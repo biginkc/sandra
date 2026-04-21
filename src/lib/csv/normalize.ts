@@ -198,10 +198,17 @@ const STREET_SUFFIX: Record<string, string> = {
 
 // ---------- Unit designators -----------
 
+// "apt" is the canonical form for the apt/unit/suite/# family. Real-world
+// CSV sources use these interchangeably for the same unit, so we collapse
+// them for dedup. Semantically distinct designators (floor, building,
+// basement, room, lot, space, penthouse, trailer) keep their own form
+// since they describe different structural features.
 const UNIT_DESIGNATOR: Record<string, string> = {
   apt: "apt", apartment: "apt",
-  unit: "unit",
-  ste: "ste", suite: "ste",
+  unit: "apt",
+  ste: "apt", suite: "apt",
+  "#": "apt",
+  no: "apt", num: "apt",
   fl: "fl", floor: "fl",
   bldg: "bldg", building: "bldg",
   rm: "rm", room: "rm",
@@ -210,8 +217,6 @@ const UNIT_DESIGNATOR: Record<string, string> = {
   ph: "ph", penthouse: "ph",
   bsmt: "bsmt", basement: "bsmt",
   trlr: "trlr",
-  "#": "apt",
-  no: "apt", num: "apt",
 };
 
 // ---------- Directionals -----------
@@ -234,10 +239,12 @@ export function normalizeAddress(raw: string | null | undefined): string | null 
   const trimmed = String(raw).trim();
   if (!trimmed) return null;
 
-  // Lowercase, strip punctuation except `#` (kept so unit markers survive), collapse whitespace.
+  // Lowercase, strip general punctuation, split `#` off from its attached
+  // number (so `#4B` tokenizes as `#` + `4B`), collapse whitespace.
   const cleaned = trimmed
     .toLowerCase()
     .replace(/[.,;:!?"'()\[\]<>]/g, " ")
+    .replace(/#/g, " # ")
     .replace(/\s+/g, " ")
     .trim();
 
