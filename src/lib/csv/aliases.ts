@@ -1,0 +1,262 @@
+/**
+ * Lowercased CSV header → target field id.
+ *
+ * Covers the common export shapes from DealMachine, Zillow, Realtor.com,
+ * generic MLS exports, and a few tax-record / skip-trace vendors.
+ * Extend as new export shapes show up — the wizard's autodetect reads
+ * directly from this map.
+ *
+ * Rule of thumb: if two sources use the same header for the same target,
+ * add it once. If two sources use the same header for *different* targets,
+ * drop it from the alias list and let the user map manually.
+ */
+
+export const HEADER_ALIASES: Record<string, string> = {
+  // ---------- Property: address ----------
+  "address": "address",
+  "street address": "address",
+  "property address": "address",
+  "full address": "address",
+  "site address": "address",
+  "situs address": "address",
+  "prop address": "address",
+  "street": "address",
+
+  // ---------- Property: city/state/zip/county ----------
+  "city": "city",
+  "property city": "city",
+  "site city": "city",
+  "situs city": "city",
+
+  "state": "state",
+  "property state": "state",
+  "site state": "state",
+  "situs state": "state",
+  "st": "state",
+
+  "zip": "zip",
+  "zip code": "zip",
+  "zipcode": "zip",
+  "postal code": "zip",
+  "postalcode": "zip",
+  "property zip": "zip",
+  "site zip": "zip",
+  "situs zip": "zip",
+
+  "county": "county_name",
+  "county name": "county_name",
+  "property county": "county_name",
+
+  // ---------- Property: identifiers ----------
+  "apn": "apn",
+  "parcel id": "apn",
+  "parcel number": "apn",
+  "parcel #": "apn",
+  "parcel": "apn",
+  "parcel no": "apn",
+  "pin": "apn",
+  "tax id": "apn",
+  "tax parcel id": "apn",
+  "assessor parcel number": "apn",
+
+  "zpid": "zpid",
+  "zillow id": "zpid",
+  "zillow property id": "zpid",
+
+  "mls": "mls_number",
+  "mls #": "mls_number",
+  "mls#": "mls_number",
+  "mls number": "mls_number",
+  "listing id": "mls_number",
+  "listing number": "mls_number",
+
+  // ---------- Property: details ----------
+  "beds": "beds",
+  "bedrooms": "beds",
+  "bed": "beds",
+  "# of beds": "beds",
+
+  "baths": "baths",
+  "bathrooms": "baths",
+  "bath": "baths",
+  "full baths": "baths",
+
+  "sqft": "sqft",
+  "sq ft": "sqft",
+  "square feet": "sqft",
+  "living area": "sqft",
+  "gla": "sqft",
+  "building sqft": "sqft",
+
+  "year built": "year_built",
+  "yr built": "year_built",
+  "built": "year_built",
+
+  "listing price": "listing_price",
+  "list price": "listing_price",
+  "asking price": "listing_price",
+  "price": "listing_price",
+
+  "arv": "arv",
+  "after repair value": "arv",
+  "avm": "arv", // DealMachine sometimes uses this
+
+  "repair estimate": "repair_estimate",
+  "estimated repairs": "repair_estimate",
+  "repair costs": "repair_estimate",
+  "repairs": "repair_estimate",
+
+  "mortgage balance": "mortgage_balance",
+  "mortgage": "mortgage_balance",
+  "loan balance": "mortgage_balance",
+  "outstanding loan": "mortgage_balance",
+
+  "equity": "equity_estimate",
+  "equity estimate": "equity_estimate",
+  "estimated equity": "equity_estimate",
+
+  "latitude": "lat",
+  "lat": "lat",
+  "longitude": "lon",
+  "lon": "lon",
+  "lng": "lon",
+  "long": "lon",
+
+  "source": "source",
+  "lead source": "source",
+
+  // ---------- Homeowner ----------
+  "owner type": "homeowner_contact_type",
+  "contact type": "homeowner_contact_type",
+
+  "owner first name": "homeowner_first_name",
+  "owner firstname": "homeowner_first_name",
+  "first name": "homeowner_first_name",
+
+  "owner last name": "homeowner_last_name",
+  "owner lastname": "homeowner_last_name",
+  "last name": "homeowner_last_name",
+
+  "owner entity name": "homeowner_entity_name",
+  "entity name": "homeowner_entity_name",
+  "llc name": "homeowner_entity_name",
+  "company name": "homeowner_entity_name",
+  "trust name": "homeowner_entity_name",
+
+  "phone": "homeowner_phone_1",
+  "owner phone": "homeowner_phone_1",
+  "phone 1": "homeowner_phone_1",
+  "phone1": "homeowner_phone_1",
+  "primary phone": "homeowner_phone_1",
+  "mobile": "homeowner_phone_1",
+  "owner mobile": "homeowner_phone_1",
+
+  "phone 2": "homeowner_phone_2",
+  "phone2": "homeowner_phone_2",
+  "secondary phone": "homeowner_phone_2",
+  "alternate phone": "homeowner_phone_2",
+
+  "phone 3": "homeowner_phone_3",
+  "phone3": "homeowner_phone_3",
+  "tertiary phone": "homeowner_phone_3",
+
+  "email": "homeowner_email",
+  "owner email": "homeowner_email",
+  "email address": "homeowner_email",
+
+  "mailing address": "homeowner_mailing_address",
+  "owner mailing address": "homeowner_mailing_address",
+  "mail address": "homeowner_mailing_address",
+  "owner address": "homeowner_mailing_address",
+
+  "mailing city": "homeowner_mailing_city",
+  "owner mailing city": "homeowner_mailing_city",
+  "mail city": "homeowner_mailing_city",
+  "owner city": "homeowner_mailing_city",
+
+  "mailing state": "homeowner_mailing_state",
+  "owner mailing state": "homeowner_mailing_state",
+  "mail state": "homeowner_mailing_state",
+  "owner state": "homeowner_mailing_state",
+
+  "mailing zip": "homeowner_mailing_zip",
+  "owner mailing zip": "homeowner_mailing_zip",
+  "mail zip": "homeowner_mailing_zip",
+  "owner zip": "homeowner_mailing_zip",
+
+  "do not contact": "homeowner_do_not_contact",
+  "dnc": "homeowner_do_not_contact",
+  "do not call": "homeowner_do_not_contact",
+
+  // ---------- Agent ----------
+  "agent first name": "agent_first_name",
+  "listing agent first name": "agent_first_name",
+
+  "agent last name": "agent_last_name",
+  "listing agent last name": "agent_last_name",
+
+  "agent phone": "agent_phone",
+  "listing agent phone": "agent_phone",
+
+  "agent email": "agent_email",
+  "listing agent email": "agent_email",
+
+  "agent brokerage": "agent_brokerage",
+  "brokerage": "agent_brokerage",
+  "listing office": "agent_brokerage",
+  "office name": "agent_brokerage",
+
+  "agent license": "agent_license_number",
+  "agent license number": "agent_license_number",
+  "license number": "agent_license_number",
+  "license #": "agent_license_number",
+};
+
+/**
+ * Normalize a header string for alias lookup.
+ * Lowercase, trim, drop surrounding quotes, convert underscores/hyphens/dots
+ * to spaces, collapse repeated whitespace. Matches real-world CSV variation
+ * like "Street_Address", "street-address", "STREET ADDRESS", " address ".
+ */
+export function normalizeHeader(header: string): string {
+  return header
+    .trim()
+    .replace(/^["']+|["']+$/g, "")
+    .toLowerCase()
+    .replace(/[_\-.]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/**
+ * Try to autodetect the target field id for a CSV header.
+ * Returns null if no alias matches.
+ */
+export function autodetectField(header: string): string | null {
+  const key = normalizeHeader(header);
+  return HEADER_ALIASES[key] ?? null;
+}
+
+/**
+ * Produce an initial mapping by autodetecting all CSV headers.
+ * Result keys are target field ids; values are the matched CSV header string
+ * (in its original casing) or null for unmapped fields.
+ *
+ * If two headers map to the same target field, the first wins; the rest
+ * are left unmapped. Conflicts are rare in practice but we prefer
+ * deterministic behavior to silently-clobbered mappings.
+ */
+export function autodetectMapping(
+  headers: readonly string[],
+): Record<string, string | null> {
+  const mapping: Record<string, string | null> = {};
+  const used = new Set<string>();
+  for (const header of headers) {
+    const fieldId = autodetectField(header);
+    if (fieldId && !used.has(fieldId)) {
+      mapping[fieldId] = header;
+      used.add(fieldId);
+    }
+  }
+  return mapping;
+}

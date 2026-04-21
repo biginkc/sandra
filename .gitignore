@@ -39,3 +39,6 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# Claude Code per-user settings (keep launch.json, drop user-specific overrides)
+.claude/settings.local.json
