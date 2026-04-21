@@ -24,6 +24,11 @@ import type { Database } from "@/lib/supabase/types";
 import { updatePropertyStatus, type PropertyStatus } from "./actions";
 import { filterLeads } from "./filter";
 
+type ContactSummary = Pick<
+  Database["public"]["Tables"]["contacts"]["Row"],
+  "first_name" | "last_name" | "entity_name"
+>;
+
 type Lead = Pick<
   Database["public"]["Tables"]["properties"]["Row"],
   | "id"
@@ -36,7 +41,9 @@ type Lead = Pick<
   | "is_vacant"
   | "cass_status"
   | "absentee_flag"
->;
+> & {
+  homeowner: ContactSummary | null;
+};
 
 const STATUS_ORDER: readonly PropertyStatus[] = [
   "new_lead",

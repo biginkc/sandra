@@ -9,6 +9,7 @@ const leads: SearchableLead[] = [
     state: "MO",
     zip: "64108",
     market: "Kansas City",
+    homeowner: { first_name: "John", last_name: "Smith", entity_name: null },
   },
   {
     address: "456 Oak Ave",
@@ -16,6 +17,7 @@ const leads: SearchableLead[] = [
     state: "MO",
     zip: "63101",
     market: "St. Louis",
+    homeowner: { first_name: "Jane", last_name: "Doe", entity_name: null },
   },
   {
     address: "789 Pine Rd",
@@ -23,6 +25,7 @@ const leads: SearchableLead[] = [
     state: "OH",
     zip: "45401",
     market: "Dayton",
+    homeowner: { first_name: null, last_name: null, entity_name: "Acme Holdings LLC" },
   },
   {
     address: "12 Elm Ct",
@@ -30,6 +33,7 @@ const leads: SearchableLead[] = [
     state: "MO",
     zip: null,
     market: null,
+    homeowner: null,
   },
 ];
 
@@ -84,5 +88,35 @@ describe("filterLeads", () => {
     const input = [...leads];
     filterLeads(input, "main");
     expect(input).toEqual(leads);
+  });
+
+  it("matches on homeowner first name", () => {
+    const result = filterLeads(leads, "john");
+    expect(result).toHaveLength(1);
+    expect(result[0].address).toBe("123 Main St");
+  });
+
+  it("matches on homeowner last name", () => {
+    const result = filterLeads(leads, "doe");
+    expect(result).toHaveLength(1);
+    expect(result[0].address).toBe("456 Oak Ave");
+  });
+
+  it("matches on entity name (LLC / trust)", () => {
+    const result = filterLeads(leads, "acme");
+    expect(result).toHaveLength(1);
+    expect(result[0].address).toBe("789 Pine Rd");
+  });
+
+  it("AND-s multi-token across address + owner name", () => {
+    expect(filterLeads(leads, "kansas smith")).toHaveLength(1);
+    expect(filterLeads(leads, "dayton smith")).toHaveLength(0);
+  });
+
+  it("tolerates leads with null homeowner", () => {
+    // 12 Elm Ct has homeowner: null. A non-owner search should still find
+    // it; an owner-only search should not.
+    expect(filterLeads(leads, "elm")).toHaveLength(1);
+    expect(filterLeads(leads, "smith")).toHaveLength(1); // matches Smith on 123 Main, not Elm
   });
 });

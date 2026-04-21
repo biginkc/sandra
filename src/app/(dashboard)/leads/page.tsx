@@ -11,10 +11,16 @@ export const metadata = {
 
 export default async function LeadsPage() {
   const supabase = await createClient();
+  // Embed the homeowner contact via the FK column so we can search on name
+  // and entity. PostgREST aliases the relation as `homeowner` and returns
+  // null when no contact is linked. Multi-FK to `contacts` requires the
+  // explicit FK constraint name; the `:contacts!fkey` form disambiguates
+  // homeowner_contact_id from agent_contact_id.
   const { data: leads, error } = await supabase
     .from("properties")
     .select(
-      "id, address, city, state, zip, market, status, is_vacant, cass_status, absentee_flag",
+      `id, address, city, state, zip, market, status, is_vacant, cass_status, absentee_flag,
+       homeowner:contacts!properties_homeowner_contact_id_fkey(first_name, last_name, entity_name)`,
     )
     .order("created_at", { ascending: false })
     .limit(500);
