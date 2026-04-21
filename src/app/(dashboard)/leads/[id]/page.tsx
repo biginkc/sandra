@@ -7,6 +7,7 @@ import { createClient } from "@/lib/supabase/server";
 
 import type { DetailedLead, PropertyStatus } from "../actions";
 
+import { CassWidget } from "./cass-widget";
 import { LeadStatusWidget } from "./status-widget";
 
 export async function generateMetadata({
@@ -108,6 +109,7 @@ export default async function LeadDetailPage({
           >
             CASS {lead.cass_status}
           </Badge>
+          <CassWidget propertyId={lead.id} cassStatus={lead.cass_status} />
         </div>
       </header>
 
