@@ -1,0 +1,6 @@
+#!/usr/bin/env sh
+# Block commits that fail typecheck or tests. Defined in plan section
+# "Testing" → "Deferred (test infrastructure)" — flipped from deferred
+# to active 2026-04-21 at user request.
+npm run verify
+
