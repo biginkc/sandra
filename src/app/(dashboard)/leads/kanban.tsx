@@ -12,15 +12,17 @@ import {
   type DragStartEvent,
 } from "@dnd-kit/core";
 import { useDraggable } from "@dnd-kit/core";
-import { ChevronDownIcon, ChevronRightIcon } from "lucide-react";
+import { ChevronDownIcon, ChevronRightIcon, SearchIcon, XIcon } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { callAction } from "@/lib/errors/call-action";
 import type { Database } from "@/lib/supabase/types";
 
 import { updatePropertyStatus, type PropertyStatus } from "./actions";
+import { filterLeads } from "./filter";
 
 type Lead = Pick<
   Database["public"]["Tables"]["properties"]["Row"],
@@ -75,6 +77,7 @@ export function Kanban({ initialLeads }: { initialLeads: Lead[] }) {
   const [leads, setLeads] = useState<Lead[]>(initialLeads);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [collapsed, setCollapsed] = useState<Set<PropertyStatus>>(new Set());
+  const [search, setSearch] = useState<string>("");
 
   // Hydrate collapsed state from localStorage after mount (avoids SSR mismatch).
   useEffect(() => {
@@ -111,6 +114,25 @@ export function Kanban({ initialLeads }: { initialLeads: Lead[] }) {
     useSensor(TouchSensor, { activationConstraint: { delay: 150, tolerance: 5 } }),
   );
 
+  const filteredLeads = useMemo(
+    () => filterLeads(leads, search),
+    [leads, search],
+  );
+
+  const totalByStatus = useMemo(() => {
+    const t: Record<PropertyStatus, number> = {
+      new_lead: 0, contacted: 0, interested: 0, offer_sent: 0,
+      offer_declined: 0, under_contract: 0, closed: 0, dead: 0,
+    };
+    for (const l of leads) {
+      const k = (l.status as PropertyStatus) in t
+        ? (l.status as PropertyStatus)
+        : "new_lead";
+      t[k]++;
+    }
+    return t;
+  }, [leads]);
+
   const leadsByStatus = useMemo(() => {
     const grouped: Record<PropertyStatus, Lead[]> = {
       new_lead: [],
@@ -122,14 +144,16 @@ export function Kanban({ initialLeads }: { initialLeads: Lead[] }) {
       closed: [],
       dead: [],
     };
-    for (const lead of leads) {
+    for (const lead of filteredLeads) {
       const key = (lead.status as PropertyStatus) in grouped
         ? (lead.status as PropertyStatus)
         : "new_lead";
       grouped[key].push(lead);
     }
     return grouped;
-  }, [leads]);
+  }, [filteredLeads]);
+
+  const isSearching = search.trim().length > 0;
 
   const activeLead = activeId
     ? leads.find((l) => l.id === activeId) ?? null
@@ -176,46 +200,90 @@ export function Kanban({ initialLeads }: { initialLeads: Lead[] }) {
     }
   };
 
+  const totalFiltered = filteredLeads.length;
+  const totalAll = leads.length;
+
   return (
-    <DndContext
-      sensors={sensors}
-      onDragStart={handleDragStart}
-      onDragEnd={handleDragEnd}
-    >
-      <div className="flex gap-3 overflow-x-auto pb-3">
-        {STATUS_ORDER.map((status) => (
-          <Column
-            key={status}
-            status={status}
-            leads={leadsByStatus[status]}
-            isActiveDropTarget={activeId != null}
-            isCollapsed={collapsed.has(status)}
-            onToggleCollapsed={() => toggleCollapsed(status)}
+    <div className="flex flex-col gap-3">
+      <div className="flex items-center gap-3">
+        <div className="relative flex-1 max-w-md">
+          <SearchIcon className="text-muted-foreground pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2" />
+          <Input
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search address, city, ZIP, market…"
+            className="w-full pl-8 pr-8"
+            aria-label="Search leads"
           />
-        ))}
+          {search ? (
+            <button
+              type="button"
+              onClick={() => setSearch("")}
+              aria-label="Clear search"
+              className="text-muted-foreground hover:text-foreground absolute top-1/2 right-2 -translate-y-1/2"
+            >
+              <XIcon className="size-4" />
+            </button>
+          ) : null}
+        </div>
+        {isSearching ? (
+          <div className="text-muted-foreground text-sm">
+            {totalFiltered} of {totalAll} leads match
+          </div>
+        ) : null}
       </div>
-      <DragOverlay>
-        {activeLead ? <LeadCard lead={activeLead} overlay /> : null}
-      </DragOverlay>
-    </DndContext>
+
+      <DndContext
+        sensors={sensors}
+        onDragStart={handleDragStart}
+        onDragEnd={handleDragEnd}
+      >
+        <div className="flex gap-3 overflow-x-auto pb-3">
+          {STATUS_ORDER.map((status) => (
+            <Column
+              key={status}
+              status={status}
+              leads={leadsByStatus[status]}
+              totalInStatus={totalByStatus[status]}
+              isActiveDropTarget={activeId != null}
+              isCollapsed={collapsed.has(status)}
+              onToggleCollapsed={() => toggleCollapsed(status)}
+              isSearching={isSearching}
+            />
+          ))}
+        </div>
+        <DragOverlay>
+          {activeLead ? <LeadCard lead={activeLead} overlay /> : null}
+        </DragOverlay>
+      </DndContext>
+    </div>
   );
 }
 
 function Column({
   status,
   leads,
+  totalInStatus,
   isActiveDropTarget,
   isCollapsed,
   onToggleCollapsed,
+  isSearching,
 }: {
   status: PropertyStatus;
   leads: Lead[];
+  totalInStatus: number;
   isActiveDropTarget: boolean;
   isCollapsed: boolean;
   onToggleCollapsed: () => void;
+  isSearching: boolean;
 }) {
   const { isOver, setNodeRef } = useDroppable({ id: status });
   const hover = isOver && isActiveDropTarget;
+
+  const countLabel =
+    isSearching && totalInStatus !== leads.length
+      ? `${leads.length}/${totalInStatus}`
+      : `${leads.length}`;
 
   // Collapsed: narrow rail. Still a valid drop target so users can drag
   // onto a collapsed column to re-categorize without expanding first.
@@ -243,7 +311,7 @@ function Column({
           {STATUS_LABEL[status]}
         </div>
         <Badge variant="secondary" className="mt-3 font-mono">
-          {leads.length}
+          {countLabel}
         </Badge>
       </div>
     );
@@ -260,7 +328,7 @@ function Column({
         <div className="text-sm font-semibold">{STATUS_LABEL[status]}</div>
         <div className="flex items-center gap-1.5">
           <Badge variant="secondary" className="font-mono">
-            {leads.length}
+            {countLabel}
           </Badge>
           <Button
             variant="ghost"
@@ -275,7 +343,13 @@ function Column({
       <div className="flex flex-col gap-2 p-2">
         {leads.length === 0 ? (
           <div className="text-muted-foreground px-2 py-6 text-center text-xs">
-            {hover ? "Drop here" : "No leads"}
+            {hover
+              ? "Drop here"
+              : isSearching
+                ? totalInStatus === 0
+                  ? "No leads"
+                  : "No matches"
+                : "No leads"}
           </div>
         ) : (
           leads.map((lead) => <LeadCard key={lead.id} lead={lead} />)
