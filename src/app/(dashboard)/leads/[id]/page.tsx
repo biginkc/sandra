@@ -5,18 +5,9 @@ import { Badge } from "@/components/ui/badge";
 import { buttonVariants } from "@/components/ui/button";
 import { createClient } from "@/lib/supabase/server";
 
-import type { DetailedLead } from "../actions";
+import type { DetailedLead, PropertyStatus } from "../actions";
 
-const STATUS_LABEL: Record<string, string> = {
-  new_lead: "New Lead",
-  contacted: "Contacted",
-  interested: "Interested",
-  offer_sent: "Offer Sent",
-  offer_declined: "Offer Declined",
-  under_contract: "Under Contract",
-  closed: "Closed",
-  dead: "Dead",
-};
+import { LeadStatusWidget } from "./status-widget";
 
 export async function generateMetadata({
   params,
@@ -97,10 +88,12 @@ export default async function LeadDetailPage({
         <div className="text-muted-foreground text-sm">
           {[lead.city, lead.state, lead.zip].filter(Boolean).join(", ") || "—"}
         </div>
-        <div className="mt-1 flex flex-wrap gap-1.5">
-          <Badge variant="outline">
-            {STATUS_LABEL[lead.status] ?? lead.status}
-          </Badge>
+        <div className="mt-1 flex flex-wrap items-center gap-1.5">
+          <LeadStatusWidget
+            propertyId={lead.id}
+            initialStatus={lead.status as PropertyStatus}
+            address={lead.address}
+          />
           {lead.market ? (
             <Badge variant="secondary">{lead.market}</Badge>
           ) : null}
