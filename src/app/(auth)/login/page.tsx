@@ -1,5 +1,6 @@
 "use client";
 
+import { useSearchParams } from "next/navigation";
 import { useActionState } from "react";
 
 import { Button } from "@/components/ui/button";
@@ -19,6 +20,8 @@ export default function LoginPage() {
   const [state, formAction, pending] = useActionState(signIn, null);
   const errorMessage =
     state && !state.ok ? state.error.message : null;
+  const searchParams = useSearchParams();
+  const next = searchParams.get("next") ?? "";
 
   return (
     <div className="flex min-h-screen flex-1 items-center justify-center p-4">
@@ -29,6 +32,7 @@ export default function LoginPage() {
         </CardHeader>
         <CardContent>
           <form action={formAction} className="flex flex-col gap-4">
+            <input type="hidden" name="next" value={next} />
             <div className="flex flex-col gap-2">
               <Label htmlFor="email">Email</Label>
               <Input

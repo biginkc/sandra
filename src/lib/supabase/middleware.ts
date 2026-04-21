@@ -36,8 +36,12 @@ export async function updateSession(request: NextRequest) {
     path.startsWith("/api/webhooks");
 
   if (!user && !isPublic) {
+    // Preserve the original path + query so the login flow can bounce the
+    // user back to it after sign-in. Lets a teammate share /leads/<uuid>
+    // links by email even when the recipient isn't already authed.
     const url = request.nextUrl.clone();
     url.pathname = "/login";
+    url.searchParams.set("next", path + request.nextUrl.search);
     return NextResponse.redirect(url);
   }
 

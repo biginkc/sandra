@@ -12,6 +12,16 @@ export async function signIn(
 ): Promise<Result<null>> {
   const email = String(formData.get("email") ?? "").trim();
   const password = String(formData.get("password") ?? "");
+  const nextRaw = String(formData.get("next") ?? "");
+  // Open-redirect protection: only honor same-site relative paths.
+  // Reject anything that doesn't start with "/" or that contains a scheme,
+  // or that points back at /login (would loop).
+  const next =
+    nextRaw.startsWith("/") &&
+    !nextRaw.startsWith("//") &&
+    !nextRaw.startsWith("/login")
+      ? nextRaw
+      : "/properties";
 
   if (!email || !password) {
     return {
@@ -44,6 +54,6 @@ export async function signIn(
     return errFromUnknown(e, "AUTH_FAILED");
   }
 
-  redirect("/properties");
+  redirect(next);
   return ok(null);
 }

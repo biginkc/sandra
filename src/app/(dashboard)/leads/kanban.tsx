@@ -21,6 +21,8 @@ import { Input } from "@/components/ui/input";
 import { callAction } from "@/lib/errors/call-action";
 import type { Database } from "@/lib/supabase/types";
 
+import { useRouter } from "next/navigation";
+
 import { updatePropertyStatus, type PropertyStatus } from "./actions";
 import { filterLeads } from "./filter";
 
@@ -85,6 +87,7 @@ export function Kanban({ initialLeads }: { initialLeads: Lead[] }) {
   const [activeId, setActiveId] = useState<string | null>(null);
   const [collapsed, setCollapsed] = useState<Set<PropertyStatus>>(new Set());
   const [search, setSearch] = useState<string>("");
+  const router = useRouter();
 
   // Hydrate collapsed state from localStorage after mount (avoids SSR mismatch).
   useEffect(() => {
@@ -256,6 +259,7 @@ export function Kanban({ initialLeads }: { initialLeads: Lead[] }) {
               isCollapsed={collapsed.has(status)}
               onToggleCollapsed={() => toggleCollapsed(status)}
               isSearching={isSearching}
+              onLeadClick={(id) => router.push(`/leads/${id}`)}
             />
           ))}
         </div>
@@ -275,6 +279,7 @@ function Column({
   isCollapsed,
   onToggleCollapsed,
   isSearching,
+  onLeadClick,
 }: {
   status: PropertyStatus;
   leads: Lead[];
@@ -283,6 +288,7 @@ function Column({
   isCollapsed: boolean;
   onToggleCollapsed: () => void;
   isSearching: boolean;
+  onLeadClick: (id: string) => void;
 }) {
   const { isOver, setNodeRef } = useDroppable({ id: status });
   const hover = isOver && isActiveDropTarget;
@@ -359,14 +365,28 @@ function Column({
                 : "No leads"}
           </div>
         ) : (
-          leads.map((lead) => <LeadCard key={lead.id} lead={lead} />)
+          leads.map((lead) => (
+            <LeadCard
+              key={lead.id}
+              lead={lead}
+              onClick={() => onLeadClick(lead.id)}
+            />
+          ))
         )}
       </div>
     </div>
   );
 }
 
-function LeadCard({ lead, overlay = false }: { lead: Lead; overlay?: boolean }) {
+function LeadCard({
+  lead,
+  overlay = false,
+  onClick,
+}: {
+  lead: Lead;
+  overlay?: boolean;
+  onClick?: () => void;
+}) {
   const { attributes, listeners, setNodeRef, transform, isDragging } =
     useDraggable({ id: lead.id });
 
@@ -380,11 +400,15 @@ function LeadCard({ lead, overlay = false }: { lead: Lead; overlay?: boolean }) 
     isDragging && !overlay ? "opacity-30" : ""
   } ${overlay ? "shadow-lg" : ""}`;
 
+  // dnd-kit's PointerSensor (distance: 4) only activates a drag once the
+  // pointer moves 4px. A stationary press → release is treated as a click,
+  // so onClick fires naturally without conflicting with drag-to-reorder.
   return (
     <div
       ref={setNodeRef}
       style={style}
       className={className}
+      onClick={onClick}
       {...attributes}
       {...listeners}
     >
