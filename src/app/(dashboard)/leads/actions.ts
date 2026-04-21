@@ -165,6 +165,9 @@ export async function verifyLeadAddress(
     if (verified.lat != null) updates.lat = verified.lat;
     if (verified.lon != null) updates.lon = verified.lon;
     if (verified.isVacant != null) updates.is_vacant = verified.isVacant;
+    if (verified.isResidential != null)
+      updates.is_residential = verified.isResidential;
+    if (verified.fipsCode) updates.fips_code = verified.fipsCode;
 
     const { error: updateError } = await supabase
       .from("properties")

@@ -29,11 +29,18 @@ type SmartyCandidate = {
   metadata?: {
     latitude?: number;
     longitude?: number;
+    /** Residential Delivery Indicator: "Residential" | "Commercial". */
+    rdi?: "Residential" | "Commercial" | string;
+    /** State + county FIPS, 5 digits. */
+    county_fips?: string;
+    /** Property Insight tier — most plans don't return this. */
     vacant?: "Y" | "N";
   };
   analysis?: {
     /** Y / S / D = deliverable variants; N = not confirmed. */
     dpv_match_code?: "Y" | "N" | "S" | "D";
+    /** DPV vacancy: "Y" if USPS marks the address as vacant, "N" otherwise. */
+    dpv_vacant?: "Y" | "N";
     /** Multiple candidates returned → ambiguous address. */
     active?: string;
   };
@@ -147,14 +154,24 @@ export function parseSmartyResponse(
     },
     lat: c.metadata?.latitude ?? null,
     lon: c.metadata?.longitude ?? null,
-    isVacant:
-      c.metadata?.vacant === "Y"
+    // Prefer DPV vacancy from analysis (basic CASS), fall back to metadata.vacant
+    // (Property Insight tier) when present.
+    isVacant: parseYN(c.analysis?.dpv_vacant) ?? parseYN(c.metadata?.vacant),
+    isResidential:
+      c.metadata?.rdi === "Residential"
         ? true
-        : c.metadata?.vacant === "N"
+        : c.metadata?.rdi === "Commercial"
           ? false
           : null,
+    fipsCode: c.metadata?.county_fips ?? null,
     raw: candidates,
   };
+}
+
+function parseYN(v: "Y" | "N" | undefined): boolean | null {
+  if (v === "Y") return true;
+  if (v === "N") return false;
+  return null;
 }
 
 function matchCodeToCassStatus(code: string | undefined): CassStatus {

@@ -33,8 +33,12 @@ export type VerifiedAddress = {
   /** Geocoding when available (some providers include lat/lon free with CASS). */
   lat?: number | null;
   lon?: number | null;
-  /** USPS DSF2 vacancy flag, when the provider's plan includes it. */
+  /** USPS DPV vacancy flag — true / false / null when the provider didn't say. */
   isVacant?: boolean | null;
+  /** Residential vs commercial vs PO Box, when the provider returns RDI. */
+  isResidential?: boolean | null;
+  /** 5-digit state+county FIPS, when the provider returns it (saves us a lookup). */
+  fipsCode?: string | null;
   /** Raw provider response — stored in `properties.cass_raw_response` for audit. */
   raw: unknown;
 };

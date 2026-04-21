@@ -19,9 +19,14 @@ const baseCandidate = {
   metadata: {
     latitude: 37.422,
     longitude: -122.084,
+    rdi: "Residential" as const,
+    county_fips: "06085",
     vacant: "N" as const,
   },
-  analysis: { dpv_match_code: "Y" as const },
+  analysis: {
+    dpv_match_code: "Y" as const,
+    dpv_vacant: "N" as const,
+  },
 };
 
 describe("parseSmartyResponse", () => {
@@ -84,15 +89,59 @@ describe("parseSmartyResponse", () => {
     expect(result.lon).toBe(-122.084);
   });
 
-  it("normalizes the vacant flag (Y → true, N → false, missing → null)", () => {
+  it("normalizes the vacant flag from analysis.dpv_vacant (basic CASS)", () => {
     expect(parseSmartyResponse([baseCandidate]).isVacant).toBe(false);
     expect(
       parseSmartyResponse([
-        { ...baseCandidate, metadata: { vacant: "Y" } },
+        { ...baseCandidate, analysis: { dpv_vacant: "Y" } },
       ]).isVacant,
     ).toBe(true);
+  });
+
+  it("falls back to metadata.vacant when analysis.dpv_vacant is missing (Property Insight tier)", () => {
     expect(
-      parseSmartyResponse([{ ...baseCandidate, metadata: {} }]).isVacant,
+      parseSmartyResponse([
+        {
+          ...baseCandidate,
+          analysis: { dpv_match_code: "Y" },
+          metadata: { ...baseCandidate.metadata, vacant: "Y" },
+        },
+      ]).isVacant,
+    ).toBe(true);
+  });
+
+  it("returns null isVacant when neither vacancy field is present", () => {
+    expect(
+      parseSmartyResponse([
+        {
+          ...baseCandidate,
+          analysis: { dpv_match_code: "Y" },
+          metadata: { latitude: 1, longitude: 2 },
+        },
+      ]).isVacant,
+    ).toBeNull();
+  });
+
+  it("extracts isResidential from metadata.rdi", () => {
+    expect(parseSmartyResponse([baseCandidate]).isResidential).toBe(true);
+    expect(
+      parseSmartyResponse([
+        { ...baseCandidate, metadata: { ...baseCandidate.metadata, rdi: "Commercial" } },
+      ]).isResidential,
+    ).toBe(false);
+    expect(
+      parseSmartyResponse([
+        { ...baseCandidate, metadata: { latitude: 1 } },
+      ]).isResidential,
+    ).toBeNull();
+  });
+
+  it("extracts fipsCode from metadata.county_fips", () => {
+    expect(parseSmartyResponse([baseCandidate]).fipsCode).toBe("06085");
+    expect(
+      parseSmartyResponse([
+        { ...baseCandidate, metadata: { latitude: 1 } },
+      ]).fipsCode,
     ).toBeNull();
   });
 
