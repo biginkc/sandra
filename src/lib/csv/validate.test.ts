@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  computeContactWarningRules,
   mappedSections,
   summarize,
   validateRow,
@@ -95,6 +96,61 @@ describe("validateRow", () => {
     expect(rules).toContain("section_required");
   });
 
+  it("derives address/city/state/zip from a mapped address_full column", () => {
+    const mapping: Mapping = {
+      address_full: "associated_property_address_full",
+    };
+    const row: RowData = {
+      associated_property_address_full: "123 Main St, Kansas City, MO 64108",
+    };
+    const result = validateRow(row, mapping, 0);
+    expect(result.ok).toBe(true);
+    expect(result.normalized.address).toBe("123 Main St");
+    expect(result.normalized.city).toBe("Kansas City");
+    expect(result.normalized.state).toBe("MO");
+    expect(result.normalized.zip).toBe("64108");
+  });
+
+  it("prefers explicit mappings over parsed address_full components", () => {
+    const mapping: Mapping = {
+      address: "Address",
+      state: "State",
+      address_full: "Combined",
+    };
+    const row: RowData = {
+      Address: "999 Real St",
+      State: "OH",
+      Combined: "123 Main St, Kansas City, MO 64108",
+    };
+    const result = validateRow(row, mapping, 0);
+    expect(result.normalized.address).toBe("999 Real St");
+    expect(result.normalized.state).toBe("OH");
+    // city/zip weren't mapped directly, so they come from the parse
+    expect(result.normalized.city).toBe("Kansas City");
+    expect(result.normalized.zip).toBe("64108");
+  });
+
+  it("flags a row whose address_full has only city+state as no_street (DealMachine skip-trace miss)", () => {
+    const mapping: Mapping = { address_full: "Combined" };
+    const row: RowData = { Combined: "Weston, Mo 64098" };
+    const result = validateRow(row, mapping, 0);
+    expect(result.ok).toBe(false);
+    // Only one error — the specific classification — not duplicate required errors.
+    const combinedErrors = result.errors.filter((e) =>
+      e.rule.startsWith("address_full_"),
+    );
+    expect(combinedErrors).toHaveLength(1);
+    expect(combinedErrors[0].rule).toBe("address_full_no_street");
+  });
+
+  it("classifies an empty address_full row as address_full_empty", () => {
+    const mapping: Mapping = { address_full: "Combined" };
+    const row: RowData = { Combined: "", SomeOtherField: "not blank" };
+    const result = validateRow(row, mapping, 0);
+    const rule = result.errors.find((e) => e.rule.startsWith("address_full_"))?.rule;
+    expect(rule).toBe("address_full_empty");
+  });
+
   it("rejects an entity contact without entity_name", () => {
     const mappingWithEntity: Mapping = {
       ...PROPERTY_MAPPING,
@@ -153,6 +209,41 @@ describe("summarize", () => {
     ];
     const summary = summarize(rows);
     expect(summary.errorsByRule.required).toBe(2);
+  });
+});
+
+describe("computeContactWarningRules", () => {
+  it("returns no_contact when nothing usable is present", () => {
+    expect(computeContactWarningRules({})).toContain("no_contact");
+  });
+
+  it("returns no_phone when owner info exists but no phone", () => {
+    const rules = computeContactWarningRules({
+      homeowner_first_name: "Alex",
+      homeowner_email: "a@b.com",
+    });
+    expect(rules).toContain("no_phone");
+    expect(rules).not.toContain("no_contact");
+  });
+
+  it("returns no_mailing_address independently of contact coverage", () => {
+    const rules = computeContactWarningRules({
+      homeowner_phone_1: "+18165551234",
+    });
+    expect(rules).toContain("no_mailing_address");
+    expect(rules).not.toContain("no_phone");
+    expect(rules).not.toContain("no_contact");
+  });
+
+  it("returns an empty array when everything is filled in", () => {
+    expect(
+      computeContactWarningRules({
+        homeowner_first_name: "Alex",
+        homeowner_phone_1: "+18165551234",
+        homeowner_email: "a@b.com",
+        homeowner_mailing_address: "1 Main St",
+      }),
+    ).toEqual([]);
   });
 });
 

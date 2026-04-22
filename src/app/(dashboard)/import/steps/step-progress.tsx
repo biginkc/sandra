@@ -23,6 +23,7 @@ export function StepProgress({ jobId }: { jobId: string }) {
     const supabase = createClient();
     let mounted = true;
     let pollId: ReturnType<typeof setInterval> | null = null;
+    let channel: ReturnType<typeof supabase.channel> | null = null;
 
     const fetchJob = async (): Promise<Job | null> => {
       const { data, error } = await supabase
@@ -40,16 +41,36 @@ export function StepProgress({ jobId }: { jobId: string }) {
     };
 
     const start = async () => {
+      // Must await setAuth() BEFORE subscribing — otherwise the socket
+      // opens as anon and RLS on `jobs` silently filters every event.
+      // Earlier attempts subscribed in parallel with setAuth and never
+      // received a single UPDATE.
       const { data: sessionData } = await supabase.auth.getSession();
       const token = sessionData.session?.access_token ?? null;
       if (token) supabase.realtime.setAuth(token);
 
+      if (!mounted) return;
+
+      channel = supabase
+        .channel(`jobs:${jobId}`)
+        .on(
+          "postgres_changes",
+          {
+            event: "UPDATE",
+            schema: "public",
+            table: "jobs",
+            filter: `id=eq.${jobId}`,
+          },
+          (payload) => {
+            setJob(payload.new as Job);
+          },
+        )
+        .subscribe();
+
       const initial = await fetchJob();
 
-      // Poll every second as a reliable progress source. Realtime below is
-      // an optimization for instant updates when it works; polling keeps
-      // the UI honest if the socket drops events (common with @supabase/ssr
-      // + serverless in local dev). Stops as soon as the job is terminal.
+      // Low-frequency safety net — Realtime is the primary channel; this
+      // only catches rare socket drops. Stops as soon as the job is terminal.
       const terminal = new Set(["completed", "failed", "partial", "canceled"]);
       if (initial && !terminal.has(initial.status)) {
         pollId = setInterval(async () => {
@@ -58,32 +79,16 @@ export function StepProgress({ jobId }: { jobId: string }) {
             clearInterval(pollId);
             pollId = null;
           }
-        }, 1000);
+        }, 15000);
       }
     };
 
     start();
 
-    const channel = supabase
-      .channel(`jobs:${jobId}`)
-      .on(
-        "postgres_changes",
-        {
-          event: "UPDATE",
-          schema: "public",
-          table: "jobs",
-          filter: `id=eq.${jobId}`,
-        },
-        (payload) => {
-          setJob(payload.new as Job);
-        },
-      )
-      .subscribe();
-
     return () => {
       mounted = false;
       if (pollId) clearInterval(pollId);
-      supabase.removeChannel(channel);
+      if (channel) supabase.removeChannel(channel);
     };
   }, [jobId]);
 

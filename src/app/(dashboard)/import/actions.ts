@@ -7,6 +7,11 @@ import { errFromUnknown, ok, type Result } from "@/lib/errors/result";
 import { reportError } from "@/lib/errors/report";
 import { runIngestion } from "@/lib/csv/ingest";
 import type { Mapping, RowData } from "@/lib/csv/validate";
+import {
+  createCassChildJob,
+  getAutotriggerCap,
+  runCassEnrichment,
+} from "@/lib/enrichment/cass-job";
 
 import type { WizardMarket, WizardSource } from "./wizard";
 
@@ -109,6 +114,51 @@ export async function createImportJob(
             completed_at: new Date().toISOString(),
           })
           .eq("id", jobRow.id);
+        return;
+      }
+
+      // Auto-trigger CASS enrichment for every property that was newly
+      // inserted by this import (duplicates already carry prior CASS state,
+      // so we skip them). Failures inside CASS are isolated — they update
+      // the child job's status without touching the parent import.
+      try {
+        const { data: items } = await supabase
+          .from("job_items")
+          .select("property_id")
+          .eq("job_id", jobRow.id)
+          .eq("status", "success")
+          .not("property_id", "is", null);
+
+        const propertyIds = (items ?? [])
+          .map((r) => r.property_id)
+          .filter((id): id is string => typeof id === "string");
+
+        if (propertyIds.length === 0) return;
+
+        const cap = getAutotriggerCap();
+        const autoStart = propertyIds.length <= cap;
+        const childId = await createCassChildJob(supabase, {
+          parentJobId: jobRow.id,
+          relatedImportId: importRow.id,
+          createdBy: userId,
+          propertyIds,
+          autoStart,
+          blockedReason: autoStart
+            ? undefined
+            : `${propertyIds.length} items exceeds CASS_AUTOTRIGGER_MAX_ITEMS=${cap}`,
+        });
+
+        if (autoStart) {
+          await runCassEnrichment(supabase, { jobId: childId, propertyIds });
+        }
+      } catch (e) {
+        reportError(e, {
+          tags: { surface: "create_import_job_after_cass" },
+          extra: { jobId: jobRow.id },
+        });
+        // Parent import is already completed — don't flip its status.
+        // Any CASS-side failures are reflected on the child job row
+        // (or just absent if we couldn't create one).
       }
     });
 

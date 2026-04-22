@@ -1,12 +1,14 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  classifyAddressFullFailure,
   normalizeAddress,
   normalizeApn,
   normalizeCountyName,
   normalizePhone,
   normalizeStateCode,
   normalizeZip,
+  parseFullAddress,
   toBoolOrNull,
   toIntOrNull,
   toNumberOrNull,
@@ -73,6 +75,85 @@ describe("normalizeAddress", () => {
   it("strips quotes, commas, periods", () => {
     expect(normalizeAddress('"123 Main St."')).toBe("123 main st");
     expect(normalizeAddress("123 Main St., Apt 4")).toBe("123 main st apt 4");
+  });
+});
+
+describe("parseFullAddress", () => {
+  it("splits a clean USPS-ish string", () => {
+    expect(parseFullAddress("123 Main St, Kansas City, MO 64108")).toEqual({
+      address: "123 Main St",
+      city: "Kansas City",
+      state: "MO",
+      zip: "64108",
+    });
+  });
+
+  it("handles ZIP+4", () => {
+    expect(
+      parseFullAddress("123 Main St, Kansas City, MO 64108-1234"),
+    ).toEqual({
+      address: "123 Main St",
+      city: "Kansas City",
+      state: "MO",
+      zip: "64108-1234",
+    });
+  });
+
+  it("handles unit designators in the street portion", () => {
+    expect(
+      parseFullAddress("123 Main St Apt 4B, Kansas City, MO 64108"),
+    ).toEqual({
+      address: "123 Main St Apt 4B",
+      city: "Kansas City",
+      state: "MO",
+      zip: "64108",
+    });
+  });
+
+  it("upper-cases the state code", () => {
+    const parsed = parseFullAddress("1 A St, Somewhere, mo 12345");
+    expect(parsed?.state).toBe("MO");
+  });
+
+  it("tolerates trailing USA / extra whitespace", () => {
+    expect(
+      parseFullAddress("  123 Main St, Kansas City, MO 64108, USA  "),
+    ).toEqual({
+      address: "123 Main St",
+      city: "Kansas City",
+      state: "MO",
+      zip: "64108",
+    });
+  });
+
+  it("returns null when the string is missing commas or ZIP", () => {
+    expect(parseFullAddress("123 Main St Kansas City MO 64108")).toBeNull();
+    expect(parseFullAddress("123 Main St, Kansas City, MO")).toBeNull();
+    expect(parseFullAddress("")).toBeNull();
+    expect(parseFullAddress(null)).toBeNull();
+    expect(parseFullAddress(undefined)).toBeNull();
+  });
+});
+
+describe("classifyAddressFullFailure", () => {
+  it("classifies empty / null / whitespace as 'empty'", () => {
+    expect(classifyAddressFullFailure(null)).toBe("empty");
+    expect(classifyAddressFullFailure(undefined)).toBe("empty");
+    expect(classifyAddressFullFailure("")).toBe("empty");
+    expect(classifyAddressFullFailure("   ")).toBe("empty");
+  });
+
+  it("classifies 'City, State ZIP' as 'no_street' (DealMachine skip-trace without street)", () => {
+    expect(classifyAddressFullFailure("Weston, Mo 64098")).toBe("no_street");
+    expect(classifyAddressFullFailure(", Mo")).toBe("no_street");
+    expect(classifyAddressFullFailure("Kansas City MO")).toBe("no_street");
+  });
+
+  it("classifies malformed three-part values as 'malformed'", () => {
+    // Two commas but doesn't match the regex — e.g. missing ZIP.
+    expect(
+      classifyAddressFullFailure("123 Main St, Kansas City, Missouri"),
+    ).toBe("malformed");
   });
 });
 

@@ -1,12 +1,11 @@
 "use server";
 
-import { ConfigurationError } from "@/lib/errors/classes";
 import { createClient } from "@/lib/supabase/server";
 import { errFromUnknown, ok, type Result } from "@/lib/errors/result";
 import { reportError } from "@/lib/errors/report";
-import { getAddressVerifier } from "@/lib/enrichment/registry";
-import type { CassStatus, VerifiedAddress } from "@/lib/enrichment/types";
-import type { Database, Json } from "@/lib/supabase/types";
+import { verifyPropertyAddress } from "@/lib/enrichment/verify-property";
+import type { CassStatus } from "@/lib/enrichment/types";
+import type { Database } from "@/lib/supabase/types";
 
 export type PropertyStatus =
   | "new_lead"
@@ -81,114 +80,56 @@ export type VerifyResult = {
   cassStatus: CassStatus;
   standardized: string;
   isVacant: boolean | null;
+  cacheHit: boolean;
 };
 
 export async function verifyLeadAddress(
   propertyId: string,
 ): Promise<Result<VerifyResult>> {
-  let verifier;
-  try {
-    verifier = getAddressVerifier();
-  } catch (e) {
-    if (e instanceof ConfigurationError) {
-      return {
-        ok: false,
-        error: {
-          code: "PROVIDER_NOT_CONFIGURED",
-          message: e.message,
-        },
-      };
-    }
-    throw e;
-  }
-
-  if (!verifier) {
-    return {
-      ok: false,
-      error: {
-        code: "PROVIDER_NOT_CONFIGURED",
-        message:
-          "Address verification is off. Set ADDRESS_VERIFIER_PROVIDER in .env.local to enable it.",
-      },
-    };
-  }
-
   try {
     const supabase = await createClient();
+    const outcome = await verifyPropertyAddress(supabase, propertyId);
 
-    const { data: property, error: fetchError } = await supabase
-      .from("properties")
-      .select("id, address, city, state, zip")
-      .eq("id", propertyId)
-      .maybeSingle();
-
-    if (fetchError) {
-      return {
-        ok: false,
-        error: { code: "LEAD_FETCH_FAILED", message: fetchError.message },
-      };
+    switch (outcome.status) {
+      case "verified":
+      case "stored_with_status":
+        return ok({
+          cassStatus: outcome.verified.cassStatus,
+          standardized: outcome.verified.standardized,
+          isVacant: outcome.verified.isVacant ?? null,
+          cacheHit: outcome.cacheHit,
+        });
+      case "provider_off":
+        return {
+          ok: false,
+          error: {
+            code: "PROVIDER_NOT_CONFIGURED",
+            message:
+              "Address verification is off. Set ADDRESS_VERIFIER_PROVIDER in .env.local to enable it.",
+          },
+        };
+      case "not_found":
+        return {
+          ok: false,
+          error: { code: "LEAD_NOT_FOUND", message: "Lead not found." },
+        };
+      case "no_result":
+        return {
+          ok: false,
+          error: {
+            code: "VERIFICATION_FAILED",
+            message: "Provider returned no result.",
+          },
+        };
+      case "failed":
+        return {
+          ok: false,
+          error: {
+            code: "VERIFICATION_FAILED",
+            message: outcome.error,
+          },
+        };
     }
-    if (!property) {
-      return {
-        ok: false,
-        error: { code: "LEAD_NOT_FOUND", message: "Lead not found." },
-      };
-    }
-
-    const verified = await verifier.verify({
-      address: property.address,
-      city: property.city,
-      state: property.state,
-      zip: property.zip,
-    });
-
-    if (!verified) {
-      return {
-        ok: false,
-        error: {
-          code: "VERIFICATION_FAILED",
-          message: "Provider returned no result.",
-        },
-      };
-    }
-
-    const updates: Database["public"]["Tables"]["properties"]["Update"] = {
-      cass_status: verified.cassStatus,
-      cass_verified_at: new Date().toISOString(),
-      cass_raw_response: verified.raw as Json,
-      updated_at: new Date().toISOString(),
-    };
-    // Only overwrite address_normalized when CASS produced a useful answer.
-    if (verified.cassStatus === "verified" && verified.standardized) {
-      updates.address_normalized = verified.standardized.toLowerCase();
-    }
-    if (verified.lat != null) updates.lat = verified.lat;
-    if (verified.lon != null) updates.lon = verified.lon;
-    if (verified.isVacant != null) updates.is_vacant = verified.isVacant;
-    if (verified.isResidential != null)
-      updates.is_residential = verified.isResidential;
-    if (verified.fipsCode) updates.fips_code = verified.fipsCode;
-
-    const { error: updateError } = await supabase
-      .from("properties")
-      .update(updates)
-      .eq("id", propertyId);
-
-    if (updateError) {
-      return {
-        ok: false,
-        error: {
-          code: "VERIFICATION_PERSIST_FAILED",
-          message: updateError.message,
-        },
-      };
-    }
-
-    return ok({
-      cassStatus: verified.cassStatus,
-      standardized: verified.standardized,
-      isVacant: verified.isVacant ?? null,
-    });
   } catch (e) {
     reportError(e, {
       tags: { surface: "verify_lead_address" },

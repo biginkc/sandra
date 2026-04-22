@@ -1,11 +1,13 @@
 import { ALL_FIELDS, PROPERTY_FIELDS, type TargetField } from "./schema";
 import {
+  classifyAddressFullFailure,
   normalizeAddress,
   normalizeApn,
   normalizeCountyName,
   normalizePhone,
   normalizeStateCode,
   normalizeZip,
+  parseFullAddress,
   toBoolOrNull,
   toIntOrNull,
   toNumberOrNull,
@@ -108,19 +110,95 @@ export function validateRow(
     return { rowIndex, ok: false, errors: [], warnings: [], normalized: {} };
   }
 
+  // Pass 1: normalize every target field from its directly mapped column
   for (const field of ALL_FIELDS) {
     const raw = rawFor(row, mapping, field.id);
-    const value = normalizeByType(field, raw);
-    normalized[field.id] = value;
+    normalized[field.id] = normalizeByType(field, raw);
+  }
 
-    if (field.required && raw == null) {
-      errors.push({
-        fieldId: field.id,
-        label: field.label,
-        value: null,
-        rule: "required",
-        message: `${field.label} is required but the mapped column is empty`,
-      });
+  // Pass 2: derive address/city/state/zip from a combined-address column
+  // when it's mapped AND the individual fields aren't. Lets DealMachine
+  // Skipped (single `associated_property_address_full` column) flow through.
+  // Track the failure reason so Pass 3 can emit a specific error rule
+  // (most common real-world case: DealMachine rows where the skip-trace
+  // found a city but no street — "Weston, MO 64098").
+  let addressFullFailure:
+    | "empty"
+    | "no_street"
+    | "malformed"
+    | null = null;
+  if (mapping.address_full) {
+    const addressFullRaw = normalized.address_full as string | null;
+    const parsed = parseFullAddress(addressFullRaw);
+    if (parsed) {
+      if (!mapping.address) normalized.address = parsed.address;
+      if (!mapping.city && parsed.city) normalized.city = parsed.city;
+      if (!mapping.state) normalized.state = normalizeStateCode(parsed.state);
+      if (!mapping.zip && parsed.zip) normalized.zip = normalizeZip(parsed.zip);
+    } else {
+      addressFullFailure = classifyAddressFullFailure(addressFullRaw);
+    }
+  }
+
+  // Pass 3: report per-field errors against the resolved values. When the
+  // root cause is an unparseable combined-address column, emit a single
+  // specific error instead of duplicating required-errors on Address and
+  // State (they're both downstream consequences of the same problem).
+  const suppressRequiredRootCause =
+    !!mapping.address_full &&
+    !mapping.address &&
+    !mapping.state &&
+    addressFullFailure !== null;
+  for (const field of ALL_FIELDS) {
+    const raw = rawFor(row, mapping, field.id);
+    const value = normalized[field.id];
+
+    if (field.required && value == null) {
+      if (
+        suppressRequiredRootCause &&
+        (field.id === "address" || field.id === "state")
+      ) {
+        // Emit only once, on the address field, with the specific reason.
+        if (field.id === "address") {
+          errors.push({
+            fieldId: "address_full",
+            label: "Full Address",
+            value: null,
+            rule: `address_full_${addressFullFailure}`,
+            message:
+              addressFullFailure === "empty"
+                ? "Full Address column is empty — no street, city, or state to import."
+                : addressFullFailure === "no_street"
+                  ? "Full Address has only city/state (no street) — DealMachine skip-trace didn't locate the property."
+                  : "Full Address value couldn't be parsed into address + city + state + ZIP.",
+          });
+        }
+        continue;
+      }
+
+      const mappedDirectly = !!mapping[field.id];
+      const derivable =
+        (field.id === "address" || field.id === "state") &&
+        !!mapping.address_full;
+      if (!mappedDirectly && !derivable) {
+        errors.push({
+          fieldId: field.id,
+          label: field.label,
+          value: null,
+          rule: "section_required",
+          message: `${field.label} column must be mapped for every import`,
+        });
+      } else {
+        errors.push({
+          fieldId: field.id,
+          label: field.label,
+          value: null,
+          rule: "required",
+          message: mappedDirectly
+            ? `${field.label} is required but the mapped column is empty`
+            : `${field.label} is required but could not be derived from the combined-address column`,
+        });
+      }
       continue;
     }
 
@@ -134,28 +212,6 @@ export function validateRow(
         message: `${field.label} value "${raw}" is not a valid ${field.type}`,
       });
     }
-  }
-
-  // Property-level required check (at least address + state)
-  const addressMapped = !!mapping.address;
-  const stateMapped = !!mapping.state;
-  if (!addressMapped) {
-    errors.push({
-      fieldId: "address",
-      label: "Address",
-      value: null,
-      rule: "section_required",
-      message: "Address column must be mapped for every import",
-    });
-  }
-  if (!stateMapped) {
-    errors.push({
-      fieldId: "state",
-      label: "State",
-      value: null,
-      rule: "section_required",
-      message: "State column must be mapped for every import",
-    });
   }
 
   // Entity contacts need entity_name; warn if missing
@@ -183,6 +239,10 @@ export function validateRow(
 
 /**
  * Aggregate counts for the Review step's badge.
+ *
+ * `errorsByRule` drives the blocking error chips. `warningsByRule` drives
+ * non-blocking soft-warning chips — things like "50 rows have no phone"
+ * that are worth surfacing before Confirm but don't disqualify the import.
  */
 export type ValidationSummary = {
   totalRows: number;
@@ -190,6 +250,7 @@ export type ValidationSummary = {
   invalidRows: number;
   emptyRows: number;
   errorsByRule: Record<string, number>;
+  warningsByRule: Record<string, number>;
 };
 
 export function summarize(rows: ValidatedRow[]): ValidationSummary {
@@ -199,6 +260,7 @@ export function summarize(rows: ValidatedRow[]): ValidationSummary {
     invalidRows: 0,
     emptyRows: 0,
     errorsByRule: {},
+    warningsByRule: {},
   };
   for (const r of rows) {
     const hasContent = Object.keys(r.normalized).length > 0;
@@ -211,8 +273,52 @@ export function summarize(rows: ValidatedRow[]): ValidationSummary {
     for (const e of r.errors) {
       summary.errorsByRule[e.rule] = (summary.errorsByRule[e.rule] ?? 0) + 1;
     }
+    // Contact-coverage warnings — only meaningful for valid rows (invalid
+    // rows don't land in the DB anyway, so contact gaps don't matter).
+    if (r.ok) {
+      for (const rule of computeContactWarningRules(r.normalized)) {
+        summary.warningsByRule[rule] =
+          (summary.warningsByRule[rule] ?? 0) + 1;
+      }
+    }
   }
   return summary;
+}
+
+/**
+ * Produce the set of contact-coverage warning rules that apply to a single
+ * validated row. Returns an empty array when the row has at least one
+ * usable contact channel.
+ *
+ * Rules (mutually exclusive in practice — `no_contact` subsumes the more
+ * specific ones):
+ *  - `no_contact`        — nothing to call, text, email, or personalize
+ *  - `no_phone`          — has a name or email but no phone slot filled
+ *  - `no_mailing_address` — property address will double as mailing address
+ */
+export function computeContactWarningRules(
+  normalized: Readonly<Record<string, unknown>>,
+): string[] {
+  const phone =
+    !!normalized.homeowner_phone_1 ||
+    !!normalized.homeowner_phone_2 ||
+    !!normalized.homeowner_phone_3;
+  const email = !!normalized.homeowner_email;
+  const name =
+    !!normalized.homeowner_first_name ||
+    !!normalized.homeowner_last_name ||
+    !!normalized.homeowner_entity_name;
+  const mailing = !!normalized.homeowner_mailing_address;
+
+  const rules: string[] = [];
+  if (!phone && !email && !name) {
+    // Nothing usable at all — this single rule covers the row.
+    rules.push("no_contact");
+  } else if (!phone) {
+    rules.push("no_phone");
+  }
+  if (!mailing) rules.push("no_mailing_address");
+  return rules;
 }
 
 /**

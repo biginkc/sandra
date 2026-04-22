@@ -131,4 +131,37 @@ describe("autodetectMapping", () => {
     const mapping = autodetectMapping(["A", "B", "C"]);
     expect(Object.keys(mapping)).toHaveLength(0);
   });
+
+  it("auto-maps the DealMachine Skipped (contact-centric) header set", () => {
+    const headers = [
+      "contact_id",
+      "associated_property_address_full",
+      "first_name",
+      "last_name",
+      "primary_mailing_address",
+      "primary_mailing_city",
+      "primary_mailing_state",
+      "primary_mailing_zip",
+      "email_address_1",
+      "email_address_2",
+      "phone_1",
+      "phone_2",
+      "phone_3",
+    ];
+    const mapping = autodetectMapping(headers);
+    expect(mapping.address_full).toBe("associated_property_address_full");
+    expect(mapping.homeowner_first_name).toBe("first_name");
+    expect(mapping.homeowner_last_name).toBe("last_name");
+    expect(mapping.homeowner_mailing_address).toBe("primary_mailing_address");
+    expect(mapping.homeowner_mailing_city).toBe("primary_mailing_city");
+    expect(mapping.homeowner_mailing_state).toBe("primary_mailing_state");
+    expect(mapping.homeowner_mailing_zip).toBe("primary_mailing_zip");
+    expect(mapping.homeowner_email).toBe("email_address_1");
+    expect(mapping.homeowner_phone_1).toBe("phone_1");
+    expect(mapping.homeowner_phone_2).toBe("phone_2");
+    expect(mapping.homeowner_phone_3).toBe("phone_3");
+    // email_address_2 and contact_id are deliberately unmapped.
+    expect(Object.values(mapping)).not.toContain("email_address_2");
+    expect(Object.values(mapping)).not.toContain("contact_id");
+  });
 });

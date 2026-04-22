@@ -1,9 +1,19 @@
 "use client";
 
 import { formatDistanceToNow } from "date-fns/formatDistanceToNow";
-import { useEffect, useState } from "react";
+import { useEffect, useState, useTransition } from "react";
 
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog";
 import {
   Table,
   TableBody,
@@ -12,8 +22,15 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import {
+  CASS_COST_PER_LOOKUP_USD,
+  isAwaitingManualStart,
+} from "@/lib/enrichment/cass-job";
+import { callAction } from "@/lib/errors/call-action";
 import { createClient } from "@/lib/supabase/client";
 import type { Database } from "@/lib/supabase/types";
+
+import { startQueuedCassJob } from "./actions";
 
 type Job = Database["public"]["Tables"]["jobs"]["Row"];
 
@@ -25,11 +42,39 @@ export function JobsList() {
   useEffect(() => {
     const supabase = createClient();
     let mounted = true;
+    let channel: ReturnType<typeof supabase.channel> | null = null;
 
     (async () => {
+      // setAuth() must resolve BEFORE subscribing — otherwise the socket
+      // opens as anon and RLS on `jobs` drops every event silently.
       const { data: sessionData } = await supabase.auth.getSession();
       const token = sessionData.session?.access_token ?? null;
       if (token) supabase.realtime.setAuth(token);
+
+      if (!mounted) return;
+
+      channel = supabase
+        .channel("jobs:list")
+        .on(
+          "postgres_changes",
+          { event: "*", schema: "public", table: "jobs" },
+          (payload) => {
+            if (payload.eventType === "INSERT") {
+              setJobs((prev) => [payload.new as Job, ...prev].slice(0, 50));
+            } else if (payload.eventType === "UPDATE") {
+              setJobs((prev) =>
+                prev.map((j) =>
+                  j.id === (payload.new as Job).id ? (payload.new as Job) : j,
+                ),
+              );
+            } else if (payload.eventType === "DELETE") {
+              setJobs((prev) =>
+                prev.filter((j) => j.id !== (payload.old as Job).id),
+              );
+            }
+          },
+        )
+        .subscribe();
 
       const { data, error } = await supabase
         .from("jobs")
@@ -42,32 +87,9 @@ export function JobsList() {
       setLoading(false);
     })();
 
-    const channel = supabase
-      .channel("jobs:list")
-      .on(
-        "postgres_changes",
-        { event: "*", schema: "public", table: "jobs" },
-        (payload) => {
-          if (payload.eventType === "INSERT") {
-            setJobs((prev) => [payload.new as Job, ...prev].slice(0, 50));
-          } else if (payload.eventType === "UPDATE") {
-            setJobs((prev) =>
-              prev.map((j) =>
-                j.id === (payload.new as Job).id ? (payload.new as Job) : j,
-              ),
-            );
-          } else if (payload.eventType === "DELETE") {
-            setJobs((prev) =>
-              prev.filter((j) => j.id !== (payload.old as Job).id),
-            );
-          }
-        },
-      )
-      .subscribe();
-
     return () => {
       mounted = false;
-      supabase.removeChannel(channel);
+      if (channel) supabase.removeChannel(channel);
     };
   }, []);
 
@@ -91,48 +113,63 @@ export function JobsList() {
             <TableHead>Status</TableHead>
             <TableHead>Progress</TableHead>
             <TableHead>Created</TableHead>
+            <TableHead className="text-right">Actions</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
           {jobs.length === 0 ? (
             <TableRow>
               <TableCell
-                colSpan={5}
+                colSpan={6}
                 className="text-muted-foreground py-8 text-center"
               >
                 No jobs yet.
               </TableCell>
             </TableRow>
           ) : (
-            jobs.map((job) => (
-              <TableRow key={job.id}>
-                <TableCell className="font-medium">
-                  {job.title ?? job.id.slice(0, 8)}
-                </TableCell>
-                <TableCell>
-                  <Badge variant="outline">{job.type}</Badge>
-                </TableCell>
-                <TableCell>
-                  <Badge variant={statusVariant(job.status)}>
-                    {job.status}
-                  </Badge>
-                </TableCell>
-                <TableCell className="text-muted-foreground text-sm">
-                  {job.processed_items}/{job.total_items}
-                  {job.failed_items > 0 && (
-                    <span className="text-destructive">
-                      {" "}
-                      · {job.failed_items} failed
-                    </span>
-                  )}
-                </TableCell>
-                <TableCell className="text-muted-foreground text-sm">
-                  {formatDistanceToNow(new Date(job.created_at), {
-                    addSuffix: true,
-                  })}
-                </TableCell>
-              </TableRow>
-            ))
+            jobs.map((job) => {
+              const canStartCass =
+                job.type === "cass_dsf2_ncoa" &&
+                job.status === "queued" &&
+                isAwaitingManualStart(job.result_summary);
+              return (
+                <TableRow key={job.id}>
+                  <TableCell className="font-medium">
+                    {job.title ?? job.id.slice(0, 8)}
+                  </TableCell>
+                  <TableCell>
+                    <Badge variant="outline">{job.type}</Badge>
+                  </TableCell>
+                  <TableCell>
+                    <Badge variant={statusVariant(job.status)}>
+                      {job.status}
+                    </Badge>
+                  </TableCell>
+                  <TableCell className="text-muted-foreground text-sm">
+                    {job.processed_items}/{job.total_items}
+                    {job.failed_items > 0 && (
+                      <span className="text-destructive">
+                        {" "}
+                        · {job.failed_items} failed
+                      </span>
+                    )}
+                  </TableCell>
+                  <TableCell className="text-muted-foreground text-sm">
+                    {formatDistanceToNow(new Date(job.created_at), {
+                      addSuffix: true,
+                    })}
+                  </TableCell>
+                  <TableCell className="text-right">
+                    {canStartCass ? (
+                      <StartCassButton
+                        jobId={job.id}
+                        totalItems={job.total_items}
+                      />
+                    ) : null}
+                  </TableCell>
+                </TableRow>
+              );
+            })
           )}
         </TableBody>
       </Table>
@@ -148,4 +185,62 @@ function statusVariant(
   if (status === "partial") return "secondary";
   if (status === "canceled") return "outline";
   return "secondary";
+}
+
+function StartCassButton({
+  jobId,
+  totalItems,
+}: {
+  jobId: string;
+  totalItems: number;
+}) {
+  const [open, setOpen] = useState(false);
+  const [pending, startTransition] = useTransition();
+  const estimatedCost = (totalItems * CASS_COST_PER_LOOKUP_USD).toFixed(2);
+
+  const run = () => {
+    startTransition(async () => {
+      const result = await callAction(startQueuedCassJob(jobId), {
+        successMessage: "CASS job started — progress will stream live.",
+        fallbackMessage: "Failed to start CASS job",
+      });
+      if (result.ok) setOpen(false);
+    });
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogTrigger
+        render={
+          <Button variant="outline" size="sm">
+            Start CASS
+          </Button>
+        }
+      />
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Start CASS verification?</DialogTitle>
+          <DialogDescription>
+            This will verify {totalItems} propert
+            {totalItems === 1 ? "y" : "ies"} against SmartyStreets. Estimated
+            cost: ${estimatedCost} ({totalItems} × $
+            {CASS_COST_PER_LOOKUP_USD.toFixed(2)}/lookup). Cached addresses
+            from prior imports count as $0.
+          </DialogDescription>
+        </DialogHeader>
+        <DialogFooter>
+          <Button
+            variant="outline"
+            onClick={() => setOpen(false)}
+            disabled={pending}
+          >
+            Cancel
+          </Button>
+          <Button onClick={run} disabled={pending}>
+            {pending ? "Starting…" : "Start"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
 }

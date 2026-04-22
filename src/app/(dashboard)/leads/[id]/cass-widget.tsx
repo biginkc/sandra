@@ -32,9 +32,9 @@ export function CassWidget({ propertyId, cassStatus }: Props) {
         fallbackMessage: "Address verification failed",
       });
       if (result.ok) {
-        const { cassStatus: newStatus, standardized } = result.data;
+        const { cassStatus: newStatus, standardized, cacheHit } = result.data;
         if (newStatus === "verified") {
-          toast.success("Address verified", {
+          toast.success(cacheHit ? "Address verified (cached)" : "Address verified", {
             description: standardized || undefined,
           });
         } else if (newStatus === "ambiguous") {

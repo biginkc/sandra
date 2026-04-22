@@ -179,8 +179,14 @@ export function Wizard() {
 
   const uploadReady =
     !!state.file && !!state.source && !!state.market && state.rows.length > 0;
+  // Address + State are required. A mapped `address_full` column counts as
+  // a substitute for both — the validator parses it into components at
+  // row-validation time.
+  const hasAddressFull = !!state.mapping.address_full;
   const mapReady =
-    sections.property && !!state.mapping.address && !!state.mapping.state;
+    sections.property &&
+    (!!state.mapping.address || hasAddressFull) &&
+    (!!state.mapping.state || hasAddressFull);
   const reviewReady =
     !!state.summary && state.summary.validRows > 0 && uploadReady && mapReady;
 

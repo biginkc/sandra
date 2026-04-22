@@ -1,7 +1,8 @@
 "use client";
 
+import { UploadCloudIcon } from "lucide-react";
 import Papa from "papaparse";
-import { useRef } from "react";
+import { useRef, useState } from "react";
 import { toast } from "sonner";
 
 import {
@@ -11,8 +12,8 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { cn } from "@/lib/utils";
 import {
   Select,
   SelectContent,
@@ -43,13 +44,18 @@ const MARKETS: { value: WizardMarket; label: string }[] = [
   { value: "Lake of the Ozarks", label: "Lake of the Ozarks" },
 ];
 
-const SOFT_WARN_BYTES = 5 * 1024 * 1024; // 5 MB
-const HARD_BLOCK_BYTES = 10 * 1024 * 1024; // 10 MB
+// A typical DealMachine monthly export is ~10 MB / ~20K rows. Hard-block
+// set high enough to accommodate that, with a soft warn on anything that
+// will noticeably stall the in-browser parse. When we move parsing to
+// Supabase Storage + an Edge Function, both limits can lift further.
+const SOFT_WARN_BYTES = 15 * 1024 * 1024; // 15 MB
+const HARD_BLOCK_BYTES = 50 * 1024 * 1024; // 50 MB
 
 type Props = { state: WizardState; dispatch: React.Dispatch<WizardAction> };
 
 export function StepUpload({ state, dispatch }: Props) {
   const inputRef = useRef<HTMLInputElement>(null);
+  const [dragActive, setDragActive] = useState(false);
 
   const handleFile = (file: File | null) => {
     if (!file) return;
@@ -57,7 +63,8 @@ export function StepUpload({ state, dispatch }: Props) {
     if (file.size > HARD_BLOCK_BYTES) {
       toast.error(
         `File too large (${(file.size / 1024 / 1024).toFixed(1)} MB). ` +
-          "Split into smaller batches or wait for the bulk-upload pipeline.",
+          `Max ${HARD_BLOCK_BYTES / 1024 / 1024} MB in-browser — split into batches ` +
+          "or wait for the bulk-upload pipeline.",
       );
       return;
     }
@@ -109,13 +116,76 @@ export function StepUpload({ state, dispatch }: Props) {
       <CardContent className="flex flex-col gap-4">
         <div className="flex flex-col gap-2">
           <Label htmlFor="file">CSV file</Label>
-          <Input
-            id="file"
-            ref={inputRef}
-            type="file"
-            accept=".csv,text/csv"
-            onChange={(e) => handleFile(e.target.files?.[0] ?? null)}
-          />
+          <label
+            htmlFor="file"
+            onDragEnter={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              setDragActive(true);
+            }}
+            onDragOver={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              if (!dragActive) setDragActive(true);
+            }}
+            onDragLeave={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              setDragActive(false);
+            }}
+            onDrop={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              setDragActive(false);
+              const file = e.dataTransfer.files?.[0] ?? null;
+              if (!file) return;
+              // Guard against non-CSV drops so a misfire on a PDF doesn't
+              // hand garbage to PapaParse.
+              const looksLikeCsv =
+                /\.csv$/i.test(file.name) ||
+                file.type === "text/csv" ||
+                file.type === "application/vnd.ms-excel" ||
+                file.type === "";
+              if (!looksLikeCsv) {
+                toast.error(
+                  `That doesn't look like a CSV (${file.type || file.name}).`,
+                );
+                return;
+              }
+              handleFile(file);
+            }}
+            className={cn(
+              "border-input flex cursor-pointer flex-col items-center justify-center gap-2 rounded-md border-2 border-dashed px-6 py-10 text-center transition-colors",
+              dragActive
+                ? "border-primary bg-primary/5"
+                : "hover:border-foreground/30 hover:bg-muted/30",
+            )}
+          >
+            <UploadCloudIcon
+              className={cn(
+                "size-6",
+                dragActive ? "text-primary" : "text-muted-foreground",
+              )}
+            />
+            <div className="flex flex-col gap-0.5">
+              <span className="text-sm font-medium">
+                {dragActive
+                  ? "Drop to upload"
+                  : "Drag a CSV here, or click to browse"}
+              </span>
+              <span className="text-muted-foreground text-xs">
+                .csv up to {HARD_BLOCK_BYTES / 1024 / 1024} MB
+              </span>
+            </div>
+            <input
+              id="file"
+              ref={inputRef}
+              type="file"
+              accept=".csv,text/csv"
+              className="sr-only"
+              onChange={(e) => handleFile(e.target.files?.[0] ?? null)}
+            />
+          </label>
           {state.filename && (
             <div className="text-muted-foreground text-sm">
               {state.filename} · {state.rows.length} rows · {state.headers.length}{" "}

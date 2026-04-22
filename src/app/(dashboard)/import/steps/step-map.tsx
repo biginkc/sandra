@@ -62,7 +62,7 @@ export function StepMap({ state, dispatch }: Props) {
 
       <SectionCard
         title="Property"
-        description="Required. Address and State must be mapped; other fields are optional."
+        description="Required. Either map Address + State separately, or map the Full Address (combined) column and we'll auto-split it. Other fields are optional."
         fields={PROPERTY_FIELDS}
         state={state}
         dispatch={dispatch}
@@ -100,9 +100,22 @@ function SectionCard({
 }) {
   const mappedCount = fields.filter((f) => !!state.mapping[f.id]).length;
   const requiredCount = fields.filter((f) => f.required).length;
-  const requiredMapped = fields.filter(
-    (f) => f.required && !!state.mapping[f.id],
-  ).length;
+  // A mapped `address_full` column satisfies both the `address` and `state`
+  // requirements by derivation — credit it in the counter so the user sees
+  // `2/2 required` when only Full Address is mapped.
+  const addressFullSatisfies =
+    !!state.mapping.address_full &&
+    fields.some((f) => f.id === "address_full");
+  const requiredMapped = fields.filter((f) => {
+    if (!f.required) return false;
+    if (state.mapping[f.id]) return true;
+    if (
+      addressFullSatisfies &&
+      (f.id === "address" || f.id === "state")
+    )
+      return true;
+    return false;
+  }).length;
 
   return (
     <Card>
@@ -134,6 +147,13 @@ function SectionCard({
   );
 }
 
+const DERIVABLE_FROM_ADDRESS_FULL: ReadonlySet<string> = new Set([
+  "address",
+  "city",
+  "state",
+  "zip",
+]);
+
 function FieldRow({
   field,
   state,
@@ -145,12 +165,28 @@ function FieldRow({
 }) {
   const currentHeader = state.mapping[field.id] ?? null;
   const triggerValue = currentHeader ?? IGNORE_VALUE;
+
+  // When the user has mapped a combined-address column, signal that Address /
+  // City / State / ZIP will be auto-filled from it even if left "(not mapped)".
+  // Suppresses the "required" warning and the confusion of seeing a required
+  // field that looks unmapped.
+  const addressFullHeader = state.mapping.address_full ?? null;
+  const willDerive =
+    !!addressFullHeader &&
+    DERIVABLE_FROM_ADDRESS_FULL.has(field.id) &&
+    !currentHeader;
+
   return (
     <div className="flex flex-col gap-1.5">
       <Label htmlFor={`map-${field.id}`} className="flex items-center gap-2">
         {field.label}
-        {field.required && (
+        {field.required && !willDerive && (
           <span className="text-destructive text-xs">required</span>
+        )}
+        {willDerive && (
+          <span className="text-emerald-600 text-xs dark:text-emerald-400">
+            auto-filled from Full Address
+          </span>
         )}
       </Label>
       <Select
@@ -169,7 +205,7 @@ function FieldRow({
               currentHeader ? "truncate" : "text-muted-foreground truncate"
             }
           >
-            {currentHeader ?? "(not mapped)"}
+            {currentHeader ?? (willDerive ? `← ${addressFullHeader}` : "(not mapped)")}
           </span>
         </SelectTrigger>
         <SelectContent>

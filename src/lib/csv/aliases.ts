@@ -22,6 +22,13 @@ export const HEADER_ALIASES: Record<string, string> = {
   "prop address": "address",
   "street": "address",
 
+  // Combined-address column (DealMachine Skipped exports). Parser in
+  // validate.ts splits it into address/city/state/zip at row-validation time.
+  "associated property address full": "address_full",
+  "associated property address": "address_full",
+  "property address full": "address_full",
+  "full property address": "address_full",
+
   // ---------- Property: city/state/zip/county ----------
   "city": "city",
   "property city": "city",
@@ -163,26 +170,33 @@ export const HEADER_ALIASES: Record<string, string> = {
   "email": "homeowner_email",
   "owner email": "homeowner_email",
   "email address": "homeowner_email",
+  "email address 1": "homeowner_email", // DealMachine Skipped
+  // email_address_2 / _3 deliberately NOT aliased — contacts table holds one
+  // email today, so auto-mapping the secondaries would silently drop data.
 
   "mailing address": "homeowner_mailing_address",
   "owner mailing address": "homeowner_mailing_address",
   "mail address": "homeowner_mailing_address",
   "owner address": "homeowner_mailing_address",
+  "primary mailing address": "homeowner_mailing_address", // DealMachine Skipped
 
   "mailing city": "homeowner_mailing_city",
   "owner mailing city": "homeowner_mailing_city",
   "mail city": "homeowner_mailing_city",
   "owner city": "homeowner_mailing_city",
+  "primary mailing city": "homeowner_mailing_city", // DealMachine Skipped
 
   "mailing state": "homeowner_mailing_state",
   "owner mailing state": "homeowner_mailing_state",
   "mail state": "homeowner_mailing_state",
   "owner state": "homeowner_mailing_state",
+  "primary mailing state": "homeowner_mailing_state", // DealMachine Skipped
 
   "mailing zip": "homeowner_mailing_zip",
   "owner mailing zip": "homeowner_mailing_zip",
   "mail zip": "homeowner_mailing_zip",
   "owner zip": "homeowner_mailing_zip",
+  "primary mailing zip": "homeowner_mailing_zip", // DealMachine Skipped
 
   "do not contact": "homeowner_do_not_contact",
   "dnc": "homeowner_do_not_contact",

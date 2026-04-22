@@ -234,6 +234,61 @@ const DIRECTIONAL: Record<string, string> = {
 
 // ---------- Public API -----------
 
+/**
+ * Classify why a combined-address string won't parse. Used to produce
+ * specific validation errors instead of the catch-all "could not derive"
+ * message — e.g. DealMachine Skipped exports often include rows like
+ * "Weston, Mo 64098" where the skip-trace found a city but no street.
+ * Those aren't parser bugs; they're genuinely unusable as property leads.
+ */
+export function classifyAddressFullFailure(
+  raw: string | null | undefined,
+): "empty" | "no_street" | "malformed" {
+  if (raw == null) return "empty";
+  const trimmed = String(raw).trim();
+  if (!trimmed) return "empty";
+  // One-or-zero-comma shapes like "Weston, MO 64098" or ", MO" carry at
+  // most city/state/zip — no street component possible.
+  if (trimmed.split(",").length < 3) return "no_street";
+  return "malformed";
+}
+
+/**
+ * Split a combined-address string (e.g. DealMachine Skipped's
+ * `associated_property_address_full`) into its four parts. Targets the
+ * canonical USPS-ish shape `"123 Main St, Kansas City, MO 64108"` plus the
+ * unit variant `"123 Main St Apt 4, Kansas City, MO 64108-1234"`.
+ *
+ * Returns null if the string doesn't have two commas + a trailing
+ * STATE + ZIP — caller falls back to per-field mapping.
+ *
+ * This is a best-effort regex. The proper solution is SmartyStreets' US
+ * Extract endpoint; that arrives with the CASS flow. Once CASS_ENABLED,
+ * the parsed components get overwritten by the verifier anyway.
+ */
+export function parseFullAddress(
+  raw: string | null | undefined,
+): { address: string; city: string; state: string; zip: string } | null {
+  if (raw == null) return null;
+  const trimmed = String(raw).trim();
+  if (!trimmed) return null;
+
+  // "address1, city, ST zip" or "address1, city, ST zip-plus4".
+  // Allows extra whitespace, optional trailing country, missing ZIP+4.
+  const match = trimmed.match(
+    /^(.+?),\s*([^,]+?),\s*([A-Za-z]{2})\s+(\d{5}(?:-\d{4})?)\s*(?:,\s*USA?)?\s*$/,
+  );
+  if (!match) return null;
+
+  const [, address, city, state, zip] = match;
+  return {
+    address: address.trim(),
+    city: city.trim(),
+    state: state.toUpperCase(),
+    zip,
+  };
+}
+
 export function normalizeAddress(raw: string | null | undefined): string | null {
   if (raw == null) return null;
   const trimmed = String(raw).trim();

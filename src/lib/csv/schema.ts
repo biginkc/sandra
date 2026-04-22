@@ -50,9 +50,21 @@ const SOURCE_VALUES = [
 const CONTACT_TYPE_VALUES = ["person", "entity"] as const;
 
 export const PROPERTY_FIELDS: readonly TargetField[] = [
+  // Required fields first — grouped so the user can't miss them.
   { id: "address", label: "Address", section: "property", type: "address", required: true },
-  { id: "city", label: "City", section: "property", type: "text" },
   { id: "state", label: "State", section: "property", type: "state", required: true },
+  // Combined-address path — explicit alternative that satisfies both
+  // required fields above by parsing a single column. Displayed right
+  // after the required pair so the relationship is visually obvious.
+  {
+    id: "address_full",
+    label: "Full Address (combined)",
+    section: "property",
+    type: "text",
+    helpText:
+      "Alternative to mapping Address + State separately. A single column like \"123 Main St, Kansas City, MO 64108\" auto-splits into Address / City / State / ZIP.",
+  },
+  { id: "city", label: "City", section: "property", type: "text" },
   { id: "zip", label: "ZIP", section: "property", type: "zip" },
   { id: "county_name", label: "County", section: "property", type: "county", helpText: "County name; FIPS resolved on ingest" },
   { id: "apn", label: "APN", section: "property", type: "apn", helpText: "Assessor Parcel Number" },
@@ -120,5 +132,12 @@ export function isSectionComplete(
   mapping: Readonly<Record<string, string | null>>,
 ): boolean {
   const required = ALL_FIELDS.filter((f) => f.section === section && f.required);
-  return required.every((f) => !!mapping[f.id]);
+  return required.every((f) => {
+    if (!!mapping[f.id]) return true;
+    // address + state can be satisfied by a mapped combined-address column
+    if ((f.id === "address" || f.id === "state") && !!mapping.address_full) {
+      return true;
+    }
+    return false;
+  });
 }
