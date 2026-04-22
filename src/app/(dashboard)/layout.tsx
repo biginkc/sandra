@@ -47,6 +47,12 @@ export default async function DashboardLayout({
             Import
           </Link>
           <Link
+            href="/messages"
+            className="text-muted-foreground hover:text-foreground"
+          >
+            Messages
+          </Link>
+          <Link
             href="/jobs"
             className="text-muted-foreground hover:text-foreground"
           >

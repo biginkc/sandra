@@ -11,7 +11,11 @@ import {
   type ConsentEventType,
 } from "@/lib/messaging/consent";
 import { getMessagingProvider } from "@/lib/messaging/registry";
-import { sendSmsToContact, type SendSmsOutcome } from "@/lib/messaging/send";
+import {
+  releaseQueuedMessage,
+  sendSmsToContact,
+  type SendSmsOutcome,
+} from "@/lib/messaging/send";
 import type { DialpadFromOption } from "@/lib/messaging/types";
 import type { Database } from "@/lib/supabase/types";
 
@@ -219,6 +223,7 @@ export async function sendSmsFromLead(
   propertyId: string,
   body: string,
   from?: string | null,
+  queueOnly?: boolean,
 ): Promise<Result<SendSmsPayload>> {
   const trimmed = body.trim();
   if (!trimmed) {
@@ -274,6 +279,7 @@ export async function sendSmsFromLead(
       propertyId,
       body: trimmed,
       from: from ?? undefined,
+      queueOnly: queueOnly ?? false,
     });
     return ok({ outcome });
   } catch (e) {

@@ -81,11 +81,11 @@ export function SmsComposer({
   const length = body.length;
   const tooLong = length > 1600;
 
-  const send = () => {
+  const sendOrQueue = (queueOnly: boolean) => {
     startTransition(async () => {
       const result = await callAction(
-        sendSmsFromLead(propertyId, body, fromNumber || null),
-        { fallbackMessage: "SMS send failed" },
+        sendSmsFromLead(propertyId, body, fromNumber || null, queueOnly),
+        { fallbackMessage: queueOnly ? "Queue failed" : "SMS send failed" },
       );
       if (!result.ok) return;
 
@@ -94,6 +94,14 @@ export function SmsComposer({
         case "sent":
           toast.success("Message sent", {
             description: `Delivered to ${homeownerPhone}.`,
+          });
+          setBody("");
+          setOpen(false);
+          router.refresh();
+          break;
+        case "queued":
+          toast.success("Queued", {
+            description: "Release it from the Messages page.",
           });
           setBody("");
           setOpen(false);
@@ -245,10 +253,17 @@ export function SmsComposer({
             Cancel
           </Button>
           <Button
-            onClick={send}
+            variant="outline"
+            onClick={() => sendOrQueue(true)}
             disabled={disabled || pending || length === 0 || tooLong}
           >
-            {pending ? "Sending…" : "Send"}
+            {pending ? "Working…" : "Queue"}
+          </Button>
+          <Button
+            onClick={() => sendOrQueue(false)}
+            disabled={disabled || pending || length === 0 || tooLong}
+          >
+            {pending ? "Sending…" : "Send now"}
           </Button>
         </DialogFooter>
       </DialogContent>

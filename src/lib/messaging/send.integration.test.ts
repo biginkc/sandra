@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 
-import { sendSmsToContact } from "@/lib/messaging/send";
+import { releaseQueuedMessage, sendSmsToContact } from "@/lib/messaging/send";
 import { recordConsentEvent } from "@/lib/messaging/consent";
 import { createTestClient } from "@tests/integration/client";
 import { resetTenantTables } from "@tests/integration/reset";
@@ -153,6 +153,103 @@ describe("sendSmsToContact (integration)", () => {
     if (outcome.status === "blocked_quiet_hours") {
       expect(outcome.check.ok).toBe(false);
     }
+  });
+
+  it("queue path: writes status='queued' without a provider call, without consent check", async () => {
+    // Deliberately no consent event — queue should STILL succeed,
+    // because consent is re-checked at release time, not at queue time.
+    const { contactId, propertyId } = await seed({ withConsent: false });
+
+    const outcome = await sendSmsToContact(supabase, {
+      contactId,
+      propertyId,
+      body: "this is queued, not sent",
+      queueOnly: true,
+    });
+    expect(outcome.status).toBe("queued");
+    if (outcome.status !== "queued") return;
+
+    const { data: row } = await supabase
+      .from("messages")
+      .select("status, direction, external_id, sent_at")
+      .eq("id", outcome.messageId)
+      .single();
+    expect(row?.status).toBe("queued");
+    expect(row?.direction).toBe("outbound");
+    expect(row?.external_id).toBeNull();
+    expect(row?.sent_at).toBeNull();
+  });
+
+  it("release path: queued → sent, requires fresh consent check", async () => {
+    // Same time-window gate.
+    const now = new Date();
+    const hour = parseInt(
+      new Intl.DateTimeFormat("en-US", {
+        timeZone: "America/Chicago",
+        hour: "2-digit",
+        hour12: false,
+      }).format(now),
+      10,
+    );
+    if (hour < 8 || hour >= 21) {
+      // eslint-disable-next-line no-console
+      console.warn("queue release happy-path test skipped — outside 8a–9p CT");
+      return;
+    }
+    const { contactId, propertyId } = await seed({ withConsent: true });
+
+    // Queue first.
+    const queue = await sendSmsToContact(supabase, {
+      contactId,
+      propertyId,
+      body: "queued then released",
+      queueOnly: true,
+    });
+    expect(queue.status).toBe("queued");
+    if (queue.status !== "queued") return;
+
+    // Release.
+    const release = await releaseQueuedMessage(supabase, queue.messageId);
+    expect(release.status).toBe("sent");
+
+    const { data: row } = await supabase
+      .from("messages")
+      .select("status, external_id")
+      .eq("id", queue.messageId)
+      .single();
+    expect(row?.status).toBe("sent");
+    expect(row?.external_id).toMatch(/^mock_/);
+  });
+
+  it("release blocks when consent was revoked between queue and release", async () => {
+    const { contactId, propertyId } = await seed({ withConsent: true });
+    const queue = await sendSmsToContact(supabase, {
+      contactId,
+      propertyId,
+      body: "queued while consented",
+      queueOnly: true,
+    });
+    expect(queue.status).toBe("queued");
+    if (queue.status !== "queued") return;
+
+    // Revoke between queue and release.
+    await recordConsentEvent(supabase, {
+      contactId,
+      channel: "sms",
+      eventType: "opt_out",
+      source: "integration-test-mid-queue-revoke",
+    });
+
+    const release = await releaseQueuedMessage(supabase, queue.messageId);
+    expect(release.status).toBe("blocked_no_consent");
+
+    // Row stays in queued state (we didn't flip it).
+    const { data: row } = await supabase
+      .from("messages")
+      .select("status")
+      .eq("id", queue.messageId)
+      .single();
+    expect(row?.status).toBe("queued");
   });
 
   it("records provider_failed when the mock provider errors on FAIL prefix", async () => {
