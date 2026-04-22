@@ -42,9 +42,20 @@ export default function LoginPage() {
 
 function LoginForm() {
   const [state, formAction, pending] = useActionState(signIn, null);
-  const errorMessage = state && !state.ok ? state.error.message : null;
+  const actionError = state && !state.ok ? state.error.message : null;
   const searchParams = useSearchParams();
   const next = searchParams.get("next") ?? "";
+  const urlError = searchParams.get("error");
+
+  // Priority: action error from this submit attempt beats a prior URL
+  // error (e.g. domain rejection from a previous session).
+  const errorMessage =
+    actionError ??
+    (urlError === "domain"
+      ? "This CRM is restricted to bmhgroupkc.com accounts. Sign in with a bmhgroupkc.com email or ask an admin for an invite."
+      : urlError === "invite_failed"
+        ? "Invite link couldn't be verified. Ask an admin to resend it."
+        : null);
 
   return (
     <form action={formAction} className="flex flex-col gap-4">
@@ -70,7 +81,9 @@ function LoginForm() {
         />
       </div>
       {errorMessage ? (
-        <div className="text-destructive text-sm">{errorMessage}</div>
+        <div className="border-destructive/30 bg-destructive/10 text-destructive rounded-md border px-3 py-2 text-sm">
+          {errorMessage}
+        </div>
       ) : null}
       <Button type="submit" disabled={pending}>
         {pending ? "Signing in…" : "Sign in"}

@@ -6,6 +6,7 @@ import { Separator } from "@/components/ui/separator";
 import { ConnectionBanner } from "@/components/connection-banner";
 import { ErrorBoundary } from "@/components/error-boundary";
 import { JobFailureNotifier } from "@/components/job-failure-notifier";
+import { isAdminEmail } from "@/lib/auth/allowlist";
 import { createClient } from "@/lib/supabase/server";
 
 export default async function DashboardLayout({
@@ -18,6 +19,7 @@ export default async function DashboardLayout({
     data: { user },
   } = await supabase.auth.getUser();
   if (!user) redirect("/login");
+  const showAdmin = isAdminEmail(user.email);
 
   return (
     <div className="flex min-h-screen flex-col">
@@ -58,6 +60,14 @@ export default async function DashboardLayout({
           >
             Jobs
           </Link>
+          {showAdmin ? (
+            <Link
+              href="/admin/users"
+              className="text-muted-foreground hover:text-foreground"
+            >
+              Team
+            </Link>
+          ) : null}
         </nav>
         <div className="ml-auto flex items-center gap-3 text-sm">
           <span className="text-muted-foreground">{user.email}</span>

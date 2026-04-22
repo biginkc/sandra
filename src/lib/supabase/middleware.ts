@@ -1,6 +1,8 @@
 import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
 
+import { isEmailAllowed } from "@/lib/auth/allowlist";
+
 export async function updateSession(request: NextRequest) {
   let supabaseResponse = NextResponse.next({ request });
 
@@ -42,6 +44,20 @@ export async function updateSession(request: NextRequest) {
     const url = request.nextUrl.clone();
     url.pathname = "/login";
     url.searchParams.set("next", path + request.nextUrl.search);
+    return NextResponse.redirect(url);
+  }
+
+  // Domain allowlist — if someone's authenticated but not on the
+  // @bmhgroupkc.com domain (or explicitly allowlisted), sign them out
+  // and bounce to /login with an error. Skips public paths so the
+  // /login error banner itself is reachable + /auth/* flows can
+  // complete before we enforce.
+  if (user && !isPublic && !isEmailAllowed(user.email)) {
+    await supabase.auth.signOut();
+    const url = request.nextUrl.clone();
+    url.pathname = "/login";
+    url.search = "";
+    url.searchParams.set("error", "domain");
     return NextResponse.redirect(url);
   }
 
