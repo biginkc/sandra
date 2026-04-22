@@ -83,6 +83,57 @@ export type Database = {
           },
         ];
       };
+      consent_events: {
+        Row: {
+          channel: string;
+          contact_id: string;
+          created_at: string;
+          event_type: string;
+          id: string;
+          occurred_at: string;
+          org_id: string;
+          source: string | null;
+          source_detail: Json | null;
+        };
+        Insert: {
+          channel: string;
+          contact_id: string;
+          created_at?: string;
+          event_type: string;
+          id?: string;
+          occurred_at?: string;
+          org_id?: string;
+          source?: string | null;
+          source_detail?: Json | null;
+        };
+        Update: {
+          channel?: string;
+          contact_id?: string;
+          created_at?: string;
+          event_type?: string;
+          id?: string;
+          occurred_at?: string;
+          org_id?: string;
+          source?: string | null;
+          source_detail?: Json | null;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "consent_events_contact_id_fkey";
+            columns: ["contact_id"];
+            isOneToOne: false;
+            referencedRelation: "contacts";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "consent_events_org_id_fkey";
+            columns: ["org_id"];
+            isOneToOne: false;
+            referencedRelation: "organizations";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
       contacts: {
         Row: {
           contact_type: string;

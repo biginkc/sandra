@@ -9,6 +9,11 @@ import type { DetailedLead, PropertyStatus } from "../actions";
 
 import { CassWidget } from "./cass-widget";
 import { LeadStatusWidget } from "./status-widget";
+import { MessagesThread } from "./messages-thread";
+import { SmsComposer } from "./sms-composer";
+import type { Database } from "@/lib/supabase/types";
+
+type MessageRow = Database["public"]["Tables"]["messages"]["Row"];
 
 export async function generateMetadata({
   params,
@@ -73,6 +78,20 @@ export default async function LeadDetailPage({
 
   const lead = data as DetailedLead;
 
+  // Fetch existing SMS thread — messages linked either to the property
+  // directly or to the homeowner (catches inbound that lands pre-linkage).
+  const homeownerContactId = lead.homeowner?.id ?? null;
+  const orFilter = homeownerContactId
+    ? `property_id.eq.${lead.id},contact_id.eq.${homeownerContactId}`
+    : `property_id.eq.${lead.id}`;
+  const { data: threadRaw } = await supabase
+    .from("messages")
+    .select("*")
+    .or(orFilter)
+    .order("created_at", { ascending: true })
+    .limit(200);
+  const initialMessages = (threadRaw ?? []) as MessageRow[];
+
   return (
     <div className="flex flex-col gap-5 p-6">
       <div>
@@ -110,6 +129,20 @@ export default async function LeadDetailPage({
             CASS {lead.cass_status}
           </Badge>
           <CassWidget propertyId={lead.id} cassStatus={lead.cass_status} />
+          <SmsComposer
+            propertyId={lead.id}
+            homeownerContactId={lead.homeowner?.id ?? null}
+            homeownerPhone={lead.homeowner?.phone_1 ?? null}
+            homeownerName={
+              lead.homeowner?.contact_type === "entity"
+                ? lead.homeowner.entity_name
+                : lead.homeowner
+                  ? [lead.homeowner.first_name, lead.homeowner.last_name]
+                      .filter(Boolean)
+                      .join(" ") || null
+                  : null
+            }
+          />
         </div>
       </header>
 
@@ -235,6 +268,19 @@ export default async function LeadDetailPage({
             <div className="whitespace-pre-wrap p-3 text-sm">{lead.notes}</div>
           </Section>
         ) : null}
+      </div>
+
+      <div>
+        <div className="text-muted-foreground mb-2 text-xs font-semibold tracking-wide uppercase">
+          SMS thread
+        </div>
+        <div className="border-border rounded-md border p-3">
+          <MessagesThread
+            initial={initialMessages}
+            contactId={lead.homeowner?.id ?? null}
+            propertyId={lead.id}
+          />
+        </div>
       </div>
     </div>
   );

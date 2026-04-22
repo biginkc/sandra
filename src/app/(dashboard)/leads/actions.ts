@@ -5,6 +5,14 @@ import { errFromUnknown, ok, type Result } from "@/lib/errors/result";
 import { reportError } from "@/lib/errors/report";
 import { verifyPropertyAddress } from "@/lib/enrichment/verify-property";
 import type { CassStatus } from "@/lib/enrichment/types";
+import {
+  recordConsentEvent,
+  type ConsentChannel,
+  type ConsentEventType,
+} from "@/lib/messaging/consent";
+import { getMessagingProvider } from "@/lib/messaging/registry";
+import { sendSmsToContact, type SendSmsOutcome } from "@/lib/messaging/send";
+import type { DialpadFromOption } from "@/lib/messaging/types";
 import type { Database } from "@/lib/supabase/types";
 
 export type PropertyStatus =
@@ -177,5 +185,127 @@ export async function updatePropertyStatus(
       extra: { propertyId, status },
     });
     return errFromUnknown(e, "STATUS_UPDATE_FAILED");
+  }
+}
+
+// ============================================================================
+// SMS messaging (Phase 1 — Dialpad via MessagingProvider adapter)
+// ============================================================================
+
+export type SendSmsPayload = {
+  outcome: SendSmsOutcome;
+};
+
+/**
+ * Pull the list of numbers on the Dialpad account, with owner names
+ * resolved, for the composer's "send from" dropdown. Safe to call
+ * from any authed user — read-only.
+ */
+export async function listFromNumbers(): Promise<Result<DialpadFromOption[]>> {
+  try {
+    const provider = getMessagingProvider();
+    if (!provider || !provider.listFromNumbers) {
+      return ok([]);
+    }
+    const numbers = await provider.listFromNumbers();
+    return ok(numbers);
+  } catch (e) {
+    reportError(e, { tags: { surface: "list_from_numbers" } });
+    return errFromUnknown(e, "LIST_FROM_NUMBERS_FAILED");
+  }
+}
+
+export async function sendSmsFromLead(
+  propertyId: string,
+  body: string,
+  from?: string | null,
+): Promise<Result<SendSmsPayload>> {
+  const trimmed = body.trim();
+  if (!trimmed) {
+    return {
+      ok: false,
+      error: { code: "EMPTY_BODY", message: "Message body is empty." },
+    };
+  }
+  // 1600 is a comfortable hard cap — Dialpad / carriers chunk beyond
+  // 160 chars anyway but we prevent runaway copy/paste of novels.
+  if (trimmed.length > 1600) {
+    return {
+      ok: false,
+      error: {
+        code: "BODY_TOO_LONG",
+        message: `Message is ${trimmed.length} characters — cap is 1600.`,
+      },
+    };
+  }
+
+  try {
+    const supabase = await createClient();
+
+    const { data: property, error } = await supabase
+      .from("properties")
+      .select("id, homeowner_contact_id")
+      .eq("id", propertyId)
+      .maybeSingle();
+    if (error) {
+      return {
+        ok: false,
+        error: { code: "LEAD_FETCH_FAILED", message: error.message },
+      };
+    }
+    if (!property) {
+      return {
+        ok: false,
+        error: { code: "LEAD_NOT_FOUND", message: "Lead not found." },
+      };
+    }
+    if (!property.homeowner_contact_id) {
+      return {
+        ok: false,
+        error: {
+          code: "NO_HOMEOWNER_CONTACT",
+          message: "Lead has no homeowner contact linked — add one first.",
+        },
+      };
+    }
+
+    const outcome = await sendSmsToContact(supabase, {
+      contactId: property.homeowner_contact_id,
+      propertyId,
+      body: trimmed,
+      from: from ?? undefined,
+    });
+    return ok({ outcome });
+  } catch (e) {
+    reportError(e, {
+      tags: { surface: "send_sms_from_lead" },
+      extra: { propertyId },
+    });
+    return errFromUnknown(e, "SEND_SMS_FAILED");
+  }
+}
+
+/**
+ * Manual consent capture from the lead-detail composer. The operator
+ * asserts they have written proof (a signed form or a screenshot of an
+ * opt-in form submission) and records an `opt_in_marketing_written`
+ * event. UI prompts for the source URL / description.
+ */
+export async function captureConsent(params: {
+  contactId: string;
+  channel: ConsentChannel;
+  eventType: ConsentEventType;
+  source: string;
+}): Promise<Result<null>> {
+  try {
+    const supabase = await createClient();
+    await recordConsentEvent(supabase, params);
+    return ok(null);
+  } catch (e) {
+    reportError(e, {
+      tags: { surface: "capture_consent" },
+      extra: { contactId: params.contactId },
+    });
+    return errFromUnknown(e, "CONSENT_CAPTURE_FAILED");
   }
 }

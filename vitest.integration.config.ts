@@ -57,6 +57,8 @@ export default defineConfig({
       // SmartyStreets for real. Real CASS coverage lives in the
       // `smartystreets.test.ts` unit suite.
       ADDRESS_VERIFIER_PROVIDER: "mock",
+      // Same story for SMS — mock provider so no real Dialpad calls.
+      MESSAGING_PROVIDER: "mock",
     },
   },
   resolve: {
