@@ -14,18 +14,15 @@ import type {
  * https://developers.dialpad.com. Requires:
  *   DIALPAD_API_KEY        — bearer token, created in the Dialpad console
  *   DIALPAD_FROM_NUMBER    — E.164 number owned by the account ("+1...")
- *   DIALPAD_WEBHOOK_SECRET — HMAC-SHA256 secret configured when setting
- *                             up the inbound-SMS subscription
- *
- * Note: Dialpad's exact signature-verification scheme is verified against
- * live webhook deliveries during implementation smoke. If the live
- * header name differs from `X-Dialpad-Signature`, update `SIGNATURE_HEADER`.
+ *   DIALPAD_WEBHOOK_SECRET — shared secret registered with the Dialpad
+ *                             webhook. Dialpad signs event deliveries as
+ *                             HS256 JWTs using this secret; the request
+ *                             body IS the JWT string.
  */
 
 const API_BASE = "https://dialpad.com/api/v2";
 const SEND_ENDPOINT = `${API_BASE}/sms`;
 const NUMBERS_ENDPOINT = `${API_BASE}/numbers`;
-const SIGNATURE_HEADER = "x-dialpad-signature";
 
 export class DialpadMessagingProvider implements MessagingProvider {
   readonly providerId = "dialpad";
@@ -96,20 +93,50 @@ export class DialpadMessagingProvider implements MessagingProvider {
   }
 
   /**
-   * HMAC-SHA256 of the raw request body, hex-encoded, compared in
-   * constant time to the value in `X-Dialpad-Signature`. Rejects an
-   * empty header unconditionally.
+   * Dialpad signs webhook deliveries as HS256 JWTs — the entire
+   * request body IS the JWT string (header.payload.signature, each
+   * base64url-encoded). We verify the signature against our shared
+   * secret; no separate header.
+   *
+   * Spec reference (Dialpad docs): "Events are encoded and signed in
+   * the JWT format using the shared secret with the HS256 algorithm.
+   * The JWT payload should be decoded and the signature verified to
+   * ensure that the event came from Dialpad."
    */
-  verifyWebhookSignature(rawBody: string, headers: Headers): boolean {
-    const received = headers.get(SIGNATURE_HEADER);
-    if (!received) return false;
+  verifyWebhookSignature(rawBody: string, _headers: Headers): boolean {
+    return this.decodeSignedJwt(rawBody.trim()) !== null;
+  }
+
+  /**
+   * Verify a JWT string against the configured webhook secret and
+   * return the parsed payload object on success, or null on any
+   * failure (malformed, wrong signature, bad JSON payload).
+   * Intentionally silent on failure — the caller maps null to a 401.
+   */
+  private decodeSignedJwt(jwt: string): Record<string, unknown> | null {
+    const parts = jwt.split(".");
+    if (parts.length !== 3) return null;
+    const [headerB64, payloadB64, sigB64] = parts;
+    let received: Buffer;
+    try {
+      received = Buffer.from(sigB64, "base64url");
+    } catch {
+      return null;
+    }
     const expected = createHmac("sha256", this.webhookSecret)
-      .update(rawBody)
-      .digest("hex");
-    const a = Buffer.from(received, "utf8");
-    const b = Buffer.from(expected, "utf8");
-    if (a.length !== b.length) return false;
-    return timingSafeEqual(a, b);
+      .update(`${headerB64}.${payloadB64}`)
+      .digest();
+    if (received.length !== expected.length) return null;
+    if (!timingSafeEqual(received, expected)) return null;
+    try {
+      const payloadJson = Buffer.from(payloadB64, "base64url").toString(
+        "utf8",
+      );
+      const obj = JSON.parse(payloadJson);
+      return obj && typeof obj === "object" ? obj : null;
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -223,16 +250,17 @@ export class DialpadMessagingProvider implements MessagingProvider {
   }
 
   /**
-   * Dialpad delivers inbound SMS as either a single event object or a
-   * batch. We accept both shapes — the parser flattens into an array.
-   * Unknown shapes raise a ProviderError so the caller can 500 and Dialpad
-   * will retry (idempotency is enforced by webhook_events unique index).
+   * Decode the JWT (must already be signature-verified by the caller),
+   * then flatten the payload into zero-or-more `SmsInboundEvent`s.
+   * Dialpad sends a single event per delivery in practice, but the
+   * parser tolerates the wrapped `{events: [...]}` and bare-array
+   * shapes too in case that changes.
    */
   parseInboundWebhook(rawBody: string): SmsInboundEvent[] {
-    const parsed = safeParseJson(rawBody);
-    if (!parsed || typeof parsed !== "object") {
+    const parsed = this.decodeSignedJwt(rawBody.trim());
+    if (!parsed) {
       throw new ProviderError(
-        "Dialpad webhook body is not valid JSON",
+        "Dialpad webhook body is not a valid signed JWT",
         "dialpad",
       );
     }

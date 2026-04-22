@@ -7,61 +7,72 @@ function makeProvider(secret = "shh-test-secret") {
   return new DialpadMessagingProvider("fake-api-key", "+18165550000", secret);
 }
 
-function sign(body: string, secret = "shh-test-secret"): string {
-  return createHmac("sha256", secret).update(body).digest("hex");
+/**
+ * Mint a valid HS256 JWT for the given payload + secret. Dialpad
+ * signs webhook deliveries this way and puts the full JWT string in
+ * the request body.
+ */
+function mintJwt(payload: object, secret = "shh-test-secret"): string {
+  const header = Buffer.from(
+    JSON.stringify({ alg: "HS256", typ: "JWT" }),
+  ).toString("base64url");
+  const body = Buffer.from(JSON.stringify(payload)).toString("base64url");
+  const sig = createHmac("sha256", secret)
+    .update(`${header}.${body}`)
+    .digest("base64url");
+  return `${header}.${body}.${sig}`;
 }
 
-describe("DialpadMessagingProvider.verifyWebhookSignature", () => {
-  it("accepts a correctly-signed body", () => {
+describe("DialpadMessagingProvider.verifyWebhookSignature (JWT)", () => {
+  it("accepts a correctly-signed JWT body", () => {
     const p = makeProvider();
-    const body = '{"ok": true}';
-    const headers = new Headers({ "x-dialpad-signature": sign(body) });
-    expect(p.verifyWebhookSignature(body, headers)).toBe(true);
+    const jwt = mintJwt({ ok: true });
+    expect(p.verifyWebhookSignature(jwt, new Headers())).toBe(true);
   });
 
-  it("rejects a tampered body", () => {
+  it("rejects a JWT whose payload was tampered after signing", () => {
     const p = makeProvider();
-    const body = '{"ok": true}';
-    const sig = sign(body);
-    const tamperedBody = '{"ok": false}';
-    const headers = new Headers({ "x-dialpad-signature": sig });
-    expect(p.verifyWebhookSignature(tamperedBody, headers)).toBe(false);
+    const jwt = mintJwt({ ok: true });
+    const [h, _body, sig] = jwt.split(".");
+    const tampered = Buffer.from(JSON.stringify({ ok: false })).toString(
+      "base64url",
+    );
+    const badJwt = `${h}.${tampered}.${sig}`;
+    expect(p.verifyWebhookSignature(badJwt, new Headers())).toBe(false);
   });
 
-  it("rejects a missing header", () => {
-    const p = makeProvider();
-    expect(p.verifyWebhookSignature("{}", new Headers())).toBe(false);
-  });
-
-  it("rejects a signature signed with a different secret", () => {
+  it("rejects a JWT signed with a different secret", () => {
     const p = makeProvider("real-secret");
-    const body = "{}";
-    const headers = new Headers({
-      "x-dialpad-signature": sign(body, "wrong-secret"),
-    });
-    expect(p.verifyWebhookSignature(body, headers)).toBe(false);
+    const jwt = mintJwt({ ok: true }, "wrong-secret");
+    expect(p.verifyWebhookSignature(jwt, new Headers())).toBe(false);
   });
 
-  it("rejects a signature of different length (before comparing bytes)", () => {
+  it("rejects a malformed body (not three dot-separated segments)", () => {
     const p = makeProvider();
-    const body = "{}";
-    const headers = new Headers({ "x-dialpad-signature": "too-short" });
-    expect(p.verifyWebhookSignature(body, headers)).toBe(false);
+    expect(p.verifyWebhookSignature("just-a-string", new Headers())).toBe(
+      false,
+    );
+    expect(p.verifyWebhookSignature("one.two", new Headers())).toBe(false);
+  });
+
+  it("rejects an empty body", () => {
+    const p = makeProvider();
+    expect(p.verifyWebhookSignature("", new Headers())).toBe(false);
   });
 });
 
-describe("DialpadMessagingProvider.parseInboundWebhook", () => {
+describe("DialpadMessagingProvider.parseInboundWebhook (JWT payloads)", () => {
   const p = makeProvider();
 
-  it("accepts a single-event object shape", () => {
-    const raw = JSON.stringify({
+  it("accepts a single-event JWT payload", () => {
+    const jwt = mintJwt({
       id: "msg_abc",
       from_number: "+18165551111",
       to_number: "+18165550000",
       text: "hi there",
       timestamp: "2026-04-21T10:00:00Z",
     });
-    const events = p.parseInboundWebhook(raw);
+    const events = p.parseInboundWebhook(jwt);
     expect(events).toHaveLength(1);
     expect(events[0]).toMatchObject({
       externalId: "msg_abc",
@@ -72,8 +83,20 @@ describe("DialpadMessagingProvider.parseInboundWebhook", () => {
     expect(events[0].receivedAt).toBeInstanceOf(Date);
   });
 
-  it("accepts a wrapped {events: [...]} shape", () => {
-    const raw = JSON.stringify({
+  it("preserves MMS media URLs when present", () => {
+    const jwt = mintJwt({
+      id: "m1",
+      from_number: "+18165551111",
+      to_number: "+18165550000",
+      text: "photo attached",
+      media_urls: ["https://dialpad.cdn/abc.jpg"],
+    });
+    const events = p.parseInboundWebhook(jwt);
+    expect(events[0].mediaUrls).toEqual(["https://dialpad.cdn/abc.jpg"]);
+  });
+
+  it("accepts a wrapped {events: [...]} payload", () => {
+    const jwt = mintJwt({
       events: [
         {
           id: "m1",
@@ -89,43 +112,20 @@ describe("DialpadMessagingProvider.parseInboundWebhook", () => {
         },
       ],
     });
-    const events = p.parseInboundWebhook(raw);
+    const events = p.parseInboundWebhook(jwt);
     expect(events).toHaveLength(2);
     expect(events[0].externalId).toBe("m1");
     expect(events[1].externalId).toBe("m2");
   });
 
-  it("accepts a bare array shape", () => {
-    const raw = JSON.stringify([
-      {
-        id: "m1",
-        from_number: "+18165551111",
-        to_number: "+18165550000",
-        text: "solo",
-      },
-    ]);
-    const events = p.parseInboundWebhook(raw);
-    expect(events).toHaveLength(1);
+  it("throws when signature is invalid", () => {
+    // Mint with wrong secret → verify fails inside parseInboundWebhook.
+    const jwt = mintJwt({ id: "m1" }, "wrong-secret");
+    expect(() => p.parseInboundWebhook(jwt)).toThrow(/signed JWT/i);
   });
 
-  it("preserves MMS media URLs when present", () => {
-    const raw = JSON.stringify({
-      id: "m1",
-      from_number: "+18165551111",
-      to_number: "+18165550000",
-      text: "photo attached",
-      media_urls: ["https://dialpad.cdn/abc.jpg"],
-    });
-    const events = p.parseInboundWebhook(raw);
-    expect(events[0].mediaUrls).toEqual(["https://dialpad.cdn/abc.jpg"]);
-  });
-
-  it("throws on malformed JSON", () => {
-    expect(() => p.parseInboundWebhook("not json")).toThrow(/not valid JSON/i);
-  });
-
-  it("throws when required fields are missing", () => {
-    const raw = JSON.stringify({ text: "missing ids" });
-    expect(() => p.parseInboundWebhook(raw)).toThrow(/missing id/i);
+  it("throws when required fields are missing from an otherwise-valid JWT", () => {
+    const jwt = mintJwt({ text: "missing ids" });
+    expect(() => p.parseInboundWebhook(jwt)).toThrow(/missing id/i);
   });
 });
