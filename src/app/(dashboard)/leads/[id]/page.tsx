@@ -19,6 +19,8 @@ import { LeadStatusWidget } from "./status-widget";
 import { MessagesThread } from "./messages-thread";
 import { NotesFeed } from "./notes-feed";
 import { SmsComposer } from "./sms-composer";
+import { TagsSection } from "./tags-section";
+import type { TagRow } from "../tags-actions";
 import type { Database } from "@/lib/supabase/types";
 
 type MessageRow = Database["public"]["Tables"]["messages"]["Row"];
@@ -119,6 +121,17 @@ export default async function LeadDetailPage({
     .order("created_at", { ascending: false })
     .limit(200);
   const initialNotes = (notesRaw ?? []) as LeadNoteRow[];
+
+  // Tags attached to this property, with the tag row joined inline.
+  const { data: tagRowsRaw } = await supabase
+    .from("property_tags")
+    .select("tags!property_tags_tag_id_fkey(id, name, color, category, system_managed)")
+    .eq("property_id", lead.id);
+  const initialTags: TagRow[] = [];
+  for (const r of tagRowsRaw ?? []) {
+    const t = (r as { tags: TagRow | null }).tags;
+    if (t) initialTags.push(t);
+  }
 
   // Resolve author + assignee emails via the admin client (auth.users isn't
   // RLS-accessible to end-users). Batched into a single listUsers() call.
@@ -331,6 +344,15 @@ export default async function LeadDetailPage({
             <div className="whitespace-pre-wrap p-3 text-sm">{lead.notes}</div>
           </Section>
         ) : null}
+      </div>
+
+      <div>
+        <div className="text-muted-foreground mb-2 text-xs font-semibold tracking-wide uppercase">
+          Tags
+        </div>
+        <div className="border-border rounded-md border">
+          <TagsSection propertyId={lead.id} initial={initialTags} />
+        </div>
       </div>
 
       <div>

@@ -980,6 +980,99 @@ export type Database = {
           },
         ]
       }
+      property_tags: {
+        Row: {
+          applied_at: string
+          applied_by: string | null
+          id: string
+          org_id: string
+          property_id: string
+          source: string
+          tag_id: string
+        }
+        Insert: {
+          applied_at?: string
+          applied_by?: string | null
+          id?: string
+          org_id?: string
+          property_id: string
+          source?: string
+          tag_id: string
+        }
+        Update: {
+          applied_at?: string
+          applied_by?: string | null
+          id?: string
+          org_id?: string
+          property_id?: string
+          source?: string
+          tag_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "property_tags_org_id_fkey"
+            columns: ["org_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "property_tags_property_id_fkey"
+            columns: ["property_id"]
+            isOneToOne: false
+            referencedRelation: "properties"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "property_tags_tag_id_fkey"
+            columns: ["tag_id"]
+            isOneToOne: false
+            referencedRelation: "tags"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      tags: {
+        Row: {
+          auto_apply_rule: Json | null
+          category: string
+          color: string | null
+          created_at: string
+          id: string
+          name: string
+          org_id: string
+          system_managed: boolean
+        }
+        Insert: {
+          auto_apply_rule?: Json | null
+          category?: string
+          color?: string | null
+          created_at?: string
+          id?: string
+          name: string
+          org_id?: string
+          system_managed?: boolean
+        }
+        Update: {
+          auto_apply_rule?: Json | null
+          category?: string
+          color?: string | null
+          created_at?: string
+          id?: string
+          name?: string
+          org_id?: string
+          system_managed?: boolean
+        }
+        Relationships: [
+          {
+            foreignKeyName: "tags_org_id_fkey"
+            columns: ["org_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       property_merges: {
         Row: {
           id: string

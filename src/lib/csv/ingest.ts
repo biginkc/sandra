@@ -68,6 +68,12 @@ export async function runIngestion(
     })
     .eq("id", params.jobId);
 
+  // Resolve the two auto-applied tag ids ONCE per import instead of
+  // per-row. Source is lowercase of the wizard's vendor selection
+  // ("source:dealmachine"); uploaded is the current month rounded
+  // ("uploaded:2026-04"). Both get `source='import'` in property_tags.
+  const autoTagIds = await resolveAutoTagIds(supabase, params.source);
+
   let succeeded = 0;
   let failed = 0;
   let skipped = 0;
@@ -117,6 +123,25 @@ export async function runIngestion(
           userId: params.userId ?? null,
           csvImportId: params.csvImportId,
         });
+      }
+
+      // Auto-apply source + uploaded tags. Strict journey-marker model —
+      // these record WHAT HAPPENED to the record (which vendor shipped
+      // the data, which month it landed), not state of the property.
+      // Same dedup semantics as list stacking: re-importing a duplicate
+      // refreshes the last-touched timestamp via ON CONFLICT DO NOTHING
+      // (the applied_at on the existing row stays first-touched; a
+      // second tag from a different month creates a SECOND membership,
+      // so re-imports correctly accumulate month-stamps over time).
+      for (const tagId of autoTagIds) {
+        await supabase.from("property_tags").upsert(
+          {
+            property_id: result.propertyId,
+            tag_id: tagId,
+            source: "import",
+          },
+          { onConflict: "property_id,tag_id", ignoreDuplicates: true },
+        );
       }
 
       await supabase.from("job_items").insert({
@@ -405,6 +430,59 @@ async function upsertContact(
     .single();
   if (error) throw new Error(`contact insert: ${error.message}`);
   return data.id;
+}
+
+/**
+ * Resolve (or create) the two auto-applied tags for this import:
+ * `source:<vendor>` and `uploaded:YYYY-MM`. Returns their ids so the
+ * per-row loop can upsert property_tags without another lookup. Both
+ * rows are stamped `system_managed=true` — VAs can see them but can't
+ * rename/delete from the custom-tags UI.
+ */
+async function resolveAutoTagIds(
+  supabase: SupabaseClient<Database>,
+  vendor: string,
+): Promise<string[]> {
+  const now = new Date();
+  const month = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+  const want: {
+    name: string;
+    category: "source" | "marketing";
+  }[] = [
+    { name: `source:${vendor.toLowerCase()}`, category: "source" },
+    { name: `uploaded:${month}`, category: "marketing" },
+  ];
+
+  const ids: string[] = [];
+  for (const w of want) {
+    // Look for an existing row first (case-sensitive since names are
+    // lowercase/ASCII-only by construction).
+    const { data: existing } = await supabase
+      .from("tags")
+      .select("id")
+      .eq("name", w.name)
+      .maybeSingle();
+    if (existing) {
+      ids.push(existing.id);
+      continue;
+    }
+    const { data: inserted, error } = await supabase
+      .from("tags")
+      .insert({
+        name: w.name,
+        category: w.category,
+        system_managed: true,
+      })
+      .select("id")
+      .single();
+    if (error) {
+      // Non-fatal: don't block a 10K-row import because one tag row failed.
+      // The per-row loop just skips this tag for this import.
+      continue;
+    }
+    ids.push(inserted.id);
+  }
+  return ids;
 }
 
 /**

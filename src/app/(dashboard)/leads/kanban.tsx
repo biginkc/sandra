@@ -89,6 +89,12 @@ type ListMembership = {
   color: string | null;
 };
 
+type CustomTag = {
+  tagId: string;
+  name: string;
+  color: string | null;
+};
+
 type KanbanProps = {
   initialLeads: Lead[];
   unreadPropertyIds: string[];
@@ -96,6 +102,8 @@ type KanbanProps = {
   currentUserId: string | null;
   /** property_id → list memberships (active lists only, names + hex colors). */
   listMemberships: Record<string, ListMembership[]>;
+  /** property_id → `custom` category tags only (source/uploaded etc. hidden from card). */
+  customTags: Record<string, CustomTag[]>;
 };
 
 const MINE_ONLY_STORAGE_KEY = "sandra.leads.mineOnly";
@@ -106,6 +114,7 @@ export function Kanban({
   assigneeEmails,
   currentUserId,
   listMemberships,
+  customTags,
 }: KanbanProps) {
   const [leads, setLeads] = useState<Lead[]>(initialLeads);
   const [activeId, setActiveId] = useState<string | null>(null);
@@ -334,6 +343,7 @@ export function Kanban({
               assigneeEmails={assigneeEmails}
               currentUserId={currentUserId}
               listMemberships={listMemberships}
+              customTags={customTags}
             />
           ))}
         </div>
@@ -346,6 +356,7 @@ export function Kanban({
               assigneeEmails={assigneeEmails}
               currentUserId={currentUserId}
               lists={listMemberships[activeLead.id] ?? []}
+              customTags={customTags[activeLead.id] ?? []}
             />
           ) : null}
         </DragOverlay>
@@ -367,6 +378,7 @@ function Column({
   assigneeEmails,
   currentUserId,
   listMemberships,
+  customTags,
 }: {
   status: PropertyStatus;
   leads: Lead[];
@@ -380,6 +392,7 @@ function Column({
   assigneeEmails: Record<string, string>;
   currentUserId: string | null;
   listMemberships: Record<string, ListMembership[]>;
+  customTags: Record<string, CustomTag[]>;
 }) {
   const { isOver, setNodeRef } = useDroppable({ id: status });
   const hover = isOver && isActiveDropTarget;
@@ -465,6 +478,7 @@ function Column({
               assigneeEmails={assigneeEmails}
               currentUserId={currentUserId}
               lists={listMemberships[lead.id] ?? []}
+              customTags={customTags[lead.id] ?? []}
             />
           ))
         )}
@@ -481,6 +495,7 @@ function LeadCard({
   assigneeEmails,
   currentUserId,
   lists = [],
+  customTags = [],
 }: {
   lead: Lead;
   overlay?: boolean;
@@ -489,6 +504,7 @@ function LeadCard({
   assigneeEmails: Record<string, string>;
   currentUserId: string | null;
   lists?: ListMembership[];
+  customTags?: CustomTag[];
 }) {
   const { attributes, listeners, setNodeRef, transform, isDragging } =
     useDraggable({ id: lead.id });
@@ -601,6 +617,33 @@ function LeadCard({
               title={`Stacked on ${lists.length} lists — high-motivation signal`}
             >
               🔥 {lists.length} lists
+            </Badge>
+          ) : null}
+        </div>
+      ) : null}
+      {customTags.length > 0 ? (
+        <div className="mt-1.5 flex flex-wrap items-center gap-1">
+          {customTags.slice(0, 3).map((t) => (
+            <Badge
+              key={t.tagId}
+              variant="outline"
+              className="text-[10px]"
+              style={
+                t.color
+                  ? {
+                      color: t.color,
+                      borderColor: `${t.color}55`,
+                    }
+                  : undefined
+              }
+              title={t.name}
+            >
+              #{t.name}
+            </Badge>
+          ))}
+          {customTags.length > 3 ? (
+            <Badge variant="outline" className="text-[10px]">
+              +{customTags.length - 3}
             </Badge>
           ) : null}
         </div>

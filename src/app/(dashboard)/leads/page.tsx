@@ -77,6 +77,34 @@ export default async function LeadsPage() {
   > = {};
   for (const [k, v] of listMembershipsByProperty) listMemberships[k] = v;
 
+  // Custom-category tags per property — only this category shows on the
+  // lead card. Auto-applied tags (source, uploaded, skip-trace, etc.)
+  // are noise on a compact card; VAs see them on the lead detail.
+  const customTagsByProperty = new Map<
+    string,
+    { tagId: string; name: string; color: string | null }[]
+  >();
+  if (shownPropertyIds.length > 0) {
+    const { data: pTags } = await supabase
+      .from("property_tags")
+      .select("property_id, tag_id, tags!property_tags_tag_id_fkey(name, color, category)")
+      .in("property_id", shownPropertyIds);
+    for (const r of pTags ?? []) {
+      const tag = r.tags as
+        | { name: string; color: string | null; category: string }
+        | null;
+      if (!tag || tag.category !== "custom") continue;
+      const arr = customTagsByProperty.get(r.property_id) ?? [];
+      arr.push({ tagId: r.tag_id, name: tag.name, color: tag.color });
+      customTagsByProperty.set(r.property_id, arr);
+    }
+  }
+  const customTags: Record<
+    string,
+    { tagId: string; name: string; color: string | null }[]
+  > = {};
+  for (const [k, v] of customTagsByProperty) customTags[k] = v;
+
   // Resolve assignee ids → emails (for the "assigned: bob@…" chip). Admin
   // client batches all users in one call. Non-fatal on failure.
   const assigneeEmails: Record<string, string> = {};
@@ -128,6 +156,7 @@ export default async function LeadsPage() {
           assigneeEmails={assigneeEmails}
           currentUserId={user?.id ?? null}
           listMemberships={listMemberships}
+          customTags={customTags}
         />
       ) : (
         <div className="text-muted-foreground border-border rounded-md border border-dashed p-8 text-center text-sm">
