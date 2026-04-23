@@ -775,6 +775,7 @@ export type Database = {
           market: string | null
           mls_number: string | null
           mortgage_balance: number | null
+          motivation_level: string | null
           ncoa_verified_at: string | null
           notes: string | null
           org_id: string
@@ -823,6 +824,7 @@ export type Database = {
           market?: string | null
           mls_number?: string | null
           mortgage_balance?: number | null
+          motivation_level?: string | null
           ncoa_verified_at?: string | null
           notes?: string | null
           org_id?: string
@@ -871,6 +873,7 @@ export type Database = {
           market?: string | null
           mls_number?: string | null
           mortgage_balance?: number | null
+          motivation_level?: string | null
           ncoa_verified_at?: string | null
           notes?: string | null
           org_id?: string

@@ -44,9 +44,26 @@ type Lead = Pick<
   | "cass_status"
   | "absentee_flag"
   | "assigned_user_id"
+  | "motivation_level"
 > & {
   homeowner: ContactSummary | null;
 };
+
+type MotivationLevel = "hot" | "warm" | "cold";
+
+const MOTIVATION_DOT: Record<MotivationLevel, string> = {
+  hot: "bg-red-500",
+  warm: "bg-amber-500",
+  cold: "bg-blue-500",
+};
+
+const MOTIVATION_LABEL: Record<MotivationLevel, string> = {
+  hot: "Hot",
+  warm: "Warm",
+  cold: "Cold",
+};
+
+const MOTIVATION_ORDER: readonly MotivationLevel[] = ["hot", "warm", "cold"];
 
 const STATUS_ORDER: readonly PropertyStatus[] = [
   "new_lead",
@@ -107,6 +124,7 @@ type KanbanProps = {
 };
 
 const MINE_ONLY_STORAGE_KEY = "sandra.leads.mineOnly";
+const MOTIVATION_FILTER_STORAGE_KEY = "sandra.leads.motivationFilter";
 
 export function Kanban({
   initialLeads,
@@ -121,6 +139,15 @@ export function Kanban({
   const [collapsed, setCollapsed] = useState<Set<PropertyStatus>>(new Set());
   const [search, setSearch] = useState<string>("");
   const [mineOnly, setMineOnly] = useState<boolean>(false);
+  /**
+   * Motivation filter: empty set = no filter (show everything). Non-empty =
+   * show only leads whose motivation_level is in the set. "unset" is a
+   * pseudo-value for leads with null motivation; stored as the string
+   * "unset" so the Set stays stringly-typed.
+   */
+  const [motivationFilter, setMotivationFilter] = useState<
+    Set<MotivationLevel | "unset">
+  >(new Set());
   const router = useRouter();
 
   const unreadSet = useMemo(
@@ -146,6 +173,22 @@ export function Kanban({
     } catch {
       // Ignore.
     }
+    // Hydrate motivation filter (stored as JSON array).
+    try {
+      const raw = window.localStorage.getItem(MOTIVATION_FILTER_STORAGE_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw) as (MotivationLevel | "unset")[];
+        const allowed = new Set<MotivationLevel | "unset">([
+          "hot",
+          "warm",
+          "cold",
+          "unset",
+        ]);
+        setMotivationFilter(new Set(parsed.filter((p) => allowed.has(p))));
+      }
+    } catch {
+      // Ignore.
+    }
   }, []);
 
   const toggleMineOnly = () => {
@@ -155,6 +198,23 @@ export function Kanban({
         window.localStorage.setItem(MINE_ONLY_STORAGE_KEY, String(next));
       } catch {
         // Ignore quota errors.
+      }
+      return next;
+    });
+  };
+
+  const toggleMotivation = (m: MotivationLevel | "unset") => {
+    setMotivationFilter((prev) => {
+      const next = new Set(prev);
+      if (next.has(m)) next.delete(m);
+      else next.add(m);
+      try {
+        window.localStorage.setItem(
+          MOTIVATION_FILTER_STORAGE_KEY,
+          JSON.stringify(Array.from(next)),
+        );
+      } catch {
+        // Ignore.
       }
       return next;
     });
@@ -187,9 +247,23 @@ export function Kanban({
     return leads.filter((l) => l.assigned_user_id === currentUserId);
   }, [leads, mineOnly, currentUserId]);
 
+  const motivationFiltered = useMemo(() => {
+    if (motivationFilter.size === 0) return mineFiltered;
+    return mineFiltered.filter((l) => {
+      const key: MotivationLevel | "unset" =
+        l.motivation_level &&
+        (l.motivation_level === "hot" ||
+          l.motivation_level === "warm" ||
+          l.motivation_level === "cold")
+          ? (l.motivation_level as MotivationLevel)
+          : "unset";
+      return motivationFilter.has(key);
+    });
+  }, [mineFiltered, motivationFilter]);
+
   const filteredLeads = useMemo(
-    () => filterLeads(mineFiltered, search),
-    [mineFiltered, search],
+    () => filterLeads(motivationFiltered, search),
+    [motivationFiltered, search],
   );
 
   const totalByStatus = useMemo(() => {
@@ -313,10 +387,45 @@ export function Kanban({
         >
           Mine only
         </Button>
-        {(isSearching || mineOnly) ? (
+        <div
+          className="flex items-center gap-1.5"
+          role="group"
+          aria-label="Motivation filter"
+        >
+          {MOTIVATION_ORDER.map((m) => {
+            const active = motivationFilter.has(m);
+            return (
+              <Button
+                key={m}
+                variant={active ? "default" : "outline"}
+                size="sm"
+                onClick={() => toggleMotivation(m)}
+                aria-pressed={active}
+                title={`Filter: ${MOTIVATION_LABEL[m]}`}
+                className="gap-1.5"
+              >
+                <span className={`size-2 rounded-full ${MOTIVATION_DOT[m]}`} />
+                {MOTIVATION_LABEL[m]}
+              </Button>
+            );
+          })}
+          <Button
+            variant={motivationFilter.has("unset") ? "default" : "outline"}
+            size="sm"
+            onClick={() => toggleMotivation("unset")}
+            aria-pressed={motivationFilter.has("unset")}
+            title="Filter: no motivation set"
+          >
+            Unset
+          </Button>
+        </div>
+        {(isSearching || mineOnly || motivationFilter.size > 0) ? (
           <div className="text-muted-foreground text-sm">
             {totalFiltered} of {totalAll} leads
             {mineOnly ? " · mine" : ""}
+            {motivationFilter.size > 0
+              ? ` · ${Array.from(motivationFilter).join("/")}`
+              : ""}
             {isSearching ? " · matching search" : ""}
           </div>
         ) : null}
@@ -544,8 +653,20 @@ function LeadCard({
           className="bg-destructive absolute top-1.5 right-1.5 size-2 rounded-full"
         />
       ) : null}
-      <div className={`truncate font-medium ${hasUnread ? "pr-4" : ""}`}>
-        {lead.address}
+      <div className="flex items-center gap-1.5">
+        {lead.motivation_level &&
+        (lead.motivation_level === "hot" ||
+          lead.motivation_level === "warm" ||
+          lead.motivation_level === "cold") ? (
+          <span
+            aria-label={`Motivation: ${MOTIVATION_LABEL[lead.motivation_level as MotivationLevel]}`}
+            title={`Motivation: ${MOTIVATION_LABEL[lead.motivation_level as MotivationLevel]}`}
+            className={`size-2 shrink-0 rounded-full ${MOTIVATION_DOT[lead.motivation_level as MotivationLevel]}`}
+          />
+        ) : null}
+        <div className={`truncate font-medium ${hasUnread ? "pr-4" : ""}`}>
+          {lead.address}
+        </div>
       </div>
       <div className="text-muted-foreground mt-0.5 truncate">
         {[lead.city, lead.state, lead.zip].filter(Boolean).join(", ") || "—"}

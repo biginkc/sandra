@@ -15,11 +15,13 @@ import {
 import { CassWidget } from "./cass-widget";
 import { InlineReply } from "./inline-reply";
 import { LeadAssigneeWidget } from "./assignee-widget";
+import { LeadMotivationWidget } from "./motivation-widget";
 import { LeadStatusWidget } from "./status-widget";
 import { MessagesThread } from "./messages-thread";
 import { NotesFeed } from "./notes-feed";
 import { SmsComposer } from "./sms-composer";
 import { TagsSection } from "./tags-section";
+import type { MotivationLevel } from "../actions";
 import type { TagRow } from "../tags-actions";
 import type { Database } from "@/lib/supabase/types";
 
@@ -189,6 +191,11 @@ export default async function LeadDetailPage({
             initialAssigneeId={lead.assigned_user_id}
             initialAssigneeEmail={assigneeEmail}
             currentUserId={sessionUser?.id ?? null}
+          />
+          <LeadMotivationWidget
+            propertyId={lead.id}
+            address={lead.address}
+            initial={lead.motivation_level as MotivationLevel | null}
           />
           {lead.market ? (
             <Badge variant="secondary">{lead.market}</Badge>

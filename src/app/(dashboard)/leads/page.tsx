@@ -24,7 +24,7 @@ export default async function LeadsPage() {
   const { data: leads, error } = await supabase
     .from("properties")
     .select(
-      `id, address, city, state, zip, market, status, is_vacant, cass_status, absentee_flag, assigned_user_id,
+      `id, address, city, state, zip, market, status, is_vacant, cass_status, absentee_flag, assigned_user_id, motivation_level,
        homeowner:contacts!properties_homeowner_contact_id_fkey(first_name, last_name, entity_name)`,
     )
     .order("created_at", { ascending: false })

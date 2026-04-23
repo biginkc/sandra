@@ -152,6 +152,59 @@ export async function verifyLeadAddress(
   }
 }
 
+export type MotivationLevel = "hot" | "warm" | "cold";
+
+const VALID_MOTIVATION_LEVELS: readonly MotivationLevel[] = [
+  "hot",
+  "warm",
+  "cold",
+];
+
+/**
+ * Set (or clear) the motivation level on a lead. Lives alongside status
+ * as a separate axis — "how hot is the seller" vs "where in the pipeline".
+ * `null` clears the temperature (e.g. requalification reset).
+ */
+export async function updateLeadMotivation(
+  propertyId: string,
+  level: MotivationLevel | null,
+): Promise<Result<null>> {
+  if (level !== null && !VALID_MOTIVATION_LEVELS.includes(level)) {
+    return {
+      ok: false,
+      error: {
+        code: "INVALID_MOTIVATION",
+        message: `Unknown motivation level: ${level}`,
+      },
+    };
+  }
+
+  try {
+    const supabase = await createClient();
+    const { error } = await supabase
+      .from("properties")
+      .update({
+        motivation_level: level,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", propertyId);
+
+    if (error) {
+      return {
+        ok: false,
+        error: { code: "MOTIVATION_UPDATE_FAILED", message: error.message },
+      };
+    }
+    return ok(null);
+  } catch (e) {
+    reportError(e, {
+      tags: { surface: "update_lead_motivation" },
+      extra: { propertyId, level },
+    });
+    return errFromUnknown(e, "MOTIVATION_UPDATE_FAILED");
+  }
+}
+
 export async function updatePropertyStatus(
   propertyId: string,
   status: PropertyStatus,
