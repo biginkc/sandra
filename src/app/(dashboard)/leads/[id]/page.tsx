@@ -15,6 +15,7 @@ import {
 import { CassWidget } from "./cass-widget";
 import { InlineReply } from "./inline-reply";
 import { LeadAssigneeWidget } from "./assignee-widget";
+import { EnrollInSequenceWidget } from "./enroll-widget";
 import { LeadMotivationWidget } from "./motivation-widget";
 import { LeadStatusWidget } from "./status-widget";
 import { MessagesThread } from "./messages-thread";
@@ -197,6 +198,7 @@ export default async function LeadDetailPage({
             address={lead.address}
             initial={lead.motivation_level as MotivationLevel | null}
           />
+          <EnrollInSequenceWidget propertyId={lead.id} />
           {lead.market ? (
             <Badge variant="secondary">{lead.market}</Badge>
           ) : null}

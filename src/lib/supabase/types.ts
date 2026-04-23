@@ -1136,6 +1136,232 @@ export type Database = {
           },
         ]
       }
+      sequence_enrollments: {
+        Row: {
+          completed_at: string | null
+          contact_id: string | null
+          current_step_index: number
+          enrolled_at: string
+          enrolled_by_user_id: string | null
+          id: string
+          next_run_at: string | null
+          org_id: string
+          pause_reason: string | null
+          property_id: string
+          sequence_id: string
+          status: string
+          updated_at: string
+        }
+        Insert: {
+          completed_at?: string | null
+          contact_id?: string | null
+          current_step_index?: number
+          enrolled_at?: string
+          enrolled_by_user_id?: string | null
+          id?: string
+          next_run_at?: string | null
+          org_id: string
+          pause_reason?: string | null
+          property_id: string
+          sequence_id: string
+          status?: string
+          updated_at?: string
+        }
+        Update: {
+          completed_at?: string | null
+          contact_id?: string | null
+          current_step_index?: number
+          enrolled_at?: string
+          enrolled_by_user_id?: string | null
+          id?: string
+          next_run_at?: string | null
+          org_id?: string
+          pause_reason?: string | null
+          property_id?: string
+          sequence_id?: string
+          status?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "sequence_enrollments_contact_id_fkey"
+            columns: ["contact_id"]
+            isOneToOne: false
+            referencedRelation: "contacts"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "sequence_enrollments_org_id_fkey"
+            columns: ["org_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "sequence_enrollments_property_id_fkey"
+            columns: ["property_id"]
+            isOneToOne: false
+            referencedRelation: "properties"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "sequence_enrollments_sequence_id_fkey"
+            columns: ["sequence_id"]
+            isOneToOne: false
+            referencedRelation: "sequences"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      sequence_step_runs: {
+        Row: {
+          created_at: string
+          enrollment_id: string
+          id: string
+          message_id: string | null
+          run_at: string | null
+          scheduled_for: string
+          skipped_reason: string | null
+          step_id: string
+        }
+        Insert: {
+          created_at?: string
+          enrollment_id: string
+          id?: string
+          message_id?: string | null
+          run_at?: string | null
+          scheduled_for: string
+          skipped_reason?: string | null
+          step_id: string
+        }
+        Update: {
+          created_at?: string
+          enrollment_id?: string
+          id?: string
+          message_id?: string | null
+          run_at?: string | null
+          scheduled_for?: string
+          skipped_reason?: string | null
+          step_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "sequence_step_runs_enrollment_id_fkey"
+            columns: ["enrollment_id"]
+            isOneToOne: false
+            referencedRelation: "sequence_enrollments"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "sequence_step_runs_message_id_fkey"
+            columns: ["message_id"]
+            isOneToOne: false
+            referencedRelation: "messages"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "sequence_step_runs_step_id_fkey"
+            columns: ["step_id"]
+            isOneToOne: false
+            referencedRelation: "sequence_steps"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      sequence_steps: {
+        Row: {
+          action_type: string
+          created_at: string
+          delay_after_previous_minutes: number
+          id: string
+          sequence_id: string
+          step_index: number
+          target_status: string | null
+          template_body: string | null
+        }
+        Insert: {
+          action_type: string
+          created_at?: string
+          delay_after_previous_minutes?: number
+          id?: string
+          sequence_id: string
+          step_index: number
+          target_status?: string | null
+          template_body?: string | null
+        }
+        Update: {
+          action_type?: string
+          created_at?: string
+          delay_after_previous_minutes?: number
+          id?: string
+          sequence_id?: string
+          step_index?: number
+          target_status?: string | null
+          template_body?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "sequence_steps_sequence_id_fkey"
+            columns: ["sequence_id"]
+            isOneToOne: false
+            referencedRelation: "sequences"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      sequences: {
+        Row: {
+          active: boolean
+          append_opt_out: boolean
+          archived_at: string | null
+          audience_type: string
+          created_at: string
+          created_by: string | null
+          description: string | null
+          id: string
+          name: string
+          org_id: string
+          trigger: string
+          updated_at: string
+        }
+        Insert: {
+          active?: boolean
+          append_opt_out?: boolean
+          archived_at?: string | null
+          audience_type?: string
+          created_at?: string
+          created_by?: string | null
+          description?: string | null
+          id?: string
+          name: string
+          org_id: string
+          trigger?: string
+          updated_at?: string
+        }
+        Update: {
+          active?: boolean
+          append_opt_out?: boolean
+          archived_at?: string | null
+          audience_type?: string
+          created_at?: string
+          created_by?: string | null
+          description?: string | null
+          id?: string
+          name?: string
+          org_id?: string
+          trigger?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "sequences_org_id_fkey"
+            columns: ["org_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       tags: {
         Row: {
           auto_apply_rule: Json | null

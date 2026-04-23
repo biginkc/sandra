@@ -7,6 +7,10 @@ import { qualifyProperty } from "@/lib/leads/qualify";
 import { recordConsentEvent } from "@/lib/messaging/consent";
 import { getMessagingProvider } from "@/lib/messaging/registry";
 import { dispatchOwnerMessageAdded } from "@/lib/notifications/dispatch";
+import {
+  pauseContactEnrollments,
+  pausePropertyEnrollments,
+} from "@/lib/sequences/enrollment";
 import type { Database, Json } from "@/lib/supabase/types";
 
 /**
@@ -135,6 +139,21 @@ export async function POST(request: Request) {
               sms_opted_out_at: ev.receivedAt.toISOString(),
             })
             .eq("id", contactId);
+          // Flip every active sequence enrollment for this contact to
+          // opted_out. Permanent — even a resume later would re-hit the
+          // send_sms consent check and abort.
+          try {
+            await pauseContactEnrollments(supabase, {
+              contactId,
+              reason: "consent_revoked",
+              permanent: true,
+            });
+          } catch (e) {
+            reportError(e, {
+              tags: { surface: "dialpad_webhook_sequence_pause_stop" },
+              extra: { contactId, externalId: ev.externalId },
+            });
+          }
         }
         // Still persist the message for audit even though it's a STOP.
         await supabase.from("messages").insert({
@@ -257,6 +276,21 @@ export async function POST(request: Request) {
           // Notifications are best-effort — never fail the webhook.
           reportError(e, {
             tags: { surface: "dialpad_webhook_notification_dispatch" },
+            extra: { propertyId, externalId: ev.externalId },
+          });
+        }
+
+        // Pause any active sequence enrollments for this property —
+        // a seller reply moves the conversation to a human, and the
+        // VA can resume the sequence later if they want to.
+        try {
+          await pausePropertyEnrollments(supabase, {
+            propertyId,
+            reason: "inbound_reply",
+          });
+        } catch (e) {
+          reportError(e, {
+            tags: { surface: "dialpad_webhook_sequence_pause_inbound" },
             extra: { propertyId, externalId: ev.externalId },
           });
         }
