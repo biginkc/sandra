@@ -6,6 +6,7 @@ import { Separator } from "@/components/ui/separator";
 import { ConnectionBanner } from "@/components/connection-banner";
 import { ErrorBoundary } from "@/components/error-boundary";
 import { JobFailureNotifier } from "@/components/job-failure-notifier";
+import { NotificationsBell } from "@/components/notifications-bell";
 import { isAdminEmail } from "@/lib/auth/allowlist";
 import { createClient } from "@/lib/supabase/server";
 
@@ -76,6 +77,7 @@ export default async function DashboardLayout({
           ) : null}
         </nav>
         <div className="ml-auto flex items-center gap-3 text-sm">
+          <NotificationsBell userId={user.id} />
           <span className="text-muted-foreground">{user.email}</span>
           <Separator orientation="vertical" className="h-5" />
           <form action="/auth/signout" method="post">

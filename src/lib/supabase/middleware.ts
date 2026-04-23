@@ -35,7 +35,8 @@ export async function updateSession(request: NextRequest) {
   const isPublic =
     path.startsWith("/login") ||
     path.startsWith("/auth") ||
-    path.startsWith("/api/webhooks");
+    path.startsWith("/api/webhooks") ||
+    path.startsWith("/api/cron");
 
   if (!user && !isPublic) {
     // Preserve the original path + query so the login flow can bounce the

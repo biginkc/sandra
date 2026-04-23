@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { createTestClient } from "@tests/integration/client";
 import { resetTenantTables } from "@tests/integration/reset";
@@ -22,6 +22,20 @@ function makeRequest(payload: object): Request {
     },
     body: JSON.stringify(payload),
   });
+}
+
+const createdAuthUsers: string[] = [];
+async function createAuthUser(email: string): Promise<string> {
+  const { data, error } = await supabase.auth.admin.createUser({
+    email,
+    password: `test-pw-${Math.random().toString(36).slice(2)}`,
+    email_confirm: true,
+  });
+  if (error || !data.user) {
+    throw new Error(`createAuthUser failed: ${error?.message}`);
+  }
+  createdAuthUsers.push(data.user.id);
+  return data.user.id;
 }
 
 async function seedContact(phone: string, opts: { optIn?: boolean } = {}) {
@@ -49,6 +63,13 @@ describe("POST /api/webhooks/dialpad/sms (integration)", () => {
     delete process.env.SUPABASE_SERVICE_ROLE_KEY;
     process.env.NEXT_PUBLIC_SUPABASE_URL = process.env.TEST_SUPABASE_URL;
     await resetTenantTables(supabase);
+  });
+
+  afterEach(async () => {
+    for (const id of createdAuthUsers) {
+      await supabase.auth.admin.deleteUser(id);
+    }
+    createdAuthUsers.length = 0;
   });
 
   it("rejects with 401 when signature is missing / wrong", async () => {
@@ -91,7 +112,7 @@ describe("POST /api/webhooks/dialpad/sms (integration)", () => {
     });
   });
 
-  it("STOP keyword flips sms_opted_out + writes an opt_out consent event", async () => {
+  it("STOP keyword flips sms_opted_out + writes an opt_out consent event AND emits no notification (decision #2)", async () => {
     const contactId = await seedContact("+18165558888", { optIn: true });
 
     const res = await POST(
@@ -119,9 +140,15 @@ describe("POST /api/webhooks/dialpad/sms (integration)", () => {
       .eq("event_type", "opt_out");
     expect(events).toHaveLength(1);
     expect(events?.[0].source).toBe("dialpad_inbound_webhook");
+
+    // Feature 7 regression guard — STOP is silent.
+    const { count: notifCount } = await supabase
+      .from("notifications")
+      .select("*", { count: "exact", head: true });
+    expect(notifCount).toBe(0);
   });
 
-  it("HELP keyword logs help_request without mutating sms_opted_out", async () => {
+  it("HELP keyword logs help_request without mutating sms_opted_out AND emits no notification (decision #2)", async () => {
     const contactId = await seedContact("+18165559000", { optIn: true });
 
     const res = await POST(
@@ -146,6 +173,12 @@ describe("POST /api/webhooks/dialpad/sms (integration)", () => {
       .select("event_type")
       .eq("contact_id", contactId);
     expect(events?.some((e) => e.event_type === "help_request")).toBe(true);
+
+    // Feature 7 regression guard — HELP is silent.
+    const { count: notifCount } = await supabase
+      .from("notifications")
+      .select("*", { count: "exact", head: true });
+    expect(notifCount).toBe(0);
   });
 
   it("auto-qualifies the threaded prospect on first inbound reply", async () => {
@@ -240,11 +273,39 @@ describe("POST /api/webhooks/dialpad/sms (integration)", () => {
     expect(after?.qualified_at).toBeNull();
   });
 
-  it("idempotent on retry — second delivery with same external_id does not double-insert", async () => {
-    await seedContact("+18165559111", { optIn: true });
+  it("idempotent on retry — second delivery with same external_id does not double-insert (incl. notifications)", async () => {
+    const phone = "+18165559111";
+    const contactId = await seedContact(phone, { optIn: true });
+    // Give it a property + prior outbound so the inbound threads to a
+    // real propertyId — that's what triggers the notification dispatch.
+    const assignee = await createAuthUser(
+      `idempotent-assignee-${Date.now()}@test.invalid`,
+    );
+    const { data: property } = await supabase
+      .from("properties")
+      .insert({
+        address: "3 Idempotent Ln",
+        state: "MO",
+        status: "new_lead",
+        homeowner_contact_id: contactId,
+        assigned_user_id: assignee,
+      })
+      .select("id")
+      .single();
+    await supabase.from("messages").insert({
+      channel: "sms",
+      direction: "outbound",
+      status: "sent",
+      from_address: "+18163706846",
+      to_address: phone,
+      body: "initial",
+      contact_id: contactId,
+      property_id: property!.id,
+    });
+
     const payload = {
       externalId: "msg_dup_001",
-      from: "+18165559111",
+      from: phone,
       to: "+18163706846",
       body: "first delivery",
     };
@@ -260,10 +321,6 @@ describe("POST /api/webhooks/dialpad/sms (integration)", () => {
       .from("messages")
       .select("*", { count: "exact", head: true })
       .eq("external_id", "msg_dup_001");
-    // Note: current handler inserts the message regardless of
-    // webhook_events unique result — idempotency at the event layer
-    // prevents downstream double-processing in the handler by
-    // `continue`-ing on 23505. Assert that webhook_events has exactly 1.
     const { count: eventCount } = await supabase
       .from("webhook_events")
       .select("*", { count: "exact", head: true })
@@ -272,5 +329,68 @@ describe("POST /api/webhooks/dialpad/sms (integration)", () => {
     // The message row is only written once per event because the
     // `continue` short-circuits downstream work on duplicate.
     expect(msgCount).toBe(1);
+
+    // Feature 7 regression guard — notification fires exactly once
+    // across the two deliveries (webhook_events dedup gates it).
+    const { count: notifCount } = await supabase
+      .from("notifications")
+      .select("*", { count: "exact", head: true })
+      .eq("user_id", assignee);
+    expect(notifCount).toBe(1);
+  });
+
+  // --------------------------------------------------------------------------
+  // Feature 7 — owner_message_added notification on regular inbound (test 18)
+  // --------------------------------------------------------------------------
+  it("fires owner_message_added notification for the assignee on a regular inbound reply", async () => {
+    const phone = "+18165550018";
+    const contactId = await seedContact(phone, { optIn: true });
+    const assignee = await createAuthUser(
+      `webhook-notif-${Date.now()}@test.invalid`,
+    );
+    const { data: property } = await supabase
+      .from("properties")
+      .insert({
+        address: "18 Notify Ln",
+        state: "MO",
+        status: "new_lead",
+        homeowner_contact_id: contactId,
+        assigned_user_id: assignee,
+      })
+      .select("id")
+      .single();
+    await supabase.from("messages").insert({
+      channel: "sms",
+      direction: "outbound",
+      status: "sent",
+      from_address: "+18163706846",
+      to_address: phone,
+      body: "hi there",
+      contact_id: contactId,
+      property_id: property!.id,
+    });
+
+    const res = await POST(
+      makeRequest({
+        externalId: "msg_notif_001",
+        from: phone,
+        to: "+18163706846",
+        body: "hey, let's talk",
+      }),
+    );
+    expect(res.status).toBe(200);
+
+    const { data: notifs } = await supabase
+      .from("notifications")
+      .select("user_id, event_type, entity_type, entity_id, read_at, body")
+      .eq("user_id", assignee);
+    expect(notifs).toHaveLength(1);
+    expect(notifs![0]).toMatchObject({
+      event_type: "owner_message_added",
+      entity_type: "property",
+      entity_id: property!.id,
+      read_at: null,
+    });
+    expect(notifs![0].body).toContain("18 Notify Ln");
   });
 });

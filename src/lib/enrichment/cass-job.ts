@@ -1,5 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
+import { reportError } from "@/lib/errors/report";
+import { dispatchJobCompleted } from "@/lib/notifications/dispatch";
 import type { Database } from "@/lib/supabase/types";
 import { verifyPropertyAddress } from "./verify-property";
 
@@ -230,6 +232,17 @@ export async function runCassEnrichment(
         status === "canceled" ? "Address verifier disabled" : null,
     })
     .eq("id", params.jobId);
+
+  // Feature 7 — notify the user who kicked the job off. Best-effort;
+  // must not fail the enrichment loop if the notification write blows up.
+  try {
+    await dispatchJobCompleted(supabase, { jobId: params.jobId });
+  } catch (e) {
+    reportError(e, {
+      tags: { surface: "cass_job_notification_dispatch" },
+      extra: { jobId: params.jobId },
+    });
+  }
 
   return summary;
 }

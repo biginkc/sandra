@@ -1,10 +1,12 @@
 import { NextResponse } from "next/server";
 import { createClient as createSupabaseClient } from "@supabase/supabase-js";
 
+import { listAdminUserIds } from "@/lib/auth/admins";
 import { reportError } from "@/lib/errors/report";
 import { qualifyProperty } from "@/lib/leads/qualify";
 import { recordConsentEvent } from "@/lib/messaging/consent";
 import { getMessagingProvider } from "@/lib/messaging/registry";
+import { dispatchOwnerMessageAdded } from "@/lib/notifications/dispatch";
 import type { Database, Json } from "@/lib/supabase/types";
 
 /**
@@ -230,6 +232,31 @@ export async function POST(request: Request) {
         if (qOutcome.status === "failed") {
           reportError(new Error(qOutcome.message), {
             tags: { surface: "dialpad_webhook_auto_qualify" },
+            extra: { propertyId, externalId: ev.externalId },
+          });
+        }
+
+        // Fire owner_message_added notification. Assignee wins over
+        // admin fallback (Feature 7 decision #6) — we look up the
+        // assigned user first and only resolve admins when unassigned,
+        // saving an auth.admin.listUsers round-trip on the hot path.
+        try {
+          const { data: propRow } = await supabase
+            .from("properties")
+            .select("assigned_user_id")
+            .eq("id", propertyId)
+            .maybeSingle();
+          const adminUserIds = propRow?.assigned_user_id
+            ? []
+            : await listAdminUserIds(supabase);
+          await dispatchOwnerMessageAdded(supabase, {
+            propertyId,
+            adminUserIds,
+          });
+        } catch (e) {
+          // Notifications are best-effort — never fail the webhook.
+          reportError(e, {
+            tags: { surface: "dialpad_webhook_notification_dispatch" },
             extra: { propertyId, externalId: ev.externalId },
           });
         }
