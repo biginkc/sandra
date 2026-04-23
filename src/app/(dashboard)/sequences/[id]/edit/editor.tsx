@@ -4,12 +4,19 @@ import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
 
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { callAction } from "@/lib/errors/call-action";
 
 import {
   deleteSequenceStep,
-  getImpactAction,
   updateSequence,
   upsertSequenceStep,
   type SequenceWithSteps,
@@ -143,29 +150,166 @@ function AddStepButton({
   nextIndex: number;
 }) {
   const router = useRouter();
+  const [open, setOpen] = useState(false);
   const [pending, startTransition] = useTransition();
-  const onAdd = () => {
+
+  // Sensible defaults for a brand-new step. First step fires immediately;
+  // subsequent steps default to +24h (a common first nudge cadence). The
+  // author can change either in the modal before committing.
+  const defaultDelay = nextIndex === 0 ? 0 : 1440;
+  const [delayMin, setDelayMin] = useState(defaultDelay);
+  const [actionType, setActionType] = useState<"send_sms" | "change_status">(
+    "send_sms",
+  );
+  const [templateBody, setTemplateBody] = useState("");
+  const [targetStatus, setTargetStatus] = useState("");
+
+  const resetForm = () => {
+    setDelayMin(defaultDelay);
+    setActionType("send_sms");
+    setTemplateBody("");
+    setTargetStatus("");
+  };
+
+  const onOpenChange = (next: boolean) => {
+    if (!next) resetForm();
+    setOpen(next);
+  };
+
+  const onSave = () => {
     startTransition(async () => {
       const r = await callAction(
         upsertSequenceStep({
           sequence_id: sequenceId,
           step_index: nextIndex,
-          delay_after_previous_minutes: nextIndex === 0 ? 0 : 1440,
-          action_type: "send_sms",
-          template_body: "Hi {{first_name}}, ",
+          delay_after_previous_minutes: delayMin,
+          action_type: actionType,
+          template_body: actionType === "send_sms" ? templateBody : null,
+          target_status: actionType === "change_status" ? targetStatus : null,
         }),
         {
           successMessage: "Step added",
           fallbackMessage: "Could not add step",
         },
       );
-      if (r.ok) router.refresh();
+      if (r.ok) {
+        onOpenChange(false);
+        router.refresh();
+      }
     });
   };
+
+  // Disable save when the action's required field is missing.
+  const canSave =
+    actionType === "send_sms"
+      ? templateBody.trim().length > 0
+      : targetStatus.length > 0;
+
   return (
-    <Button variant="outline" onClick={onAdd} disabled={pending}>
-      Add step
-    </Button>
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <Button variant="outline" onClick={() => setOpen(true)}>
+        Add step
+      </Button>
+      <DialogContent className="sm:max-w-lg">
+        <DialogHeader>
+          <DialogTitle>Add step {nextIndex + 1}</DialogTitle>
+          <DialogDescription>
+            Step fires after the delay elapses from the previous step&rsquo;s
+            run time (or enrollment time, for step 1). Templates are
+            live-read on every fire.
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="flex flex-col gap-3">
+          <div className="flex items-end gap-2">
+            <label className="flex flex-1 flex-col gap-1 text-sm">
+              <span className="font-medium">
+                Delay after previous step (minutes)
+              </span>
+              <Input
+                type="number"
+                min={0}
+                value={delayMin}
+                onChange={(e) =>
+                  setDelayMin(Math.max(0, Number(e.target.value)))
+                }
+              />
+              <span className="text-muted-foreground text-xs">
+                ≈ {describeDelay(delayMin)}
+              </span>
+            </label>
+
+            <label className="flex flex-col gap-1 text-sm">
+              <span className="font-medium">Action</span>
+              <select
+                value={actionType}
+                onChange={(e) =>
+                  setActionType(
+                    e.target.value as "send_sms" | "change_status",
+                  )
+                }
+                className="border-input rounded-md border px-2 py-1.5 text-sm"
+              >
+                <option value="send_sms">send_sms</option>
+                <option value="change_status">change_status</option>
+              </select>
+            </label>
+          </div>
+
+          {actionType === "send_sms" ? (
+            <label className="flex flex-col gap-1 text-sm">
+              <span className="font-medium">Message body</span>
+              <textarea
+                value={templateBody}
+                onChange={(e) => setTemplateBody(e.target.value)}
+                rows={4}
+                className="border-input rounded-md border px-2 py-1.5 font-mono text-sm"
+                placeholder="Hi {{first_name}}, cash offer on {{property_address}}?"
+                autoFocus
+              />
+              <span className="text-muted-foreground text-xs">
+                Variables: first_name, last_name, property_address, city,
+                state, property_zip, market, my_first_name, company_name,
+                opt_out. Wrap with <code>{"{{#if var}}…{{/if}}"}</code> to
+                skip a phrase when a value is missing.
+              </span>
+            </label>
+          ) : (
+            <label className="flex flex-col gap-1 text-sm">
+              <span className="font-medium">Target status</span>
+              <select
+                value={targetStatus}
+                onChange={(e) => setTargetStatus(e.target.value)}
+                className="border-input rounded-md border px-2 py-1.5 text-sm"
+              >
+                <option value="">— select —</option>
+                <option value="new_lead">new_lead</option>
+                <option value="contacted">contacted</option>
+                <option value="interested">interested</option>
+                <option value="offer_sent">offer_sent</option>
+                <option value="offer_declined">offer_declined</option>
+                <option value="under_contract">under_contract</option>
+                <option value="closed">closed</option>
+                <option value="dead">dead</option>
+              </select>
+            </label>
+          )}
+        </div>
+
+        <DialogFooter>
+          <Button
+            variant="ghost"
+            onClick={() => onOpenChange(false)}
+            disabled={pending}
+          >
+            Cancel
+          </Button>
+          <Button onClick={onSave} disabled={pending || !canSave}>
+            Add step
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
