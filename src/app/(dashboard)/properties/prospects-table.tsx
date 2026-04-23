@@ -68,15 +68,27 @@ export function ProspectsTable({ prospects }: Props) {
         fallbackMessage: "Could not qualify selected prospects",
       });
       if (result.ok) {
-        const { qualified, alreadyQualified } = result.data;
+        const { qualified, alreadyQualified, failed } = result.data;
         const parts: string[] = [];
         if (qualified > 0)
           parts.push(`Qualified ${qualified} prospect${qualified === 1 ? "" : "s"}`);
         if (alreadyQualified > 0)
           parts.push(`${alreadyQualified} already qualified`);
+        if (failed.length > 0)
+          parts.push(`${failed.length} failed`);
         const { toast } = await import("sonner");
-        toast.success(parts.join(" · ") || "Done");
-        setSelected(new Set());
+        const summary = parts.join(" · ") || "Done";
+        if (failed.length > 0) {
+          toast.warning(summary, {
+            description: failed[0].message,
+          });
+        } else {
+          toast.success(summary);
+        }
+        // Keep failed rows selected so the VA can retry; drop the ones
+        // that succeeded or were already qualified.
+        const failedIds = new Set(failed.map((f) => f.propertyId));
+        setSelected(failedIds);
         router.refresh();
       }
     });

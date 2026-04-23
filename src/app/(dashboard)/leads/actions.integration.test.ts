@@ -13,7 +13,10 @@ vi.mock("@/lib/supabase/server", () => ({
 }));
 
 // eslint-disable-next-line import/first
-import { updatePropertyStatus } from "@/app/(dashboard)/leads/actions";
+import {
+  qualifyLeadsBulk,
+  updatePropertyStatus,
+} from "@/app/(dashboard)/leads/actions";
 
 describe("updatePropertyStatus (integration)", () => {
   beforeEach(async () => {
@@ -70,6 +73,45 @@ describe("updatePropertyStatus (integration)", () => {
     const result = await updatePropertyStatus(id, "bogus_status");
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.error.code).toBe("INVALID_STATUS");
+  });
+
+  it("qualifyLeadsBulk collects per-id failures without aborting the batch", async () => {
+    // Seed three prospects + one missing id. qualifyLeadsBulk should
+    // qualify the real prospects, report the missing one in `failed`,
+    // and return ok so the toast can render a partial-success summary.
+    const ids: string[] = [];
+    for (let i = 0; i < 3; i++) {
+      const { data, error } = await testClient
+        .from("properties")
+        .insert({
+          address: `${i + 100} Partial Ln`,
+          state: "MO",
+          status: "prospect",
+        })
+        .select("id")
+        .single();
+      if (error || !data) throw error ?? new Error("seed failed");
+      ids.push(data.id);
+    }
+    const missingId = "00000000-0000-0000-0000-000000000000";
+
+    const result = await qualifyLeadsBulk([ids[0], missingId, ids[1], ids[2]]);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.data.qualified).toBe(3);
+    expect(result.data.alreadyQualified).toBe(0);
+    expect(result.data.failed).toHaveLength(1);
+    expect(result.data.failed[0].propertyId).toBe(missingId);
+
+    // All three real prospects actually flipped despite the bad id in the
+    // middle of the batch.
+    const { data: after } = await testClient
+      .from("properties")
+      .select("id, status")
+      .in("id", ids);
+    for (const row of after ?? []) {
+      expect(row.status).toBe("new_lead");
+    }
   });
 
   it("accepts every valid enum value", async () => {

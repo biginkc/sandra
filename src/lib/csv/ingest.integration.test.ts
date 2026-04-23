@@ -162,6 +162,66 @@ describe("runIngestion (integration)", () => {
     expect(count).toBe(1);
   });
 
+  it("re-import of a qualified lead never demotes its status back to prospect", async () => {
+    // Regression guard — Feature 4 part 1 made CSV ingest default to
+    // `status='prospect'` on insert. Dedup MUST return the existing row
+    // untouched on a second import, or a working lead (`new_lead`,
+    // `contacted`, etc.) would regress every time its address appears
+    // in a re-import.
+    const { jobId: firstJobId, csvImportId: firstImportId } =
+      await createImportJob("dealmachine", "Kansas City", 1);
+    const mapping: Mapping = { address: "Address", state: "State" };
+    const firstRows: RowData[] = [{ Address: "777 Regression Ave", State: "MO" }];
+    const firstSummary = await runIngestion(supabase, {
+      jobId: firstJobId,
+      csvImportId: firstImportId,
+      source: "dealmachine",
+      market: "Kansas City",
+      mapping,
+      rows: firstRows,
+    });
+    expect(firstSummary.succeeded).toBe(1);
+
+    const { data: inserted } = await supabase
+      .from("properties")
+      .select("id, status")
+      .single();
+    expect(inserted?.status).toBe("prospect");
+
+    // Qualify the prospect into the pipeline as if a VA clicked Qualify.
+    await supabase
+      .from("properties")
+      .update({
+        status: "contacted",
+        qualified_at: new Date().toISOString(),
+        qualified_by: "user-under-test",
+      })
+      .eq("id", inserted!.id);
+
+    // Same CSV shipped from the vendor a month later — dedup should match
+    // on `address_normalized` and leave the row alone.
+    const { jobId: secondJobId, csvImportId: secondImportId } =
+      await createImportJob("dealmachine", "Kansas City", 1);
+    const secondSummary = await runIngestion(supabase, {
+      jobId: secondJobId,
+      csvImportId: secondImportId,
+      source: "dealmachine",
+      market: "Kansas City",
+      mapping,
+      // A casing variant still collapses through the normalize pipeline.
+      rows: [{ Address: "777 REGRESSION AVE", State: "MO" }],
+    });
+    expect(secondSummary.skipped).toBe(1);
+
+    const { data: after } = await supabase
+      .from("properties")
+      .select("status, qualified_by")
+      .eq("id", inserted!.id)
+      .single();
+    expect(after?.status).toBe("contacted");
+    expect(after?.qualified_by).toBe("user-under-test");
+  });
+
   it("upserts repeated homeowners by phone — two rows, same phone → one contact", async () => {
     const { jobId, csvImportId } = await createImportJob("dealmachine", "Kansas City", 2);
 

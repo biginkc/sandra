@@ -260,32 +260,42 @@ export async function qualifyLead(
   }
 }
 
+export type BulkQualifyFailure = { propertyId: string; message: string };
+
 /**
  * Bulk variant — qualify a batch of prospects in one action. Runs the
- * qualify logic per-property serially (the volumes here are tens, not
- * thousands — no parallelism needed). Returns the counts.
+ * qualify logic per-property serially (volumes here are tens, not
+ * thousands — no parallelism needed). A single bad row does NOT abort the
+ * batch: the per-row failure is collected into `failed` and we keep
+ * going. The UI shows a toast summarizing qualified / already-qualified /
+ * failed so the VA knows exactly what landed.
  */
 export async function qualifyLeadsBulk(
   propertyIds: string[],
-): Promise<Result<{ qualified: number; alreadyQualified: number }>> {
+): Promise<
+  Result<{
+    qualified: number;
+    alreadyQualified: number;
+    failed: BulkQualifyFailure[];
+  }>
+> {
   if (propertyIds.length === 0) {
-    return ok({ qualified: 0, alreadyQualified: 0 });
+    return ok({ qualified: 0, alreadyQualified: 0, failed: [] });
   }
   let qualified = 0;
   let alreadyQualified = 0;
+  const failed: BulkQualifyFailure[] = [];
   try {
     for (const id of propertyIds) {
       const r = await qualifyLead(id);
       if (!r.ok) {
-        return {
-          ok: false,
-          error: { code: "QUALIFY_BULK_FAILED", message: r.error.message },
-        };
+        failed.push({ propertyId: id, message: r.error.message });
+        continue;
       }
       if (r.data.alreadyQualified) alreadyQualified++;
       else qualified++;
     }
-    return ok({ qualified, alreadyQualified });
+    return ok({ qualified, alreadyQualified, failed });
   } catch (e) {
     reportError(e, {
       tags: { surface: "qualify_leads_bulk" },
