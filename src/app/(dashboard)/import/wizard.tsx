@@ -67,6 +67,10 @@ export type WizardState = {
   filename: string | null;
   source: WizardSource | null;
   market: WizardMarket | null;
+  // Optional: a list name to add every imported (or matched-on-dedup)
+  // property to. Empty/null = don't add to any list. On submit, the server
+  // looks up a list by (org_id, name) and creates one if missing.
+  listName: string | null;
   headers: string[];
   rows: Record<string, string>[];
   mapping: Record<string, string | null>;
@@ -83,6 +87,7 @@ const initialState: WizardState = {
   filename: null,
   source: null,
   market: null,
+  listName: null,
   headers: [],
   rows: [],
   mapping: {},
@@ -103,6 +108,7 @@ export type WizardAction =
     }
   | { type: "SET_SOURCE"; source: WizardSource }
   | { type: "SET_MARKET"; market: WizardMarket }
+  | { type: "SET_LIST_NAME"; listName: string | null }
   | { type: "SET_MAPPING_FIELD"; fieldId: string; header: string | null }
   | { type: "AUTODETECT_MAPPING" }
   | {
@@ -133,6 +139,8 @@ function reducer(state: WizardState, action: WizardAction): WizardState {
       return { ...state, source: action.source };
     case "SET_MARKET":
       return { ...state, market: action.market };
+    case "SET_LIST_NAME":
+      return { ...state, listName: action.listName };
     case "SET_MAPPING_FIELD":
       return {
         ...state,
@@ -221,6 +229,7 @@ export function Wizard() {
           filename: state.filename!,
           source: state.source!,
           market: state.market!,
+          listName: state.listName?.trim() || null,
           mapping: state.mapping,
           rows: state.rows,
         }),

@@ -19,6 +19,8 @@ export type CreateImportJobParams = {
   filename: string;
   source: WizardSource;
   market: WizardMarket;
+  /** Optional list name. Lookup-or-create within the importer's org. */
+  listName: string | null;
   mapping: Mapping;
   rows: RowData[];
 };
@@ -42,7 +44,7 @@ export async function createImportJob(
         total_rows: params.rows.length,
         user_id: userId,
       })
-      .select("id")
+      .select("id, org_id")
       .single();
 
     if (importError) {
@@ -53,6 +55,28 @@ export async function createImportJob(
           message: importError.message,
         },
       };
+    }
+
+    // Resolve the optional list — lookup by (org_id, name); create if missing.
+    // Any error here is non-fatal for the import itself; we log and continue
+    // without a listId. (The alternative — aborting a 10K-row ingest because
+    // the list name had a funny character — is a worse UX.)
+    let listId: string | null = null;
+    if (params.listName) {
+      try {
+        listId = await resolveOrCreateList(
+          supabase,
+          importRow.org_id,
+          params.listName,
+          userId,
+        );
+      } catch (e) {
+        reportError(e, {
+          tags: { surface: "resolve_or_create_list" },
+          extra: { listName: params.listName, orgId: importRow.org_id },
+        });
+        // Proceed without list membership.
+      }
     }
 
     const { data: jobRow, error: jobError } = await supabase
@@ -99,6 +123,8 @@ export async function createImportJob(
           market: params.market,
           mapping: params.mapping,
           rows: params.rows,
+          listId,
+          userId,
         });
       } catch (e) {
         reportError(e, {
@@ -167,4 +193,54 @@ export async function createImportJob(
     reportError(e, { tags: { surface: "create_import_job" } });
     return errFromUnknown(e, "CREATE_IMPORT_JOB_FAILED");
   }
+}
+
+/**
+ * Lookup-or-create a list by (org_id, name). Used by the import wizard
+ * to resolve the optional "Add to list" input to a concrete list_id
+ * without making the user first go to /lists to create the list.
+ * Names are trimmed. Case-insensitive match against existing lists so
+ * "Absentee" and "absentee" don't accidentally create two lists.
+ */
+async function resolveOrCreateList(
+  supabase: Awaited<ReturnType<typeof createClient>>,
+  orgId: string,
+  rawName: string,
+  createdBy: string | null,
+): Promise<string> {
+  const name = rawName.trim();
+  if (!name) throw new Error("List name is empty");
+
+  // Case-insensitive match to honor REISift's "one list per data type"
+  // guideline — typing "Probate" when a "probate" list exists reuses it.
+  const { data: existing, error: lookupErr } = await supabase
+    .from("lists")
+    .select("id, archived_at")
+    .eq("org_id", orgId)
+    .ilike("name", name)
+    .maybeSingle();
+  if (lookupErr) throw new Error(`list lookup: ${lookupErr.message}`);
+  if (existing) {
+    // Reviving an archived list silently un-archives it. VAs typing a
+    // name don't want a surprise "list is archived" error on import.
+    if (existing.archived_at) {
+      await supabase
+        .from("lists")
+        .update({ archived_at: null })
+        .eq("id", existing.id);
+    }
+    return existing.id;
+  }
+
+  const { data: created, error: createErr } = await supabase
+    .from("lists")
+    .insert({
+      org_id: orgId,
+      name,
+      created_by: createdBy,
+    })
+    .select("id")
+    .single();
+  if (createErr) throw new Error(`list insert: ${createErr.message}`);
+  return created.id;
 }

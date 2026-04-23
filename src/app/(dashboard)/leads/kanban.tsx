@@ -83,11 +83,19 @@ const STATUS_ACCENT: Record<PropertyStatus, string> = {
   dead: "border-t-zinc-400",
 };
 
+type ListMembership = {
+  listId: string;
+  name: string;
+  color: string | null;
+};
+
 type KanbanProps = {
   initialLeads: Lead[];
   unreadPropertyIds: string[];
   assigneeEmails: Record<string, string>;
   currentUserId: string | null;
+  /** property_id → list memberships (active lists only, names + hex colors). */
+  listMemberships: Record<string, ListMembership[]>;
 };
 
 const MINE_ONLY_STORAGE_KEY = "sandra.leads.mineOnly";
@@ -97,6 +105,7 @@ export function Kanban({
   unreadPropertyIds,
   assigneeEmails,
   currentUserId,
+  listMemberships,
 }: KanbanProps) {
   const [leads, setLeads] = useState<Lead[]>(initialLeads);
   const [activeId, setActiveId] = useState<string | null>(null);
@@ -324,6 +333,7 @@ export function Kanban({
               unreadSet={unreadSet}
               assigneeEmails={assigneeEmails}
               currentUserId={currentUserId}
+              listMemberships={listMemberships}
             />
           ))}
         </div>
@@ -335,6 +345,7 @@ export function Kanban({
               hasUnread={unreadSet.has(activeLead.id)}
               assigneeEmails={assigneeEmails}
               currentUserId={currentUserId}
+              lists={listMemberships[activeLead.id] ?? []}
             />
           ) : null}
         </DragOverlay>
@@ -355,6 +366,7 @@ function Column({
   unreadSet,
   assigneeEmails,
   currentUserId,
+  listMemberships,
 }: {
   status: PropertyStatus;
   leads: Lead[];
@@ -367,6 +379,7 @@ function Column({
   unreadSet: Set<string>;
   assigneeEmails: Record<string, string>;
   currentUserId: string | null;
+  listMemberships: Record<string, ListMembership[]>;
 }) {
   const { isOver, setNodeRef } = useDroppable({ id: status });
   const hover = isOver && isActiveDropTarget;
@@ -451,6 +464,7 @@ function Column({
               hasUnread={unreadSet.has(lead.id)}
               assigneeEmails={assigneeEmails}
               currentUserId={currentUserId}
+              lists={listMemberships[lead.id] ?? []}
             />
           ))
         )}
@@ -466,6 +480,7 @@ function LeadCard({
   hasUnread = false,
   assigneeEmails,
   currentUserId,
+  lists = [],
 }: {
   lead: Lead;
   overlay?: boolean;
@@ -473,6 +488,7 @@ function LeadCard({
   hasUnread?: boolean;
   assigneeEmails: Record<string, string>;
   currentUserId: string | null;
+  lists?: ListMembership[];
 }) {
   const { attributes, listeners, setNodeRef, transform, isDragging } =
     useDraggable({ id: lead.id });
@@ -552,6 +568,43 @@ function LeadCard({
           </Badge>
         ) : null}
       </div>
+      {lists.length > 0 ? (
+        <div className="mt-1.5 flex flex-wrap items-center gap-1">
+          {lists.slice(0, 3).map((l) => (
+            <Badge
+              key={l.listId}
+              variant="secondary"
+              className="text-[10px]"
+              style={
+                l.color
+                  ? {
+                      backgroundColor: `${l.color}22`,
+                      color: l.color,
+                      borderColor: `${l.color}55`,
+                    }
+                  : undefined
+              }
+              title={l.name}
+            >
+              {l.name}
+            </Badge>
+          ))}
+          {lists.length > 3 ? (
+            <Badge variant="outline" className="text-[10px]">
+              +{lists.length - 3}
+            </Badge>
+          ) : null}
+          {lists.length >= 2 ? (
+            <Badge
+              variant="destructive"
+              className="text-[10px]"
+              title={`Stacked on ${lists.length} lists — high-motivation signal`}
+            >
+              🔥 {lists.length} lists
+            </Badge>
+          ) : null}
+        </div>
+      ) : null}
     </div>
   );
 }

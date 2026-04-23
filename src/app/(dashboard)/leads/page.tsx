@@ -44,6 +44,39 @@ export default async function LeadsPage() {
     if (r.property_id) unreadPropertyIds.add(r.property_id);
   }
 
+  // List memberships for the shown properties. One query, then group in
+  // JS — PostgREST embedded resource with a filter would need the FK name
+  // dance, and a flat join is simpler. The kanban card renders up to 3
+  // list name badges and a "3 lists" stack chip.
+  const shownPropertyIds = (leads ?? []).map((l) => l.id);
+  const listMembershipsByProperty = new Map<
+    string,
+    { listId: string; name: string; color: string | null }[]
+  >();
+  if (shownPropertyIds.length > 0) {
+    const { data: memberships } = await supabase
+      .from("property_lists")
+      .select("property_id, list_id, lists!property_lists_list_id_fkey(name, color, archived_at)")
+      .in("property_id", shownPropertyIds);
+    for (const m of memberships ?? []) {
+      // Exclude archived lists — memberships stay in the table, but the
+      // card shouldn't advertise a cohort that's been retired.
+      const list = m.lists as
+        | { name: string; color: string | null; archived_at: string | null }
+        | null;
+      if (!list || list.archived_at) continue;
+      const arr = listMembershipsByProperty.get(m.property_id) ?? [];
+      arr.push({ listId: m.list_id, name: list.name, color: list.color });
+      listMembershipsByProperty.set(m.property_id, arr);
+    }
+  }
+  // Serialize to a plain object for the client component boundary.
+  const listMemberships: Record<
+    string,
+    { listId: string; name: string; color: string | null }[]
+  > = {};
+  for (const [k, v] of listMembershipsByProperty) listMemberships[k] = v;
+
   // Resolve assignee ids → emails (for the "assigned: bob@…" chip). Admin
   // client batches all users in one call. Non-fatal on failure.
   const assigneeEmails: Record<string, string> = {};
@@ -94,6 +127,7 @@ export default async function LeadsPage() {
           unreadPropertyIds={Array.from(unreadPropertyIds)}
           assigneeEmails={assigneeEmails}
           currentUserId={user?.id ?? null}
+          listMemberships={listMemberships}
         />
       ) : (
         <div className="text-muted-foreground border-border rounded-md border border-dashed p-8 text-center text-sm">

@@ -589,6 +589,47 @@ export type Database = {
           },
         ]
       }
+      lists: {
+        Row: {
+          archived_at: string | null
+          color: string | null
+          created_at: string
+          created_by: string | null
+          description: string | null
+          id: string
+          name: string
+          org_id: string
+        }
+        Insert: {
+          archived_at?: string | null
+          color?: string | null
+          created_at?: string
+          created_by?: string | null
+          description?: string | null
+          id?: string
+          name: string
+          org_id?: string
+        }
+        Update: {
+          archived_at?: string | null
+          color?: string | null
+          created_at?: string
+          created_by?: string | null
+          description?: string | null
+          id?: string
+          name?: string
+          org_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "lists_org_id_fkey"
+            columns: ["org_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       messages: {
         Row: {
           body: string
@@ -877,6 +918,68 @@ export type Database = {
           },
         ]
       }
+      property_lists: {
+        Row: {
+          first_added_at: string
+          id: string
+          last_added_at: string
+          last_added_by: string | null
+          last_source_import_id: string | null
+          list_id: string
+          org_id: string
+          property_id: string
+        }
+        Insert: {
+          first_added_at?: string
+          id?: string
+          last_added_at?: string
+          last_added_by?: string | null
+          last_source_import_id?: string | null
+          list_id: string
+          org_id?: string
+          property_id: string
+        }
+        Update: {
+          first_added_at?: string
+          id?: string
+          last_added_at?: string
+          last_added_by?: string | null
+          last_source_import_id?: string | null
+          list_id?: string
+          org_id?: string
+          property_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "property_lists_last_source_import_id_fkey"
+            columns: ["last_source_import_id"]
+            isOneToOne: false
+            referencedRelation: "csv_imports"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "property_lists_list_id_fkey"
+            columns: ["list_id"]
+            isOneToOne: false
+            referencedRelation: "lists"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "property_lists_org_id_fkey"
+            columns: ["org_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "property_lists_property_id_fkey"
+            columns: ["property_id"]
+            isOneToOne: false
+            referencedRelation: "properties"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       property_merges: {
         Row: {
           id: string
@@ -989,7 +1092,22 @@ export type Database = {
       }
     }
     Views: {
-      [_ in never]: never
+      property_stack_counts: {
+        Row: {
+          list_ids: string[] | null
+          property_id: string | null
+          stack_count: number | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "property_lists_property_id_fkey"
+            columns: ["property_id"]
+            isOneToOne: false
+            referencedRelation: "properties"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
     }
     Functions: {
       delete_contact: {

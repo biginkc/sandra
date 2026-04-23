@@ -123,8 +123,17 @@ function MessageBubble({ message }: { message: Message }) {
               addSuffix: true,
             })}
           </span>
-          {outbound && (
-            <Badge variant="outline" className="text-[10px]">
+          {outbound && status !== "sent" && status !== "delivered" && (
+            <Badge
+              variant={
+                status === "failed"
+                  ? "destructive"
+                  : status === "queued" || status === "pending"
+                    ? "secondary"
+                    : "outline"
+              }
+              className="text-[10px]"
+            >
               {status}
             </Badge>
           )}

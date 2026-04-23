@@ -23,6 +23,10 @@ export type IngestParams = {
   market: string;
   mapping: Mapping;
   rows: RowData[];
+  /** Optional: add every ingested (or dedup-matched) property to this list. */
+  listId?: string | null;
+  /** Current user, stamped onto property_lists.last_added_by when listId set. */
+  userId?: string | null;
 };
 
 export type IngestSummary = {
@@ -101,6 +105,20 @@ export async function runIngestion(
         params.source,
         params.market,
       );
+
+      // Stacking: every ingested row — including dedup-matched ones —
+      // gets added to the import's list (if one was selected). Re-importing
+      // the same address into a different list is exactly how stacking
+      // accumulates signal on a high-motivation lead.
+      if (params.listId) {
+        await upsertPropertyListMembership(supabase, {
+          propertyId: result.propertyId,
+          listId: params.listId,
+          userId: params.userId ?? null,
+          csvImportId: params.csvImportId,
+        });
+      }
+
       await supabase.from("job_items").insert({
         job_id: params.jobId,
         property_id: result.propertyId,
@@ -387,6 +405,58 @@ async function upsertContact(
     .single();
   if (error) throw new Error(`contact insert: ${error.message}`);
   return data.id;
+}
+
+/**
+ * Upsert a (property, list) membership. On conflict (same pair already
+ * exists — the stacking case: re-import of an address into the same list),
+ * bump `last_added_at` + `last_added_by` + `last_source_import_id` so the
+ * lead-detail "Lists" section shows fresh provenance, but don't reset
+ * `first_added_at` — the earliest encounter stays recorded.
+ *
+ * Needs the property's org_id to satisfy the NOT NULL constraint on
+ * property_lists.org_id; reads it from the property row (cheaper than
+ * threading org_id through every per-row call).
+ */
+async function upsertPropertyListMembership(
+  supabase: SupabaseClient<Database>,
+  input: {
+    propertyId: string;
+    listId: string;
+    userId: string | null;
+    csvImportId: string;
+  },
+): Promise<void> {
+  const { data: prop } = await supabase
+    .from("properties")
+    .select("org_id")
+    .eq("id", input.propertyId)
+    .maybeSingle();
+  if (!prop) return; // property vanished between insert and upsert — rare
+
+  const now = new Date().toISOString();
+  await supabase
+    .from("property_lists")
+    .upsert(
+      {
+        org_id: prop.org_id,
+        property_id: input.propertyId,
+        list_id: input.listId,
+        last_added_at: now,
+        last_added_by: input.userId,
+        last_source_import_id: input.csvImportId,
+      },
+      {
+        onConflict: "property_id,list_id",
+        // On a conflict (already a member), we ONLY want to bump the
+        // "last" columns. Supabase's upsert replaces the whole row — we
+        // need the INSERT-default `first_added_at` to NOT be overwritten.
+        // The DB has `first_added_at DEFAULT now()` which fires only on
+        // INSERT, not on the conflict-UPDATE path, so the original value
+        // survives. Verified by integration tests.
+        ignoreDuplicates: false,
+      },
+    );
 }
 
 async function findExistingProperty(

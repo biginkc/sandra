@@ -43,6 +43,12 @@ export default async function DashboardLayout({
             Properties
           </Link>
           <Link
+            href="/lists"
+            className="text-muted-foreground hover:text-foreground"
+          >
+            Lists
+          </Link>
+          <Link
             href="/import"
             className="text-muted-foreground hover:text-foreground"
           >
