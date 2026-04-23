@@ -312,6 +312,10 @@ async function ingestRow(
     VENDOR_DEFAULT_SOURCE[defaultSource.toLowerCase()] ?? null;
 
   const property: PropertyInsert = {
+    // New imports land as 'prospect' by default. The /leads kanban filters
+    // these out, keeping them on the /properties data-lake surface until
+    // someone qualifies (manual action or auto on first inbound reply).
+    status: "prospect",
     address: addressRaw,
     city: (n.city as string | null) ?? null,
     state,

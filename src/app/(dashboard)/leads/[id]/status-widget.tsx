@@ -18,6 +18,9 @@ import {
   type PropertyStatus,
 } from "../actions";
 
+// 'prospect' intentionally omitted from the status-change dropdown —
+// a VA on the lead detail has already qualified the record, going back
+// to prospect is a deletion-grade rollback handled elsewhere (not in v1).
 const STATUS_ORDER: readonly PropertyStatus[] = [
   "new_lead",
   "contacted",
@@ -30,6 +33,7 @@ const STATUS_ORDER: readonly PropertyStatus[] = [
 ];
 
 const STATUS_LABEL: Record<PropertyStatus, string> = {
+  prospect: "Prospect",
   new_lead: "New Lead",
   contacted: "Contacted",
   offer_sent: "Offer Sent",

@@ -148,6 +148,98 @@ describe("POST /api/webhooks/dialpad/sms (integration)", () => {
     expect(events?.some((e) => e.event_type === "help_request")).toBe(true);
   });
 
+  it("auto-qualifies the threaded prospect on first inbound reply", async () => {
+    const phone = "+18165552600";
+    const contactId = await seedContact(phone, { optIn: true });
+
+    const { data: property } = await supabase
+      .from("properties")
+      .insert({
+        address: "1 Auto-Qualify Ln",
+        state: "MO",
+        status: "prospect",
+        homeowner_contact_id: contactId,
+      })
+      .select("id")
+      .single();
+    // Prior outbound to this contact threaded to the prospect property —
+    // that's what the handler uses to resolve propertyId on the inbound.
+    await supabase.from("messages").insert({
+      channel: "sms",
+      direction: "outbound",
+      status: "sent",
+      from_address: "+18163706846",
+      to_address: phone,
+      body: "Hi, are you the owner of 1 Auto-Qualify Ln?",
+      contact_id: contactId,
+      property_id: property!.id,
+    });
+
+    const res = await POST(
+      makeRequest({
+        externalId: "msg_autoq_001",
+        from: phone,
+        to: "+18163706846",
+        body: "Yeah that's me — what's the offer?",
+      }),
+    );
+    expect(res.status).toBe(200);
+
+    const { data: after } = await supabase
+      .from("properties")
+      .select("status, qualified_at, qualified_by")
+      .eq("id", property!.id)
+      .single();
+    expect(after?.status).toBe("new_lead");
+    expect(after?.qualified_by).toBe("system:inbound_reply");
+    expect(after?.qualified_at).not.toBeNull();
+  });
+
+  it("auto-qualify is a no-op when the property is already past prospect", async () => {
+    const phone = "+18165552700";
+    const contactId = await seedContact(phone, { optIn: true });
+
+    const { data: property } = await supabase
+      .from("properties")
+      .insert({
+        address: "2 Already New Ln",
+        state: "MO",
+        status: "contacted",
+        homeowner_contact_id: contactId,
+      })
+      .select("id")
+      .single();
+    await supabase.from("messages").insert({
+      channel: "sms",
+      direction: "outbound",
+      status: "sent",
+      from_address: "+18163706846",
+      to_address: phone,
+      body: "follow-up",
+      contact_id: contactId,
+      property_id: property!.id,
+    });
+
+    const res = await POST(
+      makeRequest({
+        externalId: "msg_autoq_noop_001",
+        from: phone,
+        to: "+18163706846",
+        body: "another reply",
+      }),
+    );
+    expect(res.status).toBe(200);
+
+    const { data: after } = await supabase
+      .from("properties")
+      .select("status, qualified_at")
+      .eq("id", property!.id)
+      .single();
+    // Status stays where it was; qualified_at was never stamped.
+    expect(after?.status).toBe("contacted");
+    expect(after?.qualified_at).toBeNull();
+  });
+
   it("idempotent on retry — second delivery with same external_id does not double-insert", async () => {
     await seedContact("+18165559111", { optIn: true });
     const payload = {

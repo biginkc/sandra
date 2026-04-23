@@ -21,12 +21,16 @@ export default async function LeadsPage() {
   // null when no contact is linked. Multi-FK to `contacts` requires the
   // explicit FK constraint name; the `:contacts!fkey` form disambiguates
   // homeowner_contact_id from agent_contact_id.
+  // Prospects live on /properties (the data-lake surface) and are promoted
+  // into the kanban via qualifyLead(). Filter them out server-side so the
+  // kanban query returns only workable pipeline leads.
   const { data: leads, error } = await supabase
     .from("properties")
     .select(
       `id, address, city, state, zip, market, status, is_vacant, cass_status, absentee_flag, assigned_user_id, motivation_level,
        homeowner:contacts!properties_homeowner_contact_id_fkey(first_name, last_name, entity_name)`,
     )
+    .neq("status", "prospect")
     .order("created_at", { ascending: false })
     .limit(500);
 

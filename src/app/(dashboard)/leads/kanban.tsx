@@ -65,6 +65,11 @@ const MOTIVATION_LABEL: Record<MotivationLevel, string> = {
 
 const MOTIVATION_ORDER: readonly MotivationLevel[] = ["hot", "warm", "cold"];
 
+// 'prospect' is deliberately NOT in STATUS_ORDER — prospects live on the
+// /properties data-lake surface, not the kanban working surface. If a row
+// arrives here with status='prospect' (should not happen given the
+// server-side filter in /leads/page.tsx) it groups under 'new_lead' as a
+// safety net.
 const STATUS_ORDER: readonly PropertyStatus[] = [
   "new_lead",
   "contacted",
@@ -79,6 +84,7 @@ const STATUS_ORDER: readonly PropertyStatus[] = [
 const COLLAPSED_STORAGE_KEY = "sandra.leads.collapsed";
 
 const STATUS_LABEL: Record<PropertyStatus, string> = {
+  prospect: "Prospect",
   new_lead: "New Lead",
   contacted: "Contacted",
   interested: "Interested",
@@ -90,6 +96,7 @@ const STATUS_LABEL: Record<PropertyStatus, string> = {
 };
 
 const STATUS_ACCENT: Record<PropertyStatus, string> = {
+  prospect: "border-t-slate-400",
   new_lead: "border-t-blue-500",
   contacted: "border-t-cyan-500",
   interested: "border-t-amber-500",
@@ -267,7 +274,11 @@ export function Kanban({
   );
 
   const totalByStatus = useMemo(() => {
+    // 'prospect' is tracked so TS is happy, but STATUS_ORDER excludes it
+    // so it never renders a column. Any stray prospect row gets ignored
+    // by the kanban; they belong on /properties.
     const t: Record<PropertyStatus, number> = {
+      prospect: 0,
       new_lead: 0, contacted: 0, interested: 0, offer_sent: 0,
       offer_declined: 0, under_contract: 0, closed: 0, dead: 0,
     };
@@ -282,6 +293,7 @@ export function Kanban({
 
   const leadsByStatus = useMemo(() => {
     const grouped: Record<PropertyStatus, Lead[]> = {
+      prospect: [],
       new_lead: [],
       contacted: [],
       interested: [],

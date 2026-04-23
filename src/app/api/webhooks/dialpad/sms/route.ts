@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { createClient as createSupabaseClient } from "@supabase/supabase-js";
 
 import { reportError } from "@/lib/errors/report";
+import { qualifyProperty } from "@/lib/leads/qualify";
 import { recordConsentEvent } from "@/lib/messaging/consent";
 import { getMessagingProvider } from "@/lib/messaging/registry";
 import type { Database, Json } from "@/lib/supabase/types";
@@ -214,6 +215,24 @@ export async function POST(request: Request) {
           tags: { surface: "dialpad_webhook_inbound_insert" },
           extra: { externalId: ev.externalId, code: insertError.code },
         });
+      }
+
+      // Auto-qualify: first inbound reply on a prospect promotes it to
+      // new_lead. Idempotent — noop if the property is already past
+      // prospect. Only runs when we resolved a property via the contact's
+      // most-recent outbound thread above.
+      if (propertyId) {
+        const qOutcome = await qualifyProperty(
+          supabase,
+          propertyId,
+          "system:inbound_reply",
+        );
+        if (qOutcome.status === "failed") {
+          reportError(new Error(qOutcome.message), {
+            tags: { surface: "dialpad_webhook_auto_qualify" },
+            extra: { propertyId, externalId: ev.externalId },
+          });
+        }
       }
     }
 

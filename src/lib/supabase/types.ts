@@ -780,6 +780,8 @@ export type Database = {
           notes: string | null
           org_id: string
           owner_moved_at: string | null
+          qualified_at: string | null
+          qualified_by: string | null
           regrid_id: string | null
           repair_estimate: number | null
           source: string | null
@@ -829,6 +831,8 @@ export type Database = {
           notes?: string | null
           org_id?: string
           owner_moved_at?: string | null
+          qualified_at?: string | null
+          qualified_by?: string | null
           regrid_id?: string | null
           repair_estimate?: number | null
           source?: string | null
@@ -878,6 +882,8 @@ export type Database = {
           notes?: string | null
           org_id?: string
           owner_moved_at?: string | null
+          qualified_at?: string | null
+          qualified_by?: string | null
           regrid_id?: string | null
           repair_estimate?: number | null
           source?: string | null

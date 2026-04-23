@@ -40,7 +40,7 @@ export default async function DashboardLayout({
             href="/properties"
             className="text-muted-foreground hover:text-foreground"
           >
-            Properties
+            Prospects
           </Link>
           <Link
             href="/lists"

@@ -6,6 +6,7 @@ import { errFromUnknown, ok, type Result } from "@/lib/errors/result";
 import { reportError } from "@/lib/errors/report";
 import { verifyPropertyAddress } from "@/lib/enrichment/verify-property";
 import type { CassStatus } from "@/lib/enrichment/types";
+import { qualifyProperty } from "@/lib/leads/qualify";
 import {
   recordConsentEvent,
   type ConsentChannel,
@@ -21,6 +22,7 @@ import type { DialpadFromOption } from "@/lib/messaging/types";
 import type { Database } from "@/lib/supabase/types";
 
 export type PropertyStatus =
+  | "prospect"
   | "new_lead"
   | "contacted"
   | "interested"
@@ -31,6 +33,7 @@ export type PropertyStatus =
   | "dead";
 
 const VALID_STATUSES: readonly PropertyStatus[] = [
+  "prospect",
   "new_lead",
   "contacted",
   "interested",
@@ -202,6 +205,93 @@ export async function updateLeadMotivation(
       extra: { propertyId, level },
     });
     return errFromUnknown(e, "MOTIVATION_UPDATE_FAILED");
+  }
+}
+
+/**
+ * Promote a prospect to `new_lead`. Stamps qualified_at + qualified_by so
+ * we know when and how the lead entered the working pipeline. Idempotent:
+ * calling qualifyLead() on an already-qualified lead is a no-op that
+ * returns ok.
+ *
+ * The `qualifier` is either a user id (manual action from /properties) or
+ * a system marker like 'system:inbound_reply' (auto-qualify from the
+ * Dialpad webhook).
+ */
+export async function qualifyLead(
+  propertyId: string,
+  qualifier: string | null = null,
+): Promise<Result<{ alreadyQualified: boolean }>> {
+  try {
+    const supabase = await createClient();
+
+    // Resolve the qualifier — explicit arg wins, else use the session user.
+    let qualifiedBy = qualifier;
+    if (!qualifiedBy) {
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+      qualifiedBy = user?.id ?? null;
+    }
+
+    const outcome = await qualifyProperty(supabase, propertyId, qualifiedBy);
+    switch (outcome.status) {
+      case "qualified":
+        return ok({ alreadyQualified: false });
+      case "already_qualified":
+        return ok({ alreadyQualified: true });
+      case "not_found":
+        return {
+          ok: false,
+          error: { code: "LEAD_NOT_FOUND", message: "Lead not found." },
+        };
+      case "failed":
+        return {
+          ok: false,
+          error: { code: "QUALIFY_FAILED", message: outcome.message },
+        };
+    }
+  } catch (e) {
+    reportError(e, {
+      tags: { surface: "qualify_lead" },
+      extra: { propertyId, qualifier },
+    });
+    return errFromUnknown(e, "QUALIFY_FAILED");
+  }
+}
+
+/**
+ * Bulk variant — qualify a batch of prospects in one action. Runs the
+ * qualify logic per-property serially (the volumes here are tens, not
+ * thousands — no parallelism needed). Returns the counts.
+ */
+export async function qualifyLeadsBulk(
+  propertyIds: string[],
+): Promise<Result<{ qualified: number; alreadyQualified: number }>> {
+  if (propertyIds.length === 0) {
+    return ok({ qualified: 0, alreadyQualified: 0 });
+  }
+  let qualified = 0;
+  let alreadyQualified = 0;
+  try {
+    for (const id of propertyIds) {
+      const r = await qualifyLead(id);
+      if (!r.ok) {
+        return {
+          ok: false,
+          error: { code: "QUALIFY_BULK_FAILED", message: r.error.message },
+        };
+      }
+      if (r.data.alreadyQualified) alreadyQualified++;
+      else qualified++;
+    }
+    return ok({ qualified, alreadyQualified });
+  } catch (e) {
+    reportError(e, {
+      tags: { surface: "qualify_leads_bulk" },
+      extra: { count: propertyIds.length },
+    });
+    return errFromUnknown(e, "QUALIFY_BULK_FAILED");
   }
 }
 

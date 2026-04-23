@@ -1,18 +1,15 @@
 import Link from "next/link";
 
-import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
 import { createClient } from "@/lib/supabase/server";
 
+import { ProspectsTable, type ProspectRow } from "./prospects-table";
+
 const PAGE_SIZE = 50;
+
+export const metadata = {
+  title: "Prospects · Sandra CRM",
+};
 
 export default async function PropertiesPage({
   searchParams,
@@ -31,9 +28,10 @@ export default async function PropertiesPage({
   const { data: properties, count, error } = await supabase
     .from("properties")
     .select(
-      "id, address, city, state, zip, market, status, cass_status, is_vacant, created_at",
+      "id, address, city, state, zip, market, cass_status, is_vacant, created_at",
       { count: "exact" },
     )
+    .eq("status", "prospect")
     .order("created_at", { ascending: false })
     .range(from, to);
 
@@ -42,15 +40,27 @@ export default async function PropertiesPage({
   const showingFrom = total === 0 ? 0 : from + 1;
   const showingTo = Math.min(to + 1, total);
 
+  const prospects: ProspectRow[] = (properties ?? []).map((p) => ({
+    id: p.id,
+    address: p.address,
+    city: p.city,
+    state: p.state,
+    zip: p.zip,
+    market: p.market,
+    cass_status: p.cass_status,
+    is_vacant: p.is_vacant,
+    created_at: p.created_at,
+  }));
+
   return (
     <div className="flex flex-col gap-4 p-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-semibold">Properties</h1>
+          <h1 className="text-2xl font-semibold">Prospects</h1>
           <p className="text-muted-foreground text-sm">
             {total === 0
-              ? "No properties yet. Import a CSV to get started."
-              : `Showing ${showingFrom}–${showingTo} of ${total} propert${total === 1 ? "y" : "ies"}.`}
+              ? "No prospects yet. Import a CSV to fill the data lake."
+              : `Showing ${showingFrom}–${showingTo} of ${total} prospect${total === 1 ? "" : "s"}. Qualify a prospect to move it into the leads pipeline.`}
           </p>
         </div>
         <Link href="/import" className={buttonVariants()}>
@@ -60,67 +70,11 @@ export default async function PropertiesPage({
 
       {error ? (
         <div className="text-destructive text-sm">
-          Failed to load properties: {error.message}
+          Failed to load prospects: {error.message}
         </div>
       ) : null}
 
-      <div className="border-border rounded-md border">
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>Address</TableHead>
-              <TableHead>City</TableHead>
-              <TableHead>State</TableHead>
-              <TableHead>ZIP</TableHead>
-              <TableHead>Market</TableHead>
-              <TableHead>Status</TableHead>
-              <TableHead>CASS</TableHead>
-              <TableHead>Vacant</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {properties && properties.length > 0 ? (
-              properties.map((p) => (
-                <TableRow key={p.id}>
-                  <TableCell className="font-medium">{p.address}</TableCell>
-                  <TableCell>{p.city ?? "—"}</TableCell>
-                  <TableCell>{p.state}</TableCell>
-                  <TableCell>{p.zip ?? "—"}</TableCell>
-                  <TableCell>{p.market ?? "—"}</TableCell>
-                  <TableCell>
-                    <Badge variant="outline">{p.status}</Badge>
-                  </TableCell>
-                  <TableCell>
-                    <Badge
-                      variant={
-                        p.cass_status === "verified" ? "default" : "secondary"
-                      }
-                    >
-                      {p.cass_status}
-                    </Badge>
-                  </TableCell>
-                  <TableCell>
-                    {p.is_vacant === true
-                      ? "Yes"
-                      : p.is_vacant === false
-                        ? "No"
-                        : "—"}
-                  </TableCell>
-                </TableRow>
-              ))
-            ) : (
-              <TableRow>
-                <TableCell
-                  colSpan={8}
-                  className="text-muted-foreground py-8 text-center"
-                >
-                  No properties yet.
-                </TableCell>
-              </TableRow>
-            )}
-          </TableBody>
-        </Table>
-      </div>
+      <ProspectsTable prospects={prospects} />
 
       {totalPages > 1 && (
         <div className="flex items-center justify-between">
