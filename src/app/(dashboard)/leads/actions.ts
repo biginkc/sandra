@@ -23,6 +23,7 @@ import {
   type SendSmsOutcome,
 } from "@/lib/messaging/send";
 import type { DialpadFromOption } from "@/lib/messaging/types";
+import { dispatchPropertyAssigned } from "@/lib/notifications/dispatch";
 import type { Database } from "@/lib/supabase/types";
 
 export type PropertyStatus =
@@ -395,6 +396,9 @@ export async function assignLeadsBulk(
   }
   try {
     const supabase = await createClient();
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
     const { error } = await supabase
       .from("properties")
       .update({
@@ -408,6 +412,24 @@ export async function assignLeadsBulk(
         error: { code: "ASSIGN_BULK_FAILED", message: error.message },
       };
     }
+
+    // Feature 7 — fire property_assigned notifications. Best-effort:
+    // dispatch swallows errors internally, and we catch anything that
+    // bubbles so a notification hiccup never fails the assignment.
+    try {
+      await dispatchPropertyAssigned(supabase, {
+        propertyIds,
+        newAssigneeId: userId,
+        actorId: user?.id ?? null,
+        assignerName: user?.email?.split("@")[0] ?? null,
+      });
+    } catch (e) {
+      reportError(e, {
+        tags: { surface: "assign_leads_bulk_notification_dispatch" },
+        extra: { count: propertyIds.length },
+      });
+    }
+
     return ok({ succeeded: propertyIds.length, skipped: 0, failed: [] });
   } catch (e) {
     reportError(e, {

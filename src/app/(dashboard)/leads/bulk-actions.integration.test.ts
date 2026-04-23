@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createTestClient } from "@tests/integration/client";
 import { resetTenantTables } from "@tests/integration/reset";
@@ -15,17 +15,17 @@ vi.mock("@/lib/supabase/server", () => ({
 // the admin-only delete action has a predictable answer.
 process.env.ADMIN_EMAILS = "jarrad@bmhgroupkc.com";
 
-// Stub getUser() to control admin-ness on a per-test basis.
-// `currentUser` has an email only — id is null so writes to FK columns
-// (applied_by, last_added_by) pass through as null and don't need a
-// seeded auth.users row. Admin is detected by email, so this still
-// exercises the isAdminEmail() check.
+// Stub getUser() to control admin-ness on a per-test basis. Tests that
+// only care about the admin guard (isAdminEmail) use id: null; tests
+// that need real FK IDs (e.g., Feature 7 assignment notifications)
+// override currentUserId with a real auth.users id.
 let currentEmail: string | null = "jarrad@bmhgroupkc.com";
+let currentUserId: string | null = null;
 vi.spyOn(testClient.auth, "getUser").mockImplementation(async () =>
   ({
     data: {
       user: currentEmail
-        ? ({ id: null, email: currentEmail } as never)
+        ? ({ id: currentUserId, email: currentEmail } as never)
         : null,
     },
     error: null,
@@ -73,10 +73,32 @@ async function seedCustomTag(name: string): Promise<string> {
   return data.id;
 }
 
+const createdAuthUsers: string[] = [];
+async function createAuthUser(email: string): Promise<string> {
+  const { data, error } = await testClient.auth.admin.createUser({
+    email,
+    password: `test-pw-${Math.random().toString(36).slice(2)}`,
+    email_confirm: true,
+  });
+  if (error || !data.user) {
+    throw new Error(`createAuthUser failed: ${error?.message}`);
+  }
+  createdAuthUsers.push(data.user.id);
+  return data.user.id;
+}
+
 describe("bulk actions (integration)", () => {
   beforeEach(async () => {
     await resetTenantTables(testClient);
     currentEmail = "jarrad@bmhgroupkc.com";
+    currentUserId = null;
+  });
+
+  afterEach(async () => {
+    for (const id of createdAuthUsers) {
+      await testClient.auth.admin.deleteUser(id);
+    }
+    createdAuthUsers.length = 0;
   });
 
   it("assignLeadsBulk updates every selected property", async () => {
@@ -273,5 +295,110 @@ describe("bulk actions (integration)", () => {
     const id = await seedProspect("1 AlreadyProspect Ln");
     const result = await revertToProspect(id);
     expect(result.ok).toBe(true);
+  });
+
+  // --------------------------------------------------------------------------
+  // Feature 7 — property_assigned notifications (tests 22–25)
+  // --------------------------------------------------------------------------
+  describe("assignLeadsBulk notifications", () => {
+    it("notifies the new assignee once per property; never the actor (test 22)", async () => {
+      const actor = await createAuthUser(
+        `ba-actor-${Date.now()}@test.invalid`,
+      );
+      const assignee = await createAuthUser(
+        `ba-assignee-${Date.now()}@test.invalid`,
+      );
+      currentUserId = actor;
+      currentEmail = "actor@test.invalid";
+      const ids = [
+        await seedProspect("1 FeatureSeven Ln"),
+        await seedProspect("2 FeatureSeven Ln"),
+        await seedProspect("3 FeatureSeven Ln"),
+      ];
+
+      const result = await assignLeadsBulk(ids, assignee);
+      if (!result.ok) throw new Error(result.error.message);
+
+      const { data: forAssignee } = await testClient
+        .from("notifications")
+        .select("entity_id")
+        .eq("user_id", assignee)
+        .eq("event_type", "property_assigned");
+      expect(forAssignee).toHaveLength(3);
+      expect(new Set(forAssignee!.map((n) => n.entity_id))).toEqual(
+        new Set(ids),
+      );
+
+      const { count: forActor } = await testClient
+        .from("notifications")
+        .select("*", { count: "exact", head: true })
+        .eq("user_id", actor);
+      expect(forActor).toBe(0);
+    });
+
+    it("self-assign produces zero notifications (decision #1, test 23)", async () => {
+      const self = await createAuthUser(
+        `ba-self-${Date.now()}@test.invalid`,
+      );
+      currentUserId = self;
+      currentEmail = "self@test.invalid";
+      const id = await seedProspect("1 SelfAssign Ln");
+
+      const result = await assignLeadsBulk([id], self);
+      if (!result.ok) throw new Error(result.error.message);
+
+      const { count } = await testClient
+        .from("notifications")
+        .select("*", { count: "exact", head: true });
+      expect(count).toBe(0);
+    });
+
+    it("unassign (userId = null) produces zero notifications (test 24)", async () => {
+      const actor = await createAuthUser(
+        `ba-un-${Date.now()}@test.invalid`,
+      );
+      currentUserId = actor;
+      currentEmail = "actor@test.invalid";
+      const id = await seedProspect("1 Unassign Ln");
+
+      const result = await assignLeadsBulk([id], null);
+      if (!result.ok) throw new Error(result.error.message);
+
+      const { count } = await testClient
+        .from("notifications")
+        .select("*", { count: "exact", head: true });
+      expect(count).toBe(0);
+    });
+
+    it("reassignment notifies each new assignee; no 'removed from you' for prior (decision #3, test 25)", async () => {
+      const actor = await createAuthUser(
+        `ba-ra-${Date.now()}@test.invalid`,
+      );
+      const userB = await createAuthUser(
+        `ba-rb-${Date.now()}@test.invalid`,
+      );
+      const userC = await createAuthUser(
+        `ba-rc-${Date.now()}@test.invalid`,
+      );
+      currentUserId = actor;
+      currentEmail = "actor@test.invalid";
+      const id = await seedProspect("1 Reassign Ln");
+
+      const r1 = await assignLeadsBulk([id], userB);
+      if (!r1.ok) throw new Error(r1.error.message);
+      const r2 = await assignLeadsBulk([id], userC);
+      if (!r2.ok) throw new Error(r2.error.message);
+
+      const { count: forB } = await testClient
+        .from("notifications")
+        .select("*", { count: "exact", head: true })
+        .eq("user_id", userB);
+      const { count: forC } = await testClient
+        .from("notifications")
+        .select("*", { count: "exact", head: true })
+        .eq("user_id", userC);
+      expect(forB).toBe(1);
+      expect(forC).toBe(1);
+    });
   });
 });
