@@ -3,17 +3,26 @@ import { notFound } from "next/navigation";
 
 import { Badge } from "@/components/ui/badge";
 import { buttonVariants } from "@/components/ui/button";
+import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
 
-import type { DetailedLead, PropertyStatus } from "../actions";
+import {
+  markMessagesReadForProperty,
+  type DetailedLead,
+  type PropertyStatus,
+} from "../actions";
 
 import { CassWidget } from "./cass-widget";
+import { InlineReply } from "./inline-reply";
+import { LeadAssigneeWidget } from "./assignee-widget";
 import { LeadStatusWidget } from "./status-widget";
 import { MessagesThread } from "./messages-thread";
+import { NotesFeed } from "./notes-feed";
 import { SmsComposer } from "./sms-composer";
 import type { Database } from "@/lib/supabase/types";
 
 type MessageRow = Database["public"]["Tables"]["messages"]["Row"];
+type LeadNoteRow = Database["public"]["Tables"]["lead_notes"]["Row"];
 
 export async function generateMetadata({
   params,
@@ -78,6 +87,11 @@ export default async function LeadDetailPage({
 
   const lead = data as DetailedLead;
 
+  // Current user — for "me" labeling in assignee + note-author displays.
+  const {
+    data: { user: sessionUser },
+  } = await supabase.auth.getUser();
+
   // Fetch existing SMS thread — messages linked either to the property
   // directly or to the homeowner (catches inbound that lands pre-linkage).
   const homeownerContactId = lead.homeowner?.id ?? null;
@@ -91,6 +105,48 @@ export default async function LeadDetailPage({
     .order("created_at", { ascending: true })
     .limit(200);
   const initialMessages = (threadRaw ?? []) as MessageRow[];
+
+  // Opening a lead acknowledges any unread inbound SMS on it. Fire-and-forget
+  // so the page renders fast; the kanban card's red dot will clear on next
+  // nav or Realtime UPDATE.
+  void markMessagesReadForProperty(lead.id);
+
+  // Notes — newest first for the feed component.
+  const { data: notesRaw } = await supabase
+    .from("lead_notes")
+    .select("*")
+    .eq("property_id", lead.id)
+    .order("created_at", { ascending: false })
+    .limit(200);
+  const initialNotes = (notesRaw ?? []) as LeadNoteRow[];
+
+  // Resolve author + assignee emails via the admin client (auth.users isn't
+  // RLS-accessible to end-users). Batched into a single listUsers() call.
+  const userIdsNeeded = new Set<string>();
+  if (lead.assigned_user_id) userIdsNeeded.add(lead.assigned_user_id);
+  for (const n of initialNotes) {
+    if (n.author_user_id) userIdsNeeded.add(n.author_user_id);
+  }
+  const authorEmails: Record<string, string> = {};
+  let assigneeEmail: string | null = null;
+  if (userIdsNeeded.size > 0) {
+    try {
+      const admin = createAdminClient();
+      const { data: usersPage } = await admin.auth.admin.listUsers({
+        perPage: 200,
+      });
+      for (const u of usersPage?.users ?? []) {
+        if (u.email && userIdsNeeded.has(u.id)) {
+          authorEmails[u.id] = u.email;
+        }
+      }
+      if (lead.assigned_user_id) {
+        assigneeEmail = authorEmails[lead.assigned_user_id] ?? null;
+      }
+    } catch {
+      // Non-fatal — emails just won't display pretty. The IDs stay intact.
+    }
+  }
 
   return (
     <div className="flex flex-col gap-5 p-6">
@@ -113,6 +169,13 @@ export default async function LeadDetailPage({
             propertyId={lead.id}
             initialStatus={lead.status as PropertyStatus}
             address={lead.address}
+          />
+          <LeadAssigneeWidget
+            propertyId={lead.id}
+            address={lead.address}
+            initialAssigneeId={lead.assigned_user_id}
+            initialAssigneeEmail={assigneeEmail}
+            currentUserId={sessionUser?.id ?? null}
           />
           {lead.market ? (
             <Badge variant="secondary">{lead.market}</Badge>
@@ -264,10 +327,25 @@ export default async function LeadDetailPage({
         </Section>
 
         {lead.notes ? (
-          <Section title="Notes">
+          <Section title="Imported notes (legacy)">
             <div className="whitespace-pre-wrap p-3 text-sm">{lead.notes}</div>
           </Section>
         ) : null}
+      </div>
+
+      <div>
+        <div className="text-muted-foreground mb-2 text-xs font-semibold tracking-wide uppercase">
+          Notes
+        </div>
+        <div className="border-border rounded-md border p-3">
+          <NotesFeed
+            propertyId={lead.id}
+            initial={initialNotes}
+            authorEmails={authorEmails}
+            currentUserId={sessionUser?.id ?? null}
+            currentUserEmail={sessionUser?.email ?? null}
+          />
+        </div>
       </div>
 
       <div>
@@ -279,6 +357,11 @@ export default async function LeadDetailPage({
             initial={initialMessages}
             contactId={lead.homeowner?.id ?? null}
             propertyId={lead.id}
+          />
+          <InlineReply
+            propertyId={lead.id}
+            homeownerContactId={lead.homeowner?.id ?? null}
+            homeownerPhone={lead.homeowner?.phone_1 ?? null}
           />
         </div>
       </div>

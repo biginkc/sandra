@@ -43,6 +43,7 @@ type Lead = Pick<
   | "is_vacant"
   | "cass_status"
   | "absentee_flag"
+  | "assigned_user_id"
 > & {
   homeowner: ContactSummary | null;
 };
@@ -82,12 +83,32 @@ const STATUS_ACCENT: Record<PropertyStatus, string> = {
   dead: "border-t-zinc-400",
 };
 
-export function Kanban({ initialLeads }: { initialLeads: Lead[] }) {
+type KanbanProps = {
+  initialLeads: Lead[];
+  unreadPropertyIds: string[];
+  assigneeEmails: Record<string, string>;
+  currentUserId: string | null;
+};
+
+const MINE_ONLY_STORAGE_KEY = "sandra.leads.mineOnly";
+
+export function Kanban({
+  initialLeads,
+  unreadPropertyIds,
+  assigneeEmails,
+  currentUserId,
+}: KanbanProps) {
   const [leads, setLeads] = useState<Lead[]>(initialLeads);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [collapsed, setCollapsed] = useState<Set<PropertyStatus>>(new Set());
   const [search, setSearch] = useState<string>("");
+  const [mineOnly, setMineOnly] = useState<boolean>(false);
   const router = useRouter();
+
+  const unreadSet = useMemo(
+    () => new Set(unreadPropertyIds),
+    [unreadPropertyIds],
+  );
 
   // Hydrate collapsed state from localStorage after mount (avoids SSR mismatch).
   useEffect(() => {
@@ -100,7 +121,26 @@ export function Kanban({ initialLeads }: { initialLeads: Lead[] }) {
     } catch {
       // Ignore malformed storage.
     }
+    // Hydrate mineOnly toggle — same pattern.
+    try {
+      const raw = window.localStorage.getItem(MINE_ONLY_STORAGE_KEY);
+      if (raw === "true") setMineOnly(true);
+    } catch {
+      // Ignore.
+    }
   }, []);
+
+  const toggleMineOnly = () => {
+    setMineOnly((prev) => {
+      const next = !prev;
+      try {
+        window.localStorage.setItem(MINE_ONLY_STORAGE_KEY, String(next));
+      } catch {
+        // Ignore quota errors.
+      }
+      return next;
+    });
+  };
 
   const toggleCollapsed = (status: PropertyStatus) => {
     setCollapsed((prev) => {
@@ -124,9 +164,14 @@ export function Kanban({ initialLeads }: { initialLeads: Lead[] }) {
     useSensor(TouchSensor, { activationConstraint: { delay: 150, tolerance: 5 } }),
   );
 
+  const mineFiltered = useMemo(() => {
+    if (!mineOnly || !currentUserId) return leads;
+    return leads.filter((l) => l.assigned_user_id === currentUserId);
+  }, [leads, mineOnly, currentUserId]);
+
   const filteredLeads = useMemo(
-    () => filterLeads(leads, search),
-    [leads, search],
+    () => filterLeads(mineFiltered, search),
+    [mineFiltered, search],
   );
 
   const totalByStatus = useMemo(() => {
@@ -236,9 +281,25 @@ export function Kanban({ initialLeads }: { initialLeads: Lead[] }) {
             </button>
           ) : null}
         </div>
-        {isSearching ? (
+        <Button
+          variant={mineOnly ? "default" : "outline"}
+          size="sm"
+          onClick={toggleMineOnly}
+          disabled={!currentUserId}
+          aria-pressed={mineOnly}
+          title={
+            currentUserId
+              ? "Show only leads assigned to me"
+              : "Sign in to filter by assignee"
+          }
+        >
+          Mine only
+        </Button>
+        {(isSearching || mineOnly) ? (
           <div className="text-muted-foreground text-sm">
-            {totalFiltered} of {totalAll} leads match
+            {totalFiltered} of {totalAll} leads
+            {mineOnly ? " · mine" : ""}
+            {isSearching ? " · matching search" : ""}
           </div>
         ) : null}
       </div>
@@ -260,11 +321,22 @@ export function Kanban({ initialLeads }: { initialLeads: Lead[] }) {
               onToggleCollapsed={() => toggleCollapsed(status)}
               isSearching={isSearching}
               onLeadClick={(id) => router.push(`/leads/${id}`)}
+              unreadSet={unreadSet}
+              assigneeEmails={assigneeEmails}
+              currentUserId={currentUserId}
             />
           ))}
         </div>
         <DragOverlay>
-          {activeLead ? <LeadCard lead={activeLead} overlay /> : null}
+          {activeLead ? (
+            <LeadCard
+              lead={activeLead}
+              overlay
+              hasUnread={unreadSet.has(activeLead.id)}
+              assigneeEmails={assigneeEmails}
+              currentUserId={currentUserId}
+            />
+          ) : null}
         </DragOverlay>
       </DndContext>
     </div>
@@ -280,6 +352,9 @@ function Column({
   onToggleCollapsed,
   isSearching,
   onLeadClick,
+  unreadSet,
+  assigneeEmails,
+  currentUserId,
 }: {
   status: PropertyStatus;
   leads: Lead[];
@@ -289,6 +364,9 @@ function Column({
   onToggleCollapsed: () => void;
   isSearching: boolean;
   onLeadClick: (id: string) => void;
+  unreadSet: Set<string>;
+  assigneeEmails: Record<string, string>;
+  currentUserId: string | null;
 }) {
   const { isOver, setNodeRef } = useDroppable({ id: status });
   const hover = isOver && isActiveDropTarget;
@@ -370,6 +448,9 @@ function Column({
               key={lead.id}
               lead={lead}
               onClick={() => onLeadClick(lead.id)}
+              hasUnread={unreadSet.has(lead.id)}
+              assigneeEmails={assigneeEmails}
+              currentUserId={currentUserId}
             />
           ))
         )}
@@ -382,10 +463,16 @@ function LeadCard({
   lead,
   overlay = false,
   onClick,
+  hasUnread = false,
+  assigneeEmails,
+  currentUserId,
 }: {
   lead: Lead;
   overlay?: boolean;
   onClick?: () => void;
+  hasUnread?: boolean;
+  assigneeEmails: Record<string, string>;
+  currentUserId: string | null;
 }) {
   const { attributes, listeners, setNodeRef, transform, isDragging } =
     useDraggable({ id: lead.id });
@@ -396,9 +483,15 @@ function LeadCard({
       }
     : {};
 
-  const className = `bg-card cursor-grab rounded-md border p-2.5 text-xs shadow-sm select-none active:cursor-grabbing ${
+  const className = `bg-card cursor-grab rounded-md border p-2.5 text-xs shadow-sm select-none active:cursor-grabbing relative ${
     isDragging && !overlay ? "opacity-30" : ""
   } ${overlay ? "shadow-lg" : ""}`;
+
+  const assigneeEmail = lead.assigned_user_id
+    ? assigneeEmails[lead.assigned_user_id] ?? null
+    : null;
+  const assignedToMe =
+    lead.assigned_user_id && lead.assigned_user_id === currentUserId;
 
   // dnd-kit's PointerSensor (distance: 4) only activates a drag once the
   // pointer moves 4px. A stationary press → release is treated as a click,
@@ -412,7 +505,16 @@ function LeadCard({
       {...attributes}
       {...listeners}
     >
-      <div className="truncate font-medium">{lead.address}</div>
+      {hasUnread ? (
+        <span
+          aria-label="Unread inbound message"
+          title="Unread inbound message"
+          className="bg-destructive absolute top-1.5 right-1.5 size-2 rounded-full"
+        />
+      ) : null}
+      <div className={`truncate font-medium ${hasUnread ? "pr-4" : ""}`}>
+        {lead.address}
+      </div>
       <div className="text-muted-foreground mt-0.5 truncate">
         {[lead.city, lead.state, lead.zip].filter(Boolean).join(", ") || "—"}
       </div>
@@ -437,7 +539,24 @@ function LeadCard({
             {lead.cass_status}
           </Badge>
         ) : null}
+        {lead.assigned_user_id ? (
+          <Badge
+            variant={assignedToMe ? "default" : "outline"}
+            className="text-[10px]"
+          >
+            {assignedToMe
+              ? "me"
+              : assigneeEmail
+                ? shortEmail(assigneeEmail)
+                : "assigned"}
+          </Badge>
+        ) : null}
       </div>
     </div>
   );
+}
+
+function shortEmail(email: string): string {
+  const at = email.indexOf("@");
+  return at > 0 ? email.slice(0, at) : email;
 }
