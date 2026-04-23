@@ -1,12 +1,13 @@
 "use client";
 
 import { ChevronDownIcon } from "lucide-react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useMemo, useState, useTransition } from "react";
 import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -64,6 +65,8 @@ type Props = {
   teamMembers: TeamMemberOption[];
   currentUserId: string | null;
   canDelete: boolean;
+  /** Rendered into the header subhead so the count stays right next to the title. */
+  headerCount: string;
 };
 
 const MOTIVATION_OPTIONS: {
@@ -95,6 +98,7 @@ export function ProspectsTable({
   teamMembers,
   currentUserId,
   canDelete,
+  headerCount,
 }: Props) {
   const router = useRouter();
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -266,21 +270,45 @@ export function ProspectsTable({
   const hasTags = tags.length > 0;
   const hasTeam = teamMembers.length > 0;
 
+  const hasSelection = selected.size > 0;
+
   return (
-    <div className="flex flex-col gap-3">
-      <div className="flex min-h-9 items-center gap-2">
-        {selected.size > 0 ? (
-          <>
-            <DropdownMenu>
-              <DropdownMenuTrigger
-                render={
-                  <Button size="sm" disabled={pending}>
-                    Actions ({selected.size})
-                    <ChevronDownIcon className="ml-1 size-3.5" />
-                  </Button>
-                }
-              />
-              <DropdownMenuContent align="start" className="w-56">
+    <div className="flex flex-col gap-4">
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-semibold">Prospects</h1>
+          <p className="text-muted-foreground text-sm">{headerCount}</p>
+        </div>
+        <div className="flex items-center gap-2">
+          {hasSelection ? (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => setSelected(new Set())}
+              disabled={pending}
+            >
+              Clear
+            </Button>
+          ) : null}
+          <DropdownMenu>
+            <DropdownMenuTrigger
+              render={
+                <Button
+                  variant={hasSelection ? "default" : "outline"}
+                  disabled={!hasSelection || pending}
+                  aria-label={
+                    hasSelection
+                      ? `Actions for ${selected.size} selected`
+                      : "Actions (select prospects first)"
+                  }
+                >
+                  Actions
+                  {hasSelection ? ` (${selected.size})` : ""}
+                  <ChevronDownIcon className="ml-1 size-3.5" />
+                </Button>
+              }
+            />
+              <DropdownMenuContent align="end" className="w-56">
                 {/* ------------- Advance ------------- */}
                 <DropdownMenuGroup>
                   <DropdownMenuLabel className="text-muted-foreground text-xs font-medium uppercase tracking-wide">
@@ -452,21 +480,11 @@ export function ProspectsTable({
                   </DropdownMenuItem>
                 </DropdownMenuGroup>
               </DropdownMenuContent>
-            </DropdownMenu>
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => setSelected(new Set())}
-              disabled={pending}
-            >
-              Clear
-            </Button>
-          </>
-        ) : (
-          <div className="text-muted-foreground text-sm">
-            Select prospects to open the Actions menu.
-          </div>
-        )}
+          </DropdownMenu>
+          <Link href="/import" className={buttonVariants()}>
+            Import CSV
+          </Link>
+        </div>
       </div>
 
       <div className="border-border rounded-md border">

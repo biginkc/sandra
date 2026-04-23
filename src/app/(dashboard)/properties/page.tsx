@@ -111,22 +111,13 @@ export default async function PropertiesPage({
 
   const isAdmin = isAdminEmail(user?.email);
 
+  const headerCount =
+    total === 0
+      ? "No prospects yet. Import a CSV to fill the data lake."
+      : `Showing ${showingFrom}–${showingTo} of ${total} prospect${total === 1 ? "" : "s"}. Qualify a prospect to move it into the leads pipeline.`;
+
   return (
     <div className="flex flex-col gap-4 p-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-semibold">Prospects</h1>
-          <p className="text-muted-foreground text-sm">
-            {total === 0
-              ? "No prospects yet. Import a CSV to fill the data lake."
-              : `Showing ${showingFrom}–${showingTo} of ${total} prospect${total === 1 ? "" : "s"}. Qualify a prospect to move it into the leads pipeline.`}
-          </p>
-        </div>
-        <Link href="/import" className={buttonVariants()}>
-          Import CSV
-        </Link>
-      </div>
-
       {error ? (
         <div className="text-destructive text-sm">
           Failed to load prospects: {error.message}
@@ -140,6 +131,7 @@ export default async function PropertiesPage({
         teamMembers={teamMembers}
         currentUserId={user?.id ?? null}
         canDelete={isAdmin}
+        headerCount={headerCount}
       />
 
       {totalPages > 1 && (
