@@ -1177,6 +1177,42 @@ export type Database = {
           },
         ]
       }
+      test_sms_log: {
+        Row: {
+          body: string
+          external_id: string | null
+          from_number: string
+          id: string
+          provider: string
+          raw_payload: Json
+          received_at: string
+          signature_verified: boolean
+          to_number: string
+        }
+        Insert: {
+          body: string
+          external_id?: string | null
+          from_number: string
+          id?: string
+          provider?: string
+          raw_payload: Json
+          received_at?: string
+          signature_verified?: boolean
+          to_number: string
+        }
+        Update: {
+          body?: string
+          external_id?: string | null
+          from_number?: string
+          id?: string
+          provider?: string
+          raw_payload?: Json
+          received_at?: string
+          signature_verified?: boolean
+          to_number?: string
+        }
+        Relationships: []
+      }
       webhook_events: {
         Row: {
           error_message: string | null
