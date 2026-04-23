@@ -46,3 +46,9 @@ next-env.d.ts
 # Scratch / sample data — may contain real PII (DealMachine exports, etc.).
 # Don't ever commit this.
 /tmp/
+
+# Playwright E2E artefacts
+/e2e/.auth/
+/playwright-report/
+/test-results/
+/playwright/.cache/
