@@ -22,6 +22,91 @@ import {
   type SequenceWithSteps,
 } from "../../actions";
 
+// ---------------------------------------------------------------------------
+// Delay input — number + unit dropdown.
+//
+// Storage is always minutes (matches `sequence_steps.delay_after_previous_minutes`).
+// The unit dropdown is a display convenience so authors can pick "3 days"
+// instead of typing "4320" and hoping they got the conversion right.
+//
+// On load, we infer the "most natural" unit — the largest one that yields
+// an integer amount. E.g. 10080 min → (1, weeks); 129600 → (3, months);
+// 90 → (90, minutes) since no larger unit divides it cleanly.
+// ---------------------------------------------------------------------------
+
+type DelayUnit = "minutes" | "hours" | "days" | "weeks" | "months";
+
+const MIN_PER_UNIT: Record<DelayUnit, number> = {
+  minutes: 1,
+  hours: 60,
+  days: 1440,
+  weeks: 10080,
+  months: 43200, // 30-day month; matches our 90-day "quarterly" = 3 months
+};
+
+function splitDelay(minutes: number): { amount: number; unit: DelayUnit } {
+  if (minutes === 0) return { amount: 0, unit: "minutes" };
+  const descending: DelayUnit[] = ["months", "weeks", "days", "hours", "minutes"];
+  for (const unit of descending) {
+    const per = MIN_PER_UNIT[unit];
+    if (minutes % per === 0) return { amount: minutes / per, unit };
+  }
+  return { amount: minutes, unit: "minutes" };
+}
+
+function toMinutes(amount: number, unit: DelayUnit): number {
+  return Math.round(amount * MIN_PER_UNIT[unit]);
+}
+
+function DelayInput({
+  value,
+  onChange,
+  autoFocus = false,
+}: {
+  value: number; // minutes
+  onChange: (minutes: number) => void;
+  autoFocus?: boolean;
+}) {
+  const initial = splitDelay(value);
+  const [amount, setAmount] = useState<number>(initial.amount);
+  const [unit, setUnit] = useState<DelayUnit>(initial.unit);
+
+  const apply = (nextAmount: number, nextUnit: DelayUnit) => {
+    const clamped = Math.max(0, nextAmount);
+    setAmount(clamped);
+    setUnit(nextUnit);
+    onChange(toMinutes(clamped, nextUnit));
+  };
+
+  return (
+    <div className="flex items-center gap-2">
+      <Input
+        type="number"
+        min={0}
+        step={1}
+        value={amount}
+        autoFocus={autoFocus}
+        onChange={(e) => apply(Number(e.target.value) || 0, unit)}
+        className="w-24"
+      />
+      <select
+        value={unit}
+        onChange={(e) => apply(amount, e.target.value as DelayUnit)}
+        className="border-input rounded-md border px-2 py-1.5 text-sm"
+      >
+        <option value="minutes">minutes</option>
+        <option value="hours">hours</option>
+        <option value="days">days</option>
+        <option value="weeks">weeks</option>
+        <option value="months">months</option>
+      </select>
+      <span className="text-muted-foreground text-xs">
+        after previous step
+      </span>
+    </div>
+  );
+}
+
 /**
  * Inline vertical editor. One form for sequence meta, stacked step
  * editors below. Each step has its own save — simpler than a full-form
@@ -221,23 +306,11 @@ function AddStepButton({
         </DialogHeader>
 
         <div className="flex flex-col gap-3">
-          <div className="flex items-end gap-2">
-            <label className="flex flex-1 flex-col gap-1 text-sm">
-              <span className="font-medium">
-                Delay after previous step (minutes)
-              </span>
-              <Input
-                type="number"
-                min={0}
-                value={delayMin}
-                onChange={(e) =>
-                  setDelayMin(Math.max(0, Number(e.target.value)))
-                }
-              />
-              <span className="text-muted-foreground text-xs">
-                ≈ {describeDelay(delayMin)}
-              </span>
-            </label>
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:gap-4">
+            <div className="flex flex-1 flex-col gap-1 text-sm">
+              <span className="font-medium">Delay</span>
+              <DelayInput value={delayMin} onChange={setDelayMin} autoFocus />
+            </div>
 
             <label className="flex flex-col gap-1 text-sm">
               <span className="font-medium">Action</span>
@@ -265,7 +338,6 @@ function AddStepButton({
                 rows={4}
                 className="border-input rounded-md border px-2 py-1.5 font-mono text-sm"
                 placeholder="Hi {{first_name}}, cash offer on {{property_address}}?"
-                autoFocus
               />
               <span className="text-muted-foreground text-xs">
                 Variables: first_name, last_name, property_address, city,
@@ -365,8 +437,6 @@ function StepEditor({
     });
   };
 
-  const humanDelay = describeDelay(delayMin);
-
   return (
     <div className="flex flex-col gap-3 rounded-md border p-4">
       <div className="flex items-center justify-between">
@@ -378,19 +448,11 @@ function StepEditor({
         </Button>
       </div>
 
-      <div className="flex items-end gap-2">
-        <label className="flex flex-1 flex-col gap-1 text-sm">
-          <span className="font-medium">
-            Delay after previous step (minutes)
-          </span>
-          <Input
-            type="number"
-            min={0}
-            value={delayMin}
-            onChange={(e) => setDelayMin(Math.max(0, Number(e.target.value)))}
-          />
-          <span className="text-muted-foreground text-xs">≈ {humanDelay}</span>
-        </label>
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:gap-4">
+        <div className="flex flex-1 flex-col gap-1 text-sm">
+          <span className="font-medium">Delay</span>
+          <DelayInput value={delayMin} onChange={setDelayMin} />
+        </div>
 
         <label className="flex flex-col gap-1 text-sm">
           <span className="font-medium">Action</span>
@@ -470,10 +532,3 @@ function confirmImpact(impact: {
   return window.confirm(lines.join("\n"));
 }
 
-function describeDelay(minutes: number): string {
-  if (minutes === 0) return "fires immediately";
-  if (minutes < 60) return `${minutes}m`;
-  if (minutes < 1440) return `${(minutes / 60).toFixed(1)}h`;
-  if (minutes < 43200) return `${(minutes / 1440).toFixed(1)}d`;
-  return `${(minutes / 43200).toFixed(1)}mo`;
-}
