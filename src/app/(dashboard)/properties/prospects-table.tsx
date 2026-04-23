@@ -1,10 +1,24 @@
 "use client";
 
+import { ChevronDownIcon } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useMemo, useState, useTransition } from "react";
+import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuGroup,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import {
   Table,
   TableBody,
@@ -15,7 +29,17 @@ import {
 } from "@/components/ui/table";
 import { callAction } from "@/lib/errors/call-action";
 
-import { qualifyLead, qualifyLeadsBulk } from "../leads/actions";
+import {
+  addPropertiesToListBulk,
+  applyTagBulk,
+  assignLeadsBulk,
+  deletePropertiesBulk,
+  qualifyLeadsBulk,
+  removePropertiesFromListBulk,
+  setMotivationBulk,
+  verifyPropertiesBulk,
+  type BulkOutcome,
+} from "../leads/actions";
 
 export type ProspectRow = {
   id: string;
@@ -29,11 +53,49 @@ export type ProspectRow = {
   created_at: string;
 };
 
+export type ListOption = { id: string; name: string; color: string | null };
+export type TagOption = { id: string; name: string; color: string | null };
+export type TeamMemberOption = { id: string; email: string };
+
 type Props = {
   prospects: ProspectRow[];
+  lists: ListOption[];
+  tags: TagOption[];
+  teamMembers: TeamMemberOption[];
+  currentUserId: string | null;
+  canDelete: boolean;
 };
 
-export function ProspectsTable({ prospects }: Props) {
+const MOTIVATION_OPTIONS: {
+  value: "hot" | "warm" | "cold" | null;
+  label: string;
+  dot: string;
+}[] = [
+  { value: "hot", label: "Hot", dot: "bg-red-500" },
+  { value: "warm", label: "Warm", dot: "bg-amber-500" },
+  { value: "cold", label: "Cold", dot: "bg-blue-500" },
+  { value: null, label: "Clear", dot: "bg-transparent border border-muted-foreground" },
+];
+
+function summarize(outcome: BulkOutcome, noun = "prospect"): string {
+  const parts: string[] = [];
+  if (outcome.succeeded > 0)
+    parts.push(
+      `${outcome.succeeded} ${noun}${outcome.succeeded === 1 ? "" : "s"}`,
+    );
+  if (outcome.skipped > 0) parts.push(`${outcome.skipped} skipped`);
+  if (outcome.failed.length > 0) parts.push(`${outcome.failed.length} failed`);
+  return parts.join(" · ") || "Done";
+}
+
+export function ProspectsTable({
+  prospects,
+  lists,
+  tags,
+  teamMembers,
+  currentUserId,
+  canDelete,
+}: Props) {
   const router = useRouter();
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [pending, startTransition] = useTransition();
@@ -60,72 +122,337 @@ export function ProspectsTable({ prospects }: Props) {
     });
   };
 
-  const handleQualifySelected = () => {
-    if (selected.size === 0) return;
-    const ids = Array.from(selected);
+  const selectedIds = () => Array.from(selected);
+
+  /**
+   * Shared post-action handler: show a toast, keep failed rows selected so
+   * the VA can retry, drop the rest, refresh the server view.
+   */
+  const finishBulk = (
+    verb: string,
+    outcome: BulkOutcome,
+    noun = "prospect",
+  ) => {
+    const summary = `${verb} ${summarize(outcome, noun)}`;
+    if (outcome.failed.length > 0) {
+      toast.warning(summary, { description: outcome.failed[0].message });
+    } else {
+      toast.success(summary);
+    }
+    const failedIds = new Set(outcome.failed.map((f) => f.propertyId));
+    setSelected(failedIds);
+    router.refresh();
+  };
+
+  const handleQualify = () => {
+    const ids = selectedIds();
+    if (ids.length === 0) return;
     startTransition(async () => {
       const result = await callAction(qualifyLeadsBulk(ids), {
         fallbackMessage: "Could not qualify selected prospects",
       });
       if (result.ok) {
         const { qualified, alreadyQualified, failed } = result.data;
-        const parts: string[] = [];
-        if (qualified > 0)
-          parts.push(`Qualified ${qualified} prospect${qualified === 1 ? "" : "s"}`);
-        if (alreadyQualified > 0)
-          parts.push(`${alreadyQualified} already qualified`);
-        if (failed.length > 0)
-          parts.push(`${failed.length} failed`);
-        const { toast } = await import("sonner");
-        const summary = parts.join(" · ") || "Done";
-        if (failed.length > 0) {
-          toast.warning(summary, {
-            description: failed[0].message,
-          });
-        } else {
-          toast.success(summary);
-        }
-        // Keep failed rows selected so the VA can retry; drop the ones
-        // that succeeded or were already qualified.
-        const failedIds = new Set(failed.map((f) => f.propertyId));
-        setSelected(failedIds);
+        // qualifyLeadsBulk has a bespoke shape (qualified/alreadyQualified
+        // counters). Map to BulkOutcome semantics for the shared helper.
+        finishBulk("Qualified", {
+          succeeded: qualified,
+          skipped: alreadyQualified,
+          failed,
+        });
+      }
+    });
+  };
+
+  const handleAssign = (userId: string | null) => {
+    const ids = selectedIds();
+    if (ids.length === 0) return;
+    startTransition(async () => {
+      const result = await callAction(assignLeadsBulk(ids, userId), {
+        fallbackMessage: "Could not assign selected prospects",
+      });
+      if (result.ok) {
+        finishBulk(userId ? "Assigned" : "Unassigned", result.data);
+      }
+    });
+  };
+
+  const handleAddToList = (listId: string) => {
+    const ids = selectedIds();
+    if (ids.length === 0) return;
+    startTransition(async () => {
+      const result = await callAction(addPropertiesToListBulk(ids, listId), {
+        fallbackMessage: "Could not add to list",
+      });
+      if (result.ok) finishBulk("Added", result.data);
+    });
+  };
+
+  const handleRemoveFromList = (listId: string) => {
+    const ids = selectedIds();
+    if (ids.length === 0) return;
+    startTransition(async () => {
+      const result = await callAction(
+        removePropertiesFromListBulk(ids, listId),
+        { fallbackMessage: "Could not remove from list" },
+      );
+      if (result.ok) finishBulk("Removed", result.data);
+    });
+  };
+
+  const handleApplyTag = (tagId: string) => {
+    const ids = selectedIds();
+    if (ids.length === 0) return;
+    startTransition(async () => {
+      const result = await callAction(applyTagBulk(ids, tagId), {
+        fallbackMessage: "Could not apply tag",
+      });
+      if (result.ok) finishBulk("Tagged", result.data);
+    });
+  };
+
+  const handleSetMotivation = (level: "hot" | "warm" | "cold" | null) => {
+    const ids = selectedIds();
+    if (ids.length === 0) return;
+    startTransition(async () => {
+      const result = await callAction(setMotivationBulk(ids, level), {
+        fallbackMessage: "Could not set motivation",
+      });
+      if (result.ok) {
+        finishBulk(level ? `Set ${level}` : "Cleared motivation on", result.data);
+      }
+    });
+  };
+
+  const handleVerifyAddress = () => {
+    const ids = selectedIds();
+    if (ids.length === 0) return;
+    startTransition(async () => {
+      const result = await callAction(verifyPropertiesBulk(ids), {
+        fallbackMessage: "Could not start verify job",
+      });
+      if (result.ok) {
+        toast.success(
+          `Verifying ${ids.length} address${ids.length === 1 ? "" : "es"} in the background`,
+          { description: "Watch progress on /jobs" },
+        );
+        setSelected(new Set());
         router.refresh();
       }
     });
   };
 
-  const handleQualifyOne = (id: string, address: string) => {
+  const handleDelete = () => {
+    const ids = selectedIds();
+    if (ids.length === 0) return;
+    if (
+      !window.confirm(
+        `Delete ${ids.length} prospect${ids.length === 1 ? "" : "s"}? This is a soft-delete — an admin can recover from the database.`,
+      )
+    ) {
+      return;
+    }
     startTransition(async () => {
-      const result = await callAction(qualifyLead(id), {
-        successMessage: `Qualified ${address}`,
-        fallbackMessage: `Could not qualify ${address}`,
+      const result = await callAction(deletePropertiesBulk(ids), {
+        fallbackMessage: "Could not delete prospects",
       });
       if (result.ok) {
-        setSelected((prev) => {
-          if (!prev.has(id)) return prev;
-          const next = new Set(prev);
-          next.delete(id);
-          return next;
-        });
-        router.refresh();
+        finishBulk("Deleted", result.data);
       }
     });
   };
+
+  const hasLists = lists.length > 0;
+  const hasTags = tags.length > 0;
+  const hasTeam = teamMembers.length > 0;
 
   return (
     <div className="flex flex-col gap-3">
       <div className="flex min-h-9 items-center gap-2">
         {selected.size > 0 ? (
           <>
-            <Button
-              onClick={handleQualifySelected}
-              disabled={pending}
-              size="sm"
-            >
-              {pending
-                ? "Qualifying…"
-                : `Qualify selected (${selected.size})`}
-            </Button>
+            <DropdownMenu>
+              <DropdownMenuTrigger
+                render={
+                  <Button size="sm" disabled={pending}>
+                    Actions ({selected.size})
+                    <ChevronDownIcon className="ml-1 size-3.5" />
+                  </Button>
+                }
+              />
+              <DropdownMenuContent align="start" className="w-56">
+                {/* ------------- Advance ------------- */}
+                <DropdownMenuGroup>
+                  <DropdownMenuLabel className="text-muted-foreground text-xs font-medium uppercase tracking-wide">
+                    Advance
+                  </DropdownMenuLabel>
+                  <DropdownMenuItem onClick={handleQualify}>
+                    Qualify selected
+                  </DropdownMenuItem>
+                  <DropdownMenuSub>
+                    <DropdownMenuSubTrigger disabled={!hasTeam}>
+                      Assign to…
+                    </DropdownMenuSubTrigger>
+                    <DropdownMenuSubContent className="w-56">
+                      {hasTeam ? (
+                        <>
+                          <DropdownMenuItem
+                            onClick={() => handleAssign(null)}
+                          >
+                            Unassign
+                          </DropdownMenuItem>
+                          <DropdownMenuSeparator />
+                          {teamMembers.map((m) => (
+                            <DropdownMenuItem
+                              key={m.id}
+                              onClick={() => handleAssign(m.id)}
+                            >
+                              {m.id === currentUserId
+                                ? `${m.email} (me)`
+                                : m.email}
+                            </DropdownMenuItem>
+                          ))}
+                        </>
+                      ) : (
+                        <DropdownMenuItem disabled>
+                          No team members
+                        </DropdownMenuItem>
+                      )}
+                    </DropdownMenuSubContent>
+                  </DropdownMenuSub>
+                </DropdownMenuGroup>
+
+                <DropdownMenuSeparator />
+
+                {/* ------------- Enrich ------------- */}
+                <DropdownMenuGroup>
+                  <DropdownMenuLabel className="text-muted-foreground text-xs font-medium uppercase tracking-wide">
+                    Enrich
+                  </DropdownMenuLabel>
+                  <DropdownMenuItem onClick={handleVerifyAddress}>
+                    Verify address (CASS)
+                  </DropdownMenuItem>
+                  <DropdownMenuItem disabled>
+                    Skip trace
+                    <span className="text-muted-foreground ml-2 text-[10px] uppercase">
+                      Coming soon
+                    </span>
+                  </DropdownMenuItem>
+                </DropdownMenuGroup>
+
+                <DropdownMenuSeparator />
+
+                {/* ------------- Organize ------------- */}
+                <DropdownMenuGroup>
+                  <DropdownMenuLabel className="text-muted-foreground text-xs font-medium uppercase tracking-wide">
+                    Organize
+                  </DropdownMenuLabel>
+                  <DropdownMenuSub>
+                    <DropdownMenuSubTrigger disabled={!hasLists}>
+                      Add to list…
+                    </DropdownMenuSubTrigger>
+                    <DropdownMenuSubContent className="max-h-72 w-56 overflow-y-auto">
+                      {hasLists ? (
+                        lists.map((l) => (
+                          <DropdownMenuItem
+                            key={l.id}
+                            onClick={() => handleAddToList(l.id)}
+                          >
+                            {l.color ? (
+                              <span
+                                className="mr-2 size-2.5 rounded-full"
+                                style={{ backgroundColor: l.color }}
+                              />
+                            ) : null}
+                            {l.name}
+                          </DropdownMenuItem>
+                        ))
+                      ) : (
+                        <DropdownMenuItem disabled>No lists</DropdownMenuItem>
+                      )}
+                    </DropdownMenuSubContent>
+                  </DropdownMenuSub>
+                  <DropdownMenuSub>
+                    <DropdownMenuSubTrigger disabled={!hasLists}>
+                      Remove from list…
+                    </DropdownMenuSubTrigger>
+                    <DropdownMenuSubContent className="max-h-72 w-56 overflow-y-auto">
+                      {hasLists ? (
+                        lists.map((l) => (
+                          <DropdownMenuItem
+                            key={l.id}
+                            onClick={() => handleRemoveFromList(l.id)}
+                          >
+                            {l.name}
+                          </DropdownMenuItem>
+                        ))
+                      ) : (
+                        <DropdownMenuItem disabled>No lists</DropdownMenuItem>
+                      )}
+                    </DropdownMenuSubContent>
+                  </DropdownMenuSub>
+                  <DropdownMenuSub>
+                    <DropdownMenuSubTrigger disabled={!hasTags}>
+                      Apply tag…
+                    </DropdownMenuSubTrigger>
+                    <DropdownMenuSubContent className="max-h-72 w-56 overflow-y-auto">
+                      {hasTags ? (
+                        tags.map((t) => (
+                          <DropdownMenuItem
+                            key={t.id}
+                            onClick={() => handleApplyTag(t.id)}
+                          >
+                            #{t.name}
+                          </DropdownMenuItem>
+                        ))
+                      ) : (
+                        <DropdownMenuItem disabled>
+                          No custom tags
+                        </DropdownMenuItem>
+                      )}
+                    </DropdownMenuSubContent>
+                  </DropdownMenuSub>
+                  <DropdownMenuSub>
+                    <DropdownMenuSubTrigger>
+                      Set motivation…
+                    </DropdownMenuSubTrigger>
+                    <DropdownMenuSubContent className="w-40">
+                      {MOTIVATION_OPTIONS.map((m) => (
+                        <DropdownMenuItem
+                          key={m.label}
+                          onClick={() => handleSetMotivation(m.value)}
+                          className="gap-2"
+                        >
+                          <span className={`size-2 rounded-full ${m.dot}`} />
+                          {m.label}
+                        </DropdownMenuItem>
+                      ))}
+                    </DropdownMenuSubContent>
+                  </DropdownMenuSub>
+                </DropdownMenuGroup>
+
+                <DropdownMenuSeparator />
+
+                {/* ------------- Danger zone ------------- */}
+                <DropdownMenuGroup>
+                  <DropdownMenuLabel className="text-muted-foreground text-xs font-medium uppercase tracking-wide">
+                    Danger zone
+                  </DropdownMenuLabel>
+                  <DropdownMenuItem
+                    onClick={handleDelete}
+                    disabled={!canDelete}
+                    className="text-destructive focus:text-destructive"
+                  >
+                    Delete
+                    {!canDelete ? (
+                      <span className="text-muted-foreground ml-2 text-[10px] uppercase">
+                        Admin only
+                      </span>
+                    ) : null}
+                  </DropdownMenuItem>
+                </DropdownMenuGroup>
+              </DropdownMenuContent>
+            </DropdownMenu>
             <Button
               variant="ghost"
               size="sm"
@@ -137,7 +464,7 @@ export function ProspectsTable({ prospects }: Props) {
           </>
         ) : (
           <div className="text-muted-foreground text-sm">
-            Select prospects to qualify them into the leads pipeline.
+            Select prospects to open the Actions menu.
           </div>
         )}
       </div>
@@ -165,14 +492,13 @@ export function ProspectsTable({ prospects }: Props) {
               <TableHead>Market</TableHead>
               <TableHead>CASS</TableHead>
               <TableHead>Vacant</TableHead>
-              <TableHead className="w-28 text-right">Action</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {prospects.length === 0 ? (
               <TableRow>
                 <TableCell
-                  colSpan={9}
+                  colSpan={8}
                   className="text-muted-foreground py-8 text-center"
                 >
                   No prospects. Import a CSV to fill the data lake.
@@ -220,19 +546,6 @@ export function ProspectsTable({ prospects }: Props) {
                         : p.is_vacant === false
                           ? "No"
                           : "—"}
-                    </TableCell>
-                    <TableCell
-                      className="text-right"
-                      onClick={(e) => e.stopPropagation()}
-                    >
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        disabled={pending}
-                        onClick={() => handleQualifyOne(p.id, p.address)}
-                      >
-                        Qualify
-                      </Button>
                     </TableCell>
                   </TableRow>
                 );

@@ -1,9 +1,17 @@
 import Link from "next/link";
 
 import { Button, buttonVariants } from "@/components/ui/button";
+import { isAdminEmail } from "@/lib/auth/allowlist";
+import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
 
-import { ProspectsTable, type ProspectRow } from "./prospects-table";
+import {
+  ProspectsTable,
+  type ListOption,
+  type ProspectRow,
+  type TagOption,
+  type TeamMemberOption,
+} from "./prospects-table";
 
 const PAGE_SIZE = 50;
 
@@ -25,6 +33,10 @@ export default async function PropertiesPage({
   const to = from + PAGE_SIZE - 1;
 
   const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+
   const { data: properties, count, error } = await supabase
     .from("properties")
     .select(
@@ -32,6 +44,7 @@ export default async function PropertiesPage({
       { count: "exact" },
     )
     .eq("status", "prospect")
+    .is("deleted_at", null)
     .order("created_at", { ascending: false })
     .range(from, to);
 
@@ -51,6 +64,52 @@ export default async function PropertiesPage({
     is_vacant: p.is_vacant,
     created_at: p.created_at,
   }));
+
+  // Active lists — feed the "Add to list" / "Remove from list" submenus.
+  // Archived lists are hidden from the picker (they'd be a noisy confusion
+  // vector); users can unarchive via /lists if they want them back.
+  const { data: listRows } = await supabase
+    .from("lists")
+    .select("id, name, color, archived_at")
+    .is("archived_at", null)
+    .order("name", { ascending: true });
+  const lists: ListOption[] = (listRows ?? []).map((l) => ({
+    id: l.id,
+    name: l.name,
+    color: l.color,
+  }));
+
+  // Custom-category tags only — Feature 3's strict journey-marker model
+  // forbids applying source / uploaded / skip-trace tags by hand.
+  const { data: tagRows } = await supabase
+    .from("tags")
+    .select("id, name, color")
+    .eq("category", "custom")
+    .eq("system_managed", false)
+    .order("name", { ascending: true });
+  const tags: TagOption[] = (tagRows ?? []).map((t) => ({
+    id: t.id,
+    name: t.name,
+    color: t.color,
+  }));
+
+  // Team members for the Assign submenu. Admin-only API; non-fatal on
+  // failure (the Assign submenu just renders empty).
+  let teamMembers: TeamMemberOption[] = [];
+  try {
+    const admin = createAdminClient();
+    const { data: usersPage } = await admin.auth.admin.listUsers({
+      perPage: 200,
+    });
+    teamMembers = (usersPage?.users ?? [])
+      .filter((u) => !!u.email)
+      .map((u) => ({ id: u.id, email: u.email as string }))
+      .sort((a, b) => a.email.localeCompare(b.email));
+  } catch {
+    // Leave teamMembers empty — submenu renders a subtle empty state.
+  }
+
+  const isAdmin = isAdminEmail(user?.email);
 
   return (
     <div className="flex flex-col gap-4 p-6">
@@ -74,7 +133,14 @@ export default async function PropertiesPage({
         </div>
       ) : null}
 
-      <ProspectsTable prospects={prospects} />
+      <ProspectsTable
+        prospects={prospects}
+        lists={lists}
+        tags={tags}
+        teamMembers={teamMembers}
+        currentUserId={user?.id ?? null}
+        canDelete={isAdmin}
+      />
 
       {totalPages > 1 && (
         <div className="flex items-center justify-between">

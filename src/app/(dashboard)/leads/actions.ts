@@ -1,5 +1,9 @@
 "use server";
 
+import { after } from "next/server";
+
+import { isAdminEmail } from "@/lib/auth/allowlist";
+import { runCassEnrichment } from "@/lib/enrichment/cass-job";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
 import { errFromUnknown, ok, type Result } from "@/lib/errors/result";
@@ -302,6 +306,474 @@ export async function qualifyLeadsBulk(
       extra: { count: propertyIds.length },
     });
     return errFromUnknown(e, "QUALIFY_BULK_FAILED");
+  }
+}
+
+/**
+ * Revert an already-qualified lead back to `prospect`. Used for the
+ * "I qualified that by mistake" undo on the lead-detail status dropdown.
+ * Clears `qualified_at` + `qualified_by` so a future qualify stamps fresh
+ * values. No-op if the lead is already a prospect.
+ *
+ * Intentionally does NOT restore any prior status chain — the VA picks
+ * `Prospect` explicitly, and a re-qualify is one click away.
+ */
+export async function revertToProspect(
+  propertyId: string,
+): Promise<Result<null>> {
+  try {
+    const supabase = await createClient();
+    const { data: current, error: lookupErr } = await supabase
+      .from("properties")
+      .select("status")
+      .eq("id", propertyId)
+      .maybeSingle();
+    if (lookupErr) {
+      return {
+        ok: false,
+        error: { code: "LEAD_FETCH_FAILED", message: lookupErr.message },
+      };
+    }
+    if (!current) {
+      return {
+        ok: false,
+        error: { code: "LEAD_NOT_FOUND", message: "Lead not found." },
+      };
+    }
+    if (current.status === "prospect") {
+      // Already a prospect — nothing to do.
+      return ok(null);
+    }
+
+    const nowIso = new Date().toISOString();
+    const { error } = await supabase
+      .from("properties")
+      .update({
+        status: "prospect",
+        qualified_at: null,
+        qualified_by: null,
+        updated_at: nowIso,
+      })
+      .eq("id", propertyId);
+    if (error) {
+      return {
+        ok: false,
+        error: { code: "REVERT_FAILED", message: error.message },
+      };
+    }
+    return ok(null);
+  } catch (e) {
+    reportError(e, {
+      tags: { surface: "revert_to_prospect" },
+      extra: { propertyId },
+    });
+    return errFromUnknown(e, "REVERT_FAILED");
+  }
+}
+
+// ============================================================================
+// Bulk actions for /properties (Feature 4 Actions dropdown)
+//
+// Every bulk action follows the same shape: return ok with a per-id
+// `failed[]` array rather than short-circuiting. That keeps the UX
+// truthful — "qualified 47, 3 failed" beats "action errored out and
+// I don't know what landed".
+// ============================================================================
+
+export type BulkOutcome = {
+  succeeded: number;
+  skipped: number;
+  failed: { propertyId: string; message: string }[];
+};
+
+export async function assignLeadsBulk(
+  propertyIds: string[],
+  userId: string | null,
+): Promise<Result<BulkOutcome>> {
+  if (propertyIds.length === 0) {
+    return ok({ succeeded: 0, skipped: 0, failed: [] });
+  }
+  try {
+    const supabase = await createClient();
+    const { error } = await supabase
+      .from("properties")
+      .update({
+        assigned_user_id: userId,
+        updated_at: new Date().toISOString(),
+      })
+      .in("id", propertyIds);
+    if (error) {
+      return {
+        ok: false,
+        error: { code: "ASSIGN_BULK_FAILED", message: error.message },
+      };
+    }
+    return ok({ succeeded: propertyIds.length, skipped: 0, failed: [] });
+  } catch (e) {
+    reportError(e, {
+      tags: { surface: "assign_leads_bulk" },
+      extra: { count: propertyIds.length },
+    });
+    return errFromUnknown(e, "ASSIGN_BULK_FAILED");
+  }
+}
+
+export async function addPropertiesToListBulk(
+  propertyIds: string[],
+  listId: string,
+): Promise<Result<BulkOutcome>> {
+  if (propertyIds.length === 0) {
+    return ok({ succeeded: 0, skipped: 0, failed: [] });
+  }
+  try {
+    const supabase = await createClient();
+    // Look up org_ids so we satisfy property_lists.org_id NOT NULL. Every
+    // property has an org; the query scopes to the ids we got, so RLS
+    // already filtered out cross-org rows if any.
+    const { data: props, error: lookupErr } = await supabase
+      .from("properties")
+      .select("id, org_id")
+      .in("id", propertyIds);
+    if (lookupErr) {
+      return {
+        ok: false,
+        error: { code: "ADD_TO_LIST_FAILED", message: lookupErr.message },
+      };
+    }
+    const foundIds = new Set((props ?? []).map((p) => p.id));
+    const failed: BulkOutcome["failed"] = [];
+    for (const id of propertyIds) {
+      if (!foundIds.has(id)) {
+        failed.push({ propertyId: id, message: "Property not found" });
+      }
+    }
+
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    const nowIso = new Date().toISOString();
+    const rows = (props ?? []).map((p) => ({
+      org_id: p.org_id,
+      property_id: p.id,
+      list_id: listId,
+      last_added_at: nowIso,
+      last_added_by: user?.id ?? null,
+    }));
+    if (rows.length > 0) {
+      const { error } = await supabase
+        .from("property_lists")
+        .upsert(rows, {
+          onConflict: "property_id,list_id",
+          ignoreDuplicates: false,
+        });
+      if (error) {
+        return {
+          ok: false,
+          error: { code: "ADD_TO_LIST_FAILED", message: error.message },
+        };
+      }
+    }
+    return ok({
+      succeeded: rows.length,
+      skipped: 0,
+      failed,
+    });
+  } catch (e) {
+    reportError(e, {
+      tags: { surface: "add_properties_to_list_bulk" },
+      extra: { count: propertyIds.length, listId },
+    });
+    return errFromUnknown(e, "ADD_TO_LIST_FAILED");
+  }
+}
+
+export async function removePropertiesFromListBulk(
+  propertyIds: string[],
+  listId: string,
+): Promise<Result<BulkOutcome>> {
+  if (propertyIds.length === 0) {
+    return ok({ succeeded: 0, skipped: 0, failed: [] });
+  }
+  try {
+    const supabase = await createClient();
+    const { error, count } = await supabase
+      .from("property_lists")
+      .delete({ count: "exact" })
+      .eq("list_id", listId)
+      .in("property_id", propertyIds);
+    if (error) {
+      return {
+        ok: false,
+        error: { code: "REMOVE_FROM_LIST_FAILED", message: error.message },
+      };
+    }
+    const succeeded = count ?? 0;
+    return ok({
+      succeeded,
+      skipped: propertyIds.length - succeeded,
+      failed: [],
+    });
+  } catch (e) {
+    reportError(e, {
+      tags: { surface: "remove_properties_from_list_bulk" },
+      extra: { count: propertyIds.length, listId },
+    });
+    return errFromUnknown(e, "REMOVE_FROM_LIST_FAILED");
+  }
+}
+
+export async function applyTagBulk(
+  propertyIds: string[],
+  tagId: string,
+): Promise<Result<BulkOutcome>> {
+  if (propertyIds.length === 0) {
+    return ok({ succeeded: 0, skipped: 0, failed: [] });
+  }
+  try {
+    const supabase = await createClient();
+    const { data: tag, error: tagErr } = await supabase
+      .from("tags")
+      .select("category, system_managed")
+      .eq("id", tagId)
+      .maybeSingle();
+    if (tagErr) {
+      return {
+        ok: false,
+        error: { code: "TAG_FETCH_FAILED", message: tagErr.message },
+      };
+    }
+    if (!tag) {
+      return {
+        ok: false,
+        error: { code: "TAG_NOT_FOUND", message: "Tag not found." },
+      };
+    }
+    // Strict journey-marker model: only custom tags can be applied by
+    // users. Auto tags (source:*, uploaded:*, skip-trace etc.) are
+    // system_managed and must not be hand-applied.
+    if (tag.category !== "custom" || tag.system_managed) {
+      return {
+        ok: false,
+        error: {
+          code: "TAG_NOT_APPLICABLE",
+          message: "Only custom tags can be bulk-applied.",
+        },
+      };
+    }
+
+    const { data: props, error: lookupErr } = await supabase
+      .from("properties")
+      .select("id, org_id")
+      .in("id", propertyIds);
+    if (lookupErr) {
+      return {
+        ok: false,
+        error: { code: "APPLY_TAG_FAILED", message: lookupErr.message },
+      };
+    }
+    const foundIds = new Set((props ?? []).map((p) => p.id));
+    const failed: BulkOutcome["failed"] = propertyIds
+      .filter((id) => !foundIds.has(id))
+      .map((id) => ({ propertyId: id, message: "Property not found" }));
+
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    const rows = (props ?? []).map((p) => ({
+      org_id: p.org_id,
+      property_id: p.id,
+      tag_id: tagId,
+      applied_by: user?.id ?? null,
+      source: "manual",
+    }));
+    if (rows.length > 0) {
+      const { error } = await supabase.from("property_tags").upsert(rows, {
+        onConflict: "property_id,tag_id",
+        ignoreDuplicates: true,
+      });
+      if (error) {
+        return {
+          ok: false,
+          error: { code: "APPLY_TAG_FAILED", message: error.message },
+        };
+      }
+    }
+    return ok({ succeeded: rows.length, skipped: 0, failed });
+  } catch (e) {
+    reportError(e, {
+      tags: { surface: "apply_tag_bulk" },
+      extra: { count: propertyIds.length, tagId },
+    });
+    return errFromUnknown(e, "APPLY_TAG_FAILED");
+  }
+}
+
+export async function setMotivationBulk(
+  propertyIds: string[],
+  level: MotivationLevel | null,
+): Promise<Result<BulkOutcome>> {
+  if (propertyIds.length === 0) {
+    return ok({ succeeded: 0, skipped: 0, failed: [] });
+  }
+  if (level !== null && !VALID_MOTIVATION_LEVELS.includes(level)) {
+    return {
+      ok: false,
+      error: {
+        code: "INVALID_MOTIVATION",
+        message: `Unknown motivation level: ${level}`,
+      },
+    };
+  }
+  try {
+    const supabase = await createClient();
+    const { error } = await supabase
+      .from("properties")
+      .update({
+        motivation_level: level,
+        updated_at: new Date().toISOString(),
+      })
+      .in("id", propertyIds);
+    if (error) {
+      return {
+        ok: false,
+        error: { code: "SET_MOTIVATION_FAILED", message: error.message },
+      };
+    }
+    return ok({ succeeded: propertyIds.length, skipped: 0, failed: [] });
+  } catch (e) {
+    reportError(e, {
+      tags: { surface: "set_motivation_bulk" },
+      extra: { count: propertyIds.length, level },
+    });
+    return errFromUnknown(e, "SET_MOTIVATION_FAILED");
+  }
+}
+
+/**
+ * Bulk soft-delete. Admin-only — a VA accidentally nuking 500 prospects
+ * from the wizard picker is exactly the footgun the soft-delete column
+ * was added for, but the admin guard is the first line of defense.
+ * Recovery is a single UPDATE (deleted_at = NULL) for an admin with DB
+ * access.
+ */
+export async function deletePropertiesBulk(
+  propertyIds: string[],
+): Promise<Result<BulkOutcome>> {
+  if (propertyIds.length === 0) {
+    return ok({ succeeded: 0, skipped: 0, failed: [] });
+  }
+  try {
+    const supabase = await createClient();
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    if (!isAdminEmail(user?.email)) {
+      return {
+        ok: false,
+        error: {
+          code: "FORBIDDEN",
+          message: "Only admins can delete properties.",
+        },
+      };
+    }
+    const { error } = await supabase
+      .from("properties")
+      .update({
+        deleted_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      })
+      .in("id", propertyIds)
+      .is("deleted_at", null);
+    if (error) {
+      return {
+        ok: false,
+        error: { code: "DELETE_FAILED", message: error.message },
+      };
+    }
+    return ok({ succeeded: propertyIds.length, skipped: 0, failed: [] });
+  } catch (e) {
+    reportError(e, {
+      tags: { surface: "delete_properties_bulk" },
+      extra: { count: propertyIds.length },
+    });
+    return errFromUnknown(e, "DELETE_FAILED");
+  }
+}
+
+/**
+ * Kick off a bulk CASS verify against the selection. Creates a job
+ * and runs the enrichment in the background via `after()` — the UI
+ * toast sends the VA to /jobs to watch progress. Mirrors how CSV
+ * import spawns its CASS child job, but without a parent_job_id since
+ * this is a standalone action.
+ */
+export async function verifyPropertiesBulk(
+  propertyIds: string[],
+): Promise<Result<{ jobId: string }>> {
+  if (propertyIds.length === 0) {
+    return {
+      ok: false,
+      error: {
+        code: "EMPTY_SELECTION",
+        message: "Select at least one property to verify.",
+      },
+    };
+  }
+  try {
+    const supabase = await createClient();
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+
+    const { data: job, error } = await supabase
+      .from("jobs")
+      .insert({
+        type: "cass_dsf2_ncoa",
+        status: "queued",
+        created_by: user?.id ?? null,
+        total_items: propertyIds.length,
+        title: `CASS verify ${propertyIds.length} propert${propertyIds.length === 1 ? "y" : "ies"}`,
+        description: "Bulk verify from /properties",
+        provider: "smartystreets",
+        input_params: { property_ids: propertyIds },
+      })
+      .select("id")
+      .single();
+    if (error || !job) {
+      return {
+        ok: false,
+        error: {
+          code: "VERIFY_JOB_CREATE_FAILED",
+          message: error?.message ?? "Job creation failed",
+        },
+      };
+    }
+
+    after(async () => {
+      try {
+        // Re-create a fresh server client inside `after()` — the outer
+        // request's connection may already be closed by the time the
+        // background callback runs.
+        const bgClient = await createClient();
+        await runCassEnrichment(bgClient, {
+          jobId: job.id,
+          propertyIds,
+        });
+      } catch (e) {
+        reportError(e, {
+          tags: { surface: "verify_properties_bulk_background" },
+          extra: { jobId: job.id, count: propertyIds.length },
+        });
+      }
+    });
+
+    return ok({ jobId: job.id });
+  } catch (e) {
+    reportError(e, {
+      tags: { surface: "verify_properties_bulk" },
+      extra: { count: propertyIds.length },
+    });
+    return errFromUnknown(e, "VERIFY_JOB_FAILED");
   }
 }
 

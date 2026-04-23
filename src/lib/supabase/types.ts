@@ -761,6 +761,7 @@ export type Database = {
           city: string | null
           county_id: string | null
           created_at: string
+          deleted_at: string | null
           distress_flags: string[]
           equity_estimate: number | null
           fips_code: string | null
@@ -812,6 +813,7 @@ export type Database = {
           city?: string | null
           county_id?: string | null
           created_at?: string
+          deleted_at?: string | null
           distress_flags?: string[]
           equity_estimate?: number | null
           fips_code?: string | null
@@ -863,6 +865,7 @@ export type Database = {
           city?: string | null
           county_id?: string | null
           created_at?: string
+          deleted_at?: string | null
           distress_flags?: string[]
           equity_estimate?: number | null
           fips_code?: string | null
@@ -989,6 +992,51 @@ export type Database = {
           },
         ]
       }
+      property_merges: {
+        Row: {
+          id: string
+          keeper_id: string
+          loser_id: string
+          loser_snapshot: Json
+          merged_at: string
+          merged_by: string | null
+          org_id: string
+        }
+        Insert: {
+          id?: string
+          keeper_id: string
+          loser_id: string
+          loser_snapshot: Json
+          merged_at?: string
+          merged_by?: string | null
+          org_id?: string
+        }
+        Update: {
+          id?: string
+          keeper_id?: string
+          loser_id?: string
+          loser_snapshot?: Json
+          merged_at?: string
+          merged_by?: string | null
+          org_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "property_merges_keeper_id_fkey"
+            columns: ["keeper_id"]
+            isOneToOne: false
+            referencedRelation: "properties"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "property_merges_org_id_fkey"
+            columns: ["org_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       property_tags: {
         Row: {
           applied_at: string
@@ -1075,51 +1123,6 @@ export type Database = {
         Relationships: [
           {
             foreignKeyName: "tags_org_id_fkey"
-            columns: ["org_id"]
-            isOneToOne: false
-            referencedRelation: "organizations"
-            referencedColumns: ["id"]
-          },
-        ]
-      }
-      property_merges: {
-        Row: {
-          id: string
-          keeper_id: string
-          loser_id: string
-          loser_snapshot: Json
-          merged_at: string
-          merged_by: string | null
-          org_id: string
-        }
-        Insert: {
-          id?: string
-          keeper_id: string
-          loser_id: string
-          loser_snapshot: Json
-          merged_at?: string
-          merged_by?: string | null
-          org_id?: string
-        }
-        Update: {
-          id?: string
-          keeper_id?: string
-          loser_id?: string
-          loser_snapshot?: Json
-          merged_at?: string
-          merged_by?: string | null
-          org_id?: string
-        }
-        Relationships: [
-          {
-            foreignKeyName: "property_merges_keeper_id_fkey"
-            columns: ["keeper_id"]
-            isOneToOne: false
-            referencedRelation: "properties"
-            referencedColumns: ["id"]
-          },
-          {
-            foreignKeyName: "property_merges_org_id_fkey"
             columns: ["org_id"]
             isOneToOne: false
             referencedRelation: "organizations"

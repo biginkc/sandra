@@ -9,18 +9,20 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { callAction } from "@/lib/errors/call-action";
 
 import {
+  revertToProspect,
   updatePropertyStatus,
   type PropertyStatus,
 } from "../actions";
 
-// 'prospect' intentionally omitted from the status-change dropdown —
-// a VA on the lead detail has already qualified the record, going back
-// to prospect is a deletion-grade rollback handled elsewhere (not in v1).
+// 'prospect' is handled separately at the bottom of the dropdown — it's
+// a revert action that also clears qualified_at / qualified_by, not just
+// a status flip, so it lives under its own menu item.
 const STATUS_ORDER: readonly PropertyStatus[] = [
   "new_lead",
   "contacted",
@@ -81,6 +83,31 @@ export function LeadStatusWidget({
     });
   };
 
+  const revert = () => {
+    if (status === "prospect" || pending) return;
+    if (
+      !window.confirm(
+        `Move ${address} back to Prospect? This reverses the qualify and removes the lead from the /leads kanban.`,
+      )
+    ) {
+      return;
+    }
+    const previous = status;
+    setStatus("prospect"); // optimistic
+
+    startTransition(async () => {
+      const result = await callAction(revertToProspect(propertyId), {
+        successMessage: `Reverted ${address} to Prospect`,
+        fallbackMessage: `Could not revert ${address}`,
+      });
+      if (!result.ok) {
+        setStatus(previous);
+      } else {
+        router.refresh();
+      }
+    });
+  };
+
   return (
     <DropdownMenu>
       <DropdownMenuTrigger
@@ -107,6 +134,14 @@ export function LeadStatusWidget({
             {s === status ? <CheckIcon className="size-4" /> : null}
           </DropdownMenuItem>
         ))}
+        <DropdownMenuSeparator />
+        <DropdownMenuItem
+          onClick={revert}
+          disabled={status === "prospect"}
+          className="text-muted-foreground"
+        >
+          Move back to Prospect
+        </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
   );

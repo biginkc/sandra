@@ -31,6 +31,7 @@ export default async function LeadsPage() {
        homeowner:contacts!properties_homeowner_contact_id_fkey(first_name, last_name, entity_name)`,
     )
     .neq("status", "prospect")
+    .is("deleted_at", null)
     .order("created_at", { ascending: false })
     .limit(500);
 
