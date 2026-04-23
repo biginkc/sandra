@@ -50,6 +50,12 @@ export default async function DashboardLayout({
             Lists
           </Link>
           <Link
+            href="/sequences"
+            className="text-muted-foreground hover:text-foreground"
+          >
+            Sequences
+          </Link>
+          <Link
             href="/import"
             className="text-muted-foreground hover:text-foreground"
           >
