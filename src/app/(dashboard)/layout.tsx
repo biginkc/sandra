@@ -4,6 +4,7 @@ import { redirect } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
 import { ConnectionBanner } from "@/components/connection-banner";
+import { DashboardSidebar } from "@/components/dashboard-sidebar";
 import { ErrorBoundary } from "@/components/error-boundary";
 import { JobFailureNotifier } from "@/components/job-failure-notifier";
 import { NotificationsBell } from "@/components/notifications-bell";
@@ -23,79 +24,52 @@ export default async function DashboardLayout({
   const showAdmin = isAdminEmail(user.email);
 
   return (
-    <div className="flex min-h-screen flex-col">
+    <div className="flex min-h-screen">
       <ConnectionBanner />
       <JobFailureNotifier />
-      <header className="border-border flex items-center gap-6 border-b px-6 py-3">
-        <Link href="/properties" className="font-semibold">
-          Sandra CRM
-        </Link>
-        <nav className="flex items-center gap-4 text-sm">
-          <Link
-            href="/leads"
-            className="text-muted-foreground hover:text-foreground"
-          >
-            Leads
+
+      {/* Left sidebar — fixed width, always visible on ≥md screens. On
+          smaller screens it collapses to a thin stripe; primary user is
+          on desktop today so this is the honest tradeoff. */}
+      <aside className="border-border bg-muted/30 sticky top-0 hidden h-screen w-52 shrink-0 flex-col border-r md:flex">
+        <div className="border-border flex items-center gap-2 border-b px-4 py-3">
+          <Link href="/properties" className="font-semibold">
+            Sandra CRM
           </Link>
+        </div>
+        <DashboardSidebar showAdmin={showAdmin} />
+        <div className="border-border flex items-center gap-2 border-t px-4 py-3 text-xs">
+          <span className="text-muted-foreground truncate" title={user.email ?? ""}>
+            {user.email}
+          </span>
+        </div>
+      </aside>
+
+      {/* Main column — header + content. Header only carries items that
+          stay top-right: bell, sign-out. */}
+      <div className="flex flex-1 flex-col">
+        <header className="border-border flex items-center justify-between gap-3 border-b px-6 py-2 text-sm md:justify-end">
+          {/* Mobile-only brand mark since the sidebar is hidden there. */}
           <Link
             href="/properties"
-            className="text-muted-foreground hover:text-foreground"
+            className="font-semibold md:hidden"
           >
-            Prospects
+            Sandra CRM
           </Link>
-          <Link
-            href="/lists"
-            className="text-muted-foreground hover:text-foreground"
-          >
-            Lists
-          </Link>
-          <Link
-            href="/sequences"
-            className="text-muted-foreground hover:text-foreground"
-          >
-            Sequences
-          </Link>
-          <Link
-            href="/import"
-            className="text-muted-foreground hover:text-foreground"
-          >
-            Import
-          </Link>
-          <Link
-            href="/messages"
-            className="text-muted-foreground hover:text-foreground"
-          >
-            Messages
-          </Link>
-          <Link
-            href="/jobs"
-            className="text-muted-foreground hover:text-foreground"
-          >
-            Jobs
-          </Link>
-          {showAdmin ? (
-            <Link
-              href="/admin/users"
-              className="text-muted-foreground hover:text-foreground"
-            >
-              Team
-            </Link>
-          ) : null}
-        </nav>
-        <div className="ml-auto flex items-center gap-3 text-sm">
-          <NotificationsBell userId={user.id} />
-          <span className="text-muted-foreground">{user.email}</span>
-          <Separator orientation="vertical" className="h-5" />
-          <form action="/auth/signout" method="post">
-            <Button type="submit" variant="ghost" size="sm">
-              Sign out
-            </Button>
-          </form>
-        </div>
-      </header>
-      <main className="flex flex-1 flex-col">
-        <ErrorBoundary surface="dashboard">{children}</ErrorBoundary>
-      </main>
+          <div className="flex items-center gap-3">
+            <NotificationsBell userId={user.id} />
+            <Separator orientation="vertical" className="hidden h-5 md:block" />
+            <form action="/auth/signout" method="post">
+              <Button type="submit" variant="ghost" size="sm">
+                Sign out
+              </Button>
+            </form>
+          </div>
+        </header>
+        <main className="flex flex-1 flex-col">
+          <ErrorBoundary surface="dashboard">{children}</ErrorBoundary>
+        </main>
+      </div>
     </div>
   );
 }
