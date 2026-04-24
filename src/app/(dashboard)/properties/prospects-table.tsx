@@ -41,6 +41,7 @@ import {
   verifyPropertiesBulk,
   type BulkOutcome,
 } from "../leads/actions";
+import { requestSkipTrace } from "@/lib/skip-trace/actions";
 
 export type ProspectRow = {
   id: string;
@@ -246,6 +247,37 @@ export function ProspectsTable({
     });
   };
 
+  const handleSkipTrace = () => {
+    const ids = selectedIds();
+    if (ids.length === 0) return;
+    if (ids.length > 500) {
+      toast.error(
+        `Cannot skip-trace more than 500 properties at once. Split into smaller batches.`,
+      );
+      return;
+    }
+    startTransition(async () => {
+      const result = await callAction(requestSkipTrace(ids), {
+        fallbackMessage: "Could not request skip trace",
+      });
+      if (result.ok) {
+        if (result.data.status === "queued") {
+          toast.success(
+            `Skip-trace started for ${ids.length} propert${ids.length === 1 ? "y" : "ies"}`,
+            { description: "Watch progress on /jobs" },
+          );
+        } else {
+          toast.success(
+            `Skip-trace request sent for ${ids.length} propert${ids.length === 1 ? "y" : "ies"}`,
+            { description: "Admin will approve on /jobs" },
+          );
+        }
+        setSelected(new Set());
+        router.refresh();
+      }
+    });
+  };
+
   const handleDelete = () => {
     const ids = selectedIds();
     if (ids.length === 0) return;
@@ -360,11 +392,8 @@ export function ProspectsTable({
                   <DropdownMenuItem onClick={handleVerifyAddress}>
                     Verify address (CASS)
                   </DropdownMenuItem>
-                  <DropdownMenuItem disabled>
+                  <DropdownMenuItem onClick={handleSkipTrace}>
                     Skip trace
-                    <span className="text-muted-foreground ml-2 text-[10px] uppercase">
-                      Coming soon
-                    </span>
                   </DropdownMenuItem>
                 </DropdownMenuGroup>
 

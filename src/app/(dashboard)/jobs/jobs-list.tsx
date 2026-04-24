@@ -27,6 +27,10 @@ import {
   isAwaitingManualStart,
 } from "@/lib/enrichment/cass-job";
 import { callAction } from "@/lib/errors/call-action";
+import {
+  approveSkipTraceJob,
+  denySkipTraceJob,
+} from "@/lib/skip-trace/actions";
 import { createClient } from "@/lib/supabase/client";
 import type { Database } from "@/lib/supabase/types";
 
@@ -34,7 +38,9 @@ import { startQueuedCassJob } from "./actions";
 
 type Job = Database["public"]["Tables"]["jobs"]["Row"];
 
-export function JobsList() {
+const TRACERFY_CREDITS_PER_LEAD = 1; // batch normal rate
+
+export function JobsList({ isAdmin }: { isAdmin: boolean }) {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -132,6 +138,10 @@ export function JobsList() {
                 job.type === "cass_dsf2_ncoa" &&
                 job.status === "queued" &&
                 isAwaitingManualStart(job.result_summary);
+              const canApproveSkipTrace =
+                isAdmin &&
+                job.type === "skip_trace" &&
+                job.status === "pending_approval";
               return (
                 <TableRow key={job.id}>
                   <TableCell className="font-medium">
@@ -166,6 +176,12 @@ export function JobsList() {
                         totalItems={job.total_items}
                       />
                     ) : null}
+                    {canApproveSkipTrace ? (
+                      <SkipTraceApproveButtons
+                        jobId={job.id}
+                        totalItems={job.total_items}
+                      />
+                    ) : null}
                   </TableCell>
                 </TableRow>
               );
@@ -183,8 +199,60 @@ function statusVariant(
   if (status === "completed") return "default";
   if (status === "failed") return "destructive";
   if (status === "partial") return "secondary";
-  if (status === "canceled") return "outline";
+  if (status === "canceled" || status === "denied") return "outline";
   return "secondary";
+}
+
+function SkipTraceApproveButtons({
+  jobId,
+  totalItems,
+}: {
+  jobId: string;
+  totalItems: number;
+}) {
+  const [pending, startTransition] = useTransition();
+  const estimatedCredits = totalItems * TRACERFY_CREDITS_PER_LEAD;
+
+  const onApprove = () => {
+    if (
+      !window.confirm(
+        `Approve skip-trace for ${totalItems} propert${totalItems === 1 ? "y" : "ies"}? Estimated cost: ${estimatedCredits} Tracerfy credit${estimatedCredits === 1 ? "" : "s"}.`,
+      )
+    )
+      return;
+    startTransition(async () => {
+      await callAction(approveSkipTraceJob(jobId), {
+        successMessage: "Skip-trace approved — running.",
+        fallbackMessage: "Could not approve",
+      });
+    });
+  };
+
+  const onDeny = () => {
+    const reason = window.prompt("Optional reason for denial:") ?? undefined;
+    startTransition(async () => {
+      await callAction(denySkipTraceJob(jobId, reason || undefined), {
+        successMessage: "Skip-trace denied.",
+        fallbackMessage: "Could not deny",
+      });
+    });
+  };
+
+  return (
+    <div className="flex justify-end gap-1">
+      <Button
+        variant="outline"
+        size="sm"
+        onClick={onDeny}
+        disabled={pending}
+      >
+        Deny
+      </Button>
+      <Button size="sm" onClick={onApprove} disabled={pending}>
+        Approve
+      </Button>
+    </div>
+  );
 }
 
 function StartCassButton({

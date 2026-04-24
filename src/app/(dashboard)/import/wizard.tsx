@@ -71,6 +71,10 @@ export type WizardState = {
   // property to. Empty/null = don't add to any list. On submit, the server
   // looks up a list by (org_id, name) and creates one if missing.
   listName: string | null;
+  /** Surface C: opt-in flag to also request skip-trace for the newly
+   *  imported properties. Default off. Only honored if total rows ≤ 500
+   *  (per the per-job cost cap). */
+  requestSkipTrace: boolean;
   headers: string[];
   rows: Record<string, string>[];
   mapping: Record<string, string | null>;
@@ -88,6 +92,7 @@ const initialState: WizardState = {
   source: null,
   market: null,
   listName: null,
+  requestSkipTrace: false,
   headers: [],
   rows: [],
   mapping: {},
@@ -109,6 +114,7 @@ export type WizardAction =
   | { type: "SET_SOURCE"; source: WizardSource }
   | { type: "SET_MARKET"; market: WizardMarket }
   | { type: "SET_LIST_NAME"; listName: string | null }
+  | { type: "SET_REQUEST_SKIP_TRACE"; requestSkipTrace: boolean }
   | { type: "SET_MAPPING_FIELD"; fieldId: string; header: string | null }
   | { type: "AUTODETECT_MAPPING" }
   | {
@@ -141,6 +147,8 @@ function reducer(state: WizardState, action: WizardAction): WizardState {
       return { ...state, market: action.market };
     case "SET_LIST_NAME":
       return { ...state, listName: action.listName };
+    case "SET_REQUEST_SKIP_TRACE":
+      return { ...state, requestSkipTrace: action.requestSkipTrace };
     case "SET_MAPPING_FIELD":
       return {
         ...state,
@@ -232,6 +240,7 @@ export function Wizard() {
           listName: state.listName?.trim() || null,
           mapping: state.mapping,
           rows: state.rows,
+          requestSkipTrace: state.requestSkipTrace,
         }),
         { successMessage: "Import started.", fallbackMessage: "Import failed to start" },
       );

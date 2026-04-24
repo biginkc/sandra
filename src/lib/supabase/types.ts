@@ -141,6 +141,36 @@ export type Database = {
           },
         ]
       }
+      skip_trace_cache: {
+        Row: {
+          id: string
+          provider: string
+          address_normalized: string
+          result: Json
+          match_count: number
+          cost_credits: number
+          created_at: string
+        }
+        Insert: {
+          id?: string
+          provider: string
+          address_normalized: string
+          result: Json
+          match_count?: number
+          cost_credits?: number
+          created_at?: string
+        }
+        Update: {
+          id?: string
+          provider?: string
+          address_normalized?: string
+          result?: Json
+          match_count?: number
+          cost_credits?: number
+          created_at?: string
+        }
+        Relationships: []
+      }
       consent_events: {
         Row: {
           channel: string
