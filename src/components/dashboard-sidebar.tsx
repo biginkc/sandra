@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  Bot,
   Briefcase,
   Download,
   LayoutDashboard,
@@ -78,24 +79,44 @@ export function DashboardSidebar({ showAdmin }: { showAdmin: boolean }) {
         );
       })}
       {showAdmin && (
-        <Link
-          href="/admin/users"
-          data-active={
-            pathname === "/admin/users" ||
-            pathname.startsWith("/admin/users/") ||
-            undefined
-          }
-          className={cn(
-            "mt-2 flex items-center gap-2 rounded-md px-3 py-1.5 transition-colors",
-            pathname === "/admin/users" ||
-              pathname.startsWith("/admin/users/")
-              ? "bg-accent text-foreground font-medium"
-              : "text-muted-foreground hover:bg-accent/60 hover:text-foreground",
-          )}
-        >
-          <Users className="h-4 w-4" aria-hidden />
-          <span>Team</span>
-        </Link>
+        <>
+          <Link
+            href="/admin/users"
+            data-active={
+              pathname === "/admin/users" ||
+              pathname.startsWith("/admin/users/") ||
+              undefined
+            }
+            className={cn(
+              "mt-2 flex items-center gap-2 rounded-md px-3 py-1.5 transition-colors",
+              pathname === "/admin/users" ||
+                pathname.startsWith("/admin/users/")
+                ? "bg-accent text-foreground font-medium"
+                : "text-muted-foreground hover:bg-accent/60 hover:text-foreground",
+            )}
+          >
+            <Users className="h-4 w-4" aria-hidden />
+            <span>Team</span>
+          </Link>
+          <Link
+            href="/settings/ai-responder"
+            data-active={
+              pathname === "/settings/ai-responder" ||
+              pathname.startsWith("/settings/ai-responder/") ||
+              undefined
+            }
+            className={cn(
+              "flex items-center gap-2 rounded-md px-3 py-1.5 transition-colors",
+              pathname === "/settings/ai-responder" ||
+                pathname.startsWith("/settings/ai-responder/")
+                ? "bg-accent text-foreground font-medium"
+                : "text-muted-foreground hover:bg-accent/60 hover:text-foreground",
+            )}
+          >
+            <Bot className="h-4 w-4" aria-hidden />
+            <span>AI responder</span>
+          </Link>
+        </>
       )}
     </nav>
   );

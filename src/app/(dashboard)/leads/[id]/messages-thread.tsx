@@ -146,6 +146,24 @@ function MessageBubble({ message }: { message: Message }) {
                 ).toUpperCase()}
               </Badge>
             )}
+          {outbound &&
+            message.metadata &&
+            typeof message.metadata === "object" &&
+            (message.metadata as { generated_by?: unknown }).generated_by ===
+              "ai_responder_v1" && (
+              <Badge
+                variant="outline"
+                className="border-primary-foreground/30 text-primary-foreground text-[10px]"
+                title={`AI-drafted · confidence ${
+                  typeof (message.metadata as { confidence?: unknown })
+                    .confidence === "number"
+                    ? ((message.metadata as { confidence: number }).confidence * 100).toFixed(0) + "%"
+                    : "—"
+                }`}
+              >
+                🤖 AI
+              </Badge>
+            )}
         </div>
       </div>
     </div>

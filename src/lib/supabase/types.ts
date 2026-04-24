@@ -56,6 +56,62 @@ export type Database = {
           },
         ]
       }
+      ai_responder_configs: {
+        Row: {
+          active: boolean
+          business_hours_only: boolean
+          created_at: string
+          created_by: string | null
+          daily_send_cap: number
+          escalation_keywords: string[]
+          id: string
+          max_turns: number
+          min_confidence: number
+          model: string
+          org_id: string
+          system_prompt: string
+          updated_at: string
+        }
+        Insert: {
+          active?: boolean
+          business_hours_only?: boolean
+          created_at?: string
+          created_by?: string | null
+          daily_send_cap?: number
+          escalation_keywords?: string[]
+          id?: string
+          max_turns?: number
+          min_confidence?: number
+          model?: string
+          org_id: string
+          system_prompt: string
+          updated_at?: string
+        }
+        Update: {
+          active?: boolean
+          business_hours_only?: boolean
+          created_at?: string
+          created_by?: string | null
+          daily_send_cap?: number
+          escalation_keywords?: string[]
+          id?: string
+          max_turns?: number
+          min_confidence?: number
+          model?: string
+          org_id?: string
+          system_prompt?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "ai_responder_configs_org_id_fkey"
+            columns: ["org_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       cass_cache: {
         Row: {
           cass_response: Json
@@ -795,6 +851,7 @@ export type Database = {
           address: string
           address_normalized: string | null
           agent_contact_id: string | null
+          ai_responder_disabled: boolean
           apn: string | null
           apn_normalized: string | null
           arv: number | null
@@ -804,6 +861,7 @@ export type Database = {
           beds: number | null
           cass_raw_response: Json | null
           cass_status: string
+          needs_human_attention: boolean
           cass_verified_at: string | null
           city: string | null
           county_id: string | null
@@ -847,6 +905,7 @@ export type Database = {
           address: string
           address_normalized?: string | null
           agent_contact_id?: string | null
+          ai_responder_disabled?: boolean
           apn?: string | null
           apn_normalized?: string | null
           arv?: number | null
@@ -857,6 +916,7 @@ export type Database = {
           cass_raw_response?: Json | null
           cass_status?: string
           cass_verified_at?: string | null
+          needs_human_attention?: boolean
           city?: string | null
           county_id?: string | null
           created_at?: string
@@ -899,6 +959,7 @@ export type Database = {
           address?: string
           address_normalized?: string | null
           agent_contact_id?: string | null
+          ai_responder_disabled?: boolean
           apn?: string | null
           apn_normalized?: string | null
           arv?: number | null
@@ -908,6 +969,7 @@ export type Database = {
           beds?: number | null
           cass_raw_response?: Json | null
           cass_status?: string
+          needs_human_attention?: boolean
           cass_verified_at?: string | null
           city?: string | null
           county_id?: string | null
