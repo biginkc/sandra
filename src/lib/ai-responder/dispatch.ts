@@ -74,11 +74,9 @@ export async function dispatchAiResponse(
   });
 
   if (keywordMatch) {
-    await markPropertyNeedsAttention(supabase, input.propertyId);
-    return {
-      outcome: "escalated",
-      reason: `keyword:${keywordMatch.tier}`,
-    };
+    const reason = `keyword:${keywordMatch.tier}`;
+    await markPropertyNeedsAttention(supabase, input.propertyId, reason);
+    return { outcome: "escalated", reason };
   }
 
   // --------------------------------------------------------------------------
@@ -135,7 +133,7 @@ export async function dispatchAiResponse(
       tags: { surface: "ai_responder_generate" },
       extra: { propertyId: input.propertyId },
     });
-    await markPropertyNeedsAttention(supabase, input.propertyId);
+    await markPropertyNeedsAttention(supabase, input.propertyId, "generate_error");
     return { outcome: "escalated", reason: "generate_error" };
   }
 
@@ -143,27 +141,24 @@ export async function dispatchAiResponse(
   // 5. Escalation gates on model output
   // --------------------------------------------------------------------------
   if (generated.action === "escalate") {
-    await markPropertyNeedsAttention(supabase, input.propertyId);
-    return {
-      outcome: "escalated",
-      reason: `model:${generated.escalation_reason ?? "unspecified"}`,
-    };
+    const reason = `model:${generated.escalation_reason ?? "unspecified"}`;
+    await markPropertyNeedsAttention(supabase, input.propertyId, reason);
+    return { outcome: "escalated", reason };
   }
 
   if (generated.confidence < config!.min_confidence) {
-    await markPropertyNeedsAttention(supabase, input.propertyId);
-    return {
-      outcome: "escalated",
-      reason: `low_confidence:${generated.confidence}`,
-    };
+    const reason = `low_confidence:${generated.confidence}`;
+    await markPropertyNeedsAttention(supabase, input.propertyId, reason);
+    return { outcome: "escalated", reason };
   }
 
   if (
     generated.sentiment === "frustrated" ||
     generated.sentiment === "hostile"
   ) {
-    await markPropertyNeedsAttention(supabase, input.propertyId);
-    return { outcome: "escalated", reason: `sentiment:${generated.sentiment}` };
+    const reason = `sentiment:${generated.sentiment}`;
+    await markPropertyNeedsAttention(supabase, input.propertyId, reason);
+    return { outcome: "escalated", reason };
   }
 
   // --------------------------------------------------------------------------
@@ -172,8 +167,9 @@ export async function dispatchAiResponse(
   const body = generated.body?.trim() ?? "";
   const safety = validateAiReplyBody(body);
   if (!safety.ok) {
-    await markPropertyNeedsAttention(supabase, input.propertyId);
-    return { outcome: "escalated", reason: `safety:${safety.reason}` };
+    const reason = `safety:${safety.reason}`;
+    await markPropertyNeedsAttention(supabase, input.propertyId, reason);
+    return { outcome: "escalated", reason };
   }
 
   // --------------------------------------------------------------------------
@@ -189,11 +185,9 @@ export async function dispatchAiResponse(
   if (sendResult.status !== "sent" && sendResult.status !== "queued") {
     // Pipeline rejected (quiet-hours race, no phone, etc.). Escalate so
     // a human picks it up.
-    await markPropertyNeedsAttention(supabase, input.propertyId);
-    return {
-      outcome: "escalated",
-      reason: `send_blocked:${sendResult.status}`,
-    };
+    const reason = `send_blocked:${sendResult.status}`;
+    await markPropertyNeedsAttention(supabase, input.propertyId, reason);
+    return { outcome: "escalated", reason };
   }
 
   const messageId = sendResult.messageId;
@@ -217,18 +211,22 @@ export async function dispatchAiResponse(
 async function markPropertyNeedsAttention(
   supabase: SupabaseClient<Database>,
   propertyId: string,
+  reason: string,
 ): Promise<void> {
+  const now = new Date().toISOString();
   const { error } = await supabase
     .from("properties")
     .update({
       needs_human_attention: true,
-      updated_at: new Date().toISOString(),
+      last_ai_escalation_reason: reason,
+      last_ai_escalation_at: now,
+      updated_at: now,
     })
     .eq("id", propertyId);
   if (error) {
     reportError(new Error(error.message), {
       tags: { surface: "ai_responder_mark_attention" },
-      extra: { propertyId },
+      extra: { propertyId, reason },
     });
   }
 }

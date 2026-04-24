@@ -19,9 +19,13 @@ import { clearNeedsHumanAttention } from "./ai-actions";
 export function AiAttentionBanner({
   propertyId,
   initialVisible,
+  reason,
+  escalatedAt,
 }: {
   propertyId: string;
   initialVisible: boolean;
+  reason?: string | null;
+  escalatedAt?: string | null;
 }) {
   // `initialVisible` is the source of truth (re-fetched on each
   // server-rendered page load); `dismissed` carries the optimistic
@@ -42,13 +46,23 @@ export function AiAttentionBanner({
     }
   };
 
+  const friendly = formatEscalationReason(reason);
+  const when = escalatedAt ? formatRelative(escalatedAt) : null;
+
   return (
     <div className="border-destructive/40 bg-destructive/10 text-destructive-foreground flex items-start justify-between gap-3 rounded-md border p-3 text-sm">
-      <div className="text-destructive">
+      <div className="text-destructive flex-1">
         <strong>Needs human attention.</strong>{" "}
         The AI responder escalated this conversation. Review the latest
         inbound message below and reply directly — the AI won&apos;t pick
         this thread up again until you dismiss.
+        {(friendly || when) && (
+          <div className="text-destructive/80 mt-1 text-xs">
+            {friendly ? <>Reason: <code>{friendly}</code></> : null}
+            {friendly && when ? " · " : null}
+            {when ? <>{when}</> : null}
+          </div>
+        )}
       </div>
       <Button
         variant="outline"
@@ -60,4 +74,48 @@ export function AiAttentionBanner({
       </Button>
     </div>
   );
+}
+
+/**
+ * Map the `reason` string the dispatcher writes into a human-readable
+ * label. Format from dispatch.ts: `<gate>:<detail>` (e.g.
+ * `keyword:price_offer`, `sentiment:hostile`, `low_confidence:0.42`,
+ * `safety:contains_dollar_amount`, `model:asked for price`,
+ * `send_blocked:no_consent`, `generate_error`).
+ */
+function formatEscalationReason(reason: string | null | undefined): string | null {
+  if (!reason) return null;
+  const [gate, ...rest] = reason.split(":");
+  const detail = rest.join(":");
+  switch (gate) {
+    case "keyword":
+      return `keyword match (${detail.replace(/_/g, " ")})`;
+    case "sentiment":
+      return `seller sounded ${detail}`;
+    case "low_confidence":
+      return `model unsure (${detail})`;
+    case "safety":
+      return `unsafe reply blocked (${detail.replace(/_/g, " ")})`;
+    case "model":
+      return `model chose to escalate${detail ? `: ${detail}` : ""}`;
+    case "send_blocked":
+      return `send pipeline blocked (${detail.replace(/_/g, " ")})`;
+    case "generate_error":
+      return "model call failed";
+    default:
+      return reason;
+  }
+}
+
+/** "5 minutes ago" / "2 hours ago" — small inline helper to avoid pulling
+ *  date-fns into this client component just for one string. */
+function formatRelative(iso: string): string {
+  const ms = Date.now() - new Date(iso).getTime();
+  if (ms < 60_000) return "just now";
+  const mins = Math.round(ms / 60_000);
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.round(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  const days = Math.round(hrs / 24);
+  return `${days}d ago`;
 }

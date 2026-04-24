@@ -862,6 +862,8 @@ export type Database = {
           cass_raw_response: Json | null
           cass_status: string
           needs_human_attention: boolean
+          last_ai_escalation_reason: string | null
+          last_ai_escalation_at: string | null
           cass_verified_at: string | null
           city: string | null
           county_id: string | null
@@ -917,6 +919,8 @@ export type Database = {
           cass_status?: string
           cass_verified_at?: string | null
           needs_human_attention?: boolean
+          last_ai_escalation_reason?: string | null
+          last_ai_escalation_at?: string | null
           city?: string | null
           county_id?: string | null
           created_at?: string
@@ -970,6 +974,8 @@ export type Database = {
           cass_raw_response?: Json | null
           cass_status?: string
           needs_human_attention?: boolean
+          last_ai_escalation_reason?: string | null
+          last_ai_escalation_at?: string | null
           cass_verified_at?: string | null
           city?: string | null
           county_id?: string | null
