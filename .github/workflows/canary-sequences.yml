@@ -1,0 +1,57 @@
+name: Sequences V1 Prod Canary
+
+# Runs the same `scripts/smoke-sequences-prod.ts` that proved the pipe
+# end-to-end in prod, daily on weekdays. Deliberately hosted on GitHub
+# Actions rather than inside Vercel cron so the canary isn't gated on
+# the same infra it's monitoring — a Vercel-wide cron outage would
+# silently break BOTH the Sequences tick AND an in-Vercel canary,
+# giving us the worst possible signal.
+#
+# Failure mode: exit code non-zero → red run + email to repo watchers.
+# Success leaves a `PROD-SMOKE` row in `test_sms_log` for audit; the
+# script cleans up its own seed data (sequence, property, contact,
+# enrollment, consent_events, messages).
+#
+# Cost: one Dialpad outbound SMS + one Twilio inbound per run
+# (~$0.005). ~22 weekday runs/month → ~$0.11/month.
+
+on:
+  schedule:
+    # Weekdays at 14:00 UTC = 09:00 America/Chicago (Central). Early
+    # enough that any failure surfaces before the workday really kicks
+    # off, late enough that we're not alerting anyone at 5am.
+    - cron: "0 14 * * 1-5"
+  workflow_dispatch: {}
+
+jobs:
+  canary:
+    name: Sequences V1 Prod Canary
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    env:
+      # Prod Supabase URL + service-role key. Stored as GitHub repo
+      # secrets so the canary works without any dependency on a
+      # developer's local `.env.local`.
+      NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.PROD_SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.PROD_SUPABASE_SERVICE_ROLE_KEY }}
+      CI: "1"
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run Sequences V1 prod canary
+        # Script seeds throwaway data in prod Supabase, waits up to 6
+        # min for the Vercel `sequence-tick` cron to fire, polls
+        # `test_sms_log` for the Dialpad-delivered SMS, asserts
+        # enrollment advanced to `completed`, then cleans up. Exits 0
+        # on success, non-zero on any failure.
+        run: npx tsx scripts/smoke-sequences-prod.ts
