@@ -20,6 +20,8 @@ export async function clearNeedsHumanAttention(
       .from("properties")
       .update({
         needs_human_attention: false,
+        last_ai_escalation_reason: null,
+        last_ai_escalation_at: null,
         updated_at: new Date().toISOString(),
       })
       .eq("id", propertyId);

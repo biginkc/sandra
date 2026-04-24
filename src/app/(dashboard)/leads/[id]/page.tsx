@@ -180,6 +180,8 @@ export default async function LeadDetailPage({
       <AiAttentionBanner
         propertyId={lead.id}
         initialVisible={lead.needs_human_attention}
+        reason={lead.last_ai_escalation_reason}
+        escalatedAt={lead.last_ai_escalation_at}
       />
 
       <header className="border-border flex flex-col gap-2 border-b pb-4">
