@@ -12,6 +12,8 @@ import {
   type PropertyStatus,
 } from "../actions";
 
+import { AiAttentionBanner } from "./ai-attention-banner";
+import { AiResponderToggle } from "./ai-responder-toggle";
 import { CassWidget } from "./cass-widget";
 import { InlineReply } from "./inline-reply";
 import { LeadAssigneeWidget } from "./assignee-widget";
@@ -175,6 +177,11 @@ export default async function LeadDetailPage({
         </Link>
       </div>
 
+      <AiAttentionBanner
+        propertyId={lead.id}
+        initialVisible={lead.needs_human_attention}
+      />
+
       <header className="border-border flex flex-col gap-2 border-b pb-4">
         <h1 className="text-2xl font-semibold">{lead.address}</h1>
         <div className="text-muted-foreground text-sm">
@@ -199,6 +206,10 @@ export default async function LeadDetailPage({
             initial={lead.motivation_level as MotivationLevel | null}
           />
           <EnrollInSequenceWidget propertyId={lead.id} />
+          <AiResponderToggle
+            propertyId={lead.id}
+            initialDisabled={lead.ai_responder_disabled}
+          />
           {lead.market ? (
             <Badge variant="secondary">{lead.market}</Badge>
           ) : null}

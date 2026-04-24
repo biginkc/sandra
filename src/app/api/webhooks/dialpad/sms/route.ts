@@ -1,7 +1,10 @@
 import { NextResponse } from "next/server";
 import { createClient as createSupabaseClient } from "@supabase/supabase-js";
 
+import Anthropic from "@anthropic-ai/sdk";
+
 import { listAdminUserIds } from "@/lib/auth/admins";
+import { dispatchAiResponse } from "@/lib/ai-responder/dispatch";
 import { reportError } from "@/lib/errors/report";
 import { qualifyProperty } from "@/lib/leads/qualify";
 import { recordConsentEvent } from "@/lib/messaging/consent";
@@ -293,6 +296,33 @@ export async function POST(request: Request) {
             tags: { surface: "dialpad_webhook_sequence_pause_inbound" },
             extra: { propertyId, externalId: ev.externalId },
           });
+        }
+
+        // AI responder (Feature 6) — consider a first-touch reply.
+        // Returns skip/escalate/sent; no config or any gate failure
+        // silently short-circuits. Dispatcher swallows its own errors
+        // and flags `needs_human_attention` on escalation, so the
+        // webhook doesn't need to care about the outcome for the HTTP
+        // response. Always returns 200 to Dialpad regardless.
+        if (contactId) {
+          try {
+            await dispatchAiResponse(
+              supabase,
+              {
+                propertyId,
+                contactId,
+                inboundBody: ev.body,
+              },
+              {
+                anthropic: new Anthropic(),
+              },
+            );
+          } catch (e) {
+            reportError(e, {
+              tags: { surface: "dialpad_webhook_ai_responder" },
+              extra: { propertyId, externalId: ev.externalId },
+            });
+          }
         }
       }
     }
