@@ -2,7 +2,7 @@
 
 import { formatDistanceToNow } from "date-fns/formatDistanceToNow";
 import { useRouter, useSearchParams } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
 
 import { Badge } from "@/components/ui/badge";
 import type { Thread } from "@/lib/messages/list-threads";
@@ -21,11 +21,16 @@ type Props = {
  * row, refreshes via router.refresh() so the server-rendered list
  * regenerates with new sort + unread counts. Keeps the client-side state
  * machine simple — the server is the source of truth.
+ *
+ * Threads are read straight off the prop (no local useState mirror) so
+ * `router.refresh()` from the Realtime handler actually re-renders this
+ * list with the new server payload. Mirroring into useState would freeze
+ * the initial value and silently swallow refresh updates.
  */
 export function InboxThreadList({ initial, selectedContactId }: Props) {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const [threads] = useState<Thread[]>(initial);
+  const threads = initial;
 
   useEffect(() => {
     const supabase = createClient();
@@ -67,6 +72,10 @@ export function InboxThreadList({ initial, selectedContactId }: Props) {
     const sp = new URLSearchParams(searchParams.toString());
     sp.set("thread", contactId);
     router.replace(`/messages?${sp.toString()}`);
+    // Next 16 caches the RSC payload per route — query-string-only changes
+    // hit the cache and skip the server render. Refresh forces a fetch so
+    // the side-panel data updates when the user picks a different thread.
+    router.refresh();
   };
 
   if (threads.length === 0) {

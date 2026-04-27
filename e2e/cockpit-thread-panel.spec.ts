@@ -104,6 +104,11 @@ test("ESC closes the panel and clears ?thread (test 16)", async ({ page }) => {
 
   await page.goto(`/messages?thread=${contactId}`);
   await expect(page.getByTestId("inbox-detail-panel")).toBeVisible();
+  // Give the InboxDetail useEffect a beat to register the keydown
+  // listener — it runs after the panel mounts, and the keypress can
+  // race past the registration if we fire immediately.
+  await page.waitForLoadState("networkidle");
+  await page.waitForTimeout(300);
 
   await page.keyboard.press("Escape");
   await page.waitForURL(/\/messages(?!.*thread=)/);

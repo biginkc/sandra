@@ -37,6 +37,10 @@ export function InboxDetail({ data }: Props) {
         sp.delete("thread");
         const qs = sp.toString();
         router.replace(qs ? `/messages?${qs}` : "/messages");
+        // See inbox-thread-list.tsx for the rationale — Next 16 caches the
+        // RSC payload per route, so we have to force a refresh to drop
+        // the side-panel data and show the empty-state placeholder.
+        router.refresh();
       }
     };
     window.addEventListener("keydown", onKey);
@@ -80,7 +84,12 @@ export function InboxDetail({ data }: Props) {
         ) : null}
       </div>
       <div className="flex-1 overflow-y-auto p-4">
+        {/* Key on contactId so switching threads remounts the component
+            and resets its internal `messages` useState. Without this,
+            the previous thread's bubbles linger because the Realtime
+            client preserves its initial snapshot in local state. */}
         <MessagesThread
+          key={`thread-${data.contactId}`}
           initial={data.initialMessages}
           contactId={data.contactId}
           propertyId={data.propertyId ?? ""}
@@ -89,6 +98,7 @@ export function InboxDetail({ data }: Props) {
       {data.propertyId ? (
         <div className="border-border border-t p-3">
           <InlineReply
+            key={`reply-${data.contactId}`}
             propertyId={data.propertyId}
             homeownerContactId={data.contactId}
             homeownerPhone={data.contactPhone}

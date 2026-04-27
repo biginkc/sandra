@@ -75,13 +75,15 @@ test("messages page defaults to Inbox tab (test 7)", async ({ page }) => {
   await ensureTestUser(admin);
 
   await page.goto("/messages");
+  // Base UI tabs expose active state via aria-selected — that's stable
+  // across Base UI versions; data-active is rendered without a value.
   await expect(page.getByTestId("tab-inbox")).toHaveAttribute(
-    "data-active",
+    "aria-selected",
     "true",
   );
-  await expect(page.getByTestId("tab-outbox")).not.toHaveAttribute(
-    "data-active",
-    "true",
+  await expect(page.getByTestId("tab-outbox")).toHaveAttribute(
+    "aria-selected",
+    "false",
   );
 });
 
@@ -95,7 +97,7 @@ test("clicking Outbox switches tabs and renders the queue panel (test 8)", async
   await page.goto("/messages");
   await page.getByTestId("tab-outbox").click();
   await expect(page.getByTestId("tab-outbox")).toHaveAttribute(
-    "data-active",
+    "aria-selected",
     "true",
   );
   // QueuePanel renders its table even when empty.

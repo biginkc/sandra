@@ -22,13 +22,15 @@ test("/messages?tab=outbox loads with the Outbox tab active (test 32)", async ({
   await ensureTestUser(admin);
 
   await page.goto("/messages?tab=outbox");
+  // Base UI tabs expose active state via aria-selected; data-active is
+  // rendered without a value, so prefer the ARIA attribute.
   await expect(page.getByTestId("tab-outbox")).toHaveAttribute(
-    "data-active",
+    "aria-selected",
     "true",
   );
-  await expect(page.getByTestId("tab-inbox")).not.toHaveAttribute(
-    "data-active",
-    "true",
+  await expect(page.getByTestId("tab-inbox")).toHaveAttribute(
+    "aria-selected",
+    "false",
   );
 });
 
