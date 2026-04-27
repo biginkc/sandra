@@ -252,6 +252,68 @@ describe("sendSmsToContact (integration)", () => {
     expect(row?.status).toBe("queued");
   });
 
+  // --------------------------------------------------------------------------
+  // Send-now contract — relied on by the SMS Cockpit's reply box. Cockpit
+  // calls sendSmsToContact with queueOnly=false; these tests anchor that
+  // path explicitly so a regression that breaks live-reply gets caught.
+  // --------------------------------------------------------------------------
+  it("send-now: explicit queueOnly=false fires the provider immediately, no queued row sits around", async () => {
+    const now = new Date();
+    const hour = parseInt(
+      new Intl.DateTimeFormat("en-US", {
+        timeZone: "America/Chicago",
+        hour: "2-digit",
+        hour12: false,
+      }).format(now),
+      10,
+    );
+    if (hour < 8 || hour >= 21) return;
+    const { contactId, propertyId } = await seed({ withConsent: true });
+
+    const outcome = await sendSmsToContact(supabase, {
+      contactId,
+      propertyId,
+      body: "live reply from cockpit",
+      queueOnly: false,
+    });
+    expect(outcome.status).toBe("sent");
+
+    const { data: rows } = await supabase
+      .from("messages")
+      .select("status")
+      .eq("contact_id", contactId);
+    expect(rows).toHaveLength(1);
+    expect(rows![0].status).toBe("sent");
+    // Specifically: no row in 'queued' state.
+    expect(rows!.some((r) => r.status === "queued")).toBe(false);
+  });
+
+  it("send-now: consent + quiet-hours gates still apply with queueOnly=false", async () => {
+    // No consent → blocked even with explicit queueOnly: false.
+    const a = await seed({ phone: "+18165550101", withConsent: false });
+    const noConsent = await sendSmsToContact(supabase, {
+      contactId: a.contactId,
+      propertyId: a.propertyId,
+      body: "should be blocked",
+      queueOnly: false,
+    });
+    expect(noConsent.status).toBe("blocked_no_consent");
+
+    // Unknown state → quiet-hours blocked even with explicit queueOnly: false.
+    const b = await seed({
+      phone: "+18165550102",
+      state: "ZZ",
+      withConsent: true,
+    });
+    const quietBlocked = await sendSmsToContact(supabase, {
+      contactId: b.contactId,
+      propertyId: b.propertyId,
+      body: "should be blocked",
+      queueOnly: false,
+    });
+    expect(quietBlocked.status).toBe("blocked_quiet_hours");
+  });
+
   it("records provider_failed when the mock provider errors on FAIL prefix", async () => {
     // Same time-window gate as the happy path test.
     const now = new Date();

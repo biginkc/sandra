@@ -1,33 +1,60 @@
 import { createClient } from "@/lib/supabase/server";
+import { listThreads } from "@/lib/messages/list-threads";
 
-import { QueuePanel, type QueuedRow } from "./queue-panel";
+import { markMessagesReadForProperty } from "../leads/actions";
+
+import { CockpitView } from "./cockpit-view";
+import { fetchInboxDetail } from "./inbox-detail-data";
+import { type QueuedRow } from "./queue-panel";
 
 export const metadata = {
   title: "Messages · Sandra CRM",
 };
 
 /**
- * Messages queue page. Lists every `messages` row with status='queued'
- * alongside its property address and contact name, then hands off to a
- * client component for the Send Next / Auto-send / Edit / Delete
- * controls. Server-rendered for the first paint; Realtime keeps it in
- * sync as rows leave the queue (status changes from queued → pending →
- * sent|failed).
+ * Cockpit page — two tabs:
+ *
+ *   1. Inbox  (default) — Slack/iPhone-style conversation list with a
+ *      side-panel detail view. Click a thread, reply inline, sends
+ *      immediately via the existing send-now path. Replaces the Dialpad
+ *      app for live conversation work.
+ *
+ *   2. Outbox — the legacy queue panel: drafts waiting to release with
+ *      cadence (Send Next / Auto-send). Unchanged.
+ *
+ * State (active tab, selected thread) lives in the URL query string so
+ * cockpit URLs are shareable.
  */
-export default async function MessagesPage() {
+export default async function MessagesPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ tab?: string; thread?: string }>;
+}) {
+  const sp = await searchParams;
+  const activeTab = sp.tab === "outbox" ? "outbox" : "inbox";
+  const selectedContactId = sp.thread ?? null;
+
   const supabase = await createClient();
 
-  const { data: queuedRaw, error } = await supabase
-    .from("messages")
-    .select(
-      `id, body, from_address, to_address, created_at, property_id, contact_id,
-       property:properties(id, address, city, state),
-       contact:contacts(id, first_name, last_name, entity_name, phone_1)`,
-    )
-    .eq("status", "queued")
-    .order("created_at", { ascending: true });
+  // Fetch everything in parallel — cockpit needs all three datasets to
+  // render either tab cleanly without a second roundtrip.
+  const [threads, queuedResult, threadDetail] = await Promise.all([
+    listThreads(supabase, {}),
+    supabase
+      .from("messages")
+      .select(
+        `id, body, from_address, to_address, created_at, property_id, contact_id,
+         property:properties(id, address, city, state),
+         contact:contacts(id, first_name, last_name, entity_name, phone_1)`,
+      )
+      .eq("status", "queued")
+      .order("created_at", { ascending: true }),
+    selectedContactId
+      ? fetchInboxDetail(supabase, selectedContactId)
+      : Promise.resolve(null),
+  ]);
 
-  const queued: QueuedRow[] = (queuedRaw ?? []).map((r) => ({
+  const queued: QueuedRow[] = (queuedResult.data ?? []).map((r) => ({
     id: r.id,
     body: r.body,
     fromAddress: r.from_address,
@@ -41,33 +68,28 @@ export default async function MessagesPage() {
           .join(", ")
       : null,
     contactName: r.contact
-      ? r.contact.entity_name ??
+      ? (r.contact.entity_name ??
         ([r.contact.first_name, r.contact.last_name]
           .filter(Boolean)
-          .join(" ") ||
-          null)
+          .join(" ") || null))
       : null,
     contactPhone: r.contact?.phone_1 ?? null,
   }));
 
+  // Stamp messages as read whenever a thread is opened. Idempotent — the
+  // partial index `WHERE read_at IS NULL` short-circuits if nothing's
+  // unread. Done here on the server (not on click in the client) so a
+  // direct deeplink also clears the badge.
+  if (threadDetail?.propertyId) {
+    await markMessagesReadForProperty(threadDetail.propertyId);
+  }
+
   return (
-    <div className="flex flex-col gap-4 p-6">
-      <div>
-        <h1 className="text-2xl font-semibold">Messages</h1>
-        <p className="text-muted-foreground text-sm">
-          Queued SMS waiting to be released. Drafted on lead pages, sent
-          one-at-a-time from here at a cadence that keeps carrier reputation
-          intact. Consent + quiet-hours are re-checked at release.
-        </p>
-      </div>
-
-      {error ? (
-        <div className="text-destructive text-sm">
-          Failed to load queue: {error.message}
-        </div>
-      ) : null}
-
-      <QueuePanel initial={queued} />
-    </div>
+    <CockpitView
+      activeTab={activeTab}
+      threads={threads}
+      queued={queued}
+      threadDetail={threadDetail}
+    />
   );
 }
