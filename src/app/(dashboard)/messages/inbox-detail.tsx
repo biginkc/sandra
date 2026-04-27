@@ -9,10 +9,14 @@ import { buttonVariants } from "@/components/ui/button";
 import { InlineReply } from "../leads/[id]/inline-reply";
 import { MessagesThread } from "../leads/[id]/messages-thread";
 
+import { AssignDropdown } from "./assign-dropdown";
 import { type InboxDetail as InboxDetailData } from "./inbox-detail-data";
 
 type Props = {
   data: InboxDetailData | null;
+  /** auth.users.id → email for the assign control. */
+  assigneeEmails: Record<string, string>;
+  currentUserId: string | null;
 };
 
 /**
@@ -25,7 +29,7 @@ type Props = {
  * ESC closes the panel by clearing ?thread from the URL. Matches the
  * Slack/Linear keyboard convention.
  */
-export function InboxDetail({ data }: Props) {
+export function InboxDetail({ data, assigneeEmails, currentUserId }: Props) {
   const router = useRouter();
   const searchParams = useSearchParams();
 
@@ -63,25 +67,37 @@ export function InboxDetail({ data }: Props) {
       className="border-border flex h-full flex-col rounded-md border"
       data-testid="inbox-detail-panel"
     >
-      <div className="border-border flex items-center justify-between border-b px-4 py-2">
-        <div className="flex flex-col">
-          <span className="text-sm font-medium">
+      <div className="border-border flex items-center justify-between gap-3 border-b px-4 py-2">
+        <div className="flex min-w-0 flex-col">
+          <span className="truncate text-sm font-medium">
             {data.contactName ?? data.contactPhone ?? "Unknown contact"}
           </span>
           {data.propertyAddress ? (
-            <span className="text-muted-foreground text-[11px]">
+            <span className="text-muted-foreground truncate text-[11px]">
               {data.propertyAddress}
             </span>
           ) : null}
         </div>
-        {data.propertyId ? (
-          <Link
-            href={`/leads/${data.propertyId}`}
-            className={buttonVariants({ variant: "outline", size: "sm" })}
-          >
-            Open lead
-          </Link>
-        ) : null}
+        <div className="flex shrink-0 items-center gap-1.5">
+          {data.propertyId ? (
+            <AssignDropdown
+              propertyId={data.propertyId}
+              initialAssigneeId={data.assigneeId}
+              initialAssigneeEmail={
+                data.assigneeId ? (assigneeEmails[data.assigneeId] ?? null) : null
+              }
+              currentUserId={currentUserId}
+            />
+          ) : null}
+          {data.propertyId ? (
+            <Link
+              href={`/leads/${data.propertyId}`}
+              className={buttonVariants({ variant: "outline", size: "sm" })}
+            >
+              Open lead
+            </Link>
+          ) : null}
+        </div>
       </div>
       <div className="flex-1 overflow-y-auto p-4">
         {/* Key on contactId so switching threads remounts the component

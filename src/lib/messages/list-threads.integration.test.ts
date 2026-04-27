@@ -7,6 +7,25 @@ import { listThreads } from "./list-threads";
 
 const supabase = createTestClient();
 
+/**
+ * Mint a real auth.users row so properties.assigned_user_id FK passes.
+ * Idempotent — returns the existing user's id if the email already exists.
+ */
+async function mintTestUser(email: string): Promise<string> {
+  const { data: existing } = await supabase.auth.admin.listUsers({
+    perPage: 200,
+  });
+  const found = existing?.users.find((u) => u.email === email);
+  if (found) return found.id;
+  const { data, error } = await supabase.auth.admin.createUser({
+    email,
+    password: "irrelevant-for-test",
+    email_confirm: true,
+  });
+  if (error || !data.user) throw error ?? new Error("createUser returned no user");
+  return data.user.id;
+}
+
 async function seedConversation(opts: {
   contactName?: string;
   phone: string;
@@ -192,5 +211,79 @@ describe("listThreads (integration)", () => {
 
     const threads = await listThreads(supabase, {});
     expect(threads.every((t) => t.contactId !== null)).toBe(true);
+  });
+
+  // Phase 3 — assignee surfacing
+  it("returns assigneeId on each thread (null when unassigned)", async () => {
+    const seeded = await seedConversation({
+      phone: "+18165550200",
+      messages: [{ direction: "inbound", body: "needs claim", createdAtOffsetMin: -10 }],
+    });
+
+    const threads = await listThreads(supabase, {});
+    const t = threads.find((x) => x.contactId === seeded.contactId);
+    expect(t).toBeDefined();
+    expect(t!.assigneeId).toBeNull();
+  });
+
+  // Phase 3 — Test case #48
+  it("assigneeId filter: returns only threads on properties assigned to that user", async () => {
+    // properties.assigned_user_id has a real FK to auth.users, so we have to
+    // mint actual users for the test. Createsv the users via auth.admin and
+    // reads their ids back (auth.admin.createUser doesn't let us pick the id).
+    const userA = await mintTestUser("assignee-a@example.com");
+    const userB = await mintTestUser("assignee-b@example.com");
+
+    const a = await seedConversation({
+      phone: "+18165550210",
+      messages: [{ direction: "inbound", body: "for user A", createdAtOffsetMin: -10 }],
+    });
+    const b = await seedConversation({
+      phone: "+18165550211",
+      messages: [{ direction: "inbound", body: "for user B", createdAtOffsetMin: -20 }],
+    });
+    const u = await seedConversation({
+      phone: "+18165550212",
+      messages: [{ direction: "inbound", body: "unassigned", createdAtOffsetMin: -30 }],
+    });
+
+    await supabase
+      .from("properties")
+      .update({ assigned_user_id: userA })
+      .eq("id", a.propertyId);
+    await supabase
+      .from("properties")
+      .update({ assigned_user_id: userB })
+      .eq("id", b.propertyId);
+
+    const mineForA = await listThreads(supabase, { assigneeId: userA });
+    const ids = mineForA.map((t) => t.contactId);
+    expect(ids).toContain(a.contactId);
+    expect(ids).not.toContain(b.contactId);
+    expect(ids).not.toContain(u.contactId);
+  });
+
+  // Phase 3 — Test case #49
+  it("unassignedOnly: true returns only threads where assigned_user_id IS NULL", async () => {
+    const userA = await mintTestUser("unassigned-test@example.com");
+
+    const assigned = await seedConversation({
+      phone: "+18165550220",
+      messages: [{ direction: "inbound", body: "claimed", createdAtOffsetMin: -10 }],
+    });
+    const unassigned = await seedConversation({
+      phone: "+18165550221",
+      messages: [{ direction: "inbound", body: "claim queue", createdAtOffsetMin: -20 }],
+    });
+
+    await supabase
+      .from("properties")
+      .update({ assigned_user_id: userA })
+      .eq("id", assigned.propertyId);
+
+    const queue = await listThreads(supabase, { unassignedOnly: true });
+    const ids = queue.map((t) => t.contactId);
+    expect(ids).toContain(unassigned.contactId);
+    expect(ids).not.toContain(assigned.contactId);
   });
 });

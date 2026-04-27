@@ -11,6 +11,9 @@ import { createClient } from "@/lib/supabase/client";
 type Props = {
   initial: Thread[];
   selectedContactId: string | null;
+  /** auth.users.id → email for assignee initials. */
+  assigneeEmails: Record<string, string>;
+  currentUserId: string | null;
 };
 
 /**
@@ -27,7 +30,12 @@ type Props = {
  * list with the new server payload. Mirroring into useState would freeze
  * the initial value and silently swallow refresh updates.
  */
-export function InboxThreadList({ initial, selectedContactId }: Props) {
+export function InboxThreadList({
+  initial,
+  selectedContactId,
+  assigneeEmails,
+  currentUserId,
+}: Props) {
   const router = useRouter();
   const searchParams = useSearchParams();
   const threads = initial;
@@ -96,6 +104,10 @@ export function InboxThreadList({ initial, selectedContactId }: Props) {
     >
       {threads.map((t) => {
         const selected = t.contactId === selectedContactId;
+        const assigneeEmail = t.assigneeId
+          ? assigneeEmails[t.assigneeId]
+          : null;
+        const isMine = t.assigneeId !== null && t.assigneeId === currentUserId;
         return (
           <button
             key={t.contactId}
@@ -103,6 +115,7 @@ export function InboxThreadList({ initial, selectedContactId }: Props) {
             onClick={() => select(t.contactId)}
             data-testid={`inbox-thread-${t.contactId}`}
             data-selected={selected || undefined}
+            data-assignee-id={t.assigneeId ?? undefined}
             className={`flex w-full flex-col items-start gap-1 p-3 text-left transition-colors ${
               selected
                 ? "bg-accent text-accent-foreground"
@@ -113,11 +126,18 @@ export function InboxThreadList({ initial, selectedContactId }: Props) {
               <span className="truncate text-sm font-medium">
                 {t.contactName ?? t.contactPhone ?? "Unknown contact"}
               </span>
-              <span className="text-muted-foreground shrink-0 text-[11px]">
-                {formatDistanceToNow(new Date(t.lastMessageAt), {
-                  addSuffix: true,
-                })}
-              </span>
+              <div className="flex shrink-0 items-center gap-1.5">
+                <AssigneeAvatar
+                  email={assigneeEmail}
+                  isMine={isMine}
+                  contactId={t.contactId}
+                />
+                <span className="text-muted-foreground text-[11px]">
+                  {formatDistanceToNow(new Date(t.lastMessageAt), {
+                    addSuffix: true,
+                  })}
+                </span>
+              </div>
             </div>
             <div className="flex w-full items-center justify-between gap-2">
               <span className="text-muted-foreground line-clamp-1 text-xs">
@@ -144,4 +164,41 @@ export function InboxThreadList({ initial, selectedContactId }: Props) {
       })}
     </div>
   );
+}
+
+function AssigneeAvatar({
+  email,
+  isMine,
+  contactId,
+}: {
+  email: string | null;
+  isMine: boolean;
+  contactId: string;
+}) {
+  if (!email) return null;
+  const initials = initialsOf(email);
+  return (
+    <span
+      title={isMine ? `Assigned to me (${email})` : `Assigned to ${email}`}
+      data-testid={`inbox-thread-${contactId}-assignee`}
+      data-assignee-mine={isMine || undefined}
+      className={`inline-flex h-5 min-w-5 items-center justify-center rounded-full px-1 text-[10px] font-medium ${
+        isMine
+          ? "bg-primary text-primary-foreground"
+          : "bg-muted text-muted-foreground"
+      }`}
+    >
+      {initials}
+    </span>
+  );
+}
+
+function initialsOf(email: string): string {
+  const local = email.split("@")[0] ?? email;
+  // jarrad.henry → JH; jarrad → JA; sole letter → uppercase
+  const parts = local.split(/[._-]+/).filter(Boolean);
+  if (parts.length >= 2) {
+    return (parts[0][0] + parts[1][0]).toUpperCase();
+  }
+  return local.slice(0, 2).toUpperCase();
 }

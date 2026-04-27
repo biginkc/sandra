@@ -26,7 +26,13 @@ type Props = {
   threadDetail: InboxDetailData | null;
   unknownSenders: UnknownSender[];
   unknownActiveCount: number;
+  /** auth.users.id → email map for assignee badges. */
+  assigneeEmails: Record<string, string>;
+  /** auth.users.id of the current viewer. */
+  currentUserId: string | null;
 };
+
+const THREAD_FILTERS = new Set<InboxFilter>(["all", "mine", "unassigned"]);
 
 export function CockpitView({
   activeTab,
@@ -36,6 +42,8 @@ export function CockpitView({
   threadDetail,
   unknownSenders,
   unknownActiveCount,
+  assigneeEmails,
+  currentUserId,
 }: Props) {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -50,6 +58,8 @@ export function CockpitView({
     const qs = sp.toString();
     router.replace(qs ? `/messages?${qs}` : "/messages");
   };
+
+  const showThreadList = THREAD_FILTERS.has(filter);
 
   return (
     <div className="flex flex-col gap-4 p-6">
@@ -87,15 +97,25 @@ export function CockpitView({
 
         <TabsContent value="inbox">
           <div className="mt-4 flex flex-col gap-3">
-            <InboxFilters active={filter} unknownCount={unknownActiveCount} />
+            <InboxFilters
+              active={filter}
+              unknownCount={unknownActiveCount}
+              showAssignmentChips={currentUserId !== null}
+            />
 
-            {filter === "all" && (
+            {showThreadList && (
               <div className="grid grid-cols-[minmax(280px,360px)_1fr] gap-4">
                 <InboxThreadList
                   initial={threads}
                   selectedContactId={threadDetail?.contactId ?? null}
+                  assigneeEmails={assigneeEmails}
+                  currentUserId={currentUserId}
                 />
-                <InboxDetail data={threadDetail} />
+                <InboxDetail
+                  data={threadDetail}
+                  assigneeEmails={assigneeEmails}
+                  currentUserId={currentUserId}
+                />
               </div>
             )}
 

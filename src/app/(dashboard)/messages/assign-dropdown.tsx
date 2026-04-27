@@ -1,0 +1,195 @@
+"use client";
+
+import { CheckIcon, ChevronDownIcon, UserIcon } from "lucide-react";
+import { useRouter } from "next/navigation";
+import { useState, useTransition } from "react";
+
+import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { callAction } from "@/lib/errors/call-action";
+
+import {
+  listOrgUsers,
+  updateLeadAssignee,
+  type TeamMember,
+} from "../leads/actions";
+
+type Props = {
+  propertyId: string;
+  initialAssigneeId: string | null;
+  initialAssigneeEmail: string | null;
+  currentUserId: string | null;
+};
+
+/**
+ * Cockpit side-panel assignee control. Trimmed-down version of the
+ * lead-detail `LeadAssigneeWidget`: same dropdown pattern, same server
+ * action, but no address-bound copy and no surrounding context.
+ *
+ * Renders a single button:
+ *   - "Assign to me" (one click) when the property is currently unassigned
+ *   - "Assigned: <email>" + dropdown when assigned, with options to pick
+ *     a different teammate or unassign
+ */
+export function AssignDropdown({
+  propertyId,
+  initialAssigneeId,
+  initialAssigneeEmail,
+  currentUserId,
+}: Props) {
+  const router = useRouter();
+  const [assigneeId, setAssigneeId] = useState<string | null>(
+    initialAssigneeId,
+  );
+  const [assigneeEmail, setAssigneeEmail] = useState<string | null>(
+    initialAssigneeEmail,
+  );
+  const [members, setMembers] = useState<TeamMember[]>([]);
+  const [loaded, setLoaded] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [pending, startTransition] = useTransition();
+
+  const loadMembers = () => {
+    if (loaded || loading) return;
+    setLoading(true);
+    listOrgUsers()
+      .then((result) => {
+        if (result.ok) {
+          setMembers(result.data);
+          setLoaded(true);
+        }
+      })
+      .finally(() => setLoading(false));
+  };
+
+  const change = (nextId: string | null) => {
+    if (nextId === assigneeId || pending) return;
+    const previousId = assigneeId;
+    const previousEmail = assigneeEmail;
+    const nextEmail = nextId
+      ? (members.find((m) => m.id === nextId)?.email ?? null)
+      : null;
+
+    // Optimistic update.
+    setAssigneeId(nextId);
+    setAssigneeEmail(nextEmail);
+
+    startTransition(async () => {
+      const result = await callAction(updateLeadAssignee(propertyId, nextId), {
+        successMessage: nextId
+          ? `Assigned to ${nextEmail ?? "user"}`
+          : "Unassigned",
+        fallbackMessage: "Could not update assignee",
+      });
+      if (!result.ok) {
+        setAssigneeId(previousId);
+        setAssigneeEmail(previousEmail);
+      } else {
+        router.refresh();
+      }
+    });
+  };
+
+  // Unassigned + we know who the viewer is → show "Assign to me" pill.
+  if (!assigneeId && currentUserId) {
+    return (
+      <Button
+        variant="outline"
+        size="sm"
+        disabled={pending}
+        onClick={() => change(currentUserId)}
+        data-testid="assign-to-me"
+      >
+        <UserIcon className="mr-1 size-3.5" />
+        Assign to me
+      </Button>
+    );
+  }
+
+  const label = assigneeEmail
+    ? assigneeId === currentUserId
+      ? "Mine"
+      : shortenEmail(assigneeEmail)
+    : "Unassigned";
+
+  return (
+    <DropdownMenu onOpenChange={(open) => open && loadMembers()}>
+      <DropdownMenuTrigger
+        render={
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={pending}
+            aria-label="Change assignee"
+            data-testid="assign-dropdown-trigger"
+          >
+            <UserIcon className="mr-1 size-3.5" />
+            <span>{label}</span>
+            <ChevronDownIcon className="ml-1 size-3.5" />
+          </Button>
+        }
+      />
+      <DropdownMenuContent align="end" className="max-h-80 overflow-auto">
+        {loading && <DropdownMenuItem disabled>Loading team…</DropdownMenuItem>}
+        {loaded && members.length === 0 && (
+          <DropdownMenuItem disabled>No team members found.</DropdownMenuItem>
+        )}
+        {currentUserId &&
+          loaded &&
+          members.some((m) => m.id === currentUserId) && (
+            <>
+              <DropdownMenuItem
+                onClick={() => change(currentUserId)}
+                className="flex items-center justify-between gap-4"
+                data-testid="assign-dropdown-me"
+              >
+                <span>Me</span>
+                {assigneeId === currentUserId ? (
+                  <CheckIcon className="size-4" />
+                ) : null}
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
+            </>
+          )}
+        {loaded &&
+          members
+            .filter((m) => m.id !== currentUserId)
+            .map((m) => (
+              <DropdownMenuItem
+                key={m.id}
+                onClick={() => change(m.id)}
+                className="flex items-center justify-between gap-4"
+                data-testid={`assign-dropdown-user-${m.id}`}
+              >
+                <span>{m.email}</span>
+                {m.id === assigneeId ? <CheckIcon className="size-4" /> : null}
+              </DropdownMenuItem>
+            ))}
+        {loaded && (
+          <>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem
+              onClick={() => change(null)}
+              className="flex items-center justify-between gap-4"
+              data-testid="assign-dropdown-unassign"
+            >
+              <span className="text-muted-foreground">Unassign</span>
+              {assigneeId === null ? <CheckIcon className="size-4" /> : null}
+            </DropdownMenuItem>
+          </>
+        )}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+function shortenEmail(email: string): string {
+  const at = email.indexOf("@");
+  return at > 0 ? email.slice(0, at) : email;
+}

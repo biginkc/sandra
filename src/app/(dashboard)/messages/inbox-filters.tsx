@@ -4,18 +4,30 @@ import { useRouter, useSearchParams } from "next/navigation";
 
 import { Button } from "@/components/ui/button";
 
-export type InboxFilter = "all" | "unknown" | "dismissed";
+export type InboxFilter =
+  | "all"
+  | "mine"
+  | "unassigned"
+  | "unknown"
+  | "dismissed";
 
 type Props = {
   active: InboxFilter;
   unknownCount: number;
+  /** Hide Mine + Unassigned chips when no auth user is on the request. */
+  showAssignmentChips: boolean;
 };
 
 /**
- * Filter chips above the inbox thread list. Phase 2: All / Unknown /
- * Dismissed. (Phase 3 will add Unread + Mine + Unassigned.)
+ * Filter chips above the inbox thread list. Phase 2 introduced All /
+ * Unknown / Dismissed. Phase 3 added Mine + Unassigned for per-user
+ * assignment workflow.
  */
-export function InboxFilters({ active, unknownCount }: Props) {
+export function InboxFilters({
+  active,
+  unknownCount,
+  showAssignmentChips,
+}: Props) {
   const router = useRouter();
   const searchParams = useSearchParams();
 
@@ -36,6 +48,22 @@ export function InboxFilters({ active, unknownCount }: Props) {
         onClick={() => setFilter("all")}
         testId="filter-all"
       />
+      {showAssignmentChips && (
+        <>
+          <FilterChip
+            label="Mine"
+            active={active === "mine"}
+            onClick={() => setFilter("mine")}
+            testId="filter-mine"
+          />
+          <FilterChip
+            label="Unassigned"
+            active={active === "unassigned"}
+            onClick={() => setFilter("unassigned")}
+            testId="filter-unassigned"
+          />
+        </>
+      )}
       <FilterChip
         label="Unknown"
         active={active === "unknown"}

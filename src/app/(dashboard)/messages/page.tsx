@@ -1,5 +1,6 @@
+import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
-import { listThreads } from "@/lib/messages/list-threads";
+import { listThreads, type ListThreadsOpts } from "@/lib/messages/list-threads";
 import { listUnknownSenders } from "@/lib/messages/list-unknown-senders";
 
 import { markMessagesReadForProperty } from "../leads/actions";
@@ -21,8 +22,8 @@ export const metadata = {
  *      immediately via the existing send-now path. Replaces the Dialpad
  *      app for live conversation work.
  *
- *      Filters: All (default), Unknown (Phase 2 — unmatched inbounds),
- *      Dismissed (Phase 2 — soft-deleted unknown senders).
+ *      Filters: All (default), Mine (Phase 3), Unassigned (Phase 3),
+ *      Unknown (Phase 2), Dismissed (Phase 2).
  *
  *   2. Outbox — the legacy queue panel: drafts waiting to release with
  *      cadence (Send Next / Auto-send). Unchanged.
@@ -42,17 +43,29 @@ export default async function MessagesPage({
       ? "unknown"
       : sp.filter === "dismissed"
         ? "dismissed"
-        : "all";
+        : sp.filter === "mine"
+          ? "mine"
+          : sp.filter === "unassigned"
+            ? "unassigned"
+            : "all";
   const selectedContactId = sp.thread ?? null;
 
   const supabase = await createClient();
+  const {
+    data: { user: currentUser },
+  } = await supabase.auth.getUser();
+
+  // Resolve the threads-list options based on the active filter.
+  const threadOpts: ListThreadsOpts = {};
+  if (filter === "mine" && currentUser) threadOpts.assigneeId = currentUser.id;
+  if (filter === "unassigned") threadOpts.unassignedOnly = true;
 
   // Fetch everything in parallel. The thread list + unknown active count
   // are needed regardless of which filter is active (badge counts on the
   // tab + filter chips). Other queries are conditional on the filter.
   const [threads, queuedResult, threadDetail, unknownActive, unknownAll] =
     await Promise.all([
-      listThreads(supabase, {}),
+      listThreads(supabase, threadOpts),
       supabase
         .from("messages")
         .select(
@@ -62,7 +75,7 @@ export default async function MessagesPage({
         )
         .eq("status", "queued")
         .order("created_at", { ascending: true }),
-      filter === "all" && selectedContactId
+      isThreadFilter(filter) && selectedContactId
         ? fetchInboxDetail(supabase, selectedContactId)
         : Promise.resolve(null),
       listUnknownSenders(supabase, {}),
@@ -70,6 +83,29 @@ export default async function MessagesPage({
         ? listUnknownSenders(supabase, { includeDismissed: true })
         : Promise.resolve([]),
     ]);
+
+  // Hydrate assignee emails for whichever assignee ids appear on the
+  // visible threads. One auth.admin.listUsers call covers the whole page.
+  const assigneeEmails: Record<string, string> = {};
+  const assigneeIds = new Set<string>();
+  for (const t of threads) {
+    if (t.assigneeId) assigneeIds.add(t.assigneeId);
+  }
+  if (assigneeIds.size > 0) {
+    try {
+      const admin = createAdminClient();
+      const { data: usersPage } = await admin.auth.admin.listUsers({
+        perPage: 200,
+      });
+      for (const u of usersPage?.users ?? []) {
+        if (u.email && assigneeIds.has(u.id)) {
+          assigneeEmails[u.id] = u.email;
+        }
+      }
+    } catch {
+      // ids still render — pretty labels are best-effort.
+    }
+  }
 
   const queued: QueuedRow[] = (queuedResult.data ?? []).map((r) => ({
     id: r.id,
@@ -93,7 +129,7 @@ export default async function MessagesPage({
     contactPhone: r.contact?.phone_1 ?? null,
   }));
 
-  if (filter === "all" && threadDetail?.propertyId) {
+  if (isThreadFilter(filter) && threadDetail?.propertyId) {
     await markMessagesReadForProperty(threadDetail.propertyId);
   }
 
@@ -111,6 +147,13 @@ export default async function MessagesPage({
       threadDetail={threadDetail}
       unknownSenders={unknownSenders}
       unknownActiveCount={unknownActive.length}
+      assigneeEmails={assigneeEmails}
+      currentUserId={currentUser?.id ?? null}
     />
   );
+}
+
+/** Filter values that show the thread list (vs the unknown bucket). */
+function isThreadFilter(f: InboxFilter): boolean {
+  return f === "all" || f === "mine" || f === "unassigned";
 }
