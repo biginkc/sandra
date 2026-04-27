@@ -95,7 +95,7 @@ export function MatchSenderDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-lg">
         <DialogHeader>
-          <DialogTitle>Match to existing lead</DialogTitle>
+          <DialogTitle>Merge with existing contact</DialogTitle>
           <DialogDescription>
             Attach all messages from{" "}
             <span className="font-mono">{fromAddress}</span> to a contact in

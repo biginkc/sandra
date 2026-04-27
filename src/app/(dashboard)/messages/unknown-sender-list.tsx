@@ -1,6 +1,7 @@
 "use client";
 
 import { formatDistanceToNow } from "date-fns/formatDistanceToNow";
+import { MessageSquareTextIcon } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
 
@@ -10,6 +11,7 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { callAction } from "@/lib/errors/call-action";
@@ -21,6 +23,8 @@ import {
 } from "./actions";
 import { CreateContactDialog } from "./create-contact-dialog";
 import { MatchSenderDialog } from "./match-sender-dialog";
+import { MergePropertyDialog } from "./merge-property-dialog";
+import { UnknownThreadDialog } from "./unknown-thread-dialog";
 
 type Props = {
   senders: UnknownSender[];
@@ -75,7 +79,9 @@ function UnknownRow({
   const router = useRouter();
   const [pending, startTransition] = useTransition();
   const [matchOpen, setMatchOpen] = useState(false);
+  const [mergePropOpen, setMergePropOpen] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
+  const [threadOpen, setThreadOpen] = useState(false);
 
   const dismiss = () => {
     if (!window.confirm(`Dismiss all messages from ${sender.fromAddress}?`)) {
@@ -129,7 +135,20 @@ function UnknownRow({
           {sender.latestBody}
         </div>
       </div>
-      <div className="shrink-0">
+      <div className="flex shrink-0 items-center gap-1">
+        {!showRestore && (
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => setThreadOpen(true)}
+            disabled={pending}
+            aria-label="View full thread"
+            title="View full thread"
+            data-testid={`unknown-view-thread-${sender.fromAddress}`}
+          >
+            <MessageSquareTextIcon className="size-4" />
+          </Button>
+        )}
         {showRestore ? (
           <Button
             variant="outline"
@@ -159,14 +178,21 @@ function UnknownRow({
                 onClick={() => setMatchOpen(true)}
                 data-testid={`unknown-match-${sender.fromAddress}`}
               >
-                Match to existing lead…
+                Merge with existing contact…
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                onClick={() => setMergePropOpen(true)}
+                data-testid={`unknown-merge-property-${sender.fromAddress}`}
+              >
+                Merge with existing property…
               </DropdownMenuItem>
               <DropdownMenuItem
                 onClick={() => setCreateOpen(true)}
                 data-testid={`unknown-create-${sender.fromAddress}`}
               >
-                Create new contact + property…
+                Create new lead…
               </DropdownMenuItem>
+              <DropdownMenuSeparator />
               <DropdownMenuItem
                 onClick={dismiss}
                 data-testid={`unknown-dismiss-${sender.fromAddress}`}
@@ -183,9 +209,20 @@ function UnknownRow({
         fromAddress={sender.fromAddress}
         latestBody={sender.latestBody}
       />
+      <MergePropertyDialog
+        open={mergePropOpen}
+        onOpenChange={setMergePropOpen}
+        fromAddress={sender.fromAddress}
+        latestBody={sender.latestBody}
+      />
       <CreateContactDialog
         open={createOpen}
         onOpenChange={setCreateOpen}
+        fromAddress={sender.fromAddress}
+      />
+      <UnknownThreadDialog
+        open={threadOpen}
+        onOpenChange={setThreadOpen}
         fromAddress={sender.fromAddress}
       />
     </div>

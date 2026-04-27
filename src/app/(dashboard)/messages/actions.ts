@@ -7,8 +7,13 @@ import {
   createContactFromUnknown as createContactFromUnknownHelper,
   dismissUnknownSender as dismissUnknownSenderHelper,
   matchUnknownSender as matchUnknownSenderHelper,
+  mergeUnknownSenderToProperty as mergeUnknownSenderToPropertyHelper,
   restoreDismissedSender as restoreDismissedSenderHelper,
+  type ContactRole,
 } from "@/lib/messages/triage";
+import type { Database } from "@/lib/supabase/types";
+
+type MessageRow = Database["public"]["Tables"]["messages"]["Row"];
 import {
   releaseQueuedMessage,
   type SendSmsOutcome,
@@ -163,6 +168,7 @@ export async function matchUnknownSenderAction(
 
 export async function createContactFromUnknownAction(input: {
   fromAddress: string;
+  role: ContactRole;
   contact: {
     firstName?: string | null;
     lastName?: string | null;
@@ -181,9 +187,121 @@ export async function createContactFromUnknownAction(input: {
   } catch (e) {
     reportError(e, {
       tags: { surface: "create_contact_from_unknown" },
-      extra: { fromAddress: input.fromAddress },
+      extra: { fromAddress: input.fromAddress, role: input.role },
     });
     return errFromUnknown(e, "CREATE_FROM_UNKNOWN_FAILED");
+  }
+}
+
+export async function mergeUnknownSenderToPropertyAction(input: {
+  fromAddress: string;
+  propertyId: string;
+  role: ContactRole;
+  contact: {
+    firstName?: string | null;
+    lastName?: string | null;
+    entityName?: string | null;
+  };
+}): Promise<Result<{ contactId: string }>> {
+  try {
+    const supabase = await createClient();
+    return await mergeUnknownSenderToPropertyHelper({ supabase, ...input });
+  } catch (e) {
+    reportError(e, {
+      tags: { surface: "merge_unknown_sender_to_property" },
+      extra: {
+        fromAddress: input.fromAddress,
+        propertyId: input.propertyId,
+        role: input.role,
+      },
+    });
+    return errFromUnknown(e, "MERGE_TO_PROPERTY_FAILED");
+  }
+}
+
+export type PropertySearchHit = {
+  id: string;
+  address: string;
+  city: string | null;
+  state: string | null;
+  homeownerContactId: string | null;
+  agentContactId: string | null;
+};
+
+/**
+ * Search properties by address fragment for the Merge-with-property
+ * dialog. Caps at 20 results.
+ */
+export async function searchPropertiesForMatch(
+  query: string,
+): Promise<Result<PropertySearchHit[]>> {
+  const trimmed = query.trim();
+  if (trimmed.length < 2) return ok([]);
+  try {
+    const supabase = await createClient();
+    const like = `*${trimmed.replace(/[%_*]/g, "")}*`;
+    const { data, error } = await supabase
+      .from("properties")
+      .select(
+        "id, address, city, state, homeowner_contact_id, agent_contact_id, created_at",
+      )
+      .or([`address.ilike.${like}`, `city.ilike.${like}`].join(","))
+      .order("created_at", { ascending: false })
+      .limit(20);
+    if (error) {
+      return {
+        ok: false,
+        error: { code: "SEARCH_FAILED", message: error.message },
+      };
+    }
+    const hits: PropertySearchHit[] = (data ?? []).map((p) => ({
+      id: p.id,
+      address: p.address,
+      city: p.city,
+      state: p.state,
+      homeownerContactId: p.homeowner_contact_id,
+      agentContactId: p.agent_contact_id,
+    }));
+    return ok(hits);
+  } catch (e) {
+    reportError(e, {
+      tags: { surface: "search_properties_for_match" },
+      extra: { query: trimmed.slice(0, 64) },
+    });
+    return errFromUnknown(e, "SEARCH_FAILED");
+  }
+}
+
+/**
+ * Fetch every message from a given from_address (matched or not,
+ * dismissed or not) for the read-only thread dialog. Sorted ASC by
+ * created_at so bubbles render in conversation order.
+ */
+export async function fetchUnknownSenderThread(
+  fromAddress: string,
+): Promise<Result<MessageRow[]>> {
+  try {
+    const supabase = await createClient();
+    const { data, error } = await supabase
+      .from("messages")
+      .select("*")
+      .eq("from_address", fromAddress)
+      .eq("channel", "sms")
+      .order("created_at", { ascending: true })
+      .limit(200);
+    if (error) {
+      return {
+        ok: false,
+        error: { code: "FETCH_THREAD_FAILED", message: error.message },
+      };
+    }
+    return ok(data ?? []);
+  } catch (e) {
+    reportError(e, {
+      tags: { surface: "fetch_unknown_sender_thread" },
+      extra: { fromAddress },
+    });
+    return errFromUnknown(e, "FETCH_THREAD_FAILED");
   }
 }
 
