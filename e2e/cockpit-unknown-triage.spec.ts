@@ -178,6 +178,9 @@ test("Create flow makes a new contact + property and routes to the lead", async 
   await page.getByTestId(`unknown-actions-${phone}`).click();
   await page.getByTestId(`unknown-create-${phone}`).click();
 
+  // Phase 2.5 made the role radio (Homeowner / Agent) required. Pick
+  // Homeowner to match this test's original intent.
+  await page.getByTestId("role-homeowner").click();
   await page.getByTestId("create-first").fill("Brand");
   await page.getByTestId("create-last").fill("New");
   await page.getByTestId("create-address").fill("123 Created Ln");
