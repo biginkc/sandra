@@ -9,20 +9,34 @@ import {
   TabsTrigger,
 } from "@/components/ui/tabs";
 import type { Thread } from "@/lib/messages/list-threads";
+import type { UnknownSender } from "@/lib/messages/list-unknown-senders";
 
 import { InboxDetail } from "./inbox-detail";
 import { type InboxDetail as InboxDetailData } from "./inbox-detail-data";
+import { InboxFilters, type InboxFilter } from "./inbox-filters";
 import { InboxThreadList } from "./inbox-thread-list";
 import { QueuePanel, type QueuedRow } from "./queue-panel";
+import { UnknownSenderList } from "./unknown-sender-list";
 
 type Props = {
   activeTab: "inbox" | "outbox";
+  filter: InboxFilter;
   threads: Thread[];
   queued: QueuedRow[];
   threadDetail: InboxDetailData | null;
+  unknownSenders: UnknownSender[];
+  unknownActiveCount: number;
 };
 
-export function CockpitView({ activeTab, threads, queued, threadDetail }: Props) {
+export function CockpitView({
+  activeTab,
+  filter,
+  threads,
+  queued,
+  threadDetail,
+  unknownSenders,
+  unknownActiveCount,
+}: Props) {
   const router = useRouter();
   const searchParams = useSearchParams();
 
@@ -72,12 +86,26 @@ export function CockpitView({ activeTab, threads, queued, threadDetail }: Props)
         </TabsList>
 
         <TabsContent value="inbox">
-          <div className="grid grid-cols-[minmax(280px,360px)_1fr] gap-4 mt-4">
-            <InboxThreadList
-              initial={threads}
-              selectedContactId={threadDetail?.contactId ?? null}
-            />
-            <InboxDetail data={threadDetail} />
+          <div className="mt-4 flex flex-col gap-3">
+            <InboxFilters active={filter} unknownCount={unknownActiveCount} />
+
+            {filter === "all" && (
+              <div className="grid grid-cols-[minmax(280px,360px)_1fr] gap-4">
+                <InboxThreadList
+                  initial={threads}
+                  selectedContactId={threadDetail?.contactId ?? null}
+                />
+                <InboxDetail data={threadDetail} />
+              </div>
+            )}
+
+            {filter === "unknown" && (
+              <UnknownSenderList senders={unknownSenders} showRestore={false} />
+            )}
+
+            {filter === "dismissed" && (
+              <UnknownSenderList senders={unknownSenders} showRestore={true} />
+            )}
           </div>
         </TabsContent>
 

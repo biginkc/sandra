@@ -1,10 +1,12 @@
 import { createClient } from "@/lib/supabase/server";
 import { listThreads } from "@/lib/messages/list-threads";
+import { listUnknownSenders } from "@/lib/messages/list-unknown-senders";
 
 import { markMessagesReadForProperty } from "../leads/actions";
 
 import { CockpitView } from "./cockpit-view";
 import { fetchInboxDetail } from "./inbox-detail-data";
+import { type InboxFilter } from "./inbox-filters";
 import { type QueuedRow } from "./queue-panel";
 
 export const metadata = {
@@ -19,40 +21,55 @@ export const metadata = {
  *      immediately via the existing send-now path. Replaces the Dialpad
  *      app for live conversation work.
  *
+ *      Filters: All (default), Unknown (Phase 2 — unmatched inbounds),
+ *      Dismissed (Phase 2 — soft-deleted unknown senders).
+ *
  *   2. Outbox — the legacy queue panel: drafts waiting to release with
  *      cadence (Send Next / Auto-send). Unchanged.
  *
- * State (active tab, selected thread) lives in the URL query string so
- * cockpit URLs are shareable.
+ * State (active tab, filter, selected thread) lives in the URL query
+ * string so cockpit URLs are shareable.
  */
 export default async function MessagesPage({
   searchParams,
 }: {
-  searchParams: Promise<{ tab?: string; thread?: string }>;
+  searchParams: Promise<{ tab?: string; thread?: string; filter?: string }>;
 }) {
   const sp = await searchParams;
   const activeTab = sp.tab === "outbox" ? "outbox" : "inbox";
+  const filter: InboxFilter =
+    sp.filter === "unknown"
+      ? "unknown"
+      : sp.filter === "dismissed"
+        ? "dismissed"
+        : "all";
   const selectedContactId = sp.thread ?? null;
 
   const supabase = await createClient();
 
-  // Fetch everything in parallel — cockpit needs all three datasets to
-  // render either tab cleanly without a second roundtrip.
-  const [threads, queuedResult, threadDetail] = await Promise.all([
-    listThreads(supabase, {}),
-    supabase
-      .from("messages")
-      .select(
-        `id, body, from_address, to_address, created_at, property_id, contact_id,
-         property:properties(id, address, city, state),
-         contact:contacts(id, first_name, last_name, entity_name, phone_1)`,
-      )
-      .eq("status", "queued")
-      .order("created_at", { ascending: true }),
-    selectedContactId
-      ? fetchInboxDetail(supabase, selectedContactId)
-      : Promise.resolve(null),
-  ]);
+  // Fetch everything in parallel. The thread list + unknown active count
+  // are needed regardless of which filter is active (badge counts on the
+  // tab + filter chips). Other queries are conditional on the filter.
+  const [threads, queuedResult, threadDetail, unknownActive, unknownAll] =
+    await Promise.all([
+      listThreads(supabase, {}),
+      supabase
+        .from("messages")
+        .select(
+          `id, body, from_address, to_address, created_at, property_id, contact_id,
+           property:properties(id, address, city, state),
+           contact:contacts(id, first_name, last_name, entity_name, phone_1)`,
+        )
+        .eq("status", "queued")
+        .order("created_at", { ascending: true }),
+      filter === "all" && selectedContactId
+        ? fetchInboxDetail(supabase, selectedContactId)
+        : Promise.resolve(null),
+      listUnknownSenders(supabase, {}),
+      filter === "dismissed"
+        ? listUnknownSenders(supabase, { includeDismissed: true })
+        : Promise.resolve([]),
+    ]);
 
   const queued: QueuedRow[] = (queuedResult.data ?? []).map((r) => ({
     id: r.id,
@@ -76,20 +93,24 @@ export default async function MessagesPage({
     contactPhone: r.contact?.phone_1 ?? null,
   }));
 
-  // Stamp messages as read whenever a thread is opened. Idempotent — the
-  // partial index `WHERE read_at IS NULL` short-circuits if nothing's
-  // unread. Done here on the server (not on click in the client) so a
-  // direct deeplink also clears the badge.
-  if (threadDetail?.propertyId) {
+  if (filter === "all" && threadDetail?.propertyId) {
     await markMessagesReadForProperty(threadDetail.propertyId);
   }
+
+  const unknownSenders =
+    filter === "dismissed"
+      ? unknownAll.filter((s) => s.isDismissed)
+      : unknownActive;
 
   return (
     <CockpitView
       activeTab={activeTab}
+      filter={filter}
       threads={threads}
       queued={queued}
       threadDetail={threadDetail}
+      unknownSenders={unknownSenders}
+      unknownActiveCount={unknownActive.length}
     />
   );
 }
