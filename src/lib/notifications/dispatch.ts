@@ -156,6 +156,39 @@ export async function dispatchPropertyAssigned(
  * Reads the job row directly rather than taking payload args so the
  * dispatch sees exactly what persisted — no drift risk.
  */
+export async function dispatchSkipTraceRequested(
+  supabase: SupabaseClient<Database>,
+  params: {
+    jobId: string;
+    requesterEmail: string | null;
+    propertyCount: number;
+    /** Pre-resolved admin user ids; pass [] to no-op cleanly. */
+    adminUserIds: readonly string[];
+  },
+): Promise<{ inserted: number }> {
+  const { data: job, error } = await supabase
+    .from("jobs")
+    .select("id, org_id, created_by")
+    .eq("id", params.jobId)
+    .maybeSingle();
+  if (error || !job) return { inserted: 0 };
+
+  // Don't notify the requester themselves.
+  const recipients = params.adminUserIds.filter((id) => id !== job.created_by);
+
+  return createNotification(supabase, {
+    orgId: job.org_id,
+    eventType: "skip_trace_requested",
+    entityType: "job",
+    entityId: job.id,
+    payload: {
+      requesterEmail: params.requesterEmail,
+      propertyCount: params.propertyCount,
+    },
+    recipients,
+  });
+}
+
 export async function dispatchJobCompleted(
   supabase: SupabaseClient<Database>,
   params: { jobId: string },

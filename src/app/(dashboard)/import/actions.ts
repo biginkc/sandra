@@ -12,6 +12,7 @@ import {
   getAutotriggerCap,
   runCassEnrichment,
 } from "@/lib/enrichment/cass-job";
+import { requestSkipTrace } from "@/lib/skip-trace/actions";
 
 import type { WizardMarket, WizardSource } from "./wizard";
 
@@ -23,7 +24,13 @@ export type CreateImportJobParams = {
   listName: string | null;
   mapping: Mapping;
   rows: RowData[];
+  /** Surface C — when true, after CASS auto-trigger, also request a
+   *  skip-trace job for the newly imported properties. Goes through
+   *  the same approval flow as a manual request. Off by default. */
+  requestSkipTrace?: boolean;
 };
+
+const SKIP_TRACE_PER_JOB_CAP = 500;
 
 export type CreateImportJobResult = { jobId: string };
 
@@ -185,6 +192,38 @@ export async function createImportJob(
         // Parent import is already completed — don't flip its status.
         // Any CASS-side failures are reflected on the child job row
         // (or just absent if we couldn't create one).
+      }
+
+      // Surface C: opt-in skip-trace request after CASS. Only fires when
+      // the importer ticked the wizard checkbox. Honors the per-job cap
+      // (refuse silently if over — the wizard already disables the
+      // checkbox in that case, so this is defense in depth).
+      if (params.requestSkipTrace) {
+        try {
+          const { data: stItems } = await supabase
+            .from("job_items")
+            .select("property_id")
+            .eq("job_id", jobRow.id)
+            .eq("status", "success")
+            .not("property_id", "is", null);
+
+          const stPropertyIds = (stItems ?? [])
+            .map((r) => r.property_id)
+            .filter((id): id is string => typeof id === "string")
+            .slice(0, SKIP_TRACE_PER_JOB_CAP);
+
+          if (stPropertyIds.length > 0) {
+            // requestSkipTrace handles the admin/VA branching and
+            // notifications. We don't surface the result back to the
+            // wizard — the user gets a separate notification on /jobs.
+            await requestSkipTrace(stPropertyIds);
+          }
+        } catch (e) {
+          reportError(e, {
+            tags: { surface: "create_import_job_after_skip_trace" },
+            extra: { jobId: jobRow.id },
+          });
+        }
       }
     });
 

@@ -1,10 +1,19 @@
+import { isAdminEmail } from "@/lib/auth/allowlist";
+import { createClient } from "@/lib/supabase/server";
+
 import { JobsList } from "./jobs-list";
 
 export const metadata = {
   title: "Jobs · Sandra CRM",
 };
 
-export default function JobsPage() {
+export default async function JobsPage() {
+  const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  const isAdmin = isAdminEmail(user?.email);
+
   return (
     <div className="flex flex-col gap-4 p-6">
       <div>
@@ -14,7 +23,7 @@ export default function JobsPage() {
           sweeps — shows up here with live status.
         </p>
       </div>
-      <JobsList />
+      <JobsList isAdmin={isAdmin} />
     </div>
   );
 }

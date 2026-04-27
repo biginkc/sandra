@@ -59,6 +59,9 @@ export default defineConfig({
       ADDRESS_VERIFIER_PROVIDER: "mock",
       // Same story for SMS — mock provider so no real Dialpad calls.
       MESSAGING_PROVIDER: "mock",
+      // Skip-trace also defaults to mock. Tracerfy real-API coverage
+      // lives in the unit suite (src/lib/skip-trace/providers/tracerfy.test.ts).
+      SKIP_TRACE_PROVIDER: "mock",
     },
   },
   resolve: {

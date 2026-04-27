@@ -7,7 +7,8 @@
 export type EventType =
   | "owner_message_added"
   | "property_assigned"
-  | "bulk_action_completed";
+  | "bulk_action_completed"
+  | "skip_trace_requested";
 
 export type EntityType = "property" | "job";
 
@@ -42,4 +43,7 @@ export type FormatPayload = {
   state?: string | null;
   succeeded?: number;
   failed?: number;
+  /** For skip_trace_requested: who asked + how many properties. */
+  requesterEmail?: string | null;
+  propertyCount?: number;
 };

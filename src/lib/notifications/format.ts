@@ -65,5 +65,13 @@ export function formatNotification(
         body: `${succeeded} succeeded, ${failed} failed`,
       };
     }
+    case "skip_trace_requested": {
+      const who = payload.requesterEmail ?? "A teammate";
+      const count = payload.propertyCount ?? 0;
+      return {
+        title: "Skip-trace approval needed",
+        body: `${who} requested skip-trace for ${count} propert${count === 1 ? "y" : "ies"}`,
+      };
+    }
   }
 }
