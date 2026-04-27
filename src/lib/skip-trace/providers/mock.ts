@@ -15,6 +15,8 @@ import type {
  *   - address starts with "DNC"      → hit=true, single phone with dnc=true
  *   - address starts with "EMAIL"    → hit=true, email-only (no phones)
  *   - address starts with "MULTI"    → hit=true, two persons, two phones each
+ *   - address starts with "RAW"      → hit=true, phone returned as bare
+ *                                       10 digits (Tracerfy's actual format)
  *   - otherwise                       → hit=true, one person, one mobile phone
  *
  * Batch submissions are queued in-memory and "complete" on the next
@@ -112,6 +114,24 @@ function synthesize(input: SkipTraceInput): SkipTraceResult {
       ],
       creditsDeducted: 5,
       raw: { mock: true, email: true },
+    };
+  }
+
+  if (upper.startsWith("RAW")) {
+    return {
+      propertyId: input.propertyId,
+      hit: true,
+      persons: [
+        {
+          firstName: input.firstName ?? "Raw",
+          lastName: input.lastName ?? "Owner",
+          phones: [{ number: "8167416576", type: "Mobile", dnc: false, rank: 1 }],
+          emails: [],
+          isOwner: true,
+        },
+      ],
+      creditsDeducted: 5,
+      raw: { mock: true, raw_phone: true },
     };
   }
 

@@ -286,6 +286,29 @@ describe("runSkipTraceEnrichment (integration, mock provider)", () => {
     expect(summary?.api_hits).toBe(0);
   });
 
+  it("normalizes provider-returned phones to E.164 before persisting", async () => {
+    // RAW prefix → mock returns bare "8167416576" (Tracerfy's actual shape)
+    const { propertyId } = await seedProperty({ address: "RAW phone test" });
+    const jobId = await createPendingJob([propertyId]);
+
+    await runSkipTraceEnrichment(supabase, {
+      jobId,
+      propertyIds: [propertyId],
+    });
+
+    const { data: prop } = await supabase
+      .from("properties")
+      .select("homeowner_contact_id")
+      .eq("id", propertyId)
+      .single();
+    const { data: contact } = await supabase
+      .from("contacts")
+      .select("phone_1")
+      .eq("id", prop!.homeowner_contact_id!)
+      .single();
+    expect(contact!.phone_1).toBe("+18167416576");
+  });
+
   it("dedupes phones: re-running on a contact whose phone_1 already matches doesn't fill phone_2", async () => {
     const { propertyId, contactId } = await seedProperty({
       address: "Dedupe Test Ln",
