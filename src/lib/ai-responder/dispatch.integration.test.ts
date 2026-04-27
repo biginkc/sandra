@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createTestClient } from "@tests/integration/client";
 import { resetTenantTables } from "@tests/integration/reset";
@@ -10,6 +10,17 @@ import {
 import { dispatchAiResponse } from "./dispatch";
 import type { AnthropicLike } from "./generate";
 import type { AiStructuredOutput } from "./types";
+
+// Force quiet-hours "open" for the whole file so the happy-path test is
+// deterministic regardless of wall-clock. None of the other tests in this
+// file exercise `business_hours_only: true`, so a blanket mock is safe.
+vi.mock("@/lib/messaging/quiet-hours", () => ({
+  checkQuietHours: () => ({
+    ok: true,
+    localTime: "12:00",
+    zone: "America/Chicago",
+  }),
+}));
 
 const supabase = createTestClient();
 
@@ -140,20 +151,9 @@ describe("dispatchAiResponse (integration)", () => {
   });
 
   // --------------------------------------------------------------------------
-  // Happy path
-  //
-  // FLAKY by time-of-day: this test goes all the way through
-  // `sendSmsToContact`, which independently checks `checkQuietHours` on
-  // the property's state. Outside the 08:00-21:00 local window for the
-  // hard-coded state ("MO"), the send is blocked → outcome=escalated
-  // with reason `send_blocked:blocked_quiet_hours`. To make this test
-  // robust we'd need to either (a) `vi.mock` the quiet-hours module or
-  // (b) dynamically pick a state whose current local time is inside
-  // hours. Both are out of scope for the escalation-reason PR. Skip
-  // for now; the smoke script `scripts/smoke-ai-responder.ts` already
-  // proves the happy path against real Claude.
+  // Happy path — relies on the file-level `vi.mock` of quiet-hours above.
   // --------------------------------------------------------------------------
-  it.skip("happy path: Claude approves → sends via sendSmsToContact and stamps AI metadata", async () => {
+  it("happy path: Claude approves → sends via sendSmsToContact and stamps AI metadata", async () => {
     await seedConfig();
     const { propertyId, contactId } = await seedLead({
       phone: "+18167554001",
