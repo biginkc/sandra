@@ -725,6 +725,7 @@ export type Database = {
           created_at: string
           delivered_at: string | null
           direction: string
+          dismissed_at: string | null
           error_message: string | null
           external_id: string | null
           failed_at: string | null
@@ -748,6 +749,7 @@ export type Database = {
           created_at?: string
           delivered_at?: string | null
           direction: string
+          dismissed_at?: string | null
           error_message?: string | null
           external_id?: string | null
           failed_at?: string | null
@@ -771,6 +773,7 @@ export type Database = {
           created_at?: string
           delivered_at?: string | null
           direction?: string
+          dismissed_at?: string | null
           error_message?: string | null
           external_id?: string | null
           failed_at?: string | null
