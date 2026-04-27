@@ -220,8 +220,10 @@ export async function searchContactsForMatch(
   if (trimmed.length < 2) return ok([]);
   try {
     const supabase = await createClient();
-    // PostgREST `or` filter for the fuzzy search across multiple cols.
-    const like = `%${trimmed.replace(/[%_]/g, "")}%`;
+    // PostgREST `.or()` filter for the fuzzy search across multiple cols.
+    // Inside `.or()` the wildcard for `ilike` is `*`, NOT the SQL `%` —
+    // `%` lands as a literal character match and never hits anything.
+    const like = `*${trimmed.replace(/[%_*]/g, "")}*`;
     const { data, error } = await supabase
       .from("contacts")
       .select(
