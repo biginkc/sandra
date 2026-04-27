@@ -143,7 +143,10 @@ export async function persistSkipTraceResult(
     if (existing.has(normalized)) continue;
     const emptyIdx = slots.findIndex((s) => !s);
     if (emptyIdx === -1) break;
-    slots[emptyIdx] = phone.number;
+    // Persist the E.164 form (provider-agnostic). Tracerfy returns raw
+    // 10-digit strings ("8167416576"); Dialpad outbound + the dedupe
+    // index work better with E.164 ("+18167416576").
+    slots[emptyIdx] = normalized;
     existing.add(normalized);
     phonesAdded++;
   }
@@ -187,8 +190,19 @@ export async function persistSkipTraceResult(
   };
 }
 
-/** Strip everything but digits + leading + so dedupe works across formats. */
-function normalizePhone(raw: string): string {
+/**
+ * Convert a raw provider-returned phone string into E.164 format.
+ * Strips non-digits (and a leading `+` if present), then:
+ *   - 10 digits  → assume US, prepend `+1`
+ *   - 11 digits starting with 1 → prepend `+`
+ *   - already E.164 (`+...`)    → kept as-is
+ *   - anything else             → returned with `+` removed but no
+ *                                  guess (caller can decide what to do)
+ *
+ * Exported so the unit tests + future callers (e.g. wrong-party
+ * blocklist matcher) can use it without duplicating the rules.
+ */
+export function normalizePhone(raw: string): string {
   const trimmed = raw.replace(/[^\d+]/g, "");
   if (trimmed.startsWith("+")) return trimmed;
   if (trimmed.length === 10) return `+1${trimmed}`;
