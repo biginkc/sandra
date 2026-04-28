@@ -14,7 +14,10 @@
     "typecheck": "tsc --noEmit",
     "verify": "npm run typecheck && npm run test",
     "prepare": "husky",
-    "smoke:sequences-prod": "tsx scripts/smoke-sequences-prod.ts"
+    "smoke:sequences-prod": "tsx scripts/smoke-sequences-prod.ts",
+    "smoke:ai-happy-prod": "tsx scripts/smoke-ai-responder-happy-prod.ts",
+    "smoke:ai-escalation-prod": "tsx scripts/smoke-ai-responder-escalation-prod.ts",
+    "smoke:stop-prod": "tsx scripts/smoke-stop-keyword-prod.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.91.0",
