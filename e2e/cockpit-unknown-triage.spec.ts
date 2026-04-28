@@ -225,14 +225,21 @@ test("Dismiss removes from Unknown; Restore brings it back", async ({
   await page.goto("/messages?filter=unknown");
   await expect(page.getByTestId(`unknown-row-${phone}`)).toBeVisible();
 
-  // Confirm dialog — auto-accept.
-  page.once("dialog", (d) => d.accept());
+  // Confirm dialog — auto-accept. Use `page.on` (persistent, not `once`)
+  // so a stale handler from a prior interaction can't get consumed before
+  // the confirm fires; CI was intermittently hanging here on `once`.
+  page.on("dialog", (d) => d.accept());
   await page.getByTestId(`unknown-actions-${phone}`).click();
   await page.getByTestId(`unknown-dismiss-${phone}`).click();
 
+  // Let the server action + router.refresh() settle before polling DB.
+  // Without this CI shows the bucket already empty but the DB query
+  // returns 0 rows, suggesting we're racing the action's commit.
+  await page.waitForLoadState("networkidle");
+
   await expect(page.getByTestId(`unknown-row-${phone}`)).toHaveCount(0);
 
-  // DB stamped.
+  // DB stamped. Bumped to 15s for CI headroom.
   await expect(async () => {
     const { data } = await admin
       .from("messages")
@@ -240,18 +247,20 @@ test("Dismiss removes from Unknown; Restore brings it back", async ({
       .eq("from_address", phone);
     expect(data).toHaveLength(1);
     expect(data![0].dismissed_at).not.toBeNull();
-  }).toPass({ timeout: 5_000 });
+  }).toPass({ timeout: 15_000 });
 
   // Switch to Dismissed sub-tab and restore.
   await page.getByTestId("filter-dismissed").click();
   await expect(page.getByTestId(`unknown-row-${phone}`)).toBeVisible();
   await page.getByTestId(`unknown-restore-${phone}`).click();
+  await page.waitForLoadState("networkidle");
 
   await expect(async () => {
     const { data } = await admin
       .from("messages")
       .select("dismissed_at")
       .eq("from_address", phone);
+    expect(data).toHaveLength(1);
     expect(data![0].dismissed_at).toBeNull();
-  }).toPass({ timeout: 5_000 });
+  }).toPass({ timeout: 15_000 });
 });
