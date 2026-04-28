@@ -94,9 +94,18 @@ export async function matchUnknownSender(
   }
 }
 
+/**
+ * Role of the new contact on the property. NOT the same as
+ * `contacts.contact_type` (which is `person` vs `entity`). The role
+ * decides which detail-table row gets created and which property FK
+ * gets set.
+ */
+export type ContactRole = "homeowner" | "agent";
+
 export type CreateContactFromUnknownInput = {
   supabase: SupabaseClient<Database>;
   fromAddress: string;
+  role: ContactRole;
   contact: {
     firstName?: string | null;
     lastName?: string | null;
@@ -113,7 +122,7 @@ export type CreateContactFromUnknownInput = {
 export async function createContactFromUnknown(
   input: CreateContactFromUnknownInput,
 ): Promise<Result<{ contactId: string; propertyId: string }>> {
-  const { supabase, fromAddress, contact, property } = input;
+  const { supabase, fromAddress, role, contact, property } = input;
   try {
     const { data: c, error: cErr } = await supabase
       .from("contacts")
@@ -132,6 +141,13 @@ export async function createContactFromUnknown(
       });
     }
 
+    // Detail row matching the role.
+    const detailErr = await insertRoleDetail(supabase, c.id, role);
+    if (detailErr) {
+      await supabase.from("contacts").delete().eq("id", c.id);
+      return err(detailErr);
+    }
+
     const { data: p, error: pErr } = await supabase
       .from("properties")
       .insert({
@@ -139,14 +155,16 @@ export async function createContactFromUnknown(
         city: property.city ?? null,
         state: property.state,
         zip: property.zip ?? null,
-        homeowner_contact_id: c.id,
+        homeowner_contact_id: role === "homeowner" ? c.id : null,
+        agent_contact_id: role === "agent" ? c.id : null,
         status: "new_lead",
       })
       .select("id")
       .single();
     if (pErr || !p) {
-      // Clean up the orphaned contact so a retry isn't blocked by the
-      // unique phone_1 partial index.
+      // Clean up the orphaned contact + detail row so a retry isn't
+      // blocked by the unique phone_1 partial index.
+      await deleteRoleDetail(supabase, c.id, role);
       await supabase.from("contacts").delete().eq("id", c.id);
       return err({
         code: "PROPERTY_INSERT_FAILED",
@@ -169,6 +187,154 @@ export async function createContactFromUnknown(
     return ok({ contactId: c.id, propertyId: p.id });
   } catch (e) {
     return errFromUnknown(e, "CREATE_FROM_UNKNOWN_FAILED");
+  }
+}
+
+export type MergeUnknownSenderToPropertyInput = {
+  supabase: SupabaseClient<Database>;
+  fromAddress: string;
+  propertyId: string;
+  role: ContactRole;
+  contact: {
+    firstName?: string | null;
+    lastName?: string | null;
+    entityName?: string | null;
+  };
+};
+
+/**
+ * Merge an unknown sender into an existing property. Creates a new
+ * contact (with the from_address as phone_1) and a matching detail row
+ * (`homeowner_details` or `agent_details`), sets the appropriate FK on
+ * the property, then attaches every message from that from_address.
+ *
+ * Errors PROPERTY_ROLE_TAKEN if the property already has a contact in
+ * the requested role — the VA needs to clear that slot first or pick a
+ * different role.
+ */
+export async function mergeUnknownSenderToProperty(
+  input: MergeUnknownSenderToPropertyInput,
+): Promise<Result<{ contactId: string }>> {
+  const { supabase, fromAddress, propertyId, role, contact } = input;
+  try {
+    const { data: prop, error: propErr } = await supabase
+      .from("properties")
+      .select("id, homeowner_contact_id, agent_contact_id")
+      .eq("id", propertyId)
+      .maybeSingle();
+    if (propErr) {
+      return err({ code: "PROPERTY_FETCH_FAILED", message: propErr.message });
+    }
+    if (!prop) {
+      return err({
+        code: "PROPERTY_NOT_FOUND",
+        message: "Property does not exist.",
+      });
+    }
+
+    const slotTaken =
+      role === "homeowner"
+        ? prop.homeowner_contact_id !== null
+        : prop.agent_contact_id !== null;
+    if (slotTaken) {
+      return err({
+        code: "PROPERTY_ROLE_TAKEN",
+        message: `Property already has a ${role} contact. Clear it first or pick a different role.`,
+      });
+    }
+
+    const { data: c, error: cErr } = await supabase
+      .from("contacts")
+      .insert({
+        first_name: contact.firstName ?? null,
+        last_name: contact.lastName ?? null,
+        entity_name: contact.entityName ?? null,
+        phone_1: fromAddress,
+      })
+      .select("id")
+      .single();
+    if (cErr || !c) {
+      return err({
+        code: "CONTACT_INSERT_FAILED",
+        message: cErr?.message ?? "no contact id returned",
+      });
+    }
+
+    const detailErr = await insertRoleDetail(supabase, c.id, role);
+    if (detailErr) {
+      await supabase.from("contacts").delete().eq("id", c.id);
+      return err(detailErr);
+    }
+
+    const { error: linkErr } = await supabase
+      .from("properties")
+      .update(
+        role === "homeowner"
+          ? { homeowner_contact_id: c.id }
+          : { agent_contact_id: c.id },
+      )
+      .eq("id", propertyId);
+    if (linkErr) {
+      await deleteRoleDetail(supabase, c.id, role);
+      await supabase.from("contacts").delete().eq("id", c.id);
+      return err({
+        code: "PROPERTY_LINK_FAILED",
+        message: linkErr.message,
+      });
+    }
+
+    const { error: msgErr } = await supabase
+      .from("messages")
+      .update({ contact_id: c.id, property_id: propertyId })
+      .eq("from_address", fromAddress)
+      .is("contact_id", null);
+    if (msgErr) {
+      return err({
+        code: "MESSAGE_BACKFILL_FAILED",
+        message: msgErr.message,
+      });
+    }
+
+    return ok({ contactId: c.id });
+  } catch (e) {
+    return errFromUnknown(e, "MERGE_TO_PROPERTY_FAILED");
+  }
+}
+
+/**
+ * Insert a homeowner_details or agent_details row. Returns an
+ * AppErrorShape on failure; null on success.
+ */
+async function insertRoleDetail(
+  supabase: SupabaseClient<Database>,
+  contactId: string,
+  role: ContactRole,
+): Promise<AppErrorShape | null> {
+  const { error } =
+    role === "homeowner"
+      ? await supabase.from("homeowner_details").insert({ contact_id: contactId })
+      : await supabase.from("agent_details").insert({ contact_id: contactId });
+  if (error) {
+    return {
+      code: role === "homeowner" ? "HOMEOWNER_DETAIL_FAILED" : "AGENT_DETAIL_FAILED",
+      message: error.message,
+    };
+  }
+  return null;
+}
+
+async function deleteRoleDetail(
+  supabase: SupabaseClient<Database>,
+  contactId: string,
+  role: ContactRole,
+): Promise<void> {
+  if (role === "homeowner") {
+    await supabase
+      .from("homeowner_details")
+      .delete()
+      .eq("contact_id", contactId);
+  } else {
+    await supabase.from("agent_details").delete().eq("contact_id", contactId);
   }
 }
 

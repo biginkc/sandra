@@ -8,6 +8,7 @@ import {
   dismissUnknownSender,
   restoreDismissedSender,
   createContactFromUnknown,
+  mergeUnknownSenderToProperty,
 } from "@/lib/messages/triage";
 
 const supabase = createTestClient();
@@ -197,8 +198,8 @@ describe("createContactFromUnknown (integration)", () => {
     await resetTenantTables(supabase);
   });
 
-  // Test case #44 + #45
-  it("creates a contact + property and attaches all messages from the same from_address", async () => {
+  // Test case #5 (Phase 2.5)
+  it("with role=homeowner: creates contact, homeowner_details row, sets homeowner_contact_id, attaches messages", async () => {
     const phone = "+18165559020";
     const msgIds = [
       await seedUnknown({ fromAddress: phone, body: "first body" }),
@@ -208,6 +209,7 @@ describe("createContactFromUnknown (integration)", () => {
     const result = await createContactFromUnknown({
       supabase,
       fromAddress: phone,
+      role: "homeowner",
       contact: {
         firstName: "New",
         lastName: "Lead",
@@ -225,24 +227,34 @@ describe("createContactFromUnknown (integration)", () => {
     // Contact was created with the phone in phone_1.
     const { data: c } = await supabase
       .from("contacts")
-      .select("first_name, last_name, phone_1")
+      .select("first_name, last_name, phone_1, contact_type")
       .eq("id", result.data.contactId)
       .single();
     expect(c).toMatchObject({
       first_name: "New",
       last_name: "Lead",
       phone_1: phone,
+      contact_type: "person", // role is separate; type stays defaulted
     });
 
-    // Property was created and the contact is its homeowner.
+    // homeowner_details row exists for this contact.
+    const { data: detail } = await supabase
+      .from("homeowner_details")
+      .select("contact_id")
+      .eq("contact_id", result.data.contactId)
+      .maybeSingle();
+    expect(detail?.contact_id).toBe(result.data.contactId);
+
+    // Property has homeowner_contact_id set, NOT agent_contact_id.
     const { data: p } = await supabase
       .from("properties")
-      .select("address, homeowner_contact_id, status")
+      .select("address, homeowner_contact_id, agent_contact_id, status")
       .eq("id", result.data.propertyId)
       .single();
     expect(p).toMatchObject({
       address: "123 New Lead Ln",
       homeowner_contact_id: result.data.contactId,
+      agent_contact_id: null,
       status: "new_lead",
     });
 
@@ -255,6 +267,244 @@ describe("createContactFromUnknown (integration)", () => {
       expect(m.contact_id).toBe(result.data.contactId);
       expect(m.property_id).toBe(result.data.propertyId);
     }
+  });
+
+  // Test case #6 (Phase 2.5)
+  it("with role=agent: creates contact, agent_details row, sets agent_contact_id (NOT homeowner_contact_id)", async () => {
+    const phone = "+18165559021";
+    await seedUnknown({ fromAddress: phone, body: "agent inbound" });
+
+    const result = await createContactFromUnknown({
+      supabase,
+      fromAddress: phone,
+      role: "agent",
+      contact: {
+        firstName: "Agent",
+        lastName: "Mc Agentface",
+      },
+      property: {
+        address: "456 Agent Ave",
+        state: "MO",
+      },
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    // agent_details row exists, homeowner_details does NOT.
+    const { data: agentDetail } = await supabase
+      .from("agent_details")
+      .select("contact_id")
+      .eq("contact_id", result.data.contactId)
+      .maybeSingle();
+    expect(agentDetail?.contact_id).toBe(result.data.contactId);
+
+    const { data: homeownerDetail } = await supabase
+      .from("homeowner_details")
+      .select("contact_id")
+      .eq("contact_id", result.data.contactId)
+      .maybeSingle();
+    expect(homeownerDetail).toBeNull();
+
+    // Property has agent_contact_id set, NOT homeowner_contact_id.
+    const { data: p } = await supabase
+      .from("properties")
+      .select("homeowner_contact_id, agent_contact_id")
+      .eq("id", result.data.propertyId)
+      .single();
+    expect(p).toMatchObject({
+      homeowner_contact_id: null,
+      agent_contact_id: result.data.contactId,
+    });
+  });
+});
+
+// ============================================================================
+// Phase 2.5 — mergeUnknownSenderToProperty
+// ============================================================================
+describe("mergeUnknownSenderToProperty (integration)", () => {
+  beforeEach(async () => {
+    await resetTenantTables(supabase);
+  });
+
+  async function seedProperty(opts: {
+    addressTag: string;
+    homeownerContactId?: string | null;
+    agentContactId?: string | null;
+  }): Promise<string> {
+    const { data, error } = await supabase
+      .from("properties")
+      .insert({
+        address: `${Math.floor(Math.random() * 9000) + 1000} ${opts.addressTag} Ln`,
+        state: "MO",
+        homeowner_contact_id: opts.homeownerContactId ?? null,
+        agent_contact_id: opts.agentContactId ?? null,
+      })
+      .select("id")
+      .single();
+    if (error) throw error;
+    return data!.id;
+  }
+
+  // Test case #1
+  it("with role=homeowner: attaches messages, creates contact + homeowner_details, sets property.homeowner_contact_id", async () => {
+    const phone = "+18165560001";
+    const msgIds = [
+      await seedUnknown({ fromAddress: phone, body: "merge to property 1" }),
+      await seedUnknown({ fromAddress: phone, body: "merge to property 2" }),
+    ];
+    const propertyId = await seedProperty({ addressTag: "MERGE-HO" });
+
+    const result = await mergeUnknownSenderToProperty({
+      supabase,
+      fromAddress: phone,
+      propertyId,
+      role: "homeowner",
+      contact: { firstName: "Merged", lastName: "Owner" },
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    const { data: detail } = await supabase
+      .from("homeowner_details")
+      .select("contact_id")
+      .eq("contact_id", result.data.contactId)
+      .maybeSingle();
+    expect(detail?.contact_id).toBe(result.data.contactId);
+
+    const { data: p } = await supabase
+      .from("properties")
+      .select("homeowner_contact_id, agent_contact_id")
+      .eq("id", propertyId)
+      .single();
+    expect(p).toMatchObject({
+      homeowner_contact_id: result.data.contactId,
+      agent_contact_id: null,
+    });
+
+    const { data: msgs } = await supabase
+      .from("messages")
+      .select("contact_id, property_id")
+      .in("id", msgIds);
+    for (const m of msgs!) {
+      expect(m.contact_id).toBe(result.data.contactId);
+      expect(m.property_id).toBe(propertyId);
+    }
+  });
+
+  // Test case #2
+  it("with role=agent: creates agent_details, sets property.agent_contact_id", async () => {
+    const phone = "+18165560002";
+    await seedUnknown({ fromAddress: phone, body: "agent merge" });
+    const propertyId = await seedProperty({ addressTag: "MERGE-AG" });
+
+    const result = await mergeUnknownSenderToProperty({
+      supabase,
+      fromAddress: phone,
+      propertyId,
+      role: "agent",
+      contact: { firstName: "Listing", lastName: "Agent" },
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    const { data: agentDetail } = await supabase
+      .from("agent_details")
+      .select("contact_id")
+      .eq("contact_id", result.data.contactId)
+      .maybeSingle();
+    expect(agentDetail?.contact_id).toBe(result.data.contactId);
+
+    const { data: p } = await supabase
+      .from("properties")
+      .select("homeowner_contact_id, agent_contact_id")
+      .eq("id", propertyId)
+      .single();
+    expect(p).toMatchObject({
+      homeowner_contact_id: null,
+      agent_contact_id: result.data.contactId,
+    });
+  });
+
+  // Test case #3 — backfill siblings
+  it("attaches every message from same from_address (backfill)", async () => {
+    const phone = "+18165560003";
+    const msgIds = [
+      await seedUnknown({ fromAddress: phone, body: "msg 1" }),
+      await seedUnknown({ fromAddress: phone, body: "msg 2" }),
+      await seedUnknown({ fromAddress: phone, body: "msg 3" }),
+    ];
+    const otherMsg = await seedUnknown({
+      fromAddress: "+18165560004",
+      body: "different sender",
+    });
+    const propertyId = await seedProperty({ addressTag: "MERGE-BACKFILL" });
+
+    const result = await mergeUnknownSenderToProperty({
+      supabase,
+      fromAddress: phone,
+      propertyId,
+      role: "homeowner",
+      contact: { firstName: "BF", lastName: "Test" },
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    const { data: matched } = await supabase
+      .from("messages")
+      .select("contact_id, property_id")
+      .in("id", msgIds);
+    for (const m of matched!) {
+      expect(m.contact_id).toBe(result.data.contactId);
+      expect(m.property_id).toBe(propertyId);
+    }
+
+    const { data: other } = await supabase
+      .from("messages")
+      .select("contact_id, property_id")
+      .eq("id", otherMsg)
+      .single();
+    expect(other?.contact_id).toBeNull();
+    expect(other?.property_id).toBeNull();
+  });
+
+  // Test case #4 — role taken
+  it("errors PROPERTY_ROLE_TAKEN if the property already has a contact in that role", async () => {
+    const phone = "+18165560005";
+    await seedUnknown({ fromAddress: phone, body: "blocked merge" });
+
+    // Pre-existing homeowner on the property.
+    const { data: existing } = await supabase
+      .from("contacts")
+      .insert({
+        first_name: "Existing",
+        last_name: "Homeowner",
+        phone_1: "+18165560099",
+      })
+      .select("id")
+      .single();
+    const propertyId = await seedProperty({
+      addressTag: "MERGE-TAKEN",
+      homeownerContactId: existing!.id,
+    });
+
+    const result = await mergeUnknownSenderToProperty({
+      supabase,
+      fromAddress: phone,
+      propertyId,
+      role: "homeowner",
+      contact: { firstName: "New", lastName: "Tries" },
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe("PROPERTY_ROLE_TAKEN");
+    }
+
+    // No new contact was created (no orphans).
+    const { data: contacts } = await supabase
+      .from("contacts")
+      .select("id")
+      .eq("phone_1", phone);
+    expect(contacts).toEqual([]);
   });
 });
 

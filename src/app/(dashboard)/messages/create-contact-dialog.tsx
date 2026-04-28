@@ -14,7 +14,9 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { callAction } from "@/lib/errors/call-action";
+import type { ContactRole } from "@/lib/messages/triage";
 
 import { createContactFromUnknownAction } from "./actions";
 
@@ -25,9 +27,11 @@ type Props = {
 };
 
 /**
- * "Create new contact + property from unknown sender" dialog. Minimal
- * fields — name + property address. The from_address is locked in as
- * phone_1. On success, navigates to the newly-created lead.
+ * "Create new lead" dialog — promote an unknown sender to a brand-new
+ * contact + property. The from_address goes in as phone_1; the role
+ * (homeowner / agent) decides which detail-table row gets created and
+ * which FK on the property gets set. On success, navigates to the new
+ * lead.
  */
 export function CreateContactDialog({
   open,
@@ -35,6 +39,7 @@ export function CreateContactDialog({
   fromAddress,
 }: Props) {
   const router = useRouter();
+  const [role, setRole] = useState<ContactRole | null>(null);
   const [firstName, setFirstName] = useState("");
   const [lastName, setLastName] = useState("");
   const [address, setAddress] = useState("");
@@ -44,14 +49,18 @@ export function CreateContactDialog({
   const [pending, startTransition] = useTransition();
 
   const canSubmit =
-    address.trim().length > 0 && state.trim().length === 2 && !pending;
+    role !== null &&
+    address.trim().length > 0 &&
+    state.trim().length === 2 &&
+    !pending;
 
   const submit = () => {
-    if (!canSubmit) return;
+    if (!canSubmit || !role) return;
     startTransition(async () => {
       const result = await callAction(
         createContactFromUnknownAction({
           fromAddress,
+          role,
           contact: {
             firstName: firstName.trim() || null,
             lastName: lastName.trim() || null,
@@ -64,19 +73,18 @@ export function CreateContactDialog({
           },
         }),
         {
-          successMessage: "Contact + property created.",
+          successMessage: "Lead created.",
           fallbackMessage: "Could not create",
         },
       );
       if (result.ok) {
         onOpenChange(false);
-        // Reset form for next time the dialog opens.
+        setRole(null);
         setFirstName("");
         setLastName("");
         setAddress("");
         setCity("");
         setZip("");
-        // Navigate to the new lead so the VA can start working it.
         router.push(`/leads/${result.data.propertyId}`);
       }
     });
@@ -86,13 +94,37 @@ export function CreateContactDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
-          <DialogTitle>Create new contact + property</DialogTitle>
+          <DialogTitle>Create new lead</DialogTitle>
           <DialogDescription>
             Phone <span className="font-mono">{fromAddress}</span> will be saved
             as the contact's <code>phone_1</code>. All inbound messages from
-            this number get attached automatically.
+            this number get attached to the new lead automatically.
           </DialogDescription>
         </DialogHeader>
+
+        <div className="flex flex-col gap-2">
+          <Label>Contact role on this property *</Label>
+          <RadioGroup
+            value={role ?? ""}
+            onValueChange={(v) => setRole(v as ContactRole)}
+            className="grid grid-cols-2 gap-3"
+          >
+            <label
+              className="border-input hover:bg-muted/50 has-[[data-checked]]:border-primary flex cursor-pointer items-center gap-2 rounded-md border px-3 py-2 text-sm"
+              data-testid="role-homeowner"
+            >
+              <RadioGroupItem value="homeowner" />
+              <span>Homeowner</span>
+            </label>
+            <label
+              className="border-input hover:bg-muted/50 has-[[data-checked]]:border-primary flex cursor-pointer items-center gap-2 rounded-md border px-3 py-2 text-sm"
+              data-testid="role-agent"
+            >
+              <RadioGroupItem value="agent" />
+              <span>Agent</span>
+            </label>
+          </RadioGroup>
+        </div>
 
         <div className="grid grid-cols-2 gap-3">
           <div className="flex flex-col gap-1">
@@ -171,7 +203,7 @@ export function CreateContactDialog({
             disabled={!canSubmit}
             data-testid="create-submit"
           >
-            {pending ? "Creating…" : "Create"}
+            {pending ? "Creating…" : "Create lead"}
           </Button>
         </DialogFooter>
       </DialogContent>
