@@ -11,12 +11,14 @@ export function KpiRowOne({
   newThisWeek,
   notInDrip,
   assigned,
+  assigneeEmails,
   currentUserId,
 }: {
   totalLeads: number;
   newThisWeek: number;
   notInDrip: number;
   assigned: AssignedRow[];
+  assigneeEmails: Record<string, string>;
   currentUserId: string;
 }) {
   return (
@@ -38,7 +40,11 @@ export function KpiRowOne({
         )}
       </Link>
 
-      <AssignedCard assigned={assigned} currentUserId={currentUserId} />
+      <AssignedCard
+        assigned={assigned}
+        assigneeEmails={assigneeEmails}
+        currentUserId={currentUserId}
+      />
 
       <Link
         href="/leads?no_active_sequence=true"
@@ -60,9 +66,11 @@ export function KpiRowOne({
 
 function AssignedCard({
   assigned,
+  assigneeEmails,
   currentUserId,
 }: {
   assigned: AssignedRow[];
+  assigneeEmails: Record<string, string>;
   currentUserId: string;
 }) {
   const me = assigned.find((a) => a.user_id === currentUserId);
@@ -85,7 +93,7 @@ function AssignedCard({
         {others.map((row) => (
           <AssignedLine
             key={row.user_id}
-            label={`Assigned to ${displayName(row.email)}`}
+            label={`Assigned to ${displayName(assigneeEmails[row.user_id] ?? null)}`}
             count={row.count}
             href={`/leads?assignee=${row.user_id}`}
           />
