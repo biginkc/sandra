@@ -3,7 +3,6 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 
 import { Button } from "@/components/ui/button";
-import { Separator } from "@/components/ui/separator";
 import { ConnectionBanner } from "@/components/connection-banner";
 import { DashboardSidebar } from "@/components/dashboard-sidebar";
 import { ErrorBoundary } from "@/components/error-boundary";
@@ -29,19 +28,19 @@ export default async function DashboardLayout({
       <ConnectionBanner />
       <JobFailureNotifier />
 
-      {/* Fixed top bar — brand + notifications + sign-out. Pure-visual
-          shell change; the bell + sign-out behaviors are unchanged. */}
-      <header className="border-border bg-background fixed inset-x-0 top-0 z-30 flex h-16 items-center justify-between border-b px-6 md:px-8">
+      {/* Fixed top bar — bell + sign-out only on desktop (the sidebar
+          owns brand). Starts at `left-64` on md+ so the sidebar's brand
+          block can sit flush at the top instead of being pushed down by
+          a 64px header overlay. */}
+      <header className="border-border bg-background fixed inset-x-0 top-0 z-30 flex h-16 items-center justify-between border-b px-6 md:left-64 md:justify-end md:px-6">
         <Link
           href="/properties"
           className="text-foreground text-lg font-black tracking-tight uppercase md:hidden"
         >
           Sandra
         </Link>
-        <div className="hidden md:block" />
-        <div className="flex items-center gap-3 text-sm">
+        <div className="flex items-center gap-1 text-sm">
           <NotificationsBell userId={user.id} />
-          <Separator orientation="vertical" className="hidden h-5 md:block" />
           <form action="/auth/signout" method="post">
             <Button type="submit" variant="ghost" size="sm">
               Sign out
@@ -51,13 +50,12 @@ export default async function DashboardLayout({
       </header>
 
       {/* Fixed left rail — brand block + primary nav + user-email footer.
-          Width and visual styling match the design refresh; the nav
-          contract (aria-label="Primary", link names) is preserved by the
-          DashboardSidebar component. */}
-      <aside className="border-border bg-background fixed inset-y-0 left-0 z-40 hidden w-64 flex-col border-r pt-6 md:flex">
+          Brand sits flush at top because the header no longer overlays
+          the sidebar on md+. */}
+      <aside className="border-border bg-background fixed inset-y-0 left-0 z-40 hidden w-64 flex-col border-r md:flex">
         <Link
           href="/properties"
-          className="mt-12 mb-8 flex items-center gap-3 px-6"
+          className="mt-6 mb-6 flex items-center gap-3 px-6"
         >
           <div className="bg-primary flex size-10 items-center justify-center rounded-xl">
             <Workflow className="text-primary-foreground size-5" />
