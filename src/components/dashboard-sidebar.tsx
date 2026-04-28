@@ -37,13 +37,19 @@ type Item = {
   matchAlso?: readonly string[];
 };
 
+// Ordered to mirror the lead's actual journey through the system:
+// data arrives (Import) → sits in the raw pool (Prospects) → gets
+// segmented into outreach targets (Lists) → drips run against them
+// (Sequences) → replies land in the cockpit (Messages) → engaged
+// records become qualified pipeline (Leads). Jobs is the system
+// plumbing footer.
 const ITEMS: readonly Item[] = [
-  { href: "/leads", label: "Leads", icon: LayoutDashboard },
+  { href: "/import", label: "Import", icon: Download },
   { href: "/properties", label: "Prospects", icon: Target },
   { href: "/lists", label: "Lists", icon: List },
   { href: "/sequences", label: "Sequences", icon: Repeat },
-  { href: "/import", label: "Import", icon: Download },
   { href: "/messages", label: "Messages", icon: MessageSquare },
+  { href: "/leads", label: "Leads", icon: LayoutDashboard },
   { href: "/jobs", label: "Jobs", icon: Briefcase },
 ];
 
