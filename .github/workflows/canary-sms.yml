@@ -1,0 +1,90 @@
+name: SMS Prod Canaries
+
+# Three independent SMS canaries that hit prod's inbound webhook with
+# forged-but-properly-signed JWTs. Each catches a different class of
+# silent failure:
+#
+#   - ai-responder-happy: Anthropic key valid, AI prompt unchanged,
+#     Dialpad outbound creds work, daily cap not hit, consent + quiet
+#     hours not over-aggressive.
+#   - ai-responder-escalation: keyword classifier fires, NO outbound
+#     gets sent, escalation reason recorded.
+#   - stop-keyword: TCPA STOP path — consent flipped, contact flag set,
+#     active enrollments paused. Highest-stakes canary; STOP regression
+#     = $500-$1500 per text in TCPA penalties.
+#
+# Hosted on GitHub Actions (not Vercel cron) so a Vercel-wide outage
+# doesn't blind us to the canaries themselves. Same pattern as
+# canary-sequences.yml.
+#
+# Each job runs independently — one canary failing doesn't mask the
+# other two.
+
+on:
+  schedule:
+    # Weekdays at 14:30 UTC (09:30 America/Chicago) — staggered 30 min
+    # after canary-sequences so they don't overlap if the runner is
+    # slow.
+    - cron: "30 14 * * 1-5"
+  workflow_dispatch: {}
+
+jobs:
+  ai-responder-happy:
+    name: AI responder happy path
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.PROD_SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.PROD_SUPABASE_SERVICE_ROLE_KEY }}
+      DIALPAD_WEBHOOK_SECRET: ${{ secrets.PROD_DIALPAD_WEBHOOK_SECRET }}
+      DIALPAD_FROM_NUMBER: ${{ secrets.PROD_DIALPAD_FROM_NUMBER }}
+      PROD_BASE_URL: ${{ secrets.PROD_BASE_URL }}
+      CI: "1"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "20"
+          cache: "npm"
+      - run: npm ci
+      - run: npx tsx scripts/smoke-ai-responder-happy-prod.ts
+
+  ai-responder-escalation:
+    name: AI responder escalation
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.PROD_SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.PROD_SUPABASE_SERVICE_ROLE_KEY }}
+      DIALPAD_WEBHOOK_SECRET: ${{ secrets.PROD_DIALPAD_WEBHOOK_SECRET }}
+      DIALPAD_FROM_NUMBER: ${{ secrets.PROD_DIALPAD_FROM_NUMBER }}
+      PROD_BASE_URL: ${{ secrets.PROD_BASE_URL }}
+      CI: "1"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "20"
+          cache: "npm"
+      - run: npm ci
+      - run: npx tsx scripts/smoke-ai-responder-escalation-prod.ts
+
+  stop-keyword:
+    name: STOP keyword (TCPA)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.PROD_SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.PROD_SUPABASE_SERVICE_ROLE_KEY }}
+      DIALPAD_WEBHOOK_SECRET: ${{ secrets.PROD_DIALPAD_WEBHOOK_SECRET }}
+      DIALPAD_FROM_NUMBER: ${{ secrets.PROD_DIALPAD_FROM_NUMBER }}
+      PROD_BASE_URL: ${{ secrets.PROD_BASE_URL }}
+      CI: "1"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "20"
+          cache: "npm"
+      - run: npm ci
+      - run: npx tsx scripts/smoke-stop-keyword-prod.ts
