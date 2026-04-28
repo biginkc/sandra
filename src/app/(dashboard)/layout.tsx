@@ -3,7 +3,6 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 
 import { Button } from "@/components/ui/button";
-import { Separator } from "@/components/ui/separator";
 import { ConnectionBanner } from "@/components/connection-banner";
 import { DashboardSidebar } from "@/components/dashboard-sidebar";
 import { ErrorBoundary } from "@/components/error-boundary";
@@ -29,35 +28,14 @@ export default async function DashboardLayout({
       <ConnectionBanner />
       <JobFailureNotifier />
 
-      {/* Fixed top bar — brand + notifications + sign-out. Pure-visual
-          shell change; the bell + sign-out behaviors are unchanged. */}
-      <header className="border-border bg-background fixed inset-x-0 top-0 z-30 flex h-16 items-center justify-between border-b px-6 md:px-8">
+      {/* Fixed top bar — brand on the left (sized to match the sidebar
+          rail width so it sits over it), notifications + sign-out on the
+          right. Pure-visual shell change; the bell + sign-out behaviors
+          are unchanged. */}
+      <header className="border-border bg-background fixed inset-x-0 top-0 z-40 flex h-16 items-center justify-between border-b pr-6 md:pr-8">
         <Link
           href="/properties"
-          className="text-foreground text-lg font-black tracking-tight uppercase md:hidden"
-        >
-          Sandra
-        </Link>
-        <div className="hidden md:block" />
-        <div className="flex items-center gap-3 text-sm">
-          <NotificationsBell userId={user.id} />
-          <Separator orientation="vertical" className="hidden h-5 md:block" />
-          <form action="/auth/signout" method="post">
-            <Button type="submit" variant="ghost" size="sm">
-              Sign out
-            </Button>
-          </form>
-        </div>
-      </header>
-
-      {/* Fixed left rail — brand block + primary nav + user-email footer.
-          Width and visual styling match the design refresh; the nav
-          contract (aria-label="Primary", link names) is preserved by the
-          DashboardSidebar component. */}
-      <aside className="border-border bg-background fixed inset-y-0 left-0 z-40 hidden w-64 flex-col border-r pt-6 md:flex">
-        <Link
-          href="/properties"
-          className="mt-12 mb-8 flex items-center gap-3 px-6"
+          className="flex h-full items-center gap-3 border-border px-6 md:w-64 md:border-r"
         >
           <div className="bg-primary flex size-10 items-center justify-center rounded-xl">
             <Workflow className="text-primary-foreground size-5" />
@@ -71,6 +49,23 @@ export default async function DashboardLayout({
             </span>
           </div>
         </Link>
+        <div className="flex items-center gap-3 text-sm">
+          <NotificationsBell userId={user.id} />
+          <form
+            action="/auth/signout"
+            method="post"
+            className="border-border md:border-l md:pl-3"
+          >
+            <Button type="submit" variant="ghost" size="sm">
+              Sign out
+            </Button>
+          </form>
+        </div>
+      </header>
+
+      {/* Fixed left rail — primary nav + user-email footer. Brand lives
+          in the header now, so the rail starts directly under it (top-16). */}
+      <aside className="border-border bg-background fixed bottom-0 left-0 top-16 z-30 hidden w-64 flex-col border-r pt-6 md:flex">
         <DashboardSidebar showAdmin={showAdmin} />
         <div
           className="border-border mx-6 mt-2 border-t pt-3 text-xs"

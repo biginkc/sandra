@@ -15,6 +15,7 @@ import {
   type ValidationSummary,
 } from "@/lib/csv/validate";
 import { callAction } from "@/lib/errors/call-action";
+import { cn } from "@/lib/utils";
 
 import { createImportJob, runBulkUpdateJob } from "./actions";
 import { StepConfirm } from "./steps/step-confirm";
@@ -273,7 +274,11 @@ export function Wizard() {
   const router = useRouter();
   const [submittingGlobal, setSubmittingGlobal] = useState(false);
 
-  const order = stepOrder(state.mode);
+  // While the user is sitting on the Mode step, collapse the indicator
+  // to a single dot — even if mode was previously picked. This way the
+  // full rail re-mounts (and re-cascades) every time the user picks a
+  // tile, including after a Back navigation.
+  const order = state.step === "mode" ? (["mode"] as const) : stepOrder(state.mode);
   const currentIndex = order.indexOf(state.step);
   // Lock back-nav once we're at progress or beyond — both flows have
   // their submit step right before progress, so freeze after submit.
@@ -468,6 +473,7 @@ export function Wizard() {
           variant="ghost"
           onClick={handleBack}
           disabled={!canGoBack || state.submitting}
+          className="-ml-8"
         >
           Back
         </Button>
@@ -492,8 +498,26 @@ function StepIndicator({
       {order.map((s, i) => {
         const isActive = i === currentIndex;
         const isPast = i < currentIndex;
+        // Steps 2+ animate in when mode is picked. The first step
+        // (Mode) is always present, so it never re-animates.
+        const cascade = i > 0;
         return (
-          <li key={s} className="flex items-center gap-2">
+          <li
+            key={s}
+            className={cn(
+              "flex items-center gap-2",
+              cascade &&
+                "animate-in fade-in-0 slide-in-from-left-3 duration-300",
+            )}
+            style={
+              cascade
+                ? {
+                    animationDelay: `${i * 80}ms`,
+                    animationFillMode: "both",
+                  }
+                : undefined
+            }
+          >
             <span
               className={`flex size-6 items-center justify-center rounded-full border text-xs ${
                 isActive

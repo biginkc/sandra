@@ -60,7 +60,7 @@ export function PageHeader({
        *  to the title's baseline (matches the mockup, where there's no
        *  description and the buttons sit flush with the h1 bottom). */}
       <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between md:gap-6">
-        <h1 className="text-4xl font-black tracking-tight md:text-[2.5rem]">
+        <h1 className="text-[2.5rem] font-extrabold leading-[1.1] tracking-[-0.02em]">
           {title}
         </h1>
         {actions && (
