@@ -193,11 +193,11 @@ begin
   ---------------------------------------------------------------------------
   -- Right rail: recent activity (10 newest events across surfaces)
   ---------------------------------------------------------------------------
-  select coalesce(jsonb_agg(a order by a->>'at' desc), '[]'::jsonb)
-  into v_activity
-  from (
-    -- New inbound messages
-    select jsonb_build_object(
+  -- Postgres requires each select inside a UNION ALL with its own
+  -- ORDER BY / LIMIT to be parenthesised. Wrap each branch and cap the
+  -- final union to 10 newest events.
+  with raw_events as (
+    (select jsonb_build_object(
       'kind', 'inbound_message',
       'at', m.created_at,
       'property_id', m.property_id,
@@ -211,12 +211,11 @@ begin
     where m.direction = 'inbound'
       and m.created_at >= now() - interval '7 days'
     order by m.created_at desc
-    limit 10
+    limit 10)
 
     union all
 
-    -- Sequence completions
-    select jsonb_build_object(
+    (select jsonb_build_object(
       'kind', 'sequence_completed',
       'at', e.completed_at,
       'property_id', e.property_id,
@@ -227,12 +226,11 @@ begin
     where e.status = 'completed'
       and e.completed_at >= now() - interval '7 days'
     order by e.completed_at desc
-    limit 10
+    limit 10)
 
     union all
 
-    -- Skip-trace + import jobs (completed)
-    select jsonb_build_object(
+    (select jsonb_build_object(
       'kind', case j.type when 'skip_trace' then 'skip_trace_done' else 'import_done' end,
       'at', j.updated_at,
       'job_type', j.type,
@@ -243,12 +241,11 @@ begin
       and j.type in ('skip_trace', 'csv_import')
       and j.updated_at >= now() - interval '7 days'
     order by j.updated_at desc
-    limit 10
+    limit 10)
 
     union all
 
-    -- AI escalations (newest)
-    select jsonb_build_object(
+    (select jsonb_build_object(
       'kind', 'ai_escalation',
       'at', p.last_ai_escalation_at,
       'property_id', p.id,
@@ -262,9 +259,15 @@ begin
       and p.last_ai_escalation_at is not null
       and p.last_ai_escalation_at >= now() - interval '7 days'
     order by p.last_ai_escalation_at desc
+    limit 10)
+  )
+  select coalesce(jsonb_agg(a order by a->>'at' desc), '[]'::jsonb)
+  into v_activity
+  from (
+    select a from raw_events
+    order by a->>'at' desc
     limit 10
-  ) all_events
-  limit 10;
+  ) capped;
 
   ---------------------------------------------------------------------------
   -- Assemble
