@@ -3,6 +3,7 @@ import { redirect } from "next/navigation";
 import { Page } from "@/components/page";
 import { PageHeader } from "@/components/page-header";
 import { getSkipTraceBalance } from "@/lib/skip-trace/balance";
+import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
 
 import { ActivityFeed } from "./_components/activity-feed";
@@ -58,6 +59,26 @@ export default async function DashboardPage() {
   });
   const escalatedTotal = summary.needs_attention.escalated_unhandled;
 
+  // Resolve assignee user_ids → emails via the admin client (same pattern
+  // /leads uses). The RPC can't reach auth.users under security invoker.
+  const assigneeEmails: Record<string, string> = {};
+  const assigneeIds = new Set(summary.assigned.map((a) => a.user_id));
+  if (assigneeIds.size > 0) {
+    try {
+      const admin = createAdminClient();
+      const { data: usersPage } = await admin.auth.admin.listUsers({
+        perPage: 200,
+      });
+      for (const u of usersPage?.users ?? []) {
+        if (u.email && assigneeIds.has(u.id)) {
+          assigneeEmails[u.id] = u.email;
+        }
+      }
+    } catch {
+      // Non-fatal — labels fall back to the user_id slug.
+    }
+  }
+
   return (
     <Page>
       <PageHeader
@@ -76,6 +97,7 @@ export default async function DashboardPage() {
             newThisWeek={summary.new_this_week}
             notInDrip={summary.not_in_drip}
             assigned={summary.assigned}
+            assigneeEmails={assigneeEmails}
             currentUserId={user.id}
           />
           <KpiRowTwo summary={summary} currentUserId={user.id} />

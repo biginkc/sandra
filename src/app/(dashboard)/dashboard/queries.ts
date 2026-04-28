@@ -2,7 +2,6 @@ import { createClient } from "@/lib/supabase/server";
 
 export type AssignedRow = {
   user_id: string;
-  email: string | null;
   count: number;
 };
 
@@ -67,7 +66,14 @@ export async function fetchDashboardSummary(): Promise<DashboardSummary | null> 
   const supabase = await createClient();
   const { data, error } = await supabase.rpc("dashboard_summary");
   if (error) {
-    console.error("[dashboard] dashboard_summary RPC failed", error);
+    // PostgrestError has non-enumerable props that JSON.stringify hides;
+    // unpack the fields explicitly so log lines are useful in Vercel.
+    console.error("[dashboard] dashboard_summary RPC failed", {
+      message: error.message,
+      details: error.details,
+      hint: error.hint,
+      code: error.code,
+    });
     return null;
   }
   return data as unknown as DashboardSummary;

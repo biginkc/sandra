@@ -92,13 +92,17 @@ begin
   where deleted_at is null;
 
   ---------------------------------------------------------------------------
-  -- Assigned-by-user breakdown
+  -- Assigned-by-user breakdown. We deliberately do NOT join auth.users
+  -- here — `security invoker` callers (authenticated users) lack GRANT
+  -- SELECT on the `auth` schema, which would make the entire RPC throw
+  -- "permission denied for schema auth". Emails are resolved in the
+  -- caller (page.tsx) via the admin client, the same pattern /leads
+  -- uses for assignee labels.
   ---------------------------------------------------------------------------
   select coalesce(jsonb_agg(jsonb_build_object(
-    'user_id', sub.assigned_user_id,
-    'email', u.email,
-    'count', sub.cnt
-  ) order by sub.cnt desc), '[]'::jsonb)
+    'user_id', assigned_user_id,
+    'count', cnt
+  ) order by cnt desc), '[]'::jsonb)
   into v_assigned
   from (
     select assigned_user_id, count(*) as cnt
@@ -107,8 +111,7 @@ begin
       and assigned_user_id is not null
       and status not in ('closed', 'dead')
     group by assigned_user_id
-  ) sub
-  left join auth.users u on u.id = sub.assigned_user_id;
+  ) sub;
 
   ---------------------------------------------------------------------------
   -- Needs Attention counts
