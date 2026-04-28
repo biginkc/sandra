@@ -76,14 +76,23 @@ test("Mine chip filters threads to those assigned to the current user", async ({
     offsetMin: -5,
   });
 
-  // Mint another user to own the "not mine" thread.
-  const { data: otherUserResult } = await admin.auth.admin.createUser({
-    email: "other-cockpit@example.com",
-    password: "irrelevant",
-    email_confirm: true,
+  // Mint another user to own the "not mine" thread. Idempotent —
+  // re-runs in CI hit the existing row instead of failing on a
+  // duplicate-email error.
+  const otherEmail = "other-cockpit@example.com";
+  const { data: existingUsers } = await admin.auth.admin.listUsers({
+    perPage: 200,
   });
-  const otherId = otherUserResult?.user?.id;
-  if (!otherId) throw new Error("could not create other user");
+  let otherId = existingUsers?.users.find((u) => u.email === otherEmail)?.id;
+  if (!otherId) {
+    const { data: created } = await admin.auth.admin.createUser({
+      email: otherEmail,
+      password: "irrelevant",
+      email_confirm: true,
+    });
+    otherId = created?.user?.id;
+  }
+  if (!otherId) throw new Error("could not create or fetch other user");
   const notMine = await seedAssignedThread(admin, {
     phone: "+18165562002",
     addressTag: "OTHERS",
