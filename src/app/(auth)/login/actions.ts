@@ -72,7 +72,7 @@ export async function signIn(
     !nextRaw.startsWith("//") &&
     !nextRaw.startsWith("/login")
       ? nextRaw
-      : "/properties";
+      : "/dashboard";
 
   if (!email || !password) {
     return {
