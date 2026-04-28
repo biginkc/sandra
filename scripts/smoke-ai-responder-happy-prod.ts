@@ -31,7 +31,38 @@ const PHONE = `+1555${String(TS).slice(-7)}`;
 const CRM_NUMBER = env.DIALPAD_FROM_NUMBER ?? "+18162804181";
 const BENIGN_BODY = "yes I'd like to hear more about selling my property";
 
+/**
+ * The seeded property is in MO (America/Chicago). The AI responder
+ * config has business_hours_only=true in prod, so outside the
+ * 08:00-21:00 window the AI correctly skips with reason
+ * "outside_business_hours" — no auto-reply will land. Detect that
+ * here and exit clean rather than fail the canary.
+ *
+ * The scheduled cron fires at 14:30 UTC = 09:30 Central, well inside
+ * the window. This guard protects manual `workflow_dispatch` runs
+ * fired late at night.
+ */
+function withinChicagoBusinessHours(): boolean {
+  const hour = parseInt(
+    new Intl.DateTimeFormat("en-US", {
+      timeZone: "America/Chicago",
+      hour: "2-digit",
+      hour12: false,
+    }).format(new Date()),
+    10,
+  );
+  return hour >= 8 && hour < 21;
+}
+
 async function main(): Promise<void> {
+  if (!withinChicagoBusinessHours()) {
+    console.log(
+      "Skipping AI happy-path canary — outside 08:00-21:00 America/Chicago. " +
+        "AI responder's business_hours_only flag would prevent the auto-reply " +
+        "and this canary would falsely fail.",
+    );
+    process.exit(0);
+  }
   const supabase = prodSupabase();
   let contactId: string | null = null;
   let propertyId: string | null = null;
