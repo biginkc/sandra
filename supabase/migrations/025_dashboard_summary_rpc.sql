@@ -232,15 +232,16 @@ begin
 
     (select jsonb_build_object(
       'kind', case j.type when 'skip_trace' then 'skip_trace_done' else 'import_done' end,
-      'at', j.updated_at,
+      'at', j.completed_at,
       'job_type', j.type,
       'job_status', j.status
     ) as a
     from jobs j
     where j.status = 'completed'
       and j.type in ('skip_trace', 'csv_import')
-      and j.updated_at >= now() - interval '7 days'
-    order by j.updated_at desc
+      and j.completed_at is not null
+      and j.completed_at >= now() - interval '7 days'
+    order by j.completed_at desc
     limit 10)
 
     union all
