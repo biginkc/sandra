@@ -6,6 +6,12 @@ import { createClient } from "@/lib/supabase/server";
 import { errFromUnknown, ok, type Result } from "@/lib/errors/result";
 import { reportError } from "@/lib/errors/report";
 import { runIngestion } from "@/lib/csv/ingest";
+import {
+  applyBulkUpdate,
+  previewBulkUpdate,
+  type UpdatePreview,
+} from "@/lib/csv/update-bulk";
+import type { SubOperationId } from "@/lib/csv/update-operations";
 import type { Mapping, RowData } from "@/lib/csv/validate";
 import {
   createCassChildJob,
@@ -231,6 +237,104 @@ export async function createImportJob(
   } catch (e) {
     reportError(e, { tags: { surface: "create_import_job" } });
     return errFromUnknown(e, "CREATE_IMPORT_JOB_FAILED");
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Update mode
+// ---------------------------------------------------------------------------
+
+export type RunUpdatePreviewParams = {
+  subOperationId: SubOperationId;
+  rows: Record<string, string>[];
+};
+
+export async function runUpdatePreviewAction(
+  params: RunUpdatePreviewParams,
+): Promise<Result<UpdatePreview>> {
+  try {
+    const supabase = await createClient();
+    const preview = await previewBulkUpdate(supabase, {
+      subOperationId: params.subOperationId,
+      rows: params.rows,
+    });
+    return ok(preview);
+  } catch (e) {
+    reportError(e, { tags: { surface: "run_update_preview" } });
+    return errFromUnknown(e, "RUN_UPDATE_PREVIEW_FAILED");
+  }
+}
+
+export type RunBulkUpdateJobParams = {
+  subOperationId: SubOperationId;
+  rows: Record<string, string>[];
+  filename: string;
+};
+
+export type RunBulkUpdateJobResult = { jobId: string };
+
+export async function runBulkUpdateJob(
+  params: RunBulkUpdateJobParams,
+): Promise<Result<RunBulkUpdateJobResult>> {
+  try {
+    const supabase = await createClient();
+    const { data: userData } = await supabase.auth.getUser();
+    const userId = userData.user?.id ?? null;
+
+    const { data: jobRow, error: jobError } = await supabase
+      .from("jobs")
+      .insert({
+        type: "csv_update",
+        status: "queued",
+        total_items: params.rows.length,
+        created_by: userId,
+        title: `Update ${params.filename}`,
+        description: `${params.subOperationId}: ${params.rows.length} rows`,
+        input_params: {
+          subOperationId: params.subOperationId,
+          filename: params.filename,
+          rowCount: params.rows.length,
+        },
+      })
+      .select("id")
+      .single();
+
+    if (jobError) {
+      return {
+        ok: false,
+        error: { code: "JOB_INSERT_FAILED", message: jobError.message },
+      };
+    }
+
+    after(async () => {
+      try {
+        await applyBulkUpdate(supabase, {
+          subOperationId: params.subOperationId,
+          rows: params.rows,
+          userId,
+          jobId: jobRow.id,
+        });
+      } catch (e) {
+        reportError(e, {
+          tags: { surface: "run_bulk_update_job_after" },
+          extra: { jobId: jobRow.id },
+        });
+        await supabase
+          .from("jobs")
+          .update({
+            status: "failed",
+            error_class: "database",
+            error_message: e instanceof Error ? e.message : String(e),
+            completed_at: new Date().toISOString(),
+          })
+          .eq("id", jobRow.id);
+      }
+    });
+
+    return ok({ jobId: jobRow.id });
+  } catch (e) {
+    reportError(e, { tags: { surface: "run_bulk_update_job" } });
+    return errFromUnknown(e, "RUN_BULK_UPDATE_JOB_FAILED");
   }
 }
 
