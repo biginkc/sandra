@@ -60,25 +60,50 @@ export async function requestSkipTrace(
       };
     }
 
-    // Resolve org_id once — every property in the selection should belong
-    // to the same org. We use the first property's org as the job's org.
-    const { data: orgProbe } = await supabase
+    // Filter out properties flagged as do-not-skip-trace. Bulk requests
+    // silently drop them; if every property is filtered, refuse the
+    // whole job with a friendly message.
+    const { data: eligibleRows, error: eligibleErr } = await supabase
       .from("properties")
-      .select("org_id")
-      .eq("id", propertyIds[0])
-      .maybeSingle();
-    if (!orgProbe) {
+      .select("id, org_id, skip_trace_disabled")
+      .in("id", propertyIds);
+    if (eligibleErr) {
       return {
         ok: false,
-        error: { code: "NOT_FOUND", message: "Property not found." },
+        error: { code: "QUERY_FAILED", message: eligibleErr.message },
       };
     }
+    const allowed = (eligibleRows ?? []).filter(
+      (p) => !p.skip_trace_disabled,
+    );
+    const skippedCount = propertyIds.length - allowed.length;
+    if (allowed.length === 0) {
+      return {
+        ok: false,
+        error: {
+          code: "ALL_PROPERTIES_DISABLED",
+          message:
+            propertyIds.length === 1
+              ? "Skip-trace is disabled on this property. Re-enable it on the lead detail page first."
+              : "Every selected property has skip-trace disabled. Re-enable on the lead detail pages first.",
+        },
+      };
+    }
+
+    // Use the filtered list from here on — the job only operates on
+    // properties that survived the kill-switch check.
+    const eligibleIds = allowed.map((p) => p.id);
+    const orgProbe = { org_id: allowed[0].org_id };
 
     const isAdmin = isAdminEmail(user.email);
     const initialStatus: "pending_approval" | "queued" = isAdmin
       ? "queued"
       : "pending_approval";
 
+    const skippedSuffix =
+      skippedCount > 0
+        ? ` (${skippedCount} property${skippedCount === 1 ? "" : "ies"} skipped — kill switch on)`
+        : "";
     const { data: jobRow, error: insertErr } = await supabase
       .from("jobs")
       .insert({
@@ -87,12 +112,12 @@ export async function requestSkipTrace(
         status: initialStatus,
         org_id: orgProbe.org_id,
         created_by: user.id,
-        total_items: propertyIds.length,
-        title: `Skip trace ${propertyIds.length} propert${propertyIds.length === 1 ? "y" : "ies"}`,
+        total_items: eligibleIds.length,
+        title: `Skip trace ${eligibleIds.length} propert${eligibleIds.length === 1 ? "y" : "ies"}${skippedSuffix}`,
         description: isAdmin
-          ? "Admin-initiated; running immediately"
-          : `Awaiting admin approval (requested by ${user.email ?? "VA"})`,
-        input_params: { property_ids: propertyIds },
+          ? `Admin-initiated; running immediately${skippedSuffix}`
+          : `Awaiting admin approval (requested by ${user.email ?? "VA"})${skippedSuffix}`,
+        input_params: { property_ids: eligibleIds },
       })
       .select("id")
       .single();
@@ -114,7 +139,7 @@ export async function requestSkipTrace(
         const bg = await createClient();
         await runSkipTraceEnrichment(bg, {
           jobId: jobRow.id,
-          propertyIds,
+          propertyIds: eligibleIds,
         });
       });
       return ok({ jobId: jobRow.id, status: "queued" });
@@ -126,7 +151,7 @@ export async function requestSkipTrace(
       await dispatchSkipTraceRequested(supabase, {
         jobId: jobRow.id,
         requesterEmail: user.email ?? null,
-        propertyCount: propertyIds.length,
+        propertyCount: eligibleIds.length,
         adminUserIds: adminIds,
       });
     } catch (e) {

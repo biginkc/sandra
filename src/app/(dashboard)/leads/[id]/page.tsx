@@ -14,6 +14,7 @@ import {
 
 import { AiAttentionBanner } from "./ai-attention-banner";
 import { AiResponderToggle } from "./ai-responder-toggle";
+import { SkipTraceToggle } from "./skip-trace-toggle";
 import { SkipTraceButton } from "./skip-trace-button";
 import { CassWidget } from "./cass-widget";
 import { InlineReply } from "./inline-reply";
@@ -212,6 +213,10 @@ export default async function LeadDetailPage({
           <AiResponderToggle
             propertyId={lead.id}
             initialDisabled={lead.ai_responder_disabled}
+          />
+          <SkipTraceToggle
+            propertyId={lead.id}
+            initialDisabled={lead.skip_trace_disabled}
           />
           {!lead.homeowner?.phone_1 ? (
             <SkipTraceButton propertyId={lead.id} />
