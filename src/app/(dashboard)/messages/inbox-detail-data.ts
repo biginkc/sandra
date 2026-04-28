@@ -8,6 +8,8 @@ export type InboxDetail = {
   contactPhone: string | null;
   propertyId: string | null;
   propertyAddress: string | null;
+  /** auth.users.id of the property's current assignee, or null. */
+  assigneeId: string | null;
   initialMessages: Database["public"]["Tables"]["messages"]["Row"][];
 };
 
@@ -44,7 +46,7 @@ export async function fetchInboxDetail(
     propertyId
       ? supabase
           .from("properties")
-          .select("address, city, state")
+          .select("address, city, state, assigned_user_id")
           .eq("id", propertyId)
           .maybeSingle()
       : Promise.resolve({ data: null, error: null }),
@@ -64,6 +66,7 @@ export async function fetchInboxDetail(
     propertyAddress: p
       ? [p.address, p.city, p.state].filter(Boolean).join(", ")
       : null,
+    assigneeId: p?.assigned_user_id ?? null,
     initialMessages: messages,
   };
 }

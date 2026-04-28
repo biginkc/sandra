@@ -8,6 +8,8 @@ export type Thread = {
   contactPhone: string | null;
   propertyId: string | null;
   propertyAddress: string | null;
+  /** auth.users.id of whoever is assigned to the property, or null. */
+  assigneeId: string | null;
   lastMessageBody: string;
   lastMessageDirection: "inbound" | "outbound";
   lastMessageAt: string;
@@ -19,6 +21,8 @@ export type ListThreadsOpts = {
   sinceDays?: number;
   /** When set, returns only threads on properties assigned to this user. */
   assigneeId?: string;
+  /** When true, returns only threads on properties with no assignee. */
+  unassignedOnly?: boolean;
 };
 
 /**
@@ -111,6 +115,7 @@ export async function listThreads(
     const p = bucket.propertyId ? propertyById.get(bucket.propertyId) : null;
 
     if (opts.assigneeId && p?.assigned_user_id !== opts.assigneeId) continue;
+    if (opts.unassignedOnly && p?.assigned_user_id) continue;
 
     threads.push({
       contactId,
@@ -123,6 +128,7 @@ export async function listThreads(
       propertyAddress: p
         ? [p.address, p.city, p.state].filter(Boolean).join(", ")
         : null,
+      assigneeId: p?.assigned_user_id ?? null,
       lastMessageBody: bucket.latest.body,
       lastMessageDirection: bucket.latest.direction as "inbound" | "outbound",
       lastMessageAt: bucket.latest.created_at,
