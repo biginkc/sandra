@@ -43,6 +43,43 @@ export async function clearNeedsHumanAttention(
 }
 
 /**
+ * Flip skip-trace on/off for a specific property. VA-controlled kill
+ * switch — when true, this property is excluded from any skip-trace
+ * request (silently dropped from bulk, refused outright on single).
+ * Use case: do-not-contact homeowners, properties already under
+ * contract elsewhere, anything where spending Tracerfy credits is wasted.
+ */
+export async function setSkipTraceDisabled(
+  propertyId: string,
+  disabled: boolean,
+): Promise<Result<null>> {
+  try {
+    const supabase = await createClient();
+    const { error } = await supabase
+      .from("properties")
+      .update({
+        skip_trace_disabled: disabled,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", propertyId);
+    if (error) {
+      return {
+        ok: false,
+        error: { code: "SKIP_TRACE_TOGGLE_FAILED", message: error.message },
+      };
+    }
+    revalidatePath(`/leads/${propertyId}`);
+    return ok(null);
+  } catch (e) {
+    reportError(e, {
+      tags: { surface: "set_skip_trace_disabled" },
+      extra: { propertyId, disabled },
+    });
+    return errFromUnknown(e, "SKIP_TRACE_TOGGLE_FAILED");
+  }
+}
+
+/**
  * Flip the AI responder on/off for a specific property. VA-controlled
  * kill switch for when a lead is especially sensitive or the AI's
  * tone isn't the right fit.

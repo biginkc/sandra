@@ -925,6 +925,7 @@ export type Database = {
           qualified_by: string | null
           regrid_id: string | null
           repair_estimate: number | null
+          skip_trace_disabled: boolean
           source: string | null
           sqft: number | null
           state: string
@@ -981,6 +982,7 @@ export type Database = {
           qualified_by?: string | null
           regrid_id?: string | null
           repair_estimate?: number | null
+          skip_trace_disabled?: boolean
           source?: string | null
           sqft?: number | null
           state: string
@@ -1037,6 +1039,7 @@ export type Database = {
           qualified_by?: string | null
           regrid_id?: string | null
           repair_estimate?: number | null
+          skip_trace_disabled?: boolean
           source?: string | null
           sqft?: number | null
           state?: string
