@@ -308,7 +308,7 @@ export function ProspectsTable({
     <div className="flex flex-col gap-4">
       <div className="flex items-start justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-semibold">Prospects</h1>
+          <h1 className="text-4xl font-black tracking-tight md:text-[2.5rem]">Prospects</h1>
           <p className="text-muted-foreground text-sm">{headerCount}</p>
         </div>
         <div className="flex items-center gap-2">

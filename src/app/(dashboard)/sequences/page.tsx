@@ -17,7 +17,7 @@ export default async function SequencesIndexPage() {
     <div className="flex flex-col gap-6 p-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-semibold">Sequences</h1>
+          <h1 className="text-4xl font-black tracking-tight md:text-[2.5rem]">Sequences</h1>
           <p className="text-muted-foreground text-sm">
             Multi-step outreach recipes. V1: manual enrollment, `send_sms` +
             `change_status` actions, live-read templates.
