@@ -187,7 +187,7 @@ export default async function LeadDetailPage({
       />
 
       <header className="border-border flex flex-col gap-2 border-b pb-4">
-        <h1 className="text-2xl font-semibold">{lead.address}</h1>
+        <h1 className="text-4xl font-black tracking-tight md:text-[2.5rem]">{lead.address}</h1>
         <div className="text-muted-foreground text-sm">
           {[lead.city, lead.state, lead.zip].filter(Boolean).join(", ") || "—"}
         </div>

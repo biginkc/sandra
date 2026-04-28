@@ -26,7 +26,7 @@ export default async function AiResponderSettingsPage() {
   if (!result.data) {
     return (
       <div className="flex flex-col gap-4 p-6">
-        <h1 className="text-2xl font-semibold">AI responder</h1>
+        <h1 className="text-4xl font-black tracking-tight md:text-[2.5rem]">AI responder</h1>
         <p className="text-muted-foreground text-sm">
           No active config found. Run migration 019 (or re-seed the org) to
           create one.
@@ -38,7 +38,7 @@ export default async function AiResponderSettingsPage() {
   return (
     <div className="flex flex-col gap-6 p-6">
       <div>
-        <h1 className="text-2xl font-semibold">AI responder</h1>
+        <h1 className="text-4xl font-black tracking-tight md:text-[2.5rem]">AI responder</h1>
         <p className="text-muted-foreground text-sm">
           Claude-backed first-touch reply for inbound SMS. Runs after
           auto-qualify + notifications + sequence-pause in the Dialpad
