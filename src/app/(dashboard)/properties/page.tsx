@@ -1,5 +1,6 @@
 import Link from "next/link";
 
+import { Page } from "@/components/page";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { isAdminEmail } from "@/lib/auth/allowlist";
 import { createAdminClient } from "@/lib/supabase/admin";
@@ -117,7 +118,7 @@ export default async function PropertiesPage({
       : `Showing ${showingFrom}–${showingTo} of ${total} prospect${total === 1 ? "" : "s"}. Qualify a prospect to move it into the leads pipeline.`;
 
   return (
-    <div className="flex flex-col gap-4 p-6">
+    <Page>
       {error ? (
         <div className="text-destructive text-sm">
           Failed to load prospects: {error.message}
@@ -169,6 +170,6 @@ export default async function PropertiesPage({
           </div>
         </div>
       )}
-    </div>
+    </Page>
   );
 }

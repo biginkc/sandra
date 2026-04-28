@@ -154,15 +154,7 @@ export function SequenceEditor({
 
   return (
     <div className="flex flex-col gap-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-4xl font-black tracking-tight md:text-[2.5rem]">{sequence.name}</h1>
-          <p className="text-muted-foreground text-sm">
-            {initialImpact.total_enrolled > 0
-              ? `${initialImpact.total_enrolled} lead${initialImpact.total_enrolled === 1 ? "" : "s"} enrolled · ${initialImpact.scheduled_next_7d} due in the next 7 days`
-              : "No leads enrolled yet."}
-          </p>
-        </div>
+      <div className="flex justify-end">
         <Button variant="ghost" onClick={() => router.push("/sequences")}>
           Back to list
         </Button>

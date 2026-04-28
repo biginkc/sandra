@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import { useMemo, useState, useTransition } from "react";
 import { toast } from "sonner";
 
+import { PageHeader } from "@/components/page-header";
 import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
 import {
@@ -305,13 +306,13 @@ export function ProspectsTable({
   const hasSelection = selected.size > 0;
 
   return (
-    <div className="flex flex-col gap-4">
-      <div className="flex items-start justify-between gap-4">
-        <div>
-          <h1 className="text-4xl font-black tracking-tight md:text-[2.5rem]">Prospects</h1>
-          <p className="text-muted-foreground text-sm">{headerCount}</p>
-        </div>
-        <div className="flex items-center gap-2">
+    <>
+      <PageHeader
+        breadcrumb={[{ label: "Workspace" }, { label: "Prospects" }]}
+        title="Prospects"
+        description={headerCount}
+        actions={
+          <>
           {hasSelection ? (
             <Button
               variant="ghost"
@@ -513,8 +514,9 @@ export function ProspectsTable({
           <Link href="/import" className={buttonVariants()}>
             Import CSV
           </Link>
-        </div>
-      </div>
+          </>
+        }
+      />
 
       <div className="border-border rounded-md border">
         <Table>
@@ -601,6 +603,6 @@ export function ProspectsTable({
           </TableBody>
         </Table>
       </div>
-    </div>
+    </>
   );
 }

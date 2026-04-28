@@ -364,14 +364,14 @@ export function Kanban({
 
   return (
     <div className="flex flex-col gap-3">
-      <div className="flex items-center gap-3">
-        <div className="relative flex-1 max-w-md">
-          <SearchIcon className="text-muted-foreground pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2" />
+      <div className="border-border bg-card flex items-center gap-3 rounded-2xl border p-3">
+        <div className="relative max-w-md flex-1">
+          <SearchIcon className="text-muted-foreground pointer-events-none absolute top-1/2 left-4 size-4 -translate-y-1/2" />
           <Input
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder="Search address, city, ZIP, market…"
-            className="w-full pl-8 pr-8"
+            className="bg-muted/60 h-10 w-full rounded-full border-none pr-10 pl-11"
             aria-label="Search leads"
           />
           {search ? (
@@ -379,7 +379,7 @@ export function Kanban({
               type="button"
               onClick={() => setSearch("")}
               aria-label="Clear search"
-              className="text-muted-foreground hover:text-foreground absolute top-1/2 right-2 -translate-y-1/2"
+              className="text-muted-foreground hover:text-foreground absolute top-1/2 right-3 -translate-y-1/2"
             >
               <XIcon className="size-4" />
             </button>

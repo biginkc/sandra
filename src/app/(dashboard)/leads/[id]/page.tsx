@@ -1,8 +1,8 @@
-import Link from "next/link";
 import { notFound } from "next/navigation";
 
+import { Page } from "@/components/page";
+import { PageHeader } from "@/components/page-header";
 import { Badge } from "@/components/ui/badge";
-import { buttonVariants } from "@/components/ui/button";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
 
@@ -76,17 +76,19 @@ export default async function LeadDetailPage({
 
   if (error) {
     return (
-      <div className="p-6">
-        <Link
-          href="/leads"
-          className={buttonVariants({ variant: "ghost", size: "sm" })}
-        >
-          ← Back to leads
-        </Link>
-        <div className="text-destructive mt-4 text-sm">
+      <Page>
+        <PageHeader
+          breadcrumb={[
+            { label: "Workspace" },
+            { label: "Leads", href: "/leads" },
+            { label: "Error" },
+          ]}
+          title="Lead"
+        />
+        <div className="text-destructive text-sm">
           Failed to load lead: {error.message}
         </div>
-      </div>
+      </Page>
     );
   }
 
@@ -169,15 +171,18 @@ export default async function LeadDetailPage({
   }
 
   return (
-    <div className="flex flex-col gap-5 p-6">
-      <div>
-        <Link
-          href="/leads"
-          className={buttonVariants({ variant: "ghost", size: "sm" })}
-        >
-          ← Back to leads
-        </Link>
-      </div>
+    <Page>
+      <PageHeader
+        breadcrumb={[
+          { label: "Workspace" },
+          { label: "Leads", href: "/leads" },
+          { label: lead.address },
+        ]}
+        title={lead.address}
+        description={
+          [lead.city, lead.state, lead.zip].filter(Boolean).join(", ") || "—"
+        }
+      />
 
       <AiAttentionBanner
         propertyId={lead.id}
@@ -186,12 +191,8 @@ export default async function LeadDetailPage({
         escalatedAt={lead.last_ai_escalation_at}
       />
 
-      <header className="border-border flex flex-col gap-2 border-b pb-4">
-        <h1 className="text-4xl font-black tracking-tight md:text-[2.5rem]">{lead.address}</h1>
-        <div className="text-muted-foreground text-sm">
-          {[lead.city, lead.state, lead.zip].filter(Boolean).join(", ") || "—"}
-        </div>
-        <div className="mt-1 flex flex-wrap items-center gap-1.5">
+      <div className="border-border flex flex-col gap-2 border-b pb-4">
+        <div className="flex flex-wrap items-center gap-1.5">
           <LeadStatusWidget
             propertyId={lead.id}
             initialStatus={lead.status as PropertyStatus}
@@ -251,7 +252,7 @@ export default async function LeadDetailPage({
             }
           />
         </div>
-      </header>
+      </div>
 
       <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
         <Section title="Property">
@@ -418,7 +419,7 @@ export default async function LeadDetailPage({
           />
         </div>
       </div>
-    </div>
+    </Page>
   );
 }
 

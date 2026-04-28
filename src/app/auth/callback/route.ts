@@ -47,6 +47,6 @@ export async function GET(request: NextRequest) {
     return NextResponse.redirect(`${origin}/auth/set-password`);
   }
 
-  const target = next && next.startsWith("/") ? next : "/leads";
+  const target = next && next.startsWith("/") ? next : "/dashboard";
   return NextResponse.redirect(`${origin}${target}`);
 }
