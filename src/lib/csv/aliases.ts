@@ -224,6 +224,45 @@ export const HEADER_ALIASES: Record<string, string> = {
   "agent license number": "agent_license_number",
   "license number": "agent_license_number",
   "license #": "agent_license_number",
+
+  // ---------- Skip Genie / DataTree (D4D) ----------
+  // Skip-trace exports use prefixed columns: INPUT (what the user
+  // submitted), PROP (verified from tax records), PH (skip-traced
+  // phones), REL1-5 (relatives, not currently imported). The PROP
+  // prefix is preferred over INPUT — it's the address the property
+  // record actually belongs to. The colon in the header is preserved
+  // by normalizeHeader (only underscores/hyphens/dots get stripped).
+
+  // Property address — PROP: Address Full is the verified single-line
+  // address; the wizard's address_full parser splits it into
+  // address/city/state/zip at row-validation time.
+  "prop: address full": "address_full",
+
+  // Split fields are also present and back up the parsed address.
+  "prop: city": "city",
+  "prop: state": "state",
+  "prop: zip": "zip",
+
+  // APN / parcel — used for dedup against existing properties.
+  "prop: parcel id number": "apn",
+  "prop: pid": "apn",
+
+  // Owner name — verified from tax records (more reliable than the
+  // INPUT name, which is often the submitter's typo or an LLC alias).
+  "prop: first name": "homeowner_first_name",
+  "prop: last name": "homeowner_last_name",
+
+  // Skip-traced phones — already deduped by Skip Genie, ranked 1-3.
+  "ph: phone1": "homeowner_phone_1",
+  "ph: phone2": "homeowner_phone_2",
+  "ph: phone3": "homeowner_phone_3",
+
+  // Mailing address — PROP: Mail Address Full is the owner's mailing
+  // address from the tax record (drives the absentee-owner flag).
+  "prop: mail address full": "homeowner_mailing_address",
+  "prop: mail city": "homeowner_mailing_city",
+  "prop: mail state": "homeowner_mailing_state",
+  "prop: mail zip": "homeowner_mailing_zip",
 };
 
 /**
