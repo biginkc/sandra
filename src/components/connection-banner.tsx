@@ -25,7 +25,7 @@ export function ConnectionBanner() {
   if (online) return null;
 
   return (
-    <div className="bg-destructive text-destructive-foreground flex items-center justify-center gap-2 px-4 py-1.5 text-sm">
+    <div className="bg-destructive text-destructive-foreground fixed inset-x-0 top-0 z-50 flex items-center justify-center gap-2 px-4 py-1.5 text-sm">
       <span className="size-2 animate-pulse rounded-full bg-current" />
       <span>You are offline. Changes will not save until your connection returns.</span>
     </div>
