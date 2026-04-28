@@ -428,7 +428,7 @@ export function Kanban({
             aria-pressed={motivationFilter.has("unset")}
             title="Filter: no motivation set"
           >
-            Unset
+            Not set
           </Button>
         </div>
         {(isSearching || mineOnly || motivationFilter.size > 0) ? (
