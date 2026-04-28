@@ -200,6 +200,9 @@ begin
   -- ORDER BY / LIMIT to be parenthesised. Wrap each branch and cap the
   -- final union to 10 newest events.
   with raw_events as (
+    -- Inbound messages. URL-only bodies (e.g. Dialpad MMS attachment URLs)
+    -- show as [link] instead of the raw URL — those don't tell the
+    -- operator what was said and dominate the feed visually.
     (select jsonb_build_object(
       'kind', 'inbound_message',
       'at', m.created_at,
@@ -207,7 +210,10 @@ begin
       'address', p.address,
       'city', p.city,
       'state', p.state,
-      'preview', left(m.body, 80)
+      'preview', case
+        when m.body ~ '^\s*https?://\S+\s*$' then '[link]'
+        else left(m.body, 80)
+      end
     ) as a
     from messages m
     left join properties p on p.id = m.property_id
@@ -249,6 +255,15 @@ begin
 
     union all
 
+    -- AI escalations — exclude system-error reasons. They still appear in
+    -- the threads-needing-attention rail (a human still needs to clear the
+    -- flag) but they don't add value as feed events: they're not
+    -- seller-driven, just plumbing telling someone to look.
+    --   · generate_error      — Claude API call failed
+    --   · safety:*            — post-generation safety filter caught the model
+    --   · send_blocked:*      — pipeline refused the send (quiet hours, consent)
+    -- Seller-driven reasons still surface: keyword:*, model:*,
+    -- low_confidence:*, sentiment:*.
     (select jsonb_build_object(
       'kind', 'ai_escalation',
       'at', p.last_ai_escalation_at,
@@ -262,6 +277,10 @@ begin
     where p.needs_human_attention = true
       and p.last_ai_escalation_at is not null
       and p.last_ai_escalation_at >= now() - interval '7 days'
+      and p.last_ai_escalation_reason is not null
+      and p.last_ai_escalation_reason not in ('generate_error')
+      and p.last_ai_escalation_reason not like 'safety:%'
+      and p.last_ai_escalation_reason not like 'send_blocked:%'
     order by p.last_ai_escalation_at desc
     limit 10)
   )
