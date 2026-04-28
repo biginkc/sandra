@@ -2,6 +2,8 @@
 
 import { useRouter, useSearchParams } from "next/navigation";
 
+import { Page } from "@/components/page";
+import { PageHeader } from "@/components/page-header";
 import {
   Tabs,
   TabsContent,
@@ -62,15 +64,12 @@ export function CockpitView({
   const showThreadList = THREAD_FILTERS.has(filter);
 
   return (
-    <div className="flex flex-col gap-4 p-6">
-      <div>
-        <h1 className="text-4xl font-black tracking-tight md:text-[2.5rem]">Messages</h1>
-        <p className="text-muted-foreground text-sm">
-          Live conversations on the Inbox tab; queued bulk sends on the
-          Outbox tab. Both flow through the same Dialpad provider; consent
-          and quiet-hours are checked on every send.
-        </p>
-      </div>
+    <Page>
+      <PageHeader
+        breadcrumb={[{ label: "Workspace" }, { label: "Messages" }]}
+        title="Messages"
+        description="Live conversations on the Inbox tab; queued bulk sends on the Outbox tab. Both flow through the same Dialpad provider; consent and quiet-hours are checked on every send."
+      />
 
       <Tabs
         value={activeTab}
@@ -135,6 +134,6 @@ export function CockpitView({
           </div>
         </TabsContent>
       </Tabs>
-    </div>
+    </Page>
   );
 }
