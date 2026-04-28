@@ -27,7 +27,10 @@ const TS = Date.now();
 const TAG = `CANARY-AI-ESC-${TS}`;
 const PHONE = `+1555${String(TS).slice(-7)}`;
 const CRM_NUMBER = env.DIALPAD_FROM_NUMBER ?? "+18162804181";
-const ESCALATION_BODY = "what about $200k for the property?";
+// Body must contain a tier-B `price_offer` keyword (price/offer/how much/your offer)
+// to trip the keyword classifier BEFORE the skip rules — keeps the
+// canary independent of business-hours config.
+const ESCALATION_BODY = "what's your offer for the property?";
 
 async function main(): Promise<void> {
   const supabase = prodSupabase();
