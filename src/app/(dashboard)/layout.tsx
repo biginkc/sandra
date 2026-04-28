@@ -34,7 +34,7 @@ export default async function DashboardLayout({
           are unchanged. */}
       <header className="border-border bg-background fixed inset-x-0 top-0 z-40 flex h-16 items-center justify-between border-b pr-6 md:pr-8">
         <Link
-          href="/properties"
+          href="/dashboard"
           className="flex h-full items-center gap-3 border-border px-6 md:w-64 md:border-r"
         >
           <div className="bg-primary flex size-10 items-center justify-center rounded-xl">

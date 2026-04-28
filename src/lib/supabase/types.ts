@@ -1628,6 +1628,7 @@ export type Database = {
       }
     }
     Functions: {
+      dashboard_summary: { Args: Record<string, never>; Returns: Json }
       delete_contact: {
         Args: { p_contact_id: string; p_reason: string }
         Returns: undefined

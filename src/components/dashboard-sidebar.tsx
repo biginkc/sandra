@@ -4,6 +4,7 @@ import {
   Bot,
   Briefcase,
   Download,
+  Gauge,
   LayoutDashboard,
   List,
   MessageSquare,
@@ -37,13 +38,14 @@ type Item = {
   matchAlso?: readonly string[];
 };
 
-// Ordered to mirror the lead's actual journey through the system:
-// data arrives (Import) → sits in the raw pool (Prospects) → gets
-// segmented into outreach targets (Lists) → drips run against them
-// (Sequences) → replies land in the cockpit (Messages) → engaged
-// records become qualified pipeline (Leads). Jobs is the system
+// Overview is the morning-triage landing page (KPIs + needs-attention).
+// Below it, the workflow ladder: data arrives (Import) → sits in the raw
+// pool (Prospects) → gets segmented into outreach targets (Lists) → drips
+// run against them (Sequences) → replies land in the cockpit (Messages) →
+// engaged records become qualified pipeline (Leads). Jobs is the system
 // plumbing footer.
 const ITEMS: readonly Item[] = [
+  { href: "/dashboard", label: "Overview", icon: Gauge },
   { href: "/import", label: "Import", icon: Download },
   { href: "/properties", label: "Prospects", icon: Target },
   { href: "/lists", label: "Lists", icon: List },

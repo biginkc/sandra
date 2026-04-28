@@ -12,7 +12,22 @@ export const metadata = {
   title: "Leads · Sandra CRM",
 };
 
-export default async function LeadsPage() {
+type LeadsSearchParams = {
+  status?: string;
+  assignee?: string;
+  unassigned?: string;
+  no_active_sequence?: string;
+  skip_traced?: string;
+  stale?: string;
+  sequence_ended?: string;
+};
+
+export default async function LeadsPage({
+  searchParams,
+}: {
+  searchParams: Promise<LeadsSearchParams>;
+}) {
+  const params = await searchParams;
   const supabase = await createClient();
   const {
     data: { user },
@@ -26,16 +41,73 @@ export default async function LeadsPage() {
   // Prospects live on /properties (the data-lake surface) and are promoted
   // into the kanban via qualifyLead(). Filter them out server-side so the
   // kanban query returns only workable pipeline leads.
-  const { data: leads, error } = await supabase
+  let q = supabase
     .from("properties")
     .select(
       `id, address, city, state, zip, market, status, is_vacant, cass_status, absentee_flag, assigned_user_id, motivation_level,
        homeowner:contacts!properties_homeowner_contact_id_fkey(first_name, last_name, entity_name)`,
     )
     .neq("status", "prospect")
-    .is("deleted_at", null)
+    .is("deleted_at", null);
+
+  // Dashboard click-through: hot leads (interested + offer_sent).
+  if (params.status === "hot") {
+    q = q.in("status", ["interested", "offer_sent"]);
+  }
+
+  // Dashboard click-through: assignee filter. "me" resolves to current user.
+  const assigneeId = params.assignee === "me" ? user?.id : params.assignee;
+  if (assigneeId) {
+    q = q.eq("assigned_user_id", assigneeId);
+  }
+
+  // Dashboard click-through: unassigned leads.
+  if (params.unassigned === "true") {
+    q = q.is("assigned_user_id", null);
+  }
+
+  // Dashboard click-through: leads not in a drip campaign right now.
+  // Two-step: pull active enrollment property_ids, then exclude them.
+  if (params.no_active_sequence === "true") {
+    const { data: enrolled } = await supabase
+      .from("sequence_enrollments")
+      .select("property_id")
+      .eq("status", "active");
+    const ids = (enrolled ?? [])
+      .map((r) => r.property_id)
+      .filter((v): v is string => Boolean(v));
+    if (ids.length > 0) {
+      q = q.not("id", "in", `(${ids.join(",")})`);
+    }
+  }
+
+  // Dashboard click-through: leads with no skip-trace cache row for their
+  // address — the "phone numbers gathering" gap. Two-step: collect traced
+  // property ids (UUIDs), then exclude them. Going via id (not the raw
+  // address) keeps the not-in clause safe regardless of address content.
+  if (params.skip_traced === "false") {
+    const { data: tracedAddresses } = await supabase
+      .from("skip_trace_cache")
+      .select("address_normalized");
+    const addrs = (tracedAddresses ?? [])
+      .map((r) => r.address_normalized)
+      .filter((v): v is string => Boolean(v));
+    if (addrs.length > 0) {
+      const { data: tracedProps } = await supabase
+        .from("properties")
+        .select("id")
+        .in("address_normalized", addrs);
+      const tracedIds = (tracedProps ?? []).map((p) => p.id);
+      if (tracedIds.length > 0) {
+        q = q.not("id", "in", `(${tracedIds.join(",")})`);
+      }
+    }
+  }
+
+  const { data: leads, error } = await q
     .order("created_at", { ascending: false })
     .limit(500);
+  const activeFilter = describeFilter(params);
 
   // Which properties have any unread inbound messages? One tiny query against
   // the partial index `idx_messages_unread_inbound`, deduped to a Set that
@@ -155,6 +227,24 @@ export default async function LeadsPage() {
         }
       />
 
+      {activeFilter && (
+        <div className="border-border bg-muted/40 flex flex-wrap items-center gap-3 rounded-2xl border px-4 py-3 text-sm">
+          <span className="text-muted-foreground text-[11px] font-bold tracking-widest uppercase">
+            Filter
+          </span>
+          <span className="text-foreground font-bold">{activeFilter.label}</span>
+          {activeFilter.note && (
+            <span className="text-muted-foreground">— {activeFilter.note}</span>
+          )}
+          <Link
+            href="/leads"
+            className="text-foreground ml-auto text-xs font-bold underline-offset-4 hover:underline"
+          >
+            Clear filter
+          </Link>
+        </div>
+      )}
+
       {error ? (
         <div className="text-destructive text-sm">
           Failed to load leads: {error.message}
@@ -170,9 +260,43 @@ export default async function LeadsPage() {
         />
       ) : (
         <div className="text-muted-foreground border-border rounded-md border border-dashed p-8 text-center text-sm">
-          No leads yet. Import a CSV to fill the pipeline.
+          {activeFilter
+            ? `No leads match "${activeFilter.label}". Clear the filter to see all leads.`
+            : "No leads yet. Import a CSV to fill the pipeline."}
         </div>
       )}
     </Page>
   );
+}
+
+function describeFilter(
+  params: LeadsSearchParams,
+): { label: string; note?: string } | null {
+  if (params.status === "hot") {
+    return { label: "Hot leads", note: "interested + offer sent" };
+  }
+  if (params.assignee === "me") return { label: "Assigned to me" };
+  if (params.assignee) {
+    return { label: `Assigned to ${params.assignee.slice(0, 8)}…` };
+  }
+  if (params.unassigned === "true") return { label: "Unassigned" };
+  if (params.no_active_sequence === "true") {
+    return { label: "Not in a drip campaign" };
+  }
+  if (params.skip_traced === "false") {
+    return { label: "Not skip-traced", note: "no phone numbers gathered yet" };
+  }
+  if (params.stale === "true") {
+    return {
+      label: "Stale conversations",
+      note: "filter coming soon — showing all leads",
+    };
+  }
+  if (params.sequence_ended === "true") {
+    return {
+      label: "Sequences ended without follow-up",
+      note: "filter coming soon — showing all leads",
+    };
+  }
+  return null;
 }
