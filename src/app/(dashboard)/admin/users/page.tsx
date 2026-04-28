@@ -1,6 +1,8 @@
 import { formatDistanceToNow } from "date-fns/formatDistanceToNow";
 import { notFound } from "next/navigation";
 
+import { Page } from "@/components/page";
+import { PageHeader } from "@/components/page-header";
 import { Badge } from "@/components/ui/badge";
 import {
   Table,
@@ -49,15 +51,12 @@ export default async function AdminUsersPage() {
   }));
 
   return (
-    <div className="flex flex-col gap-4 p-6">
-      <div>
-        <h1 className="text-4xl font-black tracking-tight md:text-[2.5rem]">Team</h1>
-        <p className="text-muted-foreground text-sm">
-          Invite a teammate to Sandra CRM. They get a one-time sign-in link
-          by email, pick a password, and land in the app. Only emails on the
-          bmhgroupkc.com domain are permitted.
-        </p>
-      </div>
+    <Page>
+      <PageHeader
+        breadcrumb={[{ label: "Admin" }, { label: "Team" }]}
+        title="Team"
+        description="Invite a teammate to Sandra CRM. They get a one-time sign-in link by email, pick a password, and land in the app. Only emails on the bmhgroupkc.com domain are permitted."
+      />
 
       {error ? (
         <div className="text-destructive text-sm">
@@ -95,7 +94,7 @@ export default async function AdminUsersPage() {
           </TableBody>
         </Table>
       </div>
-    </div>
+    </Page>
   );
 }
 

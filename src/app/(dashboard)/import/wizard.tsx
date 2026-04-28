@@ -425,7 +425,7 @@ export function Wizard() {
   })();
 
   return (
-    <div className="flex flex-col gap-6 p-6">
+    <div className="flex flex-col gap-6">
       <StepIndicator step={state.step} order={order} />
 
       <div className="flex flex-1 flex-col">

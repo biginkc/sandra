@@ -1,5 +1,7 @@
 import { formatDistanceToNow } from "date-fns/formatDistanceToNow";
 
+import { Page } from "@/components/page";
+import { PageHeader } from "@/components/page-header";
 import { Badge } from "@/components/ui/badge";
 import {
   Table,
@@ -42,16 +44,19 @@ export default async function ListsPage() {
   const archived = allLists.filter((l) => l.archived_at);
 
   return (
-    <div className="flex flex-col gap-6 p-6">
-      <div>
-        <h1 className="text-4xl font-black tracking-tight md:text-[2.5rem]">Lists</h1>
-        <p className="text-muted-foreground text-sm">
-          Lists are named cohorts of properties. One list per kind-of-data —
-          all Probate records to the <em>same</em> Probate list forever. Re-importing
-          the same address into a <em>different</em> list is how you stack: a
-          property on 3 lists is stronger motivation than any 1 list.
-        </p>
-      </div>
+    <Page>
+      <PageHeader
+        breadcrumb={[{ label: "Workspace" }, { label: "Lists" }]}
+        title="Lists"
+        description={
+          <>
+            Lists are named cohorts of properties. One list per kind-of-data —
+            all Probate records to the <em>same</em> Probate list forever. Re-importing
+            the same address into a <em>different</em> list is how you stack: a
+            property on 3 lists is stronger motivation than any 1 list.
+          </>
+        }
+      />
 
       <CreateListForm />
 
@@ -80,7 +85,7 @@ export default async function ListsPage() {
           />
         </section>
       ) : null}
-    </div>
+    </Page>
   );
 }
 

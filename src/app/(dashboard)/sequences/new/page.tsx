@@ -1,15 +1,20 @@
+import { Page } from "@/components/page";
+import { PageHeader } from "@/components/page-header";
+
 import { CreateSequenceForm } from "./form";
 
 export default function NewSequencePage() {
   return (
-    <div className="flex flex-col gap-6 p-6">
-      <div>
-        <h1 className="text-4xl font-black tracking-tight md:text-[2.5rem]">New sequence</h1>
-        <p className="text-muted-foreground text-sm">
-          Name it and describe what it&apos;s for. You&apos;ll add steps on the next screen.
-        </p>
-      </div>
+    <Page>
+      <PageHeader
+        breadcrumb={[
+          { label: "Sequences", href: "/sequences" },
+          { label: "New" },
+        ]}
+        title="New sequence"
+        description="Name it and describe what it's for. You'll add steps on the next screen."
+      />
       <CreateSequenceForm />
-    </div>
+    </Page>
   );
 }

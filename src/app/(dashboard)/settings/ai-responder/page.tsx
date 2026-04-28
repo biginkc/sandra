@@ -1,5 +1,7 @@
 import { redirect } from "next/navigation";
 
+import { Page } from "@/components/page";
+import { PageHeader } from "@/components/page-header";
 import { isAdminEmail } from "@/lib/auth/allowlist";
 import { createClient } from "@/lib/supabase/server";
 
@@ -17,38 +19,34 @@ export default async function AiResponderSettingsPage() {
   const result = await getAiResponderConfig();
   if (!result.ok) {
     return (
-      <div className="p-6 text-sm text-destructive">
-        Failed to load config: {result.error.message}
-      </div>
+      <Page>
+        <div className="text-destructive text-sm">
+          Failed to load config: {result.error.message}
+        </div>
+      </Page>
     );
   }
 
   if (!result.data) {
     return (
-      <div className="flex flex-col gap-4 p-6">
-        <h1 className="text-4xl font-black tracking-tight md:text-[2.5rem]">AI responder</h1>
-        <p className="text-muted-foreground text-sm">
-          No active config found. Run migration 019 (or re-seed the org) to
-          create one.
-        </p>
-      </div>
+      <Page>
+        <PageHeader
+          breadcrumb={[{ label: "Settings" }, { label: "AI responder" }]}
+          title="AI responder"
+          description="No active config found. Run migration 019 (or re-seed the org) to create one."
+        />
+      </Page>
     );
   }
 
   return (
-    <div className="flex flex-col gap-6 p-6">
-      <div>
-        <h1 className="text-4xl font-black tracking-tight md:text-[2.5rem]">AI responder</h1>
-        <p className="text-muted-foreground text-sm">
-          Claude-backed first-touch reply for inbound SMS. Runs after
-          auto-qualify + notifications + sequence-pause in the Dialpad
-          webhook. Safety rails live in four places: keyword escalator,
-          skip classifier, model-side confidence/sentiment checks, and
-          the output safety validator.
-        </p>
-      </div>
-
+    <Page>
+      <PageHeader
+        breadcrumb={[{ label: "Settings" }, { label: "AI responder" }]}
+        title="AI responder"
+        description="Claude-backed first-touch reply for inbound SMS. Runs after auto-qualify + notifications + sequence-pause in the Dialpad webhook. Safety rails live in four places: keyword escalator, skip classifier, model-side confidence/sentiment checks, and the output safety validator."
+      />
       <AiResponderConfigForm initial={result.data} />
-    </div>
+    </Page>
   );
 }

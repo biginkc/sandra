@@ -1,5 +1,8 @@
 import { notFound } from "next/navigation";
 
+import { Page } from "@/components/page";
+import { PageHeader } from "@/components/page-header";
+
 import { getImpactAction, getSequenceWithSteps } from "../../actions";
 
 import { SequenceEditor } from "./editor";
@@ -14,9 +17,19 @@ export default async function SequenceEditPage({
   if (!result.ok || !result.data) {
     if (result.ok) notFound();
     return (
-      <div className="p-6 text-destructive text-sm">
-        Failed to load sequence: {result.error.message}
-      </div>
+      <Page>
+        <PageHeader
+          breadcrumb={[
+            { label: "Workspace" },
+            { label: "Sequences", href: "/sequences" },
+            { label: "Edit" },
+          ]}
+          title="Sequence editor"
+        />
+        <div className="text-destructive text-sm">
+          Failed to load sequence: {result.error.message}
+        </div>
+      </Page>
     );
   }
   const impactResult = await getImpactAction(id);
@@ -25,8 +38,21 @@ export default async function SequenceEditPage({
     : { total_enrolled: 0, scheduled_next_7d: 0 };
 
   return (
-    <div className="p-6">
+    <Page>
+      <PageHeader
+        breadcrumb={[
+          { label: "Workspace" },
+          { label: "Sequences", href: "/sequences" },
+          { label: result.data.name },
+        ]}
+        title={result.data.name}
+        description={
+          impact.total_enrolled > 0
+            ? `${impact.total_enrolled} lead${impact.total_enrolled === 1 ? "" : "s"} enrolled · ${impact.scheduled_next_7d} due in the next 7 days`
+            : "No leads enrolled yet."
+        }
+      />
       <SequenceEditor sequence={result.data} initialImpact={impact} />
-    </div>
+    </Page>
   );
 }

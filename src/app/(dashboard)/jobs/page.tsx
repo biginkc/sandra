@@ -1,3 +1,5 @@
+import { Page } from "@/components/page";
+import { PageHeader } from "@/components/page-header";
 import { isAdminEmail } from "@/lib/auth/allowlist";
 import { createClient } from "@/lib/supabase/server";
 
@@ -15,15 +17,13 @@ export default async function JobsPage() {
   const isAdmin = isAdminEmail(user?.email);
 
   return (
-    <div className="flex flex-col gap-4 p-6">
-      <div>
-        <h1 className="text-4xl font-black tracking-tight md:text-[2.5rem]">Jobs</h1>
-        <p className="text-muted-foreground text-sm">
-          Every non-instant operation — imports, enrichment runs, scheduled
-          sweeps — shows up here with live status.
-        </p>
-      </div>
+    <Page>
+      <PageHeader
+        breadcrumb={[{ label: "Workspace" }, { label: "Jobs" }]}
+        title="Jobs"
+        description="Every non-instant operation — imports, enrichment runs, scheduled sweeps — shows up here with live status."
+      />
       <JobsList isAdmin={isAdmin} />
-    </div>
+    </Page>
   );
 }

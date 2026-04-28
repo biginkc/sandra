@@ -1,5 +1,7 @@
 import Link from "next/link";
 
+import { Page } from "@/components/page";
+import { PageHeader } from "@/components/page-header";
 import { buttonVariants } from "@/components/ui/button";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
@@ -134,21 +136,24 @@ export default async function LeadsPage() {
   }
 
   return (
-    <div className="flex flex-col gap-4 p-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-4xl font-black tracking-tight md:text-[2.5rem]">Leads</h1>
-          <p className="text-muted-foreground text-sm">
+    <Page>
+      <PageHeader
+        breadcrumb={[{ label: "Workspace" }, { label: "Leads" }]}
+        title="Leads"
+        description={
+          <>
             Drag to move leads through the pipeline.
             {leads?.length ? (
               <> · Showing the latest {leads.length} of your lead pool.</>
             ) : null}
-          </p>
-        </div>
-        <Link href="/import" className={buttonVariants()}>
-          Import CSV
-        </Link>
-      </div>
+          </>
+        }
+        actions={
+          <Link href="/import" className={buttonVariants()}>
+            Import CSV
+          </Link>
+        }
+      />
 
       {error ? (
         <div className="text-destructive text-sm">
@@ -168,6 +173,6 @@ export default async function LeadsPage() {
           No leads yet. Import a CSV to fill the pipeline.
         </div>
       )}
-    </div>
+    </Page>
   );
 }
