@@ -222,6 +222,51 @@ describe("runIngestion (integration)", () => {
     expect(after?.qualified_by).toBe("user-under-test");
   });
 
+  it("upserts repeated homeowners by name when no phone/email present", async () => {
+    // The contacts table has a partial unique index on (last_name,
+    // first_name) for person-type contacts with no phone and no email.
+    // Re-importing a row whose owner has only a name (D4D's PH=N case)
+    // must dedup against the existing name-only contact, not throw on
+    // the unique constraint.
+    const { jobId, csvImportId } = await createImportJob(
+      "dealmachine",
+      "Kansas City",
+      2,
+    );
+
+    const mapping: Mapping = {
+      address: "Address",
+      state: "State",
+      homeowner_first_name: "First",
+      homeowner_last_name: "Last",
+    };
+    const rows: RowData[] = [
+      { Address: "100 First Ave", State: "MO", First: "Jian", Last: "Shi" },
+      { Address: "200 Second Ave", State: "MO", First: "Jian", Last: "Shi" },
+    ];
+
+    const summary = await runIngestion(supabase, {
+      jobId,
+      csvImportId,
+      source: "dealmachine",
+      market: "Kansas City",
+      mapping,
+      rows,
+    });
+    expect(summary.succeeded).toBe(2);
+    expect(summary.failed).toBe(0);
+
+    const { count: propCount } = await supabase
+      .from("properties")
+      .select("*", { count: "exact", head: true });
+    expect(propCount).toBe(2);
+
+    const { count: contactCount } = await supabase
+      .from("contacts")
+      .select("*", { count: "exact", head: true });
+    expect(contactCount).toBe(1);
+  });
+
   it("upserts repeated homeowners by phone — two rows, same phone → one contact", async () => {
     const { jobId, csvImportId } = await createImportJob("dealmachine", "Kansas City", 2);
 

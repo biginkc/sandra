@@ -544,6 +544,32 @@ async function upsertContact(
       .maybeSingle();
     if (data) return data.id;
   }
+  // Name match — only for person-type contacts with no phone and no email.
+  // The contacts table has a partial unique index on
+  // (lower(last_name), lower(first_name)) where phone_1 IS NULL and
+  // email IS NULL — designed to prevent duplicate "name-only ghost"
+  // contacts. Without this branch, a re-import of a row whose owner had
+  // no phone AND no email (D4D's `PH: Phone (Y/N/U) = N` case) would
+  // hit the unique constraint on the trailing INSERT and fail the row.
+  if (
+    !contact.phone_1 &&
+    !contact.email &&
+    contact.contact_type === "person" &&
+    contact.first_name &&
+    contact.last_name
+  ) {
+    const { data } = await supabase
+      .from("contacts")
+      .select("id")
+      .ilike("first_name", contact.first_name)
+      .ilike("last_name", contact.last_name)
+      .eq("contact_type", "person")
+      .is("phone_1", null)
+      .is("email", null)
+      .limit(1)
+      .maybeSingle();
+    if (data) return data.id;
+  }
   // Insert new
   const { data, error } = await supabase
     .from("contacts")
