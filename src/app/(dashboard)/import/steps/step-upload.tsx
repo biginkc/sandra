@@ -1,10 +1,11 @@
 "use client";
 
-import { CheckCircle2, UploadCloudIcon } from "lucide-react";
+import { CheckCircle2, Download, Sparkles, UploadCloudIcon } from "lucide-react";
 import Papa from "papaparse";
-import { useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
+import { Button } from "@/components/ui/button";
 import {
   Card,
   CardContent,
@@ -13,6 +14,10 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
+import {
+  isPrecheckApplicable,
+  precheckRows,
+} from "@/lib/csv/precheck";
 import { cn } from "@/lib/utils";
 import {
   Select,
@@ -212,6 +217,8 @@ export function StepUpload({ state, dispatch }: Props) {
           </label>
         </div>
 
+        <PrecheckPanel state={state} dispatch={dispatch} />
+
         <div className="flex flex-col gap-2">
           <Label>Source</Label>
           <Select
@@ -273,5 +280,179 @@ export function StepUpload({ state, dispatch }: Props) {
         </div>
       </CardContent>
     </Card>
+  );
+}
+
+/**
+ * Cleanup panel that surfaces above Source/Market when the uploaded file
+ * looks like a D4D / Skip Genie export. Offers two non-destructive
+ * actions:
+ *
+ *   - "Drop N empty rows" — replaces the in-memory rows + the File blob
+ *     with a smaller version. Empty rows are skip-trace misses that
+ *     would silent-skip during ingest anyway; pruning them up front
+ *     makes the Progress page show only real work.
+ *
+ *   - "Download N malformed rows" — extracts rows whose `PROP: Address
+ *     Full` couldn't be parsed and downloads them as a separate CSV the
+ *     user can triage manually.
+ *
+ * Intra-file duplicates are deliberately NOT dropped — those rows often
+ * carry contact data (relatives, co-owners) that the importer upserts
+ * against the matched property. They're shown for awareness only and
+ * surface again on the Review screen.
+ */
+function PrecheckPanel({
+  state,
+  dispatch,
+}: {
+  state: WizardState;
+  dispatch: React.Dispatch<WizardAction>;
+}) {
+  const result = useMemo(() => {
+    if (!state.headers.length || !isPrecheckApplicable(state.headers)) {
+      return null;
+    }
+    return precheckRows(state.rows as Record<string, string>[]);
+  }, [state.rows, state.headers]);
+
+  if (!result) return null;
+
+  const { stats } = result;
+  // Nothing to act on — the panel would be noise.
+  if (stats.empty === 0 && stats.unparseable === 0 && stats.intraFileDup === 0) {
+    return null;
+  }
+
+  const handleDropEmpty = () => {
+    if (stats.empty === 0) return;
+    const keptRows = [
+      ...result.ready,
+      ...result.intraFileDups,
+      ...result.needsReview,
+    ];
+    const csv = Papa.unparse(keptRows, { columns: state.headers });
+    const newFile = new File([csv], state.filename ?? "import.csv", {
+      type: "text/csv",
+    });
+    dispatch({
+      type: "FILE_PARSED",
+      file: newFile,
+      filename: state.filename ?? "import.csv",
+      headers: state.headers,
+      rows: keptRows,
+    });
+    toast.success(`Dropped ${stats.empty.toLocaleString()} empty rows.`);
+  };
+
+  const handleDownloadReview = () => {
+    if (stats.unparseable === 0) return;
+    const csv = Papa.unparse(result.needsReview, { columns: state.headers });
+    const baseName = (state.filename ?? "import").replace(/\.csv$/i, "");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${baseName}.needs-review.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  return (
+    <div className="border-border bg-muted/20 flex flex-col gap-3 rounded-lg border p-4">
+      <div className="flex items-center gap-2">
+        <Sparkles className="text-muted-foreground size-4" />
+        <span className="text-foreground text-sm font-semibold">
+          File quality check
+        </span>
+      </div>
+
+      <ul className="text-sm">
+        <PrecheckRow
+          count={stats.ready}
+          label="ready to import as new properties"
+          tone="positive"
+        />
+        {stats.intraFileDup > 0 && (
+          <PrecheckRow
+            count={stats.intraFileDup}
+            label="duplicate of an earlier row · will dedup, contact data still imports"
+            tone="info"
+          />
+        )}
+        {stats.empty > 0 && (
+          <PrecheckRow
+            count={stats.empty}
+            label="have no property data · skip-trace misses, safe to drop"
+            tone="muted"
+          />
+        )}
+        {stats.unparseable > 0 && (
+          <PrecheckRow
+            count={stats.unparseable}
+            label="have a malformed address · won't import, download to inspect"
+            tone="warning"
+          />
+        )}
+      </ul>
+
+      {(stats.empty > 0 || stats.unparseable > 0) && (
+        <div className="flex flex-wrap gap-2 pt-1">
+          {stats.empty > 0 && (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={handleDropEmpty}
+              className="gap-1.5 text-xs"
+            >
+              Drop {stats.empty.toLocaleString()} empty{" "}
+              {stats.empty === 1 ? "row" : "rows"}
+            </Button>
+          )}
+          {stats.unparseable > 0 && (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={handleDownloadReview}
+              className="gap-1.5 text-xs"
+            >
+              <Download className="size-3.5" />
+              Download {stats.unparseable.toLocaleString()} for review
+            </Button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PrecheckRow({
+  count,
+  label,
+  tone,
+}: {
+  count: number;
+  label: string;
+  tone: "positive" | "info" | "muted" | "warning";
+}) {
+  return (
+    <li className="flex items-baseline gap-3 py-1">
+      <span
+        className={cn(
+          "min-w-[60px] text-right font-mono text-sm font-semibold tabular-nums",
+          tone === "positive" && "text-emerald-700 dark:text-emerald-400",
+          tone === "warning" && "text-destructive",
+          tone === "muted" && "text-muted-foreground",
+          tone === "info" && "text-foreground",
+        )}
+      >
+        {count.toLocaleString()}
+      </span>
+      <span className="text-muted-foreground text-sm">{label}</span>
+    </li>
   );
 }
