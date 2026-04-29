@@ -1,6 +1,10 @@
 import { beforeEach, describe, expect, it } from "vitest";
 
-import { runIngestion } from "@/lib/csv/ingest";
+import {
+  prepareIngestion,
+  processIngestChunk,
+  runIngestion,
+} from "@/lib/csv/ingest";
 import type { Mapping, RowData } from "@/lib/csv/validate";
 import { createTestClient } from "@tests/integration/client";
 import { resetTenantTables } from "@tests/integration/reset";
@@ -220,6 +224,89 @@ describe("runIngestion (integration)", () => {
       .single();
     expect(after?.status).toBe("contacted");
     expect(after?.qualified_by).toBe("user-under-test");
+  });
+
+  it("writes cumulative succeeded/failed counts on each progress tick (live UI)", async () => {
+    // Bug surfaced 2026-04-29: the wizard's Progress page showed "all
+    // skipped" while the import was running because chunk progress
+    // updates only wrote processed_items, leaving succeeded_items and
+    // failed_items at 0 until finalizeIngestion ran. Skipped on the UI
+    // is computed as `processed - succeeded - failed`, which made the
+    // whole batch look skipped mid-flight.
+    //
+    // Fix: chunks now write cumulative succeeded/failed alongside
+    // processed_items. This test simulates two sequential chunks and
+    // verifies the jobs row reflects cumulative counts after each.
+    const { jobId, csvImportId } = await createImportJob(
+      "dealmachine",
+      "Kansas City",
+      // Force progress writes by exceeding PROGRESS_UPDATE_INTERVAL (10).
+      24,
+    );
+
+    const mapping: Mapping = { address: "Address", state: "State" };
+    const rowsChunk1: RowData[] = Array.from({ length: 12 }, (_, i) => ({
+      Address: `${i + 1} First St`,
+      State: "MO",
+    }));
+    const rowsChunk2: RowData[] = Array.from({ length: 12 }, (_, i) => ({
+      Address: `${i + 1} Second St`,
+      State: "MO",
+    }));
+
+    const { autoTagIds } = await prepareIngestion(supabase, {
+      jobId,
+      totalRows: 24,
+      source: "dealmachine",
+    });
+
+    const c1 = await processIngestChunk(supabase, {
+      jobId,
+      csvImportId,
+      source: "dealmachine",
+      market: "Kansas City",
+      mapping,
+      rows: rowsChunk1,
+      offset: 0,
+      autoTagIds,
+      priorSucceeded: 0,
+      priorFailed: 0,
+    });
+
+    // After chunk 1, jobs row should reflect chunk 1's outcome.
+    const { data: afterChunk1 } = await supabase
+      .from("jobs")
+      .select("processed_items, succeeded_items, failed_items")
+      .eq("id", jobId)
+      .single();
+    expect(afterChunk1?.processed_items).toBe(12);
+    expect(afterChunk1?.succeeded_items).toBe(c1.succeeded);
+    expect(afterChunk1?.failed_items).toBe(c1.failed);
+    // The bug: succeeded_items was 0 here. Lock the contract.
+    expect(afterChunk1?.succeeded_items).toBeGreaterThan(0);
+
+    const c2 = await processIngestChunk(supabase, {
+      jobId,
+      csvImportId,
+      source: "dealmachine",
+      market: "Kansas City",
+      mapping,
+      rows: rowsChunk2,
+      offset: 12,
+      autoTagIds,
+      priorSucceeded: c1.succeeded,
+      priorFailed: c1.failed,
+    });
+
+    // After chunk 2, cumulative across both.
+    const { data: afterChunk2 } = await supabase
+      .from("jobs")
+      .select("processed_items, succeeded_items, failed_items")
+      .eq("id", jobId)
+      .single();
+    expect(afterChunk2?.processed_items).toBe(24);
+    expect(afterChunk2?.succeeded_items).toBe(c1.succeeded + c2.succeeded);
+    expect(afterChunk2?.failed_items).toBe(c1.failed + c2.failed);
   });
 
   it("re-imports a soft-deleted property as a fresh row (dedup ignores deleted_at)", async () => {

@@ -57,6 +57,14 @@ export type ProcessChunkParams = {
   autoTagIds: string[];
   listId?: string | null;
   userId?: string | null;
+  /**
+   * Running totals from prior chunks. The chunk includes these when it
+   * writes progress to `jobs` so the UI's live counters reflect the whole
+   * job's progress, not just this chunk's slice. Default 0 — appropriate
+   * for the legacy single-chunk runIngestion() path.
+   */
+  priorSucceeded?: number;
+  priorFailed?: number;
 };
 
 export type ChunkResult = {
@@ -267,13 +275,19 @@ export async function processIngestChunk(
     }
 
     // Progress update every N rows AND on the chunk's final row, so the
-    // wizard sees movement even if a chunk happens to be small.
+    // wizard sees movement even if a chunk happens to be small. Includes
+    // cumulative succeeded/failed (chunk's running totals + prior chunks'
+    // totals) so the UI's live counters reflect the whole job's progress
+    // — fixes the bug where mid-flight Progress showed "all skipped"
+    // until finalize wrote the final numbers.
     const isLastInChunk = localIndex === params.rows.length - 1;
     if ((absoluteIndex + 1) % PROGRESS_UPDATE_INTERVAL === 0 || isLastInChunk) {
       await supabase
         .from("jobs")
         .update({
           processed_items: absoluteIndex + 1,
+          succeeded_items: (params.priorSucceeded ?? 0) + succeeded,
+          failed_items: (params.priorFailed ?? 0) + failed,
           worker_heartbeat_at: new Date().toISOString(),
         })
         .eq("id", params.jobId);
