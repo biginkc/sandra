@@ -151,6 +151,32 @@ describe("validateRow", () => {
     expect(rule).toBe("address_full_empty");
   });
 
+  it("validates a reshaped D4D row (address_full + per-field city/state/zip)", () => {
+    // After running scripts/reshape-d4d-csv.ts, the combined column is
+    // comma-delimited and the per-field columns survive untouched. The
+    // mapping below is what autodetectMapping produces for D4D headers.
+    const mapping: Mapping = {
+      address_full: "PROP: Address Full",
+      city: "PROP: City",
+      state: "PROP: State",
+      zip: "PROP: Zip",
+    };
+    const row: RowData = {
+      "PROP: Address Full": "807 TRIPLE LODE DR, ANGELS CAMP, CA 95222",
+      "PROP: City": "ANGELS CAMP",
+      "PROP: State": "CA",
+      "PROP: Zip": "95222",
+    };
+    const result = validateRow(row, mapping, 0);
+    expect(result.ok).toBe(true);
+    expect(result.errors).toHaveLength(0);
+    expect(result.normalized.address).toBe("807 TRIPLE LODE DR");
+    // Per-field values win over parsed values for city/state/zip.
+    expect(result.normalized.city).toBe("ANGELS CAMP");
+    expect(result.normalized.state).toBe("CA");
+    expect(result.normalized.zip).toBe("95222");
+  });
+
   it("rejects an entity contact without entity_name", () => {
     const mappingWithEntity: Mapping = {
       ...PROPERTY_MAPPING,
