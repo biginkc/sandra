@@ -1,5 +1,8 @@
 "use client";
 
+import { Check, ChevronsUpDown } from "lucide-react";
+import * as React from "react";
+
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -9,23 +12,29 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import {
+  Command,
+  CommandEmpty,
+  CommandGroup,
+  CommandInput,
+  CommandItem,
+  CommandList,
+} from "@/components/ui/command";
 import { Label } from "@/components/ui/label";
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-} from "@/components/ui/select";
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
 import {
   AGENT_FIELDS,
   HOMEOWNER_FIELDS,
   PROPERTY_FIELDS,
   type TargetField,
 } from "@/lib/csv/schema";
+import { cn } from "@/lib/utils";
 
 import type { WizardAction, WizardState } from "../wizard";
-
-const IGNORE_VALUE = "__ignore__";
 
 type Props = { state: WizardState; dispatch: React.Dispatch<WizardAction> };
 
@@ -164,7 +173,6 @@ function FieldRow({
   dispatch: React.Dispatch<WizardAction>;
 }) {
   const currentHeader = state.mapping[field.id] ?? null;
-  const triggerValue = currentHeader ?? IGNORE_VALUE;
 
   // When the user has mapped a combined-address column, signal that Address /
   // City / State / ZIP will be auto-filled from it even if left "(not mapped)".
@@ -189,37 +197,121 @@ function FieldRow({
           </span>
         )}
       </Label>
-      <Select
-        value={triggerValue}
-        onValueChange={(v) =>
+      <HeaderCombobox
+        triggerId={`map-${field.id}`}
+        headers={state.headers}
+        value={currentHeader}
+        derivedFrom={willDerive ? addressFullHeader : null}
+        onChange={(header) =>
           dispatch({
             type: "SET_MAPPING_FIELD",
             fieldId: field.id,
-            header: v === IGNORE_VALUE ? null : v,
+            header,
           })
         }
-      >
-        <SelectTrigger id={`map-${field.id}`} className="w-full">
-          <span
-            className={
-              currentHeader ? "truncate" : "text-muted-foreground truncate"
-            }
-          >
-            {currentHeader ?? (willDerive ? `← ${addressFullHeader}` : "(not mapped)")}
-          </span>
-        </SelectTrigger>
-        <SelectContent>
-          <SelectItem value={IGNORE_VALUE}>(not mapped)</SelectItem>
-          {state.headers.map((h) => (
-            <SelectItem key={h} value={h}>
-              {h}
-            </SelectItem>
-          ))}
-        </SelectContent>
-      </Select>
+      />
       {field.helpText && (
         <div className="text-muted-foreground text-xs">{field.helpText}</div>
       )}
     </div>
+  );
+}
+
+/**
+ * Searchable column-mapping dropdown. Native <select> scrolling is brutal
+ * on Skip Genie / DataTree (D4D) files that ship 200+ columns; cmdk's
+ * Command does fuzzy filter-as-you-type out of the box. Selecting "(not
+ * mapped)" resets the field by passing null to onChange — different from
+ * not selecting anything, which preserves the current value.
+ */
+function HeaderCombobox({
+  triggerId,
+  headers,
+  value,
+  derivedFrom,
+  onChange,
+}: {
+  triggerId: string;
+  headers: readonly string[];
+  value: string | null;
+  /** When the field will be auto-filled from the combined-address column,
+   *  show that source as the placeholder instead of "(not mapped)". */
+  derivedFrom: string | null;
+  onChange: (header: string | null) => void;
+}) {
+  const [open, setOpen] = React.useState(false);
+
+  const placeholder = derivedFrom ? `← ${derivedFrom}` : "(not mapped)";
+
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger
+        id={triggerId}
+        render={
+          <Button
+            variant="outline"
+            role="combobox"
+            aria-expanded={open}
+            className="w-full justify-between font-normal"
+          />
+        }
+      >
+        <span
+          className={cn(
+            "truncate",
+            !value && "text-muted-foreground",
+          )}
+        >
+          {value ?? placeholder}
+        </span>
+        <ChevronsUpDown className="ml-2 size-4 shrink-0 opacity-50" />
+      </PopoverTrigger>
+      <PopoverContent
+        align="start"
+        className="w-[var(--anchor-size)] min-w-[280px] p-0"
+      >
+        <Command>
+          <CommandInput placeholder="Search columns…" />
+          <CommandList>
+            <CommandEmpty>No columns match.</CommandEmpty>
+            <CommandGroup>
+              <CommandItem
+                value="__not_mapped__"
+                onSelect={() => {
+                  onChange(null);
+                  setOpen(false);
+                }}
+              >
+                <Check
+                  className={cn(
+                    "mr-2 size-4",
+                    value === null ? "opacity-100" : "opacity-0",
+                  )}
+                />
+                (not mapped)
+              </CommandItem>
+              {headers.map((h) => (
+                <CommandItem
+                  key={h}
+                  value={h}
+                  onSelect={() => {
+                    onChange(h);
+                    setOpen(false);
+                  }}
+                >
+                  <Check
+                    className={cn(
+                      "mr-2 size-4",
+                      value === h ? "opacity-100" : "opacity-0",
+                    )}
+                  />
+                  <span className="truncate">{h}</span>
+                </CommandItem>
+              ))}
+            </CommandGroup>
+          </CommandList>
+        </Command>
+      </PopoverContent>
+    </Popover>
   );
 }
