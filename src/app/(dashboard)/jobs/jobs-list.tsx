@@ -1,10 +1,11 @@
 "use client";
 
 import { formatDistanceToNow } from "date-fns/formatDistanceToNow";
+import Link from "next/link";
 import { useEffect, useState, useTransition } from "react";
 
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import {
   Dialog,
   DialogContent,
@@ -196,6 +197,15 @@ export function JobsList({ isAdmin }: { isAdmin: boolean }) {
                         totalItems={job.total_items}
                       />
                     ) : null}
+                    <Link
+                      href={`/jobs/${job.id}`}
+                      className={buttonVariants({
+                        variant: "outline",
+                        size: "sm",
+                      })}
+                    >
+                      View details
+                    </Link>
                   </TableCell>
                 </TableRow>
               );

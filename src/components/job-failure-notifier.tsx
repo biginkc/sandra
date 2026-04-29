@@ -57,7 +57,7 @@ export function JobFailureNotifier() {
           action: {
             label: "View job",
             onClick: () => {
-              window.location.href = "/jobs";
+              window.location.href = `/jobs/${job.id}`;
             },
           },
           duration: 10_000,
