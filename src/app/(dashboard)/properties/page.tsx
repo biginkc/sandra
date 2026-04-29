@@ -69,10 +69,13 @@ export default async function PropertiesPage({
   // Active lists — feed the "Add to list" / "Remove from list" submenus.
   // Archived lists are hidden from the picker (they'd be a noisy confusion
   // vector); users can unarchive via /lists if they want them back.
+  // Sort: system-managed first, then alphabetical — same rule as the
+  // /lists page so VAs see the same order everywhere.
   const { data: listRows } = await supabase
     .from("lists")
-    .select("id, name, color, archived_at")
+    .select("id, name, color, archived_at, system_managed")
     .is("archived_at", null)
+    .order("system_managed", { ascending: false })
     .order("name", { ascending: true });
   const lists: ListOption[] = (listRows ?? []).map((l) => ({
     id: l.id,

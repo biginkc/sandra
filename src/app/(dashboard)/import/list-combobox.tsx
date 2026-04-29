@@ -57,9 +57,13 @@ export function ListCombobox({
     const supabase = createClient();
     supabase
       .from("lists")
-      .select("id, name")
+      .select("id, name, system_managed")
       .is("archived_at", null)
-      .order("name")
+      // System-managed lists pin to the top of the picker so VAs see the
+      // 20 PropStream-style buckets first; everything else stays
+      // alphabetical underneath.
+      .order("system_managed", { ascending: false })
+      .order("name", { ascending: true })
       .then(({ data }) => {
         if (cancelled) return;
         setLists((data ?? []) as ListEntry[]);

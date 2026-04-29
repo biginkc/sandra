@@ -106,10 +106,45 @@ export async function createList(
  * Archive a list (soft delete). Memberships stay — stack counts don't
  * change — but the list stops showing on lead-card badges and the /lists
  * page flips it to the archived section.
+ *
+ * System-managed lists (the 20 PropStream-style buckets seeded by
+ * migration 031) are protected: the action rejects with
+ * SYSTEM_MANAGED_LIST. Defense-in-depth alongside the UI hide in
+ * `list-row-actions.tsx`.
  */
 export async function archiveList(id: string): Promise<Result<null>> {
   try {
     const supabase = await createClient();
+
+    // Pre-check the row's system_managed flag so we can return a friendly
+    // code instead of silently mutating archived_at.
+    const { data: existing, error: lookupErr } = await supabase
+      .from("lists")
+      .select("system_managed")
+      .eq("id", id)
+      .maybeSingle();
+    if (lookupErr) {
+      return {
+        ok: false,
+        error: { code: "LIST_ARCHIVE_FAILED", message: lookupErr.message },
+      };
+    }
+    if (!existing) {
+      return {
+        ok: false,
+        error: { code: "LIST_NOT_FOUND", message: "List does not exist." },
+      };
+    }
+    if (existing.system_managed) {
+      return {
+        ok: false,
+        error: {
+          code: "SYSTEM_MANAGED_LIST",
+          message: "System-managed lists cannot be archived.",
+        },
+      };
+    }
+
     const { error } = await supabase
       .from("lists")
       .update({ archived_at: new Date().toISOString() })
@@ -127,10 +162,45 @@ export async function archiveList(id: string): Promise<Result<null>> {
   }
 }
 
-/** Un-archive a list. Reversible from the /lists "Archived" section. */
+/**
+ * Un-archive a list. Reversible from the /lists "Archived" section.
+ *
+ * System-managed lists never enter the archived section in the first
+ * place (they're blocked by `archiveList`), but we still guard
+ * `unarchiveList` for symmetry — same SYSTEM_MANAGED_LIST code so
+ * consumers can branch on a single error.
+ */
 export async function unarchiveList(id: string): Promise<Result<null>> {
   try {
     const supabase = await createClient();
+
+    const { data: existing, error: lookupErr } = await supabase
+      .from("lists")
+      .select("system_managed")
+      .eq("id", id)
+      .maybeSingle();
+    if (lookupErr) {
+      return {
+        ok: false,
+        error: { code: "LIST_UNARCHIVE_FAILED", message: lookupErr.message },
+      };
+    }
+    if (!existing) {
+      return {
+        ok: false,
+        error: { code: "LIST_NOT_FOUND", message: "List does not exist." },
+      };
+    }
+    if (existing.system_managed) {
+      return {
+        ok: false,
+        error: {
+          code: "SYSTEM_MANAGED_LIST",
+          message: "System-managed lists cannot be modified.",
+        },
+      };
+    }
+
     const { error } = await supabase
       .from("lists")
       .update({ archived_at: null })

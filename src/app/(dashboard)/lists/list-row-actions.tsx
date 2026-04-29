@@ -13,11 +13,26 @@ type Props = {
   id: string;
   name: string;
   archived: boolean;
+  systemManaged?: boolean;
 };
 
-export function ListRowActions({ id, name, archived }: Props) {
+export function ListRowActions({
+  id,
+  name,
+  archived,
+  systemManaged = false,
+}: Props) {
   const router = useRouter();
   const [pending, startTransition] = useTransition();
+
+  // System-managed lists are inert in the row-actions column. The server
+  // action also rejects with SYSTEM_MANAGED_LIST as defense-in-depth, but
+  // the UI hides the buttons entirely so VAs can't even attempt it.
+  if (systemManaged) {
+    return (
+      <span className="text-muted-foreground text-xs italic">Locked</span>
+    );
+  }
 
   const toggle = () => {
     startTransition(async () => {
