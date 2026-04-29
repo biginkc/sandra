@@ -144,6 +144,11 @@ async function processChunkStep(args: {
   autoTagIds: string[];
   listId: string | null;
   userId: string | null;
+  /** Running totals from prior chunks, threaded so the chunk's
+   *  per-row progress writes report cumulative succeeded/failed across
+   *  the whole job (not just this chunk). */
+  priorSucceeded: number;
+  priorFailed: number;
 }): Promise<ChunkResult> {
   "use step";
 
@@ -159,6 +164,8 @@ async function processChunkStep(args: {
     autoTagIds: args.autoTagIds,
     listId: args.listId,
     userId: args.userId,
+    priorSucceeded: args.priorSucceeded,
+    priorFailed: args.priorFailed,
   });
 }
 
@@ -275,6 +282,8 @@ export async function csvImportWorkflow(
       autoTagIds: loaded.autoTagIds,
       listId: params.listId,
       userId: params.userId,
+      priorSucceeded: succeeded,
+      priorFailed: failed,
     });
     succeeded += result.succeeded;
     failed += result.failed;
