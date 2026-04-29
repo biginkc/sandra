@@ -376,7 +376,16 @@ export function normalizeApn(raw: string | null | undefined): string | null {
     .toLowerCase()
     .replace(/[\s\-_.]/g, "")
     .replace(/^(apn|pin|parcel|parcelid|pid)/, "");
-  return cleaned.length > 0 ? cleaned : null;
+  if (cleaned.length === 0) return null;
+  // Reject scientific-notation values like "611e+18" — these come from
+  // Excel / Numbers / Google Sheets auto-formatting long numeric APNs on
+  // CSV export, NOT from real assessor systems. Treating them as real
+  // APN values causes mass-collisions in dedup (D4D file: 806 rows
+  // collapsing to ~30 distinct fake APNs). Returning null lets the row
+  // dedup by address_normalized instead, which is the correct behavior
+  // for "we don't actually know this property's APN."
+  if (/^\d+e[+-]?\d+$/.test(cleaned)) return null;
+  return cleaned;
 }
 
 // ---------- Scalar coercions -----------
