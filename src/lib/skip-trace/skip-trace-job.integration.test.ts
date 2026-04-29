@@ -255,6 +255,60 @@ describe("runSkipTraceEnrichment (integration, mock provider)", () => {
     expect(contactIds.size).toBe(1);
   });
 
+  it("flags submitted property_ids that don't come back in the provider response as 'provider' errors", async () => {
+    // Tonight's incident: Tracerfy returned 21 results for a 50-row
+    // submission. The other 29 properties silently dropped — counted
+    // nowhere, no per-row diagnostic. Now they land as job_items
+    // errors with class='provider' so the operator can see them on
+    // the job detail page.
+    const props = await Promise.all([
+      seedProperty({ address: "1 Returned St" }),
+      seedProperty({ address: "2 Dropped St" }),
+      seedProperty({ address: "3 Dropped Ave" }),
+    ]);
+    const ids = props.map((p) => p.propertyId);
+    const jobId = await createPendingJob(ids);
+    await runSkipTraceEnrichment(supabase, { jobId, propertyIds: ids });
+
+    // Provider only returned 1 of 3 results.
+    const partial: SkipTraceResult[] = [
+      {
+        propertyId: ids[0],
+        hit: false,
+        persons: [],
+        creditsDeducted: 0,
+        raw: {},
+      },
+    ];
+
+    await finalizeSkipTraceFromBatch(supabase, { jobId, results: partial });
+
+    // The two missing properties should have job_items rows with
+    // status=error and a 'provider dropped' message.
+    const { data: items } = await supabase
+      .from("job_items")
+      .select("property_id, status, error_class, error_message")
+      .eq("job_id", jobId)
+      .eq("status", "error");
+
+    expect(items).toHaveLength(2);
+    const missingIds = new Set(items!.map((i) => i.property_id));
+    expect(missingIds.has(ids[1])).toBe(true);
+    expect(missingIds.has(ids[2])).toBe(true);
+    expect(items![0].error_class).toBe("provider");
+    expect(items![0].error_message).toMatch(/didn't return a result/);
+
+    // Job should reflect 2 of 3 as failures in the counters.
+    const { data: job } = await supabase
+      .from("jobs")
+      .select("failed_items, succeeded_items, status")
+      .eq("id", jobId)
+      .single();
+    expect(job!.failed_items).toBe(2);
+    // status='partial' because at least one row succeeded
+    expect(["partial", "failed"]).toContain(job!.status);
+  });
+
   it("cache hit on second run: no provider call, contact unchanged", async () => {
     const { propertyId } = await seedProperty({ address: "Cache Test Ln" });
 

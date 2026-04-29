@@ -252,7 +252,7 @@ export async function finalizeSkipTraceFromBatch(
   // Resume the existing summary if present so cached_hits etc. carry forward.
   const { data: jobRow } = await supabase
     .from("jobs")
-    .select("result_summary")
+    .select("result_summary, input_params")
     .eq("id", params.jobId)
     .maybeSingle();
 
@@ -282,8 +282,37 @@ export async function finalizeSkipTraceFromBatch(
     .in("id", propertyIds);
   const propsById = new Map((props ?? []).map((p) => [p.id, p]));
 
+  // Track which submitted properties we got results for. Anything in the
+  // original input_params.property_ids that's missing from results is a
+  // provider-side dropped row we'd otherwise lose. Tonight's incident:
+  // we submitted 50, Tracerfy returned 21 results, the other 29 went
+  // ghost. With this tracking, those 29 land as job_items errors with a
+  // specific message instead of being silently absent.
+  const submittedIds: string[] = (() => {
+    const ip = (jobRow?.input_params ?? null) as { property_ids?: unknown } | null;
+    if (!ip || !Array.isArray(ip.property_ids)) return [];
+    return ip.property_ids.filter(
+      (x): x is string => typeof x === "string" && x.length > 0,
+    );
+  })();
+  const returnedIds = new Set(
+    params.results.map((r) => r.propertyId).filter((id) => id && id.length > 0),
+  );
+  const missingIds = submittedIds.filter((id) => !returnedIds.has(id));
+
   for (const result of params.results) {
-    await persistAndRecord(supabase, params.jobId, result, summary, /*fromCache*/ false);
+    try {
+      await persistAndRecord(supabase, params.jobId, result, summary, /*fromCache*/ false);
+    } catch (e) {
+      // persistAndRecord propagates insertJobItem failures since the
+      // silent-swallow fix above. One bad row mustn't prevent the
+      // remaining results from being processed — log and continue.
+      summary.failed++;
+      reportError(e, {
+        tags: { surface: "skip_trace_finalize_per_result" },
+        extra: { jobId: params.jobId, propertyId: result.propertyId },
+      });
+    }
     const p = propsById.get(result.propertyId);
     if (p) {
       await writeCache(
@@ -297,6 +326,48 @@ export async function finalizeSkipTraceFromBatch(
         }),
         result,
       );
+    }
+  }
+
+  // Surface ghost-dropped rows so the operator can see *which* submitted
+  // properties the provider didn't process. Logged as a single structured
+  // event for diagnostics, plus per-property job_items error rows so the
+  // job detail page lists them explicitly.
+  if (missingIds.length > 0) {
+    reportError(
+      new Error(
+        `Skip-trace provider dropped ${missingIds.length} of ${submittedIds.length} submitted rows`,
+      ),
+      {
+        tags: { surface: "skip_trace_provider_dropped_rows" },
+        extra: {
+          jobId: params.jobId,
+          submitted: submittedIds.length,
+          returned: params.results.length,
+          missing: missingIds.length,
+          // Sample only — don't dump 500 IDs into a log line
+          sample_missing: missingIds.slice(0, 5),
+        },
+      },
+    );
+    for (const propertyId of missingIds) {
+      summary.failed++;
+      try {
+        await insertJobItem(supabase, params.jobId, propertyId, {
+          status: "error",
+          error_class: "provider",
+          error_message:
+            "Provider didn't return a result for this property (dropped from batch response).",
+        });
+      } catch (e) {
+        // insertJobItem now throws on real DB errors — log but keep
+        // processing the rest so one bad row doesn't lose the whole
+        // missing-list audit.
+        reportError(e, {
+          tags: { surface: "skip_trace_record_dropped" },
+          extra: { jobId: params.jobId, propertyId },
+        });
+      }
     }
   }
 
@@ -376,14 +447,32 @@ async function insertJobItem(
     result?: Record<string, unknown>;
   },
 ): Promise<void> {
-  await supabase.from("job_items").insert({
+  // Earlier this function silently swallowed insert failures. That hid a
+  // class of bugs where the jobs row's counters incremented but per-item
+  // detail was missing — making forensic debugging impossible. Now we
+  // surface the error to the caller via a thrown exception, and log it
+  // so the underlying schema/RLS issue gets seen.
+  //
+  // Important: if propertyId is empty (e.g. the provider didn't echo
+  // our external_id), `property_id` becomes null instead of "" so the
+  // FK constraint doesn't reject the row. The error_message field is
+  // where the audit trail goes for those cases.
+  const normalizedPropertyId = propertyId && propertyId.length > 0 ? propertyId : null;
+  const { error } = await supabase.from("job_items").insert({
     job_id: jobId,
-    property_id: propertyId,
+    property_id: normalizedPropertyId,
     status: fields.status,
     error_class: fields.error_class ?? null,
     error_message: fields.error_message ?? null,
     output_payload: (fields.result ?? null) as unknown as Json,
   });
+  if (error) {
+    reportError(new Error(`insertJobItem failed: ${error.message}`), {
+      tags: { surface: "skip_trace_insert_job_item" },
+      extra: { jobId, propertyId: normalizedPropertyId, status: fields.status },
+    });
+    throw new Error(`insertJobItem failed: ${error.message}`);
+  }
 }
 
 async function finalizeJob(
