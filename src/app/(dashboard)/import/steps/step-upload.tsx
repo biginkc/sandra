@@ -1,6 +1,6 @@
 "use client";
 
-import { UploadCloudIcon } from "lucide-react";
+import { CheckCircle2, UploadCloudIcon } from "lucide-react";
 import Papa from "papaparse";
 import { useRef, useState } from "react";
 import { toast } from "sonner";
@@ -156,28 +156,51 @@ export function StepUpload({ state, dispatch }: Props) {
               handleFile(file);
             }}
             className={cn(
-              "border-input flex cursor-pointer flex-col items-center justify-center gap-2 rounded-md border-2 border-dashed px-6 py-10 text-center transition-colors",
-              dragActive
-                ? "border-primary bg-primary/5"
-                : "hover:border-foreground/30 hover:bg-muted/30",
+              "flex cursor-pointer flex-col items-center justify-center gap-2 rounded-md border-2 px-6 py-10 text-center transition-colors",
+              state.filename
+                ? "border-emerald-500 bg-emerald-50 dark:border-emerald-500/60 dark:bg-emerald-500/10"
+                : cn(
+                    "border-input border-dashed",
+                    dragActive
+                      ? "border-primary bg-primary/5"
+                      : "hover:border-foreground/30 hover:bg-muted/30",
+                  ),
             )}
           >
-            <UploadCloudIcon
-              className={cn(
-                "size-6",
-                dragActive ? "text-primary" : "text-muted-foreground",
-              )}
-            />
-            <div className="flex flex-col gap-0.5">
-              <span className="text-sm font-medium">
-                {dragActive
-                  ? "Drop to upload"
-                  : "Drag a CSV here, or click to browse"}
-              </span>
-              <span className="text-muted-foreground text-xs">
-                .csv up to {HARD_BLOCK_BYTES / 1024 / 1024} MB
-              </span>
-            </div>
+            {state.filename ? (
+              <>
+                <CheckCircle2 className="size-7 text-emerald-600 dark:text-emerald-400" />
+                <div className="flex flex-col gap-0.5">
+                  <span className="text-foreground text-sm font-semibold">
+                    {state.filename}
+                  </span>
+                  <span className="text-muted-foreground text-xs">
+                    {state.rows.length.toLocaleString()} rows ·{" "}
+                    {state.headers.length} columns · click to choose a different
+                    file
+                  </span>
+                </div>
+              </>
+            ) : (
+              <>
+                <UploadCloudIcon
+                  className={cn(
+                    "size-6",
+                    dragActive ? "text-primary" : "text-muted-foreground",
+                  )}
+                />
+                <div className="flex flex-col gap-0.5">
+                  <span className="text-sm font-medium">
+                    {dragActive
+                      ? "Drop to upload"
+                      : "Drag a CSV here, or click to browse"}
+                  </span>
+                  <span className="text-muted-foreground text-xs">
+                    .csv up to {HARD_BLOCK_BYTES / 1024 / 1024} MB
+                  </span>
+                </div>
+              </>
+            )}
             <input
               id="file"
               ref={inputRef}
@@ -187,12 +210,6 @@ export function StepUpload({ state, dispatch }: Props) {
               onChange={(e) => handleFile(e.target.files?.[0] ?? null)}
             />
           </label>
-          {state.filename && (
-            <div className="text-muted-foreground text-sm">
-              {state.filename} · {state.rows.length} rows · {state.headers.length}{" "}
-              columns
-            </div>
-          )}
         </div>
 
         <div className="flex flex-col gap-2">
