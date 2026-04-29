@@ -1,0 +1,63 @@
+name: Apply Supabase migrations to prod
+
+# Auto-applies any unapplied Supabase migrations to the prod project on
+# push to `main`. Runs only when `supabase/migrations/**` changes so we
+# don't waste a CI run on every code-only commit.
+#
+# Why this exists: prod migrations USED to be a manual step. Migration
+# 029 (job_items.error_class taxonomy) shipped in PR #62 but the
+# constraint wasn't extended in prod until we manually ran the
+# migration mid-deploy — meaning the freshly-shipped code would have
+# silently dropped error_class writes for a window. This workflow
+# closes that gap: every merged migration is applied to prod within
+# ~30 seconds of the merge landing.
+#
+# Required secrets (set in GitHub → repo settings → Secrets → Actions):
+#   SUPABASE_ACCESS_TOKEN
+#     A personal access token from
+#     https://supabase.com/dashboard/account/tokens. Lets the CLI
+#     authenticate to the Supabase API.
+#   PROD_SUPABASE_DB_PASSWORD
+#     The prod database password — visible at:
+#     https://supabase.com/dashboard/project/copflsklaefwzipsrjqz/settings/database
+#     (Connection info → Database password). Used by `supabase db push`
+#     to connect directly to the prod Postgres for migration execution.
+#
+# Failure mode: a failed migration leaves the workflow red and the prod
+# DB partially-migrated (depending on what failed). Investigate the
+# logs, fix the migration, push a new one — `supabase db push` is
+# idempotent and skips already-applied files.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "supabase/migrations/**"
+      - ".github/workflows/db-migrate.yml"
+  workflow_dispatch: {}
+
+jobs:
+  migrate-prod:
+    name: Apply migrations to prod
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    env:
+      # Pinned project ref — Sandra's prod project. Test project
+      # (ncsngxlcyxylaeskiteu) is intentionally NOT touched here; it
+      # gets migrations applied via the integration-test pipeline.
+      PROD_PROJECT_REF: copflsklaefwzipsrjqz
+      SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      - name: Link to prod project
+        run: supabase link --project-ref "$PROD_PROJECT_REF"
+
+      - name: Apply pending migrations
+        run: supabase db push --password "${{ secrets.PROD_SUPABASE_DB_PASSWORD }}"
