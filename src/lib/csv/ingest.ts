@@ -78,19 +78,14 @@ const PROGRESS_UPDATE_INTERVAL = 10;
 const ERROR_SAMPLE_SIZE = 20;
 
 /**
- * Map the CSV vendor (`dealmachine`, `zillow`, etc. — chosen in Step 1 of the
- * wizard) to a sensible default `properties.source` value when the CSV itself
- * doesn't map a Source column. `properties.source` is a distinct enum about
- * how the lead entered the pipeline; the vendor selection is about who
- * exported the data.
+ * As of migration 030, the import wizard's source picker uses the same
+ * canonical enum as the DB column (`src/lib/leads/create.ts → LEAD_SOURCES`)
+ * — no translation table needed. Column mapping is handled by
+ * `aliases.ts` autodetect, so source is purely an attribution signal
+ * the user picks deliberately. The previous `VENDOR_DEFAULT_SOURCE`
+ * heuristic (dealmachine→driving_for_dollars, zillow→mls, etc.) is
+ * retired with this migration.
  */
-const VENDOR_DEFAULT_SOURCE: Record<string, PropertyInsert["source"]> = {
-  dealmachine: "driving_for_dollars",
-  zillow: "mls",
-  realtor: "mls",
-  mls: "mls",
-  generic: "other",
-};
 
 /**
  * Runs the full ingestion in one call. Backward-compatible wrapper for
@@ -439,9 +434,10 @@ async function ingestRow(
     return { propertyId: existingId, wasDuplicate: true };
   }
 
+  // The wizard's source selection (`defaultSource`) IS the canonical
+  // value for properties.source — no translation table. A row-level
+  // `source` mapped from the CSV (rare) overrides only when present.
   const mappedSource = (n.source as string | null) ?? null;
-  const vendorFallback =
-    VENDOR_DEFAULT_SOURCE[defaultSource.toLowerCase()] ?? null;
 
   const property: PropertyInsert = {
     // New imports land as 'prospect' by default. The /leads kanban filters
@@ -470,7 +466,7 @@ async function ingestRow(
     equity_estimate: (n.equity_estimate as number | null) ?? null,
     lat: (n.lat as number | null) ?? null,
     lon: (n.lon as number | null) ?? null,
-    source: (mappedSource ?? vendorFallback) as PropertyInsert["source"],
+    source: (mappedSource ?? defaultSource) as PropertyInsert["source"],
     homeowner_contact_id: homeownerContactId,
     agent_contact_id: agentContactId,
   };

@@ -87,12 +87,14 @@ async function uploadCsvToStorage(
   }
 }
 
-export type WizardSource =
-  | "dealmachine"
-  | "zillow"
-  | "realtor"
-  | "mls"
-  | "generic";
+// The wizard's source picker now uses the canonical lead-source enum
+// shared with the lead webhook + manual entry form (see
+// `src/lib/leads/create.ts`). Column mapping is handled separately by
+// the `aliases.ts` autodetect — the user no longer needs to identify
+// the vendor for mapping purposes; source is purely an attribution
+// signal that the user picks deliberately.
+import type { LeadSource } from "@/lib/leads/create";
+export type WizardSource = LeadSource;
 
 export type WizardMarket =
   | "Kansas City"

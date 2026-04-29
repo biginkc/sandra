@@ -1549,6 +1549,45 @@ export type Database = {
         }
         Relationships: []
       }
+      webhook_consumers: {
+        Row: {
+          created_at: string
+          created_by: string | null
+          default_source: string
+          enabled: boolean
+          id: string
+          last_used_at: string | null
+          name: string
+          notes: string | null
+          revoked_at: string | null
+          secret_hash: string
+        }
+        Insert: {
+          created_at?: string
+          created_by?: string | null
+          default_source: string
+          enabled?: boolean
+          id?: string
+          last_used_at?: string | null
+          name: string
+          notes?: string | null
+          revoked_at?: string | null
+          secret_hash: string
+        }
+        Update: {
+          created_at?: string
+          created_by?: string | null
+          default_source?: string
+          enabled?: boolean
+          id?: string
+          last_used_at?: string | null
+          name?: string
+          notes?: string | null
+          revoked_at?: string | null
+          secret_hash?: string
+        }
+        Relationships: []
+      }
       webhook_events: {
         Row: {
           error_message: string | null

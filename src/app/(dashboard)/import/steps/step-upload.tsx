@@ -37,10 +37,13 @@ import type {
 
 const SOURCES: { value: WizardSource; label: string }[] = [
   { value: "dealmachine", label: "DealMachine" },
-  { value: "zillow", label: "Zillow" },
-  { value: "realtor", label: "Realtor.com" },
-  { value: "mls", label: "MLS" },
-  { value: "generic", label: "Generic" },
+  { value: "propstream", label: "PropStream" },
+  { value: "driving_for_dollars", label: "Driving for dollars" },
+  { value: "referral", label: "Referral" },
+  { value: "cold_call", label: "Cold call" },
+  { value: "sms", label: "SMS (inbound)" },
+  { value: "web_form", label: "Web form" },
+  { value: "direct_mail", label: "Direct mail" },
 ];
 
 const MARKETS: { value: WizardMarket; label: string }[] = [
