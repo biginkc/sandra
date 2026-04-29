@@ -1,24 +1,19 @@
 "use server";
 
 import { after } from "next/server";
+import { start } from "workflow/api";
 
 import { createClient } from "@/lib/supabase/server";
 import { errFromUnknown, ok, type Result } from "@/lib/errors/result";
 import { reportError } from "@/lib/errors/report";
-import { runIngestion } from "@/lib/csv/ingest";
 import {
   applyBulkUpdate,
   previewBulkUpdate,
   type UpdatePreview,
 } from "@/lib/csv/update-bulk";
 import type { SubOperationId } from "@/lib/csv/update-operations";
-import type { Mapping, RowData } from "@/lib/csv/validate";
-import {
-  createCassChildJob,
-  getAutotriggerCap,
-  runCassEnrichment,
-} from "@/lib/enrichment/cass-job";
-import { requestSkipTrace } from "@/lib/skip-trace/actions";
+import type { Mapping } from "@/lib/csv/validate";
+import { csvImportWorkflow } from "@/workflows/csv-import";
 
 import type { WizardMarket, WizardSource } from "./wizard";
 
@@ -29,14 +24,15 @@ export type CreateImportJobParams = {
   /** Optional list name. Lookup-or-create within the importer's org. */
   listName: string | null;
   mapping: Mapping;
-  rows: RowData[];
-  /** Surface C — when true, after CASS auto-trigger, also request a
-   *  skip-trace job for the newly imported properties. Goes through
-   *  the same approval flow as a manual request. Off by default. */
-  requestSkipTrace?: boolean;
+  /** Path within the csv-imports Storage bucket — uploaded by the wizard
+   *  before this action runs. The workflow downloads it server-side to
+   *  parse and ingest. */
+  storagePath: string;
+  /** Total row count from the client-side parse, stamped onto the jobs
+   *  row immediately so the wizard's progress UI has a denominator
+   *  before the workflow's first heartbeat. */
+  totalRows: number;
 };
-
-const SKIP_TRACE_PER_JOB_CAP = 500;
 
 export type CreateImportJobResult = { jobId: string };
 
@@ -54,7 +50,8 @@ export async function createImportJob(
         filename: params.filename,
         source: params.source,
         market: params.market,
-        total_rows: params.rows.length,
+        total_rows: params.totalRows,
+        storage_path: params.storagePath,
         user_id: userId,
       })
       .select("id, org_id")
@@ -97,16 +94,17 @@ export async function createImportJob(
       .insert({
         type: "csv_import",
         status: "queued",
-        total_items: params.rows.length,
+        total_items: params.totalRows,
         related_import_id: importRow.id,
         created_by: userId,
         title: `Import ${params.filename}`,
-        description: `${params.source} → ${params.market}: ${params.rows.length} rows`,
+        description: `${params.source} → ${params.market}: ${params.totalRows} rows`,
         input_params: {
           filename: params.filename,
           source: params.source,
           market: params.market,
           mapping: params.mapping as Record<string, string | null>,
+          storagePath: params.storagePath,
         },
       })
       .select("id")
@@ -122,114 +120,42 @@ export async function createImportJob(
       };
     }
 
-    // Return the jobId immediately; run ingestion in the background so the
-    // client can subscribe to `jobs` via Realtime and watch progress fill
-    // live. `after()` keeps the Node process alive until the task finishes.
-    // The supabase client instance captured above carries its own cookie
-    // state, so it stays valid after the response is flushed.
+    // Kick off the workflow runner. start() returns immediately — the
+    // workflow's first step picks up where we leave off here. Wrapped in
+    // `after()` so the action's HTTP response goes out before the start
+    // call's network I/O completes; if `start()` itself throws, we still
+    // surface the jobId to the wizard (the workflow can be re-triggered
+    // from /jobs in the worst case).
     after(async () => {
       try {
-        await runIngestion(supabase, {
-          jobId: jobRow.id,
-          csvImportId: importRow.id,
-          source: params.source,
-          market: params.market,
-          mapping: params.mapping,
-          rows: params.rows,
-          listId,
-          userId,
-        });
+        await start(csvImportWorkflow, [
+          {
+            jobId: jobRow.id,
+            csvImportId: importRow.id,
+            storagePath: params.storagePath,
+            source: params.source,
+            market: params.market,
+            mapping: params.mapping,
+            listId,
+            userId,
+          },
+        ]);
       } catch (e) {
         reportError(e, {
-          tags: { surface: "create_import_job_after" },
+          tags: { surface: "create_import_job_workflow_start" },
           extra: { jobId: jobRow.id },
         });
         await supabase
           .from("jobs")
           .update({
             status: "failed",
-            error_class: "database",
-            error_message: e instanceof Error ? e.message : String(e),
+            error_class: "configuration",
+            error_message:
+              "Workflow runner failed to start. " +
+              (e instanceof Error ? e.message : String(e)),
             completed_at: new Date().toISOString(),
           })
           .eq("id", jobRow.id);
-        return;
-      }
-
-      // Auto-trigger CASS enrichment for every property that was newly
-      // inserted by this import (duplicates already carry prior CASS state,
-      // so we skip them). Failures inside CASS are isolated — they update
-      // the child job's status without touching the parent import.
-      try {
-        const { data: items } = await supabase
-          .from("job_items")
-          .select("property_id")
-          .eq("job_id", jobRow.id)
-          .eq("status", "success")
-          .not("property_id", "is", null);
-
-        const propertyIds = (items ?? [])
-          .map((r) => r.property_id)
-          .filter((id): id is string => typeof id === "string");
-
-        if (propertyIds.length === 0) return;
-
-        const cap = getAutotriggerCap();
-        const autoStart = propertyIds.length <= cap;
-        const childId = await createCassChildJob(supabase, {
-          parentJobId: jobRow.id,
-          relatedImportId: importRow.id,
-          createdBy: userId,
-          propertyIds,
-          autoStart,
-          blockedReason: autoStart
-            ? undefined
-            : `${propertyIds.length} items exceeds CASS_AUTOTRIGGER_MAX_ITEMS=${cap}`,
-        });
-
-        if (autoStart) {
-          await runCassEnrichment(supabase, { jobId: childId, propertyIds });
-        }
-      } catch (e) {
-        reportError(e, {
-          tags: { surface: "create_import_job_after_cass" },
-          extra: { jobId: jobRow.id },
-        });
-        // Parent import is already completed — don't flip its status.
-        // Any CASS-side failures are reflected on the child job row
-        // (or just absent if we couldn't create one).
-      }
-
-      // Surface C: opt-in skip-trace request after CASS. Only fires when
-      // the importer ticked the wizard checkbox. Honors the per-job cap
-      // (refuse silently if over — the wizard already disables the
-      // checkbox in that case, so this is defense in depth).
-      if (params.requestSkipTrace) {
-        try {
-          const { data: stItems } = await supabase
-            .from("job_items")
-            .select("property_id")
-            .eq("job_id", jobRow.id)
-            .eq("status", "success")
-            .not("property_id", "is", null);
-
-          const stPropertyIds = (stItems ?? [])
-            .map((r) => r.property_id)
-            .filter((id): id is string => typeof id === "string")
-            .slice(0, SKIP_TRACE_PER_JOB_CAP);
-
-          if (stPropertyIds.length > 0) {
-            // requestSkipTrace handles the admin/VA branching and
-            // notifications. We don't surface the result back to the
-            // wizard — the user gets a separate notification on /jobs.
-            await requestSkipTrace(stPropertyIds);
-          }
-        } catch (e) {
-          reportError(e, {
-            tags: { surface: "create_import_job_after_skip_trace" },
-            extra: { jobId: jobRow.id },
-          });
-        }
       }
     });
 

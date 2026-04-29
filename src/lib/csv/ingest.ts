@@ -36,6 +36,36 @@ export type IngestSummary = {
   errors: { rowIndex: number; message: string }[];
 };
 
+/**
+ * Per-chunk parameters used by the workflow runner. The workflow body loops
+ * `processIngestChunk()` calls in fixed-size offsets so each invocation
+ * stays well under the serverless function timeout. Auto-tags are resolved
+ * once in `prepareIngestion()` and threaded through every chunk so we don't
+ * re-resolve them per row.
+ */
+export type ProcessChunkParams = {
+  jobId: string;
+  csvImportId: string;
+  source: string;
+  market: string;
+  mapping: Mapping;
+  /** The rows for THIS chunk only. Caller is responsible for slicing. */
+  rows: RowData[];
+  /** The 0-based offset of `rows[0]` within the full CSV — used for progress
+   *  reporting and the `rowIndex` in error samples. */
+  offset: number;
+  autoTagIds: string[];
+  listId?: string | null;
+  userId?: string | null;
+};
+
+export type ChunkResult = {
+  succeeded: number;
+  failed: number;
+  skipped: number;
+  errors: { rowIndex: number; message: string }[];
+};
+
 const PROGRESS_UPDATE_INTERVAL = 10;
 const ERROR_SAMPLE_SIZE = 20;
 
@@ -54,34 +84,110 @@ const VENDOR_DEFAULT_SOURCE: Record<string, PropertyInsert["source"]> = {
   generic: "other",
 };
 
+/**
+ * Runs the full ingestion in one call. Backward-compatible wrapper for
+ * call sites (and integration tests) that haven't moved to the chunked
+ * workflow runner yet. New callers should use the workflow at
+ * `src/workflows/csv-import.ts`, which composes prepare → loop
+ * processIngestChunk → finalize directly so each step stays under the
+ * serverless function timeout.
+ */
 export async function runIngestion(
   supabase: SupabaseClient<Database>,
   params: IngestParams,
 ): Promise<IngestSummary> {
+  const { autoTagIds } = await prepareIngestion(supabase, {
+    jobId: params.jobId,
+    totalRows: params.rows.length,
+    source: params.source,
+  });
+
+  const chunk = await processIngestChunk(supabase, {
+    jobId: params.jobId,
+    csvImportId: params.csvImportId,
+    source: params.source,
+    market: params.market,
+    mapping: params.mapping,
+    rows: params.rows,
+    offset: 0,
+    autoTagIds,
+    listId: params.listId ?? null,
+    userId: params.userId ?? null,
+  });
+
+  await finalizeIngestion(supabase, {
+    jobId: params.jobId,
+    csvImportId: params.csvImportId,
+    totalRows: params.rows.length,
+    succeeded: chunk.succeeded,
+    failed: chunk.failed,
+    skipped: chunk.skipped,
+    errors: chunk.errors,
+  });
+
+  return {
+    succeeded: chunk.succeeded,
+    failed: chunk.failed,
+    skipped: chunk.skipped,
+    errors: chunk.errors,
+  };
+}
+
+/**
+ * One-time setup before any chunk runs. Sets the job to running, stamps
+ * total_items + started_at, and resolves the two auto-applied tag ids
+ * (source:vendor and uploaded:YYYY-MM) so the per-row loop doesn't have
+ * to re-resolve them on every chunk.
+ */
+export async function prepareIngestion(
+  supabase: SupabaseClient<Database>,
+  params: { jobId: string; totalRows: number; source: string },
+): Promise<{ autoTagIds: string[] }> {
   await supabase
     .from("jobs")
     .update({
       status: "running",
       started_at: new Date().toISOString(),
-      total_items: params.rows.length,
+      total_items: params.totalRows,
       worker_heartbeat_at: new Date().toISOString(),
     })
     .eq("id", params.jobId);
 
-  // Resolve the two auto-applied tag ids ONCE per import instead of
-  // per-row. Source is lowercase of the wizard's vendor selection
-  // ("source:dealmachine"); uploaded is the current month rounded
-  // ("uploaded:2026-04"). Both get `source='import'` in property_tags.
   const autoTagIds = await resolveAutoTagIds(supabase, params.source);
+  return { autoTagIds };
+}
 
+/**
+ * Process one slice of pre-parsed CSV rows. Designed to run inside a
+ * Workflow DevKit "use step" so it gets retried on transient failure and
+ * its result is persisted for replay. The caller (the workflow body)
+ * picks chunk size based on per-row latency vs the function timeout —
+ * 250 rows fits comfortably under Vercel Pro's 5-minute cap with
+ * generous headroom even on slow CASS lookups.
+ *
+ * Pure function of (params): no global state, no auto-tag resolution
+ * (caller threads in `autoTagIds`), no jobs.status mutation (the workflow
+ * sets running/completed/partial/failed at the boundaries). The only
+ * job-row writes are progress + heartbeat updates so the wizard's
+ * Realtime subscription stays live throughout.
+ *
+ * `errors` is a sample, not the full list — caller appends to its
+ * accumulator and trims to ERROR_SAMPLE_SIZE before writing the final
+ * `jobs.result_summary`.
+ */
+export async function processIngestChunk(
+  supabase: SupabaseClient<Database>,
+  params: ProcessChunkParams,
+): Promise<ChunkResult> {
   let succeeded = 0;
   let failed = 0;
   let skipped = 0;
   const errors: { rowIndex: number; message: string }[] = [];
 
-  for (let i = 0; i < params.rows.length; i++) {
-    const row = params.rows[i];
-    const validated = validateRow(row, params.mapping, i);
+  for (let localIndex = 0; localIndex < params.rows.length; localIndex++) {
+    const absoluteIndex = params.offset + localIndex;
+    const row = params.rows[localIndex];
+    const validated = validateRow(row, params.mapping, absoluteIndex);
 
     // Empty row — skip silently
     if (Object.keys(validated.normalized).length === 0) {
@@ -100,7 +206,7 @@ export async function runIngestion(
       });
       failed++;
       if (errors.length < ERROR_SAMPLE_SIZE)
-        errors.push({ rowIndex: i, message: msg });
+        errors.push({ rowIndex: absoluteIndex, message: msg });
       continue;
     }
 
@@ -125,15 +231,10 @@ export async function runIngestion(
         });
       }
 
-      // Auto-apply source + uploaded tags. Strict journey-marker model —
-      // these record WHAT HAPPENED to the record (which vendor shipped
-      // the data, which month it landed), not state of the property.
+      // Auto-apply source + uploaded tags (resolved once in prepareIngestion).
       // Same dedup semantics as list stacking: re-importing a duplicate
-      // refreshes the last-touched timestamp via ON CONFLICT DO NOTHING
-      // (the applied_at on the existing row stays first-touched; a
-      // second tag from a different month creates a SECOND membership,
-      // so re-imports correctly accumulate month-stamps over time).
-      for (const tagId of autoTagIds) {
+      // refreshes the last-touched timestamp via ON CONFLICT DO NOTHING.
+      for (const tagId of params.autoTagIds) {
         await supabase.from("property_tags").upsert(
           {
             property_id: result.propertyId,
@@ -162,30 +263,49 @@ export async function runIngestion(
       });
       failed++;
       if (errors.length < ERROR_SAMPLE_SIZE)
-        errors.push({ rowIndex: i, message });
+        errors.push({ rowIndex: absoluteIndex, message });
     }
 
-    // Progress update every N rows (and on the final row)
-    if (
-      (i + 1) % PROGRESS_UPDATE_INTERVAL === 0 ||
-      i === params.rows.length - 1
-    ) {
+    // Progress update every N rows AND on the chunk's final row, so the
+    // wizard sees movement even if a chunk happens to be small.
+    const isLastInChunk = localIndex === params.rows.length - 1;
+    if ((absoluteIndex + 1) % PROGRESS_UPDATE_INTERVAL === 0 || isLastInChunk) {
       await supabase
         .from("jobs")
         .update({
-          processed_items: i + 1,
-          succeeded_items: succeeded,
-          failed_items: failed,
+          processed_items: absoluteIndex + 1,
           worker_heartbeat_at: new Date().toISOString(),
         })
         .eq("id", params.jobId);
     }
   }
 
+  return { succeeded, failed, skipped, errors };
+}
+
+/**
+ * Mark the job + csv_imports as terminal. Called once after the last
+ * chunk completes (or, in the legacy `runIngestion` path, immediately
+ * after the single chunk). Status is `completed` when nothing failed,
+ * `partial` when at least one row succeeded but some failed, `failed`
+ * when zero succeeded.
+ */
+export async function finalizeIngestion(
+  supabase: SupabaseClient<Database>,
+  params: {
+    jobId: string;
+    csvImportId: string;
+    totalRows: number;
+    succeeded: number;
+    failed: number;
+    skipped: number;
+    errors: { rowIndex: number; message: string }[];
+  },
+): Promise<void> {
   const status: Database["public"]["Tables"]["jobs"]["Update"]["status"] =
-    failed === 0 && params.rows.length > 0
+    params.failed === 0 && params.totalRows > 0
       ? "completed"
-      : succeeded > 0
+      : params.succeeded > 0
         ? "partial"
         : "failed";
 
@@ -193,15 +313,15 @@ export async function runIngestion(
     .from("jobs")
     .update({
       status,
-      processed_items: params.rows.length,
-      succeeded_items: succeeded,
-      failed_items: failed,
+      processed_items: params.totalRows,
+      succeeded_items: params.succeeded,
+      failed_items: params.failed,
       completed_at: new Date().toISOString(),
       result_summary: {
-        succeeded,
-        failed,
-        skipped,
-        errors: errors.slice(0, ERROR_SAMPLE_SIZE),
+        succeeded: params.succeeded,
+        failed: params.failed,
+        skipped: params.skipped,
+        errors: params.errors.slice(0, ERROR_SAMPLE_SIZE),
       },
     })
     .eq("id", params.jobId);
@@ -209,14 +329,12 @@ export async function runIngestion(
   await supabase
     .from("csv_imports")
     .update({
-      inserted_properties: succeeded,
-      skipped_duplicates: skipped,
-      failed_rows: failed,
-      total_rows: params.rows.length,
+      inserted_properties: params.succeeded,
+      skipped_duplicates: params.skipped,
+      failed_rows: params.failed,
+      total_rows: params.totalRows,
     })
     .eq("id", params.csvImportId);
-
-  return { succeeded, failed, skipped, errors };
 }
 
 // ---------- per-row ingestion ----------

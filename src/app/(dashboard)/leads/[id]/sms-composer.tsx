@@ -200,7 +200,7 @@ export function SmsComposer({
           >
             {loadingFroms && <option value="">Loading numbers…</option>}
             {!loadingFroms && fromOptions.length === 0 && (
-              <option value="">No numbers found — check Dialpad config</option>
+              <option value="">No numbers found — check SMS provider config</option>
             )}
             {fromOptions.map((o) => (
               <option key={o.number} value={o.number}>
