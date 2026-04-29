@@ -52,7 +52,17 @@ export class MockSkipTraceProvider implements SkipTraceProvider {
     const inputs = MockSkipTraceProvider.queues.get(queueId);
     if (!inputs) return null;
     MockSkipTraceProvider.queues.delete(queueId);
-    return inputs.map(synthesize);
+    // Batch results echo the input address (mirrors Tracerfy's row
+    // shape) so the finalize step can match results back by address
+    // even when external_id round-trip is missing.
+    return inputs.map((input) => ({
+      ...synthesize(input),
+      matchedAddress: {
+        address: input.address,
+        city: input.city,
+        state: input.state,
+      },
+    }));
   }
 
   // eslint-disable-next-line @typescript-eslint/require-await

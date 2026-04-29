@@ -72,8 +72,19 @@ export type SkipTraceMailingAddress = {
 };
 
 export type SkipTraceResult = {
-  /** Round-tripped from input. */
+  /** Round-tripped from input — for sync lookups and cache hits this is
+   *  authoritative. For async batches (Tracerfy especially), the
+   *  provider does NOT reliably round-trip `external_id`, so callers
+   *  must match by `matchedAddress` instead. May be `""` for batch
+   *  rows where no external_id came back. */
   propertyId: string;
+  /** Echo of the property address the provider matched against. The
+   *  finalize step uses this to fan a single result out to every
+   *  property in our system that shared the same input address —
+   *  necessary because Tracerfy silently dedupes batches by address
+   *  and doesn't return `external_id` per row. Sync lookups omit this
+   *  (propertyId is reliable in that path). */
+  matchedAddress?: { address: string; city: string; state: string } | null;
   /** True if the provider returned ≥1 person with at least a phone or email. */
   hit: boolean;
   persons: SkipTracePerson[];

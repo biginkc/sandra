@@ -5,7 +5,12 @@ import { reportError } from "@/lib/errors/report";
 import { dispatchJobCompleted } from "@/lib/notifications/dispatch";
 import type { Database, Json } from "@/lib/supabase/types";
 
-import { normalizeAddress, readCache, writeCache } from "./cache";
+import {
+  normalizeAddress,
+  normalizeAddressForMatch,
+  readCache,
+  writeCache,
+} from "./cache";
 import { persistSkipTraceResult, type PersistOutcome } from "./persist-result";
 import { getSkipTraceProvider } from "./registry";
 import type { SkipTraceInput, SkipTraceResult } from "./types";
@@ -127,11 +132,18 @@ export async function runSkipTraceEnrichment(
     const p = propsById.get(propertyId);
     if (!p) {
       summary.failed++;
-      await insertJobItem(supabase, params.jobId, propertyId, {
-        status: "error",
-        error_class: "database",
-        error_message: "Property not found",
-      });
+      try {
+        await insertJobItem(supabase, params.jobId, propertyId, {
+          status: "error",
+          error_class: "database",
+          error_message: "Property not found",
+        });
+      } catch (e) {
+        reportError(e, {
+          tags: { surface: "skip_trace_property_not_found_item" },
+          extra: { jobId: params.jobId, propertyId },
+        });
+      }
       continue;
     }
     const addressNormalized = normalizeAddress({
@@ -198,23 +210,61 @@ export async function runSkipTraceEnrichment(
       summary.failed++;
       const msg = e instanceof Error ? e.message : String(e);
       const klass = e instanceof ProviderError ? "provider" : "database";
-      await insertJobItem(supabase, params.jobId, misses[0].propertyId, {
-        status: "error",
-        error_class: klass,
-        error_message: msg,
-      });
       reportError(e, {
         tags: { surface: "skip_trace_lookup_single" },
         extra: { propertyId: misses[0].propertyId, jobId: params.jobId },
       });
+      try {
+        await insertJobItem(supabase, params.jobId, misses[0].propertyId, {
+          status: "error",
+          error_class: klass,
+          error_message: msg,
+        });
+      } catch (insertErr) {
+        reportError(insertErr, {
+          tags: { surface: "skip_trace_lookup_single_item" },
+          extra: { jobId: params.jobId, propertyId: misses[0].propertyId },
+        });
+      }
     }
     await finalizeJob(supabase, params.jobId, summary);
     return summary;
   }
 
-  // misses.length >= 2 → async batch
+  // misses.length >= 2 → async batch.
+  //
+  // Tracerfy silently dedupes batches by address ("Cleans and
+  // de-duplicates rows, then enqueues processing"), and the result
+  // shape doesn't reliably round-trip our `external_id`. So before
+  // submitting, group misses by a normalized address key, send one
+  // input per unique address, and persist the
+  // `addressKey -> propertyIds[]` map onto the job. `finalize` reads
+  // it back to fan each result row out to every property at that
+  // address — covering both Tracerfy's dedup AND the legitimate case
+  // where two of our properties share the same physical address.
+  const addressToPropertyIds = new Map<string, string[]>();
+  const uniqueByAddress: SkipTraceInput[] = [];
+  for (const miss of misses) {
+    const key = normalizeAddressForMatch({
+      address: miss.address,
+      city: miss.city,
+      state: miss.state,
+    });
+    const existing = addressToPropertyIds.get(key);
+    if (existing) {
+      existing.push(miss.propertyId);
+    } else {
+      addressToPropertyIds.set(key, [miss.propertyId]);
+      uniqueByAddress.push(miss);
+    }
+  }
+  const mapAsObject: Record<string, string[]> = {};
+  for (const [key, ids] of addressToPropertyIds) {
+    mapAsObject[key] = ids;
+  }
+
   try {
-    const ticket = await provider.submitBatch(misses);
+    const ticket = await provider.submitBatch(uniqueByAddress);
     await supabase
       .from("jobs")
       .update({
@@ -225,6 +275,9 @@ export async function runSkipTraceEnrichment(
           batch_pending: true,
           estimated_wait_seconds: ticket.estimatedWaitSeconds,
           credits_per_lead: ticket.creditsPerLead,
+          // The fan-out ledger. Keyed by `address|city|state` (lower).
+          address_to_property_ids: mapAsObject,
+          unique_addresses_submitted: uniqueByAddress.length,
         } as unknown as Json,
       })
       .eq("id", params.jobId);
@@ -234,7 +287,7 @@ export async function runSkipTraceEnrichment(
     await markJobFailed(supabase, params.jobId, `submitBatch failed: ${msg}`);
     reportError(e, {
       tags: { surface: "skip_trace_submit_batch" },
-      extra: { jobId: params.jobId, count: misses.length },
+      extra: { jobId: params.jobId, count: uniqueByAddress.length },
     });
     return summary;
   }
@@ -244,6 +297,20 @@ export async function runSkipTraceEnrichment(
  * Finalize a job whose batch results just arrived (via webhook or
  * polling). Iterates each result, persists, writes cache, updates job
  * progress, transitions to terminal status, dispatches notification.
+ *
+ * Match strategy:
+ *   1. If `result_summary.address_to_property_ids` was set at submit
+ *      time, match each result row by `matchedAddress` and fan it out
+ *      to every property in that bucket. This is the production path
+ *      for Tracerfy batches — necessary because Tracerfy dedupes
+ *      input by address and doesn't reliably round-trip external_id.
+ *   2. Fall back to `result.propertyId` matching when no map is
+ *      present (cached hits, sync flows, legacy jobs).
+ *
+ * After applying results, any property whose submitted address never
+ * came back gets a per-property error item so the UI surfaces the
+ * gap (rather than the job sitting at "completed" with mysterious
+ * count gaps).
  */
 export async function finalizeSkipTraceFromBatch(
   supabase: SupabaseClient<Database>,
@@ -258,10 +325,24 @@ export async function finalizeSkipTraceFromBatch(
 
   const prior = (jobRow?.result_summary ?? {}) as Partial<SkipTraceJobSummary> & {
     batch_pending?: boolean;
+    address_to_property_ids?: Record<string, string[]>;
   };
 
+  const addressMap: Record<string, string[]> | null =
+    prior.address_to_property_ids && typeof prior.address_to_property_ids === "object"
+      ? prior.address_to_property_ids
+      : null;
+
+  // Total stays at "what we submitted" — the map's distinct property
+  // count if available, otherwise prior.total or the result count as a
+  // last-ditch fallback. Resist using `params.results.length` directly
+  // because Tracerfy may collapse N inputs into <N rows.
+  const totalFromMap = addressMap
+    ? Object.values(addressMap).reduce((n, arr) => n + arr.length, 0)
+    : null;
+
   const summary: SkipTraceJobSummary = {
-    total: prior.total ?? params.results.length,
+    total: prior.total ?? totalFromMap ?? params.results.length,
     matched: prior.matched ?? 0,
     no_match: prior.no_match ?? 0,
     failed: prior.failed ?? 0,
@@ -274,30 +355,167 @@ export async function finalizeSkipTraceFromBatch(
   const provider = getSkipTraceProvider();
   const providerId = provider?.providerId ?? "tracerfy";
 
-  // We need property addresses for cache keys.
-  const propertyIds = params.results.map((r) => r.propertyId).filter(Boolean);
-  const { data: props } = await supabase
-    .from("properties")
-    .select("id, address, city, state, zip")
-    .in("id", propertyIds);
-  const propsById = new Map((props ?? []).map((p) => [p.id, p]));
+  // ------------------------------------------------------------------
+  // Build the fan-out plan. For each result row:
+  //   - figure out which propertyIds it applies to
+  //   - track which mapped propertyIds we satisfied so we can write
+  //     error items for the unsatisfied remainder afterwards
+  // ------------------------------------------------------------------
+  const satisfiedPropertyIds = new Set<string>();
+  const fanOut: Array<{ propertyId: string; result: SkipTraceResult }> = [];
+  const unmatchedResults: SkipTraceResult[] = [];
 
   for (const result of params.results) {
-    await persistAndRecord(supabase, params.jobId, result, summary, /*fromCache*/ false);
-    const p = propsById.get(result.propertyId);
-    if (p) {
-      await writeCache(
-        supabase,
-        providerId,
-        normalizeAddress({
-          address: p.address,
-          city: p.city,
-          state: p.state,
-          zip: p.zip,
-        }),
-        result,
-      );
+    let bucket: string[] | null = null;
+    if (addressMap) {
+      const m = result.matchedAddress;
+      const key = m
+        ? normalizeAddressForMatch({
+            address: m.address,
+            city: m.city,
+            state: m.state,
+          })
+        : null;
+      if (key && addressMap[key]) {
+        bucket = addressMap[key];
+      } else if (result.propertyId) {
+        // Compat: row didn't echo an address (older webhook payloads,
+        // hand-built test fixtures), but its propertyId IS in one of
+        // our submitted buckets. Trust the propertyId in that case.
+        for (const ids of Object.values(addressMap)) {
+          if (ids.includes(result.propertyId)) {
+            bucket = [result.propertyId];
+            break;
+          }
+        }
+      }
+    } else if (result.propertyId) {
+      // No map at all → legacy / sync / cache path. propertyId is
+      // authoritative.
+      bucket = [result.propertyId];
     }
+
+    if (!bucket || bucket.length === 0) {
+      unmatchedResults.push(result);
+      continue;
+    }
+
+    for (const propertyId of bucket) {
+      satisfiedPropertyIds.add(propertyId);
+      fanOut.push({
+        propertyId,
+        result: { ...result, propertyId },
+      });
+    }
+  }
+
+  // Property addresses are needed both for cache writes and for error
+  // items on missing-from-batch properties. One query covers all.
+  const allRelatedPropertyIds = new Set<string>();
+  for (const { propertyId } of fanOut) allRelatedPropertyIds.add(propertyId);
+  if (addressMap) {
+    for (const ids of Object.values(addressMap)) {
+      for (const id of ids) allRelatedPropertyIds.add(id);
+    }
+  }
+  const { data: props } =
+    allRelatedPropertyIds.size > 0
+      ? await supabase
+          .from("properties")
+          .select("id, address, city, state, zip")
+          .in("id", Array.from(allRelatedPropertyIds))
+      : { data: [] };
+  const propsById = new Map((props ?? []).map((p) => [p.id, p]));
+
+  // ------------------------------------------------------------------
+  // Apply results. Wrap each persist in try/catch so one bad row can't
+  // break the rest of the batch.
+  // ------------------------------------------------------------------
+  for (const { propertyId, result } of fanOut) {
+    try {
+      await persistAndRecord(
+        supabase,
+        params.jobId,
+        result,
+        summary,
+        /*fromCache*/ false,
+      );
+    } catch (e) {
+      // persistAndRecord already swallows persist-time errors into
+      // job_items + summary. This catches anything insertJobItem itself
+      // throws (e.g. transient DB error). Log + keep going.
+      reportError(e, {
+        tags: { surface: "skip_trace_finalize_per_row" },
+        extra: { jobId: params.jobId, propertyId },
+      });
+    }
+
+    const p = propsById.get(propertyId);
+    if (p) {
+      try {
+        await writeCache(
+          supabase,
+          providerId,
+          normalizeAddress({
+            address: p.address,
+            city: p.city,
+            state: p.state,
+            zip: p.zip,
+          }),
+          result,
+        );
+      } catch (e) {
+        // Cache failure is non-fatal — log and continue.
+        reportError(e, {
+          tags: { surface: "skip_trace_finalize_cache_write" },
+          extra: { jobId: params.jobId, propertyId },
+        });
+      }
+    }
+  }
+
+  // ------------------------------------------------------------------
+  // Properties that were submitted but never came back: write an
+  // error item per property so the UI doesn't go silent on the gap.
+  // ------------------------------------------------------------------
+  if (addressMap) {
+    const missing: string[] = [];
+    for (const ids of Object.values(addressMap)) {
+      for (const id of ids) {
+        if (!satisfiedPropertyIds.has(id)) missing.push(id);
+      }
+    }
+    for (const propertyId of missing) {
+      summary.failed++;
+      try {
+        await insertJobItem(supabase, params.jobId, propertyId, {
+          status: "error",
+          error_class: "provider",
+          error_message:
+            "Provider did not return a result row for this property's address.",
+        });
+      } catch (e) {
+        reportError(e, {
+          tags: { surface: "skip_trace_finalize_missing_item" },
+          extra: { jobId: params.jobId, propertyId },
+        });
+      }
+    }
+  }
+
+  // Result rows whose address didn't match any submitted bucket: log
+  // them so we don't lose visibility, but don't fail the job — these
+  // are provider-side bugs (rare) and we have no property to attach
+  // them to.
+  if (unmatchedResults.length > 0) {
+    reportError(new Error("Skip-trace batch returned unmatched result rows"), {
+      tags: { surface: "skip_trace_finalize_unmatched" },
+      extra: {
+        jobId: params.jobId,
+        count: unmatchedResults.length,
+        sample: unmatchedResults.slice(0, 3).map((r) => r.matchedAddress),
+      },
+    });
   }
 
   await finalizeJob(supabase, params.jobId, summary);
@@ -313,20 +531,37 @@ async function persistAndRecord(
   summary: SkipTraceJobSummary,
   fromCache: boolean,
 ): Promise<void> {
+  // Local helper so a transient DB hiccup writing one job_item row
+  // doesn't kill the whole loop. We still update `summary` first so
+  // counts stay consistent with what the user expects to see — the
+  // missing audit row is a known degradation we accept and log.
+  const tryInsert = async (
+    fields: Parameters<typeof insertJobItem>[3],
+  ): Promise<void> => {
+    try {
+      await insertJobItem(supabase, jobId, result.propertyId, fields);
+    } catch (e) {
+      reportError(e, {
+        tags: { surface: "skip_trace_persist_record_insert" },
+        extra: { jobId, propertyId: result.propertyId, status: fields.status },
+      });
+    }
+  };
+
   let outcome: PersistOutcome;
   try {
     outcome = await persistSkipTraceResult(supabase, result);
   } catch (e) {
     summary.failed++;
     const msg = e instanceof Error ? e.message : String(e);
-    await insertJobItem(supabase, jobId, result.propertyId, {
-      status: "error",
-      error_class: "database",
-      error_message: msg,
-    });
     reportError(e, {
       tags: { surface: "skip_trace_persist" },
       extra: { jobId, propertyId: result.propertyId },
+    });
+    await tryInsert({
+      status: "error",
+      error_class: "database",
+      error_message: msg,
     });
     return;
   }
@@ -336,7 +571,7 @@ async function persistAndRecord(
 
   if (outcome.status === "matched") {
     summary.matched++;
-    await insertJobItem(supabase, jobId, result.propertyId, {
+    await tryInsert({
       status: "success",
       result: {
         from_cache: fromCache,
@@ -347,7 +582,7 @@ async function persistAndRecord(
     });
   } else if (outcome.status === "no_match") {
     summary.no_match++;
-    await insertJobItem(supabase, jobId, result.propertyId, {
+    await tryInsert({
       status: "success",
       result: {
         from_cache: fromCache,
@@ -357,7 +592,7 @@ async function persistAndRecord(
     });
   } else {
     summary.failed++;
-    await insertJobItem(supabase, jobId, result.propertyId, {
+    await tryInsert({
       status: "error",
       error_class: "database",
       error_message: "Property not found at persist time",
@@ -365,6 +600,14 @@ async function persistAndRecord(
   }
 }
 
+/**
+ * Insert a row into `job_items` for a single property's outcome.
+ *
+ * Throws on Supabase errors so callers can surface (and the
+ * call-site try/catch can swallow per-row failures without taking
+ * down the whole batch). Pre-PR this swallowed errors silently,
+ * which masked a real bug where 21 properties had no items at all.
+ */
 async function insertJobItem(
   supabase: SupabaseClient<Database>,
   jobId: string,
@@ -376,7 +619,7 @@ async function insertJobItem(
     result?: Record<string, unknown>;
   },
 ): Promise<void> {
-  await supabase.from("job_items").insert({
+  const { error } = await supabase.from("job_items").insert({
     job_id: jobId,
     property_id: propertyId,
     status: fields.status,
@@ -384,6 +627,13 @@ async function insertJobItem(
     error_message: fields.error_message ?? null,
     output_payload: (fields.result ?? null) as unknown as Json,
   });
+  if (error) {
+    reportError(error, {
+      tags: { surface: "skip_trace_insert_job_item" },
+      extra: { jobId, propertyId, status: fields.status },
+    });
+    throw new Error(`insert job_item failed: ${error.message}`);
+  }
 }
 
 async function finalizeJob(

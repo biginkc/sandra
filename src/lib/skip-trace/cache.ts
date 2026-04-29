@@ -27,6 +27,23 @@ export function normalizeAddress(parts: {
     .join("|");
 }
 
+/**
+ * Address key used to match Tracerfy batch results back to our
+ * properties. Deliberately omits zip — Tracerfy's batch response
+ * returns address/city/state only, so submit-time and finalize-time
+ * keys must agree on the same shape.
+ */
+export function normalizeAddressForMatch(parts: {
+  address: string;
+  city?: string | null;
+  state?: string | null;
+}): string {
+  return [parts.address, parts.city, parts.state]
+    .filter((v): v is string => !!v)
+    .map((v) => v.trim().toLowerCase())
+    .join("|");
+}
+
 export type CachedSkipTrace = {
   result: SkipTraceResult;
   /** When the cache row was written. Caller can use this for "skip-traced N

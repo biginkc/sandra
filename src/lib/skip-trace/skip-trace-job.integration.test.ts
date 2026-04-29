@@ -335,4 +335,230 @@ describe("runSkipTraceEnrichment (integration, mock provider)", () => {
     expect(contact!.phone_2).toBeNull();
     expect(contact!.phone_3).toBeNull();
   });
+
+  // ---------------------------------------------------------------
+  // Address-matching: Tracerfy silently dedupes batch input by
+  // address and doesn't reliably round-trip our `external_id`. The
+  // runner builds an `address -> propertyIds[]` ledger at submit
+  // time and finalize fans each result row out to every property in
+  // its bucket. Without this, ~21/50 inputs in production silently
+  // dropped on a real D4D import.
+  // ---------------------------------------------------------------
+  describe("address fan-out (multi-property + missing rows)", () => {
+    it("two properties at the same address: submit dedups, both finalize from one result row", async () => {
+      const a = await seedProperty({ address: "1 Shared Address Ln" });
+      const b = await seedProperty({ address: "1 Shared Address Ln" });
+      const ids = [a.propertyId, b.propertyId];
+      const jobId = await createPendingJob(ids);
+
+      // Async path → submitBatch → map stored on the job.
+      const out = await runSkipTraceEnrichment(supabase, {
+        jobId,
+        propertyIds: ids,
+      });
+      expect("pending" in out).toBe(true);
+
+      // Verify the job stored a single submission for two properties.
+      const { data: jobAfterSubmit } = await supabase
+        .from("jobs")
+        .select("provider_run_id, result_summary")
+        .eq("id", jobId)
+        .single();
+      const submitSummary = jobAfterSubmit!.result_summary as {
+        unique_addresses_submitted?: number;
+        address_to_property_ids?: Record<string, string[]>;
+      } | null;
+      expect(submitSummary?.unique_addresses_submitted).toBe(1);
+      const buckets = Object.values(submitSummary?.address_to_property_ids ?? {});
+      expect(buckets).toHaveLength(1);
+      expect(buckets[0]).toEqual(expect.arrayContaining(ids));
+
+      // Drive the mock provider's pollBatch the way the cron sweep
+      // would: pull the queue we already submitted, then finalize.
+      // The mock echoes the input address as `matchedAddress`, so
+      // finalize fans the row out to BOTH properties.
+      const provider = new MockSkipTraceProvider();
+      const results = await provider.pollBatch(jobAfterSubmit!.provider_run_id!);
+      expect(results).not.toBeNull();
+      expect(results).toHaveLength(1);
+
+      await finalizeSkipTraceFromBatch(supabase, {
+        jobId,
+        results: results!,
+      });
+
+      // Both properties should now have a homeowner contact populated.
+      const { data: props } = await supabase
+        .from("properties")
+        .select("id, homeowner_contact_id")
+        .in("id", ids);
+      for (const p of props ?? []) {
+        expect(p.homeowner_contact_id).not.toBeNull();
+      }
+
+      const { data: jobRow } = await supabase
+        .from("jobs")
+        .select("status, succeeded_items, failed_items")
+        .eq("id", jobId)
+        .single();
+      expect(jobRow!.status).toBe("completed");
+      // Both properties counted as succeeded — fan-out preserves the
+      // count even though only one result row came back.
+      expect(jobRow!.succeeded_items).toBe(2);
+      expect(jobRow!.failed_items).toBe(0);
+
+      // Per-property job_items should exist for both properties.
+      const { data: items } = await supabase
+        .from("job_items")
+        .select("property_id, status")
+        .eq("job_id", jobId);
+      const itemPropertyIds = (items ?? []).map((i) => i.property_id);
+      expect(itemPropertyIds).toEqual(expect.arrayContaining(ids));
+    });
+
+    it("submitted address whose row never returns: writes per-property error item", async () => {
+      const a = await seedProperty({ address: "10 Returned Ln" });
+      const b = await seedProperty({ address: "20 Missing Ln" });
+      const ids = [a.propertyId, b.propertyId];
+      const jobId = await createPendingJob(ids);
+
+      await runSkipTraceEnrichment(supabase, {
+        jobId,
+        propertyIds: ids,
+      });
+
+      // Finalize with ONLY the result for the first address. The
+      // second one is silently absent from the provider response —
+      // exactly the production failure mode that masked 21 of 50
+      // inputs.
+      await finalizeSkipTraceFromBatch(supabase, {
+        jobId,
+        results: [
+          {
+            propertyId: "",
+            matchedAddress: {
+              address: "10 Returned Ln",
+              city: "Kansas City",
+              state: "MO",
+            },
+            hit: true,
+            persons: [
+              {
+                firstName: "Returned",
+                lastName: "Owner",
+                phones: [
+                  { number: "+18165550141", type: "Mobile", dnc: false, rank: 1 },
+                ],
+                emails: [],
+                isOwner: true,
+              },
+            ],
+            creditsDeducted: 1,
+            raw: {},
+          },
+        ],
+      });
+
+      // First property: success item.
+      const { data: itemsA } = await supabase
+        .from("job_items")
+        .select("status, error_message")
+        .eq("job_id", jobId)
+        .eq("property_id", a.propertyId);
+      expect(itemsA).toHaveLength(1);
+      expect(itemsA![0].status).toBe("success");
+
+      // Second property: error item flagging the provider gap.
+      const { data: itemsB } = await supabase
+        .from("job_items")
+        .select("status, error_class, error_message")
+        .eq("job_id", jobId)
+        .eq("property_id", b.propertyId);
+      expect(itemsB).toHaveLength(1);
+      expect(itemsB![0].status).toBe("error");
+      expect(itemsB![0].error_class).toBe("provider");
+      expect(itemsB![0].error_message).toMatch(/did not return/i);
+
+      const { data: jobRow } = await supabase
+        .from("jobs")
+        .select("status, failed_items, succeeded_items")
+        .eq("id", jobId)
+        .single();
+      expect(jobRow!.failed_items).toBe(1);
+      expect(jobRow!.succeeded_items).toBe(1);
+      // failed > 0 and matched > 0 → partial.
+      expect(jobRow!.status).toBe("partial");
+    });
+
+    it("result row whose address matches none of the submitted buckets is logged but doesn't break the batch", async () => {
+      // Need at least 2 misses to take the async path so submitBatch
+      // fires and the address map is recorded.
+      const a = await seedProperty({ address: "42 Real Ln" });
+      const b = await seedProperty({ address: "43 Real Ln" });
+      const ids = [a.propertyId, b.propertyId];
+      const jobIdMulti = await createPendingJob(ids);
+
+      await runSkipTraceEnrichment(supabase, {
+        jobId: jobIdMulti,
+        propertyIds: ids,
+      });
+
+      // One real match + one wild result with an address we never sent.
+      await finalizeSkipTraceFromBatch(supabase, {
+        jobId: jobIdMulti,
+        results: [
+          {
+            propertyId: "",
+            matchedAddress: {
+              address: "42 Real Ln",
+              city: "Kansas City",
+              state: "MO",
+            },
+            hit: true,
+            persons: [
+              {
+                firstName: "Real",
+                lastName: "Owner",
+                phones: [
+                  { number: "+18165550161", type: "Mobile", dnc: false, rank: 1 },
+                ],
+                emails: [],
+                isOwner: true,
+              },
+            ],
+            creditsDeducted: 1,
+            raw: {},
+          },
+          {
+            propertyId: "",
+            matchedAddress: {
+              address: "999 Wrong Ln",
+              city: "Kansas City",
+              state: "MO",
+            },
+            hit: true,
+            persons: [],
+            creditsDeducted: 1,
+            raw: {},
+          },
+        ],
+      });
+
+      // Job should still finalize without throwing.
+      const { data: jobRow } = await supabase
+        .from("jobs")
+        .select("status")
+        .eq("id", jobIdMulti)
+        .single();
+      expect(["completed", "partial"]).toContain(jobRow!.status);
+
+      // The matched property gets a real success row.
+      const { data: itemsA } = await supabase
+        .from("job_items")
+        .select("status")
+        .eq("job_id", jobIdMulti)
+        .eq("property_id", a.propertyId);
+      expect(itemsA![0].status).toBe("success");
+    });
+  });
 });
