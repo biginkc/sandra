@@ -17,9 +17,134 @@ import {
 // eslint-disable-next-line import/first
 import { runIngestion } from "@/lib/csv/ingest";
 
+// The 20 system-managed lists seeded by migration 031. Tests assert the
+// names round-trip exactly (no migration-time mangling) and the order
+// matches the system-first, then-alphabetical sort rule.
+const SYSTEM_MANAGED_LIST_NAMES = [
+  "Auctions",
+  "Bank Owned",
+  "Bankruptcy",
+  "Cash Buyers",
+  "Divorce",
+  "Failed Listings",
+  "Flippers",
+  "Free & Clear",
+  "High Equity",
+  "Liens",
+  "On Market",
+  "Pre-Foreclosures",
+  "Pre-Probate",
+  "Senior Owners",
+  "Tax Delinquency",
+  "Tired Landlords",
+  "Upside Down",
+  "Vacant",
+  "Vacant Land",
+  "Zombie Properties",
+];
+
 describe("Lists + property_lists stacking (integration)", () => {
   beforeEach(async () => {
     await resetTenantTables(testClient);
+  });
+
+  // --------------------------------------------------------------------------
+  // System-managed lists (migration 031)
+  // --------------------------------------------------------------------------
+  describe("system-managed lists", () => {
+    it("seeds all 20 PropStream-style lists after migration", async () => {
+      const { data, error } = await testClient
+        .from("lists")
+        .select("name, system_managed, archived_at")
+        .eq("system_managed", true)
+        .order("name", { ascending: true });
+      expect(error).toBeNull();
+      const names = (data ?? []).map((r) => r.name);
+      const expected = [...SYSTEM_MANAGED_LIST_NAMES].sort();
+      expect(names).toEqual(expected);
+      // None should ship archived.
+      for (const row of data ?? []) {
+        expect(row.archived_at).toBeNull();
+        expect(row.system_managed).toBe(true);
+      }
+    });
+
+    it("createList defaults system_managed to false on new lists", async () => {
+      const result = await createList({ name: "VA-Created Cohort" });
+      expect(result.ok).toBe(true);
+      if (!result.ok) throw new Error("create failed");
+
+      const { data } = await testClient
+        .from("lists")
+        .select("system_managed")
+        .eq("id", result.data.id)
+        .single();
+      expect(data?.system_managed).toBe(false);
+    });
+
+    it("archiveList rejects with SYSTEM_MANAGED_LIST on a system-managed row", async () => {
+      const { data: vacant } = await testClient
+        .from("lists")
+        .select("id")
+        .eq("name", "Vacant")
+        .eq("system_managed", true)
+        .single();
+      expect(vacant?.id).toBeTruthy();
+
+      const result = await archiveList(vacant!.id);
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.error.code).toBe("SYSTEM_MANAGED_LIST");
+
+      // Row must remain unarchived — defense-in-depth proof.
+      const { data } = await testClient
+        .from("lists")
+        .select("archived_at")
+        .eq("id", vacant!.id)
+        .single();
+      expect(data?.archived_at).toBeNull();
+    });
+
+    it("unarchiveList rejects with SYSTEM_MANAGED_LIST on a system-managed row", async () => {
+      const { data: liens } = await testClient
+        .from("lists")
+        .select("id")
+        .eq("name", "Liens")
+        .eq("system_managed", true)
+        .single();
+      const result = await unarchiveList(liens!.id);
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.error.code).toBe("SYSTEM_MANAGED_LIST");
+    });
+
+    it("list-fetch sort: system-managed first, then alphabetical", async () => {
+      // Seed two non-system lists that bracket the system rows
+      // alphabetically — "Aaa" would sort first if system_managed didn't
+      // pin, "Zzz" would sort last either way. After sort, the 20 system
+      // rows must appear before any non-system row.
+      const aaa = await createList({ name: "Aaa Custom" });
+      const zzz = await createList({ name: "Zzz Custom" });
+      expect(aaa.ok && zzz.ok).toBe(true);
+
+      const { data } = await testClient
+        .from("lists")
+        .select("name, system_managed")
+        .is("archived_at", null)
+        .order("system_managed", { ascending: false })
+        .order("name", { ascending: true });
+
+      const rows = data ?? [];
+      // Find the boundary — first non-system row.
+      const firstNonSystemIdx = rows.findIndex((r) => !r.system_managed);
+      expect(firstNonSystemIdx).toBe(20); // exactly 20 system rows up top
+      // System block is alphabetical.
+      const systemBlock = rows.slice(0, 20).map((r) => r.name);
+      expect(systemBlock).toEqual([...SYSTEM_MANAGED_LIST_NAMES].sort());
+      // Non-system block is alphabetical.
+      const nonSystemBlock = rows.slice(20).map((r) => r.name);
+      expect(nonSystemBlock).toEqual(["Aaa Custom", "Zzz Custom"]);
+    });
   });
 
   // --------------------------------------------------------------------------

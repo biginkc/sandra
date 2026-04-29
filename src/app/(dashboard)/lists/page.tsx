@@ -26,11 +26,18 @@ export default async function ListsPage() {
   // Two queries: all lists in the org, and a count per list. Doing the
   // count in a view/group-by is cleaner than N+1, so we sum property_lists
   // and join back in memory.
+  //
+  // Sort: system-managed first (so the 20 PropStream-style buckets pin to
+  // the top of every picker), then alphabetical by name. VAs will see the
+  // same names in the same order on every page.
   const [listsRes, countsRes] = await Promise.all([
     supabase
       .from("lists")
-      .select("id, name, description, color, archived_at, created_at")
-      .order("created_at", { ascending: false }),
+      .select(
+        "id, name, description, color, archived_at, created_at, system_managed",
+      )
+      .order("system_managed", { ascending: false })
+      .order("name", { ascending: true }),
     supabase.from("property_lists").select("list_id"),
   ]);
 
@@ -101,6 +108,7 @@ function ListTable({
     color: string | null;
     archived_at: string | null;
     created_at: string;
+    system_managed: boolean;
   }[];
   countsByList: Map<string, number>;
   archived: boolean;
@@ -128,20 +136,31 @@ function ListTable({
           {rows.map((r) => (
             <TableRow key={r.id}>
               <TableCell>
-                <Badge
-                  variant="secondary"
-                  style={
-                    r.color
-                      ? {
-                          backgroundColor: `${r.color}22`,
-                          color: r.color,
-                          borderColor: `${r.color}55`,
-                        }
-                      : undefined
-                  }
-                >
-                  {r.name}
-                </Badge>
+                <div className="flex items-center gap-2">
+                  <Badge
+                    variant="secondary"
+                    style={
+                      r.color
+                        ? {
+                            backgroundColor: `${r.color}22`,
+                            color: r.color,
+                            borderColor: `${r.color}55`,
+                          }
+                        : undefined
+                    }
+                  >
+                    {r.name}
+                  </Badge>
+                  {r.system_managed ? (
+                    <Badge
+                      variant="outline"
+                      className="text-muted-foreground text-[10px] uppercase tracking-wide"
+                      title="System-managed list — pre-populated, can't be archived"
+                    >
+                      System
+                    </Badge>
+                  ) : null}
+                </div>
               </TableCell>
               <TableCell className="text-muted-foreground text-sm">
                 {r.description || "—"}
@@ -159,6 +178,7 @@ function ListTable({
                   id={r.id}
                   name={r.name}
                   archived={!!r.archived_at}
+                  systemManaged={r.system_managed}
                 />
               </TableCell>
             </TableRow>

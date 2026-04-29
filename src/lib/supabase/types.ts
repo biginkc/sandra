@@ -658,6 +658,7 @@ export type Database = {
           id: string
           name: string
           org_id: string
+          system_managed: boolean
         }
         Insert: {
           archived_at?: string | null
@@ -668,6 +669,7 @@ export type Database = {
           id?: string
           name: string
           org_id?: string
+          system_managed?: boolean
         }
         Update: {
           archived_at?: string | null
@@ -678,6 +680,7 @@ export type Database = {
           id?: string
           name?: string
           org_id?: string
+          system_managed?: boolean
         }
         Relationships: [
           {
