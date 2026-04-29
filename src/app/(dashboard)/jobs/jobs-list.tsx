@@ -38,7 +38,11 @@ import { startQueuedCassJob } from "./actions";
 
 type Job = Database["public"]["Tables"]["jobs"]["Row"];
 
-const TRACERFY_CREDITS_PER_LEAD = 1; // batch normal rate
+// One credit per lookup at the batch normal rate. The vendor (currently
+// Tracerfy) is configured in /admin/skip-trace-settings; UI copy below
+// uses the capability label "skip-trace credits" so a vendor swap stays
+// a config change rather than a UI relabel.
+const SKIP_TRACE_CREDITS_PER_LEAD = 1;
 
 export function JobsList({ isAdmin }: { isAdmin: boolean }) {
   const [jobs, setJobs] = useState<Job[]>([]);
@@ -211,12 +215,12 @@ function SkipTraceApproveButtons({
   totalItems: number;
 }) {
   const [pending, startTransition] = useTransition();
-  const estimatedCredits = totalItems * TRACERFY_CREDITS_PER_LEAD;
+  const estimatedCredits = totalItems * SKIP_TRACE_CREDITS_PER_LEAD;
 
   const onApprove = () => {
     if (
       !window.confirm(
-        `Approve skip-trace for ${totalItems} propert${totalItems === 1 ? "y" : "ies"}? Estimated cost: ${estimatedCredits} Tracerfy credit${estimatedCredits === 1 ? "" : "s"}.`,
+        `Approve skip-trace for ${totalItems} propert${totalItems === 1 ? "y" : "ies"}? Estimated cost: ${estimatedCredits} skip-trace credit${estimatedCredits === 1 ? "" : "s"}.`,
       )
     )
       return;

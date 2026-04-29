@@ -68,7 +68,7 @@ export function CockpitView({
       <PageHeader
         breadcrumb={[{ label: "Workspace" }, { label: "Messages" }]}
         title="Messages"
-        description="Live conversations on the Inbox tab; queued bulk sends on the Outbox tab. Both flow through the same Dialpad provider; consent and quiet-hours are checked on every send."
+        description="Live conversations on the Inbox tab; queued bulk sends on the Outbox tab. Both flow through the same SMS provider; consent and quiet-hours are checked on every send."
       />
 
       <Tabs
