@@ -695,12 +695,20 @@ async function findExistingProperty(
     addressNormalized: string | null;
   },
 ): Promise<string | null> {
+  // All four tiers of the dedup cascade filter out soft-deleted rows.
+  // Without this, re-importing after `properties.deleted_at = now()` would
+  // dedup-match the ghosts and silently skip every row — making "clear
+  // prospects and start over" impossible. The semantic we want: soft-delete
+  // means "treat as gone for ingestion purposes too." If a user wants to
+  // resurrect rather than create fresh on re-import, that's a separate
+  // explicit flow (not implemented today).
   if (keys.fipsCode && keys.apnNormalized) {
     const { data } = await supabase
       .from("properties")
       .select("id")
       .eq("fips_code", keys.fipsCode)
       .eq("apn_normalized", keys.apnNormalized)
+      .is("deleted_at", null)
       .limit(1)
       .maybeSingle();
     if (data) return data.id;
@@ -710,6 +718,7 @@ async function findExistingProperty(
       .from("properties")
       .select("id")
       .eq("zpid", keys.zpid)
+      .is("deleted_at", null)
       .limit(1)
       .maybeSingle();
     if (data) return data.id;
@@ -719,6 +728,7 @@ async function findExistingProperty(
       .from("properties")
       .select("id")
       .eq("mls_number", keys.mlsNumber)
+      .is("deleted_at", null)
       .limit(1)
       .maybeSingle();
     if (data) return data.id;
@@ -728,6 +738,7 @@ async function findExistingProperty(
       .from("properties")
       .select("id")
       .eq("address_normalized", keys.addressNormalized)
+      .is("deleted_at", null)
       .limit(1)
       .maybeSingle();
     if (data) return data.id;

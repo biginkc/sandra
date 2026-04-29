@@ -222,6 +222,63 @@ describe("runIngestion (integration)", () => {
     expect(after?.qualified_by).toBe("user-under-test");
   });
 
+  it("re-imports a soft-deleted property as a fresh row (dedup ignores deleted_at)", async () => {
+    // Soft-delete = "treat as gone for ingestion purposes too." Without
+    // this guard, the wipe-then-restart workflow silently dedup-matches
+    // ghosts and creates zero new rows.
+    const { jobId, csvImportId } = await createImportJob(
+      "dealmachine",
+      "Kansas City",
+      1,
+    );
+
+    const mapping: Mapping = { address: "Address", state: "State" };
+    const firstRow: RowData[] = [{ Address: "555 Ghost Ln", State: "MO" }];
+
+    // First import — creates the row.
+    await runIngestion(supabase, {
+      jobId,
+      csvImportId,
+      source: "dealmachine",
+      market: "Kansas City",
+      mapping,
+      rows: firstRow,
+    });
+    const { count: afterFirst } = await supabase
+      .from("properties")
+      .select("*", { count: "exact", head: true });
+    expect(afterFirst).toBe(1);
+
+    // Soft-delete the property.
+    await supabase
+      .from("properties")
+      .update({ deleted_at: new Date().toISOString() })
+      .eq("address", "555 Ghost Ln");
+
+    // Re-import the same address — should create a fresh row, not match
+    // the ghost.
+    const { jobId: jobId2, csvImportId: csvImportId2 } = await createImportJob(
+      "dealmachine",
+      "Kansas City",
+      1,
+    );
+    const summary = await runIngestion(supabase, {
+      jobId: jobId2,
+      csvImportId: csvImportId2,
+      source: "dealmachine",
+      market: "Kansas City",
+      mapping,
+      rows: firstRow,
+    });
+    expect(summary.succeeded).toBe(1);
+    expect(summary.skipped).toBe(0);
+
+    const { count: afterSecond } = await supabase
+      .from("properties")
+      .select("*", { count: "exact", head: true });
+    expect(afterSecond).toBe(2);
+  });
+
   it("upserts repeated homeowners by name when no phone/email present", async () => {
     // The contacts table has a partial unique index on (last_name,
     // first_name) for person-type contacts with no phone and no email.
