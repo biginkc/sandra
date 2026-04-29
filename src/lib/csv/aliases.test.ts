@@ -165,3 +165,77 @@ describe("autodetectMapping", () => {
     expect(Object.values(mapping)).not.toContain("contact_id");
   });
 });
+
+describe("autodetectMapping — per-field-over-combined precedence", () => {
+  // When the file carries BOTH a combined `address_full` column AND a
+  // complete per-field set (city + state + zip), the per-field columns
+  // should win. The combined column is left unmapped so the validator
+  // doesn't try to parse it (e.g. D4D's space-delimited shape) and clobber
+  // the cleaner per-field values.
+
+  it("D4D headers keep Address Full mapped because no per-field street column exists", () => {
+    // D4D ships PROP: City/State/Zip per-field but splits street across 7
+    // sub-columns with no single `address`-aliasable column. Without a
+    // per-field source for `address`, the combined column must stay mapped
+    // — otherwise the reshape-then-import flow loses its only address source.
+    const headers = [
+      "PROP: Address Full",
+      "PROP: City",
+      "PROP: State",
+      "PROP: Zip",
+      "PH: Phone1",
+    ];
+    const mapping = autodetectMapping(headers);
+    expect(mapping.city).toBe("PROP: City");
+    expect(mapping.state).toBe("PROP: State");
+    expect(mapping.zip).toBe("PROP: Zip");
+    expect(mapping.address_full).toBe("PROP: Address Full");
+  });
+
+  it("DealMachine (combined-only, no per-fields) still maps address_full", () => {
+    // Regression guard: DealMachine Skipped only ships a combined column
+    // for the property address. The precedence rule must not strip it.
+    const headers = [
+      "contact_id",
+      "associated_property_address_full",
+      "first_name",
+      "last_name",
+    ];
+    const mapping = autodetectMapping(headers);
+    expect(mapping.address_full).toBe("associated_property_address_full");
+  });
+
+  it("hybrid file with explicit address column + per-fields prefers per-fields", () => {
+    const headers = [
+      "Property Address Full",
+      "Street Address",
+      "City",
+      "State",
+      "Zip",
+    ];
+    const mapping = autodetectMapping(headers);
+    expect(mapping.address).toBe("Street Address");
+    expect(mapping.city).toBe("City");
+    expect(mapping.state).toBe("State");
+    expect(mapping.zip).toBe("Zip");
+    expect(mapping.address_full).toBeUndefined();
+  });
+
+  it("partial per-field set (missing zip) keeps address_full as fallback", () => {
+    // If the per-field trio is incomplete, the combined column is the
+    // best available source — keep it mapped.
+    const headers = ["Property Address Full", "Street Address", "City", "State"];
+    const mapping = autodetectMapping(headers);
+    expect(mapping.address_full).toBe("Property Address Full");
+    expect(mapping.address).toBe("Street Address");
+    expect(mapping.city).toBe("City");
+    expect(mapping.state).toBe("State");
+    expect(mapping.zip).toBeUndefined();
+  });
+
+  it("address_full alone still maps when no per-fields are present", () => {
+    const headers = ["Property Address Full"];
+    const mapping = autodetectMapping(headers);
+    expect(mapping.address_full).toBe("Property Address Full");
+  });
+});

@@ -311,5 +311,28 @@ export function autodetectMapping(
       used.add(fieldId);
     }
   }
+
+  // Precedence: when a complete per-field address set (address + city +
+  // state + zip) is present, prefer it over a combined `address_full`
+  // column. The combined column is fragile (regex parser, sometimes ships
+  // in space-delimited shapes like Skip Genie / DataTree D4D) where as
+  // the per-field columns are pre-split and unambiguous. The user can
+  // still map the combined column manually if they want it as the source.
+  //
+  // Note: the `address` per-field is part of the precondition. Files like
+  // D4D ship city/state/zip per-fields but split the street into seven
+  // sub-columns with no single `address`-mappable column — for those the
+  // combined column stays mapped because it's the only viable street
+  // source after a reshape.
+  if (
+    mapping.address &&
+    mapping.city &&
+    mapping.state &&
+    mapping.zip &&
+    mapping.address_full
+  ) {
+    delete mapping.address_full;
+  }
+
   return mapping;
 }
