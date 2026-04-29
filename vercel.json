@@ -7,6 +7,10 @@
     {
       "path": "/api/cron/sequence-tick",
       "schedule": "*/5 * * * *"
+    },
+    {
+      "path": "/api/cron/sweep-stuck-skip-trace",
+      "schedule": "*/5 * * * *"
     }
   ]
 }
