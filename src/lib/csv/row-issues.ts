@@ -15,6 +15,7 @@
  */
 
 import { ruleLabel } from "./error-labels";
+import { normalizeAddress } from "./normalize";
 import {
   computeContactWarningRules,
   type ValidatedRow,
@@ -40,6 +41,18 @@ export type RowIssueGroup = {
 export type RowIssueBreakdown = {
   blockers: RowIssueGroup[];
   warnings: RowIssueGroup[];
+  /**
+   * Rows that won't add a NEW property — but for non-error reasons. Two
+   * sub-types today:
+   *   - intra_file_duplicate: row N has the same normalized address as
+   *     an earlier row in the same file. Importer dedups → row N still
+   *     gets list-stacked but doesn't create a fresh record.
+   *   - empty_row: row had no usable mapped values. Skipped silently.
+   *
+   * Surfaced separately from warnings (which apply to rows that WILL
+   * insert) and blockers (rows that fail validation entirely).
+   */
+  infoSkips: RowIssueGroup[];
 };
 
 /**
@@ -108,20 +121,57 @@ export function groupRowIssues(
 ): RowIssueBreakdown {
   const blockerMap = new Map<string, RowIssueGroup>();
   const warningMap = new Map<string, RowIssueGroup>();
+  const infoSkipMap = new Map<string, RowIssueGroup>();
+
+  // First pass — find intra-file duplicate addresses so we can mark the
+  // 2nd-and-later occurrences as info-skips. Only valid (passes-validation)
+  // rows compete for "winner" status; blocked rows are categorized as
+  // blockers and don't enter dedup.
+  const addressFirstSeen = new Map<string, number>();
+  const duplicateRowIndices = new Set<number>();
+  for (const v of validated) {
+    if (!v.ok) continue;
+    const addr = (v.normalized.address as string | null) ?? null;
+    if (!addr) continue;
+    const key = normalizeAddress(addr);
+    if (!key) continue;
+    if (addressFirstSeen.has(key)) {
+      duplicateRowIndices.add(v.rowIndex);
+    } else {
+      addressFirstSeen.set(key, v.rowIndex);
+    }
+  }
 
   for (const v of validated) {
-    // Empty rows have no normalized fields and no errors — they're not
-    // actionable in either bucket.
-    if (Object.keys(v.normalized).length === 0) continue;
-
+    const isEmpty = Object.keys(v.normalized).length === 0;
     const id = rowIdentifier(v.normalized) ?? rowFallback(v.rowIndex);
     const issue: RowIssue = { rowIndex: v.rowIndex, identifier: id };
+
+    if (isEmpty) {
+      // Surface empty rows as their own info-skip type so the user can see
+      // why the row count math doesn't add up at Progress time.
+      const key = "empty_row";
+      const existing = infoSkipMap.get(key);
+      if (existing) {
+        existing.rows.push(issue);
+        existing.totalCount++;
+      } else {
+        infoSkipMap.set(key, {
+          ruleKey: key,
+          ruleLabel: "Empty row (no property data)",
+          rows: [issue],
+          totalCount: 1,
+        });
+      }
+      continue;
+    }
 
     if (!v.ok) {
       // One row can have multiple errors. Each lands in its own group so
       // a single row may appear in (e.g.) both "Address missing" and
       // "State missing" — that's intentional, the user fixing one issue
-      // shouldn't lose track of the other.
+      // shouldn't lose track of the other. Blockers take priority over
+      // duplicate / warning categorization.
       for (const e of v.errors) {
         const key = `${e.rule}:${e.fieldId}`;
         const existing = blockerMap.get(key);
@@ -137,22 +187,40 @@ export function groupRowIssues(
           });
         }
       }
-    } else {
-      // Warnings are computed only for valid rows — they only matter for
-      // rows that will actually land in the DB.
-      for (const rule of computeContactWarningRules(v.normalized)) {
-        const existing = warningMap.get(rule);
-        if (existing) {
-          existing.rows.push(issue);
-          existing.totalCount++;
-        } else {
-          warningMap.set(rule, {
-            ruleKey: rule,
-            ruleLabel: warningLabel(rule),
-            rows: [issue],
-            totalCount: 1,
-          });
-        }
+      continue;
+    }
+
+    // Valid row. Could be a duplicate (info-skip) OR a winner with warnings.
+    if (duplicateRowIndices.has(v.rowIndex)) {
+      const key = "intra_file_duplicate";
+      const existing = infoSkipMap.get(key);
+      if (existing) {
+        existing.rows.push(issue);
+        existing.totalCount++;
+      } else {
+        infoSkipMap.set(key, {
+          ruleKey: key,
+          ruleLabel: "Duplicate of an earlier row in this file",
+          rows: [issue],
+          totalCount: 1,
+        });
+      }
+      continue;
+    }
+
+    // Winner — this row will actually create a property. Compute warnings.
+    for (const rule of computeContactWarningRules(v.normalized)) {
+      const existing = warningMap.get(rule);
+      if (existing) {
+        existing.rows.push(issue);
+        existing.totalCount++;
+      } else {
+        warningMap.set(rule, {
+          ruleKey: rule,
+          ruleLabel: warningLabel(rule),
+          rows: [issue],
+          totalCount: 1,
+        });
       }
     }
   }
@@ -162,6 +230,9 @@ export function groupRowIssues(
       (a, b) => b.totalCount - a.totalCount,
     ),
     warnings: [...warningMap.values()].sort(
+      (a, b) => b.totalCount - a.totalCount,
+    ),
+    infoSkips: [...infoSkipMap.values()].sort(
       (a, b) => b.totalCount - a.totalCount,
     ),
   };

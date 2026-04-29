@@ -221,3 +221,138 @@ describe("groupRowIssues", () => {
     expect(labels).toContain("Invalid phone number");
   });
 });
+
+describe("groupRowIssues — info skips (won't add new property)", () => {
+  const mapping: Mapping = { address: "Address", state: "State" };
+
+  it("returns no infoSkips when nothing skips silently", () => {
+    const validated = [
+      { Address: "1 Main", State: "MO" },
+      { Address: "2 Oak", State: "MO" },
+    ].map((row, i) => validateRow(row, mapping, i));
+
+    const result = groupRowIssues(validated);
+    expect(result.infoSkips).toEqual([]);
+  });
+
+  it("flags an intra-file duplicate (the second occurrence, not the first)", () => {
+    const validated = [
+      { Address: "1 Main St", State: "MO" }, // winner
+      { Address: "1 Main St", State: "MO" }, // duplicate
+    ].map((row, i) => validateRow(row, mapping, i));
+
+    const result = groupRowIssues(validated);
+    const dupGroup = result.infoSkips.find((g) =>
+      g.ruleLabel.toLowerCase().includes("duplicate"),
+    );
+    expect(dupGroup).toBeDefined();
+    expect(dupGroup!.totalCount).toBe(1);
+    expect(dupGroup!.rows[0].rowIndex).toBe(1);
+  });
+
+  it("collapses N occurrences of the same address into N-1 duplicates", () => {
+    const validated = [
+      { Address: "10 Pine Rd", State: "MO" }, // winner
+      { Address: "10 Pine Rd", State: "MO" }, // dup
+      { Address: "10 Pine Rd", State: "MO" }, // dup
+      { Address: "10 Pine Rd", State: "MO" }, // dup
+    ].map((row, i) => validateRow(row, mapping, i));
+
+    const result = groupRowIssues(validated);
+    const dupGroup = result.infoSkips.find((g) =>
+      g.ruleLabel.toLowerCase().includes("duplicate"),
+    );
+    expect(dupGroup!.totalCount).toBe(3);
+    expect(dupGroup!.rows.map((r) => r.rowIndex).sort()).toEqual([1, 2, 3]);
+  });
+
+  it("collapses address variants via normalization (Street vs St)", () => {
+    const validated = [
+      { Address: "1 Main Street", State: "MO" }, // winner
+      { Address: "1 main st", State: "MO" }, // dup after normalize
+    ].map((row, i) => validateRow(row, mapping, i));
+
+    const result = groupRowIssues(validated);
+    const dupGroup = result.infoSkips.find((g) =>
+      g.ruleLabel.toLowerCase().includes("duplicate"),
+    );
+    expect(dupGroup).toBeDefined();
+    expect(dupGroup!.totalCount).toBe(1);
+    expect(dupGroup!.rows[0].rowIndex).toBe(1);
+  });
+
+  it("flags empty rows as 'Empty row' info skips", () => {
+    const validated = [
+      { Address: "1 Main", State: "MO" }, // valid
+      {}, // empty
+      {}, // empty
+    ].map((row, i) => validateRow(row, mapping, i));
+
+    const result = groupRowIssues(validated);
+    const emptyGroup = result.infoSkips.find((g) =>
+      g.ruleLabel.toLowerCase().includes("empty"),
+    );
+    expect(emptyGroup).toBeDefined();
+    expect(emptyGroup!.totalCount).toBe(2);
+    expect(emptyGroup!.rows.map((r) => r.rowIndex).sort()).toEqual([1, 2]);
+  });
+
+  it("does not flag a blocked row as a duplicate (blockers win priority)", () => {
+    const mappingWithName: Mapping = {
+      address: "Address",
+      state: "State",
+      homeowner_first_name: "First",
+    };
+    // Row 1 has a name so it's not blank; State is missing → blocker.
+    // Row 0 is valid. Row 1 happens to share an address with row 0 — but
+    // since row 1 is already blocked, we don't double-categorize it.
+    const validated = [
+      { Address: "1 Main", State: "MO", First: "Alice" },
+      { Address: "1 Main", State: "", First: "Bob" },
+    ].map((row, i) => validateRow(row, mappingWithName, i));
+
+    const result = groupRowIssues(validated);
+    expect(result.blockers).toHaveLength(1);
+    expect(result.blockers[0].rows[0].rowIndex).toBe(1);
+    // Duplicate should NOT contain row 1
+    const dupGroup = result.infoSkips.find((g) =>
+      g.ruleLabel.toLowerCase().includes("duplicate"),
+    );
+    expect(dupGroup).toBeUndefined();
+  });
+
+  it("excludes duplicate rows from warnings (they won't add a property)", () => {
+    const mappingWithName: Mapping = {
+      address: "Address",
+      state: "State",
+      homeowner_first_name: "First",
+    };
+    const validated = [
+      { Address: "1 Main", State: "MO", First: "Alice" },
+      { Address: "1 Main", State: "MO", First: "Bob" }, // duplicate
+    ].map((row, i) => validateRow(row, mappingWithName, i));
+
+    const result = groupRowIssues(validated);
+    // Both rows have no phone, but only the winner should produce a warning;
+    // the duplicate is in infoSkips and shouldn't double-count.
+    const noPhone = result.warnings.find((g) => g.ruleLabel === "No phone");
+    expect(noPhone?.totalCount).toBe(1);
+    expect(noPhone?.rows[0].rowIndex).toBe(0);
+  });
+
+  it("renders both empty + duplicate groups when both are present", () => {
+    const validated = [
+      { Address: "1 Main", State: "MO" }, // winner
+      { Address: "1 Main", State: "MO" }, // dup
+      {}, // empty
+    ].map((row, i) => validateRow(row, mapping, i));
+
+    const result = groupRowIssues(validated);
+    const labels = result.infoSkips.map((g) => g.ruleLabel).sort();
+    expect(labels.length).toBe(2);
+    expect(labels.some((l) => l.toLowerCase().includes("duplicate"))).toBe(
+      true,
+    );
+    expect(labels.some((l) => l.toLowerCase().includes("empty"))).toBe(true);
+  });
+});
