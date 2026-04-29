@@ -17,6 +17,17 @@ export type SkipTraceInput = {
    *  you already have (e.g. from a CSV import). */
   firstName?: string | null;
   lastName?: string | null;
+  /**
+   * Owner's mailing address from `homeowner_details.mailing_*`. Tracerfy's
+   * batch endpoint requires a `mail_address_column` for normal traces and
+   * uses the value to disambiguate absentee-owner records. When absent,
+   * the adapter falls back to the property address — correct for owner-
+   * occupied properties, an acceptable approximation for absentees.
+   */
+  mailingAddress?: string | null;
+  mailingCity?: string | null;
+  mailingState?: string | null;
+  mailingZip?: string | null;
 };
 
 export type SkipTracePhone = {
@@ -42,6 +53,22 @@ export type SkipTracePerson = {
   emails: SkipTraceEmail[];
   /** True when the provider flags this person as the property owner. */
   isOwner?: boolean;
+  /** Person-level mailing address. Tracerfy's instant lookup returns this
+   *  per person nested under a `mailing_address` object; batch results
+   *  surface a single row-level mailing address (see SkipTraceResult). */
+  mailingAddress?: SkipTraceMailingAddress | null;
+};
+
+/**
+ * Normalized mailing address shape returned by skip-trace providers. Used
+ * to upgrade `homeowner_details.mailing_*` when the provider discovers an
+ * owner's current mailing address that the original CSV import didn't have.
+ */
+export type SkipTraceMailingAddress = {
+  street?: string | null;
+  city?: string | null;
+  state?: string | null;
+  zip?: string | null;
 };
 
 export type SkipTraceResult = {
@@ -52,6 +79,12 @@ export type SkipTraceResult = {
   persons: SkipTracePerson[];
   /** Credits the provider deducted for this lookup. 0 on miss. */
   creditsDeducted: number;
+  /** Row-level mailing address from a batch response. Tracerfy's batch
+   *  result returns mailing fields at the row level (`mail_address`,
+   *  `mail_city`, `mail_state`) rather than nested under each person.
+   *  Single lookups populate this from the first owner person's
+   *  `mailingAddress` so callers have one consistent place to read from. */
+  mailingAddress?: SkipTraceMailingAddress | null;
   /** Original provider response, kept for audit / replay. */
   raw: unknown;
 };
