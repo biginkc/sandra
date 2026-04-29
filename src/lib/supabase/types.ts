@@ -658,6 +658,7 @@ export type Database = {
           id: string
           name: string
           org_id: string
+          system_managed: boolean
         }
         Insert: {
           archived_at?: string | null
@@ -668,6 +669,7 @@ export type Database = {
           id?: string
           name: string
           org_id?: string
+          system_managed?: boolean
         }
         Update: {
           archived_at?: string | null
@@ -678,6 +680,7 @@ export type Database = {
           id?: string
           name?: string
           org_id?: string
+          system_managed?: boolean
         }
         Relationships: [
           {
@@ -1543,6 +1546,45 @@ export type Database = {
           received_at?: string
           signature_verified?: boolean
           to_number?: string
+        }
+        Relationships: []
+      }
+      webhook_consumers: {
+        Row: {
+          created_at: string
+          created_by: string | null
+          default_source: string
+          enabled: boolean
+          id: string
+          last_used_at: string | null
+          name: string
+          notes: string | null
+          revoked_at: string | null
+          secret_hash: string
+        }
+        Insert: {
+          created_at?: string
+          created_by?: string | null
+          default_source: string
+          enabled?: boolean
+          id?: string
+          last_used_at?: string | null
+          name: string
+          notes?: string | null
+          revoked_at?: string | null
+          secret_hash: string
+        }
+        Update: {
+          created_at?: string
+          created_by?: string | null
+          default_source?: string
+          enabled?: boolean
+          id?: string
+          last_used_at?: string | null
+          name?: string
+          notes?: string | null
+          revoked_at?: string | null
+          secret_hash?: string
         }
         Relationships: []
       }

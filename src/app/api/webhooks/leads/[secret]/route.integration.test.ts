@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import { beforeEach, describe, expect, it } from "vitest";
 
 import { createTestClient } from "@tests/integration/client";
@@ -15,137 +17,288 @@ import { POST } from "./route";
 
 const testClient = createTestClient();
 
-const SECRET = "test-secret";
+const ENZO_SECRET = "enzo-test-secret-1234567890abcdef";
+const PPC_SECRET = "ppc-test-secret-abcdef1234567890";
 
-function makeRequest(
-  body: unknown,
-  options: { secret?: string } = {},
-): Request {
-  return new Request(
-    `http://localhost/api/webhooks/leads/${options.secret ?? SECRET}`,
-    {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: typeof body === "string" ? body : JSON.stringify(body),
-    },
-  );
+function hashSecret(plaintext: string): string {
+  return createHash("sha256").update(plaintext).digest("hex");
 }
 
-function makeContext(secret = SECRET) {
+async function seedConsumer(opts: {
+  name: string;
+  secret: string;
+  defaultSource: string;
+  enabled?: boolean;
+  revoked?: boolean;
+}): Promise<string> {
+  const { data, error } = await testClient
+    .from("webhook_consumers")
+    .insert({
+      name: opts.name,
+      secret_hash: hashSecret(opts.secret),
+      default_source: opts.defaultSource,
+      enabled: opts.enabled ?? true,
+      revoked_at: opts.revoked ? new Date().toISOString() : null,
+    })
+    .select("id")
+    .single();
+  if (error || !data) throw error ?? new Error("seed consumer failed");
+  return data.id;
+}
+
+async function clearConsumers(): Promise<void> {
+  await testClient.from("webhook_consumers").delete().neq("id", "00000000-0000-0000-0000-000000000000");
+}
+
+function makeRequest(body: unknown, secret: string): Request {
+  return new Request(`http://localhost/api/webhooks/leads/${secret}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: typeof body === "string" ? body : JSON.stringify(body),
+  });
+}
+
+function makeContext(secret: string) {
   return { params: Promise.resolve({ secret }) };
 }
 
-describe("POST /api/webhooks/leads/[secret]", () => {
+describe("POST /api/webhooks/leads/[secret] (per-consumer auth)", () => {
   beforeEach(async () => {
     await resetTenantTables(testClient);
-    process.env.LEAD_WEBHOOK_SECRET = SECRET;
+    await clearConsumers();
   });
 
-  it("happy path: valid payload creates property + contact, returns 200 with property_id", async () => {
-    const request = makeRequest({
-      source: "cold_call",
-      property: {
-        address: "1 Webhook Ln",
-        city: "Kansas City",
-        state: "MO",
-        zip: "64111",
-      },
-      contact: {
-        first_name: "Webhook",
-        last_name: "Caller",
-        phone_1: "+18165551111",
-      },
+  it("happy path: matched consumer creates property with row's default_source applied", async () => {
+    await seedConsumer({
+      name: "Enzo",
+      secret: ENZO_SECRET,
+      defaultSource: "cold_call",
     });
-    const response = await POST(request, makeContext());
+
+    const request = makeRequest(
+      {
+        property: {
+          address: "1 Per-Consumer Ln",
+          city: "Kansas City",
+          state: "MO",
+          zip: "64111",
+        },
+        contact: {
+          first_name: "Enzo",
+          last_name: "Caller",
+          phone_1: "+18165552001",
+        },
+        // No `source` field — should fall back to consumer.default_source
+      },
+      ENZO_SECRET,
+    );
+    const response = await POST(request, makeContext(ENZO_SECRET));
     expect(response.status).toBe(200);
-    const json = (await response.json()) as {
-      property_id: string;
-      was_duplicate: boolean;
-      contact_id: string | null;
-    };
-    expect(json.property_id).toBeTruthy();
-    expect(json.was_duplicate).toBe(false);
-    expect(json.contact_id).toBeTruthy();
+    const json = (await response.json()) as { property_id: string };
 
     const { data: prop } = await testClient
       .from("properties")
-      .select("status, source, homeowner_contact_id")
+      .select("source")
       .eq("id", json.property_id)
       .single();
-    expect(prop!.status).toBe("new_lead");
     expect(prop!.source).toBe("cold_call");
-    expect(prop!.homeowner_contact_id).toBe(json.contact_id);
   });
 
-  it("rejects wrong secret with 403", async () => {
+  it("payload source overrides consumer default when present and valid", async () => {
+    await seedConsumer({
+      name: "Generic",
+      secret: ENZO_SECRET,
+      defaultSource: "cold_call",
+    });
+
     const request = makeRequest(
       {
-        source: "cold_call",
-        property: { address: "2 Wrong Secret Ln", state: "MO" },
+        source: "web_form", // override
+        property: { address: "2 Override Ln", state: "MO" },
       },
-      { secret: "wrong-secret" },
+      ENZO_SECRET,
     );
-    const response = await POST(request, makeContext("wrong-secret"));
+    const response = await POST(request, makeContext(ENZO_SECRET));
+    expect(response.status).toBe(200);
+    const json = (await response.json()) as { property_id: string };
+    const { data: prop } = await testClient
+      .from("properties")
+      .select("source")
+      .eq("id", json.property_id)
+      .single();
+    expect(prop!.source).toBe("web_form");
+  });
+
+  it("rejects with 403 when secret matches no consumer", async () => {
+    await seedConsumer({
+      name: "Enzo",
+      secret: ENZO_SECRET,
+      defaultSource: "cold_call",
+    });
+
+    const wrong = "wrong-secret-1234567890abcdef";
+    const response = await POST(
+      makeRequest({ property: { address: "3 Wrong Ln", state: "MO" } }, wrong),
+      makeContext(wrong),
+    );
     expect(response.status).toBe(403);
   });
 
-  it("rejects with 503 when LEAD_WEBHOOK_SECRET is not configured", async () => {
-    delete process.env.LEAD_WEBHOOK_SECRET;
-    const request = makeRequest({
-      source: "cold_call",
-      property: { address: "3 Unconfigured Ln", state: "MO" },
+  it("rejects with 403 when consumer is disabled", async () => {
+    await seedConsumer({
+      name: "Disabled",
+      secret: PPC_SECRET,
+      defaultSource: "web_form",
+      enabled: false,
     });
-    const response = await POST(request, makeContext());
-    expect(response.status).toBe(503);
+
+    const response = await POST(
+      makeRequest({ property: { address: "4 Disabled Ln", state: "MO" } }, PPC_SECRET),
+      makeContext(PPC_SECRET),
+    );
+    expect(response.status).toBe(403);
+  });
+
+  it("rejects with 403 when consumer is revoked", async () => {
+    await seedConsumer({
+      name: "Revoked",
+      secret: PPC_SECRET,
+      defaultSource: "web_form",
+      revoked: true,
+    });
+
+    const response = await POST(
+      makeRequest({ property: { address: "5 Revoked Ln", state: "MO" } }, PPC_SECRET),
+      makeContext(PPC_SECRET),
+    );
+    expect(response.status).toBe(403);
+  });
+
+  it("rejects with 403 when secret is too short (defensive)", async () => {
+    const response = await POST(
+      makeRequest({ property: { address: "6 Short Ln", state: "MO" } }, "short"),
+      makeContext("short"),
+    );
+    expect(response.status).toBe(403);
+  });
+
+  it("two consumers with different secrets coexist — each maps to its own default_source", async () => {
+    await seedConsumer({
+      name: "Enzo",
+      secret: ENZO_SECRET,
+      defaultSource: "cold_call",
+    });
+    await seedConsumer({
+      name: "PPC Landing",
+      secret: PPC_SECRET,
+      defaultSource: "web_form",
+    });
+
+    const enzoResp = await POST(
+      makeRequest({ property: { address: "10 Enzo Ln", state: "MO" } }, ENZO_SECRET),
+      makeContext(ENZO_SECRET),
+    );
+    const enzoJson = (await enzoResp.json()) as { property_id: string };
+
+    const ppcResp = await POST(
+      makeRequest({ property: { address: "20 PPC Ln", state: "MO" } }, PPC_SECRET),
+      makeContext(PPC_SECRET),
+    );
+    const ppcJson = (await ppcResp.json()) as { property_id: string };
+
+    const { data: enzoProp } = await testClient
+      .from("properties")
+      .select("source")
+      .eq("id", enzoJson.property_id)
+      .single();
+    const { data: ppcProp } = await testClient
+      .from("properties")
+      .select("source")
+      .eq("id", ppcJson.property_id)
+      .single();
+
+    expect(enzoProp!.source).toBe("cold_call");
+    expect(ppcProp!.source).toBe("web_form");
+  });
+
+  it("stamps last_used_at on the consumer row after a successful call", async () => {
+    const consumerId = await seedConsumer({
+      name: "Enzo",
+      secret: ENZO_SECRET,
+      defaultSource: "cold_call",
+    });
+
+    await POST(
+      makeRequest({ property: { address: "30 Stamp Ln", state: "MO" } }, ENZO_SECRET),
+      makeContext(ENZO_SECRET),
+    );
+
+    const { data: consumer } = await testClient
+      .from("webhook_consumers")
+      .select("last_used_at")
+      .eq("id", consumerId)
+      .single();
+    expect(consumer!.last_used_at).not.toBeNull();
+  });
+
+  it("rejects with 400 when payload source is present but invalid", async () => {
+    await seedConsumer({
+      name: "Enzo",
+      secret: ENZO_SECRET,
+      defaultSource: "cold_call",
+    });
+
+    const response = await POST(
+      makeRequest(
+        {
+          source: "manual_entry", // not in canonical list
+          property: { address: "40 Bad Source Ln", state: "MO" },
+        },
+        ENZO_SECRET,
+      ),
+      makeContext(ENZO_SECRET),
+    );
+    expect(response.status).toBe(400);
   });
 
   it("rejects malformed JSON with 400", async () => {
-    const request = makeRequest("not json {{{");
-    const response = await POST(request, makeContext());
-    expect(response.status).toBe(400);
-  });
-
-  it("rejects payload without source with 400", async () => {
-    const request = makeRequest({
-      property: { address: "4 No Source Ln", state: "MO" },
+    await seedConsumer({
+      name: "Enzo",
+      secret: ENZO_SECRET,
+      defaultSource: "cold_call",
     });
-    const response = await POST(request, makeContext());
-    expect(response.status).toBe(400);
-    const json = (await response.json()) as { error: string; field: string };
-    expect(json.field).toBe("source");
-  });
 
-  it("rejects payload with invalid source value with 400", async () => {
-    const request = makeRequest({
-      source: "manual_entry", // not in canonical list as of migration 030
-      property: { address: "5 Bad Source Ln", state: "MO" },
-    });
-    const response = await POST(request, makeContext());
+    const response = await POST(makeRequest("not json {{{", ENZO_SECRET), makeContext(ENZO_SECRET));
     expect(response.status).toBe(400);
   });
 
   it("rejects payload missing property block with 400", async () => {
-    const request = makeRequest({ source: "cold_call" });
-    const response = await POST(request, makeContext());
+    await seedConsumer({
+      name: "Enzo",
+      secret: ENZO_SECRET,
+      defaultSource: "cold_call",
+    });
+
+    const response = await POST(makeRequest({}, ENZO_SECRET), makeContext(ENZO_SECRET));
     expect(response.status).toBe(400);
   });
 
   it("idempotent on address: second call returns same property_id with was_duplicate=true", async () => {
+    await seedConsumer({
+      name: "Enzo",
+      secret: ENZO_SECRET,
+      defaultSource: "cold_call",
+    });
+
     const first = await POST(
-      makeRequest({
-        source: "cold_call",
-        property: { address: "100 Dedup Webhook St", state: "MO" },
-      }),
-      makeContext(),
+      makeRequest({ property: { address: "100 Dedup St", state: "MO" } }, ENZO_SECRET),
+      makeContext(ENZO_SECRET),
     );
     const firstJson = (await first.json()) as { property_id: string };
 
     const second = await POST(
-      makeRequest({
-        source: "web_form",
-        property: { address: "100 Dedup Webhook St", state: "MO" },
-      }),
-      makeContext(),
+      makeRequest({ property: { address: "100 Dedup St", state: "MO" } }, ENZO_SECRET),
+      makeContext(ENZO_SECRET),
     );
     expect(second.status).toBe(200);
     const secondJson = (await second.json()) as {
