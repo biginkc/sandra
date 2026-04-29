@@ -28,6 +28,8 @@ import {
 import { cn } from "@/lib/utils";
 import type { Database } from "@/lib/supabase/types";
 
+import { RetrySkipTraceButton } from "../retry-skip-trace-button";
+
 type Job = Database["public"]["Tables"]["jobs"]["Row"];
 type JobItem = Database["public"]["Tables"]["job_items"]["Row"];
 type CsvImport = Pick<
@@ -66,13 +68,47 @@ export function JobDetail({
       (job.failed_items ?? 0),
   );
 
+  // Skip-trace retry — only renders for failed/partial skip_trace jobs
+  // with at least one property to retry. Mirrors the server action's
+  // resolution: errored job_items first, then input_params fallback for
+  // pre-#59 jobs where Tracerfy results never fanned to per-property
+  // items.
+  const isSkipTraceRetryable =
+    job.type === "skip_trace" &&
+    (job.status === "failed" || job.status === "partial");
+  const hasErroredItems = items.some((i) => i.status === "error");
+  const fallbackPropertyCount = (() => {
+    const ids = (job.input_params as { property_ids?: unknown } | null)
+      ?.property_ids;
+    return Array.isArray(ids)
+      ? ids.filter((x) => typeof x === "string" && x.length > 0).length
+      : 0;
+  })();
+  const retryCount = hasErroredItems ? job.failed_items : fallbackPropertyCount;
+  const inFlightChild =
+    childJobs.find(
+      (c) =>
+        c.type === "skip_trace" &&
+        (c.status === "queued" || c.status === "running"),
+    ) ?? null;
+  const showRetry = isSkipTraceRetryable && retryCount > 0;
+
   return (
     <div className="flex flex-col gap-6">
-      {/* Sub-header strip with status + duration + provider */}
-      <div className="text-muted-foreground flex flex-wrap items-center gap-x-4 gap-y-1 text-sm">
-        <Badge variant={statusVariant(job.status)}>{job.status}</Badge>
-        <span>{durationLabel(job)}</span>
-        {job.provider && <span>via {job.provider}</span>}
+      {/* Sub-header strip with status + duration + provider, with retry on the right */}
+      <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
+        <div className="text-muted-foreground flex flex-wrap items-center gap-x-4 gap-y-1 text-sm">
+          <Badge variant={statusVariant(job.status)}>{job.status}</Badge>
+          <span>{durationLabel(job)}</span>
+          {job.provider && <span>via {job.provider}</span>}
+        </div>
+        {showRetry ? (
+          <RetrySkipTraceButton
+            jobId={job.id}
+            retryCount={retryCount}
+            inFlightChildId={inFlightChild?.id ?? null}
+          />
+        ) : null}
       </div>
 
       {/* KPI tiles — universal */}

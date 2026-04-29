@@ -2,12 +2,14 @@
 
 import { after } from "next/server";
 
+import { isAdminEmail } from "@/lib/auth/allowlist";
 import {
   createCassChildJob,
   runCassEnrichment,
 } from "@/lib/enrichment/cass-job";
 import { errFromUnknown, ok, type Result } from "@/lib/errors/result";
 import { reportError } from "@/lib/errors/report";
+import { runSkipTraceEnrichment } from "@/lib/skip-trace/skip-trace-job";
 import { createClient } from "@/lib/supabase/server";
 
 /**
@@ -259,6 +261,212 @@ export async function retryFailedCassItems(
       extra: { failedJobId },
     });
     return errFromUnknown(e, "RETRY_FAILED_CASS_FAILED");
+  }
+}
+
+/**
+ * Retry a failed or partial skip-trace job by creating a fresh
+ * `skip_trace` child linked via `parent_job_id` and queueing it through
+ * the standard runner. Two property-ID resolution paths:
+ *
+ *   1. **Errored job_items first.** The standard partial-failure case —
+ *      some lookups errored, retry only those.
+ *   2. **`input_params.property_ids` fallback.** Pre-#59 jobs landed with
+ *      zero `job_items` rows because the old code couldn't fan Tracerfy
+ *      results back to per-property items. The original property list is
+ *      still in `input_params`; treat the whole batch as failed.
+ *
+ * Admin-only — costs Tracerfy credits per
+ * `feedback_explicit_opt_in_for_paid_actions`. Concurrency-guarded:
+ * refuses if a child of this job is already queued or running.
+ */
+export async function retryFailedSkipTraceItems(
+  failedJobId: string,
+): Promise<Result<{ total: number; childJobId: string }>> {
+  try {
+    const supabase = await createClient();
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    if (!isAdminEmail(user?.email)) {
+      return {
+        ok: false,
+        error: {
+          code: "FORBIDDEN",
+          message: "Only admins can retry skip-trace jobs.",
+        },
+      };
+    }
+
+    const { data: parent, error: parentErr } = await supabase
+      .from("jobs")
+      .select("id, type, status, org_id, created_by, input_params")
+      .eq("id", failedJobId)
+      .maybeSingle();
+    if (parentErr) {
+      return {
+        ok: false,
+        error: { code: "JOB_FETCH_FAILED", message: parentErr.message },
+      };
+    }
+    if (!parent) {
+      return {
+        ok: false,
+        error: { code: "JOB_NOT_FOUND", message: "Job not found." },
+      };
+    }
+    if (parent.type !== "skip_trace") {
+      return {
+        ok: false,
+        error: {
+          code: "JOB_WRONG_TYPE",
+          message: `This action retries skip_trace jobs; got type="${parent.type}".`,
+        },
+      };
+    }
+    if (parent.status !== "failed" && parent.status !== "partial") {
+      return {
+        ok: false,
+        error: {
+          code: "JOB_WRONG_STATUS",
+          message: `Job is "${parent.status}", not "failed" or "partial".`,
+        },
+      };
+    }
+
+    // Concurrency guard — refuse if a child of this job is already
+    // queued or running. Prevents accidental double-charges from
+    // multi-tab clicks or stale dialogs.
+    const { data: inFlight, error: inFlightErr } = await supabase
+      .from("jobs")
+      .select("id")
+      .eq("parent_job_id", failedJobId)
+      .in("status", ["queued", "running"])
+      .limit(1)
+      .maybeSingle();
+    if (inFlightErr) {
+      return {
+        ok: false,
+        error: {
+          code: "JOB_FETCH_FAILED",
+          message: inFlightErr.message,
+        },
+      };
+    }
+    if (inFlight) {
+      return {
+        ok: false,
+        error: {
+          code: "RETRY_IN_FLIGHT",
+          message: "A retry is already running for this job.",
+        },
+      };
+    }
+
+    // Resolution: errored job_items first, then input_params fallback.
+    const { data: erroredItems, error: itemsErr } = await supabase
+      .from("job_items")
+      .select("property_id")
+      .eq("job_id", failedJobId)
+      .eq("status", "error")
+      .not("property_id", "is", null);
+    if (itemsErr) {
+      return {
+        ok: false,
+        error: { code: "JOB_ITEMS_FETCH_FAILED", message: itemsErr.message },
+      };
+    }
+
+    let propertyIds = Array.from(
+      new Set(
+        (erroredItems ?? [])
+          .map((r) => r.property_id)
+          .filter((id): id is string => typeof id === "string"),
+      ),
+    );
+
+    if (propertyIds.length === 0) {
+      const fallback = (parent.input_params as { property_ids?: unknown } | null)
+        ?.property_ids;
+      propertyIds = Array.isArray(fallback)
+        ? Array.from(
+            new Set(
+              fallback.filter(
+                (x): x is string => typeof x === "string" && x.length > 0,
+              ),
+            ),
+          )
+        : [];
+    }
+
+    if (propertyIds.length === 0) {
+      return {
+        ok: false,
+        error: {
+          code: "NO_PROPERTY_IDS",
+          message:
+            "This job has no errored items and no fallback property_ids — nothing to retry.",
+        },
+      };
+    }
+
+    const { data: childRow, error: insertErr } = await supabase
+      .from("jobs")
+      .insert({
+        type: "skip_trace",
+        provider: "tracerfy",
+        status: "queued",
+        org_id: parent.org_id,
+        parent_job_id: failedJobId,
+        created_by: user?.id ?? parent.created_by,
+        total_items: propertyIds.length,
+        title: `Retry skip-trace ${propertyIds.length} propert${propertyIds.length === 1 ? "y" : "ies"}`,
+        description: `Retry of ${failedJobId.slice(0, 8)} by ${user?.email ?? "admin"}`,
+        input_params: { property_ids: propertyIds },
+      })
+      .select("id")
+      .single();
+    if (insertErr || !childRow) {
+      return {
+        ok: false,
+        error: {
+          code: "JOB_CREATE_FAILED",
+          message: insertErr?.message ?? "Failed to create child job",
+        },
+      };
+    }
+
+    after(async () => {
+      try {
+        const bg = await createClient();
+        await runSkipTraceEnrichment(bg, {
+          jobId: childRow.id,
+          propertyIds,
+        });
+      } catch (e) {
+        reportError(e, {
+          tags: { surface: "retry_skip_trace_after" },
+          extra: { childId: childRow.id, propertyCount: propertyIds.length },
+        });
+        await supabase
+          .from("jobs")
+          .update({
+            status: "failed",
+            error_class: "internal",
+            error_message: e instanceof Error ? e.message : String(e),
+            completed_at: new Date().toISOString(),
+          })
+          .eq("id", childRow.id);
+      }
+    });
+
+    return ok({ total: propertyIds.length, childJobId: childRow.id });
+  } catch (e) {
+    reportError(e, {
+      tags: { surface: "retry_skip_trace" },
+      extra: { failedJobId },
+    });
+    return errFromUnknown(e, "RETRY_SKIP_TRACE_FAILED");
   }
 }
 
