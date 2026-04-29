@@ -143,10 +143,13 @@ export class TracerfyProvider implements SkipTraceProvider {
       throw new ValidationError("submitBatch requires at least one input");
     }
 
-    // Tracerfy's JSON batch shape mirrors the lookup body, repeated.
-    // We include `external_id` per row so we can match results back to
-    // our property when the webhook fires.
-    const json_data = inputs.map((i) => ({
+    // Tracerfy's batch endpoint takes multipart/form-data — `json_data`
+    // is a *form field* whose value is a stringified JSON array, NOT a
+    // JSON property. The earlier JSON-body shape worked through their
+    // earlier API revision but now returns 415 'Unsupported media type'.
+    // We include `external_id` per row so the webhook can match results
+    // back to our property.
+    const rows = inputs.map((i) => ({
       external_id: i.propertyId,
       address: i.address,
       city: i.city,
@@ -156,26 +159,60 @@ export class TracerfyProvider implements SkipTraceProvider {
       last_name: i.lastName ?? "",
     }));
 
-    const data = await this.request<TracerfyBatchResponse>(
-      "POST",
-      "/trace/",
-      {
-        json_data,
-        address_column: "address",
-        city_column: "city",
-        state_column: "state",
-        zip_column: "zip",
-        first_name_column: "first_name",
-        last_name_column: "last_name",
-        trace_type: "normal",
-      },
-    );
+    const form = new FormData();
+    form.append("json_data", JSON.stringify(rows));
+    form.append("address_column", "address");
+    form.append("city_column", "city");
+    form.append("state_column", "state");
+    form.append("zip_column", "zip");
+    form.append("first_name_column", "first_name");
+    form.append("last_name_column", "last_name");
+    form.append("trace_type", "normal");
+
+    const data = await this.requestForm<TracerfyBatchResponse>("/trace/", form);
 
     return {
       queueId: String(data.queue_id),
       estimatedWaitSeconds: data.estimated_wait_seconds ?? 0,
       creditsPerLead: data.credits_per_lead ?? 1,
     };
+  }
+
+  /**
+   * POST a multipart/form-data body. Separate from `request()` because
+   * fetch must not have a `Content-Type` header preset — the runtime sets
+   * it to `multipart/form-data; boundary=…` automatically when given a
+   * FormData body, and presetting breaks the boundary attachment.
+   */
+  private async requestForm<T>(path: string, form: FormData): Promise<T> {
+    const url = `${BASE_URL}${path}`;
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${this.apiKey}`,
+          Accept: "application/json",
+        },
+        body: form,
+      });
+    } catch (e) {
+      throw new ProviderError(
+        e instanceof Error ? e.message : String(e),
+        "tracerfy",
+      );
+    }
+
+    if (!response.ok) {
+      const text = await response.text().catch(() => "");
+      throw new ProviderError(
+        `Tracerfy ${response.status}: ${text || response.statusText}`,
+        "tracerfy",
+        { status: response.status },
+      );
+    }
+
+    return (await response.json()) as T;
   }
 
   async pollBatch(queueId: string): Promise<SkipTraceResult[] | null> {

@@ -157,7 +157,10 @@ describe("TracerfyProvider — lookupSingle", () => {
 });
 
 describe("TracerfyProvider — submitBatch", () => {
-  it("sends a JSON batch with external_id round-trip and trace_type=normal", async () => {
+  it("posts multipart/form-data with json_data as a stringified-JSON form field", async () => {
+    // Tracerfy's batch endpoint expects multipart/form-data — `json_data`
+    // is a form field carrying a stringified JSON array. The previous
+    // JSON-body shape returned HTTP 415 in production.
     mockFetch({
       status: 200,
       body: {
@@ -180,11 +183,27 @@ describe("TracerfyProvider — submitBatch", () => {
     expect(ticket.estimatedWaitSeconds).toBe(30);
 
     const init = (global.fetch as ReturnType<typeof vi.fn>).mock.calls[0][1] as RequestInit;
-    const body = JSON.parse(init.body as string);
-    expect(body.json_data).toHaveLength(2);
-    expect(body.json_data[0].external_id).toBe("prop-A");
-    expect(body.json_data[1].external_id).toBe("prop-B");
-    expect(body.trace_type).toBe("normal");
+    expect(init.body).toBeInstanceOf(FormData);
+    const form = init.body as FormData;
+
+    // json_data is a stringified array of row objects
+    const jsonData = form.get("json_data");
+    expect(typeof jsonData).toBe("string");
+    const rows = JSON.parse(jsonData as string);
+    expect(rows).toHaveLength(2);
+    expect(rows[0].external_id).toBe("prop-A");
+    expect(rows[1].external_id).toBe("prop-B");
+
+    // Column-mapping fields ride alongside as separate form values
+    expect(form.get("trace_type")).toBe("normal");
+    expect(form.get("address_column")).toBe("address");
+    expect(form.get("city_column")).toBe("city");
+    expect(form.get("state_column")).toBe("state");
+
+    // Critical: no manual Content-Type — fetch must set it with the
+    // boundary or the server can't parse the multipart body.
+    const headers = (init.headers ?? {}) as Record<string, string>;
+    expect(headers["Content-Type"]).toBeUndefined();
   });
 });
 
