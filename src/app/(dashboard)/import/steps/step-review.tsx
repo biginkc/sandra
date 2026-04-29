@@ -1,6 +1,9 @@
 "use client";
 
+import { Download } from "lucide-react";
+
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import {
   Card,
   CardContent,
@@ -16,6 +19,9 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { ruleLabel, summarizeTopError } from "@/lib/csv/error-labels";
+import { buildInvalidRowsCsv } from "@/lib/csv/invalid-rows-csv";
+import { validateRow } from "@/lib/csv/validate";
 
 import type { WizardAction, WizardState } from "../wizard";
 
@@ -40,6 +46,26 @@ type Props = { state: WizardState; dispatch: React.Dispatch<WizardAction> };
 
 export function StepReview({ state }: Props) {
   const summary = state.summary;
+  const topError = summary ? summarizeTopError(summary.errorsByRule) : null;
+
+  const handleDownloadInvalid = () => {
+    // Re-run validation to recover the per-row error detail (only the
+    // first 10 are kept in state.previewRows). Cheap — ~50 ms for 2K rows.
+    const validated = state.rows.map((row, idx) =>
+      validateRow(row, state.mapping, idx),
+    );
+    const csv = buildInvalidRowsCsv(state.rows, state.mapping, validated);
+    const baseName = (state.filename ?? "import").replace(/\.csv$/i, "");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${baseName}.invalid-rows.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
 
   return (
     <div className="flex flex-col gap-4">
@@ -47,21 +73,56 @@ export function StepReview({ state }: Props) {
         <CardHeader>
           <CardTitle>Validation summary</CardTitle>
           <CardDescription>
-            {summary
-              ? `${summary.totalRows} rows · ${summary.validRows} valid · ${summary.invalidRows} invalid · ${summary.emptyRows} empty`
-              : "No validation run yet."}
+            {summary ? (
+              <>
+                <span className="text-foreground font-medium">
+                  {summary.validRows.toLocaleString()} of{" "}
+                  {summary.totalRows.toLocaleString()}
+                </span>{" "}
+                rows will import.{" "}
+                {summary.invalidRows > 0 && (
+                  <>
+                    <span className="text-destructive font-medium">
+                      {summary.invalidRows.toLocaleString()}
+                    </span>{" "}
+                    can&apos;t.
+                  </>
+                )}
+                {summary.emptyRows > 0 && (
+                  <> {summary.emptyRows.toLocaleString()} empty.</>
+                )}
+                {topError && (
+                  <span className="text-muted-foreground"> {topError}</span>
+                )}
+              </>
+            ) : (
+              "No validation run yet."
+            )}
           </CardDescription>
         </CardHeader>
         <CardContent className="flex flex-col gap-3">
           {summary && Object.keys(summary.errorsByRule).length > 0 && (
             <div className="flex flex-col gap-1.5">
-              <div className="text-muted-foreground text-xs font-semibold tracking-wide uppercase">
-                Errors (block import)
+              <div className="flex items-center justify-between gap-3">
+                <div className="text-muted-foreground text-xs font-semibold tracking-wide uppercase">
+                  Errors (block import)
+                </div>
+                {summary.invalidRows > 0 && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={handleDownloadInvalid}
+                    className="h-7 gap-1.5 text-xs"
+                  >
+                    <Download className="size-3.5" />
+                    Download invalid rows
+                  </Button>
+                )}
               </div>
               <div className="flex flex-wrap gap-2">
                 {Object.entries(summary.errorsByRule).map(([rule, count]) => (
                   <Badge key={rule} variant="secondary">
-                    {rule}: {count}
+                    {ruleLabel(rule)}: {count.toLocaleString()}
                   </Badge>
                 ))}
               </div>
@@ -75,7 +136,7 @@ export function StepReview({ state }: Props) {
               <div className="flex flex-wrap gap-2">
                 {Object.entries(summary.warningsByRule).map(([rule, count]) => (
                   <Badge key={rule} variant="outline" title={WARNING_HINTS[rule] ?? ""}>
-                    {WARNING_LABELS[rule] ?? rule}: {count}
+                    {WARNING_LABELS[rule] ?? rule}: {count.toLocaleString()}
                   </Badge>
                 ))}
               </div>
