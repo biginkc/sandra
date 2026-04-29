@@ -91,13 +91,18 @@ async function seedJob(opts: {
 
 async function seedJobItems(
   jobId: string,
-  items: { propertyId: string; status: "success" | "error" | "skipped" }[],
+  items: {
+    propertyId: string;
+    status: "success" | "error" | "skipped";
+    errorClass?: string;
+  }[],
 ): Promise<void> {
   if (items.length === 0) return;
   const rows = items.map((i) => ({
     job_id: jobId,
     property_id: i.propertyId,
     status: i.status,
+    error_class: i.errorClass ?? null,
     error_message: i.status === "error" ? "boom" : null,
   }));
   const { error } = await testClient.from("job_items").insert(rows);
@@ -284,5 +289,103 @@ describe("retryFailedSkipTraceItems (integration)", () => {
       .eq("id", result.data.childJobId)
       .single();
     expect(child?.parent_job_id).toBe(jobId);
+  });
+
+  // ---------------------------------------------------------------
+  // Category-aware retry resolution: only items with retryable
+  // error_classes get re-submitted to the vendor. Terminal classes
+  // (provider_no_data, address_unverified) are excluded so the user
+  // can't accidentally pay for guaranteed-fail lookups.
+  // ---------------------------------------------------------------
+  describe("retry resolution by error_class", () => {
+    it("retries provider_transient + provider_unknown, excludes provider_no_data + address_unverified", async () => {
+      const a = await seedProperty("1 Transient St");
+      const b = await seedProperty("2 Unknown St");
+      const c = await seedProperty("3 NoData St");
+      const d = await seedProperty("4 Unverified St");
+      const jobId = await seedJob({
+        type: "skip_trace",
+        status: "partial",
+        propertyIds: [a, b, c, d],
+        failedItems: 4,
+      });
+      await seedJobItems(jobId, [
+        { propertyId: a, status: "error", errorClass: "provider_transient" },
+        { propertyId: b, status: "error", errorClass: "provider_unknown" },
+        { propertyId: c, status: "error", errorClass: "provider_no_data" },
+        { propertyId: d, status: "error", errorClass: "address_unverified" },
+      ]);
+
+      const result = await retryFailedSkipTraceItems(jobId);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.data.total).toBe(2);
+
+      const { data: child } = await testClient
+        .from("jobs")
+        .select("input_params")
+        .eq("id", result.data.childJobId)
+        .single();
+      const ids = new Set(
+        (child!.input_params as { property_ids: string[] }).property_ids,
+      );
+      expect(ids).toEqual(new Set([a, b]));
+    });
+
+    it("returns NO_RETRYABLE_ITEMS when every error is terminal", async () => {
+      const a = await seedProperty("1 Terminal St");
+      const b = await seedProperty("2 Terminal St");
+      const jobId = await seedJob({
+        type: "skip_trace",
+        status: "failed",
+        propertyIds: [a, b],
+        failedItems: 2,
+      });
+      await seedJobItems(jobId, [
+        { propertyId: a, status: "error", errorClass: "provider_no_data" },
+        { propertyId: b, status: "error", errorClass: "address_unverified" },
+      ]);
+
+      const result = await retryFailedSkipTraceItems(jobId);
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.error.code).toBe("NO_RETRYABLE_ITEMS");
+    });
+
+    it("treats legacy null error_class as retryable (back-compat)", async () => {
+      const p1 = await seedProperty("1 Legacy St");
+      const jobId = await seedJob({
+        type: "skip_trace",
+        status: "failed",
+        propertyIds: [p1],
+        failedItems: 1,
+      });
+      await seedJobItems(jobId, [
+        { propertyId: p1, status: "error" }, // null error_class
+      ]);
+
+      const result = await retryFailedSkipTraceItems(jobId);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.data.total).toBe(1);
+    });
+
+    it("treats legacy 'provider' error_class as retryable (back-compat)", async () => {
+      const p1 = await seedProperty("1 Legacy Provider St");
+      const jobId = await seedJob({
+        type: "skip_trace",
+        status: "failed",
+        propertyIds: [p1],
+        failedItems: 1,
+      });
+      await seedJobItems(jobId, [
+        { propertyId: p1, status: "error", errorClass: "provider" },
+      ]);
+
+      const result = await retryFailedSkipTraceItems(jobId);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.data.total).toBe(1);
+    });
   });
 });
