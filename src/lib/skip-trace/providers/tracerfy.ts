@@ -7,6 +7,7 @@ import {
 import type {
   SkipTraceBatchTicket,
   SkipTraceInput,
+  SkipTraceMailingAddress,
   SkipTracePerson,
   SkipTracePhone,
   SkipTraceProvider,
@@ -45,6 +46,14 @@ type TracerfyEmail = {
   rank: number;
 };
 
+/** Per-person nested mailing address — returned by /trace/lookup/. */
+type TracerfyMailingAddress = {
+  street?: string;
+  city?: string;
+  state?: string;
+  zip?: string;
+};
+
 type TracerfyPerson = {
   first_name?: string;
   last_name?: string;
@@ -53,6 +62,7 @@ type TracerfyPerson = {
   litigator?: boolean;
   phones?: TracerfyPhone[];
   emails?: TracerfyEmail[];
+  mailing_address?: TracerfyMailingAddress;
 };
 
 type TracerfyLookupResponse = {
@@ -82,6 +92,11 @@ type TracerfyQueueRow = TracerfyLookupResponse & {
    *  the batch. We pass through `propertyId` as `external_id` on
    *  submit so we can match results back. */
   external_id?: string;
+  /** Batch responses also surface the owner's mailing address as flat
+   *  row-level fields (no zip in the batch shape per Tracerfy's docs). */
+  mail_address?: string;
+  mail_city?: string;
+  mail_state?: string;
 };
 
 type TracerfyAnalyticsResponse = {
@@ -129,11 +144,22 @@ export class TracerfyProvider implements SkipTraceProvider {
       body,
     );
 
+    const persons = (data.persons ?? []).map(mapPerson);
+    // Surface the first owner's mailing address at the result level so
+    // callers don't have to hunt through `persons` for the owner record.
+    // Falls back to any person's mailing address if no one is flagged
+    // as `property_owner`.
+    const ownerMailing =
+      persons.find((p) => p.isOwner)?.mailingAddress ??
+      persons.find((p) => !!p.mailingAddress)?.mailingAddress ??
+      null;
+
     return {
       propertyId: input.propertyId,
       hit: !!data.hit,
-      persons: (data.persons ?? []).map(mapPerson),
+      persons,
       creditsDeducted: data.credits_deducted ?? 0,
+      mailingAddress: ownerMailing,
       raw: data,
     };
   }
@@ -149,12 +175,21 @@ export class TracerfyProvider implements SkipTraceProvider {
     // earlier API revision but now returns 415 'Unsupported media type'.
     // We include `external_id` per row so the webhook can match results
     // back to our property.
+    //
+    // mail_address_column is required for `normal`/`custom` trace types.
+    // Each row carries the owner's actual mailing address from
+    // `homeowner_details.mailing_*` when we have it, falling back to
+    // the property address for owner-occupied (or unknown) records.
     const rows = inputs.map((i) => ({
       external_id: i.propertyId,
       address: i.address,
       city: i.city,
       state: i.state,
       zip: i.zip ?? "",
+      mail_address: i.mailingAddress ?? i.address,
+      mail_city: i.mailingCity ?? i.city,
+      mail_state: i.mailingState ?? i.state,
+      mail_zip: i.mailingZip ?? i.zip ?? "",
       first_name: i.firstName ?? "",
       last_name: i.lastName ?? "",
     }));
@@ -165,6 +200,9 @@ export class TracerfyProvider implements SkipTraceProvider {
     form.append("city_column", "city");
     form.append("state_column", "state");
     form.append("zip_column", "zip");
+    form.append("mail_address_column", "mail_address");
+    form.append("mail_city_column", "mail_city");
+    form.append("mail_state_column", "mail_state");
     form.append("first_name_column", "first_name");
     form.append("last_name_column", "last_name");
     form.append("trace_type", "normal");
@@ -224,13 +262,29 @@ export class TracerfyProvider implements SkipTraceProvider {
     // some accounts return `{pending: true}` instead. Treat any non-array
     // shape as "still pending."
     if (!Array.isArray(data)) return null;
-    return data.map((row) => ({
-      propertyId: row.external_id ?? "",
-      hit: !!row.hit,
-      persons: (row.persons ?? []).map(mapPerson),
-      creditsDeducted: row.credits_deducted ?? 0,
-      raw: row,
-    }));
+    return data.map((row) => {
+      const persons = (row.persons ?? []).map(mapPerson);
+      // Batch responses surface mailing fields at the row level (per
+      // Tracerfy docs: `mail_address`, `mail_city`, `mail_state`).
+      // No `mail_zip` in the batch shape today.
+      const rowMailing: SkipTraceMailingAddress | null =
+        row.mail_address || row.mail_city || row.mail_state
+          ? {
+              street: row.mail_address ?? null,
+              city: row.mail_city ?? null,
+              state: row.mail_state ?? null,
+              zip: null,
+            }
+          : null;
+      return {
+        propertyId: row.external_id ?? "",
+        hit: !!row.hit,
+        persons,
+        creditsDeducted: row.credits_deducted ?? 0,
+        mailingAddress: rowMailing,
+        raw: row,
+      };
+    });
   }
 
   async getBalance(): Promise<number> {
@@ -279,12 +333,23 @@ export class TracerfyProvider implements SkipTraceProvider {
 }
 
 function mapPerson(p: TracerfyPerson): SkipTracePerson {
+  const m = p.mailing_address;
+  const mailingAddress: SkipTraceMailingAddress | null =
+    m && (m.street || m.city || m.state || m.zip)
+      ? {
+          street: m.street ?? null,
+          city: m.city ?? null,
+          state: m.state ?? null,
+          zip: m.zip ?? null,
+        }
+      : null;
   return {
     firstName: p.first_name ?? null,
     lastName: p.last_name ?? null,
     phones: (p.phones ?? []).map(mapPhone),
     emails: (p.emails ?? []).map((e) => ({ email: e.email, rank: e.rank })),
     isOwner: p.property_owner === true,
+    mailingAddress,
   };
 }
 

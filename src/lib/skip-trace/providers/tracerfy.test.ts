@@ -154,6 +154,132 @@ describe("TracerfyProvider — lookupSingle", () => {
       }),
     ).rejects.toBeInstanceOf(ProviderError);
   });
+
+  it("parses persons[].mailing_address into SkipTracePerson.mailingAddress", async () => {
+    mockFetch({
+      status: 200,
+      body: {
+        address: "1 Main",
+        city: "KC",
+        state: "MO",
+        hit: true,
+        persons_count: 1,
+        credits_deducted: 5,
+        persons: [
+          {
+            first_name: "Jane",
+            last_name: "Doe",
+            property_owner: true,
+            mailing_address: {
+              street: "PO Box 111",
+              city: "Austin",
+              state: "TX",
+              zip: "78702",
+            },
+            phones: [],
+            emails: [],
+          },
+        ],
+      },
+    });
+    const p = new TracerfyProvider("k");
+    const result = await p.lookupSingle({
+      propertyId: "prop-1",
+      address: "1 Main",
+      city: "KC",
+      state: "MO",
+    });
+    expect(result.persons[0].mailingAddress).toEqual({
+      street: "PO Box 111",
+      city: "Austin",
+      state: "TX",
+      zip: "78702",
+    });
+    // Result-level mailingAddress mirrors the owner's mailing
+    expect(result.mailingAddress).toEqual({
+      street: "PO Box 111",
+      city: "Austin",
+      state: "TX",
+      zip: "78702",
+    });
+  });
+
+  it("returns mailingAddress=null when no person has one", async () => {
+    mockFetch({
+      status: 200,
+      body: {
+        address: "1 Main",
+        city: "KC",
+        state: "MO",
+        hit: true,
+        persons_count: 1,
+        credits_deducted: 5,
+        persons: [
+          { first_name: "Jane", phones: [], emails: [] },
+        ],
+      },
+    });
+    const p = new TracerfyProvider("k");
+    const result = await p.lookupSingle({
+      propertyId: "prop-1",
+      address: "1 Main",
+      city: "KC",
+      state: "MO",
+    });
+    expect(result.persons[0].mailingAddress).toBeNull();
+    expect(result.mailingAddress).toBeNull();
+  });
+});
+
+describe("TracerfyProvider — submitBatch mailing address", () => {
+  it("sends real homeowner mailing address when provided", async () => {
+    mockFetch({
+      status: 200,
+      body: { queue_id: 1, credits_per_lead: 1, estimated_wait_seconds: 0 },
+    });
+    const p = new TracerfyProvider("k");
+    await p.submitBatch([
+      {
+        propertyId: "prop-A",
+        address: "1 Main St",
+        city: "KC",
+        state: "MO",
+        // Owner is absentee — real mailing address differs from property
+        mailingAddress: "PO Box 9000",
+        mailingCity: "Springfield",
+        mailingState: "MO",
+        mailingZip: "65801",
+      },
+    ]);
+    const init = (global.fetch as ReturnType<typeof vi.fn>).mock.calls[0][1] as RequestInit;
+    const form = init.body as FormData;
+    const rows = JSON.parse(form.get("json_data") as string);
+    expect(rows[0].mail_address).toBe("PO Box 9000");
+    expect(rows[0].mail_city).toBe("Springfield");
+    expect(rows[0].mail_state).toBe("MO");
+    expect(rows[0].mail_zip).toBe("65801");
+  });
+
+  it("falls back to property address when no mailing supplied", async () => {
+    mockFetch({
+      status: 200,
+      body: { queue_id: 1, credits_per_lead: 1, estimated_wait_seconds: 0 },
+    });
+    const p = new TracerfyProvider("k");
+    await p.submitBatch([
+      { propertyId: "prop-A", address: "1 Main St", city: "KC", state: "MO" },
+    ]);
+    const init = (global.fetch as ReturnType<typeof vi.fn>).mock.calls[0][1] as RequestInit;
+    const form = init.body as FormData;
+    const rows = JSON.parse(form.get("json_data") as string);
+    expect(rows[0].mail_address).toBe("1 Main St");
+    expect(rows[0].mail_city).toBe("KC");
+    expect(rows[0].mail_state).toBe("MO");
+    // mail_address_column is required for normal/custom traces
+    expect(form.get("mail_address_column")).toBe("mail_address");
+    expect(form.get("mail_city_column")).toBe("mail_city");
+    expect(form.get("mail_state_column")).toBe("mail_state");
+  });
 });
 
 describe("TracerfyProvider — submitBatch", () => {
@@ -245,6 +371,56 @@ describe("TracerfyProvider — pollBatch", () => {
     expect(result).not.toBeNull();
     expect(result![0].propertyId).toBe("prop-A");
     expect(result![0].hit).toBe(true);
+  });
+
+  it("parses row-level mail_address fields into result.mailingAddress", async () => {
+    mockFetch({
+      status: 200,
+      body: [
+        {
+          external_id: "prop-A",
+          address: "1 Main",
+          city: "KC",
+          state: "MO",
+          hit: true,
+          credits_deducted: 1,
+          persons: [],
+          // Tracerfy's batch shape surfaces mailing fields at the row
+          // level (no zip in batch responses per their docs).
+          mail_address: "PO Box 222",
+          mail_city: "Springfield",
+          mail_state: "MO",
+        },
+      ],
+    });
+    const p = new TracerfyProvider("k");
+    const result = await p.pollBatch("42");
+    expect(result![0].mailingAddress).toEqual({
+      street: "PO Box 222",
+      city: "Springfield",
+      state: "MO",
+      zip: null,
+    });
+  });
+
+  it("leaves mailingAddress null when no mail_* fields are present", async () => {
+    mockFetch({
+      status: 200,
+      body: [
+        {
+          external_id: "prop-A",
+          address: "1 Main",
+          city: "KC",
+          state: "MO",
+          hit: false,
+          credits_deducted: 0,
+          persons: [],
+        },
+      ],
+    });
+    const p = new TracerfyProvider("k");
+    const result = await p.pollBatch("42");
+    expect(result![0].mailingAddress).toBeNull();
   });
 });
 

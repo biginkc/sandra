@@ -82,15 +82,42 @@ export async function runSkipTraceEnrichment(
   //    - cachedResults: results we can persist immediately
   //    - misses: properties needing a real provider call
   // ------------------------------------------------------------------
+  // Pull property + the homeowner's mailing address (if any) in two
+  // shots — Supabase's PostgREST joins via the homeowner_contact_id FK
+  // would also work, but the explicit two-query path keeps the type
+  // story simple and the mailing-fields-may-be-null branch obvious.
   const { data: properties } = await supabase
     .from("properties")
-    .select("id, address, city, state, zip")
+    .select("id, address, city, state, zip, homeowner_contact_id")
     .in("id", params.propertyIds);
 
   if (!properties || properties.length === 0) {
     await markJobFailed(supabase, params.jobId, "No properties found");
     return summary;
   }
+
+  const homeownerIds = properties
+    .map((p) => p.homeowner_contact_id)
+    .filter((id): id is string => typeof id === "string");
+
+  const { data: homeowners } = homeownerIds.length
+    ? await supabase
+        .from("homeowner_details")
+        .select(
+          "contact_id, mailing_address, mailing_city, mailing_state, mailing_zip",
+        )
+        .in("contact_id", homeownerIds)
+    : { data: [] as Array<{
+        contact_id: string;
+        mailing_address: string | null;
+        mailing_city: string | null;
+        mailing_state: string | null;
+        mailing_zip: string | null;
+      }> };
+
+  const mailingByContact = new Map(
+    (homeowners ?? []).map((h) => [h.contact_id, h]),
+  );
 
   const cachedResults: SkipTraceResult[] = [];
   const misses: SkipTraceInput[] = [];
@@ -120,12 +147,19 @@ export async function runSkipTraceEnrichment(
       cachedResults.push({ ...cached.result, propertyId });
       summary.cached_hits++;
     } else {
+      const mailing = p.homeowner_contact_id
+        ? mailingByContact.get(p.homeowner_contact_id)
+        : null;
       misses.push({
         propertyId,
         address: p.address,
         city: p.city ?? "",
         state: p.state,
         zip: p.zip ?? null,
+        mailingAddress: mailing?.mailing_address ?? null,
+        mailingCity: mailing?.mailing_city ?? null,
+        mailingState: mailing?.mailing_state ?? null,
+        mailingZip: mailing?.mailing_zip ?? null,
       });
     }
   }

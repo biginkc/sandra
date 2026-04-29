@@ -9,6 +9,9 @@ export type PersistOutcome = {
   contactId?: string;
   phonesAdded: number;
   emailsAdded: number;
+  /** True when the provider returned an owner mailing address that
+   *  filled at least one previously-empty field on homeowner_details. */
+  mailingAddressAdded?: boolean;
 };
 
 /**
@@ -182,12 +185,94 @@ export async function persistSkipTraceResult(
     throw new Error(`contact update failed: ${updErr.message}`);
   }
 
+  // Mailing address upsert. Skip-trace providers often discover the
+  // owner's current mailing address as part of the response; capture
+  // it into homeowner_details so future direct mail goes to the right
+  // place. Only fills empty fields — never overwrites mailing data
+  // the original CSV import already carried, which we treat as the
+  // source of truth.
+  const ownerMailing = owner.mailingAddress ?? result.mailingAddress ?? null;
+  const mailingAdded = await upsertOwnerMailing(supabase, {
+    contactId,
+    mailing: ownerMailing,
+  });
+
   return {
     status: "matched",
     contactId,
     phonesAdded,
     emailsAdded,
+    mailingAddressAdded: mailingAdded,
   };
+}
+
+/**
+ * Upsert homeowner_details with provider-returned mailing fields. Only
+ * fills NULL fields on an existing row, preserving CSV-imported values.
+ * Inserts a fresh row when the contact has no homeowner_details yet.
+ *
+ * Returns true when at least one mailing field was newly written.
+ */
+async function upsertOwnerMailing(
+  supabase: SupabaseClient<Database>,
+  args: {
+    contactId: string;
+    mailing: {
+      street?: string | null;
+      city?: string | null;
+      state?: string | null;
+      zip?: string | null;
+    } | null;
+  },
+): Promise<boolean> {
+  if (!args.mailing) return false;
+  const incoming = {
+    mailing_address: args.mailing.street?.trim() || null,
+    mailing_city: args.mailing.city?.trim() || null,
+    mailing_state: args.mailing.state?.trim() || null,
+    mailing_zip: args.mailing.zip?.trim() || null,
+  };
+  // Nothing usable came back.
+  if (
+    !incoming.mailing_address &&
+    !incoming.mailing_city &&
+    !incoming.mailing_state &&
+    !incoming.mailing_zip
+  ) {
+    return false;
+  }
+
+  const { data: existing } = await supabase
+    .from("homeowner_details")
+    .select("contact_id, mailing_address, mailing_city, mailing_state, mailing_zip")
+    .eq("contact_id", args.contactId)
+    .maybeSingle();
+
+  // Compute the merged values: keep whatever's already there, fill blanks.
+  const merged = {
+    mailing_address: existing?.mailing_address ?? incoming.mailing_address,
+    mailing_city: existing?.mailing_city ?? incoming.mailing_city,
+    mailing_state: existing?.mailing_state ?? incoming.mailing_state,
+    mailing_zip: existing?.mailing_zip ?? incoming.mailing_zip,
+  };
+
+  // Did we actually fill any blank?
+  const wroteSomething =
+    (incoming.mailing_address && !existing?.mailing_address) ||
+    (incoming.mailing_city && !existing?.mailing_city) ||
+    (incoming.mailing_state && !existing?.mailing_state) ||
+    (incoming.mailing_zip && !existing?.mailing_zip);
+
+  if (!wroteSomething && existing) return false;
+
+  await supabase
+    .from("homeowner_details")
+    .upsert(
+      { contact_id: args.contactId, ...merged },
+      { onConflict: "contact_id" },
+    );
+
+  return !!wroteSomething;
 }
 
 /**
