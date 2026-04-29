@@ -149,12 +149,22 @@ export class TracerfyProvider implements SkipTraceProvider {
     // earlier API revision but now returns 415 'Unsupported media type'.
     // We include `external_id` per row so the webhook can match results
     // back to our property.
+    //
+    // mail_address: Tracerfy's normal trace requires both a property
+    // address column AND a mail address column. We don't yet thread the
+    // homeowner's actual mailing address through SkipTraceInput; for
+    // owner-occupied properties the property address IS the mail address
+    // and for absentees it's an acceptable approximation that Tracerfy
+    // still processes. Wiring real homeowner_mailing_address through is
+    // a follow-up that requires extending SkipTraceInput + joining
+    // homeowner_details in the runner's property fetch.
     const rows = inputs.map((i) => ({
       external_id: i.propertyId,
       address: i.address,
       city: i.city,
       state: i.state,
       zip: i.zip ?? "",
+      mail_address: i.address,
       first_name: i.firstName ?? "",
       last_name: i.lastName ?? "",
     }));
@@ -165,6 +175,7 @@ export class TracerfyProvider implements SkipTraceProvider {
     form.append("city_column", "city");
     form.append("state_column", "state");
     form.append("zip_column", "zip");
+    form.append("mail_address_column", "mail_address");
     form.append("first_name_column", "first_name");
     form.append("last_name_column", "last_name");
     form.append("trace_type", "normal");

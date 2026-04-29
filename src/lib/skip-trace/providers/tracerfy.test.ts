@@ -199,6 +199,13 @@ describe("TracerfyProvider — submitBatch", () => {
     expect(form.get("address_column")).toBe("address");
     expect(form.get("city_column")).toBe("city");
     expect(form.get("state_column")).toBe("state");
+    // mail_address_column is required for normal/custom traces
+    // (Tracerfy 400 'mail_address_column is required' otherwise). Until
+    // we thread real homeowner_mailing_address through SkipTraceInput,
+    // mail_address falls back to the property address.
+    expect(form.get("mail_address_column")).toBe("mail_address");
+    expect(rows[0].mail_address).toBe("1 Main");
+    expect(rows[1].mail_address).toBe("2 Main");
 
     // Critical: no manual Content-Type — fetch must set it with the
     // boundary or the server can't parse the multipart body.
