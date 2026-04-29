@@ -108,10 +108,15 @@ export async function POST(
     { auth: { persistSession: false } },
   );
 
+  // Restrict to consumer_type='lead' so a provider secret (e.g.,
+  // skip-trace's webhook secret) cannot authenticate as a lead intake
+  // even if it leaks. Cross-protection alongside per-row enabled +
+  // revoked_at checks.
   const { data: consumer, error: lookupErr } = await supabase
     .from("webhook_consumers")
     .select("id, name, default_source, enabled, revoked_at")
     .eq("secret_hash", secretHash)
+    .eq("consumer_type", "lead")
     .maybeSingle();
   if (lookupErr) {
     reportError(lookupErr, {

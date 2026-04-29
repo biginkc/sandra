@@ -27,7 +27,8 @@ function hashSecret(plaintext: string): string {
 async function seedConsumer(opts: {
   name: string;
   secret: string;
-  defaultSource: string;
+  defaultSource: string | null;
+  consumerType?: "lead" | "provider";
   enabled?: boolean;
   revoked?: boolean;
 }): Promise<string> {
@@ -37,6 +38,7 @@ async function seedConsumer(opts: {
       name: opts.name,
       secret_hash: hashSecret(opts.secret),
       default_source: opts.defaultSource,
+      consumer_type: opts.consumerType ?? "lead",
       enabled: opts.enabled ?? true,
       revoked_at: opts.revoked ? new Date().toISOString() : null,
     })
@@ -154,6 +156,24 @@ describe("POST /api/webhooks/leads/[secret] (per-consumer auth)", () => {
 
     const response = await POST(
       makeRequest({ property: { address: "4 Disabled Ln", state: "MO" } }, PPC_SECRET),
+      makeContext(PPC_SECRET),
+    );
+    expect(response.status).toBe(403);
+  });
+
+  it("cross-protection: rejects with 403 when secret belongs to a provider-type consumer (not a lead)", async () => {
+    // Seed a provider-type consumer (e.g., the skip-trace webhook
+    // secret). Its hash exists in the table, but the leads route's
+    // consumer_type='lead' filter must reject it.
+    await seedConsumer({
+      name: "Skip Trace Provider",
+      secret: PPC_SECRET,
+      defaultSource: null,
+      consumerType: "provider",
+    });
+
+    const response = await POST(
+      makeRequest({ property: { address: "5b Wrong Type Ln", state: "MO" } }, PPC_SECRET),
       makeContext(PPC_SECRET),
     );
     expect(response.status).toBe(403);

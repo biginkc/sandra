@@ -1551,9 +1551,10 @@ export type Database = {
       }
       webhook_consumers: {
         Row: {
+          consumer_type: string
           created_at: string
           created_by: string | null
-          default_source: string
+          default_source: string | null
           enabled: boolean
           id: string
           last_used_at: string | null
@@ -1563,9 +1564,10 @@ export type Database = {
           secret_hash: string
         }
         Insert: {
+          consumer_type: string
           created_at?: string
           created_by?: string | null
-          default_source: string
+          default_source?: string | null
           enabled?: boolean
           id?: string
           last_used_at?: string | null
@@ -1575,9 +1577,10 @@ export type Database = {
           secret_hash: string
         }
         Update: {
+          consumer_type?: string
           created_at?: string
           created_by?: string | null
-          default_source?: string
+          default_source?: string | null
           enabled?: boolean
           id?: string
           last_used_at?: string | null
