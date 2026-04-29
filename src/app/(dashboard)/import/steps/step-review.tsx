@@ -150,6 +150,23 @@ export function StepReview({ state }: Props) {
           </section>
         )}
 
+        {/* Row 2.5 — Info skips section (won't add a new property) */}
+        {breakdown.infoSkips.length > 0 && (
+          <section>
+            <header className="border-muted-foreground/30 mb-3 flex items-center gap-2 border-t pt-3">
+              <Info className="text-muted-foreground size-4" />
+              <span className="text-muted-foreground text-xs font-bold tracking-widest uppercase">
+                Won&apos;t add a new property — info only
+              </span>
+            </header>
+            <ul className="divide-border border-border divide-y rounded-md border">
+              {breakdown.infoSkips.map((g) => (
+                <IssueRow key={g.ruleKey} group={g} />
+              ))}
+            </ul>
+          </section>
+        )}
+
         {/* Row 3 — Warning section */}
         {breakdown.warnings.length > 0 && (
           <section>
