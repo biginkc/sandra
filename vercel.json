@@ -10,7 +10,7 @@
     },
     {
       "path": "/api/cron/sweep-stuck-skip-trace",
-      "schedule": "*/5 * * * *"
+      "schedule": "*/1 * * * *"
     }
   ]
 }
