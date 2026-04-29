@@ -33,8 +33,23 @@ export type ActivityRow =
       property_id: string;
       sequence_name: string;
     }
-  | { kind: "skip_trace_done"; at: string; job_type: string; job_status: string }
-  | { kind: "import_done"; at: string; job_type: string; job_status: string }
+  | {
+      kind: "skip_trace_done";
+      at: string;
+      /** Added in migration 028 — lets the activity feed deep-link to
+       *  /jobs/<id> instead of /jobs (the list). */
+      job_id: string;
+      job_type: string;
+      job_status: string;
+    }
+  | {
+      kind: "import_done";
+      at: string;
+      /** Added in migration 028 — see skip_trace_done note above. */
+      job_id: string;
+      job_type: string;
+      job_status: string;
+    }
   | {
       kind: "ai_escalation";
       at: string;

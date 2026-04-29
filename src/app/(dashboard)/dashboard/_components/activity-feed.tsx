@@ -111,7 +111,9 @@ function formatEvent(event: ActivityRow): EventMeta {
         iconBg: "bg-stone-100",
         iconColor: "text-stone-700",
         summary: "Import job finished",
-        href: "/jobs",
+        // Deep-link to the job detail page (migration 028 added job_id
+        // to the dashboard_summary RPC's activity events).
+        href: event.job_id ? `/jobs/${event.job_id}` : "/jobs",
       };
     case "skip_trace_done":
       return {
@@ -119,7 +121,7 @@ function formatEvent(event: ActivityRow): EventMeta {
         iconBg: "bg-stone-100",
         iconColor: "text-stone-700",
         summary: "Skip-trace job finished",
-        href: "/jobs",
+        href: event.job_id ? `/jobs/${event.job_id}` : "/jobs",
       };
     case "ai_escalation":
       return {
