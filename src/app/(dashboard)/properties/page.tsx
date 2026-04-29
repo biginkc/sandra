@@ -115,10 +115,37 @@ export default async function PropertiesPage({
 
   const isAdmin = isAdminEmail(user?.email);
 
+  // Cross-page CASS breakdown — shown in the header subhead so the
+  // operator can see at a glance how many prospects are skip-trace
+  // ready (verified) vs blocked behind address verification. Per-row
+  // dots in the table show the same on individual rows.
+  const cassStats = await (async () => {
+    if (total === 0) return null;
+    const counts = await Promise.all(
+      ["verified", "unverified", "invalid", "ambiguous"].map(async (s) => {
+        const { count: c } = await supabase
+          .from("properties")
+          .select("id", { count: "exact", head: true })
+          .eq("status", "prospect")
+          .is("deleted_at", null)
+          .eq("cass_status", s);
+        return [s, c ?? 0] as const;
+      }),
+    );
+    return Object.fromEntries(counts) as Record<
+      "verified" | "unverified" | "invalid" | "ambiguous",
+      number
+    >;
+  })();
+
+  const cassBreakdown = cassStats
+    ? ` · ${cassStats.verified.toLocaleString()} CASS verified · ${cassStats.unverified.toLocaleString()} unverified${cassStats.invalid > 0 ? ` · ${cassStats.invalid.toLocaleString()} invalid` : ""}${cassStats.ambiguous > 0 ? ` · ${cassStats.ambiguous.toLocaleString()} ambiguous` : ""}`
+    : "";
+
   const headerCount =
     total === 0
       ? "No prospects yet. Import a CSV to fill the data lake."
-      : `Showing ${showingFrom}–${showingTo} of ${total} prospect${total === 1 ? "" : "s"}. Qualify a prospect to move it into the leads pipeline.`;
+      : `Showing ${showingFrom}–${showingTo} of ${total} prospect${total === 1 ? "" : "s"}${cassBreakdown}. Qualify a prospect to move it into the leads pipeline.`;
 
   return (
     <Page>
