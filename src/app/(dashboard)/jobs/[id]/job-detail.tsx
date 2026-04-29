@@ -68,15 +68,33 @@ export function JobDetail({
       (job.failed_items ?? 0),
   );
 
-  // Skip-trace retry — only renders for failed/partial skip_trace jobs
-  // with at least one property to retry. Mirrors the server action's
-  // resolution: errored job_items first, then input_params fallback for
-  // pre-#59 jobs where Tracerfy results never fanned to per-property
-  // items.
+  // Skip-trace retry — categorize errored items so the user can see
+  // which are retryable, which are confirmed no-data (terminal), and
+  // which need CASS verification first.
+  const RETRYABLE_CLASSES = new Set([
+    "provider_transient",
+    "provider_unknown",
+    "provider", // legacy
+    "database",
+    "internal",
+    "transient",
+  ]);
   const isSkipTraceRetryable =
     job.type === "skip_trace" &&
     (job.status === "failed" || job.status === "partial");
-  const hasErroredItems = items.some((i) => i.status === "error");
+  const erroredItems = items.filter((i) => i.status === "error");
+  const hasErroredItems = erroredItems.length > 0;
+  const noDataCount = erroredItems.filter(
+    (i) => i.error_class === "provider_no_data",
+  ).length;
+  const cassUnverifiedCount = erroredItems.filter(
+    (i) => i.error_class === "address_unverified",
+  ).length;
+  const itemRetryableCount = erroredItems.filter(
+    (i) =>
+      i.error_class === null ||
+      RETRYABLE_CLASSES.has(i.error_class as string),
+  ).length;
   const fallbackPropertyCount = (() => {
     const ids = (job.input_params as { property_ids?: unknown } | null)
       ?.property_ids;
@@ -84,7 +102,11 @@ export function JobDetail({
       ? ids.filter((x) => typeof x === "string" && x.length > 0).length
       : 0;
   })();
-  const retryCount = hasErroredItems ? job.failed_items : fallbackPropertyCount;
+  // When we have items, use the retryable-only count; otherwise fall back
+  // to input_params (pre-#59 jobs that never wrote items at all).
+  const retryCount = hasErroredItems
+    ? itemRetryableCount
+    : fallbackPropertyCount;
   const inFlightChild =
     childJobs.find(
       (c) =>
@@ -106,6 +128,8 @@ export function JobDetail({
           <RetrySkipTraceButton
             jobId={job.id}
             retryCount={retryCount}
+            noDataCount={noDataCount}
+            cassUnverifiedCount={cassUnverifiedCount}
             inFlightChildId={inFlightChild?.id ?? null}
           />
         ) : null}
@@ -509,7 +533,17 @@ function ItemsTable({ items }: { items: JobItem[] }) {
                     )}
                   </TableCell>
                   <TableCell className="text-muted-foreground text-sm">
-                    {item.error_message ?? ""}
+                    <div className="flex flex-col items-start gap-1">
+                      {item.error_class ? (
+                        <Badge
+                          variant={errorClassVariant(item.error_class)}
+                          className="text-xs"
+                        >
+                          {errorClassLabel(item.error_class)}
+                        </Badge>
+                      ) : null}
+                      {item.error_message ? <span>{item.error_message}</span> : null}
+                    </div>
                   </TableCell>
                 </TableRow>
               ))}
@@ -645,6 +679,51 @@ function itemStatusVariant(
   if (status === "error") return "destructive";
   if (status === "skipped") return "secondary";
   return "outline";
+}
+
+/**
+ * Human-readable label for a job_items.error_class value. Defaults to
+ * the raw value for unknown classes so the UI doesn't go silent on a
+ * legacy or future code we haven't taught it yet.
+ */
+function errorClassLabel(klass: string): string {
+  switch (klass) {
+    case "provider_no_data":
+      return "No data at vendor";
+    case "address_unverified":
+      return "CASS unverified";
+    case "provider_transient":
+      return "Vendor transient";
+    case "provider_unknown":
+      return "Vendor error";
+    case "provider":
+      return "Vendor error"; // legacy
+    case "database":
+      return "Database error";
+    case "internal":
+      return "Internal error";
+    case "transient":
+      return "Transient";
+    case "configuration":
+      return "Config error";
+    case "validation":
+      return "Validation";
+    case "authorization":
+      return "Authorization";
+    default:
+      return klass;
+  }
+}
+
+function errorClassVariant(
+  klass: string,
+): "default" | "secondary" | "destructive" | "outline" {
+  // Terminal classes look distinct from retryable ones — use outline
+  // so they read "informational, no action" rather than alarming.
+  if (klass === "provider_no_data" || klass === "address_unverified") {
+    return "outline";
+  }
+  return "secondary";
 }
 
 function durationLabel(job: Job): string {

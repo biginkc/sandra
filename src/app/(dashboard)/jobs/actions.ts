@@ -363,10 +363,26 @@ export async function retryFailedSkipTraceItems(
       };
     }
 
-    // Resolution: errored job_items first, then input_params fallback.
+    // Resolution: retryable errored job_items first, then input_params
+    // fallback. "Retryable" = error_class that could plausibly succeed
+    // on a fresh provider call. `provider_no_data` is terminal (verified
+    // address, vendor empty); `address_unverified` needs CASS first
+    // before re-running. Both are excluded so the user doesn't waste
+    // vendor credits learning the same answer twice.
+    const RETRYABLE_ERROR_CLASSES = [
+      "provider_transient",
+      "provider_unknown",
+      // Legacy values written before classification existed — treat
+      // as retryable by default so existing partial jobs don't get
+      // stranded.
+      "provider",
+      "database",
+      "internal",
+      "transient",
+    ];
     const { data: erroredItems, error: itemsErr } = await supabase
       .from("job_items")
-      .select("property_id")
+      .select("property_id, error_class")
       .eq("job_id", failedJobId)
       .eq("status", "error")
       .not("property_id", "is", null);
@@ -377,15 +393,37 @@ export async function retryFailedSkipTraceItems(
       };
     }
 
-    let propertyIds = Array.from(
-      new Set(
-        (erroredItems ?? [])
-          .map((r) => r.property_id)
-          .filter((id): id is string => typeof id === "string"),
-      ),
+    const allErroredIds = new Set(
+      (erroredItems ?? [])
+        .map((r) => r.property_id)
+        .filter((id): id is string => typeof id === "string"),
+    );
+    const retryableIds = new Set(
+      (erroredItems ?? [])
+        .filter((r) =>
+          r.error_class === null ||
+          RETRYABLE_ERROR_CLASSES.includes(r.error_class as string),
+        )
+        .map((r) => r.property_id)
+        .filter((id): id is string => typeof id === "string"),
     );
 
-    if (propertyIds.length === 0) {
+    let propertyIds: string[];
+    if (allErroredIds.size > 0) {
+      // Items exist — filter by retryability.
+      propertyIds = Array.from(retryableIds);
+      if (propertyIds.length === 0) {
+        return {
+          ok: false,
+          error: {
+            code: "NO_RETRYABLE_ITEMS",
+            message:
+              "All errored items are terminal (no provider data or address-unverified) — retry would waste vendor credits.",
+          },
+        };
+      }
+    } else {
+      // No items at all — pre-#59 fallback. Use input_params.
       const fallback = (parent.input_params as { property_ids?: unknown } | null)
         ?.property_ids;
       propertyIds = Array.isArray(fallback)
@@ -397,17 +435,16 @@ export async function retryFailedSkipTraceItems(
             ),
           )
         : [];
-    }
-
-    if (propertyIds.length === 0) {
-      return {
-        ok: false,
-        error: {
-          code: "NO_PROPERTY_IDS",
-          message:
-            "This job has no errored items and no fallback property_ids — nothing to retry.",
-        },
-      };
+      if (propertyIds.length === 0) {
+        return {
+          ok: false,
+          error: {
+            code: "NO_PROPERTY_IDS",
+            message:
+              "This job has no errored items and no fallback property_ids — nothing to retry.",
+          },
+        };
+      }
     }
 
     const { data: childRow, error: insertErr } = await supabase

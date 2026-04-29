@@ -63,7 +63,9 @@ test.describe("/jobs/[id] retry button", () => {
     await expect(page.locator("text=Something went wrong.")).toHaveCount(0);
 
     // Button visible with the fallback count from input_params.property_ids.
-    const retry = page.getByRole("button", { name: /^Retry 3 properties$/ });
+    // Pre-#59 jobs (no job_items at all) use the input_params count as
+    // the retryable count — same as the count shown in the button label.
+    const retry = page.getByRole("button", { name: /^Retry 3 retryable$/ });
     await expect(retry).toBeVisible();
 
     // Open the dialog and check copy.
@@ -80,6 +82,75 @@ test.describe("/jobs/[id] retry button", () => {
     expect(children ?? []).toHaveLength(0);
 
     expect(errors, errors.join("\n")).toHaveLength(0);
+  });
+
+  test("classifies error rows by error_class and hides button when all errors are terminal", async ({
+    page,
+  }) => {
+    const admin = adminClient();
+    await resetTenantTables(admin);
+    const orgRes = await admin.from("organizations").select("id").limit(1).single();
+    const orgId = orgRes.data!.id;
+
+    const propIds: string[] = [];
+    for (let i = 0; i < 2; i++) {
+      const { data } = await admin
+        .from("properties")
+        .insert({
+          address: `${i + 1} Terminal Ln`,
+          state: "MO",
+          status: "prospect",
+          cass_status: "verified",
+        })
+        .select("id")
+        .single();
+      propIds.push(data!.id);
+    }
+
+    const { data: jobRow } = await admin
+      .from("jobs")
+      .insert({
+        type: "skip_trace",
+        provider: "tracerfy",
+        status: "failed",
+        org_id: orgId,
+        total_items: 2,
+        processed_items: 2,
+        failed_items: 2,
+        title: "Terminal-only failure",
+        input_params: { property_ids: propIds },
+      })
+      .select("id")
+      .single();
+
+    // Both errors are terminal — should hide the retry button.
+    await admin.from("job_items").insert([
+      {
+        job_id: jobRow!.id,
+        property_id: propIds[0],
+        status: "error",
+        error_class: "provider_no_data",
+        error_message: "Provider has no owner data for this address.",
+      },
+      {
+        job_id: jobRow!.id,
+        property_id: propIds[1],
+        status: "error",
+        error_class: "address_unverified",
+        error_message: "Address not USPS-verified.",
+      },
+    ]);
+
+    await page.goto(`/jobs/${jobRow!.id}`);
+
+    // Retry button should not appear: zero retryable items.
+    await expect(
+      page.getByRole("button", { name: /^Retry/ }),
+    ).toHaveCount(0);
+
+    // The error_class badges should render in the items table.
+    await expect(page.getByText("No data at vendor").first()).toBeVisible();
+    await expect(page.getByText("CASS unverified").first()).toBeVisible();
   });
 
   test("hides retry button on a completed skip_trace job", async ({ page }) => {

@@ -93,7 +93,7 @@ export async function runSkipTraceEnrichment(
   // story simple and the mailing-fields-may-be-null branch obvious.
   const { data: properties } = await supabase
     .from("properties")
-    .select("id, address, city, state, zip, homeowner_contact_id")
+    .select("id, address, city, state, zip, homeowner_contact_id, cass_status")
     .in("id", params.propertyIds);
 
   if (!properties || properties.length === 0) {
@@ -209,7 +209,8 @@ export async function runSkipTraceEnrichment(
     } catch (e) {
       summary.failed++;
       const msg = e instanceof Error ? e.message : String(e);
-      const klass = e instanceof ProviderError ? "provider" : "database";
+      const klass: "provider_transient" | "provider_unknown" | "database" =
+        e instanceof ProviderError ? classifyProviderError(e) : "database";
       reportError(e, {
         tags: { surface: "skip_trace_lookup_single" },
         extra: { propertyId: misses[0].propertyId, jobId: params.jobId },
@@ -422,7 +423,7 @@ export async function finalizeSkipTraceFromBatch(
     allRelatedPropertyIds.size > 0
       ? await supabase
           .from("properties")
-          .select("id, address, city, state, zip")
+          .select("id, address, city, state, zip, cass_status")
           .in("id", Array.from(allRelatedPropertyIds))
       : { data: [] };
   const propsById = new Map((props ?? []).map((p) => [p.id, p]));
@@ -487,18 +488,55 @@ export async function finalizeSkipTraceFromBatch(
     }
     for (const propertyId of missing) {
       summary.failed++;
+      const p = propsById.get(propertyId);
+      const isCassVerified = p?.cass_status === "verified";
+
+      // Verified address + no provider row = "vendor genuinely empty"
+      // (terminal). Unverified address = upstream block, can't tell if
+      // the vendor would have data once normalized.
+      const klass: "provider_no_data" | "address_unverified" = isCassVerified
+        ? "provider_no_data"
+        : "address_unverified";
+      const errorMessage = isCassVerified
+        ? "Provider has no owner data for this address."
+        : "Address not USPS-verified (CASS); cannot reliably look up. Verify the address first.";
+
       try {
         await insertJobItem(supabase, params.jobId, propertyId, {
           status: "error",
-          error_class: "provider",
-          error_message:
-            "Provider did not return a result row for this property's address.",
+          error_class: klass,
+          error_message: errorMessage,
         });
       } catch (e) {
         reportError(e, {
           tags: { surface: "skip_trace_finalize_missing_item" },
           extra: { jobId: params.jobId, propertyId },
         });
+      }
+
+      // Cache the "no data" verdict for verified addresses so future
+      // runs hit cache instead of re-paying the vendor. Skip
+      // unverified — their normalized address will change once CASS
+      // runs, so the cache key would be stale anyway.
+      if (isCassVerified && p) {
+        try {
+          await writeCache(
+            supabase,
+            providerId,
+            normalizeAddress({
+              address: p.address,
+              city: p.city,
+              state: p.state,
+              zip: p.zip,
+            }),
+            emptyNoMatchResult(propertyId),
+          );
+        } catch (e) {
+          reportError(e, {
+            tags: { surface: "skip_trace_finalize_cache_no_match" },
+            extra: { jobId: params.jobId, propertyId },
+          });
+        }
       }
     }
   }
@@ -601,6 +639,40 @@ async function persistAndRecord(
 }
 
 /**
+ * Classify a ProviderError into a retryability bucket. HTTP 429 + 5xx
+ * are transient (retry will likely succeed once the vendor recovers);
+ * everything else lands in `provider_unknown` (still retryable but
+ * worth a second look).
+ */
+function classifyProviderError(
+  err: ProviderError,
+): "provider_transient" | "provider_unknown" {
+  const status =
+    typeof err.details?.status === "number" ? err.details.status : null;
+  if (status === 429) return "provider_transient";
+  if (status !== null && status >= 500 && status < 600) return "provider_transient";
+  return "provider_unknown";
+}
+
+/**
+ * Build the empty SkipTraceResult written to cache for an address whose
+ * provider lookup confirmed "no data." Stored so subsequent skip-trace
+ * runs hit cache and avoid re-paying the vendor for the same null
+ * answer. Only called for CASS-verified addresses — caching a negative
+ * for an unverified address would go stale once CASS normalization
+ * changes the cache key.
+ */
+function emptyNoMatchResult(propertyId: string): SkipTraceResult {
+  return {
+    propertyId,
+    hit: false,
+    persons: [],
+    creditsDeducted: 0,
+    raw: { provider_no_data: true },
+  };
+}
+
+/**
  * Insert a row into `job_items` for a single property's outcome.
  *
  * Throws on Supabase errors so callers can surface (and the
@@ -614,7 +686,17 @@ async function insertJobItem(
   propertyId: string,
   fields: {
     status: "success" | "error" | "skipped";
-    error_class?: "database" | "provider" | "configuration" | "validation" | "transient" | "authorization";
+    error_class?:
+      | "database"
+      | "provider"
+      | "provider_no_data"
+      | "address_unverified"
+      | "provider_transient"
+      | "provider_unknown"
+      | "configuration"
+      | "validation"
+      | "transient"
+      | "authorization";
     error_message?: string;
     result?: Record<string, unknown>;
   },

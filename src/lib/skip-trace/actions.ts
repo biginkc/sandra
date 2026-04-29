@@ -60,12 +60,16 @@ export async function requestSkipTrace(
       };
     }
 
-    // Filter out properties flagged as do-not-skip-trace. Bulk requests
-    // silently drop them; if every property is filtered, refuse the
-    // whole job with a friendly message.
+    // Filter out two classes of property up-front so we never spend
+    // vendor credits on guaranteed-fail lookups:
+    //   1. `skip_trace_disabled` — the per-property kill switch.
+    //   2. `cass_status != 'verified'` — un-CASS'd addresses fail at
+    //      Tracerfy because they aren't USPS-normalized. Sending them
+    //      anyway pays $0.02/row to learn we should have CASS-verified
+    //      first.
     const { data: eligibleRows, error: eligibleErr } = await supabase
       .from("properties")
-      .select("id, org_id, skip_trace_disabled")
+      .select("id, org_id, skip_trace_disabled, cass_status")
       .in("id", propertyIds);
     if (eligibleErr) {
       return {
@@ -73,25 +77,55 @@ export async function requestSkipTrace(
         error: { code: "QUERY_FAILED", message: eligibleErr.message },
       };
     }
-    const allowed = (eligibleRows ?? []).filter(
-      (p) => !p.skip_trace_disabled,
+    const killSwitched = (eligibleRows ?? []).filter(
+      (p) => p.skip_trace_disabled,
     );
-    const skippedCount = propertyIds.length - allowed.length;
+    const cassUnverified = (eligibleRows ?? []).filter(
+      (p) => !p.skip_trace_disabled && p.cass_status !== "verified",
+    );
+    const allowed = (eligibleRows ?? []).filter(
+      (p) => !p.skip_trace_disabled && p.cass_status === "verified",
+    );
+    const killSwitchSkipped = killSwitched.length;
+    const cassSkipped = cassUnverified.length;
     if (allowed.length === 0) {
+      // Surface the most specific reason. Kill-switch wins because
+      // it's user-controlled; CASS is the next-most-actionable.
+      if (killSwitchSkipped > 0 && cassSkipped === 0) {
+        return {
+          ok: false,
+          error: {
+            code: "ALL_PROPERTIES_DISABLED",
+            message:
+              propertyIds.length === 1
+                ? "Skip-trace is disabled on this property. Re-enable it on the lead detail page first."
+                : "Every selected property has skip-trace disabled. Re-enable on the lead detail pages first.",
+          },
+        };
+      }
+      if (cassSkipped > 0 && killSwitchSkipped === 0) {
+        return {
+          ok: false,
+          error: {
+            code: "ALL_PROPERTIES_NEED_CASS",
+            message:
+              propertyIds.length === 1
+                ? "This property's address is not CASS-verified. Run address verification first to avoid a wasted skip-trace credit."
+                : "Every selected property needs CASS verification first. Run address verification, then skip-trace will be safe to spend on.",
+          },
+        };
+      }
       return {
         ok: false,
         error: {
-          code: "ALL_PROPERTIES_DISABLED",
-          message:
-            propertyIds.length === 1
-              ? "Skip-trace is disabled on this property. Re-enable it on the lead detail page first."
-              : "Every selected property has skip-trace disabled. Re-enable on the lead detail pages first.",
+          code: "NO_ELIGIBLE_PROPERTIES",
+          message: `No properties are eligible — ${killSwitchSkipped} disabled, ${cassSkipped} need CASS verification.`,
         },
       };
     }
 
     // Use the filtered list from here on — the job only operates on
-    // properties that survived the kill-switch check.
+    // properties that survived BOTH gates.
     const eligibleIds = allowed.map((p) => p.id);
     const orgProbe = { org_id: allowed[0].org_id };
 
@@ -100,10 +134,22 @@ export async function requestSkipTrace(
       ? "queued"
       : "pending_approval";
 
+    // Build a human-readable suffix listing each filter's drop count
+    // so the job title and notification copy stay truthful about what
+    // actually went to the vendor.
+    const skipReasons: string[] = [];
+    if (killSwitchSkipped > 0) {
+      skipReasons.push(
+        `${killSwitchSkipped} kill-switched`,
+      );
+    }
+    if (cassSkipped > 0) {
+      skipReasons.push(
+        `${cassSkipped} need${cassSkipped === 1 ? "s" : ""} CASS verification`,
+      );
+    }
     const skippedSuffix =
-      skippedCount > 0
-        ? ` (${skippedCount} property${skippedCount === 1 ? "" : "ies"} skipped — kill switch on)`
-        : "";
+      skipReasons.length > 0 ? ` (${skipReasons.join(", ")} skipped)` : "";
     const { data: jobRow, error: insertErr } = await supabase
       .from("jobs")
       .insert({

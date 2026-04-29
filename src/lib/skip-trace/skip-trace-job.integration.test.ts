@@ -469,6 +469,11 @@ describe("runSkipTraceEnrichment (integration, mock provider)", () => {
       expect(itemsA![0].status).toBe("success");
 
       // Second property: error item flagging the provider gap.
+      // Default seedProperty leaves cass_status null → classifier
+      // treats the missing-row case as `address_unverified` (we can't
+      // confirm "no data" without a clean address). Tests below
+      // cover the cass_status='verified' branch where it becomes
+      // `provider_no_data`.
       const { data: itemsB } = await supabase
         .from("job_items")
         .select("status, error_class, error_message")
@@ -476,8 +481,8 @@ describe("runSkipTraceEnrichment (integration, mock provider)", () => {
         .eq("property_id", b.propertyId);
       expect(itemsB).toHaveLength(1);
       expect(itemsB![0].status).toBe("error");
-      expect(itemsB![0].error_class).toBe("provider");
-      expect(itemsB![0].error_message).toMatch(/did not return/i);
+      expect(itemsB![0].error_class).toBe("address_unverified");
+      expect(itemsB![0].error_message).toMatch(/CASS|verify/i);
 
       const { data: jobRow } = await supabase
         .from("jobs")
@@ -559,6 +564,165 @@ describe("runSkipTraceEnrichment (integration, mock provider)", () => {
         .eq("job_id", jobIdMulti)
         .eq("property_id", a.propertyId);
       expect(itemsA![0].status).toBe("success");
+    });
+  });
+
+  // ---------------------------------------------------------------
+  // Error classification: every error item gets a categorized
+  // error_class so the UI + retry logic can distinguish terminal
+  // (provider_no_data, address_unverified) from retryable
+  // (provider_transient, provider_unknown). Caching also branches
+  // on this — verified-no-data caches a negative; unverified does not.
+  // ---------------------------------------------------------------
+  describe("error_class categorization on missing-from-batch rows", () => {
+    async function setCassStatus(
+      propertyId: string,
+      status: "verified" | "unverified",
+    ): Promise<void> {
+      const { error } = await supabase
+        .from("properties")
+        .update({ cass_status: status })
+        .eq("id", propertyId);
+      if (error) throw error;
+    }
+
+    it("CASS-verified property + no provider row → error_class='provider_no_data' AND cache row written", async () => {
+      const a = await seedProperty({ address: "1 Returned Verified Ln" });
+      const b = await seedProperty({ address: "2 No-Data Verified Ln" });
+      await setCassStatus(b.propertyId, "verified");
+      const ids = [a.propertyId, b.propertyId];
+      const jobId = await createPendingJob(ids);
+
+      await runSkipTraceEnrichment(supabase, { jobId, propertyIds: ids });
+
+      // Finalize with only the FIRST row; the verified b is silently absent.
+      await finalizeSkipTraceFromBatch(supabase, {
+        jobId,
+        results: [
+          {
+            propertyId: "",
+            matchedAddress: {
+              address: "1 Returned Verified Ln",
+              city: "Kansas City",
+              state: "MO",
+            },
+            hit: true,
+            persons: [
+              {
+                firstName: "Returned",
+                lastName: "Owner",
+                phones: [
+                  { number: "+18165550181", type: "Mobile", dnc: false, rank: 1 },
+                ],
+                emails: [],
+                isOwner: true,
+              },
+            ],
+            creditsDeducted: 1,
+            raw: {},
+          },
+        ],
+      });
+
+      const { data: itemB } = await supabase
+        .from("job_items")
+        .select("status, error_class, error_message")
+        .eq("job_id", jobId)
+        .eq("property_id", b.propertyId)
+        .single();
+      expect(itemB!.status).toBe("error");
+      expect(itemB!.error_class).toBe("provider_no_data");
+      expect(itemB!.error_message).toMatch(/no owner data/i);
+
+      // Cache row should exist for the verified address so subsequent
+      // runs hit cache and don't re-pay the vendor. normalizeAddress
+      // lowercases, so the assertion matches the lower form.
+      const { data: cacheRows } = await supabase
+        .from("skip_trace_cache")
+        .select("address_normalized, match_count")
+        .eq("provider", "mock");
+      const cacheAddrs = (cacheRows ?? []).map((r) => r.address_normalized);
+      expect(cacheAddrs.some((a) => a.includes("2 no-data verified"))).toBe(
+        true,
+      );
+    });
+
+    it("CASS-unverified property + no provider row → error_class='address_unverified' AND no cache row", async () => {
+      const a = await seedProperty({ address: "10 Returned Unverified Ln" });
+      const b = await seedProperty({ address: "20 No-Data Unverified Ln" });
+      // b's cass_status remains null → treated as unverified.
+      const ids = [a.propertyId, b.propertyId];
+      const jobId = await createPendingJob(ids);
+
+      await runSkipTraceEnrichment(supabase, { jobId, propertyIds: ids });
+
+      await finalizeSkipTraceFromBatch(supabase, {
+        jobId,
+        results: [
+          {
+            propertyId: "",
+            matchedAddress: {
+              address: "10 Returned Unverified Ln",
+              city: "Kansas City",
+              state: "MO",
+            },
+            hit: true,
+            persons: [
+              {
+                firstName: "Real",
+                lastName: "Owner",
+                phones: [
+                  { number: "+18165550182", type: "Mobile", dnc: false, rank: 1 },
+                ],
+                emails: [],
+                isOwner: true,
+              },
+            ],
+            creditsDeducted: 1,
+            raw: {},
+          },
+        ],
+      });
+
+      const { data: itemB } = await supabase
+        .from("job_items")
+        .select("status, error_class, error_message")
+        .eq("job_id", jobId)
+        .eq("property_id", b.propertyId)
+        .single();
+      expect(itemB!.status).toBe("error");
+      expect(itemB!.error_class).toBe("address_unverified");
+      expect(itemB!.error_message).toMatch(/CASS|verify/i);
+
+      // No cache row for the unverified address — its normalized key
+      // will change once CASS runs, so caching the negative would go
+      // stale.
+      const { data: cacheRows } = await supabase
+        .from("skip_trace_cache")
+        .select("address_normalized")
+        .eq("provider", "mock");
+      const cacheAddrs = (cacheRows ?? []).map((r) => r.address_normalized);
+      expect(
+        cacheAddrs.some((a) => a.includes("20 no-data unverified")),
+      ).toBe(false);
+    });
+
+    it("regression: successful match still writes status=success and no error_class", async () => {
+      const { propertyId } = await seedProperty({ address: "1 Happy Path Ln" });
+      const jobId = await createPendingJob([propertyId]);
+
+      await runSkipTraceEnrichment(supabase, {
+        jobId,
+        propertyIds: [propertyId],
+      });
+
+      const { data: items } = await supabase
+        .from("job_items")
+        .select("status, error_class")
+        .eq("job_id", jobId);
+      expect(items).toHaveLength(1);
+      expect(items![0].status).toBe("success");
+      expect(items![0].error_class).toBeNull();
     });
   });
 });
