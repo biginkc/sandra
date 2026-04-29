@@ -403,6 +403,34 @@ describe("TracerfyProvider — pollBatch", () => {
     });
   });
 
+  it("populates matchedAddress from row.address/city/state (used by finalize fan-out)", async () => {
+    // Tracerfy doesn't reliably round-trip external_id, so finalize
+    // matches batch results back to our properties by address. The
+    // adapter must echo the input address fields through every row.
+    mockFetch({
+      status: 200,
+      body: [
+        {
+          // No external_id on the row — common in production payloads.
+          address: "1 Main",
+          city: "Kansas City",
+          state: "MO",
+          hit: true,
+          credits_deducted: 1,
+          persons: [],
+        },
+      ],
+    });
+    const p = new TracerfyProvider("k");
+    const result = await p.pollBatch("42");
+    expect(result![0].matchedAddress).toEqual({
+      address: "1 Main",
+      city: "Kansas City",
+      state: "MO",
+    });
+    expect(result![0].propertyId).toBe(""); // expected — see comment.
+  });
+
   it("leaves mailingAddress null when no mail_* fields are present", async () => {
     mockFetch({
       status: 200,

@@ -277,7 +277,14 @@ export class TracerfyProvider implements SkipTraceProvider {
             }
           : null;
       return {
+        // Tracerfy doesn't reliably round-trip external_id, so we treat
+        // this as a hint at best — finalize matches via matchedAddress.
         propertyId: row.external_id ?? "",
+        matchedAddress: {
+          address: row.address ?? "",
+          city: row.city ?? "",
+          state: row.state ?? "",
+        },
         hit: !!row.hit,
         persons,
         creditsDeducted: row.credits_deducted ?? 0,
