@@ -77,7 +77,7 @@ export function StepDone({ jobId }: { jobId: string }) {
           View properties
         </Link>
         <Link
-          href="/jobs"
+          href={`/jobs/${jobId}`}
           className={buttonVariants({ variant: "outline" })}
         >
           Job details

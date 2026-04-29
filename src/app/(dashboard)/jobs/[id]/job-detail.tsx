@@ -1,0 +1,653 @@
+"use client";
+
+import Link from "next/link";
+import { useMemo, useState } from "react";
+
+import { Badge } from "@/components/ui/badge";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
+import {
+  Tabs,
+  TabsContent,
+  TabsList,
+  TabsTrigger,
+} from "@/components/ui/tabs";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import { cn } from "@/lib/utils";
+import type { Database } from "@/lib/supabase/types";
+
+type Job = Database["public"]["Tables"]["jobs"]["Row"];
+type JobItem = Database["public"]["Tables"]["job_items"]["Row"];
+type CsvImport = Pick<
+  Database["public"]["Tables"]["csv_imports"]["Row"],
+  | "id"
+  | "filename"
+  | "source"
+  | "market"
+  | "total_rows"
+  | "inserted_properties"
+  | "skipped_duplicates"
+  | "failed_rows"
+  | "storage_path"
+>;
+
+export type JobDetailProps = {
+  job: Job;
+  items: JobItem[];
+  parent: { id: string; type: string; status: string; title: string | null } | null;
+  /** Renamed from `children` to avoid shadowing React's reserved prop name. */
+  childJobs: { id: string; type: string; status: string; title: string | null }[];
+  csvImport: CsvImport | null;
+};
+
+export function JobDetail({
+  job,
+  items,
+  parent,
+  childJobs,
+  csvImport,
+}: JobDetailProps) {
+  const skippedFromCount = Math.max(
+    0,
+    (job.processed_items ?? 0) -
+      (job.succeeded_items ?? 0) -
+      (job.failed_items ?? 0),
+  );
+
+  return (
+    <div className="flex flex-col gap-6">
+      {/* Sub-header strip with status + duration + provider */}
+      <div className="text-muted-foreground flex flex-wrap items-center gap-x-4 gap-y-1 text-sm">
+        <Badge variant={statusVariant(job.status)}>{job.status}</Badge>
+        <span>{durationLabel(job)}</span>
+        {job.provider && <span>via {job.provider}</span>}
+      </div>
+
+      {/* KPI tiles — universal */}
+      <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
+        <Tile label="Processed" value={`${job.processed_items}/${job.total_items}`} />
+        <Tile label="Succeeded" value={(job.succeeded_items ?? 0).toLocaleString()} tone="positive" />
+        <Tile label="Failed" value={(job.failed_items ?? 0).toLocaleString()} tone={job.failed_items > 0 ? "destructive" : "neutral"} />
+        <Tile label="Skipped" value={skippedFromCount.toLocaleString()} tone="neutral" />
+      </div>
+
+      {/* Type-specific panel */}
+      <TypePanel job={job} csvImport={csvImport} />
+
+      {/* Linked jobs */}
+      {(parent || childJobs.length > 0) && (
+        <Card>
+          <CardHeader className="pb-3">
+            <CardTitle className="text-sm">Linked jobs</CardTitle>
+          </CardHeader>
+          <CardContent className="flex flex-col gap-2 pt-0">
+            {parent && (
+              <div className="flex items-center gap-2 text-sm">
+                <span className="text-muted-foreground w-16">Parent</span>
+                <LinkedJobLine job={parent} />
+              </div>
+            )}
+            {childJobs.length > 0 && (
+              <div className="flex items-start gap-2 text-sm">
+                <span className="text-muted-foreground w-16 pt-0.5">
+                  Children
+                </span>
+                <div className="flex flex-col gap-1">
+                  {childJobs.map((c) => (
+                    <LinkedJobLine key={c.id} job={c} />
+                  ))}
+                </div>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Job items + audit (tabbed) */}
+      <Tabs defaultValue="items">
+        <TabsList>
+          <TabsTrigger value="items">
+            Items ({items.length.toLocaleString()})
+          </TabsTrigger>
+          <TabsTrigger value="audit">Audit / raw</TabsTrigger>
+        </TabsList>
+        <TabsContent value="items" className="mt-4">
+          <ItemsTable items={items} />
+        </TabsContent>
+        <TabsContent value="audit" className="mt-4">
+          <AuditPanel job={job} />
+        </TabsContent>
+      </Tabs>
+    </div>
+  );
+}
+
+// ---------- KPI tile ---------------------------------------------------------
+
+function Tile({
+  label,
+  value,
+  tone = "neutral",
+}: {
+  label: string;
+  value: string;
+  tone?: "neutral" | "positive" | "destructive";
+}) {
+  return (
+    <div
+      className={cn(
+        "border-border bg-card rounded-2xl border px-5 py-4",
+        tone === "destructive" && "border-destructive/40 bg-destructive/5",
+        tone === "positive" &&
+          "border-emerald-200 bg-emerald-50/60 dark:border-emerald-500/30 dark:bg-emerald-500/5",
+      )}
+    >
+      <div
+        className={cn(
+          "text-[11px] font-bold tracking-widest uppercase",
+          tone === "destructive"
+            ? "text-destructive"
+            : tone === "positive"
+              ? "text-emerald-700 dark:text-emerald-400"
+              : "text-muted-foreground",
+        )}
+      >
+        {label}
+      </div>
+      <div className="text-foreground mt-1 text-3xl font-extrabold tracking-tight tabular-nums">
+        {value}
+      </div>
+    </div>
+  );
+}
+
+// ---------- Type-specific panels --------------------------------------------
+
+function TypePanel({
+  job,
+  csvImport,
+}: {
+  job: Job;
+  csvImport: CsvImport | null;
+}) {
+  switch (job.type) {
+    case "csv_import":
+      return <CsvImportPanel job={job} csvImport={csvImport} />;
+    case "csv_update":
+      return <CsvUpdatePanel job={job} />;
+    case "cass_dsf2_ncoa":
+    case "cass_refresh":
+    case "ncoa_refresh":
+      return <CassPanel job={job} />;
+    case "skip_trace":
+      return <SkipTracePanel job={job} />;
+    default:
+      return <DefaultPanel job={job} />;
+  }
+}
+
+function CsvImportPanel({
+  job,
+  csvImport,
+}: {
+  job: Job;
+  csvImport: CsvImport | null;
+}) {
+  const params = (job.input_params as Record<string, unknown> | null) ?? {};
+  const mapping = (params.mapping as Record<string, string | null>) ?? {};
+  const mappedCount = Object.values(mapping).filter(Boolean).length;
+
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <CardTitle className="text-sm">Import details</CardTitle>
+        <CardDescription>
+          {csvImport?.filename ?? (params.filename as string | undefined) ?? "—"}
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="grid grid-cols-1 gap-3 pt-0 sm:grid-cols-2">
+        <DetailRow label="Source" value={(params.source as string) ?? "—"} />
+        <DetailRow label="Market" value={(params.market as string) ?? "—"} />
+        <DetailRow
+          label="Mapped columns"
+          value={`${mappedCount} field${mappedCount === 1 ? "" : "s"}`}
+        />
+        <DetailRow
+          label="Storage"
+          value={
+            csvImport?.storage_path
+              ? `csv-imports/${csvImport.storage_path}`
+              : (params.storagePath as string) ?? "—"
+          }
+          mono
+        />
+        {csvImport && (
+          <>
+            <DetailRow
+              label="Inserted"
+              value={`${csvImport.inserted_properties ?? 0}`}
+            />
+            <DetailRow
+              label="Skipped (dup)"
+              value={`${csvImport.skipped_duplicates ?? 0}`}
+            />
+          </>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function CsvUpdatePanel({ job }: { job: Job }) {
+  const params = (job.input_params as Record<string, unknown> | null) ?? {};
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <CardTitle className="text-sm">Update details</CardTitle>
+        <CardDescription>
+          {(params.filename as string) ?? "—"}
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="grid grid-cols-1 gap-3 pt-0 sm:grid-cols-2">
+        <DetailRow
+          label="Operation"
+          value={(params.subOperationId as string) ?? "—"}
+        />
+        <DetailRow
+          label="Rows in file"
+          value={`${(params.rowCount as number) ?? "—"}`}
+        />
+      </CardContent>
+    </Card>
+  );
+}
+
+function CassPanel({ job }: { job: Job }) {
+  const summary =
+    (job.result_summary as Record<string, number | null> | null) ?? {};
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <CardTitle className="text-sm">CASS verification</CardTitle>
+        <CardDescription>
+          USPS-grade address verification via {job.provider ?? "(no provider)"}
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="grid grid-cols-2 gap-3 pt-0 md:grid-cols-4">
+        <DetailRow label="Verified" value={`${summary.verified ?? 0}`} />
+        <DetailRow label="Invalid" value={`${summary.invalid ?? 0}`} />
+        <DetailRow label="Ambiguous" value={`${summary.ambiguous ?? 0}`} />
+        <DetailRow label="Cache hits" value={`${summary.cacheHits ?? 0}`} />
+      </CardContent>
+    </Card>
+  );
+}
+
+function SkipTracePanel({ job }: { job: Job }) {
+  const summary =
+    (job.result_summary as Record<string, unknown> | null) ?? {};
+  const params = (job.input_params as Record<string, unknown> | null) ?? {};
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <CardTitle className="text-sm">Skip-trace</CardTitle>
+        <CardDescription>
+          Owner phone/email lookup via {job.provider ?? "(no provider)"}
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="grid grid-cols-2 gap-3 pt-0 md:grid-cols-3">
+        <DetailRow
+          label="Hit"
+          value={`${(summary.hits as number | undefined) ?? "—"}`}
+        />
+        <DetailRow
+          label="No match"
+          value={`${(summary.no_matches as number | undefined) ?? "—"}`}
+        />
+        <DetailRow
+          label="Credits used"
+          value={`${(summary.credits_used as number | undefined) ?? "—"}`}
+        />
+        <DetailRow
+          label="Provider run id"
+          value={(job.provider_run_id ?? "—") as string}
+          mono
+        />
+        <DetailRow
+          label="Trace type"
+          value={(params.trace_type as string) ?? "normal"}
+        />
+        {(summary.cached_hits as number | undefined) !== undefined && (
+          <DetailRow
+            label="Cache hits"
+            value={`${summary.cached_hits ?? 0}`}
+          />
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function DefaultPanel({ job }: { job: Job }) {
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <CardTitle className="text-sm">{job.type}</CardTitle>
+        <CardDescription>
+          No type-specific view registered yet — see Audit tab below for the
+          raw input/result.
+        </CardDescription>
+      </CardHeader>
+    </Card>
+  );
+}
+
+function DetailRow({
+  label,
+  value,
+  mono,
+}: {
+  label: string;
+  value: string;
+  mono?: boolean;
+}) {
+  return (
+    <div className="flex flex-col gap-0.5">
+      <div className="text-muted-foreground text-xs">{label}</div>
+      <div
+        className={cn(
+          "text-foreground text-sm",
+          mono && "font-mono text-xs break-all",
+        )}
+      >
+        {value || "—"}
+      </div>
+    </div>
+  );
+}
+
+// ---------- Items table ------------------------------------------------------
+
+function ItemsTable({ items }: { items: JobItem[] }) {
+  const [filter, setFilter] = useState<"all" | "error" | "skipped" | "success">(
+    "all",
+  );
+
+  const filtered = useMemo(() => {
+    if (filter === "all") return items;
+    return items.filter((i) => i.status === filter);
+  }, [items, filter]);
+
+  const counts = useMemo(() => {
+    const c: Record<string, number> = {};
+    for (const i of items) c[i.status] = (c[i.status] ?? 0) + 1;
+    return c;
+  }, [items]);
+
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <div className="flex items-center justify-between gap-3">
+          <CardTitle className="text-sm">Items</CardTitle>
+          <div className="flex flex-wrap gap-1.5">
+            <FilterChip
+              active={filter === "all"}
+              label={`All ${items.length.toLocaleString()}`}
+              onClick={() => setFilter("all")}
+            />
+            {counts.error > 0 && (
+              <FilterChip
+                active={filter === "error"}
+                label={`Errors ${counts.error.toLocaleString()}`}
+                tone="destructive"
+                onClick={() => setFilter("error")}
+              />
+            )}
+            {counts.skipped > 0 && (
+              <FilterChip
+                active={filter === "skipped"}
+                label={`Skipped ${counts.skipped.toLocaleString()}`}
+                onClick={() => setFilter("skipped")}
+              />
+            )}
+            {counts.success > 0 && (
+              <FilterChip
+                active={filter === "success"}
+                label={`Success ${counts.success.toLocaleString()}`}
+                tone="positive"
+                onClick={() => setFilter("success")}
+              />
+            )}
+          </div>
+        </div>
+        <CardDescription>
+          {items.length === 200
+            ? "Showing first 200 — open the Audit tab to query raw."
+            : `${filtered.length.toLocaleString()} item${filtered.length === 1 ? "" : "s"}`}
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="pt-0">
+        <div className="border-border rounded-md border">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead className="w-[100px]">Status</TableHead>
+                <TableHead>Property / Contact</TableHead>
+                <TableHead>Error</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {filtered.map((item) => (
+                <TableRow key={item.id}>
+                  <TableCell>
+                    <Badge variant={itemStatusVariant(item.status)}>
+                      {item.status}
+                    </Badge>
+                  </TableCell>
+                  <TableCell className="font-medium">
+                    {item.property_id ? (
+                      <Link
+                        href={`/leads/${item.property_id}`}
+                        className="hover:underline"
+                      >
+                        {item.property_id.slice(0, 8)}…
+                      </Link>
+                    ) : item.contact_id ? (
+                      <span className="text-muted-foreground font-mono text-xs">
+                        contact: {item.contact_id.slice(0, 8)}…
+                      </span>
+                    ) : (
+                      <span className="text-muted-foreground">—</span>
+                    )}
+                  </TableCell>
+                  <TableCell className="text-muted-foreground text-sm">
+                    {item.error_message ?? ""}
+                  </TableCell>
+                </TableRow>
+              ))}
+              {filtered.length === 0 && (
+                <TableRow>
+                  <TableCell
+                    colSpan={3}
+                    className="text-muted-foreground py-6 text-center"
+                  >
+                    No items match the current filter.
+                  </TableCell>
+                </TableRow>
+              )}
+            </TableBody>
+          </Table>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function FilterChip({
+  active,
+  label,
+  onClick,
+  tone,
+}: {
+  active: boolean;
+  label: string;
+  onClick: () => void;
+  tone?: "destructive" | "positive";
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={cn(
+        "rounded-full border px-2.5 py-0.5 text-xs font-medium transition-colors",
+        active
+          ? "border-foreground bg-foreground text-background"
+          : "border-border text-muted-foreground hover:bg-muted",
+        !active && tone === "destructive" && "text-destructive",
+        !active && tone === "positive" && "text-emerald-700 dark:text-emerald-400",
+      )}
+    >
+      {label}
+    </button>
+  );
+}
+
+// ---------- Audit panel ------------------------------------------------------
+
+function AuditPanel({ job }: { job: Job }) {
+  return (
+    <div className="flex flex-col gap-4">
+      <Card>
+        <CardHeader className="pb-3">
+          <CardTitle className="text-sm">Timeline</CardTitle>
+        </CardHeader>
+        <CardContent className="flex flex-col gap-2 pt-0 text-sm">
+          <DetailRow label="Created" value={fmt(job.created_at)} mono />
+          <DetailRow
+            label="Started"
+            value={fmt(job.started_at as string | null)}
+            mono
+          />
+          <DetailRow
+            label="Completed"
+            value={fmt(job.completed_at as string | null)}
+            mono
+          />
+          <DetailRow
+            label="Last heartbeat"
+            value={fmt(job.worker_heartbeat_at as string | null)}
+            mono
+          />
+        </CardContent>
+      </Card>
+
+      {(job.error_message || job.error_class) && (
+        <Card className="border-destructive/40">
+          <CardHeader className="pb-3">
+            <CardTitle className="text-destructive text-sm">Error</CardTitle>
+          </CardHeader>
+          <CardContent className="flex flex-col gap-2 pt-0 text-sm">
+            <DetailRow label="Class" value={job.error_class ?? "—"} />
+            <DetailRow label="Message" value={job.error_message ?? "—"} />
+          </CardContent>
+        </Card>
+      )}
+
+      <Card>
+        <CardHeader className="pb-3">
+          <CardTitle className="text-sm">Raw input_params</CardTitle>
+        </CardHeader>
+        <CardContent className="pt-0">
+          <pre className="bg-muted/30 max-h-96 overflow-auto rounded-md p-3 text-xs">
+            {JSON.stringify(job.input_params ?? {}, null, 2)}
+          </pre>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader className="pb-3">
+          <CardTitle className="text-sm">Raw result_summary</CardTitle>
+        </CardHeader>
+        <CardContent className="pt-0">
+          <pre className="bg-muted/30 max-h-96 overflow-auto rounded-md p-3 text-xs">
+            {JSON.stringify(job.result_summary ?? {}, null, 2)}
+          </pre>
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
+// ---------- Helpers ----------------------------------------------------------
+
+function statusVariant(
+  status: string,
+): "default" | "secondary" | "destructive" | "outline" {
+  if (status === "completed") return "default";
+  if (status === "failed") return "destructive";
+  if (status === "partial") return "secondary";
+  if (status === "canceled" || status === "denied") return "outline";
+  return "secondary";
+}
+
+function itemStatusVariant(
+  status: string,
+): "default" | "secondary" | "destructive" | "outline" {
+  if (status === "success") return "default";
+  if (status === "error") return "destructive";
+  if (status === "skipped") return "secondary";
+  return "outline";
+}
+
+function durationLabel(job: Job): string {
+  if (!job.started_at) return "not started";
+  const end = job.completed_at ?? new Date().toISOString();
+  const ms =
+    new Date(end as string).getTime() - new Date(job.started_at as string).getTime();
+  const sec = Math.max(0, Math.floor(ms / 1000));
+  if (sec < 60) return `ran ${sec}s`;
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `ran ${min}m ${sec % 60}s`;
+  const hr = Math.floor(min / 60);
+  return `ran ${hr}h ${min % 60}m`;
+}
+
+function fmt(iso: string | null | undefined): string {
+  if (!iso) return "—";
+  return new Date(iso).toISOString().replace("T", " ").slice(0, 19) + " UTC";
+}
+
+function LinkedJobLine({
+  job,
+}: {
+  job: { id: string; type: string; status: string; title: string | null };
+}) {
+  return (
+    <Link
+      href={`/jobs/${job.id}`}
+      className="hover:bg-muted/40 -mx-1 flex items-center gap-2 rounded px-1 py-0.5 transition-colors"
+    >
+      <Badge variant="outline" className="text-xs">
+        {job.type}
+      </Badge>
+      <Badge variant={statusVariant(job.status)} className="text-xs">
+        {job.status}
+      </Badge>
+      <span className="text-foreground truncate">
+        {job.title ?? job.id.slice(0, 8)}
+      </span>
+    </Link>
+  );
+}
