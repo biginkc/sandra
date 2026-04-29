@@ -581,13 +581,7 @@ export function ProspectsTable({
                     <TableCell>{p.zip ?? "—"}</TableCell>
                     <TableCell>{p.market ?? "—"}</TableCell>
                     <TableCell>
-                      <Badge
-                        variant={
-                          p.cass_status === "verified" ? "default" : "secondary"
-                        }
-                      >
-                        {p.cass_status}
-                      </Badge>
+                      <CassStatusIndicator status={p.cass_status} />
                     </TableCell>
                     <TableCell>
                       {p.is_vacant === true
@@ -604,5 +598,60 @@ export function ProspectsTable({
         </Table>
       </div>
     </>
+  );
+}
+
+/**
+ * CASS status indicator — color-coded so the skip-trace eligibility of
+ * each row is readable at a glance. Tooltip explains what each status
+ * means in human terms (skip-trace ready / pending / blocked).
+ *
+ * `verified` is the only status where skip-trace will pay vendor
+ * credits productively; everything else either blocks the call (per
+ * the pre-flight gate) or means the address is unusable.
+ */
+function CassStatusIndicator({ status }: { status: string }) {
+  const meta = (() => {
+    switch (status) {
+      case "verified":
+        return {
+          label: "Verified",
+          dot: "bg-emerald-500",
+          tooltip: "USPS-verified — skip-trace ready.",
+        };
+      case "unverified":
+        return {
+          label: "Unverified",
+          dot: "bg-amber-500",
+          tooltip: "Not yet CASS-verified. Run address verification before skip-trace to avoid wasting credits.",
+        };
+      case "invalid":
+        return {
+          label: "Invalid",
+          dot: "bg-red-500",
+          tooltip: "USPS rejected this address. Skip-trace will not work.",
+        };
+      case "ambiguous":
+        return {
+          label: "Ambiguous",
+          dot: "bg-orange-500",
+          tooltip: "Multiple matches at USPS — needs manual disambiguation.",
+        };
+      default:
+        return {
+          label: status,
+          dot: "bg-muted",
+          tooltip: status,
+        };
+    }
+  })();
+  return (
+    <span
+      className="inline-flex items-center gap-1.5 text-xs"
+      title={meta.tooltip}
+    >
+      <span className={`size-2 rounded-full ${meta.dot}`} aria-hidden />
+      <span className="text-foreground">{meta.label}</span>
+    </span>
   );
 }
