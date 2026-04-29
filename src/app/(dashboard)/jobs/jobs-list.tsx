@@ -34,7 +34,7 @@ import {
 import { createClient } from "@/lib/supabase/client";
 import type { Database } from "@/lib/supabase/types";
 
-import { startQueuedCassJob } from "./actions";
+import { retryFailedCassItems, startQueuedCassJob } from "./actions";
 
 type Job = Database["public"]["Tables"]["jobs"]["Row"];
 
@@ -146,6 +146,10 @@ export function JobsList({ isAdmin }: { isAdmin: boolean }) {
                 isAdmin &&
                 job.type === "skip_trace" &&
                 job.status === "pending_approval";
+              const canRetryCass =
+                job.type === "cass_dsf2_ncoa" &&
+                (job.status === "partial" || job.status === "failed") &&
+                job.failed_items > 0;
               return (
                 <TableRow key={job.id}>
                   <TableCell className="font-medium">
@@ -178,6 +182,12 @@ export function JobsList({ isAdmin }: { isAdmin: boolean }) {
                       <StartCassButton
                         jobId={job.id}
                         totalItems={job.total_items}
+                      />
+                    ) : null}
+                    {canRetryCass ? (
+                      <RetryCassButton
+                        jobId={job.id}
+                        failedItems={job.failed_items}
                       />
                     ) : null}
                     {canApproveSkipTrace ? (
@@ -310,6 +320,63 @@ function StartCassButton({
           </Button>
           <Button onClick={run} disabled={pending}>
             {pending ? "Starting…" : "Start"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function RetryCassButton({
+  jobId,
+  failedItems,
+}: {
+  jobId: string;
+  failedItems: number;
+}) {
+  const [open, setOpen] = useState(false);
+  const [pending, startTransition] = useTransition();
+
+  const run = () => {
+    startTransition(async () => {
+      const result = await callAction(retryFailedCassItems(jobId), {
+        successMessage: "Retry started — watch the new CASS job above.",
+        fallbackMessage: "Failed to retry CASS items",
+      });
+      if (result.ok) setOpen(false);
+    });
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogTrigger
+        render={
+          <Button variant="outline" size="sm">
+            Retry {failedItems.toLocaleString()} failed
+          </Button>
+        }
+      />
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Retry failed CASS verifications?</DialogTitle>
+          <DialogDescription>
+            Creates a fresh CASS job for the {failedItems.toLocaleString()}{" "}
+            {failedItems === 1 ? "property" : "properties"} that previously
+            failed. Already-verified addresses come from the cache (no new
+            API calls); anything not in the cache costs $
+            {CASS_COST_PER_LOOKUP_USD.toFixed(2)}/lookup.
+          </DialogDescription>
+        </DialogHeader>
+        <DialogFooter>
+          <Button
+            variant="outline"
+            onClick={() => setOpen(false)}
+            disabled={pending}
+          >
+            Cancel
+          </Button>
+          <Button onClick={run} disabled={pending}>
+            {pending ? "Starting…" : "Retry"}
           </Button>
         </DialogFooter>
       </DialogContent>
