@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 
 import { Button } from "@/components/ui/button";
 import { autodetectMapping } from "@/lib/csv/aliases";
+import { trimRowsToMapping } from "@/lib/csv/trim-rows";
 import type { UpdatePreview } from "@/lib/csv/update-bulk";
 import type { SubOperationId } from "@/lib/csv/update-operations";
 import {
@@ -369,6 +370,14 @@ export function Wizard() {
     if (state.step === "confirm") {
       setSubmittingGlobal(true);
       dispatch({ type: "SUBMIT_START" });
+      // Trim every row to only the columns referenced by the mapping. Skip
+      // Genie / DataTree (D4D) files commonly carry 200+ columns of which we
+      // map ~15; the trim keeps the Server Action payload under the body
+      // size limit and roughly 10× faster to transport. Validation already
+      // ran against the full rows above; the server validates again on the
+      // trimmed rows and only reads via the mapping, so unmapped columns
+      // are unused either way.
+      const trimmedRows = trimRowsToMapping(state.rows, state.mapping);
       const result = await callAction(
         createImportJob({
           filename: state.filename!,
@@ -376,7 +385,7 @@ export function Wizard() {
           market: state.market!,
           listName: state.listName?.trim() || null,
           mapping: state.mapping,
-          rows: state.rows,
+          rows: trimmedRows,
           requestSkipTrace: state.requestSkipTrace,
         }),
         { successMessage: "Import started.", fallbackMessage: "Import failed to start" },
