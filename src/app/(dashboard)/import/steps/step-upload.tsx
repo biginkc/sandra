@@ -12,7 +12,6 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
 import {
@@ -23,6 +22,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 
+import { ListCombobox } from "../list-combobox";
 import type {
   WizardAction,
   WizardMarket,
@@ -255,26 +255,20 @@ export function StepUpload({ state, dispatch }: Props) {
         </div>
 
         <div className="flex flex-col gap-2">
-          <Label htmlFor="list-name">List (optional)</Label>
-          <Input
-            id="list-name"
-            value={state.listName ?? ""}
-            placeholder="e.g. Absentee Low Equity"
-            onChange={(e) =>
-              dispatch({
-                type: "SET_LIST_NAME",
-                listName: e.target.value || null,
-              })
+          <Label>List (optional)</Label>
+          <ListCombobox
+            value={state.listName}
+            onChange={(next) =>
+              dispatch({ type: "SET_LIST_NAME", listName: next })
             }
-            maxLength={100}
           />
           <p className="text-muted-foreground text-xs">
             Every imported row — including duplicates we dedupe against
             existing properties — gets added to this list. Re-importing the
             same address into a different list is how you <em>stack</em>: a
             property on Absentee + Pre-Foreclosure + Tired Landlord is a
-            stronger motivation signal than any one list. Leave blank to
-            skip.
+            stronger motivation signal than any one list. Search to pick an
+            existing list or type a new name to create one.
           </p>
         </div>
       </CardContent>
