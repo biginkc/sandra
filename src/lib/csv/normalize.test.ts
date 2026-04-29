@@ -224,6 +224,28 @@ describe("normalizeApn", () => {
     expect(normalizeApn(null)).toBeNull();
     expect(normalizeApn(undefined)).toBeNull();
   });
+
+  it("rejects scientific-notation values from spreadsheet auto-formatting", () => {
+    // Excel / Numbers / Google Sheets render long numeric APNs (>15
+    // digits) in scientific notation on CSV export. The raw string we
+    // see here is "611e+18" or "6.11e18", neither of which is a real
+    // assessor parcel number. Returning null lets the row dedup by
+    // address instead of by a fake APN that mass-collides.
+    expect(normalizeApn("611e+18")).toBeNull();
+    expect(normalizeApn("6.11e+18")).toBeNull();
+    expect(normalizeApn("611E+18")).toBeNull(); // uppercase E
+    expect(normalizeApn("611e18")).toBeNull(); // no sign
+    expect(normalizeApn("611e-2")).toBeNull(); // negative exponent
+  });
+
+  it("preserves real APNs that happen to contain 'e' or digits", () => {
+    // Real APN values with letter prefixes ("PP270000010015") or just
+    // digits ("58072010000") shouldn't trip the sci-notation check.
+    expect(normalizeApn("PP270000010015")).toBe("pp270000010015");
+    expect(normalizeApn("58072010000")).toBe("58072010000");
+    expect(normalizeApn("E12345")).toBe("e12345"); // starts with letter
+    expect(normalizeApn("123E")).toBe("123e"); // trailing letter, no exponent
+  });
 });
 
 describe("normalizeStateCode", () => {
