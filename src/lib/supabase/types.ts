@@ -141,36 +141,6 @@ export type Database = {
           },
         ]
       }
-      skip_trace_cache: {
-        Row: {
-          id: string
-          provider: string
-          address_normalized: string
-          result: Json
-          match_count: number
-          cost_credits: number
-          created_at: string
-        }
-        Insert: {
-          id?: string
-          provider: string
-          address_normalized: string
-          result: Json
-          match_count?: number
-          cost_credits?: number
-          created_at?: string
-        }
-        Update: {
-          id?: string
-          provider?: string
-          address_normalized?: string
-          result?: Json
-          match_count?: number
-          cost_credits?: number
-          created_at?: string
-        }
-        Relationships: []
-      }
       consent_events: {
         Row: {
           channel: string
@@ -339,6 +309,7 @@ export type Database = {
           org_id: string
           skipped_duplicates: number
           source: string | null
+          storage_path: string | null
           total_rows: number
           user_id: string | null
         }
@@ -355,6 +326,7 @@ export type Database = {
           org_id?: string
           skipped_duplicates?: number
           source?: string | null
+          storage_path?: string | null
           total_rows?: number
           user_id?: string | null
         }
@@ -371,6 +343,7 @@ export type Database = {
           org_id?: string
           skipped_duplicates?: number
           source?: string | null
+          storage_path?: string | null
           total_rows?: number
           user_id?: string | null
         }
@@ -894,9 +867,6 @@ export type Database = {
           beds: number | null
           cass_raw_response: Json | null
           cass_status: string
-          needs_human_attention: boolean
-          last_ai_escalation_reason: string | null
-          last_ai_escalation_at: string | null
           cass_verified_at: string | null
           city: string | null
           county_id: string | null
@@ -910,6 +880,8 @@ export type Database = {
           is_residential: boolean | null
           is_seasonal: boolean | null
           is_vacant: boolean | null
+          last_ai_escalation_at: string | null
+          last_ai_escalation_reason: string | null
           lat: number | null
           listing_price: number | null
           lon: number | null
@@ -918,6 +890,7 @@ export type Database = {
           mortgage_balance: number | null
           motivation_level: string | null
           ncoa_verified_at: string | null
+          needs_human_attention: boolean
           notes: string | null
           org_id: string
           owner_moved_at: string | null
@@ -952,9 +925,6 @@ export type Database = {
           cass_raw_response?: Json | null
           cass_status?: string
           cass_verified_at?: string | null
-          needs_human_attention?: boolean
-          last_ai_escalation_reason?: string | null
-          last_ai_escalation_at?: string | null
           city?: string | null
           county_id?: string | null
           created_at?: string
@@ -967,6 +937,8 @@ export type Database = {
           is_residential?: boolean | null
           is_seasonal?: boolean | null
           is_vacant?: boolean | null
+          last_ai_escalation_at?: string | null
+          last_ai_escalation_reason?: string | null
           lat?: number | null
           listing_price?: number | null
           lon?: number | null
@@ -975,6 +947,7 @@ export type Database = {
           mortgage_balance?: number | null
           motivation_level?: string | null
           ncoa_verified_at?: string | null
+          needs_human_attention?: boolean
           notes?: string | null
           org_id?: string
           owner_moved_at?: string | null
@@ -1008,9 +981,6 @@ export type Database = {
           beds?: number | null
           cass_raw_response?: Json | null
           cass_status?: string
-          needs_human_attention?: boolean
-          last_ai_escalation_reason?: string | null
-          last_ai_escalation_at?: string | null
           cass_verified_at?: string | null
           city?: string | null
           county_id?: string | null
@@ -1024,6 +994,8 @@ export type Database = {
           is_residential?: boolean | null
           is_seasonal?: boolean | null
           is_vacant?: boolean | null
+          last_ai_escalation_at?: string | null
+          last_ai_escalation_reason?: string | null
           lat?: number | null
           listing_price?: number | null
           lon?: number | null
@@ -1032,6 +1004,7 @@ export type Database = {
           mortgage_balance?: number | null
           motivation_level?: string | null
           ncoa_verified_at?: string | null
+          needs_human_attention?: boolean
           notes?: string | null
           org_id?: string
           owner_moved_at?: string | null
@@ -1466,6 +1439,36 @@ export type Database = {
           },
         ]
       }
+      skip_trace_cache: {
+        Row: {
+          address_normalized: string
+          cost_credits: number
+          created_at: string
+          id: string
+          match_count: number
+          provider: string
+          result: Json
+        }
+        Insert: {
+          address_normalized: string
+          cost_credits?: number
+          created_at?: string
+          id?: string
+          match_count?: number
+          provider: string
+          result: Json
+        }
+        Update: {
+          address_normalized?: string
+          cost_credits?: number
+          created_at?: string
+          id?: string
+          match_count?: number
+          provider?: string
+          result?: Json
+        }
+        Relationships: []
+      }
       tags: {
         Row: {
           auto_apply_rule: Json | null
@@ -1628,7 +1631,7 @@ export type Database = {
       }
     }
     Functions: {
-      dashboard_summary: { Args: Record<string, never>; Returns: Json }
+      dashboard_summary: { Args: never; Returns: Json }
       delete_contact: {
         Args: { p_contact_id: string; p_reason: string }
         Returns: undefined

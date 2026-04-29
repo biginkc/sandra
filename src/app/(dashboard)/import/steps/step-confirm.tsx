@@ -12,18 +12,19 @@ import type { WizardAction, WizardState } from "../wizard";
 
 type Props = { state: WizardState; dispatch: React.Dispatch<WizardAction> };
 
-const SKIP_TRACE_PER_JOB_CAP = 500;
-const TRACERFY_CREDITS_PER_LEAD = 1; // batch normal rate
-
-export function StepConfirm({ state, dispatch }: Props) {
+export function StepConfirm({ state }: Props) {
   const summary = state.summary;
   const validRows = summary?.validRows ?? 0;
   const estimatedCassCost = (validRows * 0.03).toFixed(2);
-  const skipTraceTooLarge = validRows > SKIP_TRACE_PER_JOB_CAP;
-  const estimatedSkipTraceCredits = Math.min(
-    validRows,
-    SKIP_TRACE_PER_JOB_CAP,
-  ) * TRACERFY_CREDITS_PER_LEAD;
+
+  // The "Also request skip-trace" checkbox lived here in V1 and rode the
+  // legacy after()-callback path. With the workflow runner the action no
+  // longer holds a user session at completion time, which the existing
+  // requestSkipTrace() needs for the admin/VA approval branching. Easiest
+  // fix is to surface the prompt on the StepDone screen instead — once
+  // the workflow finishes, the user is still in the wizard and a one-
+  // click "skip-trace these N properties" button works the same. Tracked
+  // as a follow-up; for now skip-trace happens manually from /properties.
 
   return (
     <Card>
@@ -49,40 +50,6 @@ export function StepConfirm({ state, dispatch }: Props) {
           label="Agent enrichment"
           value="Off by default. Trigger from property detail or batch action after ingest."
         />
-
-        <div className="border-border mt-2 flex items-start gap-2 rounded-md border p-3">
-          <input
-            id="request-skip-trace"
-            type="checkbox"
-            checked={state.requestSkipTrace}
-            disabled={skipTraceTooLarge}
-            onChange={(e) =>
-              dispatch({
-                type: "SET_REQUEST_SKIP_TRACE",
-                requestSkipTrace: e.target.checked,
-              })
-            }
-            className="mt-0.5"
-          />
-          <label htmlFor="request-skip-trace" className="flex-1 text-sm">
-            <span className="font-medium">
-              Also request skip-trace for these properties
-            </span>
-            {skipTraceTooLarge ? (
-              <span className="text-muted-foreground block text-xs">
-                Imports over {SKIP_TRACE_PER_JOB_CAP} rows can&apos;t request
-                skip-trace inline — use the bulk action on /properties in
-                batches after import.
-              </span>
-            ) : (
-              <span className="text-muted-foreground block text-xs">
-                Off by default. Tracerfy charges ~{estimatedSkipTraceCredits}{" "}
-                credits for this batch ({TRACERFY_CREDITS_PER_LEAD}/lead). Goes
-                through admin approval if you&apos;re not an admin.
-              </span>
-            )}
-          </label>
-        </div>
       </CardContent>
     </Card>
   );

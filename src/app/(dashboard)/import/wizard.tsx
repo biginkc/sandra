@@ -5,8 +5,8 @@ import { useRouter } from "next/navigation";
 
 import { Button } from "@/components/ui/button";
 import { autodetectMapping } from "@/lib/csv/aliases";
-import { trimRowsToMapping } from "@/lib/csv/trim-rows";
 import type { UpdatePreview } from "@/lib/csv/update-bulk";
+import { createClient as createBrowserSupabase } from "@/lib/supabase/client";
 import type { SubOperationId } from "@/lib/csv/update-operations";
 import {
   mappedSections,
@@ -47,6 +47,45 @@ export type WizardStep =
   | "done";
 
 export type WizardMode = "add" | "update";
+
+/**
+ * Upload the user's CSV to the `csv-imports` Supabase Storage bucket.
+ * Object key is `import-{timestamp}-{rand}.csv` — globally unique,
+ * sortable, no PII. The workflow runner downloads from this path
+ * server-side using the service-role admin client (bypasses bucket RLS).
+ *
+ * Returns a discriminated union so callers can branch on success/error
+ * without juggling try/catch.
+ */
+async function uploadCsvToStorage(
+  file: File,
+): Promise<
+  | { ok: true; storagePath: string }
+  | { ok: false; error: string }
+> {
+  try {
+    const supabase = createBrowserSupabase();
+    // Random key — collision odds are vanishing and we never need to
+    // look these up by content. Sortable timestamp prefix makes the
+    // bucket browsable in the Supabase dashboard.
+    const ts = new Date().toISOString().replace(/[:.]/g, "-");
+    const rand = Math.random().toString(36).slice(2, 10);
+    const path = `import-${ts}-${rand}.csv`;
+    const { error } = await supabase.storage
+      .from("csv-imports")
+      .upload(path, file, {
+        contentType: "text/csv",
+        upsert: false,
+      });
+    if (error) {
+      return { ok: false, error: `Upload failed: ${error.message}` };
+    }
+    return { ok: true, storagePath: path };
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    return { ok: false, error: `Upload failed: ${message}` };
+  }
+}
 
 export type WizardSource =
   | "dealmachine"
@@ -370,14 +409,17 @@ export function Wizard() {
     if (state.step === "confirm") {
       setSubmittingGlobal(true);
       dispatch({ type: "SUBMIT_START" });
-      // Trim every row to only the columns referenced by the mapping. Skip
-      // Genie / DataTree (D4D) files commonly carry 200+ columns of which we
-      // map ~15; the trim keeps the Server Action payload under the body
-      // size limit and roughly 10× faster to transport. Validation already
-      // ran against the full rows above; the server validates again on the
-      // trimmed rows and only reads via the mapping, so unmapped columns
-      // are unused either way.
-      const trimmedRows = trimRowsToMapping(state.rows, state.mapping);
+      // Upload the original file to Supabase Storage so the workflow
+      // runner can download + parse it server-side. We send the storage
+      // path (and not the rows) to the action — bypasses the Server
+      // Action body-size limit entirely. trimRowsToMapping is no longer
+      // needed; the workflow does its own trim after download.
+      const uploadResult = await uploadCsvToStorage(state.file!);
+      if (!uploadResult.ok) {
+        dispatch({ type: "SUBMIT_ERROR", message: uploadResult.error });
+        setSubmittingGlobal(false);
+        return;
+      }
       const result = await callAction(
         createImportJob({
           filename: state.filename!,
@@ -385,8 +427,8 @@ export function Wizard() {
           market: state.market!,
           listName: state.listName?.trim() || null,
           mapping: state.mapping,
-          rows: trimmedRows,
-          requestSkipTrace: state.requestSkipTrace,
+          storagePath: uploadResult.storagePath,
+          totalRows: state.rows.length,
         }),
         { successMessage: "Import started.", fallbackMessage: "Import failed to start" },
       );
