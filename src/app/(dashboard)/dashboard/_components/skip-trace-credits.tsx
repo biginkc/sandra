@@ -2,9 +2,15 @@ import Link from "next/link";
 
 import type { SkipTraceBalance } from "@/lib/skip-trace/balance";
 
-type Props = { balance: SkipTraceBalance };
+type Props = {
+  balance: SkipTraceBalance;
+  /** Only admins see the "Top up →" / "Open settings →" CTAs. The
+   *  link target is `/admin/skip-trace-settings`, which is admin-only
+   *  anyway; surfacing the button to VAs led to dead-link clicks. */
+  isAdmin: boolean;
+};
 
-export function SkipTraceCredits({ balance }: Props) {
+export function SkipTraceCredits({ balance, isAdmin }: Props) {
   if (!balance.available) {
     return (
       <div className="border-border bg-card flex items-center justify-between rounded-2xl border px-6 py-5">
@@ -18,12 +24,14 @@ export function SkipTraceCredits({ balance }: Props) {
               : "Balance unavailable — check settings"}
           </div>
         </div>
-        <Link
-          href="/admin/skip-trace-settings"
-          className="text-foreground text-sm font-bold underline-offset-4 hover:underline"
-        >
-          Open settings →
-        </Link>
+        {isAdmin && (
+          <Link
+            href="/admin/skip-trace-settings"
+            className="text-foreground text-sm font-bold underline-offset-4 hover:underline"
+          >
+            Open settings →
+          </Link>
+        )}
       </div>
     );
   }
@@ -56,12 +64,14 @@ export function SkipTraceCredits({ balance }: Props) {
           </div>
         </div>
       </div>
-      <Link
-        href="/admin/skip-trace-settings"
-        className="bg-foreground text-background rounded-full px-5 py-2.5 text-sm font-bold transition-opacity hover:opacity-90"
-      >
-        Top up →
-      </Link>
+      {isAdmin && (
+        <Link
+          href="/admin/skip-trace-settings"
+          className="bg-foreground text-background rounded-full px-5 py-2.5 text-sm font-bold transition-opacity hover:opacity-90"
+        >
+          Top up →
+        </Link>
+      )}
     </div>
   );
 }

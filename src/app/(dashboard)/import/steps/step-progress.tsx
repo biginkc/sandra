@@ -1,12 +1,15 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
+import { buttonVariants } from "@/components/ui/button";
 import {
   Card,
   CardContent,
   CardDescription,
+  CardFooter,
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
@@ -15,6 +18,26 @@ import type { Database } from "@/lib/supabase/types";
 
 type Job = Database["public"]["Tables"]["jobs"]["Row"];
 
+const TERMINAL_STATUSES = new Set([
+  "completed",
+  "failed",
+  "partial",
+  "canceled",
+]);
+
+/**
+ * Final step of the import wizard. While the job is running it shows
+ * a live progress bar and explicit "you can close this tab" copy
+ * (the work is queued server-side; closing the browser doesn't lose
+ * progress). When the job reaches a terminal status the same card
+ * swaps in-place to a summary + action buttons (View properties /
+ * Job details / New import).
+ *
+ * Used to be a two-step (progress → done) flow, but that footer-Next
+ * button contradicted the "you can close this tab" copy. Combining
+ * the two states into one card removes the ambiguity. See
+ * `docs/feedback/feedback a.pdf` (item 1).
+ */
 export function StepProgress({ jobId }: { jobId: string }) {
   const [job, setJob] = useState<Job | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -71,11 +94,10 @@ export function StepProgress({ jobId }: { jobId: string }) {
 
       // Low-frequency safety net — Realtime is the primary channel; this
       // only catches rare socket drops. Stops as soon as the job is terminal.
-      const terminal = new Set(["completed", "failed", "partial", "canceled"]);
-      if (initial && !terminal.has(initial.status)) {
+      if (initial && !TERMINAL_STATUSES.has(initial.status)) {
         pollId = setInterval(async () => {
           const latest = await fetchJob();
-          if (latest && terminal.has(latest.status) && pollId) {
+          if (latest && TERMINAL_STATUSES.has(latest.status) && pollId) {
             clearInterval(pollId);
             pollId = null;
           }
@@ -96,19 +118,24 @@ export function StepProgress({ jobId }: { jobId: string }) {
   const processed = job?.processed_items ?? 0;
   const pct = total > 0 ? Math.min(100, Math.round((processed / total) * 100)) : 0;
 
+  const isTerminal = job ? TERMINAL_STATUSES.has(job.status) : false;
+  const skippedCount = Math.max(
+    0,
+    (isTerminal ? total : processed) -
+      (job?.succeeded_items ?? 0) -
+      (job?.failed_items ?? 0),
+  );
+
+  const { title, description } = describeState(job, isTerminal);
+
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Importing</CardTitle>
-        <CardDescription>
-          You can close this tab and come back — the job runs on the server.
-          Visit <code>/jobs</code> anytime to check in.
-        </CardDescription>
+        <CardTitle>{title}</CardTitle>
+        <CardDescription>{description}</CardDescription>
       </CardHeader>
       <CardContent className="flex flex-col gap-4">
-        {error && (
-          <div className="text-destructive text-sm">{error}</div>
-        )}
+        {error && <div className="text-destructive text-sm">{error}</div>}
         <div className="flex items-center justify-between text-sm">
           <div>
             <Badge variant="outline">{job?.status ?? "…"}</Badge>
@@ -117,23 +144,75 @@ export function StepProgress({ jobId }: { jobId: string }) {
             {processed} of {total} rows
           </div>
         </div>
-        <div className="bg-muted h-3 overflow-hidden rounded-full">
-          <div
-            className="bg-primary h-full transition-all"
-            style={{ width: `${pct}%` }}
-          />
-        </div>
+        {!isTerminal && (
+          <div className="bg-muted h-3 overflow-hidden rounded-full">
+            <div
+              className="bg-primary h-full transition-all"
+              style={{ width: `${pct}%` }}
+            />
+          </div>
+        )}
         <div className="grid grid-cols-3 gap-3 text-center text-sm">
           <Stat label="Succeeded" value={job?.succeeded_items ?? 0} />
           <Stat label="Failed" value={job?.failed_items ?? 0} />
-          <Stat
-            label="Skipped"
-            value={Math.max(0, processed - (job?.succeeded_items ?? 0) - (job?.failed_items ?? 0))}
-          />
+          <Stat label="Skipped" value={skippedCount} />
         </div>
       </CardContent>
+      {isTerminal && (
+        <CardFooter className="flex flex-wrap gap-2">
+          <Link href="/properties" className={buttonVariants()}>
+            View properties
+          </Link>
+          <Link
+            href={`/jobs/${jobId}`}
+            className={buttonVariants({ variant: "outline" })}
+          >
+            Job details
+          </Link>
+          <Link
+            href="/import"
+            className={buttonVariants({ variant: "ghost" })}
+          >
+            New import
+          </Link>
+        </CardFooter>
+      )}
     </Card>
   );
+}
+
+function describeState(
+  job: Job | null,
+  isTerminal: boolean,
+): { title: string; description: string } {
+  if (!job || !isTerminal) {
+    return {
+      title: "Importing",
+      description:
+        "You can close this tab and come back — the job runs on the server. Visit /jobs anytime to check in.",
+    };
+  }
+  if (job.status === "completed") {
+    return { title: "Import complete", description: "All rows processed." };
+  }
+  if (job.status === "partial") {
+    return {
+      title: "Import finished with errors",
+      description:
+        "Some rows failed. Open Job details to see specifics for the failed rows.",
+    };
+  }
+  if (job.status === "failed") {
+    return {
+      title: "Import failed",
+      description:
+        "The job failed before completing. Open Job details to see why.",
+    };
+  }
+  if (job.status === "canceled") {
+    return { title: "Import canceled", description: "The job was canceled." };
+  }
+  return { title: "Import complete", description: "Done." };
 }
 
 function Stat({ label, value }: { label: string; value: number }) {
