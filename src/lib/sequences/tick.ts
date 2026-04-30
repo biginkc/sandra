@@ -62,7 +62,7 @@ export async function processEnrollmentTick(
   // 1. Load current step.
   const { data: step, error: stepErr } = await client
     .from("sequence_steps")
-    .select("id, step_index, action_type, template_body, target_status, delay_after_previous_minutes")
+    .select("id, step_index, action_type, template_body, template_id, target_status, delay_after_previous_minutes")
     .eq("sequence_id", enrollment.sequence_id)
     .eq("step_index", enrollment.current_step_index)
     .maybeSingle();
@@ -151,7 +151,59 @@ export async function processEnrollmentTick(
       .maybeSingle();
     const appendOptOut = seq?.append_opt_out ?? true;
 
-    const rendered = renderTemplate(step.template_body ?? "", vars);
+    // Resolve the body source. A template reference takes precedence over
+    // inline copy — they're mutually exclusive at write time. If the
+    // referenced template was soft-deleted while the enrollment was in
+    // flight, pause the enrollment with reason "template_missing" so the
+    // author can fix it instead of silently looping on failure.
+    let bodySource: string;
+    if (step.template_id) {
+      const { data: tmpl, error: tmplErr } = await client
+        .from("sms_templates")
+        .select("content")
+        .eq("id", step.template_id)
+        .is("deleted_at", null)
+        .maybeSingle();
+      if (tmplErr) {
+        await markRunSkipped(client, claim.id, "provider_failed");
+        return {
+          status: "failed",
+          enrollmentId: enrollment.id,
+          message: `template_fetch: ${tmplErr.message}`,
+        };
+      }
+      if (!tmpl) {
+        await markRunSkipped(client, claim.id, "provider_failed");
+        await pauseEnrollment(client, enrollment.id, "template_missing", false);
+        return {
+          status: "paused",
+          enrollmentId: enrollment.id,
+          reason: "template_missing",
+        };
+      }
+      bodySource = tmpl.content;
+    } else {
+      bodySource = step.template_body ?? "";
+    }
+
+    // Defense-in-depth: schema check constraint
+    // `sequence_steps_send_sms_body_xor` (migration 035) rejects rows that
+    // would land here with an empty bodySource, but we re-check at runtime
+    // in case the constraint was somehow bypassed (e.g. constraint dropped
+    // via a hot-fix, or template content was hand-edited to whitespace).
+    // Pause the enrollment with `step_misconfigured` so the author can fix
+    // it instead of sending an empty SMS the provider would silently bill.
+    if (!bodySource.trim()) {
+      await markRunSkipped(client, claim.id, "provider_failed");
+      await pauseEnrollment(client, enrollment.id, "step_misconfigured", false);
+      return {
+        status: "paused",
+        enrollmentId: enrollment.id,
+        reason: "step_misconfigured",
+      };
+    }
+
+    const rendered = renderTemplate(bodySource, vars);
     const finalBody = applyOptOut(rendered, {
       append_opt_out: appendOptOut,
       // Seed the rotation with the claim id so a retry picks the same variant.

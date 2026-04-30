@@ -20,6 +20,12 @@ import type { TemplateVars } from "./render";
  * authoring VA's email via `listOrgUsers`-style lookup. Falls back to
  * blank when unknown; the conditional wrapper in the starter templates
  * handles that gracefully.
+ *
+ * Two-client split (WR-02): the property/contact/org reads run on the
+ * caller-supplied `client` (so RLS still applies in the inline-reply
+ * path), while the `auth.admin.getUserById` call runs on `adminClient`
+ * (which must be a service-role client). Cron callers can pass the same
+ * service-role client for both — it bypasses RLS by design.
  */
 export async function loadTemplateVars(
   client: SupabaseClient<Database>,
@@ -28,7 +34,15 @@ export async function loadTemplateVars(
     contactId: string | null;
     enrolledByUserId: string | null;
   },
+  adminClient?: SupabaseClient<Database>,
 ): Promise<TemplateVars> {
+  // Fall back to the session client if no admin client was provided. This
+  // preserves cron behavior (cron passes a service-role client as `client`,
+  // so `auth.admin.getUserById` works on it). Inline-reply callers should
+  // pass an explicit `adminClient` so the property/contact/org reads stay
+  // RLS-scoped.
+  const userResolverClient = adminClient ?? client;
+
   const [propertyResult, contactResult, orgNameResult, userResult] =
     await Promise.all([
       client
@@ -47,7 +61,7 @@ export async function loadTemplateVars(
       // we know property exists.
       Promise.resolve(null),
       params.enrolledByUserId
-        ? resolveUserFirstName(client, params.enrolledByUserId)
+        ? resolveUserFirstName(userResolverClient, params.enrolledByUserId)
         : Promise.resolve(null),
     ]);
 
@@ -81,6 +95,9 @@ export async function loadTemplateVars(
  * Resolve a user id to their first-name-like display string. We use the
  * local part of their email (before the `@`) since Supabase doesn't
  * ship with a profile name by default. Falls back to null on any error.
+ *
+ * Requires a service-role client because `auth.admin.getUserById` is
+ * not available on session clients.
  */
 async function resolveUserFirstName(
   client: SupabaseClient<Database>,

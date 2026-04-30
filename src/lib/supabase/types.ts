@@ -1358,6 +1358,7 @@ export type Database = {
           step_index: number
           target_status: string | null
           template_body: string | null
+          template_id: string | null
         }
         Insert: {
           action_type: string
@@ -1368,6 +1369,7 @@ export type Database = {
           step_index: number
           target_status?: string | null
           template_body?: string | null
+          template_id?: string | null
         }
         Update: {
           action_type?: string
@@ -1378,6 +1380,7 @@ export type Database = {
           step_index?: number
           target_status?: string | null
           template_body?: string | null
+          template_id?: string | null
         }
         Relationships: [
           {
@@ -1385,6 +1388,13 @@ export type Database = {
             columns: ["sequence_id"]
             isOneToOne: false
             referencedRelation: "sequences"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "sequence_steps_template_id_fkey"
+            columns: ["template_id"]
+            isOneToOne: false
+            referencedRelation: "sms_templates"
             referencedColumns: ["id"]
           },
         ]
@@ -1435,6 +1445,50 @@ export type Database = {
         Relationships: [
           {
             foreignKeyName: "sequences_org_id_fkey"
+            columns: ["org_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      sms_templates: {
+        Row: {
+          id: string
+          org_id: string
+          name: string
+          content: string
+          category: string
+          created_by: string | null
+          created_at: string
+          updated_at: string
+          deleted_at: string | null
+        }
+        Insert: {
+          id?: string
+          org_id: string
+          name: string
+          content: string
+          category?: string
+          created_by?: string | null
+          created_at?: string
+          updated_at?: string
+          deleted_at?: string | null
+        }
+        Update: {
+          id?: string
+          org_id?: string
+          name?: string
+          content?: string
+          category?: string
+          created_by?: string | null
+          created_at?: string
+          updated_at?: string
+          deleted_at?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "sms_templates_org_id_fkey"
             columns: ["org_id"]
             isOneToOne: false
             referencedRelation: "organizations"

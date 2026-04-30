@@ -25,6 +25,8 @@ import {
 import type { DialpadFromOption } from "@/lib/messaging/types";
 import { dispatchPropertyAssigned } from "@/lib/notifications/dispatch";
 import type { Database } from "@/lib/supabase/types";
+import { loadTemplateVars } from "@/lib/sequences/template-vars";
+import type { TemplateVars } from "@/lib/templates/render";
 
 export type PropertyStatus =
   | "prospect"
@@ -1151,5 +1153,76 @@ export async function createLeadNote(
       extra: { propertyId },
     });
     return errFromUnknown(e, "NOTE_CREATE_FAILED");
+  }
+}
+
+// ============================================================================
+// Template variable loading for the inline reply composer
+// ============================================================================
+
+/**
+ * Load the template variable map for a lead so the inline reply composer
+ * can render `{{first_name}}`, `{{property_address}}`, etc. into a
+ * selected SMS template before the VA sends it.
+ *
+ * Wraps the shared `loadTemplateVars` from sequences — same variable
+ * whitelist, same resolution logic. The only difference is that the
+ * "enrolled by" user (which populates `{{my_first_name}}`) is the
+ * current session user rather than a sequence enrollment author.
+ */
+export async function loadLeadVars(
+  propertyId: string,
+): Promise<Result<TemplateVars>> {
+  try {
+    const supabase = await createClient();
+
+    // 1. Get the homeowner contact id from the property.
+    const { data: property, error: propErr } = await supabase
+      .from("properties")
+      .select("homeowner_contact_id")
+      .eq("id", propertyId)
+      .maybeSingle();
+    if (propErr) {
+      return {
+        ok: false,
+        error: { code: "LEAD_FETCH_FAILED", message: propErr.message },
+      };
+    }
+    if (!property) {
+      return {
+        ok: false,
+        error: { code: "LEAD_NOT_FOUND", message: "Lead not found." },
+      };
+    }
+
+    // 2. Resolve the current user for {{my_first_name}}.
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+
+    // 3. Delegate to the shared loader. Property / contact / organization
+    //    reads run on the session client (RLS-scoped); the admin client is
+    //    only handed to the user-id → first-name resolver, which needs
+    //    `auth.admin.getUserById`. This narrows the service-role surface
+    //    so a future RLS tightening on `properties` / `contacts` /
+    //    `organizations` is not silently bypassed here (WR-02).
+    const adminClient = createAdminClient();
+    const vars = await loadTemplateVars(
+      supabase,
+      {
+        propertyId,
+        contactId: property.homeowner_contact_id,
+        enrolledByUserId: user?.id ?? null,
+      },
+      adminClient,
+    );
+
+    return ok(vars);
+  } catch (e) {
+    reportError(e, {
+      tags: { surface: "load_lead_vars" },
+      extra: { propertyId },
+    });
+    return errFromUnknown(e, "LOAD_LEAD_VARS_FAILED");
   }
 }

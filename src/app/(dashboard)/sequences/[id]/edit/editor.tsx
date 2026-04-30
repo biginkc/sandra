@@ -15,6 +15,8 @@ import {
 import { Input } from "@/components/ui/input";
 import { callAction } from "@/lib/errors/call-action";
 
+import { type TemplateRow } from "@/app/(dashboard)/templates/actions";
+
 import {
   deleteSequenceStep,
   updateSequence,
@@ -117,9 +119,11 @@ function DelayInput({
 export function SequenceEditor({
   sequence,
   initialImpact,
+  templates,
 }: {
   sequence: SequenceWithSteps;
   initialImpact: { total_enrolled: number; scheduled_next_7d: number };
+  templates: TemplateRow[];
 }) {
   const router = useRouter();
   const [name, setName] = useState(sequence.name);
@@ -198,7 +202,11 @@ export function SequenceEditor({
       <section className="flex flex-col gap-4">
         <div className="flex items-center justify-between">
           <h2 className="font-semibold">Steps</h2>
-          <AddStepButton sequenceId={sequence.id} nextIndex={sequence.steps.length} />
+          <AddStepButton
+            sequenceId={sequence.id}
+            nextIndex={sequence.steps.length}
+            templates={templates}
+          />
         </div>
         {sequence.steps.length === 0 ? (
           <div className="text-muted-foreground rounded-md border border-dashed p-6 text-sm">
@@ -211,6 +219,7 @@ export function SequenceEditor({
               sequenceId={sequence.id}
               step={step}
               impact={initialImpact}
+              templates={templates}
             />
           ))
         )}
@@ -219,12 +228,140 @@ export function SequenceEditor({
   );
 }
 
+/**
+ * Message body editor for send_sms steps. Toggles between an inline custom
+ * message and a saved SMS template reference. Inline body and template_id
+ * are mutually exclusive — picking one resets the other so the upsert
+ * action gets unambiguous input.
+ */
+function MessageBodyEditor({
+  templates,
+  body,
+  setBody,
+  templateId,
+  setTemplateId,
+}: {
+  templates: TemplateRow[];
+  body: string;
+  setBody: (next: string) => void;
+  templateId: string | null;
+  setTemplateId: (next: string | null) => void;
+}) {
+  const mode: "custom" | "template" = templateId ? "template" : "custom";
+  const setMode = (next: "custom" | "template") => {
+    // WR-10: don't wipe `body` here. The previous version cleared it on
+    // every switch to template mode, so a half-written custom body was
+    // lost the moment the author toggled the radio to peek. Both modes
+    // keep their respective fields populated; the upstream save action
+    // already nulls out the inactive field at write time
+    // (editor.tsx:379-381 / :519-521).
+    if (next === "custom") {
+      setTemplateId(null);
+    } else {
+      setTemplateId(templates[0]?.id ?? null);
+    }
+  };
+  const selected = templates.find((t) => t.id === templateId);
+  // WR-11: detect when the step references a template that's no longer
+  // in the live list (soft-deleted in another tab / by a teammate).
+  // Without this banner the <select> just shows nothing and the
+  // upsert silently saves the dead id; tick.ts then pauses with
+  // `template_missing` on the next fire — confusing for the author.
+  const referencedTemplateMissing =
+    mode === "template" && templateId !== null && selected === undefined;
+
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="flex items-center gap-4 text-sm">
+        <label className="flex items-center gap-1.5">
+          <input
+            type="radio"
+            checked={mode === "custom"}
+            onChange={() => setMode("custom")}
+          />
+          <span>Custom message</span>
+        </label>
+        <label className="flex items-center gap-1.5">
+          <input
+            type="radio"
+            checked={mode === "template"}
+            onChange={() => setMode("template")}
+            disabled={templates.length === 0}
+          />
+          <span>
+            Use template{templates.length === 0 ? " (none yet)" : ""}
+          </span>
+        </label>
+      </div>
+      {referencedTemplateMissing ? (
+        <div className="border-destructive/50 bg-destructive/5 text-destructive flex flex-col gap-1 rounded-md border px-3 py-2 text-xs">
+          <span className="font-semibold">
+            Referenced template no longer exists
+          </span>
+          <span>
+            Pick a different template from the list, or switch to
+            &ldquo;Custom message&rdquo;. Saving as-is will pause any
+            enrollments hitting this step.
+          </span>
+        </div>
+      ) : null}
+      {mode === "custom" ? (
+        <label className="flex flex-col gap-1 text-sm">
+          <span className="font-medium">Message body</span>
+          <textarea
+            value={body}
+            onChange={(e) => setBody(e.target.value)}
+            rows={4}
+            className="border-input rounded-md border px-2 py-1.5 font-mono text-sm"
+            placeholder="Hi {{first_name}}, cash offer on {{property_address}}?"
+          />
+          <span className="text-muted-foreground text-xs">
+            Variables: first_name, last_name, property_address, city,
+            state, property_zip, market, my_first_name, company_name,
+            opt_out. Wrap with <code>{"{{#if var}}…{{/if}}"}</code> to
+            skip a phrase when a value is missing.
+          </span>
+        </label>
+      ) : (
+        <div className="flex flex-col gap-2 text-sm">
+          <label className="flex flex-col gap-1">
+            <span className="font-medium">Template</span>
+            <select
+              value={templateId ?? ""}
+              onChange={(e) => setTemplateId(e.target.value || null)}
+              className="border-input rounded-md border px-2 py-1.5 text-sm"
+            >
+              {templates.map((t) => (
+                <option key={t.id} value={t.id}>
+                  {t.category} — {t.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          {selected ? (
+            <div className="flex flex-col gap-1">
+              <span className="text-muted-foreground text-xs">
+                Preview (variables resolve at send time)
+              </span>
+              <pre className="bg-muted/40 max-h-48 overflow-y-auto rounded-md p-3 text-xs whitespace-pre-wrap font-mono">
+                {selected.content}
+              </pre>
+            </div>
+          ) : null}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function AddStepButton({
   sequenceId,
   nextIndex,
+  templates,
 }: {
   sequenceId: string;
   nextIndex: number;
+  templates: TemplateRow[];
 }) {
   const router = useRouter();
   const [open, setOpen] = useState(false);
@@ -239,12 +376,14 @@ function AddStepButton({
     "send_sms",
   );
   const [templateBody, setTemplateBody] = useState("");
+  const [templateId, setTemplateId] = useState<string | null>(null);
   const [targetStatus, setTargetStatus] = useState("");
 
   const resetForm = () => {
     setDelayMin(defaultDelay);
     setActionType("send_sms");
     setTemplateBody("");
+    setTemplateId(null);
     setTargetStatus("");
   };
 
@@ -261,7 +400,9 @@ function AddStepButton({
           step_index: nextIndex,
           delay_after_previous_minutes: delayMin,
           action_type: actionType,
-          template_body: actionType === "send_sms" ? templateBody : null,
+          template_body:
+            actionType === "send_sms" && !templateId ? templateBody : null,
+          template_id: actionType === "send_sms" ? templateId : null,
           target_status: actionType === "change_status" ? targetStatus : null,
         }),
         {
@@ -279,7 +420,7 @@ function AddStepButton({
   // Disable save when the action's required field is missing.
   const canSave =
     actionType === "send_sms"
-      ? templateBody.trim().length > 0
+      ? templateId !== null || templateBody.trim().length > 0
       : targetStatus.length > 0;
 
   return (
@@ -322,22 +463,13 @@ function AddStepButton({
           </div>
 
           {actionType === "send_sms" ? (
-            <label className="flex flex-col gap-1 text-sm">
-              <span className="font-medium">Message body</span>
-              <textarea
-                value={templateBody}
-                onChange={(e) => setTemplateBody(e.target.value)}
-                rows={4}
-                className="border-input rounded-md border px-2 py-1.5 font-mono text-sm"
-                placeholder="Hi {{first_name}}, cash offer on {{property_address}}?"
-              />
-              <span className="text-muted-foreground text-xs">
-                Variables: first_name, last_name, property_address, city,
-                state, property_zip, market, my_first_name, company_name,
-                opt_out. Wrap with <code>{"{{#if var}}…{{/if}}"}</code> to
-                skip a phrase when a value is missing.
-              </span>
-            </label>
+            <MessageBodyEditor
+              templates={templates}
+              body={templateBody}
+              setBody={setTemplateBody}
+              templateId={templateId}
+              setTemplateId={setTemplateId}
+            />
           ) : (
             <label className="flex flex-col gap-1 text-sm">
               <span className="font-medium">Target status</span>
@@ -381,15 +513,20 @@ function StepEditor({
   sequenceId,
   step,
   impact,
+  templates,
 }: {
   sequenceId: string;
   step: SequenceWithSteps["steps"][number];
   impact: { total_enrolled: number; scheduled_next_7d: number };
+  templates: TemplateRow[];
 }) {
   const router = useRouter();
   const [delayMin, setDelayMin] = useState(step.delay_after_previous_minutes);
   const [actionType, setActionType] = useState(step.action_type);
   const [templateBody, setTemplateBody] = useState(step.template_body ?? "");
+  const [templateId, setTemplateId] = useState<string | null>(
+    step.template_id ?? null,
+  );
   const [targetStatus, setTargetStatus] = useState(step.target_status ?? "");
   const [pending, startTransition] = useTransition();
 
@@ -403,7 +540,9 @@ function StepEditor({
           step_index: step.step_index,
           delay_after_previous_minutes: delayMin,
           action_type: actionType,
-          template_body: actionType === "send_sms" ? templateBody : null,
+          template_body:
+            actionType === "send_sms" && !templateId ? templateBody : null,
+          template_id: actionType === "send_sms" ? templateId : null,
           target_status: actionType === "change_status" ? targetStatus : null,
         }),
         {
@@ -462,22 +601,13 @@ function StepEditor({
       </div>
 
       {actionType === "send_sms" ? (
-        <label className="flex flex-col gap-1 text-sm">
-          <span className="font-medium">Message body</span>
-          <textarea
-            value={templateBody}
-            onChange={(e) => setTemplateBody(e.target.value)}
-            rows={4}
-            className="border-input rounded-md border px-2 py-1.5 font-mono text-sm"
-            placeholder="Hi {{first_name}}, cash offer on {{property_address}}?"
-          />
-          <span className="text-muted-foreground text-xs">
-            Variables: first_name, last_name, property_address, city, state,
-            property_zip, market, my_first_name, company_name, opt_out. Wrap
-            with <code>{"{{#if var}}…{{/if}}"}</code> to skip a phrase when a
-            value is missing.
-          </span>
-        </label>
+        <MessageBodyEditor
+          templates={templates}
+          body={templateBody}
+          setBody={setTemplateBody}
+          templateId={templateId}
+          setTemplateId={setTemplateId}
+        />
       ) : (
         <label className="flex flex-col gap-1 text-sm">
           <span className="font-medium">Target status</span>

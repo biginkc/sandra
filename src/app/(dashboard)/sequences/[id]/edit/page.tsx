@@ -2,6 +2,7 @@ import { notFound } from "next/navigation";
 
 import { Page } from "@/components/page";
 import { PageHeader } from "@/components/page-header";
+import { listTemplates } from "@/app/(dashboard)/templates/actions";
 
 import { getImpactAction, getSequenceWithSteps } from "../../actions";
 
@@ -37,6 +38,9 @@ export default async function SequenceEditPage({
     ? impactResult.data
     : { total_enrolled: 0, scheduled_next_7d: 0 };
 
+  const templatesResult = await listTemplates();
+  const templates = templatesResult.ok ? templatesResult.data : [];
+
   return (
     <Page>
       <PageHeader
@@ -52,7 +56,11 @@ export default async function SequenceEditPage({
             : "No leads enrolled yet."
         }
       />
-      <SequenceEditor sequence={result.data} initialImpact={impact} />
+      <SequenceEditor
+        sequence={result.data}
+        initialImpact={impact}
+        templates={templates}
+      />
     </Page>
   );
 }

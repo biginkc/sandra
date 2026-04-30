@@ -2,13 +2,16 @@
 
 import { SendIcon } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { useEffect, useState, useTransition } from "react";
+import { useEffect, useRef, useState, useTransition } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import { callAction } from "@/lib/errors/call-action";
+import { renderTemplate } from "@/lib/templates/render";
+import { type TemplateRow } from "@/app/(dashboard)/templates/actions";
+import { TemplatePicker } from "@/app/(dashboard)/templates/template-picker";
 
-import { listFromNumbers, sendSmsFromLead } from "../actions";
+import { listFromNumbers, sendSmsFromLead, loadLeadVars } from "../actions";
 
 type Props = {
   propertyId: string;
@@ -129,8 +132,41 @@ export function InlineReply({
     );
   }
 
+  // Tracks the most recent template selection so a slower in-flight
+  // `loadLeadVars` for an earlier click can't overwrite the body the user
+  // just picked (WR-04). Each click increments the token; resolved
+  // promises whose token doesn't match the latest are discarded.
+  const templateRequestToken = useRef(0);
+
+  const handleTemplateSelect = (template: TemplateRow) => {
+    // WR-03: protect a non-empty draft from being silently clobbered.
+    // VAs who click "Templates" to peek expect a confirmation, not data
+    // loss. Empty draft = no prompt.
+    if (
+      body.trim().length > 0 &&
+      !window.confirm("Replace your draft with this template?")
+    ) {
+      return;
+    }
+
+    const requestId = ++templateRequestToken.current;
+    // Try to interpolate with lead data; fall back to raw content.
+    // Stale-resolution guard (WR-04): only apply this fetch's result if
+    // it's still the latest click. Two quick clicks → two in-flight
+    // requests; the second click bumps the token so the first one's
+    // resolution is dropped on the floor.
+    loadLeadVars(propertyId).then((result) => {
+      if (requestId !== templateRequestToken.current) return;
+      if (result.ok) {
+        setBody(renderTemplate(template.content, result.data));
+      } else {
+        setBody(template.content);
+      }
+    });
+  };
+
   return (
-    <div className="mt-3 flex items-end gap-2">
+    <div className="mt-3 flex flex-col gap-2">
       <textarea
         value={body}
         onChange={(e) => setBody(e.target.value)}
@@ -142,16 +178,19 @@ export function InlineReply({
         rows={2}
         className="border-input placeholder:text-muted-foreground focus-visible:ring-ring min-h-[44px] flex-1 rounded-md border bg-transparent px-3 py-2 text-sm shadow-sm focus-visible:ring-1 focus-visible:outline-none"
       />
-      <div className="flex shrink-0 flex-col items-end gap-1">
-        <Button onClick={send} disabled={!canSend} size="sm" aria-label="Send reply">
-          <SendIcon className="mr-1 size-3.5" />
-          {pending ? "Sending…" : "Send"}
-        </Button>
-        <span
-          className={`text-[10px] ${tooLong ? "text-destructive" : "text-muted-foreground"}`}
-        >
-          {length} / 1600
-        </span>
+      <div className="flex items-center justify-between">
+        <TemplatePicker onSelect={handleTemplateSelect} />
+        <div className="flex items-center gap-2">
+          <span
+            className={`text-[10px] ${tooLong ? "text-destructive" : "text-muted-foreground"}`}
+          >
+            {length} / 1600
+          </span>
+          <Button onClick={send} disabled={!canSend} size="sm" aria-label="Send reply">
+            <SendIcon className="mr-1 size-3.5" />
+            {pending ? "Sending…" : "Send"}
+          </Button>
+        </div>
       </div>
     </div>
   );
