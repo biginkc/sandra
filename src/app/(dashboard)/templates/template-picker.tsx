@@ -1,7 +1,7 @@
 "use client";
 
 import { FileText } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -34,6 +34,19 @@ export function TemplatePicker({ onSelect }: Props) {
   const [open, setOpen] = useState(false);
   const [loadState, setLoadState] = useState<LoadState>({ status: "idle" });
   const [search, setSearch] = useState("");
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
+
+  // Focus the search input when the popover opens, but use preventScroll
+  // so the browser doesn't scroll the page to bring the portaled popover
+  // into view. The HTML `autoFocus` attribute does NOT support preventScroll
+  // and was causing the page to jump to the top on lead detail pages.
+  useEffect(() => {
+    if (!open) return;
+    const id = requestAnimationFrame(() => {
+      searchInputRef.current?.focus({ preventScroll: true });
+    });
+    return () => cancelAnimationFrame(id);
+  }, [open]);
 
   // WR-06: re-fetch on every open. Templates are small; a fresh read on
   // each click is cheaper than the bug class of "stale picker shows a
@@ -124,11 +137,11 @@ export function TemplatePicker({ onSelect }: Props) {
       >
         <div className="border-border border-b p-2">
           <Input
+            ref={searchInputRef}
             placeholder="Search templates…"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             className="h-8 text-xs"
-            autoFocus
           />
         </div>
         <div className="max-h-[280px] overflow-y-auto">
