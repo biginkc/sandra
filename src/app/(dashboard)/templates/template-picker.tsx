@@ -18,26 +18,52 @@ type Props = {
   onSelect: (template: TemplateRow) => void;
 };
 
+type LoadState =
+  | { status: "idle" }
+  | { status: "loading" }
+  | { status: "ready"; templates: TemplateRow[] }
+  | { status: "error"; message: string };
+
 /**
- * Popover-based template picker. Loads templates on first open,
- * groups by category, and supports search. Used in InlineReply
- * and the sequence step editor.
+ * Popover-based template picker. Re-fetches templates on every open
+ * so newly-created or deleted rows in another tab are reflected
+ * without a full page reload (WR-06). Surfaces a retry button if the
+ * fetch fails so the empty state isn't ambiguous (WR-05).
  */
 export function TemplatePicker({ onSelect }: Props) {
   const [open, setOpen] = useState(false);
-  const [templates, setTemplates] = useState<TemplateRow[]>([]);
-  const [loaded, setLoaded] = useState(false);
+  const [loadState, setLoadState] = useState<LoadState>({ status: "idle" });
   const [search, setSearch] = useState("");
 
-  // Lazy-load templates on first open
+  // WR-06: re-fetch on every open. Templates are small; a fresh read on
+  // each click is cheaper than the bug class of "stale picker shows a
+  // template that was deleted in another tab". WR-05: track an explicit
+  // error state instead of swallowing the failure into "no templates yet".
+  // The `cancelled` flag mirrors the pattern used elsewhere in this file
+  // family (e.g. inline-reply.tsx) so a quick close-then-open doesn't
+  // race two in-flight fetches.
   useEffect(() => {
-    if (open && !loaded) {
-      listTemplates().then((result) => {
-        if (result.ok) setTemplates(result.data);
-        setLoaded(true);
-      });
-    }
-  }, [open, loaded]);
+    if (!open) return;
+    let cancelled = false;
+    setLoadState({ status: "loading" });
+    listTemplates().then((result) => {
+      if (cancelled) return;
+      if (result.ok) {
+        setLoadState({ status: "ready", templates: result.data });
+      } else {
+        setLoadState({
+          status: "error",
+          message: result.error.message ?? "Couldn't load templates.",
+        });
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [open]);
+
+  const templates =
+    loadState.status === "ready" ? loadState.templates : [];
 
   const filtered = search.trim()
     ? templates.filter(
@@ -58,6 +84,23 @@ export function TemplatePicker({ onSelect }: Props) {
   );
 
   const categoryOrder = Object.keys(grouped).sort();
+
+  // Manually re-trigger the load on retry click without toggling `open`.
+  // Re-using the effect via a key bump would require an extra state var;
+  // a direct call here is simpler.
+  const retry = () => {
+    setLoadState({ status: "loading" });
+    listTemplates().then((result) => {
+      if (result.ok) {
+        setLoadState({ status: "ready", templates: result.data });
+      } else {
+        setLoadState({
+          status: "error",
+          message: result.error.message ?? "Couldn't load templates.",
+        });
+      }
+    });
+  };
 
   return (
     <Popover open={open} onOpenChange={setOpen}>
@@ -89,9 +132,23 @@ export function TemplatePicker({ onSelect }: Props) {
           />
         </div>
         <div className="max-h-[280px] overflow-y-auto">
-          {!loaded ? (
+          {loadState.status === "loading" || loadState.status === "idle" ? (
             <div className="text-muted-foreground p-4 text-center text-xs">
               Loading…
+            </div>
+          ) : loadState.status === "error" ? (
+            <div className="flex flex-col items-center gap-2 p-4 text-center">
+              <p className="text-destructive text-xs">
+                {loadState.message}
+              </p>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={retry}
+                className="h-7 text-xs"
+              >
+                Retry
+              </Button>
             </div>
           ) : filtered.length === 0 ? (
             <div className="text-muted-foreground p-4 text-center text-xs">
