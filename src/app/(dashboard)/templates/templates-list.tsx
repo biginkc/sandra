@@ -1,7 +1,7 @@
 "use client";
 
 import { Search } from "lucide-react";
-import { useState, useMemo } from "react";
+import { useEffect, useState, useMemo } from "react";
 
 import { Input } from "@/components/ui/input";
 import {
@@ -113,7 +113,7 @@ export function TemplatesList({ templates, categories }: Props) {
                     {t.content.length > 80 ? "…" : ""}
                   </td>
                   <td className="text-muted-foreground whitespace-nowrap px-3 py-2 text-xs">
-                    {formatRelative(t.updated_at)}
+                    <UpdatedAt iso={t.updated_at} />
                   </td>
                   <td className="px-3 py-2 text-right">
                     <div className="flex items-center justify-end gap-1">
@@ -150,6 +150,46 @@ export function TemplatesList({ templates, categories }: Props) {
       )}
     </>
   );
+}
+
+/**
+ * WR-12: render an absolute, server-stable label first paint, then swap
+ * to the relative form on the client. The previous version called
+ * `Date.now()` during render, which produced different strings on
+ * server vs client when a row crossed a "just now" / "1m ago" boundary
+ * during SSR → hydration, triggering React's hydration mismatch warning.
+ *
+ * `suppressHydrationWarning` on `<time>` covers the narrow window
+ * between server output and the first effect tick, so the relative
+ * label updating doesn't itself trip a warning.
+ */
+function UpdatedAt({ iso }: { iso: string }) {
+  const [label, setLabel] = useState<string>(() => formatAbsolute(iso));
+
+  useEffect(() => {
+    // Compute relative once on mount, then refresh every minute so a
+    // long-lived list view doesn't go stale.
+    const update = () => setLabel(formatRelative(iso));
+    update();
+    const id = setInterval(update, 60_000);
+    return () => clearInterval(id);
+  }, [iso]);
+
+  return (
+    <time dateTime={iso} title={formatAbsolute(iso)} suppressHydrationWarning>
+      {label}
+    </time>
+  );
+}
+
+function formatAbsolute(iso: string): string {
+  // Locale-stable form (server and client agree because no `Date.now()`
+  // is involved): "2026-04-29 14:32".
+  const d = new Date(iso);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(
+    d.getUTCDate(),
+  )} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())} UTC`;
 }
 
 function formatRelative(iso: string): string {
