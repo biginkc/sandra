@@ -2,7 +2,7 @@
 
 import { SendIcon } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { useEffect, useState, useTransition } from "react";
+import { useEffect, useRef, useState, useTransition } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -132,9 +132,31 @@ export function InlineReply({
     );
   }
 
+  // Tracks the most recent template selection so a slower in-flight
+  // `loadLeadVars` for an earlier click can't overwrite the body the user
+  // just picked (WR-04). Each click increments the token; resolved
+  // promises whose token doesn't match the latest are discarded.
+  const templateRequestToken = useRef(0);
+
   const handleTemplateSelect = (template: TemplateRow) => {
-    // Try to interpolate with lead data; fall back to raw content
+    // WR-03: protect a non-empty draft from being silently clobbered.
+    // VAs who click "Templates" to peek expect a confirmation, not data
+    // loss. Empty draft = no prompt.
+    if (
+      body.trim().length > 0 &&
+      !window.confirm("Replace your draft with this template?")
+    ) {
+      return;
+    }
+
+    const requestId = ++templateRequestToken.current;
+    // Try to interpolate with lead data; fall back to raw content.
+    // Stale-resolution guard (WR-04): only apply this fetch's result if
+    // it's still the latest click. Two quick clicks → two in-flight
+    // requests; the second click bumps the token so the first one's
+    // resolution is dropped on the floor.
     loadLeadVars(propertyId).then((result) => {
+      if (requestId !== templateRequestToken.current) return;
       if (result.ok) {
         setBody(renderTemplate(template.content, result.data));
       } else {
