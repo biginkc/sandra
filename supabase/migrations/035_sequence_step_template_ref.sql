@@ -17,3 +17,24 @@ alter table public.sequence_steps
 create index if not exists idx_sequence_steps_template_id
   on public.sequence_steps(template_id)
   where template_id is not null;
+
+-- Schema-level XOR enforcement: for send_sms steps, exactly one of
+-- (template_id, template_body) must be populated, and template_body
+-- (when chosen) must be non-empty after trim. Without this constraint
+-- a direct SQL fix or future code path could leave both populated
+-- (silent-precedence rule in tick.ts) or both null (renders empty SMS,
+-- the provider may accept and bill for it). Defense-in-depth in
+-- tick.ts also rejects empty bodies — this constraint is the
+-- authoritative integrity guarantee.
+alter table public.sequence_steps
+  drop constraint if exists sequence_steps_send_sms_body_xor;
+alter table public.sequence_steps
+  add constraint sequence_steps_send_sms_body_xor
+  check (
+    action_type <> 'send_sms'
+    or (
+      (template_id is not null and template_body is null)
+      or (template_id is null and template_body is not null
+          and length(trim(template_body)) > 0)
+    )
+  );

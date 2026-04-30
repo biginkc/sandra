@@ -186,6 +186,23 @@ export async function processEnrollmentTick(
       bodySource = step.template_body ?? "";
     }
 
+    // Defense-in-depth: schema check constraint
+    // `sequence_steps_send_sms_body_xor` (migration 035) rejects rows that
+    // would land here with an empty bodySource, but we re-check at runtime
+    // in case the constraint was somehow bypassed (e.g. constraint dropped
+    // via a hot-fix, or template content was hand-edited to whitespace).
+    // Pause the enrollment with `step_misconfigured` so the author can fix
+    // it instead of sending an empty SMS the provider would silently bill.
+    if (!bodySource.trim()) {
+      await markRunSkipped(client, claim.id, "provider_failed");
+      await pauseEnrollment(client, enrollment.id, "step_misconfigured", false);
+      return {
+        status: "paused",
+        enrollmentId: enrollment.id,
+        reason: "step_misconfigured",
+      };
+    }
+
     const rendered = renderTemplate(bodySource, vars);
     const finalBody = applyOptOut(rendered, {
       append_opt_out: appendOptOut,
