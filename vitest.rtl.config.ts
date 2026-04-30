@@ -14,11 +14,6 @@ export default defineConfig({
     globals: true,
     setupFiles: ["./vitest.rtl.setup.ts"],
     reporters: ["default"],
-    // Empty .tsx test set is fine on the harness commit before any tests
-    // have been migrated. Once we have steady RTL coverage we can flip
-    // this back to the default if we want a tripwire on accidentally
-    // moving all .test.tsx files out of `src/`.
-    passWithNoTests: true,
   },
   resolve: {
     alias: {
