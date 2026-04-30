@@ -1,9 +1,10 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, it, expect, vi } from "vitest";
 
 import {
   ProspectsTable,
+  type ListOption,
   type ProspectRow,
 } from "./prospects-table";
 
@@ -21,10 +22,14 @@ vi.mock("next/navigation", () => ({
 }));
 
 // Server-action modules import `next/server` (`after`) and the Supabase
-// server client at module load. Replace them with no-op stubs — these
-// tests don't open the Actions menu, so the action handlers never fire.
+// server client at module load. Replace them with stubs — most tests
+// don't fire actions, but the bulk-add-to-list flow asserts the right
+// action is called with the right args.
 vi.mock("../leads/actions", () => ({
-  addPropertiesToListBulk: vi.fn(),
+  addPropertiesToListBulk: vi.fn(async () => ({
+    ok: true,
+    data: { succeeded: 0, skipped: 0, failed: [] },
+  })),
   applyTagBulk: vi.fn(),
   assignLeadsBulk: vi.fn(),
   deletePropertiesBulk: vi.fn(),
@@ -58,11 +63,11 @@ function makeRow(overrides: Partial<ProspectRow> & { id: string }): ProspectRow 
   };
 }
 
-function renderTable(rows: ProspectRow[]) {
+function renderTable(rows: ProspectRow[], lists: ListOption[] = []) {
   return render(
     <ProspectsTable
       prospects={rows}
-      lists={[]}
+      lists={lists}
       tags={[]}
       teamMembers={[]}
       currentUserId={null}
@@ -114,5 +119,53 @@ describe("<ProspectsTable />", () => {
     });
     expect(actions).toBeEnabled();
     expect(actions).toHaveTextContent(/^Actions \(1\)$/);
+  });
+
+  it("bulk add-to-list calls the action with the selected ids and chosen list", async () => {
+    const user = userEvent.setup({
+      // Base UI's submenu portal sets pointer-events: none until the
+      // submenu is fully open; user-event's strict default would refuse
+      // to click through. Same shape Playwright defaults to anyway.
+      pointerEventsCheck: 0,
+    });
+    const { addPropertiesToListBulk } = await import("../leads/actions");
+    const rows = [
+      makeRow({ id: "p1", address: "1 Bulk Ave" }),
+      makeRow({ id: "p2", address: "2 Bulk Ave" }),
+      makeRow({ id: "p3", address: "3 Bulk Ave" }),
+    ];
+    const lists: ListOption[] = [
+      { id: "list-pkc", name: "Probate KC", color: null },
+    ];
+
+    renderTable(rows, lists);
+
+    for (const r of rows) {
+      await user.click(
+        screen.getByRole("checkbox", { name: `Select ${r.address}` }),
+      );
+    }
+
+    await user.click(
+      screen.getByRole("button", { name: /Actions for 3 selected/ }),
+    );
+    // Base UI submenu opens with ArrowRight (or hover). jsdom doesn't
+    // fire reliable hover events, so navigate via keyboard: tab into
+    // the menu, find the submenu trigger, open it, pick the list.
+    const addToListTrigger = await screen.findByRole("menuitem", {
+      name: /Add to list/,
+    });
+    addToListTrigger.focus();
+    await user.keyboard("{ArrowRight}");
+    await user.click(
+      await screen.findByRole("menuitem", { name: "Probate KC" }),
+    );
+
+    await waitFor(() => {
+      expect(addPropertiesToListBulk).toHaveBeenCalledWith(
+        ["p1", "p2", "p3"],
+        "list-pkc",
+      );
+    });
   });
 });

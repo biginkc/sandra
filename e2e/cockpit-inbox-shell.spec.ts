@@ -9,8 +9,12 @@ import {
 
 /**
  * Feature 8 Phase 1 — cockpit shell + tabs + inbox list rendering.
- * These specs verify the surface is present and behaves; deeper flows
- * (selection, reply, realtime) live in sibling spec files.
+ *
+ * Tests 7, 8, and 13 (default tab, Outbox click → router.replace, cadence
+ * controls render) migrated to RTL in
+ * `src/app/(dashboard)/messages/cockpit-shell.test.tsx`. The remaining
+ * tests cover URL round-trip behavior and DB-driven thread sorting that
+ * RTL with mocked routers can't faithfully exercise.
  */
 
 async function seedThread(
@@ -68,41 +72,6 @@ async function seedThread(
   }
   return { contactId: contact.id, propertyId: prop.id };
 }
-
-test("messages page defaults to Inbox tab (test 7)", async ({ page }) => {
-  const admin = adminClient();
-  await resetTenantTables(admin);
-  await ensureTestUser(admin);
-
-  await page.goto("/messages");
-  // Base UI tabs expose active state via aria-selected — that's stable
-  // across Base UI versions; data-active is rendered without a value.
-  await expect(page.getByTestId("tab-inbox")).toHaveAttribute(
-    "aria-selected",
-    "true",
-  );
-  await expect(page.getByTestId("tab-outbox")).toHaveAttribute(
-    "aria-selected",
-    "false",
-  );
-});
-
-test("clicking Outbox switches tabs and renders the queue panel (test 8)", async ({
-  page,
-}) => {
-  const admin = adminClient();
-  await resetTenantTables(admin);
-  await ensureTestUser(admin);
-
-  await page.goto("/messages");
-  await page.getByTestId("tab-outbox").click();
-  await expect(page.getByTestId("tab-outbox")).toHaveAttribute(
-    "aria-selected",
-    "true",
-  );
-  // QueuePanel renders its table even when empty.
-  await expect(page.getByText(/Queued|queued/).first()).toBeVisible();
-});
 
 test("switching tabs preserves URL state (test 9)", async ({ page }) => {
   const admin = adminClient();
@@ -178,22 +147,4 @@ test("seeded threads render sorted by most recent activity (tests 11 + 12)", asy
   const buttons = list.locator("button");
   const firstId = await buttons.first().getAttribute("data-testid");
   expect(firstId).toBe(`inbox-thread-${newer.contactId}`);
-});
-
-test("Outbox cadence controls render (regression guard, test 13)", async ({
-  page,
-}) => {
-  const admin = adminClient();
-  await resetTenantTables(admin);
-  await ensureTestUser(admin);
-
-  await page.goto("/messages?tab=outbox");
-  // Auto-send toggle exists. Older copy: "Auto-send" / "Cadence" labels live
-  // in queue-panel.tsx — we check for either to avoid coupling to copy.
-  const cadenceVisible = await page
-    .getByText(/Auto.send|Cadence|Send next/i)
-    .first()
-    .isVisible()
-    .catch(() => false);
-  expect(cadenceVisible).toBe(true);
 });
