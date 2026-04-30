@@ -158,7 +158,8 @@ export function SequenceEditor({
 
   return (
     <div className="flex flex-col gap-6">
-      <div className="flex justify-end">
+      <div className="flex items-center justify-between gap-4">
+        <h1 className="text-xl font-semibold">{name}</h1>
         <Button variant="ghost" onClick={() => router.push("/sequences")}>
           Back to list
         </Button>
@@ -166,13 +167,22 @@ export function SequenceEditor({
 
       <section className="flex max-w-2xl flex-col gap-4 rounded-md border p-4">
         <h2 className="font-semibold">Sequence details</h2>
-        <label className="flex flex-col gap-1 text-sm">
+        <label htmlFor="seq-name" className="flex flex-col gap-1 text-sm">
           <span>Name</span>
-          <Input value={name} onChange={(e) => setName(e.target.value)} maxLength={120} />
+          <Input
+            id="seq-name"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            maxLength={120}
+          />
         </label>
-        <label className="flex flex-col gap-1 text-sm">
+        <label htmlFor="seq-description" className="flex flex-col gap-1 text-sm">
           <span>Description</span>
-          <Input value={description} onChange={(e) => setDescription(e.target.value)} />
+          <Input
+            id="seq-description"
+            value={description}
+            onChange={(e) => setDescription(e.target.value)}
+          />
         </label>
         <label className="flex items-center gap-2 text-sm">
           <input
