@@ -6,6 +6,7 @@ import {
   Download,
   Gauge,
   LayoutDashboard,
+  Link as LinkIcon,
   List,
   MessageSquare,
   Repeat,
@@ -76,6 +77,8 @@ export function DashboardSidebar({ showAdmin }: { showAdmin: boolean }) {
 
   const adminUsersActive =
     pathname === "/admin/users" || pathname.startsWith("/admin/users/");
+  const adminWebhooksActive =
+    pathname === "/admin/webhooks" || pathname.startsWith("/admin/webhooks/");
   const adminAiActive =
     pathname === "/settings/ai-responder" ||
     pathname.startsWith("/settings/ai-responder/");
@@ -110,6 +113,17 @@ export function DashboardSidebar({ showAdmin }: { showAdmin: boolean }) {
           >
             <Users className="size-5" aria-hidden />
             <span>Team</span>
+          </Link>
+          <Link
+            href="/admin/webhooks"
+            data-active={adminWebhooksActive || undefined}
+            className={cn(
+              ITEM_BASE,
+              adminWebhooksActive ? ITEM_ACTIVE : ITEM_INACTIVE,
+            )}
+          >
+            <LinkIcon className="size-5" aria-hidden />
+            <span>Webhooks</span>
           </Link>
           <Link
             href="/settings/ai-responder"
