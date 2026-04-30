@@ -54,6 +54,50 @@ export function getAutotriggerCap(): number {
 }
 
 /**
+ * For a parent CSV-import job, return the property_ids whose CASS status
+ * would benefit from running now. Used by the import workflow's
+ * auto-trigger step.
+ *
+ * Includes:
+ *   - Newly-inserted properties (job_items.status='success')
+ *   - Dedup-matched properties (job_items.status='skipped') whose
+ *     cass_status is still 'unverified' — i.e. re-imports of rows whose
+ *     first run pre-dated CASS or never reached the verifier.
+ *
+ * Excludes:
+ *   - Properties already in a terminal verdict ('verified' / 'invalid' /
+ *     'ambiguous'): re-running burns a SmartyStreets credit for no gain.
+ *   - Properties in 'error': those have their own retry surface via
+ *     retryFailedCassItems; the auto-trigger should not duplicate it.
+ */
+export async function selectCassEligibleProperties(
+  supabase: SupabaseClient<Database>,
+  parentJobId: string,
+): Promise<string[]> {
+  const { data: items } = await supabase
+    .from("job_items")
+    .select("property_id")
+    .eq("job_id", parentJobId)
+    .in("status", ["success", "skipped"])
+    .not("property_id", "is", null);
+
+  const candidateIds = (items ?? [])
+    .map((r) => r.property_id)
+    .filter((id): id is string => typeof id === "string");
+  if (candidateIds.length === 0) return [];
+
+  const { data: rows } = await supabase
+    .from("properties")
+    .select("id")
+    .in("id", candidateIds)
+    .eq("cass_status", "unverified");
+
+  return (rows ?? [])
+    .map((r) => r.id)
+    .filter((id): id is string => typeof id === "string");
+}
+
+/**
  * Create a `cass_dsf2_ncoa` child job linked to a parent `csv_import` job.
  * Returns the new job id. Separate from `runCassEnrichment` so callers
  * can create the job in `queued` state when a budget guard blocks the

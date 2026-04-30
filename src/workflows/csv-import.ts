@@ -30,6 +30,7 @@ import {
   createCassChildJob,
   getAutotriggerCap,
   runCassEnrichment,
+  selectCassEligibleProperties,
 } from "@/lib/enrichment/cass-job";
 import {
   finalizeIngestion,
@@ -171,9 +172,18 @@ async function processChunkStep(args: {
 
 /**
  * STEP 3a — CASS auto-trigger. Creates a child cass job for every
- * newly-inserted property, and (when under the autotrigger cap) kicks off
- * the enrichment in the same step. Failure here does NOT flip the parent
+ * eligible property and (when under the autotrigger cap) kicks off the
+ * enrichment in the same step. Failure here does NOT flip the parent
  * import; child job records the issue independently.
+ *
+ * Eligibility (`selectCassEligibleProperties`): newly-inserted rows AND
+ * dedup-matched rows whose `cass_status='unverified'`. The dedup-matched
+ * branch fixes a recovery hole where re-importing addresses that pre-dated
+ * CASS verification (or whose first CASS run never reached the verifier)
+ * would otherwise be skipped here and stay stuck at unverified — blocking
+ * downstream skip-trace via the PR #62 pre-flight gate. Terminal verdicts
+ * (verified/invalid/ambiguous) and 'error' (handled by retryFailedCassItems)
+ * are excluded.
  *
  * Skip-trace request (Surface C) is intentionally NOT in this workflow —
  * `requestSkipTrace` needs a user session for the admin/VA branching, and
@@ -190,16 +200,10 @@ async function triggerCassStep(args: {
 
   const supabase = createAdminClient();
 
-  const { data: items } = await supabase
-    .from("job_items")
-    .select("property_id")
-    .eq("job_id", args.parentJobId)
-    .eq("status", "success")
-    .not("property_id", "is", null);
-
-  const propertyIds = (items ?? [])
-    .map((r) => r.property_id)
-    .filter((id): id is string => typeof id === "string");
+  const propertyIds = await selectCassEligibleProperties(
+    supabase,
+    args.parentJobId,
+  );
 
   if (propertyIds.length === 0) return;
 
