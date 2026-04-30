@@ -37,6 +37,7 @@ export type SequenceWithSteps = {
     delay_after_previous_minutes: number;
     action_type: "send_sms" | "change_status";
     template_body: string | null;
+    template_id: string | null;
     target_status: string | null;
   }>;
 };
@@ -115,7 +116,7 @@ export async function getSequenceWithSteps(
     const { data: steps, error: stepErr } = await supabase
       .from("sequence_steps")
       .select(
-        "id, step_index, delay_after_previous_minutes, action_type, template_body, target_status",
+        "id, step_index, delay_after_previous_minutes, action_type, template_body, template_id, target_status",
       )
       .eq("sequence_id", sequenceId)
       .order("step_index", { ascending: true });
@@ -302,6 +303,7 @@ export async function upsertSequenceStep(input: {
   delay_after_previous_minutes: number;
   action_type: "send_sms" | "change_status";
   template_body?: string | null;
+  template_id?: string | null;
   target_status?: string | null;
 }): Promise<Result<{ id: string }>> {
   if (input.delay_after_previous_minutes < 0) {
@@ -310,14 +312,19 @@ export async function upsertSequenceStep(input: {
       error: { code: "VALIDATION", message: "Delay must be non-negative." },
     };
   }
-  if (input.action_type === "send_sms" && !input.template_body?.trim()) {
-    return {
-      ok: false,
-      error: {
-        code: "VALIDATION",
-        message: "send_sms steps need a non-empty template body.",
-      },
-    };
+  if (input.action_type === "send_sms") {
+    const hasInline = !!input.template_body?.trim();
+    const hasRef = !!input.template_id;
+    if (!hasInline && !hasRef) {
+      return {
+        ok: false,
+        error: {
+          code: "VALIDATION",
+          message:
+            "send_sms steps need either an inline message or a template reference.",
+        },
+      };
+    }
   }
   if (input.action_type === "change_status" && !input.target_status) {
     return {
@@ -329,6 +336,15 @@ export async function upsertSequenceStep(input: {
     };
   }
 
+  // Steps either reference a template OR carry inline copy — never both.
+  // This keeps the render path unambiguous in tick.ts.
+  const usingTemplateRef =
+    input.action_type === "send_sms" && !!input.template_id;
+  const templateBodyOnInsert = usingTemplateRef
+    ? null
+    : (input.template_body ?? null);
+  const templateIdOnInsert = usingTemplateRef ? input.template_id! : null;
+
   try {
     const supabase = await createClient();
     if (input.id) {
@@ -338,7 +354,8 @@ export async function upsertSequenceStep(input: {
           step_index: input.step_index,
           delay_after_previous_minutes: input.delay_after_previous_minutes,
           action_type: input.action_type,
-          template_body: input.template_body ?? null,
+          template_body: templateBodyOnInsert,
+          template_id: templateIdOnInsert,
           target_status: input.target_status ?? null,
         })
         .eq("id", input.id);
@@ -358,7 +375,8 @@ export async function upsertSequenceStep(input: {
         step_index: input.step_index,
         delay_after_previous_minutes: input.delay_after_previous_minutes,
         action_type: input.action_type,
-        template_body: input.template_body ?? null,
+        template_body: templateBodyOnInsert,
+        template_id: templateIdOnInsert,
         target_status: input.target_status ?? null,
       })
       .select("id")
