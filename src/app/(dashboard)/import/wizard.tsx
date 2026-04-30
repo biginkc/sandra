@@ -136,7 +136,24 @@ const STEP_LABELS: Record<WizardStep, string> = {
 function stepOrder(mode: WizardMode | null): readonly WizardStep[] {
   if (mode === "update") return UPDATE_STEP_ORDER;
   if (mode === "add") return ADD_STEP_ORDER;
-  return ["mode"]; // before mode is picked, the indicator is just the one step
+  return ["mode"]; // before mode is picked, the state machine is just the one step
+}
+
+/**
+ * Step list for the visual progress indicator. The Mode screen is always
+ * step zero in the state machine but renders no indicator — the indicator
+ * appears once the user clicks Next, starting at "1" with whichever step
+ * comes after Mode in the chosen flow.
+ *
+ * Returns an empty array when on the Mode step; the wizard treats that
+ * as "don't render the indicator at all."
+ */
+export function indicatorOrder(
+  step: WizardStep,
+  mode: WizardMode | null,
+): readonly WizardStep[] {
+  if (step === "mode") return [];
+  return stepOrder(mode).filter((s) => s !== "mode");
 }
 
 export type WizardState = {
@@ -314,12 +331,12 @@ export function Wizard() {
   const [state, dispatch] = useReducer(reducer, initialState);
   const [submittingGlobal, setSubmittingGlobal] = useState(false);
 
-  // While the user is sitting on the Mode step, collapse the indicator
-  // to a single dot — even if mode was previously picked. This way the
-  // full rail re-mounts (and re-cascades) every time the user picks a
-  // tile, including after a Back navigation.
-  const order = state.step === "mode" ? (["mode"] as const) : stepOrder(state.mode);
+  // State-machine order: includes Mode. Drives currentIndex / canGoBack.
+  // Display order (`displayOrder`) below filters Mode out — see
+  // indicatorOrder().
+  const order = stepOrder(state.mode);
   const currentIndex = order.indexOf(state.step);
+  const displayOrder = indicatorOrder(state.step, state.mode);
   // Lock back-nav once we're at progress or beyond — both flows have
   // their submit step right before progress, so freeze after submit.
   const lockBackFromIndex = state.mode === "update" ? 4 : 5;
@@ -483,7 +500,9 @@ export function Wizard() {
 
   return (
     <div className="flex flex-col gap-6">
-      <StepIndicator step={state.step} order={order} />
+      {displayOrder.length > 0 && (
+        <StepIndicator step={state.step} order={displayOrder} />
+      )}
 
       <div className="flex flex-1 flex-col">
         {state.step === "mode" && (
@@ -549,8 +568,10 @@ function StepIndicator({
       {order.map((s, i) => {
         const isActive = i === currentIndex;
         const isPast = i < currentIndex;
-        // Steps 2+ animate in when mode is picked. The first step
-        // (Mode) is always present, so it never re-animates.
+        // Cascade-in steps 2+ each time the indicator mounts. Step 1
+        // (whatever follows Mode) is the static anchor, the rest fade
+        // in left-to-right. Indicator unmounts when the user goes back
+        // to Mode, so the cascade re-plays on every forward transition.
         const cascade = i > 0;
         return (
           <li
