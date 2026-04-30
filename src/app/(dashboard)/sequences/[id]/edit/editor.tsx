@@ -249,14 +249,26 @@ function MessageBodyEditor({
 }) {
   const mode: "custom" | "template" = templateId ? "template" : "custom";
   const setMode = (next: "custom" | "template") => {
+    // WR-10: don't wipe `body` here. The previous version cleared it on
+    // every switch to template mode, so a half-written custom body was
+    // lost the moment the author toggled the radio to peek. Both modes
+    // keep their respective fields populated; the upstream save action
+    // already nulls out the inactive field at write time
+    // (editor.tsx:379-381 / :519-521).
     if (next === "custom") {
       setTemplateId(null);
     } else {
-      setBody("");
       setTemplateId(templates[0]?.id ?? null);
     }
   };
   const selected = templates.find((t) => t.id === templateId);
+  // WR-11: detect when the step references a template that's no longer
+  // in the live list (soft-deleted in another tab / by a teammate).
+  // Without this banner the <select> just shows nothing and the
+  // upsert silently saves the dead id; tick.ts then pauses with
+  // `template_missing` on the next fire — confusing for the author.
+  const referencedTemplateMissing =
+    mode === "template" && templateId !== null && selected === undefined;
 
   return (
     <div className="flex flex-col gap-2">
@@ -281,6 +293,18 @@ function MessageBodyEditor({
           </span>
         </label>
       </div>
+      {referencedTemplateMissing ? (
+        <div className="border-destructive/50 bg-destructive/5 text-destructive flex flex-col gap-1 rounded-md border px-3 py-2 text-xs">
+          <span className="font-semibold">
+            Referenced template no longer exists
+          </span>
+          <span>
+            Pick a different template from the list, or switch to
+            &ldquo;Custom message&rdquo;. Saving as-is will pause any
+            enrollments hitting this step.
+          </span>
+        </div>
+      ) : null}
       {mode === "custom" ? (
         <label className="flex flex-col gap-1 text-sm">
           <span className="font-medium">Message body</span>
