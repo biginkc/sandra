@@ -202,12 +202,10 @@ describe("<SequenceEditor /> — sequences-flows migrated tests", () => {
 });
 
 describe("<SequenceEditor /> — accessible markup (locks in Playwright failures)", () => {
-  it("renders the sequence name as a page heading", () => {
-    renderEditor(makeSequence({ name: "Flow-1 1234567890" }));
-    expect(
-      screen.getByRole("heading", { name: "Flow-1 1234567890" }),
-    ).toBeInTheDocument();
-  });
+  // Note: the page-level <h1>{sequence.name}</h1> lives in PageHeader (see
+  // src/app/(dashboard)/sequences/[id]/edit/page.tsx). The editor itself
+  // intentionally does NOT render its own heading — adding one duplicates
+  // the PageHeader title and breaks Playwright's getByRole("heading", { name }).
 
   it("associates the Description label with its input via htmlFor/id", () => {
     renderEditor(makeSequence({ description: "Existing copy" }));

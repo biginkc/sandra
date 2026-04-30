@@ -158,8 +158,7 @@ export function SequenceEditor({
 
   return (
     <div className="flex flex-col gap-6">
-      <div className="flex items-center justify-between gap-4">
-        <h1 className="text-xl font-semibold">{name}</h1>
+      <div className="flex justify-end">
         <Button variant="ghost" onClick={() => router.push("/sequences")}>
           Back to list
         </Button>
