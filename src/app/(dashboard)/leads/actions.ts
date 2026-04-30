@@ -1200,14 +1200,22 @@ export async function loadLeadVars(
       data: { user },
     } = await supabase.auth.getUser();
 
-    // 3. Delegate to the shared loader (needs admin client for user
-    //    name resolution via auth.admin.getUserById).
+    // 3. Delegate to the shared loader. Property / contact / organization
+    //    reads run on the session client (RLS-scoped); the admin client is
+    //    only handed to the user-id → first-name resolver, which needs
+    //    `auth.admin.getUserById`. This narrows the service-role surface
+    //    so a future RLS tightening on `properties` / `contacts` /
+    //    `organizations` is not silently bypassed here (WR-02).
     const adminClient = createAdminClient();
-    const vars = await loadTemplateVars(adminClient, {
-      propertyId,
-      contactId: property.homeowner_contact_id,
-      enrolledByUserId: user?.id ?? null,
-    });
+    const vars = await loadTemplateVars(
+      supabase,
+      {
+        propertyId,
+        contactId: property.homeowner_contact_id,
+        enrolledByUserId: user?.id ?? null,
+      },
+      adminClient,
+    );
 
     return ok(vars);
   } catch (e) {
