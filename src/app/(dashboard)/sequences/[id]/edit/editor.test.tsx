@@ -200,3 +200,24 @@ describe("<SequenceEditor /> — sequences-flows migrated tests", () => {
     confirmSpy.mockRestore();
   });
 });
+
+describe("<SequenceEditor /> — accessible markup (locks in Playwright failures)", () => {
+  it("renders the sequence name as a page heading", () => {
+    renderEditor(makeSequence({ name: "Flow-1 1234567890" }));
+    expect(
+      screen.getByRole("heading", { name: "Flow-1 1234567890" }),
+    ).toBeInTheDocument();
+  });
+
+  it("associates the Description label with its input via htmlFor/id", () => {
+    renderEditor(makeSequence({ description: "Existing copy" }));
+    const descInput = screen.getByLabelText("Description");
+    expect(descInput).toHaveValue("Existing copy");
+  });
+
+  it("associates the Name label with its input via htmlFor/id", () => {
+    renderEditor(makeSequence({ name: "Flow Foo" }));
+    const nameInput = screen.getByLabelText("Name");
+    expect(nameInput).toHaveValue("Flow Foo");
+  });
+});
