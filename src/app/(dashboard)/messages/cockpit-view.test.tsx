@@ -1,5 +1,5 @@
 import { render, screen } from "@testing-library/react";
-import { beforeAll, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { CockpitView } from "./cockpit-view";
 import type { InboxDetail as InboxDetailData } from "./inbox-detail-data";
@@ -67,34 +67,6 @@ vi.mock("@/lib/supabase/client", () => ({
 vi.mock("sonner", () => ({
   toast: { success: vi.fn(), warning: vi.fn(), error: vi.fn() },
 }));
-
-// queue-panel reads/writes localStorage on mount for the cadence
-// preference. The jsdom env exposes `localStorage` as an empty object
-// without method hooks (jsdom needs `--localstorage-file` to fully
-// activate), so install a minimal in-memory Storage shim before the
-// component tree mounts. Scoped to this test file only — global setup
-// is owned by the harness.
-beforeAll(() => {
-  const store = new Map<string, string>();
-  const ls: Storage = {
-    get length() {
-      return store.size;
-    },
-    clear: () => store.clear(),
-    getItem: (key) => (store.has(key) ? (store.get(key) ?? null) : null),
-    key: (index) => Array.from(store.keys())[index] ?? null,
-    removeItem: (key) => {
-      store.delete(key);
-    },
-    setItem: (key, value) => {
-      store.set(key, String(value));
-    },
-  };
-  Object.defineProperty(window, "localStorage", {
-    configurable: true,
-    get: () => ls,
-  });
-});
 
 function makeThread(overrides: Partial<Thread> & { contactId: string }): Thread {
   return {
