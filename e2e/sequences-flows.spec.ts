@@ -17,13 +17,14 @@ import {
  * had only typecheck coverage:
  *
  *   1. Create → edit → archive → restore
- *   2. Add-step modal validation + happy path
- *   3. Delay unit picker round-trip (minutes ↔ hours ↔ days ↔ weeks ↔ months)
- *   4. Delete a step
  *   5. Enroll from lead detail (change_status step, no real SMS)
  *   6. Cancel an enrollment from the lead-detail widget
  *   7. Impact modal confirm on save with active enrollments
  *   8. Sidebar nav links all route correctly
+ *
+ * Tests 2/3/4 (add-step modal validation, delay unit picker, delete
+ * step) migrated to RTL — see
+ * `src/app/(dashboard)/sequences/[id]/edit/editor.test.tsx`.
  *
  * Runs against the `sandra-crm-test` Supabase project + mock messaging
  * provider (same as the rest of our E2E suite). No real SMS is sent.
@@ -179,122 +180,6 @@ test.describe("Sequences V1 — UI flows (browser)", () => {
         .single();
       expect(data!.active).toBe(true);
     }).toPass({ timeout: 5_000 });
-  });
-
-  test("2. add-step modal validates required fields + persists on save", async ({
-    page,
-  }) => {
-    const admin = adminClient();
-    const orgId = await seedOrgId(admin);
-    const { data: seq } = await admin
-      .from("sequences")
-      .insert({ org_id: orgId, name: `Flow-2 ${Date.now()}` })
-      .select("id")
-      .single();
-
-    await page.goto(`/sequences/${seq!.id}/edit`);
-    await page.getByRole("button", { name: /add step/i }).first().click();
-
-    // Modal is visible; Add step button inside it starts disabled (no body)
-    const modal = page.getByRole("dialog");
-    await expect(modal).toBeVisible();
-    const modalSubmit = modal.getByRole("button", { name: /add step/i });
-    await expect(modalSubmit).toBeDisabled();
-
-    // Type a body — save becomes enabled
-    await modal
-      .getByPlaceholder(/cash offer/i)
-      .fill("Hi {{first_name}}, testing from flow-2");
-    await expect(modalSubmit).toBeEnabled();
-
-    // Save
-    await modalSubmit.click();
-    await expect(modal).toBeHidden({ timeout: 5_000 });
-
-    // DB: one step created for this sequence
-    const { data: steps } = await admin
-      .from("sequence_steps")
-      .select("template_body, step_index")
-      .eq("sequence_id", seq!.id)
-      .order("step_index", { ascending: true });
-    expect(steps).toHaveLength(1);
-    expect(steps![0].template_body).toContain("testing from flow-2");
-  });
-
-  test("3. delay unit picker round-trips (1 day → 3 hours → reload)", async ({
-    page,
-  }) => {
-    const admin = adminClient();
-    const { sequenceId, stepId } = await seedSequenceWithOneStep(admin, {
-      name: `Flow-3 ${Date.now()}`,
-      body: "Hello",
-      delayMinutes: 1440, // 1 day
-    });
-
-    await page.goto(`/sequences/${sequenceId}/edit`);
-
-    // Step editor card — locate via the "Step 1" heading, then walk up to
-    // its bordered container so we can scope subsequent finds.
-    const stepHeading = page.getByRole("heading", { name: /^Step 1$/ });
-    await expect(stepHeading).toBeVisible();
-    const stepCard = page
-      .locator("div.rounded-md.border")
-      .filter({ has: stepHeading });
-    const amount = stepCard.locator('input[type="number"]').first();
-    await expect(amount).toHaveValue("1");
-    const unit = stepCard.locator("select").first();
-    await expect(unit).toHaveValue("days");
-
-    // Change to 3 hours
-    await amount.fill("3");
-    await unit.selectOption("hours");
-
-    // Save (no enrollments → no impact confirm dialog)
-    await stepCard.getByRole("button", { name: /save step/i }).click();
-    await expect(async () => {
-      const { data } = await admin
-        .from("sequence_steps")
-        .select("delay_after_previous_minutes")
-        .eq("id", stepId)
-        .single();
-      expect(data!.delay_after_previous_minutes).toBe(180);
-    }).toPass({ timeout: 5_000 });
-
-    // Reload the edit page — unit picker should now display "3 hours"
-    await page.goto(`/sequences/${sequenceId}/edit`);
-    const stepHeading2 = page.getByRole("heading", { name: /^Step 1$/ });
-    await expect(stepHeading2).toBeVisible();
-    const stepCard2 = page
-      .locator("div.rounded-md.border")
-      .filter({ has: stepHeading2 });
-    await expect(
-      stepCard2.locator('input[type="number"]').first(),
-    ).toHaveValue("3");
-    await expect(stepCard2.locator("select").first()).toHaveValue("hours");
-  });
-
-  test("4. delete a step removes it from the list", async ({ page }) => {
-    const admin = adminClient();
-    const { sequenceId } = await seedSequenceWithOneStep(admin, {
-      name: `Flow-4 ${Date.now()}`,
-      body: "Only step",
-    });
-
-    await page.goto(`/sequences/${sequenceId}/edit`);
-    await expect(page.getByText(/^Step 1$/)).toBeVisible();
-
-    page.once("dialog", (d) => d.accept());
-    await page.getByRole("button", { name: /^delete$/i }).first().click();
-    await waitForSettled(page);
-
-    // Empty state should show instead of Step 1
-    await expect(page.getByText(/no steps yet/i)).toBeVisible();
-
-    const { data: steps } = await admin
-      .from("sequence_steps")
-      .select("id")
-      .eq("sequence_id", sequenceId);
-    expect(steps).toHaveLength(0);
   });
 
   test("5. enroll from lead detail widget creates an active enrollment (change_status, no SMS)", async ({
