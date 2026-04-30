@@ -2,6 +2,7 @@ import { redirect } from "next/navigation";
 
 import { Page } from "@/components/page";
 import { PageHeader } from "@/components/page-header";
+import { isAdminEmail } from "@/lib/auth/allowlist";
 import { getSkipTraceBalance } from "@/lib/skip-trace/balance";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
@@ -47,6 +48,7 @@ export default async function DashboardPage() {
     );
   }
 
+  const isAdmin = isAdminEmail(user.email);
   const greeting = greet(user.email);
   // Server components render once per request; capturing request time here
   // is intentional and stable for the duration of the response.
@@ -90,7 +92,7 @@ export default async function DashboardPage() {
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-[1fr_340px]">
         {/* Main column */}
         <div className="space-y-6">
-          <SkipTraceCredits balance={balance} />
+          <SkipTraceCredits balance={balance} isAdmin={isAdmin} />
           <NeedsAttentionStrip needs={summary.needs_attention} />
           <KpiRowOne
             totalLeads={summary.total_leads}

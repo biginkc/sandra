@@ -1,7 +1,6 @@
 "use client";
 
 import { useMemo, useReducer, useState } from "react";
-import { useRouter } from "next/navigation";
 
 import { Button } from "@/components/ui/button";
 import { autodetectMapping } from "@/lib/csv/aliases";
@@ -20,7 +19,6 @@ import { cn } from "@/lib/utils";
 
 import { createImportJob, runBulkUpdateJob } from "./actions";
 import { StepConfirm } from "./steps/step-confirm";
-import { StepDone } from "./steps/step-done";
 import { StepMap } from "./steps/step-map";
 import { StepMode } from "./steps/step-mode";
 import { StepPreviewUpdate } from "./steps/step-preview-update";
@@ -42,9 +40,13 @@ export type WizardStep =
   | "suboperation"
   | "update-upload"
   | "preview-update"
-  // Both flows end here.
-  | "progress"
-  | "done";
+  // Both flows end here. The Progress step is the terminal screen —
+  // its content swaps in-place once the job reaches a terminal status,
+  // so there is no separate "Done" step. The earlier two-step
+  // (progress → done) flow contradicted the "you can close this tab"
+  // copy by also showing a Next button; collapsing the two removes
+  // that ambiguity. See `docs/feedback/feedback a.pdf` (item 1).
+  | "progress";
 
 export type WizardMode = "add" | "update";
 
@@ -109,7 +111,6 @@ const ADD_STEP_ORDER: readonly WizardStep[] = [
   "review",
   "confirm",
   "progress",
-  "done",
 ];
 
 const UPDATE_STEP_ORDER: readonly WizardStep[] = [
@@ -118,7 +119,6 @@ const UPDATE_STEP_ORDER: readonly WizardStep[] = [
   "update-upload",
   "preview-update",
   "progress",
-  "done",
 ];
 
 const STEP_LABELS: Record<WizardStep, string> = {
@@ -131,7 +131,6 @@ const STEP_LABELS: Record<WizardStep, string> = {
   "update-upload": "Upload",
   "preview-update": "Preview",
   progress: "Progress",
-  done: "Done",
 };
 
 function stepOrder(mode: WizardMode | null): readonly WizardStep[] {
@@ -313,7 +312,6 @@ function reducer(state: WizardState, action: WizardAction): WizardState {
 
 export function Wizard() {
   const [state, dispatch] = useReducer(reducer, initialState);
-  const router = useRouter();
   const [submittingGlobal, setSubmittingGlobal] = useState(false);
 
   // While the user is sitting on the Mode step, collapse the indicator
@@ -445,14 +443,10 @@ export function Wizard() {
     }
 
     // ---- Common tail -----------------------------------------------------
-    if (state.step === "progress") {
-      dispatch({ type: "GOTO", step: "done" });
-      return;
-    }
-    if (state.step === "done") {
-      dispatch({ type: "RESET" });
-      router.push("/properties");
-    }
+    // Progress is the terminal step; the StepProgress card itself
+    // surfaces the "View properties / Job details / New import"
+    // actions inline once the job reaches a terminal status. The
+    // wizard's footer Next button is hidden on this step.
   };
 
   const handleBack = () => {
@@ -478,9 +472,14 @@ export function Wizard() {
     if (state.step === "confirm") {
       return state.submitting ? "Starting…" : "Start import";
     }
-    if (state.step === "done") return "View properties";
     return "Next";
   })();
+
+  // Hide the wizard's Back/Next buttons entirely on the progress
+  // step — the card itself shows terminal-state action buttons, and
+  // a "Next"/"Back" footer would contradict the "you can close this
+  // tab" copy that's visible while the job is running.
+  const showFooterNav = state.step !== "progress";
 
   return (
     <div className="flex flex-col gap-6">
@@ -512,28 +511,27 @@ export function Wizard() {
         {state.step === "progress" && state.jobId && (
           <StepProgress jobId={state.jobId} />
         )}
-        {state.step === "done" && state.jobId && (
-          <StepDone jobId={state.jobId} />
-        )}
       </div>
 
       {state.error && (
         <div className="text-destructive text-sm">{state.error}</div>
       )}
 
-      <div className="flex items-center justify-between">
-        <Button
-          variant="ghost"
-          onClick={handleBack}
-          disabled={!canGoBack || state.submitting}
-          className="-ml-8"
-        >
-          Back
-        </Button>
-        <Button onClick={handleNext} disabled={nextDisabled}>
-          {nextLabel}
-        </Button>
-      </div>
+      {showFooterNav && (
+        <div className="flex items-center justify-between">
+          <Button
+            variant="ghost"
+            onClick={handleBack}
+            disabled={!canGoBack || state.submitting}
+            className="-ml-8"
+          >
+            Back
+          </Button>
+          <Button onClick={handleNext} disabled={nextDisabled}>
+            {nextLabel}
+          </Button>
+        </div>
+      )}
     </div>
   );
 }
