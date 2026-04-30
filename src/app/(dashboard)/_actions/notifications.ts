@@ -166,3 +166,40 @@ export async function markAllRead(): Promise<Result<null>> {
     return errFromUnknown(e, "MARK_ALL_READ_FAILED");
   }
 }
+
+/**
+ * Hard-delete every notification for the current user. Notifications are
+ * ephemeral signals, not audit records — there's no value in retaining
+ * "cleared" rows. Both the dropdown and the unread badge fall to zero.
+ *
+ * Scoped to the authenticated user via `user_id` filter; RLS on the
+ * notifications table provides defense in depth.
+ */
+export async function clearAllNotifications(): Promise<Result<null>> {
+  try {
+    const supabase = await createClient();
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    if (!user) {
+      return {
+        ok: false,
+        error: { code: "UNAUTHENTICATED", message: "Not signed in." },
+      };
+    }
+    const { error } = await supabase
+      .from("notifications")
+      .delete()
+      .eq("user_id", user.id);
+    if (error) {
+      return {
+        ok: false,
+        error: { code: "CLEAR_ALL_FAILED", message: error.message },
+      };
+    }
+    return ok(null);
+  } catch (e) {
+    reportError(e, { tags: { surface: "notifications_clear_all" } });
+    return errFromUnknown(e, "CLEAR_ALL_FAILED");
+  }
+}
