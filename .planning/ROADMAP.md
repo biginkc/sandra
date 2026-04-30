@@ -2,128 +2,120 @@
 
 **Milestone:** SMS Templates v1
 **Created:** 2026-04-29
-**Granularity:** Standard (5 phases)
+**Revised:** 2026-04-29 (reduced from 5 → 3 phases after discovering existing interpolation engine)
+**Granularity:** Coarse (3 phases)
+
+## Existing Code Being Leveraged
+
+| File | Reuse |
+|------|-------|
+| `src/lib/sequences/render.ts` | Full `{{variable}}` + `{{#if}}` engine — add `| fallback` pipe syntax |
+| `src/lib/sequences/template-vars.ts` | `loadTemplateVars()` already fetches all v1 variables from DB |
+| `src/lib/sequences/render.test.ts` | 10 existing tests — extend with fallback tests |
+| `src/app/(dashboard)/leads/[id]/inline-reply.tsx` | Compose box with `body`/`setBody`, char counter, Cmd+Enter |
 
 ## Phase Overview
 
 | Phase | Name | Requirements | Depends on |
 |-------|------|-------------|------------|
-| 1 | Database Schema & Migration | DATA-01, DATA-02, DATA-03, DATA-04 | — |
-| 2 | Interpolation Engine | INTERP-01 through INTERP-05 | Phase 1 |
-| 3 | Templates Management UI | UI-01 through UI-09 | Phase 1, Phase 2 |
-| 4 | Compose Box Integration | COMP-01, COMP-02, COMP-03 | Phase 2, Phase 3 |
-| 5 | Sequence Integration | SEQ-01, SEQ-02, SEQ-03 | Phase 2, Phase 4 |
+| 1 | Schema + Engine Upgrade | DATA-01–04, INTERP-01–05 | — |
+| 2 | Templates Management UI | UI-01–09 | Phase 1 |
+| 3 | Compose Box + Sequence Integration | COMP-01–03, SEQ-01–03 | Phase 1, Phase 2 |
 
 ## Phases
 
-### Phase 1: Database Schema & Migration
+### Phase 1: Schema + Engine Upgrade
 
-**Goal:** Create the `sms_templates` table and seed preset categories.
+**Goal:** Create the `sms_templates` table and upgrade the existing interpolation engine with fallback support.
 
 **Scope:**
-- Supabase migration for `sms_templates` table (id, name, content, category, user_id, created_at, updated_at, deleted_at)
-- Category CHECK constraint or enum for preset values + custom support
+- Supabase migration for `sms_templates` table (id, name, content, category, user_id, org_id, created_at, updated_at, deleted_at)
+- Category support (preset: Cold Outreach, Follow Up, Appointment, General + custom)
 - RLS policies (authenticated users within org)
 - Soft delete via `deleted_at` column
+- Move `render.ts` + `template-vars.ts` to shared `src/lib/templates/` location
+- Add `{{var | fallback}}` pipe syntax to existing `renderTemplate()`
+- Update existing sequence imports to point to new shared location
+- Extend existing test suite with fallback + error cases
 
-**Requirements:** DATA-01, DATA-02, DATA-03, DATA-04
+**What's NEW vs what's a MOVE:**
+- NEW: Migration, RLS, pipe-fallback regex (~15 LOC), new tests
+- MOVE: `render.ts` → `src/lib/templates/render.ts`, `template-vars.ts` → `src/lib/templates/vars.ts`
+- EXISTING (untouched): `{{variable}}` substitution, `{{#if}}` conditionals, `loadTemplateVars()`
+
+**Requirements:** DATA-01–04, INTERP-01–05
 
 **UAT:**
 - [ ] Migration applies cleanly
 - [ ] RLS prevents unauthenticated access
 - [ ] CRUD operations work via Supabase client
 - [ ] Soft delete sets deleted_at without removing row
+- [ ] `{{first_name}}` resolves to contact's first name (existing behavior preserved)
+- [ ] `{{first_name | there}}` returns "there" when first_name is null/empty (NEW)
+- [ ] `{{#if first_name}}` conditionals still work (regression check)
+- [ ] Existing sequence tests still pass after the file move
+- [ ] Unknown variables produce clear error / render as blank (existing behavior)
 
 ---
 
-### Phase 2: Interpolation Engine
-
-**Goal:** Build a pure, testable function that resolves `{{variable | fallback}}` syntax against a lead/property context.
-
-**Scope:**
-- `src/lib/templates/interpolate.ts` — core interpolation function
-- Regex-based parser for `{{var}}` and `{{var | fallback}}` patterns
-- Variable registry mapping variable names to data accessors
-- Error handling for unrecognized variables
-- Comprehensive Vitest unit tests
-
-**Requirements:** INTERP-01, INTERP-02, INTERP-03, INTERP-04, INTERP-05
-
-**UAT:**
-- [ ] `{{first_name}}` resolves to contact's first name
-- [ ] `{{first_name | there}}` returns "there" when first_name is null/empty
-- [ ] Unknown variables produce a clear error (not silently rendered)
-- [ ] Function is pure (no side effects, no DB calls)
-- [ ] 100% branch coverage in unit tests
-
----
-
-### Phase 3: Templates Management UI
+### Phase 2: Templates Management UI
 
 **Goal:** Full CRUD management page for SMS templates with character counting, variable picker, and live preview.
 
 **Scope:**
-- `/templates` page under `(dashboard)` layout
-- Server Actions for create, update, delete, list
-- Template list with search and category filter
-- Create/Edit form with:
-  - Name, category selector, content textarea
+- `/templates` page under `(dashboard)` layout using `PageHeader` component
+- Add "Templates" nav item to `DashboardSidebar` ITEMS array
+- Server Actions for create, update, delete, list (in `templates/actions.ts`)
+- Template list with Shadcn `Table`, search `Input`, category `Select` filter
+- Create/Edit form (Shadcn `Dialog` or dedicated page) with:
+  - Name input, category selector, content `Textarea`
   - Real-time character counter (GSM-7 vs UCS-2 segment display)
-  - Variable picker dropdown that inserts at cursor
-  - Live preview panel with sample data
-- Delete with confirmation dialog
+  - Variable picker using existing `Command` (cmdk) component
+  - Live preview panel using `renderTemplate()` with sample data
+- Delete with Shadcn `Dialog` confirmation
 
-**Requirements:** UI-01 through UI-09
+**Requirements:** UI-01–09
 
 **UAT:**
+- [ ] "Templates" appears in sidebar navigation with correct active state
 - [ ] Templates page loads and lists existing templates
 - [ ] Can create a template with name, category, and content
 - [ ] Search filters by name and content
 - [ ] Category filter shows only matching templates
 - [ ] Character counter updates in real-time and shows segment count
-- [ ] Variable picker inserts variable at cursor position
-- [ ] Preview panel shows interpolated sample data
+- [ ] Variable picker inserts `{{variable}}` at cursor position
+- [ ] Preview panel shows interpolated sample data via `renderTemplate()`
 - [ ] Delete requires confirmation
+- [ ] Design matches existing Sandra warm-paper palette and component patterns
 
 ---
 
-### Phase 4: Compose Box Integration
+### Phase 3: Compose Box + Sequence Integration
 
-**Goal:** Add a template picker to the 1-to-1 message compose box that auto-fills interpolated content.
+**Goal:** Add template picker to InlineReply compose box and allow sequence steps to reference templates.
 
-**Scope:**
-- Template picker component (dropdown or command palette style)
-- Integration into existing compose box component
-- Auto-interpolate using current lead's contact/property data
-- Allow editing interpolated text before sending
+**Scope — Compose Box:**
+- Template picker component (reuse `Command` cmdk, grouped by category)
+- Add picker button to existing `InlineReply` component (next to Send)
+- On template select: call `loadTemplateVars()` for current lead, run `renderTemplate()`, call `setBody()` with result
+- User can freely edit the interpolated text before sending
 
-**Requirements:** COMP-01, COMP-02, COMP-03
+**Scope — Sequences:**
+- Add optional `template_id` foreign key to sequence step schema (migration)
+- Modify sequence step editor to offer "Use Template" toggle (radio: custom vs template)
+- When template selected, show preview with unresolved `{{variables}}`
+- At send time (`tick.ts`), if step has `template_id`: fetch template content, run through existing `renderTemplate()` + `loadTemplateVars()` pipeline
 
-**UAT:**
-- [ ] Template picker appears in compose box
-- [ ] Selecting a template fills compose box with interpolated content
-- [ ] Variables resolve using the current lead's actual data
-- [ ] User can freely edit the filled text before sending
-
----
-
-### Phase 5: Sequence Integration
-
-**Goal:** Allow sequence steps to reference templates by ID, interpolating at send time.
-
-**Scope:**
-- Add optional `template_id` field to sequence step schema
-- Modify sequence step editor to offer "Use Template" option
-- At send time, fetch template content and interpolate with target lead's data
-- Template edits apply to future sends only
-
-**Requirements:** SEQ-01, SEQ-02, SEQ-03
+**Requirements:** COMP-01–03, SEQ-01–03
 
 **UAT:**
-- [ ] Sequence step can reference a template
-- [ ] At send time, template content is fetched and interpolated
-- [ ] Editing the original template affects future sends
-- [ ] Already-sent messages are unaffected by template edits
+- [ ] Template picker button appears in InlineReply compose box
+- [ ] Selecting a template auto-fills with interpolated content for current lead
+- [ ] User can edit the filled text before sending
+- [ ] Sequence step can toggle between custom message and template reference
+- [ ] At sequence send time, template content is fetched and interpolated
+- [ ] Editing a template affects future sequence sends (not already-sent)
+- [ ] All existing InlineReply and sequence tests still pass
 
 ---
 
@@ -134,9 +126,7 @@
 | 1 | ○ Pending |
 | 2 | ○ Pending |
 | 3 | ○ Pending |
-| 4 | ○ Pending |
-| 5 | ○ Pending |
 
 ---
 *Roadmap created: 2026-04-29*
-*Last updated: 2026-04-29 after initial creation*
+*Last updated: 2026-04-29 — reduced from 5 to 3 phases after code audit*
