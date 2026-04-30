@@ -1,16 +1,18 @@
-name: Apply Supabase migrations to prod
+name: Apply Supabase migrations to prod and test
 
-# Auto-applies any unapplied Supabase migrations to the prod project on
-# push to `main`. Runs only when `supabase/migrations/**` changes so we
-# don't waste a CI run on every code-only commit.
+# Auto-applies any unapplied Supabase migrations to BOTH the prod and test
+# projects on push to `main`. Runs only when `supabase/migrations/**`
+# changes so we don't waste a CI run on every code-only commit.
 #
 # Why this exists: prod migrations USED to be a manual step. Migration
 # 029 (job_items.error_class taxonomy) shipped in PR #62 but the
 # constraint wasn't extended in prod until we manually ran the
 # migration mid-deploy — meaning the freshly-shipped code would have
-# silently dropped error_class writes for a window. This workflow
-# closes that gap: every merged migration is applied to prod within
-# ~30 seconds of the merge landing.
+# silently dropped error_class writes for a window. Later, migration
+# 035 (sequence_step_template_ref) shipped in PR #71 but never reached
+# the test project — Playwright tests against the sequences edit page
+# silently failed for days because the column the page queried didn't
+# exist on the test DB. Both jobs below close those gaps.
 #
 # Required secrets (set in GitHub → repo settings → Secrets → Actions):
 #   SUPABASE_ACCESS_TOKEN
@@ -20,13 +22,17 @@ name: Apply Supabase migrations to prod
 #   PROD_SUPABASE_DB_PASSWORD
 #     The prod database password — visible at:
 #     https://supabase.com/dashboard/project/copflsklaefwzipsrjqz/settings/database
-#     (Connection info → Database password). Used by `supabase db push`
-#     to connect directly to the prod Postgres for migration execution.
+#     (Connection info → Database password).
+#   TEST_SUPABASE_DB_PASSWORD
+#     The test database password — visible at:
+#     https://supabase.com/dashboard/project/ncsngxlcyxylaeskiteu/settings/database
+#     (Connection info → Database password).
 #
-# Failure mode: a failed migration leaves the workflow red and the prod
-# DB partially-migrated (depending on what failed). Investigate the
-# logs, fix the migration, push a new one — `supabase db push` is
-# idempotent and skips already-applied files.
+# Failure mode: a failed migration leaves the affected project's DB
+# partially-migrated (depending on what failed). Each job runs
+# independently so a test-only failure doesn't block prod and vice
+# versa. Investigate the logs, fix the migration, push a new one —
+# `supabase db push` is idempotent and skips already-applied files.
 
 on:
   push:
@@ -43,9 +49,6 @@ jobs:
     timeout-minutes: 5
 
     env:
-      # Pinned project ref — Sandra's prod project. Test project
-      # (ncsngxlcyxylaeskiteu) is intentionally NOT touched here; it
-      # gets migrations applied via the integration-test pipeline.
       PROD_PROJECT_REF: copflsklaefwzipsrjqz
       SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
 
@@ -61,3 +64,28 @@ jobs:
 
       - name: Apply pending migrations
         run: supabase db push --password "${{ secrets.PROD_SUPABASE_DB_PASSWORD }}"
+
+  migrate-test:
+    name: Apply migrations to test
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    env:
+      # Pinned project ref — Sandra's E2E / integration test project.
+      # Kept in lockstep with prod so the Playwright suite never asserts
+      # against a stale schema.
+      TEST_PROJECT_REF: ncsngxlcyxylaeskiteu
+      SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      - name: Link to test project
+        run: supabase link --project-ref "$TEST_PROJECT_REF"
+
+      - name: Apply pending migrations
+        run: supabase db push --password "${{ secrets.TEST_SUPABASE_DB_PASSWORD }}"
