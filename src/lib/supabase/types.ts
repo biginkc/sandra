@@ -1442,6 +1442,50 @@ export type Database = {
           },
         ]
       }
+      sms_templates: {
+        Row: {
+          id: string
+          org_id: string
+          name: string
+          content: string
+          category: string
+          created_by: string | null
+          created_at: string
+          updated_at: string
+          deleted_at: string | null
+        }
+        Insert: {
+          id?: string
+          org_id: string
+          name: string
+          content: string
+          category?: string
+          created_by?: string | null
+          created_at?: string
+          updated_at?: string
+          deleted_at?: string | null
+        }
+        Update: {
+          id?: string
+          org_id?: string
+          name?: string
+          content?: string
+          category?: string
+          created_by?: string | null
+          created_at?: string
+          updated_at?: string
+          deleted_at?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "sms_templates_org_id_fkey"
+            columns: ["org_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       skip_trace_cache: {
         Row: {
           address_normalized: string
