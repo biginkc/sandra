@@ -1,5 +1,6 @@
 "use client";
 
+import { formatDistanceToNowStrict } from "date-fns/formatDistanceToNowStrict";
 import { Bell } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
@@ -11,6 +12,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import {
+  clearAllNotifications,
   getRecentNotifications,
   getUnreadCount,
   markAllRead,
@@ -143,6 +145,16 @@ export function NotificationsBell({ userId }: { userId: string }) {
     await markAllRead();
   };
 
+  const onClearAll = async () => {
+    // Hard-delete: notifications are ephemeral, no audit value in
+    // retaining cleared rows. Optimistically empty + drop the badge so
+    // the dropdown reads "all caught up" instantly; if the server fails
+    // the next poll reconciles.
+    setUnreadCount(0);
+    setItems([]);
+    await clearAllNotifications();
+  };
+
   const anyUnread = items.some((n) => !n.readAt);
 
   return (
@@ -200,7 +212,18 @@ export function NotificationsBell({ userId }: { userId: string }) {
                 }`}
                 data-testid={`notifications-item-${n.id}`}
               >
-                <div className="text-sm font-medium">{n.title}</div>
+                <div className="flex items-start justify-between gap-2">
+                  <div className="text-sm font-medium">{n.title}</div>
+                  <time
+                    dateTime={n.createdAt}
+                    className="text-muted-foreground shrink-0 text-[10px] uppercase tracking-wide"
+                    data-testid={`notifications-item-time-${n.id}`}
+                  >
+                    {formatDistanceToNowStrict(new Date(n.createdAt), {
+                      addSuffix: true,
+                    })}
+                  </time>
+                </div>
                 {n.body && (
                   <div className="text-muted-foreground mt-0.5 text-xs">
                     {n.body}
@@ -211,14 +234,25 @@ export function NotificationsBell({ userId }: { userId: string }) {
           </div>
         )}
 
-        {loaded && anyUnread && (
-          <button
-            onClick={() => void onMarkAll()}
-            className="text-muted-foreground hover:bg-accent hover:text-foreground w-full border-t px-3 py-2 text-left text-xs"
-            data-testid="notifications-mark-all-read"
-          >
-            Mark all as read
-          </button>
+        {loaded && items.length > 0 && (
+          <div className="flex border-t">
+            {anyUnread && (
+              <button
+                onClick={() => void onMarkAll()}
+                className="text-muted-foreground hover:bg-accent hover:text-foreground flex-1 px-3 py-2 text-left text-xs"
+                data-testid="notifications-mark-all-read"
+              >
+                Mark all as read
+              </button>
+            )}
+            <button
+              onClick={() => void onClearAll()}
+              className="text-muted-foreground hover:bg-accent hover:text-foreground flex-1 border-l px-3 py-2 text-right text-xs first:border-l-0 first:text-left"
+              data-testid="notifications-clear-all"
+            >
+              Clear all
+            </button>
+          </div>
         )}
       </DropdownMenuContent>
     </DropdownMenu>
