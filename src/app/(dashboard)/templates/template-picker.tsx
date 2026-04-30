@@ -10,6 +10,7 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import { Input } from "@/components/ui/input";
+import { Skeleton } from "@/components/ui/skeleton";
 
 import { listTemplates, type TemplateRow } from "./actions";
 
@@ -146,8 +147,26 @@ export function TemplatePicker({ onSelect }: Props) {
         </div>
         <div className="max-h-[280px] overflow-y-auto">
           {loadState.status === "loading" || loadState.status === "idle" ? (
-            <div className="text-muted-foreground p-4 text-center text-xs">
-              Loading…
+            // Skeleton rows mirror the real row shape (category header +
+            // two lines per template) so the layout doesn't shift when
+            // real data arrives.
+            <div aria-busy="true" aria-label="Loading templates">
+              {[0, 1].map((group) => (
+                <div key={group}>
+                  <div className="bg-muted/40 px-3 py-1.5">
+                    <Skeleton className="h-2 w-20" />
+                  </div>
+                  {[0, 1, 2].map((row) => (
+                    <div
+                      key={row}
+                      className="flex flex-col gap-1.5 px-3 py-2.5"
+                    >
+                      <Skeleton className="h-3 w-2/3" />
+                      <Skeleton className="h-2.5 w-full" />
+                    </div>
+                  ))}
+                </div>
+              ))}
             </div>
           ) : loadState.status === "error" ? (
             <div className="flex flex-col items-center gap-2 p-4 text-center">
