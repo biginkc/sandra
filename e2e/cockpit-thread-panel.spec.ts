@@ -9,6 +9,12 @@ import {
 
 /**
  * Feature 8 Phase 1 — selection + thread side-panel rendering.
+ *
+ * Most of this file's tests migrated to RTL in
+ * `src/app/(dashboard)/messages/inbox-detail.test.tsx` (panel renders +
+ * bubble colors, ESC closes, switching threads). The single test that
+ * remains here exercises a server-action side-effect (`read_at` stamp on
+ * inbound rows) and needs the real backend round-trip.
  */
 
 async function seedThread(
@@ -56,94 +62,6 @@ async function seedThread(
   }
   return { contactId: contact.id, propertyId: prop.id };
 }
-
-test("clicking a thread opens the side panel with conversation bubbles (tests 14 + 15)", async ({
-  page,
-}) => {
-  const admin = adminClient();
-  await resetTenantTables(admin);
-  await ensureTestUser(admin);
-
-  const { contactId } = await seedThread(admin, {
-    phone: "+18165557101",
-    addressTag: "PANEL-A",
-    bodies: [
-      { direction: "outbound", body: "first outbound", offsetMin: -30 },
-      { direction: "inbound", body: "first inbound", offsetMin: -20 },
-    ],
-  });
-
-  await page.goto("/messages");
-  await expect(page.getByTestId("inbox-detail-empty")).toBeVisible();
-
-  await page.getByTestId(`inbox-thread-${contactId}`).click();
-  await page.waitForURL(new RegExp(`thread=${contactId}`));
-
-  // Panel renders with both bubbles. Outbound has bg-primary, inbound bg-muted.
-  const panel = page.getByTestId("inbox-detail-panel");
-  await expect(panel).toBeVisible();
-  await expect(panel).toContainText("first outbound");
-  await expect(panel).toContainText("first inbound");
-
-  const outboundBubble = panel.locator(".bg-primary").first();
-  const inboundBubble = panel.locator(".bg-muted").first();
-  await expect(outboundBubble).toBeVisible();
-  await expect(inboundBubble).toBeVisible();
-});
-
-test("ESC closes the panel and clears ?thread (test 16)", async ({ page }) => {
-  const admin = adminClient();
-  await resetTenantTables(admin);
-  await ensureTestUser(admin);
-
-  const { contactId } = await seedThread(admin, {
-    phone: "+18165557102",
-    addressTag: "PANEL-ESC",
-    bodies: [{ direction: "inbound", body: "open me", offsetMin: -5 }],
-  });
-
-  await page.goto(`/messages?thread=${contactId}`);
-  await expect(page.getByTestId("inbox-detail-panel")).toBeVisible();
-  // Give the InboxDetail useEffect a beat to register the keydown
-  // listener — it runs after the panel mounts, and the keypress can
-  // race past the registration if we fire immediately.
-  await page.waitForLoadState("networkidle");
-  await page.waitForTimeout(300);
-
-  await page.keyboard.press("Escape");
-  await page.waitForURL(/\/messages(?!.*thread=)/);
-  await expect(page.getByTestId("inbox-detail-empty")).toBeVisible();
-});
-
-test("clicking another thread updates the panel (test 17)", async ({
-  page,
-}) => {
-  const admin = adminClient();
-  await resetTenantTables(admin);
-  await ensureTestUser(admin);
-
-  const a = await seedThread(admin, {
-    phone: "+18165557103",
-    addressTag: "PANEL-A",
-    bodies: [{ direction: "inbound", body: "hello from A", offsetMin: -30 }],
-  });
-  const b = await seedThread(admin, {
-    phone: "+18165557104",
-    addressTag: "PANEL-B",
-    bodies: [{ direction: "inbound", body: "hello from B", offsetMin: -10 }],
-  });
-
-  await page.goto("/messages");
-  await page.getByTestId(`inbox-thread-${a.contactId}`).click();
-  await expect(page.getByTestId("inbox-detail-panel")).toContainText(
-    "hello from A",
-  );
-
-  await page.getByTestId(`inbox-thread-${b.contactId}`).click();
-  await expect(page.getByTestId("inbox-detail-panel")).toContainText(
-    "hello from B",
-  );
-});
 
 test.skip("long thread scrolls to most recent on open (test 18)", async () => {
   // TODO: requires controlling scroll behavior reliably across browsers.
