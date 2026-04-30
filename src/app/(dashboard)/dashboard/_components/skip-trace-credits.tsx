@@ -4,7 +4,7 @@ import type { SkipTraceBalance } from "@/lib/skip-trace/balance";
 
 type Props = {
   balance: SkipTraceBalance;
-  /** Only admins see the "Top up →" / "Open settings →" CTAs. The
+  /** Only admins see the "Add credits →" / "Open settings →" CTAs. The
    *  link target is `/admin/skip-trace-settings`, which is admin-only
    *  anyway; surfacing the button to VAs led to dead-link clicks. */
   isAdmin: boolean;
@@ -69,7 +69,7 @@ export function SkipTraceCredits({ balance, isAdmin }: Props) {
           href="/admin/skip-trace-settings"
           className="bg-foreground text-background rounded-full px-5 py-2.5 text-sm font-bold transition-opacity hover:opacity-90"
         >
-          Top up →
+          Add credits →
         </Link>
       )}
     </div>
