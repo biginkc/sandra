@@ -1,6 +1,13 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { getAutotriggerCap, isAwaitingManualStart } from "./cass-job";
+import type { SupabaseClient } from "@supabase/supabase-js";
+import type { Database } from "@/lib/supabase/types";
+
+import {
+  getAutotriggerCap,
+  isAwaitingManualStart,
+  selectCassEligibleProperties,
+} from "./cass-job";
 
 describe("getAutotriggerCap", () => {
   const original = process.env.CASS_AUTOTRIGGER_MAX_ITEMS;
@@ -58,5 +65,176 @@ describe("isAwaitingManualStart", () => {
     );
     expect(isAwaitingManualStart({ awaiting_manual_start: 1 })).toBe(false);
     expect(isAwaitingManualStart("string")).toBe(false);
+  });
+});
+
+describe("selectCassEligibleProperties", () => {
+  type JobItemRow = { property_id: string | null; status: string };
+  type PropertyRow = { id: string; cass_status: string };
+
+  type Capture = {
+    jobItemsStatusFilter: string[] | null;
+    propertiesIdFilter: string[] | null;
+    propertiesCassStatusFilter: string | null;
+  };
+
+  function makeSupabase(
+    jobItems: JobItemRow[],
+    properties: PropertyRow[],
+    capture: Capture,
+  ): SupabaseClient<Database> {
+    const fromMock = vi.fn((table: string) => {
+      if (table === "job_items") {
+        const builder = {
+          select: vi.fn(() => builder),
+          eq: vi.fn(() => builder),
+          in: vi.fn((_col: string, values: string[]) => {
+            capture.jobItemsStatusFilter = values;
+            return builder;
+          }),
+          not: vi.fn(() => Promise.resolve({ data: jobItems, error: null })),
+        };
+        return builder;
+      }
+      if (table === "properties") {
+        const builder = {
+          select: vi.fn(() => builder),
+          in: vi.fn((_col: string, values: string[]) => {
+            capture.propertiesIdFilter = values;
+            return builder;
+          }),
+          eq: vi.fn((_col: string, value: string) => {
+            capture.propertiesCassStatusFilter = value;
+            const matched = properties.filter(
+              (p) =>
+                (capture.propertiesIdFilter ?? []).includes(p.id) &&
+                p.cass_status === value,
+            );
+            return Promise.resolve({
+              data: matched.map((p) => ({ id: p.id })),
+              error: null,
+            });
+          }),
+        };
+        return builder;
+      }
+      throw new Error(`unexpected table ${table}`);
+    });
+    return { from: fromMock } as unknown as SupabaseClient<Database>;
+  }
+
+  function emptyCapture(): Capture {
+    return {
+      jobItemsStatusFilter: null,
+      propertiesIdFilter: null,
+      propertiesCassStatusFilter: null,
+    };
+  }
+
+  it("includes newly-inserted properties (status='success', cass_status='unverified')", async () => {
+    const capture = emptyCapture();
+    const supabase = makeSupabase(
+      [
+        { property_id: "a", status: "success" },
+        { property_id: "b", status: "success" },
+      ],
+      [
+        { id: "a", cass_status: "unverified" },
+        { id: "b", cass_status: "unverified" },
+      ],
+      capture,
+    );
+    const ids = await selectCassEligibleProperties(supabase, "job-1");
+    expect(ids.sort()).toEqual(["a", "b"]);
+  });
+
+  it("includes dedup-matched properties when their cass_status is still 'unverified' (recovery case)", async () => {
+    const capture = emptyCapture();
+    const supabase = makeSupabase(
+      [
+        { property_id: "x", status: "skipped" },
+        { property_id: "y", status: "skipped" },
+      ],
+      [
+        { id: "x", cass_status: "unverified" },
+        { id: "y", cass_status: "unverified" },
+      ],
+      capture,
+    );
+    const ids = await selectCassEligibleProperties(supabase, "job-1");
+    expect(ids.sort()).toEqual(["x", "y"]);
+  });
+
+  it("queries job_items with status IN ('success', 'skipped')", async () => {
+    const capture = emptyCapture();
+    const supabase = makeSupabase([], [], capture);
+    await selectCassEligibleProperties(supabase, "job-1");
+    expect(capture.jobItemsStatusFilter).toEqual(["success", "skipped"]);
+  });
+
+  it("filters out terminal CASS verdicts (verified/invalid/ambiguous) and 'error'", async () => {
+    const capture = emptyCapture();
+    const supabase = makeSupabase(
+      [
+        { property_id: "new1", status: "success" },
+        { property_id: "dup-unv", status: "skipped" },
+        { property_id: "dup-ver", status: "skipped" },
+        { property_id: "dup-inv", status: "skipped" },
+        { property_id: "dup-amb", status: "skipped" },
+        { property_id: "dup-err", status: "skipped" },
+      ],
+      [
+        { id: "new1", cass_status: "unverified" },
+        { id: "dup-unv", cass_status: "unverified" },
+        { id: "dup-ver", cass_status: "verified" },
+        { id: "dup-inv", cass_status: "invalid" },
+        { id: "dup-amb", cass_status: "ambiguous" },
+        { id: "dup-err", cass_status: "error" },
+      ],
+      capture,
+    );
+    const ids = await selectCassEligibleProperties(supabase, "job-1");
+    expect(ids.sort()).toEqual(["dup-unv", "new1"]);
+    expect(capture.propertiesCassStatusFilter).toBe("unverified");
+  });
+
+  it("returns [] when there are no eligible job_items (skips the properties query)", async () => {
+    const capture = emptyCapture();
+    const supabase = makeSupabase([], [], capture);
+    const ids = await selectCassEligibleProperties(supabase, "job-1");
+    expect(ids).toEqual([]);
+    expect(capture.propertiesIdFilter).toBeNull();
+  });
+
+  it("ignores job_items rows with null property_id", async () => {
+    const capture = emptyCapture();
+    const supabase = makeSupabase(
+      [
+        { property_id: null, status: "success" },
+        { property_id: "real", status: "success" },
+      ],
+      [{ id: "real", cass_status: "unverified" }],
+      capture,
+    );
+    const ids = await selectCassEligibleProperties(supabase, "job-1");
+    expect(ids).toEqual(["real"]);
+    expect(capture.propertiesIdFilter).toEqual(["real"]);
+  });
+
+  it("returns [] when every dedup match is already in a terminal verdict (no waste)", async () => {
+    const capture = emptyCapture();
+    const supabase = makeSupabase(
+      [
+        { property_id: "v", status: "skipped" },
+        { property_id: "i", status: "skipped" },
+      ],
+      [
+        { id: "v", cass_status: "verified" },
+        { id: "i", cass_status: "invalid" },
+      ],
+      capture,
+    );
+    const ids = await selectCassEligibleProperties(supabase, "job-1");
+    expect(ids).toEqual([]);
   });
 });
