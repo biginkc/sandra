@@ -1,14 +1,21 @@
 "use client";
 
-import { ChevronDownIcon } from "lucide-react";
+import { ArrowDown, ArrowUp, ArrowUpDown, ChevronDownIcon, Search, X } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useMemo, useState, useTransition } from "react";
+import { useEffect, useMemo, useRef, useState, useTransition } from "react";
 import { toast } from "sonner";
 
 import { PageHeader } from "@/components/page-header";
 import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import {
+  buildProspectsHref,
+  type EngagementState,
+  type SortableColumn,
+  type SortDirection,
+} from "./prospects-query";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -54,6 +61,11 @@ export type ProspectRow = {
   cass_status: string;
   is_vacant: boolean | null;
   created_at: string;
+  /** Derived from the property's most recent message direction.
+   *  "none" -> no badge rendered. */
+  engagement: EngagementState;
+  /** Truncated body of the property's most recent message; null when none. */
+  last_message_preview: string | null;
 };
 
 export type ListOption = { id: string; name: string; color: string | null };
@@ -69,6 +81,10 @@ type Props = {
   canDelete: boolean;
   /** Rendered into the header subhead so the count stays right next to the title. */
   headerCount: string;
+  /** Current URL state — drives the search input + sort header indicators. */
+  search: string;
+  sort: SortableColumn;
+  dir: SortDirection;
 };
 
 const MOTIVATION_OPTIONS: {
@@ -101,10 +117,69 @@ export function ProspectsTable({
   currentUserId,
   canDelete,
   headerCount,
+  search,
+  sort,
+  dir,
 }: Props) {
   const router = useRouter();
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [pending, startTransition] = useTransition();
+
+  // Local search input state — lets the user type without a server roundtrip
+  // every keystroke. Synced to the URL on a 250ms debounce. We do NOT mirror
+  // `search` into local state on parent re-renders; the input is uncontrolled
+  // (defaultValue) so router.refresh + new ?search= props don't clobber the
+  // user's current keystrokes mid-edit.
+  const [searchInput, setSearchInput] = useState(search);
+  const searchDebounce = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    return () => {
+      if (searchDebounce.current) clearTimeout(searchDebounce.current);
+    };
+  }, []);
+
+  const onSearchChange = (next: string) => {
+    setSearchInput(next);
+    if (searchDebounce.current) clearTimeout(searchDebounce.current);
+    searchDebounce.current = setTimeout(() => {
+      const trimmed = next.trim();
+      router.replace(
+        `/properties${buildProspectsHref({
+          page: 1,
+          search: trimmed.length === 0 ? null : trimmed,
+          sort,
+          dir,
+        })}`,
+        { scroll: false },
+      );
+    }, 250);
+  };
+
+  const onClearSearch = () => {
+    setSearchInput("");
+    if (searchDebounce.current) clearTimeout(searchDebounce.current);
+    router.replace(
+      `/properties${buildProspectsHref({ page: 1, search: null, sort, dir })}`,
+      { scroll: false },
+    );
+  };
+
+  /** Click a sortable column header. Same column flips dir; new column
+   *  resets to ascending (so the row a user "clicks toward" is the one
+   *  they expect to see at the top). Resets to page 1. */
+  const onSortClick = (column: SortableColumn) => {
+    const nextDir: SortDirection =
+      sort === column ? (dir === "asc" ? "desc" : "asc") : "asc";
+    router.replace(
+      `/properties${buildProspectsHref({
+        page: 1,
+        search: search.length === 0 ? null : search,
+        sort: column,
+        dir: nextDir,
+      })}`,
+      { scroll: false },
+    );
+  };
 
   const allSelected = useMemo(
     () => prospects.length > 0 && selected.size === prospects.length,
@@ -518,6 +593,33 @@ export function ProspectsTable({
         }
       />
 
+      <div className="relative max-w-sm">
+        <Search
+          className="text-muted-foreground pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2"
+          aria-hidden
+        />
+        <Input
+          type="text"
+          value={searchInput}
+          onChange={(e) => onSearchChange(e.target.value)}
+          placeholder="Search address…"
+          aria-label="Search prospects by address"
+          data-testid="prospects-search"
+          className="pr-9 pl-9"
+        />
+        {searchInput.length > 0 && (
+          <button
+            type="button"
+            onClick={onClearSearch}
+            aria-label="Clear search"
+            data-testid="prospects-search-clear"
+            className="text-muted-foreground hover:text-foreground absolute top-1/2 right-2 -translate-y-1/2 rounded p-1"
+          >
+            <X className="size-3" />
+          </button>
+        )}
+      </div>
+
       <div className="border-border rounded-md border">
         <Table>
           <TableHeader>
@@ -534,23 +636,41 @@ export function ProspectsTable({
                   className="size-4 cursor-pointer"
                 />
               </TableHead>
-              <TableHead>Address</TableHead>
-              <TableHead>City</TableHead>
-              <TableHead>State</TableHead>
-              <TableHead>ZIP</TableHead>
-              <TableHead>Market</TableHead>
-              <TableHead>CASS</TableHead>
-              <TableHead>Vacant</TableHead>
+              <SortableHeader column="address" sort={sort} dir={dir} onClick={onSortClick}>
+                Address
+              </SortableHeader>
+              <SortableHeader column="city" sort={sort} dir={dir} onClick={onSortClick}>
+                City
+              </SortableHeader>
+              <SortableHeader column="state" sort={sort} dir={dir} onClick={onSortClick}>
+                State
+              </SortableHeader>
+              <SortableHeader column="zip" sort={sort} dir={dir} onClick={onSortClick}>
+                ZIP
+              </SortableHeader>
+              <SortableHeader column="market" sort={sort} dir={dir} onClick={onSortClick}>
+                Market
+              </SortableHeader>
+              <SortableHeader column="cass_status" sort={sort} dir={dir} onClick={onSortClick}>
+                CASS
+              </SortableHeader>
+              <SortableHeader column="is_vacant" sort={sort} dir={dir} onClick={onSortClick}>
+                Vacant
+              </SortableHeader>
+              <TableHead>Engagement</TableHead>
+              <TableHead>Last message</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {prospects.length === 0 ? (
               <TableRow>
                 <TableCell
-                  colSpan={8}
+                  colSpan={10}
                   className="text-muted-foreground py-8 text-center"
                 >
-                  No prospects. Import a CSV to fill the data lake.
+                  {search.length > 0
+                    ? `No prospects match "${search}". Try a different address.`
+                    : "No prospects. Import a CSV to fill the data lake."}
                 </TableCell>
               </TableRow>
             ) : (
@@ -590,6 +710,19 @@ export function ProspectsTable({
                           ? "No"
                           : "—"}
                     </TableCell>
+                    <TableCell>
+                      <EngagementBadge state={p.engagement} />
+                    </TableCell>
+                    <TableCell
+                      className="text-muted-foreground max-w-[280px] truncate text-sm italic"
+                      data-testid={`prospects-last-message-${p.id}`}
+                    >
+                      {p.last_message_preview ? (
+                        <>&ldquo;{p.last_message_preview}&rdquo;</>
+                      ) : (
+                        "—"
+                      )}
+                    </TableCell>
                   </TableRow>
                 );
               })
@@ -598,6 +731,80 @@ export function ProspectsTable({
         </Table>
       </div>
     </>
+  );
+}
+
+/**
+ * Clickable column header. Same column flips dir; new column resets
+ * to ascending. Active column shows an up/down arrow; inactive columns
+ * show a subtle two-way arrow so the affordance is visible without
+ * dominating.
+ */
+function SortableHeader({
+  column,
+  sort,
+  dir,
+  onClick,
+  children,
+}: {
+  column: SortableColumn;
+  sort: SortableColumn;
+  dir: SortDirection;
+  onClick: (col: SortableColumn) => void;
+  children: React.ReactNode;
+}) {
+  const isActive = sort === column;
+  const Icon = isActive ? (dir === "asc" ? ArrowUp : ArrowDown) : ArrowUpDown;
+  return (
+    <TableHead className="select-none">
+      <button
+        type="button"
+        onClick={() => onClick(column)}
+        aria-sort={
+          isActive ? (dir === "asc" ? "ascending" : "descending") : "none"
+        }
+        data-testid={`prospects-sort-${column}`}
+        className={`hover:text-foreground flex items-center gap-1 text-left ${
+          isActive ? "text-foreground" : "text-muted-foreground"
+        }`}
+      >
+        <span>{children}</span>
+        <Icon className="size-3 opacity-70" aria-hidden />
+      </button>
+    </TableHead>
+  );
+}
+
+/**
+ * Engagement pill — keys off the property's most-recent message direction.
+ * "none" renders a transparent placeholder so the column has a stable width
+ * even on rows that have never been contacted.
+ */
+function EngagementBadge({ state }: { state: EngagementState }) {
+  if (state === "none") {
+    return <span className="text-muted-foreground text-xs">—</span>;
+  }
+  if (state === "replying") {
+    return (
+      <Badge
+        variant="secondary"
+        className="bg-amber-100 text-amber-900 hover:bg-amber-100"
+        data-testid="engagement-replying"
+        title="Their reply was last — your move."
+      >
+        Replying
+      </Badge>
+    );
+  }
+  return (
+    <Badge
+      variant="secondary"
+      className="bg-sky-100 text-sky-900 hover:bg-sky-100"
+      data-testid="engagement-contacted"
+      title="Outbound message sent, no reply yet."
+    >
+      Contacted
+    </Badge>
   );
 }
 

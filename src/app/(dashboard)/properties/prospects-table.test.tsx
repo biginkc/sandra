@@ -1,6 +1,6 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, it, expect, vi } from "vitest";
+import { beforeEach, describe, it, expect, vi } from "vitest";
 
 import {
   ProspectsTable,
@@ -9,12 +9,19 @@ import {
 } from "./prospects-table";
 
 // `next/navigation`'s real router needs an App Router context Vitest
-// doesn't provide. Stub the bits the table actually calls.
+// doesn't provide. Stub the bits the table actually calls. Hoisted
+// mock state lets tests assert what URL replace() was called with
+// when the user clicks a sort header or types into the search box.
+const { routerReplace, routerPush } = vi.hoisted(() => ({
+  routerReplace: vi.fn(),
+  routerPush: vi.fn(),
+}));
+
 vi.mock("next/navigation", () => ({
   useRouter: () => ({
-    push: vi.fn(),
+    push: routerPush,
     refresh: vi.fn(),
-    replace: vi.fn(),
+    replace: routerReplace,
     back: vi.fn(),
     forward: vi.fn(),
     prefetch: vi.fn(),
@@ -60,6 +67,8 @@ function makeRow(overrides: Partial<ProspectRow> & { id: string }): ProspectRow 
     cass_status: overrides.cass_status ?? "verified",
     is_vacant: overrides.is_vacant ?? false,
     created_at: overrides.created_at ?? "2026-04-29T12:00:00Z",
+    engagement: overrides.engagement ?? "none",
+    last_message_preview: overrides.last_message_preview ?? null,
   };
 }
 
@@ -73,6 +82,9 @@ function renderTable(rows: ProspectRow[], lists: ListOption[] = []) {
       currentUserId={null}
       canDelete={false}
       headerCount={`Showing 1-${rows.length} of ${rows.length} prospects.`}
+      search=""
+      sort="created_at"
+      dir="desc"
     />,
   );
 }
@@ -167,5 +179,146 @@ describe("<ProspectsTable />", () => {
         "list-pkc",
       );
     });
+  });
+});
+
+describe("<ProspectsTable /> engagement column", () => {
+  it("renders the Replying badge when the latest message is inbound", () => {
+    renderTable([
+      makeRow({
+        id: "p-replying",
+        engagement: "replying",
+        last_message_preview: "Yes I'd like to hear more.",
+      }),
+    ]);
+    expect(screen.getByTestId("engagement-replying")).toHaveTextContent(
+      "Replying",
+    );
+  });
+
+  it("renders the Contacted badge when the latest message is outbound", () => {
+    renderTable([
+      makeRow({
+        id: "p-contacted",
+        engagement: "contacted",
+        last_message_preview: "Hi, are you considering selling?",
+      }),
+    ]);
+    expect(screen.getByTestId("engagement-contacted")).toHaveTextContent(
+      "Contacted",
+    );
+  });
+
+  it("renders no badge (em-dash) when there are no messages", () => {
+    renderTable([makeRow({ id: "p-none", engagement: "none" })]);
+    expect(screen.queryByTestId("engagement-replying")).toBeNull();
+    expect(screen.queryByTestId("engagement-contacted")).toBeNull();
+  });
+});
+
+describe("<ProspectsTable /> last message preview column", () => {
+  it("renders the truncated body in quotes when present", () => {
+    renderTable([
+      makeRow({
+        id: "p-msg",
+        engagement: "replying",
+        last_message_preview: "Yes I'd like to hear more about your offer",
+      }),
+    ]);
+    const cell = screen.getByTestId("prospects-last-message-p-msg");
+    expect(cell.textContent).toContain(
+      "Yes I'd like to hear more about your offer",
+    );
+    expect(cell.textContent).toContain("“"); // left double quote
+  });
+
+  it("renders an em-dash placeholder when there is no preview", () => {
+    renderTable([makeRow({ id: "p-empty", last_message_preview: null })]);
+    expect(screen.getByTestId("prospects-last-message-p-empty")).toHaveTextContent(
+      "—",
+    );
+  });
+});
+
+describe("<ProspectsTable /> sortable headers", () => {
+  beforeEach(() => {
+    routerReplace.mockReset();
+  });
+
+  it("clicking a column header (default sort) sets sort=col&dir=asc and resets to page 1", async () => {
+    const user = userEvent.setup();
+    renderTable([makeRow({ id: "p1" })]);
+    await user.click(screen.getByTestId("prospects-sort-address"));
+    expect(routerReplace).toHaveBeenCalledTimes(1);
+    expect(routerReplace.mock.calls[0][0]).toBe(
+      "/properties?sort=address&dir=asc",
+    );
+  });
+
+  it("clicking the active column header flips direction asc -> desc (and clears the asc URL flag)", async () => {
+    const user = userEvent.setup();
+    render(
+      <ProspectsTable
+        prospects={[makeRow({ id: "p1" })]}
+        lists={[]}
+        tags={[]}
+        teamMembers={[]}
+        currentUserId={null}
+        canDelete={false}
+        headerCount=""
+        search=""
+        sort="address"
+        dir="asc"
+      />,
+    );
+    await user.click(screen.getByTestId("prospects-sort-address"));
+    expect(routerReplace).toHaveBeenCalledTimes(1);
+    // Flipping address asc -> desc means dir is now the default (desc),
+    // so it gets dropped from the URL — only sort= remains.
+    expect(routerReplace.mock.calls[0][0]).toBe("/properties?sort=address");
+  });
+});
+
+describe("<ProspectsTable /> address search", () => {
+  beforeEach(() => {
+    routerReplace.mockReset();
+  });
+
+  it("debounces typing and pushes the trimmed search to the URL with page reset", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    renderTable([makeRow({ id: "p1" })]);
+    const input = screen.getByTestId("prospects-search");
+    await user.type(input, "Main St");
+    await waitFor(
+      () => {
+        expect(routerReplace).toHaveBeenCalled();
+      },
+      { timeout: 1500 },
+    );
+    expect(routerReplace.mock.calls.at(-1)?.[0]).toBe(
+      "/properties?search=Main+St",
+    );
+  });
+
+  it("clearing the search via the X button immediately drops ?search and resets to page 1", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    render(
+      <ProspectsTable
+        prospects={[makeRow({ id: "p1" })]}
+        lists={[]}
+        tags={[]}
+        teamMembers={[]}
+        currentUserId={null}
+        canDelete={false}
+        headerCount=""
+        search="Main"
+        sort="created_at"
+        dir="desc"
+      />,
+    );
+    await user.click(screen.getByTestId("prospects-search-clear"));
+    expect(routerReplace).toHaveBeenCalledTimes(1);
+    // search/sort/dir all default → URL collapses to bare path
+    expect(routerReplace.mock.calls[0][0]).toBe("/properties");
   });
 });

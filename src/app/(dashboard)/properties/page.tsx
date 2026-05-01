@@ -13,6 +13,23 @@ import {
   type TagOption,
   type TeamMemberOption,
 } from "./prospects-table";
+import {
+  buildProspectsHref,
+  computeEngagement,
+  parseProspectsSearch,
+  truncateMessagePreview,
+  type SortableColumn,
+  type SortDirection,
+} from "./prospects-query";
+
+function buildPageHref(
+  page: number,
+  search: string | null,
+  sort: SortableColumn,
+  dir: SortDirection,
+): string {
+  return buildProspectsHref({ page, search, sort, dir });
+}
 
 const PAGE_SIZE = 50;
 
@@ -23,12 +40,15 @@ export const metadata = {
 export default async function PropertiesPage({
   searchParams,
 }: {
-  searchParams: Promise<{ page?: string }>;
+  searchParams: Promise<{
+    page?: string;
+    search?: string;
+    sort?: string;
+    dir?: string;
+  }>;
 }) {
-  const params = await searchParams;
-  const rawPage = Number(params.page ?? 1);
-  const page =
-    Number.isFinite(rawPage) && rawPage >= 1 ? Math.trunc(rawPage) : 1;
+  const parsed = parseProspectsSearch(await searchParams);
+  const { page, search, sort, dir } = parsed;
 
   const from = (page - 1) * PAGE_SIZE;
   const to = from + PAGE_SIZE - 1;
@@ -38,15 +58,24 @@ export default async function PropertiesPage({
     data: { user },
   } = await supabase.auth.getUser();
 
-  const { data: properties, count, error } = await supabase
+  let query = supabase
     .from("properties")
     .select(
       "id, address, city, state, zip, market, cass_status, is_vacant, created_at",
       { count: "exact" },
     )
     .eq("status", "prospect")
-    .is("deleted_at", null)
-    .order("created_at", { ascending: false })
+    .is("deleted_at", null);
+
+  if (search) {
+    query = query.ilike("address", `%${search}%`);
+  }
+
+  // Stable secondary order on id breaks ties so pagination doesn't skip
+  // or repeat rows when many rows share the primary sort value.
+  const { data: properties, count, error } = await query
+    .order(sort, { ascending: dir === "asc" })
+    .order("id", { ascending: true })
     .range(from, to);
 
   const total = count ?? 0;
@@ -54,17 +83,49 @@ export default async function PropertiesPage({
   const showingFrom = total === 0 ? 0 : from + 1;
   const showingTo = Math.min(to + 1, total);
 
-  const prospects: ProspectRow[] = (properties ?? []).map((p) => ({
-    id: p.id,
-    address: p.address,
-    city: p.city,
-    state: p.state,
-    zip: p.zip,
-    market: p.market,
-    cass_status: p.cass_status,
-    is_vacant: p.is_vacant,
-    created_at: p.created_at,
-  }));
+  // Latest message per property in the visible page — drives the
+  // engagement pill ("contacted" / "replying") and the LAST MESSAGE
+  // preview column. Single batched query, then take the most-recent
+  // row per property in JS (Supabase JS doesn't expose DISTINCT ON).
+  const pageIds = (properties ?? []).map((p) => p.id);
+  const latestByPropertyId = new Map<
+    string,
+    { direction: "inbound" | "outbound"; body: string | null }
+  >();
+  if (pageIds.length > 0) {
+    const { data: msgRows } = await supabase
+      .from("messages")
+      .select("property_id, direction, body, created_at")
+      .in("property_id", pageIds)
+      .order("created_at", { ascending: false });
+    for (const m of msgRows ?? []) {
+      if (!m.property_id) continue;
+      // Already ordered desc — first row per property_id is the latest.
+      if (!latestByPropertyId.has(m.property_id)) {
+        latestByPropertyId.set(m.property_id, {
+          direction: m.direction as "inbound" | "outbound",
+          body: m.body ?? null,
+        });
+      }
+    }
+  }
+
+  const prospects: ProspectRow[] = (properties ?? []).map((p) => {
+    const latest = latestByPropertyId.get(p.id) ?? null;
+    return {
+      id: p.id,
+      address: p.address,
+      city: p.city,
+      state: p.state,
+      zip: p.zip,
+      market: p.market,
+      cass_status: p.cass_status,
+      is_vacant: p.is_vacant,
+      created_at: p.created_at,
+      engagement: computeEngagement(latest),
+      last_message_preview: truncateMessagePreview(latest?.body ?? null),
+    };
+  });
 
   // Active lists — feed the "Add to list" / "Remove from list" submenus.
   // Archived lists are hidden from the picker (they'd be a noisy confusion
@@ -163,6 +224,9 @@ export default async function PropertiesPage({
         currentUserId={user?.id ?? null}
         canDelete={isAdmin}
         headerCount={headerCount}
+        search={search ?? ""}
+        sort={sort}
+        dir={dir}
       />
 
       {totalPages > 1 && (
@@ -173,7 +237,7 @@ export default async function PropertiesPage({
           <div className="flex gap-2">
             {page > 1 ? (
               <Link
-                href={`/properties?page=${page - 1}`}
+                href={`/properties${buildPageHref(page - 1, search, sort, dir)}`}
                 className={buttonVariants({ variant: "outline", size: "sm" })}
                 prefetch={false}
               >
@@ -186,7 +250,7 @@ export default async function PropertiesPage({
             )}
             {page < totalPages ? (
               <Link
-                href={`/properties?page=${page + 1}`}
+                href={`/properties${buildPageHref(page + 1, search, sort, dir)}`}
                 className={buttonVariants({ variant: "outline", size: "sm" })}
                 prefetch={false}
               >
