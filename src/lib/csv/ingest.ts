@@ -2,7 +2,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 
 import type { Database, Json } from "@/lib/supabase/types";
 import { resolveFips } from "./fips";
-import { normalizeAddress } from "./normalize";
+import { normalizeAddress, normalizeName } from "./normalize";
 import { validateRow, type Mapping, type RowData } from "./validate";
 
 type PropertyInsert = Database["public"]["Tables"]["properties"]["Insert"];
@@ -372,8 +372,8 @@ async function ingestRow(
   if (hasHomeownerFields(n)) {
     homeownerContactId = await upsertContact(supabase, {
       contact_type: deriveHomeownerContactType(n),
-      first_name: (n.homeowner_first_name as string | null) ?? null,
-      last_name: (n.homeowner_last_name as string | null) ?? null,
+      first_name: normalizeName(n.homeowner_first_name as string | null),
+      last_name: normalizeName(n.homeowner_last_name as string | null),
       entity_name: (n.homeowner_entity_name as string | null) ?? null,
       phone_1: (n.homeowner_phone_1 as string | null) ?? null,
       phone_2: (n.homeowner_phone_2 as string | null) ?? null,
@@ -402,8 +402,8 @@ async function ingestRow(
   if (hasAgentFields(n)) {
     agentContactId = await upsertContact(supabase, {
       contact_type: "person",
-      first_name: (n.agent_first_name as string | null) ?? null,
-      last_name: (n.agent_last_name as string | null) ?? null,
+      first_name: normalizeName(n.agent_first_name as string | null),
+      last_name: normalizeName(n.agent_last_name as string | null),
       phone_1: (n.agent_phone as string | null) ?? null,
       email: (n.agent_email as string | null) ?? null,
     });

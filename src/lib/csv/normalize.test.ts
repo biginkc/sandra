@@ -5,6 +5,7 @@ import {
   normalizeAddress,
   normalizeApn,
   normalizeCountyName,
+  normalizeName,
   normalizePhone,
   normalizeStateCode,
   normalizeZip,
@@ -350,5 +351,34 @@ describe("toStringOrNull", () => {
     expect(toStringOrNull("")).toBeNull();
     expect(toStringOrNull("   ")).toBeNull();
     expect(toStringOrNull(null)).toBeNull();
+  });
+});
+
+describe("normalizeName", () => {
+  it("title-cases all-caps names", () => {
+    expect(normalizeName("JOHN")).toBe("John");
+    expect(normalizeName("MARY JO")).toBe("Mary Jo");
+    expect(normalizeName("DOE")).toBe("Doe");
+  });
+
+  it("title-cases lowercase names", () => {
+    expect(normalizeName("john")).toBe("John");
+    expect(normalizeName("mary jo")).toBe("Mary Jo");
+  });
+
+  it("leaves already-correct names unchanged", () => {
+    expect(normalizeName("John")).toBe("John");
+    expect(normalizeName("Mary Jo")).toBe("Mary Jo");
+  });
+
+  it("trims surrounding whitespace", () => {
+    expect(normalizeName("  JOHN  ")).toBe("John");
+  });
+
+  it("returns null for empty or missing values", () => {
+    expect(normalizeName(null)).toBeNull();
+    expect(normalizeName(undefined)).toBeNull();
+    expect(normalizeName("")).toBeNull();
+    expect(normalizeName("   ")).toBeNull();
   });
 });

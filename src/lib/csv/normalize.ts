@@ -418,6 +418,22 @@ export function toStringOrNull(raw: unknown): string | null {
   return s.length > 0 ? s : null;
 }
 
+// ---------- Name normalizer -----------
+
+/**
+ * Title-case a person name — first letter of each word uppercased, rest
+ * lowercased. Handles all-caps exports from DealMachine / PropStream.
+ * Returns null for empty/missing values.
+ */
+export function normalizeName(raw: string | null | undefined): string | null {
+  if (raw == null) return null;
+  const trimmed = String(raw).trim();
+  if (!trimmed) return null;
+  return trimmed
+    .toLowerCase()
+    .replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
 // ---------- State code normalizer (for FIPS lookup) -----------
 
 const STATE_CODE: Record<string, string> = {
