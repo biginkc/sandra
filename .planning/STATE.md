@@ -1,12 +1,16 @@
 ---
+gsd_state_version: 1.0
 milestone: v2.0
-milestone_name: "Cross-table UX consistency + market refactor"
-status: planning
+milestone_name: Cross-table UX consistency + market refactor
+status: executing
+last_updated: "2026-05-01T06:13:51.350Z"
+last_activity: 2026-05-01 -- Phase 01 planning complete
 progress:
-  phases_total: 2
-  phases_done: 0
-  requirements_total: 12
-  requirements_done: 0
+  total_phases: 3
+  completed_phases: 0
+  total_plans: 6
+  completed_plans: 0
+  percent: 0
 ---
 
 # Project State
@@ -26,8 +30,8 @@ See: .planning/PROJECT.md (updated 2026-04-30)
 
 Phase: Not started (defining requirements complete; ready for plan-phase)
 Plan: —
-Status: Defining requirements complete
-Last activity: 2026-04-30 — Milestone v2.0 started
+Status: Ready to execute
+Last activity: 2026-05-01 -- Phase 01 planning complete
 
 ## Status
 
@@ -40,6 +44,7 @@ Last activity: 2026-04-30 — Milestone v2.0 started
 ## Accumulated Context (preserved across milestones)
 
 ### Decisions
+
 - Property-centric data model
 - Vendor abstraction (common interface, swappable adapters)
 - Sandra migrations are CI-only (`db-migrate.yml`)
@@ -47,6 +52,7 @@ Last activity: 2026-04-30 — Milestone v2.0 started
 - TCPA/A2P enforcement at Twilio adapter
 
 ### Open todos (operational, outside GSD scope)
+
 - 46-property CASS recovery — re-import the original DealMachine CSV; PR #79 unblocked the auto-trigger
 - Playwright retries 1→2 — `/gsd-fast` later
 - `/admin/skip-trace-settings` page — `/gsd-quick` later

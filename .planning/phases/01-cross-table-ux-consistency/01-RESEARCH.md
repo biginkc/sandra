@@ -1321,7 +1321,7 @@ A2 and A7 are the highest-risk because they affect component API surface and
 page structure. The others are content/config choices that the planner can
 adjust.
 
-## Open Questions
+## Open Questions (RESOLVED)
 
 1. **Should `<TableToolbar.FilterPill>` support a dropdown/select variant, or stay binary-toggle only?**
    - What we know: D-01 names `<TableToolbar.FilterPill>`; D-10 says `?category=` migrates from local state; the existing template page uses Base UI Select.
@@ -1331,6 +1331,7 @@ adjust.
      category, keep Base UI `<Select>` next to the toolbar with `value` /
      `onValueChange` wired to hook state. If a future phase needs cross-table
      dropdown filter pills, extend the API then.
+   - RESOLVED: Binary `<TableToolbar.FilterPill>` for toggle-style filters; `/templates` category stays as Base UI `<Select>` wired to hook state via `ts.navigate` (Plan 06, per CONTEXT.md Claude's Discretion on per-consumer filter wiring).
 
 2. **Does the new `useTableUrlState` hook own a `<Provider>` component, or is the context implicit?**
    - What we know: D-03 says `<TableToolbar.Search>` wires itself to the hook
@@ -1342,6 +1343,7 @@ adjust.
      Consumer does `<ts.Provider value={ts}><TableToolbar>...</TableToolbar></ts.Provider>`.
      Or — simpler — `<TableToolbar>` itself accepts a `state={ts}` prop and provides
      the context internally. Researcher prefers the latter (one less wrapper).
+   - RESOLVED: `<TableToolbar state={ts}>` accepts the hook return as a `state` prop and provides `TableUrlStateContext` internally — no external Provider wrapper needed (Plan 02, per CONTEXT.md D-01 and D-03).
 
 3. **Hook test framework: do we mock `next/navigation` for the hook unit tests, or is the hook itself testable in node?**
    - What we know: vitest config has node env for `*.test.ts` and jsdom for `*.test.tsx`.
@@ -1350,6 +1352,7 @@ adjust.
      `*.test.ts` (node). The hook itself is tested in `*.test.tsx` (jsdom) via
      `renderHook` from `@testing-library/react` with mocked `next/navigation`,
      matching the `prospects-table.test.tsx` mock at lines 15-28.
+   - RESOLVED: Pure helpers in `use-table-url-state.test.ts` (node env); hook rendered via `renderHook` in `use-table-url-state.hook.test.tsx` (jsdom env) with mocked `next/navigation` matching `prospects-table.test.tsx:15-28` (Plan 01 Task 4).
 
 ## Environment Availability
 
