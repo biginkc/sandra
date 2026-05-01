@@ -14,7 +14,7 @@
 - [ ] **TABLE-04**: Sort and search state lives in URL params (shareable, back-button correct, survives refresh)
 - [ ] **TABLE-05**: Pagination links preserve sort + search state across pages
 - [ ] **TABLE-06**: A skeleton loader replaces table rows during URL-driven navigation (search, sort, filter changes)
-- [ ] **TABLE-07**: A reusable `<TableToolbar>` + `<SortableHeader>` component pair extracted into `src/components/ui/` so future tables can opt in without duplicating the implementation
+- [ ] **TABLE-07**: A reusable `<TableToolbar>` + `<SortableHeader>` component pair (plus `useTableUrlState` hook) extracted into `src/components/table/` so future tables can opt in without duplicating the implementation
 
 ### Market Vocabulary Refactor
 
