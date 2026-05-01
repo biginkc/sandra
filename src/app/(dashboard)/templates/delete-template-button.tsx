@@ -11,9 +11,10 @@ import { deleteTemplate } from "./actions";
 type Props = {
   templateId: string;
   templateName: string;
+  systemManaged?: boolean;
 };
 
-export function DeleteTemplateButton({ templateId, templateName }: Props) {
+export function DeleteTemplateButton({ templateId, templateName, systemManaged }: Props) {
   const [pending, startTransition] = useTransition();
 
   const handleDelete = () => {
@@ -35,7 +36,8 @@ export function DeleteTemplateButton({ templateId, templateName }: Props) {
       variant="ghost"
       size="sm"
       onClick={handleDelete}
-      disabled={pending}
+      disabled={pending || systemManaged}
+      title={systemManaged ? "System templates cannot be deleted" : undefined}
       className="text-destructive hover:text-destructive"
     >
       {pending ? "Deleting…" : "Delete"}

@@ -276,6 +276,9 @@ export function TemplatesList({ templates, categories, parsed }: Props) {
                     >
                       {t.name}
                     </button>
+                    {t.system_managed && (
+                      <Badge variant="secondary" className="ml-1.5 text-xs">System</Badge>
+                    )}
                   </TableCell>
                   <TableCell>
                     <Badge variant="outline">{t.category}</Badge>
@@ -299,6 +302,7 @@ export function TemplatesList({ templates, categories, parsed }: Props) {
                       <DeleteTemplateButton
                         templateId={t.id}
                         templateName={t.name}
+                        systemManaged={t.system_managed}
                       />
                     </div>
                   </TableCell>

@@ -1459,6 +1459,7 @@ export type Database = {
           name: string
           content: string
           category: string
+          system_managed: boolean
           created_by: string | null
           created_at: string
           updated_at: string
@@ -1470,6 +1471,7 @@ export type Database = {
           name: string
           content: string
           category?: string
+          system_managed?: boolean
           created_by?: string | null
           created_at?: string
           updated_at?: string
@@ -1481,6 +1483,7 @@ export type Database = {
           name?: string
           content?: string
           category?: string
+          system_managed?: boolean
           created_by?: string | null
           created_at?: string
           updated_at?: string
