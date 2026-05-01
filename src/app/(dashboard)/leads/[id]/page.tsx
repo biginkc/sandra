@@ -326,14 +326,17 @@ export default async function LeadDetailPage({
               <Row label="Email" value={lead.homeowner.email} />
               <Row
                 label="Mailing address"
-                value={[
-                  lead.homeowner.homeowner_details?.mailing_address,
-                  lead.homeowner.homeowner_details?.mailing_city,
-                  lead.homeowner.homeowner_details?.mailing_state,
-                  lead.homeowner.homeowner_details?.mailing_zip,
-                ]
-                  .filter(Boolean)
-                  .join(", ") || null}
+                value={(() => {
+                  const d = lead.homeowner.homeowner_details;
+                  if (!d) return null;
+                  // If mailing_address already contains commas it's a full
+                  // combined string (e.g. DealMachine "Primary Mailing Address").
+                  // Show it alone to avoid duplicating city/state/zip.
+                  if (d.mailing_address?.includes(",")) return d.mailing_address;
+                  return [d.mailing_address, d.mailing_city, d.mailing_state, d.mailing_zip]
+                    .filter(Boolean)
+                    .join(", ") || null;
+                })()}
               />
               <Row
                 label="Do not contact"
