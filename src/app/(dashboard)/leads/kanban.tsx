@@ -128,6 +128,10 @@ type KanbanProps = {
   listMemberships: Record<string, ListMembership[]>;
   /** property_id → `custom` category tags only (source/uploaded etc. hidden from card). */
   customTags: Record<string, CustomTag[]>;
+  /** property_id → last-message body, server-truncated. Renders as the
+   *  italic-quoted preview at the bottom of each card. Missing key = no
+   *  thread. */
+  lastMessageByPropertyId: Record<string, string>;
 };
 
 const MINE_ONLY_STORAGE_KEY = "sandra.leads.mineOnly";
@@ -140,6 +144,7 @@ export function Kanban({
   currentUserId,
   listMemberships,
   customTags,
+  lastMessageByPropertyId,
 }: KanbanProps) {
   const [leads, setLeads] = useState<Lead[]>(initialLeads);
   const [activeId, setActiveId] = useState<string | null>(null);
@@ -465,6 +470,7 @@ export function Kanban({
               currentUserId={currentUserId}
               listMemberships={listMemberships}
               customTags={customTags}
+              lastMessageByPropertyId={lastMessageByPropertyId}
             />
           ))}
         </div>
@@ -478,6 +484,9 @@ export function Kanban({
               currentUserId={currentUserId}
               lists={listMemberships[activeLead.id] ?? []}
               customTags={customTags[activeLead.id] ?? []}
+              lastMessagePreview={
+                lastMessageByPropertyId[activeLead.id] ?? null
+              }
             />
           ) : null}
         </DragOverlay>
@@ -500,6 +509,7 @@ function Column({
   currentUserId,
   listMemberships,
   customTags,
+  lastMessageByPropertyId,
 }: {
   status: PropertyStatus;
   leads: Lead[];
@@ -514,6 +524,7 @@ function Column({
   currentUserId: string | null;
   listMemberships: Record<string, ListMembership[]>;
   customTags: Record<string, CustomTag[]>;
+  lastMessageByPropertyId: Record<string, string>;
 }) {
   const { isOver, setNodeRef } = useDroppable({ id: status });
   const hover = isOver && isActiveDropTarget;
@@ -600,6 +611,7 @@ function Column({
               currentUserId={currentUserId}
               lists={listMemberships[lead.id] ?? []}
               customTags={customTags[lead.id] ?? []}
+              lastMessagePreview={lastMessageByPropertyId[lead.id] ?? null}
             />
           ))
         )}
@@ -617,6 +629,7 @@ function LeadCard({
   currentUserId,
   lists = [],
   customTags = [],
+  lastMessagePreview = null,
 }: {
   lead: Lead;
   overlay?: boolean;
@@ -626,6 +639,8 @@ function LeadCard({
   currentUserId: string | null;
   lists?: ListMembership[];
   customTags?: CustomTag[];
+  /** Truncated body of the lead's most recent message; null = no thread. */
+  lastMessagePreview?: string | null;
 }) {
   const { attributes, listeners, setNodeRef, transform, isDragging } =
     useDraggable({ id: lead.id });
@@ -779,6 +794,15 @@ function LeadCard({
               +{customTags.length - 3}
             </Badge>
           ) : null}
+        </div>
+      ) : null}
+      {lastMessagePreview ? (
+        <div
+          className="text-muted-foreground mt-2 truncate text-[11px] italic"
+          data-testid={`leadcard-last-message-${lead.id}`}
+          title={lastMessagePreview}
+        >
+          &ldquo;{lastMessagePreview}&rdquo;
         </div>
       ) : null}
     </div>
