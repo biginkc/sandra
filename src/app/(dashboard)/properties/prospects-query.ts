@@ -1,12 +1,29 @@
 /**
- * Pure helpers for the /properties (Prospects) page query layer.
+ * Prospects-page domain helpers + thin wrappers around the generic
+ * URL-state primitives in @/components/table/use-table-url-state.
  *
- * Parses the page's URL searchParams into a validated, typed object
- * (page / search / sort / dir) and derives the per-row engagement state
- * from a property's most-recent message. Pure functions only — no DB,
- * no Next.js — so the page-level server component can stay terse and
- * the rules can be exercised by unit tests.
+ * Generic parse/build (page, search, sort, dir, defaults stripping,
+ * sortable whitelist, URL-encoding) lives in use-table-url-state.ts and
+ * is exercised by use-table-url-state.test.ts (~12 tests covering the
+ * shared surface). This file owns the prospects-specific shapes:
+ * KNOWN_MARKETS, ParsedProspectsFilters, computeEngagement,
+ * truncateMessagePreview, formatFullAddress — plus thin wrappers
+ * parseProspectsSearch / buildProspectsHref that delegate to the
+ * generic helpers with the prospects column whitelist + filter parsers.
+ *
+ * The wrapper signatures are unchanged from before the extraction so
+ * the 35 tests in prospects-query.test.ts and the 26 tests in
+ * prospects-table.test.tsx all stay green without modification.
  */
+
+import {
+  buildTableHref,
+  parseTableSearch,
+  type SortDirection,
+} from "@/components/table/use-table-url-state";
+
+// Re-export SortDirection so existing imports `from "./prospects-query"` keep working.
+export type { SortDirection };
 
 export const SORTABLE_COLUMNS = [
   "address",
@@ -21,8 +38,6 @@ export const SORTABLE_COLUMNS = [
 export const SELECT_ALL_HARD_CAP = 5000;
 
 export type SortableColumn = (typeof SORTABLE_COLUMNS)[number];
-
-export type SortDirection = "asc" | "desc";
 
 /** What the table renders as the engagement pill in the new column. */
 export type EngagementState = "none" | "contacted" | "replying";
@@ -72,48 +87,18 @@ function isKnownMarket(value: unknown): value is KnownMarket {
 export const DEFAULT_SORT: SortableColumn = "created_at";
 export const DEFAULT_DIR: SortDirection = "desc";
 
-function isSortableColumn(value: unknown): value is SortableColumn {
-  return (
-    typeof value === "string" &&
-    (SORTABLE_COLUMNS as readonly string[]).includes(value)
-  );
-}
-
 /**
- * Parse the page's raw searchParams into a validated object.
- * - Unknown / missing values fall back to defaults.
- * - Sort columns are whitelisted to avoid `?sort=password` style abuse
- *   (Supabase's column injection is impossible via the JS client, but
- *   we still don't want random column names producing 500s).
- * - Search is trimmed; empty strings collapse to `null` so the caller
- *   can branch on it cleanly.
+ * Domain-specific filter parser. Pulled out as a named function so
+ * parseProspectsSearch can pass it to parseTableSearch as the
+ * `parseFilters` callback. Local pickFirst helper because this is the
+ * only consumer in the file (the generic helper has its own internal
+ * pickFirst over in use-table-url-state.ts).
  */
-export function parseProspectsSearch(raw: {
-  page?: string | string[];
-  search?: string | string[];
-  sort?: string | string[];
-  dir?: string | string[];
-  vacant?: string | string[];
-  cass?: string | string[];
-  engagement?: string | string[];
-  market?: string | string[];
-  assignee?: string | string[];
-}): ParsedProspectsSearch {
+function parseProspectsFilters(
+  raw: Record<string, string | string[] | undefined>,
+): ParsedProspectsFilters {
   const pickFirst = (v: string | string[] | undefined): string | undefined =>
     Array.isArray(v) ? v[0] : v;
-
-  const rawPage = Number(pickFirst(raw.page) ?? 1);
-  const page =
-    Number.isFinite(rawPage) && rawPage >= 1 ? Math.trunc(rawPage) : 1;
-
-  const rawSearch = (pickFirst(raw.search) ?? "").trim();
-  const search = rawSearch.length === 0 ? null : rawSearch;
-
-  const rawSort = pickFirst(raw.sort);
-  const sort = isSortableColumn(rawSort) ? rawSort : DEFAULT_SORT;
-
-  const rawDir = pickFirst(raw.dir);
-  const dir: SortDirection = rawDir === "asc" ? "asc" : DEFAULT_DIR;
 
   const vacantRaw = pickFirst(raw.vacant);
   const vacant = vacantRaw === "1" || vacantRaw === "true";
@@ -134,37 +119,96 @@ export function parseProspectsSearch(raw: {
   const assigneeRaw = (pickFirst(raw.assignee) ?? "").trim();
   const assignee = assigneeRaw.length === 0 ? null : assigneeRaw;
 
+  return { vacant, cass, engagement, market, assignee };
+}
+
+/**
+ * Parse the page's raw searchParams into a validated object.
+ *
+ * Thin wrapper around `parseTableSearch` from use-table-url-state.ts.
+ * Supplies the prospects-specific column whitelist, defaults, and
+ * filter parser — every other behavior (page clamping, search
+ * trimming, dir whitelisting, array-input flattening) lives in the
+ * generic helper.
+ *
+ * Signature is byte-identical to the pre-extraction version so the 35
+ * unit tests in prospects-query.test.ts and the page.tsx call site
+ * see no change.
+ */
+export function parseProspectsSearch(raw: {
+  page?: string | string[];
+  search?: string | string[];
+  sort?: string | string[];
+  dir?: string | string[];
+  vacant?: string | string[];
+  cass?: string | string[];
+  engagement?: string | string[];
+  market?: string | string[];
+  assignee?: string | string[];
+}): ParsedProspectsSearch {
+  const result = parseTableSearch<ParsedProspectsFilters>(
+    raw as Record<string, string | string[] | undefined>,
+    {
+      sortableColumns: SORTABLE_COLUMNS,
+      defaultSort: DEFAULT_SORT,
+      defaultDir: DEFAULT_DIR,
+      parseFilters: parseProspectsFilters,
+    },
+  );
+  // The generic helper returns sort: string; narrow back to SortableColumn
+  // for the existing prospects-page consumer's type expectations.
   return {
-    page,
-    search,
-    sort,
-    dir,
-    filters: { vacant, cass, engagement, market, assignee },
+    page: result.page,
+    search: result.search,
+    sort: result.sort as ParsedProspectsSearch["sort"],
+    dir: result.dir,
+    filters: result.filters,
   };
 }
 
+/**
+ * Emit prospects filter params into a URLSearchParams in the stable
+ * order asserted by tests:
+ *
+ *   vacant, cass, engagement, market, assignee
+ *
+ * Stable ordering is asserted by prospects-query.test.ts:264-285
+ * ("composes filters with sort+search+page in stable order") and by
+ * 4+ prospects-table.test.tsx URL assertions (e.g., the "filter
+ * toggles compose" test that expects
+ * `?vacant=1&cass=verified&engagement=contacted`).
+ *
+ * Exported so prospects-table.tsx can pass it as `buildFilterParams`
+ * to `useTableUrlState`.
+ */
+export function buildProspectsFilterParams(
+  filters: Partial<ParsedProspectsFilters>,
+  sp: URLSearchParams,
+): void {
+  if (filters.vacant) sp.set("vacant", "1");
+  if (filters.cass) sp.set("cass", filters.cass);
+  if (filters.engagement) sp.set("engagement", filters.engagement);
+  if (filters.market) sp.set("market", filters.market);
+  if (filters.assignee) sp.set("assignee", filters.assignee);
+}
+
 /** Build a `?key=value&...` query-string preserving non-default fields.
- *  Filter params are emitted in a stable order for predictable URLs. */
+ *  Filter params are emitted in a stable order for predictable URLs.
+ *
+ *  Thin wrapper around `buildTableHref` from use-table-url-state.ts.
+ *  Signature is byte-identical to the pre-extraction version. */
 export function buildProspectsHref(parts: {
   page?: number;
   search?: string | null;
-  sort?: SortableColumn;
+  sort?: ParsedProspectsSearch["sort"];
   dir?: SortDirection;
   filters?: Partial<ParsedProspectsFilters>;
 }): string {
-  const sp = new URLSearchParams();
-  if (parts.page && parts.page > 1) sp.set("page", String(parts.page));
-  if (parts.search && parts.search.length > 0) sp.set("search", parts.search);
-  if (parts.sort && parts.sort !== DEFAULT_SORT) sp.set("sort", parts.sort);
-  if (parts.dir && parts.dir !== DEFAULT_DIR) sp.set("dir", parts.dir);
-  const f = parts.filters;
-  if (f?.vacant) sp.set("vacant", "1");
-  if (f?.cass) sp.set("cass", f.cass);
-  if (f?.engagement) sp.set("engagement", f.engagement);
-  if (f?.market) sp.set("market", f.market);
-  if (f?.assignee) sp.set("assignee", f.assignee);
-  const qs = sp.toString();
-  return qs ? `?${qs}` : "";
+  return buildTableHref<ParsedProspectsFilters>(parts, {
+    defaultSort: DEFAULT_SORT,
+    defaultDir: DEFAULT_DIR,
+    buildFilterParams: buildProspectsFilterParams,
+  });
 }
 
 /**
