@@ -72,6 +72,14 @@ function makeRow(overrides: Partial<ProspectRow> & { id: string }): ProspectRow 
   };
 }
 
+const EMPTY_FILTERS = {
+  vacant: false,
+  cass: null,
+  engagement: null,
+  market: null,
+  assignee: null,
+} as const;
+
 function renderTable(rows: ProspectRow[], lists: ListOption[] = []) {
   return render(
     <ProspectsTable
@@ -85,6 +93,7 @@ function renderTable(rows: ProspectRow[], lists: ListOption[] = []) {
       search=""
       sort="created_at"
       dir="desc"
+      filters={EMPTY_FILTERS}
     />,
   );
 }
@@ -269,6 +278,7 @@ describe("<ProspectsTable /> sortable headers", () => {
         search=""
         sort="address"
         dir="asc"
+        filters={EMPTY_FILTERS}
       />,
     );
     await user.click(screen.getByTestId("prospects-sort-address"));
@@ -314,11 +324,92 @@ describe("<ProspectsTable /> address search", () => {
         search="Main"
         sort="created_at"
         dir="desc"
+        filters={EMPTY_FILTERS}
       />,
     );
     await user.click(screen.getByTestId("prospects-search-clear"));
     expect(routerReplace).toHaveBeenCalledTimes(1);
     // search/sort/dir all default → URL collapses to bare path
     expect(routerReplace.mock.calls[0][0]).toBe("/properties");
+  });
+});
+
+describe("<ProspectsTable /> quick filters", () => {
+  beforeEach(() => {
+    routerReplace.mockReset();
+  });
+
+  it("clicking inactive Vacant toggle pushes ?vacant=1", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    renderTable([makeRow({ id: "p1" })]);
+    await user.click(screen.getByTestId("filter-vacant"));
+    expect(routerReplace).toHaveBeenCalledTimes(1);
+    expect(routerReplace.mock.calls[0][0]).toBe("/properties?vacant=1");
+  });
+
+  it("clicking active Vacant toggle removes ?vacant from URL", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    render(
+      <ProspectsTable
+        prospects={[makeRow({ id: "p1" })]}
+        lists={[]}
+        tags={[]}
+        teamMembers={[]}
+        currentUserId={null}
+        canDelete={false}
+        headerCount=""
+        search=""
+        sort="created_at"
+        dir="desc"
+        filters={{ ...EMPTY_FILTERS, vacant: true }}
+      />,
+    );
+    await user.click(screen.getByTestId("filter-vacant"));
+    expect(routerReplace.mock.calls[0][0]).toBe("/properties");
+  });
+
+  it("Verified toggle adds ?cass=verified", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    renderTable([makeRow({ id: "p1" })]);
+    await user.click(screen.getByTestId("filter-verified"));
+    expect(routerReplace.mock.calls[0][0]).toBe("/properties?cass=verified");
+  });
+
+  it("Contacted toggle adds ?engagement=contacted", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    renderTable([makeRow({ id: "p1" })]);
+    await user.click(screen.getByTestId("filter-contacted"));
+    expect(routerReplace.mock.calls[0][0]).toBe(
+      "/properties?engagement=contacted",
+    );
+  });
+
+  it("filter toggles compose: Vacant + Verified + Contacted active emits all three params", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    render(
+      <ProspectsTable
+        prospects={[makeRow({ id: "p1" })]}
+        lists={[]}
+        tags={[]}
+        teamMembers={[]}
+        currentUserId={null}
+        canDelete={false}
+        headerCount=""
+        search=""
+        sort="created_at"
+        dir="desc"
+        filters={{
+          vacant: true,
+          cass: "verified",
+          engagement: null,
+          market: null,
+          assignee: null,
+        }}
+      />,
+    );
+    await user.click(screen.getByTestId("filter-contacted"));
+    expect(routerReplace.mock.calls[0][0]).toBe(
+      "/properties?vacant=1&cass=verified&engagement=contacted",
+    );
   });
 });

@@ -18,6 +18,7 @@ import {
   computeEngagement,
   parseProspectsSearch,
   truncateMessagePreview,
+  type ParsedProspectsFilters,
   type SortableColumn,
   type SortDirection,
 } from "./prospects-query";
@@ -27,8 +28,9 @@ function buildPageHref(
   search: string | null,
   sort: SortableColumn,
   dir: SortDirection,
+  filters: ParsedProspectsFilters,
 ): string {
-  return buildProspectsHref({ page, search, sort, dir });
+  return buildProspectsHref({ page, search, sort, dir, filters });
 }
 
 const PAGE_SIZE = 50;
@@ -45,10 +47,15 @@ export default async function PropertiesPage({
     search?: string;
     sort?: string;
     dir?: string;
+    vacant?: string;
+    cass?: string;
+    engagement?: string;
+    market?: string;
+    assignee?: string;
   }>;
 }) {
   const parsed = parseProspectsSearch(await searchParams);
-  const { page, search, sort, dir } = parsed;
+  const { page, search, sort, dir, filters } = parsed;
 
   const from = (page - 1) * PAGE_SIZE;
   const to = from + PAGE_SIZE - 1;
@@ -57,6 +64,32 @@ export default async function PropertiesPage({
   const {
     data: { user },
   } = await supabase.auth.getUser();
+
+  // Engagement filter is the only derived one — it requires a
+  // pre-fetch against the messages table to find property_ids whose
+  // most-recent message direction matches the filter. Done up front so
+  // the .in("id", …) chain composes cleanly with the rest of the query.
+  let engagementFilteredIds: string[] | null = null;
+  if (filters.engagement === "contacted") {
+    const { data: msgRows } = await supabase
+      .from("messages")
+      .select("property_id, direction, created_at")
+      .not("property_id", "is", null)
+      .order("created_at", { ascending: false });
+    const seen = new Set<string>();
+    const matched = new Set<string>();
+    for (const m of msgRows ?? []) {
+      if (!m.property_id || seen.has(m.property_id)) continue;
+      seen.add(m.property_id);
+      if (m.direction === "outbound") matched.add(m.property_id);
+    }
+    engagementFilteredIds = Array.from(matched);
+    if (engagementFilteredIds.length === 0) {
+      // Empty IN list would error or match-all depending on driver — short
+      // circuit to "no rows" by ensuring the .in() never hits.
+      engagementFilteredIds = ["__no_match__"];
+    }
+  }
 
   let query = supabase
     .from("properties")
@@ -69,6 +102,23 @@ export default async function PropertiesPage({
 
   if (search) {
     query = query.ilike("address", `%${search}%`);
+  }
+  if (filters.vacant) {
+    query = query.eq("is_vacant", true);
+  }
+  if (filters.cass === "verified") {
+    query = query.eq("cass_status", "verified");
+  }
+  if (filters.market) {
+    query = query.eq("market", filters.market);
+  }
+  if (filters.assignee === "unassigned") {
+    query = query.is("assigned_user_id", null);
+  } else if (filters.assignee) {
+    query = query.eq("assigned_user_id", filters.assignee);
+  }
+  if (engagementFilteredIds) {
+    query = query.in("id", engagementFilteredIds);
   }
 
   // Stable secondary order on id breaks ties so pagination doesn't skip
@@ -227,6 +277,7 @@ export default async function PropertiesPage({
         search={search ?? ""}
         sort={sort}
         dir={dir}
+        filters={filters}
       />
 
       {totalPages > 1 && (
@@ -237,7 +288,7 @@ export default async function PropertiesPage({
           <div className="flex gap-2">
             {page > 1 ? (
               <Link
-                href={`/properties${buildPageHref(page - 1, search, sort, dir)}`}
+                href={`/properties${buildPageHref(page - 1, search, sort, dir, filters)}`}
                 className={buttonVariants({ variant: "outline", size: "sm" })}
                 prefetch={false}
               >
@@ -250,7 +301,7 @@ export default async function PropertiesPage({
             )}
             {page < totalPages ? (
               <Link
-                href={`/properties${buildPageHref(page + 1, search, sort, dir)}`}
+                href={`/properties${buildPageHref(page + 1, search, sort, dir, filters)}`}
                 className={buttonVariants({ variant: "outline", size: "sm" })}
                 prefetch={false}
               >

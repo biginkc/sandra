@@ -13,7 +13,10 @@ import { Input } from "@/components/ui/input";
 import {
   buildProspectsHref,
   formatFullAddress,
+  KNOWN_MARKETS,
   type EngagementState,
+  type KnownMarket,
+  type ParsedProspectsFilters,
   type SortableColumn,
   type SortDirection,
 } from "./prospects-query";
@@ -86,6 +89,7 @@ type Props = {
   search: string;
   sort: SortableColumn;
   dir: SortDirection;
+  filters: ParsedProspectsFilters;
 };
 
 const MOTIVATION_OPTIONS: {
@@ -121,6 +125,7 @@ export function ProspectsTable({
   search,
   sort,
   dir,
+  filters,
 }: Props) {
   const router = useRouter();
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -150,6 +155,7 @@ export function ProspectsTable({
           search: trimmed.length === 0 ? null : trimmed,
           sort,
           dir,
+          filters,
         })}`,
         { scroll: false },
       );
@@ -160,7 +166,7 @@ export function ProspectsTable({
     setSearchInput("");
     if (searchDebounce.current) clearTimeout(searchDebounce.current);
     router.replace(
-      `/properties${buildProspectsHref({ page: 1, search: null, sort, dir })}`,
+      `/properties${buildProspectsHref({ page: 1, search: null, sort, dir, filters })}`,
       { scroll: false },
     );
   };
@@ -177,6 +183,24 @@ export function ProspectsTable({
         search: search.length === 0 ? null : search,
         sort: column,
         dir: nextDir,
+        filters,
+      })}`,
+      { scroll: false },
+    );
+  };
+
+  /** Apply a partial change to the filter set, preserving everything else
+   *  and resetting pagination. The resulting URL drops any filter param
+   *  whose value is null/false/'' (handled by buildProspectsHref). */
+  const updateFilters = (patch: Partial<ParsedProspectsFilters>) => {
+    const nextFilters: ParsedProspectsFilters = { ...filters, ...patch };
+    router.replace(
+      `/properties${buildProspectsHref({
+        page: 1,
+        search: search.length === 0 ? null : search,
+        sort,
+        dir,
+        filters: nextFilters,
       })}`,
       { scroll: false },
     );
@@ -621,6 +645,12 @@ export function ProspectsTable({
         )}
       </div>
 
+      <ProspectFilters
+        filters={filters}
+        teamMembers={teamMembers}
+        onChange={updateFilters}
+      />
+
       <div className="border-border rounded-md border">
         <Table>
           <TableHeader>
@@ -749,7 +779,7 @@ function SortableHeader({
           isActive ? (dir === "asc" ? "ascending" : "descending") : "none"
         }
         data-testid={`prospects-sort-${column}`}
-        className={`hover:text-foreground flex items-center gap-1 text-left ${
+        className={`hover:text-foreground flex items-center gap-1 text-left text-xs font-bold tracking-widest uppercase ${
           isActive ? "text-foreground" : "text-muted-foreground"
         }`}
       >
@@ -855,6 +885,156 @@ function VacantPill() {
       Vacant
     </Badge>
   );
+}
+
+/**
+ * Filter row above the table — three independent toggle buttons +
+ * two single-select dropdowns. Each control mutates the URL via
+ * router.replace, so state lives in the URL (shareable + bookmarkable +
+ * back-button-correct). Active toggles render filled with an X to
+ * remove; inactive render outlined.
+ */
+function ProspectFilters({
+  filters,
+  teamMembers,
+  onChange,
+}: {
+  filters: ParsedProspectsFilters;
+  teamMembers: TeamMemberOption[];
+  onChange: (patch: Partial<ParsedProspectsFilters>) => void;
+}) {
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      <FilterToggle
+        active={filters.vacant}
+        label="Vacant"
+        testId="filter-vacant"
+        onClick={() => onChange({ vacant: !filters.vacant })}
+      />
+      <FilterToggle
+        active={filters.cass === "verified"}
+        label="Verified"
+        testId="filter-verified"
+        onClick={() =>
+          onChange({ cass: filters.cass === "verified" ? null : "verified" })
+        }
+      />
+      <FilterToggle
+        active={filters.engagement === "contacted"}
+        label="Contacted"
+        testId="filter-contacted"
+        onClick={() =>
+          onChange({
+            engagement:
+              filters.engagement === "contacted" ? null : "contacted",
+          })
+        }
+      />
+
+      <div className="ml-2 flex items-center gap-2">
+        <DropdownMenu>
+          <DropdownMenuTrigger
+            render={
+              <Button variant="outline" size="sm" data-testid="filter-market">
+                Market: {filters.market ?? "Anywhere"}
+                <ChevronDownIcon className="ml-1 size-3" />
+              </Button>
+            }
+          />
+          <DropdownMenuContent>
+            <DropdownMenuItem
+              onClick={() => onChange({ market: null })}
+              data-testid="filter-market-any"
+            >
+              Anywhere
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            {KNOWN_MARKETS.map((m) => (
+              <DropdownMenuItem
+                key={m}
+                onClick={() => onChange({ market: m as KnownMarket })}
+                data-testid={`filter-market-${m.replace(/\s+/g, "-")}`}
+              >
+                {m}
+              </DropdownMenuItem>
+            ))}
+          </DropdownMenuContent>
+        </DropdownMenu>
+
+        <DropdownMenu>
+          <DropdownMenuTrigger
+            render={
+              <Button variant="outline" size="sm" data-testid="filter-assignee">
+                Assignee: {assigneeLabel(filters.assignee, teamMembers)}
+                <ChevronDownIcon className="ml-1 size-3" />
+              </Button>
+            }
+          />
+          <DropdownMenuContent>
+            <DropdownMenuItem
+              onClick={() => onChange({ assignee: null })}
+              data-testid="filter-assignee-any"
+            >
+              Anyone
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              onClick={() => onChange({ assignee: "unassigned" })}
+              data-testid="filter-assignee-unassigned"
+            >
+              Unassigned
+            </DropdownMenuItem>
+            {teamMembers.length > 0 ? <DropdownMenuSeparator /> : null}
+            {teamMembers.map((tm) => (
+              <DropdownMenuItem
+                key={tm.id}
+                onClick={() => onChange({ assignee: tm.id })}
+                data-testid={`filter-assignee-${tm.id}`}
+              >
+                {tm.email}
+              </DropdownMenuItem>
+            ))}
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </div>
+    </div>
+  );
+}
+
+function FilterToggle({
+  active,
+  label,
+  onClick,
+  testId,
+}: {
+  active: boolean;
+  label: string;
+  onClick: () => void;
+  testId: string;
+}) {
+  return (
+    <Button
+      type="button"
+      variant={active ? "default" : "outline"}
+      size="sm"
+      onClick={onClick}
+      data-testid={testId}
+      data-active={active}
+      className="gap-1"
+    >
+      {label}
+      {active ? <X className="size-3" aria-hidden /> : null}
+    </Button>
+  );
+}
+
+function assigneeLabel(
+  assignee: string | null,
+  teamMembers: TeamMemberOption[],
+): string {
+  if (!assignee) return "Anyone";
+  if (assignee === "unassigned") return "Unassigned";
+  const tm = teamMembers.find((m) => m.id === assignee);
+  return tm ? tm.email : "Selected";
 }
 
 function EngagementPill({ state }: { state: Exclude<EngagementState, "none"> }) {
