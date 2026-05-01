@@ -1,54 +1,157 @@
-import { formatDistanceToNow } from "date-fns/formatDistanceToNow";
+import Link from "next/link";
 
 import { Page } from "@/components/page";
 import { PageHeader } from "@/components/page-header";
-import { Badge } from "@/components/ui/badge";
+import { Button, buttonVariants } from "@/components/ui/button";
+// Import pure helpers from the .helpers module (NO "use client" directive)
+// so this server component can call them during SSR without hitting Next.js's
+// RSC client-reference boundary. The Plan 01-03 SUMMARY documents why importing
+// from "@/components/table/use-table-url-state" (the 'use client' module)
+// would crash on /lists with the same runtime error /properties hit.
 import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
+  buildTableHref,
+  parseTableSearch,
+  type SortDirection,
+} from "@/components/table/use-table-url-state.helpers";
 import { createClient } from "@/lib/supabase/server";
 
 import { CreateListForm } from "./create-list-form";
-import { ListRowActions } from "./list-row-actions";
+import { ListsTable, type ListRow } from "./lists-table";
 
 export const metadata = {
   title: "Lists · Sandra CRM",
 };
 
-export default async function ListsPage() {
+export const LISTS_SORTABLE_COLUMNS = [
+  "name",
+  "members",
+  "created_at",
+] as const;
+export type ListsSortableColumn = (typeof LISTS_SORTABLE_COLUMNS)[number];
+
+export type ListsFilters = { archived: boolean };
+
+const PAGE_SIZE = 50;
+
+const LISTS_BUILD_CONFIG = {
+  defaultSort: "name" as const,
+  defaultDir: "asc" as SortDirection,
+  buildFilterParams: (filters: Partial<ListsFilters>, sp: URLSearchParams) => {
+    if (filters.archived) sp.set("archived", "1");
+  },
+};
+
+export default async function ListsPage({
+  searchParams,
+}: {
+  searchParams: Promise<{
+    page?: string;
+    search?: string;
+    sort?: string;
+    dir?: string;
+    archived?: string;
+  }>;
+}) {
+  const raw = await searchParams;
+  const parsed = parseTableSearch<ListsFilters>(raw, {
+    sortableColumns: LISTS_SORTABLE_COLUMNS,
+    defaultSort: "name",
+    defaultDir: "asc",
+    parseFilters: (r) => {
+      const v = Array.isArray(r.archived) ? r.archived[0] : r.archived;
+      return { archived: v === "1" || v === "true" };
+    },
+  });
+  const { page, search, sort, dir, filters } = parsed;
+
+  const from = (page - 1) * PAGE_SIZE;
+  const to = from + PAGE_SIZE - 1;
+
   const supabase = await createClient();
 
-  // Two queries: all lists in the org, and a count per list. Doing the
-  // count in a view/group-by is cleaner than N+1, so we sum property_lists
-  // and join back in memory.
+  // Build the base lists query. System-managed pinning is preserved as a
+  // PRIMARY order (system-managed first), then the user's chosen sort,
+  // then a stable id tie-breaker so pagination doesn't skip / repeat
+  // rows when many lists share the sort value (Pitfall 7).
   //
-  // Sort: system-managed first (so the 20 PropStream-style buckets pin to
-  // the top of every picker), then alphabetical by name. VAs will see the
-  // same names in the same order on every page.
-  const [listsRes, countsRes] = await Promise.all([
-    supabase
-      .from("lists")
-      .select(
-        "id, name, description, color, archived_at, created_at, system_managed",
-      )
-      .order("system_managed", { ascending: false })
-      .order("name", { ascending: true }),
-    supabase.from("property_lists").select("list_id"),
-  ]);
+  // We CAN'T use the chosen-sort directly when sort==="members" because
+  // members is a derived count (not a column). For that case, we sort
+  // by name in the DB and re-sort the page in JS after joining the
+  // member counts. This is acceptable for the typical < 100 lists per
+  // org (per RESEARCH line 678) — pagination by "members" only sorts
+  // within the page.
+  let listsQuery = supabase
+    .from("lists")
+    .select(
+      "id, name, description, color, archived_at, created_at, system_managed",
+      { count: "exact" },
+    );
 
-  const countsByList = new Map<string, number>();
-  for (const row of countsRes.data ?? []) {
-    countsByList.set(row.list_id, (countsByList.get(row.list_id) ?? 0) + 1);
+  if (search) {
+    listsQuery = listsQuery.ilike("name", `%${search}%`);
+  }
+  if (filters.archived) {
+    listsQuery = listsQuery.not("archived_at", "is", null);
+  } else {
+    listsQuery = listsQuery.is("archived_at", null);
   }
 
-  const allLists = listsRes.data ?? [];
-  const active = allLists.filter((l) => !l.archived_at);
-  const archived = allLists.filter((l) => l.archived_at);
+  // System-managed first (always); then user-chosen sort (when it's a real
+  // DB column); then id for stable pagination. The members case is handled
+  // in JS below.
+  if (sort === "members") {
+    listsQuery = listsQuery
+      .order("system_managed", { ascending: false })
+      .order("name", { ascending: true });
+  } else {
+    listsQuery = listsQuery
+      .order("system_managed", { ascending: false })
+      .order(sort, { ascending: dir === "asc" })
+      .order("id", { ascending: true });
+  }
+
+  const { data: listsData, count, error } = await listsQuery.range(from, to);
+
+  // Member counts for the visible page only (cheap; no N+1).
+  const pageIds = (listsData ?? []).map((l) => l.id);
+  const countsByList = new Map<string, number>();
+  if (pageIds.length > 0) {
+    const { data: countsData } = await supabase
+      .from("property_lists")
+      .select("list_id")
+      .in("list_id", pageIds);
+    for (const row of countsData ?? []) {
+      countsByList.set(row.list_id, (countsByList.get(row.list_id) ?? 0) + 1);
+    }
+  }
+
+  let rows: ListRow[] = (listsData ?? []).map((l) => ({
+    ...l,
+    members: countsByList.get(l.id) ?? 0,
+  }));
+
+  // Apply the JS sort for the members-count case (system-managed pin
+  // is preserved by stable-sort: input is already system_managed-first,
+  // and we never reorder across the system_managed boundary).
+  if (sort === "members") {
+    rows = rows.slice().sort((a, b) => {
+      if (a.system_managed !== b.system_managed) {
+        return a.system_managed ? -1 : 1;
+      }
+      const cmp = a.members - b.members;
+      return dir === "asc" ? cmp : -cmp;
+    });
+  }
+
+  const total = count ?? 0;
+  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+
+  function pageHref(targetPage: number): string {
+    return `/lists${buildTableHref<ListsFilters>(
+      { page: targetPage, search, sort, dir, filters },
+      LISTS_BUILD_CONFIG,
+    )}`;
+  }
 
   return (
     <Page>
@@ -58,133 +161,59 @@ export default async function ListsPage() {
         description={
           <>
             Lists are named cohorts of properties. One list per kind-of-data —
-            all Probate records to the <em>same</em> Probate list forever. Re-importing
-            the same address into a <em>different</em> list is how you stack: a
-            property on 3 lists is stronger motivation than any 1 list.
+            all Probate records to the <em>same</em> Probate list forever.
+            Re-importing the same address into a <em>different</em> list is how
+            you stack: a property on 3 lists is stronger motivation than any 1
+            list.
           </>
         }
       />
 
       <CreateListForm />
 
-      {listsRes.error ? (
+      {error ? (
         <div className="text-destructive text-sm">
-          Failed to load lists: {listsRes.error.message}
+          Failed to load lists: {error.message}
         </div>
       ) : null}
 
-      <section className="flex flex-col gap-2">
-        <h2 className="text-sm font-semibold tracking-wide uppercase text-muted-foreground">
-          Active ({active.length})
-        </h2>
-        <ListTable rows={active} countsByList={countsByList} archived={false} />
-      </section>
+      <ListsTable rows={rows} parsed={parsed} total={total} />
 
-      {archived.length > 0 ? (
-        <section className="flex flex-col gap-2">
-          <h2 className="text-sm font-semibold tracking-wide uppercase text-muted-foreground">
-            Archived ({archived.length})
-          </h2>
-          <ListTable
-            rows={archived}
-            countsByList={countsByList}
-            archived={true}
-          />
-        </section>
-      ) : null}
+      {totalPages > 1 && (
+        <div className="flex items-center justify-between">
+          <div className="text-muted-foreground text-sm">
+            Page {page} of {totalPages}
+          </div>
+          <div className="flex gap-2">
+            {page > 1 ? (
+              <Link
+                href={pageHref(page - 1)}
+                className={buttonVariants({ variant: "outline", size: "sm" })}
+                prefetch={false}
+              >
+                ← Prev
+              </Link>
+            ) : (
+              <Button variant="outline" size="sm" disabled>
+                ← Prev
+              </Button>
+            )}
+            {page < totalPages ? (
+              <Link
+                href={pageHref(page + 1)}
+                className={buttonVariants({ variant: "outline", size: "sm" })}
+                prefetch={false}
+              >
+                Next →
+              </Link>
+            ) : (
+              <Button variant="outline" size="sm" disabled>
+                Next →
+              </Button>
+            )}
+          </div>
+        </div>
+      )}
     </Page>
-  );
-}
-
-function ListTable({
-  rows,
-  countsByList,
-  archived,
-}: {
-  rows: {
-    id: string;
-    name: string;
-    description: string | null;
-    color: string | null;
-    archived_at: string | null;
-    created_at: string;
-    system_managed: boolean;
-  }[];
-  countsByList: Map<string, number>;
-  archived: boolean;
-}) {
-  if (rows.length === 0) {
-    return (
-      <div className="text-muted-foreground border-border rounded-md border border-dashed p-6 text-center text-sm">
-        {archived ? "No archived lists." : "No lists yet. Create one above or set a list name on the next CSV import."}
-      </div>
-    );
-  }
-  return (
-    <div className="border-border rounded-md border">
-      <Table>
-        <TableHeader>
-          <TableRow>
-            <TableHead>Name</TableHead>
-            <TableHead>Description</TableHead>
-            <TableHead className="text-right">Members</TableHead>
-            <TableHead>Created</TableHead>
-            <TableHead className="text-right">Actions</TableHead>
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {rows.map((r) => (
-            <TableRow key={r.id}>
-              <TableCell>
-                <div className="flex items-center gap-2">
-                  <Badge
-                    variant="secondary"
-                    style={
-                      r.color
-                        ? {
-                            backgroundColor: `${r.color}22`,
-                            color: r.color,
-                            borderColor: `${r.color}55`,
-                          }
-                        : undefined
-                    }
-                  >
-                    {r.name}
-                  </Badge>
-                  {r.system_managed ? (
-                    <Badge
-                      variant="outline"
-                      className="text-muted-foreground text-[10px] uppercase tracking-wide"
-                      title="System-managed list — pre-populated, can't be archived"
-                    >
-                      System
-                    </Badge>
-                  ) : null}
-                </div>
-              </TableCell>
-              <TableCell className="text-muted-foreground text-sm">
-                {r.description || "—"}
-              </TableCell>
-              <TableCell className="text-right font-mono text-sm">
-                {countsByList.get(r.id) ?? 0}
-              </TableCell>
-              <TableCell className="text-muted-foreground text-sm">
-                {formatDistanceToNow(new Date(r.created_at), {
-                  addSuffix: true,
-                })}
-              </TableCell>
-              <TableCell className="text-right">
-                <ListRowActions
-                  id={r.id}
-                  name={r.name}
-                  archived={!!r.archived_at}
-                  systemManaged={r.system_managed}
-                />
-              </TableCell>
-            </TableRow>
-          ))}
-        </TableBody>
-      </Table>
-    </div>
   );
 }
