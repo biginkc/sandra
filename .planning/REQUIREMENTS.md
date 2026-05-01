@@ -1,111 +1,62 @@
-# Requirements: Sandra — SMS Templates v1
+# Requirements — Milestone v2.0
 
-**Defined:** 2026-04-29
-**Core Value:** Ensure all outbound communication is consistent, compliant, and personalized with minimal effort.
+**Goal:** Apply the search/sort/filter pattern shipped on `/properties` to the remaining CRM tables, and rename the market vocabulary from city-shaped to county-shaped.
 
-## v1 Requirements
+---
 
-### Schema & Data
+## v2.0 Requirements
 
-- [ ] **DATA-01**: Templates table with fields: id, name, content, category, created_at, updated_at
-- [ ] **DATA-02**: Category field supports preset values (Cold Outreach, Follow Up, Appointment, General) and custom user-created categories
-- [ ] **DATA-03**: RLS policies restrict templates to authenticated users within the organization
-- [ ] **DATA-04**: Soft delete support for templates (recoverable from admin)
+### Cross-Table UX Consistency
 
-### Interpolation Engine
+- [ ] **TABLE-01**: User sees a unified rounded-card toolbar (search input + filter pills) on every CRM index page (`/lists`, `/jobs`, `/templates`), matching the pattern on `/properties` and `/leads`
+- [ ] **TABLE-02**: User can free-text search the primary identifier column on `/lists` (list name), `/jobs` (job title or id), `/templates` (template name)
+- [ ] **TABLE-03**: User can click any column header to sort ascending; clicking again flips to descending; an arrow icon shows current sort + direction
+- [ ] **TABLE-04**: Sort and search state lives in URL params (shareable, back-button correct, survives refresh)
+- [ ] **TABLE-05**: Pagination links preserve sort + search state across pages
+- [ ] **TABLE-06**: A skeleton loader replaces table rows during URL-driven navigation (search, sort, filter changes)
+- [ ] **TABLE-07**: A reusable `<TableToolbar>` + `<SortableHeader>` component pair extracted into `src/components/ui/` so future tables can opt in without duplicating the implementation
 
-- [ ] **INTERP-01**: Parse `{{variable_name}}` syntax in template content and replace with actual contact/property data
-- [ ] **INTERP-02**: Support inline fallback values via pipe syntax: `{{first_name | there}}`
-- [ ] **INTERP-03**: Support these v1 variables: first_name, last_name, full_name, address, city, state, zip, company_name
-- [ ] **INTERP-04**: Return clear error when a variable name is unrecognized (don't silently render `{{bad_var}}`)
-- [ ] **INTERP-05**: Interpolation function is pure, testable, and reusable across compose box and sequences
+### Market Vocabulary Refactor
 
-### Templates Management UI
+- [ ] **MARKET-01**: All four market values rename from city-shaped to county-shaped (specific names locked during phase 2 SPEC step — needs Jarrad's input on the operational mapping)
+- [ ] **MARKET-02**: `WizardMarket` type, `KNOWN_MARKETS` const, validation logic, and Wizard UI dropdowns all reference the new vocabulary
+- [ ] **MARKET-03**: Existing `properties.market` rows are updated via a migration that maps old → new values 1-to-1 (no data loss, no orphan rows)
+- [ ] **MARKET-04**: Existing prod data shows the new market labels everywhere they're rendered (filters, dashboards, lead cards, prospects table)
+- [ ] **MARKET-05**: All tests referencing market values are updated; CI is green
 
-- [ ] **UI-01**: Templates list page at `/templates` showing name, category, preview snippet, last updated
-- [ ] **UI-02**: Search templates by name and content
-- [ ] **UI-03**: Filter templates by category
-- [ ] **UI-04**: Create new template with name, category, and content fields
-- [ ] **UI-05**: Edit existing template (inline or modal)
-- [ ] **UI-06**: Delete template with confirmation
-- [ ] **UI-07**: Real-time character counter showing count, SMS segment count, and encoding warning for emoji/unicode
-- [ ] **UI-08**: Variable picker dropdown (grouped by type) that inserts `{{variable}}` at cursor position
-- [ ] **UI-09**: Live preview panel showing template with sample data populated
+---
 
-### Compose Box Integration
+## Future Requirements (deferred from v2.0 scope)
 
-- [ ] **COMP-01**: Template picker in the 1-to-1 message compose box (dropdown or command palette)
-- [ ] **COMP-02**: Selecting a template auto-fills compose box with interpolated content using current lead's data
-- [ ] **COMP-03**: User can edit the interpolated content before sending
+- `/leads` kanban sort/search alignment (different UX surface — current pattern works; revisit only if friction shows up)
+- `/messages` cockpit search beyond what already exists
+- Cross-table column-set customization (show/hide, reorder)
+- Saved filter presets ("My open leads", "Vacant verified KCK")
 
-### Sequence Integration
-
-- [ ] **SEQ-01**: Sequence step type can reference a template by ID instead of inline content
-- [ ] **SEQ-02**: When a sequence step fires, interpolate template variables with the target lead's data
-- [ ] **SEQ-03**: Template changes reflect in future sequence sends (not retroactive to already-sent messages)
-
-## v2 Requirements
-
-### Analytics
-
-- **ANALYTICS-01**: Track which template was used per outbound message
-- **ANALYTICS-02**: Display usage count per template
-- **ANALYTICS-03**: Calculate and display response rate per template
-
-### Advanced Interpolation
-
-- **ADV-01**: Conditional blocks (if/else within templates)
-- **ADV-02**: Date formatting variables (e.g., `{{today | format:MM/DD}}`)
-
-### Email
-
-- **EMAIL-01**: Email template type with HTML rendering
-- **EMAIL-02**: Shared variable system across SMS and email templates
+---
 
 ## Out of Scope
 
-| Feature | Reason |
-|---------|--------|
-| A/B testing | Requires statistical infrastructure, defer to v2+ |
-| Template marketplace / sharing | Single-org product, no multi-tenant sharing needed |
-| Rich media (MMS templates) | SMS-only for v1, MMS adds carrier complexity |
-| Template versioning / history | Over-engineering for v1, soft delete is sufficient |
-| Approval workflows | No team hierarchy requiring template approval |
-
-## Traceability
-
-| Requirement | Phase | Status |
-|-------------|-------|--------|
-| DATA-01 | Phase 1 | Pending |
-| DATA-02 | Phase 1 | Pending |
-| DATA-03 | Phase 1 | Pending |
-| DATA-04 | Phase 1 | Pending |
-| INTERP-01 | Phase 2 | Pending |
-| INTERP-02 | Phase 2 | Pending |
-| INTERP-03 | Phase 2 | Pending |
-| INTERP-04 | Phase 2 | Pending |
-| INTERP-05 | Phase 2 | Pending |
-| UI-01 | Phase 3 | Pending |
-| UI-02 | Phase 3 | Pending |
-| UI-03 | Phase 3 | Pending |
-| UI-04 | Phase 3 | Pending |
-| UI-05 | Phase 3 | Pending |
-| UI-06 | Phase 3 | Pending |
-| UI-07 | Phase 3 | Pending |
-| UI-08 | Phase 3 | Pending |
-| UI-09 | Phase 3 | Pending |
-| COMP-01 | Phase 4 | Pending |
-| COMP-02 | Phase 4 | Pending |
-| COMP-03 | Phase 4 | Pending |
-| SEQ-01 | Phase 5 | Pending |
-| SEQ-02 | Phase 5 | Pending |
-| SEQ-03 | Phase 5 | Pending |
-
-**Coverage:**
-- v1 requirements: 24 total
-- Mapped to phases: 24
-- Unmapped: 0 ✓
+- 46-property CASS recovery (operational, not a code change)
+- Playwright retries `1 → 2` (one-line bump, `/gsd-fast` later)
+- `/admin/skip-trace-settings` page (`/gsd-quick` later if not too coupled)
+- Replacing the kanban with a table view on `/leads` (kanban is intentional UX)
 
 ---
-*Requirements defined: 2026-04-29*
-*Last updated: 2026-04-29 after initial definition*
+
+## Traceability (filled by roadmap)
+
+| REQ-ID    | Phase  |
+|-----------|--------|
+| TABLE-01  | Phase 1 |
+| TABLE-02  | Phase 1 |
+| TABLE-03  | Phase 1 |
+| TABLE-04  | Phase 1 |
+| TABLE-05  | Phase 1 |
+| TABLE-06  | Phase 1 |
+| TABLE-07  | Phase 1 |
+| MARKET-01 | Phase 2 |
+| MARKET-02 | Phase 2 |
+| MARKET-03 | Phase 2 |
+| MARKET-04 | Phase 2 |
+| MARKET-05 | Phase 2 |
