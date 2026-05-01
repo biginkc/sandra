@@ -2,6 +2,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 
 import {
   normalizeAddress,
+  normalizeName,
   normalizePhone,
   normalizeStateCode,
   normalizeZip,
@@ -132,8 +133,8 @@ export async function createLead(
   const addressNormalized = normalizeAddress(addressRaw);
   const phoneNorm = normalizePhone(input.contact?.phone_1 ?? null);
   const emailNorm = input.contact?.email?.trim().toLowerCase() || null;
-  const firstNorm = input.contact?.first_name?.trim() || null;
-  const lastNorm = input.contact?.last_name?.trim() || null;
+  const firstNorm = normalizeName(input.contact?.first_name) || null;
+  const lastNorm = normalizeName(input.contact?.last_name) || null;
 
   // ---- 2. Look up existing property by normalized address ------------
   let propertyId: string | null = null;
