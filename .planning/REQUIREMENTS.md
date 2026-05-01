@@ -14,7 +14,15 @@
 - [ ] **TABLE-04**: Sort and search state lives in URL params (shareable, back-button correct, survives refresh)
 - [ ] **TABLE-05**: Pagination links preserve sort + search state across pages
 - [ ] **TABLE-06**: A skeleton loader replaces table rows during URL-driven navigation (search, sort, filter changes)
-- [ ] **TABLE-07**: A reusable `<TableToolbar>` + `<SortableHeader>` component pair extracted into `src/components/ui/` so future tables can opt in without duplicating the implementation
+- [ ] **TABLE-07**: A reusable `<TableToolbar>` + `<SortableHeader>` component pair (plus `useTableUrlState` hook) extracted into `src/components/table/` so future tables can opt in without duplicating the implementation
+
+### Sandra Design System Retrofit
+
+- [ ] **DS-01**: Sandra CRM consumes `@sandra/tokens` via `file:` reference; `globals.css` imports `theme.css` and removes the local `:root` token block (no competing definitions)
+- [ ] **DS-02**: `<TableToolbar.Search>` renders the registry's `<SearchInputPill>` (replacing the bare `<input>` shipped in Phase 1) without changing call-site signatures
+- [ ] **DS-03**: Every CRM table (`/properties`, `/lists`, `/jobs`, `/templates`) is wrapped in `<DataTableShell>` + `<DataTableFooter>` from the registry
+- [ ] **DS-04**: Pagination across all CRM tables uses `<CircularPagination>` from the registry; URL-state behavior from Phase 1 is preserved exactly
+- [ ] **DS-05**: All Phase 1 tests + the existing test suite stay green after the retrofit; visual verification on every dashboard route shows only intended token-driven color shifts (no layout regressions)
 
 ### Market Vocabulary Refactor
 
@@ -55,6 +63,11 @@
 | TABLE-05  | Phase 1 |
 | TABLE-06  | Phase 1 |
 | TABLE-07  | Phase 1 |
+| DS-01     | Phase 1.5 |
+| DS-02     | Phase 1.5 |
+| DS-03     | Phase 1.5 |
+| DS-04     | Phase 1.5 |
+| DS-05     | Phase 1.5 |
 | MARKET-01 | Phase 2 |
 | MARKET-02 | Phase 2 |
 | MARKET-03 | Phase 2 |

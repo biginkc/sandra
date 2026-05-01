@@ -2,8 +2,20 @@
 
 import { formatDistanceToNow } from "date-fns/formatDistanceToNow";
 import Link from "next/link";
-import { useEffect, useState, useTransition } from "react";
+import { useEffect, useMemo, useState, useTransition } from "react";
 
+import { SortableHeader } from "@/components/table/sortable-header";
+import {
+  TableToolbar,
+  TableToolbarFilterPill,
+  TableToolbarSearch,
+} from "@/components/table/table-toolbar";
+import {
+  useTableUrlState,
+  type ParsedTableSearch,
+  type SortDirection,
+  type UseTableUrlStateReturn,
+} from "@/components/table/use-table-url-state";
 import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
 import {
@@ -15,6 +27,7 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog";
+import { Skeleton } from "@/components/ui/skeleton";
 import {
   Table,
   TableBody,
@@ -36,6 +49,11 @@ import { createClient } from "@/lib/supabase/client";
 import type { Database } from "@/lib/supabase/types";
 
 import { retryFailedCassItems, startQueuedCassJob } from "./actions";
+import type {
+  JobStatus,
+  JobsFilters,
+  JobsSortableColumn,
+} from "./page";
 
 type Job = Database["public"]["Tables"]["jobs"]["Row"];
 
@@ -45,7 +63,29 @@ type Job = Database["public"]["Tables"]["jobs"]["Row"];
 // a config change rather than a UI relabel.
 const SKIP_TRACE_CREDITS_PER_LEAD = 1;
 
-export function JobsList({ isAdmin }: { isAdmin: boolean }) {
+const JOBS_SORTABLE_COLUMNS = [
+  "title",
+  "type",
+  "status",
+  "created_at",
+] as const;
+
+const BUILD_CONFIG = {
+  defaultSort: "created_at" as const,
+  defaultDir: "desc" as SortDirection,
+  sortableColumns: JOBS_SORTABLE_COLUMNS,
+  buildFilterParams: (filters: Partial<JobsFilters>, sp: URLSearchParams) => {
+    if (filters.status) sp.set("status", filters.status);
+  },
+};
+
+export function JobsList({
+  isAdmin,
+  parsed,
+}: {
+  isAdmin: boolean;
+  parsed: ParsedTableSearch<JobsFilters>;
+}) {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -104,10 +144,81 @@ export function JobsList({ isAdmin }: { isAdmin: boolean }) {
     };
   }, []);
 
-  if (loading) {
-    return (
-      <div className="text-muted-foreground text-sm">Loading jobs…</div>
+  // URL-state in client mode: realtime is the source of truth (D-06), the
+  // URL is mirrored for back-button + sharable links (D-07). 50-row cap
+  // means ?page= is decorative (D-08). Hook MUST be called unconditionally
+  // before any early return to satisfy the rules-of-hooks contract.
+  const ts = useTableUrlState<JobsFilters>({
+    basePath: "/jobs",
+    parsed,
+    mode: "client",
+    config: BUILD_CONFIG,
+  });
+
+  // Apply URL state in-memory over the realtime jobs array. Recomputes
+  // whenever jobs mutates (realtime INSERT/UPDATE/DELETE) OR URL state
+  // changes — Pitfall 5 protection. An INSERT during navPending mutates
+  // `jobs`; the next render re-runs this useMemo and the visible slice
+  // reflects both the new row and the active filter.
+  const visibleJobs = useMemo(() => {
+    const q = ts.search.toLowerCase().trim();
+    let result = jobs.slice();
+
+    if (q.length > 0) {
+      result = result.filter(
+        (j) =>
+          (j.title ?? "").toLowerCase().includes(q) ||
+          j.id.slice(0, 8).toLowerCase().includes(q),
+      );
+    }
+
+    if (ts.filters.status) {
+      result = result.filter((j) => j.status === ts.filters.status);
+    }
+
+    // Sort. Realtime initial query is created_at desc, so the default case
+    // is a no-op; anything else needs an explicit sort.
+    const sortKey = ts.sort as JobsSortableColumn;
+    const ascending = ts.dir === "asc";
+    result.sort((a, b) => {
+      let cmp = 0;
+      if (sortKey === "title") {
+        const at = (a.title ?? a.id.slice(0, 8)).toLowerCase();
+        const bt = (b.title ?? b.id.slice(0, 8)).toLowerCase();
+        cmp = at.localeCompare(bt);
+      } else if (sortKey === "created_at") {
+        cmp =
+          new Date(a.created_at).getTime() - new Date(b.created_at).getTime();
+      } else {
+        // type, status — string sort
+        const av = (a as Record<string, unknown>)[sortKey];
+        const bv = (b as Record<string, unknown>)[sortKey];
+        cmp = String(av ?? "").localeCompare(String(bv ?? ""));
+      }
+      return ascending ? cmp : -cmp;
+    });
+
+    return result;
+  }, [jobs, ts.search, ts.sort, ts.dir, ts.filters.status]);
+
+  // Status filter pill click: cycles between the clicked status and null.
+  // FilterPill is a binary toggle by design (Plan 01-02), so we render
+  // multiple pills and treat the URL ?status= as a single-select.
+  const onStatusPillClick = (next: JobStatus) => {
+    const newStatus = ts.filters.status === next ? null : next;
+    ts.navigate(
+      `/jobs${ts.buildHref({
+        page: 1,
+        search: ts.search === "" ? null : ts.search,
+        sort: ts.sort,
+        dir: ts.dir,
+        filters: { status: newStatus },
+      })}`,
     );
+  };
+
+  if (loading) {
+    return <div className="text-muted-foreground text-sm">Loading jobs…</div>;
   }
 
   if (error) {
@@ -115,105 +226,217 @@ export function JobsList({ isAdmin }: { isAdmin: boolean }) {
   }
 
   return (
-    <div className="border-border rounded-md border">
-      <Table>
-        <TableHeader>
-          <TableRow>
-            <TableHead>Title</TableHead>
-            <TableHead>Type</TableHead>
-            <TableHead>Status</TableHead>
-            <TableHead>Progress</TableHead>
-            <TableHead>Created</TableHead>
-            <TableHead className="text-right">Actions</TableHead>
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {jobs.length === 0 ? (
+    <>
+      <TableToolbar
+        state={
+          ts as unknown as UseTableUrlStateReturn<Record<string, unknown>>
+        }
+      >
+        <TableToolbarSearch
+          ariaLabel="Search jobs by title or id"
+          placeholder="Search jobs…"
+          testId="jobs-search"
+        />
+        {/* Compact filter row — most-used statuses surfaced as pills.
+            The other four (completed/partial/canceled/denied) round-trip
+            through ?status= but require manual URL editing — acceptable
+            for Phase 1. */}
+        <TableToolbarFilterPill
+          active={ts.filters.status === "queued"}
+          onClick={() => onStatusPillClick("queued")}
+          testId="jobs-filter-queued"
+        >
+          Queued
+        </TableToolbarFilterPill>
+        <TableToolbarFilterPill
+          active={ts.filters.status === "running"}
+          onClick={() => onStatusPillClick("running")}
+          testId="jobs-filter-running"
+        >
+          Running
+        </TableToolbarFilterPill>
+        <TableToolbarFilterPill
+          active={ts.filters.status === "failed"}
+          onClick={() => onStatusPillClick("failed")}
+          testId="jobs-filter-failed"
+        >
+          Failed
+        </TableToolbarFilterPill>
+        <TableToolbarFilterPill
+          active={ts.filters.status === "pending_approval"}
+          onClick={() => onStatusPillClick("pending_approval")}
+          testId="jobs-filter-pending_approval"
+        >
+          Pending approval
+        </TableToolbarFilterPill>
+      </TableToolbar>
+
+      <div
+        className="border-border rounded-md border"
+        data-pending={ts.navPending}
+        data-testid="jobs-table-container"
+      >
+        <Table>
+          <TableHeader>
             <TableRow>
-              <TableCell
-                colSpan={6}
-                className="text-muted-foreground py-8 text-center"
+              <SortableHeader<JobsSortableColumn>
+                column="title"
+                current={ts.sort}
+                dir={ts.dir}
+                onClick={(c) => ts.onSort(c)}
+                testIdPrefix="jobs"
               >
-                No jobs yet.
-              </TableCell>
+                Title
+              </SortableHeader>
+              <SortableHeader<JobsSortableColumn>
+                column="type"
+                current={ts.sort}
+                dir={ts.dir}
+                onClick={(c) => ts.onSort(c)}
+                testIdPrefix="jobs"
+              >
+                Type
+              </SortableHeader>
+              <SortableHeader<JobsSortableColumn>
+                column="status"
+                current={ts.sort}
+                dir={ts.dir}
+                onClick={(c) => ts.onSort(c)}
+                testIdPrefix="jobs"
+              >
+                Status
+              </SortableHeader>
+              <TableHead>Progress</TableHead>
+              <SortableHeader<JobsSortableColumn>
+                column="created_at"
+                current={ts.sort}
+                dir={ts.dir}
+                onClick={(c) => ts.onSort(c)}
+                testIdPrefix="jobs"
+              >
+                Created
+              </SortableHeader>
+              <TableHead className="text-right">Actions</TableHead>
             </TableRow>
-          ) : (
-            jobs.map((job) => {
-              const canStartCass =
-                job.type === "cass_dsf2_ncoa" &&
-                job.status === "queued" &&
-                isAwaitingManualStart(job.result_summary);
-              const canApproveSkipTrace =
-                isAdmin &&
-                job.type === "skip_trace" &&
-                job.status === "pending_approval";
-              const canRetryCass =
-                job.type === "cass_dsf2_ncoa" &&
-                (job.status === "partial" || job.status === "failed") &&
-                job.failed_items > 0;
-              return (
-                <TableRow key={job.id}>
-                  <TableCell className="font-medium">
-                    {job.title ?? job.id.slice(0, 8)}
-                  </TableCell>
-                  <TableCell>
-                    <Badge variant="outline">{job.type}</Badge>
-                  </TableCell>
-                  <TableCell>
-                    <Badge variant={statusVariant(job.status)}>
-                      {job.status}
-                    </Badge>
-                  </TableCell>
-                  <TableCell className="text-muted-foreground text-sm">
-                    {job.processed_items}/{job.total_items}
-                    {job.failed_items > 0 && (
-                      <span className="text-destructive">
-                        {" "}
-                        · {job.failed_items} failed
-                      </span>
-                    )}
-                  </TableCell>
-                  <TableCell className="text-muted-foreground text-sm">
-                    {formatDistanceToNow(new Date(job.created_at), {
-                      addSuffix: true,
-                    })}
-                  </TableCell>
-                  <TableCell className="text-right">
-                    {canStartCass ? (
-                      <StartCassButton
-                        jobId={job.id}
-                        totalItems={job.total_items}
-                      />
-                    ) : null}
-                    {canRetryCass ? (
-                      <RetryCassButton
-                        jobId={job.id}
-                        failedItems={job.failed_items}
-                      />
-                    ) : null}
-                    {canApproveSkipTrace ? (
-                      <SkipTraceApproveButtons
-                        jobId={job.id}
-                        totalItems={job.total_items}
-                      />
-                    ) : null}
-                    <Link
-                      href={`/jobs/${job.id}`}
-                      className={buttonVariants({
-                        variant: "outline",
-                        size: "sm",
+          </TableHeader>
+          <TableBody>
+            {ts.navPending ? (
+              Array.from({ length: Math.max(visibleJobs.length, 5) }).map(
+                (_, i) => (
+                  <TableRow
+                    key={`skeleton-${i}`}
+                    data-testid="jobs-skeleton-row"
+                  >
+                    <TableCell>
+                      <Skeleton className="h-4 w-48" />
+                    </TableCell>
+                    <TableCell>
+                      <Skeleton className="h-5 w-16 rounded-full" />
+                    </TableCell>
+                    <TableCell>
+                      <Skeleton className="h-5 w-20 rounded-full" />
+                    </TableCell>
+                    <TableCell>
+                      <Skeleton className="h-4 w-16" />
+                    </TableCell>
+                    <TableCell>
+                      <Skeleton className="h-4 w-24" />
+                    </TableCell>
+                    <TableCell>
+                      <Skeleton className="h-8 w-20" />
+                    </TableCell>
+                  </TableRow>
+                ),
+              )
+            ) : visibleJobs.length === 0 ? (
+              <TableRow>
+                <TableCell
+                  colSpan={6}
+                  className="text-muted-foreground py-8 text-center"
+                >
+                  {jobs.length === 0
+                    ? "No jobs yet."
+                    : "No jobs match the current filter."}
+                </TableCell>
+              </TableRow>
+            ) : (
+              visibleJobs.map((job) => {
+                const canStartCass =
+                  job.type === "cass_dsf2_ncoa" &&
+                  job.status === "queued" &&
+                  isAwaitingManualStart(job.result_summary);
+                const canApproveSkipTrace =
+                  isAdmin &&
+                  job.type === "skip_trace" &&
+                  job.status === "pending_approval";
+                const canRetryCass =
+                  job.type === "cass_dsf2_ncoa" &&
+                  (job.status === "partial" || job.status === "failed") &&
+                  job.failed_items > 0;
+                return (
+                  <TableRow key={job.id}>
+                    <TableCell className="font-medium">
+                      {job.title ?? job.id.slice(0, 8)}
+                    </TableCell>
+                    <TableCell>
+                      <Badge variant="outline">{job.type}</Badge>
+                    </TableCell>
+                    <TableCell>
+                      <Badge variant={statusVariant(job.status)}>
+                        {job.status}
+                      </Badge>
+                    </TableCell>
+                    <TableCell className="text-muted-foreground text-sm">
+                      {job.processed_items}/{job.total_items}
+                      {job.failed_items > 0 && (
+                        <span className="text-destructive">
+                          {" "}
+                          · {job.failed_items} failed
+                        </span>
+                      )}
+                    </TableCell>
+                    <TableCell className="text-muted-foreground text-sm">
+                      {formatDistanceToNow(new Date(job.created_at), {
+                        addSuffix: true,
                       })}
-                    >
-                      View details
-                    </Link>
-                  </TableCell>
-                </TableRow>
-              );
-            })
-          )}
-        </TableBody>
-      </Table>
-    </div>
+                    </TableCell>
+                    <TableCell className="text-right">
+                      {canStartCass ? (
+                        <StartCassButton
+                          jobId={job.id}
+                          totalItems={job.total_items}
+                        />
+                      ) : null}
+                      {canRetryCass ? (
+                        <RetryCassButton
+                          jobId={job.id}
+                          failedItems={job.failed_items}
+                        />
+                      ) : null}
+                      {canApproveSkipTrace ? (
+                        <SkipTraceApproveButtons
+                          jobId={job.id}
+                          totalItems={job.total_items}
+                        />
+                      ) : null}
+                      <Link
+                        href={`/jobs/${job.id}`}
+                        className={buttonVariants({
+                          variant: "outline",
+                          size: "sm",
+                        })}
+                      >
+                        View details
+                      </Link>
+                    </TableCell>
+                  </TableRow>
+                );
+              })
+            )}
+          </TableBody>
+        </Table>
+      </div>
+    </>
   );
 }
 

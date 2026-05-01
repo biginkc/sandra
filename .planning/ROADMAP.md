@@ -2,7 +2,7 @@
 
 **Milestone:** v2.0 — Cross-table UX consistency + market refactor
 **Created:** 2026-04-30
-**Phases:** 2
+**Phases:** 3
 
 ---
 
@@ -25,6 +25,34 @@
 3. Apply to `/lists` (smallest of the three; surface ground rules)
 4. Apply to `/jobs`
 5. Apply to `/templates`
+
+**Out of scope (intentionally deferred to Phase 1.5):** Adopting `@sandra/tokens` or registry components (`SearchInputPill`, `DataTableShell`, `CircularPagination`). Phase 1 builds against the existing shadcn primitives so URL-state extraction can ship without bundling a visual overhaul. The new components in `src/components/table/` are designed to swap their inner primitives later without changing call sites.
+
+---
+
+## Phase 1.5: Sandra Design System Retrofit
+
+**Goal:** Adopt `@sandra/tokens` (Layer 1) and the relevant Layer 2 registry components (`SearchInputPill`, `DataTableShell`, `DataTableFooter`, `CircularPagination`) into Sandra CRM. Visual-overhaul-only phase — no behavior change, no new features. Isolates visual regression risk from URL-state work.
+
+**Requirements:** DS-01, DS-02, DS-03, DS-04, DS-05 (added in REQUIREMENTS.md as part of this phase)
+
+**Success criteria:**
+1. `package.json` declares `@sandra/tokens` via `file:` reference; `npm install` materializes the symlink
+2. `src/app/globals.css` imports `@sandra/tokens/theme.css` and the local `:root { ... }` token block is removed (no competing definitions)
+3. `<TableToolbar.Search>` renders `<SearchInputPill>` (replacing the bare `<input>` from Phase 1) — call site signature unchanged
+4. Every CRM table (`/properties`, `/lists`, `/jobs`, `/templates`) is wrapped in `<DataTableShell>` + `<DataTableFooter>`; pagination strip uses `<CircularPagination>`
+5. Visual verification: Playwright golden paths green; manual screenshot diff against baseline shows only intended token shifts (no layout/spacing regressions on any dashboard route)
+6. CI green: typecheck + unit + RTL + Playwright
+
+**Build order suggestion:**
+1. Wire `@sandra/tokens` (deps + globals.css import + remove local `:root`)
+2. Smoke test: every dashboard route renders without console errors; eyeball each route for token-driven color shifts
+3. Install registry components via `npx shadcn add` against `@sandra/registry`
+4. Swap `<input>` → `<SearchInputPill>` inside `<TableToolbar.Search>` (one-file change)
+5. Wrap each table in `<DataTableShell>` + `<DataTableFooter>`; replace pagination markup with `<CircularPagination>`
+6. Re-run all tests; capture before/after screenshots for the handoff
+
+**Depends on:** Phase 1
 
 ---
 

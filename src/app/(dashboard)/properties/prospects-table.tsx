@@ -1,17 +1,26 @@
 "use client";
 
-import { ArrowDown, ArrowUp, ArrowUpDown, ChevronDownIcon, Search, X } from "lucide-react";
+import { ChevronDownIcon, X } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useEffect, useMemo, useRef, useState, useTransition } from "react";
+import { useEffect, useMemo, useState, useTransition } from "react";
 import { toast } from "sonner";
 
 import { PageHeader } from "@/components/page-header";
+import { SortableHeader } from "@/components/table/sortable-header";
+import {
+  TableToolbar,
+  TableToolbarSearch,
+} from "@/components/table/table-toolbar";
+import {
+  useTableUrlState,
+  type UseTableUrlStateReturn,
+} from "@/components/table/use-table-url-state";
 import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
+  buildProspectsFilterParams,
   buildProspectsHref,
   formatFullAddress,
   KNOWN_MARKETS,
@@ -131,32 +140,31 @@ export function ProspectsTable({
   // page-level toggle. Resets to false on any filter / search change
   // since the matching count would no longer match what was selected.
   const [selectAllMatching, setSelectAllMatching] = useState(false);
-  // Separate pending state for URL-driven navigation (search / sort /
-  // filter changes). Wrapping router.replace in startNavTransition lets
-  // React surface "we're fetching new server-rendered data" so the table
-  // can dim instead of looking frozen during the roundtrip. The
-  // engagement filter is the slowest path (extra messages aggregation),
-  // so the visual cue matters most there.
-  const [navPending, startNavTransition] = useTransition();
 
-  // Local search input state — lets the user type without a server roundtrip
-  // every keystroke. Synced to the URL on a 250ms debounce. We do NOT mirror
-  // `search` into local state on parent re-renders; the input is uncontrolled
-  // (defaultValue) so router.refresh + new ?search= props don't clobber the
-  // user's current keystrokes mid-edit.
-  const [searchInput, setSearchInput] = useState(search);
-  const searchDebounce = useRef<ReturnType<typeof setTimeout> | null>(null);
-  useEffect(() => {
-    return () => {
-      if (searchDebounce.current) clearTimeout(searchDebounce.current);
-    };
-  }, []);
-
-  const navigate = (url: string) => {
-    startNavTransition(() => {
-      router.replace(url, { scroll: false });
-    });
-  };
+  // URL-state machine — extracted into the shared hook in Phase 1.
+  // Mode: "ssr" because /properties is a server-rendered page; the hook
+  // wraps router.replace in startTransition and exposes navPending so
+  // the table dims during the SSR roundtrip. The hook also owns the
+  // 250ms search debounce, the searchDebounce ref cleanup, and the
+  // 150ms minimum-skeleton floor.
+  const ts = useTableUrlState<ParsedProspectsFilters>({
+    basePath: "/properties",
+    parsed: {
+      page: 1,
+      search: search.length === 0 ? null : search,
+      sort,
+      dir,
+      filters,
+    },
+    mode: "ssr",
+    config: {
+      defaultSort: "created_at",
+      defaultDir: "desc",
+      sortableColumns: ["address", "market", "created_at"],
+      buildFilterParams: buildProspectsFilterParams,
+    },
+  });
+  const navPending = ts.navPending;
 
   // Filter / search / sort change → the previously-selected "all matching"
   // set is no longer a faithful representation of what currently matches,
@@ -196,54 +204,12 @@ export function ProspectsTable({
     setSelectAllMatching(false);
   };
 
-  const onSearchChange = (next: string) => {
-    setSearchInput(next);
-    if (searchDebounce.current) clearTimeout(searchDebounce.current);
-    searchDebounce.current = setTimeout(() => {
-      const trimmed = next.trim();
-      navigate(
-        `/properties${buildProspectsHref({
-          page: 1,
-          search: trimmed.length === 0 ? null : trimmed,
-          sort,
-          dir,
-          filters,
-        })}`,
-      );
-    }, 250);
-  };
-
-  const onClearSearch = () => {
-    setSearchInput("");
-    if (searchDebounce.current) clearTimeout(searchDebounce.current);
-    navigate(
-      `/properties${buildProspectsHref({ page: 1, search: null, sort, dir, filters })}`,
-    );
-  };
-
-  /** Click a sortable column header. Same column flips dir; new column
-   *  resets to ascending (so the row a user "clicks toward" is the one
-   *  they expect to see at the top). Resets to page 1. */
-  const onSortClick = (column: SortableColumn) => {
-    const nextDir: SortDirection =
-      sort === column ? (dir === "asc" ? "desc" : "asc") : "asc";
-    navigate(
-      `/properties${buildProspectsHref({
-        page: 1,
-        search: search.length === 0 ? null : search,
-        sort: column,
-        dir: nextDir,
-        filters,
-      })}`,
-    );
-  };
-
   /** Apply a partial change to the filter set, preserving everything else
    *  and resetting pagination. The resulting URL drops any filter param
    *  whose value is null/false/'' (handled by buildProspectsHref). */
   const updateFilters = (patch: Partial<ParsedProspectsFilters>) => {
     const nextFilters: ParsedProspectsFilters = { ...filters, ...patch };
-    navigate(
+    ts.navigate(
       `/properties${buildProspectsHref({
         page: 1,
         search: search.length === 0 ? null : search,
@@ -258,7 +224,7 @@ export function ProspectsTable({
    *  "Clear filters" text link which only renders when at least one
    *  filter is active. */
   const clearAllFilters = () => {
-    navigate(
+    ts.navigate(
       `/properties${buildProspectsHref({
         page: 1,
         search: search.length === 0 ? null : search,
@@ -668,35 +634,21 @@ export function ProspectsTable({
        *  matching the /leads kanban toolbar so the two surfaces feel
        *  consistent. The search bar takes flexible width on the left;
        *  the filter row sits inline on the right, wrapping on narrow
-       *  viewports.
+       *  viewports. The rounded-card container + flex behavior come from
+       *  <TableToolbar>; the search markup + 250ms debounce come from
+       *  <TableToolbarSearch>. The filter cluster (<ProspectFilters>)
+       *  stays domain-specific.
        */}
-      <div className="border-border bg-card flex flex-wrap items-center gap-3 rounded-2xl border p-3">
-        <div className="relative max-w-md flex-1">
-          <Search
-            className="text-muted-foreground pointer-events-none absolute top-1/2 left-4 size-4 -translate-y-1/2"
-            aria-hidden
-          />
-          <Input
-            type="text"
-            value={searchInput}
-            onChange={(e) => onSearchChange(e.target.value)}
-            placeholder="Search address…"
-            aria-label="Search prospects by address"
-            data-testid="prospects-search"
-            className="bg-muted/60 h-10 w-full rounded-full border-none pr-10 pl-11"
-          />
-          {searchInput.length > 0 && (
-            <button
-              type="button"
-              onClick={onClearSearch}
-              aria-label="Clear search"
-              data-testid="prospects-search-clear"
-              className="text-muted-foreground hover:text-foreground absolute top-1/2 right-3 -translate-y-1/2"
-            >
-              <X className="size-4" />
-            </button>
-          )}
-        </div>
+      <TableToolbar
+        state={
+          ts as unknown as UseTableUrlStateReturn<Record<string, unknown>>
+        }
+      >
+        <TableToolbarSearch
+          ariaLabel="Search prospects by address"
+          placeholder="Search address…"
+          testId="prospects-search"
+        />
 
         <ProspectFilters
           filters={filters}
@@ -705,7 +657,7 @@ export function ProspectsTable({
           anyActive={anyFilterActive}
           onClearAll={clearAllFilters}
         />
-      </div>
+      </TableToolbar>
 
       <SelectAllBanner
         allOnPageSelected={allSelected}
@@ -737,10 +689,22 @@ export function ProspectsTable({
                   className="size-4 cursor-pointer"
                 />
               </TableHead>
-              <SortableHeader column="address" sort={sort} dir={dir} onClick={onSortClick}>
+              <SortableHeader
+                column="address"
+                current={ts.sort}
+                dir={ts.dir}
+                onClick={(col) => ts.onSort(col)}
+                testIdPrefix="prospects"
+              >
                 Address
               </SortableHeader>
-              <SortableHeader column="market" sort={sort} dir={dir} onClick={onSortClick}>
+              <SortableHeader
+                column="market"
+                current={ts.sort}
+                dir={ts.dir}
+                onClick={(col) => ts.onSort(col)}
+                testIdPrefix="prospects"
+              >
                 Market
               </SortableHeader>
               {/* Status column header is intentionally blank — pills speak for themselves. */}
@@ -847,47 +811,6 @@ export function ProspectsTable({
         </Table>
       </div>
     </>
-  );
-}
-
-/**
- * Clickable column header. Same column flips dir; new column resets
- * to ascending. Active column shows an up/down arrow; inactive columns
- * show a subtle two-way arrow so the affordance is visible without
- * dominating.
- */
-function SortableHeader({
-  column,
-  sort,
-  dir,
-  onClick,
-  children,
-}: {
-  column: SortableColumn;
-  sort: SortableColumn;
-  dir: SortDirection;
-  onClick: (col: SortableColumn) => void;
-  children: React.ReactNode;
-}) {
-  const isActive = sort === column;
-  const Icon = isActive ? (dir === "asc" ? ArrowUp : ArrowDown) : ArrowUpDown;
-  return (
-    <TableHead className="select-none">
-      <button
-        type="button"
-        onClick={() => onClick(column)}
-        aria-sort={
-          isActive ? (dir === "asc" ? "ascending" : "descending") : "none"
-        }
-        data-testid={`prospects-sort-${column}`}
-        className={`hover:text-foreground flex items-center gap-1 text-left text-xs font-bold tracking-widest uppercase ${
-          isActive ? "text-foreground" : "text-muted-foreground"
-        }`}
-      >
-        <span>{children}</span>
-        <Icon className="size-3 opacity-70" aria-hidden />
-      </button>
-    </TableHead>
   );
 }
 
