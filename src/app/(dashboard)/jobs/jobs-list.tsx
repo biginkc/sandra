@@ -19,6 +19,10 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
 import {
+  DataTableFooter,
+  DataTableShell,
+} from "@/components/ui/data-table-shell";
+import {
   Dialog,
   DialogContent,
   DialogDescription,
@@ -271,8 +275,7 @@ export function JobsList({
         </TableToolbarFilterPill>
       </TableToolbar>
 
-      <div
-        className="border-border rounded-md border"
+      <DataTableShell
         data-pending={ts.navPending}
         data-testid="jobs-table-container"
       >
@@ -435,7 +438,12 @@ export function JobsList({
             )}
           </TableBody>
         </Table>
-      </div>
+        <DataTableFooter>
+          <span className="text-muted-foreground text-sm">
+            {visibleJobs.length} of {jobs.length} job{jobs.length === 1 ? "" : "s"}
+          </span>
+        </DataTableFooter>
+      </DataTableShell>
     </>
   );
 }

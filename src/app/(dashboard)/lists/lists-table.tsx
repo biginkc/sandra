@@ -3,6 +3,10 @@
 import { formatDistanceToNow } from "date-fns/formatDistanceToNow";
 
 import { Badge } from "@/components/ui/badge";
+import {
+  DataTableFooter,
+  DataTableShell,
+} from "@/components/ui/data-table-shell";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   Table,
@@ -110,8 +114,7 @@ export function ListsTable({ rows, parsed, total: _total }: Props) {
         </TableToolbarFilterPill>
       </TableToolbar>
 
-      <div
-        className="border-border rounded-md border"
+      <DataTableShell
         data-pending={ts.navPending}
         data-testid="lists-table-container"
       >
@@ -244,7 +247,12 @@ export function ListsTable({ rows, parsed, total: _total }: Props) {
             )}
           </TableBody>
         </Table>
-      </div>
+        <DataTableFooter>
+          <span className="text-muted-foreground text-sm">
+            {rows.length} list{rows.length === 1 ? "" : "s"}
+          </span>
+        </DataTableFooter>
+      </DataTableShell>
     </>
   );
 }
