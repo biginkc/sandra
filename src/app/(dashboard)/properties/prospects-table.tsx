@@ -18,6 +18,11 @@ import {
 } from "@/components/table/use-table-url-state";
 import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
+import { CircularPagination } from "@/components/ui/circular-pagination";
+import {
+  DataTableFooter,
+  DataTableShell,
+} from "@/components/ui/data-table-shell";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   buildProspectsFilterParams,
@@ -103,6 +108,8 @@ type Props = {
   /** Total count across all pages matching the current filters — drives the
    *  "Select all N prospects" cross-page selection banner. */
   total: number;
+  /** Rows per page — used to compute totalPages and the "Showing X–Y of Z" footer. */
+  pageSize: number;
 };
 
 function summarize(outcome: BulkOutcome, noun = "prospect"): string {
@@ -129,6 +136,7 @@ export function ProspectsTable({
   dir,
   filters,
   total,
+  pageSize,
 }: Props) {
   const router = useRouter();
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -165,6 +173,9 @@ export function ProspectsTable({
     },
   });
   const navPending = ts.navPending;
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  const showingFrom = total === 0 ? 0 : (ts.page - 1) * pageSize + 1;
+  const showingTo = Math.min(ts.page * pageSize, total);
 
   // Filter / search / sort change → the previously-selected "all matching"
   // set is no longer a faithful representation of what currently matches,
@@ -669,8 +680,7 @@ export function ProspectsTable({
         onClear={onClearAllSelection}
       />
 
-      <div
-        className="border-border rounded-md border"
+      <DataTableShell
         data-pending={navPending}
         data-testid="prospects-table-container"
       >
@@ -809,7 +819,31 @@ export function ProspectsTable({
             )}
           </TableBody>
         </Table>
-      </div>
+        <DataTableFooter>
+          <span className="text-muted-foreground text-sm">
+            {total === 0
+              ? "No prospects"
+              : `Showing ${showingFrom.toLocaleString()}–${showingTo.toLocaleString()} of ${total.toLocaleString()}`}
+          </span>
+          {totalPages > 1 && (
+            <CircularPagination
+              currentPage={ts.page}
+              totalPages={totalPages}
+              onPageChange={(p) =>
+                ts.navigate(
+                  `${ts.basePath}${ts.buildHref({
+                    page: p,
+                    search: ts.search.length === 0 ? null : ts.search,
+                    sort: ts.sort,
+                    dir: ts.dir,
+                    filters: ts.filters,
+                  })}`,
+                )
+              }
+            />
+          )}
+        </DataTableFooter>
+      </DataTableShell>
     </>
   );
 }
