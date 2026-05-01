@@ -50,7 +50,6 @@ import {
   deletePropertiesBulk,
   qualifyLeadsBulk,
   removePropertiesFromListBulk,
-  setMotivationBulk,
   verifyPropertiesBulk,
   type BulkOutcome,
 } from "../leads/actions";
@@ -92,17 +91,6 @@ type Props = {
   dir: SortDirection;
   filters: ParsedProspectsFilters;
 };
-
-const MOTIVATION_OPTIONS: {
-  value: "hot" | "warm" | "cold" | null;
-  label: string;
-  dot: string;
-}[] = [
-  { value: "hot", label: "Hot", dot: "bg-red-500" },
-  { value: "warm", label: "Warm", dot: "bg-amber-500" },
-  { value: "cold", label: "Cold", dot: "bg-blue-500" },
-  { value: null, label: "Clear", dot: "bg-transparent border border-muted-foreground" },
-];
 
 function summarize(outcome: BulkOutcome, noun = "prospect"): string {
   const parts: string[] = [];
@@ -355,19 +343,6 @@ export function ProspectsTable({
     });
   };
 
-  const handleSetMotivation = (level: "hot" | "warm" | "cold" | null) => {
-    const ids = selectedIds();
-    if (ids.length === 0) return;
-    startTransition(async () => {
-      const result = await callAction(setMotivationBulk(ids, level), {
-        fallbackMessage: "Could not set motivation",
-      });
-      if (result.ok) {
-        finishBulk(level ? `Set ${level}` : "Cleared motivation on", result.data);
-      }
-    });
-  };
-
   const handleVerifyAddress = () => {
     const ids = selectedIds();
     if (ids.length === 0) return;
@@ -486,7 +461,7 @@ export function ProspectsTable({
                     Advance
                   </DropdownMenuLabel>
                   <DropdownMenuItem onClick={handleQualify}>
-                    Qualify selected
+                    Promote to Lead
                   </DropdownMenuItem>
                   <DropdownMenuSub>
                     <DropdownMenuSubTrigger disabled={!hasTeam}>
@@ -606,23 +581,6 @@ export function ProspectsTable({
                           No custom tags
                         </DropdownMenuItem>
                       )}
-                    </DropdownMenuSubContent>
-                  </DropdownMenuSub>
-                  <DropdownMenuSub>
-                    <DropdownMenuSubTrigger>
-                      Set motivation…
-                    </DropdownMenuSubTrigger>
-                    <DropdownMenuSubContent className="w-40">
-                      {MOTIVATION_OPTIONS.map((m) => (
-                        <DropdownMenuItem
-                          key={m.label}
-                          onClick={() => handleSetMotivation(m.value)}
-                          className="gap-2"
-                        >
-                          <span className={`size-2 rounded-full ${m.dot}`} />
-                          {m.label}
-                        </DropdownMenuItem>
-                      ))}
                     </DropdownMenuSubContent>
                   </DropdownMenuSub>
                 </DropdownMenuGroup>

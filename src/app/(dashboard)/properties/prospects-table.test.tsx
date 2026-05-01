@@ -189,6 +189,30 @@ describe("<ProspectsTable />", () => {
       );
     });
   });
+
+  it("bulk action menu uses 'Promote to Lead' (renamed from 'Qualify selected') and no longer offers 'Set motivation'", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    const rows = [makeRow({ id: "p1" }), makeRow({ id: "p2" })];
+    renderTable(rows);
+
+    // Select a row so the Actions button is enabled.
+    await user.click(
+      screen.getByRole("checkbox", { name: "Select p1 Main St" }),
+    );
+    await user.click(
+      screen.getByRole("button", { name: /Actions for 1 selected/ }),
+    );
+
+    expect(
+      await screen.findByRole("menuitem", { name: /Promote to Lead/ }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("menuitem", { name: /Qualify selected/ }),
+    ).toBeNull();
+    expect(
+      screen.queryByRole("menuitem", { name: /Set motivation/ }),
+    ).toBeNull();
+  });
 });
 
 describe("<ProspectsTable /> engagement column", () => {
