@@ -16,11 +16,17 @@
  * prospects-table.test.tsx all stay green without modification.
  */
 
+// Import the pure helpers from the .helpers module (NO "use client"
+// directive) so the SSR path on /properties/page.tsx can call them
+// without hitting Next.js's RSC client-reference boundary. Importing
+// from "./use-table-url-state" (which has "use client") would surface
+// these functions as opaque client-references to the server, causing a
+// runtime crash when the server tries to invoke them.
 import {
   buildTableHref,
   parseTableSearch,
   type SortDirection,
-} from "@/components/table/use-table-url-state";
+} from "@/components/table/use-table-url-state.helpers";
 
 // Re-export SortDirection so existing imports `from "./prospects-query"` keep working.
 export type { SortDirection };
