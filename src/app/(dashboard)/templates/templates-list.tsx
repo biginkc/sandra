@@ -1,9 +1,9 @@
 "use client";
 
-import { Search } from "lucide-react";
-import { useEffect, useState, useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 
-import { Input } from "@/components/ui/input";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import {
   Select,
   SelectContent,
@@ -11,111 +11,283 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
+import { Skeleton } from "@/components/ui/skeleton";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+
+import { SortableHeader } from "@/components/table/sortable-header";
+import {
+  TableToolbar,
+  TableToolbarSearch,
+} from "@/components/table/table-toolbar";
+import {
+  useTableUrlState,
+  type ParsedTableSearch,
+  type SortDirection,
+  type UseTableUrlStateReturn,
+} from "@/components/table/use-table-url-state";
 
 import { type TemplateRow } from "./actions";
-import { TemplateDialog } from "./template-dialog";
 import { DeleteTemplateButton } from "./delete-template-button";
+import {
+  type TemplatesFilters,
+  type TemplatesSortableColumn,
+} from "./page";
+import { TemplateDialog } from "./template-dialog";
 
 type Props = {
   templates: TemplateRow[];
   categories: string[];
+  parsed: ParsedTableSearch<TemplatesFilters>;
 };
 
-export function TemplatesList({ templates, categories }: Props) {
-  const [search, setSearch] = useState("");
-  const [categoryFilter, setCategoryFilter] = useState("all");
+const TEMPLATES_SORTABLE_COLUMNS = [
+  "name",
+  "category",
+  "updated_at",
+] as const;
+
+const BUILD_CONFIG = {
+  defaultSort: "updated_at" as const,
+  defaultDir: "desc" as SortDirection,
+  sortableColumns: TEMPLATES_SORTABLE_COLUMNS,
+  buildFilterParams: (
+    filters: Partial<TemplatesFilters>,
+    sp: URLSearchParams,
+  ) => {
+    if (filters.category) sp.set("category", filters.category);
+  },
+};
+
+/**
+ * Client island for the /templates table. Consumes
+ * useTableUrlState({ mode: "client" }) — URL is the mirror, the
+ * prefetched `templates` array is the source. Search/sort/category
+ * filter all run in-memory via useMemo over the array; the hook's
+ * navigate calls router.replace to keep the URL in sync (no SSR
+ * roundtrip, since `mode: "client"` skips the useTransition wrapper).
+ *
+ * Two notable quirks vs /lists and /jobs (per CONTEXT A2/D-10 +
+ * RESEARCH Q1 recommendation b):
+ *   1. The category filter stays as a Base UI <Select> (NOT a
+ *      <TableToolbarFilterPill>). Pills are binary toggles; categories
+ *      are a multi-option dropdown. The Select sits inside <TableToolbar>
+ *      next to <TableToolbarSearch> and is wired to ts.navigate.
+ *   2. Raw <table> → shadcn <Table> for visual continuity with
+ *      /properties /lists /jobs.
+ */
+export function TemplatesList({ templates, categories, parsed }: Props) {
   const [editingTemplate, setEditingTemplate] = useState<TemplateRow | null>(
     null,
   );
 
-  const filtered = useMemo(() => {
-    let result = templates;
-    if (search.trim()) {
-      const q = search.toLowerCase();
+  const ts = useTableUrlState<TemplatesFilters>({
+    basePath: "/templates",
+    parsed,
+    mode: "client",
+    config: BUILD_CONFIG,
+  });
+
+  // Apply URL state in-memory. Recomputes when templates mutates (e.g.,
+  // after edit/delete via revalidatePath) OR when any URL-state field
+  // changes. Pitfall 5 protection: every URL-state field is in deps.
+  const visible = useMemo(() => {
+    const q = ts.search.toLowerCase().trim();
+    let result = templates.slice();
+
+    if (q.length > 0) {
       result = result.filter(
         (t) =>
           t.name.toLowerCase().includes(q) ||
           t.content.toLowerCase().includes(q),
       );
     }
-    if (categoryFilter !== "all") {
-      result = result.filter((t) => t.category === categoryFilter);
+
+    if (ts.filters.category) {
+      result = result.filter((t) => t.category === ts.filters.category);
     }
+
+    const sortKey = ts.sort as TemplatesSortableColumn;
+    const ascending = ts.dir === "asc";
+    result.sort((a, b) => {
+      let cmp = 0;
+      if (sortKey === "name") {
+        cmp = a.name.toLowerCase().localeCompare(b.name.toLowerCase());
+      } else if (sortKey === "category") {
+        cmp = (a.category ?? "")
+          .toLowerCase()
+          .localeCompare((b.category ?? "").toLowerCase());
+      } else {
+        // updated_at
+        cmp =
+          new Date(a.updated_at).getTime() - new Date(b.updated_at).getTime();
+      }
+      return ascending ? cmp : -cmp;
+    });
+
     return result;
-  }, [templates, search, categoryFilter]);
+  }, [templates, ts.search, ts.sort, ts.dir, ts.filters.category]);
+
+  const onCategoryChange = (next: string | undefined) => {
+    const newCategory = next === "all" || !next ? null : next;
+    ts.navigate(
+      `/templates${ts.buildHref({
+        page: 1,
+        // Forward search only when non-empty to keep the URL clean when
+        // the user changes category without an active search.
+        search: ts.search === "" ? null : ts.search,
+        sort: ts.sort,
+        dir: ts.dir,
+        filters: { category: newCategory },
+      })}`,
+    );
+  };
 
   return (
     <>
-      {/* Filters */}
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
-        <div className="relative flex-1">
-          <Search className="text-muted-foreground absolute left-3 top-1/2 size-4 -translate-y-1/2" />
-          <Input
-            placeholder="Search templates…"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            className="pl-9"
-            id="template-search"
-          />
-        </div>
-        <Select value={categoryFilter} onValueChange={(v) => setCategoryFilter(v ?? "all")}>
-          <SelectTrigger className="w-full sm:w-[180px]" id="category-filter">
+      <TableToolbar
+        state={
+          ts as unknown as UseTableUrlStateReturn<Record<string, unknown>>
+        }
+      >
+        <TableToolbarSearch
+          ariaLabel="Search templates by name or content"
+          placeholder="Search templates…"
+          testId="templates-search"
+        />
+        <Select
+          value={parsed.filters.category ?? "all"}
+          onValueChange={(v) => onCategoryChange(v ?? "all")}
+        >
+          <SelectTrigger
+            className="w-full sm:w-[180px]"
+            id="category-filter"
+            data-testid="templates-category-select"
+          >
             <SelectValue placeholder="All categories" />
           </SelectTrigger>
           <SelectContent>
-            <SelectItem value="all">All categories</SelectItem>
+            <SelectItem value="all" data-testid="templates-category-option-all">
+              All categories
+            </SelectItem>
             {categories.map((c) => (
-              <SelectItem key={c} value={c}>
+              <SelectItem
+                key={c}
+                value={c}
+                data-testid={`templates-category-option-${c}`}
+              >
                 {c}
               </SelectItem>
             ))}
           </SelectContent>
         </Select>
-      </div>
+      </TableToolbar>
 
-      {/* Table */}
-      {filtered.length === 0 ? (
-        <div className="text-muted-foreground py-12 text-center text-sm">
-          {templates.length === 0
-            ? 'No templates yet. Click "New template" to create one.'
-            : "No templates match your search."}
-        </div>
-      ) : (
-        <div className="border-border overflow-x-auto rounded-md border">
-          <table className="w-full text-sm">
-            <thead className="bg-muted/40 text-left text-xs uppercase">
-              <tr>
-                <th className="px-3 py-2">Name</th>
-                <th className="px-3 py-2">Category</th>
-                <th className="hidden px-3 py-2 md:table-cell">Preview</th>
-                <th className="px-3 py-2">Updated</th>
-                <th className="px-3 py-2 text-right">Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {filtered.map((t) => (
-                <tr key={t.id} className="border-border border-t">
-                  <td className="px-3 py-2">
+      <div
+        className="border-border overflow-x-auto rounded-md border"
+        data-pending={ts.navPending}
+        data-testid="templates-table-container"
+      >
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <SortableHeader<TemplatesSortableColumn>
+                column="name"
+                current={ts.sort}
+                dir={ts.dir}
+                onClick={(c) => ts.onSort(c)}
+                testIdPrefix="templates"
+              >
+                Name
+              </SortableHeader>
+              <SortableHeader<TemplatesSortableColumn>
+                column="category"
+                current={ts.sort}
+                dir={ts.dir}
+                onClick={(c) => ts.onSort(c)}
+                testIdPrefix="templates"
+              >
+                Category
+              </SortableHeader>
+              <TableHead className="hidden md:table-cell">Preview</TableHead>
+              <SortableHeader<TemplatesSortableColumn>
+                column="updated_at"
+                current={ts.sort}
+                dir={ts.dir}
+                onClick={(c) => ts.onSort(c)}
+                testIdPrefix="templates"
+              >
+                Updated
+              </SortableHeader>
+              <TableHead className="text-right">Actions</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {ts.navPending ? (
+              Array.from({ length: Math.max(visible.length, 5) }).map(
+                (_, i) => (
+                  <TableRow
+                    key={`skeleton-${i}`}
+                    data-testid="templates-skeleton-row"
+                  >
+                    <TableCell>
+                      <Skeleton className="h-4 w-48" />
+                    </TableCell>
+                    <TableCell>
+                      <Skeleton className="h-5 w-20 rounded-full" />
+                    </TableCell>
+                    <TableCell className="hidden md:table-cell">
+                      <Skeleton className="h-4 w-72" />
+                    </TableCell>
+                    <TableCell>
+                      <Skeleton className="h-4 w-16" />
+                    </TableCell>
+                    <TableCell>
+                      <Skeleton className="h-8 w-20" />
+                    </TableCell>
+                  </TableRow>
+                ),
+              )
+            ) : visible.length === 0 ? (
+              <TableRow>
+                <TableCell
+                  colSpan={5}
+                  className="text-muted-foreground py-12 text-center"
+                >
+                  {templates.length === 0
+                    ? 'No templates yet. Click "New template" to create one.'
+                    : "No templates match your search."}
+                </TableCell>
+              </TableRow>
+            ) : (
+              visible.map((t) => (
+                <TableRow key={t.id}>
+                  <TableCell>
                     <button
+                      type="button"
                       onClick={() => setEditingTemplate(t)}
                       className="font-medium hover:underline"
                     >
                       {t.name}
                     </button>
-                  </td>
-                  <td className="px-3 py-2">
+                  </TableCell>
+                  <TableCell>
                     <Badge variant="outline">{t.category}</Badge>
-                  </td>
-                  <td className="text-muted-foreground hidden max-w-[300px] truncate px-3 py-2 md:table-cell">
+                  </TableCell>
+                  <TableCell className="text-muted-foreground hidden max-w-[300px] truncate md:table-cell">
                     {t.content.slice(0, 80)}
                     {t.content.length > 80 ? "…" : ""}
-                  </td>
-                  <td className="text-muted-foreground whitespace-nowrap px-3 py-2 text-xs">
+                  </TableCell>
+                  <TableCell className="text-muted-foreground whitespace-nowrap text-xs">
                     <UpdatedAt iso={t.updated_at} />
-                  </td>
-                  <td className="px-3 py-2 text-right">
+                  </TableCell>
+                  <TableCell className="text-right">
                     <div className="flex items-center justify-end gap-1">
                       <Button
                         variant="ghost"
@@ -129,13 +301,13 @@ export function TemplatesList({ templates, categories }: Props) {
                         templateName={t.name}
                       />
                     </div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
+                  </TableCell>
+                </TableRow>
+              ))
+            )}
+          </TableBody>
+        </Table>
+      </div>
 
       {/* Edit dialog */}
       {editingTemplate && (
@@ -154,21 +326,13 @@ export function TemplatesList({ templates, categories }: Props) {
 
 /**
  * WR-12: render an absolute, server-stable label first paint, then swap
- * to the relative form on the client. The previous version called
- * `Date.now()` during render, which produced different strings on
- * server vs client when a row crossed a "just now" / "1m ago" boundary
- * during SSR → hydration, triggering React's hydration mismatch warning.
- *
- * `suppressHydrationWarning` on `<time>` covers the narrow window
- * between server output and the first effect tick, so the relative
- * label updating doesn't itself trip a warning.
+ * to the relative form on the client. Lifted UNCHANGED from the
+ * pre-migration templates-list.tsx — same hydration-safe behavior.
  */
 function UpdatedAt({ iso }: { iso: string }) {
   const [label, setLabel] = useState<string>(() => formatAbsolute(iso));
 
   useEffect(() => {
-    // Compute relative once on mount, then refresh every minute so a
-    // long-lived list view doesn't go stale.
     const update = () => setLabel(formatRelative(iso));
     update();
     const id = setInterval(update, 60_000);
@@ -183,8 +347,6 @@ function UpdatedAt({ iso }: { iso: string }) {
 }
 
 function formatAbsolute(iso: string): string {
-  // Locale-stable form (server and client agree because no `Date.now()`
-  // is involved): "2026-04-29 14:32".
   const d = new Date(iso);
   const pad = (n: number) => String(n).padStart(2, "0");
   return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(
