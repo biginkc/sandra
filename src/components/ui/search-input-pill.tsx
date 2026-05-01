@@ -3,7 +3,8 @@ import { Search } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 export interface SearchInputPillProps
-  extends Omit<React.InputHTMLAttributes<HTMLInputElement>, "className"> {
+  extends Omit<React.InputHTMLAttributes<HTMLInputElement>, "className">,
+    React.RefAttributes<HTMLInputElement> {
   /** Outer wrapper class override — width, margin, etc. */
   wrapperClassName?: string;
   /** Magnifying glass icon class override. */
@@ -23,6 +24,7 @@ export function SearchInputPill({
   wrapperClassName,
   iconClassName,
   type = "text",
+  ref,
   ...props
 }: SearchInputPillProps) {
   return (
@@ -37,6 +39,7 @@ export function SearchInputPill({
         )}
       />
       <input
+        ref={ref}
         type={type}
         className="w-full pl-12 pr-4 py-2 border-none rounded-full text-sm bg-secondary placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
         {...props}

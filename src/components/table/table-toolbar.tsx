@@ -1,10 +1,10 @@
 "use client";
 
 import * as React from "react";
-import { Search, X } from "lucide-react";
+import { X } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
+import { SearchInputPill } from "@/components/ui/search-input-pill";
 import { cn } from "@/lib/utils";
 
 import {
@@ -93,13 +93,8 @@ function TableToolbarSearch({
 
   return (
     <div className={cn("relative max-w-md flex-1", className)}>
-      <Search
-        className="text-muted-foreground pointer-events-none absolute top-1/2 left-4 size-4 -translate-y-1/2"
-        aria-hidden
-      />
-      <Input
+      <SearchInputPill
         ref={inputRef}
-        type="text"
         defaultValue={ctx.search}
         onChange={(e) => {
           setHasContent(e.target.value.length > 0);
@@ -108,7 +103,6 @@ function TableToolbarSearch({
         placeholder={placeholder}
         aria-label={ariaLabel}
         data-testid={testId}
-        className="bg-muted/60 h-10 w-full rounded-full border-none pr-10 pl-11"
       />
       {hasContent ? (
         <button
