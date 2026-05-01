@@ -664,40 +664,48 @@ export function ProspectsTable({
         }
       />
 
-      <div className="relative max-w-sm">
-        <Search
-          className="text-muted-foreground pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2"
-          aria-hidden
-        />
-        <Input
-          type="text"
-          value={searchInput}
-          onChange={(e) => onSearchChange(e.target.value)}
-          placeholder="Search address…"
-          aria-label="Search prospects by address"
-          data-testid="prospects-search"
-          className="pr-9 pl-9"
-        />
-        {searchInput.length > 0 && (
-          <button
-            type="button"
-            onClick={onClearSearch}
-            aria-label="Clear search"
-            data-testid="prospects-search-clear"
-            className="text-muted-foreground hover:text-foreground absolute top-1/2 right-2 -translate-y-1/2 rounded p-1"
-          >
-            <X className="size-3" />
-          </button>
-        )}
-      </div>
+      {/* Unified toolbar — search + filter pills inside one rounded card,
+       *  matching the /leads kanban toolbar so the two surfaces feel
+       *  consistent. The search bar takes flexible width on the left;
+       *  the filter row sits inline on the right, wrapping on narrow
+       *  viewports.
+       */}
+      <div className="border-border bg-card flex flex-wrap items-center gap-3 rounded-2xl border p-3">
+        <div className="relative max-w-md flex-1">
+          <Search
+            className="text-muted-foreground pointer-events-none absolute top-1/2 left-4 size-4 -translate-y-1/2"
+            aria-hidden
+          />
+          <Input
+            type="text"
+            value={searchInput}
+            onChange={(e) => onSearchChange(e.target.value)}
+            placeholder="Search address…"
+            aria-label="Search prospects by address"
+            data-testid="prospects-search"
+            className="bg-muted/60 h-10 w-full rounded-full border-none pr-10 pl-11"
+          />
+          {searchInput.length > 0 && (
+            <button
+              type="button"
+              onClick={onClearSearch}
+              aria-label="Clear search"
+              data-testid="prospects-search-clear"
+              className="text-muted-foreground hover:text-foreground absolute top-1/2 right-3 -translate-y-1/2"
+            >
+              <X className="size-4" />
+            </button>
+          )}
+        </div>
 
-      <ProspectFilters
-        filters={filters}
-        teamMembers={teamMembers}
-        onChange={updateFilters}
-        anyActive={anyFilterActive}
-        onClearAll={clearAllFilters}
-      />
+        <ProspectFilters
+          filters={filters}
+          teamMembers={teamMembers}
+          onChange={updateFilters}
+          anyActive={anyFilterActive}
+          onClearAll={clearAllFilters}
+        />
+      </div>
 
       <SelectAllBanner
         allOnPageSelected={allSelected}
