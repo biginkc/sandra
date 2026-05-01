@@ -15,6 +15,7 @@ export type TemplateRow = {
   name: string;
   content: string;
   category: string;
+  system_managed: boolean;
   created_at: string;
   updated_at: string;
 };
@@ -98,7 +99,7 @@ export async function listTemplates(): Promise<Result<TemplateRow[]>> {
     const supabase = await createClient();
     const { data, error } = await supabase
       .from("sms_templates")
-      .select("id, name, content, category, created_at, updated_at")
+      .select("id, name, content, category, system_managed, created_at, updated_at")
       .is("deleted_at", null)
       .order("updated_at", { ascending: false });
     if (error) {
@@ -199,6 +200,24 @@ export async function updateTemplate(
 
   try {
     const supabase = await createClient();
+
+    // System-managed guard: never allow editing seeded templates.
+    const { data: tpl, error: tplErr } = await supabase
+      .from("sms_templates")
+      .select("system_managed")
+      .eq("id", templateId)
+      .is("deleted_at", null)
+      .maybeSingle();
+    if (tplErr) {
+      return { ok: false, error: { code: "TPL_UPDATE_FAILED", message: tplErr.message } };
+    }
+    if (!tpl) {
+      return { ok: false, error: { code: "TPL_NOT_FOUND", message: "Template not found or already deleted." } };
+    }
+    if (tpl.system_managed) {
+      return { ok: false, error: { code: "SYSTEM_MANAGED_TPL", message: "System templates cannot be edited." } };
+    }
+
     const update: {
       name?: string;
       content?: string;
@@ -281,6 +300,23 @@ export async function deleteTemplate(
           }. Detach the template from those steps before deleting.`,
         },
       };
+    }
+
+    // System-managed guard: never allow deleting seeded templates.
+    const { data: tpl, error: tplErr } = await supabase
+      .from("sms_templates")
+      .select("system_managed")
+      .eq("id", templateId)
+      .is("deleted_at", null)
+      .maybeSingle();
+    if (tplErr) {
+      return { ok: false, error: { code: "TPL_DELETE_FAILED", message: tplErr.message } };
+    }
+    if (!tpl) {
+      return { ok: false, error: { code: "TPL_NOT_FOUND", message: "Template not found or already deleted." } };
+    }
+    if (tpl.system_managed) {
+      return { ok: false, error: { code: "SYSTEM_MANAGED_TPL", message: "System templates cannot be deleted." } };
     }
 
     // WR-08: same exact-count guard as updateTemplate.

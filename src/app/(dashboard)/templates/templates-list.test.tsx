@@ -43,7 +43,9 @@ vi.mock("./template-dialog", () => ({
 }));
 
 vi.mock("./delete-template-button", () => ({
-  DeleteTemplateButton: () => null,
+  DeleteTemplateButton: ({ systemManaged }: { systemManaged?: boolean }) => (
+    <button data-testid="delete-btn" disabled={systemManaged}>Delete</button>
+  ),
 }));
 
 function makeTemplate(
@@ -54,6 +56,7 @@ function makeTemplate(
     name: overrides.name ?? `Template ${overrides.id}`,
     content: overrides.content ?? "Hello world",
     category: overrides.category ?? "General",
+    system_managed: overrides.system_managed ?? false,
     created_at: overrides.created_at ?? "2026-04-29T10:00:00Z",
     updated_at: overrides.updated_at ?? "2026-04-29T12:00:00Z",
   };
@@ -209,5 +212,19 @@ describe("<TemplatesList />", () => {
     expect(screen.getByText("Hello world")).toBeInTheDocument();
     expect(screen.getByText("Goodbye")).toBeInTheDocument(); // matches via content
     expect(screen.queryByText("Bye")).toBeNull();
+  });
+
+  it("system-managed row renders the System badge", () => {
+    renderTemplates({
+      templates: [makeTemplate({ id: "t1", name: "Owner check", system_managed: true })],
+    });
+    expect(screen.getByText("System")).toBeInTheDocument();
+  });
+
+  it("system-managed row has the delete button disabled", () => {
+    renderTemplates({
+      templates: [makeTemplate({ id: "t1", name: "Owner check", system_managed: true })],
+    });
+    expect(screen.getByTestId("delete-btn")).toBeDisabled();
   });
 });
