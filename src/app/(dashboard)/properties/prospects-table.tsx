@@ -12,6 +12,7 @@ import { Button, buttonVariants } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
   buildProspectsHref,
+  formatFullAddress,
   type EngagementState,
   type SortableColumn,
   type SortDirection,
@@ -639,25 +640,11 @@ export function ProspectsTable({
               <SortableHeader column="address" sort={sort} dir={dir} onClick={onSortClick}>
                 Address
               </SortableHeader>
-              <SortableHeader column="city" sort={sort} dir={dir} onClick={onSortClick}>
-                City
-              </SortableHeader>
-              <SortableHeader column="state" sort={sort} dir={dir} onClick={onSortClick}>
-                State
-              </SortableHeader>
-              <SortableHeader column="zip" sort={sort} dir={dir} onClick={onSortClick}>
-                ZIP
-              </SortableHeader>
               <SortableHeader column="market" sort={sort} dir={dir} onClick={onSortClick}>
                 Market
               </SortableHeader>
-              <SortableHeader column="cass_status" sort={sort} dir={dir} onClick={onSortClick}>
-                CASS
-              </SortableHeader>
-              <SortableHeader column="is_vacant" sort={sort} dir={dir} onClick={onSortClick}>
-                Vacant
-              </SortableHeader>
-              <TableHead>Engagement</TableHead>
+              {/* Status column header is intentionally blank — pills speak for themselves. */}
+              <TableHead aria-label="Status" />
               <TableHead>Last message</TableHead>
             </TableRow>
           </TableHeader>
@@ -665,7 +652,7 @@ export function ProspectsTable({
             {prospects.length === 0 ? (
               <TableRow>
                 <TableCell
-                  colSpan={10}
+                  colSpan={5}
                   className="text-muted-foreground py-8 text-center"
                 >
                   {search.length > 0
@@ -695,23 +682,21 @@ export function ProspectsTable({
                         className="size-4 cursor-pointer"
                       />
                     </TableCell>
-                    <TableCell className="font-medium">{p.address}</TableCell>
-                    <TableCell>{p.city ?? "—"}</TableCell>
-                    <TableCell>{p.state}</TableCell>
-                    <TableCell>{p.zip ?? "—"}</TableCell>
+                    <TableCell className="font-medium">
+                      {formatFullAddress({
+                        address: p.address,
+                        city: p.city,
+                        state: p.state,
+                        zip: p.zip,
+                      })}
+                    </TableCell>
                     <TableCell>{p.market ?? "—"}</TableCell>
                     <TableCell>
-                      <CassStatusIndicator status={p.cass_status} />
-                    </TableCell>
-                    <TableCell>
-                      {p.is_vacant === true
-                        ? "Yes"
-                        : p.is_vacant === false
-                          ? "No"
-                          : "—"}
-                    </TableCell>
-                    <TableCell>
-                      <EngagementBadge state={p.engagement} />
+                      <StatusPills
+                        cass={p.cass_status}
+                        isVacant={p.is_vacant}
+                        engagement={p.engagement}
+                      />
                     </TableCell>
                     <TableCell
                       className="text-muted-foreground max-w-[280px] truncate text-sm italic"
@@ -776,14 +761,103 @@ function SortableHeader({
 }
 
 /**
- * Engagement pill — keys off the property's most-recent message direction.
- * "none" renders a transparent placeholder so the column has a stable width
- * even on rows that have never been contacted.
+ * Stacked status pills — single column merging CASS, Vacancy, and
+ * Engagement signals into one visual cluster. Pill rules:
+ *
+ *   - CASS pill always renders (Verified / Unverified / Invalid / Ambiguous).
+ *   - Vacant pill renders only when is_vacant === true (the negative
+ *     case is silent — no signal, no noise).
+ *   - Engagement pill renders only when there's a thread (Contacted /
+ *     Replying); silent for fresh rows.
+ *
+ * Pills wrap horizontally on wide rows; on narrow widths flexbox stacks
+ * them. Tooltip on each pill explains the rule in human terms.
  */
-function EngagementBadge({ state }: { state: EngagementState }) {
-  if (state === "none") {
-    return <span className="text-muted-foreground text-xs">—</span>;
-  }
+function StatusPills({
+  cass,
+  isVacant,
+  engagement,
+}: {
+  cass: string;
+  isVacant: boolean | null;
+  engagement: EngagementState;
+}) {
+  return (
+    <div className="flex flex-wrap gap-1">
+      <CassPill status={cass} />
+      {isVacant === true ? <VacantPill /> : null}
+      {engagement !== "none" ? <EngagementPill state={engagement} /> : null}
+    </div>
+  );
+}
+
+function CassPill({ status }: { status: string }) {
+  const meta = (() => {
+    switch (status) {
+      case "verified":
+        return {
+          label: "Verified",
+          className: "bg-emerald-100 text-emerald-900 hover:bg-emerald-100",
+          tooltip: "USPS-verified — skip-trace ready.",
+          testId: "cass-verified",
+        };
+      case "unverified":
+        return {
+          label: "Unverified",
+          className: "bg-amber-100 text-amber-900 hover:bg-amber-100",
+          tooltip:
+            "Not yet CASS-verified. Run address verification before skip-trace to avoid wasting credits.",
+          testId: "cass-unverified",
+        };
+      case "invalid":
+        return {
+          label: "Invalid",
+          className: "bg-red-100 text-red-900 hover:bg-red-100",
+          tooltip: "USPS rejected this address. Skip-trace will not work.",
+          testId: "cass-invalid",
+        };
+      case "ambiguous":
+        return {
+          label: "Ambiguous",
+          className: "bg-orange-100 text-orange-900 hover:bg-orange-100",
+          tooltip: "Multiple matches at USPS — needs manual disambiguation.",
+          testId: "cass-ambiguous",
+        };
+      default:
+        return {
+          label: status || "Unknown",
+          className: "bg-muted text-muted-foreground",
+          tooltip: status,
+          testId: "cass-unknown",
+        };
+    }
+  })();
+  return (
+    <Badge
+      variant="secondary"
+      className={meta.className}
+      data-testid={meta.testId}
+      title={meta.tooltip}
+    >
+      {meta.label}
+    </Badge>
+  );
+}
+
+function VacantPill() {
+  return (
+    <Badge
+      variant="secondary"
+      className="bg-yellow-100 text-yellow-900 hover:bg-yellow-100"
+      data-testid="vacant-true"
+      title="Marked vacant — high-priority wholesale signal."
+    >
+      Vacant
+    </Badge>
+  );
+}
+
+function EngagementPill({ state }: { state: Exclude<EngagementState, "none"> }) {
   if (state === "replying") {
     return (
       <Badge
@@ -805,60 +879,5 @@ function EngagementBadge({ state }: { state: EngagementState }) {
     >
       Contacted
     </Badge>
-  );
-}
-
-/**
- * CASS status indicator — color-coded so the skip-trace eligibility of
- * each row is readable at a glance. Tooltip explains what each status
- * means in human terms (skip-trace ready / pending / blocked).
- *
- * `verified` is the only status where skip-trace will pay vendor
- * credits productively; everything else either blocks the call (per
- * the pre-flight gate) or means the address is unusable.
- */
-function CassStatusIndicator({ status }: { status: string }) {
-  const meta = (() => {
-    switch (status) {
-      case "verified":
-        return {
-          label: "Verified",
-          dot: "bg-emerald-500",
-          tooltip: "USPS-verified — skip-trace ready.",
-        };
-      case "unverified":
-        return {
-          label: "Unverified",
-          dot: "bg-amber-500",
-          tooltip: "Not yet CASS-verified. Run address verification before skip-trace to avoid wasting credits.",
-        };
-      case "invalid":
-        return {
-          label: "Invalid",
-          dot: "bg-red-500",
-          tooltip: "USPS rejected this address. Skip-trace will not work.",
-        };
-      case "ambiguous":
-        return {
-          label: "Ambiguous",
-          dot: "bg-orange-500",
-          tooltip: "Multiple matches at USPS — needs manual disambiguation.",
-        };
-      default:
-        return {
-          label: status,
-          dot: "bg-muted",
-          tooltip: status,
-        };
-    }
-  })();
-  return (
-    <span
-      className="inline-flex items-center gap-1.5 text-xs"
-      title={meta.tooltip}
-    >
-      <span className={`size-2 rounded-full ${meta.dot}`} aria-hidden />
-      <span className="text-foreground">{meta.label}</span>
-    </span>
   );
 }

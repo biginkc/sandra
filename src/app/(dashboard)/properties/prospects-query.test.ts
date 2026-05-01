@@ -5,6 +5,7 @@ import {
   computeEngagement,
   DEFAULT_DIR,
   DEFAULT_SORT,
+  formatFullAddress,
   parseProspectsSearch,
   truncateMessagePreview,
 } from "./prospects-query";
@@ -36,6 +37,10 @@ describe("parseProspectsSearch", () => {
 
   it("whitelists sort columns; unknown values fall back to default", () => {
     expect(parseProspectsSearch({ sort: "address" }).sort).toBe("address");
+    expect(parseProspectsSearch({ sort: "market" }).sort).toBe("market");
+    // Removed (no longer their own columns) — should fall back to default.
+    expect(parseProspectsSearch({ sort: "city" }).sort).toBe(DEFAULT_SORT);
+    expect(parseProspectsSearch({ sort: "is_vacant" }).sort).toBe(DEFAULT_SORT);
     expect(parseProspectsSearch({ sort: "deleted_at" }).sort).toBe(
       DEFAULT_SORT,
     );
@@ -55,9 +60,9 @@ describe("parseProspectsSearch", () => {
     expect(
       parseProspectsSearch({
         page: ["2", "5"],
-        sort: ["state", "address"],
+        sort: ["address", "market"],
       }),
-    ).toMatchObject({ page: 2, sort: "state" });
+    ).toMatchObject({ page: 2, sort: "address" });
   });
 });
 
@@ -88,10 +93,10 @@ describe("buildProspectsHref", () => {
       buildProspectsHref({
         page: 2,
         search: "oak",
-        sort: "city",
+        sort: "market",
         dir: "asc",
       }),
-    ).toBe("?page=2&search=oak&sort=city&dir=asc");
+    ).toBe("?page=2&search=oak&sort=market&dir=asc");
   });
 });
 
@@ -134,5 +139,62 @@ describe("truncateMessagePreview", () => {
 
   it("respects an explicit maxLen", () => {
     expect(truncateMessagePreview("abcdefghij", 5)).toBe("abcd…");
+  });
+});
+
+describe("formatFullAddress", () => {
+  it("renders 'street, city, state zip' when every part is present", () => {
+    expect(
+      formatFullAddress({
+        address: "1307 NW DEER RUN TRL",
+        city: "BLUE SPRINGS",
+        state: "MO",
+        zip: "64015",
+      }),
+    ).toBe("1307 NW DEER RUN TRL, BLUE SPRINGS, MO 64015");
+  });
+
+  it("drops the city cleanly when missing — no leading comma", () => {
+    expect(
+      formatFullAddress({
+        address: "1307 NW DEER RUN TRL",
+        city: null,
+        state: "MO",
+        zip: "64015",
+      }),
+    ).toBe("1307 NW DEER RUN TRL, MO 64015");
+  });
+
+  it("drops the zip cleanly when missing — no trailing space", () => {
+    expect(
+      formatFullAddress({
+        address: "1307 NW DEER RUN TRL",
+        city: "BLUE SPRINGS",
+        state: "MO",
+        zip: null,
+      }),
+    ).toBe("1307 NW DEER RUN TRL, BLUE SPRINGS, MO");
+  });
+
+  it("renders just the street when nothing else is set", () => {
+    expect(
+      formatFullAddress({
+        address: "1307 NW DEER RUN TRL",
+        city: null,
+        state: "",
+        zip: null,
+      }),
+    ).toBe("1307 NW DEER RUN TRL");
+  });
+
+  it("trims whitespace around each part", () => {
+    expect(
+      formatFullAddress({
+        address: "  1307 NW DEER RUN TRL  ",
+        city: "  BLUE SPRINGS  ",
+        state: " MO ",
+        zip: " 64015 ",
+      }),
+    ).toBe("1307 NW DEER RUN TRL, BLUE SPRINGS, MO 64015");
   });
 });

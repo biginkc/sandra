@@ -10,12 +10,7 @@
 
 export const SORTABLE_COLUMNS = [
   "address",
-  "city",
-  "state",
-  "zip",
   "market",
-  "cass_status",
-  "is_vacant",
   "created_at",
 ] as const;
 
@@ -127,4 +122,27 @@ export function truncateMessagePreview(
   if (collapsed.length === 0) return null;
   if (collapsed.length <= maxLen) return collapsed;
   return collapsed.slice(0, maxLen - 1).trimEnd() + "…";
+}
+
+/**
+ * Concatenate a property's address parts into a single line that reads
+ * like a human-typed address: "<street>, <city>, <state> <zip>".
+ * Drops missing parts gracefully so a row with no city still renders
+ * the street + state + zip without producing ", , MO ...". Used in
+ * place of the old separate City / State / ZIP columns.
+ */
+export function formatFullAddress(parts: {
+  address: string;
+  city: string | null;
+  state: string;
+  zip: string | null;
+}): string {
+  const head = parts.address.trim();
+  const cityState = [parts.city?.trim() || null, parts.state?.trim() || null]
+    .filter(Boolean)
+    .join(", ");
+  const tail = [cityState, parts.zip?.trim() || null]
+    .filter(Boolean)
+    .join(" ");
+  return tail ? `${head}, ${tail}` : head;
 }
