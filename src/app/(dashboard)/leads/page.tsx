@@ -7,6 +7,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
 
 import { Kanban } from "./kanban";
+import { truncateMessagePreview } from "../properties/prospects-query";
 
 export const metadata = {
   title: "Leads · Sandra CRM",
@@ -121,6 +122,26 @@ export default async function LeadsPage({
   const unreadPropertyIds = new Set<string>();
   for (const r of unreadRows ?? []) {
     if (r.property_id) unreadPropertyIds.add(r.property_id);
+  }
+
+  // Latest message per property in the visible kanban — drives the
+  // italic-quoted preview under each lead card. Same shape as the
+  // prospects table's last-message column. Single batched query, then
+  // walk in JS taking the first row per property_id (ordered desc).
+  const visibleLeadIds = (leads ?? []).map((l) => l.id);
+  const lastMessageByPropertyId: Record<string, string> = {};
+  if (visibleLeadIds.length > 0) {
+    const { data: lastMsgRows } = await supabase
+      .from("messages")
+      .select("property_id, body, created_at")
+      .in("property_id", visibleLeadIds)
+      .order("created_at", { ascending: false });
+    for (const m of lastMsgRows ?? []) {
+      if (!m.property_id) continue;
+      if (lastMessageByPropertyId[m.property_id] !== undefined) continue;
+      const preview = truncateMessagePreview(m.body ?? null);
+      if (preview) lastMessageByPropertyId[m.property_id] = preview;
+    }
   }
 
   // List memberships for the shown properties. One query, then group in
@@ -257,6 +278,7 @@ export default async function LeadsPage({
           currentUserId={user?.id ?? null}
           listMemberships={listMemberships}
           customTags={customTags}
+          lastMessageByPropertyId={lastMessageByPropertyId}
         />
       ) : (
         <div className="text-muted-foreground border-border rounded-md border border-dashed p-8 text-center text-sm">

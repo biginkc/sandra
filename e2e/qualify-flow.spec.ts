@@ -23,7 +23,7 @@ test.describe("qualify → revert round-trip", () => {
       .getByRole("button", { name: /Actions for 1 selected/ })
       .click();
     await page
-      .getByRole("menuitem", { name: "Qualify selected" })
+      .getByRole("menuitem", { name: "Promote to Lead" })
       .click();
 
     // Row disappears from /properties.
