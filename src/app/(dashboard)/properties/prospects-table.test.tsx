@@ -384,6 +384,64 @@ describe("<ProspectsTable /> quick filters", () => {
     );
   });
 
+  it("Clear text link is hidden when no filters are active", () => {
+    renderTable([makeRow({ id: "p1" })]);
+    expect(screen.queryByTestId("filter-clear-all")).toBeNull();
+  });
+
+  it("Clear text link appears when at least one filter is active and resets all five at once", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    render(
+      <ProspectsTable
+        prospects={[makeRow({ id: "p1" })]}
+        lists={[]}
+        tags={[]}
+        teamMembers={[]}
+        currentUserId={null}
+        canDelete={false}
+        headerCount=""
+        search=""
+        sort="created_at"
+        dir="desc"
+        filters={{
+          vacant: true,
+          cass: "verified",
+          engagement: "contacted",
+          market: "Kansas City",
+          assignee: "unassigned",
+        }}
+      />,
+    );
+    const clear = await screen.findByTestId("filter-clear-all");
+    await user.click(clear);
+    expect(routerReplace).toHaveBeenCalledTimes(1);
+    // search/sort/dir all default + every filter cleared → bare path.
+    expect(routerReplace.mock.calls[0][0]).toBe("/properties");
+  });
+
+  it("Clear preserves search and sort when those are non-default", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    render(
+      <ProspectsTable
+        prospects={[makeRow({ id: "p1" })]}
+        lists={[]}
+        tags={[]}
+        teamMembers={[]}
+        currentUserId={null}
+        canDelete={false}
+        headerCount=""
+        search="oak"
+        sort="address"
+        dir="asc"
+        filters={{ ...EMPTY_FILTERS, vacant: true }}
+      />,
+    );
+    await user.click(screen.getByTestId("filter-clear-all"));
+    expect(routerReplace.mock.calls[0][0]).toBe(
+      "/properties?search=oak&sort=address&dir=asc",
+    );
+  });
+
   it("filter toggles compose: Vacant + Verified + Contacted active emits all three params", async () => {
     const user = userEvent.setup({ pointerEventsCheck: 0 });
     render(

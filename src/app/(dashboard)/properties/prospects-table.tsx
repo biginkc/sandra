@@ -10,6 +10,7 @@ import { PageHeader } from "@/components/page-header";
 import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Skeleton } from "@/components/ui/skeleton";
 import {
   buildProspectsHref,
   formatFullAddress,
@@ -130,6 +131,13 @@ export function ProspectsTable({
   const router = useRouter();
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [pending, startTransition] = useTransition();
+  // Separate pending state for URL-driven navigation (search / sort /
+  // filter changes). Wrapping router.replace in startNavTransition lets
+  // React surface "we're fetching new server-rendered data" so the table
+  // can dim instead of looking frozen during the roundtrip. The
+  // engagement filter is the slowest path (extra messages aggregation),
+  // so the visual cue matters most there.
+  const [navPending, startNavTransition] = useTransition();
 
   // Local search input state — lets the user type without a server roundtrip
   // every keystroke. Synced to the URL on a 250ms debounce. We do NOT mirror
@@ -144,12 +152,18 @@ export function ProspectsTable({
     };
   }, []);
 
+  const navigate = (url: string) => {
+    startNavTransition(() => {
+      router.replace(url, { scroll: false });
+    });
+  };
+
   const onSearchChange = (next: string) => {
     setSearchInput(next);
     if (searchDebounce.current) clearTimeout(searchDebounce.current);
     searchDebounce.current = setTimeout(() => {
       const trimmed = next.trim();
-      router.replace(
+      navigate(
         `/properties${buildProspectsHref({
           page: 1,
           search: trimmed.length === 0 ? null : trimmed,
@@ -157,7 +171,6 @@ export function ProspectsTable({
           dir,
           filters,
         })}`,
-        { scroll: false },
       );
     }, 250);
   };
@@ -165,9 +178,8 @@ export function ProspectsTable({
   const onClearSearch = () => {
     setSearchInput("");
     if (searchDebounce.current) clearTimeout(searchDebounce.current);
-    router.replace(
+    navigate(
       `/properties${buildProspectsHref({ page: 1, search: null, sort, dir, filters })}`,
-      { scroll: false },
     );
   };
 
@@ -177,7 +189,7 @@ export function ProspectsTable({
   const onSortClick = (column: SortableColumn) => {
     const nextDir: SortDirection =
       sort === column ? (dir === "asc" ? "desc" : "asc") : "asc";
-    router.replace(
+    navigate(
       `/properties${buildProspectsHref({
         page: 1,
         search: search.length === 0 ? null : search,
@@ -185,7 +197,6 @@ export function ProspectsTable({
         dir: nextDir,
         filters,
       })}`,
-      { scroll: false },
     );
   };
 
@@ -194,7 +205,7 @@ export function ProspectsTable({
    *  whose value is null/false/'' (handled by buildProspectsHref). */
   const updateFilters = (patch: Partial<ParsedProspectsFilters>) => {
     const nextFilters: ParsedProspectsFilters = { ...filters, ...patch };
-    router.replace(
+    navigate(
       `/properties${buildProspectsHref({
         page: 1,
         search: search.length === 0 ? null : search,
@@ -202,9 +213,36 @@ export function ProspectsTable({
         dir,
         filters: nextFilters,
       })}`,
-      { scroll: false },
     );
   };
+
+  /** Reset every filter param at once. Preserves search/sort. Used by the
+   *  "Clear filters" text link which only renders when at least one
+   *  filter is active. */
+  const clearAllFilters = () => {
+    navigate(
+      `/properties${buildProspectsHref({
+        page: 1,
+        search: search.length === 0 ? null : search,
+        sort,
+        dir,
+        filters: {
+          vacant: false,
+          cass: null,
+          engagement: null,
+          market: null,
+          assignee: null,
+        },
+      })}`,
+    );
+  };
+
+  const anyFilterActive =
+    filters.vacant ||
+    filters.cass !== null ||
+    filters.engagement !== null ||
+    filters.market !== null ||
+    filters.assignee !== null;
 
   const allSelected = useMemo(
     () => prospects.length > 0 && selected.size === prospects.length,
@@ -649,9 +687,15 @@ export function ProspectsTable({
         filters={filters}
         teamMembers={teamMembers}
         onChange={updateFilters}
+        anyActive={anyFilterActive}
+        onClearAll={clearAllFilters}
       />
 
-      <div className="border-border rounded-md border">
+      <div
+        className="border-border rounded-md border"
+        data-pending={navPending}
+        data-testid="prospects-table-container"
+      >
         <Table>
           <TableHeader>
             <TableRow>
@@ -679,7 +723,38 @@ export function ProspectsTable({
             </TableRow>
           </TableHeader>
           <TableBody>
-            {prospects.length === 0 ? (
+            {navPending ? (
+              // Skeleton rows during search / sort / filter navigation.
+              // Match the visible row count (or 5 minimum) so the table
+              // doesn't snap-resize when results come back.
+              Array.from({ length: Math.max(prospects.length, 5) }).map(
+                (_, i) => (
+                  <TableRow
+                    key={`skeleton-${i}`}
+                    data-testid="prospects-skeleton-row"
+                  >
+                    <TableCell>
+                      <Skeleton className="size-4 rounded" />
+                    </TableCell>
+                    <TableCell>
+                      <Skeleton className="h-4 w-72" />
+                    </TableCell>
+                    <TableCell>
+                      <Skeleton className="h-4 w-24" />
+                    </TableCell>
+                    <TableCell>
+                      <div className="flex gap-1">
+                        <Skeleton className="h-5 w-16 rounded-full" />
+                        <Skeleton className="h-5 w-16 rounded-full" />
+                      </div>
+                    </TableCell>
+                    <TableCell>
+                      <Skeleton className="h-4 w-56" />
+                    </TableCell>
+                  </TableRow>
+                ),
+              )
+            ) : prospects.length === 0 ? (
               <TableRow>
                 <TableCell
                   colSpan={5}
@@ -898,10 +973,14 @@ function ProspectFilters({
   filters,
   teamMembers,
   onChange,
+  anyActive,
+  onClearAll,
 }: {
   filters: ParsedProspectsFilters;
   teamMembers: TeamMemberOption[];
   onChange: (patch: Partial<ParsedProspectsFilters>) => void;
+  anyActive: boolean;
+  onClearAll: () => void;
 }) {
   return (
     <div className="flex flex-wrap items-center gap-2">
@@ -996,6 +1075,17 @@ function ProspectFilters({
           </DropdownMenuContent>
         </DropdownMenu>
       </div>
+
+      {anyActive && (
+        <button
+          type="button"
+          onClick={onClearAll}
+          data-testid="filter-clear-all"
+          className="text-muted-foreground hover:text-foreground ml-2 text-sm underline-offset-2 hover:underline"
+        >
+          Clear
+        </button>
+      )}
     </div>
   );
 }
