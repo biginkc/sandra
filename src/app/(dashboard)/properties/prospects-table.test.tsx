@@ -50,6 +50,14 @@ vi.mock("@/lib/skip-trace/actions", () => ({
   requestSkipTrace: vi.fn(),
 }));
 
+const { getAllMatchingProspectIds } = vi.hoisted(() => ({
+  getAllMatchingProspectIds: vi.fn(),
+}));
+
+vi.mock("./actions", () => ({
+  getAllMatchingProspectIds,
+}));
+
 // Sonner's toast is fine in jsdom but the table's handlers don't fire
 // in these tests; stub anyway to keep the surface noise-free.
 vi.mock("sonner", () => ({
@@ -94,6 +102,7 @@ function renderTable(rows: ProspectRow[], lists: ListOption[] = []) {
       sort="created_at"
       dir="desc"
       filters={EMPTY_FILTERS}
+      total={1382}
     />,
   );
 }
@@ -303,6 +312,7 @@ describe("<ProspectsTable /> sortable headers", () => {
         sort="address"
         dir="asc"
         filters={EMPTY_FILTERS}
+        total={1}
       />,
     );
     await user.click(screen.getByTestId("prospects-sort-address"));
@@ -349,6 +359,7 @@ describe("<ProspectsTable /> address search", () => {
         sort="created_at"
         dir="desc"
         filters={EMPTY_FILTERS}
+        total={1}
       />,
     );
     await user.click(screen.getByTestId("prospects-search-clear"));
@@ -386,6 +397,7 @@ describe("<ProspectsTable /> quick filters", () => {
         sort="created_at"
         dir="desc"
         filters={{ ...EMPTY_FILTERS, vacant: true }}
+        total={1}
       />,
     );
     await user.click(screen.getByTestId("filter-vacant"));
@@ -434,6 +446,7 @@ describe("<ProspectsTable /> quick filters", () => {
           market: "Kansas City",
           assignee: "unassigned",
         }}
+        total={1}
       />,
     );
     const clear = await screen.findByTestId("filter-clear-all");
@@ -458,12 +471,141 @@ describe("<ProspectsTable /> quick filters", () => {
         sort="address"
         dir="asc"
         filters={{ ...EMPTY_FILTERS, vacant: true }}
+        total={1}
       />,
     );
     await user.click(screen.getByTestId("filter-clear-all"));
     expect(routerReplace.mock.calls[0][0]).toBe(
       "/properties?search=oak&sort=address&dir=asc",
     );
+  });
+
+});
+
+describe("<ProspectsTable /> select-all-across-pages banner", () => {
+  beforeEach(() => {
+    routerReplace.mockReset();
+    getAllMatchingProspectIds.mockReset();
+  });
+
+  it("does not render the banner when nothing is selected", () => {
+    renderTable([makeRow({ id: "p1" }), makeRow({ id: "p2" })]);
+    expect(screen.queryByTestId("select-all-banner")).toBeNull();
+  });
+
+  it("does not render the banner when total fits on one page (page-select == matching-set)", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    // total === pageSize === 2; selecting both is equivalent to selecting all.
+    render(
+      <ProspectsTable
+        prospects={[makeRow({ id: "p1" }), makeRow({ id: "p2" })]}
+        lists={[]}
+        tags={[]}
+        teamMembers={[]}
+        currentUserId={null}
+        canDelete={false}
+        headerCount=""
+        search=""
+        sort="created_at"
+        dir="desc"
+        filters={EMPTY_FILTERS}
+        total={2}
+      />,
+    );
+    await user.click(screen.getByRole("checkbox", { name: "Select p1 Main St" }));
+    await user.click(screen.getByRole("checkbox", { name: "Select p2 Main St" }));
+    expect(screen.queryByTestId("select-all-banner")).toBeNull();
+  });
+
+  it("renders the per-page banner when all visible rows are selected and there are more pages", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    render(
+      <ProspectsTable
+        prospects={[makeRow({ id: "p1" }), makeRow({ id: "p2" })]}
+        lists={[]}
+        tags={[]}
+        teamMembers={[]}
+        currentUserId={null}
+        canDelete={false}
+        headerCount=""
+        search=""
+        sort="created_at"
+        dir="desc"
+        filters={EMPTY_FILTERS}
+        total={1382}
+      />,
+    );
+    await user.click(screen.getByRole("checkbox", { name: "Select p1 Main St" }));
+    await user.click(screen.getByRole("checkbox", { name: "Select p2 Main St" }));
+
+    const banner = await screen.findByTestId("select-all-banner");
+    expect(banner.dataset.mode).toBe("per-page");
+    expect(banner.textContent).toMatch(/All 2 on this page selected/);
+    const link = screen.getByTestId("select-all-across-pages");
+    expect(link.textContent).toMatch(/Select all 1,382 prospects/);
+  });
+
+  it("clicking 'Select all N' calls the action and switches the banner to all-matching mode", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    getAllMatchingProspectIds.mockResolvedValue({
+      ok: true,
+      data: Array.from({ length: 1382 }, (_, i) => `prop-${i}`),
+    });
+    render(
+      <ProspectsTable
+        prospects={[makeRow({ id: "p1" })]}
+        lists={[]}
+        tags={[]}
+        teamMembers={[]}
+        currentUserId={null}
+        canDelete={false}
+        headerCount=""
+        search="oak"
+        sort="created_at"
+        dir="desc"
+        filters={EMPTY_FILTERS}
+        total={1382}
+      />,
+    );
+    await user.click(screen.getByRole("checkbox", { name: "Select p1 Main St" }));
+    await user.click(screen.getByTestId("select-all-across-pages"));
+
+    expect(getAllMatchingProspectIds).toHaveBeenCalledWith({
+      search: "oak",
+      filters: EMPTY_FILTERS,
+    });
+    const banner = await screen.findByTestId("select-all-banner");
+    expect(banner.dataset.mode).toBe("all-matching");
+    expect(banner.textContent).toMatch(/All 1,382 prospects selected/);
+  });
+
+  it("Clear button empties the selection and hides the banner", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    getAllMatchingProspectIds.mockResolvedValue({
+      ok: true,
+      data: ["a", "b", "c"],
+    });
+    render(
+      <ProspectsTable
+        prospects={[makeRow({ id: "a" })]}
+        lists={[]}
+        tags={[]}
+        teamMembers={[]}
+        currentUserId={null}
+        canDelete={false}
+        headerCount=""
+        search=""
+        sort="created_at"
+        dir="desc"
+        filters={EMPTY_FILTERS}
+        total={3}
+      />,
+    );
+    await user.click(screen.getByRole("checkbox", { name: "Select a Main St" }));
+    await user.click(screen.getByTestId("select-all-across-pages"));
+    await screen.findByTestId("select-all-clear");
+    await user.click(screen.getByTestId("select-all-clear"));
+    expect(screen.queryByTestId("select-all-banner")).toBeNull();
   });
 
   it("filter toggles compose: Vacant + Verified + Contacted active emits all three params", async () => {
@@ -487,6 +629,7 @@ describe("<ProspectsTable /> quick filters", () => {
           market: null,
           assignee: null,
         }}
+        total={1}
       />,
     );
     await user.click(screen.getByTestId("filter-contacted"));

@@ -278,6 +278,7 @@ export default async function PropertiesPage({
         sort={sort}
         dir={dir}
         filters={filters}
+        total={total}
       />
 
       {totalPages > 1 && (
