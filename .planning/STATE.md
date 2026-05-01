@@ -3,8 +3,8 @@ gsd_state_version: 1.0
 milestone: v2.0
 milestone_name: Cross-table UX consistency + market refactor
 status: executing
-last_updated: "2026-05-01T10:12:24.000Z"
-last_activity: 2026-05-01 -- Phase 01 execution complete (6/6 plans, npm run verify green)
+last_updated: "2026-05-01T10:16:00.000Z"
+last_activity: 2026-05-01 -- Phase 01 shipped — PR #89 open
 progress:
   total_phases: 3
   completed_phases: 0
@@ -28,10 +28,10 @@ See: .planning/PROJECT.md (updated 2026-04-30)
 
 ## Current Position
 
-Phase: 01 (cross-table-ux-consistency) — EXECUTION COMPLETE (6/6 plans)
+Phase: 01 (cross-table-ux-consistency) — SHIPPED (PR #89)
 Plan: 6 of 6 (done)
-Status: Awaiting verify-work + ship
-Last activity: 2026-05-01 -- Phase 01 plan 01-06 (`/templates` migration) shipped; `npm run verify` green (104 RTL tests pass, typecheck clean)
+Status: Awaiting PR merge → Phase 1.5
+Last activity: 2026-05-01 -- Phase 01 shipped; PR #89 open (34 commits, 478+104 tests green)
 
 ## Status
 
@@ -40,7 +40,8 @@ Last activity: 2026-05-01 -- Phase 01 plan 01-06 (`/templates` migration) shippe
 - Requirements defined: 2026-04-30
 - Roadmap created: 2026-04-30
 - Phase 01 plans 01-01 through 01-06: shipped 2026-04-30 → 2026-05-01
-- Next action: `/gsd-verify-work` (UAT walkthrough) → `/gsd-ship` (open PR)
+- Phase 01 PR: #89 (open) — merge when CI passes
+- Next action: Merge PR #89 → `/gsd-plan-phase 1.5`
 
 ## Accumulated Context (preserved across milestones)
 
