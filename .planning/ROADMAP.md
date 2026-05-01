@@ -44,13 +44,14 @@
 5. Visual verification: Playwright golden paths green; manual screenshot diff against baseline shows only intended token shifts (no layout/spacing regressions on any dashboard route)
 6. CI green: typecheck + unit + RTL + Playwright
 
-**Build order suggestion:**
-1. Wire `@sandra/tokens` (deps + globals.css import + remove local `:root`)
-2. Smoke test: every dashboard route renders without console errors; eyeball each route for token-driven color shifts
-3. Install registry components via `npx shadcn add` against `@sandra/registry`
-4. Swap `<input>` → `<SearchInputPill>` inside `<TableToolbar.Search>` (one-file change)
-5. Wrap each table in `<DataTableShell>` + `<DataTableFooter>`; replace pagination markup with `<CircularPagination>`
-6. Re-run all tests; capture before/after screenshots for the handoff
+**Plans:** 5 plans
+
+Plans:
+- [ ] 01.5-01-PLAN.md — Wire @sandra/tokens (package.json + globals.css import + remove :root block)
+- [ ] 01.5-02-PLAN.md — Copy 3 registry components into src/components/ui/
+- [ ] 01.5-03-PLAN.md — Swap TableToolbarSearch inner input to SearchInputPill
+- [ ] 01.5-04-PLAN.md — DataTableShell + DataTableFooter + CircularPagination on /properties
+- [ ] 01.5-05-PLAN.md — DataTableShell + DataTableFooter (count-only) on /lists, /jobs, /templates
 
 **Depends on:** Phase 1
 
