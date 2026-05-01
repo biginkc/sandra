@@ -374,11 +374,11 @@ async function ingestRow(
       contact_type: deriveHomeownerContactType(n),
       first_name: normalizeName(n.homeowner_first_name as string | null),
       last_name: normalizeName(n.homeowner_last_name as string | null),
-      entity_name: (n.homeowner_entity_name as string | null) ?? null,
+      entity_name: normalizeName(n.homeowner_entity_name as string | null),
       phone_1: (n.homeowner_phone_1 as string | null) ?? null,
       phone_2: (n.homeowner_phone_2 as string | null) ?? null,
       phone_3: (n.homeowner_phone_3 as string | null) ?? null,
-      email: (n.homeowner_email as string | null) ?? null,
+      email: (n.homeowner_email as string | null)?.trim().toLowerCase() ?? null,
       do_not_contact:
         (n.homeowner_do_not_contact as boolean | null) ?? undefined,
     });
@@ -387,9 +387,8 @@ async function ingestRow(
       .upsert(
         {
           contact_id: homeownerContactId,
-          mailing_address:
-            (n.homeowner_mailing_address as string | null) ?? null,
-          mailing_city: (n.homeowner_mailing_city as string | null) ?? null,
+          mailing_address: normalizeName(n.homeowner_mailing_address as string | null),
+          mailing_city: normalizeName(n.homeowner_mailing_city as string | null),
           mailing_state: (n.homeowner_mailing_state as string | null) ?? null,
           mailing_zip: (n.homeowner_mailing_zip as string | null) ?? null,
         },
@@ -405,7 +404,7 @@ async function ingestRow(
       first_name: normalizeName(n.agent_first_name as string | null),
       last_name: normalizeName(n.agent_last_name as string | null),
       phone_1: (n.agent_phone as string | null) ?? null,
-      email: (n.agent_email as string | null) ?? null,
+      email: (n.agent_email as string | null)?.trim().toLowerCase() ?? null,
     });
     await supabase.from("agent_details").upsert(
       {
@@ -444,8 +443,8 @@ async function ingestRow(
     // these out, keeping them on the /properties data-lake surface until
     // someone qualifies (manual action or auto on first inbound reply).
     status: "prospect",
-    address: addressRaw,
-    city: (n.city as string | null) ?? null,
+    address: normalizeName(addressRaw) ?? addressRaw,
+    city: normalizeName(n.city as string | null),
     state,
     zip: (n.zip as string | null) ?? null,
     market: market as PropertyInsert["market"],
