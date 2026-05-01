@@ -54,6 +54,7 @@ import {
   type BulkOutcome,
 } from "../leads/actions";
 import { requestSkipTrace } from "@/lib/skip-trace/actions";
+import { getAllMatchingProspectIds } from "./actions";
 
 export type ProspectRow = {
   id: string;
@@ -90,6 +91,9 @@ type Props = {
   sort: SortableColumn;
   dir: SortDirection;
   filters: ParsedProspectsFilters;
+  /** Total count across all pages matching the current filters — drives the
+   *  "Select all N prospects" cross-page selection banner. */
+  total: number;
 };
 
 function summarize(outcome: BulkOutcome, noun = "prospect"): string {
@@ -115,10 +119,18 @@ export function ProspectsTable({
   sort,
   dir,
   filters,
+  total,
 }: Props) {
   const router = useRouter();
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [pending, startTransition] = useTransition();
+  // Cross-page select-all mode. When true, the user has explicitly
+  // expanded their selection beyond the visible page to every property
+  // matching the current filters. Bound to a Set<string> of all those
+  // ids; the banner shows "All N selected · Clear" instead of the
+  // page-level toggle. Resets to false on any filter / search change
+  // since the matching count would no longer match what was selected.
+  const [selectAllMatching, setSelectAllMatching] = useState(false);
   // Separate pending state for URL-driven navigation (search / sort /
   // filter changes). Wrapping router.replace in startNavTransition lets
   // React surface "we're fetching new server-rendered data" so the table
@@ -144,6 +156,44 @@ export function ProspectsTable({
     startNavTransition(() => {
       router.replace(url, { scroll: false });
     });
+  };
+
+  // Filter / search / sort change → the previously-selected "all matching"
+  // set is no longer a faithful representation of what currently matches,
+  // so drop it. Selection itself isn't reset (existing behavior — user
+  // might have intentional manual picks that survive a refilter).
+  useEffect(() => {
+    setSelectAllMatching(false);
+  }, [
+    search,
+    sort,
+    dir,
+    filters.vacant,
+    filters.cass,
+    filters.engagement,
+    filters.market,
+    filters.assignee,
+  ]);
+
+  const onSelectAllAcrossPages = () => {
+    startTransition(async () => {
+      const result = await callAction(
+        getAllMatchingProspectIds({
+          search: search.length === 0 ? null : search,
+          filters,
+        }),
+        { fallbackMessage: "Could not select all matching prospects" },
+      );
+      if (result.ok) {
+        setSelected(new Set(result.data));
+        setSelectAllMatching(true);
+      }
+    });
+  };
+
+  const onClearAllSelection = () => {
+    setSelected(new Set());
+    setSelectAllMatching(false);
   };
 
   const onSearchChange = (next: string) => {
@@ -649,6 +699,16 @@ export function ProspectsTable({
         onClearAll={clearAllFilters}
       />
 
+      <SelectAllBanner
+        allOnPageSelected={allSelected}
+        selectAllMatching={selectAllMatching}
+        pageSize={prospects.length}
+        total={total}
+        selectedCount={selected.size}
+        onSelectAllAcrossPages={onSelectAllAcrossPages}
+        onClear={onClearAllSelection}
+      />
+
       <div
         className="border-border rounded-md border"
         data-pending={navPending}
@@ -1044,6 +1104,85 @@ function ProspectFilters({
           Clear
         </button>
       )}
+    </div>
+  );
+}
+
+/**
+ * Cross-page selection banner. Renders only when the user has selected
+ * every visible row (so we know they're trying to "select all"). Two
+ * states:
+ *
+ *   per-page mode: "All N on this page selected. Select all M prospects →"
+ *   all-matching:  "All M selected across all pages. Clear"
+ *
+ * Hidden when nothing is selected, or when only some rows on the page
+ * are selected (the row checkboxes carry that state instead).
+ */
+function SelectAllBanner({
+  allOnPageSelected,
+  selectAllMatching,
+  pageSize,
+  total,
+  selectedCount,
+  onSelectAllAcrossPages,
+  onClear,
+}: {
+  allOnPageSelected: boolean;
+  selectAllMatching: boolean;
+  pageSize: number;
+  total: number;
+  selectedCount: number;
+  onSelectAllAcrossPages: () => void;
+  onClear: () => void;
+}) {
+  // Don't render when there's nothing useful to say.
+  if (!allOnPageSelected && !selectAllMatching) return null;
+  // No banner when there's only one page — page-select == matching-set.
+  if (!selectAllMatching && total <= pageSize) return null;
+
+  const fmt = (n: number) => n.toLocaleString();
+
+  if (selectAllMatching) {
+    return (
+      <div
+        data-testid="select-all-banner"
+        data-mode="all-matching"
+        className="bg-muted/40 flex items-center justify-between gap-3 rounded-md border px-4 py-2 text-sm"
+      >
+        <span>
+          All <strong>{fmt(selectedCount)}</strong> prospects selected across
+          all pages.
+        </span>
+        <button
+          type="button"
+          onClick={onClear}
+          data-testid="select-all-clear"
+          className="text-muted-foreground hover:text-foreground underline-offset-2 hover:underline"
+        >
+          Clear
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div
+      data-testid="select-all-banner"
+      data-mode="per-page"
+      className="bg-muted/40 flex items-center justify-between gap-3 rounded-md border px-4 py-2 text-sm"
+    >
+      <span>
+        All <strong>{fmt(pageSize)}</strong> on this page selected.
+      </span>
+      <button
+        type="button"
+        onClick={onSelectAllAcrossPages}
+        data-testid="select-all-across-pages"
+        className="text-foreground font-medium underline-offset-2 hover:underline"
+      >
+        Select all {fmt(total)} prospects →
+      </button>
     </div>
   );
 }

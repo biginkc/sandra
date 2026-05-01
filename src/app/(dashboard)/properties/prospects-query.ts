@@ -14,6 +14,12 @@ export const SORTABLE_COLUMNS = [
   "created_at",
 ] as const;
 
+/** Hard cap on cross-page select-all results. Prevents a runaway
+ *  "select all 50K" from torching skip-trace credits via downstream
+ *  bulk actions. 5,000 has plenty of headroom for current org sizes
+ *  (Sandra is at ~1,400 prospects in prod). */
+export const SELECT_ALL_HARD_CAP = 5000;
+
 export type SortableColumn = (typeof SORTABLE_COLUMNS)[number];
 
 export type SortDirection = "asc" | "desc";
