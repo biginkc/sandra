@@ -2,7 +2,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 
 import type { Database, Json } from "@/lib/supabase/types";
 import { resolveFips } from "./fips";
-import { normalizeAddress, normalizeName } from "./normalize";
+import { normalizeAddress, normalizeDisplayAddress, normalizeName } from "./normalize";
 import { validateRow, type Mapping, type RowData } from "./validate";
 
 type PropertyInsert = Database["public"]["Tables"]["properties"]["Insert"];
@@ -387,8 +387,8 @@ async function ingestRow(
       .upsert(
         {
           contact_id: homeownerContactId,
-          mailing_address: normalizeName(n.homeowner_mailing_address as string | null),
-          mailing_city: normalizeName(n.homeowner_mailing_city as string | null),
+          mailing_address: normalizeDisplayAddress(n.homeowner_mailing_address as string | null),
+          mailing_city: normalizeDisplayAddress(n.homeowner_mailing_city as string | null),
           mailing_state: (n.homeowner_mailing_state as string | null) ?? null,
           mailing_zip: (n.homeowner_mailing_zip as string | null) ?? null,
         },
@@ -443,8 +443,8 @@ async function ingestRow(
     // these out, keeping them on the /properties data-lake surface until
     // someone qualifies (manual action or auto on first inbound reply).
     status: "prospect",
-    address: normalizeName(addressRaw) ?? addressRaw,
-    city: normalizeName(n.city as string | null),
+    address: normalizeDisplayAddress(addressRaw) ?? addressRaw,
+    city: normalizeDisplayAddress(n.city as string | null),
     state,
     zip: (n.zip as string | null) ?? null,
     market: market as PropertyInsert["market"],

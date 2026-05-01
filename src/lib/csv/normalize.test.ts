@@ -5,6 +5,7 @@ import {
   normalizeAddress,
   normalizeApn,
   normalizeCountyName,
+  normalizeDisplayAddress,
   normalizeName,
   normalizePhone,
   normalizeStateCode,
@@ -351,6 +352,35 @@ describe("toStringOrNull", () => {
     expect(toStringOrNull("")).toBeNull();
     expect(toStringOrNull("   ")).toBeNull();
     expect(toStringOrNull(null)).toBeNull();
+  });
+});
+
+describe("normalizeDisplayAddress", () => {
+  it("title-cases words and uppercases 2-letter tokens", () => {
+    expect(normalizeDisplayAddress("1307 NW DEER RUN TRL, BLUE SPRINGS, MO 64015")).toBe(
+      "1307 NW Deer Run Trl, Blue Springs, MO 64015",
+    );
+  });
+
+  it("uppercases state abbreviations", () => {
+    expect(normalizeDisplayAddress("KANSAS CITY, MO")).toBe("Kansas City, MO");
+    expect(normalizeDisplayAddress("DAYTON, OH")).toBe("Dayton, OH");
+  });
+
+  it("uppercases directionals", () => {
+    expect(normalizeDisplayAddress("123 NW MAIN ST")).toBe("123 NW Main ST");
+    expect(normalizeDisplayAddress("456 SE ELM AVE")).toBe("456 SE Elm Ave");
+  });
+
+  it("leaves longer words title-cased", () => {
+    expect(normalizeDisplayAddress("BLUE SPRINGS")).toBe("Blue Springs");
+    expect(normalizeDisplayAddress("DEER RUN TRL")).toBe("Deer Run Trl");
+  });
+
+  it("returns null for empty or missing values", () => {
+    expect(normalizeDisplayAddress(null)).toBeNull();
+    expect(normalizeDisplayAddress(undefined)).toBeNull();
+    expect(normalizeDisplayAddress("")).toBeNull();
   });
 });
 
