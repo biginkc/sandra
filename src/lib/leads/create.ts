@@ -2,6 +2,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 
 import {
   normalizeAddress,
+  normalizeDisplayAddress,
   normalizeName,
   normalizePhone,
   normalizeStateCode,
@@ -128,7 +129,7 @@ export async function createLead(
     };
   }
 
-  const cityNorm = normalizeName(input.property.city) || null;
+  const cityNorm = normalizeDisplayAddress(input.property.city) || null;
   const zipNorm = normalizeZip(input.property.zip ?? null);
   const addressNormalized = normalizeAddress(addressRaw);
   const phoneNorm = normalizePhone(input.contact?.phone_1 ?? null);

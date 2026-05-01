@@ -434,6 +434,22 @@ export function normalizeName(raw: string | null | undefined): string | null {
     .replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
+/**
+ * Title-case an address or city string, then uppercase any 2-letter
+ * alphabetic token (state abbreviations: MO, OH; directionals: NW, SE).
+ * Use this for address/city display fields — not for person names where
+ * "Jo" or "Bo" should stay title-cased.
+ */
+export function normalizeDisplayAddress(raw: string | null | undefined): string | null {
+  if (raw == null) return null;
+  const trimmed = String(raw).trim();
+  if (!trimmed) return null;
+  return trimmed
+    .toLowerCase()
+    .replace(/\b\w/g, (c) => c.toUpperCase())
+    .replace(/\b([A-Za-z]{2})\b/g, (w) => w.toUpperCase());
+}
+
 // ---------- State code normalizer (for FIPS lookup) -----------
 
 const STATE_CODE: Record<string, string> = {
