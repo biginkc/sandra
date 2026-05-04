@@ -5,6 +5,10 @@ import { useEffect, useMemo, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
+  DataTableFooter,
+  DataTableShell,
+} from "@/components/ui/data-table-shell";
+import {
   Select,
   SelectContent,
   SelectItem,
@@ -189,8 +193,8 @@ export function TemplatesList({ templates, categories, parsed }: Props) {
         </Select>
       </TableToolbar>
 
-      <div
-        className="border-border overflow-x-auto rounded-md border"
+      <DataTableShell
+        className="overflow-x-auto"
         data-pending={ts.navPending}
         data-testid="templates-table-container"
       >
@@ -311,7 +315,12 @@ export function TemplatesList({ templates, categories, parsed }: Props) {
             )}
           </TableBody>
         </Table>
-      </div>
+        <DataTableFooter>
+          <span className="text-muted-foreground text-sm">
+            {visible.length} of {templates.length} template{templates.length === 1 ? "" : "s"}
+          </span>
+        </DataTableFooter>
+      </DataTableShell>
 
       {/* Edit dialog */}
       {editingTemplate && (

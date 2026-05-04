@@ -1,7 +1,4 @@
-import Link from "next/link";
-
 import { Page } from "@/components/page";
-import { Button, buttonVariants } from "@/components/ui/button";
 import { isAdminEmail } from "@/lib/auth/allowlist";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
@@ -23,15 +20,6 @@ import {
   type SortDirection,
 } from "./prospects-query";
 
-function buildPageHref(
-  page: number,
-  search: string | null,
-  sort: SortableColumn,
-  dir: SortDirection,
-  filters: ParsedProspectsFilters,
-): string {
-  return buildProspectsHref({ page, search, sort, dir, filters });
-}
 
 const PAGE_SIZE = 50;
 
@@ -279,43 +267,8 @@ export default async function PropertiesPage({
         dir={dir}
         filters={filters}
         total={total}
+        pageSize={PAGE_SIZE}
       />
-
-      {totalPages > 1 && (
-        <div className="flex items-center justify-between">
-          <div className="text-muted-foreground text-sm">
-            Page {page} of {totalPages}
-          </div>
-          <div className="flex gap-2">
-            {page > 1 ? (
-              <Link
-                href={`/properties${buildPageHref(page - 1, search, sort, dir, filters)}`}
-                className={buttonVariants({ variant: "outline", size: "sm" })}
-                prefetch={false}
-              >
-                ← Prev
-              </Link>
-            ) : (
-              <Button variant="outline" size="sm" disabled>
-                ← Prev
-              </Button>
-            )}
-            {page < totalPages ? (
-              <Link
-                href={`/properties${buildPageHref(page + 1, search, sort, dir, filters)}`}
-                className={buttonVariants({ variant: "outline", size: "sm" })}
-                prefetch={false}
-              >
-                Next →
-              </Link>
-            ) : (
-              <Button variant="outline" size="sm" disabled>
-                Next →
-              </Button>
-            )}
-          </div>
-        </div>
-      )}
     </Page>
   );
 }
