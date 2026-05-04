@@ -1,12 +1,16 @@
+import Link from "next/link";
 import { notFound } from "next/navigation";
+import { ChevronLeft, ChevronRight } from "lucide-react";
 
 import { Page } from "@/components/page";
 import { PageHeader } from "@/components/page-header";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
 
 import {
+  getPropertyNeighbors,
   markMessagesReadForProperty,
   type DetailedLead,
   type PropertyStatus,
@@ -98,6 +102,11 @@ export default async function LeadDetailPage({
 
   const lead = data as DetailedLead;
 
+  const { prevId, nextId } = await getPropertyNeighbors(
+    id,
+    lead.status === "prospect" ? "prospect" : "lead",
+  );
+
   // Current user — for "me" labeling in assignee + note-author displays.
   const {
     data: { user: sessionUser },
@@ -181,6 +190,32 @@ export default async function LeadDetailPage({
         title={lead.address}
         description={
           [lead.city, lead.state, lead.zip].filter(Boolean).join(", ") || "—"
+        }
+        actions={
+          <div className="flex items-center gap-1">
+            {prevId ? (
+              <Link href={`/leads/${prevId}`}>
+                <Button variant="ghost" size="icon" aria-label="Previous">
+                  <ChevronLeft className="h-4 w-4" />
+                </Button>
+              </Link>
+            ) : (
+              <Button variant="ghost" size="icon" disabled aria-label="No previous">
+                <ChevronLeft className="h-4 w-4" />
+              </Button>
+            )}
+            {nextId ? (
+              <Link href={`/leads/${nextId}`}>
+                <Button variant="ghost" size="icon" aria-label="Next">
+                  <ChevronRight className="h-4 w-4" />
+                </Button>
+              </Link>
+            ) : (
+              <Button variant="ghost" size="icon" disabled aria-label="No next">
+                <ChevronRight className="h-4 w-4" />
+              </Button>
+            )}
+          </div>
         }
       />
 

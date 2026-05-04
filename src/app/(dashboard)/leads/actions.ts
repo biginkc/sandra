@@ -1226,3 +1226,45 @@ export async function loadLeadVars(
     return errFromUnknown(e, "LOAD_LEAD_VARS_FAILED");
   }
 }
+
+export async function getPropertyNeighbors(
+  propertyId: string,
+  mode: "prospect" | "lead",
+): Promise<{ prevId: string | null; nextId: string | null }> {
+  const supabase = await createClient();
+
+  const { data: current } = await supabase
+    .from("properties")
+    .select("created_at")
+    .eq("id", propertyId)
+    .is("deleted_at", null)
+    .single();
+
+  if (!current) return { prevId: null, nextId: null };
+
+  const [{ data: prevData }, { data: nextData }] = await Promise.all([
+    supabase
+      .from("properties")
+      .select("id")
+      .is("deleted_at", null)
+      [mode === "prospect" ? "eq" : "neq"]("status", "prospect")
+      .gt("created_at", current.created_at)
+      .order("created_at", { ascending: true })
+      .limit(1)
+      .maybeSingle(),
+    supabase
+      .from("properties")
+      .select("id")
+      .is("deleted_at", null)
+      [mode === "prospect" ? "eq" : "neq"]("status", "prospect")
+      .lt("created_at", current.created_at)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle(),
+  ]);
+
+  return {
+    prevId: prevData?.id ?? null,
+    nextId: nextData?.id ?? null,
+  };
+}
