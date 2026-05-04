@@ -2,6 +2,7 @@
 
 import { CheckCircle2, Download, Sparkles, UploadCloudIcon } from "lucide-react";
 import Papa from "papaparse";
+import { read as xlsxRead, utils as xlsxUtils } from "xlsx";
 import { useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
@@ -66,24 +67,8 @@ export function StepUpload({ state, dispatch }: Props) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [dragActive, setDragActive] = useState(false);
 
-  const handleFile = (file: File | null) => {
-    if (!file) return;
-
-    if (file.size > HARD_BLOCK_BYTES) {
-      toast.error(
-        `File too large (${(file.size / 1024 / 1024).toFixed(1)} MB). ` +
-          `Max ${HARD_BLOCK_BYTES / 1024 / 1024} MB in-browser — split into batches ` +
-          "or wait for the bulk-upload pipeline.",
-      );
-      return;
-    }
-    if (file.size > SOFT_WARN_BYTES) {
-      toast.warning(
-        `Large file (${(file.size / 1024 / 1024).toFixed(1)} MB). Parsing may take a moment.`,
-      );
-    }
-
-    Papa.parse<Record<string, string>>(file, {
+  const parseCsvString = (csvString: string, file: File) => {
+    Papa.parse<Record<string, string>>(csvString, {
       header: true,
       skipEmptyLines: "greedy",
       dynamicTyping: false,
@@ -91,7 +76,7 @@ export function StepUpload({ state, dispatch }: Props) {
       complete: (results) => {
         const headers = (results.meta.fields ?? []).filter(Boolean);
         if (headers.length === 0) {
-          toast.error("CSV has no headers — check the file and try again.");
+          toast.error("File has no headers — check the file and try again.");
           return;
         }
         const rows = results.data.filter(
@@ -108,10 +93,51 @@ export function StepUpload({ state, dispatch }: Props) {
         });
         toast.success(`Parsed ${rows.length} rows from ${file.name}.`);
       },
-      error: (err) => {
+      error: (err: Error) => {
         toast.error(`Parse error: ${err.message}`);
       },
     });
+  };
+
+  const handleFile = async (file: File | null) => {
+    if (!file) return;
+
+    if (file.size > HARD_BLOCK_BYTES) {
+      toast.error(
+        `File too large (${(file.size / 1024 / 1024).toFixed(1)} MB). ` +
+          `Max ${HARD_BLOCK_BYTES / 1024 / 1024} MB in-browser — split into batches ` +
+          "or wait for the bulk-upload pipeline.",
+      );
+      return;
+    }
+    if (file.size > SOFT_WARN_BYTES) {
+      toast.warning(
+        `Large file (${(file.size / 1024 / 1024).toFixed(1)} MB). Parsing may take a moment.`,
+      );
+    }
+
+    if (/\.xlsx$/i.test(file.name)) {
+      try {
+        const buffer = await file.arrayBuffer();
+        const wb = xlsxRead(buffer, { type: "array", cellDates: true });
+        const ws = wb.Sheets[wb.SheetNames[0]];
+        const csv = xlsxUtils.sheet_to_csv(ws, { blankrows: false });
+        parseCsvString(csv, file);
+      } catch (err) {
+        toast.error(
+          `Could not read Excel file: ${err instanceof Error ? err.message : "unknown error"}`,
+        );
+      }
+      return;
+    }
+
+    // CSV path — read directly as a string so we use the same parseCsvString
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      parseCsvString((e.target?.result as string) ?? "", file);
+    };
+    reader.onerror = () => toast.error("Could not read file.");
+    reader.readAsText(file);
   };
 
   return (
@@ -150,18 +176,19 @@ export function StepUpload({ state, dispatch }: Props) {
               if (!file) return;
               // Guard against non-CSV drops so a misfire on a PDF doesn't
               // hand garbage to PapaParse.
-              const looksLikeCsv =
-                /\.csv$/i.test(file.name) ||
+              const looksLikeSupported =
+                /\.(csv|xlsx)$/i.test(file.name) ||
                 file.type === "text/csv" ||
                 file.type === "application/vnd.ms-excel" ||
+                file.type === "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" ||
                 file.type === "";
-              if (!looksLikeCsv) {
+              if (!looksLikeSupported) {
                 toast.error(
-                  `That doesn't look like a CSV (${file.type || file.name}).`,
+                  `Unsupported file type (${file.type || file.name}). Use a .csv or .xlsx file.`,
                 );
                 return;
               }
-              handleFile(file);
+              void handleFile(file);
             }}
             className={cn(
               "flex cursor-pointer flex-col items-center justify-center gap-2 rounded-md border-2 px-6 py-10 text-center transition-colors",
@@ -201,10 +228,10 @@ export function StepUpload({ state, dispatch }: Props) {
                   <span className="text-sm font-medium">
                     {dragActive
                       ? "Drop to upload"
-                      : "Drag a CSV here, or click to browse"}
+                      : "Drag a CSV or Excel file here, or click to browse"}
                   </span>
                   <span className="text-muted-foreground text-xs">
-                    .csv up to {HARD_BLOCK_BYTES / 1024 / 1024} MB
+                    .csv or .xlsx up to {HARD_BLOCK_BYTES / 1024 / 1024} MB
                   </span>
                 </div>
               </>
@@ -213,9 +240,9 @@ export function StepUpload({ state, dispatch }: Props) {
               id="file"
               ref={inputRef}
               type="file"
-              accept=".csv,text/csv"
+              accept=".csv,.xlsx,text/csv"
               className="sr-only"
-              onChange={(e) => handleFile(e.target.files?.[0] ?? null)}
+              onChange={(e) => void handleFile(e.target.files?.[0] ?? null)}
             />
           </label>
         </div>
