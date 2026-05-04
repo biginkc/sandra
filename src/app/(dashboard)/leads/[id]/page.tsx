@@ -346,14 +346,23 @@ export default async function LeadDetailPage({
           <Row label="Source" value={lead.source} />
         </Section>
 
-        <Section title="Identifiers">
-          <Row label="APN" value={lead.apn} mono />
-          <Row label="ZPID" value={lead.zpid} mono />
-          <Row label="MLS #" value={lead.mls_number} mono />
-          <Row label="FIPS" value={lead.fips_code} mono />
-          <Row label="Regrid" value={lead.regrid_id} mono />
-          <Row label="ATTOM" value={lead.attom_id} mono />
-        </Section>
+        <div className="flex flex-col gap-2">
+          <div className="text-muted-foreground text-xs font-semibold tracking-wide uppercase">
+            SMS thread
+          </div>
+          <div className="border-border flex flex-col rounded-md border p-3">
+            <MessagesThread
+              initial={initialMessages}
+              contactId={lead.homeowner?.id ?? null}
+              propertyId={lead.id}
+            />
+            <InlineReply
+              propertyId={lead.id}
+              homeownerContactId={lead.homeowner?.id ?? null}
+              homeownerPhone={lead.homeowner?.phone_1 ?? null}
+            />
+          </div>
+        </div>
 
         <Section title="Address quality (USPS)">
           <Row label="CASS status" value={lead.cass_status} />
@@ -469,19 +478,15 @@ export default async function LeadDetailPage({
 
       <div>
         <div className="text-muted-foreground mb-2 text-xs font-semibold tracking-wide uppercase">
-          SMS thread
+          Identifiers
         </div>
-        <div className="border-border rounded-md border p-3">
-          <MessagesThread
-            initial={initialMessages}
-            contactId={lead.homeowner?.id ?? null}
-            propertyId={lead.id}
-          />
-          <InlineReply
-            propertyId={lead.id}
-            homeownerContactId={lead.homeowner?.id ?? null}
-            homeownerPhone={lead.homeowner?.phone_1 ?? null}
-          />
+        <div className="border-border rounded-md border">
+          <Row label="APN" value={lead.apn} mono />
+          <Row label="ZPID" value={lead.zpid} mono />
+          <Row label="MLS #" value={lead.mls_number} mono />
+          <Row label="FIPS" value={lead.fips_code} mono />
+          <Row label="Regrid" value={lead.regrid_id} mono />
+          <Row label="ATTOM" value={lead.attom_id} mono />
         </div>
       </div>
     </Page>
