@@ -175,6 +175,10 @@ export type WizardState = {
    *  imported properties. Default off. Only honored if total rows ≤ 500
    *  (per the per-job cost cap). */
   requestSkipTrace: boolean;
+  /** Operator attestation: all contacts in this import have given written
+   *  SMS consent. When true the workflow bulk-records opt_in_marketing_written
+   *  for every homeowner contact after ingest. */
+  smsConsent: boolean;
   headers: string[];
   rows: Record<string, string>[];
   mapping: Record<string, string | null>;
@@ -196,6 +200,7 @@ const initialState: WizardState = {
   market: null,
   listName: null,
   requestSkipTrace: false,
+  smsConsent: false,
   headers: [],
   rows: [],
   mapping: {},
@@ -228,6 +233,7 @@ export type WizardAction =
   | { type: "SET_MARKET"; market: WizardMarket }
   | { type: "SET_LIST_NAME"; listName: string | null }
   | { type: "SET_REQUEST_SKIP_TRACE"; requestSkipTrace: boolean }
+  | { type: "SET_SMS_CONSENT"; smsConsent: boolean }
   | { type: "SET_MAPPING_FIELD"; fieldId: string; header: string | null }
   | { type: "AUTODETECT_MAPPING" }
   | {
@@ -294,6 +300,8 @@ function reducer(state: WizardState, action: WizardAction): WizardState {
       return { ...state, listName: action.listName };
     case "SET_REQUEST_SKIP_TRACE":
       return { ...state, requestSkipTrace: action.requestSkipTrace };
+    case "SET_SMS_CONSENT":
+      return { ...state, smsConsent: action.smsConsent };
     case "SET_MAPPING_FIELD":
       return {
         ...state,
@@ -446,6 +454,7 @@ export function Wizard() {
           mapping: state.mapping,
           storagePath: uploadResult.storagePath,
           totalRows: state.rows.length,
+          smsConsent: state.smsConsent,
         }),
         { successMessage: "Import started.", fallbackMessage: "Import failed to start" },
       );

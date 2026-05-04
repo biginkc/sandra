@@ -7,12 +7,13 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { Label } from "@/components/ui/label";
 
 import type { WizardAction, WizardState } from "../wizard";
 
 type Props = { state: WizardState; dispatch: React.Dispatch<WizardAction> };
 
-export function StepConfirm({ state }: Props) {
+export function StepConfirm({ state, dispatch }: Props) {
   const summary = state.summary;
   const validRows = summary?.validRows ?? 0;
   const estimatedCassCost = (validRows * 0.03).toFixed(2);
@@ -50,6 +51,22 @@ export function StepConfirm({ state }: Props) {
           label="Agent enrichment"
           value="Off by default. Trigger from property detail or batch action after ingest."
         />
+
+        <div className="flex items-start gap-3 pt-1">
+          <input
+            id="sms-consent"
+            type="checkbox"
+            checked={state.smsConsent}
+            onChange={(e) =>
+              dispatch({ type: "SET_SMS_CONSENT", smsConsent: e.target.checked })
+            }
+            className="mt-0.5 h-4 w-4 cursor-pointer accent-primary"
+          />
+          <Label htmlFor="sms-consent" className="text-sm leading-snug cursor-pointer">
+            I attest that all contacts in this import have given written consent
+            to receive SMS messages, and that I have records to support this attestation.
+          </Label>
+        </div>
       </CardContent>
     </Card>
   );

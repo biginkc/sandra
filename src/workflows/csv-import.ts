@@ -59,6 +59,9 @@ export type CsvImportWorkflowParams = {
   mapping: Mapping;
   listId: string | null;
   userId: string | null;
+  /** When true, bulk-record opt_in_marketing_written for every homeowner
+   *  contact that was created or matched in this import. */
+  smsConsent?: boolean;
 };
 
 /**
@@ -226,6 +229,71 @@ async function triggerCassStep(args: {
 }
 
 /**
+ * STEP 3b — Bulk-record opt_in_marketing_written for every homeowner contact
+ * linked to a succeeded row in this import. Fires only when the operator
+ * checked the SMS consent attestation box on the confirm screen.
+ *
+ * Queries job_items for succeeded property IDs, then joins to properties to
+ * get homeowner_contact_id, then bulk-inserts consent_events. Skips contacts
+ * that already have an opted_out event (opt-outs are irrevocable).
+ */
+async function recordConsentStep(args: {
+  jobId: string;
+}): Promise<void> {
+  "use step";
+
+  const supabase = createAdminClient();
+
+  const { data: items } = await supabase
+    .from("job_items")
+    .select("property_id")
+    .eq("job_id", args.jobId)
+    .eq("status", "succeeded");
+
+  const propertyIds = (items ?? [])
+    .map((i) => i.property_id)
+    .filter((id): id is string => id !== null);
+
+  if (propertyIds.length === 0) return;
+
+  const { data: properties } = await supabase
+    .from("properties")
+    .select("homeowner_contact_id")
+    .in("id", propertyIds)
+    .not("homeowner_contact_id", "is", null);
+
+  const contactIds = (properties ?? [])
+    .map((p) => p.homeowner_contact_id)
+    .filter((id): id is string => id !== null);
+
+  if (contactIds.length === 0) return;
+
+  // Skip contacts that have already explicitly opted out — opt-outs are
+  // irrevocable and must not be overwritten by a batch attestation.
+  const { data: optedOut } = await supabase
+    .from("consent_events")
+    .select("contact_id")
+    .in("contact_id", contactIds)
+    .in("event_type", ["opt_out", "provider_auto_opt_out"]);
+
+  const optedOutIds = new Set((optedOut ?? []).map((r) => r.contact_id));
+  const eligible = contactIds.filter((id) => !optedOutIds.has(id));
+
+  if (eligible.length === 0) return;
+
+  const now = new Date().toISOString();
+  await supabase.from("consent_events").insert(
+    eligible.map((contactId) => ({
+      contact_id: contactId,
+      channel: "sms",
+      event_type: "opt_in_marketing_written",
+      source: `import_attestation:job:${args.jobId}`,
+      occurred_at: now,
+    })),
+  );
+}
+
+/**
  * STEP 3 — Mark the job + csv_imports terminal. Single shot at the end of
  * the chunk loop.
  */
@@ -310,6 +378,10 @@ export async function csvImportWorkflow(
     relatedImportId: params.csvImportId,
     createdBy: params.userId,
   });
+
+  if (params.smsConsent) {
+    await recordConsentStep({ jobId: params.jobId });
+  }
 
   return {
     succeeded,

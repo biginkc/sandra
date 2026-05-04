@@ -148,9 +148,9 @@ export async function sendSmsToContact(
     };
   }
 
-  // 3. Consent check.
+  // 3. Consent check — only hard-block explicit opt-outs; no-consent is allowed.
   const consentState = await getConsentState(supabase, input.contactId, "sms");
-  if (consentState !== "can_send_marketing") {
+  if (consentState === "opted_out") {
     return {
       status: "blocked_no_consent",
       reason: consentMessage(consentState),
@@ -357,13 +357,13 @@ export async function releaseQueuedMessage(
     };
   }
 
-  // Consent re-check — consent may have been revoked since queueing.
+  // Consent re-check — only hard-block if contact explicitly opted out.
   const consentState = await getConsentState(
     supabase,
     msg.contact_id,
     "sms",
   );
-  if (consentState !== "can_send_marketing") {
+  if (consentState === "opted_out") {
     return {
       status: "blocked_no_consent",
       reason: consentMessage(consentState),

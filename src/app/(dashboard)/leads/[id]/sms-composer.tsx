@@ -5,7 +5,6 @@ import { useRouter } from "next/navigation";
 import { useEffect, useState, useTransition } from "react";
 import { toast } from "sonner";
 
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -20,7 +19,7 @@ import { Label } from "@/components/ui/label";
 import { callAction } from "@/lib/errors/call-action";
 import type { DialpadFromOption } from "@/lib/messaging/types";
 
-import { captureConsent, listFromNumbers, sendSmsFromLead } from "../actions";
+import { listFromNumbers, sendSmsFromLead } from "../actions";
 
 type TemplatePick = {
   id: string;
@@ -48,7 +47,6 @@ export function SmsComposer({
   const [body, setBody] = useState("");
   const [selectedTemplateId, setSelectedTemplateId] = useState("");
   const [pending, startTransition] = useTransition();
-  const [capturing, startCapturing] = useTransition();
   const [fromOptions, setFromOptions] = useState<DialpadFromOption[]>([]);
   const [fromNumber, setFromNumber] = useState<string>("");
   const [loadingFroms, setLoadingFroms] = useState(false);
@@ -146,33 +144,6 @@ export function SmsComposer({
     });
   };
 
-  /**
-   * Operator-attested consent capture. The real-world trigger is that
-   * Jarrad has a form-fill / signed agreement / recorded call confirming
-   * the lead agreed to SMS. He clicks this, describes the source, and we
-   * append an `opt_in_marketing_written` event. Captured on the composer
-   * so he never has to leave context to unblock a send.
-   */
-  const capture = () => {
-    if (!homeownerContactId) return;
-    const source = prompt(
-      "Where / how did the homeowner consent? (form URL, in-person signature, recorded call with date, etc.)",
-    );
-    if (!source) return;
-    startCapturing(async () => {
-      const result = await callAction(
-        captureConsent({
-          contactId: homeownerContactId,
-          channel: "sms",
-          eventType: "opt_in_marketing_written",
-          source,
-        }),
-        { successMessage: "Consent recorded", fallbackMessage: "Capture failed" },
-      );
-      if (result.ok) router.refresh();
-    });
-  };
-
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger
@@ -259,20 +230,7 @@ export function SmsComposer({
             disabled={disabled || pending}
             maxLength={2000}
           />
-          <div className="flex items-center justify-between text-xs">
-            <div className="flex items-center gap-1.5">
-              <Badge variant="outline" className="text-xs">
-                160 chars / segment
-              </Badge>
-              <button
-                type="button"
-                onClick={capture}
-                disabled={!homeownerContactId || capturing}
-                className="text-muted-foreground hover:text-foreground text-xs underline underline-offset-2 disabled:opacity-50"
-              >
-                {capturing ? "Recording…" : "Record written consent"}
-              </button>
-            </div>
+          <div className="flex items-center justify-end text-xs">
             <span className={tooLong ? "text-destructive" : "text-muted-foreground"}>
               {length} / 1600
             </span>

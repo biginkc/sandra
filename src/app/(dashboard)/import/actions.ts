@@ -32,6 +32,9 @@ export type CreateImportJobParams = {
    *  row immediately so the wizard's progress UI has a denominator
    *  before the workflow's first heartbeat. */
   totalRows: number;
+  /** When true, the workflow bulk-records opt_in_marketing_written for every
+   *  homeowner contact after ingest (operator attestation at import time). */
+  smsConsent: boolean;
 };
 
 export type CreateImportJobResult = { jobId: string };
@@ -105,6 +108,7 @@ export async function createImportJob(
           market: params.market,
           mapping: params.mapping as Record<string, string | null>,
           storagePath: params.storagePath,
+          smsConsent: params.smsConsent,
         },
       })
       .select("id")
@@ -138,6 +142,7 @@ export async function createImportJob(
             mapping: params.mapping,
             listId,
             userId,
+            smsConsent: params.smsConsent,
           },
         ]);
       } catch (e) {
