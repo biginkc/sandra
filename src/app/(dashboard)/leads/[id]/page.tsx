@@ -16,6 +16,9 @@ import {
   type PropertyStatus,
 } from "../actions";
 
+import { listTemplates } from "../../templates/actions";
+import { loadTemplateVars } from "@/lib/sequences/template-vars";
+import { renderTemplate } from "@/lib/templates/render";
 import { AiAttentionBanner } from "./ai-attention-banner";
 import { AiResponderToggle } from "./ai-responder-toggle";
 import { SkipTraceToggle } from "./skip-trace-toggle";
@@ -151,6 +154,30 @@ export default async function LeadDetailPage({
     if (t) initialTags.push(t);
   }
 
+  // Admin client — shared for user-email resolution + template-var loading.
+  const admin = createAdminClient();
+
+  // Fetch SMS templates and pre-render them with this property's vars so the
+  // composer picker can just do a straight body injection on selection.
+  const templatesResult = await listTemplates();
+  let templateOptions: Array<{ id: string; name: string; body: string }> = [];
+  if (templatesResult.ok && templatesResult.data.length > 0) {
+    const vars = await loadTemplateVars(
+      supabase,
+      {
+        propertyId: lead.id,
+        contactId: homeownerContactId,
+        enrolledByUserId: sessionUser?.id ?? null,
+      },
+      admin,
+    );
+    templateOptions = templatesResult.data.map((t) => ({
+      id: t.id,
+      name: t.name,
+      body: renderTemplate(t.content, vars),
+    }));
+  }
+
   // Resolve author + assignee emails via the admin client (auth.users isn't
   // RLS-accessible to end-users). Batched into a single listUsers() call.
   const userIdsNeeded = new Set<string>();
@@ -162,7 +189,6 @@ export default async function LeadDetailPage({
   let assigneeEmail: string | null = null;
   if (userIdsNeeded.size > 0) {
     try {
-      const admin = createAdminClient();
       const { data: usersPage } = await admin.auth.admin.listUsers({
         perPage: 200,
       });
@@ -285,6 +311,7 @@ export default async function LeadDetailPage({
                       .join(" ") || null
                   : null
             }
+            templates={templateOptions}
           />
         </div>
       </div>

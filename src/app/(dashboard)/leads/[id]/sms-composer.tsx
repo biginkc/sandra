@@ -22,11 +22,18 @@ import type { DialpadFromOption } from "@/lib/messaging/types";
 
 import { captureConsent, listFromNumbers, sendSmsFromLead } from "../actions";
 
+type TemplatePick = {
+  id: string;
+  name: string;
+  body: string;
+};
+
 type Props = {
   propertyId: string;
   homeownerContactId: string | null;
   homeownerPhone: string | null;
   homeownerName: string | null;
+  templates?: TemplatePick[];
 };
 
 export function SmsComposer({
@@ -34,10 +41,12 @@ export function SmsComposer({
   homeownerContactId,
   homeownerPhone,
   homeownerName,
+  templates = [],
 }: Props) {
   const router = useRouter();
   const [open, setOpen] = useState(false);
   const [body, setBody] = useState("");
+  const [selectedTemplateId, setSelectedTemplateId] = useState("");
   const [pending, startTransition] = useTransition();
   const [capturing, startCapturing] = useTransition();
   const [fromOptions, setFromOptions] = useState<DialpadFromOption[]>([]);
@@ -212,6 +221,32 @@ export function SmsComposer({
             ))}
           </select>
         </div>
+
+        {templates.length > 0 && (
+          <div className="flex flex-col gap-2">
+            <Label htmlFor="sms-template">Template</Label>
+            <select
+              id="sms-template"
+              className="border-input bg-transparent rounded-md border px-3 py-2 text-sm shadow-sm focus-visible:ring-1 focus-visible:outline-none"
+              value={selectedTemplateId}
+              onChange={(e) => {
+                const id = e.target.value;
+                if (!id) return;
+                const tpl = templates.find((t) => t.id === id);
+                if (tpl) setBody(tpl.body);
+                setSelectedTemplateId("");
+              }}
+              disabled={disabled || pending}
+            >
+              <option value="">Select a template…</option>
+              {templates.map((t) => (
+                <option key={t.id} value={t.id}>
+                  {t.name}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
 
         <div className="flex flex-col gap-2">
           <Label htmlFor="sms-body">Message</Label>
