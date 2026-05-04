@@ -1,0 +1,21 @@
+Hey there, my name is Kylie. I'm your customer support manager at REI SIFT.
+In this video, I'll be showing you how notifications work.
+Notifications are indicated by the bell here, located towards the top right of your account.
+You receive a notification within your account when properties are assigned, when tasks are assigned, created or overdue.
+When a SIF line board is created or updated.
+When a card is created on a SIF line board.
+If a note is added on the property or owner message board.
+If a sequence that you created fails to run.
+And when an activity completes.
+Some examples of the activities are bulk actions such as adding tags, which appear under the activity action section of your account.
+Exporting, skip tracing and direct mail.
+The amount of notifications will increment with each new notification that you receive until all notifications are marked as read or cleared.
+If you click a notification here, it will no longer stay highlighted.
+You can mark all is read by clicking here.
+You can clear all tasks by clicking towards the top right.
+And if you would like to view all notifications, you can click here.
+And view them all in one page.
+So let your team know to keep an eye on their notifications and check them frequently so they can start working on any new records assigned.
+Be sure to check out our additional articles in the Help Center for questions about creating any of these activities.
+If you have any questions, just reach out to support by clicking the arrow next to your name here and talk to us.
+Thanks guys. I hope you have a great rest of your day.
