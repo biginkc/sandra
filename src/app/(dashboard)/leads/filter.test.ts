@@ -61,21 +61,27 @@ describe("filterLeads", () => {
   });
 
   it("matches across different fields (address, city, market)", () => {
+    // "kansas" matches Lead 2's city ("Kansas City") and market ("Kansas City")
     expect(filterLeads(leads, "kansas")).toHaveLength(1);
-    expect(filterLeads(leads, "dayton")).toHaveLength(1);
+    // "dayton" no longer appears in any fixture — legacy city-shaped market removed per phase 02
+    expect(filterLeads(leads, "dayton")).toHaveLength(0);
+    // state "MO" appears on Lead 0 (Jackson County MO), Lead 2 (Kansas City), Lead 3 (null city)
     expect(filterLeads(leads, "MO")).toHaveLength(3);
   });
 
   it("matches on ZIP", () => {
-    const result = filterLeads(leads, "63101");
+    // Lead 2 carries zip 64108 (Kansas City MO) — legacy fixture retained per D-05
+    const result = filterLeads(leads, "64108");
     expect(result).toHaveLength(1);
-    expect(result[0].city).toBe("St. Louis");
+    expect(result[0].city).toBe("Kansas City");
   });
 
   it("AND-s multiple tokens — all must match somewhere", () => {
-    expect(filterLeads(leads, "kansas main")).toHaveLength(1);
-    expect(filterLeads(leads, "main dayton")).toHaveLength(0);
-    expect(filterLeads(leads, "MO st")).toHaveLength(2); // matches '123 Main St' + '456 Oak Ave/St. Louis'
+    // "jackson" + "main": Lead 0 has market "Jackson County MO" and address "123 Main St" → match
+    expect(filterLeads(leads, "jackson main")).toHaveLength(1);
+    expect(filterLeads(leads, "main olathe")).toHaveLength(0);
+    // "MO" + "st": Lead 0 has state "MO" and address "123 Main St" → 1 match
+    expect(filterLeads(leads, "MO st")).toHaveLength(1); // matches '123 Main St' (MO state + "st" in address)
   });
 
   it("returns empty array when no lead matches", () => {
@@ -95,7 +101,10 @@ describe("filterLeads", () => {
   });
 
   it("matches on homeowner first name", () => {
-    const result = filterLeads(leads, "john");
+    // "john smith" ANDs both tokens: "john" in first_name + "smith" in last_name → only Lead 0.
+    // NOTE: "john" alone would also match Lead 1's market "Johnson County KS" (substring),
+    // so we use two tokens to isolate the homeowner-name assertion.
+    const result = filterLeads(leads, "john smith");
     expect(result).toHaveLength(1);
     expect(result[0].address).toBe("123 Main St");
   });
@@ -113,8 +122,10 @@ describe("filterLeads", () => {
   });
 
   it("AND-s multi-token across address + owner name", () => {
-    expect(filterLeads(leads, "kansas smith")).toHaveLength(1);
-    expect(filterLeads(leads, "dayton smith")).toHaveLength(0);
+    // "jackson smith": Lead 0 has market "Jackson County MO" + last_name "Smith" → 1 match
+    expect(filterLeads(leads, "jackson smith")).toHaveLength(1);
+    // "olathe smith": "Olathe" is Lead 1's city, "Smith" is Lead 0's name — no single lead has both → 0
+    expect(filterLeads(leads, "olathe smith")).toHaveLength(0);
   });
 
   it("tolerates leads with null homeowner", () => {
