@@ -88,11 +88,36 @@ export async function processEnrollmentTick(
   // 2. Re-check property status against pause rules.
   const { data: property, error: propErr } = await client
     .from("properties")
-    .select("status, state, address")
+    .select("status, state, address, outreach_dispo")
     .eq("id", enrollment.property_id)
     .maybeSingle();
   if (propErr || !property) {
     return { status: "failed", enrollmentId: enrollment.id, message: propErr?.message ?? "property missing" };
+  }
+
+  // Disqualifying outreach dispos permanently pause sequences — the
+  // prospect has opted out, requested DNC, or has a bad number.
+  const DISPO_PAUSE: ReadonlySet<string> = new Set([
+    "wrong_number",
+    "bad_number",
+    "dnc",
+    "opted_out",
+  ]);
+  if (property.outreach_dispo && DISPO_PAUSE.has(property.outreach_dispo)) {
+    const permanent = property.outreach_dispo === "dnc" || property.outreach_dispo === "opted_out";
+    await client
+      .from("sequence_enrollments")
+      .update({
+        status: permanent ? "opted_out" : "paused",
+        pause_reason: property.outreach_dispo,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", enrollment.id);
+    return {
+      status: "paused",
+      enrollmentId: enrollment.id,
+      reason: property.outreach_dispo,
+    };
   }
 
   const pauseDecision = evaluatePause({

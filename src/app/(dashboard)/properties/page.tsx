@@ -82,7 +82,7 @@ export default async function PropertiesPage({
   let query = supabase
     .from("properties")
     .select(
-      "id, address, city, state, zip, market, cass_status, is_vacant, created_at",
+      "id, address, city, state, zip, market, cass_status, is_vacant, created_at, outreach_dispo",
       { count: "exact" },
     )
     .eq("status", "prospect")
@@ -162,6 +162,7 @@ export default async function PropertiesPage({
       created_at: p.created_at,
       engagement: computeEngagement(latest),
       last_message_preview: truncateMessagePreview(latest?.body ?? null),
+      outreach_dispo: p.outreach_dispo ?? null,
     };
   });
 
