@@ -33,6 +33,16 @@ vi.mock("./actions", () => ({
   dismissUnknownSender: vi.fn(),
   restoreDismissedSender: vi.fn(),
   mergeUnknownSenderToProperty: vi.fn(),
+  getQueueStats: vi.fn(async () => ({
+    ok: true,
+    data: {
+      queued: 0,
+      sentToday: 0,
+      failedToday: 0,
+      nextScheduledFor: null,
+      lastScheduledFor: null,
+    },
+  })),
 }));
 
 vi.mock("../leads/actions", () => ({
@@ -128,6 +138,13 @@ const baseProps = {
   unknownActiveCount: 0,
   assigneeEmails: {},
   currentUserId: "user-1",
+  queueStats: {
+    queued: 0,
+    sentToday: 0,
+    failedToday: 0,
+    nextScheduledFor: null,
+    lastScheduledFor: null,
+  },
 };
 
 describe("<CockpitView /> URL deep-linking", () => {

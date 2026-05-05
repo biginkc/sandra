@@ -5,10 +5,19 @@ import { listUnknownSenders } from "@/lib/messages/list-unknown-senders";
 
 import { markMessagesReadForProperty } from "../leads/actions";
 
+import { getQueueStats, type QueueStats } from "./actions";
 import { CockpitView } from "./cockpit-view";
 import { fetchInboxDetail } from "./inbox-detail-data";
 import { type InboxFilter } from "./inbox-filters";
 import { type QueuedRow } from "./queue-panel";
+
+const EMPTY_QUEUE_STATS: QueueStats = {
+  queued: 0,
+  sentToday: 0,
+  failedToday: 0,
+  nextScheduledFor: null,
+  lastScheduledFor: null,
+};
 
 export const metadata = {
   title: "Messages · Sandra CRM",
@@ -63,26 +72,39 @@ export default async function MessagesPage({
   // Fetch everything in parallel. The thread list + unknown active count
   // are needed regardless of which filter is active (badge counts on the
   // tab + filter chips). Other queries are conditional on the filter.
-  const [threads, queuedResult, threadDetail, unknownActive, unknownAll] =
-    await Promise.all([
-      listThreads(supabase, threadOpts),
-      supabase
-        .from("messages")
-        .select(
-          `id, body, from_address, to_address, created_at, property_id, contact_id,
+  const [
+    threads,
+    queuedResult,
+    threadDetail,
+    unknownActive,
+    unknownAll,
+    queueStatsResult,
+  ] = await Promise.all([
+    listThreads(supabase, threadOpts),
+    supabase
+      .from("messages")
+      .select(
+        `id, body, from_address, to_address, created_at, property_id, contact_id,
            property:properties(id, address, city, state),
            contact:contacts(id, first_name, last_name, entity_name, phone_1)`,
-        )
-        .eq("status", "queued")
-        .order("created_at", { ascending: true }),
-      isThreadFilter(filter) && selectedContactId
-        ? fetchInboxDetail(supabase, selectedContactId)
-        : Promise.resolve(null),
-      listUnknownSenders(supabase, {}),
-      filter === "dismissed"
-        ? listUnknownSenders(supabase, { includeDismissed: true })
-        : Promise.resolve([]),
-    ]);
+      )
+      .eq("status", "queued")
+      .order("created_at", { ascending: true }),
+    isThreadFilter(filter) && selectedContactId
+      ? fetchInboxDetail(supabase, selectedContactId)
+      : Promise.resolve(null),
+    listUnknownSenders(supabase, {}),
+    filter === "dismissed"
+      ? listUnknownSenders(supabase, { includeDismissed: true })
+      : Promise.resolve([]),
+    getQueueStats(),
+  ]);
+
+  // Banner still renders if first-paint stats fail — the client-side poll
+  // will retry every 30s.
+  const queueStats: QueueStats = queueStatsResult.ok
+    ? queueStatsResult.data
+    : EMPTY_QUEUE_STATS;
 
   // Hydrate assignee emails for whichever assignee ids appear on the
   // visible threads. One auth.admin.listUsers call covers the whole page.
@@ -149,6 +171,7 @@ export default async function MessagesPage({
       unknownActiveCount={unknownActive.length}
       assigneeEmails={assigneeEmails}
       currentUserId={currentUser?.id ?? null}
+      queueStats={queueStats}
     />
   );
 }
