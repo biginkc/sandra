@@ -109,8 +109,12 @@ type Props = {
   /** Total count across all pages matching the current filters — drives the
    *  "Select all N prospects" cross-page selection banner. */
   total: number;
-  /** Rows per page — used to compute totalPages and the "Showing X–Y of Z" footer. */
+  /** Rows per page — used to compute the "Showing X–Y of Z" footer bounds and to gate the cross-page select-all banner. */
   pageSize: number;
+  /** Current page number (1-indexed) — server-rendered authoritative value from the URL `?page=` param. Drives `<CircularPagination currentPage>`. */
+  page: number;
+  /** Total page count — computed on the server as `Math.ceil(total / pageSize)`. Drives `<CircularPagination totalPages>` and gates the footer pagination strip. */
+  totalPages: number;
 };
 
 function summarize(outcome: BulkOutcome, noun = "prospect"): string {
@@ -138,6 +142,8 @@ export function ProspectsTable({
   filters,
   total,
   pageSize,
+  page,
+  totalPages,
 }: Props) {
   const router = useRouter();
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -175,9 +181,11 @@ export function ProspectsTable({
     },
   });
   const navPending = ts.navPending;
-  const totalPages = Math.max(1, Math.ceil(total / pageSize));
-  const showingFrom = total === 0 ? 0 : (ts.page - 1) * pageSize + 1;
-  const showingTo = Math.min(ts.page * pageSize, total);
+  // `totalPages` is now sourced from server-rendered props (Plan 01.5-04 contract).
+  // showingFrom/showingTo are still computed client-side from `total + pageSize + page`
+  // because they're a display-only derivation; the server doesn't need to ship them.
+  const showingFrom = total === 0 ? 0 : (page - 1) * pageSize + 1;
+  const showingTo = Math.min(page * pageSize, total);
 
   // Filter / search / sort change → the previously-selected "all matching"
   // set is no longer a faithful representation of what currently matches,
@@ -843,7 +851,7 @@ export function ProspectsTable({
           </span>
           {totalPages > 1 && (
             <CircularPagination
-              currentPage={ts.page}
+              currentPage={page}
               totalPages={totalPages}
               onPageChange={(p) =>
                 ts.navigate(

@@ -268,6 +268,8 @@ export default async function PropertiesPage({
         filters={filters}
         total={total}
         pageSize={PAGE_SIZE}
+        page={page}
+        totalPages={totalPages}
       />
     </Page>
   );
