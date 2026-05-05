@@ -85,14 +85,9 @@ test.describe("Import wizard — county dropdown (Phase 02 smoke)", () => {
     // Select Jackson County MO.
     await page.getByRole("option", { name: "Jackson County MO" }).click();
 
-    // After selection the placeholder is gone — trigger now shows a value.
-    // NOTE: Radix Select currently shows the county UUID as the trigger text
-    // (SelectValue falls back to the raw value when SelectContent is unmounted).
-    // This is a known UX bug tracked separately — the dropdown options
-    // still show county-shaped strings (verified by test 1), so MARKET-04
-    // is satisfied at the list level. The trigger display fix is a follow-up.
+    // After selection the trigger shows the county market string.
     await expect(
-      page.getByRole("combobox").filter({ hasText: /pick a market/i }),
-    ).toHaveCount(0, { timeout: 5_000 });
+      page.getByRole("combobox").filter({ hasText: "Jackson County MO" }),
+    ).toBeVisible({ timeout: 5_000 });
   });
 });

@@ -295,7 +295,11 @@ export function StepUpload({ state, dispatch, counties }: Props) {
             }}
           >
             <SelectTrigger>
-              <SelectValue placeholder="Pick a market…" />
+              <SelectValue placeholder="Pick a market…">
+                {state.countyId
+                  ? (counties.find((c) => c.id === state.countyId)?.market ?? "")
+                  : null}
+              </SelectValue>
             </SelectTrigger>
             <SelectContent>
               {counties.map((c) => (
