@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useTransition } from "react";
+import { useEffect, useMemo, useState, useTransition } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -13,7 +13,11 @@ import {
 } from "@/components/ui/dialog";
 import { callAction } from "@/lib/errors/call-action";
 
-import { bulkQueueSms, listSmsTemplateCategories } from "./actions";
+import {
+  bulkQueueSms,
+  countAlreadyContacted,
+  listSmsTemplateCategories,
+} from "./actions";
 
 type Category = { category: string; count: number };
 
@@ -24,12 +28,37 @@ type Props = {
   onQueued: (succeeded: number) => void;
 };
 
+type PaceUnit = "seconds" | "minutes";
+
+/** Convert a {value, unit} pacing pair into raw seconds. */
+export function resolvePaceSeconds(value: number, unit: PaceUnit): number {
+  return value * (unit === "minutes" ? 60 : 1);
+}
+
+const PACE_MIN_SECONDS = 10;
+const PACE_MAX_SECONDS = 600;
+const SKIP_DEFAULT_THRESHOLD = 50;
+
 export function BulkSmsModal({ open, propertyIds, onClose, onQueued }: Props) {
   const [categories, setCategories] = useState<Category[]>([]);
   const [selectedCategory, setSelectedCategory] = useState<string>("");
   const [customBody, setCustomBody] = useState("");
   const [mode, setMode] = useState<"category" | "custom">("category");
   const [pending, startTransition] = useTransition();
+
+  // Pacing
+  const [paceValue, setPaceValue] = useState<number>(18);
+  const [paceUnit, setPaceUnit] = useState<PaceUnit>("seconds");
+
+  // Skip-contacted: defaults ON for >50 selections per the locked plan rule.
+  const [skipContacted, setSkipContacted] = useState<boolean>(
+    propertyIds.length > SKIP_DEFAULT_THRESHOLD,
+  );
+  const [contactedCount, setContactedCount] = useState<number | null>(null);
+
+  // Stable key so the count-fetch effect doesn't re-run on every parent render
+  // even if the parent passes a fresh array reference each time.
+  const propertyIdsKey = useMemo(() => propertyIds.join(","), [propertyIds]);
 
   useEffect(() => {
     if (!open) return;
@@ -39,14 +68,26 @@ export function BulkSmsModal({ open, propertyIds, onClose, onQueued }: Props) {
         setSelectedCategory(result.data[0]?.category ?? "");
       }
     });
-  }, [open]);
+    setContactedCount(null);
+    countAlreadyContacted(propertyIds).then((result) => {
+      if (result.ok) setContactedCount(result.data);
+    });
+    // Reset the skip-contacted default whenever we open with a new selection.
+    setSkipContacted(propertyIds.length > SKIP_DEFAULT_THRESHOLD);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, propertyIdsKey]);
+
+  const resolvedPaceSeconds = resolvePaceSeconds(paceValue, paceUnit);
+  const paceOutOfRange =
+    !Number.isFinite(resolvedPaceSeconds) ||
+    resolvedPaceSeconds < PACE_MIN_SECONDS ||
+    resolvedPaceSeconds > PACE_MAX_SECONDS;
 
   const handleSend = () => {
-    const opts =
-      mode === "category"
-        ? { templateCategory: selectedCategory }
-        : { body: customBody.trim() };
-
+    if (paceOutOfRange) {
+      toast.error("Pacing must be between 10 seconds and 10 minutes.");
+      return;
+    }
     if (mode === "category" && !selectedCategory) {
       toast.error("Pick a template category first.");
       return;
@@ -55,6 +96,19 @@ export function BulkSmsModal({ open, propertyIds, onClose, onQueued }: Props) {
       toast.error("Enter a message body.");
       return;
     }
+
+    const opts =
+      mode === "category"
+        ? {
+            templateCategory: selectedCategory,
+            paceSeconds: resolvedPaceSeconds,
+            skipIfContacted: skipContacted,
+          }
+        : {
+            body: customBody.trim(),
+            paceSeconds: resolvedPaceSeconds,
+            skipIfContacted: skipContacted,
+          };
 
     startTransition(async () => {
       const result = await callAction(bulkQueueSms(propertyIds, opts), {
@@ -79,6 +133,9 @@ export function BulkSmsModal({ open, propertyIds, onClose, onQueued }: Props) {
       }
     });
   };
+
+  const skipLabelCount =
+    contactedCount === null ? "…" : String(contactedCount);
 
   return (
     <Dialog open={open} onOpenChange={(o) => { if (!o) onClose(); }}>
@@ -151,10 +208,55 @@ export function BulkSmsModal({ open, propertyIds, onClose, onQueued }: Props) {
             </div>
           )}
 
-          <p className="text-muted-foreground text-xs">
-            Messages are queued with 18-second pacing and sent by the cron
-            after consent + quiet-hours checks pass.
-          </p>
+          {/* Pacing — number + unit dropdown (human-readable UI). */}
+          <div className="space-y-1.5">
+            <label htmlFor="bulk-sms-pace" className="text-sm font-medium">
+              Pacing
+            </label>
+            <div className="flex gap-2">
+              <input
+                id="bulk-sms-pace"
+                type="number"
+                min={1}
+                value={paceValue}
+                onChange={(e) => setPaceValue(Number(e.target.value))}
+                aria-label="Pacing"
+                className="border-input bg-background w-24 rounded-md border px-3 py-2 text-sm"
+              />
+              <select
+                value={paceUnit}
+                onChange={(e) => setPaceUnit(e.target.value as PaceUnit)}
+                aria-label="Pacing unit"
+                className="border-input bg-background rounded-md border px-3 py-2 text-sm"
+              >
+                <option value="seconds">seconds</option>
+                <option value="minutes">minutes</option>
+              </select>
+            </div>
+            {paceOutOfRange ? (
+              <p className="text-destructive text-xs" role="alert">
+                Pacing must be between 10 seconds and 10 minutes.
+              </p>
+            ) : (
+              <p className="text-muted-foreground text-xs">
+                Messages release at {resolvedPaceSeconds}-second intervals.
+                Cron drains the queue honoring quiet hours.
+              </p>
+            )}
+          </div>
+
+          {/* Skip prospects already contacted */}
+          <div>
+            <label className="flex items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={skipContacted}
+                onChange={(e) => setSkipContacted(e.target.checked)}
+                className="border-input rounded"
+              />
+              Skip prospects already contacted ({skipLabelCount})
+            </label>
+          </div>
         </div>
 
         <DialogFooter>
@@ -162,7 +264,9 @@ export function BulkSmsModal({ open, propertyIds, onClose, onQueued }: Props) {
             Cancel
           </Button>
           <Button onClick={handleSend} disabled={pending}>
-            {pending ? "Queuing…" : `Queue ${propertyIds.length} message${propertyIds.length === 1 ? "" : "s"}`}
+            {pending
+              ? "Queuing…"
+              : `Queue ${propertyIds.length} message${propertyIds.length === 1 ? "" : "s"}`}
           </Button>
         </DialogFooter>
       </DialogContent>
