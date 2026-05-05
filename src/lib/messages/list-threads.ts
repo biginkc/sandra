@@ -84,31 +84,27 @@ export async function listThreads(
     ),
   );
 
-  const [contactsRes, propsRes] = await Promise.all([
-    supabase
-      .from("contacts")
-      .select("id, first_name, last_name, entity_name, phone_1")
-      .in("id", contactIds),
-    propertyIds.length > 0
-      ? supabase
-          .from("properties")
-          .select("id, address, city, state, assigned_user_id")
-          .in("id", propertyIds)
-      : Promise.resolve({ data: [], error: null }),
-  ]);
-  if (contactsRes.error) {
-    throw new Error(`listThreads contacts: ${contactsRes.error.message}`);
-  }
-  if (propsRes.error) {
-    throw new Error(`listThreads properties: ${propsRes.error.message}`);
-  }
+  // PostgREST rejects oversized IN clauses (URL length limit, ~8 KB).
+  // Split into batches so an active inbox with hundreds of contacts still loads.
+  const CHUNK = 250;
 
-  const contactById = new Map(
-    (contactsRes.data ?? []).map((c) => [c.id, c]),
-  );
-  const propertyById = new Map(
-    (propsRes.data ?? []).map((p) => [p.id, p]),
-  );
+  const [contactsRows, propsRows] = await Promise.all([
+    fetchInChunks(contactIds, CHUNK, (chunk) =>
+      supabase
+        .from("contacts")
+        .select("id, first_name, last_name, entity_name, phone_1")
+        .in("id", chunk),
+    ),
+    fetchInChunks(propertyIds, CHUNK, (chunk) =>
+      supabase
+        .from("properties")
+        .select("id, address, city, state, assigned_user_id")
+        .in("id", chunk),
+    ),
+  ]);
+
+  const contactById = new Map(contactsRows.map((c) => [c.id, c]));
+  const propertyById = new Map(propsRows.map((p) => [p.id, p]));
 
   const threads: Thread[] = [];
   for (const [contactId, bucket] of byContact) {
@@ -139,4 +135,28 @@ export async function listThreads(
 
   threads.sort((a, b) => b.lastMessageAt.localeCompare(a.lastMessageAt));
   return threads;
+}
+
+/**
+ * Run a Supabase `.in("id", chunk)` query in batches and concatenate the rows.
+ * Throws if any chunk errors. Returns [] for an empty input without hitting the
+ * network (PostgREST treats `id=in.()` as a 400).
+ */
+async function fetchInChunks<T>(
+  ids: string[],
+  chunkSize: number,
+  query: (chunk: string[]) => PromiseLike<{ data: T[] | null; error: { message: string } | null }>,
+): Promise<T[]> {
+  if (ids.length === 0) return [];
+  const chunks: string[][] = [];
+  for (let i = 0; i < ids.length; i += chunkSize) {
+    chunks.push(ids.slice(i, i + chunkSize));
+  }
+  const results = await Promise.all(chunks.map((c) => query(c)));
+  const rows: T[] = [];
+  for (const r of results) {
+    if (r.error) throw new Error(`listThreads chunk: ${r.error.message}`);
+    if (r.data) rows.push(...r.data);
+  }
+  return rows;
 }

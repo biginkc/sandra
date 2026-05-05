@@ -40,7 +40,12 @@ const env = loadTestEnv();
 
 export default defineConfig({
   test: {
-    include: ["src/**/*.integration.test.ts"],
+    include: [
+      "src/**/*.integration.test.ts",
+      // Migration integration tests live alongside the migration SQL files.
+      // Added in phase 02-05 to include 046_backfill*.integration.test.ts.
+      "supabase/migrations/**/*.integration.test.ts",
+    ],
     environment: "node",
     reporters: ["default"],
     // Real DB calls — 30s per test covers a reset + a few inserts + a
