@@ -63,7 +63,7 @@ jobs:
         run: supabase link --project-ref "$PROD_PROJECT_REF"
 
       - name: Apply pending migrations
-        run: supabase db push --password "${{ secrets.PROD_SUPABASE_DB_PASSWORD }}"
+        run: supabase db push --include-all --password "${{ secrets.PROD_SUPABASE_DB_PASSWORD }}"
 
   migrate-test:
     name: Apply migrations to test
@@ -88,4 +88,4 @@ jobs:
         run: supabase link --project-ref "$TEST_PROJECT_REF"
 
       - name: Apply pending migrations
-        run: supabase db push --password "${{ secrets.TEST_SUPABASE_DB_PASSWORD }}"
+        run: supabase db push --include-all --password "${{ secrets.TEST_SUPABASE_DB_PASSWORD }}"
