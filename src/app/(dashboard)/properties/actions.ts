@@ -281,16 +281,24 @@ export async function getAllMatchingProspectIds(args: {
       query = query.in("id", engagementFilteredIds);
     }
 
-    const { data, error } = await query.limit(SELECT_ALL_HARD_CAP);
-
-    if (error) {
-      return {
-        ok: false,
-        error: { code: "SELECT_ALL_FAILED", message: error.message },
-      };
+    // PostgREST silently caps results at 1 000 rows (db-max-rows default).
+    // Paginate with .range() until a page comes back short to collect all IDs.
+    const PAGE = 1000;
+    const allIds: string[] = [];
+    for (let from = 0; from < SELECT_ALL_HARD_CAP; from += PAGE) {
+      const { data, error } = await query.range(from, from + PAGE - 1);
+      if (error) {
+        return {
+          ok: false,
+          error: { code: "SELECT_ALL_FAILED", message: error.message },
+        };
+      }
+      const page = (data ?? []).map((r) => r.id);
+      allIds.push(...page);
+      if (page.length < PAGE) break;
     }
 
-    return ok((data ?? []).map((r) => r.id));
+    return ok(allIds);
   } catch (e) {
     reportError(e, { tags: { surface: "get_all_matching_prospect_ids" } });
     return errFromUnknown(e, "SELECT_ALL_FAILED");
