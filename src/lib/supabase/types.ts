@@ -263,6 +263,7 @@ export type Database = {
       counties: {
         Row: {
           created_at: string
+          fips_code: string | null
           id: string
           market: string
           name: string
@@ -271,6 +272,7 @@ export type Database = {
         }
         Insert: {
           created_at?: string
+          fips_code?: string | null
           id?: string
           market: string
           name: string
@@ -279,6 +281,7 @@ export type Database = {
         }
         Update: {
           created_at?: string
+          fips_code?: string | null
           id?: string
           market?: string
           name?: string
@@ -297,6 +300,7 @@ export type Database = {
       }
       csv_imports: {
         Row: {
+          county_id: string | null
           created_at: string
           errors: Json | null
           failed_rows: number
@@ -314,6 +318,7 @@ export type Database = {
           user_id: string | null
         }
         Insert: {
+          county_id?: string | null
           created_at?: string
           errors?: Json | null
           failed_rows?: number
@@ -331,6 +336,7 @@ export type Database = {
           user_id?: string | null
         }
         Update: {
+          county_id?: string | null
           created_at?: string
           errors?: Json | null
           failed_rows?: number
@@ -348,6 +354,13 @@ export type Database = {
           user_id?: string | null
         }
         Relationships: [
+          {
+            foreignKeyName: "csv_imports_county_id_fkey"
+            columns: ["county_id"]
+            isOneToOne: false
+            referencedRelation: "counties"
+            referencedColumns: ["id"]
+          },
           {
             foreignKeyName: "csv_imports_org_id_fkey"
             columns: ["org_id"]
