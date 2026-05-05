@@ -70,7 +70,7 @@ const BUILD_CONFIG = {
  * defaultValue, the active-sort indicator, and the archived pill all
  * read from the URL on every render.
  */
-export function ListsTable({ rows, parsed, total: _total }: Props) {
+export function ListsTable({ rows, parsed, total }: Props) {
   const ts = useTableUrlState<ListsFilters>({
     basePath: "/lists",
     parsed,
@@ -249,7 +249,7 @@ export function ListsTable({ rows, parsed, total: _total }: Props) {
         </Table>
         <DataTableFooter>
           <span className="text-muted-foreground text-sm">
-            {rows.length} list{rows.length === 1 ? "" : "s"}
+            {total.toLocaleString()} {total === 1 ? "list" : "lists"}
           </span>
         </DataTableFooter>
       </DataTableShell>
