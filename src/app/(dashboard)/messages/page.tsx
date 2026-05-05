@@ -89,7 +89,8 @@ export default async function MessagesPage({
            contact:contacts(id, first_name, last_name, entity_name, phone_1)`,
       )
       .eq("status", "queued")
-      .order("created_at", { ascending: true }),
+      .order("scheduled_for", { ascending: true })
+      .limit(100),
     isThreadFilter(filter) && selectedContactId
       ? fetchInboxDetail(supabase, selectedContactId)
       : Promise.resolve(null),
