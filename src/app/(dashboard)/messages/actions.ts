@@ -1,6 +1,7 @@
 "use server";
 
 import { createClient } from "@/lib/supabase/server";
+import { createAdminClient } from "@/lib/supabase/admin";
 import { errFromUnknown, ok, type Result } from "@/lib/errors/result";
 import { reportError } from "@/lib/errors/report";
 import {
@@ -438,7 +439,7 @@ export type QueueStats = {
  */
 export async function getQueueStats(): Promise<Result<QueueStats>> {
   try {
-    const supabase = await createClient();
+    const supabase = createAdminClient();
     const todayStart = new Date();
     todayStart.setUTCHours(0, 0, 0, 0);
     const todayStartIso = todayStart.toISOString();

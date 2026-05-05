@@ -1,9 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const { createClient } = vi.hoisted(() => ({ createClient: vi.fn() }));
+const { createAdminClient } = vi.hoisted(() => ({ createAdminClient: vi.fn() }));
 
-vi.mock("@/lib/supabase/server", () => ({
-  createClient,
+vi.mock("@/lib/supabase/admin", () => ({
+  createAdminClient,
 }));
 
 vi.mock("@/lib/errors/report", () => ({
@@ -108,7 +108,7 @@ function makeSupabase() {
 }
 
 beforeEach(() => {
-  createClient.mockReset();
+  createAdminClient.mockReset();
   responseQueue = [];
   calls = [];
 });
@@ -130,7 +130,7 @@ function pushAllZeros() {
 describe("getQueueStats", () => {
   it("returns 0/0/0/null/null when no messages exist", async () => {
     pushAllZeros();
-    createClient.mockResolvedValue(makeSupabase());
+    createAdminClient.mockReturnValue(makeSupabase());
 
     const result = await getQueueStats();
     expect(result.ok).toBe(true);
@@ -152,7 +152,7 @@ describe("getQueueStats", () => {
       { data: [], error: null },
       { data: [], error: null },
     ];
-    createClient.mockResolvedValue(makeSupabase());
+    createAdminClient.mockReturnValue(makeSupabase());
 
     const result = await getQueueStats();
     expect(result.ok).toBe(true);
@@ -171,7 +171,7 @@ describe("getQueueStats", () => {
       { data: [], error: null },
       { data: [], error: null },
     ];
-    createClient.mockResolvedValue(makeSupabase());
+    createAdminClient.mockReturnValue(makeSupabase());
 
     const result = await getQueueStats();
     expect(result.ok).toBe(true);
@@ -198,7 +198,7 @@ describe("getQueueStats", () => {
       { data: [], error: null },
       { data: [], error: null },
     ];
-    createClient.mockResolvedValue(makeSupabase());
+    createAdminClient.mockReturnValue(makeSupabase());
 
     const result = await getQueueStats();
     expect(result.ok).toBe(true);
@@ -221,7 +221,7 @@ describe("getQueueStats", () => {
       { data: [{ scheduled_for: "2026-05-04T18:00:00Z" }], error: null },
       { data: [{ scheduled_for: "2026-05-05T06:30:00Z" }], error: null },
     ];
-    createClient.mockResolvedValue(makeSupabase());
+    createAdminClient.mockReturnValue(makeSupabase());
 
     const result = await getQueueStats();
     expect(result.ok).toBe(true);
@@ -249,7 +249,7 @@ describe("getQueueStats", () => {
       { data: [], error: null },
       { data: [], error: null },
     ];
-    createClient.mockResolvedValue(makeSupabase());
+    createAdminClient.mockReturnValue(makeSupabase());
 
     const result = await getQueueStats();
     expect(result.ok).toBe(false);
