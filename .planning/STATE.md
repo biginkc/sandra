@@ -20,7 +20,7 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-30)
 
 **Core value:** Get the right message to the right property owner at the right time
-**Current focus:** Phase 01.5 — sandra-design-system-retrofit
+**Current focus:** Phase 02 — market-vocabulary-refactor
 
 ## Current Milestone
 
@@ -28,10 +28,9 @@ See: .planning/PROJECT.md (updated 2026-04-30)
 
 ## Current Position
 
-Phase: 01.5 (sandra-design-system-retrofit) — EXECUTING
-Plan: 1 of 5
-Status: Executing Phase 01.5
-Last activity: 2026-05-05 -- Completed quick task 260504-tgq: Bulk SMS modal pacing input + skip-contacted checkbox + live queue stats banner on /messages Outbox
+Phase: 02 (market-vocabulary-refactor) — DISCUSS
+Status: Phase 01.5 complete — advancing to Phase 02
+Last activity: 2026-05-05 -- Phase 01.5 UAT approved; advancing to Phase 02 (Market Vocabulary Refactor)
 
 ## Status
 
@@ -46,7 +45,9 @@ Last activity: 2026-05-05 -- Completed quick task 260504-tgq: Bulk SMS modal pac
 - Prod build fixed (PR #98 — vendored @sandra/tokens CSS)
 - 939 messages rescheduled — draining at 1/min from 8 AM CDT 2026-05-05; ~159 overflow resume 8 AM CDT 2026-05-06
 - PRs #101/#102/#103 merged: /messages crash fixed, stats banner fixed, outbox redirect added
-- Next action: Approve Phase 1.5 UAT → `/gsd-next` → Phase 2 (Market Vocabulary Refactor)
+- Phase 01.5 UAT approved 2026-05-05 — advancing to Phase 02
+- Phase 02 context gathered 2026-05-05 — market=county, counties table is source of truth, 20 counties seeded
+- Next action: `/gsd-plan-phase 02`
 
 ## Session Continuity
 
