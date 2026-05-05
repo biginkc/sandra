@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-04-30)
 
 ## Current Position
 
-Phase: 02 (market-vocabulary-refactor) — DISCUSS
+Phase: 02 (market-vocabulary-refactor) — PLAN
 Status: Ready to execute
 Last activity: 2026-05-05 -- Phase 2 planning complete
 
@@ -47,12 +47,14 @@ Last activity: 2026-05-05 -- Phase 2 planning complete
 - PRs #101/#102/#103 merged: /messages crash fixed, stats banner fixed, outbox redirect added
 - Phase 01.5 UAT approved 2026-05-05 — advancing to Phase 02
 - Phase 02 context gathered 2026-05-05 — market=county, counties table is source of truth, 20 counties seeded
-- Next action: `/gsd-plan-phase 02`
+- Phase 02 plans created 2026-05-05 — 5 plans across 4 waves (commit 42141ef); checker passed iter 2/3 after blocker revisions
+- Next action: `/gsd-execute-phase 02`
 
 ## Session Continuity
 
 - **2026-05-05** — PRs #101-103 merged. /messages page crash (listThreads .in() overflow), stats banner zero-count (anon client RLS), outbox redirect. 939 messages rescheduled via SQL. See: docs/handoff/2026-05-05-messages-page-fixes.md
 - **2026-05-05** — Phase 01.5 UAT approved. Phase 02 discuss complete: county-as-market, counties table as source of truth, 20 counties, FIPS backfill. See: docs/handoff/2026-05-05-phase2-context-complete.md
+- **2026-05-05** — Phase 02 planned: 5 plans (02-01..05) across 4 waves. Migrations 043/044/045 + code refactor (KNOWN_MARKETS/WizardMarket eliminated, csv_imports.county_id thread-through) + Playwright smokes. Verification passed iter 2/3 after revising 3 blockers (CSV chain mapping, leads/kanban+filter audit, T-02-03-01 server-side validation). Commit 42141ef.
 
 ## Accumulated Context (preserved across milestones)
 
