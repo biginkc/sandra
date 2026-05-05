@@ -405,3 +405,120 @@ export async function restoreDismissedSenderAction(
     return errFromUnknown(e, "RESTORE_FAILED");
   }
 }
+
+// ----------------------------------------------------------------------------
+// Quick task 260504-tgq — live Outbox queue stats banner.
+// ----------------------------------------------------------------------------
+
+export type QueueStats = {
+  queued: number;
+  sentToday: number;
+  failedToday: number;
+  /** ISO timestamp of the next queued release, or null if nothing is queued. */
+  nextScheduledFor: string | null;
+  /** ISO timestamp of the last queued release (used to compute drain ETA). */
+  lastScheduledFor: string | null;
+};
+
+/**
+ * Aggregate stats for the live banner above the Outbox queue panel.
+ *
+ * Five sequential reads against `messages`:
+ *   - count(*) where status='queued'
+ *   - count(*) where status='sent' AND created_at >= todayStartUtc
+ *   - count(*) where status='failed' AND updated_at >= todayStartUtc
+ *   - min(scheduled_for) where status='queued'  (next release)
+ *   - max(scheduled_for) where status='queued'  (last release → drain ETA)
+ *
+ * UTC midnight is used as the "today" boundary; the banner is a global
+ * operator surface, not a per-user view, so a stable boundary is preferred
+ * over a per-viewer-timezone one. Surfaces `QUEUE_STATS_FAILED` on any
+ * sub-query error so the client falls back to the last-known good stats
+ * and the next 30s poll retries.
+ */
+export async function getQueueStats(): Promise<Result<QueueStats>> {
+  try {
+    const supabase = await createClient();
+    const todayStart = new Date();
+    todayStart.setUTCHours(0, 0, 0, 0);
+    const todayStartIso = todayStart.toISOString();
+
+    const queuedRes = await supabase
+      .from("messages")
+      .select("*", { count: "exact", head: true })
+      .eq("status", "queued");
+    if (queuedRes.error) {
+      return {
+        ok: false,
+        error: { code: "QUEUE_STATS_FAILED", message: queuedRes.error.message },
+      };
+    }
+
+    const sentRes = await supabase
+      .from("messages")
+      .select("*", { count: "exact", head: true })
+      .eq("status", "sent")
+      .gte("created_at", todayStartIso);
+    if (sentRes.error) {
+      return {
+        ok: false,
+        error: { code: "QUEUE_STATS_FAILED", message: sentRes.error.message },
+      };
+    }
+
+    const failedRes = await supabase
+      .from("messages")
+      .select("*", { count: "exact", head: true })
+      .eq("status", "failed")
+      .gte("updated_at", todayStartIso);
+    if (failedRes.error) {
+      return {
+        ok: false,
+        error: { code: "QUEUE_STATS_FAILED", message: failedRes.error.message },
+      };
+    }
+
+    const nextRes = await supabase
+      .from("messages")
+      .select("scheduled_for")
+      .eq("status", "queued")
+      .order("scheduled_for", { ascending: true })
+      .limit(1);
+    if (nextRes.error) {
+      return {
+        ok: false,
+        error: { code: "QUEUE_STATS_FAILED", message: nextRes.error.message },
+      };
+    }
+
+    const lastRes = await supabase
+      .from("messages")
+      .select("scheduled_for")
+      .eq("status", "queued")
+      .order("scheduled_for", { ascending: false })
+      .limit(1);
+    if (lastRes.error) {
+      return {
+        ok: false,
+        error: { code: "QUEUE_STATS_FAILED", message: lastRes.error.message },
+      };
+    }
+
+    return ok({
+      queued: queuedRes.count ?? 0,
+      sentToday: sentRes.count ?? 0,
+      failedToday: failedRes.count ?? 0,
+      nextScheduledFor:
+        nextRes.data && nextRes.data.length > 0
+          ? (nextRes.data[0].scheduled_for ?? null)
+          : null,
+      lastScheduledFor:
+        lastRes.data && lastRes.data.length > 0
+          ? (lastRes.data[0].scheduled_for ?? null)
+          : null,
+    });
+  } catch (e) {
+    reportError(e, { tags: { surface: "get_queue_stats" } });
+    return errFromUnknown(e, "QUEUE_STATS_FAILED");
+  }
+}

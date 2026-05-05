@@ -13,11 +13,13 @@ import {
 import type { Thread } from "@/lib/messages/list-threads";
 import type { UnknownSender } from "@/lib/messages/list-unknown-senders";
 
+import type { QueueStats } from "./actions";
 import { InboxDetail } from "./inbox-detail";
 import { type InboxDetail as InboxDetailData } from "./inbox-detail-data";
 import { InboxFilters, type InboxFilter } from "./inbox-filters";
 import { InboxThreadList } from "./inbox-thread-list";
 import { QueuePanel, type QueuedRow } from "./queue-panel";
+import { QueueStatsBanner } from "./queue-stats-banner";
 import { UnknownSenderList } from "./unknown-sender-list";
 
 type Props = {
@@ -32,6 +34,8 @@ type Props = {
   assigneeEmails: Record<string, string>;
   /** auth.users.id of the current viewer. */
   currentUserId: string | null;
+  /** First-paint queue stats — banner above the Outbox table polls + refreshes from here. */
+  queueStats: QueueStats;
 };
 
 const THREAD_FILTERS = new Set<InboxFilter>(["all", "mine", "unassigned"]);
@@ -46,6 +50,7 @@ export function CockpitView({
   unknownActiveCount,
   assigneeEmails,
   currentUserId,
+  queueStats,
 }: Props) {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -130,6 +135,7 @@ export function CockpitView({
 
         <TabsContent value="outbox">
           <div className="mt-4">
+            <QueueStatsBanner initialStats={queueStats} />
             <QueuePanel initial={queued} />
           </div>
         </TabsContent>

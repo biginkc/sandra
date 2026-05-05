@@ -61,6 +61,13 @@ export async function bulkQueueSms(
     body?: string;
     templateCategory?: string;
     paceSeconds?: number;
+    /**
+     * When true, skip any property that already has at least one
+     * outbound message — used by the Bulk SMS modal's "Skip prospects
+     * already contacted (N)" checkbox so a re-run of an outreach
+     * doesn't double-touch leads.
+     */
+    skipIfContacted?: boolean;
   },
 ): Promise<Result<BulkSmsOutcome>> {
   if (propertyIds.length === 0) {
@@ -98,6 +105,19 @@ export async function bulkQueueSms(
       if (!property || !property.homeowner_contact_id) {
         skipped++;
         continue;
+      }
+
+      if (opts.skipIfContacted) {
+        const { data: prior } = await supabase
+          .from("messages")
+          .select("id")
+          .eq("property_id", propertyId)
+          .eq("direction", "outbound")
+          .limit(1);
+        if (prior && prior.length > 0) {
+          skipped++;
+          continue;
+        }
       }
 
       const consentState = await getConsentState(
@@ -259,5 +279,42 @@ export async function getAllMatchingProspectIds(args: {
   } catch (e) {
     reportError(e, { tags: { surface: "get_all_matching_prospect_ids" } });
     return errFromUnknown(e, "SELECT_ALL_FAILED");
+  }
+}
+
+/**
+ * Count distinct properties (in `propertyIds`) that already have at least
+ * one outbound message — fuels the Bulk SMS modal's
+ * "Skip prospects already contacted (N)" checkbox label so the operator
+ * sees how many leads will be excluded before they queue.
+ *
+ * Empty input short-circuits to ok(0) without a DB roundtrip.
+ */
+export async function countAlreadyContacted(
+  propertyIds: string[],
+): Promise<Result<number>> {
+  if (propertyIds.length === 0) return ok(0);
+  try {
+    const supabase = await createClient();
+    const { data, error } = await supabase
+      .from("messages")
+      .select("property_id")
+      .in("property_id", propertyIds)
+      .eq("direction", "outbound");
+    if (error) {
+      return {
+        ok: false,
+        error: { code: "COUNT_CONTACTED_FAILED", message: error.message },
+      };
+    }
+    const distinct = new Set(
+      (data ?? [])
+        .map((r) => r.property_id)
+        .filter((v): v is string => typeof v === "string"),
+    );
+    return ok(distinct.size);
+  } catch (e) {
+    reportError(e, { tags: { surface: "count_already_contacted" } });
+    return errFromUnknown(e, "COUNT_CONTACTED_FAILED");
   }
 }

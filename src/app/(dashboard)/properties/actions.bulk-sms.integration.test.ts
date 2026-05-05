@@ -12,7 +12,7 @@ vi.mock("@/lib/supabase/server", () => ({
 const SAFE_NOW = new Date("2026-04-23T18:00:00Z");
 
 // eslint-disable-next-line import/first
-import { bulkQueueSms } from "./actions";
+import { bulkQueueSms, countAlreadyContacted } from "./actions";
 
 async function getOrgId(): Promise<string> {
   const { data } = await testClient
@@ -254,5 +254,153 @@ describe("bulkQueueSms (integration)", () => {
     // first_name="Bulk", property_address="61 Template Rd"
     expect(messages![0].body).toContain("Bulk");
     expect(messages![0].body).toContain("61 Template Rd");
+  });
+
+  // ---------------------------------------------------------------
+  // Quick task 260504-tgq — skipIfContacted opt + countAlreadyContacted
+  // ---------------------------------------------------------------
+
+  it("skipIfContacted=true skips a property that has a prior outbound message and queues the rest", async () => {
+    const orgId = await getOrgId();
+    const { propertyId: alreadyContacted, contactId: contactedContactId } =
+      await seedLead({ phone: "+18165550071", address: "71 Skip St" });
+    const { propertyId: fresh } = await seedLead({
+      phone: "+18165550072",
+      address: "72 Skip St",
+    });
+
+    // Seed the prior outbound row so the skip filter trips.
+    const { error: insertErr } = await testClient.from("messages").insert({
+      org_id: orgId,
+      property_id: alreadyContacted,
+      contact_id: contactedContactId,
+      direction: "outbound",
+      status: "sent",
+      channel: "sms",
+      body: "earlier touch",
+      from_address: "+18162804181",
+      to_address: "+18165550071",
+    });
+    if (insertErr) throw new Error(`prior msg seed failed: ${insertErr.message}`);
+
+    const result = await bulkQueueSms([alreadyContacted, fresh], {
+      body: "Hello again",
+      skipIfContacted: true,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.data.succeeded).toBe(1);
+    expect(result.data.skipped).toBe(1);
+    expect(result.data.failed).toHaveLength(0);
+
+    // Only the fresh property should have a queued row.
+    const { data: queued } = await testClient
+      .from("messages")
+      .select("property_id")
+      .eq("status", "queued");
+    expect(queued).toHaveLength(1);
+    expect(queued![0].property_id).toBe(fresh);
+  });
+
+  it("skipIfContacted=false (or omitted) queues all eligible prospects regardless of prior messages", async () => {
+    const orgId = await getOrgId();
+    const { propertyId: alreadyContacted, contactId: contactedContactId } =
+      await seedLead({ phone: "+18165550081", address: "81 NoSkip St" });
+    const { propertyId: fresh } = await seedLead({
+      phone: "+18165550082",
+      address: "82 NoSkip St",
+    });
+
+    const { error: insertErr } = await testClient.from("messages").insert({
+      org_id: orgId,
+      property_id: alreadyContacted,
+      contact_id: contactedContactId,
+      direction: "outbound",
+      status: "sent",
+      channel: "sms",
+      body: "earlier touch",
+      from_address: "+18162804181",
+      to_address: "+18165550081",
+    });
+    if (insertErr) throw new Error(`prior msg seed failed: ${insertErr.message}`);
+
+    const result = await bulkQueueSms([alreadyContacted, fresh], {
+      body: "Send to everyone",
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.data.succeeded).toBe(2);
+    expect(result.data.skipped).toBe(0);
+
+    const { count } = await testClient
+      .from("messages")
+      .select("*", { count: "exact", head: true })
+      .eq("status", "queued");
+    expect(count).toBe(2);
+  });
+
+  it("countAlreadyContacted returns the distinct property count from prior outbound messages", async () => {
+    const orgId = await getOrgId();
+    const { propertyId: p1, contactId: c1 } = await seedLead({
+      phone: "+18165550091",
+      address: "91 Count St",
+    });
+    const { propertyId: p2, contactId: c2 } = await seedLead({
+      phone: "+18165550092",
+      address: "92 Count St",
+    });
+    const { propertyId: p3 } = await seedLead({
+      phone: "+18165550093",
+      address: "93 Count St",
+    });
+
+    // Two prior outbound rows for p1 (should still count as 1 distinct), one for p2.
+    await testClient.from("messages").insert([
+      {
+        org_id: orgId,
+        property_id: p1,
+        contact_id: c1,
+        direction: "outbound",
+        status: "sent",
+        channel: "sms",
+        body: "first touch p1",
+        from_address: "+18162804181",
+        to_address: "+18165550091",
+      },
+      {
+        org_id: orgId,
+        property_id: p1,
+        contact_id: c1,
+        direction: "outbound",
+        status: "sent",
+        channel: "sms",
+        body: "second touch p1",
+        from_address: "+18162804181",
+        to_address: "+18165550091",
+      },
+      {
+        org_id: orgId,
+        property_id: p2,
+        contact_id: c2,
+        direction: "outbound",
+        status: "sent",
+        channel: "sms",
+        body: "touch p2",
+        from_address: "+18162804181",
+        to_address: "+18165550092",
+      },
+    ]);
+
+    const result = await countAlreadyContacted([p1, p2, p3]);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.data).toBe(2);
+  });
+
+  it("countAlreadyContacted returns 0 for empty propertyIds without hitting the DB", async () => {
+    const result = await countAlreadyContacted([]);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.data).toBe(0);
   });
 });
