@@ -3,8 +3,8 @@ gsd_state_version: 1.0
 milestone: v2.0
 milestone_name: milestone
 status: executing
-last_updated: "2026-05-05T03:09:28Z"
-last_activity: 2026-05-05 -- e2ceef4 merged PRs 96-100; bulk SMS pacing shipped + 4 prod fixes; 939 messages queued and draining
+last_updated: "2026-05-05T07:05:00Z"
+last_activity: 2026-05-05 -- 224773d merged PRs 101-103; /messages crash fixed, stats banner fixed, outbox redirect added; 939 messages rescheduled 8AM CDT
 progress:
   total_phases: 3
   completed_phases: 1
@@ -44,8 +44,13 @@ Last activity: 2026-05-05 -- Completed quick task 260504-tgq: Bulk SMS modal pac
 - Phase 01.5 PRs #94/#95: merged 2026-05-04
 - Quick task 260504-tgq (bulk SMS pacing + outbox stats): PRs #96-100 merged 2026-05-05
 - Prod build fixed (PR #98 — vendored @sandra/tokens CSS)
-- 939 messages queued on prod, draining at 1-min pacing through ~17:10 UTC 2026-05-05
+- 939 messages rescheduled — draining at 1/min from 8 AM CDT 2026-05-05; ~159 overflow resume 8 AM CDT 2026-05-06
+- PRs #101/#102/#103 merged: /messages crash fixed, stats banner fixed, outbox redirect added
 - Next action: Approve Phase 1.5 UAT → `/gsd-next` → Phase 2 (Market Vocabulary Refactor)
+
+## Session Continuity
+
+- **2026-05-05** — PRs #101-103 merged. /messages page crash (listThreads .in() overflow), stats banner zero-count (anon client RLS), outbox redirect. 939 messages rescheduled via SQL. See: docs/handoff/2026-05-05-messages-page-fixes.md
 
 ## Accumulated Context (preserved across milestones)
 
