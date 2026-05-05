@@ -9,6 +9,29 @@ vi.mock("@/lib/supabase/server", () => ({
   createClient: async () => testClient,
 }));
 
+// loadTemplateVars uses an admin client to resolve the session user id →
+// first name. In tests we point that at the same service-role test client.
+vi.mock("@/lib/supabase/admin", () => ({
+  createAdminClient: () => testClient,
+}));
+
+// Stub getUser() so the bulk action can resolve `{{my_first_name}}` from
+// the current session user. Tests opt in by setting currentUserId +
+// currentEmail in their setup; the default null/null preserves the
+// pre-fix behavior so older tests keep their existing assertions.
+let currentUserId: string | null = null;
+let currentEmail: string | null = null;
+vi.spyOn(testClient.auth, "getUser").mockImplementation(async () =>
+  ({
+    data: {
+      user: currentUserId
+        ? ({ id: currentUserId, email: currentEmail } as never)
+        : null,
+    },
+    error: null,
+  }) as never,
+);
+
 const SAFE_NOW = new Date("2026-04-23T18:00:00Z");
 
 // eslint-disable-next-line import/first
@@ -78,16 +101,36 @@ async function seedTemplate(orgId: string, category: string): Promise<void> {
   if (error) throw new Error(`template seed failed: ${error.message}`);
 }
 
+const createdAuthUsers: string[] = [];
+async function createAuthUser(email: string): Promise<string> {
+  const { data, error } = await testClient.auth.admin.createUser({
+    email,
+    password: `test-pw-${Math.random().toString(36).slice(2)}`,
+    email_confirm: true,
+  });
+  if (error || !data.user) {
+    throw new Error(`createAuthUser failed: ${error?.message}`);
+  }
+  createdAuthUsers.push(data.user.id);
+  return data.user.id;
+}
+
 describe("bulkQueueSms (integration)", () => {
   beforeEach(async () => {
     await resetTenantTables(testClient);
     resetMockState();
+    currentUserId = null;
+    currentEmail = null;
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(SAFE_NOW);
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     vi.useRealTimers();
+    for (const id of createdAuthUsers) {
+      await testClient.auth.admin.deleteUser(id);
+    }
+    createdAuthUsers.length = 0;
   });
 
   it("returns zero counts immediately for an empty propertyIds array", async () => {
@@ -227,6 +270,50 @@ describe("bulkQueueSms (integration)", () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.data).toEqual({ succeeded: 2, skipped: 1, failed: [] });
+  });
+
+  it("renders {{my_first_name}} from the session user when bulk-queuing a template", async () => {
+    // Regression: prior to the fix, bulkQueueSms hardcoded
+    // enrolledByUserId: null which made loadTemplateVars return
+    // my_first_name: null. Templates with `{{my_first_name}}` then
+    // rendered an empty string and produced bodies like "Andrew,  here."
+    // that went out to real prospects (canceled in prod 2026-05-05).
+    const userId = await createAuthUser("jarrad+bulk-sender@bmhgroupkc.com");
+    currentUserId = userId;
+    currentEmail = "jarrad+bulk-sender@bmhgroupkc.com";
+
+    const orgId = await getOrgId();
+    const { error: tplErr } = await testClient.from("sms_templates").insert({
+      org_id: orgId,
+      name: "Sender token regression",
+      content:
+        "{{first_name | Hey}}, {{my_first_name}} here. Is {{property_address}} your house?",
+      category: "Test-Sender-Opener",
+    });
+    if (tplErr) throw new Error(`template seed failed: ${tplErr.message}`);
+
+    const { propertyId } = await seedLead({
+      phone: "+18165550101",
+      address: "101 Sender Rd",
+    });
+
+    const result = await bulkQueueSms([propertyId], {
+      templateCategory: "Test-Sender-Opener",
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.data.succeeded).toBe(1);
+
+    const { data: messages } = await testClient
+      .from("messages")
+      .select("body")
+      .eq("property_id", propertyId);
+    expect(messages).toHaveLength(1);
+    // local part of email → capitalized first name → "Jarrad+bulk-sender"
+    // Match the prefix so the test doesn't depend on email-suffix handling.
+    expect(messages![0].body).toContain("Jarrad");
+    // No double-space gap where the empty token used to live.
+    expect(messages![0].body).not.toMatch(/,\s\s/);
   });
 
   it("loads a template from the pool and renders it with lead vars", async () => {

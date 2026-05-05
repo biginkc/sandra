@@ -17,7 +17,7 @@ import { getQueueStats } from "./actions";
  * `getQueueStats` makes five sequential calls against `messages`:
  *   1. count(*) where status='queued'                        → number
  *   2. count(*) where status='sent' AND created_at >= today → number
- *   3. count(*) where status='failed' AND updated_at >= today → number
+ *   3. count(*) where status='failed' AND failed_at >= today → number
  *   4. select('scheduled_for') ...order asc .limit(1)       → next row
  *   5. select('scheduled_for') ...order desc .limit(1)      → last row
  *
@@ -190,7 +190,7 @@ describe("getQueueStats", () => {
     expect(String(gteFilter?.args[1])).toMatch(/T00:00:00\.000Z$/);
   });
 
-  it("failedToday counts only status='failed' rows with updated_at >= todayStart UTC", async () => {
+  it("failedToday counts only status='failed' rows with failed_at >= todayStart UTC", async () => {
     responseQueue = [
       { count: 0, error: null },
       { count: 0, error: null },
@@ -209,7 +209,11 @@ describe("getQueueStats", () => {
     const eqFilter = failedCall.filters.find((f) => f.op === "eq");
     const gteFilter = failedCall.filters.find((f) => f.op === "gte");
     expect(eqFilter?.args).toEqual(["status", "failed"]);
-    expect(gteFilter?.args[0]).toBe("updated_at");
+    // Regression: messages has no `updated_at` column; original code
+    // referenced `updated_at` which made the action throw and the banner
+    // fall back to all-zero stats. Real column is `failed_at` (set by
+    // the cron drainer when a send fails).
+    expect(gteFilter?.args[0]).toBe("failed_at");
     expect(String(gteFilter?.args[1])).toMatch(/T00:00:00\.000Z$/);
   });
 
