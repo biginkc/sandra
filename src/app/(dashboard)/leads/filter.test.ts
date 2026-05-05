@@ -2,29 +2,33 @@ import { describe, expect, it } from "vitest";
 
 import { filterLeads, type SearchableLead } from "./filter";
 
+// Phase 02 (D-05 coexistence): 2 fixtures use county-shaped market strings
+// (new vocabulary post-migration-046); 1 fixture keeps the legacy "Kansas City"
+// string (intentional — 1,437 prod properties still carry this value and the
+// filter must tolerate both vocabularies simultaneously).
 const leads: SearchableLead[] = [
   {
     address: "123 Main St",
-    city: "Kansas City",
+    city: "Independence",
     state: "MO",
-    zip: "64108",
-    market: "Kansas City",
+    zip: "64055",
+    market: "Jackson County MO",
     homeowner: { first_name: "John", last_name: "Smith", entity_name: null },
   },
   {
     address: "456 Oak Ave",
-    city: "St. Louis",
-    state: "MO",
-    zip: "63101",
-    market: "St. Louis",
+    city: "Olathe",
+    state: "KS",
+    zip: "66061",
+    market: "Johnson County KS",
     homeowner: { first_name: "Jane", last_name: "Doe", entity_name: null },
   },
   {
     address: "789 Pine Rd",
-    city: "Dayton",
-    state: "OH",
-    zip: "45401",
-    market: "Dayton",
+    city: "Kansas City",
+    state: "MO",
+    zip: "64108",
+    market: "Kansas City",
     homeowner: { first_name: null, last_name: null, entity_name: "Acme Holdings LLC" },
   },
   {
