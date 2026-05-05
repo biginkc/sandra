@@ -3,8 +3,176 @@
 import { createClient } from "@/lib/supabase/server";
 import { errFromUnknown, ok, type Result } from "@/lib/errors/result";
 import { reportError } from "@/lib/errors/report";
+import { getConsentState } from "@/lib/messaging/consent";
+import { sendSmsToContact } from "@/lib/messaging/send";
+import { pickFromPool } from "@/lib/templates/pool";
+import { loadTemplateVars } from "@/lib/sequences/template-vars";
+import { renderTemplate } from "@/lib/sequences/render";
 
 import { SELECT_ALL_HARD_CAP, type ParsedProspectsFilters } from "./prospects-query";
+
+export async function listSmsTemplateCategories(): Promise<
+  Result<{ category: string; count: number }[]>
+> {
+  try {
+    const supabase = await createClient();
+    const { data, error } = await supabase
+      .from("sms_templates")
+      .select("category")
+      .is("deleted_at", null);
+    if (error) {
+      return { ok: false, error: { code: "LIST_CATEGORIES_FAILED", message: error.message } };
+    }
+    const counts = new Map<string, number>();
+    for (const row of data ?? []) {
+      counts.set(row.category, (counts.get(row.category) ?? 0) + 1);
+    }
+    return ok(
+      Array.from(counts.entries())
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([category, count]) => ({ category, count })),
+    );
+  } catch (e) {
+    reportError(e, { tags: { surface: "list_sms_template_categories" } });
+    return errFromUnknown(e, "LIST_CATEGORIES_FAILED");
+  }
+}
+
+export type BulkSmsOutcome = {
+  succeeded: number;
+  skipped: number;
+  failed: { propertyId: string; message: string }[];
+};
+
+/**
+ * Queue a paced batch of outbound SMS messages for the given property IDs.
+ *
+ * Pre-filters opted-out contacts; everything else (quiet hours, phone
+ * existence) is delegated to sendSmsToContact with queueOnly=true.
+ * Consent + quiet-hours re-checks run at release time (cron drain).
+ *
+ * Pacing: the nth successfully queued message is scheduled
+ * `n * paceSeconds` seconds after now so the cron drain releases them
+ * at a controlled rate.
+ */
+export async function bulkQueueSms(
+  propertyIds: string[],
+  opts: {
+    body?: string;
+    templateCategory?: string;
+    paceSeconds?: number;
+  },
+): Promise<Result<BulkSmsOutcome>> {
+  if (propertyIds.length === 0) {
+    return ok({ succeeded: 0, skipped: 0, failed: [] });
+  }
+
+  try {
+    const supabase = await createClient();
+    const paceSeconds = opts.paceSeconds ?? 18;
+    const now = Date.now();
+
+    const { data: properties, error: propError } = await supabase
+      .from("properties")
+      .select("id, homeowner_contact_id, org_id")
+      .in("id", propertyIds);
+
+    if (propError) {
+      return {
+        ok: false,
+        error: { code: "BULK_SMS_FAILED", message: propError.message },
+      };
+    }
+
+    const propertyMap = new Map(
+      (properties ?? []).map((p) => [p.id, p]),
+    );
+
+    let succeeded = 0;
+    let skipped = 0;
+    const failed: BulkSmsOutcome["failed"] = [];
+    let queuedCount = 0;
+
+    for (const propertyId of propertyIds) {
+      const property = propertyMap.get(propertyId);
+      if (!property || !property.homeowner_contact_id) {
+        skipped++;
+        continue;
+      }
+
+      const consentState = await getConsentState(
+        supabase,
+        property.homeowner_contact_id,
+        "sms",
+      );
+      if (consentState === "opted_out") {
+        skipped++;
+        continue;
+      }
+
+      let body: string | null = null;
+      if (opts.body) {
+        body = opts.body;
+      } else if (opts.templateCategory) {
+        const template = await pickFromPool(
+          supabase,
+          property.org_id,
+          opts.templateCategory,
+          propertyId,
+        );
+        if (!template) {
+          skipped++;
+          continue;
+        }
+        const vars = await loadTemplateVars(supabase, {
+          propertyId,
+          contactId: property.homeowner_contact_id,
+          enrolledByUserId: null,
+        });
+        body = renderTemplate(template.content, vars);
+      }
+
+      if (!body) {
+        skipped++;
+        continue;
+      }
+
+      const scheduledFor = new Date(now + queuedCount * paceSeconds * 1000);
+      const outcome = await sendSmsToContact(supabase, {
+        contactId: property.homeowner_contact_id,
+        propertyId,
+        body,
+        queueOnly: true,
+        scheduledFor,
+      });
+
+      if (outcome.status === "queued") {
+        succeeded++;
+        queuedCount++;
+      } else if (
+        outcome.status === "blocked_no_phone" ||
+        outcome.status === "contact_not_found" ||
+        outcome.status === "property_not_found" ||
+        outcome.status === "blocked_no_consent"
+      ) {
+        skipped++;
+      } else {
+        const msg =
+          "error" in outcome
+            ? outcome.error
+            : "reason" in outcome
+              ? outcome.reason
+              : outcome.status;
+        failed.push({ propertyId, message: msg });
+      }
+    }
+
+    return ok({ succeeded, skipped, failed });
+  } catch (e) {
+    reportError(e, { tags: { surface: "bulk_queue_sms" } });
+    return errFromUnknown(e, "BULK_SMS_FAILED");
+  }
+}
 
 /**
  * Return every property_id matching the current filter set on the

@@ -69,6 +69,7 @@ import {
 } from "../leads/actions";
 import { requestSkipTrace } from "@/lib/skip-trace/actions";
 import { getAllMatchingProspectIds } from "./actions";
+import { BulkSmsModal } from "./bulk-sms-modal";
 
 export type ProspectRow = {
   id: string;
@@ -141,6 +142,7 @@ export function ProspectsTable({
   const router = useRouter();
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [pending, startTransition] = useTransition();
+  const [showBulkSms, setShowBulkSms] = useState(false);
   // Cross-page select-all mode. When true, the user has explicitly
   // expanded their selection beyond the visible page to every property
   // matching the current filters. Bound to a Set<string> of all those
@@ -523,6 +525,10 @@ export function ProspectsTable({
                   </DropdownMenuSub>
                 </DropdownMenuGroup>
 
+                  <DropdownMenuItem onClick={() => setShowBulkSms(true)}>
+                    Bulk SMS
+                  </DropdownMenuItem>
+
                 <DropdownMenuSeparator />
 
                 {/* ------------- Enrich ------------- */}
@@ -678,6 +684,16 @@ export function ProspectsTable({
         selectedCount={selected.size}
         onSelectAllAcrossPages={onSelectAllAcrossPages}
         onClear={onClearAllSelection}
+      />
+
+      <BulkSmsModal
+        open={showBulkSms}
+        propertyIds={Array.from(selected)}
+        onClose={() => setShowBulkSms(false)}
+        onQueued={() => {
+          setSelected(new Set());
+          router.refresh();
+        }}
       />
 
       <DataTableShell

@@ -35,6 +35,8 @@ export type CreateImportJobParams = {
   /** When true, the workflow bulk-records opt_in_marketing_written for every
    *  homeowner contact after ingest (operator attestation at import time). */
   smsConsent: boolean;
+  /** When set, auto-enroll every imported property into this sequence after ingest. */
+  sequenceId?: string | null;
 };
 
 export type CreateImportJobResult = { jobId: string };
@@ -143,6 +145,7 @@ export async function createImportJob(
             listId,
             userId,
             smsConsent: params.smsConsent,
+            sequenceId: params.sequenceId ?? null,
           },
         ]);
       } catch (e) {

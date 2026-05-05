@@ -83,6 +83,7 @@ export type SendSmsInput = {
    * release re-checks against then-current time.
    */
   queueOnly?: boolean;
+  scheduledFor?: Date | null;
 };
 
 export async function sendSmsToContact(
@@ -288,6 +289,7 @@ async function queueForLater(
       from_address: fromAddress,
       to_address: toPhone,
       body: input.body,
+      scheduled_for: input.scheduledFor?.toISOString() ?? null,
     })
     .select("id")
     .single();

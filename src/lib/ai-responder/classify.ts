@@ -38,7 +38,10 @@ export function classifyAiSkip(input: SkipInput): SkipDecision {
   if (!input.config) return { skip: true, reason: "no_config" };
   if (!input.config.active) return { skip: true, reason: "disabled_org_wide" };
 
-  if (input.consentState !== "can_send_marketing") {
+  // Block only explicit opt-outs. Cold contacts (no_consent) and
+  // informational-only contacts can still receive an AI reply — mirrors
+  // the outbound gate which was also relaxed for cold outreach.
+  if (input.consentState === "opted_out") {
     return { skip: true, reason: "no_consent" };
   }
 

@@ -1,5 +1,7 @@
 "use client";
 
+import { useEffect, useState } from "react";
+
 import {
   Card,
   CardContent,
@@ -8,8 +10,11 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
+import { listSequences } from "@/app/(dashboard)/sequences/actions";
 
 import type { WizardAction, WizardState } from "../wizard";
+
+type SequenceOption = { id: string; name: string };
 
 type Props = { state: WizardState; dispatch: React.Dispatch<WizardAction> };
 
@@ -17,6 +22,19 @@ export function StepConfirm({ state, dispatch }: Props) {
   const summary = state.summary;
   const validRows = summary?.validRows ?? 0;
   const estimatedCassCost = (validRows * 0.03).toFixed(2);
+
+  const [sequences, setSequences] = useState<SequenceOption[]>([]);
+  useEffect(() => {
+    listSequences().then((result) => {
+      if (result.ok) {
+        setSequences(
+          result.data
+            .filter((s) => s.active && !s.archived_at)
+            .map((s) => ({ id: s.id, name: s.name })),
+        );
+      }
+    });
+  }, []);
 
   // The "Also request skip-trace" checkbox lived here in V1 and rode the
   // legacy after()-callback path. With the workflow runner the action no
@@ -67,6 +85,32 @@ export function StepConfirm({ state, dispatch }: Props) {
             to receive SMS messages, and that I have records to support this attestation.
           </Label>
         </div>
+
+        {state.smsConsent && (
+          <div className="flex flex-col gap-1.5 pl-7">
+            <Label htmlFor="sequence-picker" className="text-sm">
+              Auto-enroll in sequence <span className="text-muted-foreground">(optional)</span>
+            </Label>
+            <select
+              id="sequence-picker"
+              value={state.sequenceId ?? ""}
+              onChange={(e) =>
+                dispatch({
+                  type: "SET_SEQUENCE_ID",
+                  sequenceId: e.target.value || null,
+                })
+              }
+              className="border-input bg-background text-sm rounded-md border px-3 py-1.5 focus:outline-none focus:ring-2 focus:ring-ring"
+            >
+              <option value="">None — don&apos;t auto-enroll</option>
+              {sequences.map((s) => (
+                <option key={s.id} value={s.id}>
+                  {s.name}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
       </CardContent>
     </Card>
   );

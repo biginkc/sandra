@@ -179,6 +179,9 @@ export type WizardState = {
    *  SMS consent. When true the workflow bulk-records opt_in_marketing_written
    *  for every homeowner contact after ingest. */
   smsConsent: boolean;
+  /** When smsConsent=true, optionally auto-enroll every imported property
+   *  into this sequence after ingest. Null = no auto-enroll. */
+  sequenceId: string | null;
   headers: string[];
   rows: Record<string, string>[];
   mapping: Record<string, string | null>;
@@ -201,6 +204,7 @@ const initialState: WizardState = {
   listName: null,
   requestSkipTrace: false,
   smsConsent: false,
+  sequenceId: null,
   headers: [],
   rows: [],
   mapping: {},
@@ -234,6 +238,7 @@ export type WizardAction =
   | { type: "SET_LIST_NAME"; listName: string | null }
   | { type: "SET_REQUEST_SKIP_TRACE"; requestSkipTrace: boolean }
   | { type: "SET_SMS_CONSENT"; smsConsent: boolean }
+  | { type: "SET_SEQUENCE_ID"; sequenceId: string | null }
   | { type: "SET_MAPPING_FIELD"; fieldId: string; header: string | null }
   | { type: "AUTODETECT_MAPPING" }
   | {
@@ -301,7 +306,14 @@ function reducer(state: WizardState, action: WizardAction): WizardState {
     case "SET_REQUEST_SKIP_TRACE":
       return { ...state, requestSkipTrace: action.requestSkipTrace };
     case "SET_SMS_CONSENT":
-      return { ...state, smsConsent: action.smsConsent };
+      return {
+        ...state,
+        smsConsent: action.smsConsent,
+        // Reset sequence picker when consent is revoked
+        sequenceId: action.smsConsent ? state.sequenceId : null,
+      };
+    case "SET_SEQUENCE_ID":
+      return { ...state, sequenceId: action.sequenceId };
     case "SET_MAPPING_FIELD":
       return {
         ...state,
@@ -455,6 +467,7 @@ export function Wizard() {
           storagePath: uploadResult.storagePath,
           totalRows: state.rows.length,
           smsConsent: state.smsConsent,
+          sequenceId: state.sequenceId,
         }),
         { successMessage: "Import started.", fallbackMessage: "Import failed to start" },
       );

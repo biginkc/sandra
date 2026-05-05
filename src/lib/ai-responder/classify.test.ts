@@ -44,11 +44,16 @@ describe("classifyAiSkip", () => {
     });
   });
 
-  it("contact with no_consent (never opted in) → no_consent", () => {
+  it("cold contact with no_consent (never opted in) → skip:false (mirrors outbound gate relaxation)", () => {
     expect(classifyAiSkip({ ...BASE, consentState: "no_consent" })).toEqual({
-      skip: true,
-      reason: "no_consent",
+      skip: false,
     });
+  });
+
+  it("informational-only contact → skip:false (not an opt-out)", () => {
+    expect(
+      classifyAiSkip({ ...BASE, consentState: "can_send_informational_only" }),
+    ).toEqual({ skip: false });
   });
 
   it("property disabled → disabled_per_property", () => {

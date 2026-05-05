@@ -2,6 +2,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { sendSmsToContact } from "@/lib/messaging/send";
 import type { Database } from "@/lib/supabase/types";
+import { pickFromPool } from "@/lib/templates/pool";
 
 import { delayToDate } from "./delays";
 import { applyOptOut } from "./opt-out";
@@ -47,6 +48,7 @@ export type TickOutcome =
 
 type EnrollmentRow = {
   id: string;
+  org_id: string;
   sequence_id: string;
   property_id: string;
   contact_id: string | null;
@@ -62,7 +64,7 @@ export async function processEnrollmentTick(
   // 1. Load current step.
   const { data: step, error: stepErr } = await client
     .from("sequence_steps")
-    .select("id, step_index, action_type, template_body, template_id, target_status, delay_after_previous_minutes")
+    .select("id, step_index, action_type, template_body, template_id, template_category, target_status, delay_after_previous_minutes")
     .eq("sequence_id", enrollment.sequence_id)
     .eq("step_index", enrollment.current_step_index)
     .maybeSingle();
@@ -182,6 +184,23 @@ export async function processEnrollmentTick(
         };
       }
       bodySource = tmpl.content;
+    } else if (step.template_category) {
+      const poolTemplate = await pickFromPool(
+        client,
+        enrollment.org_id,
+        step.template_category,
+        enrollment.id,
+      );
+      if (!poolTemplate) {
+        await markRunSkipped(client, claim.id, "provider_failed");
+        await pauseEnrollment(client, enrollment.id, "step_misconfigured", false);
+        return {
+          status: "paused",
+          enrollmentId: enrollment.id,
+          reason: "step_misconfigured",
+        };
+      }
+      bodySource = poolTemplate.content;
     } else {
       bodySource = step.template_body ?? "";
     }

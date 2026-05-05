@@ -712,6 +712,7 @@ export type Database = {
           property_id: string | null
           provider: string | null
           read_at: string | null
+          scheduled_for: string | null
           sent_at: string | null
           status: string
           subject: string | null
@@ -736,6 +737,7 @@ export type Database = {
           property_id?: string | null
           provider?: string | null
           read_at?: string | null
+          scheduled_for?: string | null
           sent_at?: string | null
           status?: string
           subject?: string | null
@@ -757,6 +759,7 @@ export type Database = {
           id?: string
           metadata?: Json | null
           org_id?: string
+          scheduled_for?: string | null
           property_id?: string | null
           provider?: string | null
           read_at?: string | null
@@ -1358,6 +1361,7 @@ export type Database = {
           step_index: number
           target_status: string | null
           template_body: string | null
+          template_category: string | null
           template_id: string | null
         }
         Insert: {
@@ -1369,6 +1373,7 @@ export type Database = {
           step_index: number
           target_status?: string | null
           template_body?: string | null
+          template_category?: string | null
           template_id?: string | null
         }
         Update: {
@@ -1380,6 +1385,7 @@ export type Database = {
           step_index?: number
           target_status?: string | null
           template_body?: string | null
+          template_category?: string | null
           template_id?: string | null
         }
         Relationships: [

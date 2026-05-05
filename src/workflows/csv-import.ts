@@ -26,6 +26,8 @@
 
 import Papa from "papaparse";
 
+import type { SupabaseClient } from "@supabase/supabase-js";
+
 import {
   createCassChildJob,
   getAutotriggerCap,
@@ -38,8 +40,10 @@ import {
   processIngestChunk,
   type ChunkResult,
 } from "@/lib/csv/ingest";
+import { enrollLead } from "@/lib/sequences/enrollment";
 import { trimRowsToMapping } from "@/lib/csv/trim-rows";
 import { createAdminClient } from "@/lib/supabase/admin";
+import type { Database } from "@/lib/supabase/types";
 import type { Mapping, RowData } from "@/lib/csv/validate";
 
 /**
@@ -62,7 +66,56 @@ export type CsvImportWorkflowParams = {
   /** When true, bulk-record opt_in_marketing_written for every homeowner
    *  contact that was created or matched in this import. */
   smsConsent?: boolean;
+  /** When set, auto-enroll every successfully imported property into this
+   *  sequence after consent is recorded. */
+  sequenceId?: string | null;
 };
+
+export type EnrollBatchResult = {
+  enrolled: number;
+  skipped: number;
+  failed: number;
+};
+
+/**
+ * Enroll every succeeded job_item's property into the given sequence.
+ * Outcomes: "enrolled" → enrolled, "failed" → failed, anything else → skipped.
+ * Never throws — partial failures are counted and execution continues.
+ */
+export async function enrollJobBatch(
+  supabase: SupabaseClient<Database>,
+  args: { jobId: string; sequenceId: string },
+): Promise<EnrollBatchResult> {
+  const { data: items } = await supabase
+    .from("job_items")
+    .select("property_id")
+    .eq("job_id", args.jobId)
+    .eq("status", "success");
+
+  const propertyIds = (items ?? [])
+    .map((i) => i.property_id)
+    .filter((id): id is string => id !== null);
+
+  let enrolled = 0;
+  let skipped = 0;
+  let failed = 0;
+
+  for (const propertyId of propertyIds) {
+    try {
+      const outcome = await enrollLead(supabase, {
+        sequenceId: args.sequenceId,
+        propertyId,
+      });
+      if (outcome.status === "enrolled") enrolled++;
+      else if (outcome.status === "failed") failed++;
+      else skipped++;
+    } catch {
+      failed++;
+    }
+  }
+
+  return { enrolled, skipped, failed };
+}
 
 /**
  * STEP 1 — Download the CSV from Storage, parse, trim to mapped columns,
@@ -248,7 +301,7 @@ async function recordConsentStep(args: {
     .from("job_items")
     .select("property_id")
     .eq("job_id", args.jobId)
-    .eq("status", "succeeded");
+    .eq("status", "success");
 
   const propertyIds = (items ?? [])
     .map((i) => i.property_id)
@@ -291,6 +344,19 @@ async function recordConsentStep(args: {
       occurred_at: now,
     })),
   );
+}
+
+/**
+ * STEP 3b — Auto-enroll every succeeded import item into a sequence.
+ * Fires only when the operator selected a sequence on the confirm screen.
+ */
+async function enrollInSequenceStep(args: {
+  jobId: string;
+  sequenceId: string;
+}): Promise<EnrollBatchResult> {
+  "use step";
+
+  return enrollJobBatch(createAdminClient(), args);
 }
 
 /**
@@ -381,6 +447,13 @@ export async function csvImportWorkflow(
 
   if (params.smsConsent) {
     await recordConsentStep({ jobId: params.jobId });
+  }
+
+  if (params.sequenceId) {
+    await enrollInSequenceStep({
+      jobId: params.jobId,
+      sequenceId: params.sequenceId,
+    });
   }
 
   return {

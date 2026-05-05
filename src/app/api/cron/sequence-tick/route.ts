@@ -3,6 +3,7 @@ import { createClient as createSupabaseClient } from "@supabase/supabase-js";
 
 import { reportError } from "@/lib/errors/report";
 import { processEnrollmentTick } from "@/lib/sequences/tick";
+import { releaseQueuedMessage } from "@/lib/messaging/send";
 import type { Database } from "@/lib/supabase/types";
 
 /**
@@ -72,12 +73,13 @@ export async function runSequenceTick(
 ): Promise<{
   processed: number;
   outcomes: Record<string, number>;
+  drained: number;
 }> {
   const nowIso = new Date().toISOString();
   const { data: due, error } = await supabase
     .from("sequence_enrollments")
     .select(
-      "id, sequence_id, property_id, contact_id, current_step_index, enrolled_by_user_id, status",
+      "id, org_id, sequence_id, property_id, contact_id, current_step_index, enrolled_by_user_id, status",
     )
     .eq("status", "active")
     .not("next_run_at", "is", null)
@@ -93,9 +95,26 @@ export async function runSequenceTick(
     outcomes[outcome.status] = (outcomes[outcome.status] ?? 0) + 1;
   }
 
+  // Drain scheduled queued messages — release any row where
+  // scheduled_for <= now. Consent + quiet-hours are re-checked at
+  // release time; unreleasable messages (opted-out, quiet hours) are
+  // left queued for the next tick.
+  const { data: dueMessages } = await supabase
+    .from("messages")
+    .select("id")
+    .eq("status", "queued")
+    .lte("scheduled_for", nowIso)
+    .not("scheduled_for", "is", null)
+    .limit(50);
+
+  for (const msg of dueMessages ?? []) {
+    await releaseQueuedMessage(supabase, msg.id);
+  }
+
   return {
     processed: (due ?? []).length,
     outcomes,
+    drained: (dueMessages ?? []).length,
   };
 }
 
