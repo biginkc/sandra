@@ -3,7 +3,8 @@
 -- Phase 02 — Market Vocabulary Refactor (per CONTEXT.md D-02, D-03).
 -- Seeds the counties table with the 18 BMH-active counties confirmed in the
 -- Drive folder, plus 3 counties present in prod FIPS data (Cass MO,
--- Wyandotte KS, Riley KS) that are PENDING JARRAD CONFIRMATION at PR review.
+-- Wyandotte KS, Riley KS) confirmed 2026-05-05 by Jarrad at the
+-- T-02-02-03 human-verify checkpoint.
 --
 -- Format (per D-03): counties.market = "{name} {state}" (e.g.
 --   "Johnson County KS", "Lincoln Parish LA"). counties.fips_code populated
@@ -110,15 +111,9 @@ BEGIN
          AND lower(county_name) IN (lower('Saint Clair'), lower('St. Clair'), lower('St Clair'))
        LIMIT 1)),
 
-    -- TODO(jarrad): confirm before merge — these 3 counties are present in
-    -- prod FIPS data but NOT YET CONFIRMED as active markets in the Drive
-    -- folder. Decision (per CONTEXT.md D-02): include with TODO so PR review
-    -- is the gate.
-    --
-    -- If you DO want them, leave these rows in place (the trailing comma on
-    -- the "Saint Clair County" row above must stay).
-    -- If you DO NOT want them, delete these 3 lines AND remove the trailing
-    -- comma on the "Saint Clair County" row above.
+    -- Confirmed 2026-05-05 by Jarrad — these 3 counties are present in prod
+    -- FIPS data and ship with the seed. Excluding them would orphan any
+    -- properties already tagged to these counties after the 02-04 backfill.
     (v_org_id, 'Cass County',           'MO', 'Cass County MO',
       (SELECT fips_code FROM public.fips_codes
        WHERE state_code = 'MO' AND lower(county_name) = lower('Cass') LIMIT 1)),
