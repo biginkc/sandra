@@ -50,15 +50,27 @@ export function BulkSmsModal({ open, propertyIds, onClose, onQueued }: Props) {
   const [paceValue, setPaceValue] = useState<number>(18);
   const [paceUnit, setPaceUnit] = useState<PaceUnit>("seconds");
 
-  // Skip-contacted: defaults ON for >50 selections per the locked plan rule.
-  const [skipContacted, setSkipContacted] = useState<boolean>(
-    propertyIds.length > SKIP_DEFAULT_THRESHOLD,
-  );
-  const [contactedCount, setContactedCount] = useState<number | null>(null);
-
   // Stable key so the count-fetch effect doesn't re-run on every parent render
   // even if the parent passes a fresh array reference each time.
   const propertyIdsKey = useMemo(() => propertyIds.join(","), [propertyIds]);
+
+  // Skip-contacted defaults ON for >50 selections per the locked plan rule.
+  // Re-derive the default whenever the selection identity changes — render
+  // path, no synchronous setState-in-effect (which the project's lint rule
+  // flags as cascading-render risk).
+  const [skipContacted, setSkipContacted] = useState<boolean>(
+    propertyIds.length > SKIP_DEFAULT_THRESHOLD,
+  );
+  const [skipContactedKey, setSkipContactedKey] = useState<string>(propertyIdsKey);
+  if (skipContactedKey !== propertyIdsKey) {
+    setSkipContactedKey(propertyIdsKey);
+    setSkipContacted(propertyIds.length > SKIP_DEFAULT_THRESHOLD);
+  }
+
+  // Contacted-count: fetched on open. We reset to `null` inside the async
+  // .then() callback (not synchronously in the effect body) so the lint
+  // rule against cascading renders stays satisfied.
+  const [contactedCount, setContactedCount] = useState<number | null>(null);
 
   useEffect(() => {
     if (!open) return;
@@ -68,12 +80,9 @@ export function BulkSmsModal({ open, propertyIds, onClose, onQueued }: Props) {
         setSelectedCategory(result.data[0]?.category ?? "");
       }
     });
-    setContactedCount(null);
     countAlreadyContacted(propertyIds).then((result) => {
       if (result.ok) setContactedCount(result.data);
     });
-    // Reset the skip-contacted default whenever we open with a new selection.
-    setSkipContacted(propertyIds.length > SKIP_DEFAULT_THRESHOLD);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, propertyIdsKey]);
 

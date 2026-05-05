@@ -87,6 +87,13 @@ const baseProps = {
   unknownActiveCount: 0,
   assigneeEmails: {},
   currentUserId: "user-1",
+  queueStats: {
+    queued: 0,
+    sentToday: 0,
+    failedToday: 0,
+    nextScheduledFor: null,
+    lastScheduledFor: null,
+  },
 };
 
 describe("<CockpitView /> assignment chips", () => {
