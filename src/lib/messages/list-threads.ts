@@ -51,6 +51,7 @@ export async function listThreads(
     )
     .eq("channel", "sms")
     .not("contact_id", "is", null)
+    .neq("status", "queued")
     .gte("created_at", cutoff)
     .order("created_at", { ascending: false });
   if (error) throw new Error(`listThreads: ${error.message}`);
