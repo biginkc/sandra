@@ -3,8 +3,8 @@ gsd_state_version: 1.0
 milestone: v2.0
 milestone_name: milestone
 status: executing
-last_updated: "2026-05-05T00:27:55.942Z"
-last_activity: 2026-05-05 -- Phase 01.5 execution started
+last_updated: "2026-05-05T03:09:28Z"
+last_activity: 2026-05-05 -- e2ceef4 merged PRs 96-100; bulk SMS pacing shipped + 4 prod fixes; 939 messages queued and draining
 progress:
   total_phases: 3
   completed_phases: 1
@@ -40,8 +40,12 @@ Last activity: 2026-05-05 -- Completed quick task 260504-tgq: Bulk SMS modal pac
 - Requirements defined: 2026-04-30
 - Roadmap created: 2026-04-30
 - Phase 01 plans 01-01 through 01-06: shipped 2026-04-30 → 2026-05-01
-- Phase 01 PR: #89 (open) — merge when CI passes
-- Next action: Merge PR #89 → `/gsd-plan-phase 1.5`
+- Phase 01 PR: #89 — merged
+- Phase 01.5 PRs #94/#95: merged 2026-05-04
+- Quick task 260504-tgq (bulk SMS pacing + outbox stats): PRs #96-100 merged 2026-05-05
+- Prod build fixed (PR #98 — vendored @sandra/tokens CSS)
+- 939 messages queued on prod, draining at 1-min pacing through ~17:10 UTC 2026-05-05
+- Next action: Approve Phase 1.5 UAT → `/gsd-next` → Phase 2 (Market Vocabulary Refactor)
 
 ## Accumulated Context (preserved across milestones)
 
