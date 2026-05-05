@@ -23,6 +23,10 @@ vi.mock("sonner", () => ({
   },
 }));
 
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ push: vi.fn() }),
+}));
+
 // eslint-disable-next-line import/first
 import { BulkSmsModal } from "./bulk-sms-modal";
 

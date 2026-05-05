@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState, useTransition } from "react";
+import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -40,6 +41,7 @@ const PACE_MAX_SECONDS = 600;
 const SKIP_DEFAULT_THRESHOLD = 50;
 
 export function BulkSmsModal({ open, propertyIds, onClose, onQueued }: Props) {
+  const router = useRouter();
   const [categories, setCategories] = useState<Category[]>([]);
   const [selectedCategory, setSelectedCategory] = useState<string>("");
   const [customBody, setCustomBody] = useState("");
@@ -139,6 +141,7 @@ export function BulkSmsModal({ open, propertyIds, onClose, onQueued }: Props) {
         }
         onQueued(succeeded);
         onClose();
+        router.push("/messages?tab=outbox");
       }
     });
   };
