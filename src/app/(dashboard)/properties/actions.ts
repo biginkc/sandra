@@ -79,21 +79,43 @@ export async function bulkQueueSms(
     const paceSeconds = opts.paceSeconds ?? 18;
     const now = Date.now();
 
-    const { data: properties, error: propError } = await supabase
-      .from("properties")
-      .select("id, homeowner_contact_id, org_id")
-      .in("id", propertyIds);
-
-    if (propError) {
-      return {
-        ok: false,
-        error: { code: "BULK_SMS_FAILED", message: propError.message },
-      };
+    // Fetch properties in chunks — Supabase PostgREST rejects large IN clauses
+    // (URL length limit, ~8 KB) so we split into batches of 250.
+    const CHUNK = 250;
+    const allProperties: { id: string; homeowner_contact_id: string | null; org_id: string | null }[] = [];
+    for (let i = 0; i < propertyIds.length; i += CHUNK) {
+      const chunk = propertyIds.slice(i, i + CHUNK);
+      const { data, error: propError } = await supabase
+        .from("properties")
+        .select("id, homeowner_contact_id, org_id")
+        .in("id", chunk);
+      if (propError) {
+        return {
+          ok: false,
+          error: { code: "BULK_SMS_FAILED", message: propError.message },
+        };
+      }
+      if (data) allProperties.push(...data);
     }
 
     const propertyMap = new Map(
-      (properties ?? []).map((p) => [p.id, p]),
+      allProperties.map((p) => [p.id, p]),
     );
+
+    // Prefetch all already-contacted property IDs in one batched query so the
+    // per-property loop doesn't fire N individual round-trips.
+    const contactedSet = new Set<string>();
+    if (opts.skipIfContacted) {
+      for (let i = 0; i < propertyIds.length; i += CHUNK) {
+        const chunk = propertyIds.slice(i, i + CHUNK);
+        const { data } = await supabase
+          .from("messages")
+          .select("property_id")
+          .in("property_id", chunk)
+          .eq("direction", "outbound");
+        data?.forEach((r) => { if (r.property_id) contactedSet.add(r.property_id); });
+      }
+    }
 
     let succeeded = 0;
     let skipped = 0;
@@ -107,17 +129,9 @@ export async function bulkQueueSms(
         continue;
       }
 
-      if (opts.skipIfContacted) {
-        const { data: prior } = await supabase
-          .from("messages")
-          .select("id")
-          .eq("property_id", propertyId)
-          .eq("direction", "outbound")
-          .limit(1);
-        if (prior && prior.length > 0) {
-          skipped++;
-          continue;
-        }
+      if (opts.skipIfContacted && contactedSet.has(propertyId)) {
+        skipped++;
+        continue;
       }
 
       const consentState = await getConsentState(
@@ -134,6 +148,7 @@ export async function bulkQueueSms(
       if (opts.body) {
         body = opts.body;
       } else if (opts.templateCategory) {
+        if (!property.org_id) { skipped++; continue; }
         const template = await pickFromPool(
           supabase,
           property.org_id,
@@ -296,22 +311,26 @@ export async function countAlreadyContacted(
   if (propertyIds.length === 0) return ok(0);
   try {
     const supabase = await createClient();
-    const { data, error } = await supabase
-      .from("messages")
-      .select("property_id")
-      .in("property_id", propertyIds)
-      .eq("direction", "outbound");
-    if (error) {
-      return {
-        ok: false,
-        error: { code: "COUNT_CONTACTED_FAILED", message: error.message },
-      };
-    }
-    const distinct = new Set(
+    const CHUNK = 250;
+    const distinct = new Set<string>();
+    for (let i = 0; i < propertyIds.length; i += CHUNK) {
+      const chunk = propertyIds.slice(i, i + CHUNK);
+      const { data, error } = await supabase
+        .from("messages")
+        .select("property_id")
+        .in("property_id", chunk)
+        .eq("direction", "outbound");
+      if (error) {
+        return {
+          ok: false,
+          error: { code: "COUNT_CONTACTED_FAILED", message: error.message },
+        };
+      }
       (data ?? [])
         .map((r) => r.property_id)
-        .filter((v): v is string => typeof v === "string"),
-    );
+        .filter((v): v is string => typeof v === "string")
+        .forEach((v) => distinct.add(v));
+    }
     return ok(distinct.size);
   } catch (e) {
     reportError(e, { tags: { surface: "count_already_contacted" } });
