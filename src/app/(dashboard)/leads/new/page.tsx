@@ -23,12 +23,9 @@ const SOURCE_LABELS: Record<string, string> = {
   direct_mail: "Direct mail",
 };
 
-const MARKETS = [
-  "Kansas City",
-  "St. Louis",
-  "Dayton",
-  "Lake of the Ozarks",
-];
+// The market dropdown reads from the counties table at runtime per
+// phase 02 D-01 — adding a new market is a DB insert, not a code
+// change. The fetch happens inside the page component below.
 
 const STATES = ["MO", "KS", "OH", "IL", "AR", "OK", "NE", "IA", "TN", "KY"];
 
@@ -50,6 +47,15 @@ export default async function NewLeadPage({
       </Page>
     );
   }
+
+  // Markets list — fetched from the counties table per phase 02 D-01.
+  // Sorted by state then name to match the import wizard's order.
+  const { data: counties } = await supabase
+    .from("counties")
+    .select("market")
+    .order("state", { ascending: true })
+    .order("name", { ascending: true });
+  const markets: string[] = (counties ?? []).map((c) => c.market);
 
   return (
     <Page>
@@ -141,7 +147,7 @@ export default async function NewLeadPage({
                 defaultValue=""
               >
                 <option value="">— pick a market —</option>
-                {MARKETS.map((m) => (
+                {markets.map((m) => (
                   <option key={m} value={m}>
                     {m}
                   </option>

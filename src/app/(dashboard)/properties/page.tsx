@@ -165,6 +165,17 @@ export default async function PropertiesPage({
     };
   });
 
+  // Markets list — feeds the Market filter pill on the prospects table.
+  // Per phase 02 D-07 the dropdown reads from the counties table at
+  // runtime (no hardcoded enum). RLS scopes the read to the user's org.
+  // Per project memory feedback_no_usestate_mirror_of_server_props.md
+  // the table renders the prop directly without a useState mirror.
+  const { data: countyRows } = await supabase
+    .from("counties")
+    .select("market")
+    .order("market", { ascending: true });
+  const markets: string[] = (countyRows ?? []).map((c) => c.market);
+
   // Active lists — feed the "Add to list" / "Remove from list" submenus.
   // Archived lists are hidden from the picker (they'd be a noisy confusion
   // vector); users can unarchive via /lists if they want them back.
@@ -259,6 +270,7 @@ export default async function PropertiesPage({
         lists={lists}
         tags={tags}
         teamMembers={teamMembers}
+        markets={markets}
         currentUserId={user?.id ?? null}
         canDelete={isAdmin}
         headerCount={headerCount}

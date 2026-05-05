@@ -95,6 +95,7 @@ function renderTable(rows: ProspectRow[], lists: ListOption[] = []) {
       lists={lists}
       tags={[]}
       teamMembers={[]}
+      markets={[]}
       currentUserId={null}
       canDelete={false}
       headerCount={`Showing 1-${rows.length} of ${rows.length} prospects.`}
@@ -308,6 +309,7 @@ describe("<ProspectsTable /> sortable headers", () => {
         lists={[]}
         tags={[]}
         teamMembers={[]}
+        markets={[]}
         currentUserId={null}
         canDelete={false}
         headerCount=""
@@ -358,6 +360,7 @@ describe("<ProspectsTable /> address search", () => {
         lists={[]}
         tags={[]}
         teamMembers={[]}
+        markets={[]}
         currentUserId={null}
         canDelete={false}
         headerCount=""
@@ -399,6 +402,7 @@ describe("<ProspectsTable /> quick filters", () => {
         lists={[]}
         tags={[]}
         teamMembers={[]}
+        markets={[]}
         currentUserId={null}
         canDelete={false}
         headerCount=""
@@ -432,6 +436,74 @@ describe("<ProspectsTable /> quick filters", () => {
     );
   });
 
+  it("Market filter pill renders one DropdownMenuItem per markets prop entry (phase 02 D-07)", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    render(
+      <ProspectsTable
+        prospects={[makeRow({ id: "p1" })]}
+        lists={[]}
+        tags={[]}
+        teamMembers={[]}
+        markets={["Buchanan County MO", "Johnson County KS"]}
+        currentUserId={null}
+        canDelete={false}
+        headerCount=""
+        search=""
+        sort="created_at"
+        dir="desc"
+        filters={EMPTY_FILTERS}
+        total={1}
+        pageSize={50}
+        page={1}
+        totalPages={28}
+      />,
+    );
+    // Open the Market filter pill so the dropdown items mount in the
+    // portal. Base UI's Menu portals into document.body so `findByTestId`
+    // (which retries) is the right primitive — `getByTestId` reads the
+    // initial render before the portal mounts.
+    await user.click(screen.getByTestId("filter-market"));
+    // Each county-shaped market gets its own data-testid (whitespace
+    // collapsed to dashes — matches the existing transform).
+    expect(
+      await screen.findByTestId("filter-market-Buchanan-County-MO"),
+    ).toBeTruthy();
+    expect(
+      await screen.findByTestId("filter-market-Johnson-County-KS"),
+    ).toBeTruthy();
+  });
+
+  it("Selecting a market dropdown item pushes ?market=<county-name+state> with the new opaque string", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    render(
+      <ProspectsTable
+        prospects={[makeRow({ id: "p1" })]}
+        lists={[]}
+        tags={[]}
+        teamMembers={[]}
+        markets={["Buchanan County MO"]}
+        currentUserId={null}
+        canDelete={false}
+        headerCount=""
+        search=""
+        sort="created_at"
+        dir="desc"
+        filters={EMPTY_FILTERS}
+        total={1}
+        pageSize={50}
+        page={1}
+        totalPages={28}
+      />,
+    );
+    await user.click(screen.getByTestId("filter-market"));
+    const item = await screen.findByTestId("filter-market-Buchanan-County-MO");
+    await user.click(item);
+    expect(routerReplace).toHaveBeenCalledTimes(1);
+    expect(routerReplace.mock.calls[0][0]).toBe(
+      "/properties?market=Buchanan+County+MO",
+    );
+  });
+
   it("Clear text link is hidden when no filters are active", () => {
     renderTable([makeRow({ id: "p1" })]);
     expect(screen.queryByTestId("filter-clear-all")).toBeNull();
@@ -445,6 +517,7 @@ describe("<ProspectsTable /> quick filters", () => {
         lists={[]}
         tags={[]}
         teamMembers={[]}
+        markets={[]}
         currentUserId={null}
         canDelete={false}
         headerCount=""
@@ -479,6 +552,7 @@ describe("<ProspectsTable /> quick filters", () => {
         lists={[]}
         tags={[]}
         teamMembers={[]}
+        markets={[]}
         currentUserId={null}
         canDelete={false}
         headerCount=""
@@ -520,6 +594,7 @@ describe("<ProspectsTable /> select-all-across-pages banner", () => {
         lists={[]}
         tags={[]}
         teamMembers={[]}
+        markets={[]}
         currentUserId={null}
         canDelete={false}
         headerCount=""
@@ -546,6 +621,7 @@ describe("<ProspectsTable /> select-all-across-pages banner", () => {
         lists={[]}
         tags={[]}
         teamMembers={[]}
+        markets={[]}
         currentUserId={null}
         canDelete={false}
         headerCount=""
@@ -581,6 +657,7 @@ describe("<ProspectsTable /> select-all-across-pages banner", () => {
         lists={[]}
         tags={[]}
         teamMembers={[]}
+        markets={[]}
         currentUserId={null}
         canDelete={false}
         headerCount=""
@@ -618,6 +695,7 @@ describe("<ProspectsTable /> select-all-across-pages banner", () => {
         lists={[]}
         tags={[]}
         teamMembers={[]}
+        markets={[]}
         currentUserId={null}
         canDelete={false}
         headerCount=""
@@ -646,6 +724,7 @@ describe("<ProspectsTable /> select-all-across-pages banner", () => {
         lists={[]}
         tags={[]}
         teamMembers={[]}
+        markets={[]}
         currentUserId={null}
         canDelete={false}
         headerCount=""

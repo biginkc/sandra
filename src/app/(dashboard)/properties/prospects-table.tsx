@@ -28,9 +28,7 @@ import {
   buildProspectsFilterParams,
   buildProspectsHref,
   formatFullAddress,
-  KNOWN_MARKETS,
   type EngagementState,
-  type KnownMarket,
   type ParsedProspectsFilters,
   type SortableColumn,
   type SortDirection,
@@ -97,6 +95,12 @@ type Props = {
   lists: ListOption[];
   tags: TagOption[];
   teamMembers: TeamMemberOption[];
+  /** Available markets — fetched server-side from the counties table
+   *  in /properties/page.tsx and rendered in the Market filter pill.
+   *  Per phase 02 D-07 the dropdown reads from counties; per
+   *  feedback_no_usestate_mirror_of_server_props.md the table renders
+   *  the prop directly with no useState mirror. */
+  markets: string[];
   currentUserId: string | null;
   canDelete: boolean;
   /** Rendered into the header subhead so the count stays right next to the title. */
@@ -133,6 +137,7 @@ export function ProspectsTable({
   lists,
   tags,
   teamMembers,
+  markets,
   currentUserId,
   canDelete,
   headerCount,
@@ -678,6 +683,7 @@ export function ProspectsTable({
         <ProspectFilters
           filters={filters}
           teamMembers={teamMembers}
+          markets={markets}
           onChange={updateFilters}
           anyActive={anyFilterActive}
           onClearAll={clearAllFilters}
@@ -979,12 +985,14 @@ function VacantPill() {
 function ProspectFilters({
   filters,
   teamMembers,
+  markets,
   onChange,
   anyActive,
   onClearAll,
 }: {
   filters: ParsedProspectsFilters;
   teamMembers: TeamMemberOption[];
+  markets: string[];
   onChange: (patch: Partial<ParsedProspectsFilters>) => void;
   anyActive: boolean;
   onClearAll: () => void;
@@ -1035,10 +1043,10 @@ function ProspectFilters({
               Anywhere
             </DropdownMenuItem>
             <DropdownMenuSeparator />
-            {KNOWN_MARKETS.map((m) => (
+            {markets.map((m) => (
               <DropdownMenuItem
                 key={m}
-                onClick={() => onChange({ market: m as KnownMarket })}
+                onClick={() => onChange({ market: m })}
                 data-testid={`filter-market-${m.replace(/\s+/g, "-")}`}
               >
                 {m}
