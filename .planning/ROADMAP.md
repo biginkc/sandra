@@ -47,8 +47,8 @@
 **Plans:** 5 plans
 
 Plans:
-- [ ] 01.5-01-PLAN.md — Wire @sandra/tokens (package.json + globals.css import + remove :root block)
-- [ ] 01.5-02-PLAN.md — Copy 3 registry components into src/components/ui/
+- [x] 01.5-01-PLAN.md — Wire @sandra/tokens (package.json + globals.css import + remove :root block)
+- [x] 01.5-02-PLAN.md — Copy 3 registry components into src/components/ui/
 - [ ] 01.5-03-PLAN.md — Swap TableToolbarSearch inner input to SearchInputPill
 - [ ] 01.5-04-PLAN.md — DataTableShell + DataTableFooter + CircularPagination on /properties
 - [ ] 01.5-05-PLAN.md — DataTableShell + DataTableFooter (count-only) on /lists, /jobs, /templates
