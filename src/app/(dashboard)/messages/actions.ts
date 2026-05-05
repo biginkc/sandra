@@ -427,7 +427,7 @@ export type QueueStats = {
  * Five sequential reads against `messages`:
  *   - count(*) where status='queued'
  *   - count(*) where status='sent' AND created_at >= todayStartUtc
- *   - count(*) where status='failed' AND updated_at >= todayStartUtc
+ *   - count(*) where status='failed' AND failed_at >= todayStartUtc
  *   - min(scheduled_for) where status='queued'  (next release)
  *   - max(scheduled_for) where status='queued'  (last release → drain ETA)
  *
@@ -471,7 +471,7 @@ export async function getQueueStats(): Promise<Result<QueueStats>> {
       .from("messages")
       .select("*", { count: "exact", head: true })
       .eq("status", "failed")
-      .gte("updated_at", todayStartIso);
+      .gte("failed_at", todayStartIso);
     if (failedRes.error) {
       return {
         ok: false,

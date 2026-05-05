@@ -1,6 +1,7 @@
 "use server";
 
 import { createClient } from "@/lib/supabase/server";
+import { createAdminClient } from "@/lib/supabase/admin";
 import { errFromUnknown, ok, type Result } from "@/lib/errors/result";
 import { reportError } from "@/lib/errors/report";
 import { getConsentState } from "@/lib/messaging/consent";
@@ -78,6 +79,18 @@ export async function bulkQueueSms(
     const supabase = await createClient();
     const paceSeconds = opts.paceSeconds ?? 18;
     const now = Date.now();
+
+    // Resolve the current session user once so {{my_first_name}} renders
+    // for every property in the batch. Without this, templates referencing
+    // the sender token produced bodies like "Andrew,  here." (canceled in
+    // prod 2026-05-05). Admin client is needed by the resolver to call
+    // auth.admin.getUserById on the lookup; the WR-02 split keeps the
+    // RLS-scoped reads on the session client.
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    const enrolledByUserId = user?.id ?? null;
+    const adminClient = createAdminClient();
 
     // Fetch properties in chunks — Supabase PostgREST rejects large IN clauses
     // (URL length limit, ~8 KB) so we split into batches of 250.
@@ -159,11 +172,15 @@ export async function bulkQueueSms(
           skipped++;
           continue;
         }
-        const vars = await loadTemplateVars(supabase, {
-          propertyId,
-          contactId: property.homeowner_contact_id,
-          enrolledByUserId: null,
-        });
+        const vars = await loadTemplateVars(
+          supabase,
+          {
+            propertyId,
+            contactId: property.homeowner_contact_id,
+            enrolledByUserId,
+          },
+          adminClient,
+        );
         body = renderTemplate(template.content, vars);
       }
 
