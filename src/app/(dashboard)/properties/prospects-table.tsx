@@ -17,6 +17,7 @@ import {
   type UseTableUrlStateReturn,
 } from "@/components/table/use-table-url-state";
 import { Badge } from "@/components/ui/badge";
+import { cn } from "@/lib/utils";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { CircularPagination } from "@/components/ui/circular-pagination";
 import {
@@ -86,6 +87,8 @@ export type ProspectRow = {
   engagement: EngagementState;
   /** Truncated body of the property's most recent message; null when none. */
   last_message_preview: string | null;
+  /** Outreach disposition, if manually set or auto-detected. */
+  outreach_dispo: string | null;
 };
 
 export type ListOption = { id: string; name: string; color: string | null };
@@ -825,6 +828,7 @@ export function ProspectsTable({
                         cass={p.cass_status}
                         isVacant={p.is_vacant}
                         engagement={p.engagement}
+                        dispo={p.outreach_dispo}
                       />
                     </TableCell>
                     <TableCell
@@ -889,17 +893,61 @@ function StatusPills({
   cass,
   isVacant,
   engagement,
+  dispo,
 }: {
   cass: string;
   isVacant: boolean | null;
   engagement: EngagementState;
+  dispo: string | null;
 }) {
   return (
     <div className="flex flex-wrap gap-1">
       <CassPill status={cass} />
       {isVacant === true ? <VacantPill /> : null}
       {engagement !== "none" ? <EngagementPill state={engagement} /> : null}
+      {dispo ? <DispoPill dispo={dispo} /> : null}
     </div>
+  );
+}
+
+const DISPO_PILL_META: Record<string, { label: string; className: string }> = {
+  wrong_number: {
+    label: "Wrong #",
+    className: "bg-zinc-100 text-zinc-600 hover:bg-zinc-100",
+  },
+  bad_number: {
+    label: "Bad #",
+    className: "bg-zinc-100 text-zinc-600 hover:bg-zinc-100",
+  },
+  not_interested: {
+    label: "Not interested",
+    className: "bg-orange-100 text-orange-800 hover:bg-orange-100",
+  },
+  opted_out: {
+    label: "Opted out",
+    className: "bg-red-100 text-red-800 hover:bg-red-100",
+  },
+  dnc: {
+    label: "Do not contact",
+    className: "bg-red-100 text-red-800 hover:bg-red-100",
+  },
+  nurture: {
+    label: "Nurture",
+    className: "bg-blue-100 text-blue-800 hover:bg-blue-100",
+  },
+  callback_requested: {
+    label: "Callback",
+    className: "bg-purple-100 text-purple-800 hover:bg-purple-100",
+  },
+};
+
+function DispoPill({ dispo }: { dispo: string }) {
+  const meta = DISPO_PILL_META[dispo];
+  if (!meta) return null;
+  return (
+    <Badge className={cn("text-[10px] font-medium", meta.className)}>
+      {meta.label}
+    </Badge>
   );
 }
 

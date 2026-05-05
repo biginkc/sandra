@@ -10,6 +10,10 @@ export type InboxDetail = {
   propertyAddress: string | null;
   /** auth.users.id of the property's current assignee, or null. */
   assigneeId: string | null;
+  /** Pipeline position — used to show/hide the dispo bar. */
+  propertyStatus: string | null;
+  /** Current outreach disposition, if any. */
+  outreachDispo: string | null;
   initialMessages: Database["public"]["Tables"]["messages"]["Row"][];
 };
 
@@ -46,7 +50,7 @@ export async function fetchInboxDetail(
     propertyId
       ? supabase
           .from("properties")
-          .select("address, city, state, assigned_user_id")
+          .select("address, city, state, assigned_user_id, status, outreach_dispo")
           .eq("id", propertyId)
           .maybeSingle()
       : Promise.resolve({ data: null, error: null }),
@@ -67,6 +71,8 @@ export async function fetchInboxDetail(
       ? [p.address, p.city, p.state].filter(Boolean).join(", ")
       : null,
     assigneeId: p?.assigned_user_id ?? null,
+    propertyStatus: p?.status ?? null,
+    outreachDispo: p?.outreach_dispo ?? null,
     initialMessages: messages,
   };
 }

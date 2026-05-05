@@ -42,6 +42,13 @@ import type { Database, Json } from "@/lib/supabase/types";
 const STOP_KEYWORDS = /^\s*(stop|stopall|unsubscribe|cancel|end|quit|opt out|opt-out|remove)\s*$/i;
 const HELP_KEYWORDS = /^\s*(help|info|support)\s*$/i;
 
+// Conversational DNC phrases — not caught by STOP_KEYWORDS (which anchors to
+// exact-match only). These carry the same TCPA suppression obligation.
+const DNC_KEYWORDS = /do not (call|text|contact|reach out|message)|don'?t (call|text|contact|reach out|message)|stop (texting|calling|contacting) me|take me off|no more (texts|messages|calls)|remove me from|stop reaching out/i;
+
+// Wrong-number phrases — property needs a new number; not a TCPA opt-out.
+const WRONG_NUMBER_KEYWORDS = /wrong number|wrong person|not the owner|don'?t own|dont own|no longer own/i;
+
 function createServiceRoleClient() {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
   const key =
@@ -197,6 +204,120 @@ export async function POST(request: Request) {
           body: ev.body,
           contact_id: contactId,
           metadata: { keyword: "help" } as Json,
+        });
+        continue;
+      }
+
+      // DNC — conversational "do not call/text me" phrases. Same TCPA
+      // suppression obligation as STOP; we just log it as opt_out and also
+      // stamp outreach_dispo = 'dnc' on the property so the cockpit shows it.
+      if (DNC_KEYWORDS.test(ev.body)) {
+        let dncPropertyId: string | null = null;
+        if (contactId) {
+          const { data: recentOutbound } = await supabase
+            .from("messages")
+            .select("property_id")
+            .eq("contact_id", contactId)
+            .eq("direction", "outbound")
+            .not("property_id", "is", null)
+            .order("created_at", { ascending: false })
+            .limit(1)
+            .maybeSingle();
+          dncPropertyId = recentOutbound?.property_id ?? null;
+
+          await recordConsentEvent(supabase, {
+            contactId,
+            channel: "sms",
+            eventType: "opt_out",
+            source: "dialpad_inbound_webhook",
+            sourceDetail: { externalId: ev.externalId, from: ev.from, keyword: "dnc" },
+            occurredAt: ev.receivedAt,
+          });
+          await supabase
+            .from("contacts")
+            .update({ sms_opted_out: true, sms_opted_out_at: ev.receivedAt.toISOString() })
+            .eq("id", contactId);
+          try {
+            await pauseContactEnrollments(supabase, {
+              contactId,
+              reason: "consent_revoked",
+              permanent: true,
+            });
+          } catch (e) {
+            reportError(e, {
+              tags: { surface: "dialpad_webhook_sequence_pause_dnc" },
+              extra: { contactId, externalId: ev.externalId },
+            });
+          }
+        }
+        if (dncPropertyId) {
+          await supabase
+            .from("properties")
+            .update({ outreach_dispo: "dnc" })
+            .eq("id", dncPropertyId);
+        }
+        await supabase.from("messages").insert({
+          channel: "sms",
+          direction: "inbound",
+          status: "received",
+          provider: provider.providerId,
+          external_id: ev.externalId,
+          from_address: ev.from,
+          to_address: ev.to,
+          body: ev.body,
+          contact_id: contactId,
+          property_id: dncPropertyId,
+          metadata: { keyword: "dnc" } as Json,
+        });
+        continue;
+      }
+
+      // WRONG_NUMBER — seller says this isn't their property or number.
+      // Marks the property as needing a new number; pauses sequences.
+      // Not a TCPA opt-out — consent state is untouched.
+      if (WRONG_NUMBER_KEYWORDS.test(ev.body)) {
+        let wrongNumPropertyId: string | null = null;
+        if (contactId) {
+          const { data: recentOutbound } = await supabase
+            .from("messages")
+            .select("property_id")
+            .eq("contact_id", contactId)
+            .eq("direction", "outbound")
+            .not("property_id", "is", null)
+            .order("created_at", { ascending: false })
+            .limit(1)
+            .maybeSingle();
+          wrongNumPropertyId = recentOutbound?.property_id ?? null;
+        }
+        if (wrongNumPropertyId) {
+          await supabase
+            .from("properties")
+            .update({ outreach_dispo: "wrong_number" })
+            .eq("id", wrongNumPropertyId);
+          try {
+            await pausePropertyEnrollments(supabase, {
+              propertyId: wrongNumPropertyId,
+              reason: "inbound_reply",
+            });
+          } catch (e) {
+            reportError(e, {
+              tags: { surface: "dialpad_webhook_sequence_pause_wrong_number" },
+              extra: { propertyId: wrongNumPropertyId, externalId: ev.externalId },
+            });
+          }
+        }
+        await supabase.from("messages").insert({
+          channel: "sms",
+          direction: "inbound",
+          status: "received",
+          provider: provider.providerId,
+          external_id: ev.externalId,
+          from_address: ev.from,
+          to_address: ev.to,
+          body: ev.body,
+          contact_id: contactId,
+          property_id: wrongNumPropertyId,
+          metadata: { keyword: "wrong_number" } as Json,
         });
         continue;
       }
