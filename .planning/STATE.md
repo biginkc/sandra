@@ -31,7 +31,7 @@ See: .planning/PROJECT.md (updated 2026-04-30)
 Phase: 01.5 (sandra-design-system-retrofit) — EXECUTING
 Plan: 1 of 5
 Status: Executing Phase 01.5
-Last activity: 2026-05-05 -- Phase 01.5 execution started
+Last activity: 2026-05-05 -- Completed quick task 260504-tgq: Bulk SMS modal pacing input + skip-contacted checkbox + live queue stats banner on /messages Outbox
 
 ## Status
 
@@ -58,3 +58,9 @@ Last activity: 2026-05-05 -- Phase 01.5 execution started
 - 46-property CASS recovery — re-import the original DealMachine CSV; PR #79 unblocked the auto-trigger
 - Playwright retries 1→2 — `/gsd-fast` later
 - `/admin/skip-trace-settings` page — `/gsd-quick` later
+
+### Quick Tasks Completed
+
+| # | Description | Date | Commit | Directory |
+|---|-------------|------|--------|-----------|
+| 260504-tgq | Bulk SMS modal pacing input + skip-contacted checkbox + live queue stats banner on /messages Outbox | 2026-05-05 | 20008dd | [260504-tgq-bulk-sms-modal-pacing-input-skip-contact](./quick/260504-tgq-bulk-sms-modal-pacing-input-skip-contact/) |
