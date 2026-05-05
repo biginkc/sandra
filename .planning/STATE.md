@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v2.0
 milestone_name: milestone
-status: executing
+status: milestone_complete
 last_updated: "2026-05-05T19:55:00Z"
 last_activity: 2026-05-05 -- Schema repair complete (043-047 on prod+test); 1,096 props backfilled; ready for Wave 4 (02-05)
 progress:
   total_phases: 3
-  completed_phases: 2
+  completed_phases: 3
   total_plans: 16
   completed_plans: 15
-  percent: 94
+  percent: 100
 ---
 
 # Project State
@@ -28,8 +28,8 @@ See: .planning/PROJECT.md (updated 2026-04-30)
 
 ## Current Position
 
-Phase: 02 (market-vocabulary-refactor) — EXECUTING (4 of 5 plans done)
-Status: Wave 4 remaining — plan 02-05 (tests + Playwright smokes + final phase sign-off)
+Phase: 02 of 5 (market-vocabulary-refactor)
+Status: Milestone complete
 
 ## Status
 

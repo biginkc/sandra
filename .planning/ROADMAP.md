@@ -77,14 +77,14 @@ Plans:
 - [x] 02-01-PLAN.md — Migration 043: drop CHECK constraints on counties.market + properties.market; add counties.fips_code column + partial unique index
 
 **Wave 2** *(blocked on Wave 1 completion)*
-- [ ] 02-02-PLAN.md — Migration 044: seed BMH Group's counties (18 confirmed + 3 pending Jarrad PR-review confirmation) with fips_code lookup via fips_codes JOIN
-- [ ] 02-03-PLAN.md — Refactor: eliminate KNOWN_MARKETS + WizardMarket; wire RSC counties fetch through wizard, properties filter, leads/new form; add county_id to csv ingest + leads/create write paths
+- [x] 02-02-PLAN.md — Migration 044: seed BMH Group's counties (18 confirmed + 3 pending Jarrad PR-review confirmation) with fips_code lookup via fips_codes JOIN
+- [x] 02-03-PLAN.md — Refactor: eliminate KNOWN_MARKETS + WizardMarket; wire RSC counties fetch through wizard, properties filter, leads/new form; add county_id to csv ingest + leads/create write paths
 
 **Wave 3** *(blocked on Wave 2 completion)*
-- [ ] 02-04-PLAN.md — Migration 045: backfill properties.county_id + market via fips_code JOIN (~1,149 rows) + cass_raw_response jsonb fallback (~26 rows); leave ~1,358 unresolved rows alone per D-05
+- [x] 02-04-PLAN.md — Migration 045: backfill properties.county_id + market via fips_code JOIN (~1,149 rows) + cass_raw_response jsonb fallback (~26 rows); leave ~1,358 unresolved rows alone per D-05
 
 **Wave 4** *(blocked on Wave 3 completion)*
-- [ ] 02-05-PLAN.md — Tests + Playwright smokes (wizard dropdown, properties filter pill) + 045 integration test + post-merge schema_migrations verification on prod + test
+- [x] 02-05-PLAN.md — Tests + Playwright smokes (wizard dropdown, properties filter pill) + 045 integration test + post-merge schema_migrations verification on prod + test
 
 ---
 
