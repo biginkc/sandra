@@ -39,6 +39,13 @@ export type CreateLeadInput = {
     state: string;
     zip?: string | null;
     market?: string | null;
+    /** Optional county_id (FK to counties.id). Per phase 02 D-04
+     *  market and county_id are set together at write time — callers
+     *  that have it (e.g. the manual-entry form once it adopts the
+     *  county picker) should supply both. Webhooks that don't have
+     *  it leave it null and the property is filled in later via CASS
+     *  verification. */
+    county_id?: string | null;
   };
   /** Optional contact info for the homeowner. If provided, dedups by
    *  phone_1 → email → name (matching the CSV ingest's contact dedup). */
@@ -183,6 +190,10 @@ export async function createLead(
       state: stateNorm,
       zip: zipNorm,
       market: input.property.market ?? null,
+      // Phase 02 D-04: market and county_id are set together at
+      // write time. Null when the caller doesn't supply it (webhooks,
+      // current-shape manual form) — CASS verification fills it later.
+      county_id: input.property.county_id ?? null,
       address_normalized: addressNormalized,
       source: input.source,
       homeowner_contact_id: contactId,

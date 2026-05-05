@@ -15,12 +15,21 @@ import type { SubOperationId } from "@/lib/csv/update-operations";
 import type { Mapping } from "@/lib/csv/validate";
 import { csvImportWorkflow } from "@/workflows/csv-import";
 
-import type { WizardMarket, WizardSource } from "./wizard";
+import type { WizardSource } from "./wizard";
 
 export type CreateImportJobParams = {
   filename: string;
   source: WizardSource;
-  market: WizardMarket;
+  /** Free-form market string from the wizard. Per phase 02 D-01 the
+   *  counties table is the source of truth — this string is NOT what
+   *  gets written. The action server-resolves the canonical market
+   *  from `counties.market` for the supplied countyId and uses that
+   *  for csv_imports.market / jobs.input_params / workflow params. */
+  market: string;
+  /** county_id (FK to counties.id) chosen on the wizard's market
+   *  dropdown. Required — server-validated against the counties table
+   *  before any writes (T-02-03-01 mitigation). */
+  countyId: string;
   /** Optional list name. Lookup-or-create within the importer's org. */
   listName: string | null;
   mapping: Mapping;
@@ -49,12 +58,34 @@ export async function createImportJob(
     const { data: userData } = await supabase.auth.getUser();
     const userId = userData.user?.id ?? null;
 
+    // T-02-03-01 mitigation: validate the supplied countyId against
+    // the counties table BEFORE inserting csv_imports. The query is
+    // RLS-scoped to the user's org, so a cross-org countyId returns
+    // no row → INVALID_COUNTY. The server-derived `county.market`
+    // (NOT params.market) is what gets persisted on csv_imports / jobs
+    // / workflow params — eliminates the trust boundary at the wizard
+    // SET_MARKET dispatch.
+    const { data: county, error: countyErr } = await supabase
+      .from("counties")
+      .select("id, market")
+      .eq("id", params.countyId)
+      .single();
+    if (countyErr || !county) {
+      return {
+        ok: false,
+        error: { code: "INVALID_COUNTY", message: "Invalid county" },
+      };
+    }
+    const canonicalMarket = county.market;
+    const canonicalCountyId = county.id;
+
     const { data: importRow, error: importError } = await supabase
       .from("csv_imports")
       .insert({
         filename: params.filename,
         source: params.source,
-        market: params.market,
+        market: canonicalMarket,
+        county_id: canonicalCountyId,
         total_rows: params.totalRows,
         storage_path: params.storagePath,
         user_id: userId,
@@ -103,11 +134,14 @@ export async function createImportJob(
         related_import_id: importRow.id,
         created_by: userId,
         title: `Import ${params.filename}`,
-        description: `${params.source} → ${params.market}: ${params.totalRows} rows`,
+        description: `${params.source} → ${canonicalMarket}: ${params.totalRows} rows`,
         input_params: {
           filename: params.filename,
           source: params.source,
-          market: params.market,
+          market: canonicalMarket,
+          // Mirror the workflow params on jobs.input_params so the
+          // /jobs UI shows the same county_id the worker will use.
+          countyId: canonicalCountyId,
           mapping: params.mapping as Record<string, string | null>,
           storagePath: params.storagePath,
           smsConsent: params.smsConsent,
@@ -140,7 +174,12 @@ export async function createImportJob(
             csvImportId: importRow.id,
             storagePath: params.storagePath,
             source: params.source,
-            market: params.market,
+            market: canonicalMarket,
+            // Workflow boundary handoff for D-04: the worker uses this
+            // as the hot path and falls back to csv_imports.county_id
+            // only if the workflow params arrive without it (legacy
+            // jobs queued before this plan shipped).
+            countyId: canonicalCountyId,
             mapping: params.mapping,
             listId,
             userId,

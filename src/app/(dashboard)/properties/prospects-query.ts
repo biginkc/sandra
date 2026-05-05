@@ -6,10 +6,10 @@
  * sortable whitelist, URL-encoding) lives in use-table-url-state.ts and
  * is exercised by use-table-url-state.test.ts (~12 tests covering the
  * shared surface). This file owns the prospects-specific shapes:
- * KNOWN_MARKETS, ParsedProspectsFilters, computeEngagement,
- * truncateMessagePreview, formatFullAddress — plus thin wrappers
- * parseProspectsSearch / buildProspectsHref that delegate to the
- * generic helpers with the prospects column whitelist + filter parsers.
+ * ParsedProspectsFilters, computeEngagement, truncateMessagePreview,
+ * formatFullAddress — plus thin wrappers parseProspectsSearch /
+ * buildProspectsHref that delegate to the generic helpers with the
+ * prospects column whitelist + filter parsers.
  *
  * The wrapper signatures are unchanged from before the extraction so
  * the 35 tests in prospects-query.test.ts and the 26 tests in
@@ -57,9 +57,11 @@ export type ParsedProspectsFilters = {
   cass: "verified" | null;
   /** ?engagement=contacted — derived state, requires a messages join. */
   engagement: "contacted" | null;
-  /** ?market=Kansas+City — narrowed to the wizard's known markets so a
-   *  bogus value doesn't 500 the query. */
-  market: "Kansas City" | "St. Louis" | "Dayton" | "Lake of the Ozarks" | null;
+  /** ?market=<county-name+state> — opaque string. Per phase 02 D-01,
+   *  the counties table is the source of truth for valid markets; the
+   *  filter dropdown is DB-driven so the parser doesn't need to narrow
+   *  to a hard-coded enum. Empty / whitespace strings collapse to null. */
+  market: string | null;
   /** ?assignee=<uuid> | "unassigned" | null. UUID is validated upstream
    *  by RLS / not-found; we only enforce the "unassigned" sentinel here. */
   assignee: string | null;
@@ -72,22 +74,6 @@ export type ParsedProspectsSearch = {
   dir: SortDirection;
   filters: ParsedProspectsFilters;
 };
-
-export const KNOWN_MARKETS = [
-  "Kansas City",
-  "St. Louis",
-  "Dayton",
-  "Lake of the Ozarks",
-] as const;
-
-export type KnownMarket = (typeof KNOWN_MARKETS)[number];
-
-function isKnownMarket(value: unknown): value is KnownMarket {
-  return (
-    typeof value === "string" &&
-    (KNOWN_MARKETS as readonly string[]).includes(value)
-  );
-}
 
 /** Default sort: newest-imported first. Matches the prior behavior. */
 export const DEFAULT_SORT: SortableColumn = "created_at";
@@ -117,9 +103,13 @@ function parseProspectsFilters(
   const engagement: ParsedProspectsFilters["engagement"] =
     engagementRaw === "contacted" ? "contacted" : null;
 
-  const marketRaw = pickFirst(raw.market);
-  const market: ParsedProspectsFilters["market"] = isKnownMarket(marketRaw)
-    ? marketRaw
+  // Per D-01: counties is the source of truth — accept any non-empty
+  // string. The dropdown that emits these values is DB-driven, so the
+  // pair is consistent. Empty / whitespace coerces to null (mirrors the
+  // search field behavior at lines 38-44).
+  const marketTrimmed = pickFirst(raw.market)?.trim();
+  const market: ParsedProspectsFilters["market"] = marketTrimmed
+    ? marketTrimmed
     : null;
 
   const assigneeRaw = (pickFirst(raw.assignee) ?? "").trim();

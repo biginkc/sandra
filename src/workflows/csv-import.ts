@@ -60,6 +60,14 @@ export type CsvImportWorkflowParams = {
   storagePath: string;
   source: string;
   market: string;
+  /** county_id chosen at job-create time. Set in lockstep with `market`
+   *  per phase 02 D-04 — workflow threads it through every chunk so
+   *  ingestRow can populate `properties.county_id` at insert time.
+   *  Nullable for the defensive-recovery branch (see workflow body):
+   *  if null on entry the workflow re-reads it from csv_imports.county_id
+   *  (column added by migration 043) — makes the async boundary
+   *  self-healing for jobs queued before this plan shipped. */
+  countyId: string | null;
   mapping: Mapping;
   listId: string | null;
   userId: string | null;
@@ -195,6 +203,10 @@ async function processChunkStep(args: {
   csvImportId: string;
   source: string;
   market: string;
+  /** county_id threaded through from the workflow params (D-04). The
+   *  worker passes this into ingestRow which sets it alongside
+   *  `properties.market` at insert time. */
+  countyId: string | null;
   mapping: Mapping;
   rows: RowData[];
   offset: number;
@@ -215,6 +227,7 @@ async function processChunkStep(args: {
     csvImportId: args.csvImportId,
     source: args.source,
     market: args.market,
+    countyId: args.countyId,
     mapping: args.mapping,
     rows: args.rows,
     offset: args.offset,
@@ -402,6 +415,24 @@ export async function csvImportWorkflow(
     params.source,
   );
 
+  // Defensive recovery (D-04): if `params.countyId` is null we are
+  // running a job that was queued before this plan shipped, OR a
+  // retry of one. The createImportJob action always persists
+  // `csv_imports.county_id` (column added by migration 043) so the
+  // worker can self-heal by reading it back from the import row. The
+  // workflow params remain the hot path for in-flight jobs queued
+  // after this ships — the DB read fires only on legacy paths.
+  let countyId = params.countyId;
+  if (countyId === null) {
+    const supabase = createAdminClient();
+    const { data: row } = await supabase
+      .from("csv_imports")
+      .select("county_id")
+      .eq("id", params.csvImportId)
+      .single();
+    countyId = row?.county_id ?? null;
+  }
+
   let succeeded = 0;
   let failed = 0;
   let skipped = 0;
@@ -414,6 +445,7 @@ export async function csvImportWorkflow(
       csvImportId: params.csvImportId,
       source: params.source,
       market: params.market,
+      countyId,
       mapping: params.mapping,
       rows: slice,
       offset,

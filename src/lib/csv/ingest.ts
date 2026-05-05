@@ -21,6 +21,11 @@ export type IngestParams = {
   csvImportId: string;
   source: string;
   market: string;
+  /** county_id (FK to counties.id) chosen on the wizard's market dropdown
+   *  and threaded down from the workflow boundary. Per phase 02 D-04 it
+   *  is set in lockstep with `properties.market` at insert time. Nullable
+   *  for the legacy runIngestion path that does not yet thread it. */
+  countyId?: string | null;
   mapping: Mapping;
   rows: RowData[];
   /** Optional: add every ingested (or dedup-matched) property to this list. */
@@ -48,6 +53,10 @@ export type ProcessChunkParams = {
   csvImportId: string;
   source: string;
   market: string;
+  /** county_id from the workflow boundary (D-04). Threaded into ingestRow
+   *  so the property insert sets `county_id` alongside `market`. Null is
+   *  legal — legacy callers / runIngestion path don't always provide it. */
+  countyId?: string | null;
   mapping: Mapping;
   /** The rows for THIS chunk only. Caller is responsible for slicing. */
   rows: RowData[];
@@ -110,6 +119,7 @@ export async function runIngestion(
     csvImportId: params.csvImportId,
     source: params.source,
     market: params.market,
+    countyId: params.countyId ?? null,
     mapping: params.mapping,
     rows: params.rows,
     offset: 0,
@@ -219,6 +229,7 @@ export async function processIngestChunk(
         validated.normalized,
         params.source,
         params.market,
+        params.countyId ?? null,
       );
 
       // Stacking: every ingested row — including dedup-matched ones —
@@ -353,6 +364,7 @@ async function ingestRow(
   n: Readonly<Record<string, unknown>>,
   defaultSource: string,
   market: string,
+  countyId: string | null,
 ): Promise<{ propertyId: string; wasDuplicate: boolean }> {
   const addressRaw = n.address as string | null;
   if (!addressRaw) throw new Error("Address is required");
@@ -448,6 +460,10 @@ async function ingestRow(
     state,
     zip: (n.zip as string | null) ?? null,
     market: market as PropertyInsert["market"],
+    // Phase 02 D-04: market and county_id are set together at write
+    // time. The wizard chose this id, the action validated it against
+    // the counties table, and the workflow threaded it down here.
+    county_id: countyId,
     fips_code: fipsCode,
     apn: (n.apn as string | null) ?? null,
     apn_normalized: apnNormalized,

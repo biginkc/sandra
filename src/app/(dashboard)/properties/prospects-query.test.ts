@@ -6,7 +6,6 @@ import {
   DEFAULT_DIR,
   DEFAULT_SORT,
   formatFullAddress,
-  KNOWN_MARKETS,
   parseProspectsSearch,
   truncateMessagePreview,
 } from "./prospects-query";
@@ -186,17 +185,30 @@ describe("parseProspectsSearch — filters", () => {
     ).toBe(null);
   });
 
-  it("whitelists ?market to known markets only", () => {
+  it("accepts any non-empty market string (county-shaped, no enum narrowing)", () => {
+    // Per phase 02 D-01: counties table is the source of truth, the URL
+    // parser no longer narrows to a city-shaped enum. The dropdown that
+    // emits these values is also DB-driven, so the pair is consistent.
+    expect(
+      parseProspectsSearch({ market: "Buchanan County MO" }).filters.market,
+    ).toBe("Buchanan County MO");
+    expect(
+      parseProspectsSearch({ market: "Johnson County KS" }).filters.market,
+    ).toBe("Johnson County KS");
+    // Old city-shaped strings still pass through (they are valid free
+    // strings; the legacy "Kansas City" rows still exist in prod per D-05).
     expect(parseProspectsSearch({ market: "Kansas City" }).filters.market).toBe(
       "Kansas City",
     );
-    expect(parseProspectsSearch({ market: "St. Louis" }).filters.market).toBe(
-      "St. Louis",
-    );
-    expect(parseProspectsSearch({ market: "Chicago" }).filters.market).toBe(
-      null,
-    );
+  });
+
+  it("collapses empty/whitespace market params to null", () => {
     expect(parseProspectsSearch({ market: "" }).filters.market).toBe(null);
+    expect(parseProspectsSearch({ market: "   " }).filters.market).toBe(null);
+  });
+
+  it("returns null when the market param is absent", () => {
+    expect(parseProspectsSearch({}).filters.market).toBe(null);
   });
 
   it("passes through ?assignee as a string (uuid validated upstream); 'unassigned' is the sentinel", () => {
@@ -213,14 +225,6 @@ describe("parseProspectsSearch — filters", () => {
     expect(parseProspectsSearch({}).filters.assignee).toBe(null);
   });
 
-  it("KNOWN_MARKETS exposes the four configured markets", () => {
-    expect(KNOWN_MARKETS).toEqual([
-      "Kansas City",
-      "St. Louis",
-      "Dayton",
-      "Lake of the Ozarks",
-    ]);
-  });
 });
 
 describe("buildProspectsHref — filters", () => {

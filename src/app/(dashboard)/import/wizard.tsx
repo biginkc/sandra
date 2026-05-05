@@ -98,11 +98,21 @@ async function uploadCsvToStorage(
 import type { LeadSource } from "@/lib/leads/create";
 export type WizardSource = LeadSource;
 
-export type WizardMarket =
-  | "Kansas City"
-  | "St. Louis"
-  | "Dayton"
-  | "Lake of the Ozarks";
+/**
+ * One county row, fetched server-side on the parent page (the RSC
+ * `import/page.tsx`) and passed in as a prop. Per phase 02 D-01 the
+ * counties table is the source of truth for valid markets — there is
+ * no compile-time enum any more (the legacy city-shaped union was
+ * removed). The dropdown renders `c.market` as the label and uses
+ * `c.id` as the select value so the SET_MARKET dispatch can carry
+ * both the canonical market string and the county_id FK.
+ */
+export type CountyOption = {
+  id: string;
+  name: string;
+  state: string;
+  market: string;
+};
 
 const ADD_STEP_ORDER: readonly WizardStep[] = [
   "mode",
@@ -166,7 +176,11 @@ export type WizardState = {
   file: File | null;
   filename: string | null;
   source: WizardSource | null;
-  market: WizardMarket | null;
+  market: string | null;
+  /** Selected county_id (FK to counties.id). Set in lockstep with
+   *  `market` via the SET_MARKET dispatch so the action can carry both
+   *  to the server in one shot. */
+  countyId: string | null;
   // Optional: a list name to add every imported (or matched-on-dedup)
   // property to. Empty/null = don't add to any list. On submit, the server
   // looks up a list by (org_id, name) and creates one if missing.
@@ -201,6 +215,7 @@ const initialState: WizardState = {
   filename: null,
   source: null,
   market: null,
+  countyId: null,
   listName: null,
   requestSkipTrace: false,
   smsConsent: false,
@@ -234,7 +249,7 @@ export type WizardAction =
       rows: Record<string, string>[];
     }
   | { type: "SET_SOURCE"; source: WizardSource }
-  | { type: "SET_MARKET"; market: WizardMarket }
+  | { type: "SET_MARKET"; market: string; countyId: string }
   | { type: "SET_LIST_NAME"; listName: string | null }
   | { type: "SET_REQUEST_SKIP_TRACE"; requestSkipTrace: boolean }
   | { type: "SET_SMS_CONSENT"; smsConsent: boolean }
@@ -300,7 +315,12 @@ function reducer(state: WizardState, action: WizardAction): WizardState {
     case "SET_SOURCE":
       return { ...state, source: action.source };
     case "SET_MARKET":
-      return { ...state, market: action.market };
+      // Per phase 02 D-04: market and county_id are set together at
+      // write time. The reducer keeps them in lockstep on the client
+      // so the createImportJob call can pass both — the action then
+      // server-validates the countyId and uses the canonical
+      // counties.market string (not state.market) when persisting.
+      return { ...state, market: action.market, countyId: action.countyId };
     case "SET_LIST_NAME":
       return { ...state, listName: action.listName };
     case "SET_REQUEST_SKIP_TRACE":
@@ -347,7 +367,7 @@ function reducer(state: WizardState, action: WizardAction): WizardState {
   }
 }
 
-export function Wizard() {
+export function Wizard({ counties }: { counties: CountyOption[] }) {
   const [state, dispatch] = useReducer(reducer, initialState);
   const [submittingGlobal, setSubmittingGlobal] = useState(false);
 
@@ -366,7 +386,11 @@ export function Wizard() {
   const sections = useMemo(() => mappedSections(state.mapping), [state.mapping]);
 
   const uploadReady =
-    !!state.file && !!state.source && !!state.market && state.rows.length > 0;
+    !!state.file &&
+    !!state.source &&
+    !!state.market &&
+    !!state.countyId &&
+    state.rows.length > 0;
   const hasAddressFull = !!state.mapping.address_full;
   const mapReady =
     sections.property &&
@@ -462,6 +486,12 @@ export function Wizard() {
           filename: state.filename!,
           source: state.source!,
           market: state.market!,
+          // Per phase 02 D-04: county_id is set in lockstep with market.
+          // The action server-validates this id against the counties
+          // table and uses the row's canonical `market` value (not the
+          // string we send) when persisting. Sending state.market is
+          // still useful for the action's error path / log breadcrumb.
+          countyId: state.countyId!,
           listName: state.listName?.trim() || null,
           mapping: state.mapping,
           storagePath: uploadResult.storagePath,
@@ -540,7 +570,7 @@ export function Wizard() {
           <StepPreviewUpdate state={state} dispatch={dispatch} />
         )}
         {state.step === "upload" && (
-          <StepUpload state={state} dispatch={dispatch} />
+          <StepUpload state={state} dispatch={dispatch} counties={counties} />
         )}
         {state.step === "map" && <StepMap state={state} dispatch={dispatch} />}
         {state.step === "review" && (

@@ -30,8 +30,8 @@ import {
 
 import { ListCombobox } from "../list-combobox";
 import type {
+  CountyOption,
   WizardAction,
-  WizardMarket,
   WizardSource,
   WizardState,
 } from "../wizard";
@@ -47,12 +47,11 @@ const SOURCES: { value: WizardSource; label: string }[] = [
   { value: "direct_mail", label: "Direct mail" },
 ];
 
-const MARKETS: { value: WizardMarket; label: string }[] = [
-  { value: "Kansas City", label: "Kansas City" },
-  { value: "St. Louis", label: "St. Louis" },
-  { value: "Dayton", label: "Dayton" },
-  { value: "Lake of the Ozarks", label: "Lake of the Ozarks" },
-];
+// The market dropdown was previously driven by a hardcoded MARKETS
+// array. Per phase 02 D-01, the counties table is the source of truth
+// and the list is now passed in as a prop from the parent server
+// component (`import/page.tsx`). Adding a new market is a DB insert,
+// not a code change.
 
 // A typical DealMachine monthly export is ~10 MB / ~20K rows. Hard-block
 // set high enough to accommodate that, with a soft warn on anything that
@@ -61,9 +60,15 @@ const MARKETS: { value: WizardMarket; label: string }[] = [
 const SOFT_WARN_BYTES = 15 * 1024 * 1024; // 15 MB
 const HARD_BLOCK_BYTES = 50 * 1024 * 1024; // 50 MB
 
-type Props = { state: WizardState; dispatch: React.Dispatch<WizardAction> };
+type Props = {
+  state: WizardState;
+  dispatch: React.Dispatch<WizardAction>;
+  /** Counties available as markets — fetched server-side in import/page.tsx
+   *  per phase 02 D-01 (counties table is the source of truth). */
+  counties: CountyOption[];
+};
 
-export function StepUpload({ state, dispatch }: Props) {
+export function StepUpload({ state, dispatch, counties }: Props) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [dragActive, setDragActive] = useState(false);
 
@@ -273,18 +278,29 @@ export function StepUpload({ state, dispatch }: Props) {
         <div className="flex flex-col gap-2">
           <Label>Market</Label>
           <Select
-            value={state.market ?? ""}
-            onValueChange={(v) =>
-              dispatch({ type: "SET_MARKET", market: v as WizardMarket })
-            }
+            // Bind to countyId so the dropdown renders the selected
+            // county by id. Per project memory
+            // `feedback_no_usestate_mirror_of_server_props.md`, the
+            // counties prop is rendered directly with no useState mirror.
+            value={state.countyId ?? ""}
+            onValueChange={(id) => {
+              const c = counties.find((x) => x.id === id);
+              if (c) {
+                dispatch({
+                  type: "SET_MARKET",
+                  market: c.market,
+                  countyId: c.id,
+                });
+              }
+            }}
           >
             <SelectTrigger>
               <SelectValue placeholder="Pick a market…" />
             </SelectTrigger>
             <SelectContent>
-              {MARKETS.map((m) => (
-                <SelectItem key={m.value} value={m.value}>
-                  {m.label}
+              {counties.map((c) => (
+                <SelectItem key={c.id} value={c.id}>
+                  {c.market}
                 </SelectItem>
               ))}
             </SelectContent>
