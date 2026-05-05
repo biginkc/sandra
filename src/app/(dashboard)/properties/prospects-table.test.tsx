@@ -103,7 +103,9 @@ function renderTable(rows: ProspectRow[], lists: ListOption[] = []) {
       dir="desc"
       filters={EMPTY_FILTERS}
       total={1382}
-        pageSize={50}
+      pageSize={50}
+      page={1}
+      totalPages={28}
     />,
   );
 }
@@ -315,6 +317,8 @@ describe("<ProspectsTable /> sortable headers", () => {
         filters={EMPTY_FILTERS}
         total={1}
         pageSize={50}
+        page={1}
+        totalPages={28}
       />,
     );
     await user.click(screen.getByTestId("prospects-sort-address"));
@@ -363,6 +367,8 @@ describe("<ProspectsTable /> address search", () => {
         filters={EMPTY_FILTERS}
         total={1}
         pageSize={50}
+        page={1}
+        totalPages={28}
       />,
     );
     await user.click(screen.getByTestId("prospects-search-clear"));
@@ -402,6 +408,8 @@ describe("<ProspectsTable /> quick filters", () => {
         filters={{ ...EMPTY_FILTERS, vacant: true }}
         total={1}
         pageSize={50}
+        page={1}
+        totalPages={28}
       />,
     );
     await user.click(screen.getByTestId("filter-vacant"));
@@ -452,6 +460,8 @@ describe("<ProspectsTable /> quick filters", () => {
         }}
         total={1}
         pageSize={50}
+        page={1}
+        totalPages={28}
       />,
     );
     const clear = await screen.findByTestId("filter-clear-all");
@@ -478,6 +488,8 @@ describe("<ProspectsTable /> quick filters", () => {
         filters={{ ...EMPTY_FILTERS, vacant: true }}
         total={1}
         pageSize={50}
+        page={1}
+        totalPages={28}
       />,
     );
     await user.click(screen.getByTestId("filter-clear-all"));
@@ -517,6 +529,8 @@ describe("<ProspectsTable /> select-all-across-pages banner", () => {
         filters={EMPTY_FILTERS}
         total={2}
         pageSize={50}
+        page={1}
+        totalPages={28}
       />,
     );
     await user.click(screen.getByRole("checkbox", { name: "Select p1 Main St" }));
@@ -541,6 +555,8 @@ describe("<ProspectsTable /> select-all-across-pages banner", () => {
         filters={EMPTY_FILTERS}
         total={1382}
         pageSize={50}
+        page={1}
+        totalPages={28}
       />,
     );
     await user.click(screen.getByRole("checkbox", { name: "Select p1 Main St" }));
@@ -574,6 +590,8 @@ describe("<ProspectsTable /> select-all-across-pages banner", () => {
         filters={EMPTY_FILTERS}
         total={1382}
         pageSize={50}
+        page={1}
+        totalPages={28}
       />,
     );
     await user.click(screen.getByRole("checkbox", { name: "Select p1 Main St" }));
@@ -609,6 +627,8 @@ describe("<ProspectsTable /> select-all-across-pages banner", () => {
         filters={EMPTY_FILTERS}
         total={3}
         pageSize={50}
+        page={1}
+        totalPages={28}
       />,
     );
     await user.click(screen.getByRole("checkbox", { name: "Select a Main St" }));
@@ -641,6 +661,8 @@ describe("<ProspectsTable /> select-all-across-pages banner", () => {
         }}
         total={1}
         pageSize={50}
+        page={1}
+        totalPages={28}
       />,
     );
     await user.click(screen.getByTestId("filter-contacted"));
