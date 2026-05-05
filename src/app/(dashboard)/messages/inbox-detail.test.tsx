@@ -103,6 +103,8 @@ function makeData(overrides: Partial<InboxDetailData> & { contactId: string }): 
     propertyId: overrides.propertyId ?? "prop-1",
     propertyAddress: overrides.propertyAddress ?? "123 Main St, Albany, NY",
     assigneeId: overrides.assigneeId ?? null,
+    propertyStatus: overrides.propertyStatus ?? "prospect",
+    outreachDispo: overrides.outreachDispo ?? null,
     initialMessages: overrides.initialMessages ?? [],
   };
 }

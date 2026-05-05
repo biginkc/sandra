@@ -894,11 +894,13 @@ export type Database = {
           market: string | null
           mls_number: string | null
           mortgage_balance: number | null
+          follow_up_at: string | null
           motivation_level: string | null
           ncoa_verified_at: string | null
           needs_human_attention: boolean
           notes: string | null
           org_id: string
+          outreach_dispo: string | null
           owner_moved_at: string | null
           qualified_at: string | null
           qualified_by: string | null
@@ -951,11 +953,13 @@ export type Database = {
           market?: string | null
           mls_number?: string | null
           mortgage_balance?: number | null
+          follow_up_at?: string | null
           motivation_level?: string | null
           ncoa_verified_at?: string | null
           needs_human_attention?: boolean
           notes?: string | null
           org_id?: string
+          outreach_dispo?: string | null
           owner_moved_at?: string | null
           qualified_at?: string | null
           qualified_by?: string | null
@@ -1008,11 +1012,13 @@ export type Database = {
           market?: string | null
           mls_number?: string | null
           mortgage_balance?: number | null
+          follow_up_at?: string | null
           motivation_level?: string | null
           ncoa_verified_at?: string | null
           needs_human_attention?: boolean
           notes?: string | null
           org_id?: string
+          outreach_dispo?: string | null
           owner_moved_at?: string | null
           qualified_at?: string | null
           qualified_by?: string | null

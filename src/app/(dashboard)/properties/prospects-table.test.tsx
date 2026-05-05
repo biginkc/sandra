@@ -77,6 +77,7 @@ function makeRow(overrides: Partial<ProspectRow> & { id: string }): ProspectRow 
     created_at: overrides.created_at ?? "2026-04-29T12:00:00Z",
     engagement: overrides.engagement ?? "none",
     last_message_preview: overrides.last_message_preview ?? null,
+    outreach_dispo: overrides.outreach_dispo ?? null,
   };
 }
 

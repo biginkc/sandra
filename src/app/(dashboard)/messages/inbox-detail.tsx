@@ -2,14 +2,22 @@
 
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { useEffect } from "react";
+import { useEffect, useState, useTransition } from "react";
 
-import { buttonVariants } from "@/components/ui/button";
+import { Ban, Clock, PhoneOff, ThumbsDown } from "lucide-react";
+import { toast } from "sonner";
+
+import { Button, buttonVariants } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
+import { cn } from "@/lib/utils";
 
 import { InlineReply } from "../leads/[id]/inline-reply";
 import { MessagesThread } from "../leads/[id]/messages-thread";
 
 import { AssignDropdown } from "./assign-dropdown";
+import { setOutreachDispo, type OutreachDispo } from "./dispo-actions";
 import { type InboxDetail as InboxDetailData } from "./inbox-detail-data";
 
 type Props = {
@@ -18,6 +26,141 @@ type Props = {
   assigneeEmails: Record<string, string>;
   currentUserId: string | null;
 };
+
+const DISPO_LABELS: Record<OutreachDispo, string> = {
+  wrong_number: "Wrong #",
+  bad_number: "Bad #",
+  not_interested: "Not interested",
+  opted_out: "Opted out",
+  dnc: "Do not contact",
+  nurture: "Nurture",
+  callback_requested: "Callback",
+};
+
+function DispoBar({
+  propertyId,
+  initialDispo,
+}: {
+  propertyId: string;
+  initialDispo: string | null;
+}) {
+  const [dispo, setDispo] = useState<OutreachDispo | null>(
+    initialDispo as OutreachDispo | null,
+  );
+  const [followUpOpen, setFollowUpOpen] = useState(false);
+  const [followUpDate, setFollowUpDate] = useState("");
+  const [pending, startTransition] = useTransition();
+
+  function apply(newDispo: OutreachDispo, followUpAt?: string) {
+    startTransition(async () => {
+      const result = await setOutreachDispo(propertyId, newDispo, followUpAt);
+      if (result.ok) {
+        setDispo(newDispo);
+        if (newDispo === "wrong_number") {
+          toast.info("Marked wrong number — consider skip-tracing a new number.");
+        }
+      } else {
+        toast.error(result.error);
+      }
+    });
+  }
+
+  const btnBase = "rounded p-1.5 transition-colors disabled:opacity-40";
+  const btnIdle = "text-muted-foreground hover:text-foreground hover:bg-muted";
+  const btnActive = "bg-muted text-foreground";
+  const btnDanger = "bg-destructive/10 text-destructive";
+
+  const isDnc = dispo === "dnc" || dispo === "opted_out";
+
+  return (
+    <TooltipProvider delay={400}>
+      <div className="flex items-center gap-0.5">
+        <span className="text-muted-foreground mr-1.5 text-[11px]">Dispo:</span>
+
+        <Tooltip>
+          <TooltipTrigger
+            onClick={() => apply("wrong_number")}
+            disabled={pending}
+            className={cn(btnBase, dispo === "wrong_number" ? btnActive : btnIdle)}
+            data-testid="dispo-wrong-number"
+          >
+            <PhoneOff className="h-3.5 w-3.5" />
+          </TooltipTrigger>
+          <TooltipContent>Wrong number</TooltipContent>
+        </Tooltip>
+
+        <Tooltip>
+          <TooltipTrigger
+            onClick={() => apply("not_interested")}
+            disabled={pending}
+            className={cn(btnBase, dispo === "not_interested" ? btnActive : btnIdle)}
+            data-testid="dispo-not-interested"
+          >
+            <ThumbsDown className="h-3.5 w-3.5" />
+          </TooltipTrigger>
+          <TooltipContent>Not interested</TooltipContent>
+        </Tooltip>
+
+        <Tooltip>
+          <TooltipTrigger
+            onClick={() => apply("dnc")}
+            disabled={pending}
+            className={cn(btnBase, isDnc ? btnDanger : btnIdle)}
+            data-testid="dispo-dnc"
+          >
+            <Ban className="h-3.5 w-3.5" />
+          </TooltipTrigger>
+          <TooltipContent>Do not contact</TooltipContent>
+        </Tooltip>
+
+        <Popover open={followUpOpen} onOpenChange={setFollowUpOpen}>
+          <PopoverTrigger
+            disabled={pending}
+            className={cn(
+              btnBase,
+              dispo === "nurture" || dispo === "callback_requested" ? btnActive : btnIdle,
+            )}
+            data-testid="dispo-nurture"
+            title="Follow up later"
+          >
+            <Clock className="h-3.5 w-3.5" />
+          </PopoverTrigger>
+          <PopoverContent className="w-52 p-3" align="start">
+            <p className="mb-2 text-xs font-medium">Follow up on</p>
+            <Input
+              type="date"
+              value={followUpDate}
+              onChange={(e) => setFollowUpDate(e.target.value)}
+              className="mb-2 h-8 text-sm"
+            />
+            <Button
+              size="sm"
+              className="w-full"
+              disabled={!followUpDate || pending}
+              onClick={() => {
+                apply("nurture", new Date(followUpDate).toISOString());
+                setFollowUpOpen(false);
+              }}
+            >
+              Set
+            </Button>
+          </PopoverContent>
+        </Popover>
+
+        {dispo ? (
+          <span
+            className={cn(
+              "ml-1 text-[10px] font-medium",
+              isDnc ? "text-destructive" : "text-muted-foreground",
+            )}
+          >
+            {DISPO_LABELS[dispo] ?? dispo}
+          </span>
+        ) : null}
+      </div>
+    </TooltipProvider>
+  );
+}
 
 /**
  * Right-side detail panel of the cockpit. Renders the existing
@@ -112,14 +255,23 @@ export function InboxDetail({ data, assigneeEmails, currentUserId }: Props) {
         />
       </div>
       {data.propertyId ? (
-        <div className="border-border border-t p-3">
-          <InlineReply
-            key={`reply-${data.contactId}`}
-            propertyId={data.propertyId}
-            homeownerContactId={data.contactId}
-            homeownerPhone={data.contactPhone}
-          />
-        </div>
+        <>
+          <div className="border-border flex items-center border-t px-3 py-1.5">
+            <DispoBar
+              key={`dispo-${data.propertyId}`}
+              propertyId={data.propertyId}
+              initialDispo={data.outreachDispo}
+            />
+          </div>
+          <div className="border-border border-t p-3">
+            <InlineReply
+              key={`reply-${data.contactId}`}
+              propertyId={data.propertyId}
+              homeownerContactId={data.contactId}
+              homeownerPhone={data.contactPhone}
+            />
+          </div>
+        </>
       ) : (
         <div className="border-border text-muted-foreground border-t p-3 text-xs">
           This conversation has no property linked — open a lead to reply.

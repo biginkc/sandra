@@ -118,6 +118,8 @@ function makeDetail(contactId: string, body: string): InboxDetailData {
     propertyId: `prop-${contactId}`,
     propertyAddress: "123 Main St, Albany, NY",
     assigneeId: null,
+    propertyStatus: "prospect",
+    outreachDispo: null,
     initialMessages: [
       makeMessage({
         id: `m-${contactId}`,
