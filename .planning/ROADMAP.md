@@ -74,7 +74,7 @@ Plans:
 
 Plans:
 **Wave 1**
-- [ ] 02-01-PLAN.md — Migration 043: drop CHECK constraints on counties.market + properties.market; add counties.fips_code column + partial unique index
+- [x] 02-01-PLAN.md — Migration 043: drop CHECK constraints on counties.market + properties.market; add counties.fips_code column + partial unique index
 
 **Wave 2** *(blocked on Wave 1 completion)*
 - [ ] 02-02-PLAN.md — Migration 044: seed BMH Group's counties (18 confirmed + 3 pending Jarrad PR-review confirmation) with fips_code lookup via fips_codes JOIN
