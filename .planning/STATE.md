@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v2.0
 milestone_name: milestone
 status: executing
-last_updated: "2026-05-05T15:13:23.889Z"
-last_activity: 2026-05-05 -- Phase 02 execution started
+last_updated: "2026-05-05T19:55:00Z"
+last_activity: 2026-05-05 -- Schema repair complete (043-047 on prod+test); 1,096 props backfilled; ready for Wave 4 (02-05)
 progress:
   total_phases: 3
   completed_phases: 2
   total_plans: 16
-  completed_plans: 11
-  percent: 69
+  completed_plans: 15
+  percent: 94
 ---
 
 # Project State
@@ -20,18 +20,16 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-30)
 
 **Core value:** Get the right message to the right property owner at the right time
-**Current focus:** Phase 02 — market-vocabulary-refactor
+**Current focus:** Phase 02 — market-vocabulary-refactor (Wave 4 of 4 remaining)
 
 ## Current Milestone
 
-**v2.0 — Cross-table UX consistency + market refactor** — 2 phases, 12 requirements
+**v2.0 — Cross-table UX consistency + market refactor** — 3 phases, 12 requirements
 
 ## Current Position
 
-Phase: 02 (market-vocabulary-refactor) — EXECUTING
-Plan: 1 of 5
-Status: Executing Phase 02
-Last activity: 2026-05-05 -- Phase 02 execution started
+Phase: 02 (market-vocabulary-refactor) — EXECUTING (4 of 5 plans done)
+Status: Wave 4 remaining — plan 02-05 (tests + Playwright smokes + final phase sign-off)
 
 ## Status
 
@@ -42,20 +40,45 @@ Last activity: 2026-05-05 -- Phase 02 execution started
 - Phase 01 plans 01-01 through 01-06: shipped 2026-04-30 → 2026-05-01
 - Phase 01 PR: #89 — merged
 - Phase 01.5 PRs #94/#95: merged 2026-05-04
-- Quick task 260504-tgq (bulk SMS pacing + outbox stats): PRs #96-100 merged 2026-05-05
-- Prod build fixed (PR #98 — vendored @sandra/tokens CSS)
-- 939 messages rescheduled — draining at 1/min from 8 AM CDT 2026-05-05; ~159 overflow resume 8 AM CDT 2026-05-06
-- PRs #101/#102/#103 merged: /messages crash fixed, stats banner fixed, outbox redirect added
-- Phase 01.5 UAT approved 2026-05-05 — advancing to Phase 02
-- Phase 02 context gathered 2026-05-05 — market=county, counties table is source of truth, 20 counties seeded
-- Phase 02 plans created 2026-05-05 — 5 plans across 4 waves (commit 42141ef); checker passed iter 2/3 after blocker revisions
-- Next action: `/gsd-execute-phase 02`
+- Phase 01.5 UAT approved 2026-05-05 — advanced to Phase 02
+- Phase 02 context gathered 2026-05-05 — market=county, counties table is source of truth, 21 counties seeded
+- Phase 02 plans created 2026-05-05 — 5 plans across 4 waves (commit 42141ef)
+- Phase 02 Wave 1 (02-01): migration 043 — drop market CHECKs, add counties.fips_code + csv_imports.county_id ✓
+- Phase 02 Wave 2 (02-02 + 02-03): migration 044 (21 county seed) + KNOWN_MARKETS/WizardMarket eliminated ✓
+- Phase 02 Wave 3 (02-04): migration 046 — backfill properties.county_id + market via FIPS JOIN + CASS jsonb fallback ✓
+- PR #105 (outreach_dispo feature): merged; migration 045_outreach_dispo.sql applied to prod+test ✓
+- Session schema repair (2026-05-05): migrations 043-047 all green on both prod+test ✓
+  - Root cause: fips_codes reference table was empty → 044 subqueries returned null → 046 touched 0 props
+  - Fix: migration 047 seeds fips_codes (21 counties) + updates counties.fips_code + re-runs backfill
+  - Result: 1,096 properties now have county_id set; 1,437 legacy 'Kansas City' intentional no-ops (D-05)
+  - db-migrate.yml updated: added --include-all flag to handle out-of-order migration inserts
+- Tests green at every gate: 524 unit + 125 RTL = 649 passing
+- Next action: `/gsd-execute-phase 02` for plan 02-05 (Wave 4)
+
+## Phase 02 Plans
+
+- [x] 02-01-PLAN.md — Schema prerequisite migration (Wave 1) ✓
+- [x] 02-02-PLAN.md — Seed counties (Wave 2) ✓
+- [x] 02-03-PLAN.md — Eliminate KNOWN_MARKETS / WizardMarket (Wave 2) ✓
+- [x] 02-04-PLAN.md — Backfill 2,533 properties (Wave 3) ✓
+- [ ] 02-05-PLAN.md — Tests + Playwright smokes + phase sign-off (Wave 4) ← REMAINING
+
+## Migration Chain (final state)
+
+| # | File | Prod | Test | Notes |
+|---|------|------|------|-------|
+| 043 | counties_add_fips_and_drop_market_check | ✓ | ✓ | Drop market CHECKs; add counties.fips_code + csv_imports.county_id |
+| 044 | seed_counties | ✓ | ✓ | 21 BMH counties seeded (fips_code set via 047 fix) |
+| 045 | outreach_dispo | ✓ | ✓ | outreach_dispo + follow_up_at on properties |
+| 046 | backfill_property_county_id_from_fips | ✓ | ✓ | Renamed from 045; idempotent; touched 0 rows initially (fixed by 047) |
+| 047 | seed_fips_codes_and_fix_county_backfill | ✓ | ✓ | Seeds fips_codes; fixes counties.fips_code; re-runs backfill |
 
 ## Session Continuity
 
-- **2026-05-05** — PRs #101-103 merged. /messages page crash (listThreads .in() overflow), stats banner zero-count (anon client RLS), outbox redirect. 939 messages rescheduled via SQL. See: docs/handoff/2026-05-05-messages-page-fixes.md
-- **2026-05-05** — Phase 01.5 UAT approved. Phase 02 discuss complete: county-as-market, counties table as source of truth, 20 counties, FIPS backfill. See: docs/handoff/2026-05-05-phase2-context-complete.md
-- **2026-05-05** — Phase 02 planned: 5 plans (02-01..05) across 4 waves. Migrations 043/044/045 + code refactor (KNOWN_MARKETS/WizardMarket eliminated, csv_imports.county_id thread-through) + Playwright smokes. Verification passed iter 2/3 after revising 3 blockers (CSV chain mapping, leads/kanban+filter audit, T-02-03-01 server-side validation). Commit 42141ef.
+- **2026-05-05 (early)** — PRs #101-103 merged. /messages page crash, stats banner, outbox redirect. 939 messages rescheduled.
+- **2026-05-05 (mid)** — Phase 01.5 UAT approved. Phase 02 discuss + plan complete: county-as-market, 21 counties, FIPS backfill, 5 plans / 4 waves.
+- **2026-05-05 (late)** — Phase 02 Waves 1-3 + outreach_dispo (PR #105) executed. Wave 4 (02-05) is next.
+- **2026-05-05 (session repair)** — Test DB stray migration repaired (deleted 20260505001908). Local main merged with origin/main. Backfill migration renamed 046. db-migrate.yml --include-all fix. fips_codes seeded via migration 047. All 043-047 green on prod+test. 1,096 props backfilled.
 
 ## Accumulated Context (preserved across milestones)
 
@@ -66,12 +89,16 @@ Last activity: 2026-05-05 -- Phase 02 execution started
 - Sandra migrations are CI-only (`db-migrate.yml`)
 - Cost-bearing actions need explicit opt-in
 - TCPA/A2P enforcement at Twilio adapter
+- market = county (D-01): counties table is the sole source of truth; no DB-level enum
+- D-05: ~1,358 properties with neither fips_code nor CASS response stay market='Kansas City' + county_id=NULL until next CASS verify
+- D-09: no synthetic Kansas City county row
 
 ### Open todos (operational, outside GSD scope)
 
 - 46-property CASS recovery — re-import the original DealMachine CSV; PR #79 unblocked the auto-trigger
 - Playwright retries 1→2 — `/gsd-fast` later
 - `/admin/skip-trace-settings` page — `/gsd-quick` later
+- `/admin/counties` page (deferred from Phase 02) — UI to add markets without a migration
 
 ### Quick Tasks Completed
 
