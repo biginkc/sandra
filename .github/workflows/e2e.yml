@@ -18,6 +18,12 @@ jobs:
       TEST_SUPABASE_URL: ${{ secrets.TEST_SUPABASE_URL }}
       TEST_SUPABASE_ANON_KEY: ${{ secrets.TEST_SUPABASE_ANON_KEY }}
       TEST_SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.TEST_SUPABASE_SERVICE_ROLE_KEY }}
+      # Skip the Haiku intent classifier in e2e — no ANTHROPIC_API_KEY here,
+      # and the classifier is already unit-tested in
+      # src/lib/leads/classify-reply-intent.test.ts. The webhook reads this
+      # and short-circuits to shouldQualify=true so the qualify path is
+      # exercised end-to-end. See dialpad/sms/route.ts.
+      SKIP_INTENT_GATE: "1"
       CI: "1"
 
     steps:
