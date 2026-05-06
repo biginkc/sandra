@@ -17,6 +17,7 @@ import { InlineReply } from "../leads/[id]/inline-reply";
 import { MessagesThread } from "../leads/[id]/messages-thread";
 
 import { AssignDropdown } from "./assign-dropdown";
+import { AssigneeSelect } from "./_components/assignee-select";
 import { setOutreachDispo, type OutreachDispo } from "./dispo-actions";
 import { type InboxDetail as InboxDetailData } from "./inbox-detail-data";
 
@@ -57,20 +58,34 @@ function initialsOfName(name: string | null): string {
 function DispoBar({
   propertyId,
   initialDispo,
+  currentUserId,
 }: {
   propertyId: string;
   initialDispo: string | null;
+  currentUserId: string | null;
 }) {
   const [dispo, setDispo] = useState<OutreachDispo | null>(
     initialDispo as OutreachDispo | null,
   );
   const [followUpOpen, setFollowUpOpen] = useState(false);
   const [followUpDate, setFollowUpDate] = useState("");
+  const [followUpAssignee, setFollowUpAssignee] = useState<string | null>(
+    currentUserId,
+  );
   const [pending, startTransition] = useTransition();
 
-  function apply(newDispo: OutreachDispo, followUpAt?: string) {
+  function apply(
+    newDispo: OutreachDispo,
+    followUpAt?: string,
+    assigneeId?: string | null,
+  ) {
     startTransition(async () => {
-      const result = await setOutreachDispo(propertyId, newDispo, followUpAt);
+      const result = await setOutreachDispo(
+        propertyId,
+        newDispo,
+        followUpAt,
+        assigneeId,
+      );
       if (result.ok) {
         setDispo(newDispo);
         if (newDispo === "wrong_number") {
@@ -145,7 +160,7 @@ function DispoBar({
         >
           Nurture
         </PopoverTrigger>
-        <PopoverContent className="w-52 p-3" align="start">
+        <PopoverContent className="w-56 p-3" align="start">
           <p className="mb-2 text-xs font-medium">Follow up on</p>
           <Input
             type="date"
@@ -153,12 +168,24 @@ function DispoBar({
             onChange={(e) => setFollowUpDate(e.target.value)}
             className="mb-2 h-8 text-sm"
           />
+          <p className="mb-2 text-xs font-medium">Assign to</p>
+          <AssigneeSelect
+            value={followUpAssignee}
+            onChange={setFollowUpAssignee}
+            currentUserId={currentUserId}
+            disabled={pending}
+            className="mb-3"
+          />
           <Button
             size="sm"
             className="w-full"
             disabled={!followUpDate || pending}
             onClick={() => {
-              apply("nurture", new Date(followUpDate).toISOString());
+              apply(
+                "nurture",
+                new Date(followUpDate).toISOString(),
+                followUpAssignee,
+              );
               setFollowUpOpen(false);
             }}
           >
@@ -329,6 +356,7 @@ export function InboxDetail({
               key={`dispo-${data.propertyId}`}
               propertyId={data.propertyId}
               initialDispo={data.outreachDispo}
+              currentUserId={currentUserId}
             />
           </div>
           <div className="border-t border-border bg-white px-6 py-4">

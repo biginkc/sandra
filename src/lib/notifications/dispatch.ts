@@ -190,6 +190,42 @@ export async function dispatchSkipTraceRequested(
   });
 }
 
+/**
+ * Fired from `setOutreachDispo` when a follow-up dispo (nurture or
+ * callback_requested) creates a task assigned to someone other than the
+ * acting user. Self-assignment is suppressed at the caller (cheaper than
+ * resolving here) so this dispatcher always emits the row.
+ *
+ * Best-effort like every other dispatcher — never throws across the boundary.
+ */
+export async function dispatchTaskAssigned(
+  supabase: SupabaseClient<Database>,
+  params: {
+    taskId: string;
+    orgId: string;
+    assigneeId: string;
+    taskTitle: string;
+    taskType: string;
+    /** ISO timestamptz */
+    dueAt: string;
+    propertyAddress?: string | null;
+  },
+): Promise<{ inserted: number }> {
+  return createNotification(supabase, {
+    orgId: params.orgId,
+    eventType: "task_assigned",
+    entityType: "task",
+    entityId: params.taskId,
+    payload: {
+      taskTitle: params.taskTitle,
+      taskType: params.taskType,
+      dueAt: params.dueAt,
+      propertyAddress: params.propertyAddress,
+    },
+    recipients: [params.assigneeId],
+  });
+}
+
 export async function dispatchJobCompleted(
   supabase: SupabaseClient<Database>,
   params: { jobId: string },
