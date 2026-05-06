@@ -104,7 +104,7 @@ test("type body, hit Send → bubble appears + DB row is status='sent' (tests 20
   await expect(page.getByTestId("inbox-detail-panel")).toBeVisible();
 
   const reply = `cockpit reply ${Date.now()}`;
-  const textarea = page.getByPlaceholder(/Type a reply/i);
+  const textarea = page.getByPlaceholder(/Type.*reply/i);
   await textarea.fill(reply);
   await page.getByRole("button", { name: /Send reply/i }).click();
 
@@ -142,7 +142,7 @@ test("Send button is disabled when the body is empty (test 22)", async ({
   const sendBtn = page.getByRole("button", { name: /Send reply/i });
   await expect(sendBtn).toBeDisabled();
 
-  await page.getByPlaceholder(/Type a reply/i).fill("now I have content");
+  await page.getByPlaceholder(/Type.*reply/i).fill("now I have content");
   await expect(sendBtn).toBeEnabled();
 });
 
@@ -164,7 +164,7 @@ test("reply to opted-out contact surfaces consent block (test 23)", async ({
 
   await page.goto(`/messages?thread=${contactId}`);
   const reply = `should be blocked ${Date.now()}`;
-  await page.getByPlaceholder(/Type a reply/i).fill(reply);
+  await page.getByPlaceholder(/Type.*reply/i).fill(reply);
   await page.getByRole("button", { name: /Send reply/i }).click();
 
   // Toast surfaces.
@@ -203,7 +203,7 @@ test("reply during quiet hours surfaces quiet-hours block (test 24)", async ({
 
   await page.goto(`/messages?thread=${contactId}`);
   const reply = `should be quiet-blocked ${Date.now()}`;
-  await page.getByPlaceholder(/Type a reply/i).fill(reply);
+  await page.getByPlaceholder(/Type.*reply/i).fill(reply);
   await page.getByRole("button", { name: /Send reply/i }).click();
 
   await expect(
@@ -251,7 +251,7 @@ test("after a successful send, the thread jumps to the top of the inbox (test 25
     .eq("contact_id", b.contactId);
 
   await page.goto(`/messages?thread=${b.contactId}`);
-  await page.getByPlaceholder(/Type a reply/i).fill(`bump ${Date.now()}`);
+  await page.getByPlaceholder(/Type.*reply/i).fill(`bump ${Date.now()}`);
   await page.getByRole("button", { name: /Send reply/i }).click();
 
   // Wait for the send to round-trip and the list to refresh.

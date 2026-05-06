@@ -1,16 +1,16 @@
 "use client";
 
+import { PhoneIcon } from "lucide-react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useState, useTransition } from "react";
 
-import { Ban, Clock, PhoneOff, ThumbsDown } from "lucide-react";
 import { toast } from "sonner";
 
-import { Button, buttonVariants } from "@/components/ui/button";
+import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
+import { StatusChip, type StatusVariant } from "@/components/ui/status-chip";
 import { cn } from "@/lib/utils";
 
 import { InlineReply } from "../leads/[id]/inline-reply";
@@ -36,6 +36,19 @@ const DISPO_LABELS: Record<OutreachDispo, string> = {
   nurture: "Nurture",
   callback_requested: "Callback",
 };
+
+const VALID_STATUSES: StatusVariant[] = ["replying", "hot", "new", "contacted", "cold", "dead"];
+
+function isValidStatus(s: string | null): s is StatusVariant {
+  return s !== null && (VALID_STATUSES as string[]).includes(s);
+}
+
+function initialsOfName(name: string | null): string {
+  if (!name) return "?";
+  const parts = name.trim().split(/\s+/);
+  if (parts.length >= 2) return (parts[0][0]! + parts[parts.length - 1][0]!).toUpperCase();
+  return name.slice(0, 2).toUpperCase();
+}
 
 function DispoBar({
   propertyId,
@@ -65,100 +78,102 @@ function DispoBar({
     });
   }
 
-  const btnBase = "rounded p-2 transition-colors disabled:opacity-40";
-  const btnIdle = "text-foreground/70 hover:text-foreground hover:bg-muted";
-  const btnActive = "bg-muted text-foreground";
-  const btnDanger = "bg-destructive/10 text-destructive";
-
   const isDnc = dispo === "dnc" || dispo === "opted_out";
 
   return (
-    <TooltipProvider delay={400}>
-      <div className="flex items-center gap-0.5">
-        <span className="text-foreground/80 mr-2 text-xs font-medium">Dispo:</span>
+    <div className="flex items-center gap-2">
+      <span className="text-[11px] font-black uppercase tracking-widest text-[#78716c]">
+        Dispo:
+      </span>
 
-        <Tooltip>
-          <TooltipTrigger
-            onClick={() => apply("wrong_number")}
-            disabled={pending}
-            className={cn(btnBase, dispo === "wrong_number" ? btnActive : btnIdle)}
-            data-testid="dispo-wrong-number"
-          >
-            <PhoneOff className="h-4 w-4" />
-          </TooltipTrigger>
-          <TooltipContent>Wrong number</TooltipContent>
-        </Tooltip>
+      <button
+        onClick={() => apply("wrong_number")}
+        disabled={pending}
+        className={cn(
+          "px-2 py-1 text-[11px] font-medium rounded-md border transition-colors",
+          dispo === "wrong_number"
+            ? "bg-[#f5f5f4] border-[#e5e1df] text-[#1c1917]"
+            : "border-[#e5e1df] text-[#78716c] hover:bg-[#f5f5f4]",
+        )}
+        data-testid="dispo-wrong-number"
+      >
+        Wrong #
+      </button>
 
-        <Tooltip>
-          <TooltipTrigger
-            onClick={() => apply("not_interested")}
-            disabled={pending}
-            className={cn(btnBase, dispo === "not_interested" ? btnActive : btnIdle)}
-            data-testid="dispo-not-interested"
-          >
-            <ThumbsDown className="h-4 w-4" />
-          </TooltipTrigger>
-          <TooltipContent>Not interested</TooltipContent>
-        </Tooltip>
+      <button
+        onClick={() => apply("not_interested")}
+        disabled={pending}
+        className={cn(
+          "px-2 py-1 text-[11px] font-medium rounded-md border transition-colors",
+          dispo === "not_interested"
+            ? "bg-[#f5f5f4] border-[#e5e1df] text-[#1c1917]"
+            : "border-[#e5e1df] text-[#78716c] hover:bg-[#f5f5f4]",
+        )}
+        data-testid="dispo-not-interested"
+      >
+        Not interested
+      </button>
 
-        <Tooltip>
-          <TooltipTrigger
-            onClick={() => apply("dnc")}
-            disabled={pending}
-            className={cn(btnBase, isDnc ? btnDanger : btnIdle)}
-            data-testid="dispo-dnc"
-          >
-            <Ban className="h-4 w-4" />
-          </TooltipTrigger>
-          <TooltipContent>Do not contact</TooltipContent>
-        </Tooltip>
+      <button
+        onClick={() => apply("dnc")}
+        disabled={pending}
+        className={cn(
+          "px-2 py-1 text-[11px] font-medium rounded-md border transition-colors",
+          isDnc
+            ? "bg-red-50 border-red-200 text-red-700"
+            : "border-[#e5e1df] text-[#78716c] hover:bg-[#f5f5f4]",
+        )}
+        data-testid="dispo-dnc"
+      >
+        DNC
+      </button>
 
-        <Popover open={followUpOpen} onOpenChange={setFollowUpOpen}>
-          <PopoverTrigger
-            disabled={pending}
-            className={cn(
-              btnBase,
-              dispo === "nurture" || dispo === "callback_requested" ? btnActive : btnIdle,
-            )}
-            data-testid="dispo-nurture"
-            title="Follow up later"
+      <Popover open={followUpOpen} onOpenChange={setFollowUpOpen}>
+        <PopoverTrigger
+          disabled={pending}
+          className={cn(
+            "px-2 py-1 text-[11px] font-medium rounded-md border transition-colors",
+            dispo === "nurture" || dispo === "callback_requested"
+              ? "bg-[#f5f5f4] border-[#e5e1df] text-[#1c1917]"
+              : "border-[#e5e1df] text-[#78716c] hover:bg-[#f5f5f4]",
+          )}
+          data-testid="dispo-nurture"
+        >
+          Nurture
+        </PopoverTrigger>
+        <PopoverContent className="w-52 p-3" align="start">
+          <p className="mb-2 text-xs font-medium">Follow up on</p>
+          <Input
+            type="date"
+            value={followUpDate}
+            onChange={(e) => setFollowUpDate(e.target.value)}
+            className="mb-2 h-8 text-sm"
+          />
+          <Button
+            size="sm"
+            className="w-full"
+            disabled={!followUpDate || pending}
+            onClick={() => {
+              apply("nurture", new Date(followUpDate).toISOString());
+              setFollowUpOpen(false);
+            }}
           >
-            <Clock className="h-4 w-4" />
-          </PopoverTrigger>
-          <PopoverContent className="w-52 p-3" align="start">
-            <p className="mb-2 text-xs font-medium">Follow up on</p>
-            <Input
-              type="date"
-              value={followUpDate}
-              onChange={(e) => setFollowUpDate(e.target.value)}
-              className="mb-2 h-8 text-sm"
-            />
-            <Button
-              size="sm"
-              className="w-full"
-              disabled={!followUpDate || pending}
-              onClick={() => {
-                apply("nurture", new Date(followUpDate).toISOString());
-                setFollowUpOpen(false);
-              }}
-            >
-              Set
-            </Button>
-          </PopoverContent>
-        </Popover>
+            Set
+          </Button>
+        </PopoverContent>
+      </Popover>
 
-        {dispo ? (
-          <span
-            className={cn(
-              "ml-1 text-[10px] font-medium",
-              isDnc ? "text-destructive" : "text-muted-foreground",
-            )}
-          >
-            {DISPO_LABELS[dispo] ?? dispo}
-          </span>
-        ) : null}
-      </div>
-    </TooltipProvider>
+      {dispo ? (
+        <span
+          className={cn(
+            "ml-1 text-[10px] font-medium",
+            isDnc ? "text-destructive" : "text-[#78716c]",
+          )}
+        >
+          {DISPO_LABELS[dispo] ?? dispo}
+        </span>
+      ) : null}
+    </div>
   );
 }
 
@@ -197,7 +212,7 @@ export function InboxDetail({ data, assigneeEmails, currentUserId }: Props) {
   if (!data) {
     return (
       <div
-        className="border-border/60 text-muted-foreground flex h-full min-h-[400px] items-center justify-center rounded-md border border-dashed p-6 text-center text-sm"
+        className="border-border bg-white text-[#78716c] flex h-full min-h-[400px] items-center justify-center rounded-xl border border-dashed p-6 text-center text-sm"
         data-testid="inbox-detail-empty"
       >
         Select a conversation to view it here.
@@ -205,44 +220,84 @@ export function InboxDetail({ data, assigneeEmails, currentUserId }: Props) {
     );
   }
 
+  const assigneeEmail = data.assigneeId
+    ? (assigneeEmails[data.assigneeId] ?? null)
+    : null;
+  const isMine =
+    data.assigneeId !== null && data.assigneeId === currentUserId;
+  const assignedLabel = !data.assigneeId
+    ? "Unassigned"
+    : isMine
+      ? "Me"
+      : (assigneeEmail ?? "Teammate");
+  const phoneHref = data.contactPhone ? `tel:${data.contactPhone}` : null;
+
   return (
     <div
-      className="border-border flex h-full flex-col rounded-md border"
+      className="bg-white border border-border rounded-xl flex h-full flex-col overflow-hidden"
       data-testid="inbox-detail-panel"
     >
-      <div className="border-border flex items-center justify-between gap-3 border-b px-4 py-2">
-        <div className="flex min-w-0 flex-col">
-          <span className="truncate text-sm font-medium">
-            {data.contactName ?? data.contactPhone ?? "Unknown contact"}
-          </span>
-          {data.propertyAddress ? (
-            <span className="text-muted-foreground truncate text-[11px]">
-              {data.propertyAddress}
-            </span>
-          ) : null}
+      <header className="border-b border-border bg-white flex items-center justify-between gap-3 px-6 py-4">
+        <div className="flex items-center gap-4 min-w-0">
+          <div className="w-12 h-12 rounded-full bg-[#f5f5f4] border border-[#e5e1df] flex items-center justify-center text-base font-bold text-[#111827] shrink-0">
+            {initialsOfName(data.contactName)}
+          </div>
+          <div className="flex flex-col min-w-0">
+            <div className="flex items-center gap-2">
+              <h2 className="truncate text-[18px] font-bold leading-tight text-[#1c1917]">
+                {data.contactName ?? data.contactPhone ?? "Unknown contact"}
+              </h2>
+              {isValidStatus(data.propertyStatus) && (
+                <StatusChip status={data.propertyStatus} />
+              )}
+            </div>
+            <p className="text-[13px] text-[#78716c] flex items-center gap-2 min-w-0">
+              {data.propertyAddress ? (
+                <span className="truncate">{data.propertyAddress}</span>
+              ) : (
+                <span className="truncate italic">No property linked</span>
+              )}
+              <span aria-hidden className="text-[#a8a29e]">·</span>
+              <span className="shrink-0 font-medium text-[#111827]">
+                Assigned: {assignedLabel}
+              </span>
+            </p>
+          </div>
         </div>
-        <div className="flex shrink-0 items-center gap-1.5">
+        <div className="flex shrink-0 items-center gap-2">
+          {phoneHref ? (
+            <a
+              href={phoneHref}
+              aria-label={`Call ${data.contactName ?? data.contactPhone ?? "contact"}`}
+              data-testid="inbox-detail-phone"
+              className="inline-flex h-9 w-9 items-center justify-center rounded-full text-[#78716c] hover:bg-[#f5f5f4] hover:text-[#111827] transition-colors"
+            >
+              <PhoneIcon className="h-4 w-4" />
+            </a>
+          ) : null}
           {data.propertyId ? (
             <AssignDropdown
               propertyId={data.propertyId}
               initialAssigneeId={data.assigneeId}
-              initialAssigneeEmail={
-                data.assigneeId ? (assigneeEmails[data.assigneeId] ?? null) : null
-              }
+              initialAssigneeEmail={assigneeEmail}
               currentUserId={currentUserId}
             />
           ) : null}
           {data.propertyId ? (
             <Link
               href={`/leads/${data.propertyId}`}
-              className={buttonVariants({ variant: "outline", size: "sm" })}
+              data-testid="inbox-detail-open-lead"
+              className={cn(
+                "inline-flex items-center gap-1 rounded-full border border-[#e5e1df] bg-white px-4 py-1.5",
+                "text-[12px] font-bold text-[#1c1917] transition-colors hover:bg-[#f5f5f4]",
+              )}
             >
               Open lead
             </Link>
           ) : null}
         </div>
-      </div>
-      <div className="flex-1 overflow-y-auto p-4">
+      </header>
+      <div className="flex-1 overflow-y-auto px-6 py-5 bg-[#faf9f8]">
         {/* Key on contactId so switching threads remounts the component
             and resets its internal `messages` useState. Without this,
             the previous thread's bubbles linger because the Realtime
@@ -256,14 +311,14 @@ export function InboxDetail({ data, assigneeEmails, currentUserId }: Props) {
       </div>
       {data.propertyId ? (
         <>
-          <div className="border-border flex items-center border-t px-3 py-1.5">
+          <div className="border-t border-border bg-white flex items-center px-6 py-2">
             <DispoBar
               key={`dispo-${data.propertyId}`}
               propertyId={data.propertyId}
               initialDispo={data.outreachDispo}
             />
           </div>
-          <div className="border-border border-t p-3">
+          <div className="border-t border-border bg-white px-6 py-4">
             <InlineReply
               key={`reply-${data.contactId}`}
               propertyId={data.propertyId}
@@ -273,7 +328,7 @@ export function InboxDetail({ data, assigneeEmails, currentUserId }: Props) {
           </div>
         </>
       ) : (
-        <div className="border-border text-muted-foreground border-t p-3 text-xs">
+        <div className="border-t border-border bg-white text-[#78716c] p-4 text-xs">
           This conversation has no property linked — open a lead to reply.
         </div>
       )}

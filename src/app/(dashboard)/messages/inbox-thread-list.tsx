@@ -99,69 +99,75 @@ export function InboxThreadList({
 
   return (
     <div
-      className="border-border rounded-md border divide-y"
+      className="bg-white border border-border rounded-xl overflow-hidden flex flex-col"
       data-testid="inbox-thread-list"
     >
-      {threads.map((t) => {
-        const selected = t.contactId === selectedContactId;
-        const assigneeEmail = t.assigneeId
-          ? assigneeEmails[t.assigneeId]
-          : null;
-        const isMine = t.assigneeId !== null && t.assigneeId === currentUserId;
-        return (
-          <button
-            key={t.contactId}
-            type="button"
-            onClick={() => select(t.contactId)}
-            data-testid={`inbox-thread-${t.contactId}`}
-            data-selected={selected || undefined}
-            data-assignee-id={t.assigneeId ?? undefined}
-            className={`flex w-full flex-col items-start gap-1 p-3 text-left transition-colors ${
-              selected
-                ? "bg-accent text-accent-foreground"
-                : "hover:bg-muted/50"
-            }`}
-          >
-            <div className="flex w-full items-center justify-between gap-2">
-              <span className="truncate text-sm font-medium">
-                {t.contactName ?? t.contactPhone ?? "Unknown contact"}
-              </span>
-              <div className="flex shrink-0 items-center gap-1.5">
-                <AssigneeAvatar
-                  email={assigneeEmail}
-                  isMine={isMine}
-                  contactId={t.contactId}
-                />
-                <span className="text-muted-foreground text-[11px]">
+      <div className="flex-1 overflow-y-auto divide-y divide-border">
+        {threads.map((t) => {
+          const selected = t.contactId === selectedContactId;
+          const assigneeEmail = t.assigneeId
+            ? assigneeEmails[t.assigneeId]
+            : null;
+          const isMine = t.assigneeId !== null && t.assigneeId === currentUserId;
+          return (
+            <button
+              key={t.contactId}
+              type="button"
+              onClick={() => select(t.contactId)}
+              data-testid={`inbox-thread-${t.contactId}`}
+              data-selected={selected || undefined}
+              data-assignee-id={t.assigneeId ?? undefined}
+              className={`flex w-full flex-col items-start gap-1 p-4 text-left transition-colors ${
+                selected
+                  ? "border-l-4 border-[#111827] bg-[#f5f5f4]"
+                  : "hover:bg-[#f5f5f4]/60"
+              }`}
+            >
+              <div className="flex w-full items-start justify-between gap-2">
+                <span className="truncate text-sm font-bold text-[#1c1917]">
+                  {t.contactName ?? t.contactPhone ?? "Unknown contact"}
+                </span>
+                <span className="shrink-0 text-[11px] tabular-nums text-[#78716c]">
                   {formatDistanceToNow(new Date(t.lastMessageAt), {
                     addSuffix: true,
                   })}
                 </span>
               </div>
-            </div>
-            <div className="flex w-full items-center justify-between gap-2">
-              <span className="text-muted-foreground line-clamp-1 text-xs">
-                {t.lastMessageDirection === "outbound" ? "You: " : ""}
-                {t.lastMessageBody}
-              </span>
-              {t.unreadCount > 0 ? (
-                <Badge
-                  variant="default"
-                  className="h-4 min-w-4 shrink-0 px-1 text-[10px]"
-                  data-testid={`inbox-thread-${t.contactId}-unread`}
-                >
-                  {t.unreadCount}
-                </Badge>
-              ) : null}
-            </div>
-            {t.propertyAddress ? (
-              <span className="text-muted-foreground line-clamp-1 text-[11px]">
-                {t.propertyAddress}
-              </span>
-            ) : null}
-          </button>
-        );
-      })}
+              <div className="flex w-full items-center gap-2">
+                <AssigneeAvatar
+                  email={assigneeEmail}
+                  isMine={isMine}
+                  contactId={t.contactId}
+                />
+                {t.propertyAddress ? (
+                  <span className="truncate text-[11px] italic text-[#78716c]">
+                    {t.propertyAddress}
+                  </span>
+                ) : (
+                  <span className="truncate text-[11px] italic text-[#a8a29e]">
+                    No property linked
+                  </span>
+                )}
+              </div>
+              <div className="flex w-full items-center justify-between gap-2">
+                <span className="line-clamp-1 text-[13px] text-[#78716c]">
+                  {t.lastMessageDirection === "outbound" ? "You: " : ""}
+                  {t.lastMessageBody}
+                </span>
+                {t.unreadCount > 0 ? (
+                  <Badge
+                    variant="default"
+                    className="h-4 min-w-4 shrink-0 px-1 text-[10px] bg-[#111827] text-white"
+                    data-testid={`inbox-thread-${t.contactId}-unread`}
+                  >
+                    {t.unreadCount}
+                  </Badge>
+                ) : null}
+              </div>
+            </button>
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -175,17 +181,28 @@ function AssigneeAvatar({
   isMine: boolean;
   contactId: string;
 }) {
-  if (!email) return null;
+  if (!email) {
+    return (
+      <span
+        title="Unassigned"
+        data-testid={`inbox-thread-${contactId}-assignee`}
+        className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-dashed border-[#e5e1df] text-[8px] text-[#a8a29e]"
+        aria-hidden
+      >
+        ·
+      </span>
+    );
+  }
   const initials = initialsOf(email);
   return (
     <span
       title={isMine ? `Assigned to me (${email})` : `Assigned to ${email}`}
       data-testid={`inbox-thread-${contactId}-assignee`}
       data-assignee-mine={isMine || undefined}
-      className={`inline-flex h-5 min-w-5 items-center justify-center rounded-full px-1 text-[10px] font-medium ${
+      className={`inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[9px] font-bold ${
         isMine
-          ? "bg-primary text-primary-foreground"
-          : "bg-muted text-muted-foreground"
+          ? "bg-[#111827] text-white"
+          : "bg-[#f5f5f4] border border-[#e5e1df] text-[#78716c]"
       }`}
     >
       {initials}

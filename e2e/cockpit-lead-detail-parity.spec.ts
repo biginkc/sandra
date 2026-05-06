@@ -85,7 +85,7 @@ test("reply from cockpit shows up on the lead detail page (test 29)", async ({
 
   await page.goto(`/messages?thread=${contactId}`);
   const reply = `parity from cockpit ${Date.now()}`;
-  await page.getByPlaceholder(/Type a reply/i).fill(reply);
+  await page.getByPlaceholder(/Type.*reply/i).fill(reply);
   await page.getByRole("button", { name: /Send reply/i }).click();
 
   // Wait for DB row.
@@ -119,7 +119,7 @@ test("reply from lead detail shows up on the cockpit (test 30)", async ({
   await page.goto(`/leads/${propertyId}`);
   const reply = `parity from lead detail ${Date.now()}`;
   // Lead detail uses the same InlineReply component, same placeholder text.
-  await page.getByPlaceholder(/Type a reply/i).fill(reply);
+  await page.getByPlaceholder(/Type.*reply/i).fill(reply);
   await page.getByRole("button", { name: /Send reply/i }).click();
 
   await expect(async () => {

@@ -1,6 +1,5 @@
 "use client";
 
-import { formatDistanceToNow } from "date-fns/formatDistanceToNow";
 import { useEffect, useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
@@ -22,6 +21,11 @@ type Props = {
  * the right, inbound on the left. Subscribes to the `messages` table
  * via Realtime (same subscribe-after-setAuth pattern that fixed the
  * jobs list) so replies and status transitions appear without refresh.
+ *
+ * Renders a "Today, October 14"-style date separator pill at every
+ * day boundary so long threads scan-able. Outbound bubbles use the
+ * primary token (#000000 in the warm-paper palette) to match the
+ * messages-cockpit Stitch design.
  */
 export function MessagesThread({ initial, contactId, propertyId }: Props) {
   const [messages, setMessages] = useState<Message[]>(initial);
@@ -86,85 +90,138 @@ export function MessagesThread({ initial, contactId, propertyId }: Props) {
     );
   }
 
+  // Group messages by local-date string so we can drop a separator
+  // pill at every day boundary. `toDateString()` is locale-stable for
+  // grouping purposes (always YYYY-MM-DD-equivalent for the runtime tz).
+  const items: Array<{ kind: "sep"; key: string; label: string } | { kind: "msg"; msg: Message }> = [];
+  let prevDay: string | null = null;
+  for (const m of messages) {
+    const day = new Date(m.created_at).toDateString();
+    if (day !== prevDay) {
+      items.push({ kind: "sep", key: `sep-${day}`, label: formatDayLabel(m.created_at) });
+      prevDay = day;
+    }
+    items.push({ kind: "msg", msg: m });
+  }
+
   return (
-    <div className="flex flex-col gap-2">
-      {messages.map((m) => (
-        <MessageBubble key={m.id} message={m} />
-      ))}
+    <div className="flex flex-col gap-4" data-testid="messages-thread">
+      {items.map((it) =>
+        it.kind === "sep" ? (
+          <div key={it.key} className="flex justify-center" data-testid="messages-thread-day-sep">
+            <span className="text-[11px] tabular-nums text-muted-foreground bg-muted border border-border px-3 py-1 rounded-full uppercase tracking-wider font-medium">
+              {it.label}
+            </span>
+          </div>
+        ) : (
+          <MessageBubble key={it.msg.id} message={it.msg} />
+        ),
+      )}
     </div>
   );
+}
+
+function formatDayLabel(iso: string): string {
+  const d = new Date(iso);
+  const today = new Date();
+  const yesterday = new Date(today);
+  yesterday.setDate(today.getDate() - 1);
+
+  const sameDay = (a: Date, b: Date) =>
+    a.getFullYear() === b.getFullYear() &&
+    a.getMonth() === b.getMonth() &&
+    a.getDate() === b.getDate();
+
+  const monthDay = d.toLocaleDateString(undefined, {
+    month: "long",
+    day: "numeric",
+  });
+  if (sameDay(d, today)) return `Today, ${monthDay}`;
+  if (sameDay(d, yesterday)) return `Yesterday, ${monthDay}`;
+  return d.toLocaleDateString(undefined, {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+    year: d.getFullYear() !== today.getFullYear() ? "numeric" : undefined,
+  });
 }
 
 function MessageBubble({ message }: { message: Message }) {
   const outbound = message.direction === "outbound";
   const status = message.status;
+  const time = new Date(message.created_at).toLocaleTimeString(undefined, {
+    hour: "numeric",
+    minute: "2-digit",
+  });
 
   return (
     <div
       className={
-        outbound ? "flex justify-end" : "flex justify-start"
+        outbound
+          ? "flex flex-col items-end ml-auto max-w-[80%]"
+          : "flex flex-col items-start max-w-[80%]"
       }
+      data-direction={outbound ? "outbound" : "inbound"}
     >
       <div
-        className={`max-w-[75%] rounded-2xl px-3 py-2 text-sm ${
+        className={
           outbound
-            ? "bg-primary text-primary-foreground"
-            : "bg-muted text-foreground"
+            ? "bg-primary text-primary-foreground p-3 rounded-2xl rounded-tr-none"
+            : "bg-muted text-foreground p-3 rounded-2xl rounded-tl-none border border-border"
+        }
+      >
+        <div className="whitespace-pre-wrap break-words text-[14px] leading-relaxed">
+          {message.body}
+        </div>
+      </div>
+      <div
+        className={`mt-1 flex items-center gap-1.5 text-[10px] tabular-nums text-muted-foreground ${
+          outbound ? "mr-1" : "ml-1"
         }`}
       >
-        <div className="whitespace-pre-wrap break-words">{message.body}</div>
-        <div
-          className={`mt-1 flex items-center gap-1.5 text-xs ${
-            outbound ? "text-primary-foreground/70" : "text-muted-foreground"
-          }`}
-        >
-          <span>
-            {formatDistanceToNow(new Date(message.created_at), {
-              addSuffix: true,
-            })}
-          </span>
-          {outbound && status !== "sent" && status !== "delivered" && (
-            <Badge
-              variant={
-                status === "failed"
-                  ? "destructive"
-                  : status === "queued" || status === "pending"
-                    ? "secondary"
-                    : "outline"
-              }
-              className="text-[10px]"
-            >
-              {status}
+        <span>{time}</span>
+        {outbound && status !== "sent" && status !== "delivered" && (
+          <Badge
+            variant={
+              status === "failed"
+                ? "destructive"
+                : status === "queued" || status === "pending"
+                  ? "secondary"
+                  : "outline"
+            }
+            className="text-[10px]"
+          >
+            {status}
+          </Badge>
+        )}
+        {!outbound &&
+          message.metadata &&
+          typeof message.metadata === "object" &&
+          "keyword" in message.metadata && (
+            <Badge variant="destructive" className="text-[10px]">
+              {String(
+                (message.metadata as { keyword: unknown }).keyword,
+              ).toUpperCase()}
             </Badge>
           )}
-          {!outbound && message.metadata &&
-            typeof message.metadata === "object" &&
-            "keyword" in message.metadata && (
-              <Badge variant="destructive" className="text-[10px]">
-                {String(
-                  (message.metadata as { keyword: unknown }).keyword,
-                ).toUpperCase()}
-              </Badge>
-            )}
-          {outbound &&
-            message.metadata &&
-            typeof message.metadata === "object" &&
-            (message.metadata as { generated_by?: unknown }).generated_by ===
-              "ai_responder_v1" && (
-              <Badge
-                variant="outline"
-                className="border-primary-foreground/30 text-primary-foreground text-[10px]"
-                title={`AI-drafted · confidence ${
-                  typeof (message.metadata as { confidence?: unknown })
-                    .confidence === "number"
-                    ? ((message.metadata as { confidence: number }).confidence * 100).toFixed(0) + "%"
-                    : "—"
-                }`}
-              >
-                🤖 AI
-              </Badge>
-            )}
-        </div>
+        {outbound &&
+          message.metadata &&
+          typeof message.metadata === "object" &&
+          (message.metadata as { generated_by?: unknown }).generated_by ===
+            "ai_responder_v1" && (
+            <Badge
+              variant="outline"
+              className="border-border text-muted-foreground text-[10px]"
+              title={`AI-drafted · confidence ${
+                typeof (message.metadata as { confidence?: unknown })
+                  .confidence === "number"
+                  ? ((message.metadata as { confidence: number }).confidence * 100).toFixed(0) + "%"
+                  : "—"
+              }`}
+            >
+              AI
+            </Badge>
+          )}
       </div>
     </div>
   );

@@ -5,7 +5,6 @@ import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState, useTransition } from "react";
 import { toast } from "sonner";
 
-import { Button } from "@/components/ui/button";
 import { callAction } from "@/lib/errors/call-action";
 import { renderTemplate } from "@/lib/templates/render";
 import { type TemplateRow } from "@/app/(dashboard)/templates/actions";
@@ -37,6 +36,11 @@ export function InlineReply({
   const router = useRouter();
   const [body, setBody] = useState("");
   const [pending, startTransition] = useTransition();
+  // Tracks the most recent template selection so a slower in-flight
+  // `loadLeadVars` for an earlier click can't overwrite the body the user
+  // just picked (WR-04). Hooks must run before the early-return for the
+  // disabled state, so this lives at the top of the component body.
+  const templateRequestToken = useRef(0);
   // Fetch the first "sendable" Dialpad number once on mount and use it as
   // the from. Avoids the env-default-is-unassigned footgun where
   // DIALPAD_FROM_NUMBER points at a number Dialpad rejects with
@@ -126,17 +130,11 @@ export function InlineReply({
 
   if (disabled) {
     return (
-      <div className="border-border/60 text-muted-foreground mt-3 rounded-md border border-dashed p-3 text-center text-xs">
+      <div className="border-[#e5e1df] text-[#78716c] rounded-xl border border-dashed p-3 text-center text-xs">
         {disabledReason}
       </div>
     );
   }
-
-  // Tracks the most recent template selection so a slower in-flight
-  // `loadLeadVars` for an earlier click can't overwrite the body the user
-  // just picked (WR-04). Each click increments the token; resolved
-  // promises whose token doesn't match the latest are discarded.
-  const templateRequestToken = useRef(0);
 
   const handleTemplateSelect = (template: TemplateRow) => {
     // WR-03: protect a non-empty draft from being silently clobbered.
@@ -165,33 +163,70 @@ export function InlineReply({
     });
   };
 
+  const formattedFrom = formatPhoneE164(fromNumber);
+
   return (
-    <div className="mt-3 flex flex-col gap-2">
-      <textarea
-        value={body}
-        onChange={(e) => setBody(e.target.value)}
-        onKeyDown={handleKeyDown}
-        placeholder="Type a reply… (⌘/Ctrl + Enter to send)"
-        aria-label="Reply to this lead"
-        disabled={pending}
-        maxLength={2000}
-        rows={2}
-        className="border-input placeholder:text-muted-foreground focus-visible:ring-ring min-h-[44px] flex-1 rounded-md border bg-transparent px-3 py-2 text-sm shadow-sm focus-visible:ring-1 focus-visible:outline-none"
-      />
-      <div className="flex items-center justify-between">
-        <TemplatePicker onSelect={handleTemplateSelect} />
-        <div className="flex items-center gap-2">
-          <span
-            className={`text-[10px] ${tooLong ? "text-destructive" : "text-muted-foreground"}`}
+    <div className="flex flex-col gap-2" data-testid="inline-reply">
+      <div className="bg-[#fdfcfb] border border-[#e5e1df] rounded-xl p-4 transition-colors focus-within:border-[#111827]">
+        <textarea
+          value={body}
+          onChange={(e) => setBody(e.target.value)}
+          onKeyDown={handleKeyDown}
+          placeholder="Type your reply…  (⌘/Ctrl + Enter to send)"
+          aria-label="Reply to this lead"
+          disabled={pending}
+          maxLength={2000}
+          rows={2}
+          className="w-full bg-transparent border-none focus:ring-0 focus:outline-none text-[14px] resize-none min-h-[60px] placeholder:text-[#a8a29e]"
+        />
+        <div className="flex items-center justify-between gap-3 mt-2 pt-2 border-t border-[#e5e1df]/60">
+          <div className="flex items-center gap-3 text-[#78716c] min-w-0">
+            <span className="text-[11px] font-medium flex items-center gap-1.5 min-w-0">
+              <span className="shrink-0">From:</span>
+              <span className="text-[#1c1917] font-bold tabular-nums truncate">
+                {formattedFrom ?? "—"}
+              </span>
+            </span>
+            <TemplatePicker onSelect={handleTemplateSelect} />
+            <span
+              className={`shrink-0 text-[10px] tabular-nums ${
+                tooLong ? "text-red-600" : "text-[#a8a29e]"
+              }`}
+            >
+              {length} / 1600
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={send}
+            disabled={!canSend}
+            aria-label="Send reply"
+            data-testid="inline-reply-send"
+            className="inline-flex shrink-0 items-center gap-2 rounded-full bg-primary px-5 py-2 text-[12px] font-bold text-primary-foreground transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
           >
-            {length} / 1600
-          </span>
-          <Button onClick={send} disabled={!canSend} size="sm" aria-label="Send reply">
-            <SendIcon className="mr-1 size-3.5" />
-            {pending ? "Sending…" : "Send"}
-          </Button>
+            {pending ? "Sending…" : "Send SMS"}
+            <SendIcon className="h-3.5 w-3.5" />
+          </button>
         </div>
       </div>
+      <p className="text-[10px] text-center text-[#a8a29e] px-2">
+        By sending, you confirm you have active consent to contact this lead
+        via SMS.
+      </p>
     </div>
   );
+}
+
+function formatPhoneE164(raw: string | null): string | null {
+  if (!raw) return null;
+  // Best-effort US phone formatting for the From: line. Falls back to
+  // the raw value if it doesn't look like a 10/11-digit number.
+  const digits = raw.replace(/\D/g, "");
+  if (digits.length === 11 && digits.startsWith("1")) {
+    return `+1 (${digits.slice(1, 4)}) ${digits.slice(4, 7)}-${digits.slice(7)}`;
+  }
+  if (digits.length === 10) {
+    return `(${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6)}`;
+  }
+  return raw;
 }

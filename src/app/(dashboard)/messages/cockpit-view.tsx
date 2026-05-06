@@ -1,15 +1,10 @@
 "use client";
 
+import { MessageSquarePlusIcon, PlusIcon } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
 
 import { Page } from "@/components/page";
 import { PageHeader } from "@/components/page-header";
-import {
-  Tabs,
-  TabsContent,
-  TabsList,
-  TabsTrigger,
-} from "@/components/ui/tabs";
 import type { Thread } from "@/lib/messages/list-threads";
 import type { UnknownSender } from "@/lib/messages/list-unknown-senders";
 
@@ -67,6 +62,7 @@ export function CockpitView({
   };
 
   const showThreadList = THREAD_FILTERS.has(filter);
+  const totalUnread = threads.reduce((n, t) => n + t.unreadCount, 0);
 
   return (
     <Page>
@@ -74,76 +70,144 @@ export function CockpitView({
         breadcrumb={[{ label: "Workspace" }, { label: "Messages" }]}
         title="Messages"
         description="Live conversations on the Inbox tab; queued bulk sends on the Outbox tab. Both flow through the same SMS provider; consent and quiet-hours are checked on every send."
+        actions={
+          <button
+            type="button"
+            data-testid="messages-new-message"
+            onClick={() => router.push(`/leads?compose=1`)}
+            className="inline-flex items-center gap-2 rounded-full bg-primary px-5 py-2.5 text-[12px] font-bold text-primary-foreground transition-opacity hover:opacity-90"
+          >
+            <PlusIcon className="h-4 w-4" />
+            New Message
+          </button>
+        }
       />
 
-      <Tabs
-        value={activeTab}
-        onValueChange={(v) => setTab(String(v))}
+      {/* Underline tabs — replaces the shadcn Tabs to match the Stitch
+          messages-cockpit design. State stays in the URL like before. */}
+      <div
+        role="tablist"
+        aria-label="Inbox / Outbox"
+        className="mt-6 flex gap-6 border-b border-border"
       >
-        <TabsList>
-          <TabsTrigger value="inbox" data-testid="tab-inbox">
-            Inbox
-            {threads.some((t) => t.unreadCount > 0) ? (
-              <span className="bg-primary text-primary-foreground ml-2 inline-flex h-4 min-w-4 items-center justify-center rounded-full px-1 text-[10px]">
-                {threads.reduce((n, t) => n + t.unreadCount, 0)}
-              </span>
-            ) : null}
-          </TabsTrigger>
-          <TabsTrigger value="outbox" data-testid="tab-outbox">
-            Outbox
-            {queued.length > 0 ? (
-              <span className="bg-secondary text-secondary-foreground ml-2 inline-flex h-4 min-w-4 items-center justify-center rounded-full px-1 text-[10px]">
-                {queued.length}
-              </span>
-            ) : null}
-          </TabsTrigger>
-        </TabsList>
+        <TabButton
+          label="Inbox"
+          count={totalUnread > 0 ? totalUnread : undefined}
+          countTone="primary"
+          active={activeTab === "inbox"}
+          onClick={() => setTab("inbox")}
+          testId="tab-inbox"
+        />
+        <TabButton
+          label="Outbox"
+          count={queued.length > 0 ? queued.length : undefined}
+          countTone="muted"
+          active={activeTab === "outbox"}
+          onClick={() => setTab("outbox")}
+          testId="tab-outbox"
+        />
+      </div>
 
-        <TabsContent value="inbox">
-          <div className="mt-4 flex flex-col gap-3">
-            <InboxFilters
-              active={filter}
-              unknownCount={unknownActiveCount}
-              unreadCount={threads.filter((t) => t.unreadCount > 0).length}
-              showAssignmentChips={currentUserId !== null}
-            />
+      {activeTab === "inbox" ? (
+        <div className="mt-4 flex flex-col gap-4">
+          <InboxFilters
+            active={filter}
+            unknownCount={unknownActiveCount}
+            unreadCount={threads.filter((t) => t.unreadCount > 0).length}
+            showAssignmentChips={currentUserId !== null}
+          />
 
-            {showThreadList && (
-              <div
-                className="grid h-[calc(100vh-260px)] min-h-[500px] grid-cols-[minmax(280px,360px)_1fr] gap-4"
-                data-testid="inbox-cockpit-grid"
-              >
-                <InboxThreadList
-                  initial={threads}
-                  selectedContactId={threadDetail?.contactId ?? null}
-                  assigneeEmails={assigneeEmails}
-                  currentUserId={currentUserId}
-                />
-                <InboxDetail
-                  data={threadDetail}
-                  assigneeEmails={assigneeEmails}
-                  currentUserId={currentUserId}
-                />
-              </div>
-            )}
+          {showThreadList && (
+            <div
+              className="grid h-[calc(100vh-260px)] min-h-[500px] grid-cols-[minmax(280px,360px)_1fr] gap-6"
+              data-testid="inbox-cockpit-grid"
+            >
+              <InboxThreadList
+                initial={threads}
+                selectedContactId={threadDetail?.contactId ?? null}
+                assigneeEmails={assigneeEmails}
+                currentUserId={currentUserId}
+              />
+              <InboxDetail
+                data={threadDetail}
+                assigneeEmails={assigneeEmails}
+                currentUserId={currentUserId}
+              />
+            </div>
+          )}
 
-            {filter === "unknown" && (
-              <UnknownSenderList senders={unknownSenders} showRestore={false} />
-            )}
+          {filter === "unknown" && (
+            <UnknownSenderList senders={unknownSenders} showRestore={false} />
+          )}
 
-            {filter === "dismissed" && (
-              <UnknownSenderList senders={unknownSenders} showRestore={true} />
-            )}
-          </div>
-        </TabsContent>
+          {filter === "dismissed" && (
+            <UnknownSenderList senders={unknownSenders} showRestore={true} />
+          )}
+        </div>
+      ) : (
+        <div className="mt-4">
+          <QueueStatsBanner initialStats={queueStats} />
+          <QueuePanel initial={queued} />
+        </div>
+      )}
 
-        <TabsContent value="outbox">
-          <div className="mt-4">
-            <QueueStatsBanner initialStats={queueStats} />
-            <QueuePanel initial={queued} />
-          </div>
-        </TabsContent>
-      </Tabs>
+      {/* Contextual FAB — quick "compose new message" entry from anywhere
+          on the page. Routes through the leads index compose flow rather
+          than opening a modal here, so we don't duplicate consent /
+          quiet-hours UX. */}
+      <button
+        type="button"
+        aria-label="Compose new message"
+        data-testid="messages-fab"
+        onClick={() => router.push(`/leads?compose=1`)}
+        className="fixed bottom-6 right-6 w-14 h-14 bg-primary text-primary-foreground rounded-full flex items-center justify-center shadow-2xl hover:scale-105 transition-transform z-40"
+      >
+        <MessageSquarePlusIcon className="h-6 w-6" />
+      </button>
     </Page>
+  );
+}
+
+function TabButton({
+  label,
+  count,
+  countTone,
+  active,
+  onClick,
+  testId,
+}: {
+  label: string;
+  count?: number;
+  countTone: "primary" | "muted";
+  active: boolean;
+  onClick: () => void;
+  testId: string;
+}) {
+  return (
+    <button
+      type="button"
+      role="tab"
+      aria-selected={active}
+      data-testid={testId}
+      onClick={onClick}
+      className={`pb-2 -mb-px flex items-center gap-2 text-[14px] font-bold border-b-2 transition-colors ${
+        active
+          ? "border-primary text-primary"
+          : "border-transparent text-[#78716c] hover:text-[#1c1917]"
+      }`}
+    >
+      {label}
+      {count !== undefined ? (
+        <span
+          className={`px-2 py-0.5 text-[10px] rounded-full font-bold ${
+            countTone === "primary" && active
+              ? "bg-primary text-primary-foreground"
+              : "bg-[#f5f5f4] text-[#78716c] border border-[#e5e1df]"
+          }`}
+        >
+          {count}
+        </span>
+      ) : null}
+    </button>
   );
 }
