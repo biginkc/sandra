@@ -157,7 +157,12 @@ test("Merge with existing property — Homeowner role: links homeowner_contact_i
 
   await page.goto("/messages?filter=unknown");
   await page.getByTestId(`unknown-actions-${phone}`).click();
-  await page.getByTestId(`unknown-merge-property-${phone}`).click();
+  // Wait for the dropdown menu item to mount before clicking — see the
+  // analogous fix in cockpit-unknown-triage.spec.ts (Dismiss). base-ui
+  // animates the dropdown in; clicking before the item is rendered races.
+  const mergeBtn = page.getByTestId(`unknown-merge-property-${phone}`);
+  await expect(mergeBtn).toBeVisible();
+  await mergeBtn.click();
 
   await page.getByTestId("merge-property-search-input").fill(prop.address.slice(0, 12));
   await expect(

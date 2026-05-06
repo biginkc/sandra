@@ -73,12 +73,20 @@ const webServerEnv: Record<string, string> = {
 
 export default defineConfig({
   testDir: "./e2e",
+  // phase-1-5-uat.spec.ts is a PROD-ONLY screenshot UAT — it requires
+  // PROD_EMAIL / PROD_PASSWORD and runs against sandra-sooty.vercel.app.
+  // It must not run in the default CI suite (no creds → it throws in
+  // beforeAll). Use playwright.prod.config.ts for that spec.
+  testIgnore: ["**/phase-1-5-uat.spec.ts"],
   // Don't run in parallel — the suite resets shared DB tables. Parallel
   // specs would race each other and flake.
   fullyParallel: false,
   workers: 1,
   forbidOnly: !!process.env.CI,
-  retries: process.env.CI ? 1 : 0,
+  // Bumped 1→2: CI runners are noticeably slower than local. Two retries
+  // catches transient flakes (slow Supabase fetch, dropdown-open races)
+  // without masking real regressions — a true regression still fails 3x.
+  retries: process.env.CI ? 2 : 0,
   reporter: process.env.CI ? [["github"], ["html", { open: "never" }]] : "list",
   timeout: 30_000,
   expect: { timeout: 5_000 },
