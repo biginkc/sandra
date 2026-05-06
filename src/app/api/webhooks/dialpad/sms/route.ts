@@ -366,34 +366,46 @@ export async function POST(request: Request) {
       // Auto-qualify: only promote a prospect to new_lead when the reply
       // shows genuine seller interest. Neutral ("who is this?") and
       // negative ("not interested") replies leave the property as a
-      // prospect. Falls back to qualifying on classification error so a
-      // real lead is never silently dropped.
+      // prospect. Fails CLOSED on classifier error — false positives are
+      // the bug we're fixing, so erring on the side of "stay a prospect"
+      // matches intent. The VA can promote manually from the lead page.
       if (propertyId) {
-        let shouldQualify = true;
-        if (ev.body) {
+        // Skip the AI call entirely if the property isn't currently a
+        // prospect (Dialpad retries, continuing conversations on already-
+        // qualified leads). qualifyProperty would no-op anyway, but this
+        // saves the Haiku call.
+        const { data: cur } = await supabase
+          .from("properties")
+          .select("status")
+          .eq("id", propertyId)
+          .maybeSingle();
+
+        if (cur?.status === "prospect" && ev.body) {
+          let shouldQualify = false;
           try {
             const intent = await classifyReplyIntent(ev.body, new Anthropic());
             shouldQualify = intent === "positive";
           } catch (e) {
-            // Classification error — fail open so genuine leads aren't lost.
+            // Classification error — fail closed. Property stays a prospect;
+            // VA can promote manually if they judge the reply as a real lead.
             reportError(e, {
               tags: { surface: "dialpad_webhook_classify_intent" },
               extra: { propertyId, externalId: ev.externalId },
             });
           }
-        }
 
-        if (shouldQualify) {
-          const qOutcome = await qualifyProperty(
-            supabase,
-            propertyId,
-            "system:inbound_reply",
-          );
-          if (qOutcome.status === "failed") {
-            reportError(new Error(qOutcome.message), {
-              tags: { surface: "dialpad_webhook_auto_qualify" },
-              extra: { propertyId, externalId: ev.externalId },
-            });
+          if (shouldQualify) {
+            const qOutcome = await qualifyProperty(
+              supabase,
+              propertyId,
+              "system:inbound_reply",
+            );
+            if (qOutcome.status === "failed") {
+              reportError(new Error(qOutcome.message), {
+                tags: { surface: "dialpad_webhook_auto_qualify" },
+                extra: { propertyId, externalId: ev.externalId },
+              });
+            }
           }
         }
 
