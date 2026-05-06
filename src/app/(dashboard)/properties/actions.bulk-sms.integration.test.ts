@@ -490,4 +490,122 @@ describe("bulkQueueSms (integration)", () => {
     if (!result.ok) return;
     expect(result.data).toBe(0);
   });
+
+  // ---------------------------------------------------------------
+  // Quick task 260506-m3a — dailyCap rollover + jitter spread
+  // ---------------------------------------------------------------
+
+  it("jitterPct=0.20 produces non-uniform gaps between scheduled_for values (variance > 0)", async () => {
+    // Seed 12 leads so we get 11 gaps to compare.
+    const ids: string[] = [];
+    for (let i = 0; i < 12; i++) {
+      const { propertyId } = await seedLead({
+        phone: `+1816555${(7000 + i).toString()}`,
+        address: `${i} Jitter St`,
+      });
+      ids.push(propertyId);
+    }
+
+    const result = await bulkQueueSms(ids, {
+      body: "Jittered",
+      paceSeconds: 10,
+      jitterPct: 0.2,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.data.succeeded).toBe(12);
+
+    const { data: messages } = await testClient
+      .from("messages")
+      .select("scheduled_for")
+      .eq("status", "queued")
+      .order("scheduled_for", { ascending: true });
+
+    const gaps: number[] = [];
+    for (let i = 1; i < messages!.length; i++) {
+      const a = new Date(messages![i - 1].scheduled_for!).getTime();
+      const b = new Date(messages![i].scheduled_for!).getTime();
+      gaps.push(b - a);
+    }
+    // Each gap is within ±20% of the 10s nominal (8000–12000ms).
+    for (const g of gaps) {
+      expect(g).toBeGreaterThanOrEqual(8000);
+      expect(g).toBeLessThanOrEqual(12000);
+    }
+    // And not all gaps are identical (real jitter, not constant offset).
+    const allEqual = gaps.every((g) => g === gaps[0]);
+    expect(allEqual).toBe(false);
+  });
+
+  it("dailyCap=3 with 5 leads → first 3 in today's bucket, last 2 deferred to next day 8 AM PT", async () => {
+    const ids: string[] = [];
+    for (let i = 0; i < 5; i++) {
+      const { propertyId } = await seedLead({
+        phone: `+1816555${(8000 + i).toString()}`,
+        address: `${i} Cap St`,
+      });
+      ids.push(propertyId);
+    }
+
+    const result = await bulkQueueSms(ids, {
+      body: "Capped",
+      paceSeconds: 10,
+      dailyCap: 3,
+      jitterPct: 0, // deterministic for this assertion
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.data.succeeded).toBe(5);
+
+    const { data: messages } = await testClient
+      .from("messages")
+      .select("scheduled_for")
+      .eq("status", "queued")
+      .order("scheduled_for", { ascending: true });
+
+    const tsMs = messages!.map((m) => new Date(m.scheduled_for!).getTime());
+    const nowMs = SAFE_NOW.getTime();
+
+    // First 3: nowMs, nowMs+10s, nowMs+20s (no jitter)
+    expect(tsMs[0]).toBe(nowMs);
+    expect(tsMs[1]).toBe(nowMs + 10_000);
+    expect(tsMs[2]).toBe(nowMs + 20_000);
+
+    // 4th and 5th: deferred to next day's 8 AM PT (16:00 UTC at -08:00).
+    // SAFE_NOW = 2026-04-23T18:00:00Z → next day 8 AM PT = 2026-04-24T16:00:00Z
+    const expectedRolloverMs = Date.UTC(2026, 3, 24, 16, 0, 0);
+    expect(tsMs[3]).toBe(expectedRolloverMs);
+    expect(tsMs[4]).toBe(expectedRolloverMs + 10_000);
+  });
+
+  it("dailyCap undefined preserves today's existing behavior (no rollover)", async () => {
+    // 3 leads, no cap → all schedule within today's bucket spaced by paceSeconds.
+    const ids = [
+      (await seedLead({ phone: "+18165559001", address: "1 NoCap St" }))
+        .propertyId,
+      (await seedLead({ phone: "+18165559002", address: "2 NoCap St" }))
+        .propertyId,
+      (await seedLead({ phone: "+18165559003", address: "3 NoCap St" }))
+        .propertyId,
+    ];
+    const result = await bulkQueueSms(ids, {
+      body: "No cap",
+      paceSeconds: 5,
+      // dailyCap omitted; jitterPct omitted (defaults to 0)
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.data.succeeded).toBe(3);
+
+    const { data: messages } = await testClient
+      .from("messages")
+      .select("scheduled_for")
+      .eq("status", "queued")
+      .order("scheduled_for", { ascending: true });
+
+    const base = SAFE_NOW.getTime();
+    expect(new Date(messages![0].scheduled_for!).getTime()).toBe(base);
+    expect(new Date(messages![1].scheduled_for!).getTime()).toBe(base + 5_000);
+    expect(new Date(messages![2].scheduled_for!).getTime()).toBe(base + 10_000);
+  });
 });

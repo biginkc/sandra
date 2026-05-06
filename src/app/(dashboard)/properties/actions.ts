@@ -46,15 +46,63 @@ export type BulkSmsOutcome = {
 };
 
 /**
+ * Anchor a timestamp at "the following PT calendar day's 8 AM, local PT".
+ * Used by bulkQueueSms's daily-cap rollover so overflow lands at the
+ * start of the recipient-local sending window (8 AM PT covers all of
+ * Jarrad's markets — KC + TX — without jumping earlier than 10 AM CT).
+ *
+ * Always advances exactly one PT calendar day from the input's PT date,
+ * then anchors at 08:00 PT. Caller passes the current bucket start;
+ * helper returns the next bucket start.
+ *
+ * Acceptable simplification: the anchor uses a fixed -08:00 PT offset
+ * (08:00 PT == 16:00 UTC). During DST (PT = -07:00) the anchor lands at
+ * 9 AM PT instead of 8 AM, which is still inside the federal 8 AM – 9 PM
+ * window and still inside the recipient-local window for KC/TX. The
+ * drift is intentional.
+ */
+function nextDayEightAmPT(afterMs: number): number {
+  const fmt = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Los_Angeles",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  });
+  const parts = fmt.formatToParts(new Date(afterMs));
+  const get = (t: string) => parts.find((p) => p.type === t)!.value;
+  const ptYear = Number(get("year"));
+  const ptMonth = Number(get("month"));
+  const ptDay = Number(get("day"));
+  // Next PT calendar day 08:00 PT == 16:00 UTC at -08:00 offset.
+  const tomorrow = new Date(
+    Date.UTC(ptYear, ptMonth - 1, ptDay + 1, 16, 0, 0),
+  );
+  return tomorrow.getTime();
+}
+
+/**
  * Queue a paced batch of outbound SMS messages for the given property IDs.
  *
  * Pre-filters opted-out contacts; everything else (quiet hours, phone
  * existence) is delegated to sendSmsToContact with queueOnly=true.
  * Consent + quiet-hours re-checks run at release time (cron drain).
  *
- * Pacing: the nth successfully queued message is scheduled
- * `n * paceSeconds` seconds after now so the cron drain releases them
- * at a controlled rate.
+ * Pacing: each successfully queued message is scheduled
+ * `paceSeconds` seconds after the previous one (with optional jitter)
+ * so the cron drain releases them at a controlled rate.
+ *
+ * Daily cap: if `dailyCap` is set, only that many messages schedule
+ * within a single 24h bucket; messages 1,001+ (etc.) defer to the start
+ * of the next day's recipient-local sending window — 8 AM PT, which
+ * covers all of Jarrad's markets (KC + TX) without going earlier than
+ * 10 AM CT. When `dailyCap` is undefined, behavior is unchanged from
+ * the original spec (no rollover, single deterministic ramp).
+ *
+ * Jitter: when `jitterPct > 0` (modal default 0.20), each gap between
+ * consecutive scheduled_for values is multiplied by `1 + (rand*2-1)*jitterPct`
+ * so mechanical-looking send patterns don't trip carrier spam-detection.
+ * The first message of each daily bucket is unjittered (anchor at bucket
+ * start) to keep tests + observability deterministic.
  */
 export async function bulkQueueSms(
   propertyIds: string[],
@@ -69,6 +117,18 @@ export async function bulkQueueSms(
      * doesn't double-touch leads.
      */
     skipIfContacted?: boolean;
+    /**
+     * Max messages scheduled within a single 24h bucket per send. When
+     * the cap is hit, subsequent messages roll over to next day 8 AM PT.
+     * Undefined = no cap (original behavior).
+     */
+    dailyCap?: number;
+    /**
+     * 0..1; defaults to 0 so existing deterministic-spacing callers
+     * (and the test suite) stay byte-for-byte compatible. The modal
+     * passes 0.20 for all four presets.
+     */
+    jitterPct?: number;
   },
 ): Promise<Result<BulkSmsOutcome>> {
   if (propertyIds.length === 0) {
@@ -78,6 +138,8 @@ export async function bulkQueueSms(
   try {
     const supabase = await createClient();
     const paceSeconds = opts.paceSeconds ?? 18;
+    const jitterPct = opts.jitterPct ?? 0;
+    const dailyCap = opts.dailyCap;
     const now = Date.now();
 
     // Resolve the current session user once so {{my_first_name}} renders
@@ -133,7 +195,13 @@ export async function bulkQueueSms(
     let succeeded = 0;
     let skipped = 0;
     const failed: BulkSmsOutcome["failed"] = [];
-    let queuedCount = 0;
+    // Daily-cap bucket state. The first queued message of each bucket
+    // anchors at `dayBucketStartMs` (no jitter). Each subsequent queue
+    // adds `paceSeconds * 1000` to `cumulativeOffsetMs` and rolls a
+    // ±jitterPct multiplier on the gap.
+    let cumulativeOffsetMs = 0;
+    let dayBucketStartMs = now;
+    let dayBucketCount = 0;
 
     for (const propertyId of propertyIds) {
       const property = propertyMap.get(propertyId);
@@ -189,7 +257,29 @@ export async function bulkQueueSms(
         continue;
       }
 
-      const scheduledFor = new Date(now + queuedCount * paceSeconds * 1000);
+      // Roll over to next day's 8 AM PT bucket if we've hit the daily cap.
+      if (dailyCap !== undefined && dayBucketCount >= dailyCap) {
+        dayBucketStartMs = nextDayEightAmPT(dayBucketStartMs);
+        dayBucketCount = 0;
+        cumulativeOffsetMs = 0;
+      }
+      // Compute the candidate next-offset so we can write `scheduledFor`,
+      // but only COMMIT the advance (and jitter) on a successful queue.
+      // This way a downstream skip (no_phone, blocked_no_consent re-check)
+      // doesn't burn a slot and stretch the next message's gap past the
+      // ±jitterPct bound.
+      //
+      // The first message of each bucket anchors at the bucket start
+      // exactly (no jitter) so observability is clean and tests are
+      // deterministic; subsequent messages jitter the GAP between
+      // consecutive scheduled_for values within ±jitterPct of pace.
+      let nextOffsetMs = cumulativeOffsetMs;
+      if (dayBucketCount > 0) {
+        const jitterMs =
+          (Math.random() * 2 - 1) * paceSeconds * 1000 * jitterPct;
+        nextOffsetMs = cumulativeOffsetMs + paceSeconds * 1000 + jitterMs;
+      }
+      const scheduledFor = new Date(dayBucketStartMs + nextOffsetMs);
       const outcome = await sendSmsToContact(supabase, {
         contactId: property.homeowner_contact_id,
         propertyId,
@@ -200,7 +290,8 @@ export async function bulkQueueSms(
 
       if (outcome.status === "queued") {
         succeeded++;
-        queuedCount++;
+        cumulativeOffsetMs = nextOffsetMs;
+        dayBucketCount += 1;
       } else if (
         outcome.status === "blocked_no_phone" ||
         outcome.status === "contact_not_found" ||
