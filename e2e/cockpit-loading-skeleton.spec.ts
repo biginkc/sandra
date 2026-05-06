@@ -111,10 +111,12 @@ test("clicking a thread surfaces the loading skeleton during navigation", async 
   await page.unroute("**/messages*");
 
   // After the round-trip lands, skeleton disappears and the real panel
-  // mounts with thread B's content.
+  // mounts with thread B's content. Bumped to 20s — CI runners are slow
+  // enough that the throttled doc + RSC fetch + React commit can outrun
+  // 10s on a cold worker.
   await clickPromise;
   await expect(page.getByTestId("inbox-detail-loading")).toBeHidden({
-    timeout: 10_000,
+    timeout: 20_000,
   });
   await expect(page.getByTestId("inbox-detail-panel")).toBeVisible();
 });

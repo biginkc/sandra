@@ -230,7 +230,12 @@ test("Dismiss removes from Unknown; Restore brings it back", async ({
   // the confirm fires; CI was intermittently hanging here on `once`.
   page.on("dialog", (d) => d.accept());
   await page.getByTestId(`unknown-actions-${phone}`).click();
-  await page.getByTestId(`unknown-dismiss-${phone}`).click();
+  // Wait for the dropdown menu item to mount before clicking — base-ui
+  // dropdowns animate in, and clicking before the item is rendered drops
+  // the click on the floor. CI saw this race ~1 in 10 runs.
+  const dismissBtn = page.getByTestId(`unknown-dismiss-${phone}`);
+  await expect(dismissBtn).toBeVisible();
+  await dismissBtn.click();
 
   // Let the server action + router.refresh() settle before polling DB.
   // Without this CI shows the bucket already empty but the DB query
@@ -252,7 +257,9 @@ test("Dismiss removes from Unknown; Restore brings it back", async ({
   // Switch to Dismissed sub-tab and restore.
   await page.getByTestId("filter-dismissed").click();
   await expect(page.getByTestId(`unknown-row-${phone}`)).toBeVisible();
-  await page.getByTestId(`unknown-restore-${phone}`).click();
+  const restoreBtn = page.getByTestId(`unknown-restore-${phone}`);
+  await expect(restoreBtn).toBeVisible();
+  await restoreBtn.click();
   await page.waitForLoadState("networkidle");
 
   await expect(async () => {
