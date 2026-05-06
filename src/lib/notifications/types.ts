@@ -8,9 +8,10 @@ export type EventType =
   | "owner_message_added"
   | "property_assigned"
   | "bulk_action_completed"
-  | "skip_trace_requested";
+  | "skip_trace_requested"
+  | "task_assigned";
 
-export type EntityType = "property" | "job";
+export type EntityType = "property" | "job" | "task";
 
 /**
  * One row in the `notifications` table. `camelCase` for app-layer
@@ -48,4 +49,10 @@ export type FormatPayload = {
   propertyCount?: number;
   /** For owner_message_added: the inbound SMS body to preview. */
   messageBody?: string | null;
+  /** For task_assigned: the task title (e.g., "Follow up on 123 Main St"). */
+  taskTitle?: string;
+  /** For task_assigned: 'follow_up' | 'callback' | 'custom'. */
+  taskType?: string;
+  /** For task_assigned: ISO timestamptz of due_at. */
+  dueAt?: string;
 };

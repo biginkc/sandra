@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { formatNotification } from "./format";
+import { formatNotification, humanDueDate } from "./format";
 
 describe("formatNotification", () => {
   it("owner_message_added → 'New SMS reply' + address in body", () => {
@@ -92,5 +92,62 @@ describe("formatNotification", () => {
       failed: 0,
     });
     expect(out.title.toLowerCase()).toContain("made_up_job");
+  });
+
+  it("task_assigned → 'Task assigned: <title>' with type label + due in body", () => {
+    // dueAt one day from a fixed "now" — the formatter uses real-time
+    // now, so we feed dueAt = real-now + 1d to land in "tomorrow" reliably.
+    const tomorrow = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+    const out = formatNotification("task_assigned", {
+      taskTitle: "Follow up on 123 Main St",
+      taskType: "follow_up",
+      dueAt: tomorrow,
+    });
+    expect(out.title).toBe("Task assigned: Follow up on 123 Main St");
+    expect(out.body).toContain("Follow-up");
+    expect(out.body).toContain("Due tomorrow");
+  });
+
+  it("task_assigned truncates long titles at 60 chars", () => {
+    const long = "a".repeat(80);
+    const out = formatNotification("task_assigned", {
+      taskTitle: long,
+      taskType: "callback",
+      dueAt: new Date().toISOString(),
+    });
+    // 57 chars + "..." = 60 chars
+    expect(out.title).toBe(`Task assigned: ${"a".repeat(57)}...`);
+    expect(out.body).toContain("Callback");
+  });
+
+  it("task_assigned tolerates missing fields", () => {
+    const out = formatNotification("task_assigned", {});
+    expect(out.title).toContain("new task");
+    expect(out.body).toContain("Due soon");
+    expect(out.body).toContain("Task");
+  });
+});
+
+describe("humanDueDate", () => {
+  const NOW = new Date("2026-05-06T18:00:00Z");
+
+  it("returns 'today' when dueAt is the same calendar day", () => {
+    expect(humanDueDate("2026-05-06T22:00:00Z", NOW)).toBe("today");
+  });
+
+  it("returns 'tomorrow' when dueAt is the next calendar day", () => {
+    expect(humanDueDate("2026-05-07T14:00:00Z", NOW)).toBe("tomorrow");
+  });
+
+  it("returns weekday + month + day for further dates", () => {
+    const out = humanDueDate("2026-05-11T14:00:00Z", NOW);
+    // exact format depends on locale, but it shouldn't be "today" or "tomorrow"
+    expect(out).not.toBe("today");
+    expect(out).not.toBe("tomorrow");
+    expect(out).toMatch(/May/);
+  });
+
+  it("returns 'soon' for an unparseable ISO string", () => {
+    expect(humanDueDate("not-a-date", NOW)).toBe("soon");
   });
 });

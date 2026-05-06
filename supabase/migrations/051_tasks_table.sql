@@ -63,7 +63,19 @@ create policy tasks_authenticated_all on tasks
   with check (true);
 
 -- ----------------------------------------------------------------------------
--- 3. Update reset_tenant_tables() to include tasks
+-- 3. Extend notifications.entity_type to include 'task'
+--
+-- The notifications table (migration 016) was created with a check constraint
+-- locking entity_type to 'property' or 'job'. The new task_assigned dispatch
+-- writes notifications with entity_type='task', so we widen the constraint
+-- here to keep both feature shipping and migration history coherent.
+-- ----------------------------------------------------------------------------
+alter table notifications drop constraint notifications_entity_type_check;
+alter table notifications add constraint notifications_entity_type_check
+  check (entity_type in ('property', 'job', 'task'));
+
+-- ----------------------------------------------------------------------------
+-- 4. Update reset_tenant_tables() to include tasks
 -- ----------------------------------------------------------------------------
 create or replace function reset_tenant_tables()
 returns void

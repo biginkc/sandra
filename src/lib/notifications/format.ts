@@ -25,6 +25,42 @@ const STATE_WORDS: Record<string, string> = {
   canceled: "canceled",
 };
 
+/** Human-readable labels for the task type values stored on `tasks.type`. */
+const TASK_TYPE_LABELS: Record<string, string> = {
+  follow_up: "Follow-up",
+  callback: "Callback",
+  custom: "Task",
+};
+
+/**
+ * Render an ISO due_at as "today" / "tomorrow" / "Fri May 9" relative to
+ * the supplied `now` (default: real time). Pure given a fixed `now`, so
+ * tests can assert exact strings without mocking Date globally.
+ *
+ * Exported for direct testing — formatNotification calls it with the default
+ * `now`, so test the labels here rather than retrofitting a `now` arg into
+ * formatNotification's call surface.
+ */
+export function humanDueDate(iso: string, now: Date = new Date()): string {
+  const due = new Date(iso);
+  if (Number.isNaN(due.getTime())) return "soon";
+
+  const startOfDay = (d: Date) =>
+    new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+
+  const todayStart = startOfDay(now);
+  const dueStart = startOfDay(due);
+  const diffDays = Math.round((dueStart - todayStart) / (24 * 60 * 60 * 1000));
+
+  if (diffDays === 0) return "today";
+  if (diffDays === 1) return "tomorrow";
+  return due.toLocaleDateString("en-US", {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+  });
+}
+
 /**
  * Build title + body for a notification given the event type and a
  * loose-typed payload. Pure — no DB, no fetch. Defensive about
@@ -74,6 +110,18 @@ export function formatNotification(
       return {
         title: "Skip-trace approval needed",
         body: `${who} requested skip-trace for ${count} propert${count === 1 ? "y" : "ies"}`,
+      };
+    }
+    case "task_assigned": {
+      const rawTitle = payload.taskTitle?.trim() ?? "";
+      const truncated =
+        rawTitle.length > 60 ? `${rawTitle.slice(0, 57)}...` : rawTitle;
+      const titleSuffix = truncated || "new task";
+      const due = payload.dueAt ? humanDueDate(payload.dueAt) : "soon";
+      const typeLabel = TASK_TYPE_LABELS[payload.taskType ?? ""] ?? "Task";
+      return {
+        title: `Task assigned: ${titleSuffix}`,
+        body: `Due ${due} · ${typeLabel}`,
       };
     }
   }
