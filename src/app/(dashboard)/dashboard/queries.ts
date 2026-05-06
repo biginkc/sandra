@@ -60,6 +60,18 @@ export type ActivityRow =
       reason: string | null;
     };
 
+export type TaskRow = {
+  id: string;
+  type: string;
+  title: string;
+  /** ISO timestamptz */
+  due_at: string;
+  property_id: string;
+  address: string;
+  city: string | null;
+  state: string;
+};
+
 export type DashboardSummary = {
   total_leads: number;
   new_this_week: number;
