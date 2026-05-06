@@ -86,8 +86,8 @@ function DispoBar({
 
   return (
     <div className="flex items-center gap-2">
-      <span className="text-[11px] font-black uppercase tracking-widest text-[#78716c]">
-        Dispo:
+      <span className="text-[12px] font-bold text-[#78716c]">
+        How&apos;d it go?
       </span>
 
       <button
