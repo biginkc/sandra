@@ -4,7 +4,7 @@
 
 **Core Value:** Get the right message to the right property owner at the right time — with VAs and the AI responder doing the boring parts.
 
-**Last updated:** 2026-05-06 (after v2.0 milestone close)
+**Last updated:** 2026-05-05 (after v2.1 milestone start)
 
 **Current state:** v2.0 shipped 2026-05-06 — cross-table UX consistency + market refactor. 16 plans across 3 phases. Closed with documented tech debt (Phase 01 + Phase 02 lack VERIFICATION.md; DS-05 visual regression check pending; see `.planning/milestones/v2.0-MILESTONE-AUDIT.md`).
 
@@ -38,19 +38,14 @@
 
 ---
 
-## Current Milestone: v2.0 — Cross-table UX consistency + market refactor
+## Current Milestone: v2.1 — Operational Visibility
 
-**Goal:** Apply the search/sort/filter pattern shipped on `/properties` to the remaining CRM tables, and rename the market vocabulary from city-shaped to county-shaped to match how BMH actually segments work.
+**Goal:** Surface the right signals at a glance — skip-trace coverage across all contacts, SMS reply previews in notifications, and an unread filter on the properties table.
 
 **Target features:**
-- Reusable search-sort-table component (extracted from `/properties` work in PRs #83-#87) applied to `/lists`, `/jobs`, `/templates`
-- Market vocabulary rename: city-shaped (`Kansas City`, `St. Louis`, `Dayton`, `Lake of the Ozarks`) → county-shaped names that match BMH's operational segmentation
-
-**Explicitly out of scope (handled outside GSD):**
-- 46-property CASS recovery — operational task, no code
-- Playwright retries 1→2 — single-line config bump (`/gsd-fast` later)
-- `/admin/skip-trace-settings` page — small enough for `/gsd-quick` later
-- `/leads` table sort/search — different UX (kanban), has its own pattern
+- Dashboard: skip-trace coverage widget counts all properties (prospects + leads combined)
+- Notifications: "New SMS reply" items show a text preview of the actual reply
+- Messages inbox: "Unread" filter tab/pill on `/messages` to surface only conversations with unread messages
 
 ---
 
