@@ -105,3 +105,86 @@ export async function fetchDashboardSummary(): Promise<DashboardSummary | null> 
   }
   return data as unknown as DashboardSummary;
 }
+
+/**
+ * Loads the viewer's open tasks split into Today / Upcoming buckets.
+ *
+ * Today = due_at on the current calendar day (server timezone, which is
+ * UTC on Vercel — adequate for the dashboard panel; per-user timezone
+ * support lands with the V2 Calendar integration when we already need
+ * timezone resolution for event creation).
+ *
+ * Upcoming = due_at strictly after today (the partial index on
+ * (assignee_id, due_at) WHERE status='open' covers this filter).
+ *
+ * Returns empty buckets on error rather than null — the panel renders
+ * the all-clear empty state, which is a reasonable failure mode.
+ */
+export async function fetchMyTasks(
+  userId: string,
+): Promise<{ today: TaskRow[]; upcoming: TaskRow[] }> {
+  const supabase = await createClient();
+  const todayStart = new Date();
+  todayStart.setUTCHours(0, 0, 0, 0);
+
+  const { data, error } = await supabase
+    .from("tasks")
+    .select(
+      "id, type, title, due_at, related_property_id, properties!inner(address, city, state, deleted_at)",
+    )
+    .eq("assignee_id", userId)
+    .eq("status", "open")
+    .gte("due_at", todayStart.toISOString())
+    .order("due_at", { ascending: true });
+
+  if (error || !data) {
+    if (error) {
+      console.error("[dashboard] fetchMyTasks failed", {
+        message: error.message,
+        code: error.code,
+      });
+    }
+    return { today: [], upcoming: [] };
+  }
+
+  const tomorrowStart = new Date(todayStart);
+  tomorrowStart.setUTCDate(tomorrowStart.getUTCDate() + 1);
+  const tomorrowMs = tomorrowStart.getTime();
+
+  const today: TaskRow[] = [];
+  const upcoming: TaskRow[] = [];
+
+  for (const row of data) {
+    // Drop tasks whose property has been soft-deleted — the !inner join
+    // already excluded properties without a row, but `deleted_at IS NULL`
+    // can't ride along an !inner select shorthand, so we filter in JS.
+    const prop = row.properties as unknown as {
+      address: string | null;
+      city: string | null;
+      state: string | null;
+      deleted_at: string | null;
+    } | null;
+    if (!prop || prop.deleted_at !== null) continue;
+    if (!prop.address || !prop.state) continue;
+
+    const taskRow: TaskRow = {
+      id: row.id,
+      type: row.type,
+      title: row.title,
+      due_at: row.due_at,
+      property_id: row.related_property_id,
+      address: prop.address,
+      city: prop.city,
+      state: prop.state,
+    };
+
+    const dueMs = new Date(row.due_at).getTime();
+    if (dueMs < tomorrowMs) {
+      today.push(taskRow);
+    } else {
+      upcoming.push(taskRow);
+    }
+  }
+
+  return { today, upcoming };
+}

@@ -12,8 +12,9 @@ import { KpiRowOne, KpiRowTwo } from "./_components/kpi-cards";
 import { NeedsAttentionStrip } from "./_components/needs-attention-strip";
 import { QuickActions } from "./_components/quick-actions";
 import { SkipTraceCredits } from "./_components/skip-trace-credits";
+import { TasksPanel } from "./_components/tasks-panel";
 import { ThreadsNeedingAttention } from "./_components/threads-needing-attention";
-import { fetchDashboardSummary } from "./queries";
+import { fetchDashboardSummary, fetchMyTasks } from "./queries";
 
 export const metadata = {
   title: "Overview · Sandra CRM",
@@ -26,9 +27,10 @@ export default async function DashboardPage() {
   } = await supabase.auth.getUser();
   if (!user) redirect("/login");
 
-  const [summary, balance] = await Promise.all([
+  const [summary, balance, myTasks] = await Promise.all([
     fetchDashboardSummary(),
     getSkipTraceBalance(),
+    fetchMyTasks(user.id),
   ]);
 
   if (!summary) {
@@ -108,6 +110,7 @@ export default async function DashboardPage() {
 
         {/* Right rail */}
         <div className="space-y-6">
+          <TasksPanel today={myTasks.today} upcoming={myTasks.upcoming} />
           <ThreadsNeedingAttention
             threads={summary.threads_needing_attention}
             totalCount={escalatedTotal}
