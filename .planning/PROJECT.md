@@ -4,7 +4,9 @@
 
 **Core Value:** Get the right message to the right property owner at the right time — with VAs and the AI responder doing the boring parts.
 
-**Last updated:** 2026-04-30 (milestone v2.0 init)
+**Last updated:** 2026-05-06 (after v2.0 milestone close)
+
+**Current state:** v2.0 shipped 2026-05-06 — cross-table UX consistency + market refactor. 16 plans across 3 phases. Closed with documented tech debt (Phase 01 + Phase 02 lack VERIFICATION.md; DS-05 visual regression check pending; see `.planning/milestones/v2.0-MILESTONE-AUDIT.md`).
 
 ---
 
