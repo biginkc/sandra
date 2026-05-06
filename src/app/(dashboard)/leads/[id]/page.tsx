@@ -220,6 +220,12 @@ export default async function LeadDetailPage({
         }
         actions={
           <div className="flex items-center gap-1">
+            <Link href="/leads">
+              <Button variant="outline" size="sm" aria-label="Back to leads">
+                <ChevronLeft className="mr-1 h-4 w-4" />
+                Back to leads
+              </Button>
+            </Link>
             {prevId ? (
               <Link href={`/leads/${prevId}`}>
                 <Button variant="ghost" size="icon" aria-label="Previous">
