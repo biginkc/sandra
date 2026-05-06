@@ -65,8 +65,8 @@ function DispoBar({
     });
   }
 
-  const btnBase = "rounded p-1.5 transition-colors disabled:opacity-40";
-  const btnIdle = "text-muted-foreground hover:text-foreground hover:bg-muted";
+  const btnBase = "rounded p-2 transition-colors disabled:opacity-40";
+  const btnIdle = "text-foreground/70 hover:text-foreground hover:bg-muted";
   const btnActive = "bg-muted text-foreground";
   const btnDanger = "bg-destructive/10 text-destructive";
 
@@ -75,7 +75,7 @@ function DispoBar({
   return (
     <TooltipProvider delay={400}>
       <div className="flex items-center gap-0.5">
-        <span className="text-muted-foreground mr-1.5 text-[11px]">Dispo:</span>
+        <span className="text-foreground/80 mr-2 text-xs font-medium">Dispo:</span>
 
         <Tooltip>
           <TooltipTrigger
@@ -84,7 +84,7 @@ function DispoBar({
             className={cn(btnBase, dispo === "wrong_number" ? btnActive : btnIdle)}
             data-testid="dispo-wrong-number"
           >
-            <PhoneOff className="h-3.5 w-3.5" />
+            <PhoneOff className="h-4 w-4" />
           </TooltipTrigger>
           <TooltipContent>Wrong number</TooltipContent>
         </Tooltip>
@@ -96,7 +96,7 @@ function DispoBar({
             className={cn(btnBase, dispo === "not_interested" ? btnActive : btnIdle)}
             data-testid="dispo-not-interested"
           >
-            <ThumbsDown className="h-3.5 w-3.5" />
+            <ThumbsDown className="h-4 w-4" />
           </TooltipTrigger>
           <TooltipContent>Not interested</TooltipContent>
         </Tooltip>
@@ -108,7 +108,7 @@ function DispoBar({
             className={cn(btnBase, isDnc ? btnDanger : btnIdle)}
             data-testid="dispo-dnc"
           >
-            <Ban className="h-3.5 w-3.5" />
+            <Ban className="h-4 w-4" />
           </TooltipTrigger>
           <TooltipContent>Do not contact</TooltipContent>
         </Tooltip>
@@ -123,7 +123,7 @@ function DispoBar({
             data-testid="dispo-nurture"
             title="Follow up later"
           >
-            <Clock className="h-3.5 w-3.5" />
+            <Clock className="h-4 w-4" />
           </PopoverTrigger>
           <PopoverContent className="w-52 p-3" align="start">
             <p className="mb-2 text-xs font-medium">Follow up on</p>
