@@ -4,7 +4,7 @@
 
 - ✅ **v1.x — Foundation** (archived) — see `.planning/milestones/v1.x-*`
 - ✅ **v2.0 — Cross-table UX + market refactor** — Phases 1, 1.5, 2 (shipped 2026-05-06) — see `.planning/milestones/v2.0-ROADMAP.md`
-- 🚧 **v2.1 — Operational Visibility** — Phase 03 (in progress)
+- 🚧 **v2.1 — Operational Visibility + Integrations** — Phase 03 shipped, Phase 04 next
 
 ## Phases
 
@@ -22,9 +22,10 @@
 
 </details>
 
-### 🚧 v2.1 — Operational Visibility (1 phase)
+### 🚧 v2.1 — Operational Visibility + Integrations (2 phases)
 
-- [ ] **Phase 03: Operational Visibility Surfaces** — Three small visibility tweaks across `/dashboard`, the notification bell, and `/messages`
+- [x] **Phase 03: Operational Visibility Surfaces** — NOTIF-01 + DASH-01 + MSG-01 (shipped outside GSD on 2026-05-06, commit e461156). Tasks substrate (V1) also shipped 2026-05-06 via PR #112 (FOLL-01 / FOLL-02 covered).
+- [ ] **Phase 04: Tasks Integrations (V2 — Slack + Google Calendar)** — Outbound delivery surfaces for the V1 Tasks substrate
 
 ## Phase Details
 
@@ -43,9 +44,39 @@
   4. The Unread filter round-trips through the URL like the other inbox filters and clears cleanly when toggled off.
   5. CI is green: typecheck + unit + RTL + Playwright golden paths.
 
-**Plans:** TBD
+**Plans:** Shipped outside GSD (commit e461156 on 2026-05-06)
 
 **UI hint**: yes
+
+---
+
+### Phase 04: Tasks Integrations (V2 — Slack + Google Calendar)
+
+**Goal:** Make the Tasks substrate's `task_assigned` events visible where VAs and the owner already work — Slack DMs and Google Calendar — so they don't need to camp on the Sandra dashboard. One-way outbound; CRM stays the source of truth.
+
+**Depends on:** Phase 03 (V1 Tasks substrate — shipped via PR #112; provides `tasks` table, `dispatchTaskAssigned`, and the `task_assigned` notification event type that this phase hooks into).
+
+**Requirements:** SLACK-01, CAL-01, INTEG-01
+
+**Success Criteria** (what must be TRUE):
+  1. When a task is assigned (via the dispo popover) to a user other than the actor, that user receives a Slack DM with task title, property address, due date, and a one-click "Mark Done" button. Clicking the button updates the task in the CRM and the Slack message reflects the new state.
+  2. When a task is created or its due_at changes, a corresponding 30-minute event lands on the assignee's Google Calendar (their primary calendar, in their stored timezone). Task completion does NOT delete the event — accept stale events as the documented tradeoff.
+  3. Each user can connect / disconnect Slack and Google Calendar in `/settings/integrations` and toggle each delivery channel on/off independently. OAuth refresh tokens are stored encrypted; never logged.
+  4. Existing in-app dashboard panel + bell notification continue to work — the Slack and Calendar paths are additive, not replacements.
+  5. CI is green: typecheck + unit + RTL + Playwright golden paths.
+
+**Plans:** TBD (run `/gsd-plan-phase 04` after `/gsd-discuss-phase 04` lands CONTEXT.md).
+
+**UI hint**: yes — `/settings/integrations` connection UI is new; existing dashboard panel + notifications bell are unchanged.
+
+**Notes / open architectural questions for discuss-phase:**
+- Slack workspace-level vs per-user OAuth scope
+- `@slack/web-api` vs Slack Bolt framework on Next.js App Router
+- Google Calendar event vs Google Tasks API (events = visible/blocking; tasks = sidebar todos)
+- Encrypted token storage shape (`user_oauth_tokens` table with column-level encryption vs Supabase Vault)
+- Async dispatch worker pattern (synchronous in webhook? background queue? Vercel cron?)
+- Slack inbound (`/follow-up` slash command) — defer to V3 or include in V2?
+- Notification preferences UI granularity (all-or-nothing per channel, or per-event-type?)
 
 ---
 
@@ -57,4 +88,5 @@ See REQUIREMENTS.md > Out of Scope for the full list and rationale.
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 03. Operational Visibility Surfaces | 0/0 | Not started | — |
+| 03. Operational Visibility Surfaces | — | Shipped (outside GSD) + V1 Tasks via PR #112 | 2026-05-06 |
+| 04. Tasks Integrations (V2 — Slack + Calendar) | 0/0 | Not started — awaiting `/gsd-discuss-phase 04` | — |
