@@ -56,7 +56,9 @@ export default async function MessagesPage({
           ? "mine"
           : sp.filter === "unassigned"
             ? "unassigned"
-            : "all";
+            : sp.filter === "unread"
+              ? "unread"
+              : "all";
   const selectedContactId = sp.thread ?? null;
 
   const supabase = await createClient();
@@ -68,6 +70,7 @@ export default async function MessagesPage({
   const threadOpts: ListThreadsOpts = {};
   if (filter === "mine" && currentUser) threadOpts.assigneeId = currentUser.id;
   if (filter === "unassigned") threadOpts.unassignedOnly = true;
+  if (filter === "unread") threadOpts.unreadOnly = true;
 
   // Fetch everything in parallel. The thread list + unknown active count
   // are needed regardless of which filter is active (badge counts on the
@@ -179,5 +182,5 @@ export default async function MessagesPage({
 
 /** Filter values that show the thread list (vs the unknown bucket). */
 function isThreadFilter(f: InboxFilter): boolean {
-  return f === "all" || f === "mine" || f === "unassigned";
+  return f === "all" || f === "mine" || f === "unassigned" || f === "unread";
 }

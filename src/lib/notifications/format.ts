@@ -38,9 +38,12 @@ export function formatNotification(
   switch (eventType) {
     case "owner_message_added": {
       const address = payload.propertyAddress ?? "a property";
+      const raw = payload.messageBody?.trim() ?? "";
+      const isUrl = /^\s*https?:\/\/\S+\s*$/.test(raw);
+      const preview = raw && !isUrl ? raw.slice(0, 80) : null;
       return {
         title: "New SMS reply",
-        body: `Reply from ${address}`,
+        body: preview ? `Reply from ${address}\n${preview}` : `Reply from ${address}`,
       };
     }
     case "property_assigned": {

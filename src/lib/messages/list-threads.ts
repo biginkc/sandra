@@ -23,6 +23,8 @@ export type ListThreadsOpts = {
   assigneeId?: string;
   /** When true, returns only threads on properties with no assignee. */
   unassignedOnly?: boolean;
+  /** When true, returns only threads with at least one unread inbound message. */
+  unreadOnly?: boolean;
 };
 
 /**
@@ -113,6 +115,7 @@ export async function listThreads(
 
     if (opts.assigneeId && p?.assigned_user_id !== opts.assigneeId) continue;
     if (opts.unassignedOnly && p?.assigned_user_id) continue;
+    if (opts.unreadOnly && bucket.unreadCount === 0) continue;
 
     threads.push({
       contactId,

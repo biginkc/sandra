@@ -9,11 +9,13 @@ export type InboxFilter =
   | "mine"
   | "unassigned"
   | "unknown"
-  | "dismissed";
+  | "dismissed"
+  | "unread";
 
 type Props = {
   active: InboxFilter;
   unknownCount: number;
+  unreadCount: number;
   /** Hide Mine + Unassigned chips when no auth user is on the request. */
   showAssignmentChips: boolean;
 };
@@ -26,6 +28,7 @@ type Props = {
 export function InboxFilters({
   active,
   unknownCount,
+  unreadCount,
   showAssignmentChips,
 }: Props) {
   const router = useRouter();
@@ -64,6 +67,13 @@ export function InboxFilters({
           />
         </>
       )}
+      <FilterChip
+        label="Unread"
+        active={active === "unread"}
+        badge={unreadCount > 0 ? String(unreadCount) : undefined}
+        onClick={() => setFilter("unread")}
+        testId="filter-unread"
+      />
       <FilterChip
         label="Unknown"
         active={active === "unknown"}

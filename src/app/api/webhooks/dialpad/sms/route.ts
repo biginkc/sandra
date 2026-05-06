@@ -395,6 +395,7 @@ export async function POST(request: Request) {
           await dispatchOwnerMessageAdded(supabase, {
             propertyId,
             adminUserIds,
+            messageBody: ev.body,
           });
         } catch (e) {
           // Notifications are best-effort — never fail the webhook.

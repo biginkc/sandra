@@ -46,4 +46,6 @@ export type FormatPayload = {
   /** For skip_trace_requested: who asked + how many properties. */
   requesterEmail?: string | null;
   propertyCount?: number;
+  /** For owner_message_added: the inbound SMS body to preview. */
+  messageBody?: string | null;
 };

@@ -38,7 +38,7 @@ type Props = {
   queueStats: QueueStats;
 };
 
-const THREAD_FILTERS = new Set<InboxFilter>(["all", "mine", "unassigned"]);
+const THREAD_FILTERS = new Set<InboxFilter>(["all", "mine", "unassigned", "unread"]);
 
 export function CockpitView({
   activeTab,
@@ -104,6 +104,7 @@ export function CockpitView({
             <InboxFilters
               active={filter}
               unknownCount={unknownActiveCount}
+              unreadCount={threads.filter((t) => t.unreadCount > 0).length}
               showAssignmentChips={currentUserId !== null}
             />
 

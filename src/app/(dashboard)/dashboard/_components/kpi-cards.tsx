@@ -156,7 +156,7 @@ export function KpiRowTwo({ summary }: Props) {
       </Link>
 
       <Link
-        href="/leads?skip_traced=false"
+        href="/properties"
         className="border-border bg-card hover:border-foreground/30 group rounded-2xl border px-6 py-5 transition-colors"
       >
         <div className="text-muted-foreground text-[11px] font-bold tracking-widest uppercase">

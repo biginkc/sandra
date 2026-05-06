@@ -74,6 +74,7 @@ export async function dispatchOwnerMessageAdded(
   params: {
     propertyId: string;
     adminUserIds: readonly string[];
+    messageBody?: string | null;
   },
 ): Promise<{ inserted: number }> {
   const { data: property, error } = await supabase
@@ -93,7 +94,7 @@ export async function dispatchOwnerMessageAdded(
     eventType: "owner_message_added",
     entityType: "property",
     entityId: property.id,
-    payload: { propertyAddress: property.address },
+    payload: { propertyAddress: property.address, messageBody: params.messageBody },
     recipients,
   });
 }
