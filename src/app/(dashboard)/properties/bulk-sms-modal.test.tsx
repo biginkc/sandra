@@ -70,13 +70,20 @@ beforeEach(() => {
 });
 
 describe("<BulkSmsModal /> pacing + skip-contacted (260504-tgq)", () => {
-  it("Pacing input defaults to 18 with seconds unit", async () => {
+  // 260506-m3a: presets replace the always-visible pace inputs. Custom
+  // mode preserves the raw inputs, so each test that touches them now
+  // selects Custom first.
+
+  it("Custom mode pacing input defaults to 18 with seconds unit", async () => {
+    const user = userEvent.setup();
     renderModal(["p1"]);
 
     // Wait for the open-time effects to settle (categories + count fetch).
     await waitFor(() =>
       expect(listSmsTemplateCategories).toHaveBeenCalled(),
     );
+
+    await user.click(screen.getByRole("radio", { name: /Custom/i }));
 
     const paceInput = screen.getByLabelText(/^Pacing$/i) as HTMLInputElement;
     expect(paceInput.value).toBe("18");
@@ -98,6 +105,8 @@ describe("<BulkSmsModal /> pacing + skip-contacted (260504-tgq)", () => {
     await waitFor(() =>
       expect(listSmsTemplateCategories).toHaveBeenCalled(),
     );
+
+    await user.click(screen.getByRole("radio", { name: /Custom/i }));
 
     const paceInput = screen.getByLabelText(/^Pacing$/i);
     const paceUnit = screen.getByLabelText(/Pacing unit/i);
@@ -123,6 +132,8 @@ describe("<BulkSmsModal /> pacing + skip-contacted (260504-tgq)", () => {
       expect(listSmsTemplateCategories).toHaveBeenCalled(),
     );
 
+    await user.click(screen.getByRole("radio", { name: /Custom/i }));
+
     const paceInput = screen.getByLabelText(/^Pacing$/i);
     await user.clear(paceInput);
     await user.type(paceInput, "5");
@@ -145,6 +156,8 @@ describe("<BulkSmsModal /> pacing + skip-contacted (260504-tgq)", () => {
     await waitFor(() =>
       expect(listSmsTemplateCategories).toHaveBeenCalled(),
     );
+
+    await user.click(screen.getByRole("radio", { name: /Custom/i }));
 
     const paceInput = screen.getByLabelText(/^Pacing$/i);
     const paceUnit = screen.getByLabelText(/Pacing unit/i);
@@ -221,6 +234,8 @@ describe("<BulkSmsModal /> pacing + skip-contacted (260504-tgq)", () => {
     );
     await waitFor(() => expect(countAlreadyContacted).toHaveBeenCalled());
 
+    await user.click(screen.getByRole("radio", { name: /Custom/i }));
+
     const paceInput = screen.getByLabelText(/^Pacing$/i);
     await user.clear(paceInput);
     await user.type(paceInput, "30");
@@ -237,35 +252,5 @@ describe("<BulkSmsModal /> pacing + skip-contacted (260504-tgq)", () => {
     expect(opts.templateCategory).toBe("Opener - Homeowner");
   });
 
-  it("Helper text reflects current resolved pace seconds (in-range values only; out-of-range swaps to inline error)", async () => {
-    const user = userEvent.setup();
-    renderModal(["p1"]);
-    await waitFor(() =>
-      expect(listSmsTemplateCategories).toHaveBeenCalled(),
-    );
-
-    // Default 18 seconds → "18-second intervals"
-    expect(
-      screen.getByText(/Messages release at 18-second intervals\./i),
-    ).toBeInTheDocument();
-
-    const paceInput = screen.getByLabelText(/^Pacing$/i);
-    await user.clear(paceInput);
-    await user.type(paceInput, "12");
-
-    // Still in-range — helper text reflects new value.
-    expect(
-      await screen.findByText(/Messages release at 12-second intervals\./i),
-    ).toBeInTheDocument();
-
-    const paceUnit = screen.getByLabelText(/Pacing unit/i);
-    await user.clear(paceInput);
-    await user.type(paceInput, "5");
-    await user.selectOptions(paceUnit, "minutes");
-
-    // 5 minutes → 300 seconds → "300-second intervals"
-    expect(
-      await screen.findByText(/Messages release at 300-second intervals\./i),
-    ).toBeInTheDocument();
-  });
+  // Removed in 260506-m3a — drain estimate replaces the per-second helper text.
 });
