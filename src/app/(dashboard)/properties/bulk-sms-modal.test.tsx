@@ -254,3 +254,129 @@ describe("<BulkSmsModal /> pacing + skip-contacted (260504-tgq)", () => {
 
   // Removed in 260506-m3a — drain estimate replaces the per-second helper text.
 });
+
+describe("<BulkSmsModal /> presets + drain estimate (260506-m3a)", () => {
+  it("renders 4 preset radios with Steady checked by default", async () => {
+    renderModal(["p1"]);
+    await waitFor(() => expect(listSmsTemplateCategories).toHaveBeenCalled());
+
+    const steady = screen.getByRole("radio", {
+      name: /Steady/i,
+    }) as HTMLInputElement;
+    const conservative = screen.getByRole("radio", {
+      name: /Conservative/i,
+    }) as HTMLInputElement;
+    const push = screen.getByRole("radio", {
+      name: /Push/i,
+    }) as HTMLInputElement;
+    const custom = screen.getByRole("radio", {
+      name: /Custom/i,
+    }) as HTMLInputElement;
+    expect(steady.checked).toBe(true);
+    expect(conservative.checked).toBe(false);
+    expect(push.checked).toBe(false);
+    expect(custom.checked).toBe(false);
+  });
+
+  it("Push preset shows the 'short-burst sprint' tagline", async () => {
+    renderModal(["p1"]);
+    await waitFor(() => expect(listSmsTemplateCategories).toHaveBeenCalled());
+    expect(
+      screen.getByText(/short-burst sprint, not for sustained use/i),
+    ).toBeInTheDocument();
+  });
+
+  it("switching from Steady → Conservative updates the drain estimate", async () => {
+    const user = userEvent.setup();
+    // 500 properties: Steady (cap 1000) drains in one day; Conservative (cap 250) splits over 2 days.
+    const ids = Array.from({ length: 500 }, (_, i) => `p${i + 1}`);
+    renderModal(ids);
+    await waitFor(() => expect(listSmsTemplateCategories).toHaveBeenCalled());
+
+    const drainBefore = screen.getByTestId("drain-estimate").textContent ?? "";
+    expect(drainBefore).toMatch(/500/);
+
+    await user.click(screen.getByRole("radio", { name: /Conservative/i }));
+    const drainAfter = screen.getByTestId("drain-estimate").textContent ?? "";
+    // 500 with cap 250 → "Today 250 · Tomorrow 250" (or similar split)
+    expect(drainAfter).toMatch(/250/);
+    expect(drainAfter).not.toBe(drainBefore);
+  });
+
+  it("Custom mode reveals raw pace inputs AND a Daily cap input; other presets hide them", async () => {
+    const user = userEvent.setup();
+    renderModal(["p1"]);
+    await waitFor(() => expect(listSmsTemplateCategories).toHaveBeenCalled());
+
+    // Steady default — neither raw input is visible. Use exact-match
+    // anchored regexes so we don't accidentally pick up the "Set your
+    // own pace and daily cap." preset tagline that wraps the Custom
+    // radio's own <label>.
+    expect(screen.queryByLabelText(/^Pacing$/i)).toBeNull();
+    expect(screen.queryByLabelText(/^Daily cap$/i)).toBeNull();
+
+    await user.click(screen.getByRole("radio", { name: /Custom/i }));
+
+    expect(screen.getByLabelText(/^Pacing$/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/Pacing unit/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/^Daily cap$/i)).toBeInTheDocument();
+  });
+
+  it("Submit forwards paceSeconds + dailyCap + jitterPct=0.20 from the active preset", async () => {
+    const user = userEvent.setup();
+    bulkQueueSms.mockResolvedValue({
+      ok: true,
+      data: { succeeded: 1, skipped: 0, failed: [] },
+    });
+    renderModal(["p1"]);
+    await waitFor(() => expect(listSmsTemplateCategories).toHaveBeenCalled());
+
+    // Default = Steady → 8s pace, 1000 cap, 0.20 jitter
+    await user.click(screen.getByRole("button", { name: /Queue 1 message/i }));
+    await waitFor(() => expect(bulkQueueSms).toHaveBeenCalled());
+    const [, opts] = bulkQueueSms.mock.calls[0];
+    expect(opts.paceSeconds).toBe(8);
+    expect(opts.dailyCap).toBe(1000);
+    expect(opts.jitterPct).toBeCloseTo(0.2, 5);
+  });
+
+  it("Push preset submits paceSeconds=4, dailyCap=1800", async () => {
+    const user = userEvent.setup();
+    bulkQueueSms.mockResolvedValue({
+      ok: true,
+      data: { succeeded: 1, skipped: 0, failed: [] },
+    });
+    renderModal(["p1"]);
+    await waitFor(() => expect(listSmsTemplateCategories).toHaveBeenCalled());
+
+    await user.click(screen.getByRole("radio", { name: /Push/i }));
+    await user.click(screen.getByRole("button", { name: /Queue 1 message/i }));
+
+    await waitFor(() => expect(bulkQueueSms).toHaveBeenCalled());
+    const [, opts] = bulkQueueSms.mock.calls[0];
+    expect(opts.paceSeconds).toBe(4);
+    expect(opts.dailyCap).toBe(1800);
+  });
+
+  it("Custom mode with no daily-cap input → opts.dailyCap is undefined", async () => {
+    const user = userEvent.setup();
+    bulkQueueSms.mockResolvedValue({
+      ok: true,
+      data: { succeeded: 1, skipped: 0, failed: [] },
+    });
+    renderModal(["p1"]);
+    await waitFor(() => expect(listSmsTemplateCategories).toHaveBeenCalled());
+
+    await user.click(screen.getByRole("radio", { name: /Custom/i }));
+    // Leave daily-cap blank, set pace to 30s
+    const paceInput = screen.getByLabelText(/^Pacing$/i);
+    await user.clear(paceInput);
+    await user.type(paceInput, "30");
+
+    await user.click(screen.getByRole("button", { name: /Queue 1 message/i }));
+    await waitFor(() => expect(bulkQueueSms).toHaveBeenCalled());
+    const [, opts] = bulkQueueSms.mock.calls[0];
+    expect(opts.paceSeconds).toBe(30);
+    expect(opts.dailyCap).toBeUndefined();
+  });
+});
