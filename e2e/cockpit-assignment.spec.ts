@@ -59,9 +59,15 @@ async function seedAssignedThread(
   return { contactId: contact.id, propertyId: prop.id };
 }
 
-test("Each assigned thread row shows assignee initials avatar", async ({
+test("Each assigned thread row tags itself with the viewer's assignment state", async ({
   page,
 }) => {
+  // Was previously asserted on a per-row "assignee initials avatar"
+  // shown next to the contact's name. The thread row now uses CONTACT
+  // initials in that slot per the messages-cockpit Stitch design;
+  // assignment visibility lives in the detail panel ("Assigned: <name>")
+  // and on the row button as a data-attribute that the test suite + CSS
+  // can key off.
   const admin = adminClient();
   await resetTenantTables(admin);
   const claudeId = await ensureTestUser(admin);
@@ -73,9 +79,9 @@ test("Each assigned thread row shows assignee initials avatar", async ({
   });
 
   await page.goto("/messages");
-  const avatar = page.getByTestId(`inbox-thread-${mine.contactId}-assignee`);
-  await expect(avatar).toBeVisible();
-  await expect(avatar).toHaveAttribute("data-assignee-mine", "true");
+  const row = page.getByTestId(`inbox-thread-${mine.contactId}`);
+  await expect(row).toBeVisible();
+  await expect(row).toHaveAttribute("data-assignee-mine", "true");
 });
 
 test('Side panel shows "Assign to me" on an unassigned thread; clicking it assigns', async ({
