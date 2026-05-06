@@ -1,40 +1,58 @@
 {
   "version": "1.0",
-  "timestamp": "2026-05-05T19:48:04Z",
-  "phase": "02",
-  "phase_name": "market-vocabulary-refactor",
-  "phase_dir": ".planning/phases/02-market-vocabulary-refactor",
-  "plan": 5,
-  "task": 0,
-  "total_tasks": 3,
+  "timestamp": "2026-05-06T02:19:03.705Z",
+  "phase": null,
+  "phase_name": null,
+  "phase_dir": null,
+  "plan": null,
+  "task": null,
+  "total_tasks": null,
   "status": "paused",
+  "context": "milestone-init-pending",
+  "milestone": "v2.1",
+  "milestone_name": "feedback-d-followup",
   "completed_tasks": [
-    {"id": 1, "name": "02-01: Schema prereq migration (043)", "status": "done", "commit": "dcc5e22"},
-    {"id": 2, "name": "02-02: Seed 21 counties (044)", "status": "done", "commit": "02716f2"},
-    {"id": 3, "name": "02-03: Eliminate KNOWN_MARKETS/WizardMarket", "status": "done", "commit": "41e1c1f"},
-    {"id": 4, "name": "02-04: Backfill properties.county_id (046)", "status": "done", "commit": "d404408"},
-    {"id": 5, "name": "Session repair: fips_codes seed + backfill fix (047)", "status": "done", "commit": "bb179d4"}
+    {"id": 1, "name": "Review backlog (empty)", "status": "done"},
+    {"id": 2, "name": "Read Feedback D + verify shipped items", "status": "done"},
+    {"id": 3, "name": "Design v2.1 scope (6 items, 3 phases)", "status": "done"},
+    {"id": 4, "name": "/gsd-new-milestone plan approved", "status": "done"}
   ],
   "remaining_tasks": [
-    {"id": 1, "name": "Task 1: Update filter.test.ts fixtures + add 046 integration test", "status": "not_started"},
-    {"id": 2, "name": "Task 2: Add 2 Playwright specs (wizard county dropdown + properties market filter)", "status": "not_started"},
-    {"id": 3, "name": "Task 3: Human checkpoint — verify 043-047 on prod+test, phase sign-off", "status": "not_started"}
+    {"id": 5, "name": "Execute /gsd-new-milestone scaffold", "status": "not_started"},
+    {"id": 6, "name": "Update PROJECT.md with v2.1 milestone block", "status": "not_started"},
+    {"id": 7, "name": "Reset STATE.md via milestone-switch", "status": "not_started"},
+    {"id": 8, "name": "Write REQUIREMENTS.md (8 REQ-IDs)", "status": "not_started"},
+    {"id": 9, "name": "Spawn gsd-roadmapper → ROADMAP.md (phases 03-05)", "status": "not_started"},
+    {"id": 10, "name": "Commit all planning artifacts", "status": "not_started"}
   ],
   "blockers": [],
-  "human_actions_pending": [
+  "human_actions_pending": [],
+  "decisions": [
     {
-      "action": "Phase 02 sign-off checkpoint",
-      "context": "After Tasks 1+2 complete, Task 3 is a blocking human checkpoint: verify schema_migrations on prod+test has 043-047, run manual smoke on /import + /properties dropdowns, then reply 'approved'",
-      "blocking": true
+      "decision": "v2.1 scope: 3 prospect filters + lists column, 3 dashboard items, 1 messages filter",
+      "rationale": "Sourced from Feedback D (revised) + 3 filter gaps from original Feedback D that never shipped",
+      "phase": "planning"
+    },
+    {
+      "decision": "Stack-depth filter shape: dropdown (2+ / 3+ / 4+ lists)",
+      "rationale": "Use case is stacked motivations — Jarrad: 'list stacking finder, finding properties that carry multiple motivations'",
+      "phase": "planning"
+    },
+    {
+      "decision": "Skip research — no new domain",
+      "rationale": "All 3 surfaces (properties, dashboard, messages) already exist; purely extending",
+      "phase": "planning"
+    },
+    {
+      "decision": "Phase numbering continues from v2.0 — start at 03",
+      "rationale": "No --reset-phase-numbers flag; standard GSD convention",
+      "phase": "planning"
     }
   ],
-  "decisions": [
-    {"decision": "Backfill migration renumbered from 045 to 046", "rationale": "045 was taken by 045_outreach_dispo.sql which merged first via PR #105", "phase": "02"},
-    {"decision": "Migration 047 seeds fips_codes + fixes counties.fips_code + re-runs backfill", "rationale": "fips_codes reference table was empty since day 1 (created in 001_initial.sql, never seeded); 044 subqueries returned null; 046 touched 0 properties", "phase": "02"},
-    {"decision": "db-migrate.yml updated with --include-all flag", "rationale": "Supabase CLI refuses out-of-order migration inserts without this flag; needed when applying 043/044 after 045 was already applied", "phase": "02"},
-    {"decision": "1,437 legacy 'Kansas City' properties intentionally left alone", "rationale": "D-05 + D-09: no synthetic Kansas City county row; these resolve on next CASS verify", "phase": "02"}
+  "uncommitted_files": [
+    ".planning/.continue-here.md",
+    ".planning/HANDOFF.json"
   ],
-  "uncommitted_files": [],
-  "next_action": "Run /gsd-execute-phase 02 on main branch. Wave 4 (02-05) has 3 tasks: (1) update filter.test.ts fixtures + add 046 backfill integration test, (2) add 2 Playwright specs for wizard county dropdown and properties market filter pill, (3) human checkpoint for schema verification and phase sign-off.",
-  "context_notes": "All Waves 1-4 code is on main. Both prod and test DBs are fully in sync with migrations 043-047 applied. 1,096 properties have county_id set; 1,437 are intentional no-ops. The 02-05 plan already updated to reference 046 (not 045) for the integration test. The phase is 94% done — Wave 4 is purely verification/testing, no new schema changes."
+  "next_action": "Run /gsd-new-milestone — scope is fully decided, skip research, version v2.1, name feedback-d-followup, phases 03-05",
+  "context_notes": "Interrupted mid-execution of /gsd-new-milestone after plan approval. No GSD scaffold files written yet. Resume is clean — just run the command with the scope from .continue-here.md decisions_made section."
 }
