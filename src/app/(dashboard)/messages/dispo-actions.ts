@@ -3,8 +3,11 @@
 import { revalidatePath } from "next/cache";
 
 import { recordConsentEvent } from "@/lib/messaging/consent";
+import { reportError } from "@/lib/errors/report";
+import { dispatchTaskAssigned } from "@/lib/notifications/dispatch";
 import { pauseContactEnrollments } from "@/lib/sequences/enrollment";
 import { createClient } from "@/lib/supabase/server";
+import { createTask, dispoToTaskType } from "@/lib/tasks";
 
 export type OutreachDispo =
   | "wrong_number"
@@ -45,6 +48,9 @@ export async function setOutreachDispo(
   propertyId: string,
   dispo: OutreachDispo,
   followUpAt?: string | null,
+  /** Required only for REQUIRES_FOLLOW_UP dispos — the user the follow-up
+   *  task is assigned to. Defaults to the acting user when omitted. */
+  assigneeId?: string | null,
 ): Promise<SetDispoResult> {
   if (!VALID_DISPOS.has(dispo)) {
     return { ok: false, error: `Unknown dispo: ${dispo}` };
@@ -54,10 +60,16 @@ export async function setOutreachDispo(
   }
 
   const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) {
+    return { ok: false, error: "Not signed in" };
+  }
 
   const { data: prop, error: propErr } = await supabase
     .from("properties")
-    .select("id, homeowner_contact_id")
+    .select("id, org_id, address, homeowner_contact_id")
     .eq("id", propertyId)
     .maybeSingle();
 
@@ -76,6 +88,48 @@ export async function setOutreachDispo(
 
   if (updateErr) {
     return { ok: false, error: updateErr.message };
+  }
+
+  // Follow-up dispos create a task row. follow_up_at on properties stays
+  // for one release as a denormalized convenience for the UI; the task
+  // row is the new source of truth (read by the dashboard panel).
+  if (REQUIRES_FOLLOW_UP.has(dispo) && followUpAt) {
+    const taskType = dispoToTaskType(dispo as "nurture" | "callback_requested");
+    const resolvedAssignee = assigneeId ?? user.id;
+    const taskTitle =
+      taskType === "callback"
+        ? `Callback ${prop.address}`
+        : `Follow up on ${prop.address}`;
+
+    const taskResult = await createTask(supabase, {
+      orgId: prop.org_id,
+      assigneeId: resolvedAssignee,
+      relatedPropertyId: prop.id,
+      type: taskType,
+      title: taskTitle,
+      dueAt: followUpAt,
+      createdBy: user.id,
+    });
+
+    if (!taskResult.ok) {
+      // Don't fail the dispo write — the dispo and follow_up_at are
+      // already persisted. Log so the gap is visible.
+      reportError(new Error(taskResult.error.message), {
+        tags: { surface: "dispo_create_task" },
+        extra: { propertyId, dispo, taskCode: taskResult.error.code },
+      });
+    } else if (resolvedAssignee !== user.id) {
+      // Notify the assignee — never notify yourself for self-assigned tasks.
+      await dispatchTaskAssigned(supabase, {
+        taskId: taskResult.data.id,
+        orgId: prop.org_id,
+        assigneeId: resolvedAssignee,
+        taskTitle,
+        taskType,
+        dueAt: followUpAt,
+        propertyAddress: prop.address,
+      });
+    }
   }
 
   // TCPA suppression — fire consent event + flip boolean + pause enrollments.
