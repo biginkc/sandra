@@ -1,0 +1,268 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+import {
+  completeTask,
+  createTask,
+  dispoToTaskType,
+  reassignTask,
+  snoozeTask,
+} from "./index";
+
+type Response = { data: unknown; error: { message: string } | null };
+
+type CallRecord = {
+  table: string;
+  op: "select" | "insert" | "update";
+  insertPayload?: unknown;
+  updatePayload?: unknown;
+  filters: Array<{ op: string; args: unknown[] }>;
+};
+
+let responseQueue: Response[] = [];
+let calls: CallRecord[] = [];
+
+function makeBuilder(record: CallRecord): Record<string, unknown> {
+  const builder: Record<string, unknown> = {};
+
+  const thenable = {
+    then(
+      onFulfilled: (v: Response) => unknown,
+      onRejected?: (r: unknown) => unknown,
+    ) {
+      const resp = responseQueue.shift();
+      if (!resp) {
+        return Promise.reject(
+          new Error(
+            `tasks.test: no mock response queued for ${record.table}.${record.op}`,
+          ),
+        ).then(onFulfilled, onRejected);
+      }
+      return Promise.resolve(resp).then(onFulfilled, onRejected);
+    },
+  };
+
+  builder.select = () => builder;
+  builder.insert = (payload: unknown) => {
+    record.insertPayload = payload;
+    record.op = "insert";
+    return builder;
+  };
+  builder.update = (payload: unknown) => {
+    record.updatePayload = payload;
+    record.op = "update";
+    return builder;
+  };
+  builder.eq = (...args: unknown[]) => {
+    record.filters.push({ op: "eq", args });
+    return builder;
+  };
+  builder.single = () => thenable;
+  builder.maybeSingle = () => thenable;
+  builder.then = thenable.then;
+
+  return builder;
+}
+
+function makeSupabase() {
+  return {
+    from: vi.fn((table: string) => {
+      const record: CallRecord = { table, op: "select", filters: [] };
+      calls.push(record);
+      return makeBuilder(record);
+    }),
+  };
+}
+
+beforeEach(() => {
+  responseQueue = [];
+  calls = [];
+});
+
+afterEach(() => {
+  vi.clearAllMocks();
+});
+
+describe("dispoToTaskType", () => {
+  it("maps callback_requested → 'callback'", () => {
+    expect(dispoToTaskType("callback_requested")).toBe("callback");
+  });
+
+  it("maps nurture → 'follow_up'", () => {
+    expect(dispoToTaskType("nurture")).toBe("follow_up");
+  });
+});
+
+describe("createTask", () => {
+  it("inserts the row with all input fields and returns ok(task)", async () => {
+    const fakeRow = { id: "task-1", title: "test", status: "open" };
+    responseQueue = [{ data: fakeRow, error: null }];
+
+    const result = await createTask(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      makeSupabase() as any,
+      {
+        orgId: "org-1",
+        assigneeId: "user-2",
+        relatedPropertyId: "prop-3",
+        type: "follow_up",
+        title: "Follow up on 123 Main",
+        dueAt: "2026-05-08T14:00:00Z",
+        createdBy: "user-1",
+      },
+    );
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.data).toEqual(fakeRow);
+
+    const insert = calls.find(
+      (c) => c.table === "tasks" && c.op === "insert",
+    );
+    expect(insert).toBeDefined();
+    const payload = insert!.insertPayload as Record<string, unknown>;
+    expect(payload.org_id).toBe("org-1");
+    expect(payload.assignee_id).toBe("user-2");
+    expect(payload.related_property_id).toBe("prop-3");
+    expect(payload.type).toBe("follow_up");
+    expect(payload.title).toBe("Follow up on 123 Main");
+    expect(payload.due_at).toBe("2026-05-08T14:00:00Z");
+    expect(payload.created_by).toBe("user-1");
+  });
+
+  it("returns err with TASK_CREATE_FAILED when supabase errors", async () => {
+    responseQueue = [{ data: null, error: { message: "rls denied" } }];
+
+    const result = await createTask(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      makeSupabase() as any,
+      {
+        orgId: "org-1",
+        assigneeId: "user-2",
+        relatedPropertyId: "prop-3",
+        type: "callback",
+        title: "Call back",
+        dueAt: "2026-05-08T14:00:00Z",
+        createdBy: "user-1",
+      },
+    );
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe("TASK_CREATE_FAILED");
+    expect(result.error.message).toBe("rls denied");
+  });
+});
+
+describe("completeTask", () => {
+  it("flips status to completed and stamps completed_at + completed_by", async () => {
+    const fakeRow = {
+      id: "task-1",
+      status: "completed",
+      completed_at: "2026-05-06T18:00:00Z",
+      completed_by: "user-1",
+    };
+    responseQueue = [{ data: fakeRow, error: null }];
+
+    const result = await completeTask(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      makeSupabase() as any,
+      "task-1",
+      "user-1",
+    );
+
+    expect(result.ok).toBe(true);
+    const update = calls.find(
+      (c) => c.table === "tasks" && c.op === "update",
+    );
+    expect(update).toBeDefined();
+    const payload = update!.updatePayload as Record<string, unknown>;
+    expect(payload.status).toBe("completed");
+    expect(payload.completed_by).toBe("user-1");
+    expect(typeof payload.completed_at).toBe("string");
+    expect(typeof payload.updated_at).toBe("string");
+
+    expect(update!.filters).toEqual([{ op: "eq", args: ["id", "task-1"] }]);
+  });
+
+  it("returns err when row is missing", async () => {
+    responseQueue = [{ data: null, error: { message: "no row" } }];
+
+    const result = await completeTask(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      makeSupabase() as any,
+      "missing",
+      "user-1",
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe("TASK_COMPLETE_FAILED");
+  });
+});
+
+describe("snoozeTask", () => {
+  it("bumps due_at and snoozed_until forward and leaves status unchanged in payload", async () => {
+    responseQueue = [
+      { data: { id: "task-1", due_at: "2026-05-09T14:00:00Z" }, error: null },
+    ];
+
+    const result = await snoozeTask(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      makeSupabase() as any,
+      "task-1",
+      "2026-05-09T14:00:00Z",
+    );
+
+    expect(result.ok).toBe(true);
+    const update = calls.find(
+      (c) => c.table === "tasks" && c.op === "update",
+    );
+    expect(update).toBeDefined();
+    const payload = update!.updatePayload as Record<string, unknown>;
+    expect(payload.due_at).toBe("2026-05-09T14:00:00Z");
+    expect(payload.snoozed_until).toBe("2026-05-09T14:00:00Z");
+    expect(payload.status).toBeUndefined();
+  });
+});
+
+describe("reassignTask", () => {
+  it("updates assignee_id and bumps updated_at", async () => {
+    responseQueue = [
+      {
+        data: { id: "task-1", assignee_id: "user-2" },
+        error: null,
+      },
+    ];
+
+    const result = await reassignTask(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      makeSupabase() as any,
+      "task-1",
+      "user-2",
+    );
+
+    expect(result.ok).toBe(true);
+    const update = calls.find(
+      (c) => c.table === "tasks" && c.op === "update",
+    );
+    expect(update).toBeDefined();
+    const payload = update!.updatePayload as Record<string, unknown>;
+    expect(payload.assignee_id).toBe("user-2");
+    expect(typeof payload.updated_at).toBe("string");
+  });
+
+  it("returns err when supabase fails", async () => {
+    responseQueue = [
+      { data: null, error: { message: "fk violation" } },
+    ];
+
+    const result = await reassignTask(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      makeSupabase() as any,
+      "task-1",
+      "user-bogus",
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe("TASK_REASSIGN_FAILED");
+  });
+});
