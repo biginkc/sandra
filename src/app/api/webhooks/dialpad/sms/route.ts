@@ -382,16 +382,24 @@ export async function POST(request: Request) {
 
         if (cur?.status === "prospect" && ev.body) {
           let shouldQualify = false;
-          try {
-            const intent = await classifyReplyIntent(ev.body, new Anthropic());
-            shouldQualify = intent === "positive";
-          } catch (e) {
-            // Classification error — fail closed. Property stays a prospect;
-            // VA can promote manually if they judge the reply as a real lead.
-            reportError(e, {
-              tags: { surface: "dialpad_webhook_classify_intent" },
-              extra: { propertyId, externalId: ev.externalId },
-            });
+          // SKIP_INTENT_GATE bypass: e2e Playwright runs without an
+          // Anthropic API key. Set in .github/workflows/e2e.yml so the
+          // downstream qualify path is exercised in CI; the classifier
+          // itself is unit-tested directly in classify-reply-intent.test.ts.
+          if (process.env.SKIP_INTENT_GATE === "1") {
+            shouldQualify = true;
+          } else {
+            try {
+              const intent = await classifyReplyIntent(ev.body, new Anthropic());
+              shouldQualify = intent === "positive";
+            } catch (e) {
+              // Classification error — fail closed. Property stays a prospect;
+              // VA can promote manually if they judge the reply as a real lead.
+              reportError(e, {
+                tags: { surface: "dialpad_webhook_classify_intent" },
+                extra: { propertyId, externalId: ev.externalId },
+              });
+            }
           }
 
           if (shouldQualify) {

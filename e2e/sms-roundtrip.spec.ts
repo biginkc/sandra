@@ -12,6 +12,12 @@ import { adminClient, resetTenantTables, seedProspects } from "./fixtures";
  * Exercises the full path: external event → webhook handler → DB →
  * server-rendered lead detail. Integration tests cover the handler
  * alone; this one adds browser + auth + routing on top.
+ *
+ * The route gates auto-qualify on a Haiku intent classifier (production)
+ * but the e2e workflow sets SKIP_INTENT_GATE=1 — there's no Anthropic
+ * key in CI, and the classifier itself is unit-tested directly in
+ * src/lib/leads/classify-reply-intent.test.ts. This test verifies the
+ * downstream qualify path beyond the gate.
  */
 test("inbound webhook lands in thread and auto-qualifies the prospect", async ({
   page,
