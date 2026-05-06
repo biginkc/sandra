@@ -6,6 +6,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { listAdminUserIds } from "@/lib/auth/admins";
 import { dispatchAiResponse } from "@/lib/ai-responder/dispatch";
 import { reportError } from "@/lib/errors/report";
+import { classifyReplyIntent } from "@/lib/leads/classify-reply-intent";
 import { qualifyProperty } from "@/lib/leads/qualify";
 import { recordConsentEvent } from "@/lib/messaging/consent";
 import { getMessagingProvider } from "@/lib/messaging/registry";
@@ -362,21 +363,38 @@ export async function POST(request: Request) {
         });
       }
 
-      // Auto-qualify: first inbound reply on a prospect promotes it to
-      // new_lead. Idempotent — noop if the property is already past
-      // prospect. Only runs when we resolved a property via the contact's
-      // most-recent outbound thread above.
+      // Auto-qualify: only promote a prospect to new_lead when the reply
+      // shows genuine seller interest. Neutral ("who is this?") and
+      // negative ("not interested") replies leave the property as a
+      // prospect. Falls back to qualifying on classification error so a
+      // real lead is never silently dropped.
       if (propertyId) {
-        const qOutcome = await qualifyProperty(
-          supabase,
-          propertyId,
-          "system:inbound_reply",
-        );
-        if (qOutcome.status === "failed") {
-          reportError(new Error(qOutcome.message), {
-            tags: { surface: "dialpad_webhook_auto_qualify" },
-            extra: { propertyId, externalId: ev.externalId },
-          });
+        let shouldQualify = true;
+        if (ev.body) {
+          try {
+            const intent = await classifyReplyIntent(ev.body, new Anthropic());
+            shouldQualify = intent === "positive";
+          } catch (e) {
+            // Classification error — fail open so genuine leads aren't lost.
+            reportError(e, {
+              tags: { surface: "dialpad_webhook_classify_intent" },
+              extra: { propertyId, externalId: ev.externalId },
+            });
+          }
+        }
+
+        if (shouldQualify) {
+          const qOutcome = await qualifyProperty(
+            supabase,
+            propertyId,
+            "system:inbound_reply",
+          );
+          if (qOutcome.status === "failed") {
+            reportError(new Error(qOutcome.message), {
+              tags: { surface: "dialpad_webhook_auto_qualify" },
+              extra: { propertyId, externalId: ev.externalId },
+            });
+          }
         }
 
         // Fire owner_message_added notification. Assignee wins over
