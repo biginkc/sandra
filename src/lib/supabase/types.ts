@@ -805,6 +805,33 @@ export type Database = {
           },
         ]
       }
+      metric_snapshots: {
+        Row: {
+          id: string
+          metric_key: string
+          numerator: number
+          denominator: number
+          captured_on: string
+          captured_at: string
+        }
+        Insert: {
+          id?: string
+          metric_key: string
+          numerator: number
+          denominator: number
+          captured_on?: string
+          captured_at?: string
+        }
+        Update: {
+          id?: string
+          metric_key?: string
+          numerator?: number
+          denominator?: number
+          captured_on?: string
+          captured_at?: string
+        }
+        Relationships: []
+      }
       notifications: {
         Row: {
           body: string | null
@@ -1758,6 +1785,10 @@ export type Database = {
       }
     }
     Functions: {
+      count_phone_coverage_stats: {
+        Args: never
+        Returns: Array<{ numerator: number; denominator: number }>
+      }
       dashboard_summary: { Args: never; Returns: Json }
       delete_contact: {
         Args: { p_contact_id: string; p_reason: string }

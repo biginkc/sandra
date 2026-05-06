@@ -5,6 +5,10 @@
       "schedule": "0 4 * * *"
     },
     {
+      "path": "/api/cron/phone-coverage-snapshot",
+      "schedule": "0 6 * * *"
+    },
+    {
       "path": "/api/cron/sequence-tick",
       "schedule": "*/5 * * * *"
     },
