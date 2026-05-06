@@ -46,15 +46,20 @@ export type BulkSmsOutcome = {
 };
 
 /**
- * Floor a timestamp to "next 8 AM in America/Los_Angeles". Used by
- * bulkQueueSms's daily-cap rollover so overflow lands at the start of
- * the recipient-local sending window (8 AM PT covers all of Jarrad's
- * markets — KC + TX — without jumping earlier than 10 AM CT).
+ * Anchor a timestamp at "the following PT calendar day's 8 AM, local PT".
+ * Used by bulkQueueSms's daily-cap rollover so overflow lands at the
+ * start of the recipient-local sending window (8 AM PT covers all of
+ * Jarrad's markets — KC + TX — without jumping earlier than 10 AM CT).
  *
- * Acceptable simplification: the floor uses a fixed -08:00 PT offset.
- * During DST (PT = -07:00) the floor lands at 9 AM PT instead of 8 AM,
- * which is still inside the federal 8 AM – 9 PM window and still inside
- * the recipient-local window for KC/TX. The drift is intentional.
+ * Always advances exactly one PT calendar day from the input's PT date,
+ * then anchors at 08:00 PT. Caller passes the current bucket start;
+ * helper returns the next bucket start.
+ *
+ * Acceptable simplification: the anchor uses a fixed -08:00 PT offset
+ * (08:00 PT == 16:00 UTC). During DST (PT = -07:00) the anchor lands at
+ * 9 AM PT instead of 8 AM, which is still inside the federal 8 AM – 9 PM
+ * window and still inside the recipient-local window for KC/TX. The
+ * drift is intentional.
  */
 function nextDayEightAmPT(afterMs: number): number {
   const fmt = new Intl.DateTimeFormat("en-US", {
@@ -62,22 +67,15 @@ function nextDayEightAmPT(afterMs: number): number {
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hour12: false,
   });
   const parts = fmt.formatToParts(new Date(afterMs));
   const get = (t: string) => parts.find((p) => p.type === t)!.value;
   const ptYear = Number(get("year"));
   const ptMonth = Number(get("month"));
   const ptDay = Number(get("day"));
-  const ptHour = Number(get("hour"));
-  // Tomorrow 08:00 PT == 16:00 UTC at -08:00 offset. If the wall-clock PT
-  // hour is already <8 AM (rare for our caller), still advance one day so
-  // the rollover never lands earlier than the configured anchor.
+  // Next PT calendar day 08:00 PT == 16:00 UTC at -08:00 offset.
   const tomorrow = new Date(
-    Date.UTC(ptYear, ptMonth - 1, ptDay + (ptHour >= 8 ? 1 : 0), 16, 0, 0),
+    Date.UTC(ptYear, ptMonth - 1, ptDay + 1, 16, 0, 0),
   );
   return tomorrow.getTime();
 }
@@ -261,22 +259,27 @@ export async function bulkQueueSms(
 
       // Roll over to next day's 8 AM PT bucket if we've hit the daily cap.
       if (dailyCap !== undefined && dayBucketCount >= dailyCap) {
-        dayBucketStartMs = nextDayEightAmPT(
-          dayBucketStartMs + 24 * 60 * 60 * 1000,
-        );
+        dayBucketStartMs = nextDayEightAmPT(dayBucketStartMs);
         dayBucketCount = 0;
         cumulativeOffsetMs = 0;
       }
-      // First message of each bucket anchors at the bucket start (no
-      // jitter) so scheduled_for is deterministic — easier to test, and
-      // "now" / "next day 8 AM PT" are the natural anchors anyway.
-      const jitter =
-        cumulativeOffsetMs === 0
-          ? 0
-          : (Math.random() * 2 - 1) * paceSeconds * 1000 * jitterPct;
-      const scheduledFor = new Date(
-        dayBucketStartMs + cumulativeOffsetMs + jitter,
-      );
+      // Compute the candidate next-offset so we can write `scheduledFor`,
+      // but only COMMIT the advance (and jitter) on a successful queue.
+      // This way a downstream skip (no_phone, blocked_no_consent re-check)
+      // doesn't burn a slot and stretch the next message's gap past the
+      // ±jitterPct bound.
+      //
+      // The first message of each bucket anchors at the bucket start
+      // exactly (no jitter) so observability is clean and tests are
+      // deterministic; subsequent messages jitter the GAP between
+      // consecutive scheduled_for values within ±jitterPct of pace.
+      let nextOffsetMs = cumulativeOffsetMs;
+      if (dayBucketCount > 0) {
+        const jitterMs =
+          (Math.random() * 2 - 1) * paceSeconds * 1000 * jitterPct;
+        nextOffsetMs = cumulativeOffsetMs + paceSeconds * 1000 + jitterMs;
+      }
+      const scheduledFor = new Date(dayBucketStartMs + nextOffsetMs);
       const outcome = await sendSmsToContact(supabase, {
         contactId: property.homeowner_contact_id,
         propertyId,
@@ -287,7 +290,7 @@ export async function bulkQueueSms(
 
       if (outcome.status === "queued") {
         succeeded++;
-        cumulativeOffsetMs += paceSeconds * 1000;
+        cumulativeOffsetMs = nextOffsetMs;
         dayBucketCount += 1;
       } else if (
         outcome.status === "blocked_no_phone" ||
