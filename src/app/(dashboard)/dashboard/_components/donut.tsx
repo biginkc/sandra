@@ -1,6 +1,8 @@
 type DonutProps = {
-  numerator: number;
-  denominator: number;
+  /** Nullable: the dashboard RPC returns null while metrics are unbacked
+   *  (e.g. before the first cron snapshot, or when a join can't resolve). */
+  numerator: number | null;
+  denominator: number | null;
   size?: number;
   thickness?: number;
 };
@@ -11,12 +13,14 @@ export function Donut({
   size = 160,
   thickness = 18,
 }: DonutProps) {
+  const num = numerator ?? 0;
+  const den = denominator ?? 0;
   const radius = (size - thickness) / 2;
   const circumference = 2 * Math.PI * radius;
-  const ratio = denominator > 0 ? numerator / denominator : 0;
+  const ratio = den > 0 ? num / den : 0;
   const filled = circumference * ratio;
   const empty = circumference - filled;
-  const percent = denominator > 0 ? Math.round(ratio * 100) : null;
+  const percent = den > 0 ? Math.round(ratio * 100) : null;
   const center = size / 2;
 
   return (
@@ -36,7 +40,7 @@ export function Donut({
           stroke="var(--border)"
           strokeWidth={thickness}
         />
-        {denominator > 0 && (
+        {den > 0 && (
           <circle
             cx={center}
             cy={center}
@@ -54,7 +58,7 @@ export function Donut({
           {percent === null ? "—" : `${percent}%`}
         </div>
         <div className="text-muted-foreground text-xs font-medium">
-          {numerator.toLocaleString()} of {denominator.toLocaleString()}
+          {num.toLocaleString()} of {den.toLocaleString()}
         </div>
       </div>
     </div>
