@@ -22,6 +22,10 @@ import { type InboxDetail as InboxDetailData } from "./inbox-detail-data";
 
 type Props = {
   data: InboxDetailData | null;
+  /** True when the URL thread param has changed but the new server data
+   *  hasn't arrived yet — render a skeleton so the user gets immediate
+   *  feedback instead of stale bubbles from the previous selection. */
+  isLoading?: boolean;
   /** auth.users.id → email for the assign control. */
   assigneeEmails: Record<string, string>;
   currentUserId: string | null;
@@ -187,7 +191,12 @@ function DispoBar({
  * ESC closes the panel by clearing ?thread from the URL. Matches the
  * Slack/Linear keyboard convention.
  */
-export function InboxDetail({ data, assigneeEmails, currentUserId }: Props) {
+export function InboxDetail({
+  data,
+  isLoading,
+  assigneeEmails,
+  currentUserId,
+}: Props) {
   const router = useRouter();
   const searchParams = useSearchParams();
 
@@ -208,6 +217,10 @@ export function InboxDetail({ data, assigneeEmails, currentUserId }: Props) {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [data, router, searchParams]);
+
+  if (isLoading) {
+    return <InboxDetailSkeleton />;
+  }
 
   if (!data) {
     return (
@@ -332,6 +345,57 @@ export function InboxDetail({ data, assigneeEmails, currentUserId }: Props) {
           This conversation has no property linked — open a lead to reply.
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * Detail-panel skeleton — shown while the URL thread param has changed
+ * but the new server data hasn't landed yet. Mirrors the rough shape of
+ * the loaded panel (header, message bubbles, dispo bar, composer) so the
+ * transition feels structural rather than a "blank flash". Uses the
+ * Tailwind `animate-pulse` utility for the breathing effect.
+ */
+function InboxDetailSkeleton() {
+  return (
+    <div
+      className="bg-white border border-border rounded-xl flex h-full flex-col overflow-hidden"
+      data-testid="inbox-detail-loading"
+      aria-busy="true"
+      aria-live="polite"
+    >
+      <header className="border-b border-border bg-white flex items-center justify-between gap-3 px-6 py-4">
+        <div className="flex items-center gap-4 min-w-0 flex-1">
+          <div className="h-12 w-12 shrink-0 rounded-full bg-[#f5f5f4] animate-pulse" />
+          <div className="flex flex-col gap-2 min-w-0 flex-1">
+            <div className="h-5 w-44 max-w-full bg-[#f5f5f4] rounded animate-pulse" />
+            <div className="h-3 w-64 max-w-full bg-[#f5f5f4] rounded animate-pulse" />
+          </div>
+        </div>
+        <div className="flex shrink-0 items-center gap-2">
+          <div className="h-9 w-9 rounded-full bg-[#f5f5f4] animate-pulse" />
+          <div className="h-8 w-24 rounded-full bg-[#f5f5f4] animate-pulse" />
+          <div className="h-8 w-24 rounded-full bg-[#f5f5f4] animate-pulse" />
+        </div>
+      </header>
+      <div className="flex-1 overflow-hidden px-6 py-5 bg-[#faf9f8] flex flex-col gap-4">
+        <div className="self-center h-5 w-32 rounded-full bg-[#f5f5f4] animate-pulse" />
+        <div className="self-start h-12 w-3/5 rounded-2xl rounded-tl-none bg-[#f5f5f4] animate-pulse" />
+        <div className="self-end h-16 w-3/5 rounded-2xl rounded-tr-none bg-[#111827]/15 animate-pulse" />
+        <div className="self-start h-10 w-2/5 rounded-2xl rounded-tl-none bg-[#f5f5f4] animate-pulse" />
+        <div className="self-end h-12 w-1/2 rounded-2xl rounded-tr-none bg-[#111827]/15 animate-pulse" />
+      </div>
+      <div className="border-t border-border bg-white flex items-center gap-3 px-6 py-2.5">
+        <div className="h-3 w-12 bg-[#f5f5f4] rounded animate-pulse" />
+        <div className="h-7 w-20 bg-[#f5f5f4] rounded-md animate-pulse" />
+        <div className="h-7 w-24 bg-[#f5f5f4] rounded-md animate-pulse" />
+        <div className="h-7 w-16 bg-[#f5f5f4] rounded-md animate-pulse" />
+        <div className="h-7 w-20 bg-[#f5f5f4] rounded-md animate-pulse" />
+      </div>
+      <div className="border-t border-border bg-white px-6 py-4">
+        <div className="h-24 w-full rounded-xl border border-[#e5e1df] bg-[#fdfcfb] animate-pulse" />
+      </div>
+      <span className="sr-only">Loading conversation…</span>
     </div>
   );
 }

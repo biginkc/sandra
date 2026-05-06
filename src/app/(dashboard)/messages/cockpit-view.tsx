@@ -63,6 +63,15 @@ export function CockpitView({
 
   const showThreadList = THREAD_FILTERS.has(filter);
 
+  // The thread query param updates instantly on click (router.replace),
+  // but threadDetail comes from the next RSC render. While that round-
+  // trip is in flight, urlThread !== threadDetail.contactId. Use that
+  // mismatch as the "loading a thread" signal so the detail panel can
+  // surface a skeleton instead of stale bubbles from the previous click.
+  const urlThread = searchParams.get("thread");
+  const isLoadingThread =
+    urlThread !== null && urlThread !== (threadDetail?.contactId ?? null);
+
   return (
     <Page>
       <PageHeader
@@ -121,11 +130,12 @@ export function CockpitView({
             >
               <InboxThreadList
                 initial={threads}
-                selectedContactId={threadDetail?.contactId ?? null}
+                selectedContactId={urlThread ?? threadDetail?.contactId ?? null}
                 currentUserId={currentUserId}
               />
               <InboxDetail
                 data={threadDetail}
+                isLoading={isLoadingThread}
                 assigneeEmails={assigneeEmails}
                 currentUserId={currentUserId}
               />
