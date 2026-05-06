@@ -4,7 +4,7 @@
 
 - ✅ **v1.x — Foundation** (archived) — see `.planning/milestones/v1.x-*`
 - ✅ **v2.0 — Cross-table UX + market refactor** — Phases 1, 1.5, 2 (shipped 2026-05-06) — see `.planning/milestones/v2.0-ROADMAP.md`
-- 📋 **v2.1 — TBD** (next)
+- 🚧 **v2.1 — Operational Visibility** — Phase 03 (in progress)
 
 ## Phases
 
@@ -22,6 +22,39 @@
 
 </details>
 
-### 📋 v2.1 — TBD (Next)
+### 🚧 v2.1 — Operational Visibility (1 phase)
 
-Run `/gsd-new-milestone` to plan v2.1.
+- [ ] **Phase 03: Operational Visibility Surfaces** — Three small visibility tweaks across `/dashboard`, the notification bell, and `/messages`
+
+## Phase Details
+
+### Phase 03: Operational Visibility Surfaces
+
+**Goal:** Surface the right operational signals at a glance — accurate skip-trace coverage on the dashboard, SMS reply text in notifications, and an unread filter on the messages inbox.
+
+**Depends on:** Nothing (clean start on top of v2.0)
+
+**Requirements:** DASH-01, NOTIF-01, MSG-01
+
+**Success Criteria** (what must be TRUE):
+  1. Dashboard skip-trace coverage widget reports a count and percentage that includes every property regardless of pipeline status (prospects + leads combined), matching the underlying `properties` row count.
+  2. Notification bell items for "New SMS reply" render a truncated preview of the actual reply body beneath the property address, with proper overflow handling.
+  3. The `/messages` inbox exposes an "Unread" filter pill (alongside the existing All / Mine / Unassigned / Unknown / Dismissed pills) that, when active, shows only conversations with at least one unread inbound message.
+  4. The Unread filter round-trips through the URL like the other inbox filters and clears cleanly when toggled off.
+  5. CI is green: typecheck + unit + RTL + Playwright golden paths.
+
+**Plans:** TBD
+
+**UI hint**: yes
+
+---
+
+## Out of Scope (this milestone)
+
+See REQUIREMENTS.md > Out of Scope for the full list and rationale.
+
+## Progress
+
+| Phase | Plans Complete | Status | Completed |
+|-------|----------------|--------|-----------|
+| 03. Operational Visibility Surfaces | 0/0 | Not started | — |
