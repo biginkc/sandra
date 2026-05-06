@@ -15,10 +15,12 @@ export type PageHeaderProps = {
 };
 
 /**
- * Title block used at the top of every dashboard page. Keeps the
- * mockup's spacing/baseline contract in one place: 40px black title,
- * tiny muted breadcrumb above, optional description below, actions
- * floated right at the title's baseline on md+.
+ * Title block used at the top of every dashboard page. Sized per the
+ * messages-cockpit Stitch design — 24px bold h1, short description
+ * directly under, optional breadcrumb above, actions floated right at
+ * the title's baseline on md+. Tighter than the v1 hero-style 40px
+ * title; matches the cockpit-style design language meant to feel dense
+ * and professional.
  */
 export function PageHeader({
   title,
@@ -27,7 +29,7 @@ export function PageHeader({
   actions,
 }: PageHeaderProps) {
   return (
-    <header className="flex flex-col gap-3">
+    <header className="flex flex-col gap-2">
       {breadcrumb && breadcrumb.length > 0 && (
         <nav
           aria-label="Breadcrumb"
@@ -55,23 +57,24 @@ export function PageHeader({
           })}
         </nav>
       )}
-      {/* Title row: title left, actions right, both bottom-aligned. The
-       *  description renders OUTSIDE this row so the actions stay anchored
-       *  to the title's baseline (matches the mockup, where there's no
-       *  description and the buttons sit flush with the h1 bottom). */}
-      <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between md:gap-6">
-        <h1 className="text-[2.5rem] font-extrabold leading-[1.1] tracking-[-0.02em]">
-          {title}
-        </h1>
+      {/* Title row: title+description left, actions right. Description
+       *  sits inside the left column so actions stay glued to the title's
+       *  baseline (per Stitch). */}
+      <div className="flex flex-col gap-2 md:flex-row md:items-start md:justify-between md:gap-6">
+        <div className="flex flex-col gap-1 min-w-0">
+          <h1 className="text-2xl font-bold leading-tight tracking-[-0.02em]">
+            {title}
+          </h1>
+          {description && (
+            <p className="text-muted-foreground max-w-3xl text-sm">
+              {description}
+            </p>
+          )}
+        </div>
         {actions && (
-          <div className="flex items-center gap-3">{actions}</div>
+          <div className="flex shrink-0 items-center gap-3">{actions}</div>
         )}
       </div>
-      {description && (
-        <p className="text-muted-foreground max-w-3xl text-sm">
-          {description}
-        </p>
-      )}
     </header>
   );
 }

@@ -2,8 +2,6 @@
 
 import { useRouter, useSearchParams } from "next/navigation";
 
-import { Button } from "@/components/ui/button";
-
 export type InboxFilter =
   | "all"
   | "mine"
@@ -44,7 +42,7 @@ export function InboxFilters({
   };
 
   return (
-    <div className="flex flex-wrap items-center gap-1" data-testid="inbox-filters">
+    <div className="flex flex-wrap items-center gap-2" data-testid="inbox-filters">
       <FilterChip
         label="All"
         active={active === "all"}
@@ -105,19 +103,27 @@ function FilterChip({
   testId: string;
 }) {
   return (
-    <Button
-      variant={active ? "default" : "outline"}
-      size="sm"
+    <button
+      type="button"
       onClick={onClick}
       data-testid={testId}
       data-active={active || undefined}
+      className={`inline-flex items-center gap-1.5 rounded-full px-4 py-1.5 text-[12px] font-bold transition-colors ${
+        active
+          ? "bg-primary text-primary-foreground"
+          : "border border-[#e5e1df] text-[#78716c] hover:bg-[#f5f5f4] hover:text-[#1c1917]"
+      }`}
     >
       <span>{label}</span>
       {badge ? (
-        <span className="bg-background text-foreground ml-1.5 inline-flex h-4 min-w-4 items-center justify-center rounded-full px-1 text-[10px]">
+        <span
+          className={`font-bold ${
+            active ? "text-primary-foreground" : "text-[#1c1917]"
+          }`}
+        >
           {badge}
         </span>
       ) : null}
-    </Button>
+    </button>
   );
 }

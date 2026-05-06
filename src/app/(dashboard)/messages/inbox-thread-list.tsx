@@ -1,7 +1,7 @@
 "use client";
 
 import { formatDistanceToNow } from "date-fns/formatDistanceToNow";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useRouter } from "next/navigation";
 import { useEffect } from "react";
 
 import { Badge } from "@/components/ui/badge";
@@ -11,9 +11,15 @@ import { createClient } from "@/lib/supabase/client";
 type Props = {
   initial: Thread[];
   selectedContactId: string | null;
-  /** auth.users.id → email for assignee initials. */
-  assigneeEmails: Record<string, string>;
+  /** Used to mark threads assigned to the viewer with a data-attribute
+   *  for tests + styling. The avatar circle itself shows contact
+   *  initials regardless of assignment — assignment lives in the detail
+   *  panel header. */
   currentUserId: string | null;
+  /** Selection is owned by CockpitView so it can wrap the URL update +
+   *  router.refresh() in useTransition; that's how the detail panel
+   *  knows when to render a skeleton. The list just emits clicks. */
+  onSelectThread: (contactId: string) => void;
 };
 
 /**
@@ -33,11 +39,10 @@ type Props = {
 export function InboxThreadList({
   initial,
   selectedContactId,
-  assigneeEmails,
   currentUserId,
+  onSelectThread,
 }: Props) {
   const router = useRouter();
-  const searchParams = useSearchParams();
   const threads = initial;
 
   useEffect(() => {
@@ -76,15 +81,6 @@ export function InboxThreadList({
     };
   }, [router]);
 
-  const select = (contactId: string) => {
-    const sp = new URLSearchParams(searchParams.toString());
-    sp.set("thread", contactId);
-    router.replace(`/messages?${sp.toString()}`);
-    // Next 16 caches the RSC payload per route — query-string-only changes
-    // hit the cache and skip the server render. Refresh forces a fetch so
-    // the side-panel data updates when the user picks a different thread.
-    router.refresh();
-  };
 
   if (threads.length === 0) {
     return (
@@ -99,106 +95,119 @@ export function InboxThreadList({
 
   return (
     <div
-      className="border-border rounded-md border divide-y"
+      className="bg-white border border-border rounded-xl overflow-hidden flex flex-col"
       data-testid="inbox-thread-list"
     >
-      {threads.map((t) => {
-        const selected = t.contactId === selectedContactId;
-        const assigneeEmail = t.assigneeId
-          ? assigneeEmails[t.assigneeId]
-          : null;
-        const isMine = t.assigneeId !== null && t.assigneeId === currentUserId;
-        return (
-          <button
-            key={t.contactId}
-            type="button"
-            onClick={() => select(t.contactId)}
-            data-testid={`inbox-thread-${t.contactId}`}
-            data-selected={selected || undefined}
-            data-assignee-id={t.assigneeId ?? undefined}
-            className={`flex w-full flex-col items-start gap-1 p-3 text-left transition-colors ${
-              selected
-                ? "bg-accent text-accent-foreground"
-                : "hover:bg-muted/50"
-            }`}
-          >
-            <div className="flex w-full items-center justify-between gap-2">
-              <span className="truncate text-sm font-medium">
-                {t.contactName ?? t.contactPhone ?? "Unknown contact"}
-              </span>
-              <div className="flex shrink-0 items-center gap-1.5">
-                <AssigneeAvatar
-                  email={assigneeEmail}
-                  isMine={isMine}
-                  contactId={t.contactId}
-                />
-                <span className="text-muted-foreground text-[11px]">
+      <div className="flex-1 overflow-y-auto divide-y divide-border">
+        {threads.map((t) => {
+          const selected = t.contactId === selectedContactId;
+          const isMine =
+            t.assigneeId !== null && t.assigneeId === currentUserId;
+          return (
+            <button
+              key={t.contactId}
+              type="button"
+              onClick={() => onSelectThread(t.contactId)}
+              data-testid={`inbox-thread-${t.contactId}`}
+              data-selected={selected || undefined}
+              data-assignee-id={t.assigneeId ?? undefined}
+              data-assignee-mine={isMine || undefined}
+              className={`flex w-full flex-col items-start gap-1 p-4 text-left transition-colors ${
+                selected
+                  ? "border-l-4 border-[#111827] bg-[#f5f5f4]"
+                  : "hover:bg-[#f5f5f4]/60"
+              }`}
+            >
+              <div className="flex w-full items-start justify-between gap-2">
+                <span className="truncate text-sm font-bold text-[#1c1917]">
+                  {t.contactName ?? t.contactPhone ?? "Unknown contact"}
+                </span>
+                <span className="shrink-0 text-[11px] tabular-nums text-[#78716c]">
                   {formatDistanceToNow(new Date(t.lastMessageAt), {
                     addSuffix: true,
                   })}
                 </span>
               </div>
-            </div>
-            <div className="flex w-full items-center justify-between gap-2">
-              <span className="text-muted-foreground line-clamp-1 text-xs">
-                {t.lastMessageDirection === "outbound" ? "You: " : ""}
-                {t.lastMessageBody}
-              </span>
-              {t.unreadCount > 0 ? (
-                <Badge
-                  variant="default"
-                  className="h-4 min-w-4 shrink-0 px-1 text-[10px]"
-                  data-testid={`inbox-thread-${t.contactId}-unread`}
-                >
-                  {t.unreadCount}
-                </Badge>
-              ) : null}
-            </div>
-            {t.propertyAddress ? (
-              <span className="text-muted-foreground line-clamp-1 text-[11px]">
-                {t.propertyAddress}
-              </span>
-            ) : null}
-          </button>
-        );
-      })}
+              <div className="flex w-full items-center gap-2">
+                <ContactAvatar
+                  contactName={t.contactName}
+                  contactPhone={t.contactPhone}
+                  contactId={t.contactId}
+                />
+                {t.propertyAddress ? (
+                  <span className="truncate text-[11px] italic text-[#78716c]">
+                    {t.propertyAddress}
+                  </span>
+                ) : (
+                  <span className="truncate text-[11px] italic text-[#a8a29e]">
+                    No property linked
+                  </span>
+                )}
+              </div>
+              <div className="flex w-full items-center justify-between gap-2">
+                <span className="line-clamp-1 text-[13px] text-[#78716c]">
+                  {t.lastMessageDirection === "outbound" ? "You: " : ""}
+                  {t.lastMessageBody}
+                </span>
+                {t.unreadCount > 0 ? (
+                  <Badge
+                    variant="default"
+                    className="h-4 min-w-4 shrink-0 px-1 text-[10px] bg-[#111827] text-white"
+                    data-testid={`inbox-thread-${t.contactId}-unread`}
+                  >
+                    {t.unreadCount}
+                  </Badge>
+                ) : null}
+              </div>
+            </button>
+          );
+        })}
+      </div>
     </div>
   );
 }
 
-function AssigneeAvatar({
-  email,
-  isMine,
+function ContactAvatar({
+  contactName,
+  contactPhone,
   contactId,
 }: {
-  email: string | null;
-  isMine: boolean;
+  contactName: string | null;
+  contactPhone: string | null;
   contactId: string;
 }) {
-  if (!email) return null;
-  const initials = initialsOf(email);
+  const initials = initialsOfContact(contactName, contactPhone);
   return (
     <span
-      title={isMine ? `Assigned to me (${email})` : `Assigned to ${email}`}
-      data-testid={`inbox-thread-${contactId}-assignee`}
-      data-assignee-mine={isMine || undefined}
-      className={`inline-flex h-5 min-w-5 items-center justify-center rounded-full px-1 text-[10px] font-medium ${
-        isMine
-          ? "bg-primary text-primary-foreground"
-          : "bg-muted text-muted-foreground"
-      }`}
+      title={contactName ?? contactPhone ?? "Unknown contact"}
+      data-testid={`inbox-thread-${contactId}-avatar`}
+      className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-[#f5f5f4] border border-[#e5e1df] text-[9px] font-bold text-[#78716c]"
     >
       {initials}
     </span>
   );
 }
 
-function initialsOf(email: string): string {
-  const local = email.split("@")[0] ?? email;
-  // jarrad.henry → JH; jarrad → JA; sole letter → uppercase
-  const parts = local.split(/[._-]+/).filter(Boolean);
-  if (parts.length >= 2) {
-    return (parts[0][0] + parts[1][0]).toUpperCase();
+function initialsOfContact(
+  name: string | null,
+  phone: string | null,
+): string {
+  if (name) {
+    // "Donna Harper-Bradley" → DH; "Maria" → MA; punctuation/whitespace
+    // collapses so "Mary-Jane Smith" stays MS.
+    const parts = name.trim().split(/\s+/).filter(Boolean);
+    if (parts.length >= 2) {
+      const first = parts[0][0] ?? "";
+      const last = parts[parts.length - 1][0] ?? "";
+      return (first + last).toUpperCase();
+    }
+    return name.slice(0, 2).toUpperCase();
   }
-  return local.slice(0, 2).toUpperCase();
+  if (phone) {
+    // last 2 digits when there's no name — keeps the avatar visually
+    // distinct from a literal "??" placeholder.
+    const digits = phone.replace(/\D/g, "");
+    return digits.slice(-2) || "·";
+  }
+  return "·";
 }
