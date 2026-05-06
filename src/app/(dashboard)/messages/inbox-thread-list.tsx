@@ -1,7 +1,7 @@
 "use client";
 
 import { formatDistanceToNow } from "date-fns/formatDistanceToNow";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useRouter } from "next/navigation";
 import { useEffect } from "react";
 
 import { Badge } from "@/components/ui/badge";
@@ -16,6 +16,10 @@ type Props = {
    *  initials regardless of assignment — assignment lives in the detail
    *  panel header. */
   currentUserId: string | null;
+  /** Selection is owned by CockpitView so it can wrap the URL update +
+   *  router.refresh() in useTransition; that's how the detail panel
+   *  knows when to render a skeleton. The list just emits clicks. */
+  onSelectThread: (contactId: string) => void;
 };
 
 /**
@@ -36,9 +40,9 @@ export function InboxThreadList({
   initial,
   selectedContactId,
   currentUserId,
+  onSelectThread,
 }: Props) {
   const router = useRouter();
-  const searchParams = useSearchParams();
   const threads = initial;
 
   useEffect(() => {
@@ -77,15 +81,6 @@ export function InboxThreadList({
     };
   }, [router]);
 
-  const select = (contactId: string) => {
-    const sp = new URLSearchParams(searchParams.toString());
-    sp.set("thread", contactId);
-    router.replace(`/messages?${sp.toString()}`);
-    // Next 16 caches the RSC payload per route — query-string-only changes
-    // hit the cache and skip the server render. Refresh forces a fetch so
-    // the side-panel data updates when the user picks a different thread.
-    router.refresh();
-  };
 
   if (threads.length === 0) {
     return (
@@ -112,7 +107,7 @@ export function InboxThreadList({
             <button
               key={t.contactId}
               type="button"
-              onClick={() => select(t.contactId)}
+              onClick={() => onSelectThread(t.contactId)}
               data-testid={`inbox-thread-${t.contactId}`}
               data-selected={selected || undefined}
               data-assignee-id={t.assigneeId ?? undefined}

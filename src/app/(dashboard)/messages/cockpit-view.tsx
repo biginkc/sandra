@@ -2,6 +2,7 @@
 
 import { MessageSquarePlusIcon, PlusIcon } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
+import { useCallback, useEffect, useState } from "react";
 
 import { Page } from "@/components/page";
 import { PageHeader } from "@/components/page-header";
@@ -62,15 +63,51 @@ export function CockpitView({
   };
 
   const showThreadList = THREAD_FILTERS.has(filter);
-
-  // The thread query param updates instantly on click (router.replace),
-  // but threadDetail comes from the next RSC render. While that round-
-  // trip is in flight, urlThread !== threadDetail.contactId. Use that
-  // mismatch as the "loading a thread" signal so the detail panel can
-  // surface a skeleton instead of stale bubbles from the previous click.
   const urlThread = searchParams.get("thread");
+
+  // Track which contactId the user is currently navigating *to*. The
+  // setState here is a synchronous high-priority update so the next
+  // render commits BEFORE the RSC round-trip completes — which is what
+  // lets the detail panel show a skeleton instead of stale bubbles
+  // from the previous selection. Using useTransition would be cleaner
+  // semantically, but React's concurrent mode keeps the old tree
+  // visible during transitions, so isPending never flips in the tree
+  // the user is looking at.
+  const [pendingContactId, setPendingContactId] = useState<string | null>(
+    null,
+  );
+
+  const handleSelectThread = useCallback(
+    (contactId: string) => {
+      setPendingContactId(contactId);
+      const sp = new URLSearchParams(searchParams.toString());
+      sp.set("thread", contactId);
+      router.replace(`/messages?${sp.toString()}`);
+      // Next 16 caches the RSC payload per route; querystring-only
+      // changes hit the cache. Refresh forces a fetch so the new
+      // thread's bubbles + dispo state replace the previous panel.
+      router.refresh();
+    },
+    [searchParams, router],
+  );
+
+  // Clear the pending marker once the server data catches up — that's
+  // when the skeleton can disappear and the real panel can mount.
+  useEffect(() => {
+    if (
+      pendingContactId !== null &&
+      threadDetail?.contactId === pendingContactId
+    ) {
+      setPendingContactId(null);
+    }
+  }, [pendingContactId, threadDetail?.contactId]);
+
+  // Skeleton shows when the user has clicked a thread that the server
+  // hasn't returned yet. Same-thread re-clicks: pendingContactId
+  // matches threadDetail.contactId already → no skeleton.
   const isLoadingThread =
-    urlThread !== null && urlThread !== (threadDetail?.contactId ?? null);
+    pendingContactId !== null &&
+    pendingContactId !== (threadDetail?.contactId ?? null);
 
   return (
     <Page>
@@ -132,6 +169,7 @@ export function CockpitView({
                 initial={threads}
                 selectedContactId={urlThread ?? threadDetail?.contactId ?? null}
                 currentUserId={currentUserId}
+                onSelectThread={handleSelectThread}
               />
               <InboxDetail
                 data={threadDetail}
