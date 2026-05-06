@@ -81,11 +81,19 @@ test("clicking a thread surfaces the loading skeleton during navigation", async 
   await page.goto(`/messages?thread=${contactA}`);
   await page.waitForSelector('[data-testid="inbox-detail-panel"]');
 
-  // Throttle the next /messages RSC roundtrip so the skeleton is
+  // Throttle the FIRST /messages document round-trip so the skeleton is
   // observable — the live env is fast enough that we'd race otherwise.
+  // After we've seen the skeleton, drop the throttle so the rest of the
+  // test isn't gated on additional 1s waits (Vercel/Next can issue
+  // pre-fetches that would otherwise stack).
+  let throttledOnce = false;
   await page.route("**/messages*", async (route) => {
-    if (route.request().resourceType() === "document") {
-      await new Promise((r) => setTimeout(r, 1000));
+    if (
+      route.request().resourceType() === "document" &&
+      !throttledOnce
+    ) {
+      throttledOnce = true;
+      await new Promise((r) => setTimeout(r, 1500));
     }
     await route.continue();
   });
@@ -96,14 +104,17 @@ test("clicking a thread surfaces the loading skeleton during navigation", async 
   // Skeleton should appear within the throttle window. We poll quickly
   // because the React commit happens early in the transition.
   await expect(page.getByTestId("inbox-detail-loading")).toBeVisible({
-    timeout: 1500,
+    timeout: 2000,
   });
 
-  // After the transition commits, skeleton goes away and the real
-  // panel reappears with the new thread's content.
+  // Drop the route handler so the remaining requests aren't throttled.
+  await page.unroute("**/messages*");
+
+  // After the round-trip lands, skeleton disappears and the real panel
+  // mounts with thread B's content.
   await clickPromise;
   await expect(page.getByTestId("inbox-detail-loading")).toBeHidden({
-    timeout: 5000,
+    timeout: 10_000,
   });
   await expect(page.getByTestId("inbox-detail-panel")).toBeVisible();
 });
