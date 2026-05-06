@@ -11,8 +11,10 @@ import { createClient } from "@/lib/supabase/client";
 type Props = {
   initial: Thread[];
   selectedContactId: string | null;
-  /** auth.users.id → email for assignee initials. */
-  assigneeEmails: Record<string, string>;
+  /** Used to mark threads assigned to the viewer with a data-attribute
+   *  for tests + styling. The avatar circle itself shows contact
+   *  initials regardless of assignment — assignment lives in the detail
+   *  panel header. */
   currentUserId: string | null;
 };
 
@@ -33,7 +35,6 @@ type Props = {
 export function InboxThreadList({
   initial,
   selectedContactId,
-  assigneeEmails,
   currentUserId,
 }: Props) {
   const router = useRouter();
@@ -105,10 +106,8 @@ export function InboxThreadList({
       <div className="flex-1 overflow-y-auto divide-y divide-border">
         {threads.map((t) => {
           const selected = t.contactId === selectedContactId;
-          const assigneeEmail = t.assigneeId
-            ? assigneeEmails[t.assigneeId]
-            : null;
-          const isMine = t.assigneeId !== null && t.assigneeId === currentUserId;
+          const isMine =
+            t.assigneeId !== null && t.assigneeId === currentUserId;
           return (
             <button
               key={t.contactId}
@@ -117,6 +116,7 @@ export function InboxThreadList({
               data-testid={`inbox-thread-${t.contactId}`}
               data-selected={selected || undefined}
               data-assignee-id={t.assigneeId ?? undefined}
+              data-assignee-mine={isMine || undefined}
               className={`flex w-full flex-col items-start gap-1 p-4 text-left transition-colors ${
                 selected
                   ? "border-l-4 border-[#111827] bg-[#f5f5f4]"
@@ -134,9 +134,9 @@ export function InboxThreadList({
                 </span>
               </div>
               <div className="flex w-full items-center gap-2">
-                <AssigneeAvatar
-                  email={assigneeEmail}
-                  isMine={isMine}
+                <ContactAvatar
+                  contactName={t.contactName}
+                  contactPhone={t.contactPhone}
                   contactId={t.contactId}
                 />
                 {t.propertyAddress ? (
@@ -172,50 +172,47 @@ export function InboxThreadList({
   );
 }
 
-function AssigneeAvatar({
-  email,
-  isMine,
+function ContactAvatar({
+  contactName,
+  contactPhone,
   contactId,
 }: {
-  email: string | null;
-  isMine: boolean;
+  contactName: string | null;
+  contactPhone: string | null;
   contactId: string;
 }) {
-  if (!email) {
-    return (
-      <span
-        title="Unassigned"
-        data-testid={`inbox-thread-${contactId}-assignee`}
-        className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-dashed border-[#e5e1df] text-[8px] text-[#a8a29e]"
-        aria-hidden
-      >
-        ·
-      </span>
-    );
-  }
-  const initials = initialsOf(email);
+  const initials = initialsOfContact(contactName, contactPhone);
   return (
     <span
-      title={isMine ? `Assigned to me (${email})` : `Assigned to ${email}`}
-      data-testid={`inbox-thread-${contactId}-assignee`}
-      data-assignee-mine={isMine || undefined}
-      className={`inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[9px] font-bold ${
-        isMine
-          ? "bg-[#111827] text-white"
-          : "bg-[#f5f5f4] border border-[#e5e1df] text-[#78716c]"
-      }`}
+      title={contactName ?? contactPhone ?? "Unknown contact"}
+      data-testid={`inbox-thread-${contactId}-avatar`}
+      className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-[#f5f5f4] border border-[#e5e1df] text-[9px] font-bold text-[#78716c]"
     >
       {initials}
     </span>
   );
 }
 
-function initialsOf(email: string): string {
-  const local = email.split("@")[0] ?? email;
-  // jarrad.henry → JH; jarrad → JA; sole letter → uppercase
-  const parts = local.split(/[._-]+/).filter(Boolean);
-  if (parts.length >= 2) {
-    return (parts[0][0] + parts[1][0]).toUpperCase();
+function initialsOfContact(
+  name: string | null,
+  phone: string | null,
+): string {
+  if (name) {
+    // "Donna Harper-Bradley" → DH; "Maria" → MA; punctuation/whitespace
+    // collapses so "Mary-Jane Smith" stays MS.
+    const parts = name.trim().split(/\s+/).filter(Boolean);
+    if (parts.length >= 2) {
+      const first = parts[0][0] ?? "";
+      const last = parts[parts.length - 1][0] ?? "";
+      return (first + last).toUpperCase();
+    }
+    return name.slice(0, 2).toUpperCase();
   }
-  return local.slice(0, 2).toUpperCase();
+  if (phone) {
+    // last 2 digits when there's no name — keeps the avatar visually
+    // distinct from a literal "??" placeholder.
+    const digits = phone.replace(/\D/g, "");
+    return digits.slice(-2) || "·";
+  }
+  return "·";
 }

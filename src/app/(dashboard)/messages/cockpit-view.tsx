@@ -62,14 +62,13 @@ export function CockpitView({
   };
 
   const showThreadList = THREAD_FILTERS.has(filter);
-  const totalUnread = threads.reduce((n, t) => n + t.unreadCount, 0);
 
   return (
     <Page>
       <PageHeader
         breadcrumb={[{ label: "Workspace" }, { label: "Messages" }]}
         title="Messages"
-        description="Live conversations on the Inbox tab; queued bulk sends on the Outbox tab. Both flow through the same SMS provider; consent and quiet-hours are checked on every send."
+        description="Live conversations on the Inbox tab; queued bulk sends on the Outbox tab."
         actions={
           <button
             type="button"
@@ -92,16 +91,14 @@ export function CockpitView({
       >
         <TabButton
           label="Inbox"
-          count={totalUnread > 0 ? totalUnread : undefined}
-          countTone="primary"
+          count={threads.length}
           active={activeTab === "inbox"}
           onClick={() => setTab("inbox")}
           testId="tab-inbox"
         />
         <TabButton
           label="Outbox"
-          count={queued.length > 0 ? queued.length : undefined}
-          countTone="muted"
+          count={queued.length}
           active={activeTab === "outbox"}
           onClick={() => setTab("outbox")}
           testId="tab-outbox"
@@ -125,7 +122,6 @@ export function CockpitView({
               <InboxThreadList
                 initial={threads}
                 selectedContactId={threadDetail?.contactId ?? null}
-                assigneeEmails={assigneeEmails}
                 currentUserId={currentUserId}
               />
               <InboxDetail
@@ -171,14 +167,12 @@ export function CockpitView({
 function TabButton({
   label,
   count,
-  countTone,
   active,
   onClick,
   testId,
 }: {
   label: string;
-  count?: number;
-  countTone: "primary" | "muted";
+  count: number;
   active: boolean;
   onClick: () => void;
   testId: string;
@@ -197,17 +191,15 @@ function TabButton({
       }`}
     >
       {label}
-      {count !== undefined ? (
-        <span
-          className={`px-2 py-0.5 text-[10px] rounded-full font-bold ${
-            countTone === "primary" && active
-              ? "bg-primary text-primary-foreground"
-              : "bg-[#f5f5f4] text-[#78716c] border border-[#e5e1df]"
-          }`}
-        >
-          {count}
-        </span>
-      ) : null}
+      <span
+        className={`px-2 py-0.5 text-[10px] rounded-full font-bold ${
+          active
+            ? "bg-primary text-primary-foreground"
+            : "bg-[#f5f5f4] text-[#78716c] border border-[#e5e1df]"
+        }`}
+      >
+        {count}
+      </span>
     </button>
   );
 }
