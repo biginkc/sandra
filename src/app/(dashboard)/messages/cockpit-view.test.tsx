@@ -170,6 +170,26 @@ describe("<CockpitView /> URL deep-linking", () => {
     expect(outbox).toHaveAttribute("aria-selected", "false");
   });
 
+  it("inbox grid is viewport-constrained so dispo + reply stay pinned (regression: page-scroll bug)", () => {
+    // Regression for the May-5 UX bug: with no height constraint on the grid,
+    // the whole page scrolled instead of the messages thread, pushing the
+    // dispo bar + reply box off-screen on busy threads. The grid must carry
+    // a viewport-relative height so each panel scrolls independently.
+    const thread = makeThread({ contactId: "contact-grid" });
+    render(
+      <CockpitView
+        {...baseProps}
+        activeTab="inbox"
+        threads={[thread]}
+        threadDetail={makeDetail("contact-grid", "body")}
+      />,
+    );
+
+    const grid = screen.getByTestId("inbox-cockpit-grid");
+    expect(grid.className).toMatch(/h-\[calc\(100vh-260px\)\]/);
+    expect(grid.className).toMatch(/min-h-\[500px\]/);
+  });
+
   it("threadDetail prop pre-selects that thread + renders its body (test 33)", () => {
     const threadA = makeThread({
       contactId: "contact-a",

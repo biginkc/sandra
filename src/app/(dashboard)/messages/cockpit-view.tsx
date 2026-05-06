@@ -108,7 +108,10 @@ export function CockpitView({
             />
 
             {showThreadList && (
-              <div className="grid grid-cols-[minmax(280px,360px)_1fr] gap-4">
+              <div
+                className="grid h-[calc(100vh-260px)] min-h-[500px] grid-cols-[minmax(280px,360px)_1fr] gap-4"
+                data-testid="inbox-cockpit-grid"
+              >
                 <InboxThreadList
                   initial={threads}
                   selectedContactId={threadDetail?.contactId ?? null}
