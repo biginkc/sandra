@@ -129,11 +129,13 @@ export function CockpitView({
       />
 
       {/* Underline tabs — replaces the shadcn Tabs to match the Stitch
-          messages-cockpit design. State stays in the URL like before. */}
+          messages-cockpit design. State stays in the URL like before.
+          No mt-* here: the parent <Page> contributes gap-8 between
+          children already; adding a margin would compound. */}
       <div
         role="tablist"
         aria-label="Inbox / Outbox"
-        className="mt-6 flex gap-6 border-b border-border"
+        className="flex gap-6 border-b border-border"
       >
         <TabButton
           label="Inbox"
@@ -152,7 +154,7 @@ export function CockpitView({
       </div>
 
       {activeTab === "inbox" ? (
-        <div className="mt-4 flex flex-col gap-4">
+        <div className="flex flex-col gap-4">
           <InboxFilters
             active={filter}
             unknownCount={unknownActiveCount}
@@ -189,7 +191,7 @@ export function CockpitView({
           )}
         </div>
       ) : (
-        <div className="mt-4">
+        <div>
           <QueueStatsBanner initialStats={queueStats} />
           <QueuePanel initial={queued} />
         </div>
