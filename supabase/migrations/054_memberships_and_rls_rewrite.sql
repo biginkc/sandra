@@ -357,10 +357,12 @@ create policy ai_responder_configs_org_insert on public.ai_responder_configs for
 create policy ai_responder_configs_org_update on public.ai_responder_configs for update to authenticated using (org_id in (select org_id from public.memberships where user_id = auth.uid())) with check (org_id in (select org_id from public.memberships where user_id = auth.uid()));
 create policy ai_responder_configs_org_delete on public.ai_responder_configs for delete to authenticated using (org_id in (select org_id from public.memberships where user_id = auth.uid()));
 
-create policy test_sms_log_org_select on public.test_sms_log for select to authenticated using (org_id in (select org_id from public.memberships where user_id = auth.uid()));
-create policy test_sms_log_org_insert on public.test_sms_log for insert to authenticated with check (org_id in (select org_id from public.memberships where user_id = auth.uid()));
-create policy test_sms_log_org_update on public.test_sms_log for update to authenticated using (org_id in (select org_id from public.memberships where user_id = auth.uid())) with check (org_id in (select org_id from public.memberships where user_id = auth.uid()));
-create policy test_sms_log_org_delete on public.test_sms_log for delete to authenticated using (org_id in (select org_id from public.memberships where user_id = auth.uid()));
+-- test_sms_log: debug table with no org_id column. After dropping the
+-- old test_sms_log_authenticated_all policy above, RLS stays enabled
+-- with no client policies — service-role-only access. The Twilio test
+-- receiver writes via service role (createAdminClient), so no
+-- functionality is lost; debug reads from /admin tooling will need to
+-- go through service role too.
 
 -- ----------------------------------------------------------------------------
 -- 5. Child-table policies via parent org
