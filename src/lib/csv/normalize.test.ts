@@ -270,6 +270,23 @@ describe("normalizeStateCode", () => {
     expect(normalizeStateCode("")).toBeNull();
     expect(normalizeStateCode(null)).toBeNull();
   });
+
+  it("accepts US territories (absentee-owner mailing addresses)", () => {
+    expect(normalizeStateCode("PR")).toBe("PR");
+    expect(normalizeStateCode("pr")).toBe("PR");
+    expect(normalizeStateCode("Puerto Rico")).toBe("PR");
+    expect(normalizeStateCode("VI")).toBe("VI");
+    expect(normalizeStateCode("Virgin Islands")).toBe("VI");
+    expect(normalizeStateCode("US Virgin Islands")).toBe("VI");
+    expect(normalizeStateCode("U.S. Virgin Islands")).toBe("VI");
+    expect(normalizeStateCode("GU")).toBe("GU");
+    expect(normalizeStateCode("Guam")).toBe("GU");
+    expect(normalizeStateCode("AS")).toBe("AS");
+    expect(normalizeStateCode("American Samoa")).toBe("AS");
+    expect(normalizeStateCode("MP")).toBe("MP");
+    expect(normalizeStateCode("Northern Mariana Islands")).toBe("MP");
+    expect(normalizeStateCode("Northern Marianas")).toBe("MP");
+  });
 });
 
 describe("normalizeCountyName", () => {
