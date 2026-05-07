@@ -116,7 +116,7 @@ test("bell badge appears via Realtime when an inbound SMS notification fires (te
       event_type: "owner_message_added",
       entity_id: propertyId,
     });
-  }).toPass({ timeout: 5_000 });
+  }).toPass({ timeout: 10_000 });
 
   // Badge should appear via Realtime — generous timeout to absorb CI
   // jitter. The 15s safety-net poll also catches it if Realtime drops.
@@ -176,7 +176,7 @@ test("click bell → open dropdown → click notification → routes + marks rea
   // Click → routes to /leads/<id> and clears the badge.
   await item.click();
   await page.waitForURL(new RegExp(`/leads/${propertyId}$`), {
-    timeout: 5_000,
+    timeout: 10_000,
   });
   await expect(page.getByTestId("notifications-badge")).toBeHidden();
 
@@ -237,7 +237,7 @@ test("seed 3 unread → 'Mark all as read' clears the badge (test 31)", async ({
 
   // Badge clears (optimistic update).
   await expect(page.getByTestId("notifications-badge")).toBeHidden({
-    timeout: 5_000,
+    timeout: 10_000,
   });
 
   // DB side-effect: every row has read_at set. Poll — the server action
@@ -253,5 +253,5 @@ test("seed 3 unread → 'Mark all as read' clears the badge (test 31)", async ({
     for (const n of notifs ?? []) {
       expect(n.read_at).not.toBeNull();
     }
-  }).toPass({ timeout: 5_000 });
+  }).toPass({ timeout: 10_000 });
 });

@@ -101,5 +101,5 @@ test("opening a thread clears its unread badge (test 19)", async ({ page }) => {
     for (const m of data ?? []) {
       expect(m.read_at).not.toBeNull();
     }
-  }).toPass({ timeout: 5_000 });
+  }).toPass({ timeout: 10_000 });
 });

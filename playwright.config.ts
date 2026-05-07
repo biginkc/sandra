@@ -65,6 +65,13 @@ const webServerEnv: Record<string, string> = {
   // Mocks match the integration-test setup — no real Dialpad / SmartyStreets.
   MESSAGING_PROVIDER: "mock",
   ADDRESS_VERIFIER_PROVIDER: "mock",
+  // Bypass the AI intent classifier in the dialpad webhook handler. There's
+  // no Anthropic key in CI, and the classifier is unit-tested directly in
+  // src/lib/leads/classify-reply-intent.test.ts. Without this, the
+  // sms-roundtrip auto-qualify path silently fails closed and the test
+  // can't see "prospect → new_lead". Mirror of .github/workflows/e2e.yml so
+  // local runs match CI.
+  SKIP_INTENT_GATE: "1",
   // Pin admin email so /properties knows claude@test.com is admin for the
   // duration of the suite (enables Delete in the Actions menu tests).
   ADMIN_EMAILS: "claude@test.com,jarrad@bmhgroupkc.com",
