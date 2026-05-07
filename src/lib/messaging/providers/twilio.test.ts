@@ -298,12 +298,12 @@ describe("twilioFromEnv", () => {
     expect(() => twilioFromEnv()).toThrow(ConfigurationError);
   });
 
-  it("registry returns TwilioMessagingProvider when MESSAGING_PROVIDER=twilio", () => {
+  it("registry returns TwilioMessagingProvider when MESSAGING_PROVIDER=twilio", async () => {
     process.env.TWILIO_ACCOUNT_SID = ACCOUNT_SID;
     process.env.TWILIO_AUTH_TOKEN = AUTH_TOKEN;
     process.env.TWILIO_MESSAGING_SERVICE_SID = MSG_SVC_SID;
     process.env.MESSAGING_PROVIDER = "twilio";
-    const p = getMessagingProvider();
+    const p = await getMessagingProvider();
     expect(p).toBeInstanceOf(TwilioMessagingProvider);
     expect(p?.providerId).toBe("twilio");
   });

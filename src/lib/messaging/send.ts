@@ -93,7 +93,7 @@ export async function sendSmsToContact(
   // 1. Resolve provider.
   let provider;
   try {
-    provider = getMessagingProvider();
+    provider = await getMessagingProvider();
   } catch (e) {
     if (e instanceof ConfigurationError) {
       return {
@@ -317,7 +317,7 @@ export async function releaseQueuedMessage(
 ): Promise<SendSmsOutcome> {
   let provider;
   try {
-    provider = getMessagingProvider();
+    provider = await getMessagingProvider();
   } catch (e) {
     if (e instanceof ConfigurationError) {
       return { status: "blocked_provider_off", reason: e.message };

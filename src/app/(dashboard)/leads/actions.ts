@@ -857,7 +857,7 @@ export type SendSmsPayload = {
  */
 export async function listFromNumbers(): Promise<Result<DialpadFromOption[]>> {
   try {
-    const provider = getMessagingProvider();
+    const provider = await getMessagingProvider();
     if (!provider || !provider.listFromNumbers) {
       return ok([]);
     }

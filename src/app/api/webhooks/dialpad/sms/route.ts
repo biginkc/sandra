@@ -67,7 +67,7 @@ function createServiceRoleClient() {
 
 export async function POST(request: Request) {
   try {
-    const provider = getMessagingProvider();
+    const provider = await getMessagingProvider();
     if (!provider) {
       return NextResponse.json(
         { error: "Messaging provider not configured" },
