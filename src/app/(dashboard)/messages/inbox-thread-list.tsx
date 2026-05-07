@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { useEffect } from "react";
 
 import { Badge } from "@/components/ui/badge";
+import { EscalationBadge } from "@/components/escalation-badge";
 import type { Thread } from "@/lib/messages/list-threads";
 import { createClient } from "@/lib/supabase/client";
 
@@ -144,6 +145,11 @@ export function InboxThreadList({
                   </span>
                 )}
               </div>
+              {t.needsHumanAttention && t.escalationReason ? (
+                <div className="flex w-full">
+                  <EscalationBadge reason={t.escalationReason} />
+                </div>
+              ) : null}
               <div className="flex w-full items-center justify-between gap-2">
                 <span className="line-clamp-1 text-[13px] text-[#78716c]">
                   {t.lastMessageDirection === "outbound" ? "You: " : ""}

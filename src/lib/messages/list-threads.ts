@@ -14,6 +14,12 @@ export type Thread = {
   lastMessageDirection: "inbound" | "outbound";
   lastMessageAt: string;
   unreadCount: number;
+  /** True when properties.needs_human_attention is set — AI responder
+   *  flagged this thread for human review. */
+  needsHumanAttention: boolean;
+  /** Latest escalation reason in `<gate>:<detail>` format, or null.
+   *  Pass to <EscalationBadge> for color-coded rendering. */
+  escalationReason: string | null;
 };
 
 export type ListThreadsOpts = {
@@ -100,7 +106,9 @@ export async function listThreads(
     fetchInChunks(propertyIds, CHUNK, (chunk) =>
       supabase
         .from("properties")
-        .select("id, address, city, state, assigned_user_id")
+        .select(
+          "id, address, city, state, assigned_user_id, needs_human_attention, last_ai_escalation_reason",
+        )
         .in("id", chunk),
     ),
   ]);
@@ -133,6 +141,8 @@ export async function listThreads(
       lastMessageDirection: bucket.latest.direction as "inbound" | "outbound",
       lastMessageAt: bucket.latest.created_at,
       unreadCount: bucket.unreadCount,
+      needsHumanAttention: p?.needs_human_attention ?? false,
+      escalationReason: p?.last_ai_escalation_reason ?? null,
     });
   }
 
