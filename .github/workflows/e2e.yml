@@ -6,6 +6,21 @@ on:
   pull_request:
     branches: [main]
 
+# Serialize all E2E runs against the shared Supabase test project so concurrent
+# runs (PR push + main push, two PRs landing back-to-back, etc.) can't truncate
+# each other's fixtures mid-test. cancel-in-progress: false means later runs
+# queue and wait, rather than killing the running job.
+#
+# Root cause confirmed by Codex investigation 2026-05-07: cockpit/notifications
+# flakes on PR #130's first CI run were caused by E2E runs overlapping against
+# the same TEST_SUPABASE project — one run's reset_tenant_tables() wiped rows
+# the other had just seeded. Symptoms looked like compile-penalty from a static
+# import; the static import was a red herring (PR #131 lazy-load workaround
+# was withdrawn).
+concurrency:
+  group: e2e-shared-test-project
+  cancel-in-progress: false
+
 jobs:
   playwright:
     name: Playwright golden paths
