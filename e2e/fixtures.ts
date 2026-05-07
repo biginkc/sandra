@@ -110,9 +110,20 @@ export async function ensureTestUser(
       { onConflict: "user_id,org_id" },
     );
   if (membershipErr) {
-    throw new Error(
-      `ensureTestUser: failed to upsert membership for ${TEST_USER_EMAIL}: ${membershipErr.message}`,
-    );
+    // Backward-compat: if the test Supabase project hasn't applied migration
+    // 054 (Stage 1) yet, the memberships table simply doesn't exist. PostgREST
+    // returns "Could not find the table 'public.memberships' in the schema
+    // cache"; raw Postgres would say "relation \"memberships\" does not exist".
+    // Skip the repair silently in that case — the rest of the suite still
+    // works pre-Stage-1. Throw on every other failure.
+    const msg = membershipErr.message ?? "";
+    const tableMissing =
+      /memberships.*(schema cache|does not exist|not (?:found|exist))/i.test(msg);
+    if (!tableMissing) {
+      throw new Error(
+        `ensureTestUser: failed to upsert membership for ${TEST_USER_EMAIL}: ${msg}`,
+      );
+    }
   }
 
   return userId;
