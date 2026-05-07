@@ -103,7 +103,11 @@ export class DialpadMessagingProvider implements MessagingProvider {
    * The JWT payload should be decoded and the signature verified to
    * ensure that the event came from Dialpad."
    */
-  verifyWebhookSignature(rawBody: string, _headers: Headers): boolean {
+  verifyWebhookSignature(
+    rawBody: string,
+    _headers: Headers,
+    _fullUrl?: string,
+  ): boolean {
     return this.decodeSignedJwt(rawBody.trim()) !== null;
   }
 

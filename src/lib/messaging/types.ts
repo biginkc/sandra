@@ -69,9 +69,16 @@ export interface MessagingProvider {
 
   /**
    * Return `true` when the webhook is authentic. Caller passes the
-   * exact raw body bytes (not parsed JSON) and the full request headers.
+   * exact raw body bytes (not parsed JSON), the full request headers,
+   * and (optionally) the full request URL — Twilio's signature scheme
+   * folds the URL into the canonical string, while DialPad's JWT
+   * scheme ignores it.
    */
-  verifyWebhookSignature(rawBody: string, headers: Headers): boolean;
+  verifyWebhookSignature(
+    rawBody: string,
+    headers: Headers,
+    fullUrl?: string,
+  ): boolean;
 
   /** Decode a raw webhook payload into zero-or-more inbound events.
    *  Providers batch multiple events per delivery; we flatten here. */

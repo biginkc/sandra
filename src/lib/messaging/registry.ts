@@ -2,6 +2,7 @@ import { ConfigurationError } from "@/lib/errors/classes";
 
 import { dialpadFromEnv } from "./providers/dialpad";
 import { MockMessagingProvider } from "./providers/mock";
+import { twilioFromEnv } from "./providers/twilio";
 import type { MessagingProvider } from "./types";
 
 /**
@@ -23,7 +24,8 @@ export function getMessagingProvider(): MessagingProvider | null {
       return dialpadFromEnv();
     case "mock":
       return new MockMessagingProvider();
-    // case "twilio": return twilioFromEnv();   — add when registered
+    case "twilio":
+      return twilioFromEnv();
     default:
       throw new ConfigurationError(
         `Unknown MESSAGING_PROVIDER: ${provider}`,
