@@ -43,9 +43,22 @@ export async function resetTenantTables(
 }
 
 /**
- * Ensure `claude@test.com` exists in auth.users and can sign in with the
- * shared test password. Idempotent — returns the existing user's id if
- * already present, otherwise creates and confirms it.
+ * Default BMH organization id from migration 054 (memberships + RLS rewrite).
+ * Stage 1 introduced membership-scoped RLS — without a membership row in
+ * this org, the test user can't read or write tenant data.
+ */
+const DEFAULT_ORG_ID = "00000000-0000-0000-0000-000000000bbb";
+
+/**
+ * Ensure `claude@test.com` exists in auth.users, can sign in with the shared
+ * test password, AND has an "owner" membership in the default BMH org.
+ * Idempotent — returns the user's id whether it was found or created.
+ *
+ * The membership repair is load-bearing post-Stage 1: a freshly-created test
+ * user is created AFTER `reset_tenant_tables()` snapshots memberships, so the
+ * snapshot's restore phase has nothing to put back. Without the explicit
+ * upsert here, RLS would block every subsequent read/write the test
+ * performs as that user.
  */
 export async function ensureTestUser(
   client: SupabaseClient<Database>,
@@ -55,17 +68,50 @@ export async function ensureTestUser(
   });
   if (listErr) throw listErr;
   const existing = list?.users.find((u) => u.email === TEST_USER_EMAIL);
-  if (existing) return existing.id;
 
-  const { data: created, error: createErr } =
-    await client.auth.admin.createUser({
-      email: TEST_USER_EMAIL,
-      password: TEST_USER_PASSWORD,
-      email_confirm: true,
-    });
-  if (createErr || !created?.user)
-    throw createErr ?? new Error("createUser returned no user");
-  return created.user.id;
+  let userId: string;
+  if (existing) {
+    userId = existing.id;
+  } else {
+    const { data: created, error: createErr } =
+      await client.auth.admin.createUser({
+        email: TEST_USER_EMAIL,
+        password: TEST_USER_PASSWORD,
+        email_confirm: true,
+      });
+    if (createErr || !created?.user)
+      throw createErr ?? new Error("createUser returned no user");
+    userId = created.user.id;
+  }
+
+  // Verify-or-repair the membership row. Idempotent via the unique
+  // (user_id, org_id) constraint from migration 054. Cast through a
+  // narrow writer interface because the generated Database types haven't
+  // been regenerated for memberships yet — same pattern as
+  // src/lib/auth/memberships.ts.
+  type MembershipWriter = {
+    from(table: "memberships"): {
+      upsert(
+        values: { user_id: string; org_id: string; role: "owner" | "member" },
+        options?: { onConflict?: string; ignoreDuplicates?: boolean },
+      ): Promise<{ error: { message: string } | null }>;
+    };
+  };
+  const { error: membershipErr } = await (
+    client as unknown as MembershipWriter
+  )
+    .from("memberships")
+    .upsert(
+      { user_id: userId, org_id: DEFAULT_ORG_ID, role: "owner" },
+      { onConflict: "user_id,org_id", ignoreDuplicates: true },
+    );
+  if (membershipErr) {
+    throw new Error(
+      `ensureTestUser: failed to upsert membership for ${TEST_USER_EMAIL}: ${membershipErr.message}`,
+    );
+  }
+
+  return userId;
 }
 
 export type SeededProspect = {
