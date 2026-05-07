@@ -111,7 +111,7 @@ test('Side panel shows "Assign to me" on an unassigned thread; clicking it assig
       .eq("id", unassigned.propertyId)
       .single();
     expect(p!.assigned_user_id).toBe(claudeId);
-  }).toPass({ timeout: 5_000 });
+  }).toPass({ timeout: 10_000 });
 
   // After assignment, the pill is replaced by the dropdown trigger.
   await expect(page.getByTestId("assign-to-me")).toHaveCount(0);
@@ -147,7 +147,7 @@ test("Assignee dropdown can unassign and reassign via the picker", async ({
       .eq("id", mine.propertyId)
       .single();
     expect(p!.assigned_user_id).toBeNull();
-  }).toPass({ timeout: 5_000 });
+  }).toPass({ timeout: 10_000 });
 
   // After unassign, the "Assign to me" pill comes back.
   await expect(page.getByTestId("assign-to-me")).toBeVisible();

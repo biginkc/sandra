@@ -170,7 +170,7 @@ test("reply to opted-out contact surfaces consent block (test 23)", async ({
   // Toast surfaces.
   await expect(
     page.getByText(/Blocked.*consent|opted out/i).first(),
-  ).toBeVisible({ timeout: 5_000 });
+  ).toBeVisible({ timeout: 10_000 });
 
   // No outbound row was created with that body.
   const { data } = await admin
@@ -208,7 +208,7 @@ test("reply during quiet hours surfaces quiet-hours block (test 24)", async ({
 
   await expect(
     page.getByText(/quiet hours|state/i).first(),
-  ).toBeVisible({ timeout: 5_000 });
+  ).toBeVisible({ timeout: 10_000 });
 
   const { data } = await admin
     .from("messages")

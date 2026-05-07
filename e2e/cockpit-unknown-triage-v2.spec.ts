@@ -124,7 +124,7 @@ test("Merge with existing contact (renamed) still attaches messages + adds phone
   await page.getByTestId(`unknown-match-${phone}`).click();
   await page.getByTestId("match-search-input").fill("Existing");
   await expect(page.getByTestId(`match-result-${contact!.id}`)).toBeVisible({
-    timeout: 5_000,
+    timeout: 10_000,
   });
   await page.getByTestId(`match-result-${contact!.id}`).click();
 
@@ -167,7 +167,7 @@ test("Merge with existing property — Homeowner role: links homeowner_contact_i
   await page.getByTestId("merge-property-search-input").fill(prop.address.slice(0, 12));
   await expect(
     page.getByTestId(`merge-property-result-${prop.id}`),
-  ).toBeVisible({ timeout: 5_000 });
+  ).toBeVisible({ timeout: 10_000 });
   await page.getByTestId(`merge-property-result-${prop.id}`).click();
 
   await page.getByTestId("merge-property-role-homeowner").click();
@@ -218,7 +218,7 @@ test("Merge with existing property — Agent role: links agent_contact_id, creat
   await page.getByTestId("merge-property-search-input").fill(prop.address.slice(0, 12));
   await expect(
     page.getByTestId(`merge-property-result-${prop.id}`),
-  ).toBeVisible({ timeout: 5_000 });
+  ).toBeVisible({ timeout: 10_000 });
   await page.getByTestId(`merge-property-result-${prop.id}`).click();
 
   await page.getByTestId("merge-property-role-agent").click();

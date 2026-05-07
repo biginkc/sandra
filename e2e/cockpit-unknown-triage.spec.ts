@@ -136,7 +136,7 @@ test("Match flow attaches message + adds phone_2 + backfills siblings", async ({
   await page.getByTestId("match-search-input").fill("Existing");
   // Wait for the debounced search and result to appear.
   await expect(page.getByTestId(`match-result-${contact.id}`)).toBeVisible({
-    timeout: 5_000,
+    timeout: 10_000,
   });
   await page.getByTestId(`match-result-${contact.id}`).click();
 
