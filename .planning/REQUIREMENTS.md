@@ -28,6 +28,14 @@
 - [ ] **CAL-01**: When a task is created or its due_at changes, a corresponding 30-minute event lands on the assignee's Google Calendar (their primary calendar, in their stored timezone). Task completion does not delete the event (accepted tradeoff to avoid sync loops).
 - [ ] **INTEG-01**: Each user can connect / disconnect Slack and Google Calendar in `/settings/integrations` and toggle each delivery channel on/off independently. OAuth refresh tokens are stored encrypted; never logged.
 
+### Agent Outreach (Phase 05)
+
+- [ ] **AGENT-01**: From a lead detail page, the SMS composer exposes a recipient picker (Homeowner / Agent) when both contacts are present on the property. The selected message is sent to the chosen recipient's phone and appears correctly attributed in the conversation thread.
+- [ ] **AGENT-02**: Bulk SMS supports a recipient-role filter (Homeowners / Agents / Both). Properties without a contact in the selected role are skipped; properties with the contact receive a message addressed to that role.
+- [ ] **AGENT-03**: Sequences carry a `target_role` field (`'homeowner' | 'agent'`). Enrollment uses the matching contact on each property; sequences targeting agents do not enroll homeowners and vice versa.
+- [ ] **AGENT-04**: Templates render with a recipient-aware variable (`{{recipient.first_name}}`) that resolves to the correct contact based on the message's target role. Existing homeowner-targeted templates continue to render correctly.
+- [ ] **AGENT-05**: Inbound SMS from a phone number matching a property's `agent_contact_id` is routed to the correct property thread and labeled as agent-originated in the inbox UI. Inbound from homeowner numbers continues to route correctly.
+
 ## Future Requirements
 
 Deferred to a future milestone. Tracked but not in current roadmap.
@@ -57,14 +65,19 @@ Deferred to a future milestone. Tracked but not in current roadmap.
 | SLACK-01 | Phase 04 | Pending |
 | CAL-01 | Phase 04 | Pending |
 | INTEG-01 | Phase 04 | Pending |
+| AGENT-01 | Phase 05 | Pending |
+| AGENT-02 | Phase 05 | Pending |
+| AGENT-03 | Phase 05 | Pending |
+| AGENT-04 | Phase 05 | Pending |
+| AGENT-05 | Phase 05 | Pending |
 
 **Coverage:**
-- v2.1 requirements: 8 total
-- Mapped to phases: 8 ✓
+- v2.1 requirements: 13 total
+- Mapped to phases: 13 ✓
 - Unmapped: 0
 - Shipped: 5 (Phase 03 + V1 Tasks substrate)
-- Pending: 3 (Phase 04 — Slack + Calendar bundle)
+- Pending: 8 (Phase 04 — Slack + Calendar bundle; Phase 05 — Agent Outreach)
 
 ---
 *Requirements defined: 2026-05-05*
-*Last updated: 2026-05-06 — Phase 04 (V2 integrations) added; FOLL-01/02 marked shipped via PR #112; SLACK-01, CAL-01, INTEG-01 pending discuss-phase*
+*Last updated: 2026-05-07 — Phase 05 (Agent Outreach) added; AGENT-01..05 pending discuss-phase*

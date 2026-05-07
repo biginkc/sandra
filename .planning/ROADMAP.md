@@ -4,7 +4,7 @@
 
 - ✅ **v1.x — Foundation** (archived) — see `.planning/milestones/v1.x-*`
 - ✅ **v2.0 — Cross-table UX + market refactor** — Phases 1, 1.5, 2 (shipped 2026-05-06) — see `.planning/milestones/v2.0-ROADMAP.md`
-- 🚧 **v2.1 — Operational Visibility + Integrations** — Phase 03 shipped, Phase 04 next
+- 🚧 **v2.1 — Operational Visibility + Integrations** — Phase 03 shipped, Phase 04 next, Phase 05 drafted
 
 ## Phases
 
@@ -22,10 +22,11 @@
 
 </details>
 
-### 🚧 v2.1 — Operational Visibility + Integrations (2 phases)
+### 🚧 v2.1 — Operational Visibility + Integrations (3 phases)
 
 - [x] **Phase 03: Operational Visibility Surfaces** — NOTIF-01 + DASH-01 + MSG-01 (shipped outside GSD on 2026-05-06, commit e461156). Tasks substrate (V1) also shipped 2026-05-06 via PR #112 (FOLL-01 / FOLL-02 covered).
 - [ ] **Phase 04: Tasks Integrations (V2 — Slack + Google Calendar)** — Outbound delivery surfaces for the V1 Tasks substrate
+- [ ] **Phase 05: Agent Outreach** — Extend SMS flows (composer, bulk, sequences, templates, inbound triage) to address the listing agent on a property, not only the homeowner
 
 ## Phase Details
 
@@ -92,6 +93,43 @@ Plans:
 
 ---
 
+### Phase 05: Agent Outreach
+
+**Goal:** Extend Sandra's existing SMS plumbing — composer, bulk send, sequences, templates, inbound triage — so it can address either the homeowner *or* the listing agent on a property. Today every flow is hard-wired to the homeowner; agent contact info is imported and stored but never messaged.
+
+**Depends on:** None blocking. The data model (`properties.agent_contact_id`, `agent_details` sidecar) is already in place. Can run in parallel with or after Phase 04.
+
+**Requirements:** AGENT-01, AGENT-02, AGENT-03, AGENT-04, AGENT-05
+
+**Success Criteria** (what must be TRUE):
+  1. From a lead detail page, a user can choose Homeowner or Agent as the SMS recipient (when both are present), send a message, and see it correctly attributed in the conversation thread.
+  2. Bulk SMS supports a recipient-role filter (Homeowners / Agents / Both); only contacts in the chosen role(s) receive a message.
+  3. Sequences can be configured to target homeowners or agents; enrollment populates the correct contact for each scheduled message.
+  4. Templates render `{{recipient.first_name}}` correctly for both roles, with no broken substitutions in existing homeowner-targeted templates.
+  5. An inbound SMS from a known agent phone number lands on the correct property thread and is visually labeled as agent-originated.
+  6. CI is green: typecheck + unit + RTL + Playwright golden paths (including a new agent-SMS e2e test).
+  7. No regression: every existing homeowner SMS flow still works exactly as before.
+
+**Plans:** Pending — see `.planning/phases/05-agent-outreach/05-CONTEXT.md` for the strategy. Run `/gsd-discuss-phase 05` then `/gsd-plan-phase 05` to break into sub-plans.
+
+**Strategy (5 incremental slices):**
+1. Manual agent SMS from lead detail page (smallest viable — proves the recipient-resolution pattern)
+2. Bulk agent SMS with role filter
+3. Sequences targeting agents
+4. Recipient-aware templates
+5. Inbound triage for agent replies
+
+**UI hint**: yes — recipient picker on lead detail composer, role filter on bulk SMS, role selector on sequence editor, role badge on inbox conversations.
+
+**Notes / open questions for discuss-phase:**
+- Recipient picker shape (radio inline vs. tabs vs. two visible buttons)
+- Agent contact card styling on lead detail (match Homeowner card or visually distinguish?)
+- Bulk "Both" UX (one click → two sends, or require two separate actions?)
+- Inbox role badge — text label, color chip, or icon?
+- Backfill policy for properties imported before this phase
+
+---
+
 ## Out of Scope (this milestone)
 
 See REQUIREMENTS.md > Out of Scope for the full list and rationale.
@@ -102,3 +140,4 @@ See REQUIREMENTS.md > Out of Scope for the full list and rationale.
 |-------|----------------|--------|-----------|
 | 03. Operational Visibility Surfaces | — | Shipped (outside GSD) + V1 Tasks via PR #112 | 2026-05-06 |
 | 04. Tasks Integrations (V2 — Slack + Calendar) | 0/10 | Plans created — awaiting /gsd-execute-phase 04 | — |
+| 05. Agent Outreach | 0/0 | Strategy drafted — awaiting /gsd-discuss-phase 05 | — |
