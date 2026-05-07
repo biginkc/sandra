@@ -22,7 +22,11 @@ That surface is too coarse for the user's daily workflow. He cannot:
 
 Pain compounds with every CSV import he runs. The competitor research surfaced REISift's "Filter Blocks" architecture as the right IA — block-stack drawer that scales from 5 to 50+ filters cleanly. The existing `Sheet` primitive at `src/components/ui/sheet.tsx` already provides the right-side drawer shell.
 
-A separate Claude session is running Phase 04 (Tasks Integrations — Slack + Calendar) in parallel in a different worktree; the two phases are independent (different surfaces, different DB objects, different migration numbers).
+**Recent foundational work on `main` that this SPEC must respect:**
+- **Migration 054 (Stage 1 — memberships + RLS rewrite)**: shipped 2026-05-07. Creates `memberships(user_id, org_id, role)` table; rewrites RLS on 25 tenant tables to scope by `org_id IN (SELECT m.org_id FROM memberships m WHERE m.user_id = auth.uid())`. New helpers `src/lib/auth/memberships.ts` and `src/lib/auth/require-org-membership.ts`. Multi-user integration test fixture at `tests/integration/fixtures/multi-user.ts`. **Every new query and table in Phase 05 must honor this regime.**
+- **Twilio 10DLC adapter**: shipped 2026-05-07. Adds `twilio` as a value alongside `dialpad` for `messages.provider`. The `MessagingProvider` interface is unchanged. Phase 05's Engagement and Last-Message-Age blocks query `messages.direction` / `messages.created_at` only and are unaffected by this migration.
+
+A separate Claude session is running Phase 04 (Tasks Integrations — Slack + Calendar) in parallel in a different worktree; the two phases are independent (different surfaces, different DB objects, separate migration slots — Phase 04 needs two migrations, Phase 05 needs one; whichever worktree commits first claims the next slot).
 
 ## Requirements
 
@@ -54,18 +58,22 @@ A separate Claude session is running Phase 04 (Tasks Integrations — Slack + Ca
 
 5. **Quick Filters chip bar replaces existing 5 chips**: Per-user pinned saved presets render as chips above the table.
    - Current: 5 hardcoded chips render above the table from `prospects-table.tsx`. No way to pin custom filters.
-   - Target: The 5 existing chips are removed. Above the table renders a per-user Quick Filters chip bar populated from `saved_filters WHERE starred = true AND user_id = current_user`. Clicking a chip activates that preset (rehydrates the drawer, applies the filters, updates the URL). Clicking the active chip again deactivates it. The 5 base presets seeded by migration default to starred for every user, so the bar is non-empty on first render.
-   - Acceptance: After login on a clean account, the Quick Filters bar shows 5 chips: **Stacked** · **Vacant** · **Engaged** · **Cold** · **High Equity**. Clicking **Vacant** filters the table to vacant-only and updates the URL. Clicking again clears it. The old `?vacant=1`, `?cass=verified`, `?engagement=contacted`, `?market=…`, `?assignee=…` URL params no longer drive any chip in the page (they may be silently honored as a back-compat translation in v1; no UI exposes them).
+   - Target: The 5 existing chips are removed. Above the table renders a Quick Filters chip bar populated by an RLS-scoped query: each user sees their own starred custom presets PLUS the base presets for any org they're a member of (`is_base = true`). Clicking a chip activates that preset (rehydrates the drawer, applies the filters, updates the URL). Clicking the active chip again deactivates it. The 5 base presets seeded by migration are visible to every member of the org via the read-RLS policy, so the bar is non-empty on first render even before a user has saved anything.
+   - Acceptance: After login on a clean account, the Quick Filters bar shows 5 chips: **Stacked** · **Vacant** · **Engaged** · **Cold** · **High Equity**. Clicking **Vacant** filters the table to vacant-only and updates the URL. Clicking again clears it. A multi-user integration test (per the membership fixture) confirms: user A's custom starred preset does NOT appear in user B's Quick Filters bar. The old `?vacant=1`, `?cass=verified`, `?engagement=contacted`, `?market=…`, `?assignee=…` URL params no longer drive any chip in the page (they may be silently honored as a back-compat translation in v1; no UI exposes them).
 
 6. **Saved Presets persistence**: Users can save their current filter stack as a named preset, recall it later, and pin it to the Quick Filters bar.
    - Current: No preset persistence exists.
    - Target: A `saved_filters` table (created in this phase's migration) stores `(id, org_id, user_id, name, filters_json, starred, is_base, last_run_at, last_count, created_at, updated_at)`. The drawer footer has an inline "Save as new preset…" checkbox that, when checked, reveals a name input. Clicking "Show N prospects" with the checkbox active creates the preset. Saved presets appear in a "Preset" dropdown at the top of the drawer (grouped: ─ Base ─ then ─ Mine ─). Selecting a preset rehydrates the drawer with that block stack. Each preset has a star toggle to pin/unpin to the Quick Filters bar.
    - Acceptance: Configuring 3 blocks, checking "Save as new preset…", entering "KC Out-of-State", and clicking Show prospects creates a row in `saved_filters` with the block stack serialized in `filters_json`. Refreshing the page shows "KC Out-of-State" in the Preset dropdown. Starring it adds it as a chip in the Quick Filters bar. Unstarring removes it.
 
-7. **Migration: `saved_filters` table + 5 base presets seed (idempotent)**: The drawer's persistence layer is created via a CI-applied migration.
-   - Current: No `saved_filters` table exists. `supabase/migrations/` contains 053 as the highest-numbered file.
-   - Target: A new migration file `supabase/migrations/0NN_saved_filters.sql` (NN = next available; the parallel Phase 04 may take 054 + 055, so this phase takes 056 — exact number determined at write-time by listing the migrations directory). Creates `saved_filters` table with the schema above plus an index on `(user_id, starred desc, name)` and another on `(org_id, is_base) WHERE is_base = true`. Seeds 5 idempotent base preset rows per organization for the BMH Group org (with `is_base = true`, `user_id = NULL`). Per memory `feedback_migrations_only_via_ci.md`: the .sql commits to `supabase/migrations/`; CI workflow `db-migrate.yml` applies to prod + test. No local `apply_migration` MCP call.
-   - Acceptance: After `db-migrate.yml` runs in CI, `select count(*) from saved_filters where is_base = true and org_id = '00000000-0000-0000-0000-000000000bbb'` returns 5. The seed is idempotent — re-running the migration does not duplicate rows. `\d saved_filters` shows the columns + indexes.
+7. **Migration: `saved_filters` table + RLS policies + 5 base presets seed (idempotent)**: The drawer's persistence layer is created via a CI-applied migration that honors the Stage 1 RLS regime (migration 054 — memberships foundation).
+   - Current: No `saved_filters` table exists. `supabase/migrations/` contains 054 (`memberships_and_rls_rewrite.sql`) as the highest-numbered file. The parallel Phase 04 worktree has not yet committed any migrations.
+   - Target: A new migration file `supabase/migrations/055_saved_filters.sql`. Creates `saved_filters` table with `(id, org_id, user_id, name, filters_json, starred, is_base, last_run_at, last_count, created_at, updated_at)`. Indexes: `(user_id, starred desc, name)` for the Quick Filters bar query and `(org_id, is_base) WHERE is_base = true` for the base preset lookup. RLS enabled with three policies matching the Stage 1 membership pattern (per `054_memberships_and_rls_rewrite.sql` precedent):
+     - **Read own + base**: `for select to authenticated using (user_id = auth.uid() OR (is_base = true AND org_id IN (SELECT m.org_id FROM memberships m WHERE m.user_id = auth.uid())))`
+     - **Write own**: `for insert / update / delete to authenticated using (user_id = auth.uid()) with check (user_id = auth.uid())`
+     - **Service-role full** for the seed step (base presets are seeded with `user_id = NULL` and bypass the user-write policy)
+     Seeds 5 idempotent base preset rows for the BMH Group org (`is_base = true`, `user_id = NULL`). Per memory `feedback_migrations_only_via_ci.md`: the .sql commits to `supabase/migrations/`; CI workflow `db-migrate.yml` applies to prod + test. No local `apply_migration` MCP call. If the parallel Phase 04 worktree commits its migrations first and claims 055, this migration renumbers to the next available slot at write-time.
+   - Acceptance: After `db-migrate.yml` runs in CI, `select count(*) from saved_filters where is_base = true and org_id = '00000000-0000-0000-0000-000000000bbb'` returns 5. The seed is idempotent — re-running the migration does not duplicate rows. RLS policies match the Stage 1 pattern: an integration test using the multi-user fixture (`tests/integration/fixtures/multi-user.ts`) confirms (a) user A cannot see user B's custom presets, (b) both users in the same org can see the same base presets, (c) a user with no membership in the org sees zero rows.
 
 8. **URL state synchronization**: Filter state is reflected in a single URL param so deep links, browser back, and link-sharing work.
    - Current: 5 hardcoded URL params drive the existing chips.
@@ -112,6 +120,7 @@ A separate Claude session is running Phase 04 (Tasks Integrations — Slack + Ca
 ## Constraints
 
 - **Migrations are CI-only** (memory `feedback_migrations_only_via_ci.md`): the .sql file commits to `supabase/migrations/`; `db-migrate.yml` applies to prod + test. Never call `apply_migration` MCP locally against prod.
+- **RLS / membership-scoped queries** (per migration 054): every query Phase 05 introduces — Prospects table predicates, the saved_filters reads/writes, the count-prospects-for-filter server action — runs through the new RLS regime. Service-role bypass is reserved for the migration seed only. New helpers `src/lib/auth/memberships.ts` and `src/lib/auth/require-org-membership.ts` exist for explicit membership checks where RLS isn't sufficient (e.g., authoritative `org_id` selection in the count action).
 - **URL state pattern** (memory `feedback_no_usestate_mirror_of_server_props.md`): render from props (URL is a prop), use `router.replace` + `router.refresh` after URL updates, key children by URL params; do not mirror server props in `useState`.
 - **Vendor abstraction** (memory `feedback_vendor_abstraction.md`): although this phase doesn't touch external vendors directly, any new query layer must keep the schema vendor-agnostic — predicates work on the existing `properties` columns, not on vendor-specific shapes.
 - **Cost-bearing actions need explicit opt-in** (memory `feedback_explicit_opt_in_for_paid_actions.md`): no filter on its own triggers paid vendor calls (skip-trace, etc.) — these stay behind explicit user clicks in the bulk-action menu.
@@ -137,7 +146,9 @@ A separate Claude session is running Phase 04 (Tasks Integrations — Slack + Ca
 - [ ] Clicking a Quick Filter chip rehydrates the drawer + filters the table + updates the URL; clicking again deactivates.
 - [ ] Saved Preset save flow: configure 3 blocks → check "Save as new preset…" → name → Show prospects → preset exists in the dropdown after page refresh.
 - [ ] Starring a saved preset adds it to the Quick Filters bar; unstarring removes it.
-- [ ] Migration `0NN_saved_filters.sql` lands in CI; `select count(*) from saved_filters where is_base = true and org_id = '00000000-0000-0000-0000-000000000bbb'` returns 5; re-running the migration does not duplicate base preset rows.
+- [ ] Migration `055_saved_filters.sql` (or next available slot if Phase 04 lands first) commits with three RLS policies: read-own-plus-base, write-own, service-role-full. `db-migrate.yml` applies to prod + test.
+- [ ] After CI applies the migration, `select count(*) from saved_filters where is_base = true and org_id = '00000000-0000-0000-0000-000000000bbb'` returns 5; re-running the migration does not duplicate base preset rows.
+- [ ] Multi-user RLS isolation test (using `tests/integration/fixtures/multi-user.ts`) confirms: user A in org X cannot read user B's custom presets; both users see the same base presets for org X; a user with no membership in org X reads zero rows.
 - [ ] URL `?filters=<encoded-json>` deep-links work: pasting a URL into a fresh tab renders the filtered table without flicker.
 - [ ] Old chip URL params (`?vacant=1`, `?cass=verified`, `?engagement=contacted`, `?market=…`, `?assignee=…`) continue to filter correctly via the back-compat translator.
 - [ ] Bulk actions (Add-to-list / Apply-tag / Assign / Skip-trace / Start-sequence) operate on the filtered set, including across pagination when "select all matching" is chosen.
@@ -155,7 +166,7 @@ A separate Claude session is running Phase 04 (Tasks Integrations — Slack + Ca
 | Goal Clarity       | 0.92  | 0.75 | ✓      | Approved plan + 5 research files + schema audit ground every block |
 | Boundary Clarity   | 0.88  | 0.70 | ✓      | v1/v1.1/v2 phasing locked; deferred items individually named       |
 | Constraint Clarity | 0.78  | 0.65 | ✓      | Migration discipline, URL state, perf flags all called out         |
-| Acceptance Criteria| 0.82  | 0.70 | ✓      | 24 pass/fail checkboxes, all falsifiable                           |
+| Acceptance Criteria| 0.82  | 0.70 | ✓      | 26 pass/fail checkboxes, all falsifiable                           |
 | **Ambiguity**      | 0.14  | ≤0.20| ✓      |                                                                    |
 
 ## Interview Log
@@ -169,6 +180,7 @@ A separate Claude session is running Phase 04 (Tasks Integrations — Slack + Ca
 | —     | Schema audit   | What other filters can the schema power that we missed?  | **Add 4 v1 blocks** — Unread Inbound · Needs Human Attention · Has Open Tasks · Motivation Level |
 | —     | Viability check| Source filter — enum vs csv_imports junction?            | v1: **enum only**; v1.1: filter by import job (needs migration)                                  |
 | —     | Viability check| Performance: denorm `last_inbound_at` now or defer?      | **Defer** — fine at 1,462 prospects; denorm at ~10k                                              |
+| —     | Late-breaking  | Migration 054 (memberships + RLS rewrite) landed mid-spec | **SPEC delta**: `saved_filters` ships with three membership-scoped RLS policies + multi-user test |
 
 (Spec-phase interview was skipped — gate passed on initial scoring against the approved plan from `~/.claude/plans/also-please-look-at-cozy-lobster.md`. Decisions locked above came from the chat-driven gray-area work in plan mode.)
 
