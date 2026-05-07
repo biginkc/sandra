@@ -84,16 +84,20 @@ export async function ensureTestUser(
     userId = created.user.id;
   }
 
-  // Verify-or-repair the membership row. Idempotent via the unique
-  // (user_id, org_id) constraint from migration 054. Cast through a
-  // narrow writer interface because the generated Database types haven't
-  // been regenerated for memberships yet — same pattern as
+  // Verify-or-repair the membership row. Real upsert: insert if missing,
+  // UPDATE role to "owner" if a row exists with a different role. We need
+  // owner because some e2e paths (admin actions, webhook consumers) are
+  // owner-gated post-Stage 1, and a stale "member" row would silently
+  // block them.
+  //
+  // Cast through a narrow writer interface because the generated Database
+  // types haven't been regenerated for memberships yet — same pattern as
   // src/lib/auth/memberships.ts.
   type MembershipWriter = {
     from(table: "memberships"): {
       upsert(
         values: { user_id: string; org_id: string; role: "owner" | "member" },
-        options?: { onConflict?: string; ignoreDuplicates?: boolean },
+        options?: { onConflict?: string },
       ): Promise<{ error: { message: string } | null }>;
     };
   };
@@ -103,7 +107,7 @@ export async function ensureTestUser(
     .from("memberships")
     .upsert(
       { user_id: userId, org_id: DEFAULT_ORG_ID, role: "owner" },
-      { onConflict: "user_id,org_id", ignoreDuplicates: true },
+      { onConflict: "user_id,org_id" },
     );
   if (membershipErr) {
     throw new Error(
