@@ -33,6 +33,13 @@ yarn-error.log*
 # env files (can opt-in for committing if needed)
 .env*
 
+# local credentials — never committed
+/.secrets/
+
+# operating documents — formation docs, EIN letters, contracts, signed PDFs.
+# Contains PII and corporate records — never committed.
+/docs/operating/
+
 # vercel
 .vercel
 
