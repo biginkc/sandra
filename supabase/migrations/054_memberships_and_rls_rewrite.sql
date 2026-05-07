@@ -79,6 +79,17 @@ alter table public.webhook_consumers
 create index if not exists idx_webhook_consumers_org_id
   on public.webhook_consumers (org_id);
 
+-- test_sms_log was created as test infrastructure before every tenant table
+-- consistently carried org_id. Add the column before policy rewrite so older
+-- prod/test schemas can apply this migration forward-only.
+alter table public.test_sms_log
+  add column if not exists org_id uuid not null
+    default '00000000-0000-0000-0000-000000000bbb'::uuid
+    references public.organizations(id);
+
+create index if not exists idx_test_sms_log_org_id
+  on public.test_sms_log (org_id);
+
 -- ----------------------------------------------------------------------------
 -- 3. Drop broad authenticated-all policies
 -- ----------------------------------------------------------------------------
