@@ -243,3 +243,46 @@ describe("<CockpitView /> DNC toggle", () => {
     expect(screen.queryByTestId("dnc-toggle-count")).not.toBeInTheDocument();
   });
 });
+
+describe("<CockpitView /> chip order (feedback-f E2b)", () => {
+  it("renders chips in priority order: Unread, Mine, Unassigned, All, Unknown, Dismissed", () => {
+    render(<CockpitView {...baseProps} filter="all" threads={[]} />);
+
+    const chips = screen
+      .getByTestId("inbox-filters")
+      .querySelectorAll("[data-testid^='filter-']");
+    const ids = Array.from(chips).map((c) => c.getAttribute("data-testid"));
+
+    expect(ids).toEqual([
+      "filter-unread",
+      "filter-mine",
+      "filter-unassigned",
+      "filter-all",
+      "filter-unknown",
+      "filter-dismissed",
+    ]);
+  });
+
+  it("when no current user, chip order collapses to: Unread, All, Unknown, Dismissed", () => {
+    render(
+      <CockpitView
+        {...baseProps}
+        filter="all"
+        threads={[]}
+        currentUserId={null}
+      />,
+    );
+
+    const chips = screen
+      .getByTestId("inbox-filters")
+      .querySelectorAll("[data-testid^='filter-']");
+    const ids = Array.from(chips).map((c) => c.getAttribute("data-testid"));
+
+    expect(ids).toEqual([
+      "filter-unread",
+      "filter-all",
+      "filter-unknown",
+      "filter-dismissed",
+    ]);
+  });
+});

@@ -68,11 +68,15 @@ export function InboxFilters({
       className="flex flex-wrap items-center gap-2"
       data-testid="inbox-filters"
     >
+      {/* feedback-f E2b — Unread first, then Mine, Unassigned, All, then
+         the catch-all buckets. Matches Jarrad's ranked priority for what
+         deserves attention first when the inbox is busy. */}
       <FilterChip
-        label="All"
-        active={active === "all"}
-        onClick={() => setFilter("all")}
-        testId="filter-all"
+        label="Unread"
+        active={active === "unread"}
+        badge={unreadCount > 0 ? String(unreadCount) : undefined}
+        onClick={() => setFilter("unread")}
+        testId="filter-unread"
       />
       {showAssignmentChips && (
         <>
@@ -91,11 +95,10 @@ export function InboxFilters({
         </>
       )}
       <FilterChip
-        label="Unread"
-        active={active === "unread"}
-        badge={unreadCount > 0 ? String(unreadCount) : undefined}
-        onClick={() => setFilter("unread")}
-        testId="filter-unread"
+        label="All"
+        active={active === "all"}
+        onClick={() => setFilter("all")}
+        testId="filter-all"
       />
       <FilterChip
         label="Unknown"

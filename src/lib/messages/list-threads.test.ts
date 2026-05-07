@@ -248,3 +248,81 @@ describe("listThreads — isOptedOut (DNC) flag", () => {
     expect(threads[0]?.isOptedOut).toBe(true);
   });
 });
+
+describe("listThreads — unread-first sort (feedback-f E2a)", () => {
+  it("bubbles unread threads to the top regardless of timestamp", async () => {
+    // Build 4 contacts: oldest unread, recent read, recent unread, oldest read.
+    // After sort, expect: recent-unread, oldest-unread, recent-read, oldest-read.
+    const now = Date.now();
+    const messages = [
+      // contact_id, age_ms, has_unread (read_at null + inbound)
+      { cid: "c-recent-read", age: 1_000, unread: false },
+      { cid: "c-recent-unread", age: 5_000, unread: true },
+      { cid: "c-old-unread", age: 60_000, unread: true },
+      { cid: "c-old-read", age: 90_000, unread: false },
+    ].map((m) => ({
+      contact_id: m.cid,
+      property_id: `p-${m.cid}`,
+      body: "x",
+      direction: "inbound" as const,
+      created_at: new Date(now - m.age).toISOString(),
+      read_at: m.unread ? null : new Date(now - m.age + 1).toISOString(),
+    }));
+
+    const contacts = new Map(
+      messages.map((m) => [
+        m.contact_id,
+        { id: m.contact_id, first_name: null, last_name: null, entity_name: m.contact_id, phone_1: null },
+      ]),
+    );
+    const properties = new Map(
+      messages.map((m) => [
+        m.property_id,
+        { id: m.property_id, address: null, city: null, state: null, assigned_user_id: null },
+      ]),
+    );
+
+    const { supabase } = makeStub({ messages, contacts, properties });
+    const threads = await listThreads(supabase, {});
+
+    expect(threads.map((t) => t.contactId)).toEqual([
+      "c-recent-unread",
+      "c-old-unread",
+      "c-recent-read",
+      "c-old-read",
+    ]);
+  });
+
+  it("preserves recency-desc within the unread group", async () => {
+    const now = Date.now();
+    const messages = [
+      { cid: "u-newer", age: 2_000 },
+      { cid: "u-older", age: 60_000 },
+    ].map((m) => ({
+      contact_id: m.cid,
+      property_id: `p-${m.cid}`,
+      body: "x",
+      direction: "inbound" as const,
+      created_at: new Date(now - m.age).toISOString(),
+      read_at: null,
+    }));
+
+    const contacts = new Map(
+      messages.map((m) => [
+        m.contact_id,
+        { id: m.contact_id, first_name: null, last_name: null, entity_name: m.contact_id, phone_1: null },
+      ]),
+    );
+    const properties = new Map(
+      messages.map((m) => [
+        m.property_id,
+        { id: m.property_id, address: null, city: null, state: null, assigned_user_id: null },
+      ]),
+    );
+
+    const { supabase } = makeStub({ messages, contacts, properties });
+    const threads = await listThreads(supabase, {});
+
+    expect(threads.map((t) => t.contactId)).toEqual(["u-newer", "u-older"]);
+  });
+});

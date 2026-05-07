@@ -177,7 +177,15 @@ export async function listThreads(
     });
   }
 
-  threads.sort((a, b) => b.lastMessageAt.localeCompare(a.lastMessageAt));
+  // Sort: unread threads bubble to the top regardless of recency, then
+  // most-recent first within each group. Per feedback-f E2a — anything
+  // with unread inbound demands attention before everything else.
+  threads.sort((a, b) => {
+    const aUnread = a.unreadCount > 0 ? 1 : 0;
+    const bUnread = b.unreadCount > 0 ? 1 : 0;
+    if (aUnread !== bUnread) return bUnread - aUnread;
+    return b.lastMessageAt.localeCompare(a.lastMessageAt);
+  });
   return threads;
 }
 
