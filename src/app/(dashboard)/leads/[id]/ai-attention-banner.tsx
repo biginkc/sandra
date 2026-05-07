@@ -3,6 +3,7 @@
 import { useState } from "react";
 
 import { Button } from "@/components/ui/button";
+import { parseEscalationReason } from "@/lib/ai-responder/format-reason";
 
 import { clearNeedsHumanAttention } from "./ai-actions";
 
@@ -46,7 +47,7 @@ export function AiAttentionBanner({
     }
   };
 
-  const friendly = formatEscalationReason(reason);
+  const friendly = parseEscalationReason(reason)?.longLabel ?? null;
   const when = escalatedAt ? formatRelative(escalatedAt) : null;
 
   return (
@@ -74,37 +75,6 @@ export function AiAttentionBanner({
       </Button>
     </div>
   );
-}
-
-/**
- * Map the `reason` string the dispatcher writes into a human-readable
- * label. Format from dispatch.ts: `<gate>:<detail>` (e.g.
- * `keyword:price_offer`, `sentiment:hostile`, `low_confidence:0.42`,
- * `safety:contains_dollar_amount`, `model:asked for price`,
- * `send_blocked:no_consent`, `generate_error`).
- */
-function formatEscalationReason(reason: string | null | undefined): string | null {
-  if (!reason) return null;
-  const [gate, ...rest] = reason.split(":");
-  const detail = rest.join(":");
-  switch (gate) {
-    case "keyword":
-      return `keyword match (${detail.replace(/_/g, " ")})`;
-    case "sentiment":
-      return `seller sounded ${detail}`;
-    case "low_confidence":
-      return `model unsure (${detail})`;
-    case "safety":
-      return `unsafe reply blocked (${detail.replace(/_/g, " ")})`;
-    case "model":
-      return `model chose to escalate${detail ? `: ${detail}` : ""}`;
-    case "send_blocked":
-      return `send pipeline blocked (${detail.replace(/_/g, " ")})`;
-    case "generate_error":
-      return "model call failed";
-    default:
-      return reason;
-  }
 }
 
 /** "5 minutes ago" / "2 hours ago" — small inline helper to avoid pulling
