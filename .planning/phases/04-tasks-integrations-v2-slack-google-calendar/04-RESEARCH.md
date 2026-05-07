@@ -10,7 +10,7 @@ Phase 04 wires the existing `task_assigned` event into two outbound delivery cha
 
 CONTEXT.md has already locked the major architectural decisions (D-01 through D-17). This research fills in the implementation-level details: exact Slack/Google API shapes, exact pgcrypto SQL, the precise `after()` semantics on Vercel Pro Fluid Compute, the canonical block_actions payload structure, and the signature-verification sequence for Slack. Several CONTEXT entries had `[ASSUMED]` framing — research either confirms them with an authoritative citation, or flags the few remaining assumptions in the **Assumptions Log** below.
 
-**Primary recommendation:** Build it as four small surfaces in this order — (1) DB migration `052_user_oauth_tokens.sql` with composite PK + SECURITY DEFINER decrypt, (2) Slack OAuth route pair + bot adapter, (3) Calendar OAuth route pair + adapter, (4) `/settings/integrations` page wiring connect/disconnect + per-channel toggles. The dispatch wiring is a four-line change to `dispo-actions.ts` (wrap existing `dispatchTaskAssigned` plus two new dispatchers in a single `after()` block).
+**Primary recommendation:** Build it as four small surfaces in this order — (1) DB migration `053_user_oauth_tokens.sql` with composite PK + SECURITY DEFINER decrypt, (2) Slack OAuth route pair + bot adapter, (3) Calendar OAuth route pair + adapter, (4) `/settings/integrations` page wiring connect/disconnect + per-channel toggles. The dispatch wiring is a four-line change to `dispo-actions.ts` (wrap existing `dispatchTaskAssigned` plus two new dispatchers in a single `after()` block).
 
 <user_constraints>
 ## User Constraints (from CONTEXT.md)
@@ -237,8 +237,8 @@ src/
 │               └── actions.ts              # server actions: setEnabled, disconnect
 └── ...
 supabase/migrations/
-├── 052_user_oauth_tokens.sql               # table + RLS + decrypt fn
-└── 053_user_integration_prefs.sql          # per-channel enabled toggle + per-user timezone
+├── 053_user_oauth_tokens.sql               # table + RLS + decrypt fn
+└── 054_user_integration_prefs.sql          # per-channel enabled toggle + per-user timezone
 ```
 
 ### Pattern 1: SECURITY DEFINER decrypt function
@@ -1018,7 +1018,7 @@ The repo's AGENTS.md explicitly warns: **"This is NOT the Next.js you know."** S
 From the user's global memory:
 - **Vendor abstraction:** every external service goes through a common interface + swappable adapters. Slack and Google adapters here follow `src/lib/messaging/providers/dialpad.ts` shape.
 - **Async everywhere:** the dispatch is fire-and-forget (`after()`) — already aligned with this constraint.
-- **Sandra migrations CI-only:** migration 052 + 053 ship as `.sql` files; `db-migrate.yml` workflow auto-applies on merge. NEVER `apply_migration` against prod via MCP.
+- **Sandra migrations CI-only:** migration 053 + 054 ship as `.sql` files; `db-migrate.yml` workflow auto-applies on merge. NEVER `apply_migration` against prod via MCP.
 - **Cost-bearing actions need explicit opt-in:** N/A here — Slack/Calendar API calls are free at our scale.
 - **No SQL in chat:** schema described in prose; SQL lives in plan/migration files.
 - **Test every fix; TDD lite:** test cases listed before file changes — see Validation Architecture above.
