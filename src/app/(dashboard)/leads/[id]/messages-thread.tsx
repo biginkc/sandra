@@ -93,28 +93,72 @@ export function MessagesThread({ initial, contactId, propertyId }: Props) {
   // Group messages by local-date string so we can drop a separator
   // pill at every day boundary. `toDateString()` is locale-stable for
   // grouping purposes (always YYYY-MM-DD-equivalent for the runtime tz).
-  const items: Array<{ kind: "sep"; key: string; label: string } | { kind: "msg"; msg: Message }> = [];
+  //
+  // We also tag each message bubble with `isContinuation` (same direction
+  // as the previous message item, no day-separator pill in between) and
+  // `isLastInGroup` (next item is either a separator, end of list, or a
+  // direction change). This drives the per-bubble margins + tail-rounding
+  // + timestamp visibility — three short consecutive inbound replies now
+  // read as a clear burst rather than a wall of text.
+  type SepItem = { kind: "sep"; key: string; label: string };
+  type MsgItem = {
+    kind: "msg";
+    msg: Message;
+    isContinuation: boolean;
+    isLastInGroup: boolean;
+  };
+  const items: Array<SepItem | MsgItem> = [];
   let prevDay: string | null = null;
+  let prevDirection: Message["direction"] | null = null;
   for (const m of messages) {
     const day = new Date(m.created_at).toDateString();
     if (day !== prevDay) {
       items.push({ kind: "sep", key: `sep-${day}`, label: formatDayLabel(m.created_at) });
       prevDay = day;
+      // Day boundary always breaks the group — next bubble starts fresh.
+      prevDirection = null;
     }
-    items.push({ kind: "msg", msg: m });
+    const isContinuation = prevDirection !== null && prevDirection === m.direction;
+    items.push({
+      kind: "msg",
+      msg: m,
+      isContinuation,
+      isLastInGroup: true, // patched in the second pass below
+    });
+    prevDirection = m.direction;
+  }
+  // Second pass: a message is "last in group" when the NEXT item is either
+  // not a message or has a different direction (i.e. a separator follows
+  // it, the list ends, or the sender flips). This is what lets us show
+  // the timestamp only on the trailing bubble of each burst.
+  for (let i = 0; i < items.length; i++) {
+    const it = items[i];
+    if (it.kind !== "msg") continue;
+    const next = items[i + 1];
+    it.isLastInGroup =
+      !next || next.kind !== "msg" || next.msg.direction !== it.msg.direction;
   }
 
   return (
-    <div className="flex flex-col gap-4" data-testid="messages-thread">
+    <div className="flex flex-col" data-testid="messages-thread">
       {items.map((it) =>
         it.kind === "sep" ? (
-          <div key={it.key} className="flex justify-center" data-testid="messages-thread-day-sep">
+          <div
+            key={it.key}
+            className="flex justify-center mt-4 mb-1"
+            data-testid="messages-thread-day-sep"
+          >
             <span className="text-[11px] tabular-nums text-muted-foreground bg-muted border border-border px-3 py-1 rounded-full uppercase tracking-wider font-medium">
               {it.label}
             </span>
           </div>
         ) : (
-          <MessageBubble key={it.msg.id} message={it.msg} />
+          <MessageBubble
+            key={it.msg.id}
+            message={it.msg}
+            isContinuation={it.isContinuation}
+            isLastInGroup={it.isLastInGroup}
+          />
         ),
       )}
     </div>
@@ -146,7 +190,15 @@ function formatDayLabel(iso: string): string {
   });
 }
 
-function MessageBubble({ message }: { message: Message }) {
+function MessageBubble({
+  message,
+  isContinuation,
+  isLastInGroup,
+}: {
+  message: Message;
+  isContinuation: boolean;
+  isLastInGroup: boolean;
+}) {
   const outbound = message.direction === "outbound";
   const status = message.status;
   const time = new Date(message.created_at).toLocaleTimeString(undefined, {
@@ -154,26 +206,42 @@ function MessageBubble({ message }: { message: Message }) {
     minute: "2-digit",
   });
 
+  // Per-bubble vertical spacing replaces the old blanket `gap-4` on the
+  // container. A continuation bubble (same sender, same day) gets a
+  // tighter `mt-1` so the burst reads as one beat; a fresh sender or
+  // post-separator bubble gets `mt-3` to clearly delimit the boundary.
+  // The very first message in the thread has no top margin (no `mt-0`
+  // ambiguity — Tailwind ignores `mt-0`-equivalent absence).
+  const wrapperSpacing = isContinuation ? "mt-1" : "mt-3 first:mt-0";
+
+  // Drop the "tail" notch on continuation bubbles so each burst reads
+  // as a stack with one tail. Outbound's tail is top-right; inbound's
+  // top-left. Continuations get a fully-rounded top.
+  const bubbleShape = outbound
+    ? `bg-primary text-primary-foreground p-3 rounded-2xl${
+        isContinuation ? "" : " rounded-tr-none"
+      }`
+    : `bg-muted text-foreground p-3 rounded-2xl border border-border${
+        isContinuation ? "" : " rounded-tl-none"
+      }`;
+
   return (
     <div
       className={
-        outbound
+        (outbound
           ? "flex flex-col items-end ml-auto max-w-[80%]"
-          : "flex flex-col items-start max-w-[80%]"
+          : "flex flex-col items-start max-w-[80%]") + ` ${wrapperSpacing}`
       }
       data-direction={outbound ? "outbound" : "inbound"}
+      data-continuation={isContinuation ? "true" : "false"}
+      data-testid="messages-thread-msg"
     >
-      <div
-        className={
-          outbound
-            ? "bg-primary text-primary-foreground p-3 rounded-2xl rounded-tr-none"
-            : "bg-muted text-foreground p-3 rounded-2xl rounded-tl-none border border-border"
-        }
-      >
+      <div className={bubbleShape}>
         <div className="whitespace-pre-wrap break-words text-[14px] leading-relaxed">
           {message.body}
         </div>
       </div>
+      {isLastInGroup ? (
       <div
         className={`mt-1 flex items-center gap-1.5 text-[10px] tabular-nums text-muted-foreground ${
           outbound ? "mr-1" : "ml-1"
@@ -223,6 +291,7 @@ function MessageBubble({ message }: { message: Message }) {
             </Badge>
           )}
       </div>
+      ) : null}
     </div>
   );
 }

@@ -24,6 +24,7 @@ import { AiResponderToggle } from "./ai-responder-toggle";
 import { SkipTraceToggle } from "./skip-trace-toggle";
 import { SkipTraceButton } from "./skip-trace-button";
 import { CassWidget } from "./cass-widget";
+import { DeleteLeadButton } from "./delete-lead-button";
 import { InlineReply } from "./inline-reply";
 import { LeadAssigneeWidget } from "./assignee-widget";
 import { EnrollInSequenceWidget } from "./enroll-widget";
@@ -219,6 +220,12 @@ export default async function LeadDetailPage({
         }
         actions={
           <div className="flex items-center gap-1">
+            <Link href="/leads">
+              <Button variant="outline" size="sm" aria-label="Back to leads">
+                <ChevronLeft className="mr-1 h-4 w-4" />
+                Back to leads
+              </Button>
+            </Link>
             {prevId ? (
               <Link href={`/leads/${prevId}`}>
                 <Button variant="ghost" size="icon" aria-label="Previous">
@@ -241,6 +248,7 @@ export default async function LeadDetailPage({
                 <ChevronRight className="h-4 w-4" />
               </Button>
             )}
+            <DeleteLeadButton propertyId={lead.id} address={lead.address} />
           </div>
         }
       />

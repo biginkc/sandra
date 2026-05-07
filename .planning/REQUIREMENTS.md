@@ -17,6 +17,17 @@
 
 - [ ] **MSG-01**: The messages inbox includes an "Unread" filter that surfaces only conversations with at least one unread inbound message
 
+### Tasks (V1 — shipped via PR #112)
+
+- [x] **FOLL-01**: Follow-ups set via the dispo popover (nurture / callback_requested) are stored as task rows in the `tasks` table with the actor or chosen assignee, due_at, and related property.
+- [x] **FOLL-02**: The dashboard renders a "My Tasks" panel showing the current viewer's open tasks, split into Today and Upcoming buckets, with inline Done + Snooze (1d / 3d / 1w) actions.
+
+### Tasks Integrations (V2 — Phase 04)
+
+- [ ] **SLACK-01**: When a task is assigned to a user other than the actor, that user receives a Slack DM with task title, property address, due date, and a one-click "Mark Done" button. Clicking the button updates the task in the CRM and the Slack message reflects the new state.
+- [ ] **CAL-01**: When a task is created or its due_at changes, a corresponding 30-minute event lands on the assignee's Google Calendar (their primary calendar, in their stored timezone). Task completion does not delete the event (accepted tradeoff to avoid sync loops).
+- [ ] **INTEG-01**: Each user can connect / disconnect Slack and Google Calendar in `/settings/integrations` and toggle each delivery channel on/off independently. OAuth refresh tokens are stored encrypted; never logged.
+
 ## Future Requirements
 
 Deferred to a future milestone. Tracked but not in current roadmap.
@@ -38,15 +49,22 @@ Deferred to a future milestone. Tracked but not in current roadmap.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| DASH-01 | Phase 03 | Pending |
-| NOTIF-01 | Phase 03 | Pending |
-| MSG-01 | Phase 03 | Pending |
+| DASH-01 | Phase 03 | Shipped |
+| NOTIF-01 | Phase 03 | Shipped |
+| MSG-01 | Phase 03 | Shipped |
+| FOLL-01 | (V1, PR #112) | Shipped |
+| FOLL-02 | (V1, PR #112) | Shipped |
+| SLACK-01 | Phase 04 | Pending |
+| CAL-01 | Phase 04 | Pending |
+| INTEG-01 | Phase 04 | Pending |
 
 **Coverage:**
-- v2.1 requirements: 3 total
-- Mapped to phases: 3 ✓
+- v2.1 requirements: 8 total
+- Mapped to phases: 8 ✓
 - Unmapped: 0
+- Shipped: 5 (Phase 03 + V1 Tasks substrate)
+- Pending: 3 (Phase 04 — Slack + Calendar bundle)
 
 ---
 *Requirements defined: 2026-05-05*
-*Last updated: 2026-05-06 — roadmap created, all 3 requirements mapped to Phase 03*
+*Last updated: 2026-05-06 — Phase 04 (V2 integrations) added; FOLL-01/02 marked shipped via PR #112; SLACK-01, CAL-01, INTEG-01 pending discuss-phase*
