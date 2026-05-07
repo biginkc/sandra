@@ -6,6 +6,8 @@ import { read as xlsxRead, utils as xlsxUtils } from "xlsx";
 import { useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
+import { HelpCircle } from "lucide-react";
+
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -19,6 +21,8 @@ import {
   isPrecheckApplicable,
   precheckRows,
 } from "@/lib/csv/precheck";
+import { detectVendor, getPresetById } from "@/lib/csv/presets";
+import type { VendorPresetId } from "@/lib/csv/presets/types";
 import { cn } from "@/lib/utils";
 import {
   Select,
@@ -28,6 +32,8 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 
+import { FormatHelperBanner } from "../format-helper-banner";
+import { FormatHelperDialog } from "../format-helper-dialog";
 import { ListCombobox } from "../list-combobox";
 import type {
   CountyOption,
@@ -39,6 +45,9 @@ import type {
 const SOURCES: { value: WizardSource; label: string }[] = [
   { value: "dealmachine", label: "DealMachine" },
   { value: "propstream", label: "PropStream" },
+  { value: "titlepro", label: "TitlePro / DataTree" },
+  { value: "reisift", label: "REISift / DealMachine Skipped" },
+  { value: "agent_outreach", label: "BMH Agent Outreach" },
   { value: "driving_for_dollars", label: "Driving for dollars" },
   { value: "referral", label: "Referral" },
   { value: "cold_call", label: "Cold call" },
@@ -71,6 +80,17 @@ type Props = {
 export function StepUpload({ state, dispatch, counties }: Props) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [dragActive, setDragActive] = useState(false);
+  const [helpOpen, setHelpOpen] = useState(false);
+  const [scrollToPresetId, setScrollToPresetId] = useState<VendorPresetId | null>(null);
+
+  const openHelpForCurrent = () => {
+    setScrollToPresetId(state.detectedPreset?.id ?? null);
+    setHelpOpen(true);
+  };
+  const openHelpGeneric = () => {
+    setScrollToPresetId(null);
+    setHelpOpen(true);
+  };
 
   const parseCsvString = (csvString: string, file: File) => {
     Papa.parse<Record<string, string>>(csvString, {
@@ -97,6 +117,32 @@ export function StepUpload({ state, dispatch, counties }: Props) {
           rows,
         });
         toast.success(`Parsed ${rows.length} rows from ${file.name}.`);
+
+        // Format-helper auto-detect: fingerprint the file and, if it
+        // matches a known vendor, atomically apply the transform + set
+        // the source dropdown. The reducer snapshots pre-state so the
+        // user can Undo. Detection is pure-JS, sub-millisecond on the
+        // first ~20 sample rows.
+        const detection = detectVendor(headers, rows.slice(0, 20));
+        if (!detection) return;
+        const preset = getPresetById(detection.id);
+        if (preset.importable) {
+          const transformed = preset.transform(rows, headers);
+          dispatch({
+            type: "DETECT_AND_APPLY_PRESET",
+            detection,
+            transformedRows: transformed.rows,
+            transformedHeaders: transformed.headers,
+            stats: transformed.stats,
+            sourceSuggestion: transformed.suggestions?.sourceSuggestion ?? null,
+          });
+          toast.success(`Recognized ${preset.label} — auto-cleaned.`);
+        } else {
+          dispatch({
+            type: "RECORD_NON_IMPORTABLE_DETECTION",
+            detection,
+          });
+        }
       },
       error: (err: Error) => {
         toast.error(`Parse error: ${err.message}`);
@@ -146,11 +192,20 @@ export function StepUpload({ state, dispatch, counties }: Props) {
   };
 
   return (
+    <>
     <Card>
       <CardHeader>
         <CardTitle>Upload CSV</CardTitle>
         <CardDescription>
-          Pick your export, then choose the source and target market.
+          Pick your export. We&apos;ll auto-detect the source and clean it.{" "}
+          <button
+            type="button"
+            onClick={openHelpGeneric}
+            className="text-primary inline-flex items-center gap-1 underline-offset-2 hover:underline"
+          >
+            <HelpCircle className="size-3.5" />
+            Need help with your input file?
+          </button>
         </CardDescription>
       </CardHeader>
       <CardContent className="flex flex-col gap-4">
@@ -252,6 +307,18 @@ export function StepUpload({ state, dispatch, counties }: Props) {
           </label>
         </div>
 
+        {state.detectedPreset && (
+          <FormatHelperBanner
+            detected={state.detectedPreset}
+            importable={getPresetById(state.detectedPreset.id).importable}
+            vendorLabel={getPresetById(state.detectedPreset.id).label}
+            stats={state.presetStats}
+            applied={state.presetApplied}
+            onUndo={() => dispatch({ type: "UNDO_PRESET" })}
+            onOpenHelp={openHelpForCurrent}
+          />
+        )}
+
         <PrecheckPanel state={state} dispatch={dispatch} />
 
         <div className="flex flex-col gap-2">
@@ -330,6 +397,12 @@ export function StepUpload({ state, dispatch, counties }: Props) {
         </div>
       </CardContent>
     </Card>
+    <FormatHelperDialog
+      open={helpOpen}
+      onOpenChange={setHelpOpen}
+      scrollToPresetId={scrollToPresetId}
+    />
+    </>
   );
 }
 

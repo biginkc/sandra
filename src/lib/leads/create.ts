@@ -12,13 +12,22 @@ import type { Database } from "@/lib/supabase/types";
 
 /**
  * Canonical list of `properties.source` values. Mirrors the DB CHECK
- * constraint defined in migration 030. Surfaces that ask for source
- * (the import wizard, the lead webhook, the manual form) all read from
- * here so the vocabulary stays in one place.
+ * constraint defined in migration 030 (with vendor additions in
+ * migration 053). Surfaces that ask for source (the import wizard, the
+ * lead webhook, the manual form) all read from here so the vocabulary
+ * stays in one place.
+ *
+ * The format-helper auto-detects the vendor from CSV headers and sets
+ * the import wizard's Source dropdown — `titlepro`, `reisift`, and
+ * `agent_outreach` were added so detection has a faithful
+ * provenance value to assign.
  */
 export const LEAD_SOURCES = [
   "dealmachine",
   "propstream",
+  "titlepro",
+  "reisift",
+  "agent_outreach",
   "driving_for_dollars",
   "referral",
   "cold_call",

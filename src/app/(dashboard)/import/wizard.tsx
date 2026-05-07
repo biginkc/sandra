@@ -4,6 +4,10 @@ import { useMemo, useReducer, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { autodetectMapping } from "@/lib/csv/aliases";
+import type {
+  DetectionResult,
+  TransformStats,
+} from "@/lib/csv/presets/types";
 import type { UpdatePreview } from "@/lib/csv/update-bulk";
 import { createClient as createBrowserSupabase } from "@/lib/supabase/client";
 import type { SubOperationId } from "@/lib/csv/update-operations";
@@ -176,6 +180,25 @@ export type WizardState = {
   file: File | null;
   filename: string | null;
   source: WizardSource | null;
+  /** Format-helper detection result for the current upload. Set by the
+   *  step-upload handler immediately after FILE_PARSED runs. Null until
+   *  detection fires (or when detection found no high-confidence match). */
+  detectedPreset: DetectionResult | null;
+  /** True after the format-helper transform was auto-applied. Drives
+   *  the banner copy (recognized vs cleaned) and gates Undo. */
+  presetApplied: boolean;
+  /** Snapshot of `{ rows, headers, source, mapping }` BEFORE the
+   *  transform ran — used to restore on Undo. Null until a preset is
+   *  applied. */
+  prePresetSnapshot: {
+    rows: Record<string, string>[];
+    headers: string[];
+    source: WizardSource | null;
+    mapping: Record<string, string | null>;
+  } | null;
+  /** Stats from the most-recent transform — surfaced in the banner.
+   *  Null when no transform has fired (or after Undo). */
+  presetStats: TransformStats | null;
   market: string | null;
   /** Selected county_id (FK to counties.id). Set in lockstep with
    *  `market` via the SET_MARKET dispatch so the action can carry both
@@ -214,6 +237,10 @@ const initialState: WizardState = {
   file: null,
   filename: null,
   source: null,
+  detectedPreset: null,
+  presetApplied: false,
+  prePresetSnapshot: null,
+  presetStats: null,
   market: null,
   countyId: null,
   listName: null,
@@ -265,6 +292,26 @@ export type WizardAction =
   | { type: "SUBMIT_START" }
   | { type: "JOB_CREATED"; jobId: string }
   | { type: "SUBMIT_ERROR"; message: string }
+  | {
+      /** Atomic action fired by step-upload after detectVendor returns
+       *  a high-confidence importable match. Snapshots the pre-state
+       *  for Undo, applies the transform, sets the source, and re-runs
+       *  autodetect against the new headers — all in one reducer pass
+       *  so the UI never observes a partially-applied state. */
+      type: "DETECT_AND_APPLY_PRESET";
+      detection: DetectionResult;
+      transformedRows: Record<string, string>[];
+      transformedHeaders: string[];
+      stats: TransformStats;
+      sourceSuggestion: WizardSource | null;
+    }
+  | {
+      /** Banner-only detection (e.g. Permits / CNAM). No transform
+       *  fires; just records the detection so the banner renders. */
+      type: "RECORD_NON_IMPORTABLE_DETECTION";
+      detection: DetectionResult;
+    }
+  | { type: "UNDO_PRESET" }
   | { type: "RESET" };
 
 function reducer(state: WizardState, action: WizardAction): WizardState {
@@ -300,6 +347,14 @@ function reducer(state: WizardState, action: WizardAction): WizardState {
         headers: action.headers,
         rows: action.rows,
         mapping,
+        // New file invalidates any prior format-helper detection /
+        // transform — the next dispatch will be either a fresh
+        // DETECT_AND_APPLY_PRESET, a RECORD_NON_IMPORTABLE_DETECTION,
+        // or nothing if detection didn't fire.
+        detectedPreset: null,
+        presetApplied: false,
+        prePresetSnapshot: null,
+        presetStats: null,
       };
     }
     case "UPDATE_FILE_PARSED":
@@ -360,6 +415,56 @@ function reducer(state: WizardState, action: WizardAction): WizardState {
       };
     case "SUBMIT_ERROR":
       return { ...state, submitting: false, error: action.message };
+    case "DETECT_AND_APPLY_PRESET": {
+      // Snapshot current state for Undo, then atomically apply
+      // transform + source + re-run autodetect against the new headers.
+      const snapshot = {
+        rows: state.rows,
+        headers: state.headers,
+        source: state.source,
+        mapping: state.mapping,
+      };
+      return {
+        ...state,
+        rows: action.transformedRows,
+        headers: action.transformedHeaders,
+        mapping: autodetectMapping(action.transformedHeaders),
+        source: action.sourceSuggestion ?? state.source,
+        detectedPreset: action.detection,
+        presetApplied: true,
+        prePresetSnapshot: snapshot,
+        presetStats: action.stats,
+      };
+    }
+    case "RECORD_NON_IMPORTABLE_DETECTION":
+      // Permits / CNAM — record detection so the banner renders, but
+      // don't touch rows/headers/source. No snapshot needed; nothing
+      // changed.
+      return {
+        ...state,
+        detectedPreset: action.detection,
+        presetApplied: false,
+        prePresetSnapshot: null,
+        presetStats: null,
+      };
+    case "UNDO_PRESET": {
+      const snap = state.prePresetSnapshot;
+      if (!snap) return state;
+      return {
+        ...state,
+        rows: snap.rows,
+        headers: snap.headers,
+        source: snap.source,
+        mapping: snap.mapping,
+        // Clear detection so banner doesn't re-fire on the same file —
+        // the user explicitly chose to keep the original. They can
+        // re-upload to re-trigger.
+        detectedPreset: null,
+        presetApplied: false,
+        prePresetSnapshot: null,
+        presetStats: null,
+      };
+    }
     case "RESET":
       return initialState;
     default:
@@ -498,6 +603,19 @@ export function Wizard({ counties }: { counties: CountyOption[] }) {
           totalRows: state.rows.length,
           smsConsent: state.smsConsent,
           sequenceId: state.sequenceId,
+          preset:
+            state.presetApplied && state.detectedPreset && state.presetStats
+              ? {
+                  id: state.detectedPreset.id,
+                  // Preset version travels via getPresetById on the
+                  // server side if needed — for now we record the id
+                  // + the wizard-side stats. The detection's id is
+                  // stable; version is recorded as 1 in v1 of every
+                  // preset module.
+                  version: 1,
+                  stats: state.presetStats,
+                }
+              : null,
         }),
         { successMessage: "Import started.", fallbackMessage: "Import failed to start" },
       );
