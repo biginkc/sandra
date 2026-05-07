@@ -32,6 +32,10 @@ type Props = {
   currentUserId: string | null;
   /** First-paint queue stats — banner above the Outbox table polls + refreshes from here. */
   queueStats: QueueStats;
+  /** True when DNC threads are currently hidden. URL: omit / hideDnc=1 → hidden. */
+  hideDnc: boolean;
+  /** Count of DNC threads under the current filter that the toggle is hiding. */
+  hiddenDncCount: number;
 };
 
 const THREAD_FILTERS = new Set<InboxFilter>(["all", "mine", "unassigned", "unread"]);
@@ -47,6 +51,8 @@ export function CockpitView({
   assigneeEmails,
   currentUserId,
   queueStats,
+  hideDnc,
+  hiddenDncCount,
 }: Props) {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -160,6 +166,8 @@ export function CockpitView({
             unknownCount={unknownActiveCount}
             unreadCount={threads.filter((t) => t.unreadCount > 0).length}
             showAssignmentChips={currentUserId !== null}
+            hideDnc={hideDnc}
+            hiddenDncCount={hiddenDncCount}
           />
 
           {showThreadList && (

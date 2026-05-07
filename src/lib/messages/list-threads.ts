@@ -1,5 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
+import { computeConsentState } from "@/lib/messaging/consent";
 import type { Database } from "@/lib/supabase/types";
 
 export type Thread = {
@@ -20,6 +21,11 @@ export type Thread = {
   /** Latest escalation reason in `<gate>:<detail>` format, or null.
    *  Pass to <EscalationBadge> for color-coded rendering. */
   escalationReason: string | null;
+  /** True when the contact's most recent SMS consent event was an opt-out
+   *  (STOP keyword, manual DNC, provider auto-opt-out). Computed via
+   *  `computeConsentState` on the latest consent_events for the contact.
+   *  The inbox uses this to drive the DNC toggle (hidden by default). */
+  isOptedOut: boolean;
 };
 
 export type ListThreadsOpts = {
@@ -96,7 +102,7 @@ export async function listThreads(
   // Split into batches so an active inbox with hundreds of contacts still loads.
   const CHUNK = 250;
 
-  const [contactsRows, propsRows] = await Promise.all([
+  const [contactsRows, propsRows, consentRows] = await Promise.all([
     fetchInChunks(contactIds, CHUNK, (chunk) =>
       supabase
         .from("contacts")
@@ -111,10 +117,30 @@ export async function listThreads(
         )
         .in("id", chunk),
     ),
+    fetchInChunks(contactIds, CHUNK, (chunk) =>
+      supabase
+        .from("consent_events")
+        .select("contact_id, event_type, occurred_at")
+        .eq("channel", "sms")
+        .in("contact_id", chunk)
+        .order("occurred_at", { ascending: false }),
+    ),
   ]);
 
   const contactById = new Map(contactsRows.map((c) => [c.id, c]));
   const propertyById = new Map(propsRows.map((p) => [p.id, p]));
+
+  // Group consent events by contact for one computeConsentState call per
+  // contact. Events are already ordered desc by the query.
+  const consentEventsByContact = new Map<
+    string,
+    Array<{ event_type: string; occurred_at: string }>
+  >();
+  for (const ev of consentRows) {
+    const list = consentEventsByContact.get(ev.contact_id) ?? [];
+    list.push({ event_type: ev.event_type, occurred_at: ev.occurred_at });
+    consentEventsByContact.set(ev.contact_id, list);
+  }
 
   const threads: Thread[] = [];
   for (const [contactId, bucket] of byContact) {
@@ -124,6 +150,10 @@ export async function listThreads(
     if (opts.assigneeId && p?.assigned_user_id !== opts.assigneeId) continue;
     if (opts.unassignedOnly && p?.assigned_user_id) continue;
     if (opts.unreadOnly && bucket.unreadCount === 0) continue;
+
+    const consentState = computeConsentState(
+      consentEventsByContact.get(contactId) ?? [],
+    );
 
     threads.push({
       contactId,
@@ -143,6 +173,7 @@ export async function listThreads(
       unreadCount: bucket.unreadCount,
       needsHumanAttention: p?.needs_human_attention ?? false,
       escalationReason: p?.last_ai_escalation_reason ?? null,
+      isOptedOut: consentState === "opted_out",
     });
   }
 

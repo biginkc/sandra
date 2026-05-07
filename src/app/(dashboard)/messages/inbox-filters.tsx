@@ -16,6 +16,12 @@ type Props = {
   unreadCount: number;
   /** Hide Mine + Unassigned chips when no auth user is on the request. */
   showAssignmentChips: boolean;
+  /** True when DNC threads are currently hidden from the list. URL state:
+   *  default (param absent) → hidden; `?hideDnc=0` → shown. */
+  hideDnc: boolean;
+  /** Count of DNC threads that the current filter set would have shown
+   *  if the toggle were OFF. Surfaced as a tiny hint next to the toggle. */
+  hiddenDncCount: number;
 };
 
 /**
@@ -28,6 +34,8 @@ export function InboxFilters({
   unknownCount,
   unreadCount,
   showAssignmentChips,
+  hideDnc,
+  hiddenDncCount,
 }: Props) {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -41,8 +49,25 @@ export function InboxFilters({
     router.replace(qs ? `/messages?${qs}` : "/messages");
   };
 
+  const toggleHideDnc = () => {
+    const sp = new URLSearchParams(searchParams.toString());
+    if (hideDnc) {
+      // Currently hidden -> show them. Set explicit hideDnc=0.
+      sp.set("hideDnc", "0");
+    } else {
+      // Currently shown -> hide. Default state, so just remove the param.
+      sp.delete("hideDnc");
+    }
+    sp.delete("thread");
+    const qs = sp.toString();
+    router.replace(qs ? `/messages?${qs}` : "/messages");
+  };
+
   return (
-    <div className="flex flex-wrap items-center gap-2" data-testid="inbox-filters">
+    <div
+      className="flex flex-wrap items-center gap-2"
+      data-testid="inbox-filters"
+    >
       <FilterChip
         label="All"
         active={active === "all"}
@@ -85,7 +110,65 @@ export function InboxFilters({
         onClick={() => setFilter("dismissed")}
         testId="filter-dismissed"
       />
+      <DncToggle
+        hideDnc={hideDnc}
+        hiddenDncCount={hiddenDncCount}
+        onToggle={toggleHideDnc}
+      />
     </div>
+  );
+}
+
+/**
+ * "Hide DNC" toggle — sits to the right of the filter chips with ml-auto.
+ * ON state: filled blue switch + "{N} hidden" hint when DNC threads exist.
+ * OFF state: muted outline switch, label reads "Showing DNC".
+ *
+ * State persists via the `hideDnc` URL param (omit / "1" = ON,
+ * "0" = OFF). Default is ON per feedback-f E1.
+ */
+function DncToggle({
+  hideDnc,
+  hiddenDncCount,
+  onToggle,
+}: {
+  hideDnc: boolean;
+  hiddenDncCount: number;
+  onToggle: () => void;
+}) {
+  const label = hideDnc ? "Hide DNC" : "Showing DNC";
+  return (
+    <button
+      type="button"
+      onClick={onToggle}
+      role="switch"
+      aria-checked={hideDnc}
+      data-testid="dnc-toggle"
+      data-active={hideDnc || undefined}
+      className="ml-auto inline-flex items-center gap-2 text-[12px] text-[#78716c] hover:text-[#1c1917]"
+    >
+      <span
+        className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${
+          hideDnc ? "bg-[#111827]" : "bg-[#e5e1df]"
+        }`}
+        data-testid="dnc-toggle-track"
+      >
+        <span
+          className={`inline-block h-4 w-4 rounded-full bg-white shadow-sm transition-transform ${
+            hideDnc ? "translate-x-4" : "translate-x-0.5"
+          }`}
+        />
+      </span>
+      <span className="font-medium">{label}</span>
+      {hideDnc && hiddenDncCount > 0 ? (
+        <span
+          className="text-[11px] text-[#a8a29e]"
+          data-testid="dnc-toggle-count"
+        >
+          ({hiddenDncCount} hidden)
+        </span>
+      ) : null}
+    </button>
   );
 }
 
