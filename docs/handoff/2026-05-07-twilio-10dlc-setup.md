@@ -69,7 +69,29 @@ The trigger: Jarrad just formed a Wyoming LLC specifically to handle the Twilio 
 
 ## What's pending — execution plan
 
-### Today (immediately)
+### 🛑 Stopped here (2026-05-07 ~16:38 PT)
+
+**Customer Profile submitted for review — awaiting Twilio approval.**
+
+Wizard completed:
+1. ✅ Persona consent → Next
+2. ✅ Business profile form — EIN `42-2369546` entered; `The BMH Group LLC` / REAL_ESTATE / LLC / https://bmhgroupkc.com / USA & Canada all confirmed → Continue
+3. ✅ Notification settings — `jarrad@bmhgroupkc.com`, callback URL blank → Next (spinner stuck visually for ~30s but the submission DID succeed)
+4. ✅ Confirmation screen displayed: *"Your primary compliance profile submission requires additional review. We will notify you by email regarding your application status. The review will take approximately 2 business days."*
+
+**"Additional review" interpretation:** likely Twilio escalating because the EIN is 1 day old (anticipated in the "Known issues" section below — TCR verification DB lags IRS by 14-30 days). Could also be standard new-account scrutiny. Watch `jarrad@bmhgroupkc.com` for status emails.
+
+**When resuming:**
+- Check `jarrad@bmhgroupkc.com` for Twilio status emails (subject contains "Customer Profile" or "compliance")
+- Reload `https://console.twilio.com/us1/account/trust-hub/customer-profiles` and look at the status field
+  - **Pending Review** = waiting (typical, do other work)
+  - **Twilio Approved** = green light, proceed to Brand registration
+  - **Twilio Rejected** = read the reason in email, fix the flagged field, resubmit. If reason is `TAX_ID_MISMATCH`, file Identity Status Appeal per "Known issues" section below
+- If still in additional review past 2 business days (i.e., past 2026-05-11), open a Twilio support ticket and attach `docs/operating/TheBMHGroupLLC_ein_federal.pdf` (CP-575) + `docs/operating/TheBMHGroupLLC_form-a-company_wyoming.pdf` (Articles)
+
+**Trust Hub clarification (locked):** Trust Hub is current, not legacy. Customer Profile is required prereq for A2P brand registration. The "legacy" label in research applies only to the URL path (direct trust-hub vs unified A2P-onboarding wizard) — both write to the same Customer Profile record. Question came up mid-session and was resolved.
+
+### Subsequent steps (unchanged)
 
 **A) Submit Customer Profile for review**
 URL: `https://console.twilio.com/us1/account/trust-hub/customer-profiles`
