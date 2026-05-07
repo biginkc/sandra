@@ -8,6 +8,7 @@ import type { Database, Json } from "@/lib/supabase/types";
 
 import { classifyAiSkip } from "./classify";
 import { generateAiReply, type AnthropicLike } from "./generate";
+import { humanizeReply } from "./humanize";
 import { matchEscalationKeyword } from "./keywords";
 import { validateAiReplyBody } from "./safety";
 import type { AiMessageMetadata } from "./types";
@@ -162,9 +163,21 @@ export async function dispatchAiResponse(
   }
 
   // --------------------------------------------------------------------------
-  // 6. Safety validator on the body (defense in depth)
+  // 6. Humanizer second-pass — strips AI-tells the first-pass let through
+  //    (em-dashes, AI vocabulary, formal-ish phrasing). Falls back to the
+  //    original draft on any error so this NEVER blocks a send.
   // --------------------------------------------------------------------------
-  const body = generated.body?.trim() ?? "";
+  const draft = generated.body?.trim() ?? "";
+  const body = draft
+    ? await humanizeReply(
+        { draft, model: config!.model },
+        { client: deps.anthropic },
+      )
+    : draft;
+
+  // --------------------------------------------------------------------------
+  // 7. Safety validator on the (humanized) body — defense in depth.
+  // --------------------------------------------------------------------------
   const safety = validateAiReplyBody(body);
   if (!safety.ok) {
     const reason = `safety:${safety.reason}`;
@@ -173,7 +186,7 @@ export async function dispatchAiResponse(
   }
 
   // --------------------------------------------------------------------------
-  // 7. Send via the existing pipeline (enforces quiet hours + consent
+  // 8. Send via the existing pipeline (enforces quiet hours + consent
   //    one more time at send time). Stamp AI metadata on the row.
   // --------------------------------------------------------------------------
   const sendResult = await sendSmsToContact(supabase, {
