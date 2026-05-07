@@ -43,7 +43,12 @@ export const metadata = {
 export default async function MessagesPage({
   searchParams,
 }: {
-  searchParams: Promise<{ tab?: string; thread?: string; filter?: string }>;
+  searchParams: Promise<{
+    tab?: string;
+    thread?: string;
+    filter?: string;
+    hideDnc?: string;
+  }>;
 }) {
   const sp = await searchParams;
   const activeTab = sp.tab === "outbox" ? "outbox" : "inbox";
@@ -59,6 +64,9 @@ export default async function MessagesPage({
             : sp.filter === "unread"
               ? "unread"
               : "all";
+  // DNC toggle — ON by default per feedback-f E1. Only `?hideDnc=0` flips
+  // it off so we can keep clean URLs the rest of the time.
+  const hideDnc = sp.hideDnc !== "0";
   const selectedContactId = sp.thread ?? null;
 
   const supabase = await createClient();
@@ -164,11 +172,21 @@ export default async function MessagesPage({
       ? unknownAll.filter((s) => s.isDismissed)
       : unknownActive;
 
+  // DNC toggle: when on (default), opted-out threads are stripped from the
+  // visible list. Hidden count is reported back to the toggle so the user
+  // sees how many they're filtering out.
+  const hiddenDncCount = hideDnc
+    ? threads.filter((t) => t.isOptedOut).length
+    : 0;
+  const visibleThreads = hideDnc
+    ? threads.filter((t) => !t.isOptedOut)
+    : threads;
+
   return (
     <CockpitView
       activeTab={activeTab}
       filter={filter}
-      threads={threads}
+      threads={visibleThreads}
       queued={queued}
       threadDetail={threadDetail}
       unknownSenders={unknownSenders}
@@ -176,6 +194,8 @@ export default async function MessagesPage({
       assigneeEmails={assigneeEmails}
       currentUserId={currentUser?.id ?? null}
       queueStats={queueStats}
+      hideDnc={hideDnc}
+      hiddenDncCount={hiddenDncCount}
     />
   );
 }

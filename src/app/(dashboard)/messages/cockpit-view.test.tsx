@@ -147,6 +147,8 @@ const baseProps = {
     nextScheduledFor: null,
     lastScheduledFor: null,
   },
+  hideDnc: true,
+  hiddenDncCount: 0,
 };
 
 describe("<CockpitView /> URL deep-linking", () => {

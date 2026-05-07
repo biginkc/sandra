@@ -21,8 +21,17 @@ function makeStub(opts: {
   }>;
   contacts: Map<string, { id: string; first_name: string | null; last_name: string | null; entity_name: string | null; phone_1: string | null }>;
   properties: Map<string, { id: string; address: string | null; city: string | null; state: string | null; assigned_user_id: string | null }>;
+  consentEvents?: Array<{
+    contact_id: string;
+    event_type: string;
+    occurred_at: string;
+  }>;
 }) {
-  const inCalls: Record<string, string[][]> = { contacts: [], properties: [] };
+  const inCalls: Record<string, string[][]> = {
+    contacts: [],
+    properties: [],
+    consent_events: [],
+  };
 
   const messagesQuery = {
     select: () => messagesQuery,
@@ -48,11 +57,31 @@ function makeStub(opts: {
     };
   }
 
+  function consentQuery() {
+    // The consent_events query uses .select(...).eq("channel", "sms").in(...).order(...)
+    return {
+      select: () => ({
+        eq: () => ({
+          in: (_col: string, chunk: string[]) => {
+            inCalls.consent_events.push(chunk);
+            const data = (opts.consentEvents ?? []).filter((ev) =>
+              chunk.includes(ev.contact_id),
+            );
+            return {
+              order: () => Promise.resolve({ data, error: null }),
+            };
+          },
+        }),
+      }),
+    };
+  }
+
   const supabase = {
     from: (table: string) => {
       if (table === "messages") return messagesQuery;
       if (table === "contacts") return tableQuery("contacts");
       if (table === "properties") return tableQuery("properties");
+      if (table === "consent_events") return consentQuery();
       throw new Error(`unexpected table ${table}`);
     },
   } as unknown as SupabaseClient<Database>;
@@ -118,5 +147,104 @@ describe("listThreads — chunking", () => {
     const tablesHit = fromSpy.mock.calls.map((c) => c[0]);
     expect(tablesHit).not.toContain("contacts");
     expect(tablesHit).not.toContain("properties");
+  });
+});
+
+describe("listThreads — isOptedOut (DNC) flag", () => {
+  function buildBasicSeed(contactIds: string[]) {
+    const messages = contactIds.map((cid, i) => ({
+      contact_id: cid,
+      property_id: `p-${i}`,
+      body: "hi",
+      direction: "inbound" as const,
+      created_at: new Date(Date.now() - i * 1000).toISOString(),
+      read_at: null,
+    }));
+    const contacts = new Map(
+      contactIds.map((cid) => [
+        cid,
+        { id: cid, first_name: null, last_name: null, entity_name: cid, phone_1: null },
+      ]),
+    );
+    const properties = new Map(
+      messages.map((m) => [
+        m.property_id,
+        { id: m.property_id, address: null, city: null, state: null, assigned_user_id: null },
+      ]),
+    );
+    return { messages, contacts, properties };
+  }
+
+  it("marks isOptedOut=true when contact's latest consent event is opt_out", async () => {
+    const seed = buildBasicSeed(["c-opted-out", "c-clean"]);
+    const { supabase } = makeStub({
+      ...seed,
+      consentEvents: [
+        {
+          contact_id: "c-opted-out",
+          event_type: "opt_out",
+          occurred_at: new Date().toISOString(),
+        },
+        {
+          contact_id: "c-opted-out",
+          event_type: "opt_in_marketing_written",
+          occurred_at: new Date(Date.now() - 60_000).toISOString(),
+        },
+      ],
+    });
+
+    const threads = await listThreads(supabase, {});
+    const optedOut = threads.find((t) => t.contactId === "c-opted-out");
+    const clean = threads.find((t) => t.contactId === "c-clean");
+
+    expect(optedOut?.isOptedOut).toBe(true);
+    expect(clean?.isOptedOut).toBe(false);
+  });
+
+  it("marks isOptedOut=false when contact has no consent events at all", async () => {
+    const seed = buildBasicSeed(["c-no-events"]);
+    const { supabase } = makeStub({ ...seed, consentEvents: [] });
+
+    const threads = await listThreads(supabase, {});
+    expect(threads[0]?.isOptedOut).toBe(false);
+  });
+
+  it("marks isOptedOut=false when latest event is opt_in (overrides prior opt_out)", async () => {
+    const seed = buildBasicSeed(["c-resubscribed"]);
+    const { supabase } = makeStub({
+      ...seed,
+      consentEvents: [
+        {
+          contact_id: "c-resubscribed",
+          event_type: "opt_in_confirmed",
+          occurred_at: new Date().toISOString(),
+        },
+        {
+          contact_id: "c-resubscribed",
+          event_type: "opt_out",
+          occurred_at: new Date(Date.now() - 60_000).toISOString(),
+        },
+      ],
+    });
+
+    const threads = await listThreads(supabase, {});
+    expect(threads[0]?.isOptedOut).toBe(false);
+  });
+
+  it("treats provider_auto_opt_out the same as a manual opt_out", async () => {
+    const seed = buildBasicSeed(["c-auto-opted-out"]);
+    const { supabase } = makeStub({
+      ...seed,
+      consentEvents: [
+        {
+          contact_id: "c-auto-opted-out",
+          event_type: "provider_auto_opt_out",
+          occurred_at: new Date().toISOString(),
+        },
+      ],
+    });
+
+    const threads = await listThreads(supabase, {});
+    expect(threads[0]?.isOptedOut).toBe(true);
   });
 });

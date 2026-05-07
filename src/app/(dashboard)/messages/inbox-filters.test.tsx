@@ -94,6 +94,8 @@ const baseProps = {
     nextScheduledFor: null,
     lastScheduledFor: null,
   },
+  hideDnc: true,
+  hiddenDncCount: 0,
 };
 
 describe("<CockpitView /> assignment chips", () => {
@@ -173,5 +175,71 @@ describe("<CockpitView /> assignment chips", () => {
     expect(screen.getByTestId("filter-all")).toBeInTheDocument();
     expect(screen.queryByTestId("filter-mine")).not.toBeInTheDocument();
     expect(screen.queryByTestId("filter-unassigned")).not.toBeInTheDocument();
+  });
+});
+
+describe("<CockpitView /> DNC toggle", () => {
+  it("renders the toggle in active (hidden) state by default", () => {
+    render(<CockpitView {...baseProps} filter="all" threads={[]} />);
+    const toggle = screen.getByTestId("dnc-toggle");
+    expect(toggle).toBeInTheDocument();
+    expect(toggle).toHaveAttribute("data-active", "true");
+    expect(toggle).toHaveAttribute("aria-checked", "true");
+    expect(toggle).toHaveTextContent("Hide DNC");
+  });
+
+  it("renders OFF state with 'Showing DNC' label when hideDnc=false", () => {
+    render(
+      <CockpitView
+        {...baseProps}
+        filter="all"
+        threads={[]}
+        hideDnc={false}
+      />,
+    );
+    const toggle = screen.getByTestId("dnc-toggle");
+    expect(toggle).not.toHaveAttribute("data-active");
+    expect(toggle).toHaveAttribute("aria-checked", "false");
+    expect(toggle).toHaveTextContent("Showing DNC");
+  });
+
+  it("shows hidden-count hint when hideDnc=true and DNC threads exist", () => {
+    render(
+      <CockpitView
+        {...baseProps}
+        filter="all"
+        threads={[]}
+        hideDnc={true}
+        hiddenDncCount={4}
+      />,
+    );
+    const count = screen.getByTestId("dnc-toggle-count");
+    expect(count).toHaveTextContent("(4 hidden)");
+  });
+
+  it("does not show count hint when hiddenDncCount is zero", () => {
+    render(
+      <CockpitView
+        {...baseProps}
+        filter="all"
+        threads={[]}
+        hideDnc={true}
+        hiddenDncCount={0}
+      />,
+    );
+    expect(screen.queryByTestId("dnc-toggle-count")).not.toBeInTheDocument();
+  });
+
+  it("does not show count hint when hideDnc=false (DNC visible inline)", () => {
+    render(
+      <CockpitView
+        {...baseProps}
+        filter="all"
+        threads={[]}
+        hideDnc={false}
+        hiddenDncCount={3}
+      />,
+    );
+    expect(screen.queryByTestId("dnc-toggle-count")).not.toBeInTheDocument();
   });
 });
