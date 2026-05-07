@@ -65,7 +65,19 @@
   4. Existing in-app dashboard panel + bell notification continue to work — the Slack and Calendar paths are additive, not replacements.
   5. CI is green: typecheck + unit + RTL + Playwright golden paths.
 
-**Plans:** TBD (run `/gsd-plan-phase 04` after `/gsd-discuss-phase 04` lands CONTEXT.md).
+**Plans:** 10 plans
+
+Plans:
+- [ ] 04-01-PLAN.md — Wave 0 scaffolding: install @slack/web-api + googleapis, create test placeholders, document env vars
+- [ ] 04-02-PLAN.md — Migration 052: user_oauth_tokens table + pgcrypto SECURITY DEFINER fns + OAuthSecret + token store
+- [ ] 04-03-PLAN.md — Migration 053: user_integration_prefs (timezone, per-channel toggle) + tasks integration columns + prefs helper
+- [ ] 04-04-PLAN.md — [BLOCKING] Schema-push checkpoint: confirm CI applied 052+053 to prod+test, regenerate types.ts
+- [ ] 04-05-PLAN.md — Slack OAuth: signature/state utils + start route + callback route + middleware allowlist
+- [ ] 04-06-PLAN.md — Google OAuth: code exchange + start route + callback route (calendar.events scope, prompt=consent)
+- [ ] 04-07-PLAN.md — Slack DM dispatcher + Block Kit composer + interactivity webhook (Mark Done)
+- [ ] 04-08-PLAN.md — Google Calendar dispatcher: events.insert + events.update (no delete on completion per D-07)
+- [ ] 04-09-PLAN.md — /settings/integrations page: connect/disconnect, per-channel toggle, timezone dropdown
+- [ ] 04-10-PLAN.md — Wire dispatchers into setOutreachDispo via after() Promise.allSettled + manual smoke checkpoint
 
 **UI hint**: yes — `/settings/integrations` connection UI is new; existing dashboard panel + notifications bell are unchanged.
 
@@ -89,4 +101,4 @@ See REQUIREMENTS.md > Out of Scope for the full list and rationale.
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 03. Operational Visibility Surfaces | — | Shipped (outside GSD) + V1 Tasks via PR #112 | 2026-05-06 |
-| 04. Tasks Integrations (V2 — Slack + Calendar) | 0/0 | Not started — awaiting `/gsd-discuss-phase 04` | — |
+| 04. Tasks Integrations (V2 — Slack + Calendar) | 0/10 | Plans created — awaiting /gsd-execute-phase 04 | — |
