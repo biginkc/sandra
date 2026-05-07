@@ -95,4 +95,18 @@ describe("EscalationBadge", () => {
     expect(badge.className).toContain("h-6");
     expect(badge.className).toContain("text-xs");
   });
+
+  it("renders the AI bot icon as the leading visual", () => {
+    render(<EscalationBadge reason="keyword:price_offer" />);
+    const icon = screen.getByTestId("escalation-badge-icon");
+    expect(icon).toBeInTheDocument();
+    expect(icon.tagName.toLowerCase()).toBe("svg");
+    expect(icon).toHaveAttribute("aria-hidden", "true");
+  });
+
+  it("scales the icon up on size=md", () => {
+    render(<EscalationBadge reason="keyword:price_offer" size="md" />);
+    const icon = screen.getByTestId("escalation-badge-icon");
+    expect(icon.getAttribute("class")).toContain("h-3.5");
+  });
 });

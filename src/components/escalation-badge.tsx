@@ -1,3 +1,5 @@
+import { Bot } from "lucide-react";
+
 import {
   parseEscalationReason,
   type ReasonColor,
@@ -25,6 +27,7 @@ export function EscalationBadge({ reason, size = "sm", className }: Props) {
     size === "sm"
       ? "h-5 px-2 text-[10px] gap-1"
       : "h-6 px-2.5 text-xs gap-1.5";
+  const iconSize = size === "sm" ? "h-3 w-3" : "h-3.5 w-3.5";
 
   return (
     <span
@@ -35,7 +38,7 @@ export function EscalationBadge({ reason, size = "sm", className }: Props) {
       data-gate={parsed.gate}
       data-tier={parsed.tier ?? undefined}
     >
-      <span aria-hidden>⚠</span>
+      <Bot className={iconSize} aria-hidden data-testid="escalation-badge-icon" />
       {parsed.shortLabel}
     </span>
   );
