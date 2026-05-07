@@ -4,11 +4,6 @@
 -- Adds the user-to-org link table and replaces tenant-table authenticated-all
 -- policies with membership-scoped policies. CI-only: applied by
 -- .github/workflows/db-migrate.yml after merge.
---
--- NOTE: this branch also sees 053_lead_sources_for_format_helper.sql in the
--- working tree while prod/test are reported at latest applied migration 052.
--- Keep this requested filename unless the migration queue is renumbered before
--- merge.
 -- ============================================================================
 
 begin;
@@ -431,12 +426,14 @@ create policy "csv_imports_org_scoped" on storage.objects
   to authenticated
   using (
     bucket_id = 'csv-imports'
+    and (storage.foldername(name))[1] ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
     and (storage.foldername(name))[1]::uuid in (
       select org_id from public.memberships where user_id = auth.uid()
     )
   )
   with check (
     bucket_id = 'csv-imports'
+    and (storage.foldername(name))[1] ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
     and (storage.foldername(name))[1]::uuid in (
       select org_id from public.memberships where user_id = auth.uid()
     )
@@ -449,6 +446,22 @@ create policy webhook_consumers_org_select on public.webhook_consumers for selec
 create policy webhook_consumers_org_insert on public.webhook_consumers for insert to authenticated with check (org_id in (select m.org_id from public.memberships m where m.user_id = auth.uid() and m.role = 'owner'));
 create policy webhook_consumers_org_update on public.webhook_consumers for update to authenticated using (org_id in (select m.org_id from public.memberships m where m.user_id = auth.uid() and m.role = 'owner')) with check (org_id in (select m.org_id from public.memberships m where m.user_id = auth.uid() and m.role = 'owner'));
 create policy webhook_consumers_org_delete on public.webhook_consumers for delete to authenticated using (org_id in (select m.org_id from public.memberships m where m.user_id = auth.uid() and m.role = 'owner'));
+
+-- ----------------------------------------------------------------------------
+-- 8b. skip_trace_cache — read-only for tenants, service-role-only writes
+-- ----------------------------------------------------------------------------
+drop policy if exists skip_trace_cache_authenticated_all on public.skip_trace_cache;
+
+create policy skip_trace_cache_authenticated_select on public.skip_trace_cache
+  for select
+  to authenticated
+  using (true);
+
+create policy skip_trace_cache_service_write on public.skip_trace_cache
+  for all
+  to service_role
+  using (true)
+  with check (true);
 
 -- ----------------------------------------------------------------------------
 -- 9. Test-reset helper preserves memberships

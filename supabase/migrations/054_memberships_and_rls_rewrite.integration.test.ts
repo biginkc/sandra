@@ -95,7 +95,7 @@ afterAll(async () => {
   await resetTenantTables(serviceClient);
 });
 
-describe("Migration 053 — memberships foundation + RLS rewrite", () => {
+describe("Migration 054 — memberships foundation + RLS rewrite", () => {
   it("backfills one BMH owner membership for every pre-existing auth user", async () => {
     const { data: users, error: usersError } =
       await serviceClient.auth.admin.listUsers();
@@ -353,5 +353,39 @@ describe("Migration 053 — memberships foundation + RLS rewrite", () => {
       .limit(5);
     expect(error).toBeNull();
     expect((data ?? []).length).toBeGreaterThan(0);
+  });
+
+  it("locks skip_trace_cache to read-only for tenants and write-only for service role", async () => {
+    const member = await createUserForOrg(TEST_ORG_B_ID, "member");
+
+    const seedAddress = `addr-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const seed = await serviceClient.from("skip_trace_cache").insert({
+      provider: "stage1-fix-test",
+      address_normalized: seedAddress,
+      result: { phones: [] },
+      match_count: 0,
+      cost_credits: 0,
+    });
+    expect(seed.error).toBeNull();
+
+    const memberRead = await member.client
+      .from("skip_trace_cache")
+      .select("provider, address_normalized")
+      .eq("address_normalized", seedAddress)
+      .limit(1);
+    expect(memberRead.error).toBeNull();
+    expect((memberRead.data ?? []).length).toBeGreaterThanOrEqual(1);
+
+    const memberWrite = await member.client.from("skip_trace_cache").insert({
+      provider: "stage1-poison",
+      address_normalized: `addr-poison-${Date.now()}`,
+      result: { phones: [] },
+      match_count: 0,
+      cost_credits: 0,
+    });
+    expect(memberWrite.error).not.toBeNull();
+    expect(memberWrite.error?.message).toMatch(
+      /row-level security|violates row-level/i,
+    );
   });
 });
