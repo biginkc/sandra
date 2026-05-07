@@ -22,10 +22,11 @@
 
 </details>
 
-### 🚧 v2.1 — Operational Visibility + Integrations (2 phases)
+### 🚧 v2.1 — Operational Visibility + Integrations (3 phases)
 
 - [x] **Phase 03: Operational Visibility Surfaces** — NOTIF-01 + DASH-01 + MSG-01 (shipped outside GSD on 2026-05-06, commit e461156). Tasks substrate (V1) also shipped 2026-05-06 via PR #112 (FOLL-01 / FOLL-02 covered).
 - [ ] **Phase 04: Tasks Integrations (V2 — Slack + Google Calendar)** — Outbound delivery surfaces for the V1 Tasks substrate
+- [ ] **Phase 05: Prospects Filter Drawer** — REISift-style block-based filter UI on `/properties` (parallel to Phase 04, separate worktree)
 
 ## Phase Details
 
@@ -90,6 +91,19 @@ Plans:
 - Slack inbound (`/follow-up` slash command) — defer to V3 or include in V2?
 - Notification preferences UI granularity (all-or-nothing per channel, or per-event-type?)
 
+### Phase 05: Prospects Filter Drawer
+
+**Goal:** Replace the 5 fixed chip filters on `/properties` with a right-side pop-out filter drawer (REISift-style block-based architecture) plus a per-user Quick Filters chip bar above the table. Ship a "lite" cut — ~19 filter blocks the existing schema can power today, no vendor-data dependency.
+
+**Requirements**: TBD (to be specified in `/gsd-spec-phase 05`)
+
+**Depends on:** Nothing — runs in parallel with Phase 04 in a separate worktree (independent surface, no shared schema or pages). Plan approved 2026-05-07; see `~/.claude/plans/also-please-look-at-cozy-lobster.md`.
+
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 05 to break down)
+
 ---
 
 ## Out of Scope (this milestone)
@@ -101,4 +115,5 @@ See REQUIREMENTS.md > Out of Scope for the full list and rationale.
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 03. Operational Visibility Surfaces | — | Shipped (outside GSD) + V1 Tasks via PR #112 | 2026-05-06 |
-| 04. Tasks Integrations (V2 — Slack + Calendar) | 0/10 | Plans created — awaiting /gsd-execute-phase 04 | — |
+| 04. Tasks Integrations (V2 — Slack + Calendar) | 0/10 | Plans created — awaiting /gsd-execute-phase 04 (parallel worktree) | — |
+| 05. Prospects Filter Drawer | 0/0 | Plan approved — awaiting /gsd-spec-phase 05 | — |

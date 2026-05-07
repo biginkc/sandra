@@ -48,6 +48,10 @@ Plans not yet created. Run `/gsd-plan-phase 03` to decompose Phase 03 into execu
 
 ## Accumulated Context (preserved across milestones)
 
+### Roadmap Evolution
+
+- Phase 05 added: Prospects Filter Drawer — REISift-style block-based filter UI on `/properties` (parallel to Phase 04). Plan approved 2026-05-07; see `~/.claude/plans/also-please-look-at-cozy-lobster.md`.
+
 ### Decisions
 
 - Property-centric data model
