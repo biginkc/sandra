@@ -2,7 +2,6 @@
 
 import { CheckCircle2, Download, Sparkles, UploadCloudIcon } from "lucide-react";
 import Papa from "papaparse";
-import { read as xlsxRead, utils as xlsxUtils } from "xlsx";
 import { useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
@@ -23,6 +22,7 @@ import {
 } from "@/lib/csv/precheck";
 import { detectVendor, getPresetById } from "@/lib/csv/presets";
 import type { VendorPresetId } from "@/lib/csv/presets/types";
+import { xlsxBufferToCsvFile } from "@/lib/csv/xlsx-to-csv-file";
 import { cn } from "@/lib/utils";
 import {
   Select,
@@ -170,10 +170,14 @@ export function StepUpload({ state, dispatch, counties }: Props) {
     if (/\.xlsx$/i.test(file.name)) {
       try {
         const buffer = await file.arrayBuffer();
-        const wb = xlsxRead(buffer, { type: "array", cellDates: true });
-        const ws = wb.Sheets[wb.SheetNames[0]];
-        const csv = xlsxUtils.sheet_to_csv(ws, { blankrows: false });
-        parseCsvString(csv, file);
+        // Convert XLSX → CSV-bytes File. The CSV-bytes File (not the
+        // original XLSX File) is what goes into state.file and then up
+        // to the csv-imports Storage bucket — so the workflow's
+        // server-side papaparse reads CSV bytes back out of Storage,
+        // not XLSX binary that masquerades as text/csv.
+        const csvFile = xlsxBufferToCsvFile(buffer, file.name);
+        const csv = await csvFile.text();
+        parseCsvString(csv, csvFile);
       } catch (err) {
         toast.error(
           `Could not read Excel file: ${err instanceof Error ? err.message : "unknown error"}`,
