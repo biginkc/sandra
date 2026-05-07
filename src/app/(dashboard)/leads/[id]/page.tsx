@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { ChevronLeft, ChevronRight } from "lucide-react";
+import { ChevronLeft, ChevronRight, ExternalLink } from "lucide-react";
 
 import { Page } from "@/components/page";
 import { PageHeader } from "@/components/page-header";
@@ -8,6 +8,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
+import { zillowUrl } from "@/lib/utils/zillow-url";
 
 import {
   getPropertyNeighbors,
@@ -206,6 +207,13 @@ export default async function LeadDetailPage({
     }
   }
 
+  const zillowHref = zillowUrl({
+    address: lead.address,
+    city: lead.city,
+    state: lead.state,
+    zip: lead.zip,
+  });
+
   return (
     <Page>
       <PageHeader
@@ -226,6 +234,20 @@ export default async function LeadDetailPage({
                 Back to leads
               </Button>
             </Link>
+            {zillowHref ? (
+              <a
+                href={zillowHref}
+                target="_blank"
+                rel="noopener noreferrer"
+                aria-label="View on Zillow"
+                data-testid="zillow-link-header"
+              >
+                <Button variant="outline" size="sm">
+                  <ExternalLink className="mr-1 h-4 w-4" />
+                  Zillow
+                </Button>
+              </a>
+            ) : null}
             {prevId ? (
               <Link href={`/leads/${prevId}`}>
                 <Button variant="ghost" size="icon" aria-label="Previous">
@@ -326,6 +348,18 @@ export default async function LeadDetailPage({
 
       <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
         <Section title="Property">
+          {zillowHref ? (
+            <a
+              href={zillowHref}
+              target="_blank"
+              rel="noopener noreferrer"
+              data-testid="zillow-link-panel"
+              className="border-border flex items-center justify-between gap-2 border-b px-4 py-2 text-xs font-medium text-[#1c1917] transition-colors hover:bg-[#f5f5f4]"
+            >
+              <span>View on Zillow</span>
+              <ExternalLink className="h-3.5 w-3.5 text-[#78716c]" aria-hidden />
+            </a>
+          ) : null}
           <Row label="Beds" value={lead.beds} />
           <Row label="Baths" value={lead.baths} />
           <Row label="Square feet" value={lead.sqft} />
