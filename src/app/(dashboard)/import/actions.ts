@@ -46,6 +46,24 @@ export type CreateImportJobParams = {
   smsConsent: boolean;
   /** When set, auto-enroll every imported property into this sequence after ingest. */
   sequenceId?: string | null;
+  /** Format-helper audit trail: when the wizard's auto-detect applied
+   *  a vendor preset before this submit, the preset id + version + the
+   *  transform stats are recorded on `jobs.input_params.preset`. Pure
+   *  metadata — does not affect ingest behavior; replaying the same
+   *  preset version against the original Storage blob yields identical
+   *  output. */
+  preset?: {
+    id: string;
+    version: number;
+    stats: {
+      rowsIn: number;
+      rowsOut: number;
+      rowsCollapsedDup: number;
+      columnsAdded: string[];
+      columnsRemoved: string[];
+      notes: string[];
+    };
+  } | null;
 };
 
 export type CreateImportJobResult = { jobId: string };
@@ -145,6 +163,8 @@ export async function createImportJob(
           mapping: params.mapping as Record<string, string | null>,
           storagePath: params.storagePath,
           smsConsent: params.smsConsent,
+          // Format-helper audit trail (null when no preset applied).
+          preset: params.preset ?? null,
         },
       })
       .select("id")

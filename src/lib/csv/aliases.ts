@@ -263,6 +263,67 @@ export const HEADER_ALIASES: Record<string, string> = {
   "prop: mail city": "homeowner_mailing_city",
   "prop: mail state": "homeowner_mailing_state",
   "prop: mail zip": "homeowner_mailing_zip",
+
+  // ---------- PropStream Property Export ----------
+  // PropStream's property exports use "Owner 1" prefixed columns. The
+  // format-helper preset auto-renames these during transform; the
+  // aliases here are the fallback for files that fail detection or
+  // when the user clicks Undo on the auto-apply banner.
+  "owner 1 first name": "homeowner_first_name",
+  "owner 1 last name": "homeowner_last_name",
+  "owner 1 firstname": "homeowner_first_name",
+  "owner 1 lastname": "homeowner_last_name",
+  "est equity": "equity_estimate",
+  "est value": "arv",
+  // "estimated equity" already aliased above in the property block.
+  "est remaining balance of open loans": "mortgage_balance",
+  "effective year built": "year_built",
+  "total bathrooms": "baths",
+  // Note: "site address", "site city", "site state", "site zip" are
+  // already aliased above in the property block — they live there
+  // because PropStream + Skip Genie + DataTree all use the same Site
+  // prefix for tax-record-derived addresses.
+  // PropStream sometimes renders the ZIP-code column with a trailing
+  // "Code" suffix (Site/Mailing variants).
+  "site zip code": "zip",
+  "mailing zip code": "homeowner_mailing_zip",
+
+  // ---------- TitlePro / DataTree title-event exports ----------
+  // The "1st Owner's" prefix appears on every TitlePro export shape
+  // (death, cash purchase, lis pendens, bankruptcy, default).
+  // normalizeHeader doesn't strip apostrophes — the source header
+  // "1st Owner's First Name" lowercases to "1st owner's first name"
+  // verbatim, so the alias key must keep the apostrophe.
+  "1st owner's first name": "homeowner_first_name",
+  "1st owner's last name": "homeowner_last_name",
+  // TitlePro splits the city/state/zip into a single combined column
+  // sometimes — already covered by `address_full` parser via the
+  // wizard's combined-address path. No alias needed here; the preset
+  // transform splits it explicitly when detection fires.
+  "primary owner's first name": "homeowner_first_name",
+  "primary owner's last name": "homeowner_last_name",
+
+  // ---------- REISift / DealMachine Skipped contact exports ----------
+  // Most REISift snake_case columns auto-match existing title-case
+  // aliases via `normalizeHeader` (underscores → spaces, lowercase) —
+  // e.g. `phone_1` → "phone 1" → existing alias. Listed here are the
+  // columns that don't have a title-case parallel in the existing
+  // alias table.
+  "associated property address line 1": "address",
+  "associated property address city": "city",
+  "associated property address state": "state",
+  "associated property address zipcode": "zip",
+  "associated parcel id": "apn",
+
+  // ---------- BMH Agent Outreach Sheets ----------
+  // The 11-column outreach Sheet schema. Most columns either don't
+  // have a target field today (Status / Follow Up / Lead Source /
+  // Date Created / Link / County) or already alias correctly via the
+  // existing entries (Property Address, First/Last Name, Phone,
+  // Email). The format-helper preset re-routes First/Last/Phone/Email
+  // to agent_* fields during transform; without detection these fall
+  // through to the homeowner fields, which is the more common shape
+  // for a manually-uploaded county sheet anyway.
 };
 
 /**

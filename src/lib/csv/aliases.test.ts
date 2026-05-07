@@ -64,6 +64,35 @@ describe("autodetectField", () => {
     expect(autodetectField("UnrelatedColumn")).toBeNull();
     expect(autodetectField("some_custom_field")).toBeNull();
   });
+
+  it("maps PropStream-specific headers (format-helper fallback)", () => {
+    expect(autodetectField("Owner 1 First Name")).toBe("homeowner_first_name");
+    expect(autodetectField("Owner 1 Last Name")).toBe("homeowner_last_name");
+    expect(autodetectField("Site Address")).toBe("address");
+    expect(autodetectField("Site Zip Code")).toBe("zip");
+    expect(autodetectField("Effective Year Built")).toBe("year_built");
+    expect(autodetectField("Total Bathrooms")).toBe("baths");
+    expect(autodetectField("Est. Equity")).toBe("equity_estimate");
+  });
+
+  it("maps TitlePro-specific headers (format-helper fallback)", () => {
+    expect(autodetectField("1st Owner's First Name")).toBe("homeowner_first_name");
+    expect(autodetectField("1st Owner's Last Name")).toBe("homeowner_last_name");
+  });
+
+  it("maps REISift snake_case headers via normalizeHeader", () => {
+    // REISift snake_case columns auto-route to existing title-case
+    // aliases via underscore→space conversion in normalizeHeader.
+    expect(autodetectField("phone_1")).toBe("homeowner_phone_1");
+    expect(autodetectField("first_name")).toBe("homeowner_first_name");
+    expect(autodetectField("primary_mailing_address")).toBe("homeowner_mailing_address");
+    // REISift's "associated_property_*" prefix has dedicated aliases.
+    expect(autodetectField("associated_property_address_line_1")).toBe("address");
+    expect(autodetectField("associated_property_address_city")).toBe("city");
+    expect(autodetectField("associated_property_address_state")).toBe("state");
+    expect(autodetectField("associated_property_address_zipcode")).toBe("zip");
+    expect(autodetectField("associated_parcel_id")).toBe("apn");
+  });
 });
 
 describe("autodetectMapping", () => {
