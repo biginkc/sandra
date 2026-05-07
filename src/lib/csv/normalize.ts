@@ -504,6 +504,19 @@ const STATE_CODE: Record<string, string> = {
   "west virginia": "WV", wv: "WV",
   wisconsin: "WI", wi: "WI",
   wyoming: "WY", wy: "WY",
+  // US territories — recognized by USPS as 2-letter state abbreviations
+  // and routinely show up in absentee-owner mailing addresses on
+  // PropStream / DealMachine / Zillow exports. Pre-fix the wizard
+  // rejected these with "value 'PR' is not a valid state" and dropped
+  // the row.
+  "puerto rico": "PR", pr: "PR",
+  "virgin islands": "VI", vi: "VI",
+  "u.s. virgin islands": "VI",
+  "us virgin islands": "VI",
+  guam: "GU", gu: "GU",
+  "american samoa": "AS", as: "AS",
+  "northern mariana islands": "MP", mp: "MP",
+  "northern marianas": "MP",
 };
 
 export function normalizeStateCode(raw: string | null | undefined): string | null {
