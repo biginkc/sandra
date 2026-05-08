@@ -13,6 +13,13 @@ Do not turn optional housekeeping into a stopping point. If a commit, cleanup, f
 
 When Jarrad provides a durable instruction or capability update mid-thread, acknowledge it briefly, then resume the active queue or explicitly restate the real blocker. Do not end on the acknowledgement alone unless there is no active task or the remaining task is truly Jarrad-owned.
 
+# Draft PRs are not automatic stopping points
+Do not treat a PR being draft, review-pending, or awaiting Jarrad's merge decision as a reason to stop if there are still objective engineering steps available. Continue with non-destructive work that does not change ownership state: inspect conflicts, merge/rebase current `main`, resolve compile or test failures, run focused and full verification, check Vercel/GitHub Actions, review changed files, update the PR body/comment with current status, and clean up agent-owned worktrees/branches.
+
+Only pause for Jarrad on a draft PR when the next step would explicitly change PR ownership/status or release state, such as marking a draft ready for review, merging a PR, closing a PR, deleting someone else's branch, applying migrations, or choosing product scope. If stopped for that reason, say exactly: "Blocked only on Jarrad decision: <decision>." Include the recommended default and the exact command/action that will run after approval.
+
+If the PR remains draft but is mergeable and green, keep moving to read-only review and verification before stopping. A final answer may mention "draft status still needs Jarrad" only after all practical non-destructive follow-up has been exhausted.
+
 # Browser checks vs Playwright checks
 For Sandra verification, use the right browser tool for the question being answered.
 
