@@ -40,17 +40,15 @@ vi.mock("@/components/ui/dropdown-menu", () => ({
   ),
   DropdownMenuItem: ({
     children,
-    onSelect,
     disabled,
-  }: {
-    children: React.ReactNode;
-    onSelect?: () => void;
-    disabled?: boolean;
-  }) => (
+    ...props
+  }: React.ComponentPropsWithoutRef<"div"> & { disabled?: boolean }) => (
     <div
       role="menuitem"
       aria-disabled={disabled}
-      onClick={disabled ? undefined : onSelect}
+      tabIndex={disabled ? undefined : 0}
+      {...props}
+      onClick={disabled ? undefined : props.onClick}
     >
       {children}
     </div>
@@ -100,6 +98,16 @@ describe("PresetDropdown", () => {
     render(<PresetDropdown orgId="org-1" presets={BASE_PRESETS} />);
     await user.click(screen.getByText("Vacant"));
     // replaceStack flows through useFilterState → router.replace
+    expect(replace).toHaveBeenCalled();
+    const [url] = replace.mock.calls[0] as [string, ...unknown[]];
+    expect(url).toContain("filters=");
+  });
+
+  it("pressing Enter on a focused preset applies it", async () => {
+    const user = userEvent.setup();
+    render(<PresetDropdown orgId="org-1" presets={BASE_PRESETS} />);
+    screen.getByText("Vacant").focus();
+    await user.keyboard("{Enter}");
     expect(replace).toHaveBeenCalled();
     const [url] = replace.mock.calls[0] as [string, ...unknown[]];
     expect(url).toContain("filters=");

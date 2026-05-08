@@ -18,7 +18,7 @@ import {
   getAllMatchingProspectIds,
   previewBatchEligibilityAction,
 } from "./actions";
-import type { ParsedProspectsFilters } from "./prospects-query";
+import type { FilterBlock } from "./prospects-query";
 
 type Counts = {
   callable: number;
@@ -30,17 +30,11 @@ export type BatchCreateModalProps = {
   open: boolean;
   onClose: () => void;
   selectedIds?: string[];
-  filterArgs?: { search?: string | null; filters?: ParsedProspectsFilters };
+  filterArgs?: { search?: string | null; blockStack: FilterBlock[] };
   totalCount: number;
 };
 
-const EMPTY_FILTERS: ParsedProspectsFilters = {
-  vacant: false,
-  cass: null,
-  engagement: null,
-  market: null,
-  assignee: null,
-};
+const EMPTY_BLOCK_STACK: FilterBlock[] = [];
 
 function formatReason(reason: string): string {
   return reason.replaceAll("_", " ");
@@ -82,7 +76,7 @@ export function BatchCreateModal({
       : "error";
 
   const filterSearch = filterArgs?.search ?? null;
-  const filterValues = filterArgs?.filters ?? EMPTY_FILTERS;
+  const filterBlockStack = filterArgs?.blockStack ?? EMPTY_BLOCK_STACK;
   const blockedTotal = totalBlocked(counts);
   const createDisabled =
     mode === "error" ||
@@ -110,7 +104,7 @@ export function BatchCreateModal({
           ? { ok: true as const, data: selectedIds ?? [] }
           : await getAllMatchingProspectIds({
               search: filterSearch,
-              filters: filterValues,
+              blockStack: filterBlockStack,
             });
 
       if (cancelled) return;
@@ -135,7 +129,7 @@ export function BatchCreateModal({
     return () => {
       cancelled = true;
     };
-  }, [filterSearch, filterValues, mode, open, selectedIds, selectedIdsKey]);
+  }, [filterBlockStack, filterSearch, mode, open, selectedIds, selectedIdsKey]);
 
   const handleCreate = () => {
     if (createDisabled) return;
@@ -151,7 +145,7 @@ export function BatchCreateModal({
             })
           : await createDialerBatchFromFilters({
               search: filterSearch,
-              filters: filterValues,
+              blockStack: filterBlockStack,
               title: cleanTitle,
             });
 

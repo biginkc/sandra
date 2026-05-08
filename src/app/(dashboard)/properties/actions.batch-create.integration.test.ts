@@ -7,7 +7,7 @@ import {
   createOrgUser,
   seedTwoOrgs,
 } from "@tests/integration/fixtures/multi-user";
-import type { ParsedProspectsFilters } from "./prospects-query";
+import type { FilterBlock } from "./prospects-query";
 
 const testClient = createTestClient();
 
@@ -32,13 +32,7 @@ import {
   previewBatchEligibilityAction,
 } from "./actions";
 
-const defaultFilters: ParsedProspectsFilters = {
-  vacant: false,
-  cass: null,
-  engagement: null,
-  market: null,
-  assignee: null,
-};
+const defaultBlockStack: FilterBlock[] = [];
 
 const createdAuthUsers: string[] = [];
 let phoneSeq = 0;
@@ -200,7 +194,7 @@ describe("Create dialer batch server actions", () => {
     ]);
     const created = await createDialerBatchFromFilters({
       search: prefix,
-      filters: defaultFilters,
+      blockStack: defaultBlockStack,
       title: "Filter batch",
     });
 
@@ -215,7 +209,7 @@ describe("Create dialer batch server actions", () => {
 
     const result = await createDialerBatchFromFilters({
       search: "Dialer Cap Smoke",
-      filters: defaultFilters,
+      blockStack: defaultBlockStack,
     });
 
     expect(result.ok).toBe(true);

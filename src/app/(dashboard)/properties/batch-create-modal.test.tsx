@@ -34,22 +34,16 @@ vi.mock("sonner", () => ({
 // eslint-disable-next-line import/first
 import { BatchCreateModal } from "./batch-create-modal";
 // eslint-disable-next-line import/first
-import type { ParsedProspectsFilters } from "./prospects-query";
+import type { FilterBlock } from "./prospects-query";
 
-const defaultFilters: ParsedProspectsFilters = {
-  vacant: false,
-  cass: null,
-  engagement: null,
-  market: null,
-  assignee: null,
-};
+const defaultBlockStack: FilterBlock[] = [];
 
 function renderModal(
   overrides: Partial<{
     open: boolean;
     onClose: () => void;
     selectedIds?: string[];
-    filterArgs?: { search?: string | null; filters?: ParsedProspectsFilters };
+    filterArgs?: { search?: string | null; blockStack: FilterBlock[] };
     totalCount: number;
   }> = {},
 ) {
@@ -176,7 +170,7 @@ describe("<BatchCreateModal />", () => {
   it("calls createDialerBatchFromFilters when select-all/filter mode", async () => {
     const user = userEvent.setup();
     renderModal({
-      filterArgs: { search: "foo", filters: defaultFilters },
+      filterArgs: { search: "foo", blockStack: defaultBlockStack },
       totalCount: 1382,
     });
     await screen.findByText("5 callable");
@@ -186,7 +180,7 @@ describe("<BatchCreateModal />", () => {
     await waitFor(() =>
       expect(createDialerBatchFromFilters).toHaveBeenCalledWith({
         search: "foo",
-        filters: defaultFilters,
+        blockStack: defaultBlockStack,
         title: undefined,
       }),
     );
@@ -275,7 +269,7 @@ describe("<BatchCreateModal />", () => {
     const user = userEvent.setup();
     renderModal({
       selectedIds: ["a", "b"],
-      filterArgs: { search: "foo", filters: defaultFilters },
+      filterArgs: { search: "foo", blockStack: defaultBlockStack },
       totalCount: 2,
     });
     await screen.findByText("5 callable");

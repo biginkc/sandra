@@ -17,7 +17,6 @@ import {
   type FilterBlock,
 } from "@/lib/prospects/filter-schema";
 import { useFilterState } from "./use-filter-state";
-import { useDebouncedFilters } from "./use-debounced-filters";
 import { AddBlockPicker } from "./add-block-picker";
 
 // ---------------------------------------------------------------------------
@@ -87,10 +86,7 @@ export type FilterDrawerProps = {
    * Plan 09 uses this for <PresetDropdown />.
    */
   topSlot?: React.ReactNode;
-  /**
-   * Slot rendered inside SheetFooter, above the "Show N prospects" CTA.
-   * Plan 09 uses this for <SavePresetInline />.
-   */
+  /** Slot rendered inside SheetFooter. Plan 09 uses this for <SavePresetInline />. */
   footerSlot?: React.ReactNode;
   /**
    * Controlled open state — passed through to Sheet (base-ui Dialog.Root).
@@ -106,7 +102,7 @@ export type FilterDrawerProps = {
 // FilterDrawer
 // ---------------------------------------------------------------------------
 export function FilterDrawer({
-  orgId,
+  orgId: _orgId,
   renderBlock,
   topSlot,
   footerSlot,
@@ -115,24 +111,18 @@ export function FilterDrawer({
 }: FilterDrawerProps) {
   const { blocks, addBlock, removeBlock, updateBlock } = useFilterState();
   const [pickerOpen, setPickerOpen] = useState(false);
-  const count = useDebouncedFilters(orgId, blocks);
 
   const onPickerSelect = (kind: BlockKind) => {
     addBlock(defaultBlockForKind(kind));
     setPickerOpen(false);
   };
 
-  const ctaLabel =
-    count.status === "loading" && count.count === 0
-      ? "Counting…"
-      : `Show ${count.count.toLocaleString()} prospects`;
-
   // Build Sheet props: controlled when open/onOpenChange provided, uncontrolled otherwise.
   const sheetRootProps =
     open !== undefined ? { open, onOpenChange } : {};
 
   return (
-    <Sheet {...sheetRootProps}>
+    <Sheet modal="trap-focus" {...sheetRootProps}>
       {/* Trigger is hidden in controlled/test mode (no need for it when open is forced) */}
       {open === undefined && (
         <SheetTrigger
@@ -147,6 +137,7 @@ export function FilterDrawer({
 
       <SheetContent
         side="right"
+        overlayClassName="pointer-events-none bg-transparent supports-backdrop-filter:backdrop-blur-none"
         className="!max-w-[440px] sm:!max-w-[440px] flex flex-col p-0"
       >
         <SheetHeader className="px-4 pt-4 pb-2">
@@ -161,11 +152,7 @@ export function FilterDrawer({
         {/* Body — relative so AddBlockPicker can absolute-fill it */}
         <div className="relative flex-1 overflow-y-auto px-4 pb-2">
           {blocks.length === 0 ? (
-            <div className="py-12 text-center text-muted-foreground">
-              <p className="mb-4 text-sm">
-                Add a filter to slice your prospects.
-              </p>
-            </div>
+            <div data-empty-filter-state className="h-0" aria-hidden="true" />
           ) : (
             <div className="space-y-3">
               {blocks.map((b) => (
@@ -213,9 +200,6 @@ export function FilterDrawer({
           {footerSlot ? (
             <div data-footer-slot>{footerSlot}</div>
           ) : null}
-          <Button className="w-full" aria-label={ctaLabel}>
-            {ctaLabel}
-          </Button>
         </SheetFooter>
       </SheetContent>
     </Sheet>

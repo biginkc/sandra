@@ -15,8 +15,9 @@
  *  - Pre-fetch helpers (list, list_count, engagement, has_unread_inbound,
  *    has_open_tasks, tag) issue a side query through the supabase client
  *    `sb`, then layer .in("id", ids) on the main builder. When the pre-fetch
- *    yields zero IDs, the helper short-circuits with .in("id", ["__no_match__"])
- *    so the page renders 0 rows instead of erroring on an empty .in() list.
+ *    yields zero IDs, the helper short-circuits with an impossible-but-valid
+ *    UUID so the page renders 0 rows instead of erroring on an empty .in()
+ *    list or sending an invalid UUID to PostgREST.
  *  - The RLS layer (migration 054) is what enforces org-scoping; this file
  *    never bypasses it. The supabase client passed in is the user-bound
  *    client from src/lib/supabase/server.ts.
@@ -47,76 +48,151 @@ type SbClient = SupabaseClient<Database>;
 // applyFilters / applyBlock
 // ---------------------------------------------------------------------------
 
+// IMPORTANT — Supabase v2 query builders are PromiseLike (`.then` triggers
+// query execution). When an async function returns `Promise<Builder>`, JS
+// unwraps the inner thenable on `await`, executing the query and replacing
+// the builder with its query result. This breaks any subsequent chain like
+// `.order().range()` on the caller side.
+//
+// Workaround: every async function in this file that produces a builder
+// returns `Promise<{ builder }>` (a plain non-thenable wrapper). Callers
+// destructure `(await fn(...)).builder` to retrieve the chainable builder
+// without triggering the thenable. Sync helpers can return the builder
+// directly because no Promise is involved.
+
+type BuilderResult = { builder: ProspectsBuilder };
+
 export async function applyFilters(
   builder: ProspectsBuilder,
   blocks: BlockStack,
   sb: SbClient,
-): Promise<ProspectsBuilder> {
+): Promise<BuilderResult> {
   let b: ProspectsBuilder = builder;
   for (const block of blocks) {
-    b = await applyBlock(b, block, sb);
+    const r = await applyBlock(b, block, sb);
+    b = r.builder;
   }
-  return b;
+  return { builder: b };
+}
+
+export function propertyListsSelectFragment(blocks: BlockStack): string | null {
+  const needsPositiveListJoin = blocks.some(
+    (block) =>
+      block.kind === "list" &&
+      block.values.length > 0 &&
+      (block.combinator === "any" ||
+        (block.combinator === "all" && block.values.length === 1)),
+  );
+  const needsAntiListJoin = blocks.some(
+    (block) =>
+      block.kind === "list" &&
+      block.values.length > 0 &&
+      block.combinator === "not",
+  );
+
+  const fragments: string[] = [];
+  if (needsPositiveListJoin) {
+    fragments.push("list_filter:property_lists!inner(list_id)");
+  }
+  if (needsAntiListJoin) {
+    fragments.push("list_exclusion:property_lists(list_id)");
+  }
+  return fragments.length > 0 ? fragments.join(", ") : null;
+}
+
+export function filterSelectFragment(blocks: BlockStack): string | null {
+  const fragments: string[] = [];
+  const listFragment = propertyListsSelectFragment(blocks);
+  if (listFragment) fragments.push(listFragment);
+
+  const singleEngagementBuckets = new Set(
+    blocks
+      .filter(
+        (block): block is Extract<FilterBlock, { kind: "engagement" }> =>
+          block.kind === "engagement" &&
+          block.combinator === "any" &&
+          block.values.length === 1,
+      )
+      .map((block) => block.values[0]),
+  );
+  const needsEngagedMessagesJoin = blocks.some(
+    (block) =>
+      block.kind === "engagement" &&
+      block.combinator === "any" &&
+      block.values.includes("attempted") &&
+      block.values.includes("replied") &&
+      block.values.every((value) => value === "attempted" || value === "replied"),
+  );
+
+  if (singleEngagementBuckets.has("never_contacted")) {
+    fragments.push("contact_messages:messages()");
+  }
+  if (singleEngagementBuckets.has("attempted")) {
+    fragments.push(
+      "attempted_outbound:messages!inner(property_id)",
+      "attempted_inbound:messages(property_id)",
+    );
+  }
+  if (singleEngagementBuckets.has("replied")) {
+    fragments.push("replied_messages:messages!inner(property_id)");
+  }
+  if (needsEngagedMessagesJoin) {
+    fragments.push("engaged_messages:messages!inner(property_id)");
+  }
+
+  return fragments.length > 0 ? fragments.join(", ") : null;
+}
+
+export function needsPropertyListsEmbed(blocks: BlockStack): boolean {
+  return propertyListsSelectFragment(blocks) !== null;
 }
 
 export async function applyBlock(
   builder: ProspectsBuilder,
   block: FilterBlock,
   sb: SbClient,
-): Promise<ProspectsBuilder> {
+): Promise<BuilderResult> {
   switch (block.kind) {
     case "vacancy":
-      return applyTriBool(builder, "is_vacant", block.tri);
+      return { builder: applyTriBool(builder, "is_vacant", block.tri) };
     case "absentee":
-      return applyTriBool(builder, "absentee_flag", block.tri);
+      return { builder: applyTriBool(builder, "absentee_flag", block.tri) };
     case "needs_human_attention":
-      return applyTriBool(builder, "needs_human_attention", block.tri);
+      return { builder: applyTriBool(builder, "needs_human_attention", block.tri) };
 
     case "cass":
-      return applyMultiSelect(builder, "cass_status", block.combinator, block.values);
+      return { builder: applyMultiSelect(builder, "cass_status", block.combinator, block.values) };
     case "outreach_dispo":
-      return applyMultiSelect(builder, "outreach_dispo", block.combinator, block.values);
+      return { builder: applyMultiSelect(builder, "outreach_dispo", block.combinator, block.values) };
     case "source":
-      return applyMultiSelect(builder, "source", block.combinator, block.values);
+      return { builder: applyMultiSelect(builder, "source", block.combinator, block.values) };
     case "state":
-      return applyMultiSelect(builder, "state", block.combinator, block.values);
+      return { builder: applyMultiSelect(builder, "state", block.combinator, block.values) };
     case "market":
-      return applyMultiSelect(builder, "market", block.combinator, block.values);
+      return { builder: applyMultiSelect(builder, "market", block.combinator, block.values) };
     case "pipeline_status":
-      // Page.tsx currently hardcodes .eq("status","prospect"). Plan 09 will
-      // make page.tsx skip that hardcoded filter when a pipeline_status
-      // block is present in the stack so this block's values fully define
-      // the active status set. Until Plan 09 lands, configuring this block
-      // will AND with the hardcoded prospect predicate (effectively a no-op
-      // unless the user picks "prospect" themselves).
-      return applyMultiSelect(builder, "status", block.combinator, block.values);
+      return { builder: applyMultiSelect(builder, "status", block.combinator, block.values) };
     case "motivation_level":
-      return applyMultiSelect(builder, "motivation_level", block.combinator, block.values);
+      return { builder: applyMultiSelect(builder, "motivation_level", block.combinator, block.values) };
 
     case "beds":
-      return applyNumRange(builder, "beds", block.range);
+      return { builder: applyNumRange(builder, "beds", block.range) };
     case "baths":
-      return applyNumRange(builder, "baths", block.range);
+      return { builder: applyNumRange(builder, "baths", block.range) };
     case "year_built":
-      return applyNumRange(builder, "year_built", block.range);
+      return { builder: applyNumRange(builder, "year_built", block.range) };
     case "estimated_value":
-      // ARV (after-repair value) is the canonical "estimated value" column
-      // on properties. Vendor-imported listing_price / mortgage_balance /
-      // equity_estimate are derived from it. Block label says "Estimated
-      // Value"; column name in DB is `arv`.
-      return applyNumRange(builder, "arv", block.range);
+      return { builder: applyNumRange(builder, "arv", block.range) };
     case "equity_pct":
-      // Indexed via migration 057 (idx_properties_equity_pct). Direct
-      // SQL-accurate range scan — no JS post-fetch, no broken counts.
-      return applyNumRange(builder, "equity_pct", block.range);
+      return { builder: applyNumRange(builder, "equity_pct", block.range) };
 
     case "assignee":
-      return applyAssigneeBlock(builder, block.combinator, block.values);
+      return { builder: applyAssigneeBlock(builder, block.combinator, block.values) };
 
     case "created_date":
-      return applyDateMode(builder, "created_at", block.date);
+      return { builder: applyDateMode(builder, "created_at", block.date) };
 
-    // ---------- Pre-fetch blocks ----------
+    // ---------- Pre-fetch blocks (each returns BuilderResult) ----------
     case "list":
       return await applyListBlock(builder, block, sb);
     case "tag":
@@ -131,10 +207,9 @@ export async function applyBlock(
       return await applyHasOpenTasksBlock(builder, block.tri, sb);
 
     default: {
-      // Compile-time exhaustiveness — unreachable at runtime.
       const _exhaustive: never = block;
       void _exhaustive;
-      return builder;
+      return { builder };
     }
   }
 }
@@ -272,10 +347,13 @@ function applyAssigneeBlock(
 
 // ---------------------------------------------------------------------------
 // Pre-fetch helpers — issue a side query, then .in("id", ids) on the main
-// builder. On empty results, short-circuit with .in("id", ["__no_match__"]).
+// builder. On empty results, short-circuit with a valid UUID that matches no row.
 // ---------------------------------------------------------------------------
 
-const NO_MATCH_SENTINEL = ["__no_match__"];
+// `properties.id` is a uuid column. A fake string sentinel makes PostgREST
+// return 400 Bad Request before the query can evaluate, so use a valid UUID
+// that is outside the generated-id space and therefore matches no real row.
+const NO_MATCH_SENTINEL = ["00000000-0000-0000-0000-000000000000"];
 
 /**
  * List block — properties on (any/all/not) the selected lists.
@@ -286,8 +364,24 @@ async function applyListBlock(
   builder: ProspectsBuilder,
   block: Extract<FilterBlock, { kind: "list" }>,
   sb: SbClient,
-): Promise<ProspectsBuilder> {
-  if (block.values.length === 0) return builder;
+): Promise<BuilderResult> {
+  if (block.values.length === 0) return { builder };
+
+  if (block.combinator === "any") {
+    return { builder: builder.in("list_filter.list_id", block.values) };
+  }
+
+  if (block.combinator === "all" && block.values.length === 1) {
+    return { builder: builder.in("list_filter.list_id", block.values) };
+  }
+
+  if (block.combinator === "not") {
+    return {
+      builder: builder
+        .in("list_exclusion.list_id", block.values)
+        .is("list_exclusion", null),
+    };
+  }
 
   const { data } = await sb
     .from("property_lists")
@@ -305,21 +399,19 @@ async function applyListBlock(
     for (const [pid, set] of byProp) {
       if (block.values.every((v) => set.has(v))) propIds.push(pid);
     }
-    return propIds.length
-      ? builder.in("id", propIds)
-      : builder.in("id", NO_MATCH_SENTINEL);
-  }
-  if (block.combinator === "not") {
-    for (const [pid] of byProp) propIds.push(pid);
-    return propIds.length
-      ? builder.not("id", "in", `(${propIds.map((id) => `"${id}"`).join(",")})`)
-      : builder;
+    return {
+      builder: propIds.length
+        ? builder.in("id", propIds)
+        : builder.in("id", NO_MATCH_SENTINEL),
+    };
   }
   // any
   for (const [pid] of byProp) propIds.push(pid);
-  return propIds.length
-    ? builder.in("id", propIds)
-    : builder.in("id", NO_MATCH_SENTINEL);
+  return {
+    builder: propIds.length
+      ? builder.in("id", propIds)
+      : builder.in("id", NO_MATCH_SENTINEL),
+  };
 }
 
 /**
@@ -330,8 +422,8 @@ async function applyTagBlock(
   builder: ProspectsBuilder,
   block: Extract<FilterBlock, { kind: "tag" }>,
   sb: SbClient,
-): Promise<ProspectsBuilder> {
-  if (block.values.length === 0) return builder;
+): Promise<BuilderResult> {
+  if (block.values.length === 0) return { builder };
 
   const { data } = await sb
     .from("property_tags")
@@ -349,21 +441,27 @@ async function applyTagBlock(
     for (const [pid, set] of byProp) {
       if (block.values.every((v) => set.has(v))) propIds.push(pid);
     }
-    return propIds.length
-      ? builder.in("id", propIds)
-      : builder.in("id", NO_MATCH_SENTINEL);
+    return {
+      builder: propIds.length
+        ? builder.in("id", propIds)
+        : builder.in("id", NO_MATCH_SENTINEL),
+    };
   }
   if (block.combinator === "not") {
     for (const [pid] of byProp) propIds.push(pid);
-    return propIds.length
-      ? builder.not("id", "in", `(${propIds.map((id) => `"${id}"`).join(",")})`)
-      : builder;
+    return {
+      builder: propIds.length
+        ? builder.not("id", "in", `(${propIds.map((id) => `"${id}"`).join(",")})`)
+        : builder,
+    };
   }
   // any
   for (const [pid] of byProp) propIds.push(pid);
-  return propIds.length
-    ? builder.in("id", propIds)
-    : builder.in("id", NO_MATCH_SENTINEL);
+  return {
+    builder: propIds.length
+      ? builder.in("id", propIds)
+      : builder.in("id", NO_MATCH_SENTINEL),
+  };
 }
 
 /**
@@ -376,7 +474,7 @@ async function applyListCountBlock(
   builder: ProspectsBuilder,
   block: Extract<FilterBlock, { kind: "list_count" }>,
   sb: SbClient,
-): Promise<ProspectsBuilder> {
+): Promise<BuilderResult> {
   const min = block.range.min ?? 1;
   const max = block.range.max ?? 999999;
 
@@ -387,9 +485,11 @@ async function applyListCountBlock(
     .lte("stack_count", max);
 
   const ids = ((data ?? []) as Array<{ property_id: string }>).map((r) => r.property_id);
-  return ids.length
-    ? builder.in("id", ids)
-    : builder.in("id", NO_MATCH_SENTINEL);
+  return {
+    builder: ids.length
+      ? builder.in("id", ids)
+      : builder.in("id", NO_MATCH_SENTINEL),
+  };
 }
 
 /**
@@ -413,8 +513,40 @@ async function applyEngagementBlock(
   builder: ProspectsBuilder,
   block: Extract<FilterBlock, { kind: "engagement" }>,
   sb: SbClient,
-): Promise<ProspectsBuilder> {
-  if (block.values.length === 0) return builder;
+): Promise<BuilderResult> {
+  if (block.values.length === 0) return { builder };
+
+  if (block.combinator === "any" && block.values.length === 1) {
+    const onlyBucket = block.values[0];
+    if (onlyBucket === "never_contacted") {
+      return { builder: builder.is("contact_messages", null) };
+    }
+    if (onlyBucket === "attempted") {
+      return {
+        builder: builder
+          .eq("attempted_outbound.direction", "outbound")
+          .eq("attempted_inbound.direction", "inbound")
+          .is("attempted_inbound", null),
+      };
+    }
+    if (onlyBucket === "replied") {
+      return { builder: builder.eq("replied_messages.direction", "inbound") };
+    }
+    if (onlyBucket === "opted_out") {
+      return { builder: builder.in("outreach_dispo", ["opted_out", "dnc"]) };
+    }
+  }
+
+  if (
+    block.combinator === "any" &&
+    block.values.includes("attempted") &&
+    block.values.includes("replied") &&
+    block.values.every((value) => value === "attempted" || value === "replied")
+  ) {
+    return {
+      builder: builder.in("engaged_messages.direction", ["inbound", "outbound"]),
+    };
+  }
 
   const wantedBuckets = new Set(block.values);
 
@@ -468,33 +600,39 @@ async function applyEngagementBlock(
     const onlyBucket = block.values[0];
     if (onlyBucket === "replied") {
       const ids = [...repliedPids];
-      return ids.length
-        ? (block.combinator === "not"
-            ? builder.not("id", "in", `(${ids.map((id) => `"${id}"`).join(",")})`)
-            : builder.in("id", ids))
-        : (block.combinator === "not"
-            ? builder
-            : builder.in("id", NO_MATCH_SENTINEL));
+      return {
+        builder: ids.length
+          ? (block.combinator === "not"
+              ? builder.not("id", "in", `(${ids.map((id) => `"${id}"`).join(",")})`)
+              : builder.in("id", ids))
+          : (block.combinator === "not"
+              ? builder
+              : builder.in("id", NO_MATCH_SENTINEL)),
+      };
     }
     if (onlyBucket === "attempted") {
       const ids = [...attemptedPids];
-      return ids.length
-        ? (block.combinator === "not"
-            ? builder.not("id", "in", `(${ids.map((id) => `"${id}"`).join(",")})`)
-            : builder.in("id", ids))
-        : (block.combinator === "not"
-            ? builder
-            : builder.in("id", NO_MATCH_SENTINEL));
+      return {
+        builder: ids.length
+          ? (block.combinator === "not"
+              ? builder.not("id", "in", `(${ids.map((id) => `"${id}"`).join(",")})`)
+              : builder.in("id", ids))
+          : (block.combinator === "not"
+              ? builder
+              : builder.in("id", NO_MATCH_SENTINEL)),
+      };
     }
     if (onlyBucket === "opted_out") {
       const ids = [...optedPids];
-      return ids.length
-        ? (block.combinator === "not"
-            ? builder.not("id", "in", `(${ids.map((id) => `"${id}"`).join(",")})`)
-            : builder.in("id", ids))
-        : (block.combinator === "not"
-            ? builder
-            : builder.in("id", NO_MATCH_SENTINEL));
+      return {
+        builder: ids.length
+          ? (block.combinator === "not"
+              ? builder.not("id", "in", `(${ids.map((id) => `"${id}"`).join(",")})`)
+              : builder.in("id", ids))
+          : (block.combinator === "not"
+              ? builder
+              : builder.in("id", NO_MATCH_SENTINEL)),
+      };
     }
     // never_contacted only — apply .not on contactedUnion. No need to
     // enumerate the universe.
@@ -502,17 +640,21 @@ async function applyEngagementBlock(
       const excluded = [...contactedUnion];
       if (block.combinator === "not") {
         // "not never_contacted" === "contacted in some way" → .in
-        return excluded.length
-          ? builder.in("id", excluded)
-          : builder.in("id", NO_MATCH_SENTINEL);
+        return {
+          builder: excluded.length
+            ? builder.in("id", excluded)
+            : builder.in("id", NO_MATCH_SENTINEL),
+        };
       }
-      return excluded.length
-        ? builder.not(
-            "id",
-            "in",
-            `(${excluded.map((id) => `"${id}"`).join(",")})`,
-          )
-        : builder; // no contacted properties → all rows are never_contacted
+      return {
+        builder: excluded.length
+          ? builder.not(
+              "id",
+              "in",
+              `(${excluded.map((id) => `"${id}"`).join(",")})`,
+            )
+          : builder, // no contacted properties → all rows are never_contacted
+      };
     }
   }
 
@@ -541,13 +683,17 @@ async function applyEngagementBlock(
 
   const ids = [...includeIds];
   if (block.combinator === "not") {
-    return ids.length
-      ? builder.not("id", "in", `(${ids.map((id) => `"${id}"`).join(",")})`)
-      : builder;
+    return {
+      builder: ids.length
+        ? builder.not("id", "in", `(${ids.map((id) => `"${id}"`).join(",")})`)
+        : builder,
+    };
   }
-  return ids.length
-    ? builder.in("id", ids)
-    : builder.in("id", NO_MATCH_SENTINEL);
+  return {
+    builder: ids.length
+      ? builder.in("id", ids)
+      : builder.in("id", NO_MATCH_SENTINEL),
+  };
 }
 
 /**
@@ -559,8 +705,8 @@ async function applyHasUnreadInboundBlock(
   builder: ProspectsBuilder,
   tri: TriBool,
   sb: SbClient,
-): Promise<ProspectsBuilder> {
-  if (tri === "any") return builder;
+): Promise<BuilderResult> {
+  if (tri === "any") return { builder };
 
   const { data } = await sb
     .from("messages")
@@ -578,13 +724,17 @@ async function applyHasUnreadInboundBlock(
   );
 
   if (tri === "yes") {
-    return ids.length
-      ? builder.in("id", ids)
-      : builder.in("id", NO_MATCH_SENTINEL);
+    return {
+      builder: ids.length
+        ? builder.in("id", ids)
+        : builder.in("id", NO_MATCH_SENTINEL),
+    };
   }
   // tri === "no"
-  if (ids.length === 0) return builder; // empty negative set → no predicate
-  return builder.not("id", "in", `(${ids.map((id) => `"${id}"`).join(",")})`);
+  if (ids.length === 0) return { builder }; // empty negative set → no predicate
+  return {
+    builder: builder.not("id", "in", `(${ids.map((id) => `"${id}"`).join(",")})`),
+  };
 }
 
 /**
@@ -596,8 +746,8 @@ async function applyHasOpenTasksBlock(
   builder: ProspectsBuilder,
   tri: TriBool,
   sb: SbClient,
-): Promise<ProspectsBuilder> {
-  if (tri === "any") return builder;
+): Promise<BuilderResult> {
+  if (tri === "any") return { builder };
 
   const { data } = await sb
     .from("tasks")
@@ -613,11 +763,15 @@ async function applyHasOpenTasksBlock(
   );
 
   if (tri === "yes") {
-    return ids.length
-      ? builder.in("id", ids)
-      : builder.in("id", NO_MATCH_SENTINEL);
+    return {
+      builder: ids.length
+        ? builder.in("id", ids)
+        : builder.in("id", NO_MATCH_SENTINEL),
+    };
   }
   // tri === "no"
-  if (ids.length === 0) return builder;
-  return builder.not("id", "in", `(${ids.map((id) => `"${id}"`).join(",")})`);
+  if (ids.length === 0) return { builder };
+  return {
+    builder: builder.not("id", "in", `(${ids.map((id) => `"${id}"`).join(",")})`),
+  };
 }

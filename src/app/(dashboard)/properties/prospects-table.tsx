@@ -1,9 +1,9 @@
 "use client";
 
-import { ChevronDownIcon, X } from "lucide-react";
+import { ChevronDownIcon } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useEffect, useMemo, useState, useTransition } from "react";
+import { useEffect, useMemo, useRef, useState, useTransition } from "react";
 import { toast } from "sonner";
 
 import { PageHeader } from "@/components/page-header";
@@ -26,11 +26,9 @@ import {
 } from "@/components/ui/data-table-shell";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
-  buildProspectsFilterParams,
-  buildProspectsHref,
   formatFullAddress,
   type EngagementState,
-  type ParsedProspectsFilters,
+  type FilterBlock,
   type SortableColumn,
   type SortDirection,
 } from "./prospects-query";
@@ -55,6 +53,10 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { callAction } from "@/lib/errors/call-action";
+import {
+  FILTER_NAVIGATION_START_EVENT,
+  type FilterNavigationStartDetail,
+} from "./_components/use-filter-state";
 
 import {
   addPropertiesToListBulk,
@@ -99,12 +101,6 @@ type Props = {
   lists: ListOption[];
   tags: TagOption[];
   teamMembers: TeamMemberOption[];
-  /** Available markets — fetched server-side from the counties table
-   *  in /properties/page.tsx and rendered in the Market filter pill.
-   *  Per phase 02 D-07 the dropdown reads from counties; per
-   *  feedback_no_usestate_mirror_of_server_props.md the table renders
-   *  the prop directly with no useState mirror. */
-  markets: string[];
   currentUserId: string | null;
   canDelete: boolean;
   /** Rendered into the header subhead so the count stays right next to the title. */
@@ -113,7 +109,18 @@ type Props = {
   search: string;
   sort: SortableColumn;
   dir: SortDirection;
-  filters: ParsedProspectsFilters;
+  /** Plan 09 v1 filter source-of-truth — the canonical block stack the
+   *  page already filtered the rows by. Passed through to the
+   *  cross-page select-all handler so getAllMatchingProspectIds runs the
+   *  same SQL chain via Plan 04's applyFilters. The 5-chip
+   *  ParsedProspectsFilters previously on this prop is GONE; the chips
+   *  themselves moved into the FilterDrawer's per-block components. */
+  blockStack: FilterBlock[];
+  /** Raw `?filters=` URL param (the encoded JSON) — preserved verbatim
+   *  on pagination / sort / search nav so the user's filter state isn't
+   *  silently dropped when they click "page 3". Null when no filters are
+   *  active in the URL. */
+  filtersParam: string | null;
   /** Total count across all pages matching the current filters — drives the
    *  "Select all N prospects" cross-page selection banner. */
   total: number;
@@ -141,14 +148,14 @@ export function ProspectsTable({
   lists,
   tags,
   teamMembers,
-  markets,
   currentUserId,
   canDelete,
   headerCount,
   search,
   sort,
   dir,
-  filters,
+  blockStack,
+  filtersParam,
   total,
   pageSize,
   page,
@@ -159,6 +166,13 @@ export function ProspectsTable({
   const [pending, startTransition] = useTransition();
   const [showBatchCreate, setShowBatchCreate] = useState(false);
   const [showBulkSms, setShowBulkSms] = useState(false);
+  const [filterNavPending, setFilterNavPending] = useState(false);
+  const [filterNavTargetKey, setFilterNavTargetKey] = useState<string | null>(
+    null,
+  );
+  const filterNavFallbackTimer = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
   // Cross-page select-all mode. When true, the user has explicitly
   // expanded their selection beyond the visible page to every property
   // matching the current filters. Bound to a Set<string> of all those
@@ -173,24 +187,37 @@ export function ProspectsTable({
   // the table dims during the SSR roundtrip. The hook also owns the
   // 250ms search debounce, the searchDebounce ref cleanup, and the
   // 150ms minimum-skeleton floor.
-  const ts = useTableUrlState<ParsedProspectsFilters>({
+  //
+  // Plan 09: filter URL state moved to ?filters=<encoded-json>; the
+  // drawer + useFilterState own filter shape now. The table's URL
+  // state machine still drives page/sort/dir/search — but pagination /
+  // sort / search-nav must NOT silently drop the active ?filters=
+  // param. We pass `filtersParam` through `buildFilterParams` so the
+  // hook re-emits it on every URL it builds.
+  const ts = useTableUrlState<Record<string, never>>({
     basePath: "/properties",
     parsed: {
       page: 1,
       search: search.length === 0 ? null : search,
       sort,
       dir,
-      filters,
+      filters: {} as Record<string, never>,
     },
     mode: "ssr",
     config: {
       defaultSort: "created_at",
       defaultDir: "desc",
       sortableColumns: ["address", "market", "created_at"],
-      buildFilterParams: buildProspectsFilterParams,
+      buildFilterParams: (_filters, sp) => {
+        // Preserve the v1 ?filters= state across pagination/sort/search nav.
+        // The hook strips defaults / empty values from the SearchParams it
+        // builds; without this re-emit, paginating from page 1→2 of a
+        // filtered view would land you on an unfiltered page 2.
+        if (filtersParam) sp.set("filters", filtersParam);
+      },
     },
   });
-  const navPending = ts.navPending;
+  const navPending = ts.navPending || filterNavPending;
   // `totalPages` is now sourced from server-rendered props (Plan 01.5-04 contract).
   // showingFrom/showingTo are still computed client-side from `total + pageSize + page`
   // because they're a display-only derivation; the server doesn't need to ship them.
@@ -201,25 +228,70 @@ export function ProspectsTable({
   // set is no longer a faithful representation of what currently matches,
   // so drop it. Selection itself isn't reset (existing behavior — user
   // might have intentional manual picks that survive a refilter).
+  //
+  // Plan 09: the dependency on the 5 chip fields is replaced by a stable
+  // serialization of the block stack — any change in kind/values/range/tri
+  // for any block triggers the reset.
+  const blockStackKey = JSON.stringify(blockStack);
   useEffect(() => {
     setSelectAllMatching(false);
-  }, [
-    search,
-    sort,
-    dir,
-    filters.vacant,
-    filters.cass,
-    filters.engagement,
-    filters.market,
-    filters.assignee,
-  ]);
+  }, [search, sort, dir, blockStackKey]);
+
+  useEffect(() => {
+    const showFilterSkeleton = (event: Event) => {
+      const targetKey =
+        event instanceof CustomEvent &&
+        typeof (event as CustomEvent<FilterNavigationStartDetail>).detail
+          ?.blocksKey === "string"
+          ? (event as CustomEvent<FilterNavigationStartDetail>).detail.blocksKey
+          : null;
+      setFilterNavPending(true);
+      setFilterNavTargetKey(targetKey);
+      if (filterNavFallbackTimer.current) {
+        clearTimeout(filterNavFallbackTimer.current);
+      }
+      filterNavFallbackTimer.current = setTimeout(() => {
+        setFilterNavPending(false);
+        setFilterNavTargetKey(null);
+      }, 5_000);
+    };
+
+    window.addEventListener(FILTER_NAVIGATION_START_EVENT, showFilterSkeleton);
+    return () => {
+      window.removeEventListener(
+        FILTER_NAVIGATION_START_EVENT,
+        showFilterSkeleton,
+      );
+      if (filterNavFallbackTimer.current) {
+        clearTimeout(filterNavFallbackTimer.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!filterNavPending) return;
+    if (filterNavTargetKey != null && filterNavTargetKey !== blockStackKey) {
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      setFilterNavPending(false);
+      setFilterNavTargetKey(null);
+      if (filterNavFallbackTimer.current) {
+        clearTimeout(filterNavFallbackTimer.current);
+        filterNavFallbackTimer.current = null;
+      }
+    }, 150);
+
+    return () => clearTimeout(timer);
+  }, [blockStackKey, filterNavPending, filterNavTargetKey]);
 
   const onSelectAllAcrossPages = () => {
     startTransition(async () => {
       const result = await callAction(
         getAllMatchingProspectIds({
           search: search.length === 0 ? null : search,
-          filters,
+          blockStack,
         }),
         { fallbackMessage: "Could not select all matching prospects" },
       );
@@ -234,50 +306,6 @@ export function ProspectsTable({
     setSelected(new Set());
     setSelectAllMatching(false);
   };
-
-  /** Apply a partial change to the filter set, preserving everything else
-   *  and resetting pagination. The resulting URL drops any filter param
-   *  whose value is null/false/'' (handled by buildProspectsHref). */
-  const updateFilters = (patch: Partial<ParsedProspectsFilters>) => {
-    const nextFilters: ParsedProspectsFilters = { ...filters, ...patch };
-    ts.navigate(
-      `/properties${buildProspectsHref({
-        page: 1,
-        search: search.length === 0 ? null : search,
-        sort,
-        dir,
-        filters: nextFilters,
-      })}`,
-    );
-  };
-
-  /** Reset every filter param at once. Preserves search/sort. Used by the
-   *  "Clear filters" text link which only renders when at least one
-   *  filter is active. */
-  const clearAllFilters = () => {
-    ts.navigate(
-      `/properties${buildProspectsHref({
-        page: 1,
-        search: search.length === 0 ? null : search,
-        sort,
-        dir,
-        filters: {
-          vacant: false,
-          cass: null,
-          engagement: null,
-          market: null,
-          assignee: null,
-        },
-      })}`,
-    );
-  };
-
-  const anyFilterActive =
-    filters.vacant ||
-    filters.cass !== null ||
-    filters.engagement !== null ||
-    filters.market !== null ||
-    filters.assignee !== null;
 
   const allSelected = useMemo(
     () => prospects.length > 0 && selected.size === prospects.length,
@@ -668,15 +696,11 @@ export function ProspectsTable({
         }
       />
 
-      {/* Unified toolbar — search + filter pills inside one rounded card,
-       *  matching the /leads kanban toolbar so the two surfaces feel
-       *  consistent. The search bar takes flexible width on the left;
-       *  the filter row sits inline on the right, wrapping on narrow
-       *  viewports. The rounded-card container + flex behavior come from
-       *  <TableToolbar>; the search markup + 250ms debounce come from
-       *  <TableToolbarSearch>. The filter cluster (<ProspectFilters>)
-       *  stays domain-specific.
-       */}
+      {/* Unified toolbar — Plan 09 dropped the inline 5-chip cluster; the
+       *  drawer + Quick Filters bar above the table own filter UI now.
+       *  The search input is the only control here. The rounded-card
+       *  container + flex behavior come from <TableToolbar>; the search
+       *  markup + 250ms debounce come from <TableToolbarSearch>. */}
       <TableToolbar
         state={
           ts as unknown as UseTableUrlStateReturn<Record<string, unknown>>
@@ -686,15 +710,6 @@ export function ProspectsTable({
           ariaLabel="Search prospects by address"
           placeholder="Search address…"
           testId="prospects-search"
-        />
-
-        <ProspectFilters
-          filters={filters}
-          teamMembers={teamMembers}
-          markets={markets}
-          onChange={updateFilters}
-          anyActive={anyFilterActive}
-          onClearAll={clearAllFilters}
         />
       </TableToolbar>
 
@@ -723,7 +738,7 @@ export function ProspectsTable({
         selectedIds={selectAllMatching ? undefined : selectedIds()}
         filterArgs={
           selectAllMatching
-            ? { search: search.length === 0 ? null : search, filters }
+            ? { search: search.length === 0 ? null : search, blockStack }
             : undefined
         }
         totalCount={selectAllMatching ? total : selected.size}
@@ -1040,136 +1055,6 @@ function VacantPill() {
 }
 
 /**
- * Filter row above the table — three independent toggle buttons +
- * two single-select dropdowns. Each control mutates the URL via
- * router.replace, so state lives in the URL (shareable + bookmarkable +
- * back-button-correct). Active toggles render filled with an X to
- * remove; inactive render outlined.
- */
-function ProspectFilters({
-  filters,
-  teamMembers,
-  markets,
-  onChange,
-  anyActive,
-  onClearAll,
-}: {
-  filters: ParsedProspectsFilters;
-  teamMembers: TeamMemberOption[];
-  markets: string[];
-  onChange: (patch: Partial<ParsedProspectsFilters>) => void;
-  anyActive: boolean;
-  onClearAll: () => void;
-}) {
-  return (
-    <div className="flex flex-wrap items-center gap-2">
-      <FilterToggle
-        active={filters.vacant}
-        label="Vacant"
-        testId="filter-vacant"
-        onClick={() => onChange({ vacant: !filters.vacant })}
-      />
-      <FilterToggle
-        active={filters.cass === "verified"}
-        label="Verified"
-        testId="filter-verified"
-        onClick={() =>
-          onChange({ cass: filters.cass === "verified" ? null : "verified" })
-        }
-      />
-      <FilterToggle
-        active={filters.engagement === "contacted"}
-        label="Contacted"
-        testId="filter-contacted"
-        onClick={() =>
-          onChange({
-            engagement:
-              filters.engagement === "contacted" ? null : "contacted",
-          })
-        }
-      />
-
-      <div className="ml-2 flex items-center gap-2">
-        <DropdownMenu>
-          <DropdownMenuTrigger
-            render={
-              <Button variant="outline" size="sm" data-testid="filter-market">
-                Market: {filters.market ?? "Anywhere"}
-                <ChevronDownIcon className="ml-1 size-3" />
-              </Button>
-            }
-          />
-          <DropdownMenuContent>
-            <DropdownMenuItem
-              onClick={() => onChange({ market: null })}
-              data-testid="filter-market-any"
-            >
-              Anywhere
-            </DropdownMenuItem>
-            <DropdownMenuSeparator />
-            {markets.map((m) => (
-              <DropdownMenuItem
-                key={m}
-                onClick={() => onChange({ market: m })}
-                data-testid={`filter-market-${m.replace(/\s+/g, "-")}`}
-              >
-                {m}
-              </DropdownMenuItem>
-            ))}
-          </DropdownMenuContent>
-        </DropdownMenu>
-
-        <DropdownMenu>
-          <DropdownMenuTrigger
-            render={
-              <Button variant="outline" size="sm" data-testid="filter-assignee">
-                Assignee: {assigneeLabel(filters.assignee, teamMembers)}
-                <ChevronDownIcon className="ml-1 size-3" />
-              </Button>
-            }
-          />
-          <DropdownMenuContent>
-            <DropdownMenuItem
-              onClick={() => onChange({ assignee: null })}
-              data-testid="filter-assignee-any"
-            >
-              Anyone
-            </DropdownMenuItem>
-            <DropdownMenuItem
-              onClick={() => onChange({ assignee: "unassigned" })}
-              data-testid="filter-assignee-unassigned"
-            >
-              Unassigned
-            </DropdownMenuItem>
-            {teamMembers.length > 0 ? <DropdownMenuSeparator /> : null}
-            {teamMembers.map((tm) => (
-              <DropdownMenuItem
-                key={tm.id}
-                onClick={() => onChange({ assignee: tm.id })}
-                data-testid={`filter-assignee-${tm.id}`}
-              >
-                {tm.email}
-              </DropdownMenuItem>
-            ))}
-          </DropdownMenuContent>
-        </DropdownMenu>
-      </div>
-
-      {anyActive && (
-        <button
-          type="button"
-          onClick={onClearAll}
-          data-testid="filter-clear-all"
-          className="text-muted-foreground hover:text-foreground ml-2 text-sm underline-offset-2 hover:underline"
-        >
-          Clear
-        </button>
-      )}
-    </div>
-  );
-}
-
-/**
  * Cross-page selection banner. Renders only when the user has selected
  * every visible row (so we know they're trying to "select all"). Two
  * states:
@@ -1246,43 +1131,6 @@ function SelectAllBanner({
       </button>
     </div>
   );
-}
-
-function FilterToggle({
-  active,
-  label,
-  onClick,
-  testId,
-}: {
-  active: boolean;
-  label: string;
-  onClick: () => void;
-  testId: string;
-}) {
-  return (
-    <Button
-      type="button"
-      variant={active ? "default" : "outline"}
-      size="sm"
-      onClick={onClick}
-      data-testid={testId}
-      data-active={active}
-      className="gap-1"
-    >
-      {label}
-      {active ? <X className="size-3" aria-hidden /> : null}
-    </Button>
-  );
-}
-
-function assigneeLabel(
-  assignee: string | null,
-  teamMembers: TeamMemberOption[],
-): string {
-  if (!assignee) return "Anyone";
-  if (assignee === "unassigned") return "Unassigned";
-  const tm = teamMembers.find((m) => m.id === assignee);
-  return tm ? tm.email : "Selected";
 }
 
 function EngagementPill({ state }: { state: Exclude<EngagementState, "none"> }) {

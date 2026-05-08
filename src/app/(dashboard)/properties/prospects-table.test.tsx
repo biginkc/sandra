@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, it, expect, vi } from "vitest";
 
@@ -7,6 +7,8 @@ import {
   type ListOption,
   type ProspectRow,
 } from "./prospects-table";
+import type { FilterBlock } from "./prospects-query";
+import { FILTER_NAVIGATION_START_EVENT } from "./_components/use-filter-state";
 
 // `next/navigation`'s real router needs an App Router context Vitest
 // doesn't provide. Stub the bits the table actually calls. Hoisted
@@ -92,33 +94,32 @@ function makeRow(overrides: Partial<ProspectRow> & { id: string }): ProspectRow 
   };
 }
 
-const EMPTY_FILTERS = {
-  vacant: false,
-  cass: null,
-  engagement: null,
-  market: null,
-  assignee: null,
-} as const;
+const EMPTY_BLOCK_STACK: FilterBlock[] = [];
 
-function renderTable(rows: ProspectRow[], lists: ListOption[] = []) {
+function renderTable(
+  rows: ProspectRow[],
+  lists: ListOption[] = [],
+  overrides: Partial<React.ComponentProps<typeof ProspectsTable>> = {},
+) {
   return render(
     <ProspectsTable
       prospects={rows}
       lists={lists}
       tags={[]}
       teamMembers={[]}
-      markets={[]}
       currentUserId={null}
       canDelete={false}
       headerCount={`Showing 1-${rows.length} of ${rows.length} prospects.`}
       search=""
       sort="created_at"
       dir="desc"
-      filters={EMPTY_FILTERS}
+      blockStack={EMPTY_BLOCK_STACK}
+      filtersParam={null}
       total={1382}
       pageSize={50}
       page={1}
       totalPages={28}
+      {...overrides}
     />,
   );
 }
@@ -287,6 +288,91 @@ describe("<ProspectsTable />", () => {
       expect(previewBatchEligibilityAction).toHaveBeenCalledWith(["p1"]),
     );
   });
+
+  it("shows table skeleton rows during FilterDrawer URL navigation", async () => {
+    renderTable([makeRow({ id: "p1" }), makeRow({ id: "p2" })]);
+    expect(screen.queryByTestId("prospects-skeleton-row")).toBeNull();
+
+    act(() => {
+      window.dispatchEvent(new Event(FILTER_NAVIGATION_START_EVENT));
+    });
+
+    expect(await screen.findAllByTestId("prospects-skeleton-row")).toHaveLength(
+      5,
+    );
+  });
+
+  it("keeps filter skeleton rows visible until the server block stack catches up", async () => {
+    const rows = [makeRow({ id: "p1" }), makeRow({ id: "p2" })];
+    const nextBlock = {
+      id: "vacancy-pending",
+      kind: "vacancy",
+      tri: "yes",
+    } as const satisfies FilterBlock;
+    const nextBlocks = [nextBlock];
+    const { rerender } = renderTable(rows);
+
+    act(() => {
+      window.dispatchEvent(
+        new CustomEvent(FILTER_NAVIGATION_START_EVENT, {
+          detail: { blocksKey: JSON.stringify(nextBlocks) },
+        }),
+      );
+    });
+
+    expect(await screen.findAllByTestId("prospects-skeleton-row")).toHaveLength(
+      5,
+    );
+
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    });
+    expect(screen.getAllByTestId("prospects-skeleton-row")).toHaveLength(5);
+
+    rerender(
+      <ProspectsTable
+        prospects={rows}
+        lists={[]}
+        tags={[]}
+        teamMembers={[]}
+        currentUserId={null}
+        canDelete={false}
+        headerCount={`Showing 1-${rows.length} of ${rows.length} prospects.`}
+        search=""
+        sort="created_at"
+        dir="desc"
+        blockStack={nextBlocks}
+        filtersParam={null}
+        total={1382}
+        pageSize={50}
+        page={1}
+        totalPages={28}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("prospects-skeleton-row")).toBeNull();
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Plan 09 — structural regression: the 5 inline chips MUST be gone. The
+// drawer + Quick Filters bar own filter UI now (Plan 06 / Plan 08); the
+// table never re-renders these testids. Falsifiable: a re-introduction of
+// any chip would put one of these testids back into the DOM and fail.
+// ---------------------------------------------------------------------------
+
+describe("<ProspectsTable /> Plan 09 chip-removal regression", () => {
+  it("does not render the legacy 5-chip cluster (vacant, verified, contacted, market, assignee, clear-all)", () => {
+    renderTable([makeRow({ id: "p1" })]);
+    expect(screen.queryByTestId("filter-vacant")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("filter-verified")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("filter-contacted")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("filter-market")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("filter-assignee")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("filter-clear-all")).not.toBeInTheDocument();
+  });
 });
 
 describe("<ProspectsTable /> engagement column", () => {
@@ -370,14 +456,14 @@ describe("<ProspectsTable /> sortable headers", () => {
         lists={[]}
         tags={[]}
         teamMembers={[]}
-        markets={[]}
         currentUserId={null}
         canDelete={false}
         headerCount=""
         search=""
         sort="address"
         dir="asc"
-        filters={EMPTY_FILTERS}
+        blockStack={EMPTY_BLOCK_STACK}
+        filtersParam={null}
         total={1}
         pageSize={50}
         page={1}
@@ -389,6 +475,43 @@ describe("<ProspectsTable /> sortable headers", () => {
     // Flipping address asc -> desc means dir is now the default (desc),
     // so it gets dropped from the URL — only sort= remains.
     expect(routerReplace.mock.calls[0][0]).toBe("/properties?sort=address");
+  });
+
+  it("preserves ?filters= across sort nav (Plan 09 — pagination/sort must not silently drop URL filter state)", async () => {
+    const user = userEvent.setup();
+    // Pass filtersParam as a plain marker so re-encoding semantics are
+    // orthogonal to this assertion. The actual encode/decode contract is
+    // symmetric and is exercised by filter-schema.test.ts; this test only
+    // asserts that the param survives sort-nav at all (R8 / Plan 09).
+    render(
+      <ProspectsTable
+        prospects={[makeRow({ id: "p1" })]}
+        lists={[]}
+        tags={[]}
+        teamMembers={[]}
+        currentUserId={null}
+        canDelete={false}
+        headerCount=""
+        search=""
+        sort="created_at"
+        dir="desc"
+        blockStack={[
+          { id: "blk1", kind: "vacancy", tri: "yes" } as FilterBlock,
+        ]}
+        filtersParam={"sentinel-filters-value"}
+        total={1}
+        pageSize={50}
+        page={1}
+        totalPages={28}
+      />,
+    );
+    await user.click(screen.getByTestId("prospects-sort-address"));
+    expect(routerReplace).toHaveBeenCalledTimes(1);
+    const url = routerReplace.mock.calls[0][0] as string;
+    expect(url).toContain("sort=address");
+    // Param key + value both present (URLSearchParams may re-encode the
+    // value; the marker is plain ASCII so it stays verbatim).
+    expect(url).toContain("filters=sentinel-filters-value");
   });
 });
 
@@ -421,14 +544,14 @@ describe("<ProspectsTable /> address search", () => {
         lists={[]}
         tags={[]}
         teamMembers={[]}
-        markets={[]}
         currentUserId={null}
         canDelete={false}
         headerCount=""
         search="Main"
         sort="created_at"
         dir="desc"
-        filters={EMPTY_FILTERS}
+        blockStack={EMPTY_BLOCK_STACK}
+        filtersParam={null}
         total={1}
         pageSize={50}
         page={1}
@@ -440,199 +563,6 @@ describe("<ProspectsTable /> address search", () => {
     // search/sort/dir all default → URL collapses to bare path
     expect(routerReplace.mock.calls[0][0]).toBe("/properties");
   });
-});
-
-describe("<ProspectsTable /> quick filters", () => {
-  beforeEach(() => {
-    routerReplace.mockReset();
-  });
-
-  it("clicking inactive Vacant toggle pushes ?vacant=1", async () => {
-    const user = userEvent.setup({ pointerEventsCheck: 0 });
-    renderTable([makeRow({ id: "p1" })]);
-    await user.click(screen.getByTestId("filter-vacant"));
-    expect(routerReplace).toHaveBeenCalledTimes(1);
-    expect(routerReplace.mock.calls[0][0]).toBe("/properties?vacant=1");
-  });
-
-  it("clicking active Vacant toggle removes ?vacant from URL", async () => {
-    const user = userEvent.setup({ pointerEventsCheck: 0 });
-    render(
-      <ProspectsTable
-        prospects={[makeRow({ id: "p1" })]}
-        lists={[]}
-        tags={[]}
-        teamMembers={[]}
-        markets={[]}
-        currentUserId={null}
-        canDelete={false}
-        headerCount=""
-        search=""
-        sort="created_at"
-        dir="desc"
-        filters={{ ...EMPTY_FILTERS, vacant: true }}
-        total={1}
-        pageSize={50}
-        page={1}
-        totalPages={28}
-      />,
-    );
-    await user.click(screen.getByTestId("filter-vacant"));
-    expect(routerReplace.mock.calls[0][0]).toBe("/properties");
-  });
-
-  it("Verified toggle adds ?cass=verified", async () => {
-    const user = userEvent.setup({ pointerEventsCheck: 0 });
-    renderTable([makeRow({ id: "p1" })]);
-    await user.click(screen.getByTestId("filter-verified"));
-    expect(routerReplace.mock.calls[0][0]).toBe("/properties?cass=verified");
-  });
-
-  it("Contacted toggle adds ?engagement=contacted", async () => {
-    const user = userEvent.setup({ pointerEventsCheck: 0 });
-    renderTable([makeRow({ id: "p1" })]);
-    await user.click(screen.getByTestId("filter-contacted"));
-    expect(routerReplace.mock.calls[0][0]).toBe(
-      "/properties?engagement=contacted",
-    );
-  });
-
-  it("Market filter pill renders one DropdownMenuItem per markets prop entry (phase 02 D-07)", async () => {
-    const user = userEvent.setup({ pointerEventsCheck: 0 });
-    render(
-      <ProspectsTable
-        prospects={[makeRow({ id: "p1" })]}
-        lists={[]}
-        tags={[]}
-        teamMembers={[]}
-        markets={["Buchanan County MO", "Johnson County KS"]}
-        currentUserId={null}
-        canDelete={false}
-        headerCount=""
-        search=""
-        sort="created_at"
-        dir="desc"
-        filters={EMPTY_FILTERS}
-        total={1}
-        pageSize={50}
-        page={1}
-        totalPages={28}
-      />,
-    );
-    // Open the Market filter pill so the dropdown items mount in the
-    // portal. Base UI's Menu portals into document.body so `findByTestId`
-    // (which retries) is the right primitive — `getByTestId` reads the
-    // initial render before the portal mounts.
-    await user.click(screen.getByTestId("filter-market"));
-    // Each county-shaped market gets its own data-testid (whitespace
-    // collapsed to dashes — matches the existing transform).
-    expect(
-      await screen.findByTestId("filter-market-Buchanan-County-MO"),
-    ).toBeTruthy();
-    expect(
-      await screen.findByTestId("filter-market-Johnson-County-KS"),
-    ).toBeTruthy();
-  });
-
-  it("Selecting a market dropdown item pushes ?market=<county-name+state> with the new opaque string", async () => {
-    const user = userEvent.setup({ pointerEventsCheck: 0 });
-    render(
-      <ProspectsTable
-        prospects={[makeRow({ id: "p1" })]}
-        lists={[]}
-        tags={[]}
-        teamMembers={[]}
-        markets={["Buchanan County MO"]}
-        currentUserId={null}
-        canDelete={false}
-        headerCount=""
-        search=""
-        sort="created_at"
-        dir="desc"
-        filters={EMPTY_FILTERS}
-        total={1}
-        pageSize={50}
-        page={1}
-        totalPages={28}
-      />,
-    );
-    await user.click(screen.getByTestId("filter-market"));
-    const item = await screen.findByTestId("filter-market-Buchanan-County-MO");
-    await user.click(item);
-    expect(routerReplace).toHaveBeenCalledTimes(1);
-    expect(routerReplace.mock.calls[0][0]).toBe(
-      "/properties?market=Buchanan+County+MO",
-    );
-  });
-
-  it("Clear text link is hidden when no filters are active", () => {
-    renderTable([makeRow({ id: "p1" })]);
-    expect(screen.queryByTestId("filter-clear-all")).toBeNull();
-  });
-
-  it("Clear text link appears when at least one filter is active and resets all five at once", async () => {
-    const user = userEvent.setup({ pointerEventsCheck: 0 });
-    render(
-      <ProspectsTable
-        prospects={[makeRow({ id: "p1" })]}
-        lists={[]}
-        tags={[]}
-        teamMembers={[]}
-        markets={[]}
-        currentUserId={null}
-        canDelete={false}
-        headerCount=""
-        search=""
-        sort="created_at"
-        dir="desc"
-        filters={{
-          vacant: true,
-          cass: "verified",
-          engagement: "contacted",
-          market: "Kansas City",
-          assignee: "unassigned",
-        }}
-        total={1}
-        pageSize={50}
-        page={1}
-        totalPages={28}
-      />,
-    );
-    const clear = await screen.findByTestId("filter-clear-all");
-    await user.click(clear);
-    expect(routerReplace).toHaveBeenCalledTimes(1);
-    // search/sort/dir all default + every filter cleared → bare path.
-    expect(routerReplace.mock.calls[0][0]).toBe("/properties");
-  });
-
-  it("Clear preserves search and sort when those are non-default", async () => {
-    const user = userEvent.setup({ pointerEventsCheck: 0 });
-    render(
-      <ProspectsTable
-        prospects={[makeRow({ id: "p1" })]}
-        lists={[]}
-        tags={[]}
-        teamMembers={[]}
-        markets={[]}
-        currentUserId={null}
-        canDelete={false}
-        headerCount=""
-        search="oak"
-        sort="address"
-        dir="asc"
-        filters={{ ...EMPTY_FILTERS, vacant: true }}
-        total={1}
-        pageSize={50}
-        page={1}
-        totalPages={28}
-      />,
-    );
-    await user.click(screen.getByTestId("filter-clear-all"));
-    expect(routerReplace.mock.calls[0][0]).toBe(
-      "/properties?search=oak&sort=address&dir=asc",
-    );
-  });
-
 });
 
 describe("<ProspectsTable /> select-all-across-pages banner", () => {
@@ -655,14 +585,14 @@ describe("<ProspectsTable /> select-all-across-pages banner", () => {
         lists={[]}
         tags={[]}
         teamMembers={[]}
-        markets={[]}
         currentUserId={null}
         canDelete={false}
         headerCount=""
         search=""
         sort="created_at"
         dir="desc"
-        filters={EMPTY_FILTERS}
+        blockStack={EMPTY_BLOCK_STACK}
+        filtersParam={null}
         total={2}
         pageSize={50}
         page={1}
@@ -682,14 +612,14 @@ describe("<ProspectsTable /> select-all-across-pages banner", () => {
         lists={[]}
         tags={[]}
         teamMembers={[]}
-        markets={[]}
         currentUserId={null}
         canDelete={false}
         headerCount=""
         search=""
         sort="created_at"
         dir="desc"
-        filters={EMPTY_FILTERS}
+        blockStack={EMPTY_BLOCK_STACK}
+        filtersParam={null}
         total={1382}
         pageSize={50}
         page={1}
@@ -706,7 +636,7 @@ describe("<ProspectsTable /> select-all-across-pages banner", () => {
     expect(link.textContent).toMatch(/Select all 1,382 prospects/);
   });
 
-  it("clicking 'Select all N' calls the action and switches the banner to all-matching mode", async () => {
+  it("clicking 'Select all N' calls the action with search + an empty blockStack and switches the banner to all-matching mode", async () => {
     const user = userEvent.setup({ pointerEventsCheck: 0 });
     getAllMatchingProspectIds.mockResolvedValue({
       ok: true,
@@ -718,14 +648,14 @@ describe("<ProspectsTable /> select-all-across-pages banner", () => {
         lists={[]}
         tags={[]}
         teamMembers={[]}
-        markets={[]}
         currentUserId={null}
         canDelete={false}
         headerCount=""
         search="oak"
         sort="created_at"
         dir="desc"
-        filters={EMPTY_FILTERS}
+        blockStack={EMPTY_BLOCK_STACK}
+        filtersParam={null}
         total={1382}
         pageSize={50}
         page={1}
@@ -737,7 +667,7 @@ describe("<ProspectsTable /> select-all-across-pages banner", () => {
 
     expect(getAllMatchingProspectIds).toHaveBeenCalledWith({
       search: "oak",
-      filters: EMPTY_FILTERS,
+      blockStack: EMPTY_BLOCK_STACK,
     });
     const banner = await screen.findByTestId("select-all-banner");
     expect(banner.dataset.mode).toBe("all-matching");
@@ -756,14 +686,14 @@ describe("<ProspectsTable /> select-all-across-pages banner", () => {
         lists={[]}
         tags={[]}
         teamMembers={[]}
-        markets={[]}
         currentUserId={null}
         canDelete={false}
         headerCount=""
         search=""
         sort="created_at"
         dir="desc"
-        filters={EMPTY_FILTERS}
+        blockStack={EMPTY_BLOCK_STACK}
+        filtersParam={null}
         total={3}
         pageSize={50}
         page={1}
@@ -777,37 +707,64 @@ describe("<ProspectsTable /> select-all-across-pages banner", () => {
     expect(screen.queryByTestId("select-all-banner")).toBeNull();
   });
 
-  it("filter toggles compose: Vacant + Verified + Contacted active emits all three params", async () => {
+  // -------------------------------------------------------------------------
+  // R9 regression — select-all-across-pages must hand the active block stack
+  // to getAllMatchingProspectIds so the resulting set covers the SAME rows
+  // the page is rendering. Plan 09 swapped the legacy `filters` arg for
+  // `blockStack`; this test pins the new contract so a future rewrite that
+  // forgets to thread blockStack through (or accidentally re-introduces the
+  // old chip-shape) fails fast.
+  // -------------------------------------------------------------------------
+  it("select-all-matching with an active block stack passes the stack to getAllMatchingProspectIds (R9)", async () => {
     const user = userEvent.setup({ pointerEventsCheck: 0 });
+    getAllMatchingProspectIds.mockResolvedValue({
+      ok: true,
+      data: Array.from({ length: 1382 }, (_, i) => `prop-${i}`),
+    });
+    const stack: FilterBlock[] = [
+      { id: "blk-vac", kind: "vacancy", tri: "yes" } as FilterBlock,
+      {
+        id: "blk-cass",
+        kind: "cass",
+        combinator: "any",
+        values: ["verified"],
+      } as FilterBlock,
+    ];
     render(
       <ProspectsTable
         prospects={[makeRow({ id: "p1" })]}
         lists={[]}
         tags={[]}
         teamMembers={[]}
-        markets={[]}
         currentUserId={null}
         canDelete={false}
         headerCount=""
         search=""
         sort="created_at"
         dir="desc"
-        filters={{
-          vacant: true,
-          cass: "verified",
-          engagement: null,
-          market: null,
-          assignee: null,
-        }}
-        total={1}
+        blockStack={stack}
+        filtersParam={"placeholder"}
+        total={1382}
         pageSize={50}
         page={1}
         totalPages={28}
       />,
     );
-    await user.click(screen.getByTestId("filter-contacted"));
-    expect(routerReplace.mock.calls[0][0]).toBe(
-      "/properties?vacant=1&cass=verified&engagement=contacted",
-    );
+    await user.click(screen.getByRole("checkbox", { name: "Select p1 Main St" }));
+    await user.click(screen.getByTestId("select-all-across-pages"));
+
+    expect(getAllMatchingProspectIds).toHaveBeenCalledWith({
+      search: null,
+      blockStack: expect.arrayContaining([
+        expect.objectContaining({ kind: "vacancy", tri: "yes" }),
+        expect.objectContaining({
+          kind: "cass",
+          combinator: "any",
+          values: ["verified"],
+        }),
+      ]),
+    });
+    const banner = await screen.findByTestId("select-all-banner");
+    expect(banner.dataset.mode).toBe("all-matching");
   });
 });

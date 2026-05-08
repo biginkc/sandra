@@ -19,7 +19,10 @@ import {
   type ClassifyInput,
 } from "@/lib/dialer/eligibility";
 
-import { SELECT_ALL_HARD_CAP, type ParsedProspectsFilters } from "./prospects-query";
+import { applyFilters } from "@/lib/prospects/filter-to-supabase";
+import type { FilterBlock } from "@/lib/prospects/filter-schema";
+
+import { SELECT_ALL_HARD_CAP } from "./prospects-query";
 
 export async function listSmsTemplateCategories(): Promise<
   Result<{ category: string; count: number }[]>
@@ -554,93 +557,68 @@ export async function createDialerBatchFromPropertyIds(
 
 export async function createDialerBatchFromFilters(args: {
   search?: string | null;
-  filters: ParsedProspectsFilters;
+  blockStack: FilterBlock[];
   title?: string;
 }): Promise<Result<CreateDialerBatchResult>> {
   const idsResult = await getAllMatchingProspectIds({
     search: args.search ?? null,
-    filters: args.filters,
+    blockStack: args.blockStack,
   });
   if (!idsResult.ok) return idsResult;
 
   return createDialerBatchFromPropertyIds(idsResult.data, {
     title: args.title,
     sourceKind: "filters",
-    sourceMeta: { search: args.search ?? null, filters: args.filters },
+    sourceMeta: { search: args.search ?? null, blockStack: args.blockStack },
   });
 }
 
 /**
  * Return every property_id matching the current filter set on the
  * prospects page. Used by the "Select all N prospects across all pages"
- * affordance — the table fetches the full ID set once, expands its
+ * affordance (R9) — the table fetches the full ID set once, expands its
  * client-side selection Set, and existing bulk actions (which already
  * accept arrays of IDs) work unchanged.
  *
- * Filter chain mirrors page.tsx:
- *   - status='prospect', deleted_at IS NULL  (always)
+ * Plan 09: signature migrated to accept the v1 block stack instead of the
+ * legacy 5-chip ParsedProspectsFilters. Filter chain mirrors page.tsx:
+ *   - .is("deleted_at", null)                            (always)
+ *   - .eq("status", "prospect") UNLESS the stack contains a
+ *     pipeline_status block (in which case that block's values fully
+ *     define the active status set — same rule as page.tsx)
  *   - search → ILIKE on address
- *   - vacant=true → is_vacant=true
- *   - cass='verified' → cass_status='verified'
- *   - market → exact match
- *   - assignee → 'unassigned' sentinel OR uuid match
- *   - engagement='contacted' → property_ids whose latest message direction
- *     is 'outbound' (one extra messages roundtrip; same logic as page.tsx)
+ *   - applyFilters(query, blockStack, supabase)          (Plan 04 translator)
  *
  * Result is capped at SELECT_ALL_HARD_CAP rows so a runaway "select-all 50K"
  * can't accidentally torch skip-trace credits via a downstream bulk action.
  */
 export async function getAllMatchingProspectIds(args: {
   search: string | null;
-  filters: ParsedProspectsFilters;
+  blockStack: FilterBlock[];
 }): Promise<Result<string[]>> {
   try {
     const supabase = await createClient();
 
-    let engagementFilteredIds: string[] | null = null;
-    if (args.filters.engagement === "contacted") {
-      const { data: msgRows } = await supabase
-        .from("messages")
-        .select("property_id, direction, created_at")
-        .not("property_id", "is", null)
-        .order("created_at", { ascending: false });
-      const seen = new Set<string>();
-      const matched = new Set<string>();
-      for (const m of msgRows ?? []) {
-        if (!m.property_id || seen.has(m.property_id)) continue;
-        seen.add(m.property_id);
-        if (m.direction === "outbound") matched.add(m.property_id);
-      }
-      engagementFilteredIds =
-        matched.size === 0 ? ["__no_match__"] : Array.from(matched);
-    }
+    const hasPipelineStatusBlock = args.blockStack.some(
+      (b) => b.kind === "pipeline_status",
+    );
 
     let query = supabase
       .from("properties")
       .select("id")
-      .eq("status", "prospect")
       .is("deleted_at", null);
+    if (!hasPipelineStatusBlock) {
+      query = query.eq("status", "prospect");
+    }
 
     if (args.search) {
       query = query.ilike("address", `%${args.search}%`);
     }
-    if (args.filters.vacant) {
-      query = query.eq("is_vacant", true);
-    }
-    if (args.filters.cass === "verified") {
-      query = query.eq("cass_status", "verified");
-    }
-    if (args.filters.market) {
-      query = query.eq("market", args.filters.market);
-    }
-    if (args.filters.assignee === "unassigned") {
-      query = query.is("assigned_user_id", null);
-    } else if (args.filters.assignee) {
-      query = query.eq("assigned_user_id", args.filters.assignee);
-    }
-    if (engagementFilteredIds) {
-      query = query.in("id", engagementFilteredIds);
-    }
+
+    // Plan 04 translator — same SQL chain the page renders against. Any
+    // engagement / vacancy / cass / market / assignee / list / tag /
+    // motivation_level / equity_pct / etc. is applied here, not duplicated.
+    query = (await applyFilters(query, args.blockStack, supabase)).builder;
 
     // PostgREST silently caps results at 1 000 rows (db-max-rows default).
     // Paginate with .range() until a page comes back short to collect all IDs.
