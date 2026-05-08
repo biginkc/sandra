@@ -24,6 +24,10 @@ describe("parseProspectsSearch", () => {
         market: null,
         assignee: null,
       },
+      // Plan 09 — block stack + filtersSource are part of the return shape.
+      // Empty raw → empty stack, source="none".
+      blockStack: [],
+      filtersSource: "none",
     });
   });
 
@@ -340,5 +344,127 @@ describe("formatFullAddress", () => {
         zip: " 64015 ",
       }),
     ).toBe("1307 NW DEER RUN TRL, BLUE SPRINGS, MO 64015");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Plan 09 — block stack + back-compat translator wiring on parseProspectsSearch
+// ---------------------------------------------------------------------------
+
+describe("parseProspectsSearch — block stack & back-compat", () => {
+  it("returns empty blockStack when ?filters= absent and no legacy chips", () => {
+    const result = parseProspectsSearch({});
+    expect(result.blockStack).toEqual([]);
+    expect(result.filtersSource).toBe("none");
+  });
+
+  it("decodes ?filters= when present (URL state takes precedence)", () => {
+    const stack = [
+      { id: "blk-vacancy-yes", kind: "vacancy", tri: "yes" },
+    ];
+    const encoded = encodeURIComponent(JSON.stringify({ v: 1, blocks: stack }));
+    const result = parseProspectsSearch({ filters: encoded });
+    expect(result.blockStack).toHaveLength(1);
+    expect(result.blockStack[0].kind).toBe("vacancy");
+    if (result.blockStack[0].kind === "vacancy") {
+      expect(result.blockStack[0].tri).toBe("yes");
+    }
+    expect(result.filtersSource).toBe("url-state");
+  });
+
+  it("?filters= takes precedence over legacy chips (no double-apply)", () => {
+    const stack = [
+      { id: "blk-vacancy-yes", kind: "vacancy", tri: "yes" },
+    ];
+    const encoded = encodeURIComponent(JSON.stringify({ v: 1, blocks: stack }));
+    // Legacy chip params present alongside ?filters= — must be IGNORED.
+    const result = parseProspectsSearch({
+      filters: encoded,
+      vacant: "1",
+      cass: "verified",
+      engagement: "contacted",
+      market: "Buchanan County MO",
+      assignee: "unassigned",
+    });
+    expect(result.blockStack).toHaveLength(1); // ONLY the URL state, not 1+5 from legacy
+    expect(result.blockStack[0].kind).toBe("vacancy");
+    expect(result.filtersSource).toBe("url-state");
+  });
+
+  it("legacy ?vacant=1 translates when ?filters= absent", () => {
+    const result = parseProspectsSearch({ vacant: "1" });
+    expect(result.blockStack).toHaveLength(1);
+    expect(result.blockStack[0].kind).toBe("vacancy");
+    expect(result.filtersSource).toBe("legacy-chips");
+  });
+
+  it("legacy ?cass=verified translates when ?filters= absent", () => {
+    const result = parseProspectsSearch({ cass: "verified" });
+    expect(result.blockStack).toHaveLength(1);
+    expect(result.blockStack[0].kind).toBe("cass");
+    expect(result.filtersSource).toBe("legacy-chips");
+  });
+
+  it("legacy ?engagement=contacted translates when ?filters= absent", () => {
+    const result = parseProspectsSearch({ engagement: "contacted" });
+    expect(result.blockStack).toHaveLength(1);
+    expect(result.blockStack[0].kind).toBe("engagement");
+    expect(result.filtersSource).toBe("legacy-chips");
+  });
+
+  it("legacy ?market=<value> translates when ?filters= absent", () => {
+    const result = parseProspectsSearch({ market: "Buchanan County MO" });
+    expect(result.blockStack).toHaveLength(1);
+    expect(result.blockStack[0].kind).toBe("market");
+    expect(result.filtersSource).toBe("legacy-chips");
+  });
+
+  it("legacy ?assignee=<uuid> translates when ?filters= absent", () => {
+    const result = parseProspectsSearch({
+      assignee: "9b6f0c2a-1234-4abc-89de-aaaaaaaaaaaa",
+    });
+    expect(result.blockStack).toHaveLength(1);
+    expect(result.blockStack[0].kind).toBe("assignee");
+    expect(result.filtersSource).toBe("legacy-chips");
+  });
+
+  it("multiple legacy chip params produce a multi-block stack in canonical order", () => {
+    const result = parseProspectsSearch({
+      vacant: "1",
+      cass: "verified",
+      engagement: "contacted",
+      market: "Buchanan County MO",
+      assignee: "unassigned",
+    });
+    expect(result.blockStack).toHaveLength(5);
+    // Per back-compat-url-translator: stable order vacancy → cass → engagement → market → assignee
+    expect(result.blockStack.map((b) => b.kind)).toEqual([
+      "vacancy",
+      "cass",
+      "engagement",
+      "market",
+      "assignee",
+    ]);
+    expect(result.filtersSource).toBe("legacy-chips");
+  });
+
+  it("malformed ?filters= falls back to empty stack (NOT to legacy chips, per fail-closed semantics)", () => {
+    const result = parseProspectsSearch({ filters: "garbage", vacant: "1" });
+    expect(result.blockStack).toEqual([]);
+    expect(result.filtersSource).toBe("url-state"); // ?filters= was present even if malformed
+  });
+
+  it("preserves the legacy ParsedProspectsFilters shape on the same return value (back-compat for table chip rendering)", () => {
+    // Existing prospects-table.tsx still consumes `filters` (the chip-shaped
+    // object) until Plan 09 Task 3 strips that codepath. Until then the
+    // field MUST keep being populated alongside the new blockStack.
+    const result = parseProspectsSearch({ vacant: "1", cass: "verified" });
+    expect(result.filters).toEqual({
+      vacant: true,
+      cass: "verified",
+      engagement: null,
+      market: null,
+      assignee: null,
+    });
   });
 });
