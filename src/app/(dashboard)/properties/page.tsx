@@ -153,7 +153,7 @@ export default async function PropertiesPage({
   // created_date / has_unread_inbound / needs_human_attention /
   // has_open_tasks). Single source of truth for the Supabase filter
   // chain — the page no longer hand-rolls per-chip predicates.
-  ({ builder: query } = await applyFilters(query, blockStack, supabase));
+  query = (await applyFilters(query, blockStack, supabase)).builder;
 
   // Stable secondary order on id breaks ties so pagination doesn't skip
   // or repeat rows when many rows share the primary sort value.
