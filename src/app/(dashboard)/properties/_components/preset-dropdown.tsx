@@ -84,7 +84,7 @@ export function PresetDropdown({ orgId, presets }: PresetDropdownProps) {
           <DropdownMenuGroup>
             <DropdownMenuLabel>Base</DropdownMenuLabel>
             {base.map((p) => (
-              <DropdownMenuItem key={p.id} onSelect={() => apply(p)}>
+              <DropdownMenuItem key={p.id} onClick={() => apply(p)}>
                 {p.name}
               </DropdownMenuItem>
             ))}
@@ -102,7 +102,7 @@ export function PresetDropdown({ orgId, presets }: PresetDropdownProps) {
                 data-preset-name={p.name}
               >
                 <DropdownMenuItem
-                  onSelect={() => apply(p)}
+                  onClick={() => apply(p)}
                   className="flex-1"
                 >
                   {p.name}
