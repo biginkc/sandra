@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useMemo, useTransition } from "react";
+import { useCallback, useEffect, useMemo, useRef, useTransition } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import {
   decodeFilters,
@@ -29,10 +29,24 @@ export function useFilterState(): UseFilterState {
     const raw = params?.get("filters") ?? null;
     return decodeFilters(raw);
   }, [params]);
+  const latestBlocksRef = useRef<BlockStack>(filterState.blocks);
+
+  useEffect(() => {
+    latestBlocksRef.current = filterState.blocks;
+  }, [filterState.blocks]);
+
+  const getLatestBlocks = useCallback(() => {
+    return latestBlocksRef.current;
+  }, []);
 
   const navigate = useCallback(
     (nextStack: BlockStack) => {
-      const next = new URLSearchParams(params?.toString() ?? "");
+      latestBlocksRef.current = nextStack;
+      const currentSearch =
+        typeof window === "undefined"
+          ? (params?.toString() ?? "")
+          : window.location.search;
+      const next = new URLSearchParams(currentSearch);
       if (nextStack.length === 0) {
         next.delete("filters");
       } else {
@@ -52,24 +66,24 @@ export function useFilterState(): UseFilterState {
   );
 
   const addBlock = useCallback(
-    (block: FilterBlock) => navigate([...filterState.blocks, block]),
-    [filterState.blocks, navigate],
+    (block: FilterBlock) => navigate([...getLatestBlocks(), block]),
+    [getLatestBlocks, navigate],
   );
 
   const removeBlock = useCallback(
-    (id: string) => navigate(filterState.blocks.filter((b) => b.id !== id)),
-    [filterState.blocks, navigate],
+    (id: string) => navigate(getLatestBlocks().filter((b) => b.id !== id)),
+    [getLatestBlocks, navigate],
   );
 
   const updateBlock = useCallback(
     (id: string, patch: Partial<FilterBlock>) => {
       navigate(
-        filterState.blocks.map((b) =>
+        getLatestBlocks().map((b) =>
           b.id === id ? ({ ...b, ...patch } as FilterBlock) : b,
         ),
       );
     },
-    [filterState.blocks, navigate],
+    [getLatestBlocks, navigate],
   );
 
   const replaceStack = useCallback(

@@ -79,6 +79,25 @@ describe("useFilterState", () => {
     expect(url).toContain("filters=");
   });
 
+  it("uses the latest pending stack for back-to-back edits before rerender", () => {
+    const id = newBlockId();
+    const { result } = renderHook(() => useFilterState());
+
+    act(() => {
+      result.current.addBlock({ id, kind: "vacancy", tri: "any" });
+      result.current.updateBlock(id, { tri: "yes" });
+    });
+
+    expect(replace).toHaveBeenCalledTimes(2);
+    const [url] = replace.mock.calls[1];
+    const raw = new URL(`http://test.local${url}`).searchParams.get("filters");
+    expect(raw).toBeTruthy();
+    expect(JSON.parse(raw as string)).toEqual({
+      v: 1,
+      blocks: [{ id, kind: "vacancy", tri: "yes" }],
+    });
+  });
+
   it("replaceStack updates blocks and URL", () => {
     const { result } = renderHook(() => useFilterState());
     const newBlock = { id: newBlockId(), kind: "absentee" as const, tri: "yes" as const };
