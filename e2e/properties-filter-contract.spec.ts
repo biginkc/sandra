@@ -101,9 +101,35 @@ test.describe.serial("Properties filter contract — seeded DB oracle", () => {
   let listB: string;
   let seeded: SeededProspect[];
 
+  async function cleanupSeededRows() {
+    if (!admin || !prefix) return;
+    if (listA || listB) {
+      await admin.from("property_lists").delete().in("list_id", [listA, listB]);
+      await admin.from("lists").delete().in("id", [listA, listB]);
+    }
+    await admin.from("properties").delete().like("address", `${prefix}%`);
+  }
+
+  async function cleanupLeakedRowsForPrefix() {
+    if (!admin || !prefix) return;
+
+    const { data: lists } = await admin
+      .from("lists")
+      .select("id")
+      .like("name", `${prefix}%`);
+    const listIds = (lists ?? []).map((list) => list.id);
+
+    if (listIds.length > 0) {
+      await admin.from("property_lists").delete().in("list_id", listIds);
+      await admin.from("lists").delete().in("id", listIds);
+    }
+    await admin.from("properties").delete().like("address", `${prefix}%`);
+  }
+
   test.beforeAll(async () => {
     admin = adminClient();
     prefix = `E2E Filter Contract ${Date.now()}`;
+    await cleanupLeakedRowsForPrefix();
     listA = await seedList(admin, `${prefix} A`);
     listB = await seedList(admin, `${prefix} B`);
     seeded = await seedProspects(admin, 6, prefix);
@@ -142,12 +168,7 @@ test.describe.serial("Properties filter contract — seeded DB oracle", () => {
   });
 
   test.afterAll(async () => {
-    if (!admin || !prefix) return;
-    if (listA || listB) {
-      await admin.from("property_lists").delete().in("list_id", [listA, listB]);
-      await admin.from("lists").delete().in("id", [listA, listB]);
-    }
-    await admin.from("properties").delete().like("address", `${prefix}%`);
+    await cleanupSeededRows();
   });
 
   test("List any matches the database count for that list", async ({ page }) => {
