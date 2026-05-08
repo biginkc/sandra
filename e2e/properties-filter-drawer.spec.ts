@@ -84,6 +84,16 @@ test.describe("Phase 05 Plan 09 — full feature flow", () => {
         list_id: listId,
       })),
     );
+    const { count: expectedCount, error: expectedCountError } = await admin
+      .from("properties")
+      .select("id, property_lists!inner(list_id)", {
+        count: "exact",
+        head: true,
+      })
+      .is("deleted_at", null)
+      .eq("status", "prospect")
+      .eq("property_lists.list_id", listId);
+    expect(expectedCountError).toBeNull();
 
     const errors: string[] = [];
     page.on("response", (response) => {
@@ -110,6 +120,13 @@ test.describe("Phase 05 Plan 09 — full feature flow", () => {
       await expect(page.getByText(prefix).first()).toBeVisible({
         timeout: 10_000,
       });
+      await expect(
+        page.getByText(
+          new RegExp(
+            `Showing 1.50 of ${expectedCount?.toLocaleString()} prospects`,
+          ),
+        ),
+      ).toBeVisible();
       expect(errors.filter((error) => error.includes("/properties"))).toEqual([]);
     } finally {
       await admin.from("property_lists").delete().eq("list_id", listId);
