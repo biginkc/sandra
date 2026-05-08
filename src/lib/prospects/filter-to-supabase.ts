@@ -74,6 +74,16 @@ export async function applyFilters(
   return { builder: b };
 }
 
+export function needsPropertyListsEmbed(blocks: BlockStack): boolean {
+  return blocks.some(
+    (block) =>
+      block.kind === "list" &&
+      block.values.length > 0 &&
+      (block.combinator === "any" ||
+        (block.combinator === "all" && block.values.length === 1)),
+  );
+}
+
 export async function applyBlock(
   builder: ProspectsBuilder,
   block: FilterBlock,
@@ -290,6 +300,14 @@ async function applyListBlock(
   sb: SbClient,
 ): Promise<BuilderResult> {
   if (block.values.length === 0) return { builder };
+
+  if (block.combinator === "any") {
+    return { builder: builder.in("property_lists.list_id", block.values) };
+  }
+
+  if (block.combinator === "all" && block.values.length === 1) {
+    return { builder: builder.in("property_lists.list_id", block.values) };
+  }
 
   const { data } = await sb
     .from("property_lists")

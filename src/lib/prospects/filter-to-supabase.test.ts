@@ -28,7 +28,11 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { FilterBlock } from "./filter-schema";
-import { applyBlock, applyFilters } from "./filter-to-supabase";
+import {
+  applyBlock,
+  applyFilters,
+  needsPropertyListsEmbed,
+} from "./filter-to-supabase";
 
 // ---------------------------------------------------------------------------
 // mockBuilder — a Proxy whose every method call is recorded as a string and
@@ -711,13 +715,9 @@ describe("applyBlock: list (pre-fetch via property_lists)", () => {
     expect(calls).toEqual([]);
     expect(m.calls.length).toBe(0);
   });
-  it("any combinator → pre-fetches property_lists, applies .in('id', ids)", async () => {
+  it("any combinator → filters through embedded property_lists instead of expanding IDs", async () => {
     const { proxy, calls } = mockBuilder();
     const m = mockSupabaseClient();
-    m.setReturn("property_lists", [
-      { property_id: "p1", list_id: "L1" },
-      { property_id: "p2", list_id: "L2" },
-    ]);
     await applyBlock(
       proxy,
       block({
@@ -727,8 +727,23 @@ describe("applyBlock: list (pre-fetch via property_lists)", () => {
       }) as FilterBlock,
       m.sb,
     );
-    expect(m.calls.some((c) => c.startsWith("from(property_lists)"))).toBe(true);
-    expect(calls.some((c) => c.startsWith("in(id,"))).toBe(true);
+    expect(m.calls.length).toBe(0);
+    expect(calls).toEqual(['in(property_lists.list_id,["L1","L2"])']);
+  });
+  it("single-value all combinator → filters through embedded property_lists", async () => {
+    const { proxy, calls } = mockBuilder();
+    const m = mockSupabaseClient();
+    await applyBlock(
+      proxy,
+      block({
+        kind: "list",
+        combinator: "all",
+        values: ["L1"],
+      }) as FilterBlock,
+      m.sb,
+    );
+    expect(m.calls.length).toBe(0);
+    expect(calls).toEqual(['in(property_lists.list_id,["L1"])']);
   });
   it("all combinator → only properties on EVERY selected list", async () => {
     const { proxy, calls } = mockBuilder();
@@ -768,7 +783,7 @@ describe("applyBlock: list (pre-fetch via property_lists)", () => {
     );
     expect(calls.some((c) => c.startsWith("not(id,in,"))).toBe(true);
   });
-  it("empty pre-fetch → __no_match__ short-circuit so .in() never matches", async () => {
+  it("empty multi-list all pre-fetch → __no_match__ short-circuit so .in() never matches", async () => {
     const { proxy, calls } = mockBuilder();
     const m = mockSupabaseClient();
     m.setReturn("property_lists", []);
@@ -776,12 +791,56 @@ describe("applyBlock: list (pre-fetch via property_lists)", () => {
       proxy,
       block({
         kind: "list",
-        combinator: "any",
-        values: ["L1"],
+        combinator: "all",
+        values: ["L1", "L2"],
       }) as FilterBlock,
       m.sb,
     );
     expect(calls.some((c) => c.includes("__no_match__"))).toBe(true);
+  });
+});
+
+describe("needsPropertyListsEmbed", () => {
+  it("returns true for list filters that use the embedded relationship path", () => {
+    expect(
+      needsPropertyListsEmbed([
+        block({
+          kind: "list",
+          combinator: "any",
+          values: ["L1"],
+        }) as FilterBlock,
+      ]),
+    ).toBe(true);
+    expect(
+      needsPropertyListsEmbed([
+        block({
+          kind: "list",
+          combinator: "all",
+          values: ["L1"],
+        }) as FilterBlock,
+      ]),
+    ).toBe(true);
+  });
+
+  it("returns false for multi-list all/not filters that still need pre-fetch set logic", () => {
+    expect(
+      needsPropertyListsEmbed([
+        block({
+          kind: "list",
+          combinator: "all",
+          values: ["L1", "L2"],
+        }) as FilterBlock,
+      ]),
+    ).toBe(false);
+    expect(
+      needsPropertyListsEmbed([
+        block({
+          kind: "list",
+          combinator: "not",
+          values: ["L1"],
+        }) as FilterBlock,
+      ]),
+    ).toBe(false);
   });
 });
 

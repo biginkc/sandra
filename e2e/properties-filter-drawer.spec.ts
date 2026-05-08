@@ -1,4 +1,5 @@
 import { test, expect } from "@playwright/test";
+import { adminClient, seedList, seedProspects } from "./fixtures";
 
 function encodedFilters(blocks: Array<Record<string, unknown>>) {
   return encodeURIComponent(JSON.stringify({ v: 1, blocks }));
@@ -69,6 +70,52 @@ test.describe("Phase 05 Plan 09 — full feature flow", () => {
     await expect(activeBar.locator("[data-chip-kind='vacancy']")).toBeVisible();
 
     expect(errors).toEqual([]);
+  });
+
+  test("large List filter renders without a Bad Request", async ({ page }) => {
+    test.setTimeout(60_000);
+    const admin = adminClient();
+    const prefix = `E2E Large List ${Date.now()}`;
+    const listId = await seedList(admin, prefix);
+    const seeded = await seedProspects(admin, 275, prefix);
+    await admin.from("property_lists").insert(
+      seeded.map((property) => ({
+        property_id: property.id,
+        list_id: listId,
+      })),
+    );
+
+    const errors: string[] = [];
+    page.on("response", (response) => {
+      if (response.status() >= 400) {
+        errors.push(`${response.status()} ${response.url()}`);
+      }
+    });
+
+    try {
+      await page.goto(
+        `/properties?filters=${encodedFilters([
+          {
+            id: "large-list",
+            kind: "list",
+            combinator: "any",
+            values: [listId],
+          },
+        ])}`,
+      );
+
+      await expect(
+        page.getByText(/Failed to load prospects: Bad Request/i),
+      ).not.toBeVisible({ timeout: 10_000 });
+      await expect(page.getByText(prefix).first()).toBeVisible({
+        timeout: 10_000,
+      });
+      expect(errors.filter((error) => error.includes("/properties"))).toEqual([]);
+    } finally {
+      await admin.from("property_lists").delete().eq("list_id", listId);
+      await admin.from("properties").delete().like("address", `${prefix}%`);
+      await admin.from("lists").delete().eq("id", listId);
+    }
   });
 
   test("base preset chip click toggles URL and aria-pressed", async ({ page }) => {

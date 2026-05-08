@@ -3,7 +3,10 @@
 import { errFromUnknown, ok, type Result } from "@/lib/errors/result";
 import { reportError } from "@/lib/errors/report";
 import { requireOrgMembership } from "@/lib/auth/require-org-membership";
-import { applyFilters } from "@/lib/prospects/filter-to-supabase";
+import {
+  applyFilters,
+  needsPropertyListsEmbed,
+} from "@/lib/prospects/filter-to-supabase";
 import type { BlockStack } from "@/lib/prospects/filter-schema";
 import { createClient } from "@/lib/supabase/server";
 
@@ -51,7 +54,12 @@ export async function countProspectsForFilter(input: {
 
     let q = sb
       .from("properties")
-      .select("id", { count: "exact", head: true })
+      .select(
+        needsPropertyListsEmbed(input.blocks)
+          ? "id, property_lists!inner(list_id)"
+          : "id",
+        { count: "exact", head: true },
+      )
       .is("deleted_at", null);
     if (!hasPipelineBlock) q = q.eq("status", "prospect");
 
