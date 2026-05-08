@@ -25,7 +25,7 @@ export function authHeaders(body: string, extra: Record<string, string> = {}) {
 
 export function jsonRequest(
   url: string,
-  method: "POST" | "PATCH",
+  method: "POST" | "PATCH" | "PUT",
   body: unknown,
   extraHeaders: Record<string, string> = {},
 ): Request {
@@ -151,4 +151,32 @@ export async function seedDialerBatch(client: SupabaseClient<any>) {
   if (itemError || !item) throw itemError ?? new Error("seed item");
 
   return { ...lead, batchId: batch.id as string, itemId: item.id as string };
+}
+
+export async function seedCallActivity(client: SupabaseClient<any>) {
+  const seeded = await seedDialerBatch(client);
+  const { data: activity, error } = await (client as any)
+    .from("call_activities")
+    .insert({
+      org_id: seeded.orgId,
+      property_id: seeded.propertyId,
+      contact_id: seeded.contactId,
+      dialer_batch_item_id: seeded.itemId,
+      jitter_attempt_id: `attempt-${crypto.randomUUID()}`,
+      provider: "jitter",
+      outcome: "unknown",
+    })
+    .select("id, updated_at")
+    .single();
+  if (error || !activity) throw error ?? new Error("seed activity");
+
+  return {
+    ...seeded,
+    callActivityId: activity.id as string,
+    callActivityUpdatedAt: activity.updated_at as string,
+  };
+}
+
+export function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
