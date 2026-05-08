@@ -1,66 +1,89 @@
 "use client";
 
-/**
- * STUB — Plan 06 ships the real implementation of useFilterState.
- * This stub exists in the Plan 08 worktree solely to unblock development
- * of components that import it (ActiveFiltersChips, PresetDropdown).
- *
- * Plan 09 will wire the real use-filter-state.ts from Plan 06's merged files,
- * replacing this stub at integration time.
- *
- * Interface matches Plan 06's contract exactly (see 05-06-PLAN.md).
- */
-
-import { useRouter, useSearchParams, usePathname } from "next/navigation";
+import { useCallback, useMemo, useTransition } from "react";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import {
   decodeFilters,
   encodeFilters,
+  type BlockStack,
   type FilterBlock,
   type FilterState,
 } from "@/lib/prospects/filter-schema";
 
-export type UseFilterStateReturn = {
-  blocks: FilterBlock[];
+export type UseFilterState = {
+  blocks: BlockStack;
   filterState: FilterState;
   addBlock: (block: FilterBlock) => void;
   removeBlock: (id: string) => void;
   updateBlock: (id: string, patch: Partial<FilterBlock>) => void;
-  replaceStack: (blocks: FilterBlock[]) => void;
+  replaceStack: (next: BlockStack) => void;
   clearAll: () => void;
 };
 
-export function useFilterState(): UseFilterStateReturn {
+export function useFilterState(): UseFilterState {
   const router = useRouter();
   const pathname = usePathname();
   const params = useSearchParams();
+  const [, startTransition] = useTransition();
 
-  const raw = params?.get("filters") ?? null;
-  const filterState = decodeFilters(raw);
-  const blocks = filterState.blocks;
+  const filterState: FilterState = useMemo(() => {
+    const raw = params?.get("filters") ?? null;
+    return decodeFilters(raw);
+  }, [params]);
 
-  const commit = (nextBlocks: FilterBlock[]) => {
-    const next = new URLSearchParams(params?.toString() ?? "");
-    if (nextBlocks.length === 0) {
-      next.delete("filters");
-    } else {
-      next.set("filters", encodeFilters({ v: 1, blocks: nextBlocks }));
-    }
-    const qs = next.toString();
-    const url = qs ? `${pathname}?${qs}` : pathname;
-    router.replace(url, { scroll: false });
-    router.refresh();
+  const navigate = useCallback(
+    (nextStack: BlockStack) => {
+      const next = new URLSearchParams(params?.toString() ?? "");
+      if (nextStack.length === 0) {
+        next.delete("filters");
+      } else {
+        next.set("filters", encodeFilters({ v: 1, blocks: nextStack }));
+      }
+      const qs = next.toString();
+      const url = qs ? `${pathname}?${qs}` : pathname;
+      startTransition(() => {
+        router.replace(url, { scroll: false });
+        router.refresh();
+      });
+    },
+    [pathname, params, router],
+  );
+
+  const addBlock = useCallback(
+    (block: FilterBlock) => navigate([...filterState.blocks, block]),
+    [filterState.blocks, navigate],
+  );
+
+  const removeBlock = useCallback(
+    (id: string) => navigate(filterState.blocks.filter((b) => b.id !== id)),
+    [filterState.blocks, navigate],
+  );
+
+  const updateBlock = useCallback(
+    (id: string, patch: Partial<FilterBlock>) => {
+      navigate(
+        filterState.blocks.map((b) =>
+          b.id === id ? ({ ...b, ...patch } as FilterBlock) : b,
+        ),
+      );
+    },
+    [filterState.blocks, navigate],
+  );
+
+  const replaceStack = useCallback(
+    (next: BlockStack) => navigate(next),
+    [navigate],
+  );
+
+  const clearAll = useCallback(() => navigate([]), [navigate]);
+
+  return {
+    blocks: filterState.blocks,
+    filterState,
+    addBlock,
+    removeBlock,
+    updateBlock,
+    replaceStack,
+    clearAll,
   };
-
-  const addBlock = (block: FilterBlock) => commit([...blocks, block] as FilterBlock[]);
-
-  const removeBlock = (id: string) => commit(blocks.filter((b) => b.id !== id));
-
-  const updateBlock = (id: string, patch: Partial<FilterBlock>) =>
-    commit(blocks.map((b) => (b.id === id ? ({ ...b, ...patch } as FilterBlock) : b)));
-
-  const replaceStack = (nextBlocks: FilterBlock[]) => commit(nextBlocks);
-
-  const clearAll = () => commit([]);
-
-  return { blocks, filterState, addBlock, removeBlock, updateBlock, replaceStack, clearAll };
 }
