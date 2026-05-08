@@ -4,7 +4,6 @@ import { useCallback, useMemo, useTransition } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import {
   decodeFilters,
-  encodeFilters,
   type BlockStack,
   type FilterBlock,
   type FilterState,
@@ -37,7 +36,10 @@ export function useFilterState(): UseFilterState {
       if (nextStack.length === 0) {
         next.delete("filters");
       } else {
-        next.set("filters", encodeFilters({ v: 1, blocks: nextStack }));
+        // Pass raw JSON; URLSearchParams.toString() URL-encodes once.
+        // Using encodeFilters() (which already URL-encodes) here would
+        // produce a double-encoded value in the URL string.
+        next.set("filters", JSON.stringify({ v: 1, blocks: nextStack }));
       }
       const qs = next.toString();
       const url = qs ? `${pathname}?${qs}` : pathname;

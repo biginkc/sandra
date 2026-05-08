@@ -70,7 +70,8 @@ test.describe("Phase 05 Plan 09 — full feature flow", () => {
 
     const yesRadio = page.getByRole("radio", { name: /yes \(vacant\)/i });
     await expect(yesRadio).toBeVisible({ timeout: 5_000 });
-    await yesRadio.check();
+    // base-ui radio: .check() rejects (custom widget); .click() works
+    await yesRadio.click();
 
     const showButton = page.getByRole("button", { name: /Show \d+ prospects/i });
     await expect(showButton).toBeVisible({ timeout: 10_000 });

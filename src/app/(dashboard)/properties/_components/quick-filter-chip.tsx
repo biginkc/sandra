@@ -3,7 +3,6 @@
 import { useRouter, useSearchParams, usePathname } from "next/navigation";
 import { Badge } from "@/components/ui/badge";
 import {
-  encodeFilters,
   decodeFilters,
   type FilterState,
   type FilterBlock,
@@ -30,23 +29,33 @@ export type QuickFilterChipProps = {
  */
 function blocksEqualIgnoringId(a: FilterBlock[], b: FilterBlock[]): boolean {
   if (a.length !== b.length) return false;
+  // Sort keys before stringify so two objects with the same fields in
+  // different orders compare equal. Without this, the DB seed shape
+  // {id,kind,tri} and the narrowBlock-reordered URL shape {id,tri,kind}
+  // would mismatch despite being semantically identical.
   const norm = (blk: FilterBlock) => {
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     const { id: _id, ...rest } = blk as FilterBlock & { id: string };
-    return rest;
+    return JSON.stringify(rest, Object.keys(rest).sort());
   };
-  return JSON.stringify(a.map(norm)) === JSON.stringify(b.map(norm));
+  return a.map(norm).join("|") === b.map(norm).join("|");
 }
 
 export function QuickFilterChip({
   preset,
-  currentFilterStateRaw,
 }: QuickFilterChipProps) {
   const router = useRouter();
   const pathname = usePathname();
   const params = useSearchParams();
 
-  const current = decodeFilters(currentFilterStateRaw);
+  // Derive active state from the live URL via useSearchParams() rather than
+  // the server-passed currentFilterStateRaw prop. Reason: the prop only
+  // updates when the RSC parent re-renders, which can lag behind a
+  // router.replace soft-nav. useSearchParams() is reactive to URL changes
+  // immediately. The prop is preserved on the type for the SSR-stable
+  // initial render but the client-side source of truth is the URL.
+  const liveRaw = params?.get("filters") ?? null;
+  const current = decodeFilters(liveRaw);
   const isActive = blocksEqualIgnoringId(
     current.blocks,
     preset.filters_json.blocks ?? []
@@ -57,10 +66,15 @@ export function QuickFilterChip({
     if (isActive) {
       next.delete("filters");
     } else {
-      next.set("filters", encodeFilters(preset.filters_json));
+      // Raw JSON; URLSearchParams.toString() URL-encodes once.
+      // Using encodeFilters() here would double-encode.
+      next.set("filters", JSON.stringify(preset.filters_json));
     }
     const qs = next.toString();
     const url = qs ? `${pathname}?${qs}` : pathname;
+    // router.replace updates the URL, but in Next 16 the RSC tree (which
+    // owns this chip's currentFilterStateRaw prop) only re-fetches when
+    // refresh() runs. Without refresh(), aria-pressed lags behind the URL.
     router.replace(url, { scroll: false });
     router.refresh();
   };

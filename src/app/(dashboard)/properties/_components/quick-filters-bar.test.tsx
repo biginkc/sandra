@@ -1,13 +1,15 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { encodeFilters, newBlockId } from "@/lib/prospects/filter-schema";
+import { newBlockId } from "@/lib/prospects/filter-schema";
 
 const replace = vi.fn();
 const refresh = vi.fn();
+let mockSearchParams = new URLSearchParams("");
+
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ replace, refresh }),
-  useSearchParams: () => new URLSearchParams(""),
+  useSearchParams: () => mockSearchParams,
   usePathname: () => "/properties",
 }));
 
@@ -16,6 +18,7 @@ import { QuickFilterChip } from "./quick-filter-chip";
 beforeEach(() => {
   replace.mockReset();
   refresh.mockReset();
+  mockSearchParams = new URLSearchParams("");
 });
 
 describe("QuickFilterChip", () => {
@@ -66,13 +69,15 @@ describe("QuickFilterChip", () => {
         blocks: [{ id: blockId, kind: "vacancy" as const, tri: "yes" as const }],
       },
     };
-    // Different UUID in URL — should still match (active) because id is ignored
-    const currentState = {
-      v: 1 as const,
-      blocks: [{ id: "different-uuid", kind: "vacancy" as const, tri: "yes" as const }],
-    };
-    const currentRaw = encodeFilters(currentState);
-    render(<QuickFilterChip preset={preset} orgId="org" currentFilterStateRaw={currentRaw} />);
+    // URL holds a different-UUID equivalent block — chip detects active via
+    // useSearchParams(), id is stripped from comparison.
+    mockSearchParams = new URLSearchParams({
+      filters: JSON.stringify({
+        v: 1,
+        blocks: [{ id: "different-uuid", kind: "vacancy", tri: "yes" }],
+      }),
+    });
+    render(<QuickFilterChip preset={preset} orgId="org" currentFilterStateRaw={null} />);
     await user.click(screen.getByText("Vacant"));
     expect(replace).toHaveBeenCalled();
     const [url] = replace.mock.calls[0] as [string, ...unknown[]];
@@ -90,12 +95,13 @@ describe("QuickFilterChip", () => {
         blocks: [{ id: "preset-uuid", kind: "vacancy" as const, tri: "yes" as const }],
       },
     };
-    const currentState = {
-      v: 1 as const,
-      blocks: [{ id: "url-uuid", kind: "vacancy" as const, tri: "yes" as const }],
-    };
-    const currentRaw = encodeFilters(currentState);
-    render(<QuickFilterChip preset={preset} orgId="org" currentFilterStateRaw={currentRaw} />);
+    mockSearchParams = new URLSearchParams({
+      filters: JSON.stringify({
+        v: 1,
+        blocks: [{ id: "url-uuid", kind: "vacancy", tri: "yes" }],
+      }),
+    });
+    render(<QuickFilterChip preset={preset} orgId="org" currentFilterStateRaw={null} />);
     const btn = screen.getByRole("button");
     expect(btn).toHaveAttribute("aria-pressed", "true");
   });
