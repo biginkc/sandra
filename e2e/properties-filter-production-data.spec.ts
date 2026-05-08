@@ -241,6 +241,14 @@ test.describe("Production data filter smoke", () => {
         values: ["never_contacted"],
       },
     ]);
+    const engaged = await readFilteredPage(page, [
+      {
+        id: "prod-engaged",
+        kind: "engagement",
+        combinator: "any",
+        values: ["replied", "attempted"],
+      },
+    ]);
     const stacked = await readFilteredPage(page, [
       { id: "prod-stacked", kind: "list_count", range: { min: 2, max: null } },
     ]);
@@ -248,6 +256,7 @@ test.describe("Production data filter smoke", () => {
     const baseline = await readFilteredPage(page);
     expect(replied.count).toBeLessThanOrEqual(baseline.count);
     expect(cold.count).toBeLessThanOrEqual(baseline.count);
+    expect(engaged.count).toBeLessThanOrEqual(baseline.count);
     expect(stacked.count).toBeLessThanOrEqual(baseline.count);
   });
 

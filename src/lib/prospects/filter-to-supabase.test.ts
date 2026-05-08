@@ -900,6 +900,18 @@ describe("filterSelectFragment", () => {
       ].join(", "),
     );
   });
+
+  it("adds a relationship alias for the contacted engagement preset", () => {
+    expect(
+      filterSelectFragment([
+        block({
+          kind: "engagement",
+          combinator: "any",
+          values: ["replied", "attempted"],
+        }) as FilterBlock,
+      ]),
+    ).toBe("engaged_messages:messages!inner(property_id)");
+  });
 });
 
 describe("applyBlock: tag (pre-fetch via property_tags)", () => {
@@ -1059,6 +1071,21 @@ describe("applyBlock: engagement (4-bucket pre-fetch)", () => {
     );
     expect(m.calls.some((c) => c.startsWith("from(messages)"))).toBe(false);
     expect(calls).toEqual(['in(outreach_dispo,["opted_out","dnc"])']);
+  });
+  it("'attempted' + 'replied' → filters through messages without pre-fetching ids", async () => {
+    const { proxy, calls } = mockBuilder();
+    const m = mockSupabaseClient();
+    await applyBlock(
+      proxy,
+      block({
+        kind: "engagement",
+        combinator: "any",
+        values: ["replied", "attempted"],
+      }) as FilterBlock,
+      m.sb,
+    );
+    expect(m.calls.some((c) => c.startsWith("from(messages)"))).toBe(false);
+    expect(calls).toEqual(['in(engaged_messages.direction,["inbound","outbound"])']);
   });
 });
 
