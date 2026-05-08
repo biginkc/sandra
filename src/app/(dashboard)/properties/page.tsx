@@ -5,7 +5,10 @@ import { isAdminEmail } from "@/lib/auth/allowlist";
 import { getCallerMemberships } from "@/lib/auth/memberships";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
-import { applyFilters } from "@/lib/prospects/filter-to-supabase";
+import {
+  applyFilters,
+  filterSelectFragment,
+} from "@/lib/prospects/filter-to-supabase";
 
 import {
   ProspectsTable,
@@ -31,6 +34,25 @@ import type { Preset } from "./_components/quick-filter-chip";
 
 
 const PAGE_SIZE = 50;
+
+type PropertyQueryRow = {
+  id: string;
+  address: string;
+  city: string | null;
+  state: string;
+  zip: string | null;
+  market: string | null;
+  cass_status: string;
+  is_vacant: boolean | null;
+  created_at: string;
+  outreach_dispo: string | null;
+  list_filter?: Array<{ list_id: string }>;
+  list_exclusion?: Array<{ list_id: string }>;
+  contact_messages?: Array<unknown>;
+  attempted_outbound?: Array<unknown>;
+  attempted_inbound?: Array<unknown>;
+  replied_messages?: Array<unknown>;
+};
 
 // Hardcoded enum sources — these match the CHECK constraints in the
 // migrations referenced inline. The drawer surfaces them through
@@ -132,13 +154,17 @@ export default async function PropertiesPage({
   const hasPipelineStatusBlock = blockStack.some(
     (b) => b.kind === "pipeline_status",
   );
+  const propertyListSelect = filterSelectFragment(blockStack);
+  const propertiesSelect = [
+    "id, address, city, state, zip, market, cass_status, is_vacant, created_at, outreach_dispo",
+    propertyListSelect,
+  ]
+    .filter(Boolean)
+    .join(", ");
 
   let query = supabase
     .from("properties")
-    .select(
-      "id, address, city, state, zip, market, cass_status, is_vacant, created_at, outreach_dispo",
-      { count: "exact" },
-    )
+    .select(propertiesSelect, { count: "exact" })
     .is("deleted_at", null);
   if (!hasPipelineStatusBlock) {
     query = query.eq("status", "prospect");
@@ -157,10 +183,14 @@ export default async function PropertiesPage({
 
   // Stable secondary order on id breaks ties so pagination doesn't skip
   // or repeat rows when many rows share the primary sort value.
-  const { data: properties, count, error } = await query
+  const { data: propertyRows, count, error } = await query
     .order(sort, { ascending: dir === "asc" })
     .order("id", { ascending: true })
     .range(from, to);
+  // Relationship embeds above are select-only filter helpers; the table
+  // consumes only property columns, but the optional fields remain typed so
+  // future readers can see why the select may include list_filter/list_exclusion.
+  const properties = (propertyRows ?? []) as unknown as PropertyQueryRow[];
 
   const total = count ?? 0;
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
@@ -171,7 +201,7 @@ export default async function PropertiesPage({
   // engagement pill ("contacted" / "replying") and the LAST MESSAGE
   // preview column. Single batched query, then take the most-recent
   // row per property in JS (Supabase JS doesn't expose DISTINCT ON).
-  const pageIds = (properties ?? []).map((p) => p.id);
+  const pageIds = properties.map((p) => p.id);
   const latestByPropertyId = new Map<
     string,
     { direction: "inbound" | "outbound"; body: string | null }
@@ -194,7 +224,7 @@ export default async function PropertiesPage({
     }
   }
 
-  const prospects: ProspectRow[] = (properties ?? []).map((p) => {
+  const prospects: ProspectRow[] = properties.map((p) => {
     const latest = latestByPropertyId.get(p.id) ?? null;
     return {
       id: p.id,

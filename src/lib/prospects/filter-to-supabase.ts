@@ -15,8 +15,9 @@
  *  - Pre-fetch helpers (list, list_count, engagement, has_unread_inbound,
  *    has_open_tasks, tag) issue a side query through the supabase client
  *    `sb`, then layer .in("id", ids) on the main builder. When the pre-fetch
- *    yields zero IDs, the helper short-circuits with .in("id", ["__no_match__"])
- *    so the page renders 0 rows instead of erroring on an empty .in() list.
+ *    yields zero IDs, the helper short-circuits with an impossible-but-valid
+ *    UUID so the page renders 0 rows instead of erroring on an empty .in()
+ *    list or sending an invalid UUID to PostgREST.
  *  - The RLS layer (migration 054) is what enforces org-scoping; this file
  *    never bypasses it. The supabase client passed in is the user-bound
  *    client from src/lib/supabase/server.ts.
@@ -72,6 +73,67 @@ export async function applyFilters(
     b = r.builder;
   }
   return { builder: b };
+}
+
+export function propertyListsSelectFragment(blocks: BlockStack): string | null {
+  const needsPositiveListJoin = blocks.some(
+    (block) =>
+      block.kind === "list" &&
+      block.values.length > 0 &&
+      (block.combinator === "any" ||
+        (block.combinator === "all" && block.values.length === 1)),
+  );
+  const needsAntiListJoin = blocks.some(
+    (block) =>
+      block.kind === "list" &&
+      block.values.length > 0 &&
+      block.combinator === "not",
+  );
+
+  const fragments: string[] = [];
+  if (needsPositiveListJoin) {
+    fragments.push("list_filter:property_lists!inner(list_id)");
+  }
+  if (needsAntiListJoin) {
+    fragments.push("list_exclusion:property_lists(list_id)");
+  }
+  return fragments.length > 0 ? fragments.join(", ") : null;
+}
+
+export function filterSelectFragment(blocks: BlockStack): string | null {
+  const fragments: string[] = [];
+  const listFragment = propertyListsSelectFragment(blocks);
+  if (listFragment) fragments.push(listFragment);
+
+  const singleEngagementBuckets = new Set(
+    blocks
+      .filter(
+        (block): block is Extract<FilterBlock, { kind: "engagement" }> =>
+          block.kind === "engagement" &&
+          block.combinator === "any" &&
+          block.values.length === 1,
+      )
+      .map((block) => block.values[0]),
+  );
+
+  if (singleEngagementBuckets.has("never_contacted")) {
+    fragments.push("contact_messages:messages()");
+  }
+  if (singleEngagementBuckets.has("attempted")) {
+    fragments.push(
+      "attempted_outbound:messages!inner(property_id)",
+      "attempted_inbound:messages(property_id)",
+    );
+  }
+  if (singleEngagementBuckets.has("replied")) {
+    fragments.push("replied_messages:messages!inner(property_id)");
+  }
+
+  return fragments.length > 0 ? fragments.join(", ") : null;
+}
+
+export function needsPropertyListsEmbed(blocks: BlockStack): boolean {
+  return propertyListsSelectFragment(blocks) !== null;
 }
 
 export async function applyBlock(
@@ -274,10 +336,13 @@ function applyAssigneeBlock(
 
 // ---------------------------------------------------------------------------
 // Pre-fetch helpers — issue a side query, then .in("id", ids) on the main
-// builder. On empty results, short-circuit with .in("id", ["__no_match__"]).
+// builder. On empty results, short-circuit with a valid UUID that matches no row.
 // ---------------------------------------------------------------------------
 
-const NO_MATCH_SENTINEL = ["__no_match__"];
+// `properties.id` is a uuid column. A fake string sentinel makes PostgREST
+// return 400 Bad Request before the query can evaluate, so use a valid UUID
+// that is outside the generated-id space and therefore matches no real row.
+const NO_MATCH_SENTINEL = ["00000000-0000-0000-0000-000000000000"];
 
 /**
  * List block — properties on (any/all/not) the selected lists.
@@ -290,6 +355,22 @@ async function applyListBlock(
   sb: SbClient,
 ): Promise<BuilderResult> {
   if (block.values.length === 0) return { builder };
+
+  if (block.combinator === "any") {
+    return { builder: builder.in("list_filter.list_id", block.values) };
+  }
+
+  if (block.combinator === "all" && block.values.length === 1) {
+    return { builder: builder.in("list_filter.list_id", block.values) };
+  }
+
+  if (block.combinator === "not") {
+    return {
+      builder: builder
+        .in("list_exclusion.list_id", block.values)
+        .is("list_exclusion", null),
+    };
+  }
 
   const { data } = await sb
     .from("property_lists")
@@ -311,14 +392,6 @@ async function applyListBlock(
       builder: propIds.length
         ? builder.in("id", propIds)
         : builder.in("id", NO_MATCH_SENTINEL),
-    };
-  }
-  if (block.combinator === "not") {
-    for (const [pid] of byProp) propIds.push(pid);
-    return {
-      builder: propIds.length
-        ? builder.not("id", "in", `(${propIds.map((id) => `"${id}"`).join(",")})`)
-        : builder,
     };
   }
   // any
@@ -431,6 +504,27 @@ async function applyEngagementBlock(
   sb: SbClient,
 ): Promise<BuilderResult> {
   if (block.values.length === 0) return { builder };
+
+  if (block.combinator === "any" && block.values.length === 1) {
+    const onlyBucket = block.values[0];
+    if (onlyBucket === "never_contacted") {
+      return { builder: builder.is("contact_messages", null) };
+    }
+    if (onlyBucket === "attempted") {
+      return {
+        builder: builder
+          .eq("attempted_outbound.direction", "outbound")
+          .eq("attempted_inbound.direction", "inbound")
+          .is("attempted_inbound", null),
+      };
+    }
+    if (onlyBucket === "replied") {
+      return { builder: builder.eq("replied_messages.direction", "inbound") };
+    }
+    if (onlyBucket === "opted_out") {
+      return { builder: builder.in("outreach_dispo", ["opted_out", "dnc"]) };
+    }
+  }
 
   const wantedBuckets = new Set(block.values);
 

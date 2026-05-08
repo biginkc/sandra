@@ -55,6 +55,9 @@ export function useFilterState(): UseFilterState {
       latestBlocksRef.current = nextStack;
       setBlocks(nextStack);
       if (typeof window !== "undefined") {
+        // The table uses this event as a narrow client-side bridge: controls
+        // update optimistically immediately, while the RSC table keeps showing
+        // skeleton rows until the server-rendered block stack catches up.
         window.dispatchEvent(
           new CustomEvent<FilterNavigationStartDetail>(
             FILTER_NAVIGATION_START_EVENT,
@@ -65,6 +68,9 @@ export function useFilterState(): UseFilterState {
       const currentSearch =
         typeof window === "undefined"
           ? (params?.toString() ?? "")
+          // useSearchParams can lag behind rapid router.replace calls inside
+          // the same interaction; reading the browser URL preserves unrelated
+          // params from the latest committed navigation.
           : window.location.search;
       const next = new URLSearchParams(currentSearch);
       if (nextStack.length === 0) {
