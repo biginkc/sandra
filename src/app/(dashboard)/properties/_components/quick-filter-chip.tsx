@@ -62,8 +62,15 @@ export function QuickFilterChip({
   );
 
   const onClick = () => {
-    const next = new URLSearchParams(params?.toString() ?? "");
-    if (isActive) {
+    const browserSearch =
+      typeof window === "undefined" ? "" : window.location.search;
+    const next = new URLSearchParams(browserSearch || (params?.toString() ?? ""));
+    const activeAtClick = blocksEqualIgnoringId(
+      decodeFilters(next.get("filters")).blocks,
+      preset.filters_json.blocks ?? []
+    );
+
+    if (activeAtClick) {
       next.delete("filters");
     } else {
       // Raw JSON; URLSearchParams.toString() URL-encodes once.
