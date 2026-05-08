@@ -267,7 +267,6 @@ export type Database = {
           id: string
           market: string
           name: string
-          org_id: string
           state: string
         }
         Insert: {
@@ -276,7 +275,6 @@ export type Database = {
           id?: string
           market: string
           name: string
-          org_id?: string
           state: string
         }
         Update: {
@@ -285,18 +283,9 @@ export type Database = {
           id?: string
           market?: string
           name?: string
-          org_id?: string
           state?: string
         }
-        Relationships: [
-          {
-            foreignKeyName: "counties_org_id_fkey"
-            columns: ["org_id"]
-            isOneToOne: false
-            referencedRelation: "organizations"
-            referencedColumns: ["id"]
-          },
-        ]
+        Relationships: []
       }
       csv_imports: {
         Row: {
@@ -705,6 +694,38 @@ export type Database = {
           },
         ]
       }
+      memberships: {
+        Row: {
+          created_at: string
+          id: string
+          org_id: string
+          role: string
+          user_id: string
+        }
+        Insert: {
+          created_at?: string
+          id?: string
+          org_id: string
+          role?: string
+          user_id: string
+        }
+        Update: {
+          created_at?: string
+          id?: string
+          org_id?: string
+          role?: string
+          user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "memberships_org_id_fkey"
+            columns: ["org_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       messages: {
         Row: {
           body: string
@@ -772,10 +793,10 @@ export type Database = {
           id?: string
           metadata?: Json | null
           org_id?: string
-          scheduled_for?: string | null
           property_id?: string | null
           provider?: string | null
           read_at?: string | null
+          scheduled_for?: string | null
           sent_at?: string | null
           status?: string
           subject?: string | null
@@ -807,28 +828,28 @@ export type Database = {
       }
       metric_snapshots: {
         Row: {
+          captured_at: string
+          captured_on: string
+          denominator: number
           id: string
           metric_key: string
           numerator: number
-          denominator: number
-          captured_on: string
-          captured_at: string
         }
         Insert: {
+          captured_at?: string
+          captured_on?: string
+          denominator: number
           id?: string
           metric_key: string
           numerator: number
-          denominator: number
-          captured_on?: string
-          captured_at?: string
         }
         Update: {
+          captured_at?: string
+          captured_on?: string
+          denominator?: number
           id?: string
           metric_key?: string
           numerator?: number
-          denominator?: number
-          captured_on?: string
-          captured_at?: string
         }
         Relationships: []
       }
@@ -921,6 +942,7 @@ export type Database = {
           distress_flags: string[]
           equity_estimate: number | null
           fips_code: string | null
+          follow_up_at: string | null
           homeowner_contact_id: string | null
           id: string
           is_residential: boolean | null
@@ -934,7 +956,6 @@ export type Database = {
           market: string | null
           mls_number: string | null
           mortgage_balance: number | null
-          follow_up_at: string | null
           motivation_level: string | null
           ncoa_verified_at: string | null
           needs_human_attention: boolean
@@ -980,6 +1001,7 @@ export type Database = {
           distress_flags?: string[]
           equity_estimate?: number | null
           fips_code?: string | null
+          follow_up_at?: string | null
           homeowner_contact_id?: string | null
           id?: string
           is_residential?: boolean | null
@@ -993,7 +1015,6 @@ export type Database = {
           market?: string | null
           mls_number?: string | null
           mortgage_balance?: number | null
-          follow_up_at?: string | null
           motivation_level?: string | null
           ncoa_verified_at?: string | null
           needs_human_attention?: boolean
@@ -1039,6 +1060,7 @@ export type Database = {
           distress_flags?: string[]
           equity_estimate?: number | null
           fips_code?: string | null
+          follow_up_at?: string | null
           homeowner_contact_id?: string | null
           id?: string
           is_residential?: boolean | null
@@ -1052,7 +1074,6 @@ export type Database = {
           market?: string | null
           mls_number?: string | null
           mortgage_balance?: number | null
-          follow_up_at?: string | null
           motivation_level?: string | null
           ncoa_verified_at?: string | null
           needs_human_attention?: boolean
@@ -1261,6 +1282,56 @@ export type Database = {
             columns: ["tag_id"]
             isOneToOne: false
             referencedRelation: "tags"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      saved_filters: {
+        Row: {
+          created_at: string
+          filters_json: Json
+          id: string
+          is_base: boolean
+          last_count: number | null
+          last_run_at: string | null
+          name: string
+          org_id: string
+          starred: boolean
+          updated_at: string
+          user_id: string | null
+        }
+        Insert: {
+          created_at?: string
+          filters_json: Json
+          id?: string
+          is_base?: boolean
+          last_count?: number | null
+          last_run_at?: string | null
+          name: string
+          org_id: string
+          starred?: boolean
+          updated_at?: string
+          user_id?: string | null
+        }
+        Update: {
+          created_at?: string
+          filters_json?: Json
+          id?: string
+          is_base?: boolean
+          last_count?: number | null
+          last_run_at?: string | null
+          name?: string
+          org_id?: string
+          starred?: boolean
+          updated_at?: string
+          user_id?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "saved_filters_org_id_fkey"
+            columns: ["org_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
             referencedColumns: ["id"]
           },
         ]
@@ -1504,53 +1575,6 @@ export type Database = {
           },
         ]
       }
-      sms_templates: {
-        Row: {
-          id: string
-          org_id: string
-          name: string
-          content: string
-          category: string
-          system_managed: boolean
-          created_by: string | null
-          created_at: string
-          updated_at: string
-          deleted_at: string | null
-        }
-        Insert: {
-          id?: string
-          org_id: string
-          name: string
-          content: string
-          category?: string
-          system_managed?: boolean
-          created_by?: string | null
-          created_at?: string
-          updated_at?: string
-          deleted_at?: string | null
-        }
-        Update: {
-          id?: string
-          org_id?: string
-          name?: string
-          content?: string
-          category?: string
-          system_managed?: boolean
-          created_by?: string | null
-          created_at?: string
-          updated_at?: string
-          deleted_at?: string | null
-        }
-        Relationships: [
-          {
-            foreignKeyName: "sms_templates_org_id_fkey"
-            columns: ["org_id"]
-            isOneToOne: false
-            referencedRelation: "organizations"
-            referencedColumns: ["id"]
-          },
-        ]
-      }
       skip_trace_cache: {
         Row: {
           address_normalized: string
@@ -1580,6 +1604,53 @@ export type Database = {
           result?: Json
         }
         Relationships: []
+      }
+      sms_templates: {
+        Row: {
+          category: string
+          content: string
+          created_at: string
+          created_by: string | null
+          deleted_at: string | null
+          id: string
+          name: string
+          org_id: string
+          system_managed: boolean
+          updated_at: string
+        }
+        Insert: {
+          category?: string
+          content: string
+          created_at?: string
+          created_by?: string | null
+          deleted_at?: string | null
+          id?: string
+          name: string
+          org_id: string
+          system_managed?: boolean
+          updated_at?: string
+        }
+        Update: {
+          category?: string
+          content?: string
+          created_at?: string
+          created_by?: string | null
+          deleted_at?: string | null
+          id?: string
+          name?: string
+          org_id?: string
+          system_managed?: boolean
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "sms_templates_org_id_fkey"
+            columns: ["org_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+        ]
       }
       tags: {
         Row: {
@@ -1735,6 +1806,7 @@ export type Database = {
           last_used_at: string | null
           name: string
           notes: string | null
+          org_id: string
           revoked_at: string | null
           secret_hash: string
         }
@@ -1748,6 +1820,7 @@ export type Database = {
           last_used_at?: string | null
           name: string
           notes?: string | null
+          org_id?: string
           revoked_at?: string | null
           secret_hash: string
         }
@@ -1761,10 +1834,19 @@ export type Database = {
           last_used_at?: string | null
           name?: string
           notes?: string | null
+          org_id?: string
           revoked_at?: string | null
           secret_hash?: string
         }
-        Relationships: []
+        Relationships: [
+          {
+            foreignKeyName: "webhook_consumers_org_id_fkey"
+            columns: ["org_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+        ]
       }
       webhook_events: {
         Row: {
@@ -1853,7 +1935,10 @@ export type Database = {
     Functions: {
       count_phone_coverage_stats: {
         Args: never
-        Returns: Array<{ numerator: number; denominator: number }>
+        Returns: {
+          denominator: number
+          numerator: number
+        }[]
       }
       dashboard_summary: { Args: never; Returns: Json }
       delete_contact: {
