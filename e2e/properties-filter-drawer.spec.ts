@@ -163,7 +163,9 @@ test.describe("Phase 05 Plan 09 — full feature flow", () => {
     await page.waitForLoadState("networkidle");
 
     await page.getByRole("button", { name: /^Filters$/i }).click();
-    await expect(page.getByText(/Add a filter to slice your prospects/i)).toBeVisible();
+    await expect(
+      page.getByText(/Add a filter to slice your prospects/i),
+    ).not.toBeVisible();
     await expect(page.locator("[data-slot='sheet-overlay']")).toHaveClass(
       /bg-transparent/,
     );

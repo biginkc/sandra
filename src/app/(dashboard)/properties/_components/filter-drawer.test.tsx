@@ -310,11 +310,12 @@ describe("FilterDrawer", () => {
     expect(screen.getByRole("button", { name: /filters/i })).toBeInTheDocument();
   });
 
-  it("clicking Filters opens drawer with empty-state copy", () => {
+  it("clicking Filters opens drawer without empty-state copy", () => {
     renderOpen();
     expect(
-      screen.getByText(/add a filter to slice your prospects/i),
-    ).toBeInTheDocument();
+      screen.queryByText(/add a filter to slice your prospects/i),
+    ).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /add filter block/i })).toBeInTheDocument();
   });
 
   it("clicking + Add Filter Block opens picker with search input", async () => {

@@ -162,11 +162,7 @@ export function FilterDrawer({
         {/* Body — relative so AddBlockPicker can absolute-fill it */}
         <div className="relative flex-1 overflow-y-auto px-4 pb-2">
           {blocks.length === 0 ? (
-            <div className="py-12 text-center text-muted-foreground">
-              <p className="mb-4 text-sm">
-                Add a filter to slice your prospects.
-              </p>
-            </div>
+            <div data-empty-filter-state className="h-0" aria-hidden="true" />
           ) : (
             <div className="space-y-3">
               {blocks.map((b) => (
