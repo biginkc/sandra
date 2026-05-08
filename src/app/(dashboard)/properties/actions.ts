@@ -365,7 +365,7 @@ export async function getAllMatchingProspectIds(args: {
     // Plan 04 translator — same SQL chain the page renders against. Any
     // engagement / vacancy / cass / market / assignee / list / tag /
     // motivation_level / equity_pct / etc. is applied here, not duplicated.
-    query = await applyFilters(query, args.blockStack, supabase);
+    ({ builder: query } = await applyFilters(query, args.blockStack, supabase));
 
     // PostgREST silently caps results at 1 000 rows (db-max-rows default).
     // Paginate with .range() until a page comes back short to collect all IDs.

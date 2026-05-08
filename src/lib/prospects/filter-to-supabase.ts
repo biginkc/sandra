@@ -51,12 +51,17 @@ export async function applyFilters(
   builder: ProspectsBuilder,
   blocks: BlockStack,
   sb: SbClient,
-): Promise<ProspectsBuilder> {
+): Promise<{ builder: ProspectsBuilder }> {
+  // Wrap return in a plain object so JS does NOT auto-unwrap the builder
+  // through its thenable interface. Supabase v2 builders implement `.then`
+  // so `await Promise<builder>` would otherwise resolve to the QUERY RESULT
+  // (executing the query early), breaking any subsequent chaining like
+  // .order(...).range(...) on the caller side.
   let b: ProspectsBuilder = builder;
   for (const block of blocks) {
     b = await applyBlock(b, block, sb);
   }
-  return b;
+  return { builder: b };
 }
 
 export async function applyBlock(
