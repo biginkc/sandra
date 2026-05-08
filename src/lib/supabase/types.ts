@@ -941,6 +941,7 @@ export type Database = {
           deleted_at: string | null
           distress_flags: string[]
           equity_estimate: number | null
+          equity_pct: number | null
           fips_code: string | null
           follow_up_at: string | null
           homeowner_contact_id: string | null
@@ -1000,6 +1001,7 @@ export type Database = {
           deleted_at?: string | null
           distress_flags?: string[]
           equity_estimate?: number | null
+          equity_pct?: number | null
           fips_code?: string | null
           follow_up_at?: string | null
           homeowner_contact_id?: string | null
@@ -1059,6 +1061,7 @@ export type Database = {
           deleted_at?: string | null
           distress_flags?: string[]
           equity_estimate?: number | null
+          equity_pct?: number | null
           fips_code?: string | null
           follow_up_at?: string | null
           homeowner_contact_id?: string | null
