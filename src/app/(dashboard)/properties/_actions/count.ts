@@ -55,7 +55,7 @@ export async function countProspectsForFilter(input: {
       .is("deleted_at", null);
     if (!hasPipelineBlock) q = q.eq("status", "prospect");
 
-    q = applyFilters(q, input.blocks, sb);
+    q = await applyFilters(q, input.blocks, sb);
 
     const { count, error } = await q;
     if (error) {
