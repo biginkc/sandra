@@ -28,8 +28,20 @@ import {
   type SortDirection,
 } from "@/components/table/use-table-url-state.helpers";
 
+// Plan 09 — block stack + back-compat translator wiring. The 23-block v1
+// filter state is the canonical source of truth; the 5-chip ParsedProspectsFilters
+// is preserved for back-compat with prospects-table.tsx during the transition.
+import {
+  decodeFilters,
+  type FilterBlock,
+} from "@/lib/prospects/filter-schema";
+import { translateLegacyChipParams } from "@/lib/prospects/back-compat-url-translator";
+
 // Re-export SortDirection so existing imports `from "./prospects-query"` keep working.
 export type { SortDirection };
+// Re-export FilterBlock so callers (page.tsx, actions.ts) can type-narrow without
+// reaching past prospects-query into the lib module directly.
+export type { FilterBlock };
 
 export const SORTABLE_COLUMNS = [
   "address",
@@ -72,7 +84,20 @@ export type ParsedProspectsSearch = {
   search: string | null;
   sort: SortableColumn;
   dir: SortDirection;
+  /** Legacy 5-chip filter shape — KEEP populated for back-compat with the
+   *  table chip block during the transition. Plan 09 Task 3 strips the
+   *  consumer; this field can be removed in v1.1 once nothing reads it. */
   filters: ParsedProspectsFilters;
+  /** v1 source-of-truth for filtering: the 23-block filter stack. Populated
+   *  from `?filters=<encoded-json>` when present (D-03 precedence), otherwise
+   *  from translating the 5 legacy chip params via translateLegacyChipParams. */
+  blockStack: FilterBlock[];
+  /** Diagnostic — which input lane produced `blockStack`:
+   *   - "url-state"     → ?filters= was present (even if it decoded to empty)
+   *   - "legacy-chips"  → ?filters= absent AND at least one legacy chip param produced a block
+   *   - "none"          → neither produced anything
+   *  When "url-state", legacy chip params are IGNORED to avoid double-application. */
+  filtersSource: "url-state" | "legacy-chips" | "none";
 };
 
 /** Default sort: newest-imported first. Matches the prior behavior. */
@@ -141,6 +166,10 @@ export function parseProspectsSearch(raw: {
   engagement?: string | string[];
   market?: string | string[];
   assignee?: string | string[];
+  /** Plan 09 — encoded `{ v: 1, blocks: [...] }` JSON state for the 23-block
+   *  filter drawer. When present, takes precedence over the 5 legacy chip
+   *  params per D-03; legacy chips are IGNORED to avoid double-application. */
+  filters?: string | string[];
 }): ParsedProspectsSearch {
   const result = parseTableSearch<ParsedProspectsFilters>(
     raw as Record<string, string | string[] | undefined>,
@@ -151,6 +180,36 @@ export function parseProspectsSearch(raw: {
       parseFilters: parseProspectsFilters,
     },
   );
+
+  // Plan 09 — derive `blockStack` from either the v1 URL state OR the legacy
+  // chip params. URL state wins per D-03 (no double-application).
+  const pickFirst = (v: string | string[] | undefined): string | undefined =>
+    Array.isArray(v) ? v[0] : v;
+  const rawFiltersParam = pickFirst(raw.filters);
+
+  let blockStack: FilterBlock[];
+  let filtersSource: ParsedProspectsSearch["filtersSource"];
+  if (rawFiltersParam !== undefined && rawFiltersParam !== "") {
+    // ?filters= was present in the URL — even when malformed, fall through to
+    // the empty stack rather than re-applying the legacy chips. This matches
+    // the fail-closed semantics of decodeFilters: a busted URL surface should
+    // never silently produce a different result than the intended one.
+    const decoded = decodeFilters(rawFiltersParam);
+    blockStack = decoded.blocks;
+    filtersSource = "url-state";
+  } else {
+    const legacy = translateLegacyChipParams(
+      raw as Record<string, string | string[] | undefined>,
+    );
+    if (legacy.length > 0) {
+      blockStack = legacy;
+      filtersSource = "legacy-chips";
+    } else {
+      blockStack = [];
+      filtersSource = "none";
+    }
+  }
+
   // The generic helper returns sort: string; narrow back to SortableColumn
   // for the existing prospects-page consumer's type expectations.
   return {
@@ -159,6 +218,8 @@ export function parseProspectsSearch(raw: {
     sort: result.sort as ParsedProspectsSearch["sort"],
     dir: result.dir,
     filters: result.filters,
+    blockStack,
+    filtersSource,
   };
 }
 

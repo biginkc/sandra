@@ -1,10 +1,9 @@
 "use client";
 
-import { useCallback, useMemo, useTransition } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useTransition } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import {
   decodeFilters,
-  encodeFilters,
   type BlockStack,
   type FilterBlock,
   type FilterState,
@@ -20,24 +19,67 @@ export type UseFilterState = {
   clearAll: () => void;
 };
 
+export const FILTER_NAVIGATION_START_EVENT = "properties:filters-navigation-start";
+export type FilterNavigationStartDetail = {
+  blocksKey: string;
+};
+
 export function useFilterState(): UseFilterState {
   const router = useRouter();
   const pathname = usePathname();
   const params = useSearchParams();
   const [, startTransition] = useTransition();
 
-  const filterState: FilterState = useMemo(() => {
+  const urlFilterState: FilterState = useMemo(() => {
     const raw = params?.get("filters") ?? null;
     return decodeFilters(raw);
   }, [params]);
+  const [blocks, setBlocks] = useState<BlockStack>(urlFilterState.blocks);
+  const latestBlocksRef = useRef<BlockStack>(urlFilterState.blocks);
+  const urlBlocksKey = JSON.stringify(urlFilterState.blocks);
+
+  useEffect(() => {
+    latestBlocksRef.current = urlFilterState.blocks;
+    setBlocks(urlFilterState.blocks);
+    // urlBlocksKey is the stable dependency; urlFilterState.blocks is the
+    // fresh decoded value to sync from when the URL actually changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [urlBlocksKey]);
+
+  const getLatestBlocks = useCallback(() => {
+    return latestBlocksRef.current;
+  }, []);
 
   const navigate = useCallback(
     (nextStack: BlockStack) => {
-      const next = new URLSearchParams(params?.toString() ?? "");
+      latestBlocksRef.current = nextStack;
+      setBlocks(nextStack);
+      if (typeof window !== "undefined") {
+        // The table uses this event as a narrow client-side bridge: controls
+        // update optimistically immediately, while the RSC table keeps showing
+        // skeleton rows until the server-rendered block stack catches up.
+        window.dispatchEvent(
+          new CustomEvent<FilterNavigationStartDetail>(
+            FILTER_NAVIGATION_START_EVENT,
+            { detail: { blocksKey: JSON.stringify(nextStack) } },
+          ),
+        );
+      }
+      const currentSearch =
+        typeof window === "undefined"
+          ? (params?.toString() ?? "")
+          // useSearchParams can lag behind rapid router.replace calls inside
+          // the same interaction; reading the browser URL preserves unrelated
+          // params from the latest committed navigation.
+          : window.location.search;
+      const next = new URLSearchParams(currentSearch);
       if (nextStack.length === 0) {
         next.delete("filters");
       } else {
-        next.set("filters", encodeFilters({ v: 1, blocks: nextStack }));
+        // Pass raw JSON; URLSearchParams.toString() URL-encodes once.
+        // Using encodeFilters() (which already URL-encodes) here would
+        // produce a double-encoded value in the URL string.
+        next.set("filters", JSON.stringify({ v: 1, blocks: nextStack }));
       }
       const qs = next.toString();
       const url = qs ? `${pathname}?${qs}` : pathname;
@@ -50,24 +92,24 @@ export function useFilterState(): UseFilterState {
   );
 
   const addBlock = useCallback(
-    (block: FilterBlock) => navigate([...filterState.blocks, block]),
-    [filterState.blocks, navigate],
+    (block: FilterBlock) => navigate([...getLatestBlocks(), block]),
+    [getLatestBlocks, navigate],
   );
 
   const removeBlock = useCallback(
-    (id: string) => navigate(filterState.blocks.filter((b) => b.id !== id)),
-    [filterState.blocks, navigate],
+    (id: string) => navigate(getLatestBlocks().filter((b) => b.id !== id)),
+    [getLatestBlocks, navigate],
   );
 
   const updateBlock = useCallback(
     (id: string, patch: Partial<FilterBlock>) => {
       navigate(
-        filterState.blocks.map((b) =>
+        getLatestBlocks().map((b) =>
           b.id === id ? ({ ...b, ...patch } as FilterBlock) : b,
         ),
       );
     },
-    [filterState.blocks, navigate],
+    [getLatestBlocks, navigate],
   );
 
   const replaceStack = useCallback(
@@ -76,9 +118,10 @@ export function useFilterState(): UseFilterState {
   );
 
   const clearAll = useCallback(() => navigate([]), [navigate]);
+  const filterState: FilterState = useMemo(() => ({ v: 1, blocks }), [blocks]);
 
   return {
-    blocks: filterState.blocks,
+    blocks,
     filterState,
     addBlock,
     removeBlock,

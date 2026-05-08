@@ -1,93 +1,134 @@
-import { test, expect } from "@playwright/test";
+import { test, expect, type Page } from "@playwright/test";
 
 import { adminClient, resetTenantTables } from "./fixtures";
 
 /**
- * Phase 02 smoke spec — /properties Market filter pill.
+ * Phase 02 smoke spec — /properties Market filter options.
  *
- * Verifies that the Market filter dropdown on /properties renders county-shaped
- * strings fetched from the seeded counties table (migration 044), NOT the old
- * hardcoded KNOWN_MARKETS array that was deleted in plan 02-03.
- *
- * Each market option uses `data-testid={`filter-market-${m.replace(/\s+/g, "-")}`}`
- * (see src/app/(dashboard)/properties/prospects-table.tsx line 1098).
- * County-shaped strings like "Buchanan County MO" → "filter-market-Buchanan-County-MO".
- *
- * Per project memory `feedback_verify_with_playwright.md`:
- *   never ask Jarrad to refresh and check — verify it ourselves.
- *
- * Auth: the `chromium` project loads storageState from e2e/.auth/user.json
- * (set up by auth.setup.ts).
- *
- * Test DB precondition: migration 044 has seeded the BMH counties with
- * county-shaped market strings. The /properties page fetches markets from
- * the counties table and passes them to ProspectsTable as the `markets` prop.
+ * PR #145 moved the legacy table filter pills into FilterDrawer blocks. This
+ * keeps the original county-market contract, but verifies it through the new
+ * drawer UI instead of the removed `data-testid="filter-market"` pill.
  */
 
-test.describe("Properties — Market filter pill (Phase 02 smoke)", () => {
-  test("filter dropdown lists county-shaped strings from the seeded counties table", async ({
+function decodedFiltersFromUrl(url: string) {
+  const raw = new URL(url).searchParams.get("filters");
+  expect(raw).toBeTruthy();
+  return JSON.parse(raw as string) as {
+    v: number;
+    blocks: Array<Record<string, unknown>>;
+  };
+}
+
+async function addMarketBlock(page: Page) {
+  await page.getByRole("button", { name: /^Filters$/i }).click();
+  await page.getByRole("button", { name: /Add Filter Block/i }).click();
+
+  const search = page.getByPlaceholder(/search filters/i);
+  await expect(search).toBeFocused();
+  await search.fill("market");
+  await page.getByRole("button", { name: /^Market$/i }).click();
+
+  await expect(page.locator("[data-block-row][data-kind='market']")).toBeVisible({
+    timeout: 10_000,
+  });
+}
+
+async function expectUrlBlocks(
+  page: Page,
+  assertion: (blocks: Array<Record<string, unknown>>) => void,
+) {
+  await expect
+    .poll(
+      () => {
+        try {
+          assertion(decodedFiltersFromUrl(page.url()).blocks);
+          return true;
+        } catch {
+          return false;
+        }
+      },
+      { timeout: 10_000 },
+    )
+    .toBe(true);
+}
+
+test.describe("Properties — Market filter drawer block (Phase 02 smoke)", () => {
+  test("Market block lists county-shaped strings from the seeded counties table", async ({
     page,
   }) => {
     await resetTenantTables(adminClient());
     await page.goto("/properties");
 
-    // Open the Market filter dropdown.
-    // The trigger button has data-testid="filter-market".
-    await page.getByTestId("filter-market").click();
+    await addMarketBlock(page);
 
-    // Assert at least 3 seeded county-shaped market strings are present
-    // as DropdownMenuItem elements with their data-testid attributes.
     await expect(
-      page.getByTestId("filter-market-Buchanan-County-MO"),
+      page.getByRole("checkbox", { name: "Buchanan County MO" }),
     ).toBeVisible({ timeout: 5_000 });
     await expect(
-      page.getByTestId("filter-market-Johnson-County-KS"),
+      page.getByRole("checkbox", { name: "Johnson County KS" }),
     ).toBeVisible();
     await expect(
-      page.getByTestId("filter-market-Jackson-County-MO"),
+      page.getByRole("checkbox", { name: "Jackson County MO" }),
     ).toBeVisible();
 
-    // Negative assertions: legacy city-shaped data-testids must NOT appear.
-    // These were the old KNOWN_MARKETS values — their testids would be
-    // filter-market-Kansas-City, filter-market-St.-Louis, etc.
     await expect(
-      page.getByTestId("filter-market-Kansas-City"),
+      page.getByRole("checkbox", { name: "Kansas City" }),
     ).toHaveCount(0);
     await expect(
-      page.getByTestId("filter-market-St.-Louis"),
+      page.getByRole("checkbox", { name: "St. Louis" }),
     ).toHaveCount(0);
   });
 
-  // Smoke: clicking a county filter option updates the URL + trigger label.
-  test("selecting a county market filter updates the displayed filter label", async ({
+  test("selecting a county market filter updates the URL and active chip", async ({
     page,
   }) => {
     await resetTenantTables(adminClient());
-    await page.goto("/properties");
+    await page.goto("/properties?search=market-drawer");
 
-    await page.getByTestId("filter-market").click();
+    await addMarketBlock(page);
 
-    // Click "Jackson County MO" filter option.
-    await page.getByTestId("filter-market-Jackson-County-MO").click();
+    const jackson = page.getByRole("checkbox", { name: "Jackson County MO" });
+    await jackson.click();
+    await expect(jackson).toBeChecked({ timeout: 250 });
 
-    // The trigger label should now show the selected market.
+    await expect(page).toHaveURL(/\bfilters=/, { timeout: 10_000 });
+    expect(new URL(page.url()).searchParams.get("search")).toBe("market-drawer");
+    await expectUrlBlocks(page, (blocks) => {
+      expect(blocks).toEqual([
+        expect.objectContaining({
+          kind: "market",
+          combinator: "any",
+          values: ["Jackson County MO"],
+        }),
+      ]);
+    });
+
     await expect(
-      page.getByTestId("filter-market"),
-    ).toContainText("Jackson County MO", { timeout: 5_000 });
+      page.locator("[data-active-filters-chips] [data-chip-kind='market']"),
+    ).toBeVisible({ timeout: 10_000 });
   });
 
-  // Smoke: the "Anywhere" option is still present (resets the filter).
-  test("Anywhere option is present and clears the market filter", async ({
+  test("removing the Market block clears only the drawer filter", async ({
     page,
   }) => {
     await resetTenantTables(adminClient());
-    await page.goto("/properties");
+    await page.goto("/properties?search=market-clear");
 
-    await page.getByTestId("filter-market").click();
+    await addMarketBlock(page);
 
-    // The "Anywhere" option (data-testid="filter-market-any") must be present.
-    await expect(
-      page.getByTestId("filter-market-any"),
-    ).toBeVisible({ timeout: 5_000 });
+    await page.getByRole("checkbox", { name: "Jackson County MO" }).click();
+    await expect(page).toHaveURL(/\bfilters=/, { timeout: 10_000 });
+    await expectUrlBlocks(page, (blocks) => {
+      expect(blocks).toEqual([
+        expect.objectContaining({
+          kind: "market",
+          values: ["Jackson County MO"],
+        }),
+      ]);
+    });
+
+    await page.getByRole("button", { name: /Remove Market filter/i }).click();
+    await expect(page).not.toHaveURL(/\bfilters=/, { timeout: 10_000 });
+    expect(new URL(page.url()).searchParams.get("search")).toBe("market-clear");
   });
 });
