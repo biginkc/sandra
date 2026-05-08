@@ -24,10 +24,8 @@ import QuickFiltersBar from "./_components/quick-filters-bar";
 import { ActiveFiltersChips } from "./_components/active-filters-chips";
 import { PresetDropdown } from "./_components/preset-dropdown";
 import { SavePresetInline } from "./_components/save-preset-inline";
-import {
-  BlockOptionsContext,
-  type BlockOptions,
-} from "./_components/blocks/_block-shell";
+import { type BlockOptions } from "./_components/blocks/_block-shell";
+import { BlockOptionsProvider } from "./_components/block-options-provider";
 import { renderBlock } from "./_components/blocks/registry";
 import type { Preset } from "./_components/quick-filter-chip";
 
@@ -361,7 +359,7 @@ export default async function PropertiesPage({
         </div>
       ) : null}
 
-      <BlockOptionsContext.Provider value={blockOptions}>
+      <BlockOptionsProvider value={blockOptions}>
         {/* Drawer trigger + Quick Filter chips share a row above the table. */}
         <div className="mb-3 flex flex-wrap items-center gap-3">
           <FilterDrawer
@@ -406,7 +404,7 @@ export default async function PropertiesPage({
           page={page}
           totalPages={totalPages}
         />
-      </BlockOptionsContext.Provider>
+      </BlockOptionsProvider>
     </Page>
   );
 }
