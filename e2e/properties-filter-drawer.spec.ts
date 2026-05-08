@@ -119,6 +119,7 @@ test.describe("Phase 05 Plan 09 — full feature flow", () => {
     await expect(yesRadio).toBeVisible({ timeout: 5_000 });
     // base-ui radio: .check() rejects (custom widget); .click() works
     await yesRadio.click();
+    await expect(yesRadio).toBeChecked({ timeout: 250 });
     await expect(page.getByTestId("prospects-skeleton-row").first()).toBeVisible();
 
     const showButton = page.getByRole("button", { name: /Show \d+ prospects/i });
@@ -180,9 +181,15 @@ test.describe("Phase 05 Plan 09 — full feature flow", () => {
 
     await addFilterBlock(page, "Vacancy");
     await page.getByRole("radio", { name: /yes \(vacant\)/i }).click();
+    await expect(page.getByRole("radio", { name: /yes \(vacant\)/i })).toBeChecked({
+      timeout: 250,
+    });
 
     await addFilterBlock(page, "CASS");
     await page.getByRole("checkbox", { name: /^unverified$/i }).click();
+    await expect(page.getByRole("checkbox", { name: /^unverified$/i })).toBeChecked({
+      timeout: 250,
+    });
 
     await expect(page).toHaveURL(/\bfilters=/, { timeout: 10_000 });
     const url = page.url();

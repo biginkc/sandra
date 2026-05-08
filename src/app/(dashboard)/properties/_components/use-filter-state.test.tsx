@@ -114,6 +114,26 @@ describe("useFilterState", () => {
     });
   });
 
+  it("optimistically updates returned blocks before URL navigation settles", () => {
+    const id = newBlockId();
+    const { result } = renderHook(() => useFilterState());
+
+    act(() => {
+      result.current.addBlock({ id, kind: "vacancy", tri: "any" });
+    });
+    expect(result.current.blocks).toEqual([{ id, kind: "vacancy", tri: "any" }]);
+
+    act(() => {
+      result.current.updateBlock(id, { tri: "yes" });
+    });
+    expect(result.current.blocks).toEqual([{ id, kind: "vacancy", tri: "yes" }]);
+
+    act(() => {
+      result.current.removeBlock(id);
+    });
+    expect(result.current.blocks).toEqual([]);
+  });
+
   it("replaceStack updates blocks and URL", () => {
     const { result } = renderHook(() => useFilterState());
     const newBlock = { id: newBlockId(), kind: "absentee" as const, tri: "yes" as const };

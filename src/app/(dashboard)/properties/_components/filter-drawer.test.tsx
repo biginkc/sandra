@@ -457,8 +457,9 @@ describe("FilterDrawer", () => {
       const { rerenderDrawer } = renderOpenWithRealBlocks();
 
       await addFilterBlock(user, "Vacancy", rerenderDrawer);
-      await user.click(await screen.findByRole("radio", { name: /yes \(vacant\)/i }));
-      await rerenderDrawer();
+      const yesRadio = await screen.findByRole("radio", { name: /yes \(vacant\)/i });
+      await user.click(yesRadio);
+      expect(yesRadio).toBeChecked();
       await waitForDebouncedCount();
 
       await waitForShowCount(2);

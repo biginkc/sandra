@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useTransition } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useTransition } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import {
   decodeFilters,
@@ -27,15 +27,21 @@ export function useFilterState(): UseFilterState {
   const params = useSearchParams();
   const [, startTransition] = useTransition();
 
-  const filterState: FilterState = useMemo(() => {
+  const urlFilterState: FilterState = useMemo(() => {
     const raw = params?.get("filters") ?? null;
     return decodeFilters(raw);
   }, [params]);
-  const latestBlocksRef = useRef<BlockStack>(filterState.blocks);
+  const [blocks, setBlocks] = useState<BlockStack>(urlFilterState.blocks);
+  const latestBlocksRef = useRef<BlockStack>(urlFilterState.blocks);
+  const urlBlocksKey = JSON.stringify(urlFilterState.blocks);
 
   useEffect(() => {
-    latestBlocksRef.current = filterState.blocks;
-  }, [filterState.blocks]);
+    latestBlocksRef.current = urlFilterState.blocks;
+    setBlocks(urlFilterState.blocks);
+    // urlBlocksKey is the stable dependency; urlFilterState.blocks is the
+    // fresh decoded value to sync from when the URL actually changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [urlBlocksKey]);
 
   const getLatestBlocks = useCallback(() => {
     return latestBlocksRef.current;
@@ -44,6 +50,7 @@ export function useFilterState(): UseFilterState {
   const navigate = useCallback(
     (nextStack: BlockStack) => {
       latestBlocksRef.current = nextStack;
+      setBlocks(nextStack);
       if (typeof window !== "undefined") {
         window.dispatchEvent(new Event(FILTER_NAVIGATION_START_EVENT));
       }
@@ -97,9 +104,10 @@ export function useFilterState(): UseFilterState {
   );
 
   const clearAll = useCallback(() => navigate([]), [navigate]);
+  const filterState: FilterState = useMemo(() => ({ v: 1, blocks }), [blocks]);
 
   return {
-    blocks: filterState.blocks,
+    blocks,
     filterState,
     addBlock,
     removeBlock,
