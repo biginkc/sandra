@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, it, expect, vi } from "vitest";
 
@@ -8,6 +8,7 @@ import {
   type ProspectRow,
 } from "./prospects-table";
 import type { FilterBlock } from "./prospects-query";
+import { FILTER_NAVIGATION_START_EVENT } from "./_components/use-filter-state";
 
 // `next/navigation`'s real router needs an App Router context Vitest
 // doesn't provide. Stub the bits the table actually calls. Hoisted
@@ -221,6 +222,19 @@ describe("<ProspectsTable />", () => {
     expect(
       screen.queryByRole("menuitem", { name: /Set motivation/ }),
     ).toBeNull();
+  });
+
+  it("shows table skeleton rows during FilterDrawer URL navigation", async () => {
+    renderTable([makeRow({ id: "p1" }), makeRow({ id: "p2" })]);
+    expect(screen.queryByTestId("prospects-skeleton-row")).toBeNull();
+
+    act(() => {
+      window.dispatchEvent(new Event(FILTER_NAVIGATION_START_EVENT));
+    });
+
+    expect(await screen.findAllByTestId("prospects-skeleton-row")).toHaveLength(
+      5,
+    );
   });
 });
 

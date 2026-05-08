@@ -11,7 +11,10 @@ vi.mock("next/navigation", () => ({
   usePathname: () => "/properties",
 }));
 
-import { useFilterState } from "./use-filter-state";
+import {
+  FILTER_NAVIGATION_START_EVENT,
+  useFilterState,
+} from "./use-filter-state";
 import { newBlockId } from "@/lib/prospects/filter-schema";
 
 beforeEach(() => {
@@ -44,6 +47,19 @@ describe("useFilterState", () => {
     const [url] = replace.mock.calls[0];
     expect(url).toContain("/properties?filters=");
     expect(refresh).toHaveBeenCalledTimes(1);
+  });
+
+  it("dispatches a filter-navigation event before URL navigation", () => {
+    const listener = vi.fn();
+    window.addEventListener(FILTER_NAVIGATION_START_EVENT, listener);
+    const { result } = renderHook(() => useFilterState());
+
+    act(() => {
+      result.current.addBlock({ id: newBlockId(), kind: "vacancy", tri: "yes" });
+    });
+
+    expect(listener).toHaveBeenCalledTimes(1);
+    window.removeEventListener(FILTER_NAVIGATION_START_EVENT, listener);
   });
 
   it("removeBlock removes by id and updates URL", () => {

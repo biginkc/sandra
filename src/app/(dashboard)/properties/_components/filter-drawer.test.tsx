@@ -140,6 +140,14 @@ describe("FilterDrawer", () => {
     expect(popup?.className).toContain("!max-w-[440px]");
   });
 
+  it("uses a non-obscuring overlay so the table stays visible while filtering", () => {
+    renderOpen();
+    const overlay = document.querySelector("[data-slot='sheet-overlay']");
+    expect(overlay?.className).toContain("bg-transparent");
+    expect(overlay?.className).toContain("backdrop-blur-none");
+    expect(overlay?.className).toContain("pointer-events-none");
+  });
+
   // ── Slot tests ────────────────────────────────────────────────────────────
 
   it("renders nothing for topSlot/footerSlot when not provided", () => {

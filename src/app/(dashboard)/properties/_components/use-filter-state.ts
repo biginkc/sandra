@@ -19,6 +19,8 @@ export type UseFilterState = {
   clearAll: () => void;
 };
 
+export const FILTER_NAVIGATION_START_EVENT = "properties:filters-navigation-start";
+
 export function useFilterState(): UseFilterState {
   const router = useRouter();
   const pathname = usePathname();
@@ -42,6 +44,9 @@ export function useFilterState(): UseFilterState {
   const navigate = useCallback(
     (nextStack: BlockStack) => {
       latestBlocksRef.current = nextStack;
+      if (typeof window !== "undefined") {
+        window.dispatchEvent(new Event(FILTER_NAVIGATION_START_EVENT));
+      }
       const currentSearch =
         typeof window === "undefined"
           ? (params?.toString() ?? "")

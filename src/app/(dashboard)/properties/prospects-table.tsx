@@ -53,6 +53,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { callAction } from "@/lib/errors/call-action";
+import { FILTER_NAVIGATION_START_EVENT } from "./_components/use-filter-state";
 
 import {
   addPropertiesToListBulk,
@@ -160,6 +161,7 @@ export function ProspectsTable({
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [pending, startTransition] = useTransition();
   const [showBulkSms, setShowBulkSms] = useState(false);
+  const [filterNavPending, setFilterNavPending] = useState(false);
   // Cross-page select-all mode. When true, the user has explicitly
   // expanded their selection beyond the visible page to every property
   // matching the current filters. Bound to a Set<string> of all those
@@ -204,7 +206,7 @@ export function ProspectsTable({
       },
     },
   });
-  const navPending = ts.navPending;
+  const navPending = ts.navPending || filterNavPending;
   // `totalPages` is now sourced from server-rendered props (Plan 01.5-04 contract).
   // showingFrom/showingTo are still computed client-side from `total + pageSize + page`
   // because they're a display-only derivation; the server doesn't need to ship them.
@@ -223,6 +225,24 @@ export function ProspectsTable({
   useEffect(() => {
     setSelectAllMatching(false);
   }, [search, sort, dir, blockStackKey]);
+
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const showFilterSkeleton = () => {
+      setFilterNavPending(true);
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => setFilterNavPending(false), 150);
+    };
+
+    window.addEventListener(FILTER_NAVIGATION_START_EVENT, showFilterSkeleton);
+    return () => {
+      window.removeEventListener(
+        FILTER_NAVIGATION_START_EVENT,
+        showFilterSkeleton,
+      );
+      if (timer) clearTimeout(timer);
+    };
+  }, []);
 
   const onSelectAllAcrossPages = () => {
     startTransition(async () => {

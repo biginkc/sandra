@@ -100,6 +100,13 @@ test.describe("Phase 05 Plan 09 — full feature flow", () => {
 
     await page.getByRole("button", { name: /^Filters$/i }).click();
     await expect(page.getByText(/Add a filter to slice your prospects/i)).toBeVisible();
+    await expect(page.locator("[data-slot='sheet-overlay']")).toHaveClass(
+      /bg-transparent/,
+    );
+    await expect(page.locator("[data-slot='sheet-overlay']")).toHaveClass(
+      /backdrop-blur-none/,
+    );
+    await expect(page.getByTestId("prospects-table-container")).toBeVisible();
 
     await page.getByRole("button", { name: /Add Filter Block/i }).click();
     const search = page.getByPlaceholder(/search filters/i);
@@ -112,6 +119,7 @@ test.describe("Phase 05 Plan 09 — full feature flow", () => {
     await expect(yesRadio).toBeVisible({ timeout: 5_000 });
     // base-ui radio: .check() rejects (custom widget); .click() works
     await yesRadio.click();
+    await expect(page.getByTestId("prospects-skeleton-row").first()).toBeVisible();
 
     const showButton = page.getByRole("button", { name: /Show \d+ prospects/i });
     await expect(showButton).toBeVisible({ timeout: 10_000 });
