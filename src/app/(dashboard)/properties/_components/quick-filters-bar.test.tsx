@@ -19,6 +19,7 @@ beforeEach(() => {
   replace.mockReset();
   refresh.mockReset();
   mockSearchParams = new URLSearchParams("");
+  window.history.replaceState(null, "", "/properties");
 });
 
 describe("QuickFilterChip", () => {
@@ -82,6 +83,39 @@ describe("QuickFilterChip", () => {
     expect(replace).toHaveBeenCalled();
     const [url] = replace.mock.calls[0] as [string, ...unknown[]];
     expect(url).not.toContain("filters=");
+  });
+
+  it("clicking the same chip twice applies and then clears the filters param", async () => {
+    const user = userEvent.setup();
+    const preset = {
+      id: "p1",
+      name: "Vacant",
+      starred: false,
+      is_base: true,
+      filters_json: {
+        v: 1 as const,
+        blocks: [{ id: "preset-uuid", kind: "vacancy" as const, tri: "yes" as const }],
+      },
+    };
+    replace.mockImplementation((url: string) => {
+      window.history.replaceState(null, "", url);
+      mockSearchParams = new URLSearchParams(window.location.search);
+    });
+
+    const { rerender } = render(
+      <QuickFilterChip preset={preset} orgId="org" currentFilterStateRaw={null} />,
+    );
+
+    await user.click(screen.getByText("Vacant"));
+    expect(replace).toHaveBeenLastCalledWith(expect.stringContaining("filters="), {
+      scroll: false,
+    });
+
+    rerender(<QuickFilterChip preset={preset} orgId="org" currentFilterStateRaw={null} />);
+    await user.click(screen.getByText("Vacant"));
+
+    expect(replace).toHaveBeenLastCalledWith("/properties", { scroll: false });
+    expect(window.location.search).not.toContain("filters=");
   });
 
   it("active state: aria-pressed=true when blocks match (ignoring id field)", () => {

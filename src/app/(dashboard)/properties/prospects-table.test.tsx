@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, it, expect, vi } from "vitest";
 
@@ -8,6 +8,7 @@ import {
   type ProspectRow,
 } from "./prospects-table";
 import type { FilterBlock } from "./prospects-query";
+import { FILTER_NAVIGATION_START_EVENT } from "./_components/use-filter-state";
 
 // `next/navigation`'s real router needs an App Router context Vitest
 // doesn't provide. Stub the bits the table actually calls. Hoisted
@@ -84,7 +85,11 @@ function makeRow(overrides: Partial<ProspectRow> & { id: string }): ProspectRow 
 
 const EMPTY_BLOCK_STACK: FilterBlock[] = [];
 
-function renderTable(rows: ProspectRow[], lists: ListOption[] = []) {
+function renderTable(
+  rows: ProspectRow[],
+  lists: ListOption[] = [],
+  overrides: Partial<React.ComponentProps<typeof ProspectsTable>> = {},
+) {
   return render(
     <ProspectsTable
       prospects={rows}
@@ -103,6 +108,7 @@ function renderTable(rows: ProspectRow[], lists: ListOption[] = []) {
       pageSize={50}
       page={1}
       totalPages={28}
+      {...overrides}
     />,
   );
 }
@@ -221,6 +227,72 @@ describe("<ProspectsTable />", () => {
     expect(
       screen.queryByRole("menuitem", { name: /Set motivation/ }),
     ).toBeNull();
+  });
+
+  it("shows table skeleton rows during FilterDrawer URL navigation", async () => {
+    renderTable([makeRow({ id: "p1" }), makeRow({ id: "p2" })]);
+    expect(screen.queryByTestId("prospects-skeleton-row")).toBeNull();
+
+    act(() => {
+      window.dispatchEvent(new Event(FILTER_NAVIGATION_START_EVENT));
+    });
+
+    expect(await screen.findAllByTestId("prospects-skeleton-row")).toHaveLength(
+      5,
+    );
+  });
+
+  it("keeps filter skeleton rows visible until the server block stack catches up", async () => {
+    const rows = [makeRow({ id: "p1" }), makeRow({ id: "p2" })];
+    const nextBlock = {
+      id: "vacancy-pending",
+      kind: "vacancy",
+      tri: "yes",
+    } as const satisfies FilterBlock;
+    const nextBlocks = [nextBlock];
+    const { rerender } = renderTable(rows);
+
+    act(() => {
+      window.dispatchEvent(
+        new CustomEvent(FILTER_NAVIGATION_START_EVENT, {
+          detail: { blocksKey: JSON.stringify(nextBlocks) },
+        }),
+      );
+    });
+
+    expect(await screen.findAllByTestId("prospects-skeleton-row")).toHaveLength(
+      5,
+    );
+
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    });
+    expect(screen.getAllByTestId("prospects-skeleton-row")).toHaveLength(5);
+
+    rerender(
+      <ProspectsTable
+        prospects={rows}
+        lists={[]}
+        tags={[]}
+        teamMembers={[]}
+        currentUserId={null}
+        canDelete={false}
+        headerCount={`Showing 1-${rows.length} of ${rows.length} prospects.`}
+        search=""
+        sort="created_at"
+        dir="desc"
+        blockStack={nextBlocks}
+        filtersParam={null}
+        total={1382}
+        pageSize={50}
+        page={1}
+        totalPages={28}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("prospects-skeleton-row")).toBeNull();
+    });
   });
 });
 

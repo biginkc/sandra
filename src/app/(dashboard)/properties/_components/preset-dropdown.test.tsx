@@ -40,17 +40,14 @@ vi.mock("@/components/ui/dropdown-menu", () => ({
   ),
   DropdownMenuItem: ({
     children,
-    onSelect,
     disabled,
-  }: {
-    children: React.ReactNode;
-    onSelect?: () => void;
-    disabled?: boolean;
-  }) => (
+    ...props
+  }: React.ComponentPropsWithoutRef<"div"> & { disabled?: boolean }) => (
     <div
       role="menuitem"
       aria-disabled={disabled}
-      onClick={disabled ? undefined : onSelect}
+      {...props}
+      onClick={disabled ? undefined : props.onClick}
     >
       {children}
     </div>

@@ -132,7 +132,7 @@ export function FilterDrawer({
     open !== undefined ? { open, onOpenChange } : {};
 
   return (
-    <Sheet {...sheetRootProps}>
+    <Sheet modal="trap-focus" {...sheetRootProps}>
       {/* Trigger is hidden in controlled/test mode (no need for it when open is forced) */}
       {open === undefined && (
         <SheetTrigger
@@ -147,6 +147,7 @@ export function FilterDrawer({
 
       <SheetContent
         side="right"
+        overlayClassName="pointer-events-none bg-transparent supports-backdrop-filter:backdrop-blur-none"
         className="!max-w-[440px] sm:!max-w-[440px] flex flex-col p-0"
       >
         <SheetHeader className="px-4 pt-4 pb-2">
