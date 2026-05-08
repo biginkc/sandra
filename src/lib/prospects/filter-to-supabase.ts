@@ -115,6 +115,14 @@ export function filterSelectFragment(blocks: BlockStack): string | null {
       )
       .map((block) => block.values[0]),
   );
+  const needsEngagedMessagesJoin = blocks.some(
+    (block) =>
+      block.kind === "engagement" &&
+      block.combinator === "any" &&
+      block.values.includes("attempted") &&
+      block.values.includes("replied") &&
+      block.values.every((value) => value === "attempted" || value === "replied"),
+  );
 
   if (singleEngagementBuckets.has("never_contacted")) {
     fragments.push("contact_messages:messages()");
@@ -127,6 +135,9 @@ export function filterSelectFragment(blocks: BlockStack): string | null {
   }
   if (singleEngagementBuckets.has("replied")) {
     fragments.push("replied_messages:messages!inner(property_id)");
+  }
+  if (needsEngagedMessagesJoin) {
+    fragments.push("engaged_messages:messages!inner(property_id)");
   }
 
   return fragments.length > 0 ? fragments.join(", ") : null;
@@ -524,6 +535,17 @@ async function applyEngagementBlock(
     if (onlyBucket === "opted_out") {
       return { builder: builder.in("outreach_dispo", ["opted_out", "dnc"]) };
     }
+  }
+
+  if (
+    block.combinator === "any" &&
+    block.values.includes("attempted") &&
+    block.values.includes("replied") &&
+    block.values.every((value) => value === "attempted" || value === "replied")
+  ) {
+    return {
+      builder: builder.in("engaged_messages.direction", ["inbound", "outbound"]),
+    };
   }
 
   const wantedBuckets = new Set(block.values);
