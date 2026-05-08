@@ -7,7 +7,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
 import {
   applyFilters,
-  needsPropertyListsEmbed,
+  filterSelectFragment,
 } from "@/lib/prospects/filter-to-supabase";
 
 import {
@@ -46,6 +46,12 @@ type PropertyQueryRow = {
   is_vacant: boolean | null;
   created_at: string;
   outreach_dispo: string | null;
+  list_filter?: Array<{ list_id: string }>;
+  list_exclusion?: Array<{ list_id: string }>;
+  contact_messages?: Array<unknown>;
+  attempted_outbound?: Array<unknown>;
+  attempted_inbound?: Array<unknown>;
+  replied_messages?: Array<unknown>;
 };
 
 // Hardcoded enum sources — these match the CHECK constraints in the
@@ -148,9 +154,13 @@ export default async function PropertiesPage({
   const hasPipelineStatusBlock = blockStack.some(
     (b) => b.kind === "pipeline_status",
   );
-  const propertiesSelect: string = needsPropertyListsEmbed(blockStack)
-    ? "id, address, city, state, zip, market, cass_status, is_vacant, created_at, outreach_dispo, property_lists!inner(list_id)"
-    : "id, address, city, state, zip, market, cass_status, is_vacant, created_at, outreach_dispo";
+  const propertyListSelect = filterSelectFragment(blockStack);
+  const propertiesSelect = [
+    "id, address, city, state, zip, market, cass_status, is_vacant, created_at, outreach_dispo",
+    propertyListSelect,
+  ]
+    .filter(Boolean)
+    .join(", ");
 
   let query = supabase
     .from("properties")
@@ -177,6 +187,9 @@ export default async function PropertiesPage({
     .order(sort, { ascending: dir === "asc" })
     .order("id", { ascending: true })
     .range(from, to);
+  // Relationship embeds above are select-only filter helpers; the table
+  // consumes only property columns, but the optional fields remain typed so
+  // future readers can see why the select may include list_filter/list_exclusion.
   const properties = (propertyRows ?? []) as unknown as PropertyQueryRow[];
 
   const total = count ?? 0;

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor, act } from "@testing-library/react";
+import { render, screen, act } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 // ── next/navigation mock ──────────────────────────────────────────────────────
@@ -24,23 +24,14 @@ vi.mock("next/navigation", () => ({
   usePathname: () => "/properties",
 }));
 
-// ── count action mock ─────────────────────────────────────────────────────────
-const countMock = vi.fn();
-
-vi.mock("@/app/(dashboard)/properties/_actions/count", () => ({
-  countProspectsForFilter: (...args: unknown[]) => countMock(...args),
-}));
-
-import type { BlockStack, Combinator, FilterBlock } from "@/lib/prospects/filter-schema";
-import { encodeFilters } from "@/lib/prospects/filter-schema";
 import { FilterDrawer } from "./filter-drawer";
 import { BlockOptionsContext, type BlockOptions } from "./blocks/_block-shell";
 import { renderBlock } from "./blocks/registry";
+import type { FilterBlock } from "@/lib/prospects/filter-schema";
 
 beforeEach(() => {
   replace.mockClear();
   refresh.mockReset();
-  countMock.mockResolvedValue({ ok: true, data: { count: 42 } });
   window.history.replaceState({}, "", "/properties");
 });
 
@@ -98,163 +89,6 @@ function renderOpenWithRealBlocks() {
   };
 }
 
-function setFilters(blocks: BlockStack) {
-  window.history.replaceState(
-    {},
-    "",
-    `/properties?filters=${encodeFilters({ v: 1, blocks })}`,
-  );
-}
-
-type MockProspect = {
-  id: string;
-  status: "prospect" | "new_lead" | "contacted";
-  cassStatus: "verified" | "unverified" | "invalid";
-  vacant: boolean | null;
-  absentee: boolean | null;
-  equityPct: number | null;
-  engagement: "never_contacted" | "attempted" | "replied" | "opted_out";
-  listCount: number;
-};
-
-const mockProspects: MockProspect[] = [
-  {
-    id: "verified-vacant-replied",
-    status: "prospect",
-    cassStatus: "verified",
-    vacant: true,
-    absentee: false,
-    equityPct: 35,
-    engagement: "replied",
-    listCount: 2,
-  },
-  {
-    id: "verified-vacant-attempted-high-equity",
-    status: "prospect",
-    cassStatus: "verified",
-    vacant: true,
-    absentee: false,
-    equityPct: 45,
-    engagement: "attempted",
-    listCount: 1,
-  },
-  {
-    id: "unverified-occupied-absentee-low-equity",
-    status: "prospect",
-    cassStatus: "unverified",
-    vacant: false,
-    absentee: true,
-    equityPct: 15,
-    engagement: "never_contacted",
-    listCount: 0,
-  },
-  {
-    id: "invalid-unknown-vacancy-replied-high-equity",
-    status: "prospect",
-    cassStatus: "invalid",
-    vacant: null,
-    absentee: false,
-    equityPct: 60,
-    engagement: "replied",
-    listCount: 3,
-  },
-  {
-    id: "new-lead-vacant-replied-high-equity",
-    status: "new_lead",
-    cassStatus: "verified",
-    vacant: true,
-    absentee: false,
-    equityPct: 70,
-    engagement: "replied",
-    listCount: 2,
-  },
-  {
-    id: "new-lead-unverified-occupied",
-    status: "new_lead",
-    cassStatus: "unverified",
-    vacant: false,
-    absentee: false,
-    equityPct: 10,
-    engagement: "attempted",
-    listCount: 0,
-  },
-];
-
-function hasPipelineStatusBlock(blocks: BlockStack) {
-  return blocks.some((block) => block.kind === "pipeline_status");
-}
-
-function matchesCombinator<T>(value: T, values: T[], combinator: Combinator) {
-  if (values.length === 0) return true;
-  const includes = values.includes(value);
-  return combinator === "not" ? !includes : includes;
-}
-
-function matchesRange(value: number | null, range: { min: number | null; max: number | null }) {
-  if (range.min == null && range.max == null) return true;
-  if (value == null) return false;
-  if (range.min != null && value < range.min) return false;
-  if (range.max != null && value > range.max) return false;
-  return true;
-}
-
-function matchesTri(value: boolean | null, tri: "any" | "yes" | "no") {
-  if (tri === "any") return true;
-  if (tri === "yes") return value === true;
-  return value !== true;
-}
-
-function mockProspectMatchesBlock(prospect: MockProspect, block: FilterBlock) {
-  switch (block.kind) {
-    case "vacancy":
-      return matchesTri(prospect.vacant, block.tri);
-    case "absentee":
-      return matchesTri(prospect.absentee, block.tri);
-    case "cass":
-      return matchesCombinator(prospect.cassStatus, block.values, block.combinator);
-    case "equity_pct":
-      return matchesRange(prospect.equityPct, block.range);
-    case "list_count":
-      return matchesRange(prospect.listCount, block.range);
-    case "pipeline_status":
-      return matchesCombinator(prospect.status, block.values, block.combinator);
-    case "engagement":
-      return matchesCombinator(prospect.engagement, block.values, block.combinator);
-    default:
-      return true;
-  }
-}
-
-function countMockProspects(blocks: BlockStack) {
-  return mockProspects.filter((prospect) => {
-    const passesBasePipeline = hasPipelineStatusBlock(blocks) || prospect.status === "prospect";
-    return passesBasePipeline && blocks.every((block) => mockProspectMatchesBlock(prospect, block));
-  }).length;
-}
-
-function installMockProspectCounter() {
-  countMock.mockImplementation(async ({ blocks }: { blocks: BlockStack }) => ({
-    ok: true,
-    data: { count: countMockProspects(blocks) },
-  }));
-}
-
-async function waitForShowCount(count: number) {
-  await waitFor(() => {
-    expect(
-      screen.getByRole("button", {
-        name: new RegExp(`show ${count} prospects`, "i"),
-      }),
-    ).toBeInTheDocument();
-  });
-}
-
-async function waitForDebouncedCount() {
-  await act(async () => {
-    await new Promise((r) => setTimeout(r, 300));
-  });
-}
-
 async function addFilterBlock(
   user: ReturnType<typeof userEvent.setup>,
   label: string,
@@ -265,43 +99,11 @@ async function addFilterBlock(
   await rerenderDrawer();
 }
 
-function vacancyBlock(tri: "any" | "yes" | "no"): Extract<FilterBlock, { kind: "vacancy" }> {
-  return { id: `vacancy-${tri}`, kind: "vacancy", tri };
-}
-
-function cassBlock(
-  values: Array<MockProspect["cassStatus"]>,
-  combinator: Combinator = "any",
-): Extract<FilterBlock, { kind: "cass" }> {
-  return { id: `cass-${values.join("-")}`, kind: "cass", combinator, values };
-}
-
-function equityPctBlock(
-  min: number | null,
-  max: number | null = null,
-): Extract<FilterBlock, { kind: "equity_pct" }> {
-  return { id: `equity-${min ?? "any"}-${max ?? "any"}`, kind: "equity_pct", range: { min, max } };
-}
-
-function pipelineStatusBlock(
-  values: Array<MockProspect["status"]>,
-  combinator: Combinator = "any",
-): Extract<FilterBlock, { kind: "pipeline_status" }> {
-  return { id: `pipeline-${values.join("-")}`, kind: "pipeline_status", combinator, values };
-}
-
-function engagementBlock(
-  values: Array<MockProspect["engagement"]>,
-  combinator: Combinator = "any",
-): Extract<FilterBlock, { kind: "engagement" }> {
-  return { id: `engagement-${values.join("-")}`, kind: "engagement", combinator, values };
-}
-
-function listCountBlock(
-  min: number | null,
-  max: number | null = null,
-): Extract<FilterBlock, { kind: "list_count" }> {
-  return { id: `list-count-${min ?? "any"}-${max ?? "any"}`, kind: "list_count", range: { min, max } };
+function currentBlocks(): FilterBlock[] {
+  const raw = new URLSearchParams(window.location.search).get("filters");
+  expect(raw).toBeTruthy();
+  const decoded = JSON.parse(raw as string) as { blocks: FilterBlock[] };
+  return decoded.blocks;
 }
 
 describe("FilterDrawer", () => {
@@ -343,18 +145,6 @@ describe("FilterDrawer", () => {
     expect(screen.queryByPlaceholderText(/search filters/i)).not.toBeInTheDocument();
     expect(document.querySelector("[data-block-row]")).toBeInTheDocument();
     expect(document.querySelector("[data-kind='vacancy']")).toBeInTheDocument();
-  });
-
-  it("Show N prospects button displays count from the count action", async () => {
-    renderOpen();
-    await act(async () => {
-      await new Promise((r) => setTimeout(r, 300));
-    });
-    await waitFor(() => {
-      expect(
-        screen.getByRole("button", { name: /show 42 prospects/i }),
-      ).toBeInTheDocument();
-    });
   });
 
   it("clicking × on a block row removes it", async () => {
@@ -401,8 +191,7 @@ describe("FilterDrawer", () => {
     renderOpen();
     expect(document.querySelector("[data-top-slot]")).not.toBeInTheDocument();
     expect(document.querySelector("[data-footer-slot]")).not.toBeInTheDocument();
-    // Unconditional Show N button is still present
-    expect(screen.getByRole("button", { name: /show/i })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /show/i })).not.toBeInTheDocument();
   });
 
   it("renders topSlot inside SheetHeader when provided", () => {
@@ -414,15 +203,14 @@ describe("FilterDrawer", () => {
     expect(document.querySelector("[data-top-slot]")).toContainElement(topSlotEl);
   });
 
-  it("renders footerSlot inside SheetFooter when provided alongside Show N button", () => {
+  it("renders footerSlot inside SheetFooter without an apply CTA", () => {
     renderOpen({
       footerSlot: <div data-testid="footer-slot-child">FOOT</div>,
     });
     const footerSlotEl = screen.getByTestId("footer-slot-child");
     expect(footerSlotEl).toBeInTheDocument();
     expect(document.querySelector("[data-footer-slot]")).toContainElement(footerSlotEl);
-    // Show N button still present
-    expect(screen.getByRole("button", { name: /show/i })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /show/i })).not.toBeInTheDocument();
   });
 
   it("renders both topSlot AND footerSlot when both provided (Plan 09 composition)", () => {
@@ -432,118 +220,62 @@ describe("FilterDrawer", () => {
     });
     expect(screen.getByTestId("ts")).toBeInTheDocument();
     expect(screen.getByTestId("fs")).toBeInTheDocument();
-    // Show N button still present
-    expect(screen.getByRole("button", { name: /show/i })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /show/i })).not.toBeInTheDocument();
   });
 
-  describe("mock prospect dataset filter semantics", () => {
-    beforeEach(() => {
-      installMockProspectCounter();
-    });
+  it("encodes Vacancy + CASS selections into URL filter state immediately", async () => {
+    const user = userEvent.setup();
+    const { rerenderDrawer } = renderOpenWithRealBlocks();
 
-    it("counts the unfiltered prospect-only baseline from mocked data", async () => {
-      renderOpenWithRealBlocks();
+    await addFilterBlock(user, "Vacancy", rerenderDrawer);
+    await user.click(await screen.findByRole("radio", { name: /yes \(vacant\)/i }));
+    await rerenderDrawer();
 
-      await waitForDebouncedCount();
+    await addFilterBlock(user, "CASS", rerenderDrawer);
+    await user.click(await screen.findByRole("checkbox", { name: /^verified$/i }));
+    await rerenderDrawer();
 
-      await waitForShowCount(4);
-      expect(countMock).toHaveBeenLastCalledWith({
-        orgId: "org-1",
-        blocks: [],
-      });
-    });
+    expect(currentBlocks()).toEqual([
+      expect.objectContaining({ kind: "vacancy", tri: "yes" }),
+      expect.objectContaining({
+        kind: "cass",
+        combinator: "any",
+        values: ["verified"],
+      }),
+    ]);
+  });
 
-    it("updates the count when a real Vacancy drawer control is selected", async () => {
-      const user = userEvent.setup();
-      const { rerenderDrawer } = renderOpenWithRealBlocks();
+  it("encodes zero-result-prone Engagement buckets without waiting on server count", async () => {
+    const user = userEvent.setup();
+    const { rerenderDrawer } = renderOpenWithRealBlocks();
 
-      await addFilterBlock(user, "Vacancy", rerenderDrawer);
-      const yesRadio = await screen.findByRole("radio", { name: /yes \(vacant\)/i });
-      await user.click(yesRadio);
-      expect(yesRadio).toBeChecked();
-      await waitForDebouncedCount();
+    await addFilterBlock(user, "Engagement", rerenderDrawer);
+    await user.click(await screen.findByRole("checkbox", { name: /attempted/i }));
+    await rerenderDrawer();
 
-      await waitForShowCount(2);
-      expect(countMock).toHaveBeenLastCalledWith({
-        orgId: "org-1",
-        blocks: [expect.objectContaining({ kind: "vacancy", tri: "yes" })],
-      });
-    });
+    expect(currentBlocks()).toEqual([
+      expect.objectContaining({
+        kind: "engagement",
+        combinator: "any",
+        values: ["attempted"],
+      }),
+    ]);
+    expect(screen.queryByRole("button", { name: /show/i })).not.toBeInTheDocument();
+  });
 
-    it("ANDs Vacancy and CASS blocks so impossible combinations count as zero", async () => {
-      setFilters([vacancyBlock("yes"), cassBlock(["unverified"])]);
+  it("encodes Equity percent ranges into URL filter state", async () => {
+    const user = userEvent.setup();
+    const { rerenderDrawer } = renderOpenWithRealBlocks();
 
-      renderOpenWithRealBlocks();
-      await waitForDebouncedCount();
+    await addFilterBlock(user, "Equity %", rerenderDrawer);
+    await user.type(await screen.findByLabelText(/minimum equity percent/i), "50");
+    await rerenderDrawer();
 
-      await waitForShowCount(0);
-      expect(countMock).toHaveBeenLastCalledWith({
-        orgId: "org-1",
-        blocks: [
-          expect.objectContaining({ kind: "vacancy", tri: "yes" }),
-          expect.objectContaining({ kind: "cass", values: ["unverified"] }),
-        ],
-      });
-    });
-
-    it("ANDs Vacancy with Equity % range against mocked property values", async () => {
-      setFilters([vacancyBlock("yes"), equityPctBlock(40)]);
-
-      renderOpenWithRealBlocks();
-      await waitForDebouncedCount();
-
-      await waitForShowCount(1);
-      expect(countMock).toHaveBeenLastCalledWith({
-        orgId: "org-1",
-        blocks: [
-          expect.objectContaining({ kind: "vacancy", tri: "yes" }),
-          expect.objectContaining({
-            kind: "equity_pct",
-            range: { min: 40, max: null },
-          }),
-        ],
-      });
-    });
-
-    it("uses Pipeline Status blocks to include non-prospect mocked rows", async () => {
-      setFilters([pipelineStatusBlock(["new_lead"]), vacancyBlock("yes")]);
-
-      renderOpenWithRealBlocks();
-      await waitForDebouncedCount();
-
-      await waitForShowCount(1);
-      expect(countMock).toHaveBeenLastCalledWith({
-        orgId: "org-1",
-        blocks: [
-          expect.objectContaining({
-            kind: "pipeline_status",
-            values: ["new_lead"],
-          }),
-          expect.objectContaining({ kind: "vacancy", tri: "yes" }),
-        ],
-      });
-    });
-
-    it("combines Engagement and List Count filters over mocked outreach data", async () => {
-      setFilters([engagementBlock(["replied"]), listCountBlock(2)]);
-
-      renderOpenWithRealBlocks();
-      await waitForDebouncedCount();
-
-      await waitForShowCount(2);
-      expect(countMock).toHaveBeenLastCalledWith({
-        orgId: "org-1",
-        blocks: [
-          expect.objectContaining({
-            kind: "engagement",
-            values: ["replied"],
-          }),
-          expect.objectContaining({
-            kind: "list_count",
-            range: { min: 2, max: null },
-          }),
-        ],
-      });
-    });
+    expect(currentBlocks()).toEqual([
+      expect.objectContaining({
+        kind: "equity_pct",
+        range: { min: 50, max: null },
+      }),
+    ]);
   });
 });

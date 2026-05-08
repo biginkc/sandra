@@ -31,7 +31,9 @@ import type { FilterBlock } from "./filter-schema";
 import {
   applyBlock,
   applyFilters,
+  filterSelectFragment,
   needsPropertyListsEmbed,
+  propertyListsSelectFragment,
 } from "./filter-to-supabase";
 
 // ---------------------------------------------------------------------------
@@ -728,7 +730,7 @@ describe("applyBlock: list (pre-fetch via property_lists)", () => {
       m.sb,
     );
     expect(m.calls.length).toBe(0);
-    expect(calls).toEqual(['in(property_lists.list_id,["L1","L2"])']);
+    expect(calls).toEqual(['in(list_filter.list_id,["L1","L2"])']);
   });
   it("single-value all combinator → filters through embedded property_lists", async () => {
     const { proxy, calls } = mockBuilder();
@@ -743,7 +745,7 @@ describe("applyBlock: list (pre-fetch via property_lists)", () => {
       m.sb,
     );
     expect(m.calls.length).toBe(0);
-    expect(calls).toEqual(['in(property_lists.list_id,["L1"])']);
+    expect(calls).toEqual(['in(list_filter.list_id,["L1"])']);
   });
   it("all combinator → only properties on EVERY selected list", async () => {
     const { proxy, calls } = mockBuilder();
@@ -768,7 +770,7 @@ describe("applyBlock: list (pre-fetch via property_lists)", () => {
     expect(inCall).toContain("p1");
     expect(inCall).not.toContain("p2");
   });
-  it("not combinator → .not(id, in, ...) on the matched IDs", async () => {
+  it("not combinator → uses anti-join instead of expanding matched property IDs", async () => {
     const { proxy, calls } = mockBuilder();
     const m = mockSupabaseClient();
     m.setReturn("property_lists", [{ property_id: "p1", list_id: "L1" }]);
@@ -781,9 +783,13 @@ describe("applyBlock: list (pre-fetch via property_lists)", () => {
       }) as FilterBlock,
       m.sb,
     );
-    expect(calls.some((c) => c.startsWith("not(id,in,"))).toBe(true);
+    expect(m.calls.length).toBe(0);
+    expect(calls).toEqual([
+      'in(list_exclusion.list_id,["L1"])',
+      "is(list_exclusion,null)",
+    ]);
   });
-  it("empty multi-list all pre-fetch → __no_match__ short-circuit so .in() never matches", async () => {
+  it("empty multi-list all pre-fetch → 00000000-0000-0000-0000-000000000000 short-circuit so .in() never matches", async () => {
     const { proxy, calls } = mockBuilder();
     const m = mockSupabaseClient();
     m.setReturn("property_lists", []);
@@ -796,12 +802,12 @@ describe("applyBlock: list (pre-fetch via property_lists)", () => {
       }) as FilterBlock,
       m.sb,
     );
-    expect(calls.some((c) => c.includes("__no_match__"))).toBe(true);
+    expect(calls.some((c) => c.includes("00000000-0000-0000-0000-000000000000"))).toBe(true);
   });
 });
 
 describe("needsPropertyListsEmbed", () => {
-  it("returns true for list filters that use the embedded relationship path", () => {
+  it("returns true for list filters that use embedded relationship paths", () => {
     expect(
       needsPropertyListsEmbed([
         block({
@@ -822,7 +828,7 @@ describe("needsPropertyListsEmbed", () => {
     ).toBe(true);
   });
 
-  it("returns false for multi-list all/not filters that still need pre-fetch set logic", () => {
+  it("returns false only for multi-list all filters that still need pre-fetch set logic", () => {
     expect(
       needsPropertyListsEmbed([
         block({
@@ -840,7 +846,59 @@ describe("needsPropertyListsEmbed", () => {
           values: ["L1"],
         }) as FilterBlock,
       ]),
-    ).toBe(false);
+    ).toBe(true);
+  });
+});
+
+describe("propertyListsSelectFragment", () => {
+  it("adds positive and anti-join aliases independently", () => {
+    expect(
+      propertyListsSelectFragment([
+        block({
+          kind: "list",
+          combinator: "any",
+          values: ["L1"],
+        }) as FilterBlock,
+        block({
+          kind: "list",
+          combinator: "not",
+          values: ["L2"],
+        }) as FilterBlock,
+      ]),
+    ).toBe(
+      "list_filter:property_lists!inner(list_id), list_exclusion:property_lists(list_id)",
+    );
+  });
+});
+
+describe("filterSelectFragment", () => {
+  it("adds relationship aliases for single-bucket engagement filters", () => {
+    expect(
+      filterSelectFragment([
+        block({
+          kind: "engagement",
+          combinator: "any",
+          values: ["never_contacted"],
+        }) as FilterBlock,
+        block({
+          kind: "engagement",
+          combinator: "any",
+          values: ["attempted"],
+        }) as FilterBlock,
+        block({
+          kind: "engagement",
+          combinator: "any",
+          values: ["replied"],
+        }) as FilterBlock,
+      ]),
+    ).toBe(
+      [
+        "contact_messages:messages()",
+        "attempted_outbound:messages!inner(property_id)",
+        "attempted_inbound:messages(property_id)",
+        "replied_messages:messages!inner(property_id)",
+      ].join(", "),
+    );
   });
 });
 
@@ -902,7 +960,7 @@ describe("applyBlock: list_count (pre-fetch via property_stack_counts)", () => {
     ).toBe(true);
     expect(calls.some((c) => c.startsWith("in(id,"))).toBe(true);
   });
-  it("empty pre-fetch → __no_match__ short-circuit", async () => {
+  it("empty pre-fetch → 00000000-0000-0000-0000-000000000000 short-circuit", async () => {
     const { proxy, calls } = mockBuilder();
     const m = mockSupabaseClient();
     m.setReturn("property_stack_counts", []);
@@ -914,7 +972,7 @@ describe("applyBlock: list_count (pre-fetch via property_stack_counts)", () => {
       }) as FilterBlock,
       m.sb,
     );
-    expect(calls.some((c) => c.includes("__no_match__"))).toBe(true);
+    expect(calls.some((c) => c.includes("00000000-0000-0000-0000-000000000000"))).toBe(true);
   });
   it("range bounds passed to .gte/.lte on the view query", async () => {
     const { proxy } = mockBuilder();
@@ -938,13 +996,9 @@ describe("applyBlock: list_count (pre-fetch via property_stack_counts)", () => {
 });
 
 describe("applyBlock: engagement (4-bucket pre-fetch)", () => {
-  it("'replied' bucket → pre-fetches inbound messages, applies .in('id', …)", async () => {
+  it("'replied' bucket → filters through inbound message relationship", async () => {
     const { proxy, calls } = mockBuilder();
     const m = mockSupabaseClient();
-    m.setReturn("messages", [
-      { property_id: "pA", direction: "inbound" },
-      { property_id: "pB", direction: "outbound" },
-    ]);
     await applyBlock(
       proxy,
       block({
@@ -954,16 +1008,12 @@ describe("applyBlock: engagement (4-bucket pre-fetch)", () => {
       }) as FilterBlock,
       m.sb,
     );
-    expect(m.calls.some((c) => c.startsWith("from(messages)"))).toBe(true);
-    expect(calls.some((c) => c.startsWith("in(id,"))).toBe(true);
+    expect(m.calls.some((c) => c.startsWith("from(messages)"))).toBe(false);
+    expect(calls).toEqual(["eq(replied_messages.direction,inbound)"]);
   });
-  it("'never_contacted' → pre-fetches both directions, computes set-NOT-membership", async () => {
+  it("'never_contacted' → anti-joins messages without pre-fetching ids", async () => {
     const { proxy, calls } = mockBuilder();
     const m = mockSupabaseClient();
-    m.setReturn("messages", [
-      { property_id: "pA", direction: "outbound" },
-      { property_id: "pB", direction: "inbound" },
-    ]);
     await applyBlock(
       proxy,
       block({
@@ -973,18 +1023,31 @@ describe("applyBlock: engagement (4-bucket pre-fetch)", () => {
       }) as FilterBlock,
       m.sb,
     );
-    // never_contacted = NOT in any messages set → .not('id','in',...)
-    expect(
-      calls.some(
-        (c) =>
-          c.startsWith("not(id,in,") || c.startsWith("in(id,"),
-      ),
-    ).toBe(true);
+    expect(m.calls.some((c) => c.startsWith("from(messages)"))).toBe(false);
+    expect(calls).toEqual(["is(contact_messages,null)"]);
+  });
+  it("'attempted' → requires outbound and anti-joins inbound without pre-fetching ids", async () => {
+    const { proxy, calls } = mockBuilder();
+    const m = mockSupabaseClient();
+    await applyBlock(
+      proxy,
+      block({
+        kind: "engagement",
+        combinator: "any",
+        values: ["attempted"],
+      }) as FilterBlock,
+      m.sb,
+    );
+    expect(m.calls.some((c) => c.startsWith("from(messages)"))).toBe(false);
+    expect(calls).toEqual([
+      "eq(attempted_outbound.direction,outbound)",
+      "eq(attempted_inbound.direction,inbound)",
+      "is(attempted_inbound,null)",
+    ]);
   });
   it("'opted_out' → checks outreach_dispo column for opted_out / dnc", async () => {
     const { proxy, calls } = mockBuilder();
     const m = mockSupabaseClient();
-    m.setReturn("messages", []);
     await applyBlock(
       proxy,
       block({
@@ -994,12 +1057,8 @@ describe("applyBlock: engagement (4-bucket pre-fetch)", () => {
       }) as FilterBlock,
       m.sb,
     );
-    // Either pre-fetches properties with the dispo, or applies .in(outreach_dispo, …) directly.
-    const hits = calls.filter(
-      (c) =>
-        c.includes("outreach_dispo") || c.includes("id,in") || c.includes("id,"),
-    );
-    expect(hits.length).toBeGreaterThan(0);
+    expect(m.calls.some((c) => c.startsWith("from(messages)"))).toBe(false);
+    expect(calls).toEqual(['in(outreach_dispo,["opted_out","dnc"])']);
   });
 });
 

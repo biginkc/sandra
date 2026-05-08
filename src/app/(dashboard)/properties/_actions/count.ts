@@ -5,7 +5,7 @@ import { reportError } from "@/lib/errors/report";
 import { requireOrgMembership } from "@/lib/auth/require-org-membership";
 import {
   applyFilters,
-  needsPropertyListsEmbed,
+  filterSelectFragment,
 } from "@/lib/prospects/filter-to-supabase";
 import type { BlockStack } from "@/lib/prospects/filter-schema";
 import { createClient } from "@/lib/supabase/server";
@@ -52,14 +52,12 @@ export async function countProspectsForFilter(input: {
       (b) => b.kind === "pipeline_status",
     );
 
+    const propertyListSelect = filterSelectFragment(input.blocks);
+    const select = ["id", propertyListSelect].filter(Boolean).join(", ");
+
     let q = sb
       .from("properties")
-      .select(
-        needsPropertyListsEmbed(input.blocks)
-          ? "id, property_lists!inner(list_id)"
-          : "id",
-        { count: "exact", head: true },
-      )
+      .select(select, { count: "exact", head: true })
       .is("deleted_at", null);
     if (!hasPipelineBlock) q = q.eq("status", "prospect");
 

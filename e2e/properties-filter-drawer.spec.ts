@@ -33,6 +33,24 @@ async function expectUrlBlocks(
     .toBe(true);
 }
 
+async function expectProspectTotal(
+  page: import("@playwright/test").Page,
+  expected: number,
+) {
+  if (expected === 0) {
+    await expect(
+      page.getByText(/No prospects yet\. Import a CSV to fill the data lake\./i),
+    ).toBeVisible();
+    return;
+  }
+
+  await expect(
+    page.getByText(
+      new RegExp(`Showing 1.50 of ${expected.toLocaleString()} prospects?`),
+    ),
+  ).toBeVisible();
+}
+
 async function addFilterBlock(page: import("@playwright/test").Page, name: string) {
   await page.getByRole("button", { name: /Add Filter Block/i }).click();
   const search = page.getByPlaceholder(/search filters/i);
@@ -94,6 +112,17 @@ test.describe("Phase 05 Plan 09 — full feature flow", () => {
       .eq("status", "prospect")
       .eq("property_lists.list_id", listId);
     expect(expectedCountError).toBeNull();
+    const { count: expectedNotCount, error: expectedNotCountError } = await admin
+      .from("properties")
+      .select("id, list_exclusion:property_lists(list_id)", {
+        count: "exact",
+        head: true,
+      })
+      .is("deleted_at", null)
+      .eq("status", "prospect")
+      .eq("list_exclusion.list_id", listId)
+      .is("list_exclusion", null);
+    expect(expectedNotCountError).toBeNull();
 
     const errors: string[] = [];
     page.on("response", (response) => {
@@ -120,13 +149,23 @@ test.describe("Phase 05 Plan 09 — full feature flow", () => {
       await expect(page.getByText(prefix).first()).toBeVisible({
         timeout: 10_000,
       });
+      await expectProspectTotal(page, expectedCount ?? 0);
+      expect(errors.filter((error) => error.includes("/properties"))).toEqual([]);
+
+      await page.goto(
+        `/properties?filters=${encodedFilters([
+          {
+            id: "large-list-not",
+            kind: "list",
+            combinator: "not",
+            values: [listId],
+          },
+        ])}`,
+      );
       await expect(
-        page.getByText(
-          new RegExp(
-            `Showing 1.50 of ${expectedCount?.toLocaleString()} prospects`,
-          ),
-        ),
-      ).toBeVisible();
+        page.getByText(/Failed to load prospects: Bad Request/i),
+      ).not.toBeVisible({ timeout: 10_000 });
+      await expectProspectTotal(page, expectedNotCount ?? 0);
       expect(errors.filter((error) => error.includes("/properties"))).toEqual([]);
     } finally {
       await admin.from("property_lists").delete().eq("list_id", listId);
@@ -155,7 +194,7 @@ test.describe("Phase 05 Plan 09 — full feature flow", () => {
     await page.screenshot({ path: "/tmp/plan-09-preset-applied.png", fullPage: true });
   });
 
-  test("opening drawer + adding Vacancy=Yes block updates count CTA", async ({ page }) => {
+  test("opening drawer + adding Vacancy=Yes block updates filters immediately", async ({ page }) => {
     const errors: string[] = [];
     page.on("pageerror", (e) => errors.push(`pageerror: ${e.message}`));
 
@@ -165,6 +204,9 @@ test.describe("Phase 05 Plan 09 — full feature flow", () => {
     await page.getByRole("button", { name: /^Filters$/i }).click();
     await expect(
       page.getByText(/Add a filter to slice your prospects/i),
+    ).not.toBeVisible();
+    await expect(
+      page.getByRole("button", { name: /^Show .* prospects$/i }),
     ).not.toBeVisible();
     await expect(page.locator("[data-slot='sheet-overlay']")).toHaveClass(
       /bg-transparent/,
@@ -187,14 +229,17 @@ test.describe("Phase 05 Plan 09 — full feature flow", () => {
     await yesRadio.click();
     await expect(yesRadio).toBeChecked({ timeout: 250 });
     await expect(page.getByTestId("prospects-skeleton-row").first()).toBeVisible();
-
-    const showButton = page.getByRole("button", { name: /Show \d+ prospects/i });
-    await expect(showButton).toBeVisible({ timeout: 10_000 });
+    await expect(
+      page.getByRole("button", { name: /^Show .* prospects$/i }),
+    ).not.toBeVisible();
 
     await page.screenshot({ path: "/tmp/plan-09-drawer-vacancy.png", fullPage: true });
 
-    await showButton.click();
     await expect(page).toHaveURL(/\bfilters=/, { timeout: 10_000 });
+    const activeBar = page.locator("[data-active-filters-chips]");
+    await expect(activeBar.locator("[data-chip-kind='vacancy']")).toBeVisible({
+      timeout: 10_000,
+    });
 
     expect(errors).toEqual([]);
   });

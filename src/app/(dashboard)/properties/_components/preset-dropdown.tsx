@@ -1,6 +1,6 @@
 "use client";
 
-import { useTransition } from "react";
+import { useTransition, type KeyboardEvent } from "react";
 import { ChevronDownIcon, StarIcon } from "lucide-react";
 import { useRouter } from "next/navigation";
 import {
@@ -52,6 +52,15 @@ export function PresetDropdown({ orgId, presets }: PresetDropdownProps) {
     replaceStack(fresh);
   };
 
+  const activatePresetFromKeyboard = (
+    event: KeyboardEvent,
+    preset: Preset,
+  ) => {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    event.preventDefault();
+    apply(preset);
+  };
+
   const togglePin = (p: Preset) => {
     startTransition(async () => {
       const result = await togglePinSavedFilter({
@@ -84,7 +93,11 @@ export function PresetDropdown({ orgId, presets }: PresetDropdownProps) {
           <DropdownMenuGroup>
             <DropdownMenuLabel>Base</DropdownMenuLabel>
             {base.map((p) => (
-              <DropdownMenuItem key={p.id} onClick={() => apply(p)}>
+              <DropdownMenuItem
+                key={p.id}
+                onClick={() => apply(p)}
+                onKeyDown={(event) => activatePresetFromKeyboard(event, p)}
+              >
                 {p.name}
               </DropdownMenuItem>
             ))}
@@ -103,6 +116,7 @@ export function PresetDropdown({ orgId, presets }: PresetDropdownProps) {
               >
                 <DropdownMenuItem
                   onClick={() => apply(p)}
+                  onKeyDown={(event) => activatePresetFromKeyboard(event, p)}
                   className="flex-1"
                 >
                   {p.name}
