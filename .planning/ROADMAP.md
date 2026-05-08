@@ -107,7 +107,7 @@ Plans:
 - [ ] 05-03-PLAN.md — [BLOCKING] Schema-push checkpoint + types regen (depends on 02)
 - [ ] 05-04-PLAN.md — Filter→Supabase translator + back-compat URL shim (TDD; equity_pct decision)
 - [ ] 05-05-PLAN.md — countProspectsForFilter + saved-filters CRUD server actions + multi-user RLS test
-- [ ] 05-06-PLAN.md — Drawer shell (440px Sheet) + Add-Block picker + URL-state hook + debounce hook
+- [x] 05-06-PLAN.md — Drawer shell (440px Sheet) + Add-Block picker + URL-state hook + debounce hook
 - [ ] 05-07-PLAN.md — 23 block components (one per kind) + lazy registry + RTL smoke
 - [ ] 05-08-PLAN.md — Quick Filters bar (RSC) + Active Filters chips + Save preset inline + Preset dropdown
 - [ ] 05-09-PLAN.md — page.tsx + prospects-query.ts rewrite; remove 5 inline chips from prospects-table.tsx
@@ -125,4 +125,4 @@ See REQUIREMENTS.md > Out of Scope for the full list and rationale.
 |-------|----------------|--------|-----------|
 | 03. Operational Visibility Surfaces | — | Shipped (outside GSD) + V1 Tasks via PR #112 | 2026-05-06 |
 | 04. Tasks Integrations (V2 — Slack + Calendar) | 0/10 | Plans created — awaiting /gsd-execute-phase 04 (parallel worktree) | — |
-| 05. Prospects Filter Drawer | 0/0 | Plan approved — awaiting /gsd-spec-phase 05 | — |
+| 05. Prospects Filter Drawer | 6/10 | Wave 3 executing (Plans 01-06 complete) | — |
