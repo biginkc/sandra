@@ -50,12 +50,23 @@ vi.mock("@/lib/skip-trace/actions", () => ({
   requestSkipTrace: vi.fn(),
 }));
 
-const { getAllMatchingProspectIds } = vi.hoisted(() => ({
+const {
+  createDialerBatchFromFilters,
+  createDialerBatchFromPropertyIds,
+  getAllMatchingProspectIds,
+  previewBatchEligibilityAction,
+} = vi.hoisted(() => ({
+  createDialerBatchFromFilters: vi.fn(),
+  createDialerBatchFromPropertyIds: vi.fn(),
   getAllMatchingProspectIds: vi.fn(),
+  previewBatchEligibilityAction: vi.fn(),
 }));
 
 vi.mock("./actions", () => ({
+  createDialerBatchFromFilters,
+  createDialerBatchFromPropertyIds,
   getAllMatchingProspectIds,
+  previewBatchEligibilityAction,
 }));
 
 // Sonner's toast is fine in jsdom but the table's handlers don't fire
@@ -111,6 +122,27 @@ function renderTable(rows: ProspectRow[], lists: ListOption[] = []) {
     />,
   );
 }
+
+beforeEach(() => {
+  createDialerBatchFromFilters.mockReset();
+  createDialerBatchFromPropertyIds.mockReset();
+  getAllMatchingProspectIds.mockReset();
+  previewBatchEligibilityAction.mockReset();
+
+  getAllMatchingProspectIds.mockResolvedValue({ ok: true, data: ["p1", "p2"] });
+  previewBatchEligibilityAction.mockResolvedValue({
+    ok: true,
+    data: { callable: 1, blocked: {}, missing: 0 },
+  });
+  createDialerBatchFromPropertyIds.mockResolvedValue({
+    ok: true,
+    data: { batchId: "batch-table", counts: { callable: 1, blocked: {}, missing: 0 } },
+  });
+  createDialerBatchFromFilters.mockResolvedValue({
+    ok: true,
+    data: { batchId: "batch-table", counts: { callable: 1, blocked: {}, missing: 0 } },
+  });
+});
 
 describe("<ProspectsTable />", () => {
   it("renders without crashing and Actions button starts disabled", () => {
@@ -226,6 +258,34 @@ describe("<ProspectsTable />", () => {
     expect(
       screen.queryByRole("menuitem", { name: /Set motivation/ }),
     ).toBeNull();
+  });
+
+  it("opens Create dialer batch from the Actions menu", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    const rows = [makeRow({ id: "p1" }), makeRow({ id: "p2" })];
+    renderTable(rows);
+
+    await user.click(
+      screen.getByRole("checkbox", { name: "Select p1 Main St" }),
+    );
+    await user.click(
+      screen.getByRole("button", { name: /Actions for 1 selected/ }),
+    );
+
+    expect(
+      await screen.findByRole("menuitem", { name: "Bulk SMS" }),
+    ).toBeInTheDocument();
+    const batchItem = await screen.findByRole("menuitem", {
+      name: "Create dialer batch",
+    });
+    await user.click(batchItem);
+
+    expect(
+      await screen.findByRole("heading", { name: "Create dialer batch" }),
+    ).toBeInTheDocument();
+    await waitFor(() =>
+      expect(previewBatchEligibilityAction).toHaveBeenCalledWith(["p1"]),
+    );
   });
 });
 

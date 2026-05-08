@@ -68,6 +68,7 @@ import {
 } from "../leads/actions";
 import { requestSkipTrace } from "@/lib/skip-trace/actions";
 import { getAllMatchingProspectIds } from "./actions";
+import { BatchCreateModal } from "./batch-create-modal";
 import { BulkSmsModal } from "./bulk-sms-modal";
 
 export type ProspectRow = {
@@ -156,6 +157,7 @@ export function ProspectsTable({
   const router = useRouter();
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [pending, startTransition] = useTransition();
+  const [showBatchCreate, setShowBatchCreate] = useState(false);
   const [showBulkSms, setShowBulkSms] = useState(false);
   // Cross-page select-all mode. When true, the user has explicitly
   // expanded their selection beyond the visible page to every property
@@ -544,6 +546,9 @@ export function ProspectsTable({
                   <DropdownMenuItem onClick={() => setShowBulkSms(true)}>
                     Bulk SMS
                   </DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => setShowBatchCreate(true)}>
+                    Create dialer batch
+                  </DropdownMenuItem>
 
                 <DropdownMenuSeparator />
 
@@ -711,6 +716,17 @@ export function ProspectsTable({
           setSelected(new Set());
           router.refresh();
         }}
+      />
+      <BatchCreateModal
+        open={showBatchCreate}
+        onClose={() => setShowBatchCreate(false)}
+        selectedIds={selectAllMatching ? undefined : selectedIds()}
+        filterArgs={
+          selectAllMatching
+            ? { search: search.length === 0 ? null : search, filters }
+            : undefined
+        }
+        totalCount={selectAllMatching ? total : selected.size}
       />
 
       <DataTableShell
