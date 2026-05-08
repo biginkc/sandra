@@ -3,7 +3,7 @@
 import { ChevronDownIcon } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useEffect, useMemo, useState, useTransition } from "react";
+import { useEffect, useMemo, useRef, useState, useTransition } from "react";
 import { toast } from "sonner";
 
 import { PageHeader } from "@/components/page-header";
@@ -53,7 +53,10 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { callAction } from "@/lib/errors/call-action";
-import { FILTER_NAVIGATION_START_EVENT } from "./_components/use-filter-state";
+import {
+  FILTER_NAVIGATION_START_EVENT,
+  type FilterNavigationStartDetail,
+} from "./_components/use-filter-state";
 
 import {
   addPropertiesToListBulk,
@@ -162,6 +165,12 @@ export function ProspectsTable({
   const [pending, startTransition] = useTransition();
   const [showBulkSms, setShowBulkSms] = useState(false);
   const [filterNavPending, setFilterNavPending] = useState(false);
+  const [filterNavTargetKey, setFilterNavTargetKey] = useState<string | null>(
+    null,
+  );
+  const filterNavFallbackTimer = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
   // Cross-page select-all mode. When true, the user has explicitly
   // expanded their selection beyond the visible page to every property
   // matching the current filters. Bound to a Set<string> of all those
@@ -227,11 +236,22 @@ export function ProspectsTable({
   }, [search, sort, dir, blockStackKey]);
 
   useEffect(() => {
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    const showFilterSkeleton = () => {
+    const showFilterSkeleton = (event: Event) => {
+      const targetKey =
+        event instanceof CustomEvent &&
+        typeof (event as CustomEvent<FilterNavigationStartDetail>).detail
+          ?.blocksKey === "string"
+          ? (event as CustomEvent<FilterNavigationStartDetail>).detail.blocksKey
+          : null;
       setFilterNavPending(true);
-      if (timer) clearTimeout(timer);
-      timer = setTimeout(() => setFilterNavPending(false), 150);
+      setFilterNavTargetKey(targetKey);
+      if (filterNavFallbackTimer.current) {
+        clearTimeout(filterNavFallbackTimer.current);
+      }
+      filterNavFallbackTimer.current = setTimeout(() => {
+        setFilterNavPending(false);
+        setFilterNavTargetKey(null);
+      }, 5_000);
     };
 
     window.addEventListener(FILTER_NAVIGATION_START_EVENT, showFilterSkeleton);
@@ -240,9 +260,29 @@ export function ProspectsTable({
         FILTER_NAVIGATION_START_EVENT,
         showFilterSkeleton,
       );
-      if (timer) clearTimeout(timer);
+      if (filterNavFallbackTimer.current) {
+        clearTimeout(filterNavFallbackTimer.current);
+      }
     };
   }, []);
+
+  useEffect(() => {
+    if (!filterNavPending) return;
+    if (filterNavTargetKey != null && filterNavTargetKey !== blockStackKey) {
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      setFilterNavPending(false);
+      setFilterNavTargetKey(null);
+      if (filterNavFallbackTimer.current) {
+        clearTimeout(filterNavFallbackTimer.current);
+        filterNavFallbackTimer.current = null;
+      }
+    }, 150);
+
+    return () => clearTimeout(timer);
+  }, [blockStackKey, filterNavPending, filterNavTargetKey]);
 
   const onSelectAllAcrossPages = () => {
     startTransition(async () => {

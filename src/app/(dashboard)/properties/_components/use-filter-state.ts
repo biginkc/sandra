@@ -20,6 +20,9 @@ export type UseFilterState = {
 };
 
 export const FILTER_NAVIGATION_START_EVENT = "properties:filters-navigation-start";
+export type FilterNavigationStartDetail = {
+  blocksKey: string;
+};
 
 export function useFilterState(): UseFilterState {
   const router = useRouter();
@@ -52,7 +55,12 @@ export function useFilterState(): UseFilterState {
       latestBlocksRef.current = nextStack;
       setBlocks(nextStack);
       if (typeof window !== "undefined") {
-        window.dispatchEvent(new Event(FILTER_NAVIGATION_START_EVENT));
+        window.dispatchEvent(
+          new CustomEvent<FilterNavigationStartDetail>(
+            FILTER_NAVIGATION_START_EVENT,
+            { detail: { blocksKey: JSON.stringify(nextStack) } },
+          ),
+        );
       }
       const currentSearch =
         typeof window === "undefined"
