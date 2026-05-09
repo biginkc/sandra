@@ -17,6 +17,7 @@ Required environment:
 - `PROD_BASE_URL` when testing a non-default deployed URL
 - `NEXT_PUBLIC_SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` for canaries that
   verify persisted production state directly
+- `DIALPAD_WEBHOOK_SECRET` for signed inbound webhook canaries
 
 Canary data must be tagged with `PROD-CANARY <run_id>`, and cleanup must only
 target data created by the active canary run.
@@ -52,3 +53,9 @@ Current coverage:
   sends through the lead-detail UI, verifies the provider-backed message row is
   `sent`, confirms thread visibility, and cleans up canary-owned contact,
   consent, property, and message rows
+- real production inbound SMS coverage that signs and posts a Dialpad-shaped
+  webhook, verifies the `received` message row, confirms lead-thread
+  visibility, and cleans up canary-owned contact, property, and message rows
+- real production STOP/DNC coverage that signs and posts a STOP webhook,
+  verifies opt-out consent, contact suppression, sequence enrollment pause,
+  lead-thread visibility, blocked-send UI feedback, and canary cleanup
