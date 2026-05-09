@@ -28,6 +28,12 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { FilterBlock } from "./filter-schema";
+import { BLOCK_KINDS } from "./filter-schema";
+import {
+  FILTER_STRATEGIES,
+  RISKY_FILTER_CONTRACT_KINDS,
+  assertFilterStrategyRegistryComplete,
+} from "./filter-strategies";
 import {
   applyBlock,
   applyFilters,
@@ -158,6 +164,43 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.useRealTimers();
+});
+
+describe("FILTER_STRATEGIES", () => {
+  it("declares an explicit query shape for every supported filter kind", () => {
+    expect(assertFilterStrategyRegistryComplete()).toBe(true);
+    expect(Object.keys(FILTER_STRATEGIES).sort()).toEqual(
+      [...BLOCK_KINDS].sort(),
+    );
+  });
+
+  it("keeps risky production filters in the contract list", () => {
+    expect([...RISKY_FILTER_CONTRACT_KINDS].sort()).toEqual(
+      [
+        "cass",
+        "engagement",
+        "equity_pct",
+        "has_open_tasks",
+        "has_unread_inbound",
+        "list",
+        "list_count",
+        "pipeline_status",
+        "vacancy",
+      ].sort(),
+    );
+  });
+
+  it("documents relationship and computed filters that can produce Bad Request regressions", () => {
+    expect(FILTER_STRATEGIES.list.strategy).toBe("relationshipJoin");
+    expect(FILTER_STRATEGIES.engagement.strategy).toBe("relationshipJoin");
+    expect(FILTER_STRATEGIES.list_count.strategy).toBe("aggregateView");
+    expect(FILTER_STRATEGIES.has_unread_inbound.strategy).toBe(
+      "computedServerSide",
+    );
+    expect(FILTER_STRATEGIES.has_open_tasks.strategy).toBe(
+      "computedServerSide",
+    );
+  });
 });
 
 // ===========================================================================
@@ -459,7 +502,9 @@ describe("applyBlock: estimated_value (range)", () => {
     );
     // The translator uses `arv` (after-repair value) as the canonical estimated-value
     // column on properties; verify whichever column is chosen, only one column appears.
-    const valueCol = calls.find((c) => c.startsWith("gte("))?.match(/gte\((\w+),/)?.[1];
+    const valueCol = calls
+      .find((c) => c.startsWith("gte("))
+      ?.match(/gte\((\w+),/)?.[1];
     expect(valueCol).toBeTruthy();
     expect(calls).toContain(`gte(${valueCol},100000)`);
     expect(calls).toContain(`lte(${valueCol},500000)`);
@@ -802,7 +847,9 @@ describe("applyBlock: list (pre-fetch via property_lists)", () => {
       }) as FilterBlock,
       m.sb,
     );
-    expect(calls.some((c) => c.includes("00000000-0000-0000-0000-000000000000"))).toBe(true);
+    expect(
+      calls.some((c) => c.includes("00000000-0000-0000-0000-000000000000")),
+    ).toBe(true);
   });
 });
 
@@ -984,7 +1031,9 @@ describe("applyBlock: list_count (pre-fetch via property_stack_counts)", () => {
       }) as FilterBlock,
       m.sb,
     );
-    expect(calls.some((c) => c.includes("00000000-0000-0000-0000-000000000000"))).toBe(true);
+    expect(
+      calls.some((c) => c.includes("00000000-0000-0000-0000-000000000000")),
+    ).toBe(true);
   });
   it("range bounds passed to .gte/.lte on the view query", async () => {
     const { proxy } = mockBuilder();
@@ -998,12 +1047,12 @@ describe("applyBlock: list_count (pre-fetch via property_stack_counts)", () => {
       }) as FilterBlock,
       m.sb,
     );
-    expect(m.calls.some((c) => c.startsWith("property_stack_counts.gte("))).toBe(
-      true,
-    );
-    expect(m.calls.some((c) => c.startsWith("property_stack_counts.lte("))).toBe(
-      true,
-    );
+    expect(
+      m.calls.some((c) => c.startsWith("property_stack_counts.gte(")),
+    ).toBe(true);
+    expect(
+      m.calls.some((c) => c.startsWith("property_stack_counts.lte(")),
+    ).toBe(true);
   });
 });
 
@@ -1085,7 +1134,9 @@ describe("applyBlock: engagement (4-bucket pre-fetch)", () => {
       m.sb,
     );
     expect(m.calls.some((c) => c.startsWith("from(messages)"))).toBe(false);
-    expect(calls).toEqual(['in(engaged_messages.direction,["inbound","outbound"])']);
+    expect(calls).toEqual([
+      'in(engaged_messages.direction,["inbound","outbound"])',
+    ]);
   });
 });
 
