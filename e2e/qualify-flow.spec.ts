@@ -59,9 +59,11 @@ test.describe("qualify → revert round-trip", () => {
     // Open the status widget and pick "Move back to Prospect". The
     // dropdown trigger label reflects the current status.
     await page.getByRole("button", { name: /Change status/i }).click();
-    await page
-      .getByRole("menuitem", { name: /Move back to Prospect/i })
-      .click();
+    const revertItem = page.getByRole("menuitem", {
+      name: /Move back to Prospect/i,
+    });
+    await expect(revertItem).toBeVisible({ timeout: 10_000 });
+    await revertItem.click();
 
     // Back in the DB, the row should now be a prospect with cleared stamps.
     // Give the server action a beat to settle before reading.

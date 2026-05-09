@@ -5,20 +5,19 @@ import { adminClient, ensureTestUser, resetTenantTables } from "./fixtures";
 
 const DEFAULT_ORG_ID = "00000000-0000-0000-0000-000000000bbb";
 
-function callableStateForNow(): string {
+function callableStateForNow(): string | null {
   for (const state of Object.keys(STATE_TO_TZ).sort()) {
     if (checkQuietHours(state).ok) return state;
   }
-  return "MO";
+  return null;
 }
 
 function uniquePhone(): string {
   return `+1816${String(Date.now()).slice(-7)}`;
 }
 
-async function seedCallableProspect() {
+async function seedCallableProspect(state: string) {
   const admin = adminClient();
-  const state = callableStateForNow();
   const suffix = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const address = `Dialer E2E ${suffix} Golden Path Ln`;
 
@@ -66,7 +65,15 @@ test.describe("Dialer batch create", () => {
     const admin = adminClient();
     await resetTenantTables(admin);
     await ensureTestUser(admin);
-    const prospect = await seedCallableProspect();
+    const callableState = callableStateForNow();
+    if (callableState === null) {
+      test.skip(
+        true,
+        "outside legal calling windows in every configured US state",
+      );
+      return;
+    }
+    const prospect = await seedCallableProspect(callableState);
     const title = `E2E dialer batch ${Date.now()}`;
 
     await page.goto("/properties");
@@ -90,6 +97,7 @@ test.describe("Dialer batch create", () => {
     await page.getByRole("button", { name: "Create batch" }).click();
 
     await expect(async () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const { data: batch } = await (admin as any)
         .from("dialer_batches")
         .select("id, source_kind")
@@ -97,6 +105,7 @@ test.describe("Dialer batch create", () => {
         .single();
       expect(batch?.source_kind).toBe("selected_ids");
 
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const { data: items } = await (admin as any)
         .from("dialer_batch_items")
         .select("id, property_id, contact_id")
@@ -106,6 +115,7 @@ test.describe("Dialer batch create", () => {
       expect(items?.[0]?.contact_id).toBe(prospect.contactId);
     }).toPass({ timeout: 15_000 });
 
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const { data: item, error: itemError } = await (admin as any)
       .from("dialer_batch_items")
       .select("id")
@@ -115,6 +125,7 @@ test.describe("Dialer batch create", () => {
       throw itemError ?? new Error("Expected created dialer batch item");
     }
 
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const { error: activityError } = await (admin as any)
       .from("call_activities")
       .insert({
