@@ -17,6 +17,11 @@ import { csvImportWorkflow } from "@/workflows/csv-import";
 
 import type { WizardSource } from "./wizard";
 
+type MembershipRow = {
+  org_id: string;
+  role: string;
+};
+
 export type CreateImportJobParams = {
   filename: string;
   source: WizardSource;
@@ -75,6 +80,26 @@ export async function createImportJob(
     const supabase = await createClient();
     const { data: userData } = await supabase.auth.getUser();
     const userId = userData.user?.id ?? null;
+    if (!userId) {
+      return {
+        ok: false,
+        error: { code: "NOT_AUTHENTICATED", message: "Not authenticated" },
+      };
+    }
+
+    const { data: memberships, error: membershipError } = await supabase
+      .from("memberships")
+      .select("org_id, role");
+    if (membershipError || !memberships?.length) {
+      return {
+        ok: false,
+        error: {
+          code: "ORG_MEMBERSHIP_REQUIRED",
+          message: membershipError?.message ?? "No organization membership found",
+        },
+      };
+    }
+    const orgId = (memberships as MembershipRow[])[0].org_id;
 
     // T-02-03-01 mitigation: validate the supplied countyId against
     // the counties table BEFORE inserting csv_imports. The query is
@@ -104,6 +129,7 @@ export async function createImportJob(
         source: params.source,
         market: canonicalMarket,
         county_id: canonicalCountyId,
+        org_id: orgId,
         total_rows: params.totalRows,
         storage_path: params.storagePath,
         user_id: userId,
@@ -148,6 +174,7 @@ export async function createImportJob(
       .insert({
         type: "csv_import",
         status: "queued",
+        org_id: orgId,
         total_items: params.totalRows,
         related_import_id: importRow.id,
         created_by: userId,

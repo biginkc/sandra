@@ -99,7 +99,7 @@ test("production canary only renders properties from the authenticated user's or
     await page.getByTestId("prospects-search").fill(token);
     await expect(page.getByText(visibleAddress)).toBeVisible({ timeout: 20_000 });
     await expect(page.getByText(hiddenAddress)).toHaveCount(0);
-    await expect(page.getByText(/Showing 1.*of 1 prospects/i)).toBeVisible();
+    await expect(page.getByText(/Showing 1.*of 1 prospect/i)).toBeVisible();
   } finally {
     await deleteCanaryPropertiesByAddressPrefix(supabase, prefix);
     await deleteCanaryOrganizationsByName(supabase, hiddenOrgName);

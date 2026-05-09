@@ -52,7 +52,9 @@ test("production canary imports a canary CSV and renders the created prospects",
       mimeType: "text/csv",
       buffer: Buffer.from(csv, "utf8"),
     });
-    await expect(page.getByText(filename)).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByRole("main").getByText(filename)).toBeVisible({
+      timeout: 10_000,
+    });
 
     await selectComboboxOption(page, /pick a source/i, "Direct mail");
     await selectComboboxOption(page, /pick a market/i, "Jackson County MO");

@@ -34,9 +34,10 @@ test("production canary creates, edits, and deletes a canary SMS template", asyn
     });
 
     await page.getByRole("button", { name: "New template" }).click();
-    await expect(page.getByRole("dialog", { name: "New template" })).toBeVisible();
-    await page.getByLabel("Name").fill(name);
-    await page.getByLabel("Content").fill(initialContent);
+    const createDialog = page.getByRole("dialog", { name: "New template" });
+    await expect(createDialog).toBeVisible();
+    await createDialog.getByRole("textbox", { name: "Name" }).fill(name);
+    await createDialog.getByLabel("Content").fill(initialContent);
     await page.getByRole("button", { name: "Create template" }).click();
 
     const created = await pollUntil(
@@ -62,9 +63,10 @@ test("production canary creates, edits, and deletes a canary SMS template", asyn
     await page.getByRole("row", { name: new RegExp(escapeRegExp(name)) })
       .getByRole("button", { name: "Edit" })
       .click();
-    await expect(page.getByRole("dialog", { name: `Edit: ${name}` })).toBeVisible();
-    await page.getByLabel("Name").fill(editedName);
-    await page.getByLabel("Content").fill(editedContent);
+    const editDialog = page.getByRole("dialog", { name: `Edit: ${name}` });
+    await expect(editDialog).toBeVisible();
+    await editDialog.getByRole("textbox", { name: "Name" }).fill(editedName);
+    await editDialog.getByLabel("Content").fill(editedContent);
     await page.getByRole("button", { name: "Save changes" }).click();
 
     await pollUntil(

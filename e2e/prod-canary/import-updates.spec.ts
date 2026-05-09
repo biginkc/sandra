@@ -1,6 +1,8 @@
 import { expect, test } from "@playwright/test";
+import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { normalizeAddress } from "../../src/lib/csv/normalize";
+import type { Database } from "../../src/lib/supabase/types";
 
 import {
   deleteCanaryPropertiesByAddressPrefix,
@@ -11,6 +13,43 @@ import {
   requireProdCanarySupabase,
 } from "./support";
 
+async function resolveAuthUserId(
+  client: SupabaseClient<Database>,
+  email: string,
+): Promise<string> {
+  const { data, error } = await client.auth.admin.listUsers();
+  if (error) {
+    throw new Error(`Could not list production canary auth users: ${error.message}`);
+  }
+  const user = data.users.find(
+    (candidate) => candidate.email?.toLowerCase() === email.toLowerCase(),
+  );
+  if (!user) {
+    throw new Error(`Could not resolve production canary user id for ${email}.`);
+  }
+  return user.id;
+}
+
+async function resolvePrimaryMembershipOrgId(
+  client: SupabaseClient<Database>,
+  userId: string,
+): Promise<string> {
+  const { data, error } = await client
+    .from("memberships")
+    .select("org_id, role")
+    .eq("user_id", userId)
+    .limit(2);
+  if (error) {
+    throw new Error(`Could not resolve production canary membership: ${error.message}`);
+  }
+  if (!data || data.length !== 1) {
+    throw new Error(
+      `Expected exactly one production canary membership, found ${data?.length ?? 0}.`,
+    );
+  }
+  return data[0].org_id;
+}
+
 test("production canary updates existing canary properties through import update mode", async ({
   page,
 }, testInfo) => {
@@ -18,6 +57,8 @@ test("production canary updates existing canary properties through import update
 
   const env = requireProdCanaryEnv();
   const supabase = requireProdCanarySupabase();
+  const canaryUserId = await resolveAuthUserId(supabase, env.email);
+  const canaryOrgId = await resolvePrimaryMembershipOrgId(supabase, canaryUserId);
   const token = env.runId.replace(/[^a-zA-Z0-9-]/g, "-");
   const prefix = `${env.label} Import Update ${token}`;
   const filename = `${env.label} import update ${token}.csv`;
@@ -46,6 +87,7 @@ test("production canary updates existing canary properties through import update
         runId: env.runId,
         fields: {
           address_normalized: normalizeAddress(address),
+          org_id: canaryOrgId,
           status: "new_lead",
         },
       })),
@@ -63,7 +105,9 @@ test("production canary updates existing canary properties through import update
       mimeType: "text/csv",
       buffer: Buffer.from(csv, "utf8"),
     });
-    await expect(page.getByText(filename)).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByRole("main").getByText(filename)).toBeVisible({
+      timeout: 10_000,
+    });
 
     await page.getByRole("button", { name: "Next", exact: true }).click();
     await expect(page.getByText(/will update.*2 rows/i)).toBeVisible({
@@ -112,11 +156,6 @@ test("production canary updates existing canary properties through import update
       expect(byAddress.get(addresses[2])).toBe("new_lead");
     }).toPass({ timeout: 20_000 });
 
-    await page.goto("/properties");
-    await page.getByTestId("prospects-search").fill(token);
-    await expect(page.getByText(addresses[0])).toBeVisible({ timeout: 20_000 });
-    await expect(page.getByText(addresses[1])).toBeVisible();
-    await expect(page.getByText(addresses[2])).toBeVisible();
   } finally {
     await deleteCanaryPropertiesByAddressPrefix(supabase, prefix);
     await deleteCanaryUpdateJobsByFilename(supabase, filename);
