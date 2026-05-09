@@ -23,6 +23,8 @@ export const metadata = {
   title: "Webhooks · Sandra CRM",
 };
 
+export const dynamic = "force-dynamic";
+
 export type WebhookConsumerRow = {
   id: string;
   name: string;
