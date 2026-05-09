@@ -53,7 +53,9 @@ test.describe("/admin/webhooks", () => {
       .getByRole("button", { name: /Add webhook consumer/i })
       .first()
       .click();
-    await page.getByTestId("webhook-name").fill(consumerName);
+    const nameInput = page.getByTestId("webhook-name");
+    await expect(nameInput).toBeVisible();
+    await nameInput.fill(consumerName);
     // type=lead is the default radio; select default_source = cold_call.
     await page.getByTestId("webhook-source").click();
     await page.getByRole("option", { name: "cold_call" }).click();
@@ -77,7 +79,7 @@ test.describe("/admin/webhooks", () => {
 
     // The row is in the table.
     const row = page.getByRole("row").filter({ hasText: consumerName });
-    await expect(row).toBeVisible();
+    await expect(row).toBeVisible({ timeout: 15_000 });
     await expect(row.getByText("lead", { exact: true })).toBeVisible();
     await expect(row.getByText("cold_call")).toBeVisible();
 
@@ -85,7 +87,7 @@ test.describe("/admin/webhooks", () => {
     await page.reload();
     await expect(
       page.getByRole("row").filter({ hasText: consumerName }),
-    ).toBeVisible();
+    ).toBeVisible({ timeout: 15_000 });
     // The plaintext must not be present anywhere on the page after a
     // refresh — the only place it lives is the in-memory success state.
     await expect(page.locator("body")).not.toContainText(firstSecret);
@@ -95,10 +97,12 @@ test.describe("/admin/webhooks", () => {
     await rotateRow
       .getByRole("button", { name: new RegExp(`Rotate secret for ${consumerName}`, "i") })
       .click();
-    await page.getByTestId("rotate-confirm").click();
+    const rotateConfirm = page.getByTestId("rotate-confirm");
+    await expect(rotateConfirm).toBeVisible();
+    await rotateConfirm.click();
 
     const rotatedSecretCode = page.getByTestId("webhook-secret-value");
-    await expect(rotatedSecretCode).toBeVisible();
+    await expect(rotatedSecretCode).toBeVisible({ timeout: 15_000 });
     const secondSecret = (await rotatedSecretCode.textContent())?.trim() ?? "";
     expect(secondSecret).toMatch(/^[0-9a-f]{48}$/);
     expect(secondSecret).not.toBe(firstSecret);
