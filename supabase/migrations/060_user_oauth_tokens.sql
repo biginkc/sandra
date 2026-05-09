@@ -53,7 +53,7 @@ returns table(
 )
 language sql
 security definer
-set search_path = public, pg_temp
+set search_path = public, extensions, pg_temp
 as $$
   select
     pgp_sym_decrypt(access_token_encrypted, p_key) as access_token,
@@ -88,7 +88,7 @@ create or replace function public.upsert_oauth_token(
 returns void
 language sql
 security definer
-set search_path = public, pg_temp
+set search_path = public, extensions, pg_temp
 as $$
   insert into public.user_oauth_tokens (
     user_id,

@@ -53,6 +53,7 @@ Plan 02 is complete. The planned `053` migration slot was already occupied in cu
 - `reset_tenant_tables()` now truncates `public.user_oauth_tokens`.
 
 The migration uses `pgp_sym_encrypt(text, key)` and `pgp_sym_decrypt(bytea, key)` only. It does not use the `_bytea` variants.
+The encryption/decryption helper functions include `extensions` in their pinned `search_path`, because Supabase installs `pgcrypto` outside `public` in the hosted projects.
 
 ## Public API
 
