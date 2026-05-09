@@ -177,6 +177,46 @@ export async function deleteCanaryImportArtifactsByFilename(
   }
 }
 
+export async function deleteCanarySmsTemplatesByName(
+  client: SupabaseClient<Database>,
+  name: string,
+): Promise<void> {
+  assertCanaryOwned(name, "template name");
+
+  const { data: templates, error: lookupError } = await client
+    .from("sms_templates")
+    .select("id, name")
+    .eq("name", name);
+  if (lookupError) {
+    throw new Error(
+      `Could not look up canary sms templates: ${lookupError.message}`,
+    );
+  }
+
+  const ids = (templates ?? []).map((template) => template.id);
+  if (ids.length === 0) return;
+
+  const { error: stepError } = await client
+    .from("sequence_steps")
+    .update({ template_id: null })
+    .in("template_id", ids);
+  if (stepError) {
+    throw new Error(
+      `Could not detach canary sms templates from sequence steps: ${stepError.message}`,
+    );
+  }
+
+  const { error: deleteError } = await client
+    .from("sms_templates")
+    .delete()
+    .in("id", ids);
+  if (deleteError) {
+    throw new Error(
+      `Could not delete canary sms templates: ${deleteError.message}`,
+    );
+  }
+}
+
 export async function insertCanaryList(
   client: SupabaseClient<Database>,
   input: { name: string },
