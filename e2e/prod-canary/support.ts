@@ -116,6 +116,67 @@ export async function deleteCanaryListsByName(
   }
 }
 
+export async function deleteCanaryImportArtifactsByFilename(
+  client: SupabaseClient<Database>,
+  filename: string,
+): Promise<void> {
+  assertCanaryOwned(filename, "import filename");
+
+  const { data: imports, error: importLookupError } = await client
+    .from("csv_imports")
+    .select("id, storage_path, filename")
+    .eq("filename", filename);
+  if (importLookupError) {
+    throw new Error(
+      `Could not look up canary import artifacts: ${importLookupError.message}`,
+    );
+  }
+
+  const importIds = (imports ?? []).map((row) => row.id);
+  const storagePaths = (imports ?? [])
+    .map((row) => row.storage_path)
+    .filter((path): path is string => !!path);
+  if (storagePaths.length > 0) {
+    const { error } = await client.storage.from("csv-imports").remove(storagePaths);
+    if (error) {
+      throw new Error(`Could not delete canary import storage: ${error.message}`);
+    }
+  }
+  if (importIds.length === 0) return;
+
+  const { data: jobs, error: jobLookupError } = await client
+    .from("jobs")
+    .select("id")
+    .in("related_import_id", importIds);
+  if (jobLookupError) {
+    throw new Error(`Could not look up canary import jobs: ${jobLookupError.message}`);
+  }
+
+  const jobIds = (jobs ?? []).map((row) => row.id);
+  if (jobIds.length > 0) {
+    const { error: itemError } = await client
+      .from("job_items")
+      .delete()
+      .in("job_id", jobIds);
+    if (itemError) {
+      throw new Error(`Could not delete canary job items: ${itemError.message}`);
+    }
+
+    const { error: jobError } = await client.from("jobs").delete().in("id", jobIds);
+    if (jobError) {
+      throw new Error(`Could not delete canary jobs: ${jobError.message}`);
+    }
+  }
+
+  const { error: importError } = await client
+    .from("csv_imports")
+    .delete()
+    .in("id", importIds);
+  if (importError) {
+    throw new Error(`Could not delete canary imports: ${importError.message}`);
+  }
+}
+
 export async function insertCanaryList(
   client: SupabaseClient<Database>,
   input: { name: string },
