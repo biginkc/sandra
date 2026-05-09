@@ -55,6 +55,10 @@ production-grade by this plan's definition.
 - Quick preset production canary coverage now creates canary-owned prospect
   rows, applies the High Equity quick preset, verifies the exact filtered row,
   clears the preset, and verifies the original canary set returns.
+- Import production canary coverage now uploads a canary CSV through the UI,
+  starts the real import job, verifies the uploaded storage path, terminal job
+  state, persisted prospect rows, and visible prospects table results, then
+  cleans up storage/import/job/property artifacts.
 
 ## Production validation rules
 

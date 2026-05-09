@@ -32,3 +32,6 @@ Current coverage:
   prospects and verifies the UI avoids Bad Request failures
 - real production quick preset coverage that applies and clears High Equity
   against canary-owned prospect rows
+- real production CSV import coverage that uploads a canary file through the UI,
+  waits for the import job to finish, verifies persisted prospects, and cleans
+  up the storage/import/job/property artifacts
