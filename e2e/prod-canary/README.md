@@ -10,6 +10,15 @@ Run locally with:
 RUN_PROD_CANARIES=1 npm run test:e2e:prod-canary
 ```
 
+Local env loading:
+
+- put production canary secrets in `.env.prod-canary.local`
+- `.env.prod-canary.local` is loaded before `.env.local`
+- shell environment variables still take precedence over both files
+- do not point `NEXT_PUBLIC_SUPABASE_URL` at the shared test project; DB-backed
+  prod canaries will refuse to run unless the URL matches the production
+  Supabase project
+
 Required environment:
 
 - `PROD_EMAIL`

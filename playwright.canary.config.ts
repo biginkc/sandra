@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { defineConfig, devices } from "@playwright/test";
+import { PROD_CANARY_ENV_FILES } from "./src/lib/prod-canary/env";
 
 /**
  * Production-grade Playwright canaries.
@@ -12,10 +13,16 @@ import { defineConfig, devices } from "@playwright/test";
  *
  * Local usage:
  *   RUN_PROD_CANARIES=1 npm run test:e2e:prod-canary
+ *
+ * Local env files are loaded in priority order:
+ *   1. .env.prod-canary.local
+ *   2. .env.local
+ *
+ * Shell environment variables still take precedence over both files.
  */
 
-function loadEnvLocal(): void {
-  const filepath = path.resolve(__dirname, ".env.local");
+function loadEnvFile(filename: string): void {
+  const filepath = path.resolve(__dirname, filename);
   if (!fs.existsSync(filepath)) return;
   for (const line of fs.readFileSync(filepath, "utf8").split(/\r?\n/)) {
     const trimmed = line.trim();
@@ -34,7 +41,9 @@ function loadEnvLocal(): void {
   }
 }
 
-loadEnvLocal();
+for (const filename of PROD_CANARY_ENV_FILES) {
+  loadEnvFile(filename);
+}
 
 export default defineConfig({
   testDir: "./e2e/prod-canary",
