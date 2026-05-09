@@ -101,29 +101,45 @@ export function propertyListsSelectFragment(blocks: BlockStack): string | null {
 }
 
 export function filterSelectFragment(blocks: BlockStack): string | null {
-  const fragments: string[] = [];
+  const fragments = new Set<string>();
   const listFragment = propertyListsSelectFragment(blocks);
-  if (listFragment) fragments.push(listFragment);
+  if (listFragment) fragments.add(listFragment);
 
-  const singleEngagementBuckets = new Set(
-    blocks
-      .filter(
-        (block): block is Extract<FilterBlock, { kind: "engagement" }> =>
-          block.kind === "engagement" &&
-          block.combinator === "any" &&
-          block.values.length === 1,
-      )
-      .map((block) => block.values[0]),
-  );
-  if (singleEngagementBuckets.has("never_contacted")) {
-    fragments.push("contact_messages:messages()");
+  for (const block of blocks) {
+    if (block.kind !== "engagement" || block.combinator !== "any") continue;
+
+    if (isEngagedContactedBlock(block)) {
+      fragments.add("contacted_messages:messages!inner(direction)");
+      continue;
+    }
+
+    if (block.values.length !== 1) continue;
+    const bucket = block.values[0];
+    if (bucket === "never_contacted") {
+      fragments.add("contact_messages:messages()");
+    } else if (bucket === "replied") {
+      fragments.add("replied_messages:messages!inner(direction)");
+    } else if (bucket === "attempted") {
+      fragments.add("attempted_outbound:messages!inner(direction)");
+      fragments.add("attempted_inbound:messages(direction)");
+    }
   }
 
-  return fragments.length > 0 ? fragments.join(", ") : null;
+  return fragments.size > 0 ? Array.from(fragments).join(", ") : null;
 }
 
 export function needsPropertyListsEmbed(blocks: BlockStack): boolean {
   return propertyListsSelectFragment(blocks) !== null;
+}
+
+function isEngagedContactedBlock(
+  block: Extract<FilterBlock, { kind: "engagement" }>,
+): boolean {
+  return (
+    block.values.length === 2 &&
+    block.values.includes("attempted") &&
+    block.values.includes("replied")
+  );
 }
 
 export async function applyBlock(
@@ -500,9 +516,29 @@ async function applyEngagementBlock(
     if (onlyBucket === "never_contacted") {
       return { builder: builder.is("contact_messages", null) };
     }
+    if (onlyBucket === "replied") {
+      return { builder: builder.eq("replied_messages.direction", "inbound") };
+    }
+    if (onlyBucket === "attempted") {
+      return {
+        builder: builder
+          .eq("attempted_outbound.direction", "outbound")
+          .eq("attempted_inbound.direction", "inbound")
+          .is("attempted_inbound", null),
+      };
+    }
     if (onlyBucket === "opted_out") {
       return { builder: builder.in("outreach_dispo", ["opted_out", "dnc"]) };
     }
+  }
+
+  if (block.combinator === "any" && isEngagedContactedBlock(block)) {
+    return {
+      builder: builder.in("contacted_messages.direction", [
+        "inbound",
+        "outbound",
+      ]),
+    };
   }
 
   const wantedBuckets = new Set(block.values);
