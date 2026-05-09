@@ -78,6 +78,24 @@ export function prodSupabase(): SupabaseClient<Database> {
   });
 }
 
+export async function resolveActiveAiResponderOrgId(
+  supabase: SupabaseClient<Database>,
+): Promise<string> {
+  const { data, error } = await supabase
+    .from("ai_responder_configs")
+    .select("org_id")
+    .eq("active", true)
+    .limit(1)
+    .maybeSingle();
+  if (error) {
+    throw new Error(`Could not resolve active AI responder org: ${error.message}`);
+  }
+  if (!data?.org_id) {
+    throw new Error("No active AI responder config found in production.");
+  }
+  return data.org_id;
+}
+
 // ----------- prod URL --------------------------------------------------------
 
 /** Stable prod alias. Override with PROD_BASE_URL when a custom domain lands. */
