@@ -1,11 +1,11 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { createHash, createHmac } from "node:crypto";
 
+import {
+  DEFAULT_PROD_BASE_URL,
+  assertProdSupabaseUrl,
+} from "../../src/lib/prod-canary/env";
 import type { Database } from "../../src/lib/supabase/types";
-
-const DEFAULT_PROD_BASE_URL = "https://sandra-sooty.vercel.app";
-const PROD_PROJECT_REF = "copflsklaefwzipsrjqz";
-const TEST_PROJECT_REF = "ncsngxlcyxylaeskiteu";
 
 export const PROD_CANARY_AUTH_FILE = "e2e/.auth/prod-canary.json";
 
@@ -95,12 +95,7 @@ export function requireProdCanarySupabase(): SupabaseClient<Database> {
       "Set NEXT_PUBLIC_SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY for production canary persistence checks.",
     );
   }
-  if (url.includes(TEST_PROJECT_REF)) {
-    throw new Error("Refusing to run production canaries against the test project.");
-  }
-  if (!url.includes(PROD_PROJECT_REF)) {
-    throw new Error(`Supabase URL ${url} does not match the Sandra production ref.`);
-  }
+  assertProdSupabaseUrl(url);
   return createClient<Database>(url, key, {
     auth: { persistSession: false, autoRefreshToken: false },
   });
