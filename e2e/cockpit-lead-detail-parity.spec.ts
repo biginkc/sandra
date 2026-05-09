@@ -13,6 +13,14 @@ import {
  * either surface must appear on the other after a refresh.
  */
 
+let phoneCounter = 0;
+
+function uniquePhone(): string {
+  phoneCounter += 1;
+  const tail = String(Date.now() + phoneCounter).slice(-7).padStart(7, "0");
+  return `+1816${tail}`;
+}
+
 async function seedConsentedLead(
   admin: ReturnType<typeof adminClient>,
   opts: { phone: string; addressTag: string },
@@ -92,7 +100,7 @@ test("reply from cockpit shows up on the lead detail page (test 29)", async ({
   await ensureTestUser(admin);
 
   const { contactId, propertyId } = await seedConsentedLead(admin, {
-    phone: "+18165557401",
+    phone: uniquePhone(),
     addressTag: "PARITY-29",
   });
 
@@ -125,7 +133,7 @@ test("reply from lead detail shows up on the cockpit (test 30)", async ({
   await ensureTestUser(admin);
 
   const { contactId, propertyId } = await seedConsentedLead(admin, {
-    phone: "+18165557402",
+    phone: uniquePhone(),
     addressTag: "PARITY-30",
   });
 
@@ -158,7 +166,7 @@ test("Realtime cross-surface: both surfaces update from the other (test 31)", as
   await resetTenantTables(admin);
   await ensureTestUser(admin);
 
-  const phone = "+18165557403";
+  const phone = uniquePhone();
   const { contactId, propertyId } = await seedConsentedLead(admin, {
     phone,
     addressTag: "PARITY-31",
@@ -202,6 +210,16 @@ test("Realtime cross-surface: both surfaces update from the other (test 31)", as
       },
     });
     expect(res.status()).toBe(200);
+
+    await expect(async () => {
+      const { data } = await admin
+        .from("messages")
+        .select("id")
+        .eq("body", inboundBody)
+        .eq("contact_id", contactId)
+        .eq("property_id", propertyId);
+      expect(data).toHaveLength(1);
+    }).toPass({ timeout: 10_000 });
 
     await Promise.all([
       expect(page.getByTestId("messages-thread")).toContainText(inboundBody, {
