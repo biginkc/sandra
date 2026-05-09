@@ -337,7 +337,10 @@ export function InboxDetail({
           ) : null}
         </div>
       </header>
-      <div className="flex-1 overflow-y-auto px-6 py-5 bg-[#faf9f8]">
+      <div
+        className="flex-1 overflow-y-auto px-6 py-5 bg-[#faf9f8]"
+        data-testid="inbox-detail-scroll"
+      >
         {/* Key on contactId so switching threads remounts the component
             and resets its internal `messages` useState. Without this,
             the previous thread's bubbles linger because the Realtime
