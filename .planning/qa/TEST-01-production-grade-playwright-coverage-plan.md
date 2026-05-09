@@ -77,6 +77,10 @@ production-grade by this plan's definition.
   recipient, sends a real provider-backed message through the lead-detail UI,
   verifies the `sent` message row and thread rendering, and cleans up
   canary-owned contact, consent, property, and message rows.
+- Inbound SMS production canary coverage now posts a signed Dialpad-shaped
+  webhook to production, verifies the persisted `received` message row, confirms
+  lead-thread rendering, and cleans up canary-owned contact, property, and
+  message rows.
 
 ## Production validation rules
 

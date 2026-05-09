@@ -1,4 +1,5 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+import { createHmac } from "node:crypto";
 
 import type { Database } from "../../src/lib/supabase/types";
 
@@ -105,6 +106,62 @@ export function requireCanarySmsRecipient(): string {
   }
 
   return phone;
+}
+
+export function requireDialpadWebhookTarget(): string {
+  const fromNumber = process.env.DIALPAD_FROM_NUMBER ?? "+18162804181";
+  if (!/^\+\d{10,15}$/.test(fromNumber)) {
+    throw new Error(`DIALPAD_FROM_NUMBER must be E.164. Got ${fromNumber}`);
+  }
+  return fromNumber;
+}
+
+function base64url(input: Buffer): string {
+  return input
+    .toString("base64")
+    .replace(/=+$/g, "")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_");
+}
+
+export async function fireSignedDialpadInbound(
+  input: {
+    baseURL: string;
+    id: string;
+    fromNumber: string;
+    toNumber: string;
+    text: string;
+  },
+): Promise<number> {
+  const secret = process.env.DIALPAD_WEBHOOK_SECRET;
+  if (!secret) {
+    throw new Error(
+      "Set DIALPAD_WEBHOOK_SECRET before running signed inbound webhook production canaries.",
+    );
+  }
+
+  const event = {
+    id: input.id,
+    from_number: input.fromNumber,
+    to_number: input.toNumber,
+    text: input.text,
+    timestamp: new Date().toISOString(),
+  };
+  const header = base64url(
+    Buffer.from(JSON.stringify({ alg: "HS256", typ: "JWT" }), "utf8"),
+  );
+  const payload = base64url(Buffer.from(JSON.stringify(event), "utf8"));
+  const signature = base64url(
+    createHmac("sha256", secret).update(`${header}.${payload}`).digest(),
+  );
+
+  const response = await fetch(`${input.baseURL}/api/webhooks/dialpad/sms`, {
+    method: "POST",
+    headers: { "content-type": "application/jwt" },
+    body: `${header}.${payload}.${signature}`,
+  });
+
+  return response.status;
 }
 
 export async function deleteCanaryListsByName(
@@ -314,6 +371,7 @@ export async function insertCanaryProspect(
       Pick<
         PropertyInsert,
         | "arv"
+        | "ai_responder_disabled"
         | "cass_status"
         | "equity_estimate"
         | "homeowner_contact_id"
@@ -359,6 +417,7 @@ export async function insertCanaryProspects(
       Pick<
         PropertyInsert,
         | "arv"
+        | "ai_responder_disabled"
         | "cass_status"
         | "equity_estimate"
         | "homeowner_contact_id"
