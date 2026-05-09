@@ -36,6 +36,15 @@ production-grade by this plan's definition.
   by refusing the known test Supabase project ref.
 - Existing production canaries are script-level smoke checks, not Playwright
   user-flow checks across the whole application UI.
+- Production Playwright canary scaffolding exists via
+  `playwright.canary.config.ts`, `npm run test:e2e:prod-canary`, and
+  `e2e/prod-canary/`; the first covered path is real production auth plus
+  read-only shell navigation.
+- The first production-write Playwright canary covers canary-owned list
+  create/archive/delete cleanup through the real UI and production database.
+- The first canary-owned prospects Playwright path inserts a production
+  prospect, finds it through real UI search, verifies persisted state, and
+  deletes only that canary-owned property.
 
 ## Production validation rules
 
