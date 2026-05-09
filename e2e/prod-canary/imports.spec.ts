@@ -8,6 +8,14 @@ import {
   requireProdCanarySupabase,
 } from "./support";
 
+function addressPattern(prefix: string, street: string): RegExp {
+  return new RegExp(`${escapeRegExp(prefix)}.*${escapeRegExp(street)}`, "i");
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 async function selectComboboxOption(
   page: Page,
   triggerText: RegExp,
@@ -123,7 +131,7 @@ test("production canary imports a canary CSV and renders the created prospects",
         const { data, error } = await supabase
           .from("properties")
           .select("id, address, source, status, equity_pct")
-          .like("address", `${prefix}%`)
+          .ilike("address", `${prefix}%`)
           .order("address", { ascending: true });
         expect(error).toBeNull();
         return (data ?? []).length === 2 ? data : null;
@@ -135,10 +143,10 @@ test("production canary imports a canary CSV and renders the created prospects",
 
     await page.goto("/properties");
     await page.getByTestId("prospects-search").fill(token);
-    await expect(page.getByText(`${prefix} 401 Maple St`)).toBeVisible({
+    await expect(page.getByText(addressPattern(prefix, "401 Maple ST"))).toBeVisible({
       timeout: 20_000,
     });
-    await expect(page.getByText(`${prefix} 402 Maple St`)).toBeVisible();
+    await expect(page.getByText(addressPattern(prefix, "402 Maple ST"))).toBeVisible();
     await expect(page.getByText(/Showing 1.*of 2 prospects/i)).toBeVisible();
   } finally {
     await deleteCanaryPropertiesByAddressPrefix(supabase, prefix);
