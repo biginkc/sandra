@@ -25,3 +25,4 @@ Current coverage:
 
 - real production auth and shell navigation
 - real production list create/archive/delete cleanup for canary-owned rows
+- real production prospect insert/search/delete cleanup for canary-owned rows

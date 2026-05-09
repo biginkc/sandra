@@ -42,6 +42,9 @@ production-grade by this plan's definition.
   read-only shell navigation.
 - The first production-write Playwright canary covers canary-owned list
   create/archive/delete cleanup through the real UI and production database.
+- The first canary-owned prospects Playwright path inserts a production
+  prospect, finds it through real UI search, verifies persisted state, and
+  deletes only that canary-owned property.
 
 ## Production validation rules
 

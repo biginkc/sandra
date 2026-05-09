@@ -106,6 +106,83 @@ export async function deleteCanaryListsByName(
   }
 }
 
+export async function insertCanaryProspect(
+  client: SupabaseClient<Database>,
+  input: { address: string; runId: string },
+): Promise<{ id: string; address: string }> {
+  assertCanaryOwned(input.address, "property address");
+
+  const { data, error } = await client
+    .from("properties")
+    .insert({
+      address: input.address,
+      city: "Kansas City",
+      state: "MO",
+      zip: "64151",
+      market: "Kansas City",
+      status: "prospect",
+      cass_status: "verified",
+      is_vacant: false,
+      notes: `Created by production Playwright canary ${input.runId}`,
+    })
+    .select("id, address")
+    .single();
+  if (error || !data) {
+    throw error ?? new Error("Could not insert canary prospect.");
+  }
+  return { id: data.id, address: data.address };
+}
+
+export async function deleteCanaryPropertiesByAddress(
+  client: SupabaseClient<Database>,
+  address: string,
+): Promise<void> {
+  assertCanaryOwned(address, "property address");
+
+  const { data: properties, error: lookupError } = await client
+    .from("properties")
+    .select("id, address")
+    .eq("address", address);
+  if (lookupError) {
+    throw new Error(
+      `Could not look up canary properties: ${lookupError.message}`,
+    );
+  }
+
+  const ids = (properties ?? []).map((property) => property.id);
+  if (ids.length === 0) return;
+
+  const { error: listError } = await client
+    .from("property_lists")
+    .delete()
+    .in("property_id", ids);
+  if (listError) {
+    throw new Error(
+      `Could not delete canary property list memberships: ${listError.message}`,
+    );
+  }
+
+  const { error: messageError } = await client
+    .from("messages")
+    .delete()
+    .in("property_id", ids);
+  if (messageError) {
+    throw new Error(
+      `Could not delete canary property messages: ${messageError.message}`,
+    );
+  }
+
+  const { error: propertyError } = await client
+    .from("properties")
+    .delete()
+    .in("id", ids);
+  if (propertyError) {
+    throw new Error(
+      `Could not delete canary properties: ${propertyError.message}`,
+    );
+  }
+}
+
 export async function pollUntil<T>(
   fn: () => Promise<T | null>,
   opts: { intervalMs?: number; timeoutMs?: number; label?: string } = {},
