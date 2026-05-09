@@ -71,12 +71,25 @@ async function uploadCsvToStorage(
 > {
   try {
     const supabase = createBrowserSupabase();
+    const { data: memberships, error: membershipError } = await supabase
+      .from("memberships")
+      .select("org_id")
+      .limit(1);
+    if (membershipError || !memberships?.[0]?.org_id) {
+      return {
+        ok: false,
+        error:
+          "Upload failed: " +
+          (membershipError?.message ?? "No organization membership found"),
+      };
+    }
+    const orgId = memberships[0].org_id;
     // Random key — collision odds are vanishing and we never need to
     // look these up by content. Sortable timestamp prefix makes the
     // bucket browsable in the Supabase dashboard.
     const ts = new Date().toISOString().replace(/[:.]/g, "-");
     const rand = Math.random().toString(36).slice(2, 10);
-    const path = `import-${ts}-${rand}.csv`;
+    const path = `${orgId}/import-${ts}-${rand}.csv`;
     const { error } = await supabase.storage
       .from("csv-imports")
       .upload(path, file, {
