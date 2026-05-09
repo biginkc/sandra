@@ -5,7 +5,7 @@ This version has breaking changes — APIs, conventions, and file structure may 
 <!-- END:nextjs-agent-rules -->
 
 # Continue through the next unblocked step
-For Sandra work, do not stop after a leaf task if the next action is obvious and does not require user authorization. Keep a visible checklist, mark completed items, and continue to the next unblocked step. Only pause when the remaining work needs Jarrad's decision, credentials, destructive-action approval, spending approval, or another authorization that cannot be safely inferred.
+For Sandra work, do not stop after a leaf task if the next action is obvious and does not require user authorization. Keep a visible checklist, mark completed items, and continue to the next unblocked step. Only pause when the remaining work needs Jarrad's decision, credentials, spending approval, broad or irreversible non-canary data approval, or another authorization that cannot be safely inferred.
 
 When blocked, state the exact blocker and the next command/action that will run once unblocked. This is especially important for PR/debug/verification workflows: continue from diagnosis to fix, tests, deploy/checks, browser verification, and issue/PR updates without waiting between routine steps.
 
@@ -20,7 +20,14 @@ Jarrad's approval is required before merging into `main`, `master`, a release br
 
 Codex may create worktrees, create branches, commit changes, push branches, open PRs, update PR branches, rebase or merge `main` into its own worktree branch, and merge/cherry-pick agent-owned local branches into its own worktree branch when that is the sensible next engineering step. Use judgment to segment PRs by coherent reviewable units, but do not stop merely because branch, PR, or worktree integration mechanics are involved.
 
-Destructive commands still require explicit authorization. Preserve unrelated user or agent changes, and coordinate before touching another agent's worktree or branch.
+Destructive shell or git commands outside canary-owned cleanup still require explicit authorization. Preserve unrelated user or agent changes, and coordinate before touching another agent's worktree or branch.
+
+# Sandra pre-user production-canary autonomy
+Sandra is a new application and its production environment is not yet an established live business system. Do not treat "production", "production write", "real provider", "provider call", "production canary cleanup", or "destructive action" wording as a reason to stop by default.
+
+Codex should continue through production-canary implementation work, including harnesses, guards, disabled-by-default Playwright specs, config scaffolding, canary data factories, provider adapter inspection, controlled canary execution, production writes, real provider calls, canary cleanup/destructive actions, commits, pushes, and PRs. Use judgment and keep cleanup/tagging safeguards strong.
+
+Still stop for explicit approval before spending money or running an unusually expensive provider path, broad or irreversible changes to existing non-canary prospects/leads, applying migrations outside the established Sandra migration workflow, using credentials that were not already provided for the active task, merging into `main` or another shared/user-owned branch, or contacting real non-owned customers/leads. Existing prospects and leads must be protected. If blocked only on one of those actions, state the exact blocked action and continue any remaining implementation, verification, and PR work first.
 
 # Draft PRs are not automatic stopping points
 Do not treat a PR being draft, review-pending, or awaiting Jarrad's merge decision as a reason to stop if there are still objective engineering steps available. Continue with non-destructive work that does not change ownership state: inspect conflicts, merge/rebase current `main`, resolve compile or test failures, run focused and full verification, check Vercel/GitHub Actions, review changed files, update the PR body/comment with current status, and clean up agent-owned worktrees/branches.
