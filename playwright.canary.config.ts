@@ -1,8 +1,5 @@
-import fs from "node:fs";
-import path from "node:path";
-
 import { defineConfig, devices } from "@playwright/test";
-import { PROD_CANARY_ENV_FILES } from "./src/lib/prod-canary/env";
+import { loadProdCanaryEnvFiles } from "./src/lib/prod-canary/env";
 
 /**
  * Production-grade Playwright canaries.
@@ -21,29 +18,7 @@ import { PROD_CANARY_ENV_FILES } from "./src/lib/prod-canary/env";
  * Shell environment variables still take precedence over both files.
  */
 
-function loadEnvFile(filename: string): void {
-  const filepath = path.resolve(__dirname, filename);
-  if (!fs.existsSync(filepath)) return;
-  for (const line of fs.readFileSync(filepath, "utf8").split(/\r?\n/)) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith("#")) continue;
-    const eq = trimmed.indexOf("=");
-    if (eq < 0) continue;
-    const key = trimmed.slice(0, eq).trim();
-    let value = trimmed.slice(eq + 1).trim();
-    if (
-      (value.startsWith('"') && value.endsWith('"')) ||
-      (value.startsWith("'") && value.endsWith("'"))
-    ) {
-      value = value.slice(1, -1);
-    }
-    if (!process.env[key]) process.env[key] = value;
-  }
-}
-
-for (const filename of PROD_CANARY_ENV_FILES) {
-  loadEnvFile(filename);
-}
+loadProdCanaryEnvFiles(__dirname);
 
 export default defineConfig({
   testDir: "./e2e/prod-canary",
