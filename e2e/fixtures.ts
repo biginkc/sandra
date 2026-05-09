@@ -41,7 +41,13 @@ export async function resetTenantTables(
   const maxAttempts = 3;
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     const { error } = await client.rpc("reset_tenant_tables");
-    if (!error) return;
+    if (!error) {
+      await deleteAllRows(client, "messages");
+      await deleteAllRows(client, "notifications");
+      await deleteAllRows(client, "properties");
+      await deleteAllRows(client, "contacts");
+      return;
+    }
 
     const retryable =
       error.code === "40P01" || error.message.includes("deadlock detected");
@@ -50,6 +56,16 @@ export async function resetTenantTables(
     }
 
     await new Promise((resolve) => setTimeout(resolve, attempt * 250));
+  }
+}
+
+async function deleteAllRows(
+  client: SupabaseClient<Database>,
+  table: "messages" | "notifications" | "properties" | "contacts",
+): Promise<void> {
+  const { error } = await client.from(table).delete().not("id", "is", null);
+  if (error) {
+    throw new Error(`reset_tenant_tables() failed to clear ${table}: ${error.message}`);
   }
 }
 

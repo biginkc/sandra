@@ -2,12 +2,21 @@
 
 import { formatDistanceToNow } from "date-fns/formatDistanceToNow";
 import { useRouter } from "next/navigation";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
 import { EscalationBadge } from "@/components/escalation-badge";
 import type { Thread } from "@/lib/messages/list-threads";
 import { createClient } from "@/lib/supabase/client";
+import type { Database } from "@/lib/supabase/types";
+
+type Message = Database["public"]["Tables"]["messages"]["Row"];
+type ThreadUpdate = {
+  lastMessageBody: string;
+  lastMessageDirection: Thread["lastMessageDirection"];
+  lastMessageAt: string;
+  unreadDelta: number;
+};
 
 type Props = {
   initial: Thread[];
@@ -32,10 +41,9 @@ type Props = {
  * regenerates with new sort + unread counts. Keeps the client-side state
  * machine simple — the server is the source of truth.
  *
- * Threads are read straight off the prop (no local useState mirror) so
- * `router.refresh()` from the Realtime handler actually re-renders this
- * list with the new server payload. Mirroring into useState would freeze
- * the initial value and silently swallow refresh updates.
+ * Existing thread rows update optimistically from Realtime INSERT payloads;
+ * `router.refresh()` remains the reconciliation path for new rows, assignment
+ * metadata, unknown sender routing, and unread/read count edge cases.
  */
 export function InboxThreadList({
   initial,
@@ -44,7 +52,10 @@ export function InboxThreadList({
   onSelectThread,
 }: Props) {
   const router = useRouter();
-  const threads = initial;
+  const [threadUpdates, setThreadUpdates] = useState<Record<string, ThreadUpdate>>(
+    {},
+  );
+  const threads = applyThreadUpdates(initial, threadUpdates);
 
   useEffect(() => {
     const supabase = createClient();
@@ -62,9 +73,9 @@ export function InboxThreadList({
         .on(
           "postgres_changes",
           { event: "INSERT", schema: "public", table: "messages" },
-          () => {
-            // Cheap path: re-render via server. Avoids re-implementing
-            // the dedupe/sort/unread logic on the client.
+          (payload) => {
+            const row = payload.new as Message;
+            setThreadUpdates((curr) => mergeThreadUpdate(curr, row));
             router.refresh();
           },
         )
@@ -192,6 +203,54 @@ function ContactAvatar({
       {initials}
     </span>
   );
+}
+
+function mergeThreadUpdate(
+  updates: Record<string, ThreadUpdate>,
+  row: Message,
+): Record<string, ThreadUpdate> {
+  if (!row.contact_id || row.channel !== "sms" || row.status === "queued") {
+    return updates;
+  }
+
+  const previous = updates[row.contact_id];
+  return {
+    ...updates,
+    [row.contact_id]: {
+      lastMessageBody: row.body,
+      lastMessageDirection: row.direction as Thread["lastMessageDirection"],
+      lastMessageAt: row.created_at,
+      unreadDelta:
+        (previous?.unreadDelta ?? 0) +
+        (row.direction === "inbound" && row.read_at === null ? 1 : 0),
+    },
+  };
+}
+
+function applyThreadUpdates(
+  threads: Thread[],
+  updates: Record<string, ThreadUpdate>,
+): Thread[] {
+  if (Object.keys(updates).length === 0) return threads;
+
+  const next = threads.map((thread) => {
+    const update = updates[thread.contactId];
+    if (!update) return thread;
+    return {
+      ...thread,
+      lastMessageBody: update.lastMessageBody,
+      lastMessageDirection: update.lastMessageDirection,
+      lastMessageAt: update.lastMessageAt,
+      unreadCount: thread.unreadCount + update.unreadDelta,
+    };
+  });
+
+  return next.sort((a, b) => {
+    const aUnread = a.unreadCount > 0 ? 1 : 0;
+    const bUnread = b.unreadCount > 0 ? 1 : 0;
+    if (aUnread !== bUnread) return bUnread - aUnread;
+    return b.lastMessageAt.localeCompare(a.lastMessageAt);
+  });
 }
 
 function initialsOfContact(
