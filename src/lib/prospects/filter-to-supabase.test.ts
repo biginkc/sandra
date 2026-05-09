@@ -48,12 +48,14 @@ import {
 // ---------------------------------------------------------------------------
 
 type MockBuilder = {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Fluent proxy records arbitrary query-builder calls.
   proxy: any;
   calls: string[];
 };
 
 function mockBuilder(): MockBuilder {
   const calls: string[] = [];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Fluent proxy records arbitrary query-builder calls.
   const proxy: any = new Proxy(
     {},
     {
@@ -99,6 +101,7 @@ function mockSupabaseClient(fixtures: FixtureMap = new Map()) {
 
   const calls: string[] = [];
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Awaitable fluent proxy mirrors the Supabase query builder.
   function chain(table: string): any {
     const fixture = fixtures.get(table) ?? { data: [], error: null };
     const handler: ProxyHandler<object> = {
@@ -132,6 +135,7 @@ function mockSupabaseClient(fixtures: FixtureMap = new Map()) {
         calls.push(`from(${table})`);
         return chain(table);
       },
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Minimal Supabase stub only implements the methods this test calls.
     } as any,
     calls,
     setReturn(table: string, rows: unknown[]) {
@@ -941,9 +945,6 @@ describe("filterSelectFragment", () => {
     ).toBe(
       [
         "contact_messages:messages()",
-        "attempted_outbound:messages!inner(property_id)",
-        "attempted_inbound:messages(property_id)",
-        "replied_messages:messages!inner(property_id)",
       ].join(", "),
     );
   });
@@ -957,7 +958,7 @@ describe("filterSelectFragment", () => {
           values: ["replied", "attempted"],
         }) as FilterBlock,
       ]),
-    ).toBe("engaged_messages:messages!inner(property_id)");
+    ).toBeNull();
   });
 });
 
@@ -1057,9 +1058,13 @@ describe("applyBlock: list_count (pre-fetch via property_stack_counts)", () => {
 });
 
 describe("applyBlock: engagement (4-bucket pre-fetch)", () => {
-  it("'replied' bucket → filters through inbound message relationship", async () => {
+  it("'replied' bucket → pre-fetches ids for inbound-message properties", async () => {
     const { proxy, calls } = mockBuilder();
     const m = mockSupabaseClient();
+    m.setReturn("messages", [
+      { property_id: "p1", direction: "inbound" },
+      { property_id: "p2", direction: "outbound" },
+    ]);
     await applyBlock(
       proxy,
       block({
@@ -1069,8 +1074,8 @@ describe("applyBlock: engagement (4-bucket pre-fetch)", () => {
       }) as FilterBlock,
       m.sb,
     );
-    expect(m.calls.some((c) => c.startsWith("from(messages)"))).toBe(false);
-    expect(calls).toEqual(["eq(replied_messages.direction,inbound)"]);
+    expect(m.calls.some((c) => c.startsWith("from(messages)"))).toBe(true);
+    expect(calls).toEqual(['in(id,["p1"])']);
   });
   it("'never_contacted' → anti-joins messages without pre-fetching ids", async () => {
     const { proxy, calls } = mockBuilder();
@@ -1087,9 +1092,15 @@ describe("applyBlock: engagement (4-bucket pre-fetch)", () => {
     expect(m.calls.some((c) => c.startsWith("from(messages)"))).toBe(false);
     expect(calls).toEqual(["is(contact_messages,null)"]);
   });
-  it("'attempted' → requires outbound and anti-joins inbound without pre-fetching ids", async () => {
+  it("'attempted' → pre-fetches ids for outbound-only properties", async () => {
     const { proxy, calls } = mockBuilder();
     const m = mockSupabaseClient();
+    m.setReturn("messages", [
+      { property_id: "p1", direction: "outbound" },
+      { property_id: "p2", direction: "outbound" },
+      { property_id: "p2", direction: "inbound" },
+      { property_id: "p3", direction: "inbound" },
+    ]);
     await applyBlock(
       proxy,
       block({
@@ -1099,12 +1110,8 @@ describe("applyBlock: engagement (4-bucket pre-fetch)", () => {
       }) as FilterBlock,
       m.sb,
     );
-    expect(m.calls.some((c) => c.startsWith("from(messages)"))).toBe(false);
-    expect(calls).toEqual([
-      "eq(attempted_outbound.direction,outbound)",
-      "eq(attempted_inbound.direction,inbound)",
-      "is(attempted_inbound,null)",
-    ]);
+    expect(m.calls.some((c) => c.startsWith("from(messages)"))).toBe(true);
+    expect(calls).toEqual(['in(id,["p1"])']);
   });
   it("'opted_out' → checks outreach_dispo column for opted_out / dnc", async () => {
     const { proxy, calls } = mockBuilder();
@@ -1121,9 +1128,13 @@ describe("applyBlock: engagement (4-bucket pre-fetch)", () => {
     expect(m.calls.some((c) => c.startsWith("from(messages)"))).toBe(false);
     expect(calls).toEqual(['in(outreach_dispo,["opted_out","dnc"])']);
   });
-  it("'attempted' + 'replied' → filters through messages without pre-fetching ids", async () => {
+  it("'attempted' + 'replied' → pre-fetches and unions contacted ids", async () => {
     const { proxy, calls } = mockBuilder();
     const m = mockSupabaseClient();
+    m.setReturn("messages", [
+      { property_id: "p1", direction: "inbound" },
+      { property_id: "p2", direction: "outbound" },
+    ]);
     await applyBlock(
       proxy,
       block({
@@ -1133,10 +1144,8 @@ describe("applyBlock: engagement (4-bucket pre-fetch)", () => {
       }) as FilterBlock,
       m.sb,
     );
-    expect(m.calls.some((c) => c.startsWith("from(messages)"))).toBe(false);
-    expect(calls).toEqual([
-      'in(engaged_messages.direction,["inbound","outbound"])',
-    ]);
+    expect(m.calls.some((c) => c.startsWith("from(messages)"))).toBe(true);
+    expect(calls).toEqual(['in(id,["p1","p2"])']);
   });
 });
 
