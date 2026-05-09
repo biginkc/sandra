@@ -75,7 +75,7 @@ Plans:
 
 - [x] 04-01-PLAN.md — Wave 0 scaffolding: install @slack/web-api + googleapis, create test placeholders, document env vars
 - [x] 04-02-PLAN.md — Migration 060: user_oauth_tokens table + pgcrypto SECURITY DEFINER fns + OAuthSecret + token store
-- [ ] 04-03-PLAN.md — Migration 053: user_integration_prefs (timezone, per-channel toggle) + tasks integration columns + prefs helper
+- [x] 04-03-PLAN.md — Migration 061: user_integration_prefs (timezone, per-channel toggle) + tasks integration columns + prefs helper
 - [ ] 04-04-PLAN.md — [BLOCKING] Schema-push checkpoint: confirm CI applied 052+053 to prod+test, regenerate types.ts
 - [ ] 04-05-PLAN.md — Slack OAuth: signature/state utils + start route + callback route + middleware allowlist
 - [ ] 04-06-PLAN.md — Google OAuth: code exchange + start route + callback route (calendar.events scope, prompt=consent)
