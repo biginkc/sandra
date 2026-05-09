@@ -60,6 +60,20 @@ test("production canary verifies AI responder escalation without outbound send",
     });
     expect(consentError).toBeNull();
 
+    const { error: anchorError } = await supabase.from("messages").insert({
+      channel: "sms",
+      direction: "outbound",
+      status: "sent",
+      provider: "prod-canary",
+      body: `${env.label} AI escalation outbound anchor`,
+      contact_id: contact!.id,
+      property_id: lead.id,
+      from_address: crmNumber,
+      to_address: phone,
+      metadata: { canary_anchor: env.runId },
+    });
+    expect(anchorError).toBeNull();
+
     const status = await fireSignedDialpadInbound({
       baseURL: env.baseURL,
       id: `${env.runId}-ai-escalation`,
@@ -86,10 +100,11 @@ test("production canary verifies AI responder escalation without outbound send",
 
     const { data: outboundMessages, error: outboundError } = await supabase
       .from("messages")
-      .select("id, body")
+      .select("id, body, metadata")
       .eq("property_id", lead.id)
       .eq("contact_id", contact!.id)
-      .eq("direction", "outbound");
+      .eq("direction", "outbound")
+      .contains("metadata", { generated_by: "ai_responder_v1" });
     expect(outboundError).toBeNull();
     expect(outboundMessages ?? []).toHaveLength(0);
 

@@ -76,6 +76,20 @@ test("production canary verifies AI responder happy path in the lead thread", as
     });
     expect(consentError).toBeNull();
 
+    const { error: anchorError } = await supabase.from("messages").insert({
+      channel: "sms",
+      direction: "outbound",
+      status: "sent",
+      provider: "prod-canary",
+      body: `${env.label} AI responder outbound anchor`,
+      contact_id: contact!.id,
+      property_id: lead.id,
+      from_address: crmNumber,
+      to_address: phone,
+      metadata: { canary_anchor: env.runId },
+    });
+    expect(anchorError).toBeNull();
+
     const status = await fireSignedDialpadInbound({
       baseURL: env.baseURL,
       id: `${env.runId}-ai-happy`,
