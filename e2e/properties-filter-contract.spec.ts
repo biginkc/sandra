@@ -29,9 +29,11 @@ async function openFilteredProperties(
   });
 
   if (expectedCount === 0) {
-    await expect(page.getByText(/No prospects/i)).toBeVisible({
-      timeout: 10_000,
-    });
+    await expect(
+      page.getByRole("cell", {
+        name: /No prospects\. Import a CSV to fill the data lake\./i,
+      }),
+    ).toBeVisible({ timeout: 10_000 });
     return;
   }
 

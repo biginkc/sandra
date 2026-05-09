@@ -25,6 +25,8 @@ Object.defineProperty(window, "localStorage", {
   get: () => ls,
 });
 
+Element.prototype.scrollIntoView ??= vi.fn();
+
 afterEach(() => {
   cleanup();
   store.clear();
