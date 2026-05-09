@@ -42,10 +42,7 @@ export async function resetTenantTables(
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     const { error } = await client.rpc("reset_tenant_tables");
     if (!error) {
-      await deleteAllRows(client, "messages");
-      await deleteAllRows(client, "notifications");
-      await deleteAllRows(client, "properties");
-      await deleteAllRows(client, "contacts");
+      await deleteTenantCoreRows(client);
       return;
     }
 
@@ -67,6 +64,29 @@ async function deleteAllRows(
   if (error) {
     throw new Error(`reset_tenant_tables() failed to clear ${table}: ${error.message}`);
   }
+}
+
+async function deleteTenantCoreRows(
+  client: SupabaseClient<Database>,
+): Promise<void> {
+  await deleteAllRows(client, "messages");
+  await deleteAllRows(client, "notifications");
+
+  const { error: unlinkContactsError } = await client
+    .from("properties")
+    .update({
+      homeowner_contact_id: null,
+      agent_contact_id: null,
+    })
+    .not("id", "is", null);
+  if (unlinkContactsError) {
+    throw new Error(
+      `reset_tenant_tables() failed to unlink property contacts: ${unlinkContactsError.message}`,
+    );
+  }
+
+  await deleteAllRows(client, "contacts");
+  await deleteAllRows(client, "properties");
 }
 
 /**

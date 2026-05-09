@@ -1,5 +1,10 @@
 import { test, expect } from "@playwright/test";
-import { adminClient, seedList, seedProspects } from "./fixtures";
+import {
+  adminClient,
+  resetTenantTables,
+  seedList,
+  seedProspects,
+} from "./fixtures";
 
 function encodedFilters(blocks: Array<Record<string, unknown>>) {
   return encodeURIComponent(JSON.stringify({ v: 1, blocks }));
@@ -44,9 +49,12 @@ async function expectProspectTotal(
     return;
   }
 
+  const pageEnd = Math.min(50, expected).toLocaleString();
   await expect(
     page.getByText(
-      new RegExp(`Showing 1.50 of ${expected.toLocaleString()} prospects?`),
+      new RegExp(
+        `Showing 1[–-]${pageEnd} of ${expected.toLocaleString()} prospects?`,
+      ),
     ),
   ).toBeVisible();
 }
@@ -93,6 +101,7 @@ test.describe("Phase 05 Plan 09 — full feature flow", () => {
   test("large List filter renders without a Bad Request", async ({ page }) => {
     test.setTimeout(60_000);
     const admin = adminClient();
+    await resetTenantTables(admin);
     const prefix = `E2E Large List ${Date.now()}`;
     const listId = await seedList(admin, prefix);
     const seeded = await seedProspects(admin, 275, prefix);

@@ -173,6 +173,7 @@ export function Kanban({
       const raw = window.localStorage.getItem(COLLAPSED_STORAGE_KEY);
       if (raw) {
         const parsed = JSON.parse(raw) as PropertyStatus[];
+        // eslint-disable-next-line react-hooks/set-state-in-effect -- Client-only localStorage hydration must happen after SSR.
         setCollapsed(new Set(parsed.filter((s) => STATUS_ORDER.includes(s))));
       }
     } catch {
@@ -449,6 +450,7 @@ export function Kanban({
       </div>
 
       <DndContext
+        id="leads-kanban"
         sensors={sensors}
         onDragStart={handleDragStart}
         onDragEnd={handleDragEnd}

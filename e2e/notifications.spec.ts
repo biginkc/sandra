@@ -23,7 +23,7 @@ async function seedAssignedInboundThread(
   admin: ReturnType<typeof adminClient>,
   opts: { phone: string; assigneeId: string; addressTag: string },
 ): Promise<{ propertyId: string; contactId: string }> {
-  const { data: contact } = await admin
+  const { data: contact, error: contactErr } = await admin
     .from("contacts")
     .insert({
       first_name: "Notif",
@@ -32,12 +32,14 @@ async function seedAssignedInboundThread(
     })
     .select("id")
     .single();
-  if (!contact) throw new Error("contact seed failed");
+  if (contactErr || !contact) {
+    throw new Error(`contact seed failed: ${contactErr?.message ?? "no row"}`);
+  }
 
   const [prop] = await seedProspects(admin, 1, opts.addressTag);
   // Promote out of prospect so the auto-qualify doesn't race with our
   // Realtime assertion. We're testing notifications, not qualify.
-  await admin
+  const { error: propertyErr } = await admin
     .from("properties")
     .update({
       homeowner_contact_id: contact.id,
@@ -45,9 +47,12 @@ async function seedAssignedInboundThread(
       status: "new_lead",
     })
     .eq("id", prop.id);
+  if (propertyErr) {
+    throw new Error(`property seed failed: ${propertyErr.message}`);
+  }
 
   // Prior outbound so the webhook can thread the inbound to a property.
-  await admin.from("messages").insert({
+  const { error: messageErr } = await admin.from("messages").insert({
     channel: "sms",
     direction: "outbound",
     status: "sent",
@@ -57,8 +62,17 @@ async function seedAssignedInboundThread(
     contact_id: contact.id,
     property_id: prop.id,
   });
+  if (messageErr) {
+    throw new Error(`message seed failed: ${messageErr.message}`);
+  }
 
   return { propertyId: prop.id, contactId: contact.id };
+}
+
+function uniqueKansasCityPhone(suffix: number): string {
+  return `+181655${Date.now().toString().slice(-3)}${suffix
+    .toString()
+    .padStart(2, "0")}`;
 }
 
 test("bell badge appears via Realtime when an inbound SMS notification fires (test 29)", async ({
@@ -70,7 +84,7 @@ test("bell badge appears via Realtime when an inbound SMS notification fires (te
   await resetTenantTables(admin);
   const claudeId = await ensureTestUser(admin);
 
-  const phone = "+18165552930";
+  const phone = uniqueKansasCityPhone(29);
   const { propertyId } = await seedAssignedInboundThread(admin, {
     phone,
     assigneeId: claudeId,
@@ -135,7 +149,7 @@ test("click bell → open dropdown → click notification → routes + marks rea
   await resetTenantTables(admin);
   const claudeId = await ensureTestUser(admin);
 
-  const phone = "+18165552931";
+  const phone = uniqueKansasCityPhone(30);
   const { propertyId } = await seedAssignedInboundThread(admin, {
     phone,
     assigneeId: claudeId,
