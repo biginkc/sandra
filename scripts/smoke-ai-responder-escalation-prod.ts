@@ -21,6 +21,7 @@ import {
   fireInboundWebhook,
   pollUntil,
   prodSupabase,
+  resolveActiveAiResponderOrgId,
 } from "./canary-helpers";
 
 const TS = Date.now();
@@ -38,10 +39,13 @@ async function main(): Promise<void> {
   let propertyId: string | null = null;
 
   try {
+    const orgId = await resolveActiveAiResponderOrgId(supabase);
+
     // ---- Seed --------------------------------------------------------------
     const { data: contact, error: contactErr } = await supabase
       .from("contacts")
       .insert({
+        org_id: orgId,
         first_name: "Canary",
         last_name: TAG,
         phone_1: PHONE,
@@ -54,6 +58,7 @@ async function main(): Promise<void> {
     const { data: property, error: propErr } = await supabase
       .from("properties")
       .insert({
+        org_id: orgId,
         address: `${TAG} Way`,
         state: "MO",
         homeowner_contact_id: contactId,
