@@ -6,6 +6,7 @@ import {
   resetTenantTables,
   seedProspects,
 } from "./fixtures";
+import { checkQuietHours, STATE_TO_TZ } from "../src/lib/messaging/quiet-hours";
 
 /**
  * Feature 8 Phase 1 — the cockpit and the lead detail page share the
@@ -23,7 +24,7 @@ function uniquePhone(): string {
 
 async function seedConsentedLead(
   admin: ReturnType<typeof adminClient>,
-  opts: { phone: string; addressTag: string },
+  opts: { phone: string; addressTag: string; state: string },
 ): Promise<{ contactId: string; propertyId: string }> {
   const { data: contact } = await admin
     .from("contacts")
@@ -42,6 +43,7 @@ async function seedConsentedLead(
     .update({
       homeowner_contact_id: contact.id,
       status: "new_lead",
+      state: opts.state,
     })
     .eq("id", prop.id);
 
@@ -79,29 +81,29 @@ async function seedConsentedLead(
   return { contactId: contact.id, propertyId: prop.id };
 }
 
-function inBusinessHours(): boolean {
-  const hour = parseInt(
-    new Intl.DateTimeFormat("en-US", {
-      timeZone: "America/Chicago",
-      hour: "2-digit",
-      hour12: false,
-    }).format(new Date()),
-    10,
-  );
-  return hour >= 8 && hour < 21;
+function callableStateForNow(): string | null {
+  for (const state of Object.keys(STATE_TO_TZ).sort()) {
+    if (checkQuietHours(state).ok) return state;
+  }
+  return null;
 }
 
 test("reply from cockpit shows up on the lead detail page (test 29)", async ({
   page,
 }) => {
-  if (!inBusinessHours()) test.skip(true, "outside business hours");
   const admin = adminClient();
   await resetTenantTables(admin);
   await ensureTestUser(admin);
+  const callableState = callableStateForNow();
+  if (callableState === null) {
+    test.skip(true, "outside legal send windows in every configured US state");
+    return;
+  }
 
   const { contactId, propertyId } = await seedConsentedLead(admin, {
     phone: uniquePhone(),
     addressTag: "PARITY-29",
+    state: callableState,
   });
 
   await page.goto(`/messages?thread=${contactId}`);
@@ -127,14 +129,19 @@ test("reply from cockpit shows up on the lead detail page (test 29)", async ({
 test("reply from lead detail shows up on the cockpit (test 30)", async ({
   page,
 }) => {
-  if (!inBusinessHours()) test.skip(true, "outside business hours");
   const admin = adminClient();
   await resetTenantTables(admin);
   await ensureTestUser(admin);
+  const callableState = callableStateForNow();
+  if (callableState === null) {
+    test.skip(true, "outside legal send windows in every configured US state");
+    return;
+  }
 
   const { contactId, propertyId } = await seedConsentedLead(admin, {
     phone: uniquePhone(),
     addressTag: "PARITY-30",
+    state: callableState,
   });
 
   await page.goto(`/leads/${propertyId}`);
@@ -170,6 +177,7 @@ test("Realtime cross-surface: both surfaces update from the other (test 31)", as
   const { contactId, propertyId } = await seedConsentedLead(admin, {
     phone,
     addressTag: "PARITY-31",
+    state: callableStateForNow() ?? "MO",
   });
 
   const leadContext = await browser.newContext({

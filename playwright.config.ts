@@ -55,6 +55,8 @@ const supabaseServiceRoleKey =
 process.env.TEST_SUPABASE_URL = supabaseUrl;
 process.env.TEST_SUPABASE_ANON_KEY = supabaseAnonKey;
 process.env.TEST_SUPABASE_SERVICE_ROLE_KEY = supabaseServiceRoleKey;
+process.env.E2E_QUIET_HOURS_NOW =
+  process.env.E2E_QUIET_HOURS_NOW ?? "2026-05-09T16:00:00.000Z";
 
 const webServerEnv: Record<string, string> = {
   // The Next app reads these for its Supabase clients. Point them at the
@@ -75,6 +77,9 @@ const webServerEnv: Record<string, string> = {
   // Pin admin email so /properties knows claude@test.com is admin for the
   // duration of the suite (enables Delete in the Actions menu tests).
   ADMIN_EMAILS: "claude@test.com,jarrad@bmhgroupkc.com",
+  // Pin quiet-hours checks to 11:00 AM America/Chicago so send-flow E2E
+  // coverage is deterministic when the suite runs overnight.
+  E2E_QUIET_HOURS_NOW: process.env.E2E_QUIET_HOURS_NOW,
   NODE_ENV: "development",
 };
 

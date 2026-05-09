@@ -30,7 +30,7 @@ export type ItemClassification = "callable" | "missing" | { blocked: string };
  */
 export function classifyItem(
   input: ClassifyInput,
-  now: Date = new Date(),
+  now?: Date,
 ): ItemClassification[] {
   if (!input.contact) return [{ blocked: "no_contact" }];
 
@@ -52,7 +52,7 @@ export function classifyItem(
 
 export function previewBatchEligibility(
   items: ClassifyInput[],
-  now: Date = new Date(),
+  now?: Date,
 ): BatchEligibilityCounts {
   const counts: BatchEligibilityCounts = {
     callable: 0,

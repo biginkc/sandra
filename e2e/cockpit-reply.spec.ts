@@ -6,6 +6,7 @@ import {
   resetTenantTables,
   seedProspects,
 } from "./fixtures";
+import { checkQuietHours, STATE_TO_TZ } from "../src/lib/messaging/quiet-hours";
 
 /**
  * Feature 8 Phase 1 — send-now reply flow from the cockpit side panel.
@@ -16,7 +17,12 @@ import {
 
 async function seedConsentedThread(
   admin: ReturnType<typeof adminClient>,
-  opts: { phone: string; addressTag: string; opted?: "in" | "out" | "none" },
+  opts: {
+    phone: string;
+    addressTag: string;
+    opted?: "in" | "out" | "none";
+    state?: string;
+  },
 ): Promise<{ contactId: string; propertyId: string }> {
   const opted = opts.opted ?? "in";
   const { data: contact } = await admin
@@ -36,8 +42,7 @@ async function seedConsentedThread(
     .update({
       homeowner_contact_id: contact.id,
       status: "new_lead",
-      // Default seedProspects uses MO. Tests that need quiet-hours
-      // blocking override via opt overrideState.
+      state: opts.state,
     })
     .eq("id", prop.id);
 
@@ -72,32 +77,30 @@ async function seedConsentedThread(
   return { contactId: contact.id, propertyId: prop.id };
 }
 
-function inBusinessHours(): boolean {
-  const hour = parseInt(
-    new Intl.DateTimeFormat("en-US", {
-      timeZone: "America/Chicago",
-      hour: "2-digit",
-      hour12: false,
-    }).format(new Date()),
-    10,
-  );
-  return hour >= 8 && hour < 21;
+function callableStateForNow(): string | null {
+  for (const state of Object.keys(STATE_TO_TZ).sort()) {
+    if (checkQuietHours(state).ok) return state;
+  }
+  return null;
 }
 
 test("type body, hit Send → bubble appears + DB row is status='sent' (tests 20 + 21)", async ({
   page,
 }) => {
-  if (!inBusinessHours()) {
-    test.skip(true, "outside business hours — quiet-hours would block");
-  }
   const admin = adminClient();
   await resetTenantTables(admin);
   await ensureTestUser(admin);
+  const callableState = callableStateForNow();
+  if (callableState === null) {
+    test.skip(true, "outside legal send windows in every configured US state");
+    return;
+  }
 
   const { contactId, propertyId } = await seedConsentedThread(admin, {
     phone: "+18165557201",
     addressTag: "REPLY-OK",
     opted: "in",
+    state: callableState,
   });
 
   await page.goto(`/messages?thread=${contactId}`);
@@ -149,17 +152,20 @@ test("Send button is disabled when the body is empty (test 22)", async ({
 test("reply to opted-out contact surfaces consent block (test 23)", async ({
   page,
 }) => {
-  if (!inBusinessHours()) {
-    test.skip(true, "outside business hours — would also trip quiet-hours");
-  }
   const admin = adminClient();
   await resetTenantTables(admin);
   await ensureTestUser(admin);
+  const callableState = callableStateForNow();
+  if (callableState === null) {
+    test.skip(true, "outside legal send windows in every configured US state");
+    return;
+  }
 
   const { contactId, propertyId } = await seedConsentedThread(admin, {
     phone: "+18165557203",
     addressTag: "REPLY-NOCONSENT",
     opted: "out",
+    state: callableState,
   });
 
   await page.goto(`/messages?thread=${contactId}`);
@@ -221,12 +227,14 @@ test("reply during quiet hours surfaces quiet-hours block (test 24)", async ({
 test("after a successful send, the thread jumps to the top of the inbox (test 25)", async ({
   page,
 }) => {
-  if (!inBusinessHours()) {
-    test.skip(true, "outside business hours");
-  }
   const admin = adminClient();
   await resetTenantTables(admin);
   await ensureTestUser(admin);
+  const callableState = callableStateForNow();
+  if (callableState === null) {
+    test.skip(true, "outside legal send windows in every configured US state");
+    return;
+  }
 
   // Two threads: A is older, B is the one we'll reply to. After the
   // reply, B should jump to the top.
@@ -234,6 +242,7 @@ test("after a successful send, the thread jumps to the top of the inbox (test 25
     phone: "+18165557205",
     addressTag: "REPLY-A",
     opted: "in",
+    state: callableState,
   });
   await admin
     .from("messages")
@@ -244,6 +253,7 @@ test("after a successful send, the thread jumps to the top of the inbox (test 25
     phone: "+18165557206",
     addressTag: "REPLY-B",
     opted: "in",
+    state: callableState,
   });
   await admin
     .from("messages")
