@@ -35,3 +35,6 @@ Current coverage:
 - real production CSV import coverage that uploads a canary file through the UI,
   waits for the import job to finish, verifies persisted prospects, and cleans
   up the storage/import/job/property artifacts
+- real production lead qualification coverage that promotes a canary-owned
+  prospect through the UI, verifies the `new_lead` persisted state, confirms it
+  renders on `/leads`, and cleans up the canary property
