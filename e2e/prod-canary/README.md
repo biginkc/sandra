@@ -42,3 +42,6 @@ Current coverage:
   drags it from New Lead to Contacted, verifies the persisted status change,
   confirms the lead still renders after reload, and cleans up the canary
   property
+- real production lead management coverage that edits a canary-owned lead
+  detail page status, motivation, and assignee, verifies the persisted DB row,
+  confirms the controls survive reload, and cleans up the canary property
