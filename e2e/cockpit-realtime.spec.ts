@@ -130,8 +130,78 @@ test("inbound to a currently-open thread appears in the panel (test 27)", async 
   );
 });
 
-test.skip("two browsers, A opens thread B sends inbound, both see the bubble (test 28)", async () => {
-  // TODO: requires `browser.newContext()` with two storageStates and
-  // careful Realtime handshake ordering. Mirror notifications.spec.ts
-  // pattern when the cross-browser harness is settled.
+test("two browsers, A opens thread B sends inbound, both see the bubble (test 28)", async ({
+  page,
+  browser,
+  request,
+  baseURL,
+}) => {
+  const admin = adminClient();
+  await resetTenantTables(admin);
+  await ensureTestUser(admin);
+
+  const phone = "+18165557303";
+  const { contactId } = await seedThreaded(admin, {
+    phone,
+    addressTag: "RT-28",
+  });
+
+  const secondContext = await browser.newContext({
+    storageState: "e2e/.auth/user.json",
+  });
+  const secondPage = await secondContext.newPage();
+
+  try {
+    await Promise.all([
+      page.goto(`/messages?thread=${contactId}`),
+      secondPage.goto(`/messages?thread=${contactId}`),
+    ]);
+    await Promise.all([
+      expect(page.getByTestId("inbox-detail-panel")).toBeVisible(),
+      expect(secondPage.getByTestId("inbox-detail-panel")).toBeVisible(),
+    ]);
+    await Promise.all([
+      expect(page.getByTestId("messages-thread")).toContainText(
+        "previous outbound",
+      ),
+      expect(secondPage.getByTestId("messages-thread")).toContainText(
+        "previous outbound",
+      ),
+    ]);
+    await Promise.all([
+      page.waitForLoadState("networkidle"),
+      secondPage.waitForLoadState("networkidle"),
+    ]);
+    await Promise.all([
+      page.waitForTimeout(1000),
+      secondPage.waitForTimeout(1000),
+    ]);
+
+    const inboundBody = `two browser realtime inbound ${Date.now()}`;
+    const res = await request.post(`${baseURL}/api/webhooks/dialpad/sms`, {
+      headers: {
+        "x-mock-signature": "valid",
+        "content-type": "application/json",
+      },
+      data: {
+        externalId: `e2e_rt28_${Date.now()}`,
+        from: phone,
+        to: "+18162804181",
+        body: inboundBody,
+      },
+    });
+    expect(res.status()).toBe(200);
+
+    await Promise.all([
+      expect(page.getByTestId("messages-thread")).toContainText(inboundBody, {
+        timeout: 20_000,
+      }),
+      expect(secondPage.getByTestId("messages-thread")).toContainText(
+        inboundBody,
+        { timeout: 20_000 },
+      ),
+    ]);
+  } finally {
+    await secondContext.close();
+  }
 });

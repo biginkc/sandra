@@ -19,6 +19,8 @@ const EMPTY_QUEUE_STATS: QueueStats = {
   lastScheduledFor: null,
 };
 
+export const dynamic = "force-dynamic";
+
 export const metadata = {
   title: "Messages · Sandra CRM",
 };
