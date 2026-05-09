@@ -16,6 +16,8 @@ export type ProdCanaryEnv = {
   label: string;
 };
 
+type PropertyInsert = Database["public"]["Tables"]["properties"]["Insert"];
+
 export function requireProdCanaryEnv(): ProdCanaryEnv {
   const baseURL = process.env.PROD_BASE_URL ?? DEFAULT_PROD_BASE_URL;
   const email = process.env.PROD_EMAIL;
@@ -106,9 +108,45 @@ export async function deleteCanaryListsByName(
   }
 }
 
+export async function insertCanaryList(
+  client: SupabaseClient<Database>,
+  input: { name: string },
+): Promise<{ id: string; name: string }> {
+  assertCanaryOwned(input.name, "list name");
+
+  const { data, error } = await client
+    .from("lists")
+    .insert({
+      name: input.name,
+      description: "Created by production Playwright canary.",
+      color: "#111827",
+    })
+    .select("id, name")
+    .single();
+  if (error || !data) {
+    throw error ?? new Error("Could not insert canary list.");
+  }
+  return { id: data.id, name: data.name };
+}
+
 export async function insertCanaryProspect(
   client: SupabaseClient<Database>,
-  input: { address: string; runId: string },
+  input: {
+    address: string;
+    runId: string;
+    fields?: Partial<
+      Pick<
+        PropertyInsert,
+        | "arv"
+        | "cass_status"
+        | "equity_estimate"
+        | "is_vacant"
+        | "market"
+        | "source"
+        | "status"
+      >
+    >;
+  },
 ): Promise<{ id: string; address: string }> {
   assertCanaryOwned(input.address, "property address");
 
@@ -124,6 +162,7 @@ export async function insertCanaryProspect(
       cass_status: "verified",
       is_vacant: false,
       notes: `Created by production Playwright canary ${input.runId}`,
+      ...input.fields,
     })
     .select("id, address")
     .single();
@@ -131,6 +170,23 @@ export async function insertCanaryProspect(
     throw error ?? new Error("Could not insert canary prospect.");
   }
   return { id: data.id, address: data.address };
+}
+
+export async function insertCanaryListMemberships(
+  client: SupabaseClient<Database>,
+  input: { listId: string; propertyIds: string[] },
+): Promise<void> {
+  if (input.propertyIds.length === 0) return;
+
+  const { error } = await client.from("property_lists").insert(
+    input.propertyIds.map((propertyId) => ({
+      list_id: input.listId,
+      property_id: propertyId,
+    })),
+  );
+  if (error) {
+    throw new Error(`Could not insert canary list memberships: ${error.message}`);
+  }
 }
 
 export async function deleteCanaryPropertiesByAddress(
@@ -180,6 +236,27 @@ export async function deleteCanaryPropertiesByAddress(
     throw new Error(
       `Could not delete canary properties: ${propertyError.message}`,
     );
+  }
+}
+
+export async function deleteCanaryPropertiesByAddressPrefix(
+  client: SupabaseClient<Database>,
+  prefix: string,
+): Promise<void> {
+  assertCanaryOwned(prefix, "property address prefix");
+
+  const { data: properties, error: lookupError } = await client
+    .from("properties")
+    .select("address")
+    .like("address", `${prefix}%`);
+  if (lookupError) {
+    throw new Error(
+      `Could not look up canary properties by prefix: ${lookupError.message}`,
+    );
+  }
+
+  for (const property of properties ?? []) {
+    await deleteCanaryPropertiesByAddress(client, property.address);
   }
 }
 
