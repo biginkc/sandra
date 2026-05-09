@@ -88,6 +88,10 @@ production-grade by this plan's definition.
   webhook during Chicago business hours, waits for the AI-generated outbound
   send, verifies no escalation, confirms both messages render in the lead
   thread, and cleans up canary-owned rows.
+- AI escalation production canary coverage now posts a signed keyword
+  escalation inbound, verifies human-attention state, asserts no outbound
+  message is sent, confirms the UI escalation banner, and cleans up
+  canary-owned rows.
 
 ## Production validation rules
 

@@ -62,3 +62,6 @@ Current coverage:
 - real production AI responder happy-path coverage that signs and posts an
   inbound SMS, waits for the AI-generated outbound provider send, verifies no
   escalation, confirms both messages render in the lead thread, and cleans up
+- real production AI escalation coverage that signs and posts a keyword
+  escalation inbound, verifies human-attention state, asserts no outbound
+  message is sent, confirms the UI escalation banner, and cleans up
