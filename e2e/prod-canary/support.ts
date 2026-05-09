@@ -197,6 +197,51 @@ export async function deleteCanaryListsByName(
   }
 }
 
+export async function deleteCanaryOrganizationsByName(
+  client: SupabaseClient<Database>,
+  name: string,
+): Promise<void> {
+  assertCanaryOwned(name, "organization name");
+
+  const { data: organizations, error: lookupError } = await client
+    .from("organizations")
+    .select("id, name")
+    .eq("name", name);
+  if (lookupError) {
+    throw new Error(
+      `Could not look up canary organizations: ${lookupError.message}`,
+    );
+  }
+
+  const ids = (organizations ?? []).map((organization) => organization.id);
+  if (ids.length === 0) return;
+
+  const { error: deleteError } = await client
+    .from("organizations")
+    .delete()
+    .in("id", ids);
+  if (deleteError) {
+    throw new Error(`Could not delete canary organizations: ${deleteError.message}`);
+  }
+}
+
+export async function insertCanaryOrganization(
+  client: SupabaseClient<Database>,
+  input: { name: string },
+): Promise<{ id: string; name: string }> {
+  assertCanaryOwned(input.name, "organization name");
+
+  const { data, error } = await client
+    .from("organizations")
+    .insert({ name: input.name })
+    .select("id, name")
+    .single();
+  if (error || !data) {
+    throw error ?? new Error("Could not insert canary organization.");
+  }
+  return { id: data.id, name: data.name };
+}
+
 export async function deleteCanaryImportArtifactsByFilename(
   client: SupabaseClient<Database>,
   filename: string,
@@ -410,6 +455,7 @@ export async function insertCanaryProspect(
         | "homeowner_contact_id"
         | "is_vacant"
         | "market"
+        | "org_id"
         | "source"
         | "state"
         | "status"
@@ -457,6 +503,7 @@ export async function insertCanaryProspects(
         | "homeowner_contact_id"
         | "is_vacant"
         | "market"
+        | "org_id"
         | "source"
         | "state"
         | "status"

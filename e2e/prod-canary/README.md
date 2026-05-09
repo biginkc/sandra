@@ -25,6 +25,10 @@ target data created by the active canary run.
 Current coverage:
 
 - real production auth and shell navigation
+- real production membership/RLS coverage that seeds canary-owned rows in the
+  authenticated user's org and an unrelated canary org, verifies only the
+  visible org row renders through `/properties`, and cleans up both property
+  and organization artifacts
 - real production list create/archive/delete cleanup for canary-owned rows
 - real production prospect insert/search/delete cleanup for canary-owned rows
 - real production drawer filter controls against canary-owned prospect rows and
