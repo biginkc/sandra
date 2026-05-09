@@ -18,6 +18,14 @@ export type ProdCanaryEnv = {
 
 type PropertyInsert = Database["public"]["Tables"]["properties"]["Insert"];
 
+function chunks<T>(items: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let index = 0; index < items.length; index += size) {
+    out.push(items.slice(index, index + size));
+  }
+  return out;
+}
+
 export function requireProdCanaryEnv(): ProdCanaryEnv {
   const baseURL = process.env.PROD_BASE_URL ?? DEFAULT_PROD_BASE_URL;
   const email = process.env.PROD_EMAIL;
@@ -172,20 +180,76 @@ export async function insertCanaryProspect(
   return { id: data.id, address: data.address };
 }
 
+export async function insertCanaryProspects(
+  client: SupabaseClient<Database>,
+  input: Array<{
+    address: string;
+    runId: string;
+    fields?: Partial<
+      Pick<
+        PropertyInsert,
+        | "arv"
+        | "cass_status"
+        | "equity_estimate"
+        | "is_vacant"
+        | "market"
+        | "source"
+        | "status"
+      >
+    >;
+  }>,
+): Promise<Array<{ id: string; address: string }>> {
+  if (input.length === 0) return [];
+  for (const row of input) {
+    assertCanaryOwned(row.address, "property address");
+  }
+
+  const rows = input.map((row) => ({
+    address: row.address,
+    city: "Kansas City",
+    state: "MO",
+    zip: "64151",
+    market: "Kansas City",
+    status: "prospect",
+    cass_status: "verified",
+    is_vacant: false,
+    notes: `Created by production Playwright canary ${row.runId}`,
+    ...row.fields,
+  }));
+
+  const inserted: Array<{ id: string; address: string }> = [];
+  for (const batch of chunks(rows, 100)) {
+    const { data, error } = await client
+      .from("properties")
+      .insert(batch)
+      .select("id, address");
+    if (error || !data) {
+      throw error ?? new Error("Could not insert canary prospects.");
+    }
+    inserted.push(...data.map((row) => ({ id: row.id, address: row.address })));
+  }
+
+  return inserted;
+}
+
 export async function insertCanaryListMemberships(
   client: SupabaseClient<Database>,
   input: { listId: string; propertyIds: string[] },
 ): Promise<void> {
   if (input.propertyIds.length === 0) return;
 
-  const { error } = await client.from("property_lists").insert(
-    input.propertyIds.map((propertyId) => ({
-      list_id: input.listId,
-      property_id: propertyId,
-    })),
-  );
-  if (error) {
-    throw new Error(`Could not insert canary list memberships: ${error.message}`);
+  const rows = input.propertyIds.map((propertyId) => ({
+    list_id: input.listId,
+    property_id: propertyId,
+  }));
+
+  for (const batch of chunks(rows, 100)) {
+    const { error } = await client.from("property_lists").insert(batch);
+    if (error) {
+      throw new Error(
+        `Could not insert canary list memberships: ${error.message}`,
+      );
+    }
   }
 }
 
@@ -247,7 +311,7 @@ export async function deleteCanaryPropertiesByAddressPrefix(
 
   const { data: properties, error: lookupError } = await client
     .from("properties")
-    .select("address")
+    .select("id, address")
     .like("address", `${prefix}%`);
   if (lookupError) {
     throw new Error(
@@ -255,8 +319,39 @@ export async function deleteCanaryPropertiesByAddressPrefix(
     );
   }
 
-  for (const property of properties ?? []) {
-    await deleteCanaryPropertiesByAddress(client, property.address);
+  const ids = (properties ?? []).map((property) => property.id);
+  if (ids.length === 0) return;
+
+  for (const batch of chunks(ids, 50)) {
+    const { error: listError } = await client
+      .from("property_lists")
+      .delete()
+      .in("property_id", batch);
+    if (listError) {
+      throw new Error(
+        `Could not delete canary property list memberships: ${listError.message}`,
+      );
+    }
+
+    const { error: messageError } = await client
+      .from("messages")
+      .delete()
+      .in("property_id", batch);
+    if (messageError) {
+      throw new Error(
+        `Could not delete canary property messages: ${messageError.message}`,
+      );
+    }
+
+    const { error: propertyError } = await client
+      .from("properties")
+      .delete()
+      .in("id", batch);
+    if (propertyError) {
+      throw new Error(
+        `Could not delete canary properties: ${propertyError.message}`,
+      );
+    }
   }
 }
 

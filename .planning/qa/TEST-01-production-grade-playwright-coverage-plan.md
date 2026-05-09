@@ -49,6 +49,9 @@ production-grade by this plan's definition.
   a canary-owned list, applies List + Equity + CASS controls through the UI,
   verifies the exact expected prospect row, and cleans up only canary-owned
   rows.
+- Large-list production filter canary coverage now creates a 275-property
+  canary-owned list, applies the List filter through the UI, verifies the
+  expected total, and asserts the Bad Request failure class does not recur.
 
 ## Production validation rules
 
