@@ -20,15 +20,34 @@ function decodedFiltersFromUrl(url: string) {
 }
 
 async function addMarketBlock(page: Page) {
-  await page.getByRole("button", { name: /^Filters$/i }).click();
-  await page.getByRole("button", { name: /Add Filter Block/i }).click();
+  await page.waitForLoadState("networkidle");
 
-  const search = page.getByPlaceholder(/search filters/i);
+  const filtersButton = page.getByRole("button", { name: /^Filters$/i });
+  await expect(filtersButton).toBeVisible({ timeout: 10_000 });
+  await expect(filtersButton).toBeEnabled();
+  await filtersButton.click();
+
+  const drawer = page.locator("[data-slot='sheet-content']");
+  await expect(drawer).toBeVisible({ timeout: 10_000 });
+  await expect(drawer.getByText(/^Filters$/i)).toBeVisible();
+
+  const addBlockButton = drawer.getByRole("button", {
+    name: /Add Filter Block/i,
+  });
+  await expect(addBlockButton).toBeEnabled();
+  await addBlockButton.click();
+
+  const picker = page.getByRole("dialog", { name: /Add filter block/i });
+  await expect(picker).toBeVisible({ timeout: 10_000 });
+
+  const search = picker.getByPlaceholder(/search filters/i);
   await expect(search).toBeFocused();
   await search.fill("market");
-  await page.getByRole("button", { name: /^Market$/i }).click();
+  await picker.getByRole("button", { name: /^Market$/i }).click();
 
-  await expect(page.locator("[data-block-row][data-kind='market']")).toBeVisible({
+  await expect(
+    page.locator("[data-block-row][data-kind='market']"),
+  ).toBeVisible({
     timeout: 10_000,
   });
 }
@@ -74,9 +93,9 @@ test.describe("Properties — Market filter drawer block (Phase 02 smoke)", () =
     await expect(
       page.getByRole("checkbox", { name: "Kansas City" }),
     ).toHaveCount(0);
-    await expect(
-      page.getByRole("checkbox", { name: "St. Louis" }),
-    ).toHaveCount(0);
+    await expect(page.getByRole("checkbox", { name: "St. Louis" })).toHaveCount(
+      0,
+    );
   });
 
   test("selecting a county market filter updates the URL and active chip", async ({
@@ -92,7 +111,9 @@ test.describe("Properties — Market filter drawer block (Phase 02 smoke)", () =
     await expect(jackson).toBeChecked({ timeout: 250 });
 
     await expect(page).toHaveURL(/\bfilters=/, { timeout: 10_000 });
-    expect(new URL(page.url()).searchParams.get("search")).toBe("market-drawer");
+    expect(new URL(page.url()).searchParams.get("search")).toBe(
+      "market-drawer",
+    );
     await expectUrlBlocks(page, (blocks) => {
       expect(blocks).toEqual([
         expect.objectContaining({
