@@ -258,6 +258,38 @@ export async function deleteCanaryImportArtifactsByFilename(
   }
 }
 
+export async function deleteCanaryUpdateJobsByFilename(
+  client: SupabaseClient<Database>,
+  filename: string,
+): Promise<void> {
+  assertCanaryOwned(filename, "update filename");
+
+  const { data: jobs, error: lookupError } = await client
+    .from("jobs")
+    .select("id, title")
+    .eq("type", "csv_update")
+    .eq("title", `Update ${filename}`);
+  if (lookupError) {
+    throw new Error(`Could not look up canary update jobs: ${lookupError.message}`);
+  }
+
+  const jobIds = (jobs ?? []).map((row) => row.id);
+  if (jobIds.length === 0) return;
+
+  const { error: itemError } = await client
+    .from("job_items")
+    .delete()
+    .in("job_id", jobIds);
+  if (itemError) {
+    throw new Error(`Could not delete canary update job items: ${itemError.message}`);
+  }
+
+  const { error: jobError } = await client.from("jobs").delete().in("id", jobIds);
+  if (jobError) {
+    throw new Error(`Could not delete canary update jobs: ${jobError.message}`);
+  }
+}
+
 export async function deleteCanaryContactsByLastName(
   client: SupabaseClient<Database>,
   lastName: string,
@@ -372,6 +404,7 @@ export async function insertCanaryProspect(
         PropertyInsert,
         | "arv"
         | "ai_responder_disabled"
+        | "address_normalized"
         | "cass_status"
         | "equity_estimate"
         | "homeowner_contact_id"
@@ -418,6 +451,7 @@ export async function insertCanaryProspects(
         PropertyInsert,
         | "arv"
         | "ai_responder_disabled"
+        | "address_normalized"
         | "cass_status"
         | "equity_estimate"
         | "homeowner_contact_id"
