@@ -46,6 +46,8 @@ import type { Database } from "@/lib/supabase/types";
 type MessageRow = Database["public"]["Tables"]["messages"]["Row"];
 type LeadNoteRow = Database["public"]["Tables"]["lead_notes"]["Row"];
 
+export const dynamic = "force-dynamic";
+
 export async function generateMetadata({
   params,
 }: {

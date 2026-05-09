@@ -44,6 +44,19 @@ async function seedConsentedLead(
     source: "e2e-cockpit-parity",
   });
 
+  // The inbound webhook threads regular replies to the contact's most recent
+  // outbound property, matching the production conversation path.
+  await admin.from("messages").insert({
+    channel: "sms",
+    direction: "outbound",
+    status: "sent",
+    contact_id: contact.id,
+    property_id: prop.id,
+    from_address: "+18162804181",
+    to_address: opts.phone,
+    body: "previous outbound",
+  });
+
   await admin.from("messages").insert({
     channel: "sms",
     direction: "inbound",
@@ -135,6 +148,70 @@ test("reply from lead detail shows up on the cockpit (test 30)", async ({
   await expect(page.getByTestId("inbox-detail-panel")).toContainText(reply);
 });
 
-test.skip("Realtime cross-surface: both surfaces update from the other (test 31)", async () => {
-  // TODO: needs two browser contexts. Same blocker as cockpit-realtime test 28.
+test("Realtime cross-surface: both surfaces update from the other (test 31)", async ({
+  page,
+  browser,
+  request,
+  baseURL,
+}) => {
+  const admin = adminClient();
+  await resetTenantTables(admin);
+  await ensureTestUser(admin);
+
+  const phone = "+18165557403";
+  const { contactId, propertyId } = await seedConsentedLead(admin, {
+    phone,
+    addressTag: "PARITY-31",
+  });
+
+  const leadContext = await browser.newContext({
+    storageState: "e2e/.auth/user.json",
+  });
+  const leadPage = await leadContext.newPage();
+
+  try {
+    await Promise.all([
+      page.goto(`/messages?thread=${contactId}`),
+      leadPage.goto(`/leads/${propertyId}`),
+    ]);
+    await Promise.all([
+      expect(page.getByTestId("messages-thread")).toContainText(
+        "starting the thread",
+      ),
+      expect(leadPage.getByTestId("messages-thread")).toContainText(
+        "starting the thread",
+      ),
+    ]);
+    await Promise.all([
+      page.waitForLoadState("networkidle"),
+      leadPage.waitForLoadState("networkidle"),
+    ]);
+    await Promise.all([page.waitForTimeout(1000), leadPage.waitForTimeout(1000)]);
+
+    const inboundBody = `cross surface realtime ${Date.now()}`;
+    const res = await request.post(`${baseURL}/api/webhooks/dialpad/sms`, {
+      headers: {
+        "x-mock-signature": "valid",
+        "content-type": "application/json",
+      },
+      data: {
+        externalId: `e2e_parity31_${Date.now()}`,
+        from: phone,
+        to: "+18162804181",
+        body: inboundBody,
+      },
+    });
+    expect(res.status()).toBe(200);
+
+    await Promise.all([
+      expect(page.getByTestId("messages-thread")).toContainText(inboundBody, {
+        timeout: 20_000,
+      }),
+      expect(leadPage.getByTestId("messages-thread")).toContainText(inboundBody, {
+        timeout: 20_000,
+      }),
+    ]);
+  } finally {
+    await leadContext.close();
+  }
 });
