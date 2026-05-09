@@ -25,6 +25,7 @@ export interface DispatchSlackTaskInput {
   propertyAddress: string;
   deepLink: string;
   timezone: string;
+  slackEnabled?: boolean;
 }
 
 export type DispatchSlackResult =
@@ -43,9 +44,10 @@ export async function dispatchTaskAssignedSlack(
 ): Promise<DispatchSlackResult> {
   try {
     const admin = createAdminClient();
-    const prefs = await loadIntegrationPrefs(admin, input.assigneeId);
-    if (!prefs) return { sent: false, reason: "no_pref" };
-    if (!prefs.slackEnabled) return { sent: false, reason: "pref_disabled" };
+    const slackEnabled =
+      input.slackEnabled ??
+      (await loadIntegrationPrefs(admin, input.assigneeId)).slackEnabled;
+    if (!slackEnabled) return { sent: false, reason: "pref_disabled" };
 
     const token = await getDecryptedToken({
       userId: input.assigneeId,

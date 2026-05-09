@@ -1,5 +1,32 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+const {
+  afterCallbacks,
+  afterMock,
+  dispatchTaskCalendarEventUpdate,
+  loadIntegrationPrefs,
+} = vi.hoisted(() => ({
+  afterCallbacks: [] as Array<() => Promise<void> | void>,
+  afterMock: vi.fn((callback: () => Promise<void> | void) => {
+    afterCallbacks.push(callback);
+  }),
+  dispatchTaskCalendarEventUpdate: vi.fn(async () => ({
+    inserted: true,
+    eventId: "event-1",
+  })),
+  loadIntegrationPrefs: vi.fn(async () => ({
+    slackEnabled: true,
+    calendarEnabled: true,
+    timezone: "America/Chicago",
+  })),
+}));
+
+vi.mock("next/server", () => ({ after: afterMock }));
+vi.mock("@/lib/integrations/google/dispatch", () => ({
+  dispatchTaskCalendarEventUpdate,
+}));
+vi.mock("@/lib/integrations/prefs", () => ({ loadIntegrationPrefs }));
+
 import {
   completeTask,
   createTask,
@@ -76,10 +103,13 @@ function makeSupabase() {
 beforeEach(() => {
   responseQueue = [];
   calls = [];
+  afterCallbacks.length = 0;
+  vi.stubEnv("NEXT_PUBLIC_APP_URL", "https://app.test");
 });
 
 afterEach(() => {
   vi.clearAllMocks();
+  vi.unstubAllEnvs();
 });
 
 describe("dispoToTaskType", () => {
@@ -222,6 +252,57 @@ describe("snoozeTask", () => {
     expect(payload.snoozed_until).toBe("2026-05-09T14:00:00Z");
     expect(payload.status).toBeUndefined();
   });
+
+  it("schedules a Google Calendar update when snooze changes due_at", async () => {
+    responseQueue = [
+      {
+        data: {
+          id: "task-1",
+          assignee_id: "user-2",
+          related_property_id: "property-3",
+          title: "Call the owner",
+          due_at: "2026-05-09T14:00:00Z",
+        },
+        error: null,
+      },
+      {
+        data: { address: "123 Snooze Ln" },
+        error: null,
+      },
+    ];
+    loadIntegrationPrefs.mockResolvedValueOnce({
+      slackEnabled: true,
+      calendarEnabled: true,
+      timezone: "America/Denver",
+    });
+
+    const result = await snoozeTask(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      makeSupabase() as any,
+      "task-1",
+      "2026-05-09T14:00:00Z",
+    );
+
+    expect(result.ok).toBe(true);
+    expect(loadIntegrationPrefs).toHaveBeenCalledWith(
+      expect.anything(),
+      "user-2",
+    );
+    expect(afterMock).toHaveBeenCalledTimes(1);
+
+    await flushAfterCallbacks();
+
+    expect(dispatchTaskCalendarEventUpdate).toHaveBeenCalledWith({
+      taskId: "task-1",
+      assigneeId: "user-2",
+      taskTitle: "Call the owner",
+      propertyAddress: "123 Snooze Ln",
+      dueAt: "2026-05-09T14:00:00Z",
+      timezone: "America/Denver",
+      deepLink: "https://app.test/messages?property_id=property-3",
+      calendarEnabled: true,
+    });
+  });
 });
 
 describe("reassignTask", () => {
@@ -266,3 +347,9 @@ describe("reassignTask", () => {
     expect(result.error.code).toBe("TASK_REASSIGN_FAILED");
   });
 });
+
+async function flushAfterCallbacks(): Promise<void> {
+  const callbacks = [...afterCallbacks];
+  afterCallbacks.length = 0;
+  await Promise.all(callbacks.map((callback) => callback()));
+}

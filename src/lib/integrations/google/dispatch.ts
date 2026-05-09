@@ -19,6 +19,7 @@ export interface DispatchCalendarTaskInput {
   dueAt: string;
   timezone: string;
   deepLink: string;
+  calendarEnabled?: boolean;
 }
 
 export interface DispatchCalendarResult {
@@ -37,8 +38,10 @@ export async function dispatchTaskCalendarEvent(
 ): Promise<DispatchCalendarResult> {
   try {
     const admin = createAdminClient();
-    const prefs = await loadIntegrationPrefs(admin, input.assigneeId);
-    if (!prefs.calendarEnabled) {
+    const calendarEnabled =
+      input.calendarEnabled ??
+      (await loadIntegrationPrefs(admin, input.assigneeId)).calendarEnabled;
+    if (!calendarEnabled) {
       return { inserted: false, reason: "pref_disabled" };
     }
 
@@ -82,8 +85,10 @@ export async function dispatchTaskCalendarEventUpdate(
     const eventId = await loadStoredCalendarEventId(admin, input.taskId);
     if (!eventId) return dispatchTaskCalendarEvent(input);
 
-    const prefs = await loadIntegrationPrefs(admin, input.assigneeId);
-    if (!prefs.calendarEnabled) {
+    const calendarEnabled =
+      input.calendarEnabled ??
+      (await loadIntegrationPrefs(admin, input.assigneeId)).calendarEnabled;
+    if (!calendarEnabled) {
       return { inserted: false, reason: "pref_disabled" };
     }
 
