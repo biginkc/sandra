@@ -80,7 +80,7 @@ test("production canary verifies AI responder happy path in the lead thread", as
       channel: "sms",
       direction: "outbound",
       status: "sent",
-      provider: "prod-canary",
+      provider: "internal",
       body: `${env.label} AI responder outbound anchor`,
       contact_id: contact!.id,
       property_id: lead.id,
