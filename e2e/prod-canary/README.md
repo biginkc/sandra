@@ -38,3 +38,7 @@ Current coverage:
 - real production lead qualification coverage that promotes a canary-owned
   prospect through the UI, verifies the `new_lead` persisted state, confirms it
   renders on `/leads`, and cleans up the canary property
+- real production Kanban status coverage that creates a canary-owned lead,
+  drags it from New Lead to Contacted, verifies the persisted status change,
+  confirms the lead still renders after reload, and cleans up the canary
+  property
