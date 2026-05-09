@@ -84,6 +84,10 @@ production-grade by this plan's definition.
 - STOP/DNC production canary coverage now posts a signed STOP webhook to
   production, verifies opt-out consent, contact suppression, sequence enrollment
   pause, lead-thread rendering, blocked-send UI feedback, and canary cleanup.
+- AI responder happy-path production canary coverage now posts a signed inbound
+  webhook during Chicago business hours, waits for the AI-generated outbound
+  send, verifies no escalation, confirms both messages render in the lead
+  thread, and cleans up canary-owned rows.
 
 ## Production validation rules
 

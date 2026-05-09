@@ -59,3 +59,6 @@ Current coverage:
 - real production STOP/DNC coverage that signs and posts a STOP webhook,
   verifies opt-out consent, contact suppression, sequence enrollment pause,
   lead-thread visibility, blocked-send UI feedback, and canary cleanup
+- real production AI responder happy-path coverage that signs and posts an
+  inbound SMS, waits for the AI-generated outbound provider send, verifies no
+  escalation, confirms both messages render in the lead thread, and cleans up
