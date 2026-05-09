@@ -112,6 +112,201 @@ export type Database = {
           },
         ]
       }
+      call_activities: {
+        Row: {
+          contact_id: string
+          created_at: string
+          dialer_batch_item_id: string | null
+          disposition: string | null
+          do_not_call_requested: boolean
+          duration_seconds: number | null
+          ended_at: string | null
+          error_code: string | null
+          error_message: string | null
+          id: string
+          jitter_attempt_id: string
+          jitter_session_id: string | null
+          operator_user_id: string | null
+          org_id: string
+          outcome: string | null
+          property_id: string
+          provider: string
+          provider_call_id: string | null
+          raw_event_count: number
+          recording_status: string
+          started_at: string | null
+          transcript_status: string
+          updated_at: string
+        }
+        Insert: {
+          contact_id: string
+          created_at?: string
+          dialer_batch_item_id?: string | null
+          disposition?: string | null
+          do_not_call_requested?: boolean
+          duration_seconds?: number | null
+          ended_at?: string | null
+          error_code?: string | null
+          error_message?: string | null
+          id?: string
+          jitter_attempt_id: string
+          jitter_session_id?: string | null
+          operator_user_id?: string | null
+          org_id: string
+          outcome?: string | null
+          property_id: string
+          provider?: string
+          provider_call_id?: string | null
+          raw_event_count?: number
+          recording_status?: string
+          started_at?: string | null
+          transcript_status?: string
+          updated_at?: string
+        }
+        Update: {
+          contact_id?: string
+          created_at?: string
+          dialer_batch_item_id?: string | null
+          disposition?: string | null
+          do_not_call_requested?: boolean
+          duration_seconds?: number | null
+          ended_at?: string | null
+          error_code?: string | null
+          error_message?: string | null
+          id?: string
+          jitter_attempt_id?: string
+          jitter_session_id?: string | null
+          operator_user_id?: string | null
+          org_id?: string
+          outcome?: string | null
+          property_id?: string
+          provider?: string
+          provider_call_id?: string | null
+          raw_event_count?: number
+          recording_status?: string
+          started_at?: string | null
+          transcript_status?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "call_activities_contact_id_fkey"
+            columns: ["contact_id"]
+            isOneToOne: false
+            referencedRelation: "contacts"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "call_activities_dialer_batch_item_id_fkey"
+            columns: ["dialer_batch_item_id"]
+            isOneToOne: false
+            referencedRelation: "dialer_batch_items"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "call_activities_org_id_fkey"
+            columns: ["org_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "call_activities_property_id_fkey"
+            columns: ["property_id"]
+            isOneToOne: false
+            referencedRelation: "properties"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      call_recordings: {
+        Row: {
+          call_activity_id: string
+          created_at: string
+          duration_seconds: number | null
+          error_code: string | null
+          error_message: string | null
+          id: string
+          status: string
+          storage_path: string | null
+          updated_at: string
+        }
+        Insert: {
+          call_activity_id: string
+          created_at?: string
+          duration_seconds?: number | null
+          error_code?: string | null
+          error_message?: string | null
+          id?: string
+          status?: string
+          storage_path?: string | null
+          updated_at?: string
+        }
+        Update: {
+          call_activity_id?: string
+          created_at?: string
+          duration_seconds?: number | null
+          error_code?: string | null
+          error_message?: string | null
+          id?: string
+          status?: string
+          storage_path?: string | null
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "call_recordings_call_activity_id_fkey"
+            columns: ["call_activity_id"]
+            isOneToOne: false
+            referencedRelation: "call_activities"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      call_transcripts: {
+        Row: {
+          call_activity_id: string
+          created_at: string
+          error_code: string | null
+          error_message: string | null
+          id: string
+          language: string | null
+          status: string
+          text: string | null
+          updated_at: string
+        }
+        Insert: {
+          call_activity_id: string
+          created_at?: string
+          error_code?: string | null
+          error_message?: string | null
+          id?: string
+          language?: string | null
+          status?: string
+          text?: string | null
+          updated_at?: string
+        }
+        Update: {
+          call_activity_id?: string
+          created_at?: string
+          error_code?: string | null
+          error_message?: string | null
+          id?: string
+          language?: string | null
+          status?: string
+          text?: string | null
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "call_transcripts_call_activity_id_fkey"
+            columns: ["call_activity_id"]
+            isOneToOne: false
+            referencedRelation: "call_activities"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       cass_cache: {
         Row: {
           cass_response: Json
@@ -352,6 +547,142 @@ export type Database = {
           },
           {
             foreignKeyName: "csv_imports_org_id_fkey"
+            columns: ["org_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      dialer_batch_items: {
+        Row: {
+          batch_id: string
+          calling_window_end_hour: number
+          calling_window_start_hour: number
+          contact_id: string
+          created_at: string
+          id: string
+          last_call_activity_id: string | null
+          phone_e164: string
+          phone_label: string
+          property_id: string
+          sort_order: number
+          state: string
+          status: string
+          timezone: string
+          updated_at: string
+        }
+        Insert: {
+          batch_id: string
+          calling_window_end_hour?: number
+          calling_window_start_hour?: number
+          contact_id: string
+          created_at?: string
+          id?: string
+          last_call_activity_id?: string | null
+          phone_e164: string
+          phone_label: string
+          property_id: string
+          sort_order?: number
+          state: string
+          status?: string
+          timezone: string
+          updated_at?: string
+        }
+        Update: {
+          batch_id?: string
+          calling_window_end_hour?: number
+          calling_window_start_hour?: number
+          contact_id?: string
+          created_at?: string
+          id?: string
+          last_call_activity_id?: string | null
+          phone_e164?: string
+          phone_label?: string
+          property_id?: string
+          sort_order?: number
+          state?: string
+          status?: string
+          timezone?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "dialer_batch_items_batch_id_fkey"
+            columns: ["batch_id"]
+            isOneToOne: false
+            referencedRelation: "dialer_batches"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "dialer_batch_items_contact_id_fkey"
+            columns: ["contact_id"]
+            isOneToOne: false
+            referencedRelation: "contacts"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "dialer_batch_items_last_call_activity_id_fkey"
+            columns: ["last_call_activity_id"]
+            isOneToOne: false
+            referencedRelation: "call_activities"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "dialer_batch_items_property_id_fkey"
+            columns: ["property_id"]
+            isOneToOne: false
+            referencedRelation: "properties"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      dialer_batches: {
+        Row: {
+          claimed_at: string | null
+          completed_at: string | null
+          created_at: string
+          created_by_user_id: string | null
+          id: string
+          jitter_session_id: string | null
+          org_id: string
+          source_kind: string
+          source_meta: Json
+          status: string
+          title: string | null
+          updated_at: string
+        }
+        Insert: {
+          claimed_at?: string | null
+          completed_at?: string | null
+          created_at?: string
+          created_by_user_id?: string | null
+          id?: string
+          jitter_session_id?: string | null
+          org_id: string
+          source_kind: string
+          source_meta?: Json
+          status?: string
+          title?: string | null
+          updated_at?: string
+        }
+        Update: {
+          claimed_at?: string | null
+          completed_at?: string | null
+          created_at?: string
+          created_by_user_id?: string | null
+          id?: string
+          jitter_session_id?: string | null
+          org_id?: string
+          source_kind?: string
+          source_meta?: Json
+          status?: string
+          title?: string | null
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "dialer_batches_org_id_fkey"
             columns: ["org_id"]
             isOneToOne: false
             referencedRelation: "organizations"
@@ -1704,9 +2035,12 @@ export type Database = {
           created_at: string
           created_by: string
           due_at: string
+          google_calendar_event_id: string | null
           id: string
           org_id: string
           related_property_id: string
+          slack_channel_id: string | null
+          slack_message_ts: string | null
           snoozed_until: string | null
           status: string
           title: string
@@ -1720,9 +2054,12 @@ export type Database = {
           created_at?: string
           created_by: string
           due_at: string
+          google_calendar_event_id?: string | null
           id?: string
           org_id: string
           related_property_id: string
+          slack_channel_id?: string | null
+          slack_message_ts?: string | null
           snoozed_until?: string | null
           status?: string
           title: string
@@ -1736,9 +2073,12 @@ export type Database = {
           created_at?: string
           created_by?: string
           due_at?: string
+          google_calendar_event_id?: string | null
           id?: string
           org_id?: string
           related_property_id?: string
+          slack_channel_id?: string | null
+          slack_message_ts?: string | null
           snoozed_until?: string | null
           status?: string
           title?: string
@@ -1795,6 +2135,72 @@ export type Database = {
           received_at?: string
           signature_verified?: boolean
           to_number?: string
+        }
+        Relationships: []
+      }
+      user_integration_prefs: {
+        Row: {
+          channel: string
+          created_at: string
+          enabled: boolean
+          timezone: string
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          channel: string
+          created_at?: string
+          enabled?: boolean
+          timezone?: string
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          channel?: string
+          created_at?: string
+          enabled?: boolean
+          timezone?: string
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: []
+      }
+      user_oauth_tokens: {
+        Row: {
+          access_token_encrypted: string
+          access_token_expires_at: string | null
+          created_at: string
+          external_account_id: string | null
+          provider: string
+          refresh_token_encrypted: string | null
+          scopes: string[]
+          token_type: string
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          access_token_encrypted: string
+          access_token_expires_at?: string | null
+          created_at?: string
+          external_account_id?: string | null
+          provider: string
+          refresh_token_encrypted?: string | null
+          scopes?: string[]
+          token_type: string
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          access_token_encrypted?: string
+          access_token_expires_at?: string | null
+          created_at?: string
+          external_account_id?: string | null
+          provider?: string
+          refresh_token_encrypted?: string | null
+          scopes?: string[]
+          token_type?: string
+          updated_at?: string
+          user_id?: string
         }
         Relationships: []
       }
@@ -1948,11 +2354,44 @@ export type Database = {
         Args: { p_contact_id: string; p_reason: string }
         Returns: undefined
       }
+      delete_oauth_tokens: {
+        Args: { p_provider: string; p_user_id: string }
+        Returns: undefined
+      }
+      get_oauth_token: {
+        Args: {
+          p_key: string
+          p_provider: string
+          p_token_type: string
+          p_user_id: string
+        }
+        Returns: {
+          access_token: string
+          access_token_expires_at: string
+          external_account_id: string
+          refresh_token: string
+          scopes: string[]
+        }[]
+      }
       merge_duplicate_properties: {
         Args: { keeper_id: string; loser_id: string }
         Returns: undefined
       }
       reset_tenant_tables: { Args: never; Returns: undefined }
+      upsert_oauth_token: {
+        Args: {
+          p_access: string
+          p_account: string
+          p_expires_at: string
+          p_key: string
+          p_provider: string
+          p_refresh: string
+          p_scopes: string[]
+          p_token_type: string
+          p_user_id: string
+        }
+        Returns: undefined
+      }
     }
     Enums: {
       [_ in never]: never
