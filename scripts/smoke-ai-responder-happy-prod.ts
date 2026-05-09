@@ -112,7 +112,7 @@ async function main(): Promise<void> {
       channel: "sms",
       direction: "outbound",
       status: "sent",
-      provider: "prod-canary",
+      provider: "internal",
       body: `${TAG} outbound anchor`,
       contact_id: contactId,
       property_id: propertyId,
