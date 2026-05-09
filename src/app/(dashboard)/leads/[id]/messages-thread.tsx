@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
 import { createClient } from "@/lib/supabase/client";
@@ -29,6 +29,7 @@ type Props = {
  */
 export function MessagesThread({ initial, contactId, propertyId }: Props) {
   const [messages, setMessages] = useState<Message[]>(initial);
+  const endRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     const supabase = createClient();
@@ -81,6 +82,13 @@ export function MessagesThread({ initial, contactId, propertyId }: Props) {
       if (channel) supabase.removeChannel(channel);
     };
   }, [contactId, propertyId]);
+
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(() => {
+      endRef.current?.scrollIntoView({ block: "end" });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [contactId, messages.length, propertyId]);
 
   if (messages.length === 0) {
     return (
@@ -161,6 +169,7 @@ export function MessagesThread({ initial, contactId, propertyId }: Props) {
           />
         ),
       )}
+      <div ref={endRef} data-testid="messages-thread-end" />
     </div>
   );
 }

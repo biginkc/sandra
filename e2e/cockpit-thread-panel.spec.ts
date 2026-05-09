@@ -63,9 +63,41 @@ async function seedThread(
   return { contactId: contact.id, propertyId: prop.id };
 }
 
-test.skip("long thread scrolls to most recent on open (test 18)", async () => {
-  // TODO: requires controlling scroll behavior reliably across browsers.
-  // Defer to manual QA for now; flake risk too high to gate CI on this.
+test("long thread scrolls to most recent on open (test 18)", async ({ page }) => {
+  const admin = adminClient();
+  await resetTenantTables(admin);
+  await ensureTestUser(admin);
+
+  const latestBody = `latest message ${Date.now()}`;
+  const bodies = Array.from({ length: 32 }, (_, i) => ({
+    direction: i % 2 === 0 ? ("inbound" as const) : ("outbound" as const),
+    body: i === 31 ? latestBody : `long thread filler ${i}`,
+    offsetMin: i - 32,
+    read: true,
+  }));
+  const { contactId } = await seedThread(admin, {
+    phone: "+18165557104",
+    addressTag: "PANEL-SCROLL",
+    bodies,
+  });
+
+  await page.goto(`/messages?thread=${contactId}`);
+  await expect(page.getByTestId("inbox-detail-panel")).toBeVisible();
+  const latestMessage = page.getByTestId("messages-thread").getByText(latestBody);
+  await expect(latestMessage).toBeVisible({ timeout: 10_000 });
+
+  const scroller = page.getByTestId("inbox-detail-scroll");
+  await expect(async () => {
+    const metrics = await scroller.evaluate((el) => ({
+      clientHeight: el.clientHeight,
+      scrollHeight: el.scrollHeight,
+      scrollTop: el.scrollTop,
+    }));
+    expect(metrics.scrollHeight).toBeGreaterThan(metrics.clientHeight);
+    expect(metrics.scrollTop).toBeGreaterThanOrEqual(
+      metrics.scrollHeight - metrics.clientHeight - 24,
+    );
+  }).toPass({ timeout: 10_000 });
 });
 
 test("opening a thread clears its unread badge (test 19)", async ({ page }) => {
