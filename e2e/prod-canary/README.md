@@ -30,3 +30,5 @@ Current coverage:
   list membership data
 - real production large-list filter coverage that creates 275 canary-owned
   prospects and verifies the UI avoids Bad Request failures
+- real production quick preset coverage that applies and clears High Equity
+  against canary-owned prospect rows

@@ -52,6 +52,9 @@ production-grade by this plan's definition.
 - Large-list production filter canary coverage now creates a 275-property
   canary-owned list, applies the List filter through the UI, verifies the
   expected total, and asserts the Bad Request failure class does not recur.
+- Quick preset production canary coverage now creates canary-owned prospect
+  rows, applies the High Equity quick preset, verifies the exact filtered row,
+  clears the preset, and verifies the original canary set returns.
 
 ## Production validation rules
 
