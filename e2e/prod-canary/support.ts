@@ -1,5 +1,5 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
-import { createHmac } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
 
 import type { Database } from "../../src/lib/supabase/types";
 
@@ -18,6 +18,34 @@ export type ProdCanaryEnv = {
 };
 
 type PropertyInsert = Database["public"]["Tables"]["properties"]["Insert"];
+type PostgrestError = { message: string };
+type UntypedQueryResult = {
+  data: Array<Record<string, unknown>> | null;
+  error: PostgrestError | null;
+};
+type UntypedQuerySingleResult = {
+  data: Record<string, unknown> | null;
+  error: PostgrestError | null;
+};
+type UntypedQuery = PromiseLike<UntypedQueryResult> & {
+  delete(): UntypedQuery;
+  eq(column: string, value: unknown): UntypedQuery;
+  in(column: string, values: unknown[]): UntypedQuery;
+  insert(values: unknown): UntypedQuery;
+  select(columns?: string): UntypedQuery;
+  single(): Promise<UntypedQuerySingleResult>;
+  update(values: unknown): UntypedQuery;
+};
+type UntypedSupabase = {
+  from(table: string): UntypedQuery;
+};
+
+function fromUntyped(
+  client: SupabaseClient<Database>,
+  table: string,
+): UntypedQuery {
+  return (client as unknown as UntypedSupabase).from(table);
+}
 
 function chunks<T>(items: T[], size: number): T[][] {
   const out: T[][] = [];
@@ -82,6 +110,14 @@ export function assertCanaryOwned(value: string, context: string): void {
   if (!value.includes("PROD-CANARY")) {
     throw new Error(`${context} must include PROD-CANARY before cleanup/write.`);
   }
+}
+
+export function hashCanarySecret(value: string): string {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+export function signCanaryJson(body: string, token: string): string {
+  return "sha256=" + createHmac("sha256", token).update(body).digest("hex");
 }
 
 export function requireCanarySmsRecipient(): string {
@@ -225,6 +261,60 @@ export async function deleteCanaryOrganizationsByName(
   }
 }
 
+export async function deleteCanaryWebhookConsumersByName(
+  client: SupabaseClient<Database>,
+  name: string,
+): Promise<void> {
+  assertCanaryOwned(name, "webhook consumer name");
+
+  const { error } = await client.from("webhook_consumers").delete().eq("name", name);
+  if (error) {
+    throw new Error(`Could not delete canary webhook consumers: ${error.message}`);
+  }
+}
+
+export async function deleteCanaryWebhookEventsByExternalIds(
+  client: SupabaseClient<Database>,
+  externalIds: string[],
+): Promise<void> {
+  if (externalIds.length === 0) return;
+  for (const externalId of externalIds) {
+    assertCanaryOwned(externalId, "webhook event external id");
+  }
+
+  const { error } = await client
+    .from("webhook_events")
+    .delete()
+    .in("external_id", externalIds);
+  if (error) {
+    throw new Error(`Could not delete canary webhook events: ${error.message}`);
+  }
+}
+
+export async function insertCanaryJitterWebhookConsumer(
+  client: SupabaseClient<Database>,
+  input: { name: string; orgId: string; token: string },
+): Promise<{ id: string; name: string }> {
+  assertCanaryOwned(input.name, "webhook consumer name");
+
+  const { data, error } = await client
+    .from("webhook_consumers")
+    .insert({
+      consumer_type: "jitter_writeback",
+      enabled: true,
+      name: input.name,
+      notes: "Created by production Playwright canary.",
+      org_id: input.orgId,
+      secret_hash: hashCanarySecret(input.token),
+    })
+    .select("id, name")
+    .single();
+  if (error || !data) {
+    throw error ?? new Error("Could not insert canary webhook consumer.");
+  }
+  return { id: data.id, name: data.name };
+}
+
 export async function insertCanaryOrganization(
   client: SupabaseClient<Database>,
   input: { name: string },
@@ -240,6 +330,117 @@ export async function insertCanaryOrganization(
     throw error ?? new Error("Could not insert canary organization.");
   }
   return { id: data.id, name: data.name };
+}
+
+export async function deleteCanaryDialerArtifactsByBatchTitle(
+  client: SupabaseClient<Database>,
+  title: string,
+): Promise<void> {
+  assertCanaryOwned(title, "dialer batch title");
+
+  const { data: batches, error: batchLookupError } = await fromUntyped(
+    client,
+    "dialer_batches",
+  )
+    .select("id")
+    .eq("title", title);
+  if (batchLookupError) {
+    throw new Error(
+      `Could not look up canary dialer batches: ${batchLookupError.message}`,
+    );
+  }
+
+  const batchIds = (batches ?? []).map((row) => String(row.id));
+  if (batchIds.length === 0) return;
+
+  const { data: items, error: itemLookupError } = await fromUntyped(
+    client,
+    "dialer_batch_items",
+  )
+    .select("id")
+    .in("batch_id", batchIds);
+  if (itemLookupError) {
+    throw new Error(
+      `Could not look up canary dialer batch items: ${itemLookupError.message}`,
+    );
+  }
+
+  const itemIds = (items ?? []).map((row) => String(row.id));
+  if (itemIds.length > 0) {
+    const { data: activities, error: activityLookupError } = await fromUntyped(
+      client,
+      "call_activities",
+    )
+      .select("id")
+      .in("dialer_batch_item_id", itemIds);
+    if (activityLookupError) {
+      throw new Error(
+        `Could not look up canary call activities: ${activityLookupError.message}`,
+      );
+    }
+
+    const activityIds = (activities ?? []).map((row) => String(row.id));
+    if (activityIds.length > 0) {
+      const { error: recordingError } = await fromUntyped(
+        client,
+        "call_recordings",
+      )
+        .delete()
+        .in("call_activity_id", activityIds);
+      if (recordingError) {
+        throw new Error(
+          `Could not delete canary call recordings: ${recordingError.message}`,
+        );
+      }
+
+      const { error: transcriptError } = await fromUntyped(
+        client,
+        "call_transcripts",
+      )
+        .delete()
+        .in("call_activity_id", activityIds);
+      if (transcriptError) {
+        throw new Error(
+          `Could not delete canary call transcripts: ${transcriptError.message}`,
+        );
+      }
+
+      const { error: activityError } = await fromUntyped(
+        client,
+        "call_activities",
+      )
+        .delete()
+        .in("id", activityIds);
+      if (activityError) {
+        throw new Error(
+          `Could not delete canary call activities: ${activityError.message}`,
+        );
+      }
+    }
+  }
+
+  const { error: batchError } = await fromUntyped(client, "dialer_batches")
+    .delete()
+    .in("id", batchIds);
+  if (batchError) {
+    throw new Error(`Could not delete canary dialer batches: ${batchError.message}`);
+  }
+}
+
+export async function fetchSingleUntypedRow(
+  client: SupabaseClient<Database>,
+  table: string,
+  columns: string,
+  eq: { column: string; value: unknown },
+): Promise<Record<string, unknown>> {
+  const { data, error } = await fromUntyped(client, table)
+    .select(columns)
+    .eq(eq.column, eq.value)
+    .single();
+  if (error || !data) {
+    throw error ?? new Error(`Could not fetch ${table} row.`);
+  }
+  return data;
 }
 
 export async function deleteCanaryImportArtifactsByFilename(
@@ -455,6 +656,7 @@ export async function insertCanaryProspect(
         | "homeowner_contact_id"
         | "is_vacant"
         | "market"
+        | "notes"
         | "org_id"
         | "source"
         | "state"
@@ -503,6 +705,7 @@ export async function insertCanaryProspects(
         | "homeowner_contact_id"
         | "is_vacant"
         | "market"
+        | "notes"
         | "org_id"
         | "source"
         | "state"

@@ -76,3 +76,7 @@ Current coverage:
 - real production sequence coverage that seeds a one-step active sequence,
   waits for the production sequence tick to send through the provider, verifies
   completed enrollment and lead-thread rendering, and cleans up
+- real production Sandra/Jitter dialer handoff coverage that creates a canary
+  dialer batch through the UI, registers a canary Jitter writeback consumer,
+  verifies signed batch fetch/claim/writeback endpoints, confirms the call
+  appears on the lead, and cleans up dialer/webhook/contact/property artifacts
