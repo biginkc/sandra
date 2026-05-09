@@ -23,11 +23,21 @@ type WritebackBody = {
   duration_seconds?: number | null;
   outcome?: string | null;
   disposition?: string | null;
+  callback_at?: string | null;
+  callback_assignee_id?: string | null;
   do_not_call_requested?: boolean;
   provider?: string;
   provider_call_id?: string | null;
   error_code?: string | null;
   error_message?: string | null;
+};
+
+type ValidatedWriteback = {
+  property: {
+    id: string;
+    org_id: string;
+    address: string | null;
+  };
 };
 
 function unprocessable(error_code: string, field?: string) {
@@ -44,7 +54,7 @@ async function validateOrgConsistency(serviceClient: any, body: WritebackBody) {
 
   const { data: property, error: propertyError } = await serviceClient
     .from("properties")
-    .select("id, org_id, deleted_at")
+    .select("id, org_id, address, deleted_at")
     .eq("id", body.property_id)
     .maybeSingle();
   if (propertyError) throw propertyError;
@@ -97,7 +107,92 @@ async function validateOrgConsistency(serviceClient: any, body: WritebackBody) {
     }
   }
 
-  return { ok: true as const };
+  return { ok: true as const, property } satisfies { ok: true; property: ValidatedWriteback["property"] };
+}
+
+function validTimestamp(value: string | null | undefined): string | null {
+  if (!value) return null;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  return date.toISOString();
+}
+
+async function resolveCallbackAssignee(serviceClient: any, body: WritebackBody): Promise<string | null> {
+  const preferred = body.callback_assignee_id ?? body.operator_user_id ?? null;
+  if (preferred && body.org_id) {
+    const { data: membership, error } = await serviceClient
+      .from("memberships")
+      .select("user_id")
+      .eq("org_id", body.org_id)
+      .eq("user_id", preferred)
+      .maybeSingle();
+    if (error) throw error;
+    if (membership?.user_id) return membership.user_id;
+  }
+
+  const { data: fallback, error } = await serviceClient
+    .from("memberships")
+    .select("user_id")
+    .eq("org_id", body.org_id)
+    .order("role", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error) throw error;
+  return fallback?.user_id ?? null;
+}
+
+async function syncCallbackTask(serviceClient: any, body: WritebackBody, validation: ValidatedWriteback) {
+  if (body.disposition !== "callback_requested") return null;
+
+  const callbackAt = validTimestamp(body.callback_at);
+  if (!callbackAt) {
+    return { ok: false as const, response: unprocessable("callback_at_required", "callback_at") };
+  }
+
+  const assigneeId = await resolveCallbackAssignee(serviceClient, body);
+  if (!assigneeId) {
+    return { ok: false as const, response: unprocessable("callback_assignee_required", "callback_assignee_id") };
+  }
+
+  const title = `Callback ${validation.property.address ?? "property"}`;
+  const now = new Date().toISOString();
+  const { error: propertyError } = await serviceClient
+    .from("properties")
+    .update({
+      outreach_dispo: "callback_requested",
+      follow_up_at: callbackAt,
+      updated_at: now,
+    })
+    .eq("id", validation.property.id);
+  if (propertyError) throw propertyError;
+
+  const { data: existing, error: existingError } = await serviceClient
+    .from("tasks")
+    .select("id")
+    .eq("related_property_id", validation.property.id)
+    .eq("type", "callback")
+    .eq("status", "open")
+    .eq("due_at", callbackAt)
+    .maybeSingle();
+  if (existingError) throw existingError;
+  if (existing?.id) return { ok: true as const, taskId: existing.id as string };
+
+  const { data: task, error: taskError } = await serviceClient
+    .from("tasks")
+    .insert({
+      org_id: body.org_id,
+      assignee_id: assigneeId,
+      related_property_id: validation.property.id,
+      type: "callback",
+      title,
+      due_at: callbackAt,
+      created_by: assigneeId,
+    })
+    .select("id")
+    .single();
+  if (taskError) throw taskError;
+
+  return { ok: true as const, taskId: task?.id as string };
 }
 
 export async function PUT(
@@ -117,6 +212,9 @@ export async function PUT(
 
     const validation = await validateOrgConsistency(auth.serviceClient as any, body);
     if (!validation.ok) return validation.response;
+
+    const callbackTask = await syncCallbackTask(auth.serviceClient as any, body, validation);
+    if (callbackTask && !callbackTask.ok) return callbackTask.response;
 
     const idempotency = await checkAndRecordIdempotency(auth.serviceClient, {
       eventType: "call_activity_writeback",
@@ -166,7 +264,10 @@ export async function PUT(
       if (itemError) throw itemError;
     }
 
-    const payload = { call_activity: activity };
+    const payload = {
+      call_activity: activity,
+      ...(callbackTask?.ok ? { callback_task: { id: callbackTask.taskId } } : {}),
+    };
     await recordIdempotentResponse(auth.serviceClient, {
       eventType: "call_activity_writeback",
       idempotencyKey,

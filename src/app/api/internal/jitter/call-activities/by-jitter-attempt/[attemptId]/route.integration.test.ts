@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 
 import { createTestClient } from "@tests/integration/client";
+import { BMH_ORG_ID, createOrgUser } from "@tests/integration/fixtures/multi-user";
 
 import {
   authHeaders,
@@ -158,6 +159,83 @@ describe("internal.jitter.call-activities writeback PUT", () => {
       .eq("id", seeded.itemId)
       .single();
     expect(item.last_call_activity_id).toBe(json.call_activity.id);
+  });
+
+  it("creates Sandra callback task semantics for callback_requested writeback", async () => {
+    const seeded = await seedDialerBatch(testClient);
+    const operator = await createOrgUser(testClient, {
+      orgId: BMH_ORG_ID,
+      email: `jitter-callback-${crypto.randomUUID()}@example.test`,
+      role: "member",
+    });
+    const attemptId = `attempt-${crypto.randomUUID()}`;
+    const callbackAt = "2026-05-11T15:30:00.000Z";
+    const response = await PUT(
+      jsonRequest(
+        `https://sandra.test/api/internal/jitter/call-activities/by-jitter-attempt/${attemptId}`,
+        "PUT",
+        {
+          ...writebackBody(seeded),
+          disposition: "callback_requested",
+          callback_at: callbackAt,
+          operator_user_id: operator.userId,
+        },
+        { "idempotency-key": "activity-callback-task" },
+      ),
+      attemptContext(attemptId),
+    );
+
+    expect(response.status).toBe(200);
+    const json = (await response.json()) as any;
+    expect(json.callback_task.id).toEqual(expect.any(String));
+
+    const { data: property } = await testClient
+      .from("properties")
+      .select("outreach_dispo, follow_up_at")
+      .eq("id", seeded.propertyId)
+      .single();
+    expect(property).toBeTruthy();
+    expect(property).toMatchObject({
+      outreach_dispo: "callback_requested",
+    });
+    expect(new Date(property!.follow_up_at!).toISOString()).toBe(callbackAt);
+
+    const { data: task } = await testClient
+      .from("tasks")
+      .select("type, status, due_at, assignee_id, related_property_id")
+      .eq("id", json.callback_task.id)
+      .single();
+    expect(task).toBeTruthy();
+    expect(task).toMatchObject({
+      type: "callback",
+      status: "open",
+      assignee_id: operator.userId,
+      related_property_id: seeded.propertyId,
+    });
+    expect(new Date(task!.due_at).toISOString()).toBe(callbackAt);
+  });
+
+  it("requires callback_at when callback_requested is written back", async () => {
+    const seeded = await seedDialerBatch(testClient);
+    const attemptId = `attempt-${crypto.randomUUID()}`;
+    const response = await PUT(
+      jsonRequest(
+        `https://sandra.test/api/internal/jitter/call-activities/by-jitter-attempt/${attemptId}`,
+        "PUT",
+        {
+          ...writebackBody(seeded),
+          disposition: "callback_requested",
+        },
+        { "idempotency-key": "activity-callback-missing-at" },
+      ),
+      attemptContext(attemptId),
+    );
+
+    expect(response.status).toBe(422);
+    await expect(response.json()).resolves.toMatchObject({
+      error_code: "callback_at_required",
+      field: "callback_at",
+    });
   });
 
   it("updates an existing row for the same provider and jitter_attempt_id", async () => {
