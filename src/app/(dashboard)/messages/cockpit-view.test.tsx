@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import { CockpitView } from "./cockpit-view";
@@ -78,7 +78,9 @@ vi.mock("sonner", () => ({
   toast: { success: vi.fn(), warning: vi.fn(), error: vi.fn() },
 }));
 
-function makeThread(overrides: Partial<Thread> & { contactId: string }): Thread {
+function makeThread(
+  overrides: Partial<Thread> & { contactId: string },
+): Thread {
   return {
     contactId: overrides.contactId,
     contactName: overrides.contactName ?? `Contact ${overrides.contactId}`,
@@ -93,7 +95,14 @@ function makeThread(overrides: Partial<Thread> & { contactId: string }): Thread 
   } as Thread;
 }
 
-function makeMessage(overrides: Partial<MessageRow> & { id: string; body: string; contact_id: string; property_id: string }): MessageRow {
+function makeMessage(
+  overrides: Partial<MessageRow> & {
+    id: string;
+    body: string;
+    contact_id: string;
+    property_id: string;
+  },
+): MessageRow {
   return {
     id: overrides.id,
     body: overrides.body,
@@ -135,6 +144,7 @@ const baseProps = {
   filter: "all" as const,
   threads: [],
   queued: [],
+  selectedContactId: null,
   threadDetail: null,
   unknownSenders: [],
   unknownActiveCount: 0,
@@ -224,5 +234,46 @@ describe("<CockpitView /> URL deep-linking", () => {
     expect(screen.getByTestId("inbox-thread-contact-a")).not.toHaveAttribute(
       "data-selected",
     );
+  });
+
+  it("clears the loading skeleton when the server returns no detail for the selected thread", async () => {
+    const threadA = makeThread({
+      contactId: "contact-a",
+      lastMessageBody: "thread A body",
+    });
+    const threadB = makeThread({
+      contactId: "contact-b",
+      lastMessageBody: "thread B body",
+    });
+
+    const view = render(
+      <CockpitView
+        {...baseProps}
+        activeTab="inbox"
+        threads={[threadA, threadB]}
+        selectedContactId="contact-a"
+        threadDetail={makeDetail("contact-a", "thread A body")}
+      />,
+    );
+
+    fireEvent.click(screen.getByTestId("inbox-thread-contact-b"));
+    expect(screen.getByTestId("inbox-detail-loading")).toBeInTheDocument();
+
+    view.rerender(
+      <CockpitView
+        {...baseProps}
+        activeTab="inbox"
+        threads={[threadA, threadB]}
+        selectedContactId="contact-b"
+        threadDetail={null}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(
+        screen.queryByTestId("inbox-detail-loading"),
+      ).not.toBeInTheDocument();
+    });
+    expect(screen.getByTestId("inbox-detail-empty")).toBeVisible();
   });
 });

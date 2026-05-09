@@ -23,6 +23,9 @@ type Props = {
   filter: InboxFilter;
   threads: Thread[];
   queued: QueuedRow[];
+  /** Server-resolved URL thread param. Used to distinguish "still fetching"
+   *  from "fetch completed but there is no matching thread detail." */
+  selectedContactId?: string | null;
   threadDetail: InboxDetailData | null;
   unknownSenders: UnknownSender[];
   unknownActiveCount: number;
@@ -38,13 +41,19 @@ type Props = {
   hiddenDncCount: number;
 };
 
-const THREAD_FILTERS = new Set<InboxFilter>(["all", "mine", "unassigned", "unread"]);
+const THREAD_FILTERS = new Set<InboxFilter>([
+  "all",
+  "mine",
+  "unassigned",
+  "unread",
+]);
 
 export function CockpitView({
   activeTab,
   filter,
   threads,
   queued,
+  selectedContactId = null,
   threadDetail,
   unknownSenders,
   unknownActiveCount,
@@ -69,8 +78,6 @@ export function CockpitView({
   };
 
   const showThreadList = THREAD_FILTERS.has(filter);
-  const urlThread = searchParams.get("thread");
-
   // Track which contactId the user is currently navigating *to*. The
   // setState here is a synchronous high-priority update so the next
   // render commits BEFORE the RSC round-trip completes — which is what
@@ -79,9 +86,7 @@ export function CockpitView({
   // semantically, but React's concurrent mode keeps the old tree
   // visible during transitions, so isPending never flips in the tree
   // the user is looking at.
-  const [pendingContactId, setPendingContactId] = useState<string | null>(
-    null,
-  );
+  const [pendingContactId, setPendingContactId] = useState<string | null>(null);
 
   const handleSelectThread = useCallback(
     (contactId: string) => {
@@ -98,22 +103,21 @@ export function CockpitView({
   );
 
   // Clear the pending marker once the server data catches up — that's
-  // when the skeleton can disappear and the real panel can mount.
+  // when the skeleton can disappear and the real panel or empty state
+  // can mount. The server-selected id is load-bearing here: client
+  // searchParams update immediately on click, but this prop updates only
+  // after the RSC payload has returned.
   useEffect(() => {
-    if (
-      pendingContactId !== null &&
-      threadDetail?.contactId === pendingContactId
-    ) {
+    if (pendingContactId !== null && selectedContactId === pendingContactId) {
       setPendingContactId(null);
     }
-  }, [pendingContactId, threadDetail?.contactId]);
+  }, [pendingContactId, selectedContactId]);
 
   // Skeleton shows when the user has clicked a thread that the server
   // hasn't returned yet. Same-thread re-clicks: pendingContactId
   // matches threadDetail.contactId already → no skeleton.
   const isLoadingThread =
-    pendingContactId !== null &&
-    pendingContactId !== (threadDetail?.contactId ?? null);
+    pendingContactId !== null && selectedContactId !== pendingContactId;
 
   return (
     <Page>
@@ -177,7 +181,12 @@ export function CockpitView({
             >
               <InboxThreadList
                 initial={threads}
-                selectedContactId={urlThread ?? threadDetail?.contactId ?? null}
+                selectedContactId={
+                  pendingContactId ??
+                  selectedContactId ??
+                  threadDetail?.contactId ??
+                  null
+                }
                 currentUserId={currentUserId}
                 onSelectThread={handleSelectThread}
               />
