@@ -71,6 +71,20 @@ test("production canary verifies STOP opt-out side effects and UI blocking", asy
     });
     expect(consentError).toBeNull();
 
+    const { error: outboundError } = await supabase.from("messages").insert({
+      channel: "sms",
+      direction: "outbound",
+      status: "sent",
+      provider: "internal",
+      external_id: `${env.runId}-stop-outbound-anchor`,
+      from_address: crmNumber,
+      to_address: phone,
+      body: `${env.label} STOP outbound anchor ${token}`,
+      contact_id: contact!.id,
+      property_id: lead.id,
+    });
+    expect(outboundError).toBeNull();
+
     const { data: sequence, error: sequenceError } = await supabase
       .from("sequences")
       .insert({
