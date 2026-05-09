@@ -177,30 +177,23 @@ async function propertyIdsWithEngagement(
   return listIds.filter((id) => !outbound.has(id) && !inbound.has(id));
 }
 
-async function discoverLargestList(admin: SupabaseClient<Database>) {
-  const { data: lists, error } = await admin
+async function ensureFallbackData(
+  admin: SupabaseClient<Database>,
+): Promise<{ id: string; name: string }> {
+  const fallbackName = `${ORACLE_PREFIX} A`;
+  const { data: existingFallback } = await admin
     .from("lists")
     .select("id, name")
-    .is("archived_at", null);
-  expect(error).toBeNull();
-
-  let best: { id: string; name: string; count: number } | null = null;
-  for (const list of lists ?? []) {
-    const oracle = await listOracle(admin, list.id);
-    if (oracle.count > 0 && (!best || oracle.count > best.count)) {
-      best = { id: list.id, name: list.name, count: oracle.count };
-    }
+    .eq("name", fallbackName)
+    .maybeSingle();
+  if (existingFallback) {
+    const oracle = await listOracle(admin, existingFallback.id);
+    if (oracle.count >= 5) return existingFallback;
   }
-  return best;
-}
-
-async function ensureFallbackData(admin: SupabaseClient<Database>) {
-  const existing = await discoverLargestList(admin);
-  if (existing && existing.count >= 5) return;
 
   const testUserId = await ensureTestUser(admin);
   await cleanupFallbackData(admin);
-  const listA = await seedList(admin, `${ORACLE_PREFIX} A`);
+  const listA = await seedList(admin, fallbackName);
   const listB = await seedList(admin, `${ORACLE_PREFIX} B`);
   const now = Date.now();
 
@@ -265,6 +258,8 @@ async function ensureFallbackData(admin: SupabaseClient<Database>) {
     created_by: testUserId,
   });
   expect(taskError).toBeNull();
+
+  return { id: listA, name: fallbackName };
 }
 
 async function cleanupFallbackData(admin: SupabaseClient<Database>) {
@@ -292,9 +287,7 @@ async function cleanupFallbackData(admin: SupabaseClient<Database>) {
 }
 
 async function discoverScenarios(admin: SupabaseClient<Database>) {
-  await ensureFallbackData(admin);
-  const list = await discoverLargestList(admin);
-  if (!list) return [];
+  const list = await ensureFallbackData(admin);
 
   const scenarios: Scenario[] = [];
   const push = async (

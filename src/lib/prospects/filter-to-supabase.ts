@@ -115,29 +115,8 @@ export function filterSelectFragment(blocks: BlockStack): string | null {
       )
       .map((block) => block.values[0]),
   );
-  const needsEngagedMessagesJoin = blocks.some(
-    (block) =>
-      block.kind === "engagement" &&
-      block.combinator === "any" &&
-      block.values.includes("attempted") &&
-      block.values.includes("replied") &&
-      block.values.every((value) => value === "attempted" || value === "replied"),
-  );
-
   if (singleEngagementBuckets.has("never_contacted")) {
     fragments.push("contact_messages:messages()");
-  }
-  if (singleEngagementBuckets.has("attempted")) {
-    fragments.push(
-      "attempted_outbound:messages!inner(property_id)",
-      "attempted_inbound:messages(property_id)",
-    );
-  }
-  if (singleEngagementBuckets.has("replied")) {
-    fragments.push("replied_messages:messages!inner(property_id)");
-  }
-  if (needsEngagedMessagesJoin) {
-    fragments.push("engaged_messages:messages!inner(property_id)");
   }
 
   return fragments.length > 0 ? fragments.join(", ") : null;
@@ -521,31 +500,9 @@ async function applyEngagementBlock(
     if (onlyBucket === "never_contacted") {
       return { builder: builder.is("contact_messages", null) };
     }
-    if (onlyBucket === "attempted") {
-      return {
-        builder: builder
-          .eq("attempted_outbound.direction", "outbound")
-          .eq("attempted_inbound.direction", "inbound")
-          .is("attempted_inbound", null),
-      };
-    }
-    if (onlyBucket === "replied") {
-      return { builder: builder.eq("replied_messages.direction", "inbound") };
-    }
     if (onlyBucket === "opted_out") {
       return { builder: builder.in("outreach_dispo", ["opted_out", "dnc"]) };
     }
-  }
-
-  if (
-    block.combinator === "any" &&
-    block.values.includes("attempted") &&
-    block.values.includes("replied") &&
-    block.values.every((value) => value === "attempted" || value === "replied")
-  ) {
-    return {
-      builder: builder.in("engaged_messages.direction", ["inbound", "outbound"]),
-    };
   }
 
   const wantedBuckets = new Set(block.values);
@@ -662,7 +619,7 @@ async function applyEngagementBlock(
   // For never_contacted in a multi-bucket selection we'd need to enumerate
   // the universe; pre-fetch all property_ids (RLS-scoped, soft-delete
   // filtered) once.
-  let includeIds = new Set<string>();
+  const includeIds = new Set<string>();
   let needsUniverse = false;
   for (const bucket of block.values) {
     if (bucket === "replied") for (const id of repliedPids) includeIds.add(id);
