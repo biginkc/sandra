@@ -25,6 +25,10 @@ target data created by the active canary run.
 Current coverage:
 
 - real production auth and shell navigation
+- real production membership/RLS coverage that seeds canary-owned rows in the
+  authenticated user's org and an unrelated canary org, verifies only the
+  visible org row renders through `/properties`, and cleans up both property
+  and organization artifacts
 - real production list create/archive/delete cleanup for canary-owned rows
 - real production prospect insert/search/delete cleanup for canary-owned rows
 - real production drawer filter controls against canary-owned prospect rows and
@@ -36,6 +40,10 @@ Current coverage:
 - real production CSV import coverage that uploads a canary file through the UI,
   waits for the import job to finish, verifies persisted prospects, and cleans
   up the storage/import/job/property artifacts
+- real production CSV update-mode coverage that uploads a canary file through
+  the UI, previews matched and unmatched rows, applies property status updates,
+  verifies the update job counters and persisted statuses, and cleans up the
+  canary job/property artifacts
 - real production lead qualification coverage that promotes a canary-owned
   prospect through the UI, verifies the `new_lead` persisted state, confirms it
   renders on `/leads`, and cleans up the canary property
@@ -62,3 +70,13 @@ Current coverage:
 - real production AI responder happy-path coverage that signs and posts an
   inbound SMS, waits for the AI-generated outbound provider send, verifies no
   escalation, confirms both messages render in the lead thread, and cleans up
+- real production AI escalation coverage that signs and posts a keyword
+  escalation inbound, verifies human-attention state, asserts no outbound
+  message is sent, confirms the UI escalation banner, and cleans up
+- real production sequence coverage that seeds a one-step active sequence,
+  waits for the production sequence tick to send through the provider, verifies
+  completed enrollment and lead-thread rendering, and cleans up
+- real production Sandra/Jitter dialer handoff coverage that creates a canary
+  dialer batch through the UI, registers a canary Jitter writeback consumer,
+  verifies signed batch fetch/claim/writeback endpoints, confirms the call
+  appears on the lead, and cleans up dialer/webhook/contact/property artifacts
