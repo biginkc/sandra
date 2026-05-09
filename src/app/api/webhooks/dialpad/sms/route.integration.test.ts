@@ -114,6 +114,26 @@ describe("POST /api/webhooks/dialpad/sms (integration)", () => {
 
   it("STOP keyword flips sms_opted_out + writes an opt_out consent event AND emits no notification (decision #2)", async () => {
     const contactId = await seedContact("+18165558888", { optIn: true });
+    const { data: property } = await supabase
+      .from("properties")
+      .insert({
+        address: "1 Stop Thread Ln",
+        state: "MO",
+        status: "new_lead",
+        homeowner_contact_id: contactId,
+      })
+      .select("id")
+      .single();
+    await supabase.from("messages").insert({
+      channel: "sms",
+      direction: "outbound",
+      status: "sent",
+      from_address: "+18163706846",
+      to_address: "+18165558888",
+      body: "Reply STOP to unsubscribe.",
+      contact_id: contactId,
+      property_id: property!.id,
+    });
 
     const res = await POST(
       makeRequest({
@@ -140,6 +160,13 @@ describe("POST /api/webhooks/dialpad/sms (integration)", () => {
       .eq("event_type", "opt_out");
     expect(events).toHaveLength(1);
     expect(events?.[0].source).toBe("dialpad_inbound_webhook");
+
+    const { data: stopMessage } = await supabase
+      .from("messages")
+      .select("property_id")
+      .eq("external_id", "msg_stop_001")
+      .single();
+    expect(stopMessage?.property_id).toBe(property!.id);
 
     // Feature 7 regression guard — STOP is silent.
     const { count: notifCount } = await supabase

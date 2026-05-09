@@ -134,7 +134,19 @@ export async function POST(request: Request) {
 
       // STOP — propagate opt-out to consent log AND the fast-path boolean.
       if (STOP_KEYWORDS.test(bodyTrimmed)) {
+        let stopPropertyId: string | null = null;
         if (contactId) {
+          const { data: recentOutbound } = await supabase
+            .from("messages")
+            .select("property_id")
+            .eq("contact_id", contactId)
+            .eq("direction", "outbound")
+            .not("property_id", "is", null)
+            .order("created_at", { ascending: false })
+            .limit(1)
+            .maybeSingle();
+          stopPropertyId = recentOutbound?.property_id ?? null;
+
           await recordConsentEvent(supabase, {
             contactId,
             channel: "sms",
@@ -177,6 +189,7 @@ export async function POST(request: Request) {
           to_address: ev.to,
           body: ev.body,
           contact_id: contactId,
+          property_id: stopPropertyId,
           metadata: { keyword: "stop" } as Json,
         });
         continue;
