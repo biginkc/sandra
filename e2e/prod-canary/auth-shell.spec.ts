@@ -11,7 +11,9 @@ test("production canary auth shell loads core routes", async ({
   await page.goto("/properties");
   await expect(page).not.toHaveURL(/\/login/);
   await expect(page.locator("text=Sign out")).toBeVisible();
-  await expect(page.getByRole("navigation")).toContainText("Prospects");
+  await expect(page.getByRole("navigation", { name: "Primary" })).toContainText(
+    "Prospects",
+  );
 
   await page.getByRole("link", { name: /^leads$/i }).click();
   await expect(page).toHaveURL(/\/leads/);
