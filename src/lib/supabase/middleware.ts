@@ -3,6 +3,16 @@ import { NextResponse, type NextRequest } from "next/server";
 
 import { isEmailAllowed } from "@/lib/auth/allowlist";
 
+export function isPublicPath(path: string): boolean {
+  return (
+    path.startsWith("/login") ||
+    path.startsWith("/auth") ||
+    path.startsWith("/api/webhooks") ||
+    path.startsWith("/api/cron") ||
+    path.startsWith("/api/internal/jitter")
+  );
+}
+
 export async function updateSession(request: NextRequest) {
   let supabaseResponse = NextResponse.next({ request });
 
@@ -32,11 +42,7 @@ export async function updateSession(request: NextRequest) {
   } = await supabase.auth.getUser();
 
   const path = request.nextUrl.pathname;
-  const isPublic =
-    path.startsWith("/login") ||
-    path.startsWith("/auth") ||
-    path.startsWith("/api/webhooks") ||
-    path.startsWith("/api/cron");
+  const isPublic = isPublicPath(path);
 
   if (!user && !isPublic) {
     // Preserve the original path + query so the login flow can bounce the
