@@ -6,6 +6,7 @@ import {
   resetTenantTables,
   seedProspects,
 } from "./fixtures";
+import { clickMenuItemByTestId } from "./menu-helpers";
 
 /**
  * Feature 8 Phase 2 — Unknown sender triage. Covers:
@@ -129,8 +130,11 @@ test("Match flow attaches message + adds phone_2 + backfills siblings", async ({
     .eq("id", prop.id);
 
   await page.goto("/messages?filter=unknown");
-  await page.getByTestId(`unknown-actions-${phone}`).click();
-  await page.getByTestId(`unknown-match-${phone}`).click();
+  await clickMenuItemByTestId(
+    page,
+    `unknown-actions-${phone}`,
+    `unknown-match-${phone}`,
+  );
 
   // Match dialog opens; search by name fragment.
   await page.getByTestId("match-search-input").fill("Existing");
@@ -175,8 +179,11 @@ test("Create flow makes a new contact + property and routes to the lead", async 
   await seedUnknown(admin, { from: phone, body: "fresh inbound" });
 
   await page.goto("/messages?filter=unknown");
-  await page.getByTestId(`unknown-actions-${phone}`).click();
-  await page.getByTestId(`unknown-create-${phone}`).click();
+  await clickMenuItemByTestId(
+    page,
+    `unknown-actions-${phone}`,
+    `unknown-create-${phone}`,
+  );
 
   // Phase 2.5 made the role radio (Homeowner / Agent) required. Pick
   // Homeowner to match this test's original intent.
@@ -229,13 +236,11 @@ test("Dismiss removes from Unknown; Restore brings it back", async ({
   // so a stale handler from a prior interaction can't get consumed before
   // the confirm fires; CI was intermittently hanging here on `once`.
   page.on("dialog", (d) => d.accept());
-  await page.getByTestId(`unknown-actions-${phone}`).click();
-  // Wait for the dropdown menu item to mount before clicking — base-ui
-  // dropdowns animate in, and clicking before the item is rendered drops
-  // the click on the floor. CI saw this race ~1 in 10 runs.
-  const dismissBtn = page.getByTestId(`unknown-dismiss-${phone}`);
-  await expect(dismissBtn).toBeVisible();
-  await dismissBtn.click();
+  await clickMenuItemByTestId(
+    page,
+    `unknown-actions-${phone}`,
+    `unknown-dismiss-${phone}`,
+  );
 
   // Let the server action + router.refresh() settle before polling DB.
   // Without this CI shows the bucket already empty but the DB query

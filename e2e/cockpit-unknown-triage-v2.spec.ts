@@ -6,6 +6,7 @@ import {
   resetTenantTables,
   seedProspects,
 } from "./fixtures";
+import { clickMenuItemByTestId } from "./menu-helpers";
 
 /**
  * Feature 8 Phase 2.5 — Triage UX polish:
@@ -51,6 +52,9 @@ test("Triage dropdown shows the renamed 3 primary options + dismiss after the di
 
   await page.goto("/messages?filter=unknown");
   await page.getByTestId(`unknown-actions-${phone}`).click();
+  await expect(page.getByTestId(`unknown-match-${phone}`)).toBeVisible({
+    timeout: 10_000,
+  });
 
   // The four items in the renamed order.
   await expect(
@@ -120,8 +124,11 @@ test("Merge with existing contact (renamed) still attaches messages + adds phone
     .eq("id", prop.id);
 
   await page.goto("/messages?filter=unknown");
-  await page.getByTestId(`unknown-actions-${phone}`).click();
-  await page.getByTestId(`unknown-match-${phone}`).click();
+  await clickMenuItemByTestId(
+    page,
+    `unknown-actions-${phone}`,
+    `unknown-match-${phone}`,
+  );
   await page.getByTestId("match-search-input").fill("Existing");
   await expect(page.getByTestId(`match-result-${contact!.id}`)).toBeVisible({
     timeout: 10_000,
@@ -156,13 +163,11 @@ test("Merge with existing property — Homeowner role: links homeowner_contact_i
   const [prop] = await seedProspects(admin, 1, "MERGE-PROP-HO");
 
   await page.goto("/messages?filter=unknown");
-  await page.getByTestId(`unknown-actions-${phone}`).click();
-  // Wait for the dropdown menu item to mount before clicking — see the
-  // analogous fix in cockpit-unknown-triage.spec.ts (Dismiss). base-ui
-  // animates the dropdown in; clicking before the item is rendered races.
-  const mergeBtn = page.getByTestId(`unknown-merge-property-${phone}`);
-  await expect(mergeBtn).toBeVisible();
-  await mergeBtn.click();
+  await clickMenuItemByTestId(
+    page,
+    `unknown-actions-${phone}`,
+    `unknown-merge-property-${phone}`,
+  );
 
   await page.getByTestId("merge-property-search-input").fill(prop.address.slice(0, 12));
   await expect(
@@ -213,8 +218,11 @@ test("Merge with existing property — Agent role: links agent_contact_id, creat
   const [prop] = await seedProspects(admin, 1, "MERGE-PROP-AG");
 
   await page.goto("/messages?filter=unknown");
-  await page.getByTestId(`unknown-actions-${phone}`).click();
-  await page.getByTestId(`unknown-merge-property-${phone}`).click();
+  await clickMenuItemByTestId(
+    page,
+    `unknown-actions-${phone}`,
+    `unknown-merge-property-${phone}`,
+  );
   await page.getByTestId("merge-property-search-input").fill(prop.address.slice(0, 12));
   await expect(
     page.getByTestId(`merge-property-result-${prop.id}`),
@@ -255,8 +263,11 @@ test("Create new lead — Homeowner: contact + homeowner_details + property.home
   await seedUnknown(admin, { from: phone, body: "create new homeowner" });
 
   await page.goto("/messages?filter=unknown");
-  await page.getByTestId(`unknown-actions-${phone}`).click();
-  await page.getByTestId(`unknown-create-${phone}`).click();
+  await clickMenuItemByTestId(
+    page,
+    `unknown-actions-${phone}`,
+    `unknown-create-${phone}`,
+  );
 
   await page.getByTestId("role-homeowner").click();
   await page.getByTestId("create-first").fill("Brand");
@@ -302,8 +313,11 @@ test("Create new lead — Agent: contact + agent_details + property.agent_contac
   await seedUnknown(admin, { from: phone, body: "create new agent" });
 
   await page.goto("/messages?filter=unknown");
-  await page.getByTestId(`unknown-actions-${phone}`).click();
-  await page.getByTestId(`unknown-create-${phone}`).click();
+  await clickMenuItemByTestId(
+    page,
+    `unknown-actions-${phone}`,
+    `unknown-create-${phone}`,
+  );
 
   await page.getByTestId("role-agent").click();
   await page.getByTestId("create-first").fill("Listing");

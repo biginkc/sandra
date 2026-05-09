@@ -38,8 +38,19 @@ export function adminClient(): SupabaseClient<Database> {
 export async function resetTenantTables(
   client: SupabaseClient<Database>,
 ): Promise<void> {
-  const { error } = await client.rpc("reset_tenant_tables");
-  if (error) throw new Error(`reset_tenant_tables() failed: ${error.message}`);
+  const maxAttempts = 3;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const { error } = await client.rpc("reset_tenant_tables");
+    if (!error) return;
+
+    const retryable =
+      error.code === "40P01" || error.message.includes("deadlock detected");
+    if (!retryable || attempt === maxAttempts) {
+      throw new Error(`reset_tenant_tables() failed: ${error.message}`);
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, attempt * 250));
+  }
 }
 
 /**

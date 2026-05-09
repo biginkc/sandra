@@ -80,6 +80,7 @@ test("clicking a thread surfaces the loading skeleton during navigation", async 
   // Open with thread A pre-selected so the panel has real data first.
   await page.goto(`/messages?thread=${contactA}`);
   await page.waitForSelector('[data-testid="inbox-detail-panel"]');
+  await page.waitForLoadState("networkidle");
 
   // Throttle the FIRST /messages document round-trip so the skeleton is
   // observable — the live env is fast enough that we'd race otherwise.
@@ -107,16 +108,15 @@ test("clicking a thread surfaces the loading skeleton during navigation", async 
     timeout: 2000,
   });
 
-  // Drop the route handler so the remaining requests aren't throttled.
-  await page.unroute("**/messages*");
-
   // After the round-trip lands, skeleton disappears and the real panel
-  // mounts with thread B's content. Bumped to 20s — CI runners are slow
-  // enough that the throttled doc + RSC fetch + React commit can outrun
-  // 10s on a cold worker.
+  // mounts with thread B's content. The handler throttles only once, so keep
+  // it installed until navigation settles instead of tearing down a route
+  // while its delayed document request may still be in flight.
   await clickPromise;
-  await expect(page.getByTestId("inbox-detail-loading")).toBeHidden({
+  const detailPanel = page.getByTestId("inbox-detail-panel");
+  await expect(detailPanel).toBeVisible({ timeout: 20_000 });
+  await expect(detailPanel).toContainText("body for Bob", { timeout: 20_000 });
+  await expect(page.getByTestId("inbox-detail-loading")).toHaveCount(0, {
     timeout: 20_000,
   });
-  await expect(page.getByTestId("inbox-detail-panel")).toBeVisible();
 });

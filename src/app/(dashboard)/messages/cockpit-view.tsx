@@ -94,10 +94,6 @@ export function CockpitView({
       const sp = new URLSearchParams(searchParams.toString());
       sp.set("thread", contactId);
       router.replace(`/messages?${sp.toString()}`);
-      // Next 16 caches the RSC payload per route; querystring-only
-      // changes hit the cache. Refresh forces a fetch so the new
-      // thread's bubbles + dispo state replace the previous panel.
-      router.refresh();
     },
     [searchParams, router],
   );
@@ -109,8 +105,10 @@ export function CockpitView({
   // after the RSC payload has returned.
   useEffect(() => {
     if (pendingContactId !== null && selectedContactId === pendingContactId) {
-      setPendingContactId(null);
+      const timeout = window.setTimeout(() => setPendingContactId(null), 0);
+      return () => window.clearTimeout(timeout);
     }
+    return undefined;
   }, [pendingContactId, selectedContactId]);
 
   // Skeleton shows when the user has clicked a thread that the server
