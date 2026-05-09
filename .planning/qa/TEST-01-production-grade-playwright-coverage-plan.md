@@ -92,6 +92,10 @@ production-grade by this plan's definition.
   escalation inbound, verifies human-attention state, asserts no outbound
   message is sent, confirms the UI escalation banner, and cleans up
   canary-owned rows.
+- Sequences production canary coverage now seeds a one-step sequence and active
+  enrollment, waits for the production sequence tick to send through the
+  provider, verifies completed enrollment, confirms lead-thread rendering, and
+  cleans up canary-owned rows.
 
 ## Production validation rules
 

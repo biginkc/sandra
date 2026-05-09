@@ -65,3 +65,6 @@ Current coverage:
 - real production AI escalation coverage that signs and posts a keyword
   escalation inbound, verifies human-attention state, asserts no outbound
   message is sent, confirms the UI escalation banner, and cleans up
+- real production sequence coverage that seeds a one-step active sequence,
+  waits for the production sequence tick to send through the provider, verifies
+  completed enrollment and lead-thread rendering, and cleans up
