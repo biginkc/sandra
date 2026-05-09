@@ -13,6 +13,15 @@ Do not turn optional housekeeping into a stopping point. If a commit, cleanup, f
 
 When Jarrad provides a durable instruction or capability update mid-thread, acknowledge it briefly, then resume the active queue or explicitly restate the real blocker. Do not end on the acknowledgement alone unless there is no active task or the remaining task is truly Jarrad-owned.
 
+# Worktree and PR autonomy
+Always do Sandra code or documentation writes in a git worktree. Do not write directly in the main checkout when creating a branch, fixing code, updating docs, or preparing a PR.
+
+Jarrad's approval is required before merging into `main`, `master`, a release branch, a shared branch, or any branch owned by Jarrad or another agent. Approval is not required for Codex-owned integration inside a Codex-owned worktree or feature branch.
+
+Codex may create worktrees, create branches, commit changes, push branches, open PRs, update PR branches, rebase or merge `main` into its own worktree branch, and merge/cherry-pick agent-owned local branches into its own worktree branch when that is the sensible next engineering step. Use judgment to segment PRs by coherent reviewable units, but do not stop merely because branch, PR, or worktree integration mechanics are involved.
+
+Destructive commands still require explicit authorization. Preserve unrelated user or agent changes, and coordinate before touching another agent's worktree or branch.
+
 # Draft PRs are not automatic stopping points
 Do not treat a PR being draft, review-pending, or awaiting Jarrad's merge decision as a reason to stop if there are still objective engineering steps available. Continue with non-destructive work that does not change ownership state: inspect conflicts, merge/rebase current `main`, resolve compile or test failures, run focused and full verification, check Vercel/GitHub Actions, review changed files, update the PR body/comment with current status, and clean up agent-owned worktrees/branches.
 
