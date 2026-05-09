@@ -157,8 +157,8 @@ test("production canary creates a dialer batch and accepts signed Jitter writeba
     await expect(page).not.toHaveURL(/\/login/);
     await page.getByTestId("prospects-search").fill(token);
     await expect(page.getByText(address)).toBeVisible({ timeout: 20_000 });
-    await page
-      .getByRole("checkbox", { name: "Select all prospects on this page" })
+    await page.getByRole("row", { name: new RegExp(address) })
+      .getByRole("checkbox")
       .check();
     await page.getByRole("button", { name: /actions for 1 selected/i }).click();
     await page.getByRole("menuitem", { name: "Create dialer batch" }).click();

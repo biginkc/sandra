@@ -22,11 +22,13 @@ test("production canary creates and archives a canary-owned list", async ({
     await page.goto("/lists");
     await expect(page).not.toHaveURL(/\/login/);
 
-    await page.getByLabel("Name").fill(listName);
+    await page.getByRole("textbox", { name: "Name", exact: true }).fill(listName);
     await page.getByLabel("Description (optional)").fill(description);
     await page.getByRole("button", { name: /^create$/i }).click();
 
-    await expect(page.getByText(listName)).toBeVisible({ timeout: 15_000 });
+    await expect(
+      page.getByTestId("lists-table-container").getByText(listName),
+    ).toBeVisible({ timeout: 15_000 });
 
     const created = await pollUntil(
       async () => {

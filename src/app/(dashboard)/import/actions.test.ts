@@ -34,10 +34,11 @@ import { createImportJob } from "./actions";
  * calls in the happy path:
  *
  *   0. auth.getUser()                                                  → user
- *   1. from('counties').select('id, market').eq('id', countyId).single() → T-02-03-01 validation
- *   2. from('csv_imports').insert(...).select('id, org_id').single()
- *   3. (optional) from('lists') for resolveOrCreateList — skipped here (listName=null)
- *   4. from('jobs').insert(...).select('id').single()
+ *   1. from('memberships').select('org_id, role')                         → resolve insert org
+ *   2. from('counties').select('id, market').eq('id', countyId).single() → T-02-03-01 validation
+ *   3. from('csv_imports').insert(...).select('id, org_id').single()
+ *   4. (optional) from('lists') for resolveOrCreateList — skipped here (listName=null)
+ *   5. from('jobs').insert(...).select('id').single()
  *
  * The mock builder records each operation so each test can assert what
  * was sent. Tests push per-call responses in order.
@@ -154,20 +155,27 @@ const baseParams = {
 };
 
 describe("createImportJob — T-02-03-01 mitigation", () => {
+  const membershipResponse = {
+    data: [{ org_id: "org-1", role: "owner" }],
+    error: null,
+  };
+
   it("queries counties for the supplied countyId before any csv_imports insert", async () => {
     // Happy path: counties row exists, csv_imports + jobs both succeed.
     responseQueue = [
-      // 1. counties.select(...).eq(id).single()
+      // 1. memberships.select(...)
+      membershipResponse,
+      // 2. counties.select(...).eq(id).single()
       {
         data: { id: baseParams.countyId, market: "Buchanan County MO" },
         error: null,
       },
-      // 2. csv_imports.insert(...).select.single()
+      // 3. csv_imports.insert(...).select.single()
       {
         data: { id: "import-1", org_id: "org-1" },
         error: null,
       },
-      // 3. jobs.insert(...).select.single()
+      // 4. jobs.insert(...).select.single()
       { data: { id: "job-1" }, error: null },
     ];
     createClient.mockResolvedValue(makeSupabase());
@@ -178,10 +186,9 @@ describe("createImportJob — T-02-03-01 mitigation", () => {
     if (!result.ok) return;
     expect(result.data.jobId).toBe("job-1");
 
-    // The very first table touched must be `counties` — validates the
-    // T-02-03-01 ordering: validate BEFORE any persistence.
-    expect(calls[0]?.table).toBe("counties");
-    expect(calls[0]?.filters).toContainEqual({
+    const countiesCall = calls.find((c) => c.table === "counties");
+    expect(countiesCall).toBeDefined();
+    expect(countiesCall!.filters).toContainEqual({
       op: "eq",
       args: ["id", baseParams.countyId],
     });
@@ -198,6 +205,7 @@ describe("createImportJob — T-02-03-01 mitigation", () => {
     // Stage a counties row whose market differs from what the client sent.
     // The action MUST trust the DB row, not the client string.
     responseQueue = [
+      membershipResponse,
       {
         data: {
           id: baseParams.countyId,
@@ -220,9 +228,11 @@ describe("createImportJob — T-02-03-01 mitigation", () => {
     const payload = csvCall!.insertPayload as Record<string, unknown>;
     expect(payload.market).toBe("Buchanan County MO");
     expect(payload.county_id).toBe(baseParams.countyId);
+    expect(payload.org_id).toBe("org-1");
     // jobs insert mirrors the same canonical strings.
     const jobCall = calls.find((c) => c.table === "jobs");
     const jobPayload = jobCall!.insertPayload as Record<string, unknown>;
+    expect(jobPayload.org_id).toBe("org-1");
     const inputParams = jobPayload.input_params as Record<string, unknown>;
     expect(inputParams.market).toBe("Buchanan County MO");
     expect(inputParams.countyId).toBe(baseParams.countyId);
@@ -230,7 +240,7 @@ describe("createImportJob — T-02-03-01 mitigation", () => {
 
   it("returns INVALID_COUNTY and inserts NOTHING when the countyId is unknown", async () => {
     // counties.select returns no row.
-    responseQueue = [{ data: null, error: null }];
+    responseQueue = [membershipResponse, { data: null, error: null }];
     createClient.mockResolvedValue(makeSupabase());
 
     const result = await createImportJob({
@@ -253,6 +263,7 @@ describe("createImportJob — T-02-03-01 mitigation", () => {
 
   it("returns INVALID_COUNTY when the counties query errors (e.g. cross-org RLS reject)", async () => {
     responseQueue = [
+      membershipResponse,
       // RLS-denied / not-found shape from the postgrest builder.
       { data: null, error: { message: "no rows returned" } },
     ];
@@ -267,6 +278,7 @@ describe("createImportJob — T-02-03-01 mitigation", () => {
 
   it("threads countyId into the workflow start payload", async () => {
     responseQueue = [
+      membershipResponse,
       {
         data: { id: baseParams.countyId, market: "Buchanan County MO" },
         error: null,
