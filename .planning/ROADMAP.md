@@ -73,7 +73,7 @@
 
 Plans:
 
-- [ ] 04-01-PLAN.md — Wave 0 scaffolding: install @slack/web-api + googleapis, create test placeholders, document env vars
+- [x] 04-01-PLAN.md — Wave 0 scaffolding: install @slack/web-api + googleapis, create test placeholders, document env vars
 - [ ] 04-02-PLAN.md — Migration 052: user_oauth_tokens table + pgcrypto SECURITY DEFINER fns + OAuthSecret + token store
 - [ ] 04-03-PLAN.md — Migration 053: user_integration_prefs (timezone, per-channel toggle) + tasks integration columns + prefs helper
 - [ ] 04-04-PLAN.md — [BLOCKING] Schema-push checkpoint: confirm CI applied 052+053 to prod+test, regenerate types.ts
@@ -127,8 +127,8 @@ See REQUIREMENTS.md > Out of Scope for the full list and rationale.
 
 ## Progress
 
-| Phase                                          | Plans Complete | Status                                                             | Completed  |
-| ---------------------------------------------- | -------------- | ------------------------------------------------------------------ | ---------- |
-| 03. Operational Visibility Surfaces            | —              | Shipped (outside GSD) + V1 Tasks via PR #112                       | 2026-05-06 |
-| 04. Tasks Integrations (V2 — Slack + Calendar) | 0/10           | Plans created — awaiting /gsd-execute-phase 04 (parallel worktree) | —          |
-| 05. Prospects Filter Drawer                    | 0/0            | Plan approved — awaiting /gsd-spec-phase 05                        | —          |
+| Phase                                          | Plans Complete | Status                                       | Completed  |
+| ---------------------------------------------- | -------------- | -------------------------------------------- | ---------- |
+| 03. Operational Visibility Surfaces            | —              | Shipped (outside GSD) + V1 Tasks via PR #112 | 2026-05-06 |
+| 04. Tasks Integrations (V2 — Slack + Calendar) | 1/10           | Plan 01 complete — Wave 0 scaffold shipped   | —          |
+| 05. Prospects Filter Drawer                    | 0/0            | Plan approved — awaiting /gsd-spec-phase 05  | —          |
