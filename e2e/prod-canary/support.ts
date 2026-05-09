@@ -83,6 +83,30 @@ export function assertCanaryOwned(value: string, context: string): void {
   }
 }
 
+export function requireCanarySmsRecipient(): string {
+  const phone = process.env.PROD_CANARY_SMS_TO;
+  const allowlist = (process.env.PROD_CANARY_SMS_ALLOWLIST ?? "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+
+  if (!phone) {
+    throw new Error(
+      "Set PROD_CANARY_SMS_TO to an owned, allowlisted E.164 recipient before running SMS production canaries.",
+    );
+  }
+  if (!/^\+\d{10,15}$/.test(phone)) {
+    throw new Error(`PROD_CANARY_SMS_TO must be E.164. Got ${phone}`);
+  }
+  if (!allowlist.includes(phone)) {
+    throw new Error(
+      "PROD_CANARY_SMS_TO must also appear in PROD_CANARY_SMS_ALLOWLIST before a provider-backed canary can send.",
+    );
+  }
+
+  return phone;
+}
+
 export async function deleteCanaryListsByName(
   client: SupabaseClient<Database>,
   name: string,
@@ -177,6 +201,49 @@ export async function deleteCanaryImportArtifactsByFilename(
   }
 }
 
+export async function deleteCanaryContactsByLastName(
+  client: SupabaseClient<Database>,
+  lastName: string,
+): Promise<void> {
+  assertCanaryOwned(lastName, "contact last name");
+
+  const { data: contacts, error: lookupError } = await client
+    .from("contacts")
+    .select("id, last_name")
+    .eq("last_name", lastName);
+  if (lookupError) {
+    throw new Error(`Could not look up canary contacts: ${lookupError.message}`);
+  }
+
+  const ids = (contacts ?? []).map((contact) => contact.id);
+  if (ids.length === 0) return;
+
+  const { error: messageError } = await client
+    .from("messages")
+    .delete()
+    .in("contact_id", ids);
+  if (messageError) {
+    throw new Error(
+      `Could not delete canary contact messages: ${messageError.message}`,
+    );
+  }
+
+  const { error: consentError } = await client
+    .from("consent_events")
+    .delete()
+    .in("contact_id", ids);
+  if (consentError) {
+    throw new Error(
+      `Could not delete canary contact consent events: ${consentError.message}`,
+    );
+  }
+
+  const { error: contactError } = await client.from("contacts").delete().in("id", ids);
+  if (contactError) {
+    throw new Error(`Could not delete canary contacts: ${contactError.message}`);
+  }
+}
+
 export async function deleteCanarySmsTemplatesByName(
   client: SupabaseClient<Database>,
   name: string,
@@ -249,9 +316,11 @@ export async function insertCanaryProspect(
         | "arv"
         | "cass_status"
         | "equity_estimate"
+        | "homeowner_contact_id"
         | "is_vacant"
         | "market"
         | "source"
+        | "state"
         | "status"
       >
     >;
@@ -292,9 +361,11 @@ export async function insertCanaryProspects(
         | "arv"
         | "cass_status"
         | "equity_estimate"
+        | "homeowner_contact_id"
         | "is_vacant"
         | "market"
         | "source"
+        | "state"
         | "status"
       >
     >;

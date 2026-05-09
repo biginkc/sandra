@@ -48,3 +48,7 @@ Current coverage:
 - real production SMS template lifecycle coverage that creates, edits,
   soft-deletes, verifies persisted state, verifies visible table state, and
   hard-cleans canary-owned template rows
+- real production outbound SMS coverage that requires an allowlisted recipient,
+  sends through the lead-detail UI, verifies the provider-backed message row is
+  `sent`, confirms thread visibility, and cleans up canary-owned contact,
+  consent, property, and message rows
