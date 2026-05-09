@@ -77,7 +77,7 @@ Plans:
 - [x] 04-02-PLAN.md — Migration 060: user_oauth_tokens table + pgcrypto SECURITY DEFINER fns + OAuthSecret + token store
 - [x] 04-03-PLAN.md — Migration 061: user_integration_prefs (timezone, per-channel toggle) + tasks integration columns + prefs helper
 - [x] 04-04-PLAN.md — Schema-push checkpoint: confirm CI applied 060+061 to prod+test, regenerate types.ts
-- [ ] 04-05-PLAN.md — Slack OAuth: signature/state utils + start route + callback route + middleware allowlist
+- [x] 04-05-PLAN.md — Slack OAuth: signature/state utils + start route + callback route + middleware allowlist
 - [ ] 04-06-PLAN.md — Google OAuth: code exchange + start route + callback route (calendar.events scope, prompt=consent)
 - [ ] 04-07-PLAN.md — Slack DM dispatcher + Block Kit composer + interactivity webhook (Mark Done)
 - [ ] 04-08-PLAN.md — Google Calendar dispatcher: events.insert + events.update (no delete on completion per D-07)
