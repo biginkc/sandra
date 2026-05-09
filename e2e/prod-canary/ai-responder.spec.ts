@@ -6,6 +6,7 @@ import {
   fireSignedDialpadInbound,
   insertCanaryProspect,
   pollUntil,
+  requireCanarySmsRecipient,
   requireDialpadWebhookTarget,
   requireProdCanaryEnv,
   requireProdCanarySupabase,
@@ -36,7 +37,7 @@ test("production canary verifies AI responder happy path in the lead thread", as
   const supabase = requireProdCanarySupabase();
   const crmNumber = requireDialpadWebhookTarget();
   const token = env.runId.replace(/[^a-zA-Z0-9-]/g, "-");
-  const phone = `+1555${Date.now().toString().slice(-7)}`;
+  const phone = requireCanarySmsRecipient();
   const address = `${env.label} AI ${token} 1101 Responder Ct`;
   const contactLastName = `PROD-CANARY AI ${token}`;
   const inboundBody = "yes I'd like to hear more about selling my property";
