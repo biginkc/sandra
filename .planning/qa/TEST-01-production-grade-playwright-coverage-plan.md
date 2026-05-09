@@ -59,6 +59,10 @@ production-grade by this plan's definition.
   starts the real import job, verifies the uploaded storage path, terminal job
   state, persisted prospect rows, and visible prospects table results, then
   cleans up storage/import/job/property artifacts.
+- Lead qualification production canary coverage now creates a canary-owned
+  prospect, promotes it through the real properties bulk action UI, verifies the
+  persisted `new_lead` state and qualification stamp, confirms it renders on
+  `/leads`, and cleans up the canary property.
 
 ## Production validation rules
 
@@ -93,7 +97,7 @@ Every production-grade Playwright test must follow these rules.
 | Saved filter state | Save a filter or preset if supported, reload, apply it, and remove it. | Production app, production DB. | Saved filter/preset row. | Some UI filter behavior exists in test E2E. | Production saved-filter Playwright coverage. | Name with `PROD-CANARY`; delete saved preset after test. | P1 | Pre-release |
 | Lists | Create a list, add canary properties, filter by the list, remove members, and delete the list. | Production app, production DB. | List rows and list membership rows. | Test/project list-filter coverage exists. | Production list CRUD and list-filter Playwright spec. | Canary list name; cleanup memberships before list. | P0 | Pre-release |
 | Large lists | Create or select a large canary-safe list and verify large-list filtering does not create oversized requests or 400s. | Production app, production DB. | Canary list and many membership rows, unless using an existing canary list. | Large-list bug has regression coverage outside production UI. | Production Playwright proof for large-list filter path. | Use generated canary members or a dedicated reusable canary list. | P0 | Pre-release |
-| Lead qualification | Qualify a canary prospect into a lead and verify it appears in the pipeline. | Production app, production DB. | Lead row, prospect status/linkage updates, activity rows if created. | Test-project qualify flow exists. | Production qualify Playwright spec. | Canary prospect only; cleanup lead and linked rows. | P0 | Pre-release |
+| Lead qualification | Qualify a canary prospect into a lead and verify it appears in the pipeline. | Production app, production DB. | Lead row, prospect status/linkage updates, activity rows if created. | Test-project qualify flow exists; production canary creates a canary prospect, promotes it through the UI, verifies persisted `new_lead` state, and confirms `/leads` visibility. | Add scheduled workflow wiring once production canary secrets are installed. | Canary prospect only; cleanup lead and linked rows. | P0 | Pre-release |
 | Lead management | Open a canary lead, edit details, assign owner/status, and verify persistence after reload. | Production app, production DB. | Lead updates, assignment/status rows if applicable. | Test-project cockpit/lead detail specs exist. | Production lead detail Playwright spec. | Dedicated canary lead; restore/delete after run. | P1 | Pre-release |
 | Kanban | Drag a canary lead between pipeline columns and verify persisted status. | Production app, production DB. | Lead status/stage updates. | Test-project Kanban drag spec exists. | Production Kanban Playwright spec. | Canary lead only; cleanup or restore original status. | P1 | Pre-release |
 | Messaging outbound | Send an SMS from the UI to an owned allowlisted number and verify provider send plus UI thread update. | Production app, production DB, real SMS provider. | Message row, provider delivery/log row, contact activity. | Script-level production SMS canaries exist. | Production Playwright outbound SMS spec. | Allowlisted recipient; message body includes canary run id. | P0 | Pre-release and scheduled |
