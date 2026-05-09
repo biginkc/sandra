@@ -26,7 +26,7 @@ async function seedAssignedThread(
     offsetMin?: number;
   },
 ): Promise<{ contactId: string; propertyId: string }> {
-  const { data: contact } = await admin
+  const { data: contact, error: contactErr } = await admin
     .from("contacts")
     .insert({
       first_name: "Assign",
@@ -35,9 +35,11 @@ async function seedAssignedThread(
     })
     .select("id")
     .single();
-  if (!contact) throw new Error("contact seed failed");
+  if (contactErr || !contact) {
+    throw new Error(`contact seed failed: ${contactErr?.message ?? "no row"}`);
+  }
   const [prop] = await seedProspects(admin, 1, opts.addressTag);
-  await admin
+  const { error: propertyErr } = await admin
     .from("properties")
     .update({
       homeowner_contact_id: contact.id,
@@ -45,7 +47,10 @@ async function seedAssignedThread(
       status: "new_lead",
     })
     .eq("id", prop.id);
-  await admin.from("messages").insert({
+  if (propertyErr) {
+    throw new Error(`property assignment seed failed: ${propertyErr.message}`);
+  }
+  const { error: messageErr } = await admin.from("messages").insert({
     channel: "sms",
     direction: "inbound",
     status: "received",
@@ -54,8 +59,23 @@ async function seedAssignedThread(
     from_address: opts.phone,
     to_address: "+18162804181",
     body: opts.body ?? "thread for assignment test",
-    created_at: new Date(Date.now() + (opts.offsetMin ?? -10) * 60_000).toISOString(),
+    created_at: new Date(
+      Date.now() + (opts.offsetMin ?? -10) * 60_000,
+    ).toISOString(),
   });
+  if (messageErr) {
+    throw new Error(`message seed failed: ${messageErr.message}`);
+  }
+  await expect(async () => {
+    const { data, error } = await admin
+      .from("properties")
+      .select("id, assigned_user_id, homeowner_contact_id, messages!inner(id)")
+      .eq("id", prop.id)
+      .eq("homeowner_contact_id", contact.id)
+      .single();
+    expect(error).toBeNull();
+    expect(data?.id).toBe(prop.id);
+  }).toPass({ timeout: 10_000 });
   return { contactId: contact.id, propertyId: prop.id };
 }
 
@@ -115,9 +135,7 @@ test('Side panel shows "Assign to me" on an unassigned thread; clicking it assig
 
   // After assignment, the pill is replaced by the dropdown trigger.
   await expect(page.getByTestId("assign-to-me")).toHaveCount(0);
-  await expect(
-    page.getByTestId("assign-dropdown-trigger"),
-  ).toBeVisible();
+  await expect(page.getByTestId("assign-dropdown-trigger")).toBeVisible();
 });
 
 test("Assignee dropdown can unassign and reassign via the picker", async ({
@@ -138,7 +156,9 @@ test("Assignee dropdown can unassign and reassign via the picker", async ({
   const trigger = page.getByTestId("assign-dropdown-trigger");
   await expect(trigger).toBeVisible();
   await trigger.click();
-  await page.getByTestId("assign-dropdown-unassign").click();
+  const unassign = page.getByTestId("assign-dropdown-unassign");
+  await expect(unassign).toBeVisible();
+  await unassign.click();
 
   await expect(async () => {
     const { data: p } = await admin

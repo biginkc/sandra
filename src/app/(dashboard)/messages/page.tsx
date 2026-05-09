@@ -158,7 +158,8 @@ export default async function MessagesPage({
       ? (r.contact.entity_name ??
         ([r.contact.first_name, r.contact.last_name]
           .filter(Boolean)
-          .join(" ") || null))
+          .join(" ") ||
+          null))
       : null,
     contactPhone: r.contact?.phone_1 ?? null,
   }));
@@ -188,6 +189,7 @@ export default async function MessagesPage({
       filter={filter}
       threads={visibleThreads}
       queued={queued}
+      selectedContactId={selectedContactId}
       threadDetail={threadDetail}
       unknownSenders={unknownSenders}
       unknownActiveCount={unknownActive.length}
