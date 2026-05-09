@@ -9,13 +9,16 @@
  */
 
 /**
- * Static state → IANA zone lookup. Covers BMH's four markets first, then
+ * State (USPS 2-letter) -> IANA timezone string. Re-exported for cross-module
+ * reuse by the dialer (Jitter Phase 1, migration 058).
+ *
+ * Covers BMH's four markets first, then
  * a fallback table for the rest of the US. States that span multiple
  * zones (AK, AZ, FL, ID, IN, KS, KY, MI, NE, ND, OR, SD, TN, TX) pick
  * the MOST-populated zone, which is wrong in border towns but a safe
  * default until we drive this off zip.
  */
-const STATE_TO_TZ: Record<string, string> = {
+export const STATE_TO_TZ: Record<string, string> = {
   // BMH markets (confirmed)
   MO: "America/Chicago", // Kansas City, St. Louis, Lake of the Ozarks
   OH: "America/New_York", // Dayton

@@ -70,6 +70,7 @@ import {
 } from "../leads/actions";
 import { requestSkipTrace } from "@/lib/skip-trace/actions";
 import { getAllMatchingProspectIds } from "./actions";
+import { BatchCreateModal } from "./batch-create-modal";
 import { BulkSmsModal } from "./bulk-sms-modal";
 
 export type ProspectRow = {
@@ -163,6 +164,7 @@ export function ProspectsTable({
   const router = useRouter();
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [pending, startTransition] = useTransition();
+  const [showBatchCreate, setShowBatchCreate] = useState(false);
   const [showBulkSms, setShowBulkSms] = useState(false);
   const [filterNavPending, setFilterNavPending] = useState(false);
   const [filterNavTargetKey, setFilterNavTargetKey] = useState<string | null>(
@@ -572,6 +574,9 @@ export function ProspectsTable({
                   <DropdownMenuItem onClick={() => setShowBulkSms(true)}>
                     Bulk SMS
                   </DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => setShowBatchCreate(true)}>
+                    Create dialer batch
+                  </DropdownMenuItem>
 
                 <DropdownMenuSeparator />
 
@@ -726,6 +731,17 @@ export function ProspectsTable({
           setSelected(new Set());
           router.refresh();
         }}
+      />
+      <BatchCreateModal
+        open={showBatchCreate}
+        onClose={() => setShowBatchCreate(false)}
+        selectedIds={selectAllMatching ? undefined : selectedIds()}
+        filterArgs={
+          selectAllMatching
+            ? { search: search.length === 0 ? null : search, blockStack }
+            : undefined
+        }
+        totalCount={selectAllMatching ? total : selected.size}
       />
 
       <DataTableShell

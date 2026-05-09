@@ -33,6 +33,10 @@ import { LeadMotivationWidget } from "./motivation-widget";
 import { LeadStatusWidget } from "./status-widget";
 import { MessagesThread } from "./messages-thread";
 import { NotesFeed } from "./notes-feed";
+import {
+  LeadCallSummary,
+  type CallActivityRollupRow,
+} from "./lead-call-summary";
 import { SmsComposer } from "./sms-composer";
 import { TagsSection } from "./tags-section";
 import type { MotivationLevel } from "../actions";
@@ -144,6 +148,17 @@ export default async function LeadDetailPage({
     .order("created_at", { ascending: false })
     .limit(200);
   const initialNotes = (notesRaw ?? []) as LeadNoteRow[];
+
+  const { data: callRollupRaw } = await (supabase as any)
+    .from("call_activities")
+    .select(
+      "id, started_at, outcome, disposition, recording_status, transcript_status",
+    )
+    .eq("property_id", lead.id)
+    .order("started_at", { ascending: false, nullsFirst: false })
+    .limit(20);
+  const initialCallRows =
+    (callRollupRaw ?? []) as unknown as CallActivityRollupRow[];
 
   // Tags attached to this property, with the tag row joined inline.
   const { data: tagRowsRaw } = await supabase
@@ -507,13 +522,20 @@ export default async function LeadDetailPage({
         <div className="text-muted-foreground mb-2 text-xs font-semibold tracking-wide uppercase">
           Notes
         </div>
-        <div className="border-border rounded-md border p-3">
-          <NotesFeed
+        <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_320px]">
+          <div className="border-border rounded-md border p-3">
+            <NotesFeed
+              propertyId={lead.id}
+              initial={initialNotes}
+              authorEmails={authorEmails}
+              currentUserId={sessionUser?.id ?? null}
+              currentUserEmail={sessionUser?.email ?? null}
+            />
+          </div>
+          <LeadCallSummary
             propertyId={lead.id}
-            initial={initialNotes}
-            authorEmails={authorEmails}
-            currentUserId={sessionUser?.id ?? null}
-            currentUserEmail={sessionUser?.email ?? null}
+            initialRows={initialCallRows}
+            jitterHost={process.env.NEXT_PUBLIC_JITTER_HOST ?? ""}
           />
         </div>
       </div>
