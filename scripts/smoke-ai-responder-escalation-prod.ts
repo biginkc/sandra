@@ -76,6 +76,21 @@ async function main(): Promise<void> {
       source: TAG,
     });
 
+    const { error: anchorErr } = await supabase.from("messages").insert({
+      org_id: orgId,
+      channel: "sms",
+      direction: "outbound",
+      status: "sent",
+      provider: "prod-canary",
+      body: `${TAG} outbound anchor`,
+      contact_id: contactId,
+      property_id: propertyId,
+      from_address: CRM_NUMBER,
+      to_address: PHONE,
+      metadata: { canary_anchor: TAG },
+    });
+    if (anchorErr) throw anchorErr;
+
     // ---- Fire inbound webhook ---------------------------------------------
     const status = await fireInboundWebhook({
       id: `${TAG}-inbound`,
@@ -115,12 +130,13 @@ async function main(): Promise<void> {
     // ---- Assert NO outbound was sent --------------------------------------
     const { data: outbounds } = await supabase
       .from("messages")
-      .select("id, body")
+      .select("id, body, metadata")
       .eq("property_id", propertyId)
-      .eq("direction", "outbound");
+      .eq("direction", "outbound")
+      .contains("metadata", { generated_by: "ai_responder_v1" });
     if (outbounds && outbounds.length > 0) {
       throw new Error(
-        `Expected no outbound after escalation, got ${outbounds.length}: ${JSON.stringify(outbounds)}`,
+        `Expected no AI outbound after escalation, got ${outbounds.length}: ${JSON.stringify(outbounds)}`,
       );
     }
 

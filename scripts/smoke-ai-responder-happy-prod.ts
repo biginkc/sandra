@@ -107,6 +107,21 @@ async function main(): Promise<void> {
     });
     if (consentErr) throw consentErr;
 
+    const { error: anchorErr } = await supabase.from("messages").insert({
+      org_id: orgId,
+      channel: "sms",
+      direction: "outbound",
+      status: "sent",
+      provider: "prod-canary",
+      body: `${TAG} outbound anchor`,
+      contact_id: contactId,
+      property_id: propertyId,
+      from_address: CRM_NUMBER,
+      to_address: PHONE,
+      metadata: { canary_anchor: TAG },
+    });
+    if (anchorErr) throw anchorErr;
+
     // ---- Fire inbound webhook ---------------------------------------------
     const status = await fireInboundWebhook({
       id: `${TAG}-inbound`,
