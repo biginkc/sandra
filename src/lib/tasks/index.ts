@@ -1,7 +1,10 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { after } from "next/server";
 
 import type { Result } from "@/lib/errors/result";
 import { err, ok } from "@/lib/errors/result";
+import { dispatchTaskCalendarEventUpdate } from "@/lib/integrations/google/dispatch";
+import { loadIntegrationPrefs } from "@/lib/integrations/prefs";
 import type { Database, Tables } from "@/lib/supabase/types";
 
 export type Task = Tables<"tasks">;
@@ -116,6 +119,7 @@ export async function snoozeTask(
       message: error?.message ?? "Failed to snooze task",
     });
   }
+  await scheduleCalendarUpdateAfterSnooze(supabase, data);
   return ok(data);
 }
 
@@ -142,4 +146,54 @@ export async function reassignTask(
     });
   }
   return ok(data);
+}
+
+async function scheduleCalendarUpdateAfterSnooze(
+  supabase: SupabaseClient<Database>,
+  task: Task,
+): Promise<void> {
+  if (!task.assignee_id || !task.related_property_id || !task.due_at) return;
+
+  const propertyAddress = await loadTaskPropertyAddress(
+    supabase,
+    task.related_property_id,
+  );
+  const prefs = await loadIntegrationPrefs(supabase, task.assignee_id);
+  const deepLink = buildTaskDeepLink(task.related_property_id);
+
+  after(async () => {
+    await dispatchTaskCalendarEventUpdate({
+      taskId: task.id,
+      assigneeId: task.assignee_id,
+      taskTitle: task.title,
+      propertyAddress,
+      dueAt: task.due_at,
+      timezone: prefs.timezone,
+      deepLink,
+      calendarEnabled: prefs.calendarEnabled,
+    });
+  });
+}
+
+async function loadTaskPropertyAddress(
+  supabase: SupabaseClient<Database>,
+  propertyId: string,
+): Promise<string> {
+  const { data } = await supabase
+    .from("properties")
+    .select("address")
+    .eq("id", propertyId)
+    .maybeSingle();
+  return data?.address ?? "Property";
+}
+
+function buildTaskDeepLink(propertyId: string): string {
+  const baseUrl =
+    process.env.NEXT_PUBLIC_APP_URL ??
+    process.env.APP_URL ??
+    "https://sandra-sooty.vercel.app";
+  const normalizedBaseUrl = baseUrl.startsWith("http")
+    ? baseUrl
+    : `https://${baseUrl}`;
+  return `${normalizedBaseUrl}/messages?property_id=${propertyId}`;
 }

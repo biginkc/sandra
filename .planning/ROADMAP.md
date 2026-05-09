@@ -82,7 +82,7 @@ Plans:
 - [x] 04-07-PLAN.md — Slack DM dispatcher + Block Kit composer + interactivity webhook (Mark Done)
 - [x] 04-08-PLAN.md — Google Calendar dispatcher: events.insert + events.update (no delete on completion per D-07)
 - [x] 04-09-PLAN.md — /settings/integrations page: connect/disconnect, per-channel toggle, timezone dropdown
-- [ ] 04-10-PLAN.md — Wire dispatchers into setOutreachDispo via after() Promise.allSettled + manual smoke checkpoint
+- [x] 04-10-PLAN.md — Wire dispatchers into setOutreachDispo via after() Promise.allSettled + manual smoke checkpoint
 
 **UI hint**: yes — `/settings/integrations` connection UI is new; existing dashboard panel + notifications bell are unchanged.
 
@@ -130,5 +130,5 @@ See REQUIREMENTS.md > Out of Scope for the full list and rationale.
 | Phase                                          | Plans Complete | Status                                       | Completed  |
 | ---------------------------------------------- | -------------- | -------------------------------------------- | ---------- |
 | 03. Operational Visibility Surfaces            | —              | Shipped (outside GSD) + V1 Tasks via PR #112 | 2026-05-06 |
-| 04. Tasks Integrations (V2 — Slack + Calendar) | 9/10           | Plan 09 complete — settings UI ready; dispatcher wiring remains | —          |
+| 04. Tasks Integrations (V2 — Slack + Calendar) | 10/10          | Plan 10 complete — dispatch wiring ready for prod smoke | —          |
 | 05. Prospects Filter Drawer                    | 0/0            | Plan approved — awaiting /gsd-spec-phase 05  | —          |

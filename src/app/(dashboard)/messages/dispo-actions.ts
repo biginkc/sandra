@@ -1,9 +1,13 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
+import { after } from "next/server";
 
 import { recordConsentEvent } from "@/lib/messaging/consent";
 import { reportError } from "@/lib/errors/report";
+import { dispatchTaskCalendarEvent } from "@/lib/integrations/google/dispatch";
+import { loadIntegrationPrefs } from "@/lib/integrations/prefs";
+import { dispatchTaskAssignedSlack } from "@/lib/integrations/slack/dispatch";
 import { dispatchTaskAssigned } from "@/lib/notifications/dispatch";
 import { pauseContactEnrollments } from "@/lib/sequences/enrollment";
 import { createClient } from "@/lib/supabase/server";
@@ -120,14 +124,41 @@ export async function setOutreachDispo(
       });
     } else if (resolvedAssignee !== user.id) {
       // Notify the assignee — never notify yourself for self-assigned tasks.
-      await dispatchTaskAssigned(supabase, {
-        taskId: taskResult.data.id,
-        orgId: prop.org_id,
-        assigneeId: resolvedAssignee,
-        taskTitle,
-        taskType,
-        dueAt: followUpAt,
-        propertyAddress: prop.address,
+      const prefs = await loadIntegrationPrefs(supabase, resolvedAssignee);
+      const deepLink = buildTaskDeepLink(prop.id);
+      after(async () => {
+        await Promise.allSettled([
+          dispatchTaskAssigned(supabase, {
+            taskId: taskResult.data.id,
+            orgId: prop.org_id,
+            assigneeId: resolvedAssignee,
+            taskTitle,
+            taskType,
+            dueAt: followUpAt,
+            propertyAddress: prop.address,
+          }),
+          dispatchTaskAssignedSlack({
+            taskId: taskResult.data.id,
+            assigneeId: resolvedAssignee,
+            taskTitle,
+            taskType,
+            dueAt: followUpAt,
+            propertyAddress: prop.address,
+            deepLink,
+            timezone: prefs.timezone,
+            slackEnabled: prefs.slackEnabled,
+          }),
+          dispatchTaskCalendarEvent({
+            taskId: taskResult.data.id,
+            assigneeId: resolvedAssignee,
+            taskTitle,
+            propertyAddress: prop.address,
+            dueAt: followUpAt,
+            timezone: prefs.timezone,
+            deepLink,
+            calendarEnabled: prefs.calendarEnabled,
+          }),
+        ]);
       });
     }
   }
@@ -161,4 +192,15 @@ export async function setOutreachDispo(
   revalidatePath("/properties");
 
   return { ok: true };
+}
+
+function buildTaskDeepLink(propertyId: string): string {
+  const baseUrl =
+    process.env.NEXT_PUBLIC_APP_URL ??
+    process.env.APP_URL ??
+    "https://sandra-sooty.vercel.app";
+  const normalizedBaseUrl = baseUrl.startsWith("http")
+    ? baseUrl
+    : `https://${baseUrl}`;
+  return `${normalizedBaseUrl}/messages?property_id=${propertyId}`;
 }
