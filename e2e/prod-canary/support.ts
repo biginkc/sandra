@@ -4,8 +4,11 @@ import { createHash, createHmac } from "node:crypto";
 import {
   DEFAULT_PROD_BASE_URL,
   assertProdSupabaseUrl,
+  loadProdCanaryEnvFiles,
 } from "../../src/lib/prod-canary/env";
 import type { Database } from "../../src/lib/supabase/types";
+
+loadProdCanaryEnvFiles();
 
 export const PROD_CANARY_AUTH_FILE = "e2e/.auth/prod-canary.json";
 
