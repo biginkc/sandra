@@ -84,13 +84,22 @@ export type QuietHoursCheck =
       zone: string | null;
     };
 
+function currentQuietHoursTime(): Date {
+  const override = process.env.E2E_QUIET_HOURS_NOW;
+  if (override) {
+    const parsed = new Date(override);
+    if (!Number.isNaN(parsed.getTime())) return parsed;
+  }
+  return new Date();
+}
+
 /**
  * Is `now` inside the send window for a property in `state`? Pass `now`
  * in unit tests to pin a specific moment; defaults to current time.
  */
 export function checkQuietHours(
   state: string | null | undefined,
-  now: Date = new Date(),
+  now: Date = currentQuietHoursTime(),
 ): QuietHoursCheck {
   if (!state) {
     return {
