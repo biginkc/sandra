@@ -81,6 +81,9 @@ production-grade by this plan's definition.
   webhook to production, verifies the persisted `received` message row, confirms
   lead-thread rendering, and cleans up canary-owned contact, property, and
   message rows.
+- STOP/DNC production canary coverage now posts a signed STOP webhook to
+  production, verifies opt-out consent, contact suppression, sequence enrollment
+  pause, lead-thread rendering, blocked-send UI feedback, and canary cleanup.
 
 ## Production validation rules
 

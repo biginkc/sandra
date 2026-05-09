@@ -56,3 +56,6 @@ Current coverage:
 - real production inbound SMS coverage that signs and posts a Dialpad-shaped
   webhook, verifies the `received` message row, confirms lead-thread
   visibility, and cleans up canary-owned contact, property, and message rows
+- real production STOP/DNC coverage that signs and posts a STOP webhook,
+  verifies opt-out consent, contact suppression, sequence enrollment pause,
+  lead-thread visibility, blocked-send UI feedback, and canary cleanup
