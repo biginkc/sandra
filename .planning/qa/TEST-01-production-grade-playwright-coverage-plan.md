@@ -45,6 +45,13 @@ production-grade by this plan's definition.
 - The first canary-owned prospects Playwright path inserts a production
   prospect, finds it through real UI search, verifies persisted state, and
   deletes only that canary-owned property.
+- Production drawer filter canary coverage now creates canary-owned prospects,
+  a canary-owned list, applies List + Equity + CASS controls through the UI,
+  verifies the exact expected prospect row, and cleans up only canary-owned
+  rows.
+- Large-list production filter canary coverage now creates a 275-property
+  canary-owned list, applies the List filter through the UI, verifies the
+  expected total, and asserts the Bad Request failure class does not recur.
 
 ## Production validation rules
 

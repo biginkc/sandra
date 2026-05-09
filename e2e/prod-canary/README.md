@@ -26,3 +26,7 @@ Current coverage:
 - real production auth and shell navigation
 - real production list create/archive/delete cleanup for canary-owned rows
 - real production prospect insert/search/delete cleanup for canary-owned rows
+- real production drawer filter controls against canary-owned prospect rows and
+  list membership data
+- real production large-list filter coverage that creates 275 canary-owned
+  prospects and verifies the UI avoids Bad Request failures
