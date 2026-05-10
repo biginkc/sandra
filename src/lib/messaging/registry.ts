@@ -2,7 +2,6 @@ import { ConfigurationError } from "@/lib/errors/classes";
 
 import { dialpadFromEnv } from "./providers/dialpad";
 import { MockMessagingProvider } from "./providers/mock";
-import { twilioFromEnv } from "./providers/twilio";
 import type { MessagingProvider } from "./types";
 
 /**
@@ -14,8 +13,12 @@ import type { MessagingProvider } from "./types";
  * `mock` is reserved for the integration test suite and for exercising
  * the UI without real Dialpad credentials. Production never sets
  * MESSAGING_PROVIDER=mock.
+ *
+ * Twilio is dynamically imported so Dialpad-only deployments do not pull the
+ * Twilio provider and its crypto-heavy import graph into every messaging
+ * consumer.
  */
-export function getMessagingProvider(): MessagingProvider | null {
+export async function getMessagingProvider(): Promise<MessagingProvider | null> {
   const provider = process.env.MESSAGING_PROVIDER?.toLowerCase().trim();
   if (!provider) return null;
 
@@ -24,8 +27,10 @@ export function getMessagingProvider(): MessagingProvider | null {
       return dialpadFromEnv();
     case "mock":
       return new MockMessagingProvider();
-    case "twilio":
+    case "twilio": {
+      const { twilioFromEnv } = await import("./providers/twilio");
       return twilioFromEnv();
+    }
     default:
       throw new ConfigurationError(
         `Unknown MESSAGING_PROVIDER: ${provider}`,
