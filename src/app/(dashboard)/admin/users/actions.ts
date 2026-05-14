@@ -1,5 +1,7 @@
 "use server";
 
+import { headers } from "next/headers";
+
 import { ALLOWED_DOMAIN, isAdminEmail } from "@/lib/auth/allowlist";
 import { errFromUnknown, ok, type Result } from "@/lib/errors/result";
 import { reportError } from "@/lib/errors/report";
@@ -8,19 +10,43 @@ import { createClient } from "@/lib/supabase/server";
 
 type MembershipAdminClient = {
   from(table: "memberships"): {
-    insert(values: {
-      user_id: string;
-      org_id: string;
-      role: "owner" | "member";
-    }): Promise<{ error: { message: string } | null }>;
+    upsert(
+      values: {
+        user_id: string;
+        org_id: string;
+        role: "owner" | "member";
+      },
+      options: { onConflict: "user_id,org_id" },
+    ): Promise<{ error: { message: string } | null }>;
   };
 };
 
+const FALLBACK_SITE_URL = "https://sandra-sooty.vercel.app";
+
+function firstForwarded(value: string | null): string | null {
+  const first = value?.split(",")[0]?.trim();
+  return first && first.length > 0 ? first : null;
+}
+
+async function inviteRedirectTo(): Promise<string> {
+  const h = await headers();
+  const proto = firstForwarded(h.get("x-forwarded-proto")) ?? "https";
+  const host = firstForwarded(h.get("x-forwarded-host")) ?? h.get("host");
+
+  if (host) {
+    return `${proto}://${host}/auth/accept-invite`;
+  }
+
+  const configured = process.env.NEXT_PUBLIC_SITE_URL?.trim();
+  const base = configured && configured.length > 0 ? configured : FALLBACK_SITE_URL;
+  return `${base.replace(/\/$/, "")}/auth/accept-invite`;
+}
+
 /**
  * Invite a teammate. Admin-only. Uses Supabase's built-in invite flow:
- * Supabase sends a branded email with a one-time link → recipient
- * clicks → lands on /auth/callback → redirected to /auth/set-password
- * → picks a password → signed in.
+ * Supabase sends a branded email with a one-time link. Admin invites are
+ * implicit-flow links, so the browser lands on /auth/accept-invite to store
+ * the fragment tokens as cookies before redirecting to /auth/set-password.
  *
  * Strict about the email: must be `@bmhgroupkc.com` (the allowed
  * domain). Non-admins can't call this — they'd hit the same guard on
@@ -58,10 +84,7 @@ export async function inviteUser(
     }
 
     const admin = createAdminClient();
-    const redirectTo =
-      (process.env.NEXT_PUBLIC_SITE_URL ??
-        "https://sandra-jarrad-5416s-projects.vercel.app") +
-      "/auth/callback?type=invite";
+    const redirectTo = await inviteRedirectTo();
     const { data, error } = await admin.auth.admin.inviteUserByEmail(
       trimmed,
       {
@@ -85,7 +108,10 @@ export async function inviteUser(
       admin as unknown as MembershipAdminClient
     )
       .from("memberships")
-      .insert({ user_id: data.user.id, org_id: orgId, role });
+      .upsert(
+        { user_id: data.user.id, org_id: orgId, role },
+        { onConflict: "user_id,org_id" },
+      );
     if (membershipError) {
       await admin.auth.admin.deleteUser(data.user.id);
       return {
