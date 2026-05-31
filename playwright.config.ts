@@ -58,6 +58,9 @@ process.env.TEST_SUPABASE_SERVICE_ROLE_KEY = supabaseServiceRoleKey;
 process.env.E2E_QUIET_HOURS_NOW =
   process.env.E2E_QUIET_HOURS_NOW ?? "2026-05-09T16:00:00.000Z";
 
+const browserChannel =
+  process.env.PLAYWRIGHT_BROWSER_CHANNEL === "chrome" ? "chrome" : undefined;
+
 const webServerEnv: Record<string, string> = {
   // The Next app reads these for its Supabase clients. Point them at the
   // test project so e2e tests never touch dev data.
@@ -89,7 +92,11 @@ export default defineConfig({
   // PROD_EMAIL / PROD_PASSWORD and runs against sandra-sooty.vercel.app.
   // It must not run in the default CI suite (no creds → it throws in
   // beforeAll). Use playwright.prod.config.ts for that spec.
-  testIgnore: ["**/phase-1-5-uat.spec.ts", "**/prod-canary/**"],
+  testIgnore: [
+    "**/phase-1-5-uat.spec.ts",
+    "**/prod-canary/**",
+    "**/properties-filter-characterization.*.ts",
+  ],
   // Don't run in parallel — the suite resets shared DB tables. Parallel
   // specs would race each other and flake.
   fullyParallel: false,
@@ -104,6 +111,7 @@ export default defineConfig({
   expect: { timeout: 5_000 },
   use: {
     baseURL: "http://localhost:3456",
+    ...(browserChannel ? { channel: browserChannel } : {}),
     trace: "retain-on-failure",
     screenshot: "only-on-failure",
   },

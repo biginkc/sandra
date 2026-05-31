@@ -38,7 +38,9 @@ import {
   applyBlock,
   applyFilters,
   filterSelectFragment,
+  listCountSelectFragment,
   needsPropertyListsEmbed,
+  propertyTagsSelectFragment,
   propertyListsSelectFragment,
 } from "./filter-to-supabase";
 
@@ -283,7 +285,7 @@ describe("applyBlock: cass", () => {
     );
     expect(calls.some((c) => c.startsWith("not(cass_status,in,"))).toBe(true);
   });
-  it("combinator='all' single-column collapses to .in", async () => {
+  it("combinator='all' with multiple values on a single-value column returns no matches", async () => {
     const { proxy, calls } = mockBuilder();
     const { sb } = mockSupabaseClient();
     await applyBlock(
@@ -295,7 +297,7 @@ describe("applyBlock: cass", () => {
       }) as FilterBlock,
       sb,
     );
-    expect(calls.some((c) => c.startsWith("in(cass_status,"))).toBe(true);
+    expect(calls).toContain("eq(cass_status,__sandra_no_match__)");
   });
 });
 
@@ -641,6 +643,20 @@ describe("applyBlock: assignee", () => {
       true,
     );
   });
+  it("not + unassigned excludes null assignees instead of becoming a no-op", async () => {
+    const { proxy, calls } = mockBuilder();
+    const { sb } = mockSupabaseClient();
+    await applyBlock(
+      proxy,
+      block({
+        kind: "assignee",
+        combinator: "not",
+        values: ["unassigned"],
+      }) as FilterBlock,
+      sb,
+    );
+    expect(calls).toEqual(["not(assigned_user_id,is,null)"]);
+  });
 });
 
 describe("applyBlock: created_date", () => {
@@ -879,7 +895,7 @@ describe("needsPropertyListsEmbed", () => {
     ).toBe(true);
   });
 
-  it("returns false only for multi-list all filters that still need pre-fetch set logic", () => {
+  it("returns false for list filters that still need pre-fetch set logic", () => {
     expect(
       needsPropertyListsEmbed([
         block({
@@ -898,6 +914,34 @@ describe("needsPropertyListsEmbed", () => {
         }) as FilterBlock,
       ]),
     ).toBe(true);
+    expect(
+      needsPropertyListsEmbed([
+        block({
+          kind: "list",
+          combinator: "any",
+          values: ["L1"],
+        }) as FilterBlock,
+        block({
+          kind: "list",
+          combinator: "any",
+          values: ["L2"],
+        }) as FilterBlock,
+      ]),
+    ).toBe(false);
+    expect(
+      needsPropertyListsEmbed([
+        block({
+          kind: "list",
+          combinator: "not",
+          values: ["L1"],
+        }) as FilterBlock,
+        block({
+          kind: "list",
+          combinator: "not",
+          values: ["L2"],
+        }) as FilterBlock,
+      ]),
+    ).toBe(false);
   });
 });
 
@@ -919,6 +963,102 @@ describe("propertyListsSelectFragment", () => {
     ).toBe(
       "list_filter:property_lists!inner(list_id), list_exclusion:property_lists(list_id)",
     );
+  });
+
+  it("omits the anti-join alias for repeated negative list blocks", () => {
+    expect(
+      propertyListsSelectFragment([
+        block({
+          kind: "list",
+          combinator: "not",
+          values: ["L1"],
+        }) as FilterBlock,
+        block({
+          kind: "list",
+          combinator: "not",
+          values: ["L2"],
+        }) as FilterBlock,
+      ]),
+    ).toBeNull();
+  });
+});
+
+describe("propertyTagsSelectFragment", () => {
+  it("adds positive and anti-join aliases independently", () => {
+    expect(
+      propertyTagsSelectFragment([
+        block({
+          kind: "tag",
+          combinator: "any",
+          values: ["T1"],
+        }) as FilterBlock,
+        block({
+          kind: "tag",
+          combinator: "not",
+          values: ["T2"],
+        }) as FilterBlock,
+      ]),
+    ).toBe(
+      "tag_filter:property_tags!inner(tag_id), tag_exclusion:property_tags(tag_id)",
+    );
+  });
+
+  it("omits the positive tag alias for repeated positive tag blocks", () => {
+    expect(
+      propertyTagsSelectFragment([
+        block({
+          kind: "tag",
+          combinator: "any",
+          values: ["T1"],
+        }) as FilterBlock,
+        block({
+          kind: "tag",
+          combinator: "any",
+          values: ["T2"],
+        }) as FilterBlock,
+      ]),
+    ).toBeNull();
+  });
+
+  it("omits the anti-join alias for repeated negative tag blocks", () => {
+    expect(
+      propertyTagsSelectFragment([
+        block({
+          kind: "tag",
+          combinator: "not",
+          values: ["T1"],
+        }) as FilterBlock,
+        block({
+          kind: "tag",
+          combinator: "not",
+          values: ["T2"],
+        }) as FilterBlock,
+      ]),
+    ).toBeNull();
+  });
+});
+
+describe("listCountSelectFragment", () => {
+  it("uses the positive stack join for min-bound list-count filters", () => {
+    expect(
+      listCountSelectFragment([
+        block({
+          kind: "list_count",
+          range: { min: 2, max: null },
+        }) as FilterBlock,
+      ]),
+    ).toBe("stack_filter:property_stack_counts!inner(stack_count)");
+  });
+
+  it("uses an anti-join for max-only list-count filters so zero-list properties can match", () => {
+    expect(
+      listCountSelectFragment([
+        block({
+          kind: "list_count",
+          range: { min: null, max: 1 },
+        }) as FilterBlock,
+      ]),
+    ).toBe("stack_exclusion:property_stack_counts(stack_count)");
   });
 });
 
@@ -963,16 +1103,53 @@ describe("filterSelectFragment", () => {
       ]),
     ).toBe("contacted_messages:messages!inner(direction)");
   });
+
+  it("adds relationship aliases for tag and list-count filters so production queries do not expand thousands of ids", () => {
+    expect(
+      filterSelectFragment([
+        block({
+          kind: "tag",
+          combinator: "any",
+          values: ["T1"],
+        }) as FilterBlock,
+        block({
+          kind: "list_count",
+          range: { min: 2, max: null },
+        }) as FilterBlock,
+      ]),
+    ).toBe(
+      "tag_filter:property_tags!inner(tag_id), stack_filter:property_stack_counts!inner(stack_count)",
+    );
+  });
+
+  it("adds no-inbound alias for never_contacted + attempted engagement without id expansion", () => {
+    expect(
+      filterSelectFragment([
+        block({
+          kind: "engagement",
+          combinator: "any",
+          values: ["never_contacted", "attempted"],
+        }) as FilterBlock,
+      ]),
+    ).toBe("inbound_messages:messages(direction)");
+  });
+
+  it("adds the list-count anti-join alias for max-only ranges", () => {
+    expect(
+      filterSelectFragment([
+        block({
+          kind: "list_count",
+          range: { min: null, max: 1 },
+        }) as FilterBlock,
+      ]),
+    ).toBe("stack_exclusion:property_stack_counts(stack_count)");
+  });
 });
 
 describe("applyBlock: tag (pre-fetch via property_tags)", () => {
-  it("any combinator → pre-fetches property_tags, applies .in('id', ids)", async () => {
+  it("any combinator → filters through embedded property_tags instead of expanding IDs", async () => {
     const { proxy, calls } = mockBuilder();
     const m = mockSupabaseClient();
-    m.setReturn("property_tags", [
-      { property_id: "p1", tag_id: "T1" },
-      { property_id: "p2", tag_id: "T2" },
-    ]);
     await applyBlock(
       proxy,
       block({
@@ -982,8 +1159,26 @@ describe("applyBlock: tag (pre-fetch via property_tags)", () => {
       }) as FilterBlock,
       m.sb,
     );
-    expect(m.calls.some((c) => c.startsWith("from(property_tags)"))).toBe(true);
-    expect(calls.some((c) => c.startsWith("in(id,"))).toBe(true);
+    expect(m.calls.length).toBe(0);
+    expect(calls).toEqual(['in(tag_filter.tag_id,["T1","T2"])']);
+  });
+  it("not combinator → uses anti-join instead of expanding matched property IDs", async () => {
+    const { proxy, calls } = mockBuilder();
+    const m = mockSupabaseClient();
+    await applyBlock(
+      proxy,
+      block({
+        kind: "tag",
+        combinator: "not",
+        values: ["T1"],
+      }) as FilterBlock,
+      m.sb,
+    );
+    expect(m.calls.length).toBe(0);
+    expect(calls).toEqual([
+      'in(tag_exclusion.tag_id,["T1"])',
+      "is(tag_exclusion,null)",
+    ]);
   });
   it("empty values → no pre-fetch, no predicate", async () => {
     const { proxy, calls } = mockBuilder();
@@ -1002,14 +1197,128 @@ describe("applyBlock: tag (pre-fetch via property_tags)", () => {
   });
 });
 
-describe("applyBlock: list_count (pre-fetch via property_stack_counts)", () => {
-  it("min only → pre-fetches property_stack_counts, applies .in('id', ids)", async () => {
+describe("applyFilters: repeated relationship-backed blocks", () => {
+  it("repeated positive list blocks use parent-id intersection instead of one shared child alias", async () => {
     const { proxy, calls } = mockBuilder();
     const m = mockSupabaseClient();
-    m.setReturn("property_stack_counts", [
-      { property_id: "p1" },
-      { property_id: "p2" },
+    m.setReturn("property_lists", [
+      { property_id: "p1", list_id: "L1" },
+      { property_id: "p1", list_id: "L2" },
     ]);
+
+    await applyFilters(
+      proxy,
+      [
+        block({
+          kind: "list",
+          combinator: "any",
+          values: ["L1"],
+        }) as FilterBlock,
+        block({
+          kind: "list",
+          combinator: "any",
+          values: ["L2"],
+        }) as FilterBlock,
+      ],
+      m.sb,
+    );
+
+    expect(m.calls.filter((c) => c === "from(property_lists)")).toHaveLength(2);
+    expect(calls).toEqual(['in(id,["p1"])', 'in(id,["p1"])']);
+  });
+
+  it("repeated positive tag blocks use parent-id intersection instead of one shared child alias", async () => {
+    const { proxy, calls } = mockBuilder();
+    const m = mockSupabaseClient();
+    m.setReturn("property_tags", [
+      { property_id: "p1", tag_id: "T1" },
+      { property_id: "p1", tag_id: "T2" },
+    ]);
+
+    await applyFilters(
+      proxy,
+      [
+        block({
+          kind: "tag",
+          combinator: "any",
+          values: ["T1"],
+        }) as FilterBlock,
+        block({
+          kind: "tag",
+          combinator: "any",
+          values: ["T2"],
+        }) as FilterBlock,
+      ],
+      m.sb,
+    );
+
+    expect(m.calls.filter((c) => c === "from(property_tags)")).toHaveLength(2);
+    expect(calls).toEqual(['in(id,["p1"])', 'in(id,["p1"])']);
+  });
+
+  it("repeated negative list blocks use parent-id exclusion instead of one shared anti-join alias", async () => {
+    const { proxy, calls } = mockBuilder();
+    const m = mockSupabaseClient();
+    m.setReturn("property_lists", [{ property_id: "p1", list_id: "L1" }]);
+
+    await applyFilters(
+      proxy,
+      [
+        block({
+          kind: "list",
+          combinator: "not",
+          values: ["L1"],
+        }) as FilterBlock,
+        block({
+          kind: "list",
+          combinator: "not",
+          values: ["L2"],
+        }) as FilterBlock,
+      ],
+      m.sb,
+    );
+
+    expect(m.calls.filter((c) => c === "from(property_lists)")).toHaveLength(2);
+    expect(calls).toEqual([
+      'not(id,in,("p1"))',
+      'not(id,in,("p1"))',
+    ]);
+  });
+
+  it("repeated negative tag blocks use parent-id exclusion instead of one shared anti-join alias", async () => {
+    const { proxy, calls } = mockBuilder();
+    const m = mockSupabaseClient();
+    m.setReturn("property_tags", [{ property_id: "p1", tag_id: "T1" }]);
+
+    await applyFilters(
+      proxy,
+      [
+        block({
+          kind: "tag",
+          combinator: "not",
+          values: ["T1"],
+        }) as FilterBlock,
+        block({
+          kind: "tag",
+          combinator: "not",
+          values: ["T2"],
+        }) as FilterBlock,
+      ],
+      m.sb,
+    );
+
+    expect(m.calls.filter((c) => c === "from(property_tags)")).toHaveLength(2);
+    expect(calls).toEqual([
+      'not(id,in,("p1"))',
+      'not(id,in,("p1"))',
+    ]);
+  });
+});
+
+describe("applyBlock: list_count (pre-fetch via property_stack_counts)", () => {
+  it("min only → filters through embedded property_stack_counts instead of expanding IDs", async () => {
+    const { proxy, calls } = mockBuilder();
+    const m = mockSupabaseClient();
     await applyBlock(
       proxy,
       block({
@@ -1018,31 +1327,12 @@ describe("applyBlock: list_count (pre-fetch via property_stack_counts)", () => {
       }) as FilterBlock,
       m.sb,
     );
-    expect(
-      m.calls.some((c) => c.startsWith("from(property_stack_counts)")),
-    ).toBe(true);
-    expect(calls.some((c) => c.startsWith("in(id,"))).toBe(true);
+    expect(m.calls.length).toBe(0);
+    expect(calls).toEqual(["gte(stack_filter.stack_count,2)"]);
   });
-  it("empty pre-fetch → 00000000-0000-0000-0000-000000000000 short-circuit", async () => {
+  it("range bounds passed to .gte/.lte on the embedded view alias", async () => {
     const { proxy, calls } = mockBuilder();
     const m = mockSupabaseClient();
-    m.setReturn("property_stack_counts", []);
-    await applyBlock(
-      proxy,
-      block({
-        kind: "list_count",
-        range: { min: 5, max: null },
-      }) as FilterBlock,
-      m.sb,
-    );
-    expect(
-      calls.some((c) => c.includes("00000000-0000-0000-0000-000000000000")),
-    ).toBe(true);
-  });
-  it("range bounds passed to .gte/.lte on the view query", async () => {
-    const { proxy } = mockBuilder();
-    const m = mockSupabaseClient();
-    m.setReturn("property_stack_counts", [{ property_id: "p1" }]);
     await applyBlock(
       proxy,
       block({
@@ -1051,12 +1341,28 @@ describe("applyBlock: list_count (pre-fetch via property_stack_counts)", () => {
       }) as FilterBlock,
       m.sb,
     );
-    expect(
-      m.calls.some((c) => c.startsWith("property_stack_counts.gte(")),
-    ).toBe(true);
-    expect(
-      m.calls.some((c) => c.startsWith("property_stack_counts.lte(")),
-    ).toBe(true);
+    expect(m.calls.length).toBe(0);
+    expect(calls).toEqual([
+      "gte(stack_filter.stack_count,2)",
+      "lte(stack_filter.stack_count,5)",
+    ]);
+  });
+  it("max only → anti-joins rows above the max so properties with zero lists are included", async () => {
+    const { proxy, calls } = mockBuilder();
+    const m = mockSupabaseClient();
+    await applyBlock(
+      proxy,
+      block({
+        kind: "list_count",
+        range: { min: null, max: 1 },
+      }) as FilterBlock,
+      m.sb,
+    );
+    expect(m.calls.length).toBe(0);
+    expect(calls).toEqual([
+      "gt(stack_exclusion.stack_count,1)",
+      "is(stack_exclusion,null)",
+    ]);
   });
 });
 
@@ -1140,6 +1446,58 @@ describe("applyBlock: engagement (4-bucket pre-fetch)", () => {
     expect(m.calls.some((c) => c.startsWith("from(messages)"))).toBe(false);
     expect(calls).toEqual([
       'in(contacted_messages.direction,["inbound","outbound"])',
+    ]);
+  });
+  it("'never_contacted' + 'attempted' → anti-joins inbound messages without id expansion", async () => {
+    const { proxy, calls } = mockBuilder();
+    const m = mockSupabaseClient();
+    await applyBlock(
+      proxy,
+      block({
+        kind: "engagement",
+        combinator: "any",
+        values: ["never_contacted", "attempted"],
+      }) as FilterBlock,
+      m.sb,
+    );
+    expect(m.calls.some((c) => c.startsWith("from(messages)"))).toBe(false);
+    expect(calls).toEqual([
+      "eq(inbound_messages.direction,inbound)",
+      "is(inbound_messages,null)",
+    ]);
+  });
+  it("not never_contacted → filters through contacted messages without id expansion", async () => {
+    const { proxy, calls } = mockBuilder();
+    const m = mockSupabaseClient();
+    await applyBlock(
+      proxy,
+      block({
+        kind: "engagement",
+        combinator: "not",
+        values: ["never_contacted"],
+      }) as FilterBlock,
+      m.sb,
+    );
+    expect(m.calls.some((c) => c.startsWith("from(messages)"))).toBe(false);
+    expect(calls).toEqual([
+      'in(contacted_messages.direction,["inbound","outbound"])',
+    ]);
+  });
+  it("all never_contacted + attempted short-circuits to no matches", async () => {
+    const { proxy, calls } = mockBuilder();
+    const m = mockSupabaseClient();
+    await applyBlock(
+      proxy,
+      block({
+        kind: "engagement",
+        combinator: "all",
+        values: ["never_contacted", "attempted"],
+      }) as FilterBlock,
+      m.sb,
+    );
+    expect(m.calls.some((c) => c.startsWith("from(messages)"))).toBe(false);
+    expect(calls).toEqual([
+      'in(id,["00000000-0000-0000-0000-000000000000"])',
     ]);
   });
 });

@@ -19,7 +19,10 @@ import {
   type ClassifyInput,
 } from "@/lib/dialer/eligibility";
 
-import { applyFilters } from "@/lib/prospects/filter-to-supabase";
+import {
+  applyFilters,
+  filterSelectFragment,
+} from "@/lib/prospects/filter-to-supabase";
 import type { FilterBlock } from "@/lib/prospects/filter-schema";
 
 import { SELECT_ALL_HARD_CAP } from "./prospects-query";
@@ -603,9 +606,12 @@ export async function getAllMatchingProspectIds(args: {
       (b) => b.kind === "pipeline_status",
     );
 
+    const filterSelect = filterSelectFragment(args.blockStack);
+    const propertiesSelect = ["id", filterSelect].filter(Boolean).join(", ");
+
     let query = supabase
       .from("properties")
-      .select("id")
+      .select(propertiesSelect)
       .is("deleted_at", null);
     if (!hasPipelineStatusBlock) {
       query = query.eq("status", "prospect");
@@ -632,7 +638,9 @@ export async function getAllMatchingProspectIds(args: {
           error: { code: "SELECT_ALL_FAILED", message: error.message },
         };
       }
-      const page = (data ?? []).map((r) => r.id);
+      const page = ((data ?? []) as unknown as Array<{ id: string }>).map(
+        (r) => r.id,
+      );
       allIds.push(...page);
       if (page.length < PAGE) break;
     }

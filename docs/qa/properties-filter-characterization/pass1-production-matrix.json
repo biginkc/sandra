@@ -1,0 +1,5335 @@
+{
+  "generatedAt": "2026-05-31T09:16:52.472Z",
+  "projectRef": "copflsklaefwzipsrjqz",
+  "orgId": "00000000-0000-0000-0000-000000000bbb",
+  "dataShape": {
+    "activeProperties": 51708,
+    "lists": 32,
+    "customTags": 36,
+    "assignedUsers": 1
+  },
+  "summary": {
+    "total": 272,
+    "passed": 272,
+    "failed": 0,
+    "byFilter": {
+      "baseline": {
+        "total": 1,
+        "failed": 0
+      },
+      "list": {
+        "total": 36,
+        "failed": 0
+      },
+      "tag": {
+        "total": 40,
+        "failed": 0
+      },
+      "cass": {
+        "total": 8,
+        "failed": 0
+      },
+      "outreach_dispo": {
+        "total": 11,
+        "failed": 0
+      },
+      "source": {
+        "total": 15,
+        "failed": 0
+      },
+      "state": {
+        "total": 30,
+        "failed": 0
+      },
+      "market": {
+        "total": 17,
+        "failed": 0
+      },
+      "pipeline_status": {
+        "total": 13,
+        "failed": 0
+      },
+      "assignee": {
+        "total": 6,
+        "failed": 0
+      },
+      "motivation_level": {
+        "total": 7,
+        "failed": 0
+      },
+      "engagement": {
+        "total": 8,
+        "failed": 0
+      },
+      "vacancy": {
+        "total": 3,
+        "failed": 0
+      },
+      "absentee": {
+        "total": 3,
+        "failed": 0
+      },
+      "has_unread_inbound": {
+        "total": 3,
+        "failed": 0
+      },
+      "needs_human_attention": {
+        "total": 3,
+        "failed": 0
+      },
+      "has_open_tasks": {
+        "total": 3,
+        "failed": 0
+      },
+      "beds": {
+        "total": 6,
+        "failed": 0
+      },
+      "baths": {
+        "total": 11,
+        "failed": 0
+      },
+      "year_built": {
+        "total": 11,
+        "failed": 0
+      },
+      "estimated_value": {
+        "total": 11,
+        "failed": 0
+      },
+      "equity_pct": {
+        "total": 11,
+        "failed": 0
+      },
+      "list_count": {
+        "total": 5,
+        "failed": 0
+      },
+      "created_date": {
+        "total": 3,
+        "failed": 0
+      },
+      "vacancy+cass": {
+        "total": 1,
+        "failed": 0
+      },
+      "list_count+equity_pct": {
+        "total": 1,
+        "failed": 0
+      },
+      "engagement+has_open_tasks": {
+        "total": 1,
+        "failed": 0
+      },
+      "list+list": {
+        "total": 2,
+        "failed": 0
+      },
+      "tag+tag": {
+        "total": 2,
+        "failed": 0
+      }
+    }
+  },
+  "results": [
+    {
+      "filter": "baseline",
+      "scenario": "baseline prospect default",
+      "blocks": [],
+      "expected": 49052,
+      "actual": 49052,
+      "pass": true,
+      "error": null,
+      "encodedLength": 41
+    },
+    {
+      "filter": "list",
+      "scenario": "List: any ec393f84-a934-48a8-be90-20f460489228",
+      "blocks": [
+        {
+          "id": "list-any-ec393f84-a934-48a8-be90-20f460489228",
+          "kind": "list",
+          "combinator": "any",
+          "values": [
+            "ec393f84-a934-48a8-be90-20f460489228"
+          ]
+        }
+      ],
+      "expected": 0,
+      "actual": 0,
+      "pass": true,
+      "error": null,
+      "encodedLength": 232
+    },
+    {
+      "filter": "list",
+      "scenario": "List: any 2209b945-8999-4515-979e-117d83814bac",
+      "blocks": [
+        {
+          "id": "list-any-2209b945-8999-4515-979e-117d83814bac",
+          "kind": "list",
+          "combinator": "any",
+          "values": [
+            "2209b945-8999-4515-979e-117d83814bac"
+          ]
+        }
+      ],
+      "expected": 0,
+      "actual": 0,
+      "pass": true,
+      "error": null,
+      "encodedLength": 232
+    },
+    {
+      "filter": "list",
+      "scenario": "List: any 985af16f-c54d-462c-84e2-00dd85360839",
+      "blocks": [
+        {
+          "id": "list-any-985af16f-c54d-462c-84e2-00dd85360839",
+          "kind": "list",
+          "combinator": "any",
+          "values": [
+            "985af16f-c54d-462c-84e2-00dd85360839"
+          ]
+        }
+      ],
+      "expected": 0,
+      "actual": 0,
+      "pass": true,
+      "error": null,
+      "encodedLength": 232
+    },
+    {
+      "filter": "list",
+      "scenario": "List: any 79cd3413-650e-4c7d-9c1c-49ffb4600771",
+      "blocks": [
+        {
+          "id": "list-any-79cd3413-650e-4c7d-9c1c-49ffb4600771",
+          "kind": "list",
+          "combinator": "any",
+          "values": [
+            "79cd3413-650e-4c7d-9c1c-49ffb4600771"
+          ]
+        }
+      ],
+      "expected": 2991,
+      "actual": 2991,
+      "pass": true,
+      "error": null,
+      "encodedLength": 232
+    },
+    {
+      "filter": "list",
+      "scenario": "List: any 0a99e0f7-18cc-4c93-9557-6b4fc3b26e49",
+      "blocks": [
+        {
+          "id": "list-any-0a99e0f7-18cc-4c93-9557-6b4fc3b26e49",
+          "kind": "list",
+          "combinator": "any",
+          "values": [
+            "0a99e0f7-18cc-4c93-9557-6b4fc3b26e49"
+          ]
+        }
+      ],
+      "expected": 0,
+      "actual": 0,
+      "pass": true,
+      "error": null,
+      "encodedLength": 232
+    },
+    {
+      "filter": "list",
+      "scenario": "List: any 56a64398-b9b9-4820-9a25-29a92316f01f",
+      "blocks": [
+        {
+          "id": "list-any-56a64398-b9b9-4820-9a25-29a92316f01f",
+          "kind": "list",
+          "combinator": "any",
+          "values": [
+            "56a64398-b9b9-4820-9a25-29a92316f01f"
+          ]
+        }
+      ],
+      "expected": 52,
+      "actual": 52,
+      "pass": true,
+      "error": null,
+      "encodedLength": 232
+    },
+    {
+      "filter": "list",
+      "scenario": "List: any 75d2d98f-4811-4eaf-9d22-e6461e8c102b",
+      "blocks": [
+        {
+          "id": "list-any-75d2d98f-4811-4eaf-9d22-e6461e8c102b",
+          "kind": "list",
+          "combinator": "any",
+          "values": [
+            "75d2d98f-4811-4eaf-9d22-e6461e8c102b"
+          ]
+        }
+      ],
+      "expected": 0,
+      "actual": 0,
+      "pass": true,
+      "error": null,
+      "encodedLength": 232
+    },
+    {
+      "filter": "list",
+      "scenario": "List: any cf14a09f-c52e-4fdb-a6d7-d128ef9ef148",
+      "blocks": [
+        {
+          "id": "list-any-cf14a09f-c52e-4fdb-a6d7-d128ef9ef148",
+          "kind": "list",
+          "combinator": "any",
+          "values": [
+            "cf14a09f-c52e-4fdb-a6d7-d128ef9ef148"
+          ]
+        }
+      ],
+      "expected": 0,
+      "actual": 0,
+      "pass": true,
+      "error": null,
+      "encodedLength": 232
+    },
+    {
+      "filter": "list",
+      "scenario": "List: any c7116350-1d40-4ad3-a1f9-0ed54b7925c4",
+      "blocks": [
+        {
+          "id": "list-any-c7116350-1d40-4ad3-a1f9-0ed54b7925c4",
+          "kind": "list",
+          "combinator": "any",
+          "values": [
+            "c7116350-1d40-4ad3-a1f9-0ed54b7925c4"
+          ]
+        }
+      ],
+      "expected": 7365,
+      "actual": 7365,
+      "pass": true,
+      "error": null,
+      "encodedLength": 232
+    },
+    {
+      "filter": "list",
+      "scenario": "List: any b6d1d831-d5cd-44af-a741-3e9b20a5a45d",
+      "blocks": [
+        {
+          "id": "list-any-b6d1d831-d5cd-44af-a741-3e9b20a5a45d",
+          "kind": "list",
+          "combinator": "any",
+          "values": [
+            "b6d1d831-d5cd-44af-a741-3e9b20a5a45d"
+          ]
+        }
+      ],
+      "expected": 0,
+      "actual": 0,
+      "pass": true,
+      "error": null,
+      "encodedLength": 232
+    },
+    {
+      "filter": "list",
+      "scenario": "List: any 223ea1b4-4223-4c4a-85f5-979d15ba2923",
+      "blocks": [
+        {
+          "id": "list-any-223ea1b4-4223-4c4a-85f5-979d15ba2923",
+          "kind": "list",
+          "combinator": "any",
+          "values": [
+            "223ea1b4-4223-4c4a-85f5-979d15ba2923"
+          ]
+        }
+      ],
+      "expected": 0,
+      "actual": 0,
+      "pass": true,
+      "error": null,
+      "encodedLength": 232
+    },
+    {
+      "filter": "list",
+      "scenario": "List: any eb6fbd69-f730-476b-9a54-b32ef39cc909",
+      "blocks": [
+        {
+          "id": "list-any-eb6fbd69-f730-476b-9a54-b32ef39cc909",
+          "kind": "list",
+          "combinator": "any",
+          "values": [
+            "eb6fbd69-f730-476b-9a54-b32ef39cc909"
+          ]
+        }
+      ],
+      "expected": 0,
+      "actual": 0,
+      "pass": true,
+      "error": null,
+      "encodedLength": 232
+    },
+    {
+      "filter": "list",
+      "scenario": "List: any 3b43cfb5-636e-4819-8378-65e3c7713be0",
+      "blocks": [
+        {
+          "id": "list-any-3b43cfb5-636e-4819-8378-65e3c7713be0",
+          "kind": "list",
+          "combinator": "any",
+          "values": [
+            "3b43cfb5-636e-4819-8378-65e3c7713be0"
+          ]
+        }
+      ],
+      "expected": 5231,
+      "actual": 5231,
+      "pass": true,
+      "error": null,
+      "encodedLength": 232
+    },
+    {
+      "filter": "list",
+      "scenario": "List: any 3b9abf4e-6e25-4ec6-99e0-0c984bcf0f4c",
+      "blocks": [
+        {
+          "id": "list-any-3b9abf4e-6e25-4ec6-99e0-0c984bcf0f4c",
+          "kind": "list",
+          "combinator": "any",
+          "values": [
+            "3b9abf4e-6e25-4ec6-99e0-0c984bcf0f4c"
+          ]
+        }
+      ],
+      "expected": 2325,
+      "actual": 2325,
+      "pass": true,
+      "error": null,
+      "encodedLength": 232
+    },
+    {
+      "filter": "list",
+      "scenario": "List: any 868ce043-f313-4ff2-ad3c-aff4f5eacc4e",
+      "blocks": [
+        {
+          "id": "list-any-868ce043-f313-4ff2-ad3c-aff4f5eacc4e",
+          "kind": "list",
+          "combinator": "any",
+          "values": [
+            "868ce043-f313-4ff2-ad3c-aff4f5eacc4e"
+          ]
+        }
+      ],
+      "expected": 2018,
+      "actual": 2018,
+      "pass": true,
+      "error": null,
+      "encodedLength": 232
+    },
+    {
+      "filter": "list",
+      "scenario": "List: any a34271eb-ff55-41a7-9d3d-0dcc2ce63279",
+      "blocks": [
+        {
+          "id": "list-any-a34271eb-ff55-41a7-9d3d-0dcc2ce63279",
+          "kind": "list",
+          "combinator": "any",
+          "values": [
+            "a34271eb-ff55-41a7-9d3d-0dcc2ce63279"
+          ]
+        }
+      ],
+      "expected": 752,
+      "actual": 752,
+      "pass": true,
+      "error": null,
+      "encodedLength": 232
+    },
+    {
+      "filter": "list",
+      "scenario": "List: any e682ed32-5d91-42b9-9df6-da084211ad58",
+      "blocks": [
+        {
+          "id": "list-any-e682ed32-5d91-42b9-9df6-da084211ad58",
+          "kind": "list",
+          "combinator": "any",
+          "values": [
+            "e682ed32-5d91-42b9-9df6-da084211ad58"
+          ]
+        }
+      ],
+      "expected": 18,
+      "actual": 18,
+      "pass": true,
+      "error": null,
+      "encodedLength": 232
+    },
+    {
+      "filter": "list",
+      "scenario": "List: any 348134b2-2e20-47d6-8a68-d9a0352dfe9e",
+      "blocks": [
+        {
+          "id": "list-any-348134b2-2e20-47d6-8a68-d9a0352dfe9e",
+          "kind": "list",
+          "combinator": "any",
+          "values": [
+            "348134b2-2e20-47d6-8a68-d9a0352dfe9e"
+          ]
+        }
+      ],
+      "expected": 1445,
+      "actual": 1445,
+      "pass": true,
+      "error": null,
+      "encodedLength": 232
+    },
+    {
+      "filter": "list",
+      "scenario": "List: any e9e31fc8-05f8-4ecd-acc2-3c924798b31b",
+      "blocks": [
+        {
+          "id": "list-any-e9e31fc8-05f8-4ecd-acc2-3c924798b31b",
+          "kind": "list",
+          "combinator": "any",
+          "values": [
+            "e9e31fc8-05f8-4ecd-acc2-3c924798b31b"
+          ]
+        }
+      ],
+      "expected": 0,
+      "actual": 0,
+      "pass": true,
+      "error": null,
+      "encodedLength": 232
+    },
+    {
+      "filter": "list",
+      "scenario": "List: any 8a43df1a-79d6-40f1-a23c-5cf488547a7e",
+      "blocks": [
+        {
+          "id": "list-any-8a43df1a-79d6-40f1-a23c-5cf488547a7e",
+          "kind": "list",
+          "combinator": "any",
+          "values": [
+            "8a43df1a-79d6-40f1-a23c-5cf488547a7e"
+          ]
+        }
+      ],
+      "expected": 693,
+      "actual": 693,
+      "pass": true,
+      "error": null,
+      "encodedLength": 232
+    },
+    {
+      "filter": "list",
+      "scenario": "List: any c6c33338-0a98-40bc-88d5-8e6a5d010fef",
+      "blocks": [
+        {
+          "id": "list-any-c6c33338-0a98-40bc-88d5-8e6a5d010fef",
+          "kind": "list",
+          "combinator": "any",
+          "values": [
+            "c6c33338-0a98-40bc-88d5-8e6a5d010fef"
+          ]
+        }
+      ],
+      "expected": 15,
+      "actual": 15,
+      "pass": true,
+      "error": null,
+      "encodedLength": 232
+    },
+    {
+      "filter": "list",
+      "scenario": "List: any f06cec23-ac4c-475b-beea-08c160d27006",
+      "blocks": [
+        {
+          "id": "list-any-f06cec23-ac4c-475b-beea-08c160d27006",
+          "kind": "list",
+          "combinator": "any",
+          "values": [
+            "f06cec23-ac4c-475b-beea-08c160d27006"
+          ]
+        }
+      ],
+      "expected": 17966,
+      "actual": 17966,
+      "pass": true,
+      "error": null,
+      "encodedLength": 232
+    },
+    {
+      "filter": "list",
+      "scenario": "List: any bbe56694-98e4-46e8-8612-f6a43d42dcf4",
+      "blocks": [
+        {
+          "id": "list-any-bbe56694-98e4-46e8-8612-f6a43d42dcf4",
+          "kind": "list",
+          "combinator": "any",
+          "values": [
+            "bbe56694-98e4-46e8-8612-f6a43d42dcf4"
+          ]
+        }
+      ],
+      "expected": 292,
+      "actual": 292,
+      "pass": true,
+      "error": null,
+      "encodedLength": 232
+    },
+    {
+      "filter": "list",
+      "scenario": "List: any 0a51859d-c58b-4bed-ae96-af827e571ab9",
+      "blocks": [
+        {
+          "id": "list-any-0a51859d-c58b-4bed-ae96-af827e571ab9",
+          "kind": "list",
+          "combinator": "any",
+          "values": [
+            "0a51859d-c58b-4bed-ae96-af827e571ab9"
+          ]
+        }
+      ],
+      "expected": 79,
+      "actual": 79,
+      "pass": true,
+      "error": null,
+      "encodedLength": 232
+    },
+    {
+      "filter": "list",
+      "scenario": "List: any 17f8a5a6-bc99-4cc0-b839-38c2bc8126bd",
+      "blocks": [
+        {
+          "id": "list-any-17f8a5a6-bc99-4cc0-b839-38c2bc8126bd",
+          "kind": "list",
+          "combinator": "any",
+          "values": [
+            "17f8a5a6-bc99-4cc0-b839-38c2bc8126bd"
+          ]
+        }
+      ],
+      "expected": 1062,
+      "actual": 1062,
+      "pass": true,
+      "error": null,
+      "encodedLength": 232
+    },
+    {
+      "filter": "list",
+      "scenario": "List: any 3241368b-0631-45d1-908b-0322660b387f",
+      "blocks": [
+        {
+          "id": "list-any-3241368b-0631-45d1-908b-0322660b387f",
+          "kind": "list",
+          "combinator": "any",
+          "values": [
+            "3241368b-0631-45d1-908b-0322660b387f"
+          ]
+        }
+      ],
+      "expected": 99,
+      "actual": 99,
+      "pass": true,
+      "error": null,
+      "encodedLength": 232
+    },
+    {
+      "filter": "list",
+      "scenario": "List: any c15c2ba9-29a3-4c37-902d-f66daea4df76",
+      "blocks": [
+        {
+          "id": "list-any-c15c2ba9-29a3-4c37-902d-f66daea4df76",
+          "kind": "list",
+          "combinator": "any",
+          "values": [
+            "c15c2ba9-29a3-4c37-902d-f66daea4df76"
+          ]
+        }
+      ],
+      "expected": 0,
+      "actual": 0,
+      "pass": true,
+      "error": null,
+      "encodedLength": 232
+    },
+    {
+      "filter": "list",
+      "scenario": "List: any 1cc42a5b-510a-4d5b-a67e-9a9a11d7bf68",
+      "blocks": [
+        {
+          "id": "list-any-1cc42a5b-510a-4d5b-a67e-9a9a11d7bf68",
+          "kind": "list",
+          "combinator": "any",
+          "values": [
+            "1cc42a5b-510a-4d5b-a67e-9a9a11d7bf68"
+          ]
+        }
+      ],
+      "expected": 15204,
+      "actual": 15204,
+      "pass": true,
+      "error": null,
+      "encodedLength": 232
+    },
+    {
+      "filter": "list",
+      "scenario": "List: any 28b087ce-e873-44fe-9004-eee3379d648c",
+      "blocks": [
+        {
+          "id": "list-any-28b087ce-e873-44fe-9004-eee3379d648c",
+          "kind": "list",
+          "combinator": "any",
+          "values": [
+            "28b087ce-e873-44fe-9004-eee3379d648c"
+          ]
+        }
+      ],
+      "expected": 0,
+      "actual": 0,
+      "pass": true,
+      "error": null,
+      "encodedLength": 232
+    },
+    {
+      "filter": "list",
+      "scenario": "List: any db70dac4-a7fd-41d6-b8ef-4608bfcc4680",
+      "blocks": [
+        {
+          "id": "list-any-db70dac4-a7fd-41d6-b8ef-4608bfcc4680",
+          "kind": "list",
+          "combinator": "any",
+          "values": [
+            "db70dac4-a7fd-41d6-b8ef-4608bfcc4680"
+          ]
+        }
+      ],
+      "expected": 1315,
+      "actual": 1315,
+      "pass": true,
+      "error": null,
+      "encodedLength": 232
+    },
+    {
+      "filter": "list",
+      "scenario": "List: any dfea544c-de95-4bab-8011-7475b97a2e0d",
+      "blocks": [
+        {
+          "id": "list-any-dfea544c-de95-4bab-8011-7475b97a2e0d",
+          "kind": "list",
+          "combinator": "any",
+          "values": [
+            "dfea544c-de95-4bab-8011-7475b97a2e0d"
+          ]
+        }
+      ],
+      "expected": 0,
+      "actual": 0,
+      "pass": true,
+      "error": null,
+      "encodedLength": 232
+    },
+    {
+      "filter": "list",
+      "scenario": "List: any 448251d9-3dd0-4459-8e90-d6c38cd4369f",
+      "blocks": [
+        {
+          "id": "list-any-448251d9-3dd0-4459-8e90-d6c38cd4369f",
+          "kind": "list",
+          "combinator": "any",
+          "values": [
+            "448251d9-3dd0-4459-8e90-d6c38cd4369f"
+          ]
+        }
+      ],
+      "expected": 0,
+      "actual": 0,
+      "pass": true,
+      "error": null,
+      "encodedLength": 232
+    },
+    {
+      "filter": "list",
+      "scenario": "List: any first 2",
+      "blocks": [
+        {
+          "id": "list-any-first-2",
+          "kind": "list",
+          "combinator": "any",
+          "values": [
+            "ec393f84-a934-48a8-be90-20f460489228",
+            "2209b945-8999-4515-979e-117d83814bac"
+          ]
+        }
+      ],
+      "expected": 0,
+      "actual": 0,
+      "pass": true,
+      "error": null,
+      "encodedLength": 248
+    },
+    {
+      "filter": "list",
+      "scenario": "List: all first 2",
+      "blocks": [
+        {
+          "id": "list-all-first-2",
+          "kind": "list",
+          "combinator": "all",
+          "values": [
+            "ec393f84-a934-48a8-be90-20f460489228",
+            "2209b945-8999-4515-979e-117d83814bac"
+          ]
+        }
+      ],
+      "expected": 0,
+      "actual": 0,
+      "pass": true,
+      "error": null,
+      "encodedLength": 248
+    },
+    {
+      "filter": "list",
+      "scenario": "List: not first 2",
+      "blocks": [
+        {
+          "id": "list-not-first-2",
+          "kind": "list",
+          "combinator": "not",
+          "values": [
+            "ec393f84-a934-48a8-be90-20f460489228",
+            "2209b945-8999-4515-979e-117d83814bac"
+          ]
+        }
+      ],
+      "expected": 49052,
+      "actual": 49052,
+      "pass": true,
+      "error": null,
+      "encodedLength": 248
+    },
+    {
+      "filter": "list",
+      "scenario": "List: not first",
+      "blocks": [
+        {
+          "id": "list-not-first",
+          "kind": "list",
+          "combinator": "not",
+          "values": [
+            "ec393f84-a934-48a8-be90-20f460489228"
+          ]
+        }
+      ],
+      "expected": 49052,
+      "actual": 49052,
+      "pass": true,
+      "error": null,
+      "encodedLength": 201
+    },
+    {
+      "filter": "tag",
+      "scenario": "Tag: any 6d89ef36-b30f-40b9-97a2-7979e14c4a45",
+      "blocks": [
+        {
+          "id": "tag-any-6d89ef36-b30f-40b9-97a2-7979e14c4a45",
+          "kind": "tag",
+          "combinator": "any",
+          "values": [
+            "6d89ef36-b30f-40b9-97a2-7979e14c4a45"
+          ]
+        }
+      ],
+      "expected": 0,
+      "actual": 0,
+      "pass": true,
+      "error": null,
+      "encodedLength": 230
+    },
+    {
+      "filter": "tag",
+      "scenario": "Tag: any a01b6cf9-6a7d-4cbd-b6b2-f1a3e91b37fb",
+      "blocks": [
+        {
+          "id": "tag-any-a01b6cf9-6a7d-4cbd-b6b2-f1a3e91b37fb",
+          "kind": "tag",
+          "combinator": "any",
+          "values": [
+            "a01b6cf9-6a7d-4cbd-b6b2-f1a3e91b37fb"
+          ]
+        }
+      ],
+      "expected": 1,
+      "actual": 1,
+      "pass": true,
+      "error": null,
+      "encodedLength": 230
+    },
+    {
+      "filter": "tag",
+      "scenario": "Tag: any 1393e88e-4bdf-4311-9df2-c37436aafa3f",
+      "blocks": [
+        {
+          "id": "tag-any-1393e88e-4bdf-4311-9df2-c37436aafa3f",
+          "kind": "tag",
+          "combinator": "any",
+          "values": [
+            "1393e88e-4bdf-4311-9df2-c37436aafa3f"
+          ]
+        }
+      ],
+      "expected": 88,
+      "actual": 88,
+      "pass": true,
+      "error": null,
+      "encodedLength": 230
+    },
+    {
+      "filter": "tag",
+      "scenario": "Tag: any 6ed59b04-2631-427c-86f9-c65936f2327e",
+      "blocks": [
+        {
+          "id": "tag-any-6ed59b04-2631-427c-86f9-c65936f2327e",
+          "kind": "tag",
+          "combinator": "any",
+          "values": [
+            "6ed59b04-2631-427c-86f9-c65936f2327e"
+          ]
+        }
+      ],
+      "expected": 2676,
+      "actual": 2676,
+      "pass": true,
+      "error": null,
+      "encodedLength": 230
+    },
+    {
+      "filter": "tag",
+      "scenario": "Tag: any ef5918e7-9841-4008-92b5-ed0ec0c9609d",
+      "blocks": [
+        {
+          "id": "tag-any-ef5918e7-9841-4008-92b5-ed0ec0c9609d",
+          "kind": "tag",
+          "combinator": "any",
+          "values": [
+            "ef5918e7-9841-4008-92b5-ed0ec0c9609d"
+          ]
+        }
+      ],
+      "expected": 9713,
+      "actual": 9713,
+      "pass": true,
+      "error": null,
+      "encodedLength": 230
+    },
+    {
+      "filter": "tag",
+      "scenario": "Tag: any 2004adc4-5aaf-4c1a-aa3e-2e6ddc90bed5",
+      "blocks": [
+        {
+          "id": "tag-any-2004adc4-5aaf-4c1a-aa3e-2e6ddc90bed5",
+          "kind": "tag",
+          "combinator": "any",
+          "values": [
+            "2004adc4-5aaf-4c1a-aa3e-2e6ddc90bed5"
+          ]
+        }
+      ],
+      "expected": 1,
+      "actual": 1,
+      "pass": true,
+      "error": null,
+      "encodedLength": 230
+    },
+    {
+      "filter": "tag",
+      "scenario": "Tag: any 55ea3971-0e43-46a2-b339-4f8c7c11d081",
+      "blocks": [
+        {
+          "id": "tag-any-55ea3971-0e43-46a2-b339-4f8c7c11d081",
+          "kind": "tag",
+          "combinator": "any",
+          "values": [
+            "55ea3971-0e43-46a2-b339-4f8c7c11d081"
+          ]
+        }
+      ],
+      "expected": 17101,
+      "actual": 17101,
+      "pass": true,
+      "error": null,
+      "encodedLength": 230
+    },
+    {
+      "filter": "tag",
+      "scenario": "Tag: any c89cdaf2-4919-49b5-bd39-8356c880e386",
+      "blocks": [
+        {
+          "id": "tag-any-c89cdaf2-4919-49b5-bd39-8356c880e386",
+          "kind": "tag",
+          "combinator": "any",
+          "values": [
+            "c89cdaf2-4919-49b5-bd39-8356c880e386"
+          ]
+        }
+      ],
+      "expected": 11788,
+      "actual": 11788,
+      "pass": true,
+      "error": null,
+      "encodedLength": 230
+    },
+    {
+      "filter": "tag",
+      "scenario": "Tag: any 2f3f9393-7120-44d7-8ec9-b44cbec5ba4a",
+      "blocks": [
+        {
+          "id": "tag-any-2f3f9393-7120-44d7-8ec9-b44cbec5ba4a",
+          "kind": "tag",
+          "combinator": "any",
+          "values": [
+            "2f3f9393-7120-44d7-8ec9-b44cbec5ba4a"
+          ]
+        }
+      ],
+      "expected": 5723,
+      "actual": 5723,
+      "pass": true,
+      "error": null,
+      "encodedLength": 230
+    },
+    {
+      "filter": "tag",
+      "scenario": "Tag: any 8785cfa9-9151-4e56-912d-bc4fa8fd9e44",
+      "blocks": [
+        {
+          "id": "tag-any-8785cfa9-9151-4e56-912d-bc4fa8fd9e44",
+          "kind": "tag",
+          "combinator": "any",
+          "values": [
+            "8785cfa9-9151-4e56-912d-bc4fa8fd9e44"
+          ]
+        }
+      ],
+      "expected": 1,
+      "actual": 1,
+      "pass": true,
+      "error": null,
+      "encodedLength": 230
+    },
+    {
+      "filter": "tag",
+      "scenario": "Tag: any 539fe791-ff10-44c5-86b4-b855cb43d06d",
+      "blocks": [
+        {
+          "id": "tag-any-539fe791-ff10-44c5-86b4-b855cb43d06d",
+          "kind": "tag",
+          "combinator": "any",
+          "values": [
+            "539fe791-ff10-44c5-86b4-b855cb43d06d"
+          ]
+        }
+      ],
+      "expected": 2,
+      "actual": 2,
+      "pass": true,
+      "error": null,
+      "encodedLength": 230
+    },
+    {
+      "filter": "tag",
+      "scenario": "Tag: any 51b39c25-e446-49b8-b5e3-84889c33c0ad",
+      "blocks": [
+        {
+          "id": "tag-any-51b39c25-e446-49b8-b5e3-84889c33c0ad",
+          "kind": "tag",
+          "combinator": "any",
+          "values": [
+            "51b39c25-e446-49b8-b5e3-84889c33c0ad"
+          ]
+        }
+      ],
+      "expected": 2991,
+      "actual": 2991,
+      "pass": true,
+      "error": null,
+      "encodedLength": 230
+    },
+    {
+      "filter": "tag",
+      "scenario": "Tag: any 76e9dba2-4b32-4b97-a29a-0efb06430b7a",
+      "blocks": [
+        {
+          "id": "tag-any-76e9dba2-4b32-4b97-a29a-0efb06430b7a",
+          "kind": "tag",
+          "combinator": "any",
+          "values": [
+            "76e9dba2-4b32-4b97-a29a-0efb06430b7a"
+          ]
+        }
+      ],
+      "expected": 52,
+      "actual": 52,
+      "pass": true,
+      "error": null,
+      "encodedLength": 230
+    },
+    {
+      "filter": "tag",
+      "scenario": "Tag: any b148eb9c-f79e-453e-9af4-0278cc1fcd22",
+      "blocks": [
+        {
+          "id": "tag-any-b148eb9c-f79e-453e-9af4-0278cc1fcd22",
+          "kind": "tag",
+          "combinator": "any",
+          "values": [
+            "b148eb9c-f79e-453e-9af4-0278cc1fcd22"
+          ]
+        }
+      ],
+      "expected": 15,
+      "actual": 15,
+      "pass": true,
+      "error": null,
+      "encodedLength": 230
+    },
+    {
+      "filter": "tag",
+      "scenario": "Tag: any fc90619b-4a6b-4d46-bb98-ef4991095f8f",
+      "blocks": [
+        {
+          "id": "tag-any-fc90619b-4a6b-4d46-bb98-ef4991095f8f",
+          "kind": "tag",
+          "combinator": "any",
+          "values": [
+            "fc90619b-4a6b-4d46-bb98-ef4991095f8f"
+          ]
+        }
+      ],
+      "expected": 3122,
+      "actual": 3122,
+      "pass": true,
+      "error": null,
+      "encodedLength": 230
+    },
+    {
+      "filter": "tag",
+      "scenario": "Tag: any 7328fc49-df4d-4cb6-bb7b-bf6ad1023636",
+      "blocks": [
+        {
+          "id": "tag-any-7328fc49-df4d-4cb6-bb7b-bf6ad1023636",
+          "kind": "tag",
+          "combinator": "any",
+          "values": [
+            "7328fc49-df4d-4cb6-bb7b-bf6ad1023636"
+          ]
+        }
+      ],
+      "expected": 54,
+      "actual": 54,
+      "pass": true,
+      "error": null,
+      "encodedLength": 230
+    },
+    {
+      "filter": "tag",
+      "scenario": "Tag: any d3facd72-54b9-4ab3-8f46-f2f5dfd2981b",
+      "blocks": [
+        {
+          "id": "tag-any-d3facd72-54b9-4ab3-8f46-f2f5dfd2981b",
+          "kind": "tag",
+          "combinator": "any",
+          "values": [
+            "d3facd72-54b9-4ab3-8f46-f2f5dfd2981b"
+          ]
+        }
+      ],
+      "expected": 1772,
+      "actual": 1772,
+      "pass": true,
+      "error": null,
+      "encodedLength": 230
+    },
+    {
+      "filter": "tag",
+      "scenario": "Tag: any 79651faf-3593-47b7-9a74-5256329406e5",
+      "blocks": [
+        {
+          "id": "tag-any-79651faf-3593-47b7-9a74-5256329406e5",
+          "kind": "tag",
+          "combinator": "any",
+          "values": [
+            "79651faf-3593-47b7-9a74-5256329406e5"
+          ]
+        }
+      ],
+      "expected": 5610,
+      "actual": 5610,
+      "pass": true,
+      "error": null,
+      "encodedLength": 230
+    },
+    {
+      "filter": "tag",
+      "scenario": "Tag: any 878259b9-139b-4263-8928-3267c733656a",
+      "blocks": [
+        {
+          "id": "tag-any-878259b9-139b-4263-8928-3267c733656a",
+          "kind": "tag",
+          "combinator": "any",
+          "values": [
+            "878259b9-139b-4263-8928-3267c733656a"
+          ]
+        }
+      ],
+      "expected": 144,
+      "actual": 144,
+      "pass": true,
+      "error": null,
+      "encodedLength": 230
+    },
+    {
+      "filter": "tag",
+      "scenario": "Tag: any 9ce3dde0-064c-4349-a66f-f87e9943e0aa",
+      "blocks": [
+        {
+          "id": "tag-any-9ce3dde0-064c-4349-a66f-f87e9943e0aa",
+          "kind": "tag",
+          "combinator": "any",
+          "values": [
+            "9ce3dde0-064c-4349-a66f-f87e9943e0aa"
+          ]
+        }
+      ],
+      "expected": 7,
+      "actual": 7,
+      "pass": true,
+      "error": null,
+      "encodedLength": 230
+    },
+    {
+      "filter": "tag",
+      "scenario": "Tag: any 3a513e0f-0ef8-4f1e-9a29-f2f58abec0df",
+      "blocks": [
+        {
+          "id": "tag-any-3a513e0f-0ef8-4f1e-9a29-f2f58abec0df",
+          "kind": "tag",
+          "combinator": "any",
+          "values": [
+            "3a513e0f-0ef8-4f1e-9a29-f2f58abec0df"
+          ]
+        }
+      ],
+      "expected": 5231,
+      "actual": 5231,
+      "pass": true,
+      "error": null,
+      "encodedLength": 230
+    },
+    {
+      "filter": "tag",
+      "scenario": "Tag: any 0bb82600-7f0a-4037-ba79-35ddc581181b",
+      "blocks": [
+        {
+          "id": "tag-any-0bb82600-7f0a-4037-ba79-35ddc581181b",
+          "kind": "tag",
+          "combinator": "any",
+          "values": [
+            "0bb82600-7f0a-4037-ba79-35ddc581181b"
+          ]
+        }
+      ],
+      "expected": 693,
+      "actual": 693,
+      "pass": true,
+      "error": null,
+      "encodedLength": 230
+    },
+    {
+      "filter": "tag",
+      "scenario": "Tag: any 22a2512d-f9af-40c1-9a77-abef3cb84361",
+      "blocks": [
+        {
+          "id": "tag-any-22a2512d-f9af-40c1-9a77-abef3cb84361",
+          "kind": "tag",
+          "combinator": "any",
+          "values": [
+            "22a2512d-f9af-40c1-9a77-abef3cb84361"
+          ]
+        }
+      ],
+      "expected": 2325,
+      "actual": 2325,
+      "pass": true,
+      "error": null,
+      "encodedLength": 230
+    },
+    {
+      "filter": "tag",
+      "scenario": "Tag: any 81c1cafa-7f3d-4358-9a50-eab2ed55bcb1",
+      "blocks": [
+        {
+          "id": "tag-any-81c1cafa-7f3d-4358-9a50-eab2ed55bcb1",
+          "kind": "tag",
+          "combinator": "any",
+          "values": [
+            "81c1cafa-7f3d-4358-9a50-eab2ed55bcb1"
+          ]
+        }
+      ],
+      "expected": 18,
+      "actual": 18,
+      "pass": true,
+      "error": null,
+      "encodedLength": 230
+    },
+    {
+      "filter": "tag",
+      "scenario": "Tag: any 1195fef9-deb8-4625-95ce-2c866e6da753",
+      "blocks": [
+        {
+          "id": "tag-any-1195fef9-deb8-4625-95ce-2c866e6da753",
+          "kind": "tag",
+          "combinator": "any",
+          "values": [
+            "1195fef9-deb8-4625-95ce-2c866e6da753"
+          ]
+        }
+      ],
+      "expected": 1201,
+      "actual": 1201,
+      "pass": true,
+      "error": null,
+      "encodedLength": 230
+    },
+    {
+      "filter": "tag",
+      "scenario": "Tag: any 34ae739d-9859-404f-bd21-b60975f710ec",
+      "blocks": [
+        {
+          "id": "tag-any-34ae739d-9859-404f-bd21-b60975f710ec",
+          "kind": "tag",
+          "combinator": "any",
+          "values": [
+            "34ae739d-9859-404f-bd21-b60975f710ec"
+          ]
+        }
+      ],
+      "expected": 11,
+      "actual": 11,
+      "pass": true,
+      "error": null,
+      "encodedLength": 230
+    },
+    {
+      "filter": "tag",
+      "scenario": "Tag: any 325ee145-36b3-4f59-b471-1313e264586d",
+      "blocks": [
+        {
+          "id": "tag-any-325ee145-36b3-4f59-b471-1313e264586d",
+          "kind": "tag",
+          "combinator": "any",
+          "values": [
+            "325ee145-36b3-4f59-b471-1313e264586d"
+          ]
+        }
+      ],
+      "expected": 1700,
+      "actual": 1700,
+      "pass": true,
+      "error": null,
+      "encodedLength": 230
+    },
+    {
+      "filter": "tag",
+      "scenario": "Tag: any c8b3e810-9a9c-4194-8dcf-79ca61013d90",
+      "blocks": [
+        {
+          "id": "tag-any-c8b3e810-9a9c-4194-8dcf-79ca61013d90",
+          "kind": "tag",
+          "combinator": "any",
+          "values": [
+            "c8b3e810-9a9c-4194-8dcf-79ca61013d90"
+          ]
+        }
+      ],
+      "expected": 861,
+      "actual": 861,
+      "pass": true,
+      "error": null,
+      "encodedLength": 230
+    },
+    {
+      "filter": "tag",
+      "scenario": "Tag: any 75bf6eab-8f73-4048-a036-41bdfe074a36",
+      "blocks": [
+        {
+          "id": "tag-any-75bf6eab-8f73-4048-a036-41bdfe074a36",
+          "kind": "tag",
+          "combinator": "any",
+          "values": [
+            "75bf6eab-8f73-4048-a036-41bdfe074a36"
+          ]
+        }
+      ],
+      "expected": 1445,
+      "actual": 1445,
+      "pass": true,
+      "error": null,
+      "encodedLength": 230
+    },
+    {
+      "filter": "tag",
+      "scenario": "Tag: any e63fc1e4-c7be-4922-8e66-64db85f3abf0",
+      "blocks": [
+        {
+          "id": "tag-any-e63fc1e4-c7be-4922-8e66-64db85f3abf0",
+          "kind": "tag",
+          "combinator": "any",
+          "values": [
+            "e63fc1e4-c7be-4922-8e66-64db85f3abf0"
+          ]
+        }
+      ],
+      "expected": 48,
+      "actual": 48,
+      "pass": true,
+      "error": null,
+      "encodedLength": 230
+    },
+    {
+      "filter": "tag",
+      "scenario": "Tag: any ac2e232d-b12c-42c9-a699-490a3dd5cf86",
+      "blocks": [
+        {
+          "id": "tag-any-ac2e232d-b12c-42c9-a699-490a3dd5cf86",
+          "kind": "tag",
+          "combinator": "any",
+          "values": [
+            "ac2e232d-b12c-42c9-a699-490a3dd5cf86"
+          ]
+        }
+      ],
+      "expected": 79,
+      "actual": 79,
+      "pass": true,
+      "error": null,
+      "encodedLength": 230
+    },
+    {
+      "filter": "tag",
+      "scenario": "Tag: any ce2074ce-bc54-4cee-83bb-a76eb695d27a",
+      "blocks": [
+        {
+          "id": "tag-any-ce2074ce-bc54-4cee-83bb-a76eb695d27a",
+          "kind": "tag",
+          "combinator": "any",
+          "values": [
+            "ce2074ce-bc54-4cee-83bb-a76eb695d27a"
+          ]
+        }
+      ],
+      "expected": 1062,
+      "actual": 1062,
+      "pass": true,
+      "error": null,
+      "encodedLength": 230
+    },
+    {
+      "filter": "tag",
+      "scenario": "Tag: any 28a054ab-4cd0-4e65-8d99-21a47e8d4691",
+      "blocks": [
+        {
+          "id": "tag-any-28a054ab-4cd0-4e65-8d99-21a47e8d4691",
+          "kind": "tag",
+          "combinator": "any",
+          "values": [
+            "28a054ab-4cd0-4e65-8d99-21a47e8d4691"
+          ]
+        }
+      ],
+      "expected": 12695,
+      "actual": 12695,
+      "pass": true,
+      "error": null,
+      "encodedLength": 230
+    },
+    {
+      "filter": "tag",
+      "scenario": "Tag: any 5ef3ab64-bf8d-4003-9bf9-208bda300e59",
+      "blocks": [
+        {
+          "id": "tag-any-5ef3ab64-bf8d-4003-9bf9-208bda300e59",
+          "kind": "tag",
+          "combinator": "any",
+          "values": [
+            "5ef3ab64-bf8d-4003-9bf9-208bda300e59"
+          ]
+        }
+      ],
+      "expected": 986,
+      "actual": 986,
+      "pass": true,
+      "error": null,
+      "encodedLength": 230
+    },
+    {
+      "filter": "tag",
+      "scenario": "Tag: any 1390f0a3-9658-46d6-a2d1-6d707929251b",
+      "blocks": [
+        {
+          "id": "tag-any-1390f0a3-9658-46d6-a2d1-6d707929251b",
+          "kind": "tag",
+          "combinator": "any",
+          "values": [
+            "1390f0a3-9658-46d6-a2d1-6d707929251b"
+          ]
+        }
+      ],
+      "expected": 15204,
+      "actual": 15204,
+      "pass": true,
+      "error": null,
+      "encodedLength": 230
+    },
+    {
+      "filter": "tag",
+      "scenario": "Tag: any 97f756c0-65b9-4153-b25b-152cbfcb6d16",
+      "blocks": [
+        {
+          "id": "tag-any-97f756c0-65b9-4153-b25b-152cbfcb6d16",
+          "kind": "tag",
+          "combinator": "any",
+          "values": [
+            "97f756c0-65b9-4153-b25b-152cbfcb6d16"
+          ]
+        }
+      ],
+      "expected": 1315,
+      "actual": 1315,
+      "pass": true,
+      "error": null,
+      "encodedLength": 230
+    },
+    {
+      "filter": "tag",
+      "scenario": "Tag: any first 2",
+      "blocks": [
+        {
+          "id": "tag-any-first-2",
+          "kind": "tag",
+          "combinator": "any",
+          "values": [
+            "6d89ef36-b30f-40b9-97a2-7979e14c4a45",
+            "a01b6cf9-6a7d-4cbd-b6b2-f1a3e91b37fb"
+          ]
+        }
+      ],
+      "expected": 1,
+      "actual": 1,
+      "pass": true,
+      "error": null,
+      "encodedLength": 246
+    },
+    {
+      "filter": "tag",
+      "scenario": "Tag: all first 2",
+      "blocks": [
+        {
+          "id": "tag-all-first-2",
+          "kind": "tag",
+          "combinator": "all",
+          "values": [
+            "6d89ef36-b30f-40b9-97a2-7979e14c4a45",
+            "a01b6cf9-6a7d-4cbd-b6b2-f1a3e91b37fb"
+          ]
+        }
+      ],
+      "expected": 0,
+      "actual": 0,
+      "pass": true,
+      "error": null,
+      "encodedLength": 246
+    },
+    {
+      "filter": "tag",
+      "scenario": "Tag: not first 2",
+      "blocks": [
+        {
+          "id": "tag-not-first-2",
+          "kind": "tag",
+          "combinator": "not",
+          "values": [
+            "6d89ef36-b30f-40b9-97a2-7979e14c4a45",
+            "a01b6cf9-6a7d-4cbd-b6b2-f1a3e91b37fb"
+          ]
+        }
+      ],
+      "expected": 49051,
+      "actual": 49051,
+      "pass": true,
+      "error": null,
+      "encodedLength": 246
+    },
+    {
+      "filter": "tag",
+      "scenario": "Tag: not first",
+      "blocks": [
+        {
+          "id": "tag-not-first",
+          "kind": "tag",
+          "combinator": "not",
+          "values": [
+            "6d89ef36-b30f-40b9-97a2-7979e14c4a45"
+          ]
+        }
+      ],
+      "expected": 49052,
+      "actual": 49052,
+      "pass": true,
+      "error": null,
+      "encodedLength": 199
+    },
+    {
+      "filter": "cass",
+      "scenario": "CASS: any verified",
+      "blocks": [
+        {
+          "id": "cass-any-verified",
+          "kind": "cass",
+          "combinator": "any",
+          "values": [
+            "verified"
+          ]
+        }
+      ],
+      "expected": 1897,
+      "actual": 1897,
+      "pass": true,
+      "error": null,
+      "encodedLength": 176
+    },
+    {
+      "filter": "cass",
+      "scenario": "CASS: any unverified",
+      "blocks": [
+        {
+          "id": "cass-any-unverified",
+          "kind": "cass",
+          "combinator": "any",
+          "values": [
+            "unverified"
+          ]
+        }
+      ],
+      "expected": 47133,
+      "actual": 47133,
+      "pass": true,
+      "error": null,
+      "encodedLength": 180
+    },
+    {
+      "filter": "cass",
+      "scenario": "CASS: any invalid",
+      "blocks": [
+        {
+          "id": "cass-any-invalid",
+          "kind": "cass",
+          "combinator": "any",
+          "values": [
+            "invalid"
+          ]
+        }
+      ],
+      "expected": 22,
+      "actual": 22,
+      "pass": true,
+      "error": null,
+      "encodedLength": 174
+    },
+    {
+      "filter": "cass",
+      "scenario": "CASS: any ambiguous",
+      "blocks": [
+        {
+          "id": "cass-any-ambiguous",
+          "kind": "cass",
+          "combinator": "any",
+          "values": [
+            "ambiguous"
+          ]
+        }
+      ],
+      "expected": 0,
+      "actual": 0,
+      "pass": true,
+      "error": null,
+      "encodedLength": 178
+    },
+    {
+      "filter": "cass",
+      "scenario": "CASS: any first 2",
+      "blocks": [
+        {
+          "id": "cass-any-first-2",
+          "kind": "cass",
+          "combinator": "any",
+          "values": [
+            "verified",
+            "unverified"
+          ]
+        }
+      ],
+      "expected": 49030,
+      "actual": 49030,
+      "pass": true,
+      "error": null,
+      "encodedLength": 194
+    },
+    {
+      "filter": "cass",
+      "scenario": "CASS: all first 2",
+      "blocks": [
+        {
+          "id": "cass-all-first-2",
+          "kind": "cass",
+          "combinator": "all",
+          "values": [
+            "verified",
+            "unverified"
+          ]
+        }
+      ],
+      "expected": 0,
+      "actual": 0,
+      "pass": true,
+      "error": null,
+      "encodedLength": 194
+    },
+    {
+      "filter": "cass",
+      "scenario": "CASS: not first 2",
+      "blocks": [
+        {
+          "id": "cass-not-first-2",
+          "kind": "cass",
+          "combinator": "not",
+          "values": [
+            "verified",
+            "unverified"
+          ]
+        }
+      ],
+      "expected": 22,
+      "actual": 22,
+      "pass": true,
+      "error": null,
+      "encodedLength": 194
+    },
+    {
+      "filter": "cass",
+      "scenario": "CASS: not first",
+      "blocks": [
+        {
+          "id": "cass-not-first",
+          "kind": "cass",
+          "combinator": "not",
+          "values": [
+            "verified"
+          ]
+        }
+      ],
+      "expected": 47155,
+      "actual": 47155,
+      "pass": true,
+      "error": null,
+      "encodedLength": 173
+    },
+    {
+      "filter": "outreach_dispo",
+      "scenario": "Outreach Disposition: any wrong_number",
+      "blocks": [
+        {
+          "id": "outreach_dispo-any-wrong_number",
+          "kind": "outreach_dispo",
+          "combinator": "any",
+          "values": [
+            "wrong_number"
+          ]
+        }
+      ],
+      "expected": 1,
+      "actual": 1,
+      "pass": true,
+      "error": null,
+      "encodedLength": 204
+    },
+    {
+      "filter": "outreach_dispo",
+      "scenario": "Outreach Disposition: any bad_number",
+      "blocks": [
+        {
+          "id": "outreach_dispo-any-bad_number",
+          "kind": "outreach_dispo",
+          "combinator": "any",
+          "values": [
+            "bad_number"
+          ]
+        }
+      ],
+      "expected": 0,
+      "actual": 0,
+      "pass": true,
+      "error": null,
+      "encodedLength": 200
+    },
+    {
+      "filter": "outreach_dispo",
+      "scenario": "Outreach Disposition: any not_interested",
+      "blocks": [
+        {
+          "id": "outreach_dispo-any-not_interested",
+          "kind": "outreach_dispo",
+          "combinator": "any",
+          "values": [
+            "not_interested"
+          ]
+        }
+      ],
+      "expected": 1,
+      "actual": 1,
+      "pass": true,
+      "error": null,
+      "encodedLength": 208
+    },
+    {
+      "filter": "outreach_dispo",
+      "scenario": "Outreach Disposition: any opted_out",
+      "blocks": [
+        {
+          "id": "outreach_dispo-any-opted_out",
+          "kind": "outreach_dispo",
+          "combinator": "any",
+          "values": [
+            "opted_out"
+          ]
+        }
+      ],
+      "expected": 0,
+      "actual": 0,
+      "pass": true,
+      "error": null,
+      "encodedLength": 198
+    },
+    {
+      "filter": "outreach_dispo",
+      "scenario": "Outreach Disposition: any dnc",
+      "blocks": [
+        {
+          "id": "outreach_dispo-any-dnc",
+          "kind": "outreach_dispo",
+          "combinator": "any",
+          "values": [
+            "dnc"
+          ]
+        }
+      ],
+      "expected": 3,
+      "actual": 3,
+      "pass": true,
+      "error": null,
+      "encodedLength": 186
+    },
+    {
+      "filter": "outreach_dispo",
+      "scenario": "Outreach Disposition: any nurture",
+      "blocks": [
+        {
+          "id": "outreach_dispo-any-nurture",
+          "kind": "outreach_dispo",
+          "combinator": "any",
+          "values": [
+            "nurture"
+          ]
+        }
+      ],
+      "expected": 0,
+      "actual": 0,
+      "pass": true,
+      "error": null,
+      "encodedLength": 194
+    },
+    {
+      "filter": "outreach_dispo",
+      "scenario": "Outreach Disposition: any callback_requested",
+      "blocks": [
+        {
+          "id": "outreach_dispo-any-callback_requested",
+          "kind": "outreach_dispo",
+          "combinator": "any",
+          "values": [
+            "callback_requested"
+          ]
+        }
+      ],
+      "expected": 19,
+      "actual": 19,
+      "pass": true,
+      "error": null,
+      "encodedLength": 216
+    },
+    {
+      "filter": "outreach_dispo",
+      "scenario": "Outreach Disposition: any first 2",
+      "blocks": [
+        {
+          "id": "outreach_dispo-any-first-2",
+          "kind": "outreach_dispo",
+          "combinator": "any",
+          "values": [
+            "wrong_number",
+            "bad_number"
+          ]
+        }
+      ],
+      "expected": 1,
+      "actual": 1,
+      "pass": true,
+      "error": null,
+      "encodedLength": 218
+    },
+    {
+      "filter": "outreach_dispo",
+      "scenario": "Outreach Disposition: all first 2",
+      "blocks": [
+        {
+          "id": "outreach_dispo-all-first-2",
+          "kind": "outreach_dispo",
+          "combinator": "all",
+          "values": [
+            "wrong_number",
+            "bad_number"
+          ]
+        }
+      ],
+      "expected": 0,
+      "actual": 0,
+      "pass": true,
+      "error": null,
+      "encodedLength": 218
+    },
+    {
+      "filter": "outreach_dispo",
+      "scenario": "Outreach Disposition: not first 2",
+      "blocks": [
+        {
+          "id": "outreach_dispo-not-first-2",
+          "kind": "outreach_dispo",
+          "combinator": "not",
+          "values": [
+            "wrong_number",
+            "bad_number"
+          ]
+        }
+      ],
+      "expected": 23,
+      "actual": 23,
+      "pass": true,
+      "error": null,
+      "encodedLength": 218
+    },
+    {
+      "filter": "outreach_dispo",
+      "scenario": "Outreach Disposition: not first",
+      "blocks": [
+        {
+          "id": "outreach_dispo-not-first",
+          "kind": "outreach_dispo",
+          "combinator": "not",
+          "values": [
+            "wrong_number"
+          ]
+        }
+      ],
+      "expected": 23,
+      "actual": 23,
+      "pass": true,
+      "error": null,
+      "encodedLength": 197
+    },
+    {
+      "filter": "source",
+      "scenario": "Source: any dealmachine",
+      "blocks": [
+        {
+          "id": "source-any-dealmachine",
+          "kind": "source",
+          "combinator": "any",
+          "values": [
+            "dealmachine"
+          ]
+        }
+      ],
+      "expected": 9060,
+      "actual": 9060,
+      "pass": true,
+      "error": null,
+      "encodedLength": 186
+    },
+    {
+      "filter": "source",
+      "scenario": "Source: any propstream",
+      "blocks": [
+        {
+          "id": "source-any-propstream",
+          "kind": "source",
+          "combinator": "any",
+          "values": [
+            "propstream"
+          ]
+        }
+      ],
+      "expected": 33220,
+      "actual": 33220,
+      "pass": true,
+      "error": null,
+      "encodedLength": 184
+    },
+    {
+      "filter": "source",
+      "scenario": "Source: any titlepro",
+      "blocks": [
+        {
+          "id": "source-any-titlepro",
+          "kind": "source",
+          "combinator": "any",
+          "values": [
+            "titlepro"
+          ]
+        }
+      ],
+      "expected": 2123,
+      "actual": 2123,
+      "pass": true,
+      "error": null,
+      "encodedLength": 180
+    },
+    {
+      "filter": "source",
+      "scenario": "Source: any reisift",
+      "blocks": [
+        {
+          "id": "source-any-reisift",
+          "kind": "source",
+          "combinator": "any",
+          "values": [
+            "reisift"
+          ]
+        }
+      ],
+      "expected": 0,
+      "actual": 0,
+      "pass": true,
+      "error": null,
+      "encodedLength": 178
+    },
+    {
+      "filter": "source",
+      "scenario": "Source: any agent_outreach",
+      "blocks": [
+        {
+          "id": "source-any-agent_outreach",
+          "kind": "source",
+          "combinator": "any",
+          "values": [
+            "agent_outreach"
+          ]
+        }
+      ],
+      "expected": 0,
+      "actual": 0,
+      "pass": true,
+      "error": null,
+      "encodedLength": 192
+    },
+    {
+      "filter": "source",
+      "scenario": "Source: any driving_for_dollars",
+      "blocks": [
+        {
+          "id": "source-any-driving_for_dollars",
+          "kind": "source",
+          "combinator": "any",
+          "values": [
+            "driving_for_dollars"
+          ]
+        }
+      ],
+      "expected": 1371,
+      "actual": 1371,
+      "pass": true,
+      "error": null,
+      "encodedLength": 202
+    },
+    {
+      "filter": "source",
+      "scenario": "Source: any referral",
+      "blocks": [
+        {
+          "id": "source-any-referral",
+          "kind": "source",
+          "combinator": "any",
+          "values": [
+            "referral"
+          ]
+        }
+      ],
+      "expected": 0,
+      "actual": 0,
+      "pass": true,
+      "error": null,
+      "encodedLength": 180
+    },
+    {
+      "filter": "source",
+      "scenario": "Source: any cold_call",
+      "blocks": [
+        {
+          "id": "source-any-cold_call",
+          "kind": "source",
+          "combinator": "any",
+          "values": [
+            "cold_call"
+          ]
+        }
+      ],
+      "expected": 0,
+      "actual": 0,
+      "pass": true,
+      "error": null,
+      "encodedLength": 182
+    },
+    {
+      "filter": "source",
+      "scenario": "Source: any sms",
+      "blocks": [
+        {
+          "id": "source-any-sms",
+          "kind": "source",
+          "combinator": "any",
+          "values": [
+            "sms"
+          ]
+        }
+      ],
+      "expected": 2310,
+      "actual": 2310,
+      "pass": true,
+      "error": null,
+      "encodedLength": 170
+    },
+    {
+      "filter": "source",
+      "scenario": "Source: any web_form",
+      "blocks": [
+        {
+          "id": "source-any-web_form",
+          "kind": "source",
+          "combinator": "any",
+          "values": [
+            "web_form"
+          ]
+        }
+      ],
+      "expected": 0,
+      "actual": 0,
+      "pass": true,
+      "error": null,
+      "encodedLength": 180
+    },
+    {
+      "filter": "source",
+      "scenario": "Source: any direct_mail",
+      "blocks": [
+        {
+          "id": "source-any-direct_mail",
+          "kind": "source",
+          "combinator": "any",
+          "values": [
+            "direct_mail"
+          ]
+        }
+      ],
+      "expected": 8,
+      "actual": 8,
+      "pass": true,
+      "error": null,
+      "encodedLength": 186
+    },
+    {
+      "filter": "source",
+      "scenario": "Source: any first 2",
+      "blocks": [
+        {
+          "id": "source-any-first-2",
+          "kind": "source",
+          "combinator": "any",
+          "values": [
+            "dealmachine",
+            "propstream"
+          ]
+        }
+      ],
+      "expected": 42280,
+      "actual": 42280,
+      "pass": true,
+      "error": null,
+      "encodedLength": 201
+    },
+    {
+      "filter": "source",
+      "scenario": "Source: all first 2",
+      "blocks": [
+        {
+          "id": "source-all-first-2",
+          "kind": "source",
+          "combinator": "all",
+          "values": [
+            "dealmachine",
+            "propstream"
+          ]
+        }
+      ],
+      "expected": 0,
+      "actual": 0,
+      "pass": true,
+      "error": null,
+      "encodedLength": 201
+    },
+    {
+      "filter": "source",
+      "scenario": "Source: not first 2",
+      "blocks": [
+        {
+          "id": "source-not-first-2",
+          "kind": "source",
+          "combinator": "not",
+          "values": [
+            "dealmachine",
+            "propstream"
+          ]
+        }
+      ],
+      "expected": 5812,
+      "actual": 5812,
+      "pass": true,
+      "error": null,
+      "encodedLength": 201
+    },
+    {
+      "filter": "source",
+      "scenario": "Source: not first",
+      "blocks": [
+        {
+          "id": "source-not-first",
+          "kind": "source",
+          "combinator": "not",
+          "values": [
+            "dealmachine"
+          ]
+        }
+      ],
+      "expected": 39032,
+      "actual": 39032,
+      "pass": true,
+      "error": null,
+      "encodedLength": 180
+    },
+    {
+      "filter": "state",
+      "scenario": "State: any MO",
+      "blocks": [
+        {
+          "id": "state-any-MO",
+          "kind": "state",
+          "combinator": "any",
+          "values": [
+            "MO"
+          ]
+        }
+      ],
+      "expected": 36472,
+      "actual": 36472,
+      "pass": true,
+      "error": null,
+      "encodedLength": 166
+    },
+    {
+      "filter": "state",
+      "scenario": "State: any KS",
+      "blocks": [
+        {
+          "id": "state-any-KS",
+          "kind": "state",
+          "combinator": "any",
+          "values": [
+            "KS"
+          ]
+        }
+      ],
+      "expected": 12338,
+      "actual": 12338,
+      "pass": true,
+      "error": null,
+      "encodedLength": 166
+    },
+    {
+      "filter": "state",
+      "scenario": "State: any HI",
+      "blocks": [
+        {
+          "id": "state-any-HI",
+          "kind": "state",
+          "combinator": "any",
+          "values": [
+            "HI"
+          ]
+        }
+      ],
+      "expected": 23,
+      "actual": 23,
+      "pass": true,
+      "error": null,
+      "encodedLength": 166
+    },
+    {
+      "filter": "state",
+      "scenario": "State: any OH",
+      "blocks": [
+        {
+          "id": "state-any-OH",
+          "kind": "state",
+          "combinator": "any",
+          "values": [
+            "OH"
+          ]
+        }
+      ],
+      "expected": 150,
+      "actual": 150,
+      "pass": true,
+      "error": null,
+      "encodedLength": 166
+    },
+    {
+      "filter": "state",
+      "scenario": "State: any CA",
+      "blocks": [
+        {
+          "id": "state-any-CA",
+          "kind": "state",
+          "combinator": "any",
+          "values": [
+            "CA"
+          ]
+        }
+      ],
+      "expected": 26,
+      "actual": 26,
+      "pass": true,
+      "error": null,
+      "encodedLength": 166
+    },
+    {
+      "filter": "state",
+      "scenario": "State: any FL",
+      "blocks": [
+        {
+          "id": "state-any-FL",
+          "kind": "state",
+          "combinator": "any",
+          "values": [
+            "FL"
+          ]
+        }
+      ],
+      "expected": 6,
+      "actual": 6,
+      "pass": true,
+      "error": null,
+      "encodedLength": 166
+    },
+    {
+      "filter": "state",
+      "scenario": "State: any CO",
+      "blocks": [
+        {
+          "id": "state-any-CO",
+          "kind": "state",
+          "combinator": "any",
+          "values": [
+            "CO"
+          ]
+        }
+      ],
+      "expected": 4,
+      "actual": 4,
+      "pass": true,
+      "error": null,
+      "encodedLength": 166
+    },
+    {
+      "filter": "state",
+      "scenario": "State: any TX",
+      "blocks": [
+        {
+          "id": "state-any-TX",
+          "kind": "state",
+          "combinator": "any",
+          "values": [
+            "TX"
+          ]
+        }
+      ],
+      "expected": 4,
+      "actual": 4,
+      "pass": true,
+      "error": null,
+      "encodedLength": 166
+    },
+    {
+      "filter": "state",
+      "scenario": "State: any AZ",
+      "blocks": [
+        {
+          "id": "state-any-AZ",
+          "kind": "state",
+          "combinator": "any",
+          "values": [
+            "AZ"
+          ]
+        }
+      ],
+      "expected": 3,
+      "actual": 3,
+      "pass": true,
+      "error": null,
+      "encodedLength": 166
+    },
+    {
+      "filter": "state",
+      "scenario": "State: any NE",
+      "blocks": [
+        {
+          "id": "state-any-NE",
+          "kind": "state",
+          "combinator": "any",
+          "values": [
+            "NE"
+          ]
+        }
+      ],
+      "expected": 3,
+      "actual": 3,
+      "pass": true,
+      "error": null,
+      "encodedLength": 166
+    },
+    {
+      "filter": "state",
+      "scenario": "State: any AR",
+      "blocks": [
+        {
+          "id": "state-any-AR",
+          "kind": "state",
+          "combinator": "any",
+          "values": [
+            "AR"
+          ]
+        }
+      ],
+      "expected": 2,
+      "actual": 2,
+      "pass": true,
+      "error": null,
+      "encodedLength": 166
+    },
+    {
+      "filter": "state",
+      "scenario": "State: any IA",
+      "blocks": [
+        {
+          "id": "state-any-IA",
+          "kind": "state",
+          "combinator": "any",
+          "values": [
+            "IA"
+          ]
+        }
+      ],
+      "expected": 2,
+      "actual": 2,
+      "pass": true,
+      "error": null,
+      "encodedLength": 166
+    },
+    {
+      "filter": "state",
+      "scenario": "State: any IL",
+      "blocks": [
+        {
+          "id": "state-any-IL",
+          "kind": "state",
+          "combinator": "any",
+          "values": [
+            "IL"
+          ]
+        }
+      ],
+      "expected": 2,
+      "actual": 2,
+      "pass": true,
+      "error": null,
+      "encodedLength": 166
+    },
+    {
+      "filter": "state",
+      "scenario": "State: any MN",
+      "blocks": [
+        {
+          "id": "state-any-MN",
+          "kind": "state",
+          "combinator": "any",
+          "values": [
+            "MN"
+          ]
+        }
+      ],
+      "expected": 2,
+      "actual": 2,
+      "pass": true,
+      "error": null,
+      "encodedLength": 166
+    },
+    {
+      "filter": "state",
+      "scenario": "State: any OR",
+      "blocks": [
+        {
+          "id": "state-any-OR",
+          "kind": "state",
+          "combinator": "any",
+          "values": [
+            "OR"
+          ]
+        }
+      ],
+      "expected": 2,
+      "actual": 2,
+      "pass": true,
+      "error": null,
+      "encodedLength": 166
+    },
+    {
+      "filter": "state",
+      "scenario": "State: any SD",
+      "blocks": [
+        {
+          "id": "state-any-SD",
+          "kind": "state",
+          "combinator": "any",
+          "values": [
+            "SD"
+          ]
+        }
+      ],
+      "expected": 2,
+      "actual": 2,
+      "pass": true,
+      "error": null,
+      "encodedLength": 166
+    },
+    {
+      "filter": "state",
+      "scenario": "State: any WA",
+      "blocks": [
+        {
+          "id": "state-any-WA",
+          "kind": "state",
+          "combinator": "any",
+          "values": [
+            "WA"
+          ]
+        }
+      ],
+      "expected": 2,
+      "actual": 2,
+      "pass": true,
+      "error": null,
+      "encodedLength": 166
+    },
+    {
+      "filter": "state",
+      "scenario": "State: any AK",
+      "blocks": [
+        {
+          "id": "state-any-AK",
+          "kind": "state",
+          "combinator": "any",
+          "values": [
+            "AK"
+          ]
+        }
+      ],
+      "expected": 1,
+      "actual": 1,
+      "pass": true,
+      "error": null,
+      "encodedLength": 166
+    },
+    {
+      "filter": "state",
+      "scenario": "State: any AL",
+      "blocks": [
+        {
+          "id": "state-any-AL",
+          "kind": "state",
+          "combinator": "any",
+          "values": [
+            "AL"
+          ]
+        }
+      ],
+      "expected": 1,
+      "actual": 1,
+      "pass": true,
+      "error": null,
+      "encodedLength": 166
+    },
+    {
+      "filter": "state",
+      "scenario": "State: any IN",
+      "blocks": [
+        {
+          "id": "state-any-IN",
+          "kind": "state",
+          "combinator": "any",
+          "values": [
+            "IN"
+          ]
+        }
+      ],
+      "expected": 1,
+      "actual": 1,
+      "pass": true,
+      "error": null,
+      "encodedLength": 166
+    },
+    {
+      "filter": "state",
+      "scenario": "State: any MI",
+      "blocks": [
+        {
+          "id": "state-any-MI",
+          "kind": "state",
+          "combinator": "any",
+          "values": [
+            "MI"
+          ]
+        }
+      ],
+      "expected": 1,
+      "actual": 1,
+      "pass": true,
+      "error": null,
+      "encodedLength": 166
+    },
+    {
+      "filter": "state",
+      "scenario": "State: any ND",
+      "blocks": [
+        {
+          "id": "state-any-ND",
+          "kind": "state",
+          "combinator": "any",
+          "values": [
+            "ND"
+          ]
+        }
+      ],
+      "expected": 1,
+      "actual": 1,
+      "pass": true,
+      "error": null,
+      "encodedLength": 166
+    },
+    {
+      "filter": "state",
+      "scenario": "State: any OK",
+      "blocks": [
+        {
+          "id": "state-any-OK",
+          "kind": "state",
+          "combinator": "any",
+          "values": [
+            "OK"
+          ]
+        }
+      ],
+      "expected": 1,
+      "actual": 1,
+      "pass": true,
+      "error": null,
+      "encodedLength": 166
+    },
+    {
+      "filter": "state",
+      "scenario": "State: any SC",
+      "blocks": [
+        {
+          "id": "state-any-SC",
+          "kind": "state",
+          "combinator": "any",
+          "values": [
+            "SC"
+          ]
+        }
+      ],
+      "expected": 1,
+      "actual": 1,
+      "pass": true,
+      "error": null,
+      "encodedLength": 166
+    },
+    {
+      "filter": "state",
+      "scenario": "State: any WI",
+      "blocks": [
+        {
+          "id": "state-any-WI",
+          "kind": "state",
+          "combinator": "any",
+          "values": [
+            "WI"
+          ]
+        }
+      ],
+      "expected": 1,
+      "actual": 1,
+      "pass": true,
+      "error": null,
+      "encodedLength": 166
+    },
+    {
+      "filter": "state",
+      "scenario": "State: any WV",
+      "blocks": [
+        {
+          "id": "state-any-WV",
+          "kind": "state",
+          "combinator": "any",
+          "values": [
+            "WV"
+          ]
+        }
+      ],
+      "expected": 1,
+      "actual": 1,
+      "pass": true,
+      "error": null,
+      "encodedLength": 166
+    },
+    {
+      "filter": "state",
+      "scenario": "State: any first 2",
+      "blocks": [
+        {
+          "id": "state-any-first-2",
+          "kind": "state",
+          "combinator": "any",
+          "values": [
+            "MO",
+            "KS"
+          ]
+        }
+      ],
+      "expected": 48810,
+      "actual": 48810,
+      "pass": true,
+      "error": null,
+      "encodedLength": 182
+    },
+    {
+      "filter": "state",
+      "scenario": "State: all first 2",
+      "blocks": [
+        {
+          "id": "state-all-first-2",
+          "kind": "state",
+          "combinator": "all",
+          "values": [
+            "MO",
+            "KS"
+          ]
+        }
+      ],
+      "expected": 0,
+      "actual": 0,
+      "pass": true,
+      "error": null,
+      "encodedLength": 182
+    },
+    {
+      "filter": "state",
+      "scenario": "State: not first 2",
+      "blocks": [
+        {
+          "id": "state-not-first-2",
+          "kind": "state",
+          "combinator": "not",
+          "values": [
+            "MO",
+            "KS"
+          ]
+        }
+      ],
+      "expected": 242,
+      "actual": 242,
+      "pass": true,
+      "error": null,
+      "encodedLength": 182
+    },
+    {
+      "filter": "state",
+      "scenario": "State: not first",
+      "blocks": [
+        {
+          "id": "state-not-first",
+          "kind": "state",
+          "combinator": "not",
+          "values": [
+            "MO"
+          ]
+        }
+      ],
+      "expected": 12580,
+      "actual": 12580,
+      "pass": true,
+      "error": null,
+      "encodedLength": 169
+    },
+    {
+      "filter": "market",
+      "scenario": "Market: any Jackson County MO",
+      "blocks": [
+        {
+          "id": "market-any-Jackson County MO",
+          "kind": "market",
+          "combinator": "any",
+          "values": [
+            "Jackson County MO"
+          ]
+        }
+      ],
+      "expected": 17975,
+      "actual": 17975,
+      "pass": true,
+      "error": null,
+      "encodedLength": 206
+    },
+    {
+      "filter": "market",
+      "scenario": "Market: any Johnson County KS",
+      "blocks": [
+        {
+          "id": "market-any-Johnson County KS",
+          "kind": "market",
+          "combinator": "any",
+          "values": [
+            "Johnson County KS"
+          ]
+        }
+      ],
+      "expected": 11981,
+      "actual": 11981,
+      "pass": true,
+      "error": null,
+      "encodedLength": 206
+    },
+    {
+      "filter": "market",
+      "scenario": "Market: any Clay County MO",
+      "blocks": [
+        {
+          "id": "market-any-Clay County MO",
+          "kind": "market",
+          "combinator": "any",
+          "values": [
+            "Clay County MO"
+          ]
+        }
+      ],
+      "expected": 9575,
+      "actual": 9575,
+      "pass": true,
+      "error": null,
+      "encodedLength": 200
+    },
+    {
+      "filter": "market",
+      "scenario": "Market: any Platte County MO",
+      "blocks": [
+        {
+          "id": "market-any-Platte County MO",
+          "kind": "market",
+          "combinator": "any",
+          "values": [
+            "Platte County MO"
+          ]
+        }
+      ],
+      "expected": 5388,
+      "actual": 5388,
+      "pass": true,
+      "error": null,
+      "encodedLength": 204
+    },
+    {
+      "filter": "market",
+      "scenario": "Market: any Cass County MO",
+      "blocks": [
+        {
+          "id": "market-any-Cass County MO",
+          "kind": "market",
+          "combinator": "any",
+          "values": [
+            "Cass County MO"
+          ]
+        }
+      ],
+      "expected": 2624,
+      "actual": 2624,
+      "pass": true,
+      "error": null,
+      "encodedLength": 200
+    },
+    {
+      "filter": "market",
+      "scenario": "Market: any Kansas City",
+      "blocks": [
+        {
+          "id": "market-any-Kansas City",
+          "kind": "market",
+          "combinator": "any",
+          "values": [
+            "Kansas City"
+          ]
+        }
+      ],
+      "expected": 1399,
+      "actual": 1399,
+      "pass": true,
+      "error": null,
+      "encodedLength": 190
+    },
+    {
+      "filter": "market",
+      "scenario": "Market: any Synthetic Test",
+      "blocks": [
+        {
+          "id": "market-any-Synthetic Test",
+          "kind": "market",
+          "combinator": "any",
+          "values": [
+            "Synthetic Test"
+          ]
+        }
+      ],
+      "expected": 0,
+      "actual": 0,
+      "pass": true,
+      "error": null,
+      "encodedLength": 196
+    },
+    {
+      "filter": "market",
+      "scenario": "Market: any Camden County MO",
+      "blocks": [
+        {
+          "id": "market-any-Camden County MO",
+          "kind": "market",
+          "combinator": "any",
+          "values": [
+            "Camden County MO"
+          ]
+        }
+      ],
+      "expected": 61,
+      "actual": 61,
+      "pass": true,
+      "error": null,
+      "encodedLength": 204
+    },
+    {
+      "filter": "market",
+      "scenario": "Market: any Los Angeles",
+      "blocks": [
+        {
+          "id": "market-any-Los Angeles",
+          "kind": "market",
+          "combinator": "any",
+          "values": [
+            "Los Angeles"
+          ]
+        }
+      ],
+      "expected": 20,
+      "actual": 20,
+      "pass": true,
+      "error": null,
+      "encodedLength": 190
+    },
+    {
+      "filter": "market",
+      "scenario": "Market: any Honolulu",
+      "blocks": [
+        {
+          "id": "market-any-Honolulu",
+          "kind": "market",
+          "combinator": "any",
+          "values": [
+            "Honolulu"
+          ]
+        }
+      ],
+      "expected": 18,
+      "actual": 18,
+      "pass": true,
+      "error": null,
+      "encodedLength": 180
+    },
+    {
+      "filter": "market",
+      "scenario": "Market: any Wyandotte County KS",
+      "blocks": [
+        {
+          "id": "market-any-Wyandotte County KS",
+          "kind": "market",
+          "combinator": "any",
+          "values": [
+            "Wyandotte County KS"
+          ]
+        }
+      ],
+      "expected": 9,
+      "actual": 9,
+      "pass": true,
+      "error": null,
+      "encodedLength": 210
+    },
+    {
+      "filter": "market",
+      "scenario": "Market: any Boone County MO",
+      "blocks": [
+        {
+          "id": "market-any-Boone County MO",
+          "kind": "market",
+          "combinator": "any",
+          "values": [
+            "Boone County MO"
+          ]
+        }
+      ],
+      "expected": 1,
+      "actual": 1,
+      "pass": true,
+      "error": null,
+      "encodedLength": 202
+    },
+    {
+      "filter": "market",
+      "scenario": "Market: any Riley County KS",
+      "blocks": [
+        {
+          "id": "market-any-Riley County KS",
+          "kind": "market",
+          "combinator": "any",
+          "values": [
+            "Riley County KS"
+          ]
+        }
+      ],
+      "expected": 1,
+      "actual": 1,
+      "pass": true,
+      "error": null,
+      "encodedLength": 202
+    },
+    {
+      "filter": "market",
+      "scenario": "Market: any first 2",
+      "blocks": [
+        {
+          "id": "market-any-first-2",
+          "kind": "market",
+          "combinator": "any",
+          "values": [
+            "Jackson County MO",
+            "Johnson County KS"
+          ]
+        }
+      ],
+      "expected": 29956,
+      "actual": 29956,
+      "pass": true,
+      "error": null,
+      "encodedLength": 222
+    },
+    {
+      "filter": "market",
+      "scenario": "Market: all first 2",
+      "blocks": [
+        {
+          "id": "market-all-first-2",
+          "kind": "market",
+          "combinator": "all",
+          "values": [
+            "Jackson County MO",
+            "Johnson County KS"
+          ]
+        }
+      ],
+      "expected": 0,
+      "actual": 0,
+      "pass": true,
+      "error": null,
+      "encodedLength": 222
+    },
+    {
+      "filter": "market",
+      "scenario": "Market: not first 2",
+      "blocks": [
+        {
+          "id": "market-not-first-2",
+          "kind": "market",
+          "combinator": "not",
+          "values": [
+            "Jackson County MO",
+            "Johnson County KS"
+          ]
+        }
+      ],
+      "expected": 19096,
+      "actual": 19096,
+      "pass": true,
+      "error": null,
+      "encodedLength": 222
+    },
+    {
+      "filter": "market",
+      "scenario": "Market: not first",
+      "blocks": [
+        {
+          "id": "market-not-first",
+          "kind": "market",
+          "combinator": "not",
+          "values": [
+            "Jackson County MO"
+          ]
+        }
+      ],
+      "expected": 31077,
+      "actual": 31077,
+      "pass": true,
+      "error": null,
+      "encodedLength": 190
+    },
+    {
+      "filter": "pipeline_status",
+      "scenario": "Pipeline Status: any prospect",
+      "blocks": [
+        {
+          "id": "pipeline_status-any-prospect",
+          "kind": "pipeline_status",
+          "combinator": "any",
+          "values": [
+            "prospect"
+          ]
+        }
+      ],
+      "expected": 49052,
+      "actual": 49052,
+      "pass": true,
+      "error": null,
+      "encodedLength": 198
+    },
+    {
+      "filter": "pipeline_status",
+      "scenario": "Pipeline Status: any new_lead",
+      "blocks": [
+        {
+          "id": "pipeline_status-any-new_lead",
+          "kind": "pipeline_status",
+          "combinator": "any",
+          "values": [
+            "new_lead"
+          ]
+        }
+      ],
+      "expected": 2656,
+      "actual": 2656,
+      "pass": true,
+      "error": null,
+      "encodedLength": 198
+    },
+    {
+      "filter": "pipeline_status",
+      "scenario": "Pipeline Status: any contacted",
+      "blocks": [
+        {
+          "id": "pipeline_status-any-contacted",
+          "kind": "pipeline_status",
+          "combinator": "any",
+          "values": [
+            "contacted"
+          ]
+        }
+      ],
+      "expected": 0,
+      "actual": 0,
+      "pass": true,
+      "error": null,
+      "encodedLength": 200
+    },
+    {
+      "filter": "pipeline_status",
+      "scenario": "Pipeline Status: any interested",
+      "blocks": [
+        {
+          "id": "pipeline_status-any-interested",
+          "kind": "pipeline_status",
+          "combinator": "any",
+          "values": [
+            "interested"
+          ]
+        }
+      ],
+      "expected": 0,
+      "actual": 0,
+      "pass": true,
+      "error": null,
+      "encodedLength": 202
+    },
+    {
+      "filter": "pipeline_status",
+      "scenario": "Pipeline Status: any offer_sent",
+      "blocks": [
+        {
+          "id": "pipeline_status-any-offer_sent",
+          "kind": "pipeline_status",
+          "combinator": "any",
+          "values": [
+            "offer_sent"
+          ]
+        }
+      ],
+      "expected": 0,
+      "actual": 0,
+      "pass": true,
+      "error": null,
+      "encodedLength": 202
+    },
+    {
+      "filter": "pipeline_status",
+      "scenario": "Pipeline Status: any offer_declined",
+      "blocks": [
+        {
+          "id": "pipeline_status-any-offer_declined",
+          "kind": "pipeline_status",
+          "combinator": "any",
+          "values": [
+            "offer_declined"
+          ]
+        }
+      ],
+      "expected": 0,
+      "actual": 0,
+      "pass": true,
+      "error": null,
+      "encodedLength": 210
+    },
+    {
+      "filter": "pipeline_status",
+      "scenario": "Pipeline Status: any under_contract",
+      "blocks": [
+        {
+          "id": "pipeline_status-any-under_contract",
+          "kind": "pipeline_status",
+          "combinator": "any",
+          "values": [
+            "under_contract"
+          ]
+        }
+      ],
+      "expected": 0,
+      "actual": 0,
+      "pass": true,
+      "error": null,
+      "encodedLength": 210
+    },
+    {
+      "filter": "pipeline_status",
+      "scenario": "Pipeline Status: any closed",
+      "blocks": [
+        {
+          "id": "pipeline_status-any-closed",
+          "kind": "pipeline_status",
+          "combinator": "any",
+          "values": [
+            "closed"
+          ]
+        }
+      ],
+      "expected": 0,
+      "actual": 0,
+      "pass": true,
+      "error": null,
+      "encodedLength": 194
+    },
+    {
+      "filter": "pipeline_status",
+      "scenario": "Pipeline Status: any dead",
+      "blocks": [
+        {
+          "id": "pipeline_status-any-dead",
+          "kind": "pipeline_status",
+          "combinator": "any",
+          "values": [
+            "dead"
+          ]
+        }
+      ],
+      "expected": 0,
+      "actual": 0,
+      "pass": true,
+      "error": null,
+      "encodedLength": 190
+    },
+    {
+      "filter": "pipeline_status",
+      "scenario": "Pipeline Status: any first 2",
+      "blocks": [
+        {
+          "id": "pipeline_status-any-first-2",
+          "kind": "pipeline_status",
+          "combinator": "any",
+          "values": [
+            "prospect",
+            "new_lead"
+          ]
+        }
+      ],
+      "expected": 51708,
+      "actual": 51708,
+      "pass": true,
+      "error": null,
+      "encodedLength": 214
+    },
+    {
+      "filter": "pipeline_status",
+      "scenario": "Pipeline Status: all first 2",
+      "blocks": [
+        {
+          "id": "pipeline_status-all-first-2",
+          "kind": "pipeline_status",
+          "combinator": "all",
+          "values": [
+            "prospect",
+            "new_lead"
+          ]
+        }
+      ],
+      "expected": 0,
+      "actual": 0,
+      "pass": true,
+      "error": null,
+      "encodedLength": 214
+    },
+    {
+      "filter": "pipeline_status",
+      "scenario": "Pipeline Status: not first 2",
+      "blocks": [
+        {
+          "id": "pipeline_status-not-first-2",
+          "kind": "pipeline_status",
+          "combinator": "not",
+          "values": [
+            "prospect",
+            "new_lead"
+          ]
+        }
+      ],
+      "expected": 0,
+      "actual": 0,
+      "pass": true,
+      "error": null,
+      "encodedLength": 214
+    },
+    {
+      "filter": "pipeline_status",
+      "scenario": "Pipeline Status: not first",
+      "blocks": [
+        {
+          "id": "pipeline_status-not-first",
+          "kind": "pipeline_status",
+          "combinator": "not",
+          "values": [
+            "prospect"
+          ]
+        }
+      ],
+      "expected": 2656,
+      "actual": 2656,
+      "pass": true,
+      "error": null,
+      "encodedLength": 195
+    },
+    {
+      "filter": "assignee",
+      "scenario": "Assignee: any unassigned",
+      "blocks": [
+        {
+          "id": "assignee-any-unassigned",
+          "kind": "assignee",
+          "combinator": "any",
+          "values": [
+            "unassigned"
+          ]
+        }
+      ],
+      "expected": 49052,
+      "actual": 49052,
+      "pass": true,
+      "error": null,
+      "encodedLength": 188
+    },
+    {
+      "filter": "assignee",
+      "scenario": "Assignee: any 7459021e-3872-4ff2-8360-535d6e297408",
+      "blocks": [
+        {
+          "id": "assignee-any-7459021e-3872-4ff2-8360-535d6e297408",
+          "kind": "assignee",
+          "combinator": "any",
+          "values": [
+            "7459021e-3872-4ff2-8360-535d6e297408"
+          ]
+        }
+      ],
+      "expected": 0,
+      "actual": 0,
+      "pass": true,
+      "error": null,
+      "encodedLength": 240
+    },
+    {
+      "filter": "assignee",
+      "scenario": "Assignee: any first 2",
+      "blocks": [
+        {
+          "id": "assignee-any-first-2",
+          "kind": "assignee",
+          "combinator": "any",
+          "values": [
+            "unassigned",
+            "7459021e-3872-4ff2-8360-535d6e297408"
+          ]
+        }
+      ],
+      "expected": 49052,
+      "actual": 49052,
+      "pass": true,
+      "error": null,
+      "encodedLength": 230
+    },
+    {
+      "filter": "assignee",
+      "scenario": "Assignee: all first 2",
+      "blocks": [
+        {
+          "id": "assignee-all-first-2",
+          "kind": "assignee",
+          "combinator": "all",
+          "values": [
+            "unassigned",
+            "7459021e-3872-4ff2-8360-535d6e297408"
+          ]
+        }
+      ],
+      "expected": 49052,
+      "actual": 49052,
+      "pass": true,
+      "error": null,
+      "encodedLength": 230
+    },
+    {
+      "filter": "assignee",
+      "scenario": "Assignee: not first 2",
+      "blocks": [
+        {
+          "id": "assignee-not-first-2",
+          "kind": "assignee",
+          "combinator": "not",
+          "values": [
+            "unassigned",
+            "7459021e-3872-4ff2-8360-535d6e297408"
+          ]
+        }
+      ],
+      "expected": 0,
+      "actual": 0,
+      "pass": true,
+      "error": null,
+      "encodedLength": 230
+    },
+    {
+      "filter": "assignee",
+      "scenario": "Assignee: not first",
+      "blocks": [
+        {
+          "id": "assignee-not-first",
+          "kind": "assignee",
+          "combinator": "not",
+          "values": [
+            "unassigned"
+          ]
+        }
+      ],
+      "expected": 0,
+      "actual": 0,
+      "pass": true,
+      "error": null,
+      "encodedLength": 183
+    },
+    {
+      "filter": "motivation_level",
+      "scenario": "Motivation Level: any hot",
+      "blocks": [
+        {
+          "id": "motivation_level-any-hot",
+          "kind": "motivation_level",
+          "combinator": "any",
+          "values": [
+            "hot"
+          ]
+        }
+      ],
+      "expected": 0,
+      "actual": 0,
+      "pass": true,
+      "error": null,
+      "encodedLength": 190
+    },
+    {
+      "filter": "motivation_level",
+      "scenario": "Motivation Level: any warm",
+      "blocks": [
+        {
+          "id": "motivation_level-any-warm",
+          "kind": "motivation_level",
+          "combinator": "any",
+          "values": [
+            "warm"
+          ]
+        }
+      ],
+      "expected": 0,
+      "actual": 0,
+      "pass": true,
+      "error": null,
+      "encodedLength": 192
+    },
+    {
+      "filter": "motivation_level",
+      "scenario": "Motivation Level: any cold",
+      "blocks": [
+        {
+          "id": "motivation_level-any-cold",
+          "kind": "motivation_level",
+          "combinator": "any",
+          "values": [
+            "cold"
+          ]
+        }
+      ],
+      "expected": 0,
+      "actual": 0,
+      "pass": true,
+      "error": null,
+      "encodedLength": 192
+    },
+    {
+      "filter": "motivation_level",
+      "scenario": "Motivation Level: any first 2",
+      "blocks": [
+        {
+          "id": "motivation_level-any-first-2",
+          "kind": "motivation_level",
+          "combinator": "any",
+          "values": [
+            "hot",
+            "warm"
+          ]
+        }
+      ],
+      "expected": 0,
+      "actual": 0,
+      "pass": true,
+      "error": null,
+      "encodedLength": 207
+    },
+    {
+      "filter": "motivation_level",
+      "scenario": "Motivation Level: all first 2",
+      "blocks": [
+        {
+          "id": "motivation_level-all-first-2",
+          "kind": "motivation_level",
+          "combinator": "all",
+          "values": [
+            "hot",
+            "warm"
+          ]
+        }
+      ],
+      "expected": 0,
+      "actual": 0,
+      "pass": true,
+      "error": null,
+      "encodedLength": 207
+    },
+    {
+      "filter": "motivation_level",
+      "scenario": "Motivation Level: not first 2",
+      "blocks": [
+        {
+          "id": "motivation_level-not-first-2",
+          "kind": "motivation_level",
+          "combinator": "not",
+          "values": [
+            "hot",
+            "warm"
+          ]
+        }
+      ],
+      "expected": 0,
+      "actual": 0,
+      "pass": true,
+      "error": null,
+      "encodedLength": 207
+    },
+    {
+      "filter": "motivation_level",
+      "scenario": "Motivation Level: not first",
+      "blocks": [
+        {
+          "id": "motivation_level-not-first",
+          "kind": "motivation_level",
+          "combinator": "not",
+          "values": [
+            "hot"
+          ]
+        }
+      ],
+      "expected": 0,
+      "actual": 0,
+      "pass": true,
+      "error": null,
+      "encodedLength": 192
+    },
+    {
+      "filter": "engagement",
+      "scenario": "Engagement: any never_contacted",
+      "blocks": [
+        {
+          "id": "engagement-any-never_contacted",
+          "kind": "engagement",
+          "combinator": "any",
+          "values": [
+            "never_contacted"
+          ]
+        }
+      ],
+      "expected": 48101,
+      "actual": 48101,
+      "pass": true,
+      "error": null,
+      "encodedLength": 202
+    },
+    {
+      "filter": "engagement",
+      "scenario": "Engagement: any attempted",
+      "blocks": [
+        {
+          "id": "engagement-any-attempted",
+          "kind": "engagement",
+          "combinator": "any",
+          "values": [
+            "attempted"
+          ]
+        }
+      ],
+      "expected": 898,
+      "actual": 898,
+      "pass": true,
+      "error": null,
+      "encodedLength": 190
+    },
+    {
+      "filter": "engagement",
+      "scenario": "Engagement: any replied",
+      "blocks": [
+        {
+          "id": "engagement-any-replied",
+          "kind": "engagement",
+          "combinator": "any",
+          "values": [
+            "replied"
+          ]
+        }
+      ],
+      "expected": 53,
+      "actual": 53,
+      "pass": true,
+      "error": null,
+      "encodedLength": 186
+    },
+    {
+      "filter": "engagement",
+      "scenario": "Engagement: any opted_out",
+      "blocks": [
+        {
+          "id": "engagement-any-opted_out",
+          "kind": "engagement",
+          "combinator": "any",
+          "values": [
+            "opted_out"
+          ]
+        }
+      ],
+      "expected": 3,
+      "actual": 3,
+      "pass": true,
+      "error": null,
+      "encodedLength": 190
+    },
+    {
+      "filter": "engagement",
+      "scenario": "Engagement: any first 2",
+      "blocks": [
+        {
+          "id": "engagement-any-first-2",
+          "kind": "engagement",
+          "combinator": "any",
+          "values": [
+            "never_contacted",
+            "attempted"
+          ]
+        }
+      ],
+      "expected": 48999,
+      "actual": 48999,
+      "pass": true,
+      "error": null,
+      "encodedLength": 212
+    },
+    {
+      "filter": "engagement",
+      "scenario": "Engagement: all first 2",
+      "blocks": [
+        {
+          "id": "engagement-all-first-2",
+          "kind": "engagement",
+          "combinator": "all",
+          "values": [
+            "never_contacted",
+            "attempted"
+          ]
+        }
+      ],
+      "expected": 0,
+      "actual": 0,
+      "pass": true,
+      "error": null,
+      "encodedLength": 212
+    },
+    {
+      "filter": "engagement",
+      "scenario": "Engagement: not first 2",
+      "blocks": [
+        {
+          "id": "engagement-not-first-2",
+          "kind": "engagement",
+          "combinator": "not",
+          "values": [
+            "never_contacted",
+            "attempted"
+          ]
+        }
+      ],
+      "expected": 53,
+      "actual": 53,
+      "pass": true,
+      "error": null,
+      "encodedLength": 212
+    },
+    {
+      "filter": "engagement",
+      "scenario": "Engagement: not first",
+      "blocks": [
+        {
+          "id": "engagement-not-first",
+          "kind": "engagement",
+          "combinator": "not",
+          "values": [
+            "never_contacted"
+          ]
+        }
+      ],
+      "expected": 951,
+      "actual": 951,
+      "pass": true,
+      "error": null,
+      "encodedLength": 192
+    },
+    {
+      "filter": "vacancy",
+      "scenario": "vacancy: yes",
+      "blocks": [
+        {
+          "id": "vacancy-yes",
+          "kind": "vacancy",
+          "tri": "yes"
+        }
+      ],
+      "expected": 28,
+      "actual": 28,
+      "pass": true,
+      "error": null,
+      "encodedLength": 128
+    },
+    {
+      "filter": "vacancy",
+      "scenario": "vacancy: no",
+      "blocks": [
+        {
+          "id": "vacancy-no",
+          "kind": "vacancy",
+          "tri": "no"
+        }
+      ],
+      "expected": 49024,
+      "actual": 49024,
+      "pass": true,
+      "error": null,
+      "encodedLength": 126
+    },
+    {
+      "filter": "vacancy",
+      "scenario": "vacancy: any",
+      "blocks": [
+        {
+          "id": "vacancy-any",
+          "kind": "vacancy",
+          "tri": "any"
+        }
+      ],
+      "expected": 49052,
+      "actual": 49052,
+      "pass": true,
+      "error": null,
+      "encodedLength": 128
+    },
+    {
+      "filter": "absentee",
+      "scenario": "absentee: yes",
+      "blocks": [
+        {
+          "id": "absentee-yes",
+          "kind": "absentee",
+          "tri": "yes"
+        }
+      ],
+      "expected": 0,
+      "actual": 0,
+      "pass": true,
+      "error": null,
+      "encodedLength": 130
+    },
+    {
+      "filter": "absentee",
+      "scenario": "absentee: no",
+      "blocks": [
+        {
+          "id": "absentee-no",
+          "kind": "absentee",
+          "tri": "no"
+        }
+      ],
+      "expected": 49052,
+      "actual": 49052,
+      "pass": true,
+      "error": null,
+      "encodedLength": 128
+    },
+    {
+      "filter": "absentee",
+      "scenario": "absentee: any",
+      "blocks": [
+        {
+          "id": "absentee-any",
+          "kind": "absentee",
+          "tri": "any"
+        }
+      ],
+      "expected": 49052,
+      "actual": 49052,
+      "pass": true,
+      "error": null,
+      "encodedLength": 130
+    },
+    {
+      "filter": "has_unread_inbound",
+      "scenario": "has_unread_inbound: yes",
+      "blocks": [
+        {
+          "id": "has_unread_inbound-yes",
+          "kind": "has_unread_inbound",
+          "tri": "yes"
+        }
+      ],
+      "expected": 1,
+      "actual": 1,
+      "pass": true,
+      "error": null,
+      "encodedLength": 150
+    },
+    {
+      "filter": "has_unread_inbound",
+      "scenario": "has_unread_inbound: no",
+      "blocks": [
+        {
+          "id": "has_unread_inbound-no",
+          "kind": "has_unread_inbound",
+          "tri": "no"
+        }
+      ],
+      "expected": 49051,
+      "actual": 49051,
+      "pass": true,
+      "error": null,
+      "encodedLength": 148
+    },
+    {
+      "filter": "has_unread_inbound",
+      "scenario": "has_unread_inbound: any",
+      "blocks": [
+        {
+          "id": "has_unread_inbound-any",
+          "kind": "has_unread_inbound",
+          "tri": "any"
+        }
+      ],
+      "expected": 49052,
+      "actual": 49052,
+      "pass": true,
+      "error": null,
+      "encodedLength": 150
+    },
+    {
+      "filter": "needs_human_attention",
+      "scenario": "needs_human_attention: yes",
+      "blocks": [
+        {
+          "id": "needs_human_attention-yes",
+          "kind": "needs_human_attention",
+          "tri": "yes"
+        }
+      ],
+      "expected": 10,
+      "actual": 10,
+      "pass": true,
+      "error": null,
+      "encodedLength": 156
+    },
+    {
+      "filter": "needs_human_attention",
+      "scenario": "needs_human_attention: no",
+      "blocks": [
+        {
+          "id": "needs_human_attention-no",
+          "kind": "needs_human_attention",
+          "tri": "no"
+        }
+      ],
+      "expected": 49042,
+      "actual": 49042,
+      "pass": true,
+      "error": null,
+      "encodedLength": 154
+    },
+    {
+      "filter": "needs_human_attention",
+      "scenario": "needs_human_attention: any",
+      "blocks": [
+        {
+          "id": "needs_human_attention-any",
+          "kind": "needs_human_attention",
+          "tri": "any"
+        }
+      ],
+      "expected": 49052,
+      "actual": 49052,
+      "pass": true,
+      "error": null,
+      "encodedLength": 156
+    },
+    {
+      "filter": "has_open_tasks",
+      "scenario": "has_open_tasks: yes",
+      "blocks": [
+        {
+          "id": "has_open_tasks-yes",
+          "kind": "has_open_tasks",
+          "tri": "yes"
+        }
+      ],
+      "expected": 19,
+      "actual": 19,
+      "pass": true,
+      "error": null,
+      "encodedLength": 142
+    },
+    {
+      "filter": "has_open_tasks",
+      "scenario": "has_open_tasks: no",
+      "blocks": [
+        {
+          "id": "has_open_tasks-no",
+          "kind": "has_open_tasks",
+          "tri": "no"
+        }
+      ],
+      "expected": 49033,
+      "actual": 49033,
+      "pass": true,
+      "error": null,
+      "encodedLength": 140
+    },
+    {
+      "filter": "has_open_tasks",
+      "scenario": "has_open_tasks: any",
+      "blocks": [
+        {
+          "id": "has_open_tasks-any",
+          "kind": "has_open_tasks",
+          "tri": "any"
+        }
+      ],
+      "expected": 49052,
+      "actual": 49052,
+      "pass": true,
+      "error": null,
+      "encodedLength": 142
+    },
+    {
+      "filter": "beds",
+      "scenario": "Beds: min 2",
+      "blocks": [
+        {
+          "id": "beds-min-2",
+          "kind": "beds",
+          "range": {
+            "min": 2,
+            "max": null
+          }
+        }
+      ],
+      "expected": 28149,
+      "actual": 28149,
+      "pass": true,
+      "error": null,
+      "encodedLength": 155
+    },
+    {
+      "filter": "beds",
+      "scenario": "Beds: max 2",
+      "blocks": [
+        {
+          "id": "beds-max-2",
+          "kind": "beds",
+          "range": {
+            "min": null,
+            "max": 2
+          }
+        }
+      ],
+      "expected": 4411,
+      "actual": 4411,
+      "pass": true,
+      "error": null,
+      "encodedLength": 155
+    },
+    {
+      "filter": "beds",
+      "scenario": "Beds: min 3",
+      "blocks": [
+        {
+          "id": "beds-min-3",
+          "kind": "beds",
+          "range": {
+            "min": 3,
+            "max": null
+          }
+        }
+      ],
+      "expected": 24139,
+      "actual": 24139,
+      "pass": true,
+      "error": null,
+      "encodedLength": 155
+    },
+    {
+      "filter": "beds",
+      "scenario": "Beds: max 3",
+      "blocks": [
+        {
+          "id": "beds-max-3",
+          "kind": "beds",
+          "range": {
+            "min": null,
+            "max": 3
+          }
+        }
+      ],
+      "expected": 17715,
+      "actual": 17715,
+      "pass": true,
+      "error": null,
+      "encodedLength": 155
+    },
+    {
+      "filter": "beds",
+      "scenario": "Beds: min 4",
+      "blocks": [
+        {
+          "id": "beds-min-4",
+          "kind": "beds",
+          "range": {
+            "min": 4,
+            "max": null
+          }
+        }
+      ],
+      "expected": 10835,
+      "actual": 10835,
+      "pass": true,
+      "error": null,
+      "encodedLength": 155
+    },
+    {
+      "filter": "beds",
+      "scenario": "Beds: max 4",
+      "blocks": [
+        {
+          "id": "beds-max-4",
+          "kind": "beds",
+          "range": {
+            "min": null,
+            "max": 4
+          }
+        }
+      ],
+      "expected": 26079,
+      "actual": 26079,
+      "pass": true,
+      "error": null,
+      "encodedLength": 155
+    },
+    {
+      "filter": "baths",
+      "scenario": "Baths: min 1",
+      "blocks": [
+        {
+          "id": "baths-min-1",
+          "kind": "baths",
+          "range": {
+            "min": 1,
+            "max": null
+          }
+        }
+      ],
+      "expected": 28538,
+      "actual": 28538,
+      "pass": true,
+      "error": null,
+      "encodedLength": 157
+    },
+    {
+      "filter": "baths",
+      "scenario": "Baths: max 1",
+      "blocks": [
+        {
+          "id": "baths-max-1",
+          "kind": "baths",
+          "range": {
+            "min": null,
+            "max": 1
+          }
+        }
+      ],
+      "expected": 5358,
+      "actual": 5358,
+      "pass": true,
+      "error": null,
+      "encodedLength": 157
+    },
+    {
+      "filter": "baths",
+      "scenario": "Baths: min 1.5",
+      "blocks": [
+        {
+          "id": "baths-min-1.5",
+          "kind": "baths",
+          "range": {
+            "min": 1.5,
+            "max": null
+          }
+        }
+      ],
+      "expected": 23250,
+      "actual": 23250,
+      "pass": true,
+      "error": null,
+      "encodedLength": 161
+    },
+    {
+      "filter": "baths",
+      "scenario": "Baths: max 1.5",
+      "blocks": [
+        {
+          "id": "baths-max-1.5",
+          "kind": "baths",
+          "range": {
+            "min": null,
+            "max": 1.5
+          }
+        }
+      ],
+      "expected": 7729,
+      "actual": 7729,
+      "pass": true,
+      "error": null,
+      "encodedLength": 161
+    },
+    {
+      "filter": "baths",
+      "scenario": "Baths: min 2",
+      "blocks": [
+        {
+          "id": "baths-min-2",
+          "kind": "baths",
+          "range": {
+            "min": 2,
+            "max": null
+          }
+        }
+      ],
+      "expected": 20993,
+      "actual": 20993,
+      "pass": true,
+      "error": null,
+      "encodedLength": 157
+    },
+    {
+      "filter": "baths",
+      "scenario": "Baths: max 2",
+      "blocks": [
+        {
+          "id": "baths-max-2",
+          "kind": "baths",
+          "range": {
+            "min": null,
+            "max": 2
+          }
+        }
+      ],
+      "expected": 14695,
+      "actual": 14695,
+      "pass": true,
+      "error": null,
+      "encodedLength": 157
+    },
+    {
+      "filter": "baths",
+      "scenario": "Baths: min 3",
+      "blocks": [
+        {
+          "id": "baths-min-3",
+          "kind": "baths",
+          "range": {
+            "min": 3,
+            "max": null
+          }
+        }
+      ],
+      "expected": 9567,
+      "actual": 9567,
+      "pass": true,
+      "error": null,
+      "encodedLength": 157
+    },
+    {
+      "filter": "baths",
+      "scenario": "Baths: max 3",
+      "blocks": [
+        {
+          "id": "baths-max-3",
+          "kind": "baths",
+          "range": {
+            "min": null,
+            "max": 3
+          }
+        }
+      ],
+      "expected": 23269,
+      "actual": 23269,
+      "pass": true,
+      "error": null,
+      "encodedLength": 157
+    },
+    {
+      "filter": "baths",
+      "scenario": "Baths: min 4",
+      "blocks": [
+        {
+          "id": "baths-min-4",
+          "kind": "baths",
+          "range": {
+            "min": 4,
+            "max": null
+          }
+        }
+      ],
+      "expected": 3327,
+      "actual": 3327,
+      "pass": true,
+      "error": null,
+      "encodedLength": 157
+    },
+    {
+      "filter": "baths",
+      "scenario": "Baths: max 4",
+      "blocks": [
+        {
+          "id": "baths-max-4",
+          "kind": "baths",
+          "range": {
+            "min": null,
+            "max": 4
+          }
+        }
+      ],
+      "expected": 26681,
+      "actual": 26681,
+      "pass": true,
+      "error": null,
+      "encodedLength": 157
+    },
+    {
+      "filter": "baths",
+      "scenario": "Baths: middle band",
+      "blocks": [
+        {
+          "id": "baths-band",
+          "kind": "baths",
+          "range": {
+            "min": 1.5,
+            "max": 3
+          }
+        }
+      ],
+      "expected": 17791,
+      "actual": 17791,
+      "pass": true,
+      "error": null,
+      "encodedLength": 155
+    },
+    {
+      "filter": "year_built",
+      "scenario": "Year Built: min 1937",
+      "blocks": [
+        {
+          "id": "year_built-min-1937",
+          "kind": "year_built",
+          "range": {
+            "min": 1937,
+            "max": null
+          }
+        }
+      ],
+      "expected": 27097,
+      "actual": 27097,
+      "pass": true,
+      "error": null,
+      "encodedLength": 173
+    },
+    {
+      "filter": "year_built",
+      "scenario": "Year Built: max 1937",
+      "blocks": [
+        {
+          "id": "year_built-max-1937",
+          "kind": "year_built",
+          "range": {
+            "min": null,
+            "max": 1937
+          }
+        }
+      ],
+      "expected": 3026,
+      "actual": 3026,
+      "pass": true,
+      "error": null,
+      "encodedLength": 173
+    },
+    {
+      "filter": "year_built",
+      "scenario": "Year Built: min 1960",
+      "blocks": [
+        {
+          "id": "year_built-min-1960",
+          "kind": "year_built",
+          "range": {
+            "min": 1960,
+            "max": null
+          }
+        }
+      ],
+      "expected": 22912,
+      "actual": 22912,
+      "pass": true,
+      "error": null,
+      "encodedLength": 173
+    },
+    {
+      "filter": "year_built",
+      "scenario": "Year Built: max 1960",
+      "blocks": [
+        {
+          "id": "year_built-max-1960",
+          "kind": "year_built",
+          "range": {
+            "min": null,
+            "max": 1960
+          }
+        }
+      ],
+      "expected": 7863,
+      "actual": 7863,
+      "pass": true,
+      "error": null,
+      "encodedLength": 173
+    },
+    {
+      "filter": "year_built",
+      "scenario": "Year Built: min 1981",
+      "blocks": [
+        {
+          "id": "year_built-min-1981",
+          "kind": "year_built",
+          "range": {
+            "min": 1981,
+            "max": null
+          }
+        }
+      ],
+      "expected": 15296,
+      "actual": 15296,
+      "pass": true,
+      "error": null,
+      "encodedLength": 173
+    },
+    {
+      "filter": "year_built",
+      "scenario": "Year Built: max 1981",
+      "blocks": [
+        {
+          "id": "year_built-max-1981",
+          "kind": "year_built",
+          "range": {
+            "min": null,
+            "max": 1981
+          }
+        }
+      ],
+      "expected": 15318,
+      "actual": 15318,
+      "pass": true,
+      "error": null,
+      "encodedLength": 173
+    },
+    {
+      "filter": "year_built",
+      "scenario": "Year Built: min 1999",
+      "blocks": [
+        {
+          "id": "year_built-min-1999",
+          "kind": "year_built",
+          "range": {
+            "min": 1999,
+            "max": null
+          }
+        }
+      ],
+      "expected": 7947,
+      "actual": 7947,
+      "pass": true,
+      "error": null,
+      "encodedLength": 173
+    },
+    {
+      "filter": "year_built",
+      "scenario": "Year Built: max 1999",
+      "blocks": [
+        {
+          "id": "year_built-max-1999",
+          "kind": "year_built",
+          "range": {
+            "min": null,
+            "max": 1999
+          }
+        }
+      ],
+      "expected": 22737,
+      "actual": 22737,
+      "pass": true,
+      "error": null,
+      "encodedLength": 173
+    },
+    {
+      "filter": "year_built",
+      "scenario": "Year Built: min 2007",
+      "blocks": [
+        {
+          "id": "year_built-min-2007",
+          "kind": "year_built",
+          "range": {
+            "min": 2007,
+            "max": null
+          }
+        }
+      ],
+      "expected": 3083,
+      "actual": 3083,
+      "pass": true,
+      "error": null,
+      "encodedLength": 173
+    },
+    {
+      "filter": "year_built",
+      "scenario": "Year Built: max 2007",
+      "blocks": [
+        {
+          "id": "year_built-max-2007",
+          "kind": "year_built",
+          "range": {
+            "min": null,
+            "max": 2007
+          }
+        }
+      ],
+      "expected": 27476,
+      "actual": 27476,
+      "pass": true,
+      "error": null,
+      "encodedLength": 173
+    },
+    {
+      "filter": "year_built",
+      "scenario": "Year Built: middle band",
+      "blocks": [
+        {
+          "id": "year_built-band",
+          "kind": "year_built",
+          "range": {
+            "min": 1960,
+            "max": 1999
+          }
+        }
+      ],
+      "expected": 15544,
+      "actual": 15544,
+      "pass": true,
+      "error": null,
+      "encodedLength": 169
+    },
+    {
+      "filter": "estimated_value",
+      "scenario": "Estimated Value: min 182000",
+      "blocks": [
+        {
+          "id": "estimated_value-min-182000",
+          "kind": "estimated_value",
+          "range": {
+            "min": 182000,
+            "max": null
+          }
+        }
+      ],
+      "expected": 24753,
+      "actual": 24753,
+      "pass": true,
+      "error": null,
+      "encodedLength": 187
+    },
+    {
+      "filter": "estimated_value",
+      "scenario": "Estimated Value: max 182000",
+      "blocks": [
+        {
+          "id": "estimated_value-max-182000",
+          "kind": "estimated_value",
+          "range": {
+            "min": null,
+            "max": 182000
+          }
+        }
+      ],
+      "expected": 2786,
+      "actual": 2786,
+      "pass": true,
+      "error": null,
+      "encodedLength": 187
+    },
+    {
+      "filter": "estimated_value",
+      "scenario": "Estimated Value: min 249000",
+      "blocks": [
+        {
+          "id": "estimated_value-min-249000",
+          "kind": "estimated_value",
+          "range": {
+            "min": 249000,
+            "max": null
+          }
+        }
+      ],
+      "expected": 20691,
+      "actual": 20691,
+      "pass": true,
+      "error": null,
+      "encodedLength": 187
+    },
+    {
+      "filter": "estimated_value",
+      "scenario": "Estimated Value: max 249000",
+      "blocks": [
+        {
+          "id": "estimated_value-max-249000",
+          "kind": "estimated_value",
+          "range": {
+            "min": null,
+            "max": 249000
+          }
+        }
+      ],
+      "expected": 6886,
+      "actual": 6886,
+      "pass": true,
+      "error": null,
+      "encodedLength": 187
+    },
+    {
+      "filter": "estimated_value",
+      "scenario": "Estimated Value: min 347000",
+      "blocks": [
+        {
+          "id": "estimated_value-min-347000",
+          "kind": "estimated_value",
+          "range": {
+            "min": 347000,
+            "max": null
+          }
+        }
+      ],
+      "expected": 13761,
+      "actual": 13761,
+      "pass": true,
+      "error": null,
+      "encodedLength": 187
+    },
+    {
+      "filter": "estimated_value",
+      "scenario": "Estimated Value: max 347000",
+      "blocks": [
+        {
+          "id": "estimated_value-max-347000",
+          "kind": "estimated_value",
+          "range": {
+            "min": null,
+            "max": 347000
+          }
+        }
+      ],
+      "expected": 13806,
+      "actual": 13806,
+      "pass": true,
+      "error": null,
+      "encodedLength": 187
+    },
+    {
+      "filter": "estimated_value",
+      "scenario": "Estimated Value: min 495000",
+      "blocks": [
+        {
+          "id": "estimated_value-min-495000",
+          "kind": "estimated_value",
+          "range": {
+            "min": 495000,
+            "max": null
+          }
+        }
+      ],
+      "expected": 6875,
+      "actual": 6875,
+      "pass": true,
+      "error": null,
+      "encodedLength": 187
+    },
+    {
+      "filter": "estimated_value",
+      "scenario": "Estimated Value: max 495000",
+      "blocks": [
+        {
+          "id": "estimated_value-max-495000",
+          "kind": "estimated_value",
+          "range": {
+            "min": null,
+            "max": 495000
+          }
+        }
+      ],
+      "expected": 20656,
+      "actual": 20656,
+      "pass": true,
+      "error": null,
+      "encodedLength": 187
+    },
+    {
+      "filter": "estimated_value",
+      "scenario": "Estimated Value: min 696000",
+      "blocks": [
+        {
+          "id": "estimated_value-min-696000",
+          "kind": "estimated_value",
+          "range": {
+            "min": 696000,
+            "max": null
+          }
+        }
+      ],
+      "expected": 2750,
+      "actual": 2750,
+      "pass": true,
+      "error": null,
+      "encodedLength": 187
+    },
+    {
+      "filter": "estimated_value",
+      "scenario": "Estimated Value: max 696000",
+      "blocks": [
+        {
+          "id": "estimated_value-max-696000",
+          "kind": "estimated_value",
+          "range": {
+            "min": null,
+            "max": 696000
+          }
+        }
+      ],
+      "expected": 24756,
+      "actual": 24756,
+      "pass": true,
+      "error": null,
+      "encodedLength": 187
+    },
+    {
+      "filter": "estimated_value",
+      "scenario": "Estimated Value: middle band",
+      "blocks": [
+        {
+          "id": "estimated_value-band",
+          "kind": "estimated_value",
+          "range": {
+            "min": 249000,
+            "max": 495000
+          }
+        }
+      ],
+      "expected": 13847,
+      "actual": 13847,
+      "pass": true,
+      "error": null,
+      "encodedLength": 183
+    },
+    {
+      "filter": "equity_pct",
+      "scenario": "Equity %: min 4.628593795610753",
+      "blocks": [
+        {
+          "id": "equity_pct-min-4.628593795610753",
+          "kind": "equity_pct",
+          "range": {
+            "min": 4.628593795610753,
+            "max": null
+          }
+        }
+      ],
+      "expected": 24856,
+      "actual": 24856,
+      "pass": true,
+      "error": null,
+      "encodedLength": 199
+    },
+    {
+      "filter": "equity_pct",
+      "scenario": "Equity %: max 4.628593795610753",
+      "blocks": [
+        {
+          "id": "equity_pct-max-4.628593795610753",
+          "kind": "equity_pct",
+          "range": {
+            "min": null,
+            "max": 4.628593795610753
+          }
+        }
+      ],
+      "expected": 1571,
+      "actual": 1571,
+      "pass": true,
+      "error": null,
+      "encodedLength": 199
+    },
+    {
+      "filter": "equity_pct",
+      "scenario": "Equity %: min 27.7673393697565",
+      "blocks": [
+        {
+          "id": "equity_pct-min-27.7673393697565",
+          "kind": "equity_pct",
+          "range": {
+            "min": 27.7673393697565,
+            "max": null
+          }
+        }
+      ],
+      "expected": 22537,
+      "actual": 22537,
+      "pass": true,
+      "error": null,
+      "encodedLength": 197
+    },
+    {
+      "filter": "equity_pct",
+      "scenario": "Equity %: max 27.7673393697565",
+      "blocks": [
+        {
+          "id": "equity_pct-max-27.7673393697565",
+          "kind": "equity_pct",
+          "range": {
+            "min": null,
+            "max": 27.7673393697565
+          }
+        }
+      ],
+      "expected": 3890,
+      "actual": 3890,
+      "pass": true,
+      "error": null,
+      "encodedLength": 197
+    },
+    {
+      "filter": "equity_pct",
+      "scenario": "Equity %: min 56.67618015122665",
+      "blocks": [
+        {
+          "id": "equity_pct-min-56.67618015122665",
+          "kind": "equity_pct",
+          "range": {
+            "min": 56.67618015122665,
+            "max": null
+          }
+        }
+      ],
+      "expected": 18644,
+      "actual": 18644,
+      "pass": true,
+      "error": null,
+      "encodedLength": 199
+    },
+    {
+      "filter": "equity_pct",
+      "scenario": "Equity %: max 56.67618015122665",
+      "blocks": [
+        {
+          "id": "equity_pct-max-56.67618015122665",
+          "kind": "equity_pct",
+          "range": {
+            "min": null,
+            "max": 56.67618015122665
+          }
+        }
+      ],
+      "expected": 7783,
+      "actual": 7783,
+      "pass": true,
+      "error": null,
+      "encodedLength": 199
+    },
+    {
+      "filter": "equity_pct",
+      "scenario": "Equity %: min 70.51871968320073",
+      "blocks": [
+        {
+          "id": "equity_pct-min-70.51871968320073",
+          "kind": "equity_pct",
+          "range": {
+            "min": 70.51871968320073,
+            "max": null
+          }
+        }
+      ],
+      "expected": 14774,
+      "actual": 14774,
+      "pass": true,
+      "error": null,
+      "encodedLength": 199
+    },
+    {
+      "filter": "equity_pct",
+      "scenario": "Equity %: max 70.51871968320073",
+      "blocks": [
+        {
+          "id": "equity_pct-max-70.51871968320073",
+          "kind": "equity_pct",
+          "range": {
+            "min": null,
+            "max": 70.51871968320073
+          }
+        }
+      ],
+      "expected": 11653,
+      "actual": 11653,
+      "pass": true,
+      "error": null,
+      "encodedLength": 199
+    },
+    {
+      "filter": "equity_pct",
+      "scenario": "Equity %: min 83.02931934594169",
+      "blocks": [
+        {
+          "id": "equity_pct-min-83.02931934594169",
+          "kind": "equity_pct",
+          "range": {
+            "min": 83.02931934594169,
+            "max": null
+          }
+        }
+      ],
+      "expected": 12451,
+      "actual": 12451,
+      "pass": true,
+      "error": null,
+      "encodedLength": 199
+    },
+    {
+      "filter": "equity_pct",
+      "scenario": "Equity %: max 83.02931934594169",
+      "blocks": [
+        {
+          "id": "equity_pct-max-83.02931934594169",
+          "kind": "equity_pct",
+          "range": {
+            "min": null,
+            "max": 83.02931934594169
+          }
+        }
+      ],
+      "expected": 13976,
+      "actual": 13976,
+      "pass": true,
+      "error": null,
+      "encodedLength": 199
+    },
+    {
+      "filter": "equity_pct",
+      "scenario": "Equity %: middle band",
+      "blocks": [
+        {
+          "id": "equity_pct-band",
+          "kind": "equity_pct",
+          "range": {
+            "min": 27.7673393697565,
+            "max": 70.51871968320073
+          }
+        }
+      ],
+      "expected": 7763,
+      "actual": 7763,
+      "pass": true,
+      "error": null,
+      "encodedLength": 194
+    },
+    {
+      "filter": "list_count",
+      "scenario": "List Count: {\"min\":1,\"max\":null}",
+      "blocks": [
+        {
+          "id": "list-count-1-null",
+          "kind": "list_count",
+          "range": {
+            "min": 1,
+            "max": null
+          }
+        }
+      ],
+      "expected": 47140,
+      "actual": 47140,
+      "pass": true,
+      "error": null,
+      "encodedLength": 168
+    },
+    {
+      "filter": "list_count",
+      "scenario": "List Count: {\"min\":2,\"max\":null}",
+      "blocks": [
+        {
+          "id": "list-count-2-null",
+          "kind": "list_count",
+          "range": {
+            "min": 2,
+            "max": null
+          }
+        }
+      ],
+      "expected": 11134,
+      "actual": 11134,
+      "pass": true,
+      "error": null,
+      "encodedLength": 168
+    },
+    {
+      "filter": "list_count",
+      "scenario": "List Count: {\"min\":3,\"max\":null}",
+      "blocks": [
+        {
+          "id": "list-count-3-null",
+          "kind": "list_count",
+          "range": {
+            "min": 3,
+            "max": null
+          }
+        }
+      ],
+      "expected": 627,
+      "actual": 627,
+      "pass": true,
+      "error": null,
+      "encodedLength": 168
+    },
+    {
+      "filter": "list_count",
+      "scenario": "List Count: {\"min\":null,\"max\":1}",
+      "blocks": [
+        {
+          "id": "list-count-null-1",
+          "kind": "list_count",
+          "range": {
+            "min": null,
+            "max": 1
+          }
+        }
+      ],
+      "expected": 37918,
+      "actual": 37918,
+      "pass": true,
+      "error": null,
+      "encodedLength": 168
+    },
+    {
+      "filter": "list_count",
+      "scenario": "List Count: {\"min\":2,\"max\":3}",
+      "blocks": [
+        {
+          "id": "list-count-2-3",
+          "kind": "list_count",
+          "range": {
+            "min": 2,
+            "max": 3
+          }
+        }
+      ],
+      "expected": 11115,
+      "actual": 11115,
+      "pass": true,
+      "error": null,
+      "encodedLength": 162
+    },
+    {
+      "filter": "created_date",
+      "scenario": "Created Date: since 30 days",
+      "blocks": [
+        {
+          "id": "created-since-30",
+          "kind": "created_date",
+          "date": {
+            "mode": "since",
+            "days": 30
+          }
+        }
+      ],
+      "expected": 47681,
+      "actual": 47681,
+      "pass": true,
+      "error": null,
+      "encodedLength": 178
+    },
+    {
+      "filter": "created_date",
+      "scenario": "Created Date: prior 180 days",
+      "blocks": [
+        {
+          "id": "created-prior-180",
+          "kind": "created_date",
+          "date": {
+            "mode": "prior",
+            "days": 180
+          }
+        }
+      ],
+      "expected": 0,
+      "actual": 0,
+      "pass": true,
+      "error": null,
+      "encodedLength": 180
+    },
+    {
+      "filter": "created_date",
+      "scenario": "Created Date: fixed 180 to 30 days ago",
+      "blocks": [
+        {
+          "id": "created-fixed",
+          "kind": "created_date",
+          "date": {
+            "mode": "fixed",
+            "from": "2025-12-02T09:15:57.582Z",
+            "to": "2026-05-01T09:15:57.582Z"
+          }
+        }
+      ],
+      "expected": 1371,
+      "actual": 1371,
+      "pass": true,
+      "error": null,
+      "encodedLength": 255
+    },
+    {
+      "filter": "vacancy+cass",
+      "scenario": "Cross-filter combo 1",
+      "blocks": [
+        {
+          "id": "combo-vacant",
+          "kind": "vacancy",
+          "tri": "yes"
+        },
+        {
+          "id": "combo-cass",
+          "kind": "cass",
+          "combinator": "any",
+          "values": [
+            "verified"
+          ]
+        }
+      ],
+      "expected": 28,
+      "actual": 28,
+      "pass": true,
+      "error": null,
+      "encodedLength": 260
+    },
+    {
+      "filter": "list_count+equity_pct",
+      "scenario": "Cross-filter combo 2",
+      "blocks": [
+        {
+          "id": "combo-list-count",
+          "kind": "list_count",
+          "range": {
+            "min": 2,
+            "max": null
+          }
+        },
+        {
+          "id": "combo-equity",
+          "kind": "equity_pct",
+          "range": {
+            "min": 40,
+            "max": null
+          }
+        }
+      ],
+      "expected": 1950,
+      "actual": 1950,
+      "pass": true,
+      "error": null,
+      "encodedLength": 293
+    },
+    {
+      "filter": "engagement+has_open_tasks",
+      "scenario": "Cross-filter combo 3",
+      "blocks": [
+        {
+          "id": "combo-engaged",
+          "kind": "engagement",
+          "combinator": "any",
+          "values": [
+            "attempted",
+            "replied"
+          ]
+        },
+        {
+          "id": "combo-tasks",
+          "kind": "has_open_tasks",
+          "tri": "no"
+        }
+      ],
+      "expected": 951,
+      "actual": 951,
+      "pass": true,
+      "error": null,
+      "encodedLength": 291
+    },
+    {
+      "filter": "list+list",
+      "scenario": "Repeated list positive blocks",
+      "blocks": [
+        {
+          "id": "list-any-first",
+          "kind": "list",
+          "combinator": "any",
+          "values": [
+            "ec393f84-a934-48a8-be90-20f460489228"
+          ]
+        },
+        {
+          "id": "list-any-second",
+          "kind": "list",
+          "combinator": "any",
+          "values": [
+            "2209b945-8999-4515-979e-117d83814bac"
+          ]
+        }
+      ],
+      "expected": 0,
+      "actual": 0,
+      "pass": true,
+      "error": null,
+      "encodedLength": 365
+    },
+    {
+      "filter": "list+list",
+      "scenario": "Repeated list negative blocks",
+      "blocks": [
+        {
+          "id": "list-not-first",
+          "kind": "list",
+          "combinator": "not",
+          "values": [
+            "ec393f84-a934-48a8-be90-20f460489228"
+          ]
+        },
+        {
+          "id": "list-not-second",
+          "kind": "list",
+          "combinator": "not",
+          "values": [
+            "2209b945-8999-4515-979e-117d83814bac"
+          ]
+        }
+      ],
+      "expected": 49052,
+      "actual": 49052,
+      "pass": true,
+      "error": null,
+      "encodedLength": 365
+    },
+    {
+      "filter": "tag+tag",
+      "scenario": "Repeated tag positive blocks",
+      "blocks": [
+        {
+          "id": "tag-any-first",
+          "kind": "tag",
+          "combinator": "any",
+          "values": [
+            "6d89ef36-b30f-40b9-97a2-7979e14c4a45"
+          ]
+        },
+        {
+          "id": "tag-any-second",
+          "kind": "tag",
+          "combinator": "any",
+          "values": [
+            "a01b6cf9-6a7d-4cbd-b6b2-f1a3e91b37fb"
+          ]
+        }
+      ],
+      "expected": 0,
+      "actual": 0,
+      "pass": true,
+      "error": null,
+      "encodedLength": 361
+    },
+    {
+      "filter": "tag+tag",
+      "scenario": "Repeated tag negative blocks",
+      "blocks": [
+        {
+          "id": "tag-not-first",
+          "kind": "tag",
+          "combinator": "not",
+          "values": [
+            "6d89ef36-b30f-40b9-97a2-7979e14c4a45"
+          ]
+        },
+        {
+          "id": "tag-not-second",
+          "kind": "tag",
+          "combinator": "not",
+          "values": [
+            "a01b6cf9-6a7d-4cbd-b6b2-f1a3e91b37fb"
+          ]
+        }
+      ],
+      "expected": 49051,
+      "actual": 49051,
+      "pass": true,
+      "error": null,
+      "encodedLength": 361
+    }
+  ]
+}
