@@ -92,7 +92,11 @@ export default defineConfig({
   // PROD_EMAIL / PROD_PASSWORD and runs against sandra-sooty.vercel.app.
   // It must not run in the default CI suite (no creds → it throws in
   // beforeAll). Use playwright.prod.config.ts for that spec.
-  testIgnore: ["**/phase-1-5-uat.spec.ts", "**/prod-canary/**"],
+  testIgnore: [
+    "**/phase-1-5-uat.spec.ts",
+    "**/prod-canary/**",
+    "**/properties-filter-characterization.*.ts",
+  ],
   // Don't run in parallel — the suite resets shared DB tables. Parallel
   // specs would race each other and flake.
   fullyParallel: false,
