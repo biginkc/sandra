@@ -885,7 +885,10 @@ export function ProspectsTable({
           </TableBody>
         </Table>
         <DataTableFooter>
-          <span className="text-muted-foreground text-sm">
+          <span
+            className="text-muted-foreground text-sm"
+            data-testid="prospects-result-count"
+          >
             {total === 0
               ? "No prospects"
               : `Showing ${showingFrom.toLocaleString()}–${showingTo.toLocaleString()} of ${total.toLocaleString()}`}

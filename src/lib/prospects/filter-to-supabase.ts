@@ -68,7 +68,38 @@ export async function applyFilters(
   sb: SbClient,
 ): Promise<BuilderResult> {
   let b: ProspectsBuilder = builder;
+  const useEmbeddedPositiveListBlocks =
+    blocks.filter(isEmbeddedPositiveListBlock).length <= 1;
+  const useEmbeddedPositiveTagBlocks =
+    blocks.filter(isEmbeddedPositiveTagBlock).length <= 1;
+  const useEmbeddedNegativeListBlocks =
+    blocks.filter(isEmbeddedNegativeListBlock).length <= 1;
+  const useEmbeddedNegativeTagBlocks =
+    blocks.filter(isEmbeddedNegativeTagBlock).length <= 1;
+
   for (const block of blocks) {
+    if (block.kind === "list") {
+      const r = await applyListBlock(
+        b,
+        block,
+        sb,
+        useEmbeddedPositiveListBlocks,
+        useEmbeddedNegativeListBlocks,
+      );
+      b = r.builder;
+      continue;
+    }
+    if (block.kind === "tag") {
+      const r = await applyTagBlock(
+        b,
+        block,
+        sb,
+        useEmbeddedPositiveTagBlocks,
+        useEmbeddedNegativeTagBlocks,
+      );
+      b = r.builder;
+      continue;
+    }
     const r = await applyBlock(b, block, sb);
     b = r.builder;
   }
@@ -76,19 +107,10 @@ export async function applyFilters(
 }
 
 export function propertyListsSelectFragment(blocks: BlockStack): string | null {
-  const needsPositiveListJoin = blocks.some(
-    (block) =>
-      block.kind === "list" &&
-      block.values.length > 0 &&
-      (block.combinator === "any" ||
-        (block.combinator === "all" && block.values.length === 1)),
-  );
-  const needsAntiListJoin = blocks.some(
-    (block) =>
-      block.kind === "list" &&
-      block.values.length > 0 &&
-      block.combinator === "not",
-  );
+  const needsPositiveListJoin =
+    blocks.filter(isEmbeddedPositiveListBlock).length === 1;
+  const needsAntiListJoin =
+    blocks.filter(isEmbeddedNegativeListBlock).length === 1;
 
   const fragments: string[] = [];
   if (needsPositiveListJoin) {
@@ -100,13 +122,59 @@ export function propertyListsSelectFragment(blocks: BlockStack): string | null {
   return fragments.length > 0 ? fragments.join(", ") : null;
 }
 
+export function propertyTagsSelectFragment(blocks: BlockStack): string | null {
+  const needsPositiveTagJoin =
+    blocks.filter(isEmbeddedPositiveTagBlock).length === 1;
+  const needsAntiTagJoin =
+    blocks.filter(isEmbeddedNegativeTagBlock).length === 1;
+
+  const fragments: string[] = [];
+  if (needsPositiveTagJoin) {
+    fragments.push("tag_filter:property_tags!inner(tag_id)");
+  }
+  if (needsAntiTagJoin) {
+    fragments.push("tag_exclusion:property_tags(tag_id)");
+  }
+  return fragments.length > 0 ? fragments.join(", ") : null;
+}
+
+export function listCountSelectFragment(blocks: BlockStack): string | null {
+  const needsPositiveStackJoin = blocks.some(
+    (block) => block.kind === "list_count" && block.range.min != null,
+  );
+  const needsAntiStackJoin = blocks.some(
+    (block) =>
+      block.kind === "list_count" &&
+      block.range.min == null &&
+      block.range.max != null,
+  );
+
+  const fragments: string[] = [];
+  if (needsPositiveStackJoin) {
+    fragments.push("stack_filter:property_stack_counts!inner(stack_count)");
+  }
+  if (needsAntiStackJoin) {
+    fragments.push("stack_exclusion:property_stack_counts(stack_count)");
+  }
+  return fragments.length > 0 ? fragments.join(", ") : null;
+}
+
 export function filterSelectFragment(blocks: BlockStack): string | null {
   const fragments = new Set<string>();
   const listFragment = propertyListsSelectFragment(blocks);
   if (listFragment) fragments.add(listFragment);
+  const tagFragment = propertyTagsSelectFragment(blocks);
+  if (tagFragment) fragments.add(tagFragment);
+  const stackFragment = listCountSelectFragment(blocks);
+  if (stackFragment) fragments.add(stackFragment);
 
   for (const block of blocks) {
     if (block.kind !== "engagement" || block.combinator !== "any") continue;
+
+    if (isNoInboundBlock(block)) {
+      fragments.add("inbound_messages:messages(direction)");
+      continue;
+    }
 
     if (isEngagedContactedBlock(block)) {
       fragments.add("contacted_messages:messages!inner(direction)");
@@ -125,11 +193,63 @@ export function filterSelectFragment(blocks: BlockStack): string | null {
     }
   }
 
+  for (const block of blocks) {
+    if (block.kind !== "engagement" || block.combinator !== "not") continue;
+
+    if (isNeverContactedOnlyBlock(block)) {
+      fragments.add("contacted_messages:messages!inner(direction)");
+    } else if (isNoInboundBlock(block)) {
+      fragments.add("replied_messages:messages!inner(direction)");
+    }
+  }
+
   return fragments.size > 0 ? Array.from(fragments).join(", ") : null;
 }
 
 export function needsPropertyListsEmbed(blocks: BlockStack): boolean {
   return propertyListsSelectFragment(blocks) !== null;
+}
+
+function isEmbeddedPositiveListBlock(
+  block: FilterBlock,
+): block is Extract<FilterBlock, { kind: "list" }> {
+  return (
+    block.kind === "list" &&
+    block.values.length > 0 &&
+    (block.combinator === "any" ||
+      (block.combinator === "all" && block.values.length === 1))
+  );
+}
+
+function isEmbeddedPositiveTagBlock(
+  block: FilterBlock,
+): block is Extract<FilterBlock, { kind: "tag" }> {
+  return (
+    block.kind === "tag" &&
+    block.values.length > 0 &&
+    (block.combinator === "any" ||
+      (block.combinator === "all" && block.values.length === 1))
+  );
+}
+
+function isEmbeddedNegativeListBlock(
+  block: FilterBlock,
+): block is Extract<FilterBlock, { kind: "list" }> {
+  return (
+    block.kind === "list" &&
+    block.values.length > 0 &&
+    block.combinator === "not"
+  );
+}
+
+function isEmbeddedNegativeTagBlock(
+  block: FilterBlock,
+): block is Extract<FilterBlock, { kind: "tag" }> {
+  return (
+    block.kind === "tag" &&
+    block.values.length > 0 &&
+    block.combinator === "not"
+  );
 }
 
 function isEngagedContactedBlock(
@@ -140,6 +260,22 @@ function isEngagedContactedBlock(
     block.values.includes("attempted") &&
     block.values.includes("replied")
   );
+}
+
+function isNoInboundBlock(
+  block: Extract<FilterBlock, { kind: "engagement" }>,
+): boolean {
+  return (
+    block.values.length === 2 &&
+    block.values.includes("never_contacted") &&
+    block.values.includes("attempted")
+  );
+}
+
+function isNeverContactedOnlyBlock(
+  block: Extract<FilterBlock, { kind: "engagement" }>,
+): boolean {
+  return block.values.length === 1 && block.values[0] === "never_contacted";
 }
 
 export async function applyBlock(
@@ -248,10 +384,13 @@ function applyMultiSelect(
   values: string[],
 ): ProspectsBuilder {
   if (values.length === 0) return builder;
+  if (combinator === "all" && values.length > 1) {
+    return builder.eq(col, "__sandra_no_match__");
+  }
   if (combinator === "not") {
     return builder.not(col, "in", `(${values.map((v) => `"${v}"`).join(",")})`);
   }
-  // any + all (single-column) both → .in
+  // any + single-value all
   return builder.in(col, values);
 }
 
@@ -316,16 +455,18 @@ function applyAssigneeBlock(
   const uuids = values.filter((v) => v !== "unassigned");
 
   if (combinator === "not") {
-    // "Doesn't include" semantics: NOT IN the UUIDs, AND not unassigned if
-    // unassigned was selected. v1 keeps it simple — emit .not on UUIDs only;
-    // including "unassigned" in a NOT clause is uncommon and we'd need a
-    // compound predicate; revisit if requested.
-    if (uuids.length === 0) return builder;
-    return builder.not(
-      "assigned_user_id",
-      "in",
-      `(${uuids.map((v) => `"${v}"`).join(",")})`,
-    );
+    let b = builder;
+    if (hasUnassigned) {
+      b = b.not("assigned_user_id", "is", null);
+    }
+    if (uuids.length > 0) {
+      b = b.not(
+        "assigned_user_id",
+        "in",
+        `(${uuids.map((v) => `"${v}"`).join(",")})`,
+      );
+    }
+    return b;
   }
 
   if (hasUnassigned && uuids.length === 0) {
@@ -359,18 +500,24 @@ async function applyListBlock(
   builder: ProspectsBuilder,
   block: Extract<FilterBlock, { kind: "list" }>,
   sb: SbClient,
+  useEmbeddedPositiveBlock = true,
+  useEmbeddedNegativeBlock = true,
 ): Promise<BuilderResult> {
   if (block.values.length === 0) return { builder };
 
-  if (block.combinator === "any") {
+  if (useEmbeddedPositiveBlock && block.combinator === "any") {
     return { builder: builder.in("list_filter.list_id", block.values) };
   }
 
-  if (block.combinator === "all" && block.values.length === 1) {
+  if (
+    useEmbeddedPositiveBlock &&
+    block.combinator === "all" &&
+    block.values.length === 1
+  ) {
     return { builder: builder.in("list_filter.list_id", block.values) };
   }
 
-  if (block.combinator === "not") {
+  if (useEmbeddedNegativeBlock && block.combinator === "not") {
     return {
       builder: builder
         .in("list_exclusion.list_id", block.values)
@@ -390,6 +537,18 @@ async function applyListBlock(
   }
 
   const propIds: string[] = [];
+  if (block.combinator === "not") {
+    for (const [pid] of byProp) propIds.push(pid);
+    return {
+      builder: propIds.length
+        ? builder.not(
+            "id",
+            "in",
+            `(${propIds.map((id) => `"${id}"`).join(",")})`,
+          )
+        : builder,
+    };
+  }
   if (block.combinator === "all") {
     for (const [pid, set] of byProp) {
       if (block.values.every((v) => set.has(v))) propIds.push(pid);
@@ -417,8 +576,30 @@ async function applyTagBlock(
   builder: ProspectsBuilder,
   block: Extract<FilterBlock, { kind: "tag" }>,
   sb: SbClient,
+  useEmbeddedPositiveBlock = true,
+  useEmbeddedNegativeBlock = true,
 ): Promise<BuilderResult> {
   if (block.values.length === 0) return { builder };
+
+  if (useEmbeddedPositiveBlock && block.combinator === "any") {
+    return { builder: builder.in("tag_filter.tag_id", block.values) };
+  }
+
+  if (
+    useEmbeddedPositiveBlock &&
+    block.combinator === "all" &&
+    block.values.length === 1
+  ) {
+    return { builder: builder.in("tag_filter.tag_id", block.values) };
+  }
+
+  if (useEmbeddedNegativeBlock && block.combinator === "not") {
+    return {
+      builder: builder
+        .in("tag_exclusion.tag_id", block.values)
+        .is("tag_exclusion", null),
+    };
+  }
 
   const { data } = await sb
     .from("property_tags")
@@ -432,6 +613,18 @@ async function applyTagBlock(
   }
 
   const propIds: string[] = [];
+  if (block.combinator === "not") {
+    for (const [pid] of byProp) propIds.push(pid);
+    return {
+      builder: propIds.length
+        ? builder.not(
+            "id",
+            "in",
+            `(${propIds.map((id) => `"${id}"`).join(",")})`,
+          )
+        : builder,
+    };
+  }
   if (block.combinator === "all") {
     for (const [pid, set] of byProp) {
       if (block.values.every((v) => set.has(v))) propIds.push(pid);
@@ -440,14 +633,6 @@ async function applyTagBlock(
       builder: propIds.length
         ? builder.in("id", propIds)
         : builder.in("id", NO_MATCH_SENTINEL),
-    };
-  }
-  if (block.combinator === "not") {
-    for (const [pid] of byProp) propIds.push(pid);
-    return {
-      builder: propIds.length
-        ? builder.not("id", "in", `(${propIds.map((id) => `"${id}"`).join(",")})`)
-        : builder,
     };
   }
   // any
@@ -470,21 +655,24 @@ async function applyListCountBlock(
   block: Extract<FilterBlock, { kind: "list_count" }>,
   sb: SbClient,
 ): Promise<BuilderResult> {
-  const min = block.range.min ?? 1;
-  const max = block.range.max ?? 999999;
+  void sb;
+  if (block.range.min == null && block.range.max == null) {
+    return { builder };
+  }
+  if (block.range.min == null && block.range.max != null) {
+    return {
+      builder: builder
+        .gt("stack_exclusion.stack_count", block.range.max)
+        .is("stack_exclusion", null),
+    };
+  }
 
-  const { data } = await sb
-    .from("property_stack_counts")
-    .select("property_id")
-    .gte("stack_count", min)
-    .lte("stack_count", max);
-
-  const ids = ((data ?? []) as Array<{ property_id: string }>).map((r) => r.property_id);
-  return {
-    builder: ids.length
-      ? builder.in("id", ids)
-      : builder.in("id", NO_MATCH_SENTINEL),
-  };
+  let b = builder;
+  b = b.gte("stack_filter.stack_count", block.range.min);
+  if (block.range.max != null) {
+    b = b.lte("stack_filter.stack_count", block.range.max);
+  }
+  return { builder: b };
 }
 
 /**
@@ -532,6 +720,14 @@ async function applyEngagementBlock(
     }
   }
 
+  if (block.combinator === "any" && isNoInboundBlock(block)) {
+    return {
+      builder: builder
+        .eq("inbound_messages.direction", "inbound")
+        .is("inbound_messages", null),
+    };
+  }
+
   if (block.combinator === "any" && isEngagedContactedBlock(block)) {
     return {
       builder: builder.in("contacted_messages.direction", [
@@ -539,6 +735,28 @@ async function applyEngagementBlock(
         "outbound",
       ]),
     };
+  }
+
+  if (block.combinator === "not" && isNeverContactedOnlyBlock(block)) {
+    return {
+      builder: builder.in("contacted_messages.direction", [
+        "inbound",
+        "outbound",
+      ]),
+    };
+  }
+
+  if (block.combinator === "not" && isNoInboundBlock(block)) {
+    return { builder: builder.eq("replied_messages.direction", "inbound") };
+  }
+
+  if (block.combinator === "all") {
+    if (
+      block.values.includes("never_contacted") ||
+      (block.values.includes("attempted") && block.values.includes("replied"))
+    ) {
+      return { builder: builder.in("id", NO_MATCH_SENTINEL) };
+    }
   }
 
   const wantedBuckets = new Set(block.values);

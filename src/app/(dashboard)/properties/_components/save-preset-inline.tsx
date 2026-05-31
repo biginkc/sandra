@@ -56,6 +56,7 @@ export function SavePresetInline({ orgId, currentBlocks }: SavePresetInlineProps
     <div className="border-t pt-3 mt-3" data-save-preset-inline>
       <label className="flex items-center gap-2 cursor-pointer select-none">
         <input
+          data-testid="save-preset-toggle"
           type="checkbox"
           checked={enabled}
           onChange={(e) => setEnabled(e.target.checked)}
