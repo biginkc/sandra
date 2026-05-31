@@ -32,7 +32,7 @@
     "@dnd-kit/core": "^6.3.1",
     "@dnd-kit/sortable": "^10.0.0",
     "@dnd-kit/utilities": "^3.2.2",
-    "@sandra/tokens": "file:../Sandra Design System",
+    "@sandra/tokens": "github:biginkc/sandra-design-system#main",
     "@slack/web-api": "^7.15.2",
     "@supabase/ssr": "^0.10.2",
     "@supabase/supabase-js": "^2.104.0",
