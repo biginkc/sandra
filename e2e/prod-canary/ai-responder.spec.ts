@@ -1,9 +1,11 @@
 import { expect, test } from "@playwright/test";
 
 import {
+  deleteCanaryConsentBySource,
   deleteCanaryContactsByLastName,
   deleteCanaryPropertiesByAddress,
   fireSignedDialpadInbound,
+  getOrCreateCanarySmsRecipientContact,
   insertCanaryProspect,
   pollUntil,
   requireCanarySmsRecipient,
@@ -41,36 +43,34 @@ test("production canary verifies AI responder happy path in the lead thread", as
   const address = `${env.label} AI ${token} 1101 Responder Ct`;
   const contactLastName = `PROD-CANARY AI ${token}`;
   const inboundBody = "yes I'd like to hear more about selling my property";
+  let contactId: string | null = null;
+  let createdContact = false;
   testInfo.annotations.push({ type: "runId", description: env.runId });
 
   await deleteCanaryPropertiesByAddress(supabase, address);
   await deleteCanaryContactsByLastName(supabase, contactLastName);
 
   try {
-    const { data: contact, error: contactError } = await supabase
-      .from("contacts")
-      .insert({
-        first_name: "PROD-CANARY",
-        last_name: contactLastName,
-        phone_1: phone,
-      })
-      .select("id")
-      .single();
-    expect(contactError).toBeNull();
-    expect(contact?.id).toBeTruthy();
+    const contact = await getOrCreateCanarySmsRecipientContact(supabase, {
+      firstName: "PROD-CANARY",
+      lastName: contactLastName,
+      phone,
+    });
+    contactId = contact.id;
+    createdContact = contact.created;
 
     const lead = await insertCanaryProspect(supabase, {
       address,
       runId: env.runId,
       fields: {
-        homeowner_contact_id: contact!.id,
+        homeowner_contact_id: contact.id,
         state: "MO",
         status: "new_lead",
       },
     });
 
     const { error: consentError } = await supabase.from("consent_events").insert({
-      contact_id: contact!.id,
+      contact_id: contact.id,
       channel: "sms",
       event_type: "opt_in_marketing_written",
       source: env.label,
@@ -83,7 +83,7 @@ test("production canary verifies AI responder happy path in the lead thread", as
       status: "sent",
       provider: "internal",
       body: `${env.label} AI responder outbound anchor`,
-      contact_id: contact!.id,
+      contact_id: contact.id,
       property_id: lead.id,
       from_address: crmNumber,
       to_address: phone,
@@ -106,7 +106,7 @@ test("production canary verifies AI responder happy path in the lead thread", as
           .from("messages")
           .select("id, body, direction, status, metadata")
           .eq("property_id", lead.id)
-          .eq("contact_id", contact!.id)
+          .eq("contact_id", contact.id)
           .eq("direction", "outbound")
           .order("created_at", { ascending: false })
           .limit(1)
@@ -149,6 +149,14 @@ test("production canary verifies AI responder happy path in the lead thread", as
     });
   } finally {
     await deleteCanaryPropertiesByAddress(supabase, address);
-    await deleteCanaryContactsByLastName(supabase, contactLastName);
+    if (contactId) {
+      await deleteCanaryConsentBySource(supabase, {
+        contactId,
+        source: env.label,
+      });
+    }
+    if (createdContact) {
+      await deleteCanaryContactsByLastName(supabase, contactLastName);
+    }
   }
 });
