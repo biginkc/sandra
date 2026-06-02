@@ -161,6 +161,36 @@ describe("internal.jitter.call-activities writeback PUT", () => {
     expect(item.last_call_activity_id).toBe(json.call_activity.id);
   });
 
+  it("derives org, property, and contact from dialer_batch_item_id", async () => {
+    const seeded = await seedDialerBatch(testClient);
+    const attemptId = `attempt-${crypto.randomUUID()}`;
+    const response = await PUT(
+      jsonRequest(
+        `https://sandra.test/api/internal/jitter/call-activities/by-jitter-attempt/${attemptId}`,
+        "PUT",
+        {
+          dialer_batch_item_id: seeded.itemId,
+          jitter_session_id: "session-activity",
+          provider: "jitter",
+          outcome: "connected_human",
+          duration_seconds: 91,
+        },
+        { "idempotency-key": "activity-derived-batch-item" },
+      ),
+      attemptContext(attemptId),
+    );
+
+    expect(response.status).toBe(200);
+    const json = (await response.json()) as any;
+    expect(json.call_activity).toMatchObject({
+      jitter_attempt_id: attemptId,
+      outcome: "connected_human",
+      dialer_batch_item_id: seeded.itemId,
+      property_id: seeded.propertyId,
+      contact_id: seeded.contactId,
+    });
+  });
+
   it("creates Sandra callback task semantics for callback_requested writeback", async () => {
     const seeded = await seedDialerBatch(testClient);
     const operator = await createOrgUser(testClient, {
