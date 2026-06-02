@@ -13,6 +13,7 @@ function clientWithMembershipResult(error: { message: string } | null) {
           },
           error: null,
         }),
+        updateUserById: vi.fn().mockResolvedValue({ error: null }),
       },
     },
     from: vi.fn((table: string) => {

@@ -119,6 +119,14 @@ export async function ensureTestUser(
   let userId: string;
   if (existing) {
     userId = existing.id;
+    const { error: updateErr } = await client.auth.admin.updateUserById(
+      userId,
+      {
+        password: TEST_USER_PASSWORD,
+        email_confirm: true,
+      },
+    );
+    if (updateErr) throw updateErr;
   } else {
     const { data: created, error: createErr } =
       await client.auth.admin.createUser({
