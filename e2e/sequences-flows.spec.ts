@@ -213,7 +213,7 @@ test.describe("Sequences V1 — UI flows (browser)", () => {
       name: new RegExp(`^${sequenceName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`),
     });
     await expect(option).toBeVisible({ timeout: 5_000 });
-    await option.click();
+    await option.evaluate((element) => (element as HTMLButtonElement).click());
 
     // DB: enrollment exists in active status
     await expect(async () => {
