@@ -66,6 +66,7 @@ function mockAdminClient({
 }
 
 beforeEach(() => {
+  vi.stubEnv("ADMIN_EMAILS", "jarrad@bmhgroupkc.com");
   headersMock.mockResolvedValue(
     makeHeaders({
       "x-forwarded-proto": "https",
