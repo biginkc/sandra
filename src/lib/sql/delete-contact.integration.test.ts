@@ -1,7 +1,16 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { createClient } from "@supabase/supabase-js";
 
 import { createTestClient } from "@tests/integration/client";
 import { resetTenantTables } from "@tests/integration/reset";
+import {
+  BMH_ORG_ID,
+  TEST_ORG_B_ID,
+  clientForUser,
+  createOrgUser,
+  seedTwoOrgs,
+} from "@tests/integration/fixtures/multi-user";
+import type { Database } from "@/lib/supabase/types";
 
 const supabase = createTestClient();
 
@@ -15,33 +24,64 @@ const supabase = createTestClient();
  */
 
 describe("delete_contact() (integration)", () => {
+  const createdUserIds: string[] = [];
+
   beforeEach(async () => {
     await resetTenantTables(supabase);
+    await seedTwoOrgs(supabase);
   });
 
-  it("deletes the contact, nulls contact_id on messages, redacts body with reason", async () => {
-    const { data: contact } = await supabase
+  afterEach(async () => {
+    for (const id of createdUserIds) {
+      await supabase.auth.admin.deleteUser(id);
+    }
+    createdUserIds.length = 0;
+  });
+
+  async function createUserClient(orgId: string) {
+    const user = await createOrgUser(supabase, {
+      orgId,
+      role: "member",
+      email: `delete-contact-${orgId.slice(-3)}-${Date.now()}-${Math.random().toString(36).slice(2)}@bmhgroupkc.com`,
+    });
+    createdUserIds.push(user.userId);
+    return clientForUser(user.jwt);
+  }
+
+  async function seedContact(orgId: string, firstName: string): Promise<string> {
+    const { data: contact, error } = await supabase
       .from("contacts")
-      .insert({ first_name: "Pat", last_name: "Jones", phone_1: "+18165551111" })
+      .insert({ org_id: orgId, first_name: firstName, last_name: "Jones" })
       .select()
       .single();
+    if (error || !contact) {
+      throw new Error(`seedContact failed: ${error?.message ?? "no contact"}`);
+    }
+    return contact!.id;
+  }
+
+  it("deletes a same-org contact, nulls contact_id on messages, and redacts body with reason", async () => {
+    const caller = await createUserClient(BMH_ORG_ID);
+    const contactId = await seedContact(BMH_ORG_ID, "Pat");
 
     await supabase.from("messages").insert({
+      org_id: BMH_ORG_ID,
       channel: "sms",
       direction: "outbound",
       body: "Hi Pat, quick question about your house",
-      contact_id: contact!.id,
+      contact_id: contactId,
     });
     await supabase.from("messages").insert({
+      org_id: BMH_ORG_ID,
       channel: "sms",
       direction: "inbound",
       body: "Reply from Pat",
-      contact_id: contact!.id,
+      contact_id: contactId,
     });
 
     const reason = "TCPA opt-out (verified by Jarrad on 2026-04-21)";
-    const { error } = await supabase.rpc("delete_contact", {
-      p_contact_id: contact!.id,
+    const { error } = await caller.rpc("delete_contact", {
+      p_contact_id: contactId,
       p_reason: reason,
     });
     expect(error).toBeNull();
@@ -49,7 +89,7 @@ describe("delete_contact() (integration)", () => {
     const { data: contactAfter } = await supabase
       .from("contacts")
       .select("id")
-      .eq("id", contact!.id)
+      .eq("id", contactId)
       .maybeSingle();
     expect(contactAfter).toBeNull();
 
@@ -64,14 +104,11 @@ describe("delete_contact() (integration)", () => {
   });
 
   it("is a no-op when no messages reference the contact", async () => {
-    const { data: contact } = await supabase
-      .from("contacts")
-      .insert({ first_name: "Solo", last_name: "Contact" })
-      .select()
-      .single();
+    const caller = await createUserClient(BMH_ORG_ID);
+    const contactId = await seedContact(BMH_ORG_ID, "Solo");
 
-    const { error } = await supabase.rpc("delete_contact", {
-      p_contact_id: contact!.id,
+    const { error } = await caller.rpc("delete_contact", {
+      p_contact_id: contactId,
       p_reason: "cleanup",
     });
     expect(error).toBeNull();
@@ -79,8 +116,62 @@ describe("delete_contact() (integration)", () => {
     const { data: after } = await supabase
       .from("contacts")
       .select("id")
-      .eq("id", contact!.id)
+      .eq("id", contactId)
       .maybeSingle();
     expect(after).toBeNull();
+  });
+
+  it("rejects unauthenticated callers", async () => {
+    const contactId = await seedContact(BMH_ORG_ID, "Anon");
+    const anon = createClient<Database>(
+      process.env.TEST_SUPABASE_URL!,
+      process.env.TEST_SUPABASE_ANON_KEY!,
+      { auth: { persistSession: false, autoRefreshToken: false } },
+    );
+
+    const { error } = await anon.rpc("delete_contact", {
+      p_contact_id: contactId,
+      p_reason: "blocked",
+    });
+
+    expect(error?.message.toLowerCase()).toMatch(
+      /permission denied|authenticated user required/,
+    );
+    const { data: contactAfter } = await supabase
+      .from("contacts")
+      .select("id")
+      .eq("id", contactId)
+      .maybeSingle();
+    expect(contactAfter?.id).toBe(contactId);
+  });
+
+  it("rejects authenticated callers from a different org", async () => {
+    const caller = await createUserClient(TEST_ORG_B_ID);
+    const contactId = await seedContact(BMH_ORG_ID, "Cross");
+
+    const { error } = await caller.rpc("delete_contact", {
+      p_contact_id: contactId,
+      p_reason: "blocked",
+    });
+
+    expect(error?.message).toContain("caller is not authorized");
+    const { data: contactAfter } = await supabase
+      .from("contacts")
+      .select("id")
+      .eq("id", contactId)
+      .maybeSingle();
+    expect(contactAfter?.id).toBe(contactId);
+  });
+
+  it("rejects anon reset_tenant_tables RPC calls", async () => {
+    const anon = createClient<Database>(
+      process.env.TEST_SUPABASE_URL!,
+      process.env.TEST_SUPABASE_ANON_KEY!,
+      { auth: { persistSession: false, autoRefreshToken: false } },
+    );
+
+    const { error } = await anon.rpc("reset_tenant_tables");
+
+    expect(error?.message.toLowerCase()).toContain("permission denied");
   });
 });
