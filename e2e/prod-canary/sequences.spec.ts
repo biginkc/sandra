@@ -1,8 +1,10 @@
 import { expect, test } from "@playwright/test";
 
 import {
+  deleteCanaryConsentBySource,
   deleteCanaryContactsByLastName,
   deleteCanaryPropertiesByAddress,
+  getOrCreateCanarySmsRecipientContact,
   insertCanaryProspect,
   pollUntil,
   requireCanarySmsRecipient,
@@ -26,6 +28,8 @@ test("production canary verifies sequence tick delivery and lead-thread UI", asy
   let sequenceId: string | null = null;
   let stepId: string | null = null;
   let enrollmentId: string | null = null;
+  let contactId: string | null = null;
+  let createdContact = false;
   testInfo.annotations.push({ type: "runId", description: env.runId });
 
   await deleteCanaryPropertiesByAddress(supabase, address);
@@ -70,23 +74,19 @@ test("production canary verifies sequence tick delivery and lead-thread UI", asy
     expect(step?.id).toBeTruthy();
     stepId = step!.id;
 
-    const { data: contact, error: contactError } = await supabase
-      .from("contacts")
-      .insert({
-        first_name: "PROD-CANARY",
-        last_name: contactLastName,
-        phone_1: recipient,
-      })
-      .select("id")
-      .single();
-    expect(contactError).toBeNull();
-    expect(contact?.id).toBeTruthy();
+    const contact = await getOrCreateCanarySmsRecipientContact(supabase, {
+      firstName: "PROD-CANARY",
+      lastName: contactLastName,
+      phone: recipient,
+    });
+    contactId = contact.id;
+    createdContact = contact.created;
 
     const lead = await insertCanaryProspect(supabase, {
       address,
       runId: env.runId,
       fields: {
-        homeowner_contact_id: contact!.id,
+        homeowner_contact_id: contact.id,
         // Hawaii keeps the send-now sequence canary inside TCPA quiet-hour
         // windows during late-night Central manual runs.
         state: "HI",
@@ -95,7 +95,7 @@ test("production canary verifies sequence tick delivery and lead-thread UI", asy
     });
 
     const { error: consentError } = await supabase.from("consent_events").insert({
-      contact_id: contact!.id,
+      contact_id: contact.id,
       channel: "sms",
       event_type: "opt_in_marketing_written",
       source: env.label,
@@ -108,7 +108,7 @@ test("production canary verifies sequence tick delivery and lead-thread UI", asy
         org_id: org!.id,
         sequence_id: sequenceId,
         property_id: lead.id,
-        contact_id: contact!.id,
+        contact_id: contact.id,
         current_step_index: 0,
         status: "active",
         next_run_at: new Date().toISOString(),
@@ -127,7 +127,7 @@ test("production canary verifies sequence tick delivery and lead-thread UI", asy
               .from("messages")
               .select("id, body, direction, status, to_address")
               .eq("property_id", lead.id)
-              .eq("contact_id", contact!.id)
+              .eq("contact_id", contact.id)
               .eq("body", body)
               .maybeSingle(),
             supabase
@@ -174,6 +174,14 @@ test("production canary verifies sequence tick delivery and lead-thread UI", asy
       await supabase.from("sequences").delete().eq("id", sequenceId);
     }
     await deleteCanaryPropertiesByAddress(supabase, address);
-    await deleteCanaryContactsByLastName(supabase, contactLastName);
+    if (contactId) {
+      await deleteCanaryConsentBySource(supabase, {
+        contactId,
+        source: env.label,
+      });
+    }
+    if (createdContact) {
+      await deleteCanaryContactsByLastName(supabase, contactLastName);
+    }
   }
 });

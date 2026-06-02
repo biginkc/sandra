@@ -577,6 +577,56 @@ export async function deleteCanaryContactsByLastName(
   }
 }
 
+export async function deleteCanaryConsentBySource(
+  client: SupabaseClient<Database>,
+  input: { contactId: string; source: string },
+): Promise<void> {
+  assertCanaryOwned(input.source, "consent source");
+
+  const { error } = await client
+    .from("consent_events")
+    .delete()
+    .eq("contact_id", input.contactId)
+    .eq("source", input.source);
+  if (error) {
+    throw new Error(`Could not delete canary consent events: ${error.message}`);
+  }
+}
+
+export async function getOrCreateCanarySmsRecipientContact(
+  client: SupabaseClient<Database>,
+  input: { firstName: string; lastName: string; phone: string },
+): Promise<{ id: string; created: boolean }> {
+  assertCanaryOwned(input.lastName, "contact last name");
+
+  const { data: existing, error: lookupError } = await client
+    .from("contacts")
+    .select("id")
+    .eq("phone_1", input.phone)
+    .maybeSingle();
+  if (lookupError) {
+    throw new Error(`Could not look up canary SMS contact: ${lookupError.message}`);
+  }
+  if (existing?.id) {
+    return { id: existing.id, created: false };
+  }
+
+  const { data: contact, error: contactError } = await client
+    .from("contacts")
+    .insert({
+      first_name: input.firstName,
+      last_name: input.lastName,
+      phone_1: input.phone,
+    })
+    .select("id")
+    .single();
+  if (contactError || !contact?.id) {
+    throw contactError ?? new Error("Could not insert canary SMS contact.");
+  }
+
+  return { id: contact.id, created: true };
+}
+
 export async function deleteCanarySmsTemplatesByName(
   client: SupabaseClient<Database>,
   name: string,

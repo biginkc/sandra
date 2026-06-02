@@ -13,6 +13,7 @@ function clientWithMembershipResult(error: { message: string } | null) {
           },
           error: null,
         }),
+        updateUserById: vi.fn().mockResolvedValue({ error: null }),
       },
     },
     from: vi.fn((table: string) => {
@@ -24,11 +25,12 @@ function clientWithMembershipResult(error: { message: string } | null) {
 }
 
 describe("ensureTestUser", () => {
-  it("upserts the default owner membership for the e2e auth user", async () => {
+  it("upserts the default owner membership without rotating an active session", async () => {
     const client = clientWithMembershipResult(null);
 
     await expect(ensureTestUser(client as never)).resolves.toBe("user-123");
 
+    expect(client.auth.admin.updateUserById).not.toHaveBeenCalled();
     expect(client.__upsert).toHaveBeenCalledWith(
       {
         user_id: "user-123",
@@ -37,6 +39,19 @@ describe("ensureTestUser", () => {
       },
       { onConflict: "user_id,org_id" },
     );
+  });
+
+  it("repairs the existing e2e auth user password when explicitly requested", async () => {
+    const client = clientWithMembershipResult(null);
+
+    await expect(
+      ensureTestUser(client as never, { repairPassword: true }),
+    ).resolves.toBe("user-123");
+
+    expect(client.auth.admin.updateUserById).toHaveBeenCalledWith("user-123", {
+      password: "test12345",
+      email_confirm: true,
+    });
   });
 
   it("fails loudly when the memberships table is missing", async () => {

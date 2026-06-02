@@ -17,7 +17,7 @@ const AUTH_FILE = "e2e/.auth/user.json";
  */
 setup("authenticate", async ({ page }) => {
   const admin = adminClient();
-  await ensureTestUser(admin);
+  await ensureTestUser(admin, { repairPassword: true });
 
   await page.goto("/login");
   await page.getByLabel("Email").fill(TEST_USER_EMAIL);

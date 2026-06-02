@@ -1,8 +1,10 @@
 import { expect, test } from "@playwright/test";
 
 import {
+  deleteCanaryConsentBySource,
   deleteCanaryContactsByLastName,
   deleteCanaryPropertiesByAddress,
+  getOrCreateCanarySmsRecipientContact,
   insertCanaryProspect,
   pollUntil,
   requireCanarySmsRecipient,
@@ -22,29 +24,27 @@ test("production canary sends a real outbound SMS from a canary lead", async ({
   const address = `${env.label} SMS ${token} 801 Provider St`;
   const contactLastName = `PROD-CANARY SMS ${token}`;
   const body = `${env.label} outbound SMS ${token}`;
+  let contactId: string | null = null;
+  let createdContact = false;
   testInfo.annotations.push({ type: "runId", description: env.runId });
 
   await deleteCanaryPropertiesByAddress(supabase, address);
   await deleteCanaryContactsByLastName(supabase, contactLastName);
 
   try {
-    const { data: contact, error: contactError } = await supabase
-      .from("contacts")
-      .insert({
-        first_name: "PROD-CANARY",
-        last_name: contactLastName,
-        phone_1: recipient,
-      })
-      .select("id")
-      .single();
-    expect(contactError).toBeNull();
-    expect(contact?.id).toBeTruthy();
+    const contact = await getOrCreateCanarySmsRecipientContact(supabase, {
+      firstName: "PROD-CANARY",
+      lastName: contactLastName,
+      phone: recipient,
+    });
+    contactId = contact.id;
+    createdContact = contact.created;
 
     const lead = await insertCanaryProspect(supabase, {
       address,
       runId: env.runId,
       fields: {
-        homeowner_contact_id: contact!.id,
+        homeowner_contact_id: contact.id,
         status: "new_lead",
         // Hawaii keeps this send-now canary inside TCPA quiet-hour windows
         // during late-night Central manual runs.
@@ -53,7 +53,7 @@ test("production canary sends a real outbound SMS from a canary lead", async ({
     });
 
     const { error: consentError } = await supabase.from("consent_events").insert({
-      contact_id: contact!.id,
+      contact_id: contact.id,
       channel: "sms",
       event_type: "opt_in_marketing_written",
       source: env.label,
@@ -80,7 +80,7 @@ test("production canary sends a real outbound SMS from a canary lead", async ({
           .from("messages")
           .select("id, body, direction, status, to_address, property_id, contact_id")
           .eq("property_id", lead.id)
-          .eq("contact_id", contact!.id)
+          .eq("contact_id", contact.id)
           .eq("body", body)
           .maybeSingle();
         expect(error).toBeNull();
@@ -98,6 +98,14 @@ test("production canary sends a real outbound SMS from a canary lead", async ({
     });
   } finally {
     await deleteCanaryPropertiesByAddress(supabase, address);
-    await deleteCanaryContactsByLastName(supabase, contactLastName);
+    if (contactId) {
+      await deleteCanaryConsentBySource(supabase, {
+        contactId,
+        source: env.label,
+      });
+    }
+    if (createdContact) {
+      await deleteCanaryContactsByLastName(supabase, contactLastName);
+    }
   }
 });
