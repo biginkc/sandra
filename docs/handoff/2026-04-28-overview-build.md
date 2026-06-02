@@ -110,7 +110,7 @@ All five must pass with real data + real phone before the VA gets the keys.
 
 ## Test credentials
 
-- Prod test user: `claude@test.com` / `test12345` (stored in `e2e/fixtures.ts`)
+- Test-suite user: shared E2E account / `test12345` (stored in `e2e/fixtures.ts`)
 - Test phone for outbound smoke: **+13107540662** (Jarrad's test phone)
 - Twilio test receiver (inbound only): **+18148097074** — never a sender
 

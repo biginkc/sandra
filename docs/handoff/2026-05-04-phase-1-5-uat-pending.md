@@ -87,7 +87,7 @@ After visual check passes → reply "approved" → `/gsd-next` will route to Pha
 - **Prod login**: `PROD_EMAIL` / `PROD_PASSWORD` in `.env.local` (gitignored — do not log)
 - **Jarrad's test phone**: `+13107540662` — SMS smoke only, never real leads
 - **Twilio test receiver**: `+18148097074` — inbound-only canary, never a sender
-- **Test suite user**: `claude@test.com` / `test12345` (test Supabase project only)
+- **Test suite user**: shared E2E account / `test12345` (test Supabase project only)
 
 ---
 

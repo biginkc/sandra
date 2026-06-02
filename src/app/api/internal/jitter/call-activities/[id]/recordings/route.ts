@@ -55,6 +55,7 @@ export async function POST(
     }
 
     const idempotency = await checkAndRecordIdempotency(auth.serviceClient, {
+      orgId: auth.orgId,
       eventType: "call_recording_writeback",
       idempotencyKey,
       payload: body,
@@ -93,6 +94,7 @@ export async function POST(
     // Parent status + updated_at are handled by bump_call_activities_on_child_change.
     const payload = { recording };
     await recordIdempotentResponse(auth.serviceClient, {
+      orgId: auth.orgId,
       eventType: "call_recording_writeback",
       idempotencyKey,
       payload,

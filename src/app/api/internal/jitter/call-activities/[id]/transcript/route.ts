@@ -55,6 +55,7 @@ export async function PUT(
     }
 
     const idempotency = await checkAndRecordIdempotency(auth.serviceClient, {
+      orgId: auth.orgId,
       eventType: "call_transcript_writeback",
       idempotencyKey,
       payload: body,
@@ -93,6 +94,7 @@ export async function PUT(
     // Parent status + updated_at are handled by bump_call_activities_on_child_change.
     const payload = { transcript };
     await recordIdempotentResponse(auth.serviceClient, {
+      orgId: auth.orgId,
       eventType: "call_transcript_writeback",
       idempotencyKey,
       payload,

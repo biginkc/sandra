@@ -246,6 +246,7 @@ export async function PUT(
     if (callbackTask && !callbackTask.ok) return callbackTask.response;
 
     const idempotency = await checkAndRecordIdempotency(auth.serviceClient, {
+      orgId: auth.orgId,
       eventType: "call_activity_writeback",
       idempotencyKey,
       payload: body,
@@ -298,6 +299,7 @@ export async function PUT(
       ...(callbackTask?.ok ? { callback_task: { id: callbackTask.taskId } } : {}),
     };
     await recordIdempotentResponse(auth.serviceClient, {
+      orgId: auth.orgId,
       eventType: "call_activity_writeback",
       idempotencyKey,
       payload,

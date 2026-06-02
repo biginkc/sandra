@@ -77,9 +77,9 @@ const webServerEnv: Record<string, string> = {
   // can't see "prospect → new_lead". Mirror of .github/workflows/e2e.yml so
   // local runs match CI.
   SKIP_INTENT_GATE: "1",
-  // Pin admin email so /properties knows claude@test.com is admin for the
+  // Pin admin email so /properties knows the shared E2E user is admin for the
   // duration of the suite (enables Delete in the Actions menu tests).
-  ADMIN_EMAILS: "claude@test.com,jarrad@bmhgroupkc.com",
+  ADMIN_EMAILS: "e2e-test@bmhgroupkc.com,jarrad@bmhgroupkc.com",
   // Pin quiet-hours checks to 11:00 AM America/Chicago so send-flow E2E
   // coverage is deterministic when the suite runs overnight.
   E2E_QUIET_HOURS_NOW: process.env.E2E_QUIET_HOURS_NOW,

@@ -15,7 +15,7 @@ import {
  * detail + verify mark-read works end-to-end.
  *
  * The suite runs against `sandra-crm-test`. The signed-in user is
- * `claude@test.com` (the shared E2E test user) via the stored
+ * the shared E2E test user via the stored
  * storageState.
  */
 
