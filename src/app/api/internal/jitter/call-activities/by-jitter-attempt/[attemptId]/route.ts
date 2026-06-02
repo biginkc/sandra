@@ -48,6 +48,35 @@ function unprocessable(error_code: string, field?: string) {
 }
 
 async function validateOrgConsistency(serviceClient: any, body: WritebackBody) {
+  if ((!body.org_id || !body.property_id || !body.contact_id) && !body.dialer_batch_item_id) {
+    return { ok: false as const, response: unprocessable("missing_required_field") };
+  }
+
+  if (body.dialer_batch_item_id && (!body.org_id || !body.property_id || !body.contact_id)) {
+    const { data: item, error: itemError } = await serviceClient
+      .from("dialer_batch_items")
+      .select(`
+        id,
+        property_id,
+        contact_id,
+        batch:dialer_batches!dialer_batch_items_batch_id_fkey(org_id)
+      `)
+      .eq("id", body.dialer_batch_item_id)
+      .maybeSingle();
+    if (itemError) throw itemError;
+    const batch = Array.isArray(item?.batch) ? item.batch[0] : item?.batch;
+    if (!item || !batch?.org_id || !item.property_id || !item.contact_id) {
+      return {
+        ok: false as const,
+        response: unprocessable("org_mismatch", "dialer_batch_item_id"),
+      };
+    }
+
+    body.org_id ??= batch.org_id;
+    body.property_id ??= item.property_id;
+    body.contact_id ??= item.contact_id;
+  }
+
   if (!body.org_id || !body.property_id || !body.contact_id) {
     return { ok: false as const, response: unprocessable("missing_required_field") };
   }
