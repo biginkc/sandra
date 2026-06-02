@@ -31,6 +31,15 @@ describe("isPublicPath", () => {
     expect(isPublicPath("/api/internal/closer/admin/debug")).toBe(false);
   });
 
+  it("allows signed BMH Institute internal API routes to handle their own auth", () => {
+    expect(
+      isPublicPath(
+        "/api/internal/bmh-institute/course-outcomes/by-course-completion/user-1%3Acourse-1",
+      ),
+    ).toBe(true);
+    expect(isPublicPath("/api/internal/bmh-institute/admin/debug")).toBe(false);
+  });
+
   it("keeps dashboard routes protected", () => {
     expect(isPublicPath("/dashboard")).toBe(false);
     expect(isPublicPath("/leads/property-1")).toBe(false);
