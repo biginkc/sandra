@@ -167,6 +167,7 @@ export async function PUT(
     if (!validation.ok) return validation.response;
 
     const idempotency = await checkAndRecordIdempotency(auth.serviceClient, {
+      orgId: auth.orgId,
       eventType: "closer_practice_outcome",
       idempotencyKey,
       payload: body,
@@ -209,6 +210,7 @@ export async function PUT(
 
     const payload = { practice_outcome: outcome };
     await recordIdempotentResponse(auth.serviceClient, {
+      orgId: auth.orgId,
       eventType: "closer_practice_outcome",
       idempotencyKey,
       payload,

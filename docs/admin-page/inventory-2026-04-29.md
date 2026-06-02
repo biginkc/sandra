@@ -81,8 +81,8 @@ These are config knobs that exist as live behavior but have zero UI — admin mu
 - Recommendation: build into `/admin/team`. The current "you can be admin if you're in this env var" model means adding a 3rd admin requires a Vercel deploy.
 
 ### B2. Domain allowlist (`ALLOWED_DOMAIN`)
-- File: `src/lib/auth/allowlist.ts:16` (constant) + `EMAIL_ALLOWLIST` set at line 19
-- Knob: hardcoded to `bmhgroupkc.com`, plus a one-off `claude@test.com` allowlist entry. Anyone whose email doesn't match gets bounced from middleware.
+- File: `src/lib/auth/allowlist.ts` (domain constant)
+- Knob: hardcoded to `bmhgroupkc.com`. Anyone whose email doesn't match gets bounced from middleware.
 - Recommendation: defer. Single-tenant app for now; flip into DB only when multi-org is real.
 
 ### B3. Skip-trace provider selection (`SKIP_TRACE_PROVIDER`)
@@ -166,8 +166,8 @@ Comments and dead links pointing to admin surfaces that don't exist yet.
 - Description: model is read-only too. Stored in `ai_responder_configs.model`. To switch from Haiku to Sonnet, you currently have to write SQL.
 - Recommendation: build a model dropdown into the AI responder settings.
 
-### C5. Dev/test allowlist exception (`claude@test.com`)
-- File: `src/lib/auth/allowlist.ts:19-23`
+### C5. Dev/test allowlist exception
+- File: retired; no non-domain app allowlist remains.
 - Description: comment says "Remove when we migrate dev login to a real @bmhgroupkc.com account."
 - Recommendation: defer until the migration; not actionable from a UI.
 
@@ -363,7 +363,7 @@ Bench-grade tools that an admin runs from a terminal today.
 
 ### F5. Probe RPC as test user
 - File: `scripts/probe-rpc-as-test-user.ts`
-- Action: smoke `dashboard_summary` RPC as the `claude@test.com` dev user.
+- Action: smoke `dashboard_summary` RPC as the shared E2E dev user.
 - Recommendation: leave as dev script.
 
 ### F6. Precheck D4D CSV

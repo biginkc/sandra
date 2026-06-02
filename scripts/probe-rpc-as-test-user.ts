@@ -2,11 +2,15 @@ import { createClient } from "@supabase/supabase-js";
 
 const SUPABASE_URL = "https://copflsklaefwzipsrjqz.supabase.co";
 const ANON_KEY = process.env.PROD_ANON_KEY ?? "";
-const EMAIL = "claude@test.com";
-const PASSWORD = "test12345";
+const EMAIL = process.env.VERIFY_EMAIL ?? "";
+const PASSWORD = process.env.VERIFY_PASSWORD ?? "";
 
 if (!ANON_KEY) {
   console.error("Set PROD_ANON_KEY env var to the prod anon key.");
+  process.exit(2);
+}
+if (!EMAIL || !PASSWORD) {
+  console.error("Set VERIFY_EMAIL and VERIFY_PASSWORD for a real allowed prod user.");
   process.exit(2);
 }
 

@@ -107,7 +107,7 @@ export function requireIdempotencyKey(request: Request): NextResponse | null {
 
 export async function checkAndRecordIdempotency(
   serviceClient: InstituteServiceClient,
-  args: { eventType: string; idempotencyKey: string; payload: unknown },
+  args: { orgId: string; eventType: string; idempotencyKey: string; payload: unknown },
 ): Promise<IdempotencyResult> {
   const idempotencyKey = args.idempotencyKey.trim();
   if (!idempotencyKey) {
@@ -115,6 +115,7 @@ export async function checkAndRecordIdempotency(
   }
 
   const { error } = await (serviceClient as any).from("webhook_events").insert({
+    org_id: args.orgId,
     provider: "bmh_institute",
     event_type: args.eventType,
     external_id: idempotencyKey,
@@ -129,6 +130,7 @@ export async function checkAndRecordIdempotency(
   const { data: existing } = await (serviceClient as any)
     .from("webhook_events")
     .select("payload, processing_status")
+    .eq("org_id", args.orgId)
     .eq("provider", "bmh_institute")
     .eq("event_type", args.eventType)
     .eq("external_id", idempotencyKey)
@@ -143,11 +145,12 @@ export async function checkAndRecordIdempotency(
 
 export async function recordIdempotentResponse(
   serviceClient: InstituteServiceClient,
-  args: { eventType: string; idempotencyKey: string; payload: unknown },
+  args: { orgId: string; eventType: string; idempotencyKey: string; payload: unknown },
 ): Promise<void> {
   const { error } = await (serviceClient as any)
     .from("webhook_events")
     .update({ payload: args.payload as Json, processing_status: "processed" })
+    .eq("org_id", args.orgId)
     .eq("provider", "bmh_institute")
     .eq("event_type", args.eventType)
     .eq("external_id", args.idempotencyKey);

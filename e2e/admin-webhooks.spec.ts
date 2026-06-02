@@ -12,8 +12,8 @@ import { adminClient } from "./fixtures";
  *   4. Rotating the row produces a new plaintext that differs from the
  *      first.
  *
- * The test user (claude@test.com) is an admin in the e2e env because
- * `playwright.config.ts` sets `ADMIN_EMAILS=claude@test.com,...`.
+ * The shared test user is an admin in the e2e env because
+ * `playwright.config.ts` sets `ADMIN_EMAILS` for it.
  *
  * Cleanup: webhook_consumers isn't part of `reset_tenant_tables` (it's
  * an admin-config table, not tenant data), so we wipe per-test by name

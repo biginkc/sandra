@@ -110,6 +110,7 @@ export async function PUT(
     if (!completedAt.ok) return unprocessable("invalid_timestamp", "completed_at");
 
     const idempotency = await checkAndRecordIdempotency(auth.serviceClient, {
+      orgId: auth.orgId,
       eventType: "course_completed",
       idempotencyKey,
       payload: { completion_id: completionId, ...body },
@@ -149,6 +150,7 @@ export async function PUT(
 
     const payload = { course_outcome: outcome };
     await recordIdempotentResponse(auth.serviceClient, {
+      orgId: auth.orgId,
       eventType: "course_completed",
       idempotencyKey,
       payload,

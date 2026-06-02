@@ -12,6 +12,7 @@ type JitterServiceClient = SupabaseClient<Database>;
 export type JitterAuthOk = {
   ok: true;
   consumerId: string;
+  orgId: string;
   serviceClient: JitterServiceClient;
   rawBody: string;
 };
@@ -52,14 +53,14 @@ export async function authenticateJitterWriteback(
   const tokenHash = createHash("sha256").update(token).digest("hex");
   const { data: consumer, error } = await (serviceClient as any)
     .from("webhook_consumers")
-    .select("id, secret_hash")
+    .select("id, org_id, secret_hash")
     .eq("secret_hash", tokenHash)
     .eq("consumer_type", "jitter_writeback")
     .eq("enabled", true)
     .is("revoked_at", null)
     .maybeSingle();
 
-  if (error || !consumer?.id || !consumer?.secret_hash) {
+  if (error || !consumer?.id || !consumer?.org_id || !consumer?.secret_hash) {
     return unauthorized();
   }
 
@@ -80,6 +81,7 @@ export async function authenticateJitterWriteback(
   return {
     ok: true,
     consumerId: consumer.id as string,
+    orgId: consumer.org_id as string,
     serviceClient,
     rawBody,
   };
@@ -98,7 +100,7 @@ export function requireIdempotencyKey(request: Request): NextResponse | null {
 
 export async function checkAndRecordIdempotency(
   serviceClient: JitterServiceClient,
-  args: { eventType: string; idempotencyKey: string; payload: unknown },
+  args: { orgId: string; eventType: string; idempotencyKey: string; payload: unknown },
 ): Promise<IdempotencyResult> {
   const idempotencyKey = args.idempotencyKey.trim();
   if (!idempotencyKey) {
@@ -106,6 +108,7 @@ export async function checkAndRecordIdempotency(
   }
 
   const { error } = await (serviceClient as any).from("webhook_events").insert({
+    org_id: args.orgId,
     provider: "jitter",
     event_type: args.eventType,
     external_id: idempotencyKey,
@@ -120,6 +123,7 @@ export async function checkAndRecordIdempotency(
   const { data: existing } = await (serviceClient as any)
     .from("webhook_events")
     .select("payload")
+    .eq("org_id", args.orgId)
     .eq("provider", "jitter")
     .eq("event_type", args.eventType)
     .eq("external_id", idempotencyKey)
@@ -130,11 +134,12 @@ export async function checkAndRecordIdempotency(
 
 export async function recordIdempotentResponse(
   serviceClient: JitterServiceClient,
-  args: { eventType: string; idempotencyKey: string; payload: unknown },
+  args: { orgId: string; eventType: string; idempotencyKey: string; payload: unknown },
 ): Promise<void> {
   await (serviceClient as any)
     .from("webhook_events")
     .update({ payload: args.payload as Json, processing_status: "processed" })
+    .eq("org_id", args.orgId)
     .eq("provider", "jitter")
     .eq("event_type", args.eventType)
     .eq("external_id", args.idempotencyKey);

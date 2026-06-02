@@ -18,9 +18,10 @@ type Row = Record<string, any>;
 
 let webhookConsumers: Row[] = [];
 let webhookEvents = new Map<string, Row>();
+const ORG_ID = "00000000-0000-0000-0000-000000000bbb";
 
 function eventKey(row: Row): string {
-  return `${row.provider}:${row.event_type}:${row.external_id}`;
+  return `${row.org_id}:${row.provider}:${row.event_type}:${row.external_id}`;
 }
 
 function makeBuilder(table: string) {
@@ -125,6 +126,7 @@ describe("authenticateJitterWriteback", () => {
     webhookConsumers = [
       {
         id: "consumer-1",
+        org_id: ORG_ID,
         secret_hash: hash(TOKEN),
         consumer_type: "jitter_writeback",
         enabled: true,
@@ -211,6 +213,7 @@ describe("authenticateJitterWriteback", () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.consumerId).toBe("consumer-1");
+    expect(result.orgId).toBe(ORG_ID);
     expect(result.serviceClient).toBe(serviceClient);
     expect(result.rawBody).toBe(BODY);
   });
@@ -245,30 +248,36 @@ describe("Jitter writeback idempotency helpers", () => {
 
   it("checkAndRecordIdempotency inserts new webhook_events row and returns fresh", async () => {
     const result = await checkAndRecordIdempotency(serviceClient as any, {
+      orgId: ORG_ID,
       eventType: "dialer_batch_claim",
       idempotencyKey: "key-1",
       payload: { request: true },
     });
 
     expect(result).toEqual({ state: "fresh", idempotencyKey: "key-1" });
-    expect(webhookEvents.get("jitter:dialer_batch_claim:key-1")?.payload).toEqual({
+    expect(
+      webhookEvents.get(`${ORG_ID}:jitter:dialer_batch_claim:key-1`)?.payload,
+    ).toEqual({
       request: true,
     });
   });
 
   it("checkAndRecordIdempotency on duplicate Idempotency-Key returns cached payload", async () => {
     await checkAndRecordIdempotency(serviceClient as any, {
+      orgId: ORG_ID,
       eventType: "dialer_batch_claim",
       idempotencyKey: "key-1",
       payload: { request: true },
     });
     await recordIdempotentResponse(serviceClient as any, {
+      orgId: ORG_ID,
       eventType: "dialer_batch_claim",
       idempotencyKey: "key-1",
       payload: { ok: true },
     });
 
     const result = await checkAndRecordIdempotency(serviceClient as any, {
+      orgId: ORG_ID,
       eventType: "dialer_batch_claim",
       idempotencyKey: "key-1",
       payload: { request: true },
@@ -279,17 +288,19 @@ describe("Jitter writeback idempotency helpers", () => {
 
   it("checkAndRecordIdempotency uses event_type matching route name", async () => {
     await checkAndRecordIdempotency(serviceClient as any, {
+      orgId: ORG_ID,
       eventType: "dialer_batch_item_patch",
       idempotencyKey: "key-2",
       payload: {},
     });
 
-    expect(webhookEvents.has("jitter:dialer_batch_item_patch:key-2")).toBe(true);
+    expect(webhookEvents.has(`${ORG_ID}:jitter:dialer_batch_item_patch:key-2`)).toBe(true);
   });
 
   it("checkAndRecordIdempotency throws when called with an empty key", async () => {
     await expect(
       checkAndRecordIdempotency(serviceClient as any, {
+        orgId: ORG_ID,
         eventType: "dialer_batch_claim",
         idempotencyKey: " ",
         payload: {},

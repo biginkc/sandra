@@ -3,8 +3,11 @@ import { chromium } from "@playwright/test";
 const PROD_URL = "https://sandra-sooty.vercel.app";
 
 async function main() {
-  const email = process.env.VERIFY_EMAIL ?? "claude@test.com";
-  const password = process.env.VERIFY_PASSWORD ?? "test12345";
+  const email = process.env.VERIFY_EMAIL ?? "";
+  const password = process.env.VERIFY_PASSWORD ?? "";
+  if (!email || !password) {
+    throw new Error("Set VERIFY_EMAIL and VERIFY_PASSWORD for a real allowed prod user.");
+  }
 
   const browser = await chromium.launch();
   const ctx = await browser.newContext();
