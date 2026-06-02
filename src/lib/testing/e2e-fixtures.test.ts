@@ -30,6 +30,10 @@ describe("ensureTestUser", () => {
 
     await expect(ensureTestUser(client as never)).resolves.toBe("user-123");
 
+    expect(client.auth.admin.updateUserById).toHaveBeenCalledWith("user-123", {
+      password: "test12345",
+      email_confirm: true,
+    });
     expect(client.__upsert).toHaveBeenCalledWith(
       {
         user_id: "user-123",
