@@ -22,6 +22,15 @@ describe("isPublicPath", () => {
     ).toBe(true);
   });
 
+  it("allows signed Closer internal API routes to handle their own auth", () => {
+    expect(
+      isPublicPath(
+        "/api/internal/closer/practice-outcomes/by-closer-attempt/attempt-1",
+      ),
+    ).toBe(true);
+    expect(isPublicPath("/api/internal/closer/admin/debug")).toBe(false);
+  });
+
   it("keeps dashboard routes protected", () => {
     expect(isPublicPath("/dashboard")).toBe(false);
     expect(isPublicPath("/leads/property-1")).toBe(false);

@@ -1,9 +1,16 @@
 import { beforeEach, describe, expect, it } from "vitest";
 
 import { createTestClient } from "@tests/integration/client";
+import {
+  BMH_ORG_ID,
+  clientForUser,
+  createOrgUser,
+  seedTwoOrgs,
+} from "@tests/integration/fixtures/multi-user";
 import { resetTenantTables } from "@tests/integration/reset";
 
 const supabase = createTestClient();
+let authed: ReturnType<typeof clientForUser>;
 
 /**
  * Covers the `merge_duplicate_properties(keeper_id, loser_id)` SQL function.
@@ -16,6 +23,13 @@ const supabase = createTestClient();
 describe("merge_duplicate_properties() (integration)", () => {
   beforeEach(async () => {
     await resetTenantTables(supabase);
+    await seedTwoOrgs(supabase);
+    const user = await createOrgUser(supabase, {
+      orgId: BMH_ORG_ID,
+      email: `merge-${crypto.randomUUID()}@example.com`,
+      role: "member",
+    });
+    authed = clientForUser(user.jwt);
   });
 
   it("re-points messages and job_items, coalesces fields, logs snapshot, deletes loser", async () => {
@@ -59,7 +73,7 @@ describe("merge_duplicate_properties() (integration)", () => {
       status: "success",
     });
 
-    const { error } = await supabase.rpc("merge_duplicate_properties", {
+    const { error } = await authed.rpc("merge_duplicate_properties", {
       keeper_id: keeper!.id,
       loser_id: loser!.id,
     });
@@ -112,7 +126,7 @@ describe("merge_duplicate_properties() (integration)", () => {
   it("raises an exception when either row doesn't exist", async () => {
     const bogus1 = "00000000-0000-0000-0000-000000000001";
     const bogus2 = "00000000-0000-0000-0000-000000000002";
-    const { error } = await supabase.rpc("merge_duplicate_properties", {
+    const { error } = await authed.rpc("merge_duplicate_properties", {
       keeper_id: bogus1,
       loser_id: bogus2,
     });
