@@ -55,7 +55,7 @@ import {
 import { runSkipTraceEnrichment } from "../src/lib/skip-trace/skip-trace-job";
 
 const RECOVERY_LIST_ID = "3241368b-0631-45d1-908b-0322660b387f";
-const ADMIN_EMAIL = "jarrad@bmhgroupkc.com";
+const ADMIN_EMAIL_ENV = "RECOVERY_ADMIN_EMAIL";
 const TRACERFY_COST_PER_LOOKUP_USD = 0.02;
 
 type Bucket = "verified" | "unverified" | "invalid" | "ambiguous" | "other";
@@ -83,6 +83,12 @@ function classify(status: string | null): Bucket {
 
 function fmtUsd(n: number): string {
   return `$${n.toFixed(2)}`;
+}
+
+function requiredEnv(name: string): string {
+  const value = process.env[name];
+  if (!value) throw new Error(`${name} must be set.`);
+  return value;
 }
 
 async function loadRecoveryProperties(
@@ -213,8 +219,9 @@ async function lookupAdminUserId(
   if (error) {
     throw new Error(`auth.admin.listUsers failed: ${error.message}`);
   }
+  const adminEmail = requiredEnv(ADMIN_EMAIL_ENV);
   const match = data.users.find(
-    (u) => (u.email ?? "").toLowerCase() === ADMIN_EMAIL.toLowerCase(),
+    (u) => (u.email ?? "").toLowerCase() === adminEmail.toLowerCase(),
   );
   return match?.id ?? null;
 }
@@ -388,6 +395,7 @@ async function main() {
     "SMARTY_AUTH_TOKEN",
     "SKIP_TRACE_PROVIDER",
     "TRACERFY_API_KEY",
+    ADMIN_EMAIL_ENV,
   ];
   const missing = need.filter((k) => !process.env[k]);
   if (missing.length > 0) {
@@ -399,7 +407,7 @@ async function main() {
   const adminUserId = await lookupAdminUserId(supabase);
   if (!adminUserId) {
     throw new Error(
-      `Admin user '${ADMIN_EMAIL}' not found in this project's auth.users — cannot set created_by.`,
+      `${ADMIN_EMAIL_ENV} user not found in this project's auth.users — cannot set created_by.`,
     );
   }
   console.log(`Admin user_id for created_by: ${adminUserId}`);

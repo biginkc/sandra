@@ -24,11 +24,11 @@ export function isEmailAllowed(email: string | null | undefined): boolean {
  * `/admin/*` pages. Comma-separated env var so we can add people
  * without a code change.
  *
- *   ADMIN_EMAILS=jarrad@bmhgroupkc.com,someone-else@bmhgroupkc.com
+ *   ADMIN_EMAILS=admin-one@bmhgroupkc.com,admin-two@bmhgroupkc.com
  */
 export function isAdminEmail(email: string | null | undefined): boolean {
   if (!email) return false;
-  const raw = process.env.ADMIN_EMAILS ?? "jarrad@bmhgroupkc.com";
+  const raw = process.env.ADMIN_EMAILS ?? "";
   const admins = raw
     .split(",")
     .map((s) => s.trim().toLowerCase())

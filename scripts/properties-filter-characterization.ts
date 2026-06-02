@@ -25,7 +25,7 @@ const SUPABASE_ANON_KEY = requiredEnv(
   "NEXT_PUBLIC_SUPABASE_ANON_KEY",
   "NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY",
 );
-const TEST_EMAIL = process.env.PROD_EMAIL ?? "sandra-filter-test@bmhgroupkc.com";
+const TEST_EMAIL = requiredEnv("PROD_EMAIL");
 const PROD_PASSWORD = requiredEnv("PROD_PASSWORD");
 const OUT_DIR = "docs/qa/properties-filter-characterization";
 const ACTUAL_COUNT_TIMEOUT_MS = 20_000;
