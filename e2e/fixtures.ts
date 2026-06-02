@@ -109,6 +109,7 @@ const DEFAULT_ORG_ID = "00000000-0000-0000-0000-000000000bbb";
  */
 export async function ensureTestUser(
   client: SupabaseClient<Database>,
+  options: { repairPassword?: boolean } = {},
 ): Promise<string> {
   const { data: list, error: listErr } = await client.auth.admin.listUsers({
     perPage: 200,
@@ -119,14 +120,13 @@ export async function ensureTestUser(
   let userId: string;
   if (existing) {
     userId = existing.id;
-    const { error: updateErr } = await client.auth.admin.updateUserById(
-      userId,
-      {
+    if (options.repairPassword) {
+      const { error: updateErr } = await client.auth.admin.updateUserById(userId, {
         password: TEST_USER_PASSWORD,
         email_confirm: true,
-      },
-    );
-    if (updateErr) throw updateErr;
+      });
+      if (updateErr) throw updateErr;
+    }
   } else {
     const { data: created, error: createErr } =
       await client.auth.admin.createUser({
