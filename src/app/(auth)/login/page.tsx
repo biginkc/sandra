@@ -4,38 +4,55 @@ import { useSearchParams } from "next/navigation";
 import { Suspense, useActionState, useState } from "react";
 
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 
 import { requestPasswordReset, signIn } from "./actions";
+import { LoginBackground } from "./login-background";
 
-/**
- * Next 16 requires `useSearchParams` to be inside a Suspense boundary
- * so static prerender can bail out of the subtree instead of failing
- * the build. The outer page is server-rendered for layout; the inner
- * LoginForm reads the query string.
- */
+const CARD_GLOW =
+  "0 0 0 1px rgba(60,130,255,0.16), 0 0 22px rgba(46,128,255,0.42), 0 0 60px rgba(46,128,255,0.22), 0 0 120px rgba(46,128,255,0.12), inset 0 1px 0 rgba(160,200,255,0.18), inset 0 0 26px rgba(46,128,255,0.06)";
+const BUTTON_GLOW =
+  "0 0 0 1px rgba(60,130,255,0.18), 0 0 18px rgba(46,128,255,0.45), 0 0 44px rgba(46,128,255,0.22), inset 0 1px 0 rgba(160,200,255,0.25), inset 0 0 18px rgba(46,128,255,0.1)";
+
+const INPUT_CLASS =
+  "h-12 rounded-xl border-[1.5px] border-white/10 bg-white/[0.025] px-4 text-[15px] text-[#f3f6fb] placeholder:text-[#5b6479] transition-colors focus-visible:border-[#78b0ff] focus-visible:ring-[#2e80ff]/25 hover:border-white/20";
+
 export default function LoginPage() {
   return (
-    <div className="flex min-h-screen flex-1 items-center justify-center p-4">
-      <Card className="w-full max-w-sm">
-        <CardHeader>
-          <CardTitle>Sign in</CardTitle>
-          <CardDescription>Sandra CRM · BMH Group</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <Suspense fallback={<LoginFormFallback />}>
-            <LoginForm />
-          </Suspense>
-        </CardContent>
-      </Card>
+    <div className="relative flex min-h-screen flex-1 flex-col items-center justify-center p-4">
+      <LoginBackground />
+
+      <div className="mb-7 flex w-[360px] max-w-[82vw] flex-col items-center">
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img
+          src="/brand/mascot.svg"
+          alt=""
+          aria-hidden="true"
+          className="w-[56%]"
+          style={{ filter: "drop-shadow(0 12px 22px rgba(0,0,0,0.5))" }}
+        />
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img
+          src="/brand/sandra-wordmark.png"
+          alt="Sandra"
+          className="-mt-1 w-full"
+          style={{ filter: "drop-shadow(0 8px 18px rgba(0,0,0,0.45))" }}
+        />
+      </div>
+
+      <div
+        className="relative w-full max-w-[430px] rounded-[26px] border-[1.5px] px-[34px] pt-[34px] pb-[26px]"
+        style={{
+          background:
+            "linear-gradient(180deg, rgba(13,19,33,0.94) 0%, rgba(9,13,24,0.96) 100%)",
+          borderColor: "rgba(120,176,255,0.55)",
+          boxShadow: CARD_GLOW,
+        }}
+      >
+        <Suspense fallback={<LoginFormFallback />}>
+          <LoginForm />
+        </Suspense>
+      </div>
     </div>
   );
 }
@@ -47,6 +64,8 @@ function LoginForm() {
     null,
   );
   const [showReset, setShowReset] = useState(false);
+  const [showPw, setShowPw] = useState(false);
+
   const actionError = state && !state.ok ? state.error.message : null;
   const resetError = resetState && !resetState.ok ? resetState.error.message : null;
   const resetSuccess = resetState && resetState.ok;
@@ -54,8 +73,6 @@ function LoginForm() {
   const next = searchParams.get("next") ?? "";
   const urlError = searchParams.get("error");
 
-  // Priority: action error from this submit attempt beats a prior URL
-  // error (e.g. domain rejection from a previous session).
   const errorMessage =
     actionError ??
     (urlError === "domain"
@@ -66,30 +83,32 @@ function LoginForm() {
 
   if (showReset) {
     return (
-      <form action={resetAction} className="flex flex-col gap-4">
-        <p className="text-muted-foreground text-sm">
+      <form action={resetAction} className="mt-6 flex flex-col gap-4">
+        <p className="text-[14px] text-[#7e889c]">
           Enter your email and we&apos;ll send a password-reset link.
         </p>
         <div className="flex flex-col gap-2">
-          <Label htmlFor="reset-email">Email</Label>
           <Input
             id="reset-email"
+            aria-label="Email"
             name="email"
             type="email"
             autoComplete="email"
+            placeholder="Email"
             required
+            className={INPUT_CLASS}
           />
         </div>
         {resetSuccess ? (
-          <div className="border-border bg-muted text-foreground rounded-md border px-3 py-2 text-sm">
+          <p className="rounded-[10px] border border-white/10 bg-white/[0.05] px-3 py-2 text-[13px] text-[#cdd6e6]">
             If that email is on file, a reset link is on its way. Check your
             inbox (and spam).
-          </div>
+          </p>
         ) : null}
         {resetError ? (
-          <div className="border-destructive/30 bg-destructive/10 text-destructive rounded-md border px-3 py-2 text-sm">
+          <p className="rounded-[10px] border border-[rgba(255,90,90,0.25)] bg-[rgba(255,80,80,0.08)] px-3 py-2 text-[13px] text-[#ff9a9a]">
             {resetError}
-          </div>
+          </p>
         ) : null}
         <div className="flex gap-2">
           <Button
@@ -97,11 +116,21 @@ function LoginForm() {
             variant="outline"
             onClick={() => setShowReset(false)}
             disabled={resetPending}
-            className="flex-1"
+            className="h-12 flex-1"
           >
             Back
           </Button>
-          <Button type="submit" disabled={resetPending} className="flex-1">
+          <Button
+            type="submit"
+            disabled={resetPending}
+            className="h-12 flex-1 text-white"
+            style={{
+              background:
+                "linear-gradient(180deg, rgba(28,46,82,0.65), rgba(14,24,46,0.7))",
+              border: "1.5px solid rgba(120,176,255,0.7)",
+              boxShadow: BUTTON_GLOW,
+            }}
+          >
             {resetPending ? "Sending…" : "Send link"}
           </Button>
         </div>
@@ -110,40 +139,70 @@ function LoginForm() {
   }
 
   return (
-    <form action={formAction} className="flex flex-col gap-4">
+    <form action={formAction} className="mt-6 flex flex-col gap-4">
       <input type="hidden" name="next" value={next} />
+
       <div className="flex flex-col gap-2">
-        <Label htmlFor="email">Email</Label>
         <Input
           id="email"
+          aria-label="Email"
           name="email"
           type="email"
           autoComplete="email"
+          placeholder="Email"
           required
+          className={INPUT_CLASS}
         />
       </div>
+
       <div className="flex flex-col gap-2">
-        <Label htmlFor="password">Password</Label>
-        <Input
-          id="password"
-          name="password"
-          type="password"
-          autoComplete="current-password"
-          required
-        />
-      </div>
-      {errorMessage ? (
-        <div className="border-destructive/30 bg-destructive/10 text-destructive rounded-md border px-3 py-2 text-sm">
-          {errorMessage}
+        <div className="relative">
+          <Input
+            id="password"
+            aria-label="Password"
+            name="password"
+            type={showPw ? "text" : "password"}
+            autoComplete="current-password"
+            placeholder="Password"
+            required
+            className={`${INPUT_CLASS} pr-[62px]`}
+          />
+          <button
+            type="button"
+            onClick={() => setShowPw((v) => !v)}
+            aria-label={showPw ? "Hide password" : "Show password"}
+            aria-pressed={showPw}
+            className="absolute top-1/2 right-2 -translate-y-1/2 rounded-lg px-2.5 py-2 text-[12.5px] font-semibold text-[#7e889c] transition-colors hover:bg-white/5 hover:text-[#bcd0f0]"
+          >
+            {showPw ? "Hide" : "Show"}
+          </button>
         </div>
+      </div>
+
+      {errorMessage ? (
+        <p className="rounded-[10px] border border-[rgba(255,90,90,0.25)] bg-[rgba(255,80,80,0.08)] px-3 py-2 text-[13px] text-[#ff9a9a]">
+          {errorMessage}
+        </p>
       ) : null}
-      <Button type="submit" disabled={pending}>
+
+      <Button
+        type="submit"
+        disabled={pending}
+        className="mt-2 h-14 w-full text-base text-white"
+        style={{
+          background:
+            "linear-gradient(180deg, rgba(28,46,82,0.65), rgba(14,24,46,0.7))",
+          border: "1.5px solid rgba(120,176,255,0.7)",
+          boxShadow: BUTTON_GLOW,
+        }}
+      >
         {pending ? "Signing in…" : "Sign in"}
       </Button>
+
       <button
         type="button"
         onClick={() => setShowReset(true)}
-        className="text-muted-foreground hover:text-foreground -mt-1 self-end text-xs underline-offset-4 hover:underline"
+        className="-mt-1 self-end text-[13.5px] text-[#7e889c] underline-offset-4 transition-colors hover:text-[#bcd0f0] hover:underline"
       >
         Forgot password?
       </button>
@@ -153,16 +212,21 @@ function LoginForm() {
 
 function LoginFormFallback() {
   return (
-    <div className="flex flex-col gap-4">
+    <div className="mt-6 flex flex-col gap-4">
       <div className="flex flex-col gap-2">
-        <Label htmlFor="email">Email</Label>
-        <Input id="email" type="email" disabled />
+        <Input aria-label="Email" type="email" disabled className={INPUT_CLASS} />
       </div>
       <div className="flex flex-col gap-2">
-        <Label htmlFor="password">Password</Label>
-        <Input id="password" type="password" disabled />
+        <Input
+          aria-label="Password"
+          type="password"
+          disabled
+          className={INPUT_CLASS}
+        />
       </div>
-      <Button disabled>Loading…</Button>
+      <Button disabled className="mt-2 h-14 w-full text-base text-white">
+        Loading…
+      </Button>
     </div>
   );
 }
