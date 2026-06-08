@@ -246,6 +246,10 @@ function schedulePersonaReply(toNumber: string, ourNumber: string): void {
 export class MockMessagingProvider implements MessagingProvider {
   readonly providerId = "mock";
 
+  getDefaultFromNumber(): string | null {
+    return "+15551234567";
+  }
+
   async sendSms(input: SmsOutboundInput): Promise<SmsSendResult> {
     const failReason = parseFailReason(input.body);
     const externalId = `mock_${input.to}_${simpleHash(input.body)}`;

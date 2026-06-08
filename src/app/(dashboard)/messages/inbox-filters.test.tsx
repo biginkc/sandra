@@ -66,6 +66,8 @@ vi.mock("sonner", () => ({
 
 function makeThread(overrides: Partial<Thread> & { contactId: string }): Thread {
   return {
+    threadId: overrides.threadId ?? overrides.contactId,
+    conversationId: overrides.conversationId ?? null,
     contactId: overrides.contactId,
     contactName: overrides.contactName ?? `Contact ${overrides.contactId}`,
     contactPhone: overrides.contactPhone ?? "+15551234567",
@@ -76,6 +78,9 @@ function makeThread(overrides: Partial<Thread> & { contactId: string }): Thread 
     lastMessageDirection: overrides.lastMessageDirection ?? "inbound",
     unreadCount: overrides.unreadCount ?? 0,
     assigneeId: overrides.assigneeId ?? null,
+    needsHumanAttention: overrides.needsHumanAttention ?? false,
+    escalationReason: overrides.escalationReason ?? null,
+    isOptedOut: overrides.isOptedOut ?? false,
   } as Thread;
 }
 

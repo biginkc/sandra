@@ -82,6 +82,8 @@ function makeThread(
   overrides: Partial<Thread> & { contactId: string },
 ): Thread {
   return {
+    threadId: overrides.threadId ?? overrides.contactId,
+    conversationId: overrides.conversationId ?? null,
     contactId: overrides.contactId,
     contactName: overrides.contactName ?? `Contact ${overrides.contactId}`,
     contactPhone: overrides.contactPhone ?? "+15551234567",
@@ -92,6 +94,9 @@ function makeThread(
     lastMessageDirection: overrides.lastMessageDirection ?? "inbound",
     unreadCount: overrides.unreadCount ?? 0,
     assigneeId: overrides.assigneeId ?? null,
+    needsHumanAttention: overrides.needsHumanAttention ?? false,
+    escalationReason: overrides.escalationReason ?? null,
+    isOptedOut: overrides.isOptedOut ?? false,
   } as Thread;
 }
 
@@ -121,6 +126,8 @@ function makeMessage(
 
 function makeDetail(contactId: string, body: string): InboxDetailData {
   return {
+    threadId: contactId,
+    conversationId: null,
     contactId,
     contactName: `Contact ${contactId}`,
     contactPhone: "+15551234567",
@@ -144,7 +151,7 @@ const baseProps = {
   filter: "all" as const,
   threads: [],
   queued: [],
-  selectedContactId: null,
+  selectedThreadId: null,
   threadDetail: null,
   unknownSenders: [],
   unknownActiveCount: 0,
@@ -251,7 +258,7 @@ describe("<CockpitView /> URL deep-linking", () => {
         {...baseProps}
         activeTab="inbox"
         threads={[threadA, threadB]}
-        selectedContactId="contact-a"
+        selectedThreadId="contact-a"
         threadDetail={makeDetail("contact-a", "thread A body")}
       />,
     );
@@ -264,7 +271,7 @@ describe("<CockpitView /> URL deep-linking", () => {
         {...baseProps}
         activeTab="inbox"
         threads={[threadA, threadB]}
-        selectedContactId="contact-b"
+        selectedThreadId="contact-b"
         threadDetail={null}
       />,
     );

@@ -41,12 +41,12 @@ export function InlineReply({
   // just picked (WR-04). Hooks must run before the early-return for the
   // disabled state, so this lives at the top of the component body.
   const templateRequestToken = useRef(0);
-  // Fetch the first "sendable" Dialpad number once on mount and use it as
-  // the from. Avoids the env-default-is-unassigned footgun where
-  // DIALPAD_FROM_NUMBER points at a number Dialpad rejects with
-  // "A user or a group or a valid from_number must be provided for the
-  // sender." The modal composer picks via a dropdown; the inline reply
-  // stays minimal by auto-selecting the first usable number.
+  // Fetch the first provider-owned number once on mount and use it as the
+  // sender when the active adapter exposes a numbers list. This avoids the
+  // "default sender is unusable" footgun on providers that distinguish
+  // between owned numbers and unassigned/available inventory. The modal
+  // composer keeps an explicit picker; the inline reply stays minimal by
+  // auto-selecting the first usable number.
   const [fromNumber, setFromNumber] = useState<string | null>(null);
   useEffect(() => {
     let cancelled = false;

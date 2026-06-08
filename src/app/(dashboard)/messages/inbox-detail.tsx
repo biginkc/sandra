@@ -341,14 +341,13 @@ export function InboxDetail({
         className="flex-1 overflow-y-auto px-6 py-5 bg-[#faf9f8]"
         data-testid="inbox-detail-scroll"
       >
-        {/* Key on contactId so switching threads remounts the component
-            and resets its internal `messages` useState. Without this,
-            the previous thread's bubbles linger because the Realtime
-            client preserves its initial snapshot in local state. */}
+        {/* Key on the resolved thread so switching conversations remounts
+            the component and resets its local snapshot immediately. */}
         <MessagesThread
-          key={`thread-${data.contactId}`}
+          key={`thread-${data.threadId}`}
           initial={data.initialMessages}
           contactId={data.contactId}
+          conversationId={data.conversationId}
           propertyId={data.propertyId ?? ""}
         />
       </div>

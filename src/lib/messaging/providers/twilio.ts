@@ -64,6 +64,10 @@ export class TwilioMessagingProvider implements MessagingProvider {
     this.fromNumber = config.fromNumber;
   }
 
+  getDefaultFromNumber(): string | null {
+    return this.fromNumber ?? null;
+  }
+
   async sendSms(input: SmsOutboundInput): Promise<SmsSendResult> {
     const params = new URLSearchParams();
     params.set("To", input.to);

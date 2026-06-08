@@ -2,8 +2,11 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { computeConsentState } from "@/lib/messaging/consent";
 import type { Database } from "@/lib/supabase/types";
+import { buildThreadId } from "./threading";
 
 export type Thread = {
+  threadId: string;
+  conversationId: string | null;
   contactId: string;
   contactName: string | null;
   contactPhone: string | null;
@@ -40,8 +43,9 @@ export type ListThreadsOpts = {
 };
 
 /**
- * Build the inbox thread list — one row per contact, sorted by most
- * recent activity, with last-message preview and unread count.
+ * Build the inbox thread list — one row per contact/property thread,
+ * using `messages.conversation_id` when available and falling back to a
+ * legacy contact+property key for older rows.
  *
  * Strategy: fetch all messages in the window in one round-trip, group
  * by contact in JS, then batch-fetch contact + property info. Keeps
@@ -61,7 +65,7 @@ export async function listThreads(
   const { data: msgs, error } = await supabase
     .from("messages")
     .select(
-      "contact_id, property_id, body, direction, created_at, read_at",
+      "contact_id, property_id, conversation_id, body, direction, created_at, read_at",
     )
     .eq("channel", "sms")
     .not("contact_id", "is", null)
@@ -76,23 +80,30 @@ export async function listThreads(
     propertyId: string | null;
     unreadCount: number;
   };
-  const byContact = new Map<string, Bucket>();
+  const byThread = new Map<string, Bucket>();
   for (const m of msgs) {
     const cid = m.contact_id!;
-    let bucket = byContact.get(cid);
+    const threadId = buildThreadId(m.conversation_id, cid, m.property_id);
+    let bucket = byThread.get(threadId);
     if (!bucket) {
       bucket = { latest: m, propertyId: m.property_id, unreadCount: 0 };
-      byContact.set(cid, bucket);
+      byThread.set(threadId, bucket);
     }
     if (m.direction === "inbound" && m.read_at === null) {
       bucket.unreadCount += 1;
     }
   }
 
-  const contactIds = Array.from(byContact.keys());
+  const contactIds = Array.from(
+    new Set(
+      msgs
+        .map((m) => m.contact_id)
+        .filter((contactId): contactId is string => contactId !== null),
+    ),
+  );
   const propertyIds = Array.from(
     new Set(
-      Array.from(byContact.values())
+      Array.from(byThread.values())
         .map((b) => b.propertyId)
         .filter((p): p is string => p !== null),
     ),
@@ -143,7 +154,8 @@ export async function listThreads(
   }
 
   const threads: Thread[] = [];
-  for (const [contactId, bucket] of byContact) {
+  for (const [threadId, bucket] of byThread) {
+    const contactId = bucket.latest.contact_id!;
     const c = contactById.get(contactId);
     const p = bucket.propertyId ? propertyById.get(bucket.propertyId) : null;
 
@@ -156,6 +168,8 @@ export async function listThreads(
     );
 
     threads.push({
+      threadId,
+      conversationId: bucket.latest.conversation_id,
       contactId,
       contactName: c
         ? (c.entity_name ??

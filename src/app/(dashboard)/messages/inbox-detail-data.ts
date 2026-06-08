@@ -1,8 +1,11 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
+import { parseThreadId } from "@/lib/messages/threading";
 import type { Database } from "@/lib/supabase/types";
 
 export type InboxDetail = {
+  threadId: string;
+  conversationId: string | null;
   contactId: string;
   contactName: string | null;
   contactPhone: string | null;
@@ -25,21 +28,38 @@ export type InboxDetail = {
  */
 export async function fetchInboxDetail(
   supabase: SupabaseClient<Database>,
-  contactId: string,
+  threadId: string,
 ): Promise<InboxDetail | null> {
-  const { data: messages, error } = await supabase
+  const parsed = parseThreadId(threadId);
+  let query = supabase
     .from("messages")
     .select("*")
-    .eq("contact_id", contactId)
     .eq("channel", "sms")
     .order("created_at", { ascending: true })
     .limit(100);
+
+  if (parsed.kind === "conversation") {
+    query = query.eq("conversation_id", parsed.conversationId);
+  } else if (parsed.kind === "legacy") {
+    query = query.eq("contact_id", parsed.contactId);
+    query =
+      parsed.propertyId === null
+        ? query.is("property_id", null)
+        : query.eq("property_id", parsed.propertyId);
+  } else {
+    query = query.eq("contact_id", parsed.contactId);
+  }
+
+  const { data: messages, error } = await query;
   if (error || !messages || messages.length === 0) return null;
 
-  // The thread's "current" property is the property of the most recent
-  // message — handles the (rare) case where a contact has bounced
-  // between properties.
+  const contactId =
+    messages.find((message) => message.contact_id !== null)?.contact_id ??
+    (parsed.kind !== "conversation" ? parsed.contactId : null);
+  if (!contactId) return null;
+
   const propertyId = messages[messages.length - 1].property_id;
+  const conversationId = messages[messages.length - 1].conversation_id;
 
   const [contactRes, propertyRes] = await Promise.all([
     supabase
@@ -60,6 +80,8 @@ export async function fetchInboxDetail(
   const p = propertyRes.data;
 
   return {
+    threadId,
+    conversationId,
     contactId,
     contactName: c
       ? (c.entity_name ??

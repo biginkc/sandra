@@ -33,6 +33,10 @@ export class DialpadMessagingProvider implements MessagingProvider {
     private readonly webhookSecret: string,
   ) {}
 
+  getDefaultFromNumber(): string | null {
+    return this.fromNumber;
+  }
+
   async sendSms(input: SmsOutboundInput): Promise<SmsSendResult> {
     const body = {
       to_numbers: [input.to],

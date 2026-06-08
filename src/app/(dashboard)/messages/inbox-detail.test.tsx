@@ -97,6 +97,8 @@ function makeMessage(overrides: Partial<MessageRow> & { id: string; body: string
 function makeData(overrides: Partial<InboxDetailData> & { contactId: string }): InboxDetailData {
   const contactId = overrides.contactId;
   return {
+    threadId: overrides.threadId ?? contactId,
+    conversationId: overrides.conversationId ?? null,
     contactId,
     contactName: overrides.contactName ?? "Panel Test",
     contactPhone: overrides.contactPhone ?? "+15551234567",

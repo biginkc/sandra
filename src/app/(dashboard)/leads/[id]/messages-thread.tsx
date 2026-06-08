@@ -13,6 +13,7 @@ type Props = {
   initial: Message[];
   /** Contact + property ids define which rows belong in this thread. */
   contactId: string | null;
+  conversationId?: string | null;
   propertyId: string;
 };
 
@@ -27,7 +28,12 @@ type Props = {
  * primary token (#000000 in the warm-paper palette) to match the
  * messages-cockpit Stitch design.
  */
-export function MessagesThread({ initial, contactId, propertyId }: Props) {
+export function MessagesThread({
+  initial,
+  contactId,
+  conversationId = null,
+  propertyId,
+}: Props) {
   const [messages, setMessages] = useState<Message[]>(initial);
   const endRef = useRef<HTMLDivElement | null>(null);
 
@@ -51,6 +57,7 @@ export function MessagesThread({ initial, contactId, propertyId }: Props) {
           (payload) => {
             const row = payload.new as Message;
             const belongs =
+              (conversationId !== null && row.conversation_id === conversationId) ||
               row.property_id === propertyId ||
               (contactId && row.contact_id === contactId);
             if (belongs) {
@@ -81,14 +88,14 @@ export function MessagesThread({ initial, contactId, propertyId }: Props) {
       mounted = false;
       if (channel) supabase.removeChannel(channel);
     };
-  }, [contactId, propertyId]);
+  }, [contactId, conversationId, propertyId]);
 
   useEffect(() => {
     const frame = window.requestAnimationFrame(() => {
       endRef.current?.scrollIntoView({ block: "end" });
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [contactId, messages.length, propertyId]);
+  }, [contactId, conversationId, messages.length, propertyId]);
 
   if (messages.length === 0) {
     return (
