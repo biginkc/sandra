@@ -59,11 +59,17 @@ const ITEMS: readonly Item[] = [
 ];
 
 const ITEM_BASE =
-  "flex items-center gap-3 py-3 text-sm font-bold tracking-wide transition-all duration-200 ease-in-out";
+  "flex items-center gap-3 py-3 text-sm font-bold tracking-[0.02em] transition-all duration-150 ease-in-out";
 const ITEM_ACTIVE =
-  "text-foreground border-l-4 border-foreground pl-4";
+  "border-l-4 border-nav-active-border bg-white/10 pl-[17px] text-white";
 const ITEM_INACTIVE =
-  "text-muted-foreground hover:bg-muted hover:text-foreground pl-5";
+  "pl-[21px] text-white/75 hover:bg-white/[0.07] hover:text-white";
+
+const MOBILE_ITEM_BASE =
+  "rounded-full border border-white/10 px-3 py-1.5 text-xs font-bold tracking-[0.02em] whitespace-nowrap transition-colors duration-150 ease-in-out";
+const MOBILE_ITEM_ACTIVE =
+  "border-nav-active-border bg-white/10 text-white";
+const MOBILE_ITEM_INACTIVE = "text-white/75 hover:bg-white/[0.07] hover:text-white";
 
 export function DashboardSidebar({ showAdmin }: { showAdmin: boolean }) {
   const pathname = usePathname();
@@ -109,7 +115,7 @@ export function DashboardSidebar({ showAdmin }: { showAdmin: boolean }) {
             data-active={adminUsersActive || undefined}
             className={cn(
               ITEM_BASE,
-              "mt-2",
+              "mt-1",
               adminUsersActive ? ITEM_ACTIVE : ITEM_INACTIVE,
             )}
           >
@@ -134,6 +140,77 @@ export function DashboardSidebar({ showAdmin }: { showAdmin: boolean }) {
           >
             <Bot className="size-5" aria-hidden />
             <span>AI responder</span>
+          </Link>
+        </>
+      )}
+    </nav>
+  );
+}
+
+export function DashboardMobileNav({ showAdmin }: { showAdmin: boolean }) {
+  const pathname = usePathname();
+
+  const isActiveHref = (href: string): boolean =>
+    pathname === href || pathname.startsWith(href + "/");
+
+  return (
+    <nav
+      aria-label="Primary"
+      className="flex items-center gap-2 overflow-x-auto px-4 py-3"
+    >
+      {ITEMS.map((item) => {
+        const active = isActiveHref(item.href);
+        return (
+          <Link
+            key={item.href}
+            href={item.href}
+            data-active={active || undefined}
+            className={cn(
+              MOBILE_ITEM_BASE,
+              active ? MOBILE_ITEM_ACTIVE : MOBILE_ITEM_INACTIVE,
+            )}
+          >
+            {item.label}
+          </Link>
+        );
+      })}
+      {showAdmin && (
+        <>
+          <Link
+            href="/admin/users"
+            data-active={isActiveHref("/admin/users") || undefined}
+            className={cn(
+              MOBILE_ITEM_BASE,
+              isActiveHref("/admin/users")
+                ? MOBILE_ITEM_ACTIVE
+                : MOBILE_ITEM_INACTIVE,
+            )}
+          >
+            Team
+          </Link>
+          <Link
+            href="/admin/webhooks"
+            data-active={isActiveHref("/admin/webhooks") || undefined}
+            className={cn(
+              MOBILE_ITEM_BASE,
+              isActiveHref("/admin/webhooks")
+                ? MOBILE_ITEM_ACTIVE
+                : MOBILE_ITEM_INACTIVE,
+            )}
+          >
+            Webhooks
+          </Link>
+          <Link
+            href="/settings/ai-responder"
+            data-active={isActiveHref("/settings/ai-responder") || undefined}
+            className={cn(
+              MOBILE_ITEM_BASE,
+              isActiveHref("/settings/ai-responder")
+                ? MOBILE_ITEM_ACTIVE
+                : MOBILE_ITEM_INACTIVE,
+            )}
+          >
+            AI responder
           </Link>
         </>
       )}

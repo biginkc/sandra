@@ -169,14 +169,14 @@ export function NotificationsBell({ userId }: { userId: string }) {
             variant="ghost"
             size="icon"
             aria-label="Notifications"
-            className="relative"
+            className="relative size-[38px] rounded-full text-white hover:bg-white/[0.07] hover:text-white"
             data-testid="notifications-bell"
           >
-            <Bell className="h-5 w-5" />
+            <Bell className="size-[19px]" />
             {unreadCount > 0 && (
               <span
                 data-testid="notifications-badge"
-                className="bg-destructive text-destructive-foreground absolute -right-0.5 -top-0.5 flex h-4 min-w-4 items-center justify-center rounded-full px-1 text-[10px] font-semibold"
+                className="bg-destructive absolute right-1 top-1 flex h-4 min-w-4 items-center justify-center rounded-full px-1 text-[10px] font-bold text-white"
               >
                 {unreadCount > 9 ? "9+" : unreadCount}
               </span>
