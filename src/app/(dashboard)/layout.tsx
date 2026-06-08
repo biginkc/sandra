@@ -40,9 +40,9 @@ export default async function DashboardLayout({
           <Image
             src="/brand/sandra-logo-home.svg"
             alt="Sandra"
-            width={120}
-            height={36}
-            className="h-9 w-auto"
+            width={104}
+            height={32}
+            className="h-8 w-auto object-contain"
             priority
           />
         </Link>
@@ -61,17 +61,17 @@ export default async function DashboardLayout({
         </div>
       </header>
 
-      <aside className="nav-field fixed inset-y-0 left-0 z-30 hidden w-64 flex-col border-r border-white/10 md:flex">
+      <aside className="nav-field fixed inset-y-0 left-0 z-30 hidden w-64 flex-col md:flex">
         <Link
           href="/dashboard"
-          className="mb-[14px] flex items-center justify-center border-b border-white/10 px-5 pt-[22px] pb-5"
+          className="mb-4 flex items-center justify-center px-5 pt-5 pb-3"
         >
           <Image
             src="/brand/sandra-logo-home.svg"
             alt="Sandra"
-            width={176}
-            height={178}
-            className="h-auto w-44"
+            width={152}
+            height={154}
+            className="h-auto w-[152px] object-contain"
             priority
           />
         </Link>
@@ -83,9 +83,6 @@ export default async function DashboardLayout({
           <span className="block truncate">{user.email}</span>
         </div>
       </aside>
-
-      <div aria-hidden="true" className="glow-v hidden md:block" />
-      <div aria-hidden="true" className="glow-h hidden md:block" />
 
       <div className="nav-field fixed inset-x-0 top-16 z-30 border-b border-white/10 md:hidden">
         <DashboardMobileNav showAdmin={showAdmin} />
