@@ -170,7 +170,7 @@ function LoginForm() {
           <button
             type="button"
             onClick={() => setShowPw((v) => !v)}
-            aria-label={showPw ? "Hide password" : "Show password"}
+            aria-label={showPw ? "Hide characters" : "Show characters"}
             aria-pressed={showPw}
             className="absolute top-1/2 right-2 -translate-y-1/2 rounded-lg px-2.5 py-2 text-[12.5px] font-semibold text-[#7e889c] transition-colors hover:bg-white/5 hover:text-[#bcd0f0]"
           >
