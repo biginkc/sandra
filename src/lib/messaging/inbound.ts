@@ -113,6 +113,7 @@ export async function handleInboundWebhook(
           occurredAt: ev.receivedAt,
           providerId: provider.providerId,
           surface: "stop",
+          idempotencyKey: ev.externalId,
         });
         const insertOutcome = await insertInboundMessage(supabase, {
           providerId: provider.providerId,
@@ -143,13 +144,14 @@ export async function handleInboundWebhook(
 
       if (HELP_KEYWORDS.test(bodyTrimmed)) {
         if (contactId) {
-          await recordConsentEvent(supabase, {
+          await recordConsentEventOnce(supabase, {
             contactId,
             channel: "sms",
             eventType: "help_request",
             source,
             sourceDetail: { externalId: ev.externalId, from: ev.from },
             occurredAt: ev.receivedAt,
+            idempotencyKey: ev.externalId,
           });
         }
         const insertOutcome = await insertInboundMessage(supabase, {
@@ -191,6 +193,7 @@ export async function handleInboundWebhook(
           occurredAt: ev.receivedAt,
           providerId: provider.providerId,
           surface: "dnc",
+          idempotencyKey: ev.externalId,
         });
         if (propertyId) {
           await supabase
@@ -299,11 +302,6 @@ export async function handleInboundWebhook(
           { status: 500 },
         );
       }
-      if (insertOutcome.duplicate) {
-        await markWebhookEventProcessed(supabase, provider.providerId, ev.externalId);
-        continue;
-      }
-
       if (!propertyId) {
         await markWebhookEventProcessed(supabase, provider.providerId, ev.externalId);
         continue;
@@ -427,6 +425,19 @@ async function insertInboundMessage(
     metadata: Json | null;
   },
 ) {
+  const { data: existing, error: lookupError } = await supabase
+    .from("messages")
+    .select("id")
+    .eq("channel", "sms")
+    .eq("direction", "inbound")
+    .eq("provider", input.providerId)
+    .eq("external_id", input.externalId)
+    .limit(1);
+  if (lookupError) return { duplicate: false, error: lookupError };
+  if ((existing ?? []).length > 0) {
+    return { duplicate: true, error: null as null };
+  }
+
   const { error } = await supabase.from("messages").insert({
     channel: "sms",
     direction: "inbound",
@@ -526,17 +537,19 @@ async function applyPhoneLevelOptOut(
     occurredAt: Date;
     providerId: string;
     surface: "stop" | "dnc";
+    idempotencyKey: string;
   },
 ) {
   const contactIds = await loadContactIdsByPhone(supabase, input.fromPhone);
   for (const contactId of contactIds) {
-    await recordConsentEvent(supabase, {
+    await recordConsentEventOnce(supabase, {
       contactId,
       channel: "sms",
       eventType: "opt_out",
       source: input.source,
       sourceDetail: input.sourceDetail,
       occurredAt: input.occurredAt,
+      idempotencyKey: input.idempotencyKey,
     });
     await supabase
       .from("contacts")
@@ -558,6 +571,42 @@ async function applyPhoneLevelOptOut(
       });
     }
   }
+}
+
+async function recordConsentEventOnce(
+  supabase: SupabaseClient<Database>,
+  params: {
+    contactId: string;
+    channel: "sms";
+    eventType: "opt_out" | "help_request";
+    source: string;
+    sourceDetail: Json;
+    occurredAt: Date;
+    idempotencyKey: string;
+  },
+): Promise<void> {
+  const { data: existing, error: lookupError } = await supabase
+    .from("consent_events")
+    .select("id")
+    .eq("contact_id", params.contactId)
+    .eq("channel", params.channel)
+    .eq("event_type", params.eventType)
+    .eq("source", params.source)
+    .contains("source_detail", { externalId: params.idempotencyKey })
+    .limit(1);
+  if (lookupError) {
+    throw new Error(`recordConsentEventOnce lookup: ${lookupError.message}`);
+  }
+  if ((existing ?? []).length > 0) return;
+
+  await recordConsentEvent(supabase, {
+    contactId: params.contactId,
+    channel: params.channel,
+    eventType: params.eventType,
+    source: params.source,
+    sourceDetail: params.sourceDetail,
+    occurredAt: params.occurredAt,
+  });
 }
 
 async function loadContactIdsByPhone(

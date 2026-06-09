@@ -198,34 +198,32 @@ describe("listThreads (integration)", () => {
     expect(new Set(attempts).size).toBe(1);
 
     const [conversationId] = attempts;
-    await supabase.from("messages").insert([
-      {
-        channel: "sms",
-        direction: "outbound",
-        status: "sent",
-        contact_id: contact!.id,
-        property_id: property!.id,
-        conversation_id: conversationId,
-        from_address: "+18162804181",
-        to_address: "+18165550123",
-        body: "first send",
-      },
-      {
-        channel: "sms",
-        direction: "inbound",
-        status: "received",
-        contact_id: contact!.id,
-        property_id: property!.id,
-        conversation_id: await ensureConversationIdForThread(
-          supabase,
-          contact!.id,
-          property!.id,
-        ),
-        from_address: "+18165550123",
-        to_address: "+18162804181",
-        body: "first reply",
-      },
-    ]);
+    await supabase.from("messages").insert({
+      channel: "sms",
+      direction: "outbound",
+      status: "sent",
+      contact_id: contact!.id,
+      property_id: property!.id,
+      conversation_id: conversationId,
+      from_address: "+18162804181",
+      to_address: "+18165550123",
+      body: "first send",
+    });
+    await supabase.from("messages").insert({
+      channel: "sms",
+      direction: "inbound",
+      status: "received",
+      contact_id: contact!.id,
+      property_id: property!.id,
+      conversation_id: await ensureConversationIdForThread(
+        supabase,
+        contact!.id,
+        property!.id,
+      ),
+      from_address: "+18165550123",
+      to_address: "+18162804181",
+      body: "first reply",
+    });
 
     const { data: messages, error } = await supabase
       .from("messages")

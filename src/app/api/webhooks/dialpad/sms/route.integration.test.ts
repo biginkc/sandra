@@ -533,7 +533,7 @@ describe("POST /api/webhooks/dialpad/sms (integration)", () => {
     expect(notifCount).toBe(1);
   });
 
-  it("does not rerun downstream side effects when a retry finds the inbound row already inserted", async () => {
+  it("resumes downstream side effects when a retry finds a pending inbound row already inserted", async () => {
     const phone = "+18165559112";
     const contactId = await seedContact(phone, { optIn: true });
     const assignee = await createAuthUser(
@@ -603,7 +603,7 @@ describe("POST /api/webhooks/dialpad/sms (integration)", () => {
       .from("notifications")
       .select("*", { count: "exact", head: true })
       .eq("user_id", assignee);
-    expect(notifCount).toBe(0);
+    expect(notifCount).toBe(1);
 
     const { data: webhookEvent } = await supabase
       .from("webhook_events")
@@ -613,6 +613,71 @@ describe("POST /api/webhooks/dialpad/sms (integration)", () => {
       .eq("external_id", "msg_dup_resume_001")
       .single();
     expect(webhookEvent?.processing_status).toBe("processed");
+  });
+
+  it("does not duplicate STOP consent events when replay resumes a pending keyword webhook", async () => {
+    const phone = "+18165559113";
+    const contactId = await seedContact(phone, { optIn: true });
+    const sourceDetail = {
+      externalId: "msg_stop_resume_001",
+      from: phone,
+    };
+    await supabase.from("messages").insert({
+      channel: "sms",
+      direction: "inbound",
+      status: "received",
+      provider: "mock",
+      external_id: "msg_stop_resume_001",
+      from_address: phone,
+      to_address: "+18163706846",
+      body: "STOP",
+      contact_id: contactId,
+      metadata: { keyword: "stop" },
+    });
+    await supabase.from("consent_events").insert({
+      contact_id: contactId,
+      channel: "sms",
+      event_type: "opt_out",
+      source: "mock_inbound_webhook",
+      source_detail: sourceDetail,
+    });
+    await supabase.from("webhook_events").insert({
+      provider: "mock",
+      event_type: "sms_inbound",
+      external_id: "msg_stop_resume_001",
+      signature_verified: true,
+      processing_status: "pending",
+      payload: {
+        externalId: "msg_stop_resume_001",
+        from: phone,
+        to: "+18163706846",
+        body: "STOP",
+      },
+    });
+
+    const res = await POST(
+      makeRequest({
+        externalId: "msg_stop_resume_001",
+        from: phone,
+        to: "+18163706846",
+        body: "STOP",
+      }),
+    );
+    expect(res.status).toBe(200);
+
+    const { count: consentCount } = await supabase
+      .from("consent_events")
+      .select("*", { count: "exact", head: true })
+      .eq("contact_id", contactId)
+      .eq("event_type", "opt_out");
+    expect(consentCount).toBe(1);
+
+    const { data: contact } = await supabase
+      .from("contacts")
+      .select("sms_opted_out")
+      .eq("id", contactId)
+      .single();
+    expect(contact?.sms_opted_out).toBe(true);
   });
 
   // --------------------------------------------------------------------------

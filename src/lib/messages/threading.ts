@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { normalizePhone } from "@/lib/csv/normalize";
@@ -11,6 +13,8 @@ type ThreadCandidate = {
   propertyId: string;
   latestAt: string;
 };
+
+const fallbackConversationLocks = new Map<string, Promise<string>>();
 
 export type ParsedThreadId =
   | { kind: "conversation"; conversationId: string }
@@ -66,10 +70,70 @@ export async function ensureConversationIdForThread(
     p_contact_id: contactId,
     p_property_id: propertyId,
   });
-  if (error) {
+  if (!error) return data;
+  if (!isMissingEnsureConversationRpc(error.message)) {
     throw new Error(`ensureConversationIdForThread rpc: ${error.message}`);
   }
-  return data;
+
+  const fallbackKey = `${contactId}:${propertyId}`;
+  const existingLock = fallbackConversationLocks.get(fallbackKey);
+  if (existingLock) return existingLock;
+
+  const fallback = ensureConversationIdForThreadWithoutRpc(
+    supabase,
+    contactId,
+    propertyId,
+  ).finally(() => {
+    fallbackConversationLocks.delete(fallbackKey);
+  });
+  fallbackConversationLocks.set(fallbackKey, fallback);
+  return fallback;
+}
+
+async function ensureConversationIdForThreadWithoutRpc(
+  supabase: SupabaseClient<Database>,
+  contactId: string,
+  propertyId: string,
+): Promise<string> {
+  const { data: existing, error: lookupError } = await supabase
+    .from("messages")
+    .select("conversation_id")
+    .eq("channel", "sms")
+    .eq("contact_id", contactId)
+    .eq("property_id", propertyId)
+    .not("conversation_id", "is", null)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (lookupError) {
+    throw new Error(
+      `ensureConversationIdForThread fallback lookup: ${lookupError.message}`,
+    );
+  }
+  if (existing?.conversation_id) return existing.conversation_id;
+
+  const conversationId = randomUUID();
+  const { error: updateError } = await supabase
+    .from("messages")
+    .update({ conversation_id: conversationId })
+    .eq("channel", "sms")
+    .eq("contact_id", contactId)
+    .eq("property_id", propertyId)
+    .is("conversation_id", null);
+  if (updateError) {
+    throw new Error(
+      `ensureConversationIdForThread fallback backfill: ${updateError.message}`,
+    );
+  }
+  return conversationId;
+}
+
+function isMissingEnsureConversationRpc(message: string): boolean {
+  return (
+    message.includes("Could not find the function public.ensure_sms_conversation_id") ||
+    message.includes("function public.ensure_sms_conversation_id") ||
+    message.includes("schema cache")
+  );
 }
 
 export async function resolveInboundThread(
