@@ -162,9 +162,10 @@ describe("listThreads (integration)", () => {
     const mine = threads.filter((thread) => thread.contactId === contact!.id);
 
     expect(mine).toHaveLength(2);
-    expect(mine.map((thread) => thread.propertyId).sort()).toEqual(
-      [propertyA!.id, propertyB!.id].sort(),
-    );
+    expect(mine.map((thread) => thread.propertyId).sort()).toEqual([
+      propertyA!.id,
+      propertyB!.id,
+    ]);
     expect(new Set(mine.map((thread) => thread.threadId)).size).toBe(2);
   });
 

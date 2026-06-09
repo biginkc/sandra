@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 
@@ -8,13 +8,14 @@ import type { Database } from "@/lib/supabase/types";
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
+// Fixed namespace so conversation ids are a pure function of the SMS thread key.
+const SMS_CONV_NS = "6f9a1e2c-3b4d-4f5a-8c7e-1d2b3a4c5d6e";
+
 type ThreadCandidate = {
   conversationId: string | null;
   propertyId: string;
   latestAt: string;
 };
-
-const fallbackConversationLocks = new Map<string, Promise<string>>();
 
 export type ParsedThreadId =
   | { kind: "conversation"; conversationId: string }
@@ -66,36 +67,7 @@ export async function ensureConversationIdForThread(
   contactId: string,
   propertyId: string,
 ): Promise<string> {
-  const { data, error } = await supabase.rpc("ensure_sms_conversation_id", {
-    p_contact_id: contactId,
-    p_property_id: propertyId,
-  });
-  if (!error) return data;
-  if (!isMissingEnsureConversationRpc(error.message)) {
-    throw new Error(`ensureConversationIdForThread rpc: ${error.message}`);
-  }
-
-  const fallbackKey = `${contactId}:${propertyId}`;
-  const existingLock = fallbackConversationLocks.get(fallbackKey);
-  if (existingLock) return existingLock;
-
-  const fallback = ensureConversationIdForThreadWithoutRpc(
-    supabase,
-    contactId,
-    propertyId,
-  ).finally(() => {
-    fallbackConversationLocks.delete(fallbackKey);
-  });
-  fallbackConversationLocks.set(fallbackKey, fallback);
-  return fallback;
-}
-
-async function ensureConversationIdForThreadWithoutRpc(
-  supabase: SupabaseClient<Database>,
-  contactId: string,
-  propertyId: string,
-): Promise<string> {
-  const { data: existing, error: lookupError } = await supabase
+  const { data: existing, error } = await supabase
     .from("messages")
     .select("conversation_id")
     .eq("channel", "sms")
@@ -105,14 +77,12 @@ async function ensureConversationIdForThreadWithoutRpc(
     .order("created_at", { ascending: false })
     .limit(1)
     .maybeSingle();
-  if (lookupError) {
-    throw new Error(
-      `ensureConversationIdForThread fallback lookup: ${lookupError.message}`,
-    );
+  if (error) {
+    throw new Error(`ensureConversationIdForThread lookup: ${error.message}`);
   }
   if (existing?.conversation_id) return existing.conversation_id;
 
-  const conversationId = randomUUID();
+  const conversationId = conversationIdFor(contactId, propertyId);
   const { error: updateError } = await supabase
     .from("messages")
     .update({ conversation_id: conversationId })
@@ -121,19 +91,20 @@ async function ensureConversationIdForThreadWithoutRpc(
     .eq("property_id", propertyId)
     .is("conversation_id", null);
   if (updateError) {
-    throw new Error(
-      `ensureConversationIdForThread fallback backfill: ${updateError.message}`,
-    );
+    throw new Error(`ensureConversationIdForThread backfill: ${updateError.message}`);
   }
   return conversationId;
 }
 
-function isMissingEnsureConversationRpc(message: string): boolean {
-  return (
-    message.includes("Could not find the function public.ensure_sms_conversation_id") ||
-    message.includes("function public.ensure_sms_conversation_id") ||
-    message.includes("schema cache")
-  );
+function conversationIdFor(contactId: string, propertyId: string): string {
+  const ns = Buffer.from(SMS_CONV_NS.replace(/-/g, ""), "hex");
+  const h = createHash("sha1")
+    .update(Buffer.concat([ns, Buffer.from(`${contactId}:${propertyId}`)]))
+    .digest();
+  h[6] = (h[6] & 0x0f) | 0x50;
+  h[8] = (h[8] & 0x3f) | 0x80;
+  const x = h.toString("hex");
+  return `${x.slice(0, 8)}-${x.slice(8, 12)}-${x.slice(12, 16)}-${x.slice(16, 20)}-${x.slice(20, 32)}`;
 }
 
 export async function resolveInboundThread(
