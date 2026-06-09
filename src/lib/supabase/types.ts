@@ -347,6 +347,7 @@ export type Database = {
           org_id: string
           source: string | null
           source_detail: Json | null
+          source_external_id: string | null
         }
         Insert: {
           channel: string
@@ -358,6 +359,7 @@ export type Database = {
           org_id?: string
           source?: string | null
           source_detail?: Json | null
+          source_external_id?: never
         }
         Update: {
           channel?: string
@@ -369,6 +371,7 @@ export type Database = {
           org_id?: string
           source?: string | null
           source_detail?: Json | null
+          source_external_id?: never
         }
         Relationships: [
           {

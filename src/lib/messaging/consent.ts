@@ -99,17 +99,48 @@ export async function recordConsentEvent(
     source: string;
     sourceDetail?: unknown;
     occurredAt?: Date;
+    idempotencyKey?: string;
   },
 ): Promise<void> {
-  const { error } = await supabase.from("consent_events").insert({
+  const sourceDetail = buildConsentSourceDetail(
+    params.sourceDetail,
+    params.idempotencyKey,
+  );
+  const row = {
     contact_id: params.contactId,
     channel: params.channel,
     event_type: params.eventType,
     source: params.source,
-    source_detail: (params.sourceDetail ?? null) as Json,
+    source_detail: sourceDetail as Json,
     occurred_at: (params.occurredAt ?? new Date()).toISOString(),
-  });
+  };
+  const query = params.idempotencyKey
+    ? supabase.from("consent_events").upsert(row, {
+        onConflict: "contact_id,channel,event_type,source_external_id",
+        ignoreDuplicates: true,
+      })
+    : supabase.from("consent_events").insert(row);
+  const { error } = await query;
   if (error) {
     throw new Error(`recordConsentEvent: ${error.message}`);
   }
+}
+
+function buildConsentSourceDetail(
+  sourceDetail: unknown,
+  idempotencyKey?: string,
+): Json | null {
+  const base =
+    sourceDetail && typeof sourceDetail === "object" && !Array.isArray(sourceDetail)
+      ? (sourceDetail as Record<string, unknown>)
+      : {};
+
+  if (!idempotencyKey) {
+    return sourceDetail == null ? null : (sourceDetail as Json);
+  }
+
+  return {
+    ...base,
+    externalId: idempotencyKey,
+  } as Json;
 }

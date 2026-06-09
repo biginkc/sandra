@@ -119,6 +119,7 @@ export async function handleInboundWebhook(
           source,
           sourceDetail: { externalId: ev.externalId, from: ev.from },
           occurredAt: ev.receivedAt,
+          idempotencyKey: ev.externalId,
           providerId: provider.providerId,
           surface: "stop",
         });
@@ -158,6 +159,7 @@ export async function handleInboundWebhook(
             source,
             sourceDetail: { externalId: ev.externalId, from: ev.from },
             occurredAt: ev.receivedAt,
+            idempotencyKey: ev.externalId,
           });
         }
         const insertOutcome = await insertInboundMessage(supabase, {
@@ -197,6 +199,7 @@ export async function handleInboundWebhook(
             keyword: "dnc",
           },
           occurredAt: ev.receivedAt,
+          idempotencyKey: ev.externalId,
           providerId: provider.providerId,
           surface: "dnc",
         });
@@ -664,6 +667,7 @@ async function applyPhoneLevelOptOut(
     source: string;
     sourceDetail: Json;
     occurredAt: Date;
+    idempotencyKey: string;
     providerId: string;
     surface: "stop" | "dnc";
   },
@@ -677,6 +681,7 @@ async function applyPhoneLevelOptOut(
       source: input.source,
       sourceDetail: input.sourceDetail,
       occurredAt: input.occurredAt,
+      idempotencyKey: input.idempotencyKey,
     });
     await supabase
       .from("contacts")
