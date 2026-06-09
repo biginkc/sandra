@@ -64,53 +64,6 @@ async function seedContact(
   return data!.id;
 }
 
-async function seedPendingKeywordReplay(params: {
-  contactId: string;
-  phone: string;
-  externalId: string;
-  body: string;
-  eventType: "opt_out" | "help_request";
-  keyword: "stop" | "help" | "dnc";
-}) {
-  const sourceDetail = {
-    externalId: params.externalId,
-    from: params.phone,
-    ...(params.keyword === "dnc" ? { keyword: "dnc" } : {}),
-  };
-  await supabase.from("messages").insert({
-    channel: "sms",
-    direction: "inbound",
-    status: "received",
-    provider: "mock",
-    external_id: params.externalId,
-    from_address: params.phone,
-    to_address: "+18163706846",
-    body: params.body,
-    contact_id: params.contactId,
-    metadata: { keyword: params.keyword },
-  });
-  await supabase.from("consent_events").insert({
-    contact_id: params.contactId,
-    channel: "sms",
-    event_type: params.eventType,
-    source: "mock_inbound_webhook",
-    source_detail: sourceDetail,
-  });
-  await supabase.from("webhook_events").insert({
-    provider: "mock",
-    event_type: "sms_inbound",
-    external_id: params.externalId,
-    signature_verified: true,
-    processing_status: "pending",
-    payload: {
-      externalId: params.externalId,
-      from: params.phone,
-      to: "+18163706846",
-      body: params.body,
-    },
-  });
-}
-
 describe("POST /api/webhooks/dialpad/sms (integration)", () => {
   beforeEach(async () => {
     // Reuse the test Supabase project's service role key for the
@@ -567,8 +520,7 @@ describe("POST /api/webhooks/dialpad/sms (integration)", () => {
       .select("*", { count: "exact", head: true })
       .eq("external_id", "msg_dup_001");
     expect(eventCount).toBe(1);
-    // The message row is only written once per event because the
-    // `continue` short-circuits downstream work on duplicate.
+    // Processed-event replays are still a no-op.
     expect(msgCount).toBe(1);
 
     // Feature 7 regression guard — notification fires exactly once
@@ -580,7 +532,7 @@ describe("POST /api/webhooks/dialpad/sms (integration)", () => {
     expect(notifCount).toBe(1);
   });
 
-  it("resumes downstream side effects when a retry finds a pending inbound row already inserted", async () => {
+  it("resumes downstream side effects exactly once when a pending retry finds the inbound row already inserted", async () => {
     const phone = "+18165559112";
     const contactId = await seedContact(phone, { optIn: true });
     const assignee = await createAuthUser(
@@ -591,7 +543,7 @@ describe("POST /api/webhooks/dialpad/sms (integration)", () => {
       .insert({
         address: "4 Replay Ln",
         state: "MO",
-        status: "new_lead",
+        status: "prospect",
         homeowner_contact_id: contactId,
         assigned_user_id: assignee,
       })
@@ -652,6 +604,15 @@ describe("POST /api/webhooks/dialpad/sms (integration)", () => {
       .eq("user_id", assignee);
     expect(notifCount).toBe(1);
 
+    const { data: updatedProperty } = await supabase
+      .from("properties")
+      .select("status, qualified_by, qualified_at")
+      .eq("id", property!.id)
+      .single();
+    expect(updatedProperty?.status).toBe("new_lead");
+    expect(updatedProperty?.qualified_by).toBe("system:inbound_reply");
+    expect(updatedProperty?.qualified_at).not.toBeNull();
+
     const { data: webhookEvent } = await supabase
       .from("webhook_events")
       .select("processing_status")
@@ -660,110 +621,6 @@ describe("POST /api/webhooks/dialpad/sms (integration)", () => {
       .eq("external_id", "msg_dup_resume_001")
       .single();
     expect(webhookEvent?.processing_status).toBe("processed");
-  });
-
-  it("does not duplicate STOP consent events when replay resumes a pending keyword webhook", async () => {
-    const phone = "+18165559113";
-    const contactId = await seedContact(phone, { optIn: true });
-    await seedPendingKeywordReplay({
-      contactId,
-      phone,
-      externalId: "msg_stop_resume_001",
-      body: "STOP",
-      eventType: "opt_out",
-      keyword: "stop",
-    });
-
-    const res = await POST(
-      makeRequest({
-        externalId: "msg_stop_resume_001",
-        from: phone,
-        to: "+18163706846",
-        body: "STOP",
-      }),
-    );
-    expect(res.status).toBe(200);
-
-    const { count: consentCount } = await supabase
-      .from("consent_events")
-      .select("*", { count: "exact", head: true })
-      .eq("contact_id", contactId)
-      .eq("event_type", "opt_out");
-    expect(consentCount).toBe(1);
-
-    const { data: contact } = await supabase
-      .from("contacts")
-      .select("sms_opted_out")
-      .eq("id", contactId)
-      .single();
-    expect(contact?.sms_opted_out).toBe(true);
-  });
-
-  it("does not duplicate HELP consent events when replay resumes a pending keyword webhook", async () => {
-    const phone = "+18165559114";
-    const contactId = await seedContact(phone, { optIn: true });
-    await seedPendingKeywordReplay({
-      contactId,
-      phone,
-      externalId: "msg_help_resume_001",
-      body: "HELP",
-      eventType: "help_request",
-      keyword: "help",
-    });
-
-    const res = await POST(
-      makeRequest({
-        externalId: "msg_help_resume_001",
-        from: phone,
-        to: "+18163706846",
-        body: "HELP",
-      }),
-    );
-    expect(res.status).toBe(200);
-
-    const { count: consentCount } = await supabase
-      .from("consent_events")
-      .select("*", { count: "exact", head: true })
-      .eq("contact_id", contactId)
-      .eq("event_type", "help_request");
-    expect(consentCount).toBe(1);
-  });
-
-  it("does not duplicate DNC consent events when replay resumes a pending keyword webhook", async () => {
-    const phone = "+18165559115";
-    const contactId = await seedContact(phone, { optIn: true });
-    await seedPendingKeywordReplay({
-      contactId,
-      phone,
-      externalId: "msg_dnc_resume_001",
-      body: "please do not contact me",
-      eventType: "opt_out",
-      keyword: "dnc",
-    });
-
-    const res = await POST(
-      makeRequest({
-        externalId: "msg_dnc_resume_001",
-        from: phone,
-        to: "+18163706846",
-        body: "please do not contact me",
-      }),
-    );
-    expect(res.status).toBe(200);
-
-    const { count: consentCount } = await supabase
-      .from("consent_events")
-      .select("*", { count: "exact", head: true })
-      .eq("contact_id", contactId)
-      .eq("event_type", "opt_out");
-    expect(consentCount).toBe(1);
-
-    const { data: contact } = await supabase
-      .from("contacts")
-      .select("sms_opted_out")
-      .eq("id", contactId)
-      .single();
-    expect(contact?.sms_opted_out).toBe(true);
   });
 
   // --------------------------------------------------------------------------

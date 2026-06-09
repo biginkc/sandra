@@ -37,6 +37,8 @@ export type AiDispatchInput = {
   propertyId: string;
   contactId: string;
   inboundBody: string;
+  conversationId?: string | null;
+  externalId?: string;
 };
 
 export async function dispatchAiResponse(
@@ -44,6 +46,13 @@ export async function dispatchAiResponse(
   input: AiDispatchInput,
   deps: { anthropic: AnthropicLike },
 ): Promise<AiDispatchOutcome> {
+  if (input.externalId) {
+    const existingReply = await findExistingAiReply(supabase, input);
+    if (existingReply) {
+      return { outcome: "skipped", reason: "already_replied" };
+    }
+  }
+
   // --------------------------------------------------------------------------
   // 1. Load property + org + config
   // --------------------------------------------------------------------------
@@ -210,6 +219,9 @@ export async function dispatchAiResponse(
     confidence: generated.confidence,
     sentiment: generated.sentiment,
     turn: currentTurn + 1,
+    ...(input.externalId
+      ? { in_reply_to_external_id: input.externalId }
+      : {}),
   };
   await supabase
     .from("messages")
@@ -220,6 +232,40 @@ export async function dispatchAiResponse(
 }
 
 // ---------- helpers ---------------------------------------------------------
+
+async function findExistingAiReply(
+  supabase: SupabaseClient<Database>,
+  input: AiDispatchInput,
+): Promise<boolean> {
+  const query = supabase
+    .from("messages")
+    .select("id")
+    .eq("direction", "outbound")
+    .contains("metadata", {
+      generated_by: "ai_responder_v1",
+      in_reply_to_external_id: input.externalId,
+    });
+
+  const scopedQuery = input.conversationId
+    ? query.eq("conversation_id", input.conversationId)
+    : query
+        .eq("property_id", input.propertyId)
+        .eq("contact_id", input.contactId);
+
+  const { data, error } = await scopedQuery.limit(1);
+  if (error) {
+    reportError(new Error(error.message), {
+      tags: { surface: "ai_responder_existing_reply_lookup" },
+      extra: {
+        propertyId: input.propertyId,
+        externalId: input.externalId,
+      },
+    });
+    return false;
+  }
+
+  return (data ?? []).length > 0;
+}
 
 async function markPropertyNeedsAttention(
   supabase: SupabaseClient<Database>,
