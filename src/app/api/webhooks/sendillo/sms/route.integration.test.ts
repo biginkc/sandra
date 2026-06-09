@@ -12,6 +12,8 @@ const ORIGINAL_ENV = {
   SENDILLO_FROM_NUMBER: process.env.SENDILLO_FROM_NUMBER,
   SENDILLO_WEBHOOK_SECRET: process.env.SENDILLO_WEBHOOK_SECRET,
   SUPABASE_SERVICE_ROLE_KEY: process.env.SUPABASE_SERVICE_ROLE_KEY,
+  NEXT_PUBLIC_SUPABASE_URL: process.env.NEXT_PUBLIC_SUPABASE_URL,
+  SKIP_INTENT_GATE: process.env.SKIP_INTENT_GATE,
 };
 
 async function seedContact(phone: string) {
@@ -45,6 +47,8 @@ describe("POST /api/webhooks/sendillo/sms (integration)", () => {
     process.env.SENDILLO_FROM_NUMBER = ORIGINAL_ENV.SENDILLO_FROM_NUMBER;
     process.env.SENDILLO_WEBHOOK_SECRET = ORIGINAL_ENV.SENDILLO_WEBHOOK_SECRET;
     process.env.SUPABASE_SERVICE_ROLE_KEY = ORIGINAL_ENV.SUPABASE_SERVICE_ROLE_KEY;
+    process.env.NEXT_PUBLIC_SUPABASE_URL = ORIGINAL_ENV.NEXT_PUBLIC_SUPABASE_URL;
+    process.env.SKIP_INTENT_GATE = ORIGINAL_ENV.SKIP_INTENT_GATE;
   });
 
   it("rejects when the Sendillo shared secret is missing", async () => {

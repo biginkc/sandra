@@ -78,54 +78,77 @@ create or replace function public.ensure_sms_conversation_id(
   p_property_id uuid
 )
 returns uuid
-language sql
+language plpgsql
 security definer
 set search_path = public, pg_temp
 as $$
-  with existing_message as (
-    select m.org_id, m.conversation_id
-    from public.messages m
-    where m.channel = 'sms'
-      and m.contact_id = p_contact_id
-      and m.property_id = p_property_id
-      and m.conversation_id is not null
-    order by m.created_at asc, m.id asc
-    limit 1
-  ),
-  property_org as (
-    select p.org_id
-    from public.properties p
-    where p.id = p_property_id
-  ),
-  upserted as (
-    insert into public.message_threads (
-      org_id,
-      channel,
-      contact_id,
-      property_id,
-      conversation_id
+declare
+  v_org_id uuid;
+  v_existing_conversation_id uuid;
+  v_conversation_id uuid;
+begin
+  select p.org_id
+  into v_org_id
+  from public.properties p
+  join public.contacts c
+    on c.id = p_contact_id
+   and c.org_id = p.org_id
+  where p.id = p_property_id;
+
+  if v_org_id is null then
+    raise exception 'contact/property thread scope not found'
+      using errcode = '42501';
+  end if;
+
+  if coalesce(auth.role(), '') <> 'service_role'
+    and not exists (
+      select 1
+      from public.memberships m
+      where m.user_id = auth.uid()
+        and m.org_id = v_org_id
     )
-    select
-      coalesce((select org_id from existing_message), property_org.org_id),
-      'sms',
-      p_contact_id,
-      p_property_id,
-      coalesce((select conversation_id from existing_message), gen_random_uuid())
-    from property_org
-    on conflict (channel, contact_id, property_id)
-    do update set updated_at = public.message_threads.updated_at
-    returning conversation_id
-  ),
-  backfill as (
-    update public.messages m
-    set conversation_id = (select conversation_id from upserted)
-    where m.channel = 'sms'
-      and m.contact_id = p_contact_id
-      and m.property_id = p_property_id
-      and m.conversation_id is null
-    returning m.id
+  then
+    raise exception 'not authorized for contact/property thread'
+      using errcode = '42501';
+  end if;
+
+  select m.conversation_id
+  into v_existing_conversation_id
+  from public.messages m
+  where m.channel = 'sms'
+    and m.contact_id = p_contact_id
+    and m.property_id = p_property_id
+    and m.conversation_id is not null
+  order by m.created_at asc, m.id asc
+  limit 1;
+
+  insert into public.message_threads (
+    org_id,
+    channel,
+    contact_id,
+    property_id,
+    conversation_id
   )
-  select conversation_id from upserted;
+  values (
+    v_org_id,
+    'sms',
+    p_contact_id,
+    p_property_id,
+    coalesce(v_existing_conversation_id, gen_random_uuid())
+  )
+  on conflict (channel, contact_id, property_id)
+  do update set updated_at = public.message_threads.updated_at
+  returning conversation_id into v_conversation_id;
+
+  update public.messages m
+  set conversation_id = v_conversation_id
+  where m.channel = 'sms'
+    and m.contact_id = p_contact_id
+    and m.property_id = p_property_id
+    and m.conversation_id is null;
+
+  return v_conversation_id;
+end;
 $$;
 
 revoke execute on function public.ensure_sms_conversation_id(uuid, uuid) from public;

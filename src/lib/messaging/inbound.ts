@@ -499,7 +499,7 @@ async function markWebhookEventProcessed(
   providerId: string,
   externalId: string,
 ) {
-  await supabase
+  const { data, error } = await supabase
     .from("webhook_events")
     .update({
       processing_status: "processed",
@@ -507,7 +507,16 @@ async function markWebhookEventProcessed(
     })
     .eq("provider", providerId)
     .eq("event_type", "sms_inbound")
-    .eq("external_id", externalId);
+    .eq("external_id", externalId)
+    .select("id");
+  if (error) {
+    throw new Error(`markWebhookEventProcessed: ${error.message}`);
+  }
+  if ((data ?? []).length !== 1) {
+    throw new Error(
+      `markWebhookEventProcessed: expected one webhook event for ${providerId}/${externalId}`,
+    );
+  }
 }
 
 async function markWebhookEventError(
@@ -516,7 +525,7 @@ async function markWebhookEventError(
   externalId: string,
   message: string,
 ) {
-  await supabase
+  const { data, error } = await supabase
     .from("webhook_events")
     .update({
       processing_status: "error",
@@ -525,7 +534,16 @@ async function markWebhookEventError(
     })
     .eq("provider", providerId)
     .eq("event_type", "sms_inbound")
-    .eq("external_id", externalId);
+    .eq("external_id", externalId)
+    .select("id");
+  if (error) {
+    throw new Error(`markWebhookEventError: ${error.message}`);
+  }
+  if ((data ?? []).length !== 1) {
+    throw new Error(
+      `markWebhookEventError: expected one webhook event for ${providerId}/${externalId}`,
+    );
+  }
 }
 
 async function applyPhoneLevelOptOut(
