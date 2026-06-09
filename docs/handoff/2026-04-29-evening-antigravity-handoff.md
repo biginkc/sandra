@@ -114,7 +114,7 @@ None of these are blocking; everything in flight is shipped.
 - **Jarrad's test phone:** `+13107540662` — for SMS smoke; never smoke real leads.
 - **Twilio test receiver:** `+18148097074` — inbound only for canary round-trip; never use as a sender.
 - **Prod admin emails:** `jarrad.henry@gmail.com` and `jarrad@bmhgroupkc.com` (in `isAdminEmail` allowlist).
-- **E2E test user:** `claude@test.com` / `test12345` (per `e2e/fixtures.ts`).
+- **E2E test user:** shared E2E account / `test12345` (per `e2e/fixtures.ts`).
 
 ## Verification scripts
 

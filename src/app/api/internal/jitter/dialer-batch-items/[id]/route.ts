@@ -41,6 +41,7 @@ export async function PATCH(
     }
 
     const idempotency = await checkAndRecordIdempotency(auth.serviceClient, {
+      orgId: auth.orgId,
       eventType: "dialer_batch_item_patch",
       idempotencyKey,
       payload: body,
@@ -60,6 +61,7 @@ export async function PATCH(
 
     const payload = { item };
     await recordIdempotentResponse(auth.serviceClient, {
+      orgId: auth.orgId,
       eventType: "dialer_batch_item_patch",
       idempotencyKey,
       payload,

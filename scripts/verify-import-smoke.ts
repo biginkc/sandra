@@ -25,8 +25,11 @@ const DEFAULT_FILE = path.join(
 
 async function main() {
   const filePath = process.argv[2] ?? DEFAULT_FILE;
-  const email = process.env.VERIFY_EMAIL ?? "claude@test.com";
-  const password = process.env.VERIFY_PASSWORD ?? "test12345";
+  const email = process.env.VERIFY_EMAIL ?? "";
+  const password = process.env.VERIFY_PASSWORD ?? "";
+  if (!email || !password) {
+    throw new Error("Set VERIFY_EMAIL and VERIFY_PASSWORD for a real allowed prod user.");
+  }
 
   console.log(`→ Smoke-testing /import on ${PROD_URL}`);
   console.log(`  file: ${filePath}`);

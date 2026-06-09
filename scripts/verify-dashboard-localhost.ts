@@ -1,7 +1,7 @@
 import { chromium } from "@playwright/test";
 
 const URL = process.env.VERIFY_URL ?? "http://localhost:3000";
-const EMAIL = process.env.VERIFY_EMAIL ?? "claude@test.com";
+const EMAIL = process.env.VERIFY_EMAIL ?? "e2e-test@bmhgroupkc.com";
 const PASSWORD = process.env.VERIFY_PASSWORD ?? "test12345";
 
 async function main() {

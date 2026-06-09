@@ -21,6 +21,8 @@ export default async function QuickFiltersBar({
   orgId,
   currentFilterStateRaw,
 }: QuickFiltersBarProps) {
+  if (!orgId) return null;
+
   const sb = await createClient();
 
   const { data, error } = await sb

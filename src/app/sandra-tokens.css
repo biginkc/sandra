@@ -67,6 +67,13 @@
   --sidebar-border: #e5e1df;
   --sidebar-ring: #1c1917;
 
+  /* Navigation chrome */
+  --nav-active-border: #5ea8e6;
+  --nav-field:
+    radial-gradient(110% 105% at 50% 60%, transparent 60%, rgba(0, 0, 0, 0.36) 100%),
+    radial-gradient(125% 120% at 11% 8%, #2a4374 0%, #20355d 24%, #16233f 46%, #0d1526 70%, #070b16 100%),
+    linear-gradient(160deg, #0e1834 0%, #090f20 60%, #05060f 100%);
+
   /* Status palette — 6 semantic states from Stitch source.
    * Used for status chips on lead cards, attempt scores, etc.
    * Each state has bg / fg / border tokens. */
@@ -196,6 +203,7 @@
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-ring: var(--sidebar-ring);
+  --color-nav-active-border: var(--nav-active-border);
 
   /* Status utilities — bg-status-hot, text-status-hot, etc. */
   --color-status-replying-bg: var(--status-replying-bg);
@@ -261,4 +269,9 @@
   html {
     @apply font-sans;
   }
+}
+
+.nav-field {
+  background: var(--nav-field);
+  background-attachment: fixed;
 }

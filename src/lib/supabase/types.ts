@@ -2263,6 +2263,7 @@ export type Database = {
           event_type: string
           external_id: string
           id: string
+          org_id: string
           payload: Json
           processed_at: string | null
           processing_started_at: string | null
@@ -2276,6 +2277,7 @@ export type Database = {
           event_type: string
           external_id: string
           id?: string
+          org_id?: string
           payload: Json
           processed_at?: string | null
           processing_started_at?: string | null
@@ -2289,6 +2291,7 @@ export type Database = {
           event_type?: string
           external_id?: string
           id?: string
+          org_id?: string
           payload?: Json
           processed_at?: string | null
           processing_started_at?: string | null
@@ -2297,7 +2300,15 @@ export type Database = {
           received_at?: string
           signature_verified?: boolean
         }
-        Relationships: []
+        Relationships: [
+          {
+            foreignKeyName: "webhook_events_org_id_fkey"
+            columns: ["org_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+        ]
       }
       zip_county_xref: {
         Row: {

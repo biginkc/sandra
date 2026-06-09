@@ -34,6 +34,7 @@ export async function POST(
     }
 
     const idempotency = await checkAndRecordIdempotency(auth.serviceClient, {
+      orgId: auth.orgId,
       eventType: "dialer_batch_claim",
       idempotencyKey,
       payload: body,
@@ -77,6 +78,7 @@ export async function POST(
 
     const payload = { batch };
     await recordIdempotentResponse(auth.serviceClient, {
+      orgId: auth.orgId,
       eventType: "dialer_batch_claim",
       idempotencyKey,
       payload,

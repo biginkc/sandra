@@ -186,8 +186,9 @@ test.describe("Sequences V1 — UI flows (browser)", () => {
     page,
   }) => {
     const admin = adminClient();
+    const sequenceName = `Flow-5 ${Date.now()}`;
     const { sequenceId } = await seedSequenceWithOneStep(admin, {
-      name: `Flow-5 ${Date.now()}`,
+      name: sequenceName,
       actionType: "change_status",
       targetStatus: "contacted",
       delayMinutes: 99999, // don't fire during the test
@@ -208,9 +209,11 @@ test.describe("Sequences V1 — UI flows (browser)", () => {
     await enrollBtn.click();
 
     // Dropdown row with the sequence name appears
-    const option = page.getByRole("button", { name: /Flow-5/i });
+    const option = page.getByRole("button", {
+      name: new RegExp(`^${sequenceName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`),
+    });
     await expect(option).toBeVisible({ timeout: 5_000 });
-    await option.click();
+    await option.evaluate((element) => (element as HTMLButtonElement).click());
 
     // DB: enrollment exists in active status
     await expect(async () => {
