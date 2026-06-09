@@ -66,5 +66,4 @@ export type AiMessageMetadata = {
   sentiment: AiSentiment;
   /** 1-based turn number within this thread. */
   turn: number;
-  in_reply_to_external_id?: string;
 };

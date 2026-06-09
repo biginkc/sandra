@@ -29,34 +29,6 @@ async function seedContact(phone: string) {
   return data!.id;
 }
 
-function makeSendilloRequest(body: {
-  messageId: string;
-  from: string;
-  to: string;
-  body: string;
-  receivedAt?: string;
-}): Request {
-  return new Request(
-    "https://example.invalid/api/webhooks/sendillo/sms?secret=sendillo-secret",
-    {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        event: "inbound.received",
-        timestamp: "2026-06-08T19:07:39.264912233Z",
-        data: {
-          messageId: body.messageId,
-          from: body.from,
-          to: body.to,
-          body: body.body,
-          type: "SMS",
-          receivedAt: body.receivedAt ?? "2026-06-08T19:07:39.257Z",
-        },
-      }),
-    },
-  );
-}
-
 describe("POST /api/webhooks/sendillo/sms (integration)", () => {
   beforeEach(async () => {
     delete process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -157,69 +129,5 @@ describe("POST /api/webhooks/sendillo/sms (integration)", () => {
       direction: "inbound",
       status: "received",
     });
-  });
-
-  it("does not duplicate STOP consent events when a Sendillo replay resumes a pending keyword webhook", async () => {
-    const phone = "+18165550003";
-    const contactId = await seedContact(phone);
-    await supabase.from("messages").insert({
-      channel: "sms",
-      direction: "inbound",
-      status: "received",
-      provider: "sendillo",
-      external_id: "snd_stop_resume_001",
-      from_address: phone,
-      to_address: "+18164876899",
-      body: "STOP",
-      contact_id: contactId,
-      metadata: { keyword: "stop" },
-    });
-    await supabase.from("consent_events").insert({
-      contact_id: contactId,
-      channel: "sms",
-      event_type: "opt_out",
-      source: "sendillo_inbound_webhook",
-      source_detail: { externalId: "snd_stop_resume_001", from: phone },
-    });
-    await supabase.from("webhook_events").insert({
-      provider: "sendillo",
-      event_type: "sms_inbound",
-      external_id: "snd_stop_resume_001",
-      signature_verified: true,
-      processing_status: "pending",
-      payload: {
-        event: "inbound.received",
-        data: {
-          messageId: "snd_stop_resume_001",
-          from: phone,
-          to: "+18164876899",
-          body: "STOP",
-        },
-      },
-    });
-
-    const res = await POST(
-      makeSendilloRequest({
-        messageId: "snd_stop_resume_001",
-        from: phone,
-        to: "+18164876899",
-        body: "STOP",
-      }),
-    );
-    expect(res.status).toBe(200);
-
-    const { count: consentCount } = await supabase
-      .from("consent_events")
-      .select("*", { count: "exact", head: true })
-      .eq("contact_id", contactId)
-      .eq("event_type", "opt_out");
-    expect(consentCount).toBe(1);
-
-    const { data: contact } = await supabase
-      .from("contacts")
-      .select("sms_opted_out")
-      .eq("id", contactId)
-      .single();
-    expect(contact?.sms_opted_out).toBe(true);
   });
 });

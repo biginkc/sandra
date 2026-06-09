@@ -8,7 +8,12 @@ import type { Database } from "@/lib/supabase/types";
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
-// Fixed namespace so conversation ids are a pure function of the SMS thread key.
+// Fixed namespace so the fallback conversation id is a pure function of the SMS
+// thread key. This is what keeps a near-simultaneous first outbound and first
+// inbound from splitting into two threads when the DB-owned registry
+// (`ensure_sms_conversation_id`, migration 063) is not deployed: separate
+// serverless invocations independently derive the SAME id. Must match the value
+// used by historical rows so existing threads stay intact.
 const SMS_CONV_NS = "6f9a1e2c-3b4d-4f5a-8c7e-1d2b3a4c5d6e";
 
 type ThreadCandidate = {
@@ -16,6 +21,8 @@ type ThreadCandidate = {
   propertyId: string;
   latestAt: string;
 };
+
+const fallbackConversationLocks = new Map<string, Promise<string>>();
 
 export type ParsedThreadId =
   | { kind: "conversation"; conversationId: string }
@@ -67,7 +74,36 @@ export async function ensureConversationIdForThread(
   contactId: string,
   propertyId: string,
 ): Promise<string> {
-  const { data: existing, error } = await supabase
+  const { data, error } = await supabase.rpc("ensure_sms_conversation_id", {
+    p_contact_id: contactId,
+    p_property_id: propertyId,
+  });
+  if (!error) return data;
+  if (!isMissingEnsureConversationRpc(error.message)) {
+    throw new Error(`ensureConversationIdForThread rpc: ${error.message}`);
+  }
+
+  const fallbackKey = `${contactId}:${propertyId}`;
+  const existingLock = fallbackConversationLocks.get(fallbackKey);
+  if (existingLock) return existingLock;
+
+  const fallback = ensureConversationIdForThreadWithoutRpc(
+    supabase,
+    contactId,
+    propertyId,
+  ).finally(() => {
+    fallbackConversationLocks.delete(fallbackKey);
+  });
+  fallbackConversationLocks.set(fallbackKey, fallback);
+  return fallback;
+}
+
+async function ensureConversationIdForThreadWithoutRpc(
+  supabase: SupabaseClient<Database>,
+  contactId: string,
+  propertyId: string,
+): Promise<string> {
+  const { data: existing, error: lookupError } = await supabase
     .from("messages")
     .select("conversation_id")
     .eq("channel", "sms")
@@ -77,11 +113,18 @@ export async function ensureConversationIdForThread(
     .order("created_at", { ascending: false })
     .limit(1)
     .maybeSingle();
-  if (error) {
-    throw new Error(`ensureConversationIdForThread lookup: ${error.message}`);
+  if (lookupError) {
+    throw new Error(
+      `ensureConversationIdForThread fallback lookup: ${lookupError.message}`,
+    );
   }
   if (existing?.conversation_id) return existing.conversation_id;
 
+  // Deterministic id — NOT random. Two independent invocations (outbound send
+  // vs inbound webhook) that both reach this branch before either's row lands
+  // must arrive at the same conversation id, or one real conversation splits
+  // into two threads. The in-process lock above only dedupes within a single
+  // process; determinism is the cross-process guarantee.
   const conversationId = conversationIdFor(contactId, propertyId);
   const { error: updateError } = await supabase
     .from("messages")
@@ -91,11 +134,22 @@ export async function ensureConversationIdForThread(
     .eq("property_id", propertyId)
     .is("conversation_id", null);
   if (updateError) {
-    throw new Error(`ensureConversationIdForThread backfill: ${updateError.message}`);
+    throw new Error(
+      `ensureConversationIdForThread fallback backfill: ${updateError.message}`,
+    );
   }
   return conversationId;
 }
 
+function isMissingEnsureConversationRpc(message: string): boolean {
+  return (
+    message.includes("Could not find the function public.ensure_sms_conversation_id") ||
+    message.includes("function public.ensure_sms_conversation_id") ||
+    message.includes("schema cache")
+  );
+}
+
+// UUIDv5-style deterministic id over the (contact, property) thread key.
 function conversationIdFor(contactId: string, propertyId: string): string {
   const ns = Buffer.from(SMS_CONV_NS.replace(/-/g, ""), "hex");
   const h = createHash("sha1")
