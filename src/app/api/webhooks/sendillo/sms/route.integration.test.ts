@@ -130,4 +130,63 @@ describe("POST /api/webhooks/sendillo/sms (integration)", () => {
       status: "received",
     });
   });
+
+  it("accepts the shared secret from a header without relying on the query string", async () => {
+    const contactId = await seedContact("+18165550003");
+    const { data: property } = await supabase
+      .from("properties")
+      .insert({
+        address: "2 Sendillo Header Ln",
+        state: "MO",
+        status: "new_lead",
+        homeowner_contact_id: contactId,
+      })
+      .select("id")
+      .single();
+    await supabase.from("messages").insert({
+      channel: "sms",
+      direction: "outbound",
+      status: "sent",
+      provider: "sendillo",
+      from_address: "+18164876899",
+      to_address: "+18165550003",
+      body: "seed outbound",
+      contact_id: contactId,
+      property_id: property!.id,
+    });
+
+    const req = new Request("https://example.invalid/api/webhooks/sendillo/sms", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-sendillo-webhook-secret": "sendillo-secret",
+      },
+      body: JSON.stringify({
+        event: "inbound.received",
+        data: {
+          messageId: "snd_realish_002",
+          from: "+18165550003",
+          to: "+18164876899",
+          body: "HEADER OK",
+          type: "SMS",
+          receivedAt: "2026-06-08T19:08:39.257Z",
+        },
+      }),
+    });
+
+    const res = await POST(req);
+    expect(res.status).toBe(200);
+
+    const { data: message } = await supabase
+      .from("messages")
+      .select("contact_id, property_id, provider, external_id")
+      .eq("external_id", "snd_realish_002")
+      .single();
+    expect(message).toMatchObject({
+      contact_id: contactId,
+      property_id: property!.id,
+      provider: "sendillo",
+      external_id: "snd_realish_002",
+    });
+  });
 });

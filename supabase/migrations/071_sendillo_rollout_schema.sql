@@ -1,6 +1,76 @@
+-- Ship the Sendillo SMS lane on top of main's current migration chain.
+--
+-- Earlier Sendillo work used migration numbers 062/063 on a branch that
+-- later fell behind main. Main now owns 062-070 for unrelated schema work, so
+-- the Sendillo lane must land on a fresh post-070 migration instead of
+-- reusing stale numbers.
+
+begin;
+
+-- Allow Sendillo anywhere provider labels are constrained.
+alter table public.messages drop constraint if exists messages_provider_check;
+alter table public.messages add constraint messages_provider_check
+  check (provider in ('dialpad','twilio','resend','sendgrid','internal','mock','sendillo'));
+
+alter table public.jobs drop constraint if exists jobs_provider_check;
+alter table public.jobs add constraint jobs_provider_check
+  check (provider in (
+    'apify',
+    'smartystreets',
+    'lob',
+    'dialpad',
+    'twilio',
+    'resend',
+    'internal',
+    'mock',
+    'tracerfy',
+    'sendillo'
+  ));
+
+do $$
+declare
+  duplicate_group_count integer;
+  duplicate_rows integer;
+begin
+  with duplicate_groups as (
+    select provider, external_id, count(*) as row_count
+    from public.messages
+    where direction = 'inbound'
+      and provider is not null
+      and external_id is not null
+    group by provider, external_id
+    having count(*) > 1
+  )
+  select count(*), coalesce(sum(row_count), 0)
+  into duplicate_group_count, duplicate_rows
+  from duplicate_groups;
+
+  if duplicate_group_count > 0 then
+    raise exception
+      'Cannot add inbound provider/external_id uniqueness: found % duplicate group(s) across % inbound message row(s). Run an audited cleanup/merge before this migration.',
+      duplicate_group_count,
+      duplicate_rows;
+  end if;
+end $$;
+
+create unique index if not exists idx_messages_inbound_provider_external_unique
+  on public.messages (provider, external_id)
+  where direction = 'inbound' and external_id is not null;
+
+-- Give the webhook handler an explicit in-flight claim state so duplicate
+-- deliveries can no-op while another worker owns processing.
+alter table public.webhook_events
+  add column if not exists processing_started_at timestamptz;
+
+alter table public.webhook_events
+  drop constraint if exists webhook_events_processing_status_check;
+
+alter table public.webhook_events
+  add constraint webhook_events_processing_status_check
+  check (processing_status in ('pending','processing','processed','ignored','error'));
+
 -- Make SMS conversation ids database-owned so concurrent first outbound and
 -- inbound messages for the same contact/property cannot split threads.
-
 create table if not exists public.message_threads (
   id uuid primary key default gen_random_uuid(),
   org_id uuid not null default '00000000-0000-0000-0000-000000000bbb' references public.organizations(id),
@@ -18,22 +88,53 @@ create index if not exists idx_message_threads_conversation
 
 alter table public.message_threads enable row level security;
 
-create policy message_threads_org_select on public.message_threads
-  for select to authenticated
-  using (org_id in (select org_id from public.memberships where user_id = auth.uid()));
+do $$
+begin
+  if not exists (
+    select 1 from pg_policies
+    where schemaname = 'public'
+      and tablename = 'message_threads'
+      and policyname = 'message_threads_org_select'
+  ) then
+    create policy message_threads_org_select on public.message_threads
+      for select to authenticated
+      using (org_id in (select org_id from public.memberships where user_id = auth.uid()));
+  end if;
 
-create policy message_threads_org_insert on public.message_threads
-  for insert to authenticated
-  with check (org_id in (select org_id from public.memberships where user_id = auth.uid()));
+  if not exists (
+    select 1 from pg_policies
+    where schemaname = 'public'
+      and tablename = 'message_threads'
+      and policyname = 'message_threads_org_insert'
+  ) then
+    create policy message_threads_org_insert on public.message_threads
+      for insert to authenticated
+      with check (org_id in (select org_id from public.memberships where user_id = auth.uid()));
+  end if;
 
-create policy message_threads_org_update on public.message_threads
-  for update to authenticated
-  using (org_id in (select org_id from public.memberships where user_id = auth.uid()))
-  with check (org_id in (select org_id from public.memberships where user_id = auth.uid()));
+  if not exists (
+    select 1 from pg_policies
+    where schemaname = 'public'
+      and tablename = 'message_threads'
+      and policyname = 'message_threads_org_update'
+  ) then
+    create policy message_threads_org_update on public.message_threads
+      for update to authenticated
+      using (org_id in (select org_id from public.memberships where user_id = auth.uid()))
+      with check (org_id in (select org_id from public.memberships where user_id = auth.uid()));
+  end if;
 
-create policy message_threads_org_delete on public.message_threads
-  for delete to authenticated
-  using (org_id in (select org_id from public.memberships where user_id = auth.uid()));
+  if not exists (
+    select 1 from pg_policies
+    where schemaname = 'public'
+      and tablename = 'message_threads'
+      and policyname = 'message_threads_org_delete'
+  ) then
+    create policy message_threads_org_delete on public.message_threads
+      for delete to authenticated
+      using (org_id in (select org_id from public.memberships where user_id = auth.uid()));
+  end if;
+end $$;
 
 insert into public.message_threads (
   org_id,
@@ -218,3 +319,45 @@ $$;
 
 revoke execute on function public.reset_tenant_tables() from public;
 revoke execute on function public.reset_tenant_tables() from authenticated;
+
+-- Keep STOP/HELP replay-safe at the database layer.
+alter table public.consent_events
+  add column if not exists source_external_id text
+  generated always as ((source_detail ->> 'externalId')) stored;
+
+do $$
+declare
+  duplicate_group_count integer;
+  duplicate_rows integer;
+begin
+  with duplicate_groups as (
+    select
+      contact_id,
+      channel,
+      event_type,
+      source_external_id,
+      count(*) as row_count
+    from public.consent_events
+    where source_external_id is not null
+      and event_type in ('opt_out', 'help_request')
+    group by 1, 2, 3, 4
+    having count(*) > 1
+  )
+  select count(*), coalesce(sum(row_count), 0)
+  into duplicate_group_count, duplicate_rows
+  from duplicate_groups;
+
+  if duplicate_group_count > 0 then
+    raise exception
+      'Cannot add consent external-id idempotency: found % duplicate group(s) across % consent row(s). Run an audited cleanup before this migration.',
+      duplicate_group_count,
+      duplicate_rows;
+  end if;
+end $$;
+
+create unique index if not exists idx_consent_events_external_idempotency
+  on public.consent_events (contact_id, channel, event_type, source_external_id)
+  where source_external_id is not null
+    and event_type in ('opt_out', 'help_request');
+
+commit;

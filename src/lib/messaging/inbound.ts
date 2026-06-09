@@ -26,6 +26,7 @@ const STOP_KEYWORDS = /^\s*(stop|stopall|unsubscribe|cancel|end|quit|opt out|opt
 const HELP_KEYWORDS = /^\s*(help|info|support)\s*$/i;
 const DNC_KEYWORDS = /do not (call|text|contact|reach out|message)|don'?t (call|text|contact|reach out|message)|stop (texting|calling|contacting) me|take me off|no more (texts|messages|calls)|remove me from|stop reaching out/i;
 const WRONG_NUMBER_KEYWORDS = /wrong number|wrong person|not the owner|don'?t own|dont own|no longer own/i;
+const WEBHOOK_PROCESSING_LEASE_MS = 5 * 60_000;
 
 function createServiceRoleClient() {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
@@ -144,7 +145,7 @@ export async function handleInboundWebhook(
 
       if (HELP_KEYWORDS.test(bodyTrimmed)) {
         if (contactId) {
-          await recordConsentEventOnce(supabase, {
+          await recordConsentEvent(supabase, {
             contactId,
             channel: "sms",
             eventType: "help_request",
@@ -471,6 +472,77 @@ async function reserveWebhookEvent(
   | { status: "skip" }
   | { status: "error"; message: string }
 > {
+  const now = new Date().toISOString();
+  const { error } = await supabase.from("webhook_events").insert({
+    provider: input.provider,
+    event_type: "sms_inbound",
+    external_id: input.externalId,
+    signature_verified: true,
+    processing_status: "processing",
+    processing_started_at: now,
+    payload: input.payload,
+  });
+  if (!error) return { status: "reserved" };
+  if (isMissingWebhookProcessingClaimSupport(error.message)) {
+    return reserveWebhookEventLegacy(supabase, input);
+  }
+  if (error.code !== "23505") return { status: "error", message: error.message };
+
+  const { data: existing, error: existingError } = await supabase
+    .from("webhook_events")
+    .select("processing_status, processing_started_at")
+    .eq("provider", input.provider)
+    .eq("event_type", "sms_inbound")
+    .eq("external_id", input.externalId)
+    .maybeSingle();
+  if (existingError) return { status: "error", message: existingError.message };
+  if (existing?.processing_status === "processed") return { status: "skip" };
+  if (
+    existing?.processing_status === "processing" &&
+    !isWebhookProcessingLeaseExpired(existing.processing_started_at)
+  ) {
+    return { status: "skip" };
+  }
+
+  let claim = supabase
+    .from("webhook_events")
+    .update({
+      processing_status: "processing",
+      processing_started_at: now,
+      processed_at: null,
+      error_message: null,
+      signature_verified: true,
+      payload: input.payload,
+    })
+    .eq("provider", input.provider)
+    .eq("event_type", "sms_inbound")
+    .eq("external_id", input.externalId);
+
+  if (existing?.processing_status) {
+    claim = claim.eq("processing_status", existing.processing_status);
+  }
+  if (existing?.processing_started_at) {
+    claim = claim.eq("processing_started_at", existing.processing_started_at);
+  } else {
+    claim = claim.is("processing_started_at", null);
+  }
+
+  const { data: claimed, error: claimError } = await claim
+    .select("id")
+    .maybeSingle();
+  if (claimError) return { status: "error", message: claimError.message };
+  if (!claimed) return { status: "skip" };
+  return { status: "reserved" };
+}
+
+async function reserveWebhookEventLegacy(
+  supabase: SupabaseClient<Database>,
+  input: { provider: string; externalId: string; payload: Json },
+): Promise<
+  | { status: "reserved" }
+  | { status: "skip" }
+  | { status: "error"; message: string }
+> {
   const { error } = await supabase.from("webhook_events").insert({
     provider: input.provider,
     event_type: "sms_inbound",
@@ -560,7 +632,7 @@ async function applyPhoneLevelOptOut(
 ) {
   const contactIds = await loadContactIdsByPhone(supabase, input.fromPhone);
   for (const contactId of contactIds) {
-    await recordConsentEventOnce(supabase, {
+    await recordConsentEvent(supabase, {
       contactId,
       channel: "sms",
       eventType: "opt_out",
@@ -591,40 +663,20 @@ async function applyPhoneLevelOptOut(
   }
 }
 
-async function recordConsentEventOnce(
-  supabase: SupabaseClient<Database>,
-  params: {
-    contactId: string;
-    channel: "sms";
-    eventType: "opt_out" | "help_request";
-    source: string;
-    sourceDetail: Json;
-    occurredAt: Date;
-    idempotencyKey: string;
-  },
-): Promise<void> {
-  const { data: existing, error: lookupError } = await supabase
-    .from("consent_events")
-    .select("id")
-    .eq("contact_id", params.contactId)
-    .eq("channel", params.channel)
-    .eq("event_type", params.eventType)
-    .eq("source", params.source)
-    .contains("source_detail", { externalId: params.idempotencyKey })
-    .limit(1);
-  if (lookupError) {
-    throw new Error(`recordConsentEventOnce lookup: ${lookupError.message}`);
-  }
-  if ((existing ?? []).length > 0) return;
+function isWebhookProcessingLeaseExpired(
+  processingStartedAt: string | null,
+): boolean {
+  if (!processingStartedAt) return true;
+  const startedAt = new Date(processingStartedAt).getTime();
+  if (Number.isNaN(startedAt)) return true;
+  return Date.now() - startedAt > WEBHOOK_PROCESSING_LEASE_MS;
+}
 
-  await recordConsentEvent(supabase, {
-    contactId: params.contactId,
-    channel: params.channel,
-    eventType: params.eventType,
-    source: params.source,
-    sourceDetail: params.sourceDetail,
-    occurredAt: params.occurredAt,
-  });
+function isMissingWebhookProcessingClaimSupport(message: string): boolean {
+  return (
+    message.includes("processing_started_at") ||
+    (message.includes("processing_status") && message.includes("check constraint"))
+  );
 }
 
 async function loadContactIdsByPhone(

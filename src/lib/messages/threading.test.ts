@@ -12,7 +12,7 @@ const UUID_RE =
  * Minimal Supabase fake that forces the *fallback* branch inside
  * `ensureConversationIdForThread`:
  *   - `.rpc("ensure_sms_conversation_id", ...)` reports the function as absent
- *     (i.e. migration 063's DB-owned thread registry has not shipped), and
+ *     (i.e. the Sendillo rollout's DB-owned thread registry has not shipped), and
  *   - the `messages` table has no pre-existing conversation row.
  *
  * That is the live production reality until the registry migration is
@@ -62,7 +62,7 @@ const CONTACT = "11111111-1111-4111-8111-111111111111";
 const PROPERTY = "22222222-2222-4222-8222-222222222222";
 const OTHER_PROPERTY = "33333333-3333-4333-8333-333333333333";
 
-describe("ensureConversationIdForThread — fallback (RPC / migration 063 absent)", () => {
+describe("ensureConversationIdForThread — fallback (RPC / registry migration absent)", () => {
   it("reproduces the split-thread race: an independent first-send and first-reply must converge on ONE conversation id", async () => {
     // Model two SEPARATE serverless invocations — the outbound sender and the
     // inbound webhook — each resolving a thread id before the other's message

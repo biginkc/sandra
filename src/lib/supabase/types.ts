@@ -2265,6 +2265,7 @@ export type Database = {
           id: string
           payload: Json
           processed_at: string | null
+          processing_started_at: string | null
           processing_status: string
           provider: string
           received_at: string
@@ -2277,6 +2278,7 @@ export type Database = {
           id?: string
           payload: Json
           processed_at?: string | null
+          processing_started_at?: string | null
           processing_status?: string
           provider: string
           received_at?: string
@@ -2289,6 +2291,7 @@ export type Database = {
           id?: string
           payload?: Json
           processed_at?: string | null
+          processing_started_at?: string | null
           processing_status?: string
           provider?: string
           received_at?: string

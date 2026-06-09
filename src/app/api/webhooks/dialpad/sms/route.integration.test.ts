@@ -699,6 +699,48 @@ describe("POST /api/webhooks/dialpad/sms (integration)", () => {
     expect(contact?.sms_opted_out).toBe(true);
   });
 
+  it("acknowledges duplicate delivery while another worker is actively processing it", async () => {
+    await supabase.from("webhook_events").insert({
+      provider: "mock",
+      event_type: "sms_inbound",
+      external_id: "msg_inflight_001",
+      signature_verified: true,
+      processing_status: "processing",
+      processing_started_at: new Date().toISOString(),
+      payload: {
+        externalId: "msg_inflight_001",
+        from: "+18165559116",
+        to: "+18163706846",
+        body: "still processing",
+      },
+    });
+
+    const res = await POST(
+      makeRequest({
+        externalId: "msg_inflight_001",
+        from: "+18165559116",
+        to: "+18163706846",
+        body: "still processing",
+      }),
+    );
+    expect(res.status).toBe(200);
+
+    const { count: messageCount } = await supabase
+      .from("messages")
+      .select("*", { count: "exact", head: true })
+      .eq("external_id", "msg_inflight_001");
+    expect(messageCount).toBe(0);
+
+    const { data: webhookEvent } = await supabase
+      .from("webhook_events")
+      .select("processing_status")
+      .eq("provider", "mock")
+      .eq("event_type", "sms_inbound")
+      .eq("external_id", "msg_inflight_001")
+      .single();
+    expect(webhookEvent?.processing_status).toBe("processing");
+  });
+
   it("does not duplicate HELP consent events when replay resumes a pending keyword webhook", async () => {
     const phone = "+18165559114";
     const contactId = await seedContact(phone, { optIn: true });

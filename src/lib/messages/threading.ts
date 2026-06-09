@@ -11,7 +11,8 @@ const UUID_RE =
 // Fixed namespace so the fallback conversation id is a pure function of the SMS
 // thread key. This is what keeps a near-simultaneous first outbound and first
 // inbound from splitting into two threads when the DB-owned registry
-// (`ensure_sms_conversation_id`, migration 063) is not deployed: separate
+// (`ensure_sms_conversation_id`, shipped by the Sendillo rollout migration) is
+// not deployed: separate
 // serverless invocations independently derive the SAME id. Must match the value
 // used by historical rows so existing threads stay intact.
 const SMS_CONV_NS = "6f9a1e2c-3b4d-4f5a-8c7e-1d2b3a4c5d6e";
