@@ -1,5 +1,3 @@
-import { randomUUID } from "node:crypto";
-
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { normalizePhone } from "@/lib/csv/normalize";
@@ -64,33 +62,14 @@ export async function ensureConversationIdForThread(
   contactId: string,
   propertyId: string,
 ): Promise<string> {
-  const { data: existing, error } = await supabase
-    .from("messages")
-    .select("conversation_id")
-    .eq("channel", "sms")
-    .eq("contact_id", contactId)
-    .eq("property_id", propertyId)
-    .not("conversation_id", "is", null)
-    .order("created_at", { ascending: false })
-    .limit(1)
-    .maybeSingle();
+  const { data, error } = await supabase.rpc("ensure_sms_conversation_id", {
+    p_contact_id: contactId,
+    p_property_id: propertyId,
+  });
   if (error) {
-    throw new Error(`ensureConversationIdForThread lookup: ${error.message}`);
+    throw new Error(`ensureConversationIdForThread rpc: ${error.message}`);
   }
-  if (existing?.conversation_id) return existing.conversation_id;
-
-  const conversationId = randomUUID();
-  const { error: updateError } = await supabase
-    .from("messages")
-    .update({ conversation_id: conversationId })
-    .eq("channel", "sms")
-    .eq("contact_id", contactId)
-    .eq("property_id", propertyId)
-    .is("conversation_id", null);
-  if (updateError) {
-    throw new Error(`ensureConversationIdForThread backfill: ${updateError.message}`);
-  }
-  return conversationId;
+  return data;
 }
 
 export async function resolveInboundThread(
