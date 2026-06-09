@@ -63,7 +63,7 @@ export type DetailedLead = PropertyRow & {
   agent: (ContactRow & { agent_details: AgentDetailsRow | null }) | null;
 };
 
-export async function getLeadDetail(
+async function getLeadDetail(
   propertyId: string,
 ): Promise<Result<DetailedLead | null>> {
   try {
@@ -226,7 +226,7 @@ export async function updateLeadMotivation(
  * a system marker like 'system:inbound_reply' (auto-qualify from the
  * Dialpad webhook).
  */
-export async function qualifyLead(
+async function qualifyLead(
   propertyId: string,
   qualifier: string | null = null,
 ): Promise<Result<{ alreadyQualified: boolean }>> {
@@ -948,7 +948,7 @@ export async function sendSmsFromLead(
  * opt-in form submission) and records an `opt_in_marketing_written`
  * event. UI prompts for the source URL / description.
  */
-export async function captureConsent(params: {
+async function captureConsent(params: {
   contactId: string;
   channel: ConsentChannel;
   eventType: ConsentEventType;

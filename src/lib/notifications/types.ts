@@ -18,7 +18,7 @@ export type EntityType = "property" | "job" | "task" | "message";
  * ergonomics; DB rows come off `supabase` in `snake_case` and are mapped
  * at read sites.
  */
-export type Notification = {
+type Notification = {
   id: string;
   orgId: string;
   userId: string;
