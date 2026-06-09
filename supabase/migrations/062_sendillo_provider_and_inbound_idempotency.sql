@@ -22,28 +22,15 @@ alter table jobs add constraint jobs_provider_check
   ));
 
 do $$
-declare
-  duplicate_group_count integer;
-  duplicate_rows integer;
+declare dup_count int;
 begin
-  with duplicate_groups as (
-    select provider, external_id, count(*) as row_count
-    from public.messages
-    where direction = 'inbound'
-      and provider is not null
-      and external_id is not null
-    group by provider, external_id
-    having count(*) > 1
-  )
-  select count(*), coalesce(sum(row_count), 0)
-  into duplicate_group_count, duplicate_rows
-  from duplicate_groups;
-
-  if duplicate_group_count > 0 then
-    raise exception
-      'Cannot add inbound provider/external_id uniqueness: found % duplicate group(s) across % inbound message row(s). Run an audited cleanup/merge before this migration.',
-      duplicate_group_count,
-      duplicate_rows;
+  select count(*) into dup_count from (
+    select provider, external_id from messages
+    where direction = 'inbound' and external_id is not null
+    group by provider, external_id having count(*) > 1
+  ) d;
+  if dup_count > 0 then
+    raise exception 'Cannot add inbound uniqueness: % duplicate (provider, external_id) groups exist. Dedupe first.', dup_count;
   end if;
 end $$;
 
