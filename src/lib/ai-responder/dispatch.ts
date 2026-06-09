@@ -37,6 +37,7 @@ export type AiDispatchInput = {
   propertyId: string;
   contactId: string;
   inboundBody: string;
+  inboundMessageId?: string | null;
 };
 
 export async function dispatchAiResponse(
@@ -44,6 +45,16 @@ export async function dispatchAiResponse(
   input: AiDispatchInput,
   deps: { anthropic: AnthropicLike },
 ): Promise<AiDispatchOutcome> {
+  if (input.inboundMessageId) {
+    const existingReply = await findExistingAiReplyForInbound(
+      supabase,
+      input.inboundMessageId,
+    );
+    if (existingReply) {
+      return { outcome: "skipped", reason: "already_replied" };
+    }
+  }
+
   // --------------------------------------------------------------------------
   // 1. Load property + org + config
   // --------------------------------------------------------------------------
@@ -193,6 +204,12 @@ export async function dispatchAiResponse(
     contactId: input.contactId,
     propertyId: input.propertyId,
     body,
+    metadata: input.inboundMessageId
+      ? ({
+          generated_by: "ai_responder_v1",
+          inbound_message_id: input.inboundMessageId,
+        } as Json)
+      : null,
   });
 
   if (sendResult.status !== "sent" && sendResult.status !== "queued") {
@@ -217,6 +234,32 @@ export async function dispatchAiResponse(
     .eq("id", messageId);
 
   return { outcome: "sent", messageId, confidence: generated.confidence };
+}
+
+async function findExistingAiReplyForInbound(
+  supabase: SupabaseClient<Database>,
+  inboundMessageId: string,
+): Promise<{ id: string } | null> {
+  const { data, error } = await supabase
+    .from("messages")
+    .select("id")
+    .eq("channel", "sms")
+    .eq("direction", "outbound")
+    .contains("metadata", {
+      generated_by: "ai_responder_v1",
+      inbound_message_id: inboundMessageId,
+    })
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error) {
+    reportError(new Error(error.message), {
+      tags: { surface: "ai_responder_existing_reply_lookup" },
+      extra: { inboundMessageId },
+    });
+    return null;
+  }
+  return data ?? null;
 }
 
 // ---------- helpers ---------------------------------------------------------

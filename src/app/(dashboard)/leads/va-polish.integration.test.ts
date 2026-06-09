@@ -14,6 +14,7 @@ vi.mock("@/lib/supabase/server", () => ({
 import {
   createLeadNote,
   markMessagesReadForProperty,
+  markMessagesReadForThread,
   updateLeadAssignee,
 } from "@/app/(dashboard)/leads/actions";
 
@@ -210,6 +211,61 @@ describe("VA polish seams — Feature 1 integration", () => {
         .eq("property_id", b.id);
       expect(aRows![0]!.read_at).not.toBeNull();
       expect(bRows![0]!.read_at).toBeNull();
+    });
+  });
+
+  describe("markMessagesReadForThread", () => {
+    it("marks only the selected conversation thread as read", async () => {
+      const { id: propertyId, orgId } = await seedProperty();
+      const { data: contactA } = await testClient
+        .from("contacts")
+        .insert({ first_name: "A", last_name: "Thread", phone_1: "+18165550101" })
+        .select("id")
+        .single();
+      const { data: contactB } = await testClient
+        .from("contacts")
+        .insert({ first_name: "B", last_name: "Thread", phone_1: "+18165550102" })
+        .select("id")
+        .single();
+
+      const convoA = "11111111-1111-4111-8111-111111111111";
+      const convoB = "22222222-2222-4222-8222-222222222222";
+
+      await testClient.from("messages").insert([
+        {
+          channel: "sms",
+          direction: "inbound",
+          body: "thread A",
+          property_id: propertyId,
+          contact_id: contactA!.id,
+          conversation_id: convoA,
+          org_id: orgId,
+          status: "received",
+        },
+        {
+          channel: "sms",
+          direction: "inbound",
+          body: "thread B",
+          property_id: propertyId,
+          contact_id: contactB!.id,
+          conversation_id: convoB,
+          org_id: orgId,
+          status: "received",
+        },
+      ]);
+
+      const result = await markMessagesReadForThread(convoA);
+      expect(result.ok).toBe(true);
+
+      const { data: rows } = await testClient
+        .from("messages")
+        .select("conversation_id, read_at")
+        .eq("property_id", propertyId)
+        .order("created_at", { ascending: true });
+
+      expect(rows).toHaveLength(2);
+      expect(rows?.find((row) => row.conversation_id === convoA)?.read_at).not.toBeNull();
+      expect(rows?.find((row) => row.conversation_id === convoB)?.read_at).toBeNull();
     });
   });
 

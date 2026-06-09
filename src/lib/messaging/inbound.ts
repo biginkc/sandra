@@ -29,7 +29,7 @@ const WRONG_NUMBER_KEYWORDS = /wrong number|wrong person|not the owner|don'?t ow
 const WEBHOOK_PROCESSING_LEASE_MS = 5 * 60_000;
 
 function createServiceRoleClient() {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL ?? process.env.TEST_SUPABASE_URL;
   const key =
     process.env.SUPABASE_SERVICE_ROLE_KEY ??
     process.env.TEST_SUPABASE_SERVICE_ROLE_KEY;
@@ -303,10 +303,11 @@ export async function handleInboundWebhook(
           { status: 500 },
         );
       }
-      if (!propertyId) {
+      if (!propertyId || !insertOutcome.messageId) {
         await markWebhookEventProcessed(supabase, provider.providerId, ev.externalId);
         continue;
       }
+      const inboundState = readInboundMessageState(insertOutcome.metadata);
 
       const { data: cur } = await supabase
         .from("properties")
@@ -314,7 +315,7 @@ export async function handleInboundWebhook(
         .eq("id", propertyId)
         .maybeSingle();
 
-      if (cur?.status === "prospect" && ev.body) {
+      if (cur?.status === "prospect" && ev.body && !inboundState.autoQualifiedAt) {
         let shouldQualify = false;
         if (process.env.SKIP_INTENT_GATE === "1") {
           shouldQualify = true;
@@ -341,56 +342,78 @@ export async function handleInboundWebhook(
               tags: { surface: `${provider.providerId}_webhook_auto_qualify` },
               extra: { propertyId, externalId: ev.externalId },
             });
+          } else {
+            await markInboundMessageState(supabase, insertOutcome.messageId, {
+              autoQualifiedAt: new Date().toISOString(),
+            });
           }
         }
       }
 
-      try {
-        const { data: propRow } = await supabase
-          .from("properties")
-          .select("assigned_user_id")
-          .eq("id", propertyId)
-          .maybeSingle();
-        const adminUserIds = propRow?.assigned_user_id
-          ? []
-          : await listAdminUserIds(supabase);
-        await dispatchOwnerMessageAdded(supabase, {
-          propertyId,
-          adminUserIds,
-          messageBody: ev.body,
-        });
-      } catch (e) {
-        reportError(e, {
-          tags: { surface: `${provider.providerId}_webhook_notification_dispatch` },
-          extra: { propertyId, externalId: ev.externalId },
-        });
-      }
-
-      try {
-        await pausePropertyEnrollments(supabase, {
-          propertyId,
-          reason: "inbound_reply",
-        });
-      } catch (e) {
-        reportError(e, {
-          tags: { surface: `${provider.providerId}_webhook_sequence_pause_inbound` },
-          extra: { propertyId, externalId: ev.externalId },
-        });
-      }
-
-      if (contactId) {
+      if (!inboundState.ownerNotificationSentAt) {
         try {
-          await dispatchAiResponse(
+          const { data: propRow } = await supabase
+            .from("properties")
+            .select("assigned_user_id")
+            .eq("id", propertyId)
+            .maybeSingle();
+          const adminUserIds = propRow?.assigned_user_id
+            ? []
+            : await listAdminUserIds(supabase);
+          await dispatchOwnerMessageAdded(supabase, {
+            messageId: insertOutcome.messageId,
+            propertyId,
+            adminUserIds,
+            messageBody: ev.body,
+          });
+          await markInboundMessageState(supabase, insertOutcome.messageId, {
+            ownerNotificationSentAt: new Date().toISOString(),
+          });
+        } catch (e) {
+          reportError(e, {
+            tags: { surface: `${provider.providerId}_webhook_notification_dispatch` },
+            extra: { propertyId, externalId: ev.externalId },
+          });
+        }
+      }
+
+      if (!inboundState.propertyEnrollmentsPausedAt) {
+        try {
+          await pausePropertyEnrollments(supabase, {
+            propertyId,
+            reason: "inbound_reply",
+          });
+          await markInboundMessageState(supabase, insertOutcome.messageId, {
+            propertyEnrollmentsPausedAt: new Date().toISOString(),
+          });
+        } catch (e) {
+          reportError(e, {
+            tags: { surface: `${provider.providerId}_webhook_sequence_pause_inbound` },
+            extra: { propertyId, externalId: ev.externalId },
+          });
+        }
+      }
+
+      if (contactId && !inboundState.aiResponder) {
+        try {
+          const outcome = await dispatchAiResponse(
             supabase,
             {
               propertyId,
               contactId,
               inboundBody: ev.body,
+              inboundMessageId: insertOutcome.messageId,
             },
             {
               anthropic: new Anthropic(),
             },
           );
+          await markInboundMessageState(supabase, insertOutcome.messageId, {
+            aiResponder: {
+              ...outcome,
+              completedAt: new Date().toISOString(),
+            },
+          });
         } catch (e) {
           reportError(e, {
             tags: { surface: `${provider.providerId}_webhook_ai_responder` },
@@ -428,7 +451,7 @@ async function insertInboundMessage(
 ) {
   const { data: existing, error: lookupError } = await supabase
     .from("messages")
-    .select("id")
+    .select("id, metadata")
     .eq("channel", "sms")
     .eq("direction", "inbound")
     .eq("provider", input.providerId)
@@ -436,26 +459,58 @@ async function insertInboundMessage(
     .limit(1);
   if (lookupError) return { duplicate: false, error: lookupError };
   if ((existing ?? []).length > 0) {
-    return { duplicate: true, error: null as null };
+    return {
+      duplicate: true,
+      error: null as null,
+      messageId: existing?.[0]?.id ?? null,
+      metadata: existing?.[0]?.metadata ?? null,
+    };
   }
 
-  const { error } = await supabase.from("messages").insert({
-    channel: "sms",
-    direction: "inbound",
-    status: "received",
-    provider: input.providerId,
-    external_id: input.externalId,
-    from_address: normalizePhone(input.from) ?? input.from,
-    to_address: normalizePhone(input.to) ?? input.to,
-    body: input.body,
-    contact_id: input.contactId,
-    property_id: input.propertyId,
-    conversation_id: input.conversationId,
-    metadata: input.metadata,
-  });
-  if (!error) return { duplicate: false, error: null as null };
-  if (error.code === "23505") return { duplicate: true, error: null as null };
-  return { duplicate: false, error };
+  const { data: inserted, error } = await supabase
+    .from("messages")
+    .insert({
+      channel: "sms",
+      direction: "inbound",
+      status: "received",
+      provider: input.providerId,
+      external_id: input.externalId,
+      from_address: normalizePhone(input.from) ?? input.from,
+      to_address: normalizePhone(input.to) ?? input.to,
+      body: input.body,
+      contact_id: input.contactId,
+      property_id: input.propertyId,
+      conversation_id: input.conversationId,
+      metadata: input.metadata,
+    })
+    .select("id, metadata")
+    .maybeSingle();
+  if (!error) {
+    return {
+      duplicate: false,
+      error: null as null,
+      messageId: inserted?.id ?? null,
+      metadata: inserted?.metadata ?? null,
+    };
+  }
+  if (error.code === "23505") {
+    const { data: duplicate } = await supabase
+      .from("messages")
+      .select("id, metadata")
+      .eq("channel", "sms")
+      .eq("direction", "inbound")
+      .eq("provider", input.providerId)
+      .eq("external_id", input.externalId)
+      .limit(1)
+      .maybeSingle();
+    return {
+      duplicate: true,
+      error: null as null,
+      messageId: duplicate?.id ?? null,
+      metadata: duplicate?.metadata ?? null,
+    };
+  }
+  return { duplicate: false, error, messageId: null, metadata: null };
 }
 
 function jsonObject(value: Json): Record<string, unknown> {
@@ -700,4 +755,65 @@ async function loadContactIdsByPhone(
     for (const row of result.data ?? []) ids.add(row.id);
   }
   return Array.from(ids);
+}
+
+type InboundMessageState = {
+  autoQualifiedAt?: string;
+  ownerNotificationSentAt?: string;
+  propertyEnrollmentsPausedAt?: string;
+  aiResponder?: {
+    outcome: "sent" | "escalated" | "skipped";
+    messageId?: string;
+    confidence?: number;
+    reason?: string;
+    completedAt?: string;
+  };
+};
+
+function readInboundMessageState(metadata: Json | null): InboundMessageState {
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
+    return {};
+  }
+  const processing = (metadata as Record<string, unknown>).processing;
+  if (!processing || typeof processing !== "object" || Array.isArray(processing)) {
+    return {};
+  }
+  return processing as InboundMessageState;
+}
+
+async function markInboundMessageState(
+  supabase: SupabaseClient<Database>,
+  messageId: string,
+  patch: InboundMessageState,
+): Promise<void> {
+  const { data: row, error: fetchError } = await supabase
+    .from("messages")
+    .select("metadata")
+    .eq("id", messageId)
+    .maybeSingle();
+  if (fetchError) {
+    throw new Error(`markInboundMessageState fetch: ${fetchError.message}`);
+  }
+
+  const currentMetadata =
+    row?.metadata && typeof row.metadata === "object" && !Array.isArray(row.metadata)
+      ? (row.metadata as Record<string, unknown>)
+      : {};
+  const currentState = readInboundMessageState(row?.metadata ?? null);
+
+  const { error: updateError } = await supabase
+    .from("messages")
+    .update({
+      metadata: {
+        ...currentMetadata,
+        processing: {
+          ...currentState,
+          ...patch,
+        },
+      } as Json,
+    })
+    .eq("id", messageId);
+  if (updateError) {
+    throw new Error(`markInboundMessageState update: ${updateError.message}`);
+  }
 }

@@ -3,7 +3,7 @@ import { createClient } from "@/lib/supabase/server";
 import { listThreads, type ListThreadsOpts } from "@/lib/messages/list-threads";
 import { listUnknownSenders } from "@/lib/messages/list-unknown-senders";
 
-import { markMessagesReadForProperty } from "../leads/actions";
+import { markMessagesReadForThread } from "../leads/actions";
 
 import { getQueueStats, type QueueStats } from "./actions";
 import { CockpitView } from "./cockpit-view";
@@ -166,8 +166,8 @@ export default async function MessagesPage({
     contactPhone: r.contact?.phone_1 ?? null,
   }));
 
-  if (isThreadFilter(filter) && threadDetail?.propertyId) {
-    await markMessagesReadForProperty(threadDetail.propertyId);
+  if (isThreadFilter(filter) && threadDetail) {
+    await markMessagesReadForThread(threadDetail.threadId);
   }
 
   const unknownSenders =

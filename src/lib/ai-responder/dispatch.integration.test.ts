@@ -194,6 +194,45 @@ describe("dispatchAiResponse (integration)", () => {
     expect(meta.turn).toBe(1);
   });
 
+  it("skips when an AI reply already exists for the same inbound message", async () => {
+    await seedConfig();
+    const { propertyId, contactId } = await seedLead({
+      phone: "+18167554011",
+    });
+    const inboundMessageId = "33333333-3333-4333-8333-333333333333";
+
+    await supabase.from("messages").insert({
+      id: "44444444-4444-4444-8444-444444444444",
+      channel: "sms",
+      direction: "outbound",
+      status: "sent",
+      property_id: propertyId,
+      contact_id: contactId,
+      body: "already sent",
+      metadata: {
+        generated_by: "ai_responder_v1",
+        inbound_message_id: inboundMessageId,
+      },
+    });
+
+    const outcome = await dispatchAiResponse(
+      supabase,
+      {
+        propertyId,
+        contactId,
+        inboundBody: "following up",
+        inboundMessageId,
+      },
+      { anthropic: stubAnthropic(HAPPY_OUT) },
+    );
+
+    expect(outcome).toEqual({
+      outcome: "skipped",
+      reason: "already_replied",
+    });
+    expect(getMockMessageLog()).toHaveLength(0);
+  });
+
   // --------------------------------------------------------------------------
   // Keyword escalation tiers — no Claude call, property flagged
   // --------------------------------------------------------------------------

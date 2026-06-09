@@ -135,6 +135,11 @@ describe("POST /api/webhooks/sendillo/capture/[secret]", () => {
     const insertedPayload = insertMock.mock.calls[0]?.[0]?.payload;
     expect(insertedPayload).toMatchObject({
       method: "POST",
+      url: "https://sandra.test/api/webhooks/sendillo/capture/[redacted]",
+      headers: {
+        "content-type": "application/json",
+        "x-sendillo-attempt": "1",
+      },
       rawBody: JSON.stringify({
         event: "inbound.received",
         data: {
@@ -153,6 +158,32 @@ describe("POST /api/webhooks/sendillo/capture/[secret]", () => {
           body: "hello there",
         },
       },
+    });
+    expect(insertedPayload.headers.authorization).toBeUndefined();
+  });
+
+  it("redacts auth-bearing headers and secret-bearing URLs before storing the capture", async () => {
+    await POST(
+      new Request("https://sandra.test/api/webhooks/sendillo/capture/capture-secret?secret=capture-secret", {
+        method: "POST",
+        headers: {
+          authorization: "Bearer sendillo-secret",
+          "x-sendillo-webhook-secret": "sendillo-secret",
+          "x-api-token": "abc123",
+        },
+        body: JSON.stringify({ event: "message.sent", messageId: "msg_redacted" }),
+      }),
+      { params: Promise.resolve({ secret: "capture-secret" }) },
+    );
+
+    const insertedPayload = insertMock.mock.calls[0]?.[0]?.payload;
+    expect(insertedPayload.url).toBe(
+      "https://sandra.test/api/webhooks/sendillo/capture/[redacted]",
+    );
+    expect(insertedPayload.headers).toMatchObject({
+      authorization: "[redacted]",
+      "x-sendillo-webhook-secret": "[redacted]",
+      "x-api-token": "[redacted]",
     });
   });
 

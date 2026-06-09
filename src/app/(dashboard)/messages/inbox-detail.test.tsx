@@ -96,13 +96,14 @@ function makeMessage(overrides: Partial<MessageRow> & { id: string; body: string
 
 function makeData(overrides: Partial<InboxDetailData> & { contactId: string }): InboxDetailData {
   const contactId = overrides.contactId;
+  const propertyId = overrides.propertyId ?? "prop-1";
   return {
-    threadId: overrides.threadId ?? contactId,
+    threadId: overrides.threadId ?? `legacy:${contactId}:${propertyId}`,
     conversationId: overrides.conversationId ?? null,
     contactId,
     contactName: overrides.contactName ?? "Panel Test",
     contactPhone: overrides.contactPhone ?? "+15551234567",
-    propertyId: overrides.propertyId ?? "prop-1",
+    propertyId,
     propertyAddress: overrides.propertyAddress ?? "123 Main St, Albany, NY",
     assigneeId: overrides.assigneeId ?? null,
     propertyStatus: overrides.propertyStatus ?? "prospect",

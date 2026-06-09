@@ -4,6 +4,7 @@ import { after } from "next/server";
 
 import { isAdminEmail } from "@/lib/auth/allowlist";
 import { runCassEnrichment } from "@/lib/enrichment/cass-job";
+import { parseThreadId } from "@/lib/messages/threading";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
 import { errFromUnknown, ok, type Result } from "@/lib/errors/result";
@@ -1066,6 +1067,56 @@ export async function markMessagesReadForProperty(
     reportError(e, {
       tags: { surface: "mark_messages_read" },
       extra: { propertyId },
+    });
+    return errFromUnknown(e, "MARK_READ_FAILED");
+  }
+}
+
+export async function markMessagesReadForThread(
+  threadId: string,
+): Promise<Result<null>> {
+  try {
+    const parsed = parseThreadId(threadId);
+    if (parsed.kind === "contact") {
+      return {
+        ok: false,
+        error: {
+          code: "MARK_READ_FAILED",
+          message: "Contact-only thread ids are no longer valid for mark-read.",
+        },
+      };
+    }
+
+    const supabase = await createClient();
+    let query = supabase
+      .from("messages")
+      .update({ read_at: new Date().toISOString() })
+      .eq("channel", "sms")
+      .eq("direction", "inbound")
+      .is("read_at", null);
+
+    if (parsed.kind === "conversation") {
+      query = query.eq("conversation_id", parsed.conversationId);
+    } else {
+      query = query.eq("contact_id", parsed.contactId);
+      query =
+        parsed.propertyId === null
+          ? query.is("property_id", null)
+          : query.eq("property_id", parsed.propertyId);
+    }
+
+    const { error } = await query;
+    if (error) {
+      return {
+        ok: false,
+        error: { code: "MARK_READ_FAILED", message: error.message },
+      };
+    }
+    return ok(null);
+  } catch (e) {
+    reportError(e, {
+      tags: { surface: "mark_messages_read_thread" },
+      extra: { threadId },
     });
     return errFromUnknown(e, "MARK_READ_FAILED");
   }

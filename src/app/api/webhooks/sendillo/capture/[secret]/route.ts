@@ -6,7 +6,7 @@ import { reportError } from "@/lib/errors/report";
 import type { Database, Json } from "@/lib/supabase/types";
 
 function createServiceRoleClient() {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL ?? process.env.TEST_SUPABASE_URL;
   const key =
     process.env.SUPABASE_SERVICE_ROLE_KEY ??
     process.env.TEST_SUPABASE_SERVICE_ROLE_KEY;
@@ -44,7 +44,33 @@ function normalizeHeaders(headers: Headers): Record<string, string> {
 }
 
 function captureSecret(): string | null {
-  return process.env.SENDILLO_CAPTURE_SECRET ?? process.env.CRON_SECRET ?? null;
+  return process.env.SENDILLO_CAPTURE_SECRET ?? null;
+}
+
+function redactUrl(rawUrl: string, secret: string): string {
+  try {
+    const url = new URL(rawUrl);
+    url.pathname = url.pathname.replace(`/${secret}`, "/[redacted]");
+    url.searchParams.delete("secret");
+    return url.toString();
+  } catch {
+    return rawUrl.replace(secret, "[redacted]");
+  }
+}
+
+function redactHeaders(headers: Headers): Record<string, string> {
+  const normalized = normalizeHeaders(headers);
+  const redacted: Record<string, string> = {};
+  for (const [key, value] of Object.entries(normalized)) {
+    const lower = key.toLowerCase();
+    redacted[key] =
+      lower === "authorization" ||
+      lower.includes("secret") ||
+      lower.includes("token")
+        ? "[redacted]"
+        : value;
+  }
+  return redacted;
 }
 
 async function authorizeCaptureSecret(secret: string) {
@@ -123,9 +149,9 @@ export async function POST(
     const supabase = createServiceRoleClient();
     const payload: Json = {
       capturedAt: new Date().toISOString(),
-      url: request.url,
+      url: redactUrl(request.url, secret),
       method: request.method,
-      headers: normalizeHeaders(request.headers),
+      headers: redactHeaders(request.headers),
       rawBody,
       parsed,
     };

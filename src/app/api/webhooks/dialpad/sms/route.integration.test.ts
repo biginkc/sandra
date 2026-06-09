@@ -662,6 +662,94 @@ describe("POST /api/webhooks/dialpad/sms (integration)", () => {
     expect(webhookEvent?.processing_status).toBe("processed");
   });
 
+  it("does not duplicate owner notifications when a retry resumes after the notification already fired", async () => {
+    const phone = "+18165559117";
+    const contactId = await seedContact(phone, { optIn: true });
+    const assignee = await createAuthUser(
+      `idempotent-notif-${Date.now()}@test.invalid`,
+    );
+    const { data: property } = await supabase
+      .from("properties")
+      .insert({
+        address: "5 Replay Ln",
+        state: "MO",
+        status: "new_lead",
+        homeowner_contact_id: contactId,
+        assigned_user_id: assignee,
+      })
+      .select("id")
+      .single();
+    await supabase.from("messages").insert([
+      {
+        channel: "sms",
+        direction: "outbound",
+        status: "sent",
+        provider: "mock",
+        from_address: "+18163706846",
+        to_address: phone,
+        body: "initial",
+        contact_id: contactId,
+        property_id: property!.id,
+      },
+      {
+        channel: "sms",
+        direction: "inbound",
+        status: "received",
+        provider: "mock",
+        external_id: "msg_dup_resume_notif_001",
+        from_address: phone,
+        to_address: "+18163706846",
+        body: "already notified",
+        contact_id: contactId,
+        property_id: property!.id,
+        metadata: {
+          processing: {
+            ownerNotificationSentAt: "2026-06-09T12:00:00.000Z",
+          },
+        },
+      },
+    ]);
+    await supabase.from("notifications").insert({
+      org_id: "00000000-0000-0000-0000-000000000bbb",
+      user_id: assignee,
+      event_type: "owner_message_added",
+      entity_type: "message",
+      entity_id: "55555555-5555-4555-8555-555555555555",
+      title: "New SMS reply",
+      body: "Replay Ln",
+    });
+    await supabase.from("webhook_events").insert({
+      provider: "mock",
+      event_type: "sms_inbound",
+      external_id: "msg_dup_resume_notif_001",
+      signature_verified: true,
+      processing_status: "pending",
+      payload: {
+        externalId: "msg_dup_resume_notif_001",
+        from: phone,
+        to: "+18163706846",
+        body: "already notified",
+      },
+    });
+
+    const res = await POST(
+      makeRequest({
+        externalId: "msg_dup_resume_notif_001",
+        from: phone,
+        to: "+18163706846",
+        body: "already notified",
+      }),
+    );
+    expect(res.status).toBe(200);
+
+    const { count: notifCount } = await supabase
+      .from("notifications")
+      .select("*", { count: "exact", head: true })
+      .eq("user_id", assignee)
+      .eq("event_type", "owner_message_added");
+    expect(notifCount).toBe(1);
+  });
+
   it("does not duplicate STOP consent events when replay resumes a pending keyword webhook", async () => {
     const phone = "+18165559113";
     const contactId = await seedContact(phone, { optIn: true });
@@ -856,8 +944,7 @@ describe("POST /api/webhooks/dialpad/sms (integration)", () => {
     expect(notifs).toHaveLength(1);
     expect(notifs![0]).toMatchObject({
       event_type: "owner_message_added",
-      entity_type: "property",
-      entity_id: property!.id,
+      entity_type: "message",
       read_at: null,
     });
     expect(notifs![0].body).toContain("18 Notify Ln");

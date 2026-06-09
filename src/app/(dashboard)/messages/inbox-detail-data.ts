@@ -1,6 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
-import { parseThreadId } from "@/lib/messages/threading";
+import { buildThreadId, parseThreadId } from "@/lib/messages/threading";
 import type { Database } from "@/lib/supabase/types";
 
 export type InboxDetail = {
@@ -30,7 +30,19 @@ export async function fetchInboxDetail(
   supabase: SupabaseClient<Database>,
   threadId: string,
 ): Promise<InboxDetail | null> {
-  const parsed = parseThreadId(threadId);
+  let parsed = parseThreadId(threadId);
+  let resolvedThreadId = threadId;
+
+  if (parsed.kind === "contact") {
+    const fallbackThreadId = await resolveConcreteThreadIdForContact(
+      supabase,
+      parsed.contactId,
+    );
+    if (!fallbackThreadId) return null;
+    resolvedThreadId = fallbackThreadId;
+    parsed = parseThreadId(fallbackThreadId);
+  }
+
   let query = supabase
     .from("messages")
     .select("*")
@@ -80,7 +92,7 @@ export async function fetchInboxDetail(
   const p = propertyRes.data;
 
   return {
-    threadId,
+    threadId: resolvedThreadId,
     conversationId,
     contactId,
     contactName: c
@@ -97,4 +109,30 @@ export async function fetchInboxDetail(
     outreachDispo: p?.outreach_dispo ?? null,
     initialMessages: messages,
   };
+}
+
+async function resolveConcreteThreadIdForContact(
+  supabase: SupabaseClient<Database>,
+  contactId: string,
+): Promise<string | null> {
+  const { data: messages, error } = await supabase
+    .from("messages")
+    .select("conversation_id, property_id, created_at")
+    .eq("channel", "sms")
+    .eq("contact_id", contactId)
+    .order("created_at", { ascending: false })
+    .limit(100);
+  if (error || !messages || messages.length === 0) return null;
+
+  const uniqueThreadIds = Array.from(
+    new Set(
+      messages.map((message) =>
+        buildThreadId(message.conversation_id, contactId, message.property_id),
+      ),
+    ),
+  );
+  if (uniqueThreadIds.length !== 1) {
+    return null;
+  }
+  return uniqueThreadIds[0] ?? null;
 }

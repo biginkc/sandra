@@ -11,7 +11,7 @@ export type EventType =
   | "skip_trace_requested"
   | "task_assigned";
 
-export type EntityType = "property" | "job" | "task";
+export type EntityType = "property" | "job" | "task" | "message";
 
 /**
  * One row in the `notifications` table. `camelCase` for app-layer

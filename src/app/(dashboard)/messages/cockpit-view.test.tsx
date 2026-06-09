@@ -81,13 +81,14 @@ vi.mock("sonner", () => ({
 function makeThread(
   overrides: Partial<Thread> & { contactId: string },
 ): Thread {
+  const propertyId = overrides.propertyId ?? `prop-${overrides.contactId}`;
   return {
-    threadId: overrides.threadId ?? overrides.contactId,
+    threadId: overrides.threadId ?? `legacy:${overrides.contactId}:${propertyId}`,
     conversationId: overrides.conversationId ?? null,
     contactId: overrides.contactId,
     contactName: overrides.contactName ?? `Contact ${overrides.contactId}`,
     contactPhone: overrides.contactPhone ?? "+15551234567",
-    propertyId: overrides.propertyId ?? `prop-${overrides.contactId}`,
+    propertyId,
     propertyAddress: overrides.propertyAddress ?? "123 Main St",
     lastMessageAt: overrides.lastMessageAt ?? "2026-04-29T12:00:00Z",
     lastMessageBody: overrides.lastMessageBody ?? "hello",
@@ -125,13 +126,14 @@ function makeMessage(
 }
 
 function makeDetail(contactId: string, body: string): InboxDetailData {
+  const propertyId = `prop-${contactId}`;
   return {
-    threadId: contactId,
+    threadId: `legacy:${contactId}:${propertyId}`,
     conversationId: null,
     contactId,
     contactName: `Contact ${contactId}`,
     contactPhone: "+15551234567",
-    propertyId: `prop-${contactId}`,
+    propertyId,
     propertyAddress: "123 Main St, Albany, NY",
     assigneeId: null,
     propertyStatus: "prospect",
@@ -234,11 +236,11 @@ describe("<CockpitView /> URL deep-linking", () => {
     expect(panel).toHaveTextContent("thread B body");
     expect(panel).not.toHaveTextContent("thread A body");
 
-    expect(screen.getByTestId("inbox-thread-contact-b")).toHaveAttribute(
+    expect(screen.getByTestId(threadBTestId(threadB.threadId))).toHaveAttribute(
       "data-selected",
       "true",
     );
-    expect(screen.getByTestId("inbox-thread-contact-a")).not.toHaveAttribute(
+    expect(screen.getByTestId(threadBTestId(threadA.threadId))).not.toHaveAttribute(
       "data-selected",
     );
   });
@@ -258,12 +260,12 @@ describe("<CockpitView /> URL deep-linking", () => {
         {...baseProps}
         activeTab="inbox"
         threads={[threadA, threadB]}
-        selectedThreadId="contact-a"
+        selectedThreadId={threadA.threadId}
         threadDetail={makeDetail("contact-a", "thread A body")}
       />,
     );
 
-    fireEvent.click(screen.getByTestId("inbox-thread-contact-b"));
+    fireEvent.click(screen.getByTestId(threadBTestId(threadB.threadId)));
     expect(screen.getByTestId("inbox-detail-loading")).toBeInTheDocument();
 
     view.rerender(
@@ -271,7 +273,7 @@ describe("<CockpitView /> URL deep-linking", () => {
         {...baseProps}
         activeTab="inbox"
         threads={[threadA, threadB]}
-        selectedThreadId="contact-b"
+        selectedThreadId={threadB.threadId}
         threadDetail={null}
       />,
     );
@@ -284,3 +286,7 @@ describe("<CockpitView /> URL deep-linking", () => {
     expect(screen.getByTestId("inbox-detail-empty")).toBeVisible();
   });
 });
+
+function threadBTestId(threadId: string): string {
+  return `inbox-thread-${threadId}`;
+}

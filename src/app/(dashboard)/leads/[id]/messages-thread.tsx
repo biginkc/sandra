@@ -17,6 +17,20 @@ type Props = {
   propertyId: string;
 };
 
+export function messageBelongsToThread(
+  row: Message,
+  scope: {
+    contactId: string | null;
+    conversationId: string | null;
+    propertyId: string;
+  },
+): boolean {
+  if (scope.conversationId !== null) {
+    return row.conversation_id === scope.conversationId;
+  }
+  return row.property_id === scope.propertyId || Boolean(scope.contactId && row.contact_id === scope.contactId);
+}
+
 /**
  * SMS conversation view for the lead detail page. Outbound bubbles on
  * the right, inbound on the left. Subscribes to the `messages` table
@@ -56,11 +70,13 @@ export function MessagesThread({
           { event: "INSERT", schema: "public", table: "messages" },
           (payload) => {
             const row = payload.new as Message;
-            const belongs =
-              (conversationId !== null && row.conversation_id === conversationId) ||
-              row.property_id === propertyId ||
-              (contactId && row.contact_id === contactId);
-            if (belongs) {
+            if (
+              messageBelongsToThread(row, {
+                contactId,
+                conversationId,
+                propertyId,
+              })
+            ) {
               setMessages((prev) => {
                 if (prev.some((m) => m.id === row.id)) return prev;
                 return [...prev, row].sort((a, b) =>

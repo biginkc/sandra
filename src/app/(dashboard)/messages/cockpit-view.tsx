@@ -111,6 +111,21 @@ export function CockpitView({
     return undefined;
   }, [pendingThreadId, selectedThreadId]);
 
+  useEffect(() => {
+    if (
+      pendingThreadId !== null ||
+      !selectedThreadId ||
+      !threadDetail?.threadId ||
+      selectedThreadId === threadDetail.threadId
+    ) {
+      return;
+    }
+
+    const sp = new URLSearchParams(searchParams.toString());
+    sp.set("thread", threadDetail.threadId);
+    router.replace(`/messages?${sp.toString()}`);
+  }, [pendingThreadId, router, searchParams, selectedThreadId, threadDetail?.threadId]);
+
   // Skeleton shows when the user has clicked a thread that the server
   // hasn't returned yet. Same-thread re-clicks: pendingContactId
   // matches threadDetail.contactId already → no skeleton.
@@ -181,8 +196,8 @@ export function CockpitView({
                 initial={threads}
                 selectedThreadId={
                   pendingThreadId ??
-                  selectedThreadId ??
                   threadDetail?.threadId ??
+                  selectedThreadId ??
                   null
                 }
                 currentUserId={currentUserId}

@@ -72,6 +72,7 @@ export async function createNotification(
 export async function dispatchOwnerMessageAdded(
   supabase: SupabaseClient<Database>,
   params: {
+    messageId: string;
     propertyId: string;
     adminUserIds: readonly string[];
     messageBody?: string | null;
@@ -92,8 +93,8 @@ export async function dispatchOwnerMessageAdded(
   return createNotification(supabase, {
     orgId: property.org_id,
     eventType: "owner_message_added",
-    entityType: "property",
-    entityId: property.id,
+    entityType: "message",
+    entityId: params.messageId,
     payload: { propertyAddress: property.address, messageBody: params.messageBody },
     recipients,
   });

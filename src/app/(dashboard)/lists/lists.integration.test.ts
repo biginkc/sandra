@@ -252,7 +252,11 @@ describe("Lists + property_lists stacking (integration)", () => {
     }> {
       const { data: imp } = await testClient
         .from("csv_imports")
-        .insert({ filename: "test.csv", source: "generic", market: "Kansas City" })
+        .insert({
+          filename: "test.csv",
+          source: "dealmachine",
+          market: "Kansas City",
+        })
         .select("id")
         .single();
       const { data: job } = await testClient
@@ -278,7 +282,7 @@ describe("Lists + property_lists stacking (integration)", () => {
       await runIngestion(testClient, {
         jobId,
         csvImportId: importId,
-        source: "generic",
+        source: "dealmachine",
         market: "Kansas City",
         mapping: baseMapping,
         rows: [row],
@@ -303,7 +307,7 @@ describe("Lists + property_lists stacking (integration)", () => {
       await runIngestion(testClient, {
         jobId: a.jobId,
         csvImportId: a.importId,
-        source: "generic",
+        source: "dealmachine",
         market: "Kansas City",
         mapping: baseMapping,
         rows: [row],
@@ -315,7 +319,7 @@ describe("Lists + property_lists stacking (integration)", () => {
       await runIngestion(testClient, {
         jobId: b.jobId,
         csvImportId: b.importId,
-        source: "generic",
+        source: "dealmachine",
         market: "Kansas City",
         mapping: baseMapping,
         rows: [row],
@@ -344,7 +348,7 @@ describe("Lists + property_lists stacking (integration)", () => {
       await runIngestion(testClient, {
         jobId: a.jobId,
         csvImportId: a.importId,
-        source: "generic",
+        source: "dealmachine",
         market: "Kansas City",
         mapping: baseMapping,
         rows: [row],
@@ -364,7 +368,7 @@ describe("Lists + property_lists stacking (integration)", () => {
       await runIngestion(testClient, {
         jobId: b.jobId,
         csvImportId: b.importId,
-        source: "generic",
+        source: "dealmachine",
         market: "Kansas City",
         mapping: baseMapping,
         rows: [row],
@@ -389,7 +393,7 @@ describe("Lists + property_lists stacking (integration)", () => {
       await runIngestion(testClient, {
         jobId,
         csvImportId: importId,
-        source: "generic",
+        source: "dealmachine",
         market: "Kansas City",
         mapping: baseMapping,
         rows: [row],

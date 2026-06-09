@@ -85,6 +85,7 @@ export type SendSmsInput = {
    */
   queueOnly?: boolean;
   scheduledFor?: Date | null;
+  metadata?: Json | null;
 };
 
 export async function sendSmsToContact(
@@ -194,6 +195,7 @@ export async function sendSmsToContact(
       from_address: fromAddress,
       to_address: normalizedToPhone,
       body: input.body,
+      metadata: input.metadata ?? null,
     })
     .select("id")
     .single();
@@ -215,7 +217,13 @@ export async function sendSmsToContact(
       status: "sent",
       external_id: result.externalId,
       sent_at: new Date().toISOString(),
-      metadata: { providerStatus: result.providerStatus, raw: result.raw } as Json,
+      metadata: {
+        ...(input.metadata && typeof input.metadata === "object" && !Array.isArray(input.metadata)
+          ? input.metadata
+          : {}),
+        providerStatus: result.providerStatus,
+        raw: result.raw,
+      } as Json,
     };
     const { error: updateError } = await supabase
       .from("messages")
@@ -311,6 +319,7 @@ async function queueForLater(
       to_address: normalizedToPhone,
       body: input.body,
       scheduled_for: input.scheduledFor?.toISOString() ?? null,
+      metadata: input.metadata ?? null,
     })
     .select("id")
     .single();
