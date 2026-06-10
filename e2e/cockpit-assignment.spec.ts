@@ -25,7 +25,7 @@ async function seedAssignedThread(
     body?: string;
     offsetMin?: number;
   },
-): Promise<{ contactId: string; propertyId: string }> {
+): Promise<{ contactId: string; propertyId: string; threadId: string }> {
   const { data: contact, error: contactErr } = await admin
     .from("contacts")
     .insert({
@@ -76,7 +76,11 @@ async function seedAssignedThread(
     expect(error).toBeNull();
     expect(data?.id).toBe(prop.id);
   }).toPass({ timeout: 10_000 });
-  return { contactId: contact.id, propertyId: prop.id };
+  return {
+    contactId: contact.id,
+    propertyId: prop.id,
+    threadId: `legacy:${contact.id}:${prop.id}`,
+  };
 }
 
 test("Each assigned thread row tags itself with the viewer's assignment state", async ({
@@ -99,7 +103,7 @@ test("Each assigned thread row tags itself with the viewer's assignment state", 
   });
 
   await page.goto("/messages");
-  const row = page.getByTestId(`inbox-thread-${mine.contactId}`);
+  const row = page.getByTestId(`inbox-thread-${mine.threadId}`);
   await expect(row).toBeVisible();
   await expect(row).toHaveAttribute("data-assignee-mine", "true");
 });

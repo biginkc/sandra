@@ -97,7 +97,7 @@ These are config knobs that exist as live behavior but have zero UI — admin mu
 
 ### B5. Messaging provider (`MESSAGING_PROVIDER`)
 - File: `src/lib/messaging/registry.ts:17-32`
-- Knob: env var values `dialpad` | `mock`. Comments `// case "twilio"` as future.
+- Knob: env var values `dialpad` | `sendillo` | `twilio` | `mock`.
 - Recommendation: build into `/admin/integrations`.
 
 ### B6. Vendor secrets — Tracerfy
@@ -107,8 +107,13 @@ These are config knobs that exist as live behavior but have zero UI — admin mu
 
 ### B7. Vendor secrets — Dialpad
 - File: `src/lib/messaging/providers/dialpad.ts:326-328`
-- Knobs: `DIALPAD_API_KEY`, `DIALPAD_FROM_NUMBER`, `DIALPAD_WEBHOOK_SECRET`. Send-pipeline pulls from-number on every send (`src/lib/messaging/send.ts:172, 278`).
+- Knobs: `DIALPAD_API_KEY`, `DIALPAD_FROM_NUMBER`, `DIALPAD_WEBHOOK_SECRET`.
 - Recommendation: status tile only. Tie into the Dialpad rotation runbook (`scripts/rotate-dialpad-secret.ts`).
+
+### B7b. Vendor secrets — Sendillo
+- File: `src/lib/messaging/providers/sendillo.ts`
+- Knobs: `SENDILLO_API_KEY`, `SENDILLO_FROM_NUMBER`.
+- Recommendation: status tile only. Inbound should remain flagged as gated until the webhook signature contract and exact inbound payload are confirmed from authenticated Sendillo docs or a captured live delivery.
 
 ### B8. Vendor secrets — SmartyStreets
 - File: `src/lib/enrichment/providers/smartystreets.ts:196-197`

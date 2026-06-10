@@ -24,7 +24,7 @@ async function seedThread(
     addressTag: string;
     bodies: Array<{ direction: "inbound" | "outbound"; body: string; offsetMin: number; read?: boolean }>;
   },
-): Promise<{ contactId: string; propertyId: string }> {
+): Promise<{ contactId: string; propertyId: string; threadId: string }> {
   const { data: contact } = await admin
     .from("contacts")
     .insert({
@@ -60,7 +60,11 @@ async function seedThread(
           : null,
     });
   }
-  return { contactId: contact.id, propertyId: prop.id };
+  return {
+    contactId: contact.id,
+    propertyId: prop.id,
+    threadId: `legacy:${contact.id}:${prop.id}`,
+  };
 }
 
 test("long thread scrolls to most recent on open (test 18)", async ({ page }) => {
@@ -105,7 +109,7 @@ test("opening a thread clears its unread badge (test 19)", async ({ page }) => {
   await resetTenantTables(admin);
   await ensureTestUser(admin);
 
-  const { contactId, propertyId } = await seedThread(admin, {
+  const { contactId, propertyId, threadId } = await seedThread(admin, {
     phone: "+18165557105",
     addressTag: "PANEL-UNREAD",
     bodies: [
@@ -116,10 +120,10 @@ test("opening a thread clears its unread badge (test 19)", async ({ page }) => {
 
   await page.goto("/messages");
   await expect(
-    page.getByTestId(`inbox-thread-${contactId}-unread`),
+    page.getByTestId(`inbox-thread-${threadId}-unread`),
   ).toBeVisible();
 
-  await page.getByTestId(`inbox-thread-${contactId}`).click();
+  await page.getByTestId(`inbox-thread-${threadId}`).click();
   await page.waitForURL(new RegExp(`thread=${contactId}`));
 
   // Server stamped read_at on those inbound rows when we opened the panel.

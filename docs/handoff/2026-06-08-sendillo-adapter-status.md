@@ -170,22 +170,22 @@ What changed after the earlier handoff:
 
 Test-project schema state repaired for this lane:
 
-- `sandra-crm-test` had drifted: the live test schema still rejected `provider='sendillo'` and lacked the inbound unique index even though remote migration history had already recorded `062`
-- the lane was unblocked by applying the corrected SQL packet from `supabase/migrations/062_sendillo_provider_and_inbound_idempotency.sql` directly to `sandra-crm-test`
-- local migration `062` was corrected before that apply so `jobs_provider_check` preserved existing `mock` and `tracerfy` values while adding `sendillo`
+- `sandra-crm-test` and production are now aligned on the Sendillo rollout packet carried by migrations `071` through `074`
+- those applied migrations cover the provider rollout schema, reset/idempotency hardening, provider-scoped consent-event idempotency, and AI inbound-reply uniqueness
+- any follow-up schema work for this lane must ship as `075+`; the `062` packet is no longer the live reality for this branch
 
 Manual review findings that were accepted and fixed:
 
-- migration `062` initially dropped valid existing `jobs.provider` values
+- the Sendillo rollout packet now preserves valid existing provider values under the applied `071` through `074` schema set
 - `releaseQueuedMessage()` could let two workers both think they claimed the same queued row
 - inbound write failures were ACKed with `200`, which could silently lose inbound SMS
 
 Manual review findings left as explicit residual gaps:
 
-- Sendillo still has no verified provider-primary signing contract; query-param shared secret remains a fallback and leaks into access logs
+- Sendillo still has no verified provider-primary signing contract; the route now uses header-only shared-secret verification, but provider-native signing remains unproven
 - if a webhook attempt inserts the inbound row and then crashes during downstream side effects, a resumed retry now favors "do not double-send notifications/AI" over "re-run every side effect"; that tradeoff is intentional for now but not a perfect exactly-once design
 - keyword branches can still append duplicate audit rows on a resumed STOP/DNC replay because compliance-side opt-out is intentionally applied before the message insert branch decides whether the inbound row is a duplicate
-- migration `062` assumes the target DB does not already contain duplicate inbound `(provider, external_id)` rows; if prod already has duplicates, the unique index creation would need a cleanup step first
+- the applied uniqueness guards in migrations `071` through `074` still assume the target DB does not already contain conflicting historical rows; if a later environment has duplicates, the next schema packet would need a cleanup step first
 
 Latest focused verification after the review fixes:
 

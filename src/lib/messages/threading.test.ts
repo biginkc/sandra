@@ -22,23 +22,36 @@ const UUID_RE =
 function makeFallbackSupabase(
   opts: {
     existingConversationId?: string | null;
+    existingConversationIds?: string[];
+    rpcErrorCode?: string;
     rpcErrorMessage?: string;
   } = {},
 ): SupabaseClient<Database> {
+  let existingOrderAscending = false;
   const messagesBuilder: Record<string, unknown> = {};
   Object.assign(messagesBuilder, {
     select: () => messagesBuilder,
     update: () => messagesBuilder,
     eq: () => messagesBuilder,
     not: () => messagesBuilder,
-    order: () => messagesBuilder,
+    order: (_column: string, opts?: { ascending?: boolean }) => {
+      existingOrderAscending = opts?.ascending ?? false;
+      return messagesBuilder;
+    },
     limit: () => messagesBuilder,
     // Terminal of the existing-conversation lookup.
     maybeSingle: () =>
       Promise.resolve({
-        data: opts.existingConversationId
-          ? { conversation_id: opts.existingConversationId }
-          : null,
+        data:
+          opts.existingConversationIds && opts.existingConversationIds.length > 0
+            ? {
+                conversation_id: existingOrderAscending
+                  ? opts.existingConversationIds[0]
+                  : opts.existingConversationIds[opts.existingConversationIds.length - 1],
+              }
+            : opts.existingConversationId
+              ? { conversation_id: opts.existingConversationId }
+              : null,
         error: null,
       }),
     // Terminal of the null-conversation backfill update.
@@ -50,6 +63,7 @@ function makeFallbackSupabase(
       Promise.resolve({
         data: null,
         error: {
+          code: opts.rpcErrorCode ?? "PGRST202",
           message:
             opts.rpcErrorMessage ??
             "Could not find the function public.ensure_sms_conversation_id(p_contact_id, p_property_id) in the schema cache",
@@ -120,15 +134,59 @@ describe("ensureConversationIdForThread — fallback (RPC / registry migration a
     expect(resolved).toBe(existing);
   });
 
+  it("adopts the earliest existing conversation id when the fallback sees multiple historical rows", async () => {
+    const earliest = "11111111-2222-4333-8444-555555555555";
+    const latest = "99999999-8888-4777-8666-555555555555";
+    const resolved = await ensureConversationIdForThread(
+      makeFallbackSupabase({
+        existingConversationIds: [earliest, latest],
+      }),
+      CONTACT,
+      PROPERTY,
+    );
+
+    expect(resolved).toBe(earliest);
+  });
+
+  it("normalizes contact/property UUID casing before hashing", async () => {
+    const lowercase = await ensureConversationIdForThread(
+      makeFallbackSupabase(),
+      CONTACT.toLowerCase(),
+      PROPERTY.toLowerCase(),
+    );
+    const uppercase = await ensureConversationIdForThread(
+      makeFallbackSupabase(),
+      CONTACT.toUpperCase(),
+      PROPERTY.toUpperCase(),
+    );
+
+    expect(uppercase).toBe(lowercase);
+  });
+
   it("fails closed when the RPC rejects the contact/property pair instead of falling back", async () => {
     await expect(
       ensureConversationIdForThread(
         makeFallbackSupabase({
+          rpcErrorCode: "42501",
           rpcErrorMessage: "contact/property thread scope not found",
         }),
         CONTACT,
         PROPERTY,
       ),
     ).rejects.toThrow("contact/property thread scope not found");
+  });
+
+  it("fails closed on permission-style schema cache errors instead of silently falling back", async () => {
+    await expect(
+      ensureConversationIdForThread(
+        makeFallbackSupabase({
+          rpcErrorCode: "42501",
+          rpcErrorMessage:
+            "permission denied for function ensure_sms_conversation_id while loading schema cache",
+        }),
+        CONTACT,
+        PROPERTY,
+      ),
+    ).rejects.toThrow("permission denied for function ensure_sms_conversation_id");
   });
 });

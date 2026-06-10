@@ -14,7 +14,10 @@ import { qualifyProperty } from "@/lib/leads/qualify";
 import { resolveInboundThread } from "@/lib/messages/threading";
 import { normalizePhone } from "@/lib/csv/normalize";
 import { recordConsentEvent } from "@/lib/messaging/consent";
-import { dispatchOwnerMessageAdded } from "@/lib/notifications/dispatch";
+import {
+  dispatchOwnerMessageAdded,
+  dispatchOwnerMessageAddedNeedsTriage,
+} from "@/lib/notifications/dispatch";
 import {
   pauseContactEnrollments,
   pausePropertyEnrollments,
@@ -29,10 +32,15 @@ const WRONG_NUMBER_KEYWORDS = /wrong number|wrong person|not the owner|don'?t ow
 const WEBHOOK_PROCESSING_LEASE_MS = 5 * 60_000;
 
 function createServiceRoleClient() {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL ?? process.env.TEST_SUPABASE_URL;
-  const key =
-    process.env.SUPABASE_SERVICE_ROLE_KEY ??
-    process.env.TEST_SUPABASE_SERVICE_ROLE_KEY;
+  const useTestEnv =
+    process.env.NODE_ENV === "test" || process.env.VITEST === "true";
+  const url = useTestEnv
+    ? (process.env.TEST_SUPABASE_URL ?? process.env.NEXT_PUBLIC_SUPABASE_URL)
+    : process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const key = useTestEnv
+    ? (process.env.TEST_SUPABASE_SERVICE_ROLE_KEY ??
+        process.env.SUPABASE_SERVICE_ROLE_KEY)
+    : process.env.SUPABASE_SERVICE_ROLE_KEY;
   if (!url || !key) {
     throw new Error(
       "Inbound webhook needs SUPABASE_SERVICE_ROLE_KEY in .env.local to write past RLS.",
@@ -307,11 +315,35 @@ export async function handleInboundWebhook(
       }
       const effectiveContactId = insertOutcome.contactId ?? contactId;
       const effectivePropertyId = insertOutcome.propertyId ?? propertyId;
-      if (!effectivePropertyId || !insertOutcome.messageId) {
+      if (!insertOutcome.messageId) {
         await markWebhookEventProcessed(supabase, provider.providerId, ev.externalId);
         continue;
       }
       const inboundState = readInboundMessageState(insertOutcome.metadata);
+
+      if (!effectivePropertyId) {
+        if (effectiveContactId && !inboundState.ownerNotificationSentAt) {
+          try {
+            const adminUserIds = await listAdminUserIds(supabase);
+            await dispatchOwnerMessageAddedNeedsTriage(supabase, {
+              messageId: insertOutcome.messageId,
+              contactId: effectiveContactId,
+              adminUserIds,
+              messageBody: ev.body,
+            });
+            await markInboundMessageState(supabase, insertOutcome.messageId, {
+              ownerNotificationSentAt: new Date().toISOString(),
+            });
+          } catch (e) {
+            reportError(e, {
+              tags: { surface: `${provider.providerId}_webhook_notification_triage` },
+              extra: { contactId: effectiveContactId, externalId: ev.externalId },
+            });
+          }
+        }
+        await markWebhookEventProcessed(supabase, provider.providerId, ev.externalId);
+        continue;
+      }
 
       const { data: cur } = await supabase
         .from("properties")
@@ -712,7 +744,10 @@ async function applyPhoneLevelOptOut(
     idempotencyKey: string;
   },
 ) {
-  const contactIds = input.contactId ? [input.contactId] : [];
+  const contactIds = await loadAllContactIdsByPhone(supabase, input.fromPhone);
+  if (input.contactId) {
+    contactIds.add(input.contactId);
+  }
   for (const contactId of contactIds) {
     try {
       await recordConsentEvent(supabase, {
@@ -753,6 +788,31 @@ async function applyPhoneLevelOptOut(
       });
     }
   }
+}
+
+async function loadAllContactIdsByPhone(
+  supabase: SupabaseClient<Database>,
+  rawPhone: string,
+): Promise<Set<string>> {
+  const normalizedPhone = normalizePhone(rawPhone);
+  if (!normalizedPhone) return new Set<string>();
+
+  const results = await Promise.all([
+    supabase.from("contacts").select("id").eq("phone_1", normalizedPhone),
+    supabase.from("contacts").select("id").eq("phone_2", normalizedPhone),
+    supabase.from("contacts").select("id").eq("phone_3", normalizedPhone),
+  ]);
+
+  const contactIds = new Set<string>();
+  for (const result of results) {
+    if (result.error) {
+      throw new Error(`loadAllContactIdsByPhone: ${result.error.message}`);
+    }
+    for (const row of result.data ?? []) {
+      contactIds.add(row.id);
+    }
+  }
+  return contactIds;
 }
 
 function isWebhookProcessingLeaseExpired(

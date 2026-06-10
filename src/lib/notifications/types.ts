@@ -39,6 +39,7 @@ type Notification = {
  */
 export type FormatPayload = {
   propertyAddress?: string | null;
+  needsPropertyTriage?: boolean;
   assignerName?: string | null;
   jobType?: string | null;
   state?: string | null;

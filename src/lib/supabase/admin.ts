@@ -16,11 +16,11 @@ export function createAdminClient(): SupabaseClient<Database> {
   const useTestEnv =
     process.env.NODE_ENV === "test" || process.env.VITEST === "true";
   const url = useTestEnv
-    ? (process.env.NEXT_PUBLIC_SUPABASE_URL ?? process.env.TEST_SUPABASE_URL)
+    ? (process.env.TEST_SUPABASE_URL ?? process.env.NEXT_PUBLIC_SUPABASE_URL)
     : process.env.NEXT_PUBLIC_SUPABASE_URL;
   const key = useTestEnv
-    ? (process.env.SUPABASE_SERVICE_ROLE_KEY ??
-        process.env.TEST_SUPABASE_SERVICE_ROLE_KEY)
+    ? (process.env.TEST_SUPABASE_SERVICE_ROLE_KEY ??
+        process.env.SUPABASE_SERVICE_ROLE_KEY)
     : process.env.SUPABASE_SERVICE_ROLE_KEY;
   if (!url || !key) {
     throw new Error(

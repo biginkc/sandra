@@ -105,7 +105,7 @@ export class SendilloMessagingProvider implements MessagingProvider {
   verifyWebhookSignature(
     _rawBody: string,
     headers: Headers,
-    fullUrl?: string,
+    _fullUrl?: string,
   ): boolean {
     if (!this.webhookSecret) return false;
 
@@ -116,16 +116,6 @@ export class SendilloMessagingProvider implements MessagingProvider {
     }
     const explicitHeader = headers.get("x-sendillo-webhook-secret");
     if (explicitHeader) candidates.add(explicitHeader.trim());
-
-    if (fullUrl) {
-      try {
-        const url = new URL(fullUrl);
-        const querySecret = url.searchParams.get("secret");
-        if (querySecret) candidates.add(querySecret.trim());
-      } catch {
-        return false;
-      }
-    }
 
     for (const candidate of candidates) {
       if (constantTimeEqual(candidate, this.webhookSecret)) return true;

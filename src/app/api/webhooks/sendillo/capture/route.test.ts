@@ -16,48 +16,64 @@ vi.mock("@/lib/errors/report", () => ({
 
 import { GET, POST } from "./route";
 
-describe("POST /api/webhooks/sendillo/capture/[secret]", () => {
+describe("POST /api/webhooks/sendillo/capture", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.stubEnv("NEXT_PUBLIC_SUPABASE_URL", "https://supabase.test");
     vi.stubEnv("SUPABASE_SERVICE_ROLE_KEY", "service-role-key");
     vi.stubEnv("SENDILLO_CAPTURE_SECRET", "capture-secret");
+    vi.stubEnv("SENDILLO_CAPTURE_ENABLED", "true");
 
     insertMock.mockResolvedValue({ error: null });
     fromMock.mockReturnValue({ insert: insertMock });
     createClientMock.mockReturnValue({ from: fromMock });
   });
 
+  it("returns 404 when capture is disabled", async () => {
+    vi.stubEnv("SENDILLO_CAPTURE_ENABLED", "false");
+
+    const response = await POST(
+      new Request("https://sandra.test/api/webhooks/sendillo/capture", {
+        method: "POST",
+        body: "{}",
+      }),
+    );
+
+    expect(response.status).toBe(404);
+    expect(createClientMock).not.toHaveBeenCalled();
+  });
+
   it("returns 503 when no capture secret is configured", async () => {
     vi.unstubAllEnvs();
     vi.stubEnv("NEXT_PUBLIC_SUPABASE_URL", "https://supabase.test");
     vi.stubEnv("SUPABASE_SERVICE_ROLE_KEY", "service-role-key");
+    vi.stubEnv("SENDILLO_CAPTURE_ENABLED", "true");
 
     const response = await POST(
-      new Request("https://sandra.test/api/webhooks/sendillo/capture/anything", {
+      new Request("https://sandra.test/api/webhooks/sendillo/capture", {
         method: "POST",
+        headers: { "x-sendillo-capture-secret": "anything" },
         body: "{}",
       }),
-      { params: Promise.resolve({ secret: "anything" }) },
     );
 
     expect(response.status).toBe(503);
   });
 
-  it("returns 401 when the secret path segment is wrong", async () => {
+  it("returns 401 when the capture secret header is wrong", async () => {
     const response = await POST(
-      new Request("https://sandra.test/api/webhooks/sendillo/capture/wrong", {
+      new Request("https://sandra.test/api/webhooks/sendillo/capture", {
         method: "POST",
+        headers: { "x-sendillo-capture-secret": "wrong" },
         body: "{}",
       }),
-      { params: Promise.resolve({ secret: "wrong" }) },
     );
 
     expect(response.status).toBe(401);
     expect(createClientMock).not.toHaveBeenCalled();
   });
 
-  it("lists recent captures for the deployment-local database", async () => {
+  it("lists recent captures when explicitly enabled and authorized", async () => {
     fromMock.mockReturnValueOnce({
       select: () => ({
         eq: () => ({
@@ -83,8 +99,9 @@ describe("POST /api/webhooks/sendillo/capture/[secret]", () => {
     });
 
     const response = await GET(
-      new Request("https://sandra.test/api/webhooks/sendillo/capture/capture-secret"),
-      { params: Promise.resolve({ secret: "capture-secret" }) },
+      new Request("https://sandra.test/api/webhooks/sendillo/capture", {
+        headers: { authorization: "Bearer capture-secret" },
+      }),
     );
 
     expect(response.status).toBe(200);
@@ -100,25 +117,14 @@ describe("POST /api/webhooks/sendillo/capture/[secret]", () => {
     });
   });
 
-  it("disables capture reads in production", async () => {
-    vi.stubEnv("VERCEL_ENV", "production");
-
-    const response = await GET(
-      new Request("https://sandra.test/api/webhooks/sendillo/capture/capture-secret"),
-      { params: Promise.resolve({ secret: "capture-secret" }) },
-    );
-
-    expect(response.status).toBe(404);
-    expect(createClientMock).not.toHaveBeenCalled();
-  });
-
   it("captures a parsed Sendillo payload into webhook_events", async () => {
     const response = await POST(
-      new Request("https://sandra.test/api/webhooks/sendillo/capture/capture-secret", {
+      new Request("https://sandra.test/api/webhooks/sendillo/capture", {
         method: "POST",
         headers: {
           "content-type": "application/json",
           "x-sendillo-attempt": "1",
+          "x-sendillo-capture-secret": "capture-secret",
         },
         body: JSON.stringify({
           event: "inbound.received",
@@ -130,7 +136,6 @@ describe("POST /api/webhooks/sendillo/capture/[secret]", () => {
           },
         }),
       }),
-      { params: Promise.resolve({ secret: "capture-secret" }) },
     );
 
     expect(response.status).toBe(200);
@@ -147,10 +152,11 @@ describe("POST /api/webhooks/sendillo/capture/[secret]", () => {
     const insertedPayload = insertMock.mock.calls[0]?.[0]?.payload;
     expect(insertedPayload).toMatchObject({
       method: "POST",
-      url: "https://sandra.test/api/webhooks/sendillo/capture/[redacted]",
+      url: "https://sandra.test/api/webhooks/sendillo/capture",
       headers: {
         "content-type": "application/json",
         "x-sendillo-attempt": "1",
+        "x-sendillo-capture-secret": "[redacted]",
       },
       rawBody: JSON.stringify({
         event: "inbound.received",
@@ -174,26 +180,27 @@ describe("POST /api/webhooks/sendillo/capture/[secret]", () => {
     expect(insertedPayload.headers.authorization).toBeUndefined();
   });
 
-  it("redacts auth-bearing headers and secret-bearing URLs before storing the capture", async () => {
+  it("redacts auth-bearing headers before storing the capture", async () => {
     await POST(
-      new Request("https://sandra.test/api/webhooks/sendillo/capture/capture-secret?secret=capture-secret", {
+      new Request("https://sandra.test/api/webhooks/sendillo/capture?secret=nope", {
         method: "POST",
         headers: {
-          authorization: "Bearer sendillo-secret",
+          authorization: "Bearer capture-secret",
+          "x-sendillo-capture-secret": "capture-secret",
           "x-sendillo-webhook-secret": "sendillo-secret",
           "x-api-token": "abc123",
         },
         body: JSON.stringify({ event: "message.sent", messageId: "msg_redacted" }),
       }),
-      { params: Promise.resolve({ secret: "capture-secret" }) },
     );
 
     const insertedPayload = insertMock.mock.calls[0]?.[0]?.payload;
     expect(insertedPayload.url).toBe(
-      "https://sandra.test/api/webhooks/sendillo/capture/[redacted]",
+      "https://sandra.test/api/webhooks/sendillo/capture",
     );
     expect(insertedPayload.headers).toMatchObject({
       authorization: "[redacted]",
+      "x-sendillo-capture-secret": "[redacted]",
       "x-sendillo-webhook-secret": "[redacted]",
       "x-api-token": "[redacted]",
     });
@@ -203,11 +210,11 @@ describe("POST /api/webhooks/sendillo/capture/[secret]", () => {
     insertMock.mockResolvedValueOnce({ error: { code: "23505" } });
 
     const response = await POST(
-      new Request("https://sandra.test/api/webhooks/sendillo/capture/capture-secret", {
+      new Request("https://sandra.test/api/webhooks/sendillo/capture", {
         method: "POST",
+        headers: { authorization: "Bearer capture-secret" },
         body: JSON.stringify({ event: "message.delivered", messageId: "msg_dup" }),
       }),
-      { params: Promise.resolve({ secret: "capture-secret" }) },
     );
 
     expect(response.status).toBe(200);

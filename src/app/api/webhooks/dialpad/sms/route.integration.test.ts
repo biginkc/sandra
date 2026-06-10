@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createTestClient } from "@tests/integration/client";
 import { resetTenantTables } from "@tests/integration/reset";
 
+import { listThreads } from "@/lib/messages/list-threads";
 import { POST } from "./route";
 
 // Directly invokes the App Router POST handler with synthetic Request
@@ -12,6 +13,7 @@ import { POST } from "./route";
 // messaging provider accepts signatures equal to "valid".
 
 const supabase = createTestClient();
+const ORIGINAL_ADMIN_EMAILS = process.env.ADMIN_EMAILS;
 
 function makeRequest(payload: object): Request {
   return new Request("https://example.invalid/api/webhooks/dialpad/sms", {
@@ -119,10 +121,12 @@ describe("POST /api/webhooks/dialpad/sms (integration)", () => {
     delete process.env.SUPABASE_SERVICE_ROLE_KEY;
     process.env.NEXT_PUBLIC_SUPABASE_URL = process.env.TEST_SUPABASE_URL;
     process.env.SKIP_INTENT_GATE = "1";
+    process.env.ADMIN_EMAILS = ORIGINAL_ADMIN_EMAILS ?? "";
     await resetTenantTables(supabase);
   });
 
   afterEach(async () => {
+    process.env.ADMIN_EMAILS = ORIGINAL_ADMIN_EMAILS;
     for (const id of createdAuthUsers) {
       await supabase.auth.admin.deleteUser(id);
     }
@@ -352,7 +356,7 @@ describe("POST /api/webhooks/dialpad/sms (integration)", () => {
     expect(notifCount).toBe(0);
   });
 
-  it("STOP scopes opt-out to the resolved contact when duplicate phone records exist", async () => {
+  it("STOP opts out every matching contact even when recipient-number history resolves one thread", async () => {
     const sharedPhone = "+18165559012";
     const firstContactId = await seedContact(sharedPhone, {
       optIn: true,
@@ -401,7 +405,7 @@ describe("POST /api/webhooks/dialpad/sms (integration)", () => {
     expect(contacts).toEqual(
       [
         { id: firstContactId, sms_opted_out: true },
-        { id: secondContactId, sms_opted_out: false },
+        { id: secondContactId, sms_opted_out: true },
       ].sort((left, right) => left.id.localeCompare(right.id)),
     );
 
@@ -411,7 +415,56 @@ describe("POST /api/webhooks/dialpad/sms (integration)", () => {
       .in("contact_id", [firstContactId, secondContactId])
       .eq("event_type", "opt_out")
       .order("contact_id");
-    expect(events).toEqual([{ contact_id: firstContactId, event_type: "opt_out" }]);
+    expect(events).toEqual(
+      [
+        { contact_id: firstContactId, event_type: "opt_out" },
+        { contact_id: secondContactId, event_type: "opt_out" },
+      ].sort((left, right) => left.contact_id.localeCompare(right.contact_id)),
+    );
+  });
+
+  it("STOP opts out every matching contact when the shared phone is ambiguous", async () => {
+    const sharedPhone = "+18165559014";
+    const firstContactId = await seedContact(sharedPhone, { optIn: true });
+    const secondContactId = await seedContact("+18165559015", {
+      optIn: true,
+      phone2: sharedPhone,
+    });
+
+    const res = await POST(
+      makeRequest({
+        externalId: "msg_stop_all_matches_001",
+        from: sharedPhone,
+        to: "+18163706846",
+        body: "STOP",
+      }),
+    );
+    expect(res.status).toBe(200);
+
+    const { data: contacts } = await supabase
+      .from("contacts")
+      .select("id, sms_opted_out")
+      .in("id", [firstContactId, secondContactId])
+      .order("id");
+    expect(contacts).toEqual(
+      [
+        { id: firstContactId, sms_opted_out: true },
+        { id: secondContactId, sms_opted_out: true },
+      ].sort((left, right) => left.id.localeCompare(right.id)),
+    );
+
+    const { data: events } = await supabase
+      .from("consent_events")
+      .select("contact_id, event_type")
+      .in("contact_id", [firstContactId, secondContactId])
+      .eq("event_type", "opt_out")
+      .order("contact_id");
+    expect(events).toEqual(
+      [
+        { contact_id: firstContactId, event_type: "opt_out" },
+        { contact_id: secondContactId, event_type: "opt_out" },
+      ].sort((left, right) => left.contact_id.localeCompare(right.contact_id)),
+    );
   });
 
   it("auto-qualifies the threaded prospect on first inbound reply", async () => {
@@ -904,6 +957,156 @@ describe("POST /api/webhooks/dialpad/sms (integration)", () => {
     });
     expect(notifs?.[0]?.body).toContain("21 Persisted Replay Ln");
     expect(notifs?.[0]?.body).not.toContain("22 Fresh Resolve Ln");
+  });
+
+  it("notifies admins and surfaces a propertyless thread when one contact maps to multiple recipient-number properties", async () => {
+    const phone = "+18165559118";
+    const contactId = await seedContact(phone, { optIn: true });
+    const adminEmail = `triage-admin-${Date.now()}@bmhgroupkc.com`;
+    const adminUserId = await createAuthUser(adminEmail);
+    process.env.ADMIN_EMAILS = adminEmail;
+
+    const { data: propertyA } = await supabase
+      .from("properties")
+      .insert({
+        address: "31 Triage A Ln",
+        state: "MO",
+        status: "prospect",
+        homeowner_contact_id: contactId,
+      })
+      .select("id")
+      .single();
+    const { data: propertyB } = await supabase
+      .from("properties")
+      .insert({
+        address: "32 Triage B Ln",
+        state: "MO",
+        status: "prospect",
+        homeowner_contact_id: contactId,
+      })
+      .select("id")
+      .single();
+
+    await supabase.from("messages").insert([
+      {
+        channel: "sms",
+        direction: "outbound",
+        status: "sent",
+        provider: "mock",
+        from_address: "+18163706846",
+        to_address: phone,
+        body: "thread a",
+        contact_id: contactId,
+        property_id: propertyA!.id,
+      },
+      {
+        channel: "sms",
+        direction: "outbound",
+        status: "sent",
+        provider: "mock",
+        from_address: "+18163706846",
+        to_address: phone,
+        body: "thread b",
+        contact_id: contactId,
+        property_id: propertyB!.id,
+      },
+    ]);
+
+    const inboundBody = "which property is this about?";
+    const res = await POST(
+      makeRequest({
+        externalId: "msg_triage_recipient_001",
+        from: phone,
+        to: "+18163706846",
+        body: inboundBody,
+      }),
+    );
+    expect(res.status).toBe(200);
+
+    const { data: message } = await supabase
+      .from("messages")
+      .select("contact_id, property_id, metadata")
+      .eq("external_id", "msg_triage_recipient_001")
+      .single();
+    expect(message?.contact_id).toBe(contactId);
+    expect(message?.property_id).toBeNull();
+    expect(message?.metadata).toMatchObject({
+      routing: "ambiguous_recipient_number",
+      processing: {
+        ownerNotificationSentAt: expect.any(String),
+      },
+    });
+
+    const { data: notifs } = await supabase
+      .from("notifications")
+      .select("user_id, title, body")
+      .eq("event_type", "owner_message_added")
+      .eq("user_id", adminUserId);
+    expect(notifs).toHaveLength(1);
+    expect(notifs?.[0]?.title).toBe("New SMS reply needs property triage");
+    expect(notifs?.[0]?.body).toContain(inboundBody);
+
+    const threads = await listThreads(supabase, {});
+    expect(
+      threads.some(
+        (thread) =>
+          thread.contactId === contactId &&
+          thread.propertyId === null &&
+          thread.lastMessageBody === inboundBody,
+      ),
+    ).toBe(true);
+  });
+
+  it("notifies admins and surfaces a propertyless thread when a known contact has no linked property", async () => {
+    const phone = "+18165559119";
+    const contactId = await seedContact(phone, { optIn: true });
+    const adminEmail = `triage-noproperty-${Date.now()}@bmhgroupkc.com`;
+    const adminUserId = await createAuthUser(adminEmail);
+    process.env.ADMIN_EMAILS = adminEmail;
+
+    const inboundBody = "texting back with no property history";
+    const res = await POST(
+      makeRequest({
+        externalId: "msg_triage_contact_only_001",
+        from: phone,
+        to: "+18163706846",
+        body: inboundBody,
+      }),
+    );
+    expect(res.status).toBe(200);
+
+    const { data: message } = await supabase
+      .from("messages")
+      .select("contact_id, property_id, metadata")
+      .eq("external_id", "msg_triage_contact_only_001")
+      .single();
+    expect(message?.contact_id).toBe(contactId);
+    expect(message?.property_id).toBeNull();
+    expect(message?.metadata).toMatchObject({
+      routing: "matched_contact_without_property",
+      processing: {
+        ownerNotificationSentAt: expect.any(String),
+      },
+    });
+
+    const { data: notifs } = await supabase
+      .from("notifications")
+      .select("user_id, title, body")
+      .eq("event_type", "owner_message_added")
+      .eq("user_id", adminUserId);
+    expect(notifs).toHaveLength(1);
+    expect(notifs?.[0]?.title).toBe("New SMS reply needs property triage");
+    expect(notifs?.[0]?.body).toContain(inboundBody);
+
+    const threads = await listThreads(supabase, {});
+    expect(
+      threads.some(
+        (thread) =>
+          thread.contactId === contactId &&
+          thread.propertyId === null &&
+          thread.lastMessageBody === inboundBody,
+      ),
+    ).toBe(true);
   });
 
   it("does not duplicate STOP consent events when replay resumes a pending keyword webhook", async () => {

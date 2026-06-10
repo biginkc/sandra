@@ -1,4 +1,5 @@
-import { createHash } from "crypto";
+import { createHash, timingSafeEqual } from "node:crypto";
+
 import { NextResponse } from "next/server";
 import { createClient as createSupabaseClient } from "@supabase/supabase-js";
 
@@ -6,10 +7,15 @@ import { reportError } from "@/lib/errors/report";
 import type { Database, Json } from "@/lib/supabase/types";
 
 function createServiceRoleClient() {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL ?? process.env.TEST_SUPABASE_URL;
-  const key =
-    process.env.SUPABASE_SERVICE_ROLE_KEY ??
-    process.env.TEST_SUPABASE_SERVICE_ROLE_KEY;
+  const useTestEnv =
+    process.env.NODE_ENV === "test" || process.env.VITEST === "true";
+  const url = useTestEnv
+    ? (process.env.TEST_SUPABASE_URL ?? process.env.NEXT_PUBLIC_SUPABASE_URL)
+    : process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const key = useTestEnv
+    ? (process.env.TEST_SUPABASE_SERVICE_ROLE_KEY ??
+        process.env.SUPABASE_SERVICE_ROLE_KEY)
+    : process.env.SUPABASE_SERVICE_ROLE_KEY;
   if (!url || !key) {
     throw new Error(
       "Sendillo capture webhook needs NEXT_PUBLIC_SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY.",
@@ -47,18 +53,17 @@ function captureSecret(): string | null {
   return process.env.SENDILLO_CAPTURE_SECRET ?? null;
 }
 
-function captureReadDisabledInProduction(): boolean {
-  return process.env.VERCEL_ENV === "production";
+function captureEnabled(): boolean {
+  return process.env.SENDILLO_CAPTURE_ENABLED === "true";
 }
 
-function redactUrl(rawUrl: string, secret: string): string {
+function redactUrl(rawUrl: string): string {
   try {
     const url = new URL(rawUrl);
-    url.pathname = url.pathname.replace(`/${secret}`, "/[redacted]");
     url.searchParams.delete("secret");
     return url.toString();
   } catch {
-    return rawUrl.replace(secret, "[redacted]");
+    return rawUrl;
   }
 }
 
@@ -77,7 +82,26 @@ function redactHeaders(headers: Headers): Record<string, string> {
   return redacted;
 }
 
-async function authorizeCaptureSecret(secret: string) {
+function constantTimeEqual(a: string, b: string): boolean {
+  const left = Buffer.from(a);
+  const right = Buffer.from(b);
+  if (left.length !== right.length) return false;
+  return timingSafeEqual(left, right);
+}
+
+function readCaptureCredential(headers: Headers): string | null {
+  const auth = headers.get("authorization");
+  if (auth?.startsWith("Bearer ")) {
+    return auth.slice("Bearer ".length).trim();
+  }
+  return headers.get("x-sendillo-capture-secret")?.trim() ?? null;
+}
+
+async function authorizeCaptureRequest(request: Request) {
+  if (!captureEnabled()) {
+    return NextResponse.json({ error: "Not found" }, { status: 404 });
+  }
+
   const expectedSecret = captureSecret();
   if (!expectedSecret) {
     return NextResponse.json(
@@ -85,22 +109,18 @@ async function authorizeCaptureSecret(secret: string) {
       { status: 503 },
     );
   }
-  if (secret !== expectedSecret) {
+
+  const providedSecret = readCaptureCredential(request.headers);
+  if (!providedSecret || !constantTimeEqual(providedSecret, expectedSecret)) {
     return NextResponse.json({ error: "Invalid secret" }, { status: 401 });
   }
+
   return null;
 }
 
-export async function GET(
-  _request: Request,
-  context: { params: Promise<{ secret: string }> },
-) {
+export async function GET(request: Request) {
   try {
-    if (captureReadDisabledInProduction()) {
-      return NextResponse.json({ error: "Not found" }, { status: 404 });
-    }
-    const { secret } = await context.params;
-    const authError = await authorizeCaptureSecret(secret);
+    const authError = await authorizeCaptureRequest(request);
     if (authError) return authError;
 
     const supabase = createServiceRoleClient();
@@ -130,13 +150,9 @@ export async function GET(
   }
 }
 
-export async function POST(
-  request: Request,
-  context: { params: Promise<{ secret: string }> },
-) {
+export async function POST(request: Request) {
   try {
-    const { secret } = await context.params;
-    const authError = await authorizeCaptureSecret(secret);
+    const authError = await authorizeCaptureRequest(request);
     if (authError) return authError;
 
     const rawBody = await request.text();
@@ -151,12 +167,13 @@ export async function POST(
       readString(parsed, "messageId") ??
       readString(parsed, "data", "id") ??
       readString(parsed, "id") ??
+      readString(parsed, "data", "eventId") ??
       createHash("sha256").update(rawBody).digest("hex");
 
     const supabase = createServiceRoleClient();
     const payload: Json = {
       capturedAt: new Date().toISOString(),
-      url: redactUrl(request.url, secret),
+      url: redactUrl(request.url),
       method: request.method,
       headers: redactHeaders(request.headers),
       rawBody,

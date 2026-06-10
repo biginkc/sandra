@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { normalizePhone } from "@/lib/csv/normalize";
+import { reportError } from "@/lib/errors/report";
 import type { Database } from "@/lib/supabase/types";
 
 const UUID_RE =
@@ -80,7 +81,11 @@ export async function ensureConversationIdForThread(
     p_property_id: propertyId,
   });
   if (!error) return data;
-  if (!isMissingEnsureConversationRpc(error.message)) {
+  if (!isMissingEnsureConversationRpc(error)) {
+    reportError(new Error(error.message), {
+      tags: { surface: "ensure_conversation_id_rpc" },
+      extra: { contactId, propertyId, code: error.code ?? null },
+    });
     throw new Error(`ensureConversationIdForThread rpc: ${error.message}`);
   }
 
@@ -111,7 +116,7 @@ async function ensureConversationIdForThreadWithoutRpc(
     .eq("contact_id", contactId)
     .eq("property_id", propertyId)
     .not("conversation_id", "is", null)
-    .order("created_at", { ascending: false })
+    .order("created_at", { ascending: true })
     .limit(1)
     .maybeSingle();
   if (lookupError) {
@@ -142,19 +147,30 @@ async function ensureConversationIdForThreadWithoutRpc(
   return conversationId;
 }
 
-function isMissingEnsureConversationRpc(message: string): boolean {
+function isMissingEnsureConversationRpc(error: {
+  code?: string | null;
+  message: string;
+}): boolean {
   return (
-    message.includes("Could not find the function public.ensure_sms_conversation_id") ||
-    message.includes("function public.ensure_sms_conversation_id") ||
-    message.includes("schema cache")
+    error.code === "PGRST202" ||
+    error.message.includes(
+      "Could not find the function public.ensure_sms_conversation_id",
+    )
   );
 }
 
 // UUIDv5-style deterministic id over the (contact, property) thread key.
 function conversationIdFor(contactId: string, propertyId: string): string {
   const ns = Buffer.from(SMS_CONV_NS.replace(/-/g, ""), "hex");
+  const normalizedContactId = contactId.toLowerCase();
+  const normalizedPropertyId = propertyId.toLowerCase();
   const h = createHash("sha1")
-    .update(Buffer.concat([ns, Buffer.from(`${contactId}:${propertyId}`)]))
+    .update(
+      Buffer.concat([
+        ns,
+        Buffer.from(`${normalizedContactId}:${normalizedPropertyId}`),
+      ]),
+    )
     .digest();
   h[6] = (h[6] & 0x0f) | 0x50;
   h[8] = (h[8] & 0x3f) | 0x80;
@@ -192,7 +208,7 @@ export async function resolveInboundThread(
   }
   if (recipientCandidates.length > 1) {
     return {
-      contactId: null,
+      contactId: contacts.length === 1 ? contacts[0].id : null,
       propertyId: null,
       conversationId: null,
       resolution: "ambiguous_recipient_number",
@@ -216,7 +232,7 @@ export async function resolveInboundThread(
   }
   if (historyCandidates.length > 1) {
     return {
-      contactId: null,
+      contactId: contacts.length === 1 ? contacts[0].id : null,
       propertyId: null,
       conversationId: null,
       resolution: "ambiguous_history",

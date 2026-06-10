@@ -23,7 +23,7 @@ async function seedConsentedThread(
     opted?: "in" | "out" | "none";
     state?: string;
   },
-): Promise<{ contactId: string; propertyId: string }> {
+): Promise<{ contactId: string; propertyId: string; threadId: string }> {
   const opted = opts.opted ?? "in";
   const { data: contact } = await admin
     .from("contacts")
@@ -74,7 +74,11 @@ async function seedConsentedThread(
     body: "asking the question",
   });
 
-  return { contactId: contact.id, propertyId: prop.id };
+  return {
+    contactId: contact.id,
+    propertyId: prop.id,
+    threadId: `legacy:${contact.id}:${prop.id}`,
+  };
 }
 
 function callableStateForNow(): string | null {
@@ -269,6 +273,6 @@ test("after a successful send, the thread jumps to the top of the inbox (test 25
     const list = page.getByTestId("inbox-thread-list");
     const buttons = list.locator("button");
     const firstId = await buttons.first().getAttribute("data-testid");
-    expect(firstId).toBe(`inbox-thread-${b.contactId}`);
+    expect(firstId).toBe(`inbox-thread-${b.threadId}`);
   }).toPass({ timeout: 10_000 });
 });

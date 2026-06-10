@@ -15,7 +15,7 @@ import {
 async function seedThreaded(
   admin: ReturnType<typeof adminClient>,
   opts: { phone: string; addressTag: string },
-): Promise<{ contactId: string; propertyId: string }> {
+): Promise<{ contactId: string; propertyId: string; threadId: string }> {
   const { data: contact } = await admin
     .from("contacts")
     .insert({
@@ -45,7 +45,11 @@ async function seedThreaded(
     to_address: opts.phone,
     body: "previous outbound",
   });
-  return { contactId: contact.id, propertyId: prop.id };
+  return {
+    contactId: contact.id,
+    propertyId: prop.id,
+    threadId: `legacy:${contact.id}:${prop.id}`,
+  };
 }
 
 test("inbound webhook adds a thread to the inbox via Realtime (test 26)", async ({
@@ -57,7 +61,7 @@ test("inbound webhook adds a thread to the inbox via Realtime (test 26)", async 
   await resetTenantTables(admin);
   await ensureTestUser(admin);
 
-  const { contactId } = await seedThreaded(admin, {
+  const { contactId, threadId } = await seedThreaded(admin, {
     phone: "+18165557301",
     addressTag: "RT-26",
   });
@@ -65,7 +69,7 @@ test("inbound webhook adds a thread to the inbox via Realtime (test 26)", async 
   await page.goto("/messages");
   // Existing thread visible from prior outbound.
   await expect(
-    page.getByTestId(`inbox-thread-${contactId}`),
+    page.getByTestId(`inbox-thread-${threadId}`),
   ).toBeVisible();
   await page.waitForLoadState("networkidle");
   await page.waitForTimeout(500);
@@ -87,7 +91,7 @@ test("inbound webhook adds a thread to the inbox via Realtime (test 26)", async 
 
   // Thread row should refresh via Realtime → show new last-message preview.
   await expect(
-    page.getByTestId(`inbox-thread-${contactId}`),
+    page.getByTestId(`inbox-thread-${threadId}`),
   ).toContainText(inboundBody, { timeout: 20_000 });
 });
 

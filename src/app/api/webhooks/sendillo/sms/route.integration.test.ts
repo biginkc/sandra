@@ -70,7 +70,7 @@ describe("POST /api/webhooks/sendillo/sms (integration)", () => {
     expect(res.status).toBe(401);
   });
 
-  it("accepts a real Sendillo-shaped inbound when the shared secret is present in the URL", async () => {
+  it("rejects query-string secrets on the live inbound route", async () => {
     const contactId = await seedContact("+18165550002");
     const { data: property } = await supabase
       .from("properties")
@@ -115,20 +115,13 @@ describe("POST /api/webhooks/sendillo/sms (integration)", () => {
     );
 
     const res = await POST(req);
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(401);
 
-    const { data: message } = await supabase
+    const { count } = await supabase
       .from("messages")
-      .select("contact_id, property_id, provider, direction, status, external_id")
-      .eq("external_id", "snd_realish_001")
-      .single();
-    expect(message).toMatchObject({
-      contact_id: contactId,
-      property_id: property!.id,
-      provider: "sendillo",
-      direction: "inbound",
-      status: "received",
-    });
+      .select("*", { count: "exact", head: true })
+      .eq("external_id", "snd_realish_001");
+    expect(count).toBe(0);
   });
 
   it("accepts the shared secret from a header without relying on the query string", async () => {

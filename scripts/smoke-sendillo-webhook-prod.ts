@@ -51,18 +51,29 @@ async function resolveCanaryUserId(
   client: SupabaseClient<Database>,
   email: string,
 ): Promise<string> {
-  const { data, error } = await client.auth.admin.listUsers();
-  if (error) {
-    throw new Error(`Could not list production auth users: ${error.message}`);
-  }
+  let page = 1;
+  while (true) {
+    const { data, error } = await client.auth.admin.listUsers({
+      page,
+      perPage: 200,
+    });
+    if (error) {
+      throw new Error(`Could not list production auth users: ${error.message}`);
+    }
 
-  const user = data.users.find(
-    (candidate) => candidate.email?.toLowerCase() === email.toLowerCase(),
-  );
-  if (!user) {
-    throw new Error(`Could not resolve production canary user for ${email}.`);
+    const user = data.users.find(
+      (candidate) => candidate.email?.toLowerCase() === email.toLowerCase(),
+    );
+    if (user) {
+      return user.id;
+    }
+
+    if (!data.nextPage || data.users.length === 0) {
+      break;
+    }
+    page = data.nextPage;
   }
-  return user.id;
+  throw new Error(`Could not resolve production canary user for ${email}.`);
 }
 
 async function resolveOrgId(
