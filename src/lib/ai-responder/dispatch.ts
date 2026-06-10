@@ -36,6 +36,7 @@ export type AiDispatchOutcome =
 export type AiDispatchInput = {
   propertyId: string;
   contactId: string;
+  conversationId?: string | null;
   inboundBody: string;
   inboundMessageId?: string | null;
 };
@@ -98,6 +99,8 @@ export async function dispatchAiResponse(
   const currentTurn = await countAiTurnsInThread(
     supabase,
     input.propertyId,
+    input.contactId,
+    input.conversationId ?? null,
   );
   const orgSendsToday = await countAiSendsLast24h(supabase, property.org_id);
   const withinBusinessHours = checkQuietHours(property.state).ok;
@@ -125,7 +128,12 @@ export async function dispatchAiResponse(
   // --------------------------------------------------------------------------
   // 4. Generate via Claude
   // --------------------------------------------------------------------------
-  const conversation = await loadConversation(supabase, input.propertyId);
+  const conversation = await loadConversation(
+    supabase,
+    input.propertyId,
+    input.contactId,
+    input.conversationId ?? null,
+  );
   // Append the current inbound body (it was just inserted by the
   // webhook; include it explicitly so the model sees it).
   conversation.push({ role: "user", content: input.inboundBody });
@@ -211,6 +219,20 @@ export async function dispatchAiResponse(
         } as Json)
       : null,
   });
+
+  if (
+    input.inboundMessageId &&
+    sendResult.status === "db_error" &&
+    isAiReplyDuplicateInsertError(sendResult.error)
+  ) {
+    const existingReply = await findExistingAiReplyForInbound(
+      supabase,
+      input.inboundMessageId,
+    );
+    if (existingReply) {
+      return { outcome: "skipped", reason: "already_replied" };
+    }
+  }
 
   if (sendResult.status !== "sent" && sendResult.status !== "queued") {
     // Pipeline rejected (quiet-hours race, no phone, etc.). Escalate so
@@ -312,6 +334,13 @@ function readJsonObject(value: Json | null): Record<string, Json> {
     : {};
 }
 
+function isAiReplyDuplicateInsertError(message: string): boolean {
+  return (
+    message.includes("idx_messages_ai_responder_inbound_unique") ||
+    message.includes("duplicate key value violates unique constraint")
+  );
+}
+
 /**
  * Count AI-generated messages already sent on this property's thread.
  * Drives the `max_turns` cap.
@@ -319,13 +348,19 @@ function readJsonObject(value: Json | null): Record<string, Json> {
 async function countAiTurnsInThread(
   supabase: SupabaseClient<Database>,
   propertyId: string,
+  contactId: string,
+  conversationId: string | null,
 ): Promise<number> {
-  const { count } = await supabase
+  let query = supabase
     .from("messages")
     .select("*", { count: "exact", head: true })
     .eq("property_id", propertyId)
     .eq("direction", "outbound")
     .contains("metadata", { generated_by: "ai_responder_v1" });
+  query = conversationId
+    ? query.eq("conversation_id", conversationId)
+    : query.eq("contact_id", contactId);
+  const { count } = await query;
   return count ?? 0;
 }
 
@@ -357,13 +392,19 @@ async function countAiSendsLast24h(
 async function loadConversation(
   supabase: SupabaseClient<Database>,
   propertyId: string,
+  contactId: string,
+  conversationId: string | null,
 ): Promise<Array<{ role: "user" | "assistant"; content: string }>> {
-  const { data } = await supabase
+  let query = supabase
     .from("messages")
     .select("direction, body, created_at")
     .eq("property_id", propertyId)
     .order("created_at", { ascending: false })
     .limit(20);
+  query = conversationId
+    ? query.eq("conversation_id", conversationId)
+    : query.eq("contact_id", contactId);
+  const { data } = await query;
   const rows = (data ?? []).slice().reverse(); // chronological
   return rows.map((r) => ({
     role: r.direction === "inbound" ? "user" : "assistant",

@@ -63,7 +63,21 @@ export async function fetchInboxDetail(
   }
 
   const { data: messages, error } = await query;
-  if (error || !messages || messages.length === 0) return null;
+  if (error || !messages || messages.length === 0) {
+    // Migration compatibility: old inbox links used bare contact UUIDs,
+    // but conversation ids are also UUID-shaped. If a direct conversation
+    // lookup finds nothing, retry as a legacy contact link before giving up.
+    if (parsed.kind === "conversation") {
+      const fallbackThreadId = await resolveConcreteThreadIdForContact(
+        supabase,
+        parsed.conversationId,
+      );
+      if (fallbackThreadId) {
+        return fetchInboxDetail(supabase, fallbackThreadId);
+      }
+    }
+    return null;
+  }
 
   const contactId =
     messages.find((message) => message.contact_id !== null)?.contact_id ??
@@ -131,8 +145,5 @@ async function resolveConcreteThreadIdForContact(
       ),
     ),
   );
-  if (uniqueThreadIds.length !== 1) {
-    return null;
-  }
   return uniqueThreadIds[0] ?? null;
 }

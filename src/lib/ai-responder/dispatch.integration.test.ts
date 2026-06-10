@@ -282,6 +282,101 @@ describe("dispatchAiResponse (integration)", () => {
     });
   });
 
+  it("scopes AI turn count and conversation history to the actual thread, not the whole property", async () => {
+    await seedConfig({ max_turns: 1 });
+    const { propertyId, contactId } = await seedLead({
+      phone: "+18167554013",
+    });
+    const siblingConversationId = "66666666-6666-4666-8666-666666666666";
+    const activeConversationId = "77777777-7777-4777-8777-777777777777";
+
+    const { data: siblingContact } = await supabase
+      .from("contacts")
+      .insert({
+        first_name: "Sibling",
+        last_name: "Thread",
+        phone_1: "+18167554913",
+      })
+      .select("id")
+      .single();
+    await supabase.from("consent_events").insert({
+      contact_id: siblingContact!.id,
+      channel: "sms",
+      event_type: "opt_in_marketing_written",
+      source: "ai-responder-test",
+    });
+
+    await supabase.from("messages").insert([
+      {
+        channel: "sms",
+        direction: "inbound",
+        status: "received",
+        property_id: propertyId,
+        contact_id: siblingContact!.id,
+        conversation_id: siblingConversationId,
+        body: "sibling conversation inbound",
+      },
+      {
+        channel: "sms",
+        direction: "outbound",
+        status: "sent",
+        property_id: propertyId,
+        contact_id: siblingContact!.id,
+        conversation_id: siblingConversationId,
+        body: "sibling conversation outbound",
+        metadata: {
+          generated_by: "ai_responder_v1",
+          model: "claude-haiku-4-5-20251001",
+          confidence: 0.9,
+          sentiment: "positive",
+          turn: 1,
+        },
+      },
+      {
+        channel: "sms",
+        direction: "inbound",
+        status: "received",
+        property_id: propertyId,
+        contact_id: contactId,
+        conversation_id: activeConversationId,
+        body: "my earlier thread message",
+      },
+    ]);
+
+    let capturedMessages: Array<{ role: string; content: string }> = [];
+    const trackingAnthropic: AnthropicLike = {
+      messages: {
+        create: (async (args: { messages: Array<{ role: string; content: string }> }) => {
+          if (capturedMessages.length === 0) {
+            capturedMessages = args.messages;
+          }
+          return stubAnthropic(HAPPY_OUT).messages.create(args as never);
+        }) as unknown as AnthropicLike["messages"]["create"],
+      } as unknown as AnthropicLike["messages"],
+    };
+
+    const outcome = await dispatchAiResponse(
+      supabase,
+      {
+        propertyId,
+        contactId,
+        conversationId: activeConversationId,
+        inboundBody: "active thread latest inbound",
+      },
+      { anthropic: trackingAnthropic },
+    );
+
+    expect(outcome.outcome).toBe("sent");
+    expect(capturedMessages.map((message) => message.content)).toEqual([
+      "my earlier thread message",
+      "active thread latest inbound",
+    ]);
+    expect(capturedMessages.map((message) => message.content)).not.toContain(
+      "sibling conversation inbound",
+    );
+    expect(getMockMessageLog()).toHaveLength(1);
+  });
+
   // --------------------------------------------------------------------------
   // Keyword escalation tiers — no Claude call, property flagged
   // --------------------------------------------------------------------------

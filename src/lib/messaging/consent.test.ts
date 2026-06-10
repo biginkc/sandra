@@ -1,6 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
-import { computeConsentState } from "./consent";
+import { computeConsentState, recordConsentEvent } from "./consent";
 
 function ev(event_type: string, occurred_at: string) {
   return { event_type, occurred_at };
@@ -70,5 +70,65 @@ describe("computeConsentState", () => {
     ];
     // Latest non-help event is opt_in_marketing_written.
     expect(computeConsentState(events)).toBe("can_send_marketing");
+  });
+});
+
+describe("recordConsentEvent", () => {
+  it("does not treat a reused external id from a different source as a duplicate", async () => {
+    const filters: Array<[string, unknown]> = [];
+    const insert = vi.fn().mockResolvedValue({ error: null });
+    const supabase = {
+      from: vi.fn((table: string) => {
+        expect(table).toBe("consent_events");
+        return {
+          select: vi.fn(() => ({
+            eq: (column: string, value: unknown) => {
+              filters.push([column, value]);
+              return {
+                eq: (column2: string, value2: unknown) => {
+                  filters.push([column2, value2]);
+                  return {
+                    eq: (column3: string, value3: unknown) => {
+                      filters.push([column3, value3]);
+                      return {
+                        eq: (column4: string, value4: unknown) => {
+                          filters.push([column4, value4]);
+                          return {
+                            contains: (_column5: string, value5: unknown) => {
+                              filters.push(["source_detail", value5]);
+                              return {
+                                limit: vi.fn().mockResolvedValue({
+                                  data: [],
+                                  error: null,
+                                }),
+                              };
+                            },
+                          };
+                        },
+                      };
+                    },
+                  };
+                },
+              };
+            },
+          })),
+          insert,
+        };
+      }),
+    };
+
+    await expect(
+      recordConsentEvent(supabase as never, {
+        contactId: "contact-1",
+        channel: "sms",
+        eventType: "opt_out",
+        source: "sendillo_inbound_webhook",
+        sourceDetail: { externalId: "shared-id" },
+        idempotencyKey: "shared-id",
+      }),
+    ).resolves.toBeUndefined();
+
+    expect(filters).toContainEqual(["source", "sendillo_inbound_webhook"]);
+    expect(insert).toHaveBeenCalledTimes(1);
   });
 });

@@ -403,6 +403,7 @@ export async function handleInboundWebhook(
             {
               propertyId: effectivePropertyId,
               contactId: effectiveContactId,
+              conversationId: insertOutcome.conversationId,
               inboundBody: ev.body,
               inboundMessageId: insertOutcome.messageId,
             },

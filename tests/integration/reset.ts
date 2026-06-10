@@ -68,12 +68,27 @@ async function pruneOrphanMemberships(
   client: SupabaseClient<Database>,
   memberships: Array<{ user_id: string; org_id: string; role: string }>,
 ): Promise<Set<string>> {
-  const { data, error } = await client.auth.admin.listUsers();
-  if (error) {
-    throw new Error(`listUsers failed after reset: ${error.message}`);
-  }
+  const validUserIds = new Set<string>();
+  let page = 1;
 
-  const validUserIds = new Set(data.users.map((user) => user.id));
+  while (true) {
+    const { data, error } = await client.auth.admin.listUsers({
+      page,
+      perPage: 200,
+    });
+    if (error) {
+      throw new Error(`listUsers failed after reset: ${error.message}`);
+    }
+
+    for (const user of data.users) {
+      validUserIds.add(user.id);
+    }
+
+    if (!data.nextPage || data.users.length === 0) {
+      break;
+    }
+    page = data.nextPage;
+  }
   const orphanUserIds = Array.from(
     new Set(
       memberships

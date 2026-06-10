@@ -65,16 +65,30 @@ async function resolveCanaryUserId(
   return user.id;
 }
 
-async function resolveOrgId(client: SupabaseClient<Database>): Promise<string> {
-  const { data, error } = await client
-    .from("organizations")
-    .select("id")
-    .limit(1)
-    .single();
-  if (error || !data) {
-    throw error ?? new Error("Could not resolve production organization.");
+async function resolveOrgId(
+  client: SupabaseClient<Database>,
+  canaryUserId: string,
+): Promise<string> {
+  const explicitOrgId = env.PROD_ORG_ID;
+  if (explicitOrgId) {
+    return explicitOrgId;
   }
-  return data.id;
+
+  const { data, error } = await client
+    .from("memberships")
+    .select("org_id")
+    .eq("user_id", canaryUserId);
+  if (error) {
+    throw new Error(`Could not resolve canary org membership: ${error.message}`);
+  }
+
+  const orgIds = Array.from(new Set((data ?? []).map((row) => row.org_id)));
+  if (orgIds.length !== 1) {
+    throw new Error(
+      `Could not resolve a single production org for canary user ${canaryUserId}. Set PROD_ORG_ID explicitly.`,
+    );
+  }
+  return orgIds[0];
 }
 
 async function cleanup(
@@ -164,7 +178,7 @@ async function main(): Promise<void> {
   const prodEmail = requireProdEmail();
   const sendilloFrom = requireSendilloFromNumber();
   const canaryUserId = await resolveCanaryUserId(supabase, prodEmail);
-  const orgId = await resolveOrgId(supabase);
+  const orgId = await resolveOrgId(supabase, canaryUserId);
   const body = mode === "stop" ? "STOP" : `${tag} inbound replay-safe proof`;
   const externalId = `${tag}-message`;
   const ids = {
