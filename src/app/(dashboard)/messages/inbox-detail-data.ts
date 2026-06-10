@@ -47,6 +47,7 @@ export async function fetchInboxDetail(
     .from("messages")
     .select("*")
     .eq("channel", "sms")
+    .neq("status", "queued")
     .order("created_at", { ascending: true })
     .limit(100);
 
@@ -134,6 +135,7 @@ async function resolveConcreteThreadIdForContact(
     .select("conversation_id, property_id, created_at")
     .eq("channel", "sms")
     .eq("contact_id", contactId)
+    .neq("status", "queued")
     .order("created_at", { ascending: false })
     .limit(100);
   if (error || !messages || messages.length === 0) return null;

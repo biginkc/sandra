@@ -20,7 +20,10 @@ const UUID_RE =
  * Just enough of the chain API to satisfy the fallback path.
  */
 function makeFallbackSupabase(
-  opts: { existingConversationId?: string | null } = {},
+  opts: {
+    existingConversationId?: string | null;
+    rpcErrorMessage?: string;
+  } = {},
 ): SupabaseClient<Database> {
   const messagesBuilder: Record<string, unknown> = {};
   Object.assign(messagesBuilder, {
@@ -48,6 +51,7 @@ function makeFallbackSupabase(
         data: null,
         error: {
           message:
+            opts.rpcErrorMessage ??
             "Could not find the function public.ensure_sms_conversation_id(p_contact_id, p_property_id) in the schema cache",
         },
       }),
@@ -114,5 +118,17 @@ describe("ensureConversationIdForThread — fallback (RPC / registry migration a
     );
 
     expect(resolved).toBe(existing);
+  });
+
+  it("fails closed when the RPC rejects the contact/property pair instead of falling back", async () => {
+    await expect(
+      ensureConversationIdForThread(
+        makeFallbackSupabase({
+          rpcErrorMessage: "contact/property thread scope not found",
+        }),
+        CONTACT,
+        PROPERTY,
+      ),
+    ).rejects.toThrow("contact/property thread scope not found");
   });
 });

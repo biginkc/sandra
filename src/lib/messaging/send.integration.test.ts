@@ -347,6 +347,14 @@ describe("sendSmsToContact (integration)", () => {
     if (outcome.status === "db_error") {
       expect(outcome.error).toMatch(/belongs to provider mock/i);
     }
+
+    const { data: row } = await supabase
+      .from("messages")
+      .select("status, error_message")
+      .eq("id", queued!.id)
+      .single();
+    expect(row?.status).toBe("failed");
+    expect(row?.error_message).toMatch(/belongs to provider mock/i);
   });
 
   it("release blocks when a queued Sendillo row targets an obsolete sender number", async () => {
@@ -376,6 +384,55 @@ describe("sendSmsToContact (integration)", () => {
     if (outcome.status === "db_error") {
       expect(outcome.error).toMatch(/no longer matches active Sendillo sender/i);
     }
+
+    const { data: row } = await supabase
+      .from("messages")
+      .select("status, error_message")
+      .eq("id", queued!.id)
+      .single();
+    expect(row?.status).toBe("failed");
+    expect(row?.error_message).toMatch(/no longer matches active Sendillo sender/i);
+  });
+
+  it("release preserves queued metadata when the message is sent", async () => {
+    const now = new Date();
+    const hour = parseInt(
+      new Intl.DateTimeFormat("en-US", {
+        timeZone: "America/Chicago",
+        hour: "2-digit",
+        hour12: false,
+      }).format(now),
+      10,
+    );
+    if (hour < 8 || hour >= 21) return;
+
+    const { contactId, propertyId } = await seed({ withConsent: true });
+    const queue = await sendSmsToContact(supabase, {
+      contactId,
+      propertyId,
+      body: "queued metadata survives release",
+      queueOnly: true,
+      metadata: {
+        source: "send.integration.test",
+        nested: { keep: true },
+      },
+    });
+    expect(queue.status).toBe("queued");
+    if (queue.status !== "queued") return;
+
+    const release = await releaseQueuedMessage(supabase, queue.messageId);
+    expect(release.status).toBe("sent");
+
+    const { data: row } = await supabase
+      .from("messages")
+      .select("metadata")
+      .eq("id", queue.messageId)
+      .single();
+    expect(row?.metadata).toMatchObject({
+      source: "send.integration.test",
+      nested: { keep: true },
+      providerStatus: "sent",
+    });
   });
 
   // --------------------------------------------------------------------------

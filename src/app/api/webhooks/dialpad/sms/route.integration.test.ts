@@ -207,6 +207,55 @@ describe("POST /api/webhooks/dialpad/sms (integration)", () => {
     });
   });
 
+  it("disambiguates duplicate contact phones by recipient-number history", async () => {
+    const sharedPhone = "+18165553333";
+    const matchedContactId = await seedContact(sharedPhone, { optIn: true });
+    await seedContact("+18165553334", { optIn: true, phone2: sharedPhone });
+
+    const { data: property } = await supabase
+      .from("properties")
+      .insert({
+        address: "44 Routed Reply Ln",
+        state: "MO",
+        status: "new_lead",
+        homeowner_contact_id: matchedContactId,
+      })
+      .select("id")
+      .single();
+
+    await supabase.from("messages").insert({
+      channel: "sms",
+      direction: "outbound",
+      status: "sent",
+      from_address: "+18163706846",
+      to_address: sharedPhone,
+      body: "Prior outbound anchor",
+      contact_id: matchedContactId,
+      property_id: property!.id,
+    });
+
+    const res = await POST(
+      makeRequest({
+        externalId: "msg_dupe_phone_001",
+        from: sharedPhone,
+        to: "+18163706846",
+        body: "Reply to the known sender",
+      }),
+    );
+    expect(res.status).toBe(200);
+
+    const { data: message } = await supabase
+      .from("messages")
+      .select("contact_id, property_id, metadata")
+      .eq("external_id", "msg_dupe_phone_001")
+      .single();
+    expect(message?.contact_id).toBe(matchedContactId);
+    expect(message?.property_id).toBe(property!.id);
+    expect(message?.metadata).toMatchObject({
+      routing: "matched_recipient_number",
+    });
+  });
+
   it("STOP keyword flips sms_opted_out + writes an opt_out consent event AND emits no notification (decision #2)", async () => {
     const contactId = await seedContact("+18165558888", { optIn: true });
     const { data: property } = await supabase
@@ -303,21 +352,41 @@ describe("POST /api/webhooks/dialpad/sms (integration)", () => {
     expect(notifCount).toBe(0);
   });
 
-  it("STOP opt-outs every contact matching the sender phone even when thread resolution is ambiguous", async () => {
-    const sharedPhone2 = "+18165559012";
-    const firstContactId = await seedContact("+18165559010", {
+  it("STOP scopes opt-out to the resolved contact when duplicate phone records exist", async () => {
+    const sharedPhone = "+18165559012";
+    const firstContactId = await seedContact(sharedPhone, {
       optIn: true,
-      phone2: sharedPhone2,
     });
-    const secondContactId = await seedContact("+18165559011", {
+    const secondContactId = await seedContact("+18165559013", {
       optIn: true,
-      phone2: sharedPhone2,
+      phone2: sharedPhone,
+    });
+    const { data: property } = await supabase
+      .from("properties")
+      .insert({
+        address: "12 Scoped Stop Way",
+        state: "MO",
+        status: "new_lead",
+        homeowner_contact_id: firstContactId,
+      })
+      .select("id")
+      .single();
+
+    await supabase.from("messages").insert({
+      channel: "sms",
+      direction: "outbound",
+      status: "sent",
+      from_address: "+18163706846",
+      to_address: sharedPhone,
+      body: "Reply STOP to unsubscribe.",
+      contact_id: firstContactId,
+      property_id: property!.id,
     });
 
     const res = await POST(
       makeRequest({
         externalId: "msg_stop_ambiguous_001",
-        from: sharedPhone2,
+        from: sharedPhone,
         to: "+18163706846",
         body: "STOP",
       }),
@@ -329,14 +398,20 @@ describe("POST /api/webhooks/dialpad/sms (integration)", () => {
       .select("id, sms_opted_out")
       .in("id", [firstContactId, secondContactId])
       .order("id");
-    expect(contacts?.every((contact) => contact.sms_opted_out)).toBe(true);
+    expect(contacts).toEqual(
+      [
+        { id: firstContactId, sms_opted_out: true },
+        { id: secondContactId, sms_opted_out: false },
+      ].sort((left, right) => left.id.localeCompare(right.id)),
+    );
 
     const { data: events } = await supabase
       .from("consent_events")
       .select("contact_id, event_type")
       .in("contact_id", [firstContactId, secondContactId])
-      .eq("event_type", "opt_out");
-    expect(events).toHaveLength(2);
+      .eq("event_type", "opt_out")
+      .order("contact_id");
+    expect(events).toEqual([{ contact_id: firstContactId, event_type: "opt_out" }]);
   });
 
   it("auto-qualifies the threaded prospect on first inbound reply", async () => {

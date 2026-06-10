@@ -134,6 +134,7 @@ type SeedData = {
 function makeSupabaseStub(seed: SeedData) {
   function makeBuilder(table: keyof SeedData) {
     const filters: Array<{ kind: "eq" | "is"; key: string; value: unknown }> = [];
+    const negativeFilters: Array<{ key: string; value: unknown }> = [];
     let orderBy: { key: string; ascending: boolean } | null = null;
     let maxRows: number | null = null;
     let wantSingle = false;
@@ -148,6 +149,10 @@ function makeSupabaseStub(seed: SeedData) {
       },
       is(key: string, value: unknown) {
         filters.push({ kind: "is", key, value });
+        return builder;
+      },
+      neq(key: string, value: unknown) {
+        negativeFilters.push({ key, value });
         return builder;
       },
       order(key: string, options: { ascending: boolean }) {
@@ -183,6 +188,11 @@ function makeSupabaseStub(seed: SeedData) {
             ? value === filter.value
             : value === null && filter.value === null;
         });
+      }
+      for (const filter of negativeFilters) {
+        rows = rows.filter(
+          (row) => row[filter.key as keyof typeof row] !== filter.value,
+        );
       }
 
       if (orderBy) {
@@ -270,5 +280,50 @@ describe("fetchInboxDetail", () => {
     expect(detail?.threadId).toBe(CONVERSATION_ID);
     expect(detail?.conversationId).toBe(CONVERSATION_ID);
     expect(detail?.contactId).toBe(CONTACT_ID);
+  });
+
+  it("ignores queued rows when resolving a legacy contact link to the live thread", async () => {
+    const supabase = makeSupabaseStub({
+      messages: [
+        makeMessage({
+          id: "queued-same-thread",
+          contact_id: CONTACT_ID,
+          property_id: OLDER_PROPERTY_ID,
+          status: "queued",
+          body: "queued sibling in same thread",
+          created_at: "2026-06-09T12:00:00.000Z",
+        }),
+        makeMessage({
+          id: "queued-other-thread",
+          contact_id: CONTACT_ID,
+          property_id: RECENT_PROPERTY_ID,
+          status: "queued",
+          body: "queued newer thread",
+          created_at: "2026-06-09T13:00:00.000Z",
+        }),
+        makeMessage({
+          id: "live-thread",
+          contact_id: CONTACT_ID,
+          property_id: OLDER_PROPERTY_ID,
+          status: "received",
+          body: "live inbound thread",
+          created_at: "2026-06-08T12:00:00.000Z",
+        }),
+      ],
+      contacts: [makeContact({ id: CONTACT_ID })],
+      properties: [
+        makeProperty({ id: RECENT_PROPERTY_ID, address: "200 Queued Ave" }),
+        makeProperty({ id: OLDER_PROPERTY_ID, address: "100 Live Ave" }),
+      ],
+    });
+
+    const detail = await fetchInboxDetail(supabase as never, CONTACT_ID);
+
+    expect(detail).not.toBeNull();
+    expect(detail?.threadId).toBe(`legacy:${CONTACT_ID}:${OLDER_PROPERTY_ID}`);
+    expect(detail?.initialMessages.map((message) => message.id)).toEqual([
+      "live-thread",
+    ]);
+    expect(detail?.propertyAddress).toContain("100 Live Ave");
   });
 });

@@ -1,8 +1,30 @@
-import { describe, expect, it } from "vitest";
+import { render, screen } from "@testing-library/react";
+import { describe, expect, it, vi } from "vitest";
 
 import type { Database } from "@/lib/supabase/types";
 
-import { messageBelongsToThread } from "./messages-thread";
+const { createClient } = vi.hoisted(() => ({
+  createClient: vi.fn(() => {
+    const channel = {
+      on: vi.fn(() => channel),
+      subscribe: vi.fn(() => channel),
+    };
+    return {
+      auth: {
+        getSession: vi.fn().mockResolvedValue({ data: { session: null } }),
+      },
+      realtime: { setAuth: vi.fn() },
+      channel: vi.fn(() => channel),
+      removeChannel: vi.fn(),
+    };
+  }),
+}));
+
+vi.mock("@/lib/supabase/client", () => ({
+  createClient,
+}));
+
+import { MessagesThread, messageBelongsToThread } from "./messages-thread";
 
 type MessageRow = Database["public"]["Tables"]["messages"]["Row"];
 
@@ -92,5 +114,33 @@ describe("messageBelongsToThread", () => {
         conversationId: null,
       }),
     ).toBe(false);
+  });
+});
+
+describe("<MessagesThread />", () => {
+  it("filters sibling-thread rows out of the initial render", () => {
+    render(
+      <MessagesThread
+        initial={[
+          makeMessage({
+            id: "matching",
+            contact_id: "contact-9",
+            property_id: "property-9",
+            body: "right thread",
+          }),
+          makeMessage({
+            id: "sibling",
+            contact_id: "contact-9",
+            property_id: "property-10",
+            body: "wrong thread",
+          }),
+        ]}
+        contactId="contact-9"
+        propertyId="property-9"
+      />,
+    );
+
+    expect(screen.getByText("right thread")).toBeInTheDocument();
+    expect(screen.queryByText("wrong thread")).not.toBeInTheDocument();
   });
 });

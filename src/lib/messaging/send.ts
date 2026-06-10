@@ -172,11 +172,19 @@ export async function sendSmsToContact(
   }
 
   // 5. Pre-insert the row so we always have a breadcrumb.
-  const conversationId = await ensureConversationIdForThread(
-    supabase,
-    input.contactId,
-    input.propertyId,
-  );
+  let conversationId: string;
+  try {
+    conversationId = await ensureConversationIdForThread(
+      supabase,
+      input.contactId,
+      input.propertyId,
+    );
+  } catch (e) {
+    return {
+      status: "db_error",
+      error: e instanceof Error ? e.message : String(e),
+    };
+  }
   const fromAddressRaw = input.from ?? provider.getDefaultFromNumber?.() ?? null;
   const fromAddress = fromAddressRaw
     ? normalizePhone(fromAddressRaw) ?? fromAddressRaw
@@ -295,11 +303,19 @@ async function queueForLater(
     };
   }
 
-  const conversationId = await ensureConversationIdForThread(
-    supabase,
-    input.contactId,
-    input.propertyId,
-  );
+  let conversationId: string;
+  try {
+    conversationId = await ensureConversationIdForThread(
+      supabase,
+      input.contactId,
+      input.propertyId,
+    );
+  } catch (e) {
+    return {
+      status: "db_error",
+      error: e instanceof Error ? e.message : String(e),
+    };
+  }
   const fromAddressRaw = input.from ?? providerIdToDefaultFrom(providerId) ?? null;
   const fromAddress = fromAddressRaw
     ? normalizePhone(fromAddressRaw) ?? fromAddressRaw
@@ -365,7 +381,7 @@ export async function releaseQueuedMessage(
   const { data: msg, error: fetchError } = await supabase
     .from("messages")
     .select(
-      "id, status, provider, contact_id, property_id, body, from_address, to_address",
+      "id, status, provider, contact_id, property_id, body, from_address, to_address, metadata",
     )
     .eq("id", messageId)
     .maybeSingle();
@@ -389,9 +405,12 @@ export async function releaseQueuedMessage(
     };
   }
   if (msg.provider !== provider.providerId) {
+    const error =
+      `queued message belongs to provider ${msg.provider ?? "unknown"}, current provider is ${provider.providerId}`;
+    await failQueuedMessage(supabase, msg.id, error);
     return {
       status: "db_error",
-      error: `queued message belongs to provider ${msg.provider ?? "unknown"}, current provider is ${provider.providerId}`,
+      error,
     };
   }
   const currentDefaultFromRaw = provider.getDefaultFromNumber?.() ?? null;
@@ -404,9 +423,12 @@ export async function releaseQueuedMessage(
     currentDefaultFrom &&
     msg.from_address !== currentDefaultFrom
   ) {
+    const error =
+      `queued message sender ${msg.from_address} no longer matches active Sendillo sender ${currentDefaultFrom}`;
+    await failQueuedMessage(supabase, msg.id, error);
     return {
       status: "db_error",
-      error: `queued message sender ${msg.from_address} no longer matches active Sendillo sender ${currentDefaultFrom}`,
+      error,
     };
   }
 
@@ -466,6 +488,10 @@ export async function releaseQueuedMessage(
       body: msg.body,
       from: msg.from_address ?? undefined,
     });
+    const currentMetadata =
+      msg.metadata && typeof msg.metadata === "object" && !Array.isArray(msg.metadata)
+        ? msg.metadata
+        : null;
     const { error: updateError } = await supabase
       .from("messages")
       .update({
@@ -473,6 +499,7 @@ export async function releaseQueuedMessage(
         external_id: result.externalId,
         sent_at: new Date().toISOString(),
         metadata: {
+          ...(currentMetadata ?? {}),
           providerStatus: result.providerStatus,
           raw: result.raw,
         } as Json,
@@ -526,4 +553,20 @@ function providerIdToDefaultFrom(providerId: string): string | null {
   const provider = getMessagingProvider();
   if (!provider || provider.providerId !== providerId) return null;
   return provider.getDefaultFromNumber?.() ?? null;
+}
+
+async function failQueuedMessage(
+  supabase: SupabaseClient<Database>,
+  messageId: string,
+  errorMessage: string,
+): Promise<void> {
+  await supabase
+    .from("messages")
+    .update({
+      status: "failed",
+      failed_at: new Date().toISOString(),
+      error_message: errorMessage,
+    })
+    .eq("id", messageId)
+    .eq("status", "queued");
 }

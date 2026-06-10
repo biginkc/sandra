@@ -146,8 +146,7 @@ function isMissingEnsureConversationRpc(message: string): boolean {
   return (
     message.includes("Could not find the function public.ensure_sms_conversation_id") ||
     message.includes("function public.ensure_sms_conversation_id") ||
-    message.includes("schema cache") ||
-    message.includes("contact/property thread scope not found")
+    message.includes("schema cache")
   );
 }
 
@@ -180,93 +179,125 @@ export async function resolveInboundThread(
       resolution: "unmatched_contact",
     };
   }
-  if (contacts.length > 1) {
-    return {
-      contactId: null,
-      propertyId: null,
-      conversationId: null,
-      resolution: "ambiguous_contact",
-    };
-  }
-
-  const contactId = contacts[0].id;
-  const recipientCandidates = await loadCandidates(supabase, contactId, normalizedTo);
+  const recipientCandidates = flattenContactCandidates(
+    await Promise.all(
+      contacts.map(async ({ id }) => ({
+        contactId: id,
+        candidates: await loadCandidates(supabase, id, normalizedTo),
+      })),
+    ),
+  );
   if (recipientCandidates.length === 1) {
-    const candidate = recipientCandidates[0];
-    return {
-      contactId,
-      propertyId: candidate.propertyId,
-      conversationId:
-        candidate.conversationId ??
-        (await ensureConversationIdForThread(
-          supabase,
-          contactId,
-          candidate.propertyId,
-        )),
-      resolution: "matched_recipient_number",
-    };
+    return materializeThreadCandidate(supabase, recipientCandidates[0], "matched_recipient_number");
   }
   if (recipientCandidates.length > 1) {
     return {
-      contactId,
+      contactId: null,
       propertyId: null,
       conversationId: null,
       resolution: "ambiguous_recipient_number",
     };
   }
 
-  const historyCandidates = await loadCandidates(supabase, contactId);
+  const historyCandidates = flattenContactCandidates(
+    await Promise.all(
+      contacts.map(async ({ id }) => ({
+        contactId: id,
+        candidates: await loadCandidates(supabase, id),
+      })),
+    ),
+  );
   if (historyCandidates.length === 1) {
-    const candidate = historyCandidates[0];
-    return {
-      contactId,
-      propertyId: candidate.propertyId,
-      conversationId:
-        candidate.conversationId ??
-        (await ensureConversationIdForThread(
-          supabase,
-          contactId,
-          candidate.propertyId,
-        )),
-      resolution: "matched_single_history_property",
-    };
+    return materializeThreadCandidate(
+      supabase,
+      historyCandidates[0],
+      "matched_single_history_property",
+    );
   }
   if (historyCandidates.length > 1) {
     return {
-      contactId,
+      contactId: null,
       propertyId: null,
       conversationId: null,
       resolution: "ambiguous_history",
     };
   }
 
-  const { data: linkedProps, error: linkedError } = await supabase
-    .from("properties")
-    .select("id")
-    .or(`homeowner_contact_id.eq.${contactId},agent_contact_id.eq.${contactId}`)
-    .limit(2);
-  if (linkedError) {
-    throw new Error(`resolveInboundThread linked property lookup: ${linkedError.message}`);
-  }
-  if (linkedProps?.length === 1) {
-    const propertyId = linkedProps[0].id;
+  const linkedPropertyCandidates = flattenLinkedPropertyCandidates(
+    await Promise.all(
+      contacts.map(async ({ id }) => ({
+        contactId: id,
+        propertyIds: await loadLinkedPropertyIds(supabase, id),
+      })),
+    ),
+  );
+  if (linkedPropertyCandidates.length === 1) {
+    const candidate = linkedPropertyCandidates[0];
     return {
-      contactId,
-      propertyId,
+      contactId: candidate.contactId,
+      propertyId: candidate.propertyId,
       conversationId: await ensureConversationIdForThread(
         supabase,
-        contactId,
-        propertyId,
+        candidate.contactId,
+        candidate.propertyId,
       ),
       resolution: "matched_single_linked_property",
     };
   }
 
+  if (contacts.length === 1) {
+    return {
+      contactId: contacts[0].id,
+      propertyId: null,
+      conversationId: null,
+      resolution: "matched_contact_without_property",
+    };
+  }
+
   return {
-    contactId,
+    contactId: null,
     propertyId: null,
     conversationId: null,
-    resolution: "matched_contact_without_property",
+    resolution: "ambiguous_contact",
+  };
+}
+
+type ContactThreadCandidate = ThreadCandidate & { contactId: string };
+
+function flattenContactCandidates(
+  rows: Array<{ contactId: string; candidates: ThreadCandidate[] }>,
+): ContactThreadCandidate[] {
+  return rows.flatMap(({ contactId, candidates }) =>
+    candidates.map((candidate) => ({ contactId, ...candidate })),
+  );
+}
+
+function flattenLinkedPropertyCandidates(
+  rows: Array<{ contactId: string; propertyIds: string[] }>,
+): Array<{ contactId: string; propertyId: string }> {
+  return rows.flatMap(({ contactId, propertyIds }) =>
+    propertyIds.map((propertyId) => ({ contactId, propertyId })),
+  );
+}
+
+async function materializeThreadCandidate(
+  supabase: SupabaseClient<Database>,
+  candidate: ContactThreadCandidate,
+  resolution:
+    | "matched_recipient_number"
+    | "matched_single_history_property",
+): Promise<InboundThreadResolution> {
+  return {
+    contactId: candidate.contactId,
+    propertyId: candidate.propertyId,
+    conversationId:
+      candidate.conversationId ??
+      (await ensureConversationIdForThread(
+        supabase,
+        candidate.contactId,
+        candidate.propertyId,
+      )),
+    resolution,
   };
 }
 
@@ -333,4 +364,19 @@ async function loadContactsByPhone(
   }
 
   return Array.from(deduped.values()).slice(0, 2);
+}
+
+async function loadLinkedPropertyIds(
+  supabase: SupabaseClient<Database>,
+  contactId: string,
+): Promise<string[]> {
+  const { data: linkedProps, error } = await supabase
+    .from("properties")
+    .select("id")
+    .or(`homeowner_contact_id.eq.${contactId},agent_contact_id.eq.${contactId}`)
+    .limit(2);
+  if (error) {
+    throw new Error(`resolveInboundThread linked property lookup: ${error.message}`);
+  }
+  return (linkedProps ?? []).map((row) => row.id);
 }

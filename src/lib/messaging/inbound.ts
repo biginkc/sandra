@@ -108,6 +108,7 @@ export async function handleInboundWebhook(
 
       if (STOP_KEYWORDS.test(bodyTrimmed)) {
         await applyPhoneLevelOptOut(supabase, {
+          contactId,
           fromPhone: ev.from,
           source,
           sourceDetail: { externalId: ev.externalId, from: ev.from },
@@ -184,6 +185,7 @@ export async function handleInboundWebhook(
 
       if (DNC_KEYWORDS.test(ev.body)) {
         await applyPhoneLevelOptOut(supabase, {
+          contactId,
           fromPhone: ev.from,
           source,
           sourceDetail: {
@@ -700,6 +702,7 @@ async function markWebhookEventError(
 async function applyPhoneLevelOptOut(
   supabase: SupabaseClient<Database>,
   input: {
+    contactId: string | null;
     fromPhone: string;
     source: string;
     sourceDetail: Json;
@@ -709,7 +712,7 @@ async function applyPhoneLevelOptOut(
     idempotencyKey: string;
   },
 ) {
-  const contactIds = await loadExistingContactIdsByPhone(supabase, input.fromPhone);
+  const contactIds = input.contactId ? [input.contactId] : [];
   for (const contactId of contactIds) {
     try {
       await recordConsentEvent(supabase, {
@@ -766,46 +769,6 @@ function isMissingWebhookProcessingClaimSupport(message: string): boolean {
     message.includes("processing_started_at") ||
     (message.includes("processing_status") && message.includes("check constraint"))
   );
-}
-
-async function loadContactIdsByPhone(
-  supabase: SupabaseClient<Database>,
-  fromPhone: string,
-): Promise<string[]> {
-  const normalized = normalizePhone(fromPhone);
-  if (!normalized) return [];
-
-  const queries = await Promise.all([
-    supabase.from("contacts").select("id").eq("phone_1", normalized).limit(20),
-    supabase.from("contacts").select("id").eq("phone_2", normalized).limit(20),
-    supabase.from("contacts").select("id").eq("phone_3", normalized).limit(20),
-  ]);
-
-  const ids = new Set<string>();
-  for (const result of queries) {
-    if (result.error) {
-      throw new Error(`loadContactIdsByPhone: ${result.error.message}`);
-    }
-    for (const row of result.data ?? []) ids.add(row.id);
-  }
-  return Array.from(ids);
-}
-
-async function loadExistingContactIdsByPhone(
-  supabase: SupabaseClient<Database>,
-  fromPhone: string,
-): Promise<string[]> {
-  const contactIds = await loadContactIdsByPhone(supabase, fromPhone);
-  if (contactIds.length === 0) return [];
-
-  const { data, error } = await supabase
-    .from("contacts")
-    .select("id")
-    .in("id", contactIds);
-  if (error) {
-    throw new Error(`loadExistingContactIdsByPhone: ${error.message}`);
-  }
-  return (data ?? []).map((row) => row.id);
 }
 
 type InboundMessageState = {

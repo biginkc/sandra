@@ -54,8 +54,24 @@ export function MessagesThread({
   conversationId = null,
   propertyId,
 }: Props) {
-  const [messages, setMessages] = useState<Message[]>(initial);
+  const [messages, setMessages] = useState<Message[]>(() =>
+    filterThreadMessages(initial, {
+      contactId,
+      conversationId,
+      propertyId,
+    }),
+  );
   const endRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    setMessages(
+      filterThreadMessages(initial, {
+        contactId,
+        conversationId,
+        propertyId,
+      }),
+    );
+  }, [contactId, conversationId, initial, propertyId]);
 
   useEffect(() => {
     const supabase = createClient();
@@ -201,6 +217,17 @@ export function MessagesThread({
       <div ref={endRef} data-testid="messages-thread-end" />
     </div>
   );
+}
+
+function filterThreadMessages(
+  rows: Message[],
+  scope: {
+    contactId: string | null;
+    conversationId: string | null;
+    propertyId: string | null;
+  },
+): Message[] {
+  return rows.filter((row) => messageBelongsToThread(row, scope));
 }
 
 function formatDayLabel(iso: string): string {
