@@ -6,6 +6,10 @@ import {
   resetTenantTables,
   seedProspects,
 } from "./fixtures";
+import {
+  buildThreadId,
+  ensureConversationIdForThread,
+} from "../src/lib/messages/threading";
 
 /**
  * Feature 8 Phase 1 — live updates from the inbound webhook to the
@@ -34,11 +38,17 @@ async function seedThreaded(
       status: "new_lead",
     })
     .eq("id", prop.id);
+  const conversationId = await ensureConversationIdForThread(
+    admin,
+    contact.id,
+    prop.id,
+  );
   // Prior outbound so the inbound webhook can resolve a property by phone.
   await admin.from("messages").insert({
     channel: "sms",
     direction: "outbound",
     status: "sent",
+    conversation_id: conversationId,
     contact_id: contact.id,
     property_id: prop.id,
     from_address: "+18162804181",
@@ -48,7 +58,7 @@ async function seedThreaded(
   return {
     contactId: contact.id,
     propertyId: prop.id,
-    threadId: `legacy:${contact.id}:${prop.id}`,
+    threadId: buildThreadId(conversationId, contact.id, prop.id),
   };
 }
 
@@ -61,7 +71,7 @@ test("inbound webhook adds a thread to the inbox via Realtime (test 26)", async 
   await resetTenantTables(admin);
   await ensureTestUser(admin);
 
-  const { contactId, threadId } = await seedThreaded(admin, {
+  const { threadId } = await seedThreaded(admin, {
     phone: "+18165557301",
     addressTag: "RT-26",
   });
@@ -104,12 +114,12 @@ test("inbound to a currently-open thread appears in the panel (test 27)", async 
   await resetTenantTables(admin);
   await ensureTestUser(admin);
 
-  const { contactId } = await seedThreaded(admin, {
+  const { threadId } = await seedThreaded(admin, {
     phone: "+18165557302",
     addressTag: "RT-27",
   });
 
-  await page.goto(`/messages?thread=${contactId}`);
+  await page.goto(`/messages?thread=${encodeURIComponent(threadId)}`);
   await expect(page.getByTestId("inbox-detail-panel")).toBeVisible();
   await page.waitForLoadState("networkidle");
   await page.waitForTimeout(500);
@@ -145,7 +155,7 @@ test("two browsers, A opens thread B sends inbound, both see the bubble (test 28
   await ensureTestUser(admin);
 
   const phone = "+18165557303";
-  const { contactId } = await seedThreaded(admin, {
+  const { threadId } = await seedThreaded(admin, {
     phone,
     addressTag: "RT-28",
   });
@@ -157,8 +167,8 @@ test("two browsers, A opens thread B sends inbound, both see the bubble (test 28
 
   try {
     await Promise.all([
-      page.goto(`/messages?thread=${contactId}`),
-      secondPage.goto(`/messages?thread=${contactId}`),
+      page.goto(`/messages?thread=${encodeURIComponent(threadId)}`),
+      secondPage.goto(`/messages?thread=${encodeURIComponent(threadId)}`),
     ]);
     await Promise.all([
       expect(page.getByTestId("inbox-detail-panel")).toBeVisible(),
