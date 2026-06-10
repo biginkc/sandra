@@ -26,10 +26,11 @@ type InsertedRow = {
 };
 
 type StubResult<T> = { data: T | null; error: { code?: string; message: string } | null };
+type StubUser = { id?: string | null; email?: string | null } | null;
 
 function makeSupabase(opts: {
   org: StubResult<{ id: string }>;
-  user: StubResult<{ user: { id: string } | null }>;
+  user: StubResult<{ user: StubUser }>;
   insertResult: StubResult<{ id: string }>;
   insertCapture: { rows: InsertedRow[] };
 }) {
@@ -66,10 +67,12 @@ function makeSupabase(opts: {
 
 beforeEach(() => {
   createClient.mockReset();
+  vi.stubEnv("ADMIN_EMAILS", "admin@bmhgroupkc.com");
 });
 
 afterEach(() => {
   vi.clearAllMocks();
+  vi.unstubAllEnvs();
 });
 
 describe("createSequence", () => {
@@ -96,7 +99,10 @@ describe("createSequence", () => {
     createClient.mockResolvedValue(
       makeSupabase({
         org: { data: null, error: null },
-        user: { data: { user: { id: "u-1" } }, error: null },
+        user: {
+          data: { user: { id: "u-1", email: "admin@bmhgroupkc.com" } },
+          error: null,
+        },
         insertResult: { data: { id: "s-1" }, error: null },
         insertCapture,
       }),
@@ -114,7 +120,10 @@ describe("createSequence", () => {
     createClient.mockResolvedValue(
       makeSupabase({
         org: { data: { id: "org-1" }, error: null },
-        user: { data: { user: { id: "user-1" } }, error: null },
+        user: {
+          data: { user: { id: "user-1", email: "admin@bmhgroupkc.com" } },
+          error: null,
+        },
         insertResult: { data: { id: "seq-42" }, error: null },
         insertCapture,
       }),
@@ -144,7 +153,10 @@ describe("createSequence", () => {
     createClient.mockResolvedValue(
       makeSupabase({
         org: { data: { id: "org-1" }, error: null },
-        user: { data: { user: null }, error: null },
+        user: {
+          data: { user: { id: null, email: "admin@bmhgroupkc.com" } },
+          error: null,
+        },
         insertResult: { data: { id: "seq-43" }, error: null },
         insertCapture,
       }),
@@ -165,7 +177,10 @@ describe("createSequence", () => {
     createClient.mockResolvedValue(
       makeSupabase({
         org: { data: { id: "org-1" }, error: null },
-        user: { data: { user: { id: "u-1" } }, error: null },
+        user: {
+          data: { user: { id: "u-1", email: "admin@bmhgroupkc.com" } },
+          error: null,
+        },
         insertResult: {
           data: null,
           error: { code: "23505", message: "duplicate key" },

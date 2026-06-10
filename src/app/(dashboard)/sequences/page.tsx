@@ -1,4 +1,6 @@
 import Link from "next/link";
+import { createClient } from "@/lib/supabase/server";
+import { isAdminEmail } from "@/lib/auth/allowlist";
 
 import { Page } from "@/components/page";
 import { PageHeader } from "@/components/page-header";
@@ -9,6 +11,12 @@ import { listSequences, type SequenceRow } from "./actions";
 import { SequenceRowActions } from "./row-actions";
 
 export default async function SequencesIndexPage() {
+  const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  const isAdmin = isAdminEmail(user?.email);
+
   const result = await listSequences();
   const sequences: SequenceRow[] = result.ok ? result.data : [];
 
@@ -21,11 +29,11 @@ export default async function SequencesIndexPage() {
         breadcrumb={[{ label: "Workspace" }, { label: "Sequences" }]}
         title="Sequences"
         description="Multi-step outreach recipes. V1: manual enrollment, `send_sms` + `change_status` actions, live-read templates."
-        actions={
+        actions={isAdmin ? (
           <Link href="/sequences/new">
             <Button>New sequence</Button>
           </Link>
-        }
+        ) : undefined}
       />
 
       {!result.ok && (
@@ -44,7 +52,7 @@ export default async function SequencesIndexPage() {
       {active.length > 0 && (
         <section className="flex flex-col gap-2">
           <h2 className="text-sm font-semibold tracking-tight">Active</h2>
-          <SequenceTable rows={active} />
+          <SequenceTable rows={active} isAdmin={isAdmin} />
         </section>
       )}
 
@@ -53,7 +61,7 @@ export default async function SequencesIndexPage() {
           <h2 className="text-muted-foreground text-sm font-semibold tracking-tight">
             Archived
           </h2>
-          <SequenceTable rows={archived} isArchived />
+          <SequenceTable rows={archived} isArchived isAdmin={isAdmin} />
         </section>
       )}
     </Page>
@@ -63,9 +71,11 @@ export default async function SequencesIndexPage() {
 function SequenceTable({
   rows,
   isArchived = false,
+  isAdmin,
 }: {
   rows: SequenceRow[];
   isArchived?: boolean;
+  isAdmin: boolean;
 }) {
   return (
     <div className="border-border overflow-x-auto rounded-md border">
@@ -84,12 +94,16 @@ function SequenceTable({
           {rows.map((s) => (
             <tr key={s.id} className="border-border border-t">
               <td className="px-3 py-2">
-                <Link
-                  href={`/sequences/${s.id}/edit`}
-                  className="font-medium hover:underline"
-                >
-                  {s.name}
-                </Link>
+                {isAdmin ? (
+                  <Link
+                    href={`/sequences/${s.id}/edit`}
+                    className="font-medium hover:underline"
+                  >
+                    {s.name}
+                  </Link>
+                ) : (
+                  <span className="font-medium">{s.name}</span>
+                )}
                 {s.description && (
                   <div className="text-muted-foreground text-xs">
                     {s.description}
@@ -113,10 +127,12 @@ function SequenceTable({
                 )}
               </td>
               <td className="px-3 py-2 text-right">
-                <SequenceRowActions
-                  sequenceId={s.id}
-                  isArchived={isArchived}
-                />
+                {isAdmin ? (
+                  <SequenceRowActions
+                    sequenceId={s.id}
+                    isArchived={isArchived}
+                  />
+                ) : null}
               </td>
             </tr>
           ))}

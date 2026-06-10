@@ -1,5 +1,7 @@
-import { notFound } from "next/navigation";
+import { notFound, redirect } from "next/navigation";
 
+import { isAdminEmail } from "@/lib/auth/allowlist";
+import { createClient } from "@/lib/supabase/server";
 import { Page } from "@/components/page";
 import { PageHeader } from "@/components/page-header";
 import { listTemplates } from "@/app/(dashboard)/templates/actions";
@@ -13,6 +15,12 @@ export default async function SequenceEditPage({
 }: {
   params: Promise<{ id: string }>;
 }) {
+  const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!isAdminEmail(user?.email)) redirect("/leads");
+
   const { id } = await params;
   const result = await getSequenceWithSteps(id);
   if (!result.ok || !result.data) {
