@@ -750,6 +750,87 @@ describe("POST /api/webhooks/dialpad/sms (integration)", () => {
     expect(notifCount).toBe(1);
   });
 
+  it("uses the persisted inbound row's property when a replay resolves to different fresh thread context", async () => {
+    const phone = "+18165559117";
+    const contactId = await seedContact(phone, { optIn: true });
+    const assigneeA = await createAuthUser(
+      `persisted-prop-a-${Date.now()}@test.invalid`,
+    );
+    const assigneeB = await createAuthUser(
+      `persisted-prop-b-${Date.now()}@test.invalid`,
+    );
+
+    const { data: propertyA } = await supabase
+      .from("properties")
+      .insert({
+        address: "21 Persisted Replay Ln",
+        state: "MO",
+        status: "prospect",
+        homeowner_contact_id: contactId,
+        assigned_user_id: assigneeA,
+      })
+      .select("id")
+      .single();
+    const { data: propertyB } = await supabase
+      .from("properties")
+      .insert({
+        address: "22 Fresh Resolve Ln",
+        state: "MO",
+        status: "prospect",
+        homeowner_contact_id: contactId,
+        assigned_user_id: assigneeB,
+      })
+      .select("id")
+      .single();
+
+    await supabase.from("messages").insert([
+      {
+        channel: "sms",
+        direction: "inbound",
+        status: "received",
+        provider: "mock",
+        external_id: "msg_persisted_thread_001",
+        from_address: phone,
+        to_address: "+18163706840",
+        body: "old persisted thread",
+        contact_id: contactId,
+        property_id: propertyA!.id,
+      },
+      {
+        channel: "sms",
+        direction: "outbound",
+        status: "sent",
+        provider: "mock",
+        external_id: "msg_persisted_thread_anchor",
+        from_address: "+18163706846",
+        to_address: phone,
+        body: "latest property B outbound",
+        contact_id: contactId,
+        property_id: propertyB!.id,
+      },
+    ]);
+    const res = await POST(
+      makeRequest({
+        externalId: "msg_persisted_thread_001",
+        from: phone,
+        to: "+18163706846",
+        body: "replay should trust persisted property",
+      }),
+    );
+    expect(res.status).toBe(200);
+
+    const { data: notifs } = await supabase
+      .from("notifications")
+      .select("user_id, body")
+      .eq("event_type", "owner_message_added");
+    expect(notifs).toHaveLength(1);
+    expect(notifs?.[0]).toMatchObject({
+      user_id: assigneeA,
+    });
+    expect(notifs?.[0]?.body).toContain("21 Persisted Replay Ln");
+    expect(notifs?.[0]?.body).not.toContain("22 Fresh Resolve Ln");
+  });
+
   it("does not duplicate STOP consent events when replay resumes a pending keyword webhook", async () => {
     const phone = "+18165559113";
     const contactId = await seedContact(phone, { optIn: true });

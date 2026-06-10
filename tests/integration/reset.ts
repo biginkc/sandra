@@ -64,6 +64,36 @@ async function ensureSystemManagedLists(
   }
 }
 
+async function pruneOrphanMemberships(
+  client: SupabaseClient<Database>,
+  memberships: Array<{ user_id: string; org_id: string; role: string }>,
+): Promise<Set<string>> {
+  const { data, error } = await client.auth.admin.listUsers();
+  if (error) {
+    throw new Error(`listUsers failed after reset: ${error.message}`);
+  }
+
+  const validUserIds = new Set(data.users.map((user) => user.id));
+  const orphanUserIds = Array.from(
+    new Set(
+      memberships
+        .map((row) => row.user_id)
+        .filter((userId) => !validUserIds.has(userId)),
+    ),
+  );
+  if (orphanUserIds.length > 0) {
+    const { error: deleteError } = await client
+      .from("memberships")
+      .delete()
+      .in("user_id", orphanUserIds);
+    if (deleteError) {
+      throw new Error(`orphan membership prune failed: ${deleteError.message}`);
+    }
+  }
+
+  return validUserIds;
+}
+
 /**
  * Truncate every tenant-data table. Called from `beforeEach` so each
  * integration test starts from a clean slate. Delegates to the
@@ -94,7 +124,14 @@ export async function resetTenantTables(
 
   await ensureSystemManagedLists(client);
 
-  const expectedMemberships = membershipsBefore ?? [];
+  const validUserIds = await pruneOrphanMemberships(
+    client,
+    membershipsBefore ?? [],
+  );
+
+  const expectedMemberships = (membershipsBefore ?? []).filter((row) =>
+    validUserIds.has(row.user_id),
+  );
   const knownUserIds = Array.from(
     new Set(expectedMemberships.map((row) => row.user_id)),
   );

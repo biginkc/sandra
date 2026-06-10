@@ -348,7 +348,7 @@ export function InboxDetail({
           initial={data.initialMessages}
           contactId={data.contactId}
           conversationId={data.conversationId}
-          propertyId={data.propertyId ?? ""}
+          propertyId={data.propertyId}
         />
       </div>
       {data.propertyId ? (
@@ -363,7 +363,7 @@ export function InboxDetail({
           </div>
           <div className="border-t border-border bg-white px-6 py-4">
             <InlineReply
-              key={`reply-${data.contactId}`}
+              key={`reply-${data.threadId}`}
               propertyId={data.propertyId}
               homeownerContactId={data.contactId}
               homeownerPhone={data.contactPhone}

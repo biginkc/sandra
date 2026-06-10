@@ -113,14 +113,7 @@ export async function recordConsentEvent(
     ) as Json,
     occurred_at: (params.occurredAt ?? new Date()).toISOString(),
   };
-  const query = params.idempotencyKey
-    ? supabase.from("consent_events").upsert(row, {
-        onConflict: "contact_id,channel,event_type,source_external_id",
-        ignoreDuplicates: true,
-      })
-    : supabase.from("consent_events").insert(row);
-  const { error } = await query;
-  if (error && params.idempotencyKey && isMissingConsentIdempotencySupport(error.message)) {
+  if (params.idempotencyKey) {
     const { data: existing, error: lookupError } = await supabase
       .from("consent_events")
       .select("id")
@@ -134,16 +127,14 @@ export async function recordConsentEvent(
       throw new Error(`recordConsentEvent lookup: ${lookupError.message}`);
     }
     if ((existing ?? []).length > 0) return;
+  }
 
-    const { error: fallbackError } = await supabase
-      .from("consent_events")
-      .insert(row);
-    if (!fallbackError) return;
-    throw new Error(`recordConsentEvent: ${fallbackError.message}`);
+  const { error } = await supabase.from("consent_events").insert(row);
+  if (!error) return;
+  if (params.idempotencyKey && isConsentIdempotencyDuplicate(error)) {
+    return;
   }
-  if (error) {
-    throw new Error(`recordConsentEvent: ${error.message}`);
-  }
+  throw new Error(`recordConsentEvent: ${error.message}`);
 }
 
 function buildConsentSourceDetail(
@@ -165,9 +156,10 @@ function buildConsentSourceDetail(
   } as Json;
 }
 
-function isMissingConsentIdempotencySupport(message: string): boolean {
+function isConsentIdempotencyDuplicate(error: { code?: string; message: string }): boolean {
   return (
-    message.includes("source_external_id") ||
-    message.includes("no unique or exclusion constraint matching the ON CONFLICT")
+    error.code === "23505" ||
+    error.message.includes("idx_consent_events_external_idempotency") ||
+    error.message.includes("source_external_id")
   );
 }

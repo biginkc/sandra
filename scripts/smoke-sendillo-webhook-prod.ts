@@ -80,6 +80,7 @@ async function resolveOrgId(client: SupabaseClient<Database>): Promise<string> {
 async function cleanup(
   client: SupabaseClient<Database>,
   ids: {
+    externalId: string;
     messageIds: string[];
     propertyId: string | null;
     contactId: string | null;
@@ -88,32 +89,73 @@ async function cleanup(
     sequenceId: string | null;
   },
 ): Promise<void> {
+  const cleanupErrors: string[] = [];
+  async function runDelete(
+    label: string,
+    runner: () => PromiseLike<{ error: { message: string } | null }>,
+  ) {
+    const { error } = await runner();
+    if (error) cleanupErrors.push(`${label}: ${error.message}`);
+  }
+
   if (ids.messageIds.length > 0) {
-    await client
-      .from("notifications")
-      .delete()
-      .eq("entity_type", "message")
-      .in("entity_id", ids.messageIds);
+    await runDelete("notifications", () =>
+      client
+        .from("notifications")
+        .delete()
+        .eq("entity_type", "message")
+        .in("entity_id", ids.messageIds),
+    );
   }
   if (ids.sequenceEnrollmentId) {
-    await client
-      .from("sequence_enrollments")
-      .delete()
-      .eq("id", ids.sequenceEnrollmentId);
+    const sequenceEnrollmentId = ids.sequenceEnrollmentId;
+    await runDelete("sequence_enrollments", () =>
+      client
+        .from("sequence_enrollments")
+        .delete()
+        .eq("id", sequenceEnrollmentId),
+    );
   }
   if (ids.sequenceStepId) {
-    await client.from("sequence_steps").delete().eq("id", ids.sequenceStepId);
+    const sequenceStepId = ids.sequenceStepId;
+    await runDelete("sequence_steps", () =>
+      client.from("sequence_steps").delete().eq("id", sequenceStepId),
+    );
   }
   if (ids.sequenceId) {
-    await client.from("sequences").delete().eq("id", ids.sequenceId);
+    const sequenceId = ids.sequenceId;
+    await runDelete("sequences", () =>
+      client.from("sequences").delete().eq("id", sequenceId),
+    );
   }
+  await runDelete("webhook_events", () =>
+    client
+      .from("webhook_events")
+      .delete()
+      .eq("provider", "sendillo")
+      .eq("event_type", "sms_inbound")
+      .eq("external_id", ids.externalId),
+  );
   if (ids.propertyId) {
-    await client.from("messages").delete().eq("property_id", ids.propertyId);
-    await client.from("properties").delete().eq("id", ids.propertyId);
+    const propertyId = ids.propertyId;
+    await runDelete("messages", () =>
+      client.from("messages").delete().eq("property_id", propertyId),
+    );
+    await runDelete("properties", () =>
+      client.from("properties").delete().eq("id", propertyId),
+    );
   }
   if (ids.contactId) {
-    await client.from("consent_events").delete().eq("contact_id", ids.contactId);
-    await client.from("contacts").delete().eq("id", ids.contactId);
+    const contactId = ids.contactId;
+    await runDelete("consent_events", () =>
+      client.from("consent_events").delete().eq("contact_id", contactId),
+    );
+    await runDelete("contacts", () =>
+      client.from("contacts").delete().eq("id", contactId),
+    );
+  }
+  if (cleanupErrors.length > 0) {
+    throw new Error(`cleanup failed: ${cleanupErrors.join("; ")}`);
   }
 }
 
@@ -126,6 +168,7 @@ async function main(): Promise<void> {
   const body = mode === "stop" ? "STOP" : `${tag} inbound replay-safe proof`;
   const externalId = `${tag}-message`;
   const ids = {
+    externalId,
     messageIds: [] as string[],
     propertyId: null as string | null,
     contactId: null as string | null,

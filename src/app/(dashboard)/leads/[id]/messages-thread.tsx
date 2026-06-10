@@ -14,7 +14,7 @@ type Props = {
   /** Contact + property ids define which rows belong in this thread. */
   contactId: string | null;
   conversationId?: string | null;
-  propertyId: string;
+  propertyId: string | null;
 };
 
 export function messageBelongsToThread(
@@ -22,13 +22,19 @@ export function messageBelongsToThread(
   scope: {
     contactId: string | null;
     conversationId: string | null;
-    propertyId: string;
+    propertyId: string | null;
   },
 ): boolean {
   if (scope.conversationId !== null) {
     return row.conversation_id === scope.conversationId;
   }
-  return row.property_id === scope.propertyId || Boolean(scope.contactId && row.contact_id === scope.contactId);
+  const normalizedPropertyId = scope.propertyId && scope.propertyId.length > 0
+    ? scope.propertyId
+    : null;
+  return (
+    row.contact_id === scope.contactId &&
+    row.property_id === normalizedPropertyId
+  );
 }
 
 /**
@@ -64,7 +70,7 @@ export function MessagesThread({
       if (!mounted) return;
 
       channel = supabase
-        .channel(`messages:${propertyId}`)
+        .channel(`messages:${propertyId ?? "none"}`)
         .on(
           "postgres_changes",
           { event: "INSERT", schema: "public", table: "messages" },

@@ -83,6 +83,7 @@ async function insertProperty(orgId: string, address: string): Promise<string> {
 
 beforeAll(async () => {
   vi.stubEnv("ADMIN_EMAILS", "jarrad@bmhgroupkc.com");
+  await resetTenantTables(serviceClient);
   await seedTwoOrgs(serviceClient);
 });
 

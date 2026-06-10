@@ -146,7 +146,8 @@ function isMissingEnsureConversationRpc(message: string): boolean {
   return (
     message.includes("Could not find the function public.ensure_sms_conversation_id") ||
     message.includes("function public.ensure_sms_conversation_id") ||
-    message.includes("schema cache")
+    message.includes("schema cache") ||
+    message.includes("contact/property thread scope not found")
   );
 }
 

@@ -233,6 +233,55 @@ describe("dispatchAiResponse (integration)", () => {
     expect(getMockMessageLog()).toHaveLength(0);
   });
 
+  it("preserves inbound_message_id after send so a replay does not send a second AI reply", async () => {
+    await seedConfig();
+    const { propertyId, contactId } = await seedLead({
+      phone: "+18167554012",
+    });
+    const inboundMessageId = "55555555-5555-4555-8555-555555555555";
+
+    const firstOutcome = await dispatchAiResponse(
+      supabase,
+      {
+        propertyId,
+        contactId,
+        inboundBody: "sounds good",
+        inboundMessageId,
+      },
+      { anthropic: stubAnthropic(HAPPY_OUT) },
+    );
+    expect(firstOutcome.outcome).toBe("sent");
+    expect(getMockMessageLog()).toHaveLength(1);
+
+    const replayOutcome = await dispatchAiResponse(
+      supabase,
+      {
+        propertyId,
+        contactId,
+        inboundBody: "sounds good",
+        inboundMessageId,
+      },
+      { anthropic: stubAnthropic(HAPPY_OUT) },
+    );
+
+    expect(replayOutcome).toEqual({
+      outcome: "skipped",
+      reason: "already_replied",
+    });
+    expect(getMockMessageLog()).toHaveLength(1);
+
+    const { data: outbound } = await supabase
+      .from("messages")
+      .select("metadata")
+      .eq("property_id", propertyId)
+      .eq("direction", "outbound")
+      .single();
+    expect(outbound?.metadata).toMatchObject({
+      generated_by: "ai_responder_v1",
+      inbound_message_id: inboundMessageId,
+    });
+  });
+
   // --------------------------------------------------------------------------
   // Keyword escalation tiers — no Claude call, property flagged
   // --------------------------------------------------------------------------

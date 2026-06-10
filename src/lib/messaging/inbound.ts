@@ -303,7 +303,9 @@ export async function handleInboundWebhook(
           { status: 500 },
         );
       }
-      if (!propertyId || !insertOutcome.messageId) {
+      const effectiveContactId = insertOutcome.contactId ?? contactId;
+      const effectivePropertyId = insertOutcome.propertyId ?? propertyId;
+      if (!effectivePropertyId || !insertOutcome.messageId) {
         await markWebhookEventProcessed(supabase, provider.providerId, ev.externalId);
         continue;
       }
@@ -312,7 +314,7 @@ export async function handleInboundWebhook(
       const { data: cur } = await supabase
         .from("properties")
         .select("status")
-        .eq("id", propertyId)
+        .eq("id", effectivePropertyId)
         .maybeSingle();
 
       if (cur?.status === "prospect" && ev.body && !inboundState.autoQualifiedAt) {
@@ -334,13 +336,13 @@ export async function handleInboundWebhook(
         if (shouldQualify) {
           const qOutcome = await qualifyProperty(
             supabase,
-            propertyId,
+            effectivePropertyId,
             "system:inbound_reply",
           );
           if (qOutcome.status === "failed") {
             reportError(new Error(qOutcome.message), {
               tags: { surface: `${provider.providerId}_webhook_auto_qualify` },
-              extra: { propertyId, externalId: ev.externalId },
+              extra: { propertyId: effectivePropertyId, externalId: ev.externalId },
             });
           } else {
             await markInboundMessageState(supabase, insertOutcome.messageId, {
@@ -355,14 +357,14 @@ export async function handleInboundWebhook(
           const { data: propRow } = await supabase
             .from("properties")
             .select("assigned_user_id")
-            .eq("id", propertyId)
+            .eq("id", effectivePropertyId)
             .maybeSingle();
           const adminUserIds = propRow?.assigned_user_id
             ? []
             : await listAdminUserIds(supabase);
           await dispatchOwnerMessageAdded(supabase, {
             messageId: insertOutcome.messageId,
-            propertyId,
+            propertyId: effectivePropertyId,
             adminUserIds,
             messageBody: ev.body,
           });
@@ -372,7 +374,7 @@ export async function handleInboundWebhook(
         } catch (e) {
           reportError(e, {
             tags: { surface: `${provider.providerId}_webhook_notification_dispatch` },
-            extra: { propertyId, externalId: ev.externalId },
+            extra: { propertyId: effectivePropertyId, externalId: ev.externalId },
           });
         }
       }
@@ -380,7 +382,7 @@ export async function handleInboundWebhook(
       if (!inboundState.propertyEnrollmentsPausedAt) {
         try {
           await pausePropertyEnrollments(supabase, {
-            propertyId,
+            propertyId: effectivePropertyId,
             reason: "inbound_reply",
           });
           await markInboundMessageState(supabase, insertOutcome.messageId, {
@@ -389,18 +391,18 @@ export async function handleInboundWebhook(
         } catch (e) {
           reportError(e, {
             tags: { surface: `${provider.providerId}_webhook_sequence_pause_inbound` },
-            extra: { propertyId, externalId: ev.externalId },
+            extra: { propertyId: effectivePropertyId, externalId: ev.externalId },
           });
         }
       }
 
-      if (contactId && !inboundState.aiResponder) {
+      if (effectiveContactId && !inboundState.aiResponder) {
         try {
           const outcome = await dispatchAiResponse(
             supabase,
             {
-              propertyId,
-              contactId,
+              propertyId: effectivePropertyId,
+              contactId: effectiveContactId,
               inboundBody: ev.body,
               inboundMessageId: insertOutcome.messageId,
             },
@@ -417,7 +419,7 @@ export async function handleInboundWebhook(
         } catch (e) {
           reportError(e, {
             tags: { surface: `${provider.providerId}_webhook_ai_responder` },
-            extra: { propertyId, externalId: ev.externalId },
+            extra: { propertyId: effectivePropertyId, externalId: ev.externalId },
           });
         }
       }
@@ -451,7 +453,7 @@ async function insertInboundMessage(
 ) {
   const { data: existing, error: lookupError } = await supabase
     .from("messages")
-    .select("id, metadata")
+    .select("id, metadata, contact_id, property_id, conversation_id")
     .eq("channel", "sms")
     .eq("direction", "inbound")
     .eq("provider", input.providerId)
@@ -464,6 +466,9 @@ async function insertInboundMessage(
       error: null as null,
       messageId: existing?.[0]?.id ?? null,
       metadata: existing?.[0]?.metadata ?? null,
+      contactId: existing?.[0]?.contact_id ?? null,
+      propertyId: existing?.[0]?.property_id ?? null,
+      conversationId: existing?.[0]?.conversation_id ?? null,
     };
   }
 
@@ -483,7 +488,7 @@ async function insertInboundMessage(
       conversation_id: input.conversationId,
       metadata: input.metadata,
     })
-    .select("id, metadata")
+    .select("id, metadata, contact_id, property_id, conversation_id")
     .maybeSingle();
   if (!error) {
     return {
@@ -491,12 +496,15 @@ async function insertInboundMessage(
       error: null as null,
       messageId: inserted?.id ?? null,
       metadata: inserted?.metadata ?? null,
+      contactId: inserted?.contact_id ?? null,
+      propertyId: inserted?.property_id ?? null,
+      conversationId: inserted?.conversation_id ?? null,
     };
   }
   if (error.code === "23505") {
     const { data: duplicate } = await supabase
       .from("messages")
-      .select("id, metadata")
+      .select("id, metadata, contact_id, property_id, conversation_id")
       .eq("channel", "sms")
       .eq("direction", "inbound")
       .eq("provider", input.providerId)
@@ -508,9 +516,20 @@ async function insertInboundMessage(
       error: null as null,
       messageId: duplicate?.id ?? null,
       metadata: duplicate?.metadata ?? null,
+      contactId: duplicate?.contact_id ?? null,
+      propertyId: duplicate?.property_id ?? null,
+      conversationId: duplicate?.conversation_id ?? null,
     };
   }
-  return { duplicate: false, error, messageId: null, metadata: null };
+  return {
+    duplicate: false,
+    error,
+    messageId: null,
+    metadata: null,
+    contactId: null,
+    propertyId: null,
+    conversationId: null,
+  };
 }
 
 function jsonObject(value: Json): Record<string, unknown> {
@@ -618,7 +637,11 @@ async function reserveWebhookEventLegacy(
     .maybeSingle();
   if (existingError) return { status: "error", message: existingError.message };
   if (existing?.processing_status === "processed") return { status: "skip" };
-  return { status: "reserved" };
+  return {
+    status: "error",
+    message:
+      "legacy webhook replay cannot be safely claimed without processing_started_at support",
+  };
 }
 
 async function markWebhookEventProcessed(
@@ -685,17 +708,27 @@ async function applyPhoneLevelOptOut(
     idempotencyKey: string;
   },
 ) {
-  const contactIds = await loadContactIdsByPhone(supabase, input.fromPhone);
+  const contactIds = await loadExistingContactIdsByPhone(supabase, input.fromPhone);
   for (const contactId of contactIds) {
-    await recordConsentEvent(supabase, {
-      contactId,
-      channel: "sms",
-      eventType: "opt_out",
-      source: input.source,
-      sourceDetail: input.sourceDetail,
-      occurredAt: input.occurredAt,
-      idempotencyKey: input.idempotencyKey,
-    });
+    try {
+      await recordConsentEvent(supabase, {
+        contactId,
+        channel: "sms",
+        eventType: "opt_out",
+        source: input.source,
+        sourceDetail: input.sourceDetail,
+        occurredAt: input.occurredAt,
+        idempotencyKey: input.idempotencyKey,
+      });
+    } catch (e) {
+      // Compliance enforcement beats audit perfection: if a contact row
+      // has drifted or a replay-safe insert races oddly, still flip the
+      // opt-out bit and stop future sends rather than 500ing the webhook.
+      reportError(e, {
+        tags: { surface: `${input.providerId}_webhook_opt_out_record` },
+        extra: { contactId, fromPhone: input.fromPhone, surface: input.surface },
+      });
+    }
     await supabase
       .from("contacts")
       .update({
@@ -755,6 +788,23 @@ async function loadContactIdsByPhone(
     for (const row of result.data ?? []) ids.add(row.id);
   }
   return Array.from(ids);
+}
+
+async function loadExistingContactIdsByPhone(
+  supabase: SupabaseClient<Database>,
+  fromPhone: string,
+): Promise<string[]> {
+  const contactIds = await loadContactIdsByPhone(supabase, fromPhone);
+  if (contactIds.length === 0) return [];
+
+  const { data, error } = await supabase
+    .from("contacts")
+    .select("id")
+    .in("id", contactIds);
+  if (error) {
+    throw new Error(`loadExistingContactIdsByPhone: ${error.message}`);
+  }
+  return (data ?? []).map((row) => row.id);
 }
 
 type InboundMessageState = {

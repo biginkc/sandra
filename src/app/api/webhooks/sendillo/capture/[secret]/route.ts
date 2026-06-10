@@ -47,6 +47,10 @@ function captureSecret(): string | null {
   return process.env.SENDILLO_CAPTURE_SECRET ?? null;
 }
 
+function captureReadDisabledInProduction(): boolean {
+  return process.env.VERCEL_ENV === "production";
+}
+
 function redactUrl(rawUrl: string, secret: string): string {
   try {
     const url = new URL(rawUrl);
@@ -92,6 +96,9 @@ export async function GET(
   context: { params: Promise<{ secret: string }> },
 ) {
   try {
+    if (captureReadDisabledInProduction()) {
+      return NextResponse.json({ error: "Not found" }, { status: 404 });
+    }
     const { secret } = await context.params;
     const authError = await authorizeCaptureSecret(secret);
     if (authError) return authError;

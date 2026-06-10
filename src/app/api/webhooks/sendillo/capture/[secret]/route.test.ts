@@ -100,6 +100,18 @@ describe("POST /api/webhooks/sendillo/capture/[secret]", () => {
     });
   });
 
+  it("disables capture reads in production", async () => {
+    vi.stubEnv("VERCEL_ENV", "production");
+
+    const response = await GET(
+      new Request("https://sandra.test/api/webhooks/sendillo/capture/capture-secret"),
+      { params: Promise.resolve({ secret: "capture-secret" }) },
+    );
+
+    expect(response.status).toBe(404);
+    expect(createClientMock).not.toHaveBeenCalled();
+  });
+
   it("captures a parsed Sendillo payload into webhook_events", async () => {
     const response = await POST(
       new Request("https://sandra.test/api/webhooks/sendillo/capture/capture-secret", {

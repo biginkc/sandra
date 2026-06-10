@@ -76,4 +76,21 @@ describe("messageBelongsToThread", () => {
       }),
     ).toBe(true);
   });
+
+  it("does not leak same-contact messages from a sibling property into a legacy thread", () => {
+    const siblingPropertyRow = makeMessage({
+      id: "m4",
+      contact_id: "contact-9",
+      property_id: "property-10",
+      conversation_id: null,
+    });
+
+    expect(
+      messageBelongsToThread(siblingPropertyRow, {
+        contactId: "contact-9",
+        propertyId: "property-9",
+        conversationId: null,
+      }),
+    ).toBe(false);
+  });
 });

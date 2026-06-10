@@ -61,6 +61,7 @@ export type AiStructuredOutput = {
 /** Payload written to `messages.metadata` for every AI-generated send. */
 export type AiMessageMetadata = {
   generated_by: "ai_responder_v1";
+  inbound_message_id?: string;
   model: string;
   confidence: number;
   sentiment: AiSentiment;

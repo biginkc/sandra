@@ -4,6 +4,29 @@ alter table public.notifications drop constraint if exists notifications_entity_
 alter table public.notifications add constraint notifications_entity_type_check
   check (entity_type in ('property', 'job', 'task', 'message'));
 
+do $$
+declare
+  duplicate_row record;
+begin
+  select user_id, entity_id, count(*) as duplicate_count
+  into duplicate_row
+  from public.notifications
+  where event_type = 'owner_message_added'
+    and entity_type = 'message'
+  group by user_id, entity_id
+  having count(*) > 1
+  limit 1;
+
+  if duplicate_row is not null then
+    raise exception
+      'Cannot create idx_notifications_owner_message_added_message_unique: duplicate notifications exist for user_id %, entity_id %, count %',
+      duplicate_row.user_id,
+      duplicate_row.entity_id,
+      duplicate_row.duplicate_count;
+  end if;
+end
+$$;
+
 create unique index if not exists idx_notifications_owner_message_added_message_unique
   on public.notifications (user_id, event_type, entity_type, entity_id)
   where event_type = 'owner_message_added'

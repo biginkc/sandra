@@ -223,14 +223,33 @@ export async function dispatchAiResponse(
   const messageId = sendResult.messageId;
   const metadata: AiMessageMetadata = {
     generated_by: "ai_responder_v1",
+    ...(input.inboundMessageId
+      ? { inbound_message_id: input.inboundMessageId }
+      : {}),
     model: config!.model,
     confidence: generated.confidence,
     sentiment: generated.sentiment,
     turn: currentTurn + 1,
   };
+  const { data: messageRow, error: messageLookupError } = await supabase
+    .from("messages")
+    .select("metadata")
+    .eq("id", messageId)
+    .maybeSingle();
+  if (messageLookupError) {
+    reportError(new Error(messageLookupError.message), {
+      tags: { surface: "ai_responder_message_metadata_lookup" },
+      extra: { messageId, inboundMessageId: input.inboundMessageId ?? null },
+    });
+  }
   await supabase
     .from("messages")
-    .update({ metadata: metadata as unknown as Json })
+    .update({
+      metadata: {
+        ...readJsonObject(messageRow?.metadata ?? null),
+        ...metadata,
+      } as Json,
+    })
     .eq("id", messageId);
 
   return { outcome: "sent", messageId, confidence: generated.confidence };
@@ -285,6 +304,12 @@ async function markPropertyNeedsAttention(
       extra: { propertyId, reason },
     });
   }
+}
+
+function readJsonObject(value: Json | null): Record<string, Json> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, Json>)
+    : {};
 }
 
 /**

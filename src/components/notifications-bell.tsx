@@ -115,12 +115,6 @@ export function NotificationsBell({ userId }: { userId: string }) {
     setLoaded(true);
   };
 
-  const hrefFor = (n: NotificationRow): string => {
-    if (n.entityType === "property") return `/leads/${n.entityId}`;
-    if (n.entityType === "job") return `/jobs`;
-    return "/";
-  };
-
   const onNotificationClick = async (n: NotificationRow) => {
     // Optimistically mark read; if the server write fails the Realtime
     // UPDATE won't land and the next poll will correct the badge.
@@ -132,7 +126,7 @@ export function NotificationsBell({ userId }: { userId: string }) {
       );
       await markRead(n.id);
     }
-    router.push(hrefFor(n));
+    router.push(n.href);
   };
 
   const onMarkAll = async () => {

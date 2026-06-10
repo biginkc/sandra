@@ -247,4 +247,58 @@ describe("<InboxDetail />", () => {
     expect(panel).toHaveTextContent("hello from B");
     expect(panel).not.toHaveTextContent("hello from A");
   });
+
+  it("switching threads for the same contact resets the inline reply draft", async () => {
+    const user = userEvent.setup();
+    const aData = makeData({
+      contactId: "contact-a",
+      propertyId: "prop-a",
+      threadId: "legacy:contact-a:prop-a",
+      initialMessages: [
+        makeMessage({
+          id: "ma",
+          body: "hello from property A",
+          direction: "inbound",
+          contact_id: "contact-a",
+          property_id: "prop-a",
+        }),
+      ],
+    });
+    const bData = makeData({
+      contactId: "contact-a",
+      propertyId: "prop-b",
+      threadId: "legacy:contact-a:prop-b",
+      initialMessages: [
+        makeMessage({
+          id: "mb",
+          body: "hello from property B",
+          direction: "inbound",
+          contact_id: "contact-a",
+          property_id: "prop-b",
+        }),
+      ],
+    });
+
+    const { rerender } = render(
+      <InboxDetail
+        data={aData}
+        assigneeEmails={{}}
+        currentUserId="user-1"
+      />,
+    );
+
+    const textarea = screen.getByLabelText("Reply to this lead");
+    await user.type(textarea, "draft for property A");
+    expect(textarea).toHaveValue("draft for property A");
+
+    rerender(
+      <InboxDetail
+        data={bData}
+        assigneeEmails={{}}
+        currentUserId="user-1"
+      />,
+    );
+
+    expect(screen.getByLabelText("Reply to this lead")).toHaveValue("");
+  });
 });
