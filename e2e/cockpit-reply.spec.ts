@@ -7,6 +7,10 @@ import {
   seedProspects,
 } from "./fixtures";
 import { checkQuietHours, STATE_TO_TZ } from "../src/lib/messaging/quiet-hours";
+import {
+  buildThreadId,
+  ensureConversationIdForThread,
+} from "../src/lib/messages/threading";
 
 /**
  * Feature 8 Phase 1 — send-now reply flow from the cockpit side panel.
@@ -61,12 +65,18 @@ async function seedConsentedThread(
       source: "e2e-cockpit-reply",
     });
   }
+  const conversationId = await ensureConversationIdForThread(
+    admin,
+    contact.id,
+    prop.id,
+  );
 
   // Seed at least one prior message so the thread shows up in the inbox list.
   await admin.from("messages").insert({
     channel: "sms",
     direction: "inbound",
     status: "received",
+    conversation_id: conversationId,
     contact_id: contact.id,
     property_id: prop.id,
     from_address: opts.phone,
@@ -77,7 +87,7 @@ async function seedConsentedThread(
   return {
     contactId: contact.id,
     propertyId: prop.id,
-    threadId: `legacy:${contact.id}:${prop.id}`,
+    threadId: buildThreadId(conversationId, contact.id, prop.id),
   };
 }
 
@@ -100,14 +110,14 @@ test("type body, hit Send → bubble appears + DB row is status='sent' (tests 20
     return;
   }
 
-  const { contactId, propertyId } = await seedConsentedThread(admin, {
+  const { propertyId, threadId } = await seedConsentedThread(admin, {
     phone: "+18165557201",
     addressTag: "REPLY-OK",
     opted: "in",
     state: callableState,
   });
 
-  await page.goto(`/messages?thread=${contactId}`);
+  await page.goto(`/messages?thread=${encodeURIComponent(threadId)}`);
   await expect(page.getByTestId("inbox-detail-panel")).toBeVisible();
 
   const reply = `cockpit reply ${Date.now()}`;
@@ -139,13 +149,13 @@ test("Send button is disabled when the body is empty (test 22)", async ({
   await resetTenantTables(admin);
   await ensureTestUser(admin);
 
-  const { contactId } = await seedConsentedThread(admin, {
+  const { threadId } = await seedConsentedThread(admin, {
     phone: "+18165557202",
     addressTag: "REPLY-EMPTY",
     opted: "in",
   });
 
-  await page.goto(`/messages?thread=${contactId}`);
+  await page.goto(`/messages?thread=${encodeURIComponent(threadId)}`);
   const sendBtn = page.getByRole("button", { name: /Send reply/i });
   await expect(sendBtn).toBeDisabled();
 
@@ -165,14 +175,14 @@ test("reply to opted-out contact surfaces consent block (test 23)", async ({
     return;
   }
 
-  const { contactId, propertyId } = await seedConsentedThread(admin, {
+  const { propertyId, threadId } = await seedConsentedThread(admin, {
     phone: "+18165557203",
     addressTag: "REPLY-NOCONSENT",
     opted: "out",
     state: callableState,
   });
 
-  await page.goto(`/messages?thread=${contactId}`);
+  await page.goto(`/messages?thread=${encodeURIComponent(threadId)}`);
   const reply = `should be blocked ${Date.now()}`;
   await page.getByPlaceholder(/Type.*reply/i).fill(reply);
   await page.getByRole("button", { name: /Send reply/i }).click();
@@ -201,7 +211,7 @@ test("reply during quiet hours surfaces quiet-hours block (test 24)", async ({
   await resetTenantTables(admin);
   await ensureTestUser(admin);
 
-  const { contactId, propertyId } = await seedConsentedThread(admin, {
+  const { propertyId, threadId } = await seedConsentedThread(admin, {
     phone: "+18165557204",
     addressTag: "REPLY-QUIET",
     opted: "in",
@@ -211,13 +221,18 @@ test("reply during quiet hours surfaces quiet-hours block (test 24)", async ({
     .update({ state: "ZZ" })
     .eq("id", propertyId);
 
-  await page.goto(`/messages?thread=${contactId}`);
+  await page.goto(`/messages?thread=${encodeURIComponent(threadId)}`);
   const reply = `should be quiet-blocked ${Date.now()}`;
   await page.getByPlaceholder(/Type.*reply/i).fill(reply);
   await page.getByRole("button", { name: /Send reply/i }).click();
 
+  await expect(page.getByText(/Blocked: quiet hours/i).first()).toBeVisible({
+    timeout: 10_000,
+  });
   await expect(
-    page.getByText(/quiet hours|state/i).first(),
+    page
+      .getByText(/Property has no US state .* Add state and retry\./i)
+      .first(),
   ).toBeVisible({ timeout: 10_000 });
 
   const { data } = await admin
@@ -264,7 +279,7 @@ test("after a successful send, the thread jumps to the top of the inbox (test 25
     .update({ created_at: new Date(Date.now() - 30 * 60_000).toISOString() })
     .eq("contact_id", b.contactId);
 
-  await page.goto(`/messages?thread=${b.contactId}`);
+  await page.goto(`/messages?thread=${encodeURIComponent(b.threadId)}`);
   await page.getByPlaceholder(/Type.*reply/i).fill(`bump ${Date.now()}`);
   await page.getByRole("button", { name: /Send reply/i }).click();
 
