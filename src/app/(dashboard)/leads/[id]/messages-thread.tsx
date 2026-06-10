@@ -13,8 +13,29 @@ type Props = {
   initial: Message[];
   /** Contact + property ids define which rows belong in this thread. */
   contactId: string | null;
-  propertyId: string;
+  conversationId?: string | null;
+  propertyId: string | null;
 };
+
+export function messageBelongsToThread(
+  row: Message,
+  scope: {
+    contactId: string | null;
+    conversationId: string | null;
+    propertyId: string | null;
+  },
+): boolean {
+  if (scope.conversationId !== null) {
+    return row.conversation_id === scope.conversationId;
+  }
+  const normalizedPropertyId = scope.propertyId && scope.propertyId.length > 0
+    ? scope.propertyId
+    : null;
+  return (
+    row.contact_id === scope.contactId &&
+    row.property_id === normalizedPropertyId
+  );
+}
 
 /**
  * SMS conversation view for the lead detail page. Outbound bubbles on
@@ -27,9 +48,30 @@ type Props = {
  * primary token (#000000 in the warm-paper palette) to match the
  * messages-cockpit Stitch design.
  */
-export function MessagesThread({ initial, contactId, propertyId }: Props) {
-  const [messages, setMessages] = useState<Message[]>(initial);
+export function MessagesThread({
+  initial,
+  contactId,
+  conversationId = null,
+  propertyId,
+}: Props) {
+  const [messages, setMessages] = useState<Message[]>(() =>
+    filterThreadMessages(initial, {
+      contactId,
+      conversationId,
+      propertyId,
+    }),
+  );
   const endRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    setMessages(
+      filterThreadMessages(initial, {
+        contactId,
+        conversationId,
+        propertyId,
+      }),
+    );
+  }, [contactId, conversationId, initial, propertyId]);
 
   useEffect(() => {
     const supabase = createClient();
@@ -44,16 +86,19 @@ export function MessagesThread({ initial, contactId, propertyId }: Props) {
       if (!mounted) return;
 
       channel = supabase
-        .channel(`messages:${propertyId}`)
+        .channel(`messages:${propertyId ?? "none"}`)
         .on(
           "postgres_changes",
           { event: "INSERT", schema: "public", table: "messages" },
           (payload) => {
             const row = payload.new as Message;
-            const belongs =
-              row.property_id === propertyId ||
-              (contactId && row.contact_id === contactId);
-            if (belongs) {
+            if (
+              messageBelongsToThread(row, {
+                contactId,
+                conversationId,
+                propertyId,
+              })
+            ) {
               setMessages((prev) => {
                 if (prev.some((m) => m.id === row.id)) return prev;
                 return [...prev, row].sort((a, b) =>
@@ -81,14 +126,14 @@ export function MessagesThread({ initial, contactId, propertyId }: Props) {
       mounted = false;
       if (channel) supabase.removeChannel(channel);
     };
-  }, [contactId, propertyId]);
+  }, [contactId, conversationId, propertyId]);
 
   useEffect(() => {
     const frame = window.requestAnimationFrame(() => {
       endRef.current?.scrollIntoView({ block: "end" });
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [contactId, messages.length, propertyId]);
+  }, [contactId, conversationId, messages.length, propertyId]);
 
   if (messages.length === 0) {
     return (
@@ -172,6 +217,17 @@ export function MessagesThread({ initial, contactId, propertyId }: Props) {
       <div ref={endRef} data-testid="messages-thread-end" />
     </div>
   );
+}
+
+function filterThreadMessages(
+  rows: Message[],
+  scope: {
+    contactId: string | null;
+    conversationId: string | null;
+    propertyId: string | null;
+  },
+): Message[] {
+  return rows.filter((row) => messageBelongsToThread(row, scope));
 }
 
 function formatDayLabel(iso: string): string {

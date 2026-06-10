@@ -29,12 +29,16 @@ function firstForwarded(value: string | null): string | null {
 }
 
 async function inviteRedirectTo(): Promise<string> {
-  const h = await headers();
-  const proto = firstForwarded(h.get("x-forwarded-proto")) ?? "https";
-  const host = firstForwarded(h.get("x-forwarded-host")) ?? h.get("host");
+  try {
+    const h = await headers();
+    const proto = firstForwarded(h.get("x-forwarded-proto")) ?? "https";
+    const host = firstForwarded(h.get("x-forwarded-host")) ?? h.get("host");
 
-  if (host) {
-    return `${proto}://${host}/auth/accept-invite`;
+    if (host) {
+      return `${proto}://${host}/auth/accept-invite`;
+    }
+  } catch {
+    // Some test and script contexts have no active request store.
   }
 
   const configured = process.env.NEXT_PUBLIC_SITE_URL?.trim();

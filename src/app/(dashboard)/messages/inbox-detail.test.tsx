@@ -96,11 +96,14 @@ function makeMessage(overrides: Partial<MessageRow> & { id: string; body: string
 
 function makeData(overrides: Partial<InboxDetailData> & { contactId: string }): InboxDetailData {
   const contactId = overrides.contactId;
+  const propertyId = overrides.propertyId ?? "prop-1";
   return {
+    threadId: overrides.threadId ?? `legacy:${contactId}:${propertyId}`,
+    conversationId: overrides.conversationId ?? null,
     contactId,
     contactName: overrides.contactName ?? "Panel Test",
     contactPhone: overrides.contactPhone ?? "+15551234567",
-    propertyId: overrides.propertyId ?? "prop-1",
+    propertyId,
     propertyAddress: overrides.propertyAddress ?? "123 Main St, Albany, NY",
     assigneeId: overrides.assigneeId ?? null,
     propertyStatus: overrides.propertyStatus ?? "prospect",
@@ -243,5 +246,59 @@ describe("<InboxDetail />", () => {
     const panel = screen.getByTestId("inbox-detail-panel");
     expect(panel).toHaveTextContent("hello from B");
     expect(panel).not.toHaveTextContent("hello from A");
+  });
+
+  it("switching threads for the same contact resets the inline reply draft", async () => {
+    const user = userEvent.setup();
+    const aData = makeData({
+      contactId: "contact-a",
+      propertyId: "prop-a",
+      threadId: "legacy:contact-a:prop-a",
+      initialMessages: [
+        makeMessage({
+          id: "ma",
+          body: "hello from property A",
+          direction: "inbound",
+          contact_id: "contact-a",
+          property_id: "prop-a",
+        }),
+      ],
+    });
+    const bData = makeData({
+      contactId: "contact-a",
+      propertyId: "prop-b",
+      threadId: "legacy:contact-a:prop-b",
+      initialMessages: [
+        makeMessage({
+          id: "mb",
+          body: "hello from property B",
+          direction: "inbound",
+          contact_id: "contact-a",
+          property_id: "prop-b",
+        }),
+      ],
+    });
+
+    const { rerender } = render(
+      <InboxDetail
+        data={aData}
+        assigneeEmails={{}}
+        currentUserId="user-1"
+      />,
+    );
+
+    const textarea = screen.getByLabelText("Reply to this lead");
+    await user.type(textarea, "draft for property A");
+    expect(textarea).toHaveValue("draft for property A");
+
+    rerender(
+      <InboxDetail
+        data={bData}
+        assigneeEmails={{}}
+        currentUserId="user-1"
+      />,
+    );
+
+    expect(screen.getByLabelText("Reply to this lead")).toHaveValue("");
   });
 });

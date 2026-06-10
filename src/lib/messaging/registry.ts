@@ -2,6 +2,7 @@ import { ConfigurationError } from "@/lib/errors/classes";
 
 import { dialpadFromEnv } from "./providers/dialpad";
 import { MockMessagingProvider } from "./providers/mock";
+import { sendilloFromEnv } from "./providers/sendillo";
 import { twilioFromEnv } from "./providers/twilio";
 import type { MessagingProvider } from "./types";
 
@@ -24,11 +25,35 @@ export function getMessagingProvider(): MessagingProvider | null {
       return dialpadFromEnv();
     case "mock":
       return new MockMessagingProvider();
+    case "sendillo":
+      return sendilloFromEnv();
     case "twilio":
       return twilioFromEnv();
     default:
       throw new ConfigurationError(
         `Unknown MESSAGING_PROVIDER: ${provider}`,
       );
+  }
+}
+
+export function getWebhookProvider(
+  providerId: "dialpad" | "sendillo" | "twilio",
+): MessagingProvider | null {
+  const configured = process.env.MESSAGING_PROVIDER?.toLowerCase().trim();
+  if (configured === "mock") return new MockMessagingProvider();
+
+  try {
+    switch (providerId) {
+      case "dialpad":
+        return dialpadFromEnv();
+      case "sendillo":
+        return sendilloFromEnv();
+      case "twilio":
+        return twilioFromEnv();
+    }
+    return null;
+  } catch (error) {
+    if (error instanceof ConfigurationError) return null;
+    throw error;
   }
 }

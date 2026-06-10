@@ -20,7 +20,7 @@ type ThreadUpdate = {
 
 type Props = {
   initial: Thread[];
-  selectedContactId: string | null;
+  selectedThreadId: string | null;
   /** Used to mark threads assigned to the viewer with a data-attribute
    *  for tests + styling. The avatar circle itself shows contact
    *  initials regardless of assignment — assignment lives in the detail
@@ -29,7 +29,7 @@ type Props = {
   /** Selection is owned by CockpitView so it can wrap the URL update +
    *  router.refresh() in useTransition; that's how the detail panel
    *  knows when to render a skeleton. The list just emits clicks. */
-  onSelectThread: (contactId: string) => void;
+  onSelectThread: (threadId: string) => void;
 };
 
 /**
@@ -47,7 +47,7 @@ type Props = {
  */
 export function InboxThreadList({
   initial,
-  selectedContactId,
+  selectedThreadId,
   currentUserId,
   onSelectThread,
 }: Props) {
@@ -112,15 +112,15 @@ export function InboxThreadList({
     >
       <div className="flex-1 overflow-y-auto divide-y divide-border">
         {threads.map((t) => {
-          const selected = t.contactId === selectedContactId;
+          const selected = t.threadId === selectedThreadId;
           const isMine =
             t.assigneeId !== null && t.assigneeId === currentUserId;
           return (
             <button
-              key={t.contactId}
+              key={t.threadId}
               type="button"
-              onClick={() => onSelectThread(t.contactId)}
-              data-testid={`inbox-thread-${t.contactId}`}
+              onClick={() => onSelectThread(t.threadId)}
+              data-testid={`inbox-thread-${t.threadId}`}
               data-selected={selected || undefined}
               data-assignee-id={t.assigneeId ?? undefined}
               data-assignee-mine={isMine || undefined}
@@ -144,7 +144,7 @@ export function InboxThreadList({
                 <ContactAvatar
                   contactName={t.contactName}
                   contactPhone={t.contactPhone}
-                  contactId={t.contactId}
+                  avatarId={t.threadId}
                 />
                 {t.propertyAddress ? (
                   <span className="truncate text-[11px] italic text-[#78716c]">
@@ -170,7 +170,7 @@ export function InboxThreadList({
                   <Badge
                     variant="default"
                     className="h-4 min-w-4 shrink-0 px-1 text-[10px] bg-[#111827] text-white"
-                    data-testid={`inbox-thread-${t.contactId}-unread`}
+                    data-testid={`inbox-thread-${t.threadId}-unread`}
                   >
                     {t.unreadCount}
                   </Badge>
@@ -187,17 +187,17 @@ export function InboxThreadList({
 function ContactAvatar({
   contactName,
   contactPhone,
-  contactId,
+  avatarId,
 }: {
   contactName: string | null;
   contactPhone: string | null;
-  contactId: string;
+  avatarId: string;
 }) {
   const initials = initialsOfContact(contactName, contactPhone);
   return (
     <span
       title={contactName ?? contactPhone ?? "Unknown contact"}
-      data-testid={`inbox-thread-${contactId}-avatar`}
+      data-testid={`inbox-thread-${avatarId}-avatar`}
       className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-[#f5f5f4] border border-[#e5e1df] text-[9px] font-bold text-[#78716c]"
     >
       {initials}
@@ -213,10 +213,13 @@ function mergeThreadUpdate(
     return updates;
   }
 
-  const previous = updates[row.contact_id];
+  const threadId =
+    row.conversation_id ??
+    `legacy:${row.contact_id}:${row.property_id ?? "none"}`;
+  const previous = updates[threadId];
   return {
     ...updates,
-    [row.contact_id]: {
+    [threadId]: {
       lastMessageBody: row.body,
       lastMessageDirection: row.direction as Thread["lastMessageDirection"],
       lastMessageAt: row.created_at,
@@ -234,7 +237,7 @@ function applyThreadUpdates(
   if (Object.keys(updates).length === 0) return threads;
 
   const next = threads.map((thread) => {
-    const update = updates[thread.contactId];
+    const update = updates[thread.threadId];
     if (!update) return thread;
     return {
       ...thread,

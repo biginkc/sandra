@@ -11,6 +11,17 @@ describe("formatNotification", () => {
     expect(out.body).toContain("123 Main St, Kansas City MO");
   });
 
+  it("owner_message_added triage path calls out missing property resolution", () => {
+    const out = formatNotification("owner_message_added", {
+      propertyAddress: null,
+      needsPropertyTriage: true,
+      messageBody: "Need to know which house this is for",
+    });
+    expect(out.title).toBe("New SMS reply needs property triage");
+    expect(out.body).toContain("property");
+    expect(out.body).toContain("Need to know which house this is for");
+  });
+
   it("property_assigned → 'Lead assigned to you' + address + assigner in body", () => {
     const out = formatNotification("property_assigned", {
       propertyAddress: "456 Oak Ave",

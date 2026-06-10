@@ -4,6 +4,7 @@ import { after } from "next/server";
 
 import { isAdminEmail } from "@/lib/auth/allowlist";
 import { runCassEnrichment } from "@/lib/enrichment/cass-job";
+import { parseThreadId } from "@/lib/messages/threading";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
 import { errFromUnknown, ok, type Result } from "@/lib/errors/result";
@@ -62,7 +63,7 @@ export type DetailedLead = PropertyRow & {
   agent: (ContactRow & { agent_details: AgentDetailsRow | null }) | null;
 };
 
-export async function getLeadDetail(
+async function getLeadDetail(
   propertyId: string,
 ): Promise<Result<DetailedLead | null>> {
   try {
@@ -225,7 +226,7 @@ export async function updateLeadMotivation(
  * a system marker like 'system:inbound_reply' (auto-qualify from the
  * Dialpad webhook).
  */
-export async function qualifyLead(
+async function qualifyLead(
   propertyId: string,
   qualifier: string | null = null,
 ): Promise<Result<{ alreadyQualified: boolean }>> {
@@ -947,7 +948,7 @@ export async function sendSmsFromLead(
  * opt-in form submission) and records an `opt_in_marketing_written`
  * event. UI prompts for the source URL / description.
  */
-export async function captureConsent(params: {
+async function captureConsent(params: {
   contactId: string;
   channel: ConsentChannel;
   eventType: ConsentEventType;
@@ -1066,6 +1067,56 @@ export async function markMessagesReadForProperty(
     reportError(e, {
       tags: { surface: "mark_messages_read" },
       extra: { propertyId },
+    });
+    return errFromUnknown(e, "MARK_READ_FAILED");
+  }
+}
+
+export async function markMessagesReadForThread(
+  threadId: string,
+): Promise<Result<null>> {
+  try {
+    const parsed = parseThreadId(threadId);
+    if (parsed.kind === "contact") {
+      return {
+        ok: false,
+        error: {
+          code: "MARK_READ_FAILED",
+          message: "Contact-only thread ids are no longer valid for mark-read.",
+        },
+      };
+    }
+
+    const supabase = await createClient();
+    let query = supabase
+      .from("messages")
+      .update({ read_at: new Date().toISOString() })
+      .eq("channel", "sms")
+      .eq("direction", "inbound")
+      .is("read_at", null);
+
+    if (parsed.kind === "conversation") {
+      query = query.eq("conversation_id", parsed.conversationId);
+    } else {
+      query = query.eq("contact_id", parsed.contactId);
+      query =
+        parsed.propertyId === null
+          ? query.is("property_id", null)
+          : query.eq("property_id", parsed.propertyId);
+    }
+
+    const { error } = await query;
+    if (error) {
+      return {
+        ok: false,
+        error: { code: "MARK_READ_FAILED", message: error.message },
+      };
+    }
+    return ok(null);
+  } catch (e) {
+    reportError(e, {
+      tags: { surface: "mark_messages_read_thread" },
+      extra: { threadId },
     });
     return errFromUnknown(e, "MARK_READ_FAILED");
   }

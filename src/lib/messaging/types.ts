@@ -65,6 +65,12 @@ export interface MessagingProvider {
   /** Identifier written to `messages.provider` + `webhook_events.provider`. */
   readonly providerId: string;
 
+  /**
+   * Provider-configured default sender, when one exists. Used for
+   * persisting outbound breadcrumbs before the provider call happens.
+   */
+  getDefaultFromNumber?(): string | null;
+
   sendSms(input: SmsOutboundInput): Promise<SmsSendResult>;
 
   /**

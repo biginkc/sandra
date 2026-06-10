@@ -42,10 +42,11 @@ function loadLocalEnv(file: string): Record<string, string> {
   return out;
 }
 
-export const env = { ...loadLocalEnv(".env.local"), ...process.env } as Record<
-  string,
-  string | undefined
->;
+export const env = {
+  ...loadLocalEnv(".env.local"),
+  ...loadLocalEnv(".env.prod-canary.local"),
+  ...process.env,
+} as Record<string, string | undefined>;
 
 // ----------- supabase --------------------------------------------------------
 
@@ -153,6 +154,44 @@ export async function fireInboundWebhook(
     method: "POST",
     headers: { "content-type": "application/jwt" },
     body,
+  });
+  return res.status;
+}
+
+export type SendilloInboundEvent = {
+  event?: "inbound.received";
+  data: {
+    messageId: string;
+    from: string;
+    to: string;
+    body: string;
+    receivedAt?: string;
+    type?: "SMS";
+    mediaUrls?: string[];
+  };
+};
+
+export async function fireSendilloInboundWebhook(
+  event: SendilloInboundEvent,
+): Promise<number> {
+  const secret = env.SENDILLO_WEBHOOK_SECRET;
+  if (!secret) {
+    throw new Error(
+      "SENDILLO_WEBHOOK_SECRET missing — Sendillo canaries need the " +
+        "same shared secret Sandra uses to verify inbound deliveries.",
+    );
+  }
+
+  const res = await fetch(`${PROD_BASE_URL}/api/webhooks/sendillo/sms`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-sendillo-webhook-secret": secret,
+    },
+    body: JSON.stringify({
+      event: event.event ?? "inbound.received",
+      data: event.data,
+    }),
   });
   return res.status;
 }

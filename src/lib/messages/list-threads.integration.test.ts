@@ -4,6 +4,7 @@ import { createTestClient } from "@tests/integration/client";
 import { resetTenantTables } from "@tests/integration/reset";
 
 import { listThreads } from "./list-threads";
+import { ensureConversationIdForThread } from "./threading";
 
 const supabase = createTestClient();
 
@@ -83,7 +84,7 @@ describe("listThreads (integration)", () => {
   });
 
   // Test case #1
-  it("returns one row per contact_id with the most recent message", async () => {
+  it("returns one row per contact/property thread with the most recent message", async () => {
     const { contactId } = await seedConversation({
       phone: "+18165550001",
       messages: [
@@ -99,6 +100,141 @@ describe("listThreads (integration)", () => {
     expect(mine).toHaveLength(1);
     expect(mine[0].lastMessageBody).toBe("great — 2pm work?");
     expect(mine[0].lastMessageDirection).toBe("outbound");
+  });
+
+  it("keeps separate threads when the same contact has two properties", async () => {
+    const { data: contact } = await supabase
+      .from("contacts")
+      .insert({
+        first_name: "Split",
+        last_name: "Thread",
+        phone_1: "+18165550002",
+      })
+      .select("id")
+      .single();
+
+    const { data: propertyA } = await supabase
+      .from("properties")
+      .insert({
+        address: "100 Alpha Ct",
+        state: "MO",
+        homeowner_contact_id: contact!.id,
+      })
+      .select("id")
+      .single();
+
+    const { data: propertyB } = await supabase
+      .from("properties")
+      .insert({
+        address: "200 Bravo Ct",
+        state: "MO",
+        homeowner_contact_id: contact!.id,
+      })
+      .select("id")
+      .single();
+
+    await supabase.from("messages").insert([
+      {
+        channel: "sms",
+        direction: "outbound",
+        status: "sent",
+        contact_id: contact!.id,
+        property_id: propertyA!.id,
+        from_address: "+18162804181",
+        to_address: "+18165550002",
+        body: "Property A",
+        created_at: new Date(Date.now() - 10 * 60_000).toISOString(),
+      },
+      {
+        channel: "sms",
+        direction: "inbound",
+        status: "received",
+        contact_id: contact!.id,
+        property_id: propertyB!.id,
+        from_address: "+18165550002",
+        to_address: "+18162804182",
+        body: "Property B",
+        created_at: new Date(Date.now() - 5 * 60_000).toISOString(),
+      },
+    ]);
+
+    const threads = await listThreads(supabase, {});
+    const mine = threads.filter((thread) => thread.contactId === contact!.id);
+
+    expect(mine).toHaveLength(2);
+    expect(mine.map((thread) => thread.propertyId).sort()).toEqual(
+      [propertyA!.id, propertyB!.id].sort(),
+    );
+    expect(new Set(mine.map((thread) => thread.threadId)).size).toBe(2);
+  });
+
+  it("uses one conversation id for concurrent first-send and first-reply races", async () => {
+    const { data: contact } = await supabase
+      .from("contacts")
+      .insert({
+        first_name: "Race",
+        last_name: "Thread",
+        phone_1: "+18165550123",
+      })
+      .select("id")
+      .single();
+
+    const { data: property } = await supabase
+      .from("properties")
+      .insert({
+        address: "123 Race St",
+        state: "MO",
+        homeowner_contact_id: contact!.id,
+      })
+      .select("id")
+      .single();
+
+    const attempts = await Promise.all(
+      Array.from({ length: 20 }, () =>
+        ensureConversationIdForThread(supabase, contact!.id, property!.id),
+      ),
+    );
+
+    expect(new Set(attempts).size).toBe(1);
+
+    const [conversationId] = attempts;
+    await supabase.from("messages").insert({
+      channel: "sms",
+      direction: "outbound",
+      status: "sent",
+      contact_id: contact!.id,
+      property_id: property!.id,
+      conversation_id: conversationId,
+      from_address: "+18162804181",
+      to_address: "+18165550123",
+      body: "first send",
+    });
+    await supabase.from("messages").insert({
+      channel: "sms",
+      direction: "inbound",
+      status: "received",
+      contact_id: contact!.id,
+      property_id: property!.id,
+      conversation_id: await ensureConversationIdForThread(
+        supabase,
+        contact!.id,
+        property!.id,
+      ),
+      from_address: "+18165550123",
+      to_address: "+18162804181",
+      body: "first reply",
+    });
+
+    const { data: messages, error } = await supabase
+      .from("messages")
+      .select("conversation_id")
+      .eq("contact_id", contact!.id)
+      .eq("property_id", property!.id);
+
+    expect(error).toBeNull();
+    expect(new Set((messages ?? []).map((row) => row.conversation_id))).toEqual(
+      new Set([conversationId]),
+    );
   });
 
   // Test case #2

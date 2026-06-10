@@ -25,7 +25,7 @@ type Props = {
   queued: QueuedRow[];
   /** Server-resolved URL thread param. Used to distinguish "still fetching"
    *  from "fetch completed but there is no matching thread detail." */
-  selectedContactId?: string | null;
+  selectedThreadId?: string | null;
   threadDetail: InboxDetailData | null;
   unknownSenders: UnknownSender[];
   unknownActiveCount: number;
@@ -53,7 +53,7 @@ export function CockpitView({
   filter,
   threads,
   queued,
-  selectedContactId = null,
+  selectedThreadId = null,
   threadDetail,
   unknownSenders,
   unknownActiveCount,
@@ -86,13 +86,13 @@ export function CockpitView({
   // semantically, but React's concurrent mode keeps the old tree
   // visible during transitions, so isPending never flips in the tree
   // the user is looking at.
-  const [pendingContactId, setPendingContactId] = useState<string | null>(null);
+  const [pendingThreadId, setPendingThreadId] = useState<string | null>(null);
 
   const handleSelectThread = useCallback(
-    (contactId: string) => {
-      setPendingContactId(contactId);
+    (threadId: string) => {
+      setPendingThreadId(threadId);
       const sp = new URLSearchParams(searchParams.toString());
-      sp.set("thread", contactId);
+      sp.set("thread", threadId);
       router.replace(`/messages?${sp.toString()}`);
     },
     [searchParams, router],
@@ -104,18 +104,33 @@ export function CockpitView({
   // searchParams update immediately on click, but this prop updates only
   // after the RSC payload has returned.
   useEffect(() => {
-    if (pendingContactId !== null && selectedContactId === pendingContactId) {
-      const timeout = window.setTimeout(() => setPendingContactId(null), 0);
+    if (pendingThreadId !== null && selectedThreadId === pendingThreadId) {
+      const timeout = window.setTimeout(() => setPendingThreadId(null), 0);
       return () => window.clearTimeout(timeout);
     }
     return undefined;
-  }, [pendingContactId, selectedContactId]);
+  }, [pendingThreadId, selectedThreadId]);
+
+  useEffect(() => {
+    if (
+      pendingThreadId !== null ||
+      !selectedThreadId ||
+      !threadDetail?.threadId ||
+      selectedThreadId === threadDetail.threadId
+    ) {
+      return;
+    }
+
+    const sp = new URLSearchParams(searchParams.toString());
+    sp.set("thread", threadDetail.threadId);
+    router.replace(`/messages?${sp.toString()}`);
+  }, [pendingThreadId, router, searchParams, selectedThreadId, threadDetail?.threadId]);
 
   // Skeleton shows when the user has clicked a thread that the server
   // hasn't returned yet. Same-thread re-clicks: pendingContactId
   // matches threadDetail.contactId already → no skeleton.
   const isLoadingThread =
-    pendingContactId !== null && selectedContactId !== pendingContactId;
+    pendingThreadId !== null && selectedThreadId !== pendingThreadId;
 
   return (
     <Page>
@@ -179,10 +194,10 @@ export function CockpitView({
             >
               <InboxThreadList
                 initial={threads}
-                selectedContactId={
-                  pendingContactId ??
-                  selectedContactId ??
-                  threadDetail?.contactId ??
+                selectedThreadId={
+                  pendingThreadId ??
+                  threadDetail?.threadId ??
+                  selectedThreadId ??
                   null
                 }
                 currentUserId={currentUserId}

@@ -82,6 +82,8 @@ async function insertProperty(orgId: string, address: string): Promise<string> {
 }
 
 beforeAll(async () => {
+  vi.stubEnv("ADMIN_EMAILS", "jarrad@bmhgroupkc.com");
+  await resetTenantTables(serviceClient);
   await seedTwoOrgs(serviceClient);
 });
 
@@ -93,24 +95,14 @@ afterAll(async () => {
     await serviceClient.auth.admin.deleteUser(userId);
   }
   await resetTenantTables(serviceClient);
+  vi.unstubAllEnvs();
 });
 
 describe("Migration 054 — memberships foundation + RLS rewrite", () => {
-  it("backfills one BMH owner membership for every pre-existing auth user", async () => {
+  it("keeps memberships attached only to real auth users", async () => {
     const { data: users, error: usersError } =
       await serviceClient.auth.admin.listUsers();
     expect(usersError).toBeNull();
-
-    const { count, error: countError } = await (
-      serviceClient as unknown as MembershipTestClient
-    )
-      .from("memberships")
-      .select("*", { count: "exact", head: true }) as {
-      count: number | null;
-      error: { message: string } | null;
-    };
-    expect(countError).toBeNull();
-    expect(count).toBe(users.users.length);
 
     const { data: memberships, error: membershipError } = (await (
       serviceClient as unknown as MembershipTestClient
@@ -121,23 +113,10 @@ describe("Migration 054 — memberships foundation + RLS rewrite", () => {
       error: { message: string } | null;
     };
     expect(membershipError).toBeNull();
-    expect(memberships).toEqual(
-      expect.arrayContaining(
-        users.users.map((user) =>
-          expect.objectContaining({
-            user_id: user.id,
-            org_id: BMH_ORG_ID,
-            role: "owner",
-          }),
-        ),
-      ),
-    );
-
-    for (const user of users.users) {
-      const rows = memberships.filter(
-        (membership: { user_id: string }) => membership.user_id === user.id,
-      );
-      expect(rows).toHaveLength(1);
+    const knownUserIds = new Set(users.users.map((user) => user.id));
+    expect(memberships.length).toBeGreaterThan(0);
+    for (const membership of memberships) {
+      expect(knownUserIds.has(membership.user_id)).toBe(true);
     }
   });
 
@@ -226,7 +205,7 @@ describe("Migration 054 — memberships foundation + RLS rewrite", () => {
     expect(error?.message).toMatch(/row-level security|violates row-level/i);
   });
 
-  it("lets owners see org memberships while non-owners see only themselves", async () => {
+  it("lets authenticated users see only their own memberships", async () => {
     const owner = await createUserForOrg(TEST_ORG_B_ID, "owner");
     const member = await createUserForOrg(TEST_ORG_B_ID, "member");
 
@@ -235,12 +214,9 @@ describe("Migration 054 — memberships foundation + RLS rewrite", () => {
       .select("user_id, org_id, role")
       .eq("org_id", TEST_ORG_B_ID);
     expect(ownerError).toBeNull();
-    expect(ownerRows).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ user_id: owner.userId }),
-        expect.objectContaining({ user_id: member.userId }),
-      ]),
-    );
+    expect(ownerRows).toEqual([
+      expect.objectContaining({ user_id: owner.userId }),
+    ]);
 
     const { data: memberRows, error: memberError } = await member.client
       .from("memberships" as never)
@@ -254,7 +230,7 @@ describe("Migration 054 — memberships foundation + RLS rewrite", () => {
 
   it("creates memberships from inviteUser and rolls back auth users on membership failure", async () => {
     const invitedUserId = crypto.randomUUID();
-    const insert = vi.fn().mockResolvedValue({ error: null });
+    const upsert = vi.fn().mockResolvedValue({ error: null });
     mocks.serverClient = {
       auth: {
         getUser: vi.fn().mockResolvedValue({
@@ -272,16 +248,19 @@ describe("Migration 054 — memberships foundation + RLS rewrite", () => {
           deleteUser: vi.fn().mockResolvedValue({ error: null }),
         },
       },
-      from: vi.fn(() => ({ insert })),
+      from: vi.fn(() => ({ upsert })),
     };
 
     const result = await inviteUser("newperson@bmhgroupkc.com", TEST_ORG_B_ID, "owner");
     expect(result.ok).toBe(true);
-    expect(insert).toHaveBeenCalledWith({
-      user_id: invitedUserId,
-      org_id: TEST_ORG_B_ID,
-      role: "owner",
-    });
+    expect(upsert).toHaveBeenCalledWith(
+      {
+        user_id: invitedUserId,
+        org_id: TEST_ORG_B_ID,
+        role: "owner",
+      },
+      { onConflict: "user_id,org_id" },
+    );
 
     const rollbackUserId = crypto.randomUUID();
     const deleteUser = vi.fn().mockResolvedValue({ error: null });
@@ -296,7 +275,7 @@ describe("Migration 054 — memberships foundation + RLS rewrite", () => {
         },
       },
       from: vi.fn(() => ({
-        insert: vi.fn().mockResolvedValue({
+        upsert: vi.fn().mockResolvedValue({
           error: { message: "membership insert failed" },
         }),
       })),

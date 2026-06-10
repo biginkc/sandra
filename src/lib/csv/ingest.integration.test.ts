@@ -331,6 +331,10 @@ describe("runIngestion (integration)", () => {
       mapping,
       rows: firstRow,
     });
+    const { data: firstProperty } = await supabase
+      .from("properties")
+      .select("id")
+      .single();
     const { count: afterFirst } = await supabase
       .from("properties")
       .select("*", { count: "exact", head: true });
@@ -340,7 +344,7 @@ describe("runIngestion (integration)", () => {
     await supabase
       .from("properties")
       .update({ deleted_at: new Date().toISOString() })
-      .eq("address", "555 Ghost Ln");
+      .eq("id", firstProperty!.id);
 
     // Re-import the same address — should create a fresh row, not match
     // the ghost.

@@ -6,6 +6,10 @@ import {
   resetTenantTables,
   seedProspects,
 } from "./fixtures";
+import {
+  buildThreadId,
+  ensureConversationIdForThread,
+} from "../src/lib/messages/threading";
 
 /**
  * Feature 7 — in-app notifications. Exercises the full Realtime path:
@@ -22,7 +26,7 @@ import {
 async function seedAssignedInboundThread(
   admin: ReturnType<typeof adminClient>,
   opts: { phone: string; assigneeId: string; addressTag: string },
-): Promise<{ propertyId: string; contactId: string }> {
+): Promise<{ propertyId: string; contactId: string; threadId: string }> {
   const { data: contact, error: contactErr } = await admin
     .from("contacts")
     .insert({
@@ -50,12 +54,18 @@ async function seedAssignedInboundThread(
   if (propertyErr) {
     throw new Error(`property seed failed: ${propertyErr.message}`);
   }
+  const conversationId = await ensureConversationIdForThread(
+    admin,
+    contact.id,
+    prop.id,
+  );
 
   // Prior outbound so the webhook can thread the inbound to a property.
   const { error: messageErr } = await admin.from("messages").insert({
     channel: "sms",
     direction: "outbound",
     status: "sent",
+    conversation_id: conversationId,
     from_address: "+18163706846",
     to_address: opts.phone,
     body: "Any updates on your property?",
@@ -66,7 +76,11 @@ async function seedAssignedInboundThread(
     throw new Error(`message seed failed: ${messageErr.message}`);
   }
 
-  return { propertyId: prop.id, contactId: contact.id };
+  return {
+    propertyId: prop.id,
+    contactId: contact.id,
+    threadId: buildThreadId(conversationId, contact.id, prop.id),
+  };
 }
 
 function uniqueKansasCityPhone(suffix: number): string {
@@ -123,13 +137,19 @@ test("bell badge appears via Realtime when an inbound SMS notification fires (te
   await expect(async () => {
     const { data: notifs } = await admin
       .from("notifications")
-      .select("user_id, entity_id, event_type")
+      .select("user_id, entity_id, event_type, entity_type")
       .eq("user_id", claudeId);
     expect(notifs).toHaveLength(1);
     expect(notifs![0]).toMatchObject({
       event_type: "owner_message_added",
-      entity_id: propertyId,
+      entity_type: "message",
     });
+    const { data: msg } = await admin
+      .from("messages")
+      .select("property_id")
+      .eq("id", notifs![0]!.entity_id)
+      .single();
+    expect(msg?.property_id).toBe(propertyId);
   }).toPass({ timeout: 10_000 });
 
   // Badge should appear via Realtime — generous timeout to absorb CI
@@ -150,7 +170,7 @@ test("click bell → open dropdown → click notification → routes + marks rea
   const claudeId = await ensureTestUser(admin);
 
   const phone = uniqueKansasCityPhone(30);
-  const { propertyId } = await seedAssignedInboundThread(admin, {
+  const { threadId } = await seedAssignedInboundThread(admin, {
     phone,
     assigneeId: claudeId,
     addressTag: "NOTIF30",
@@ -187,9 +207,15 @@ test("click bell → open dropdown → click notification → routes + marks rea
   );
   await expect(item).toBeVisible();
 
-  // Click → routes to /leads/<id> and clears the badge.
+  // Click → routes to the message thread and clears the badge.
   await item.click();
-  await page.waitForURL(new RegExp(`/leads/${propertyId}$`), {
+  await page.waitForURL(
+    new RegExp(`thread=${encodeURIComponent(threadId).replace(/[.*+?^${}()|[\]\\\\]/g, "\\$&")}`),
+    {
+      timeout: 10_000,
+    },
+  );
+  await expect(page.getByTestId("inbox-detail-panel")).toBeVisible({
     timeout: 10_000,
   });
   await expect(page.getByTestId("notifications-badge")).toBeHidden();

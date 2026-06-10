@@ -2266,6 +2266,7 @@ export type Database = {
           org_id: string
           payload: Json
           processed_at: string | null
+          processing_started_at: string | null
           processing_status: string
           provider: string
           received_at: string
@@ -2279,6 +2280,7 @@ export type Database = {
           org_id?: string
           payload: Json
           processed_at?: string | null
+          processing_started_at?: string | null
           processing_status?: string
           provider: string
           received_at?: string
@@ -2292,6 +2294,7 @@ export type Database = {
           org_id?: string
           payload?: Json
           processed_at?: string | null
+          processing_started_at?: string | null
           processing_status?: string
           provider?: string
           received_at?: string
@@ -2330,6 +2333,61 @@ export type Database = {
             isOneToOne: false
             referencedRelation: "fips_codes"
             referencedColumns: ["fips_code"]
+          },
+        ]
+      }
+      message_threads: {
+        Row: {
+          channel: string
+          contact_id: string
+          conversation_id: string
+          created_at: string
+          id: string
+          org_id: string
+          property_id: string
+          updated_at: string
+        }
+        Insert: {
+          channel: string
+          contact_id: string
+          conversation_id?: string
+          created_at?: string
+          id?: string
+          org_id?: string
+          property_id: string
+          updated_at?: string
+        }
+        Update: {
+          channel?: string
+          contact_id?: string
+          conversation_id?: string
+          created_at?: string
+          id?: string
+          org_id?: string
+          property_id?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "message_threads_contact_id_fkey"
+            columns: ["contact_id"]
+            isOneToOne: false
+            referencedRelation: "contacts"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "message_threads_org_id_fkey"
+            columns: ["org_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "message_threads_property_id_fkey"
+            columns: ["property_id"]
+            isOneToOne: false
+            referencedRelation: "properties"
+            referencedColumns: ["id"]
           },
         ]
       }
@@ -2383,6 +2441,10 @@ export type Database = {
           refresh_token: string
           scopes: string[]
         }[]
+      }
+      ensure_sms_conversation_id: {
+        Args: { p_contact_id: string; p_property_id: string }
+        Returns: string
       }
       merge_duplicate_properties: {
         Args: { keeper_id: string; loser_id: string }

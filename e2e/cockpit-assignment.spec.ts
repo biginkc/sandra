@@ -6,6 +6,10 @@ import {
   resetTenantTables,
   seedProspects,
 } from "./fixtures";
+import {
+  buildThreadId,
+  ensureConversationIdForThread,
+} from "../src/lib/messages/threading";
 
 /**
  * Feature 8 Phase 3 — Per-user assignment + cockpit ergonomics.
@@ -25,7 +29,7 @@ async function seedAssignedThread(
     body?: string;
     offsetMin?: number;
   },
-): Promise<{ contactId: string; propertyId: string }> {
+): Promise<{ contactId: string; propertyId: string; threadId: string }> {
   const { data: contact, error: contactErr } = await admin
     .from("contacts")
     .insert({
@@ -50,10 +54,16 @@ async function seedAssignedThread(
   if (propertyErr) {
     throw new Error(`property assignment seed failed: ${propertyErr.message}`);
   }
+  const conversationId = await ensureConversationIdForThread(
+    admin,
+    contact.id,
+    prop.id,
+  );
   const { error: messageErr } = await admin.from("messages").insert({
     channel: "sms",
     direction: "inbound",
     status: "received",
+    conversation_id: conversationId,
     contact_id: contact.id,
     property_id: prop.id,
     from_address: opts.phone,
@@ -76,7 +86,11 @@ async function seedAssignedThread(
     expect(error).toBeNull();
     expect(data?.id).toBe(prop.id);
   }).toPass({ timeout: 10_000 });
-  return { contactId: contact.id, propertyId: prop.id };
+  return {
+    contactId: contact.id,
+    propertyId: prop.id,
+    threadId: buildThreadId(conversationId, contact.id, prop.id),
+  };
 }
 
 test("Each assigned thread row tags itself with the viewer's assignment state", async ({
@@ -99,7 +113,7 @@ test("Each assigned thread row tags itself with the viewer's assignment state", 
   });
 
   await page.goto("/messages");
-  const row = page.getByTestId(`inbox-thread-${mine.contactId}`);
+  const row = page.getByTestId(`inbox-thread-${mine.threadId}`);
   await expect(row).toBeVisible();
   await expect(row).toHaveAttribute("data-assignee-mine", "true");
 });
@@ -117,7 +131,7 @@ test('Side panel shows "Assign to me" on an unassigned thread; clicking it assig
     assigneeId: null,
   });
 
-  await page.goto(`/messages?thread=${unassigned.contactId}`);
+  await page.goto(`/messages?thread=${encodeURIComponent(unassigned.threadId)}`);
   await expect(page.getByTestId("inbox-detail-panel")).toBeVisible();
 
   const assignToMe = page.getByTestId("assign-to-me");
@@ -151,7 +165,7 @@ test("Assignee dropdown can unassign and reassign via the picker", async ({
     assigneeId: claudeId,
   });
 
-  await page.goto(`/messages?thread=${mine.contactId}`);
+  await page.goto(`/messages?thread=${encodeURIComponent(mine.threadId)}`);
 
   const trigger = page.getByTestId("assign-dropdown-trigger");
   await expect(trigger).toBeVisible();

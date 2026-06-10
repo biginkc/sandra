@@ -1,6 +1,8 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
+import { normalizePhone } from "@/lib/csv/normalize";
 import { ConfigurationError } from "@/lib/errors/classes";
+import { ensureConversationIdForThread } from "@/lib/messages/threading";
 import type { Database, Json } from "@/lib/supabase/types";
 import { getConsentState, type ConsentState } from "./consent";
 import { checkQuietHours, type QuietHoursCheck } from "./quiet-hours";
@@ -13,8 +15,7 @@ import { getMessagingProvider } from "./registry";
  * Pre-send checks (in order):
  *  1. Messaging provider configured.
  *  2. Contact has phone_1 set.
- *  3. Latest consent state on SMS = can_send_marketing (TCPA requires
- *     written consent for solicitation messages).
+ *  3. Latest consent state on SMS is not an explicit opt-out.
  *  4. Current time is inside [08:00, 21:00) local to the property state.
  *
  * On the send path:
@@ -69,7 +70,7 @@ export type SendSmsInput = {
   /**
    * Optional override for the provider's default from-number. Comes from
    * the composer's "send from" picker. When omitted, the provider uses
-   * its env-configured default (DIALPAD_FROM_NUMBER).
+   * its env-configured default sender.
    */
   from?: string;
   /**
@@ -84,6 +85,7 @@ export type SendSmsInput = {
    */
   queueOnly?: boolean;
   scheduledFor?: Date | null;
+  metadata?: Json | null;
 };
 
 export async function sendSmsToContact(
@@ -170,7 +172,24 @@ export async function sendSmsToContact(
   }
 
   // 5. Pre-insert the row so we always have a breadcrumb.
-  const fromAddress = input.from ?? process.env.DIALPAD_FROM_NUMBER ?? null;
+  let conversationId: string;
+  try {
+    conversationId = await ensureConversationIdForThread(
+      supabase,
+      input.contactId,
+      input.propertyId,
+    );
+  } catch (e) {
+    return {
+      status: "db_error",
+      error: e instanceof Error ? e.message : String(e),
+    };
+  }
+  const fromAddressRaw = input.from ?? provider.getDefaultFromNumber?.() ?? null;
+  const fromAddress = fromAddressRaw
+    ? normalizePhone(fromAddressRaw) ?? fromAddressRaw
+    : null;
+  const normalizedToPhone = normalizePhone(toPhone) ?? toPhone;
   const { data: pending, error: insertError } = await supabase
     .from("messages")
     .insert({
@@ -180,9 +199,11 @@ export async function sendSmsToContact(
       provider: provider.providerId,
       contact_id: input.contactId,
       property_id: input.propertyId,
+      conversation_id: conversationId,
       from_address: fromAddress,
-      to_address: toPhone,
+      to_address: normalizedToPhone,
       body: input.body,
+      metadata: input.metadata ?? null,
     })
     .select("id")
     .single();
@@ -204,7 +225,13 @@ export async function sendSmsToContact(
       status: "sent",
       external_id: result.externalId,
       sent_at: new Date().toISOString(),
-      metadata: { providerStatus: result.providerStatus, raw: result.raw } as Json,
+      metadata: {
+        ...(input.metadata && typeof input.metadata === "object" && !Array.isArray(input.metadata)
+          ? input.metadata
+          : {}),
+        providerStatus: result.providerStatus,
+        raw: result.raw,
+      } as Json,
     };
     const { error: updateError } = await supabase
       .from("messages")
@@ -276,7 +303,24 @@ async function queueForLater(
     };
   }
 
-  const fromAddress = input.from ?? process.env.DIALPAD_FROM_NUMBER ?? null;
+  let conversationId: string;
+  try {
+    conversationId = await ensureConversationIdForThread(
+      supabase,
+      input.contactId,
+      input.propertyId,
+    );
+  } catch (e) {
+    return {
+      status: "db_error",
+      error: e instanceof Error ? e.message : String(e),
+    };
+  }
+  const fromAddressRaw = input.from ?? providerIdToDefaultFrom(providerId) ?? null;
+  const fromAddress = fromAddressRaw
+    ? normalizePhone(fromAddressRaw) ?? fromAddressRaw
+    : null;
+  const normalizedToPhone = normalizePhone(toPhone) ?? toPhone;
   const { data: queued, error } = await supabase
     .from("messages")
     .insert({
@@ -286,10 +330,12 @@ async function queueForLater(
       provider: providerId,
       contact_id: input.contactId,
       property_id: input.propertyId,
+      conversation_id: conversationId,
       from_address: fromAddress,
-      to_address: toPhone,
+      to_address: normalizedToPhone,
       body: input.body,
       scheduled_for: input.scheduledFor?.toISOString() ?? null,
+      metadata: input.metadata ?? null,
     })
     .select("id")
     .single();
@@ -335,7 +381,7 @@ export async function releaseQueuedMessage(
   const { data: msg, error: fetchError } = await supabase
     .from("messages")
     .select(
-      "id, status, contact_id, property_id, body, from_address, to_address",
+      "id, status, provider, contact_id, property_id, body, from_address, to_address, metadata",
     )
     .eq("id", messageId)
     .maybeSingle();
@@ -356,6 +402,33 @@ export async function releaseQueuedMessage(
     return {
       status: "db_error",
       error: "queued message missing contact/property/to_address",
+    };
+  }
+  if (msg.provider !== provider.providerId) {
+    const error =
+      `queued message belongs to provider ${msg.provider ?? "unknown"}, current provider is ${provider.providerId}`;
+    await failQueuedMessage(supabase, msg.id, error);
+    return {
+      status: "db_error",
+      error,
+    };
+  }
+  const currentDefaultFromRaw = provider.getDefaultFromNumber?.() ?? null;
+  const currentDefaultFrom = currentDefaultFromRaw
+    ? normalizePhone(currentDefaultFromRaw) ?? currentDefaultFromRaw
+    : null;
+  if (
+    provider.providerId === "sendillo" &&
+    msg.from_address &&
+    currentDefaultFrom &&
+    msg.from_address !== currentDefaultFrom
+  ) {
+    const error =
+      `queued message sender ${msg.from_address} no longer matches active Sendillo sender ${currentDefaultFrom}`;
+    await failQueuedMessage(supabase, msg.id, error);
+    return {
+      status: "db_error",
+      error,
     };
   }
 
@@ -392,21 +465,17 @@ export async function releaseQueuedMessage(
   // double-sending. The `eq("status", "queued")` guard means the UPDATE
   // only applies if nobody else grabbed it first; we check rowcount
   // indirectly via a re-read.
-  const { error: flipError } = await supabase
+  const { data: claimed, error: flipError } = await supabase
     .from("messages")
     .update({ status: "pending" })
     .eq("id", msg.id)
-    .eq("status", "queued");
+    .eq("status", "queued")
+    .select("id")
+    .maybeSingle();
   if (flipError) {
     return { status: "db_error", error: flipError.message };
   }
-  // Re-fetch to confirm we won the flip.
-  const { data: confirm } = await supabase
-    .from("messages")
-    .select("status")
-    .eq("id", msg.id)
-    .single();
-  if (confirm?.status !== "pending") {
+  if (!claimed) {
     return {
       status: "db_error",
       error: "another worker claimed this queued message",
@@ -419,6 +488,10 @@ export async function releaseQueuedMessage(
       body: msg.body,
       from: msg.from_address ?? undefined,
     });
+    const currentMetadata =
+      msg.metadata && typeof msg.metadata === "object" && !Array.isArray(msg.metadata)
+        ? msg.metadata
+        : null;
     const { error: updateError } = await supabase
       .from("messages")
       .update({
@@ -426,6 +499,7 @@ export async function releaseQueuedMessage(
         external_id: result.externalId,
         sent_at: new Date().toISOString(),
         metadata: {
+          ...(currentMetadata ?? {}),
           providerStatus: result.providerStatus,
           raw: result.raw,
         } as Json,
@@ -473,4 +547,26 @@ function quietMessage(check: QuietHoursCheck): string {
     return "Property has no US state — can't determine local time. Add state and retry.";
   }
   return `Quiet hours — it's ${check.localTime} local (${check.zone}). TCPA window is 08:00–21:00.`;
+}
+
+function providerIdToDefaultFrom(providerId: string): string | null {
+  const provider = getMessagingProvider();
+  if (!provider || provider.providerId !== providerId) return null;
+  return provider.getDefaultFromNumber?.() ?? null;
+}
+
+async function failQueuedMessage(
+  supabase: SupabaseClient<Database>,
+  messageId: string,
+  errorMessage: string,
+): Promise<void> {
+  await supabase
+    .from("messages")
+    .update({
+      status: "failed",
+      failed_at: new Date().toISOString(),
+      error_message: errorMessage,
+    })
+    .eq("id", messageId)
+    .eq("status", "queued");
 }

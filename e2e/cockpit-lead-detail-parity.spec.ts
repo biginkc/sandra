@@ -7,6 +7,10 @@ import {
   seedProspects,
 } from "./fixtures";
 import { checkQuietHours, STATE_TO_TZ } from "../src/lib/messaging/quiet-hours";
+import {
+  buildThreadId,
+  ensureConversationIdForThread,
+} from "../src/lib/messages/threading";
 
 /**
  * Feature 8 Phase 1 — the cockpit and the lead detail page share the
@@ -25,7 +29,7 @@ function uniquePhone(): string {
 async function seedConsentedLead(
   admin: ReturnType<typeof adminClient>,
   opts: { phone: string; addressTag: string; state: string },
-): Promise<{ contactId: string; propertyId: string }> {
+): Promise<{ contactId: string; propertyId: string; threadId: string }> {
   const { data: contact } = await admin
     .from("contacts")
     .insert({
@@ -53,6 +57,11 @@ async function seedConsentedLead(
     event_type: "opt_in_marketing_written",
     source: "e2e-cockpit-parity",
   });
+  const conversationId = await ensureConversationIdForThread(
+    admin,
+    contact.id,
+    prop.id,
+  );
 
   // The inbound webhook threads regular replies to the contact's most recent
   // outbound property, matching the production conversation path.
@@ -60,6 +69,7 @@ async function seedConsentedLead(
     channel: "sms",
     direction: "outbound",
     status: "sent",
+    conversation_id: conversationId,
     contact_id: contact.id,
     property_id: prop.id,
     from_address: "+18162804181",
@@ -71,6 +81,7 @@ async function seedConsentedLead(
     channel: "sms",
     direction: "inbound",
     status: "received",
+    conversation_id: conversationId,
     contact_id: contact.id,
     property_id: prop.id,
     from_address: opts.phone,
@@ -78,7 +89,11 @@ async function seedConsentedLead(
     body: "starting the thread",
   });
 
-  return { contactId: contact.id, propertyId: prop.id };
+  return {
+    contactId: contact.id,
+    propertyId: prop.id,
+    threadId: buildThreadId(conversationId, contact.id, prop.id),
+  };
 }
 
 function callableStateForNow(): string | null {
@@ -100,13 +115,13 @@ test("reply from cockpit shows up on the lead detail page (test 29)", async ({
     return;
   }
 
-  const { contactId, propertyId } = await seedConsentedLead(admin, {
+  const { propertyId, threadId } = await seedConsentedLead(admin, {
     phone: uniquePhone(),
     addressTag: "PARITY-29",
     state: callableState,
   });
 
-  await page.goto(`/messages?thread=${contactId}`);
+  await page.goto(`/messages?thread=${encodeURIComponent(threadId)}`);
   const reply = `parity from cockpit ${Date.now()}`;
   await page.getByPlaceholder(/Type.*reply/i).fill(reply);
   await page.getByRole("button", { name: /Send reply/i }).click();
@@ -138,7 +153,7 @@ test("reply from lead detail shows up on the cockpit (test 30)", async ({
     return;
   }
 
-  const { contactId, propertyId } = await seedConsentedLead(admin, {
+  const { propertyId, threadId } = await seedConsentedLead(admin, {
     phone: uniquePhone(),
     addressTag: "PARITY-30",
     state: callableState,
@@ -159,7 +174,7 @@ test("reply from lead detail shows up on the cockpit (test 30)", async ({
     expect(data).toHaveLength(1);
   }).toPass({ timeout: 10_000 });
 
-  await page.goto(`/messages?thread=${contactId}`);
+  await page.goto(`/messages?thread=${encodeURIComponent(threadId)}`);
   await expect(page.getByTestId("inbox-detail-panel")).toContainText(reply);
 });
 
@@ -174,7 +189,7 @@ test("Realtime cross-surface: both surfaces update from the other (test 31)", as
   await ensureTestUser(admin);
 
   const phone = uniquePhone();
-  const { contactId, propertyId } = await seedConsentedLead(admin, {
+  const { contactId, propertyId, threadId } = await seedConsentedLead(admin, {
     phone,
     addressTag: "PARITY-31",
     state: callableStateForNow() ?? "MO",
@@ -187,7 +202,7 @@ test("Realtime cross-surface: both surfaces update from the other (test 31)", as
 
   try {
     await Promise.all([
-      page.goto(`/messages?thread=${contactId}`),
+      page.goto(`/messages?thread=${encodeURIComponent(threadId)}`),
       leadPage.goto(`/leads/${propertyId}`),
     ]);
     await Promise.all([

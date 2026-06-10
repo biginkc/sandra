@@ -3,6 +3,7 @@
 import { createClient } from "@/lib/supabase/server";
 import { errFromUnknown, ok, type Result } from "@/lib/errors/result";
 import { reportError } from "@/lib/errors/report";
+import { buildThreadId } from "@/lib/messages/threading";
 
 /**
  * Shape the bell UI actually renders. Column names are camelCased and
@@ -15,8 +16,9 @@ export type NotificationRow = {
     | "owner_message_added"
     | "property_assigned"
     | "bulk_action_completed";
-  entityType: "property" | "job";
+  entityType: "property" | "job" | "task" | "message";
   entityId: string;
+  href: string;
   title: string;
   body: string | null;
   readAt: string | null;
@@ -79,11 +81,49 @@ export async function getRecentNotifications(
         error: { code: "NOTIF_LIST_FAILED", message: error.message },
       };
     }
+    const messageIds = (data ?? [])
+      .filter((row) => row.entity_type === "message")
+      .map((row) => row.entity_id);
+    const messageHrefById = new Map<string, string>();
+    if (messageIds.length > 0) {
+      const { data: messageRows, error: messageError } = await supabase
+        .from("messages")
+        .select("id, conversation_id, contact_id, property_id")
+        .in("id", messageIds);
+      if (messageError) {
+        reportError(new Error(messageError.message), {
+          tags: { surface: "get_recent_notifications_message_lookup" },
+          extra: { messageIds },
+        });
+      } else {
+        for (const row of messageRows ?? []) {
+          if (!row.contact_id) continue;
+          const threadId = buildThreadId(
+            row.conversation_id,
+            row.contact_id,
+            row.property_id,
+          );
+          messageHrefById.set(
+            row.id,
+            `/messages?thread=${encodeURIComponent(threadId)}`,
+          );
+        }
+      }
+    }
+
     const rows: NotificationRow[] = (data ?? []).map((r) => ({
       id: r.id,
       eventType: r.event_type as NotificationRow["eventType"],
       entityType: r.entity_type as NotificationRow["entityType"],
       entityId: r.entity_id,
+      href:
+        r.entity_type === "property"
+          ? `/leads/${r.entity_id}`
+          : r.entity_type === "job"
+            ? "/jobs"
+            : r.entity_type === "message"
+              ? (messageHrefById.get(r.entity_id) ?? "/messages")
+              : "/",
       title: r.title,
       body: r.body,
       readAt: r.read_at,

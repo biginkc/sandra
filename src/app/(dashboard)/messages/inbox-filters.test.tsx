@@ -65,17 +65,23 @@ vi.mock("sonner", () => ({
 }));
 
 function makeThread(overrides: Partial<Thread> & { contactId: string }): Thread {
+  const propertyId = overrides.propertyId ?? `prop-${overrides.contactId}`;
   return {
+    threadId: overrides.threadId ?? `legacy:${overrides.contactId}:${propertyId}`,
+    conversationId: overrides.conversationId ?? null,
     contactId: overrides.contactId,
     contactName: overrides.contactName ?? `Contact ${overrides.contactId}`,
     contactPhone: overrides.contactPhone ?? "+15551234567",
-    propertyId: overrides.propertyId ?? `prop-${overrides.contactId}`,
+    propertyId,
     propertyAddress: overrides.propertyAddress ?? "123 Main St",
     lastMessageAt: overrides.lastMessageAt ?? "2026-04-29T12:00:00Z",
     lastMessageBody: overrides.lastMessageBody ?? "hello",
     lastMessageDirection: overrides.lastMessageDirection ?? "inbound",
     unreadCount: overrides.unreadCount ?? 0,
     assigneeId: overrides.assigneeId ?? null,
+    needsHumanAttention: overrides.needsHumanAttention ?? false,
+    escalationReason: overrides.escalationReason ?? null,
+    isOptedOut: overrides.isOptedOut ?? false,
   } as Thread;
 }
 
@@ -128,10 +134,10 @@ describe("<CockpitView /> assignment chips", () => {
       "data-active",
     );
 
-    expect(screen.getByTestId("inbox-thread-mine-1")).toBeInTheDocument();
+    expect(screen.getByTestId(`inbox-thread-${mine.threadId}`)).toBeInTheDocument();
     expect(screen.queryByTestId("inbox-thread-not-mine")).not.toBeInTheDocument();
     expect(
-      screen.queryByTestId("inbox-thread-unassigned-1"),
+      screen.queryByTestId(`inbox-thread-legacy:unassigned-1:prop-unassigned-1`),
     ).not.toBeInTheDocument();
   });
 
@@ -158,8 +164,8 @@ describe("<CockpitView /> assignment chips", () => {
     expect(screen.getByTestId("filter-all")).not.toHaveAttribute("data-active");
     expect(screen.getByTestId("filter-mine")).not.toHaveAttribute("data-active");
 
-    expect(screen.getByTestId("inbox-thread-unassigned-1")).toBeInTheDocument();
-    expect(screen.queryByTestId("inbox-thread-mine-1")).not.toBeInTheDocument();
+    expect(screen.getByTestId(`inbox-thread-${open.threadId}`)).toBeInTheDocument();
+    expect(screen.queryByTestId(`inbox-thread-legacy:mine-1:prop-mine-1`)).not.toBeInTheDocument();
   });
 
   it("does not render Mine/Unassigned chips when there is no current user", () => {

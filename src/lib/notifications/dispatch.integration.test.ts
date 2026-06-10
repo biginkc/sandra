@@ -195,8 +195,10 @@ describe("notifications/dispatch (integration)", () => {
         assignedUserId: assignee,
         address: "111 Assigned Ave",
       });
+      const messageId = "00000000-0000-4000-8000-000000000151";
 
       const r = await dispatchOwnerMessageAdded(supabase, {
+        messageId,
         propertyId,
         adminUserIds: [admin],
       });
@@ -209,8 +211,8 @@ describe("notifications/dispatch (integration)", () => {
       expect(data).toHaveLength(1);
       expect(data![0]).toMatchObject({
         user_id: assignee,
-        entity_type: "property",
-        entity_id: propertyId,
+        entity_type: "message",
+        entity_id: messageId,
         read_at: null,
       });
     });
@@ -223,8 +225,10 @@ describe("notifications/dispatch (integration)", () => {
         `owner-fallback-user-${Date.now()}@test.invalid`,
       );
       const propertyId = await seedProperty({ assignedUserId: null });
+      const messageId = "00000000-0000-4000-8000-000000000152";
 
       const r = await dispatchOwnerMessageAdded(supabase, {
+        messageId,
         propertyId,
         adminUserIds: [admin],
       });
@@ -243,6 +247,7 @@ describe("notifications/dispatch (integration)", () => {
       const propertyId = await seedProperty({ assignedUserId: null });
 
       const r = await dispatchOwnerMessageAdded(supabase, {
+        messageId: "00000000-0000-4000-8000-000000000153",
         propertyId,
         adminUserIds: [],
       });

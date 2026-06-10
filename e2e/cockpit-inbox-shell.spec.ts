@@ -30,7 +30,7 @@ async function seedThread(
       read?: boolean;
     }>;
   },
-): Promise<{ contactId: string; propertyId: string }> {
+): Promise<{ contactId: string; propertyId: string; threadId: string }> {
   const { data: contact } = await admin
     .from("contacts")
     .insert({
@@ -70,7 +70,11 @@ async function seedThread(
           : null,
     });
   }
-  return { contactId: contact.id, propertyId: prop.id };
+  return {
+    contactId: contact.id,
+    propertyId: prop.id,
+    threadId: `legacy:${contact.id}:${prop.id}`,
+  };
 }
 
 test("switching tabs preserves URL state (test 9)", async ({ page }) => {
@@ -128,23 +132,23 @@ test("seeded threads render sorted by most recent activity (tests 11 + 12)", asy
 
   // Both threads render.
   await expect(
-    page.getByTestId(`inbox-thread-${old.contactId}`),
+    page.getByTestId(`inbox-thread-${old.threadId}`),
   ).toBeVisible();
   await expect(
-    page.getByTestId(`inbox-thread-${newer.contactId}`),
+    page.getByTestId(`inbox-thread-${newer.threadId}`),
   ).toBeVisible();
 
   // Each row shows: name, preview body, unread badge, timestamp ("ago").
-  const newerRow = page.getByTestId(`inbox-thread-${newer.contactId}`);
+  const newerRow = page.getByTestId(`inbox-thread-${newer.threadId}`);
   await expect(newerRow).toContainText("Newer Thread");
   await expect(newerRow).toContainText("fresh inbound reply");
   await expect(
-    page.getByTestId(`inbox-thread-${newer.contactId}-unread`),
+    page.getByTestId(`inbox-thread-${newer.threadId}-unread`),
   ).toBeVisible();
 
   // Newer row appears before older in DOM order.
   const list = page.getByTestId("inbox-thread-list");
   const buttons = list.locator("button");
   const firstId = await buttons.first().getAttribute("data-testid");
-  expect(firstId).toBe(`inbox-thread-${newer.contactId}`);
+  expect(firstId).toBe(`inbox-thread-${newer.threadId}`);
 });

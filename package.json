@@ -24,7 +24,8 @@
     "smoke:sequences-prod": "tsx scripts/smoke-sequences-prod.ts",
     "smoke:ai-happy-prod": "tsx scripts/smoke-ai-responder-happy-prod.ts",
     "smoke:ai-escalation-prod": "tsx scripts/smoke-ai-responder-escalation-prod.ts",
-    "smoke:stop-prod": "tsx scripts/smoke-stop-keyword-prod.ts"
+    "smoke:stop-prod": "tsx scripts/smoke-stop-keyword-prod.ts",
+    "smoke:sendillo-webhook-prod": "tsx scripts/smoke-sendillo-webhook-prod.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.91.0",

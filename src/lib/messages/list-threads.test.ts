@@ -247,6 +247,75 @@ describe("listThreads — isOptedOut (DNC) flag", () => {
     const threads = await listThreads(supabase, {});
     expect(threads[0]?.isOptedOut).toBe(true);
   });
+
+  it("returns separate thread rows when one contact has two property conversations", async () => {
+    const createdAt = new Date().toISOString();
+    const { supabase } = makeStub({
+      messages: [
+        {
+          contact_id: "c-shared",
+          property_id: "p-a",
+          body: "about property A",
+          direction: "inbound",
+          created_at: createdAt,
+          read_at: null,
+        },
+        {
+          contact_id: "c-shared",
+          property_id: "p-b",
+          body: "about property B",
+          direction: "outbound",
+          created_at: new Date(Date.now() - 60_000).toISOString(),
+          read_at: null,
+        },
+      ],
+      contacts: new Map([
+        [
+          "c-shared",
+          {
+            id: "c-shared",
+            first_name: "Shared",
+            last_name: "Owner",
+            entity_name: null,
+            phone_1: "+18165550123",
+          },
+        ],
+      ]),
+      properties: new Map([
+        [
+          "p-a",
+          {
+            id: "p-a",
+            address: "1 Alpha Ave",
+            city: null,
+            state: null,
+            assigned_user_id: null,
+          },
+        ],
+        [
+          "p-b",
+          {
+            id: "p-b",
+            address: "2 Bravo Blvd",
+            city: null,
+            state: null,
+            assigned_user_id: null,
+          },
+        ],
+      ]),
+      consentEvents: [],
+    });
+
+    const threads = await listThreads(supabase, {});
+    const shared = threads.filter((thread) => thread.contactId === "c-shared");
+
+    expect(shared).toHaveLength(2);
+    expect(shared.map((thread) => thread.propertyId).sort()).toEqual([
+      "p-a",
+      "p-b",
+    ]);
+    expect(new Set(shared.map((thread) => thread.threadId)).size).toBe(2);
+  });
 });
 
 describe("listThreads — unread-first sort (feedback-f E2a)", () => {

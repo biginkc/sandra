@@ -72,6 +72,7 @@ export async function createNotification(
 export async function dispatchOwnerMessageAdded(
   supabase: SupabaseClient<Database>,
   params: {
+    messageId: string;
     propertyId: string;
     adminUserIds: readonly string[];
     messageBody?: string | null;
@@ -92,10 +93,40 @@ export async function dispatchOwnerMessageAdded(
   return createNotification(supabase, {
     orgId: property.org_id,
     eventType: "owner_message_added",
-    entityType: "property",
-    entityId: property.id,
+    entityType: "message",
+    entityId: params.messageId,
     payload: { propertyAddress: property.address, messageBody: params.messageBody },
     recipients,
+  });
+}
+
+export async function dispatchOwnerMessageAddedNeedsTriage(
+  supabase: SupabaseClient<Database>,
+  params: {
+    messageId: string;
+    contactId: string;
+    adminUserIds: readonly string[];
+    messageBody?: string | null;
+  },
+): Promise<{ inserted: number }> {
+  const { data: contact, error } = await supabase
+    .from("contacts")
+    .select("org_id")
+    .eq("id", params.contactId)
+    .maybeSingle();
+  if (error || !contact) return { inserted: 0 };
+
+  return createNotification(supabase, {
+    orgId: contact.org_id,
+    eventType: "owner_message_added",
+    entityType: "message",
+    entityId: params.messageId,
+    payload: {
+      propertyAddress: null,
+      needsPropertyTriage: true,
+      messageBody: params.messageBody,
+    },
+    recipients: [...params.adminUserIds],
   });
 }
 

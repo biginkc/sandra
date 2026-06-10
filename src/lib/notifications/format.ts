@@ -77,6 +77,14 @@ export function formatNotification(
       const raw = payload.messageBody?.trim() ?? "";
       const isUrl = /^\s*https?:\/\/\S+\s*$/.test(raw);
       const preview = raw && !isUrl ? raw.slice(0, 80) : null;
+      if (payload.needsPropertyTriage) {
+        return {
+          title: "New SMS reply needs property triage",
+          body: preview
+            ? `Reply from ${address}\n${preview}`
+            : `Reply from ${address}`,
+        };
+      }
       return {
         title: "New SMS reply",
         body: preview ? `Reply from ${address}\n${preview}` : `Reply from ${address}`,

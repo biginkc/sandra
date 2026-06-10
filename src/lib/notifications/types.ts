@@ -11,14 +11,14 @@ export type EventType =
   | "skip_trace_requested"
   | "task_assigned";
 
-export type EntityType = "property" | "job" | "task";
+export type EntityType = "property" | "job" | "task" | "message";
 
 /**
  * One row in the `notifications` table. `camelCase` for app-layer
  * ergonomics; DB rows come off `supabase` in `snake_case` and are mapped
  * at read sites.
  */
-export type Notification = {
+type Notification = {
   id: string;
   orgId: string;
   userId: string;
@@ -39,6 +39,7 @@ export type Notification = {
  */
 export type FormatPayload = {
   propertyAddress?: string | null;
+  needsPropertyTriage?: boolean;
   assignerName?: string | null;
   jobType?: string | null;
   state?: string | null;

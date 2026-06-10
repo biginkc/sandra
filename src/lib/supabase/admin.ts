@@ -13,8 +13,15 @@ import type { Database } from "./types";
  * a user session at all.
  */
 export function createAdminClient(): SupabaseClient<Database> {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  const useTestEnv =
+    process.env.NODE_ENV === "test" || process.env.VITEST === "true";
+  const url = useTestEnv
+    ? (process.env.TEST_SUPABASE_URL ?? process.env.NEXT_PUBLIC_SUPABASE_URL)
+    : process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const key = useTestEnv
+    ? (process.env.TEST_SUPABASE_SERVICE_ROLE_KEY ??
+        process.env.SUPABASE_SERVICE_ROLE_KEY)
+    : process.env.SUPABASE_SERVICE_ROLE_KEY;
   if (!url || !key) {
     throw new Error(
       "Admin Supabase client requires NEXT_PUBLIC_SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.",

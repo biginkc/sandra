@@ -1,8 +1,11 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
+import { buildThreadId, parseThreadId } from "@/lib/messages/threading";
 import type { Database } from "@/lib/supabase/types";
 
 export type InboxDetail = {
+  threadId: string;
+  conversationId: string | null;
   contactId: string;
   contactName: string | null;
   contactPhone: string | null;
@@ -25,21 +28,65 @@ export type InboxDetail = {
  */
 export async function fetchInboxDetail(
   supabase: SupabaseClient<Database>,
-  contactId: string,
+  threadId: string,
 ): Promise<InboxDetail | null> {
-  const { data: messages, error } = await supabase
+  let parsed = parseThreadId(threadId);
+  let resolvedThreadId = threadId;
+
+  if (parsed.kind === "contact") {
+    const fallbackThreadId = await resolveConcreteThreadIdForContact(
+      supabase,
+      parsed.contactId,
+    );
+    if (!fallbackThreadId) return null;
+    resolvedThreadId = fallbackThreadId;
+    parsed = parseThreadId(fallbackThreadId);
+  }
+
+  let query = supabase
     .from("messages")
     .select("*")
-    .eq("contact_id", contactId)
     .eq("channel", "sms")
+    .neq("status", "queued")
     .order("created_at", { ascending: true })
     .limit(100);
-  if (error || !messages || messages.length === 0) return null;
 
-  // The thread's "current" property is the property of the most recent
-  // message — handles the (rare) case where a contact has bounced
-  // between properties.
+  if (parsed.kind === "conversation") {
+    query = query.eq("conversation_id", parsed.conversationId);
+  } else if (parsed.kind === "legacy") {
+    query = query.eq("contact_id", parsed.contactId);
+    query =
+      parsed.propertyId === null
+        ? query.is("property_id", null)
+        : query.eq("property_id", parsed.propertyId);
+  } else {
+    query = query.eq("contact_id", parsed.contactId);
+  }
+
+  const { data: messages, error } = await query;
+  if (error || !messages || messages.length === 0) {
+    // Migration compatibility: old inbox links used bare contact UUIDs,
+    // but conversation ids are also UUID-shaped. If a direct conversation
+    // lookup finds nothing, retry as a legacy contact link before giving up.
+    if (parsed.kind === "conversation") {
+      const fallbackThreadId = await resolveConcreteThreadIdForContact(
+        supabase,
+        parsed.conversationId,
+      );
+      if (fallbackThreadId) {
+        return fetchInboxDetail(supabase, fallbackThreadId);
+      }
+    }
+    return null;
+  }
+
+  const contactId =
+    messages.find((message) => message.contact_id !== null)?.contact_id ??
+    (parsed.kind !== "conversation" ? parsed.contactId : null);
+  if (!contactId) return null;
+
   const propertyId = messages[messages.length - 1].property_id;
+  const conversationId = messages[messages.length - 1].conversation_id;
 
   const [contactRes, propertyRes] = await Promise.all([
     supabase
@@ -60,6 +107,8 @@ export async function fetchInboxDetail(
   const p = propertyRes.data;
 
   return {
+    threadId: resolvedThreadId,
+    conversationId,
     contactId,
     contactName: c
       ? (c.entity_name ??
@@ -75,4 +124,28 @@ export async function fetchInboxDetail(
     outreachDispo: p?.outreach_dispo ?? null,
     initialMessages: messages,
   };
+}
+
+async function resolveConcreteThreadIdForContact(
+  supabase: SupabaseClient<Database>,
+  contactId: string,
+): Promise<string | null> {
+  const { data: messages, error } = await supabase
+    .from("messages")
+    .select("conversation_id, property_id, created_at")
+    .eq("channel", "sms")
+    .eq("contact_id", contactId)
+    .neq("status", "queued")
+    .order("created_at", { ascending: false })
+    .limit(100);
+  if (error || !messages || messages.length === 0) return null;
+
+  const uniqueThreadIds = Array.from(
+    new Set(
+      messages.map((message) =>
+        buildThreadId(message.conversation_id, contactId, message.property_id),
+      ),
+    ),
+  );
+  return uniqueThreadIds[0] ?? null;
 }

@@ -99,17 +99,67 @@ export async function recordConsentEvent(
     source: string;
     sourceDetail?: unknown;
     occurredAt?: Date;
+    idempotencyKey?: string;
   },
 ): Promise<void> {
-  const { error } = await supabase.from("consent_events").insert({
+  const row = {
     contact_id: params.contactId,
     channel: params.channel,
     event_type: params.eventType,
     source: params.source,
-    source_detail: (params.sourceDetail ?? null) as Json,
+    source_detail: buildConsentSourceDetail(
+      params.sourceDetail,
+      params.idempotencyKey,
+    ) as Json,
     occurred_at: (params.occurredAt ?? new Date()).toISOString(),
-  });
-  if (error) {
-    throw new Error(`recordConsentEvent: ${error.message}`);
+  };
+  if (params.idempotencyKey) {
+    const { data: existing, error: lookupError } = await supabase
+      .from("consent_events")
+      .select("id")
+      .eq("contact_id", params.contactId)
+      .eq("channel", params.channel)
+      .eq("event_type", params.eventType)
+      .eq("source", params.source)
+      .contains("source_detail", { externalId: params.idempotencyKey })
+      .limit(1);
+    if (lookupError) {
+      throw new Error(`recordConsentEvent lookup: ${lookupError.message}`);
+    }
+    if ((existing ?? []).length > 0) return;
   }
+
+  const { error } = await supabase.from("consent_events").insert(row);
+  if (!error) return;
+  if (params.idempotencyKey && isConsentIdempotencyDuplicate(error)) {
+    return;
+  }
+  throw new Error(`recordConsentEvent: ${error.message}`);
+}
+
+function buildConsentSourceDetail(
+  sourceDetail: unknown,
+  idempotencyKey?: string,
+): Json | null {
+  if (!idempotencyKey) {
+    return sourceDetail == null ? null : (sourceDetail as Json);
+  }
+
+  const base =
+    sourceDetail && typeof sourceDetail === "object" && !Array.isArray(sourceDetail)
+      ? (sourceDetail as Record<string, unknown>)
+      : {};
+
+  return {
+    ...base,
+    externalId: idempotencyKey,
+  } as Json;
+}
+
+function isConsentIdempotencyDuplicate(error: { code?: string; message: string }): boolean {
+  return (
+    error.code === "23505" ||
+    error.message.includes("idx_consent_events_external_idempotency") ||
+    error.message.includes("source_external_id")
+  );
 }

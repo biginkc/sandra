@@ -4,9 +4,13 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { NotificationsBell } from "./notifications-bell";
 
+const { pushMock } = vi.hoisted(() => ({
+  pushMock: vi.fn(),
+}));
+
 vi.mock("next/navigation", () => ({
   useRouter: () => ({
-    push: vi.fn(),
+    push: pushMock,
     refresh: vi.fn(),
     replace: vi.fn(),
     back: vi.fn(),
@@ -75,6 +79,7 @@ describe("<NotificationsBell />", () => {
           eventType: "owner_message_added",
           entityType: "property",
           entityId: "p-1",
+          href: "/leads/p-1",
           title: "Reply from owner",
           body: null,
           readAt: null,
@@ -85,6 +90,7 @@ describe("<NotificationsBell />", () => {
           eventType: "bulk_action_completed",
           entityType: "job",
           entityId: "j-1",
+          href: "/jobs",
           title: "Skip-trace finished",
           body: null,
           readAt: null,
@@ -119,6 +125,7 @@ describe("<NotificationsBell />", () => {
           eventType: "owner_message_added",
           entityType: "property",
           entityId: "p-1",
+          href: "/leads/p-1",
           title: "Hello",
           body: null,
           readAt: null,
@@ -166,6 +173,7 @@ describe("<NotificationsBell />", () => {
           eventType: "owner_message_added",
           entityType: "property",
           entityId: "p-1",
+          href: "/leads/p-1",
           title: "Hi",
           body: null,
           readAt: null,
@@ -194,6 +202,7 @@ describe("<NotificationsBell />", () => {
           eventType: "owner_message_added",
           entityType: "property",
           entityId: "p-1",
+          href: "/leads/p-1",
           title: "Old",
           body: null,
           readAt: new Date().toISOString(),
@@ -207,5 +216,36 @@ describe("<NotificationsBell />", () => {
 
     await screen.findByTestId("notifications-clear-all");
     expect(screen.queryByTestId("notifications-mark-all-read")).toBeNull();
+  });
+
+  it("routes message notifications into the messages inbox thread", async () => {
+    const user = userEvent.setup();
+    getUnreadCount.mockResolvedValue({ ok: true, data: 1 });
+    getRecentNotifications.mockResolvedValue({
+      ok: true,
+      data: [
+        {
+          id: "n-msg-1",
+          eventType: "owner_message_added",
+          entityType: "message",
+          entityId: "m-1",
+          href: "/messages?thread=legacy%3Acontact-1%3Aproperty-1",
+          title: "New SMS reply",
+          body: "123 Main St",
+          readAt: null,
+          createdAt: isoMinusHours(1),
+        },
+      ],
+    });
+    markRead.mockResolvedValue({ ok: true, data: null });
+
+    render(<NotificationsBell userId="u-1" />);
+    await user.click(screen.getByTestId("notifications-bell"));
+    await user.click(await screen.findByTestId("notifications-item-n-msg-1"));
+
+    expect(markRead).toHaveBeenCalledWith("n-msg-1");
+    expect(pushMock).toHaveBeenCalledWith(
+      "/messages?thread=legacy%3Acontact-1%3Aproperty-1",
+    );
   });
 });

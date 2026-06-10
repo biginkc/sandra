@@ -3,7 +3,7 @@ import { createClient } from "@/lib/supabase/server";
 import { listThreads, type ListThreadsOpts } from "@/lib/messages/list-threads";
 import { listUnknownSenders } from "@/lib/messages/list-unknown-senders";
 
-import { markMessagesReadForProperty } from "../leads/actions";
+import { markMessagesReadForThread } from "../leads/actions";
 
 import { getQueueStats, type QueueStats } from "./actions";
 import { CockpitView } from "./cockpit-view";
@@ -69,7 +69,7 @@ export default async function MessagesPage({
   // DNC toggle — ON by default per feedback-f E1. Only `?hideDnc=0` flips
   // it off so we can keep clean URLs the rest of the time.
   const hideDnc = sp.hideDnc !== "0";
-  const selectedContactId = sp.thread ?? null;
+  const selectedThreadId = sp.thread ?? null;
 
   const supabase = await createClient();
   const {
@@ -104,8 +104,8 @@ export default async function MessagesPage({
       .eq("status", "queued")
       .order("scheduled_for", { ascending: true })
       .limit(100),
-    isThreadFilter(filter) && selectedContactId
-      ? fetchInboxDetail(supabase, selectedContactId)
+    isThreadFilter(filter) && selectedThreadId
+      ? fetchInboxDetail(supabase, selectedThreadId)
       : Promise.resolve(null),
     listUnknownSenders(supabase, {}),
     filter === "dismissed"
@@ -166,8 +166,8 @@ export default async function MessagesPage({
     contactPhone: r.contact?.phone_1 ?? null,
   }));
 
-  if (isThreadFilter(filter) && threadDetail?.propertyId) {
-    await markMessagesReadForProperty(threadDetail.propertyId);
+  if (isThreadFilter(filter) && threadDetail) {
+    await markMessagesReadForThread(threadDetail.threadId);
   }
 
   const unknownSenders =
@@ -191,7 +191,7 @@ export default async function MessagesPage({
       filter={filter}
       threads={visibleThreads}
       queued={queued}
-      selectedContactId={selectedContactId}
+      selectedThreadId={selectedThreadId}
       threadDetail={threadDetail}
       unknownSenders={unknownSenders}
       unknownActiveCount={unknownActive.length}

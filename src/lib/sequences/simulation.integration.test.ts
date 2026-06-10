@@ -62,18 +62,24 @@ async function seedLeadBatch(
   const leads: SeededLead[] = [];
   for (let i = 0; i < count; i++) {
     const phone = `${prefix}${String(1000 + i).padStart(4, "0")}`;
-    const { data: contact } = await supabase
+    const { data: contact, error: contactError } = await supabase
       .from("contacts")
       .insert({ first_name: `Lead${i}`, phone_1: phone })
       .select("id")
       .single();
-    await supabase.from("consent_events").insert({
+    if (contactError || !contact) {
+      throw new Error(`seedLeadBatch contact[${i}] failed: ${contactError?.message ?? "missing row"}`);
+    }
+    const { error: consentError } = await supabase.from("consent_events").insert({
       contact_id: contact!.id,
       channel: "sms",
       event_type: "opt_in_marketing_written",
       source: "sim-seed",
     });
-    const { data: prop } = await supabase
+    if (consentError) {
+      throw new Error(`seedLeadBatch consent[${i}] failed: ${consentError.message}`);
+    }
+    const { data: prop, error: propError } = await supabase
       .from("properties")
       .insert({
         address: `${i} Sim St`,
@@ -83,7 +89,10 @@ async function seedLeadBatch(
       })
       .select("id")
       .single();
-    leads.push({ propertyId: prop!.id, contactId: contact!.id, phone });
+    if (propError || !prop) {
+      throw new Error(`seedLeadBatch property[${i}] failed: ${propError?.message ?? "missing row"}`);
+    }
+    leads.push({ propertyId: prop.id, contactId: contact.id, phone });
 
     const persona = opts.personaFor?.(i) ?? null;
     if (persona) registerMockPersona(phone, persona);
