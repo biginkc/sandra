@@ -442,6 +442,37 @@ async function ingestRow(
   });
 
   if (existingId) {
+    // Contact enrichment on re-import: the homeowner/agent contact was
+    // already upserted above. If this CSV row carries a contact the
+    // existing property lacks, attach it — that's how a "skip-traced
+    // contacts" re-export backfills owner data onto address-only rows
+    // imported earlier. NULL-only fill: a property that already has a
+    // linked contact is never rewired by an import.
+    if (homeownerContactId || agentContactId) {
+      const { data: existing } = await supabase
+        .from("properties")
+        .select("homeowner_contact_id, agent_contact_id")
+        .eq("id", existingId)
+        .single();
+      const patch: Partial<PropertyInsert> = {};
+      if (homeownerContactId && !existing?.homeowner_contact_id) {
+        patch.homeowner_contact_id = homeownerContactId;
+      }
+      if (agentContactId && !existing?.agent_contact_id) {
+        patch.agent_contact_id = agentContactId;
+      }
+      if (Object.keys(patch).length > 0) {
+        const { error: patchError } = await supabase
+          .from("properties")
+          .update(patch)
+          .eq("id", existingId);
+        if (patchError) {
+          throw new Error(
+            `contact attach on dedup: ${patchError.message}`,
+          );
+        }
+      }
+    }
     return { propertyId: existingId, wasDuplicate: true };
   }
 
