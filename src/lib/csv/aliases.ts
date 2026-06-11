@@ -11,6 +11,8 @@
  * drop it from the alias list and let the user map manually.
  */
 
+import { ALL_FIELDS } from "./schema";
+
 export const HEADER_ALIASES: Record<string, string> = {
   // ---------- Property: address ----------
   "address": "address",
@@ -348,8 +350,20 @@ export function normalizeHeader(header: string): string {
  */
 export function autodetectField(header: string): string | null {
   const key = normalizeHeader(header);
-  return HEADER_ALIASES[key] ?? null;
+  return HEADER_ALIASES[key] ?? SELF_ALIASES[key] ?? null;
 }
+
+/**
+ * Self-aliases: every target field's own id (normalized: underscores →
+ * spaces) maps to itself, so a CSV exported in Sandra's own column format
+ * — e.g. a prepared "skip-traced contacts" backfill file with headers
+ * like `homeowner_first_name` — auto-maps without the operator hand-
+ * wiring 13 dropdowns. Built from the schema so it can't drift. Vendor
+ * aliases always win on conflict (checked first above).
+ */
+const SELF_ALIASES: Record<string, string> = Object.fromEntries(
+  ALL_FIELDS.map((f) => [normalizeHeader(f.id), f.id]),
+);
 
 /**
  * Produce an initial mapping by autodetecting all CSV headers.
