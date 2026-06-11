@@ -1,21 +1,30 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // Hoist `createClient` mock so it's installed before `actions.ts` imports it.
-const { createClient } = vi.hoisted(() => ({ createClient: vi.fn() }));
+const { createClient, revalidatePath } = vi.hoisted(() => ({
+  createClient: vi.fn(),
+  revalidatePath: vi.fn(),
+}));
 
 vi.mock("@/lib/supabase/server", () => ({
   createClient,
 }));
 
 vi.mock("next/cache", () => ({
-  revalidatePath: vi.fn(),
+  revalidatePath,
 }));
 
 vi.mock("@/lib/errors/report", () => ({
   reportError: vi.fn(),
 }));
 
-import { createSequence } from "./actions";
+import {
+  archiveSequence,
+  createSequence,
+  deleteSequenceStep,
+  updateSequence,
+  upsertSequenceStep,
+} from "./actions";
 
 type InsertedRow = {
   org_id: string;
@@ -26,10 +35,14 @@ type InsertedRow = {
 };
 
 type StubResult<T> = { data: T | null; error: { code?: string; message: string } | null };
+type StubUser = { id?: string | null; email?: string | null } | null;
+type GuardedActionResult =
+  | { ok: true }
+  | { ok: false; error: { code: string } };
 
 function makeSupabase(opts: {
   org: StubResult<{ id: string }>;
-  user: StubResult<{ user: { id: string } | null }>;
+  user: StubResult<{ user: StubUser }>;
   insertResult: StubResult<{ id: string }>;
   insertCapture: { rows: InsertedRow[] };
 }) {
@@ -66,10 +79,12 @@ function makeSupabase(opts: {
 
 beforeEach(() => {
   createClient.mockReset();
+  vi.stubEnv("ADMIN_EMAILS", "admin@bmhgroupkc.com");
 });
 
 afterEach(() => {
   vi.clearAllMocks();
+  vi.unstubAllEnvs();
 });
 
 describe("createSequence", () => {
@@ -96,7 +111,10 @@ describe("createSequence", () => {
     createClient.mockResolvedValue(
       makeSupabase({
         org: { data: null, error: null },
-        user: { data: { user: { id: "u-1" } }, error: null },
+        user: {
+          data: { user: { id: "u-1", email: "admin@bmhgroupkc.com" } },
+          error: null,
+        },
         insertResult: { data: { id: "s-1" }, error: null },
         insertCapture,
       }),
@@ -114,7 +132,10 @@ describe("createSequence", () => {
     createClient.mockResolvedValue(
       makeSupabase({
         org: { data: { id: "org-1" }, error: null },
-        user: { data: { user: { id: "user-1" } }, error: null },
+        user: {
+          data: { user: { id: "user-1", email: "admin@bmhgroupkc.com" } },
+          error: null,
+        },
         insertResult: { data: { id: "seq-42" }, error: null },
         insertCapture,
       }),
@@ -144,7 +165,10 @@ describe("createSequence", () => {
     createClient.mockResolvedValue(
       makeSupabase({
         org: { data: { id: "org-1" }, error: null },
-        user: { data: { user: null }, error: null },
+        user: {
+          data: { user: { id: null, email: "admin@bmhgroupkc.com" } },
+          error: null,
+        },
         insertResult: { data: { id: "seq-43" }, error: null },
         insertCapture,
       }),
@@ -165,7 +189,10 @@ describe("createSequence", () => {
     createClient.mockResolvedValue(
       makeSupabase({
         org: { data: { id: "org-1" }, error: null },
-        user: { data: { user: { id: "u-1" } }, error: null },
+        user: {
+          data: { user: { id: "u-1", email: "admin@bmhgroupkc.com" } },
+          error: null,
+        },
         insertResult: {
           data: null,
           error: { code: "23505", message: "duplicate key" },
@@ -181,5 +208,72 @@ describe("createSequence", () => {
       expect(result.error.code).toBe("DUPLICATE_NAME");
       expect(result.error.message).toMatch(/already exists/);
     }
+  });
+});
+
+describe("sequence admin guard", () => {
+  function makeForbiddenSupabase(user: StubUser) {
+    return {
+      auth: {
+        getUser: vi.fn().mockResolvedValue({ data: { user }, error: null }),
+      },
+      from: vi.fn(() => {
+        throw new Error("admin guard should return before table access");
+      }),
+    };
+  }
+
+  async function expectForbidden(
+    user: StubUser,
+    action: () => Promise<GuardedActionResult>,
+  ) {
+    const supabase = makeForbiddenSupabase(user);
+    createClient.mockResolvedValue(supabase);
+
+    const result = await action();
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe("FORBIDDEN");
+    }
+    expect(supabase.from).not.toHaveBeenCalled();
+    expect(revalidatePath).not.toHaveBeenCalled();
+  }
+
+  describe.each([
+    ["non-admin", { id: "user-2", email: "va@bmhgroupkc.com" }],
+    ["unauthenticated user", null],
+  ] satisfies Array<[string, StubUser]>)("%s", (_label, user) => {
+    it("blocks sequence creation before table access", async () => {
+      await expectForbidden(user, () =>
+        createSequence({ name: "Blocked create" }),
+      );
+    });
+
+    it("blocks sequence metadata updates before table access", async () => {
+      await expectForbidden(user, () =>
+        updateSequence("seq-1", { name: "Blocked update" }),
+      );
+    });
+
+    it("blocks archiving before table access", async () => {
+      await expectForbidden(user, () => archiveSequence("seq-1"));
+    });
+
+    it("blocks step upserts before table access", async () => {
+      await expectForbidden(user, () =>
+        upsertSequenceStep({
+          sequence_id: "seq-1",
+          step_index: 0,
+          delay_after_previous_minutes: 0,
+          action_type: "send_sms",
+          template_body: "Hello",
+        }),
+      );
+    });
+
+    it("blocks step deletion before table access", async () => {
+      await expectForbidden(user, () => deleteSequenceStep("step-1", "seq-1"));
+    });
   });
 });

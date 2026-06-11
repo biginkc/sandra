@@ -1,7 +1,7 @@
 import { Download, MessageSquare, Repeat } from "lucide-react";
 import Link from "next/link";
 
-export function QuickActions() {
+export function QuickActions({ isAdmin }: { isAdmin: boolean }) {
   return (
     <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
       <Action
@@ -10,12 +10,21 @@ export function QuickActions() {
         icon={Download}
         variant="outline"
       />
-      <Action
-        href="/sequences/new"
-        label="Start a sequence"
-        icon={Repeat}
-        variant="solid"
-      />
+      {isAdmin ? (
+        <Action
+          href="/sequences/new"
+          label="Start a sequence"
+          icon={Repeat}
+          variant="solid"
+        />
+      ) : (
+        <Action
+          href="/sequences"
+          label="View sequences"
+          icon={Repeat}
+          variant="outline"
+        />
+      )}
       <Action
         href="/messages"
         label="View messages"

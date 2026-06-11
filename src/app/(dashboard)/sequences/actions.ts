@@ -5,12 +5,10 @@ import { revalidatePath } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
 import { errFromUnknown, ok, type Result } from "@/lib/errors/result";
 import { reportError } from "@/lib/errors/report";
-import {
-  enrollLead,
-  pausePropertyEnrollments,
-  resumeEnrollment,
-} from "@/lib/sequences/enrollment";
+import { enrollLead, resumeEnrollment } from "@/lib/sequences/enrollment";
 import { getSequenceImpact } from "@/lib/sequences/impact";
+
+import { requireSequenceAdmin } from "./admin";
 
 export type SequenceRow = {
   id: string;
@@ -164,6 +162,9 @@ export async function createSequence(input: {
     };
   }
   try {
+    const guard = await requireSequenceAdmin();
+    if (!guard.ok) return { ok: false, error: guard.error };
+
     const supabase = await createClient();
     const {
       data: { user },
@@ -228,6 +229,9 @@ export async function updateSequence(
   },
 ): Promise<Result<null>> {
   try {
+    const guard = await requireSequenceAdmin();
+    if (!guard.ok) return { ok: false, error: guard.error };
+
     const supabase = await createClient();
     const update: {
       name?: string;
@@ -270,6 +274,9 @@ export async function archiveSequence(
   sequenceId: string,
 ): Promise<Result<null>> {
   try {
+    const guard = await requireSequenceAdmin();
+    if (!guard.ok) return { ok: false, error: guard.error };
+
     const supabase = await createClient();
     const { error } = await supabase
       .from("sequences")
@@ -346,6 +353,9 @@ export async function upsertSequenceStep(input: {
   const templateIdOnInsert = usingTemplateRef ? input.template_id! : null;
 
   try {
+    const guard = await requireSequenceAdmin();
+    if (!guard.ok) return { ok: false, error: guard.error };
+
     const supabase = await createClient();
     if (input.id) {
       const { error } = await supabase
@@ -400,6 +410,9 @@ export async function deleteSequenceStep(
   sequenceId: string,
 ): Promise<Result<null>> {
   try {
+    const guard = await requireSequenceAdmin();
+    if (!guard.ok) return { ok: false, error: guard.error };
+
     const supabase = await createClient();
     const { error } = await supabase
       .from("sequence_steps")

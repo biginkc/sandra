@@ -1,9 +1,14 @@
+import { redirect } from "next/navigation";
+
 import { Page } from "@/components/page";
 import { PageHeader } from "@/components/page-header";
 
+import { getSequenceAdminStatus } from "../admin";
 import { CreateSequenceForm } from "./form";
 
-export default function NewSequencePage() {
+export default async function NewSequencePage() {
+  if (!(await getSequenceAdminStatus())) redirect("/leads");
+
   return (
     <Page>
       <PageHeader

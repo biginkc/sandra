@@ -1,9 +1,10 @@
-import { notFound } from "next/navigation";
+import { notFound, redirect } from "next/navigation";
 
 import { Page } from "@/components/page";
 import { PageHeader } from "@/components/page-header";
 import { listTemplates } from "@/app/(dashboard)/templates/actions";
 
+import { getSequenceAdminStatus } from "../../admin";
 import { getImpactAction, getSequenceWithSteps } from "../../actions";
 
 import { SequenceEditor } from "./editor";
@@ -13,6 +14,8 @@ export default async function SequenceEditPage({
 }: {
   params: Promise<{ id: string }>;
 }) {
+  if (!(await getSequenceAdminStatus())) redirect("/leads");
+
   const { id } = await params;
   const result = await getSequenceWithSteps(id);
   if (!result.ok || !result.data) {

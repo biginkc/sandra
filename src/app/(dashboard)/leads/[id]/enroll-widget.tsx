@@ -36,7 +36,16 @@ export function EnrollInSequenceWidget({ propertyId }: { propertyId: string }) {
   const [pending, startTransition] = useTransition();
 
   useEffect(() => {
-    void refreshEnrollments();
+    let cancelled = false;
+
+    void (async () => {
+      const r = await listPropertyEnrollments(propertyId);
+      if (!cancelled && r.ok) setEnrollments(r.data);
+    })();
+
+    return () => {
+      cancelled = true;
+    };
   }, [propertyId]);
 
   const refreshEnrollments = async () => {
@@ -123,11 +132,8 @@ export function EnrollInSequenceWidget({ propertyId }: { propertyId: string }) {
           <div className="bg-popover absolute z-50 mt-1 flex w-64 flex-col gap-1 rounded-md border p-2 shadow-md">
             {sequences.length === 0 ? (
               <div className="text-muted-foreground p-2 text-xs">
-                No active sequences with steps. Author one in{" "}
-                <a href="/sequences" className="underline">
-                  /sequences
-                </a>
-                .
+                No active sequences with steps. Ask an admin to create and
+                activate one before enrolling this lead.
               </div>
             ) : (
               sequences.map((s) => (
