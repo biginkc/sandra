@@ -1,12 +1,11 @@
 "use server";
 
 import { after } from "next/server";
+import { start } from "workflow/api";
 
 import { isAdminEmail } from "@/lib/auth/allowlist";
-import {
-  createCassChildJob,
-  runCassEnrichment,
-} from "@/lib/enrichment/cass-job";
+import { createCassChildJob } from "@/lib/enrichment/cass-job";
+import { cassBulkWorkflow } from "@/workflows/cass-bulk";
 import { errFromUnknown, ok, type Result } from "@/lib/errors/result";
 import { reportError } from "@/lib/errors/report";
 import { runSkipTraceEnrichment } from "@/lib/skip-trace/skip-trace-job";
@@ -109,12 +108,15 @@ export async function startQueuedCassJob(
       };
     }
 
+    // Chunked workflow, NOT inline enrichment — parked jobs exist
+    // precisely because they exceeded the autotrigger cap, so they are
+    // exactly the size class that dies at the 5-minute function ceiling.
     after(async () => {
       try {
-        await runCassEnrichment(supabase, { jobId, propertyIds });
+        await start(cassBulkWorkflow, [{ jobId }]);
       } catch (e) {
         reportError(e, {
-          tags: { surface: "start_queued_cass_after" },
+          tags: { surface: "start_queued_cass_workflow_start" },
           extra: { jobId },
         });
         await supabase
@@ -231,15 +233,14 @@ export async function retryFailedCassItems(
       autoStart: true,
     });
 
+    // Chunked workflow — retry sets after a mass failure can be as large
+    // as the original job, so the inline path's 5-minute ceiling applies.
     after(async () => {
       try {
-        await runCassEnrichment(supabase, {
-          jobId: childId,
-          propertyIds,
-        });
+        await start(cassBulkWorkflow, [{ jobId: childId }]);
       } catch (e) {
         reportError(e, {
-          tags: { surface: "retry_failed_cass_after" },
+          tags: { surface: "retry_failed_cass_workflow_start" },
           extra: { childId, propertyCount: propertyIds.length },
         });
         await supabase
