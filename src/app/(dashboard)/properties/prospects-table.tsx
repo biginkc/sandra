@@ -439,9 +439,9 @@ export function ProspectsTable({
   const handleSkipTrace = () => {
     const ids = selectedIds();
     if (ids.length === 0) return;
-    if (ids.length > 500) {
+    if (ids.length > 10_000) {
       toast.error(
-        `Cannot skip-trace more than 500 properties at once. Split into smaller batches.`,
+        `Cannot skip-trace more than 10,000 properties at once. Split into smaller batches.`,
       );
       return;
     }

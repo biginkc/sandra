@@ -8,7 +8,7 @@ import type { Database, Json } from "@/lib/supabase/types";
 import {
   normalizeAddress,
   normalizeAddressForMatch,
-  readCache,
+  readCacheMany,
   writeCache,
 } from "./cache";
 import { persistSkipTraceResult, type PersistOutcome } from "./persist-result";
@@ -29,6 +29,16 @@ import type { SkipTraceInput, SkipTraceResult } from "./types";
  *
  * Never throws — errors are absorbed into the job row + reported.
  */
+
+/** PostgREST .in() rides in the URL — chunk large ID lists to stay clear
+ *  of URL length limits. 500 UUIDs ≈ 18KB of query string per request. */
+const IN_CHUNK = 500;
+
+function chunked<T>(arr: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
+}
 
 export type SkipTraceJobSummary = {
   total: number;
@@ -91,12 +101,24 @@ export async function runSkipTraceEnrichment(
   // shots — Supabase's PostgREST joins via the homeowner_contact_id FK
   // would also work, but the explicit two-query path keeps the type
   // story simple and the mailing-fields-may-be-null branch obvious.
-  const { data: properties } = await supabase
-    .from("properties")
-    .select("id, address, city, state, zip, homeowner_contact_id, cass_status")
-    .in("id", params.propertyIds);
+  const properties: Array<{
+    id: string;
+    address: string;
+    city: string | null;
+    state: string;
+    zip: string | null;
+    homeowner_contact_id: string | null;
+    cass_status: string;
+  }> = [];
+  for (const ids of chunked(params.propertyIds, IN_CHUNK)) {
+    const { data } = await supabase
+      .from("properties")
+      .select("id, address, city, state, zip, homeowner_contact_id, cass_status")
+      .in("id", ids);
+    if (data) properties.push(...data);
+  }
 
-  if (!properties || properties.length === 0) {
+  if (properties.length === 0) {
     await markJobFailed(supabase, params.jobId, "No properties found");
     return summary;
   }
@@ -105,28 +127,53 @@ export async function runSkipTraceEnrichment(
     .map((p) => p.homeowner_contact_id)
     .filter((id): id is string => typeof id === "string");
 
-  const { data: homeowners } = homeownerIds.length
-    ? await supabase
-        .from("homeowner_details")
-        .select(
-          "contact_id, mailing_address, mailing_city, mailing_state, mailing_zip",
-        )
-        .in("contact_id", homeownerIds)
-    : { data: [] as Array<{
-        contact_id: string;
-        mailing_address: string | null;
-        mailing_city: string | null;
-        mailing_state: string | null;
-        mailing_zip: string | null;
-      }> };
+  const homeowners: Array<{
+    contact_id: string;
+    mailing_address: string | null;
+    mailing_city: string | null;
+    mailing_state: string | null;
+    mailing_zip: string | null;
+  }> = [];
+  for (const ids of chunked(homeownerIds, IN_CHUNK)) {
+    const { data } = await supabase
+      .from("homeowner_details")
+      .select(
+        "contact_id, mailing_address, mailing_city, mailing_state, mailing_zip",
+      )
+      .in("contact_id", ids);
+    if (data) homeowners.push(...data);
+  }
 
   const mailingByContact = new Map(
-    (homeowners ?? []).map((h) => [h.contact_id, h]),
+    homeowners.map((h) => [h.contact_id, h]),
   );
 
   const cachedResults: SkipTraceResult[] = [];
   const misses: SkipTraceInput[] = [];
   const propsById = new Map(properties.map((p) => [p.id, p]));
+
+  // Pass 1: normalize every address, then ONE bulk cache read. The old
+  // per-row readCache was an N+1 that would have pushed a 10K job's
+  // pre-submit phase past the function ceiling on its own.
+  const normalizedById = new Map<string, string>();
+  for (const propertyId of params.propertyIds) {
+    const p = propsById.get(propertyId);
+    if (!p) continue;
+    normalizedById.set(
+      propertyId,
+      normalizeAddress({
+        address: p.address,
+        city: p.city,
+        state: p.state,
+        zip: p.zip,
+      }),
+    );
+  }
+  const cacheByAddress = await readCacheMany(
+    supabase,
+    provider.providerId,
+    Array.from(normalizedById.values()),
+  );
 
   for (const propertyId of params.propertyIds) {
     const p = propsById.get(propertyId);
@@ -146,13 +193,8 @@ export async function runSkipTraceEnrichment(
       }
       continue;
     }
-    const addressNormalized = normalizeAddress({
-      address: p.address,
-      city: p.city,
-      state: p.state,
-      zip: p.zip,
-    });
-    const cached = await readCache(supabase, provider.providerId, addressNormalized);
+    const addressNormalized = normalizedById.get(propertyId) as string;
+    const cached = cacheByAddress.get(addressNormalized) ?? null;
     if (cached) {
       // Cache row stores the previous result; reuse it but rewrite the
       // propertyId so persistence targets the *current* row.

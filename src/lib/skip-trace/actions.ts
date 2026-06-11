@@ -15,7 +15,11 @@ import { createClient } from "@/lib/supabase/server";
 import { getSkipTraceProvider } from "./registry";
 import { runSkipTraceEnrichment } from "./skip-trace-job";
 
-const MAX_PROPERTIES_PER_JOB = 500;
+/** Raised from 500 (2026-06-11): the runner submits ONE async batch to
+ *  Tracerfy (1 credit/lead) and exits, so job size is not a function-
+ *  lifetime concern. The remaining guards are the credit-balance check
+ *  (refuses overdraft) and Tracerfy's own 10-batches/5-min rate limit. */
+const MAX_PROPERTIES_PER_JOB = 10_000;
 
 /**
  * Server actions for the three skip-trace UI surfaces:
@@ -67,15 +71,24 @@ export async function requestSkipTrace(
     //      Tracerfy because they aren't USPS-normalized. Sending them
     //      anyway pays $0.02/row to learn we should have CASS-verified
     //      first.
-    const { data: eligibleRows, error: eligibleErr } = await supabase
-      .from("properties")
-      .select("id, org_id, skip_trace_disabled, cass_status")
-      .in("id", propertyIds);
-    if (eligibleErr) {
-      return {
-        ok: false,
-        error: { code: "QUERY_FAILED", message: eligibleErr.message },
-      };
+    const eligibleRows: Array<{
+      id: string;
+      org_id: string;
+      skip_trace_disabled: boolean;
+      cass_status: string;
+    }> = [];
+    for (let i = 0; i < propertyIds.length; i += 500) {
+      const { data, error: eligibleErr } = await supabase
+        .from("properties")
+        .select("id, org_id, skip_trace_disabled, cass_status")
+        .in("id", propertyIds.slice(i, i + 500));
+      if (eligibleErr) {
+        return {
+          ok: false,
+          error: { code: "QUERY_FAILED", message: eligibleErr.message },
+        };
+      }
+      if (data) eligibleRows.push(...data);
     }
     const killSwitched = (eligibleRows ?? []).filter(
       (p) => p.skip_trace_disabled,
