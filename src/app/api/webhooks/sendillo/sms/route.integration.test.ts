@@ -29,6 +29,19 @@ async function seedContact(phone: string) {
   return data!.id;
 }
 
+async function expectNoMessageOrWebhookReservation(externalId: string) {
+  const { count: messageCount } = await supabase
+    .from("messages")
+    .select("*", { count: "exact", head: true })
+    .eq("external_id", externalId);
+  const { count: eventCount } = await supabase
+    .from("webhook_events")
+    .select("*", { count: "exact", head: true })
+    .eq("external_id", externalId);
+  expect(messageCount).toBe(0);
+  expect(eventCount).toBe(0);
+}
+
 describe("POST /api/webhooks/sendillo/sms (integration)", () => {
   beforeEach(async () => {
     delete process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -70,7 +83,53 @@ describe("POST /api/webhooks/sendillo/sms (integration)", () => {
     expect(res.status).toBe(401);
   });
 
-  it("rejects query-string secrets on the live inbound route", async () => {
+  it("rejects the wrong Sendillo target URL query secret without reserving the webhook", async () => {
+    const req = new Request(
+      "https://example.invalid/api/webhooks/sendillo/sms?secret=wrong",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          event: "inbound.received",
+          data: {
+            messageId: "snd_wrong_secret_001",
+            from: "+18165550004",
+            to: "+18164876899",
+            body: "hi",
+          },
+        }),
+      },
+    );
+
+    const res = await POST(req);
+    expect(res.status).toBe(401);
+    await expectNoMessageOrWebhookReservation("snd_wrong_secret_001");
+  });
+
+  it("rejects the wrong Sendillo header secret without reserving the webhook", async () => {
+    const req = new Request("https://example.invalid/api/webhooks/sendillo/sms", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-sendillo-webhook-secret": "wrong",
+      },
+      body: JSON.stringify({
+        event: "inbound.received",
+        data: {
+          messageId: "snd_wrong_secret_002",
+          from: "+18165550005",
+          to: "+18164876899",
+          body: "hi",
+        },
+      }),
+    });
+
+    const res = await POST(req);
+    expect(res.status).toBe(401);
+    await expectNoMessageOrWebhookReservation("snd_wrong_secret_002");
+  });
+
+  it("accepts the shared secret from Sendillo's target URL query", async () => {
     const contactId = await seedContact("+18165550002");
     const { data: property } = await supabase
       .from("properties")
@@ -94,34 +153,73 @@ describe("POST /api/webhooks/sendillo/sms (integration)", () => {
       property_id: property!.id,
     });
 
-    const req = new Request(
-      "https://example.invalid/api/webhooks/sendillo/sms?secret=sendillo-secret",
-      {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          event: "inbound.received",
-          timestamp: "2026-06-08T19:07:39.264912233Z",
-          data: {
-            messageId: "snd_realish_001",
-            from: "+18165550002",
-            to: "+18164876899",
-            body: "YES",
-            type: "SMS",
-            receivedAt: "2026-06-08T19:07:39.257Z",
-          },
-        }),
+    const body = JSON.stringify({
+      event: "inbound.received",
+      timestamp: "2026-06-08T19:07:39.264912233Z",
+      data: {
+        messageId: "snd_realish_001",
+        from: "+18165550002",
+        to: "+18164876899",
+        body: "YES",
+        type: "SMS",
+        receivedAt: "2026-06-08T19:07:39.257Z",
       },
-    );
+    });
+    const makeRequest = () =>
+      new Request(
+        "https://example.invalid/api/webhooks/sendillo/sms?secret=sendillo-secret",
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body,
+        },
+      );
 
-    const res = await POST(req);
-    expect(res.status).toBe(401);
+    const res = await POST(makeRequest());
+    expect(res.status).toBe(200);
 
-    const { count } = await supabase
+    const replayRes = await POST(makeRequest());
+    expect(replayRes.status).toBe(200);
+
+    const { data: message } = await supabase
+      .from("messages")
+      .select("contact_id, property_id, provider, external_id")
+      .eq("external_id", "snd_realish_001")
+      .single();
+    expect(message).toMatchObject({
+      contact_id: contactId,
+      property_id: property!.id,
+      provider: "sendillo",
+      external_id: "snd_realish_001",
+    });
+
+    const { count: messageCount } = await supabase
       .from("messages")
       .select("*", { count: "exact", head: true })
+      .eq("provider", "sendillo")
       .eq("external_id", "snd_realish_001");
-    expect(count).toBe(0);
+    const { data: webhookEvent } = await supabase
+      .from("webhook_events")
+      .select("provider, event_type, signature_verified, processing_status")
+      .eq("provider", "sendillo")
+      .eq("event_type", "sms_inbound")
+      .eq("external_id", "snd_realish_001")
+      .single();
+    const { count: eventCount } = await supabase
+      .from("webhook_events")
+      .select("*", { count: "exact", head: true })
+      .eq("provider", "sendillo")
+      .eq("event_type", "sms_inbound")
+      .eq("external_id", "snd_realish_001");
+
+    expect(messageCount).toBe(1);
+    expect(eventCount).toBe(1);
+    expect(webhookEvent).toMatchObject({
+      provider: "sendillo",
+      event_type: "sms_inbound",
+      signature_verified: true,
+      processing_status: "processed",
+    });
   });
 
   it("accepts the shared secret from a header without relying on the query string", async () => {
@@ -149,23 +247,24 @@ describe("POST /api/webhooks/sendillo/sms (integration)", () => {
     });
 
     const req = new Request("https://example.invalid/api/webhooks/sendillo/sms", {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-sendillo-webhook-secret": "sendillo-secret",
-      },
-      body: JSON.stringify({
-        event: "inbound.received",
-        data: {
-          messageId: "snd_realish_002",
-          from: "+18165550003",
-          to: "+18164876899",
-          body: "HEADER OK",
-          type: "SMS",
-          receivedAt: "2026-06-08T19:08:39.257Z",
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-sendillo-webhook-secret": "sendillo-secret",
         },
-      }),
-    });
+        body: JSON.stringify({
+          event: "inbound.received",
+          data: {
+            messageId: "snd_realish_002",
+            from: "+18165550003",
+            to: "+18164876899",
+            body: "HEADER OK",
+            type: "SMS",
+            receivedAt: "2026-06-08T19:08:39.257Z",
+          },
+        }),
+      },
+    );
 
     const res = await POST(req);
     expect(res.status).toBe(200);

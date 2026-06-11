@@ -133,7 +133,7 @@ describe("SendilloMessagingProvider inbound contract", () => {
     ).toBe(false);
   });
 
-  it("rejects webhook URL query secrets even when the shared secret is configured", () => {
+  it("accepts the configured shared secret from Sendillo's target URL query", () => {
     const provider = new SendilloMessagingProvider(
       "sendillo-test-key",
       "+18165550000",
@@ -145,6 +145,22 @@ describe("SendilloMessagingProvider inbound contract", () => {
         "{}",
         new Headers(),
         "https://example.test/api/webhooks/sendillo/sms?secret=sendillo-secret",
+      ),
+    ).toBe(true);
+  });
+
+  it("rejects the wrong Sendillo target URL query secret", () => {
+    const provider = new SendilloMessagingProvider(
+      "sendillo-test-key",
+      "+18165550000",
+      "sendillo-secret",
+    );
+
+    expect(
+      provider.verifyWebhookSignature(
+        "{}",
+        new Headers(),
+        "https://example.test/api/webhooks/sendillo/sms?secret=wrong",
       ),
     ).toBe(false);
   });
@@ -162,6 +178,21 @@ describe("SendilloMessagingProvider inbound contract", () => {
     expect(
       provider.verifyWebhookSignature("{}", headers, "https://example.test"),
     ).toBe(true);
+  });
+
+  it("rejects the wrong Sendillo header secret", () => {
+    const provider = new SendilloMessagingProvider(
+      "sendillo-test-key",
+      "+18165550000",
+      "sendillo-secret",
+    );
+    const headers = new Headers({
+      "x-sendillo-webhook-secret": "wrong",
+    });
+
+    expect(
+      provider.verifyWebhookSignature("{}", headers, "https://example.test"),
+    ).toBe(false);
   });
 
   it("parses inbound.received JSON payloads into the shared inbound shape", () => {

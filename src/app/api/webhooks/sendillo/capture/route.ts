@@ -61,6 +61,10 @@ function redactUrl(rawUrl: string): string {
   try {
     const url = new URL(rawUrl);
     url.searchParams.delete("secret");
+    url.pathname = url.pathname.replace(
+      /\/api\/webhooks\/sendillo\/capture\/[^/]+$/,
+      "/api/webhooks/sendillo/capture/[redacted]",
+    );
     return url.toString();
   } catch {
     return rawUrl;
@@ -89,12 +93,28 @@ function constantTimeEqual(a: string, b: string): boolean {
   return timingSafeEqual(left, right);
 }
 
-function readCaptureCredential(headers: Headers): string | null {
+function readCaptureCredentials(headers: Headers): string[] {
+  const candidates: string[] = [];
   const auth = headers.get("authorization");
   if (auth?.startsWith("Bearer ")) {
-    return auth.slice("Bearer ".length).trim();
+    const bearer = auth.slice("Bearer ".length).trim();
+    if (bearer) candidates.push(bearer);
   }
-  return headers.get("x-sendillo-capture-secret")?.trim() ?? null;
+  const explicitHeader = headers.get("x-sendillo-capture-secret")?.trim();
+  if (explicitHeader) candidates.push(explicitHeader);
+  return candidates;
+}
+
+function readCapturePathSecret(request: Request): string | null {
+  try {
+    const url = new URL(request.url);
+    const prefix = "/api/webhooks/sendillo/capture/";
+    if (!url.pathname.startsWith(prefix)) return null;
+    const candidate = decodeURIComponent(url.pathname.slice(prefix.length));
+    return candidate && !candidate.includes("/") ? candidate : null;
+  } catch {
+    return null;
+  }
 }
 
 async function authorizeCaptureRequest(request: Request) {
@@ -110,8 +130,10 @@ async function authorizeCaptureRequest(request: Request) {
     );
   }
 
-  const providedSecret = readCaptureCredential(request.headers);
-  if (!providedSecret || !constantTimeEqual(providedSecret, expectedSecret)) {
+  const candidates = readCaptureCredentials(request.headers);
+  const pathSecret = readCapturePathSecret(request);
+  if (pathSecret) candidates.push(pathSecret);
+  if (!candidates.some((candidate) => constantTimeEqual(candidate, expectedSecret))) {
     return NextResponse.json({ error: "Invalid secret" }, { status: 401 });
   }
 
