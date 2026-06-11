@@ -77,6 +77,52 @@ export async function readCache(
   };
 }
 
+/**
+ * Bulk variant of readCache: one round-trip per ~150 addresses instead of
+ * one per row. Returns a map keyed by address_normalized holding the
+ * NEWEST in-TTL cache row per address. Added for the 10K bulk skip-trace
+ * path — the per-row loop was a hidden N+1 that would have pushed a large
+ * job's pre-submit phase past the function ceiling.
+ */
+export async function readCacheMany(
+  supabase: SupabaseClient<Database>,
+  provider: string,
+  addressesNormalized: string[],
+): Promise<Map<string, CachedSkipTrace>> {
+  const out = new Map<string, CachedSkipTrace>();
+  if (addressesNormalized.length === 0) return out;
+
+  const cutoff = new Date(
+    Date.now() - TTL_DAYS * 24 * 60 * 60 * 1000,
+  ).toISOString();
+
+  // Addresses ride in the GET query string — keep chunks small enough to
+  // stay clear of URL length limits.
+  const CHUNK = 150;
+  const unique = Array.from(new Set(addressesNormalized));
+  for (let i = 0; i < unique.length; i += CHUNK) {
+    const slice = unique.slice(i, i + CHUNK);
+    const { data } = await supabase
+      .from("skip_trace_cache")
+      .select("address_normalized, result, created_at")
+      .eq("provider", provider)
+      .in("address_normalized", slice)
+      .gte("created_at", cutoff)
+      .order("created_at", { ascending: false });
+
+    for (const row of data ?? []) {
+      // Rows arrive newest-first; first write per address wins.
+      if (!out.has(row.address_normalized)) {
+        out.set(row.address_normalized, {
+          result: row.result as unknown as SkipTraceResult,
+          cachedAt: row.created_at,
+        });
+      }
+    }
+  }
+  return out;
+}
+
 export async function writeCache(
   supabase: SupabaseClient<Database>,
   provider: string,
