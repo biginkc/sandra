@@ -15,6 +15,7 @@ vi.mock("@/lib/errors/report", () => ({
 }));
 
 import { GET, POST } from "./route";
+import * as pathSecretRoute from "./[secret]/route";
 
 describe("POST /api/webhooks/sendillo/capture", () => {
   beforeEach(() => {
@@ -181,7 +182,7 @@ describe("POST /api/webhooks/sendillo/capture", () => {
   });
 
   it("accepts Sendillo capture credentials from the URL path segment", async () => {
-    const response = await POST(
+    const response = await pathSecretRoute.POST(
       new Request("https://sandra.test/api/webhooks/sendillo/capture/capture-secret", {
         method: "POST",
         headers: {
@@ -196,6 +197,25 @@ describe("POST /api/webhooks/sendillo/capture", () => {
     expect(insertedPayload.url).toBe(
       "https://sandra.test/api/webhooks/sendillo/capture/[redacted]",
     );
+  });
+
+  it("does not expose capture listing from the provider-facing path route", () => {
+    expect("GET" in pathSecretRoute).toBe(false);
+  });
+
+  it("accepts the path credential even when an unrelated auth header is present", async () => {
+    const response = await pathSecretRoute.POST(
+      new Request("https://sandra.test/api/webhooks/sendillo/capture/capture-secret", {
+        method: "POST",
+        headers: {
+          authorization: "Bearer wrong",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ event: "message.sent", messageId: "msg_path_header" }),
+      }),
+    );
+
+    expect(response.status).toBe(200);
   });
 
   it("rejects the wrong Sendillo capture path credential", async () => {
