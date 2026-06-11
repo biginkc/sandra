@@ -1,18 +1,13 @@
 import { redirect } from "next/navigation";
 
-import { isAdminEmail } from "@/lib/auth/allowlist";
-import { createClient } from "@/lib/supabase/server";
 import { Page } from "@/components/page";
 import { PageHeader } from "@/components/page-header";
 
+import { getSequenceAdminStatus } from "../admin";
 import { CreateSequenceForm } from "./form";
 
 export default async function NewSequencePage() {
-  const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-  if (!isAdminEmail(user?.email)) redirect("/leads");
+  if (!(await getSequenceAdminStatus())) redirect("/leads");
 
   return (
     <Page>

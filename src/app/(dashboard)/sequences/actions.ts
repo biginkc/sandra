@@ -2,36 +2,13 @@
 
 import { revalidatePath } from "next/cache";
 
-import { isAdminEmail } from "@/lib/auth/allowlist";
 import { createClient } from "@/lib/supabase/server";
 import { errFromUnknown, ok, type Result } from "@/lib/errors/result";
 import { reportError } from "@/lib/errors/report";
-import {
-  enrollLead,
-  pausePropertyEnrollments,
-  resumeEnrollment,
-} from "@/lib/sequences/enrollment";
+import { enrollLead, resumeEnrollment } from "@/lib/sequences/enrollment";
 import { getSequenceImpact } from "@/lib/sequences/impact";
 
-async function requireSequenceAdmin(): Promise<
-  | { ok: true }
-  | { ok: false; error: { code: string; message: string } }
-> {
-  const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-  if (!user || !isAdminEmail(user.email)) {
-    return {
-      ok: false,
-      error: {
-        code: "FORBIDDEN",
-        message: "Only admins can create or edit sequences.",
-      },
-    };
-  }
-  return { ok: true };
-}
+import { requireSequenceAdmin } from "./admin";
 
 export type SequenceRow = {
   id: string;

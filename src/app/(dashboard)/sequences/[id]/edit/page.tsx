@@ -1,11 +1,10 @@
 import { notFound, redirect } from "next/navigation";
 
-import { isAdminEmail } from "@/lib/auth/allowlist";
-import { createClient } from "@/lib/supabase/server";
 import { Page } from "@/components/page";
 import { PageHeader } from "@/components/page-header";
 import { listTemplates } from "@/app/(dashboard)/templates/actions";
 
+import { getSequenceAdminStatus } from "../../admin";
 import { getImpactAction, getSequenceWithSteps } from "../../actions";
 
 import { SequenceEditor } from "./editor";
@@ -15,11 +14,7 @@ export default async function SequenceEditPage({
 }: {
   params: Promise<{ id: string }>;
 }) {
-  const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-  if (!isAdminEmail(user?.email)) redirect("/leads");
+  if (!(await getSequenceAdminStatus())) redirect("/leads");
 
   const { id } = await params;
   const result = await getSequenceWithSteps(id);

@@ -105,7 +105,7 @@ export default async function DashboardPage() {
             currentUserId={user.id}
           />
           <KpiRowTwo summary={summary} currentUserId={user.id} />
-          <QuickActions />
+          <QuickActions isAdmin={isAdmin} />
         </div>
 
         {/* Right rail */}

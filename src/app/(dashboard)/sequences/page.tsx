@@ -1,21 +1,16 @@
 import Link from "next/link";
-import { createClient } from "@/lib/supabase/server";
-import { isAdminEmail } from "@/lib/auth/allowlist";
 
 import { Page } from "@/components/page";
 import { PageHeader } from "@/components/page-header";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 
+import { getSequenceAdminStatus } from "./admin";
 import { listSequences, type SequenceRow } from "./actions";
 import { SequenceRowActions } from "./row-actions";
 
 export default async function SequencesIndexPage() {
-  const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-  const isAdmin = isAdminEmail(user?.email);
+  const isAdmin = await getSequenceAdminStatus();
 
   const result = await listSequences();
   const sequences: SequenceRow[] = result.ok ? result.data : [];
@@ -44,8 +39,9 @@ export default async function SequencesIndexPage() {
 
       {active.length === 0 && archived.length === 0 && result.ok ? (
         <div className="text-muted-foreground text-sm">
-          No sequences yet. Click &ldquo;New sequence&rdquo; to author one, or
-          apply migration 018&apos;s starter library.
+          {isAdmin
+            ? "No sequences yet. Click \"New sequence\" to author one, or apply migration 018's starter library."
+            : "No sequences are available yet. Ask an admin to create one before enrolling leads."}
         </div>
       ) : null}
 
