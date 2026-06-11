@@ -180,6 +180,36 @@ describe("POST /api/webhooks/sendillo/capture", () => {
     expect(insertedPayload.headers.authorization).toBeUndefined();
   });
 
+  it("accepts Sendillo capture credentials from the URL path segment", async () => {
+    const response = await POST(
+      new Request("https://sandra.test/api/webhooks/sendillo/capture/capture-secret", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ event: "message.sent", messageId: "msg_path" }),
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    const insertedPayload = insertMock.mock.calls[0]?.[0]?.payload;
+    expect(insertedPayload.url).toBe(
+      "https://sandra.test/api/webhooks/sendillo/capture/[redacted]",
+    );
+  });
+
+  it("rejects the wrong Sendillo capture path credential", async () => {
+    const response = await POST(
+      new Request("https://sandra.test/api/webhooks/sendillo/capture/wrong", {
+        method: "POST",
+        body: "{}",
+      }),
+    );
+
+    expect(response.status).toBe(401);
+    expect(createClientMock).not.toHaveBeenCalled();
+  });
+
   it("redacts auth-bearing headers before storing the capture", async () => {
     await POST(
       new Request("https://sandra.test/api/webhooks/sendillo/capture?secret=nope", {

@@ -105,7 +105,7 @@ export class SendilloMessagingProvider implements MessagingProvider {
   verifyWebhookSignature(
     _rawBody: string,
     headers: Headers,
-    _fullUrl?: string,
+    fullUrl?: string,
   ): boolean {
     if (!this.webhookSecret) return false;
 
@@ -116,6 +116,8 @@ export class SendilloMessagingProvider implements MessagingProvider {
     }
     const explicitHeader = headers.get("x-sendillo-webhook-secret");
     if (explicitHeader) candidates.add(explicitHeader.trim());
+    const querySecret = readQuerySecret(fullUrl, "secret");
+    if (querySecret) candidates.add(querySecret);
 
     for (const candidate of candidates) {
       if (constantTimeEqual(candidate, this.webhookSecret)) return true;
@@ -249,4 +251,13 @@ function constantTimeEqual(left: string, right: string): boolean {
   const rightBuffer = Buffer.from(right);
   if (leftBuffer.length !== rightBuffer.length) return false;
   return timingSafeEqual(leftBuffer, rightBuffer);
+}
+
+function readQuerySecret(fullUrl: string | undefined, key: string): string | null {
+  if (!fullUrl) return null;
+  try {
+    return new URL(fullUrl).searchParams.get(key)?.trim() || null;
+  } catch {
+    return null;
+  }
 }

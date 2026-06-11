@@ -133,7 +133,7 @@ describe("SendilloMessagingProvider inbound contract", () => {
     ).toBe(false);
   });
 
-  it("rejects webhook URL query secrets even when the shared secret is configured", () => {
+  it("accepts the configured shared secret from Sendillo's target URL query", () => {
     const provider = new SendilloMessagingProvider(
       "sendillo-test-key",
       "+18165550000",
@@ -146,7 +146,7 @@ describe("SendilloMessagingProvider inbound contract", () => {
         new Headers(),
         "https://example.test/api/webhooks/sendillo/sms?secret=sendillo-secret",
       ),
-    ).toBe(false);
+    ).toBe(true);
   });
 
   it("accepts a configured shared secret from a header", () => {

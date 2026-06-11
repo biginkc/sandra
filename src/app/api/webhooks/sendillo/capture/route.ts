@@ -61,6 +61,10 @@ function redactUrl(rawUrl: string): string {
   try {
     const url = new URL(rawUrl);
     url.searchParams.delete("secret");
+    url.pathname = url.pathname.replace(
+      /\/api\/webhooks\/sendillo\/capture\/[^/]+$/,
+      "/api/webhooks/sendillo/capture/[redacted]",
+    );
     return url.toString();
   } catch {
     return rawUrl;
@@ -97,6 +101,18 @@ function readCaptureCredential(headers: Headers): string | null {
   return headers.get("x-sendillo-capture-secret")?.trim() ?? null;
 }
 
+function readCapturePathSecret(request: Request): string | null {
+  try {
+    const url = new URL(request.url);
+    const prefix = "/api/webhooks/sendillo/capture/";
+    if (!url.pathname.startsWith(prefix)) return null;
+    const candidate = decodeURIComponent(url.pathname.slice(prefix.length));
+    return candidate && !candidate.includes("/") ? candidate : null;
+  } catch {
+    return null;
+  }
+}
+
 async function authorizeCaptureRequest(request: Request) {
   if (!captureEnabled()) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
@@ -110,7 +126,8 @@ async function authorizeCaptureRequest(request: Request) {
     );
   }
 
-  const providedSecret = readCaptureCredential(request.headers);
+  const providedSecret =
+    readCaptureCredential(request.headers) ?? readCapturePathSecret(request);
   if (!providedSecret || !constantTimeEqual(providedSecret, expectedSecret)) {
     return NextResponse.json({ error: "Invalid secret" }, { status: 401 });
   }
