@@ -1,9 +1,10 @@
 "use server";
 
 import { after } from "next/server";
+import { start } from "workflow/api";
 
 import { isAdminEmail } from "@/lib/auth/allowlist";
-import { runCassEnrichment } from "@/lib/enrichment/cass-job";
+import { cassBulkWorkflow } from "@/workflows/cass-bulk";
 import { parseThreadId } from "@/lib/messages/threading";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
@@ -774,19 +775,17 @@ export async function verifyPropertiesBulk(
       };
     }
 
+    // Chunked workflow, NOT inline enrichment: a single function
+    // invocation dies at the platform's 5-minute ceiling (~1.8K rows),
+    // which is how the 2026-06-11 11,134-row bulk verify stalled. The
+    // workflow reads property_ids back off the job row and processes
+    // them in capped chunks, one invocation each.
     after(async () => {
       try {
-        // Re-create a fresh server client inside `after()` — the outer
-        // request's connection may already be closed by the time the
-        // background callback runs.
-        const bgClient = await createClient();
-        await runCassEnrichment(bgClient, {
-          jobId: job.id,
-          propertyIds,
-        });
+        await start(cassBulkWorkflow, [{ jobId: job.id }]);
       } catch (e) {
         reportError(e, {
-          tags: { surface: "verify_properties_bulk_background" },
+          tags: { surface: "verify_properties_bulk_workflow_start" },
           extra: { jobId: job.id, count: propertyIds.length },
         });
       }

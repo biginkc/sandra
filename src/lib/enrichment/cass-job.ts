@@ -145,39 +145,45 @@ export async function createCassChildJob(
 }
 
 /**
- * Drive the CASS enrichment of one child job to completion. Iterates the
- * given property IDs, calling `verifyPropertyAddress` (cache-through) for
- * each, updating job progress every N rows and setting a final status.
- *
- * Never throws — job failures are absorbed and reflected in
- * `result_summary` / `error_message` so the /jobs page stays truthful.
+ * Flip a CASS job to `running` and stamp the heartbeat. Step 0 of the
+ * chunked enrichment path; also the head of the single-shot wrapper.
  */
-export async function runCassEnrichment(
+export async function beginCassJob(
   supabase: SupabaseClient<Database>,
-  params: {
-    jobId: string;
-    propertyIds: string[];
-  },
-): Promise<CassJobSummary> {
-  const summary: CassJobSummary = {
-    total: params.propertyIds.length,
-    verified: 0,
-    invalid: 0,
-    ambiguous: 0,
-    cacheHits: 0,
-    failed: 0,
-    providerOff: 0,
-  };
-
+  params: { jobId: string; totalItems: number },
+): Promise<void> {
   await supabase
     .from("jobs")
     .update({
       status: "running",
       started_at: new Date().toISOString(),
-      total_items: params.propertyIds.length,
+      total_items: params.totalItems,
       worker_heartbeat_at: new Date().toISOString(),
     })
     .eq("id", params.jobId);
+}
+
+/**
+ * Verify one slice of property IDs, accumulating into (and returning) the
+ * running summary. Progress writes report cumulative counts via
+ * `processedBefore`, so chunked callers (cass-bulk workflow) and the
+ * single-shot wrapper share identical per-row behavior.
+ *
+ * Never throws on per-row outcomes — provider/database row failures are
+ * absorbed into job_items + summary, matching the legacy loop.
+ */
+export async function runCassChunk(
+  supabase: SupabaseClient<Database>,
+  params: {
+    jobId: string;
+    propertyIds: string[];
+    /** Rows already processed by prior chunks (0 for the first chunk). */
+    processedBefore: number;
+    /** Running totals from prior chunks; mutated and returned. */
+    summary: CassJobSummary;
+  },
+): Promise<CassJobSummary> {
+  const { summary } = params;
 
   for (let i = 0; i < params.propertyIds.length; i++) {
     const propertyId = params.propertyIds[i];
@@ -239,7 +245,7 @@ export async function runCassEnrichment(
       await supabase
         .from("jobs")
         .update({
-          processed_items: i + 1,
+          processed_items: params.processedBefore + i + 1,
           succeeded_items: summary.verified + summary.invalid + summary.ambiguous,
           failed_items: summary.failed,
           worker_heartbeat_at: new Date().toISOString(),
@@ -247,6 +253,19 @@ export async function runCassEnrichment(
         .eq("id", params.jobId);
     }
   }
+
+  return summary;
+}
+
+/**
+ * Write the terminal status + result_summary and notify the initiator.
+ * Status rules unchanged from the legacy single-shot loop.
+ */
+export async function finalizeCassJob(
+  supabase: SupabaseClient<Database>,
+  params: { jobId: string; summary: CassJobSummary },
+): Promise<void> {
+  const { summary } = params;
 
   // "failed" status only if every single verification bombed AND at least
   // one real attempt was made. If the provider is off across the board,
@@ -265,7 +284,7 @@ export async function runCassEnrichment(
     .from("jobs")
     .update({
       status,
-      processed_items: params.propertyIds.length,
+      processed_items: summary.total,
       succeeded_items: summary.verified + summary.invalid + summary.ambiguous,
       failed_items: summary.failed,
       completed_at: new Date().toISOString(),
@@ -287,6 +306,52 @@ export async function runCassEnrichment(
       extra: { jobId: params.jobId },
     });
   }
+}
+
+/**
+ * Drive the CASS enrichment of one child job to completion in a SINGLE
+ * invocation: begin → one full-size chunk → finalize.
+ *
+ * ⚠️ Only safe for bounded batches (import auto-trigger, capped by
+ * CASS_AUTOTRIGGER_MAX_ITEMS). Anything user-sized must go through the
+ * cass-bulk workflow (src/workflows/cass-bulk.ts), which chunks the IDs
+ * across separate function invocations — a single invocation dies at the
+ * platform's 5-minute ceiling (~1.8K rows), which is exactly how the
+ * 2026-06-11 11,134-row bulk verify stalled.
+ *
+ * Never throws — job failures are absorbed and reflected in
+ * `result_summary` / `error_message` so the /jobs page stays truthful.
+ */
+export async function runCassEnrichment(
+  supabase: SupabaseClient<Database>,
+  params: {
+    jobId: string;
+    propertyIds: string[];
+  },
+): Promise<CassJobSummary> {
+  const summary: CassJobSummary = {
+    total: params.propertyIds.length,
+    verified: 0,
+    invalid: 0,
+    ambiguous: 0,
+    cacheHits: 0,
+    failed: 0,
+    providerOff: 0,
+  };
+
+  await beginCassJob(supabase, {
+    jobId: params.jobId,
+    totalItems: params.propertyIds.length,
+  });
+
+  await runCassChunk(supabase, {
+    jobId: params.jobId,
+    propertyIds: params.propertyIds,
+    processedBefore: 0,
+    summary,
+  });
+
+  await finalizeCassJob(supabase, { jobId: params.jobId, summary });
 
   return summary;
 }
