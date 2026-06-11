@@ -204,7 +204,7 @@ describe("Create dialer batch server actions", () => {
     expect(created.data.counts).toStrictEqual(preview.data);
   });
 
-  it("createDialerBatchFromFilters honors SELECT_ALL_HARD_CAP=5000 [SANDRA-02, T-1-Cap]", async () => {
+  it("createDialerBatchFromFilters returns all matching rows (select-all cap removed) [SANDRA-02]", async () => {
     const lead = await seedLead({ address: "Dialer Cap Smoke", phone_1: nextPhone() });
 
     const result = await createDialerBatchFromFilters({

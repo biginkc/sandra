@@ -25,8 +25,6 @@ import {
 } from "@/lib/prospects/filter-to-supabase";
 import type { FilterBlock } from "@/lib/prospects/filter-schema";
 
-import { SELECT_ALL_HARD_CAP } from "./prospects-query";
-
 export async function listSmsTemplateCategories(): Promise<
   Result<{ category: string; count: number }[]>
 > {
@@ -592,8 +590,9 @@ export async function createDialerBatchFromFilters(args: {
  *   - search → ILIKE on address
  *   - applyFilters(query, blockStack, supabase)          (Plan 04 translator)
  *
- * Result is capped at SELECT_ALL_HARD_CAP rows so a runaway "select-all 50K"
- * can't accidentally torch skip-trace credits via a downstream bulk action.
+ * Returns every matching row. Credit-spending bulk actions carry their own
+ * guards (skip-trace: MAX_PROPERTIES_PER_JOB server-side + CASS-unverified
+ * filtering), so select-all itself is unbounded.
  */
 export async function getAllMatchingProspectIds(args: {
   search: string | null;
@@ -630,7 +629,7 @@ export async function getAllMatchingProspectIds(args: {
     // Paginate with .range() until a page comes back short to collect all IDs.
     const PAGE = 1000;
     const allIds: string[] = [];
-    for (let from = 0; from < SELECT_ALL_HARD_CAP; from += PAGE) {
+    for (let from = 0; ; from += PAGE) {
       const { data, error } = await query.range(from, from + PAGE - 1);
       if (error) {
         return {
