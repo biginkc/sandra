@@ -19,7 +19,7 @@ import { runSkipTraceEnrichment } from "./skip-trace-job";
  *  Tracerfy (1 credit/lead) and exits, so job size is not a function-
  *  lifetime concern. The remaining guards are the credit-balance check
  *  (refuses overdraft) and Tracerfy's own 10-batches/5-min rate limit. */
-const MAX_PROPERTIES_PER_JOB = 10_000;
+const MAX_PROPERTIES_PER_JOB = 12_000;
 
 /**
  * Server actions for the three skip-trace UI surfaces:
