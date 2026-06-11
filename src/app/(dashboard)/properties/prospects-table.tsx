@@ -430,7 +430,7 @@ export function ProspectsTable({
           `Verifying ${ids.length} address${ids.length === 1 ? "" : "es"} in the background`,
           { description: "Watch progress on /jobs" },
         );
-        setSelected(new Set());
+        onClearAllSelection();
         router.refresh();
       }
     });
@@ -461,7 +461,7 @@ export function ProspectsTable({
             { description: "Admin will approve on /jobs" },
           );
         }
-        setSelected(new Set());
+        onClearAllSelection();
         router.refresh();
       }
     });
@@ -505,7 +505,7 @@ export function ProspectsTable({
             <Button
               variant="ghost"
               size="sm"
-              onClick={() => setSelected(new Set())}
+              onClick={onClearAllSelection}
               disabled={pending}
             >
               Clear
@@ -728,7 +728,7 @@ export function ProspectsTable({
         propertyIds={Array.from(selected)}
         onClose={() => setShowBulkSms(false)}
         onQueued={() => {
-          setSelected(new Set());
+          onClearAllSelection();
           router.refresh();
         }}
       />
