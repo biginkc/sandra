@@ -29,6 +29,19 @@ async function seedContact(phone: string) {
   return data!.id;
 }
 
+async function expectNoMessageOrWebhookReservation(externalId: string) {
+  const { count: messageCount } = await supabase
+    .from("messages")
+    .select("*", { count: "exact", head: true })
+    .eq("external_id", externalId);
+  const { count: eventCount } = await supabase
+    .from("webhook_events")
+    .select("*", { count: "exact", head: true })
+    .eq("external_id", externalId);
+  expect(messageCount).toBe(0);
+  expect(eventCount).toBe(0);
+}
+
 describe("POST /api/webhooks/sendillo/sms (integration)", () => {
   beforeEach(async () => {
     delete process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -90,17 +103,7 @@ describe("POST /api/webhooks/sendillo/sms (integration)", () => {
 
     const res = await POST(req);
     expect(res.status).toBe(401);
-
-    const { count: messageCount } = await supabase
-      .from("messages")
-      .select("*", { count: "exact", head: true })
-      .eq("external_id", "snd_wrong_secret_001");
-    const { count: eventCount } = await supabase
-      .from("webhook_events")
-      .select("*", { count: "exact", head: true })
-      .eq("external_id", "snd_wrong_secret_001");
-    expect(messageCount).toBe(0);
-    expect(eventCount).toBe(0);
+    await expectNoMessageOrWebhookReservation("snd_wrong_secret_001");
   });
 
   it("rejects the wrong Sendillo header secret without reserving the webhook", async () => {
@@ -123,17 +126,7 @@ describe("POST /api/webhooks/sendillo/sms (integration)", () => {
 
     const res = await POST(req);
     expect(res.status).toBe(401);
-
-    const { count: messageCount } = await supabase
-      .from("messages")
-      .select("*", { count: "exact", head: true })
-      .eq("external_id", "snd_wrong_secret_002");
-    const { count: eventCount } = await supabase
-      .from("webhook_events")
-      .select("*", { count: "exact", head: true })
-      .eq("external_id", "snd_wrong_secret_002");
-    expect(messageCount).toBe(0);
-    expect(eventCount).toBe(0);
+    await expectNoMessageOrWebhookReservation("snd_wrong_secret_002");
   });
 
   it("accepts the shared secret from Sendillo's target URL query", async () => {
