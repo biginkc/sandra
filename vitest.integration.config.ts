@@ -1,6 +1,7 @@
 import { defineConfig } from "vitest/config";
-import fs from "node:fs";
 import path from "node:path";
+
+import { loadTestEnv } from "./tests/integration/env";
 
 /**
  * Integration suite — hits the `sandra-crm-test` Supabase project (a real
@@ -9,32 +10,10 @@ import path from "node:path";
  * test:integration`, not on the pre-commit hook (would be too slow and
  * requires network + creds).
  *
- * Env is loaded from `.env.test.local` via a minimal parser so we don't
+ * Env is loaded from `.env.test.local` via the minimal parser in
+ * `tests/integration/env.ts` (shared with the global setup) so we don't
  * pull in `dotenv` just for this.
  */
-function loadTestEnv(): Record<string, string> {
-  const filepath = path.resolve(__dirname, ".env.test.local");
-  if (!fs.existsSync(filepath)) return {};
-  const raw = fs.readFileSync(filepath, "utf8");
-  const out: Record<string, string> = {};
-  for (const line of raw.split(/\r?\n/)) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith("#")) continue;
-    const eq = trimmed.indexOf("=");
-    if (eq < 0) continue;
-    const k = trimmed.slice(0, eq).trim();
-    let v = trimmed.slice(eq + 1).trim();
-    // Strip surrounding quotes if present.
-    if (
-      (v.startsWith('"') && v.endsWith('"')) ||
-      (v.startsWith("'") && v.endsWith("'"))
-    ) {
-      v = v.slice(1, -1);
-    }
-    out[k] = v;
-  }
-  return out;
-}
 
 const env = loadTestEnv();
 
@@ -48,6 +27,10 @@ export default defineConfig({
     ],
     environment: "node",
     reporters: ["default"],
+    // Cross-process mutex: a Postgres advisory lock so only one
+    // integration run truncates the shared test DB at a time — covers
+    // other worktrees, agents, and machines, which a lockfile can't.
+    globalSetup: ["./tests/integration/global-setup.ts"],
     // Real DB calls — 30s per test covers a reset + a few inserts + a
     // query with comfortable headroom.
     testTimeout: 30000,
