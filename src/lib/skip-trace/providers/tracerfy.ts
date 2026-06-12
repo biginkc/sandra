@@ -371,11 +371,13 @@ export function mapBatchRow(row: TracerfyBatchRow): SkipTraceResult {
           zip: row.mail_zip ?? null,
         }
       : null;
-  // Flat rows carry no `hit` boolean — any extracted person counts as a
-  // hit. A name-only row (no phones/emails) still carries owner identity
-  // worth persisting; downgrading it to no_match would silently drop the
-  // enrichment (Codex review finding on PR #252).
-  const hit = !!row.hit || persons.length > 0;
+  // Respect a provider-declared `hit` when the field is present
+  // (lookup-style rows) — overriding an explicit hit:false would promote
+  // provider-declared misses to matches. Flat advanced-mode rows carry
+  // no `hit` field at all; there, any extracted person counts as a hit —
+  // a name-only row still carries owner identity worth persisting
+  // (both from Codex review on PR #252).
+  const hit = "hit" in row ? !!row.hit : persons.length > 0;
   return {
     // Tracerfy doesn't reliably round-trip external_id, so we treat
     // this as a hint at best — finalize matches via matchedAddress.

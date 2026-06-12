@@ -444,6 +444,35 @@ describe("TracerfyProvider — pollBatch", () => {
     expect(result![0].persons[0].phones).toHaveLength(0);
   });
 
+  it("respects provider-declared hit=false on nested-persons rows", async () => {
+    // The persons-derived hit fallback applies ONLY when the row carries
+    // no `hit` field (flat shape). An explicit provider hit:false must
+    // not be promoted to a match (Codex re-review finding on PR #252).
+    mockFetch({
+      status: 200,
+      body: [
+        {
+          address: "3 Declared Miss Ln",
+          city: "KC",
+          state: "MO",
+          hit: false,
+          credits_deducted: 0,
+          persons: [
+            {
+              first_name: "Ghost",
+              last_name: "Record",
+              phones: [],
+              emails: [],
+            },
+          ],
+        },
+      ],
+    });
+    const p = new TracerfyProvider("k");
+    const result = await p.pollBatch("42");
+    expect(result![0].hit).toBe(false);
+  });
+
   it("flat row with no owner data at all maps to hit=false, no persons", async () => {
     mockFetch({
       status: 200,
