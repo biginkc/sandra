@@ -29,7 +29,30 @@ export type Thread = {
    *  `computeConsentState` on the latest consent_events for the contact.
    *  The inbox uses this to drive the DNC toggle (hidden by default). */
   isOptedOut: boolean;
+  /** True when the thread belongs to Jitter test infrastructure (canary /
+   *  rehearsal contacts and synthetic addresses). Hidden by the same
+   *  inbox toggle as DNC — both are noise, one switch. */
+  isTestTraffic: boolean;
 };
+
+/** Match Jitter's test-fixture CONTRACT precisely, not generic human
+ *  text. Fixtures always present as one of:
+ *   - contact "Canary CANARY-<TYPE>-<ts>" (first name literally Canary,
+ *     last name a CANARY- token) — matched as a name PREFIX
+ *   - synthetic address starting "Jitter " or "JITTER-" ("Jitter Canary
+ *     … Golden Path Ln", "Jitter Rehearsal …", "JITTER-SANDRA-V1 …")
+ *  A homeowner on "123 Canary Ln", a seller surnamed Canary, or a
+ *  "Jitterbug Dr" address never matches — those are substrings, not
+ *  prefixes of the fixture shapes. */
+export function looksLikeTestTraffic(
+  contactName: string | null,
+  propertyAddress: string | null,
+): boolean {
+  const name = (contactName ?? "").trim().toLowerCase();
+  if (name.startsWith("canary canary-")) return true;
+  const address = (propertyAddress ?? "").trim().toLowerCase();
+  return address.startsWith("jitter ") || address.startsWith("jitter-");
+}
 
 export type ListThreadsOpts = {
   /** Window for "active" conversations. Defaults to 90 days. */
@@ -188,6 +211,13 @@ export async function listThreads(
       needsHumanAttention: p?.needs_human_attention ?? false,
       escalationReason: p?.last_ai_escalation_reason ?? null,
       isOptedOut: consentState === "opted_out",
+      isTestTraffic: looksLikeTestTraffic(
+        c
+          ? (c.entity_name ??
+            ([c.first_name, c.last_name].filter(Boolean).join(" ") || null))
+          : null,
+        p ? [p.address, p.city, p.state].filter(Boolean).join(", ") : null,
+      ),
     });
   }
 

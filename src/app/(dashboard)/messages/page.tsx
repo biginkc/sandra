@@ -175,14 +175,15 @@ export default async function MessagesPage({
       ? unknownAll.filter((s) => s.isDismissed)
       : unknownActive;
 
-  // DNC toggle: when on (default), opted-out threads are stripped from the
-  // visible list. Hidden count is reported back to the toggle so the user
-  // sees how many they're filtering out.
-  const hiddenDncCount = hideDnc
-    ? threads.filter((t) => t.isOptedOut).length
-    : 0;
+  // Noise toggle: when on (default), opted-out threads AND Jitter test
+  // traffic (canary/rehearsal fixtures) are stripped from the visible
+  // list — one switch, both kinds of noise (Jarrad, 2026-06-12). Hidden
+  // count reported back to the toggle.
+  const isNoise = (t: (typeof threads)[number]) =>
+    t.isOptedOut || t.isTestTraffic;
+  const hiddenDncCount = hideDnc ? threads.filter(isNoise).length : 0;
   const visibleThreads = hideDnc
-    ? threads.filter((t) => !t.isOptedOut)
+    ? threads.filter((t) => !isNoise(t))
     : threads;
 
   return (
