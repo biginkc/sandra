@@ -12,7 +12,7 @@ import type { Database } from "@/lib/supabase/types";
 import { useThrottledRefresh } from "./use-throttled-refresh";
 
 type Message = Database["public"]["Tables"]["messages"]["Row"];
-type ThreadUpdate = {
+export type ThreadUpdate = {
   lastMessageBody: string;
   lastMessageDirection: Thread["lastMessageDirection"];
   lastMessageAt: string;
@@ -234,7 +234,9 @@ function mergeThreadUpdate(
   };
 }
 
-function applyThreadUpdates(
+/** Exported for tests — must stay order-aligned with the server sort in
+ *  `listThreads` (recency-only) or the list reshuffles on every refresh. */
+export function applyThreadUpdates(
   threads: Thread[],
   updates: Record<string, ThreadUpdate>,
 ): Thread[] {
@@ -252,12 +254,9 @@ function applyThreadUpdates(
     };
   });
 
-  return next.sort((a, b) => {
-    const aUnread = a.unreadCount > 0 ? 1 : 0;
-    const bUnread = b.unreadCount > 0 ? 1 : 0;
-    if (aUnread !== bUnread) return bUnread - aUnread;
-    return b.lastMessageAt.localeCompare(a.lastMessageAt);
-  });
+  // Recency-only, matching the server sort in listThreads — reading a
+  // thread must never reposition it.
+  return next.sort((a, b) => b.lastMessageAt.localeCompare(a.lastMessageAt));
 }
 
 function initialsOfContact(

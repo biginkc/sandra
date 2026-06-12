@@ -79,7 +79,12 @@ export default async function MessagesPage({
   const threadOpts: ListThreadsOpts = {};
   if (filter === "mine" && currentUser) threadOpts.assigneeId = currentUser.id;
   if (filter === "unassigned") threadOpts.unassignedOnly = true;
-  if (filter === "unread") threadOpts.unreadOnly = true;
+  if (filter === "unread") {
+    threadOpts.unreadOnly = true;
+    // Keep the open thread listed even after read-on-open marks it read —
+    // it should only leave the Unread list once the user clicks away.
+    if (selectedThreadId) threadOpts.includeThreadId = selectedThreadId;
+  }
 
   // Fetch everything in parallel. The thread list + unknown active count
   // are needed regardless of which filter is active (badge counts on the

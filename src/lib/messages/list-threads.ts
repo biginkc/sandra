@@ -2,7 +2,11 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { computeConsentState } from "@/lib/messaging/consent";
 import type { Database } from "@/lib/supabase/types";
-import { buildThreadId } from "./threading";
+import {
+  buildThreadId,
+  parseThreadId,
+  type ParsedThreadId,
+} from "./threading";
 
 export type Thread = {
   threadId: string;
@@ -63,6 +67,12 @@ export type ListThreadsOpts = {
   unassignedOnly?: boolean;
   /** When true, returns only threads with at least one unread inbound message. */
   unreadOnly?: boolean;
+  /** Thread id exempt from the `unreadOnly` filter. The cockpit passes the
+   *  currently open thread so read-on-open doesn't yank it out of the
+   *  Unread list while the user is still looking at it. Accepts any of the
+   *  URL formats (conversation UUID, `legacy:contact:property`, bare
+   *  contact id) — matching is by parsed identity, not raw string. */
+  includeThreadId?: string;
 };
 
 /**
@@ -176,6 +186,41 @@ export async function listThreads(
     consentEventsByContact.set(ev.contact_id, list);
   }
 
+  // Resolve the pin the same way fetchInboxDetail resolves the URL param:
+  // conversation first, then bare-contact fallback. Real contact ids are
+  // UUID-shaped, so a stale `?thread=<contactId>` link parses as
+  // "conversation" — if no message in the window carries that
+  // conversation id, retry it as a contact id (Codex round-3 on PR #268).
+  let pinned = opts.includeThreadId
+    ? parseThreadId(opts.includeThreadId)
+    : null;
+  if (pinned?.kind === "conversation") {
+    const pinnedConversationId = pinned.conversationId;
+    const conversationExists = msgs.some(
+      (m) => m.conversation_id === pinnedConversationId,
+    );
+    if (!conversationExists) {
+      pinned = { kind: "contact", contactId: pinnedConversationId };
+    }
+  }
+  if (pinned?.kind === "contact") {
+    // Bare contact ids are ambiguous when the contact has several threads.
+    // Pin only the thread holding the contact's most recent message (msgs
+    // is ordered created_at desc), not every thread the contact appears
+    // in (Codex round-2 on PR #268).
+    const pinnedContactId = pinned.contactId;
+    const latest = msgs.find((m) => m.contact_id === pinnedContactId);
+    pinned = latest
+      ? parseThreadId(
+          buildThreadId(
+            latest.conversation_id,
+            pinnedContactId,
+            latest.property_id,
+          ),
+        )
+      : null;
+  }
+
   const threads: Thread[] = [];
   for (const [threadId, bucket] of byThread) {
     const contactId = bucket.latest.contact_id!;
@@ -184,7 +229,12 @@ export async function listThreads(
 
     if (opts.assigneeId && p?.assigned_user_id !== opts.assigneeId) continue;
     if (opts.unassignedOnly && p?.assigned_user_id) continue;
-    if (opts.unreadOnly && bucket.unreadCount === 0) continue;
+    if (
+      opts.unreadOnly &&
+      bucket.unreadCount === 0 &&
+      !(pinned !== null && matchesPinnedThread(pinned, threadId, bucket))
+    )
+      continue;
 
     const consentState = computeConsentState(
       consentEventsByContact.get(contactId) ?? [],
@@ -221,16 +271,45 @@ export async function listThreads(
     });
   }
 
-  // Sort: unread threads bubble to the top regardless of recency, then
-  // most-recent first within each group. Per feedback-f E2a — anything
-  // with unread inbound demands attention before everything else.
-  threads.sort((a, b) => {
-    const aUnread = a.unreadCount > 0 ? 1 : 0;
-    const bUnread = b.unreadCount > 0 ? 1 : 0;
-    if (aUnread !== bUnread) return bUnread - aUnread;
-    return b.lastMessageAt.localeCompare(a.lastMessageAt);
-  });
+  // Sort: most-recent first, full stop. Rows move only when a new message
+  // arrives — reading a thread must never reposition it. This retires the
+  // feedback-f E2a unread-first bubbling; the dedicated Unread chip is now
+  // the "what needs attention" view.
+  threads.sort((a, b) => b.lastMessageAt.localeCompare(a.lastMessageAt));
   return threads;
+}
+
+/**
+ * True when a thread bucket is the one the cockpit pinned via
+ * `includeThreadId`. Compares parsed identity rather than raw strings:
+ * the URL can carry a stale format (legacy key or bare contact id) for a
+ * thread that is now grouped under a conversation UUID, and an exact
+ * string compare would silently drop the pin (Codex P1 on PR #268).
+ */
+function matchesPinnedThread(
+  pinned: ParsedThreadId,
+  threadId: string,
+  bucket: {
+    latest: { contact_id: string | null; conversation_id: string | null };
+    propertyId: string | null;
+  },
+): boolean {
+  switch (pinned.kind) {
+    case "conversation":
+      return (
+        threadId === pinned.conversationId ||
+        bucket.latest.conversation_id === pinned.conversationId
+      );
+    case "legacy":
+      return (
+        bucket.latest.contact_id === pinned.contactId &&
+        (bucket.propertyId ?? null) === pinned.propertyId
+      );
+    case "contact":
+      // Unreachable in practice — listThreads normalizes bare contact ids
+      // to a concrete thread before matching. Kept for exhaustiveness.
+      return bucket.latest.contact_id === pinned.contactId;
+  }
 }
 
 /**
