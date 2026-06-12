@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { reportError } from "@/lib/errors/report";
+import { recordConsentEvent } from "@/lib/messaging/consent";
 
 import {
   authenticateJitterWriteback,
@@ -224,6 +225,53 @@ async function syncCallbackTask(serviceClient: any, body: WritebackBody, validat
   return { ok: true as const, taskId: task?.id as string };
 }
 
+async function applyDoNotCallOptOut(
+  serviceClient: any,
+  body: WritebackBody,
+  attemptId: string,
+) {
+  if (body.do_not_call_requested !== true) return;
+
+  // By this point validateOrgConsistency has resolved contact_id (deriving
+  // it from dialer_batch_item_id if needed) or already returned 422.
+  const contactId = body.contact_id!;
+  const occurredAt = validTimestamp(body.ended_at);
+
+  try {
+    await recordConsentEvent(serviceClient, {
+      contactId,
+      channel: "voice",
+      eventType: "opt_out",
+      source: "jitter_writeback",
+      sourceDetail: {
+        disposition: body.disposition ?? null,
+        jitter_session_id: body.jitter_session_id ?? null,
+      },
+      occurredAt: occurredAt ? new Date(occurredAt) : new Date(),
+      // attemptId → source_external_id; the partial unique index on
+      // (contact_id, channel, event_type, source, source_external_id)
+      // keeps writeback replays from duplicating the audit row.
+      idempotencyKey: attemptId,
+    });
+  } catch (e) {
+    // Compliance enforcement beats audit perfection: if the audit insert
+    // fails, still flip the do-not-contact bit and stop future outreach
+    // rather than 500ing the writeback.
+    reportError(e, {
+      tags: { surface: "jitter_call_activity_writeback_dnc_consent" },
+      extra: { contactId, attemptId },
+    });
+  }
+
+  // Enforced, not best-effort: if this fails the route must 500 so
+  // Jitter's bounded writeback retry replays the request.
+  const { error } = await serviceClient
+    .from("contacts")
+    .update({ do_not_contact: true })
+    .eq("id", contactId);
+  if (error) throw error;
+}
+
 export async function PUT(
   request: Request,
   context: RouteContext,
@@ -244,6 +292,11 @@ export async function PUT(
 
     const callbackTask = await syncCallbackTask(auth.serviceClient as any, body, validation);
     if (callbackTask && !callbackTask.ok) return callbackTask.response;
+
+    // Must run BEFORE checkAndRecordIdempotency: the idempotency record is
+    // written before processing, so anything after it that throws would be
+    // skipped (cached) on Jitter's retry and never replayed.
+    await applyDoNotCallOptOut(auth.serviceClient as any, body, attemptId);
 
     const idempotency = await checkAndRecordIdempotency(auth.serviceClient, {
       orgId: auth.orgId,

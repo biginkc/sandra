@@ -344,6 +344,152 @@ describe("internal.jitter.call-activities writeback PUT", () => {
     });
   });
 
+  it("sets do_not_contact and records a voice opt-out consent event on DNC writeback", async () => {
+    const seeded = await seedDialerBatch(testClient);
+    const attemptId = `attempt-${crypto.randomUUID()}`;
+    const response = await PUT(
+      jsonRequest(
+        `https://sandra.test/api/internal/jitter/call-activities/by-jitter-attempt/${attemptId}`,
+        "PUT",
+        {
+          ...writebackBody(seeded),
+          disposition: "dnc_request",
+          do_not_call_requested: true,
+        },
+        { "idempotency-key": "activity-dnc" },
+      ),
+      attemptContext(attemptId),
+    );
+
+    expect(response.status).toBe(200);
+
+    const { data: contact } = await testClient
+      .from("contacts")
+      .select("do_not_contact")
+      .eq("id", seeded.contactId)
+      .single();
+    expect(contact?.do_not_contact).toBe(true);
+
+    // (testClient as any): generated DB types predate the
+    // consent_events.source_external_id column added in migration 071.
+    const { data: events } = await (testClient as any)
+      .from("consent_events")
+      .select("channel, event_type, source, source_detail, source_external_id")
+      .eq("contact_id", seeded.contactId);
+    expect(events).toHaveLength(1);
+    expect(events![0]).toMatchObject({
+      channel: "voice",
+      event_type: "opt_out",
+      source: "jitter_writeback",
+      source_external_id: attemptId,
+    });
+    expect(events![0].source_detail).toMatchObject({
+      disposition: "dnc_request",
+      jitter_session_id: "session-activity",
+    });
+  });
+
+  it("keeps exactly one consent event when a DNC writeback is replayed", async () => {
+    const seeded = await seedDialerBatch(testClient);
+    const attemptId = `attempt-${crypto.randomUUID()}`;
+    const requestUrl = `https://sandra.test/api/internal/jitter/call-activities/by-jitter-attempt/${attemptId}`;
+    const body = {
+      ...writebackBody(seeded),
+      disposition: "dnc_request",
+      do_not_call_requested: true,
+    };
+
+    const first = await PUT(
+      jsonRequest(requestUrl, "PUT", body, { "idempotency-key": "activity-dnc-replay-1" }),
+      attemptContext(attemptId),
+    );
+    const replay = await PUT(
+      jsonRequest(requestUrl, "PUT", body, { "idempotency-key": "activity-dnc-replay-2" }),
+      attemptContext(attemptId),
+    );
+
+    expect(first.status).toBe(200);
+    expect(replay.status).toBe(200);
+
+    const { data: events } = await testClient
+      .from("consent_events")
+      .select("id")
+      .eq("contact_id", seeded.contactId);
+    expect(events).toHaveLength(1);
+
+    const { data: contact } = await testClient
+      .from("contacts")
+      .select("do_not_contact")
+      .eq("id", seeded.contactId)
+      .single();
+    expect(contact?.do_not_contact).toBe(true);
+  });
+
+  it("leaves consent and do_not_contact untouched when do_not_call_requested is false", async () => {
+    const seeded = await seedDialerBatch(testClient);
+    const attemptId = `attempt-${crypto.randomUUID()}`;
+    const response = await PUT(
+      jsonRequest(
+        `https://sandra.test/api/internal/jitter/call-activities/by-jitter-attempt/${attemptId}`,
+        "PUT",
+        { ...writebackBody(seeded), do_not_call_requested: false },
+        { "idempotency-key": "activity-no-dnc" },
+      ),
+      attemptContext(attemptId),
+    );
+
+    expect(response.status).toBe(200);
+
+    const { data: contact } = await testClient
+      .from("contacts")
+      .select("do_not_contact")
+      .eq("id", seeded.contactId)
+      .single();
+    expect(contact?.do_not_contact).toBe(false);
+
+    const { data: events } = await testClient
+      .from("consent_events")
+      .select("id")
+      .eq("contact_id", seeded.contactId);
+    expect(events).toHaveLength(0);
+  });
+
+  it("sets do_not_contact on the contact derived from dialer_batch_item_id", async () => {
+    const seeded = await seedDialerBatch(testClient);
+    const attemptId = `attempt-${crypto.randomUUID()}`;
+    const response = await PUT(
+      jsonRequest(
+        `https://sandra.test/api/internal/jitter/call-activities/by-jitter-attempt/${attemptId}`,
+        "PUT",
+        {
+          dialer_batch_item_id: seeded.itemId,
+          jitter_session_id: "session-activity",
+          provider: "jitter",
+          outcome: "connected_human",
+          disposition: "dnc_request",
+          do_not_call_requested: true,
+        },
+        { "idempotency-key": "activity-dnc-derived" },
+      ),
+      attemptContext(attemptId),
+    );
+
+    expect(response.status).toBe(200);
+
+    const { data: contact } = await testClient
+      .from("contacts")
+      .select("do_not_contact")
+      .eq("id", seeded.contactId)
+      .single();
+    expect(contact?.do_not_contact).toBe(true);
+
+    const { data: events } = await testClient
+      .from("consent_events")
+      .select("channel, event_type, source")
+      .eq("contact_id", seeded.contactId);
+    expect(events).toHaveLength(1);
+  });
+
   it("returns 422 when org_id mismatches the property", async () => {
     const seeded = await seedDialerBatch(testClient);
     const attemptId = `attempt-${crypto.randomUUID()}`;
