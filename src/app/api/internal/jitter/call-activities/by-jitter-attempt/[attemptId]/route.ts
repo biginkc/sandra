@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { reportError } from "@/lib/errors/report";
+import { recordConsentEvent } from "@/lib/messaging/consent";
 
 import {
   authenticateJitterWriteback,
@@ -45,6 +46,10 @@ function unprocessable(error_code: string, field?: string) {
     { error: "validation_error", error_code, ...(field ? { field } : {}) },
     { status: 422 },
   );
+}
+
+function forbidden(error_code: string) {
+  return NextResponse.json({ error: "forbidden", error_code }, { status: 403 });
 }
 
 async function validateOrgConsistency(serviceClient: any, body: WritebackBody) {
@@ -224,6 +229,51 @@ async function syncCallbackTask(serviceClient: any, body: WritebackBody, validat
   return { ok: true as const, taskId: task?.id as string };
 }
 
+async function applyDoNotCallOptOut(
+  serviceClient: any,
+  body: WritebackBody,
+  attemptId: string,
+) {
+  if (body.do_not_call_requested !== true) return;
+
+  // By this point validateOrgConsistency has resolved contact_id (deriving
+  // it from dialer_batch_item_id if needed) or already returned 422.
+  const contactId = body.contact_id!;
+  const occurredAt = validTimestamp(body.ended_at);
+
+  // Deliberately NOT wrapped in try/catch: recordConsentEvent already
+  // handles duplicates internally (externalId pre-lookup + unique-index
+  // conflict detection), so any error that escapes it is a real failure.
+  // Swallowing it would return 200 — Jitter stops retrying and the contact
+  // is flagged with no audit row. Let it throw: the route 500s and Jitter's
+  // bounded writeback retry replays this fully replay-safe helper. (The
+  // "best-effort audit" precedent in inbound.ts doesn't apply here —
+  // inbound SMS senders don't retry; Jitter does.)
+  await recordConsentEvent(serviceClient, {
+    contactId,
+    channel: "voice",
+    eventType: "opt_out",
+    source: "jitter_writeback",
+    sourceDetail: {
+      disposition: body.disposition ?? null,
+      jitter_session_id: body.jitter_session_id ?? null,
+    },
+    occurredAt: occurredAt ? new Date(occurredAt) : new Date(),
+    // attemptId → source_external_id; the partial unique index on
+    // (contact_id, channel, event_type, source, source_external_id)
+    // keeps writeback replays from duplicating the audit row.
+    idempotencyKey: attemptId,
+  });
+
+  // Also enforced: if this fails the route must 500 so Jitter's bounded
+  // writeback retry replays the request.
+  const { error } = await serviceClient
+    .from("contacts")
+    .update({ do_not_contact: true })
+    .eq("id", contactId);
+  if (error) throw error;
+}
+
 export async function PUT(
   request: Request,
   context: RouteContext,
@@ -242,8 +292,23 @@ export async function PUT(
     const validation = await validateOrgConsistency(auth.serviceClient as any, body);
     if (!validation.ok) return validation.response;
 
+    // Tenant isolation: validateOrgConsistency only proves the body ids are
+    // internally consistent with body.org_id — it never compares against the
+    // AUTHENTICATED consumer's org. The writes below use the service-role
+    // client, so without this check an org-A token could submit org-B ids
+    // and mutate org-B rows (call_activities, contacts.do_not_contact,
+    // consent_events).
+    if (body.org_id !== auth.orgId) {
+      return forbidden("org_consumer_mismatch");
+    }
+
     const callbackTask = await syncCallbackTask(auth.serviceClient as any, body, validation);
     if (callbackTask && !callbackTask.ok) return callbackTask.response;
+
+    // Must run BEFORE checkAndRecordIdempotency: the idempotency record is
+    // written before processing, so anything after it that throws would be
+    // skipped (cached) on Jitter's retry and never replayed.
+    await applyDoNotCallOptOut(auth.serviceClient as any, body, attemptId);
 
     const idempotency = await checkAndRecordIdempotency(auth.serviceClient, {
       orgId: auth.orgId,
@@ -279,7 +344,9 @@ export async function PUT(
           error_message: body.error_message ?? null,
           raw_event_count: 1,
         },
-        { onConflict: "provider,jitter_attempt_id" },
+        // Org-scoped (migration 075): a colliding attemptId from another
+        // org inserts its own row instead of overwriting the existing one.
+        { onConflict: "org_id,provider,jitter_attempt_id" },
       )
       .select("id, org_id, property_id, contact_id, dialer_batch_item_id, jitter_attempt_id, provider, outcome")
       .single();

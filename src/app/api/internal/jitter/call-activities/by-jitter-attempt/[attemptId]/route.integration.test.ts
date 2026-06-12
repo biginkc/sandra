@@ -1,13 +1,21 @@
+import { createHmac } from "node:crypto";
+
 import { beforeEach, describe, expect, it } from "vitest";
 
 import { createTestClient } from "@tests/integration/client";
-import { BMH_ORG_ID, createOrgUser } from "@tests/integration/fixtures/multi-user";
+import {
+  BMH_ORG_ID,
+  TEST_ORG_B_ID,
+  createOrgUser,
+} from "@tests/integration/fixtures/multi-user";
 
 import {
   authHeaders,
+  hashSecret,
   jsonRequest,
   resetJitterIntegration,
   seedDialerBatch,
+  seedDialerLead,
 } from "../../../_lib/test-helpers.integration";
 import { PUT } from "./route";
 
@@ -342,6 +350,279 @@ describe("internal.jitter.call-activities writeback PUT", () => {
     await expect(response.json()).resolves.toMatchObject({
       error_code: "property_deleted",
     });
+  });
+
+  it("returns 403 and writes nothing when the body org differs from the authenticated consumer org", async () => {
+    // The seeded webhook consumer belongs to BMH_ORG_ID (webhook_consumers
+    // org_id default). Submit internally-consistent org-B ids with that
+    // org-A token — the route must refuse to touch org B.
+    const otherOrgLead = await seedDialerLead(testClient, { org_id: TEST_ORG_B_ID });
+    const attemptId = `attempt-${crypto.randomUUID()}`;
+    const response = await PUT(
+      jsonRequest(
+        `https://sandra.test/api/internal/jitter/call-activities/by-jitter-attempt/${attemptId}`,
+        "PUT",
+        {
+          org_id: otherOrgLead.orgId,
+          property_id: otherOrgLead.propertyId,
+          contact_id: otherOrgLead.contactId,
+          jitter_session_id: "session-activity",
+          provider: "jitter",
+          outcome: "connected_human",
+          disposition: "dnc_request",
+          do_not_call_requested: true,
+        },
+        { "idempotency-key": "activity-cross-org" },
+      ),
+      attemptContext(attemptId),
+    );
+
+    expect(response.status).toBe(403);
+    await expect(response.json()).resolves.toMatchObject({
+      error: "forbidden",
+      error_code: "org_consumer_mismatch",
+    });
+
+    const { data: activities } = await (testClient as any)
+      .from("call_activities")
+      .select("id")
+      .eq("jitter_attempt_id", attemptId);
+    expect(activities).toHaveLength(0);
+
+    const { data: contact } = await testClient
+      .from("contacts")
+      .select("do_not_contact")
+      .eq("id", otherOrgLead.contactId)
+      .single();
+    expect(contact?.do_not_contact).toBe(false);
+
+    const { data: events } = await testClient
+      .from("consent_events")
+      .select("id")
+      .eq("contact_id", otherOrgLead.contactId);
+    expect(events).toHaveLength(0);
+  });
+
+  it("creates a separate org-B row when the same attemptId arrives from another org's consumer", async () => {
+    const seeded = await seedDialerBatch(testClient);
+    const attemptId = `attempt-${crypto.randomUUID()}`;
+    const requestUrl = `https://sandra.test/api/internal/jitter/call-activities/by-jitter-attempt/${attemptId}`;
+
+    const first = await PUT(
+      jsonRequest(requestUrl, "PUT", writebackBody(seeded), {
+        "idempotency-key": "activity-collide-org-a",
+      }),
+      attemptContext(attemptId),
+    );
+    expect(first.status).toBe(200);
+    const firstJson = (await first.json()) as any;
+
+    // Second writeback consumer authenticated for org B (mirrors the BMH
+    // consumer seeded by resetJitterIntegration).
+    const ORG_B_TOKEN = "jitter-route-integration-token-org-b";
+    const { error: consumerError } = await (testClient as any)
+      .from("webhook_consumers")
+      .insert({
+        consumer_type: "jitter_writeback",
+        name: "jitter-route-tests-org-b",
+        secret_hash: hashSecret(ORG_B_TOKEN),
+        enabled: true,
+        org_id: TEST_ORG_B_ID,
+      });
+    expect(consumerError).toBeNull();
+
+    const orgBLead = await seedDialerLead(testClient, { org_id: TEST_ORG_B_ID });
+    const orgBBody = JSON.stringify({
+      org_id: orgBLead.orgId,
+      property_id: orgBLead.propertyId,
+      contact_id: orgBLead.contactId,
+      jitter_session_id: "session-activity-org-b",
+      provider: "jitter",
+      outcome: "voicemail",
+    });
+    const second = await PUT(
+      new Request(requestUrl, {
+        method: "PUT",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${ORG_B_TOKEN}`,
+          "x-sandra-signature":
+            "sha256=" + createHmac("sha256", ORG_B_TOKEN).update(orgBBody).digest("hex"),
+          "idempotency-key": "activity-collide-org-b",
+        },
+        body: orgBBody,
+      }),
+      attemptContext(attemptId),
+    );
+
+    expect(second.status).toBe(200);
+    const secondJson = (await second.json()) as any;
+    expect(secondJson.call_activity.id).not.toBe(firstJson.call_activity.id);
+    expect(secondJson.call_activity).toMatchObject({
+      org_id: TEST_ORG_B_ID,
+      jitter_attempt_id: attemptId,
+      outcome: "voicemail",
+    });
+
+    // Org A's original row is unchanged by the colliding writeback.
+    const { data: original } = await (testClient as any)
+      .from("call_activities")
+      .select("org_id, property_id, contact_id, outcome, jitter_attempt_id")
+      .eq("id", firstJson.call_activity.id)
+      .single();
+    expect(original).toMatchObject({
+      org_id: BMH_ORG_ID,
+      property_id: seeded.propertyId,
+      contact_id: seeded.contactId,
+      outcome: "connected_human",
+      jitter_attempt_id: attemptId,
+    });
+  });
+
+  it("sets do_not_contact and records a voice opt-out consent event on DNC writeback", async () => {
+    const seeded = await seedDialerBatch(testClient);
+    const attemptId = `attempt-${crypto.randomUUID()}`;
+    const response = await PUT(
+      jsonRequest(
+        `https://sandra.test/api/internal/jitter/call-activities/by-jitter-attempt/${attemptId}`,
+        "PUT",
+        {
+          ...writebackBody(seeded),
+          disposition: "dnc_request",
+          do_not_call_requested: true,
+        },
+        { "idempotency-key": "activity-dnc" },
+      ),
+      attemptContext(attemptId),
+    );
+
+    expect(response.status).toBe(200);
+
+    const { data: contact } = await testClient
+      .from("contacts")
+      .select("do_not_contact")
+      .eq("id", seeded.contactId)
+      .single();
+    expect(contact?.do_not_contact).toBe(true);
+
+    // (testClient as any): generated DB types predate the
+    // consent_events.source_external_id column added in migration 071.
+    const { data: events } = await (testClient as any)
+      .from("consent_events")
+      .select("channel, event_type, source, source_detail, source_external_id")
+      .eq("contact_id", seeded.contactId);
+    expect(events).toHaveLength(1);
+    expect(events![0]).toMatchObject({
+      channel: "voice",
+      event_type: "opt_out",
+      source: "jitter_writeback",
+      source_external_id: attemptId,
+    });
+    expect(events![0].source_detail).toMatchObject({
+      disposition: "dnc_request",
+      jitter_session_id: "session-activity",
+    });
+  });
+
+  it("keeps exactly one consent event when a DNC writeback is replayed", async () => {
+    const seeded = await seedDialerBatch(testClient);
+    const attemptId = `attempt-${crypto.randomUUID()}`;
+    const requestUrl = `https://sandra.test/api/internal/jitter/call-activities/by-jitter-attempt/${attemptId}`;
+    const body = {
+      ...writebackBody(seeded),
+      disposition: "dnc_request",
+      do_not_call_requested: true,
+    };
+
+    const first = await PUT(
+      jsonRequest(requestUrl, "PUT", body, { "idempotency-key": "activity-dnc-replay-1" }),
+      attemptContext(attemptId),
+    );
+    const replay = await PUT(
+      jsonRequest(requestUrl, "PUT", body, { "idempotency-key": "activity-dnc-replay-2" }),
+      attemptContext(attemptId),
+    );
+
+    expect(first.status).toBe(200);
+    expect(replay.status).toBe(200);
+
+    const { data: events } = await testClient
+      .from("consent_events")
+      .select("id")
+      .eq("contact_id", seeded.contactId);
+    expect(events).toHaveLength(1);
+
+    const { data: contact } = await testClient
+      .from("contacts")
+      .select("do_not_contact")
+      .eq("id", seeded.contactId)
+      .single();
+    expect(contact?.do_not_contact).toBe(true);
+  });
+
+  it("leaves consent and do_not_contact untouched when do_not_call_requested is false", async () => {
+    const seeded = await seedDialerBatch(testClient);
+    const attemptId = `attempt-${crypto.randomUUID()}`;
+    const response = await PUT(
+      jsonRequest(
+        `https://sandra.test/api/internal/jitter/call-activities/by-jitter-attempt/${attemptId}`,
+        "PUT",
+        { ...writebackBody(seeded), do_not_call_requested: false },
+        { "idempotency-key": "activity-no-dnc" },
+      ),
+      attemptContext(attemptId),
+    );
+
+    expect(response.status).toBe(200);
+
+    const { data: contact } = await testClient
+      .from("contacts")
+      .select("do_not_contact")
+      .eq("id", seeded.contactId)
+      .single();
+    expect(contact?.do_not_contact).toBe(false);
+
+    const { data: events } = await testClient
+      .from("consent_events")
+      .select("id")
+      .eq("contact_id", seeded.contactId);
+    expect(events).toHaveLength(0);
+  });
+
+  it("sets do_not_contact on the contact derived from dialer_batch_item_id", async () => {
+    const seeded = await seedDialerBatch(testClient);
+    const attemptId = `attempt-${crypto.randomUUID()}`;
+    const response = await PUT(
+      jsonRequest(
+        `https://sandra.test/api/internal/jitter/call-activities/by-jitter-attempt/${attemptId}`,
+        "PUT",
+        {
+          dialer_batch_item_id: seeded.itemId,
+          jitter_session_id: "session-activity",
+          provider: "jitter",
+          outcome: "connected_human",
+          disposition: "dnc_request",
+          do_not_call_requested: true,
+        },
+        { "idempotency-key": "activity-dnc-derived" },
+      ),
+      attemptContext(attemptId),
+    );
+
+    expect(response.status).toBe(200);
+
+    const { data: contact } = await testClient
+      .from("contacts")
+      .select("do_not_contact")
+      .eq("id", seeded.contactId)
+      .single();
+    expect(contact?.do_not_contact).toBe(true);
+
+    const { data: events } = await testClient
+      .from("consent_events")
+      .select("channel, event_type, source")
+      .eq("contact_id", seeded.contactId);
+    expect(events).toHaveLength(1);
   });
 
   it("returns 422 when org_id mismatches the property", async () => {
