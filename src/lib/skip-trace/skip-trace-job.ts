@@ -390,13 +390,114 @@ export async function finalizeSkipTraceFromBatch(
   } catch (e) {
     // Give the job back so the next sweep tick can re-claim and retry —
     // a crashed finalizer must not strand the job in 'finalizing'.
-    await supabase
-      .from("jobs")
-      .update({ status: "running" })
-      .eq("id", params.jobId)
-      .eq("status", "finalizing");
+    // EXCEPT when we lost the claim: the job now belongs to another
+    // finalizer, and reverting would steal ITS claim and reopen the
+    // overlap this whole mechanism exists to prevent.
+    if (!(e instanceof ClaimLostError)) {
+      await supabase
+        .from("jobs")
+        .update({ status: "running" })
+        .eq("id", params.jobId)
+        .eq("status", "finalizing");
+    }
     throw e;
   }
+}
+
+/** Thrown when a finalizer discovers (at heartbeat time) that the sweep
+ *  rescued its job away — the worker must abort without touching the
+ *  job row, because a new owner is already working it. */
+class ClaimLostError extends Error {
+  constructor(jobId: string) {
+    super(`finalize claim lost for job ${jobId} — rescued by sweep`);
+    this.name = "ClaimLostError";
+  }
+}
+
+type LedgerEntry = {
+  status: string;
+  errorClass: string | null;
+  noMatch: boolean;
+};
+
+/** Error classes that are a FINAL answer for this run — resuming must
+ *  not retry them. Everything else (database, provider_transient,
+ *  provider_unknown, …) is a retry candidate on resume. */
+const TERMINAL_ERROR_CLASSES = new Set(["provider_no_data", "address_unverified"]);
+
+/** Explicit precedence for duplicate rows per property (pre-resumability
+ *  overlap damage): a persisted success outranks any error; a terminal
+ *  error outranks a retryable one. Without this, the winner is UUID-
+ *  order dependent and terminality becomes nondeterministic. */
+function ledgerRank(entry: LedgerEntry): number {
+  if (entry.status === "success") return 2;
+  if (
+    entry.status === "error" &&
+    entry.errorClass &&
+    TERMINAL_ERROR_CLASSES.has(entry.errorClass)
+  ) {
+    return 1;
+  }
+  return 0;
+}
+
+/**
+ * Read the job's full job_items ledger, one entry per property. Keyset-
+ * paged on the uuid PK with an explicit order — offset pages without an
+ * ORDER BY have undefined boundaries and can skip/repeat rows.
+ * Duplicate rows for one property collapse by `ledgerRank` precedence.
+ * Also returns the row ids of retryable (non-terminal) ERROR items so a
+ * resume can delete exactly those rows — and never a terminal error or
+ * success row that happens to share the property.
+ */
+async function readItemLedger(
+  supabase: SupabaseClient<Database>,
+  jobId: string,
+  onPage?: () => Promise<void>,
+): Promise<{
+  ledger: Map<string, LedgerEntry>;
+  retryableErrorItemIds: string[];
+}> {
+  const ledger = new Map<string, LedgerEntry>();
+  const retryableErrorItemIds: string[] = [];
+  let lastId: string | null = null;
+  for (;;) {
+    let q = supabase
+      .from("job_items")
+      .select("id, property_id, status, error_class, output_payload")
+      .eq("job_id", jobId)
+      .order("id", { ascending: true })
+      .limit(1000);
+    if (lastId) q = q.gt("id", lastId);
+    const { data, error } = await q;
+    if (error) {
+      // Fail closed — resuming or reconciling blind would corrupt the
+      // ledger guarantee.
+      throw new Error(`finalize ledger read failed: ${error.message}`);
+    }
+    for (const row of data ?? []) {
+      lastId = row.id;
+      if (!row.property_id) continue;
+      const entry: LedgerEntry = {
+        status: row.status,
+        errorClass: row.error_class ?? null,
+        noMatch:
+          !!row.output_payload &&
+          typeof row.output_payload === "object" &&
+          (row.output_payload as Record<string, unknown>).no_match === true,
+      };
+      if (entry.status === "error" && ledgerRank(entry) === 0) {
+        retryableErrorItemIds.push(row.id);
+      }
+      const prev = ledger.get(row.property_id);
+      if (!prev || ledgerRank(entry) > ledgerRank(prev)) {
+        ledger.set(row.property_id, entry);
+      }
+    }
+    if (onPage) await onPage();
+    if (!data || data.length < 1000) break;
+  }
+  return { ledger, retryableErrorItemIds };
 }
 
 async function finalizeClaimed(
@@ -408,6 +509,98 @@ async function finalizeClaimed(
     batch_pending?: boolean;
     address_to_property_ids?: Record<string, string[]>;
   };
+
+  // Claim heartbeat + ownership fence, armed for the ENTIRE claimed
+  // lifetime — including the pre-loop resume work below (ledger read,
+  // retryable cleanup, props lookup), which is itself a dozen-plus DB
+  // round trips that can stall on a degraded database. TIME-based
+  // (checked at every step, written every ≤45s): a count-keyed
+  // heartbeat would starve exactly when the rescue window matters. The
+  // write doubles as the claim fence: it only matches while the job is
+  // still 'finalizing' under our ownership; if the sweep rescued the
+  // job away, we abort instead of double-writing alongside the new
+  // owner. The fence is only as fresh as the last CONFIRMED write, so
+  // failures retry on a short cadence and a worker that cannot prove
+  // ownership for longer than the rescue window aborts conservatively
+  // — the only realistic rescue-while-alive trigger is exactly this
+  // can't-write-heartbeat state.
+  const HEARTBEAT_INTERVAL_MS = 45_000;
+  const HEARTBEAT_RETRY_MS = 10_000;
+  // Just under the sweep's STALE_FINALIZING_MS (5 min) so we abort
+  // before the rescue can hand the job to a new owner.
+  const OWNERSHIP_PROOF_DEADLINE_MS = 4.5 * 60 * 1000;
+  let lastAttemptAt = 0;
+  let lastConfirmedAt = Date.now();
+  const bumpHeartbeat = async () => {
+    const now = Date.now();
+    const sinceConfirmed = now - lastConfirmedAt;
+    const interval =
+      sinceConfirmed > HEARTBEAT_INTERVAL_MS
+        ? HEARTBEAT_RETRY_MS
+        : HEARTBEAT_INTERVAL_MS;
+    if (now - lastAttemptAt < interval) return;
+    lastAttemptAt = now;
+    const { data, error } = await supabase
+      .from("jobs")
+      .update({ worker_heartbeat_at: new Date().toISOString() })
+      .eq("id", params.jobId)
+      .eq("status", "finalizing")
+      .select("id");
+    if (error) {
+      // Transient heartbeat failure — keep working, but only while we
+      // can still prove ownership inside the rescue window.
+      if (sinceConfirmed > OWNERSHIP_PROOF_DEADLINE_MS) {
+        throw new ClaimLostError(params.jobId);
+      }
+      return;
+    }
+    if (!data || data.length === 0) {
+      throw new ClaimLostError(params.jobId);
+    }
+    lastConfirmedAt = Date.now();
+  };
+
+  // ------------------------------------------------------------------
+  // RESUMABILITY. A 4,000-row finalize (~5 rows/s of sequential DB
+  // writes) outlives the function's max duration — the 2026-06-12
+  // recovery passes died at ~3,400 rows and the platform kill skips the
+  // catch block, so the claim-revert never ran. The sweep's stale-
+  // heartbeat rescue re-claims the job; THIS pass must then pick up
+  // where the dead one stopped instead of re-writing every row.
+  // job_items is the ledger: a property with a success or terminal-error
+  // item was fully handled by a previous pass — skip it. Non-terminal
+  // error items (database / provider_transient / provider_unknown) get
+  // their rows deleted and the property reprocessed: a transient hiccup
+  // in the dead pass must not become a permanent failure.
+  // ------------------------------------------------------------------
+  const { ledger: startLedger, retryableErrorItemIds } = await readItemLedger(
+    supabase,
+    params.jobId,
+    bumpHeartbeat,
+  );
+  const alreadyProcessed = new Set<string>();
+  for (const [pid, entry] of startLedger) {
+    // ledgerRank 0 = retryable error → reprocess. Everything else
+    // (success, terminal error) is settled for this run.
+    if (ledgerRank(entry) > 0) alreadyProcessed.add(pid);
+  }
+  // Delete exactly the retryable error rows (by id — never a terminal
+  // error or success row sharing the property) so the reprocess writes
+  // a single fresh outcome per property.
+  for (const ids of chunked(retryableErrorItemIds, IN_CHUNK)) {
+    await bumpHeartbeat();
+    const { error } = await supabase
+      .from("job_items")
+      .delete()
+      .eq("job_id", params.jobId)
+      .in("id", ids);
+    if (error) {
+      // Fail closed — reprocessing without the delete would duplicate.
+      throw new Error(
+        `finalize transient-item cleanup failed: ${error.message}`,
+      );
+    }
+  }
 
   const addressMap: Record<string, string[]> | null =
     prior.address_to_property_ids && typeof prior.address_to_property_ids === "object"
@@ -511,6 +704,7 @@ async function finalizeClaimed(
     cass_status: string;
   }> = [];
   for (const ids of chunked(Array.from(allRelatedPropertyIds), IN_CHUNK)) {
+    await bumpHeartbeat();
     const { data, error } = await supabase
       .from("properties")
       .select("id, address, city, state, zip, cass_status")
@@ -531,24 +725,12 @@ async function finalizeClaimed(
   }
   const propsById = new Map(props.map((p) => [p.id, p]));
 
-  // Refresh the claim heartbeat as the long loops below grind through
-  // thousands of rows, so the sweep's stale-finalizing rescue (15 min)
-  // can tell "working" from "crashed".
-  let heartbeatCounter = 0;
-  const bumpHeartbeat = async () => {
-    heartbeatCounter++;
-    if (heartbeatCounter % 500 !== 0) return;
-    await supabase
-      .from("jobs")
-      .update({ worker_heartbeat_at: new Date().toISOString() })
-      .eq("id", params.jobId);
-  };
-
   // ------------------------------------------------------------------
   // Apply results. Wrap each persist in try/catch so one bad row can't
   // break the rest of the batch.
   // ------------------------------------------------------------------
   for (const { propertyId, result } of fanOut) {
+    if (alreadyProcessed.has(propertyId)) continue;
     await bumpHeartbeat();
     try {
       await persistAndRecord(
@@ -604,6 +786,7 @@ async function finalizeClaimed(
       }
     }
     for (const propertyId of missing) {
+      if (alreadyProcessed.has(propertyId)) continue;
       await bumpHeartbeat();
       summary.failed++;
       const p = propsById.get(propertyId);
@@ -674,7 +857,39 @@ async function finalizeClaimed(
     });
   }
 
-  await finalizeJob(supabase, params.jobId, summary);
+  // ------------------------------------------------------------------
+  // Terminal counters come from the job_items ledger, not memory. A
+  // resumed pass only walked the remainder — its in-memory counters
+  // miss everything the dead pass persisted. The ledger read dedupes by
+  // property (job_items has no uniqueness on job_id+property_id, and
+  // pre-resumability overlap damage left duplicate rows), so counters
+  // can never exceed the distinct-property total.
+  // (cached_hits/api_hits/total_credits stay in-memory: informational,
+  // and the ledger doesn't carry credits per row.)
+  // ------------------------------------------------------------------
+  const { ledger: endLedger } = await readItemLedger(
+    supabase,
+    params.jobId,
+    bumpHeartbeat,
+  );
+  let matchedTotal = 0;
+  let noMatchTotal = 0;
+  let failedTotal = 0;
+  for (const entry of endLedger.values()) {
+    if (entry.status === "success") {
+      if (entry.noMatch) noMatchTotal++;
+      else matchedTotal++;
+    } else if (entry.status === "error") {
+      failedTotal++;
+    }
+  }
+  summary.matched = matchedTotal;
+  summary.no_match = noMatchTotal;
+  summary.failed = failedTotal;
+
+  await finalizeJob(supabase, params.jobId, summary, {
+    requireFinalizing: true,
+  });
   return summary;
 }
 
@@ -840,6 +1055,7 @@ async function finalizeJob(
   supabase: SupabaseClient<Database>,
   jobId: string,
   summary: SkipTraceJobSummary,
+  opts?: { requireFinalizing?: boolean },
 ): Promise<void> {
   const status: Database["public"]["Tables"]["jobs"]["Update"]["status"] =
     summary.failed === 0
@@ -848,7 +1064,11 @@ async function finalizeJob(
         ? "failed"
         : "partial";
 
-  await supabase
+  // Batch finalizers must still OWN the job when writing terminal
+  // state — a stale worker whose claim was rescued away must not
+  // overwrite the new owner's job row. Sync paths (no claim machinery)
+  // update unconditionally as before.
+  let q = supabase
     .from("jobs")
     .update({
       status,
@@ -859,6 +1079,16 @@ async function finalizeJob(
       result_summary: summary as unknown as Json,
     })
     .eq("id", jobId);
+  if (opts?.requireFinalizing) {
+    q = q.eq("status", "finalizing");
+  }
+  const { data: updated, error: updateErr } = await q.select("id");
+  if (updateErr) {
+    throw new Error(`finalize terminal write failed: ${updateErr.message}`);
+  }
+  if (opts?.requireFinalizing && (!updated || updated.length === 0)) {
+    throw new ClaimLostError(jobId);
+  }
 
   try {
     await dispatchJobCompleted(supabase, { jobId });
