@@ -15,11 +15,12 @@ import { createClient } from "@/lib/supabase/server";
 import { getSkipTraceProvider } from "./registry";
 import { runSkipTraceEnrichment } from "./skip-trace-job";
 
-/** Raised from 500 (2026-06-11): the runner submits ONE async batch to
- *  Tracerfy (1 credit/lead) and exits, so job size is not a function-
- *  lifetime concern. The remaining guards are the credit-balance check
- *  (refuses overdraft) and Tracerfy's own 10-batches/5-min rate limit. */
-const MAX_PROPERTIES_PER_JOB = 12_000;
+/** Cap removed entirely (Jarrad, 2026-06-11): credit balance is the
+ *  operator's intentional throttle — he loads a fixed amount at a time
+ *  and tops up deliberately. The runner submits ONE async batch to
+ *  Tracerfy and exits, so job size is not a function-lifetime concern;
+ *  Tracerfy refuses spend past the balance. Same policy as the
+ *  select-all cap removal (#238). */
 
 /**
  * Server actions for the three skip-trace UI surfaces:
@@ -41,15 +42,6 @@ export async function requestSkipTrace(
       return {
         ok: false,
         error: { code: "VALIDATION", message: "Select at least one property." },
-      };
-    }
-    if (propertyIds.length > MAX_PROPERTIES_PER_JOB) {
-      return {
-        ok: false,
-        error: {
-          code: "VALIDATION",
-          message: `Cannot skip-trace more than ${MAX_PROPERTIES_PER_JOB} properties at once. Split into smaller batches.`,
-        },
       };
     }
 

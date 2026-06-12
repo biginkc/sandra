@@ -439,12 +439,6 @@ export function ProspectsTable({
   const handleSkipTrace = () => {
     const ids = selectedIds();
     if (ids.length === 0) return;
-    if (ids.length > 12_000) {
-      toast.error(
-        `Cannot skip-trace more than 12,000 properties at once. Split into smaller batches.`,
-      );
-      return;
-    }
     startTransition(async () => {
       const result = await callAction(requestSkipTrace(ids), {
         fallbackMessage: "Could not request skip trace",
