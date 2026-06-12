@@ -32,7 +32,39 @@ create unique index if not exists uq_message_threads_contact_only
   on public.message_threads (channel, contact_id)
   where property_id is null;
 
--- 2. Internal minting helper. No auth checks — callable only from the
+-- 2a. Shared org-scope resolver — the ONE definition of which org a
+--     thread key belongs to, used by the RPC, the fill trigger, and the
+--     backfill so none of them can weaken the invariant independently.
+--     Property-scoped keys require contact.org_id = property.org_id
+--     (mismatch → null → caller refuses to mint); contact-level keys
+--     scope via the contact.
+create or replace function public.sms_thread_org_id(
+  p_contact_id uuid,
+  p_property_id uuid
+)
+returns uuid
+language sql
+stable
+security definer
+set search_path = public, pg_temp
+as $$
+  select case
+    when p_property_id is null then
+      (select c.org_id from public.contacts c where c.id = p_contact_id)
+    else
+      (select p.org_id
+       from public.properties p
+       join public.contacts c
+         on c.id = p_contact_id
+        and c.org_id = p.org_id
+       where p.id = p_property_id)
+  end;
+$$;
+
+revoke execute on function public.sms_thread_org_id(uuid, uuid) from public;
+revoke execute on function public.sms_thread_org_id(uuid, uuid) from authenticated;
+
+-- 2b. Internal minting helper. No auth checks — callable only from the
 --    security-definer RPC, the fill trigger, and migrations. Reuses any
 --    conversation id already present on messages for the thread key so
 --    pre-registry threads keep their historical ids.
@@ -106,20 +138,7 @@ declare
   v_org_id uuid;
   v_conversation_id uuid;
 begin
-  if p_property_id is null then
-    select c.org_id
-    into v_org_id
-    from public.contacts c
-    where c.id = p_contact_id;
-  else
-    select p.org_id
-    into v_org_id
-    from public.properties p
-    join public.contacts c
-      on c.id = p_contact_id
-     and c.org_id = p.org_id
-    where p.id = p_property_id;
-  end if;
+  v_org_id := public.sms_thread_org_id(p_contact_id, p_property_id);
 
   if v_org_id is null then
     raise exception 'contact/property thread scope not found'
@@ -171,15 +190,10 @@ begin
     and new.contact_id is not null
     and new.conversation_id is null
   then
-    if new.property_id is null then
-      select c.org_id into v_org_id
-      from public.contacts c
-      where c.id = new.contact_id;
-    else
-      select p.org_id into v_org_id
-      from public.properties p
-      where p.id = new.property_id;
-    end if;
+    -- Shared resolver enforces contact/property org agreement; a
+    -- mismatched row gets no conversation id rather than being
+    -- normalized into the wrong org's registry.
+    v_org_id := public.sms_thread_org_id(new.contact_id, new.property_id);
 
     if v_org_id is not null then
       new.conversation_id := public.sms_conversation_id_mint(
@@ -212,17 +226,13 @@ begin
       and conversation_id is null
       and contact_id is not null
   loop
-    if r.property_id is null then
-      select c.org_id into v_org_id
-      from public.contacts c
-      where c.id = r.contact_id;
-    else
-      select p.org_id into v_org_id
-      from public.properties p
-      where p.id = r.property_id;
-    end if;
+    v_org_id := public.sms_thread_org_id(r.contact_id, r.property_id);
 
     if v_org_id is null then
+      -- Org mismatch or dangling reference. Skip here; the strict
+      -- assert below then fails the migration loudly so the bad row is
+      -- fixed by hand instead of silently normalized. (Prod audited
+      -- 2026-06-12: zero such rows.)
       raise warning 'conversation backfill: no org scope for contact % / property %',
         r.contact_id, r.property_id;
       continue;

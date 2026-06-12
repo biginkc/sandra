@@ -147,7 +147,17 @@ export async function ensureConversationIdForThread(
     p_property_id: propertyId,
   });
   if (!error) return data;
-  if (!isMissingEnsureConversationRpc(error)) {
+  // Deploy-window compat: the pre-080 RPC requires a property for org
+  // scoping, so a contact-level (null-property) call gets a 42501
+  // scope-not-found even when the contact is fine. That state must not
+  // 500 inbound webhooks — drop to the deterministic fallback, which
+  // verifies the contact actually exists before minting.
+  const nullPropertyRejectedByPre080Rpc =
+    propertyId === null && isThreadScopeNotFound(error);
+  if (
+    !isMissingEnsureConversationRpc(error) &&
+    !nullPropertyRejectedByPre080Rpc
+  ) {
     reportError(new Error(error.message), {
       tags: { surface: "ensure_conversation_id_rpc" },
       extra: { contactId, propertyId, code: error.code ?? null },
@@ -175,6 +185,28 @@ async function ensureConversationIdForThreadWithoutRpc(
   contactId: string,
   propertyId: string | null,
 ): Promise<string> {
+  // Contact-level threads reach this path when the pre-080 RPC rejected
+  // the null property — the same 42501 the new RPC raises for a missing
+  // contact. Disambiguate by checking the contact really exists; fail
+  // closed if it doesn't.
+  if (propertyId === null) {
+    const { data: contactRow, error: contactError } = await supabase
+      .from("contacts")
+      .select("id")
+      .eq("id", contactId)
+      .maybeSingle();
+    if (contactError) {
+      throw new Error(
+        `ensureConversationIdForThread contact check: ${contactError.message}`,
+      );
+    }
+    if (!contactRow) {
+      throw new Error(
+        "ensureConversationIdForThread: contact not found for contact-level thread",
+      );
+    }
+  }
+
   let lookup = supabase
     .from("messages")
     .select("conversation_id")
@@ -218,6 +250,18 @@ async function ensureConversationIdForThreadWithoutRpc(
     );
   }
   return conversationId;
+}
+
+/** The 42501 the RPC raises when it cannot org-scope the thread key —
+ *  for the pre-080 function, ANY null-property call lands here. */
+function isThreadScopeNotFound(error: {
+  code?: string | null;
+  message: string;
+}): boolean {
+  return (
+    error.code === "42501" &&
+    error.message.includes("contact/property thread scope not found")
+  );
 }
 
 function isMissingEnsureConversationRpc(error: {

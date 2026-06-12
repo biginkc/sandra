@@ -28,6 +28,9 @@ function makeFallbackSupabase(
     existingConversationIds?: string[];
     rpcErrorCode?: string;
     rpcErrorMessage?: string;
+    /** Whether the contacts-table existence check finds the contact.
+     *  Defaults to true. */
+    contactExists?: boolean;
   } = {},
 ): SupabaseClient<Database> {
   let existingOrderAscending = false;
@@ -78,6 +81,19 @@ function makeFallbackSupabase(
       }),
     from: (table: string) => {
       if (table === "messages") return messagesBuilder;
+      if (table === "contacts") {
+        const contactsBuilder: Record<string, unknown> = {};
+        Object.assign(contactsBuilder, {
+          select: () => contactsBuilder,
+          eq: () => contactsBuilder,
+          maybeSingle: () =>
+            Promise.resolve({
+              data: (opts.contactExists ?? true) ? { id: "found" } : null,
+              error: null,
+            }),
+        });
+        return contactsBuilder;
+      }
       throw new Error(`unexpected table ${table}`);
     },
   } as unknown as SupabaseClient<Database>;
@@ -195,6 +211,40 @@ describe("ensureConversationIdForThread — fallback (RPC / registry migration a
         PROPERTY,
       ),
     ).rejects.toThrow("permission denied for function ensure_sms_conversation_id");
+  });
+
+  it("pre-080 RPC rejecting a null property falls back to the deterministic contact-level id", async () => {
+    // Deploy-window state (Codex P1 on PR #270): new code, un-migrated
+    // DB. The old RPC exists and raises scope-not-found for ANY
+    // null-property call — inbound webhooks must keep working via the
+    // deterministic fallback instead of 500ing.
+    const pre080 = () =>
+      makeFallbackSupabase({
+        rpcErrorCode: "42501",
+        rpcErrorMessage: "contact/property thread scope not found",
+      });
+
+    const first = await ensureConversationIdForThread(pre080(), CONTACT, null);
+    const second = await ensureConversationIdForThread(pre080(), CONTACT, null);
+
+    expect(first).toMatch(UUID_RE);
+    expect(second).toBe(first);
+  });
+
+  it("contact-level fallback fails closed when the contact does not exist", async () => {
+    // The same 42501 also covers a genuinely missing contact under the
+    // new RPC — the fallback disambiguates via a contact lookup.
+    await expect(
+      ensureConversationIdForThread(
+        makeFallbackSupabase({
+          rpcErrorCode: "42501",
+          rpcErrorMessage: "contact/property thread scope not found",
+          contactExists: false,
+        }),
+        CONTACT,
+        null,
+      ),
+    ).rejects.toThrow("contact not found for contact-level thread");
   });
 });
 
