@@ -90,6 +90,15 @@ describe("validateAiReplyBody", () => {
     });
   });
 
+  it("accepts digit-prefixed bodies whose first letter is uppercase", () => {
+    expect(
+      validateAiReplyBody("123 Main St works for a quick call."),
+    ).toEqual({ ok: true });
+    expect(
+      validateAiReplyBody("123 main st works for a quick call."),
+    ).toEqual({ ok: false, reason: "starts_lowercase" });
+  });
+
   it("rejects bodies over one SMS segment (160 chars)", () => {
     expect(validateAiReplyBody("X" + "x".repeat(160))).toEqual({
       ok: false,
