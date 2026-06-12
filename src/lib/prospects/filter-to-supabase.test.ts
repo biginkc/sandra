@@ -283,9 +283,7 @@ describe("applyBlock: cass", () => {
       }) as FilterBlock,
       sb,
     );
-    expect(
-      calls.some((c) => c.startsWith("or(cass_status.is.null,cass_status.not.in.")),
-    ).toBe(true);
+    expect(calls.some((c) => c.startsWith("not(cass_status,in,"))).toBe(true);
   });
   it("combinator='all' with multiple values on a single-value column returns no matches", async () => {
     const { proxy, calls } = mockBuilder();
@@ -335,6 +333,55 @@ describe("applyBlock: outreach_dispo", () => {
         c.startsWith("or(outreach_dispo.is.null,outreach_dispo.not.in."),
       ),
     ).toBe(true);
+  });
+
+  it("source not → null-safe (unknown origin stays visible)", async () => {
+    const { proxy, calls } = mockBuilder();
+    const { sb } = mockSupabaseClient();
+    await applyBlock(
+      proxy,
+      block({
+        kind: "source",
+        combinator: "not",
+        values: ["propstream"],
+      }) as FilterBlock,
+      sb,
+    );
+    expect(calls).toEqual([
+      'or(source.is.null,source.not.in.("propstream"))',
+    ]);
+  });
+
+  it("motivation_level not → plain NOT IN (unscored rows deliberately excluded)", async () => {
+    const { proxy, calls } = mockBuilder();
+    const { sb } = mockSupabaseClient();
+    await applyBlock(
+      proxy,
+      block({
+        kind: "motivation_level",
+        combinator: "not",
+        values: ["hot"],
+      }) as FilterBlock,
+      sb,
+    );
+    expect(calls).toEqual(['not(motivation_level,in,("hot"))']);
+  });
+
+  it("market not with comma-containing value stays quoted inside or()", async () => {
+    const { proxy, calls } = mockBuilder();
+    const { sb } = mockSupabaseClient();
+    await applyBlock(
+      proxy,
+      block({
+        kind: "market",
+        combinator: "not",
+        values: ["Jackson, MO"],
+      }) as FilterBlock,
+      sb,
+    );
+    // market keeps plain NOT IN (not opted into null-safety) with the
+    // value quoted so the comma can't split the IN list.
+    expect(calls).toEqual(['not(market,in,("Jackson, MO"))']);
   });
 
   it("combinator='not' keeps NULL rows visible (null-safe exclusion)", async () => {

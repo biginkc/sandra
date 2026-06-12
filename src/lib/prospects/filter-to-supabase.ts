@@ -294,9 +294,17 @@ export async function applyBlock(
     case "cass":
       return { builder: applyMultiSelect(builder, "cass_status", block.combinator, block.values) };
     case "outreach_dispo":
-      return { builder: applyMultiSelect(builder, "outreach_dispo", block.combinator, block.values) };
+      return {
+        builder: applyMultiSelect(builder, "outreach_dispo", block.combinator, block.values, {
+          nullSafeNot: true,
+        }),
+      };
     case "source":
-      return { builder: applyMultiSelect(builder, "source", block.combinator, block.values) };
+      return {
+        builder: applyMultiSelect(builder, "source", block.combinator, block.values, {
+          nullSafeNot: true,
+        }),
+      };
     case "state":
       return { builder: applyMultiSelect(builder, "state", block.combinator, block.values) };
     case "market":
@@ -382,20 +390,29 @@ function applyMultiSelect(
   col: string,
   combinator: Combinator,
   values: string[],
+  opts?: {
+    /** NULL-safe negation: `not` emits or(col.is.null, col.not.in(...))
+     *  so "not X" reads "X is false or UNKNOWN" and NULL rows stay
+     *  visible. OPT-IN per column because the right semantics differ:
+     *  outreach_dispo NULL = never disposed (must stay visible when
+     *  excluding DNC — 11,313/11,317 verified rows were NULL on
+     *  2026-06-12 and plain NOT IN hid them all); source NULL =
+     *  unknown origin (the filter plan documents null-inclusion).
+     *  motivation_level NULL = deliberately UNSCORED — "not hot" must
+     *  NOT pull in every unscored prospect, so it keeps plain NOT IN. */
+    nullSafeNot?: boolean;
+  },
 ): ProspectsBuilder {
   if (values.length === 0) return builder;
   if (combinator === "all" && values.length > 1) {
     return builder.eq(col, "__sandra_no_match__");
   }
   if (combinator === "not") {
-    // NULL-safe exclusion. Plain `NOT (col IN (...))` evaluates to NULL
-    // for rows where col IS NULL, silently excluding them — on nullable
-    // columns like outreach_dispo (11,313 of 11,317 verified rows were
-    // NULL on 2026-06-12) a "Dispo is not DNC" filter hid the entire
-    // list instead of the 2 DNC rows. "Not X" must mean "X is false or
-    // unknown", so NULL rows stay visible.
     const quoted = values.map((v) => `"${v}"`).join(",");
-    return builder.or(`${col}.is.null,${col}.not.in.(${quoted})`);
+    if (opts?.nullSafeNot) {
+      return builder.or(`${col}.is.null,${col}.not.in.(${quoted})`);
+    }
+    return builder.not(col, "in", `(${quoted})`);
   }
   // any + single-value all
   return builder.in(col, values);
