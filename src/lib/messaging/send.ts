@@ -555,7 +555,13 @@ function providerIdToDefaultFrom(providerId: string): string | null {
   return provider.getDefaultFromNumber?.() ?? null;
 }
 
-async function failQueuedMessage(
+/**
+ * Terminal-fail a queued message (status-guarded so a row another
+ * worker claimed or sent is never touched). Exported for the
+ * sequence-tick cron, which fails opted-out rows instead of leaving
+ * them eternally queued.
+ */
+export async function failQueuedMessage(
   supabase: SupabaseClient<Database>,
   messageId: string,
   errorMessage: string,

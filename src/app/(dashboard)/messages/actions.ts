@@ -444,64 +444,49 @@ export async function getQueueStats(): Promise<Result<QueueStats>> {
     todayStart.setUTCHours(0, 0, 0, 0);
     const todayStartIso = todayStart.toISOString();
 
-    const queuedRes = await supabase
-      .from("messages")
-      .select("*", { count: "exact", head: true })
-      .eq("status", "queued");
-    if (queuedRes.error) {
-      return {
-        ok: false,
-        error: { code: "QUEUE_STATS_FAILED", message: queuedRes.error.message },
-      };
-    }
+    // All five reads are independent — run them concurrently. Serial
+    // awaits here turned one slow-DB moment into a 5x page stall (each
+    // poll and first paint pays the sum, not the max).
+    const [queuedRes, sentRes, failedRes, nextRes, lastRes] =
+      await Promise.all([
+        supabase
+          .from("messages")
+          .select("*", { count: "exact", head: true })
+          .eq("status", "queued"),
+        supabase
+          .from("messages")
+          .select("*", { count: "exact", head: true })
+          .eq("status", "sent")
+          .gte("created_at", todayStartIso),
+        supabase
+          .from("messages")
+          .select("*", { count: "exact", head: true })
+          .eq("status", "failed")
+          .gte("failed_at", todayStartIso),
+        supabase
+          .from("messages")
+          .select("scheduled_for")
+          .eq("status", "queued")
+          .order("scheduled_for", { ascending: true })
+          .limit(1),
+        supabase
+          .from("messages")
+          .select("scheduled_for")
+          .eq("status", "queued")
+          .order("scheduled_for", { ascending: false })
+          .limit(1),
+      ]);
 
-    const sentRes = await supabase
-      .from("messages")
-      .select("*", { count: "exact", head: true })
-      .eq("status", "sent")
-      .gte("created_at", todayStartIso);
-    if (sentRes.error) {
+    const firstError =
+      queuedRes.error ??
+      sentRes.error ??
+      failedRes.error ??
+      nextRes.error ??
+      lastRes.error;
+    if (firstError) {
       return {
         ok: false,
-        error: { code: "QUEUE_STATS_FAILED", message: sentRes.error.message },
-      };
-    }
-
-    const failedRes = await supabase
-      .from("messages")
-      .select("*", { count: "exact", head: true })
-      .eq("status", "failed")
-      .gte("failed_at", todayStartIso);
-    if (failedRes.error) {
-      return {
-        ok: false,
-        error: { code: "QUEUE_STATS_FAILED", message: failedRes.error.message },
-      };
-    }
-
-    const nextRes = await supabase
-      .from("messages")
-      .select("scheduled_for")
-      .eq("status", "queued")
-      .order("scheduled_for", { ascending: true })
-      .limit(1);
-    if (nextRes.error) {
-      return {
-        ok: false,
-        error: { code: "QUEUE_STATS_FAILED", message: nextRes.error.message },
-      };
-    }
-
-    const lastRes = await supabase
-      .from("messages")
-      .select("scheduled_for")
-      .eq("status", "queued")
-      .order("scheduled_for", { ascending: false })
-      .limit(1);
-    if (lastRes.error) {
-      return {
-        ok: false,
-        error: { code: "QUEUE_STATS_FAILED", message: lastRes.error.message },
+        error: { code: "QUEUE_STATS_FAILED", message: firstError.message },
       };
     }
 
