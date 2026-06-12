@@ -15,6 +15,12 @@ import {
 import type { Database } from "@/lib/supabase/types";
 
 import type { QueuedRow } from "./queue-panel";
+import {
+  buildQueuedCursorFilter,
+  type QueuedPageCursor,
+} from "./queued-cursor";
+
+export type { QueuedPageCursor } from "./queued-cursor";
 
 type MessageRow = Database["public"]["Tables"]["messages"]["Row"];
 import {
@@ -514,17 +520,6 @@ export async function getQueueStats(): Promise<Result<QueueStats>> {
 /** Page size for the Outbox queue list (first paint + each scroll fetch). */
 const QUEUE_PAGE_SIZE = 100;
 
-/**
- * Keyset cursor for the Outbox queue list — the (scheduled_for, id) of
- * the last row the client already has. Keyset (not offset) because rows
- * continually leave the head of the queue as they release; an offset
- * would skip rows every time the queue drains underneath the scroller.
- */
-export type QueuedPageCursor = {
-  scheduledFor: string | null;
-  id: string;
-};
-
 export type QueuedPage = {
   rows: QueuedRow[];
   hasMore: boolean;
@@ -534,6 +529,9 @@ export type QueuedPage = {
  * One page of the Outbox queue, ordered (scheduled_for ASC nulls last,
  * id ASC) — the same order the release path drains in. Pass null to get
  * the first page; pass the last visible row's cursor to get the next.
+ *
+ * The cursor is client-supplied and validated by buildQueuedCursorFilter
+ * before it touches the raw `.or()` grammar — see queued-cursor.ts.
  *
  * Uses the session-scoped client (same RLS surface as the page's
  * first-paint query). Fetches PAGE_SIZE+1 rows to derive hasMore.
@@ -554,15 +552,17 @@ export async function listQueuedPage(
       .eq("status", "queued");
 
     if (cursor) {
-      if (cursor.scheduledFor === null) {
-        // Cursor is inside the nulls-last tail — only later-id null rows remain.
-        query = query.is("scheduled_for", null).gt("id", cursor.id);
+      const filter = buildQueuedCursorFilter(cursor);
+      if (filter.kind === "invalid") {
+        return {
+          ok: false,
+          error: { code: "QUEUE_PAGE_FAILED", message: "invalid cursor" },
+        };
+      }
+      if (filter.kind === "nullTail") {
+        query = query.is("scheduled_for", null).gt("id", filter.id);
       } else {
-        // Strictly-after in (scheduled_for, id) order, plus the nulls tail
-        // which sorts after every non-null timestamp.
-        query = query.or(
-          `scheduled_for.gt."${cursor.scheduledFor}",and(scheduled_for.eq."${cursor.scheduledFor}",id.gt.${cursor.id}),scheduled_for.is.null`,
-        );
+        query = query.or(filter.expr);
       }
     }
 

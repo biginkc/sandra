@@ -72,8 +72,12 @@ export function CockpitView({
 
   // One live stats source for the Outbox tab badge + the stats banner,
   // so the two never show different numbers. Seeds from the server
-  // first-paint stats and polls every 30s while visible.
-  const liveQueueStats = useQueueStats(queueStats);
+  // first-paint stats; polls every 30s while visible, but only while
+  // the Outbox tab is active — Inbox dwellers shouldn't generate
+  // stats-query load (5 DB reads/poll) for a banner they can't see.
+  const liveQueueStats = useQueueStats(queueStats, {
+    enabled: activeTab === "outbox",
+  });
 
   const setTab = (next: string) => {
     const sp = new URLSearchParams(searchParams.toString());

@@ -14,11 +14,20 @@ const POLL_INTERVAL_MS = 30_000;
  * pauses while hidden; fires one immediate refresh when the tab returns
  * to visible so an operator coming back from another window doesn't
  * have to wait up to 30s for fresh data.
+ *
+ * `enabled: false` (Inbox tab) skips polling entirely — getQueueStats
+ * is five DB reads, and an operator parked on Inbox shouldn't generate
+ * that load every 30s. First-paint stats stay fresh enough there: the
+ * page is force-dynamic, so every navigation/tab switch re-fetches.
  */
-export function useQueueStats(initialStats: QueueStats): QueueStats {
+export function useQueueStats(
+  initialStats: QueueStats,
+  { enabled = true }: { enabled?: boolean } = {},
+): QueueStats {
   const [stats, setStats] = useState<QueueStats>(initialStats);
 
   useEffect(() => {
+    if (!enabled) return undefined;
     let cancelled = false;
 
     async function refresh() {
@@ -48,7 +57,7 @@ export function useQueueStats(initialStats: QueueStats): QueueStats {
       clearInterval(intervalId);
       document.removeEventListener("visibilitychange", onVisibilityChange);
     };
-  }, []);
+  }, [enabled]);
 
   return stats;
 }

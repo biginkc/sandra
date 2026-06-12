@@ -130,6 +130,32 @@ describe("useQueueStats (260504-tgq polling, lifted from QueueStatsBanner)", () 
     expect(result.current.queued).toBe(5);
   });
 
+  it("Does not poll at all when enabled=false (Inbox tab)", async () => {
+    getQueueStats.mockResolvedValue({
+      ok: true,
+      data: makeStats({ queued: 1 }),
+    });
+
+    const { result } = renderHook(() =>
+      useQueueStats(makeStats({ queued: 9 }), { enabled: false }),
+    );
+
+    await act(async () => {
+      vi.advanceTimersByTime(120_000);
+    });
+    expect(getQueueStats).not.toHaveBeenCalled();
+
+    // Visibility transitions must also be inert while disabled.
+    await act(async () => {
+      setVisibility("hidden");
+      setVisibility("visible");
+      await Promise.resolve();
+    });
+    expect(getQueueStats).not.toHaveBeenCalled();
+    // Still returns the server-fetched first-paint stats.
+    expect(result.current.queued).toBe(9);
+  });
+
   it("Clears interval and removes visibilitychange listener on unmount", async () => {
     getQueueStats.mockResolvedValue({
       ok: true,
