@@ -65,24 +65,15 @@ export async function persistSkipTraceResult(
   // `contacts_phone_1_key` and lose the row.
   let contactId = property.homeowner_contact_id;
   if (!contactId) {
-    const topPhone = owner.phones
-      .filter((p) => !!p.number && !p.dnc)
-      .sort((a, b) => a.rank - b.rank)[0]?.number;
-    if (topPhone) {
-      const normalized = normalizePhone(topPhone);
-      const { data: existing } = await supabase
-        .from("contacts")
-        .select("id")
-        .eq("org_id", property.org_id)
-        .or(
-          `phone_1.eq.${normalized},phone_2.eq.${normalized},phone_3.eq.${normalized}`,
-        )
-        .limit(1)
-        .maybeSingle();
-      if (existing) {
-        contactId = existing.id;
-      }
-    }
+    contactId =
+      (await resolveContactByPhone(supabase, property.org_id, owner)) ??
+      // contacts_person_name_key is a partial unique index on
+      // (lower(last_name), lower(first_name)) WHERE phone_1 IS NULL AND
+      // email IS NULL — a name-only contact (created when a previous
+      // property's persist couldn't fill any phone) collides
+      // deterministically with every later insert for the same owner
+      // (624 rows failed this way on 2026-06-12). Reuse it instead.
+      (await resolveContactByName(supabase, property.org_id, owner));
     if (!contactId) {
       const { data: newContact, error: contactErr } = await supabase
         .from("contacts")
@@ -93,12 +84,24 @@ export async function persistSkipTraceResult(
         })
         .select("id")
         .single();
-      if (contactErr || !newContact) {
+      if (newContact) {
+        contactId = newContact.id;
+      } else if (isUniqueViolation(contactErr?.message)) {
+        // Raced another writer between lookup and insert — re-resolve
+        // and reuse whoever won.
+        contactId =
+          (await resolveContactByPhone(supabase, property.org_id, owner)) ??
+          (await resolveContactByName(supabase, property.org_id, owner));
+        if (!contactId) {
+          throw new Error(
+            `failed to create contact: ${contactErr?.message ?? "unknown"}`,
+          );
+        }
+      } else {
         throw new Error(
           `failed to create contact: ${contactErr?.message ?? "unknown"}`,
         );
       }
-      contactId = newContact.id;
     }
     await supabase
       .from("properties")
@@ -177,11 +180,36 @@ export async function persistSkipTraceResult(
     updates.last_name = owner.lastName;
   }
 
-  const { error: updErr } = await supabase
-    .from("contacts")
-    .update(updates)
-    .eq("id", contactId);
-  if (updErr) {
+  // Apply the update, degrading granularly on unique-index conflicts:
+  // phone_1 and lower(email) carry global partial unique indexes, so a
+  // number/email that already belongs to ANOTHER contact must not sink
+  // the whole write (names + remaining fields still land). The
+  // conflicting value is reachable via its owning contact; dropping it
+  // here loses nothing. 38 email-key + 16 phone-key rows failed
+  // wholesale this way on 2026-06-12.
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const { error: updErr } = await supabase
+      .from("contacts")
+      .update(updates)
+      .eq("id", contactId);
+    if (!updErr) break;
+    if (!isUniqueViolation(updErr.message)) {
+      throw new Error(`contact update failed: ${updErr.message}`);
+    }
+    if (updErr.message.includes("contacts_phone_1_key")) {
+      // Revert all phone slots to their current values; the numbers
+      // belong to another contact.
+      updates.phone_1 = currentContact.phone_1 ?? null;
+      updates.phone_2 = currentContact.phone_2 ?? null;
+      updates.phone_3 = currentContact.phone_3 ?? null;
+      phonesAdded = 0;
+      continue;
+    }
+    if (updErr.message.includes("contacts_email_key")) {
+      updates.email = currentContact.email ?? null;
+      emailsAdded = 0;
+      continue;
+    }
     throw new Error(`contact update failed: ${updErr.message}`);
   }
 
@@ -204,6 +232,68 @@ export async function persistSkipTraceResult(
     emailsAdded,
     mailingAddressAdded: mailingAdded,
   };
+}
+
+function isUniqueViolation(message: string | null | undefined): boolean {
+  return !!message && message.includes("duplicate key value violates");
+}
+
+type OwnerPerson = {
+  firstName?: string | null;
+  lastName?: string | null;
+  phones: Array<{ number: string; dnc: boolean; rank: number }>;
+};
+
+/** Find an existing contact in this org holding the owner's top-ranked
+ *  non-DNC phone in any slot. */
+async function resolveContactByPhone(
+  supabase: SupabaseClient<Database>,
+  orgId: string,
+  owner: OwnerPerson,
+): Promise<string | null> {
+  const topPhone = owner.phones
+    .filter((p) => !!p.number && !p.dnc)
+    .sort((a, b) => a.rank - b.rank)[0]?.number;
+  if (!topPhone) return null;
+  const normalized = normalizePhone(topPhone);
+  const { data: existing } = await supabase
+    .from("contacts")
+    .select("id")
+    .eq("org_id", orgId)
+    .or(
+      `phone_1.eq.${normalized},phone_2.eq.${normalized},phone_3.eq.${normalized}`,
+    )
+    .limit(1)
+    .maybeSingle();
+  return existing?.id ?? null;
+}
+
+/** Find an existing NAME-ONLY person contact (no phone, no email) with
+ *  the owner's exact name, case-insensitively — the population covered
+ *  by the contacts_person_name_key partial unique index. */
+async function resolveContactByName(
+  supabase: SupabaseClient<Database>,
+  orgId: string,
+  owner: OwnerPerson,
+): Promise<string | null> {
+  const first = owner.firstName?.trim();
+  const last = owner.lastName?.trim();
+  if (!first || !last) return null;
+  // ilike without wildcards = case-insensitive equality; escape the
+  // pattern chars so a literal % or _ in a name can't widen the match.
+  const escape = (v: string) => v.replace(/([%_\\])/g, "\\$1");
+  const { data: existing } = await supabase
+    .from("contacts")
+    .select("id")
+    .eq("org_id", orgId)
+    .eq("contact_type", "person")
+    .ilike("first_name", escape(first))
+    .ilike("last_name", escape(last))
+    .is("phone_1", null)
+    .is("email", null)
+    .limit(1)
+    .maybeSingle();
+  return existing?.id ?? null;
 }
 
 /**
