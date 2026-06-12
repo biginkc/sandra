@@ -25,35 +25,35 @@ function textResponse(text: string) {
 describe("humanizeReply — success path", () => {
   it("returns the rewritten body when API returns clean text", async () => {
     const client = mockClient(() =>
-      textResponse("Awesome, appreciate you confirming. Open to a cash offer if the number worked?"),
+      textResponse("Thanks for confirming. Would you be open to a cash offer if the number worked?"),
     );
     const out = await humanizeReply(
       { draft: "Great — thanks for confirming! What's your motivation to sell?", model: "claude-haiku-4-5-20251001" },
       { client },
     );
     expect(out).toBe(
-      "Awesome, appreciate you confirming. Open to a cash offer if the number worked?",
+      "Thanks for confirming. Would you be open to a cash offer if the number worked?",
     );
   });
 
   it("trims surrounding whitespace from the API output", async () => {
-    const client = mockClient(() => textResponse("\n\n  hello there  \n"));
+    const client = mockClient(() => textResponse("\n\n  Hello there  \n"));
     const out = await humanizeReply(
       { draft: "Hi there!", model: "test-model" },
       { client },
     );
-    expect(out).toBe("hello there");
+    expect(out).toBe("Hello there");
   });
 
   it("strips a 'Here's the rewrite:' preamble", async () => {
     const client = mockClient(() =>
-      textResponse("Here's the rewrite: All good, my number's here if anything changes."),
+      textResponse("Here's the rewrite: Understood, thanks for letting me know."),
     );
     const out = await humanizeReply(
       { draft: "Sounds good — feel free to reach out!", model: "test-model" },
       { client },
     );
-    expect(out).toBe("All good, my number's here if anything changes.");
+    expect(out).toBe("Understood, thanks for letting me know.");
   });
 
   it("strips wrapping double quotes", async () => {
@@ -128,6 +128,42 @@ describe("humanizeReply — fallback path (NEVER drops a message)", () => {
       { client },
     );
     expect(out).toBe("Original short draft.");
+  });
+
+  it("returns the original when output exceeds one SMS segment (161-320 chars)", async () => {
+    const twoSegments = "B" + "b".repeat(199);
+    const client = mockClient(() => textResponse(twoSegments));
+    const out = await humanizeReply(
+      { draft: "Original short draft.", model: "test-model" },
+      { client },
+    );
+    expect(out).toBe("Original short draft.");
+  });
+
+  it("returns the original when the rewrite introduces slang", async () => {
+    const client = mockClient(() =>
+      textResponse("My bad for the cold text, hit me up if anything changes."),
+    );
+    const out = await humanizeReply(
+      { draft: "Sorry for the unexpected text. If anything changes, feel free to reach out.", model: "test-model" },
+      { client },
+    );
+    expect(out).toBe(
+      "Sorry for the unexpected text. If anything changes, feel free to reach out.",
+    );
+  });
+
+  it("returns the original when the rewrite mirrors lowercase", async () => {
+    const client = mockClient(() =>
+      textResponse("thanks for confirming, would a cash offer work for you?"),
+    );
+    const out = await humanizeReply(
+      { draft: "Thanks for confirming. Would you be open to a cash offer?", model: "test-model" },
+      { client },
+    );
+    expect(out).toBe(
+      "Thanks for confirming. Would you be open to a cash offer?",
+    );
   });
 
   it("returns the empty string for an empty draft (no API call)", async () => {

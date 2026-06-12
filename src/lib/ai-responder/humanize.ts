@@ -1,5 +1,11 @@
 import type Anthropic from "@anthropic-ai/sdk";
 
+import {
+  MAX_REPLY_BODY_LEN,
+  SLANG_REGEX,
+  STARTS_LOWERCASE_REGEX,
+} from "./safety";
+
 /**
  * Second-pass humanizer for AI-drafted SMS replies.
  *
@@ -54,8 +60,8 @@ ALWAYS:
 
 /** Reply must be at least this many characters to be considered valid. */
 const MIN_REPLY_LEN = 5;
-/** SMS hard cap — TCPA-friendly single-segment territory. */
-const MAX_REPLY_LEN = 320;
+/** SMS hard cap — single segment, same contract as the first pass. */
+const MAX_REPLY_LEN = MAX_REPLY_BODY_LEN;
 
 /**
  * Run the draft through the humanizer model. Always resolves to a
@@ -96,6 +102,13 @@ export async function humanizeReply(
 
     const cleaned = stripQuotesAndPreamble(textBlock.text).trim();
     if (cleaned.length < MIN_REPLY_LEN || cleaned.length > MAX_REPLY_LEN) {
+      return draft;
+    }
+
+    // Register guard: if the rewrite introduced slang or lowercase
+    // mirroring, it made the draft worse — keep the draft. (The draft
+    // itself is still gated by the dispatch safety validator.)
+    if (SLANG_REGEX.test(cleaned) || STARTS_LOWERCASE_REGEX.test(cleaned)) {
       return draft;
     }
 
