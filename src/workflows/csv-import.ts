@@ -40,11 +40,22 @@ import {
   processIngestChunk,
   type ChunkResult,
 } from "@/lib/csv/ingest";
+import {
+  applyLineTypes,
+  collectUnlabeledPhones,
+  summarizeClassification,
+  type ClassificationCounts,
+} from "@/lib/csv/line-type-classify";
+import {
+  telnyxLookupFromEnv,
+  TELNYX_LOOKUP_COST_USD,
+} from "@/lib/line-type-lookup/telnyx";
 import { enrollLead } from "@/lib/sequences/enrollment";
 import { trimRowsToMapping } from "@/lib/csv/trim-rows";
 import { createAdminClient } from "@/lib/supabase/admin";
 import type { Database } from "@/lib/supabase/types";
 import type { Mapping, RowData } from "@/lib/csv/validate";
+import type { PhoneLineType } from "@/lib/messaging/line-type";
 
 /**
  * Per-chunk row count. 250 was chosen empirically: at the per-row latency
@@ -53,6 +64,13 @@ import type { Mapping, RowData } from "@/lib/csv/validate";
  * comfortable headroom for the tail-end p95 outliers.
  */
 const CHUNK_SIZE = 250;
+
+/**
+ * Numbers per Telnyx-classification step. At 5 lookups in flight and
+ * ~300ms each, 200 numbers is ~12s — far under the per-step cap even
+ * with the one-retry backoff on every number.
+ */
+const LOOKUP_CHUNK_SIZE = 200;
 
 export type CsvImportWorkflowParams = {
   jobId: string;
@@ -77,6 +95,10 @@ export type CsvImportWorkflowParams = {
   /** When set, auto-enroll every successfully imported property into this
    *  sequence after consent is recorded. */
   sequenceId?: string | null;
+  /** When true, classify unlabeled phone numbers via Telnyx before the
+   *  ingest chunks run. Off (or TELNYX_API_KEY unset) = unlabeled
+   *  numbers are dropped by the ingest hard rule and counted. */
+  classifyLineTypes?: boolean;
 };
 
 export type EnrollBatchResult = {
@@ -185,6 +207,75 @@ async function loadCsvFromStorage(
     totalRows: trimmedRows.length,
     autoTagIds,
   };
+}
+
+/**
+ * STEP 1b — Find the distinct phone numbers that would ingest with type
+ * 'unknown' (the set the migration-080 hard rule would drop). Also
+ * reports whether Telnyx is configured — env access lives in steps, not
+ * the sandboxed workflow body.
+ */
+async function collectUnlabeledPhonesStep(args: {
+  rows: RowData[];
+  mapping: Mapping;
+}): Promise<{ numbers: string[]; telnyxConfigured: boolean }> {
+  "use step";
+
+  return {
+    numbers: collectUnlabeledPhones(args.rows, args.mapping),
+    telnyxConfigured: !!process.env.TELNYX_API_KEY?.trim(),
+  };
+}
+
+/**
+ * STEP 1c — Classify one slice of phone numbers via Telnyx. Returns
+ * entries (not a Map — step results must serialize). The provider never
+ * throws on a single number's failure; a thrown error here means Telnyx
+ * is unreachable outright, which WDK retries with backoff.
+ */
+async function classifyPhonesChunkStep(args: {
+  numbers: string[];
+}): Promise<[string, PhoneLineType][]> {
+  "use step";
+
+  const lookup = telnyxLookupFromEnv();
+  const classified = await lookup.classify(args.numbers);
+  return [...classified.entries()];
+}
+
+/**
+ * STEP 1d — Write classified types back into the rows (and extend the
+ * mapping with synthetic type columns where the file had none), then
+ * record the classification counts + estimated cost on the job row so
+ * the operator sees what the lookup found before ingest finishes. The
+ * same counts ride into the final result_summary via finalizeStep.
+ */
+async function applyLineTypesStep(args: {
+  jobId: string;
+  rows: RowData[];
+  mapping: Mapping;
+  classified: [string, PhoneLineType][];
+}): Promise<{
+  rows: RowData[];
+  mapping: Mapping;
+  counts: ClassificationCounts;
+}> {
+  "use step";
+
+  const classified = new Map(args.classified);
+  const applied = applyLineTypes(args.rows, args.mapping, classified);
+  const counts = summarizeClassification(classified, TELNYX_LOOKUP_COST_USD);
+
+  const supabase = createAdminClient();
+  await supabase
+    .from("jobs")
+    .update({
+      result_summary: { lineTypeClassification: counts },
+      worker_heartbeat_at: new Date().toISOString(),
+    })
+    .eq("id", args.jobId);
+
+  return { rows: applied.rows, mapping: applied.mapping, counts };
 }
 
 /**
@@ -383,6 +474,8 @@ async function finalizeStep(args: {
   succeeded: number;
   failed: number;
   skipped: number;
+  droppedUnlabeledPhones: number;
+  lineTypeClassification: ClassificationCounts | null;
   errors: { rowIndex: number; message: string }[];
 }): Promise<void> {
   "use step";
@@ -433,20 +526,58 @@ export async function csvImportWorkflow(
     countyId = row?.county_id ?? null;
   }
 
+  // Pre-ingest line-type classification (Telnyx). Only when the operator
+  // opted in at the wizard's interstitial AND the API key is configured —
+  // otherwise unlabeled numbers fall through to the ingest hard rule,
+  // which drops and counts them. Classified types are written back into
+  // the rows/mapping that the ingest chunks below consume.
+  let rows = loaded.rows;
+  let mapping = params.mapping;
+  let lineTypeClassification: ClassificationCounts | null = null;
+  if (params.classifyLineTypes) {
+    const collected = await collectUnlabeledPhonesStep({ rows, mapping });
+    if (collected.telnyxConfigured && collected.numbers.length > 0) {
+      // Chunked like the ingest loop so a big file's lookups never push
+      // a single invocation past the function time cap.
+      const entries: [string, PhoneLineType][] = [];
+      for (
+        let offset = 0;
+        offset < collected.numbers.length;
+        offset += LOOKUP_CHUNK_SIZE
+      ) {
+        const slice = collected.numbers.slice(
+          offset,
+          offset + LOOKUP_CHUNK_SIZE,
+        );
+        entries.push(...(await classifyPhonesChunkStep({ numbers: slice })));
+      }
+      const applied = await applyLineTypesStep({
+        jobId: params.jobId,
+        rows,
+        mapping,
+        classified: entries,
+      });
+      rows = applied.rows;
+      mapping = applied.mapping;
+      lineTypeClassification = applied.counts;
+    }
+  }
+
   let succeeded = 0;
   let failed = 0;
   let skipped = 0;
+  let droppedUnlabeledPhones = 0;
   const allErrors: { rowIndex: number; message: string }[] = [];
 
   for (let offset = 0; offset < loaded.totalRows; offset += CHUNK_SIZE) {
-    const slice = loaded.rows.slice(offset, offset + CHUNK_SIZE);
+    const slice = rows.slice(offset, offset + CHUNK_SIZE);
     const result = await processChunkStep({
       jobId: params.jobId,
       csvImportId: params.csvImportId,
       source: params.source,
       market: params.market,
       countyId,
-      mapping: params.mapping,
+      mapping,
       rows: slice,
       offset,
       autoTagIds: loaded.autoTagIds,
@@ -458,6 +589,7 @@ export async function csvImportWorkflow(
     succeeded += result.succeeded;
     failed += result.failed;
     skipped += result.skipped;
+    droppedUnlabeledPhones += result.droppedUnlabeledPhones;
     allErrors.push(...result.errors);
   }
 
@@ -468,6 +600,8 @@ export async function csvImportWorkflow(
     succeeded,
     failed,
     skipped,
+    droppedUnlabeledPhones,
+    lineTypeClassification,
     errors: allErrors,
   });
 
