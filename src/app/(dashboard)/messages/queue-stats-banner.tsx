@@ -1,57 +1,16 @@
 "use client";
 
-import { useEffect, useState } from "react";
-
-import { getQueueStats, type QueueStats } from "./actions";
-
-const POLL_INTERVAL_MS = 30_000;
+import { type QueueStats } from "./actions";
 
 /**
- * Live stats banner above the Outbox queue table.
+ * Stats banner above the Outbox queue table.
  *
  * Renders queued / sentToday / failedToday counts, plus the relative
- * "next release" time and humanized drain ETA. Polls getQueueStats
- * every 30s while document.visibilityState === "visible"; pauses while
- * hidden; fires one immediate refresh when the tab returns to visible
- * so an operator coming back from another window doesn't have to wait
- * up to 30s for fresh data.
+ * "next release" time and humanized drain ETA. Polling lives in
+ * useQueueStats, owned by CockpitView, so this banner and the Outbox
+ * tab badge always show the same numbers.
  */
-export function QueueStatsBanner({
-  initialStats,
-}: {
-  initialStats: QueueStats;
-}) {
-  const [stats, setStats] = useState<QueueStats>(initialStats);
-
-  useEffect(() => {
-    let cancelled = false;
-
-    async function refresh() {
-      const result = await getQueueStats();
-      if (cancelled) return;
-      if (result.ok) setStats(result.data);
-    }
-
-    const intervalId = setInterval(() => {
-      if (typeof document !== "undefined" && document.visibilityState === "visible") {
-        void refresh();
-      }
-    }, POLL_INTERVAL_MS);
-
-    function onVisibilityChange() {
-      if (document.visibilityState === "visible") {
-        void refresh();
-      }
-    }
-    document.addEventListener("visibilitychange", onVisibilityChange);
-
-    return () => {
-      cancelled = true;
-      clearInterval(intervalId);
-      document.removeEventListener("visibilitychange", onVisibilityChange);
-    };
-  }, []);
-
+export function QueueStatsBanner({ stats }: { stats: QueueStats }) {
   return (
     <div className="bg-card mb-4 rounded-xl border p-4 text-sm">
       <div className="font-medium">

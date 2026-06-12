@@ -1,0 +1,54 @@
+"use client";
+
+import { useEffect, useState } from "react";
+
+import { getQueueStats, type QueueStats } from "./actions";
+
+const POLL_INTERVAL_MS = 30_000;
+
+/**
+ * Live queue stats shared by the Outbox tab badge and the stats banner.
+ *
+ * Seeds from the server-fetched first-paint stats, then polls
+ * getQueueStats every 30s while document.visibilityState === "visible";
+ * pauses while hidden; fires one immediate refresh when the tab returns
+ * to visible so an operator coming back from another window doesn't
+ * have to wait up to 30s for fresh data.
+ */
+export function useQueueStats(initialStats: QueueStats): QueueStats {
+  const [stats, setStats] = useState<QueueStats>(initialStats);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function refresh() {
+      const result = await getQueueStats();
+      if (cancelled) return;
+      if (result.ok) setStats(result.data);
+    }
+
+    const intervalId = setInterval(() => {
+      if (
+        typeof document !== "undefined" &&
+        document.visibilityState === "visible"
+      ) {
+        void refresh();
+      }
+    }, POLL_INTERVAL_MS);
+
+    function onVisibilityChange() {
+      if (document.visibilityState === "visible") {
+        void refresh();
+      }
+    }
+    document.addEventListener("visibilitychange", onVisibilityChange);
+
+    return () => {
+      cancelled = true;
+      clearInterval(intervalId);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  }, []);
+
+  return stats;
+}
