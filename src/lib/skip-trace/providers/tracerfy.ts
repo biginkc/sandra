@@ -223,6 +223,7 @@ export class TracerfyProvider implements SkipTraceProvider {
     form.append("mail_address_column", "mail_address");
     form.append("mail_city_column", "mail_city");
     form.append("mail_state_column", "mail_state");
+    form.append("mail_zip_column", "mail_zip");
     form.append("first_name_column", "first_name");
     form.append("last_name_column", "last_name");
     // `advanced` = Tracerfy resolves the property owner from the address
@@ -370,11 +371,11 @@ export function mapBatchRow(row: TracerfyBatchRow): SkipTraceResult {
           zip: row.mail_zip ?? null,
         }
       : null;
-  // Flat rows carry no `hit` boolean — derive it from whether any
-  // contactable data came back.
-  const hit =
-    !!row.hit ||
-    persons.some((p) => p.phones.length > 0 || p.emails.length > 0);
+  // Flat rows carry no `hit` boolean — any extracted person counts as a
+  // hit. A name-only row (no phones/emails) still carries owner identity
+  // worth persisting; downgrading it to no_match would silently drop the
+  // enrichment (Codex review finding on PR #252).
+  const hit = !!row.hit || persons.length > 0;
   return {
     // Tracerfy doesn't reliably round-trip external_id, so we treat
     // this as a hint at best — finalize matches via matchedAddress.

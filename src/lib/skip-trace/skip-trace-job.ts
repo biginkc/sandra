@@ -520,6 +520,12 @@ async function finalizeClaimed(
         tags: { surface: "skip_trace_finalize_props_lookup" },
         extra: { jobId: params.jobId, chunkSize: ids.length },
       });
+      // Fail CLOSED. A partial propsById map silently misclassifies
+      // every affected missing property as address_unverified and skips
+      // its negative-cache write. Throwing reverts the claim
+      // (finalizing→running) so the next sweep tick retries the whole
+      // finalize against a healthy database.
+      throw new Error(`finalize props lookup failed: ${error.message}`);
     }
     if (data) props.push(...data);
   }

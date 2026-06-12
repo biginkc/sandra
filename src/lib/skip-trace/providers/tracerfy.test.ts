@@ -417,6 +417,33 @@ describe("TracerfyProvider — pollBatch", () => {
     });
   });
 
+  it("flat row with name only (no phones/emails) still counts as a hit", async () => {
+    // Owner identity without contact data is still enrichment worth
+    // persisting — hit=false would downgrade it to no_match and drop
+    // the name (Codex review finding on PR #252).
+    mockFetch({
+      status: 200,
+      body: [
+        {
+          address: "9 Name Only Rd",
+          city: "KC",
+          state: "MO",
+          first_name: "Pat",
+          last_name: "Owner",
+          mobile_1: "",
+          landline_1: "",
+          email_1: "",
+        },
+      ],
+    });
+    const p = new TracerfyProvider("k");
+    const result = await p.pollBatch("42");
+    expect(result![0].hit).toBe(true);
+    expect(result![0].persons).toHaveLength(1);
+    expect(result![0].persons[0].lastName).toBe("Owner");
+    expect(result![0].persons[0].phones).toHaveLength(0);
+  });
+
   it("flat row with no owner data at all maps to hit=false, no persons", async () => {
     mockFetch({
       status: 200,
