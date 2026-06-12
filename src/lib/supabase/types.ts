@@ -2452,7 +2452,7 @@ export type Database = {
         }[]
       }
       ensure_sms_conversation_id: {
-        Args: { p_contact_id: string; p_property_id: string }
+        Args: { p_contact_id: string; p_property_id: string | null }
         Returns: string
       }
       merge_duplicate_properties: {

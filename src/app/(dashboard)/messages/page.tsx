@@ -2,6 +2,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
 import { listThreads, type ListThreadsOpts } from "@/lib/messages/list-threads";
 import { listUnknownSenders } from "@/lib/messages/list-unknown-senders";
+import { canonicalizeThreadId } from "@/lib/messages/threading";
 
 import { markMessagesReadForThread } from "../leads/actions";
 
@@ -75,6 +76,15 @@ export default async function MessagesPage({
     data: { user: currentUser },
   } = await supabase.auth.getUser();
 
+  // Translate whatever the URL carries (canonical conversation UUID, or a
+  // stale legacy/bare-contact link) into the one true conversation id.
+  // Everything downstream — thread pin, detail fetch, mark-read — deals
+  // in canonical ids only.
+  const canonicalThreadId =
+    isThreadFilter(filter) && selectedThreadId
+      ? await canonicalizeThreadId(supabase, selectedThreadId)
+      : null;
+
   // Resolve the threads-list options based on the active filter.
   const threadOpts: ListThreadsOpts = {};
   if (filter === "mine" && currentUser) threadOpts.assigneeId = currentUser.id;
@@ -83,7 +93,7 @@ export default async function MessagesPage({
     threadOpts.unreadOnly = true;
     // Keep the open thread listed even after read-on-open marks it read —
     // it should only leave the Unread list once the user clicks away.
-    if (selectedThreadId) threadOpts.includeThreadId = selectedThreadId;
+    if (canonicalThreadId) threadOpts.includeThreadId = canonicalThreadId;
   }
 
   // Fetch everything in parallel. The thread list + unknown active count
@@ -99,8 +109,8 @@ export default async function MessagesPage({
   ] = await Promise.all([
     listThreads(supabase, threadOpts),
     listQueuedPage(null),
-    isThreadFilter(filter) && selectedThreadId
-      ? fetchInboxDetail(supabase, selectedThreadId)
+    canonicalThreadId
+      ? fetchInboxDetail(supabase, canonicalThreadId)
       : Promise.resolve(null),
     listUnknownSenders(supabase, {}),
     filter === "dismissed"

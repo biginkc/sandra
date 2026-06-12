@@ -6,10 +6,7 @@ import {
   resetTenantTables,
   seedProspects,
 } from "./fixtures";
-import {
-  buildThreadId,
-  ensureConversationIdForThread,
-} from "../src/lib/messages/threading";
+import { ensureConversationIdForThread } from "../src/lib/messages/threading";
 
 /**
  * Feature 7 — in-app notifications. Exercises the full Realtime path:
@@ -79,7 +76,7 @@ async function seedAssignedInboundThread(
   return {
     propertyId: prop.id,
     contactId: contact.id,
-    threadId: buildThreadId(conversationId, contact.id, prop.id),
+    threadId: conversationId,
   };
 }
 

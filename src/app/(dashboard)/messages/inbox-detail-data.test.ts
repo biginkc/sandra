@@ -225,38 +225,25 @@ function makeSupabaseStub(seed: SeedData) {
 }
 
 describe("fetchInboxDetail", () => {
-  it("resolves a legacy contact UUID link to the most recent concrete thread", async () => {
+  // Stale URL formats (legacy keys, bare contact ids) are translated by
+  // canonicalizeThreadId at the page boundary — see threading.test.ts.
+  // fetchInboxDetail's contract is conversation-UUID-only.
+
+  it("returns null when the conversation has no messages", async () => {
     const supabase = makeSupabaseStub({
       messages: [
         makeMessage({
-          id: "newer",
+          id: "other-conversation",
           contact_id: CONTACT_ID,
           property_id: RECENT_PROPERTY_ID,
-          body: "latest thread message",
-          created_at: "2026-06-09T12:00:00.000Z",
-        }),
-        makeMessage({
-          id: "older",
-          contact_id: CONTACT_ID,
-          property_id: OLDER_PROPERTY_ID,
-          body: "older thread message",
-          created_at: "2026-06-08T12:00:00.000Z",
+          conversation_id: "99999999-9999-4999-8999-999999999999",
         }),
       ],
       contacts: [makeContact({ id: CONTACT_ID })],
-      properties: [
-        makeProperty({ id: RECENT_PROPERTY_ID, address: "200 Newer Ave" }),
-        makeProperty({ id: OLDER_PROPERTY_ID, address: "100 Older Ave" }),
-      ],
+      properties: [makeProperty({ id: RECENT_PROPERTY_ID })],
     });
 
-    const detail = await fetchInboxDetail(supabase as never, CONTACT_ID);
-
-    expect(detail).not.toBeNull();
-    expect(detail?.threadId).toBe(`legacy:${CONTACT_ID}:${RECENT_PROPERTY_ID}`);
-    expect(detail?.propertyId).toBe(RECENT_PROPERTY_ID);
-    expect(detail?.initialMessages.map((message) => message.id)).toEqual(["newer"]);
-    expect(detail?.propertyAddress).toContain("200 Newer Ave");
+    expect(await fetchInboxDetail(supabase as never, CONVERSATION_ID)).toBeNull();
   });
 
   it("still resolves bare conversation UUID links directly", async () => {
@@ -282,29 +269,23 @@ describe("fetchInboxDetail", () => {
     expect(detail?.contactId).toBe(CONTACT_ID);
   });
 
-  it("ignores queued rows when resolving a legacy contact link to the live thread", async () => {
+  it("ignores queued rows in the conversation", async () => {
     const supabase = makeSupabaseStub({
       messages: [
         makeMessage({
-          id: "queued-same-thread",
+          id: "queued-draft",
           contact_id: CONTACT_ID,
           property_id: OLDER_PROPERTY_ID,
+          conversation_id: CONVERSATION_ID,
           status: "queued",
-          body: "queued sibling in same thread",
+          body: "queued draft waiting for release",
           created_at: "2026-06-09T12:00:00.000Z",
-        }),
-        makeMessage({
-          id: "queued-other-thread",
-          contact_id: CONTACT_ID,
-          property_id: RECENT_PROPERTY_ID,
-          status: "queued",
-          body: "queued newer thread",
-          created_at: "2026-06-09T13:00:00.000Z",
         }),
         makeMessage({
           id: "live-thread",
           contact_id: CONTACT_ID,
           property_id: OLDER_PROPERTY_ID,
+          conversation_id: CONVERSATION_ID,
           status: "received",
           body: "live inbound thread",
           created_at: "2026-06-08T12:00:00.000Z",
@@ -312,15 +293,14 @@ describe("fetchInboxDetail", () => {
       ],
       contacts: [makeContact({ id: CONTACT_ID })],
       properties: [
-        makeProperty({ id: RECENT_PROPERTY_ID, address: "200 Queued Ave" }),
         makeProperty({ id: OLDER_PROPERTY_ID, address: "100 Live Ave" }),
       ],
     });
 
-    const detail = await fetchInboxDetail(supabase as never, CONTACT_ID);
+    const detail = await fetchInboxDetail(supabase as never, CONVERSATION_ID);
 
     expect(detail).not.toBeNull();
-    expect(detail?.threadId).toBe(`legacy:${CONTACT_ID}:${OLDER_PROPERTY_ID}`);
+    expect(detail?.threadId).toBe(CONVERSATION_ID);
     expect(detail?.initialMessages.map((message) => message.id)).toEqual([
       "live-thread",
     ]);

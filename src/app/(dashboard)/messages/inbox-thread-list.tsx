@@ -213,13 +213,19 @@ function mergeThreadUpdate(
   updates: Record<string, ThreadUpdate>,
   row: Message,
 ): Record<string, ThreadUpdate> {
-  if (!row.contact_id || row.channel !== "sms" || row.status === "queued") {
+  // Realtime payloads carry the post-trigger row, so conversation_id is
+  // always stamped for contact-bearing SMS (migration 080). Anything
+  // without one is unknown-sender traffic — not a thread row.
+  if (
+    !row.contact_id ||
+    !row.conversation_id ||
+    row.channel !== "sms" ||
+    row.status === "queued"
+  ) {
     return updates;
   }
 
-  const threadId =
-    row.conversation_id ??
-    `legacy:${row.contact_id}:${row.property_id ?? "none"}`;
+  const threadId = row.conversation_id;
   const previous = updates[threadId];
   return {
     ...updates,

@@ -7,10 +7,7 @@ import {
   seedProspects,
 } from "./fixtures";
 import { checkQuietHours, STATE_TO_TZ } from "../src/lib/messaging/quiet-hours";
-import {
-  buildThreadId,
-  ensureConversationIdForThread,
-} from "../src/lib/messages/threading";
+import { ensureConversationIdForThread } from "../src/lib/messages/threading";
 
 /**
  * Feature 8 Phase 1 — send-now reply flow from the cockpit side panel.
@@ -87,7 +84,7 @@ async function seedConsentedThread(
   return {
     contactId: contact.id,
     propertyId: prop.id,
-    threadId: buildThreadId(conversationId, contact.id, prop.id),
+    threadId: conversationId,
   };
 }
 

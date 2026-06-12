@@ -83,6 +83,8 @@ function makeMessage(overrides: Partial<MessageRow> & { id: string; body: string
     channel: "sms",
     contact_id: overrides.contact_id ?? "contact-1",
     property_id: overrides.property_id ?? "prop-1",
+    conversation_id:
+      overrides.conversation_id ?? `conv-${overrides.contact_id ?? "contact-1"}`,
     from_address: overrides.direction === "inbound" ? "+15551234567" : "+18162804181",
     to_address: overrides.direction === "inbound" ? "+18162804181" : "+15551234567",
     created_at: overrides.created_at ?? "2026-04-29T12:00:00Z",
@@ -98,8 +100,8 @@ function makeData(overrides: Partial<InboxDetailData> & { contactId: string }): 
   const contactId = overrides.contactId;
   const propertyId = overrides.propertyId ?? "prop-1";
   return {
-    threadId: overrides.threadId ?? `legacy:${contactId}:${propertyId}`,
-    conversationId: overrides.conversationId ?? null,
+    threadId: overrides.threadId ?? `conv-${contactId}`,
+    conversationId: overrides.conversationId ?? `conv-${contactId}`,
     contactId,
     contactName: overrides.contactName ?? "Panel Test",
     contactPhone: overrides.contactPhone ?? "+15551234567",
@@ -253,7 +255,8 @@ describe("<InboxDetail />", () => {
     const aData = makeData({
       contactId: "contact-a",
       propertyId: "prop-a",
-      threadId: "legacy:contact-a:prop-a",
+      threadId: "conv-contact-a-prop-a",
+      conversationId: "conv-contact-a-prop-a",
       initialMessages: [
         makeMessage({
           id: "ma",
@@ -267,7 +270,8 @@ describe("<InboxDetail />", () => {
     const bData = makeData({
       contactId: "contact-a",
       propertyId: "prop-b",
-      threadId: "legacy:contact-a:prop-b",
+      threadId: "conv-contact-a-prop-b",
+      conversationId: "conv-contact-a-prop-b",
       initialMessages: [
         makeMessage({
           id: "mb",
