@@ -16,7 +16,9 @@
  *
  * Per the plan:
  *  - empty values / no predicate → builder returned unchanged.
- *  - within-multi-select tri-state combinator: all = AND ; any = IN ; not = NOT IN.
+ *  - within-multi-select tri-state combinator: all = AND ; any = IN ;
+ *    not = NOT IN by default, null-safe or(is.null,not.in) for
+ *    outreach_dispo + source (opt-in per column).
  *  - tri-state booleans: any = no-op ; yes = .eq(col, true) ; no = .or(col.eq.false,col.is.null).
  *  - numeric range: only emit .gte / .lte when bound is non-null.
  *  - date mode: fixed = .gte/.lte on created_at ; since N = .gte(now-N) ; prior N = .lte(now-N).
@@ -316,7 +318,7 @@ describe("applyBlock: outreach_dispo", () => {
     );
     expect(calls.some((c) => c.startsWith("in(outreach_dispo,"))).toBe(true);
   });
-  it("not+values → .not(outreach_dispo, in, …)", async () => {
+  it("not+values → null-safe or(is.null,not.in) on outreach_dispo", async () => {
     const { proxy, calls } = mockBuilder();
     const { sb } = mockSupabaseClient();
     await applyBlock(

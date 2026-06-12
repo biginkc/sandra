@@ -7,7 +7,9 @@
  *  - applyFilters(builder, blocks, sb) returns the builder with predicates
  *    layered on top, in stack order. Across blocks AND. Within multi-select
  *    blocks the combinator is honored: any = .in / all = .in (single-column
- *    collapse, see comment) / not = .not("col","in",...).
+ *    collapse, see comment) / not = .not("col","in",...) by default, with
+ *    PER-COLUMN null-safe negation (or(col.is.null,col.not.in...)) for
+ *    outreach_dispo + source — see applyMultiSelect's nullSafeNot.
  *  - applyBlock(builder, block, sb) is one switch case per kind.
  *  - Soft-delete (.is('deleted_at', null)) is the CALLER's responsibility,
  *    not this function's. The base query in page.tsx adds it before the
