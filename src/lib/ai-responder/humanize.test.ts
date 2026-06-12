@@ -191,4 +191,18 @@ describe("HUMANIZER_SYSTEM_PROMPT — sanity", () => {
     expect(HUMANIZER_SYSTEM_PROMPT).not.toMatch(/—/);
     expect(HUMANIZER_SYSTEM_PROMPT).not.toMatch(/–/);
   });
+
+  it("forbids slang", () => {
+    expect(HUMANIZER_SYSTEM_PROMPT).toMatch(/my bad/i);
+    expect(HUMANIZER_SYSTEM_PROMPT).toMatch(/hit me up/i);
+  });
+
+  it("requires standard capitalization", () => {
+    expect(HUMANIZER_SYSTEM_PROMPT).toMatch(/standard sentence capitalization/i);
+  });
+
+  it("targets a professional register, not casual mirroring", () => {
+    expect(HUMANIZER_SYSTEM_PROMPT).toMatch(/professional/i);
+    expect(HUMANIZER_SYSTEM_PROMPT).not.toMatch(/casual gets casual/i);
+  });
 });
