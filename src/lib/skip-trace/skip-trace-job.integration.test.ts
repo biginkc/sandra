@@ -4,6 +4,7 @@ import { createTestClient } from "@tests/integration/client";
 import { resetTenantTables } from "@tests/integration/reset";
 
 import { MockSkipTraceProvider } from "./providers/mock";
+import { persistSkipTraceResult } from "./persist-result";
 import {
   finalizeSkipTraceFromBatch,
   runSkipTraceEnrichment,
@@ -392,6 +393,98 @@ describe("runSkipTraceEnrichment (integration, mock provider)", () => {
     expect(job!.status).toBe("completed");
     expect(job!.succeeded_items).toBe(3);
     expect(job!.failed_items).toBe(0);
+  });
+
+  it("shared owner name with no phones: second persist reuses the name-only contact instead of colliding", async () => {
+    // contacts_person_name_key is a partial unique index on
+    // (lower(last), lower(first)) WHERE phone_1 IS NULL AND email IS
+    // NULL. An owner who returns no usable phones leaves a name-only
+    // contact; persisting a second property for the same owner used to
+    // die on the insert (624 rows on 2026-06-12).
+    const a = await seedProperty({ address: "71 Sameowner St" });
+    const b = await seedProperty({ address: "72 Sameowner St" });
+
+    const nameOnlyResult = (propertyId: string): SkipTraceResult => ({
+      propertyId,
+      hit: true,
+      persons: [
+        {
+          firstName: "Landlord",
+          lastName: "Manyhouses",
+          phones: [],
+          emails: [],
+          isOwner: true,
+        },
+      ],
+      creditsDeducted: 2,
+      raw: {},
+    });
+
+    const first = await persistSkipTraceResult(
+      supabase,
+      nameOnlyResult(a.propertyId),
+    );
+    expect(first.status).toBe("matched");
+
+    const second = await persistSkipTraceResult(
+      supabase,
+      nameOnlyResult(b.propertyId),
+    );
+    expect(second.status).toBe("matched");
+    expect(second.contactId).toBe(first.contactId);
+
+    // Both properties point at the one shared contact.
+    const { data: props } = await supabase
+      .from("properties")
+      .select("id, homeowner_contact_id")
+      .in("id", [a.propertyId, b.propertyId]);
+    expect(new Set(props!.map((p) => p.homeowner_contact_id)).size).toBe(1);
+  });
+
+  it("phone owned by another contact degrades gracefully: names land, phone skipped", async () => {
+    // contacts_phone_1_key is global — a returned number that already
+    // belongs to a different contact must not sink the whole update.
+    const a = await seedProperty({ address: "81 Phoneclash Ave" });
+    const b = await seedProperty({
+      address: "82 Phoneclash Ave",
+      withContact: true,
+    });
+
+    const sharedPhone = "+18165550777";
+    const withPhone = (propertyId: string, name: string): SkipTraceResult => ({
+      propertyId,
+      hit: true,
+      persons: [
+        {
+          firstName: name,
+          lastName: "Owner",
+          phones: [
+            { number: sharedPhone, type: "Mobile", dnc: false, rank: 1 },
+          ],
+          emails: [],
+          isOwner: true,
+        },
+      ],
+      creditsDeducted: 2,
+      raw: {},
+    });
+
+    // First persist claims the phone on property A's new contact.
+    const first = await persistSkipTraceResult(
+      supabase,
+      withPhone(a.propertyId, "Alpha"),
+    );
+    expect(first.phonesAdded).toBe(1);
+
+    // Property B already HAS a contact (import-created), so the
+    // phone-reuse pre-resolve is skipped and the update path hits the
+    // unique index. It must degrade (skip the phone), not throw.
+    const second = await persistSkipTraceResult(
+      supabase,
+      withPhone(b.propertyId, "Beta"),
+    );
+    expect(second.status).toBe("matched");
+    expect(second.phonesAdded).toBe(0);
   });
 
   it("cache hit on second run: no provider call, contact unchanged", async () => {

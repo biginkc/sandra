@@ -65,24 +65,15 @@ export async function persistSkipTraceResult(
   // `contacts_phone_1_key` and lose the row.
   let contactId = property.homeowner_contact_id;
   if (!contactId) {
-    const topPhone = owner.phones
-      .filter((p) => !!p.number && !p.dnc)
-      .sort((a, b) => a.rank - b.rank)[0]?.number;
-    if (topPhone) {
-      const normalized = normalizePhone(topPhone);
-      const { data: existing } = await supabase
-        .from("contacts")
-        .select("id")
-        .eq("org_id", property.org_id)
-        .or(
-          `phone_1.eq.${normalized},phone_2.eq.${normalized},phone_3.eq.${normalized}`,
-        )
-        .limit(1)
-        .maybeSingle();
-      if (existing) {
-        contactId = existing.id;
-      }
-    }
+    contactId =
+      (await resolveContactByPhone(supabase, property.org_id, owner)) ??
+      // contacts_person_name_key is a partial unique index on
+      // (lower(last_name), lower(first_name)) WHERE phone_1 IS NULL AND
+      // email IS NULL — a name-only contact (created when a previous
+      // property's persist couldn't fill any phone) collides
+      // deterministically with every later insert for the same owner
+      // (624 rows failed this way on 2026-06-12). Reuse it instead.
+      (await resolveContactByName(supabase, property.org_id, owner));
     if (!contactId) {
       const { data: newContact, error: contactErr } = await supabase
         .from("contacts")
@@ -93,12 +84,24 @@ export async function persistSkipTraceResult(
         })
         .select("id")
         .single();
-      if (contactErr || !newContact) {
+      if (newContact) {
+        contactId = newContact.id;
+      } else if (isUniqueViolation(contactErr?.message)) {
+        // Raced another writer between lookup and insert — re-resolve
+        // and reuse whoever won.
+        contactId =
+          (await resolveContactByPhone(supabase, property.org_id, owner)) ??
+          (await resolveContactByName(supabase, property.org_id, owner));
+        if (!contactId) {
+          throw new Error(
+            `failed to create contact: ${contactErr?.message ?? "unknown"}`,
+          );
+        }
+      } else {
         throw new Error(
           `failed to create contact: ${contactErr?.message ?? "unknown"}`,
         );
       }
-      contactId = newContact.id;
     }
     await supabase
       .from("properties")
@@ -140,19 +143,29 @@ export async function persistSkipTraceResult(
     .filter((p) => !!p.number && !p.dnc)
     .sort((a, b) => a.rank - b.rank);
 
-  let phonesAdded = 0;
-  for (const phone of candidatePhones) {
-    const normalized = normalizePhone(phone.number);
-    if (existing.has(normalized)) continue;
-    const emptyIdx = slots.findIndex((s) => !s);
-    if (emptyIdx === -1) break;
-    // Persist the E.164 form (provider-agnostic). Tracerfy returns raw
-    // 10-digit strings ("8167416576"); Dialpad outbound + the dedupe
-    // index work better with E.164 ("+18167416576").
-    slots[emptyIdx] = normalized;
-    existing.add(normalized);
-    phonesAdded++;
-  }
+  // Slot packing is re-runnable with a ban list so a phone_1 unique
+  // conflict can drop ONLY the conflicting number and keep salvageable
+  // lower-ranked ones (rather than reverting every slot wholesale).
+  // Persist the E.164 form (provider-agnostic). Tracerfy returns raw
+  // 10-digit strings ("8167416576"); Dialpad outbound + the dedupe
+  // index work better with E.164 ("+18167416576").
+  const bannedPhones = new Set<string>();
+  const packSlots = (): { packed: (string | null)[]; added: number } => {
+    const packed = [...slots];
+    const seen = new Set(existing);
+    let added = 0;
+    for (const phone of candidatePhones) {
+      const normalized = normalizePhone(phone.number);
+      if (seen.has(normalized) || bannedPhones.has(normalized)) continue;
+      const emptyIdx = packed.findIndex((s) => !s);
+      if (emptyIdx === -1) break;
+      packed[emptyIdx] = normalized;
+      seen.add(normalized);
+      added++;
+    }
+    return { packed, added };
+  };
+  let { packed: packedSlots, added: phonesAdded } = packSlots();
 
   // Email: take rank-1 if we don't already have one.
   let emailToWrite: string | null = currentContact.email ?? null;
@@ -165,9 +178,9 @@ export async function persistSkipTraceResult(
 
   // Backfill names if missing.
   const updates: Database["public"]["Tables"]["contacts"]["Update"] = {
-    phone_1: slots[0],
-    phone_2: slots[1],
-    phone_3: slots[2],
+    phone_1: packedSlots[0],
+    phone_2: packedSlots[1],
+    phone_3: packedSlots[2],
     email: emailToWrite,
   };
   if (!currentContact.first_name && owner.firstName) {
@@ -177,12 +190,58 @@ export async function persistSkipTraceResult(
     updates.last_name = owner.lastName;
   }
 
-  const { error: updErr } = await supabase
-    .from("contacts")
-    .update(updates)
-    .eq("id", contactId);
-  if (updErr) {
+  // Apply the update, degrading granularly on unique-index conflicts:
+  // phone_1 and lower(email) carry global partial unique indexes, so a
+  // number/email that already belongs to ANOTHER contact must not sink
+  // the whole write (names + remaining fields still land). A phone
+  // conflict bans only the number that landed in phone_1 and re-packs,
+  // so salvageable lower-ranked numbers still persist. The conflicting
+  // value is reachable via its owning contact; dropping it loses
+  // nothing. 38 email-key + 16 phone-key rows failed wholesale this
+  // way on 2026-06-12. Attempts are bounded by the ways the update can
+  // shrink (one per candidate phone + one for email + one clean pass);
+  // exhausting them without a confirmed write is a FAILURE — falling
+  // through would report matched for a write that never happened.
+  const maxAttempts = candidatePhones.length + 2;
+  let updateConfirmed = false;
+  let lastUpdateError = "";
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const { error: updErr } = await supabase
+      .from("contacts")
+      .update(updates)
+      .eq("id", contactId);
+    if (!updErr) {
+      updateConfirmed = true;
+      break;
+    }
+    lastUpdateError = updErr.message;
+    if (!isUniqueViolation(updErr.message)) {
+      throw new Error(`contact update failed: ${updErr.message}`);
+    }
+    if (updErr.message.includes("contacts_phone_1_key")) {
+      const conflicting = updates.phone_1;
+      if (typeof conflicting === "string" && conflicting) {
+        bannedPhones.add(conflicting);
+      }
+      const repacked = packSlots();
+      packedSlots = repacked.packed;
+      phonesAdded = repacked.added;
+      updates.phone_1 = packedSlots[0];
+      updates.phone_2 = packedSlots[1];
+      updates.phone_3 = packedSlots[2];
+      continue;
+    }
+    if (updErr.message.includes("contacts_email_key")) {
+      updates.email = currentContact.email ?? null;
+      emailsAdded = 0;
+      continue;
+    }
     throw new Error(`contact update failed: ${updErr.message}`);
+  }
+  if (!updateConfirmed) {
+    throw new Error(
+      `contact update failed after ${maxAttempts} degrade attempts: ${lastUpdateError}`,
+    );
   }
 
   // Mailing address upsert. Skip-trace providers often discover the
@@ -204,6 +263,68 @@ export async function persistSkipTraceResult(
     emailsAdded,
     mailingAddressAdded: mailingAdded,
   };
+}
+
+function isUniqueViolation(message: string | null | undefined): boolean {
+  return !!message && message.includes("duplicate key value violates");
+}
+
+type OwnerPerson = {
+  firstName?: string | null;
+  lastName?: string | null;
+  phones: Array<{ number: string; dnc: boolean; rank: number }>;
+};
+
+/** Find an existing contact in this org holding the owner's top-ranked
+ *  non-DNC phone in any slot. */
+async function resolveContactByPhone(
+  supabase: SupabaseClient<Database>,
+  orgId: string,
+  owner: OwnerPerson,
+): Promise<string | null> {
+  const topPhone = owner.phones
+    .filter((p) => !!p.number && !p.dnc)
+    .sort((a, b) => a.rank - b.rank)[0]?.number;
+  if (!topPhone) return null;
+  const normalized = normalizePhone(topPhone);
+  const { data: existing } = await supabase
+    .from("contacts")
+    .select("id")
+    .eq("org_id", orgId)
+    .or(
+      `phone_1.eq.${normalized},phone_2.eq.${normalized},phone_3.eq.${normalized}`,
+    )
+    .limit(1)
+    .maybeSingle();
+  return existing?.id ?? null;
+}
+
+/** Find an existing NAME-ONLY person contact (no phone, no email) with
+ *  the owner's exact name, case-insensitively — the population covered
+ *  by the contacts_person_name_key partial unique index. */
+async function resolveContactByName(
+  supabase: SupabaseClient<Database>,
+  orgId: string,
+  owner: OwnerPerson,
+): Promise<string | null> {
+  const first = owner.firstName?.trim();
+  const last = owner.lastName?.trim();
+  if (!first || !last) return null;
+  // ilike without wildcards = case-insensitive equality; escape the
+  // pattern chars so a literal % or _ in a name can't widen the match.
+  const escape = (v: string) => v.replace(/([%_\\])/g, "\\$1");
+  const { data: existing } = await supabase
+    .from("contacts")
+    .select("id")
+    .eq("org_id", orgId)
+    .eq("contact_type", "person")
+    .ilike("first_name", escape(first))
+    .ilike("last_name", escape(last))
+    .is("phone_1", null)
+    .is("email", null)
+    .limit(1)
+    .maybeSingle();
+  return existing?.id ?? null;
 }
 
 /**
