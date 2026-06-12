@@ -89,9 +89,30 @@ export type SweepSummary = {
  * against the test Supabase without constructing an HTTP request.
  * Production always goes through `handle()`.
  */
+// A finalizer that died mid-run (deploy, crash, function timeout) leaves
+// its job stranded in 'finalizing'. The finalize loop bumps the heartbeat
+// every ~500 rows, so a heartbeat this stale means the worker is gone —
+// hand the job back to 'running' so a later tick re-claims it.
+const STALE_FINALIZING_MS = 15 * 60 * 1000;
+
 export async function runSweep(
   supabase: ReturnType<typeof createServiceRoleClient>,
 ): Promise<SweepSummary> {
+  const staleFinalizingCutoff = new Date(
+    Date.now() - STALE_FINALIZING_MS,
+  ).toISOString();
+  const { error: rescueErr } = await supabase
+    .from("jobs")
+    .update({ status: "running" })
+    .eq("type", "skip_trace")
+    .eq("status", "finalizing")
+    .lt("worker_heartbeat_at", staleFinalizingCutoff);
+  if (rescueErr) {
+    reportError(rescueErr, {
+      tags: { surface: "cron_sweep_stale_finalizing_rescue" },
+    });
+  }
+
   const cutoff = new Date(Date.now() - MIN_AGE_BEFORE_SWEEP_MS).toISOString();
 
   const { data: stuck, error } = await supabase
@@ -134,11 +155,17 @@ export async function runSweep(
         stillPending++;
         continue;
       }
-      await finalizeSkipTraceFromBatch(supabase, {
+      const outcome = await finalizeSkipTraceFromBatch(supabase, {
         jobId: job.id,
         results,
       });
-      finalized++;
+      if (outcome === null) {
+        // Lost the claim — another finalizer (webhook, or an
+        // overlapping tick) owns this job. Not our work to count.
+        stillPending++;
+      } else {
+        finalized++;
+      }
     } catch (e) {
       reportError(e, {
         tags: { surface: "cron_sweep_stuck_skip_trace_per_job" },

@@ -29,6 +29,7 @@ export type JobsSortableColumn = (typeof JOBS_SORTABLE_COLUMNS)[number];
 export type JobStatus =
   | "queued"
   | "running"
+  | "finalizing"
   | "completed"
   | "failed"
   | "partial"
@@ -41,6 +42,7 @@ export type JobsFilters = { status: JobStatus | null };
 const JOB_STATUS_VALUES: readonly JobStatus[] = [
   "queued",
   "running",
+  "finalizing",
   "completed",
   "failed",
   "partial",

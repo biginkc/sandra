@@ -6,6 +6,7 @@ import {
 
 import type {
   SkipTraceBatchTicket,
+  SkipTraceEmail,
   SkipTraceInput,
   SkipTraceMailingAddress,
   SkipTracePerson,
@@ -87,16 +88,34 @@ type TracerfyBatchResponse = {
   estimated_wait_seconds?: number;
 };
 
-type TracerfyQueueRow = TracerfyLookupResponse & {
+/**
+ * One row of a batch result — webhook payload and `GET /queue/:id` share
+ * this shape.
+ *
+ * IMPORTANT: live advanced-mode batches (first observed 2026-06-12) do
+ * NOT nest owner data under `persons` the way `/trace/lookup/` does.
+ * They return FLAT row-level fields: `first_name`, `last_name`,
+ * `mobile_1..5`, `landline_1..5`, `email_1..5`, `mail_*`, and no `hit`
+ * boolean at all. The first 12,282-row production run parsed rows with
+ * the lookup shape, found no `persons`/`hit`, and silently dropped every
+ * returned owner. `mapBatchRow` below handles both shapes.
+ */
+export type TracerfyBatchRow = Partial<TracerfyLookupResponse> & {
   /** When polling, Tracerfy echoes the per-row identifier we sent in
    *  the batch. We pass through `propertyId` as `external_id` on
    *  submit so we can match results back. */
   external_id?: string;
   /** Batch responses also surface the owner's mailing address as flat
-   *  row-level fields (no zip in the batch shape per Tracerfy's docs). */
+   *  row-level fields. */
   mail_address?: string;
   mail_city?: string;
   mail_state?: string;
+  mail_zip?: string;
+  /** Flat owner fields (advanced/batch shape). Numbered phone/email
+   *  fields (`mobile_1`…, `landline_1`…, `email_1`…) are probed via
+   *  index access in `flatRowPerson` rather than enumerated here. */
+  first_name?: string;
+  last_name?: string;
 };
 
 type TracerfyAnalyticsResponse = {
@@ -264,7 +283,7 @@ export class TracerfyProvider implements SkipTraceProvider {
   }
 
   async pollBatch(queueId: string): Promise<SkipTraceResult[] | null> {
-    const data = await this.request<TracerfyQueueRow[] | { pending: boolean }>(
+    const data = await this.request<TracerfyBatchRow[] | { pending: boolean }>(
       "GET",
       `/queue/${encodeURIComponent(queueId)}`,
     );
@@ -272,36 +291,12 @@ export class TracerfyProvider implements SkipTraceProvider {
     // some accounts return `{pending: true}` instead. Treat any non-array
     // shape as "still pending."
     if (!Array.isArray(data)) return null;
-    return data.map((row) => {
-      const persons = (row.persons ?? []).map(mapPerson);
-      // Batch responses surface mailing fields at the row level (per
-      // Tracerfy docs: `mail_address`, `mail_city`, `mail_state`).
-      // No `mail_zip` in the batch shape today.
-      const rowMailing: SkipTraceMailingAddress | null =
-        row.mail_address || row.mail_city || row.mail_state
-          ? {
-              street: row.mail_address ?? null,
-              city: row.mail_city ?? null,
-              state: row.mail_state ?? null,
-              zip: null,
-            }
-          : null;
-      return {
-        // Tracerfy doesn't reliably round-trip external_id, so we treat
-        // this as a hint at best — finalize matches via matchedAddress.
-        propertyId: row.external_id ?? "",
-        matchedAddress: {
-          address: row.address ?? "",
-          city: row.city ?? "",
-          state: row.state ?? "",
-        },
-        hit: !!row.hit,
-        persons,
-        creditsDeducted: row.credits_deducted ?? 0,
-        mailingAddress: rowMailing,
-        raw: row,
-      };
-    });
+    // An EMPTY array is "no rows ready yet", not "completed with zero
+    // rows" — a submitted batch always materializes ≥1 row. On
+    // 2026-06-12 empty-array polls were finalized as complete, writing a
+    // blanket error item for every submitted property.
+    if (data.length === 0) return null;
+    return data.map(mapBatchRow);
   }
 
   async getBalance(): Promise<number> {
@@ -347,6 +342,106 @@ export class TracerfyProvider implements SkipTraceProvider {
 
     return (await response.json()) as T;
   }
+}
+
+/**
+ * Map one batch result row (webhook payload or `GET /queue/:id`) to the
+ * provider-agnostic result shape. Shared by `pollBatch` and the webhook
+ * receiver so the two ingestion paths can never diverge again.
+ *
+ * Handles both row shapes:
+ *  - lookup-style: `persons: [...]` + `hit` (older docs / normal traces)
+ *  - flat advanced-mode: `first_name`/`last_name`, `mobile_N`,
+ *    `landline_N`, `email_N` at the row level, no `hit` field (the live
+ *    shape as of 2026-06-12)
+ */
+export function mapBatchRow(row: TracerfyBatchRow): SkipTraceResult {
+  let persons = (row.persons ?? []).map(mapPerson);
+  if (persons.length === 0) {
+    const flat = flatRowPerson(row);
+    if (flat) persons = [flat];
+  }
+  const rowMailing: SkipTraceMailingAddress | null =
+    row.mail_address || row.mail_city || row.mail_state
+      ? {
+          street: row.mail_address ?? null,
+          city: row.mail_city ?? null,
+          state: row.mail_state ?? null,
+          zip: row.mail_zip ?? null,
+        }
+      : null;
+  // Flat rows carry no `hit` boolean — derive it from whether any
+  // contactable data came back.
+  const hit =
+    !!row.hit ||
+    persons.some((p) => p.phones.length > 0 || p.emails.length > 0);
+  return {
+    // Tracerfy doesn't reliably round-trip external_id, so we treat
+    // this as a hint at best — finalize matches via matchedAddress.
+    propertyId: row.external_id ?? "",
+    matchedAddress: {
+      address: row.address ?? "",
+      city: row.city ?? "",
+      state: row.state ?? "",
+    },
+    hit,
+    persons,
+    creditsDeducted: row.credits_deducted ?? 0,
+    mailingAddress: rowMailing,
+    raw: row,
+  };
+}
+
+/**
+ * Build a SkipTracePerson from the flat row-level owner fields of an
+ * advanced-mode batch row. Returns null when the row carries no owner
+ * data at all (a true miss). Mobiles rank ahead of landlines — phone_1
+ * feeds the SMS pipeline, so textable numbers come first. The flat shape
+ * has no DNC flag; numbers default to dnc=false (same as unknown).
+ */
+function flatRowPerson(row: TracerfyBatchRow): SkipTracePerson | null {
+  const rec = row as Record<string, unknown>;
+  const str = (key: string): string | null => {
+    const v = rec[key];
+    return typeof v === "string" && v.trim() !== "" ? v.trim() : null;
+  };
+
+  const phones: SkipTracePhone[] = [];
+  let rank = 1;
+  for (let i = 1; i <= 10; i++) {
+    const n = str(`mobile_${i}`);
+    if (n) phones.push({ number: n, type: "Mobile", dnc: false, rank: rank++, carrier: null });
+  }
+  for (let i = 1; i <= 10; i++) {
+    const n = str(`landline_${i}`);
+    if (n) phones.push({ number: n, type: "Landline", dnc: false, rank: rank++, carrier: null });
+  }
+
+  const emails: SkipTraceEmail[] = [];
+  let emailRank = 1;
+  for (let i = 1; i <= 10; i++) {
+    const e = str(`email_${i}`);
+    if (e) emails.push({ email: e, rank: emailRank++ });
+  }
+
+  const firstName = str("first_name");
+  const lastName = str("last_name");
+
+  if (!firstName && !lastName && phones.length === 0 && emails.length === 0) {
+    return null;
+  }
+
+  return {
+    firstName,
+    lastName,
+    phones,
+    emails,
+    // The advanced trace resolves THE owner of the submitted address —
+    // that's the product. Flag accordingly so persist prefers this
+    // person for homeowner_details.
+    isOwner: true,
+    mailingAddress: null,
+  };
 }
 
 function mapPerson(p: TracerfyPerson): SkipTracePerson {
