@@ -453,6 +453,7 @@ function ledgerRank(entry: LedgerEntry): number {
 async function readItemLedger(
   supabase: SupabaseClient<Database>,
   jobId: string,
+  onPage?: () => Promise<void>,
 ): Promise<{
   ledger: Map<string, LedgerEntry>;
   retryableErrorItemIds: string[];
@@ -493,6 +494,7 @@ async function readItemLedger(
         ledger.set(row.property_id, entry);
       }
     }
+    if (onPage) await onPage();
     if (!data || data.length < 1000) break;
   }
   return { ledger, retryableErrorItemIds };
@@ -506,6 +508,56 @@ async function finalizeClaimed(
   const prior = (priorSummary ?? {}) as Partial<SkipTraceJobSummary> & {
     batch_pending?: boolean;
     address_to_property_ids?: Record<string, string[]>;
+  };
+
+  // Claim heartbeat + ownership fence, armed for the ENTIRE claimed
+  // lifetime — including the pre-loop resume work below (ledger read,
+  // retryable cleanup, props lookup), which is itself a dozen-plus DB
+  // round trips that can stall on a degraded database. TIME-based
+  // (checked at every step, written every ≤45s): a count-keyed
+  // heartbeat would starve exactly when the rescue window matters. The
+  // write doubles as the claim fence: it only matches while the job is
+  // still 'finalizing' under our ownership; if the sweep rescued the
+  // job away, we abort instead of double-writing alongside the new
+  // owner. The fence is only as fresh as the last CONFIRMED write, so
+  // failures retry on a short cadence and a worker that cannot prove
+  // ownership for longer than the rescue window aborts conservatively
+  // — the only realistic rescue-while-alive trigger is exactly this
+  // can't-write-heartbeat state.
+  const HEARTBEAT_INTERVAL_MS = 45_000;
+  const HEARTBEAT_RETRY_MS = 10_000;
+  // Just under the sweep's STALE_FINALIZING_MS (5 min) so we abort
+  // before the rescue can hand the job to a new owner.
+  const OWNERSHIP_PROOF_DEADLINE_MS = 4.5 * 60 * 1000;
+  let lastAttemptAt = 0;
+  let lastConfirmedAt = Date.now();
+  const bumpHeartbeat = async () => {
+    const now = Date.now();
+    const sinceConfirmed = now - lastConfirmedAt;
+    const interval =
+      sinceConfirmed > HEARTBEAT_INTERVAL_MS
+        ? HEARTBEAT_RETRY_MS
+        : HEARTBEAT_INTERVAL_MS;
+    if (now - lastAttemptAt < interval) return;
+    lastAttemptAt = now;
+    const { data, error } = await supabase
+      .from("jobs")
+      .update({ worker_heartbeat_at: new Date().toISOString() })
+      .eq("id", params.jobId)
+      .eq("status", "finalizing")
+      .select("id");
+    if (error) {
+      // Transient heartbeat failure — keep working, but only while we
+      // can still prove ownership inside the rescue window.
+      if (sinceConfirmed > OWNERSHIP_PROOF_DEADLINE_MS) {
+        throw new ClaimLostError(params.jobId);
+      }
+      return;
+    }
+    if (!data || data.length === 0) {
+      throw new ClaimLostError(params.jobId);
+    }
+    lastConfirmedAt = Date.now();
   };
 
   // ------------------------------------------------------------------
@@ -524,6 +576,7 @@ async function finalizeClaimed(
   const { ledger: startLedger, retryableErrorItemIds } = await readItemLedger(
     supabase,
     params.jobId,
+    bumpHeartbeat,
   );
   const alreadyProcessed = new Set<string>();
   for (const [pid, entry] of startLedger) {
@@ -535,6 +588,7 @@ async function finalizeClaimed(
   // error or success row sharing the property) so the reprocess writes
   // a single fresh outcome per property.
   for (const ids of chunked(retryableErrorItemIds, IN_CHUNK)) {
+    await bumpHeartbeat();
     const { error } = await supabase
       .from("job_items")
       .delete()
@@ -650,6 +704,7 @@ async function finalizeClaimed(
     cass_status: string;
   }> = [];
   for (const ids of chunked(Array.from(allRelatedPropertyIds), IN_CHUNK)) {
+    await bumpHeartbeat();
     const { data, error } = await supabase
       .from("properties")
       .select("id, address, city, state, zip, cass_status")
@@ -669,55 +724,6 @@ async function finalizeClaimed(
     if (data) props.push(...data);
   }
   const propsById = new Map(props.map((p) => [p.id, p]));
-
-  // Refresh the claim heartbeat as the long loops below grind through
-  // thousands of rows, so the sweep's stale-finalizing rescue can tell
-  // "working" from "crashed". TIME-based (checked every row, written
-  // every ≤45s) rather than row-count-based — a degraded DB slows the
-  // row rate, and a count-keyed heartbeat would starve exactly when the
-  // rescue window matters. The write is also the claim fence: it only
-  // matches while the job is still 'finalizing' under our ownership; if
-  // the sweep rescued the job away, we abort instead of double-writing
-  // alongside the new owner. The fence is only as fresh as the last
-  // CONFIRMED write, so failures retry on a short cadence and a worker
-  // that cannot prove ownership for longer than the rescue window
-  // aborts conservatively — the only realistic rescue-while-alive
-  // trigger is exactly this can't-write-heartbeat state.
-  const HEARTBEAT_INTERVAL_MS = 45_000;
-  const HEARTBEAT_RETRY_MS = 10_000;
-  // Just under the sweep's STALE_FINALIZING_MS (5 min) so we abort
-  // before the rescue can hand the job to a new owner.
-  const OWNERSHIP_PROOF_DEADLINE_MS = 4.5 * 60 * 1000;
-  let lastAttemptAt = 0;
-  let lastConfirmedAt = Date.now();
-  const bumpHeartbeat = async () => {
-    const now = Date.now();
-    const sinceConfirmed = now - lastConfirmedAt;
-    const interval =
-      sinceConfirmed > HEARTBEAT_INTERVAL_MS
-        ? HEARTBEAT_RETRY_MS
-        : HEARTBEAT_INTERVAL_MS;
-    if (now - lastAttemptAt < interval) return;
-    lastAttemptAt = now;
-    const { data, error } = await supabase
-      .from("jobs")
-      .update({ worker_heartbeat_at: new Date().toISOString() })
-      .eq("id", params.jobId)
-      .eq("status", "finalizing")
-      .select("id");
-    if (error) {
-      // Transient heartbeat failure — keep working, but only while we
-      // can still prove ownership inside the rescue window.
-      if (sinceConfirmed > OWNERSHIP_PROOF_DEADLINE_MS) {
-        throw new ClaimLostError(params.jobId);
-      }
-      return;
-    }
-    if (!data || data.length === 0) {
-      throw new ClaimLostError(params.jobId);
-    }
-    lastConfirmedAt = Date.now();
-  };
 
   // ------------------------------------------------------------------
   // Apply results. Wrap each persist in try/catch so one bad row can't
