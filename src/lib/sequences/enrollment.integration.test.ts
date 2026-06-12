@@ -68,6 +68,7 @@ async function seedPropertyWithConsent(opts: {
         first_name: "Enrollee",
         last_name: "Test",
         phone_1: opts.phone,
+        phone_1_type: "mobile",
       })
       .select("id")
       .single();

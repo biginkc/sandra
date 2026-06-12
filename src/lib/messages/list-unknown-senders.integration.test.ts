@@ -55,7 +55,12 @@ describe("listUnknownSenders (integration)", () => {
     // Matched inbound — should NOT appear (we'll cheat by attaching to a contact).
     const { data: contact } = await supabase
       .from("contacts")
-      .insert({ first_name: "Matched", last_name: "Already", phone_1: "+18165558003" })
+      .insert({
+        first_name: "Matched",
+        last_name: "Already",
+        phone_1: "+18165558003",
+        phone_1_type: "mobile",
+      })
       .select("id")
       .single();
     await supabase.from("messages").insert({

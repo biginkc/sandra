@@ -94,6 +94,7 @@ export async function seedDialerLead(
       first_name: "Jitter",
       last_name: "Route",
       phone_1: phone,
+      phone_1_type: phone ? "mobile" : "unknown",
       do_not_contact: opts.do_not_contact ?? false,
     })
     .select("id")

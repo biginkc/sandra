@@ -117,7 +117,12 @@ describe("update-homeowner-phones sub-op (integration)", () => {
     const contactId = await seedContact();
     await supabase
       .from("contacts")
-      .update({ phone_1: "+19998880001", phone_2: "+19998880002" })
+      .update({
+        phone_1: "+19998880001",
+        phone_1_type: "mobile",
+        phone_2: "+19998880002",
+        phone_2_type: "mobile",
+      })
       .eq("id", contactId);
     await seedPropertyWithHomeowner("400 Partial St", contactId);
     const result = await applyRow({

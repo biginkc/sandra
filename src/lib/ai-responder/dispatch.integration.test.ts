@@ -112,6 +112,7 @@ async function seedLead(opts: {
       first_name: "AI",
       last_name: "Test",
       phone_1: opts.phone,
+      phone_1_type: "mobile",
     })
     .select("id")
     .single();
@@ -296,6 +297,7 @@ describe("dispatchAiResponse (integration)", () => {
         first_name: "Sibling",
         last_name: "Thread",
         phone_1: "+18167554913",
+        phone_1_type: "mobile",
       })
       .select("id")
       .single();
@@ -480,7 +482,7 @@ describe("dispatchAiResponse (integration)", () => {
     // property — count is org-wide).
     const { data: otherContact } = await supabase
       .from("contacts")
-      .insert({ phone_1: "+18167554106" })
+      .insert({ phone_1: "+18167554106", phone_1_type: "mobile" })
       .select("id")
       .single();
     const { data: otherProp } = await supabase

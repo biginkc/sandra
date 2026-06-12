@@ -20,12 +20,14 @@ async function seed(params: {
   state?: string;
   withConsent?: boolean;
 }): Promise<{ contactId: string; propertyId: string }> {
+  const phone1 = params.phone === undefined ? "+18165559999" : params.phone;
   const { data: contact } = await supabase
     .from("contacts")
     .insert({
       first_name: "Integration",
       last_name: "Test",
-      phone_1: params.phone === undefined ? "+18165559999" : params.phone,
+      phone_1: phone1,
+      phone_1_type: phone1 ? "mobile" : "unknown",
     })
     .select("id")
     .single();
