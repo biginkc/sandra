@@ -6,7 +6,6 @@ import { applyThreadUpdates, type ThreadUpdate } from "./inbox-thread-list";
 
 function makeThread(overrides: Partial<Thread> & { threadId: string }): Thread {
   return {
-    conversationId: null,
     contactId: `contact-${overrides.threadId}`,
     contactName: null,
     contactPhone: null,

@@ -6,10 +6,7 @@ import {
   resetTenantTables,
   seedProspects,
 } from "./fixtures";
-import {
-  buildThreadId,
-  ensureConversationIdForThread,
-} from "../src/lib/messages/threading";
+import { ensureConversationIdForThread } from "../src/lib/messages/threading";
 
 /**
  * Feature 8 Phase 1 — selection + thread side-panel rendering.
@@ -73,7 +70,7 @@ async function seedThread(
   return {
     contactId: contact.id,
     propertyId: prop.id,
-    threadId: buildThreadId(conversationId, contact.id, prop.id),
+    threadId: conversationId,
   };
 }
 

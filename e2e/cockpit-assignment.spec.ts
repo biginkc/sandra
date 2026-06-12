@@ -6,10 +6,7 @@ import {
   resetTenantTables,
   seedProspects,
 } from "./fixtures";
-import {
-  buildThreadId,
-  ensureConversationIdForThread,
-} from "../src/lib/messages/threading";
+import { ensureConversationIdForThread } from "../src/lib/messages/threading";
 
 /**
  * Feature 8 Phase 3 — Per-user assignment + cockpit ergonomics.
@@ -89,7 +86,7 @@ async function seedAssignedThread(
   return {
     contactId: contact.id,
     propertyId: prop.id,
-    threadId: buildThreadId(conversationId, contact.id, prop.id),
+    threadId: conversationId,
   };
 }
 

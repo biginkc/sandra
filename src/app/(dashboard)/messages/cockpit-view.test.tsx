@@ -87,8 +87,7 @@ function makeThread(
 ): Thread {
   const propertyId = overrides.propertyId ?? `prop-${overrides.contactId}`;
   return {
-    threadId: overrides.threadId ?? `legacy:${overrides.contactId}:${propertyId}`,
-    conversationId: overrides.conversationId ?? null,
+    threadId: overrides.threadId ?? `conv-${overrides.contactId}`,
     contactId: overrides.contactId,
     contactName: overrides.contactName ?? `Contact ${overrides.contactId}`,
     contactPhone: overrides.contactPhone ?? "+15551234567",
@@ -121,6 +120,7 @@ function makeMessage(
     channel: "sms",
     contact_id: overrides.contact_id,
     property_id: overrides.property_id,
+    conversation_id: overrides.conversation_id ?? null,
     from_address: "+15551234567",
     to_address: "+18162804181",
     created_at: overrides.created_at ?? "2026-04-29T12:00:00Z",
@@ -132,8 +132,8 @@ function makeMessage(
 function makeDetail(contactId: string, body: string): InboxDetailData {
   const propertyId = `prop-${contactId}`;
   return {
-    threadId: `legacy:${contactId}:${propertyId}`,
-    conversationId: null,
+    threadId: `conv-${contactId}`,
+    conversationId: `conv-${contactId}`,
     contactId,
     contactName: `Contact ${contactId}`,
     contactPhone: "+15551234567",
@@ -148,6 +148,7 @@ function makeDetail(contactId: string, body: string): InboxDetailData {
         body,
         contact_id: contactId,
         property_id: `prop-${contactId}`,
+        conversation_id: `conv-${contactId}`,
       }),
     ],
   };

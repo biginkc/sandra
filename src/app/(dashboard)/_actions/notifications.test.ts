@@ -18,7 +18,7 @@ describe("getRecentNotifications", () => {
     vi.clearAllMocks();
   });
 
-  it("builds a real message-thread href from UUID contact/property ids", async () => {
+  it("builds the message-thread href from the conversation id", async () => {
     createClient.mockResolvedValue({
       auth: {
         getUser: vi.fn().mockResolvedValue({
@@ -59,7 +59,7 @@ describe("getRecentNotifications", () => {
                 data: [
                   {
                     id: "message-1",
-                    conversation_id: null,
+                    conversation_id: "55555555-5555-4555-8555-555555555555",
                     contact_id: CONTACT_ID,
                     property_id: PROPERTY_ID,
                   },
@@ -82,7 +82,7 @@ describe("getRecentNotifications", () => {
       expect.objectContaining({
         id: "notification-1",
         entityId: "message-1",
-        href: `/messages?thread=${encodeURIComponent(`legacy:${CONTACT_ID}:${PROPERTY_ID}`)}`,
+        href: `/messages?thread=${encodeURIComponent("55555555-5555-4555-8555-555555555555")}`,
       }),
     ]);
   });

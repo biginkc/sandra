@@ -1075,36 +1075,28 @@ export async function markMessagesReadForThread(
   threadId: string,
 ): Promise<Result<null>> {
   try {
+    // Thread identity is the conversation UUID since migration 080 —
+    // callers pass canonical ids only (the page boundary translates any
+    // stale URL format before this runs).
     const parsed = parseThreadId(threadId);
-    if (parsed.kind === "contact") {
+    if (parsed.kind !== "conversation") {
       return {
         ok: false,
         error: {
           code: "MARK_READ_FAILED",
-          message: "Contact-only thread ids are no longer valid for mark-read.",
+          message: "mark-read requires a canonical conversation id.",
         },
       };
     }
 
     const supabase = await createClient();
-    let query = supabase
+    const { error } = await supabase
       .from("messages")
       .update({ read_at: new Date().toISOString() })
       .eq("channel", "sms")
       .eq("direction", "inbound")
-      .is("read_at", null);
-
-    if (parsed.kind === "conversation") {
-      query = query.eq("conversation_id", parsed.conversationId);
-    } else {
-      query = query.eq("contact_id", parsed.contactId);
-      query =
-        parsed.propertyId === null
-          ? query.is("property_id", null)
-          : query.eq("property_id", parsed.propertyId);
-    }
-
-    const { error } = await query;
+      .is("read_at", null)
+      .eq("conversation_id", parsed.conversationId);
     if (error) {
       return {
         ok: false,

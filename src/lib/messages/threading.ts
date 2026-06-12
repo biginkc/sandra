@@ -46,14 +46,14 @@ export type InboundThreadResolution = {
     | "matched_contact_without_property";
 };
 
-export function buildThreadId(
-  conversationId: string | null,
-  contactId: string,
-  propertyId: string | null,
-): string {
-  return conversationId ?? `legacy:${contactId}:${propertyId ?? "none"}`;
-}
-
+/**
+ * Parse a thread id from a URL. Since migration 080 every contact-bearing
+ * SMS row carries a conversation_id, so this exists ONLY as the
+ * URL-compat doormat: old bookmarked links may still carry
+ * `legacy:<contact>:<property>` keys or bare contact ids. New code never
+ * constructs those formats — `canonicalizeThreadId` translates them to a
+ * conversation UUID once, at the page boundary.
+ */
 export function parseThreadId(threadId: string): ParsedThreadId {
   if (UUID_RE.test(threadId)) {
     return { kind: "conversation", conversationId: threadId };
@@ -71,17 +71,93 @@ export function parseThreadId(threadId: string): ParsedThreadId {
   return { kind: "contact", contactId: threadId };
 }
 
+/**
+ * Resolve a thread id of any URL format to its canonical conversation
+ * UUID, or null when nothing matches. This is the single compat shim for
+ * stale links — everything past the page boundary deals in conversation
+ * UUIDs only.
+ */
+export async function canonicalizeThreadId(
+  supabase: SupabaseClient<Database>,
+  threadId: string,
+): Promise<string | null> {
+  const parsed = parseThreadId(threadId);
+
+  if (parsed.kind === "conversation") {
+    const { data } = await supabase
+      .from("messages")
+      .select("conversation_id")
+      .eq("channel", "sms")
+      .eq("conversation_id", parsed.conversationId)
+      .limit(1)
+      .maybeSingle();
+    if (data) return parsed.conversationId;
+    // Contact ids are UUID-shaped too; a pre-Phase-2 link that doesn't
+    // match any conversation gets retried as a contact id.
+    return latestConversationIdForContact(supabase, parsed.conversationId);
+  }
+
+  if (parsed.kind === "legacy") {
+    let query = supabase
+      .from("messages")
+      .select("conversation_id")
+      .eq("channel", "sms")
+      .eq("contact_id", parsed.contactId)
+      .not("conversation_id", "is", null)
+      .order("created_at", { ascending: false })
+      .limit(1);
+    query =
+      parsed.propertyId === null
+        ? query.is("property_id", null)
+        : query.eq("property_id", parsed.propertyId);
+    const { data } = await query.maybeSingle();
+    return data?.conversation_id ?? null;
+  }
+
+  return latestConversationIdForContact(supabase, parsed.contactId);
+}
+
+/** A bare contact id is ambiguous when the contact has several threads —
+ *  resolve to the thread holding the contact's most recent message. */
+async function latestConversationIdForContact(
+  supabase: SupabaseClient<Database>,
+  contactId: string,
+): Promise<string | null> {
+  const { data } = await supabase
+    .from("messages")
+    .select("conversation_id")
+    .eq("channel", "sms")
+    .eq("contact_id", contactId)
+    .not("conversation_id", "is", null)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  return data?.conversation_id ?? null;
+}
+
 export async function ensureConversationIdForThread(
   supabase: SupabaseClient<Database>,
   contactId: string,
-  propertyId: string,
+  /** Null for contact-level threads (inbound from a contact with no
+   *  resolvable property). Org scoping falls back to the contact. */
+  propertyId: string | null,
 ): Promise<string> {
   const { data, error } = await supabase.rpc("ensure_sms_conversation_id", {
     p_contact_id: contactId,
     p_property_id: propertyId,
   });
   if (!error) return data;
-  if (!isMissingEnsureConversationRpc(error)) {
+  // Deploy-window compat: the pre-080 RPC requires a property for org
+  // scoping, so a contact-level (null-property) call gets a 42501
+  // scope-not-found even when the contact is fine. That state must not
+  // 500 inbound webhooks — drop to the deterministic fallback, which
+  // verifies the contact actually exists before minting.
+  const nullPropertyRejectedByPre080Rpc =
+    propertyId === null && isThreadScopeNotFound(error);
+  if (
+    !isMissingEnsureConversationRpc(error) &&
+    !nullPropertyRejectedByPre080Rpc
+  ) {
     reportError(new Error(error.message), {
       tags: { surface: "ensure_conversation_id_rpc" },
       extra: { contactId, propertyId, code: error.code ?? null },
@@ -89,7 +165,7 @@ export async function ensureConversationIdForThread(
     throw new Error(`ensureConversationIdForThread rpc: ${error.message}`);
   }
 
-  const fallbackKey = `${contactId}:${propertyId}`;
+  const fallbackKey = `${contactId}:${propertyId ?? "none"}`;
   const existingLock = fallbackConversationLocks.get(fallbackKey);
   if (existingLock) return existingLock;
 
@@ -107,18 +183,43 @@ export async function ensureConversationIdForThread(
 async function ensureConversationIdForThreadWithoutRpc(
   supabase: SupabaseClient<Database>,
   contactId: string,
-  propertyId: string,
+  propertyId: string | null,
 ): Promise<string> {
-  const { data: existing, error: lookupError } = await supabase
+  // Contact-level threads reach this path when the pre-080 RPC rejected
+  // the null property — the same 42501 the new RPC raises for a missing
+  // contact. Disambiguate by checking the contact really exists; fail
+  // closed if it doesn't.
+  if (propertyId === null) {
+    const { data: contactRow, error: contactError } = await supabase
+      .from("contacts")
+      .select("id")
+      .eq("id", contactId)
+      .maybeSingle();
+    if (contactError) {
+      throw new Error(
+        `ensureConversationIdForThread contact check: ${contactError.message}`,
+      );
+    }
+    if (!contactRow) {
+      throw new Error(
+        "ensureConversationIdForThread: contact not found for contact-level thread",
+      );
+    }
+  }
+
+  let lookup = supabase
     .from("messages")
     .select("conversation_id")
     .eq("channel", "sms")
     .eq("contact_id", contactId)
-    .eq("property_id", propertyId)
     .not("conversation_id", "is", null)
     .order("created_at", { ascending: true })
-    .limit(1)
-    .maybeSingle();
+    .limit(1);
+  lookup =
+    propertyId === null
+      ? lookup.is("property_id", null)
+      : lookup.eq("property_id", propertyId);
+  const { data: existing, error: lookupError } = await lookup.maybeSingle();
   if (lookupError) {
     throw new Error(
       `ensureConversationIdForThread fallback lookup: ${lookupError.message}`,
@@ -132,19 +233,35 @@ async function ensureConversationIdForThreadWithoutRpc(
   // into two threads. The in-process lock above only dedupes within a single
   // process; determinism is the cross-process guarantee.
   const conversationId = conversationIdFor(contactId, propertyId);
-  const { error: updateError } = await supabase
+  let update = supabase
     .from("messages")
     .update({ conversation_id: conversationId })
     .eq("channel", "sms")
     .eq("contact_id", contactId)
-    .eq("property_id", propertyId)
     .is("conversation_id", null);
+  update =
+    propertyId === null
+      ? update.is("property_id", null)
+      : update.eq("property_id", propertyId);
+  const { error: updateError } = await update;
   if (updateError) {
     throw new Error(
       `ensureConversationIdForThread fallback backfill: ${updateError.message}`,
     );
   }
   return conversationId;
+}
+
+/** The 42501 the RPC raises when it cannot org-scope the thread key —
+ *  for the pre-080 function, ANY null-property call lands here. */
+function isThreadScopeNotFound(error: {
+  code?: string | null;
+  message: string;
+}): boolean {
+  return (
+    error.code === "42501" &&
+    error.message.includes("contact/property thread scope not found")
+  );
 }
 
 function isMissingEnsureConversationRpc(error: {
@@ -160,10 +277,14 @@ function isMissingEnsureConversationRpc(error: {
 }
 
 // UUIDv5-style deterministic id over the (contact, property) thread key.
-function conversationIdFor(contactId: string, propertyId: string): string {
+// Property-less (contact-level) threads hash with the "none" sentinel —
+// the same sentinel the retired legacy: key format used, so the recipe
+// stays a pure function of the thread key. Existing (contact, property)
+// ids are untouched: the non-null input is hashed exactly as before.
+function conversationIdFor(contactId: string, propertyId: string | null): string {
   const ns = Buffer.from(SMS_CONV_NS.replace(/-/g, ""), "hex");
   const normalizedContactId = contactId.toLowerCase();
-  const normalizedPropertyId = propertyId.toLowerCase();
+  const normalizedPropertyId = (propertyId ?? "none").toLowerCase();
   const h = createHash("sha1")
     .update(
       Buffer.concat([
@@ -207,12 +328,11 @@ export async function resolveInboundThread(
     return materializeThreadCandidate(supabase, recipientCandidates[0], "matched_recipient_number");
   }
   if (recipientCandidates.length > 1) {
-    return {
-      contactId: contacts.length === 1 ? contacts[0].id : null,
-      propertyId: null,
-      conversationId: null,
-      resolution: "ambiguous_recipient_number",
-    };
+    return contactLevelResolution(
+      supabase,
+      contacts.length === 1 ? contacts[0].id : null,
+      "ambiguous_recipient_number",
+    );
   }
 
   const historyCandidates = flattenContactCandidates(
@@ -231,12 +351,11 @@ export async function resolveInboundThread(
     );
   }
   if (historyCandidates.length > 1) {
-    return {
-      contactId: contacts.length === 1 ? contacts[0].id : null,
-      propertyId: null,
-      conversationId: null,
-      resolution: "ambiguous_history",
-    };
+    return contactLevelResolution(
+      supabase,
+      contacts.length === 1 ? contacts[0].id : null,
+      "ambiguous_history",
+    );
   }
 
   const linkedPropertyCandidates = flattenLinkedPropertyCandidates(
@@ -262,12 +381,11 @@ export async function resolveInboundThread(
   }
 
   if (contacts.length === 1) {
-    return {
-      contactId: contacts[0].id,
-      propertyId: null,
-      conversationId: null,
-      resolution: "matched_contact_without_property",
-    };
+    return contactLevelResolution(
+      supabase,
+      contacts[0].id,
+      "matched_contact_without_property",
+    );
   }
 
   return {
@@ -275,6 +393,30 @@ export async function resolveInboundThread(
     propertyId: null,
     conversationId: null,
     resolution: "ambiguous_contact",
+  };
+}
+
+/**
+ * Resolution for a thread that attaches to a contact but no property.
+ * Contact-level threads get a real conversation id too (migration 080) —
+ * org-scoped via the contact — so no contact-bearing row is ever written
+ * without one.
+ */
+async function contactLevelResolution(
+  supabase: SupabaseClient<Database>,
+  contactId: string | null,
+  resolution:
+    | "ambiguous_recipient_number"
+    | "ambiguous_history"
+    | "matched_contact_without_property",
+): Promise<InboundThreadResolution> {
+  return {
+    contactId,
+    propertyId: null,
+    conversationId: contactId
+      ? await ensureConversationIdForThread(supabase, contactId, null)
+      : null,
+    resolution,
   };
 }
 
@@ -346,7 +488,9 @@ async function loadCandidates(
     }
     for (const row of result.data ?? []) {
       if (!row.property_id) continue;
-      const key = buildThreadId(row.conversation_id, contactId, row.property_id);
+      // Dedup key, local to this scan: conversation id when stamped,
+      // else the property (contactId is fixed for the whole call).
+      const key = row.conversation_id ?? `prop:${row.property_id}`;
       if (!byKey.has(key)) {
         byKey.set(key, {
           conversationId: row.conversation_id,

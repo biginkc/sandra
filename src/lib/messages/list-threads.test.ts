@@ -40,7 +40,19 @@ function makeStub(opts: {
     not: () => messagesQuery,
     neq: () => messagesQuery,
     gte: () => messagesQuery,
-    order: () => Promise.resolve({ data: opts.messages, error: null }),
+    // Stamp a deterministic conversation id on any row the test didn't
+    // give one — mirrors the DB invariant since migration 080 (the fill
+    // trigger guarantees every contact-bearing SMS row has one).
+    order: () =>
+      Promise.resolve({
+        data: opts.messages.map((m) => ({
+          ...m,
+          conversation_id:
+            m.conversation_id ??
+            `conv:${m.contact_id}:${m.property_id ?? "none"}`,
+        })),
+        error: null,
+      }),
   };
 
   function tableQuery(name: "contacts" | "properties") {
@@ -377,7 +389,9 @@ describe("listThreads — recency-only sort", () => {
   it("unreadOnly keeps the pinned includeThreadId thread after it is read", async () => {
     // Read-on-open marks the open thread read; the cockpit pins it via
     // includeThreadId so it doesn't vanish from the Unread list while
-    // the user is still viewing it.
+    // the user is still viewing it. The pin is an exact conversation id —
+    // stale URL formats are canonicalized upstream (canonicalizeThreadId),
+    // so listThreads itself never sees legacy or bare-contact ids.
     const { supabase } = seedFixtures([
       { cid: "c-open", age: 1_000, unread: false },
       { cid: "c-unread", age: 5_000, unread: true },
@@ -386,141 +400,12 @@ describe("listThreads — recency-only sort", () => {
 
     const pinned = await listThreads(supabase, {
       unreadOnly: true,
-      includeThreadId: "legacy:c-open:p-c-open",
+      includeThreadId: "conv:c-open:p-c-open",
     });
     expect(pinned.map((t) => t.contactId)).toEqual(["c-open", "c-unread"]);
 
     const unpinned = await listThreads(supabase, { unreadOnly: true });
     expect(unpinned.map((t) => t.contactId)).toEqual(["c-unread"]);
-  });
-
-  it("pins via stale URL formats when the thread is grouped by conversation UUID", async () => {
-    // Codex P1 on PR #268: old inbox links carry legacy / bare-contact ids
-    // while the thread may now group under a conversation UUID. The pin
-    // must match by identity, not raw string equality.
-    const CONV = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
-    const seed = () =>
-      seedFixtures([
-        { cid: "c-open", age: 1_000, unread: false, convId: CONV },
-        { cid: "c-unread", age: 5_000, unread: true },
-      ]);
-
-    // Stale legacy-format link.
-    const viaLegacy = await listThreads(seed().supabase, {
-      unreadOnly: true,
-      includeThreadId: "legacy:c-open:p-c-open",
-    });
-    expect(viaLegacy.map((t) => t.contactId)).toEqual(["c-open", "c-unread"]);
-
-    // Pre-Phase-2 bare contact-id link.
-    const viaContact = await listThreads(seed().supabase, {
-      unreadOnly: true,
-      includeThreadId: "c-open",
-    });
-    expect(viaContact.map((t) => t.contactId)).toEqual(["c-open", "c-unread"]);
-
-    // Canonical conversation-UUID link.
-    const viaConversation = await listThreads(seed().supabase, {
-      unreadOnly: true,
-      includeThreadId: CONV,
-    });
-    expect(viaConversation.map((t) => t.contactId)).toEqual([
-      "c-open",
-      "c-unread",
-    ]);
-  });
-
-  it("bare contact-id pin keeps only the contact's most recent thread", async () => {
-    // Codex round-2 on PR #268: a contact can have several threads (one
-    // per property). A bare-contact pin must resolve to the thread with
-    // the contact's latest message — matching fetchInboxDetail — not pin
-    // every read thread the contact appears in.
-    const now = Date.now();
-    const messages = [
-      // c-multi, two threads, both fully read. p-a is the more recent.
-      { cid: "c-multi", pid: "p-a", age: 1_000, unread: false },
-      { cid: "c-multi", pid: "p-b", age: 9_000, unread: false },
-      // Unrelated unread thread that must survive the filter.
-      { cid: "c-unread", pid: "p-u", age: 5_000, unread: true },
-    ].map((m) => ({
-      contact_id: m.cid,
-      property_id: m.pid,
-      conversation_id: null,
-      body: "x",
-      direction: "inbound" as const,
-      created_at: new Date(now - m.age).toISOString(),
-      read_at: m.unread ? null : new Date(now - m.age + 1).toISOString(),
-    }));
-    const contacts = new Map(
-      messages.map((m) => [
-        m.contact_id,
-        { id: m.contact_id, first_name: null, last_name: null, entity_name: m.contact_id, phone_1: null },
-      ]),
-    );
-    const properties = new Map(
-      messages.map((m) => [
-        m.property_id,
-        { id: m.property_id, address: null, city: null, state: null, assigned_user_id: null },
-      ]),
-    );
-
-    const { supabase } = makeStub({ messages, contacts, properties });
-    const threads = await listThreads(supabase, {
-      unreadOnly: true,
-      includeThreadId: "c-multi",
-    });
-
-    // p-a (the contact's latest thread) is pinned; p-b stays filtered out.
-    expect(threads.map((t) => t.threadId)).toEqual([
-      "legacy:c-multi:p-a",
-      "legacy:c-unread:p-u",
-    ]);
-  });
-
-  it("pins a stale bare-contact link whose contact id is a real UUID", async () => {
-    // Codex round-3 on PR #268: production contact ids are UUIDs, so a
-    // stale `?thread=<contactId>` link parses as a conversation id. When
-    // no conversation in the window matches, the pin must retry the UUID
-    // as a contact id — mirroring fetchInboxDetail — instead of silently
-    // attaching to nothing.
-    const CONTACT_UUID = "11111111-1111-4111-8111-111111111111";
-    const now = Date.now();
-    const messages = [
-      { cid: CONTACT_UUID, pid: "p-a", age: 1_000, unread: false },
-      { cid: CONTACT_UUID, pid: "p-b", age: 9_000, unread: false },
-      { cid: "c-unread", pid: "p-u", age: 5_000, unread: true },
-    ].map((m) => ({
-      contact_id: m.cid,
-      property_id: m.pid,
-      conversation_id: null,
-      body: "x",
-      direction: "inbound" as const,
-      created_at: new Date(now - m.age).toISOString(),
-      read_at: m.unread ? null : new Date(now - m.age + 1).toISOString(),
-    }));
-    const contacts = new Map(
-      messages.map((m) => [
-        m.contact_id,
-        { id: m.contact_id, first_name: null, last_name: null, entity_name: m.contact_id, phone_1: null },
-      ]),
-    );
-    const properties = new Map(
-      messages.map((m) => [
-        m.property_id,
-        { id: m.property_id, address: null, city: null, state: null, assigned_user_id: null },
-      ]),
-    );
-
-    const { supabase } = makeStub({ messages, contacts, properties });
-    const threads = await listThreads(supabase, {
-      unreadOnly: true,
-      includeThreadId: CONTACT_UUID,
-    });
-
-    expect(threads.map((t) => t.threadId)).toEqual([
-      `legacy:${CONTACT_UUID}:p-a`,
-      "legacy:c-unread:p-u",
-    ]);
   });
 });
 

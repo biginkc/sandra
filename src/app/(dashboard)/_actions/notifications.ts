@@ -3,7 +3,6 @@
 import { createClient } from "@/lib/supabase/server";
 import { errFromUnknown, ok, type Result } from "@/lib/errors/result";
 import { reportError } from "@/lib/errors/report";
-import { buildThreadId } from "@/lib/messages/threading";
 
 /**
  * Shape the bell UI actually renders. Column names are camelCased and
@@ -97,15 +96,13 @@ export async function getRecentNotifications(
         });
       } else {
         for (const row of messageRows ?? []) {
-          if (!row.contact_id) continue;
-          const threadId = buildThreadId(
-            row.conversation_id,
-            row.contact_id,
-            row.property_id,
-          );
+          // Contact-bearing SMS always has a conversation_id (migration
+          // 080); rows without one are unknown-sender traffic with no
+          // thread to link to.
+          if (!row.contact_id || !row.conversation_id) continue;
           messageHrefById.set(
             row.id,
-            `/messages?thread=${encodeURIComponent(threadId)}`,
+            `/messages?thread=${encodeURIComponent(row.conversation_id)}`,
           );
         }
       }
