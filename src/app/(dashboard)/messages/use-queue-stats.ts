@@ -1,10 +1,20 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { getQueueStats, type QueueStats } from "./actions";
 
 const POLL_INTERVAL_MS = 30_000;
+
+function sameStats(a: QueueStats, b: QueueStats): boolean {
+  return (
+    a.queued === b.queued &&
+    a.sentToday === b.sentToday &&
+    a.failedToday === b.failedToday &&
+    a.nextScheduledFor === b.nextScheduledFor &&
+    a.lastScheduledFor === b.lastScheduledFor
+  );
+}
 
 /**
  * Live queue stats shared by the Outbox tab badge and the stats banner.
@@ -25,6 +35,22 @@ export function useQueueStats(
   { enabled = true }: { enabled?: boolean } = {},
 ): QueueStats {
   const [stats, setStats] = useState<QueueStats>(initialStats);
+
+  // Adopt fresh server-fetched stats whenever a new RSC render delivers
+  // them. The page is force-dynamic, so every navigation (incl. tab
+  // switches) re-fetches stats server-side — without this resync, a
+  // viewer parked on Inbox (polling disabled) would carry a stale
+  // snapshot into the Outbox tab until the next 30s poll. Render-phase
+  // derived-state-from-props per React docs. Comparison is by VALUE
+  // (the prop is a fresh object literal each render in some callers;
+  // identity-tracking would loop), against the last seen prop — not
+  // current stats — so a client-side re-render with the old prop never
+  // clobbers fresher polled numbers.
+  const lastInitialRef = useRef(initialStats);
+  if (!sameStats(lastInitialRef.current, initialStats)) {
+    lastInitialRef.current = initialStats;
+    setStats(initialStats);
+  }
 
   useEffect(() => {
     if (!enabled) return undefined;

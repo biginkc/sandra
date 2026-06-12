@@ -156,6 +156,38 @@ describe("useQueueStats (260504-tgq polling, lifted from QueueStatsBanner)", () 
     expect(result.current.queued).toBe(9);
   });
 
+  it("Adopts fresh server stats from props while disabled (Inbox rerender)", () => {
+    const { result, rerender } = renderHook(
+      ({ stats }) => useQueueStats(stats, { enabled: false }),
+      { initialProps: { stats: makeStats({ queued: 100 }) } },
+    );
+    expect(result.current.queued).toBe(100);
+
+    // A new RSC render hands down fresh server stats — no polling needed.
+    rerender({ stats: makeStats({ queued: 8964, sentToday: 385 }) });
+    expect(result.current.queued).toBe(8964);
+    expect(result.current.sentToday).toBe(385);
+    expect(getQueueStats).not.toHaveBeenCalled();
+  });
+
+  it("Switching to Outbox uses the fresh server stats immediately, before any poll", () => {
+    const { result, rerender } = renderHook(
+      ({ stats, enabled }) => useQueueStats(stats, { enabled }),
+      {
+        initialProps: {
+          stats: makeStats({ queued: 100 }),
+          enabled: false,
+        },
+      },
+    );
+
+    // Tab switch: enabled flips true AND the force-dynamic page delivers
+    // freshly fetched stats in the same render.
+    rerender({ stats: makeStats({ queued: 42 }), enabled: true });
+    expect(result.current.queued).toBe(42);
+    expect(getQueueStats).not.toHaveBeenCalled();
+  });
+
   it("Clears interval and removes visibilitychange listener on unmount", async () => {
     getQueueStats.mockResolvedValue({
       ok: true,
