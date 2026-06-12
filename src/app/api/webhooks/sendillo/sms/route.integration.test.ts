@@ -23,6 +23,7 @@ async function seedContact(phone: string) {
       first_name: "Sendillo",
       last_name: "Inbound",
       phone_1: phone,
+      phone_1_type: "mobile",
     })
     .select("id")
     .single();

@@ -72,6 +72,7 @@ describe("update-agent-phones sub-op (integration)", () => {
     const result = await applyRow({
       Address: "100 Agent St",
       "Phone 1": "8165551000",
+      "Phone 1 Type": "Mobile",
     });
     expect(result.kind).toBe("updated");
     expect((await readPhones(contactId)).phone_1).toBe("+18165551000");

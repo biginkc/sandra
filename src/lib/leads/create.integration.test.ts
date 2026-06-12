@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createTestClient } from "@tests/integration/client";
 import { resetTenantTables } from "@tests/integration/reset";
@@ -7,9 +7,33 @@ import { createLead } from "./create";
 
 const supabase = createTestClient();
 
+// createLead classifies the lead's phone via Telnyx at intake (hard
+// rule: untyped phones are never saved). Stub the Telnyx endpoint so
+// these tests keep covering the phone-saved happy path; everything
+// else passes through to the real test DB.
+const realFetch = globalThis.fetch;
+
 describe("createLead (integration)", () => {
   beforeEach(async () => {
     await resetTenantTables(supabase);
+    vi.stubEnv("TELNYX_API_KEY", "test-key");
+    globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.startsWith("https://api.telnyx.com/v2/number_lookup")) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({ data: { carrier: { type: "mobile" } } }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          ),
+        );
+      }
+      return realFetch(input, init);
+    }) as typeof fetch;
+  });
+
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+    vi.unstubAllEnvs();
   });
 
   it("creates property + homeowner contact with status='new_lead' and source set", async () => {
