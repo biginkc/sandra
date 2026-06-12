@@ -50,6 +50,8 @@ const MIN_CADENCE_S = 5;
 const MAX_CADENCE_S = 300;
 const DEFAULT_CADENCE_S = 15;
 const CADENCE_STORAGE_KEY = "sandra.queue.cadence";
+/** Min gap between corrective fetches when live stats outrun the table. */
+const CORRECTIVE_COOLDOWN_MS = 30_000;
 
 export function QueuePanel({
   initial,
@@ -118,21 +120,29 @@ export function QueuePanel({
   // sentinel is retired, re-arm it so the table catches up instead of
   // contradicting the badge ("1 queued" over an empty table).
   //
-  // One corrective attempt per distinct total: if the fetch comes back
-  // empty the total was stale-high, and re-arming again for the same
-  // number would loop (fetch → hasMore=false → re-arm → fetch …) until
-  // the next stats poll. A genuinely new total re-arms again.
-  const correctedForTotalRef = useRef<number | null>(null);
+  // Cooldown, not a value latch: at most one corrective fetch per 30s
+  // (the stats cadence). An immediate unconditional re-arm would loop
+  // on a stale-high total (fetch → hasMore=false → re-arm → fetch …);
+  // a per-value latch would never recover when a REAL row later
+  // appears at the same numeric total. While the contradiction
+  // persists, the scheduled retry turns this into a slow bounded poll
+  // that stops the moment table and badge agree.
+  const lastCorrectiveAttemptRef = useRef(0);
   useEffect(() => {
-    if (
-      totalQueued !== undefined &&
-      totalQueued > rows.length &&
-      !hasMore &&
-      correctedForTotalRef.current !== totalQueued
-    ) {
-      correctedForTotalRef.current = totalQueued;
-      setHasMore(true);
+    if (totalQueued === undefined || totalQueued <= rows.length || hasMore) {
+      return undefined;
     }
+    const sinceLast = Date.now() - lastCorrectiveAttemptRef.current;
+    if (sinceLast >= CORRECTIVE_COOLDOWN_MS) {
+      lastCorrectiveAttemptRef.current = Date.now();
+      setHasMore(true);
+      return undefined;
+    }
+    const timeout = window.setTimeout(() => {
+      lastCorrectiveAttemptRef.current = Date.now();
+      setHasMore(true);
+    }, CORRECTIVE_COOLDOWN_MS - sinceLast);
+    return () => window.clearTimeout(timeout);
   }, [totalQueued, rows.length, hasMore]);
 
   useEffect(() => {

@@ -194,26 +194,84 @@ describe("<QueuePanel /> infinite scroll", () => {
     expect(screen.getByText("1 Main St")).toBeInTheDocument();
   });
 
-  it("does not loop the corrective fetch when the live total is stale-high", async () => {
-    // Server truth: the queue really is empty — the badge is stale-high.
-    listQueuedPage.mockResolvedValue({
-      ok: true,
-      data: { rows: [], hasMore: false },
-    });
+  it("rate-limits the corrective fetch on a stale-high total instead of tight-looping", async () => {
+    vi.useFakeTimers();
+    try {
+      // Server truth: the queue really is empty — the badge is stale-high.
+      listQueuedPage.mockResolvedValue({
+        ok: true,
+        data: { rows: [], hasMore: false },
+      });
 
-    render(<QueuePanel initial={[]} initialHasMore={false} totalQueued={1} />);
+      render(
+        <QueuePanel initial={[]} initialHasMore={false} totalQueued={1} />,
+      );
 
-    // One corrective attempt fires…
-    expect(screen.getByTestId("queue-load-more-sentinel")).toBeInTheDocument();
-    await act(async () => {
-      intersect!();
-    });
-    expect(listQueuedPage).toHaveBeenCalledTimes(1);
+      // One corrective attempt fires…
+      expect(
+        screen.getByTestId("queue-load-more-sentinel"),
+      ).toBeInTheDocument();
+      await act(async () => {
+        intersect!();
+      });
+      expect(listQueuedPage).toHaveBeenCalledTimes(1);
 
-    // …and the sentinel must NOT re-arm for the same stale total.
-    expect(
-      screen.queryByTestId("queue-load-more-sentinel"),
-    ).not.toBeInTheDocument();
+      // …and within the cooldown the sentinel stays retired — no loop.
+      await act(async () => {
+        vi.advanceTimersByTime(5_000);
+      });
+      expect(
+        screen.queryByTestId("queue-load-more-sentinel"),
+      ).not.toBeInTheDocument();
+      expect(listQueuedPage).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("recovers when a real row later appears at the SAME numeric total", async () => {
+    vi.useFakeTimers();
+    try {
+      // First corrective fetch: badge stale-high, queue genuinely empty.
+      listQueuedPage.mockResolvedValue({
+        ok: true,
+        data: { rows: [], hasMore: false },
+      });
+
+      render(
+        <QueuePanel initial={[]} initialHasMore={false} totalQueued={1} />,
+      );
+      await act(async () => {
+        intersect!();
+      });
+      expect(listQueuedPage).toHaveBeenCalledTimes(1);
+
+      // Now a REAL message gets queued; the live total is still 1.
+      listQueuedPage.mockResolvedValue({
+        ok: true,
+        data: { rows: [makeRow(1)], hasMore: false },
+      });
+
+      // After the cooldown the sentinel re-arms by itself…
+      await act(async () => {
+        vi.advanceTimersByTime(30_000);
+      });
+      expect(
+        screen.getByTestId("queue-load-more-sentinel"),
+      ).toBeInTheDocument();
+
+      // …and the next corrective fetch surfaces the row.
+      await act(async () => {
+        intersect!();
+      });
+      expect(listQueuedPage).toHaveBeenCalledTimes(2);
+      expect(screen.getByText("1 Main St")).toBeInTheDocument();
+      expect(
+        screen.queryByTestId("queue-load-more-sentinel"),
+      ).not.toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("shows 'X of Y loaded' when the live total exceeds the loaded rows", () => {
