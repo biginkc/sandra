@@ -740,6 +740,57 @@ describe("dispatchAiResponse (integration)", () => {
     await supabase.auth.admin.deleteUser(adminUserId);
   });
 
+  it("dedupe index: same admin/kind/day blocked within an org, allowed across orgs", async () => {
+    // Codex re-review P1: an admin allowlisted in two orgs must get one
+    // outage alert PER ORG. The 076 partial unique index is keyed
+    // (org_id, user_id, title, utc-day) — verify both sides at the DB.
+    const adminEmail = `dedupe-admin-${Date.now()}@test.example.com`;
+    const { data: adminUser } = await supabase.auth.admin.createUser({
+      email: adminEmail,
+      password: `test-pw-${Math.random().toString(36).slice(2)}`,
+      email_confirm: true,
+    });
+    const adminUserId = adminUser!.user!.id;
+    const { data: orgA } = await supabase
+      .from("organizations")
+      .select("id")
+      .limit(1)
+      .single();
+    const { data: orgB, error: orgBErr } = await supabase
+      .from("organizations")
+      .insert({ name: `dedupe-test-org-${Date.now()}` })
+      .select("id")
+      .single();
+    if (orgBErr || !orgB) throw new Error(`org seed failed: ${orgBErr?.message}`);
+
+    const row = (orgId: string) => ({
+      org_id: orgId,
+      user_id: adminUserId,
+      event_type: "ai_responder_provider_failure",
+      entity_type: "property",
+      entity_id: "00000000-0000-0000-0000-000000000001",
+      title: "AI responder is DOWN — Anthropic credits exhausted",
+      body: "test",
+    });
+
+    const first = await supabase.from("notifications").insert(row(orgA!.id));
+    expect(first.error).toBeNull();
+    // Same org, same kind, same day → conflict.
+    const dup = await supabase.from("notifications").insert(row(orgA!.id));
+    expect(dup.error?.message ?? "").toMatch(/duplicate key/i);
+    // Different org, same admin/kind/day → allowed.
+    const crossOrg = await supabase.from("notifications").insert(row(orgB.id));
+    expect(crossOrg.error).toBeNull();
+
+    // Cleanup (shared test project).
+    await supabase
+      .from("notifications")
+      .delete()
+      .eq("event_type", "ai_responder_provider_failure");
+    await supabase.from("organizations").delete().eq("id", orgB.id);
+    await supabase.auth.admin.deleteUser(adminUserId);
+  });
+
   it("401 auth failure → provider_auth reason", async () => {
     await seedConfig();
     const { propertyId, contactId } = await seedLead({

@@ -30,6 +30,9 @@ alter table notifications add constraint notifications_event_type_check check (e
 -- createNotification swallows insert errors by design). Keyed per user,
 -- per failure kind (titles are deterministic per kind — see
 -- formatNotification), per UTC day.
+-- org_id is part of the key: an admin allowlisted across two orgs must
+-- still receive one alert PER ORG — a billing incident in org A must
+-- not swallow org B's only outage signal.
 create unique index if not exists notifications_ai_provider_failure_daily_key
-  on notifications (user_id, title, (date_trunc('day', created_at at time zone 'utc')))
+  on notifications (org_id, user_id, title, (date_trunc('day', created_at at time zone 'utc')))
   where event_type = 'ai_responder_provider_failure';
