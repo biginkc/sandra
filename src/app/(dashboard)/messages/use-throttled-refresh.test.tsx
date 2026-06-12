@@ -82,6 +82,64 @@ describe("useThrottledRefresh", () => {
     expect(refresh).toHaveBeenCalledTimes(1);
   });
 
+  it("reconciles IMMEDIATELY on return even inside the throttle window", () => {
+    const { result } = renderHook(() => useThrottledRefresh(INTERVAL));
+    act(() => result.current()); // refresh at t=0 — window open until t=10s
+    expect(refresh).toHaveBeenCalledTimes(1);
+
+    act(() => setVisibility("hidden")); // t≈2s
+    act(() => {
+      vi.advanceTimersByTime(2_000);
+      result.current(); // event lands while hidden → stale
+    });
+    act(() => {
+      vi.advanceTimersByTime(2_000);
+      setVisibility("visible"); // back at t≈4s — still inside the window
+    });
+    // Must NOT wait out the remaining ~6s: the operator is looking at the
+    // page now and events were suppressed the whole time it was hidden.
+    expect(refresh).toHaveBeenCalledTimes(2);
+  });
+
+  it("the return reconcile folds an armed trailing timer into itself", () => {
+    const { result } = renderHook(() => useThrottledRefresh(INTERVAL));
+    act(() => {
+      result.current(); // leading
+      result.current(); // arms trailing
+    });
+    expect(refresh).toHaveBeenCalledTimes(1);
+
+    act(() => setVisibility("hidden"));
+    act(() => {
+      result.current(); // hidden event → stale (trailing still armed)
+    });
+    act(() => setVisibility("visible")); // immediate reconcile, folds trailing
+    expect(refresh).toHaveBeenCalledTimes(2);
+
+    act(() => {
+      vi.advanceTimersByTime(INTERVAL * 2);
+    });
+    expect(refresh).toHaveBeenCalledTimes(2); // no orphaned trailing fire
+  });
+
+  it("changing minIntervalMs keeps a pending trailing refresh alive", () => {
+    const { result, rerender } = renderHook(
+      ({ interval }: { interval: number }) => useThrottledRefresh(interval),
+      { initialProps: { interval: INTERVAL } },
+    );
+    act(() => {
+      result.current(); // leading
+      result.current(); // arms trailing at t=10s
+    });
+    expect(refresh).toHaveBeenCalledTimes(1);
+
+    rerender({ interval: INTERVAL * 2 }); // must not drop the armed timer
+    act(() => {
+      vi.advanceTimersByTime(INTERVAL);
+    });
+    expect(refresh).toHaveBeenCalledTimes(2); // trailing still fired
+  });
+
   it("a trailing timer that fires after tabbing away defers to the visibility reconcile", () => {
     const { result } = renderHook(() => useThrottledRefresh(INTERVAL));
     act(() => {
