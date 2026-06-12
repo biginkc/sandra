@@ -190,16 +190,23 @@ begin
     and new.contact_id is not null
     and new.conversation_id is null
   then
-    -- Shared resolver enforces contact/property org agreement; a
-    -- mismatched row gets no conversation id rather than being
-    -- normalized into the wrong org's registry.
     v_org_id := public.sms_thread_org_id(new.contact_id, new.property_id);
 
-    if v_org_id is not null then
-      new.conversation_id := public.sms_conversation_id_mint(
-        v_org_id, new.contact_id, new.property_id
-      );
+    -- FKs guarantee the contact/property rows exist, so a null org scope
+    -- can only mean a cross-org contact/property pairing — corrupt data
+    -- that no legitimate write path produces. Reject it outright rather
+    -- than persisting an invisible (conversation-less) thread row or
+    -- normalizing it into the wrong org's registry.
+    if v_org_id is null then
+      raise exception
+        'sms message links contact % and property % across orgs',
+        new.contact_id, new.property_id
+        using errcode = '23514';
     end if;
+
+    new.conversation_id := public.sms_conversation_id_mint(
+      v_org_id, new.contact_id, new.property_id
+    );
   end if;
   return new;
 end;
