@@ -1,7 +1,6 @@
 "use client";
 
 import { formatDistanceToNow } from "date-fns/formatDistanceToNow";
-import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
@@ -9,6 +8,8 @@ import { EscalationBadge } from "@/components/escalation-badge";
 import type { Thread } from "@/lib/messages/list-threads";
 import { createClient } from "@/lib/supabase/client";
 import type { Database } from "@/lib/supabase/types";
+
+import { useThrottledRefresh } from "./use-throttled-refresh";
 
 type Message = Database["public"]["Tables"]["messages"]["Row"];
 type ThreadUpdate = {
@@ -36,14 +37,17 @@ type Props = {
  * Conversation list — left rail of the cockpit. Click a thread to
  * surface it in the side panel (URL state: ?thread=<contactId>).
  *
- * Realtime: subscribes to INSERTs on `messages`. On every relevant new
- * row, refreshes via router.refresh() so the server-rendered list
- * regenerates with new sort + unread counts. Keeps the client-side state
- * machine simple — the server is the source of truth.
+ * Realtime: subscribes to INSERTs + UPDATEs on `messages`. Refreshes are
+ * coalesced through useThrottledRefresh — during a bulk campaign the queue
+ * worker flips a row every few seconds, and refreshing per event kept the
+ * expensive cockpit page in a permanent server rebuild (frozen clicks,
+ * blank panels — 2026-06-12 incident). The server stays the source of
+ * truth; it's just consulted at a bounded rate.
  *
- * Existing thread rows update optimistically from Realtime INSERT payloads;
- * `router.refresh()` remains the reconciliation path for new rows, assignment
- * metadata, unknown sender routing, and unread/read count edge cases.
+ * Existing thread rows update optimistically from Realtime INSERT payloads
+ * (instant paint, unthrottled); the throttled refresh remains the
+ * reconciliation path for new rows, assignment metadata, unknown sender
+ * routing, and unread/read count edge cases.
  */
 export function InboxThreadList({
   initial,
@@ -51,7 +55,7 @@ export function InboxThreadList({
   currentUserId,
   onSelectThread,
 }: Props) {
-  const router = useRouter();
+  const requestRefresh = useThrottledRefresh();
   const [threadUpdates, setThreadUpdates] = useState<Record<string, ThreadUpdate>>(
     {},
   );
@@ -76,13 +80,13 @@ export function InboxThreadList({
           (payload) => {
             const row = payload.new as Message;
             setThreadUpdates((curr) => mergeThreadUpdate(curr, row));
-            router.refresh();
+            requestRefresh();
           },
         )
         .on(
           "postgres_changes",
           { event: "UPDATE", schema: "public", table: "messages" },
-          () => router.refresh(),
+          () => requestRefresh(),
         )
         .subscribe();
     })();
@@ -91,7 +95,7 @@ export function InboxThreadList({
       mounted = false;
       if (channel) supabase.removeChannel(channel);
     };
-  }, [router]);
+  }, [requestRefresh]);
 
 
   if (threads.length === 0) {

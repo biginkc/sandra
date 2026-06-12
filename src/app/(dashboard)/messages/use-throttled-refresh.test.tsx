@@ -1,0 +1,203 @@
+import { act, renderHook } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+const { refresh } = vi.hoisted(() => ({ refresh: vi.fn() }));
+
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ refresh }),
+}));
+
+// eslint-disable-next-line import/first
+import { useThrottledRefresh } from "./use-throttled-refresh";
+
+const INTERVAL = 10_000;
+
+function setVisibility(state: "visible" | "hidden") {
+  Object.defineProperty(document, "visibilityState", {
+    configurable: true,
+    get: () => state,
+  });
+  document.dispatchEvent(new Event("visibilitychange"));
+}
+
+describe("useThrottledRefresh", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    refresh.mockClear();
+    setVisibility("visible");
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("refreshes immediately when outside the throttle window", () => {
+    const { result } = renderHook(() => useThrottledRefresh(INTERVAL));
+    act(() => result.current());
+    expect(refresh).toHaveBeenCalledTimes(1);
+  });
+
+  it("coalesces a burst into one leading + one trailing refresh", () => {
+    const { result } = renderHook(() => useThrottledRefresh(INTERVAL));
+    act(() => {
+      result.current(); // leading
+      result.current();
+      result.current();
+      result.current();
+    });
+    expect(refresh).toHaveBeenCalledTimes(1);
+
+    act(() => {
+      vi.advanceTimersByTime(INTERVAL);
+    });
+    expect(refresh).toHaveBeenCalledTimes(2); // trailing fired once
+  });
+
+  it("sustained events refresh at most once per interval", () => {
+    const { result } = renderHook(() => useThrottledRefresh(INTERVAL));
+    // Simulate a campaign: an event every second for 60s.
+    act(() => {
+      for (let i = 0; i < 60; i++) {
+        result.current();
+        vi.advanceTimersByTime(1_000);
+      }
+    });
+    // 60s of once-a-second events through a 10s throttle → ≤7 refreshes
+    // (leading + one per window), far below the 60 of the old behavior.
+    expect(refresh.mock.calls.length).toBeLessThanOrEqual(7);
+    expect(refresh.mock.calls.length).toBeGreaterThanOrEqual(6);
+  });
+
+  it("does not refresh while hidden; reconciles once on return", () => {
+    const { result } = renderHook(() => useThrottledRefresh(INTERVAL));
+    act(() => setVisibility("hidden"));
+    act(() => {
+      result.current();
+      result.current();
+      vi.advanceTimersByTime(INTERVAL * 3);
+    });
+    expect(refresh).not.toHaveBeenCalled();
+
+    act(() => setVisibility("visible"));
+    expect(refresh).toHaveBeenCalledTimes(1);
+  });
+
+  it("reconciles IMMEDIATELY on return even inside the throttle window", () => {
+    const { result } = renderHook(() => useThrottledRefresh(INTERVAL));
+    act(() => result.current()); // refresh at t=0 — window open until t=10s
+    expect(refresh).toHaveBeenCalledTimes(1);
+
+    act(() => setVisibility("hidden")); // t≈2s
+    act(() => {
+      vi.advanceTimersByTime(2_000);
+      result.current(); // event lands while hidden → stale
+    });
+    act(() => {
+      vi.advanceTimersByTime(2_000);
+      setVisibility("visible"); // back at t≈4s — still inside the window
+    });
+    // Must NOT wait out the remaining ~6s: the operator is looking at the
+    // page now and events were suppressed the whole time it was hidden.
+    expect(refresh).toHaveBeenCalledTimes(2);
+  });
+
+  it("the return reconcile folds an armed trailing timer into itself", () => {
+    const { result } = renderHook(() => useThrottledRefresh(INTERVAL));
+    act(() => {
+      result.current(); // leading
+      result.current(); // arms trailing
+    });
+    expect(refresh).toHaveBeenCalledTimes(1);
+
+    act(() => setVisibility("hidden"));
+    act(() => {
+      result.current(); // hidden event → stale (trailing still armed)
+    });
+    act(() => setVisibility("visible")); // immediate reconcile, folds trailing
+    expect(refresh).toHaveBeenCalledTimes(2);
+
+    act(() => {
+      vi.advanceTimersByTime(INTERVAL * 2);
+    });
+    expect(refresh).toHaveBeenCalledTimes(2); // no orphaned trailing fire
+  });
+
+  it("a timer armed BEFORE tab-away reconciles immediately on return (no hidden events)", () => {
+    const { result } = renderHook(() => useThrottledRefresh(INTERVAL));
+    act(() => {
+      result.current(); // leading at t=0
+      result.current(); // arms trailing for t=10s
+    });
+    expect(refresh).toHaveBeenCalledTimes(1);
+
+    act(() => setVisibility("hidden")); // t≈2s — nothing arrives while hidden
+    act(() => {
+      vi.advanceTimersByTime(2_000);
+      setVisibility("visible"); // back at t≈4s
+    });
+    // The armed timer is pending staleness — fold it into an immediate
+    // reconcile instead of letting the operator wait out the window.
+    expect(refresh).toHaveBeenCalledTimes(2);
+
+    act(() => {
+      vi.advanceTimersByTime(INTERVAL * 2);
+    });
+    expect(refresh).toHaveBeenCalledTimes(2); // and no orphaned third fire
+  });
+
+  it("changing minIntervalMs keeps a pending trailing refresh alive", () => {
+    const { result, rerender } = renderHook(
+      ({ interval }: { interval: number }) => useThrottledRefresh(interval),
+      { initialProps: { interval: INTERVAL } },
+    );
+    act(() => {
+      result.current(); // leading
+      result.current(); // arms trailing at t=10s
+    });
+    expect(refresh).toHaveBeenCalledTimes(1);
+
+    rerender({ interval: INTERVAL * 2 }); // must not drop the armed timer
+    act(() => {
+      vi.advanceTimersByTime(INTERVAL);
+    });
+    expect(refresh).toHaveBeenCalledTimes(2); // trailing still fired
+  });
+
+  it("a trailing timer that fires after tabbing away defers to the visibility reconcile", () => {
+    const { result } = renderHook(() => useThrottledRefresh(INTERVAL));
+    act(() => {
+      result.current(); // leading — starts the window
+      result.current(); // arms trailing
+    });
+    expect(refresh).toHaveBeenCalledTimes(1);
+
+    act(() => setVisibility("hidden"));
+    act(() => {
+      vi.advanceTimersByTime(INTERVAL); // trailing fires while hidden
+    });
+    expect(refresh).toHaveBeenCalledTimes(1); // suppressed
+
+    act(() => setVisibility("visible"));
+    expect(refresh).toHaveBeenCalledTimes(2); // reconciled on return
+  });
+
+  it("returning to a tab with nothing pending does not refresh", () => {
+    renderHook(() => useThrottledRefresh(INTERVAL));
+    act(() => setVisibility("hidden"));
+    act(() => setVisibility("visible"));
+    expect(refresh).not.toHaveBeenCalled();
+  });
+
+  it("clears the trailing timer on unmount", () => {
+    const { result, unmount } = renderHook(() => useThrottledRefresh(INTERVAL));
+    act(() => {
+      result.current();
+      result.current(); // arms trailing
+    });
+    unmount();
+    act(() => {
+      vi.advanceTimersByTime(INTERVAL * 2);
+    });
+    expect(refresh).toHaveBeenCalledTimes(1); // only the leading call
+  });
+});
