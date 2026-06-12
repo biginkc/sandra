@@ -559,7 +559,9 @@ describe("bulkQueueSms (integration)", () => {
   });
 
   // ---------------------------------------------------------------
-  // Quick task 260506-m3a — dailyCap rollover + jitter spread
+  // Jitter spread + uncapped continuous ramp. No client-side volume
+  // caps — provider credits are the only cap (Jarrad's standing rule;
+  // dailyCap removed 2026-06-12).
   // ---------------------------------------------------------------
 
   it("jitterPct=0.20 produces non-uniform gaps between scheduled_for values (variance > 0)", async () => {
@@ -604,7 +606,10 @@ describe("bulkQueueSms (integration)", () => {
     expect(allEqual).toBe(false);
   });
 
-  it("dailyCap=3 with 5 leads → first 3 in today's bucket, last 2 deferred to next day 8 AM PT", async () => {
+  it("schedules every message in one continuous ramp — no rollover, no volume cap", async () => {
+    // 5 leads → all 5 schedule at pace intervals from the anchor. Before
+    // 2026-06-12 a dailyCap would have deferred the overflow to the next
+    // day's 8 AM PT; that behavior is permanently gone.
     const ids: string[] = [];
     for (let i = 0; i < 5; i++) {
       const { propertyId } = await seedLead({
@@ -615,9 +620,8 @@ describe("bulkQueueSms (integration)", () => {
     }
 
     const result = await bulkQueueSms(ids, {
-      body: "Capped",
+      body: "Uncapped",
       paceSeconds: 10,
-      dailyCap: 3,
       jitterPct: 0, // deterministic for this assertion
     });
     expect(result.ok).toBe(true);
@@ -633,20 +637,18 @@ describe("bulkQueueSms (integration)", () => {
     const tsMs = messages!.map((m) => new Date(m.scheduled_for!).getTime());
     const nowMs = SAFE_NOW.getTime();
 
-    // First 3: nowMs, nowMs+10s, nowMs+20s (no jitter)
-    expect(tsMs[0]).toBe(nowMs);
-    expect(tsMs[1]).toBe(nowMs + 10_000);
-    expect(tsMs[2]).toBe(nowMs + 20_000);
-
-    // 4th and 5th: deferred to next day's 8 AM PT (16:00 UTC at -08:00).
-    // SAFE_NOW = 2026-04-23T18:00:00Z → next day 8 AM PT = 2026-04-24T16:00:00Z
-    const expectedRolloverMs = Date.UTC(2026, 3, 24, 16, 0, 0);
-    expect(tsMs[3]).toBe(expectedRolloverMs);
-    expect(tsMs[4]).toBe(expectedRolloverMs + 10_000);
+    // All 5: one continuous 10s ramp, nothing deferred to a next-day bucket.
+    expect(tsMs).toEqual([
+      nowMs,
+      nowMs + 10_000,
+      nowMs + 20_000,
+      nowMs + 30_000,
+      nowMs + 40_000,
+    ]);
   });
 
-  it("dailyCap undefined preserves today's existing behavior (no rollover)", async () => {
-    // 3 leads, no cap → all schedule within today's bucket spaced by paceSeconds.
+  it("default opts (no jitter) schedule a deterministic paced ramp", async () => {
+    // 3 leads → all schedule spaced by paceSeconds from the anchor.
     const ids = [
       (await seedLead({ phone: "+18165559001", address: "1 NoCap St" }))
         .propertyId,
@@ -658,7 +660,7 @@ describe("bulkQueueSms (integration)", () => {
     const result = await bulkQueueSms(ids, {
       body: "No cap",
       paceSeconds: 5,
-      // dailyCap omitted; jitterPct omitted (defaults to 0)
+      // jitterPct omitted (defaults to 0)
     });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
