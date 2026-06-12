@@ -1,14 +1,19 @@
 "use server";
 
+import { after } from "next/server";
+import { start } from "workflow/api";
+
+import { bulkSmsWorkflow } from "@/workflows/bulk-sms";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { errFromUnknown, ok, type Result } from "@/lib/errors/result";
 import { reportError } from "@/lib/errors/report";
-import { getConsentState } from "@/lib/messaging/consent";
 import { sendSmsToContact } from "@/lib/messaging/send";
-import { pickFromPool } from "@/lib/templates/pool";
-import { loadTemplateVars } from "@/lib/sequences/template-vars";
-import { renderTemplate } from "@/lib/sequences/render";
+import {
+  freshScheduleState,
+  queueSmsBatch,
+  type BulkSmsQueueOpts,
+} from "@/lib/messaging/bulk-queue";
 import {
   buildSnapshotsForProperty,
   type DialerBatchItemSnapshot,
@@ -56,93 +61,30 @@ export type BulkSmsOutcome = {
   succeeded: number;
   skipped: number;
   failed: { propertyId: string; message: string }[];
+  /** Set when the batch was too large for the synchronous path and was
+   *  handed to the bulk-sms workflow instead. Counts above are zero;
+   *  real counts land on the job row as the workflow progresses. */
+  deferred?: { jobId: string; total: number };
 };
-
-/**
- * Anchor a timestamp at "the following PT calendar day's 8 AM, local PT".
- * Used by bulkQueueSms's daily-cap rollover so overflow lands at the
- * start of the recipient-local sending window (8 AM PT covers all of
- * Jarrad's markets — KC + TX — without jumping earlier than 10 AM CT).
- *
- * Always advances exactly one PT calendar day from the input's PT date,
- * then anchors at 08:00 PT. Caller passes the current bucket start;
- * helper returns the next bucket start.
- *
- * Acceptable simplification: the anchor uses a fixed -08:00 PT offset
- * (08:00 PT == 16:00 UTC). During DST (PT = -07:00) the anchor lands at
- * 9 AM PT instead of 8 AM, which is still inside the federal 8 AM – 9 PM
- * window and still inside the recipient-local window for KC/TX. The
- * drift is intentional.
- */
-function nextDayEightAmPT(afterMs: number): number {
-  const fmt = new Intl.DateTimeFormat("en-US", {
-    timeZone: "America/Los_Angeles",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  });
-  const parts = fmt.formatToParts(new Date(afterMs));
-  const get = (t: string) => parts.find((p) => p.type === t)!.value;
-  const ptYear = Number(get("year"));
-  const ptMonth = Number(get("month"));
-  const ptDay = Number(get("day"));
-  // Next PT calendar day 08:00 PT == 16:00 UTC at -08:00 offset.
-  const tomorrow = new Date(
-    Date.UTC(ptYear, ptMonth - 1, ptDay + 1, 16, 0, 0),
-  );
-  return tomorrow.getTime();
-}
 
 /**
  * Queue a paced batch of outbound SMS messages for the given property IDs.
  *
- * Pre-filters opted-out contacts; everything else (quiet hours, phone
- * existence) is delegated to sendSmsToContact with queueOnly=true.
- * Consent + quiet-hours re-checks run at release time (cron drain).
+ * Selections up to SYNC_BULK_SMS_LIMIT run inline (same behavior as
+ * always — the integration suite pins the scheduling math). Larger
+ * selections are handed to the bulk-sms workflow, which runs the same
+ * queueSmsBatch loop in 200-row chunks across separate invocations —
+ * a single invocation dies at the platform's 5-minute ceiling at
+ * roughly 2.5K rows (same failure class as #240/#241).
  *
- * Pacing: each successfully queued message is scheduled
- * `paceSeconds` seconds after the previous one (with optional jitter)
- * so the cron drain releases them at a controlled rate.
- *
- * Daily cap: if `dailyCap` is set, only that many messages schedule
- * within a single 24h bucket; messages 1,001+ (etc.) defer to the start
- * of the next day's recipient-local sending window — 8 AM PT, which
- * covers all of Jarrad's markets (KC + TX) without going earlier than
- * 10 AM CT. When `dailyCap` is undefined, behavior is unchanged from
- * the original spec (no rollover, single deterministic ramp).
- *
- * Jitter: when `jitterPct > 0` (modal default 0.20), each gap between
- * consecutive scheduled_for values is multiplied by `1 + (rand*2-1)*jitterPct`
- * so mechanical-looking send patterns don't trip carrier spam-detection.
- * The first message of each daily bucket is unjittered (anchor at bucket
- * start) to keep tests + observability deterministic.
+ * Pacing, daily-cap rollover (8 AM PT buckets), and ±jitterPct gap
+ * jitter are implemented in @/lib/messaging/bulk-queue.
  */
+const SYNC_BULK_SMS_LIMIT = 500;
+
 export async function bulkQueueSms(
   propertyIds: string[],
-  opts: {
-    body?: string;
-    templateCategory?: string;
-    paceSeconds?: number;
-    /**
-     * When true, skip any property that already has at least one
-     * outbound message — used by the Bulk SMS modal's "Skip prospects
-     * already contacted (N)" checkbox so a re-run of an outreach
-     * doesn't double-touch leads.
-     */
-    skipIfContacted?: boolean;
-    /**
-     * Max messages scheduled within a single 24h bucket per send. When
-     * the cap is hit, subsequent messages roll over to next day 8 AM PT.
-     * Undefined = no cap (original behavior).
-     */
-    dailyCap?: number;
-    /**
-     * 0..1; defaults to 0 so existing deterministic-spacing callers
-     * (and the test suite) stay byte-for-byte compatible. The modal
-     * passes 0.20 for all four presets.
-     */
-    jitterPct?: number;
-  },
+  opts: BulkSmsQueueOpts,
 ): Promise<Result<BulkSmsOutcome>> {
   if (propertyIds.length === 0) {
     return ok({ succeeded: 0, skipped: 0, failed: [] });
@@ -150,10 +92,6 @@ export async function bulkQueueSms(
 
   try {
     const supabase = await createClient();
-    const paceSeconds = opts.paceSeconds ?? 18;
-    const jitterPct = opts.jitterPct ?? 0;
-    const dailyCap = opts.dailyCap;
-    const now = Date.now();
 
     // Resolve the current session user once so {{my_first_name}} renders
     // for every property in the batch. Without this, templates referencing
@@ -165,165 +103,87 @@ export async function bulkQueueSms(
       data: { user },
     } = await supabase.auth.getUser();
     const enrolledByUserId = user?.id ?? null;
-    const adminClient = createAdminClient();
 
-    // Fetch properties in chunks — Supabase PostgREST rejects large IN clauses
-    // (URL length limit, ~8 KB) so we split into batches of 250.
-    const CHUNK = 250;
-    const allProperties: { id: string; homeowner_contact_id: string | null; org_id: string | null }[] = [];
-    for (let i = 0; i < propertyIds.length; i += CHUNK) {
-      const chunk = propertyIds.slice(i, i + CHUNK);
-      const { data, error: propError } = await supabase
-        .from("properties")
-        .select("id, homeowner_contact_id, org_id")
-        .in("id", chunk);
-      if (propError) {
-        return {
-          ok: false,
-          error: { code: "BULK_SMS_FAILED", message: propError.message },
-        };
-      }
-      if (data) allProperties.push(...data);
-    }
-
-    const propertyMap = new Map(
-      allProperties.map((p) => [p.id, p]),
-    );
-
-    // Prefetch all already-contacted property IDs in one batched query so the
-    // per-property loop doesn't fire N individual round-trips.
-    const contactedSet = new Set<string>();
-    if (opts.skipIfContacted) {
-      for (let i = 0; i < propertyIds.length; i += CHUNK) {
-        const chunk = propertyIds.slice(i, i + CHUNK);
-        const { data } = await supabase
-          .from("messages")
-          .select("property_id")
-          .in("property_id", chunk)
-          .eq("direction", "outbound");
-        data?.forEach((r) => { if (r.property_id) contactedSet.add(r.property_id); });
-      }
-    }
-
-    let succeeded = 0;
-    let skipped = 0;
-    const failed: BulkSmsOutcome["failed"] = [];
-    // Daily-cap bucket state. The first queued message of each bucket
-    // anchors at `dayBucketStartMs` (no jitter). Each subsequent queue
-    // adds `paceSeconds * 1000` to `cumulativeOffsetMs` and rolls a
-    // ±jitterPct multiplier on the gap.
-    let cumulativeOffsetMs = 0;
-    let dayBucketStartMs = now;
-    let dayBucketCount = 0;
-
-    for (const propertyId of propertyIds) {
-      const property = propertyMap.get(propertyId);
-      if (!property || !property.homeowner_contact_id) {
-        skipped++;
-        continue;
-      }
-
-      if (opts.skipIfContacted && contactedSet.has(propertyId)) {
-        skipped++;
-        continue;
-      }
-
-      const consentState = await getConsentState(
-        supabase,
-        property.homeowner_contact_id,
-        "sms",
-      );
-      if (consentState === "opted_out") {
-        skipped++;
-        continue;
-      }
-
-      let body: string | null = null;
-      if (opts.body) {
-        body = opts.body;
-      } else if (opts.templateCategory) {
-        if (!property.org_id) { skipped++; continue; }
-        const template = await pickFromPool(
-          supabase,
-          property.org_id,
-          opts.templateCategory,
-          propertyId,
-        );
-        if (!template) {
-          skipped++;
-          continue;
-        }
-        const vars = await loadTemplateVars(
-          supabase,
-          {
-            propertyId,
-            contactId: property.homeowner_contact_id,
-            enrolledByUserId,
-          },
-          adminClient,
-        );
-        body = renderTemplate(template.content, vars);
-      }
-
-      if (!body) {
-        skipped++;
-        continue;
-      }
-
-      // Roll over to next day's 8 AM PT bucket if we've hit the daily cap.
-      if (dailyCap !== undefined && dayBucketCount >= dailyCap) {
-        dayBucketStartMs = nextDayEightAmPT(dayBucketStartMs);
-        dayBucketCount = 0;
-        cumulativeOffsetMs = 0;
-      }
-      // Compute the candidate next-offset so we can write `scheduledFor`,
-      // but only COMMIT the advance (and jitter) on a successful queue.
-      // This way a downstream skip (no_phone, blocked_no_consent re-check)
-      // doesn't burn a slot and stretch the next message's gap past the
-      // ±jitterPct bound.
-      //
-      // The first message of each bucket anchors at the bucket start
-      // exactly (no jitter) so observability is clean and tests are
-      // deterministic; subsequent messages jitter the GAP between
-      // consecutive scheduled_for values within ±jitterPct of pace.
-      let nextOffsetMs = cumulativeOffsetMs;
-      if (dayBucketCount > 0) {
-        const jitterMs =
-          (Math.random() * 2 - 1) * paceSeconds * 1000 * jitterPct;
-        nextOffsetMs = cumulativeOffsetMs + paceSeconds * 1000 + jitterMs;
-      }
-      const scheduledFor = new Date(dayBucketStartMs + nextOffsetMs);
-      const outcome = await sendSmsToContact(supabase, {
-        contactId: property.homeowner_contact_id,
-        propertyId,
-        body,
-        queueOnly: true,
-        scheduledFor,
+    if (propertyIds.length <= SYNC_BULK_SMS_LIMIT) {
+      const adminClient = createAdminClient();
+      const state = await queueSmsBatch(supabase, adminClient, {
+        propertyIds,
+        opts,
+        enrolledByUserId,
+        state: freshScheduleState(Date.now()),
       });
-
-      if (outcome.status === "queued") {
-        succeeded++;
-        cumulativeOffsetMs = nextOffsetMs;
-        dayBucketCount += 1;
-      } else if (
-        outcome.status === "blocked_no_phone" ||
-        outcome.status === "contact_not_found" ||
-        outcome.status === "property_not_found" ||
-        outcome.status === "blocked_no_consent"
-      ) {
-        skipped++;
-      } else {
-        const msg =
-          "error" in outcome
-            ? outcome.error
-            : "reason" in outcome
-              ? outcome.reason
-              : outcome.status;
-        failed.push({ propertyId, message: msg });
-      }
+      return ok({
+        succeeded: state.succeeded,
+        skipped: state.skipped,
+        failed: state.failed,
+      });
     }
 
-    return ok({ succeeded, skipped, failed });
+    // Large selection: create a bulk_sms job and let the workflow chunk
+    // through it. Org for the job row comes from the first property.
+    const { data: probe } = await supabase
+      .from("properties")
+      .select("org_id")
+      .eq("id", propertyIds[0])
+      .single();
+    if (!probe?.org_id) {
+      return {
+        ok: false,
+        error: {
+          code: "BULK_SMS_JOB_CREATE_FAILED",
+          message: "Could not resolve the selection's organization",
+        },
+      };
+    }
+
+    const { data: jobRow, error: jobError } = await supabase
+      .from("jobs")
+      .insert({
+        type: "bulk_sms",
+        status: "queued",
+        org_id: probe.org_id,
+        created_by: user?.id ?? null,
+        total_items: propertyIds.length,
+        title: `Bulk SMS queue ${propertyIds.length.toLocaleString()} prospects`,
+        description: opts.templateCategory
+          ? `Template pool "${opts.templateCategory}"`
+          : "Custom message",
+        input_params: {
+          property_ids: propertyIds,
+          opts,
+          enrolled_by_user_id: enrolledByUserId,
+          anchor_ms: Date.now(),
+        },
+      })
+      .select("id")
+      .single();
+    if (jobError || !jobRow) {
+      return {
+        ok: false,
+        error: {
+          code: "BULK_SMS_JOB_CREATE_FAILED",
+          message: jobError?.message ?? "Job creation failed",
+        },
+      };
+    }
+
+    after(async () => {
+      try {
+        await start(bulkSmsWorkflow, [{ jobId: jobRow.id }]);
+      } catch (e) {
+        reportError(e, {
+          tags: { surface: "bulk_sms_workflow_start" },
+          extra: { jobId: jobRow.id, count: propertyIds.length },
+        });
+      }
+    });
+
+    return ok({
+      succeeded: 0,
+      skipped: 0,
+      failed: [],
+      deferred: { jobId: jobRow.id, total: propertyIds.length },
+    });
   } catch (e) {
     reportError(e, { tags: { surface: "bulk_queue_sms" } });
     return errFromUnknown(e, "BULK_SMS_FAILED");

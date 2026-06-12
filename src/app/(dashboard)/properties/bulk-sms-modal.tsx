@@ -273,6 +273,19 @@ export function BulkSmsModal({ open, propertyIds, onClose, onQueued }: Props) {
         fallbackMessage: "Bulk SMS failed",
       });
       if (result.ok) {
+        if (result.data.deferred) {
+          toast.success(
+            `Queueing ${result.data.deferred.total.toLocaleString()} messages in the background`,
+            {
+              description:
+                "Track progress on /jobs — messages appear in the Outbox as they're scheduled.",
+            },
+          );
+          onQueued(result.data.deferred.total);
+          onClose();
+          router.push("/messages?tab=outbox");
+          return;
+        }
         const { succeeded, skipped, failed } = result.data;
         const parts: string[] = [];
         if (succeeded > 0)
