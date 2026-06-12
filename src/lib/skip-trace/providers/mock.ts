@@ -145,6 +145,29 @@ function synthesize(input: SkipTraceInput): SkipTraceResult {
     };
   }
 
+  if (upper.startsWith("UNTYPED")) {
+    // One unlabeled phone + one Mobile — the hard rule must drop the
+    // unlabeled one instead of letting the 080 trigger sink the write.
+    return {
+      propertyId: input.propertyId,
+      hit: true,
+      persons: [
+        {
+          firstName: input.firstName ?? "Untyped",
+          lastName: input.lastName ?? "Owner",
+          phones: [
+            { number: "+18165550104", type: "Unknown", dnc: false, rank: 1 },
+            { number: "+18165550105", type: "Mobile", dnc: false, rank: 2 },
+          ],
+          emails: [],
+          isOwner: true,
+        },
+      ],
+      creditsDeducted: 5,
+      raw: { mock: true, untyped: true },
+    };
+  }
+
   if (upper.startsWith("MULTI")) {
     return {
       propertyId: input.propertyId,

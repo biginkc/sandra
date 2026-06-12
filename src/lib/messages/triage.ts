@@ -54,10 +54,21 @@ export async function matchUnknownSender(
       contact.phone_3 === fromAddress;
 
     if (!alreadyHas) {
-      const updates: Partial<{ phone_2: string; phone_3: string }> = {};
-      if (!contact.phone_2) updates.phone_2 = fromAddress;
-      else if (!contact.phone_3) updates.phone_3 = fromAddress;
-      else {
+      // A number that just texted us is mobile by demonstration — and
+      // the 080 trigger requires a type on every new phone value.
+      const updates: Partial<{
+        phone_2: string;
+        phone_2_type: string;
+        phone_3: string;
+        phone_3_type: string;
+      }> = {};
+      if (!contact.phone_2) {
+        updates.phone_2 = fromAddress;
+        updates.phone_2_type = "mobile";
+      } else if (!contact.phone_3) {
+        updates.phone_3 = fromAddress;
+        updates.phone_3_type = "mobile";
+      } else {
         return err({
           code: "PHONE_SLOTS_FULL",
           message:
@@ -131,6 +142,8 @@ export async function createContactFromUnknown(
         last_name: contact.lastName ?? null,
         entity_name: contact.entityName ?? null,
         phone_1: fromAddress,
+        // Inbound sender — mobile by demonstration (080 hard rule).
+        phone_1_type: "mobile",
       })
       .select("id")
       .single();
@@ -250,6 +263,8 @@ export async function mergeUnknownSenderToProperty(
         last_name: contact.lastName ?? null,
         entity_name: contact.entityName ?? null,
         phone_1: fromAddress,
+        // Inbound sender — mobile by demonstration (080 hard rule).
+        phone_1_type: "mobile",
       })
       .select("id")
       .single();

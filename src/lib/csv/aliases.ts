@@ -223,6 +223,7 @@ export const HEADER_ALIASES: Record<string, string> = {
   "listing agent last name": "agent_last_name",
 
   "agent phone": "agent_phone",
+  "agent phone type": "agent_phone_type",
   "listing agent phone": "agent_phone",
 
   "agent email": "agent_email",

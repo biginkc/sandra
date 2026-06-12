@@ -8,6 +8,9 @@ import {
   normalizeStateCode,
   normalizeZip,
 } from "@/lib/csv/normalize";
+import { reportError } from "@/lib/errors/report";
+import { telnyxLookupFromEnv } from "@/lib/line-type-lookup/telnyx";
+import type { PhoneLineType } from "@/lib/messaging/line-type";
 import type { Database } from "@/lib/supabase/types";
 
 /**
@@ -297,13 +300,39 @@ async function resolveOrCreateContact(
       .maybeSingle();
     if (data) return data.id;
   }
+  // Hard rule (migration 080): a phone can't be saved with type
+  // 'unknown'. Lead phones arrive untyped, so classify at intake via
+  // Telnyx when configured; when the lookup is unavailable or fails,
+  // drop the phone (loudly) rather than blocking the lead — name/email
+  // still land and the number is recoverable from the lead payload log.
+  let phoneType: PhoneLineType = "unknown";
+  if (contact.phone_1) {
+    try {
+      const lookup = telnyxLookupFromEnv();
+      const types = await lookup.classify([contact.phone_1]);
+      phoneType = types.get(contact.phone_1) ?? "unknown";
+    } catch {
+      // ConfigurationError (no TELNYX_API_KEY) or transport failure.
+    }
+    if (phoneType === "unknown") {
+      reportError(
+        new Error("lead phone dropped — line type unavailable at intake"),
+        {
+          tags: { surface: "lead_create_phone_unclassified" },
+          extra: { phone: contact.phone_1 },
+        },
+      );
+    }
+  }
+  const phoneToSave = phoneType === "unknown" ? null : contact.phone_1;
   const { data, error } = await supabase
     .from("contacts")
     .insert({
       contact_type: "person",
       first_name: contact.first_name,
       last_name: contact.last_name,
-      phone_1: contact.phone_1,
+      phone_1: phoneToSave,
+      phone_1_type: phoneToSave ? phoneType : "unknown",
       email: contact.email,
     })
     .select("id")

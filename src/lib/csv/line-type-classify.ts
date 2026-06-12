@@ -25,6 +25,8 @@ const SYNTHETIC_TYPE_HEADERS: Record<(typeof PHONE_SLOTS)[number], string> = {
   3: "__phone_3_line_type",
 };
 
+const AGENT_SYNTHETIC_TYPE_HEADER = "__agent_phone_line_type";
+
 function slotPhoneAndType(
   normalized: Readonly<Record<string, unknown>>,
   slot: (typeof PHONE_SLOTS)[number],
@@ -33,6 +35,14 @@ function slotPhoneAndType(
   const type = asLineType(
     normalized[`homeowner_phone_${slot}_type`] as string | null,
   );
+  return { phone, type };
+}
+
+function agentPhoneAndType(
+  normalized: Readonly<Record<string, unknown>>,
+): { phone: string | null; type: PhoneLineType } {
+  const phone = (normalized.agent_phone as string | null) ?? null;
+  const type = asLineType(normalized.agent_phone_type as string | null);
   return { phone, type };
 }
 
@@ -54,6 +64,8 @@ export function collectUnlabeledPhones(
       const { phone, type } = slotPhoneAndType(validated.normalized, slot);
       if (phone && type === "unknown") numbers.add(phone);
     }
+    const agent = agentPhoneAndType(validated.normalized);
+    if (agent.phone && agent.type === "unknown") numbers.add(agent.phone);
   }
   return [...numbers];
 }
@@ -102,6 +114,18 @@ export function applyLineTypes(
       patched = patched ?? { ...row };
       patched[header] = found;
       labeledSlots++;
+    }
+    const agent = agentPhoneAndType(validated.normalized);
+    if (agent.phone && agent.type === "unknown") {
+      const found = classified.get(agent.phone);
+      if (found === "mobile" || found === "landline") {
+        const header =
+          outMapping.agent_phone_type ?? AGENT_SYNTHETIC_TYPE_HEADER;
+        outMapping.agent_phone_type = header;
+        patched = patched ?? { ...row };
+        patched[header] = found;
+        labeledSlots++;
+      }
     }
     return patched ?? row;
   });

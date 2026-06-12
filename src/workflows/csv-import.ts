@@ -244,6 +244,28 @@ async function classifyPhonesChunkStep(args: {
 }
 
 /**
+ * Mark the job failed with an operator-readable error. Used when the
+ * operator approved paid classification but the lookup can't run —
+ * failing fast beats silently dropping the numbers they paid to keep.
+ */
+async function failJobStep(args: {
+  jobId: string;
+  message: string;
+}): Promise<void> {
+  "use step";
+
+  const supabase = createAdminClient();
+  await supabase
+    .from("jobs")
+    .update({
+      status: "failed",
+      error_message: args.message,
+      completed_at: new Date().toISOString(),
+    })
+    .eq("id", args.jobId);
+}
+
+/**
  * STEP 1d — Write classified types back into the rows (and extend the
  * mapping with synthetic type columns where the file had none), then
  * record the classification counts + estimated cost on the job row so
@@ -536,6 +558,23 @@ export async function csvImportWorkflow(
   let lineTypeClassification: ClassificationCounts | null = null;
   if (params.classifyLineTypes) {
     const collected = await collectUnlabeledPhonesStep({ rows, mapping });
+    // The operator explicitly approved paid classification — silently
+    // falling through to the drop path would discard the very numbers
+    // they paid to keep. Fail the job fast with a config error instead.
+    if (!collected.telnyxConfigured && collected.numbers.length > 0) {
+      await failJobStep({
+        jobId: params.jobId,
+        message:
+          "Line-type classification was requested but TELNYX_API_KEY is not configured. " +
+          "Add the key (Vercel env) and re-run the import, or choose 'Skip — drop unlabeled numbers'.",
+      });
+      return {
+        succeeded: 0,
+        failed: 0,
+        skipped: 0,
+        totalRows: loaded.totalRows,
+      };
+    }
     if (collected.telnyxConfigured && collected.numbers.length > 0) {
       // Chunked like the ingest loop so a big file's lookups never push
       // a single invocation past the function time cap.

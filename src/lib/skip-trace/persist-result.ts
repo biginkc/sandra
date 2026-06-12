@@ -164,9 +164,15 @@ export async function persistSkipTraceResult(
 
   // Mobile-first, then rank ascending; keep non-DNC, non-dup. Everything
   // downstream texts phone_1, so a known mobile must win slot 1 over a
-  // lower-rank landline.
+  // lower-rank landline. Unlabeled phones are dropped entirely — the
+  // hard rule (migration 080 trigger) rejects saving a new number with
+  // type 'unknown', so packing one would fail the whole contact update
+  // and sink the skip-trace finalize.
   const candidatePhones = owner.phones
-    .filter((p) => !!p.number && !p.dnc)
+    .filter(
+      (p) =>
+        !!p.number && !p.dnc && lineTypeFromVendorLabel(p.type) !== "unknown",
+    )
     .sort((a, b) => {
       const aMobile = lineTypeFromVendorLabel(a.type) === "mobile";
       const bMobile = lineTypeFromVendorLabel(b.type) === "mobile";

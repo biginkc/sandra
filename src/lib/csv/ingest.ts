@@ -440,13 +440,20 @@ async function ingestRow(
   }
 
   // Upsert agent contact + sidecar when any agent fields are present.
+  // Same hard rule for the agent's phone: no line type → not saved.
   let agentContactId: string | null = null;
+  let agentPhoneDropped = 0;
   if (hasAgentFields(n)) {
+    const agentPhone = (n.agent_phone as string | null) ?? null;
+    const agentPhoneType = asLineType(n.agent_phone_type as string | null);
+    const keepAgentPhone = !!agentPhone && agentPhoneType !== "unknown";
+    if (agentPhone && !keepAgentPhone) agentPhoneDropped = 1;
     agentContactId = await upsertContact(supabase, {
       contact_type: "person",
       first_name: normalizeName(n.agent_first_name as string | null),
       last_name: normalizeName(n.agent_last_name as string | null),
-      phone_1: (n.agent_phone as string | null) ?? null,
+      phone_1: keepAgentPhone ? agentPhone : null,
+      phone_1_type: keepAgentPhone ? agentPhoneType : "unknown",
       email: (n.agent_email as string | null)?.trim().toLowerCase() ?? null,
     });
     await supabase.from("agent_details").upsert(
@@ -507,7 +514,7 @@ async function ingestRow(
     return {
       propertyId: existingId,
       wasDuplicate: true,
-      droppedUnlabeledPhones: phoneSlots.dropped,
+      droppedUnlabeledPhones: phoneSlots.dropped + agentPhoneDropped,
     };
   }
 
@@ -561,7 +568,7 @@ async function ingestRow(
   return {
     propertyId: inserted.id,
     wasDuplicate: false,
-    droppedUnlabeledPhones: phoneSlots.dropped,
+    droppedUnlabeledPhones: phoneSlots.dropped + agentPhoneDropped,
   };
 }
 

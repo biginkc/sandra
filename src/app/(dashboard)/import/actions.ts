@@ -413,3 +413,13 @@ async function resolveOrCreateList(
   if (createErr) throw new Error(`list insert: ${createErr.message}`);
   return created.id;
 }
+
+/**
+ * Whether the Telnyx line-type lookup can actually run. The Confirm
+ * step's interstitial disables the paid "Classify" choice when the key
+ * is missing — offering it and then silently dropping the numbers was
+ * the failure mode (the workflow also fails fast as a backstop).
+ */
+export async function isLineTypeLookupConfigured(): Promise<boolean> {
+  return !!process.env.TELNYX_API_KEY?.trim();
+}
