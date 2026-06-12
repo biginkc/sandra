@@ -252,12 +252,9 @@ function applyThreadUpdates(
     };
   });
 
-  return next.sort((a, b) => {
-    const aUnread = a.unreadCount > 0 ? 1 : 0;
-    const bUnread = b.unreadCount > 0 ? 1 : 0;
-    if (aUnread !== bUnread) return bUnread - aUnread;
-    return b.lastMessageAt.localeCompare(a.lastMessageAt);
-  });
+  // Recency-only, matching the server sort in listThreads — reading a
+  // thread must never reposition it.
+  return next.sort((a, b) => b.lastMessageAt.localeCompare(a.lastMessageAt));
 }
 
 function initialsOfContact(

@@ -318,18 +318,12 @@ describe("listThreads — isOptedOut (DNC) flag", () => {
   });
 });
 
-describe("listThreads — unread-first sort (feedback-f E2a)", () => {
-  it("bubbles unread threads to the top regardless of timestamp", async () => {
-    // Build 4 contacts: oldest unread, recent read, recent unread, oldest read.
-    // After sort, expect: recent-unread, oldest-unread, recent-read, oldest-read.
+describe("listThreads — recency-only sort", () => {
+  function seedFixtures(
+    rows: Array<{ cid: string; age: number; unread: boolean }>,
+  ) {
     const now = Date.now();
-    const messages = [
-      // contact_id, age_ms, has_unread (read_at null + inbound)
-      { cid: "c-recent-read", age: 1_000, unread: false },
-      { cid: "c-recent-unread", age: 5_000, unread: true },
-      { cid: "c-old-unread", age: 60_000, unread: true },
-      { cid: "c-old-read", age: 90_000, unread: false },
-    ].map((m) => ({
+    const messages = rows.map((m) => ({
       contact_id: m.cid,
       property_id: `p-${m.cid}`,
       body: "x",
@@ -350,49 +344,47 @@ describe("listThreads — unread-first sort (feedback-f E2a)", () => {
         { id: m.property_id, address: null, city: null, state: null, assigned_user_id: null },
       ]),
     );
+    return makeStub({ messages, contacts, properties });
+  }
 
-    const { supabase } = makeStub({ messages, contacts, properties });
+  it("orders strictly by last message recency — read state never moves a row", async () => {
+    // Unread-first bubbling (feedback-f E2a) was retired: the dedicated
+    // Unread chip owns "what needs attention", so reading a thread must
+    // not reposition it in All/Mine/Unassigned.
+    const { supabase } = seedFixtures([
+      { cid: "c-recent-read", age: 1_000, unread: false },
+      { cid: "c-recent-unread", age: 5_000, unread: true },
+      { cid: "c-old-unread", age: 60_000, unread: true },
+      { cid: "c-old-read", age: 90_000, unread: false },
+    ]);
     const threads = await listThreads(supabase, {});
 
     expect(threads.map((t) => t.contactId)).toEqual([
+      "c-recent-read",
       "c-recent-unread",
       "c-old-unread",
-      "c-recent-read",
       "c-old-read",
     ]);
   });
 
-  it("preserves recency-desc within the unread group", async () => {
-    const now = Date.now();
-    const messages = [
-      { cid: "u-newer", age: 2_000 },
-      { cid: "u-older", age: 60_000 },
-    ].map((m) => ({
-      contact_id: m.cid,
-      property_id: `p-${m.cid}`,
-      body: "x",
-      direction: "inbound" as const,
-      created_at: new Date(now - m.age).toISOString(),
-      read_at: null,
-    }));
+  it("unreadOnly keeps the pinned includeThreadId thread after it is read", async () => {
+    // Read-on-open marks the open thread read; the cockpit pins it via
+    // includeThreadId so it doesn't vanish from the Unread list while
+    // the user is still viewing it.
+    const { supabase } = seedFixtures([
+      { cid: "c-open", age: 1_000, unread: false },
+      { cid: "c-unread", age: 5_000, unread: true },
+      { cid: "c-other-read", age: 9_000, unread: false },
+    ]);
 
-    const contacts = new Map(
-      messages.map((m) => [
-        m.contact_id,
-        { id: m.contact_id, first_name: null, last_name: null, entity_name: m.contact_id, phone_1: null },
-      ]),
-    );
-    const properties = new Map(
-      messages.map((m) => [
-        m.property_id,
-        { id: m.property_id, address: null, city: null, state: null, assigned_user_id: null },
-      ]),
-    );
+    const pinned = await listThreads(supabase, {
+      unreadOnly: true,
+      includeThreadId: "legacy:c-open:p-c-open",
+    });
+    expect(pinned.map((t) => t.contactId)).toEqual(["c-open", "c-unread"]);
 
-    const { supabase } = makeStub({ messages, contacts, properties });
-    const threads = await listThreads(supabase, {});
-
-    expect(threads.map((t) => t.contactId)).toEqual(["u-newer", "u-older"]);
+    const unpinned = await listThreads(supabase, { unreadOnly: true });
+    expect(unpinned.map((t) => t.contactId)).toEqual(["c-unread"]);
   });
 });
 

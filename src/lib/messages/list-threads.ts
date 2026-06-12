@@ -63,6 +63,10 @@ export type ListThreadsOpts = {
   unassignedOnly?: boolean;
   /** When true, returns only threads with at least one unread inbound message. */
   unreadOnly?: boolean;
+  /** Thread id exempt from the `unreadOnly` filter. The cockpit passes the
+   *  currently open thread so read-on-open doesn't yank it out of the
+   *  Unread list while the user is still looking at it. */
+  includeThreadId?: string;
 };
 
 /**
@@ -184,7 +188,12 @@ export async function listThreads(
 
     if (opts.assigneeId && p?.assigned_user_id !== opts.assigneeId) continue;
     if (opts.unassignedOnly && p?.assigned_user_id) continue;
-    if (opts.unreadOnly && bucket.unreadCount === 0) continue;
+    if (
+      opts.unreadOnly &&
+      bucket.unreadCount === 0 &&
+      threadId !== opts.includeThreadId
+    )
+      continue;
 
     const consentState = computeConsentState(
       consentEventsByContact.get(contactId) ?? [],
@@ -221,15 +230,11 @@ export async function listThreads(
     });
   }
 
-  // Sort: unread threads bubble to the top regardless of recency, then
-  // most-recent first within each group. Per feedback-f E2a — anything
-  // with unread inbound demands attention before everything else.
-  threads.sort((a, b) => {
-    const aUnread = a.unreadCount > 0 ? 1 : 0;
-    const bUnread = b.unreadCount > 0 ? 1 : 0;
-    if (aUnread !== bUnread) return bUnread - aUnread;
-    return b.lastMessageAt.localeCompare(a.lastMessageAt);
-  });
+  // Sort: most-recent first, full stop. Rows move only when a new message
+  // arrives — reading a thread must never reposition it. This retires the
+  // feedback-f E2a unread-first bubbling; the dedicated Unread chip is now
+  // the "what needs attention" view.
+  threads.sort((a, b) => b.lastMessageAt.localeCompare(a.lastMessageAt));
   return threads;
 }
 
