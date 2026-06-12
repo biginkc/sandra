@@ -48,6 +48,10 @@ function unprocessable(error_code: string, field?: string) {
   );
 }
 
+function forbidden(error_code: string) {
+  return NextResponse.json({ error: "forbidden", error_code }, { status: 403 });
+}
+
 async function validateOrgConsistency(serviceClient: any, body: WritebackBody) {
   if ((!body.org_id || !body.property_id || !body.contact_id) && !body.dialer_batch_item_id) {
     return { ok: false as const, response: unprocessable("missing_required_field") };
@@ -237,34 +241,32 @@ async function applyDoNotCallOptOut(
   const contactId = body.contact_id!;
   const occurredAt = validTimestamp(body.ended_at);
 
-  try {
-    await recordConsentEvent(serviceClient, {
-      contactId,
-      channel: "voice",
-      eventType: "opt_out",
-      source: "jitter_writeback",
-      sourceDetail: {
-        disposition: body.disposition ?? null,
-        jitter_session_id: body.jitter_session_id ?? null,
-      },
-      occurredAt: occurredAt ? new Date(occurredAt) : new Date(),
-      // attemptId → source_external_id; the partial unique index on
-      // (contact_id, channel, event_type, source, source_external_id)
-      // keeps writeback replays from duplicating the audit row.
-      idempotencyKey: attemptId,
-    });
-  } catch (e) {
-    // Compliance enforcement beats audit perfection: if the audit insert
-    // fails, still flip the do-not-contact bit and stop future outreach
-    // rather than 500ing the writeback.
-    reportError(e, {
-      tags: { surface: "jitter_call_activity_writeback_dnc_consent" },
-      extra: { contactId, attemptId },
-    });
-  }
+  // Deliberately NOT wrapped in try/catch: recordConsentEvent already
+  // handles duplicates internally (externalId pre-lookup + unique-index
+  // conflict detection), so any error that escapes it is a real failure.
+  // Swallowing it would return 200 — Jitter stops retrying and the contact
+  // is flagged with no audit row. Let it throw: the route 500s and Jitter's
+  // bounded writeback retry replays this fully replay-safe helper. (The
+  // "best-effort audit" precedent in inbound.ts doesn't apply here —
+  // inbound SMS senders don't retry; Jitter does.)
+  await recordConsentEvent(serviceClient, {
+    contactId,
+    channel: "voice",
+    eventType: "opt_out",
+    source: "jitter_writeback",
+    sourceDetail: {
+      disposition: body.disposition ?? null,
+      jitter_session_id: body.jitter_session_id ?? null,
+    },
+    occurredAt: occurredAt ? new Date(occurredAt) : new Date(),
+    // attemptId → source_external_id; the partial unique index on
+    // (contact_id, channel, event_type, source, source_external_id)
+    // keeps writeback replays from duplicating the audit row.
+    idempotencyKey: attemptId,
+  });
 
-  // Enforced, not best-effort: if this fails the route must 500 so
-  // Jitter's bounded writeback retry replays the request.
+  // Also enforced: if this fails the route must 500 so Jitter's bounded
+  // writeback retry replays the request.
   const { error } = await serviceClient
     .from("contacts")
     .update({ do_not_contact: true })
@@ -289,6 +291,16 @@ export async function PUT(
 
     const validation = await validateOrgConsistency(auth.serviceClient as any, body);
     if (!validation.ok) return validation.response;
+
+    // Tenant isolation: validateOrgConsistency only proves the body ids are
+    // internally consistent with body.org_id — it never compares against the
+    // AUTHENTICATED consumer's org. The writes below use the service-role
+    // client, so without this check an org-A token could submit org-B ids
+    // and mutate org-B rows (call_activities, contacts.do_not_contact,
+    // consent_events).
+    if (body.org_id !== auth.orgId) {
+      return forbidden("org_consumer_mismatch");
+    }
 
     const callbackTask = await syncCallbackTask(auth.serviceClient as any, body, validation);
     if (callbackTask && !callbackTask.ok) return callbackTask.response;

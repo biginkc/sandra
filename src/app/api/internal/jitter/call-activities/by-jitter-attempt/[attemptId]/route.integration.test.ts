@@ -1,13 +1,18 @@
 import { beforeEach, describe, expect, it } from "vitest";
 
 import { createTestClient } from "@tests/integration/client";
-import { BMH_ORG_ID, createOrgUser } from "@tests/integration/fixtures/multi-user";
+import {
+  BMH_ORG_ID,
+  TEST_ORG_B_ID,
+  createOrgUser,
+} from "@tests/integration/fixtures/multi-user";
 
 import {
   authHeaders,
   jsonRequest,
   resetJitterIntegration,
   seedDialerBatch,
+  seedDialerLead,
 } from "../../../_lib/test-helpers.integration";
 import { PUT } from "./route";
 
@@ -342,6 +347,57 @@ describe("internal.jitter.call-activities writeback PUT", () => {
     await expect(response.json()).resolves.toMatchObject({
       error_code: "property_deleted",
     });
+  });
+
+  it("returns 403 and writes nothing when the body org differs from the authenticated consumer org", async () => {
+    // The seeded webhook consumer belongs to BMH_ORG_ID (webhook_consumers
+    // org_id default). Submit internally-consistent org-B ids with that
+    // org-A token — the route must refuse to touch org B.
+    const otherOrgLead = await seedDialerLead(testClient, { org_id: TEST_ORG_B_ID });
+    const attemptId = `attempt-${crypto.randomUUID()}`;
+    const response = await PUT(
+      jsonRequest(
+        `https://sandra.test/api/internal/jitter/call-activities/by-jitter-attempt/${attemptId}`,
+        "PUT",
+        {
+          org_id: otherOrgLead.orgId,
+          property_id: otherOrgLead.propertyId,
+          contact_id: otherOrgLead.contactId,
+          jitter_session_id: "session-activity",
+          provider: "jitter",
+          outcome: "connected_human",
+          disposition: "dnc_request",
+          do_not_call_requested: true,
+        },
+        { "idempotency-key": "activity-cross-org" },
+      ),
+      attemptContext(attemptId),
+    );
+
+    expect(response.status).toBe(403);
+    await expect(response.json()).resolves.toMatchObject({
+      error: "forbidden",
+      error_code: "org_consumer_mismatch",
+    });
+
+    const { data: activities } = await (testClient as any)
+      .from("call_activities")
+      .select("id")
+      .eq("jitter_attempt_id", attemptId);
+    expect(activities).toHaveLength(0);
+
+    const { data: contact } = await testClient
+      .from("contacts")
+      .select("do_not_contact")
+      .eq("id", otherOrgLead.contactId)
+      .single();
+    expect(contact?.do_not_contact).toBe(false);
+
+    const { data: events } = await testClient
+      .from("consent_events")
+      .select("id")
+      .eq("contact_id", otherOrgLead.contactId);
+    expect(events).toHaveLength(0);
   });
 
   it("sets do_not_contact and records a voice opt-out consent event on DNC writeback", async () => {
