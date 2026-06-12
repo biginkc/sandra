@@ -20,7 +20,6 @@ export function AiResponderConfigForm({
   const [systemPrompt, setSystemPrompt] = useState(initial.system_prompt);
   const [maxTurns, setMaxTurns] = useState(initial.max_turns);
   const [minConfidence, setMinConfidence] = useState(initial.min_confidence);
-  const [dailyCap, setDailyCap] = useState(initial.daily_send_cap);
   const [businessHours, setBusinessHours] = useState(
     initial.business_hours_only,
   );
@@ -36,7 +35,6 @@ export function AiResponderConfigForm({
           system_prompt: systemPrompt,
           max_turns: maxTurns,
           min_confidence: minConfidence,
-          daily_send_cap: dailyCap,
           business_hours_only: businessHours,
         }),
         {
@@ -103,7 +101,7 @@ export function AiResponderConfigForm({
         />
       </section>
 
-      <section className="grid gap-4 rounded-md border p-4 sm:grid-cols-3">
+      <section className="grid gap-4 rounded-md border p-4 sm:grid-cols-2">
         <label className="flex flex-col gap-1 text-sm">
           <span className="font-medium">Max turns</span>
           <Input
@@ -137,18 +135,6 @@ export function AiResponderConfigForm({
           </span>
         </label>
 
-        <label className="flex flex-col gap-1 text-sm">
-          <span className="font-medium">Daily send cap</span>
-          <Input
-            type="number"
-            min={0}
-            value={dailyCap}
-            onChange={(e) => setDailyCap(Math.max(0, Number(e.target.value)))}
-          />
-          <span className="text-muted-foreground text-xs">
-            Org-wide 24h ceiling. 0 = AI never sends.
-          </span>
-        </label>
       </section>
 
       <section className="flex flex-col gap-2 rounded-md border p-4 text-xs">

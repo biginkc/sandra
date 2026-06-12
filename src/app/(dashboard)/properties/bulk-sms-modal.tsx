@@ -43,116 +43,75 @@ const PACE_MIN_SECONDS = 10;
 const PACE_MAX_SECONDS = 600;
 const SKIP_DEFAULT_THRESHOLD = 50;
 
-// Carrier-safe pacing presets (260506-m3a). Each preset bundles
-// pace + daily cap + jitter into a single radio choice so Jarrad
-// doesn't have to remember the rules every time.
+// Pacing presets (260506-m3a). Each preset is a pace + jitter bundle —
+// NO volume caps client-side; provider credits are the only cap
+// (Jarrad's standing rule). The queue drains continuously at the
+// chosen pace until empty.
 type PresetId = "conservative" | "steady" | "push" | "custom";
 const PRESETS: Record<
   Exclude<PresetId, "custom">,
-  { label: string; dailyCap: number; paceSeconds: number; tagline: string }
+  { label: string; paceSeconds: number; tagline: string }
 > = {
   conservative: {
     label: "Conservative",
-    dailyCap: 250,
     paceSeconds: 14,
     tagline: "Low and slow — best for warmup or paranoid mode.",
   },
   steady: {
     label: "Steady",
-    dailyCap: 1000,
     paceSeconds: 8,
-    tagline: "Recommended. ~50% of T-Mobile Standard ceiling.",
+    tagline: "Recommended. Continuous 8s pace.",
   },
   push: {
     label: "Push",
-    dailyCap: 1800,
     paceSeconds: 4,
-    tagline: "Short-burst sprint, not for sustained use.",
+    tagline: "Fast continuous drain.",
   },
 };
 const JITTER_PCT = 0.2;
 
 /**
  * Mirror the server-side bulkQueueSms drain math so the UI shows the
- * preset's per-day breakdown + last-send timestamp BEFORE the operator
- * queues. Pure function; exported for test access.
+ * ramp size + last-send timestamp BEFORE the operator queues. Pure
+ * function; exported for test access.
  *
- * Same DST simplification as the server: daily-cap rollover anchors at
- * 8 AM PT using a fixed -08:00 offset, drifting to 9 AM PT during DST.
+ * No volume caps client-side — the schedule is one continuous paced
+ * ramp; provider credits are the only cap. Messages whose release time
+ * lands in recipient quiet hours are deferred by the release cron, so
+ * the quiet-window count is a preview of that deferral, not a cap.
+ *
+ * DST simplification (same as the server used to make): the 9 PM–8 AM
+ * PT quiet window uses a fixed -08:00 offset.
  */
 export function computeDrain(args: {
   total: number;
   paceSeconds: number;
-  dailyCap: number | undefined;
   now: Date;
 }): {
   perDay: { dayLabel: string; count: number }[];
   lastSendLocal: string | null;
   pastCutoffCount: number;
 } {
-  const { total, paceSeconds, dailyCap, now } = args;
+  const { total, paceSeconds, now } = args;
   if (total === 0 || !Number.isFinite(paceSeconds) || paceSeconds <= 0) {
     return { perDay: [], lastSendLocal: null, pastCutoffCount: 0 };
   }
-  const perDay: { dayLabel: string; count: number }[] = [];
-  let remaining = total;
-  let dayStart = now.getTime();
+  const startMs = now.getTime();
+  const lastSendMs = startMs + Math.max(0, total - 1) * paceSeconds * 1000;
+  // Count messages whose scheduled slot lands inside the 9 PM – 8 AM PT
+  // quiet window (federal TCPA cutoff) on ANY night the ramp crosses,
+  // not just the first one. The release cron defers those to the next
+  // morning; this is a preview of that deferral. Fixed -08:00 PT offset
+  // (same simplification as the rest of this file), so pure arithmetic
+  // per message instead of an Intl call.
+  const PT_OFFSET_MS = 8 * 3_600_000;
+  const DAY_MS = 86_400_000;
   let pastCutoffCount = 0;
-  let lastSendMs = dayStart;
-  const dayLabelFor = (ms: number, idx: number): string => {
-    if (idx === 0) return "Today";
-    if (idx === 1) return "Tomorrow";
-    return new Intl.DateTimeFormat("en-US", {
-      weekday: "short",
-      timeZone: "America/Los_Angeles",
-    }).format(new Date(ms));
-  };
-  let dayIdx = 0;
-  while (remaining > 0) {
-    const cap = dailyCap ?? remaining;
-    const inThisDay = Math.min(remaining, cap);
-    perDay.push({ dayLabel: dayLabelFor(dayStart, dayIdx), count: inThisDay });
-    lastSendMs = dayStart + Math.max(0, inThisDay - 1) * paceSeconds * 1000;
-    // Count any that would land past 9 PM PT same calendar day (federal
-    // TCPA cutoff). The server defers them on release; we surface the
-    // count so the UI shows the rollover ahead of time.
-    const ptNinePm = (() => {
-      const fmt = new Intl.DateTimeFormat("en-US", {
-        timeZone: "America/Los_Angeles",
-        year: "numeric",
-        month: "2-digit",
-        day: "2-digit",
-      });
-      const parts = fmt.formatToParts(new Date(dayStart));
-      const y = Number(parts.find((p) => p.type === "year")!.value);
-      const m = Number(parts.find((p) => p.type === "month")!.value);
-      const day = Number(parts.find((p) => p.type === "day")!.value);
-      // 21:00 PT == 05:00 UTC next day at -08:00.
-      return Date.UTC(y, m - 1, day + 1, 5, 0, 0);
-    })();
-    if (lastSendMs > ptNinePm) {
-      const overflowStart = Math.max(
-        0,
-        Math.ceil((ptNinePm - dayStart) / (paceSeconds * 1000)),
-      );
-      pastCutoffCount += Math.max(0, inThisDay - overflowStart);
-    }
-    remaining -= inThisDay;
-    dayIdx += 1;
-    // Next bucket starts at 08:00 PT == 16:00 UTC at -08:00 offset.
-    const nextDay = new Date(dayStart);
-    nextDay.setUTCDate(nextDay.getUTCDate() + 1);
-    const fmt = new Intl.DateTimeFormat("en-US", {
-      timeZone: "America/Los_Angeles",
-      year: "numeric",
-      month: "2-digit",
-      day: "2-digit",
-    });
-    const parts = fmt.formatToParts(nextDay);
-    const y = Number(parts.find((p) => p.type === "year")!.value);
-    const m = Number(parts.find((p) => p.type === "month")!.value);
-    const day = Number(parts.find((p) => p.type === "day")!.value);
-    dayStart = Date.UTC(y, m - 1, day, 16, 0, 0);
+  for (let i = 0; i < total; i++) {
+    const ptMs = startMs + i * paceSeconds * 1000 - PT_OFFSET_MS;
+    const timeOfDayMs = ((ptMs % DAY_MS) + DAY_MS) % DAY_MS;
+    const hour = timeOfDayMs / 3_600_000;
+    if (hour >= 21 || hour < 8) pastCutoffCount++;
   }
   const lastSendLocal = new Intl.DateTimeFormat("en-US", {
     timeZone: "America/Los_Angeles",
@@ -160,7 +119,11 @@ export function computeDrain(args: {
     minute: "2-digit",
     weekday: "short",
   }).format(new Date(lastSendMs));
-  return { perDay, lastSendLocal, pastCutoffCount };
+  return {
+    perDay: [{ dayLabel: "Queued", count: total }],
+    lastSendLocal,
+    pastCutoffCount,
+  };
 }
 
 export function BulkSmsModal({ open, propertyIds, onClose, onQueued }: Props) {
@@ -177,7 +140,6 @@ export function BulkSmsModal({ open, propertyIds, onClose, onQueued }: Props) {
   const [presetId, setPresetId] = useState<PresetId>("steady");
   const [paceValue, setPaceValue] = useState<number>(18);
   const [paceUnit, setPaceUnit] = useState<PaceUnit>("seconds");
-  const [customDailyCap, setCustomDailyCap] = useState<number | "">("");
 
   // Stable key so the count-fetch effect doesn't re-run on every parent render
   // even if the parent passes a fresh array reference each time.
@@ -232,18 +194,12 @@ export function BulkSmsModal({ open, propertyIds, onClose, onQueued }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, propertyIdsKey]);
 
-  // Resolve the active preset's pace + daily cap. Custom mode reads
-  // from the raw inputs; the other 3 presets pull from PRESETS.
+  // Resolve the active preset's pace. Custom mode reads from the raw
+  // inputs; the other 3 presets pull from PRESETS.
   const resolvedPaceSeconds =
     presetId === "custom"
       ? resolvePaceSeconds(paceValue, paceUnit)
       : PRESETS[presetId].paceSeconds;
-  const resolvedDailyCap: number | undefined =
-    presetId === "custom"
-      ? typeof customDailyCap === "number" && customDailyCap > 0
-        ? customDailyCap
-        : undefined
-      : PRESETS[presetId].dailyCap;
   // Out-of-range is a Custom-mode concern only; the locked presets are
   // always within bounds by definition.
   const paceOutOfRange =
@@ -265,10 +221,9 @@ export function BulkSmsModal({ open, propertyIds, onClose, onQueued }: Props) {
       computeDrain({
         total: textableCount,
         paceSeconds: resolvedPaceSeconds,
-        dailyCap: resolvedDailyCap,
         now: new Date(),
       }),
-    [textableCount, resolvedPaceSeconds, resolvedDailyCap],
+    [textableCount, resolvedPaceSeconds],
   );
 
   const handleSend = () => {
@@ -288,7 +243,6 @@ export function BulkSmsModal({ open, propertyIds, onClose, onQueued }: Props) {
     const baseOpts = {
       paceSeconds: resolvedPaceSeconds,
       skipIfContacted: skipContacted,
-      dailyCap: resolvedDailyCap,
       jitterPct: JITTER_PCT,
       includeUnknown,
     };
@@ -420,7 +374,7 @@ export function BulkSmsModal({ open, propertyIds, onClose, onQueued }: Props) {
                     id === "custom"
                       ? {
                           label: "Custom",
-                          tagline: "Set your own pace and daily cap.",
+                          tagline: "Set your own pace.",
                         }
                       : PRESETS[id];
                   return (
@@ -453,10 +407,6 @@ export function BulkSmsModal({ open, propertyIds, onClose, onQueued }: Props) {
                       </p>
                       {id !== "custom" ? (
                         <p className="text-muted-foreground mt-0.5 text-xs">
-                          {PRESETS[
-                            id as Exclude<PresetId, "custom">
-                          ].dailyCap.toLocaleString()}
-                          /day ·{" "}
                           {
                             PRESETS[id as Exclude<PresetId, "custom">]
                               .paceSeconds
@@ -505,29 +455,6 @@ export function BulkSmsModal({ open, propertyIds, onClose, onQueued }: Props) {
                     </p>
                   ) : null}
                 </div>
-                <div className="space-y-1.5">
-                  <label
-                    htmlFor="bulk-sms-daily-cap"
-                    className="text-sm font-medium"
-                  >
-                    Daily cap
-                  </label>
-                  <input
-                    id="bulk-sms-daily-cap"
-                    type="number"
-                    min={1}
-                    value={customDailyCap}
-                    onChange={(e) => {
-                      const v = e.target.value;
-                      setCustomDailyCap(
-                        v === "" ? "" : Math.max(1, Number(v)),
-                      );
-                    }}
-                    aria-label="Daily cap"
-                    placeholder="No cap"
-                    className="border-input bg-background w-32 rounded-md border px-3 py-2 text-sm"
-                  />
-                </div>
               </div>
             ) : null}
 
@@ -550,8 +477,8 @@ export function BulkSmsModal({ open, propertyIds, onClose, onQueued }: Props) {
                 ) : null}
                 {drain.pastCutoffCount > 0 ? (
                   <p className="text-amber-700 dark:text-amber-400">
-                    {drain.pastCutoffCount.toLocaleString()} would land past
-                    9 PM cutoff — released next morning.
+                    {drain.pastCutoffCount.toLocaleString()} would land in
+                    the 9 PM – 8 AM quiet window — released next morning.
                   </p>
                 ) : null}
               </div>

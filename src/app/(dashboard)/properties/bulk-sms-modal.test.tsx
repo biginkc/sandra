@@ -34,7 +34,7 @@ vi.mock("next/navigation", () => ({
 }));
 
 // eslint-disable-next-line import/first
-import { BulkSmsModal } from "./bulk-sms-modal";
+import { BulkSmsModal, computeDrain } from "./bulk-sms-modal";
 
 function renderModal(
   propertyIds: string[],
@@ -299,17 +299,18 @@ describe("<BulkSmsModal /> presets + drain estimate (260506-m3a)", () => {
     expect(custom.checked).toBe(false);
   });
 
-  it("Push preset shows the 'short-burst sprint' tagline", async () => {
+  it("Push preset shows the 'fast continuous drain' tagline", async () => {
     renderModal(["p1"]);
     await waitFor(() => expect(listSmsTemplateCategories).toHaveBeenCalled());
     expect(
-      screen.getByText(/short-burst sprint, not for sustained use/i),
+      screen.getByText(/fast continuous drain/i),
     ).toBeInTheDocument();
   });
 
   it("switching from Steady → Conservative updates the drain estimate", async () => {
     const user = userEvent.setup();
-    // 500 properties: Steady (cap 1000) drains in one day; Conservative (cap 250) splits over 2 days.
+    // No caps — the full 500 stay in one continuous ramp on every
+    // preset; only the pace (and therefore the last-send time) changes.
     const ids = Array.from({ length: 500 }, (_, i) => `p${i + 1}`);
     renderModal(ids);
     await waitFor(() => expect(listSmsTemplateCategories).toHaveBeenCalled());
@@ -319,31 +320,30 @@ describe("<BulkSmsModal /> presets + drain estimate (260506-m3a)", () => {
 
     await user.click(screen.getByRole("radio", { name: /Conservative/i }));
     const drainAfter = screen.getByTestId("drain-estimate").textContent ?? "";
-    // 500 with cap 250 → "Today 250 · Tomorrow 250" (or similar split)
-    expect(drainAfter).toMatch(/250/);
+    // Still all 500 queued (no per-day split), but the slower pace
+    // moves the last-send estimate.
+    expect(drainAfter).toMatch(/500/);
     expect(drainAfter).not.toBe(drainBefore);
   });
 
-  it("Custom mode reveals raw pace inputs AND a Daily cap input; other presets hide them", async () => {
+  it("Custom mode reveals raw pace inputs and never offers a daily cap; other presets hide them", async () => {
     const user = userEvent.setup();
     renderModal(["p1"]);
     await waitFor(() => expect(listSmsTemplateCategories).toHaveBeenCalled());
 
-    // Steady default — neither raw input is visible. Use exact-match
-    // anchored regexes so we don't accidentally pick up the "Set your
-    // own pace and daily cap." preset tagline that wraps the Custom
-    // radio's own <label>.
+    // Steady default — raw pace input is hidden. Anchored regex so we
+    // don't pick up tagline text wrapping the Custom radio's <label>.
     expect(screen.queryByLabelText(/^Pacing$/i)).toBeNull();
-    expect(screen.queryByLabelText(/^Daily cap$/i)).toBeNull();
 
     await user.click(screen.getByRole("radio", { name: /Custom/i }));
 
     expect(screen.getByLabelText(/^Pacing$/i)).toBeInTheDocument();
     expect(screen.getByLabelText(/Pacing unit/i)).toBeInTheDocument();
-    expect(screen.getByLabelText(/^Daily cap$/i)).toBeInTheDocument();
+    // No client-side caps — credits at the provider are the only cap.
+    expect(screen.queryByLabelText(/^Daily cap$/i)).toBeNull();
   });
 
-  it("Submit forwards paceSeconds + dailyCap + jitterPct=0.20 from the active preset", async () => {
+  it("Submit forwards paceSeconds + jitterPct=0.20 from the active preset, with NO dailyCap", async () => {
     const user = userEvent.setup();
     bulkQueueSms.mockResolvedValue({
       ok: true,
@@ -352,16 +352,16 @@ describe("<BulkSmsModal /> presets + drain estimate (260506-m3a)", () => {
     renderModal(["p1"]);
     await waitFor(() => expect(listSmsTemplateCategories).toHaveBeenCalled());
 
-    // Default = Steady → 8s pace, 1000 cap, 0.20 jitter
+    // Default = Steady → 8s pace, 0.20 jitter, no cap
     await user.click(screen.getByRole("button", { name: /Queue 1 message/i }));
     await waitFor(() => expect(bulkQueueSms).toHaveBeenCalled());
     const [, opts] = bulkQueueSms.mock.calls[0];
     expect(opts.paceSeconds).toBe(8);
-    expect(opts.dailyCap).toBe(1000);
     expect(opts.jitterPct).toBeCloseTo(0.2, 5);
+    expect("dailyCap" in opts).toBe(false);
   });
 
-  it("Push preset submits paceSeconds=4, dailyCap=1800", async () => {
+  it("Push preset submits paceSeconds=4 with no dailyCap", async () => {
     const user = userEvent.setup();
     bulkQueueSms.mockResolvedValue({
       ok: true,
@@ -376,10 +376,10 @@ describe("<BulkSmsModal /> presets + drain estimate (260506-m3a)", () => {
     await waitFor(() => expect(bulkQueueSms).toHaveBeenCalled());
     const [, opts] = bulkQueueSms.mock.calls[0];
     expect(opts.paceSeconds).toBe(4);
-    expect(opts.dailyCap).toBe(1800);
+    expect("dailyCap" in opts).toBe(false);
   });
 
-  it("Custom mode with no daily-cap input → opts.dailyCap is undefined", async () => {
+  it("Custom mode forwards the raw pace with no dailyCap", async () => {
     const user = userEvent.setup();
     bulkQueueSms.mockResolvedValue({
       ok: true,
@@ -389,7 +389,6 @@ describe("<BulkSmsModal /> presets + drain estimate (260506-m3a)", () => {
     await waitFor(() => expect(listSmsTemplateCategories).toHaveBeenCalled());
 
     await user.click(screen.getByRole("radio", { name: /Custom/i }));
-    // Leave daily-cap blank, set pace to 30s
     const paceInput = screen.getByLabelText(/^Pacing$/i);
     await user.clear(paceInput);
     await user.type(paceInput, "30");
@@ -398,7 +397,7 @@ describe("<BulkSmsModal /> presets + drain estimate (260506-m3a)", () => {
     await waitFor(() => expect(bulkQueueSms).toHaveBeenCalled());
     const [, opts] = bulkQueueSms.mock.calls[0];
     expect(opts.paceSeconds).toBe(30);
-    expect(opts.dailyCap).toBeUndefined();
+    expect("dailyCap" in opts).toBe(false);
   });
 });
 
@@ -480,5 +479,39 @@ describe("<BulkSmsModal /> line-type assessment", () => {
         screen.getByRole("button", { name: /Queue 0 messages/i }),
       ).toBeDisabled(),
     );
+  });
+});
+
+describe("computeDrain — uncapped continuous ramp", () => {
+  // 2026-04-23T17:00:00Z == 9:00 AM PT at the fixed -08:00 offset the
+  // preview math uses.
+  const NINE_AM_PT = new Date("2026-04-23T17:00:00Z");
+
+  it("counts quiet-window (9 PM – 8 AM PT) slots across EVERY night the ramp crosses", () => {
+    // 30 messages at 1h pacing from 9 AM PT: slots land at 9 AM..8 PM
+    // (sendable), 9 PM..7 AM (11 quiet slots), then 8 AM..2 PM next day
+    // (sendable again).
+    const drain = computeDrain({
+      total: 30,
+      paceSeconds: 3600,
+      now: NINE_AM_PT,
+    });
+    expect(drain.pastCutoffCount).toBe(11);
+    expect(drain.perDay).toEqual([{ dayLabel: "Queued", count: 30 }]);
+  });
+
+  it("reports zero quiet-window slots when the ramp finishes before 9 PM PT", () => {
+    const drain = computeDrain({
+      total: 10,
+      paceSeconds: 8,
+      now: NINE_AM_PT,
+    });
+    expect(drain.pastCutoffCount).toBe(0);
+  });
+
+  it("empty selection → empty preview", () => {
+    expect(
+      computeDrain({ total: 0, paceSeconds: 8, now: NINE_AM_PT }),
+    ).toEqual({ perDay: [], lastSendLocal: null, pastCutoffCount: 0 });
   });
 });

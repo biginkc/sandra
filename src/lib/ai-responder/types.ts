@@ -28,7 +28,6 @@ export type KeywordMatch = {
 export type SkipReason =
   | "no_consent"
   | "disabled_per_property"
-  | "daily_cap"
   | "outside_business_hours"
   | "max_turns_reached"
   | "no_config"

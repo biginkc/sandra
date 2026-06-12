@@ -20,7 +20,6 @@ export type SkipInput = {
     active: boolean;
     business_hours_only: boolean;
     max_turns: number;
-    daily_send_cap: number;
   } | null;
   /** Current effective consent state on the contact. */
   consentState: ConsentState;
@@ -28,8 +27,6 @@ export type SkipInput = {
   propertyDisabled: boolean;
   /** Count of AI-generated messages already in this thread today. */
   currentTurn: number;
-  /** Sends made by this org's AI responder in the last 24h. */
-  orgSendsToday: number;
   /** Is the current moment inside the property's 08:00–21:00 window? */
   withinBusinessHours: boolean;
 };
@@ -49,10 +46,9 @@ export function classifyAiSkip(input: SkipInput): SkipDecision {
     return { skip: true, reason: "disabled_per_property" };
   }
 
-  if (input.orgSendsToday >= input.config.daily_send_cap) {
-    return { skip: true, reason: "daily_cap" };
-  }
-
+  // No org-wide volume cap — provider/API credits are the only cap
+  // (Jarrad's standing rule). Per-thread max_turns stays: it's a
+  // conversation-quality escalation gate, not a volume cap.
   if (input.currentTurn >= input.config.max_turns) {
     return { skip: true, reason: "max_turns_reached" };
   }

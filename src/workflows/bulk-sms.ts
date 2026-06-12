@@ -11,10 +11,9 @@
  *   1. loadBulkSmsJob   — read property_ids + opts off the job row,
  *                          flip it to running
  *   2. bulkSmsChunkStep — queue one slice via queueSmsBatch; the
- *                          schedule state (pacing offsets, daily-cap
- *                          bucket, counters) threads between chunks so
- *                          a chunked run schedules identically to one
- *                          long loop
+ *                          schedule state (pacing offsets, counters)
+ *                          threads between chunks so a chunked run
+ *                          schedules identically to one long loop
  *   3. finalize         — terminal status + result_summary
  *
  * Queue inserts are idempotent-enough for WDK retry semantics: a chunk

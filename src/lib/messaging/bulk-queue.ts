@@ -24,7 +24,6 @@ export type BulkSmsQueueOpts = {
   templateCategory?: string;
   paceSeconds?: number;
   skipIfContacted?: boolean;
-  dailyCap?: number;
   jitterPct?: number;
   /**
    * Queue to contacts whose phone_1 line type is 'unknown' (never
@@ -36,9 +35,17 @@ export type BulkSmsQueueOpts = {
 };
 
 /**
- * Pacing/bucket state threaded across chunks so a workflow-chunked run
+ * Pacing state threaded across chunks so a workflow-chunked run
  * schedules identically to one long loop. Counters ride along so the
  * job row can report cumulative progress.
+ *
+ * Field names predate the daily-cap removal: `dayBucketStartMs` is now
+ * simply the ramp anchor and `dayBucketCount` the number queued so far.
+ * Names kept so legacy serialized state still parses — but the
+ * SEMANTICS intentionally change across deploy: a run serialized under
+ * the old capped scheduler resumes as an uncapped continuous ramp from
+ * its current anchor+offset (no next-day rollover). That is the point
+ * of the cap removal; do not re-add rollover for legacy state.
  */
 export type BulkSmsScheduleState = {
   cumulativeOffsetMs: number;
@@ -58,37 +65,6 @@ export function freshScheduleState(anchorMs: number): BulkSmsScheduleState {
     skipped: 0,
     failed: [],
   };
-}
-
-/**
- * Anchor a timestamp at "the following PT calendar day's 8 AM, local PT".
- * Used by the daily-cap rollover so overflow lands at the start of the
- * recipient-local sending window (8 AM PT covers all of Jarrad's markets
- * — KC + TX — without jumping earlier than 10 AM CT).
- *
- * Acceptable simplification: the anchor uses a fixed -08:00 PT offset
- * (08:00 PT == 16:00 UTC). During DST (PT = -07:00) the anchor lands at
- * 9 AM PT instead of 8 AM, which is still inside the federal 8 AM – 9 PM
- * window and still inside the recipient-local window for KC/TX. The
- * drift is intentional.
- */
-export function nextDayEightAmPT(afterMs: number): number {
-  const fmt = new Intl.DateTimeFormat("en-US", {
-    timeZone: "America/Los_Angeles",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  });
-  const parts = fmt.formatToParts(new Date(afterMs));
-  const get = (t: string) => parts.find((p) => p.type === t)!.value;
-  const ptYear = Number(get("year"));
-  const ptMonth = Number(get("month"));
-  const ptDay = Number(get("day"));
-  // Next PT calendar day 08:00 PT == 16:00 UTC at -08:00 offset.
-  const tomorrow = new Date(
-    Date.UTC(ptYear, ptMonth - 1, ptDay + 1, 16, 0, 0),
-  );
-  return tomorrow.getTime();
 }
 
 /**
@@ -114,7 +90,6 @@ export async function queueSmsBatch(
   const { opts, state } = args;
   const paceSeconds = opts.paceSeconds ?? 18;
   const jitterPct = opts.jitterPct ?? 0;
-  const dailyCap = opts.dailyCap;
 
   // Fetch properties in chunks — Supabase PostgREST rejects large IN
   // clauses (URL length limit, ~8 KB) so we split into batches of 250.
@@ -244,19 +219,16 @@ export async function queueSmsBatch(
       continue;
     }
 
-    // Roll over to next day's 8 AM PT bucket if we've hit the daily cap.
-    if (dailyCap !== undefined && state.dayBucketCount >= dailyCap) {
-      state.dayBucketStartMs = nextDayEightAmPT(state.dayBucketStartMs);
-      state.dayBucketCount = 0;
-      state.cumulativeOffsetMs = 0;
-    }
+    // No volume caps client-side — credits at the provider are the only
+    // cap (Jarrad's standing rule). The queue is one continuous paced
+    // ramp from the anchor; quiet hours + consent re-check at release.
     // Compute the candidate next-offset so we can write `scheduledFor`,
     // but only COMMIT the advance (and jitter) on a successful queue.
     // This way a downstream skip (no_phone, blocked_no_consent re-check)
     // doesn't burn a slot and stretch the next message's gap past the
     // ±jitterPct bound.
     //
-    // The first message of each bucket anchors at the bucket start
+    // The first message of the ramp anchors at the anchor timestamp
     // exactly (no jitter) so observability is clean and tests are
     // deterministic; subsequent messages jitter the GAP between
     // consecutive scheduled_for values within ±jitterPct of pace.

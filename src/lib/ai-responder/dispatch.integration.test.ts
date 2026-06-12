@@ -75,7 +75,6 @@ async function seedConfig(overrides: Partial<{
   business_hours_only: boolean;
   max_turns: number;
   min_confidence: number;
-  daily_send_cap: number;
 }> = {}) {
   const orgId = await getOrgId();
   // Delete any existing active config — unique partial index prevents two.
@@ -471,55 +470,8 @@ describe("dispatchAiResponse (integration)", () => {
     expect(outcome).toEqual({ outcome: "skipped", reason: "no_consent" });
   });
 
-  it("daily cap exceeded → skipped", async () => {
-    // Cap=2; seed 2 prior AI-generated outbound messages on OTHER
-    // properties in the same org so the counter is already at the cap.
-    await seedConfig({ daily_send_cap: 2 });
-    const { propertyId, contactId } = await seedLead({
-      phone: "+18167554006",
-    });
-    // Pre-populate 2 AI-origin outbound messages on the same org (any
-    // property — count is org-wide).
-    const { data: otherContact } = await supabase
-      .from("contacts")
-      .insert({ phone_1: "+18167554106", phone_1_type: "mobile" })
-      .select("id")
-      .single();
-    const { data: otherProp } = await supabase
-      .from("properties")
-      .insert({
-        address: "99 Cap Ln",
-        state: "MO",
-        status: "new_lead",
-        homeowner_contact_id: otherContact!.id,
-      })
-      .select("id")
-      .single();
-    for (let i = 0; i < 2; i++) {
-      await supabase.from("messages").insert({
-        channel: "sms",
-        direction: "outbound",
-        status: "sent",
-        property_id: otherProp!.id,
-        contact_id: otherContact!.id,
-        body: `prior AI ${i}`,
-        metadata: {
-          generated_by: "ai_responder_v1",
-          model: "claude-haiku-4-5-20251001",
-          confidence: 0.9,
-          sentiment: "positive",
-          turn: 1,
-        },
-      });
-    }
-
-    const outcome = await dispatchAiResponse(
-      supabase,
-      { propertyId, contactId, inboundBody: "hey" },
-      { anthropic: stubAnthropic(HAPPY_OUT) },
-    );
-    expect(outcome).toEqual({ outcome: "skipped", reason: "daily_cap" });
-  });
+  // No org-wide daily cap — provider/API credits are the only cap
+  // (Jarrad's standing rule; daily_send_cap removed 2026-06-12).
 
   // --------------------------------------------------------------------------
   // Model-driven escalations

@@ -99,8 +99,9 @@ export type BulkSmsOutcome = {
  * a single invocation dies at the platform's 5-minute ceiling at
  * roughly 2.5K rows (same failure class as #240/#241).
  *
- * Pacing, daily-cap rollover (8 AM PT buckets), and ±jitterPct gap
- * jitter are implemented in @/lib/messaging/bulk-queue.
+ * Pacing and ±jitterPct gap jitter are implemented in
+ * @/lib/messaging/bulk-queue. There are NO client-side volume caps —
+ * provider credits are the only cap (Jarrad's standing rule).
  */
 const SYNC_BULK_SMS_LIMIT = 500;
 

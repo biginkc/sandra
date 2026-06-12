@@ -29,7 +29,7 @@ import type { AiMessageMetadata } from "./types";
  * gets `needs_human_attention=true` when a human response is actually
  * needed (keyword match, model escalation, safety-validator reject,
  * generate failure). Non-attention skips (opt_out, disabled,
- * cap-exceeded, outside-business-hours) just return silently.
+ * max-turns-reached, outside-business-hours) just return silently.
  *
  * Deps-injected Anthropic client so integration tests stub the LLM
  * call without hitting the real API.
@@ -78,7 +78,7 @@ export async function dispatchAiResponse(
   const { data: config } = await supabase
     .from("ai_responder_configs")
     .select(
-      "id, active, model, system_prompt, max_turns, min_confidence, escalation_keywords, business_hours_only, daily_send_cap",
+      "id, active, model, system_prompt, max_turns, min_confidence, escalation_keywords, business_hours_only",
     )
     .eq("org_id", property.org_id)
     .eq("active", true)
@@ -100,7 +100,8 @@ export async function dispatchAiResponse(
   }
 
   // --------------------------------------------------------------------------
-  // 3. Skip classifier — consent, disabled, cap, turn, biz-hours
+  // 3. Skip classifier — consent, disabled, turn, biz-hours. No volume
+  //    cap: provider/API credits are the only cap (Jarrad's standing rule).
   // --------------------------------------------------------------------------
   const consentState = await getConsentState(supabase, input.contactId, "sms");
   const currentTurn = await countAiTurnsInThread(
@@ -109,7 +110,6 @@ export async function dispatchAiResponse(
     input.contactId,
     input.conversationId ?? null,
   );
-  const orgSendsToday = await countAiSendsLast24h(supabase, property.org_id);
   const withinBusinessHours = checkQuietHours(property.state).ok;
 
   const decision = classifyAiSkip({
@@ -118,13 +118,11 @@ export async function dispatchAiResponse(
           active: config.active,
           business_hours_only: config.business_hours_only,
           max_turns: config.max_turns,
-          daily_send_cap: config.daily_send_cap,
         }
       : null,
     consentState,
     propertyDisabled: property.ai_responder_disabled,
     currentTurn,
-    orgSendsToday,
     withinBusinessHours,
   });
 
@@ -388,25 +386,6 @@ async function countAiTurnsInThread(
     ? query.eq("conversation_id", conversationId)
     : query.eq("contact_id", contactId);
   const { count } = await query;
-  return count ?? 0;
-}
-
-/**
- * Count AI-generated messages for the org in the last 24h. Drives the
- * `daily_send_cap`.
- */
-async function countAiSendsLast24h(
-  supabase: SupabaseClient<Database>,
-  orgId: string,
-): Promise<number> {
-  const since = new Date(Date.now() - 24 * 60 * 60_000).toISOString();
-  const { count } = await supabase
-    .from("messages")
-    .select("*, properties!inner(org_id)", { count: "exact", head: true })
-    .eq("direction", "outbound")
-    .eq("properties.org_id", orgId)
-    .contains("metadata", { generated_by: "ai_responder_v1" })
-    .gte("created_at", since);
   return count ?? 0;
 }
 

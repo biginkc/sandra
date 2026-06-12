@@ -47,7 +47,7 @@ These are admin-gated capabilities that already have a UI but the UI is embedded
 
 ### A6. AI responder org-wide config
 - File: `src/app/(dashboard)/settings/ai-responder/page.tsx:11-52`, `src/app/(dashboard)/settings/ai-responder/actions.ts:76-157` (`updateAiResponderConfig`), form `src/app/(dashboard)/settings/ai-responder/form.tsx`
-- Action: admin tunes Active toggle, business-hours-only flag, system prompt (textarea, 14 rows, large), `max_turns` (1-10), `min_confidence` (0-1), `daily_send_cap` (>=0). Stored in `ai_responder_configs` (mig 019).
+- Action: admin tunes Active toggle, business-hours-only flag, system prompt (textarea, 14 rows, large), `max_turns` (1-10), `min_confidence` (0-1). Stored in `ai_responder_configs` (mig 019; `daily_send_cap` removed by mig 080 — no client-side volume caps, credits are the only cap).
 - Current surface: `/settings/ai-responder`, sidebar "AI responder" link (admin-only).
 - Recommendation: route lives at `/settings/...` despite being admin-only — inconsistent with `/admin/users`. Either move to `/admin/ai-responder` for a unified surface, or keep both routes, both styled the same.
 

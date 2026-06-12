@@ -14,7 +14,6 @@ export type AiResponderConfigRow = {
   system_prompt: string;
   max_turns: number;
   min_confidence: number;
-  daily_send_cap: number;
   business_hours_only: boolean;
   escalation_keywords: string[];
   updated_at: string;
@@ -40,7 +39,7 @@ export async function getAiResponderConfig(): Promise<
     const { data, error } = await supabase
       .from("ai_responder_configs")
       .select(
-        "id, active, model, system_prompt, max_turns, min_confidence, daily_send_cap, business_hours_only, escalation_keywords, updated_at",
+        "id, active, model, system_prompt, max_turns, min_confidence, business_hours_only, escalation_keywords, updated_at",
       )
       .eq("org_id", org.id)
       .eq("active", true)
@@ -64,7 +63,6 @@ export type UpdateAiResponderInput = {
   system_prompt: string;
   max_turns: number;
   min_confidence: number;
-  daily_send_cap: number;
   business_hours_only: boolean;
 };
 
@@ -93,15 +91,6 @@ export async function updateAiResponderConfig(
       error: {
         code: "VALIDATION",
         message: "Min confidence must be between 0 and 1.",
-      },
-    };
-  }
-  if (input.daily_send_cap < 0) {
-    return {
-      ok: false,
-      error: {
-        code: "VALIDATION",
-        message: "Daily send cap can't be negative.",
       },
     };
   }
@@ -137,7 +126,6 @@ export async function updateAiResponderConfig(
         system_prompt: input.system_prompt,
         max_turns: input.max_turns,
         min_confidence: input.min_confidence,
-        daily_send_cap: input.daily_send_cap,
         business_hours_only: input.business_hours_only,
         updated_at: new Date().toISOString(),
       })
