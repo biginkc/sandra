@@ -116,11 +116,21 @@ export function QueuePanel({
   // display data isn't in the WAL payload), or rows became due after
   // the first paint. When the total exceeds what we hold and the
   // sentinel is retired, re-arm it so the table catches up instead of
-  // contradicting the badge ("1 queued" over an empty table). A
-  // stale-high total at worst causes one extra fetch that corrects
-  // hasMore.
+  // contradicting the badge ("1 queued" over an empty table).
+  //
+  // One corrective attempt per distinct total: if the fetch comes back
+  // empty the total was stale-high, and re-arming again for the same
+  // number would loop (fetch → hasMore=false → re-arm → fetch …) until
+  // the next stats poll. A genuinely new total re-arms again.
+  const correctedForTotalRef = useRef<number | null>(null);
   useEffect(() => {
-    if (totalQueued !== undefined && totalQueued > rows.length && !hasMore) {
+    if (
+      totalQueued !== undefined &&
+      totalQueued > rows.length &&
+      !hasMore &&
+      correctedForTotalRef.current !== totalQueued
+    ) {
+      correctedForTotalRef.current = totalQueued;
       setHasMore(true);
     }
   }, [totalQueued, rows.length, hasMore]);

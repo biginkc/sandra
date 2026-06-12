@@ -194,6 +194,28 @@ describe("<QueuePanel /> infinite scroll", () => {
     expect(screen.getByText("1 Main St")).toBeInTheDocument();
   });
 
+  it("does not loop the corrective fetch when the live total is stale-high", async () => {
+    // Server truth: the queue really is empty — the badge is stale-high.
+    listQueuedPage.mockResolvedValue({
+      ok: true,
+      data: { rows: [], hasMore: false },
+    });
+
+    render(<QueuePanel initial={[]} initialHasMore={false} totalQueued={1} />);
+
+    // One corrective attempt fires…
+    expect(screen.getByTestId("queue-load-more-sentinel")).toBeInTheDocument();
+    await act(async () => {
+      intersect!();
+    });
+    expect(listQueuedPage).toHaveBeenCalledTimes(1);
+
+    // …and the sentinel must NOT re-arm for the same stale total.
+    expect(
+      screen.queryByTestId("queue-load-more-sentinel"),
+    ).not.toBeInTheDocument();
+  });
+
   it("shows 'X of Y loaded' when the live total exceeds the loaded rows", () => {
     render(
       <QueuePanel
