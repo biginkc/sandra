@@ -18,9 +18,28 @@ import type { Database } from "@/lib/supabase/types";
  *
  * Returns a summary of outcomes so the cron dashboard can reason about
  * health at a glance.
+ *
+ * Time budget: before the 2026-06-12 incident this route had no
+ * maxDuration and an unbounded drain loop — with a bulk campaign's
+ * 8k+ queued messages coming due, Vercel killed the function mid-batch
+ * on EVERY run (504 every 5 minutes), churning the DB and risking
+ * messages stranded in 'pending'. Both loops now stop cleanly when the
+ * elapsed-time budget is spent and report `budgetExhausted` so the cron
+ * dashboard can see partial runs. maxDuration gives the worst case
+ * (slow provider + slow DB) room to exit through our own guard instead
+ * of the platform kill.
  */
+export const maxDuration = 300;
 
 const BATCH_SIZE = 100;
+/** Max queued-message releases per tick. With ~0.5–1s per release
+ *  (provider HTTP + status flips) this fits comfortably in the budget
+ *  while draining faster than a bulk campaign's ~4s/message schedule. */
+const DRAIN_BATCH_SIZE = 150;
+/** Stop starting new work after this much elapsed time — leaves the
+ *  remaining maxDuration as headroom for the in-flight release to
+ *  finish and the summary to flush. */
+const TICK_BUDGET_MS = 240_000;
 
 function createServiceRoleClient() {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
@@ -70,11 +89,19 @@ async function handle(request: Request) {
  */
 export async function runSequenceTick(
   supabase: ReturnType<typeof createServiceRoleClient>,
+  opts: { budgetMs?: number; drainLimit?: number } = {},
 ): Promise<{
   processed: number;
   outcomes: Record<string, number>;
   drained: number;
+  budgetExhausted: boolean;
 }> {
+  const budgetMs = opts.budgetMs ?? TICK_BUDGET_MS;
+  const drainLimit = opts.drainLimit ?? DRAIN_BATCH_SIZE;
+  const startedAt = Date.now();
+  const withinBudget = () => Date.now() - startedAt < budgetMs;
+  let budgetExhausted = false;
+
   const nowIso = new Date().toISOString();
   const { data: due, error } = await supabase
     .from("sequence_enrollments")
@@ -90,31 +117,47 @@ export async function runSequenceTick(
   if (error) throw new Error(`fetch due enrollments failed: ${error.message}`);
 
   const outcomes: Record<string, number> = {};
+  let processed = 0;
   for (const enrollment of due ?? []) {
+    if (!withinBudget()) {
+      budgetExhausted = true;
+      break;
+    }
     const outcome = await processEnrollmentTick(supabase, enrollment);
     outcomes[outcome.status] = (outcomes[outcome.status] ?? 0) + 1;
+    processed += 1;
   }
 
   // Drain scheduled queued messages — release any row where
   // scheduled_for <= now. Consent + quiet-hours are re-checked at
   // release time; unreleasable messages (opted-out, quiet hours) are
-  // left queued for the next tick.
+  // left queued for the next tick. Stops at the time budget so the
+  // platform never kills us mid-release; whatever is left stays
+  // cleanly `queued` for the next tick.
   const { data: dueMessages } = await supabase
     .from("messages")
     .select("id")
     .eq("status", "queued")
     .lte("scheduled_for", nowIso)
     .not("scheduled_for", "is", null)
-    .limit(50);
+    .order("scheduled_for", { ascending: true })
+    .limit(drainLimit);
 
+  let drained = 0;
   for (const msg of dueMessages ?? []) {
+    if (!withinBudget()) {
+      budgetExhausted = true;
+      break;
+    }
     await releaseQueuedMessage(supabase, msg.id);
+    drained += 1;
   }
 
   return {
-    processed: (due ?? []).length,
+    processed,
     outcomes,
-    drained: (dueMessages ?? []).length,
+    drained,
+    budgetExhausted,
   };
 }
 

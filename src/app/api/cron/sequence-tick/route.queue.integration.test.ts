@@ -202,13 +202,44 @@ describe("runSequenceTick — queue drain (integration)", () => {
       });
     }
 
-    const summary = await runSequenceTick(supabase);
+    const summary = await runSequenceTick(supabase, { drainLimit: 50 });
     expect(summary.drained).toBe(50);
+    expect(summary.budgetExhausted).toBe(false);
 
     const { count } = await supabase
       .from("messages")
       .select("*", { count: "exact", head: true })
       .eq("status", "queued");
     expect(count).toBe(1);
+  });
+
+  it("stops draining when the time budget is exhausted and leaves the rest queued", async () => {
+    const { propertyId, contactId } = await seedLead({
+      phone: "+18165550106",
+    });
+    const pastTime = new Date(SAFE_NOW.getTime() - 60 * 60_000);
+    for (let i = 0; i < 2; i++) {
+      await seedQueuedMessage({
+        propertyId,
+        contactId,
+        toPhone: "+18165550106",
+        scheduledFor: pastTime,
+        body: `Budget test message ${i}`,
+      });
+    }
+
+    // budgetMs: 0 → the guard trips before any enrollment or release work.
+    const summary = await runSequenceTick(supabase, { budgetMs: 0 });
+    expect(summary.budgetExhausted).toBe(true);
+    expect(summary.drained).toBe(0);
+    expect(summary.processed).toBe(0);
+
+    // Nothing sent, nothing stranded mid-flight — all rows still queued.
+    const { count } = await supabase
+      .from("messages")
+      .select("*", { count: "exact", head: true })
+      .eq("status", "queued");
+    expect(count).toBe(2);
+    expect(getMockMessageLog()).toHaveLength(0);
   });
 });
