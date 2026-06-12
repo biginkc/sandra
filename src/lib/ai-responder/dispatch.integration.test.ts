@@ -663,4 +663,97 @@ describe("dispatchAiResponse (integration)", () => {
     );
     expect(outcome).toEqual({ outcome: "escalated", reason: "generate_error" });
   });
+
+  it("credit-balance failure → provider_billing reason + one admin notification", async () => {
+    // The live 2026-06-12 incident shape: Anthropic 400 with the
+    // credit-balance message. Must escalate with the DISTINCT reason and
+    // notify admins (throttled), not blend into generate_error.
+    await seedConfig();
+    // Seed a real admin: listAdminUserIds filters auth users against
+    // ADMIN_EMAILS (read at call time).
+    const adminEmail = `ai-billing-admin-${Date.now()}@test.example.com`;
+    const prevAdminEmails = process.env.ADMIN_EMAILS;
+    process.env.ADMIN_EMAILS = adminEmail;
+    const { data: adminUser, error: adminErr } =
+      await supabase.auth.admin.createUser({
+        email: adminEmail,
+        password: `test-pw-${Math.random().toString(36).slice(2)}`,
+        email_confirm: true,
+      });
+    if (adminErr || !adminUser.user) {
+      throw new Error(`admin seed failed: ${adminErr?.message}`);
+    }
+    const adminUserId = adminUser.user.id;
+    const { propertyId, contactId } = await seedLead({
+      phone: "+18167554013",
+    });
+    const billingError = Object.assign(
+      new Error(
+        "Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits.",
+      ),
+      { status: 400 },
+    );
+    const outcome = await dispatchAiResponse(
+      supabase,
+      { propertyId, contactId, inboundBody: "hey" },
+      { anthropic: throwingAnthropic(billingError) },
+    );
+    expect(outcome).toEqual({
+      outcome: "escalated",
+      reason: "provider_billing",
+    });
+
+    const { data: prop } = await supabase
+      .from("properties")
+      .select("needs_human_attention, last_ai_escalation_reason")
+      .eq("id", propertyId)
+      .single();
+    expect(prop!.needs_human_attention).toBe(true);
+    expect(prop!.last_ai_escalation_reason).toBe("provider_billing");
+
+    const { data: notifs } = await supabase
+      .from("notifications")
+      .select("id, title")
+      .eq("event_type", "ai_responder_provider_failure");
+    expect(notifs!.length).toBeGreaterThan(0);
+    expect(notifs![0].title).toMatch(/credits/i);
+    const firstCount = notifs!.length;
+
+    // Second failure inside the 24h window: escalates again but does
+    // NOT add another notification (throttle).
+    const { propertyId: p2, contactId: c2 } = await seedLead({
+      phone: "+18167554014",
+    });
+    await dispatchAiResponse(
+      supabase,
+      { propertyId: p2, contactId: c2, inboundBody: "hey" },
+      { anthropic: throwingAnthropic(billingError) },
+    );
+    const { data: notifs2 } = await supabase
+      .from("notifications")
+      .select("id")
+      .eq("event_type", "ai_responder_provider_failure");
+    expect(notifs2!.length).toBe(firstCount);
+
+    // Cleanup: shared test project — don't leak the auth user or env.
+    process.env.ADMIN_EMAILS = prevAdminEmails;
+    await supabase.auth.admin.deleteUser(adminUserId);
+  });
+
+  it("401 auth failure → provider_auth reason", async () => {
+    await seedConfig();
+    const { propertyId, contactId } = await seedLead({
+      phone: "+18167554015",
+    });
+    const authError = Object.assign(
+      new Error("authentication_error: invalid x-api-key"),
+      { status: 401 },
+    );
+    const outcome = await dispatchAiResponse(
+      supabase,
+      { propertyId, contactId, inboundBody: "hey" },
+      { anthropic: throwingAnthropic(authError) },
+    );
+    expect(outcome).toEqual({ outcome: "escalated", reason: "provider_auth" });
+  });
 });

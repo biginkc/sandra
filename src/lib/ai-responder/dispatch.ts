@@ -6,8 +6,15 @@ import { checkQuietHours } from "@/lib/messaging/quiet-hours";
 import { sendSmsToContact } from "@/lib/messaging/send";
 import type { Database, Json } from "@/lib/supabase/types";
 
+import { listAdminUserIds } from "@/lib/auth/admins";
+import { createNotification } from "@/lib/notifications/dispatch";
+
 import { classifyAiSkip } from "./classify";
-import { generateAiReply, type AnthropicLike } from "./generate";
+import {
+  classifyProviderFailure,
+  generateAiReply,
+  type AnthropicLike,
+} from "./generate";
 import { humanizeReply } from "./humanize";
 import { matchEscalationKeyword } from "./keywords";
 import { validateAiReplyBody } from "./safety";
@@ -149,12 +156,32 @@ export async function dispatchAiResponse(
       { client: deps.anthropic },
     );
   } catch (e) {
+    // Account-level provider failures (dead credits / dead key) are an
+    // operator incident, not a code error: every inbound will fail the
+    // same way until a human fixes the account. Distinct reasons make
+    // the UI say what actually broke, and admins get notified (once per
+    // 24h, not per reply) so a hot campaign can't silently lose its
+    // first-responder for a whole morning (2026-06-12).
+    const providerFailure = classifyProviderFailure(e);
+    const reason =
+      providerFailure === "billing"
+        ? "provider_billing"
+        : providerFailure === "auth"
+          ? "provider_auth"
+          : "generate_error";
     reportError(e, {
-      tags: { surface: "ai_responder_generate" },
+      tags: { surface: "ai_responder_generate", reason },
       extra: { propertyId: input.propertyId },
     });
-    await markPropertyNeedsAttention(supabase, input.propertyId, "generate_error");
-    return { outcome: "escalated", reason: "generate_error" };
+    await markPropertyNeedsAttention(supabase, input.propertyId, reason);
+    if (providerFailure) {
+      await notifyAdminsOfProviderFailure(supabase, {
+        orgId: property.org_id,
+        propertyId: input.propertyId,
+        failure: providerFailure,
+      });
+    }
+    return { outcome: "escalated", reason };
   }
 
   // --------------------------------------------------------------------------
@@ -410,4 +437,49 @@ async function loadConversation(
     role: r.direction === "inbound" ? "user" : "assistant",
     content: r.body ?? "",
   }));
+}
+
+/**
+ * Tell every admin the AI responder is down at the ACCOUNT level —
+ * throttled to one notification per failure kind per 24h, because a
+ * busy campaign can hit the same dead-credits wall on every single
+ * inbound and a notification per reply is noise, not signal. Failures
+ * here are swallowed: notifying is best-effort and must never break
+ * the escalation path that is already protecting the conversation.
+ */
+async function notifyAdminsOfProviderFailure(
+  supabase: SupabaseClient<Database>,
+  args: {
+    orgId: string;
+    propertyId: string;
+    failure: "billing" | "auth";
+  },
+): Promise<void> {
+  try {
+    const { data: recent } = await supabase
+      .from("notifications")
+      .select("id")
+      .eq("org_id", args.orgId)
+      .eq("event_type", "ai_responder_provider_failure")
+      .gte("created_at", new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString())
+      .limit(1);
+    if (recent && recent.length > 0) return;
+
+    const adminIds = await listAdminUserIds(supabase);
+    if (adminIds.length === 0) return;
+
+    await createNotification(supabase, {
+      orgId: args.orgId,
+      eventType: "ai_responder_provider_failure",
+      entityType: "property",
+      entityId: args.propertyId,
+      payload: { providerFailure: args.failure },
+      recipients: adminIds,
+    });
+  } catch (e) {
+    reportError(e, {
+      tags: { surface: "ai_responder_provider_failure_notify" },
+      extra: { orgId: args.orgId, failure: args.failure },
+    });
+  }
 }

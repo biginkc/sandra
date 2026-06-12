@@ -9,7 +9,8 @@ export type EventType =
   | "property_assigned"
   | "bulk_action_completed"
   | "skip_trace_requested"
-  | "task_assigned";
+  | "task_assigned"
+  | "ai_responder_provider_failure";
 
 export type EntityType = "property" | "job" | "task" | "message";
 
@@ -56,4 +57,6 @@ export type FormatPayload = {
   taskType?: string;
   /** For task_assigned: ISO timestamptz of due_at. */
   dueAt?: string;
+  /** For ai_responder_provider_failure: which account-level failure. */
+  providerFailure?: "billing" | "auth";
 };
