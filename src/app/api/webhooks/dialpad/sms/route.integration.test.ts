@@ -50,6 +50,7 @@ async function seedContact(
       first_name: "Inbound",
       last_name: "Test",
       phone_1: phone,
+      phone_1_type: "mobile",
       phone_2: opts.phone2 ?? null,
       phone_3: opts.phone3 ?? null,
     })

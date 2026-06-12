@@ -65,6 +65,7 @@ async function insertContact(orgId = BMH_ORG_ID): Promise<string> {
       first_name: "Migration",
       last_name: "Dialer",
       phone_1: uniquePhone(),
+      phone_1_type: "mobile",
     })
     .select("id")
     .single();

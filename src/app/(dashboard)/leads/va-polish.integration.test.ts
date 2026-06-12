@@ -219,12 +219,22 @@ describe("VA polish seams — Feature 1 integration", () => {
       const { id: propertyId, orgId } = await seedProperty();
       const { data: contactA } = await testClient
         .from("contacts")
-        .insert({ first_name: "A", last_name: "Thread", phone_1: "+18165550101" })
+        .insert({
+          first_name: "A",
+          last_name: "Thread",
+          phone_1: "+18165550101",
+          phone_1_type: "mobile",
+        })
         .select("id")
         .single();
       const { data: contactB } = await testClient
         .from("contacts")
-        .insert({ first_name: "B", last_name: "Thread", phone_1: "+18165550102" })
+        .insert({
+          first_name: "B",
+          last_name: "Thread",
+          phone_1: "+18165550102",
+          phone_1_type: "mobile",
+        })
         .select("id")
         .single();
 

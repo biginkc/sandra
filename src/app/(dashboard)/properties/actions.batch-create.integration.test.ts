@@ -52,15 +52,19 @@ async function seedLead(opts: {
   doNotContact?: boolean;
   status?: string;
 }): Promise<{ propertyId: string; contactId: string }> {
+  const phone1 = opts.phone_1 === undefined ? nextPhone() : opts.phone_1;
   const { data: contact, error: contactError } = await testClient
     .from("contacts")
     .insert({
       org_id: opts.orgId ?? BMH_ORG_ID,
       first_name: "Dialer",
       last_name: "Preview",
-      phone_1: opts.phone_1 === undefined ? nextPhone() : opts.phone_1,
+      phone_1: phone1,
+      phone_1_type: phone1 ? "mobile" : "unknown",
       phone_2: opts.phone_2 ?? null,
+      phone_2_type: opts.phone_2 ? "mobile" : "unknown",
       phone_3: opts.phone_3 ?? null,
+      phone_3_type: opts.phone_3 ? "mobile" : "unknown",
       do_not_contact: opts.doNotContact ?? false,
     })
     .select("id")

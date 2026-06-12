@@ -72,8 +72,11 @@ describe("update-homeowner-phones sub-op (integration)", () => {
     const result = await applyRow({
       Address: "100 Phone St",
       "Phone 1": "8165550100",
+      "Phone 1 Type": "Mobile",
       "Phone 2": "8165550101",
+      "Phone 2 Type": "Mobile",
       "Phone 3": "8165550102",
+      "Phone 3 Type": "Landline",
     });
     expect(result.kind).toBe("updated");
     const phones = await readPhones(contactId);
@@ -101,12 +104,28 @@ describe("update-homeowner-phones sub-op (integration)", () => {
     if (result.kind === "rejected") expect(result.reason).toBe("no-homeowner");
   });
 
+  it("phone without a line type → rejected with reason missing-line-type, nothing written", async () => {
+    const contactId = await seedContact();
+    await seedPropertyWithHomeowner("250 Untyped St", contactId);
+    const result = await applyRow({
+      Address: "250 Untyped St",
+      "Phone 1": "8165550250",
+    });
+    expect(result.kind).toBe("rejected");
+    if (result.kind === "rejected") {
+      expect(result.reason).toBe("missing-line-type");
+    }
+    const phones = await readPhones(contactId);
+    expect(phones.phone_1).toBeNull();
+  });
+
   it("E.164 normalization: 816-555-1234 → +18165551234", async () => {
     const contactId = await seedContact();
     await seedPropertyWithHomeowner("300 E164 St", contactId);
     const result = await applyRow({
       Address: "300 E164 St",
       "Phone 1": "816-555-1234",
+      "Phone 1 Type": "Mobile",
     });
     expect(result.kind).toBe("updated");
     const phones = await readPhones(contactId);
@@ -117,12 +136,18 @@ describe("update-homeowner-phones sub-op (integration)", () => {
     const contactId = await seedContact();
     await supabase
       .from("contacts")
-      .update({ phone_1: "+19998880001", phone_2: "+19998880002" })
+      .update({
+        phone_1: "+19998880001",
+        phone_1_type: "mobile",
+        phone_2: "+19998880002",
+        phone_2_type: "mobile",
+      })
       .eq("id", contactId);
     await seedPropertyWithHomeowner("400 Partial St", contactId);
     const result = await applyRow({
       Address: "400 Partial St",
       "Phone 1": "8165550400",
+      "Phone 1 Type": "Mobile",
       "Phone 2": "",
       "Phone 3": "",
     });

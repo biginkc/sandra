@@ -25,7 +25,14 @@ async function seedContact(phones: {
   const orgId = await getOrgId();
   const { data, error } = await supabase
     .from("contacts")
-    .insert({ org_id: orgId, first_name: "Test", ...phones })
+    .insert({
+      org_id: orgId,
+      first_name: "Test",
+      ...phones,
+      phone_1_type: phones.phone_1 ? "mobile" : "unknown",
+      phone_2_type: phones.phone_2 ? "mobile" : "unknown",
+      phone_3_type: phones.phone_3 ? "mobile" : "unknown",
+    })
     .select("id")
     .single();
   if (error || !data) throw new Error(`seedContact failed: ${error?.message}`);

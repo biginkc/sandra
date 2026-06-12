@@ -99,7 +99,10 @@ describe("getSequenceImpact (integration)", () => {
     for (let i = 0; i < 3; i++) {
       const { data: contact } = await supabase
         .from("contacts")
-        .insert({ phone_1: `+1816555${String(2000 + i).padStart(4, "0")}` })
+        .insert({
+          phone_1: `+1816555${String(2000 + i).padStart(4, "0")}`,
+          phone_1_type: "mobile",
+        })
         .select("id")
         .single();
       await supabase.from("consent_events").insert({

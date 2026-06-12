@@ -272,6 +272,7 @@ describe("internal.closer.practice-outcomes writeback PUT", () => {
         first_name: "Closer",
         last_name: "Other Org",
         phone_1: `+1816888${String(Math.floor(Math.random() * 10000)).padStart(4, "0")}`,
+        phone_1_type: "mobile",
       })
       .select("id")
       .single();

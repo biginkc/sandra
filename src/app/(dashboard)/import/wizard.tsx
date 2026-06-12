@@ -4,6 +4,7 @@ import { useMemo, useReducer, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { autodetectMapping } from "@/lib/csv/aliases";
+import { collectUnlabeledPhones } from "@/lib/csv/line-type-classify";
 import type {
   DetectionResult,
   TransformStats,
@@ -232,6 +233,12 @@ export type WizardState = {
   /** When smsConsent=true, optionally auto-enroll every imported property
    *  into this sequence after ingest. Null = no auto-enroll. */
   sequenceId: string | null;
+  /** Line-type interstitial choice (Confirm step). Unlabeled phone
+   *  numbers are never saved (migration-080 hard rule) — the operator
+   *  either pays to classify them via Telnyx (true) or drops them
+   *  (false). Null = not chosen yet; blocks Start import while the
+   *  file has unlabeled numbers. */
+  classifyLineTypes: boolean | null;
   headers: string[];
   rows: Record<string, string>[];
   mapping: Record<string, string | null>;
@@ -260,6 +267,7 @@ const initialState: WizardState = {
   requestSkipTrace: false,
   smsConsent: false,
   sequenceId: null,
+  classifyLineTypes: null,
   headers: [],
   rows: [],
   mapping: {},
@@ -294,6 +302,7 @@ export type WizardAction =
   | { type: "SET_REQUEST_SKIP_TRACE"; requestSkipTrace: boolean }
   | { type: "SET_SMS_CONSENT"; smsConsent: boolean }
   | { type: "SET_SEQUENCE_ID"; sequenceId: string | null }
+  | { type: "SET_CLASSIFY_LINE_TYPES"; classifyLineTypes: boolean }
   | { type: "SET_MAPPING_FIELD"; fieldId: string; header: string | null }
   | { type: "AUTODETECT_MAPPING" }
   | {
@@ -360,6 +369,9 @@ function reducer(state: WizardState, action: WizardAction): WizardState {
         headers: action.headers,
         rows: action.rows,
         mapping,
+        // New file invalidates the prior interstitial choice — the new
+        // file's unlabeled-phone count may differ.
+        classifyLineTypes: null,
         // New file invalidates any prior format-helper detection /
         // transform — the next dispatch will be either a fresh
         // DETECT_AND_APPLY_PRESET, a RECORD_NON_IMPORTABLE_DETECTION,
@@ -402,6 +414,8 @@ function reducer(state: WizardState, action: WizardAction): WizardState {
       };
     case "SET_SEQUENCE_ID":
       return { ...state, sequenceId: action.sequenceId };
+    case "SET_CLASSIFY_LINE_TYPES":
+      return { ...state, classifyLineTypes: action.classifyLineTypes };
     case "SET_MAPPING_FIELD":
       return {
         ...state,
@@ -502,6 +516,15 @@ export function Wizard({ counties }: { counties: CountyOption[] }) {
 
   // Derive per-step readiness for the Next button.
   const sections = useMemo(() => mappedSections(state.mapping), [state.mapping]);
+
+  // Distinct phone numbers that would ingest with no line type — the
+  // set the hard rule drops unless the operator pays to classify them.
+  // Only computed on Confirm (full-file validation pass, same cost as
+  // the Review step's breakdown).
+  const unlabeledPhoneCount = useMemo(() => {
+    if (state.step !== "confirm") return 0;
+    return collectUnlabeledPhones(state.rows, state.mapping).length;
+  }, [state.step, state.rows, state.mapping]);
 
   const uploadReady =
     !!state.file &&
@@ -616,6 +639,9 @@ export function Wizard({ counties }: { counties: CountyOption[] }) {
           totalRows: state.rows.length,
           smsConsent: state.smsConsent,
           sequenceId: state.sequenceId,
+          // Interstitial choice. No unlabeled numbers → nothing to
+          // classify, so an unmade choice (null) submits as false.
+          classifyLineTypes: state.classifyLineTypes === true,
           preset:
             state.presetApplied && state.detectedPreset && state.presetStats
               ? {
@@ -663,7 +689,13 @@ export function Wizard({ counties }: { counties: CountyOption[] }) {
     (state.step === "preview-update" && !previewReady) ||
     (state.step === "upload" && !uploadReady) ||
     (state.step === "map" && !mapReady) ||
-    (state.step === "review" && !reviewReady);
+    (state.step === "review" && !reviewReady) ||
+    // The interstitial is a forced choice: with unlabeled phone numbers
+    // in the file, Start import stays locked until the operator picks
+    // Classify or Skip.
+    (state.step === "confirm" &&
+      unlabeledPhoneCount > 0 &&
+      state.classifyLineTypes === null);
 
   const nextLabel = (() => {
     if (state.step === "preview-update") {
@@ -708,7 +740,11 @@ export function Wizard({ counties }: { counties: CountyOption[] }) {
           <StepReview state={state} dispatch={dispatch} />
         )}
         {state.step === "confirm" && (
-          <StepConfirm state={state} dispatch={dispatch} />
+          <StepConfirm
+            state={state}
+            dispatch={dispatch}
+            unlabeledPhoneCount={unlabeledPhoneCount}
+          />
         )}
         {state.step === "progress" && state.jobId && (
           <StepProgress jobId={state.jobId} />

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createTestClient } from "@tests/integration/client";
 import { resetTenantTables } from "@tests/integration/reset";
@@ -7,9 +7,33 @@ import { createLead } from "./create";
 
 const supabase = createTestClient();
 
+// createLead classifies the lead's phone via Telnyx at intake (hard
+// rule: untyped phones are never saved). Stub the Telnyx endpoint so
+// these tests keep covering the phone-saved happy path; everything
+// else passes through to the real test DB.
+const realFetch = globalThis.fetch;
+
 describe("createLead (integration)", () => {
   beforeEach(async () => {
     await resetTenantTables(supabase);
+    vi.stubEnv("TELNYX_API_KEY", "test-key");
+    globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.startsWith("https://api.telnyx.com/v2/number_lookup")) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({ data: { carrier: { type: "mobile" } } }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          ),
+        );
+      }
+      return realFetch(input, init);
+    }) as typeof fetch;
+  });
+
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+    vi.unstubAllEnvs();
   });
 
   it("creates property + homeowner contact with status='new_lead' and source set", async () => {
@@ -160,5 +184,65 @@ describe("createLead (integration)", () => {
       .eq("id", result.data.propertyId)
       .single();
     expect(prop!.homeowner_contact_id).toBeNull();
+  });
+
+  it("dedups against phone_2/phone_3 — secondary-slot numbers reuse the contact, no paid lookup, no duplicate", async () => {
+    const { data: existing } = await supabase
+      .from("contacts")
+      .insert({
+        first_name: "Secondary",
+        last_name: "Slot",
+        phone_1: "+18165553100",
+        phone_1_type: "mobile",
+        phone_2: "+18165553101",
+        phone_2_type: "mobile",
+      })
+      .select("id")
+      .single();
+
+    const result = await createLead(supabase, {
+      source: "cold_call",
+      property: { address: "8 Secondary Slot Ln", state: "MO" },
+      contact: { phone_1: "+18165553101" },
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.data.contactId).toBe(existing!.id);
+    expect(result.data.phoneDropped).toBeNull();
+
+    const { count } = await supabase
+      .from("contacts")
+      .select("*", { count: "exact", head: true })
+      .or("phone_1.eq.+18165553101,phone_2.eq.+18165553101,phone_3.eq.+18165553101");
+    expect(count).toBe(1);
+  });
+
+  it("classification unavailable → lead succeeds degraded: phone parked on notes, phoneDropped flagged, no phone slot written", async () => {
+    // Simulate a Telnyx outage: the stub returns a 500 for lookup calls.
+    globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.startsWith("https://api.telnyx.com/v2/number_lookup")) {
+        return Promise.resolve(new Response("{}", { status: 500 }));
+      }
+      return realFetch(input, init);
+    }) as typeof fetch;
+
+    const result = await createLead(supabase, {
+      source: "cold_call",
+      property: { address: "9 Outage Ln", state: "MO" },
+      contact: { first_name: "Out", last_name: "Age", phone_1: "+18165553200" },
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.data.phoneDropped).toBe("+18165553200");
+    expect(result.data.contactId).not.toBeNull();
+
+    const { data: contact } = await supabase
+      .from("contacts")
+      .select("phone_1, notes")
+      .eq("id", result.data.contactId!)
+      .single();
+    expect(contact!.phone_1).toBeNull();
+    expect(contact!.notes).toContain("+18165553200");
   });
 });

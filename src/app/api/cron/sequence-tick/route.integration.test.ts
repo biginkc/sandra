@@ -72,6 +72,7 @@ async function seedLead(opts: {
       first_name: "Cron",
       last_name: "Tester",
       phone_1: opts.phone,
+      phone_1_type: "mobile",
     })
     .select("id")
     .single();

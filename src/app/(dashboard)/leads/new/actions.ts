@@ -10,6 +10,9 @@ import { createClient } from "@/lib/supabase/server";
 export type NewLeadFormResult = Result<{
   propertyId: string;
   wasDuplicate: boolean;
+  /** Phone that couldn't be classified and was parked on the contact's
+   *  notes instead of saved as a callable number (hard rule). */
+  phoneDropped: string | null;
 }>;
 
 /**
@@ -84,6 +87,7 @@ export async function createLeadFromForm(
     return ok({
       propertyId: result.data.propertyId,
       wasDuplicate: result.data.wasDuplicate,
+      phoneDropped: result.data.phoneDropped,
     });
   } catch (e) {
     reportError(e, { tags: { surface: "create_lead_from_form" } });
@@ -116,6 +120,16 @@ export async function submitNewLead(formData: FormData): Promise<void> {
     // Surface the error via a query-string param the form reads.
     redirect(
       `/leads/new?error=${encodeURIComponent(result.error.message)}${result.error.details && typeof result.error.details === "object" && "field" in result.error.details ? `&field=${encodeURIComponent(String(result.error.details.field))}` : ""}`,
+    );
+  }
+  // Degraded save: the phone couldn't be classified and sits on the
+  // contact's notes instead of a phone slot. Land on the lead page
+  // with a warning param so the operator sees it immediately.
+  if (result.data.phoneDropped) {
+    redirect(
+      `/leads/${result.data.propertyId}?warning=${encodeURIComponent(
+        `Phone ${result.data.phoneDropped} couldn't be classified (line-type lookup unavailable) — it's saved on the contact's notes, not as a callable number.`,
+      )}`,
     );
   }
   redirect(`/leads/${result.data.propertyId}`);

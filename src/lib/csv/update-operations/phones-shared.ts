@@ -1,3 +1,5 @@
+import { lineTypeFromVendorLabel } from "@/lib/messaging/line-type";
+
 import { normalizePhone } from "../normalize";
 
 import type { SubOperationModule } from "./types";
@@ -17,16 +19,30 @@ export function buildPhonesOp(role: Role): SubOperationModule {
   return {
     id: `update-${idSuffix}` as SubOperationModule["id"],
     label,
-    description: `Overwrite the ${role}'s phone slots in order. Blank slots are left untouched.`,
-    requiredColumns: ["Address", "Phone 1"],
-    optionalColumns: ["Phone 2", "Phone 3", "City", "State", "Zip"],
+    description: `Overwrite the ${role}'s phone slots in order. Blank slots are left untouched. Each provided phone needs a matching "Phone N Type" (Mobile/Landline) — numbers without a line type are never saved.`,
+    requiredColumns: ["Address", "Phone 1", "Phone 1 Type"],
+    optionalColumns: [
+      "Phone 2",
+      "Phone 2 Type",
+      "Phone 3",
+      "Phone 3 Type",
+      "City",
+      "State",
+      "Zip",
+    ],
     exampleRows: [
       {
         Address: "123 Main St",
         "Phone 1": "8165550100",
+        "Phone 1 Type": "Mobile",
         "Phone 2": "8165550101",
+        "Phone 2 Type": "Landline",
       },
-      { Address: "456 Oak Ave", "Phone 1": "(816) 555-0200" },
+      {
+        Address: "456 Oak Ave",
+        "Phone 1": "(816) 555-0200",
+        "Phone 1 Type": "Mobile",
+      },
     ],
 
     async apply(ctx, args, options) {
@@ -50,7 +66,19 @@ export function buildPhonesOp(role: Role): SubOperationModule {
         "phone_3",
       ];
       const headerNames = ["Phone 1", "Phone 2", "Phone 3"];
-      const update: Partial<Record<(typeof slots)[number], string>> = {};
+      const typeHeaderNames = ["Phone 1 Type", "Phone 2 Type", "Phone 3 Type"];
+      // Hard rule (migration 080): every written phone needs its line
+      // type in the same update — both so the trigger accepts the write
+      // and so a new number can't ride on the previous number's type.
+      const update: Partial<
+        Record<
+          | (typeof slots)[number]
+          | "phone_1_type"
+          | "phone_2_type"
+          | "phone_3_type",
+          string
+        >
+      > = {};
       let anyValid = false;
 
       for (let i = 0; i < slots.length; i++) {
@@ -66,7 +94,20 @@ export function buildPhonesOp(role: Role): SubOperationModule {
             detail: `"${raw}" in column "${headerNames[i]}" is not a valid US phone (need 10 digits or 11 with leading 1).`,
           };
         }
+        const lineType = lineTypeFromVendorLabel(
+          (parsedRow[typeHeaderNames[i]] ?? "").trim(),
+        );
+        if (lineType === "unknown") {
+          return {
+            kind: "rejected",
+            rowIndex,
+            address,
+            reason: "missing-line-type",
+            detail: `"${headerNames[i]}" has a number but "${typeHeaderNames[i]}" is missing or not Mobile/Landline — numbers without a line type are never saved.`,
+          };
+        }
         update[slots[i]] = normalized;
+        update[`${slots[i]}_type` as const] = lineType;
         anyValid = true;
       }
 

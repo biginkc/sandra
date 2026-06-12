@@ -51,6 +51,10 @@ export type CreateImportJobParams = {
   smsConsent: boolean;
   /** When set, auto-enroll every imported property into this sequence after ingest. */
   sequenceId?: string | null;
+  /** Operator's choice at the wizard's line-type interstitial: classify
+   *  unlabeled phone numbers via Telnyx before ingest. False = those
+   *  numbers are dropped by the ingest hard rule (and counted). */
+  classifyLineTypes: boolean;
   /** Format-helper audit trail: when the wizard's auto-detect applied
    *  a vendor preset before this submit, the preset id + version + the
    *  transform stats are recorded on `jobs.input_params.preset`. Pure
@@ -190,6 +194,7 @@ export async function createImportJob(
           mapping: params.mapping as Record<string, string | null>,
           storagePath: params.storagePath,
           smsConsent: params.smsConsent,
+          classifyLineTypes: params.classifyLineTypes,
           // Format-helper audit trail (null when no preset applied).
           preset: params.preset ?? null,
         },
@@ -232,6 +237,7 @@ export async function createImportJob(
             userId,
             smsConsent: params.smsConsent,
             sequenceId: params.sequenceId ?? null,
+            classifyLineTypes: params.classifyLineTypes,
           },
         ]);
       } catch (e) {
@@ -406,4 +412,14 @@ async function resolveOrCreateList(
     .single();
   if (createErr) throw new Error(`list insert: ${createErr.message}`);
   return created.id;
+}
+
+/**
+ * Whether the Telnyx line-type lookup can actually run. The Confirm
+ * step's interstitial disables the paid "Classify" choice when the key
+ * is missing — offering it and then silently dropping the numbers was
+ * the failure mode (the workflow also fails fast as a backstop).
+ */
+export async function isLineTypeLookupConfigured(): Promise<boolean> {
+  return !!process.env.TELNYX_API_KEY?.trim();
 }

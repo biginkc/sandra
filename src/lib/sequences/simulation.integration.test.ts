@@ -64,7 +64,7 @@ async function seedLeadBatch(
     const phone = `${prefix}${String(1000 + i).padStart(4, "0")}`;
     const { data: contact, error: contactError } = await supabase
       .from("contacts")
-      .insert({ first_name: `Lead${i}`, phone_1: phone })
+      .insert({ first_name: `Lead${i}`, phone_1: phone, phone_1_type: "mobile" })
       .select("id")
       .single();
     if (contactError || !contact) {

@@ -49,8 +49,11 @@ async function seedContact(opts: {
       first_name: opts.firstName,
       last_name: "Test",
       phone_1: opts.phone1 ?? null,
+      phone_1_type: opts.phone1 ? "mobile" : "unknown",
       phone_2: opts.phone2 ?? null,
+      phone_2_type: opts.phone2 ? "mobile" : "unknown",
       phone_3: opts.phone3 ?? null,
+      phone_3_type: opts.phone3 ? "mobile" : "unknown",
     })
     .select("id")
     .single();
@@ -479,6 +482,7 @@ describe("mergeUnknownSenderToProperty (integration)", () => {
         first_name: "Existing",
         last_name: "Homeowner",
         phone_1: "+18165560099",
+        phone_1_type: "mobile",
       })
       .select("id")
       .single();

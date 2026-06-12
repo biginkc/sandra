@@ -128,6 +128,13 @@ export function StepProgress({ jobId }: { jobId: string }) {
 
   const { title, description } = describeState(job, isTerminal);
 
+  // Hard-rule counter from finalize: phones dropped because they had no
+  // line type. result_summary is untyped Json — read defensively.
+  const summary = (job?.result_summary ?? null) as {
+    droppedUnlabeledPhones?: number;
+  } | null;
+  const droppedUnlabeledPhones = summary?.droppedUnlabeledPhones ?? 0;
+
   return (
     <Card>
       <CardHeader>
@@ -157,6 +164,13 @@ export function StepProgress({ jobId }: { jobId: string }) {
           <Stat label="Failed" value={job?.failed_items ?? 0} />
           <Stat label="Skipped" value={skippedCount} />
         </div>
+        {isTerminal && droppedUnlabeledPhones > 0 && (
+          <div className="text-muted-foreground text-sm">
+            {droppedUnlabeledPhones.toLocaleString()} phone{" "}
+            {droppedUnlabeledPhones === 1 ? "number" : "numbers"} skipped — no
+            line type. Unlabeled numbers are never saved.
+          </div>
+        )}
       </CardContent>
       {isTerminal && (
         <CardFooter className="flex flex-wrap gap-2">

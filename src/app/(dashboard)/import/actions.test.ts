@@ -152,6 +152,7 @@ const baseParams = {
   totalRows: 42,
   smsConsent: false,
   sequenceId: null,
+  classifyLineTypes: false,
 };
 
 describe("createImportJob — T-02-03-01 mitigation", () => {

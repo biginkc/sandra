@@ -64,7 +64,12 @@ async function seedPropertyWithPhone(phone: string | null = "+18165550099"): Pro
   if (phone) {
     const { data: contact } = await supabase
       .from("contacts")
-      .insert({ first_name: "Test", last_name: "Owner", phone_1: phone })
+      .insert({
+        first_name: "Test",
+        last_name: "Owner",
+        phone_1: phone,
+        phone_1_type: "mobile",
+      })
       .select("id")
       .single();
     if (!contact) throw new Error("contact seed failed");

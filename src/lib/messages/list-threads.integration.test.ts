@@ -43,6 +43,7 @@ async function seedConversation(opts: {
       first_name: opts.contactName ?? "Conv",
       last_name: "Test",
       phone_1: opts.phone,
+      phone_1_type: "mobile",
     })
     .select("id")
     .single();
@@ -109,6 +110,7 @@ describe("listThreads (integration)", () => {
         first_name: "Split",
         last_name: "Thread",
         phone_1: "+18165550002",
+        phone_1_type: "mobile",
       })
       .select("id")
       .single();
@@ -175,6 +177,7 @@ describe("listThreads (integration)", () => {
         first_name: "Race",
         last_name: "Thread",
         phone_1: "+18165550123",
+        phone_1_type: "mobile",
       })
       .select("id")
       .single();
@@ -288,7 +291,12 @@ describe("listThreads (integration)", () => {
   it("excludes contacts with no messages", async () => {
     const { data: contact } = await supabase
       .from("contacts")
-      .insert({ first_name: "Lonely", last_name: "Contact", phone_1: "+18165550030" })
+      .insert({
+        first_name: "Lonely",
+        last_name: "Contact",
+        phone_1: "+18165550030",
+        phone_1_type: "mobile",
+      })
       .select("id")
       .single();
     await supabase

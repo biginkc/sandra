@@ -549,7 +549,7 @@ describe("runSkipTraceEnrichment (integration, mock provider)", () => {
     // Pre-populate phone_1 with the same number the mock will return.
     await supabase
       .from("contacts")
-      .update({ phone_1: "+18165550199" })
+      .update({ phone_1: "+18165550199", phone_1_type: "mobile" })
       .eq("id", contactId!);
 
     const jobId = await createPendingJob([propertyId]);
@@ -600,6 +600,39 @@ describe("runSkipTraceEnrichment (integration, mock provider)", () => {
     expect(contact!.phone_2).toBe("+18165550155");
     expect(contact!.phone_2_type).toBe("landline");
     expect(contact!.phone_3).toBeNull();
+  });
+
+  it("drops unlabeled provider phones (hard rule) instead of failing the write on the 080 trigger", async () => {
+    const { propertyId, contactId } = await seedProperty({
+      address: "UNTYPED Hard Rule Ln",
+      withContact: true,
+    });
+
+    const jobId = await createPendingJob([propertyId]);
+    await runSkipTraceEnrichment(supabase, {
+      jobId,
+      propertyIds: [propertyId],
+    });
+
+    // Mock UNTYPED prefix returns one Unknown-typed phone (rank 1) and
+    // one Mobile (rank 2). The unlabeled number must be dropped — not
+    // packed with type 'unknown', which the 080 trigger rejects and
+    // would sink the whole finalize.
+    const { data: contact } = await supabase
+      .from("contacts")
+      .select("phone_1, phone_1_type, phone_2")
+      .eq("id", contactId!)
+      .single();
+    expect(contact!.phone_1).toBe("+18165550105");
+    expect(contact!.phone_1_type).toBe("mobile");
+    expect(contact!.phone_2).toBeNull();
+
+    const { data: job } = await supabase
+      .from("jobs")
+      .select("status")
+      .eq("id", jobId)
+      .single();
+    expect(job!.status).toBe("completed");
   });
 
   // ---------------------------------------------------------------

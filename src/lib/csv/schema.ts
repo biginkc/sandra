@@ -112,6 +112,7 @@ export const AGENT_FIELDS: readonly TargetField[] = [
   { id: "agent_first_name", label: "First Name", section: "agent", type: "text" },
   { id: "agent_last_name", label: "Last Name", section: "agent", type: "text" },
   { id: "agent_phone", label: "Phone", section: "agent", type: "phone" },
+  { id: "agent_phone_type", label: "Phone Line Type", section: "agent", type: "enum", enumValues: PHONE_LINE_TYPE_VALUES },
   { id: "agent_email", label: "Email", section: "agent", type: "email" },
   { id: "agent_brokerage", label: "Brokerage", section: "agent", type: "text" },
   { id: "agent_license_number", label: "License Number", section: "agent", type: "text" },

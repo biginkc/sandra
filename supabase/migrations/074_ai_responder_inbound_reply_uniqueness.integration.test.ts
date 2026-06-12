@@ -12,6 +12,7 @@ async function seedLead(): Promise<{ contactId: string; propertyId: string }> {
       first_name: "AI",
       last_name: "Unique",
       phone_1: `+1555${Math.floor(Math.random() * 9000000 + 1000000)}`,
+      phone_1_type: "mobile",
     })
     .select("id")
     .single();

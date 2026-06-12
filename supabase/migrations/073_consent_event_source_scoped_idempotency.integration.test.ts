@@ -12,6 +12,7 @@ async function seedContact(): Promise<string> {
       first_name: "Consent",
       last_name: "Scope",
       phone_1: `+1555${Math.floor(Math.random() * 9000000 + 1000000)}`,
+      phone_1_type: "mobile",
     })
     .select("id")
     .single();

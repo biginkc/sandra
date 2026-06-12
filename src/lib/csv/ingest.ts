@@ -1,6 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
-import { asLineType } from "@/lib/messaging/line-type";
+import { asLineType, type PhoneLineType } from "@/lib/messaging/line-type";
 import type { Database, Json } from "@/lib/supabase/types";
 import { resolveFips } from "./fips";
 import { normalizeAddress, normalizeDisplayAddress, normalizeName } from "./normalize";
@@ -39,6 +39,9 @@ export type IngestSummary = {
   succeeded: number;
   failed: number;
   skipped: number;
+  /** Phones dropped at ingest because they arrived with no line type
+   *  (the migration-080 hard rule: unlabeled numbers are never saved). */
+  droppedUnlabeledPhones: number;
   errors: { rowIndex: number; message: string }[];
 };
 
@@ -81,6 +84,8 @@ export type ChunkResult = {
   succeeded: number;
   failed: number;
   skipped: number;
+  /** Phones dropped in this chunk because they had no line type. */
+  droppedUnlabeledPhones: number;
   errors: { rowIndex: number; message: string }[];
 };
 
@@ -136,6 +141,7 @@ export async function runIngestion(
     succeeded: chunk.succeeded,
     failed: chunk.failed,
     skipped: chunk.skipped,
+    droppedUnlabeledPhones: chunk.droppedUnlabeledPhones,
     errors: chunk.errors,
   });
 
@@ -143,6 +149,7 @@ export async function runIngestion(
     succeeded: chunk.succeeded,
     failed: chunk.failed,
     skipped: chunk.skipped,
+    droppedUnlabeledPhones: chunk.droppedUnlabeledPhones,
     errors: chunk.errors,
   };
 }
@@ -196,6 +203,7 @@ export async function processIngestChunk(
   let succeeded = 0;
   let failed = 0;
   let skipped = 0;
+  let droppedUnlabeledPhones = 0;
   const errors: { rowIndex: number; message: string }[] = [];
 
   for (let localIndex = 0; localIndex < params.rows.length; localIndex++) {
@@ -232,6 +240,7 @@ export async function processIngestChunk(
         params.market,
         params.countyId ?? null,
       );
+      droppedUnlabeledPhones += result.droppedUnlabeledPhones;
 
       // Stacking: every ingested row — including dedup-matched ones —
       // gets added to the import's list (if one was selected). Re-importing
@@ -301,7 +310,7 @@ export async function processIngestChunk(
     }
   }
 
-  return { succeeded, failed, skipped, errors };
+  return { succeeded, failed, skipped, droppedUnlabeledPhones, errors };
 }
 
 /**
@@ -320,6 +329,17 @@ export async function finalizeIngestion(
     succeeded: number;
     failed: number;
     skipped: number;
+    /** Total unlabeled phones dropped across all chunks. Optional so the
+     *  legacy single-shot path and older callers don't have to thread it. */
+    droppedUnlabeledPhones?: number;
+    /** Telnyx classification counts from the workflow's pre-ingest step.
+     *  Null/absent when classification didn't run for this import. */
+    lineTypeClassification?: {
+      classifiedMobile: number;
+      classifiedLandline: number;
+      stillUnknown: number;
+      estimatedCostUsd: number;
+    } | null;
     errors: { rowIndex: number; message: string }[];
   },
 ): Promise<void> {
@@ -342,6 +362,8 @@ export async function finalizeIngestion(
         succeeded: params.succeeded,
         failed: params.failed,
         skipped: params.skipped,
+        droppedUnlabeledPhones: params.droppedUnlabeledPhones ?? 0,
+        lineTypeClassification: params.lineTypeClassification ?? null,
         errors: params.errors.slice(0, ERROR_SAMPLE_SIZE),
       },
     })
@@ -366,7 +388,11 @@ async function ingestRow(
   defaultSource: string,
   market: string,
   countyId: string | null,
-): Promise<{ propertyId: string; wasDuplicate: boolean }> {
+): Promise<{
+  propertyId: string;
+  wasDuplicate: boolean;
+  droppedUnlabeledPhones: number;
+}> {
   const addressRaw = n.address as string | null;
   if (!addressRaw) throw new Error("Address is required");
 
@@ -380,6 +406,12 @@ async function ingestRow(
     zip: n.zip as string | null,
   });
 
+  // Hard rule (migration 080): a phone with no line type is never saved.
+  // Drop unlabeled slots up front and compact typed phones forward; the
+  // contact itself still upserts (name/email survive) even when every
+  // phone was dropped.
+  const phoneSlots = compactTypedPhones(n);
+
   // Upsert homeowner contact + sidecar when any homeowner fields are present.
   let homeownerContactId: string | null = null;
   if (hasHomeownerFields(n)) {
@@ -388,12 +420,7 @@ async function ingestRow(
       first_name: normalizeName(n.homeowner_first_name as string | null),
       last_name: normalizeName(n.homeowner_last_name as string | null),
       entity_name: normalizeName(n.homeowner_entity_name as string | null),
-      phone_1: (n.homeowner_phone_1 as string | null) ?? null,
-      phone_1_type: asLineType(n.homeowner_phone_1_type as string | null),
-      phone_2: (n.homeowner_phone_2 as string | null) ?? null,
-      phone_2_type: asLineType(n.homeowner_phone_2_type as string | null),
-      phone_3: (n.homeowner_phone_3 as string | null) ?? null,
-      phone_3_type: asLineType(n.homeowner_phone_3_type as string | null),
+      ...phoneSlots.contactFields,
       email: (n.homeowner_email as string | null)?.trim().toLowerCase() ?? null,
       do_not_contact:
         (n.homeowner_do_not_contact as boolean | null) ?? undefined,
@@ -413,13 +440,20 @@ async function ingestRow(
   }
 
   // Upsert agent contact + sidecar when any agent fields are present.
+  // Same hard rule for the agent's phone: no line type → not saved.
   let agentContactId: string | null = null;
+  let agentPhoneDropped = 0;
   if (hasAgentFields(n)) {
+    const agentPhone = (n.agent_phone as string | null) ?? null;
+    const agentPhoneType = asLineType(n.agent_phone_type as string | null);
+    const keepAgentPhone = !!agentPhone && agentPhoneType !== "unknown";
+    if (agentPhone && !keepAgentPhone) agentPhoneDropped = 1;
     agentContactId = await upsertContact(supabase, {
       contact_type: "person",
       first_name: normalizeName(n.agent_first_name as string | null),
       last_name: normalizeName(n.agent_last_name as string | null),
-      phone_1: (n.agent_phone as string | null) ?? null,
+      phone_1: keepAgentPhone ? agentPhone : null,
+      phone_1_type: keepAgentPhone ? agentPhoneType : "unknown",
       email: (n.agent_email as string | null)?.trim().toLowerCase() ?? null,
     });
     await supabase.from("agent_details").upsert(
@@ -477,7 +511,11 @@ async function ingestRow(
         }
       }
     }
-    return { propertyId: existingId, wasDuplicate: true };
+    return {
+      propertyId: existingId,
+      wasDuplicate: true,
+      droppedUnlabeledPhones: phoneSlots.dropped + agentPhoneDropped,
+    };
   }
 
   // The wizard's source selection (`defaultSource`) IS the canonical
@@ -527,10 +565,58 @@ async function ingestRow(
     .select("id")
     .single();
   if (error) throw new Error(`property insert: ${error.message}`);
-  return { propertyId: inserted.id, wasDuplicate: false };
+  return {
+    propertyId: inserted.id,
+    wasDuplicate: false,
+    droppedUnlabeledPhones: phoneSlots.dropped + agentPhoneDropped,
+  };
 }
 
 // ---------- helpers ----------
+
+/**
+ * Apply the hard rule to a row's homeowner phone slots: a phone whose
+ * type normalizes to 'unknown' is dropped (never written), and the
+ * surviving typed phones compact forward so phone_1 is always the first
+ * usable number. Returns the contact-insert fields plus the dropped
+ * count for the import summary.
+ */
+function compactTypedPhones(n: Readonly<Record<string, unknown>>): {
+  contactFields: Pick<
+    ContactInsert,
+    | "phone_1"
+    | "phone_1_type"
+    | "phone_2"
+    | "phone_2_type"
+    | "phone_3"
+    | "phone_3_type"
+  >;
+  dropped: number;
+} {
+  const typed: { phone: string; type: PhoneLineType }[] = [];
+  let dropped = 0;
+  for (const slot of [1, 2, 3] as const) {
+    const phone = (n[`homeowner_phone_${slot}`] as string | null) ?? null;
+    if (!phone) continue;
+    const type = asLineType(n[`homeowner_phone_${slot}_type`] as string | null);
+    if (type === "unknown") {
+      dropped++;
+      continue;
+    }
+    typed.push({ phone, type });
+  }
+  return {
+    contactFields: {
+      phone_1: typed[0]?.phone ?? null,
+      phone_1_type: typed[0]?.type ?? "unknown",
+      phone_2: typed[1]?.phone ?? null,
+      phone_2_type: typed[1]?.type ?? "unknown",
+      phone_3: typed[2]?.phone ?? null,
+      phone_3_type: typed[2]?.type ?? "unknown",
+    },
+    dropped,
+  };
+}
 
 function hasHomeownerFields(n: Readonly<Record<string, unknown>>): boolean {
   const keys = [

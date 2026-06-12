@@ -59,18 +59,30 @@ async function seedLead(opts: {
   let contactId: string | null = null;
 
   if (opts.phone !== null) {
+    const phoneType = opts.phoneType ?? "mobile";
     const { data: contact } = await testClient
       .from("contacts")
       .insert({
         first_name: "Bulk",
         last_name: "Tester",
         phone_1: opts.phone ?? "+18165550099",
-        phone_1_type: opts.phoneType ?? "mobile",
+        // The 080 trigger rejects saving a phone typed 'unknown', so
+        // seed unknown rows in two steps: insert typed 'mobile', then a
+        // type-only update (allowed) — exactly how legacy unknowns exist.
+        phone_1_type: phoneType === "unknown" ? "mobile" : phoneType,
       })
       .select("id")
       .single();
     if (!contact) throw new Error("contact seed failed");
     contactId = contact.id;
+
+    if (phoneType === "unknown") {
+      const { error: typeError } = await testClient
+        .from("contacts")
+        .update({ phone_1_type: "unknown" })
+        .eq("id", contactId);
+      if (typeError) throw new Error(`type downgrade failed: ${typeError.message}`);
+    }
 
     await testClient.from("consent_events").insert({
       contact_id: contactId,

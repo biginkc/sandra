@@ -20,7 +20,12 @@ async function seedLead(opts: {
 }): Promise<{ propertyId: string; contactId: string }> {
   const { data: contact } = await supabase
     .from("contacts")
-    .insert({ first_name: "Queue", last_name: "Test", phone_1: opts.phone })
+    .insert({
+      first_name: "Queue",
+      last_name: "Test",
+      phone_1: opts.phone,
+      phone_1_type: "mobile",
+    })
     .select("id")
     .single();
   if (!contact) throw new Error("contact seed failed");
