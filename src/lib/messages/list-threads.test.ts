@@ -41,7 +41,7 @@ function makeStub(opts: {
     neq: () => messagesQuery,
     gte: () => messagesQuery,
     // Stamp a deterministic conversation id on any row the test didn't
-    // give one — mirrors the DB invariant since migration 080 (the fill
+    // give one — mirrors the DB invariant since migration 081 (the fill
     // trigger guarantees every contact-bearing SMS row has one).
     order: () =>
       Promise.resolve({

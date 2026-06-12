@@ -1,4 +1,4 @@
--- 080: Unify SMS thread identity on conversation_id.
+-- 081: Unify SMS thread identity on conversation_id.
 --
 -- Before this migration three thread-id formats coexisted: conversation
 -- UUIDs, `legacy:<contact>:<property>` keys (rows with null

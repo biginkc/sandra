@@ -5,7 +5,7 @@ import type { Database } from "@/lib/supabase/types";
 
 export type Thread = {
   /** The conversation UUID — the one and only thread identity since
-   *  migration 080. */
+   *  migration 081. */
   threadId: string;
   contactId: string;
   contactName: string | null;
@@ -74,7 +74,7 @@ export type ListThreadsOpts = {
 /**
  * Build the inbox thread list — one row per conversation. Every
  * contact-bearing SMS row carries a conversation_id (backfilled and
- * trigger-enforced by migration 080), so grouping is a plain key lookup.
+ * trigger-enforced by migration 081), so grouping is a plain key lookup.
  *
  * Strategy: fetch all messages in the window in one round-trip, group
  * by conversation in JS, then batch-fetch contact + property info. Keeps

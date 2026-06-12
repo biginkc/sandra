@@ -47,7 +47,7 @@ export type InboundThreadResolution = {
 };
 
 /**
- * Parse a thread id from a URL. Since migration 080 every contact-bearing
+ * Parse a thread id from a URL. Since migration 081 every contact-bearing
  * SMS row carries a conversation_id, so this exists ONLY as the
  * URL-compat doormat: old bookmarked links may still carry
  * `legacy:<contact>:<property>` keys or bare contact ids. New code never
@@ -398,7 +398,7 @@ export async function resolveInboundThread(
 
 /**
  * Resolution for a thread that attaches to a contact but no property.
- * Contact-level threads get a real conversation id too (migration 080) —
+ * Contact-level threads get a real conversation id too (migration 081) —
  * org-scoped via the contact — so no contact-bearing row is ever written
  * without one.
  */
