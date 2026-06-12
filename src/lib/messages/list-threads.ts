@@ -35,16 +35,23 @@ export type Thread = {
   isTestTraffic: boolean;
 };
 
-/** Jitter's test fixtures name their contacts "Canary CANARY-*" /
- *  "Jitter *" and use synthetic addresses containing "jitter". Matching
- *  on those markers keeps test STOP/AI-canary threads out of the inbox
- *  without touching real conversations. */
+/** Match Jitter's test-fixture CONTRACT precisely, not generic human
+ *  text. Fixtures always present as one of:
+ *   - contact "Canary CANARY-<TYPE>-<ts>" (first name literally Canary,
+ *     last name a CANARY- token) — matched as a name PREFIX
+ *   - synthetic address starting "Jitter " or "JITTER-" ("Jitter Canary
+ *     … Golden Path Ln", "Jitter Rehearsal …", "JITTER-SANDRA-V1 …")
+ *  A homeowner on "123 Canary Ln", a seller surnamed Canary, or a
+ *  "Jitterbug Dr" address never matches — those are substrings, not
+ *  prefixes of the fixture shapes. */
 export function looksLikeTestTraffic(
   contactName: string | null,
   propertyAddress: string | null,
 ): boolean {
-  const hay = `${contactName ?? ""} ${propertyAddress ?? ""}`.toLowerCase();
-  return hay.includes("canary") || hay.includes("jitter");
+  const name = (contactName ?? "").trim().toLowerCase();
+  if (name.startsWith("canary canary-")) return true;
+  const address = (propertyAddress ?? "").trim().toLowerCase();
+  return address.startsWith("jitter ") || address.startsWith("jitter-");
 }
 
 export type ListThreadsOpts = {

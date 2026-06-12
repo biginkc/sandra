@@ -7,6 +7,7 @@ import {
 import Anthropic from "@anthropic-ai/sdk";
 
 import { listAdminUserIds } from "@/lib/auth/admins";
+import { looksLikeTestTraffic } from "@/lib/messages/list-threads";
 import { dispatchAiResponse } from "@/lib/ai-responder/dispatch";
 import { reportError } from "@/lib/errors/report";
 import { classifyReplyIntent } from "@/lib/leads/classify-reply-intent";
@@ -25,10 +26,13 @@ import {
 import type { Database, Json } from "@/lib/supabase/types";
 import type { MessagingProvider } from "./types";
 
-const STOP_KEYWORDS = /^\s*(stop|stopall|unsubscribe|cancel|end|quit|opt out|opt-out|remove)\s*$/i;
+const STOP_KEYWORDS =
+  /^\s*(stop|stopall|unsubscribe|cancel|end|quit|opt out|opt-out|remove)\s*$/i;
 const HELP_KEYWORDS = /^\s*(help|info|support)\s*$/i;
-const DNC_KEYWORDS = /do not (call|text|contact|reach out|message)|don'?t (call|text|contact|reach out|message)|stop (texting|calling|contacting) me|take me off|no more (texts|messages|calls)|remove me from|stop reaching out/i;
-const WRONG_NUMBER_KEYWORDS = /wrong number|wrong person|not the owner|don'?t own|dont own|no longer own/i;
+const DNC_KEYWORDS =
+  /do not (call|text|contact|reach out|message)|don'?t (call|text|contact|reach out|message)|stop (texting|calling|contacting) me|take me off|no more (texts|messages|calls)|remove me from|stop reaching out/i;
+const WRONG_NUMBER_KEYWORDS =
+  /wrong number|wrong person|not the owner|don'?t own|dont own|no longer own/i;
 const WEBHOOK_PROCESSING_LEASE_MS = 5 * 60_000;
 
 function createServiceRoleClient() {
@@ -39,7 +43,7 @@ function createServiceRoleClient() {
     : process.env.NEXT_PUBLIC_SUPABASE_URL;
   const key = useTestEnv
     ? (process.env.TEST_SUPABASE_SERVICE_ROLE_KEY ??
-        process.env.SUPABASE_SERVICE_ROLE_KEY)
+      process.env.SUPABASE_SERVICE_ROLE_KEY)
     : process.env.SUPABASE_SERVICE_ROLE_KEY;
   if (!url || !key) {
     throw new Error(
@@ -83,7 +87,10 @@ export async function handleInboundWebhook(
       reportError(e, {
         tags: { surface: `${provider.providerId}_webhook_parse` },
       });
-      return NextResponse.json({ error: "Unrecognized payload" }, { status: 400 });
+      return NextResponse.json(
+        { error: "Unrecognized payload" },
+        { status: 400 },
+      );
     }
 
     const supabase = createServiceRoleClient();
@@ -100,7 +107,10 @@ export async function handleInboundWebhook(
           tags: { surface: `${provider.providerId}_webhook_events_insert` },
           extra: { externalId: ev.externalId },
         });
-        return NextResponse.json({ error: "webhook event reserve failed" }, { status: 500 });
+        return NextResponse.json(
+          { error: "webhook event reserve failed" },
+          { status: 500 },
+        );
       }
 
       const thread = await resolveInboundThread(supabase, ev.from, ev.to);
@@ -148,7 +158,11 @@ export async function handleInboundWebhook(
             { status: 500 },
           );
         }
-        await markWebhookEventProcessed(supabase, provider.providerId, ev.externalId);
+        await markWebhookEventProcessed(
+          supabase,
+          provider.providerId,
+          ev.externalId,
+        );
         continue;
       }
 
@@ -187,7 +201,11 @@ export async function handleInboundWebhook(
             { status: 500 },
           );
         }
-        await markWebhookEventProcessed(supabase, provider.providerId, ev.externalId);
+        await markWebhookEventProcessed(
+          supabase,
+          provider.providerId,
+          ev.externalId,
+        );
         continue;
       }
 
@@ -235,7 +253,11 @@ export async function handleInboundWebhook(
             { status: 500 },
           );
         }
-        await markWebhookEventProcessed(supabase, provider.providerId, ev.externalId);
+        await markWebhookEventProcessed(
+          supabase,
+          provider.providerId,
+          ev.externalId,
+        );
         continue;
       }
 
@@ -268,7 +290,10 @@ export async function handleInboundWebhook(
           contactId,
           propertyId,
           conversationId,
-          metadata: { ...jsonObject(baseMetadata), keyword: "wrong_number" } as Json,
+          metadata: {
+            ...jsonObject(baseMetadata),
+            keyword: "wrong_number",
+          } as Json,
         });
         if (insertOutcome.error) {
           await markWebhookEventError(
@@ -282,7 +307,11 @@ export async function handleInboundWebhook(
             { status: 500 },
           );
         }
-        await markWebhookEventProcessed(supabase, provider.providerId, ev.externalId);
+        await markWebhookEventProcessed(
+          supabase,
+          provider.providerId,
+          ev.externalId,
+        );
         continue;
       }
 
@@ -297,11 +326,11 @@ export async function handleInboundWebhook(
         conversationId,
         metadata: baseMetadata,
       });
-        if (insertOutcome.error) {
-          reportError(new Error(insertOutcome.error.message), {
-            tags: { surface: `${provider.providerId}_webhook_inbound_insert` },
-            extra: { externalId: ev.externalId, code: insertOutcome.error.code },
-          });
+      if (insertOutcome.error) {
+        reportError(new Error(insertOutcome.error.message), {
+          tags: { surface: `${provider.providerId}_webhook_inbound_insert` },
+          extra: { externalId: ev.externalId, code: insertOutcome.error.code },
+        });
         await markWebhookEventError(
           supabase,
           provider.providerId,
@@ -316,7 +345,11 @@ export async function handleInboundWebhook(
       const effectiveContactId = insertOutcome.contactId ?? contactId;
       const effectivePropertyId = insertOutcome.propertyId ?? propertyId;
       if (!insertOutcome.messageId) {
-        await markWebhookEventProcessed(supabase, provider.providerId, ev.externalId);
+        await markWebhookEventProcessed(
+          supabase,
+          provider.providerId,
+          ev.externalId,
+        );
         continue;
       }
       const inboundState = readInboundMessageState(insertOutcome.metadata);
@@ -336,12 +369,21 @@ export async function handleInboundWebhook(
             });
           } catch (e) {
             reportError(e, {
-              tags: { surface: `${provider.providerId}_webhook_notification_triage` },
-              extra: { contactId: effectiveContactId, externalId: ev.externalId },
+              tags: {
+                surface: `${provider.providerId}_webhook_notification_triage`,
+              },
+              extra: {
+                contactId: effectiveContactId,
+                externalId: ev.externalId,
+              },
             });
           }
         }
-        await markWebhookEventProcessed(supabase, provider.providerId, ev.externalId);
+        await markWebhookEventProcessed(
+          supabase,
+          provider.providerId,
+          ev.externalId,
+        );
         continue;
       }
 
@@ -351,7 +393,11 @@ export async function handleInboundWebhook(
         .eq("id", effectivePropertyId)
         .maybeSingle();
 
-      if (cur?.status === "prospect" && ev.body && !inboundState.autoQualifiedAt) {
+      if (
+        cur?.status === "prospect" &&
+        ev.body &&
+        !inboundState.autoQualifiedAt
+      ) {
         let shouldQualify = false;
         if (process.env.SKIP_INTENT_GATE === "1") {
           shouldQualify = true;
@@ -361,7 +407,9 @@ export async function handleInboundWebhook(
             shouldQualify = intent === "positive";
           } catch (e) {
             reportError(e, {
-              tags: { surface: `${provider.providerId}_webhook_classify_intent` },
+              tags: {
+                surface: `${provider.providerId}_webhook_classify_intent`,
+              },
               extra: { propertyId, externalId: ev.externalId },
             });
           }
@@ -376,7 +424,10 @@ export async function handleInboundWebhook(
           if (qOutcome.status === "failed") {
             reportError(new Error(qOutcome.message), {
               tags: { surface: `${provider.providerId}_webhook_auto_qualify` },
-              extra: { propertyId: effectivePropertyId, externalId: ev.externalId },
+              extra: {
+                propertyId: effectivePropertyId,
+                externalId: ev.externalId,
+              },
             });
           } else {
             await markInboundMessageState(supabase, insertOutcome.messageId, {
@@ -390,25 +441,49 @@ export async function handleInboundWebhook(
         try {
           const { data: propRow } = await supabase
             .from("properties")
-            .select("assigned_user_id")
+            .select("assigned_user_id, address, city, state")
             .eq("id", effectivePropertyId)
             .maybeSingle();
-          const adminUserIds = propRow?.assigned_user_id
-            ? []
-            : await listAdminUserIds(supabase);
-          await dispatchOwnerMessageAdded(supabase, {
-            messageId: insertOutcome.messageId,
-            propertyId: effectivePropertyId,
-            adminUserIds,
-            messageBody: ev.body,
-          });
-          await markInboundMessageState(supabase, insertOutcome.messageId, {
-            ownerNotificationSentAt: new Date().toISOString(),
-          });
+          // Jitter test fixtures must not light the notification bell —
+          // the inbox hides their threads (Hide DNC & tests), and a bell
+          // deep-link would auto-mark them read anyway (Codex P2 on PR
+          // #257). State still marks notification-sent so retries don't
+          // re-evaluate.
+          const isTestTraffic = looksLikeTestTraffic(
+            null,
+            propRow
+              ? [propRow.address, propRow.city, propRow.state]
+                  .filter(Boolean)
+                  .join(", ")
+              : null,
+          );
+          if (isTestTraffic) {
+            await markInboundMessageState(supabase, insertOutcome.messageId, {
+              ownerNotificationSentAt: new Date().toISOString(),
+            });
+          } else {
+            const adminUserIds = propRow?.assigned_user_id
+              ? []
+              : await listAdminUserIds(supabase);
+            await dispatchOwnerMessageAdded(supabase, {
+              messageId: insertOutcome.messageId,
+              propertyId: effectivePropertyId,
+              adminUserIds,
+              messageBody: ev.body,
+            });
+            await markInboundMessageState(supabase, insertOutcome.messageId, {
+              ownerNotificationSentAt: new Date().toISOString(),
+            });
+          }
         } catch (e) {
           reportError(e, {
-            tags: { surface: `${provider.providerId}_webhook_notification_dispatch` },
-            extra: { propertyId: effectivePropertyId, externalId: ev.externalId },
+            tags: {
+              surface: `${provider.providerId}_webhook_notification_dispatch`,
+            },
+            extra: {
+              propertyId: effectivePropertyId,
+              externalId: ev.externalId,
+            },
           });
         }
       }
@@ -424,8 +499,13 @@ export async function handleInboundWebhook(
           });
         } catch (e) {
           reportError(e, {
-            tags: { surface: `${provider.providerId}_webhook_sequence_pause_inbound` },
-            extra: { propertyId: effectivePropertyId, externalId: ev.externalId },
+            tags: {
+              surface: `${provider.providerId}_webhook_sequence_pause_inbound`,
+            },
+            extra: {
+              propertyId: effectivePropertyId,
+              externalId: ev.externalId,
+            },
           });
         }
       }
@@ -454,12 +534,19 @@ export async function handleInboundWebhook(
         } catch (e) {
           reportError(e, {
             tags: { surface: `${provider.providerId}_webhook_ai_responder` },
-            extra: { propertyId: effectivePropertyId, externalId: ev.externalId },
+            extra: {
+              propertyId: effectivePropertyId,
+              externalId: ev.externalId,
+            },
           });
         }
       }
 
-      await markWebhookEventProcessed(supabase, provider.providerId, ev.externalId);
+      await markWebhookEventProcessed(
+        supabase,
+        provider.providerId,
+        ev.externalId,
+      );
     }
 
     return NextResponse.json({ ok: true });
@@ -595,7 +682,8 @@ async function reserveWebhookEvent(
   if (isMissingWebhookProcessingClaimSupport(error.message)) {
     return reserveWebhookEventLegacy(supabase, input);
   }
-  if (error.code !== "23505") return { status: "error", message: error.message };
+  if (error.code !== "23505")
+    return { status: "error", message: error.message };
 
   const { data: existing, error: existingError } = await supabase
     .from("webhook_events")
@@ -661,7 +749,8 @@ async function reserveWebhookEventLegacy(
     payload: input.payload,
   });
   if (!error) return { status: "reserved" };
-  if (error.code !== "23505") return { status: "error", message: error.message };
+  if (error.code !== "23505")
+    return { status: "error", message: error.message };
 
   const { data: existing, error: existingError } = await supabase
     .from("webhook_events")
@@ -765,7 +854,11 @@ async function applyPhoneLevelOptOut(
       // opt-out bit and stop future sends rather than 500ing the webhook.
       reportError(e, {
         tags: { surface: `${input.providerId}_webhook_opt_out_record` },
-        extra: { contactId, fromPhone: input.fromPhone, surface: input.surface },
+        extra: {
+          contactId,
+          fromPhone: input.fromPhone,
+          surface: input.surface,
+        },
       });
     }
     await supabase
@@ -783,7 +876,9 @@ async function applyPhoneLevelOptOut(
       });
     } catch (e) {
       reportError(e, {
-        tags: { surface: `${input.providerId}_webhook_sequence_pause_${input.surface}` },
+        tags: {
+          surface: `${input.providerId}_webhook_sequence_pause_${input.surface}`,
+        },
         extra: { contactId, fromPhone: input.fromPhone },
       });
     }
@@ -827,7 +922,8 @@ function isWebhookProcessingLeaseExpired(
 function isMissingWebhookProcessingClaimSupport(message: string): boolean {
   return (
     message.includes("processing_started_at") ||
-    (message.includes("processing_status") && message.includes("check constraint"))
+    (message.includes("processing_status") &&
+      message.includes("check constraint"))
   );
 }
 
@@ -849,7 +945,11 @@ function readInboundMessageState(metadata: Json | null): InboundMessageState {
     return {};
   }
   const processing = (metadata as Record<string, unknown>).processing;
-  if (!processing || typeof processing !== "object" || Array.isArray(processing)) {
+  if (
+    !processing ||
+    typeof processing !== "object" ||
+    Array.isArray(processing)
+  ) {
     return {};
   }
   return processing as InboundMessageState;
@@ -870,7 +970,9 @@ async function markInboundMessageState(
   }
 
   const currentMetadata =
-    row?.metadata && typeof row.metadata === "object" && !Array.isArray(row.metadata)
+    row?.metadata &&
+    typeof row.metadata === "object" &&
+    !Array.isArray(row.metadata)
       ? (row.metadata as Record<string, unknown>)
       : {};
   const currentState = readInboundMessageState(row?.metadata ?? null);
