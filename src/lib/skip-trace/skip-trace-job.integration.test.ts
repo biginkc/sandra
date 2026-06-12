@@ -568,6 +568,40 @@ describe("runSkipTraceEnrichment (integration, mock provider)", () => {
     expect(contact!.phone_3).toBeNull();
   });
 
+  it("promotes a newly traced mobile into slot 1 when slot 1 holds a classified landline", async () => {
+    const { propertyId, contactId } = await seedProperty({
+      address: "Promotion Test Ln",
+      withContact: true,
+    });
+    // Contact already carries a known landline in slot 1 (e.g. from a
+    // CSV import + carrier lookup). The mock provider returns a Mobile
+    // (+18165550199); persist must put the mobile in slot 1 — every
+    // send path texts slot 1 and hard-blocks landlines.
+    await supabase
+      .from("contacts")
+      .update({ phone_1: "+18165550155", phone_1_type: "landline" })
+      .eq("id", contactId!);
+
+    const jobId = await createPendingJob([propertyId]);
+    await runSkipTraceEnrichment(supabase, {
+      jobId,
+      propertyIds: [propertyId],
+    });
+
+    const { data: contact } = await supabase
+      .from("contacts")
+      .select(
+        "phone_1, phone_1_type, phone_2, phone_2_type, phone_3, phone_3_type",
+      )
+      .eq("id", contactId!)
+      .single();
+    expect(contact!.phone_1).toBe("+18165550199");
+    expect(contact!.phone_1_type).toBe("mobile");
+    expect(contact!.phone_2).toBe("+18165550155");
+    expect(contact!.phone_2_type).toBe("landline");
+    expect(contact!.phone_3).toBeNull();
+  });
+
   // ---------------------------------------------------------------
   // Address-matching: Tracerfy silently dedupes batch input by
   // address and doesn't reliably round-trip our `external_id`. The

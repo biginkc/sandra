@@ -26,6 +26,13 @@ export type BulkSmsQueueOpts = {
   skipIfContacted?: boolean;
   dailyCap?: number;
   jitterPct?: number;
+  /**
+   * Queue to contacts whose phone_1 line type is 'unknown' (never
+   * classified). Default false — bulk SMS targets confirmed mobiles
+   * only; the audience-assessment step surfaces the unknown count and
+   * lets the operator opt them in. Landlines are always excluded.
+   */
+  includeUnknown?: boolean;
 };
 
 /**
@@ -112,21 +119,39 @@ export async function queueSmsBatch(
   // Fetch properties in chunks — Supabase PostgREST rejects large IN
   // clauses (URL length limit, ~8 KB) so we split into batches of 250.
   const CHUNK = 250;
+  type HomeownerJoin = { phone_1_type: string };
   const allProperties: {
     id: string;
     homeowner_contact_id: string | null;
     org_id: string | null;
+    homeowner: HomeownerJoin | null;
   }[] = [];
   for (let i = 0; i < args.propertyIds.length; i += CHUNK) {
     const chunk = args.propertyIds.slice(i, i + CHUNK);
     const { data, error: propError } = await client
       .from("properties")
-      .select("id, homeowner_contact_id, org_id")
+      .select(
+        `id, homeowner_contact_id, org_id,
+         homeowner:contacts!properties_homeowner_contact_id_fkey(phone_1_type)`,
+      )
       .in("id", chunk);
     if (propError) {
       throw new Error(`bulk sms property fetch: ${propError.message}`);
     }
-    if (data) allProperties.push(...data);
+    // PostgREST may return the joined contact as an object or a
+    // one-element array depending on relationship detection — same
+    // normalization as fetchDialerPropertyRows.
+    for (const row of (data ?? []) as unknown as (Omit<
+      (typeof allProperties)[number],
+      "homeowner"
+    > & { homeowner: HomeownerJoin | HomeownerJoin[] | null })[]) {
+      allProperties.push({
+        ...row,
+        homeowner: Array.isArray(row.homeowner)
+          ? (row.homeowner[0] ?? null)
+          : row.homeowner,
+      });
+    }
   }
 
   const propertyMap = new Map(allProperties.map((p) => [p.id, p]));
@@ -156,6 +181,20 @@ export async function queueSmsBatch(
     }
 
     if (opts.skipIfContacted && contactedSet.has(propertyId)) {
+      state.skipped++;
+      continue;
+    }
+
+    // Line-type gate: landlines never get queued; unknowns only when the
+    // operator opted in at the assessment step. (sendSmsToContact blocks
+    // landlines again at queue time — this early skip just avoids burning
+    // template-pool picks and renders on rows that can't send.)
+    const lineType = property.homeowner?.phone_1_type ?? "unknown";
+    if (lineType === "landline") {
+      state.skipped++;
+      continue;
+    }
+    if (lineType === "unknown" && !opts.includeUnknown) {
       state.skipped++;
       continue;
     }
@@ -242,6 +281,7 @@ export async function queueSmsBatch(
       state.dayBucketCount += 1;
     } else if (
       outcome.status === "blocked_no_phone" ||
+      outcome.status === "blocked_landline" ||
       outcome.status === "contact_not_found" ||
       outcome.status === "property_not_found" ||
       outcome.status === "blocked_no_consent"

@@ -100,8 +100,11 @@ afterAll(async () => {
 
 describe("Migration 054 — memberships foundation + RLS rewrite", () => {
   it("keeps memberships attached only to real auth users", async () => {
+    // perPage must exceed the project's total user count — the default
+    // page size is 50, and accumulated test users past that made every
+    // membership on page 2+ look orphaned (false failures 2026-06-12).
     const { data: users, error: usersError } =
-      await serviceClient.auth.admin.listUsers();
+      await serviceClient.auth.admin.listUsers({ page: 1, perPage: 1000 });
     expect(usersError).toBeNull();
 
     const { data: memberships, error: membershipError } = (await (

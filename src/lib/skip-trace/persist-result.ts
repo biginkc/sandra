@@ -1,5 +1,10 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
+import {
+  asLineType,
+  lineTypeFromVendorLabel,
+  type PhoneLineType,
+} from "@/lib/messaging/line-type";
 import type { Database } from "@/lib/supabase/types";
 
 import type { SkipTraceResult } from "./types";
@@ -112,7 +117,9 @@ export async function persistSkipTraceResult(
   // Load current contact phones/emails for dedupe + slot picking.
   const { data: currentContact } = await supabase
     .from("contacts")
-    .select("phone_1, phone_2, phone_3, email, first_name, last_name")
+    .select(
+      "phone_1, phone_1_type, phone_2, phone_2_type, phone_3, phone_3_type, email, first_name, last_name",
+    )
     .eq("id", contactId)
     .maybeSingle();
 
@@ -138,10 +145,34 @@ export async function persistSkipTraceResult(
     currentContact.phone_3 ?? null,
   ];
 
-  // Sort person's phones by rank ascending, then keep non-DNC, non-dup.
+  // Provider line-type per normalized number — used both to type newly
+  // packed slots and to upgrade pre-existing 'unknown' slots the trace
+  // just classified.
+  const typeByNumber = new Map<string, PhoneLineType>();
+  for (const p of owner.phones) {
+    if (!p.number) continue;
+    const t = lineTypeFromVendorLabel(p.type);
+    if (t !== "unknown") typeByNumber.set(normalizePhone(p.number), t);
+  }
+  const typeForSlot = (
+    number: string | null,
+    current: string | null,
+  ): PhoneLineType => {
+    const known = number ? typeByNumber.get(number) : undefined;
+    return known ?? asLineType(current);
+  };
+
+  // Mobile-first, then rank ascending; keep non-DNC, non-dup. Everything
+  // downstream texts phone_1, so a known mobile must win slot 1 over a
+  // lower-rank landline.
   const candidatePhones = owner.phones
     .filter((p) => !!p.number && !p.dnc)
-    .sort((a, b) => a.rank - b.rank);
+    .sort((a, b) => {
+      const aMobile = lineTypeFromVendorLabel(a.type) === "mobile";
+      const bMobile = lineTypeFromVendorLabel(b.type) === "mobile";
+      if (aMobile !== bMobile) return aMobile ? -1 : 1;
+      return a.rank - b.rank;
+    });
 
   // Slot packing is re-runnable with a ban list so a phone_1 unique
   // conflict can drop ONLY the conflicting number and keep salvageable
@@ -165,7 +196,38 @@ export async function persistSkipTraceResult(
     }
     return { packed, added };
   };
+  const currentTypes = [
+    currentContact.phone_1_type,
+    currentContact.phone_2_type,
+    currentContact.phone_3_type,
+  ];
+
+  // Derive per-slot types (packing preserves original positions, so
+  // index alignment with currentTypes holds), then promote a known
+  // mobile into slot 1 when slot 1 holds a landline — packing alone
+  // only fills EMPTY slots, so without this a contact that already
+  // carries a landline in slot 1 would stay untextable even after the
+  // trace finds a mobile. Types travel with their numbers through the
+  // swap. Banned numbers (phone_1 unique conflicts) can't be promoted.
+  const finalizeSlots = (
+    packed: (string | null)[],
+  ): { numbers: (string | null)[]; types: PhoneLineType[] } => {
+    const numbers = [...packed];
+    const types = numbers.map((n, i) => typeForSlot(n, currentTypes[i]));
+    if (types[0] === "landline") {
+      const j = numbers.findIndex(
+        (n, i) => i > 0 && !!n && types[i] === "mobile" && !bannedPhones.has(n),
+      );
+      if (j > 0) {
+        [numbers[0], numbers[j]] = [numbers[j], numbers[0]];
+        [types[0], types[j]] = [types[j], types[0]];
+      }
+    }
+    return { numbers, types };
+  };
+
   let { packed: packedSlots, added: phonesAdded } = packSlots();
+  let { numbers: slotNumbers, types: slotTypes } = finalizeSlots(packedSlots);
 
   // Email: take rank-1 if we don't already have one.
   let emailToWrite: string | null = currentContact.email ?? null;
@@ -178,9 +240,12 @@ export async function persistSkipTraceResult(
 
   // Backfill names if missing.
   const updates: Database["public"]["Tables"]["contacts"]["Update"] = {
-    phone_1: packedSlots[0],
-    phone_2: packedSlots[1],
-    phone_3: packedSlots[2],
+    phone_1: slotNumbers[0],
+    phone_1_type: slotTypes[0],
+    phone_2: slotNumbers[1],
+    phone_2_type: slotTypes[1],
+    phone_3: slotNumbers[2],
+    phone_3_type: slotTypes[2],
     email: emailToWrite,
   };
   if (!currentContact.first_name && owner.firstName) {
@@ -202,7 +267,10 @@ export async function persistSkipTraceResult(
   // shrink (one per candidate phone + one for email + one clean pass);
   // exhausting them without a confirmed write is a FAILURE — falling
   // through would report matched for a write that never happened.
-  const maxAttempts = candidatePhones.length + 2;
+  // +3: one per candidate phone, one for email, one clean pass, plus a
+  // possible conflict from promoting a PRE-EXISTING slot-2/3 mobile into
+  // phone_1 (a number that was never a candidate this run).
+  const maxAttempts = candidatePhones.length + 3;
   let updateConfirmed = false;
   let lastUpdateError = "";
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
@@ -226,9 +294,14 @@ export async function persistSkipTraceResult(
       const repacked = packSlots();
       packedSlots = repacked.packed;
       phonesAdded = repacked.added;
-      updates.phone_1 = packedSlots[0];
-      updates.phone_2 = packedSlots[1];
-      updates.phone_3 = packedSlots[2];
+      ({ numbers: slotNumbers, types: slotTypes } =
+        finalizeSlots(packedSlots));
+      updates.phone_1 = slotNumbers[0];
+      updates.phone_1_type = slotTypes[0];
+      updates.phone_2 = slotNumbers[1];
+      updates.phone_2_type = slotTypes[1];
+      updates.phone_3 = slotNumbers[2];
+      updates.phone_3_type = slotTypes[2];
       continue;
     }
     if (updErr.message.includes("contacts_email_key")) {

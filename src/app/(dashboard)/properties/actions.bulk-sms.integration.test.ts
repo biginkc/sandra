@@ -51,6 +51,10 @@ async function seedLead(opts: {
   phone?: string | null;
   optOut?: boolean;
   address?: string;
+  /** Defaults to 'mobile' — bulk SMS only queues confirmed mobiles, so
+   *  most tests want a textable lead. Pass 'landline' / 'unknown' to
+   *  exercise the line-type gate. */
+  phoneType?: "mobile" | "landline" | "unknown";
 }): Promise<{ propertyId: string; contactId: string | null }> {
   let contactId: string | null = null;
 
@@ -61,6 +65,7 @@ async function seedLead(opts: {
         first_name: "Bulk",
         last_name: "Tester",
         phone_1: opts.phone ?? "+18165550099",
+        phone_1_type: opts.phoneType ?? "mobile",
       })
       .select("id")
       .single();
@@ -202,6 +207,56 @@ describe("bulkQueueSms (integration)", () => {
       .from("messages")
       .select("*", { count: "exact", head: true });
     expect(count).toBe(0);
+  });
+
+  it("skips landline contacts — never queues regardless of includeUnknown", async () => {
+    const { propertyId } = await seedLead({
+      phone: "+18165550061",
+      phoneType: "landline",
+    });
+
+    const result = await bulkQueueSms([propertyId], {
+      body: "Hi",
+      includeUnknown: true,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.data.succeeded).toBe(0);
+    expect(result.data.skipped).toBe(1);
+
+    const { count } = await testClient
+      .from("messages")
+      .select("*", { count: "exact", head: true });
+    expect(count).toBe(0);
+  });
+
+  it("skips unknown line types by default", async () => {
+    const { propertyId } = await seedLead({
+      phone: "+18165550062",
+      phoneType: "unknown",
+    });
+
+    const result = await bulkQueueSms([propertyId], { body: "Hi" });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.data.succeeded).toBe(0);
+    expect(result.data.skipped).toBe(1);
+  });
+
+  it("queues unknown line types when includeUnknown=true", async () => {
+    const { propertyId } = await seedLead({
+      phone: "+18165550063",
+      phoneType: "unknown",
+    });
+
+    const result = await bulkQueueSms([propertyId], {
+      body: "Hi",
+      includeUnknown: true,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.data.succeeded).toBe(1);
+    expect(result.data.skipped).toBe(0);
   });
 
   it("queues one message with scheduled_for = now for a valid lead", async () => {

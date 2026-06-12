@@ -455,6 +455,7 @@ export async function enrollLeadInSequence(
       case "duplicate_active":
         return ok({ duplicate: true });
       case "no_phone":
+      case "landline_phone":
       case "no_consent":
       case "sequence_not_found":
       case "sequence_inactive":
@@ -483,6 +484,8 @@ function formatEnrollError(status: string): string {
   switch (status) {
     case "no_phone":
       return "Lead has no phone number.";
+    case "landline_phone":
+      return "Lead's primary phone is a landline — SMS can't be delivered.";
     case "no_consent":
       return "Contact has opted out of SMS.";
     case "sequence_not_found":

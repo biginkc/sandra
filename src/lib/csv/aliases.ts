@@ -160,14 +160,25 @@ export const HEADER_ALIASES: Record<string, string> = {
   "mobile": "homeowner_phone_1",
   "owner mobile": "homeowner_phone_1",
 
+  "phone 1 type": "homeowner_phone_1_type",
+  "phone1 type": "homeowner_phone_1_type",
+  "phone type": "homeowner_phone_1_type",
+  "line type": "homeowner_phone_1_type",
+
   "phone 2": "homeowner_phone_2",
   "phone2": "homeowner_phone_2",
   "secondary phone": "homeowner_phone_2",
   "alternate phone": "homeowner_phone_2",
 
+  "phone 2 type": "homeowner_phone_2_type",
+  "phone2 type": "homeowner_phone_2_type",
+
   "phone 3": "homeowner_phone_3",
   "phone3": "homeowner_phone_3",
   "tertiary phone": "homeowner_phone_3",
+
+  "phone 3 type": "homeowner_phone_3_type",
+  "phone3 type": "homeowner_phone_3_type",
 
   "email": "homeowner_email",
   "owner email": "homeowner_email",

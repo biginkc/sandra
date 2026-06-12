@@ -289,6 +289,64 @@ describe("sendSmsToContact (integration)", () => {
     expect(row?.external_id).toMatch(/^mock_/);
   });
 
+  it("blocks with blocked_landline when phone_1 is classified landline", async () => {
+    const { contactId, propertyId } = await seed({ withConsent: true });
+    await supabase
+      .from("contacts")
+      .update({ phone_1_type: "landline" })
+      .eq("id", contactId);
+
+    const outcome = await sendSmsToContact(supabase, {
+      contactId,
+      propertyId,
+      body: "should never send",
+    });
+    expect(outcome.status).toBe("blocked_landline");
+
+    const { count } = await supabase
+      .from("messages")
+      .select("*", { count: "exact", head: true });
+    expect(count).toBe(0);
+  });
+
+  it("release fails permanently when the queued destination was classified landline and promoted out of slot 1", async () => {
+    const { contactId, propertyId } = await seed({ withConsent: true });
+    const queue = await sendSmsToContact(supabase, {
+      contactId,
+      propertyId,
+      body: "queued before classification",
+      queueOnly: true,
+    });
+    expect(queue.status).toBe("queued");
+    if (queue.status !== "queued") return;
+
+    // Classification lands between queue and release: the queued-to
+    // number turns out to be a landline, and a known mobile gets
+    // promoted into slot 1 (backfill promotion). The queued to_address
+    // now matches slot 2, not slot 1 — release must still catch it.
+    await supabase
+      .from("contacts")
+      .update({
+        phone_1: "+18165550001",
+        phone_1_type: "mobile",
+        phone_2: "+18165559999",
+        phone_2_type: "landline",
+      })
+      .eq("id", contactId);
+
+    const release = await releaseQueuedMessage(supabase, queue.messageId);
+    expect(release.status).toBe("blocked_landline");
+
+    // Failed permanently — the auto-send tick must not retry it.
+    const { data: row } = await supabase
+      .from("messages")
+      .select("status, error_message")
+      .eq("id", queue.messageId)
+      .single();
+    expect(row?.status).toBe("failed");
+    expect(row?.error_message).toMatch(/landline/i);
+  });
+
   it("release blocks when consent was revoked between queue and release", async () => {
     const { contactId, propertyId } = await seed({ withConsent: true });
     const queue = await sendSmsToContact(supabase, {

@@ -14,6 +14,7 @@ export type EnrollmentOutcome =
   | { status: "enrolled"; enrollmentId: string }
   | { status: "duplicate_active" }
   | { status: "no_phone"; message: string }
+  | { status: "landline_phone"; message: string }
   | { status: "no_consent"; message: string }
   | { status: "sequence_not_found" }
   | { status: "sequence_inactive" }
@@ -53,18 +54,38 @@ export async function enrollLead(
     .from("properties")
     .select(
       `id, org_id, homeowner_contact_id,
-       homeowner:contacts!properties_homeowner_contact_id_fkey(id, phone_1)`,
+       homeowner:contacts!properties_homeowner_contact_id_fkey(id, phone_1, phone_1_type)`,
     )
     .eq("id", params.propertyId)
     .maybeSingle();
   if (propErr) return { status: "failed", message: propErr.message };
   if (!prop) return { status: "property_not_found" };
 
-  const homeowner = prop.homeowner as { id: string; phone_1: string | null } | null;
+  // PostgREST may return the joined contact as an object or a
+  // one-element array — normalize before reading.
+  type HomeownerJoin = {
+    id: string;
+    phone_1: string | null;
+    phone_1_type: string;
+  };
+  const rawHomeowner = prop.homeowner as unknown as
+    | HomeownerJoin
+    | HomeownerJoin[]
+    | null;
+  const homeowner = Array.isArray(rawHomeowner)
+    ? (rawHomeowner[0] ?? null)
+    : rawHomeowner;
   if (!homeowner || !homeowner.phone_1) {
     return {
       status: "no_phone",
       message: "Lead has no phone number. Add one (or skip-trace) before enrolling.",
+    };
+  }
+  if (homeowner.phone_1_type === "landline") {
+    return {
+      status: "landline_phone",
+      message:
+        "Lead's primary phone is a landline — SMS can't be delivered. Call or mail instead.",
     };
   }
 

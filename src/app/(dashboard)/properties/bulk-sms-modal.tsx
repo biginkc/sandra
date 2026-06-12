@@ -14,7 +14,10 @@ import {
 } from "@/components/ui/dialog";
 import { callAction } from "@/lib/errors/call-action";
 
+import type { AudienceLineTypeAssessment } from "@/lib/messaging/audience-assessment";
+
 import {
+  assessBulkSmsAudience,
   bulkQueueSms,
   countAlreadyContacted,
   listSmsTemplateCategories,
@@ -198,6 +201,20 @@ export function BulkSmsModal({ open, propertyIds, onClose, onQueued }: Props) {
   // rule against cascading renders stays satisfied.
   const [contactedCount, setContactedCount] = useState<number | null>(null);
 
+  // Line-type assessment: who in this selection can actually receive a
+  // text. Landlines are always excluded server-side; unknowns need the
+  // opt-in toggle below. Re-defaults to OFF per selection, same pattern
+  // as skipContacted.
+  const [assessment, setAssessment] =
+    useState<AudienceLineTypeAssessment | null>(null);
+  const [includeUnknown, setIncludeUnknown] = useState(false);
+  const [assessmentKey, setAssessmentKey] = useState(propertyIdsKey);
+  if (assessmentKey !== propertyIdsKey) {
+    setAssessmentKey(propertyIdsKey);
+    setAssessment(null);
+    setIncludeUnknown(false);
+  }
+
   useEffect(() => {
     if (!open) return;
     listSmsTemplateCategories().then((result) => {
@@ -208,6 +225,9 @@ export function BulkSmsModal({ open, propertyIds, onClose, onQueued }: Props) {
     });
     countAlreadyContacted(propertyIds).then((result) => {
       if (result.ok) setContactedCount(result.data);
+    });
+    assessBulkSmsAudience(propertyIds).then((result) => {
+      if (result.ok) setAssessment(result.data);
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, propertyIdsKey]);
@@ -232,15 +252,23 @@ export function BulkSmsModal({ open, propertyIds, onClose, onQueued }: Props) {
       resolvedPaceSeconds < PACE_MIN_SECONDS ||
       resolvedPaceSeconds > PACE_MAX_SECONDS);
 
+  // How many will actually queue: confirmed mobiles, plus unknowns when
+  // opted in. Until the assessment loads, fall back to the selection
+  // size so the button isn't disabled by a slow fetch.
+  const textableCount =
+    assessment === null
+      ? propertyIds.length
+      : assessment.mobile + (includeUnknown ? assessment.unknown : 0);
+
   const drain = useMemo(
     () =>
       computeDrain({
-        total: propertyIds.length,
+        total: textableCount,
         paceSeconds: resolvedPaceSeconds,
         dailyCap: resolvedDailyCap,
         now: new Date(),
       }),
-    [propertyIds.length, resolvedPaceSeconds, resolvedDailyCap],
+    [textableCount, resolvedPaceSeconds, resolvedDailyCap],
   );
 
   const handleSend = () => {
@@ -262,6 +290,7 @@ export function BulkSmsModal({ open, propertyIds, onClose, onQueued }: Props) {
       skipIfContacted: skipContacted,
       dailyCap: resolvedDailyCap,
       jitterPct: JITTER_PCT,
+      includeUnknown,
     };
     const opts =
       mode === "category"
@@ -529,6 +558,41 @@ export function BulkSmsModal({ open, propertyIds, onClose, onQueued }: Props) {
             ) : null}
           </div>
 
+          {/* Audience line-type assessment — who can actually get a text. */}
+          <div
+            className="bg-muted/40 space-y-2 rounded-md p-3 text-xs"
+            data-testid="line-type-assessment"
+          >
+            <p className="font-medium">Who gets texted</p>
+            {assessment === null ? (
+              <p className="text-muted-foreground">Checking line types…</p>
+            ) : (
+              <>
+                <p className="text-muted-foreground">
+                  {assessment.mobile.toLocaleString()} mobile ·{" "}
+                  {assessment.landline.toLocaleString()} landline (always
+                  excluded) · {assessment.unknown.toLocaleString()} unknown
+                  {assessment.noPhone > 0
+                    ? ` · ${assessment.noPhone.toLocaleString()} no phone`
+                    : ""}
+                </p>
+                {assessment.unknown > 0 ? (
+                  <label className="flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      checked={includeUnknown}
+                      onChange={(e) => setIncludeUnknown(e.target.checked)}
+                      className="border-input rounded"
+                    />
+                    Also text {assessment.unknown.toLocaleString()} unknown
+                    line type{assessment.unknown === 1 ? "" : "s"} (may
+                    include landlines)
+                  </label>
+                ) : null}
+              </>
+            )}
+          </div>
+
           {/* Skip prospects already contacted */}
           <div>
             <label className="flex items-center gap-2 text-sm">
@@ -547,10 +611,10 @@ export function BulkSmsModal({ open, propertyIds, onClose, onQueued }: Props) {
           <Button variant="outline" onClick={onClose} disabled={pending}>
             Cancel
           </Button>
-          <Button onClick={handleSend} disabled={pending}>
+          <Button onClick={handleSend} disabled={pending || textableCount === 0}>
             {pending
               ? "Queuing…"
-              : `Queue ${propertyIds.length} message${propertyIds.length === 1 ? "" : "s"}`}
+              : `Queue ${textableCount.toLocaleString()} message${textableCount === 1 ? "" : "s"}`}
           </Button>
         </DialogFooter>
       </DialogContent>

@@ -402,8 +402,11 @@ export type Database = {
           notes: string | null
           org_id: string
           phone_1: string | null
+          phone_1_type: string
           phone_2: string | null
+          phone_2_type: string
           phone_3: string | null
+          phone_3_type: string
           sms_opted_out: boolean
           sms_opted_out_at: string | null
         }
@@ -421,8 +424,11 @@ export type Database = {
           notes?: string | null
           org_id?: string
           phone_1?: string | null
+          phone_1_type?: string
           phone_2?: string | null
+          phone_2_type?: string
           phone_3?: string | null
+          phone_3_type?: string
           sms_opted_out?: boolean
           sms_opted_out_at?: string | null
         }
@@ -440,8 +446,11 @@ export type Database = {
           notes?: string | null
           org_id?: string
           phone_1?: string | null
+          phone_1_type?: string
           phone_2?: string | null
+          phone_2_type?: string
           phone_3?: string | null
+          phone_3_type?: string
           sms_opted_out?: boolean
           sms_opted_out_at?: string | null
         }
