@@ -7,12 +7,10 @@ const BASE: SkipInput = {
     active: true,
     business_hours_only: true,
     max_turns: 3,
-    daily_send_cap: 100,
   },
   consentState: "can_send_marketing",
   propertyDisabled: false,
   currentTurn: 0,
-  orgSendsToday: 0,
   withinBusinessHours: true,
 };
 
@@ -63,19 +61,8 @@ describe("classifyAiSkip", () => {
     });
   });
 
-  it("daily cap hit → daily_cap", () => {
-    expect(classifyAiSkip({ ...BASE, orgSendsToday: 100 })).toEqual({
-      skip: true,
-      reason: "daily_cap",
-    });
-  });
-
-  it("daily cap exceeded → daily_cap", () => {
-    expect(classifyAiSkip({ ...BASE, orgSendsToday: 250 })).toEqual({
-      skip: true,
-      reason: "daily_cap",
-    });
-  });
+  // No org-wide daily cap — provider/API credits are the only cap
+  // (Jarrad's standing rule; daily_send_cap removed 2026-06-12).
 
   it("max turns reached → max_turns_reached", () => {
     expect(classifyAiSkip({ ...BASE, currentTurn: 3 })).toEqual({

@@ -62,7 +62,6 @@ export type Database = {
           business_hours_only: boolean
           created_at: string
           created_by: string | null
-          daily_send_cap: number
           escalation_keywords: string[]
           id: string
           max_turns: number
@@ -77,7 +76,6 @@ export type Database = {
           business_hours_only?: boolean
           created_at?: string
           created_by?: string | null
-          daily_send_cap?: number
           escalation_keywords?: string[]
           id?: string
           max_turns?: number
@@ -92,7 +90,6 @@ export type Database = {
           business_hours_only?: boolean
           created_at?: string
           created_by?: string | null
-          daily_send_cap?: number
           escalation_keywords?: string[]
           id?: string
           max_turns?: number
