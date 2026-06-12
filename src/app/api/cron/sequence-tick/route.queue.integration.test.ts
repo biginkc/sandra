@@ -160,7 +160,7 @@ describe("runSequenceTick — queue drain (integration)", () => {
     expect(getMockMessageLog()).toHaveLength(0);
   });
 
-  it("does not send to opted-out contacts — releaseQueuedMessage blocks, message stays queued", async () => {
+  it("does not send to opted-out contacts — drain terminal-fails the row", async () => {
     const { propertyId, contactId } = await seedLead({
       phone: "+18165550104",
       optOut: true,
@@ -175,13 +175,16 @@ describe("runSequenceTick — queue drain (integration)", () => {
 
     await runSequenceTick(supabase);
 
-    // releaseQueuedMessage returns blocked_no_consent — no status update
+    // releaseQueuedMessage returns blocked_no_consent; the drain then
+    // terminal-fails the row — it can never send, so leaving it queued
+    // would poison queued counts and the oldest-first head forever.
     const { data: msg } = await supabase
       .from("messages")
-      .select("status")
+      .select("status, error_message")
       .eq("id", msgId)
       .single();
-    expect(msg!.status).toBe("queued");
+    expect(msg!.status).toBe("failed");
+    expect(msg!.error_message).toMatch(/opted out/i);
     expect(getMockMessageLog()).toHaveLength(0);
   });
 
@@ -268,21 +271,18 @@ describe("runSequenceTick — queue drain (integration)", () => {
     });
 
     // drainLimit 1 models the cap being fully consumed by the blocked
-    // head. Tick 1 only reaches the blocked row: nothing sends, but the
-    // row must be deferred out of the due-window (still queued).
+    // head. Tick 1 only reaches the opted-out row: nothing sends, and
+    // the row is terminal-failed so it stops pinning the head slot.
     const tick1 = await runSequenceTick(supabase, { drainLimit: 1 });
     expect(tick1.drained).toBe(0);
     expect(tick1.drainOutcomes.blocked_no_consent).toBe(1);
 
     const { data: blocked } = await supabase
       .from("messages")
-      .select("status, scheduled_for")
+      .select("status")
       .eq("id", blockedId)
       .single();
-    expect(blocked!.status).toBe("queued");
-    expect(new Date(blocked!.scheduled_for!).getTime()).toBeGreaterThan(
-      SAFE_NOW.getTime(),
-    );
+    expect(blocked!.status).toBe("failed");
 
     // Tick 2's oldest-first head slot is now free — the eligible row sends.
     // Pre-fix this re-selected the same blocked row forever (starvation).
@@ -290,5 +290,40 @@ describe("runSequenceTick — queue drain (integration)", () => {
     expect(tick2.drained).toBe(1);
     expect(getMockMessageLog()).toHaveLength(1);
     expect(getMockMessageLog()[0].to).toBe("+18165550108");
+  });
+
+  it("defers quiet-hours-blocked rows out of the due-window (still queued, later scheduled_for)", async () => {
+    // 08:00Z = 3:00am Central — inside TCPA quiet hours for MO.
+    const QUIET_NOW = new Date("2026-04-23T08:00:00Z");
+    vi.setSystemTime(QUIET_NOW);
+
+    const { propertyId, contactId } = await seedLead({
+      phone: "+18165550109",
+      state: "MO",
+    });
+    const msgId = await seedQueuedMessage({
+      propertyId,
+      contactId,
+      toPhone: "+18165550109",
+      scheduledFor: new Date(QUIET_NOW.getTime() - 60 * 60_000),
+      body: "Quiet hours defer test",
+    });
+
+    const summary = await runSequenceTick(supabase);
+    expect(summary.drained).toBe(0);
+    expect(summary.drainOutcomes.blocked_quiet_hours).toBe(1);
+    expect(getMockMessageLog()).toHaveLength(0);
+
+    // Still queued — quiet-hours rows become sendable later — but pushed
+    // out of the due-window so they stop occupying oldest-first slots.
+    const { data: msg } = await supabase
+      .from("messages")
+      .select("status, scheduled_for")
+      .eq("id", msgId)
+      .single();
+    expect(msg!.status).toBe("queued");
+    expect(new Date(msg!.scheduled_for!).getTime()).toBeGreaterThan(
+      QUIET_NOW.getTime(),
+    );
   });
 });

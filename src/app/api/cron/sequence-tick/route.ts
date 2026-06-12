@@ -3,7 +3,7 @@ import { createClient as createSupabaseClient } from "@supabase/supabase-js";
 
 import { reportError } from "@/lib/errors/report";
 import { processEnrollmentTick } from "@/lib/sequences/tick";
-import { releaseQueuedMessage } from "@/lib/messaging/send";
+import { failQueuedMessage, releaseQueuedMessage } from "@/lib/messaging/send";
 import type { Database } from "@/lib/supabase/types";
 
 /**
@@ -40,12 +40,11 @@ const DRAIN_BATCH_SIZE = 150;
  *  remaining maxDuration as headroom for the in-flight release to
  *  finish and the summary to flush. */
 const TICK_BUDGET_MS = 240_000;
-/** How far a blocked (quiet-hours / opted-out) row is pushed out of the
- *  due-window. Without this, oldest-first + a hard cap lets a head of
- *  blocked rows pin the queue: every tick re-selects the same blocked
- *  rows and eligible messages behind them never release. Quiet-hours
- *  rows become sendable again once the clock allows; opted-out rows
- *  keep deferring harmlessly until the operator deletes them. */
+/** How far a quiet-hours-blocked row is pushed out of the due-window.
+ *  Without this, oldest-first + a hard cap lets a head of blocked rows
+ *  pin the queue: every tick re-selects the same blocked rows and
+ *  eligible messages behind them never release. (Opted-out rows are
+ *  terminal-failed instead — they can never become sendable.) */
 const BLOCKED_DEFER_MS = 30 * 60_000;
 
 function createServiceRoleClient() {
@@ -164,11 +163,8 @@ export async function runSequenceTick(
     drainOutcomes[outcome.status] = (drainOutcomes[outcome.status] ?? 0) + 1;
     if (outcome.status === "sent") {
       drained += 1;
-    } else if (
-      outcome.status === "blocked_quiet_hours" ||
-      outcome.status === "blocked_no_consent"
-    ) {
-      // Blocked rows stay `queued` by design — defer them out of the
+    } else if (outcome.status === "blocked_quiet_hours") {
+      // Quiet-hours rows become sendable later — defer them out of the
       // due-window so they stop occupying oldest-first head slots.
       // Guarded on status so we never touch a row another worker
       // resolved in the meantime.
@@ -179,6 +175,15 @@ export async function runSequenceTick(
         })
         .eq("id", msg.id)
         .eq("status", "queued");
+    } else if (outcome.status === "blocked_no_consent") {
+      // Opted-out rows can never send — terminal-fail instead of
+      // deferring forever, so queued counts / drain ETA stay truthful
+      // and the row surfaces in the failed-today stat for the operator.
+      await failQueuedMessage(
+        supabase,
+        msg.id,
+        "Contact opted out — queued message can never send (failed by sequence-tick drain).",
+      );
     }
   }
 
