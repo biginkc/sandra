@@ -15,6 +15,16 @@ import { createClient } from "@/lib/supabase/server";
 import { getSkipTraceProvider } from "./registry";
 import { runSkipTraceEnrichment } from "./skip-trace-job";
 
+/** Max rows per single Tracerfy POST. Their server rejects request
+ *  bodies past ~2.5 MB with a generic HTML 400 before any field
+ *  validation runs (hit live 2026-06-12 with a 12,282-row batch ≈ 3 MB).
+ *  4,000 rows ≈ 0.9 MB keeps comfortable headroom. Selections larger
+ *  than this are auto-split into multiple part-jobs — each with its own
+ *  Tracerfy queue id, so the existing per-job webhook/poll finalization
+ *  works unchanged. This is a wire-format constraint, NOT a volume cap.
+ */
+const PROVIDER_BATCH_MAX = 4_000;
+
 /** Cap removed entirely (Jarrad, 2026-06-11): credit balance is the
  *  operator's intentional throttle — he loads a fixed amount at a time
  *  and tops up deliberately. The runner submits ONE async batch to
@@ -155,52 +165,71 @@ export async function requestSkipTrace(
     }
     const skippedSuffix =
       skipReasons.length > 0 ? ` (${skipReasons.join(", ")} skipped)` : "";
-    const { data: jobRow, error: insertErr } = await supabase
-      .from("jobs")
-      .insert({
-        type: "skip_trace",
-        provider: "tracerfy",
-        status: initialStatus,
-        org_id: orgProbe.org_id,
-        created_by: user.id,
-        total_items: eligibleIds.length,
-        title: `Skip trace ${eligibleIds.length} propert${eligibleIds.length === 1 ? "y" : "ies"}${skippedSuffix}`,
-        description: isAdmin
-          ? `Admin-initiated; running immediately${skippedSuffix}`
-          : `Awaiting admin approval (requested by ${user.email ?? "VA"})${skippedSuffix}`,
-        input_params: { property_ids: eligibleIds },
-      })
-      .select("id")
-      .single();
+    // Auto-split selections that exceed the provider's per-request wire
+    // limit into part-jobs. One part = the common case; each part keeps
+    // its own Tracerfy queue id so per-job finalization is unchanged.
+    const parts: string[][] = [];
+    for (let i = 0; i < eligibleIds.length; i += PROVIDER_BATCH_MAX) {
+      parts.push(eligibleIds.slice(i, i + PROVIDER_BATCH_MAX));
+    }
 
-    if (insertErr || !jobRow) {
-      return {
-        ok: false,
-        error: {
-          code: "JOB_CREATE_FAILED",
-          message: insertErr?.message ?? "Failed to create job",
-        },
-      };
+    const jobIds: string[] = [];
+    for (let p = 0; p < parts.length; p++) {
+      const partIds = parts[p];
+      const partLabel =
+        parts.length > 1 ? ` (part ${p + 1}/${parts.length})` : "";
+      const { data: jobRow, error: insertErr } = await supabase
+        .from("jobs")
+        .insert({
+          type: "skip_trace",
+          provider: "tracerfy",
+          status: initialStatus,
+          org_id: orgProbe.org_id,
+          created_by: user.id,
+          total_items: partIds.length,
+          title: `Skip trace ${partIds.length} propert${partIds.length === 1 ? "y" : "ies"}${partLabel}${skippedSuffix}`,
+          description: isAdmin
+            ? `Admin-initiated; running immediately${skippedSuffix}`
+            : `Awaiting admin approval (requested by ${user.email ?? "VA"})${skippedSuffix}`,
+          input_params: { property_ids: partIds },
+        })
+        .select("id")
+        .single();
+
+      if (insertErr || !jobRow) {
+        return {
+          ok: false,
+          error: {
+            code: "JOB_CREATE_FAILED",
+            message: insertErr?.message ?? "Failed to create job",
+          },
+        };
+      }
+      jobIds.push(jobRow.id);
     }
 
     if (isAdmin) {
       // Run immediately. The runner exits early for async batches and
-      // the webhook finalizes; for ≤1-miss it completes inline.
+      // the webhook finalizes; for ≤1-miss it completes inline. Parts
+      // submit sequentially — each is a fast cache-check + one POST,
+      // and Tracerfy allows 10 batch submissions per 5 minutes.
       after(async () => {
         const bg = await createClient();
-        await runSkipTraceEnrichment(bg, {
-          jobId: jobRow.id,
-          propertyIds: eligibleIds,
-        });
+        for (let p = 0; p < jobIds.length; p++) {
+          await runSkipTraceEnrichment(bg, {
+            jobId: jobIds[p],
+            propertyIds: parts[p],
+          });
+        }
       });
-      return ok({ jobId: jobRow.id, status: "queued" });
+      return ok({ jobId: jobIds[0], status: "queued" });
     }
 
-    // VA path: notify admins.
+    // VA path: notify admins once for the whole request.
     try {
       const adminIds = await listAdminUserIds(supabase);
       await dispatchSkipTraceRequested(supabase, {
-        jobId: jobRow.id,
+        jobId: jobIds[0],
         requesterEmail: user.email ?? null,
         propertyCount: eligibleIds.length,
         adminUserIds: adminIds,
@@ -208,10 +237,10 @@ export async function requestSkipTrace(
     } catch (e) {
       reportError(e, {
         tags: { surface: "skip_trace_request_notify" },
-        extra: { jobId: jobRow.id },
+        extra: { jobId: jobIds[0] },
       });
     }
-    return ok({ jobId: jobRow.id, status: "pending_approval" });
+    return ok({ jobId: jobIds[0], status: "pending_approval" });
   } catch (e) {
     reportError(e, { tags: { surface: "request_skip_trace" } });
     return errFromUnknown(e, "REQUEST_SKIP_TRACE_FAILED");
