@@ -283,7 +283,9 @@ describe("applyBlock: cass", () => {
       }) as FilterBlock,
       sb,
     );
-    expect(calls.some((c) => c.startsWith("not(cass_status,in,"))).toBe(true);
+    expect(
+      calls.some((c) => c.startsWith("or(cass_status.is.null,cass_status.not.in.")),
+    ).toBe(true);
   });
   it("combinator='all' with multiple values on a single-value column returns no matches", async () => {
     const { proxy, calls } = mockBuilder();
@@ -328,9 +330,32 @@ describe("applyBlock: outreach_dispo", () => {
       }) as FilterBlock,
       sb,
     );
-    expect(calls.some((c) => c.startsWith("not(outreach_dispo,in,"))).toBe(
-      true,
+    expect(
+      calls.some((c) =>
+        c.startsWith("or(outreach_dispo.is.null,outreach_dispo.not.in."),
+      ),
+    ).toBe(true);
+  });
+
+  it("combinator='not' keeps NULL rows visible (null-safe exclusion)", async () => {
+    // 2026-06-12: 11,313 of 11,317 verified rows had NULL outreach_dispo
+    // — the old plain NOT IN excluded them all, so "Dispo is not DNC"
+    // showed 4 rows instead of hiding 2. "Not X" must read as "X is
+    // false or unknown".
+    const { proxy, calls } = mockBuilder();
+    const { sb } = mockSupabaseClient();
+    await applyBlock(
+      proxy,
+      block({
+        kind: "outreach_dispo",
+        combinator: "not",
+        values: ["dnc", "opted_out"],
+      }) as FilterBlock,
+      sb,
     );
+    expect(calls).toEqual([
+      'or(outreach_dispo.is.null,outreach_dispo.not.in.("dnc","opted_out"))',
+    ]);
   });
 });
 

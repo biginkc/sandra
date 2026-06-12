@@ -388,7 +388,14 @@ function applyMultiSelect(
     return builder.eq(col, "__sandra_no_match__");
   }
   if (combinator === "not") {
-    return builder.not(col, "in", `(${values.map((v) => `"${v}"`).join(",")})`);
+    // NULL-safe exclusion. Plain `NOT (col IN (...))` evaluates to NULL
+    // for rows where col IS NULL, silently excluding them — on nullable
+    // columns like outreach_dispo (11,313 of 11,317 verified rows were
+    // NULL on 2026-06-12) a "Dispo is not DNC" filter hid the entire
+    // list instead of the 2 DNC rows. "Not X" must mean "X is false or
+    // unknown", so NULL rows stay visible.
+    const quoted = values.map((v) => `"${v}"`).join(",");
+    return builder.or(`${col}.is.null,${col}.not.in.(${quoted})`);
   }
   // any + single-value all
   return builder.in(col, values);
