@@ -79,6 +79,13 @@ export type CreateLeadResult = {
   wasDuplicate: boolean;
   /** Resolved homeowner contact id, if a contact was provided. */
   contactId: string | null;
+  /** Set when the submitted phone could not be classified (Telnyx
+   *  unconfigured / unreachable / unknown line type) and was therefore
+   *  not saved as a phone slot (hard rule, migration 080). The number
+   *  is preserved verbatim on the contact's notes for manual recovery —
+   *  callers must surface this degraded outcome, not report plain
+   *  success. */
+  phoneDropped: string | null;
 };
 
 export type CreateLeadError = {
@@ -181,15 +188,18 @@ export async function createLead(
 
   // ---- 3. Resolve / create contact (if any was supplied) -------------
   let contactId: string | null = null;
+  let phoneDropped: string | null = null;
   const hasAnyContactField =
     !!phoneNorm || !!emailNorm || !!firstNorm || !!lastNorm;
   if (hasAnyContactField) {
-    contactId = await resolveOrCreateContact(supabase, {
+    const resolved = await resolveOrCreateContact(supabase, {
       first_name: firstNorm,
       last_name: lastNorm,
       phone_1: phoneNorm,
       email: emailNorm,
     });
+    contactId = resolved.id;
+    phoneDropped = resolved.phoneDropped;
   }
 
   // ---- 4. Create property if new, or attach contact to existing ------
@@ -239,14 +249,18 @@ export async function createLead(
 
   return {
     ok: true,
-    data: { propertyId, wasDuplicate, contactId },
+    data: { propertyId, wasDuplicate, contactId, phoneDropped },
   };
 }
 
 /**
  * Mirror of the CSV ingest's contact-dedup chain (see
- * `src/lib/csv/ingest.ts:540-595`):
- *   1. phone_1 match → reuse
+ * `src/lib/csv/ingest.ts:540-595`), with the phone match widened to all
+ * three slots — triage and skip-trace populate phone_2/phone_3, and a
+ * number already known there must reuse that contact (a phone_1-only
+ * check created duplicates AND a pointless paid lookup, and downstream
+ * inbound threading returns ambiguous_contact on multi-contact numbers):
+ *   1. any-slot phone match → reuse
  *   2. email match → reuse
  *   3. first/last name match (only for person-type, no phone, no email)
  *   4. Insert new
@@ -263,15 +277,17 @@ async function resolveOrCreateContact(
     phone_1: string | null;
     email: string | null;
   },
-): Promise<string | null> {
+): Promise<{ id: string | null; phoneDropped: string | null }> {
   if (contact.phone_1) {
     const { data } = await supabase
       .from("contacts")
       .select("id")
-      .eq("phone_1", contact.phone_1)
+      .or(
+        `phone_1.eq.${contact.phone_1},phone_2.eq.${contact.phone_1},phone_3.eq.${contact.phone_1}`,
+      )
       .limit(1)
       .maybeSingle();
-    if (data) return data.id;
+    if (data) return { id: data.id, phoneDropped: null };
   }
   if (contact.email) {
     const { data } = await supabase
@@ -280,7 +296,7 @@ async function resolveOrCreateContact(
       .ilike("email", contact.email)
       .limit(1)
       .maybeSingle();
-    if (data) return data.id;
+    if (data) return { id: data.id, phoneDropped: null };
   }
   if (
     !contact.phone_1 &&
@@ -298,13 +314,14 @@ async function resolveOrCreateContact(
       .is("email", null)
       .limit(1)
       .maybeSingle();
-    if (data) return data.id;
+    if (data) return { id: data.id, phoneDropped: null };
   }
   // Hard rule (migration 080): a phone can't be saved with type
   // 'unknown'. Lead phones arrive untyped, so classify at intake via
-  // Telnyx when configured; when the lookup is unavailable or fails,
-  // drop the phone (loudly) rather than blocking the lead — name/email
-  // still land and the number is recoverable from the lead payload log.
+  // Telnyx when configured. When the lookup is unavailable or fails,
+  // the number can't go into a phone slot — preserve it verbatim on
+  // the contact's notes (durable, visible on the lead page) and flag
+  // the degraded outcome to the caller; never silently succeed.
   let phoneType: PhoneLineType = "unknown";
   if (contact.phone_1) {
     try {
@@ -316,7 +333,7 @@ async function resolveOrCreateContact(
     }
     if (phoneType === "unknown") {
       reportError(
-        new Error("lead phone dropped — line type unavailable at intake"),
+        new Error("lead phone unclassified at intake — parked on notes"),
         {
           tags: { surface: "lead_create_phone_unclassified" },
           extra: { phone: contact.phone_1 },
@@ -324,21 +341,25 @@ async function resolveOrCreateContact(
       );
     }
   }
-  const phoneToSave = phoneType === "unknown" ? null : contact.phone_1;
+  const phoneClassified = phoneType !== "unknown";
+  const phoneDropped = !phoneClassified ? contact.phone_1 : null;
   const { data, error } = await supabase
     .from("contacts")
     .insert({
       contact_type: "person",
       first_name: contact.first_name,
       last_name: contact.last_name,
-      phone_1: phoneToSave,
-      phone_1_type: phoneToSave ? phoneType : "unknown",
+      phone_1: phoneClassified ? contact.phone_1 : null,
+      phone_1_type: phoneClassified ? phoneType : "unknown",
       email: contact.email,
+      notes: phoneDropped
+        ? `Unclassified phone from lead intake (line-type lookup unavailable): ${phoneDropped}`
+        : null,
     })
     .select("id")
     .single();
   if (error) {
     throw new Error(`contact insert: ${error.message}`);
   }
-  return data.id;
+  return { id: data.id, phoneDropped };
 }

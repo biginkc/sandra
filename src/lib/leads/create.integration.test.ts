@@ -185,4 +185,64 @@ describe("createLead (integration)", () => {
       .single();
     expect(prop!.homeowner_contact_id).toBeNull();
   });
+
+  it("dedups against phone_2/phone_3 — secondary-slot numbers reuse the contact, no paid lookup, no duplicate", async () => {
+    const { data: existing } = await supabase
+      .from("contacts")
+      .insert({
+        first_name: "Secondary",
+        last_name: "Slot",
+        phone_1: "+18165553100",
+        phone_1_type: "mobile",
+        phone_2: "+18165553101",
+        phone_2_type: "mobile",
+      })
+      .select("id")
+      .single();
+
+    const result = await createLead(supabase, {
+      source: "cold_call",
+      property: { address: "8 Secondary Slot Ln", state: "MO" },
+      contact: { phone_1: "+18165553101" },
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.data.contactId).toBe(existing!.id);
+    expect(result.data.phoneDropped).toBeNull();
+
+    const { count } = await supabase
+      .from("contacts")
+      .select("*", { count: "exact", head: true })
+      .or("phone_1.eq.+18165553101,phone_2.eq.+18165553101,phone_3.eq.+18165553101");
+    expect(count).toBe(1);
+  });
+
+  it("classification unavailable → lead succeeds degraded: phone parked on notes, phoneDropped flagged, no phone slot written", async () => {
+    // Simulate a Telnyx outage: the stub returns a 500 for lookup calls.
+    globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.startsWith("https://api.telnyx.com/v2/number_lookup")) {
+        return Promise.resolve(new Response("{}", { status: 500 }));
+      }
+      return realFetch(input, init);
+    }) as typeof fetch;
+
+    const result = await createLead(supabase, {
+      source: "cold_call",
+      property: { address: "9 Outage Ln", state: "MO" },
+      contact: { first_name: "Out", last_name: "Age", phone_1: "+18165553200" },
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.data.phoneDropped).toBe("+18165553200");
+    expect(result.data.contactId).not.toBeNull();
+
+    const { data: contact } = await supabase
+      .from("contacts")
+      .select("phone_1, notes")
+      .eq("id", result.data.contactId!)
+      .single();
+    expect(contact!.phone_1).toBeNull();
+    expect(contact!.notes).toContain("+18165553200");
+  });
 });

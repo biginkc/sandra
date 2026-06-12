@@ -68,10 +68,15 @@ export async function generateMetadata({
 
 export default async function LeadDetailPage({
   params,
+  searchParams,
 }: {
   params: Promise<{ id: string }>;
+  searchParams?: Promise<{ warning?: string }>;
 }) {
   const { id } = await params;
+  // Degraded-save warning from the new-lead form (e.g. phone parked on
+  // notes because line-type classification was unavailable).
+  const warning = (await searchParams)?.warning ?? null;
   const supabase = await createClient();
   const { data, error } = await supabase
     .from("properties")
@@ -291,6 +296,16 @@ export default async function LeadDetailPage({
           </div>
         }
       />
+
+      {warning ? (
+        <div
+          className="rounded-md border border-amber-300 bg-amber-50 p-3 text-sm dark:border-amber-500/40 dark:bg-amber-500/10"
+          role="alert"
+          data-testid="lead-save-warning"
+        >
+          {warning}
+        </div>
+      ) : null}
 
       <AiAttentionBanner
         propertyId={lead.id}
