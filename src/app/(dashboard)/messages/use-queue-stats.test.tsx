@@ -219,6 +219,39 @@ describe("useQueueStats (260504-tgq polling, lifted from QueueStatsBanner)", () 
     expect(result.current.queued).toBe(42);
   });
 
+  it("Two overlapping polls apply newest-started-wins, regardless of resolve order", async () => {
+    // Each call gets its own deferred so we control resolve order.
+    const resolvers: Array<(v: unknown) => void> = [];
+    getQueueStats.mockImplementation(
+      () => new Promise((resolve) => resolvers.push(resolve)),
+    );
+
+    const { result } = renderHook(() => useQueueStats(makeStats()));
+
+    // Poll A starts on the first tick, poll B on the second — A still pending.
+    await act(async () => {
+      vi.advanceTimersByTime(30_000);
+    });
+    await act(async () => {
+      vi.advanceTimersByTime(30_000);
+    });
+    expect(resolvers).toHaveLength(2);
+
+    // B (newer) resolves first and applies.
+    await act(async () => {
+      resolvers[1]({ ok: true, data: makeStats({ queued: 7 }) });
+      await Promise.resolve();
+    });
+    expect(result.current.queued).toBe(7);
+
+    // A (older) resolves late with stale numbers — must NOT overwrite B.
+    await act(async () => {
+      resolvers[0]({ ok: true, data: makeStats({ queued: 3 }) });
+      await Promise.resolve();
+    });
+    expect(result.current.queued).toBe(7);
+  });
+
   it("Clears interval and removes visibilitychange listener on unmount", async () => {
     getQueueStats.mockResolvedValue({
       ok: true,

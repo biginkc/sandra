@@ -60,15 +60,27 @@ export function useQueueStats(
     setStats(initialStats);
   }
 
+  // Monotonic ordering for the polls themselves: two refreshes can
+  // overlap (interval tick + visibilitychange firing close together),
+  // and the earlier-started one can resolve last. A result only applies
+  // if no later-started refresh has already applied.
+  const requestSeqRef = useRef(0);
+  const appliedSeqRef = useRef(0);
+
   useEffect(() => {
     if (!enabled) return undefined;
     let cancelled = false;
 
     async function refresh() {
       const generation = generationRef.current;
+      const seq = ++requestSeqRef.current;
       const result = await getQueueStats();
       if (cancelled || generation !== generationRef.current) return;
-      if (result.ok) setStats(result.data);
+      if (seq <= appliedSeqRef.current) return;
+      if (result.ok) {
+        appliedSeqRef.current = seq;
+        setStats(result.data);
+      }
     }
 
     const intervalId = setInterval(() => {
