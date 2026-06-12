@@ -186,9 +186,26 @@ export async function listThreads(
     consentEventsByContact.set(ev.contact_id, list);
   }
 
-  const pinned = opts.includeThreadId
+  let pinned = opts.includeThreadId
     ? parseThreadId(opts.includeThreadId)
     : null;
+  if (pinned?.kind === "contact") {
+    // Bare contact ids are ambiguous when the contact has several threads.
+    // Mirror fetchInboxDetail's resolution — pin only the thread holding
+    // the contact's most recent message (msgs is ordered created_at desc),
+    // not every thread the contact appears in (Codex round-2 on PR #268).
+    const pinnedContactId = pinned.contactId;
+    const latest = msgs.find((m) => m.contact_id === pinnedContactId);
+    pinned = latest
+      ? parseThreadId(
+          buildThreadId(
+            latest.conversation_id,
+            pinnedContactId,
+            latest.property_id,
+          ),
+        )
+      : null;
+  }
 
   const threads: Thread[] = [];
   for (const [threadId, bucket] of byThread) {
@@ -275,6 +292,8 @@ function matchesPinnedThread(
         (bucket.propertyId ?? null) === pinned.propertyId
       );
     case "contact":
+      // Unreachable in practice — listThreads normalizes bare contact ids
+      // to a concrete thread before matching. Kept for exhaustiveness.
       return bucket.latest.contact_id === pinned.contactId;
   }
 }

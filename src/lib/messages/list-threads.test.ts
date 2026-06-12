@@ -429,6 +429,53 @@ describe("listThreads — recency-only sort", () => {
       "c-unread",
     ]);
   });
+
+  it("bare contact-id pin keeps only the contact's most recent thread", async () => {
+    // Codex round-2 on PR #268: a contact can have several threads (one
+    // per property). A bare-contact pin must resolve to the thread with
+    // the contact's latest message — matching fetchInboxDetail — not pin
+    // every read thread the contact appears in.
+    const now = Date.now();
+    const messages = [
+      // c-multi, two threads, both fully read. p-a is the more recent.
+      { cid: "c-multi", pid: "p-a", age: 1_000, unread: false },
+      { cid: "c-multi", pid: "p-b", age: 9_000, unread: false },
+      // Unrelated unread thread that must survive the filter.
+      { cid: "c-unread", pid: "p-u", age: 5_000, unread: true },
+    ].map((m) => ({
+      contact_id: m.cid,
+      property_id: m.pid,
+      conversation_id: null,
+      body: "x",
+      direction: "inbound" as const,
+      created_at: new Date(now - m.age).toISOString(),
+      read_at: m.unread ? null : new Date(now - m.age + 1).toISOString(),
+    }));
+    const contacts = new Map(
+      messages.map((m) => [
+        m.contact_id,
+        { id: m.contact_id, first_name: null, last_name: null, entity_name: m.contact_id, phone_1: null },
+      ]),
+    );
+    const properties = new Map(
+      messages.map((m) => [
+        m.property_id,
+        { id: m.property_id, address: null, city: null, state: null, assigned_user_id: null },
+      ]),
+    );
+
+    const { supabase } = makeStub({ messages, contacts, properties });
+    const threads = await listThreads(supabase, {
+      unreadOnly: true,
+      includeThreadId: "c-multi",
+    });
+
+    // p-a (the contact's latest thread) is pinned; p-b stays filtered out.
+    expect(threads.map((t) => t.threadId)).toEqual([
+      "legacy:c-multi:p-a",
+      "legacy:c-unread:p-u",
+    ]);
+  });
 });
 
 describe("looksLikeTestTraffic", () => {
