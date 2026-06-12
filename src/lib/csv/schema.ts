@@ -49,6 +49,11 @@ const SOURCE_VALUES = [
 
 const CONTACT_TYPE_VALUES = ["person", "entity"] as const;
 
+// Vendor labels normalize to lowercase before the enum check, so
+// "Mobile"/"Landline" columns map cleanly. Anything else (or blank)
+// lands as null → stored as 'unknown'.
+const PHONE_LINE_TYPE_VALUES = ["mobile", "landline", "unknown"] as const;
+
 export const PROPERTY_FIELDS: readonly TargetField[] = [
   // Required fields first — grouped so the user can't miss them.
   { id: "address", label: "Address", section: "property", type: "address", required: true },
@@ -90,8 +95,11 @@ export const HOMEOWNER_FIELDS: readonly TargetField[] = [
   { id: "homeowner_last_name", label: "Last Name", section: "homeowner", type: "text" },
   { id: "homeowner_entity_name", label: "Entity Name (LLC/trust)", section: "homeowner", type: "text" },
   { id: "homeowner_phone_1", label: "Phone 1", section: "homeowner", type: "phone" },
+  { id: "homeowner_phone_1_type", label: "Phone 1 Line Type", section: "homeowner", type: "enum", enumValues: PHONE_LINE_TYPE_VALUES },
   { id: "homeowner_phone_2", label: "Phone 2", section: "homeowner", type: "phone" },
+  { id: "homeowner_phone_2_type", label: "Phone 2 Line Type", section: "homeowner", type: "enum", enumValues: PHONE_LINE_TYPE_VALUES },
   { id: "homeowner_phone_3", label: "Phone 3", section: "homeowner", type: "phone" },
+  { id: "homeowner_phone_3_type", label: "Phone 3 Line Type", section: "homeowner", type: "enum", enumValues: PHONE_LINE_TYPE_VALUES },
   { id: "homeowner_email", label: "Email", section: "homeowner", type: "email" },
   { id: "homeowner_mailing_address", label: "Mailing Address", section: "homeowner", type: "text" },
   { id: "homeowner_mailing_city", label: "Mailing City", section: "homeowner", type: "text" },

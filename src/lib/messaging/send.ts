@@ -31,6 +31,9 @@ import { getMessagingProvider } from "./registry";
 
 type MessagesUpdate = Database["public"]["Tables"]["messages"]["Update"];
 
+const LANDLINE_BLOCK_REASON =
+  "Contact's primary phone is a landline — SMS can't be delivered. Call or mail instead.";
+
 export type SendSmsOutcome =
   | { status: "sent"; messageId: string; externalId: string }
   | { status: "queued"; messageId: string }
@@ -40,6 +43,10 @@ export type SendSmsOutcome =
     }
   | {
       status: "blocked_no_phone";
+      reason: string;
+    }
+  | {
+      status: "blocked_landline";
       reason: string;
     }
   | {
@@ -124,7 +131,7 @@ export async function sendSmsToContact(
   const [contactResult, propertyResult] = await Promise.all([
     supabase
       .from("contacts")
-      .select("id, phone_1")
+      .select("id, phone_1, phone_1_type")
       .eq("id", input.contactId)
       .maybeSingle(),
     supabase
@@ -149,6 +156,9 @@ export async function sendSmsToContact(
       status: "blocked_no_phone",
       reason: "Contact has no phone_1. Add a number before sending SMS.",
     };
+  }
+  if (contactResult.data.phone_1_type === "landline") {
+    return { status: "blocked_landline", reason: LANDLINE_BLOCK_REASON };
   }
 
   // 3. Consent check — only hard-block explicit opt-outs; no-consent is allowed.
@@ -277,7 +287,7 @@ async function queueForLater(
   const [contactResult, propertyResult] = await Promise.all([
     supabase
       .from("contacts")
-      .select("id, phone_1")
+      .select("id, phone_1, phone_1_type")
       .eq("id", input.contactId)
       .maybeSingle(),
     supabase
@@ -301,6 +311,9 @@ async function queueForLater(
       status: "blocked_no_phone",
       reason: "Contact has no phone_1. Add a number before queueing.",
     };
+  }
+  if (contactResult.data.phone_1_type === "landline") {
+    return { status: "blocked_landline", reason: LANDLINE_BLOCK_REASON };
   }
 
   let conversationId: string;
@@ -444,6 +457,26 @@ export async function releaseQueuedMessage(
       reason: consentMessage(consentState),
       consentState,
     };
+  }
+
+  // Line-type re-check — a number can get classified landline between
+  // queue and release (cache backfill, future lookup providers). Only
+  // applies while the queued destination still matches the contact's
+  // current phone_1; fail permanently rather than blocking so the
+  // auto-send tick doesn't retry it forever.
+  const { data: releaseContact } = await supabase
+    .from("contacts")
+    .select("phone_1, phone_1_type")
+    .eq("id", msg.contact_id)
+    .maybeSingle();
+  if (
+    releaseContact?.phone_1_type === "landline" &&
+    releaseContact.phone_1 &&
+    (normalizePhone(releaseContact.phone_1) ?? releaseContact.phone_1) ===
+      msg.to_address
+  ) {
+    await failQueuedMessage(supabase, msg.id, LANDLINE_BLOCK_REASON);
+    return { status: "blocked_landline", reason: LANDLINE_BLOCK_REASON };
   }
 
   // Quiet-hours re-check — dominant reason to queue in the first place.

@@ -1,5 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
+import { asLineType } from "@/lib/messaging/line-type";
 import type { Database, Json } from "@/lib/supabase/types";
 import { resolveFips } from "./fips";
 import { normalizeAddress, normalizeDisplayAddress, normalizeName } from "./normalize";
@@ -388,8 +389,11 @@ async function ingestRow(
       last_name: normalizeName(n.homeowner_last_name as string | null),
       entity_name: normalizeName(n.homeowner_entity_name as string | null),
       phone_1: (n.homeowner_phone_1 as string | null) ?? null,
+      phone_1_type: asLineType(n.homeowner_phone_1_type as string | null),
       phone_2: (n.homeowner_phone_2 as string | null) ?? null,
+      phone_2_type: asLineType(n.homeowner_phone_2_type as string | null),
       phone_3: (n.homeowner_phone_3 as string | null) ?? null,
+      phone_3_type: asLineType(n.homeowner_phone_3_type as string | null),
       email: (n.homeowner_email as string | null)?.trim().toLowerCase() ?? null,
       do_not_contact:
         (n.homeowner_do_not_contact as boolean | null) ?? undefined,
@@ -570,8 +574,11 @@ type ContactFields = Pick<
   | "last_name"
   | "entity_name"
   | "phone_1"
+  | "phone_1_type"
   | "phone_2"
+  | "phone_2_type"
   | "phone_3"
+  | "phone_3_type"
   | "email"
   | "do_not_contact"
 >;

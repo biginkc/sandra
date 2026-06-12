@@ -10,6 +10,10 @@ import { errFromUnknown, ok, type Result } from "@/lib/errors/result";
 import { reportError } from "@/lib/errors/report";
 import { sendSmsToContact } from "@/lib/messaging/send";
 import {
+  assessAudienceLineTypes,
+  type AudienceLineTypeAssessment,
+} from "@/lib/messaging/audience-assessment";
+import {
   freshScheduleState,
   queueSmsBatch,
   type BulkSmsQueueOpts,
@@ -54,6 +58,24 @@ export async function listSmsTemplateCategories(): Promise<
   } catch (e) {
     reportError(e, { tags: { surface: "list_sms_template_categories" } });
     return errFromUnknown(e, "LIST_CATEGORIES_FAILED");
+  }
+}
+
+/**
+ * Pre-send line-type assessment for the bulk SMS modal — "X mobile /
+ * Y landline / Z unknown" so the operator sees exactly who gets texted
+ * (and who's excluded) before confirming. Landlines never queue;
+ * unknowns queue only with the modal's opt-in toggle.
+ */
+export async function assessBulkSmsAudience(
+  propertyIds: string[],
+): Promise<Result<AudienceLineTypeAssessment>> {
+  try {
+    const supabase = await createClient();
+    return ok(await assessAudienceLineTypes(supabase, propertyIds));
+  } catch (e) {
+    reportError(e, { tags: { surface: "assess_bulk_sms_audience" } });
+    return errFromUnknown(e, "AUDIENCE_ASSESSMENT_FAILED");
   }
 }
 

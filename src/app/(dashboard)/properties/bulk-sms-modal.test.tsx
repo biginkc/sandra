@@ -2,17 +2,23 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { bulkQueueSms, listSmsTemplateCategories, countAlreadyContacted } =
-  vi.hoisted(() => ({
-    bulkQueueSms: vi.fn(),
-    listSmsTemplateCategories: vi.fn(),
-    countAlreadyContacted: vi.fn(),
-  }));
+const {
+  bulkQueueSms,
+  listSmsTemplateCategories,
+  countAlreadyContacted,
+  assessBulkSmsAudience,
+} = vi.hoisted(() => ({
+  bulkQueueSms: vi.fn(),
+  listSmsTemplateCategories: vi.fn(),
+  countAlreadyContacted: vi.fn(),
+  assessBulkSmsAudience: vi.fn(),
+}));
 
 vi.mock("./actions", () => ({
   bulkQueueSms,
   listSmsTemplateCategories,
   countAlreadyContacted,
+  assessBulkSmsAudience,
 }));
 
 vi.mock("sonner", () => ({
@@ -63,6 +69,21 @@ beforeEach(() => {
     ],
   });
   countAlreadyContacted.mockResolvedValue({ ok: true, data: 0 });
+  // All-mobile by default so the textable count matches the selection
+  // size and pre-existing label/drain assertions hold unchanged.
+  assessBulkSmsAudience.mockReset();
+  assessBulkSmsAudience.mockImplementation((ids: string[]) =>
+    Promise.resolve({
+      ok: true,
+      data: {
+        total: ids.length,
+        mobile: ids.length,
+        landline: 0,
+        unknown: 0,
+        noPhone: 0,
+      },
+    }),
+  );
   bulkQueueSms.mockResolvedValue({
     ok: true,
     data: { succeeded: 0, skipped: 0, failed: [] },
@@ -378,5 +399,86 @@ describe("<BulkSmsModal /> presets + drain estimate (260506-m3a)", () => {
     const [, opts] = bulkQueueSms.mock.calls[0];
     expect(opts.paceSeconds).toBe(30);
     expect(opts.dailyCap).toBeUndefined();
+  });
+});
+
+describe("<BulkSmsModal /> line-type assessment", () => {
+  it("shows the mobile/landline/unknown breakdown from assessBulkSmsAudience", async () => {
+    assessBulkSmsAudience.mockResolvedValue({
+      ok: true,
+      data: { total: 10, mobile: 6, landline: 3, unknown: 1, noPhone: 0 },
+    });
+    renderModal(Array.from({ length: 10 }, (_, i) => `p${i}`));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("line-type-assessment")).toHaveTextContent(
+        /6 mobile/,
+      ),
+    );
+    expect(screen.getByTestId("line-type-assessment")).toHaveTextContent(
+      /3 landline \(always excluded\)/,
+    );
+    expect(screen.getByTestId("line-type-assessment")).toHaveTextContent(
+      /1 unknown/,
+    );
+  });
+
+  it("queue button reflects mobile count only; unknown toggle adds unknowns and forwards includeUnknown", async () => {
+    const user = userEvent.setup();
+    assessBulkSmsAudience.mockResolvedValue({
+      ok: true,
+      data: { total: 5, mobile: 2, landline: 1, unknown: 2, noPhone: 0 },
+    });
+    bulkQueueSms.mockResolvedValue({
+      ok: true,
+      data: { succeeded: 2, skipped: 3, failed: [] },
+    });
+    renderModal(["p1", "p2", "p3", "p4", "p5"]);
+
+    // Mobiles only until opted in.
+    const queueBtn = await screen.findByRole("button", {
+      name: /Queue 2 messages/i,
+    });
+
+    await user.click(
+      screen.getByRole("checkbox", { name: /Also text 2 unknown/i }),
+    );
+    expect(
+      screen.getByRole("button", { name: /Queue 4 messages/i }),
+    ).toBeInTheDocument();
+
+    await user.click(queueBtn);
+    await waitFor(() => expect(bulkQueueSms).toHaveBeenCalled());
+    const [, opts] = bulkQueueSms.mock.calls[0];
+    expect(opts.includeUnknown).toBe(true);
+  });
+
+  it("includeUnknown defaults to false in submitted opts", async () => {
+    const user = userEvent.setup();
+    bulkQueueSms.mockResolvedValue({
+      ok: true,
+      data: { succeeded: 1, skipped: 0, failed: [] },
+    });
+    renderModal(["p1"]);
+    await waitFor(() => expect(listSmsTemplateCategories).toHaveBeenCalled());
+
+    await user.click(screen.getByRole("button", { name: /Queue 1 message/i }));
+    await waitFor(() => expect(bulkQueueSms).toHaveBeenCalled());
+    const [, opts] = bulkQueueSms.mock.calls[0];
+    expect(opts.includeUnknown).toBe(false);
+  });
+
+  it("disables the queue button when nothing is textable", async () => {
+    assessBulkSmsAudience.mockResolvedValue({
+      ok: true,
+      data: { total: 2, mobile: 0, landline: 2, unknown: 0, noPhone: 0 },
+    });
+    renderModal(["p1", "p2"]);
+
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: /Queue 0 messages/i }),
+      ).toBeDisabled(),
+    );
   });
 });

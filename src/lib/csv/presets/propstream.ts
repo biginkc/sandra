@@ -22,6 +22,7 @@
  * No row-level dedup — PropStream is already one-row-per-property.
  */
 import { toBoolOrNull } from "@/lib/csv/normalize";
+import { lineTypeFromVendorLabel } from "@/lib/messaging/line-type";
 
 import type { TransformResult, VendorPreset } from "./types";
 
@@ -98,19 +99,26 @@ export const propstreamPreset: VendorPreset = {
         if (dnc) anyDnc = true;
         slots.push({ phone, type: (next[typeKey] ?? "").trim(), dnc });
       }
-      // Drop DNC slots first, then keep the first 3 survivors. If we
-      // run out of non-DNC slots we leave the trailing slots empty.
+      // Drop DNC slots first, mobiles before landlines within each
+      // band (everything downstream texts slot 1, so a known mobile
+      // must win it), then keep the first 3 survivors. If we run out
+      // of non-DNC slots we leave the trailing slots empty.
+      const mobileFirst = (list: Slot[]) => [
+        ...list.filter((s) => lineTypeFromVendorLabel(s.type) === "mobile"),
+        ...list.filter((s) => lineTypeFromVendorLabel(s.type) !== "mobile"),
+      ];
       const ranked = [
-        ...slots.filter((s) => !s.dnc),
-        ...slots.filter((s) => s.dnc),
+        ...mobileFirst(slots.filter((s) => !s.dnc)),
+        ...mobileFirst(slots.filter((s) => s.dnc)),
       ].slice(0, 3);
       for (let i = 1; i <= 3; i++) {
         const target = `homeowner_phone_${i}`;
+        const typeTarget = `homeowner_phone_${i}_type`;
         const slot = ranked[i - 1];
         next[target] = slot ? slot.phone : "";
-        if (i === 1 && !columnsAdded.includes(target)) columnsAdded.push(target);
-        if (i === 2 && !columnsAdded.includes(target)) columnsAdded.push(target);
-        if (i === 3 && !columnsAdded.includes(target)) columnsAdded.push(target);
+        next[typeTarget] = slot ? lineTypeFromVendorLabel(slot.type) : "";
+        if (!columnsAdded.includes(target)) columnsAdded.push(target);
+        if (!columnsAdded.includes(typeTarget)) columnsAdded.push(typeTarget);
       }
       // Drop the per-phone source columns from the row.
       for (const i of PHONE_SLOTS) {

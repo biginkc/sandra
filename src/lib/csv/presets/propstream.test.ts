@@ -67,23 +67,33 @@ describe("propstreamPreset.detect", () => {
 });
 
 describe("propstreamPreset.transform — phone fold", () => {
-  it("collapses 5 phones into 3 slots when no DNC", () => {
+  it("collapses 5 phones into 3 slots, mobiles first", () => {
     const result = propstreamPreset.transform([row()], FULL_HEADERS);
     const r = result.rows[0];
+    // Mobiles {1,2,4} outrank landlines {3,5} for the 3 slots —
+    // everything downstream texts slot 1, so mobiles must win.
     expect(r.homeowner_phone_1).toBe("8165551001");
     expect(r.homeowner_phone_2).toBe("8165551002");
-    expect(r.homeowner_phone_3).toBe("8165551003");
+    expect(r.homeowner_phone_3).toBe("8165551004");
+    expect(r.homeowner_phone_1_type).toBe("mobile");
+    expect(r.homeowner_phone_2_type).toBe("mobile");
+    expect(r.homeowner_phone_3_type).toBe("mobile");
     expect(r.homeowner_do_not_contact).toBeUndefined();
   });
-  it("drops DNC slot first; keeps next 3 non-DNC", () => {
+  it("drops DNC slot first; keeps next 3 non-DNC mobiles-first", () => {
     const result = propstreamPreset.transform(
       [row({ "Phone 2 DNC": "Yes" })],
       FULL_HEADERS,
     );
     const r = result.rows[0];
-    // Slot 2 dropped; first 3 of {1,3,4,5} = 1,3,4
+    // Slot 2 dropped; non-DNC mobiles {1,4} lead, then landline 3.
     expect([r.homeowner_phone_1, r.homeowner_phone_2, r.homeowner_phone_3])
-      .toEqual(["8165551001", "8165551003", "8165551004"]);
+      .toEqual(["8165551001", "8165551004", "8165551003"]);
+    expect([
+      r.homeowner_phone_1_type,
+      r.homeowner_phone_2_type,
+      r.homeowner_phone_3_type,
+    ]).toEqual(["mobile", "mobile", "landline"]);
     expect(r.homeowner_do_not_contact).toBe("true");
   });
   it("all-empty phones → no DNC flag, slots empty", () => {
