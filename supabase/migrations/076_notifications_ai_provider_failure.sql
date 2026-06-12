@@ -23,3 +23,13 @@ alter table notifications add constraint notifications_event_type_check check (e
   'task_assigned'::text,
   'ai_responder_provider_failure'::text
 ]));
+
+-- Race-safe dedupe backstop for the provider-failure throttle: two
+-- concurrent inbound failures can both pass dispatch's read-then-insert
+-- recent-check; this index makes the second insert conflict (and
+-- createNotification swallows insert errors by design). Keyed per user,
+-- per failure kind (titles are deterministic per kind — see
+-- formatNotification), per UTC day.
+create unique index if not exists notifications_ai_provider_failure_daily_key
+  on notifications (user_id, title, (date_trunc('day', created_at at time zone 'utc')))
+  where event_type = 'ai_responder_provider_failure';

@@ -456,11 +456,21 @@ async function notifyAdminsOfProviderFailure(
   },
 ): Promise<void> {
   try {
+    // Per-KIND throttle: a billing alert must not suppress a later auth
+    // alert. Kind is matched via the deterministic title written by
+    // formatNotification (coupling noted there) — and the migration-076
+    // partial unique index on (user_id, title, utc-day) makes the
+    // insert race-safe even when two concurrent failures both pass this
+    // read-then-insert check: the loser's insert conflicts and is
+    // swallowed by createNotification.
+    const titleNeedle =
+      args.failure === "billing" ? "%credits exhausted%" : "%key rejected%";
     const { data: recent } = await supabase
       .from("notifications")
       .select("id")
       .eq("org_id", args.orgId)
       .eq("event_type", "ai_responder_provider_failure")
+      .ilike("title", titleNeedle)
       .gte("created_at", new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString())
       .limit(1);
     if (recent && recent.length > 0) return;

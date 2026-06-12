@@ -133,6 +133,9 @@ export function formatNotification(
       };
     }
     case "ai_responder_provider_failure": {
+      // NB: the dispatch throttle and the migration-076 dedupe index
+      // both key on these exact titles ("credits exhausted" / "key
+      // rejected") — keep those phrases stable if rewording.
       const kind = payload.providerFailure ?? "billing";
       return kind === "billing"
         ? {

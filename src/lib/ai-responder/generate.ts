@@ -141,7 +141,25 @@ export function createAnthropicClient(): Anthropic {
 export function classifyProviderFailure(
   err: unknown,
 ): "billing" | "auth" | null {
-  const e = err as { status?: unknown; message?: unknown } | null;
+  const e = err as
+    | {
+        status?: unknown;
+        message?: unknown;
+        error?: { type?: unknown; error?: { type?: unknown } };
+      }
+    | null;
+  // The SDK's APIError carries the structured body: { type: "error",
+  // error: { type: "billing_error" | "authentication_error" | ... } }.
+  // Trust that FIRST — Anthropic can reword the human message, but the
+  // typed enum is the contract. Message regex stays as fallback for
+  // older payload shapes and test stubs.
+  const structuredType =
+    (typeof e?.error?.error?.type === "string" && e.error.error.type) ||
+    (typeof e?.error?.type === "string" && e.error.type) ||
+    null;
+  if (structuredType === "billing_error") return "billing";
+  if (structuredType === "authentication_error") return "auth";
+
   const status = typeof e?.status === "number" ? e.status : null;
   const message = typeof e?.message === "string" ? e.message : "";
   if (status === 401 || /invalid x-api-key|authentication_error/i.test(message)) {

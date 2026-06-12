@@ -121,9 +121,11 @@ export async function getRecentNotifications(
           ? `/leads/${r.entity_id}`
           : r.entity_type === "job"
             ? "/jobs"
-            : r.entity_type === "message"
-              ? (messageHrefById.get(r.entity_id) ?? "/messages")
-              : "/",
+            : r.entity_type === "task"
+              ? "/tasks"
+              : r.entity_type === "message"
+                ? (messageHrefById.get(r.entity_id) ?? "/messages")
+                : "/",
       title: r.title,
       body: r.body,
       readAt: r.read_at,
