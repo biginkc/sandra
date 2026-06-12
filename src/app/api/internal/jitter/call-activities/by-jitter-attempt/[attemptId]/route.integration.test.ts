@@ -1,3 +1,5 @@
+import { createHmac } from "node:crypto";
+
 import { beforeEach, describe, expect, it } from "vitest";
 
 import { createTestClient } from "@tests/integration/client";
@@ -9,6 +11,7 @@ import {
 
 import {
   authHeaders,
+  hashSecret,
   jsonRequest,
   resetJitterIntegration,
   seedDialerBatch,
@@ -398,6 +401,82 @@ describe("internal.jitter.call-activities writeback PUT", () => {
       .select("id")
       .eq("contact_id", otherOrgLead.contactId);
     expect(events).toHaveLength(0);
+  });
+
+  it("creates a separate org-B row when the same attemptId arrives from another org's consumer", async () => {
+    const seeded = await seedDialerBatch(testClient);
+    const attemptId = `attempt-${crypto.randomUUID()}`;
+    const requestUrl = `https://sandra.test/api/internal/jitter/call-activities/by-jitter-attempt/${attemptId}`;
+
+    const first = await PUT(
+      jsonRequest(requestUrl, "PUT", writebackBody(seeded), {
+        "idempotency-key": "activity-collide-org-a",
+      }),
+      attemptContext(attemptId),
+    );
+    expect(first.status).toBe(200);
+    const firstJson = (await first.json()) as any;
+
+    // Second writeback consumer authenticated for org B (mirrors the BMH
+    // consumer seeded by resetJitterIntegration).
+    const ORG_B_TOKEN = "jitter-route-integration-token-org-b";
+    const { error: consumerError } = await (testClient as any)
+      .from("webhook_consumers")
+      .insert({
+        consumer_type: "jitter_writeback",
+        name: "jitter-route-tests-org-b",
+        secret_hash: hashSecret(ORG_B_TOKEN),
+        enabled: true,
+        org_id: TEST_ORG_B_ID,
+      });
+    expect(consumerError).toBeNull();
+
+    const orgBLead = await seedDialerLead(testClient, { org_id: TEST_ORG_B_ID });
+    const orgBBody = JSON.stringify({
+      org_id: orgBLead.orgId,
+      property_id: orgBLead.propertyId,
+      contact_id: orgBLead.contactId,
+      jitter_session_id: "session-activity-org-b",
+      provider: "jitter",
+      outcome: "voicemail",
+    });
+    const second = await PUT(
+      new Request(requestUrl, {
+        method: "PUT",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${ORG_B_TOKEN}`,
+          "x-sandra-signature":
+            "sha256=" + createHmac("sha256", ORG_B_TOKEN).update(orgBBody).digest("hex"),
+          "idempotency-key": "activity-collide-org-b",
+        },
+        body: orgBBody,
+      }),
+      attemptContext(attemptId),
+    );
+
+    expect(second.status).toBe(200);
+    const secondJson = (await second.json()) as any;
+    expect(secondJson.call_activity.id).not.toBe(firstJson.call_activity.id);
+    expect(secondJson.call_activity).toMatchObject({
+      org_id: TEST_ORG_B_ID,
+      jitter_attempt_id: attemptId,
+      outcome: "voicemail",
+    });
+
+    // Org A's original row is unchanged by the colliding writeback.
+    const { data: original } = await (testClient as any)
+      .from("call_activities")
+      .select("org_id, property_id, contact_id, outcome, jitter_attempt_id")
+      .eq("id", firstJson.call_activity.id)
+      .single();
+    expect(original).toMatchObject({
+      org_id: BMH_ORG_ID,
+      property_id: seeded.propertyId,
+      contact_id: seeded.contactId,
+      outcome: "connected_human",
+      jitter_attempt_id: attemptId,
+    });
   });
 
   it("sets do_not_contact and records a voice opt-out consent event on DNC writeback", async () => {

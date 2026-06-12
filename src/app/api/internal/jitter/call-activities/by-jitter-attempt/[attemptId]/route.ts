@@ -344,7 +344,9 @@ export async function PUT(
           error_message: body.error_message ?? null,
           raw_event_count: 1,
         },
-        { onConflict: "provider,jitter_attempt_id" },
+        // Org-scoped (migration 075): a colliding attemptId from another
+        // org inserts its own row instead of overwriting the existing one.
+        { onConflict: "org_id,provider,jitter_attempt_id" },
       )
       .select("id, org_id, property_id, contact_id, dialer_batch_item_id, jitter_attempt_id, provider, outcome")
       .single();
