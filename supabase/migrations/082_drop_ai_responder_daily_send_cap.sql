@@ -1,4 +1,4 @@
--- 084: drop ai_responder_configs.daily_send_cap
+-- 082: drop ai_responder_configs.daily_send_cap
 --
 -- Jarrad's standing rule (2026-06-12): no client-side volume caps,
 -- anywhere — provider/API credits are the only cap. The AI responder's
