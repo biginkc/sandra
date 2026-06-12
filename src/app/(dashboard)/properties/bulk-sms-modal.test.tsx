@@ -34,7 +34,7 @@ vi.mock("next/navigation", () => ({
 }));
 
 // eslint-disable-next-line import/first
-import { BulkSmsModal } from "./bulk-sms-modal";
+import { BulkSmsModal, computeDrain } from "./bulk-sms-modal";
 
 function renderModal(
   propertyIds: string[],
@@ -479,5 +479,39 @@ describe("<BulkSmsModal /> line-type assessment", () => {
         screen.getByRole("button", { name: /Queue 0 messages/i }),
       ).toBeDisabled(),
     );
+  });
+});
+
+describe("computeDrain — uncapped continuous ramp", () => {
+  // 2026-04-23T17:00:00Z == 9:00 AM PT at the fixed -08:00 offset the
+  // preview math uses.
+  const NINE_AM_PT = new Date("2026-04-23T17:00:00Z");
+
+  it("counts quiet-window (9 PM – 8 AM PT) slots across EVERY night the ramp crosses", () => {
+    // 30 messages at 1h pacing from 9 AM PT: slots land at 9 AM..8 PM
+    // (sendable), 9 PM..7 AM (11 quiet slots), then 8 AM..2 PM next day
+    // (sendable again).
+    const drain = computeDrain({
+      total: 30,
+      paceSeconds: 3600,
+      now: NINE_AM_PT,
+    });
+    expect(drain.pastCutoffCount).toBe(11);
+    expect(drain.perDay).toEqual([{ dayLabel: "Queued", count: 30 }]);
+  });
+
+  it("reports zero quiet-window slots when the ramp finishes before 9 PM PT", () => {
+    const drain = computeDrain({
+      total: 10,
+      paceSeconds: 8,
+      now: NINE_AM_PT,
+    });
+    expect(drain.pastCutoffCount).toBe(0);
+  });
+
+  it("empty selection → empty preview", () => {
+    expect(
+      computeDrain({ total: 0, paceSeconds: 8, now: NINE_AM_PT }),
+    ).toEqual({ perDay: [], lastSendLocal: null, pastCutoffCount: 0 });
   });
 });

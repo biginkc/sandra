@@ -41,8 +41,11 @@ export type BulkSmsQueueOpts = {
  *
  * Field names predate the daily-cap removal: `dayBucketStartMs` is now
  * simply the ramp anchor and `dayBucketCount` the number queued so far.
- * Kept as-is so in-flight workflow runs (which serialize this state
- * between invocations) survive a deploy.
+ * Names kept so legacy serialized state still parses — but the
+ * SEMANTICS intentionally change across deploy: a run serialized under
+ * the old capped scheduler resumes as an uncapped continuous ramp from
+ * its current anchor+offset (no next-day rollover). That is the point
+ * of the cap removal; do not re-add rollover for legacy state.
  */
 export type BulkSmsScheduleState = {
   cumulativeOffsetMs: number;

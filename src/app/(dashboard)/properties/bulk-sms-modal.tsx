@@ -78,10 +78,10 @@ const JITTER_PCT = 0.2;
  * No volume caps client-side — the schedule is one continuous paced
  * ramp; provider credits are the only cap. Messages whose release time
  * lands in recipient quiet hours are deferred by the release cron, so
- * the past-9-PM-PT count is a preview of that deferral, not a cap.
+ * the quiet-window count is a preview of that deferral, not a cap.
  *
- * DST simplification (same as the server used to make): the 9 PM PT
- * cutoff uses a fixed -08:00 offset.
+ * DST simplification (same as the server used to make): the 9 PM–8 AM
+ * PT quiet window uses a fixed -08:00 offset.
  */
 export function computeDrain(args: {
   total: number;
@@ -98,30 +98,20 @@ export function computeDrain(args: {
   }
   const startMs = now.getTime();
   const lastSendMs = startMs + Math.max(0, total - 1) * paceSeconds * 1000;
-  // Count any that would land past 9 PM PT on the start calendar day
-  // (federal TCPA cutoff). The server defers them on release; we
-  // surface the count so the UI shows the deferral ahead of time.
-  const ptNinePm = (() => {
-    const fmt = new Intl.DateTimeFormat("en-US", {
-      timeZone: "America/Los_Angeles",
-      year: "numeric",
-      month: "2-digit",
-      day: "2-digit",
-    });
-    const parts = fmt.formatToParts(new Date(startMs));
-    const y = Number(parts.find((p) => p.type === "year")!.value);
-    const m = Number(parts.find((p) => p.type === "month")!.value);
-    const day = Number(parts.find((p) => p.type === "day")!.value);
-    // 21:00 PT == 05:00 UTC next day at -08:00.
-    return Date.UTC(y, m - 1, day + 1, 5, 0, 0);
-  })();
+  // Count messages whose scheduled slot lands inside the 9 PM – 8 AM PT
+  // quiet window (federal TCPA cutoff) on ANY night the ramp crosses,
+  // not just the first one. The release cron defers those to the next
+  // morning; this is a preview of that deferral. Fixed -08:00 PT offset
+  // (same simplification as the rest of this file), so pure arithmetic
+  // per message instead of an Intl call.
+  const PT_OFFSET_MS = 8 * 3_600_000;
+  const DAY_MS = 86_400_000;
   let pastCutoffCount = 0;
-  if (lastSendMs > ptNinePm) {
-    const beforeCutoff = Math.max(
-      0,
-      Math.ceil((ptNinePm - startMs) / (paceSeconds * 1000)),
-    );
-    pastCutoffCount = Math.max(0, total - beforeCutoff);
+  for (let i = 0; i < total; i++) {
+    const ptMs = startMs + i * paceSeconds * 1000 - PT_OFFSET_MS;
+    const timeOfDayMs = ((ptMs % DAY_MS) + DAY_MS) % DAY_MS;
+    const hour = timeOfDayMs / 3_600_000;
+    if (hour >= 21 || hour < 8) pastCutoffCount++;
   }
   const lastSendLocal = new Intl.DateTimeFormat("en-US", {
     timeZone: "America/Los_Angeles",
@@ -487,8 +477,8 @@ export function BulkSmsModal({ open, propertyIds, onClose, onQueued }: Props) {
                 ) : null}
                 {drain.pastCutoffCount > 0 ? (
                   <p className="text-amber-700 dark:text-amber-400">
-                    {drain.pastCutoffCount.toLocaleString()} would land past
-                    9 PM cutoff — released next morning.
+                    {drain.pastCutoffCount.toLocaleString()} would land in
+                    the 9 PM – 8 AM quiet window — released next morning.
                   </p>
                 ) : null}
               </div>
