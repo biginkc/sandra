@@ -143,19 +143,29 @@ export async function persistSkipTraceResult(
     .filter((p) => !!p.number && !p.dnc)
     .sort((a, b) => a.rank - b.rank);
 
-  let phonesAdded = 0;
-  for (const phone of candidatePhones) {
-    const normalized = normalizePhone(phone.number);
-    if (existing.has(normalized)) continue;
-    const emptyIdx = slots.findIndex((s) => !s);
-    if (emptyIdx === -1) break;
-    // Persist the E.164 form (provider-agnostic). Tracerfy returns raw
-    // 10-digit strings ("8167416576"); Dialpad outbound + the dedupe
-    // index work better with E.164 ("+18167416576").
-    slots[emptyIdx] = normalized;
-    existing.add(normalized);
-    phonesAdded++;
-  }
+  // Slot packing is re-runnable with a ban list so a phone_1 unique
+  // conflict can drop ONLY the conflicting number and keep salvageable
+  // lower-ranked ones (rather than reverting every slot wholesale).
+  // Persist the E.164 form (provider-agnostic). Tracerfy returns raw
+  // 10-digit strings ("8167416576"); Dialpad outbound + the dedupe
+  // index work better with E.164 ("+18167416576").
+  const bannedPhones = new Set<string>();
+  const packSlots = (): { packed: (string | null)[]; added: number } => {
+    const packed = [...slots];
+    const seen = new Set(existing);
+    let added = 0;
+    for (const phone of candidatePhones) {
+      const normalized = normalizePhone(phone.number);
+      if (seen.has(normalized) || bannedPhones.has(normalized)) continue;
+      const emptyIdx = packed.findIndex((s) => !s);
+      if (emptyIdx === -1) break;
+      packed[emptyIdx] = normalized;
+      seen.add(normalized);
+      added++;
+    }
+    return { packed, added };
+  };
+  let { packed: packedSlots, added: phonesAdded } = packSlots();
 
   // Email: take rank-1 if we don't already have one.
   let emailToWrite: string | null = currentContact.email ?? null;
@@ -168,9 +178,9 @@ export async function persistSkipTraceResult(
 
   // Backfill names if missing.
   const updates: Database["public"]["Tables"]["contacts"]["Update"] = {
-    phone_1: slots[0],
-    phone_2: slots[1],
-    phone_3: slots[2],
+    phone_1: packedSlots[0],
+    phone_2: packedSlots[1],
+    phone_3: packedSlots[2],
     email: emailToWrite,
   };
   if (!currentContact.first_name && owner.firstName) {
@@ -183,26 +193,42 @@ export async function persistSkipTraceResult(
   // Apply the update, degrading granularly on unique-index conflicts:
   // phone_1 and lower(email) carry global partial unique indexes, so a
   // number/email that already belongs to ANOTHER contact must not sink
-  // the whole write (names + remaining fields still land). The
-  // conflicting value is reachable via its owning contact; dropping it
-  // here loses nothing. 38 email-key + 16 phone-key rows failed
-  // wholesale this way on 2026-06-12.
-  for (let attempt = 0; attempt < 3; attempt++) {
+  // the whole write (names + remaining fields still land). A phone
+  // conflict bans only the number that landed in phone_1 and re-packs,
+  // so salvageable lower-ranked numbers still persist. The conflicting
+  // value is reachable via its owning contact; dropping it loses
+  // nothing. 38 email-key + 16 phone-key rows failed wholesale this
+  // way on 2026-06-12. Attempts are bounded by the ways the update can
+  // shrink (one per candidate phone + one for email + one clean pass);
+  // exhausting them without a confirmed write is a FAILURE — falling
+  // through would report matched for a write that never happened.
+  const maxAttempts = candidatePhones.length + 2;
+  let updateConfirmed = false;
+  let lastUpdateError = "";
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
     const { error: updErr } = await supabase
       .from("contacts")
       .update(updates)
       .eq("id", contactId);
-    if (!updErr) break;
+    if (!updErr) {
+      updateConfirmed = true;
+      break;
+    }
+    lastUpdateError = updErr.message;
     if (!isUniqueViolation(updErr.message)) {
       throw new Error(`contact update failed: ${updErr.message}`);
     }
     if (updErr.message.includes("contacts_phone_1_key")) {
-      // Revert all phone slots to their current values; the numbers
-      // belong to another contact.
-      updates.phone_1 = currentContact.phone_1 ?? null;
-      updates.phone_2 = currentContact.phone_2 ?? null;
-      updates.phone_3 = currentContact.phone_3 ?? null;
-      phonesAdded = 0;
+      const conflicting = updates.phone_1;
+      if (typeof conflicting === "string" && conflicting) {
+        bannedPhones.add(conflicting);
+      }
+      const repacked = packSlots();
+      packedSlots = repacked.packed;
+      phonesAdded = repacked.added;
+      updates.phone_1 = packedSlots[0];
+      updates.phone_2 = packedSlots[1];
+      updates.phone_3 = packedSlots[2];
       continue;
     }
     if (updErr.message.includes("contacts_email_key")) {
@@ -211,6 +237,11 @@ export async function persistSkipTraceResult(
       continue;
     }
     throw new Error(`contact update failed: ${updErr.message}`);
+  }
+  if (!updateConfirmed) {
+    throw new Error(
+      `contact update failed after ${maxAttempts} degrade attempts: ${lastUpdateError}`,
+    );
   }
 
   // Mailing address upsert. Skip-trace providers often discover the
