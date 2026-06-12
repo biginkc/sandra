@@ -214,7 +214,7 @@ function mergeThreadUpdate(
   row: Message,
 ): Record<string, ThreadUpdate> {
   // Realtime payloads carry the post-trigger row, so conversation_id is
-  // always stamped for contact-bearing SMS (migration 080). Anything
+  // always stamped for contact-bearing SMS (migration 081). Anything
   // without one is unknown-sender traffic — not a thread row.
   if (
     !row.contact_id ||

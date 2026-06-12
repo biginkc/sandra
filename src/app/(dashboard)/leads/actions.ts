@@ -1075,7 +1075,7 @@ export async function markMessagesReadForThread(
   threadId: string,
 ): Promise<Result<null>> {
   try {
-    // Thread identity is the conversation UUID since migration 080 —
+    // Thread identity is the conversation UUID since migration 081 —
     // callers pass canonical ids only (the page boundary translates any
     // stale URL format before this runs).
     const parsed = parseThreadId(threadId);

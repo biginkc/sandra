@@ -344,7 +344,7 @@ export async function PUT(
           error_message: body.error_message ?? null,
           raw_event_count: 1,
         },
-        // Org-scoped (migration 075): a colliding attemptId from another
+        // Org-scoped (migration 083): a colliding attemptId from another
         // org inserts its own row instead of overwriting the existing one.
         { onConflict: "org_id,provider,jitter_attempt_id" },
       )
