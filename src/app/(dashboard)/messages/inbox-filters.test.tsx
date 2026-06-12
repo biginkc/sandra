@@ -191,10 +191,10 @@ describe("<CockpitView /> DNC toggle", () => {
     expect(toggle).toBeInTheDocument();
     expect(toggle).toHaveAttribute("data-active", "true");
     expect(toggle).toHaveAttribute("aria-checked", "true");
-    expect(toggle).toHaveTextContent("Hide DNC");
+    expect(toggle).toHaveTextContent("Hide DNC & tests");
   });
 
-  it("renders OFF state with 'Showing DNC' label when hideDnc=false", () => {
+  it("renders OFF state with 'Showing all' label when hideDnc=false", () => {
     render(
       <CockpitView
         {...baseProps}
@@ -206,7 +206,7 @@ describe("<CockpitView /> DNC toggle", () => {
     const toggle = screen.getByTestId("dnc-toggle");
     expect(toggle).not.toHaveAttribute("data-active");
     expect(toggle).toHaveAttribute("aria-checked", "false");
-    expect(toggle).toHaveTextContent("Showing DNC");
+    expect(toggle).toHaveTextContent("Showing all");
   });
 
   it("shows hidden-count hint when hideDnc=true and DNC threads exist", () => {

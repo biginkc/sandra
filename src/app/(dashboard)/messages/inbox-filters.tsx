@@ -123,9 +123,10 @@ export function InboxFilters({
 }
 
 /**
- * "Hide DNC" toggle — sits to the right of the filter chips with ml-auto.
- * ON state: filled blue switch + "{N} hidden" hint when DNC threads exist.
- * OFF state: muted outline switch, label reads "Showing DNC".
+ * Noise toggle ("Hide DNC & tests") — sits to the right of the filter
+ * chips with ml-auto. ON: hides opted-out threads AND Jitter test
+ * traffic (canary/rehearsal fixtures), with a "{N} hidden" hint.
+ * OFF: label reads "Showing all".
  *
  * State persists via the `hideDnc` URL param (omit / "1" = ON,
  * "0" = OFF). Default is ON per feedback-f E1.
@@ -139,7 +140,7 @@ function DncToggle({
   hiddenDncCount: number;
   onToggle: () => void;
 }) {
-  const label = hideDnc ? "Hide DNC" : "Showing DNC";
+  const label = hideDnc ? "Hide DNC & tests" : "Showing all";
   return (
     <button
       type="button"

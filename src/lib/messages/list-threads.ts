@@ -29,7 +29,23 @@ export type Thread = {
    *  `computeConsentState` on the latest consent_events for the contact.
    *  The inbox uses this to drive the DNC toggle (hidden by default). */
   isOptedOut: boolean;
+  /** True when the thread belongs to Jitter test infrastructure (canary /
+   *  rehearsal contacts and synthetic addresses). Hidden by the same
+   *  inbox toggle as DNC — both are noise, one switch. */
+  isTestTraffic: boolean;
 };
+
+/** Jitter's test fixtures name their contacts "Canary CANARY-*" /
+ *  "Jitter *" and use synthetic addresses containing "jitter". Matching
+ *  on those markers keeps test STOP/AI-canary threads out of the inbox
+ *  without touching real conversations. */
+export function looksLikeTestTraffic(
+  contactName: string | null,
+  propertyAddress: string | null,
+): boolean {
+  const hay = `${contactName ?? ""} ${propertyAddress ?? ""}`.toLowerCase();
+  return hay.includes("canary") || hay.includes("jitter");
+}
 
 export type ListThreadsOpts = {
   /** Window for "active" conversations. Defaults to 90 days. */
@@ -188,6 +204,13 @@ export async function listThreads(
       needsHumanAttention: p?.needs_human_attention ?? false,
       escalationReason: p?.last_ai_escalation_reason ?? null,
       isOptedOut: consentState === "opted_out",
+      isTestTraffic: looksLikeTestTraffic(
+        c
+          ? (c.entity_name ??
+            ([c.first_name, c.last_name].filter(Boolean).join(" ") || null))
+          : null,
+        p ? [p.address, p.city, p.state].filter(Boolean).join(", ") : null,
+      ),
     });
   }
 

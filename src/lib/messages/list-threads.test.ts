@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { Database } from "@/lib/supabase/types";
 
-import { listThreads } from "./list-threads";
+import { listThreads, looksLikeTestTraffic } from "./list-threads";
 
 /**
  * Stub Supabase client that records every `.in("id", chunk)` call and returns
@@ -393,5 +393,23 @@ describe("listThreads — unread-first sort (feedback-f E2a)", () => {
     const threads = await listThreads(supabase, {});
 
     expect(threads.map((t) => t.contactId)).toEqual(["u-newer", "u-older"]);
+  });
+});
+
+describe("looksLikeTestTraffic", () => {
+  it("flags Jitter canary contact names", () => {
+    expect(looksLikeTestTraffic("Canary CANARY-STOP-1778862210079", null)).toBe(true);
+    expect(looksLikeTestTraffic("Canary CANARY-AI-HAPPY-1777657500276", null)).toBe(true);
+  });
+
+  it("flags synthetic jitter addresses even without a contact", () => {
+    expect(
+      looksLikeTestTraffic(null, "Jitter Canary 26710917291-1 Golden Path Ln, Kansas City, MO"),
+    ).toBe(true);
+  });
+
+  it("does not flag real homeowners", () => {
+    expect(looksLikeTestTraffic("Sheka Newsome", "8101 E 133rd ST, Grandview, MO")).toBe(false);
+    expect(looksLikeTestTraffic(null, null)).toBe(false);
   });
 });
