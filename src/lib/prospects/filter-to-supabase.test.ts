@@ -16,7 +16,9 @@
  *
  * Per the plan:
  *  - empty values / no predicate → builder returned unchanged.
- *  - within-multi-select tri-state combinator: all = AND ; any = IN ; not = NOT IN.
+ *  - within-multi-select tri-state combinator: all = AND ; any = IN ;
+ *    not = NOT IN by default, null-safe or(is.null,not.in) for
+ *    outreach_dispo + source (opt-in per column).
  *  - tri-state booleans: any = no-op ; yes = .eq(col, true) ; no = .or(col.eq.false,col.is.null).
  *  - numeric range: only emit .gte / .lte when bound is non-null.
  *  - date mode: fixed = .gte/.lte on created_at ; since N = .gte(now-N) ; prior N = .lte(now-N).
@@ -316,7 +318,7 @@ describe("applyBlock: outreach_dispo", () => {
     );
     expect(calls.some((c) => c.startsWith("in(outreach_dispo,"))).toBe(true);
   });
-  it("not+values → .not(outreach_dispo, in, …)", async () => {
+  it("not+values → null-safe or(is.null,not.in) on outreach_dispo", async () => {
     const { proxy, calls } = mockBuilder();
     const { sb } = mockSupabaseClient();
     await applyBlock(
@@ -328,9 +330,81 @@ describe("applyBlock: outreach_dispo", () => {
       }) as FilterBlock,
       sb,
     );
-    expect(calls.some((c) => c.startsWith("not(outreach_dispo,in,"))).toBe(
-      true,
+    expect(
+      calls.some((c) =>
+        c.startsWith("or(outreach_dispo.is.null,outreach_dispo.not.in."),
+      ),
+    ).toBe(true);
+  });
+
+  it("source not → null-safe (unknown origin stays visible)", async () => {
+    const { proxy, calls } = mockBuilder();
+    const { sb } = mockSupabaseClient();
+    await applyBlock(
+      proxy,
+      block({
+        kind: "source",
+        combinator: "not",
+        values: ["propstream"],
+      }) as FilterBlock,
+      sb,
     );
+    expect(calls).toEqual([
+      'or(source.is.null,source.not.in.("propstream"))',
+    ]);
+  });
+
+  it("motivation_level not → plain NOT IN (unscored rows deliberately excluded)", async () => {
+    const { proxy, calls } = mockBuilder();
+    const { sb } = mockSupabaseClient();
+    await applyBlock(
+      proxy,
+      block({
+        kind: "motivation_level",
+        combinator: "not",
+        values: ["hot"],
+      }) as FilterBlock,
+      sb,
+    );
+    expect(calls).toEqual(['not(motivation_level,in,("hot"))']);
+  });
+
+  it("market not with comma-containing value stays quoted inside or()", async () => {
+    const { proxy, calls } = mockBuilder();
+    const { sb } = mockSupabaseClient();
+    await applyBlock(
+      proxy,
+      block({
+        kind: "market",
+        combinator: "not",
+        values: ["Jackson, MO"],
+      }) as FilterBlock,
+      sb,
+    );
+    // market keeps plain NOT IN (not opted into null-safety) with the
+    // value quoted so the comma can't split the IN list.
+    expect(calls).toEqual(['not(market,in,("Jackson, MO"))']);
+  });
+
+  it("combinator='not' keeps NULL rows visible (null-safe exclusion)", async () => {
+    // 2026-06-12: 11,313 of 11,317 verified rows had NULL outreach_dispo
+    // — the old plain NOT IN excluded them all, so "Dispo is not DNC"
+    // showed 4 rows instead of hiding 2. "Not X" must read as "X is
+    // false or unknown".
+    const { proxy, calls } = mockBuilder();
+    const { sb } = mockSupabaseClient();
+    await applyBlock(
+      proxy,
+      block({
+        kind: "outreach_dispo",
+        combinator: "not",
+        values: ["dnc", "opted_out"],
+      }) as FilterBlock,
+      sb,
+    );
+    expect(calls).toEqual([
+      'or(outreach_dispo.is.null,outreach_dispo.not.in.("dnc","opted_out"))',
+    ]);
   });
 });
 

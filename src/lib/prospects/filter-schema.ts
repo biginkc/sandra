@@ -65,7 +65,9 @@ export type BlockKind = (typeof BLOCK_KINDS)[number];
 
 const BLOCK_KIND_SET = new Set<string>(BLOCK_KINDS);
 
-// Tri-state combinator for multi-select blocks: "all" = AND, "any" = OR, "not" = NOT IN
+// Tri-state combinator for multi-select blocks: "all" = AND, "any" = OR,
+// "not" = NOT IN (null-safe per column for outreach_dispo + source — see
+// filter-to-supabase applyMultiSelect)
 export type Combinator = "all" | "any" | "not";
 const COMBINATOR_VALUES: ReadonlySet<Combinator> = new Set(["all", "any", "not"]);
 

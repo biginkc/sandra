@@ -7,7 +7,9 @@
  *  - applyFilters(builder, blocks, sb) returns the builder with predicates
  *    layered on top, in stack order. Across blocks AND. Within multi-select
  *    blocks the combinator is honored: any = .in / all = .in (single-column
- *    collapse, see comment) / not = .not("col","in",...).
+ *    collapse, see comment) / not = .not("col","in",...) by default, with
+ *    PER-COLUMN null-safe negation (or(col.is.null,col.not.in...)) for
+ *    outreach_dispo + source — see applyMultiSelect's nullSafeNot.
  *  - applyBlock(builder, block, sb) is one switch case per kind.
  *  - Soft-delete (.is('deleted_at', null)) is the CALLER's responsibility,
  *    not this function's. The base query in page.tsx adds it before the
@@ -294,9 +296,17 @@ export async function applyBlock(
     case "cass":
       return { builder: applyMultiSelect(builder, "cass_status", block.combinator, block.values) };
     case "outreach_dispo":
-      return { builder: applyMultiSelect(builder, "outreach_dispo", block.combinator, block.values) };
+      return {
+        builder: applyMultiSelect(builder, "outreach_dispo", block.combinator, block.values, {
+          nullSafeNot: true,
+        }),
+      };
     case "source":
-      return { builder: applyMultiSelect(builder, "source", block.combinator, block.values) };
+      return {
+        builder: applyMultiSelect(builder, "source", block.combinator, block.values, {
+          nullSafeNot: true,
+        }),
+      };
     case "state":
       return { builder: applyMultiSelect(builder, "state", block.combinator, block.values) };
     case "market":
@@ -382,13 +392,29 @@ function applyMultiSelect(
   col: string,
   combinator: Combinator,
   values: string[],
+  opts?: {
+    /** NULL-safe negation: `not` emits or(col.is.null, col.not.in(...))
+     *  so "not X" reads "X is false or UNKNOWN" and NULL rows stay
+     *  visible. OPT-IN per column because the right semantics differ:
+     *  outreach_dispo NULL = never disposed (must stay visible when
+     *  excluding DNC — 11,313/11,317 verified rows were NULL on
+     *  2026-06-12 and plain NOT IN hid them all); source NULL =
+     *  unknown origin (the filter plan documents null-inclusion).
+     *  motivation_level NULL = deliberately UNSCORED — "not hot" must
+     *  NOT pull in every unscored prospect, so it keeps plain NOT IN. */
+    nullSafeNot?: boolean;
+  },
 ): ProspectsBuilder {
   if (values.length === 0) return builder;
   if (combinator === "all" && values.length > 1) {
     return builder.eq(col, "__sandra_no_match__");
   }
   if (combinator === "not") {
-    return builder.not(col, "in", `(${values.map((v) => `"${v}"`).join(",")})`);
+    const quoted = values.map((v) => `"${v}"`).join(",");
+    if (opts?.nullSafeNot) {
+      return builder.or(`${col}.is.null,${col}.not.in.(${quoted})`);
+    }
+    return builder.not(col, "in", `(${quoted})`);
   }
   // any + single-value all
   return builder.in(col, values);
