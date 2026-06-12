@@ -73,6 +73,23 @@ describe("validateAiReplyBody", () => {
     });
   });
 
+  it("rejects lowercase hiding behind leading punctuation or quotes", () => {
+    expect(validateAiReplyBody('"thanks for confirming."')).toEqual({
+      ok: false,
+      reason: "starts_lowercase",
+    });
+    expect(validateAiReplyBody("(thanks for confirming.)")).toEqual({
+      ok: false,
+      reason: "starts_lowercase",
+    });
+  });
+
+  it("accepts an uppercase start behind leading punctuation", () => {
+    expect(validateAiReplyBody('"Thanks for confirming."')).toEqual({
+      ok: true,
+    });
+  });
+
   it("rejects bodies over one SMS segment (160 chars)", () => {
     expect(validateAiReplyBody("X" + "x".repeat(160))).toEqual({
       ok: false,

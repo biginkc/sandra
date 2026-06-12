@@ -31,8 +31,12 @@ const COMMITMENT_REGEX =
 export const SLANG_REGEX =
   /\b(my bad|hit me up|no worries|gonna|wanna|for sure|all good|awesome|cool|lol|yo)\b/i;
 
-/** Starts with a lowercase letter — lowercase mirroring is never allowed. */
-export const STARTS_LOWERCASE_REGEX = /^[a-z]/;
+/**
+ * First LETTER is lowercase — lowercase mirroring is never allowed.
+ * Skips leading punctuation/quotes/digits so `"thanks..."` or
+ * `(thanks...)` cannot bypass the check via a non-letter first char.
+ */
+export const STARTS_LOWERCASE_REGEX = /^[^a-zA-Z]*[a-z]/;
 
 /** Hard cap from the reply contract: one SMS segment. */
 export const MAX_REPLY_BODY_LEN = 160;
