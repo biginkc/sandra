@@ -23,13 +23,17 @@
  * release path re-checks consent and quiet hours per message regardless.
  */
 
-import {
-  freshScheduleState,
-  queueSmsBatch,
-  type BulkSmsQueueOpts,
-  type BulkSmsScheduleState,
+import type {
+  BulkSmsQueueOpts,
+  BulkSmsScheduleState,
 } from "@/lib/messaging/bulk-queue";
 import { createAdminClient } from "@/lib/supabase/admin";
+
+/* The queueing library's import graph reaches node:crypto (template-pool
+ * hashing, provider HMAC verification) — Node built-ins are banned in the
+ * sandboxed workflow-function bundle, so the library is loaded with a
+ * dynamic import INSIDE the steps (steps run in full Node).
+ * See https://useworkflow.dev/err/node-js-module-in-workflow */
 
 /** Rows per chunk step. ~150ms/row worst case ≈ 30s per invocation. */
 const CHUNK_SIZE = 200;
@@ -43,7 +47,7 @@ type LoadedBulkSmsJob = {
   propertyIds: string[];
   opts: BulkSmsQueueOpts;
   enrolledByUserId: string | null;
-  anchorMs: number;
+  initialState: BulkSmsScheduleState;
 };
 
 /** STEP 1 — Read the batch off the job row and flip it to running. */
@@ -92,11 +96,12 @@ async function loadBulkSmsJob(jobId: string): Promise<LoadedBulkSmsJob> {
     })
     .eq("id", jobId);
 
+  const { freshScheduleState } = await import("@/lib/messaging/bulk-queue");
   return {
     propertyIds,
     opts: params?.opts ?? {},
     enrolledByUserId: params?.enrolled_by_user_id ?? null,
-    anchorMs: params?.anchor_ms ?? Date.now(),
+    initialState: freshScheduleState(params?.anchor_ms ?? Date.now()),
   };
 }
 
@@ -116,6 +121,7 @@ async function bulkSmsChunkStep(args: {
   "use step";
 
   const adminClient = createAdminClient();
+  const { queueSmsBatch } = await import("@/lib/messaging/bulk-queue");
   const state = await queueSmsBatch(adminClient, adminClient, {
     propertyIds: args.propertyIds,
     opts: args.opts,
@@ -179,7 +185,7 @@ export async function bulkSmsWorkflow(
 
   const loaded = await loadBulkSmsJob(params.jobId);
 
-  let state = freshScheduleState(loaded.anchorMs);
+  let state = loaded.initialState;
 
   for (
     let offset = 0;
