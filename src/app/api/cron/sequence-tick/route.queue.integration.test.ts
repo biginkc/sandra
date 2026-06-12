@@ -242,4 +242,53 @@ describe("runSequenceTick — queue drain (integration)", () => {
     expect(count).toBe(2);
     expect(getMockMessageLog()).toHaveLength(0);
   });
+
+  it("defers blocked head-of-queue rows so eligible messages behind them still release", async () => {
+    // Oldest due row: opted-out contact → release blocks, row stays queued.
+    const blockedLead = await seedLead({
+      phone: "+18165550107",
+      optOut: true,
+    });
+    const blockedId = await seedQueuedMessage({
+      propertyId: blockedLead.propertyId,
+      contactId: blockedLead.contactId,
+      toPhone: "+18165550107",
+      scheduledFor: new Date(SAFE_NOW.getTime() - 2 * 60 * 60_000),
+      body: "Starvation blocked head",
+    });
+
+    // Newer due row: eligible contact.
+    const okLead = await seedLead({ phone: "+18165550108" });
+    await seedQueuedMessage({
+      propertyId: okLead.propertyId,
+      contactId: okLead.contactId,
+      toPhone: "+18165550108",
+      scheduledFor: new Date(SAFE_NOW.getTime() - 60 * 60_000),
+      body: "Starvation eligible tail",
+    });
+
+    // drainLimit 1 models the cap being fully consumed by the blocked
+    // head. Tick 1 only reaches the blocked row: nothing sends, but the
+    // row must be deferred out of the due-window (still queued).
+    const tick1 = await runSequenceTick(supabase, { drainLimit: 1 });
+    expect(tick1.drained).toBe(0);
+    expect(tick1.drainOutcomes.blocked_no_consent).toBe(1);
+
+    const { data: blocked } = await supabase
+      .from("messages")
+      .select("status, scheduled_for")
+      .eq("id", blockedId)
+      .single();
+    expect(blocked!.status).toBe("queued");
+    expect(new Date(blocked!.scheduled_for!).getTime()).toBeGreaterThan(
+      SAFE_NOW.getTime(),
+    );
+
+    // Tick 2's oldest-first head slot is now free — the eligible row sends.
+    // Pre-fix this re-selected the same blocked row forever (starvation).
+    const tick2 = await runSequenceTick(supabase, { drainLimit: 1 });
+    expect(tick2.drained).toBe(1);
+    expect(getMockMessageLog()).toHaveLength(1);
+    expect(getMockMessageLog()[0].to).toBe("+18165550108");
+  });
 });

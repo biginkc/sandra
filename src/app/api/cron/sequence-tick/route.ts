@@ -40,6 +40,13 @@ const DRAIN_BATCH_SIZE = 150;
  *  remaining maxDuration as headroom for the in-flight release to
  *  finish and the summary to flush. */
 const TICK_BUDGET_MS = 240_000;
+/** How far a blocked (quiet-hours / opted-out) row is pushed out of the
+ *  due-window. Without this, oldest-first + a hard cap lets a head of
+ *  blocked rows pin the queue: every tick re-selects the same blocked
+ *  rows and eligible messages behind them never release. Quiet-hours
+ *  rows become sendable again once the clock allows; opted-out rows
+ *  keep deferring harmlessly until the operator deletes them. */
+const BLOCKED_DEFER_MS = 30 * 60_000;
 
 function createServiceRoleClient() {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
@@ -93,7 +100,10 @@ export async function runSequenceTick(
 ): Promise<{
   processed: number;
   outcomes: Record<string, number>;
+  /** Messages actually handed to the provider this tick (status=sent). */
   drained: number;
+  /** Per-outcome tally of every release attempt, blocked ones included. */
+  drainOutcomes: Record<string, number>;
   budgetExhausted: boolean;
 }> {
   const budgetMs = opts.budgetMs ?? TICK_BUDGET_MS;
@@ -144,19 +154,39 @@ export async function runSequenceTick(
     .limit(drainLimit);
 
   let drained = 0;
+  const drainOutcomes: Record<string, number> = {};
   for (const msg of dueMessages ?? []) {
     if (!withinBudget()) {
       budgetExhausted = true;
       break;
     }
-    await releaseQueuedMessage(supabase, msg.id);
-    drained += 1;
+    const outcome = await releaseQueuedMessage(supabase, msg.id);
+    drainOutcomes[outcome.status] = (drainOutcomes[outcome.status] ?? 0) + 1;
+    if (outcome.status === "sent") {
+      drained += 1;
+    } else if (
+      outcome.status === "blocked_quiet_hours" ||
+      outcome.status === "blocked_no_consent"
+    ) {
+      // Blocked rows stay `queued` by design — defer them out of the
+      // due-window so they stop occupying oldest-first head slots.
+      // Guarded on status so we never touch a row another worker
+      // resolved in the meantime.
+      await supabase
+        .from("messages")
+        .update({
+          scheduled_for: new Date(Date.now() + BLOCKED_DEFER_MS).toISOString(),
+        })
+        .eq("id", msg.id)
+        .eq("status", "queued");
+    }
   }
 
   return {
     processed,
     outcomes,
     drained,
+    drainOutcomes,
     budgetExhausted,
   };
 }
