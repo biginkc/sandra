@@ -52,4 +52,35 @@ describe("validateAiReplyBody", () => {
       validateAiReplyBody("Is this about 123 Main St? Want to chat?"),
     ).toEqual({ ok: true });
   });
+
+  it("rejects bodies containing slang", () => {
+    expect(
+      validateAiReplyBody("My bad for the cold text, hit me up anytime."),
+    ).toEqual({ ok: false, reason: "contains_slang" });
+  });
+
+  it("rejects slang only on word boundaries", () => {
+    // "Coolidge" must not trip "cool".
+    expect(
+      validateAiReplyBody("Is this about the place on Coolidge Street?"),
+    ).toEqual({ ok: true });
+  });
+
+  it("rejects bodies that start lowercase", () => {
+    expect(validateAiReplyBody("thanks for confirming.")).toEqual({
+      ok: false,
+      reason: "starts_lowercase",
+    });
+  });
+
+  it("rejects bodies over one SMS segment (160 chars)", () => {
+    expect(validateAiReplyBody("X" + "x".repeat(160))).toEqual({
+      ok: false,
+      reason: "too_long",
+    });
+  });
+
+  it("accepts a body at exactly 160 chars", () => {
+    expect(validateAiReplyBody("X" + "x".repeat(159))).toEqual({ ok: true });
+  });
 });
