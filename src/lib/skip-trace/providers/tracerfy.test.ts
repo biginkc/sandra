@@ -320,8 +320,10 @@ describe("TracerfyProvider — submitBatch", () => {
     expect(rows[0].external_id).toBe("prop-A");
     expect(rows[1].external_id).toBe("prop-B");
 
-    // Column-mapping fields ride alongside as separate form values
-    expect(form.get("trace_type")).toBe("normal");
+    // Column-mapping fields ride alongside as separate form values.
+    // Batch uses `enhanced` (address-only owner resolution) so bulk
+    // skip-trace works on records without owner names.
+    expect(form.get("trace_type")).toBe("enhanced");
     expect(form.get("address_column")).toBe("address");
     expect(form.get("city_column")).toBe("city");
     expect(form.get("state_column")).toBe("state");
