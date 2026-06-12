@@ -476,6 +476,52 @@ describe("listThreads — recency-only sort", () => {
       "legacy:c-unread:p-u",
     ]);
   });
+
+  it("pins a stale bare-contact link whose contact id is a real UUID", async () => {
+    // Codex round-3 on PR #268: production contact ids are UUIDs, so a
+    // stale `?thread=<contactId>` link parses as a conversation id. When
+    // no conversation in the window matches, the pin must retry the UUID
+    // as a contact id — mirroring fetchInboxDetail — instead of silently
+    // attaching to nothing.
+    const CONTACT_UUID = "11111111-1111-4111-8111-111111111111";
+    const now = Date.now();
+    const messages = [
+      { cid: CONTACT_UUID, pid: "p-a", age: 1_000, unread: false },
+      { cid: CONTACT_UUID, pid: "p-b", age: 9_000, unread: false },
+      { cid: "c-unread", pid: "p-u", age: 5_000, unread: true },
+    ].map((m) => ({
+      contact_id: m.cid,
+      property_id: m.pid,
+      conversation_id: null,
+      body: "x",
+      direction: "inbound" as const,
+      created_at: new Date(now - m.age).toISOString(),
+      read_at: m.unread ? null : new Date(now - m.age + 1).toISOString(),
+    }));
+    const contacts = new Map(
+      messages.map((m) => [
+        m.contact_id,
+        { id: m.contact_id, first_name: null, last_name: null, entity_name: m.contact_id, phone_1: null },
+      ]),
+    );
+    const properties = new Map(
+      messages.map((m) => [
+        m.property_id,
+        { id: m.property_id, address: null, city: null, state: null, assigned_user_id: null },
+      ]),
+    );
+
+    const { supabase } = makeStub({ messages, contacts, properties });
+    const threads = await listThreads(supabase, {
+      unreadOnly: true,
+      includeThreadId: CONTACT_UUID,
+    });
+
+    expect(threads.map((t) => t.threadId)).toEqual([
+      `legacy:${CONTACT_UUID}:p-a`,
+      "legacy:c-unread:p-u",
+    ]);
+  });
 });
 
 describe("looksLikeTestTraffic", () => {

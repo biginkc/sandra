@@ -186,14 +186,28 @@ export async function listThreads(
     consentEventsByContact.set(ev.contact_id, list);
   }
 
+  // Resolve the pin the same way fetchInboxDetail resolves the URL param:
+  // conversation first, then bare-contact fallback. Real contact ids are
+  // UUID-shaped, so a stale `?thread=<contactId>` link parses as
+  // "conversation" — if no message in the window carries that
+  // conversation id, retry it as a contact id (Codex round-3 on PR #268).
   let pinned = opts.includeThreadId
     ? parseThreadId(opts.includeThreadId)
     : null;
+  if (pinned?.kind === "conversation") {
+    const pinnedConversationId = pinned.conversationId;
+    const conversationExists = msgs.some(
+      (m) => m.conversation_id === pinnedConversationId,
+    );
+    if (!conversationExists) {
+      pinned = { kind: "contact", contactId: pinnedConversationId };
+    }
+  }
   if (pinned?.kind === "contact") {
     // Bare contact ids are ambiguous when the contact has several threads.
-    // Mirror fetchInboxDetail's resolution — pin only the thread holding
-    // the contact's most recent message (msgs is ordered created_at desc),
-    // not every thread the contact appears in (Codex round-2 on PR #268).
+    // Pin only the thread holding the contact's most recent message (msgs
+    // is ordered created_at desc), not every thread the contact appears
+    // in (Codex round-2 on PR #268).
     const pinnedContactId = pinned.contactId;
     const latest = msgs.find((m) => m.contact_id === pinnedContactId);
     pinned = latest
