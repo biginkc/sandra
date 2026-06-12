@@ -61,11 +61,20 @@ export async function enrollLead(
   if (propErr) return { status: "failed", message: propErr.message };
   if (!prop) return { status: "property_not_found" };
 
-  const homeowner = prop.homeowner as {
+  // PostgREST may return the joined contact as an object or a
+  // one-element array — normalize before reading.
+  type HomeownerJoin = {
     id: string;
     phone_1: string | null;
     phone_1_type: string;
-  } | null;
+  };
+  const rawHomeowner = prop.homeowner as unknown as
+    | HomeownerJoin
+    | HomeownerJoin[]
+    | null;
+  const homeowner = Array.isArray(rawHomeowner)
+    ? (rawHomeowner[0] ?? null)
+    : rawHomeowner;
   if (!homeowner || !homeowner.phone_1) {
     return {
       status: "no_phone",

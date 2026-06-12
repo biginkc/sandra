@@ -54,10 +54,14 @@ export async function assessAudienceLineTypes(
     }
     for (const row of data ?? []) {
       seen.add(row.id);
-      const homeowner = row.homeowner as unknown as {
-        phone_1: string | null;
-        phone_1_type: string;
-      } | null;
+      // PostgREST may return the joined contact as an object or a
+      // one-element array — normalize like fetchDialerPropertyRows.
+      type HomeownerJoin = { phone_1: string | null; phone_1_type: string };
+      const raw = row.homeowner as unknown as
+        | HomeownerJoin
+        | HomeownerJoin[]
+        | null;
+      const homeowner = Array.isArray(raw) ? (raw[0] ?? null) : raw;
       if (!homeowner?.phone_1) {
         assessment.noPhone++;
       } else if (homeowner.phone_1_type === "mobile") {

@@ -119,11 +119,12 @@ export async function queueSmsBatch(
   // Fetch properties in chunks — Supabase PostgREST rejects large IN
   // clauses (URL length limit, ~8 KB) so we split into batches of 250.
   const CHUNK = 250;
+  type HomeownerJoin = { phone_1_type: string };
   const allProperties: {
     id: string;
     homeowner_contact_id: string | null;
     org_id: string | null;
-    homeowner: { phone_1_type: string } | null;
+    homeowner: HomeownerJoin | null;
   }[] = [];
   for (let i = 0; i < args.propertyIds.length; i += CHUNK) {
     const chunk = args.propertyIds.slice(i, i + CHUNK);
@@ -137,10 +138,19 @@ export async function queueSmsBatch(
     if (propError) {
       throw new Error(`bulk sms property fetch: ${propError.message}`);
     }
-    if (data) {
-      allProperties.push(
-        ...(data as unknown as typeof allProperties),
-      );
+    // PostgREST may return the joined contact as an object or a
+    // one-element array depending on relationship detection — same
+    // normalization as fetchDialerPropertyRows.
+    for (const row of (data ?? []) as unknown as (Omit<
+      (typeof allProperties)[number],
+      "homeowner"
+    > & { homeowner: HomeownerJoin | HomeownerJoin[] | null })[]) {
+      allProperties.push({
+        ...row,
+        homeowner: Array.isArray(row.homeowner)
+          ? (row.homeowner[0] ?? null)
+          : row.homeowner,
+      });
     }
   }
 

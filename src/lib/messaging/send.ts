@@ -460,23 +460,34 @@ export async function releaseQueuedMessage(
   }
 
   // Line-type re-check — a number can get classified landline between
-  // queue and release (cache backfill, future lookup providers). Only
-  // applies while the queued destination still matches the contact's
-  // current phone_1; fail permanently rather than blocking so the
-  // auto-send tick doesn't retry it forever.
+  // queue and release (cache backfill, lookup providers), and slot
+  // promotion can move a queued-to landline OUT of phone_1 (slot 2/3),
+  // so the destination must be checked against EVERY current slot, not
+  // just slot 1. Fail permanently rather than blocking so the auto-send
+  // tick doesn't retry it forever.
   const { data: releaseContact } = await supabase
     .from("contacts")
-    .select("phone_1, phone_1_type")
+    .select(
+      "phone_1, phone_1_type, phone_2, phone_2_type, phone_3, phone_3_type",
+    )
     .eq("id", msg.contact_id)
     .maybeSingle();
-  if (
-    releaseContact?.phone_1_type === "landline" &&
-    releaseContact.phone_1 &&
-    (normalizePhone(releaseContact.phone_1) ?? releaseContact.phone_1) ===
-      msg.to_address
-  ) {
-    await failQueuedMessage(supabase, msg.id, LANDLINE_BLOCK_REASON);
-    return { status: "blocked_landline", reason: LANDLINE_BLOCK_REASON };
+  if (releaseContact) {
+    const slots: [string | null, string][] = [
+      [releaseContact.phone_1, releaseContact.phone_1_type],
+      [releaseContact.phone_2, releaseContact.phone_2_type],
+      [releaseContact.phone_3, releaseContact.phone_3_type],
+    ];
+    const destinationIsLandline = slots.some(
+      ([number, type]) =>
+        type === "landline" &&
+        number &&
+        (normalizePhone(number) ?? number) === msg.to_address,
+    );
+    if (destinationIsLandline) {
+      await failQueuedMessage(supabase, msg.id, LANDLINE_BLOCK_REASON);
+      return { status: "blocked_landline", reason: LANDLINE_BLOCK_REASON };
+    }
   }
 
   // Quiet-hours re-check — dominant reason to queue in the first place.
