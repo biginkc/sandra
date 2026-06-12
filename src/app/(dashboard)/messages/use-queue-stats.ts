@@ -47,8 +47,16 @@ export function useQueueStats(
   // current stats — so a client-side re-render with the old prop never
   // clobbers fresher polled numbers.
   const lastInitialRef = useRef(initialStats);
+  // Bumped every time fresh server props are adopted. A poll snapshots
+  // the generation when it STARTS; if props arrived while it was in
+  // flight, its data predates the server payload and is discarded —
+  // otherwise a slow 30s poll resolving after a router.refresh() (every
+  // queue action triggers one) would overwrite newer numbers with
+  // pre-action ones.
+  const generationRef = useRef(0);
   if (!sameStats(lastInitialRef.current, initialStats)) {
     lastInitialRef.current = initialStats;
+    generationRef.current += 1;
     setStats(initialStats);
   }
 
@@ -57,8 +65,9 @@ export function useQueueStats(
     let cancelled = false;
 
     async function refresh() {
+      const generation = generationRef.current;
       const result = await getQueueStats();
-      if (cancelled) return;
+      if (cancelled || generation !== generationRef.current) return;
       if (result.ok) setStats(result.data);
     }
 

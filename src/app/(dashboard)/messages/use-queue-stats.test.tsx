@@ -188,6 +188,37 @@ describe("useQueueStats (260504-tgq polling, lifted from QueueStatsBanner)", () 
     expect(getQueueStats).not.toHaveBeenCalled();
   });
 
+  it("Discards an in-flight poll that started before fresh server props arrived", async () => {
+    // Deferred poll: starts on the 30s tick, resolves only when we say so.
+    let resolvePoll: (v: unknown) => void = () => {};
+    getQueueStats.mockImplementation(
+      () => new Promise((resolve) => (resolvePoll = resolve)),
+    );
+
+    const { result, rerender } = renderHook(
+      ({ stats }) => useQueueStats(stats, { enabled: true }),
+      { initialProps: { stats: makeStats({ queued: 100 }) } },
+    );
+
+    // Start a poll; it stays pending.
+    await act(async () => {
+      vi.advanceTimersByTime(30_000);
+    });
+    expect(getQueueStats).toHaveBeenCalledTimes(1);
+
+    // A router.refresh()-driven RSC payload lands with fresh numbers.
+    rerender({ stats: makeStats({ queued: 42 }) });
+    expect(result.current.queued).toBe(42);
+
+    // The stale poll finally resolves with pre-refresh numbers — it must
+    // NOT overwrite the fresher server payload.
+    await act(async () => {
+      resolvePoll({ ok: true, data: makeStats({ queued: 100 }) });
+      await Promise.resolve();
+    });
+    expect(result.current.queued).toBe(42);
+  });
+
   it("Clears interval and removes visibilitychange listener on unmount", async () => {
     getQueueStats.mockResolvedValue({
       ok: true,
