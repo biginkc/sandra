@@ -206,14 +206,16 @@ export class TracerfyProvider implements SkipTraceProvider {
     form.append("mail_state_column", "mail_state");
     form.append("first_name_column", "first_name");
     form.append("last_name_column", "last_name");
-    // `enhanced` = Tracerfy resolves the property owner from the address
+    // `advanced` = Tracerfy resolves the property owner from the address
     // itself, the batch equivalent of the single-lookup path's
     // `find_owner: true`. The job never threads owner names into batch
     // inputs (only mailing address), so `normal` mode — which matches by
     // name — returned zero owners for address-only records (the
-    // 2026-06-11 0/49 bulk pilot). Enhanced is 2 credits/hit vs 1; misses
-    // stay free. Named-owner records still resolve under enhanced.
-    form.append("trace_type", "enhanced");
+    // 2026-06-11 0/49 bulk pilot). Advanced is 2 credits/hit vs 1; misses
+    // stay free. Named-owner records still resolve under advanced.
+    // NB: the API enum is `advanced` — `enhanced` (the marketing name)
+    // returns 400 "not a valid choice" (hit live 2026-06-12).
+    form.append("trace_type", "advanced");
 
     const data = await this.requestForm<TracerfyBatchResponse>("/trace/", form);
 
