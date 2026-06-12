@@ -23,6 +23,10 @@ vi.mock("next/navigation", () => ({
 
 // Server-action modules can't load in jsdom (next/server, supabase server).
 vi.mock("./actions", () => ({
+  listQueuedPage: vi.fn(async () => ({
+    ok: true,
+    data: { rows: [], hasMore: false },
+  })),
   releaseMessage: vi.fn(),
   pauseQueuedMessage: vi.fn(),
   resumeQueuedMessage: vi.fn(),

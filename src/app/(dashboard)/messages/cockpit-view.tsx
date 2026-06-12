@@ -24,6 +24,8 @@ type Props = {
   filter: InboxFilter;
   threads: Thread[];
   queued: QueuedRow[];
+  /** True when more queued rows exist beyond the first server page. */
+  queuedHasMore?: boolean;
   /** Server-resolved URL thread param. Used to distinguish "still fetching"
    *  from "fetch completed but there is no matching thread detail." */
   selectedThreadId?: string | null;
@@ -54,6 +56,7 @@ export function CockpitView({
   filter,
   threads,
   queued,
+  queuedHasMore = false,
   selectedThreadId = null,
   threadDetail,
   unknownSenders,
@@ -229,7 +232,11 @@ export function CockpitView({
       ) : (
         <div>
           <QueueStatsBanner stats={liveQueueStats} />
-          <QueuePanel initial={queued} />
+          <QueuePanel
+            initial={queued}
+            initialHasMore={queuedHasMore}
+            totalQueued={liveQueueStats.queued}
+          />
         </div>
       )}
 

@@ -14,6 +14,8 @@ import {
 } from "@/lib/messages/triage";
 import type { Database } from "@/lib/supabase/types";
 
+import type { QueuedRow } from "./queue-panel";
+
 type MessageRow = Database["public"]["Tables"]["messages"]["Row"];
 import {
   releaseQueuedMessage,
@@ -506,5 +508,107 @@ export async function getQueueStats(): Promise<Result<QueueStats>> {
   } catch (e) {
     reportError(e, { tags: { surface: "get_queue_stats" } });
     return errFromUnknown(e, "QUEUE_STATS_FAILED");
+  }
+}
+
+/** Page size for the Outbox queue list (first paint + each scroll fetch). */
+const QUEUE_PAGE_SIZE = 100;
+
+/**
+ * Keyset cursor for the Outbox queue list — the (scheduled_for, id) of
+ * the last row the client already has. Keyset (not offset) because rows
+ * continually leave the head of the queue as they release; an offset
+ * would skip rows every time the queue drains underneath the scroller.
+ */
+export type QueuedPageCursor = {
+  scheduledFor: string | null;
+  id: string;
+};
+
+export type QueuedPage = {
+  rows: QueuedRow[];
+  hasMore: boolean;
+};
+
+/**
+ * One page of the Outbox queue, ordered (scheduled_for ASC nulls last,
+ * id ASC) — the same order the release path drains in. Pass null to get
+ * the first page; pass the last visible row's cursor to get the next.
+ *
+ * Uses the session-scoped client (same RLS surface as the page's
+ * first-paint query). Fetches PAGE_SIZE+1 rows to derive hasMore.
+ */
+export async function listQueuedPage(
+  cursor: QueuedPageCursor | null,
+): Promise<Result<QueuedPage>> {
+  try {
+    const supabase = await createClient();
+
+    let query = supabase
+      .from("messages")
+      .select(
+        `id, body, from_address, to_address, created_at, scheduled_for, property_id, contact_id,
+           property:properties(id, address, city, state),
+           contact:contacts(id, first_name, last_name, entity_name, phone_1)`,
+      )
+      .eq("status", "queued");
+
+    if (cursor) {
+      if (cursor.scheduledFor === null) {
+        // Cursor is inside the nulls-last tail — only later-id null rows remain.
+        query = query.is("scheduled_for", null).gt("id", cursor.id);
+      } else {
+        // Strictly-after in (scheduled_for, id) order, plus the nulls tail
+        // which sorts after every non-null timestamp.
+        query = query.or(
+          `scheduled_for.gt."${cursor.scheduledFor}",and(scheduled_for.eq."${cursor.scheduledFor}",id.gt.${cursor.id}),scheduled_for.is.null`,
+        );
+      }
+    }
+
+    const { data, error } = await query
+      .order("scheduled_for", { ascending: true, nullsFirst: false })
+      .order("id", { ascending: true })
+      .limit(QUEUE_PAGE_SIZE + 1);
+
+    if (error) {
+      return {
+        ok: false,
+        error: { code: "QUEUE_PAGE_FAILED", message: error.message },
+      };
+    }
+
+    const all = data ?? [];
+    const pageRows = all.slice(0, QUEUE_PAGE_SIZE);
+
+    return ok({
+      hasMore: all.length > QUEUE_PAGE_SIZE,
+      rows: pageRows.map((r) => ({
+        id: r.id,
+        body: r.body,
+        fromAddress: r.from_address,
+        toAddress: r.to_address,
+        createdAt: r.created_at,
+        scheduledFor: r.scheduled_for,
+        propertyId: r.property_id,
+        contactId: r.contact_id,
+        propertyAddress: r.property
+          ? [r.property.address, r.property.city, r.property.state]
+              .filter(Boolean)
+              .join(", ")
+          : null,
+        contactName: r.contact
+          ? (r.contact.entity_name ??
+            ([r.contact.first_name, r.contact.last_name]
+              .filter(Boolean)
+              .join(" ") ||
+              null))
+          : null,
+        contactPhone: r.contact?.phone_1 ?? null,
+      })),
+    });
+  } catch (e) {
+    reportError(e, { tags: { surface: "list_queued_page" } });
+    return errFromUnknown(e, "QUEUE_PAGE_FAILED");
   }
 }

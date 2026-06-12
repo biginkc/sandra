@@ -22,6 +22,10 @@ vi.mock("next/navigation", () => ({
 }));
 
 vi.mock("./actions", () => ({
+  listQueuedPage: vi.fn(async () => ({
+    ok: true,
+    data: { rows: [], hasMore: false },
+  })),
   releaseMessage: vi.fn(),
   pauseQueuedMessage: vi.fn(),
   resumeQueuedMessage: vi.fn(),

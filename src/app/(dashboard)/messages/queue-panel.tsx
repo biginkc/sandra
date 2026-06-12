@@ -22,6 +22,7 @@ import { createClient } from "@/lib/supabase/client";
 
 import {
   deleteQueuedMessage,
+  listQueuedPage,
   releaseMessage,
   updateQueuedMessage,
 } from "./actions";
@@ -32,6 +33,8 @@ export type QueuedRow = {
   fromAddress: string | null;
   toAddress: string | null;
   createdAt: string;
+  /** Keyset-pagination cursor component — see listQueuedPage. */
+  scheduledFor: string | null;
   propertyId: string | null;
   contactId: string | null;
   propertyAddress: string | null;
@@ -48,12 +51,82 @@ const MAX_CADENCE_S = 300;
 const DEFAULT_CADENCE_S = 15;
 const CADENCE_STORAGE_KEY = "sandra.queue.cadence";
 
-export function QueuePanel({ initial }: { initial: QueuedRow[] }) {
+export function QueuePanel({
+  initial,
+  initialHasMore = false,
+  totalQueued,
+}: {
+  initial: QueuedRow[];
+  /** True when the server's first page was full — more rows exist beyond it. */
+  initialHasMore?: boolean;
+  /** Live total from queue stats, for the "X of Y loaded" readout. */
+  totalQueued?: number;
+}) {
   const router = useRouter();
   const [rows, setRows] = useState<QueuedRow[]>(initial);
   const [pending, startTransition] = useTransition();
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editBody, setEditBody] = useState("");
+
+  // Infinite scroll — a sentinel below the table loads the next keyset
+  // page when it nears the viewport. hasMore comes from the server's
+  // page-size+1 probe; loadingRef guards against overlapping fetches
+  // (IntersectionObserver can fire repeatedly while the sentinel stays
+  // visible during a slow fetch).
+  const [hasMore, setHasMore] = useState(initialHasMore);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const loadingRef = useRef(false);
+  const sentinelRef = useRef<HTMLDivElement | null>(null);
+
+  const loadMore = async () => {
+    if (loadingRef.current) return;
+    const last = rowsRef.current[rowsRef.current.length - 1];
+    if (!last) return;
+    loadingRef.current = true;
+    setLoadingMore(true);
+    try {
+      const result = await callAction(
+        listQueuedPage({ scheduledFor: last.scheduledFor, id: last.id }),
+        { fallbackMessage: "Couldn't load more of the queue" },
+      );
+      if (!result.ok) return;
+      setHasMore(result.data.hasMore);
+      // Dedup by id: realtime inserts or a queue that drained between
+      // pages can hand us rows we already render.
+      setRows((prev) => {
+        const seen = new Set(prev.map((r) => r.id));
+        return [...prev, ...result.data.rows.filter((r) => !seen.has(r.id))];
+      });
+    } finally {
+      loadingRef.current = false;
+      setLoadingMore(false);
+    }
+  };
+  const loadMoreRef = useRef(loadMore);
+  useEffect(() => {
+    loadMoreRef.current = loadMore;
+  });
+
+  useEffect(() => {
+    if (!hasMore) return;
+    // jsdom (unit tests) has no IntersectionObserver; the panel still
+    // renders, it just never auto-loads.
+    if (typeof IntersectionObserver === "undefined") return;
+    const sentinel = sentinelRef.current;
+    if (!sentinel) return;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((e) => e.isIntersecting)) {
+          void loadMoreRef.current();
+        }
+      },
+      // Start fetching one screen early so the scroll never visibly stalls.
+      { rootMargin: "100% 0px" },
+    );
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  }, [hasMore]);
 
   // Auto-send controller state. Persists across page navigations via
   // localStorage so a half-sent batch survives accidental route changes.
@@ -306,7 +379,9 @@ export function QueuePanel({ initial }: { initial: QueuedRow[] }) {
         </div>
 
         <div className="text-muted-foreground ml-auto text-sm">
-          {rows.length} queued
+          {totalQueued !== undefined && totalQueued > rows.length
+            ? `${rows.length} of ${totalQueued} loaded`
+            : `${rows.length} queued`}
         </div>
       </div>
 
@@ -431,6 +506,16 @@ export function QueuePanel({ initial }: { initial: QueuedRow[] }) {
           </TableBody>
         </Table>
       </div>
+
+      {hasMore && (
+        <div
+          ref={sentinelRef}
+          data-testid="queue-load-more-sentinel"
+          className="text-muted-foreground py-3 text-center text-xs"
+        >
+          {loadingMore ? "Loading more…" : "Scroll to load more"}
+        </div>
+      )}
 
       {autoOn && (
         <Badge variant="outline" className="w-fit text-xs">
