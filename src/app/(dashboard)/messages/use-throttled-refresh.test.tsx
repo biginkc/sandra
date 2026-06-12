@@ -122,6 +122,29 @@ describe("useThrottledRefresh", () => {
     expect(refresh).toHaveBeenCalledTimes(2); // no orphaned trailing fire
   });
 
+  it("a timer armed BEFORE tab-away reconciles immediately on return (no hidden events)", () => {
+    const { result } = renderHook(() => useThrottledRefresh(INTERVAL));
+    act(() => {
+      result.current(); // leading at t=0
+      result.current(); // arms trailing for t=10s
+    });
+    expect(refresh).toHaveBeenCalledTimes(1);
+
+    act(() => setVisibility("hidden")); // t≈2s — nothing arrives while hidden
+    act(() => {
+      vi.advanceTimersByTime(2_000);
+      setVisibility("visible"); // back at t≈4s
+    });
+    // The armed timer is pending staleness — fold it into an immediate
+    // reconcile instead of letting the operator wait out the window.
+    expect(refresh).toHaveBeenCalledTimes(2);
+
+    act(() => {
+      vi.advanceTimersByTime(INTERVAL * 2);
+    });
+    expect(refresh).toHaveBeenCalledTimes(2); // and no orphaned third fire
+  });
+
   it("changing minIntervalMs keeps a pending trailing refresh alive", () => {
     const { result, rerender } = renderHook(
       ({ interval }: { interval: number }) => useThrottledRefresh(interval),

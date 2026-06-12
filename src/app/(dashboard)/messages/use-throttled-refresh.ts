@@ -86,11 +86,13 @@ export function useThrottledRefresh(
   useEffect(() => {
     const onVisibilityChange = () => {
       if (document.visibilityState !== "visible") return;
-      if (!staleWhileHidden.current) return;
+      // Pending state is EITHER an event that arrived while hidden OR a
+      // trailing timer armed before the tab went away — both mean the page
+      // is staler than the user expects on return.
+      if (!staleWhileHidden.current && trailingTimer.current === null) return;
       staleWhileHidden.current = false;
-      // Bypass the throttle window: events were suppressed while hidden,
-      // so this is the first rebuild the user will actually see. Any armed
-      // trailing timer is folded into it.
+      // Bypass the throttle window: this is the first rebuild the user
+      // will actually see. Any armed trailing timer is folded into it.
       clearTrailing();
       refreshNow();
     };
