@@ -308,6 +308,76 @@ describe("runSkipTraceEnrichment (integration, mock provider)", () => {
     expect(itemsAfterSecond).toBe(itemsAfterFirst);
   });
 
+  it("resumed finalize skips already-itemized properties and reconciles counters from the ledger", async () => {
+    // A finalizer killed by the platform's max-duration leaves partial
+    // job_items behind and the claim-revert never runs (2026-06-12).
+    // The sweep rescues the job back to 'running'; the next finalize
+    // pass must skip rows a dead pass already persisted and compute
+    // terminal counters from job_items, not memory.
+    const props = await Promise.all([
+      seedProperty({ address: "61 Resume Ln" }),
+      seedProperty({ address: "62 Resume Ln" }),
+    ]);
+    const ids = props.map((p) => p.propertyId);
+    const jobId = await createPendingJob(ids);
+    await runSkipTraceEnrichment(supabase, { jobId, propertyIds: ids });
+
+    // Simulate the dead pass: one property already has a success item.
+    await supabase.from("job_items").insert({
+      job_id: jobId,
+      property_id: ids[0],
+      status: "success",
+      output_payload: { phones_added: 1 },
+    });
+    // Rescue path: job back to running with the batch still pending.
+    await supabase
+      .from("jobs")
+      .update({ status: "running", provider_run_id: "resume-test-q" })
+      .eq("id", jobId);
+
+    const fakeResults: SkipTraceResult[] = ids.map((id) => ({
+      propertyId: id,
+      hit: true,
+      persons: [
+        {
+          firstName: "Resume",
+          lastName: "Owner",
+          phones: [
+            { number: "+18165550161", type: "Mobile", dnc: false, rank: 1 },
+          ],
+          emails: [],
+          isOwner: true,
+        },
+      ],
+      creditsDeducted: 1,
+      raw: {},
+    }));
+
+    const out = await finalizeSkipTraceFromBatch(supabase, {
+      jobId,
+      results: fakeResults,
+    });
+    expect(out).not.toBeNull();
+
+    // Exactly one item per property — the pre-existing one untouched.
+    const { data: items } = await supabase
+      .from("job_items")
+      .select("property_id, status")
+      .eq("job_id", jobId);
+    expect(items).toHaveLength(2);
+    expect(new Set(items!.map((i) => i.property_id)).size).toBe(2);
+
+    // Counters reconciled from the ledger: both rows count as matched.
+    const { data: job } = await supabase
+      .from("jobs")
+      .select("status, succeeded_items, failed_items")
+      .eq("id", jobId)
+      .single();
+    expect(job!.status).toBe("completed");
+    expect(job!.succeeded_items).toBe(2);
+    expect(job!.failed_items).toBe(0);
+  });
+
   it("cache hit on second run: no provider call, contact unchanged", async () => {
     const { propertyId } = await seedProperty({ address: "Cache Test Ln" });
 

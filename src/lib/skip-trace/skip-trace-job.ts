@@ -409,6 +409,33 @@ async function finalizeClaimed(
     address_to_property_ids?: Record<string, string[]>;
   };
 
+  // ------------------------------------------------------------------
+  // RESUMABILITY. A 4,000-row finalize (~5 rows/s of sequential DB
+  // writes) outlives the function's max duration — the 2026-06-12
+  // recovery passes died at ~3,400 rows and the platform kill skips the
+  // catch block, so the claim-revert never ran. The sweep's stale-
+  // heartbeat rescue re-claims the job; THIS pass must then pick up
+  // where the dead one stopped instead of re-writing every row.
+  // job_items is the ledger: any property that already has an item for
+  // this job was fully persisted by a previous pass — skip it.
+  // ------------------------------------------------------------------
+  const alreadyProcessed = new Set<string>();
+  for (let from = 0; ; from += 1000) {
+    const { data, error } = await supabase
+      .from("job_items")
+      .select("property_id")
+      .eq("job_id", params.jobId)
+      .range(from, from + 999);
+    if (error) {
+      // Fail closed — resuming blind would duplicate items.
+      throw new Error(`finalize resume ledger read failed: ${error.message}`);
+    }
+    for (const row of data ?? []) {
+      if (row.property_id) alreadyProcessed.add(row.property_id);
+    }
+    if (!data || data.length < 1000) break;
+  }
+
   const addressMap: Record<string, string[]> | null =
     prior.address_to_property_ids && typeof prior.address_to_property_ids === "object"
       ? prior.address_to_property_ids
@@ -532,12 +559,13 @@ async function finalizeClaimed(
   const propsById = new Map(props.map((p) => [p.id, p]));
 
   // Refresh the claim heartbeat as the long loops below grind through
-  // thousands of rows, so the sweep's stale-finalizing rescue (15 min)
-  // can tell "working" from "crashed".
+  // thousands of rows, so the sweep's stale-finalizing rescue can tell
+  // "working" from "crashed". At ~5 rows/s a 250-row interval bumps
+  // every ~50s — 6x margin inside the 5-minute rescue window.
   let heartbeatCounter = 0;
   const bumpHeartbeat = async () => {
     heartbeatCounter++;
-    if (heartbeatCounter % 500 !== 0) return;
+    if (heartbeatCounter % 250 !== 0) return;
     await supabase
       .from("jobs")
       .update({ worker_heartbeat_at: new Date().toISOString() })
@@ -549,6 +577,7 @@ async function finalizeClaimed(
   // break the rest of the batch.
   // ------------------------------------------------------------------
   for (const { propertyId, result } of fanOut) {
+    if (alreadyProcessed.has(propertyId)) continue;
     await bumpHeartbeat();
     try {
       await persistAndRecord(
@@ -604,6 +633,7 @@ async function finalizeClaimed(
       }
     }
     for (const propertyId of missing) {
+      if (alreadyProcessed.has(propertyId)) continue;
       await bumpHeartbeat();
       summary.failed++;
       const p = propsById.get(propertyId);
@@ -674,8 +704,50 @@ async function finalizeClaimed(
     });
   }
 
+  // ------------------------------------------------------------------
+  // Terminal counters come from the job_items ledger, not memory. A
+  // resumed pass only walked the remainder — its in-memory counters
+  // miss everything the dead pass persisted. job_items has one row per
+  // property across all passes, so counting it is exact either way.
+  // (cached_hits/api_hits/total_credits stay in-memory: informational,
+  // and the ledger doesn't carry credits per row.)
+  // ------------------------------------------------------------------
+  const successTotal = await countJobItems(supabase, params.jobId, "success");
+  const noMatchTotal = await countJobItems(
+    supabase,
+    params.jobId,
+    "success",
+    /*noMatchOnly*/ true,
+  );
+  const failedTotal = await countJobItems(supabase, params.jobId, "error");
+  summary.matched = successTotal - noMatchTotal;
+  summary.no_match = noMatchTotal;
+  summary.failed = failedTotal;
+
   await finalizeJob(supabase, params.jobId, summary);
   return summary;
+}
+
+/** Count job_items rows for terminal-summary reconciliation. Throws on
+ *  error — finalize must fail closed (claim reverts, sweep retries)
+ *  rather than write counters it couldn't verify. */
+async function countJobItems(
+  supabase: SupabaseClient<Database>,
+  jobId: string,
+  status: "success" | "error",
+  noMatchOnly = false,
+): Promise<number> {
+  let q = supabase
+    .from("job_items")
+    .select("id", { count: "exact", head: true })
+    .eq("job_id", jobId)
+    .eq("status", status);
+  if (noMatchOnly) q = q.eq("output_payload->>no_match", "true");
+  const { count, error } = await q;
+  if (error) {
+    throw new Error(`job_items count failed: ${error.message}`);
+  }
+  return count ?? 0;
 }
 
 // ---------- helpers ----------------------------------------------------

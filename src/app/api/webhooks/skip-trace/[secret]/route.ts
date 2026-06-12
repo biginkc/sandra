@@ -3,6 +3,11 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import { NextResponse } from "next/server";
 import { createClient as createSupabaseClient } from "@supabase/supabase-js";
 
+// Webhook-triggered finalize of a 4,000-row part outlives the default
+// function window. Same ceiling as the sweep cron; finalize is resumable
+// if the platform still kills us.
+export const maxDuration = 800;
+
 import { reportError } from "@/lib/errors/report";
 import {
   mapBatchRow,

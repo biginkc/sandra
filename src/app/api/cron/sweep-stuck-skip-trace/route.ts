@@ -1,6 +1,13 @@
 import { NextResponse } from "next/server";
 import { createClient as createSupabaseClient } from "@supabase/supabase-js";
 
+// Finalizing a 4,000-row part takes ~10+ min of sequential DB writes —
+// far past the default function window (the 2026-06-12 recovery passes
+// were killed mid-loop). 800s is the platform ceiling; combined with
+// resumable finalize, each invocation makes maximal progress and the
+// next re-claim finishes the remainder.
+export const maxDuration = 800;
+
 import { reportError } from "@/lib/errors/report";
 import { getSkipTraceProvider } from "@/lib/skip-trace/registry";
 import { finalizeSkipTraceFromBatch } from "@/lib/skip-trace/skip-trace-job";
@@ -89,11 +96,14 @@ export type SweepSummary = {
  * against the test Supabase without constructing an HTTP request.
  * Production always goes through `handle()`.
  */
-// A finalizer that died mid-run (deploy, crash, function timeout) leaves
-// its job stranded in 'finalizing'. The finalize loop bumps the heartbeat
-// every ~500 rows, so a heartbeat this stale means the worker is gone —
-// hand the job back to 'running' so a later tick re-claims it.
-const STALE_FINALIZING_MS = 15 * 60 * 1000;
+// A finalizer that died mid-run (deploy, crash, function max-duration
+// kill) leaves its job stranded in 'finalizing'. The finalize loop bumps
+// the heartbeat every ~250 rows (~50s at observed row rates), so a
+// 5-minute-stale heartbeat means the worker is gone — hand the job back
+// to 'running' so a later tick re-claims it. Finalize is resumable (it
+// skips properties already in job_items), so re-claims converge instead
+// of re-writing from scratch.
+const STALE_FINALIZING_MS = 5 * 60 * 1000;
 
 export async function runSweep(
   supabase: ReturnType<typeof createServiceRoleClient>,
