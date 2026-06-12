@@ -12,7 +12,7 @@ import type { Database } from "@/lib/supabase/types";
 import { useThrottledRefresh } from "./use-throttled-refresh";
 
 type Message = Database["public"]["Tables"]["messages"]["Row"];
-type ThreadUpdate = {
+export type ThreadUpdate = {
   lastMessageBody: string;
   lastMessageDirection: Thread["lastMessageDirection"];
   lastMessageAt: string;
@@ -234,7 +234,9 @@ function mergeThreadUpdate(
   };
 }
 
-function applyThreadUpdates(
+/** Exported for tests — must stay order-aligned with the server sort in
+ *  `listThreads` (recency-only) or the list reshuffles on every refresh. */
+export function applyThreadUpdates(
   threads: Thread[],
   updates: Record<string, ThreadUpdate>,
 ): Thread[] {

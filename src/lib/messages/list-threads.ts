@@ -2,7 +2,11 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { computeConsentState } from "@/lib/messaging/consent";
 import type { Database } from "@/lib/supabase/types";
-import { buildThreadId } from "./threading";
+import {
+  buildThreadId,
+  parseThreadId,
+  type ParsedThreadId,
+} from "./threading";
 
 export type Thread = {
   threadId: string;
@@ -65,7 +69,9 @@ export type ListThreadsOpts = {
   unreadOnly?: boolean;
   /** Thread id exempt from the `unreadOnly` filter. The cockpit passes the
    *  currently open thread so read-on-open doesn't yank it out of the
-   *  Unread list while the user is still looking at it. */
+   *  Unread list while the user is still looking at it. Accepts any of the
+   *  URL formats (conversation UUID, `legacy:contact:property`, bare
+   *  contact id) — matching is by parsed identity, not raw string. */
   includeThreadId?: string;
 };
 
@@ -180,6 +186,10 @@ export async function listThreads(
     consentEventsByContact.set(ev.contact_id, list);
   }
 
+  const pinned = opts.includeThreadId
+    ? parseThreadId(opts.includeThreadId)
+    : null;
+
   const threads: Thread[] = [];
   for (const [threadId, bucket] of byThread) {
     const contactId = bucket.latest.contact_id!;
@@ -191,7 +201,7 @@ export async function listThreads(
     if (
       opts.unreadOnly &&
       bucket.unreadCount === 0 &&
-      threadId !== opts.includeThreadId
+      !(pinned !== null && matchesPinnedThread(pinned, threadId, bucket))
     )
       continue;
 
@@ -236,6 +246,37 @@ export async function listThreads(
   // the "what needs attention" view.
   threads.sort((a, b) => b.lastMessageAt.localeCompare(a.lastMessageAt));
   return threads;
+}
+
+/**
+ * True when a thread bucket is the one the cockpit pinned via
+ * `includeThreadId`. Compares parsed identity rather than raw strings:
+ * the URL can carry a stale format (legacy key or bare contact id) for a
+ * thread that is now grouped under a conversation UUID, and an exact
+ * string compare would silently drop the pin (Codex P1 on PR #268).
+ */
+function matchesPinnedThread(
+  pinned: ParsedThreadId,
+  threadId: string,
+  bucket: {
+    latest: { contact_id: string | null; conversation_id: string | null };
+    propertyId: string | null;
+  },
+): boolean {
+  switch (pinned.kind) {
+    case "conversation":
+      return (
+        threadId === pinned.conversationId ||
+        bucket.latest.conversation_id === pinned.conversationId
+      );
+    case "legacy":
+      return (
+        bucket.latest.contact_id === pinned.contactId &&
+        (bucket.propertyId ?? null) === pinned.propertyId
+      );
+    case "contact":
+      return bucket.latest.contact_id === pinned.contactId;
+  }
 }
 
 /**

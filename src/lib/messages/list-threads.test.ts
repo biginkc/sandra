@@ -14,6 +14,7 @@ function makeStub(opts: {
   messages: Array<{
     contact_id: string;
     property_id: string | null;
+    conversation_id?: string | null;
     body: string;
     direction: "inbound" | "outbound";
     created_at: string;
@@ -320,12 +321,18 @@ describe("listThreads — isOptedOut (DNC) flag", () => {
 
 describe("listThreads — recency-only sort", () => {
   function seedFixtures(
-    rows: Array<{ cid: string; age: number; unread: boolean }>,
+    rows: Array<{
+      cid: string;
+      age: number;
+      unread: boolean;
+      convId?: string | null;
+    }>,
   ) {
     const now = Date.now();
     const messages = rows.map((m) => ({
       contact_id: m.cid,
       property_id: `p-${m.cid}`,
+      conversation_id: m.convId ?? null,
       body: "x",
       direction: "inbound" as const,
       created_at: new Date(now - m.age).toISOString(),
@@ -385,6 +392,42 @@ describe("listThreads — recency-only sort", () => {
 
     const unpinned = await listThreads(supabase, { unreadOnly: true });
     expect(unpinned.map((t) => t.contactId)).toEqual(["c-unread"]);
+  });
+
+  it("pins via stale URL formats when the thread is grouped by conversation UUID", async () => {
+    // Codex P1 on PR #268: old inbox links carry legacy / bare-contact ids
+    // while the thread may now group under a conversation UUID. The pin
+    // must match by identity, not raw string equality.
+    const CONV = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const seed = () =>
+      seedFixtures([
+        { cid: "c-open", age: 1_000, unread: false, convId: CONV },
+        { cid: "c-unread", age: 5_000, unread: true },
+      ]);
+
+    // Stale legacy-format link.
+    const viaLegacy = await listThreads(seed().supabase, {
+      unreadOnly: true,
+      includeThreadId: "legacy:c-open:p-c-open",
+    });
+    expect(viaLegacy.map((t) => t.contactId)).toEqual(["c-open", "c-unread"]);
+
+    // Pre-Phase-2 bare contact-id link.
+    const viaContact = await listThreads(seed().supabase, {
+      unreadOnly: true,
+      includeThreadId: "c-open",
+    });
+    expect(viaContact.map((t) => t.contactId)).toEqual(["c-open", "c-unread"]);
+
+    // Canonical conversation-UUID link.
+    const viaConversation = await listThreads(seed().supabase, {
+      unreadOnly: true,
+      includeThreadId: CONV,
+    });
+    expect(viaConversation.map((t) => t.contactId)).toEqual([
+      "c-open",
+      "c-unread",
+    ]);
   });
 });
 
