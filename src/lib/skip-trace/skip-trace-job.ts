@@ -867,7 +867,11 @@ async function finalizeClaimed(
   // (cached_hits/api_hits/total_credits stay in-memory: informational,
   // and the ledger doesn't carry credits per row.)
   // ------------------------------------------------------------------
-  const { ledger: endLedger } = await readItemLedger(supabase, params.jobId);
+  const { ledger: endLedger } = await readItemLedger(
+    supabase,
+    params.jobId,
+    bumpHeartbeat,
+  );
   let matchedTotal = 0;
   let noMatchTotal = 0;
   let failedTotal = 0;
@@ -883,7 +887,9 @@ async function finalizeClaimed(
   summary.no_match = noMatchTotal;
   summary.failed = failedTotal;
 
-  await finalizeJob(supabase, params.jobId, summary);
+  await finalizeJob(supabase, params.jobId, summary, {
+    requireFinalizing: true,
+  });
   return summary;
 }
 
@@ -1049,6 +1055,7 @@ async function finalizeJob(
   supabase: SupabaseClient<Database>,
   jobId: string,
   summary: SkipTraceJobSummary,
+  opts?: { requireFinalizing?: boolean },
 ): Promise<void> {
   const status: Database["public"]["Tables"]["jobs"]["Update"]["status"] =
     summary.failed === 0
@@ -1057,7 +1064,11 @@ async function finalizeJob(
         ? "failed"
         : "partial";
 
-  await supabase
+  // Batch finalizers must still OWN the job when writing terminal
+  // state — a stale worker whose claim was rescued away must not
+  // overwrite the new owner's job row. Sync paths (no claim machinery)
+  // update unconditionally as before.
+  let q = supabase
     .from("jobs")
     .update({
       status,
@@ -1068,6 +1079,16 @@ async function finalizeJob(
       result_summary: summary as unknown as Json,
     })
     .eq("id", jobId);
+  if (opts?.requireFinalizing) {
+    q = q.eq("status", "finalizing");
+  }
+  const { data: updated, error: updateErr } = await q.select("id");
+  if (updateErr) {
+    throw new Error(`finalize terminal write failed: ${updateErr.message}`);
+  }
+  if (opts?.requireFinalizing && (!updated || updated.length === 0)) {
+    throw new ClaimLostError(jobId);
+  }
 
   try {
     await dispatchJobCompleted(supabase, { jobId });
