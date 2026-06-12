@@ -358,15 +358,53 @@ export async function runSkipTraceEnrichment(
 export async function finalizeSkipTraceFromBatch(
   supabase: SupabaseClient<Database>,
   params: { jobId: string; results: SkipTraceResult[] },
-): Promise<SkipTraceJobSummary> {
-  // Resume the existing summary if present so cached_hits etc. carry forward.
-  const { data: jobRow } = await supabase
+): Promise<SkipTraceJobSummary | null> {
+  // ------------------------------------------------------------------
+  // Atomic claim. Finalize at 4K rows takes minutes while the sweep
+  // cron fires every minute AND the webhook can land concurrently — on
+  // 2026-06-12 four overlapping finalizers wrote 16,000 job_items on a
+  // 4,000-row job. The UPDATE's `status='running'` predicate makes the
+  // claim atomic: exactly one caller flips running→finalizing; everyone
+  // else sees zero rows updated and walks away.
+  // ------------------------------------------------------------------
+  const { data: claimed, error: claimErr } = await supabase
     .from("jobs")
-    .select("result_summary")
+    .update({
+      status: "finalizing",
+      worker_heartbeat_at: new Date().toISOString(),
+    })
     .eq("id", params.jobId)
-    .maybeSingle();
+    .eq("status", "running")
+    .select("result_summary");
+  if (claimErr) {
+    throw new Error(`finalize claim failed: ${claimErr.message}`);
+  }
+  if (!claimed || claimed.length === 0) {
+    // Another finalizer owns (or already finished) this job.
+    return null;
+  }
+  const jobRow = claimed[0];
 
-  const prior = (jobRow?.result_summary ?? {}) as Partial<SkipTraceJobSummary> & {
+  try {
+    return await finalizeClaimed(supabase, params, jobRow.result_summary);
+  } catch (e) {
+    // Give the job back so the next sweep tick can re-claim and retry —
+    // a crashed finalizer must not strand the job in 'finalizing'.
+    await supabase
+      .from("jobs")
+      .update({ status: "running" })
+      .eq("id", params.jobId)
+      .eq("status", "finalizing");
+    throw e;
+  }
+}
+
+async function finalizeClaimed(
+  supabase: SupabaseClient<Database>,
+  params: { jobId: string; results: SkipTraceResult[] },
+  priorSummary: unknown,
+): Promise<SkipTraceJobSummary> {
+  const prior = (priorSummary ?? {}) as Partial<SkipTraceJobSummary> & {
     batch_pending?: boolean;
     address_to_property_ids?: Record<string, string[]>;
   };
@@ -461,20 +499,57 @@ export async function finalizeSkipTraceFromBatch(
       for (const id of ids) allRelatedPropertyIds.add(id);
     }
   }
-  const { data: props } =
-    allRelatedPropertyIds.size > 0
-      ? await supabase
-          .from("properties")
-          .select("id, address, city, state, zip, cass_status")
-          .in("id", Array.from(allRelatedPropertyIds))
-      : { data: [] };
-  const propsById = new Map((props ?? []).map((p) => [p.id, p]));
+  // Chunked — a 4,000-id .in() rides the URL past PostgREST's request
+  // line limit and the query fails wholesale (which then misclassified
+  // every missing property as address_unverified on 2026-06-12).
+  const props: Array<{
+    id: string;
+    address: string;
+    city: string | null;
+    state: string;
+    zip: string | null;
+    cass_status: string;
+  }> = [];
+  for (const ids of chunked(Array.from(allRelatedPropertyIds), IN_CHUNK)) {
+    const { data, error } = await supabase
+      .from("properties")
+      .select("id, address, city, state, zip, cass_status")
+      .in("id", ids);
+    if (error) {
+      reportError(error, {
+        tags: { surface: "skip_trace_finalize_props_lookup" },
+        extra: { jobId: params.jobId, chunkSize: ids.length },
+      });
+      // Fail CLOSED. A partial propsById map silently misclassifies
+      // every affected missing property as address_unverified and skips
+      // its negative-cache write. Throwing reverts the claim
+      // (finalizing→running) so the next sweep tick retries the whole
+      // finalize against a healthy database.
+      throw new Error(`finalize props lookup failed: ${error.message}`);
+    }
+    if (data) props.push(...data);
+  }
+  const propsById = new Map(props.map((p) => [p.id, p]));
+
+  // Refresh the claim heartbeat as the long loops below grind through
+  // thousands of rows, so the sweep's stale-finalizing rescue (15 min)
+  // can tell "working" from "crashed".
+  let heartbeatCounter = 0;
+  const bumpHeartbeat = async () => {
+    heartbeatCounter++;
+    if (heartbeatCounter % 500 !== 0) return;
+    await supabase
+      .from("jobs")
+      .update({ worker_heartbeat_at: new Date().toISOString() })
+      .eq("id", params.jobId);
+  };
 
   // ------------------------------------------------------------------
   // Apply results. Wrap each persist in try/catch so one bad row can't
   // break the rest of the batch.
   // ------------------------------------------------------------------
   for (const { propertyId, result } of fanOut) {
+    await bumpHeartbeat();
     try {
       await persistAndRecord(
         supabase,
@@ -529,6 +604,7 @@ export async function finalizeSkipTraceFromBatch(
       }
     }
     for (const propertyId of missing) {
+      await bumpHeartbeat();
       summary.failed++;
       const p = propsById.get(propertyId);
       const isCassVerified = p?.cass_status === "verified";

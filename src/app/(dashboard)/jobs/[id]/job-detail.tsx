@@ -111,7 +111,9 @@ export function JobDetail({
     childJobs.find(
       (c) =>
         c.type === "skip_trace" &&
-        (c.status === "queued" || c.status === "running"),
+        (c.status === "queued" ||
+          c.status === "running" ||
+          c.status === "finalizing"),
     ) ?? null;
   const showRetry = isSkipTraceRetryable && retryCount > 0;
 

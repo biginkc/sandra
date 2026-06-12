@@ -229,7 +229,7 @@ describe("POST /api/webhooks/skip-trace/[secret] (per-consumer auth)", () => {
     expect(response.status).toBe(403);
   });
 
-  it("rejects with 400 when payload has no queue_id", async () => {
+  it("acknowledges (200, ignored) when payload has no queue_id — live Tracerfy webhooks omit it; the cron poll path finalizes instead", async () => {
     await seedConsumer({
       name: "Tracerfy",
       secret: PROVIDER_SECRET,
@@ -239,7 +239,11 @@ describe("POST /api/webhooks/skip-trace/[secret] (per-consumer auth)", () => {
       makeRequest({ rows: [] }, PROVIDER_SECRET),
       makeContext(PROVIDER_SECRET),
     );
-    expect(response.status).toBe(400);
+    // 400 would make Tracerfy retry a payload we can never map; 200
+    // stops the retry loop and defers to the sweep cron.
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.ignored).toBeTruthy();
   });
 
   it("returns 200 with ignored body when queue_id matches no job (defensive — provider firing for a queue we don't track)", async () => {

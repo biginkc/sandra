@@ -255,6 +255,59 @@ describe("runSkipTraceEnrichment (integration, mock provider)", () => {
     expect(contactIds.size).toBe(1);
   });
 
+  it("second finalize loses the claim: returns null, writes no duplicate items", async () => {
+    // 2026-06-12: the sweep cron fires every minute while a 4K-row
+    // finalize takes several — overlapping finalizers quadruple-wrote
+    // job_items. The running→finalizing claim makes finalize re-entrant.
+    const { propertyId } = await seedProperty({ address: "55 Claim Ln" });
+    const jobId = await createPendingJob([propertyId]);
+    await runSkipTraceEnrichment(supabase, {
+      jobId,
+      propertyIds: [propertyId],
+    });
+    // The 1-miss path runs sync; force the job back to running with a
+    // provider_run_id so it looks like a pending batch.
+    await supabase
+      .from("jobs")
+      .update({ status: "running", provider_run_id: "claim-test-q" })
+      .eq("id", jobId);
+
+    const fakeResults: SkipTraceResult[] = [
+      {
+        propertyId,
+        hit: false,
+        persons: [],
+        creditsDeducted: 0,
+        raw: {},
+      },
+    ];
+
+    const first = await finalizeSkipTraceFromBatch(supabase, {
+      jobId,
+      results: fakeResults,
+    });
+    expect(first).not.toBeNull();
+
+    const { count: itemsAfterFirst } = await supabase
+      .from("job_items")
+      .select("id", { count: "exact", head: true })
+      .eq("job_id", jobId);
+
+    // Job is terminal now — a late webhook / overlapping tick must
+    // no-op instead of re-applying results.
+    const second = await finalizeSkipTraceFromBatch(supabase, {
+      jobId,
+      results: fakeResults,
+    });
+    expect(second).toBeNull();
+
+    const { count: itemsAfterSecond } = await supabase
+      .from("job_items")
+      .select("id", { count: "exact", head: true })
+      .eq("job_id", jobId);
+    expect(itemsAfterSecond).toBe(itemsAfterFirst);
+  });
+
   it("cache hit on second run: no provider call, contact unchanged", async () => {
     const { propertyId } = await seedProperty({ address: "Cache Test Ln" });
 

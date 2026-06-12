@@ -343,6 +343,158 @@ describe("TracerfyProvider — pollBatch", () => {
     expect(result).toBeNull();
   });
 
+  it("returns null for an EMPTY array — no rows yet, not zero-row completion", async () => {
+    // 2026-06-12: empty-array polls were treated as completed batches,
+    // which finalized jobs with blanket error items for every property.
+    mockFetch({ status: 200, body: [] });
+    const p = new TracerfyProvider("k");
+    const result = await p.pollBatch("42");
+    expect(result).toBeNull();
+  });
+
+  it("parses the FLAT advanced-mode row shape (no persons array, no hit field)", async () => {
+    // Live advanced-batch shape, first observed 2026-06-12: owner data
+    // arrives as flat row-level fields. The previous parser looked only
+    // for `persons`/`hit` and silently dropped every returned owner
+    // across a 12,282-row production run.
+    mockFetch({
+      status: 200,
+      body: [
+        {
+          id: 34477211,
+          address: "7412 E 110th ST",
+          city: "Kansas City",
+          state: "MO",
+          zip: "64134",
+          first_name: "Julia",
+          last_name: "Eichler",
+          mobile_1: "8102802114",
+          mobile_2: "8102802195",
+          mobile_3: "",
+          landline_1: "8107975891",
+          landline_2: "",
+          email_1: "julialynn2013@gmail.com",
+          email_2: "",
+          mail_address: "7412 E 110th ST",
+          mail_city: "Kansas City",
+          mail_state: "MO",
+          mail_zip: "64134",
+        },
+      ],
+    });
+    const p = new TracerfyProvider("k");
+    const result = await p.pollBatch("42");
+    expect(result).not.toBeNull();
+    const row = result![0];
+    expect(row.hit).toBe(true);
+    expect(row.persons).toHaveLength(1);
+    const person = row.persons[0];
+    expect(person.firstName).toBe("Julia");
+    expect(person.lastName).toBe("Eichler");
+    expect(person.isOwner).toBe(true);
+    // Mobiles rank ahead of landlines (phone_1 feeds SMS), empties dropped.
+    expect(person.phones.map((ph) => ph.number)).toEqual([
+      "8102802114",
+      "8102802195",
+      "8107975891",
+    ]);
+    expect(person.phones[0].type).toBe("Mobile");
+    expect(person.phones[2].type).toBe("Landline");
+    expect(person.phones.map((ph) => ph.rank)).toEqual([1, 2, 3]);
+    expect(person.emails).toEqual([
+      { email: "julialynn2013@gmail.com", rank: 1 },
+    ]);
+    expect(row.mailingAddress).toEqual({
+      street: "7412 E 110th ST",
+      city: "Kansas City",
+      state: "MO",
+      zip: "64134",
+    });
+    expect(row.matchedAddress).toEqual({
+      address: "7412 E 110th ST",
+      city: "Kansas City",
+      state: "MO",
+    });
+  });
+
+  it("flat row with name only (no phones/emails) still counts as a hit", async () => {
+    // Owner identity without contact data is still enrichment worth
+    // persisting — hit=false would downgrade it to no_match and drop
+    // the name (Codex review finding on PR #252).
+    mockFetch({
+      status: 200,
+      body: [
+        {
+          address: "9 Name Only Rd",
+          city: "KC",
+          state: "MO",
+          first_name: "Pat",
+          last_name: "Owner",
+          mobile_1: "",
+          landline_1: "",
+          email_1: "",
+        },
+      ],
+    });
+    const p = new TracerfyProvider("k");
+    const result = await p.pollBatch("42");
+    expect(result![0].hit).toBe(true);
+    expect(result![0].persons).toHaveLength(1);
+    expect(result![0].persons[0].lastName).toBe("Owner");
+    expect(result![0].persons[0].phones).toHaveLength(0);
+  });
+
+  it("respects provider-declared hit=false on nested-persons rows", async () => {
+    // The persons-derived hit fallback applies ONLY when the row carries
+    // no `hit` field (flat shape). An explicit provider hit:false must
+    // not be promoted to a match (Codex re-review finding on PR #252).
+    mockFetch({
+      status: 200,
+      body: [
+        {
+          address: "3 Declared Miss Ln",
+          city: "KC",
+          state: "MO",
+          hit: false,
+          credits_deducted: 0,
+          persons: [
+            {
+              first_name: "Ghost",
+              last_name: "Record",
+              phones: [],
+              emails: [],
+            },
+          ],
+        },
+      ],
+    });
+    const p = new TracerfyProvider("k");
+    const result = await p.pollBatch("42");
+    expect(result![0].hit).toBe(false);
+  });
+
+  it("flat row with no owner data at all maps to hit=false, no persons", async () => {
+    mockFetch({
+      status: 200,
+      body: [
+        {
+          address: "1 Empty St",
+          city: "KC",
+          state: "MO",
+          first_name: "",
+          last_name: "",
+          mobile_1: "",
+          landline_1: "",
+          email_1: "",
+        },
+      ],
+    });
+    const p = new TracerfyProvider("k");
+    const result = await p.pollBatch("42");
+    expect(result![0].hit).toBe(false);
+    expect(result![0].persons).toHaveLength(0);
+  });
+
   it("returns mapped results when complete (array response)", async () => {
     mockFetch({
       status: 200,
