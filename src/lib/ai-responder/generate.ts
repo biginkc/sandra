@@ -126,3 +126,47 @@ export async function generateAiReply(
 export function createAnthropicClient(): Anthropic {
   return new Anthropic();
 }
+
+/**
+ * Classify a thrown provider error into the two account-level failure
+ * modes an operator must act on TODAY, as opposed to transient or
+ * code-level failures a retry/deploy fixes:
+ *   - "billing": the org is out of API credits — every call fails until
+ *     someone adds funds (live incident 2026-06-12: 6 hot replies in the
+ *     first campaign hour, zero AI responses, generic generate_error)
+ *   - "auth": the API key is invalid/revoked/expired
+ * Duck-typed on status + message so it works for the real SDK's
+ * APIError and for test stubs alike.
+ */
+export function classifyProviderFailure(
+  err: unknown,
+): "billing" | "auth" | null {
+  const e = err as
+    | {
+        status?: unknown;
+        message?: unknown;
+        error?: { type?: unknown; error?: { type?: unknown } };
+      }
+    | null;
+  // The SDK's APIError carries the structured body: { type: "error",
+  // error: { type: "billing_error" | "authentication_error" | ... } }.
+  // Trust that FIRST — Anthropic can reword the human message, but the
+  // typed enum is the contract. Message regex stays as fallback for
+  // older payload shapes and test stubs.
+  const structuredType =
+    (typeof e?.error?.error?.type === "string" && e.error.error.type) ||
+    (typeof e?.error?.type === "string" && e.error.type) ||
+    null;
+  if (structuredType === "billing_error") return "billing";
+  if (structuredType === "authentication_error") return "auth";
+
+  const status = typeof e?.status === "number" ? e.status : null;
+  const message = typeof e?.message === "string" ? e.message : "";
+  if (status === 401 || /invalid x-api-key|authentication_error/i.test(message)) {
+    return "auth";
+  }
+  if (/credit balance|purchase credits|billing/i.test(message)) {
+    return "billing";
+  }
+  return null;
+}

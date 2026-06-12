@@ -132,5 +132,20 @@ export function formatNotification(
         body: `Due ${due} · ${typeLabel}`,
       };
     }
+    case "ai_responder_provider_failure": {
+      // NB: the dispatch throttle and the migration-076 dedupe index
+      // both key on these exact titles ("credits exhausted" / "key
+      // rejected") — keep those phrases stable if rewording.
+      const kind = payload.providerFailure ?? "billing";
+      return kind === "billing"
+        ? {
+            title: "AI responder is DOWN — Anthropic credits exhausted",
+            body: "Every inbound reply is escalating unanswered. Add credits at console.anthropic.com → Plans & Billing; it recovers automatically.",
+          }
+        : {
+            title: "AI responder is DOWN — Anthropic API key rejected",
+            body: "Every inbound reply is escalating unanswered. Check the key at console.anthropic.com and update ANTHROPIC_API_KEY in Vercel.",
+          };
+    }
   }
 }

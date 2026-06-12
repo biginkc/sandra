@@ -51,11 +51,17 @@ export function parseEscalationReason(
     };
   }
 
+  // Account-level provider failures (dead credits / dead key) take the
+  // loudest color: they mean the responder is down for EVERY lead, not
+  // just this conversation.
+  const color: ReasonColor =
+    gate === "provider_billing" || gate === "provider_auth" ? "rose" : "amber";
+
   return {
     raw,
     gate,
     tier: null,
-    color: "amber",
+    color,
     shortLabel: formatShortLabel(gate),
     longLabel: formatLongLabel(gate, detail) ?? raw,
   };
@@ -77,6 +83,10 @@ function formatLongLabel(gate: string, detail: string): string | null {
       return `send pipeline blocked (${detail.replace(/_/g, " ")})`;
     case "generate_error":
       return "model call failed";
+    case "provider_billing":
+      return "Anthropic credits exhausted - AI responder down until topped up";
+    case "provider_auth":
+      return "Anthropic API key rejected - AI responder down until fixed";
     default:
       return null;
   }
@@ -98,6 +108,10 @@ function formatShortLabel(gate: string): string {
       return "Send blocked";
     case "generate_error":
       return "AI error";
+    case "provider_billing":
+      return "API credits out";
+    case "provider_auth":
+      return "API key dead";
     default:
       return "Needs review";
   }

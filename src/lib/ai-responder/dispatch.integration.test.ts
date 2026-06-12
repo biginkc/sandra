@@ -663,4 +663,148 @@ describe("dispatchAiResponse (integration)", () => {
     );
     expect(outcome).toEqual({ outcome: "escalated", reason: "generate_error" });
   });
+
+  it("credit-balance failure → provider_billing reason + one admin notification", async () => {
+    // The live 2026-06-12 incident shape: Anthropic 400 with the
+    // credit-balance message. Must escalate with the DISTINCT reason and
+    // notify admins (throttled), not blend into generate_error.
+    await seedConfig();
+    // Seed a real admin: listAdminUserIds filters auth users against
+    // ADMIN_EMAILS (read at call time).
+    const adminEmail = `ai-billing-admin-${Date.now()}@test.example.com`;
+    const prevAdminEmails = process.env.ADMIN_EMAILS;
+    process.env.ADMIN_EMAILS = adminEmail;
+    const { data: adminUser, error: adminErr } =
+      await supabase.auth.admin.createUser({
+        email: adminEmail,
+        password: `test-pw-${Math.random().toString(36).slice(2)}`,
+        email_confirm: true,
+      });
+    if (adminErr || !adminUser.user) {
+      throw new Error(`admin seed failed: ${adminErr?.message}`);
+    }
+    const adminUserId = adminUser.user.id;
+    const { propertyId, contactId } = await seedLead({
+      phone: "+18167554013",
+    });
+    const billingError = Object.assign(
+      new Error(
+        "Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits.",
+      ),
+      { status: 400 },
+    );
+    const outcome = await dispatchAiResponse(
+      supabase,
+      { propertyId, contactId, inboundBody: "hey" },
+      { anthropic: throwingAnthropic(billingError) },
+    );
+    expect(outcome).toEqual({
+      outcome: "escalated",
+      reason: "provider_billing",
+    });
+
+    const { data: prop } = await supabase
+      .from("properties")
+      .select("needs_human_attention, last_ai_escalation_reason")
+      .eq("id", propertyId)
+      .single();
+    expect(prop!.needs_human_attention).toBe(true);
+    expect(prop!.last_ai_escalation_reason).toBe("provider_billing");
+
+    const { data: notifs } = await supabase
+      .from("notifications")
+      .select("id, title")
+      .eq("event_type", "ai_responder_provider_failure");
+    expect(notifs!.length).toBeGreaterThan(0);
+    expect(notifs![0].title).toMatch(/credits/i);
+    const firstCount = notifs!.length;
+
+    // Second failure inside the 24h window: escalates again but does
+    // NOT add another notification (throttle).
+    const { propertyId: p2, contactId: c2 } = await seedLead({
+      phone: "+18167554014",
+    });
+    await dispatchAiResponse(
+      supabase,
+      { propertyId: p2, contactId: c2, inboundBody: "hey" },
+      { anthropic: throwingAnthropic(billingError) },
+    );
+    const { data: notifs2 } = await supabase
+      .from("notifications")
+      .select("id")
+      .eq("event_type", "ai_responder_provider_failure");
+    expect(notifs2!.length).toBe(firstCount);
+
+    // Cleanup: shared test project — don't leak the auth user or env.
+    process.env.ADMIN_EMAILS = prevAdminEmails;
+    await supabase.auth.admin.deleteUser(adminUserId);
+  });
+
+  it("dedupe index: same admin/kind/day blocked within an org, allowed across orgs", async () => {
+    // Codex re-review P1: an admin allowlisted in two orgs must get one
+    // outage alert PER ORG. The 076 partial unique index is keyed
+    // (org_id, user_id, title, utc-day) — verify both sides at the DB.
+    const adminEmail = `dedupe-admin-${Date.now()}@test.example.com`;
+    const { data: adminUser } = await supabase.auth.admin.createUser({
+      email: adminEmail,
+      password: `test-pw-${Math.random().toString(36).slice(2)}`,
+      email_confirm: true,
+    });
+    const adminUserId = adminUser!.user!.id;
+    const { data: orgA } = await supabase
+      .from("organizations")
+      .select("id")
+      .limit(1)
+      .single();
+    const { data: orgB, error: orgBErr } = await supabase
+      .from("organizations")
+      .insert({ name: `dedupe-test-org-${Date.now()}` })
+      .select("id")
+      .single();
+    if (orgBErr || !orgB) throw new Error(`org seed failed: ${orgBErr?.message}`);
+
+    const row = (orgId: string) => ({
+      org_id: orgId,
+      user_id: adminUserId,
+      event_type: "ai_responder_provider_failure",
+      entity_type: "property",
+      entity_id: "00000000-0000-0000-0000-000000000001",
+      title: "AI responder is DOWN — Anthropic credits exhausted",
+      body: "test",
+    });
+
+    const first = await supabase.from("notifications").insert(row(orgA!.id));
+    expect(first.error).toBeNull();
+    // Same org, same kind, same day → conflict.
+    const dup = await supabase.from("notifications").insert(row(orgA!.id));
+    expect(dup.error?.message ?? "").toMatch(/duplicate key/i);
+    // Different org, same admin/kind/day → allowed.
+    const crossOrg = await supabase.from("notifications").insert(row(orgB.id));
+    expect(crossOrg.error).toBeNull();
+
+    // Cleanup (shared test project).
+    await supabase
+      .from("notifications")
+      .delete()
+      .eq("event_type", "ai_responder_provider_failure");
+    await supabase.from("organizations").delete().eq("id", orgB.id);
+    await supabase.auth.admin.deleteUser(adminUserId);
+  });
+
+  it("401 auth failure → provider_auth reason", async () => {
+    await seedConfig();
+    const { propertyId, contactId } = await seedLead({
+      phone: "+18167554015",
+    });
+    const authError = Object.assign(
+      new Error("authentication_error: invalid x-api-key"),
+      { status: 401 },
+    );
+    const outcome = await dispatchAiResponse(
+      supabase,
+      { propertyId, contactId, inboundBody: "hey" },
+      { anthropic: throwingAnthropic(authError) },
+    );
+    expect(outcome).toEqual({ outcome: "escalated", reason: "provider_auth" });
+  });
 });

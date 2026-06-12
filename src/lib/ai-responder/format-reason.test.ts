@@ -129,3 +129,21 @@ describe("parseEscalationReason — unknown gate falls back gracefully", () => {
     expect(r!.longLabel).toBe("future_gate:something");
   });
 });
+
+describe("provider failure reasons", () => {
+  it("provider_billing parses loud: rose color, credits label", () => {
+    const parsed = parseEscalationReason("provider_billing");
+    expect(parsed).not.toBeNull();
+    expect(parsed!.color).toBe("rose");
+    expect(parsed!.shortLabel).toBe("API credits out");
+    expect(parsed!.longLabel).toMatch(/credits exhausted/i);
+  });
+
+  it("provider_auth parses loud: rose color, key label", () => {
+    const parsed = parseEscalationReason("provider_auth");
+    expect(parsed).not.toBeNull();
+    expect(parsed!.color).toBe("rose");
+    expect(parsed!.shortLabel).toBe("API key dead");
+    expect(parsed!.longLabel).toMatch(/key rejected/i);
+  });
+});
