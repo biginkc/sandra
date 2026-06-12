@@ -172,6 +172,28 @@ describe("<QueuePanel /> infinite scroll", () => {
     expect(screen.getByTestId("queue-load-more-sentinel")).toBeInTheDocument();
   });
 
+  it("re-arms the sentinel and re-seeds from page 1 when live stats outrun an empty table", async () => {
+    listQueuedPage.mockResolvedValue({
+      ok: true,
+      data: { rows: [makeRow(1)], hasMore: false },
+    });
+
+    // Empty queue, fully loaded… but the live stats say 1 queued
+    // (another tab queued a message; realtime has no INSERT path).
+    render(<QueuePanel initial={[]} initialHasMore={false} totalQueued={1} />);
+
+    // The sentinel re-arms instead of letting the table contradict the badge.
+    expect(screen.getByTestId("queue-load-more-sentinel")).toBeInTheDocument();
+
+    await act(async () => {
+      intersect!();
+    });
+
+    // Empty list → null cursor re-seed, and the new row renders.
+    expect(listQueuedPage).toHaveBeenCalledWith(null);
+    expect(screen.getByText("1 Main St")).toBeInTheDocument();
+  });
+
   it("shows 'X of Y loaded' when the live total exceeds the loaded rows", () => {
     render(
       <QueuePanel

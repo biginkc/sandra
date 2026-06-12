@@ -80,15 +80,19 @@ export function QueuePanel({
 
   const loadMore = async () => {
     if (loadingRef.current) return;
+    // Empty list → null cursor re-seeds from page 1 (dedup makes this
+    // idempotent). Happens when live stats re-arm the sentinel on a
+    // queue that grew from zero.
     const last = rowsRef.current[rowsRef.current.length - 1];
-    if (!last) return;
+    const cursor = last
+      ? { scheduledFor: last.scheduledFor, id: last.id }
+      : null;
     loadingRef.current = true;
     setLoadingMore(true);
     try {
-      const result = await callAction(
-        listQueuedPage({ scheduledFor: last.scheduledFor, id: last.id }),
-        { fallbackMessage: "Couldn't load more of the queue" },
-      );
+      const result = await callAction(listQueuedPage(cursor), {
+        fallbackMessage: "Couldn't load more of the queue",
+      });
       if (!result.ok) return;
       setHasMore(result.data.hasMore);
       // Dedup by id: realtime inserts or a queue that drained between
@@ -106,6 +110,20 @@ export function QueuePanel({
   useEffect(() => {
     loadMoreRef.current = loadMore;
   });
+
+  // The live stats total can outrun the loaded set: another tab/user
+  // queues a message (the realtime channel has no INSERT path — joined
+  // display data isn't in the WAL payload), or rows became due after
+  // the first paint. When the total exceeds what we hold and the
+  // sentinel is retired, re-arm it so the table catches up instead of
+  // contradicting the badge ("1 queued" over an empty table). A
+  // stale-high total at worst causes one extra fetch that corrects
+  // hasMore.
+  useEffect(() => {
+    if (totalQueued !== undefined && totalQueued > rows.length && !hasMore) {
+      setHasMore(true);
+    }
+  }, [totalQueued, rows.length, hasMore]);
 
   useEffect(() => {
     if (!hasMore) return;
