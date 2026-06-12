@@ -29,7 +29,7 @@ import type { AiMessageMetadata } from "./types";
  * gets `needs_human_attention=true` when a human response is actually
  * needed (keyword match, model escalation, safety-validator reject,
  * generate failure). Non-attention skips (opt_out, disabled,
- * cap-exceeded, outside-business-hours) just return silently.
+ * max-turns-reached, outside-business-hours) just return silently.
  *
  * Deps-injected Anthropic client so integration tests stub the LLM
  * call without hitting the real API.
