@@ -17,12 +17,15 @@ import { InboxThreadList } from "./inbox-thread-list";
 import { QueuePanel, type QueuedRow } from "./queue-panel";
 import { QueueStatsBanner } from "./queue-stats-banner";
 import { UnknownSenderList } from "./unknown-sender-list";
+import { useQueueStats } from "./use-queue-stats";
 
 type Props = {
   activeTab: "inbox" | "outbox";
   filter: InboxFilter;
   threads: Thread[];
   queued: QueuedRow[];
+  /** True when more queued rows exist beyond the first server page. */
+  queuedHasMore?: boolean;
   /** Server-resolved URL thread param. Used to distinguish "still fetching"
    *  from "fetch completed but there is no matching thread detail." */
   selectedThreadId?: string | null;
@@ -53,6 +56,7 @@ export function CockpitView({
   filter,
   threads,
   queued,
+  queuedHasMore = false,
   selectedThreadId = null,
   threadDetail,
   unknownSenders,
@@ -65,6 +69,15 @@ export function CockpitView({
 }: Props) {
   const router = useRouter();
   const searchParams = useSearchParams();
+
+  // One live stats source for the Outbox tab badge + the stats banner,
+  // so the two never show different numbers. Seeds from the server
+  // first-paint stats; polls every 30s while visible, but only while
+  // the Outbox tab is active — Inbox dwellers shouldn't generate
+  // stats-query load (5 DB reads/poll) for a banner they can't see.
+  const liveQueueStats = useQueueStats(queueStats, {
+    enabled: activeTab === "outbox",
+  });
 
   const setTab = (next: string) => {
     const sp = new URLSearchParams(searchParams.toString());
@@ -169,7 +182,7 @@ export function CockpitView({
         />
         <TabButton
           label="Outbox"
-          count={queued.length}
+          stats={liveQueueStats}
           active={activeTab === "outbox"}
           onClick={() => setTab("outbox")}
           testId="tab-outbox"
@@ -222,8 +235,12 @@ export function CockpitView({
         </div>
       ) : (
         <div>
-          <QueueStatsBanner initialStats={queueStats} />
-          <QueuePanel initial={queued} />
+          <QueueStatsBanner stats={liveQueueStats} />
+          <QueuePanel
+            initial={queued}
+            initialHasMore={queuedHasMore}
+            totalQueued={liveQueueStats.queued}
+          />
         </div>
       )}
 
@@ -247,12 +264,16 @@ export function CockpitView({
 function TabButton({
   label,
   count,
+  stats,
   active,
   onClick,
   testId,
 }: {
   label: string;
-  count: number;
+  /** Simple count pill (Inbox). */
+  count?: number;
+  /** Queue figures: queued · sent today (green) · failed today (red) (Outbox). */
+  stats?: QueueStats;
   active: boolean;
   onClick: () => void;
   testId: string;
@@ -271,15 +292,32 @@ function TabButton({
       }`}
     >
       {label}
-      <span
-        className={`px-2 py-0.5 text-[10px] rounded-full font-bold ${
-          active
-            ? "bg-primary text-primary-foreground"
-            : "bg-[#f5f5f4] text-[#78716c] border border-[#e5e1df]"
-        }`}
-      >
-        {count}
-      </span>
+      {count !== undefined && (
+        <span
+          className={`px-2 py-0.5 text-[10px] rounded-full font-bold ${
+            active
+              ? "bg-primary text-primary-foreground"
+              : "bg-[#f5f5f4] text-[#78716c] border border-[#e5e1df]"
+          }`}
+        >
+          {count}
+        </span>
+      )}
+      {stats && (
+        <span
+          className="flex items-center gap-1.5 text-[11px] font-bold"
+          title={`${stats.queued} queued · ${stats.sentToday} sent today · ${stats.failedToday} failed today`}
+          data-testid={`${testId}-stats`}
+        >
+          {/* Queued inherits the tab text color; sent/failed keep their
+              status colors in both active and inactive states. */}
+          <span>{stats.queued}</span>
+          <span className="text-[#a8a29e]">·</span>
+          <span className="text-emerald-600">{stats.sentToday}</span>
+          <span className="text-[#a8a29e]">·</span>
+          <span className="text-red-600">{stats.failedToday}</span>
+        </span>
+      )}
     </button>
   );
 }

@@ -5,11 +5,10 @@ import { listUnknownSenders } from "@/lib/messages/list-unknown-senders";
 
 import { markMessagesReadForThread } from "../leads/actions";
 
-import { getQueueStats, type QueueStats } from "./actions";
+import { getQueueStats, listQueuedPage, type QueueStats } from "./actions";
 import { CockpitView } from "./cockpit-view";
 import { fetchInboxDetail } from "./inbox-detail-data";
 import { type InboxFilter } from "./inbox-filters";
-import { type QueuedRow } from "./queue-panel";
 
 const EMPTY_QUEUE_STATS: QueueStats = {
   queued: 0,
@@ -94,16 +93,7 @@ export default async function MessagesPage({
     queueStatsResult,
   ] = await Promise.all([
     listThreads(supabase, threadOpts),
-    supabase
-      .from("messages")
-      .select(
-        `id, body, from_address, to_address, created_at, property_id, contact_id,
-           property:properties(id, address, city, state),
-           contact:contacts(id, first_name, last_name, entity_name, phone_1)`,
-      )
-      .eq("status", "queued")
-      .order("scheduled_for", { ascending: true })
-      .limit(100),
+    listQueuedPage(null),
     isThreadFilter(filter) && selectedThreadId
       ? fetchInboxDetail(supabase, selectedThreadId)
       : Promise.resolve(null),
@@ -143,28 +133,9 @@ export default async function MessagesPage({
     }
   }
 
-  const queued: QueuedRow[] = (queuedResult.data ?? []).map((r) => ({
-    id: r.id,
-    body: r.body,
-    fromAddress: r.from_address,
-    toAddress: r.to_address,
-    createdAt: r.created_at,
-    propertyId: r.property_id,
-    contactId: r.contact_id,
-    propertyAddress: r.property
-      ? [r.property.address, r.property.city, r.property.state]
-          .filter(Boolean)
-          .join(", ")
-      : null,
-    contactName: r.contact
-      ? (r.contact.entity_name ??
-        ([r.contact.first_name, r.contact.last_name]
-          .filter(Boolean)
-          .join(" ") ||
-          null))
-      : null,
-    contactPhone: r.contact?.phone_1 ?? null,
-  }));
+  const queuedPage = queuedResult.ok
+    ? queuedResult.data
+    : { rows: [], hasMore: false };
 
   if (isThreadFilter(filter) && threadDetail) {
     await markMessagesReadForThread(threadDetail.threadId);
@@ -191,7 +162,8 @@ export default async function MessagesPage({
       activeTab={activeTab}
       filter={filter}
       threads={visibleThreads}
-      queued={queued}
+      queued={queuedPage.rows}
+      queuedHasMore={queuedPage.hasMore}
       selectedThreadId={selectedThreadId}
       threadDetail={threadDetail}
       unknownSenders={unknownSenders}

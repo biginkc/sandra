@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import { CockpitView } from "./cockpit-view";
@@ -23,6 +23,10 @@ vi.mock("next/navigation", () => ({
 
 // Server-action modules can't load in jsdom (next/server, supabase server).
 vi.mock("./actions", () => ({
+  listQueuedPage: vi.fn(async () => ({
+    ok: true,
+    data: { rows: [], hasMore: false },
+  })),
   releaseMessage: vi.fn(),
   pauseQueuedMessage: vi.fn(),
   resumeQueuedMessage: vi.fn(),
@@ -189,6 +193,31 @@ describe("<CockpitView /> URL deep-linking", () => {
 
     expect(inbox).toHaveAttribute("aria-selected", "true");
     expect(outbox).toHaveAttribute("aria-selected", "false");
+  });
+
+  it("Outbox tab shows real queue stats — queued plain, sent green, failed red", () => {
+    render(
+      <CockpitView
+        {...baseProps}
+        activeTab="outbox"
+        queueStats={{
+          ...baseProps.queueStats,
+          queued: 8964,
+          sentToday: 385,
+          failedToday: 2,
+        }}
+      />,
+    );
+
+    const stats = screen.getByTestId("tab-outbox-stats");
+    const queued = within(stats).getByText("8964");
+    const sent = within(stats).getByText("385");
+    const failed = within(stats).getByText("2");
+
+    // Queued inherits the tab text color — no status class of its own.
+    expect(queued.className).not.toMatch(/emerald|red/);
+    expect(sent).toHaveClass("text-emerald-600");
+    expect(failed).toHaveClass("text-red-600");
   });
 
   it("inbox grid is viewport-constrained so dispo + reply stay pinned (regression: page-scroll bug)", () => {
