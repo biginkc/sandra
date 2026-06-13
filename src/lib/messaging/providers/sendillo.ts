@@ -6,17 +6,12 @@ import type {
   SmsInboundEvent,
   SmsOutboundInput,
   SmsSendResult,
+  SmsStatusEvent,
 } from "../types";
 
 const API_BASE = "https://www.sendillo.com/api/v1";
 const SEND_ENDPOINT = `${API_BASE}/messages`;
 const DEFAULT_SEND_TIMEOUT_MS = 10_000;
-
-type SendilloConfig = {
-  apiKey: string;
-  fromNumber: string;
-  webhookSecret?: string | null;
-};
 
 type JsonObject = Record<string, unknown>;
 
@@ -133,17 +128,10 @@ export class SendilloMessagingProvider implements MessagingProvider {
    * exact payload schema used for inbound.received.
    */
   parseInboundWebhook(rawBody: string): SmsInboundEvent[] {
-    const parsed = safeParseJson(rawBody);
-    if (!parsed || typeof parsed !== "object") {
-      throw new ProviderError("Sendillo inbound payload was not JSON", "sendillo");
-    }
-
-    const root = parsed as JsonObject;
-    const event =
-      readString(root, "event") ??
-      readString(root, "eventType") ??
-      readString(root, "type");
-    const payload = objectValue(root, "data") ?? root;
+    const { parsed, event, payload } = parseWebhookEnvelope(
+      rawBody,
+      "Sendillo inbound payload was not JSON",
+    );
 
     if (event && event !== "inbound.received") {
       return [];
@@ -184,6 +172,43 @@ export class SendilloMessagingProvider implements MessagingProvider {
       },
     ];
   }
+
+  parseStatusWebhook(rawBody: string): SmsStatusEvent[] {
+    const { parsed, event, payload } = parseWebhookEnvelope(
+      rawBody,
+      "Sendillo status payload was not JSON",
+    );
+
+    switch (event) {
+      case "message.sent":
+        return [
+          buildStatusEvent("sent", payload, parsed, [
+            "sentAt",
+            "createdAt",
+          ]),
+        ];
+      case "message.delivered":
+        return [
+          buildStatusEvent("delivered", payload, parsed, [
+            "deliveredAt",
+            "sentAt",
+            "createdAt",
+          ]),
+        ];
+      case "message.failed":
+        return [
+          buildStatusEvent(
+            "failed",
+            payload,
+            parsed,
+            ["failedAt", "createdAt"],
+            readString(payload, "error") ?? readString(payload, "reason") ?? undefined,
+          ),
+        ];
+      default:
+        return [];
+    }
+  }
 }
 
 export function sendilloFromEnv(): SendilloMessagingProvider {
@@ -204,6 +229,23 @@ function safeParseJson(s: string): unknown {
   } catch {
     return null;
   }
+}
+
+function parseWebhookEnvelope(rawBody: string, errorMessage: string) {
+  const parsed = safeParseJson(rawBody);
+  if (!parsed || typeof parsed !== "object") {
+    throw new ProviderError(errorMessage, "sendillo");
+  }
+
+  const root = parsed as JsonObject;
+  return {
+    parsed,
+    event:
+      readString(root, "event") ??
+      readString(root, "eventType") ??
+      readString(root, "type"),
+    payload: objectValue(root, "data") ?? root,
+  };
 }
 
 function objectValue(
@@ -244,6 +286,63 @@ function parseDate(raw: string | null): Date {
   if (!raw) return new Date();
   const parsed = new Date(raw);
   return Number.isNaN(parsed.getTime()) ? new Date() : parsed;
+}
+
+function buildStatusEvent(
+  kind: SmsStatusEvent["kind"],
+  payload: JsonObject,
+  rawPayload: unknown,
+  timestampFields: string[],
+  errorMessage?: string,
+): SmsStatusEvent {
+  const externalId =
+    readString(payload, "messageId") ??
+    readString(payload, "id");
+  if (!externalId) {
+    throw new ProviderError(
+      "Sendillo status payload missing messageId",
+      "sendillo",
+      { payload: rawPayload },
+    );
+  }
+
+  const timestamp =
+    parseRequiredTimestamp(rawPayload, payload, timestampFields);
+
+  return {
+    kind,
+    externalId,
+    timestamp,
+    ...(errorMessage ? { errorMessage } : {}),
+  };
+}
+
+function parseRequiredTimestamp(
+  rawPayload: unknown,
+  payload: JsonObject,
+  timestampFields: string[],
+): Date {
+  const rawTimestamp =
+    timestampFields
+      .map((field) => readString(payload, field))
+      .find((value): value is string => typeof value === "string") ?? null;
+  if (!rawTimestamp) {
+    throw new ProviderError(
+      `Sendillo status payload missing ${timestampFields.join("/")}`,
+      "sendillo",
+      { payload: rawPayload },
+    );
+  }
+
+  const parsed = new Date(rawTimestamp);
+  if (Number.isNaN(parsed.getTime())) {
+    throw new ProviderError(
+      `Sendillo status payload had invalid timestamp: ${rawTimestamp}`,
+      "sendillo",
+      { payload: rawPayload },
+    );
+  }
+  return parsed;
 }
 
 function constantTimeEqual(left: string, right: string): boolean {
