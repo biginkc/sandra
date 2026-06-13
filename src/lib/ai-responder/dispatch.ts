@@ -48,6 +48,8 @@ export type AiDispatchInput = {
   inboundMessageId?: string | null;
 };
 
+const AI_REPLY_THREAD_DEBOUNCE_MS = 45_000;
+
 export async function dispatchAiResponse(
   supabase: SupabaseClient<Database>,
   input: AiDispatchInput,
@@ -128,6 +130,17 @@ export async function dispatchAiResponse(
 
   if (decision.skip) {
     return { outcome: "skipped", reason: decision.reason };
+  }
+
+  if (input.conversationId) {
+    const recentReply = await findRecentAiReplyInThread(
+      supabase,
+      input.conversationId,
+      AI_REPLY_THREAD_DEBOUNCE_MS,
+    );
+    if (recentReply) {
+      return { outcome: "skipped", reason: "duplicate_throttled" };
+    }
   }
 
   // --------------------------------------------------------------------------
@@ -326,6 +339,41 @@ async function findExistingAiReplyForInbound(
     return null;
   }
   return data ?? null;
+}
+
+async function findRecentAiReplyInThread(
+  supabase: SupabaseClient<Database>,
+  conversationId: string,
+  windowMs: number,
+): Promise<{ id: string } | null> {
+  const cutoff = new Date(Date.now() - windowMs).toISOString();
+  const { data, error } = await supabase
+    .from("messages")
+    .select("id, status, created_at, sent_at")
+    .eq("channel", "sms")
+    .eq("conversation_id", conversationId)
+    .eq("direction", "outbound")
+    .in("status", ["pending", "sent", "queued"])
+    .contains("metadata", { generated_by: "ai_responder_v1" })
+    .order("created_at", { ascending: false })
+    .limit(20);
+  if (error) {
+    reportError(new Error(error.message), {
+      tags: { surface: "ai_responder_recent_reply_lookup" },
+      extra: { conversationId, cutoff },
+    });
+    return null;
+  }
+
+  return (
+    data?.find((reply) => {
+      const effectiveTimestamp =
+        reply.status === "pending"
+          ? reply.created_at
+          : reply.sent_at ?? reply.created_at;
+      return effectiveTimestamp >= cutoff;
+    }) ?? null
+  );
 }
 
 // ---------- helpers ---------------------------------------------------------
