@@ -4,6 +4,9 @@ alter table public.message_threads
   add column if not exists ai_responder_debounce_until timestamptz,
   add column if not exists ai_responder_debounce_token uuid;
 
+create unique index if not exists uq_message_threads_conversation_id
+  on public.message_threads (conversation_id);
+
 create or replace function public.claim_ai_responder_thread_debounce(
   p_conversation_id uuid,
   p_window_seconds integer
@@ -65,9 +68,17 @@ begin
     where m.channel = 'sms'
       and m.conversation_id = p_conversation_id
       and m.direction = 'outbound'
-      and m.status in ('sent', 'queued')
+      and (
+        (
+          m.status = 'pending'
+          and m.created_at >= now() - make_interval(secs => p_window_seconds)
+        )
+        or (
+          m.status in ('sent', 'queued')
+          and coalesce(m.sent_at, m.created_at) >= now() - make_interval(secs => p_window_seconds)
+        )
+      )
       and m.metadata ->> 'generated_by' = 'ai_responder_v1'
-      and m.created_at >= now() - make_interval(secs => p_window_seconds)
   ) then
     return jsonb_build_object('status', 'duplicate');
   end if;

@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createTestClient } from "@tests/integration/client";
 import { resetTenantTables } from "@tests/integration/reset";
+import { sendSmsToContact } from "@/lib/messaging/send";
 import {
   getMockMessageLog,
   resetMockState,
@@ -272,6 +273,36 @@ function withRpcOverride(
         const override = overrides[fn];
         if (override) return override(args);
         return target.rpc(fn as never, args as never);
+      };
+    },
+  }) as typeof supabase;
+}
+
+function withThreadSyncFailure(
+  client: typeof supabase,
+  message: string,
+): typeof supabase {
+  return new Proxy(client, {
+    get(target, prop, receiver) {
+      if (prop !== "from") {
+        return Reflect.get(target, prop, receiver);
+      }
+      return (table: string) => {
+        const builder = target.from(table as never);
+        if (table !== "message_threads") {
+          return builder;
+        }
+        return new Proxy(builder, {
+          get(builderTarget, builderProp, builderReceiver) {
+            if (builderProp !== "upsert") {
+              return Reflect.get(builderTarget, builderProp, builderReceiver);
+            }
+            return async () => ({
+              data: null,
+              error: { message },
+            });
+          },
+        });
       };
     },
   }) as typeof supabase;
@@ -609,7 +640,7 @@ describe("dispatchAiResponse (integration)", () => {
     const staleCreatedAt = new Date(Date.now() - 46_000).toISOString();
     const { error: ageError } = await supabase
       .from("messages")
-      .update({ created_at: staleCreatedAt })
+      .update({ created_at: staleCreatedAt, sent_at: staleCreatedAt })
       .eq("conversation_id", conversationId)
       .eq("direction", "outbound");
     if (ageError) {
@@ -705,6 +736,58 @@ describe("dispatchAiResponse (integration)", () => {
     expect(getMockMessageLog()).toHaveLength(1);
   });
 
+  it("treats a recent pending AI outbound row as an active thread debounce", async () => {
+    await seedConfig();
+    const { propertyId, contactId } = await seedLead({
+      phone: "+18167554030",
+    });
+    const conversationId = "30303030-3030-4303-8303-303030303030";
+    const inboundMessageId = "30303030-3030-4303-8303-303030303001";
+    const trackedAnthropic = trackingAnthropic(HAPPY_OUT);
+
+    await seedMessageThread({ propertyId, contactId, conversationId });
+    await supabase.from("messages").insert({
+      id: "30303030-3030-4303-8303-303030303002",
+      channel: "sms",
+      direction: "outbound",
+      status: "pending",
+      property_id: propertyId,
+      contact_id: contactId,
+      conversation_id: conversationId,
+      body: "pending ai attempt",
+      created_at: new Date(Date.now() - 30_000).toISOString(),
+      metadata: {
+        generated_by: "ai_responder_v1",
+      },
+    });
+    await seedInboundMessage({
+      propertyId,
+      contactId,
+      conversationId,
+      inboundMessageId,
+      body: "checking in",
+    });
+
+    const outcome = await dispatchAiResponse(
+      supabase,
+      {
+        propertyId,
+        contactId,
+        conversationId,
+        inboundBody: "checking in",
+        inboundMessageId,
+      },
+      { anthropic: trackedAnthropic.anthropic },
+    );
+
+    expect(outcome).toEqual({
+      outcome: "skipped",
+      reason: "duplicate_throttled",
+    });
+    expect(trackedAnthropic.createSpy).not.toHaveBeenCalled();
+    expect(getMockMessageLog()).toHaveLength(0);
+  });
+
   it("atomically throttles overlapping dispatches in the same conversation", async () => {
     await seedConfig();
     const { propertyId, contactId } = await seedLead({
@@ -769,8 +852,69 @@ describe("dispatchAiResponse (integration)", () => {
     await expectThreadRow({ conversationId, propertyId, contactId });
     await expectSingleOutboundAiReply(conversationId, {
       createSpy: trackedAnthropic.createSpy,
-      expectedCreateCalls: 4,
+      expectedCreateCalls: 2,
     });
+  });
+
+  it("does not send without a lease when the thread-debounce claim stays busy past the wait window", async () => {
+    await seedConfig();
+    const { propertyId, contactId } = await seedLead({
+      phone: "+18167554024",
+    });
+    const conversationId = "24242424-2424-4242-8242-242424242424";
+    const inboundMessageId = "24242424-2424-4242-8242-242424242401";
+    const trackedAnthropic = trackingAnthropic(HAPPY_OUT);
+    const busyClaimClient = withRpcOverride(supabase, {
+      claim_ai_responder_thread_debounce: async () => ({
+        data: { status: "busy" },
+        error: null,
+      }),
+    });
+
+    await insertInboundMessageRecord({
+      propertyId,
+      contactId,
+      conversationId,
+      inboundMessageId,
+      body: "hello",
+    });
+
+    const outcome = await dispatchAiResponse(
+      busyClaimClient,
+      {
+        propertyId,
+        contactId,
+        conversationId,
+        inboundBody: "hello",
+        inboundMessageId,
+      },
+      {
+        anthropic: trackedAnthropic.anthropic,
+        debounceBusyWaitMs: 20,
+        debounceBusyPollMs: 1,
+      },
+    );
+
+    expect(outcome).toEqual({
+      outcome: "escalated",
+      reason: "thread_debounce_timeout",
+    });
+    expect(trackedAnthropic.createSpy).not.toHaveBeenCalled();
+    expect(getMockMessageLog()).toHaveLength(0);
+
+    const { data: outbound } = await supabase
+      .from("messages")
+      .select("id")
+      .eq("conversation_id", conversationId)
+      .eq("direction", "outbound");
+    expect(outbound).toHaveLength(0);
+
+    const { data: property } = await supabase
+      .from("properties")
+      .select("needs_human_attention")
+      .eq("id", propertyId)
+      .single();
+    expect(property?.needs_human_attention).toBe(true);
   });
 
   it("falls back to the existing behavior when conversationId is missing", async () => {
@@ -864,6 +1008,316 @@ describe("dispatchAiResponse (integration)", () => {
     expect(outcome.outcome).toBe("sent");
     expect(trackedAnthropic.createSpy).toHaveBeenCalledTimes(2);
     expect(getMockMessageLog()).toHaveLength(1);
+  });
+
+  it("escalates instead of sending when thread conversation repair fails", async () => {
+    await seedConfig();
+    const { propertyId, contactId } = await seedLead({
+      phone: "+18167554027",
+    });
+    const conversationId = "27272727-2727-4272-8272-272727272727";
+    const inboundMessageId = "27272727-2727-4272-8272-272727272701";
+    const trackedAnthropic = trackingAnthropic(HAPPY_OUT);
+    const brokenThreadSyncClient = withThreadSyncFailure(
+      supabase,
+      "thread sync failed",
+    );
+
+    await insertInboundMessageRecord({
+      propertyId,
+      contactId,
+      conversationId,
+      inboundMessageId,
+      body: "hello",
+    });
+
+    const outcome = await dispatchAiResponse(
+      brokenThreadSyncClient,
+      {
+        propertyId,
+        contactId,
+        conversationId,
+        inboundBody: "hello",
+        inboundMessageId,
+      },
+      { anthropic: trackedAnthropic.anthropic },
+    );
+
+    expect(outcome).toEqual({
+      outcome: "escalated",
+      reason: "thread_conversation_sync_error",
+    });
+    expect(trackedAnthropic.createSpy).not.toHaveBeenCalled();
+    expect(getMockMessageLog()).toHaveLength(0);
+
+    const { data: property } = await supabase
+      .from("properties")
+      .select("needs_human_attention")
+      .eq("id", propertyId)
+      .single();
+    expect(property?.needs_human_attention).toBe(true);
+  });
+
+  it("escalates when an explicit conversationId already belongs to another thread", async () => {
+    await seedConfig();
+    const { propertyId, contactId } = await seedLead({
+      phone: "+18167554028",
+    });
+    const siblingPropertyId = await seedPropertyForContact({
+      contactId,
+      address: "28 Wrong Thread Ln",
+    });
+    const activeConversationId = "28282828-2828-4282-8282-282828282828";
+    const wrongConversationId = "38383838-3838-4383-8383-383838383838";
+    const inboundMessageId = "28282828-2828-4282-8282-282828282801";
+    const wrongInboundMessageId = "38383838-3838-4383-8383-383838383801";
+    const trackedAnthropic = trackingAnthropic(HAPPY_OUT);
+
+    await seedInboundMessage({
+      propertyId: siblingPropertyId,
+      contactId,
+      conversationId: wrongConversationId,
+      inboundMessageId: wrongInboundMessageId,
+      body: "other thread",
+    });
+    await insertInboundMessageRecord({
+      propertyId,
+      contactId,
+      conversationId: activeConversationId,
+      inboundMessageId,
+      body: "hello",
+    });
+
+    const outcome = await dispatchAiResponse(
+      supabase,
+      {
+        propertyId,
+        contactId,
+        conversationId: wrongConversationId,
+        inboundBody: "hello",
+        inboundMessageId,
+      },
+      { anthropic: trackedAnthropic.anthropic },
+    );
+
+    expect(outcome).toEqual({
+      outcome: "escalated",
+      reason: "thread_conversation_sync_error",
+    });
+    expect(trackedAnthropic.createSpy).not.toHaveBeenCalled();
+    expect(getMockMessageLog()).toHaveLength(0);
+  });
+
+  it("escalates when an explicit conversationId has no existing owner", async () => {
+    await seedConfig();
+    const { propertyId, contactId } = await seedLead({
+      phone: "+18167554031",
+    });
+    const trackedAnthropic = trackingAnthropic(HAPPY_OUT);
+    const inboundMessageId = "31313131-3131-4313-8313-313131313101";
+
+    await insertInboundMessageRecord({
+      propertyId,
+      contactId,
+      conversationId: "41414141-4141-4414-8414-414141414141",
+      inboundMessageId,
+      body: "hello",
+    });
+
+    const outcome = await dispatchAiResponse(
+      supabase,
+      {
+        propertyId,
+        contactId,
+        conversationId: "51515151-5151-4515-8515-515151515151",
+        inboundBody: "hello",
+        inboundMessageId,
+      },
+      { anthropic: trackedAnthropic.anthropic },
+    );
+
+    expect(outcome).toEqual({
+      outcome: "escalated",
+      reason: "thread_conversation_sync_error",
+    });
+    expect(trackedAnthropic.createSpy).not.toHaveBeenCalled();
+    expect(getMockMessageLog()).toHaveLength(0);
+  });
+
+  it("escalates instead of falling back when the thread-debounce claim payload is malformed", async () => {
+    await seedConfig();
+    const { propertyId, contactId } = await seedLead({
+      phone: "+18167554029",
+    });
+    const conversationId = "29292929-2929-4292-8292-292929292929";
+    const inboundMessageId = "29292929-2929-4292-8292-292929292901";
+    const trackedAnthropic = trackingAnthropic(HAPPY_OUT);
+    const malformedClaimClient = withRpcOverride(supabase, {
+      claim_ai_responder_thread_debounce: async () => ({
+        data: { nope: "bad-payload" },
+        error: null,
+      }),
+    });
+
+    await insertInboundMessageRecord({
+      propertyId,
+      contactId,
+      conversationId,
+      inboundMessageId,
+      body: "hello",
+    });
+
+    const outcome = await dispatchAiResponse(
+      malformedClaimClient,
+      {
+        propertyId,
+        contactId,
+        conversationId,
+        inboundBody: "hello",
+        inboundMessageId,
+      },
+      { anthropic: trackedAnthropic.anthropic },
+    );
+
+    expect(outcome).toEqual({
+      outcome: "escalated",
+      reason: "thread_debounce_error",
+    });
+    expect(trackedAnthropic.createSpy).not.toHaveBeenCalled();
+    expect(getMockMessageLog()).toHaveLength(0);
+  });
+
+  it("escalates instead of sending when the thread-debounce claim RPC errors", async () => {
+    await seedConfig();
+    const { propertyId, contactId } = await seedLead({
+      phone: "+18167554026",
+    });
+    const conversationId = "26262626-2626-4262-8262-262626262626";
+    const inboundMessageId = "26262626-2626-4262-8262-262626262601";
+    const trackedAnthropic = trackingAnthropic(HAPPY_OUT);
+    const brokenClaimClient = withRpcOverride(supabase, {
+      claim_ai_responder_thread_debounce: async () => ({
+        data: null,
+        error: {
+          code: "57014",
+          details: "",
+          hint: "",
+          message: "claim rpc timed out",
+          name: "PostgrestError",
+        },
+      }),
+    });
+
+    await insertInboundMessageRecord({
+      propertyId,
+      contactId,
+      conversationId,
+      inboundMessageId,
+      body: "hello",
+    });
+
+    const outcome = await dispatchAiResponse(
+      brokenClaimClient,
+      {
+        propertyId,
+        contactId,
+        conversationId,
+        inboundBody: "hello",
+        inboundMessageId,
+      },
+      { anthropic: trackedAnthropic.anthropic },
+    );
+
+    expect(outcome).toEqual({
+      outcome: "escalated",
+      reason: "thread_debounce_error",
+    });
+    expect(trackedAnthropic.createSpy).not.toHaveBeenCalled();
+    expect(getMockMessageLog()).toHaveLength(0);
+
+    const { data: property } = await supabase
+      .from("properties")
+      .select("needs_human_attention")
+      .eq("id", propertyId)
+      .single();
+    expect(property?.needs_human_attention).toBe(true);
+  });
+
+  it("sends the outbound on the same explicit conversation that the debounce checked", async () => {
+    await seedConfig();
+    const { propertyId, contactId } = await seedLead({
+      phone: "+18167554025",
+    });
+    const staleConversationId = "25252525-2525-4252-8252-252525252525";
+    const activeConversationId = "35353535-3535-4353-8353-353535353535";
+    const inboundMessageId = "35353535-3535-4353-8353-353535353501";
+
+    await seedMessageThread({
+      propertyId,
+      contactId,
+      conversationId: staleConversationId,
+    });
+    await supabase.from("messages").insert({
+      id: "25252525-2525-4252-8252-252525252501",
+      channel: "sms",
+      direction: "inbound",
+      status: "received",
+      property_id: propertyId,
+      contact_id: contactId,
+      conversation_id: staleConversationId,
+      body: "stale thread history",
+    });
+    await insertInboundMessageRecord({
+      propertyId,
+      contactId,
+      conversationId: activeConversationId,
+      inboundMessageId,
+      body: "yes",
+    });
+
+    const outcome = await dispatchAiResponse(
+      supabase,
+      {
+        propertyId,
+        contactId,
+        conversationId: activeConversationId,
+        inboundBody: "yes",
+        inboundMessageId,
+      },
+      { anthropic: stubAnthropic(HAPPY_OUT) },
+    );
+
+    expect(outcome.outcome).toBe("sent");
+    if (outcome.outcome !== "sent") return;
+
+    const { data: outbound } = await supabase
+      .from("messages")
+      .select("conversation_id")
+      .eq("id", outcome.messageId)
+      .single();
+    expect(outbound?.conversation_id).toBe(activeConversationId);
+
+    const followUp = await sendSmsToContact(supabase, {
+      contactId,
+      propertyId,
+      body: "follow up",
+    });
+    expect(followUp.status).toBe("sent");
+    if (followUp.status !== "sent") return;
+
+    const { data: followUpRow } = await supabase
+      .from("messages")
+      .select("conversation_id")
+      .eq("id", followUp.messageId)
+      .single();
+    expect(followUpRow?.conversation_id).toBe(activeConversationId);
+
+    const { data: allRows } = await supabase
+      .from("messages")
+      .select("conversation_id")
+      .eq("contact_id", contactId)
+      .eq("property_id", propertyId);
+    expect(allRows?.every((row) => row.conversation_id === activeConversationId)).toBe(true);
   });
 
   it("clears the lease with a direct row update when the release RPC fails", async () => {

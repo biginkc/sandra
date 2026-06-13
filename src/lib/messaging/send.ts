@@ -73,6 +73,8 @@ export type SendSmsInput = {
   contactId: string;
   /** Linked property — required for quiet-hours zone + thread continuity. */
   propertyId: string;
+  /** Optional pre-resolved thread id to keep the outbound on a known conversation. */
+  conversationId?: string | null;
   body: string;
   /**
    * Optional override for the provider's default from-number. Comes from
@@ -136,7 +138,7 @@ export async function sendSmsToContact(
       .maybeSingle(),
     supabase
       .from("properties")
-      .select("id, state")
+      .select("id, org_id, state")
       .eq("id", input.propertyId)
       .maybeSingle(),
   ]);
@@ -182,19 +184,16 @@ export async function sendSmsToContact(
   }
 
   // 5. Pre-insert the row so we always have a breadcrumb.
-  let conversationId: string;
-  try {
-    conversationId = await ensureConversationIdForThread(
-      supabase,
-      input.contactId,
-      input.propertyId,
-    );
-  } catch (e) {
-    return {
-      status: "db_error",
-      error: e instanceof Error ? e.message : String(e),
-    };
+  const conversationIdResult = await resolveOutboundConversationId(supabase, {
+    contactId: input.contactId,
+    propertyId: input.propertyId,
+    orgId: propertyResult.data.org_id,
+    conversationId: input.conversationId ?? null,
+  });
+  if (conversationIdResult.error) {
+    return { status: "db_error", error: conversationIdResult.error };
   }
+  const conversationId = conversationIdResult.conversationId;
   const fromAddressRaw = input.from ?? provider.getDefaultFromNumber?.() ?? null;
   const fromAddress = fromAddressRaw
     ? normalizePhone(fromAddressRaw) ?? fromAddressRaw
@@ -292,7 +291,7 @@ async function queueForLater(
       .maybeSingle(),
     supabase
       .from("properties")
-      .select("id")
+      .select("id, org_id")
       .eq("id", input.propertyId)
       .maybeSingle(),
   ]);
@@ -316,19 +315,16 @@ async function queueForLater(
     return { status: "blocked_landline", reason: LANDLINE_BLOCK_REASON };
   }
 
-  let conversationId: string;
-  try {
-    conversationId = await ensureConversationIdForThread(
-      supabase,
-      input.contactId,
-      input.propertyId,
-    );
-  } catch (e) {
-    return {
-      status: "db_error",
-      error: e instanceof Error ? e.message : String(e),
-    };
+  const conversationIdResult = await resolveOutboundConversationId(supabase, {
+    contactId: input.contactId,
+    propertyId: input.propertyId,
+    orgId: propertyResult.data.org_id,
+    conversationId: input.conversationId ?? null,
+  });
+  if (conversationIdResult.error) {
+    return { status: "db_error", error: conversationIdResult.error };
   }
+  const conversationId = conversationIdResult.conversationId;
   const fromAddressRaw = input.from ?? providerIdToDefaultFrom(providerId) ?? null;
   const fromAddress = fromAddressRaw
     ? normalizePhone(fromAddressRaw) ?? fromAddressRaw
@@ -597,6 +593,186 @@ function providerIdToDefaultFrom(providerId: string): string | null {
   const provider = getMessagingProvider();
   if (!provider || provider.providerId !== providerId) return null;
   return provider.getDefaultFromNumber?.() ?? null;
+}
+
+async function resolveOutboundConversationId(
+  supabase: SupabaseClient<Database>,
+  input: {
+    contactId: string;
+    propertyId: string;
+    orgId: string;
+    conversationId: string | null;
+  },
+): Promise<
+  | { conversationId: string; error: null }
+  | { conversationId: null; error: string }
+> {
+  let conversationId = input.conversationId;
+  if (!conversationId) {
+    try {
+      conversationId = await ensureConversationIdForThread(
+        supabase,
+        input.contactId,
+        input.propertyId,
+      );
+    } catch (e) {
+      return {
+        conversationId: null,
+        error: e instanceof Error ? e.message : String(e),
+      };
+    }
+  }
+
+  if (input.conversationId) {
+    const syncError = await syncThreadConversationId(supabase, {
+      contactId: input.contactId,
+      propertyId: input.propertyId,
+      orgId: input.orgId,
+      conversationId,
+    });
+    if (syncError) {
+      return { conversationId: null, error: syncError };
+    }
+  }
+
+  return { conversationId, error: null };
+}
+
+async function syncThreadConversationId(
+  supabase: SupabaseClient<Database>,
+  input: {
+    contactId: string;
+    conversationId: string;
+    orgId: string;
+    propertyId: string;
+  },
+): Promise<string | null> {
+  const ownership = await validateConversationThreadOwnership(supabase, {
+    contactId: input.contactId,
+    conversationId: input.conversationId,
+    orgId: input.orgId,
+    propertyId: input.propertyId,
+  });
+  if (ownership.error) {
+    return ownership.error;
+  }
+
+  if (
+    ownership.currentConversationId &&
+    ownership.currentConversationId !== input.conversationId
+  ) {
+    const { error: rebindError } = await supabase
+      .from("messages")
+      .update({
+        conversation_id: input.conversationId,
+      })
+      .eq("channel", "sms")
+      .eq("contact_id", input.contactId)
+      .eq("property_id", input.propertyId)
+      .eq("conversation_id", ownership.currentConversationId);
+    if (rebindError) {
+      return rebindError.message;
+    }
+  }
+
+  const { error } = await supabase.from("message_threads").upsert(
+    {
+      org_id: input.orgId,
+      channel: "sms",
+      contact_id: input.contactId,
+      property_id: input.propertyId,
+      conversation_id: input.conversationId,
+    },
+    { onConflict: "channel,contact_id,property_id" },
+  );
+  return error?.message ?? null;
+}
+
+async function validateConversationThreadOwnership(
+  supabase: SupabaseClient<Database>,
+  input: {
+    contactId: string;
+    conversationId: string;
+    orgId: string;
+    propertyId: string;
+  },
+): Promise<{
+  currentConversationId: string | null;
+  error: string | null;
+}> {
+  const { data: currentThread, error: currentThreadError } = await supabase
+    .from("message_threads")
+    .select("conversation_id")
+    .eq("channel", "sms")
+    .eq("contact_id", input.contactId)
+    .eq("property_id", input.propertyId)
+    .maybeSingle();
+  if (currentThreadError) {
+    return { currentConversationId: null, error: currentThreadError.message };
+  }
+
+  let ownerFound = currentThread?.conversation_id === input.conversationId;
+  const { data: messageRow, error: messageError } = await supabase
+    .from("messages")
+    .select("contact_id, property_id")
+    .eq("conversation_id", input.conversationId)
+    .order("created_at", { ascending: true })
+    .limit(1)
+    .maybeSingle();
+  if (messageError) {
+    return {
+      currentConversationId: currentThread?.conversation_id ?? null,
+      error: messageError.message,
+    };
+  }
+  if (
+    messageRow &&
+    (messageRow.contact_id !== input.contactId ||
+      messageRow.property_id !== input.propertyId)
+  ) {
+    return {
+      currentConversationId: currentThread?.conversation_id ?? null,
+      error: "conversation belongs to another thread",
+    };
+  }
+  ownerFound ||= Boolean(messageRow);
+
+  const { data: threadRow, error: threadError } = await supabase
+    .from("message_threads")
+    .select("org_id, contact_id, property_id")
+    .eq("conversation_id", input.conversationId)
+    .limit(1)
+    .maybeSingle();
+  if (threadError) {
+    return {
+      currentConversationId: currentThread?.conversation_id ?? null,
+      error: threadError.message,
+    };
+  }
+  if (
+    threadRow &&
+    (threadRow.org_id !== input.orgId ||
+      threadRow.contact_id !== input.contactId ||
+      threadRow.property_id !== input.propertyId)
+  ) {
+    return {
+      currentConversationId: currentThread?.conversation_id ?? null,
+      error: "conversation belongs to another thread",
+    };
+  }
+  ownerFound ||= Boolean(threadRow);
+
+  if (!ownerFound) {
+    return {
+      currentConversationId: currentThread?.conversation_id ?? null,
+      error: "conversation has no existing owner",
+    };
+  }
+
+  return {
+    currentConversationId: currentThread?.conversation_id ?? null,
+    error: null,
+  };
 }
 
 /**

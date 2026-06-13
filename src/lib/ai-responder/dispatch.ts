@@ -56,7 +56,11 @@ const AI_REPLY_THREAD_BUSY_POLL_MS = 200;
 export async function dispatchAiResponse(
   supabase: SupabaseClient<Database>,
   input: AiDispatchInput,
-  deps: { anthropic: AnthropicLike },
+  deps: {
+    anthropic: AnthropicLike;
+    debounceBusyPollMs?: number;
+    debounceBusyWaitMs?: number;
+  },
 ): Promise<AiDispatchOutcome> {
   if (input.inboundMessageId) {
     const existingReply = await findExistingAiReplyForInbound(
@@ -105,6 +109,19 @@ export async function dispatchAiResponse(
   }
 
   const conversationId = input.conversationId ?? null;
+  if (conversationId) {
+    const syncError = await syncAiThreadConversationId(supabase, {
+      contactId: input.contactId,
+      conversationId,
+      orgId: property.org_id,
+      propertyId: input.propertyId,
+    });
+    if (syncError) {
+      const reason = "thread_conversation_sync_error";
+      await markPropertyNeedsAttention(supabase, input.propertyId, reason);
+      return { outcome: "escalated", reason };
+    }
+  }
 
   // --------------------------------------------------------------------------
   // 3. Skip classifier — consent, disabled, turn, biz-hours. No volume
@@ -152,6 +169,34 @@ export async function dispatchAiResponse(
   let releaseDebounceClaim = false;
 
   try {
+    if (conversationId) {
+      const claim = await acquireAiReplyThreadDebounce(
+        supabase,
+        conversationId,
+        {
+          pollMs: deps.debounceBusyPollMs ?? AI_REPLY_THREAD_BUSY_POLL_MS,
+          waitMs: deps.debounceBusyWaitMs ?? AI_REPLY_THREAD_BUSY_WAIT_MS,
+        },
+      );
+      if (claim.status === "duplicate") {
+        return { outcome: "skipped", reason: "duplicate_throttled" };
+      }
+      if (claim.status === "busy_timeout") {
+        const reason = "thread_debounce_timeout";
+        await markPropertyNeedsAttention(supabase, input.propertyId, reason);
+        return { outcome: "escalated", reason };
+      }
+      if (claim.status === "error") {
+        const reason = "thread_debounce_error";
+        await markPropertyNeedsAttention(supabase, input.propertyId, reason);
+        return { outcome: "escalated", reason };
+      }
+      if (claim.status === "claimed") {
+        debounceClaimToken = claim.token;
+        releaseDebounceClaim = true;
+      }
+    }
+
     // ------------------------------------------------------------------------
     // 4. Generate via Claude
     // ------------------------------------------------------------------------
@@ -255,23 +300,10 @@ export async function dispatchAiResponse(
     // 8. Send via the existing pipeline (enforces quiet hours + consent
     //    one more time at send time). Stamp AI metadata on the row.
     // ------------------------------------------------------------------------
-    if (conversationId) {
-      const claim = await acquireAiReplyThreadDebounce(
-        supabase,
-        conversationId,
-      );
-      if (claim.status === "duplicate") {
-        return { outcome: "skipped", reason: "duplicate_throttled" };
-      }
-      if (claim.status === "claimed") {
-        debounceClaimToken = claim.token;
-        releaseDebounceClaim = true;
-      }
-    }
-
     const sendResult = await sendSmsToContact(supabase, {
       contactId: input.contactId,
       propertyId: input.propertyId,
+      conversationId,
       body,
       metadata: input.inboundMessageId
         ? ({
@@ -382,16 +414,14 @@ async function findRecentAiReplyInThread(
   const cutoff = new Date(Date.now() - windowMs).toISOString();
   const { data, error } = await supabase
     .from("messages")
-    .select("id")
+    .select("id, status, created_at, sent_at")
     .eq("channel", "sms")
     .eq("conversation_id", conversationId)
     .eq("direction", "outbound")
-    .in("status", ["sent", "queued"])
+    .in("status", ["pending", "sent", "queued"])
     .contains("metadata", { generated_by: "ai_responder_v1" })
-    .gte("created_at", cutoff)
     .order("created_at", { ascending: false })
-    .limit(1)
-    .maybeSingle();
+    .limit(20);
   if (error) {
     reportError(new Error(error.message), {
       tags: { surface: "ai_responder_recent_reply_lookup" },
@@ -399,13 +429,22 @@ async function findRecentAiReplyInThread(
     });
     return null;
   }
-  return data ?? null;
+  return (
+    data?.find((reply) => {
+      const effectiveTimestamp =
+        reply.status === "pending"
+          ? reply.created_at
+          : reply.sent_at ?? reply.created_at;
+      return effectiveTimestamp >= cutoff;
+    }) ?? null
+  );
 }
 
 type AiReplyThreadDebounceClaim =
   | { status: "claimed"; token: string }
   | { status: "duplicate" }
   | { status: "busy" }
+  | { status: "busy_timeout" }
   | { status: "unavailable" }
   | { status: "error" };
 
@@ -443,7 +482,7 @@ async function claimAiReplyThreadDebounce(
       tags: { surface: "ai_responder_thread_debounce_claim_payload" },
       extra: { conversationId },
     });
-    return { status: "unavailable" };
+    return { status: "error" };
   }
 
   if (claim.status === "claimed" && claim.token) {
@@ -499,8 +538,12 @@ async function releaseAiReplyThreadDebounce(
 async function acquireAiReplyThreadDebounce(
   supabase: SupabaseClient<Database>,
   conversationId: string,
+  timing: {
+    pollMs: number;
+    waitMs: number;
+  },
 ): Promise<AiReplyThreadDebounceClaim> {
-  const deadline = Date.now() + AI_REPLY_THREAD_BUSY_WAIT_MS;
+  const deadline = Date.now() + timing.waitMs;
 
   while (true) {
     const claim = await claimAiReplyThreadDebounce(
@@ -518,10 +561,17 @@ async function acquireAiReplyThreadDebounce(
     }
 
     if (Date.now() >= deadline) {
-      return { status: "unavailable" };
+      const recentReply = await findRecentAiReplyInThread(
+        supabase,
+        conversationId,
+        AI_REPLY_THREAD_DEBOUNCE_MS,
+      );
+      return recentReply
+        ? { status: "duplicate" }
+        : { status: "busy_timeout" };
     }
 
-    await wait(AI_REPLY_THREAD_BUSY_POLL_MS);
+    await wait(timing.pollMs);
 
     const recentReply = await findRecentAiReplyInThread(
       supabase,
@@ -557,7 +607,6 @@ function isAiReplyThreadDebounceCompatibilityError(error: {
   return (
     error.code === "PGRST202" ||
     error.code === "42703" ||
-    error.code === "42501" ||
     error.message.includes(
       "Could not find the function public.claim_ai_responder_thread_debounce",
     ) ||
@@ -567,6 +616,154 @@ function isAiReplyThreadDebounceCompatibilityError(error: {
 
 function wait(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function syncAiThreadConversationId(
+  supabase: SupabaseClient<Database>,
+  input: {
+    contactId: string;
+    conversationId: string;
+    orgId: string;
+    propertyId: string;
+  },
+): Promise<string | null> {
+  const ownership = await validateConversationThreadOwnership(supabase, {
+    contactId: input.contactId,
+    conversationId: input.conversationId,
+    orgId: input.orgId,
+    propertyId: input.propertyId,
+  });
+  if (ownership.error) {
+    return ownership.error;
+  }
+
+  if (
+    ownership.currentConversationId &&
+    ownership.currentConversationId !== input.conversationId
+  ) {
+    const { error: rebindError } = await supabase
+      .from("messages")
+      .update({
+        conversation_id: input.conversationId,
+      })
+      .eq("channel", "sms")
+      .eq("contact_id", input.contactId)
+      .eq("property_id", input.propertyId)
+      .eq("conversation_id", ownership.currentConversationId);
+    if (rebindError) {
+      return rebindError.message;
+    }
+  }
+
+  const { error } = await supabase.from("message_threads").upsert(
+    {
+      org_id: input.orgId,
+      channel: "sms",
+      contact_id: input.contactId,
+      property_id: input.propertyId,
+      conversation_id: input.conversationId,
+    },
+    { onConflict: "channel,contact_id,property_id" },
+  );
+  if (error) {
+    reportError(new Error(error.message), {
+      tags: { surface: "ai_responder_thread_conversation_sync" },
+      extra: {
+        contactId: input.contactId,
+        conversationId: input.conversationId,
+        propertyId: input.propertyId,
+      },
+    });
+    return error.message;
+  }
+  return null;
+}
+
+async function validateConversationThreadOwnership(
+  supabase: SupabaseClient<Database>,
+  input: {
+    contactId: string;
+    conversationId: string;
+    orgId: string;
+    propertyId: string;
+  },
+): Promise<{
+  currentConversationId: string | null;
+  error: string | null;
+}> {
+  const { data: currentThread, error: currentThreadError } = await supabase
+    .from("message_threads")
+    .select("conversation_id")
+    .eq("channel", "sms")
+    .eq("contact_id", input.contactId)
+    .eq("property_id", input.propertyId)
+    .maybeSingle();
+  if (currentThreadError) {
+    return { currentConversationId: null, error: currentThreadError.message };
+  }
+
+  let ownerFound = currentThread?.conversation_id === input.conversationId;
+  const { data: messageRow, error: messageError } = await supabase
+    .from("messages")
+    .select("contact_id, property_id")
+    .eq("conversation_id", input.conversationId)
+    .order("created_at", { ascending: true })
+    .limit(1)
+    .maybeSingle();
+  if (messageError) {
+    return {
+      currentConversationId: currentThread?.conversation_id ?? null,
+      error: messageError.message,
+    };
+  }
+  if (
+    messageRow &&
+    (messageRow.contact_id !== input.contactId ||
+      messageRow.property_id !== input.propertyId)
+  ) {
+    return {
+      currentConversationId: currentThread?.conversation_id ?? null,
+      error: "conversation belongs to another thread",
+    };
+  }
+  ownerFound ||= Boolean(messageRow);
+
+  const { data: threadRow, error: threadError } = await supabase
+    .from("message_threads")
+    .select("org_id, contact_id, property_id")
+    .eq("conversation_id", input.conversationId)
+    .limit(1)
+    .maybeSingle();
+  if (threadError) {
+    return {
+      currentConversationId: currentThread?.conversation_id ?? null,
+      error: threadError.message,
+    };
+  }
+  if (
+    threadRow &&
+    (threadRow.org_id !== input.orgId ||
+      threadRow.contact_id !== input.contactId ||
+      threadRow.property_id !== input.propertyId)
+  ) {
+    return {
+      currentConversationId: currentThread?.conversation_id ?? null,
+      error: "conversation belongs to another thread",
+    };
+  }
+  ownerFound ||= Boolean(threadRow);
+
+  if (!ownerFound) {
+    return {
+      currentConversationId: currentThread?.conversation_id ?? null,
+      error: "conversation has no existing owner",
+    };
+  }
+
+  return {
+    currentConversationId: currentThread?.conversation_id ?? null,
+    error: null,
+  };
 }
 
 async function markPropertyNeedsAttention(
