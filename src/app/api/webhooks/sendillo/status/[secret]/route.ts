@@ -1,6 +1,6 @@
-import { POST as handlePost, runtime } from "../route";
+import { POST as handlePost } from "../route";
 
-export { runtime };
+export const runtime = "nodejs";
 
 export async function POST(
   request: Request,
