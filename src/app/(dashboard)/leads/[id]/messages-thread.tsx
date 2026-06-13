@@ -329,6 +329,19 @@ function MessageBubble({
           }`}
         >
           <span>{time}</span>
+          {deliveryStatusLabel ? (
+            <span
+              className={cn(
+                "font-medium",
+                deliveryStatusLabel.tone === "destructive"
+                  ? "text-destructive"
+                  : undefined,
+              )}
+              data-testid="messages-thread-delivery-status"
+            >
+              {deliveryStatusLabel.label}
+            </span>
+          ) : null}
           {outboundStatusBadge ? (
             <Badge variant={outboundStatusBadge.variant} className="text-[10px]">
               {outboundStatusBadge.label}
@@ -364,7 +377,7 @@ function MessageBubble({
             )}
         </div>
       ) : null}
-      {deliveryStatusLabel ? (
+      {!isLastInGroup && deliveryStatusLabel ? (
         <div
           className={cn(
             `mt-1 text-[11px] font-medium ${outbound ? "mr-1" : "ml-1"}`,
