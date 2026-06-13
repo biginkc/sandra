@@ -143,4 +143,153 @@ describe("<MessagesThread />", () => {
     expect(screen.getByText("right thread")).toBeInTheDocument();
     expect(screen.queryByText("wrong thread")).not.toBeInTheDocument();
   });
+
+  it.each([
+    ["queued", "Pending"],
+    ["pending", "Pending"],
+    ["sent", "Sent"],
+    ["delivered", "Delivered"],
+  ])(
+    "renders %s under the most recent outbound message only",
+    (status, expectedLabel) => {
+      render(
+        <MessagesThread
+          initial={[
+            makeMessage({
+              id: "older-outbound",
+              direction: "outbound",
+              status: "sent",
+              body: "older outbound",
+              created_at: "2026-06-09T12:00:00.000Z",
+            }),
+            makeMessage({
+              id: "mid-inbound",
+              direction: "inbound",
+              body: "mid inbound",
+              created_at: "2026-06-09T12:02:00.000Z",
+            }),
+            makeMessage({
+              id: "newest-outbound",
+              direction: "outbound",
+              status,
+              body: "newest outbound",
+              created_at: "2026-06-09T12:05:00.000Z",
+            }),
+          ]}
+          contactId="contact-1"
+          propertyId="property-1"
+        />,
+      );
+
+      const labels = screen.getAllByTestId("messages-thread-delivery-status");
+      const threadMessages = screen.getAllByTestId("messages-thread-msg");
+      expect(labels).toHaveLength(1);
+      expect(labels[0]).toHaveTextContent(expectedLabel);
+      expect(threadMessages[0]).not.toHaveTextContent(expectedLabel);
+      expect(threadMessages[1]).not.toHaveTextContent(expectedLabel);
+      expect(threadMessages[2]).toHaveTextContent(expectedLabel);
+    },
+  );
+
+  it("renders red 'Not delivered' under any failed outbound message", () => {
+    render(
+      <MessagesThread
+        initial={[
+          makeMessage({
+            id: "failed-outbound",
+            direction: "outbound",
+            status: "failed",
+            body: "failed outbound",
+            created_at: "2026-06-09T12:00:00.000Z",
+          }),
+          makeMessage({
+            id: "newer-inbound",
+            direction: "inbound",
+            body: "reply",
+            created_at: "2026-06-09T12:05:00.000Z",
+          }),
+        ]}
+        contactId="contact-1"
+        propertyId="property-1"
+      />,
+    );
+
+    const label = screen.getByText("Not delivered");
+    expect(label).toHaveClass("text-destructive");
+  });
+
+  it("keeps 'Not delivered' on a failed outbound continuation bubble", () => {
+    render(
+      <MessagesThread
+        initial={[
+          makeMessage({
+            id: "failed-outbound",
+            direction: "outbound",
+            status: "failed",
+            body: "failed outbound",
+            created_at: "2026-06-09T12:00:00.000Z",
+          }),
+          makeMessage({
+            id: "later-outbound",
+            direction: "outbound",
+            status: "sent",
+            body: "later outbound",
+            created_at: "2026-06-09T12:05:00.000Z",
+          }),
+        ]}
+        contactId="contact-1"
+        propertyId="property-1"
+      />,
+    );
+
+    const threadMessages = screen.getAllByTestId("messages-thread-msg");
+    expect(threadMessages[0]).toHaveTextContent("Not delivered");
+    expect(threadMessages[1]).toHaveTextContent("Sent");
+  });
+
+  it("keeps the inline badge for uncommon outbound statuses", () => {
+    render(
+      <MessagesThread
+        initial={[
+          makeMessage({
+            id: "custom-status",
+            direction: "outbound",
+            status: "provider_failed",
+            body: "custom status outbound",
+          }),
+        ]}
+        contactId="contact-1"
+        propertyId="property-1"
+      />,
+    );
+
+    expect(screen.getByText("provider_failed")).toBeInTheDocument();
+    expect(
+      screen.queryByTestId("messages-thread-delivery-status"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("does not render a delivery label for inbound messages", () => {
+    render(
+      <MessagesThread
+        initial={[
+          makeMessage({
+            id: "inbound-only",
+            direction: "inbound",
+            body: "hello from inbound",
+          }),
+        ]}
+        contactId="contact-1"
+        propertyId="property-1"
+      />,
+    );
+
+    expect(
+      screen.queryByTestId("messages-thread-delivery-status"),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText("Pending")).not.toBeInTheDocument();
+    expect(screen.queryByText("Sent")).not.toBeInTheDocument();
+    expect(screen.queryByText("Delivered")).not.toBeInTheDocument();
+    expect(screen.queryByText("Not delivered")).not.toBeInTheDocument();
+  });
 });

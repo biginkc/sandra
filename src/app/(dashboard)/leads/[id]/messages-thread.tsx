@@ -5,6 +5,7 @@ import { useEffect, useRef, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { createClient } from "@/lib/supabase/client";
 import type { Database } from "@/lib/supabase/types";
+import { cn } from "@/lib/utils";
 
 type Message = Database["public"]["Tables"]["messages"]["Row"];
 
@@ -64,6 +65,7 @@ export function MessagesThread({
   const endRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- Thread props can change underneath the live subscription; reset the local realtime buffer to the new server-rendered thread snapshot.
     setMessages(
       filterThreadMessages(initial, {
         contactId,
@@ -191,6 +193,13 @@ export function MessagesThread({
     it.isLastInGroup =
       !next || next.kind !== "msg" || next.msg.direction !== it.msg.direction;
   }
+  const mostRecentOutboundId =
+    [...items]
+      .reverse()
+      .find(
+        (item): item is MsgItem =>
+          item.kind === "msg" && item.msg.direction === "outbound",
+      )?.msg.id ?? null;
 
   return (
     <div className="flex flex-col" data-testid="messages-thread">
@@ -211,6 +220,7 @@ export function MessagesThread({
             message={it.msg}
             isContinuation={it.isContinuation}
             isLastInGroup={it.isLastInGroup}
+            isMostRecentOutbound={it.msg.id === mostRecentOutboundId}
           />
         ),
       )}
@@ -259,17 +269,23 @@ function MessageBubble({
   message,
   isContinuation,
   isLastInGroup,
+  isMostRecentOutbound,
 }: {
   message: Message;
   isContinuation: boolean;
   isLastInGroup: boolean;
+  isMostRecentOutbound: boolean;
 }) {
   const outbound = message.direction === "outbound";
-  const status = message.status;
   const time = new Date(message.created_at).toLocaleTimeString(undefined, {
     hour: "numeric",
     minute: "2-digit",
   });
+  const outboundStatusBadge = getOutboundStatusBadge(message);
+  const deliveryStatusLabel = getDeliveryStatusLabel(
+    message,
+    isMostRecentOutbound,
+  );
 
   // Per-bubble vertical spacing replaces the old blanket `gap-4` on the
   // container. A continuation bubble (same sender, same day) gets a
@@ -307,56 +323,107 @@ function MessageBubble({
         </div>
       </div>
       {isLastInGroup ? (
-      <div
-        className={`mt-1 flex items-center gap-1.5 text-[10px] tabular-nums text-muted-foreground ${
-          outbound ? "mr-1" : "ml-1"
-        }`}
-      >
-        <span>{time}</span>
-        {outbound && status !== "sent" && status !== "delivered" && (
-          <Badge
-            variant={
-              status === "failed"
-                ? "destructive"
-                : status === "queued" || status === "pending"
-                  ? "secondary"
-                  : "outline"
-            }
-            className="text-[10px]"
-          >
-            {status}
-          </Badge>
-        )}
-        {!outbound &&
-          message.metadata &&
-          typeof message.metadata === "object" &&
-          "keyword" in message.metadata && (
-            <Badge variant="destructive" className="text-[10px]">
-              {String(
-                (message.metadata as { keyword: unknown }).keyword,
-              ).toUpperCase()}
+        <div
+          className={`mt-1 flex items-center gap-1.5 text-[10px] tabular-nums text-muted-foreground ${
+            outbound ? "mr-1" : "ml-1"
+          }`}
+        >
+          <span>{time}</span>
+          {outboundStatusBadge ? (
+            <Badge variant={outboundStatusBadge.variant} className="text-[10px]">
+              {outboundStatusBadge.label}
             </Badge>
+          ) : null}
+          {!outbound &&
+            message.metadata &&
+            typeof message.metadata === "object" &&
+            "keyword" in message.metadata && (
+              <Badge variant="destructive" className="text-[10px]">
+                {String(
+                  (message.metadata as { keyword: unknown }).keyword,
+                ).toUpperCase()}
+              </Badge>
+            )}
+          {outbound &&
+            message.metadata &&
+            typeof message.metadata === "object" &&
+            (message.metadata as { generated_by?: unknown }).generated_by ===
+              "ai_responder_v1" && (
+              <Badge
+                variant="outline"
+                className="border-border text-muted-foreground text-[10px]"
+                title={`AI-drafted · confidence ${
+                  typeof (message.metadata as { confidence?: unknown })
+                    .confidence === "number"
+                    ? ((message.metadata as { confidence: number }).confidence * 100).toFixed(0) + "%"
+                    : "—"
+                }`}
+              >
+                AI
+              </Badge>
+            )}
+        </div>
+      ) : null}
+      {deliveryStatusLabel ? (
+        <div
+          className={cn(
+            `mt-1 text-[11px] font-medium ${outbound ? "mr-1" : "ml-1"}`,
+            deliveryStatusLabel.tone === "destructive"
+              ? "text-destructive"
+              : "text-muted-foreground",
           )}
-        {outbound &&
-          message.metadata &&
-          typeof message.metadata === "object" &&
-          (message.metadata as { generated_by?: unknown }).generated_by ===
-            "ai_responder_v1" && (
-            <Badge
-              variant="outline"
-              className="border-border text-muted-foreground text-[10px]"
-              title={`AI-drafted · confidence ${
-                typeof (message.metadata as { confidence?: unknown })
-                  .confidence === "number"
-                  ? ((message.metadata as { confidence: number }).confidence * 100).toFixed(0) + "%"
-                  : "—"
-              }`}
-            >
-              AI
-            </Badge>
-          )}
-      </div>
+          data-testid="messages-thread-delivery-status"
+        >
+          {deliveryStatusLabel.label}
+        </div>
       ) : null}
     </div>
   );
+}
+
+function getOutboundStatusBadge(message: Message): {
+  label: string;
+  variant: "secondary" | "outline";
+} | null {
+  if (message.direction !== "outbound") return null;
+
+  switch (message.status) {
+    case "queued":
+    case "pending":
+    case "sent":
+    case "delivered":
+    case "failed":
+      return null;
+    default:
+      return {
+        label: message.status,
+        variant: "outline",
+      };
+  }
+}
+
+function getDeliveryStatusLabel(
+  message: Message,
+  isMostRecentOutbound: boolean,
+): {
+  label: string;
+  tone: "muted" | "destructive";
+} | null {
+  if (message.direction !== "outbound") return null;
+  if (message.status === "failed") {
+    return { label: "Not delivered", tone: "destructive" };
+  }
+  if (!isMostRecentOutbound) return null;
+
+  switch (message.status) {
+    case "queued":
+    case "pending":
+      return { label: "Pending", tone: "muted" };
+    case "sent":
+      return { label: "Sent", tone: "muted" };
+    case "delivered":
+      return { label: "Delivered", tone: "muted" };
+    default:
+      return null;
+  }
 }
