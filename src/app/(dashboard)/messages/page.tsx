@@ -1,6 +1,6 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
-import { listThreads, type ListThreadsOpts } from "@/lib/messages/list-threads";
+import { listThreads } from "@/lib/messages/list-threads";
 import { listUnknownSenders } from "@/lib/messages/list-unknown-senders";
 import { canonicalizeThreadId } from "@/lib/messages/threading";
 
@@ -8,8 +8,12 @@ import { markMessagesReadForThread } from "../leads/actions";
 
 import { getQueueStats, listQueuedPage, type QueueStats } from "./actions";
 import { CockpitView } from "./cockpit-view";
+import {
+  buildThreadOpts,
+  isThreadFilter,
+  parseInboxFilter,
+} from "./inbox-filter-resolve";
 import { fetchInboxDetail } from "./inbox-detail-data";
-import { type InboxFilter } from "./inbox-filters";
 
 const EMPTY_QUEUE_STATS: QueueStats = {
   queued: 0,
@@ -54,20 +58,7 @@ export default async function MessagesPage({
 }) {
   const sp = await searchParams;
   const activeTab = sp.tab === "outbox" ? "outbox" : "inbox";
-  const filter: InboxFilter =
-    sp.filter === "unknown"
-      ? "unknown"
-      : sp.filter === "dismissed"
-        ? "dismissed"
-        : sp.filter === "mine"
-          ? "mine"
-          : sp.filter === "unassigned"
-            ? "unassigned"
-            : sp.filter === "unread"
-              ? "unread"
-              : sp.filter === "escalated"
-                ? "escalated"
-                : "all";
+  const filter = parseInboxFilter(sp.filter);
   // DNC toggle — ON by default per feedback-f E1. Only `?hideDnc=0` flips
   // it off so we can keep clean URLs the rest of the time.
   const hideDnc = sp.hideDnc !== "0";
@@ -88,16 +79,10 @@ export default async function MessagesPage({
       : null;
 
   // Resolve the threads-list options based on the active filter.
-  const threadOpts: ListThreadsOpts = {};
-  if (filter === "mine" && currentUser) threadOpts.assigneeId = currentUser.id;
-  if (filter === "unassigned") threadOpts.unassignedOnly = true;
-  if (filter === "unread") {
-    threadOpts.unreadOnly = true;
-    // Keep the open thread listed even after read-on-open marks it read —
-    // it should only leave the Unread list once the user clicks away.
-    if (canonicalThreadId) threadOpts.includeThreadId = canonicalThreadId;
-  }
-  if (filter === "escalated") threadOpts.escalatedOnly = true;
+  const threadOpts = buildThreadOpts(filter, {
+    currentUserId: currentUser?.id ?? null,
+    canonicalThreadId,
+  });
 
   // Fetch everything in parallel. The thread list + unknown active count
   // are needed regardless of which filter is active (badge counts on the
@@ -192,16 +177,5 @@ export default async function MessagesPage({
       hideDnc={hideDnc}
       hiddenDncCount={hiddenDncCount}
     />
-  );
-}
-
-/** Filter values that show the thread list (vs the unknown bucket). */
-function isThreadFilter(f: InboxFilter): boolean {
-  return (
-    f === "all" ||
-    f === "mine" ||
-    f === "unassigned" ||
-    f === "unread" ||
-    f === "escalated"
   );
 }
