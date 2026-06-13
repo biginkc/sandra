@@ -137,6 +137,180 @@ async function seedLead(opts: {
   return { propertyId: property!.id, contactId: contact!.id };
 }
 
+async function seedPropertyForContact(args: {
+  contactId: string;
+  state?: string;
+  address: string;
+}): Promise<string> {
+  const { data, error } = await supabase
+    .from("properties")
+    .insert({
+      address: args.address,
+      state: args.state ?? "MO",
+      status: "new_lead",
+      homeowner_contact_id: args.contactId,
+    })
+    .select("id")
+    .single();
+  if (error || !data) {
+    throw new Error(`property seed failed: ${error?.message ?? "unknown"}`);
+  }
+  return data.id;
+}
+
+async function seedMessageThread(args: {
+  propertyId: string;
+  contactId: string;
+  conversationId: string;
+}) {
+  const { data: property, error: propertyError } = await supabase
+    .from("properties")
+    .select("org_id")
+    .eq("id", args.propertyId)
+    .single();
+  if (propertyError || !property) {
+    throw new Error(
+      `thread property lookup failed: ${propertyError?.message ?? "unknown"}`,
+    );
+  }
+
+  const { error } = await supabase.from("message_threads").upsert(
+    {
+      org_id: property.org_id,
+      channel: "sms",
+      contact_id: args.contactId,
+      property_id: args.propertyId,
+      conversation_id: args.conversationId,
+    },
+    { onConflict: "channel,contact_id,property_id" },
+  );
+  if (error) {
+    throw new Error(`thread seed failed: ${error.message}`);
+  }
+}
+
+async function seedInboundMessage(args: {
+  propertyId: string;
+  contactId: string;
+  conversationId: string;
+  inboundMessageId: string;
+  body: string;
+}) {
+  await seedMessageThread(args);
+  await insertInboundMessageRecord(args);
+}
+
+async function insertInboundMessageRecord(args: {
+  propertyId: string;
+  contactId: string;
+  conversationId?: string;
+  inboundMessageId: string;
+  body: string;
+}) {
+  const { error } = await supabase.from("messages").insert({
+    id: args.inboundMessageId,
+    channel: "sms",
+    direction: "inbound",
+    status: "received",
+    property_id: args.propertyId,
+    contact_id: args.contactId,
+    conversation_id: args.conversationId ?? null,
+    body: args.body,
+  });
+  if (error) {
+    throw new Error(`inbound seed failed: ${error.message}`);
+  }
+}
+
+async function seedInboundMessageWithoutConversation(args: {
+  propertyId: string;
+  contactId: string;
+  inboundMessageId: string;
+  body: string;
+}) {
+  await insertInboundMessageRecord(args);
+}
+
+function trackingAnthropic(
+  out: AiStructuredOutput,
+  opts: { delayMs?: number } = {},
+): {
+  anthropic: AnthropicLike;
+  createSpy: ReturnType<typeof vi.fn>;
+} {
+  const createSpy = vi.fn(
+    async (args: Parameters<AnthropicLike["messages"]["create"]>[0]) => {
+      if (opts.delayMs) {
+        await new Promise((resolve) => setTimeout(resolve, opts.delayMs));
+      }
+      return stubAnthropic(out).messages.create(args as never);
+    },
+  );
+  return {
+    anthropic: {
+      messages: {
+        create: createSpy as unknown as AnthropicLike["messages"]["create"],
+      } as unknown as AnthropicLike["messages"],
+    },
+    createSpy,
+  };
+}
+
+function withRpcOverride(
+  client: typeof supabase,
+  overrides: Record<
+    string,
+    (args: unknown) => Promise<{ data: unknown; error: { message: string; code?: string | null } | null }>
+  >,
+): typeof supabase {
+  return new Proxy(client, {
+    get(target, prop, receiver) {
+      if (prop !== "rpc") {
+        return Reflect.get(target, prop, receiver);
+      }
+      return async (fn: string, args: unknown) => {
+        const override = overrides[fn];
+        if (override) return override(args);
+        return target.rpc(fn as never, args as never);
+      };
+    },
+  }) as typeof supabase;
+}
+
+async function expectSingleOutboundAiReply(
+  conversationId: string,
+  opts: {
+    createSpy: ReturnType<typeof vi.fn>;
+    expectedCreateCalls?: number;
+  },
+) {
+  expect(opts.createSpy).toHaveBeenCalledTimes(opts.expectedCreateCalls ?? 2);
+  expect(getMockMessageLog()).toHaveLength(1);
+
+  const { data: outbound } = await supabase
+    .from("messages")
+    .select("id")
+    .eq("conversation_id", conversationId)
+    .eq("direction", "outbound")
+    .eq("status", "sent");
+  expect(outbound).toHaveLength(1);
+}
+
+async function expectThreadRow(args: {
+  conversationId: string;
+  propertyId: string;
+  contactId: string;
+}) {
+  const { data: thread } = await supabase
+    .from("message_threads")
+    .select("conversation_id")
+    .eq("channel", "sms")
+    .eq("contact_id", args.contactId)
+    .eq("property_id", args.propertyId)
+    .single();
+  expect(thread?.conversation_id).toBe(args.conversationId);
+}
+
 const HAPPY_OUT: AiStructuredOutput = {
   action: "send_reply",
   body: "Thanks for the reply — someone will reach out shortly.",
@@ -282,6 +456,490 @@ describe("dispatchAiResponse (integration)", () => {
     });
   });
 
+  it("throttles a second AI reply when two near-identical inbound texts land within 45 seconds in the same conversation", async () => {
+    await seedConfig();
+    const { propertyId, contactId } = await seedLead({
+      phone: "+18167554016",
+    });
+    const conversationId = "88888888-8888-4888-8888-888888888888";
+    const firstInboundMessageId = "88888888-8888-4888-9888-888888888881";
+    const secondInboundMessageId = "88888888-8888-4888-9888-888888888882";
+
+    await insertInboundMessageRecord({
+      propertyId,
+      contactId,
+      conversationId,
+      inboundMessageId: firstInboundMessageId,
+      body: "I do",
+    });
+
+    const trackedAnthropic = trackingAnthropic(HAPPY_OUT);
+
+    const firstOutcome = await dispatchAiResponse(
+      supabase,
+      {
+        propertyId,
+        contactId,
+        conversationId,
+        inboundBody: "I do",
+        inboundMessageId: firstInboundMessageId,
+      },
+      { anthropic: trackedAnthropic.anthropic },
+    );
+    expect(firstOutcome.outcome).toBe("sent");
+    await expectThreadRow({ conversationId, propertyId, contactId });
+
+    await insertInboundMessageRecord({
+      propertyId,
+      contactId,
+      conversationId,
+      inboundMessageId: secondInboundMessageId,
+      body: "I do",
+    });
+
+    const secondOutcome = await dispatchAiResponse(
+      supabase,
+      {
+        propertyId,
+        contactId,
+        conversationId,
+        inboundBody: "I do",
+        inboundMessageId: secondInboundMessageId,
+      },
+      { anthropic: trackedAnthropic.anthropic },
+    );
+
+    expect(secondOutcome).toEqual({
+      outcome: "skipped",
+      reason: "duplicate_throttled",
+    });
+    await expectSingleOutboundAiReply(conversationId, {
+      createSpy: trackedAnthropic.createSpy,
+    });
+  });
+
+  it("keeps the debounce scoped to the active conversation, not the whole contact", async () => {
+    await seedConfig();
+    const { propertyId, contactId } = await seedLead({
+      phone: "+18167554018",
+    });
+    const siblingPropertyId = await seedPropertyForContact({
+      contactId,
+      address: "2 AI Ln",
+    });
+    const firstConversationId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const secondConversationId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const firstInboundMessageId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaa01";
+    const secondInboundMessageId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbb02";
+
+    await seedInboundMessage({
+      propertyId,
+      contactId,
+      conversationId: firstConversationId,
+      inboundMessageId: firstInboundMessageId,
+      body: "hello",
+    });
+    const firstOutcome = await dispatchAiResponse(
+      supabase,
+      {
+        propertyId,
+        contactId,
+        conversationId: firstConversationId,
+        inboundBody: "hello",
+        inboundMessageId: firstInboundMessageId,
+      },
+      { anthropic: stubAnthropic(HAPPY_OUT) },
+    );
+    expect(firstOutcome.outcome).toBe("sent");
+
+    await seedInboundMessage({
+      propertyId: siblingPropertyId,
+      contactId,
+      conversationId: secondConversationId,
+      inboundMessageId: secondInboundMessageId,
+      body: "still interested",
+    });
+    const secondOutcome = await dispatchAiResponse(
+      supabase,
+      {
+        propertyId: siblingPropertyId,
+        contactId,
+        conversationId: secondConversationId,
+        inboundBody: "still interested",
+        inboundMessageId: secondInboundMessageId,
+      },
+      { anthropic: stubAnthropic(HAPPY_OUT) },
+    );
+
+    expect(secondOutcome.outcome).toBe("sent");
+    expect(getMockMessageLog()).toHaveLength(2);
+  });
+
+  it("allows a second AI reply after the 45-second debounce window expires", async () => {
+    await seedConfig();
+    const { propertyId, contactId } = await seedLead({
+      phone: "+18167554017",
+    });
+    const conversationId = "99999999-9999-4999-8999-999999999999";
+    const firstInboundMessageId = "99999999-9999-4999-9999-999999999991";
+    const secondInboundMessageId = "99999999-9999-4999-9999-999999999992";
+
+    await insertInboundMessageRecord({
+      propertyId,
+      contactId,
+      conversationId,
+      inboundMessageId: firstInboundMessageId,
+      body: "?",
+    });
+
+    const firstOutcome = await dispatchAiResponse(
+      supabase,
+      {
+        propertyId,
+        contactId,
+        conversationId,
+        inboundBody: "?",
+        inboundMessageId: firstInboundMessageId,
+      },
+      { anthropic: stubAnthropic(HAPPY_OUT) },
+    );
+    expect(firstOutcome.outcome).toBe("sent");
+    await expectThreadRow({ conversationId, propertyId, contactId });
+
+    const staleCreatedAt = new Date(Date.now() - 46_000).toISOString();
+    const { error: ageError } = await supabase
+      .from("messages")
+      .update({ created_at: staleCreatedAt })
+      .eq("conversation_id", conversationId)
+      .eq("direction", "outbound");
+    if (ageError) {
+      throw new Error(`failed to age outbound AI reply: ${ageError.message}`);
+    }
+    const { error: leaseAgeError } = await supabase
+      .from("message_threads")
+      .update({
+        ai_responder_debounce_token: null,
+        ai_responder_debounce_until: staleCreatedAt,
+      })
+      .eq("conversation_id", conversationId);
+    if (leaseAgeError) {
+      throw new Error(
+        `failed to age debounce lease: ${leaseAgeError.message}`,
+      );
+    }
+
+    await insertInboundMessageRecord({
+      propertyId,
+      contactId,
+      conversationId,
+      inboundMessageId: secondInboundMessageId,
+      body: "?",
+    });
+
+    const secondOutcome = await dispatchAiResponse(
+      supabase,
+      {
+        propertyId,
+        contactId,
+        conversationId,
+        inboundBody: "?",
+        inboundMessageId: secondInboundMessageId,
+      },
+      { anthropic: stubAnthropic(HAPPY_OUT) },
+    );
+
+    expect(secondOutcome.outcome).toBe("sent");
+    expect(getMockMessageLog()).toHaveLength(2);
+
+    const { data: outbound } = await supabase
+      .from("messages")
+      .select("id")
+      .eq("conversation_id", conversationId)
+      .eq("direction", "outbound");
+    expect(outbound).toHaveLength(2);
+  });
+
+  it("does not throttle on a recent failed AI outbound row", async () => {
+    await seedConfig();
+    const { propertyId, contactId } = await seedLead({
+      phone: "+18167554019",
+    });
+    const conversationId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    const inboundMessageId = "cccccccc-cccc-4ccc-8ccc-cccccccccc01";
+
+    await seedMessageThread({ propertyId, contactId, conversationId });
+    await supabase.from("messages").insert({
+      id: "cccccccc-cccc-4ccc-8ccc-cccccccccc02",
+      channel: "sms",
+      direction: "outbound",
+      status: "failed",
+      property_id: propertyId,
+      contact_id: contactId,
+      conversation_id: conversationId,
+      body: "failed ai attempt",
+      metadata: {
+        generated_by: "ai_responder_v1",
+      },
+    });
+    await seedInboundMessage({
+      propertyId,
+      contactId,
+      conversationId,
+      inboundMessageId,
+      body: "checking in",
+    });
+
+    const outcome = await dispatchAiResponse(
+      supabase,
+      {
+        propertyId,
+        contactId,
+        conversationId,
+        inboundBody: "checking in",
+        inboundMessageId,
+      },
+      { anthropic: stubAnthropic(HAPPY_OUT) },
+    );
+
+    expect(outcome.outcome).toBe("sent");
+    expect(getMockMessageLog()).toHaveLength(1);
+  });
+
+  it("atomically throttles overlapping dispatches in the same conversation", async () => {
+    await seedConfig();
+    const { propertyId, contactId } = await seedLead({
+      phone: "+18167554020",
+    });
+    const conversationId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+    const firstInboundMessageId = "dddddddd-dddd-4ddd-8ddd-dddddddddd01";
+    const secondInboundMessageId = "dddddddd-dddd-4ddd-8ddd-dddddddddd02";
+
+    await insertInboundMessageRecord({
+      propertyId,
+      contactId,
+      conversationId,
+      inboundMessageId: firstInboundMessageId,
+      body: "?",
+    });
+    await insertInboundMessageRecord({
+      propertyId,
+      contactId,
+      conversationId,
+      inboundMessageId: secondInboundMessageId,
+      body: "?",
+    });
+
+    const trackedAnthropic = trackingAnthropic(HAPPY_OUT, { delayMs: 100 });
+    const [firstOutcome, secondOutcome] = await Promise.all([
+      dispatchAiResponse(
+        supabase,
+        {
+          propertyId,
+          contactId,
+          conversationId,
+          inboundBody: "?",
+          inboundMessageId: firstInboundMessageId,
+        },
+        { anthropic: trackedAnthropic.anthropic },
+      ),
+      dispatchAiResponse(
+        supabase,
+        {
+          propertyId,
+          contactId,
+          conversationId,
+          inboundBody: "?",
+          inboundMessageId: secondInboundMessageId,
+        },
+        { anthropic: trackedAnthropic.anthropic },
+      ),
+    ]);
+
+    expect([firstOutcome.outcome, secondOutcome.outcome].sort()).toEqual([
+      "sent",
+      "skipped",
+    ]);
+    expect(
+      [firstOutcome, secondOutcome].some(
+        (outcome) =>
+          outcome.outcome === "skipped" &&
+          outcome.reason === "duplicate_throttled",
+      ),
+    ).toBe(true);
+    await expectThreadRow({ conversationId, propertyId, contactId });
+    await expectSingleOutboundAiReply(conversationId, {
+      createSpy: trackedAnthropic.createSpy,
+      expectedCreateCalls: 4,
+    });
+  });
+
+  it("falls back to the existing behavior when conversationId is missing", async () => {
+    await seedConfig();
+    const { propertyId, contactId } = await seedLead({
+      phone: "+18167554021",
+    });
+    const firstInboundMessageId = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeee01";
+    const secondInboundMessageId = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeee02";
+    const trackedAnthropic = trackingAnthropic(HAPPY_OUT);
+
+    await seedInboundMessageWithoutConversation({
+      propertyId,
+      contactId,
+      inboundMessageId: firstInboundMessageId,
+      body: "I do",
+    });
+    const firstOutcome = await dispatchAiResponse(
+      supabase,
+      {
+        propertyId,
+        contactId,
+        inboundBody: "I do",
+        inboundMessageId: firstInboundMessageId,
+      },
+      { anthropic: trackedAnthropic.anthropic },
+    );
+    expect(firstOutcome.outcome).toBe("sent");
+
+    await seedInboundMessageWithoutConversation({
+      propertyId,
+      contactId,
+      inboundMessageId: secondInboundMessageId,
+      body: "I do",
+    });
+    const secondOutcome = await dispatchAiResponse(
+      supabase,
+      {
+        propertyId,
+        contactId,
+        inboundBody: "I do",
+        inboundMessageId: secondInboundMessageId,
+      },
+      { anthropic: trackedAnthropic.anthropic },
+    );
+
+    expect(secondOutcome.outcome).toBe("sent");
+
+    expect(trackedAnthropic.createSpy).toHaveBeenCalledTimes(4);
+    expect(getMockMessageLog()).toHaveLength(2);
+  });
+
+  it("falls back to the existing behavior when the thread-debounce claim RPC is unavailable", async () => {
+    await seedConfig();
+    const { propertyId, contactId } = await seedLead({
+      phone: "+18167554022",
+    });
+    const conversationId = "ffffffff-ffff-4fff-8fff-ffffffffffff";
+    const inboundMessageId = "ffffffff-ffff-4fff-8fff-ffffffffff01";
+    const trackedAnthropic = trackingAnthropic(HAPPY_OUT);
+    const claimBrokenClient = withRpcOverride(supabase, {
+      claim_ai_responder_thread_debounce: async () => ({
+        data: null,
+        error: {
+          code: "PGRST202",
+          message: "claim_ai_responder_thread_debounce missing",
+        },
+      }),
+    });
+
+    await insertInboundMessageRecord({
+      propertyId,
+      contactId,
+      conversationId,
+      inboundMessageId,
+      body: "hello",
+    });
+
+    const outcome = await dispatchAiResponse(
+      claimBrokenClient,
+      {
+        propertyId,
+        contactId,
+        conversationId,
+        inboundBody: "hello",
+        inboundMessageId,
+      },
+      { anthropic: trackedAnthropic.anthropic },
+    );
+
+    expect(outcome.outcome).toBe("sent");
+    expect(trackedAnthropic.createSpy).toHaveBeenCalledTimes(2);
+    expect(getMockMessageLog()).toHaveLength(1);
+  });
+
+  it("clears the lease with a direct row update when the release RPC fails", async () => {
+    await seedConfig();
+    const { propertyId, contactId } = await seedLead({
+      phone: "+18167554023",
+    });
+    const conversationId = "12121212-1212-4212-8212-121212121212";
+    const firstInboundMessageId = "12121212-1212-4212-8212-121212121201";
+    const secondInboundMessageId = "12121212-1212-4212-8212-121212121202";
+    const releaseBrokenClient = withRpcOverride(supabase, {
+      release_ai_responder_thread_debounce: async () => ({
+        data: null,
+        error: {
+          code: "PGRST202",
+          message: "release_ai_responder_thread_debounce missing",
+        },
+      }),
+    });
+
+    await seedInboundMessage({
+      propertyId,
+      contactId,
+      conversationId,
+      inboundMessageId: firstInboundMessageId,
+      body: "need a person",
+    });
+    const firstOutcome = await dispatchAiResponse(
+      releaseBrokenClient,
+      {
+        propertyId,
+        contactId,
+        conversationId,
+        inboundBody: "need a person",
+        inboundMessageId: firstInboundMessageId,
+      },
+      {
+        anthropic: stubAnthropic({
+          action: "escalate",
+          confidence: 0.8,
+          sentiment: "neutral",
+          escalation_reason: "needs human",
+        }),
+      },
+    );
+    expect(firstOutcome.outcome).toBe("escalated");
+
+    const { data: leaseRow } = await supabase
+      .from("message_threads")
+      .select("ai_responder_debounce_until, ai_responder_debounce_token")
+      .eq("conversation_id", conversationId)
+      .single();
+    expect(leaseRow?.ai_responder_debounce_until).toBeNull();
+    expect(leaseRow?.ai_responder_debounce_token).toBeNull();
+
+    await seedInboundMessage({
+      propertyId,
+      contactId,
+      conversationId,
+      inboundMessageId: secondInboundMessageId,
+      body: "following up",
+    });
+    const secondOutcome = await dispatchAiResponse(
+      supabase,
+      {
+        propertyId,
+        contactId,
+        conversationId,
+        inboundBody: "following up",
+        inboundMessageId: secondInboundMessageId,
+      },
+      { anthropic: stubAnthropic(HAPPY_OUT) },
+    );
+    expect(secondOutcome.outcome).toBe("sent");
+  });
+
   it("scopes AI turn count and conversation history to the actual thread, not the whole property", async () => {
     await seedConfig({ max_turns: 1 });
     const { propertyId, contactId } = await seedLead({
@@ -343,6 +1001,16 @@ describe("dispatchAiResponse (integration)", () => {
         body: "my earlier thread message",
       },
     ]);
+    await seedMessageThread({
+      propertyId,
+      contactId: siblingContact!.id,
+      conversationId: siblingConversationId,
+    });
+    await seedMessageThread({
+      propertyId,
+      contactId,
+      conversationId: activeConversationId,
+    });
 
     let capturedMessages: Array<{ role: string; content: string }> = [];
     const trackingAnthropic: AnthropicLike = {
@@ -550,9 +1218,25 @@ describe("dispatchAiResponse (integration)", () => {
     const { propertyId, contactId } = await seedLead({
       phone: "+18167554010",
     });
+    const conversationId = "abababab-abab-4bab-8bab-abababababab";
+    const inboundMessageId = "abababab-abab-4bab-8bab-ababababab01";
+    await seedInboundMessage({
+      propertyId,
+      contactId,
+      conversationId,
+      inboundMessageId,
+      body: "what next",
+    });
+
     const outcome = await dispatchAiResponse(
       supabase,
-      { propertyId, contactId, inboundBody: "what next" },
+      {
+        propertyId,
+        contactId,
+        conversationId,
+        inboundBody: "what next",
+        inboundMessageId,
+      },
       {
         anthropic: stubAnthropic({
           ...HAPPY_OUT,

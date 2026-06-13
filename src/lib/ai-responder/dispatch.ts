@@ -48,6 +48,11 @@ export type AiDispatchInput = {
   inboundMessageId?: string | null;
 };
 
+const AI_REPLY_THREAD_DEBOUNCE_MS = 45_000;
+const AI_REPLY_THREAD_DEBOUNCE_SECONDS = AI_REPLY_THREAD_DEBOUNCE_MS / 1000;
+const AI_REPLY_THREAD_BUSY_WAIT_MS = AI_REPLY_THREAD_DEBOUNCE_MS;
+const AI_REPLY_THREAD_BUSY_POLL_MS = 200;
+
 export async function dispatchAiResponse(
   supabase: SupabaseClient<Database>,
   input: AiDispatchInput,
@@ -99,6 +104,8 @@ export async function dispatchAiResponse(
     return { outcome: "escalated", reason };
   }
 
+  const conversationId = input.conversationId ?? null;
+
   // --------------------------------------------------------------------------
   // 3. Skip classifier — consent, disabled, turn, biz-hours. No volume
   //    cap: provider/API credits are the only cap (Jarrad's standing rule).
@@ -108,7 +115,7 @@ export async function dispatchAiResponse(
     supabase,
     input.propertyId,
     input.contactId,
-    input.conversationId ?? null,
+    conversationId,
   );
   const withinBusinessHours = checkQuietHours(property.state).ok;
 
@@ -130,176 +137,215 @@ export async function dispatchAiResponse(
     return { outcome: "skipped", reason: decision.reason };
   }
 
-  // --------------------------------------------------------------------------
-  // 4. Generate via Claude
-  // --------------------------------------------------------------------------
-  const conversation = await loadConversation(
-    supabase,
-    input.propertyId,
-    input.contactId,
-    input.conversationId ?? null,
-  );
-  // Append the current inbound body (it was just inserted by the
-  // webhook; include it explicitly so the model sees it).
-  conversation.push({ role: "user", content: input.inboundBody });
-
-  let generated;
-  try {
-    generated = await generateAiReply(
-      {
-        model: config!.model,
-        systemPrompt: config!.system_prompt,
-        conversation,
-      },
-      { client: deps.anthropic },
+  if (conversationId) {
+    const recentReply = await findRecentAiReplyInThread(
+      supabase,
+      conversationId,
+      AI_REPLY_THREAD_DEBOUNCE_MS,
     );
-  } catch (e) {
-    // Account-level provider failures (dead credits / dead key) are an
-    // operator incident, not a code error: every inbound will fail the
-    // same way until a human fixes the account. Distinct reasons make
-    // the UI say what actually broke, and admins get notified (once per
-    // 24h, not per reply) so a hot campaign can't silently lose its
-    // first-responder for a whole morning (2026-06-12).
-    const providerFailure = classifyProviderFailure(e);
-    const reason =
-      providerFailure === "billing"
-        ? "provider_billing"
-        : providerFailure === "auth"
-          ? "provider_auth"
-          : "generate_error";
-    reportError(e, {
-      tags: { surface: "ai_responder_generate", reason },
-      extra: { propertyId: input.propertyId },
+    if (recentReply) {
+      return { outcome: "skipped", reason: "duplicate_throttled" };
+    }
+  }
+
+  let debounceClaimToken: string | null = null;
+  let releaseDebounceClaim = false;
+
+  try {
+    // ------------------------------------------------------------------------
+    // 4. Generate via Claude
+    // ------------------------------------------------------------------------
+    const conversation = await loadConversation(
+      supabase,
+      input.propertyId,
+      input.contactId,
+      conversationId,
+    );
+    // Append the current inbound body (it was just inserted by the
+    // webhook; include it explicitly so the model sees it).
+    conversation.push({ role: "user", content: input.inboundBody });
+
+    let generated;
+    try {
+      generated = await generateAiReply(
+        {
+          model: config!.model,
+          systemPrompt: config!.system_prompt,
+          conversation,
+        },
+        { client: deps.anthropic },
+      );
+    } catch (e) {
+      // Account-level provider failures (dead credits / dead key) are an
+      // operator incident, not a code error: every inbound will fail the
+      // same way until a human fixes the account. Distinct reasons make
+      // the UI say what actually broke, and admins get notified (once per
+      // 24h, not per reply) so a hot campaign can't silently lose its
+      // first-responder for a whole morning (2026-06-12).
+      const providerFailure = classifyProviderFailure(e);
+      const reason =
+        providerFailure === "billing"
+          ? "provider_billing"
+          : providerFailure === "auth"
+            ? "provider_auth"
+            : "generate_error";
+      reportError(e, {
+        tags: { surface: "ai_responder_generate", reason },
+        extra: { propertyId: input.propertyId },
+      });
+      await markPropertyNeedsAttention(supabase, input.propertyId, reason);
+      if (providerFailure) {
+        await notifyAdminsOfProviderFailure(supabase, {
+          orgId: property.org_id,
+          propertyId: input.propertyId,
+          failure: providerFailure,
+        });
+      }
+      return { outcome: "escalated", reason };
+    }
+
+    // ------------------------------------------------------------------------
+    // 5. Escalation gates on model output
+    // ------------------------------------------------------------------------
+    if (generated.action === "escalate") {
+      const reason = `model:${generated.escalation_reason ?? "unspecified"}`;
+      await markPropertyNeedsAttention(supabase, input.propertyId, reason);
+      return { outcome: "escalated", reason };
+    }
+
+    if (generated.confidence < config!.min_confidence) {
+      const reason = `low_confidence:${generated.confidence}`;
+      await markPropertyNeedsAttention(supabase, input.propertyId, reason);
+      return { outcome: "escalated", reason };
+    }
+
+    if (
+      generated.sentiment === "frustrated" ||
+      generated.sentiment === "hostile"
+    ) {
+      const reason = `sentiment:${generated.sentiment}`;
+      await markPropertyNeedsAttention(supabase, input.propertyId, reason);
+      return { outcome: "escalated", reason };
+    }
+
+    // ------------------------------------------------------------------------
+    // 6. Humanizer second-pass — strips AI-tells the first-pass let through
+    //    (em-dashes, AI vocabulary, formal-ish phrasing). Falls back to the
+    //    original draft on any error so this NEVER blocks a send.
+    // ------------------------------------------------------------------------
+    const draft = generated.body?.trim() ?? "";
+    const body = draft
+      ? await humanizeReply(
+          { draft, model: config!.model },
+          { client: deps.anthropic },
+        )
+      : draft;
+
+    // ------------------------------------------------------------------------
+    // 7. Safety validator on the (humanized) body — defense in depth.
+    // ------------------------------------------------------------------------
+    const safety = validateAiReplyBody(body);
+    if (!safety.ok) {
+      const reason = `safety:${safety.reason}`;
+      await markPropertyNeedsAttention(supabase, input.propertyId, reason);
+      return { outcome: "escalated", reason };
+    }
+
+    // ------------------------------------------------------------------------
+    // 8. Send via the existing pipeline (enforces quiet hours + consent
+    //    one more time at send time). Stamp AI metadata on the row.
+    // ------------------------------------------------------------------------
+    if (conversationId) {
+      const claim = await acquireAiReplyThreadDebounce(
+        supabase,
+        conversationId,
+      );
+      if (claim.status === "duplicate") {
+        return { outcome: "skipped", reason: "duplicate_throttled" };
+      }
+      if (claim.status === "claimed") {
+        debounceClaimToken = claim.token;
+        releaseDebounceClaim = true;
+      }
+    }
+
+    const sendResult = await sendSmsToContact(supabase, {
+      contactId: input.contactId,
+      propertyId: input.propertyId,
+      body,
+      metadata: input.inboundMessageId
+        ? ({
+            generated_by: "ai_responder_v1",
+            inbound_message_id: input.inboundMessageId,
+          } as Json)
+        : null,
     });
-    await markPropertyNeedsAttention(supabase, input.propertyId, reason);
-    if (providerFailure) {
-      await notifyAdminsOfProviderFailure(supabase, {
-        orgId: property.org_id,
-        propertyId: input.propertyId,
-        failure: providerFailure,
+
+    if (
+      input.inboundMessageId &&
+      sendResult.status === "db_error" &&
+      isAiReplyDuplicateInsertError(sendResult.error)
+    ) {
+      const existingReply = await findExistingAiReplyForInbound(
+        supabase,
+        input.inboundMessageId,
+      );
+      if (existingReply) {
+        return { outcome: "skipped", reason: "already_replied" };
+      }
+    }
+
+    if (sendResult.status !== "sent" && sendResult.status !== "queued") {
+      // Pipeline rejected (quiet-hours race, no phone, etc.). Escalate so
+      // a human picks it up.
+      const reason = `send_blocked:${sendResult.status}`;
+      await markPropertyNeedsAttention(supabase, input.propertyId, reason);
+      return { outcome: "escalated", reason };
+    }
+
+    const messageId = sendResult.messageId;
+    const metadata: AiMessageMetadata = {
+      generated_by: "ai_responder_v1",
+      ...(input.inboundMessageId
+        ? { inbound_message_id: input.inboundMessageId }
+        : {}),
+      model: config!.model,
+      confidence: generated.confidence,
+      sentiment: generated.sentiment,
+      turn: currentTurn + 1,
+    };
+    const { data: messageRow, error: messageLookupError } = await supabase
+      .from("messages")
+      .select("metadata")
+      .eq("id", messageId)
+      .maybeSingle();
+    if (messageLookupError) {
+      reportError(new Error(messageLookupError.message), {
+        tags: { surface: "ai_responder_message_metadata_lookup" },
+        extra: { messageId, inboundMessageId: input.inboundMessageId ?? null },
       });
     }
-    return { outcome: "escalated", reason };
-  }
+    await supabase
+      .from("messages")
+      .update({
+        metadata: {
+          ...readJsonObject(messageRow?.metadata ?? null),
+          ...metadata,
+        } as Json,
+      })
+      .eq("id", messageId);
 
-  // --------------------------------------------------------------------------
-  // 5. Escalation gates on model output
-  // --------------------------------------------------------------------------
-  if (generated.action === "escalate") {
-    const reason = `model:${generated.escalation_reason ?? "unspecified"}`;
-    await markPropertyNeedsAttention(supabase, input.propertyId, reason);
-    return { outcome: "escalated", reason };
-  }
-
-  if (generated.confidence < config!.min_confidence) {
-    const reason = `low_confidence:${generated.confidence}`;
-    await markPropertyNeedsAttention(supabase, input.propertyId, reason);
-    return { outcome: "escalated", reason };
-  }
-
-  if (
-    generated.sentiment === "frustrated" ||
-    generated.sentiment === "hostile"
-  ) {
-    const reason = `sentiment:${generated.sentiment}`;
-    await markPropertyNeedsAttention(supabase, input.propertyId, reason);
-    return { outcome: "escalated", reason };
-  }
-
-  // --------------------------------------------------------------------------
-  // 6. Humanizer second-pass — strips AI-tells the first-pass let through
-  //    (em-dashes, AI vocabulary, formal-ish phrasing). Falls back to the
-  //    original draft on any error so this NEVER blocks a send.
-  // --------------------------------------------------------------------------
-  const draft = generated.body?.trim() ?? "";
-  const body = draft
-    ? await humanizeReply(
-        { draft, model: config!.model },
-        { client: deps.anthropic },
-      )
-    : draft;
-
-  // --------------------------------------------------------------------------
-  // 7. Safety validator on the (humanized) body — defense in depth.
-  // --------------------------------------------------------------------------
-  const safety = validateAiReplyBody(body);
-  if (!safety.ok) {
-    const reason = `safety:${safety.reason}`;
-    await markPropertyNeedsAttention(supabase, input.propertyId, reason);
-    return { outcome: "escalated", reason };
-  }
-
-  // --------------------------------------------------------------------------
-  // 8. Send via the existing pipeline (enforces quiet hours + consent
-  //    one more time at send time). Stamp AI metadata on the row.
-  // --------------------------------------------------------------------------
-  const sendResult = await sendSmsToContact(supabase, {
-    contactId: input.contactId,
-    propertyId: input.propertyId,
-    body,
-    metadata: input.inboundMessageId
-      ? ({
-          generated_by: "ai_responder_v1",
-          inbound_message_id: input.inboundMessageId,
-        } as Json)
-      : null,
-  });
-
-  if (
-    input.inboundMessageId &&
-    sendResult.status === "db_error" &&
-    isAiReplyDuplicateInsertError(sendResult.error)
-  ) {
-    const existingReply = await findExistingAiReplyForInbound(
-      supabase,
-      input.inboundMessageId,
-    );
-    if (existingReply) {
-      return { outcome: "skipped", reason: "already_replied" };
+    releaseDebounceClaim = false;
+    return { outcome: "sent", messageId, confidence: generated.confidence };
+  } finally {
+    if (conversationId && debounceClaimToken && releaseDebounceClaim) {
+      await releaseAiReplyThreadDebounce(
+        supabase,
+        conversationId,
+        debounceClaimToken,
+      );
     }
   }
-
-  if (sendResult.status !== "sent" && sendResult.status !== "queued") {
-    // Pipeline rejected (quiet-hours race, no phone, etc.). Escalate so
-    // a human picks it up.
-    const reason = `send_blocked:${sendResult.status}`;
-    await markPropertyNeedsAttention(supabase, input.propertyId, reason);
-    return { outcome: "escalated", reason };
-  }
-
-  const messageId = sendResult.messageId;
-  const metadata: AiMessageMetadata = {
-    generated_by: "ai_responder_v1",
-    ...(input.inboundMessageId
-      ? { inbound_message_id: input.inboundMessageId }
-      : {}),
-    model: config!.model,
-    confidence: generated.confidence,
-    sentiment: generated.sentiment,
-    turn: currentTurn + 1,
-  };
-  const { data: messageRow, error: messageLookupError } = await supabase
-    .from("messages")
-    .select("metadata")
-    .eq("id", messageId)
-    .maybeSingle();
-  if (messageLookupError) {
-    reportError(new Error(messageLookupError.message), {
-      tags: { surface: "ai_responder_message_metadata_lookup" },
-      extra: { messageId, inboundMessageId: input.inboundMessageId ?? null },
-    });
-  }
-  await supabase
-    .from("messages")
-    .update({
-      metadata: {
-        ...readJsonObject(messageRow?.metadata ?? null),
-        ...metadata,
-      } as Json,
-    })
-    .eq("id", messageId);
-
-  return { outcome: "sent", messageId, confidence: generated.confidence };
 }
 
 async function findExistingAiReplyForInbound(
@@ -328,7 +374,200 @@ async function findExistingAiReplyForInbound(
   return data ?? null;
 }
 
+async function findRecentAiReplyInThread(
+  supabase: SupabaseClient<Database>,
+  conversationId: string,
+  windowMs: number,
+): Promise<{ id: string } | null> {
+  const cutoff = new Date(Date.now() - windowMs).toISOString();
+  const { data, error } = await supabase
+    .from("messages")
+    .select("id")
+    .eq("channel", "sms")
+    .eq("conversation_id", conversationId)
+    .eq("direction", "outbound")
+    .in("status", ["sent", "queued"])
+    .contains("metadata", { generated_by: "ai_responder_v1" })
+    .gte("created_at", cutoff)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error) {
+    reportError(new Error(error.message), {
+      tags: { surface: "ai_responder_recent_reply_lookup" },
+      extra: { conversationId, cutoff },
+    });
+    return null;
+  }
+  return data ?? null;
+}
+
+type AiReplyThreadDebounceClaim =
+  | { status: "claimed"; token: string }
+  | { status: "duplicate" }
+  | { status: "busy" }
+  | { status: "unavailable" }
+  | { status: "error" };
+
+type AiReplyThreadDebounceClaimRow = {
+  status?: string;
+  token?: string | null;
+};
+
+async function claimAiReplyThreadDebounce(
+  supabase: SupabaseClient<Database>,
+  conversationId: string,
+  windowSeconds: number,
+): Promise<AiReplyThreadDebounceClaim> {
+  const { data, error } = await supabase.rpc(
+    "claim_ai_responder_thread_debounce",
+    {
+      p_conversation_id: conversationId,
+      p_window_seconds: windowSeconds,
+    },
+  );
+  if (error) {
+    reportError(new Error(error.message), {
+      tags: { surface: "ai_responder_thread_debounce_claim" },
+      extra: { conversationId, windowSeconds, code: error.code ?? null },
+    });
+    if (isAiReplyThreadDebounceCompatibilityError(error)) {
+      return { status: "unavailable" };
+    }
+    return { status: "error" };
+  }
+
+  const claim = readAiReplyThreadDebounceClaim(data);
+  if (!claim) {
+    reportError(new Error("invalid ai responder thread debounce claim payload"), {
+      tags: { surface: "ai_responder_thread_debounce_claim_payload" },
+      extra: { conversationId },
+    });
+    return { status: "unavailable" };
+  }
+
+  if (claim.status === "claimed" && claim.token) {
+    return { status: "claimed", token: claim.token };
+  }
+  if (claim.status === "duplicate") {
+    return { status: "duplicate" };
+  }
+  if (claim.status === "busy") {
+    return { status: "busy" };
+  }
+  if (claim.status === "unavailable") {
+    return { status: "unavailable" };
+  }
+  return { status: "error" };
+}
+
+async function releaseAiReplyThreadDebounce(
+  supabase: SupabaseClient<Database>,
+  conversationId: string,
+  claimToken: string,
+): Promise<void> {
+  const { error } = await supabase.rpc(
+    "release_ai_responder_thread_debounce",
+    {
+      p_claim_token: claimToken,
+      p_conversation_id: conversationId,
+    },
+  );
+  if (!error) return;
+
+  reportError(new Error(error.message), {
+    tags: { surface: "ai_responder_thread_debounce_release" },
+    extra: { conversationId, code: error.code ?? null },
+  });
+
+  const { error: fallbackError } = await supabase
+    .from("message_threads")
+    .update({
+      ai_responder_debounce_token: null,
+      ai_responder_debounce_until: null,
+    })
+    .eq("conversation_id", conversationId)
+    .eq("ai_responder_debounce_token", claimToken);
+  if (fallbackError) {
+    reportError(new Error(fallbackError.message), {
+      tags: { surface: "ai_responder_thread_debounce_release_fallback" },
+      extra: { conversationId },
+    });
+  }
+}
+
+async function acquireAiReplyThreadDebounce(
+  supabase: SupabaseClient<Database>,
+  conversationId: string,
+): Promise<AiReplyThreadDebounceClaim> {
+  const deadline = Date.now() + AI_REPLY_THREAD_BUSY_WAIT_MS;
+
+  while (true) {
+    const claim = await claimAiReplyThreadDebounce(
+      supabase,
+      conversationId,
+      AI_REPLY_THREAD_DEBOUNCE_SECONDS,
+    );
+
+    if (claim.status === "claimed" || claim.status === "duplicate") {
+      return claim;
+    }
+
+    if (claim.status === "unavailable" || claim.status === "error") {
+      return claim;
+    }
+
+    if (Date.now() >= deadline) {
+      return { status: "unavailable" };
+    }
+
+    await wait(AI_REPLY_THREAD_BUSY_POLL_MS);
+
+    const recentReply = await findRecentAiReplyInThread(
+      supabase,
+      conversationId,
+      AI_REPLY_THREAD_DEBOUNCE_MS,
+    );
+    if (recentReply) {
+      return { status: "duplicate" };
+    }
+  }
+}
+
 // ---------- helpers ---------------------------------------------------------
+
+function readAiReplyThreadDebounceClaim(
+  value: Json | null,
+): AiReplyThreadDebounceClaimRow | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+
+  const claim = value as Record<string, Json>;
+  return {
+    status: typeof claim.status === "string" ? claim.status : undefined,
+    token: typeof claim.token === "string" ? claim.token : null,
+  };
+}
+
+function isAiReplyThreadDebounceCompatibilityError(error: {
+  code?: string | null;
+  message: string;
+}): boolean {
+  return (
+    error.code === "PGRST202" ||
+    error.code === "42703" ||
+    error.code === "42501" ||
+    error.message.includes(
+      "Could not find the function public.claim_ai_responder_thread_debounce",
+    ) ||
+    error.message.includes("ai_responder_debounce_")
+  );
+}
+
+function wait(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 async function markPropertyNeedsAttention(
   supabase: SupabaseClient<Database>,
@@ -379,8 +618,10 @@ async function countAiTurnsInThread(
   let query = supabase
     .from("messages")
     .select("*", { count: "exact", head: true })
+    .eq("channel", "sms")
     .eq("property_id", propertyId)
     .eq("direction", "outbound")
+    .in("status", ["sent", "queued"])
     .contains("metadata", { generated_by: "ai_responder_v1" });
   query = conversationId
     ? query.eq("conversation_id", conversationId)
