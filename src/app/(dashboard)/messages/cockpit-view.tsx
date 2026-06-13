@@ -49,6 +49,7 @@ const THREAD_FILTERS = new Set<InboxFilter>([
   "mine",
   "unassigned",
   "unread",
+  "escalated",
 ]);
 
 export function CockpitView({

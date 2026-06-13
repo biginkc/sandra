@@ -250,7 +250,7 @@ describe("<CockpitView /> DNC toggle", () => {
 });
 
 describe("<CockpitView /> chip order (feedback-f E2b)", () => {
-  it("renders chips in priority order: Unread, Mine, Unassigned, All, Unknown, Dismissed", () => {
+  it("renders chips in priority order: Unread, Escalated, Mine, Unassigned, All, Unknown, Dismissed", () => {
     render(<CockpitView {...baseProps} filter="all" threads={[]} />);
 
     const chips = screen
@@ -260,6 +260,7 @@ describe("<CockpitView /> chip order (feedback-f E2b)", () => {
 
     expect(ids).toEqual([
       "filter-unread",
+      "filter-escalated",
       "filter-mine",
       "filter-unassigned",
       "filter-all",
@@ -268,7 +269,7 @@ describe("<CockpitView /> chip order (feedback-f E2b)", () => {
     ]);
   });
 
-  it("when no current user, chip order collapses to: Unread, All, Unknown, Dismissed", () => {
+  it("when no current user, chip order collapses to: Unread, Escalated, All, Unknown, Dismissed", () => {
     render(
       <CockpitView
         {...baseProps}
@@ -285,9 +286,54 @@ describe("<CockpitView /> chip order (feedback-f E2b)", () => {
 
     expect(ids).toEqual([
       "filter-unread",
+      "filter-escalated",
       "filter-all",
       "filter-unknown",
       "filter-dismissed",
     ]);
+  });
+});
+
+describe("<CockpitView /> escalated chip", () => {
+  it("Escalated chip is active and only escalated threads render when filter='escalated'", () => {
+    // Mirrors the Mine/Unassigned contract: the page-level Server Component
+    // runs the escalatedOnly query and passes the resulting set as `threads`.
+    // Here we assert the chip is active and the handed-off rows render.
+    const escalated = makeThread({
+      contactId: "esc-1",
+      contactName: "Escalated Thread",
+      lastMessageBody: "I want to talk to a person",
+      needsHumanAttention: true,
+      escalationReason: "keyword:handoff_request",
+    });
+
+    render(
+      <CockpitView {...baseProps} filter="escalated" threads={[escalated]} />,
+    );
+
+    expect(screen.getByTestId("filter-escalated")).toHaveAttribute(
+      "data-active",
+      "true",
+    );
+    expect(screen.getByTestId("filter-all")).not.toHaveAttribute("data-active");
+    expect(screen.getByTestId("filter-unread")).not.toHaveAttribute(
+      "data-active",
+    );
+
+    expect(
+      screen.getByTestId(`inbox-thread-${escalated.threadId}`),
+    ).toBeInTheDocument();
+  });
+
+  it("renders the Escalated chip even when no current user is present", () => {
+    render(
+      <CockpitView
+        {...baseProps}
+        filter="all"
+        threads={[]}
+        currentUserId={null}
+      />,
+    );
+    expect(screen.getByTestId("filter-escalated")).toBeInTheDocument();
   });
 });

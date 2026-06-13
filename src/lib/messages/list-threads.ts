@@ -69,6 +69,10 @@ export type ListThreadsOpts = {
    *  it. Stale URL formats are translated upstream by
    *  `canonicalizeThreadId` — this is always an exact id. */
   includeThreadId?: string;
+  /** When true, returns only threads the AI responder escalated for human
+   *  review (properties.needs_human_attention). Drives the "Escalated"
+   *  inbox filter chip. */
+  escalatedOnly?: boolean;
 };
 
 /**
@@ -196,6 +200,7 @@ export async function listThreads(
       threadId !== opts.includeThreadId
     )
       continue;
+    if (opts.escalatedOnly && !(p?.needs_human_attention ?? false)) continue;
 
     const consentState = computeConsentState(
       consentEventsByContact.get(contactId) ?? [],
