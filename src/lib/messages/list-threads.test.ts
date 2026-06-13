@@ -21,7 +21,7 @@ function makeStub(opts: {
     read_at: string | null;
   }>;
   contacts: Map<string, { id: string; first_name: string | null; last_name: string | null; entity_name: string | null; phone_1: string | null }>;
-  properties: Map<string, { id: string; address: string | null; city: string | null; state: string | null; assigned_user_id: string | null }>;
+  properties: Map<string, { id: string; address: string | null; city: string | null; state: string | null; assigned_user_id: string | null; needs_human_attention?: boolean; last_ai_escalation_reason?: string | null }>;
   consentEvents?: Array<{
     contact_id: string;
     event_type: string;
@@ -406,6 +406,79 @@ describe("listThreads — recency-only sort", () => {
 
     const unpinned = await listThreads(supabase, { unreadOnly: true });
     expect(unpinned.map((t) => t.contactId)).toEqual(["c-unread"]);
+  });
+});
+
+describe("listThreads — escalatedOnly", () => {
+  // Two threads: one the AI handed off (needs_human_attention=true), one it
+  // handled cleanly. escalatedOnly should return only the handed-off thread.
+  function seedEscalation() {
+    const now = Date.now();
+    const messages = [
+      {
+        contact_id: "c-esc",
+        property_id: "p-esc",
+        body: "I want to talk to a human",
+        direction: "inbound" as const,
+        created_at: new Date(now - 1_000).toISOString(),
+        read_at: new Date(now).toISOString(),
+      },
+      {
+        contact_id: "c-calm",
+        property_id: "p-calm",
+        body: "sounds good, thanks",
+        direction: "inbound" as const,
+        created_at: new Date(now - 2_000).toISOString(),
+        read_at: new Date(now).toISOString(),
+      },
+    ];
+    const contacts = new Map(
+      messages.map((m) => [
+        m.contact_id,
+        { id: m.contact_id, first_name: null, last_name: null, entity_name: m.contact_id, phone_1: null },
+      ]),
+    );
+    const properties = new Map([
+      [
+        "p-esc",
+        {
+          id: "p-esc",
+          address: null,
+          city: null,
+          state: null,
+          assigned_user_id: null,
+          needs_human_attention: true,
+          last_ai_escalation_reason: "keyword:handoff_request",
+        },
+      ],
+      [
+        "p-calm",
+        {
+          id: "p-calm",
+          address: null,
+          city: null,
+          state: null,
+          assigned_user_id: null,
+          needs_human_attention: false,
+          last_ai_escalation_reason: null,
+        },
+      ],
+    ]);
+    return makeStub({ messages, contacts, properties });
+  }
+
+  it("returns only threads the AI escalated for human review", async () => {
+    const { supabase } = seedEscalation();
+    const threads = await listThreads(supabase, { escalatedOnly: true });
+    expect(threads.map((t) => t.contactId)).toEqual(["c-esc"]);
+    expect(threads[0].needsHumanAttention).toBe(true);
+    expect(threads[0].escalationReason).toBe("keyword:handoff_request");
+  });
+
+  it("returns both threads when escalatedOnly is not set", async () => {
+    const { supabase } = seedEscalation();
+    const threads = await listThreads(supabase, {});
+    expect(threads.map((t) => t.contactId).sort()).toEqual(["c-calm", "c-esc"]);
   });
 });
 

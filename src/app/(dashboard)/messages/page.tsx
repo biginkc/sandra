@@ -65,7 +65,9 @@ export default async function MessagesPage({
             ? "unassigned"
             : sp.filter === "unread"
               ? "unread"
-              : "all";
+              : sp.filter === "escalated"
+                ? "escalated"
+                : "all";
   // DNC toggle — ON by default per feedback-f E1. Only `?hideDnc=0` flips
   // it off so we can keep clean URLs the rest of the time.
   const hideDnc = sp.hideDnc !== "0";
@@ -95,6 +97,7 @@ export default async function MessagesPage({
     // it should only leave the Unread list once the user clicks away.
     if (canonicalThreadId) threadOpts.includeThreadId = canonicalThreadId;
   }
+  if (filter === "escalated") threadOpts.escalatedOnly = true;
 
   // Fetch everything in parallel. The thread list + unknown active count
   // are needed regardless of which filter is active (badge counts on the
@@ -194,5 +197,11 @@ export default async function MessagesPage({
 
 /** Filter values that show the thread list (vs the unknown bucket). */
 function isThreadFilter(f: InboxFilter): boolean {
-  return f === "all" || f === "mine" || f === "unassigned" || f === "unread";
+  return (
+    f === "all" ||
+    f === "mine" ||
+    f === "unassigned" ||
+    f === "unread" ||
+    f === "escalated"
+  );
 }

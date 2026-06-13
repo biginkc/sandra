@@ -8,7 +8,8 @@ export type InboxFilter =
   | "unassigned"
   | "unknown"
   | "dismissed"
-  | "unread";
+  | "unread"
+  | "escalated";
 
 type Props = {
   active: InboxFilter;
@@ -68,15 +69,22 @@ export function InboxFilters({
       className="flex flex-wrap items-center gap-2"
       data-testid="inbox-filters"
     >
-      {/* feedback-f E2b — Unread first, then Mine, Unassigned, All, then
-         the catch-all buckets. Matches Jarrad's ranked priority for what
-         deserves attention first when the inbox is busy. */}
+      {/* feedback-f E2b — Unread first, then Escalated (AI handed off →
+         needs me), then Mine, Unassigned, All, then the catch-all buckets.
+         Matches Jarrad's ranked priority for what deserves attention first
+         when the inbox is busy. */}
       <FilterChip
         label="Unread"
         active={active === "unread"}
         badge={unreadCount > 0 ? String(unreadCount) : undefined}
         onClick={() => setFilter("unread")}
         testId="filter-unread"
+      />
+      <FilterChip
+        label="Escalated"
+        active={active === "escalated"}
+        onClick={() => setFilter("escalated")}
+        testId="filter-escalated"
       />
       {showAssignmentChips && (
         <>
