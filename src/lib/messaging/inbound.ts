@@ -26,14 +26,22 @@ import {
 import type { Database, Json } from "@/lib/supabase/types";
 import type { MessagingProvider } from "./types";
 
-const STOP_KEYWORDS =
-  /^\s*(stop|stopall|unsubscribe|cancel|end|quit|opt out|opt-out|remove)\s*$/i;
+const UNAMBIGUOUS_STOP_KEYWORDS =
+  /\b(?:stopall|unsubscribe|opt(?:\s|-)?out|remove me)\b|\bstop\b(?!\s+by\b)/i;
+const AMBIGUOUS_STOP_KEYWORDS = /^\s*(end|cancel|quit|remove)\s*$/i;
 const HELP_KEYWORDS = /^\s*(help|info|support)\s*$/i;
 const DNC_KEYWORDS =
   /do not (call|text|contact|reach out|message)|don'?t (call|text|contact|reach out|message)|stop (texting|calling|contacting) me|take me off|no more (texts|messages|calls)|remove me from|stop reaching out/i;
 const WRONG_NUMBER_KEYWORDS =
   /wrong number|wrong person|not the owner|don'?t own|dont own|no longer own/i;
 const WEBHOOK_PROCESSING_LEASE_MS = 5 * 60_000;
+
+export function matchesStopKeyword(body: string) {
+  return (
+    UNAMBIGUOUS_STOP_KEYWORDS.test(body) ||
+    AMBIGUOUS_STOP_KEYWORDS.test(body)
+  );
+}
 
 function createServiceRoleClient() {
   const useTestEnv =
@@ -124,7 +132,7 @@ export async function handleInboundWebhook(
         ...(ev.mediaUrls ? { mediaUrls: ev.mediaUrls } : {}),
       } as Json;
 
-      if (STOP_KEYWORDS.test(bodyTrimmed)) {
+      if (matchesStopKeyword(bodyTrimmed)) {
         await applyPhoneLevelOptOut(supabase, {
           contactId,
           fromPhone: ev.from,
