@@ -4,6 +4,7 @@ import { normalizePhone } from "@/lib/csv/normalize";
 import { ConfigurationError } from "@/lib/errors/classes";
 import { ensureConversationIdForThread } from "@/lib/messages/threading";
 import type { Database, Json } from "@/lib/supabase/types";
+import { reconcileStoredStatusEvents } from "./status-events";
 import { getConsentState, type ConsentState } from "./consent";
 import { checkQuietHours, type QuietHoursCheck } from "./quiet-hours";
 import { getMessagingProvider } from "./registry";
@@ -250,6 +251,11 @@ export async function sendSmsToContact(
     if (updateError) {
       return { status: "db_error", error: updateError.message };
     }
+    await reconcileStoredStatusEvents(
+      supabase,
+      provider.providerId,
+      result.externalId,
+    );
     return {
       status: "sent",
       messageId: pending.id,
@@ -552,6 +558,11 @@ export async function releaseQueuedMessage(
     if (updateError) {
       return { status: "db_error", error: updateError.message };
     }
+    await reconcileStoredStatusEvents(
+      supabase,
+      provider.providerId,
+      result.externalId,
+    );
     return {
       status: "sent",
       messageId: msg.id,

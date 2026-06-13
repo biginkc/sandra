@@ -55,6 +55,13 @@ export type SmsInboundEvent = {
   raw: unknown;
 };
 
+export type SmsStatusEvent = {
+  kind: "sent" | "delivered" | "failed";
+  externalId: string;
+  timestamp: Date;
+  errorMessage?: string;
+};
+
 /**
  * Common interface every SMS adapter implements. Matches the
  * `AddressVerifier` shape. `verifyWebhookSignature` lives on the adapter
@@ -89,6 +96,9 @@ export interface MessagingProvider {
   /** Decode a raw webhook payload into zero-or-more inbound events.
    *  Providers batch multiple events per delivery; we flatten here. */
   parseInboundWebhook(rawBody: string): SmsInboundEvent[];
+
+  /** Decode raw delivery-status webhooks into normalized message events. */
+  parseStatusWebhook?(rawBody: string): SmsStatusEvent[];
 
   /**
    * List the phone numbers on the account with resolved owner names, so

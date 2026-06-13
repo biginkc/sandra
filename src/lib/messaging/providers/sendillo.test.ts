@@ -248,6 +248,140 @@ describe("SendilloMessagingProvider inbound contract", () => {
   });
 });
 
+describe("SendilloMessagingProvider status contract", () => {
+  it("parses message.sent into the shared status shape", () => {
+    const provider = new SendilloMessagingProvider(
+      "sendillo-test-key",
+      "+18165550000",
+    );
+
+    const events = provider.parseStatusWebhook!(
+      JSON.stringify({
+        event: "message.sent",
+        data: {
+          messageId: "snd_status_sent_001",
+          sentAt: "2026-06-10T16:54:00.000Z",
+        },
+      }),
+    );
+
+    expect(events).toEqual([
+      {
+        kind: "sent",
+        externalId: "snd_status_sent_001",
+        timestamp: new Date("2026-06-10T16:54:00.000Z"),
+      },
+    ]);
+  });
+
+  it("parses message.delivered into the shared status shape", () => {
+    const provider = new SendilloMessagingProvider(
+      "sendillo-test-key",
+      "+18165550000",
+    );
+
+    const events = provider.parseStatusWebhook!(
+      JSON.stringify({
+        event: "message.delivered",
+        data: {
+          messageId: "snd_status_delivered_001",
+          deliveredAt: "2026-06-10T16:55:54.627Z",
+        },
+      }),
+    );
+
+    expect(events).toEqual([
+      {
+        kind: "delivered",
+        externalId: "snd_status_delivered_001",
+        timestamp: new Date("2026-06-10T16:55:54.627Z"),
+      },
+    ]);
+  });
+
+  it("parses message.failed and carries forward provider error text", () => {
+    const provider = new SendilloMessagingProvider(
+      "sendillo-test-key",
+      "+18165550000",
+    );
+
+    const events = provider.parseStatusWebhook!(
+      JSON.stringify({
+        event: "message.failed",
+        data: {
+          messageId: "snd_status_failed_001",
+          failedAt: "2026-06-10T16:56:30.000Z",
+          error: "carrier rejected recipient",
+        },
+      }),
+    );
+
+    expect(events).toEqual([
+      {
+        kind: "failed",
+        externalId: "snd_status_failed_001",
+        timestamp: new Date("2026-06-10T16:56:30.000Z"),
+        errorMessage: "carrier rejected recipient",
+      },
+    ]);
+  });
+
+  it("ignores unknown status events", () => {
+    const provider = new SendilloMessagingProvider(
+      "sendillo-test-key",
+      "+18165550000",
+    );
+
+    const events = provider.parseStatusWebhook!(
+      JSON.stringify({
+        event: "message.queued",
+        data: {
+          messageId: "snd_status_queued_001",
+        },
+      }),
+    );
+
+    expect(events).toEqual([]);
+  });
+
+  it("rejects status events when the provider timestamp is missing", () => {
+    const provider = new SendilloMessagingProvider(
+      "sendillo-test-key",
+      "+18165550000",
+    );
+
+    expect(() =>
+      provider.parseStatusWebhook!(
+        JSON.stringify({
+          event: "message.delivered",
+          data: {
+            messageId: "snd_status_missing_timestamp_001",
+          },
+        }),
+      ),
+    ).toThrow(/missing deliveredAt\/sentAt\/createdAt/i);
+  });
+
+  it("rejects status events when the provider timestamp is invalid", () => {
+    const provider = new SendilloMessagingProvider(
+      "sendillo-test-key",
+      "+18165550000",
+    );
+
+    expect(() =>
+      provider.parseStatusWebhook!(
+        JSON.stringify({
+          event: "message.failed",
+          data: {
+            messageId: "snd_status_invalid_timestamp_001",
+            failedAt: "not-a-date",
+          },
+        }),
+      ),
+    ).toThrow(/invalid timestamp/i);
+  });
+});
+
 describe("sendilloFromEnv / registry", () => {
   it("requires both SENDILLO_API_KEY and SENDILLO_FROM_NUMBER", () => {
     delete process.env.SENDILLO_API_KEY;
