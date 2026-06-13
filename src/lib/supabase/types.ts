@@ -2344,8 +2344,6 @@ export type Database = {
       }
       message_threads: {
         Row: {
-          ai_responder_debounce_token: string | null
-          ai_responder_debounce_until: string | null
           channel: string
           contact_id: string
           conversation_id: string
@@ -2356,8 +2354,6 @@ export type Database = {
           updated_at: string
         }
         Insert: {
-          ai_responder_debounce_token?: string | null
-          ai_responder_debounce_until?: string | null
           channel: string
           contact_id: string
           conversation_id?: string
@@ -2368,8 +2364,6 @@ export type Database = {
           updated_at?: string
         }
         Update: {
-          ai_responder_debounce_token?: string | null
-          ai_responder_debounce_until?: string | null
           channel?: string
           contact_id?: string
           conversation_id?: string
@@ -2423,13 +2417,6 @@ export type Database = {
       }
     }
     Functions: {
-      claim_ai_responder_thread_debounce: {
-        Args: { p_conversation_id: string; p_window_seconds: number }
-        Returns: {
-          status: string
-          token?: string | null
-        }
-      }
       count_phone_coverage_stats: {
         Args: never
         Returns: {
@@ -2464,10 +2451,6 @@ export type Database = {
       ensure_sms_conversation_id: {
         Args: { p_contact_id: string; p_property_id: string | null }
         Returns: string
-      }
-      release_ai_responder_thread_debounce: {
-        Args: { p_claim_token: string; p_conversation_id: string }
-        Returns: undefined
       }
       merge_duplicate_properties: {
         Args: { keeper_id: string; loser_id: string }
