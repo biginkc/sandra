@@ -345,6 +345,12 @@ describe("Migration 084 — campaigns SMS v1 backbone", () => {
       contactId: contactId2,
     });
 
+    const propertyUnlink = await serviceClient
+      .from("properties")
+      .update({ homeowner_contact_id: null })
+      .eq("id", propertyId2);
+    expect(propertyUnlink.error).toBeNull();
+
     const contactDelete = await serviceClient
       .from("contacts")
       .delete()
