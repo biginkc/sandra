@@ -1,18 +1,15 @@
 "use client";
 
 import {
-  Bot,
   Briefcase,
   Download,
   FileText,
   Gauge,
   LayoutDashboard,
-  Link as LinkIcon,
   List,
   MessageSquare,
   Repeat,
   Target,
-  Users,
 } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
@@ -20,10 +17,11 @@ import { usePathname } from "next/navigation";
 import { cn } from "@/lib/utils";
 
 /**
- * Left-nav for the dashboard. Server component (`layout.tsx`) passes
- * `showAdmin` so we render the Team link only for admins; the rest is
- * pathname-reactive (useful hover + active-link highlighting), which
- * needs to be client-side.
+ * Left-nav for the dashboard — the day-to-day workflow ladder. Admin /
+ * config links (Team, Webhooks, AI responder) live in the top nav
+ * (`DashboardAdminNav`), not here, so the sidebar stays uncluttered.
+ * Pathname-reactive (hover + active-link highlighting), so it must be
+ * client-side.
  *
  * Visual contract — design refresh: each item is a 3-unit-tall row
  * with a 4px left-border accent for the active state (replaces the
@@ -71,7 +69,7 @@ const MOBILE_ITEM_ACTIVE =
   "border-nav-active-border bg-white/10 text-white";
 const MOBILE_ITEM_INACTIVE = "text-white/75 hover:bg-white/[0.07] hover:text-white";
 
-export function DashboardSidebar({ showAdmin }: { showAdmin: boolean }) {
+export function DashboardSidebar() {
   const pathname = usePathname();
 
   const isActive = (item: Item): boolean => {
@@ -82,14 +80,6 @@ export function DashboardSidebar({ showAdmin }: { showAdmin: boolean }) {
     }
     return false;
   };
-
-  const adminUsersActive =
-    pathname === "/admin/users" || pathname.startsWith("/admin/users/");
-  const adminWebhooksActive =
-    pathname === "/admin/webhooks" || pathname.startsWith("/admin/webhooks/");
-  const adminAiActive =
-    pathname === "/settings/ai-responder" ||
-    pathname.startsWith("/settings/ai-responder/");
 
   return (
     <nav aria-label="Primary" className="flex flex-1 flex-col gap-1">
@@ -108,46 +98,11 @@ export function DashboardSidebar({ showAdmin }: { showAdmin: boolean }) {
           </Link>
         );
       })}
-      {showAdmin && (
-        <>
-          <Link
-            href="/admin/users"
-            data-active={adminUsersActive || undefined}
-            className={cn(
-              ITEM_BASE,
-              "mt-1",
-              adminUsersActive ? ITEM_ACTIVE : ITEM_INACTIVE,
-            )}
-          >
-            <Users className="size-5" aria-hidden />
-            <span>Team</span>
-          </Link>
-          <Link
-            href="/admin/webhooks"
-            data-active={adminWebhooksActive || undefined}
-            className={cn(
-              ITEM_BASE,
-              adminWebhooksActive ? ITEM_ACTIVE : ITEM_INACTIVE,
-            )}
-          >
-            <LinkIcon className="size-5" aria-hidden />
-            <span>Webhooks</span>
-          </Link>
-          <Link
-            href="/settings/ai-responder"
-            data-active={adminAiActive || undefined}
-            className={cn(ITEM_BASE, adminAiActive ? ITEM_ACTIVE : ITEM_INACTIVE)}
-          >
-            <Bot className="size-5" aria-hidden />
-            <span>AI responder</span>
-          </Link>
-        </>
-      )}
     </nav>
   );
 }
 
-export function DashboardMobileNav({ showAdmin }: { showAdmin: boolean }) {
+export function DashboardMobileNav() {
   const pathname = usePathname();
 
   const isActiveHref = (href: string): boolean =>
@@ -174,46 +129,6 @@ export function DashboardMobileNav({ showAdmin }: { showAdmin: boolean }) {
           </Link>
         );
       })}
-      {showAdmin && (
-        <>
-          <Link
-            href="/admin/users"
-            data-active={isActiveHref("/admin/users") || undefined}
-            className={cn(
-              MOBILE_ITEM_BASE,
-              isActiveHref("/admin/users")
-                ? MOBILE_ITEM_ACTIVE
-                : MOBILE_ITEM_INACTIVE,
-            )}
-          >
-            Team
-          </Link>
-          <Link
-            href="/admin/webhooks"
-            data-active={isActiveHref("/admin/webhooks") || undefined}
-            className={cn(
-              MOBILE_ITEM_BASE,
-              isActiveHref("/admin/webhooks")
-                ? MOBILE_ITEM_ACTIVE
-                : MOBILE_ITEM_INACTIVE,
-            )}
-          >
-            Webhooks
-          </Link>
-          <Link
-            href="/settings/ai-responder"
-            data-active={isActiveHref("/settings/ai-responder") || undefined}
-            className={cn(
-              MOBILE_ITEM_BASE,
-              isActiveHref("/settings/ai-responder")
-                ? MOBILE_ITEM_ACTIVE
-                : MOBILE_ITEM_INACTIVE,
-            )}
-          >
-            AI responder
-          </Link>
-        </>
-      )}
     </nav>
   );
 }
