@@ -304,6 +304,102 @@ export type Database = {
           },
         ]
       }
+      campaigns: {
+        Row: {
+          archived_at: string | null
+          audience_snapshot: Json | null
+          channel: string
+          created_at: string
+          created_by: string | null
+          description: string | null
+          id: string
+          name: string
+          org_id: string
+          status: string
+          updated_at: string
+        }
+        Insert: {
+          archived_at?: string | null
+          audience_snapshot?: Json | null
+          channel?: string
+          created_at?: string
+          created_by?: string | null
+          description?: string | null
+          id?: string
+          name: string
+          org_id: string
+          status?: string
+          updated_at?: string
+        }
+        Update: {
+          archived_at?: string | null
+          audience_snapshot?: Json | null
+          channel?: string
+          created_at?: string
+          created_by?: string | null
+          description?: string | null
+          id?: string
+          name?: string
+          org_id?: string
+          status?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "campaigns_org_id_fkey"
+            columns: ["org_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      campaign_recipients: {
+        Row: {
+          campaign_id: string
+          contact_id: string | null
+          created_at: string
+          id: string
+          property_id: string
+        }
+        Insert: {
+          campaign_id: string
+          contact_id?: string | null
+          created_at?: string
+          id?: string
+          property_id: string
+        }
+        Update: {
+          campaign_id?: string
+          contact_id?: string | null
+          created_at?: string
+          id?: string
+          property_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "campaign_recipients_campaign_id_fkey"
+            columns: ["campaign_id"]
+            isOneToOne: false
+            referencedRelation: "campaigns"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "campaign_recipients_contact_id_fkey"
+            columns: ["contact_id"]
+            isOneToOne: false
+            referencedRelation: "contacts"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "campaign_recipients_property_id_fkey"
+            columns: ["property_id"]
+            isOneToOne: false
+            referencedRelation: "properties"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       cass_cache: {
         Row: {
           cass_response: Json
@@ -1065,7 +1161,9 @@ export type Database = {
       }
       messages: {
         Row: {
+          attributed_outbound_message_id: string | null
           body: string
+          campaign_id: string | null
           channel: string
           contact_id: string | null
           conversation_id: string | null
@@ -1090,7 +1188,9 @@ export type Database = {
           to_address: string | null
         }
         Insert: {
+          attributed_outbound_message_id?: string | null
           body: string
+          campaign_id?: string | null
           channel: string
           contact_id?: string | null
           conversation_id?: string | null
@@ -1115,7 +1215,9 @@ export type Database = {
           to_address?: string | null
         }
         Update: {
+          attributed_outbound_message_id?: string | null
           body?: string
+          campaign_id?: string | null
           channel?: string
           contact_id?: string | null
           conversation_id?: string | null
@@ -1140,6 +1242,20 @@ export type Database = {
           to_address?: string | null
         }
         Relationships: [
+          {
+            foreignKeyName: "messages_attributed_outbound_message_id_fkey"
+            columns: ["attributed_outbound_message_id"]
+            isOneToOne: false
+            referencedRelation: "messages"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "messages_campaign_id_fkey"
+            columns: ["campaign_id"]
+            isOneToOne: false
+            referencedRelation: "campaigns"
+            referencedColumns: ["id"]
+          },
           {
             foreignKeyName: "messages_contact_id_fkey"
             columns: ["contact_id"]
