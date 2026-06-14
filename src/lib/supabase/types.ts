@@ -2545,6 +2545,21 @@ export type Database = {
       }
     }
     Functions: {
+      campaign_kpis: {
+        Args: { p_campaign_id: string }
+        Returns: {
+          attempted: number
+          audience: number
+          delivered: number
+          delivered_rate: number
+          failed: number
+          failed_rate: number
+          opt_out_rate: number
+          opted_out: number
+          replied: number
+          reply_rate: number
+        }[]
+      }
       count_phone_coverage_stats: {
         Args: never
         Returns: {

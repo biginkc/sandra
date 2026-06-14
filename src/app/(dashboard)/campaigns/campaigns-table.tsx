@@ -1,6 +1,7 @@
 "use client";
 
 import { formatDistanceToNow } from "date-fns/formatDistanceToNow";
+import Link from "next/link";
 
 import { SortableHeader } from "@/components/table/sortable-header";
 import {
@@ -211,7 +212,12 @@ export function CampaignsTable({ rows, parsed, total }: Props) {
                 <TableRow key={row.id}>
                   <TableCell>
                     <div className="flex flex-col gap-1">
-                      <span className="font-medium">{row.name}</span>
+                      <Link
+                        href={`/campaigns/${row.id}`}
+                        className="font-medium underline-offset-4 hover:underline"
+                      >
+                        {row.name}
+                      </Link>
                       {row.recipientCount > 0 ? (
                         <span className="text-muted-foreground text-xs">
                           Frozen recipients: {row.recipientCount.toLocaleString()}
