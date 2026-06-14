@@ -1,6 +1,7 @@
 "use server";
 
 import { bulkQueueSms, getAllMatchingProspectIds } from "@/app/(dashboard)/properties/actions";
+import { getCallerMemberships } from "@/lib/auth/memberships";
 import { errFromUnknown, ok, type Result } from "@/lib/errors/result";
 import { reportError } from "@/lib/errors/report";
 import type { BulkSmsQueueOpts } from "@/lib/messaging/bulk-queue";
@@ -30,6 +31,18 @@ type CampaignRecipientSeedRow = {
 
 type LaunchCampaignOpts = Omit<BulkSmsQueueOpts, "campaignId">;
 
+export type CreateCampaignInput = {
+  name: string;
+  body?: string | null;
+  templateCategory?: string | null;
+  paceSeconds?: number | null;
+  skipIfContacted?: boolean;
+  audience: {
+    search?: string | null;
+    blockStack: FilterBlock[];
+  };
+};
+
 export type LaunchCampaignResult = {
   recipientCount: number;
   succeeded: number;
@@ -41,6 +54,91 @@ export type LaunchCampaignResult = {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function normalizeAudienceSnapshot(
+  audience: CreateCampaignInput["audience"],
+): Result<{
+  search: string | null;
+  blockStack: FilterBlock[];
+  audienceSnapshot: Json;
+}> {
+  if (!isRecord(audience) || !Array.isArray(audience.blockStack)) {
+    return {
+      ok: false,
+      error: {
+        code: "VALIDATION",
+        message: "Campaign audience must include a filter block stack.",
+      },
+    };
+  }
+
+  const search =
+    typeof audience.search === "string" && audience.search.trim().length > 0
+      ? audience.search.trim()
+      : null;
+
+  const decoded = decodeFilters(
+    encodeURIComponent(
+      JSON.stringify({
+        v: 1,
+        blocks: audience.blockStack,
+      }),
+    ),
+  );
+
+  if (decoded.blocks.length === 0 && !search) {
+    return {
+      ok: false,
+      error: {
+        code: "VALIDATION",
+        message:
+          "Campaign audience is required. Add a search term or at least one filter block.",
+      },
+    };
+  }
+
+  if (audience.blockStack.length > 0 && decoded.blocks.length === 0) {
+    return {
+      ok: false,
+      error: {
+        code: "VALIDATION",
+        message: "Campaign audience contains invalid filter blocks.",
+      },
+    };
+  }
+
+  const audienceSnapshot = {
+    search,
+    blockStack: decoded.blocks,
+  } satisfies {
+    search: string | null;
+    blockStack: FilterBlock[];
+  };
+
+  return ok({
+    search,
+    blockStack: decoded.blocks,
+    audienceSnapshot: audienceSnapshot as Json,
+  });
+}
+
+function normalizePaceSeconds(
+  value: CreateCampaignInput["paceSeconds"],
+): Result<number | null> {
+  if (value == null) return ok(null);
+
+  if (!Number.isInteger(value) || value < 10 || value > 600) {
+    return {
+      ok: false,
+      error: {
+        code: "VALIDATION",
+        message: "Pacing must be between 10 seconds and 10 minutes.",
+      },
+    };
+  }
+
+  return ok(value);
 }
 
 function parseAudienceSnapshot(
@@ -126,6 +224,137 @@ function parseLaunchOpts(campaign: CampaignRow): Result<LaunchCampaignOpts> {
   opts.skipIfContacted = campaign.skip_if_contacted;
 
   return ok(opts);
+}
+
+export async function createCampaign(
+  input: CreateCampaignInput,
+): Promise<Result<{ id: string }>> {
+  const name = input.name.trim();
+  if (!name) {
+    return {
+      ok: false,
+      error: { code: "VALIDATION", message: "Campaign name is required." },
+    };
+  }
+  if (name.length > 80) {
+    return {
+      ok: false,
+      error: {
+        code: "VALIDATION",
+        message: `Name is ${name.length} characters — cap is 80.`,
+      },
+    };
+  }
+
+  const body =
+    typeof input.body === "string" && input.body.trim().length > 0
+      ? input.body.trim()
+      : null;
+  const templateCategory =
+    typeof input.templateCategory === "string" &&
+    input.templateCategory.trim().length > 0
+      ? input.templateCategory.trim()
+      : null;
+  if (!body && !templateCategory) {
+    return {
+      ok: false,
+      error: {
+        code: "VALIDATION",
+        message: "Write a message or choose a template pool before saving.",
+      },
+    };
+  }
+
+  const paceResult = normalizePaceSeconds(input.paceSeconds ?? null);
+  if (!paceResult.ok) return paceResult;
+
+  const audienceResult = normalizeAudienceSnapshot(input.audience);
+  if (!audienceResult.ok) return audienceResult;
+
+  try {
+    const supabase = await createClient();
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    const memberships = await getCallerMemberships();
+    const orgId = memberships[0]?.org_id ?? null;
+    if (!orgId) {
+      return {
+        ok: false,
+        error: {
+          code: "CAMPAIGN_CREATE_FAILED",
+          message: "No organization membership found for this user.",
+        },
+      };
+    }
+
+    const { data: existing } = await supabase
+      .from("campaigns")
+      .select("id, archived_at")
+      .ilike("name", name)
+      .maybeSingle();
+    if (existing) {
+      if (existing.archived_at) {
+        const now = new Date().toISOString();
+        const { error } = await supabase
+          .from("campaigns")
+          .update({
+            archived_at: null,
+            status: "active",
+            channel: "sms",
+            audience_snapshot: audienceResult.data.audienceSnapshot,
+            body,
+            template_category: templateCategory,
+            pace_seconds: paceResult.data,
+            skip_if_contacted: input.skipIfContacted ?? false,
+            updated_at: now,
+          })
+          .eq("id", existing.id);
+        if (error) {
+          return {
+            ok: false,
+            error: { code: "CAMPAIGN_UPDATE_FAILED", message: error.message },
+          };
+        }
+        return ok({ id: existing.id });
+      }
+
+      return {
+        ok: false,
+        error: {
+          code: "DUPLICATE_NAME",
+          message: `A campaign named "${name}" already exists.`,
+        },
+      };
+    }
+
+    const { data: inserted, error } = await supabase
+      .from("campaigns")
+      .insert({
+        org_id: orgId,
+        name,
+        channel: "sms",
+        audience_snapshot: audienceResult.data.audienceSnapshot,
+        body,
+        template_category: templateCategory,
+        pace_seconds: paceResult.data,
+        skip_if_contacted: input.skipIfContacted ?? false,
+        created_by: user?.id ?? null,
+      })
+      .select("id")
+      .single();
+    if (error) {
+      return {
+        ok: false,
+        error: { code: "CAMPAIGN_CREATE_FAILED", message: error.message },
+      };
+    }
+
+    return ok({ id: inserted.id });
+  } catch (e) {
+    reportError(e, { tags: { surface: "create_campaign" } });
+    return errFromUnknown(e, "CAMPAIGN_CREATE_FAILED");
+  }
 }
 
 async function loadCampaign(
@@ -274,6 +503,118 @@ async function countCampaignMessages(campaignId: string): Promise<Result<number>
   }
 
   return ok(count ?? 0);
+}
+
+export async function archiveCampaign(id: string): Promise<Result<null>> {
+  try {
+    const supabase = await createClient();
+    const { data: existing, error: lookupErr } = await supabase
+      .from("campaigns")
+      .select("status")
+      .eq("id", id)
+      .maybeSingle();
+    if (lookupErr) {
+      return {
+        ok: false,
+        error: { code: "CAMPAIGN_ARCHIVE_FAILED", message: lookupErr.message },
+      };
+    }
+    if (!existing) {
+      return {
+        ok: false,
+        error: {
+          code: "CAMPAIGN_NOT_FOUND",
+          message: "Campaign does not exist.",
+        },
+      };
+    }
+    if (existing.status === "launching") {
+      return {
+        ok: false,
+        error: {
+          code: "CAMPAIGN_ARCHIVE_FAILED",
+          message: "Wait for the launch to finish before archiving this campaign.",
+        },
+      };
+    }
+
+    const now = new Date().toISOString();
+    const { error } = await supabase
+      .from("campaigns")
+      .update({
+        archived_at: now,
+        status: "archived",
+        updated_at: now,
+      })
+      .eq("id", id);
+    if (error) {
+      return {
+        ok: false,
+        error: { code: "CAMPAIGN_ARCHIVE_FAILED", message: error.message },
+      };
+    }
+    return ok(null);
+  } catch (e) {
+    reportError(e, { tags: { surface: "archive_campaign" }, extra: { id } });
+    return errFromUnknown(e, "CAMPAIGN_ARCHIVE_FAILED");
+  }
+}
+
+export async function unarchiveCampaign(id: string): Promise<Result<null>> {
+  try {
+    const supabase = await createClient();
+    const { data: existing, error: lookupErr } = await supabase
+      .from("campaigns")
+      .select("status")
+      .eq("id", id)
+      .maybeSingle();
+    if (lookupErr) {
+      return {
+        ok: false,
+        error: {
+          code: "CAMPAIGN_UNARCHIVE_FAILED",
+          message: lookupErr.message,
+        },
+      };
+    }
+    if (!existing) {
+      return {
+        ok: false,
+        error: {
+          code: "CAMPAIGN_NOT_FOUND",
+          message: "Campaign does not exist.",
+        },
+      };
+    }
+
+    const messageCountResult = await countCampaignMessages(id);
+    if (!messageCountResult.ok) return messageCountResult;
+
+    const nextStatus: CampaignRow["status"] =
+      messageCountResult.data > 0 ? "completed" : "active";
+    const now = new Date().toISOString();
+    const { error } = await supabase
+      .from("campaigns")
+      .update({
+        archived_at: null,
+        status: nextStatus,
+        updated_at: now,
+      })
+      .eq("id", id);
+    if (error) {
+      return {
+        ok: false,
+        error: {
+          code: "CAMPAIGN_UNARCHIVE_FAILED",
+          message: error.message,
+        },
+      };
+    }
+    return ok(null);
+  } catch (e) {
+    reportError(e, { tags: { surface: "unarchive_campaign" }, extra: { id } });
+    return errFromUnknown(e, "CAMPAIGN_UNARCHIVE_FAILED");
+  }
 }
 
 async function markCampaignCompleted(campaignId: string): Promise<Result<null>> {

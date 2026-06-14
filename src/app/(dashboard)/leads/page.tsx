@@ -67,7 +67,7 @@ export default async function LeadsPage({
     q = q.is("assigned_user_id", null);
   }
 
-  // Dashboard click-through: leads not in a drip campaign right now.
+  // Dashboard click-through: leads not in a sequence right now.
   // Two-step: pull active enrollment property_ids, then exclude them.
   if (params.no_active_sequence === "true") {
     const { data: enrolled } = await supabase
@@ -303,7 +303,7 @@ function describeFilter(
   }
   if (params.unassigned === "true") return { label: "Unassigned" };
   if (params.no_active_sequence === "true") {
-    return { label: "Not in a drip campaign" };
+    return { label: "Not in a sequence" };
   }
   if (params.skip_traced === "false") {
     return { label: "Not skip-traced", note: "no phone numbers gathered yet" };
