@@ -35,6 +35,7 @@
  */
 
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { isEffectiveBlock } from "./effective-audience";
 import type { FilterBlock, BlockStack, NumRange, TriBool, Combinator } from "./filter-schema";
 import type { Database } from "@/lib/supabase/types";
 
@@ -285,6 +286,8 @@ export async function applyBlock(
   block: FilterBlock,
   sb: SbClient,
 ): Promise<BuilderResult> {
+  if (!isEffectiveBlock(block)) return { builder };
+
   switch (block.kind) {
     case "vacancy":
       return { builder: applyTriBool(builder, "is_vacant", block.tri) };

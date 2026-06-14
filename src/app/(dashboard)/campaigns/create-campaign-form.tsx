@@ -21,6 +21,10 @@ import {
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { callAction } from "@/lib/errors/call-action";
+import {
+  EMPTY_AUDIENCE_VALIDATION_MESSAGE,
+  hasEffectiveAudience,
+} from "@/lib/prospects/effective-audience";
 import type { FilterBlock } from "@/lib/prospects/filter-schema";
 
 import { createCampaign } from "./actions";
@@ -90,9 +94,8 @@ export function CreateCampaignForm({
       nextErrors.pace = "Pacing must be between 10 seconds and 10 minutes.";
     }
 
-    if (!audienceSearch.trim() && blocks.length === 0) {
-      nextErrors.audience =
-        "Add a search term or at least one audience filter.";
+    if (!hasEffectiveAudience({ search: audienceSearch, blockStack: blocks })) {
+      nextErrors.audience = EMPTY_AUDIENCE_VALIDATION_MESSAGE;
     }
 
     return nextErrors;

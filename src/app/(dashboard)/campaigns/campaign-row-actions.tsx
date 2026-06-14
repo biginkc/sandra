@@ -30,7 +30,7 @@ export function CampaignRowActions({
   const router = useRouter();
   const [pending, startTransition] = useTransition();
 
-  const canLaunch = !archived && (status === "active" || status === "paused");
+  const canLaunch = !archived && status === "active";
   const canArchive = !archived && status !== "launching";
 
   const handleLaunch = () => {

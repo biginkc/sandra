@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { BlockOptions } from "@/app/(dashboard)/properties/_components/blocks/_block-shell";
+import { EMPTY_AUDIENCE_VALIDATION_MESSAGE } from "@/lib/prospects/effective-audience";
 
 import { CreateCampaignForm } from "./create-campaign-form";
 
@@ -66,6 +67,12 @@ async function addVacancyAudience(user: ReturnType<typeof userEvent.setup>) {
   await user.click(await screen.findByRole("button", { name: "Vacancy" }));
   await screen.findByText("Vacancy");
   await user.click(screen.getByText("Yes (vacant)"));
+}
+
+async function addNoOpVacancyFilter(user: ReturnType<typeof userEvent.setup>) {
+  await user.click(screen.getByRole("button", { name: /add filter/i }));
+  await user.click(await screen.findByRole("button", { name: "Vacancy" }));
+  await screen.findByText("Vacancy");
 }
 
 beforeEach(() => {
@@ -168,6 +175,26 @@ describe("<CreateCampaignForm />", () => {
     expect(createCampaign).not.toHaveBeenCalled();
     expect(
       screen.getByText("Pacing must be between 10 seconds and 10 minutes."),
+    ).toBeInTheDocument();
+  });
+
+  it("blocks a no-op audience filter before the server action runs", async () => {
+    const user = userEvent.setup();
+    createCampaign.mockResolvedValue({ ok: true, data: { id: "camp-4" } });
+
+    renderForm();
+
+    await user.type(screen.getByLabelText(/^name$/i), "No-op Audience");
+    await user.type(screen.getByLabelText(/message body/i), "Hello there");
+    await addNoOpVacancyFilter(user);
+
+    await user.click(
+      screen.getByRole("button", { name: /create campaign/i }),
+    );
+
+    expect(createCampaign).not.toHaveBeenCalled();
+    expect(
+      screen.getByText(EMPTY_AUDIENCE_VALIDATION_MESSAGE),
     ).toBeInTheDocument();
   });
 });

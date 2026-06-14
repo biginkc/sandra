@@ -5,6 +5,10 @@ import { getCallerMemberships } from "@/lib/auth/memberships";
 import { errFromUnknown, ok, type Result } from "@/lib/errors/result";
 import { reportError } from "@/lib/errors/report";
 import type { BulkSmsQueueOpts } from "@/lib/messaging/bulk-queue";
+import {
+  EMPTY_AUDIENCE_VALIDATION_MESSAGE,
+  hasEffectiveAudience,
+} from "@/lib/prospects/effective-audience";
 import { decodeFilters, type FilterBlock } from "@/lib/prospects/filter-schema";
 import { createClient } from "@/lib/supabase/server";
 import type { Database, Json } from "@/lib/supabase/types";
@@ -104,6 +108,16 @@ function normalizeAudienceSnapshot(
       error: {
         code: "VALIDATION",
         message: "Campaign audience contains invalid filter blocks.",
+      },
+    };
+  }
+
+  if (!hasEffectiveAudience({ search, blockStack: decoded.blocks })) {
+    return {
+      ok: false,
+      error: {
+        code: "VALIDATION",
+        message: EMPTY_AUDIENCE_VALIDATION_MESSAGE,
       },
     };
   }
@@ -226,6 +240,48 @@ function parseLaunchOpts(campaign: CampaignRow): Result<LaunchCampaignOpts> {
   return ok(opts);
 }
 
+function invalidAudienceResult(): Result<never> {
+  return {
+    ok: false,
+    error: {
+      code: "VALIDATION",
+      message: EMPTY_AUDIENCE_VALIDATION_MESSAGE,
+    },
+  };
+}
+
+function stateConflictResult(
+  message: string,
+): Result<never> {
+  return {
+    ok: false,
+    error: {
+      code: "CAMPAIGN_STATE_CONFLICT",
+      message,
+    },
+  };
+}
+
+async function campaignExists(
+  campaignId: string,
+  supabase: Awaited<ReturnType<typeof createClient>>,
+): Promise<Result<boolean>> {
+  const { data, error } = await supabase
+    .from("campaigns")
+    .select("id")
+    .eq("id", campaignId)
+    .maybeSingle();
+
+  if (error) {
+    return {
+      ok: false,
+      error: { code: "CAMPAIGN_LOOKUP_FAILED", message: error.message },
+    };
+  }
+
+  return ok(Boolean(data?.id));
+}
+
 export async function createCampaign(
   input: CreateCampaignInput,
 ): Promise<Result<{ id: string }>> {
@@ -288,37 +344,24 @@ export async function createCampaign(
       };
     }
 
-    const { data: existing } = await supabase
+    const { data: activeCandidates, error: activeLookupError } = await supabase
       .from("campaigns")
-      .select("id, archived_at")
+      .select("id")
+      .eq("org_id", orgId)
       .ilike("name", name)
-      .maybeSingle();
-    if (existing) {
-      if (existing.archived_at) {
-        const now = new Date().toISOString();
-        const { error } = await supabase
-          .from("campaigns")
-          .update({
-            archived_at: null,
-            status: "active",
-            channel: "sms",
-            audience_snapshot: audienceResult.data.audienceSnapshot,
-            body,
-            template_category: templateCategory,
-            pace_seconds: paceResult.data,
-            skip_if_contacted: input.skipIfContacted ?? false,
-            updated_at: now,
-          })
-          .eq("id", existing.id);
-        if (error) {
-          return {
-            ok: false,
-            error: { code: "CAMPAIGN_UPDATE_FAILED", message: error.message },
-          };
-        }
-        return ok({ id: existing.id });
-      }
+      .is("archived_at", null)
+      .limit(1);
+    if (activeLookupError) {
+      return {
+        ok: false,
+        error: {
+          code: "CAMPAIGN_LOOKUP_FAILED",
+          message: activeLookupError.message,
+        },
+      };
+    }
 
+    if ((activeCandidates ?? []).length > 0) {
       return {
         ok: false,
         error: {
@@ -326,6 +369,60 @@ export async function createCampaign(
           message: `A campaign named "${name}" already exists.`,
         },
       };
+    }
+
+    const { data: archivedCandidates, error: archivedLookupError } =
+      await supabase
+        .from("campaigns")
+        .select("id, archived_at")
+        .eq("org_id", orgId)
+        .ilike("name", name)
+        .not("archived_at", "is", null)
+        .order("archived_at", { ascending: false })
+        .limit(1);
+    if (archivedLookupError) {
+      return {
+        ok: false,
+        error: {
+          code: "CAMPAIGN_LOOKUP_FAILED",
+          message: archivedLookupError.message,
+        },
+      };
+    }
+
+    const archivedCandidate = archivedCandidates?.[0] ?? null;
+    if (archivedCandidate) {
+      const now = new Date().toISOString();
+      const { data: revivedRow, error } = await supabase
+        .from("campaigns")
+        .update({
+          archived_at: null,
+          status: "active",
+          channel: "sms",
+          audience_snapshot: audienceResult.data.audienceSnapshot,
+          body,
+          template_category: templateCategory,
+          pace_seconds: paceResult.data,
+          skip_if_contacted: input.skipIfContacted ?? false,
+          updated_at: now,
+        })
+        .eq("id", archivedCandidate.id)
+        .not("archived_at", "is", null)
+        .select("id")
+        .maybeSingle();
+      if (error) {
+        return {
+          ok: false,
+          error: { code: "CAMPAIGN_UPDATE_FAILED", message: error.message },
+        };
+      }
+      if (!revivedRow?.id) {
+        return stateConflictResult(
+          "Campaign state changed before the archived draft could be restored.",
+        );
+      }
+
+      return ok({ id: revivedRow.id });
     }
 
     const { data: inserted, error } = await supabase
@@ -508,50 +605,40 @@ async function countCampaignMessages(campaignId: string): Promise<Result<number>
 export async function archiveCampaign(id: string): Promise<Result<null>> {
   try {
     const supabase = await createClient();
-    const { data: existing, error: lookupErr } = await supabase
-      .from("campaigns")
-      .select("status")
-      .eq("id", id)
-      .maybeSingle();
-    if (lookupErr) {
-      return {
-        ok: false,
-        error: { code: "CAMPAIGN_ARCHIVE_FAILED", message: lookupErr.message },
-      };
-    }
-    if (!existing) {
-      return {
-        ok: false,
-        error: {
-          code: "CAMPAIGN_NOT_FOUND",
-          message: "Campaign does not exist.",
-        },
-      };
-    }
-    if (existing.status === "launching") {
-      return {
-        ok: false,
-        error: {
-          code: "CAMPAIGN_ARCHIVE_FAILED",
-          message: "Wait for the launch to finish before archiving this campaign.",
-        },
-      };
-    }
-
     const now = new Date().toISOString();
-    const { error } = await supabase
+    const { data, error } = await supabase
       .from("campaigns")
       .update({
         archived_at: now,
         status: "archived",
         updated_at: now,
       })
-      .eq("id", id);
+      .eq("id", id)
+      .is("archived_at", null)
+      .in("status", ["active", "paused", "completed"])
+      .select("id")
+      .maybeSingle();
     if (error) {
       return {
         ok: false,
         error: { code: "CAMPAIGN_ARCHIVE_FAILED", message: error.message },
       };
+    }
+    if (!data?.id) {
+      const existsResult = await campaignExists(id, supabase);
+      if (!existsResult.ok) return existsResult;
+      if (!existsResult.data) {
+        return {
+          ok: false,
+          error: {
+            code: "CAMPAIGN_NOT_FOUND",
+            message: "Campaign does not exist.",
+          },
+        };
+      }
+      return stateConflictResult(
+        "Wait for the launch to finish before archiving this campaign.",
+      );
     }
     return ok(null);
   } catch (e) {
@@ -563,44 +650,24 @@ export async function archiveCampaign(id: string): Promise<Result<null>> {
 export async function unarchiveCampaign(id: string): Promise<Result<null>> {
   try {
     const supabase = await createClient();
-    const { data: existing, error: lookupErr } = await supabase
-      .from("campaigns")
-      .select("status")
-      .eq("id", id)
-      .maybeSingle();
-    if (lookupErr) {
-      return {
-        ok: false,
-        error: {
-          code: "CAMPAIGN_UNARCHIVE_FAILED",
-          message: lookupErr.message,
-        },
-      };
-    }
-    if (!existing) {
-      return {
-        ok: false,
-        error: {
-          code: "CAMPAIGN_NOT_FOUND",
-          message: "Campaign does not exist.",
-        },
-      };
-    }
-
     const messageCountResult = await countCampaignMessages(id);
     if (!messageCountResult.ok) return messageCountResult;
 
     const nextStatus: CampaignRow["status"] =
       messageCountResult.data > 0 ? "completed" : "active";
     const now = new Date().toISOString();
-    const { error } = await supabase
+    const { data, error } = await supabase
       .from("campaigns")
       .update({
         archived_at: null,
         status: nextStatus,
         updated_at: now,
       })
-      .eq("id", id);
+      .eq("id", id)
+      .eq("status", "archived")
+      .not("archived_at", "is", null)
+      .select("id")
+      .maybeSingle();
     if (error) {
       return {
         ok: false,
@@ -609,6 +676,22 @@ export async function unarchiveCampaign(id: string): Promise<Result<null>> {
           message: error.message,
         },
       };
+    }
+    if (!data?.id) {
+      const existsResult = await campaignExists(id, supabase);
+      if (!existsResult.ok) return existsResult;
+      if (!existsResult.data) {
+        return {
+          ok: false,
+          error: {
+            code: "CAMPAIGN_NOT_FOUND",
+            message: "Campaign does not exist.",
+          },
+        };
+      }
+      return stateConflictResult(
+        "Campaign state changed before it could be restored.",
+      );
     }
     return ok(null);
   } catch (e) {
@@ -747,6 +830,12 @@ export async function launchCampaign(
       return buildAlreadyLaunchedResult(campaignId, messageCount);
     }
 
+    const snapshotResult = parseAudienceSnapshot(campaign.audience_snapshot);
+    if (!snapshotResult.ok) return snapshotResult;
+    if (!hasEffectiveAudience(snapshotResult.data)) {
+      return invalidAudienceResult();
+    }
+
     const claimResult = await claimCampaignLaunch(campaignId, launchClaimStatuses);
     if (!claimResult.ok) return claimResult;
     if (!claimResult.data) {
@@ -758,9 +847,6 @@ export async function launchCampaign(
 
     let propertyIds = frozenResult.data;
     if (propertyIds.length === 0) {
-      const snapshotResult = parseAudienceSnapshot(campaign.audience_snapshot);
-      if (!snapshotResult.ok) return snapshotResult;
-
       const idsResult = await getAllMatchingProspectIds({
         search: snapshotResult.data.search,
         blockStack: snapshotResult.data.blockStack,

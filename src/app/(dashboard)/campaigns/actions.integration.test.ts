@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { resetMockState } from "@/lib/messaging/providers/mock";
+import { EMPTY_AUDIENCE_VALIDATION_MESSAGE } from "@/lib/prospects/effective-audience";
 import { createTestClient } from "@tests/integration/client";
 import { resetTenantTables } from "@tests/integration/reset";
 
@@ -133,11 +134,12 @@ async function seedTaggedLead(args: {
 async function seedCampaign(args: {
   orgId: string;
   audienceSnapshot: Record<string, unknown>;
+  archivedAt?: string | null;
   body?: string | null;
   name?: string;
   paceSeconds?: number | null;
   skipIfContacted?: boolean;
-  status?: "active" | "launching";
+  status?: "active" | "launching" | "paused" | "completed" | "archived";
   templateCategory?: string | null;
 }): Promise<string> {
   const { data, error } = await testClient
@@ -151,6 +153,7 @@ async function seedCampaign(args: {
       skip_if_contacted: args.skipIfContacted ?? false,
       status: args.status ?? "active",
       template_category: args.templateCategory ?? null,
+      archived_at: args.archivedAt ?? null,
     } as never)
     .select("id")
     .single();
@@ -224,6 +227,44 @@ describe("createCampaign / archiveCampaign / unarchiveCampaign (integration)", (
     });
   });
 
+  it("rejects create when the saved audience only contains no-op filters", async () => {
+    const email = uniqueCampaignEmail("campaign-empty-audience");
+    const userId = await createAuthUser(email);
+    currentUserId = userId;
+    currentEmail = email;
+
+    const result = await createCampaign({
+      name: "Empty Audience",
+      body: "Should never save",
+      paceSeconds: 18,
+      audience: {
+        search: null,
+        blockStack: [
+          { id: "vacancy-empty", kind: "vacancy", tri: "any" },
+          {
+            id: "state-empty",
+            kind: "state",
+            combinator: "any",
+            values: [],
+          },
+        ],
+      },
+    });
+
+    expect(result).toEqual({
+      ok: false,
+      error: {
+        code: "VALIDATION",
+        message: EMPTY_AUDIENCE_VALIDATION_MESSAGE,
+      },
+    });
+
+    const { count } = await testClient
+      .from("campaigns")
+      .select("*", { count: "exact", head: true });
+    expect(count).toBe(0);
+  });
+
   it("revives an archived duplicate name and overwrites the saved launch config", async () => {
     const email = uniqueCampaignEmail("campaign-revive");
     const userId = await createAuthUser(email);
@@ -281,6 +322,124 @@ describe("createCampaign / archiveCampaign / unarchiveCampaign (integration)", (
     });
   });
 
+  it("revives the most recently archived duplicate when multiple archived matches exist", async () => {
+    const orgId = await getOrgId();
+    const email = uniqueCampaignEmail("campaign-multi-archive-revive");
+    const userId = await createAuthUser(email);
+    currentUserId = userId;
+    currentEmail = email;
+
+    const olderId = await seedCampaign({
+      orgId,
+      name: "Deterministic Revive",
+      audienceSnapshot: {
+        search: null,
+        blockStack: [{ id: "older-vacancy", kind: "vacancy", tri: "yes" }],
+      },
+      body: "Older archived body",
+      status: "archived",
+      archivedAt: "2026-06-10T10:00:00.000Z",
+    });
+    const newerId = await seedCampaign({
+      orgId,
+      name: "Deterministic Revive",
+      audienceSnapshot: {
+        search: null,
+        blockStack: [{ id: "newer-vacancy", kind: "vacancy", tri: "yes" }],
+      },
+      body: "Newer archived body",
+      status: "archived",
+      archivedAt: "2026-06-12T10:00:00.000Z",
+    });
+
+    const revived = await createCampaign({
+      name: "deterministic revive",
+      body: "Fresh body",
+      paceSeconds: 30,
+      skipIfContacted: true,
+      audience: {
+        search: "oak",
+        blockStack: [{ id: "revived-vacancy", kind: "vacancy", tri: "no" }],
+      },
+    });
+
+    expect(revived.ok).toBe(true);
+    if (!revived.ok) return;
+    expect(revived.data.id).toBe(newerId);
+
+    const { data: rows } = await testClient
+      .from("campaigns")
+      .select("id, status, archived_at, body, pace_seconds, skip_if_contacted")
+      .in("id", [olderId, newerId])
+      .order("id", { ascending: true });
+
+    const olderRow = rows?.find((row) => row.id === olderId);
+    const newerRow = rows?.find((row) => row.id === newerId);
+
+    expect(olderRow).toMatchObject({
+      id: olderId,
+      status: "archived",
+      body: "Older archived body",
+    });
+    expect(olderRow?.archived_at).toBe("2026-06-10T10:00:00.000Z");
+    expect(newerRow).toMatchObject({
+      id: newerId,
+      status: "active",
+      archived_at: null,
+      body: "Fresh body",
+      pace_seconds: 30,
+      skip_if_contacted: true,
+    });
+  });
+
+  it("returns DUPLICATE_NAME when an active match exists even if archived dupes also exist", async () => {
+    const orgId = await getOrgId();
+    const email = uniqueCampaignEmail("campaign-active-duplicate");
+    const userId = await createAuthUser(email);
+    currentUserId = userId;
+    currentEmail = email;
+
+    await seedCampaign({
+      orgId,
+      name: "Already Live",
+      audienceSnapshot: {
+        search: null,
+        blockStack: [{ id: "active-vacancy", kind: "vacancy", tri: "yes" }],
+      },
+      body: "Active body",
+      status: "active",
+    });
+    await seedCampaign({
+      orgId,
+      name: "Already Live",
+      audienceSnapshot: {
+        search: null,
+        blockStack: [{ id: "archived-vacancy", kind: "vacancy", tri: "no" }],
+      },
+      body: "Archived body",
+      status: "archived",
+      archivedAt: "2026-06-13T10:00:00.000Z",
+    });
+
+    const result = await createCampaign({
+      name: "already live",
+      body: "Should fail",
+      paceSeconds: 18,
+      audience: {
+        search: "oak",
+        blockStack: [{ id: "new-vacancy", kind: "vacancy", tri: "yes" }],
+      },
+    });
+
+    expect(result).toEqual({
+      ok: false,
+      error: {
+        code: "DUPLICATE_NAME",
+        message: 'A campaign named "already live" already exists.',
+      },
+    });
+  });
+
   it("archives and restores a campaign back to the correct status", async () => {
     const email = uniqueCampaignEmail("campaign-archive");
     const userId = await createAuthUser(email);
@@ -321,6 +480,39 @@ describe("createCampaign / archiveCampaign / unarchiveCampaign (integration)", (
       .single());
     expect(row?.status).toBe("active");
     expect(row?.archived_at).toBeNull();
+  });
+
+  it("rejects archiving a launching campaign without flipping it to archived", async () => {
+    const orgId = await getOrgId();
+    const campaignId = await seedCampaign({
+      orgId,
+      name: "Launching Now",
+      audienceSnapshot: {
+        search: null,
+        blockStack: [{ id: "launching-vacancy", kind: "vacancy", tri: "yes" }],
+      },
+      body: "Still launching",
+      status: "launching",
+    });
+
+    const result = await archiveCampaign(campaignId);
+    expect(result).toEqual({
+      ok: false,
+      error: {
+        code: "CAMPAIGN_STATE_CONFLICT",
+        message: "Wait for the launch to finish before archiving this campaign.",
+      },
+    });
+
+    const { data: row } = await testClient
+      .from("campaigns")
+      .select("status, archived_at")
+      .eq("id", campaignId)
+      .single();
+    expect(row).toMatchObject({
+      status: "launching",
+      archived_at: null,
+    });
   });
 });
 
@@ -576,6 +768,59 @@ describe("launchCampaign (integration)", () => {
       .select("property_id")
       .eq("campaign_id", campaignId);
     expect(messages?.map((row) => row.property_id)).toEqual([lead.propertyId]);
+  });
+
+  it("rejects launch when the saved audience only contains no-op filters", async () => {
+    const orgId = await getOrgId();
+    const email = uniqueCampaignEmail("campaign-launch-empty-audience");
+    const userId = await createAuthUser(email);
+    currentUserId = userId;
+    currentEmail = email;
+
+    const campaignId = await seedCampaign({
+      orgId,
+      audienceSnapshot: {
+        search: null,
+        blockStack: [
+          { id: "vacancy-empty", kind: "vacancy", tri: "any" },
+          {
+            id: "state-empty",
+            kind: "state",
+            combinator: "any",
+            values: [],
+          },
+        ],
+      },
+      body: "Should never send",
+    });
+
+    const launch = await launchCampaign(campaignId);
+    expect(launch).toEqual({
+      ok: false,
+      error: {
+        code: "VALIDATION",
+        message: EMPTY_AUDIENCE_VALIDATION_MESSAGE,
+      },
+    });
+
+    const { count: recipientCount } = await testClient
+      .from("campaign_recipients")
+      .select("*", { count: "exact", head: true })
+      .eq("campaign_id", campaignId);
+    expect(recipientCount).toBe(0);
+
+    const { count: messageCount } = await testClient
+      .from("messages")
+      .select("*", { count: "exact", head: true })
+      .eq("campaign_id", campaignId);
+    expect(messageCount).toBe(0);
+
+    const { data: campaignRow } = await testClient
+      .from("campaigns")
+      .select("status")
+      .eq("id", campaignId)
+      .single();
+    expect(campaignRow?.status).toBe("active");
   });
 
   it("serializes campaignId through the deferred workflow path, keeps the campaign launching until finalize, and stamps every chunked row", async () => {
