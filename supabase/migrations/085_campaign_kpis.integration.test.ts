@@ -147,7 +147,7 @@ afterAll(async () => {
 });
 
 describe("Migration 085 — campaign KPI scoreboard RPC", () => {
-  it("returns deduped counts and rates from attributed campaign traffic", async () => {
+  it("classifies campaign KPI replies and opt-outs with contact-based rates", async () => {
     const member = await createUserForOrg(BMH_ORG_ID);
     const campaignId = await insertCampaign();
     const otherCampaignId = await insertCampaign(BMH_ORG_ID, {
@@ -159,19 +159,26 @@ describe("Migration 085 — campaign KPI scoreboard RPC", () => {
     const contactC = await insertContact(BMH_ORG_ID, "C");
     const contactD = await insertContact(BMH_ORG_ID, "D");
     const contactE = await insertContact(BMH_ORG_ID, "E");
+    const contactF = await insertContact(BMH_ORG_ID, "F");
+    const contactG = await insertContact(BMH_ORG_ID, "G");
 
     const propertyA = await insertProperty(BMH_ORG_ID, contactA);
+    const propertyA2 = await insertProperty(BMH_ORG_ID, contactA);
     const propertyB = await insertProperty(BMH_ORG_ID, contactB);
     const propertyC = await insertProperty(BMH_ORG_ID, contactC);
     const propertyD = await insertProperty(BMH_ORG_ID, contactD);
     const propertyE = await insertProperty(BMH_ORG_ID, contactE);
+    const propertyF = await insertProperty(BMH_ORG_ID, contactF);
+    const propertyG = await insertProperty(BMH_ORG_ID, contactG);
 
     await Promise.all([
       insertCampaignRecipient({ campaignId, propertyId: propertyA, contactId: contactA }),
+      insertCampaignRecipient({ campaignId, propertyId: propertyA2, contactId: contactA }),
       insertCampaignRecipient({ campaignId, propertyId: propertyB, contactId: contactB }),
       insertCampaignRecipient({ campaignId, propertyId: propertyC, contactId: contactC }),
       insertCampaignRecipient({ campaignId, propertyId: propertyD, contactId: contactD }),
       insertCampaignRecipient({ campaignId, propertyId: propertyE, contactId: contactE }),
+      insertCampaignRecipient({ campaignId, propertyId: propertyF, contactId: contactF }),
     ]);
 
     const outboundA = await insertMessage(BMH_ORG_ID, {
@@ -179,6 +186,13 @@ describe("Migration 085 — campaign KPI scoreboard RPC", () => {
       status: "delivered",
       campaign_id: campaignId,
       property_id: propertyA,
+      contact_id: contactA,
+    });
+    const outboundA2 = await insertMessage(BMH_ORG_ID, {
+      direction: "outbound",
+      status: "delivered",
+      campaign_id: campaignId,
+      property_id: propertyA2,
       contact_id: contactA,
     });
     const outboundB = await insertMessage(BMH_ORG_ID, {
@@ -202,12 +216,26 @@ describe("Migration 085 — campaign KPI scoreboard RPC", () => {
       property_id: propertyD,
       contact_id: contactD,
     });
+    const outboundE = await insertMessage(BMH_ORG_ID, {
+      direction: "outbound",
+      status: "delivered",
+      campaign_id: campaignId,
+      property_id: propertyE,
+      contact_id: contactE,
+    });
+    const outboundF = await insertMessage(BMH_ORG_ID, {
+      direction: "outbound",
+      status: "delivered",
+      campaign_id: campaignId,
+      property_id: propertyF,
+      contact_id: contactF,
+    });
     const otherCampaignOutbound = await insertMessage(BMH_ORG_ID, {
       direction: "outbound",
       status: "delivered",
       campaign_id: otherCampaignId,
-      property_id: propertyE,
-      contact_id: contactE,
+      property_id: propertyG,
+      contact_id: contactG,
     });
 
     await Promise.all([
@@ -223,16 +251,8 @@ describe("Migration 085 — campaign KPI scoreboard RPC", () => {
         direction: "inbound",
         status: "received",
         contact_id: contactA,
-        property_id: propertyA,
-        attributed_outbound_message_id: outboundA,
-        body: "Still interested",
-      }),
-      insertMessage(BMH_ORG_ID, {
-        direction: "inbound",
-        status: "received",
-        contact_id: contactB,
-        property_id: propertyB,
-        attributed_outbound_message_id: outboundB,
+        property_id: propertyA2,
+        attributed_outbound_message_id: outboundA2,
         body: "STOP",
         metadata: { keyword: "stop" },
       }),
@@ -242,8 +262,8 @@ describe("Migration 085 — campaign KPI scoreboard RPC", () => {
         contact_id: contactB,
         property_id: propertyB,
         attributed_outbound_message_id: outboundB,
-        body: "stop again",
-        metadata: { keyword: "stop" },
+        body: "Do not contact me",
+        metadata: { keyword: "dnc" },
       }),
       insertMessage(BMH_ORG_ID, {
         direction: "inbound",
@@ -259,6 +279,23 @@ describe("Migration 085 — campaign KPI scoreboard RPC", () => {
         status: "received",
         contact_id: contactE,
         property_id: propertyE,
+        attributed_outbound_message_id: outboundE,
+        body: "wrong number",
+        metadata: { keyword: "wrong_number" },
+      }),
+      insertMessage(BMH_ORG_ID, {
+        direction: "inbound",
+        status: "received",
+        contact_id: contactF,
+        property_id: propertyF,
+        attributed_outbound_message_id: outboundF,
+        body: "Still interested",
+      }),
+      insertMessage(BMH_ORG_ID, {
+        direction: "inbound",
+        status: "received",
+        contact_id: contactG,
+        property_id: propertyG,
         attributed_outbound_message_id: otherCampaignOutbound,
         body: "wrong campaign",
       }),
@@ -277,18 +314,21 @@ describe("Migration 085 — campaign KPI scoreboard RPC", () => {
     });
 
     expect(error).toBeNull();
+    const row = data?.[0];
+    expect(row?.replied).toBe(1); // Only contactF; STOP/DNC win, HELP/WRONG_NUMBER count as neither.
+    expect(row?.opted_out).toBe(2); // contactA STOP + contactB DNC.
     expect(data).toEqual([
       {
-        audience: 5,
-        attempted: 4,
-        delivered: 2,
-        delivered_rate: 50,
+        audience: 7,
+        attempted: 7,
+        delivered: 5,
+        delivered_rate: 71.4,
         failed: 1,
-        failed_rate: 25,
-        replied: 2,
-        reply_rate: 50,
-        opted_out: 1,
-        opt_out_rate: 25,
+        failed_rate: 14.3,
+        replied: 1,
+        reply_rate: 16.7,
+        opted_out: 2,
+        opt_out_rate: 33.3,
       },
     ]);
   });

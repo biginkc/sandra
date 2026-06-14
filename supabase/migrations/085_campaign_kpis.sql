@@ -55,7 +55,7 @@ begin
     where cr.campaign_id = p_campaign_id
   ),
   outbound_messages as (
-    select m.property_id, m.status
+    select m.property_id, m.contact_id, m.status
     from public.messages m
     where m.campaign_id = p_campaign_id
       and m.direction = 'outbound'
@@ -68,6 +68,11 @@ begin
       count(distinct property_id) filter (where status = 'failed')::bigint as failed
     from outbound_messages
   ),
+  outbound_contact_counts as (
+    select count(distinct contact_id)::bigint as attempted_contacts
+    from outbound_messages
+    where contact_id is not null
+  ),
   attributed_inbound as (
     select
       inbound.contact_id,
@@ -79,11 +84,23 @@ begin
       and inbound.direction = 'inbound'
       and inbound.contact_id is not null
   ),
+  opted_out_contacts as (
+    select distinct contact_id
+    from attributed_inbound
+    where keyword in ('stop', 'dnc')
+  ),
+  replied_contacts as (
+    select distinct inbound.contact_id
+    from attributed_inbound inbound
+    left join opted_out_contacts opted_out
+      on opted_out.contact_id = inbound.contact_id
+    where opted_out.contact_id is null
+      and inbound.keyword not in ('stop', 'dnc', 'help', 'wrong_number')
+  ),
   inbound_counts as (
     select
-      count(distinct contact_id) filter (where keyword <> 'stop')::bigint as replied,
-      count(distinct contact_id) filter (where keyword = 'stop')::bigint as opted_out
-    from attributed_inbound
+      (select count(*) from replied_contacts)::bigint as replied,
+      (select count(*) from opted_out_contacts)::bigint as opted_out
   )
   select
     rc.audience,
@@ -100,16 +117,17 @@ begin
     end as failed_rate,
     ic.replied,
     case
-      when oc.attempted = 0 then 0
-      else round((ic.replied::numeric * 100.0) / oc.attempted::numeric, 1)::double precision
+      when occ.attempted_contacts = 0 then 0
+      else round((ic.replied::numeric * 100.0) / occ.attempted_contacts::numeric, 1)::double precision
     end as reply_rate,
     ic.opted_out,
     case
-      when oc.attempted = 0 then 0
-      else round((ic.opted_out::numeric * 100.0) / oc.attempted::numeric, 1)::double precision
+      when occ.attempted_contacts = 0 then 0
+      else round((ic.opted_out::numeric * 100.0) / occ.attempted_contacts::numeric, 1)::double precision
     end as opt_out_rate
   from recipient_counts rc
   cross join outbound_counts oc
+  cross join outbound_contact_counts occ
   cross join inbound_counts ic;
 end;
 $$;
