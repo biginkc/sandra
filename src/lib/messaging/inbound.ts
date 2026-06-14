@@ -126,13 +126,25 @@ export async function handleInboundWebhook(
       const contactId = thread.contactId;
       const propertyId = thread.propertyId;
       const conversationId = thread.conversationId;
-      const attributedOutboundMessageId =
-        await findAttributedOutboundMessageId(supabase, {
+      let attributedOutboundMessageId: string | null = null;
+      try {
+        attributedOutboundMessageId = await findAttributedOutboundMessageId(supabase, {
           contactId,
           toPhone: ev.to,
           propertyId,
           conversationId,
         });
+      } catch (e) {
+        reportError(e, {
+          tags: { surface: `${provider.providerId}_inbound_attribution_lookup` },
+          extra: {
+            externalId: ev.externalId,
+            contactId,
+            propertyId,
+            conversationId,
+          },
+        });
+      }
       const source = `${provider.providerId}_inbound_webhook`;
       const bodyTrimmed = ev.body.trim();
       const baseMetadata = {

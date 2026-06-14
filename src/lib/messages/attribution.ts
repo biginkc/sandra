@@ -38,7 +38,6 @@ export async function findAttributedOutboundMessageId(
     .in("property_id", candidatePropertyIds)
     .not("campaign_id", "is", null)
     .in("status", ["sent", "delivered"])
-    .order("sent_at", { ascending: false, nullsFirst: false })
     .order("created_at", { ascending: false })
     .limit(1)
     .maybeSingle();
