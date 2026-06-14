@@ -35,6 +35,7 @@ test.skip("Dialpad → Twilio round-trip: body we sent matches body Twilio recei
       first_name: "Twilio",
       last_name: "Probe",
       phone_1: twilioTo,
+      phone_1_type: "mobile",
     })
     .select("id")
     .single();

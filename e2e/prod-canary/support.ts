@@ -617,6 +617,7 @@ export async function getOrCreateCanarySmsRecipientContact(
       first_name: input.firstName,
       last_name: input.lastName,
       phone_1: input.phone,
+      phone_1_type: "mobile",
     })
     .select("id")
     .single();

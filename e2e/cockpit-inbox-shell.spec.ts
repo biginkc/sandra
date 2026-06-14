@@ -37,6 +37,7 @@ async function seedThread(
       first_name: opts.contactName.first,
       last_name: opts.contactName.last,
       phone_1: opts.phone,
+      phone_1_type: "mobile",
     })
     .select("id")
     .single();

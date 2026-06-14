@@ -36,6 +36,7 @@ test("production canary renders a signed inbound SMS webhook in the lead thread"
         first_name: "PROD-CANARY",
         last_name: contactLastName,
         phone_1: phone,
+        phone_1_type: "mobile",
       })
       .select("id")
       .single();

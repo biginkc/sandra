@@ -33,6 +33,7 @@ async function seedTwoThreads(admin: ReturnType<typeof adminClient>) {
         first_name: names[i].first,
         last_name: names[i].last,
         phone_1: phones[i],
+        phone_1_type: "mobile",
       })
       .select("id")
       .single();

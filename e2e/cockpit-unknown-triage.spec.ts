@@ -119,6 +119,7 @@ test("Match flow attaches message + adds phone_2 + backfills siblings", async ({
       first_name: "Existing",
       last_name: "Match",
       phone_1: "+18165560120",
+      phone_1_type: "mobile",
     })
     .select("id")
     .single();
