@@ -49,6 +49,29 @@ type LoadedBulkSmsJob = {
   initialState: BulkSmsScheduleState;
 };
 
+async function completeCampaign(
+  campaignId: string,
+): Promise<void> {
+  const supabase = createAdminClient();
+  const { data, error } = await supabase
+    .from("campaigns")
+    .update({
+      status: "completed",
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", campaignId)
+    .eq("status", "launching")
+    .select("id")
+    .maybeSingle();
+
+  if (error) {
+    throw new Error(`bulk-sms workflow: failed to complete campaign ${campaignId}: ${error.message}`);
+  }
+  if (!data) {
+    throw new Error(`bulk-sms workflow: campaign ${campaignId} is no longer launching`);
+  }
+}
+
 /** STEP 1 — Read the batch off the job row and flip it to running. */
 async function loadBulkSmsJob(jobId: string): Promise<LoadedBulkSmsJob> {
   "use step";
@@ -143,6 +166,7 @@ async function bulkSmsChunkStep(args: {
 
 /** STEP 3 — Terminal status + result_summary. */
 async function finalizeBulkSmsStep(args: {
+  campaignId: string | null;
   jobId: string;
   total: number;
   state: BulkSmsScheduleState;
@@ -157,6 +181,10 @@ async function finalizeBulkSmsStep(args: {
       : state.succeeded > 0
         ? "partial"
         : "failed";
+
+  if (args.campaignId) {
+    await completeCampaign(args.campaignId);
+  }
 
   await supabase
     .from("jobs")
@@ -202,6 +230,7 @@ export async function bulkSmsWorkflow(
   }
 
   await finalizeBulkSmsStep({
+    campaignId: loaded.opts.campaignId ?? null,
     jobId: params.jobId,
     total: loaded.propertyIds.length,
     state,

@@ -1,4 +1,41 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+const inboundAttributionState = vi.hoisted(() => ({
+  shouldThrow: false,
+}));
+const reportErrorSpy = vi.hoisted(() => vi.fn());
+
+vi.mock("@/lib/messages/attribution", async () => {
+  const actual = await vi.importActual<typeof import("@/lib/messages/attribution")>(
+    "@/lib/messages/attribution",
+  );
+
+  return {
+    ...actual,
+    findAttributedOutboundMessageId: async (
+      ...args: Parameters<typeof actual.findAttributedOutboundMessageId>
+    ) => {
+      if (inboundAttributionState.shouldThrow) {
+        throw new Error("synthetic attribution lookup failure");
+      }
+      return actual.findAttributedOutboundMessageId(...args);
+    },
+  };
+});
+
+vi.mock("@/lib/errors/report", async () => {
+  const actual = await vi.importActual<typeof import("@/lib/errors/report")>(
+    "@/lib/errors/report",
+  );
+
+  return {
+    ...actual,
+    reportError: (...args: Parameters<typeof actual.reportError>) => {
+      reportErrorSpy(...args);
+      return actual.reportError(...args);
+    },
+  };
+});
 
 import { createTestClient } from "@tests/integration/client";
 import { resetTenantTables } from "@tests/integration/reset";
@@ -14,6 +51,7 @@ import { POST } from "./route";
 
 const supabase = createTestClient();
 const ORIGINAL_ADMIN_EMAILS = process.env.ADMIN_EMAILS;
+const TEST_ORG_ID = "00000000-0000-0000-0000-000000000bbb";
 
 function makeRequest(payload: object): Request {
   return new Request("https://example.invalid/api/webhooks/dialpad/sms", {
@@ -64,6 +102,19 @@ async function seedContact(
       source: "test-seed",
     });
   }
+  return data!.id;
+}
+
+async function seedCampaign(namePrefix = "Campaign") {
+  const { data, error } = await supabase
+    .from("campaigns")
+    .insert({
+      org_id: TEST_ORG_ID,
+      name: `${namePrefix} ${crypto.randomUUID()}`,
+    })
+    .select("id")
+    .single();
+  expect(error).toBeNull();
   return data!.id;
 }
 
@@ -123,6 +174,8 @@ describe("POST /api/webhooks/dialpad/sms (integration)", () => {
     process.env.NEXT_PUBLIC_SUPABASE_URL = process.env.TEST_SUPABASE_URL;
     process.env.SKIP_INTENT_GATE = "1";
     process.env.ADMIN_EMAILS = ORIGINAL_ADMIN_EMAILS ?? "";
+    inboundAttributionState.shouldThrow = false;
+    reportErrorSpy.mockReset();
     await resetTenantTables(supabase);
   });
 
@@ -263,6 +316,7 @@ describe("POST /api/webhooks/dialpad/sms (integration)", () => {
 
   it("STOP keyword flips sms_opted_out + writes an opt_out consent event AND emits no notification (decision #2)", async () => {
     const contactId = await seedContact("+18165558888", { optIn: true });
+    const campaignId = await seedCampaign("Stop");
     const { data: property } = await supabase
       .from("properties")
       .insert({
@@ -273,16 +327,21 @@ describe("POST /api/webhooks/dialpad/sms (integration)", () => {
       })
       .select("id")
       .single();
-    await supabase.from("messages").insert({
-      channel: "sms",
-      direction: "outbound",
-      status: "sent",
-      from_address: "+18163706846",
-      to_address: "+18165558888",
-      body: "Reply STOP to unsubscribe.",
-      contact_id: contactId,
-      property_id: property!.id,
-    });
+    const { data: stopOutbound } = await supabase
+      .from("messages")
+      .insert({
+        channel: "sms",
+        direction: "outbound",
+        status: "sent",
+        from_address: "+18163706846",
+        to_address: "+18165558888",
+        body: "Reply STOP to unsubscribe.",
+        contact_id: contactId,
+        property_id: property!.id,
+        campaign_id: campaignId,
+      })
+      .select("id")
+      .single();
 
     const res = await POST(
       makeRequest({
@@ -312,16 +371,94 @@ describe("POST /api/webhooks/dialpad/sms (integration)", () => {
 
     const { data: stopMessage } = await supabase
       .from("messages")
-      .select("property_id")
+      .select("property_id, attributed_outbound_message_id")
       .eq("external_id", "msg_stop_001")
       .single();
     expect(stopMessage?.property_id).toBe(property!.id);
+    expect(stopMessage?.attributed_outbound_message_id).toBe(stopOutbound!.id);
 
     // Feature 7 regression guard — STOP is silent.
     const { count: notifCount } = await supabase
       .from("notifications")
       .select("*", { count: "exact", head: true });
     expect(notifCount).toBe(0);
+  });
+
+  it("fails soft when attribution lookup errors so STOP still opts out and inserts the inbound", async () => {
+    const phone = "+18165558889";
+    const contactId = await seedContact(phone, { optIn: true });
+    const campaignId = await seedCampaign("Stop fail soft");
+    const { data: property } = await supabase
+      .from("properties")
+      .insert({
+        address: "1 Stop Fail Soft Ln",
+        state: "MO",
+        status: "new_lead",
+        homeowner_contact_id: contactId,
+      })
+      .select("id")
+      .single();
+
+    await supabase.from("messages").insert({
+      channel: "sms",
+      direction: "outbound",
+      status: "sent",
+      provider: "mock",
+      from_address: "+18163706846",
+      to_address: phone,
+      body: "Reply STOP to unsubscribe.",
+      contact_id: contactId,
+      property_id: property!.id,
+      campaign_id: campaignId,
+    });
+
+    inboundAttributionState.shouldThrow = true;
+
+    const res = await POST(
+      makeRequest({
+        externalId: "msg_stop_fail_soft_001",
+        from: phone,
+        to: "+18163706846",
+        body: "STOP",
+      }),
+    );
+    expect(res.status).toBe(200);
+
+    const { data: contact } = await supabase
+      .from("contacts")
+      .select("sms_opted_out")
+      .eq("id", contactId)
+      .single();
+    expect(contact?.sms_opted_out).toBe(true);
+
+    const { data: events } = await supabase
+      .from("consent_events")
+      .select("event_type")
+      .eq("contact_id", contactId)
+      .eq("event_type", "opt_out");
+    expect(events).toHaveLength(1);
+
+    const { data: inbound } = await supabase
+      .from("messages")
+      .select("property_id, attributed_outbound_message_id")
+      .eq("external_id", "msg_stop_fail_soft_001")
+      .single();
+    expect(inbound?.property_id).toBe(property!.id);
+    expect(inbound?.attributed_outbound_message_id).toBeNull();
+
+    expect(reportErrorSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        message: "synthetic attribution lookup failure",
+      }),
+      expect.objectContaining({
+        tags: { surface: "mock_inbound_attribution_lookup" },
+        extra: expect.objectContaining({
+          externalId: "msg_stop_fail_soft_001",
+          contactId,
+          propertyId: property!.id,
+        }),
+      }),
+    );
   });
 
   it("HELP keyword logs help_request without mutating sms_opted_out AND emits no notification (decision #2)", async () => {
@@ -596,6 +733,335 @@ describe("POST /api/webhooks/dialpad/sms (integration)", () => {
           .filter((value): value is string => typeof value === "string"),
       ).size,
     ).toBe(1);
+  });
+
+  it("attributes an ambiguous inbound to the most recent campaign outbound across sibling property threads", async () => {
+    const phone = "+18165552602";
+    const contactId = await seedContact(phone, { optIn: true });
+    const campaignId = await seedCampaign("Sibling");
+
+    const { data: propertyA } = await supabase
+      .from("properties")
+      .insert({
+        address: "11 Sibling Alpha Way",
+        state: "MO",
+        status: "prospect",
+        homeowner_contact_id: contactId,
+      })
+      .select("id")
+      .single();
+    const { data: propertyB } = await supabase
+      .from("properties")
+      .insert({
+        address: "12 Sibling Bravo Way",
+        state: "MO",
+        status: "prospect",
+        homeowner_contact_id: contactId,
+      })
+      .select("id")
+      .single();
+
+    await supabase.from("messages").insert([
+      {
+        channel: "sms",
+        direction: "outbound",
+        status: "sent",
+        provider: "mock",
+        from_address: "+18163706846",
+        to_address: phone,
+        body: "older campaign",
+        contact_id: contactId,
+        property_id: propertyA!.id,
+        campaign_id: campaignId,
+        sent_at: "2026-06-08T18:00:00.000Z",
+      },
+      {
+        channel: "sms",
+        direction: "outbound",
+        status: "sent",
+        provider: "mock",
+        from_address: "+18163706846",
+        to_address: phone,
+        body: "newest campaign",
+        contact_id: contactId,
+        property_id: propertyB!.id,
+        campaign_id: campaignId,
+        sent_at: "2026-06-08T19:00:00.000Z",
+      },
+      {
+        channel: "sms",
+        direction: "outbound",
+        status: "sent",
+        provider: "mock",
+        from_address: "+18163706846",
+        to_address: phone,
+        body: "later human reply",
+        contact_id: contactId,
+        property_id: propertyA!.id,
+        sent_at: "2026-06-08T20:00:00.000Z",
+      },
+    ]);
+
+    const { data: newestCampaignOutbound } = await supabase
+      .from("messages")
+      .select("id")
+      .eq("contact_id", contactId)
+      .eq("property_id", propertyB!.id)
+      .eq("body", "newest campaign")
+      .single();
+
+    const res = await POST(
+      makeRequest({
+        externalId: "msg_attr_siblings_001",
+        from: phone,
+        to: "+18163706846",
+        body: "Which house was this again?",
+      }),
+    );
+    expect(res.status).toBe(200);
+
+    const { data: inbound } = await supabase
+      .from("messages")
+      .select("property_id, metadata, attributed_outbound_message_id")
+      .eq("external_id", "msg_attr_siblings_001")
+      .single();
+    expect(inbound?.property_id).toBeNull();
+    expect(inbound?.metadata).toMatchObject({
+      routing: "ambiguous_recipient_number",
+    });
+    expect(inbound?.attributed_outbound_message_id).toBe(
+      newestCampaignOutbound!.id,
+    );
+  });
+
+  it("attributes to the most recent delivered campaign even when sent_at never arrived", async () => {
+    const phone = "+18165552605";
+    const contactId = await seedContact(phone, { optIn: true });
+    const campaignId = await seedCampaign("Delivered without sent_at");
+
+    const { data: propertyA } = await supabase
+      .from("properties")
+      .insert({
+        address: "15 Older Sent Way",
+        state: "MO",
+        status: "prospect",
+        homeowner_contact_id: contactId,
+      })
+      .select("id")
+      .single();
+    const { data: propertyB } = await supabase
+      .from("properties")
+      .insert({
+        address: "16 Newer Delivered Way",
+        state: "MO",
+        status: "prospect",
+        homeowner_contact_id: contactId,
+      })
+      .select("id")
+      .single();
+
+    await supabase.from("messages").insert([
+      {
+        channel: "sms",
+        direction: "outbound",
+        status: "sent",
+        provider: "mock",
+        from_address: "+18163706846",
+        to_address: phone,
+        body: "older sent campaign",
+        contact_id: contactId,
+        property_id: propertyA!.id,
+        campaign_id: campaignId,
+        sent_at: "2026-06-08T18:00:00.000Z",
+        created_at: "2026-06-08T18:00:00.000Z",
+      },
+      {
+        channel: "sms",
+        direction: "outbound",
+        status: "delivered",
+        provider: "mock",
+        from_address: "+18163706846",
+        to_address: phone,
+        body: "newer delivered campaign",
+        contact_id: contactId,
+        property_id: propertyB!.id,
+        campaign_id: campaignId,
+        sent_at: null,
+        delivered_at: "2026-06-08T19:05:00.000Z",
+        created_at: "2026-06-08T19:00:00.000Z",
+      },
+    ]);
+
+    const { data: deliveredOutbound } = await supabase
+      .from("messages")
+      .select("id")
+      .eq("contact_id", contactId)
+      .eq("property_id", propertyB!.id)
+      .eq("body", "newer delivered campaign")
+      .single();
+
+    const res = await POST(
+      makeRequest({
+        externalId: "msg_attr_delivered_without_sent_001",
+        from: phone,
+        to: "+18163706846",
+        body: "Got it",
+      }),
+    );
+    expect(res.status).toBe(200);
+
+    const { data: inbound } = await supabase
+      .from("messages")
+      .select("property_id, metadata, attributed_outbound_message_id")
+      .eq("external_id", "msg_attr_delivered_without_sent_001")
+      .single();
+    expect(inbound?.property_id).toBeNull();
+    expect(inbound?.metadata).toMatchObject({
+      routing: "ambiguous_recipient_number",
+    });
+    expect(inbound?.attributed_outbound_message_id).toBe(
+      deliveredOutbound!.id,
+    );
+  });
+
+  it("keeps the original attributed pointer when a replay resumes after a newer campaign send exists", async () => {
+    const phone = "+18165552603";
+    const contactId = await seedContact(phone, { optIn: true });
+    const campaignId = await seedCampaign("Replay");
+
+    const { data: property } = await supabase
+      .from("properties")
+      .insert({
+        address: "13 Replay Pointer Way",
+        state: "MO",
+        status: "new_lead",
+        homeowner_contact_id: contactId,
+      })
+      .select("id")
+      .single();
+    const { data: originalCampaignOutbound } = await supabase
+      .from("messages")
+      .insert({
+        channel: "sms",
+        direction: "outbound",
+        status: "sent",
+        provider: "mock",
+        from_address: "+18163706846",
+        to_address: phone,
+        body: "original campaign",
+        contact_id: contactId,
+        property_id: property!.id,
+        campaign_id: campaignId,
+        sent_at: "2026-06-08T18:00:00.000Z",
+      })
+      .select("id, conversation_id")
+      .single();
+
+    await supabase.from("messages").insert({
+      channel: "sms",
+      direction: "inbound",
+      status: "received",
+      provider: "mock",
+      external_id: "msg_attr_replay_001",
+      from_address: phone,
+      to_address: "+18163706846",
+      body: "already inserted",
+      contact_id: contactId,
+      property_id: property!.id,
+      conversation_id: originalCampaignOutbound!.conversation_id,
+      attributed_outbound_message_id: originalCampaignOutbound!.id,
+    });
+    await supabase.from("webhook_events").insert({
+      provider: "mock",
+      event_type: "sms_inbound",
+      external_id: "msg_attr_replay_001",
+      signature_verified: true,
+      processing_status: "pending",
+      payload: {
+        externalId: "msg_attr_replay_001",
+        from: phone,
+        to: "+18163706846",
+        body: "already inserted",
+      },
+    });
+    await supabase.from("messages").insert({
+      channel: "sms",
+      direction: "outbound",
+      status: "sent",
+      provider: "mock",
+      from_address: "+18163706846",
+      to_address: phone,
+      body: "newer campaign",
+      contact_id: contactId,
+      property_id: property!.id,
+      campaign_id: campaignId,
+      sent_at: "2026-06-08T19:00:00.000Z",
+    });
+
+    const res = await POST(
+      makeRequest({
+        externalId: "msg_attr_replay_001",
+        from: phone,
+        to: "+18163706846",
+        body: "already inserted",
+      }),
+    );
+    expect(res.status).toBe(200);
+
+    const { data: replayedInbound } = await supabase
+      .from("messages")
+      .select("attributed_outbound_message_id")
+      .eq("external_id", "msg_attr_replay_001")
+      .single();
+    expect(replayedInbound?.attributed_outbound_message_id).toBe(
+      originalCampaignOutbound!.id,
+    );
+  });
+
+  it("leaves attributed_outbound_message_id null when no campaign-bearing outbound exists", async () => {
+    const phone = "+18165552604";
+    const contactId = await seedContact(phone, { optIn: true });
+
+    const { data: property } = await supabase
+      .from("properties")
+      .insert({
+        address: "14 No Campaign Way",
+        state: "MO",
+        status: "new_lead",
+        homeowner_contact_id: contactId,
+      })
+      .select("id")
+      .single();
+    await supabase.from("messages").insert({
+      channel: "sms",
+      direction: "outbound",
+      status: "sent",
+      provider: "mock",
+      from_address: "+18163706846",
+      to_address: phone,
+      body: "manual follow-up",
+      contact_id: contactId,
+      property_id: property!.id,
+      sent_at: "2026-06-08T18:00:00.000Z",
+    });
+
+    const res = await POST(
+      makeRequest({
+        externalId: "msg_attr_none_001",
+        from: phone,
+        to: "+18163706846",
+        body: "regular reply",
+      }),
+    );
+    expect(res.status).toBe(200);
+
+    const { data: inbound } = await supabase
+      .from("messages")
+      .select("property_id, attributed_outbound_message_id")
+      .eq("external_id", "msg_attr_none_001")
+      .single();
+    expect(inbound?.property_id).toBe(property!.id);
+    expect(inbound?.attributed_outbound_message_id).toBeNull();
   });
 
   it("auto-qualify is a no-op when the property is already past prospect", async () => {

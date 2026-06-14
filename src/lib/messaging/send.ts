@@ -94,6 +94,7 @@ export type SendSmsInput = {
   queueOnly?: boolean;
   scheduledFor?: Date | null;
   metadata?: Json | null;
+  campaignId?: string | null;
 };
 
 export async function sendSmsToContact(
@@ -208,6 +209,7 @@ export async function sendSmsToContact(
       direction: "outbound",
       status: "pending",
       provider: provider.providerId,
+      campaign_id: input.campaignId ?? null,
       contact_id: input.contactId,
       property_id: input.propertyId,
       conversation_id: conversationId,
@@ -347,6 +349,7 @@ async function queueForLater(
       direction: "outbound",
       status: "queued",
       provider: providerId,
+      campaign_id: input.campaignId ?? null,
       contact_id: input.contactId,
       property_id: input.propertyId,
       conversation_id: conversationId,

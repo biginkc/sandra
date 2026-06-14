@@ -7,6 +7,7 @@ import {
 import Anthropic from "@anthropic-ai/sdk";
 
 import { listAdminUserIds } from "@/lib/auth/admins";
+import { findAttributedOutboundMessageId } from "@/lib/messages/attribution";
 import { looksLikeTestTraffic } from "@/lib/messages/list-threads";
 import { dispatchAiResponse } from "@/lib/ai-responder/dispatch";
 import { reportError } from "@/lib/errors/report";
@@ -125,6 +126,25 @@ export async function handleInboundWebhook(
       const contactId = thread.contactId;
       const propertyId = thread.propertyId;
       const conversationId = thread.conversationId;
+      let attributedOutboundMessageId: string | null = null;
+      try {
+        attributedOutboundMessageId = await findAttributedOutboundMessageId(supabase, {
+          contactId,
+          toPhone: ev.to,
+          propertyId,
+          conversationId,
+        });
+      } catch (e) {
+        reportError(e, {
+          tags: { surface: `${provider.providerId}_inbound_attribution_lookup` },
+          extra: {
+            externalId: ev.externalId,
+            contactId,
+            propertyId,
+            conversationId,
+          },
+        });
+      }
       const source = `${provider.providerId}_inbound_webhook`;
       const bodyTrimmed = ev.body.trim();
       const baseMetadata = {
@@ -152,6 +172,7 @@ export async function handleInboundWebhook(
           contactId,
           propertyId,
           conversationId,
+          attributedOutboundMessageId,
           metadata: { ...jsonObject(baseMetadata), keyword: "stop" } as Json,
         });
         if (insertOutcome.error) {
@@ -195,6 +216,7 @@ export async function handleInboundWebhook(
           contactId,
           propertyId,
           conversationId,
+          attributedOutboundMessageId,
           metadata: { ...jsonObject(baseMetadata), keyword: "help" } as Json,
         });
         if (insertOutcome.error) {
@@ -247,6 +269,7 @@ export async function handleInboundWebhook(
           contactId,
           propertyId,
           conversationId,
+          attributedOutboundMessageId,
           metadata: { ...jsonObject(baseMetadata), keyword: "dnc" } as Json,
         });
         if (insertOutcome.error) {
@@ -298,6 +321,7 @@ export async function handleInboundWebhook(
           contactId,
           propertyId,
           conversationId,
+          attributedOutboundMessageId,
           metadata: {
             ...jsonObject(baseMetadata),
             keyword: "wrong_number",
@@ -332,6 +356,7 @@ export async function handleInboundWebhook(
         contactId,
         propertyId,
         conversationId,
+        attributedOutboundMessageId,
         metadata: baseMetadata,
       });
       if (insertOutcome.error) {
@@ -578,6 +603,7 @@ async function insertInboundMessage(
     contactId: string | null;
     propertyId: string | null;
     conversationId: string | null;
+    attributedOutboundMessageId: string | null;
     metadata: Json | null;
   },
 ) {
@@ -616,6 +642,7 @@ async function insertInboundMessage(
       contact_id: input.contactId,
       property_id: input.propertyId,
       conversation_id: input.conversationId,
+      attributed_outbound_message_id: input.attributedOutboundMessageId,
       metadata: input.metadata,
     })
     .select("id, metadata, contact_id, property_id, conversation_id")

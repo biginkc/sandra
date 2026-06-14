@@ -51,7 +51,7 @@ export function KpiRowOne({
         className="border-border bg-card hover:border-foreground/30 group rounded-2xl border px-6 py-5 transition-colors"
       >
         <div className="text-muted-foreground text-[11px] font-bold tracking-widest uppercase">
-          Not in a drip campaign
+          Not in a sequence
         </div>
         <div className="text-foreground mt-2 text-4xl font-extrabold tracking-tight tabular-nums">
           {notInDrip.toLocaleString()}

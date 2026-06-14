@@ -22,6 +22,7 @@ import type { Database } from "@/lib/supabase/types";
 export type BulkSmsQueueOpts = {
   body?: string;
   templateCategory?: string;
+  campaignId?: string | null;
   paceSeconds?: number;
   skipIfContacted?: boolean;
   jitterPct?: number;
@@ -243,6 +244,7 @@ export async function queueSmsBatch(
       contactId: property.homeowner_contact_id,
       propertyId,
       body,
+      campaignId: opts.campaignId ?? null,
       queueOnly: true,
       scheduledFor,
     });
