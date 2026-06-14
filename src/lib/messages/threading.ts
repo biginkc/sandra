@@ -396,6 +396,24 @@ export async function resolveInboundThread(
   };
 }
 
+export async function listCandidatePropertyThreadsForInboundContact(
+  supabase: SupabaseClient<Database>,
+  input: {
+    contactId: string;
+    toPhone?: string | null;
+  },
+): Promise<ThreadCandidate[]> {
+  const recipientCandidates = input.toPhone
+    ? await loadCandidates(supabase, input.contactId, normalizePhone(input.toPhone))
+    : [];
+
+  if (recipientCandidates.length > 0) {
+    return recipientCandidates;
+  }
+
+  return loadCandidates(supabase, input.contactId);
+}
+
 /**
  * Resolution for a thread that attaches to a contact but no property.
  * Contact-level threads get a real conversation id too (migration 081) —
