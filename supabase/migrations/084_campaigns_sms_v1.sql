@@ -5,8 +5,12 @@ create table if not exists public.campaigns (
   org_id uuid not null references public.organizations(id) on delete cascade,
   name text not null check (length(trim(name)) > 0),
   channel text not null default 'sms' check (channel in ('sms')),
-  status text not null default 'active' check (status in ('active','paused','completed','archived')),
+  status text not null default 'active' check (status in ('active','launching','paused','completed','archived')),
   audience_snapshot jsonb,
+  body text,
+  template_category text,
+  pace_seconds integer,
+  skip_if_contacted boolean not null default false,
   description text,
   created_by uuid references auth.users(id) on delete set null,
   created_at timestamptz not null default now(),
@@ -15,7 +19,8 @@ create table if not exists public.campaigns (
 );
 
 create unique index if not exists idx_campaigns_org_lower_name_unique
-  on public.campaigns (org_id, lower(name));
+  on public.campaigns (org_id, lower(name))
+  where archived_at is null;
 
 create index if not exists idx_campaigns_org_status
   on public.campaigns (org_id, status);
@@ -36,9 +41,9 @@ alter table public.messages
   add column if not exists campaign_id uuid references public.campaigns(id) on delete restrict,
   add column if not exists attributed_outbound_message_id uuid references public.messages(id) on delete set null;
 
-create index if not exists idx_messages_campaign_id
-  on public.messages (campaign_id)
-  where campaign_id is not null;
+create unique index if not exists idx_messages_campaign_property_unique
+  on public.messages (campaign_id, property_id)
+  where campaign_id is not null and direction = 'outbound';
 
 create index if not exists idx_messages_campaign_id_status
   on public.messages (campaign_id, status)

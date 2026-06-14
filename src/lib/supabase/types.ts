@@ -308,6 +308,7 @@ export type Database = {
         Row: {
           archived_at: string | null
           audience_snapshot: Json | null
+          body: string | null
           channel: string
           created_at: string
           created_by: string | null
@@ -315,12 +316,16 @@ export type Database = {
           id: string
           name: string
           org_id: string
+          pace_seconds: number | null
+          skip_if_contacted: boolean
           status: string
+          template_category: string | null
           updated_at: string
         }
         Insert: {
           archived_at?: string | null
           audience_snapshot?: Json | null
+          body?: string | null
           channel?: string
           created_at?: string
           created_by?: string | null
@@ -328,12 +333,16 @@ export type Database = {
           id?: string
           name: string
           org_id: string
+          pace_seconds?: number | null
+          skip_if_contacted?: boolean
           status?: string
+          template_category?: string | null
           updated_at?: string
         }
         Update: {
           archived_at?: string | null
           audience_snapshot?: Json | null
+          body?: string | null
           channel?: string
           created_at?: string
           created_by?: string | null
@@ -341,7 +350,10 @@ export type Database = {
           id?: string
           name?: string
           org_id?: string
+          pace_seconds?: number | null
+          skip_if_contacted?: boolean
           status?: string
+          template_category?: string | null
           updated_at?: string
         }
         Relationships: [

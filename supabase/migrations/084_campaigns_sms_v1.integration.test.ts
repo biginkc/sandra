@@ -161,7 +161,7 @@ describe("Migration 084 — campaigns SMS v1 backbone", () => {
   it("creates the campaigns tables and new message columns", async () => {
     await expectSelectable(
       "campaigns",
-      "id, org_id, name, channel, status, audience_snapshot, description, created_by, created_at, updated_at, archived_at",
+      "id, org_id, name, channel, status, audience_snapshot, body, template_category, pace_seconds, skip_if_contacted, description, created_by, created_at, updated_at, archived_at",
     );
     await expectSelectable(
       "campaign_recipients",
@@ -170,13 +170,42 @@ describe("Migration 084 — campaigns SMS v1 backbone", () => {
     await expectSelectable("messages", "campaign_id, attributed_outbound_message_id");
   });
 
-  it("enforces case-insensitive campaign-name uniqueness within an org", async () => {
+  it("accepts launching status and one-shot blast content columns", async () => {
+    const { data, error } = await serviceClient
+      .from("campaigns")
+      .insert({
+        org_id: BMH_ORG_ID,
+        name: "Launch State Campaign",
+        status: "launching",
+        body: "Hello from the blast",
+        template_category: "marketing",
+        pace_seconds: 45,
+        skip_if_contacted: true,
+      } as never)
+      .select("status, body, template_category, pace_seconds, skip_if_contacted")
+      .single();
+
+    expect(error).toBeNull();
+    expect(data).toMatchObject({
+      status: "launching",
+      body: "Hello from the blast",
+      template_category: "marketing",
+      pace_seconds: 45,
+      skip_if_contacted: true,
+    });
+  });
+
+  it("enforces case-insensitive campaign-name uniqueness only among active campaigns", async () => {
     const name = "June List";
 
-    const first = await serviceClient.from("campaigns").insert({
-      org_id: BMH_ORG_ID,
-      name,
-    } as never);
+    const first = await serviceClient
+      .from("campaigns")
+      .insert({
+        org_id: BMH_ORG_ID,
+        name,
+      } as never)
+      .select("id")
+      .single();
     const duplicate = await serviceClient.from("campaigns").insert({
       org_id: BMH_ORG_ID,
       name: name.toLowerCase(),
@@ -187,9 +216,55 @@ describe("Migration 084 — campaigns SMS v1 backbone", () => {
     } as never);
 
     expect(first.error).toBeNull();
+    expect(first.data?.id).toBeTruthy();
     expect(duplicate.error?.code).toBe("23505");
     expect(duplicate.error?.message).toContain("idx_campaigns_org_lower_name_unique");
     expect(otherOrg.error).toBeNull();
+
+    const archiveResult = await serviceClient
+      .from("campaigns")
+      .update({ archived_at: new Date().toISOString() } as never)
+      .eq("id", first.data!.id);
+    expect(archiveResult.error).toBeNull();
+
+    const reusedName = await serviceClient.from("campaigns").insert({
+      org_id: BMH_ORG_ID,
+      name: name.toLowerCase(),
+    } as never);
+    expect(reusedName.error).toBeNull();
+  });
+
+  it("rejects a second outbound campaign message for the same property", async () => {
+    const contactId = await insertContact();
+    const propertyId = await insertProperty(BMH_ORG_ID, contactId);
+    const campaignId = await insertCampaign();
+
+    const firstOutbound = await serviceClient.from("messages").insert({
+      org_id: BMH_ORG_ID,
+      channel: "sms",
+      direction: "outbound",
+      status: "sent",
+      body: "First blast send",
+      campaign_id: campaignId,
+      property_id: propertyId,
+      contact_id: contactId,
+    } as never);
+    const duplicateOutbound = await serviceClient.from("messages").insert({
+      org_id: BMH_ORG_ID,
+      channel: "sms",
+      direction: "outbound",
+      status: "queued",
+      body: "Duplicate blast send",
+      campaign_id: campaignId,
+      property_id: propertyId,
+      contact_id: contactId,
+    } as never);
+
+    expect(firstOutbound.error).toBeNull();
+    expect(duplicateOutbound.error?.code).toBe("23505");
+    expect(duplicateOutbound.error?.message).toContain(
+      "idx_messages_campaign_property_unique",
+    );
   });
 
   it("preserves campaign history when messages reference it and only SET NULLs attributed outbound links", async () => {
