@@ -14,7 +14,13 @@ const UPSERT_CHUNK = 500;
 
 type CampaignRow = Pick<
   Database["public"]["Tables"]["campaigns"]["Row"],
-  "id" | "audience_snapshot" | "status"
+  | "id"
+  | "audience_snapshot"
+  | "body"
+  | "pace_seconds"
+  | "skip_if_contacted"
+  | "status"
+  | "template_category"
 >;
 
 type CampaignRecipientSeedRow = {
@@ -42,7 +48,6 @@ function parseAudienceSnapshot(
 ): Result<{
   search: string | null;
   blockStack: FilterBlock[];
-  rawLaunch: unknown;
 }> {
   if (!isRecord(snapshot)) {
     return {
@@ -84,30 +89,18 @@ function parseAudienceSnapshot(
   return ok({
     search,
     blockStack: decoded.blocks,
-    rawLaunch: snapshot.launch,
   });
 }
 
-function parseLaunchOpts(raw: unknown): Result<LaunchCampaignOpts> {
-  if (!isRecord(raw)) {
-    return {
-      ok: false,
-      error: {
-        code: "CAMPAIGN_LAUNCH_CONFIG_MISSING",
-        message:
-          "Campaign launch needs audience_snapshot.launch with a body or templateCategory.",
-      },
-    };
-  }
-
+function parseLaunchOpts(campaign: CampaignRow): Result<LaunchCampaignOpts> {
   const body =
-    typeof raw.body === "string" && raw.body.trim().length > 0
-      ? raw.body.trim()
+    typeof campaign.body === "string" && campaign.body.trim().length > 0
+      ? campaign.body.trim()
       : undefined;
   const templateCategory =
-    typeof raw.templateCategory === "string" &&
-    raw.templateCategory.trim().length > 0
-      ? raw.templateCategory.trim()
+    typeof campaign.template_category === "string" &&
+    campaign.template_category.trim().length > 0
+      ? campaign.template_category.trim()
       : undefined;
 
   if (!body && !templateCategory) {
@@ -116,7 +109,7 @@ function parseLaunchOpts(raw: unknown): Result<LaunchCampaignOpts> {
       error: {
         code: "CAMPAIGN_LAUNCH_CONFIG_MISSING",
         message:
-          "Campaign launch needs audience_snapshot.launch.body or .templateCategory.",
+          "Campaign launch needs campaigns.body or campaigns.template_category.",
       },
     };
   }
@@ -124,18 +117,13 @@ function parseLaunchOpts(raw: unknown): Result<LaunchCampaignOpts> {
   const opts: LaunchCampaignOpts = {};
   if (body) opts.body = body;
   if (templateCategory) opts.templateCategory = templateCategory;
-  if (typeof raw.paceSeconds === "number" && Number.isFinite(raw.paceSeconds)) {
-    opts.paceSeconds = raw.paceSeconds;
+  if (
+    typeof campaign.pace_seconds === "number" &&
+    Number.isFinite(campaign.pace_seconds)
+  ) {
+    opts.paceSeconds = campaign.pace_seconds;
   }
-  if (typeof raw.skipIfContacted === "boolean") {
-    opts.skipIfContacted = raw.skipIfContacted;
-  }
-  if (typeof raw.jitterPct === "number" && Number.isFinite(raw.jitterPct)) {
-    opts.jitterPct = raw.jitterPct;
-  }
-  if (typeof raw.includeUnknown === "boolean") {
-    opts.includeUnknown = raw.includeUnknown;
-  }
+  opts.skipIfContacted = campaign.skip_if_contacted;
 
   return ok(opts);
 }
@@ -146,7 +134,9 @@ async function loadCampaign(
   const supabase = await createClient();
   const { data, error } = await supabase
     .from("campaigns")
-    .select("id, audience_snapshot, status")
+    .select(
+      "id, audience_snapshot, body, pace_seconds, skip_if_contacted, status, template_category",
+    )
     .eq("id", campaignId)
     .maybeSingle();
 
@@ -177,6 +167,7 @@ async function listFrozenRecipientPropertyIds(
       .from("campaign_recipients")
       .select("property_id")
       .eq("campaign_id", campaignId)
+      .order("property_id", { ascending: true })
       .range(from, from + RECIPIENT_PAGE - 1);
 
     if (error) {
@@ -287,13 +278,51 @@ async function countCampaignMessages(campaignId: string): Promise<Result<number>
 
 async function markCampaignCompleted(campaignId: string): Promise<Result<null>> {
   const supabase = await createClient();
-  const { error } = await supabase
+  const { data, error } = await supabase
     .from("campaigns")
     .update({
       status: "completed",
       updated_at: new Date().toISOString(),
     })
-    .eq("id", campaignId);
+    .eq("id", campaignId)
+    .eq("status", "launching")
+    .select("id")
+    .maybeSingle();
+
+  if (error) {
+    return {
+      ok: false,
+      error: { code: "CAMPAIGN_STATUS_UPDATE_FAILED", message: error.message },
+    };
+  }
+  if (!data) {
+    return {
+      ok: false,
+      error: {
+        code: "CAMPAIGN_STATUS_UPDATE_FAILED",
+        message: "Campaign is no longer launching.",
+      },
+    };
+  }
+
+  return ok(null);
+}
+
+async function claimCampaignLaunch(
+  campaignId: string,
+  allowedStatuses: CampaignRow["status"][],
+): Promise<Result<boolean>> {
+  const supabase = await createClient();
+  const { data, error } = await supabase
+    .from("campaigns")
+    .update({
+      status: "launching",
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", campaignId)
+    .in("status", allowedStatuses)
+    .select("id")
+    .maybeSingle();
 
   if (error) {
     return {
@@ -302,7 +331,34 @@ async function markCampaignCompleted(campaignId: string): Promise<Result<null>> 
     };
   }
 
-  return ok(null);
+  return ok(Boolean(data?.id));
+}
+
+async function buildAlreadyLaunchedResult(
+  campaignId: string,
+  messageCount: number,
+): Promise<Result<LaunchCampaignResult>> {
+  const frozenResult = await listFrozenRecipientPropertyIds(campaignId);
+  if (!frozenResult.ok) return frozenResult;
+
+  if (messageCount > 0 && frozenResult.data.length === 0) {
+    return {
+      ok: false,
+      error: {
+        code: "CAMPAIGN_RECIPIENTS_MISSING",
+        message:
+          "Campaign already has stamped messages but no frozen recipient set.",
+      },
+    };
+  }
+
+  return ok({
+    recipientCount: frozenResult.data.length,
+    succeeded: 0,
+    skipped: 0,
+    failed: [],
+    alreadyLaunched: true,
+  });
 }
 
 export async function launchCampaign(
@@ -323,6 +379,9 @@ export async function launchCampaign(
     const campaignResult = await loadCampaign(campaignId);
     if (!campaignResult.ok) return campaignResult;
     const campaign = campaignResult.data;
+    const messageCountResult = await countCampaignMessages(campaignId);
+    if (!messageCountResult.ok) return messageCountResult;
+    const messageCount = messageCountResult.data;
 
     if (campaign.status === "archived") {
       return {
@@ -334,39 +393,29 @@ export async function launchCampaign(
       };
     }
 
+    const recoverableLaunching =
+      campaign.status === "launching" && messageCount === 0;
+    const launchClaimStatuses: CampaignRow["status"][] = [];
+    if (campaign.status === "active") launchClaimStatuses.push("active");
+    if (recoverableLaunching) launchClaimStatuses.push("launching");
+
+    if (campaign.status === "completed" || messageCount > 0) {
+      return buildAlreadyLaunchedResult(campaignId, messageCount);
+    }
+    if (launchClaimStatuses.length === 0) {
+      return buildAlreadyLaunchedResult(campaignId, messageCount);
+    }
+
+    const claimResult = await claimCampaignLaunch(campaignId, launchClaimStatuses);
+    if (!claimResult.ok) return claimResult;
+    if (!claimResult.data) {
+      return buildAlreadyLaunchedResult(campaignId, messageCount);
+    }
+
     const frozenResult = await listFrozenRecipientPropertyIds(campaignId);
     if (!frozenResult.ok) return frozenResult;
 
     let propertyIds = frozenResult.data;
-    const messageCountResult = await countCampaignMessages(campaignId);
-    if (!messageCountResult.ok) return messageCountResult;
-
-    if (campaign.status === "completed" || messageCountResult.data > 0) {
-      if (propertyIds.length === 0) {
-        return {
-          ok: false,
-          error: {
-            code: "CAMPAIGN_RECIPIENTS_MISSING",
-            message:
-              "Campaign already has stamped messages but no frozen recipient set.",
-          },
-        };
-      }
-
-      if (campaign.status !== "completed") {
-        const markCompletedResult = await markCampaignCompleted(campaignId);
-        if (!markCompletedResult.ok) return markCompletedResult;
-      }
-
-      return ok({
-        recipientCount: propertyIds.length,
-        succeeded: 0,
-        skipped: 0,
-        failed: [],
-        alreadyLaunched: true,
-      });
-    }
-
     if (propertyIds.length === 0) {
       const snapshotResult = parseAudienceSnapshot(campaign.audience_snapshot);
       if (!snapshotResult.ok) return snapshotResult;
@@ -409,10 +458,7 @@ export async function launchCampaign(
       propertyIds = recipientsResult.data.map((row) => row.propertyId);
     }
 
-    const snapshotResult = parseAudienceSnapshot(campaign.audience_snapshot);
-    if (!snapshotResult.ok) return snapshotResult;
-
-    const launchOptsResult = parseLaunchOpts(snapshotResult.data.rawLaunch);
+    const launchOptsResult = parseLaunchOpts(campaign);
     if (!launchOptsResult.ok) return launchOptsResult;
 
     const queueResult = await bulkQueueSms(propertyIds, {
@@ -430,8 +476,10 @@ export async function launchCampaign(
       };
     }
 
-    const markCompletedResult = await markCampaignCompleted(campaignId);
-    if (!markCompletedResult.ok) return markCompletedResult;
+    if (!queueResult.data.deferred) {
+      const markCompletedResult = await markCampaignCompleted(campaignId);
+      if (!markCompletedResult.ok) return markCompletedResult;
+    }
 
     return ok({
       recipientCount: propertyIds.length,

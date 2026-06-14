@@ -63,6 +63,10 @@ async function createAuthUser(email: string): Promise<string> {
   return data.user.id;
 }
 
+function uniqueCampaignEmail(label: string): string {
+  return `jarrad+${label}-${Date.now()}-${Math.random().toString(36).slice(2)}@bmhgroupkc.com`;
+}
+
 async function seedTag(orgId: string, name: string): Promise<string> {
   const { data, error } = await testClient
     .from("tags")
@@ -124,7 +128,12 @@ async function seedTaggedLead(args: {
 async function seedCampaign(args: {
   orgId: string;
   audienceSnapshot: Record<string, unknown>;
+  body?: string | null;
   name?: string;
+  paceSeconds?: number | null;
+  skipIfContacted?: boolean;
+  status?: "active" | "launching";
+  templateCategory?: string | null;
 }): Promise<string> {
   const { data, error } = await testClient
     .from("campaigns")
@@ -132,7 +141,11 @@ async function seedCampaign(args: {
       org_id: args.orgId,
       name: args.name ?? `Campaign ${Math.random().toString(36).slice(2)}`,
       audience_snapshot: args.audienceSnapshot,
-      status: "active",
+      body: args.body ?? null,
+      pace_seconds: args.paceSeconds ?? null,
+      skip_if_contacted: args.skipIfContacted ?? false,
+      status: args.status ?? "active",
+      template_category: args.templateCategory ?? null,
     } as never)
     .select("id")
     .single();
@@ -162,9 +175,10 @@ describe("launchCampaign (integration)", () => {
 
   it("freezes a deduped recipient set, stamps queued blast rows, and is idempotent on relaunch", async () => {
     const orgId = await getOrgId();
-    const userId = await createAuthUser("jarrad+campaign-launch@bmhgroupkc.com");
+    const launchEmail = uniqueCampaignEmail("campaign-launch");
+    const userId = await createAuthUser(launchEmail);
     currentUserId = userId;
-    currentEmail = "jarrad+campaign-launch@bmhgroupkc.com";
+    currentEmail = launchEmail;
 
     const tagId = await seedTag(orgId, "Campaign Launch");
     const first = await seedTaggedLead({
@@ -197,10 +211,8 @@ describe("launchCampaign (integration)", () => {
             values: [tagId],
           },
         ],
-        launch: {
-          body: "Campaign hello",
-        },
       },
+      body: "Campaign hello",
     });
 
     const firstLaunch = await launchCampaign(campaignId);
@@ -224,7 +236,7 @@ describe("launchCampaign (integration)", () => {
 
     const { data: queuedRows } = await testClient
       .from("messages")
-      .select("property_id, contact_id, campaign_id, status")
+      .select("property_id, contact_id, campaign_id, status, body")
       .eq("campaign_id", campaignId)
       .order("property_id", { ascending: true });
     expect(queuedRows).toHaveLength(2);
@@ -232,6 +244,7 @@ describe("launchCampaign (integration)", () => {
       first.propertyId,
       second.propertyId,
     ]);
+    expect(queuedRows?.every((row) => row.body === "Campaign hello")).toBe(true);
     expect(queuedRows?.every((row) => row.status === "queued")).toBe(true);
     expect(queuedRows?.every((row) => row.campaign_id === campaignId)).toBe(true);
 
@@ -268,11 +281,140 @@ describe("launchCampaign (integration)", () => {
     expect(messagesAfterRelaunch).toBe(2);
   });
 
-  it("serializes campaignId through the deferred workflow path so every chunked queued row is stamped", async () => {
+  it("rejects a concurrent second launch and keeps one outbound message per property", async () => {
     const orgId = await getOrgId();
-    const userId = await createAuthUser("jarrad+campaign-workflow@bmhgroupkc.com");
+    const raceEmail = uniqueCampaignEmail("campaign-race");
+    const userId = await createAuthUser(raceEmail);
     currentUserId = userId;
-    currentEmail = "jarrad+campaign-workflow@bmhgroupkc.com";
+    currentEmail = raceEmail;
+
+    const tagId = await seedTag(orgId, "Campaign Race");
+    const first = await seedTaggedLead({
+      orgId,
+      tagId,
+      address: "1 Race Condition Rd",
+      phone: "+18165551011",
+    });
+    const second = await seedTaggedLead({
+      orgId,
+      tagId,
+      address: "2 Race Condition Rd",
+      phone: "+18165551012",
+    });
+
+    const campaignId = await seedCampaign({
+      orgId,
+      audienceSnapshot: {
+        search: null,
+        blockStack: [
+          {
+            id: "tag-race",
+            kind: "tag",
+            combinator: "any",
+            values: [tagId],
+          },
+        ],
+      },
+      body: "Race-safe hello",
+    });
+
+    const launches = await Promise.all([
+      launchCampaign(campaignId),
+      launchCampaign(campaignId),
+    ]);
+
+    expect(launches.every((result) => result.ok)).toBe(true);
+    const successfulLaunches = launches.filter(
+      (result): result is Extract<(typeof launches)[number], { ok: true }> =>
+        result.ok,
+    );
+    expect(
+      successfulLaunches.filter((result) => result.data.alreadyLaunched === false),
+    ).toHaveLength(1);
+    expect(
+      successfulLaunches.filter((result) => result.data.alreadyLaunched === true),
+    ).toHaveLength(1);
+
+    const { data: recipients } = await testClient
+      .from("campaign_recipients")
+      .select("property_id")
+      .eq("campaign_id", campaignId)
+      .order("property_id", { ascending: true });
+    expect(recipients?.map((row) => row.property_id)).toEqual([
+      first.propertyId,
+      second.propertyId,
+    ]);
+
+    const { data: queuedRows } = await testClient
+      .from("messages")
+      .select("property_id, campaign_id")
+      .eq("campaign_id", campaignId)
+      .order("property_id", { ascending: true });
+    expect(queuedRows?.map((row) => row.property_id)).toEqual([
+      first.propertyId,
+      second.propertyId,
+    ]);
+    expect(queuedRows?.every((row) => row.campaign_id === campaignId)).toBe(true);
+  });
+
+  it("allows relaunch when a launching campaign has zero stamped messages", async () => {
+    const orgId = await getOrgId();
+    const recoveryEmail = uniqueCampaignEmail("campaign-recovery");
+    const userId = await createAuthUser(recoveryEmail);
+    currentUserId = userId;
+    currentEmail = recoveryEmail;
+
+    const tagId = await seedTag(orgId, "Campaign Recovery");
+    const lead = await seedTaggedLead({
+      orgId,
+      tagId,
+      address: "1 Recovery Way",
+      phone: "+18165551021",
+    });
+
+    const campaignId = await seedCampaign({
+      orgId,
+      audienceSnapshot: {
+        search: null,
+        blockStack: [
+          {
+            id: "tag-recovery",
+            kind: "tag",
+            combinator: "any",
+            values: [tagId],
+          },
+        ],
+      },
+      body: "Recovered launch",
+      status: "launching",
+    });
+
+    const launch = await launchCampaign(campaignId);
+    expect(launch.ok).toBe(true);
+    if (!launch.ok) return;
+    expect(launch.data.alreadyLaunched).toBe(false);
+    expect(launch.data.recipientCount).toBe(1);
+
+    const { data: campaignRow } = await testClient
+      .from("campaigns")
+      .select("status")
+      .eq("id", campaignId)
+      .single();
+    expect(campaignRow?.status).toBe("completed");
+
+    const { data: messages } = await testClient
+      .from("messages")
+      .select("property_id")
+      .eq("campaign_id", campaignId);
+    expect(messages?.map((row) => row.property_id)).toEqual([lead.propertyId]);
+  });
+
+  it("serializes campaignId through the deferred workflow path, keeps the campaign launching until finalize, and stamps every chunked row", async () => {
+    const orgId = await getOrgId();
+    const workflowEmail = uniqueCampaignEmail("campaign-workflow");
+    const userId = await createAuthUser(workflowEmail);
+    currentUserId = userId;
+    currentEmail = workflowEmail;
 
     const tagId = await seedTag(orgId, "Workflow Campaign");
     const propertyIds: string[] = [];
@@ -298,10 +440,8 @@ describe("launchCampaign (integration)", () => {
             values: [tagId],
           },
         ],
-        launch: {
-          body: "Workflow blast",
-        },
       },
+      body: "Workflow blast",
     });
 
     const launch = await launchCampaign(campaignId);
@@ -311,6 +451,19 @@ describe("launchCampaign (integration)", () => {
     expect(launch.data.recipientCount).toBe(501);
     expect(launch.data.deferred?.total).toBe(501);
     expect(launch.data.deferred?.jobId).toBeTruthy();
+
+    const { data: campaignBeforeWorkflow } = await testClient
+      .from("campaigns")
+      .select("status")
+      .eq("id", campaignId)
+      .single();
+    expect(campaignBeforeWorkflow?.status).toBe("launching");
+
+    const { count: messageCountBeforeWorkflow } = await testClient
+      .from("messages")
+      .select("*", { count: "exact", head: true })
+      .eq("campaign_id", campaignId);
+    expect(messageCountBeforeWorkflow).toBe(0);
 
     const jobId = launch.data.deferred!.jobId;
     const { data: jobRow } = await testClient
@@ -345,5 +498,12 @@ describe("launchCampaign (integration)", () => {
       .limit(5);
     expect(sampleRows?.every((row) => row.campaign_id === campaignId)).toBe(true);
     expect(sampleRows?.every((row) => row.status === "queued")).toBe(true);
+
+    const { data: campaignAfterWorkflow } = await testClient
+      .from("campaigns")
+      .select("status")
+      .eq("id", campaignId)
+      .single();
+    expect(campaignAfterWorkflow?.status).toBe("completed");
   });
 });
