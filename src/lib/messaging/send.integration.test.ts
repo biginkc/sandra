@@ -93,7 +93,7 @@ describe("sendSmsToContact (integration)", () => {
     const { data: msg } = await supabase
       .from("messages")
       .select(
-        "status, direction, external_id, body, contact_id, property_id, conversation_id",
+        "status, direction, external_id, body, contact_id, property_id, conversation_id, campaign_id",
       )
       .eq("contact_id", contactId)
       .single();
@@ -102,6 +102,7 @@ describe("sendSmsToContact (integration)", () => {
     expect(msg?.external_id).toMatch(/^mock_/);
     expect(msg?.property_id).toBe(propertyId);
     expect(msg?.conversation_id).toBeTruthy();
+    expect(msg?.campaign_id).toBeNull();
   });
 
   it("does not block when no consent event exists and quiet hours allow sending", async () => {
@@ -192,7 +193,7 @@ describe("sendSmsToContact (integration)", () => {
 
     const { data: row } = await supabase
       .from("messages")
-      .select("status, direction, external_id, sent_at, conversation_id")
+      .select("status, direction, external_id, sent_at, conversation_id, campaign_id")
       .eq("id", outcome.messageId)
       .single();
     expect(row?.status).toBe("queued");
@@ -200,6 +201,73 @@ describe("sendSmsToContact (integration)", () => {
     expect(row?.external_id).toBeNull();
     expect(row?.sent_at).toBeNull();
     expect(row?.conversation_id).toBeTruthy();
+    expect(row?.campaign_id).toBeNull();
+  });
+
+  it("stamps campaign_id on an immediate send when campaignId is provided", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-08T18:00:00Z"));
+    const { contactId, propertyId } = await seed({ withConsent: true });
+
+    try {
+      const { data: campaign } = await supabase
+        .from("campaigns")
+        .insert({
+          org_id: "00000000-0000-0000-0000-000000000bbb",
+          name: `Campaign ${crypto.randomUUID()}`,
+        })
+        .select("id")
+        .single();
+
+      const outcome = await sendSmsToContact(supabase, {
+        contactId,
+        propertyId,
+        body: "campaign send",
+        campaignId: campaign!.id,
+      });
+      expect(outcome.status).toBe("sent");
+
+      const { data: row } = await supabase
+        .from("messages")
+        .select("campaign_id, status")
+        .eq("contact_id", contactId)
+        .eq("property_id", propertyId)
+        .single();
+      expect(row?.status).toBe("sent");
+      expect(row?.campaign_id).toBe(campaign!.id);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("stamps campaign_id on a queued send when campaignId is provided", async () => {
+    const { contactId, propertyId } = await seed({ withConsent: false });
+    const { data: campaign } = await supabase
+      .from("campaigns")
+      .insert({
+        org_id: "00000000-0000-0000-0000-000000000bbb",
+        name: `Campaign ${crypto.randomUUID()}`,
+      })
+      .select("id")
+      .single();
+
+    const outcome = await sendSmsToContact(supabase, {
+      contactId,
+      propertyId,
+      body: "queued campaign send",
+      queueOnly: true,
+      campaignId: campaign!.id,
+    });
+    expect(outcome.status).toBe("queued");
+    if (outcome.status !== "queued") return;
+
+    const { data: row } = await supabase
+      .from("messages")
+      .select("campaign_id, status")
+      .eq("id", outcome.messageId)
+      .single();
+    expect(row?.status).toBe("queued");
+    expect(row?.campaign_id).toBe(campaign!.id);
   });
 
   it("reuses one conversation_id for repeated sends on the same contact/property thread", async () => {
