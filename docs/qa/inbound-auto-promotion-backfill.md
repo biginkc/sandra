@@ -4,6 +4,8 @@ One-off maintenance script for production properties that were promoted by the o
 
 The script is dry-run by default. It only writes with `--apply`.
 
+It requires production `NEXT_PUBLIC_SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY`. The script refuses to run unless the Supabase project ref is `copflsklaefwzipsrjqz`.
+
 ## Commands
 
 Dry run:

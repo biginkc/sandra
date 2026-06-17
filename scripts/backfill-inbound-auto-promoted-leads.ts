@@ -560,7 +560,11 @@ function printReport(params: {
   ).length;
 
   console.log("");
-  console.log("=== DRY RUN - inbound auto-promotion backfill ===");
+  console.log(
+    params.options.apply
+      ? "=== PRE-APPLY REPORT - inbound auto-promotion backfill ==="
+      : "=== DRY RUN - inbound auto-promotion backfill ===",
+  );
   console.log(`Supabase project: ${params.projectRef}`);
   console.log(`Write mode: ${params.options.apply ? "APPLY REQUESTED" : "dry-run only"}`);
   console.log("");
