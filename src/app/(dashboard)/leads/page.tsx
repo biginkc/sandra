@@ -49,7 +49,16 @@ export default async function LeadsPage({
        homeowner:contacts!properties_homeowner_contact_id_fkey(first_name, last_name, entity_name)`,
     )
     .neq("status", "prospect")
-    .is("deleted_at", null);
+    .is("deleted_at", null)
+    // Hide leads that were dispositioned dead. Disposition writes
+    // `outreach_dispo` but never reverts `status`, so without this filter a
+    // lead marked wrong-number / not-interested / DNC stays in the kanban
+    // forever. Keep nurture + callback_requested (live follow-ups) and any
+    // lead never dispositioned (outreach_dispo IS NULL) — the explicit
+    // is.null disjunct is required because Postgres `NOT IN` drops NULL rows.
+    .or(
+      "outreach_dispo.is.null,outreach_dispo.not.in.(wrong_number,bad_number,not_interested,opted_out,dnc)",
+    );
 
   // Dashboard click-through: hot leads (interested + offer_sent).
   if (params.status === "hot") {
