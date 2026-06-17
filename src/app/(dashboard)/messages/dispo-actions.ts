@@ -75,6 +75,7 @@ export async function setOutreachDispo(
     .from("properties")
     .select("id, org_id, address, homeowner_contact_id")
     .eq("id", propertyId)
+    .is("deleted_at", null)
     .maybeSingle();
 
   if (propErr || !prop) {
@@ -88,7 +89,8 @@ export async function setOutreachDispo(
       follow_up_at: followUpAt ?? null,
       updated_at: new Date().toISOString(),
     })
-    .eq("id", propertyId);
+    .eq("id", propertyId)
+    .is("deleted_at", null);
 
   if (updateErr) {
     return { ok: false, error: updateErr.message };

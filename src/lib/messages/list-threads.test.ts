@@ -21,7 +21,7 @@ function makeStub(opts: {
     read_at: string | null;
   }>;
   contacts: Map<string, { id: string; first_name: string | null; last_name: string | null; entity_name: string | null; phone_1: string | null }>;
-  properties: Map<string, { id: string; address: string | null; city: string | null; state: string | null; assigned_user_id: string | null; needs_human_attention?: boolean; last_ai_escalation_reason?: string | null }>;
+  properties: Map<string, { id: string; address: string | null; city: string | null; state: string | null; assigned_user_id: string | null; needs_human_attention?: boolean; last_ai_escalation_reason?: string | null; deleted_at?: string | null }>;
   consentEvents?: Array<{
     contact_id: string;
     event_type: string;
@@ -56,8 +56,27 @@ function makeStub(opts: {
   };
 
   function tableQuery(name: "contacts" | "properties") {
+    let nullFilter: { column: string; value: null } | null = null;
+
     return {
       select: () => ({
+        is: (column: string, value: null) => {
+          nullFilter = { column, value };
+          return {
+            in: (_col: string, chunk: string[]) => {
+              inCalls[name].push(chunk);
+              const source = name === "contacts" ? opts.contacts : opts.properties;
+              const data = chunk
+                .map((id) => source.get(id))
+                .filter((row): row is NonNullable<typeof row> => Boolean(row))
+                .filter((row) => {
+                  if (!nullFilter) return true;
+                  return (row[nullFilter.column as keyof typeof row] ?? null) === nullFilter.value;
+                });
+              return Promise.resolve({ data, error: null });
+            },
+          };
+        },
         in: (_col: string, chunk: string[]) => {
           inCalls[name].push(chunk);
           const source = name === "contacts" ? opts.contacts : opts.properties;
@@ -328,6 +347,54 @@ describe("listThreads — isOptedOut (DNC) flag", () => {
       "p-b",
     ]);
     expect(new Set(shared.map((thread) => thread.threadId)).size).toBe(2);
+  });
+
+  it("drops property metadata when the linked property is soft-deleted", async () => {
+    const createdAt = new Date().toISOString();
+    const { supabase } = makeStub({
+      messages: [
+        {
+          contact_id: "c-deleted",
+          property_id: "p-deleted",
+          body: "about deleted property",
+          direction: "inbound",
+          created_at: createdAt,
+          read_at: null,
+        },
+      ],
+      contacts: new Map([
+        [
+          "c-deleted",
+          {
+            id: "c-deleted",
+            first_name: "Deleted",
+            last_name: "Owner",
+            entity_name: null,
+            phone_1: "+18165550001",
+          },
+        ],
+      ]),
+      properties: new Map([
+        [
+          "p-deleted",
+          {
+            id: "p-deleted",
+            address: "9 Gone St",
+            city: "Honolulu",
+            state: "HI",
+            assigned_user_id: null,
+            deleted_at: "2026-06-17T12:00:00.000Z",
+          },
+        ],
+      ]),
+      consentEvents: [],
+    });
+
+    const threads = await listThreads(supabase, {});
+
+    expect(threads).toHaveLength(1);
+    expect(threads[0].propertyId).toBeNull();
+    expect(threads[0].propertyAddress).toBeNull();
   });
 });
 

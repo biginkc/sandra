@@ -99,4 +99,26 @@ describe("internal.jitter.dialer-batch GET", () => {
     const json = (await response.json()) as any;
     expect(json.items[0].eligibility.status).toBe("callable");
   });
+
+  it("marks a soft-deleted property as blocked instead of callable", async () => {
+    const seeded = await seedDialerBatch(testClient);
+    await testClient
+      .from("properties")
+      .update({ deleted_at: new Date().toISOString() })
+      .eq("id", seeded.propertyId);
+
+    const response = await GET(
+      signedGet(
+        `https://sandra.test/api/internal/jitter/dialer-batches/${seeded.batchId}?eligibility=fresh`,
+      ),
+      context(seeded.batchId),
+    );
+
+    expect(response.status).toBe(200);
+    const json = (await response.json()) as any;
+    expect(json.items[0].eligibility).toEqual({
+      status: "blocked",
+      reason: "property_deleted",
+    });
+  });
 });

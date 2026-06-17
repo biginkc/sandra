@@ -227,6 +227,21 @@ describe("setOutreachDispo integration dispatch fan-out", () => {
     expect(dispatchTaskAssignedSlack).toHaveBeenCalledTimes(1);
     expect(dispatchTaskCalendarEvent).toHaveBeenCalledTimes(1);
   });
+
+  it("refuses to update a soft-deleted property", async () => {
+    responseQueue = [{ data: null, error: null }];
+
+    const result = await setOutreachDispo(
+      "property-deleted",
+      "callback_requested",
+      "2026-05-10T15:00:00.000Z",
+      "assignee-2",
+    );
+
+    expect(result).toEqual({ ok: false, error: "Property not found" });
+    expect(updatePayloads).toEqual([]);
+    expect(createTask).not.toHaveBeenCalled();
+  });
 });
 
 function makeSupabase(userId: string) {
@@ -244,6 +259,7 @@ function makeSupabase(userId: string) {
           return builder;
         }),
         eq: vi.fn(() => builder),
+        is: vi.fn(() => builder),
         maybeSingle: vi.fn(async () => {
           const response = responseQueue.shift();
           return { data: response?.data ?? null, error: response?.error ?? null };

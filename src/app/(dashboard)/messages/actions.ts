@@ -255,6 +255,7 @@ export async function searchPropertiesForMatch(
         "id, address, city, state, homeowner_contact_id, agent_contact_id, created_at",
       )
       .or([`address.ilike.${like}`, `city.ilike.${like}`].join(","))
+      .is("deleted_at", null)
       .order("created_at", { ascending: false })
       .limit(20);
     if (error) {

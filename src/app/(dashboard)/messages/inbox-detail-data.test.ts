@@ -306,4 +306,34 @@ describe("fetchInboxDetail", () => {
     ]);
     expect(detail?.propertyAddress).toContain("100 Live Ave");
   });
+
+  it("hides property metadata when the linked property was soft-deleted", async () => {
+    const supabase = makeSupabaseStub({
+      messages: [
+        makeMessage({
+          id: "deleted-property-thread",
+          contact_id: CONTACT_ID,
+          property_id: RECENT_PROPERTY_ID,
+          conversation_id: CONVERSATION_ID,
+          body: "thread survives but property is deleted",
+        }),
+      ],
+      contacts: [makeContact({ id: CONTACT_ID })],
+      properties: [
+        makeProperty({
+          id: RECENT_PROPERTY_ID,
+          address: "404 Archived Ln",
+          deleted_at: "2026-06-17T12:00:00.000Z",
+        }),
+      ],
+    });
+
+    const detail = await fetchInboxDetail(supabase as never, CONVERSATION_ID);
+
+    expect(detail).not.toBeNull();
+    expect(detail?.propertyId).toBeNull();
+    expect(detail?.propertyAddress).toBeNull();
+    expect(detail?.propertyStatus).toBeNull();
+    expect(detail?.outreachDispo).toBeNull();
+  });
 });

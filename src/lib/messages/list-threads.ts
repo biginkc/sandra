@@ -157,8 +157,9 @@ export async function listThreads(
       supabase
         .from("properties")
         .select(
-          "id, address, city, state, assigned_user_id, needs_human_attention, last_ai_escalation_reason",
+          "id, address, city, state, assigned_user_id, needs_human_attention, last_ai_escalation_reason, deleted_at",
         )
+        .is("deleted_at", null)
         .in("id", chunk),
     ),
     fetchInChunks(contactIds, CHUNK, (chunk) =>
@@ -214,7 +215,7 @@ export async function listThreads(
           ([c.first_name, c.last_name].filter(Boolean).join(" ") || null))
         : null,
       contactPhone: c?.phone_1 ?? null,
-      propertyId: bucket.propertyId,
+      propertyId: p ? bucket.propertyId : null,
       propertyAddress: p
         ? [p.address, p.city, p.state].filter(Boolean).join(", ")
         : null,

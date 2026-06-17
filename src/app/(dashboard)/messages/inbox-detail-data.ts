@@ -60,6 +60,7 @@ export async function fetchInboxDetail(
           .from("properties")
           .select("address, city, state, assigned_user_id, status, outreach_dispo")
           .eq("id", propertyId)
+          .is("deleted_at", null)
           .maybeSingle()
       : Promise.resolve({ data: null, error: null }),
   ]);
@@ -76,7 +77,7 @@ export async function fetchInboxDetail(
         ([c.first_name, c.last_name].filter(Boolean).join(" ") || null))
       : null,
     contactPhone: c?.phone_1 ?? null,
-    propertyId,
+    propertyId: p ? propertyId : null,
     propertyAddress: p
       ? [p.address, p.city, p.state].filter(Boolean).join(", ")
       : null,

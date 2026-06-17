@@ -19,7 +19,10 @@ type ItemRow = {
   timezone: string;
   status: string;
   sort_order: number;
-  property: { id: string; state: string | null } | { id: string; state: string | null }[] | null;
+  property:
+    | { id: string; state: string | null; deleted_at: string | null }
+    | { id: string; state: string | null; deleted_at: string | null }[]
+    | null;
   contact:
     | {
         id: string;
@@ -48,6 +51,7 @@ function itemEligibility(row: ItemRow) {
   const property = one(row.property);
   const contact = one(row.contact);
   if (!property || !contact) return { status: "blocked", reason: "no_contact" };
+  if (property.deleted_at) return { status: "blocked", reason: "property_deleted" };
 
   const snapshots = buildSnapshotsForProperty(property, contact);
   const index = snapshots.findIndex(
@@ -97,7 +101,7 @@ export async function GET(
       .from("dialer_batch_items")
       .select(
         `id, batch_id, property_id, contact_id, phone_e164, phone_label, state, timezone, status, sort_order,
-         property:properties!dialer_batch_items_property_id_fkey(id, state),
+         property:properties!dialer_batch_items_property_id_fkey(id, state, deleted_at),
          contact:contacts!dialer_batch_items_contact_id_fkey(id, phone_1, phone_2, phone_3, do_not_contact, sms_opted_out)`,
       )
       .eq("batch_id", id)

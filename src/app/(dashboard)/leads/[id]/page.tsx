@@ -59,6 +59,7 @@ export async function generateMetadata({
     .from("properties")
     .select("address, city, state")
     .eq("id", id)
+    .is("deleted_at", null)
     .maybeSingle();
   const title = data
     ? `${data.address}${data.city ? `, ${data.city}` : ""} · Sandra CRM`
@@ -92,6 +93,7 @@ export default async function LeadDetailPage({
        )`,
     )
     .eq("id", id)
+    .is("deleted_at", null)
     .maybeSingle();
 
   if (error) {
