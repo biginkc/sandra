@@ -194,12 +194,24 @@ export function BulkTagModal({
           ) : null}
         </div>
 
-        <DialogFooter>
-          <Button variant="outline" onClick={handleClose} disabled={pending}>
+        <DialogFooter className="items-stretch sm:grid sm:grid-cols-[auto_minmax(0,1fr)]">
+          <Button
+            variant="outline"
+            onClick={handleClose}
+            disabled={pending}
+            className="w-full sm:w-auto"
+          >
             Cancel
           </Button>
-          <Button onClick={() => submit(trimmed)} disabled={submitDisabled}>
-            {pending ? "Applying..." : submitLabel}
+          <Button
+            onClick={() => submit(trimmed)}
+            disabled={submitDisabled}
+            title={pending ? "Applying..." : submitLabel}
+            className="min-w-0 max-w-full overflow-hidden px-4 sm:w-full sm:shrink"
+          >
+            <span className="block min-w-0 max-w-full truncate">
+              {pending ? "Applying..." : submitLabel}
+            </span>
           </Button>
         </DialogFooter>
       </DialogContent>
