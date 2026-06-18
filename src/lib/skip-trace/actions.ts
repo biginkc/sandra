@@ -4,6 +4,7 @@ import { after } from "next/server";
 
 import { isAdminEmail } from "@/lib/auth/allowlist";
 import { listAdminUserIds } from "@/lib/auth/admins";
+import { CASS_COST_PER_LOOKUP_USD } from "@/lib/enrichment/cass-job";
 import { errFromUnknown, ok, type Result } from "@/lib/errors/result";
 import { reportError } from "@/lib/errors/report";
 import {
@@ -15,30 +16,188 @@ import { createClient } from "@/lib/supabase/server";
 import { getSkipTraceProvider } from "./registry";
 import { runSkipTraceEnrichment } from "./skip-trace-job";
 
-/** Max rows per single Tracerfy POST. Their server rejects request
+/** Max rows per single Tracefy POST. Their server rejects request
  *  bodies past ~2.5 MB with a generic HTML 400 before any field
  *  validation runs (hit live 2026-06-12 with a 12,282-row batch ≈ 3 MB).
  *  4,000 rows ≈ 0.9 MB keeps comfortable headroom. Selections larger
  *  than this are auto-split into multiple part-jobs — each with its own
- *  Tracerfy queue id, so the existing per-job webhook/poll finalization
+ *  Tracefy queue id, so the existing per-job webhook/poll finalization
  *  works unchanged. This is a wire-format constraint, NOT a volume cap.
  */
 const PROVIDER_BATCH_MAX = 4_000;
 
+type SupabaseServerClient = Awaited<ReturnType<typeof createClient>>;
+
+export type SkipTraceCreditStatus =
+  | "sufficient"
+  | "insufficient"
+  | "unavailable";
+
+export type SkipTracePreflight = {
+  requested: number;
+  eligible: number;
+  cassVerified: number;
+  cassUnverified: number;
+  notEligible: number;
+  killSwitchSkipped: number;
+  tracefyCreditsRequired: number;
+  tracefyCreditsAvailable: number | null;
+  tracefyCreditStatus: SkipTraceCreditStatus;
+  canLaunchSkipTrace: boolean;
+  estimatedCassVerificationCostUsd: number;
+  cassVerificationPropertyIds: string[];
+};
+
+type InternalSkipTracePreflight = SkipTracePreflight & {
+  eligiblePropertyIds: string[];
+  orgId: string | null;
+};
+
+function tracefyCreditsRequired(eligibleCount: number): number {
+  if (eligibleCount <= 0) return 0;
+  let required = 0;
+  for (let i = 0; i < eligibleCount; i += PROVIDER_BATCH_MAX) {
+    const partCount = Math.min(PROVIDER_BATCH_MAX, eligibleCount - i);
+    required += partCount === 1 ? 5 : partCount;
+  }
+  return required;
+}
+
+async function getTracefyCreditState(required: number): Promise<{
+  available: number | null;
+  status: SkipTraceCreditStatus;
+}> {
+  if (required <= 0) {
+    return { available: null, status: "sufficient" };
+  }
+
+  try {
+    const provider = getSkipTraceProvider();
+    if (!provider) return { available: null, status: "unavailable" };
+    const available = await provider.getBalance();
+    return {
+      available,
+      status: available >= required ? "sufficient" : "insufficient",
+    };
+  } catch (e) {
+    reportError(e, { tags: { surface: "skip_trace_credit_preflight" } });
+    return { available: null, status: "unavailable" };
+  }
+}
+
+async function buildSkipTracePreflight(
+  supabase: SupabaseServerClient,
+  propertyIds: string[],
+): Promise<InternalSkipTracePreflight> {
+  const rows: Array<{
+    id: string;
+    org_id: string | null;
+    skip_trace_disabled: boolean;
+    cass_status: string;
+  }> = [];
+
+  for (let i = 0; i < propertyIds.length; i += 500) {
+    const { data, error } = await supabase
+      .from("properties")
+      .select("id, org_id, skip_trace_disabled, cass_status")
+      .in("id", propertyIds.slice(i, i + 500));
+    if (error) {
+      throw new Error(error.message);
+    }
+    if (data) rows.push(...data);
+  }
+
+  const allowed = rows.filter(
+    (p) => !p.skip_trace_disabled && p.cass_status === "verified",
+  );
+  const cassVerified = rows.filter((p) => p.cass_status === "verified");
+  const cassUnverified = rows.filter((p) => p.cass_status !== "verified");
+  const cassVerificationCandidates = cassUnverified.filter(
+    (p) => !p.skip_trace_disabled && p.cass_status !== "verified",
+  );
+  const killSwitched = rows.filter((p) => p.skip_trace_disabled);
+  const required = tracefyCreditsRequired(allowed.length);
+  const creditState = await getTracefyCreditState(required);
+
+  return {
+    requested: propertyIds.length,
+    eligible: allowed.length,
+    cassVerified: cassVerified.length,
+    cassUnverified: cassUnverified.length,
+    notEligible: propertyIds.length - allowed.length,
+    killSwitchSkipped: killSwitched.length,
+    tracefyCreditsRequired: required,
+    tracefyCreditsAvailable: creditState.available,
+    tracefyCreditStatus: creditState.status,
+    canLaunchSkipTrace: allowed.length > 0 && creditState.status === "sufficient",
+    estimatedCassVerificationCostUsd:
+      cassVerificationCandidates.length * CASS_COST_PER_LOOKUP_USD,
+    cassVerificationPropertyIds: cassVerificationCandidates.map((p) => p.id),
+    eligiblePropertyIds: allowed.map((p) => p.id),
+    orgId: allowed[0]?.org_id ?? rows[0]?.org_id ?? null,
+  };
+}
+
+function publicPreflight(
+  preflight: InternalSkipTracePreflight,
+): SkipTracePreflight {
+  return {
+    requested: preflight.requested,
+    eligible: preflight.eligible,
+    cassVerified: preflight.cassVerified,
+    cassUnverified: preflight.cassUnverified,
+    notEligible: preflight.notEligible,
+    killSwitchSkipped: preflight.killSwitchSkipped,
+    tracefyCreditsRequired: preflight.tracefyCreditsRequired,
+    tracefyCreditsAvailable: preflight.tracefyCreditsAvailable,
+    tracefyCreditStatus: preflight.tracefyCreditStatus,
+    canLaunchSkipTrace: preflight.canLaunchSkipTrace,
+    estimatedCassVerificationCostUsd:
+      preflight.estimatedCassVerificationCostUsd,
+    cassVerificationPropertyIds: preflight.cassVerificationPropertyIds,
+  };
+}
+
+async function requireTracefyCredits(
+  preflight: InternalSkipTracePreflight,
+): Promise<Result<null>> {
+  if (preflight.eligible === 0) return ok(null);
+  if (preflight.tracefyCreditStatus === "sufficient") return ok(null);
+
+  if (preflight.tracefyCreditStatus === "insufficient") {
+    return {
+      ok: false,
+      error: {
+        code: "INSUFFICIENT_CREDITS",
+        message: `Tracefy has ${preflight.tracefyCreditsAvailable ?? 0} credits; this skip trace needs ${preflight.tracefyCreditsRequired}. Top up before launching.`,
+      },
+    };
+  }
+
+  return {
+    ok: false,
+    error: {
+      code: "TRACEFY_CREDITS_UNAVAILABLE",
+      message:
+        "Could not confirm Tracefy credits. Retry before launching skip trace.",
+    },
+  };
+}
+
 /** Cap removed entirely (Jarrad, 2026-06-11): credit balance is the
  *  operator's intentional throttle — he loads a fixed amount at a time
  *  and tops up deliberately. The runner submits ONE async batch to
- *  Tracerfy and exits, so job size is not a function-lifetime concern;
- *  Tracerfy refuses spend past the balance. Same policy as the
+ *  Tracefy and exits, so job size is not a function-lifetime concern;
+ *  Tracefy refuses spend past the balance. Same policy as the
  *  select-all cap removal (#238). */
 
 /**
- * Server actions for the three skip-trace UI surfaces:
+ * Server actions for the primary skip-trace UI surfaces:
  *   - bulk from /properties (Surface A)
  *   - single from /leads/[id] (Surface B)
- *   - opt-in checkbox in CSV import wizard (Surface C)
+ *   - pending approval from /jobs
  *
- * All three call `requestSkipTrace` with a list of property ids. The
+ * Request surfaces call `requestSkipTrace` with a list of property ids. The
  * approval gate is enforced server-side: if the caller isn't an admin,
  * the job lands in `pending_approval` and admins get a notification;
  * if the caller IS an admin, the job queues + runs immediately.
@@ -63,6 +222,35 @@ export type SkipTraceOutcome = {
   killSwitchSkipped: number;
 };
 
+export async function preflightSkipTrace(
+  propertyIds: string[],
+): Promise<Result<SkipTracePreflight>> {
+  try {
+    if (!Array.isArray(propertyIds) || propertyIds.length === 0) {
+      return {
+        ok: false,
+        error: { code: "VALIDATION", message: "Select at least one property." },
+      };
+    }
+
+    const supabase = await createClient();
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    if (!user) {
+      return {
+        ok: false,
+        error: { code: "AUTH", message: "Sign in required." },
+      };
+    }
+
+    return ok(publicPreflight(await buildSkipTracePreflight(supabase, propertyIds)));
+  } catch (e) {
+    reportError(e, { tags: { surface: "preflight_skip_trace" } });
+    return errFromUnknown(e, "PREFLIGHT_SKIP_TRACE_FAILED");
+  }
+}
+
 export async function requestSkipTrace(
   propertyIds: string[],
 ): Promise<Result<SkipTraceOutcome>> {
@@ -85,44 +273,10 @@ export async function requestSkipTrace(
       };
     }
 
-    // Filter out two classes of property up-front so we never spend
-    // vendor credits on guaranteed-fail lookups:
-    //   1. `skip_trace_disabled` — the per-property kill switch.
-    //   2. `cass_status != 'verified'` — un-CASS'd addresses fail at
-    //      Tracerfy because they aren't USPS-normalized. Sending them
-    //      anyway pays $0.02/row to learn we should have CASS-verified
-    //      first.
-    const eligibleRows: Array<{
-      id: string;
-      org_id: string;
-      skip_trace_disabled: boolean;
-      cass_status: string;
-    }> = [];
-    for (let i = 0; i < propertyIds.length; i += 500) {
-      const { data, error: eligibleErr } = await supabase
-        .from("properties")
-        .select("id, org_id, skip_trace_disabled, cass_status")
-        .in("id", propertyIds.slice(i, i + 500));
-      if (eligibleErr) {
-        return {
-          ok: false,
-          error: { code: "QUERY_FAILED", message: eligibleErr.message },
-        };
-      }
-      if (data) eligibleRows.push(...data);
-    }
-    const killSwitched = (eligibleRows ?? []).filter(
-      (p) => p.skip_trace_disabled,
-    );
-    const cassUnverified = (eligibleRows ?? []).filter(
-      (p) => !p.skip_trace_disabled && p.cass_status !== "verified",
-    );
-    const allowed = (eligibleRows ?? []).filter(
-      (p) => !p.skip_trace_disabled && p.cass_status === "verified",
-    );
-    const killSwitchSkipped = killSwitched.length;
-    const cassSkipped = cassUnverified.length;
-    if (allowed.length === 0) {
+    const preflight = await buildSkipTracePreflight(supabase, propertyIds);
+    const killSwitchSkipped = preflight.killSwitchSkipped;
+    const cassSkipped = preflight.cassVerificationPropertyIds.length;
+    if (preflight.eligible === 0) {
       // Nothing eligible — but this is NOT an error. Every selected
       // property either needs CASS verification or has skip-trace
       // disabled, both of which the operator can act on. Returning a
@@ -139,10 +293,22 @@ export async function requestSkipTrace(
       });
     }
 
+    const creditGate = await requireTracefyCredits(preflight);
+    if (!creditGate.ok) return creditGate;
+
     // Use the filtered list from here on — the job only operates on
     // properties that survived BOTH gates.
-    const eligibleIds = allowed.map((p) => p.id);
-    const orgProbe = { org_id: allowed[0].org_id };
+    const eligibleIds = preflight.eligiblePropertyIds;
+    if (!preflight.orgId) {
+      return {
+        ok: false,
+        error: {
+          code: "QUERY_FAILED",
+          message: "No organization found for selected properties.",
+        },
+      };
+    }
+    const orgProbe = { org_id: preflight.orgId };
 
     const isAdmin = isAdminEmail(user.email);
     const initialStatus: "pending_approval" | "queued" = isAdmin
@@ -167,7 +333,7 @@ export async function requestSkipTrace(
       skipReasons.length > 0 ? ` (${skipReasons.join(", ")} skipped)` : "";
     // Auto-split selections that exceed the provider's per-request wire
     // limit into part-jobs. One part = the common case; each part keeps
-    // its own Tracerfy queue id so per-job finalization is unchanged.
+    // its own Tracefy queue id so per-job finalization is unchanged.
     const parts: string[][] = [];
     for (let i = 0; i < eligibleIds.length; i += PROVIDER_BATCH_MAX) {
       parts.push(eligibleIds.slice(i, i + PROVIDER_BATCH_MAX));
@@ -178,6 +344,7 @@ export async function requestSkipTrace(
       const partIds = parts[p];
       const partLabel =
         parts.length > 1 ? ` (part ${p + 1}/${parts.length})` : "";
+      const partSkippedSuffix = p === 0 ? skippedSuffix : "";
       const { data: jobRow, error: insertErr } = await supabase
         .from("jobs")
         .insert({
@@ -187,10 +354,10 @@ export async function requestSkipTrace(
           org_id: orgProbe.org_id,
           created_by: user.id,
           total_items: partIds.length,
-          title: `Skip trace ${partIds.length} propert${partIds.length === 1 ? "y" : "ies"}${partLabel}${skippedSuffix}`,
+          title: `Skip trace ${partIds.length} propert${partIds.length === 1 ? "y" : "ies"}${partLabel}${partSkippedSuffix}`,
           description: isAdmin
-            ? `Admin-initiated; running immediately${skippedSuffix}`
-            : `Awaiting admin approval (requested by ${user.email ?? "VA"})${skippedSuffix}`,
+            ? `Admin-initiated; running immediately${partSkippedSuffix}`
+            : `Awaiting admin approval (requested by ${user.email ?? "VA"})${partSkippedSuffix}`,
           input_params: { property_ids: partIds },
         })
         .select("id")
@@ -212,7 +379,7 @@ export async function requestSkipTrace(
       // Run immediately. The runner exits early for async batches and
       // the webhook finalizes; for ≤1-miss it completes inline. Parts
       // submit sequentially — each is a fast cache-check + one POST,
-      // and Tracerfy allows 10 batch submissions per 5 minutes.
+      // and Tracefy allows 10 batch submissions per 5 minutes.
       after(async () => {
         const bg = await createClient();
         for (let p = 0; p < jobIds.length; p++) {
@@ -310,36 +477,48 @@ export async function approveSkipTraceJob(
       };
     }
 
-    // Pre-flight balance — refuse if balance < estimated worst case.
-    // Single lookup = 5 credits; batch = 1 credit per row.
-    const provider = getSkipTraceProvider();
-    if (provider) {
-      try {
-        const balance = await provider.getBalance();
-        const worstCase = propertyIds.length === 1 ? 5 : propertyIds.length;
-        if (balance < worstCase) {
-          return {
-            ok: false,
-            error: {
-              code: "INSUFFICIENT_CREDITS",
-              message: `Account has ${balance} credits; this job needs at least ${worstCase}. Top up before approving.`,
-            },
-          };
-        }
-      } catch (e) {
-        reportError(e, { tags: { surface: "skip_trace_balance_check" } });
-        // Don't block approval on a balance-check failure; the job will
-        // surface a clear provider error if credits actually run out.
-      }
+    const preflight = await buildSkipTracePreflight(supabase, propertyIds);
+    if (preflight.eligible !== propertyIds.length) {
+      return {
+        ok: false,
+        error: {
+          code: "SKIP_TRACE_PREFLIGHT_CHANGED",
+          message:
+            "This job no longer matches the current CASS/skip-trace eligibility. Re-run preflight before approving.",
+        },
+      };
     }
+    const creditGate = await requireTracefyCredits(preflight);
+    if (!creditGate.ok) return creditGate;
 
-    await supabase
+    const { data: claimedJob, error: claimErr } = await supabase
       .from("jobs")
       .update({
         status: "queued",
         description: `Approved by ${user?.email ?? "admin"}`,
       })
-      .eq("id", jobId);
+      .eq("id", jobId)
+      .eq("status", "pending_approval")
+      .select("id")
+      .maybeSingle();
+    if (claimErr) {
+      return {
+        ok: false,
+        error: {
+          code: "APPROVE_SKIP_TRACE_FAILED",
+          message: claimErr.message,
+        },
+      };
+    }
+    if (!claimedJob) {
+      return {
+        ok: false,
+        error: {
+          code: "APPROVAL_ALREADY_CLAIMED",
+          message: "This skip-trace job was already approved or is no longer pending.",
+        },
+      };
+    }
 
     after(async () => {
       const bg = await createClient();

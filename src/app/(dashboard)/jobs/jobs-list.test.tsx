@@ -30,7 +30,7 @@ vi.mock("next/navigation", () => ({
 }));
 
 vi.mock("sonner", () => ({
-  toast: { success: vi.fn(), warning: vi.fn(), error: vi.fn() },
+  toast: { success: vi.fn(), warning: vi.fn(), error: vi.fn(), info: vi.fn() },
 }));
 
 // The action modules import server-only Supabase bindings. Stub so jsdom
@@ -41,9 +41,39 @@ vi.mock("./actions", () => ({
   startQueuedCassJob: vi.fn(),
 }));
 
-vi.mock("@/lib/skip-trace/actions", () => ({
+const {
+  approveSkipTraceJob,
+  denySkipTraceJob,
+  preflightSkipTrace,
+  requestSkipTrace,
+} = vi.hoisted(() => ({
   approveSkipTraceJob: vi.fn(),
   denySkipTraceJob: vi.fn(),
+  preflightSkipTrace: vi.fn(async () => ({
+    ok: true,
+    data: {
+      requested: 1,
+      eligible: 1,
+      cassVerified: 1,
+      cassUnverified: 0,
+      notEligible: 0,
+      killSwitchSkipped: 0,
+      tracefyCreditsRequired: 5,
+      tracefyCreditsAvailable: 100,
+      tracefyCreditStatus: "sufficient",
+      canLaunchSkipTrace: true,
+      estimatedCassVerificationCostUsd: 0,
+      cassVerificationPropertyIds: [],
+    },
+  })),
+  requestSkipTrace: vi.fn(),
+}));
+
+vi.mock("@/lib/skip-trace/actions", () => ({
+  approveSkipTraceJob,
+  denySkipTraceJob,
+  preflightSkipTrace,
+  requestSkipTrace,
 }));
 
 // Supabase realtime + initial-fetch mock — pattern from
@@ -88,6 +118,7 @@ type MockJob = {
   processed_items: number;
   failed_items: number;
   result_summary: unknown;
+  input_params: unknown;
 };
 
 function makeJob(overrides: Partial<MockJob> & { id: string }): MockJob {
@@ -101,6 +132,7 @@ function makeJob(overrides: Partial<MockJob> & { id: string }): MockJob {
     processed_items: overrides.processed_items ?? 100,
     failed_items: overrides.failed_items ?? 0,
     result_summary: overrides.result_summary ?? {},
+    input_params: overrides.input_params ?? {},
   };
 }
 
@@ -116,11 +148,12 @@ async function renderJobs(
   opts: {
     jobs?: MockJob[];
     parsed?: Partial<ParsedTableSearch<JobsFilters>>;
+    isAdmin?: boolean;
   } = {},
 ) {
   const result = render(
     <JobsList
-      isAdmin={false}
+      isAdmin={opts.isAdmin ?? false}
       parsed={{
         ...DEFAULT_PARSED,
         ...opts.parsed,
@@ -160,6 +193,10 @@ async function renderJobs(
 beforeEach(() => {
   routerReplace.mockReset();
   jobsResolver.resolve = null;
+  approveSkipTraceJob.mockClear();
+  denySkipTraceJob.mockClear();
+  preflightSkipTrace.mockClear();
+  requestSkipTrace.mockClear();
 });
 
 afterEach(() => {
@@ -273,5 +310,33 @@ describe("<JobsList />", () => {
       },
       { timeout: 1500 },
     );
+  });
+
+  it("opens skip-trace preflight before approving a pending Tracefy job", async () => {
+    const user = userEvent.setup();
+    await renderJobs({
+      isAdmin: true,
+      jobs: [
+        makeJob({
+          id: "job-skip-1",
+          title: "Pending skip trace",
+          type: "skip_trace",
+          status: "pending_approval",
+          total_items: 1,
+          processed_items: 0,
+          input_params: { property_ids: ["p1"] },
+        }),
+      ],
+    });
+
+    await user.click(screen.getByRole("button", { name: "Approve" }));
+
+    expect(
+      await screen.findByRole("heading", { name: "Approve skip-trace?" }),
+    ).toBeInTheDocument();
+    await waitFor(() => {
+      expect(preflightSkipTrace).toHaveBeenCalledWith(["p1"]);
+    });
+    expect(approveSkipTraceJob).not.toHaveBeenCalled();
   });
 });

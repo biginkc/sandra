@@ -95,18 +95,32 @@ export function JobDetail({
       i.error_class === null ||
       RETRYABLE_CLASSES.has(i.error_class as string),
   ).length;
-  const fallbackPropertyCount = (() => {
+  const itemRetryablePropertyIds = erroredItems
+    .filter(
+      (i) =>
+        i.error_class === null ||
+        RETRYABLE_CLASSES.has(i.error_class as string),
+    )
+    .map((i) => i.property_id)
+    .filter((id): id is string => typeof id === "string" && id.length > 0);
+  const fallbackPropertyIds = (() => {
     const ids = (job.input_params as { property_ids?: unknown } | null)
       ?.property_ids;
     return Array.isArray(ids)
-      ? ids.filter((x) => typeof x === "string" && x.length > 0).length
-      : 0;
+      ? ids.filter((x): x is string => typeof x === "string" && x.length > 0)
+      : [];
+  })();
+  const fallbackPropertyCount = (() => {
+    return fallbackPropertyIds.length;
   })();
   // When we have items, use the retryable-only count; otherwise fall back
   // to input_params (pre-#59 jobs that never wrote items at all).
   const retryCount = hasErroredItems
     ? itemRetryableCount
     : fallbackPropertyCount;
+  const retryPropertyIds = hasErroredItems
+    ? itemRetryablePropertyIds
+    : fallbackPropertyIds;
   const inFlightChild =
     childJobs.find(
       (c) =>
@@ -129,6 +143,7 @@ export function JobDetail({
         {showRetry ? (
           <RetrySkipTraceButton
             jobId={job.id}
+            propertyIds={retryPropertyIds}
             retryCount={retryCount}
             noDataCount={noDataCount}
             cassUnverifiedCount={cassUnverifiedCount}

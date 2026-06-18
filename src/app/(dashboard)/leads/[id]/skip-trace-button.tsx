@@ -1,12 +1,10 @@
 "use client";
 
-import { useTransition } from "react";
+import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
-import { callAction } from "@/lib/errors/call-action";
-import { requestSkipTrace } from "@/lib/skip-trace/actions";
+import { SkipTracePreflightDialog } from "@/components/skip-trace-preflight-dialog";
 
 /**
  * Per-property skip-trace trigger for the lead-detail page header chip
@@ -19,54 +17,26 @@ import { requestSkipTrace } from "@/lib/skip-trace/actions";
  */
 export function SkipTraceButton({ propertyId }: { propertyId: string }) {
   const router = useRouter();
-  const [pending, startTransition] = useTransition();
-
-  const onClick = () => {
-    startTransition(async () => {
-      const result = await callAction(requestSkipTrace([propertyId]), {
-        fallbackMessage: "Could not request skip trace",
-      });
-      if (!result.ok) return;
-      const { status, cassSkipped } = result.data;
-      if (status === "none_eligible") {
-        // Not a failure — an actionable precondition. Info, not red.
-        toast.info(
-          cassSkipped > 0
-            ? "Address needs verification first"
-            : "Skip-trace is disabled for this property",
-          {
-            description:
-              cassSkipped > 0
-                ? "Verify the address (CASS), then skip-trace."
-                : "Re-enable skip-trace on this property first.",
-          },
-        );
-        return;
-      }
-      if (status === "queued") {
-        toast.success("Skip-trace started", {
-          description: "Refresh in a few seconds for results",
-        });
-      } else {
-        toast.success("Skip-trace request sent", {
-          description: "Admin will approve on /jobs",
-        });
-      }
-      // The sync path can finish in ~2s; refresh after a short delay so
-      // the new phones land. Async/approval paths are no-ops on refresh.
-      setTimeout(() => router.refresh(), 2500);
-    });
-  };
+  const [open, setOpen] = useState(false);
 
   return (
-    <Button
-      variant="outline"
-      size="sm"
-      onClick={onClick}
-      disabled={pending}
-      className="h-7 px-2 text-xs"
-    >
-      {pending ? "Requesting…" : "🔍 Skip trace"}
-    </Button>
+    <>
+      <Button
+        variant="outline"
+        size="sm"
+        onClick={() => setOpen(true)}
+        className="h-7 px-2 text-xs"
+      >
+        🔍 Skip trace
+      </Button>
+      <SkipTracePreflightDialog
+        open={open}
+        onOpenChange={setOpen}
+        propertyIds={[propertyId]}
+        onFinished={() => {
+          setTimeout(() => router.refresh(), 2500);
+        }}
+      />
+    </>
   );
 }

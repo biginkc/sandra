@@ -22,6 +22,7 @@ import {
   DataTableFooter,
   DataTableShell,
 } from "@/components/ui/data-table-shell";
+import { SkipTracePreflightDialog } from "@/components/skip-trace-preflight-dialog";
 import {
   Dialog,
   DialogContent,
@@ -46,7 +47,6 @@ import {
 } from "@/lib/enrichment/cass-job";
 import { callAction } from "@/lib/errors/call-action";
 import {
-  approveSkipTraceJob,
   denySkipTraceJob,
 } from "@/lib/skip-trace/actions";
 import { createClient } from "@/lib/supabase/client";
@@ -60,12 +60,6 @@ import type {
 } from "./page";
 
 type Job = Database["public"]["Tables"]["jobs"]["Row"];
-
-// One credit per lookup at the batch normal rate. The vendor (currently
-// Tracerfy) is configured in /admin/skip-trace-settings; UI copy below
-// uses the capability label "skip-trace credits" so a vendor swap stays
-// a config change rather than a UI relabel.
-const SKIP_TRACE_CREDITS_PER_LEAD = 1;
 
 const JOBS_SORTABLE_COLUMNS = [
   "title",
@@ -372,6 +366,14 @@ export function JobsList({
                   isAdmin &&
                   job.type === "skip_trace" &&
                   job.status === "pending_approval";
+                const rawSkipTracePropertyIds = (
+                  job.input_params as { property_ids?: unknown } | null
+                )?.property_ids;
+                const skipTracePropertyIds = Array.isArray(rawSkipTracePropertyIds)
+                  ? rawSkipTracePropertyIds.filter(
+                      (id): id is string => typeof id === "string",
+                    )
+                  : [];
                 const canRetryCass =
                   job.type === "cass_dsf2_ncoa" &&
                   (job.status === "partial" || job.status === "failed") &&
@@ -419,7 +421,7 @@ export function JobsList({
                       {canApproveSkipTrace ? (
                         <SkipTraceApproveButtons
                           jobId={job.id}
-                          totalItems={job.total_items}
+                          propertyIds={skipTracePropertyIds}
                         />
                       ) : null}
                       <Link
@@ -460,28 +462,13 @@ function statusVariant(
 
 function SkipTraceApproveButtons({
   jobId,
-  totalItems,
+  propertyIds,
 }: {
   jobId: string;
-  totalItems: number;
+  propertyIds: string[];
 }) {
   const [pending, startTransition] = useTransition();
-  const estimatedCredits = totalItems * SKIP_TRACE_CREDITS_PER_LEAD;
-
-  const onApprove = () => {
-    if (
-      !window.confirm(
-        `Approve skip-trace for ${totalItems} propert${totalItems === 1 ? "y" : "ies"}? Estimated cost: ${estimatedCredits} skip-trace credit${estimatedCredits === 1 ? "" : "s"}.`,
-      )
-    )
-      return;
-    startTransition(async () => {
-      await callAction(approveSkipTraceJob(jobId), {
-        successMessage: "Skip-trace approved — running.",
-        fallbackMessage: "Could not approve",
-      });
-    });
-  };
+  const [preflightOpen, setPreflightOpen] = useState(false);
 
   const onDeny = () => {
     const reason = window.prompt("Optional reason for denial:") ?? undefined;
@@ -503,9 +490,19 @@ function SkipTraceApproveButtons({
       >
         Deny
       </Button>
-      <Button size="sm" onClick={onApprove} disabled={pending}>
+      <Button
+        size="sm"
+        onClick={() => setPreflightOpen(true)}
+        disabled={pending || propertyIds.length === 0}
+      >
         Approve
       </Button>
+      <SkipTracePreflightDialog
+        open={preflightOpen}
+        onOpenChange={setPreflightOpen}
+        propertyIds={propertyIds}
+        approveJobId={jobId}
+      />
     </div>
   );
 }

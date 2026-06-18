@@ -51,6 +51,24 @@ vi.mock("../leads/actions", () => ({
 }));
 
 vi.mock("@/lib/skip-trace/actions", () => ({
+  approveSkipTraceJob: vi.fn(),
+  preflightSkipTrace: vi.fn(async () => ({
+    ok: true,
+    data: {
+      requested: 1,
+      eligible: 1,
+      cassVerified: 1,
+      cassUnverified: 0,
+      notEligible: 0,
+      killSwitchSkipped: 0,
+      tracefyCreditsRequired: 5,
+      tracefyCreditsAvailable: 100,
+      tracefyCreditStatus: "sufficient",
+      canLaunchSkipTrace: true,
+      estimatedCassVerificationCostUsd: 0,
+      cassVerificationPropertyIds: [],
+    },
+  })),
   requestSkipTrace: vi.fn(),
 }));
 
@@ -76,7 +94,7 @@ vi.mock("./actions", () => ({
 // Sonner's toast is fine in jsdom but the table's handlers don't fire
 // in these tests; stub anyway to keep the surface noise-free.
 vi.mock("sonner", () => ({
-  toast: { success: vi.fn(), warning: vi.fn(), error: vi.fn() },
+  toast: { success: vi.fn(), warning: vi.fn(), error: vi.fn(), info: vi.fn() },
 }));
 
 function makeRow(overrides: Partial<ProspectRow> & { id: string }): ProspectRow {
@@ -491,6 +509,33 @@ describe("<ProspectsTable />", () => {
     await waitFor(() =>
       expect(previewBatchEligibilityAction).toHaveBeenCalledWith(["p1"]),
     );
+  });
+
+  it("opens skip-trace preflight from the bulk Enrich action", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    const { preflightSkipTrace, requestSkipTrace } = await import(
+      "@/lib/skip-trace/actions"
+    );
+    const rows = [makeRow({ id: "p1", address: "1 Tracefy Ave" })];
+    renderTable(rows);
+
+    await user.click(
+      screen.getByRole("checkbox", { name: "Select 1 Tracefy Ave" }),
+    );
+    await user.click(
+      screen.getByRole("button", { name: /Actions for 1 selected/ }),
+    );
+    await user.click(await screen.findByRole("menuitem", { name: "Skip trace" }));
+
+    expect(
+      await screen.findByRole("heading", {
+        name: "Confirm skip-trace preflight",
+      }),
+    ).toBeInTheDocument();
+    await waitFor(() => {
+      expect(preflightSkipTrace).toHaveBeenCalledWith(["p1"]);
+    });
+    expect(requestSkipTrace).not.toHaveBeenCalled();
   });
 
   it("shows table skeleton rows during FilterDrawer URL navigation", async () => {

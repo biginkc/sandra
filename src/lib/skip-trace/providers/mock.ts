@@ -15,8 +15,8 @@ import type {
  *   - address starts with "DNC"      → hit=true, single phone with dnc=true
  *   - address starts with "EMAIL"    → hit=true, email-only (no phones)
  *   - address starts with "MULTI"    → hit=true, two persons, two phones each
- *   - address starts with "RAW"      → hit=true, phone returned as bare
- *                                       10 digits (Tracerfy's actual format)
+   *   - address starts with "RAW"      → hit=true, phone returned as bare
+   *                                       10 digits (Tracefy's actual format)
  *   - otherwise                       → hit=true, one person, one mobile phone
  *
  * Batch submissions are queued in-memory and "complete" on the next
@@ -29,13 +29,12 @@ export class MockSkipTraceProvider implements SkipTraceProvider {
   private static queues = new Map<string, SkipTraceInput[]>();
   private static queueCounter = 0;
   private static balance = 10_000;
+  private static balanceError: Error | null = null;
 
-  // eslint-disable-next-line @typescript-eslint/require-await
   async lookupSingle(input: SkipTraceInput): Promise<SkipTraceResult> {
     return synthesize(input);
   }
 
-  // eslint-disable-next-line @typescript-eslint/require-await
   async submitBatch(inputs: SkipTraceInput[]): Promise<SkipTraceBatchTicket> {
     MockSkipTraceProvider.queueCounter += 1;
     const queueId = `mock-queue-${MockSkipTraceProvider.queueCounter}`;
@@ -47,12 +46,11 @@ export class MockSkipTraceProvider implements SkipTraceProvider {
     };
   }
 
-  // eslint-disable-next-line @typescript-eslint/require-await
   async pollBatch(queueId: string): Promise<SkipTraceResult[] | null> {
     const inputs = MockSkipTraceProvider.queues.get(queueId);
     if (!inputs) return null;
     MockSkipTraceProvider.queues.delete(queueId);
-    // Batch results echo the input address (mirrors Tracerfy's row
+    // Batch results echo the input address (mirrors Tracefy's row
     // shape) so the finalize step can match results back by address
     // even when external_id round-trip is missing.
     return inputs.map((input) => ({
@@ -65,9 +63,20 @@ export class MockSkipTraceProvider implements SkipTraceProvider {
     }));
   }
 
-  // eslint-disable-next-line @typescript-eslint/require-await
   async getBalance(): Promise<number> {
+    if (MockSkipTraceProvider.balanceError) {
+      throw MockSkipTraceProvider.balanceError;
+    }
     return MockSkipTraceProvider.balance;
+  }
+
+  static setBalance(balance: number): void {
+    MockSkipTraceProvider.balance = balance;
+    MockSkipTraceProvider.balanceError = null;
+  }
+
+  static failBalance(message = "mock balance unavailable"): void {
+    MockSkipTraceProvider.balanceError = new Error(message);
   }
 
   /** Test helper — reset between tests. */
@@ -75,6 +84,7 @@ export class MockSkipTraceProvider implements SkipTraceProvider {
     MockSkipTraceProvider.queues.clear();
     MockSkipTraceProvider.queueCounter = 0;
     MockSkipTraceProvider.balance = 10_000;
+    MockSkipTraceProvider.balanceError = null;
   }
 }
 
