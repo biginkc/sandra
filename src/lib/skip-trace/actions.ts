@@ -44,9 +44,28 @@ const PROVIDER_BATCH_MAX = 4_000;
  * if the caller IS an admin, the job queues + runs immediately.
  */
 
+export type SkipTraceOutcome = {
+  /** Job id for the queued/pending work; null when nothing was eligible. */
+  jobId: string | null;
+  /**
+   * `queued`/`pending_approval` → a job was created. `none_eligible` is a
+   * NORMAL, actionable outcome (everything needs CASS or is kill-switched),
+   * NOT an error — callers render it as info, never a red failure toast.
+   */
+  status: "pending_approval" | "queued" | "none_eligible";
+  /** Total ids the caller selected. */
+  requested: number;
+  /** Ids actually sent to the provider. */
+  eligible: number;
+  /** Skipped because the address isn't CASS-verified. */
+  cassSkipped: number;
+  /** Skipped because the per-property skip-trace kill switch is on. */
+  killSwitchSkipped: number;
+};
+
 export async function requestSkipTrace(
   propertyIds: string[],
-): Promise<Result<{ jobId: string; status: "pending_approval" | "queued" }>> {
+): Promise<Result<SkipTraceOutcome>> {
   try {
     if (!Array.isArray(propertyIds) || propertyIds.length === 0) {
       return {
@@ -104,39 +123,20 @@ export async function requestSkipTrace(
     const killSwitchSkipped = killSwitched.length;
     const cassSkipped = cassUnverified.length;
     if (allowed.length === 0) {
-      // Surface the most specific reason. Kill-switch wins because
-      // it's user-controlled; CASS is the next-most-actionable.
-      if (killSwitchSkipped > 0 && cassSkipped === 0) {
-        return {
-          ok: false,
-          error: {
-            code: "ALL_PROPERTIES_DISABLED",
-            message:
-              propertyIds.length === 1
-                ? "Skip-trace is disabled on this property. Re-enable it on the lead detail page first."
-                : "Every selected property has skip-trace disabled. Re-enable on the lead detail pages first.",
-          },
-        };
-      }
-      if (cassSkipped > 0 && killSwitchSkipped === 0) {
-        return {
-          ok: false,
-          error: {
-            code: "ALL_PROPERTIES_NEED_CASS",
-            message:
-              propertyIds.length === 1
-                ? "This property's address is not CASS-verified. Run address verification first to avoid a wasted skip-trace credit."
-                : "Every selected property needs CASS verification first. Run address verification, then skip-trace will be safe to spend on.",
-          },
-        };
-      }
-      return {
-        ok: false,
-        error: {
-          code: "NO_ELIGIBLE_PROPERTIES",
-          message: `No properties are eligible — ${killSwitchSkipped} disabled, ${cassSkipped} need CASS verification.`,
-        },
-      };
+      // Nothing eligible — but this is NOT an error. Every selected
+      // property either needs CASS verification or has skip-trace
+      // disabled, both of which the operator can act on. Returning a
+      // success outcome (rather than an error Result) is what stops the
+      // UI from painting a normal "verify the addresses first" state as
+      // a red failure alert. The caller decides the copy from the counts.
+      return ok({
+        jobId: null,
+        status: "none_eligible",
+        requested: propertyIds.length,
+        eligible: 0,
+        cassSkipped,
+        killSwitchSkipped,
+      });
     }
 
     // Use the filtered list from here on — the job only operates on
@@ -222,7 +222,14 @@ export async function requestSkipTrace(
           });
         }
       });
-      return ok({ jobId: jobIds[0], status: "queued" });
+      return ok({
+        jobId: jobIds[0],
+        status: "queued",
+        requested: propertyIds.length,
+        eligible: eligibleIds.length,
+        cassSkipped,
+        killSwitchSkipped,
+      });
     }
 
     // VA path: notify admins once for the whole request.
@@ -240,7 +247,14 @@ export async function requestSkipTrace(
         extra: { jobId: jobIds[0] },
       });
     }
-    return ok({ jobId: jobIds[0], status: "pending_approval" });
+    return ok({
+      jobId: jobIds[0],
+      status: "pending_approval",
+      requested: propertyIds.length,
+      eligible: eligibleIds.length,
+      cassSkipped,
+      killSwitchSkipped,
+    });
   } catch (e) {
     reportError(e, { tags: { surface: "request_skip_trace" } });
     return errFromUnknown(e, "REQUEST_SKIP_TRACE_FAILED");

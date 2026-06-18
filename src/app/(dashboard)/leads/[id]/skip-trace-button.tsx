@@ -27,7 +27,23 @@ export function SkipTraceButton({ propertyId }: { propertyId: string }) {
         fallbackMessage: "Could not request skip trace",
       });
       if (!result.ok) return;
-      if (result.data.status === "queued") {
+      const { status, cassSkipped } = result.data;
+      if (status === "none_eligible") {
+        // Not a failure — an actionable precondition. Info, not red.
+        toast.info(
+          cassSkipped > 0
+            ? "Address needs verification first"
+            : "Skip-trace is disabled for this property",
+          {
+            description:
+              cassSkipped > 0
+                ? "Verify the address (CASS), then skip-trace."
+                : "Re-enable skip-trace on this property first.",
+          },
+        );
+        return;
+      }
+      if (status === "queued") {
         toast.success("Skip-trace started", {
           description: "Refresh in a few seconds for results",
         });

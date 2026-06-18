@@ -444,15 +444,49 @@ export function ProspectsTable({
         fallbackMessage: "Could not request skip trace",
       });
       if (result.ok) {
-        if (result.data.status === "queued") {
+        const { status, eligible, cassSkipped, killSwitchSkipped } =
+          result.data;
+        const skipNote = [
+          cassSkipped > 0
+            ? `${cassSkipped.toLocaleString()} need address verification first`
+            : null,
+          killSwitchSkipped > 0
+            ? `${killSwitchSkipped.toLocaleString()} skip-trace disabled`
+            : null,
+        ]
+          .filter(Boolean)
+          .join(" · ");
+
+        if (status === "none_eligible") {
+          // Not a failure — a precondition the operator can act on.
+          // Informational toast, never a red error. Leave the selection
+          // intact so they can verify the same rows, then re-trace.
+          toast.info("Nothing to skip-trace yet", {
+            description: skipNote
+              ? `${skipNote}. Verify the addresses (CASS), then skip-trace.`
+              : "No eligible properties in this selection.",
+          });
+          return;
+        }
+
+        const noun = `propert${eligible === 1 ? "y" : "ies"}`;
+        if (status === "queued") {
           toast.success(
-            `Skip-trace started for ${ids.length} propert${ids.length === 1 ? "y" : "ies"}`,
-            { description: "Watch progress on /jobs" },
+            `Skip-trace started for ${eligible.toLocaleString()} ${noun}`,
+            {
+              description: skipNote
+                ? `${skipNote} · Watch progress on /jobs`
+                : "Watch progress on /jobs",
+            },
           );
         } else {
           toast.success(
-            `Skip-trace request sent for ${ids.length} propert${ids.length === 1 ? "y" : "ies"}`,
-            { description: "Admin will approve on /jobs" },
+            `Skip-trace request sent for ${eligible.toLocaleString()} ${noun}`,
+            {
+              description: skipNote
+                ? `${skipNote} · Admin will approve on /jobs`
+                : "Admin will approve on /jobs",
+            },
           );
         }
         onClearAllSelection();

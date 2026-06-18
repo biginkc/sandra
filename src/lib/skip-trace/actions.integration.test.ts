@@ -81,7 +81,7 @@ describe("requestSkipTrace pre-flight gates (integration)", () => {
     const { data: job } = await testClient
       .from("jobs")
       .select("input_params, title")
-      .eq("id", result.data.jobId)
+      .eq("id", result.data.jobId!)
       .single();
     const input = (job!.input_params as { property_ids: string[] }).property_ids;
     expect(new Set(input)).toEqual(new Set(ids));
@@ -103,31 +103,38 @@ describe("requestSkipTrace pre-flight gates (integration)", () => {
     const result = await requestSkipTrace([verified, unverified, nullStatus]);
     expect(result.ok).toBe(true);
     if (!result.ok) return;
+    expect(result.data.eligible).toBe(1);
+    expect(result.data.cassSkipped).toBe(2);
 
     const { data: job } = await testClient
       .from("jobs")
       .select("input_params, title")
-      .eq("id", result.data.jobId)
+      .eq("id", result.data.jobId!)
       .single();
     const input = (job!.input_params as { property_ids: string[] }).property_ids;
     expect(input).toEqual([verified]);
     expect(job!.title).toMatch(/2 need.* CASS/i);
   });
 
-  it("refuses with ALL_PROPERTIES_NEED_CASS when every property is unverified", async () => {
+  it("reports none_eligible (not an error) when every property needs CASS", async () => {
     const ids = await Promise.all([
       seedProperty({ address: "1 Block Ln", cassStatus: "unverified" }),
       seedProperty({ address: "2 Block Ln", cassStatus: "unverified" }),
     ]);
 
     const result = await requestSkipTrace(ids);
-    expect(result.ok).toBe(false);
-    if (result.ok) return;
-    expect(result.error.code).toBe("ALL_PROPERTIES_NEED_CASS");
-    expect(result.error.message).toMatch(/CASS|verification/i);
+    // A normal "verify the addresses first" state, surfaced as a success
+    // outcome so the UI renders info — never a red failure toast.
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.data.status).toBe("none_eligible");
+    expect(result.data.jobId).toBeNull();
+    expect(result.data.eligible).toBe(0);
+    expect(result.data.cassSkipped).toBe(2);
+    expect(result.data.killSwitchSkipped).toBe(0);
   });
 
-  it("regression: refuses with ALL_PROPERTIES_DISABLED when every property is kill-switched and none need CASS", async () => {
+  it("regression: reports none_eligible when every property is kill-switched and none need CASS", async () => {
     const ids = await Promise.all([
       seedProperty({
         address: "1 Off Ln",
@@ -142,12 +149,14 @@ describe("requestSkipTrace pre-flight gates (integration)", () => {
     ]);
 
     const result = await requestSkipTrace(ids);
-    expect(result.ok).toBe(false);
-    if (result.ok) return;
-    expect(result.error.code).toBe("ALL_PROPERTIES_DISABLED");
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.data.status).toBe("none_eligible");
+    expect(result.data.killSwitchSkipped).toBe(2);
+    expect(result.data.cassSkipped).toBe(0);
   });
 
-  it("returns NO_ELIGIBLE_PROPERTIES when both gates trip together", async () => {
+  it("reports none_eligible with both counts when both gates trip together", async () => {
     const killed = await seedProperty({
       address: "1 Off Ln",
       cassStatus: "verified",
@@ -159,11 +168,12 @@ describe("requestSkipTrace pre-flight gates (integration)", () => {
     });
 
     const result = await requestSkipTrace([killed, unverified]);
-    expect(result.ok).toBe(false);
-    if (result.ok) return;
-    expect(result.error.code).toBe("NO_ELIGIBLE_PROPERTIES");
-    expect(result.error.message).toMatch(/disabled/);
-    expect(result.error.message).toMatch(/CASS/i);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.data.status).toBe("none_eligible");
+    expect(result.data.eligible).toBe(0);
+    expect(result.data.killSwitchSkipped).toBe(1);
+    expect(result.data.cassSkipped).toBe(1);
   });
 
   it("includes both skipped counts in the title when they apply together", async () => {
@@ -184,11 +194,14 @@ describe("requestSkipTrace pre-flight gates (integration)", () => {
     const result = await requestSkipTrace([verified, killed, unverified]);
     expect(result.ok).toBe(true);
     if (!result.ok) return;
+    expect(result.data.eligible).toBe(1);
+    expect(result.data.cassSkipped).toBe(1);
+    expect(result.data.killSwitchSkipped).toBe(1);
 
     const { data: job } = await testClient
       .from("jobs")
       .select("title, input_params")
-      .eq("id", result.data.jobId)
+      .eq("id", result.data.jobId!)
       .single();
     expect(job!.title).toMatch(/1 kill-switched/);
     expect(job!.title).toMatch(/1 need.* CASS/i);
