@@ -952,23 +952,33 @@ async function runUndo(params: {
 
   const changedIds: string[] = [];
   for (const row of undoable) {
-    const { error } = await params.supabase
+    const { data: updatedRows, error, count } = await params.supabase
       .from("properties")
-      .update({
-        status: row.status_before,
-        qualified_at: row.qualified_at_before,
-        qualified_by: row.qualified_by_before,
-        updated_at: row.updated_at_before,
-      })
+      .update(
+        {
+          status: row.status_before,
+          qualified_at: row.qualified_at_before,
+          qualified_by: row.qualified_by_before,
+          updated_at: row.updated_at_before,
+        },
+        { count: "exact" },
+      )
       .eq("id", row.id)
       .eq("org_id", row.org_id)
       .eq("status", "prospect")
       .is("qualified_at", null)
       .is("qualified_by", null)
-      .eq("updated_at", manifest.applied_at);
+      .eq("updated_at", manifest.applied_at)
+      .select("id");
 
     if (error) {
       throw new Error(`Undo failed for ${row.id}: ${error.message}`);
+    }
+    const updatedIds = (updatedRows ?? []).map((updated) => updated.id);
+    if ((count ?? updatedIds.length) !== 1 || updatedIds.length !== 1) {
+      throw new Error(
+        `Property ${row.id} changed during undo; aborting. Re-run undo dry-run before retrying.`,
+      );
     }
     changedIds.push(row.id);
   }
