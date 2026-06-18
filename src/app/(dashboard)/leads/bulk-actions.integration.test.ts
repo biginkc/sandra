@@ -1,14 +1,22 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createTestClient } from "@tests/integration/client";
+import {
+  BMH_ORG_ID,
+  TEST_ORG_B_ID,
+  clientForUser,
+  createOrgUser,
+  seedTwoOrgs,
+} from "@tests/integration/fixtures/multi-user";
 import { resetTenantTables } from "@tests/integration/reset";
 
 // Same mock pattern as actions.integration.test.ts — swap the action's
 // server-side `createClient()` for our service-role test client so
 // writes hit sandra-crm-test.
 const testClient = createTestClient();
+let actionClient = testClient;
 vi.mock("@/lib/supabase/server", () => ({
-  createClient: async () => testClient,
+  createClient: async () => actionClient,
 }));
 
 // Admin check reads ADMIN_EMAILS env. Pin a known value before tests so
@@ -32,21 +40,25 @@ vi.spyOn(testClient.auth, "getUser").mockImplementation(async () =>
   }) as never,
 );
 
-// eslint-disable-next-line import/first
 import {
   addPropertiesToListBulk,
   applyTagBulk,
   assignLeadsBulk,
+  createAndApplyCustomTagBulk,
+  createAndApplyCustomTagBulkFromFilters,
   deletePropertiesBulk,
   removePropertiesFromListBulk,
   revertToProspect,
   setMotivationBulk,
 } from "@/app/(dashboard)/leads/actions";
 
-async function seedProspect(address: string): Promise<string> {
+async function seedProspect(
+  address: string,
+  orgId = BMH_ORG_ID,
+): Promise<string> {
   const { data, error } = await testClient
     .from("properties")
-    .insert({ address, state: "MO", status: "prospect" })
+    .insert({ org_id: orgId, address, state: "MO", status: "prospect" })
     .select("id")
     .single();
   if (error || !data) throw error ?? new Error("seed failed");
@@ -63,10 +75,13 @@ async function seedList(name: string): Promise<string> {
   return data.id;
 }
 
-async function seedCustomTag(name: string): Promise<string> {
+async function seedCustomTag(
+  name: string,
+  orgId = BMH_ORG_ID,
+): Promise<string> {
   const { data, error } = await testClient
     .from("tags")
-    .insert({ name, category: "custom", system_managed: false })
+    .insert({ org_id: orgId, name, category: "custom", system_managed: false })
     .select("id")
     .single();
   if (error || !data) throw error ?? new Error("seed tag failed");
@@ -90,6 +105,8 @@ async function createAuthUser(email: string): Promise<string> {
 describe("bulk actions (integration)", () => {
   beforeEach(async () => {
     await resetTenantTables(testClient);
+    await seedTwoOrgs(testClient);
+    actionClient = testClient;
     currentEmail = "jarrad@bmhgroupkc.com";
     currentUserId = null;
   });
@@ -194,6 +211,309 @@ describe("bulk actions (integration)", () => {
       .select("*", { count: "exact", head: true })
       .eq("tag_id", tagId);
     expect(count).toBe(2);
+  });
+
+  it("applyTagBulk refuses to attach a tag to properties in another organization", async () => {
+    const tagId = await seedCustomTag("org-owned");
+    const ownPropertyId = await seedProspect("1 Own Org Ln");
+    const otherPropertyId = await seedProspect("1 Other Org Ln", TEST_ORG_B_ID);
+
+    const result = await applyTagBulk([ownPropertyId, otherPropertyId], tagId);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.data.succeeded).toBe(1);
+    expect(result.data.failed).toEqual([
+      {
+        propertyId: otherPropertyId,
+        message: "Tag does not belong to this property's organization",
+      },
+    ]);
+
+    const { data: rows } = await testClient
+      .from("property_tags")
+      .select("property_id, tag_id")
+      .eq("tag_id", tagId);
+    expect(rows).toEqual([{ property_id: ownPropertyId, tag_id: tagId }]);
+  });
+
+  it("applyTagBulk keeps cross-org properties hidden on the user RLS path", async () => {
+    const { userId, jwt } = await createOrgUser(testClient, {
+      orgId: BMH_ORG_ID,
+      email: `bulk-tag-rls-${Date.now()}@test.invalid`,
+      role: "member",
+    });
+    createdAuthUsers.push(userId);
+    actionClient = clientForUser(jwt);
+    const tagId = await seedCustomTag("rls-owned");
+    const ownPropertyId = await seedProspect("1 Own RLS Ln");
+    const otherPropertyId = await seedProspect("1 Other RLS Ln", TEST_ORG_B_ID);
+
+    const result = await applyTagBulk([ownPropertyId, otherPropertyId], tagId);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.data.succeeded).toBe(1);
+    expect(result.data.failed).toEqual([
+      { propertyId: otherPropertyId, message: "Property not found" },
+    ]);
+
+    const { data: rows } = await testClient
+      .from("property_tags")
+      .select("property_id, tag_id")
+      .eq("tag_id", tagId);
+    expect(rows).toEqual([{ property_id: ownPropertyId, tag_id: tagId }]);
+  });
+
+  it("createAndApplyCustomTagBulk creates a custom tag and idempotently applies it", async () => {
+    const ids = [
+      await seedProspect("1 New Tag Ln"),
+      await seedProspect("2 New Tag Ln"),
+    ];
+
+    const first = await createAndApplyCustomTagBulk({
+      name: "High intent",
+      color: null,
+      propertyIds: ids,
+    });
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    expect(first.data.tag.name).toBe("High intent");
+    expect(first.data.tag.category).toBe("custom");
+    expect(first.data.tag.system_managed).toBe(false);
+    expect(first.data.outcome.succeeded).toBe(2);
+
+    const second = await createAndApplyCustomTagBulk({
+      name: "high intent",
+      color: null,
+      propertyIds: ids,
+    });
+    expect(second.ok).toBe(true);
+    if (!second.ok) return;
+    expect(second.data.tag.id).toBe(first.data.tag.id);
+
+    const { count: tagCount } = await testClient
+      .from("tags")
+      .select("*", { count: "exact", head: true })
+      .ilike("name", "high intent");
+    expect(tagCount).toBe(1);
+
+    const { count: propertyTagCount } = await testClient
+      .from("property_tags")
+      .select("*", { count: "exact", head: true })
+      .eq("tag_id", first.data.tag.id);
+    expect(propertyTagCount).toBe(2);
+  });
+
+  it("createAndApplyCustomTagBulk recovers from concurrent same-name creates", async () => {
+    const firstId = await seedProspect("1 Race Tag Ln");
+    const secondId = await seedProspect("2 Race Tag Ln");
+
+    const [first, second] = await Promise.all([
+      createAndApplyCustomTagBulk({
+        name: "Race tag",
+        color: null,
+        propertyIds: [firstId],
+      }),
+      createAndApplyCustomTagBulk({
+        name: "Race tag",
+        color: null,
+        propertyIds: [secondId],
+      }),
+    ]);
+    expect(first.ok).toBe(true);
+    expect(second.ok).toBe(true);
+    if (!first.ok || !second.ok) return;
+    expect(second.data.tag.id).toBe(first.data.tag.id);
+
+    const { count: tagCount } = await testClient
+      .from("tags")
+      .select("*", { count: "exact", head: true })
+      .eq("name", "Race tag");
+    expect(tagCount).toBe(1);
+
+    const { count: propertyTagCount } = await testClient
+      .from("property_tags")
+      .select("*", { count: "exact", head: true })
+      .eq("tag_id", first.data.tag.id);
+    expect(propertyTagCount).toBe(2);
+  });
+
+  it("createAndApplyCustomTagBulk applies across multiple Supabase chunks", async () => {
+    const seedRows = Array.from({ length: 501 }, (_, i) => ({
+      org_id: BMH_ORG_ID,
+      address: `${i.toString().padStart(3, "0")} Chunk Tag Ln`,
+      state: "MO",
+      status: "prospect",
+    }));
+    const { data: properties, error } = await testClient
+      .from("properties")
+      .insert(seedRows)
+      .select("id");
+    if (error || !properties) throw error ?? new Error("chunk seed failed");
+    const ids = properties.map((property) => property.id);
+
+    const result = await createAndApplyCustomTagBulk({
+      name: "Chunked wave",
+      color: null,
+      propertyIds: ids,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.data.outcome).toEqual({
+      succeeded: 501,
+      skipped: 0,
+      failed: [],
+    });
+
+    const { count } = await testClient
+      .from("property_tags")
+      .select("*", { count: "exact", head: true })
+      .eq("tag_id", result.data.tag.id);
+    expect(count).toBe(501);
+  });
+
+  it("createAndApplyCustomTagBulkFromFilters resolves matching prospects server-side", async () => {
+    const matchA = await seedProspect("1 Filter Bulk Oak Ln");
+    const matchB = await seedProspect("2 Filter Bulk Oak Ln");
+    await seedProspect("3 Filter Bulk Pine Ln");
+
+    const result = await createAndApplyCustomTagBulkFromFilters({
+      name: "Oak filter wave",
+      color: null,
+      search: "Oak",
+      blockStack: [],
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.data.outcome).toEqual({
+      succeeded: 2,
+      skipped: 0,
+      failed: [],
+    });
+
+    const { data: rows } = await testClient
+      .from("property_tags")
+      .select("property_id")
+      .eq("tag_id", result.data.tag.id);
+    expect(new Set((rows ?? []).map((row) => row.property_id))).toEqual(
+      new Set([matchA, matchB]),
+    );
+  });
+
+  it("createAndApplyCustomTagBulk treats wildcard characters as literal tag text", async () => {
+    const firstId = await seedProspect("1 Wildcard Tag Ln");
+    const secondId = await seedProspect("2 Wildcard Tag Ln");
+    const thirdId = await seedProspect("3 Wildcard Tag Ln");
+    const fourthId = await seedProspect("4 Wildcard Tag Ln");
+
+    const first = await createAndApplyCustomTagBulk({
+      name: "A_B",
+      color: null,
+      propertyIds: [firstId],
+    });
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+
+    const second = await createAndApplyCustomTagBulk({
+      name: "AXB",
+      color: null,
+      propertyIds: [secondId],
+    });
+    expect(second.ok).toBe(true);
+    if (!second.ok) return;
+    expect(second.data.tag.id).not.toBe(first.data.tag.id);
+
+    const third = await createAndApplyCustomTagBulk({
+      name: "A%B",
+      color: null,
+      propertyIds: [thirdId],
+    });
+    expect(third.ok).toBe(true);
+    if (!third.ok) return;
+
+    const fourth = await createAndApplyCustomTagBulk({
+      name: "AXXB",
+      color: null,
+      propertyIds: [fourthId],
+    });
+    expect(fourth.ok).toBe(true);
+    if (!fourth.ok) return;
+    expect(fourth.data.tag.id).not.toBe(third.data.tag.id);
+
+    const { data: tags } = await testClient
+      .from("tags")
+      .select("id, name")
+      .in("name", ["A_B", "AXB", "A%B", "AXXB"]);
+    expect(tags).toHaveLength(4);
+  });
+
+  it("createAndApplyCustomTagBulk refuses a mixed-organization selection before creating a tag", async () => {
+    const ownPropertyId = await seedProspect("1 Own Create Ln");
+    const otherPropertyId = await seedProspect(
+      "1 Other Create Ln",
+      TEST_ORG_B_ID,
+    );
+
+    const result = await createAndApplyCustomTagBulk({
+      name: "Mixed org tag",
+      color: null,
+      propertyIds: [ownPropertyId, otherPropertyId],
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe("MULTI_ORG_SELECTION");
+
+    const { count: tagCount } = await testClient
+      .from("tags")
+      .select("*", { count: "exact", head: true })
+      .eq("name", "Mixed org tag");
+    expect(tagCount).toBe(0);
+  });
+
+  it("createAndApplyCustomTagBulk refuses matching system-managed tags", async () => {
+    const id = await seedProspect("1 System Tag Ln");
+    await testClient
+      .from("tags")
+      .insert({ name: "source:test", category: "source", system_managed: true });
+
+    const result = await createAndApplyCustomTagBulk({
+      name: "SOURCE:TEST",
+      color: null,
+      propertyIds: [id],
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe("TAG_NOT_APPLICABLE");
+
+    const { count } = await testClient
+      .from("property_tags")
+      .select("*", { count: "exact", head: true })
+      .eq("property_id", id);
+    expect(count).toBe(0);
+  });
+
+  it("createAndApplyCustomTagBulk prefers a custom tag over a case-matching system tag", async () => {
+    const id = await seedProspect("1 Custom Collision Ln");
+    await testClient.from("tags").insert({
+      name: "DUPLICATE",
+      category: "source",
+      system_managed: true,
+    });
+    const customTagId = await seedCustomTag("duplicate");
+
+    const result = await createAndApplyCustomTagBulk({
+      name: "Duplicate",
+      color: null,
+      propertyIds: [id],
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.data.tag.id).toBe(customTagId);
+
+    const { data: rows } = await testClient
+      .from("property_tags")
+      .select("property_id, tag_id")
+      .eq("property_id", id);
+    expect(rows).toEqual([{ property_id: id, tag_id: customTagId }]);
   });
 
   it("setMotivationBulk updates everyone to the same level", async () => {

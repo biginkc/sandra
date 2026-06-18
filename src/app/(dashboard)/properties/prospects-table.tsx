@@ -72,6 +72,7 @@ import { requestSkipTrace } from "@/lib/skip-trace/actions";
 import { getAllMatchingProspectIds } from "./actions";
 import { BatchCreateModal } from "./batch-create-modal";
 import { BulkSmsModal } from "./bulk-sms-modal";
+import { BulkTagModal } from "./bulk-tag-modal";
 
 export type ProspectRow = {
   id: string;
@@ -162,10 +163,13 @@ export function ProspectsTable({
   totalPages,
 }: Props) {
   const router = useRouter();
+  const blockStackKey = JSON.stringify(blockStack);
+  const selectionScopeKey = `${search}\u0000${sort}\u0000${dir}\u0000${blockStackKey}`;
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [pending, startTransition] = useTransition();
   const [showBatchCreate, setShowBatchCreate] = useState(false);
   const [showBulkSms, setShowBulkSms] = useState(false);
+  const [showBulkTag, setShowBulkTag] = useState(false);
   const [filterNavPending, setFilterNavPending] = useState(false);
   const [filterNavTargetKey, setFilterNavTargetKey] = useState<string | null>(
     null,
@@ -173,13 +177,20 @@ export function ProspectsTable({
   const filterNavFallbackTimer = useRef<ReturnType<typeof setTimeout> | null>(
     null,
   );
-  // Cross-page select-all mode. When true, the user has explicitly
-  // expanded their selection beyond the visible page to every property
-  // matching the current filters. Bound to a Set<string> of all those
-  // ids; the banner shows "All N selected · Clear" instead of the
-  // page-level toggle. Resets to false on any filter / search change
-  // since the matching count would no longer match what was selected.
-  const [selectAllMatching, setSelectAllMatching] = useState(false);
+  // Cross-page select-all mode. The stored key marks the exact
+  // search/sort/filter scope that produced the selected id set. When the
+  // page scope changes, the selected ids may survive as manual picks, but
+  // they no longer claim to represent "all matching" for the new scope.
+  const [selectAllMatchingKey, setSelectAllMatchingKey] = useState<string | null>(
+    null,
+  );
+  const selectAllMatching = selectAllMatchingKey === selectionScopeKey;
+  const selectionScopeStale =
+    selectAllMatchingKey !== null && selectAllMatchingKey !== selectionScopeKey;
+  const selectedInScope = useMemo(
+    () => (selectionScopeStale ? new Set<string>() : selected),
+    [selected, selectionScopeStale],
+  );
 
   // URL-state machine — extracted into the shared hook in Phase 1.
   // Mode: "ssr" because /properties is a server-rendered page; the hook
@@ -223,19 +234,6 @@ export function ProspectsTable({
   // because they're a display-only derivation; the server doesn't need to ship them.
   const showingFrom = total === 0 ? 0 : (page - 1) * pageSize + 1;
   const showingTo = Math.min(page * pageSize, total);
-
-  // Filter / search / sort change → the previously-selected "all matching"
-  // set is no longer a faithful representation of what currently matches,
-  // so drop it. Selection itself isn't reset (existing behavior — user
-  // might have intentional manual picks that survive a refilter).
-  //
-  // Plan 09: the dependency on the 5 chip fields is replaced by a stable
-  // serialization of the block stack — any change in kind/values/range/tri
-  // for any block triggers the reset.
-  const blockStackKey = JSON.stringify(blockStack);
-  useEffect(() => {
-    setSelectAllMatching(false);
-  }, [search, sort, dir, blockStackKey]);
 
   useEffect(() => {
     const showFilterSkeleton = (event: Event) => {
@@ -297,39 +295,42 @@ export function ProspectsTable({
       );
       if (result.ok) {
         setSelected(new Set(result.data));
-        setSelectAllMatching(true);
+        setSelectAllMatchingKey(selectionScopeKey);
       }
     });
   };
 
   const onClearAllSelection = () => {
     setSelected(new Set());
-    setSelectAllMatching(false);
+    setSelectAllMatchingKey(null);
   };
 
   const allSelected = useMemo(
-    () => prospects.length > 0 && selected.size === prospects.length,
-    [selected.size, prospects.length],
+    () =>
+      prospects.length > 0 && prospects.every((p) => selectedInScope.has(p.id)),
+    [prospects, selectedInScope],
   );
-  const someSelected = selected.size > 0 && !allSelected;
+  const someSelected = selectedInScope.size > 0 && !allSelected;
 
   const toggleAll = () => {
-    setSelected((prev) => {
-      if (prev.size === prospects.length) return new Set();
+    setSelectAllMatchingKey(null);
+    setSelected(() => {
+      if (allSelected) return new Set();
       return new Set(prospects.map((p) => p.id));
     });
   };
 
   const toggleOne = (id: string) => {
+    setSelectAllMatchingKey(null);
     setSelected((prev) => {
-      const next = new Set(prev);
+      const next = selectionScopeStale ? new Set<string>() : new Set(prev);
       if (next.has(id)) next.delete(id);
       else next.add(id);
       return next;
     });
   };
 
-  const selectedIds = () => Array.from(selected);
+  const selectedIds = () => Array.from(selectedInScope);
 
   /**
    * Shared post-action handler: show a toast, keep failed rows selected so
@@ -348,6 +349,7 @@ export function ProspectsTable({
     }
     const failedIds = new Set(outcome.failed.map((f) => f.propertyId));
     setSelected(failedIds);
+    setSelectAllMatchingKey(null);
     router.refresh();
   };
 
@@ -526,7 +528,7 @@ export function ProspectsTable({
   const hasTags = tags.length > 0;
   const hasTeam = teamMembers.length > 0;
 
-  const hasSelection = selected.size > 0;
+  const hasSelection = selectedInScope.size > 0;
 
   return (
     <>
@@ -554,12 +556,12 @@ export function ProspectsTable({
                   disabled={!hasSelection || pending}
                   aria-label={
                     hasSelection
-                      ? `Actions for ${selected.size} selected`
+                      ? `Actions for ${selectedInScope.size} selected`
                       : "Actions (select prospects first)"
                   }
                 >
                   Actions
-                  {hasSelection ? ` (${selected.size})` : ""}
+                  {hasSelection ? ` (${selectedInScope.size})` : ""}
                   <ChevronDownIcon className="ml-1 size-3.5" />
                 </Button>
               }
@@ -700,6 +702,9 @@ export function ProspectsTable({
                       )}
                     </DropdownMenuSubContent>
                   </DropdownMenuSub>
+                  <DropdownMenuItem onClick={() => setShowBulkTag(true)}>
+                    Create/apply tag…
+                  </DropdownMenuItem>
                 </DropdownMenuGroup>
 
                 <DropdownMenuSeparator />
@@ -753,19 +758,33 @@ export function ProspectsTable({
         selectAllMatching={selectAllMatching}
         pageSize={prospects.length}
         total={total}
-        selectedCount={selected.size}
+        selectedCount={selectedInScope.size}
         onSelectAllAcrossPages={onSelectAllAcrossPages}
         onClear={onClearAllSelection}
       />
 
       <BulkSmsModal
         open={showBulkSms}
-        propertyIds={Array.from(selected)}
+        propertyIds={selectedIds()}
         onClose={() => setShowBulkSms(false)}
         onQueued={() => {
           onClearAllSelection();
           router.refresh();
         }}
+      />
+      <BulkTagModal
+        open={showBulkTag}
+        propertyIds={selectAllMatching ? [] : selectedIds()}
+        filterArgs={
+          selectAllMatching
+            ? { search: search.length === 0 ? null : search, blockStack }
+            : undefined
+        }
+        tags={tags}
+        allMatching={selectAllMatching}
+        totalCount={selectAllMatching ? total : selectedInScope.size}
+        onClose={() => setShowBulkTag(false)}
+        onApplied={(outcome) => finishBulk("Tagged", outcome)}
       />
       <BatchCreateModal
         open={showBatchCreate}
@@ -776,7 +795,7 @@ export function ProspectsTable({
             ? { search: search.length === 0 ? null : search, blockStack }
             : undefined
         }
-        totalCount={selectAllMatching ? total : selected.size}
+        totalCount={selectAllMatching ? total : selectedInScope.size}
       />
 
       <DataTableShell
@@ -866,7 +885,7 @@ export function ProspectsTable({
               </TableRow>
             ) : (
               prospects.map((p) => {
-                const isChecked = selected.has(p.id);
+                const isChecked = selectedInScope.has(p.id);
                 return (
                   <TableRow
                     key={p.id}
