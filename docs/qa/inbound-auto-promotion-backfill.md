@@ -17,14 +17,14 @@ npx tsx scripts/backfill-inbound-auto-promoted-leads.ts
 Apply after dry-run approval:
 
 ```bash
-npx tsx scripts/backfill-inbound-auto-promoted-leads.ts --apply
+npx tsx scripts/backfill-inbound-auto-promoted-leads.ts --org-id <org-id> --apply
 ```
 
 Undo an apply manifest:
 
 ```bash
-npx tsx scripts/backfill-inbound-auto-promoted-leads.ts --undo tmp/inbound-auto-promotion-backfill/backfill-<timestamp>.json
-npx tsx scripts/backfill-inbound-auto-promoted-leads.ts --undo tmp/inbound-auto-promotion-backfill/backfill-<timestamp>.json --apply
+npx tsx scripts/backfill-inbound-auto-promoted-leads.ts --org-id <org-id> --undo tmp/inbound-auto-promotion-backfill/backfill-<timestamp>.json
+npx tsx scripts/backfill-inbound-auto-promoted-leads.ts --org-id <org-id> --undo tmp/inbound-auto-promotion-backfill/backfill-<timestamp>.json --apply
 ```
 
 ## Selection Rules
@@ -40,6 +40,7 @@ Rows are base candidates only when all of these are true:
 - `deleted_at IS NULL`
 - `qualified_at IS NOT NULL`
 - `qualified_by` is one of the included system markers
+- `org_id` is in the `--org-id` allowlist when an org scope is supplied
 
 Rows are excluded as human-touched when any of these happened after `qualified_at`:
 
@@ -65,5 +66,9 @@ The apply path mirrors `revertToProspect()` in `src/app/(dashboard)/leads/action
 - stamps `updated_at`
 
 Updates are grouped by `org_id` and update only the IDs selected by the dry-run logic. Re-running is idempotent because changed rows no longer match `status = 'new_lead'` or the system `qualified_by` marker.
+
+Writes require at least one explicit `--org-id <uuid>` because the script uses a service-role client for maintenance and therefore does not rely on dashboard-user RLS. The flag can be repeated for a multi-org repair, and apply/undo refuses rows outside the allowlist.
+
+Before each batch update, the script reloads the current property rows and related human-touch signals. If any row no longer matches the base query or has become human-touched, the run aborts before updating that batch. Each row update also guards on the reloaded `updated_at` value so a concurrent property edit causes a fail-closed abort instead of a stale write.
 
 Before any update, the script writes a manifest under `tmp/inbound-auto-promotion-backfill/`. That folder is gitignored. The manifest stores changed IDs and the prior qualification fields for undo.

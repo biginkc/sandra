@@ -20,6 +20,8 @@ const AUTO_PROMOTION_MARKERS = [
   "system:inbound_reply",
   "system:outbound_reply",
 ] as const;
+const PROPERTY_SELECT =
+  "id, org_id, address, city, state, assigned_user_id, status, qualified_at, qualified_by, updated_at, outreach_dispo, follow_up_at, needs_human_attention, last_ai_escalation_at";
 const DEFAULT_BATCH_SIZE = 50;
 const DEFAULT_SAMPLE_SIZE = 10;
 const UPDATED_AT_GRACE_MINUTES = 5;
@@ -35,6 +37,7 @@ type Options = {
   useUpdatedAtCatchall: boolean;
   manifestPath: string | null;
   undoManifestPath: string | null;
+  orgIds: string[];
 };
 
 type PropertyRow = {
@@ -123,6 +126,7 @@ function parseOptions(argv: string[]): Options {
     useUpdatedAtCatchall: true,
     manifestPath: null,
     undoManifestPath: null,
+    orgIds: [],
   };
 
   for (let i = 0; i < argv.length; i += 1) {
@@ -146,15 +150,23 @@ function parseOptions(argv: string[]): Options {
       case "--undo":
         options.undoManifestPath = requireValue(argv[++i], "--undo");
         break;
+      case "--org-id":
+        options.orgIds.push(parseOrgId(requireValue(argv[++i], "--org-id")));
+        break;
       case "--help":
       case "-h":
         printUsage();
         process.exit(0);
       default:
+        if (arg.startsWith("--org-id=")) {
+          options.orgIds.push(parseOrgId(arg.slice("--org-id=".length)));
+          break;
+        }
         throw new Error(`Unknown argument: ${arg}`);
     }
   }
 
+  options.orgIds = [...new Set(options.orgIds)];
   return options;
 }
 
@@ -174,6 +186,14 @@ function requireValue(value: string | undefined, name: string): string {
   return value;
 }
 
+function parseOrgId(value: string): string {
+  const orgId = value.trim();
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(orgId)) {
+    throw new Error(`--org-id must be a UUID. Received: ${value}`);
+  }
+  return orgId;
+}
+
 function printUsage(): void {
   console.log(`
 Usage:
@@ -181,11 +201,11 @@ Usage:
     npx tsx scripts/backfill-inbound-auto-promoted-leads.ts
 
   Apply after dry-run approval:
-    npx tsx scripts/backfill-inbound-auto-promoted-leads.ts --apply
+    npx tsx scripts/backfill-inbound-auto-promoted-leads.ts --org-id <org-id> --apply
 
   Undo from an apply manifest:
-    npx tsx scripts/backfill-inbound-auto-promoted-leads.ts --undo <manifest.json>
-    npx tsx scripts/backfill-inbound-auto-promoted-leads.ts --undo <manifest.json> --apply
+    npx tsx scripts/backfill-inbound-auto-promoted-leads.ts --org-id <org-id> --undo <manifest.json>
+    npx tsx scripts/backfill-inbound-auto-promoted-leads.ts --org-id <org-id> --undo <manifest.json> --apply
 
 Options:
   --apply                         Execute writes. Default is read-only.
@@ -193,6 +213,7 @@ Options:
   --batch-size <n>                Update batch size. Default: ${DEFAULT_BATCH_SIZE}.
   --sample-size <n>               Rows to show in sample tables. Default: ${DEFAULT_SAMPLE_SIZE}.
   --manifest <path>               Apply manifest path. Default: ${MANIFEST_DIR}/backfill-<timestamp>.json.
+  --org-id <uuid>                 Limit dry-run/apply/undo to one org. Repeat for multiple orgs. Required for writes.
 `);
 }
 
@@ -239,6 +260,31 @@ function addMinutes(iso: string, minutes: number): string {
 
 function fullAddress(row: Pick<PropertyRow, "address" | "city" | "state">): string {
   return [row.address, row.city, row.state].filter(Boolean).join(", ");
+}
+
+function orgScopeDescription(orgIds: string[]): string {
+  return orgIds.length > 0
+    ? orgIds.join(", ")
+    : "all orgs (read-only only; writes require --org-id)";
+}
+
+function assertWriteOrgScope(options: Options, operation: "apply" | "undo"): void {
+  if (options.orgIds.length === 0) {
+    throw new Error(`${operation} writes require at least one --org-id <uuid>.`);
+  }
+}
+
+function assertRowsWithinOrgScope(
+  rows: Array<{ id: string; org_id: string }>,
+  orgIds: string[],
+  label: string,
+): void {
+  const allowed = new Set(orgIds);
+  const outOfScope = rows.filter((row) => !allowed.has(row.org_id));
+  if (outOfScope.length > 0) {
+    const ids = outOfScope.map((row) => `${row.id}:${row.org_id}`).join(", ");
+    throw new Error(`${label} includes rows outside --org-id scope: ${ids}`);
+  }
 }
 
 function requiredQualifiedAt(property: PropertyRow): string {
@@ -305,23 +351,55 @@ function includedMarkersFromCounts(
 async function loadBaseRows(
   supabase: Supabase,
   markers: AutoPromotionMarker[],
+  orgIds: string[],
 ): Promise<PropertyRow[]> {
   if (markers.length === 0) return [];
   return pagedSelect<PropertyRow>(
     "base auto-promoted properties",
-    (from, to) =>
-      supabase
+    (from, to) => {
+      let query = supabase
         .from("properties")
-        .select(
-          "id, org_id, address, city, state, assigned_user_id, status, qualified_at, qualified_by, updated_at, outreach_dispo, follow_up_at, needs_human_attention, last_ai_escalation_at",
-        )
+        .select(PROPERTY_SELECT)
         .eq("status", "new_lead")
         .is("deleted_at", null)
         .not("qualified_at", "is", null)
-        .in("qualified_by", markers)
-        .order("qualified_at", { ascending: true })
-        .range(from, to),
+        .in("qualified_by", markers);
+      if (orgIds.length > 0) {
+        query = query.in("org_id", orgIds);
+      }
+      return query.order("qualified_at", { ascending: true }).range(from, to);
+    },
   );
+}
+
+async function loadCurrentBatchRows(
+  supabase: Supabase,
+  rows: ManifestRow[],
+  markers: AutoPromotionMarker[],
+): Promise<PropertyRow[]> {
+  if (rows.length === 0) return [];
+  const orgIds = [...new Set(rows.map((row) => row.org_id))];
+  if (orgIds.length !== 1) {
+    throw new Error("Internal safety check failed: batch contains multiple orgs.");
+  }
+
+  const { data, error } = await supabase
+    .from("properties")
+    .select(PROPERTY_SELECT)
+    .eq("org_id", orgIds[0])
+    .eq("status", "new_lead")
+    .is("deleted_at", null)
+    .not("qualified_at", "is", null)
+    .in("qualified_by", markers)
+    .in(
+      "id",
+      rows.map((row) => row.id),
+    );
+
+  if (error) {
+    throw new Error(`current batch query failed: ${error.message}`);
+  }
+  return data ?? [];
 }
 
 async function loadRowsByProperty<T>(
@@ -566,6 +644,7 @@ function printReport(params: {
       : "=== DRY RUN - inbound auto-promotion backfill ===",
   );
   console.log(`Supabase project: ${params.projectRef}`);
+  console.log(`Org scope: ${orgScopeDescription(params.options.orgIds)}`);
   console.log(`Write mode: ${params.options.apply ? "APPLY REQUESTED" : "dry-run only"}`);
   console.log("");
   console.log("Distinct qualified_by values in prod");
@@ -637,6 +716,48 @@ function writeManifest(path: string, manifest: ApplyManifest): void {
   writeFileSync(path, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
 }
 
+async function eligibleCurrentBatchCandidates(params: {
+  supabase: Supabase;
+  batch: ManifestRow[];
+  includedMarkers: AutoPromotionMarker[];
+  options: Options;
+}): Promise<Map<string, Candidate>> {
+  const currentRows = await loadCurrentBatchRows(
+    params.supabase,
+    params.batch,
+    params.includedMarkers,
+  );
+  const currentById = new Map(currentRows.map((row) => [row.id, row]));
+  const missingIds = params.batch
+    .filter((row) => !currentById.has(row.id))
+    .map((row) => row.id);
+
+  const activity = await loadRelatedActivity(params.supabase, currentRows);
+  const candidates = buildCandidates(currentRows, activity, params.options);
+  const candidateById = new Map(candidates.map((candidate) => [candidate.property.id, candidate]));
+  const ineligible = params.batch
+    .map((row) => candidateById.get(row.id))
+    .filter(
+      (candidate): candidate is Candidate =>
+        candidate !== undefined && !candidate.eligible,
+    );
+
+  if (missingIds.length > 0 || ineligible.length > 0) {
+    const changed = [
+      ...missingIds.map((id) => `${id}: no longer matches base query`),
+      ...ineligible.map(
+        (candidate) =>
+          `${candidate.property.id}: ${candidate.signals.blocking.join("; ")}`,
+      ),
+    ];
+    throw new Error(
+      `Batch eligibility changed before apply; aborting without updating this batch. Re-run dry-run. ${changed.join(" | ")}`,
+    );
+  }
+
+  return candidateById;
+}
+
 async function applyBackfill(params: {
   supabase: Supabase;
   projectRef: string;
@@ -644,7 +765,9 @@ async function applyBackfill(params: {
   includedMarkers: AutoPromotionMarker[];
   options: Options;
 }): Promise<void> {
+  assertWriteOrgScope(params.options, "apply");
   const rows = manifestRows(params.candidates);
+  assertRowsWithinOrgScope(rows, params.options.orgIds, "apply candidates");
   if (rows.length === 0) {
     console.log("No eligible rows to update.");
     return;
@@ -666,6 +789,7 @@ async function applyBackfill(params: {
   const manifestPath = resolve(
     params.options.manifestPath ?? defaultManifestPath(appliedAt),
   );
+  const persistManifest = (): void => writeManifest(manifestPath, manifest);
   writeManifest(manifestPath, manifest);
   console.log(`Apply manifest written before updates: ${manifestPath}`);
 
@@ -679,38 +803,63 @@ async function applyBackfill(params: {
   const changedIds: string[] = [];
   for (const [orgId, orgRows] of rowsByOrg.entries()) {
     for (const batch of chunk(orgRows, params.options.batchSize)) {
-      const ids = batch.map((row) => row.id);
-      const { data: updatedRows, error, count } = await params.supabase
-        .from("properties")
-        .update(
-          {
-            status: "prospect",
-            qualified_at: null,
-            qualified_by: null,
-            updated_at: appliedAt,
-          },
-          { count: "exact" },
-        )
-        .eq("org_id", orgId)
-        .eq("status", "new_lead")
-        .in("qualified_by", params.includedMarkers)
-        .not("qualified_at", "is", null)
-        .is("deleted_at", null)
-        .in("id", ids)
-        .select("id");
+      const currentCandidates = await eligibleCurrentBatchCandidates({
+        supabase: params.supabase,
+        batch,
+        includedMarkers: params.includedMarkers,
+        options: params.options,
+      });
+      const batchChangedIds: string[] = [];
 
-      if (error) {
-        throw new Error(`Backfill update failed for org ${orgId}: ${error.message}`);
+      for (const row of batch) {
+        const current = currentCandidates.get(row.id)?.property;
+        if (!current) {
+          throw new Error(`Internal safety check failed: missing current candidate for ${row.id}.`);
+        }
+
+        const { data: updatedRows, error, count } = await params.supabase
+          .from("properties")
+          .update(
+            {
+              status: "prospect",
+              qualified_at: null,
+              qualified_by: null,
+              updated_at: appliedAt,
+            },
+            { count: "exact" },
+          )
+          .eq("id", row.id)
+          .eq("org_id", orgId)
+          .eq("status", "new_lead")
+          .in("qualified_by", params.includedMarkers)
+          .not("qualified_at", "is", null)
+          .is("deleted_at", null)
+          .eq("updated_at", current.updated_at)
+          .select("id");
+
+        if (error) {
+          throw new Error(`Backfill update failed for ${row.id}: ${error.message}`);
+        }
+        const updatedIds = (updatedRows ?? []).map((updated) => updated.id);
+        if ((count ?? updatedIds.length) !== 1 || updatedIds.length !== 1) {
+          throw new Error(
+            `Property ${row.id} changed during apply; aborting. Re-run dry-run before retrying.`,
+          );
+        }
+
+        batchChangedIds.push(row.id);
+        changedIds.push(row.id);
+        manifest.changed_ids = changedIds;
+        persistManifest();
       }
-      const updatedIds = (updatedRows ?? []).map((row) => row.id);
-      console.log(`Updated org=${orgId} batch=${ids.length} count=${count ?? updatedIds.length}`);
-      changedIds.push(...updatedIds);
+
+      console.log(`Updated org=${orgId} batch=${batch.length} count=${batchChangedIds.length}`);
     }
   }
 
   manifest.changed_ids = changedIds;
   manifest.completed_at = new Date().toISOString();
-  writeManifest(manifestPath, manifest);
+  persistManifest();
   console.log("");
   console.log(`Changed rows: ${changedIds.length}`);
   console.log("Changed ids");
@@ -752,6 +901,12 @@ async function runUndo(params: {
       `Manifest project_ref=${manifest.project_ref} does not match connected project ${params.projectRef}.`,
     );
   }
+  if (params.options.apply) {
+    assertWriteOrgScope(params.options, "undo");
+  }
+  if (params.options.orgIds.length > 0) {
+    assertRowsWithinOrgScope(manifest.rows, params.options.orgIds, "undo manifest");
+  }
 
   const ids = manifest.rows.map((row) => row.id);
   const currentRows = await pagedSelect<{
@@ -783,6 +938,7 @@ async function runUndo(params: {
   console.log("");
   console.log("=== UNDO - inbound auto-promotion backfill ===");
   console.log(`Manifest: ${manifestPath}`);
+  console.log(`Org scope: ${orgScopeDescription(params.options.orgIds)}`);
   console.log(`Rows in manifest: ${manifest.rows.length}`);
   console.log(`Undoable rows: ${undoable.length}`);
   console.log(`Skipped rows: ${skipped}`);
@@ -824,6 +980,9 @@ async function runUndo(params: {
 
 async function run(): Promise<void> {
   const options = parseOptions(process.argv.slice(2));
+  if (options.apply) {
+    assertWriteOrgScope(options, options.undoManifestPath ? "undo" : "apply");
+  }
   const projectRef = projectRefFromEnv();
   assertProdProject(projectRef);
   const supabase = createAdminClient();
@@ -835,7 +994,7 @@ async function run(): Promise<void> {
 
   const qualifiedByCounts = await loadQualifiedByCounts(supabase);
   const includedMarkers = includedMarkersFromCounts(qualifiedByCounts);
-  const baseRows = await loadBaseRows(supabase, includedMarkers);
+  const baseRows = await loadBaseRows(supabase, includedMarkers, options.orgIds);
   const activity = await loadRelatedActivity(supabase, baseRows);
   const candidates = buildCandidates(baseRows, activity, options);
 
