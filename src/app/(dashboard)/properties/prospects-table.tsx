@@ -458,14 +458,21 @@ export function ProspectsTable({
           .join(" · ");
 
         if (status === "none_eligible") {
-          // Not a failure — a precondition the operator can act on.
-          // Informational toast, never a red error. Leave the selection
-          // intact so they can verify the same rows, then re-trace.
-          toast.info("Nothing to skip-trace yet", {
-            description: skipNote
-              ? `${skipNote}. Verify the addresses (CASS), then skip-trace.`
-              : "No eligible properties in this selection.",
-          });
+          // Not a failure — a precondition the operator can act on, so
+          // info (never red), and leave the selection intact so they can
+          // act on the same rows. The fix DIFFERS by reason, so branch the
+          // guidance instead of always telling them to verify CASS.
+          let description: string;
+          if (cassSkipped > 0 && killSwitchSkipped > 0) {
+            description = `${cassSkipped.toLocaleString()} need address verification (CASS), ${killSwitchSkipped.toLocaleString()} have skip-trace disabled. Verify those addresses and re-enable the rest, then skip-trace.`;
+          } else if (cassSkipped > 0) {
+            description = `${cassSkipped.toLocaleString()} need address verification first. Verify the addresses (CASS), then skip-trace.`;
+          } else if (killSwitchSkipped > 0) {
+            description = `${killSwitchSkipped.toLocaleString()} have skip-trace disabled. Re-enable skip-trace on those properties first.`;
+          } else {
+            description = "No eligible properties in this selection.";
+          }
+          toast.info("Nothing to skip-trace yet", { description });
           return;
         }
 
