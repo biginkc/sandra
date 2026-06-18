@@ -47,6 +47,7 @@ test("production canary verifies STOP opt-out side effects and UI blocking", asy
         first_name: "PROD-CANARY",
         last_name: contactLastName,
         phone_1: phone,
+        phone_1_type: "mobile",
       })
       .select("id")
       .single();

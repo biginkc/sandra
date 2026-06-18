@@ -129,6 +129,7 @@ test("production canary creates a dialer batch and accepts signed Jitter writeba
         last_name: contactLastName,
         org_id: orgId,
         phone_1: e164FromToken(token),
+        phone_1_type: "mobile",
       })
       .select("id")
       .single();

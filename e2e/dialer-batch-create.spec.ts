@@ -28,6 +28,7 @@ async function seedCallableProspect(state: string) {
       first_name: "Dialer",
       last_name: "E2E",
       phone_1: uniquePhone(),
+      phone_1_type: "mobile",
       do_not_contact: false,
     })
     .select("id")

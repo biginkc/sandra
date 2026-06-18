@@ -33,6 +33,7 @@ async function seedConsentedLead(
       first_name: "Parity",
       last_name: "Test",
       phone_1: opts.phone,
+      phone_1_type: "mobile",
     })
     .select("id")
     .single();

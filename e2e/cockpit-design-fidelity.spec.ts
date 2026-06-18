@@ -33,6 +33,7 @@ async function seedDesignThread(admin: ReturnType<typeof adminClient>): Promise<
       first_name: "Maria",
       last_name: "Flores",
       phone_1: "+12105550192",
+      phone_1_type: "mobile",
     })
     .select("id")
     .single();

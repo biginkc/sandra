@@ -23,6 +23,7 @@ async function seedThreaded(
       first_name: "RT",
       last_name: "Test",
       phone_1: opts.phone,
+      phone_1_type: "mobile",
     })
     .select("id")
     .single();

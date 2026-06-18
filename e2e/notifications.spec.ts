@@ -30,6 +30,7 @@ async function seedAssignedInboundThread(
       first_name: "Notif",
       last_name: "Smoke",
       phone_1: opts.phone,
+      phone_1_type: "mobile",
     })
     .select("id")
     .single();

@@ -6,6 +6,7 @@ import {
   resetTenantTables,
   seedProspects,
 } from "./fixtures";
+import { ensureConversationIdForThread } from "../src/lib/messages/threading";
 
 /**
  * Validates that clicking a different thread surfaces the loading
@@ -33,6 +34,7 @@ async function seedTwoThreads(admin: ReturnType<typeof adminClient>) {
         first_name: names[i].first,
         last_name: names[i].last,
         phone_1: phones[i],
+        phone_1_type: "mobile",
       })
       .select("id")
       .single();
@@ -41,11 +43,6 @@ async function seedTwoThreads(admin: ReturnType<typeof adminClient>) {
         `contact seed failed: ${contactErr?.message ?? "no row"}`,
       );
     }
-    seeded.push({
-      contactId: contact.id,
-      propertyId: props[i].id,
-      threadId: `legacy:${contact.id}:${props[i].id}`,
-    });
     const { error: propErr } = await admin
       .from("properties")
       .update({
@@ -56,10 +53,21 @@ async function seedTwoThreads(admin: ReturnType<typeof adminClient>) {
     if (propErr) {
       throw new Error(`property update failed: ${propErr.message}`);
     }
+    const conversationId = await ensureConversationIdForThread(
+      admin,
+      contact.id,
+      props[i].id,
+    );
+    seeded.push({
+      contactId: contact.id,
+      propertyId: props[i].id,
+      threadId: conversationId,
+    });
     const { error: msgErr } = await admin.from("messages").insert({
       channel: "sms",
       direction: "inbound",
       status: "received",
+      conversation_id: conversationId,
       contact_id: contact.id,
       property_id: props[i].id,
       from_address: phones[i],
@@ -82,7 +90,7 @@ test("clicking a thread surfaces the loading skeleton during navigation", async 
   const [threadA, threadB] = await seedTwoThreads(admin);
 
   // Open with thread A pre-selected so the panel has real data first.
-  await page.goto(`/messages?thread=${threadA.contactId}`);
+  await page.goto(`/messages?thread=${encodeURIComponent(threadA.threadId)}`);
   await page.waitForSelector('[data-testid="inbox-detail-panel"]');
   await page.waitForLoadState("networkidle");
 
