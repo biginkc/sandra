@@ -11,10 +11,15 @@ import { ActivityFeed } from "./_components/activity-feed";
 import { KpiRowOne, KpiRowTwo } from "./_components/kpi-cards";
 import { NeedsAttentionStrip } from "./_components/needs-attention-strip";
 import { QuickActions } from "./_components/quick-actions";
+import { SendilloHealthCard } from "./_components/sendillo-health-card";
 import { SkipTraceCredits } from "./_components/skip-trace-credits";
 import { TasksPanel } from "./_components/tasks-panel";
 import { ThreadsNeedingAttention } from "./_components/threads-needing-attention";
-import { fetchDashboardSummary, fetchMyTasks } from "./queries";
+import {
+  fetchDashboardSendilloSmsHealth,
+  fetchDashboardSummary,
+  fetchMyTasks,
+} from "./queries";
 
 export const metadata = {
   title: "Overview · Sandra CRM",
@@ -27,10 +32,11 @@ export default async function DashboardPage() {
   } = await supabase.auth.getUser();
   if (!user) redirect("/login");
 
-  const [summary, balance, myTasks] = await Promise.all([
+  const [summary, balance, myTasks, sendilloSmsHealth] = await Promise.all([
     fetchDashboardSummary(),
     getSkipTraceBalance(),
     fetchMyTasks(user.id),
+    fetchDashboardSendilloSmsHealth(),
   ]);
 
   if (!summary) {
@@ -105,6 +111,7 @@ export default async function DashboardPage() {
             currentUserId={user.id}
           />
           <KpiRowTwo summary={summary} currentUserId={user.id} />
+          <SendilloHealthCard result={sendilloSmsHealth} />
           <QuickActions isAdmin={isAdmin} />
         </div>
 

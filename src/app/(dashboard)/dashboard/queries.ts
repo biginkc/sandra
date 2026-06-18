@@ -1,4 +1,10 @@
 import { createClient } from "@/lib/supabase/server";
+import {
+  EMPTY_SENDILLO_SMS_HEALTH,
+  loadSendilloSmsHealth,
+  type SendilloSmsHealth,
+  type SendilloSmsHealthResult,
+} from "@/lib/messages/sendillo-health";
 
 export type AssignedRow = {
   user_id: string;
@@ -104,6 +110,52 @@ export async function fetchDashboardSummary(): Promise<DashboardSummary | null> 
     return null;
   }
   return data as unknown as DashboardSummary;
+}
+
+const SENDILLO_HEALTH_CACHE_MS = 5 * 60 * 1000;
+
+let sendilloHealthCache:
+  | {
+      health: SendilloSmsHealth;
+      updatedAt: string;
+      expiresAt: number;
+    }
+  | null = null;
+
+export async function fetchDashboardSendilloSmsHealth(): Promise<SendilloSmsHealthResult> {
+  const now = Date.now();
+  if (sendilloHealthCache && sendilloHealthCache.expiresAt > now) {
+    return {
+      status: "available",
+      health: sendilloHealthCache.health,
+      updatedAt: sendilloHealthCache.updatedAt,
+    };
+  }
+
+  const supabase = await createClient();
+  try {
+    const health = await loadSendilloSmsHealth(supabase);
+    const updatedAt = new Date(now).toISOString();
+    sendilloHealthCache = {
+      health,
+      updatedAt,
+      expiresAt: now + SENDILLO_HEALTH_CACHE_MS,
+    };
+    return {
+      status: "available",
+      health,
+      updatedAt,
+    };
+  } catch (error) {
+    console.error("[dashboard] Sendillo SMS health failed", {
+      message: error instanceof Error ? error.message : String(error),
+    });
+    return {
+      status: "unavailable",
+      health: EMPTY_SENDILLO_SMS_HEALTH,
+      message: "Sendillo SMS health unavailable",
+    };
+  }
 }
 
 /**
