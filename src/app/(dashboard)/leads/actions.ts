@@ -26,6 +26,11 @@ import {
 } from "@/lib/messaging/send";
 import type { DialpadFromOption } from "@/lib/messaging/types";
 import { dispatchPropertyAssigned } from "@/lib/notifications/dispatch";
+import {
+  applyFilters,
+  filterSelectFragment,
+} from "@/lib/prospects/filter-to-supabase";
+import type { FilterBlock } from "@/lib/prospects/filter-schema";
 import type { Database } from "@/lib/supabase/types";
 import { loadTemplateVars } from "@/lib/sequences/template-vars";
 import type { TemplateVars } from "@/lib/templates/render";
@@ -391,6 +396,274 @@ export type BulkOutcome = {
   failed: { propertyId: string; message: string }[];
 };
 
+export type BulkTagRow = {
+  id: string;
+  name: string;
+  color: string | null;
+  category: "source" | "marketing" | "skip_trace" | "phone" | "journey" | "custom";
+  system_managed: boolean;
+};
+
+const TAG_BULK_CHUNK_SIZE = 500;
+
+type BulkTagProperty = { id: string; org_id: string };
+type ResolvedBulkTagRow = BulkTagRow & { org_id: string };
+type TagInsertError = { code?: string; message: string };
+
+function validateCustomTagInput(name: string, color?: string | null) {
+  const trimmed = name.trim();
+  if (!trimmed) {
+    return {
+      ok: false as const,
+      error: { code: "VALIDATION", message: "Tag name is required." },
+    };
+  }
+  if (trimmed.length > 60) {
+    return {
+      ok: false as const,
+      error: {
+        code: "VALIDATION",
+        message: `Name is ${trimmed.length} characters - cap is 60.`,
+      },
+    };
+  }
+  if (color && !/^#[0-9a-f]{6}$/i.test(color)) {
+    return {
+      ok: false as const,
+      error: {
+        code: "VALIDATION",
+        message: "Color must be a 6-character hex like #3b82f6.",
+      },
+    };
+  }
+  return { ok: true as const, trimmed, color: color ?? null };
+}
+
+async function fetchCustomTagsForOrg(
+  supabase: Awaited<ReturnType<typeof createClient>>,
+  orgId: string,
+): Promise<Result<ResolvedBulkTagRow[]>> {
+  const { data, error } = await supabase
+    .from("tags")
+    .select("id, name, color, category, system_managed, org_id")
+    .eq("org_id", orgId);
+  if (error) {
+    return {
+      ok: false,
+      error: { code: "TAG_FETCH_FAILED", message: error.message },
+    };
+  }
+  return ok((data ?? []) as ResolvedBulkTagRow[]);
+}
+
+function findTagByNormalizedName(
+  tags: ResolvedBulkTagRow[],
+  normalizedName: string,
+) {
+  const matches = tags.filter(
+    (tag) => tag.name.toLowerCase() === normalizedName,
+  );
+  return (
+    matches.find((tag) => tag.category === "custom" && !tag.system_managed) ??
+    matches[0] ??
+    null
+  );
+}
+
+function requireBulkApplicableCustomTag(
+  tag: ResolvedBulkTagRow,
+): Result<ResolvedBulkTagRow> {
+  if (tag.category !== "custom" || tag.system_managed) {
+    return {
+      ok: false,
+      error: {
+        code: "TAG_NOT_APPLICABLE",
+        message: "Only custom tags can be bulk-applied.",
+      },
+    };
+  }
+  return ok(tag);
+}
+
+async function resolveCustomTagForBulk(
+  supabase: Awaited<ReturnType<typeof createClient>>,
+  orgId: string,
+  name: string,
+  color?: string | null,
+): Promise<Result<ResolvedBulkTagRow>> {
+  const validation = validateCustomTagInput(name, color);
+  if (!validation.ok) return validation;
+
+  const normalizedName = validation.trimmed.toLowerCase();
+  const visibleTags = await fetchCustomTagsForOrg(supabase, orgId);
+  if (!visibleTags.ok) return visibleTags;
+  const existing = findTagByNormalizedName(visibleTags.data, normalizedName);
+  if (existing) {
+    return requireBulkApplicableCustomTag(existing);
+  }
+
+  const { data: inserted, error: insertErr } = await supabase
+    .from("tags")
+    .insert({
+      org_id: orgId,
+      name: validation.trimmed,
+      category: "custom",
+      color: validation.color,
+    })
+    .select("id, name, color, category, system_managed, org_id")
+    .single();
+  if (insertErr) {
+    if ((insertErr as TagInsertError).code === "23505") {
+      const racedTags = await fetchCustomTagsForOrg(supabase, orgId);
+      if (!racedTags.ok) return racedTags;
+      const raced = findTagByNormalizedName(racedTags.data, normalizedName);
+      if (raced) {
+        return requireBulkApplicableCustomTag(raced);
+      }
+    }
+    return {
+      ok: false,
+      error: { code: "TAG_CREATE_FAILED", message: insertErr.message },
+    };
+  }
+
+  return ok(inserted as ResolvedBulkTagRow);
+}
+
+async function fetchBulkTagProperties(
+  supabase: Awaited<ReturnType<typeof createClient>>,
+  propertyIds: string[],
+): Promise<Result<{ props: BulkTagProperty[]; failed: BulkOutcome["failed"] }>> {
+  const props: BulkTagProperty[] = [];
+  for (let i = 0; i < propertyIds.length; i += TAG_BULK_CHUNK_SIZE) {
+    const chunk = propertyIds.slice(i, i + TAG_BULK_CHUNK_SIZE);
+    const { data, error: lookupErr } = await supabase
+      .from("properties")
+      .select("id, org_id")
+      .in("id", chunk);
+    if (lookupErr) {
+      return {
+        ok: false,
+        error: { code: "APPLY_TAG_FAILED", message: lookupErr.message },
+      };
+    }
+    props.push(...((data ?? []) as BulkTagProperty[]));
+  }
+
+  const foundIds = new Set(props.map((p) => p.id));
+  const failed: BulkOutcome["failed"] = propertyIds
+    .filter((id) => !foundIds.has(id))
+    .map((id) => ({ propertyId: id, message: "Property not found" }));
+
+  return ok({ props, failed });
+}
+
+async function applyResolvedCustomTagBulkWithClient(
+  supabase: Awaited<ReturnType<typeof createClient>>,
+  props: BulkTagProperty[],
+  initialFailed: BulkOutcome["failed"],
+  tag: Pick<ResolvedBulkTagRow, "id" | "org_id">,
+): Promise<Result<BulkOutcome>> {
+  const failed: BulkOutcome["failed"] = [...initialFailed];
+  const sameOrgProps: BulkTagProperty[] = [];
+  for (const prop of props) {
+    if (prop.org_id === tag.org_id) {
+      sameOrgProps.push(prop);
+    } else {
+      failed.push({
+        propertyId: prop.id,
+        message: "Tag does not belong to this property's organization",
+      });
+    }
+  }
+
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  const rows = sameOrgProps.map((p) => ({
+    org_id: p.org_id,
+    property_id: p.id,
+    tag_id: tag.id,
+    applied_by: user?.id ?? null,
+    source: "manual",
+  }));
+
+  let succeeded = 0;
+  for (let i = 0; i < rows.length; i += TAG_BULK_CHUNK_SIZE) {
+    const chunk = rows.slice(i, i + TAG_BULK_CHUNK_SIZE);
+    const { error } = await supabase.from("property_tags").upsert(chunk, {
+      onConflict: "property_id,tag_id",
+      ignoreDuplicates: true,
+    });
+    if (error) {
+      return ok({
+        succeeded,
+        skipped: 0,
+        failed: [
+          ...failed,
+          ...rows.slice(i).map((row) => ({
+            propertyId: row.property_id,
+            message: error.message,
+          })),
+        ],
+      });
+    }
+    succeeded += chunk.length;
+  }
+
+  return ok({ succeeded, skipped: 0, failed });
+}
+
+async function applyCustomTagBulkWithClient(
+  supabase: Awaited<ReturnType<typeof createClient>>,
+  propertyIds: string[],
+  tagId: string,
+): Promise<Result<BulkOutcome>> {
+  if (propertyIds.length === 0) {
+    return ok({ succeeded: 0, skipped: 0, failed: [] });
+  }
+
+  const { data: tag, error: tagErr } = await supabase
+    .from("tags")
+    .select("id, category, system_managed, org_id")
+    .eq("id", tagId)
+    .maybeSingle();
+  if (tagErr) {
+    return {
+      ok: false,
+      error: { code: "TAG_FETCH_FAILED", message: tagErr.message },
+    };
+  }
+  if (!tag) {
+    return {
+      ok: false,
+      error: { code: "TAG_NOT_FOUND", message: "Tag not found." },
+    };
+  }
+  // Strict journey-marker model: only custom tags can be applied by
+  // users. Auto tags (source:*, uploaded:*, skip-trace etc.) are
+  // system_managed and must not be hand-applied.
+  if (tag.category !== "custom" || tag.system_managed) {
+    return {
+      ok: false,
+      error: {
+        code: "TAG_NOT_APPLICABLE",
+        message: "Only custom tags can be bulk-applied.",
+      },
+    };
+  }
+
+  const propsResult = await fetchBulkTagProperties(supabase, propertyIds);
+  if (!propsResult.ok) return propsResult;
+
+  return applyResolvedCustomTagBulkWithClient(
+    supabase,
+    propsResult.data.props,
+    propsResult.data.failed,
+    tag as Pick<ResolvedBulkTagRow, "id" | "org_id">,
+  );
+}
+
 export async function assignLeadsBulk(
   propertyIds: string[],
   userId: string | null,
@@ -548,87 +821,163 @@ export async function removePropertiesFromListBulk(
   }
 }
 
+async function getMatchingProspectIdsForBulkTag(args: {
+  supabase: Awaited<ReturnType<typeof createClient>>;
+  search: string | null;
+  blockStack: FilterBlock[];
+}): Promise<Result<string[]>> {
+  const hasPipelineStatusBlock = args.blockStack.some(
+    (block) => block.kind === "pipeline_status",
+  );
+  const filterSelect = filterSelectFragment(args.blockStack);
+  const propertiesSelect = ["id", filterSelect].filter(Boolean).join(", ");
+
+  let query = args.supabase
+    .from("properties")
+    .select(propertiesSelect)
+    .is("deleted_at", null);
+  if (!hasPipelineStatusBlock) {
+    query = query.eq("status", "prospect");
+  }
+  if (args.search) {
+    query = query.ilike("address", `%${args.search}%`);
+  }
+
+  query = (await applyFilters(query, args.blockStack, args.supabase)).builder;
+
+  const pageSize = 1000;
+  const ids: string[] = [];
+  for (let from = 0; ; from += pageSize) {
+    const { data, error } = await query.range(from, from + pageSize - 1);
+    if (error) {
+      return {
+        ok: false,
+        error: { code: "SELECT_ALL_FAILED", message: error.message },
+      };
+    }
+    const page = ((data ?? []) as unknown as Array<{ id: string }>).map(
+      (row) => row.id,
+    );
+    ids.push(...page);
+    if (page.length < pageSize) break;
+  }
+
+  return ok(ids);
+}
+
 export async function applyTagBulk(
   propertyIds: string[],
   tagId: string,
 ): Promise<Result<BulkOutcome>> {
-  if (propertyIds.length === 0) {
-    return ok({ succeeded: 0, skipped: 0, failed: [] });
-  }
   try {
     const supabase = await createClient();
-    const { data: tag, error: tagErr } = await supabase
-      .from("tags")
-      .select("category, system_managed")
-      .eq("id", tagId)
-      .maybeSingle();
-    if (tagErr) {
-      return {
-        ok: false,
-        error: { code: "TAG_FETCH_FAILED", message: tagErr.message },
-      };
-    }
-    if (!tag) {
-      return {
-        ok: false,
-        error: { code: "TAG_NOT_FOUND", message: "Tag not found." },
-      };
-    }
-    // Strict journey-marker model: only custom tags can be applied by
-    // users. Auto tags (source:*, uploaded:*, skip-trace etc.) are
-    // system_managed and must not be hand-applied.
-    if (tag.category !== "custom" || tag.system_managed) {
-      return {
-        ok: false,
-        error: {
-          code: "TAG_NOT_APPLICABLE",
-          message: "Only custom tags can be bulk-applied.",
-        },
-      };
-    }
-
-    const { data: props, error: lookupErr } = await supabase
-      .from("properties")
-      .select("id, org_id")
-      .in("id", propertyIds);
-    if (lookupErr) {
-      return {
-        ok: false,
-        error: { code: "APPLY_TAG_FAILED", message: lookupErr.message },
-      };
-    }
-    const foundIds = new Set((props ?? []).map((p) => p.id));
-    const failed: BulkOutcome["failed"] = propertyIds
-      .filter((id) => !foundIds.has(id))
-      .map((id) => ({ propertyId: id, message: "Property not found" }));
-
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
-    const rows = (props ?? []).map((p) => ({
-      org_id: p.org_id,
-      property_id: p.id,
-      tag_id: tagId,
-      applied_by: user?.id ?? null,
-      source: "manual",
-    }));
-    if (rows.length > 0) {
-      const { error } = await supabase.from("property_tags").upsert(rows, {
-        onConflict: "property_id,tag_id",
-        ignoreDuplicates: true,
-      });
-      if (error) {
-        return {
-          ok: false,
-          error: { code: "APPLY_TAG_FAILED", message: error.message },
-        };
-      }
-    }
-    return ok({ succeeded: rows.length, skipped: 0, failed });
+    return await applyCustomTagBulkWithClient(supabase, propertyIds, tagId);
   } catch (e) {
     reportError(e, {
       tags: { surface: "apply_tag_bulk" },
       extra: { count: propertyIds.length, tagId },
+    });
+    return errFromUnknown(e, "APPLY_TAG_FAILED");
+  }
+}
+
+export async function createAndApplyCustomTagBulk(params: {
+  name: string;
+  color?: string | null;
+  propertyIds: string[];
+}): Promise<Result<{ tag: BulkTagRow; outcome: BulkOutcome }>> {
+  try {
+    const supabase = await createClient();
+    if (params.propertyIds.length === 0) {
+      return {
+        ok: false,
+        error: {
+          code: "NO_SELECTED_PROPERTIES",
+          message: "Select at least one prospect before applying a tag.",
+        },
+      };
+    }
+
+    const propsResult = await fetchBulkTagProperties(
+      supabase,
+      params.propertyIds,
+    );
+    if (!propsResult.ok) return propsResult;
+
+    const visibleOrgIds = Array.from(
+      new Set(propsResult.data.props.map((prop) => prop.org_id)),
+    );
+    if (visibleOrgIds.length === 0) {
+      return {
+        ok: false,
+        error: {
+          code: "NO_VISIBLE_PROPERTIES",
+          message: "No selected prospects are available for tagging.",
+        },
+      };
+    }
+    if (visibleOrgIds.length > 1) {
+      return {
+        ok: false,
+        error: {
+          code: "MULTI_ORG_SELECTION",
+          message:
+            "Create/apply tag only supports prospects from one organization at a time.",
+        },
+      };
+    }
+
+    const tagResult = await resolveCustomTagForBulk(
+      supabase,
+      visibleOrgIds[0],
+      params.name,
+      params.color ?? null,
+    );
+    if (!tagResult.ok) return tagResult;
+
+    const outcomeResult = await applyResolvedCustomTagBulkWithClient(
+      supabase,
+      propsResult.data.props,
+      propsResult.data.failed,
+      tagResult.data,
+    );
+    if (!outcomeResult.ok) return outcomeResult;
+
+    return ok({ tag: tagResult.data, outcome: outcomeResult.data });
+  } catch (e) {
+    reportError(e, {
+      tags: { surface: "create_and_apply_custom_tag_bulk" },
+      extra: { count: params.propertyIds.length },
+    });
+    return errFromUnknown(e, "APPLY_TAG_FAILED");
+  }
+}
+
+export async function createAndApplyCustomTagBulkFromFilters(params: {
+  name: string;
+  color?: string | null;
+  search: string | null;
+  blockStack: FilterBlock[];
+}): Promise<Result<{ tag: BulkTagRow; outcome: BulkOutcome }>> {
+  try {
+    const supabase = await createClient();
+    const idsResult = await getMatchingProspectIdsForBulkTag({
+      supabase,
+      search: params.search,
+      blockStack: params.blockStack,
+    });
+    if (!idsResult.ok) return idsResult;
+
+    const tagResult = await createAndApplyCustomTagBulk({
+      name: params.name,
+      color: params.color ?? null,
+      propertyIds: idsResult.data,
+    });
+    return tagResult;
+  } catch (e) {
+    reportError(e, {
+      tags: { surface: "create_and_apply_custom_tag_bulk_from_filters" },
+      extra: { blockCount: params.blockStack.length },
     });
     return errFromUnknown(e, "APPLY_TAG_FAILED");
   }

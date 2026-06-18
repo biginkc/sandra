@@ -41,6 +41,8 @@ vi.mock("../leads/actions", () => ({
   })),
   applyTagBulk: vi.fn(),
   assignLeadsBulk: vi.fn(),
+  createAndApplyCustomTagBulk: vi.fn(),
+  createAndApplyCustomTagBulkFromFilters: vi.fn(),
   deletePropertiesBulk: vi.fn(),
   qualifyLeadsBulk: vi.fn(),
   removePropertiesFromListBulk: vi.fn(),
@@ -235,6 +237,208 @@ describe("<ProspectsTable />", () => {
         "list-pkc",
       );
     });
+  });
+
+  it("bulk apply existing tag calls the action with selected ids and the chosen tag", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    const { applyTagBulk } = await import("../leads/actions");
+    vi.mocked(applyTagBulk).mockResolvedValue({
+      ok: true,
+      data: { succeeded: 2, skipped: 0, failed: [] },
+    });
+    const rows = [
+      makeRow({ id: "p1", address: "1 Tagged Ave" }),
+      makeRow({ id: "p2", address: "2 Tagged Ave" }),
+    ];
+
+    renderTable(rows, [], {
+      tags: [{ id: "tag-hot", name: "Hot seller", color: null }],
+    });
+
+    for (const r of rows) {
+      await user.click(
+        screen.getByRole("checkbox", { name: `Select ${r.address}` }),
+      );
+    }
+
+    await user.click(
+      screen.getByRole("button", { name: /Actions for 2 selected/ }),
+    );
+    const applyTagTrigger = await screen.findByRole("menuitem", {
+      name: /Apply tag/,
+    });
+    applyTagTrigger.focus();
+    await user.keyboard("{ArrowRight}");
+    await user.click(
+      await screen.findByRole("menuitem", { name: /Hot seller/ }),
+    );
+
+    await waitFor(() => {
+      expect(applyTagBulk).toHaveBeenCalledWith(["p1", "p2"], "tag-hot");
+    });
+  });
+
+  it("creates a new tag from the prospects page and applies it to selected ids", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    const { createAndApplyCustomTagBulk } = await import("../leads/actions");
+    vi.mocked(createAndApplyCustomTagBulk).mockResolvedValue({
+      ok: true,
+      data: {
+        tag: {
+          id: "tag-new",
+          name: "High intent",
+          color: null,
+          category: "custom",
+          system_managed: false,
+        },
+        outcome: { succeeded: 2, skipped: 0, failed: [] },
+      },
+    });
+    const rows = [
+      makeRow({ id: "p1", address: "1 Intent Ave" }),
+      makeRow({ id: "p2", address: "2 Intent Ave" }),
+    ];
+
+    renderTable(rows);
+
+    for (const r of rows) {
+      await user.click(
+        screen.getByRole("checkbox", { name: `Select ${r.address}` }),
+      );
+    }
+
+    await user.click(
+      screen.getByRole("button", { name: /Actions for 2 selected/ }),
+    );
+    await user.click(
+      await screen.findByRole("menuitem", { name: /Create\/apply tag/ }),
+    );
+
+    expect(
+      await screen.findByRole("heading", { name: "Create/apply tag" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("2 selected prospects")).toBeInTheDocument();
+
+    await user.type(screen.getByLabelText("Tag name"), "High intent");
+    await user.click(
+      screen.getByRole("button", { name: /Create #High intent and apply/ }),
+    );
+
+    await waitFor(() => {
+      expect(createAndApplyCustomTagBulk).toHaveBeenCalledWith({
+        name: "High intent",
+        color: null,
+        propertyIds: ["p1", "p2"],
+      });
+    });
+  });
+
+  it("keeps failed rows selected after create/apply tag partial failures", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    const { createAndApplyCustomTagBulk } = await import("../leads/actions");
+    vi.mocked(createAndApplyCustomTagBulk).mockResolvedValue({
+      ok: true,
+      data: {
+        tag: {
+          id: "tag-new",
+          name: "Retry tag",
+          color: null,
+          category: "custom",
+          system_managed: false,
+        },
+        outcome: {
+          succeeded: 1,
+          skipped: 0,
+          failed: [{ propertyId: "p2", message: "Property not found" }],
+        },
+      },
+    });
+    const rows = [
+      makeRow({ id: "p1", address: "1 Partial Ave" }),
+      makeRow({ id: "p2", address: "2 Partial Ave" }),
+    ];
+
+    renderTable(rows);
+    for (const r of rows) {
+      await user.click(
+        screen.getByRole("checkbox", { name: `Select ${r.address}` }),
+      );
+    }
+    await user.click(
+      screen.getByRole("button", { name: /Actions for 2 selected/ }),
+    );
+    await user.click(
+      await screen.findByRole("menuitem", { name: /Create\/apply tag/ }),
+    );
+    await user.type(screen.getByLabelText("Tag name"), "Retry tag");
+    await user.click(
+      screen.getByRole("button", { name: /Create #Retry tag and apply/ }),
+    );
+
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: /Actions for 1 selected/ }),
+      ).toBeEnabled();
+    });
+    expect(
+      screen.getByRole("checkbox", { name: "Select 1 Partial Ave" }),
+    ).not.toBeChecked();
+    expect(
+      screen.getByRole("checkbox", { name: "Select 2 Partial Ave" }),
+    ).toBeChecked();
+  });
+
+  it("does not submit an empty tag name or clear the current selection", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    const { createAndApplyCustomTagBulk } = await import("../leads/actions");
+    const rows = [makeRow({ id: "p1", address: "1 Empty Ave" })];
+
+    renderTable(rows);
+    await user.click(
+      screen.getByRole("checkbox", { name: "Select 1 Empty Ave" }),
+    );
+    await user.click(
+      screen.getByRole("button", { name: /Actions for 1 selected/ }),
+    );
+    await user.click(
+      await screen.findByRole("menuitem", { name: /Create\/apply tag/ }),
+    );
+
+    expect(
+      screen.getByRole("button", { name: "Create/apply tag" }),
+    ).toBeDisabled();
+    expect(createAndApplyCustomTagBulk).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(
+      screen.getByRole("button", { name: /Actions for 1 selected/ }),
+    ).toBeEnabled();
+  });
+
+  it("clears a typed tag name when the create/apply modal is canceled", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    const rows = [makeRow({ id: "p1", address: "1 Cancel Ave" })];
+
+    renderTable(rows);
+    await user.click(
+      screen.getByRole("checkbox", { name: "Select 1 Cancel Ave" }),
+    );
+    await user.click(
+      screen.getByRole("button", { name: /Actions for 1 selected/ }),
+    );
+    await user.click(
+      await screen.findByRole("menuitem", { name: /Create\/apply tag/ }),
+    );
+    await user.type(screen.getByLabelText("Tag name"), "Wrong wave");
+    expect(screen.getByLabelText("Tag name")).toHaveValue("Wrong wave");
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+
+    await user.click(
+      screen.getByRole("button", { name: /Actions for 1 selected/ }),
+    );
+    await user.click(
+      await screen.findByRole("menuitem", { name: /Create\/apply tag/ }),
+    );
+    expect(screen.getByLabelText("Tag name")).toHaveValue("");
   });
 
   it("bulk action menu uses 'Promote to Lead' (renamed from 'Qualify selected') and no longer offers 'Set motivation'", async () => {
@@ -672,6 +876,273 @@ describe("<ProspectsTable /> select-all-across-pages banner", () => {
     const banner = await screen.findByTestId("select-all-banner");
     expect(banner.dataset.mode).toBe("all-matching");
     expect(banner.textContent).toMatch(/All 1,382 prospects selected/);
+  });
+
+  it("create/apply tag after select-all-matching sends filters instead of every id", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    const { createAndApplyCustomTagBulk, createAndApplyCustomTagBulkFromFilters } =
+      await import("../leads/actions");
+    const allIds = Array.from({ length: 1382 }, (_, i) => `prop-${i}`);
+    getAllMatchingProspectIds.mockResolvedValue({
+      ok: true,
+      data: allIds,
+    });
+    vi.mocked(createAndApplyCustomTagBulkFromFilters).mockResolvedValue({
+      ok: true,
+      data: {
+        tag: {
+          id: "tag-all",
+          name: "Probate wave",
+          color: null,
+          category: "custom",
+          system_managed: false,
+        },
+        outcome: { succeeded: 1382, skipped: 0, failed: [] },
+      },
+    });
+
+    render(
+      <ProspectsTable
+        prospects={[makeRow({ id: "p1" })]}
+        lists={[]}
+        tags={[]}
+        teamMembers={[]}
+        currentUserId={null}
+        canDelete={false}
+        headerCount=""
+        search="oak"
+        sort="created_at"
+        dir="desc"
+        blockStack={EMPTY_BLOCK_STACK}
+        filtersParam={null}
+        total={1382}
+        pageSize={50}
+        page={1}
+        totalPages={28}
+      />,
+    );
+
+    await user.click(screen.getByRole("checkbox", { name: "Select p1 Main St" }));
+    await user.click(screen.getByTestId("select-all-across-pages"));
+    await waitFor(() => {
+      expect(screen.getByTestId("select-all-banner").textContent).toMatch(
+        /All 1,382 prospects selected/,
+      );
+    });
+    await user.click(
+      screen.getByRole("button", { name: /Actions for 1382 selected/ }),
+    );
+    await user.click(
+      await screen.findByRole("menuitem", { name: /Create\/apply tag/ }),
+    );
+    expect(
+      await screen.findByText("All 1,382 matching prospects"),
+    ).toBeInTheDocument();
+    await user.type(screen.getByLabelText("Tag name"), "Probate wave");
+    await user.click(
+      screen.getByRole("button", { name: /Create #Probate wave and apply/ }),
+    );
+
+    await waitFor(() => {
+      expect(createAndApplyCustomTagBulkFromFilters).toHaveBeenCalledWith({
+        name: "Probate wave",
+        color: null,
+        search: "oak",
+        blockStack: EMPTY_BLOCK_STACK,
+      });
+    });
+    expect(createAndApplyCustomTagBulk).not.toHaveBeenCalled();
+  });
+
+  it("manual row selection after select-all-matching clears all-matching mode", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    const allIds = [
+      "p1",
+      ...Array.from({ length: 1381 }, (_, i) => `prop-${i}`),
+    ];
+    getAllMatchingProspectIds.mockResolvedValue({
+      ok: true,
+      data: allIds,
+    });
+
+    render(
+      <ProspectsTable
+        prospects={[makeRow({ id: "p1" })]}
+        lists={[]}
+        tags={[]}
+        teamMembers={[]}
+        currentUserId={null}
+        canDelete={false}
+        headerCount=""
+        search="oak"
+        sort="created_at"
+        dir="desc"
+        blockStack={EMPTY_BLOCK_STACK}
+        filtersParam={null}
+        total={1382}
+        pageSize={50}
+        page={1}
+        totalPages={28}
+      />,
+    );
+
+    await user.click(screen.getByRole("checkbox", { name: "Select p1 Main St" }));
+    await user.click(screen.getByTestId("select-all-across-pages"));
+    await waitFor(() => {
+      expect(screen.getByTestId("select-all-banner").textContent).toMatch(
+        /All 1,382 prospects selected/,
+      );
+    });
+
+    await user.click(screen.getByRole("checkbox", { name: "Select p1 Main St" }));
+
+    expect(screen.queryByTestId("select-all-banner")).toBeNull();
+    expect(
+      screen.getByRole("button", { name: /Actions for 1381 selected/ }),
+    ).toBeEnabled();
+  });
+
+  it("create/apply tag partial failure after select-all-matching clears all-matching mode", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    const { createAndApplyCustomTagBulkFromFilters } = await import("../leads/actions");
+    const allIds = [
+      "p1",
+      ...Array.from({ length: 1381 }, (_, i) => `prop-${i}`),
+    ];
+    getAllMatchingProspectIds.mockResolvedValue({
+      ok: true,
+      data: allIds,
+    });
+    vi.mocked(createAndApplyCustomTagBulkFromFilters).mockResolvedValue({
+      ok: true,
+      data: {
+        tag: {
+          id: "tag-all-partial",
+          name: "Retry all",
+          color: null,
+          category: "custom",
+          system_managed: false,
+        },
+        outcome: {
+          succeeded: 1381,
+          skipped: 0,
+          failed: [{ propertyId: "prop-7", message: "Property not found" }],
+        },
+      },
+    });
+
+    render(
+      <ProspectsTable
+        prospects={[makeRow({ id: "p1" })]}
+        lists={[]}
+        tags={[]}
+        teamMembers={[]}
+        currentUserId={null}
+        canDelete={false}
+        headerCount=""
+        search="oak"
+        sort="created_at"
+        dir="desc"
+        blockStack={EMPTY_BLOCK_STACK}
+        filtersParam={null}
+        total={1382}
+        pageSize={50}
+        page={1}
+        totalPages={28}
+      />,
+    );
+
+    await user.click(screen.getByRole("checkbox", { name: "Select p1 Main St" }));
+    await user.click(screen.getByTestId("select-all-across-pages"));
+    await waitFor(() => {
+      expect(screen.getByTestId("select-all-banner").textContent).toMatch(
+        /All 1,382 prospects selected/,
+      );
+    });
+    await user.click(
+      screen.getByRole("button", { name: /Actions for 1382 selected/ }),
+    );
+    await user.click(
+      await screen.findByRole("menuitem", { name: /Create\/apply tag/ }),
+    );
+    await user.type(screen.getByLabelText("Tag name"), "Retry all");
+    await user.click(
+      screen.getByRole("button", { name: /Create #Retry all and apply/ }),
+    );
+
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: /Actions for 1 selected/ }),
+      ).toBeEnabled();
+    });
+    expect(screen.queryByTestId("select-all-banner")).toBeNull();
+    expect(
+      screen.getByRole("checkbox", { name: "Select p1 Main St" }),
+    ).not.toBeChecked();
+  });
+
+  it("clears a stale all-matching selection when search scope changes", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    getAllMatchingProspectIds.mockResolvedValue({
+      ok: true,
+      data: Array.from({ length: 1382 }, (_, i) => `prop-${i}`),
+    });
+    const { rerender } = render(
+      <ProspectsTable
+        prospects={[makeRow({ id: "p1" })]}
+        lists={[]}
+        tags={[]}
+        teamMembers={[]}
+        currentUserId={null}
+        canDelete={false}
+        headerCount=""
+        search="oak"
+        sort="created_at"
+        dir="desc"
+        blockStack={EMPTY_BLOCK_STACK}
+        filtersParam={null}
+        total={1382}
+        pageSize={50}
+        page={1}
+        totalPages={28}
+      />,
+    );
+
+    await user.click(screen.getByRole("checkbox", { name: "Select p1 Main St" }));
+    await user.click(screen.getByTestId("select-all-across-pages"));
+    await waitFor(() => {
+      expect(screen.getByTestId("select-all-banner").textContent).toMatch(
+        /All 1,382 prospects selected/,
+      );
+    });
+
+    rerender(
+      <ProspectsTable
+        prospects={[makeRow({ id: "p1" })]}
+        lists={[]}
+        tags={[]}
+        teamMembers={[]}
+        currentUserId={null}
+        canDelete={false}
+        headerCount=""
+        search="pine"
+        sort="created_at"
+        dir="desc"
+        blockStack={EMPTY_BLOCK_STACK}
+        filtersParam={null}
+        total={1382}
+        pageSize={50}
+        page={1}
+        totalPages={28}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: /Actions \(select prospects first\)/ }),
+      ).toBeDisabled();
+    });
+    expect(screen.queryByTestId("select-all-banner")).toBeNull();
   });
 
   it("Clear button empties the selection and hides the banner", async () => {
