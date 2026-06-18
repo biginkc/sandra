@@ -24,6 +24,7 @@ import {
   DataTableFooter,
   DataTableShell,
 } from "@/components/ui/data-table-shell";
+import { SkipTracePreflightDialog } from "@/components/skip-trace-preflight-dialog";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   formatFullAddress,
@@ -68,7 +69,6 @@ import {
   verifyPropertiesBulk,
   type BulkOutcome,
 } from "../leads/actions";
-import { requestSkipTrace } from "@/lib/skip-trace/actions";
 import { getAllMatchingProspectIds } from "./actions";
 import { BatchCreateModal } from "./batch-create-modal";
 import { BulkSmsModal } from "./bulk-sms-modal";
@@ -170,6 +170,9 @@ export function ProspectsTable({
   const [showBatchCreate, setShowBatchCreate] = useState(false);
   const [showBulkSms, setShowBulkSms] = useState(false);
   const [showBulkTag, setShowBulkTag] = useState(false);
+  const [skipTracePreflightIds, setSkipTracePreflightIds] = useState<string[]>(
+    [],
+  );
   const [filterNavPending, setFilterNavPending] = useState(false);
   const [filterNavTargetKey, setFilterNavTargetKey] = useState<string | null>(
     null,
@@ -441,67 +444,7 @@ export function ProspectsTable({
   const handleSkipTrace = () => {
     const ids = selectedIds();
     if (ids.length === 0) return;
-    startTransition(async () => {
-      const result = await callAction(requestSkipTrace(ids), {
-        fallbackMessage: "Could not request skip trace",
-      });
-      if (result.ok) {
-        const { status, eligible, cassSkipped, killSwitchSkipped } =
-          result.data;
-        const skipNote = [
-          cassSkipped > 0
-            ? `${cassSkipped.toLocaleString()} need address verification first`
-            : null,
-          killSwitchSkipped > 0
-            ? `${killSwitchSkipped.toLocaleString()} skip-trace disabled`
-            : null,
-        ]
-          .filter(Boolean)
-          .join(" · ");
-
-        if (status === "none_eligible") {
-          // Not a failure — a precondition the operator can act on, so
-          // info (never red), and leave the selection intact so they can
-          // act on the same rows. The fix DIFFERS by reason, so branch the
-          // guidance instead of always telling them to verify CASS.
-          let description: string;
-          if (cassSkipped > 0 && killSwitchSkipped > 0) {
-            description = `${cassSkipped.toLocaleString()} need address verification (CASS), ${killSwitchSkipped.toLocaleString()} have skip-trace disabled. Verify those addresses and re-enable the rest, then skip-trace.`;
-          } else if (cassSkipped > 0) {
-            description = `${cassSkipped.toLocaleString()} need address verification first. Verify the addresses (CASS), then skip-trace.`;
-          } else if (killSwitchSkipped > 0) {
-            description = `${killSwitchSkipped.toLocaleString()} have skip-trace disabled. Re-enable skip-trace on those properties first.`;
-          } else {
-            description = "No eligible properties in this selection.";
-          }
-          toast.info("Nothing to skip-trace yet", { description });
-          return;
-        }
-
-        const noun = `propert${eligible === 1 ? "y" : "ies"}`;
-        if (status === "queued") {
-          toast.success(
-            `Skip-trace started for ${eligible.toLocaleString()} ${noun}`,
-            {
-              description: skipNote
-                ? `${skipNote} · Watch progress on /jobs`
-                : "Watch progress on /jobs",
-            },
-          );
-        } else {
-          toast.success(
-            `Skip-trace request sent for ${eligible.toLocaleString()} ${noun}`,
-            {
-              description: skipNote
-                ? `${skipNote} · Admin will approve on /jobs`
-                : "Admin will approve on /jobs",
-            },
-          );
-        }
-        onClearAllSelection();
-        router.refresh();
-      }
-    });
+    setSkipTracePreflightIds(ids);
   };
 
   const handleDelete = () => {
@@ -796,6 +739,17 @@ export function ProspectsTable({
             : undefined
         }
         totalCount={selectAllMatching ? total : selectedInScope.size}
+      />
+      <SkipTracePreflightDialog
+        open={skipTracePreflightIds.length > 0}
+        onOpenChange={(open) => {
+          if (!open) setSkipTracePreflightIds([]);
+        }}
+        propertyIds={skipTracePreflightIds}
+        onFinished={() => {
+          onClearAllSelection();
+          router.refresh();
+        }}
       />
 
       <DataTableShell

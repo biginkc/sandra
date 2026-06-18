@@ -109,11 +109,14 @@ export async function runSkipTraceEnrichment(
     zip: string | null;
     homeowner_contact_id: string | null;
     cass_status: string;
+    skip_trace_disabled: boolean;
   }> = [];
   for (const ids of chunked(params.propertyIds, IN_CHUNK)) {
     const { data } = await supabase
       .from("properties")
-      .select("id, address, city, state, zip, homeowner_contact_id, cass_status")
+      .select(
+        "id, address, city, state, zip, homeowner_contact_id, cass_status, skip_trace_disabled",
+      )
       .in("id", ids);
     if (data) properties.push(...data);
   }
@@ -159,6 +162,7 @@ export async function runSkipTraceEnrichment(
   for (const propertyId of params.propertyIds) {
     const p = propsById.get(propertyId);
     if (!p) continue;
+    if (p.skip_trace_disabled || p.cass_status !== "verified") continue;
     normalizedById.set(
       propertyId,
       normalizeAddress({
@@ -193,7 +197,41 @@ export async function runSkipTraceEnrichment(
       }
       continue;
     }
-    const addressNormalized = normalizedById.get(propertyId) as string;
+    if (p.skip_trace_disabled) {
+      summary.failed++;
+      try {
+        await insertJobItem(supabase, params.jobId, propertyId, {
+          status: "error",
+          error_class: "validation",
+          error_message: "Skip trace is disabled for this property.",
+        });
+      } catch (e) {
+        reportError(e, {
+          tags: { surface: "skip_trace_disabled_item" },
+          extra: { jobId: params.jobId, propertyId },
+        });
+      }
+      continue;
+    }
+    if (p.cass_status !== "verified") {
+      summary.failed++;
+      try {
+        await insertJobItem(supabase, params.jobId, propertyId, {
+          status: "error",
+          error_class: "address_unverified",
+          error_message:
+            "Address not USPS-verified (CASS); verify the address before skip tracing.",
+        });
+      } catch (e) {
+        reportError(e, {
+          tags: { surface: "skip_trace_unverified_item" },
+          extra: { jobId: params.jobId, propertyId },
+        });
+      }
+      continue;
+    }
+    const addressNormalized = normalizedById.get(propertyId);
+    if (!addressNormalized) continue;
     const cached = cacheByAddress.get(addressNormalized) ?? null;
     if (cached) {
       // Cache row stores the previous result; reuse it but rewrite the

@@ -1,7 +1,8 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createTestClient } from "@tests/integration/client";
 import { resetTenantTables } from "@tests/integration/reset";
+import { MockSkipTraceProvider } from "./providers/mock";
 
 const testClient = createTestClient();
 vi.mock("@/lib/supabase/server", () => ({
@@ -15,7 +16,12 @@ vi.mock("next/server", async () => {
   const actual = await vi.importActual<typeof import("next/server")>(
     "next/server",
   );
-  return { ...actual, after: (_fn: () => unknown) => {} };
+  return {
+    ...actual,
+    after: (fn: () => unknown) => {
+      void fn();
+    },
+  };
 });
 
 vi.mock("@/lib/skip-trace/skip-trace-job", () => ({
@@ -37,8 +43,12 @@ vi.spyOn(testClient.auth, "getUser").mockImplementation(async () =>
   }) as never,
 );
 
-// eslint-disable-next-line import/first
-import { requestSkipTrace } from "./actions";
+import {
+  approveSkipTraceJob,
+  preflightSkipTrace,
+  requestSkipTrace,
+} from "./actions";
+import { runSkipTraceEnrichment } from "./skip-trace-job";
 
 async function seedProperty(opts: {
   address: string;
@@ -64,8 +74,15 @@ async function seedProperty(opts: {
 describe("requestSkipTrace pre-flight gates (integration)", () => {
   beforeEach(async () => {
     await resetTenantTables(testClient);
+    process.env.SKIP_TRACE_PROVIDER = "mock";
+    MockSkipTraceProvider.reset();
+    vi.mocked(runSkipTraceEnrichment).mockClear();
     currentEmail = "jarrad@bmhgroupkc.com";
     currentUserId = null;
+  });
+
+  afterEach(() => {
+    MockSkipTraceProvider.reset();
   });
 
   it("happy path: all CASS-verified, no kill-switch — every id lands in input_params", async () => {
@@ -87,6 +104,98 @@ describe("requestSkipTrace pre-flight gates (integration)", () => {
     expect(new Set(input)).toEqual(new Set(ids));
     // No skipped suffix on the happy path.
     expect(job!.title).not.toMatch(/skipped/i);
+  });
+
+  it("preflight prices a single eligible row at 5 Tracefy credits", async () => {
+    const id = await seedProperty({
+      address: "1 Single Ln",
+      cassStatus: "verified",
+    });
+
+    const result = await preflightSkipTrace([id]);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.data.eligible).toBe(1);
+    expect(result.data.tracefyCreditsRequired).toBe(5);
+    expect(result.data.tracefyCreditsAvailable).toBe(10_000);
+    expect(result.data.canLaunchSkipTrace).toBe(true);
+  });
+
+  it("preflight prices batch eligible rows at 1 Tracefy credit per row", async () => {
+    const ids = await Promise.all([
+      seedProperty({ address: "1 Batch Ln", cassStatus: "verified" }),
+      seedProperty({ address: "2 Batch Ln", cassStatus: "verified" }),
+      seedProperty({ address: "3 Needs Cass Ln", cassStatus: "unverified" }),
+    ]);
+
+    const result = await preflightSkipTrace(ids);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.data.eligible).toBe(2);
+    expect(result.data.cassUnverified).toBe(1);
+    expect(result.data.tracefyCreditsRequired).toBe(2);
+    expect(result.data.estimatedCassVerificationCostUsd).toBeCloseTo(0.03);
+  });
+
+  it("preflight prices split batches including a one-row tail at Tracefy single-lookup cost", async () => {
+    const rows = Array.from({ length: 4_001 }, (_, index) => ({
+      address: `${index + 1} Split Credit Ln`,
+      state: "MO",
+      status: "prospect",
+      skip_trace_disabled: false,
+      cass_status: "verified",
+    }));
+    const { data, error } = await testClient
+      .from("properties")
+      .insert(rows as never)
+      .select("id");
+    if (error || !data) throw error ?? new Error("bulk seed failed");
+
+    const result = await preflightSkipTrace(data.map((row) => row.id));
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.data.eligible).toBe(4_001);
+    expect(result.data.tracefyCreditsRequired).toBe(4_005);
+  });
+
+  it("preflight reports CASS status separately from skip-trace eligibility", async () => {
+    const activeVerified = await seedProperty({
+      address: "1 Active Verified Ln",
+      cassStatus: "verified",
+    });
+    const activeUnverified = await seedProperty({
+      address: "2 Active Unverified Ln",
+      cassStatus: "unverified",
+    });
+    const disabledVerified = await seedProperty({
+      address: "3 Disabled Verified Ln",
+      cassStatus: "verified",
+      killSwitch: true,
+    });
+    const disabledUnverified = await seedProperty({
+      address: "4 Disabled Unverified Ln",
+      cassStatus: "unverified",
+      killSwitch: true,
+    });
+
+    const result = await preflightSkipTrace([
+      activeVerified,
+      activeUnverified,
+      disabledVerified,
+      disabledUnverified,
+    ]);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.data.requested).toBe(4);
+    expect(result.data.cassVerified).toBe(2);
+    expect(result.data.cassUnverified).toBe(2);
+    expect(result.data.eligible).toBe(1);
+    expect(result.data.killSwitchSkipped).toBe(2);
+    expect(result.data.cassVerificationPropertyIds).toEqual([activeUnverified]);
+    expect(result.data.estimatedCassVerificationCostUsd).toBeCloseTo(0.03);
+    expect(result.data.tracefyCreditsRequired).toBe(5);
   });
 
   it("filters out CASS-unverified properties before sending to vendor", async () => {
@@ -114,6 +223,71 @@ describe("requestSkipTrace pre-flight gates (integration)", () => {
     const input = (job!.input_params as { property_ids: string[] }).property_ids;
     expect(input).toEqual([verified]);
     expect(job!.title).toMatch(/2 need.* CASS/i);
+  });
+
+  it("blocks requestSkipTrace when Tracefy credits are insufficient at final launch", async () => {
+    const ids = await Promise.all([
+      seedProperty({ address: "1 Low Credit Ln", cassStatus: "verified" }),
+      seedProperty({ address: "2 Low Credit Ln", cassStatus: "verified" }),
+    ]);
+    MockSkipTraceProvider.setBalance(1);
+
+    const preflight = await preflightSkipTrace(ids);
+    expect(preflight.ok).toBe(true);
+    if (!preflight.ok) return;
+    expect(preflight.data.tracefyCreditStatus).toBe("insufficient");
+    expect(preflight.data.canLaunchSkipTrace).toBe(false);
+
+    const result = await requestSkipTrace(ids);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe("INSUFFICIENT_CREDITS");
+  });
+
+  it("blocks requestSkipTrace when Tracefy balance cannot be confirmed", async () => {
+    const id = await seedProperty({
+      address: "1 Balance Error Ln",
+      cassStatus: "verified",
+    });
+    MockSkipTraceProvider.failBalance();
+
+    const preflight = await preflightSkipTrace([id]);
+    expect(preflight.ok).toBe(true);
+    if (!preflight.ok) return;
+    expect(preflight.data.tracefyCreditStatus).toBe("unavailable");
+    expect(preflight.data.canLaunchSkipTrace).toBe(false);
+
+    const result = await requestSkipTrace([id]);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe("TRACEFY_CREDITS_UNAVAILABLE");
+  });
+
+  it("post-CASS recompute keeps invalid and ambiguous rows ineligible", async () => {
+    const invalid = await seedProperty({
+      address: "1 Invalid Ln",
+      cassStatus: "unverified",
+    });
+    const ambiguous = await seedProperty({
+      address: "2 Ambiguous Ln",
+      cassStatus: "unverified",
+    });
+
+    await testClient
+      .from("properties")
+      .update({ cass_status: "invalid" })
+      .eq("id", invalid);
+    await testClient
+      .from("properties")
+      .update({ cass_status: "ambiguous" })
+      .eq("id", ambiguous);
+
+    const result = await preflightSkipTrace([invalid, ambiguous]);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.data.eligible).toBe(0);
+    expect(result.data.cassUnverified).toBe(2);
+    expect(result.data.canLaunchSkipTrace).toBe(false);
   });
 
   it("reports none_eligible (not an error) when every property needs CASS", async () => {
@@ -207,5 +381,76 @@ describe("requestSkipTrace pre-flight gates (integration)", () => {
     expect(job!.title).toMatch(/1 need.* CASS/i);
     const input = (job!.input_params as { property_ids: string[] }).property_ids;
     expect(input).toEqual([verified]);
+  });
+
+  it("blocks stale pending approval when Tracefy credits are no longer sufficient", async () => {
+    const verified = await seedProperty({
+      address: "1 Pending Approval Ln",
+      cassStatus: "verified",
+    });
+    const { data: prop } = await testClient
+      .from("properties")
+      .select("org_id")
+      .eq("id", verified)
+      .single();
+    const { data: job, error } = await testClient
+      .from("jobs")
+      .insert({
+        type: "skip_trace",
+        provider: "tracerfy",
+        status: "pending_approval",
+        org_id: prop!.org_id,
+        total_items: 1,
+        title: "Pending skip trace",
+        input_params: { property_ids: [verified] },
+      })
+      .select("id")
+      .single();
+    if (error || !job) throw error ?? new Error("seed job failed");
+    MockSkipTraceProvider.setBalance(4);
+
+    const result = await approveSkipTraceJob(job.id);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe("INSUFFICIENT_CREDITS");
+  });
+
+  it("claims a pending skip-trace approval once when two approvals race", async () => {
+    const verified = await seedProperty({
+      address: "1 Approval Race Ln",
+      cassStatus: "verified",
+    });
+    const { data: prop } = await testClient
+      .from("properties")
+      .select("org_id")
+      .eq("id", verified)
+      .single();
+    const { data: job, error } = await testClient
+      .from("jobs")
+      .insert({
+        type: "skip_trace",
+        provider: "tracerfy",
+        status: "pending_approval",
+        org_id: prop!.org_id,
+        total_items: 1,
+        title: "Pending skip trace",
+        input_params: { property_ids: [verified] },
+      })
+      .select("id")
+      .single();
+    if (error || !job) throw error ?? new Error("seed job failed");
+
+    const results = await Promise.all([
+      approveSkipTraceJob(job.id),
+      approveSkipTraceJob(job.id),
+    ]);
+
+    expect(results.filter((result) => result.ok)).toHaveLength(1);
+    const rejected = results.find((result) => !result.ok);
+    expect(rejected?.ok).toBe(false);
+    if (rejected?.ok === false) {
+      expect(rejected.error.code).toBe("APPROVAL_ALREADY_CLAIMED");
+    }
+    expect(runSkipTraceEnrichment).toHaveBeenCalledTimes(1);
   });
 });

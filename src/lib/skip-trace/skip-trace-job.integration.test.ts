@@ -27,6 +27,7 @@ async function seedProperty(opts: {
   city?: string;
   state?: string;
   withContact?: boolean;
+  cassStatus?: "verified" | "unverified";
 }): Promise<{ propertyId: string; contactId: string | null }> {
   const orgId = await getOrgId();
   let contactId: string | null = null;
@@ -50,6 +51,7 @@ async function seedProperty(opts: {
       state: opts.state ?? "MO",
       status: "new_lead",
       homeowner_contact_id: contactId,
+      cass_status: opts.cassStatus === undefined ? "verified" : opts.cassStatus,
     })
     .select("id")
     .single();
@@ -768,11 +770,8 @@ describe("runSkipTraceEnrichment (integration, mock provider)", () => {
       expect(itemsA![0].status).toBe("success");
 
       // Second property: error item flagging the provider gap.
-      // Default seedProperty leaves cass_status null → classifier
-      // treats the missing-row case as `address_unverified` (we can't
-      // confirm "no data" without a clean address). Tests below
-      // cover the cass_status='verified' branch where it becomes
-      // `provider_no_data`.
+      // Runnable fixture rows default to CASS-verified, so a missing
+      // provider row means the vendor genuinely returned no owner data.
       const { data: itemsB } = await supabase
         .from("job_items")
         .select("status, error_class, error_message")
@@ -780,8 +779,8 @@ describe("runSkipTraceEnrichment (integration, mock provider)", () => {
         .eq("property_id", b.propertyId);
       expect(itemsB).toHaveLength(1);
       expect(itemsB![0].status).toBe("error");
-      expect(itemsB![0].error_class).toBe("address_unverified");
-      expect(itemsB![0].error_message).toMatch(/CASS|verify/i);
+      expect(itemsB![0].error_class).toBe("provider_no_data");
+      expect(itemsB![0].error_message).toMatch(/no owner data/i);
 
       const { data: jobRow } = await supabase
         .from("jobs")
@@ -948,8 +947,11 @@ describe("runSkipTraceEnrichment (integration, mock provider)", () => {
 
     it("CASS-unverified property + no provider row → error_class='address_unverified' AND no cache row", async () => {
       const a = await seedProperty({ address: "10 Returned Unverified Ln" });
-      const b = await seedProperty({ address: "20 No-Data Unverified Ln" });
-      // b's cass_status remains null → treated as unverified.
+      const b = await seedProperty({
+        address: "20 No-Data Unverified Ln",
+        cassStatus: "unverified",
+      });
+      // The runner blocks unverified rows before provider spend.
       const ids = [a.propertyId, b.propertyId];
       const jobId = await createPendingJob(ids);
 
