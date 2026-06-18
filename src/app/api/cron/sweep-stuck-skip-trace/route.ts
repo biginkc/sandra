@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { createClient as createSupabaseClient } from "@supabase/supabase-js";
+import { start } from "workflow/api";
 
 // Finalizing a 4,000-row part takes ~10+ min of sequential DB writes —
 // far past the default function window (the 2026-06-12 recovery passes
@@ -12,6 +13,7 @@ import { reportError } from "@/lib/errors/report";
 import { getSkipTraceProvider } from "@/lib/skip-trace/registry";
 import { finalizeSkipTraceFromBatch } from "@/lib/skip-trace/skip-trace-job";
 import type { Database } from "@/lib/supabase/types";
+import { skipTraceSubmitWorkflow } from "@/workflows/skip-trace-submit";
 
 /**
  * Vercel cron → `/api/cron/sweep-stuck-skip-trace` every 5 minutes.
@@ -23,11 +25,12 @@ import type { Database } from "@/lib/supabase/types";
  * transient network blips, deploy races). When that happens, the job
  * sits in `running` forever and someone has to notice.
  *
- * This endpoint is the catch-up. For each `skip_trace` job that's been
- * `running` for more than `MIN_AGE_BEFORE_SWEEP_MS` and has a
- * `provider_run_id` set, we poll the provider directly. If the batch
- * finished, we finalize. If it's still pending, we just bump the
- * heartbeat so the row doesn't look orphaned and try again next tick.
+ * This endpoint is the catch-up. For jobs that never reached Tracerfy
+ * (provider_run_id is null), it atomically claims the stale row and
+ * starts the durable submit workflow. For jobs already submitted
+ * (provider_run_id is set), it polls the provider directly. If the batch
+ * finished, we finalize. If it's still pending, we just bump the heartbeat
+ * so the row doesn't look orphaned and try again next tick.
  *
  * Returns a summary so the cron dashboard can reason about health
  * at a glance.
@@ -86,6 +89,7 @@ async function handle(request: Request) {
 
 export type SweepSummary = {
   candidates: number;
+  unsubmitted_reclaimed: number;
   finalized: number;
   still_pending: number;
   errors: number;
@@ -105,8 +109,80 @@ export type SweepSummary = {
 // of re-writing from scratch.
 const STALE_FINALIZING_MS = 5 * 60 * 1000;
 
+type SweepClient = ReturnType<typeof createServiceRoleClient>;
+
+async function reclaimUnsubmittedSkipTraceJobs(
+  supabase: SweepClient,
+  cutoff: string,
+): Promise<{ candidates: number; reclaimed: number; errors: number }> {
+  const { data: unsubmitted, error } = await supabase
+    .from("jobs")
+    .select("id, status, worker_heartbeat_at, created_at")
+    .eq("type", "skip_trace")
+    .in("status", ["queued", "running"])
+    .is("provider_run_id", null)
+    .or(`worker_heartbeat_at.is.null,worker_heartbeat_at.lt.${cutoff}`)
+    .order("created_at", { ascending: true })
+    .limit(PER_TICK_LIMIT);
+
+  if (error) {
+    throw new Error(
+      `fetch unsubmitted skip-trace jobs failed: ${error.message}`,
+    );
+  }
+
+  let reclaimed = 0;
+  let errors = 0;
+  for (const job of unsubmitted ?? []) {
+    const now = new Date().toISOString();
+    let claim = supabase
+      .from("jobs")
+      .update({
+        status: "running",
+        worker_heartbeat_at: now,
+      })
+      .eq("id", job.id)
+      .eq("status", job.status)
+      .is("provider_run_id", null);
+
+    claim = job.worker_heartbeat_at
+      ? claim.eq("worker_heartbeat_at", job.worker_heartbeat_at)
+      : claim.is("worker_heartbeat_at", null);
+
+    const { data: claimed, error: claimError } = await claim.select("id");
+    if (claimError) {
+      reportError(claimError, {
+        tags: { surface: "cron_sweep_unsubmitted_skip_trace_claim" },
+        extra: { jobId: job.id },
+      });
+      errors++;
+      continue;
+    }
+    if (!claimed || claimed.length === 0) {
+      continue;
+    }
+
+    try {
+      await start(skipTraceSubmitWorkflow, [{ jobId: job.id }]);
+      reclaimed++;
+    } catch (e) {
+      reportError(e, {
+        tags: { surface: "cron_sweep_unsubmitted_skip_trace_start" },
+        extra: { jobId: job.id },
+      });
+      errors++;
+    }
+  }
+
+  return {
+    candidates: unsubmitted?.length ?? 0,
+    reclaimed,
+    errors,
+  };
+}
+
 export async function runSweep(
-  supabase: ReturnType<typeof createServiceRoleClient>,
+  supabase: SweepClient,
 ): Promise<SweepSummary> {
   const staleFinalizingCutoff = new Date(
     Date.now() - STALE_FINALIZING_MS,
@@ -125,6 +201,8 @@ export async function runSweep(
 
   const cutoff = new Date(Date.now() - MIN_AGE_BEFORE_SWEEP_MS).toISOString();
 
+  const unsubmitted = await reclaimUnsubmittedSkipTraceJobs(supabase, cutoff);
+
   const { data: stuck, error } = await supabase
     .from("jobs")
     .select("id, provider, provider_run_id, started_at, worker_heartbeat_at")
@@ -141,10 +219,11 @@ export async function runSweep(
   if (!provider) {
     // Provider is feature-flagged off — nothing to poll.
     return {
-      candidates: stuck?.length ?? 0,
+      candidates: (stuck?.length ?? 0) + unsubmitted.candidates,
+      unsubmitted_reclaimed: unsubmitted.reclaimed,
       finalized: 0,
       still_pending: 0,
-      errors: 0,
+      errors: unsubmitted.errors,
     };
   }
 
@@ -186,10 +265,11 @@ export async function runSweep(
   }
 
   return {
-    candidates: stuck?.length ?? 0,
+    candidates: (stuck?.length ?? 0) + unsubmitted.candidates,
+    unsubmitted_reclaimed: unsubmitted.reclaimed,
     finalized,
     still_pending: stillPending,
-    errors,
+    errors: errors + unsubmitted.errors,
   };
 }
 

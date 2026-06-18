@@ -5,27 +5,14 @@ import { resetTenantTables } from "@tests/integration/reset";
 import { MockSkipTraceProvider } from "./providers/mock";
 
 const testClient = createTestClient();
+const { start } = vi.hoisted(() => ({ start: vi.fn() }));
+
 vi.mock("@/lib/supabase/server", () => ({
   createClient: async () => testClient,
 }));
 
-// `after()` requires a request scope — stub it to a no-op so the
-// action returns synchronously. We assert against the inserted job
-// row, not the runner side-effects.
-vi.mock("next/server", async () => {
-  const actual = await vi.importActual<typeof import("next/server")>(
-    "next/server",
-  );
-  return {
-    ...actual,
-    after: (fn: () => unknown) => {
-      void fn();
-    },
-  };
-});
-
-vi.mock("@/lib/skip-trace/skip-trace-job", () => ({
-  runSkipTraceEnrichment: vi.fn(async () => {}),
+vi.mock("workflow/api", () => ({
+  start,
 }));
 
 process.env.ADMIN_EMAILS = "jarrad@bmhgroupkc.com";
@@ -48,7 +35,6 @@ import {
   preflightSkipTrace,
   requestSkipTrace,
 } from "./actions";
-import { runSkipTraceEnrichment } from "./skip-trace-job";
 
 async function seedProperty(opts: {
   address: string;
@@ -76,7 +62,8 @@ describe("requestSkipTrace pre-flight gates (integration)", () => {
     await resetTenantTables(testClient);
     process.env.SKIP_TRACE_PROVIDER = "mock";
     MockSkipTraceProvider.reset();
-    vi.mocked(runSkipTraceEnrichment).mockClear();
+    start.mockReset();
+    start.mockResolvedValue({ runId: "test-run" });
     currentEmail = "jarrad@bmhgroupkc.com";
     currentUserId = null;
   });
@@ -451,6 +438,9 @@ describe("requestSkipTrace pre-flight gates (integration)", () => {
     if (rejected?.ok === false) {
       expect(rejected.error.code).toBe("APPROVAL_ALREADY_CLAIMED");
     }
-    expect(runSkipTraceEnrichment).toHaveBeenCalledTimes(1);
+    expect(start).toHaveBeenCalledTimes(1);
+    expect(start).toHaveBeenCalledWith(expect.any(Function), [
+      { jobId: job.id },
+    ]);
   });
 });

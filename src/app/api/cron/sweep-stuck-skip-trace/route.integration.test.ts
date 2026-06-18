@@ -1,8 +1,14 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createTestClient } from "@tests/integration/client";
 import { resetTenantTables } from "@tests/integration/reset";
 import { MockSkipTraceProvider } from "@/lib/skip-trace/providers/mock";
+
+const { start } = vi.hoisted(() => ({ start: vi.fn() }));
+
+vi.mock("workflow/api", () => ({
+  start,
+}));
 
 import { runSweep } from "./route";
 
@@ -13,6 +19,8 @@ const ORIGINAL_PROVIDER_ENV = process.env.SKIP_TRACE_PROVIDER;
 beforeEach(async () => {
   await resetTenantTables(supabase);
   MockSkipTraceProvider.reset();
+  start.mockReset();
+  start.mockResolvedValue({ runId: "test-run" });
   process.env.SKIP_TRACE_PROVIDER = "mock";
 });
 
@@ -139,7 +147,7 @@ describe("runSweep — sweep-stuck-skip-trace cron", () => {
     expect(after!.status).toBe("running");
   });
 
-  it("ignores skip_trace jobs without a provider_run_id (never submitted)", async () => {
+  it("reclaims stale skip_trace jobs without a provider_run_id", async () => {
     const orgId = await getOrgId();
     const startedAt = new Date(Date.now() - 15 * 60 * 1000).toISOString();
     const { data: job } = await supabase
@@ -149,7 +157,7 @@ describe("runSweep — sweep-stuck-skip-trace cron", () => {
         type: "skip_trace",
         status: "running",
         total_items: 1,
-        // provider_run_id intentionally null — sweep should skip
+        // provider_run_id intentionally null — sweep should restart submit
         started_at: startedAt,
         worker_heartbeat_at: startedAt,
       })
@@ -157,14 +165,53 @@ describe("runSweep — sweep-stuck-skip-trace cron", () => {
       .single();
 
     const result = await runSweep(supabase);
-    expect(result.candidates).toBe(0);
+    expect(result.candidates).toBe(1);
+    expect(result.unsubmitted_reclaimed).toBe(1);
+    expect(start).toHaveBeenCalledTimes(1);
+    expect(start).toHaveBeenCalledWith(expect.any(Function), [
+      { jobId: job!.id },
+    ]);
 
     const { data: after } = await supabase
       .from("jobs")
-      .select("status")
+      .select("status, worker_heartbeat_at")
       .eq("id", job!.id)
       .single();
     expect(after!.status).toBe("running");
+    expect(after!.worker_heartbeat_at).not.toBe(startedAt);
+  });
+
+  it("reclaims queued never-submitted skip_trace jobs with null heartbeat", async () => {
+    const orgId = await getOrgId();
+    const { data: job } = await supabase
+      .from("jobs")
+      .insert({
+        org_id: orgId,
+        type: "skip_trace",
+        status: "queued",
+        total_items: 1,
+        provider_run_id: null,
+        worker_heartbeat_at: null,
+        input_params: { property_ids: ["placeholder"] },
+      })
+      .select("id")
+      .single();
+
+    const result = await runSweep(supabase);
+    expect(result.candidates).toBe(1);
+    expect(result.unsubmitted_reclaimed).toBe(1);
+    expect(start).toHaveBeenCalledTimes(1);
+    expect(start).toHaveBeenCalledWith(expect.any(Function), [
+      { jobId: job!.id },
+    ]);
+
+    const { data: after } = await supabase
+      .from("jobs")
+      .select("status, worker_heartbeat_at")
+      .eq("id", job!.id)
+      .single();
+    expect(after!.status).toBe("running");
+    expect(after!.worker_heartbeat_at).not.toBeNull();
   });
 
   it("ignores non-skip_trace job types", async () => {

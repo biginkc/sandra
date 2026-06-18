@@ -1,6 +1,6 @@
 "use server";
 
-import { after } from "next/server";
+import { start } from "workflow/api";
 
 import { isAdminEmail } from "@/lib/auth/allowlist";
 import { listAdminUserIds } from "@/lib/auth/admins";
@@ -12,9 +12,9 @@ import {
   dispatchSkipTraceRequested,
 } from "@/lib/notifications/dispatch";
 import { createClient } from "@/lib/supabase/server";
+import { skipTraceSubmitWorkflow } from "@/workflows/skip-trace-submit";
 
 import { getSkipTraceProvider } from "./registry";
-import { runSkipTraceEnrichment } from "./skip-trace-job";
 
 /** Max rows per single Tracefy POST. Their server rejects request
  *  bodies past ~2.5 MB with a generic HTML 400 before any field
@@ -182,6 +182,21 @@ async function requireTracefyCredits(
         "Could not confirm Tracefy credits. Retry before launching skip trace.",
     },
   };
+}
+
+async function startSkipTraceSubmitWorkflow(
+  jobId: string,
+  surface: string,
+): Promise<void> {
+  try {
+    await start(skipTraceSubmitWorkflow, [{ jobId }]);
+  } catch (e) {
+    reportError(e, {
+      tags: { surface },
+      extra: { jobId },
+    });
+    throw e;
+  }
 }
 
 /** Cap removed entirely (Jarrad, 2026-06-11): credit balance is the
@@ -376,19 +391,12 @@ export async function requestSkipTrace(
     }
 
     if (isAdmin) {
-      // Run immediately. The runner exits early for async batches and
-      // the webhook finalizes; for ≤1-miss it completes inline. Parts
-      // submit sequentially — each is a fast cache-check + one POST,
-      // and Tracefy allows 10 batch submissions per 5 minutes.
-      after(async () => {
-        const bg = await createClient();
-        for (let p = 0; p < jobIds.length; p++) {
-          await runSkipTraceEnrichment(bg, {
-            jobId: jobIds[p],
-            propertyIds: parts[p],
-          });
-        }
-      });
+      // Run immediately via durable Workflow, not a raw after() runner.
+      // The workflow step claims each job before hitting Tracerfy, so a
+      // cron rescue and this action cannot double-submit the same part.
+      for (const jobId of jobIds) {
+        await startSkipTraceSubmitWorkflow(jobId, "skip_trace_request_workflow_start");
+      }
       return ok({
         jobId: jobIds[0],
         status: "queued",
@@ -520,10 +528,10 @@ export async function approveSkipTraceJob(
       };
     }
 
-    after(async () => {
-      const bg = await createClient();
-      await runSkipTraceEnrichment(bg, { jobId, propertyIds });
-    });
+    await startSkipTraceSubmitWorkflow(
+      jobId,
+      "approve_skip_trace_workflow_start",
+    );
 
     return ok({ jobId });
   } catch (e) {
