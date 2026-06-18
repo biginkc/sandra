@@ -444,15 +444,56 @@ export function ProspectsTable({
         fallbackMessage: "Could not request skip trace",
       });
       if (result.ok) {
-        if (result.data.status === "queued") {
+        const { status, eligible, cassSkipped, killSwitchSkipped } =
+          result.data;
+        const skipNote = [
+          cassSkipped > 0
+            ? `${cassSkipped.toLocaleString()} need address verification first`
+            : null,
+          killSwitchSkipped > 0
+            ? `${killSwitchSkipped.toLocaleString()} skip-trace disabled`
+            : null,
+        ]
+          .filter(Boolean)
+          .join(" · ");
+
+        if (status === "none_eligible") {
+          // Not a failure — a precondition the operator can act on, so
+          // info (never red), and leave the selection intact so they can
+          // act on the same rows. The fix DIFFERS by reason, so branch the
+          // guidance instead of always telling them to verify CASS.
+          let description: string;
+          if (cassSkipped > 0 && killSwitchSkipped > 0) {
+            description = `${cassSkipped.toLocaleString()} need address verification (CASS), ${killSwitchSkipped.toLocaleString()} have skip-trace disabled. Verify those addresses and re-enable the rest, then skip-trace.`;
+          } else if (cassSkipped > 0) {
+            description = `${cassSkipped.toLocaleString()} need address verification first. Verify the addresses (CASS), then skip-trace.`;
+          } else if (killSwitchSkipped > 0) {
+            description = `${killSwitchSkipped.toLocaleString()} have skip-trace disabled. Re-enable skip-trace on those properties first.`;
+          } else {
+            description = "No eligible properties in this selection.";
+          }
+          toast.info("Nothing to skip-trace yet", { description });
+          return;
+        }
+
+        const noun = `propert${eligible === 1 ? "y" : "ies"}`;
+        if (status === "queued") {
           toast.success(
-            `Skip-trace started for ${ids.length} propert${ids.length === 1 ? "y" : "ies"}`,
-            { description: "Watch progress on /jobs" },
+            `Skip-trace started for ${eligible.toLocaleString()} ${noun}`,
+            {
+              description: skipNote
+                ? `${skipNote} · Watch progress on /jobs`
+                : "Watch progress on /jobs",
+            },
           );
         } else {
           toast.success(
-            `Skip-trace request sent for ${ids.length} propert${ids.length === 1 ? "y" : "ies"}`,
-            { description: "Admin will approve on /jobs" },
+            `Skip-trace request sent for ${eligible.toLocaleString()} ${noun}`,
+            {
+              description: skipNote
+                ? `${skipNote} · Admin will approve on /jobs`
+                : "Admin will approve on /jobs",
+            },
           );
         }
         onClearAllSelection();
