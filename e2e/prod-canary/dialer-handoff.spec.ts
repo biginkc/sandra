@@ -1,8 +1,6 @@
 import { expect, test } from "@playwright/test";
-import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { checkQuietHours, STATE_TO_TZ } from "../../src/lib/messaging/quiet-hours";
-import type { Database } from "../../src/lib/supabase/types";
 
 import {
   deleteCanaryContactsByLastName,
@@ -16,6 +14,8 @@ import {
   pollUntil,
   requireProdCanaryEnv,
   requireProdCanarySupabase,
+  resolveAuthUserId,
+  resolvePrimaryMembershipOrgId,
   signCanaryJson,
 } from "./support";
 
@@ -29,44 +29,6 @@ function callableStateForNow(): string {
 function e164FromToken(token: string): string {
   const digits = token.replace(/\D/g, "").padEnd(7, "0").slice(-7);
   return `+1816${digits}`;
-}
-
-async function resolveAuthUserId(
-  client: SupabaseClient<Database>,
-  email: string,
-): Promise<string> {
-  const { data, error } = await client.auth.admin.listUsers();
-  if (error) {
-    throw new Error(`Could not list production canary auth users: ${error.message}`);
-  }
-
-  const user = data.users.find(
-    (candidate) => candidate.email?.toLowerCase() === email.toLowerCase(),
-  );
-  if (!user) {
-    throw new Error(`Could not resolve production canary user id for ${email}.`);
-  }
-  return user.id;
-}
-
-async function resolvePrimaryMembershipOrgId(
-  client: SupabaseClient<Database>,
-  userId: string,
-): Promise<string> {
-  const { data, error } = await client
-    .from("memberships")
-    .select("org_id")
-    .eq("user_id", userId)
-    .limit(2);
-  if (error) {
-    throw new Error(`Could not resolve production canary membership: ${error.message}`);
-  }
-  if (!data || data.length !== 1) {
-    throw new Error(
-      `Expected exactly one production canary membership, found ${data?.length ?? 0}.`,
-    );
-  }
-  return data[0].org_id;
 }
 
 async function signedRequest(
