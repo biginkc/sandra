@@ -1,0 +1,1 @@
+-- Placeholder for a remote Supabase migration version already marked applied.
