@@ -5,7 +5,9 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { useFilterState } from "./use-filter-state";
 import { BLOCK_PICKER_GROUPS } from "./add-block-picker";
+import { SaveFilterButton } from "./save-filter-button";
 import type { FilterBlock } from "@/lib/prospects/filter-schema";
+import type { BlockStack } from "@/lib/prospects/filter-schema";
 
 /**
  * Look up the human-readable label for a block kind from BLOCK_PICKER_GROUPS.
@@ -75,7 +77,10 @@ function summarize(block: FilterBlock): string {
   }
 }
 
-export type ActiveFiltersChipsProps = Record<string, never>;
+export type ActiveFiltersChipsProps = {
+  orgId?: string;
+  currentBlocks?: BlockStack;
+};
 
 /**
  * Renders one chip per configured filter block above the prospects table.
@@ -86,6 +91,7 @@ export type ActiveFiltersChipsProps = Record<string, never>;
  * "Clear all" wipes the entire filter stack.
  */
 export function ActiveFiltersChips(_props: ActiveFiltersChipsProps = {}) {
+  const { orgId, currentBlocks } = _props;
   const { blocks, removeBlock, clearAll } = useFilterState();
 
   if (blocks.length === 0) return null;
@@ -122,6 +128,9 @@ export function ActiveFiltersChips(_props: ActiveFiltersChipsProps = {}) {
       <Button variant="ghost" size="sm" onClick={clearAll}>
         Clear all
       </Button>
+      {orgId && currentBlocks ? (
+        <SaveFilterButton orgId={orgId} currentBlocks={currentBlocks} />
+      ) : null}
     </div>
   );
 }

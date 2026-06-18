@@ -414,7 +414,7 @@ export default async function PropertiesPage({
           </Suspense>
         </div>
 
-        <ActiveFiltersChips />
+        <ActiveFiltersChips orgId={orgId} currentBlocks={blockStack} />
 
         <ProspectsTable
           prospects={prospects}

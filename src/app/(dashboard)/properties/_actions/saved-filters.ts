@@ -26,9 +26,10 @@ import { createClient } from "@/lib/supabase/server";
  * `user_id = NULL`. SPEC §5 honors this — base always shows in the Quick
  * Filters bar regardless of starred state.
  *
- * All inserts hardcode `is_base: false` and `starred: false` — only the
- * migration's seed step can create base presets, and the user has to call
- * togglePinSavedFilter explicitly to star.
+ * Inserts hardcode `is_base: false` — only the migration's seed step can
+ * create base presets. Drawer-footer saves remain unstarred by default; the
+ * active-filter-row save affordance opts into `starred: true` so the saved
+ * preset is immediately visible in Quick Filters.
  */
 
 export type SavedFilterRow = {
@@ -52,6 +53,7 @@ export async function createSavedFilter(input: {
   orgId: string;
   name: string;
   filtersJson: FilterState;
+  starred?: boolean;
 }): Promise<Result<{ id: string }>> {
   try {
     const trimmed = input.name.trim();
@@ -84,7 +86,7 @@ export async function createSavedFilter(input: {
         name: trimmed,
         filters_json: input.filtersJson,
         is_base: false,
-        starred: false,
+        starred: input.starred ?? false,
       })
       .select("id")
       .single();

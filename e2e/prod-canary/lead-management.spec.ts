@@ -1,32 +1,13 @@
 import { expect, test } from "@playwright/test";
-import type { SupabaseClient } from "@supabase/supabase-js";
 
-import type { Database } from "../../src/lib/supabase/types";
 import {
   deleteCanaryPropertiesByAddress,
   insertCanaryProspect,
   pollUntil,
   requireProdCanaryEnv,
   requireProdCanarySupabase,
+  resolveAuthUserId,
 } from "./support";
-
-async function resolveAuthUserId(
-  client: SupabaseClient<Database>,
-  email: string,
-): Promise<string> {
-  const { data, error } = await client.auth.admin.listUsers();
-  if (error) {
-    throw new Error(`Could not list production canary auth users: ${error.message}`);
-  }
-
-  const user = data.users.find(
-    (candidate) => candidate.email?.toLowerCase() === email.toLowerCase(),
-  );
-  if (!user) {
-    throw new Error(`Could not resolve production canary user id for ${email}.`);
-  }
-  return user.id;
-}
 
 test("production canary edits a canary lead detail status, motivation, and assignee", async ({
   page,

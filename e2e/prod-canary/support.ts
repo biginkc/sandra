@@ -104,6 +104,44 @@ export function requireProdCanarySupabase(): SupabaseClient<Database> {
   });
 }
 
+export async function resolveAuthUserId(
+  client: SupabaseClient<Database>,
+  email: string,
+): Promise<string> {
+  const { data, error } = await client.auth.admin.listUsers();
+  if (error) {
+    throw new Error(`Could not list production canary auth users: ${error.message}`);
+  }
+
+  const user = data.users.find(
+    (candidate) => candidate.email?.toLowerCase() === email.toLowerCase(),
+  );
+  if (!user) {
+    throw new Error(`Could not resolve production canary user id for ${email}.`);
+  }
+  return user.id;
+}
+
+export async function resolvePrimaryMembershipOrgId(
+  client: SupabaseClient<Database>,
+  userId: string,
+): Promise<string> {
+  const { data, error } = await client
+    .from("memberships")
+    .select("org_id")
+    .eq("user_id", userId)
+    .limit(2);
+  if (error) {
+    throw new Error(`Could not resolve production canary membership: ${error.message}`);
+  }
+  if (!data || data.length !== 1) {
+    throw new Error(
+      `Expected exactly one production canary membership, found ${data?.length ?? 0}.`,
+    );
+  }
+  return data[0].org_id;
+}
+
 export function assertCanaryOwned(value: string, context: string): void {
   if (!value.includes("PROD-CANARY")) {
     throw new Error(`${context} must include PROD-CANARY before cleanup/write.`);
@@ -916,6 +954,18 @@ export async function deleteCanaryPropertiesByAddressPrefix(
         `Could not delete canary properties: ${propertyError.message}`,
       );
     }
+  }
+}
+
+export async function deleteCanarySavedFiltersByName(
+  client: SupabaseClient<Database>,
+  name: string,
+): Promise<void> {
+  assertCanaryOwned(name, "saved filter name");
+
+  const { error } = await client.from("saved_filters").delete().eq("name", name);
+  if (error) {
+    throw new Error(`Could not delete canary saved filters: ${error.message}`);
   }
 }
 
