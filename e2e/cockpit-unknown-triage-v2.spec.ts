@@ -114,6 +114,7 @@ test("Merge with existing contact (renamed) still attaches messages + adds phone
       first_name: "Existing",
       last_name: "Person",
       phone_1: "+18165561103",
+      phone_1_type: "mobile",
     })
     .select("id")
     .single();

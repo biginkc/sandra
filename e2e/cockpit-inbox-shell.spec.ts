@@ -6,6 +6,7 @@ import {
   resetTenantTables,
   seedProspects,
 } from "./fixtures";
+import { ensureConversationIdForThread } from "../src/lib/messages/threading";
 
 /**
  * Feature 8 Phase 1 — cockpit shell + tabs + inbox list rendering.
@@ -37,6 +38,7 @@ async function seedThread(
       first_name: opts.contactName.first,
       last_name: opts.contactName.last,
       phone_1: opts.phone,
+      phone_1_type: "mobile",
     })
     .select("id")
     .single();
@@ -50,6 +52,11 @@ async function seedThread(
       status: "new_lead",
     })
     .eq("id", prop.id);
+  const conversationId = await ensureConversationIdForThread(
+    admin,
+    contact.id,
+    prop.id,
+  );
 
   for (const m of opts.messages) {
     const offsetMs = m.createdAtOffsetMin * 60_000;
@@ -58,6 +65,7 @@ async function seedThread(
       channel: "sms",
       direction: m.direction,
       status: m.direction === "inbound" ? "received" : "sent",
+      conversation_id: conversationId,
       contact_id: contact.id,
       property_id: prop.id,
       from_address: m.direction === "inbound" ? opts.phone : "+18162804181",
@@ -73,7 +81,7 @@ async function seedThread(
   return {
     contactId: contact.id,
     propertyId: prop.id,
-    threadId: `legacy:${contact.id}:${prop.id}`,
+    threadId: conversationId,
   };
 }
 

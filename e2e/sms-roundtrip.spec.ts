@@ -36,6 +36,7 @@ test("inbound webhook lands in thread and auto-qualifies the prospect", async ({
       first_name: "Inbound",
       last_name: "Smoke",
       phone_1: phone,
+      phone_1_type: "mobile",
     })
     .select("id")
     .single();
