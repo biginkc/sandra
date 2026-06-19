@@ -12,6 +12,8 @@ export type Thread = {
   contactPhone: string | null;
   propertyId: string | null;
   propertyAddress: string | null;
+  propertyStatus: string | null;
+  outreachDispo: string | null;
   /** auth.users.id of whoever is assigned to the property, or null. */
   assigneeId: string | null;
   lastMessageBody: string;
@@ -33,6 +35,8 @@ export type Thread = {
    *  rehearsal contacts and synthetic addresses). Hidden by the same
    *  inbox toggle as DNC — both are noise, one switch. */
   isTestTraffic: boolean;
+  /** True when this replied prospect thread still needs an operator outcome. */
+  needsOutcome: boolean;
 };
 
 /** Match Jitter's test-fixture CONTRACT precisely, not generic human
@@ -73,6 +77,15 @@ export type ListThreadsOpts = {
    *  review (properties.needs_human_attention). Drives the "Escalated"
    *  inbox filter chip. */
   escalatedOnly?: boolean;
+  /** When true, returns only replied prospect threads with no outreach outcome. */
+  needsOutcomeOnly?: boolean;
+};
+
+export type NeedsOutcomeCountOpts = {
+  /** Window for "active" conversations. Defaults to 90 days. */
+  sinceDays?: number;
+  /** When true, excludes contacts whose latest SMS consent state is opt-out. */
+  hideOptedOut?: boolean;
 };
 
 /**
@@ -157,7 +170,7 @@ export async function listThreads(
       supabase
         .from("properties")
         .select(
-          "id, address, city, state, assigned_user_id, needs_human_attention, last_ai_escalation_reason",
+          "id, address, city, state, status, outreach_dispo, assigned_user_id, needs_human_attention, last_ai_escalation_reason",
         )
         .in("id", chunk),
     ),
@@ -201,6 +214,12 @@ export async function listThreads(
     )
       continue;
     if (opts.escalatedOnly && !(p?.needs_human_attention ?? false)) continue;
+    const needsOutcome =
+      bucket.propertyId !== null &&
+      bucket.latest.direction === "inbound" &&
+      p?.status === "prospect" &&
+      p?.outreach_dispo == null;
+    if (opts.needsOutcomeOnly && !needsOutcome) continue;
 
     const consentState = computeConsentState(
       consentEventsByContact.get(contactId) ?? [],
@@ -218,6 +237,8 @@ export async function listThreads(
       propertyAddress: p
         ? [p.address, p.city, p.state].filter(Boolean).join(", ")
         : null,
+      propertyStatus: p?.status ?? null,
+      outreachDispo: p?.outreach_dispo ?? null,
       assigneeId: p?.assigned_user_id ?? null,
       lastMessageBody: bucket.latest.body,
       lastMessageDirection: bucket.latest.direction as "inbound" | "outbound",
@@ -233,6 +254,7 @@ export async function listThreads(
           : null,
         p ? [p.address, p.city, p.state].filter(Boolean).join(", ") : null,
       ),
+      needsOutcome,
     });
   }
 
@@ -242,6 +264,84 @@ export async function listThreads(
   // the "what needs attention" view.
   threads.sort((a, b) => b.lastMessageAt.localeCompare(a.lastMessageAt));
   return threads;
+}
+
+export async function countNeedsOutcomeThreads(
+  supabase: SupabaseClient<Database>,
+  opts: NeedsOutcomeCountOpts = {},
+): Promise<number> {
+  const sinceDays = opts.sinceDays ?? 90;
+  const cutoff = new Date(Date.now() - sinceDays * 24 * 60 * 60 * 1000).toISOString();
+
+  const { data: msgs, error } = await supabase
+    .from("messages")
+    .select("contact_id, property_id, conversation_id, direction, created_at")
+    .eq("channel", "sms")
+    .not("contact_id", "is", null)
+    .not("property_id", "is", null)
+    .not("conversation_id", "is", null)
+    .neq("status", "queued")
+    .gte("created_at", cutoff)
+    .order("created_at", { ascending: false });
+  if (error) throw new Error(`countNeedsOutcomeThreads: ${error.message}`);
+  if (!msgs || msgs.length === 0) return 0;
+
+  type Candidate = { contactId: string; propertyId: string };
+  const candidatesByThread = new Map<string, Candidate>();
+  for (const m of msgs) {
+    const contactId = m.contact_id;
+    const propertyId = m.property_id;
+    if (!contactId || !propertyId) continue;
+    const threadId = m.conversation_id!;
+    if (candidatesByThread.has(threadId)) continue;
+    if (m.direction === "inbound") {
+      candidatesByThread.set(threadId, { contactId, propertyId });
+    }
+  }
+  const candidates = Array.from(candidatesByThread.values());
+  if (candidates.length === 0) return 0;
+
+  const CHUNK = 250;
+  const propertyIds = Array.from(new Set(candidates.map((c) => c.propertyId)));
+  const propsRows = await fetchInChunks(propertyIds, CHUNK, (chunk) =>
+    supabase
+      .from("properties")
+      .select("id, status, outreach_dispo")
+      .in("id", chunk),
+  );
+  const propertyById = new Map(propsRows.map((p) => [p.id, p]));
+  const needsOutcome = candidates.filter((candidate) => {
+    const property = propertyById.get(candidate.propertyId);
+    return property?.status === "prospect" && property.outreach_dispo == null;
+  });
+  if (!opts.hideOptedOut || needsOutcome.length === 0) {
+    return needsOutcome.length;
+  }
+
+  const contactIds = Array.from(new Set(needsOutcome.map((c) => c.contactId)));
+  const consentRows = await fetchInChunks(contactIds, CHUNK, (chunk) =>
+    supabase
+      .from("consent_events")
+      .select("contact_id, event_type, occurred_at")
+      .eq("channel", "sms")
+      .in("contact_id", chunk)
+      .order("occurred_at", { ascending: false }),
+  );
+  const consentEventsByContact = new Map<
+    string,
+    Array<{ event_type: string; occurred_at: string }>
+  >();
+  for (const ev of consentRows) {
+    const list = consentEventsByContact.get(ev.contact_id) ?? [];
+    list.push({ event_type: ev.event_type, occurred_at: ev.occurred_at });
+    consentEventsByContact.set(ev.contact_id, list);
+  }
+
+  return needsOutcome.filter(
+    (candidate) =>
+      computeConsentState(consentEventsByContact.get(candidate.contactId) ?? []) !==
+      "opted_out",
+  ).length;
 }
 
 /**

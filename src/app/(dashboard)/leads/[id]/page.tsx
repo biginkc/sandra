@@ -37,6 +37,7 @@ import {
   LeadCallSummary,
   type CallActivityRollupRow,
 } from "./lead-call-summary";
+import { LeadTaskWidget } from "./lead-task-widget";
 import { SmsComposer } from "./sms-composer";
 import { TagsSection } from "./tags-section";
 import type { MotivationLevel } from "../actions";
@@ -437,6 +438,15 @@ export default async function LeadDetailPage({
             />
           </div>
         </div>
+
+        <Section title="Tasks">
+          <LeadTaskWidget
+            propertyId={lead.id}
+            address={lead.address}
+            currentUserId={sessionUser?.id ?? null}
+            initialAssigneeId={lead.assigned_user_id}
+          />
+        </Section>
 
         <Section title="Address quality (USPS)">
           <Row label="CASS status" value={lead.cass_status} />

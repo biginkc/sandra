@@ -21,6 +21,9 @@ function makeThread(overrides: Partial<Thread> & { threadId: string }): Thread {
     isOptedOut: false,
     isTestTraffic: false,
     ...overrides,
+    propertyStatus: overrides.propertyStatus ?? null,
+    outreachDispo: overrides.outreachDispo ?? null,
+    needsOutcome: overrides.needsOutcome ?? false,
   };
 }
 

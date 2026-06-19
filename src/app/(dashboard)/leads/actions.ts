@@ -1,5 +1,6 @@
 "use server";
 
+import { revalidatePath } from "next/cache";
 import { after } from "next/server";
 import { start } from "workflow/api";
 
@@ -25,7 +26,13 @@ import {
   type SendSmsOutcome,
 } from "@/lib/messaging/send";
 import type { DialpadFromOption } from "@/lib/messaging/types";
-import { dispatchPropertyAssigned } from "@/lib/notifications/dispatch";
+import { dispatchTaskCalendarEvent } from "@/lib/integrations/google/dispatch";
+import { loadIntegrationPrefs } from "@/lib/integrations/prefs";
+import { dispatchTaskAssignedSlack } from "@/lib/integrations/slack/dispatch";
+import {
+  dispatchPropertyAssigned,
+  dispatchTaskAssigned,
+} from "@/lib/notifications/dispatch";
 import {
   applyFilters,
   filterSelectFragment,
@@ -34,6 +41,7 @@ import type { FilterBlock } from "@/lib/prospects/filter-schema";
 import type { Database } from "@/lib/supabase/types";
 import { loadTemplateVars } from "@/lib/sequences/template-vars";
 import type { TemplateVars } from "@/lib/templates/render";
+import { createTask, type Task, type TaskType } from "@/lib/tasks";
 
 export type PropertyStatus =
   | "prospect"
@@ -1191,6 +1199,203 @@ export async function updatePropertyStatus(
   }
 }
 
+export type LeadTaskKind = Extract<TaskType, "follow_up" | "callback">;
+
+export async function createLeadTaskAction(
+  propertyId: string,
+  input: {
+    type: LeadTaskKind;
+    dueAt: string;
+    assigneeId: string;
+  },
+): Promise<Result<Task>> {
+  if (input.type !== "follow_up" && input.type !== "callback") {
+    return {
+      ok: false,
+      error: {
+        code: "INVALID_TASK_TYPE",
+        message: "Choose follow-up or callback.",
+      },
+    };
+  }
+  if (!input.dueAt || Number.isNaN(new Date(input.dueAt).getTime())) {
+    return {
+      ok: false,
+      error: {
+        code: "INVALID_DUE_AT",
+        message: "Choose a valid due date.",
+      },
+    };
+  }
+  if (!input.assigneeId) {
+    return {
+      ok: false,
+      error: {
+        code: "ASSIGNEE_REQUIRED",
+        message: "Choose who owns this task.",
+      },
+    };
+  }
+
+  try {
+    const supabase = await createClient();
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    if (!user) {
+      return {
+        ok: false,
+        error: { code: "UNAUTHENTICATED", message: "Not signed in" },
+      };
+    }
+
+    const { data: property, error: propertyErr } = await supabase
+      .from("properties")
+      .select("id, org_id, address")
+      .eq("id", propertyId)
+      .maybeSingle();
+    if (propertyErr) {
+      return {
+        ok: false,
+        error: { code: "LEAD_FETCH_FAILED", message: propertyErr.message },
+      };
+    }
+    if (!property) {
+      return {
+        ok: false,
+        error: { code: "LEAD_NOT_FOUND", message: "Lead not found." },
+      };
+    }
+
+    const { data: actorMembership, error: actorMembershipErr } = await supabase
+      .from("memberships")
+      .select("user_id")
+      .eq("org_id", property.org_id)
+      .eq("user_id", user.id)
+      .maybeSingle();
+    if (actorMembershipErr) {
+      return {
+        ok: false,
+        error: {
+          code: "MEMBERSHIP_LOOKUP_FAILED",
+          message: actorMembershipErr.message,
+        },
+      };
+    }
+    if (!actorMembership) {
+      return {
+        ok: false,
+        error: {
+          code: "LEAD_FORBIDDEN",
+          message: "You do not have access to this lead's org.",
+        },
+      };
+    }
+
+    const admin = createAdminClient();
+    const { data: assignee, error: assigneeErr } = await admin
+      .from("memberships")
+      .select("user_id")
+      .eq("org_id", property.org_id)
+      .eq("user_id", input.assigneeId)
+      .maybeSingle();
+    if (assigneeErr) {
+      return {
+        ok: false,
+        error: {
+          code: "ASSIGNEE_LOOKUP_FAILED",
+          message: assigneeErr.message,
+        },
+      };
+    }
+    if (!assignee) {
+      return {
+        ok: false,
+        error: {
+          code: "ASSIGNEE_NOT_IN_ORG",
+          message: "Choose a team member in this lead's org.",
+        },
+      };
+    }
+
+    const taskTitle =
+      input.type === "callback"
+        ? `Callback ${property.address}`
+        : `Follow up on ${property.address}`;
+    const taskResult = await createTask(supabase, {
+      orgId: property.org_id,
+      assigneeId: input.assigneeId,
+      relatedPropertyId: property.id,
+      type: input.type,
+      title: taskTitle,
+      dueAt: input.dueAt,
+      createdBy: user.id,
+    });
+
+    if (!taskResult.ok) return taskResult;
+
+    if (input.assigneeId !== user.id) {
+      const prefs = await loadIntegrationPrefs(supabase, input.assigneeId);
+      const deepLink = buildLeadTaskDeepLink(property.id);
+      after(async () => {
+        await Promise.allSettled([
+          dispatchTaskAssigned(supabase, {
+            taskId: taskResult.data.id,
+            orgId: property.org_id,
+            assigneeId: input.assigneeId,
+            taskTitle,
+            taskType: input.type,
+            dueAt: input.dueAt,
+            propertyAddress: property.address,
+          }),
+          dispatchTaskAssignedSlack({
+            taskId: taskResult.data.id,
+            assigneeId: input.assigneeId,
+            taskTitle,
+            taskType: input.type,
+            dueAt: input.dueAt,
+            propertyAddress: property.address,
+            deepLink,
+            timezone: prefs.timezone,
+            slackEnabled: prefs.slackEnabled,
+          }),
+          dispatchTaskCalendarEvent({
+            taskId: taskResult.data.id,
+            assigneeId: input.assigneeId,
+            taskTitle,
+            propertyAddress: property.address,
+            dueAt: input.dueAt,
+            timezone: prefs.timezone,
+            deepLink,
+            calendarEnabled: prefs.calendarEnabled,
+          }),
+        ]);
+      });
+    }
+
+    revalidatePath(`/leads/${propertyId}`);
+    revalidatePath("/dashboard");
+    return taskResult;
+  } catch (e) {
+    reportError(e, {
+      tags: { surface: "create_lead_task" },
+      extra: { propertyId, type: input.type },
+    });
+    return errFromUnknown(e, "TASK_CREATE_FAILED");
+  }
+}
+
+function buildLeadTaskDeepLink(propertyId: string): string {
+  const baseUrl =
+    process.env.NEXT_PUBLIC_APP_URL ??
+    process.env.APP_URL ??
+    "https://sandra-sooty.vercel.app";
+  const normalizedBaseUrl = baseUrl.startsWith("http")
+    ? baseUrl
+    : `https://${baseUrl}`;
+  return `${normalizedBaseUrl}/leads/${propertyId}`;
+}
+
 // ============================================================================
 // SMS messaging (Phase 1 — Dialpad via MessagingProvider adapter)
 // ============================================================================
@@ -1334,16 +1539,60 @@ export type TeamMember = {
  */
 export async function listOrgUsers(): Promise<Result<TeamMember[]>> {
   try {
-    const admin = createAdminClient();
-    const { data, error } = await admin.auth.admin.listUsers({ perPage: 200 });
-    if (error) {
+    const supabase = await createClient();
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    if (!user) {
       return {
         ok: false,
-        error: { code: "TEAM_FETCH_FAILED", message: error.message },
+        error: { code: "UNAUTHENTICATED", message: "Not signed in" },
       };
     }
-    const members: TeamMember[] = (data?.users ?? [])
-      .filter((u) => !!u.email)
+
+    const { data: myMemberships, error: myMembershipsError } = await supabase
+      .from("memberships")
+      .select("org_id")
+      .eq("user_id", user.id);
+    if (myMembershipsError) {
+      return {
+        ok: false,
+        error: {
+          code: "TEAM_FETCH_FAILED",
+          message: myMembershipsError.message,
+        },
+      };
+    }
+
+    const orgIds = Array.from(
+      new Set((myMemberships ?? []).map((membership) => membership.org_id)),
+    );
+    if (orgIds.length === 0) return ok([]);
+
+    const admin = createAdminClient();
+    const { data: orgMemberships, error: orgMembershipsError } = await admin
+      .from("memberships")
+      .select("user_id")
+      .in("org_id", orgIds);
+    if (orgMembershipsError) {
+      return {
+        ok: false,
+        error: {
+          code: "TEAM_FETCH_FAILED",
+          message: orgMembershipsError.message,
+        },
+      };
+    }
+
+    const memberIds = new Set(
+      (orgMemberships ?? []).map((membership) => membership.user_id),
+    );
+    if (memberIds.size === 0) return ok([]);
+
+    const users = await listAllAuthUsers(admin);
+    if (!users.ok) return users;
+    const members: TeamMember[] = users.data
+      .filter((u) => memberIds.has(u.id) && !!u.email)
       .map((u) => ({ id: u.id, email: u.email as string }))
       .sort((a, b) => a.email.localeCompare(b.email));
     return ok(members);
@@ -1351,6 +1600,35 @@ export async function listOrgUsers(): Promise<Result<TeamMember[]>> {
     reportError(e, { tags: { surface: "list_org_users" } });
     return errFromUnknown(e, "TEAM_FETCH_FAILED");
   }
+}
+
+type AuthUserPageUser = { id: string; email?: string | null };
+
+async function listAllAuthUsers(
+  admin: ReturnType<typeof createAdminClient>,
+): Promise<Result<AuthUserPageUser[]>> {
+  const users: AuthUserPageUser[] = [];
+  let page = 1;
+  const perPage = 200;
+
+  while (true) {
+    const { data, error } = await admin.auth.admin.listUsers({
+      page,
+      perPage,
+    });
+    if (error) {
+      return {
+        ok: false,
+        error: { code: "TEAM_FETCH_FAILED", message: error.message },
+      };
+    }
+
+    users.push(...((data?.users ?? []) as AuthUserPageUser[]));
+    if (!data?.nextPage || data.users.length === 0) break;
+    page = data.nextPage;
+  }
+
+  return ok(users);
 }
 
 /**

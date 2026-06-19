@@ -17,6 +17,7 @@ export function parseInboxFilter(raw: string | undefined): InboxFilter {
     case "unassigned":
     case "unread":
     case "escalated":
+    case "needs_outcome":
       return raw;
     default:
       return "all";
@@ -30,7 +31,8 @@ export function isThreadFilter(f: InboxFilter): boolean {
     f === "mine" ||
     f === "unassigned" ||
     f === "unread" ||
-    f === "escalated"
+    f === "escalated" ||
+    f === "needs_outcome"
   );
 }
 
@@ -43,6 +45,8 @@ export function isThreadFilter(f: InboxFilter): boolean {
  *   `includeThreadId` so read-on-open doesn't yank it mid-view.
  * - `escalated` returns only threads the AI handed off
  *   (properties.needs_human_attention).
+ * - `needs_outcome` returns replied prospects that still lack an outreach
+ *   outcome.
  */
 export function buildThreadOpts(
   filter: InboxFilter,
@@ -58,5 +62,6 @@ export function buildThreadOpts(
     if (ctx.canonicalThreadId) opts.includeThreadId = ctx.canonicalThreadId;
   }
   if (filter === "escalated") opts.escalatedOnly = true;
+  if (filter === "needs_outcome") opts.needsOutcomeOnly = true;
   return opts;
 }
