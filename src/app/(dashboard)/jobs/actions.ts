@@ -8,8 +8,8 @@ import { createCassChildJob } from "@/lib/enrichment/cass-job";
 import { cassBulkWorkflow } from "@/workflows/cass-bulk";
 import { errFromUnknown, ok, type Result } from "@/lib/errors/result";
 import { reportError } from "@/lib/errors/report";
-import { runSkipTraceEnrichment } from "@/lib/skip-trace/skip-trace-job";
 import { createClient } from "@/lib/supabase/server";
+import { skipTraceSubmitWorkflow } from "@/workflows/skip-trace-submit";
 
 /**
  * Start a CASS child job that the import autotrigger deliberately parked in
@@ -474,29 +474,14 @@ export async function retryFailedSkipTraceItems(
       };
     }
 
-    after(async () => {
-      try {
-        const bg = await createClient();
-        await runSkipTraceEnrichment(bg, {
-          jobId: childRow.id,
-          propertyIds,
-        });
-      } catch (e) {
-        reportError(e, {
-          tags: { surface: "retry_skip_trace_after" },
-          extra: { childId: childRow.id, propertyCount: propertyIds.length },
-        });
-        await supabase
-          .from("jobs")
-          .update({
-            status: "failed",
-            error_class: "internal",
-            error_message: e instanceof Error ? e.message : String(e),
-            completed_at: new Date().toISOString(),
-          })
-          .eq("id", childRow.id);
-      }
-    });
+    try {
+      await start(skipTraceSubmitWorkflow, [{ jobId: childRow.id }]);
+    } catch (e) {
+      reportError(e, {
+        tags: { surface: "retry_skip_trace_workflow_start" },
+        extra: { childId: childRow.id, propertyCount: propertyIds.length },
+      });
+    }
 
     return ok({ total: propertyIds.length, childJobId: childRow.id });
   } catch (e) {
@@ -507,4 +492,3 @@ export async function retryFailedSkipTraceItems(
     return errFromUnknown(e, "RETRY_SKIP_TRACE_FAILED");
   }
 }
-

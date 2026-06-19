@@ -5,27 +5,14 @@ import { resetTenantTables } from "@tests/integration/reset";
 import { MockSkipTraceProvider } from "./providers/mock";
 
 const testClient = createTestClient();
+const { start } = vi.hoisted(() => ({ start: vi.fn() }));
+
 vi.mock("@/lib/supabase/server", () => ({
   createClient: async () => testClient,
 }));
 
-// `after()` requires a request scope — stub it to a no-op so the
-// action returns synchronously. We assert against the inserted job
-// row, not the runner side-effects.
-vi.mock("next/server", async () => {
-  const actual = await vi.importActual<typeof import("next/server")>(
-    "next/server",
-  );
-  return {
-    ...actual,
-    after: (fn: () => unknown) => {
-      void fn();
-    },
-  };
-});
-
-vi.mock("@/lib/skip-trace/skip-trace-job", () => ({
-  runSkipTraceEnrichment: vi.fn(async () => {}),
+vi.mock("workflow/api", () => ({
+  start,
 }));
 
 process.env.ADMIN_EMAILS = "jarrad@bmhgroupkc.com";
@@ -48,7 +35,6 @@ import {
   preflightSkipTrace,
   requestSkipTrace,
 } from "./actions";
-import { runSkipTraceEnrichment } from "./skip-trace-job";
 
 async function seedProperty(opts: {
   address: string;
@@ -76,7 +62,8 @@ describe("requestSkipTrace pre-flight gates (integration)", () => {
     await resetTenantTables(testClient);
     process.env.SKIP_TRACE_PROVIDER = "mock";
     MockSkipTraceProvider.reset();
-    vi.mocked(runSkipTraceEnrichment).mockClear();
+    start.mockReset();
+    start.mockResolvedValue({ runId: "test-run" });
     currentEmail = "jarrad@bmhgroupkc.com";
     currentUserId = null;
   });
@@ -104,6 +91,31 @@ describe("requestSkipTrace pre-flight gates (integration)", () => {
     expect(new Set(input)).toEqual(new Set(ids));
     // No skipped suffix on the happy path.
     expect(job!.title).not.toMatch(/skipped/i);
+    expect(start).toHaveBeenCalledTimes(1);
+    expect(start).toHaveBeenCalledWith(expect.any(Function), [
+      { jobId: result.data.jobId },
+    ]);
+  });
+
+  it("keeps admin request successful when workflow enqueue fails after job create", async () => {
+    const id = await seedProperty({
+      address: "1 Recoverable Start Failure Ln",
+      cassStatus: "verified",
+    });
+    start.mockRejectedValueOnce(new Error("workflow enqueue down"));
+
+    const result = await requestSkipTrace([id]);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.data.status).toBe("queued");
+    const { data: job } = await testClient
+      .from("jobs")
+      .select("status, provider_run_id, worker_heartbeat_at")
+      .eq("id", result.data.jobId!)
+      .single();
+    expect(job?.status).toBe("queued");
+    expect(job?.provider_run_id).toBeNull();
   });
 
   it("preflight prices a single eligible row at 5 Tracefy credits", async () => {
@@ -157,6 +169,11 @@ describe("requestSkipTrace pre-flight gates (integration)", () => {
     if (!result.ok) return;
     expect(result.data.eligible).toBe(4_001);
     expect(result.data.tracefyCreditsRequired).toBe(4_005);
+
+    const launch = await requestSkipTrace(data.map((row) => row.id));
+    expect(launch.ok).toBe(true);
+    if (!launch.ok) return;
+    expect(start).toHaveBeenCalledTimes(2);
   });
 
   it("preflight reports CASS status separately from skip-trace eligibility", async () => {
@@ -451,6 +468,47 @@ describe("requestSkipTrace pre-flight gates (integration)", () => {
     if (rejected?.ok === false) {
       expect(rejected.error.code).toBe("APPROVAL_ALREADY_CLAIMED");
     }
-    expect(runSkipTraceEnrichment).toHaveBeenCalledTimes(1);
+    expect(start).toHaveBeenCalledTimes(1);
+    expect(start).toHaveBeenCalledWith(expect.any(Function), [
+      { jobId: job.id },
+    ]);
+  });
+
+  it("keeps approval successful when workflow enqueue fails after claim", async () => {
+    const verified = await seedProperty({
+      address: "1 Approval Start Failure Ln",
+      cassStatus: "verified",
+    });
+    const { data: prop } = await testClient
+      .from("properties")
+      .select("org_id")
+      .eq("id", verified)
+      .single();
+    const { data: job, error } = await testClient
+      .from("jobs")
+      .insert({
+        type: "skip_trace",
+        provider: "tracerfy",
+        status: "pending_approval",
+        org_id: prop!.org_id,
+        total_items: 1,
+        title: "Pending skip trace",
+        input_params: { property_ids: [verified] },
+      })
+      .select("id")
+      .single();
+    if (error || !job) throw error ?? new Error("seed job failed");
+    start.mockRejectedValueOnce(new Error("workflow enqueue down"));
+
+    const result = await approveSkipTraceJob(job.id);
+
+    expect(result.ok).toBe(true);
+    const { data: after } = await testClient
+      .from("jobs")
+      .select("status, provider_run_id")
+      .eq("id", job.id)
+      .single();
+    expect(after?.status).toBe("queued");
+    expect(after?.provider_run_id).toBeNull();
   });
 });

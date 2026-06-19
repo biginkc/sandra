@@ -193,6 +193,76 @@ describe("runSkipTraceEnrichment (integration, mock provider)", () => {
     expect(job!.provider_run_id).toBeTruthy();
   });
 
+  it("async path: does not submit a second provider batch after a queue id is already saved", async () => {
+    const props = await Promise.all([
+      seedProperty({ address: "11 Duplicate Submit Ln" }),
+      seedProperty({ address: "22 Duplicate Submit Ln" }),
+    ]);
+    const ids = props.map((p) => p.propertyId);
+    const jobId = await createPendingJob(ids);
+    await supabase
+      .from("jobs")
+      .update({
+        status: "running",
+        provider_run_id: "already-submitted-q",
+      })
+      .eq("id", jobId);
+
+    const out = await runSkipTraceEnrichment(supabase, {
+      jobId,
+      propertyIds: ids,
+    });
+    expect("pending" in out).toBe(false);
+
+    const provider = new MockSkipTraceProvider();
+    expect(await provider.pollBatch("mock-queue-1")).toBeNull();
+
+    const { data: job } = await supabase
+      .from("jobs")
+      .select("provider_run_id, result_summary")
+      .eq("id", jobId)
+      .single();
+    expect(job!.provider_run_id).toBe("already-submitted-q");
+    expect(job!.result_summary).toBeNull();
+  });
+
+  it("async path: does not mark failed when queue-id persistence loses to another submitter", async () => {
+    const props = await Promise.all([
+      seedProperty({ address: "33 Queue Race Ln" }),
+      seedProperty({ address: "44 Queue Race Ln" }),
+    ]);
+    const ids = props.map((p) => p.propertyId);
+    const jobId = await createPendingJob(ids);
+    const originalSubmitBatch = MockSkipTraceProvider.prototype.submitBatch;
+    MockSkipTraceProvider.prototype.submitBatch = async function (inputs) {
+      const ticket = await originalSubmitBatch.call(this, inputs);
+      await supabase
+        .from("jobs")
+        .update({ provider_run_id: "winner-q" })
+        .eq("id", jobId);
+      return ticket;
+    };
+
+    try {
+      const out = await runSkipTraceEnrichment(supabase, {
+        jobId,
+        propertyIds: ids,
+      });
+      expect("pending" in out).toBe(false);
+    } finally {
+      MockSkipTraceProvider.prototype.submitBatch = originalSubmitBatch;
+    }
+
+    const { data: job } = await supabase
+      .from("jobs")
+      .select("status, provider_run_id, error_message")
+      .eq("id", jobId)
+      .single();
+    expect(job!.status).toBe("running");
+    expect(job!.provider_run_id).toBe("winner-q");
+    expect(job!.error_message).toBeNull();
+  });
+
   it("finalizeSkipTraceFromBatch persists results + completes the job", async () => {
     const props = await Promise.all([
       seedProperty({ address: "100 Batch Ln" }),
