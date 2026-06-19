@@ -33,6 +33,7 @@ type Props = {
   unknownSenders: UnknownSender[];
   unknownActiveCount: number;
   needsOutcomeCount: number;
+  unreadCount: number;
   /** auth.users.id → email map for assignee badges. */
   assigneeEmails: Record<string, string>;
   /** auth.users.id of the current viewer. */
@@ -65,6 +66,7 @@ export function CockpitView({
   unknownSenders,
   unknownActiveCount,
   needsOutcomeCount,
+  unreadCount,
   assigneeEmails,
   currentUserId,
   queueStats,
@@ -199,7 +201,7 @@ export function CockpitView({
             active={filter}
             unknownCount={unknownActiveCount}
             needsOutcomeCount={needsOutcomeCount}
-            unreadCount={threads.filter((t) => t.unreadCount > 0).length}
+            unreadCount={unreadCount}
             showAssignmentChips={currentUserId !== null}
             hideDnc={hideDnc}
             hiddenDncCount={hiddenDncCount}

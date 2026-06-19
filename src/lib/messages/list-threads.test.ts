@@ -803,4 +803,118 @@ describe("countNeedsOutcomeThreads", () => {
     expect(inCalls.properties).toHaveLength(1);
     expect(inCalls.consent_events).toHaveLength(1);
   });
+
+  it("can exclude Jitter test traffic from the Needs Outcome count", async () => {
+    const now = Date.now();
+    const messages = [
+      {
+        contact_id: "c-real",
+        property_id: "p-real",
+        body: "Yes",
+        direction: "inbound" as const,
+        created_at: new Date(now).toISOString(),
+        read_at: null,
+      },
+      {
+        contact_id: "c-canary",
+        property_id: "p-canary",
+        body: "Canary reply",
+        direction: "inbound" as const,
+        created_at: new Date(now - 1_000).toISOString(),
+        read_at: null,
+      },
+      {
+        contact_id: "c-jitter-address",
+        property_id: "p-jitter-address",
+        body: "Fixture reply",
+        direction: "inbound" as const,
+        created_at: new Date(now - 2_000).toISOString(),
+        read_at: null,
+      },
+    ];
+    const contacts = new Map([
+      [
+        "c-real",
+        {
+          id: "c-real",
+          first_name: "Real",
+          last_name: "Seller",
+          entity_name: null,
+          phone_1: null,
+        },
+      ],
+      [
+        "c-canary",
+        {
+          id: "c-canary",
+          first_name: "Canary",
+          last_name: "CANARY-HAPPY-1777657500276",
+          entity_name: null,
+          phone_1: null,
+        },
+      ],
+      [
+        "c-jitter-address",
+        {
+          id: "c-jitter-address",
+          first_name: "Fixture",
+          last_name: "Owner",
+          entity_name: null,
+          phone_1: null,
+        },
+      ],
+    ]);
+    const properties = new Map([
+      [
+        "p-real",
+        {
+          id: "p-real",
+          address: "1 Real Ave",
+          city: "Kansas City",
+          state: "MO",
+          status: "prospect",
+          outreach_dispo: null,
+          assigned_user_id: null,
+        },
+      ],
+      [
+        "p-canary",
+        {
+          id: "p-canary",
+          address: "2 Test Ave",
+          city: "Kansas City",
+          state: "MO",
+          status: "prospect",
+          outreach_dispo: null,
+          assigned_user_id: null,
+        },
+      ],
+      [
+        "p-jitter-address",
+        {
+          id: "p-jitter-address",
+          address: "JITTER-SANDRA-V1 writeback proof abc123",
+          city: null,
+          state: null,
+          status: "prospect",
+          outreach_dispo: null,
+          assigned_user_id: null,
+        },
+      ],
+    ]);
+
+    const { supabase, inCalls } = makeStub({
+      messages,
+      contacts,
+      properties,
+    });
+
+    const count = await countNeedsOutcomeThreads(supabase, {
+      hideTestTraffic: true,
+    });
+
+    expect(count).toBe(1);
+    expect(inCalls.contacts).toHaveLength(1);
+    expect(inCalls.consent_events).toEqual([]);
+  });
 });
