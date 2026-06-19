@@ -343,25 +343,90 @@ export async function runSkipTraceEnrichment(
   for (const [key, ids] of addressToPropertyIds) {
     mapAsObject[key] = ids;
   }
+  const pendingSummary = {
+    ...summary,
+    batch_pending: true,
+    submit_phase: "submitting",
+    submit_phase_started_at: new Date().toISOString(),
+    // The fan-out ledger. Keyed by `address|city|state` (lower).
+    address_to_property_ids: mapAsObject,
+    unique_addresses_submitted: uniqueByAddress.length,
+  } as unknown as Json;
 
   try {
+    const { data: summaryClaim, error: summaryErr } = await supabase
+      .from("jobs")
+      .update({
+        result_summary: pendingSummary,
+        worker_heartbeat_at: new Date().toISOString(),
+      })
+      .eq("id", params.jobId)
+      .is("provider_run_id", null)
+      .select("id");
+    if (summaryErr || !summaryClaim || summaryClaim.length === 0) {
+      const msg =
+        summaryErr?.message ??
+        "provider_run_id was already set or the job disappeared before submit";
+      reportError(new Error(msg), {
+        tags: { surface: "skip_trace_prepare_batch_summary" },
+        extra: { jobId: params.jobId, count: uniqueByAddress.length },
+      });
+      return summary;
+    }
+
     const ticket = await provider.submitBatch(uniqueByAddress);
-    await supabase
+    const { data: ticketClaim, error: ticketErr } = await supabase
       .from("jobs")
       .update({
         provider_run_id: ticket.queueId,
         worker_heartbeat_at: new Date().toISOString(),
+      })
+      .eq("id", params.jobId)
+      .is("provider_run_id", null)
+      .select("id");
+    if (ticketErr || !ticketClaim || ticketClaim.length === 0) {
+      const msg =
+        ticketErr?.message ??
+        "provider_run_id was already set or the job disappeared after submit";
+      reportError(new Error(msg), {
+        tags: { surface: "skip_trace_persist_batch_ticket" },
+        extra: {
+          jobId: params.jobId,
+          queueId: ticket.queueId,
+          count: uniqueByAddress.length,
+        },
+      });
+      // Do not mark the job failed here. The provider boundary has already
+      // been crossed, so a normal retry can double-bill. The pre-submit
+      // summary still has submit_phase='submitting', which makes the cron
+      // skip automatic resubmission and leaves this for manual reconciliation.
+      return summary;
+    }
+
+    const { error: ticketSummaryErr } = await supabase
+      .from("jobs")
+      .update({
         result_summary: {
-          ...summary,
-          batch_pending: true,
+          ...(pendingSummary as Record<string, unknown>),
+          submit_phase: "submitted",
+          submit_phase_completed_at: new Date().toISOString(),
           estimated_wait_seconds: ticket.estimatedWaitSeconds,
           credits_per_lead: ticket.creditsPerLead,
-          // The fan-out ledger. Keyed by `address|city|state` (lower).
-          address_to_property_ids: mapAsObject,
-          unique_addresses_submitted: uniqueByAddress.length,
         } as unknown as Json,
+        worker_heartbeat_at: new Date().toISOString(),
       })
-      .eq("id", params.jobId);
+      .eq("id", params.jobId)
+      .eq("provider_run_id", ticket.queueId);
+    if (ticketSummaryErr) {
+      reportError(ticketSummaryErr, {
+        tags: { surface: "skip_trace_persist_batch_summary" },
+        extra: {
+          jobId: params.jobId,
+          queueId: ticket.queueId,
+          count: uniqueByAddress.length,
+        },
+      });
+    }
     return { pending: true, queueId: ticket.queueId };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);

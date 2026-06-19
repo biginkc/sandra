@@ -111,13 +111,29 @@ const STALE_FINALIZING_MS = 5 * 60 * 1000;
 
 type SweepClient = ReturnType<typeof createServiceRoleClient>;
 
+function isBeforeCutoff(value: string | null, cutoffMs: number): boolean {
+  if (!value) return false;
+  const parsed = Date.parse(value);
+  return !Number.isNaN(parsed) && parsed < cutoffMs;
+}
+
+function isSubmissionUnknown(resultSummary: unknown): boolean {
+  return (
+    !!resultSummary &&
+    typeof resultSummary === "object" &&
+    !Array.isArray(resultSummary) &&
+    (resultSummary as Record<string, unknown>).submit_phase === "submitting"
+  );
+}
+
 async function reclaimUnsubmittedSkipTraceJobs(
   supabase: SweepClient,
   cutoff: string,
 ): Promise<{ candidates: number; reclaimed: number; errors: number }> {
+  const cutoffMs = Date.parse(cutoff);
   const { data: unsubmitted, error } = await supabase
     .from("jobs")
-    .select("id, status, worker_heartbeat_at, created_at")
+    .select("id, status, worker_heartbeat_at, created_at, result_summary")
     .eq("type", "skip_trace")
     .in("status", ["queued", "running"])
     .is("provider_run_id", null)
@@ -133,35 +149,19 @@ async function reclaimUnsubmittedSkipTraceJobs(
 
   let reclaimed = 0;
   let errors = 0;
-  for (const job of unsubmitted ?? []) {
-    const now = new Date().toISOString();
-    let claim = supabase
-      .from("jobs")
-      .update({
-        status: "running",
-        worker_heartbeat_at: now,
-      })
-      .eq("id", job.id)
-      .eq("status", job.status)
-      .is("provider_run_id", null);
+  const candidates = (unsubmitted ?? []).filter((job) => {
+    const staleByHeartbeat = job.worker_heartbeat_at
+      ? isBeforeCutoff(job.worker_heartbeat_at, cutoffMs)
+      : isBeforeCutoff(job.created_at, cutoffMs);
+    if (!staleByHeartbeat) return false;
+    // Once a submitter has crossed the paid provider boundary, automatic
+    // re-submit is not safe without a provider idempotency key. Leave the
+    // row for manual reconciliation instead of risking duplicate spend.
+    if (isSubmissionUnknown(job.result_summary)) return false;
+    return true;
+  });
 
-    claim = job.worker_heartbeat_at
-      ? claim.eq("worker_heartbeat_at", job.worker_heartbeat_at)
-      : claim.is("worker_heartbeat_at", null);
-
-    const { data: claimed, error: claimError } = await claim.select("id");
-    if (claimError) {
-      reportError(claimError, {
-        tags: { surface: "cron_sweep_unsubmitted_skip_trace_claim" },
-        extra: { jobId: job.id },
-      });
-      errors++;
-      continue;
-    }
-    if (!claimed || claimed.length === 0) {
-      continue;
-    }
-
+  for (const job of candidates) {
     try {
       await start(skipTraceSubmitWorkflow, [{ jobId: job.id }]);
       reclaimed++;
@@ -171,11 +171,12 @@ async function reclaimUnsubmittedSkipTraceJobs(
         extra: { jobId: job.id },
       });
       errors++;
+      continue;
     }
   }
 
   return {
-    candidates: unsubmitted?.length ?? 0,
+    candidates: candidates.length,
     reclaimed,
     errors,
   };

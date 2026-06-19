@@ -4,19 +4,15 @@ import { createTestClient } from "@tests/integration/client";
 import { resetTenantTables } from "@tests/integration/reset";
 
 const testClient = createTestClient();
+const { start } = vi.hoisted(() => ({ start: vi.fn() }));
+
 vi.mock("@/lib/supabase/server", () => ({
   createClient: async () => testClient,
 }));
 
-// `after()` requires a request scope; in tests we just want it to not
-// throw and to skip the runner. We assert against the synchronously-
-// inserted child job row, not the runner side effects.
-vi.mock("next/server", async () => {
-  const actual = await vi.importActual<typeof import("next/server")>(
-    "next/server",
-  );
-  return { ...actual, after: (_fn: () => unknown) => {} };
-});
+vi.mock("workflow/api", () => ({
+  start,
+}));
 
 process.env.ADMIN_EMAILS = "jarrad@bmhgroupkc.com";
 
@@ -33,15 +29,6 @@ vi.spyOn(testClient.auth, "getUser").mockImplementation(async () =>
   }) as never,
 );
 
-// Stub the runner so the action returns synchronously without hitting
-// Tracerfy. We assert against the new child job row that the action
-// inserts, not against runner behaviour (covered separately by
-// skip-trace-job.integration.test.ts).
-vi.mock("@/lib/skip-trace/skip-trace-job", () => ({
-  runSkipTraceEnrichment: vi.fn(async () => {}),
-}));
-
-// eslint-disable-next-line import/first
 import { retryFailedSkipTraceItems } from "./actions";
 
 async function getOrgId(): Promise<string> {
@@ -112,6 +99,8 @@ async function seedJobItems(
 describe("retryFailedSkipTraceItems (integration)", () => {
   beforeEach(async () => {
     await resetTenantTables(testClient);
+    start.mockReset();
+    start.mockResolvedValue({ runId: "test-run" });
     currentEmail = "jarrad@bmhgroupkc.com";
     currentUserId = null;
   });
@@ -148,6 +137,36 @@ describe("retryFailedSkipTraceItems (integration)", () => {
     const ids = (child?.input_params as { property_ids: string[] })
       .property_ids;
     expect(ids).toEqual([p2]);
+    expect(start).toHaveBeenCalledTimes(1);
+    expect(start).toHaveBeenCalledWith(expect.any(Function), [
+      { jobId: result.data.childJobId },
+    ]);
+  });
+
+  it("returns the retry child when workflow enqueue fails so cron can recover it", async () => {
+    const p1 = await seedProperty("1 Retry Enqueue Failure St");
+    const jobId = await seedJob({
+      type: "skip_trace",
+      status: "failed",
+      propertyIds: [p1],
+      failedItems: 1,
+    });
+    await seedJobItems(jobId, [
+      { propertyId: p1, status: "error", errorClass: "provider_transient" },
+    ]);
+    start.mockRejectedValueOnce(new Error("workflow enqueue down"));
+
+    const result = await retryFailedSkipTraceItems(jobId);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const { data: child } = await testClient
+      .from("jobs")
+      .select("status, provider_run_id")
+      .eq("id", result.data.childJobId)
+      .single();
+    expect(child?.status).toBe("queued");
+    expect(child?.provider_run_id).toBeNull();
   });
 
   it("pre-#59 failed job (0 items): falls back to input_params.property_ids", async () => {

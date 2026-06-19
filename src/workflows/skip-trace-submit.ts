@@ -13,11 +13,25 @@ export type SkipTraceSubmitWorkflowParams = {
   jobId: string;
 };
 
+const SUBMIT_STALE_MS = 2 * 60 * 1000;
+
 type SubmitOutcome =
   | { status: "submitted"; jobId: string }
   | { status: "already_submitted"; jobId: string; providerRunId: string }
   | { status: "not_runnable"; jobId: string; jobStatus: string }
   | { status: "claim_lost"; jobId: string };
+
+function isStaleHeartbeat(heartbeat: string | null): boolean {
+  if (!heartbeat) return true;
+  const parsed = Date.parse(heartbeat);
+  return Number.isNaN(parsed) || parsed < Date.now() - SUBMIT_STALE_MS;
+}
+
+function resultSummaryObject(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
 
 async function submitSkipTraceJob(jobId: string): Promise<SubmitOutcome> {
   "use step";
@@ -25,7 +39,7 @@ async function submitSkipTraceJob(jobId: string): Promise<SubmitOutcome> {
   const supabase = createAdminClient();
   const { data: job, error } = await supabase
     .from("jobs")
-    .select("id, status, input_params, provider_run_id, worker_heartbeat_at")
+    .select("id, status, input_params, provider_run_id, worker_heartbeat_at, result_summary")
     .eq("id", jobId)
     .eq("type", "skip_trace")
     .maybeSingle();
@@ -45,6 +59,15 @@ async function submitSkipTraceJob(jobId: string): Promise<SubmitOutcome> {
   }
   if (job.status !== "queued" && job.status !== "running") {
     return { status: "not_runnable", jobId, jobStatus: job.status };
+  }
+  if (job.status === "running") {
+    if (!isStaleHeartbeat(job.worker_heartbeat_at)) {
+      return { status: "claim_lost", jobId };
+    }
+    const summary = resultSummaryObject(job.result_summary);
+    if (summary.submit_phase === "submitting") {
+      return { status: "not_runnable", jobId, jobStatus: job.status };
+    }
   }
 
   const propertyIds = (
@@ -69,6 +92,7 @@ async function submitSkipTraceJob(jobId: string): Promise<SubmitOutcome> {
   }
 
   const now = new Date().toISOString();
+  const summary = resultSummaryObject(job.result_summary);
   let claim = supabase
     .from("jobs")
     .update({
@@ -76,6 +100,11 @@ async function submitSkipTraceJob(jobId: string): Promise<SubmitOutcome> {
       started_at: now,
       total_items: runnableIds.length,
       worker_heartbeat_at: now,
+      result_summary: {
+        ...summary,
+        submit_phase: "submitting",
+        submit_phase_started_at: now,
+      },
     })
     .eq("id", jobId)
     .eq("status", job.status)
@@ -111,3 +140,5 @@ export async function skipTraceSubmitWorkflow(
 
   return submitSkipTraceJob(params.jobId);
 }
+
+Object.assign(submitSkipTraceJob, { maxRetries: 0 });

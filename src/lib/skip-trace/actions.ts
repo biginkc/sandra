@@ -187,15 +187,16 @@ async function requireTracefyCredits(
 async function startSkipTraceSubmitWorkflow(
   jobId: string,
   surface: string,
-): Promise<void> {
+): Promise<boolean> {
   try {
     await start(skipTraceSubmitWorkflow, [{ jobId }]);
+    return true;
   } catch (e) {
     reportError(e, {
       tags: { surface },
       extra: { jobId },
     });
-    throw e;
+    return false;
   }
 }
 
@@ -395,7 +396,10 @@ export async function requestSkipTrace(
       // The workflow step claims each job before hitting Tracerfy, so a
       // cron rescue and this action cannot double-submit the same part.
       for (const jobId of jobIds) {
-        await startSkipTraceSubmitWorkflow(jobId, "skip_trace_request_workflow_start");
+        await startSkipTraceSubmitWorkflow(
+          jobId,
+          "skip_trace_request_workflow_start",
+        );
       }
       return ok({
         jobId: jobIds[0],
@@ -410,12 +414,14 @@ export async function requestSkipTrace(
     // VA path: notify admins once for the whole request.
     try {
       const adminIds = await listAdminUserIds(supabase);
-      await dispatchSkipTraceRequested(supabase, {
-        jobId: jobIds[0],
-        requesterEmail: user.email ?? null,
-        propertyCount: eligibleIds.length,
-        adminUserIds: adminIds,
-      });
+      for (let i = 0; i < jobIds.length; i++) {
+        await dispatchSkipTraceRequested(supabase, {
+          jobId: jobIds[i],
+          requesterEmail: user.email ?? null,
+          propertyCount: parts[i]?.length ?? 0,
+          adminUserIds: adminIds,
+        });
+      }
     } catch (e) {
       reportError(e, {
         tags: { surface: "skip_trace_request_notify" },
