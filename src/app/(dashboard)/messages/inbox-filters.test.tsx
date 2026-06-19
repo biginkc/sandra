@@ -94,6 +94,7 @@ const baseProps = {
   unknownSenders: [],
   unknownActiveCount: 0,
   needsOutcomeCount: 0,
+  unreadCount: 0,
   assigneeEmails: {},
   currentUserId: "user-1",
   queueStats: {
@@ -325,8 +326,41 @@ describe("<CockpitView /> chip order (feedback-f E2b)", () => {
 
     const chip = screen.getByTestId("filter-needs-outcome");
     expect(chip).toHaveAttribute("data-active", "true");
+    expect(chip).toHaveAttribute("aria-pressed", "true");
     expect(chip).toHaveTextContent("Needs Outcome");
     expect(chip).toHaveTextContent("3");
+  });
+
+  it("keeps count badges visible on inactive filter labels", () => {
+    render(
+      <CockpitView
+        {...baseProps}
+        filter="all"
+        threads={[]}
+        unreadCount={2}
+        needsOutcomeCount={3}
+        unknownActiveCount={4}
+      />,
+    );
+
+    const unread = screen.getByTestId("filter-unread");
+    const needsOutcome = screen.getByTestId("filter-needs-outcome");
+    const unknown = screen.getByTestId("filter-unknown");
+
+    expect(unread).not.toHaveAttribute("data-active");
+    expect(unread).toHaveAttribute("aria-pressed", "false");
+    expect(unread).toHaveTextContent("Unread");
+    expect(unread).toHaveTextContent("2");
+
+    expect(needsOutcome).not.toHaveAttribute("data-active");
+    expect(needsOutcome).toHaveAttribute("aria-pressed", "false");
+    expect(needsOutcome).toHaveTextContent("Needs Outcome");
+    expect(needsOutcome).toHaveTextContent("3");
+
+    expect(unknown).not.toHaveAttribute("data-active");
+    expect(unknown).toHaveAttribute("aria-pressed", "false");
+    expect(unknown).toHaveTextContent("Unknown");
+    expect(unknown).toHaveTextContent("4");
   });
 });
 

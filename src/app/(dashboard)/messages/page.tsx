@@ -1,9 +1,6 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
-import {
-  countNeedsOutcomeThreads,
-  listThreads,
-} from "@/lib/messages/list-threads";
+import { listThreads } from "@/lib/messages/list-threads";
 import { listUnknownSenders } from "@/lib/messages/list-unknown-senders";
 import { canonicalizeThreadId } from "@/lib/messages/threading";
 
@@ -12,9 +9,9 @@ import { markMessagesReadForThread } from "../leads/actions";
 import { getQueueStats, listQueuedPage, type QueueStats } from "./actions";
 import { CockpitView } from "./cockpit-view";
 import {
-  buildThreadOpts,
   isThreadFilter,
   parseInboxFilter,
+  resolveVisibleThreadState,
 } from "./inbox-filter-resolve";
 import { fetchInboxDetail } from "./inbox-detail-data";
 
@@ -81,25 +78,18 @@ export default async function MessagesPage({
       ? await canonicalizeThreadId(supabase, selectedThreadId)
       : null;
 
-  // Resolve the threads-list options based on the active filter.
-  const threadOpts = buildThreadOpts(filter, {
-    currentUserId: currentUser?.id ?? null,
-    canonicalThreadId,
-  });
-
   // Fetch everything in parallel. The thread list + unknown active count
   // are needed regardless of which filter is active (badge counts on the
   // tab + filter chips). Other queries are conditional on the filter.
   const [
-    threads,
+    allThreads,
     queuedResult,
     threadDetail,
     unknownActive,
     unknownAll,
-    needsOutcomeCount,
     queueStatsResult,
   ] = await Promise.all([
-    listThreads(supabase, threadOpts),
+    listThreads(supabase, {}),
     listQueuedPage(null),
     canonicalThreadId
       ? fetchInboxDetail(supabase, canonicalThreadId)
@@ -108,9 +98,19 @@ export default async function MessagesPage({
     filter === "dismissed"
       ? listUnknownSenders(supabase, { includeDismissed: true })
       : Promise.resolve([]),
-    countNeedsOutcomeThreads(supabase, { hideOptedOut: hideDnc }),
     getQueueStats(),
   ]);
+
+  const {
+    threads: visibleThreads,
+    unreadCount,
+    needsOutcomeCount,
+    hiddenDncCount,
+  } = resolveVisibleThreadState(allThreads, filter, {
+    currentUserId: currentUser?.id ?? null,
+    canonicalThreadId,
+    hideDnc,
+  });
 
   // Banner still renders if first-paint stats fail — the client-side poll
   // will retry every 30s.
@@ -122,7 +122,7 @@ export default async function MessagesPage({
   // visible threads. One auth.admin.listUsers call covers the whole page.
   const assigneeEmails: Record<string, string> = {};
   const assigneeIds = new Set<string>();
-  for (const t of threads) {
+  for (const t of visibleThreads) {
     if (t.assigneeId) assigneeIds.add(t.assigneeId);
   }
   if (assigneeIds.size > 0) {
@@ -154,16 +154,6 @@ export default async function MessagesPage({
       ? unknownAll.filter((s) => s.isDismissed)
       : unknownActive;
 
-  // Noise toggle: when on (default), opted-out threads AND Jitter test
-  // traffic (canary/rehearsal fixtures) are stripped from the visible
-  // list — one switch, both kinds of noise (Jarrad, 2026-06-12). Hidden
-  // count reported back to the toggle.
-  const isNoise = (t: (typeof threads)[number]) =>
-    t.isOptedOut || t.isTestTraffic;
-  const hiddenDncCount = hideDnc ? threads.filter(isNoise).length : 0;
-  const visibleThreads = hideDnc
-    ? threads.filter((t) => !isNoise(t))
-    : threads;
   return (
     <CockpitView
       activeTab={activeTab}
@@ -176,6 +166,7 @@ export default async function MessagesPage({
       unknownSenders={unknownSenders}
       unknownActiveCount={unknownActive.length}
       needsOutcomeCount={needsOutcomeCount}
+      unreadCount={unreadCount}
       assigneeEmails={assigneeEmails}
       currentUserId={currentUser?.id ?? null}
       queueStats={queueStats}

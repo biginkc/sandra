@@ -90,6 +90,7 @@ const baseProps = {
   unknownSenders: [],
   unknownActiveCount: 0,
   needsOutcomeCount: 0,
+  unreadCount: 0,
   assigneeEmails: {},
   currentUserId: "user-1",
   queueStats: {

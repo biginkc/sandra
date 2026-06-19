@@ -86,6 +86,8 @@ export type NeedsOutcomeCountOpts = {
   sinceDays?: number;
   /** When true, excludes contacts whose latest SMS consent state is opt-out. */
   hideOptedOut?: boolean;
+  /** When true, excludes known Jitter canary/rehearsal fixture traffic. */
+  hideTestTraffic?: boolean;
 };
 
 /**
@@ -306,14 +308,41 @@ export async function countNeedsOutcomeThreads(
   const propsRows = await fetchInChunks(propertyIds, CHUNK, (chunk) =>
     supabase
       .from("properties")
-      .select("id, status, outreach_dispo")
+      .select("id, address, city, state, status, outreach_dispo")
       .in("id", chunk),
   );
   const propertyById = new Map(propsRows.map((p) => [p.id, p]));
-  const needsOutcome = candidates.filter((candidate) => {
+  let needsOutcome = candidates.filter((candidate) => {
     const property = propertyById.get(candidate.propertyId);
     return property?.status === "prospect" && property.outreach_dispo == null;
   });
+  if (needsOutcome.length === 0) return 0;
+
+  if (opts.hideTestTraffic) {
+    const contactIds = Array.from(new Set(needsOutcome.map((c) => c.contactId)));
+    const contactsRows = await fetchInChunks(contactIds, CHUNK, (chunk) =>
+      supabase
+        .from("contacts")
+        .select("id, first_name, last_name, entity_name")
+        .in("id", chunk),
+    );
+    const contactById = new Map(contactsRows.map((contact) => [contact.id, contact]));
+    needsOutcome = needsOutcome.filter((candidate) => {
+      const contact = contactById.get(candidate.contactId);
+      const property = propertyById.get(candidate.propertyId);
+      const contactName = contact
+        ? (contact.entity_name ??
+          ([contact.first_name, contact.last_name].filter(Boolean).join(" ") ||
+            null))
+        : null;
+      const propertyAddress = property
+        ? [property.address, property.city, property.state].filter(Boolean).join(", ")
+        : null;
+
+      return !looksLikeTestTraffic(contactName, propertyAddress);
+    });
+  }
+
   if (!opts.hideOptedOut || needsOutcome.length === 0) {
     return needsOutcome.length;
   }

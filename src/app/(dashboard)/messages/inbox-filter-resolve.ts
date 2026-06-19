@@ -1,4 +1,7 @@
-import { type ListThreadsOpts } from "@/lib/messages/list-threads";
+import {
+  type ListThreadsOpts,
+  type Thread,
+} from "@/lib/messages/list-threads";
 
 import { type InboxFilter } from "./inbox-filters";
 
@@ -64,4 +67,75 @@ export function buildThreadOpts(
   if (filter === "escalated") opts.escalatedOnly = true;
   if (filter === "needs_outcome") opts.needsOutcomeOnly = true;
   return opts;
+}
+
+export type VisibleThreadState = {
+  threads: Thread[];
+  unreadCount: number;
+  needsOutcomeCount: number;
+  hiddenDncCount: number;
+};
+
+function isInboxNoise(thread: Thread): boolean {
+  return thread.isOptedOut || thread.isTestTraffic;
+}
+
+export function applyInboxThreadFilter(
+  threads: Thread[],
+  filter: InboxFilter,
+  ctx: { currentUserId: string | null; canonicalThreadId: string | null },
+): Thread[] {
+  switch (filter) {
+    case "mine":
+      if (!ctx.currentUserId) return threads;
+      return threads.filter((thread) => thread.assigneeId === ctx.currentUserId);
+    case "unassigned":
+      return threads.filter((thread) => !thread.assigneeId);
+    case "unread":
+      return threads.filter(
+        (thread) =>
+          thread.unreadCount > 0 || thread.threadId === ctx.canonicalThreadId,
+      );
+    case "escalated":
+      return threads.filter((thread) => thread.needsHumanAttention);
+    case "needs_outcome":
+      return threads.filter((thread) => thread.needsOutcome);
+    case "unknown":
+    case "dismissed":
+      return [];
+    case "all":
+    default:
+      return threads;
+  }
+}
+
+export function resolveVisibleThreadState(
+  allThreads: Thread[],
+  filter: InboxFilter,
+  ctx: {
+    currentUserId: string | null;
+    canonicalThreadId: string | null;
+    hideDnc: boolean;
+  },
+): VisibleThreadState {
+  const visibleAllThreads = ctx.hideDnc
+    ? allThreads.filter((thread) => !isInboxNoise(thread))
+    : allThreads;
+  const filteredThreads = isThreadFilter(filter)
+    ? applyInboxThreadFilter(allThreads, filter, ctx)
+    : allThreads;
+  const threads = ctx.hideDnc
+    ? filteredThreads.filter((thread) => !isInboxNoise(thread))
+    : filteredThreads;
+
+  return {
+    threads,
+    unreadCount: visibleAllThreads.filter((thread) => thread.unreadCount > 0)
+      .length,
+    needsOutcomeCount: visibleAllThreads.filter((thread) => thread.needsOutcome)
+      .length,
+    hiddenDncCount: ctx.hideDnc
+      ? filteredThreads.filter((thread) => isInboxNoise(thread)).length
+      : 0,
+  };
 }
