@@ -93,6 +93,8 @@ function makeThread(
     contactPhone: overrides.contactPhone ?? "+15551234567",
     propertyId,
     propertyAddress: overrides.propertyAddress ?? "123 Main St",
+    propertyStatus: overrides.propertyStatus ?? "prospect",
+    outreachDispo: overrides.outreachDispo ?? null,
     lastMessageAt: overrides.lastMessageAt ?? "2026-04-29T12:00:00Z",
     lastMessageBody: overrides.lastMessageBody ?? "hello",
     lastMessageDirection: overrides.lastMessageDirection ?? "inbound",
@@ -101,6 +103,7 @@ function makeThread(
     needsHumanAttention: overrides.needsHumanAttention ?? false,
     escalationReason: overrides.escalationReason ?? null,
     isOptedOut: overrides.isOptedOut ?? false,
+    needsOutcome: overrides.needsOutcome ?? false,
   } as Thread;
 }
 
@@ -162,6 +165,7 @@ const baseProps = {
   threadDetail: null,
   unknownSenders: [],
   unknownActiveCount: 0,
+  needsOutcomeCount: 0,
   assigneeEmails: {},
   currentUserId: "user-1",
   queueStats: {

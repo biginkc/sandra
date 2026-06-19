@@ -1,6 +1,9 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
-import { listThreads } from "@/lib/messages/list-threads";
+import {
+  countNeedsOutcomeThreads,
+  listThreads,
+} from "@/lib/messages/list-threads";
 import { listUnknownSenders } from "@/lib/messages/list-unknown-senders";
 import { canonicalizeThreadId } from "@/lib/messages/threading";
 
@@ -93,6 +96,7 @@ export default async function MessagesPage({
     threadDetail,
     unknownActive,
     unknownAll,
+    needsOutcomeCount,
     queueStatsResult,
   ] = await Promise.all([
     listThreads(supabase, threadOpts),
@@ -104,6 +108,7 @@ export default async function MessagesPage({
     filter === "dismissed"
       ? listUnknownSenders(supabase, { includeDismissed: true })
       : Promise.resolve([]),
+    countNeedsOutcomeThreads(supabase, { hideOptedOut: hideDnc }),
     getQueueStats(),
   ]);
 
@@ -159,7 +164,6 @@ export default async function MessagesPage({
   const visibleThreads = hideDnc
     ? threads.filter((t) => !isNoise(t))
     : threads;
-
   return (
     <CockpitView
       activeTab={activeTab}
@@ -171,6 +175,7 @@ export default async function MessagesPage({
       threadDetail={threadDetail}
       unknownSenders={unknownSenders}
       unknownActiveCount={unknownActive.length}
+      needsOutcomeCount={needsOutcomeCount}
       assigneeEmails={assigneeEmails}
       currentUserId={currentUser?.id ?? null}
       queueStats={queueStats}

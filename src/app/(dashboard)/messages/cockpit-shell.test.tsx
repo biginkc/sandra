@@ -89,6 +89,7 @@ const baseProps = {
   threadDetail: null,
   unknownSenders: [],
   unknownActiveCount: 0,
+  needsOutcomeCount: 0,
   assigneeEmails: {},
   currentUserId: "user-1",
   queueStats: {

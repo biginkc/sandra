@@ -9,11 +9,13 @@ export type InboxFilter =
   | "unknown"
   | "dismissed"
   | "unread"
-  | "escalated";
+  | "escalated"
+  | "needs_outcome";
 
 type Props = {
   active: InboxFilter;
   unknownCount: number;
+  needsOutcomeCount: number;
   unreadCount: number;
   /** Hide Mine + Unassigned chips when no auth user is on the request. */
   showAssignmentChips: boolean;
@@ -33,6 +35,7 @@ type Props = {
 export function InboxFilters({
   active,
   unknownCount,
+  needsOutcomeCount,
   unreadCount,
   showAssignmentChips,
   hideDnc,
@@ -85,6 +88,13 @@ export function InboxFilters({
         active={active === "escalated"}
         onClick={() => setFilter("escalated")}
         testId="filter-escalated"
+      />
+      <FilterChip
+        label="Needs Outcome"
+        active={active === "needs_outcome"}
+        badge={needsOutcomeCount > 0 ? String(needsOutcomeCount) : undefined}
+        onClick={() => setFilter("needs_outcome")}
+        testId="filter-needs-outcome"
       />
       {showAssignmentChips && (
         <>

@@ -73,6 +73,8 @@ function makeThread(overrides: Partial<Thread> & { contactId: string }): Thread 
     contactPhone: overrides.contactPhone ?? "+15551234567",
     propertyId,
     propertyAddress: overrides.propertyAddress ?? "123 Main St",
+    propertyStatus: overrides.propertyStatus ?? "prospect",
+    outreachDispo: overrides.outreachDispo ?? null,
     lastMessageAt: overrides.lastMessageAt ?? "2026-04-29T12:00:00Z",
     lastMessageBody: overrides.lastMessageBody ?? "hello",
     lastMessageDirection: overrides.lastMessageDirection ?? "inbound",
@@ -81,6 +83,7 @@ function makeThread(overrides: Partial<Thread> & { contactId: string }): Thread 
     needsHumanAttention: overrides.needsHumanAttention ?? false,
     escalationReason: overrides.escalationReason ?? null,
     isOptedOut: overrides.isOptedOut ?? false,
+    needsOutcome: overrides.needsOutcome ?? false,
   } as Thread;
 }
 
@@ -90,6 +93,7 @@ const baseProps = {
   threadDetail: null,
   unknownSenders: [],
   unknownActiveCount: 0,
+  needsOutcomeCount: 0,
   assigneeEmails: {},
   currentUserId: "user-1",
   queueStats: {
@@ -250,7 +254,21 @@ describe("<CockpitView /> DNC toggle", () => {
 });
 
 describe("<CockpitView /> chip order (feedback-f E2b)", () => {
-  it("renders chips in priority order: Unread, Escalated, Mine, Unassigned, All, Unknown, Dismissed", () => {
+  it("renders a compact badge on threads that need an outcome", () => {
+    const thread = makeThread({
+      contactId: "needs-1",
+      threadId: "legacy:needs-1:prop-needs-1",
+      needsOutcome: true,
+    });
+
+    render(<CockpitView {...baseProps} filter="all" threads={[thread]} />);
+
+    expect(
+      screen.getByTestId("inbox-thread-legacy:needs-1:prop-needs-1-needs-outcome"),
+    ).toHaveTextContent("Needs outcome");
+  });
+
+  it("renders chips in priority order: Unread, Escalated, Needs Outcome, Mine, Unassigned, All, Unknown, Dismissed", () => {
     render(<CockpitView {...baseProps} filter="all" threads={[]} />);
 
     const chips = screen
@@ -261,6 +279,7 @@ describe("<CockpitView /> chip order (feedback-f E2b)", () => {
     expect(ids).toEqual([
       "filter-unread",
       "filter-escalated",
+      "filter-needs-outcome",
       "filter-mine",
       "filter-unassigned",
       "filter-all",
@@ -269,7 +288,7 @@ describe("<CockpitView /> chip order (feedback-f E2b)", () => {
     ]);
   });
 
-  it("when no current user, chip order collapses to: Unread, Escalated, All, Unknown, Dismissed", () => {
+  it("when no current user, chip order collapses to: Unread, Escalated, Needs Outcome, All, Unknown, Dismissed", () => {
     render(
       <CockpitView
         {...baseProps}
@@ -287,10 +306,27 @@ describe("<CockpitView /> chip order (feedback-f E2b)", () => {
     expect(ids).toEqual([
       "filter-unread",
       "filter-escalated",
+      "filter-needs-outcome",
       "filter-all",
       "filter-unknown",
       "filter-dismissed",
     ]);
+  });
+
+  it("shows Needs Outcome as active with a count badge", () => {
+    render(
+      <CockpitView
+        {...baseProps}
+        filter="needs_outcome"
+        needsOutcomeCount={3}
+        threads={[]}
+      />,
+    );
+
+    const chip = screen.getByTestId("filter-needs-outcome");
+    expect(chip).toHaveAttribute("data-active", "true");
+    expect(chip).toHaveTextContent("Needs Outcome");
+    expect(chip).toHaveTextContent("3");
   });
 });
 

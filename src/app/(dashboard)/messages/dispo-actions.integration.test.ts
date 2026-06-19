@@ -1,231 +1,133 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const {
-  afterCallbacks,
-  afterMock,
   createClient,
-  createTask,
-  dispatchTaskAssigned,
-  dispatchTaskAssignedSlack,
-  dispatchTaskCalendarEvent,
-  loadIntegrationPrefs,
+  pauseContactEnrollments,
+  qualifyProperty,
+  recordConsentEvent,
   revalidatePath,
-  reportError,
 } = vi.hoisted(() => ({
-  afterCallbacks: [] as Array<() => Promise<void> | void>,
-  afterMock: vi.fn((callback: () => Promise<void> | void) => {
-    afterCallbacks.push(callback);
-  }),
   createClient: vi.fn(),
-  createTask: vi.fn(),
-  dispatchTaskAssigned: vi.fn(async () => ({ inserted: 1 })),
-  dispatchTaskAssignedSlack: vi.fn(async () => ({ sent: false })),
-  dispatchTaskCalendarEvent: vi.fn(async () => ({ inserted: false })),
-  loadIntegrationPrefs: vi.fn(async () => ({
-    slackEnabled: true,
-    calendarEnabled: true,
-    timezone: "America/Chicago",
-  })),
+  pauseContactEnrollments: vi.fn(),
+  qualifyProperty: vi.fn(),
+  recordConsentEvent: vi.fn(),
   revalidatePath: vi.fn(),
-  reportError: vi.fn(),
 }));
 
 vi.mock("next/cache", () => ({ revalidatePath }));
-vi.mock("next/server", () => ({ after: afterMock }));
-vi.mock("@/lib/errors/report", () => ({ reportError }));
-vi.mock("@/lib/integrations/google/dispatch", () => ({
-  dispatchTaskCalendarEvent,
-}));
-vi.mock("@/lib/integrations/prefs", () => ({ loadIntegrationPrefs }));
-vi.mock("@/lib/integrations/slack/dispatch", () => ({
-  dispatchTaskAssignedSlack,
-}));
-vi.mock("@/lib/messaging/consent", () => ({
-  recordConsentEvent: vi.fn(),
-}));
-vi.mock("@/lib/notifications/dispatch", () => ({ dispatchTaskAssigned }));
-vi.mock("@/lib/sequences/enrollment", () => ({
-  pauseContactEnrollments: vi.fn(),
-}));
+vi.mock("@/lib/leads/qualify", () => ({ qualifyProperty }));
+vi.mock("@/lib/messaging/consent", () => ({ recordConsentEvent }));
+vi.mock("@/lib/sequences/enrollment", () => ({ pauseContactEnrollments }));
 vi.mock("@/lib/supabase/server", () => ({ createClient }));
-vi.mock("@/lib/tasks", () => ({
-  createTask,
-  dispoToTaskType: (dispo: "nurture" | "callback_requested") =>
-    dispo === "callback_requested" ? "callback" : "follow_up",
-}));
 
-import { setOutreachDispo } from "./dispo-actions";
+import { moveMessageThreadToLead, setOutreachDispo } from "./dispo-actions";
 
 type Response = { data?: unknown; error?: { message: string } | null };
 
 let responseQueue: Response[] = [];
-let updatePayloads: unknown[] = [];
+let updatePayloads: Array<{ table: string; payload: unknown }> = [];
 
 beforeEach(() => {
   responseQueue = [];
   updatePayloads = [];
-  afterCallbacks.length = 0;
-  vi.stubEnv("NEXT_PUBLIC_APP_URL", "https://app.test");
   createClient.mockResolvedValue(makeSupabase("actor-1"));
-  createTask.mockResolvedValue({
-    ok: true,
-    data: { id: "task-1" },
-  });
-  loadIntegrationPrefs.mockResolvedValue({
-    slackEnabled: true,
-    calendarEnabled: true,
-    timezone: "America/Chicago",
-  });
+  qualifyProperty.mockResolvedValue({ status: "qualified" });
 });
 
 afterEach(() => {
   vi.clearAllMocks();
-  vi.unstubAllEnvs();
 });
 
-describe("setOutreachDispo integration dispatch fan-out", () => {
-  it("task-creating dispo assigned to another user schedules all three dispatchers", async () => {
-    responseQueue = [
-      { data: property(), error: null },
-      { error: null },
-    ];
-    loadIntegrationPrefs.mockResolvedValueOnce({
-      slackEnabled: true,
-      calendarEnabled: true,
-      timezone: "America/Denver",
-    });
+describe("setOutreachDispo", () => {
+  it("writes only message outcomes and clears follow_up_at", async () => {
+    responseQueue = [{ data: property(), error: null }, { error: null }];
 
-    const result = await setOutreachDispo(
-      "property-1",
-      "callback_requested",
-      "2026-05-10T15:00:00.000Z",
-      "assignee-2",
-    );
+    const result = await setOutreachDispo("property-1", "not_interested");
 
     expect(result).toEqual({ ok: true });
-    expect(createTask).toHaveBeenCalledWith(expect.anything(), {
-      orgId: "org-1",
-      assigneeId: "assignee-2",
-      relatedPropertyId: "property-1",
-      type: "callback",
-      title: "Callback 123 Dispatch Ln",
-      dueAt: "2026-05-10T15:00:00.000Z",
-      createdBy: "actor-1",
+    expect(updatePayloads).toContainEqual({
+      table: "properties",
+      payload: expect.objectContaining({
+        outreach_dispo: "not_interested",
+        follow_up_at: null,
+      }),
     });
-    expect(loadIntegrationPrefs).toHaveBeenCalledWith(
-      expect.anything(),
-      "assignee-2",
-    );
-    expect(dispatchTaskAssigned).not.toHaveBeenCalled();
-    expect(afterMock).toHaveBeenCalledTimes(1);
-
-    await flushAfterCallbacks();
-
-    expect(dispatchTaskAssigned).toHaveBeenCalledWith(expect.anything(), {
-      taskId: "task-1",
-      orgId: "org-1",
-      assigneeId: "assignee-2",
-      taskTitle: "Callback 123 Dispatch Ln",
-      taskType: "callback",
-      dueAt: "2026-05-10T15:00:00.000Z",
-      propertyAddress: "123 Dispatch Ln",
-    });
-    expect(dispatchTaskAssignedSlack).toHaveBeenCalledWith({
-      taskId: "task-1",
-      assigneeId: "assignee-2",
-      taskTitle: "Callback 123 Dispatch Ln",
-      taskType: "callback",
-      dueAt: "2026-05-10T15:00:00.000Z",
-      propertyAddress: "123 Dispatch Ln",
-      deepLink: "https://app.test/messages?property_id=property-1",
-      timezone: "America/Denver",
-      slackEnabled: true,
-    });
-    expect(dispatchTaskCalendarEvent).toHaveBeenCalledWith({
-      taskId: "task-1",
-      assigneeId: "assignee-2",
-      taskTitle: "Callback 123 Dispatch Ln",
-      propertyAddress: "123 Dispatch Ln",
-      dueAt: "2026-05-10T15:00:00.000Z",
-      timezone: "America/Denver",
-      deepLink: "https://app.test/messages?property_id=property-1",
-      calendarEnabled: true,
-    });
+    expect(recordConsentEvent).not.toHaveBeenCalled();
+    expect(pauseContactEnrollments).not.toHaveBeenCalled();
+    expect(revalidatePath).toHaveBeenCalledWith("/messages");
+    expect(revalidatePath).toHaveBeenCalledWith("/properties");
   });
 
-  it("self-assigned task-creating dispo schedules no dispatchers", async () => {
+  it("rejects legacy task dispositions from the manual Messages action", async () => {
+    const result = await setOutreachDispo(
+      "property-1",
+      "callback_requested" as never,
+    );
+
+    expect(result).toEqual({
+      ok: false,
+      error: "Unknown dispo: callback_requested",
+    });
+    expect(createClient).not.toHaveBeenCalled();
+  });
+
+  it("keeps DNC and opt-out safety side effects", async () => {
     responseQueue = [
       { data: property(), error: null },
       { error: null },
+      { error: null },
     ];
 
-    const result = await setOutreachDispo(
+    const result = await setOutreachDispo("property-1", "opted_out");
+
+    expect(result).toEqual({ ok: true });
+    expect(recordConsentEvent).toHaveBeenCalledWith(expect.anything(), {
+      contactId: "contact-1",
+      channel: "sms",
+      eventType: "opt_out",
+      source: "manual_dispo",
+      sourceDetail: { propertyId: "property-1", dispo: "opted_out" },
+      occurredAt: expect.any(Date),
+    });
+    expect(updatePayloads).toContainEqual({
+      table: "contacts",
+      payload: expect.objectContaining({
+        sms_opted_out: true,
+        sms_opted_out_at: expect.any(String),
+      }),
+    });
+    expect(pauseContactEnrollments).toHaveBeenCalledWith(expect.anything(), {
+      contactId: "contact-1",
+      reason: "consent_revoked",
+      permanent: true,
+    });
+  });
+});
+
+describe("moveMessageThreadToLead", () => {
+  it("qualifies a property without writing outreach_dispo", async () => {
+    const result = await moveMessageThreadToLead("property-1");
+
+    expect(result).toEqual({ ok: true, alreadyQualified: false });
+    expect(qualifyProperty).toHaveBeenCalledWith(
+      expect.anything(),
       "property-1",
-      "callback_requested",
-      "2026-05-10T15:00:00.000Z",
       "actor-1",
     );
-
-    expect(result).toEqual({ ok: true });
-    expect(afterMock).not.toHaveBeenCalled();
-    expect(loadIntegrationPrefs).not.toHaveBeenCalled();
-    await flushAfterCallbacks();
-    expect(dispatchTaskAssigned).not.toHaveBeenCalled();
-    expect(dispatchTaskAssignedSlack).not.toHaveBeenCalled();
-    expect(dispatchTaskCalendarEvent).not.toHaveBeenCalled();
+    expect(updatePayloads).toEqual([]);
+    expect(revalidatePath).toHaveBeenCalledWith("/messages");
+    expect(revalidatePath).toHaveBeenCalledWith("/leads");
+    expect(revalidatePath).toHaveBeenCalledWith("/leads/property-1");
   });
 
-  it("uses captured default prefs returned by loadIntegrationPrefs", async () => {
-    responseQueue = [
-      { data: property(), error: null },
-      { error: null },
-    ];
-    loadIntegrationPrefs.mockResolvedValueOnce({
-      slackEnabled: true,
-      calendarEnabled: true,
-      timezone: "America/Chicago",
-    });
+  it("treats already-qualified properties as a successful Open Lead path", async () => {
+    qualifyProperty.mockResolvedValueOnce({ status: "already_qualified" });
 
-    await setOutreachDispo(
-      "property-1",
-      "nurture",
-      "2026-05-11T15:00:00.000Z",
-      "assignee-2",
-    );
-    await flushAfterCallbacks();
+    const result = await moveMessageThreadToLead("property-1");
 
-    expect(dispatchTaskAssignedSlack).toHaveBeenCalledWith(
-      expect.objectContaining({
-        timezone: "America/Chicago",
-        slackEnabled: true,
-      }),
-    );
-    expect(dispatchTaskCalendarEvent).toHaveBeenCalledWith(
-      expect.objectContaining({
-        timezone: "America/Chicago",
-        calendarEnabled: true,
-      }),
-    );
-  });
-
-  it("one rejected dispatcher does not prevent the other dispatchers from running", async () => {
-    responseQueue = [
-      { data: property(), error: null },
-      { error: null },
-    ];
-    dispatchTaskAssignedSlack.mockRejectedValueOnce(new Error("Slack down"));
-
-    await setOutreachDispo(
-      "property-1",
-      "callback_requested",
-      "2026-05-10T15:00:00.000Z",
-      "assignee-2",
-    );
-
-    await expect(flushAfterCallbacks()).resolves.toBeUndefined();
-    expect(dispatchTaskAssigned).toHaveBeenCalledTimes(1);
-    expect(dispatchTaskAssignedSlack).toHaveBeenCalledTimes(1);
-    expect(dispatchTaskCalendarEvent).toHaveBeenCalledTimes(1);
+    expect(result).toEqual({ ok: true, alreadyQualified: true });
+    expect(revalidatePath).toHaveBeenCalledWith("/messages");
+    expect(revalidatePath).toHaveBeenCalledWith("/leads/property-1");
   });
 });
 
@@ -266,14 +168,6 @@ function makeSupabase(userId: string) {
 function property() {
   return {
     id: "property-1",
-    org_id: "org-1",
-    address: "123 Dispatch Ln",
     homeowner_contact_id: "contact-1",
   };
-}
-
-async function flushAfterCallbacks(): Promise<void> {
-  const callbacks = [...afterCallbacks];
-  afterCallbacks.length = 0;
-  await Promise.all(callbacks.map((callback) => callback()));
 }

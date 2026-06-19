@@ -3,7 +3,11 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { Database } from "@/lib/supabase/types";
 
-import { listThreads, looksLikeTestTraffic } from "./list-threads";
+import {
+  countNeedsOutcomeThreads,
+  listThreads,
+  looksLikeTestTraffic,
+} from "./list-threads";
 
 /**
  * Stub Supabase client that records every `.in("id", chunk)` call and returns
@@ -21,7 +25,17 @@ function makeStub(opts: {
     read_at: string | null;
   }>;
   contacts: Map<string, { id: string; first_name: string | null; last_name: string | null; entity_name: string | null; phone_1: string | null }>;
-  properties: Map<string, { id: string; address: string | null; city: string | null; state: string | null; assigned_user_id: string | null; needs_human_attention?: boolean; last_ai_escalation_reason?: string | null }>;
+  properties: Map<string, {
+    id: string;
+    address: string | null;
+    city: string | null;
+    state: string | null;
+    status?: string | null;
+    outreach_dispo?: string | null;
+    assigned_user_id: string | null;
+    needs_human_attention?: boolean;
+    last_ai_escalation_reason?: string | null;
+  }>;
   consentEvents?: Array<{
     contact_id: string;
     event_type: string;
@@ -123,7 +137,15 @@ describe("listThreads — chunking", () => {
     const properties = new Map(
       messages.map((m) => [
         m.property_id!,
-        { id: m.property_id!, address: "1 Main", city: null, state: null, assigned_user_id: null },
+        {
+          id: m.property_id!,
+          address: "1 Main",
+          city: null,
+          state: null,
+          status: "prospect",
+          outreach_dispo: null,
+          assigned_user_id: null,
+        },
       ]),
     );
 
@@ -182,7 +204,15 @@ describe("listThreads — isOptedOut (DNC) flag", () => {
     const properties = new Map(
       messages.map((m) => [
         m.property_id,
-        { id: m.property_id, address: null, city: null, state: null, assigned_user_id: null },
+        {
+          id: m.property_id,
+          address: null,
+          city: null,
+          state: null,
+          status: "prospect",
+          outreach_dispo: null,
+          assigned_user_id: null,
+        },
       ]),
     );
     return { messages, contacts, properties };
@@ -302,6 +332,8 @@ describe("listThreads — isOptedOut (DNC) flag", () => {
             address: "1 Alpha Ave",
             city: null,
             state: null,
+            status: "prospect",
+            outreach_dispo: null,
             assigned_user_id: null,
           },
         ],
@@ -312,6 +344,8 @@ describe("listThreads — isOptedOut (DNC) flag", () => {
             address: "2 Bravo Blvd",
             city: null,
             state: null,
+            status: "prospect",
+            outreach_dispo: null,
             assigned_user_id: null,
           },
         ],
@@ -360,7 +394,15 @@ describe("listThreads — recency-only sort", () => {
     const properties = new Map(
       messages.map((m) => [
         m.property_id,
-        { id: m.property_id, address: null, city: null, state: null, assigned_user_id: null },
+        {
+          id: m.property_id,
+          address: null,
+          city: null,
+          state: null,
+          status: "prospect",
+          outreach_dispo: null,
+          assigned_user_id: null,
+        },
       ]),
     );
     return makeStub({ messages, contacts, properties });
@@ -446,6 +488,8 @@ describe("listThreads — escalatedOnly", () => {
           address: null,
           city: null,
           state: null,
+          status: "prospect",
+          outreach_dispo: null,
           assigned_user_id: null,
           needs_human_attention: true,
           last_ai_escalation_reason: "keyword:handoff_request",
@@ -458,6 +502,8 @@ describe("listThreads — escalatedOnly", () => {
           address: null,
           city: null,
           state: null,
+          status: "prospect",
+          outreach_dispo: null,
           assigned_user_id: null,
           needs_human_attention: false,
           last_ai_escalation_reason: null,
@@ -510,5 +556,251 @@ describe("looksLikeTestTraffic", () => {
 
   it("flags the JITTER-SANDRA-V1 writeback-proof address shape", () => {
     expect(looksLikeTestTraffic(null, "JITTER-SANDRA-V1 writeback proof mpwl5neb")).toBe(true);
+  });
+});
+
+describe("listThreads — Needs Outcome", () => {
+  it("marks replied prospect threads with no outreach outcome", async () => {
+    const now = Date.now();
+    const messages = [
+      {
+        contact_id: "c-needs",
+        property_id: "p-needs",
+        body: "Yes, tell me more",
+        direction: "inbound" as const,
+        created_at: new Date(now).toISOString(),
+        read_at: null,
+      },
+      {
+        contact_id: "c-outbound-latest",
+        property_id: "p-outbound-latest",
+        body: "Following up",
+        direction: "outbound" as const,
+        created_at: new Date(now - 1_000).toISOString(),
+        read_at: null,
+      },
+      {
+        contact_id: "c-dispo",
+        property_id: "p-dispo",
+        body: "No thanks",
+        direction: "inbound" as const,
+        created_at: new Date(now - 2_000).toISOString(),
+        read_at: null,
+      },
+      {
+        contact_id: "c-lead",
+        property_id: "p-lead",
+        body: "Call me",
+        direction: "inbound" as const,
+        created_at: new Date(now - 3_000).toISOString(),
+        read_at: null,
+      },
+      {
+        contact_id: "c-no-property",
+        property_id: null,
+        body: "Who is this?",
+        direction: "inbound" as const,
+        created_at: new Date(now - 4_000).toISOString(),
+        read_at: null,
+      },
+    ];
+    const contacts = new Map(
+      messages.map((m) => [
+        m.contact_id,
+        { id: m.contact_id, first_name: null, last_name: null, entity_name: m.contact_id, phone_1: null },
+      ]),
+    );
+    const properties = new Map([
+      [
+        "p-needs",
+        {
+          id: "p-needs",
+          address: "1 Needs Ave",
+          city: null,
+          state: null,
+          status: "prospect",
+          outreach_dispo: null,
+          assigned_user_id: null,
+        },
+      ],
+      [
+        "p-outbound-latest",
+        {
+          id: "p-outbound-latest",
+          address: "2 Outbound St",
+          city: null,
+          state: null,
+          status: "prospect",
+          outreach_dispo: null,
+          assigned_user_id: null,
+        },
+      ],
+      [
+        "p-dispo",
+        {
+          id: "p-dispo",
+          address: "3 Dispo Dr",
+          city: null,
+          state: null,
+          status: "prospect",
+          outreach_dispo: "not_interested",
+          assigned_user_id: null,
+        },
+      ],
+      [
+        "p-lead",
+        {
+          id: "p-lead",
+          address: "4 Lead Ln",
+          city: null,
+          state: null,
+          status: "new_lead",
+          outreach_dispo: null,
+          assigned_user_id: null,
+        },
+      ],
+    ]);
+
+    const { supabase } = makeStub({ messages, contacts, properties });
+    const threads = await listThreads(supabase, {});
+
+    expect(
+      threads.filter((thread) => thread.needsOutcome).map((thread) => thread.propertyId),
+    ).toEqual(["p-needs"]);
+  });
+
+  it("filters to the same Needs Outcome predicate", async () => {
+    const now = Date.now();
+    const messages = [
+      {
+        contact_id: "c-needs",
+        property_id: "p-needs",
+        body: "Yes",
+        direction: "inbound" as const,
+        created_at: new Date(now).toISOString(),
+        read_at: null,
+      },
+      {
+        contact_id: "c-lead",
+        property_id: "p-lead",
+        body: "Already moved",
+        direction: "inbound" as const,
+        created_at: new Date(now - 1_000).toISOString(),
+        read_at: null,
+      },
+    ];
+    const contacts = new Map(
+      messages.map((m) => [
+        m.contact_id,
+        { id: m.contact_id, first_name: null, last_name: null, entity_name: m.contact_id, phone_1: null },
+      ]),
+    );
+    const properties = new Map([
+      [
+        "p-needs",
+        {
+          id: "p-needs",
+          address: "1 Needs Ave",
+          city: null,
+          state: null,
+          status: "prospect",
+          outreach_dispo: null,
+          assigned_user_id: null,
+        },
+      ],
+      [
+        "p-lead",
+        {
+          id: "p-lead",
+          address: "2 Lead Ln",
+          city: null,
+          state: null,
+          status: "new_lead",
+          outreach_dispo: null,
+          assigned_user_id: null,
+        },
+      ],
+    ]);
+
+    const { supabase } = makeStub({ messages, contacts, properties });
+    const threads = await listThreads(supabase, { needsOutcomeOnly: true });
+
+    expect(threads).toHaveLength(1);
+    expect(threads[0]?.propertyId).toBe("p-needs");
+    expect(threads[0]?.needsOutcome).toBe(true);
+  });
+});
+
+describe("countNeedsOutcomeThreads", () => {
+  it("counts Needs Outcome threads without hydrating contacts", async () => {
+    const now = Date.now();
+    const messages = [
+      {
+        contact_id: "c-needs",
+        property_id: "p-needs",
+        body: "Yes",
+        direction: "inbound" as const,
+        created_at: new Date(now).toISOString(),
+        read_at: null,
+      },
+      {
+        contact_id: "c-outbound-latest",
+        property_id: "p-outbound-latest",
+        body: "Checking in",
+        direction: "outbound" as const,
+        created_at: new Date(now - 1_000).toISOString(),
+        read_at: null,
+      },
+      {
+        contact_id: "c-opted-out",
+        property_id: "p-opted-out",
+        body: "Stop",
+        direction: "inbound" as const,
+        created_at: new Date(now - 2_000).toISOString(),
+        read_at: null,
+      },
+    ];
+    const contacts = new Map(
+      messages.map((m) => [
+        m.contact_id,
+        { id: m.contact_id, first_name: null, last_name: null, entity_name: m.contact_id, phone_1: null },
+      ]),
+    );
+    const properties = new Map(
+      ["p-needs", "p-outbound-latest", "p-opted-out"].map((id) => [
+        id,
+        {
+          id,
+          address: null,
+          city: null,
+          state: null,
+          status: "prospect",
+          outreach_dispo: null,
+          assigned_user_id: null,
+        },
+      ]),
+    );
+
+    const { supabase, inCalls } = makeStub({
+      messages,
+      contacts,
+      properties,
+      consentEvents: [
+        {
+          contact_id: "c-opted-out",
+          event_type: "opt_out",
+          occurred_at: new Date(now).toISOString(),
+        },
+      ],
+    });
+
+    const count = await countNeedsOutcomeThreads(supabase, {
+      hideOptedOut: true,
+    });
+
+    expect(count).toBe(1);
+    expect(inCalls.contacts).toEqual([]);
+    expect(inCalls.properties).toHaveLength(1);
+    expect(inCalls.consent_events).toHaveLength(1);
   });
 });

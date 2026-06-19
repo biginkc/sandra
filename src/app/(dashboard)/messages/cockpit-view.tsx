@@ -32,6 +32,7 @@ type Props = {
   threadDetail: InboxDetailData | null;
   unknownSenders: UnknownSender[];
   unknownActiveCount: number;
+  needsOutcomeCount: number;
   /** auth.users.id → email map for assignee badges. */
   assigneeEmails: Record<string, string>;
   /** auth.users.id of the current viewer. */
@@ -50,6 +51,7 @@ const THREAD_FILTERS = new Set<InboxFilter>([
   "unassigned",
   "unread",
   "escalated",
+  "needs_outcome",
 ]);
 
 export function CockpitView({
@@ -62,6 +64,7 @@ export function CockpitView({
   threadDetail,
   unknownSenders,
   unknownActiveCount,
+  needsOutcomeCount,
   assigneeEmails,
   currentUserId,
   queueStats,
@@ -195,6 +198,7 @@ export function CockpitView({
           <InboxFilters
             active={filter}
             unknownCount={unknownActiveCount}
+            needsOutcomeCount={needsOutcomeCount}
             unreadCount={threads.filter((t) => t.unreadCount > 0).length}
             showAssignmentChips={currentUserId !== null}
             hideDnc={hideDnc}

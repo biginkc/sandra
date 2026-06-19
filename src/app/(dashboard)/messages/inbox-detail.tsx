@@ -1,15 +1,18 @@
 "use client";
 
-import { PhoneIcon } from "lucide-react";
+import { ChevronDownIcon, PhoneIcon } from "lucide-react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useState, useTransition } from "react";
 
 import { toast } from "sonner";
 
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { StatusChip, type StatusVariant } from "@/components/ui/status-chip";
 import { cn } from "@/lib/utils";
 
@@ -17,8 +20,11 @@ import { InlineReply } from "../leads/[id]/inline-reply";
 import { MessagesThread } from "../leads/[id]/messages-thread";
 
 import { AssignDropdown } from "./assign-dropdown";
-import { AssigneeSelect } from "./_components/assignee-select";
-import { setOutreachDispo, type OutreachDispo } from "./dispo-actions";
+import {
+  moveMessageThreadToLead,
+  setOutreachDispo,
+  type OutreachDispo,
+} from "./dispo-actions";
 import { type InboxDetail as InboxDetailData } from "./inbox-detail-data";
 
 type Props = {
@@ -32,14 +38,14 @@ type Props = {
   currentUserId: string | null;
 };
 
-const DISPO_LABELS: Record<OutreachDispo, string> = {
+const DISPO_LABELS: Record<string, string> = {
   wrong_number: "Wrong #",
-  bad_number: "Bad #",
+  bad_number: "Bad / disconnected #",
   not_interested: "Not interested",
-  opted_out: "Opted out",
-  dnc: "Do not contact",
-  nurture: "Nurture",
-  callback_requested: "Callback",
+  opted_out: "SMS opted out",
+  dnc: "Do not call",
+  nurture: "Legacy follow-up",
+  callback_requested: "Lead task requested",
 };
 
 const VALID_STATUSES: StatusVariant[] = ["replying", "hot", "new", "contacted", "cold", "dead"];
@@ -58,34 +64,20 @@ function initialsOfName(name: string | null): string {
 function DispoBar({
   propertyId,
   initialDispo,
-  currentUserId,
+  propertyStatus,
 }: {
   propertyId: string;
   initialDispo: string | null;
-  currentUserId: string | null;
+  propertyStatus: string | null;
 }) {
-  const [dispo, setDispo] = useState<OutreachDispo | null>(
-    initialDispo as OutreachDispo | null,
-  );
-  const [followUpOpen, setFollowUpOpen] = useState(false);
-  const [followUpDate, setFollowUpDate] = useState("");
-  const [followUpAssignee, setFollowUpAssignee] = useState<string | null>(
-    currentUserId,
-  );
+  const router = useRouter();
+  const [dispo, setDispo] = useState<string | null>(initialDispo);
+  const [isLead, setIsLead] = useState(propertyStatus !== "prospect");
   const [pending, startTransition] = useTransition();
 
-  function apply(
-    newDispo: OutreachDispo,
-    followUpAt?: string,
-    assigneeId?: string | null,
-  ) {
+  function apply(newDispo: OutreachDispo) {
     startTransition(async () => {
-      const result = await setOutreachDispo(
-        propertyId,
-        newDispo,
-        followUpAt,
-        assigneeId,
-      );
+      const result = await setOutreachDispo(propertyId, newDispo);
       if (result.ok) {
         setDispo(newDispo);
         if (newDispo === "wrong_number") {
@@ -97,10 +89,26 @@ function DispoBar({
     });
   }
 
+  function moveToLead() {
+    startTransition(async () => {
+      const result = await moveMessageThreadToLead(propertyId);
+      if (result.ok) {
+        setIsLead(true);
+        toast.success(
+          result.alreadyQualified ? "Opening lead" : "Moved to lead",
+        );
+        router.push(`/leads/${propertyId}`);
+        router.refresh();
+      } else {
+        toast.error(result.error);
+      }
+    });
+  }
+
   const isDnc = dispo === "dnc" || dispo === "opted_out";
 
   return (
-    <div className="flex items-center gap-2">
+    <div className="flex flex-wrap items-center gap-2">
       <span className="text-[12px] font-bold text-[#78716c]">
         How&apos;d it go?
       </span>
@@ -116,7 +124,7 @@ function DispoBar({
         )}
         data-testid="dispo-wrong-number"
       >
-        Wrong #
+        Wrong number
       </button>
 
       <button
@@ -144,55 +152,69 @@ function DispoBar({
         )}
         data-testid="dispo-dnc"
       >
-        DNC
+        Do not call
       </button>
 
-      <Popover open={followUpOpen} onOpenChange={setFollowUpOpen}>
-        <PopoverTrigger
-          disabled={pending}
-          className={cn(
-            "px-2 py-1 text-[11px] font-medium rounded-md border transition-colors",
-            dispo === "nurture" || dispo === "callback_requested"
-              ? "bg-[#f5f5f4] border-[#e5e1df] text-[#1c1917]"
-              : "border-[#e5e1df] text-[#78716c] hover:bg-[#f5f5f4]",
-          )}
-          data-testid="dispo-nurture"
+      {isLead ? (
+        <Link
+          href={`/leads/${propertyId}`}
+          className="inline-flex items-center rounded-md border border-[#e5e1df] px-2 py-1 text-[11px] font-medium text-[#1c1917] transition-colors hover:bg-[#f5f5f4]"
+          data-testid="message-open-lead"
         >
-          Nurture
-        </PopoverTrigger>
-        <PopoverContent className="w-56 p-3" align="start">
-          <p className="mb-2 text-xs font-medium">Follow up on</p>
-          <Input
-            type="date"
-            value={followUpDate}
-            onChange={(e) => setFollowUpDate(e.target.value)}
-            className="mb-2 h-8 text-sm"
-          />
-          <p className="mb-2 text-xs font-medium">Assign to</p>
-          <AssigneeSelect
-            value={followUpAssignee}
-            onChange={setFollowUpAssignee}
-            currentUserId={currentUserId}
-            disabled={pending}
-            className="mb-3"
-          />
-          <Button
-            size="sm"
-            className="w-full"
-            disabled={!followUpDate || pending}
-            onClick={() => {
-              apply(
-                "nurture",
-                new Date(followUpDate).toISOString(),
-                followUpAssignee,
-              );
-              setFollowUpOpen(false);
-            }}
+          Open lead
+        </Link>
+      ) : (
+        <button
+          onClick={moveToLead}
+          disabled={pending}
+          className="rounded-md border border-[#111827] bg-[#111827] px-2 py-1 text-[11px] font-medium text-white transition-colors hover:bg-[#292524] disabled:opacity-60"
+          data-testid="message-move-to-lead"
+        >
+          Move to Lead
+        </button>
+      )}
+
+      <DropdownMenu>
+        <DropdownMenuTrigger
+          render={
+            <button
+              type="button"
+              disabled={pending}
+              className="inline-flex items-center gap-1 rounded-md border border-[#e5e1df] px-2 py-1 text-[11px] font-medium text-[#78716c] transition-colors hover:bg-[#f5f5f4] hover:text-[#1c1917]"
+              data-testid="dispo-more"
+            >
+              More
+              <ChevronDownIcon className="h-3 w-3" />
+            </button>
+          }
+        />
+        <DropdownMenuContent align="start">
+          <DropdownMenuItem
+            onClick={() => apply("bad_number")}
+            data-testid="dispo-bad-number"
           >
-            Set
-          </Button>
-        </PopoverContent>
-      </Popover>
+            Bad / disconnected #
+          </DropdownMenuItem>
+          <DropdownMenuItem
+            onClick={() => apply("opted_out")}
+            data-testid="dispo-opted-out"
+          >
+            SMS opt-out
+          </DropdownMenuItem>
+          <DropdownMenuItem
+            onClick={() => {
+              if (isLead) {
+                router.push(`/leads/${propertyId}`);
+              } else {
+                moveToLead();
+              }
+            }}
+            data-testid="dispo-open-lead-task"
+          >
+            Open lead to add task
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
 
       {dispo ? (
         <span
@@ -226,6 +248,7 @@ export function InboxDetail({
 }: Props) {
   const router = useRouter();
   const searchParams = useSearchParams();
+  const [openLeadPending, startOpenLeadTransition] = useTransition();
 
   useEffect(() => {
     if (!data) return;
@@ -271,6 +294,25 @@ export function InboxDetail({
       ? "Me"
       : (assigneeEmail ?? "Teammate");
   const phoneHref = data.contactPhone ? `tel:${data.contactPhone}` : null;
+  const openLeadFromHeader = () => {
+    if (!data.propertyId) return;
+    if (data.propertyStatus !== "prospect") {
+      router.push(`/leads/${data.propertyId}`);
+      return;
+    }
+    startOpenLeadTransition(async () => {
+      const result = await moveMessageThreadToLead(data.propertyId!);
+      if (result.ok) {
+        toast.success(
+          result.alreadyQualified ? "Opening lead" : "Moved to lead",
+        );
+        router.push(`/leads/${data.propertyId}`);
+        router.refresh();
+      } else {
+        toast.error(result.error);
+      }
+    });
+  };
 
   return (
     <div
@@ -324,16 +366,31 @@ export function InboxDetail({
             />
           ) : null}
           {data.propertyId ? (
-            <Link
-              href={`/leads/${data.propertyId}`}
-              data-testid="inbox-detail-open-lead"
-              className={cn(
-                "inline-flex items-center gap-1 rounded-full border border-[#e5e1df] bg-white px-4 py-1.5",
-                "text-[12px] font-bold text-[#1c1917] transition-colors hover:bg-[#f5f5f4]",
-              )}
-            >
-              Open lead
-            </Link>
+            data.propertyStatus === "prospect" ? (
+              <button
+                type="button"
+                onClick={openLeadFromHeader}
+                disabled={openLeadPending}
+                data-testid="inbox-detail-open-lead"
+                className={cn(
+                  "inline-flex items-center gap-1 rounded-full border border-[#e5e1df] bg-white px-4 py-1.5",
+                  "text-[12px] font-bold text-[#1c1917] transition-colors hover:bg-[#f5f5f4] disabled:opacity-60",
+                )}
+              >
+                Move to Lead
+              </button>
+            ) : (
+              <Link
+                href={`/leads/${data.propertyId}`}
+                data-testid="inbox-detail-open-lead"
+                className={cn(
+                  "inline-flex items-center gap-1 rounded-full border border-[#e5e1df] bg-white px-4 py-1.5",
+                  "text-[12px] font-bold text-[#1c1917] transition-colors hover:bg-[#f5f5f4]",
+                )}
+              >
+                Open lead
+              </Link>
+            )
           ) : null}
         </div>
       </header>
@@ -358,7 +415,7 @@ export function InboxDetail({
               key={`dispo-${data.propertyId}`}
               propertyId={data.propertyId}
               initialDispo={data.outreachDispo}
-              currentUserId={currentUserId}
+              propertyStatus={data.propertyStatus}
             />
           </div>
           <div className="border-t border-border bg-white px-6 py-4">

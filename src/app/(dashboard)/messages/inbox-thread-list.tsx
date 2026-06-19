@@ -165,6 +165,17 @@ export function InboxThreadList({
                   <EscalationBadge reason={t.escalationReason} />
                 </div>
               ) : null}
+              {t.needsOutcome ? (
+                <div className="flex w-full">
+                  <Badge
+                    variant="outline"
+                    className="h-5 px-1.5 text-[10px] font-semibold text-[#78716c]"
+                    data-testid={`inbox-thread-${t.threadId}-needs-outcome`}
+                  >
+                    Needs outcome
+                  </Badge>
+                </div>
+              ) : null}
               <div className="flex w-full items-center justify-between gap-2">
                 <span className="line-clamp-1 text-[13px] text-[#78716c]">
                   {t.lastMessageDirection === "outbound" ? "You: " : ""}

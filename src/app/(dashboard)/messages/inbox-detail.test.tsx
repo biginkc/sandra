@@ -1,6 +1,6 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, it, expect, vi } from "vitest";
+import { beforeEach, describe, it, expect, vi } from "vitest";
 
 import { InboxDetail } from "./inbox-detail";
 import type { InboxDetail as InboxDetailData } from "./inbox-detail-data";
@@ -13,10 +13,15 @@ type MessageRow = Database["public"]["Tables"]["messages"]["Row"];
 // would push.
 const replaceCalls: string[] = [];
 const refreshCalls: number[] = [];
+const pushCalls: string[] = [];
+const setOutreachDispoMock = vi.hoisted(() => vi.fn());
+const moveMessageThreadToLeadMock = vi.hoisted(() => vi.fn());
 
 vi.mock("next/navigation", () => ({
   useRouter: () => ({
-    push: vi.fn(),
+    push: vi.fn((url: string) => {
+      pushCalls.push(url);
+    }),
     replace: vi.fn((url: string) => {
       replaceCalls.push(url);
     }),
@@ -29,6 +34,11 @@ vi.mock("next/navigation", () => ({
   }),
   useSearchParams: () => new URLSearchParams(),
   usePathname: () => "/messages",
+}));
+
+vi.mock("./dispo-actions", () => ({
+  setOutreachDispo: setOutreachDispoMock,
+  moveMessageThreadToLead: moveMessageThreadToLeadMock,
 }));
 
 // Server-action modules ("use server" at top) cannot be imported in jsdom —
@@ -115,6 +125,15 @@ function makeData(overrides: Partial<InboxDetailData> & { contactId: string }): 
 }
 
 describe("<InboxDetail />", () => {
+  beforeEach(() => {
+    pushCalls.length = 0;
+    setOutreachDispoMock.mockResolvedValue({ ok: true });
+    moveMessageThreadToLeadMock.mockResolvedValue({
+      ok: true,
+      alreadyQualified: false,
+    });
+  });
+
   it("renders the empty placeholder when no thread is selected (test 14 baseline)", () => {
     render(
       <InboxDetail
@@ -304,5 +323,147 @@ describe("<InboxDetail />", () => {
     );
 
     expect(screen.getByLabelText("Reply to this lead")).toHaveValue("");
+  });
+
+  it("renders message outcomes without the old Nurture scheduling popover", () => {
+    const data = makeData({
+      contactId: "contact-outcomes",
+      initialMessages: [],
+    });
+
+    render(
+      <InboxDetail
+        data={data}
+        assigneeEmails={{}}
+        currentUserId="user-1"
+      />,
+    );
+
+    expect(screen.getByTestId("dispo-wrong-number")).toHaveTextContent(
+      "Wrong number",
+    );
+    expect(screen.getByTestId("dispo-not-interested")).toBeInTheDocument();
+    expect(screen.getByTestId("dispo-dnc")).toHaveTextContent("Do not call");
+    expect(screen.getByTestId("message-move-to-lead")).toBeInTheDocument();
+    expect(screen.getByTestId("dispo-more")).toBeInTheDocument();
+    expect(screen.queryByTestId("dispo-nurture")).not.toBeInTheDocument();
+    expect(screen.queryByText("Follow up on")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("assignee-select")).not.toBeInTheDocument();
+  });
+
+  it("message outcomes call setOutreachDispo without task scheduling fields", async () => {
+    const user = userEvent.setup();
+    const data = makeData({
+      contactId: "contact-dispo-click",
+      initialMessages: [],
+    });
+
+    render(
+      <InboxDetail
+        data={data}
+        assigneeEmails={{}}
+        currentUserId="user-1"
+      />,
+    );
+
+    await user.click(screen.getByTestId("dispo-not-interested"));
+
+    expect(setOutreachDispoMock).toHaveBeenCalledWith(
+      "prop-1",
+      "not_interested",
+    );
+  });
+
+  it("Move to Lead promotes then opens the lead page", async () => {
+    const user = userEvent.setup();
+    const data = makeData({
+      contactId: "contact-move-lead",
+      propertyId: "prop-move",
+      propertyStatus: "prospect",
+      initialMessages: [],
+    });
+
+    render(
+      <InboxDetail
+        data={data}
+        assigneeEmails={{}}
+        currentUserId="user-1"
+      />,
+    );
+
+    await user.click(screen.getByTestId("message-move-to-lead"));
+
+    expect(moveMessageThreadToLeadMock).toHaveBeenCalledWith("prop-move");
+    expect(pushCalls).toContain("/leads/prop-move");
+  });
+
+  it("header Move to Lead promotes prospects before opening the lead page", async () => {
+    const user = userEvent.setup();
+    const data = makeData({
+      contactId: "contact-header-move",
+      propertyId: "prop-header-move",
+      propertyStatus: "prospect",
+      initialMessages: [],
+    });
+
+    render(
+      <InboxDetail
+        data={data}
+        assigneeEmails={{}}
+        currentUserId="user-1"
+      />,
+    );
+
+    await user.click(screen.getByTestId("inbox-detail-open-lead"));
+
+    expect(moveMessageThreadToLeadMock).toHaveBeenCalledWith("prop-header-move");
+    expect(pushCalls).toContain("/leads/prop-header-move");
+  });
+
+  it("Open lead to add task promotes prospects before navigation", async () => {
+    const user = userEvent.setup();
+    const data = makeData({
+      contactId: "contact-task-move",
+      propertyId: "prop-task-move",
+      propertyStatus: "prospect",
+      initialMessages: [],
+    });
+
+    render(
+      <InboxDetail
+        data={data}
+        assigneeEmails={{}}
+        currentUserId="user-1"
+      />,
+    );
+
+    await user.click(screen.getByTestId("dispo-more"));
+    await user.click(await screen.findByTestId("dispo-open-lead-task"));
+
+    expect(moveMessageThreadToLeadMock).toHaveBeenCalledWith("prop-task-move");
+    expect(pushCalls).toContain("/leads/prop-task-move");
+  });
+
+  it("already-qualified rows show Open Lead instead of Move to Lead", () => {
+    const data = makeData({
+      contactId: "contact-open-lead",
+      propertyId: "prop-open",
+      propertyStatus: "new_lead",
+      initialMessages: [],
+    });
+
+    render(
+      <InboxDetail
+        data={data}
+        assigneeEmails={{}}
+        currentUserId="user-1"
+      />,
+    );
+
+    expect(screen.queryByTestId("message-move-to-lead")).not.toBeInTheDocument();
+    expect(screen.getByTestId("message-open-lead")).toHaveAttribute(
+      "href",
+      "/leads/prop-open",
+    );
   });
 });
