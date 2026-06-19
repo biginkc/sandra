@@ -124,9 +124,31 @@ function makeData(overrides: Partial<InboxDetailData> & { contactId: string }): 
   };
 }
 
+function expectSharedOutcomeControls({
+  moveToLeadDisabled,
+}: {
+  moveToLeadDisabled: boolean;
+}) {
+  expect(screen.getByTestId("dispo-wrong-number")).toHaveTextContent(
+    "Wrong number",
+  );
+  expect(screen.getByTestId("dispo-not-interested")).toBeInTheDocument();
+  expect(screen.getByTestId("dispo-dnc")).toHaveTextContent("Do not call");
+  expect(screen.getByTestId("dispo-more")).toBeInTheDocument();
+
+  const moveToLead = screen.getByTestId("message-move-to-lead");
+  if (moveToLeadDisabled) {
+    expect(moveToLead).toBeDisabled();
+  } else {
+    expect(moveToLead).toBeEnabled();
+  }
+}
+
 describe("<InboxDetail />", () => {
   beforeEach(() => {
     pushCalls.length = 0;
+    setOutreachDispoMock.mockClear();
+    moveMessageThreadToLeadMock.mockClear();
     setOutreachDispoMock.mockResolvedValue({ ok: true });
     moveMessageThreadToLeadMock.mockResolvedValue({
       ok: true,
@@ -339,16 +361,32 @@ describe("<InboxDetail />", () => {
       />,
     );
 
-    expect(screen.getByTestId("dispo-wrong-number")).toHaveTextContent(
-      "Wrong number",
-    );
-    expect(screen.getByTestId("dispo-not-interested")).toBeInTheDocument();
-    expect(screen.getByTestId("dispo-dnc")).toHaveTextContent("Do not call");
-    expect(screen.getByTestId("message-move-to-lead")).toBeInTheDocument();
-    expect(screen.getByTestId("dispo-more")).toBeInTheDocument();
+    expectSharedOutcomeControls({ moveToLeadDisabled: false });
     expect(screen.queryByTestId("dispo-nurture")).not.toBeInTheDocument();
     expect(screen.queryByText("Follow up on")).not.toBeInTheDocument();
     expect(screen.queryByTestId("assignee-select")).not.toBeInTheDocument();
+  });
+
+  it("keeps lead promotion out of the More outcome menu", async () => {
+    const user = userEvent.setup();
+    const data = makeData({
+      contactId: "contact-more-menu",
+      initialMessages: [],
+    });
+
+    render(
+      <InboxDetail
+        data={data}
+        assigneeEmails={{}}
+        currentUserId="user-1"
+      />,
+    );
+
+    await user.click(screen.getByTestId("dispo-more"));
+
+    expect(await screen.findByTestId("dispo-bad-number")).toBeInTheDocument();
+    expect(screen.getByTestId("dispo-opted-out")).toBeInTheDocument();
+    expect(screen.queryByTestId("dispo-open-lead-task")).not.toBeInTheDocument();
   });
 
   it("message outcomes call setOutreachDispo without task scheduling fields", async () => {
@@ -420,31 +458,8 @@ describe("<InboxDetail />", () => {
     expect(pushCalls).toContain("/leads/prop-header-move");
   });
 
-  it("Open lead to add task promotes prospects before navigation", async () => {
+  it("already-qualified rows keep the same outcome buttons and disable Move to Lead", async () => {
     const user = userEvent.setup();
-    const data = makeData({
-      contactId: "contact-task-move",
-      propertyId: "prop-task-move",
-      propertyStatus: "prospect",
-      initialMessages: [],
-    });
-
-    render(
-      <InboxDetail
-        data={data}
-        assigneeEmails={{}}
-        currentUserId="user-1"
-      />,
-    );
-
-    await user.click(screen.getByTestId("dispo-more"));
-    await user.click(await screen.findByTestId("dispo-open-lead-task"));
-
-    expect(moveMessageThreadToLeadMock).toHaveBeenCalledWith("prop-task-move");
-    expect(pushCalls).toContain("/leads/prop-task-move");
-  });
-
-  it("already-qualified rows show Open Lead instead of Move to Lead", () => {
     const data = makeData({
       contactId: "contact-open-lead",
       propertyId: "prop-open",
@@ -460,10 +475,51 @@ describe("<InboxDetail />", () => {
       />,
     );
 
-    expect(screen.queryByTestId("message-move-to-lead")).not.toBeInTheDocument();
-    expect(screen.getByTestId("message-open-lead")).toHaveAttribute(
-      "href",
-      "/leads/prop-open",
+    const moveToLead = screen.getByTestId("message-move-to-lead");
+    expectSharedOutcomeControls({ moveToLeadDisabled: true });
+    expect(screen.getByTestId("inbox-detail-open-lead")).toHaveTextContent(
+      "Move to Lead",
     );
+    expect(screen.getByTestId("inbox-detail-open-lead")).toBeDisabled();
+    expect(screen.queryByTestId("message-open-lead")).not.toBeInTheDocument();
+
+    await user.click(moveToLead);
+
+    expect(moveMessageThreadToLeadMock).not.toHaveBeenCalled();
+  });
+
+  it("disables Move to Lead when the same property refreshes from prospect to lead", () => {
+    const prospectData = makeData({
+      contactId: "contact-status-refresh",
+      propertyId: "prop-status-refresh",
+      propertyStatus: "prospect",
+      initialMessages: [],
+    });
+    const leadData = {
+      ...prospectData,
+      propertyStatus: "new_lead",
+    };
+
+    const { rerender } = render(
+      <InboxDetail
+        data={prospectData}
+        assigneeEmails={{}}
+        currentUserId="user-1"
+      />,
+    );
+
+    expectSharedOutcomeControls({ moveToLeadDisabled: false });
+    expect(screen.getByTestId("inbox-detail-open-lead")).toBeEnabled();
+
+    rerender(
+      <InboxDetail
+        data={leadData}
+        assigneeEmails={{}}
+        currentUserId="user-1"
+      />,
+    );
+
+    expectSharedOutcomeControls({ moveToLeadDisabled: true });
+    expect(screen.getByTestId("inbox-detail-open-lead")).toBeDisabled();
   });
 });

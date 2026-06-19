@@ -152,21 +152,27 @@ test.describe("Messages cockpit — design fidelity", () => {
     await expect(panel).toContainText("4421 Blanco Rd");
     await expect(panel).toContainText(/Assigned:/);
 
-    // Phone button + Open lead pill
+    // Phone button + unified Move to Lead pill
     await expect(page.getByTestId("inbox-detail-phone")).toBeVisible();
     const openLead = page.getByTestId("inbox-detail-open-lead");
     await expect(openLead).toBeVisible();
+    await expect(openLead).toContainText("Move to Lead");
+    await expect(openLead).toBeDisabled();
     await expect(openLead).toHaveClass(/rounded-full/);
 
-    // Dispo bar — labeled buttons, uppercase DISPO label
+    // Dispo bar — same outcome controls for lead and prospect threads.
     await expect(page.getByTestId("dispo-wrong-number")).toContainText(
-      "Wrong #",
+      "Wrong number",
     );
     await expect(page.getByTestId("dispo-not-interested")).toContainText(
       "Not interested",
     );
-    await expect(page.getByTestId("dispo-dnc")).toContainText("DNC");
-    await expect(page.getByTestId("dispo-nurture")).toContainText("Nurture");
+    await expect(page.getByTestId("dispo-dnc")).toContainText("Do not call");
+    const moveToLead = page.getByTestId("message-move-to-lead");
+    await expect(moveToLead).toContainText("Move to Lead");
+    await expect(moveToLead).toBeDisabled();
+    await expect(page.getByTestId("dispo-more")).toBeVisible();
+    await expect(page.getByTestId("message-open-lead")).toHaveCount(0);
 
     // Composer card with From: + Send SMS button + disclaimer
     const reply = page.getByTestId("inline-reply");

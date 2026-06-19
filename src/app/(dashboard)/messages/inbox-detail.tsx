@@ -1,7 +1,6 @@
 "use client";
 
 import { ChevronDownIcon, PhoneIcon } from "lucide-react";
-import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useState, useTransition } from "react";
 
@@ -61,6 +60,15 @@ function initialsOfName(name: string | null): string {
   return name.slice(0, 2).toUpperCase();
 }
 
+function outcomeButtonClass(isActive: boolean, activeClass = "bg-[#f5f5f4] border-[#e5e1df] text-[#1c1917]") {
+  return cn(
+    "px-2 py-1 text-[11px] font-medium rounded-md border transition-colors",
+    isActive
+      ? activeClass
+      : "border-[#e5e1df] text-[#78716c] hover:bg-[#f5f5f4]",
+  );
+}
+
 function DispoBar({
   propertyId,
   initialDispo,
@@ -72,8 +80,9 @@ function DispoBar({
 }) {
   const router = useRouter();
   const [dispo, setDispo] = useState<string | null>(initialDispo);
-  const [isLead, setIsLead] = useState(propertyStatus !== "prospect");
+  const [wasMovedToLead, setWasMovedToLead] = useState(false);
   const [pending, startTransition] = useTransition();
+  const isLead = propertyStatus !== "prospect" || wasMovedToLead;
 
   function apply(newDispo: OutreachDispo) {
     startTransition(async () => {
@@ -93,7 +102,7 @@ function DispoBar({
     startTransition(async () => {
       const result = await moveMessageThreadToLead(propertyId);
       if (result.ok) {
-        setIsLead(true);
+        setWasMovedToLead(true);
         toast.success(
           result.alreadyQualified ? "Opening lead" : "Moved to lead",
         );
@@ -116,12 +125,7 @@ function DispoBar({
       <button
         onClick={() => apply("wrong_number")}
         disabled={pending}
-        className={cn(
-          "px-2 py-1 text-[11px] font-medium rounded-md border transition-colors",
-          dispo === "wrong_number"
-            ? "bg-[#f5f5f4] border-[#e5e1df] text-[#1c1917]"
-            : "border-[#e5e1df] text-[#78716c] hover:bg-[#f5f5f4]",
-        )}
+        className={outcomeButtonClass(dispo === "wrong_number")}
         data-testid="dispo-wrong-number"
       >
         Wrong number
@@ -130,12 +134,7 @@ function DispoBar({
       <button
         onClick={() => apply("not_interested")}
         disabled={pending}
-        className={cn(
-          "px-2 py-1 text-[11px] font-medium rounded-md border transition-colors",
-          dispo === "not_interested"
-            ? "bg-[#f5f5f4] border-[#e5e1df] text-[#1c1917]"
-            : "border-[#e5e1df] text-[#78716c] hover:bg-[#f5f5f4]",
-        )}
+        className={outcomeButtonClass(dispo === "not_interested")}
         data-testid="dispo-not-interested"
       >
         Not interested
@@ -144,35 +143,21 @@ function DispoBar({
       <button
         onClick={() => apply("dnc")}
         disabled={pending}
-        className={cn(
-          "px-2 py-1 text-[11px] font-medium rounded-md border transition-colors",
-          isDnc
-            ? "bg-red-50 border-red-200 text-red-700"
-            : "border-[#e5e1df] text-[#78716c] hover:bg-[#f5f5f4]",
-        )}
+        className={outcomeButtonClass(isDnc, "bg-red-50 border-red-200 text-red-700")}
         data-testid="dispo-dnc"
       >
         Do not call
       </button>
 
-      {isLead ? (
-        <Link
-          href={`/leads/${propertyId}`}
-          className="inline-flex items-center rounded-md border border-[#e5e1df] px-2 py-1 text-[11px] font-medium text-[#1c1917] transition-colors hover:bg-[#f5f5f4]"
-          data-testid="message-open-lead"
-        >
-          Open lead
-        </Link>
-      ) : (
-        <button
-          onClick={moveToLead}
-          disabled={pending}
-          className="rounded-md border border-[#111827] bg-[#111827] px-2 py-1 text-[11px] font-medium text-white transition-colors hover:bg-[#292524] disabled:opacity-60"
-          data-testid="message-move-to-lead"
-        >
-          Move to Lead
-        </button>
-      )}
+      <button
+        onClick={moveToLead}
+        disabled={pending || isLead}
+        className="rounded-md border border-[#111827] bg-[#111827] px-2 py-1 text-[11px] font-medium text-white transition-colors hover:bg-[#292524] disabled:cursor-not-allowed disabled:opacity-60"
+        data-testid="message-move-to-lead"
+        title={isLead ? "Already a lead" : undefined}
+      >
+        Move to Lead
+      </button>
 
       <DropdownMenu>
         <DropdownMenuTrigger
@@ -200,18 +185,6 @@ function DispoBar({
             data-testid="dispo-opted-out"
           >
             SMS opt-out
-          </DropdownMenuItem>
-          <DropdownMenuItem
-            onClick={() => {
-              if (isLead) {
-                router.push(`/leads/${propertyId}`);
-              } else {
-                moveToLead();
-              }
-            }}
-            data-testid="dispo-open-lead-task"
-          >
-            Open lead to add task
           </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
@@ -294,12 +267,9 @@ export function InboxDetail({
       ? "Me"
       : (assigneeEmail ?? "Teammate");
   const phoneHref = data.contactPhone ? `tel:${data.contactPhone}` : null;
+  const propertyIsLead = data.propertyStatus !== "prospect";
   const openLeadFromHeader = () => {
-    if (!data.propertyId) return;
-    if (data.propertyStatus !== "prospect") {
-      router.push(`/leads/${data.propertyId}`);
-      return;
-    }
+    if (!data.propertyId || propertyIsLead) return;
     startOpenLeadTransition(async () => {
       const result = await moveMessageThreadToLead(data.propertyId!);
       if (result.ok) {
@@ -366,31 +336,19 @@ export function InboxDetail({
             />
           ) : null}
           {data.propertyId ? (
-            data.propertyStatus === "prospect" ? (
-              <button
-                type="button"
-                onClick={openLeadFromHeader}
-                disabled={openLeadPending}
-                data-testid="inbox-detail-open-lead"
-                className={cn(
-                  "inline-flex items-center gap-1 rounded-full border border-[#e5e1df] bg-white px-4 py-1.5",
-                  "text-[12px] font-bold text-[#1c1917] transition-colors hover:bg-[#f5f5f4] disabled:opacity-60",
-                )}
-              >
-                Move to Lead
-              </button>
-            ) : (
-              <Link
-                href={`/leads/${data.propertyId}`}
-                data-testid="inbox-detail-open-lead"
-                className={cn(
-                  "inline-flex items-center gap-1 rounded-full border border-[#e5e1df] bg-white px-4 py-1.5",
-                  "text-[12px] font-bold text-[#1c1917] transition-colors hover:bg-[#f5f5f4]",
-                )}
-              >
-                Open lead
-              </Link>
-            )
+            <button
+              type="button"
+              onClick={openLeadFromHeader}
+              disabled={openLeadPending || propertyIsLead}
+              data-testid="inbox-detail-open-lead"
+              title={propertyIsLead ? "Already a lead" : undefined}
+              className={cn(
+                "inline-flex items-center gap-1 rounded-full border border-[#e5e1df] bg-white px-4 py-1.5",
+                "text-[12px] font-bold text-[#1c1917] transition-colors hover:bg-[#f5f5f4] disabled:cursor-not-allowed disabled:opacity-60",
+              )}
+            >
+              Move to Lead
+            </button>
           ) : null}
         </div>
       </header>
