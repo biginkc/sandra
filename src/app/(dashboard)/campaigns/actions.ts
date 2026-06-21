@@ -4,7 +4,7 @@ import { bulkQueueSms, getAllMatchingProspectIds } from "@/app/(dashboard)/prope
 import { getCallerMemberships } from "@/lib/auth/memberships";
 import { errFromUnknown, ok, type Result } from "@/lib/errors/result";
 import { reportError } from "@/lib/errors/report";
-import type { BulkSmsQueueOpts } from "@/lib/messaging/bulk-queue";
+import type { BulkSmsQueueBaseOpts } from "@/lib/messaging/bulk-queue";
 import {
   EMPTY_AUDIENCE_VALIDATION_MESSAGE,
   hasEffectiveAudience,
@@ -33,7 +33,7 @@ type CampaignRecipientSeedRow = {
   contactId: string | null;
 };
 
-type LaunchCampaignOpts = Omit<BulkSmsQueueOpts, "campaignId">;
+type LaunchCampaignOpts = BulkSmsQueueBaseOpts;
 
 export type CreateCampaignInput = {
   name: string;

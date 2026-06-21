@@ -6,9 +6,14 @@ import { start } from "workflow/api";
 import { bulkSmsWorkflow } from "@/workflows/bulk-sms";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
+import {
+  completeLaunchingCampaign,
+  normalizeAdHocCampaignName,
+  resolveAdHocBulkSmsCampaign,
+  settleAdHocCampaignAfterQueueFailure,
+} from "@/lib/campaigns/ad-hoc-bulk-sms";
 import { errFromUnknown, ok, type Result } from "@/lib/errors/result";
 import { reportError } from "@/lib/errors/report";
-import { sendSmsToContact } from "@/lib/messaging/send";
 import {
   assessAudienceLineTypes,
   type AudienceLineTypeAssessment,
@@ -16,7 +21,9 @@ import {
 import {
   freshScheduleState,
   queueSmsBatch,
+  type BulkSmsQueueBaseOpts,
   type BulkSmsQueueOpts,
+  type ResolvedBulkSmsQueueOpts,
 } from "@/lib/messaging/bulk-queue";
 import {
   buildSnapshotsForProperty,
@@ -104,15 +111,149 @@ export type BulkSmsOutcome = {
  * provider credits are the only cap (Jarrad's standing rule).
  */
 const SYNC_BULK_SMS_LIMIT = 500;
+const VALIDATION_CHUNK = 250;
+
+function resolveProvidedCampaignId(opts: BulkSmsQueueOpts): string | null {
+  return "campaignId" in opts &&
+    typeof opts.campaignId === "string" &&
+    opts.campaignId.trim().length > 0
+    ? opts.campaignId.trim()
+    : null;
+}
+
+function baseBulkSmsOpts(opts: BulkSmsQueueOpts): BulkSmsQueueBaseOpts {
+  return {
+    body: opts.body,
+    templateCategory: opts.templateCategory,
+    paceSeconds: opts.paceSeconds,
+    skipIfContacted: opts.skipIfContacted,
+    jitterPct: opts.jitterPct,
+    includeUnknown: opts.includeUnknown,
+  };
+}
+
+function uniqueIds(ids: string[]): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const id of ids) {
+    if (seen.has(id)) continue;
+    seen.add(id);
+    result.push(id);
+  }
+  return result;
+}
+
+async function validateProvidedCampaignForBulkSms(
+  supabase: Awaited<ReturnType<typeof createClient>>,
+  campaignId: string,
+  propertyIds: string[],
+): Promise<Result<null>> {
+  const { data: campaign, error: campaignError } = await supabase
+    .from("campaigns")
+    .select("org_id, status")
+    .eq("id", campaignId)
+    .maybeSingle();
+
+  if (campaignError) {
+    return {
+      ok: false,
+      error: { code: "CAMPAIGN_LOOKUP_FAILED", message: campaignError.message },
+    };
+  }
+  if (!campaign) {
+    return {
+      ok: false,
+      error: { code: "CAMPAIGN_NOT_FOUND", message: "Campaign not found." },
+    };
+  }
+  if (campaign.status !== "launching") {
+    return {
+      ok: false,
+      error: {
+        code: "CAMPAIGN_STATE_CONFLICT",
+        message: "Campaign must be launching before bulk SMS can queue it.",
+      },
+    };
+  }
+
+  const requestedIds = uniqueIds(propertyIds);
+  if (requestedIds.length === 0) return ok(null);
+
+  const propertyOrgIds = new Set<string>();
+  let readableCount = 0;
+  for (let i = 0; i < requestedIds.length; i += VALIDATION_CHUNK) {
+    const chunk = requestedIds.slice(i, i + VALIDATION_CHUNK);
+    const { data, error } = await supabase
+      .from("properties")
+      .select("id, org_id")
+      .in("id", chunk);
+    if (error) {
+      return {
+        ok: false,
+        error: { code: "CAMPAIGN_AUDIENCE_LOOKUP_FAILED", message: error.message },
+      };
+    }
+    readableCount += data?.length ?? 0;
+    data?.forEach((row) => {
+      if (row.org_id) propertyOrgIds.add(row.org_id);
+    });
+  }
+
+  if (readableCount !== requestedIds.length || propertyOrgIds.size !== 1) {
+    return {
+      ok: false,
+      error: {
+        code: "CAMPAIGN_AUDIENCE_ORG_MISMATCH",
+        message: "Campaign send must resolve to one readable organization.",
+      },
+    };
+  }
+  if (!propertyOrgIds.has(campaign.org_id)) {
+    return {
+      ok: false,
+      error: {
+        code: "CAMPAIGN_AUDIENCE_ORG_MISMATCH",
+        message: "Campaign and selected prospects must belong to the same organization.",
+      },
+    };
+  }
+
+  return ok(null);
+}
+
+async function markDeferredBulkSmsStartFailed(args: {
+  campaignId: string | null;
+  count: number;
+  jobId: string;
+  error: unknown;
+}): Promise<void> {
+  const adminClient = createAdminClient();
+  const message =
+    args.error instanceof Error ? args.error.message : String(args.error);
+  await adminClient
+    .from("jobs")
+    .update({
+      status: "failed",
+      failed_items: args.count,
+      completed_at: new Date().toISOString(),
+      result_summary: {
+        queued: 0,
+        skipped: 0,
+        failed: args.count,
+        workflow_start_error: message,
+      },
+    })
+    .eq("id", args.jobId);
+
+  if (args.campaignId) {
+    await settleAdHocCampaignAfterQueueFailure(adminClient, args.campaignId);
+  }
+}
 
 export async function bulkQueueSms(
   propertyIds: string[],
   opts: BulkSmsQueueOpts,
 ): Promise<Result<BulkSmsOutcome>> {
-  if (propertyIds.length === 0) {
-    return ok({ succeeded: 0, skipped: 0, failed: [] });
-  }
-
   try {
     const supabase = await createClient();
 
@@ -126,15 +267,94 @@ export async function bulkQueueSms(
       data: { user },
     } = await supabase.auth.getUser();
     const enrolledByUserId = user?.id ?? null;
+    const providedCampaignId = resolveProvidedCampaignId(opts);
+    if (providedCampaignId && "campaignName" in opts) {
+      return {
+        ok: false,
+        error: {
+          code: "VALIDATION",
+          message: "Provide a campaign ID or a campaign name, not both.",
+        },
+      };
+    }
+    const isAdHoc = !providedCampaignId;
 
-    if (propertyIds.length <= SYNC_BULK_SMS_LIMIT) {
-      const adminClient = createAdminClient();
-      const state = await queueSmsBatch(supabase, adminClient, {
+    if (!providedCampaignId) {
+      const nameResult = normalizeAdHocCampaignName(
+        "campaignName" in opts ? opts.campaignName : undefined,
+      );
+      if (!nameResult.ok) return nameResult;
+    }
+
+    if (propertyIds.length === 0) {
+      return ok({ succeeded: 0, skipped: 0, failed: [] });
+    }
+
+    let resolvedPropertyIds = Array.from(new Set(propertyIds));
+    let resolvedOpts: ResolvedBulkSmsQueueOpts;
+
+    if (providedCampaignId) {
+      const campaignValidation = await validateProvidedCampaignForBulkSms(
+        supabase,
+        providedCampaignId,
+        resolvedPropertyIds,
+      );
+      if (!campaignValidation.ok) return campaignValidation;
+      resolvedOpts = {
+        ...baseBulkSmsOpts(opts),
+        campaignId: providedCampaignId,
+        campaignSource: "saved_campaign",
+      };
+    } else if ("campaignName" in opts && typeof opts.campaignName === "string") {
+      const campaignResult = await resolveAdHocBulkSmsCampaign(supabase, {
+        campaignName: opts.campaignName,
+        createdByUserId: enrolledByUserId,
+        opts: baseBulkSmsOpts(opts),
         propertyIds,
-        opts,
-        enrolledByUserId,
-        state: freshScheduleState(Date.now()),
       });
+      if (!campaignResult.ok) return campaignResult;
+      resolvedPropertyIds = campaignResult.data.propertyIds;
+      resolvedOpts = {
+        ...baseBulkSmsOpts(opts),
+        campaignId: campaignResult.data.campaignId,
+        campaignSource: "ad_hoc_bulk_sms",
+      };
+    } else {
+      return {
+        ok: false,
+        error: {
+          code: "VALIDATION",
+          message: "Campaign name is required.",
+        },
+      };
+    }
+
+    if (resolvedPropertyIds.length <= SYNC_BULK_SMS_LIMIT) {
+      const adminClient = createAdminClient();
+      let state;
+      try {
+        state = await queueSmsBatch(supabase, adminClient, {
+          propertyIds: resolvedPropertyIds,
+          opts: resolvedOpts,
+          enrolledByUserId,
+          state: freshScheduleState(Date.now()),
+        });
+      } catch (e) {
+        if (isAdHoc) {
+          await settleAdHocCampaignAfterQueueFailure(
+            supabase,
+            resolvedOpts.campaignId,
+          );
+        }
+        throw e;
+      }
+      if (isAdHoc) {
+        const completedResult = await completeLaunchingCampaign(
+          supabase,
+          resolvedOpts.campaignId,
+        );
+        if (!completedResult.ok) return completedResult;
+      }
       return ok({
         succeeded: state.succeeded,
         skipped: state.skipped,
@@ -147,9 +367,15 @@ export async function bulkQueueSms(
     const { data: probe } = await supabase
       .from("properties")
       .select("org_id")
-      .eq("id", propertyIds[0])
+      .eq("id", resolvedPropertyIds[0])
       .single();
     if (!probe?.org_id) {
+      if (isAdHoc) {
+        await settleAdHocCampaignAfterQueueFailure(
+          supabase,
+          resolvedOpts.campaignId,
+        );
+      }
       return {
         ok: false,
         error: {
@@ -166,14 +392,14 @@ export async function bulkQueueSms(
         status: "queued",
         org_id: probe.org_id,
         created_by: user?.id ?? null,
-        total_items: propertyIds.length,
-        title: `Bulk SMS queue ${propertyIds.length.toLocaleString()} prospects`,
-        description: opts.templateCategory
-          ? `Template pool "${opts.templateCategory}"`
+        total_items: resolvedPropertyIds.length,
+        title: `Bulk SMS queue ${resolvedPropertyIds.length.toLocaleString()} prospects`,
+        description: resolvedOpts.templateCategory
+          ? `Template pool "${resolvedOpts.templateCategory}"`
           : "Custom message",
         input_params: {
-          property_ids: propertyIds,
-          opts,
+          property_ids: resolvedPropertyIds,
+          opts: resolvedOpts,
           enrolled_by_user_id: enrolledByUserId,
           anchor_ms: Date.now(),
         },
@@ -181,6 +407,12 @@ export async function bulkQueueSms(
       .select("id")
       .single();
     if (jobError || !jobRow) {
+      if (isAdHoc) {
+        await settleAdHocCampaignAfterQueueFailure(
+          supabase,
+          resolvedOpts.campaignId,
+        );
+      }
       return {
         ok: false,
         error: {
@@ -194,9 +426,15 @@ export async function bulkQueueSms(
       try {
         await start(bulkSmsWorkflow, [{ jobId: jobRow.id }]);
       } catch (e) {
+        await markDeferredBulkSmsStartFailed({
+          campaignId: isAdHoc ? resolvedOpts.campaignId : null,
+          count: resolvedPropertyIds.length,
+          jobId: jobRow.id,
+          error: e,
+        });
         reportError(e, {
           tags: { surface: "bulk_sms_workflow_start" },
-          extra: { jobId: jobRow.id, count: propertyIds.length },
+          extra: { jobId: jobRow.id, count: resolvedPropertyIds.length },
         });
       }
     });
@@ -205,7 +443,7 @@ export async function bulkQueueSms(
       succeeded: 0,
       skipped: 0,
       failed: [],
-      deferred: { jobId: jobRow.id, total: propertyIds.length },
+      deferred: { jobId: jobRow.id, total: resolvedPropertyIds.length },
     });
   } catch (e) {
     reportError(e, { tags: { surface: "bulk_queue_sms" } });
@@ -240,6 +478,23 @@ type CreateDialerBatchOptions = {
 type CreateDialerBatchResult = {
   batchId: string;
   counts: BatchEligibilityCounts;
+};
+
+type DialerInsertError = { message: string } | null;
+type DialerInsertClient = {
+  from(table: "dialer_batches"): {
+    insert(values: unknown): {
+      select(columns: string): {
+        single(): Promise<{
+          data: { id: string } | null;
+          error: DialerInsertError;
+        }>;
+      };
+    };
+  };
+  from(table: "dialer_batch_items"): {
+    insert(values: unknown): Promise<{ error: DialerInsertError }>;
+  };
 };
 
 const DIALER_CHUNK = 250;
@@ -382,8 +637,9 @@ export async function createDialerBatchFromPropertyIds(
           )
         : [],
     );
+    const dialerInsertClient = supabase as unknown as DialerInsertClient;
 
-    const { data: batch, error: batchError } = await (supabase as any)
+    const { data: batch, error: batchError } = await dialerInsertClient
       .from("dialer_batches")
       .insert({
         org_id: orgId,
@@ -421,7 +677,7 @@ export async function createDialerBatchFromPropertyIds(
     );
 
     for (let i = 0; i < itemRows.length; i += 500) {
-      const { error: itemsError } = await (supabase as any)
+      const { error: itemsError } = await dialerInsertClient
         .from("dialer_batch_items")
         .insert(itemRows.slice(i, i + 500));
       if (itemsError) {

@@ -23,7 +23,7 @@
  */
 
 import type {
-  BulkSmsQueueOpts,
+  ResolvedBulkSmsQueueOpts,
   BulkSmsScheduleState,
 } from "@/lib/messaging/bulk-queue";
 import { createAdminClient } from "@/lib/supabase/admin";
@@ -44,9 +44,18 @@ export type BulkSmsWorkflowParams = {
 
 type LoadedBulkSmsJob = {
   propertyIds: string[];
-  opts: BulkSmsQueueOpts;
+  opts: ResolvedBulkSmsQueueOpts;
   enrolledByUserId: string | null;
   initialState: BulkSmsScheduleState;
+};
+
+type BulkSmsJobFailureArgs = {
+  campaignId: string;
+  campaignSource: ResolvedBulkSmsQueueOpts["campaignSource"];
+  errorMessage: string;
+  jobId: string;
+  state: BulkSmsScheduleState;
+  total: number;
 };
 
 async function completeCampaign(
@@ -60,7 +69,7 @@ async function completeCampaign(
       updated_at: new Date().toISOString(),
     })
     .eq("id", campaignId)
-    .eq("status", "launching")
+    .in("status", ["launching", "completed"])
     .select("id")
     .maybeSingle();
 
@@ -68,7 +77,7 @@ async function completeCampaign(
     throw new Error(`bulk-sms workflow: failed to complete campaign ${campaignId}: ${error.message}`);
   }
   if (!data) {
-    throw new Error(`bulk-sms workflow: campaign ${campaignId} is no longer launching`);
+    throw new Error(`bulk-sms workflow: campaign ${campaignId} is not launchable`);
   }
 }
 
@@ -80,7 +89,7 @@ async function loadBulkSmsJob(jobId: string): Promise<LoadedBulkSmsJob> {
 
   const { data: job, error } = await supabase
     .from("jobs")
-    .select("input_params")
+    .select("input_params, org_id")
     .eq("id", jobId)
     .single();
 
@@ -92,7 +101,7 @@ async function loadBulkSmsJob(jobId: string): Promise<LoadedBulkSmsJob> {
 
   const params = job.input_params as {
     property_ids?: unknown;
-    opts?: BulkSmsQueueOpts;
+    opts?: ResolvedBulkSmsQueueOpts;
     enrolled_by_user_id?: string | null;
     anchor_ms?: number;
   } | null;
@@ -105,6 +114,40 @@ async function loadBulkSmsJob(jobId: string): Promise<LoadedBulkSmsJob> {
   if (propertyIds.length === 0) {
     throw new Error(
       `bulk-sms workflow: job ${jobId} has no property IDs in input_params`,
+    );
+  }
+  const rawOpts = params?.opts ?? null;
+  const campaignId =
+    rawOpts &&
+    "campaignId" in rawOpts &&
+    typeof rawOpts.campaignId === "string" &&
+    rawOpts.campaignId.trim().length > 0
+      ? rawOpts.campaignId.trim()
+      : null;
+  if (!rawOpts || !campaignId) {
+    throw new Error(
+      `bulk-sms workflow: job ${jobId} has no resolved campaign ID in input_params`,
+    );
+  }
+
+  const { data: campaign, error: campaignError } = await supabase
+    .from("campaigns")
+    .select("org_id, status")
+    .eq("id", campaignId)
+    .maybeSingle();
+  if (campaignError || !campaign) {
+    throw new Error(
+      `bulk-sms workflow: campaign ${campaignId} not found: ${campaignError?.message ?? "no row"}`,
+    );
+  }
+  if (campaign.org_id !== job.org_id) {
+    throw new Error(
+      `bulk-sms workflow: campaign ${campaignId} does not match job org`,
+    );
+  }
+  if (campaign.status !== "launching" && campaign.status !== "completed") {
+    throw new Error(
+      `bulk-sms workflow: campaign ${campaignId} is not launchable`,
     );
   }
 
@@ -121,10 +164,42 @@ async function loadBulkSmsJob(jobId: string): Promise<LoadedBulkSmsJob> {
   const { freshScheduleState } = await import("@/lib/messaging/bulk-queue");
   return {
     propertyIds,
-    opts: params?.opts ?? {},
+    opts: {
+      body: rawOpts.body,
+      templateCategory: rawOpts.templateCategory,
+      paceSeconds: rawOpts.paceSeconds,
+      skipIfContacted: rawOpts.skipIfContacted,
+      jitterPct: rawOpts.jitterPct,
+      includeUnknown: rawOpts.includeUnknown,
+      campaignId,
+      campaignSource: rawOpts.campaignSource,
+    },
     enrolledByUserId: params?.enrolled_by_user_id ?? null,
     initialState: freshScheduleState(params?.anchor_ms ?? Date.now()),
   };
+}
+
+async function failBulkSmsLoadStep(args: {
+  errorMessage: string;
+  jobId: string;
+}): Promise<void> {
+  "use step";
+
+  const supabase = createAdminClient();
+  await supabase
+    .from("jobs")
+    .update({
+      status: "failed",
+      completed_at: new Date().toISOString(),
+      error_message: args.errorMessage,
+      result_summary: {
+        queued: 0,
+        skipped: 0,
+        failed: 0,
+        workflow_error: args.errorMessage,
+      },
+    })
+    .eq("id", args.jobId);
 }
 
 /**
@@ -135,7 +210,7 @@ async function loadBulkSmsJob(jobId: string): Promise<LoadedBulkSmsJob> {
 async function bulkSmsChunkStep(args: {
   jobId: string;
   propertyIds: string[];
-  opts: BulkSmsQueueOpts;
+  opts: ResolvedBulkSmsQueueOpts;
   enrolledByUserId: string | null;
   processedBefore: number;
   state: BulkSmsScheduleState;
@@ -204,37 +279,127 @@ async function finalizeBulkSmsStep(args: {
     .eq("id", args.jobId);
 }
 
+async function failBulkSmsJobStep(args: BulkSmsJobFailureArgs): Promise<void> {
+  "use step";
+
+  const supabase = createAdminClient();
+  const { state } = args;
+  const { count } = await supabase
+    .from("messages")
+    .select("*", { count: "exact", head: true })
+    .eq("campaign_id", args.campaignId)
+    .eq("direction", "outbound");
+  const stampedCount = count ?? state.succeeded;
+  const terminalStatus = stampedCount > 0 ? "partial" : "failed";
+  const processedItems = Math.min(
+    args.total,
+    state.succeeded + state.skipped + state.failed.length,
+  );
+  const failedItems = Math.max(
+    state.failed.length,
+    args.total - processedItems,
+  );
+  const now = new Date().toISOString();
+
+  await supabase
+    .from("jobs")
+    .update({
+      status: terminalStatus,
+      processed_items: processedItems,
+      succeeded_items: state.succeeded,
+      failed_items: failedItems,
+      completed_at: now,
+      error_message: args.errorMessage,
+      result_summary: {
+        queued: state.succeeded,
+        skipped: state.skipped,
+        failed: failedItems,
+        failed_sample: state.failed.slice(0, 20),
+        workflow_error: args.errorMessage,
+      },
+    })
+    .eq("id", args.jobId);
+
+  if (stampedCount > 0) {
+    await supabase
+      .from("campaigns")
+      .update({ status: "completed", updated_at: now })
+      .eq("id", args.campaignId)
+      .eq("status", "launching");
+    return;
+  }
+
+  if (args.campaignSource === "ad_hoc_bulk_sms") {
+    await supabase
+      .from("campaigns")
+      .update({
+        status: "archived",
+        archived_at: now,
+        updated_at: now,
+      })
+      .eq("id", args.campaignId)
+      .eq("status", "launching");
+    return;
+  }
+
+  await supabase
+    .from("campaigns")
+    .update({ status: "active", updated_at: now })
+    .eq("id", args.campaignId)
+    .eq("status", "launching");
+}
+
 /** `start(bulkSmsWorkflow, [{ jobId }])` — load → chunk loop → finalize. */
 export async function bulkSmsWorkflow(
   params: BulkSmsWorkflowParams,
 ): Promise<{ queued: number; skipped: number; failed: number }> {
   "use workflow";
 
-  const loaded = await loadBulkSmsJob(params.jobId);
+  let loaded: LoadedBulkSmsJob;
+  try {
+    loaded = await loadBulkSmsJob(params.jobId);
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    await failBulkSmsLoadStep({ errorMessage: message, jobId: params.jobId });
+    throw e;
+  }
 
   let state = loaded.initialState;
 
-  for (
-    let offset = 0;
-    offset < loaded.propertyIds.length;
-    offset += CHUNK_SIZE
-  ) {
-    state = await bulkSmsChunkStep({
+  try {
+    for (
+      let offset = 0;
+      offset < loaded.propertyIds.length;
+      offset += CHUNK_SIZE
+    ) {
+      state = await bulkSmsChunkStep({
+        jobId: params.jobId,
+        propertyIds: loaded.propertyIds.slice(offset, offset + CHUNK_SIZE),
+        opts: loaded.opts,
+        enrolledByUserId: loaded.enrolledByUserId,
+        processedBefore: offset,
+        state,
+      });
+    }
+
+    await finalizeBulkSmsStep({
+      campaignId: loaded.opts.campaignId ?? null,
       jobId: params.jobId,
-      propertyIds: loaded.propertyIds.slice(offset, offset + CHUNK_SIZE),
-      opts: loaded.opts,
-      enrolledByUserId: loaded.enrolledByUserId,
-      processedBefore: offset,
+      total: loaded.propertyIds.length,
       state,
     });
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    await failBulkSmsJobStep({
+      campaignId: loaded.opts.campaignId,
+      campaignSource: loaded.opts.campaignSource,
+      errorMessage: message,
+      jobId: params.jobId,
+      state,
+      total: loaded.propertyIds.length,
+    });
+    throw e;
   }
-
-  await finalizeBulkSmsStep({
-    campaignId: loaded.opts.campaignId ?? null,
-    jobId: params.jobId,
-    total: loaded.propertyIds.length,
-    state,
-  });
 
   return {
     queued: state.succeeded,

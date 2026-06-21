@@ -14,6 +14,12 @@ vi.mock("@/lib/supabase/server", () => ({
 vi.mock("@/lib/supabase/admin", () => ({
   createAdminClient: () => testClient,
 }));
+vi.mock("next/server", async () => {
+  const actual = await vi.importActual<typeof import("next/server")>(
+    "next/server",
+  );
+  return { ...actual, after: () => {} };
+});
 
 // Stub getUser() so the bulk action can resolve `{{my_first_name}}` from
 // the current session user. Tests opt in by setting currentUserId +
@@ -34,7 +40,6 @@ vi.spyOn(testClient.auth, "getUser").mockImplementation(async () =>
 
 const SAFE_NOW = new Date("2026-04-23T18:00:00Z");
 
-// eslint-disable-next-line import/first
 import { bulkQueueSms, countAlreadyContacted } from "./actions";
 
 async function getOrgId(): Promise<string> {
@@ -57,12 +62,14 @@ async function seedLead(opts: {
   phoneType?: "mobile" | "landline" | "unknown";
 }): Promise<{ propertyId: string; contactId: string | null }> {
   let contactId: string | null = null;
+  const orgId = await getOrgId();
 
   if (opts.phone !== null) {
     const phoneType = opts.phoneType ?? "mobile";
     const { data: contact } = await testClient
       .from("contacts")
       .insert({
+        org_id: orgId,
         first_name: "Bulk",
         last_name: "Tester",
         phone_1: opts.phone ?? "+18165550099",
@@ -95,6 +102,7 @@ async function seedLead(opts: {
   const { data: property } = await testClient
     .from("properties")
     .insert({
+      org_id: orgId,
       address: opts.address ?? "1 Bulk SMS St",
       state: "MO",
       status: "prospect",
@@ -116,6 +124,15 @@ async function seedTemplate(orgId: string, category: string): Promise<void> {
     category,
   });
   if (error) throw new Error(`template seed failed: ${error.message}`);
+}
+
+function adHocOpts<T extends Record<string, unknown>>(opts: T): T & {
+  campaignName: string;
+} {
+  return {
+    ...opts,
+    campaignName: `Bulk Test ${Math.random().toString(36).slice(2)}`,
+  };
 }
 
 const createdAuthUsers: string[] = [];
@@ -151,7 +168,7 @@ describe("bulkQueueSms (integration)", () => {
   });
 
   it("returns zero counts immediately for an empty propertyIds array", async () => {
-    const result = await bulkQueueSms([], { body: "Test" });
+    const result = await bulkQueueSms([], adHocOpts({ body: "Test" }));
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.data).toEqual({ succeeded: 0, skipped: 0, failed: [] });
@@ -162,10 +179,195 @@ describe("bulkQueueSms (integration)", () => {
     expect(count).toBe(0);
   });
 
+  it("rejects an empty ad-hoc send without a campaign name", async () => {
+    const result = await bulkQueueSms([], { body: "Test" } as never);
+    expect(result).toEqual({
+      ok: false,
+      error: { code: "VALIDATION", message: "Campaign name is required." },
+    });
+  });
+
+  it("rejects ad-hoc sends without a campaign name before creating messages", async () => {
+    const { propertyId } = await seedLead({ phone: "+18165551031" });
+
+    const result = await bulkQueueSms([propertyId], { body: "Hi" } as never);
+    expect(result).toEqual({
+      ok: false,
+      error: { code: "VALIDATION", message: "Campaign name is required." },
+    });
+
+    const { count: messageCount } = await testClient
+      .from("messages")
+      .select("*", { count: "exact", head: true });
+    expect(messageCount).toBe(0);
+    const { count: campaignCount } = await testClient
+      .from("campaigns")
+      .select("*", { count: "exact", head: true });
+    expect(campaignCount).toBe(0);
+  });
+
+  it("creates an ad-hoc campaign, freezes recipients, stamps messages, and completes sync sends", async () => {
+    const first = await seedLead({
+      phone: "+18165551032",
+      address: "1 Auto Campaign Way",
+    });
+    const second = await seedLead({
+      phone: "+18165551033",
+      address: "2 Auto Campaign Way",
+    });
+
+    const result = await bulkQueueSms(
+      [first.propertyId, second.propertyId],
+      {
+        body: "Auto campaign hello",
+        campaignName: "Auto Campaign Sync",
+        paceSeconds: 10,
+        skipIfContacted: true,
+      },
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.data.succeeded).toBe(2);
+
+    const { data: campaign } = await testClient
+      .from("campaigns")
+      .select(
+        "id, name, status, body, pace_seconds, skip_if_contacted, audience_snapshot",
+      )
+      .eq("name", "Auto Campaign Sync")
+      .single();
+    expect(campaign).toMatchObject({
+      name: "Auto Campaign Sync",
+      status: "completed",
+      body: "Auto campaign hello",
+      pace_seconds: 10,
+      skip_if_contacted: true,
+    });
+    expect(campaign?.audience_snapshot).toEqual({
+      source: "bulk_sms_modal",
+      selection: { count: 2 },
+    });
+
+    const { data: recipients } = await testClient
+      .from("campaign_recipients")
+      .select("property_id, contact_id")
+      .eq("campaign_id", campaign!.id);
+    expect(new Set(recipients?.map((row) => row.property_id))).toEqual(
+      new Set([first.propertyId, second.propertyId]),
+    );
+    expect(recipients?.every((row) => row.contact_id)).toBe(true);
+
+    const { data: messages } = await testClient
+      .from("messages")
+      .select("campaign_id, property_id, status")
+      .order("property_id", { ascending: true });
+    expect(messages).toHaveLength(2);
+    expect(messages?.every((row) => row.campaign_id === campaign!.id)).toBe(
+      true,
+    );
+    expect(messages?.every((row) => row.status === "queued")).toBe(true);
+  });
+
+  it("campaign sends use the frozen recipient contact, not the property's current homeowner", async () => {
+    const orgId = await getOrgId();
+    const frozen = await seedLead({
+      phone: "+18165551035",
+      address: "1 Frozen Contact Way",
+    });
+    const { data: replacement } = await testClient
+      .from("contacts")
+      .insert({
+        org_id: orgId,
+        first_name: "Replacement",
+        last_name: "Owner",
+        phone_1: "+18165551036",
+        phone_1_type: "mobile",
+      })
+      .select("id")
+      .single();
+    if (!replacement) throw new Error("replacement contact seed failed");
+    await testClient.from("consent_events").insert({
+      contact_id: replacement.id,
+      channel: "sms",
+      event_type: "opt_in_marketing_written",
+      source: "test-seed",
+    });
+
+    const { data: campaign } = await testClient
+      .from("campaigns")
+      .insert({
+        org_id: orgId,
+        name: "Frozen Recipient Campaign",
+        channel: "sms",
+        status: "launching",
+      })
+      .select("id")
+      .single();
+    if (!campaign) throw new Error("campaign seed failed");
+    await testClient.from("campaign_recipients").insert({
+      campaign_id: campaign.id,
+      property_id: frozen.propertyId,
+      contact_id: frozen.contactId,
+    });
+    await testClient
+      .from("properties")
+      .update({ homeowner_contact_id: replacement.id })
+      .eq("id", frozen.propertyId);
+
+    const result = await bulkQueueSms([frozen.propertyId], {
+      body: "Frozen recipient hello",
+      campaignId: campaign.id,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.data.succeeded).toBe(1);
+
+    const { data: message } = await testClient
+      .from("messages")
+      .select("contact_id")
+      .eq("campaign_id", campaign.id)
+      .single();
+    expect(message?.contact_id).toBe(frozen.contactId);
+    expect(message?.contact_id).not.toBe(replacement.id);
+  });
+
+  it("rejects duplicate ad-hoc campaign names before queueing", async () => {
+    const orgId = await getOrgId();
+    const { propertyId } = await seedLead({ phone: "+18165551034" });
+    const { error } = await testClient.from("campaigns").insert({
+      org_id: orgId,
+      name: "Duplicate Bulk",
+      channel: "sms",
+      status: "active",
+    });
+    expect(error).toBeNull();
+
+    const result = await bulkQueueSms([propertyId], {
+      body: "Should not queue",
+      campaignName: "duplicate bulk",
+    });
+    expect(result).toEqual({
+      ok: false,
+      error: {
+        code: "DUPLICATE_NAME",
+        message: 'A campaign named "duplicate bulk" already exists.',
+      },
+    });
+
+    const { count: messageCount } = await testClient
+      .from("messages")
+      .select("*", { count: "exact", head: true });
+    expect(messageCount).toBe(0);
+    const { count: recipientCount } = await testClient
+      .from("campaign_recipients")
+      .select("*", { count: "exact", head: true });
+    expect(recipientCount).toBe(0);
+  });
+
   it("skips properties with no homeowner_contact_id", async () => {
     const { propertyId } = await seedLead({ phone: null });
 
-    const result = await bulkQueueSms([propertyId], { body: "Hi there" });
+    const result = await bulkQueueSms([propertyId], adHocOpts({ body: "Hi there" }));
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.data.succeeded).toBe(0);
@@ -179,9 +381,10 @@ describe("bulkQueueSms (integration)", () => {
   });
 
   it("skips contacts with no phone_1 (blocked_no_phone)", async () => {
+    const orgId = await getOrgId();
     const { data: contact } = await testClient
       .from("contacts")
-      .insert({ first_name: "No", last_name: "Phone" })
+      .insert({ org_id: orgId, first_name: "No", last_name: "Phone" })
       .select("id")
       .single();
     if (!contact) throw new Error("contact seed failed");
@@ -189,6 +392,7 @@ describe("bulkQueueSms (integration)", () => {
     const { data: property } = await testClient
       .from("properties")
       .insert({
+        org_id: orgId,
         address: "1 No Phone St",
         state: "MO",
         status: "prospect",
@@ -198,7 +402,7 @@ describe("bulkQueueSms (integration)", () => {
       .single();
     if (!property) throw new Error("property seed failed");
 
-    const result = await bulkQueueSms([property.id], { body: "Hi" });
+    const result = await bulkQueueSms([property.id], adHocOpts({ body: "Hi" }));
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.data.succeeded).toBe(0);
@@ -209,7 +413,7 @@ describe("bulkQueueSms (integration)", () => {
   it("skips opted-out contacts without queuing a message", async () => {
     const { propertyId } = await seedLead({ optOut: true });
 
-    const result = await bulkQueueSms([propertyId], { body: "Hi" });
+    const result = await bulkQueueSms([propertyId], adHocOpts({ body: "Hi" }));
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.data.succeeded).toBe(0);
@@ -227,10 +431,10 @@ describe("bulkQueueSms (integration)", () => {
       phoneType: "landline",
     });
 
-    const result = await bulkQueueSms([propertyId], {
+    const result = await bulkQueueSms([propertyId], adHocOpts({
       body: "Hi",
       includeUnknown: true,
-    });
+    }));
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.data.succeeded).toBe(0);
@@ -248,7 +452,7 @@ describe("bulkQueueSms (integration)", () => {
       phoneType: "unknown",
     });
 
-    const result = await bulkQueueSms([propertyId], { body: "Hi" });
+    const result = await bulkQueueSms([propertyId], adHocOpts({ body: "Hi" }));
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.data.succeeded).toBe(0);
@@ -261,10 +465,10 @@ describe("bulkQueueSms (integration)", () => {
       phoneType: "unknown",
     });
 
-    const result = await bulkQueueSms([propertyId], {
+    const result = await bulkQueueSms([propertyId], adHocOpts({
       body: "Hi",
       includeUnknown: true,
-    });
+    }));
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.data.succeeded).toBe(1);
@@ -274,7 +478,7 @@ describe("bulkQueueSms (integration)", () => {
   it("queues one message with scheduled_for = now for a valid lead", async () => {
     const { propertyId } = await seedLead({ phone: "+18165550031" });
 
-    const result = await bulkQueueSms([propertyId], { body: "Hi there!" });
+    const result = await bulkQueueSms([propertyId], adHocOpts({ body: "Hi there!" }));
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.data).toEqual({ succeeded: 1, skipped: 0, failed: [] });
@@ -303,7 +507,10 @@ describe("bulkQueueSms (integration)", () => {
         .propertyId,
     ];
 
-    const result = await bulkQueueSms(ids, { body: "Paced message", paceSeconds: 18 });
+    const result = await bulkQueueSms(
+      ids,
+      adHocOpts({ body: "Paced message", paceSeconds: 18 }),
+    );
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.data.succeeded).toBe(3);
@@ -333,7 +540,10 @@ describe("bulkQueueSms (integration)", () => {
       address: "53 Mix St",
     });
 
-    const result = await bulkQueueSms([p1, p2, p3], { body: "Mixed batch" });
+    const result = await bulkQueueSms(
+      [p1, p2, p3],
+      adHocOpts({ body: "Mixed batch" }),
+    );
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.data).toEqual({ succeeded: 2, skipped: 1, failed: [] });
@@ -364,9 +574,9 @@ describe("bulkQueueSms (integration)", () => {
       address: "101 Sender Rd",
     });
 
-    const result = await bulkQueueSms([propertyId], {
+    const result = await bulkQueueSms([propertyId], adHocOpts({
       templateCategory: "Test-Sender-Opener",
-    });
+    }));
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.data.succeeded).toBe(1);
@@ -391,9 +601,9 @@ describe("bulkQueueSms (integration)", () => {
       address: "61 Template Rd",
     });
 
-    const result = await bulkQueueSms([propertyId], {
+    const result = await bulkQueueSms([propertyId], adHocOpts({
       templateCategory: "Test-Opener",
-    });
+    }));
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.data.succeeded).toBe(1);
@@ -437,10 +647,10 @@ describe("bulkQueueSms (integration)", () => {
     });
     if (insertErr) throw new Error(`prior msg seed failed: ${insertErr.message}`);
 
-    const result = await bulkQueueSms([alreadyContacted, fresh], {
+    const result = await bulkQueueSms([alreadyContacted, fresh], adHocOpts({
       body: "Hello again",
       skipIfContacted: true,
-    });
+    }));
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.data.succeeded).toBe(1);
@@ -478,9 +688,9 @@ describe("bulkQueueSms (integration)", () => {
     });
     if (insertErr) throw new Error(`prior msg seed failed: ${insertErr.message}`);
 
-    const result = await bulkQueueSms([alreadyContacted, fresh], {
+    const result = await bulkQueueSms([alreadyContacted, fresh], adHocOpts({
       body: "Send to everyone",
-    });
+    }));
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.data.succeeded).toBe(2);
@@ -575,11 +785,11 @@ describe("bulkQueueSms (integration)", () => {
       ids.push(propertyId);
     }
 
-    const result = await bulkQueueSms(ids, {
+    const result = await bulkQueueSms(ids, adHocOpts({
       body: "Jittered",
       paceSeconds: 10,
       jitterPct: 0.2,
-    });
+    }));
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.data.succeeded).toBe(12);
@@ -619,11 +829,11 @@ describe("bulkQueueSms (integration)", () => {
       ids.push(propertyId);
     }
 
-    const result = await bulkQueueSms(ids, {
+    const result = await bulkQueueSms(ids, adHocOpts({
       body: "Uncapped",
       paceSeconds: 10,
       jitterPct: 0, // deterministic for this assertion
-    });
+    }));
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.data.succeeded).toBe(5);
@@ -657,11 +867,11 @@ describe("bulkQueueSms (integration)", () => {
       (await seedLead({ phone: "+18165559003", address: "3 NoCap St" }))
         .propertyId,
     ];
-    const result = await bulkQueueSms(ids, {
+    const result = await bulkQueueSms(ids, adHocOpts({
       body: "No cap",
       paceSeconds: 5,
       // jitterPct omitted (defaults to 0)
-    });
+    }));
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.data.succeeded).toBe(3);
@@ -676,5 +886,81 @@ describe("bulkQueueSms (integration)", () => {
     expect(new Date(messages![0].scheduled_for!).getTime()).toBe(base);
     expect(new Date(messages![1].scheduled_for!).getTime()).toBe(base + 5_000);
     expect(new Date(messages![2].scheduled_for!).getTime()).toBe(base + 10_000);
+  });
+
+  it("deferred ad-hoc sends create campaign recipients and serialize the resolved campaignId", async () => {
+    const orgId = await getOrgId();
+    const { data: contacts, error: contactError } = await testClient
+      .from("contacts")
+      .insert(
+        Array.from({ length: 501 }, (_, i) => ({
+          org_id: orgId,
+          first_name: "Deferred",
+          last_name: "Lead",
+          phone_1: `+1816556${(1000 + i).toString()}`,
+          phone_1_type: "mobile",
+        })),
+      )
+      .select("id");
+    if (contactError || !contacts) {
+      throw new Error(`deferred contacts seed failed: ${contactError?.message}`);
+    }
+    const { data: properties, error: propertyError } = await testClient
+      .from("properties")
+      .insert(
+        contacts.map((contact, i) => ({
+          org_id: orgId,
+          address: `${i} Deferred Bulk St`,
+          state: "MO",
+          status: "prospect",
+          homeowner_contact_id: contact.id,
+        })),
+      )
+      .select("id");
+    if (propertyError || !properties) {
+      throw new Error(`deferred properties seed failed: ${propertyError?.message}`);
+    }
+    const ids = properties.map((property) => property.id);
+
+    const result = await bulkQueueSms(ids, {
+      body: "Deferred bulk",
+      campaignName: "Deferred Auto Campaign",
+      paceSeconds: 10,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.data.deferred?.total).toBe(501);
+    expect(result.data.succeeded).toBe(0);
+
+    const { data: campaign } = await testClient
+      .from("campaigns")
+      .select("id, status")
+      .eq("name", "Deferred Auto Campaign")
+      .single();
+    expect(campaign?.status).toBe("launching");
+
+    const { count: recipientCount } = await testClient
+      .from("campaign_recipients")
+      .select("*", { count: "exact", head: true })
+      .eq("campaign_id", campaign!.id);
+    expect(recipientCount).toBe(501);
+
+    const { data: job } = await testClient
+      .from("jobs")
+      .select("input_params")
+      .eq("id", result.data.deferred!.jobId)
+      .single();
+    const input = job?.input_params as {
+      opts?: {
+        campaignId?: string | null;
+        campaignName?: string | null;
+        campaignSource?: string | null;
+      };
+      property_ids?: string[];
+    };
+    expect(input.opts?.campaignId).toBe(campaign!.id);
+    expect(input.opts?.campaignName).toBeUndefined();
+    expect(input.opts?.campaignSource).toBe("ad_hoc_bulk_sms");
+    expect(input.property_ids).toHaveLength(501);
   });
 });

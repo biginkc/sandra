@@ -19,10 +19,9 @@ import { loadTemplateVars } from "@/lib/sequences/template-vars";
 import { renderTemplate } from "@/lib/sequences/render";
 import type { Database } from "@/lib/supabase/types";
 
-export type BulkSmsQueueOpts = {
+export type BulkSmsQueueBaseOpts = {
   body?: string;
   templateCategory?: string;
-  campaignId?: string | null;
   paceSeconds?: number;
   skipIfContacted?: boolean;
   jitterPct?: number;
@@ -33,6 +32,21 @@ export type BulkSmsQueueOpts = {
    * lets the operator opt them in. Landlines are always excluded.
    */
   includeUnknown?: boolean;
+};
+
+export type BulkSmsQueueOpts =
+  | (BulkSmsQueueBaseOpts & {
+      campaignId: string;
+      campaignName?: never;
+    })
+  | (BulkSmsQueueBaseOpts & {
+      campaignName: string;
+      campaignId?: never;
+    });
+
+export type ResolvedBulkSmsQueueOpts = BulkSmsQueueBaseOpts & {
+  campaignId: string;
+  campaignSource?: "ad_hoc_bulk_sms" | "saved_campaign";
 };
 
 /**
@@ -83,7 +97,7 @@ export async function queueSmsBatch(
   adminClient: SupabaseClient<Database>,
   args: {
     propertyIds: string[];
-    opts: BulkSmsQueueOpts;
+    opts: ResolvedBulkSmsQueueOpts;
     enrolledByUserId: string | null;
     state: BulkSmsScheduleState;
   },
@@ -132,6 +146,65 @@ export async function queueSmsBatch(
 
   const propertyMap = new Map(allProperties.map((p) => [p.id, p]));
 
+  const frozenContactByProperty = new Map<string, string | null>();
+  for (let i = 0; i < args.propertyIds.length; i += CHUNK) {
+    const chunk = args.propertyIds.slice(i, i + CHUNK);
+    const { data, error } = await client
+      .from("campaign_recipients")
+      .select("property_id, contact_id")
+      .eq("campaign_id", opts.campaignId)
+      .in("property_id", chunk);
+    if (error) {
+      throw new Error(`bulk sms campaign recipients fetch: ${error.message}`);
+    }
+    data?.forEach((row) => {
+      if (row.property_id) {
+        frozenContactByProperty.set(row.property_id, row.contact_id ?? null);
+      }
+    });
+  }
+
+  const frozenContactLineType = new Map<string, string>();
+  const frozenContactIds = Array.from(
+    new Set(
+      Array.from(frozenContactByProperty.values()).filter(
+        (value): value is string => typeof value === "string",
+      ),
+    ),
+  );
+  for (let i = 0; i < frozenContactIds.length; i += CHUNK) {
+    const chunk = frozenContactIds.slice(i, i + CHUNK);
+    const { data, error } = await client
+      .from("contacts")
+      .select("id, phone_1_type")
+      .in("id", chunk);
+    if (error) {
+      throw new Error(`bulk sms frozen contacts fetch: ${error.message}`);
+    }
+    data?.forEach((row) => {
+      if (row.id && row.phone_1_type) {
+        frozenContactLineType.set(row.id, row.phone_1_type);
+      }
+    });
+  }
+
+  const alreadyQueuedForCampaign = new Set<string>();
+  for (let i = 0; i < args.propertyIds.length; i += CHUNK) {
+    const chunk = args.propertyIds.slice(i, i + CHUNK);
+    const { data, error } = await client
+      .from("messages")
+      .select("property_id")
+      .eq("campaign_id", opts.campaignId)
+      .eq("direction", "outbound")
+      .in("property_id", chunk);
+    if (error) {
+      throw new Error(`bulk sms campaign duplicate check: ${error.message}`);
+    }
+    data?.forEach((row) => {
+      if (row.property_id) alreadyQueuedForCampaign.add(row.property_id);
+    });
+  }
+
   // Prefetch already-contacted property IDs in batched queries so the
   // per-property loop doesn't fire N individual round-trips.
   const contactedSet = new Set<string>();
@@ -151,8 +224,25 @@ export async function queueSmsBatch(
 
   for (const propertyId of args.propertyIds) {
     const property = propertyMap.get(propertyId);
-    if (!property || !property.homeowner_contact_id) {
+    if (!property) {
       state.skipped++;
+      continue;
+    }
+
+    const contactId = frozenContactByProperty.get(propertyId);
+    if (!contactId) {
+      state.skipped++;
+      continue;
+    }
+
+    if (alreadyQueuedForCampaign.has(propertyId)) {
+      let nextOffsetMs = state.cumulativeOffsetMs;
+      if (state.dayBucketCount > 0) {
+        nextOffsetMs = state.cumulativeOffsetMs + paceSeconds * 1000;
+      }
+      state.succeeded++;
+      state.cumulativeOffsetMs = nextOffsetMs;
+      state.dayBucketCount += 1;
       continue;
     }
 
@@ -165,7 +255,7 @@ export async function queueSmsBatch(
     // operator opted in at the assessment step. (sendSmsToContact blocks
     // landlines again at queue time — this early skip just avoids burning
     // template-pool picks and renders on rows that can't send.)
-    const lineType = property.homeowner?.phone_1_type ?? "unknown";
+    const lineType = frozenContactLineType.get(contactId) ?? "unknown";
     if (lineType === "landline") {
       state.skipped++;
       continue;
@@ -177,7 +267,7 @@ export async function queueSmsBatch(
 
     const consentState = await getConsentState(
       client,
-      property.homeowner_contact_id,
+      contactId,
       "sms",
     );
     if (consentState === "opted_out") {
@@ -207,7 +297,7 @@ export async function queueSmsBatch(
         client,
         {
           propertyId,
-          contactId: property.homeowner_contact_id,
+          contactId,
           enrolledByUserId: args.enrolledByUserId,
         },
         adminClient,
@@ -241,10 +331,10 @@ export async function queueSmsBatch(
     }
     const scheduledFor = new Date(state.dayBucketStartMs + nextOffsetMs);
     const outcome = await sendSmsToContact(client, {
-      contactId: property.homeowner_contact_id,
+      contactId,
       propertyId,
       body,
-      campaignId: opts.campaignId ?? null,
+      campaignId: opts.campaignId,
       queueOnly: true,
       scheduledFor,
     });
