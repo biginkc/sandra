@@ -7,11 +7,13 @@ const {
   listSmsTemplateCategories,
   countAlreadyContacted,
   assessBulkSmsAudience,
+  routerPush,
 } = vi.hoisted(() => ({
   bulkQueueSms: vi.fn(),
   listSmsTemplateCategories: vi.fn(),
   countAlreadyContacted: vi.fn(),
   assessBulkSmsAudience: vi.fn(),
+  routerPush: vi.fn(),
 }));
 
 vi.mock("./actions", () => ({
@@ -30,10 +32,9 @@ vi.mock("sonner", () => ({
 }));
 
 vi.mock("next/navigation", () => ({
-  useRouter: () => ({ push: vi.fn() }),
+  useRouter: () => ({ push: routerPush }),
 }));
 
-// eslint-disable-next-line import/first
 import { BulkSmsModal, computeDrain } from "./bulk-sms-modal";
 
 function renderModal(
@@ -56,10 +57,21 @@ function renderModal(
   );
 }
 
+async function fillCampaignName(
+  user: ReturnType<typeof userEvent.setup>,
+  name = "June Vacant Homes",
+) {
+  await user.type(
+    screen.getByRole("textbox", { name: /Campaign name/i }),
+    name,
+  );
+}
+
 beforeEach(() => {
   bulkQueueSms.mockReset();
   listSmsTemplateCategories.mockReset();
   countAlreadyContacted.mockReset();
+  routerPush.mockReset();
 
   listSmsTemplateCategories.mockResolvedValue({
     ok: true,
@@ -91,6 +103,36 @@ beforeEach(() => {
 });
 
 describe("<BulkSmsModal /> pacing + skip-contacted (260504-tgq)", () => {
+  it("renders campaign name blank by default", async () => {
+    renderModal(["p1"]);
+    await waitFor(() =>
+      expect(listSmsTemplateCategories).toHaveBeenCalled(),
+    );
+
+    expect(screen.getByRole("textbox", { name: /Campaign name/i })).toHaveValue(
+      "",
+    );
+  });
+
+  it("requires a non-whitespace campaign name before queueing", async () => {
+    const user = userEvent.setup();
+    renderModal(["p1"]);
+    await waitFor(() =>
+      expect(listSmsTemplateCategories).toHaveBeenCalled(),
+    );
+
+    await user.click(screen.getByRole("button", { name: /Queue 1 message/i }));
+    expect(
+      screen.getByText("Campaign name is required."),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: /Campaign name/i })).toHaveFocus();
+    expect(bulkQueueSms).not.toHaveBeenCalled();
+
+    await user.type(screen.getByRole("textbox", { name: /Campaign name/i }), "   ");
+    await user.click(screen.getByRole("button", { name: /Queue 1 message/i }));
+    expect(bulkQueueSms).not.toHaveBeenCalled();
+  });
+
   // 260506-m3a: presets replace the always-visible pace inputs. Custom
   // mode preserves the raw inputs, so each test that touches them now
   // selects Custom first.
@@ -135,6 +177,7 @@ describe("<BulkSmsModal /> pacing + skip-contacted (260504-tgq)", () => {
     await user.clear(paceInput);
     await user.type(paceInput, "5");
     await user.selectOptions(paceUnit, "minutes");
+    await fillCampaignName(user);
 
     await user.click(
       screen.getByRole("button", { name: /Queue 1 message/i }),
@@ -143,6 +186,7 @@ describe("<BulkSmsModal /> pacing + skip-contacted (260504-tgq)", () => {
     await waitFor(() => expect(bulkQueueSms).toHaveBeenCalled());
     const [ids, opts] = bulkQueueSms.mock.calls[0];
     expect(ids).toEqual(["p1"]);
+    expect(opts.campaignName).toBe("June Vacant Homes");
     expect(opts.paceSeconds).toBe(300);
   });
 
@@ -154,6 +198,7 @@ describe("<BulkSmsModal /> pacing + skip-contacted (260504-tgq)", () => {
     );
 
     await user.click(screen.getByRole("radio", { name: /Custom/i }));
+    await fillCampaignName(user);
 
     const paceInput = screen.getByLabelText(/^Pacing$/i);
     await user.clear(paceInput);
@@ -179,6 +224,7 @@ describe("<BulkSmsModal /> pacing + skip-contacted (260504-tgq)", () => {
     );
 
     await user.click(screen.getByRole("radio", { name: /Custom/i }));
+    await fillCampaignName(user);
 
     const paceInput = screen.getByLabelText(/^Pacing$/i);
     const paceUnit = screen.getByLabelText(/Pacing unit/i);
@@ -256,6 +302,7 @@ describe("<BulkSmsModal /> pacing + skip-contacted (260504-tgq)", () => {
     await waitFor(() => expect(countAlreadyContacted).toHaveBeenCalled());
 
     await user.click(screen.getByRole("radio", { name: /Custom/i }));
+    await fillCampaignName(user, "  Skip Contacted Campaign  ");
 
     const paceInput = screen.getByLabelText(/^Pacing$/i);
     await user.clear(paceInput);
@@ -269,6 +316,7 @@ describe("<BulkSmsModal /> pacing + skip-contacted (260504-tgq)", () => {
     const [, opts] = bulkQueueSms.mock.calls[0];
     expect(opts.paceSeconds).toBe(30);
     expect(opts.skipIfContacted).toBe(true);
+    expect(opts.campaignName).toBe("Skip Contacted Campaign");
     // Template-pool mode should also forward the category.
     expect(opts.templateCategory).toBe("Opener - Homeowner");
   });
@@ -351,11 +399,13 @@ describe("<BulkSmsModal /> presets + drain estimate (260506-m3a)", () => {
     });
     renderModal(["p1"]);
     await waitFor(() => expect(listSmsTemplateCategories).toHaveBeenCalled());
+    await fillCampaignName(user);
 
     // Default = Steady → 8s pace, 0.20 jitter, no cap
     await user.click(screen.getByRole("button", { name: /Queue 1 message/i }));
     await waitFor(() => expect(bulkQueueSms).toHaveBeenCalled());
     const [, opts] = bulkQueueSms.mock.calls[0];
+    expect(opts.campaignName).toBe("June Vacant Homes");
     expect(opts.paceSeconds).toBe(8);
     expect(opts.jitterPct).toBeCloseTo(0.2, 5);
     expect("dailyCap" in opts).toBe(false);
@@ -369,12 +419,14 @@ describe("<BulkSmsModal /> presets + drain estimate (260506-m3a)", () => {
     });
     renderModal(["p1"]);
     await waitFor(() => expect(listSmsTemplateCategories).toHaveBeenCalled());
+    await fillCampaignName(user);
 
     await user.click(screen.getByRole("radio", { name: /Push/i }));
     await user.click(screen.getByRole("button", { name: /Queue 1 message/i }));
 
     await waitFor(() => expect(bulkQueueSms).toHaveBeenCalled());
     const [, opts] = bulkQueueSms.mock.calls[0];
+    expect(opts.campaignName).toBe("June Vacant Homes");
     expect(opts.paceSeconds).toBe(4);
     expect("dailyCap" in opts).toBe(false);
   });
@@ -387,6 +439,7 @@ describe("<BulkSmsModal /> presets + drain estimate (260506-m3a)", () => {
     });
     renderModal(["p1"]);
     await waitFor(() => expect(listSmsTemplateCategories).toHaveBeenCalled());
+    await fillCampaignName(user);
 
     await user.click(screen.getByRole("radio", { name: /Custom/i }));
     const paceInput = screen.getByLabelText(/^Pacing$/i);
@@ -396,8 +449,90 @@ describe("<BulkSmsModal /> presets + drain estimate (260506-m3a)", () => {
     await user.click(screen.getByRole("button", { name: /Queue 1 message/i }));
     await waitFor(() => expect(bulkQueueSms).toHaveBeenCalled());
     const [, opts] = bulkQueueSms.mock.calls[0];
+    expect(opts.campaignName).toBe("June Vacant Homes");
     expect(opts.paceSeconds).toBe(30);
     expect("dailyCap" in opts).toBe(false);
+  });
+
+  it("Custom message submit forwards trimmed campaignName and body", async () => {
+    const user = userEvent.setup();
+    bulkQueueSms.mockResolvedValue({
+      ok: true,
+      data: { succeeded: 1, skipped: 0, failed: [] },
+    });
+    renderModal(["p1"]);
+    await waitFor(() => expect(listSmsTemplateCategories).toHaveBeenCalled());
+
+    await fillCampaignName(user, "  Custom Campaign  ");
+    await user.click(screen.getByRole("button", { name: /Custom message/i }));
+    await user.type(
+      screen.getByPlaceholderText(/interested in your property/i),
+      "  Hi there from custom  ",
+    );
+    await user.click(screen.getByRole("button", { name: /Queue 1 message/i }));
+
+    await waitFor(() => expect(bulkQueueSms).toHaveBeenCalled());
+    const [, opts] = bulkQueueSms.mock.calls[0];
+    expect(opts.campaignName).toBe("Custom Campaign");
+    expect(opts.body).toBe("Hi there from custom");
+  });
+
+  it("server-side duplicate campaign name errors stay inline on the field", async () => {
+    const user = userEvent.setup();
+    bulkQueueSms.mockResolvedValue({
+      ok: false,
+      error: {
+        code: "DUPLICATE_NAME",
+        message: 'A campaign named "June Vacant Homes" already exists.',
+      },
+    });
+    renderModal(["p1"]);
+    await waitFor(() => expect(listSmsTemplateCategories).toHaveBeenCalled());
+    await fillCampaignName(user);
+
+    await user.click(screen.getByRole("button", { name: /Queue 1 message/i }));
+
+    expect(
+      await screen.findByText(
+        'A campaign named "June Vacant Homes" already exists.',
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: /Campaign name/i })).toHaveFocus();
+    expect(routerPush).not.toHaveBeenCalled();
+  });
+
+  it("deferred sends route to the job detail progress page", async () => {
+    const user = userEvent.setup();
+    bulkQueueSms.mockResolvedValue({
+      ok: true,
+      data: {
+        succeeded: 0,
+        skipped: 0,
+        failed: [],
+        deferred: { jobId: "job-123", total: 501 },
+      },
+    });
+    renderModal(Array.from({ length: 501 }, (_, i) => `p${i}`));
+    await waitFor(() => expect(listSmsTemplateCategories).toHaveBeenCalled());
+    await fillCampaignName(user);
+
+    await user.click(screen.getByRole("button", { name: /Queue 501 messages/i }));
+
+    await waitFor(() => expect(routerPush).toHaveBeenCalledWith("/jobs/job-123"));
+  });
+
+  it("mode switching does not clear campaign name", async () => {
+    const user = userEvent.setup();
+    renderModal(["p1"]);
+    await waitFor(() => expect(listSmsTemplateCategories).toHaveBeenCalled());
+
+    await fillCampaignName(user, "Mode Stable");
+    await user.click(screen.getByRole("button", { name: /Custom message/i }));
+    await user.click(screen.getByRole("button", { name: /Template pool/i }));
+
+    expect(screen.getByRole("textbox", { name: /Campaign name/i })).toHaveValue(
+      "Mode Stable",
+    );
   });
 });
 
@@ -438,6 +573,7 @@ describe("<BulkSmsModal /> line-type assessment", () => {
     const queueBtn = await screen.findByRole("button", {
       name: /Queue 2 messages/i,
     });
+    await fillCampaignName(user);
 
     await user.click(
       screen.getByRole("checkbox", { name: /Also text 2 unknown/i }),
@@ -449,6 +585,7 @@ describe("<BulkSmsModal /> line-type assessment", () => {
     await user.click(queueBtn);
     await waitFor(() => expect(bulkQueueSms).toHaveBeenCalled());
     const [, opts] = bulkQueueSms.mock.calls[0];
+    expect(opts.campaignName).toBe("June Vacant Homes");
     expect(opts.includeUnknown).toBe(true);
   });
 
@@ -460,10 +597,12 @@ describe("<BulkSmsModal /> line-type assessment", () => {
     });
     renderModal(["p1"]);
     await waitFor(() => expect(listSmsTemplateCategories).toHaveBeenCalled());
+    await fillCampaignName(user);
 
     await user.click(screen.getByRole("button", { name: /Queue 1 message/i }));
     await waitFor(() => expect(bulkQueueSms).toHaveBeenCalled());
     const [, opts] = bulkQueueSms.mock.calls[0];
+    expect(opts.campaignName).toBe("June Vacant Homes");
     expect(opts.includeUnknown).toBe(false);
   });
 

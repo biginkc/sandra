@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState, useTransition } from "react";
+import { useEffect, useMemo, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 
@@ -133,6 +133,11 @@ export function BulkSmsModal({ open, propertyIds, onClose, onQueued }: Props) {
   const [customBody, setCustomBody] = useState("");
   const [mode, setMode] = useState<"category" | "custom">("category");
   const [pending, startTransition] = useTransition();
+  const [campaignName, setCampaignName] = useState("");
+  const [campaignNameError, setCampaignNameError] = useState<string | null>(
+    null,
+  );
+  const campaignNameRef = useRef<HTMLInputElement>(null);
 
   // Pacing — preset selector replaces the raw inputs (260506-m3a).
   // Steady is the default. Custom-mode raw inputs are only consulted
@@ -227,6 +232,12 @@ export function BulkSmsModal({ open, propertyIds, onClose, onQueued }: Props) {
   );
 
   const handleSend = () => {
+    const trimmedCampaignName = campaignName.trim();
+    if (!trimmedCampaignName) {
+      setCampaignNameError("Campaign name is required.");
+      campaignNameRef.current?.focus();
+      return;
+    }
     if (paceOutOfRange) {
       toast.error("Pacing must be between 10 seconds and 10 minutes.");
       return;
@@ -245,6 +256,7 @@ export function BulkSmsModal({ open, propertyIds, onClose, onQueued }: Props) {
       skipIfContacted: skipContacted,
       jitterPct: JITTER_PCT,
       includeUnknown,
+      campaignName: trimmedCampaignName,
     };
     const opts =
       mode === "category"
@@ -255,6 +267,16 @@ export function BulkSmsModal({ open, propertyIds, onClose, onQueued }: Props) {
       const result = await callAction(bulkQueueSms(propertyIds, opts), {
         fallbackMessage: "Bulk SMS failed",
       });
+      if (!result.ok) {
+        if (
+          result.error.code === "VALIDATION" ||
+          result.error.code === "DUPLICATE_NAME"
+        ) {
+          setCampaignNameError(result.error.message);
+          campaignNameRef.current?.focus();
+        }
+        return;
+      }
       if (result.ok) {
         if (result.data.deferred) {
           toast.success(
@@ -265,8 +287,8 @@ export function BulkSmsModal({ open, propertyIds, onClose, onQueued }: Props) {
             },
           );
           onQueued(result.data.deferred.total);
-          onClose();
-          router.push("/messages?tab=outbox");
+          handleClose();
+          router.push(`/jobs/${result.data.deferred.jobId}`);
           return;
         }
         const { succeeded, skipped, failed } = result.data;
@@ -283,7 +305,7 @@ export function BulkSmsModal({ open, propertyIds, onClose, onQueued }: Props) {
           toast.success(parts.join(" · ") || "Done");
         }
         onQueued(succeeded);
-        onClose();
+        handleClose();
         router.push("/messages?tab=outbox");
       }
     });
@@ -291,9 +313,14 @@ export function BulkSmsModal({ open, propertyIds, onClose, onQueued }: Props) {
 
   const skipLabelCount =
     contactedCount === null ? "…" : String(contactedCount);
+  const handleClose = () => {
+    setCampaignName("");
+    setCampaignNameError(null);
+    onClose();
+  };
 
   return (
-    <Dialog open={open} onOpenChange={(o) => { if (!o) onClose(); }}>
+    <Dialog open={open} onOpenChange={(o) => { if (!o) handleClose(); }}>
       <DialogContent className="max-w-md">
         <DialogHeader>
           <DialogTitle>
@@ -303,6 +330,39 @@ export function BulkSmsModal({ open, propertyIds, onClose, onQueued }: Props) {
         </DialogHeader>
 
         <div className="space-y-4 py-2">
+          <div className="space-y-1.5">
+            <label htmlFor="bulk-sms-campaign-name" className="text-sm font-medium">
+              Campaign name
+            </label>
+            <input
+              ref={campaignNameRef}
+              id="bulk-sms-campaign-name"
+              value={campaignName}
+              maxLength={80}
+              onChange={(event) => {
+                setCampaignName(event.target.value);
+                if (campaignNameError && event.target.value.trim()) {
+                  setCampaignNameError(null);
+                }
+              }}
+              placeholder="e.g. June Vacant Homes"
+              aria-invalid={campaignNameError ? "true" : "false"}
+              aria-describedby={
+                campaignNameError ? "bulk-sms-campaign-name-error" : undefined
+              }
+              className="border-input bg-background w-full rounded-md border px-3 py-2 text-sm"
+            />
+            {campaignNameError ? (
+              <p
+                id="bulk-sms-campaign-name-error"
+                className="text-destructive text-xs"
+                role="alert"
+              >
+                {campaignNameError}
+              </p>
+            ) : null}
+          </div>
+
           {/* Mode toggle */}
           <div className="flex gap-2">
             <button
@@ -535,7 +595,7 @@ export function BulkSmsModal({ open, propertyIds, onClose, onQueued }: Props) {
         </div>
 
         <DialogFooter>
-          <Button variant="outline" onClick={onClose} disabled={pending}>
+          <Button variant="outline" onClick={handleClose} disabled={pending}>
             Cancel
           </Button>
           <Button onClick={handleSend} disabled={pending || textableCount === 0}>
