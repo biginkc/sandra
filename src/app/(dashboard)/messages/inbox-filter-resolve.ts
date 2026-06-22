@@ -48,8 +48,8 @@ export function isThreadFilter(f: InboxFilter): boolean {
  *   `includeThreadId` so read-on-open doesn't yank it mid-view.
  * - `escalated` returns only threads the AI handed off
  *   (properties.needs_human_attention).
- * - `needs_outcome` returns replied prospects that still lack an outreach
- *   outcome.
+ * - `needs_outcome` returns replied early-stage outreach threads that still
+ *   lack an outreach outcome.
  */
 export function buildThreadOpts(
   filter: InboxFilter,
@@ -134,7 +134,7 @@ export function resolveVisibleThreadState(
       .length,
     needsOutcomeCount: visibleAllThreads.filter((thread) => thread.needsOutcome)
       .length,
-    hiddenDncCount: ctx.hideDnc
+    hiddenDncCount: ctx.hideDnc && isThreadFilter(filter)
       ? filteredThreads.filter((thread) => isInboxNoise(thread)).length
       : 0,
   };

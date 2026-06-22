@@ -246,13 +246,15 @@ describe("resolveVisibleThreadState", () => {
     expect(state.hiddenDncCount).toBe(0);
   });
 
-  it("keeps the shell thread count stable on non-thread Unknown/Dismissed buckets", () => {
+  it.each(["unknown", "dismissed"] as const)(
+    "does not report hidden DNC/test thread counts on non-thread %s buckets",
+    (filter) => {
     const threads = [
       makeThread({ threadId: "real-thread" }),
       makeThread({ threadId: "hidden-thread", isTestTraffic: true }),
     ];
 
-    const state = resolveVisibleThreadState(threads, "unknown", {
+    const state = resolveVisibleThreadState(threads, filter, {
       currentUserId: "user-1",
       canonicalThreadId: null,
       hideDnc: true,
@@ -261,6 +263,7 @@ describe("resolveVisibleThreadState", () => {
     expect(state.threads.map((thread) => thread.threadId)).toEqual([
       "real-thread",
     ]);
-    expect(state.hiddenDncCount).toBe(1);
-  });
+    expect(state.hiddenDncCount).toBe(0);
+    },
+  );
 });

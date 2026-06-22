@@ -17,7 +17,7 @@ export function NeedsAttentionStrip({ needs }: Props) {
     {
       count: needs.escalated_unhandled,
       label: "Escalated, needs reply (>1hr)",
-      href: "/messages?attention=escalated",
+      href: "/messages?filter=escalated",
       dotClass: "bg-red-500",
     },
     {

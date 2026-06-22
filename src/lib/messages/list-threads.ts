@@ -27,17 +27,35 @@ export type Thread = {
    *  Pass to <EscalationBadge> for color-coded rendering. */
   escalationReason: string | null;
   /** True when the contact's most recent SMS consent event was an opt-out
-   *  (STOP keyword, manual DNC, provider auto-opt-out). Computed via
-   *  `computeConsentState` on the latest consent_events for the contact.
-   *  The inbox uses this to drive the DNC toggle (hidden by default). */
+   *  (STOP keyword, manual DNC, provider auto-opt-out), or the contact-level
+   *  DNC/SMS opt-out flags are set. The inbox uses this to drive the DNC
+   *  toggle (hidden by default). */
   isOptedOut: boolean;
   /** True when the thread belongs to Jitter test infrastructure (canary /
    *  rehearsal contacts and synthetic addresses). Hidden by the same
    *  inbox toggle as DNC — both are noise, one switch. */
   isTestTraffic: boolean;
-  /** True when this replied prospect thread still needs an operator outcome. */
+  /** True when this replied outreach thread still needs an operator outcome. */
   needsOutcome: boolean;
 };
+
+const NEEDS_OUTCOME_STATUSES = new Set(["prospect", "new_lead", "contacted"]);
+
+function isNeedsOutcomeThread(input: {
+  propertyId: string | null;
+  hasInbound: boolean;
+  propertyStatus: string | null | undefined;
+  outreachDispo: string | null | undefined;
+  isOptedOut: boolean;
+}): boolean {
+  return (
+    input.propertyId !== null &&
+    input.hasInbound &&
+    input.outreachDispo == null &&
+    !input.isOptedOut &&
+    NEEDS_OUTCOME_STATUSES.has(input.propertyStatus ?? "")
+  );
+}
 
 /** Match Jitter's test-fixture CONTRACT precisely, not generic human
  *  text. Fixtures always present as one of:
@@ -77,14 +95,14 @@ export type ListThreadsOpts = {
    *  review (properties.needs_human_attention). Drives the "Escalated"
    *  inbox filter chip. */
   escalatedOnly?: boolean;
-  /** When true, returns only replied prospect threads with no outreach outcome. */
+  /** When true, returns only replied outreach threads with no outreach outcome. */
   needsOutcomeOnly?: boolean;
 };
 
 export type NeedsOutcomeCountOpts = {
   /** Window for "active" conversations. Defaults to 90 days. */
   sinceDays?: number;
-  /** When true, excludes contacts whose latest SMS consent state is opt-out. */
+  /** Backward-compatible no-op: Needs Outcome always excludes opt-outs. */
   hideOptedOut?: boolean;
   /** When true, excludes known Jitter canary/rehearsal fixture traffic. */
   hideTestTraffic?: boolean;
@@ -128,14 +146,26 @@ export async function listThreads(
     latest: typeof msgs[number];
     propertyId: string | null;
     unreadCount: number;
+    hasInbound: boolean;
   };
   const byThread = new Map<string, Bucket>();
   for (const m of msgs) {
     const threadId = m.conversation_id!;
     let bucket = byThread.get(threadId);
     if (!bucket) {
-      bucket = { latest: m, propertyId: m.property_id, unreadCount: 0 };
+      bucket = {
+        latest: m,
+        propertyId: m.property_id,
+        unreadCount: 0,
+        hasInbound: false,
+      };
       byThread.set(threadId, bucket);
+    }
+    if (bucket.propertyId === null && m.property_id !== null) {
+      bucket.propertyId = m.property_id;
+    }
+    if (m.direction === "inbound") {
+      bucket.hasInbound = true;
     }
     if (m.direction === "inbound" && m.read_at === null) {
       bucket.unreadCount += 1;
@@ -165,7 +195,9 @@ export async function listThreads(
     fetchInChunks(contactIds, CHUNK, (chunk) =>
       supabase
         .from("contacts")
-        .select("id, first_name, last_name, entity_name, phone_1")
+        .select(
+          "id, first_name, last_name, entity_name, phone_1, do_not_contact, sms_opted_out",
+        )
         .in("id", chunk),
     ),
     fetchInChunks(propertyIds, CHUNK, (chunk) =>
@@ -216,16 +248,22 @@ export async function listThreads(
     )
       continue;
     if (opts.escalatedOnly && !(p?.needs_human_attention ?? false)) continue;
-    const needsOutcome =
-      bucket.propertyId !== null &&
-      bucket.latest.direction === "inbound" &&
-      p?.status === "prospect" &&
-      p?.outreach_dispo == null;
-    if (opts.needsOutcomeOnly && !needsOutcome) continue;
 
     const consentState = computeConsentState(
       consentEventsByContact.get(contactId) ?? [],
     );
+    const isOptedOut =
+      consentState === "opted_out" ||
+      c?.do_not_contact === true ||
+      c?.sms_opted_out === true;
+    const needsOutcome = isNeedsOutcomeThread({
+      propertyId: bucket.propertyId,
+      hasInbound: bucket.hasInbound,
+      propertyStatus: p?.status,
+      outreachDispo: p?.outreach_dispo,
+      isOptedOut,
+    });
+    if (opts.needsOutcomeOnly && !needsOutcome) continue;
 
     threads.push({
       threadId,
@@ -248,7 +286,7 @@ export async function listThreads(
       unreadCount: bucket.unreadCount,
       needsHumanAttention: p?.needs_human_attention ?? false,
       escalationReason: p?.last_ai_escalation_reason ?? null,
-      isOptedOut: consentState === "opted_out",
+      isOptedOut,
       isTestTraffic: looksLikeTestTraffic(
         c
           ? (c.entity_name ??
@@ -280,7 +318,6 @@ export async function countNeedsOutcomeThreads(
     .select("contact_id, property_id, conversation_id, direction, created_at")
     .eq("channel", "sms")
     .not("contact_id", "is", null)
-    .not("property_id", "is", null)
     .not("conversation_id", "is", null)
     .neq("status", "queued")
     .gte("created_at", cutoff)
@@ -288,66 +325,71 @@ export async function countNeedsOutcomeThreads(
   if (error) throw new Error(`countNeedsOutcomeThreads: ${error.message}`);
   if (!msgs || msgs.length === 0) return 0;
 
-  type Candidate = { contactId: string; propertyId: string };
+  type Candidate = {
+    contactId: string;
+    propertyId: string | null;
+    hasInbound: boolean;
+  };
   const candidatesByThread = new Map<string, Candidate>();
   for (const m of msgs) {
     const contactId = m.contact_id;
-    const propertyId = m.property_id;
-    if (!contactId || !propertyId) continue;
+    if (!contactId) continue;
     const threadId = m.conversation_id!;
-    if (candidatesByThread.has(threadId)) continue;
-    if (m.direction === "inbound") {
-      candidatesByThread.set(threadId, { contactId, propertyId });
+    const propertyId = m.property_id;
+    const candidate = candidatesByThread.get(threadId);
+    if (candidate) {
+      if (candidate.propertyId === null && propertyId !== null) {
+        candidate.propertyId = propertyId;
+      }
+      if (m.direction === "inbound") {
+        candidate.hasInbound = true;
+      }
+      continue;
     }
+
+    if (m.direction === "inbound") {
+      candidatesByThread.set(threadId, {
+        contactId,
+        propertyId,
+        hasInbound: true,
+      });
+      continue;
+    }
+    candidatesByThread.set(threadId, {
+      contactId,
+      propertyId,
+      hasInbound: false,
+    });
   }
   const candidates = Array.from(candidatesByThread.values());
   if (candidates.length === 0) return 0;
 
   const CHUNK = 250;
-  const propertyIds = Array.from(new Set(candidates.map((c) => c.propertyId)));
-  const propsRows = await fetchInChunks(propertyIds, CHUNK, (chunk) =>
-    supabase
-      .from("properties")
-      .select("id, address, city, state, status, outreach_dispo")
-      .in("id", chunk),
+  const propertyIds = Array.from(
+    new Set(
+      candidates
+        .map((c) => c.propertyId)
+        .filter((propertyId): propertyId is string => propertyId !== null),
+    ),
   );
-  const propertyById = new Map(propsRows.map((p) => [p.id, p]));
-  let needsOutcome = candidates.filter((candidate) => {
-    const property = propertyById.get(candidate.propertyId);
-    return property?.status === "prospect" && property.outreach_dispo == null;
-  });
-  if (needsOutcome.length === 0) return 0;
-
-  if (opts.hideTestTraffic) {
-    const contactIds = Array.from(new Set(needsOutcome.map((c) => c.contactId)));
-    const contactsRows = await fetchInChunks(contactIds, CHUNK, (chunk) =>
+  const contactIds = Array.from(new Set(candidates.map((c) => c.contactId)));
+  const [propsRows, contactsRows] = await Promise.all([
+    fetchInChunks(propertyIds, CHUNK, (chunk) =>
+      supabase
+        .from("properties")
+        .select("id, address, city, state, status, outreach_dispo")
+        .in("id", chunk),
+    ),
+    fetchInChunks(contactIds, CHUNK, (chunk) =>
       supabase
         .from("contacts")
-        .select("id, first_name, last_name, entity_name")
+        .select("id, first_name, last_name, entity_name, do_not_contact, sms_opted_out")
         .in("id", chunk),
-    );
-    const contactById = new Map(contactsRows.map((contact) => [contact.id, contact]));
-    needsOutcome = needsOutcome.filter((candidate) => {
-      const contact = contactById.get(candidate.contactId);
-      const property = propertyById.get(candidate.propertyId);
-      const contactName = contact
-        ? (contact.entity_name ??
-          ([contact.first_name, contact.last_name].filter(Boolean).join(" ") ||
-            null))
-        : null;
-      const propertyAddress = property
-        ? [property.address, property.city, property.state].filter(Boolean).join(", ")
-        : null;
+    ),
+  ]);
+  const propertyById = new Map(propsRows.map((p) => [p.id, p]));
+  const contactById = new Map(contactsRows.map((contact) => [contact.id, contact]));
 
-      return !looksLikeTestTraffic(contactName, propertyAddress);
-    });
-  }
-
-  if (!opts.hideOptedOut || needsOutcome.length === 0) {
-    return needsOutcome.length;
-  }
-
-  const contactIds = Array.from(new Set(needsOutcome.map((c) => c.contactId)));
   const consentRows = await fetchInChunks(contactIds, CHUNK, (chunk) =>
     supabase
       .from("consent_events")
@@ -366,11 +408,46 @@ export async function countNeedsOutcomeThreads(
     consentEventsByContact.set(ev.contact_id, list);
   }
 
-  return needsOutcome.filter(
-    (candidate) =>
-      computeConsentState(consentEventsByContact.get(candidate.contactId) ?? []) !==
-      "opted_out",
-  ).length;
+  let needsOutcome = candidates.filter((candidate) => {
+    const property = candidate.propertyId
+      ? propertyById.get(candidate.propertyId)
+      : null;
+    const contact = contactById.get(candidate.contactId);
+    const isOptedOut =
+      contact?.do_not_contact === true ||
+      contact?.sms_opted_out === true ||
+      computeConsentState(consentEventsByContact.get(candidate.contactId) ?? []) ===
+        "opted_out";
+    return isNeedsOutcomeThread({
+      propertyId: candidate.propertyId,
+      hasInbound: candidate.hasInbound,
+      propertyStatus: property?.status,
+      outreachDispo: property?.outreach_dispo,
+      isOptedOut,
+    });
+  });
+  if (needsOutcome.length === 0) return 0;
+
+  if (opts.hideTestTraffic) {
+    needsOutcome = needsOutcome.filter((candidate) => {
+      const contact = contactById.get(candidate.contactId);
+      const property = candidate.propertyId
+        ? propertyById.get(candidate.propertyId)
+        : null;
+      const contactName = contact
+        ? (contact.entity_name ??
+          ([contact.first_name, contact.last_name].filter(Boolean).join(" ") ||
+            null))
+        : null;
+      const propertyAddress = property
+        ? [property.address, property.city, property.state].filter(Boolean).join(", ")
+        : null;
+
+      return !looksLikeTestTraffic(contactName, propertyAddress);
+    });
+  }
+
+  return needsOutcome.length;
 }
 
 /**

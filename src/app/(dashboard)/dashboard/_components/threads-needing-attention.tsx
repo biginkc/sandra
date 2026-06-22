@@ -73,7 +73,7 @@ export function ThreadsNeedingAttention({
       </ul>
       {totalCount > threads.length && (
         <Link
-          href="/messages?attention=escalated"
+          href="/messages?filter=escalated"
           className="text-foreground mt-4 block text-center text-sm font-bold underline-offset-4 hover:underline"
         >
           View all ({totalCount}) →
