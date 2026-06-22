@@ -133,6 +133,7 @@ function expectSharedOutcomeControls({
     "Wrong number",
   );
   expect(screen.getByTestId("dispo-not-interested")).toBeInTheDocument();
+  expect(screen.getByTestId("dispo-follow-up")).toHaveTextContent("Follow up");
   expect(screen.getByTestId("dispo-dnc")).toHaveTextContent("Do not call");
   expect(screen.getByTestId("dispo-needs-sequence")).toHaveTextContent(
     "Needs sequence",
@@ -396,6 +397,26 @@ describe("<InboxDetail />", () => {
     });
   });
 
+  it("sets nurture (Follow up) from the picker button", async () => {
+    const user = userEvent.setup();
+    const data = makeData({
+      contactId: "contact-follow-up-click",
+      initialMessages: [],
+    });
+
+    render(
+      <InboxDetail
+        data={data}
+        assigneeEmails={{}}
+        currentUserId="user-1"
+      />,
+    );
+
+    await user.click(screen.getByTestId("dispo-follow-up"));
+
+    expect(setOutreachDispoMock).toHaveBeenCalledWith("prop-1", "nurture");
+  });
+
   it("renders legacy nurture values as Follow up without changing the value", () => {
     const data = makeData({
       contactId: "contact-follow-up",
@@ -411,7 +432,9 @@ describe("<InboxDetail />", () => {
       />,
     );
 
-    expect(screen.getByText("Follow up")).toBeInTheDocument();
+    // "Follow up" now appears twice when nurture is the active dispo: the
+    // picker button and the active-disposition label.
+    expect(screen.getAllByText("Follow up")).toHaveLength(2);
     expect(screen.queryByText("Legacy follow-up")).not.toBeInTheDocument();
     expect(screen.queryByText("Nurture")).not.toBeInTheDocument();
   });
