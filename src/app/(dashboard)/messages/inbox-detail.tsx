@@ -142,6 +142,18 @@ function DispoBar({
       </button>
 
       <button
+        onClick={() => apply("nurture")}
+        disabled={pending}
+        className={outcomeButtonClass(
+          dispo === "nurture",
+          "bg-blue-50 border-blue-200 text-blue-800",
+        )}
+        data-testid="dispo-follow-up"
+      >
+        Follow up
+      </button>
+
+      <button
         onClick={() => apply("dnc")}
         disabled={pending}
         className={outcomeButtonClass(isDnc, "bg-red-50 border-red-200 text-red-700")}
