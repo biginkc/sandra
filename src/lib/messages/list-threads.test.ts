@@ -24,7 +24,15 @@ function makeStub(opts: {
     created_at: string;
     read_at: string | null;
   }>;
-  contacts: Map<string, { id: string; first_name: string | null; last_name: string | null; entity_name: string | null; phone_1: string | null }>;
+  contacts: Map<string, {
+    id: string;
+    first_name: string | null;
+    last_name: string | null;
+    entity_name: string | null;
+    phone_1: string | null;
+    do_not_contact?: boolean;
+    sms_opted_out?: boolean;
+  }>;
   properties: Map<string, {
     id: string;
     address: string | null;
@@ -560,7 +568,7 @@ describe("looksLikeTestTraffic", () => {
 });
 
 describe("listThreads — Needs Outcome", () => {
-  it("marks replied prospect threads with no outreach outcome", async () => {
+  it("marks replied early-stage threads with no outreach outcome", async () => {
     const now = Date.now();
     const messages = [
       {
@@ -572,11 +580,21 @@ describe("listThreads — Needs Outcome", () => {
         read_at: null,
       },
       {
-        contact_id: "c-outbound-latest",
-        property_id: "p-outbound-latest",
-        body: "Following up",
+        contact_id: "c-followup",
+        property_id: "p-followup",
+        conversation_id: "conv-followup",
+        body: "I'll call tomorrow",
         direction: "outbound" as const,
         created_at: new Date(now - 1_000).toISOString(),
+        read_at: null,
+      },
+      {
+        contact_id: "c-followup",
+        property_id: "p-followup",
+        conversation_id: "conv-followup",
+        body: "Yes, call me",
+        direction: "inbound" as const,
+        created_at: new Date(now - 2_000).toISOString(),
         read_at: null,
       },
       {
@@ -584,7 +602,7 @@ describe("listThreads — Needs Outcome", () => {
         property_id: "p-dispo",
         body: "No thanks",
         direction: "inbound" as const,
-        created_at: new Date(now - 2_000).toISOString(),
+        created_at: new Date(now - 3_000).toISOString(),
         read_at: null,
       },
       {
@@ -592,7 +610,57 @@ describe("listThreads — Needs Outcome", () => {
         property_id: "p-lead",
         body: "Call me",
         direction: "inbound" as const,
-        created_at: new Date(now - 3_000).toISOString(),
+        created_at: new Date(now - 4_000).toISOString(),
+        read_at: null,
+      },
+      {
+        contact_id: "c-contacted",
+        property_id: "p-contacted",
+        body: "Maybe",
+        direction: "inbound" as const,
+        created_at: new Date(now - 5_000).toISOString(),
+        read_at: null,
+      },
+      {
+        contact_id: "c-terminal",
+        property_id: "p-terminal",
+        body: "I'm interested",
+        direction: "inbound" as const,
+        created_at: new Date(now - 6_000).toISOString(),
+        read_at: null,
+      },
+      {
+        contact_id: "c-dnc",
+        property_id: "p-dnc",
+        body: "Stop",
+        direction: "inbound" as const,
+        created_at: new Date(now - 7_000).toISOString(),
+        read_at: null,
+      },
+      {
+        contact_id: "c-sms-opted-out",
+        property_id: "p-sms-opted-out",
+        body: "Stop texting",
+        direction: "inbound" as const,
+        created_at: new Date(now - 8_000).toISOString(),
+        read_at: null,
+      },
+      {
+        contact_id: "c-mixed",
+        property_id: null,
+        conversation_id: "conv-mixed",
+        body: "Yes, maybe",
+        direction: "inbound" as const,
+        created_at: new Date(now - 9_000).toISOString(),
+        read_at: null,
+      },
+      {
+        contact_id: "c-mixed",
+        property_id: "p-mixed",
+        conversation_id: "conv-mixed",
+        body: "We reached out about this property",
+        direction: "outbound" as const,
+        created_at: new Date(now - 10_000).toISOString(),
         read_at: null,
       },
       {
@@ -600,14 +668,22 @@ describe("listThreads — Needs Outcome", () => {
         property_id: null,
         body: "Who is this?",
         direction: "inbound" as const,
-        created_at: new Date(now - 4_000).toISOString(),
+        created_at: new Date(now - 11_000).toISOString(),
         read_at: null,
       },
     ];
     const contacts = new Map(
       messages.map((m) => [
         m.contact_id,
-        { id: m.contact_id, first_name: null, last_name: null, entity_name: m.contact_id, phone_1: null },
+        {
+          id: m.contact_id,
+          first_name: null,
+          last_name: null,
+          entity_name: m.contact_id,
+          phone_1: null,
+          do_not_contact: m.contact_id === "c-dnc",
+          sms_opted_out: m.contact_id === "c-sms-opted-out",
+        },
       ]),
     );
     const properties = new Map([
@@ -624,9 +700,9 @@ describe("listThreads — Needs Outcome", () => {
         },
       ],
       [
-        "p-outbound-latest",
+        "p-followup",
         {
-          id: "p-outbound-latest",
+          id: "p-followup",
           address: "2 Outbound St",
           city: null,
           state: null,
@@ -659,6 +735,66 @@ describe("listThreads — Needs Outcome", () => {
           assigned_user_id: null,
         },
       ],
+      [
+        "p-contacted",
+        {
+          id: "p-contacted",
+          address: "5 Contacted Ct",
+          city: null,
+          state: null,
+          status: "contacted",
+          outreach_dispo: null,
+          assigned_user_id: null,
+        },
+      ],
+      [
+        "p-terminal",
+        {
+          id: "p-terminal",
+          address: "6 Terminal Trl",
+          city: null,
+          state: null,
+          status: "interested",
+          outreach_dispo: null,
+          assigned_user_id: null,
+        },
+      ],
+      [
+        "p-dnc",
+        {
+          id: "p-dnc",
+          address: "7 Dnc Dr",
+          city: null,
+          state: null,
+          status: "prospect",
+          outreach_dispo: null,
+          assigned_user_id: null,
+        },
+      ],
+      [
+        "p-sms-opted-out",
+        {
+          id: "p-sms-opted-out",
+          address: "8 Sms Opt Out St",
+          city: null,
+          state: null,
+          status: "prospect",
+          outreach_dispo: null,
+          assigned_user_id: null,
+        },
+      ],
+      [
+        "p-mixed",
+        {
+          id: "p-mixed",
+          address: "9 Mixed Message Rd",
+          city: null,
+          state: null,
+          status: "prospect",
+          outreach_dispo: null,
+          assigned_user_id: null,
+        },
+      ],
     ]);
 
     const { supabase } = makeStub({ messages, contacts, properties });
@@ -666,7 +802,11 @@ describe("listThreads — Needs Outcome", () => {
 
     expect(
       threads.filter((thread) => thread.needsOutcome).map((thread) => thread.propertyId),
-    ).toEqual(["p-needs"]);
+    ).toEqual(["p-needs", "p-followup", "p-lead", "p-contacted", "p-mixed"]);
+    expect(
+      threads.find((thread) => thread.propertyId === "p-sms-opted-out")
+        ?.isOptedOut,
+    ).toBe(true);
   });
 
   it("filters to the same Needs Outcome predicate", async () => {
@@ -686,6 +826,14 @@ describe("listThreads — Needs Outcome", () => {
         body: "Already moved",
         direction: "inbound" as const,
         created_at: new Date(now - 1_000).toISOString(),
+        read_at: null,
+      },
+      {
+        contact_id: "c-contacted",
+        property_id: "p-contacted",
+        body: "Maybe later",
+        direction: "inbound" as const,
+        created_at: new Date(now - 2_000).toISOString(),
         read_at: null,
       },
     ];
@@ -720,19 +868,34 @@ describe("listThreads — Needs Outcome", () => {
           assigned_user_id: null,
         },
       ],
+      [
+        "p-contacted",
+        {
+          id: "p-contacted",
+          address: "3 Contacted Ct",
+          city: null,
+          state: null,
+          status: "contacted",
+          outreach_dispo: null,
+          assigned_user_id: null,
+        },
+      ],
     ]);
 
     const { supabase } = makeStub({ messages, contacts, properties });
     const threads = await listThreads(supabase, { needsOutcomeOnly: true });
 
-    expect(threads).toHaveLength(1);
-    expect(threads[0]?.propertyId).toBe("p-needs");
-    expect(threads[0]?.needsOutcome).toBe(true);
+    expect(threads.map((thread) => thread.propertyId)).toEqual([
+      "p-needs",
+      "p-lead",
+      "p-contacted",
+    ]);
+    expect(threads.every((thread) => thread.needsOutcome)).toBe(true);
   });
 });
 
 describe("countNeedsOutcomeThreads", () => {
-  it("counts Needs Outcome threads without hydrating contacts", async () => {
+  it("counts the same durable Needs Outcome predicate", async () => {
     const now = Date.now();
     const messages = [
       {
@@ -744,11 +907,45 @@ describe("countNeedsOutcomeThreads", () => {
         read_at: null,
       },
       {
-        contact_id: "c-outbound-latest",
-        property_id: "p-outbound-latest",
+        contact_id: "c-followup",
+        property_id: "p-followup",
+        conversation_id: "conv-followup",
         body: "Checking in",
         direction: "outbound" as const,
         created_at: new Date(now - 1_000).toISOString(),
+        read_at: null,
+      },
+      {
+        contact_id: "c-followup",
+        property_id: "p-followup",
+        conversation_id: "conv-followup",
+        body: "Call me tomorrow",
+        direction: "inbound" as const,
+        created_at: new Date(now - 2_000).toISOString(),
+        read_at: null,
+      },
+      {
+        contact_id: "c-lead",
+        property_id: "p-lead",
+        body: "Yes",
+        direction: "inbound" as const,
+        created_at: new Date(now - 3_000).toISOString(),
+        read_at: null,
+      },
+      {
+        contact_id: "c-contacted",
+        property_id: "p-contacted",
+        body: "Maybe",
+        direction: "inbound" as const,
+        created_at: new Date(now - 4_000).toISOString(),
+        read_at: null,
+      },
+      {
+        contact_id: "c-dispo",
+        property_id: "p-dispo",
+        body: "No",
+        direction: "inbound" as const,
+        created_at: new Date(now - 5_000).toISOString(),
         read_at: null,
       },
       {
@@ -756,26 +953,79 @@ describe("countNeedsOutcomeThreads", () => {
         property_id: "p-opted-out",
         body: "Stop",
         direction: "inbound" as const,
-        created_at: new Date(now - 2_000).toISOString(),
+        created_at: new Date(now - 6_000).toISOString(),
+        read_at: null,
+      },
+      {
+        contact_id: "c-dnc",
+        property_id: "p-dnc",
+        body: "DNC",
+        direction: "inbound" as const,
+        created_at: new Date(now - 7_000).toISOString(),
+        read_at: null,
+      },
+      {
+        contact_id: "c-sms-opted-out",
+        property_id: "p-sms-opted-out",
+        body: "Stop texting",
+        direction: "inbound" as const,
+        created_at: new Date(now - 8_000).toISOString(),
+        read_at: null,
+      },
+      {
+        contact_id: "c-mixed",
+        property_id: null,
+        conversation_id: "conv-mixed",
+        body: "Yes, maybe",
+        direction: "inbound" as const,
+        created_at: new Date(now - 9_000).toISOString(),
+        read_at: null,
+      },
+      {
+        contact_id: "c-mixed",
+        property_id: "p-mixed",
+        conversation_id: "conv-mixed",
+        body: "We reached out about this property",
+        direction: "outbound" as const,
+        created_at: new Date(now - 10_000).toISOString(),
         read_at: null,
       },
     ];
     const contacts = new Map(
       messages.map((m) => [
         m.contact_id,
-        { id: m.contact_id, first_name: null, last_name: null, entity_name: m.contact_id, phone_1: null },
+        {
+          id: m.contact_id,
+          first_name: null,
+          last_name: null,
+          entity_name: m.contact_id,
+          phone_1: null,
+          do_not_contact: m.contact_id === "c-dnc",
+          sms_opted_out: m.contact_id === "c-sms-opted-out",
+        },
       ]),
     );
+    const propertySeeds: Array<[string, string, string | null]> = [
+      ["p-needs", "prospect", null],
+      ["p-followup", "prospect", null],
+      ["p-lead", "new_lead", null],
+      ["p-contacted", "contacted", null],
+      ["p-dispo", "prospect", "not_interested"],
+      ["p-opted-out", "prospect", null],
+      ["p-dnc", "prospect", null],
+      ["p-sms-opted-out", "prospect", null],
+      ["p-mixed", "prospect", null],
+    ];
     const properties = new Map(
-      ["p-needs", "p-outbound-latest", "p-opted-out"].map((id) => [
+      propertySeeds.map(([id, status, outreachDispo]) => [
         id,
         {
           id,
           address: null,
           city: null,
           state: null,
-          status: "prospect",
-          outreach_dispo: null,
+          status,
+          outreach_dispo: outreachDispo,
           assigned_user_id: null,
         },
       ]),
@@ -797,9 +1047,24 @@ describe("countNeedsOutcomeThreads", () => {
     const count = await countNeedsOutcomeThreads(supabase, {
       hideOptedOut: true,
     });
+    const { supabase: listSupabase } = makeStub({
+      messages,
+      contacts,
+      properties,
+      consentEvents: [
+        {
+          contact_id: "c-opted-out",
+          event_type: "opt_out",
+          occurred_at: new Date(now).toISOString(),
+        },
+      ],
+    });
+    const listed = await listThreads(listSupabase, { needsOutcomeOnly: true });
 
-    expect(count).toBe(1);
-    expect(inCalls.contacts).toEqual([]);
+    expect(count).toBe(5);
+    expect(count).toBe(listed.length);
+    expect(listed.map((thread) => thread.propertyId)).toContain("p-mixed");
+    expect(inCalls.contacts).toHaveLength(1);
     expect(inCalls.properties).toHaveLength(1);
     expect(inCalls.consent_events).toHaveLength(1);
   });
@@ -915,6 +1180,6 @@ describe("countNeedsOutcomeThreads", () => {
 
     expect(count).toBe(1);
     expect(inCalls.contacts).toHaveLength(1);
-    expect(inCalls.consent_events).toEqual([]);
+    expect(inCalls.consent_events).toHaveLength(1);
   });
 });
