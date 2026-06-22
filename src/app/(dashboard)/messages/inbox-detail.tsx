@@ -41,9 +41,10 @@ const DISPO_LABELS: Record<string, string> = {
   wrong_number: "Wrong #",
   bad_number: "Bad / disconnected #",
   not_interested: "Not interested",
+  needs_sequence: "Needs sequence",
   opted_out: "SMS opted out",
   dnc: "Do not call",
-  nurture: "Legacy follow-up",
+  nurture: "Follow up",
   callback_requested: "Lead task requested",
 };
 
@@ -147,6 +148,18 @@ function DispoBar({
         data-testid="dispo-dnc"
       >
         Do not call
+      </button>
+
+      <button
+        onClick={() => apply("needs_sequence")}
+        disabled={pending}
+        className={outcomeButtonClass(
+          dispo === "needs_sequence",
+          "bg-teal-50 border-teal-200 text-teal-800",
+        )}
+        data-testid="dispo-needs-sequence"
+      >
+        Needs sequence
       </button>
 
       <button

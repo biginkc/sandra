@@ -8,7 +8,7 @@
 
 import React from "react";
 import { describe, it, expect, vi } from "vitest";
-import { render, screen, fireEvent, act } from "@testing-library/react";
+import { render, screen, fireEvent } from "@testing-library/react";
 import { BlockOptionsContext, type BlockOptions } from "./_block-shell";
 
 // ---------------------------------------------------------------------------
@@ -23,7 +23,7 @@ const opts: BlockOptions = {
   sources: ["dealmachine", "csv"],
   pipelineStatuses: ["prospect", "lead", "contract", "closed"],
   motivationLevels: ["high", "medium", "low"],
-  outreachDispos: ["interested", "not_interested", "callback"],
+  outreachDispos: ["nurture", "needs_sequence", "not_interested"],
   cassStatuses: ["verified", "unverified", "invalid", "ambiguous"],
 };
 
@@ -212,8 +212,16 @@ describe("outreach-dispo-block", () => {
   it("onChange fires when a dispo is checked", () => {
     const onChange = vi.fn();
     wrap(<OutreachDispoBlock block={base} onChange={onChange} onRemove={vi.fn()} />);
-    fireEvent.click(screen.getByRole("checkbox", { name: "interested" }));
-    expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ values: ["interested"] }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Follow up" }));
+    expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ values: ["nurture"] }));
+  });
+
+  it("renders operator labels for non-obvious disposition values", () => {
+    wrap(<OutreachDispoBlock block={base} onChange={vi.fn()} onRemove={vi.fn()} />);
+    expect(screen.getByRole("checkbox", { name: "Follow up" })).toBeInTheDocument();
+    expect(screen.getByRole("checkbox", { name: "Needs sequence" })).toBeInTheDocument();
+    expect(screen.queryByText("nurture")).not.toBeInTheDocument();
+    expect(screen.queryByText("needs_sequence")).not.toBeInTheDocument();
   });
 
   it("onRemove fires when × clicked", () => {

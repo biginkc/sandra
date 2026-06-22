@@ -12,6 +12,7 @@ export type OutreachDispo =
   | "wrong_number"
   | "bad_number"
   | "not_interested"
+  | "needs_sequence"
   | "opted_out"
   | "dnc";
 
@@ -19,6 +20,7 @@ const VALID_DISPOS: ReadonlySet<string> = new Set<OutreachDispo>([
   "wrong_number",
   "bad_number",
   "not_interested",
+  "needs_sequence",
   "opted_out",
   "dnc",
 ]);

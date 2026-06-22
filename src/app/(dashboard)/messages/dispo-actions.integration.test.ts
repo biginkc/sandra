@@ -58,6 +58,23 @@ describe("setOutreachDispo", () => {
     expect(revalidatePath).toHaveBeenCalledWith("/properties");
   });
 
+  it("accepts needs_sequence as a tag-only disposition", async () => {
+    responseQueue = [{ data: property(), error: null }, { error: null }];
+
+    const result = await setOutreachDispo("property-1", "needs_sequence");
+
+    expect(result).toEqual({ ok: true });
+    expect(updatePayloads).toContainEqual({
+      table: "properties",
+      payload: expect.objectContaining({
+        outreach_dispo: "needs_sequence",
+        follow_up_at: null,
+      }),
+    });
+    expect(recordConsentEvent).not.toHaveBeenCalled();
+    expect(pauseContactEnrollments).not.toHaveBeenCalled();
+  });
+
   it("rejects legacy task dispositions from the manual Messages action", async () => {
     const result = await setOutreachDispo(
       "property-1",

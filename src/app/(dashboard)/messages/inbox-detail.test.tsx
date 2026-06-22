@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, it, expect, vi } from "vitest";
 
@@ -134,6 +134,9 @@ function expectSharedOutcomeControls({
   );
   expect(screen.getByTestId("dispo-not-interested")).toBeInTheDocument();
   expect(screen.getByTestId("dispo-dnc")).toHaveTextContent("Do not call");
+  expect(screen.getByTestId("dispo-needs-sequence")).toHaveTextContent(
+    "Needs sequence",
+  );
   expect(screen.getByTestId("dispo-more")).toBeInTheDocument();
 
   const moveToLead = screen.getByTestId("message-move-to-lead");
@@ -365,6 +368,52 @@ describe("<InboxDetail />", () => {
     expect(screen.queryByTestId("dispo-nurture")).not.toBeInTheDocument();
     expect(screen.queryByText("Follow up on")).not.toBeInTheDocument();
     expect(screen.queryByTestId("assignee-select")).not.toBeInTheDocument();
+  });
+
+  it("sets the needs_sequence live label from the picker", async () => {
+    const user = userEvent.setup();
+    const data = makeData({
+      contactId: "contact-needs-sequence",
+      initialMessages: [],
+    });
+
+    render(
+      <InboxDetail
+        data={data}
+        assigneeEmails={{}}
+        currentUserId="user-1"
+      />,
+    );
+
+    await user.click(screen.getByTestId("dispo-needs-sequence"));
+
+    expect(setOutreachDispoMock).toHaveBeenCalledWith(
+      "prop-1",
+      "needs_sequence",
+    );
+    await waitFor(() => {
+      expect(screen.getAllByText("Needs sequence")).toHaveLength(2);
+    });
+  });
+
+  it("renders legacy nurture values as Follow up without changing the value", () => {
+    const data = makeData({
+      contactId: "contact-follow-up",
+      outreachDispo: "nurture",
+      initialMessages: [],
+    });
+
+    render(
+      <InboxDetail
+        data={data}
+        assigneeEmails={{}}
+        currentUserId="user-1"
+      />,
+    );
+
+    expect(screen.getByText("Follow up")).toBeInTheDocument();
+    expect(screen.queryByText("Legacy follow-up")).not.toBeInTheDocument();
+    expect(screen.queryByText("Nurture")).not.toBeInTheDocument();
   });
 
   it("keeps lead promotion out of the More outcome menu", async () => {

@@ -189,6 +189,19 @@ describe("<ProspectsTable />", () => {
     expect(screen.getByRole("link", { name: "Import CSV" })).toBeInTheDocument();
   });
 
+  it("renders outreach disposition pills with operator-facing labels", () => {
+    const rows = [
+      makeRow({ id: "p1", outreach_dispo: "nurture" }),
+      makeRow({ id: "p2", outreach_dispo: "needs_sequence" }),
+    ];
+
+    renderTable(rows);
+
+    expect(screen.getByText("Follow up")).toBeInTheDocument();
+    expect(screen.getByText("Needs sequence")).toBeInTheDocument();
+    expect(screen.queryByText("Nurture")).not.toBeInTheDocument();
+  });
+
   it("flips Actions to 'Actions (1)' when a row checkbox is selected", async () => {
     const user = userEvent.setup();
     const rows = [makeRow({ id: "p1" }), makeRow({ id: "p2" })];

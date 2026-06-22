@@ -81,6 +81,7 @@ const OUTREACH_DISPOS = [
   "dnc",
   "nurture",
   "callback_requested",
+  "needs_sequence",
 ];
 // cass_status — fixed CASS taxonomy used throughout the app.
 const CASS_STATUSES = ["verified", "unverified", "invalid", "ambiguous"];

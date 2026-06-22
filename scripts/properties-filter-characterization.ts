@@ -338,7 +338,16 @@ function buildScenarios(data: DataSet): Scenario[] {
     scenarios,
     "outreach_dispo",
     "Outreach Disposition",
-    ["wrong_number", "bad_number", "not_interested", "opted_out", "dnc", "nurture", "callback_requested"],
+    [
+      "wrong_number",
+      "bad_number",
+      "not_interested",
+      "opted_out",
+      "dnc",
+      "nurture",
+      "callback_requested",
+      "needs_sequence",
+    ],
   );
   addMultiScenarios(
     scenarios,
