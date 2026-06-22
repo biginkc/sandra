@@ -5,6 +5,17 @@ import { BlockShell, CombinatorSelect, useBlockOptions } from "./_block-shell";
 
 type Block = Extract<FilterBlock, { kind: "outreach_dispo" }>;
 
+const OUTREACH_DISPO_LABELS: Record<string, string> = {
+  wrong_number: "Wrong number",
+  bad_number: "Bad / disconnected number",
+  not_interested: "Not interested",
+  opted_out: "SMS opted out",
+  dnc: "Do not call",
+  nurture: "Follow up",
+  callback_requested: "Callback requested",
+  needs_sequence: "Needs sequence",
+};
+
 export default function OutreachDispoBlock({
   block,
   onChange,
@@ -37,7 +48,7 @@ export default function OutreachDispoBlock({
               checked={block.values.includes(d)}
               onChange={() => toggle(d)}
             />
-            {d}
+            {OUTREACH_DISPO_LABELS[d] ?? d}
           </label>
         ))}
       </div>

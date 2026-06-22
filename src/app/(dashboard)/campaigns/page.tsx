@@ -59,6 +59,7 @@ const OUTREACH_DISPOS = [
   "dnc",
   "nurture",
   "callback_requested",
+  "needs_sequence",
 ];
 
 const SOURCES = [

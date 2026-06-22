@@ -980,12 +980,16 @@ const DISPO_PILL_META: Record<string, { label: string; className: string }> = {
     className: "bg-red-100 text-red-800 hover:bg-red-100",
   },
   nurture: {
-    label: "Nurture",
+    label: "Follow up",
     className: "bg-blue-100 text-blue-800 hover:bg-blue-100",
   },
   callback_requested: {
     label: "Callback",
     className: "bg-purple-100 text-purple-800 hover:bg-purple-100",
+  },
+  needs_sequence: {
+    label: "Needs sequence",
+    className: "bg-teal-100 text-teal-800 hover:bg-teal-100",
   },
 };
 
