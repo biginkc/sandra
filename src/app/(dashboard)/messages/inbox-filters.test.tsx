@@ -255,7 +255,7 @@ describe("<CockpitView /> DNC toggle", () => {
 });
 
 describe("<CockpitView /> chip order (feedback-f E2b)", () => {
-  it("renders a compact badge on threads that need an outcome", () => {
+  it("renders a needs-outcome dot on threads that need an outcome", () => {
     const thread = makeThread({
       contactId: "needs-1",
       threadId: "legacy:needs-1:prop-needs-1",
@@ -264,9 +264,28 @@ describe("<CockpitView /> chip order (feedback-f E2b)", () => {
 
     render(<CockpitView {...baseProps} filter="all" threads={[thread]} />);
 
+    const dot = screen.getByTestId(
+      "inbox-thread-legacy:needs-1:prop-needs-1-needs-outcome",
+    );
+    expect(dot).toHaveAccessibleName("Needs outcome");
+    expect(dot).toHaveAttribute("title", "Needs outcome");
+    expect(dot).toHaveClass("bg-[#f59e0b]");
+    expect(dot).toBeEmptyDOMElement();
+  });
+
+  it("does not render the needs-outcome dot once the thread has an outcome", () => {
+    const thread = makeThread({
+      contactId: "done-1",
+      threadId: "legacy:done-1:prop-done-1",
+      needsOutcome: false,
+      outreachDispo: "not_interested",
+    });
+
+    render(<CockpitView {...baseProps} filter="all" threads={[thread]} />);
+
     expect(
-      screen.getByTestId("inbox-thread-legacy:needs-1:prop-needs-1-needs-outcome"),
-    ).toHaveTextContent("Needs outcome");
+      screen.queryByTestId("inbox-thread-legacy:done-1:prop-done-1-needs-outcome"),
+    ).not.toBeInTheDocument();
   });
 
   it("renders chips in priority order: Unread, Escalated, Needs Outcome, Mine, Unassigned, All, Unknown, Dismissed", () => {

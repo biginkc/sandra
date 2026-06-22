@@ -135,8 +135,19 @@ export function InboxThreadList({
               }`}
             >
               <div className="flex w-full items-start justify-between gap-2">
-                <span className="truncate text-sm font-bold text-[#1c1917]">
-                  {t.contactName ?? t.contactPhone ?? "Unknown contact"}
+                <span className="flex min-w-0 flex-1 items-center gap-1.5">
+                  {t.needsOutcome ? (
+                    <span
+                      role="img"
+                      aria-label="Needs outcome"
+                      title="Needs outcome"
+                      className="h-2 w-2 shrink-0 rounded-full bg-[#f59e0b]"
+                      data-testid={`inbox-thread-${t.threadId}-needs-outcome`}
+                    />
+                  ) : null}
+                  <span className="min-w-0 truncate text-sm font-bold text-[#1c1917]">
+                    {t.contactName ?? t.contactPhone ?? "Unknown contact"}
+                  </span>
                 </span>
                 <span className="shrink-0 text-[11px] tabular-nums text-[#78716c]">
                   {formatDistanceToNow(new Date(t.lastMessageAt), {
@@ -163,17 +174,6 @@ export function InboxThreadList({
               {t.needsHumanAttention && t.escalationReason ? (
                 <div className="flex w-full">
                   <EscalationBadge reason={t.escalationReason} />
-                </div>
-              ) : null}
-              {t.needsOutcome ? (
-                <div className="flex w-full">
-                  <Badge
-                    variant="outline"
-                    className="h-5 px-1.5 text-[10px] font-semibold text-[#78716c]"
-                    data-testid={`inbox-thread-${t.threadId}-needs-outcome`}
-                  >
-                    Needs outcome
-                  </Badge>
                 </div>
               ) : null}
               <div className="flex w-full items-center justify-between gap-2">
