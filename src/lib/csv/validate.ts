@@ -96,9 +96,10 @@ function normalizeByType(
 
 function isPhoneLineTypeField(field: TargetField): boolean {
   return (
-    field.enumValues?.includes("mobile") === true &&
-    field.enumValues.includes("landline") &&
-    field.enumValues.includes("unknown")
+    field.id === "homeowner_phone_1_type" ||
+    field.id === "homeowner_phone_2_type" ||
+    field.id === "homeowner_phone_3_type" ||
+    field.id === "agent_phone_type"
   );
 }
 
