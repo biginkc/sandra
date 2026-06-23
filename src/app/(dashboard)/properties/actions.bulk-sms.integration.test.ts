@@ -40,7 +40,11 @@ vi.spyOn(testClient.auth, "getUser").mockImplementation(async () =>
 
 const SAFE_NOW = new Date("2026-04-23T18:00:00Z");
 
-import { bulkQueueSms, countAlreadyContacted } from "./actions";
+import {
+  assessBulkSmsAudience,
+  bulkQueueSms,
+  countAlreadyContacted,
+} from "./actions";
 
 async function getOrgId(): Promise<string> {
   const { data } = await testClient
@@ -444,6 +448,70 @@ describe("bulkQueueSms (integration)", () => {
       .from("messages")
       .select("*", { count: "exact", head: true });
     expect(count).toBe(0);
+  });
+
+  it("uses a mobile in phone_2 when phone_1 is a landline", async () => {
+    const orgId = await getOrgId();
+    const { data: contact } = await testClient
+      .from("contacts")
+      .insert({
+        org_id: orgId,
+        first_name: "Mobile",
+        last_name: "Second",
+        phone_1: "+18165550101",
+        phone_1_type: "landline",
+        phone_2: "+18165550102",
+        phone_2_type: "mobile",
+      })
+      .select("id")
+      .single();
+    if (!contact) throw new Error("contact seed failed");
+    await testClient.from("consent_events").insert({
+      contact_id: contact.id,
+      channel: "sms",
+      event_type: "opt_in_marketing_written",
+      source: "test-seed",
+    });
+    const { data: property } = await testClient
+      .from("properties")
+      .insert({
+        org_id: orgId,
+        address: "1 Mobile Second St",
+        state: "MO",
+        status: "prospect",
+        homeowner_contact_id: contact.id,
+      })
+      .select("id")
+      .single();
+    if (!property) throw new Error("property seed failed");
+
+    const assessment = await assessBulkSmsAudience([property.id]);
+    expect(assessment.ok).toBe(true);
+    if (!assessment.ok) return;
+    expect(assessment.data).toMatchObject({
+      total: 1,
+      mobile: 1,
+      landline: 0,
+      unknown: 0,
+      noPhone: 0,
+    });
+
+    const result = await bulkQueueSms(
+      [property.id],
+      adHocOpts({ body: "Hi from the mobile slot" }),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.data.succeeded).toBe(1);
+
+    const { data: message } = await testClient
+      .from("messages")
+      .select("to_address, status")
+      .single();
+    expect(message).toMatchObject({
+      to_address: "+18165550102",
+      status: "queued",
+    });
   });
 
   it("skips unknown line types by default", async () => {

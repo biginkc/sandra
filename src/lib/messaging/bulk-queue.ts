@@ -18,6 +18,11 @@ import { pickFromPool } from "@/lib/templates/pool";
 import { loadTemplateVars } from "@/lib/sequences/template-vars";
 import { renderTemplate } from "@/lib/sequences/render";
 import type { Database } from "@/lib/supabase/types";
+import {
+  classifySmsPhoneAvailability,
+  type SmsPhoneAvailability,
+  type SmsPhoneContact,
+} from "@/lib/messaging/sms-phone";
 
 export const CONTACTED_MESSAGE_STATUSES = ["sent", "delivered"] as const;
 
@@ -28,7 +33,7 @@ export type BulkSmsQueueBaseOpts = {
   skipIfContacted?: boolean;
   jitterPct?: number;
   /**
-   * Queue to contacts whose phone_1 line type is 'unknown' (never
+   * Queue to contacts whose best available SMS phone is 'unknown' (never
    * classified). Default false — bulk SMS targets confirmed mobiles
    * only; the audience-assessment step surfaces the unknown count and
    * lets the operator opt them in. Landlines are always excluded.
@@ -111,12 +116,11 @@ export async function queueSmsBatch(
   // Fetch properties in chunks — Supabase PostgREST rejects large IN
   // clauses (URL length limit, ~8 KB) so we split into batches of 250.
   const CHUNK = 250;
-  type HomeownerJoin = { phone_1_type: string };
   const allProperties: {
     id: string;
     homeowner_contact_id: string | null;
     org_id: string | null;
-    homeowner: HomeownerJoin | null;
+    homeowner: SmsPhoneContact | null;
   }[] = [];
   for (let i = 0; i < args.propertyIds.length; i += CHUNK) {
     const chunk = args.propertyIds.slice(i, i + CHUNK);
@@ -124,7 +128,9 @@ export async function queueSmsBatch(
       .from("properties")
       .select(
         `id, homeowner_contact_id, org_id,
-         homeowner:contacts!properties_homeowner_contact_id_fkey(phone_1_type)`,
+         homeowner:contacts!properties_homeowner_contact_id_fkey(
+           phone_1, phone_1_type, phone_2, phone_2_type, phone_3, phone_3_type
+         )`,
       )
       .in("id", chunk);
     if (propError) {
@@ -136,7 +142,7 @@ export async function queueSmsBatch(
     for (const row of (data ?? []) as unknown as (Omit<
       (typeof allProperties)[number],
       "homeowner"
-    > & { homeowner: HomeownerJoin | HomeownerJoin[] | null })[]) {
+    > & { homeowner: SmsPhoneContact | SmsPhoneContact[] | null })[]) {
       allProperties.push({
         ...row,
         homeowner: Array.isArray(row.homeowner)
@@ -166,7 +172,7 @@ export async function queueSmsBatch(
     });
   }
 
-  const frozenContactLineType = new Map<string, string>();
+  const frozenContactAvailability = new Map<string, SmsPhoneAvailability>();
   const frozenContactIds = Array.from(
     new Set(
       Array.from(frozenContactByProperty.values()).filter(
@@ -178,14 +184,17 @@ export async function queueSmsBatch(
     const chunk = frozenContactIds.slice(i, i + CHUNK);
     const { data, error } = await client
       .from("contacts")
-      .select("id, phone_1_type")
+      .select("id, phone_1, phone_1_type, phone_2, phone_2_type, phone_3, phone_3_type")
       .in("id", chunk);
     if (error) {
       throw new Error(`bulk sms frozen contacts fetch: ${error.message}`);
     }
     data?.forEach((row) => {
-      if (row.id && row.phone_1_type) {
-        frozenContactLineType.set(row.id, row.phone_1_type);
+      if (row.id) {
+        frozenContactAvailability.set(
+          row.id,
+          classifySmsPhoneAvailability(row),
+        );
       }
     });
   }
@@ -260,11 +269,14 @@ export async function queueSmsBatch(
     }
 
     // Line-type gate: landlines never get queued; unknowns only when the
-    // operator opted in at the assessment step. (sendSmsToContact blocks
-    // landlines again at queue time — this early skip just avoids burning
-    // template-pool picks and renders on rows that can't send.)
-    const lineType = frozenContactLineType.get(contactId) ?? "unknown";
+    // operator opted in at the assessment step. A mobile in any saved
+    // phone slot wins over earlier landlines.
+    const lineType = frozenContactAvailability.get(contactId) ?? "none";
     if (lineType === "landline") {
+      state.skipped++;
+      continue;
+    }
+    if (lineType === "none") {
       state.skipped++;
       continue;
     }

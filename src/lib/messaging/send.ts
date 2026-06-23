@@ -8,6 +8,7 @@ import { reconcileStoredStatusEvents } from "./status-events";
 import { getConsentState, type ConsentState } from "./consent";
 import { checkQuietHours, type QuietHoursCheck } from "./quiet-hours";
 import { getMessagingProvider } from "./registry";
+import { selectBestSmsPhone } from "./sms-phone";
 
 /**
  * Core "send one outbound SMS" operation. Called from the lead-detail
@@ -15,7 +16,7 @@ import { getMessagingProvider } from "./registry";
  *
  * Pre-send checks (in order):
  *  1. Messaging provider configured.
- *  2. Contact has phone_1 set.
+ *  2. Contact has at least one usable saved phone.
  *  3. Latest consent state on SMS is not an explicit opt-out.
  *  4. Current time is inside [08:00, 21:00) local to the property state.
  *
@@ -33,7 +34,7 @@ import { getMessagingProvider } from "./registry";
 type MessagesUpdate = Database["public"]["Tables"]["messages"]["Update"];
 
 const LANDLINE_BLOCK_REASON =
-  "Contact's primary phone is a landline — SMS can't be delivered. Call or mail instead.";
+  "Contact only has landline numbers — SMS can't be delivered. Call or mail instead.";
 
 export type SendSmsOutcome =
   | { status: "sent"; messageId: string; externalId: string }
@@ -70,7 +71,7 @@ export type SendSmsOutcome =
   | { status: "db_error"; error: string };
 
 export type SendSmsInput = {
-  /** Contact to send to. We use their `phone_1` as the destination. */
+  /** Contact to send to. We prefer a saved mobile across phone_1/2/3. */
   contactId: string;
   /** Linked property — required for quiet-hours zone + thread continuity. */
   propertyId: string;
@@ -133,7 +134,7 @@ export async function sendSmsToContact(
   const [contactResult, propertyResult] = await Promise.all([
     supabase
       .from("contacts")
-      .select("id, phone_1, phone_1_type")
+      .select("id, phone_1, phone_1_type, phone_2, phone_2_type, phone_3, phone_3_type")
       .eq("id", input.contactId)
       .maybeSingle(),
     supabase
@@ -152,14 +153,14 @@ export async function sendSmsToContact(
   }
   if (!propertyResult.data) return { status: "property_not_found" };
 
-  const toPhone = contactResult.data.phone_1;
-  if (!toPhone) {
+  const destination = selectBestSmsPhone(contactResult.data);
+  if (!destination) {
     return {
       status: "blocked_no_phone",
-      reason: "Contact has no phone_1. Add a number before sending SMS.",
+      reason: "Contact has no phone number. Add one before sending SMS.",
     };
   }
-  if (contactResult.data.phone_1_type === "landline") {
+  if (destination.lineType === "landline") {
     return { status: "blocked_landline", reason: LANDLINE_BLOCK_REASON };
   }
 
@@ -201,7 +202,7 @@ export async function sendSmsToContact(
   const fromAddress = fromAddressRaw
     ? normalizePhone(fromAddressRaw) ?? fromAddressRaw
     : null;
-  const normalizedToPhone = normalizePhone(toPhone) ?? toPhone;
+  const normalizedToPhone = normalizePhone(destination.phone) ?? destination.phone;
   const { data: pending, error: insertError } = await supabase
     .from("messages")
     .insert({
@@ -230,7 +231,7 @@ export async function sendSmsToContact(
   // 6. Send.
   try {
     const result = await provider.sendSms({
-      to: toPhone,
+      to: destination.phone,
       body: input.body,
       from: input.from,
     });
@@ -295,7 +296,7 @@ async function queueForLater(
   const [contactResult, propertyResult] = await Promise.all([
     supabase
       .from("contacts")
-      .select("id, phone_1, phone_1_type")
+      .select("id, phone_1, phone_1_type, phone_2, phone_2_type, phone_3, phone_3_type")
       .eq("id", input.contactId)
       .maybeSingle(),
     supabase
@@ -313,14 +314,14 @@ async function queueForLater(
   }
   if (!propertyResult.data) return { status: "property_not_found" };
 
-  const toPhone = contactResult.data.phone_1;
-  if (!toPhone) {
+  const destination = selectBestSmsPhone(contactResult.data);
+  if (!destination) {
     return {
       status: "blocked_no_phone",
-      reason: "Contact has no phone_1. Add a number before queueing.",
+      reason: "Contact has no phone number. Add one before queueing.",
     };
   }
-  if (contactResult.data.phone_1_type === "landline") {
+  if (destination.lineType === "landline") {
     return { status: "blocked_landline", reason: LANDLINE_BLOCK_REASON };
   }
 
@@ -341,7 +342,7 @@ async function queueForLater(
   const fromAddress = fromAddressRaw
     ? normalizePhone(fromAddressRaw) ?? fromAddressRaw
     : null;
-  const normalizedToPhone = normalizePhone(toPhone) ?? toPhone;
+  const normalizedToPhone = normalizePhone(destination.phone) ?? destination.phone;
   const { data: queued, error } = await supabase
     .from("messages")
     .insert({
