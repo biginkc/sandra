@@ -10,6 +10,10 @@ import {
   type BulkSmsQueueBaseOpts,
 } from "@/lib/messaging/bulk-queue";
 import {
+  classifySmsPhoneAvailability,
+  type SmsPhoneContact,
+} from "@/lib/messaging/sms-phone";
+import {
   EMPTY_AUDIENCE_VALIDATION_MESSAGE,
   hasEffectiveAudience,
 } from "@/lib/prospects/effective-audience";
@@ -596,15 +600,15 @@ async function resolvePreviewRecipientRows(
 
 async function fetchContactsForPreview(
   contactIds: string[],
-): Promise<Result<Map<string, { phone_1: string | null; phone_1_type: string | null }>>> {
+): Promise<Result<Map<string, SmsPhoneContact>>> {
   const supabase = await createClient();
-  const contacts = new Map<string, { phone_1: string | null; phone_1_type: string | null }>();
+  const contacts = new Map<string, SmsPhoneContact>();
 
   for (let i = 0; i < contactIds.length; i += PROPERTY_CHUNK) {
     const chunk = contactIds.slice(i, i + PROPERTY_CHUNK);
     const { data, error } = await supabase
       .from("contacts")
-      .select("id, phone_1, phone_1_type")
+      .select("id, phone_1, phone_1_type, phone_2, phone_2_type, phone_3, phone_3_type")
       .in("id", chunk);
 
     if (error) {
@@ -617,6 +621,10 @@ async function fetchContactsForPreview(
       contacts.set(row.id, {
         phone_1: row.phone_1 ?? null,
         phone_1_type: row.phone_1_type ?? null,
+        phone_2: row.phone_2 ?? null,
+        phone_2_type: row.phone_2_type ?? null,
+        phone_3: row.phone_3 ?? null,
+        phone_3_type: row.phone_3_type ?? null,
       });
     }
   }
@@ -1030,12 +1038,12 @@ export async function previewCampaignLaunch(
       }
 
       const contact = row.contactId ? contacts.get(row.contactId) : null;
-      if (!row.contactId || !contact || !contact.phone_1) {
+      const lineType = classifySmsPhoneAvailability(contact);
+      if (!row.contactId || lineType === "none") {
         missingContactCount += 1;
         continue;
       }
 
-      const lineType = contact.phone_1_type ?? "unknown";
       if (lineType === "landline") {
         landlineCount += 1;
         continue;

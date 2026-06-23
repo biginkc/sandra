@@ -1,7 +1,7 @@
 /**
  * Pre-send audience assessment for bulk SMS — classifies a property
- * selection by the homeowner contact's phone_1 line type so the operator
- * sees "X mobile / Y landline / Z unknown" BEFORE anything queues.
+ * selection by all saved homeowner phone slots so the operator sees
+ * "X mobile / Y landline / Z unknown" BEFORE anything queues.
  *
  * Landlines are always excluded from bulk sends; unknowns are excluded
  * by default with an opt-in toggle. This function only counts — the
@@ -11,17 +11,21 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import type { Database } from "@/lib/supabase/types";
+import {
+  classifySmsPhoneAvailability,
+  type SmsPhoneContact,
+} from "./sms-phone";
 
 export type AudienceLineTypeAssessment = {
   /** Properties in the selection. */
   total: number;
-  /** Confirmed-mobile phone_1 — will be queued. */
+  /** Contact has at least one confirmed mobile phone — will be queued. */
   mobile: number;
-  /** Confirmed-landline phone_1 — always excluded. */
+  /** Contact has phones, but only confirmed landlines — always excluded. */
   landline: number;
-  /** Never-classified phone_1 — excluded unless the operator opts in. */
+  /** Contact has an unclassified phone and no mobile — opt-in required. */
   unknown: number;
-  /** No homeowner contact or no phone_1 — nothing to text. */
+  /** No homeowner contact or no saved phone — nothing to text. */
   noPhone: number;
 };
 
@@ -46,7 +50,9 @@ export async function assessAudienceLineTypes(
       .from("properties")
       .select(
         `id,
-         homeowner:contacts!properties_homeowner_contact_id_fkey(phone_1, phone_1_type)`,
+         homeowner:contacts!properties_homeowner_contact_id_fkey(
+           phone_1, phone_1_type, phone_2, phone_2_type, phone_3, phone_3_type
+         )`,
       )
       .in("id", chunk);
     if (error) {
@@ -56,20 +62,24 @@ export async function assessAudienceLineTypes(
       seen.add(row.id);
       // PostgREST may return the joined contact as an object or a
       // one-element array — normalize like fetchDialerPropertyRows.
-      type HomeownerJoin = { phone_1: string | null; phone_1_type: string };
       const raw = row.homeowner as unknown as
-        | HomeownerJoin
-        | HomeownerJoin[]
+        | SmsPhoneContact
+        | SmsPhoneContact[]
         | null;
       const homeowner = Array.isArray(raw) ? (raw[0] ?? null) : raw;
-      if (!homeowner?.phone_1) {
-        assessment.noPhone++;
-      } else if (homeowner.phone_1_type === "mobile") {
-        assessment.mobile++;
-      } else if (homeowner.phone_1_type === "landline") {
-        assessment.landline++;
-      } else {
-        assessment.unknown++;
+      switch (classifySmsPhoneAvailability(homeowner)) {
+        case "mobile":
+          assessment.mobile++;
+          break;
+        case "landline":
+          assessment.landline++;
+          break;
+        case "unknown":
+          assessment.unknown++;
+          break;
+        case "none":
+          assessment.noPhone++;
+          break;
       }
     }
   }

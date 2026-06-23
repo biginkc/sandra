@@ -1,6 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { getConsentState } from "@/lib/messaging/consent";
+import { selectBestSmsPhone } from "@/lib/messaging/sms-phone";
 import type { Database } from "@/lib/supabase/types";
 
 import { delayToDate } from "./delays";
@@ -54,7 +55,9 @@ export async function enrollLead(
     .from("properties")
     .select(
       `id, org_id, homeowner_contact_id,
-       homeowner:contacts!properties_homeowner_contact_id_fkey(id, phone_1, phone_1_type)`,
+       homeowner:contacts!properties_homeowner_contact_id_fkey(
+         id, phone_1, phone_1_type, phone_2, phone_2_type, phone_3, phone_3_type
+       )`,
     )
     .eq("id", params.propertyId)
     .maybeSingle();
@@ -66,7 +69,11 @@ export async function enrollLead(
   type HomeownerJoin = {
     id: string;
     phone_1: string | null;
-    phone_1_type: string;
+    phone_1_type: string | null;
+    phone_2: string | null;
+    phone_2_type: string | null;
+    phone_3: string | null;
+    phone_3_type: string | null;
   };
   const rawHomeowner = prop.homeowner as unknown as
     | HomeownerJoin
@@ -75,17 +82,18 @@ export async function enrollLead(
   const homeowner = Array.isArray(rawHomeowner)
     ? (rawHomeowner[0] ?? null)
     : rawHomeowner;
-  if (!homeowner || !homeowner.phone_1) {
+  const destination = selectBestSmsPhone(homeowner);
+  if (!homeowner || !destination) {
     return {
       status: "no_phone",
       message: "Lead has no phone number. Add one (or skip-trace) before enrolling.",
     };
   }
-  if (homeowner.phone_1_type === "landline") {
+  if (destination.lineType === "landline") {
     return {
       status: "landline_phone",
       message:
-        "Lead's primary phone is a landline — SMS can't be delivered. Call or mail instead.",
+        "Lead only has landline numbers — SMS can't be delivered. Call or mail instead.",
     };
   }
 

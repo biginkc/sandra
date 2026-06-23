@@ -46,6 +46,25 @@ describe("collectUnlabeledPhones", () => {
     const numbers = collectUnlabeledPhones(rows, mapping);
     expect(numbers.sort()).toEqual(["+18165550002", "+19135550003"]);
   });
+
+  it("does not collect phones whose vendor line-type labels normalize cleanly", () => {
+    const vendorRows = [
+      {
+        Address: "123 Main St",
+        State: "MO",
+        "Phone 1": "816-555-0001",
+        "Phone 1 Type": "Wireless",
+        "Phone 2": "816-555-0002",
+        "Phone 2 Type": "Land Line",
+      },
+    ];
+    const vendorMapping: Mapping = {
+      ...mapping,
+      homeowner_phone_2_type: "Phone 2 Type",
+    };
+
+    expect(collectUnlabeledPhones(vendorRows, vendorMapping)).toEqual([]);
+  });
 });
 
 describe("applyLineTypes", () => {
