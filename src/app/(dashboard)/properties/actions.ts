@@ -19,6 +19,7 @@ import {
   type AudienceLineTypeAssessment,
 } from "@/lib/messaging/audience-assessment";
 import {
+  CONTACTED_MESSAGE_STATUSES,
   freshScheduleState,
   queueSmsBatch,
   type BulkSmsQueueBaseOpts,
@@ -792,9 +793,12 @@ export async function getAllMatchingProspectIds(args: {
 
 /**
  * Count distinct properties (in `propertyIds`) that already have at least
- * one outbound message — fuels the Bulk SMS modal's
+ * one successful outbound message — fuels the Bulk SMS modal's
  * "Skip prospects already contacted (N)" checkbox label so the operator
  * sees how many leads will be excluded before they queue.
+ *
+ * Failed provider attempts are intentionally excluded; they are not real
+ * prospect contacts.
  *
  * Empty input short-circuits to ok(0) without a DB roundtrip.
  */
@@ -812,7 +816,8 @@ export async function countAlreadyContacted(
         .from("messages")
         .select("property_id")
         .in("property_id", chunk)
-        .eq("direction", "outbound");
+        .eq("direction", "outbound")
+        .in("status", CONTACTED_MESSAGE_STATUSES);
       if (error) {
         return {
           ok: false,

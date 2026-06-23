@@ -19,6 +19,8 @@ import { loadTemplateVars } from "@/lib/sequences/template-vars";
 import { renderTemplate } from "@/lib/sequences/render";
 import type { Database } from "@/lib/supabase/types";
 
+export const CONTACTED_MESSAGE_STATUSES = ["sent", "delivered"] as const;
+
 export type BulkSmsQueueBaseOpts = {
   body?: string;
   templateCategory?: string;
@@ -205,17 +207,23 @@ export async function queueSmsBatch(
     });
   }
 
-  // Prefetch already-contacted property IDs in batched queries so the
-  // per-property loop doesn't fire N individual round-trips.
+  // Prefetch successfully contacted property IDs in batched queries so
+  // the per-property loop doesn't fire N individual round-trips. Failed
+  // prior attempts are not real contacts; they should not suppress a
+  // future campaign launch.
   const contactedSet = new Set<string>();
   if (opts.skipIfContacted) {
     for (let i = 0; i < args.propertyIds.length; i += CHUNK) {
       const chunk = args.propertyIds.slice(i, i + CHUNK);
-      const { data } = await client
+      const { data, error } = await client
         .from("messages")
         .select("property_id")
         .in("property_id", chunk)
-        .eq("direction", "outbound");
+        .eq("direction", "outbound")
+        .in("status", CONTACTED_MESSAGE_STATUSES);
+      if (error) {
+        throw new Error(`bulk sms prior contact lookup: ${error.message}`);
+      }
       data?.forEach((r) => {
         if (r.property_id) contactedSet.add(r.property_id);
       });

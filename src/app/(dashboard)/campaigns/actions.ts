@@ -2,9 +2,13 @@
 
 import { bulkQueueSms, getAllMatchingProspectIds } from "@/app/(dashboard)/properties/actions";
 import { getCallerMemberships } from "@/lib/auth/memberships";
+import { computeConsentState } from "@/lib/messaging/consent";
 import { errFromUnknown, ok, type Result } from "@/lib/errors/result";
 import { reportError } from "@/lib/errors/report";
-import type { BulkSmsQueueBaseOpts } from "@/lib/messaging/bulk-queue";
+import {
+  CONTACTED_MESSAGE_STATUSES,
+  type BulkSmsQueueBaseOpts,
+} from "@/lib/messaging/bulk-queue";
 import {
   EMPTY_AUDIENCE_VALIDATION_MESSAGE,
   hasEffectiveAudience,
@@ -54,6 +58,18 @@ export type LaunchCampaignResult = {
   failed: { propertyId: string; message: string }[];
   deferred?: { jobId: string; total: number };
   alreadyLaunched: boolean;
+};
+
+export type CampaignLaunchPreview = {
+  recipientCount: number;
+  estimatedQueueableCount: number;
+  skipIfContacted: boolean;
+  successfulPriorContactCount: number;
+  priorFailedAttemptCount: number;
+  missingContactCount: number;
+  landlineCount: number;
+  unknownLineTypeCount: number;
+  optedOutCount: number;
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -517,6 +533,168 @@ async function listFrozenRecipientPropertyIds(
   return ok(propertyIds);
 }
 
+async function listFrozenRecipientSeedRows(
+  campaignId: string,
+): Promise<Result<CampaignRecipientSeedRow[]>> {
+  const supabase = await createClient();
+  const rows: CampaignRecipientSeedRow[] = [];
+
+  for (let from = 0; ; from += RECIPIENT_PAGE) {
+    const { data, error } = await supabase
+      .from("campaign_recipients")
+      .select("property_id, contact_id")
+      .eq("campaign_id", campaignId)
+      .order("property_id", { ascending: true })
+      .range(from, from + RECIPIENT_PAGE - 1);
+
+    if (error) {
+      return {
+        ok: false,
+        error: {
+          code: "CAMPAIGN_RECIPIENTS_LOOKUP_FAILED",
+          message: error.message,
+        },
+      };
+    }
+
+    const page = (data ?? [])
+      .map((row) => ({
+        propertyId: row.property_id,
+        contactId: row.contact_id ?? null,
+      }))
+      .filter((row): row is CampaignRecipientSeedRow =>
+        typeof row.propertyId === "string",
+      );
+
+    rows.push(...page);
+    if (page.length < RECIPIENT_PAGE) break;
+  }
+
+  return ok(rows);
+}
+
+async function resolvePreviewRecipientRows(
+  campaignId: string,
+  campaign: CampaignRow,
+): Promise<Result<CampaignRecipientSeedRow[]>> {
+  const frozenResult = await listFrozenRecipientSeedRows(campaignId);
+  if (!frozenResult.ok) return frozenResult;
+  if (frozenResult.data.length > 0) return frozenResult;
+
+  const snapshotResult = parseAudienceSnapshot(campaign.audience_snapshot);
+  if (!snapshotResult.ok) return snapshotResult;
+  if (!hasEffectiveAudience(snapshotResult.data)) return invalidAudienceResult();
+
+  const idsResult = await getAllMatchingProspectIds({
+    search: snapshotResult.data.search,
+    blockStack: snapshotResult.data.blockStack,
+  });
+  if (!idsResult.ok) return idsResult;
+
+  return fetchRecipientSeedRows(Array.from(new Set(idsResult.data)));
+}
+
+async function fetchContactsForPreview(
+  contactIds: string[],
+): Promise<Result<Map<string, { phone_1: string | null; phone_1_type: string | null }>>> {
+  const supabase = await createClient();
+  const contacts = new Map<string, { phone_1: string | null; phone_1_type: string | null }>();
+
+  for (let i = 0; i < contactIds.length; i += PROPERTY_CHUNK) {
+    const chunk = contactIds.slice(i, i + PROPERTY_CHUNK);
+    const { data, error } = await supabase
+      .from("contacts")
+      .select("id, phone_1, phone_1_type")
+      .in("id", chunk);
+
+    if (error) {
+      return {
+        ok: false,
+        error: { code: "CAMPAIGN_CONTACT_LOOKUP_FAILED", message: error.message },
+      };
+    }
+    for (const row of data ?? []) {
+      contacts.set(row.id, {
+        phone_1: row.phone_1 ?? null,
+        phone_1_type: row.phone_1_type ?? null,
+      });
+    }
+  }
+
+  return ok(contacts);
+}
+
+async function fetchPriorOutboundPropertySet(
+  propertyIds: string[],
+  statuses: readonly string[],
+): Promise<Result<Set<string>>> {
+  const supabase = await createClient();
+  const result = new Set<string>();
+
+  for (let i = 0; i < propertyIds.length; i += PROPERTY_CHUNK) {
+    const chunk = propertyIds.slice(i, i + PROPERTY_CHUNK);
+    const { data, error } = await supabase
+      .from("messages")
+      .select("property_id")
+      .in("property_id", chunk)
+      .eq("direction", "outbound")
+      .in("status", statuses);
+
+    if (error) {
+      return {
+        ok: false,
+        error: { code: "CAMPAIGN_PRIOR_MESSAGE_LOOKUP_FAILED", message: error.message },
+      };
+    }
+    for (const row of data ?? []) {
+      if (row.property_id) result.add(row.property_id);
+    }
+  }
+
+  return ok(result);
+}
+
+async function fetchOptedOutContactSet(
+  contactIds: string[],
+): Promise<Result<Set<string>>> {
+  const supabase = await createClient();
+  const eventsByContact = new Map<string, { event_type: string; occurred_at: string }[]>();
+
+  for (let i = 0; i < contactIds.length; i += PROPERTY_CHUNK) {
+    const chunk = contactIds.slice(i, i + PROPERTY_CHUNK);
+    const { data, error } = await supabase
+      .from("consent_events")
+      .select("contact_id, event_type, occurred_at")
+      .in("contact_id", chunk)
+      .eq("channel", "sms");
+
+    if (error) {
+      return {
+        ok: false,
+        error: { code: "CAMPAIGN_CONSENT_LOOKUP_FAILED", message: error.message },
+      };
+    }
+    for (const row of data ?? []) {
+      if (!row.contact_id) continue;
+      const events = eventsByContact.get(row.contact_id) ?? [];
+      events.push({
+        event_type: row.event_type,
+        occurred_at: row.occurred_at,
+      });
+      eventsByContact.set(row.contact_id, events);
+    }
+  }
+
+  const optedOut = new Set<string>();
+  for (const [contactId, events] of eventsByContact) {
+    if (computeConsentState(events) === "opted_out") {
+      optedOut.add(contactId);
+    }
+  }
+
+  return ok(optedOut);
+}
+
 async function fetchRecipientSeedRows(
   propertyIds: string[],
 ): Promise<Result<CampaignRecipientSeedRow[]>> {
@@ -783,6 +961,116 @@ async function buildAlreadyLaunchedResult(
     failed: [],
     alreadyLaunched: true,
   });
+}
+
+export async function previewCampaignLaunch(
+  campaignId: string,
+): Promise<Result<CampaignLaunchPreview>> {
+  try {
+    const campaignResult = await loadCampaign(campaignId);
+    if (!campaignResult.ok) return campaignResult;
+    const campaign = campaignResult.data;
+    if (campaign.status === "archived") {
+      return {
+        ok: false,
+        error: {
+          code: "CAMPAIGN_ARCHIVED",
+          message: "Archived campaigns cannot be launched.",
+        },
+      };
+    }
+
+    const rowsResult = await resolvePreviewRecipientRows(campaignId, campaign);
+    if (!rowsResult.ok) return rowsResult;
+    const rows = rowsResult.data;
+    const propertyIds = rows.map((row) => row.propertyId);
+    const contactIds = Array.from(
+      new Set(
+        rows
+          .map((row) => row.contactId)
+          .filter((value): value is string => typeof value === "string"),
+      ),
+    );
+
+    const [
+      contactsResult,
+      priorSuccessfulResult,
+      priorFailedResult,
+      optedOutResult,
+    ] = await Promise.all([
+      fetchContactsForPreview(contactIds),
+      fetchPriorOutboundPropertySet(propertyIds, CONTACTED_MESSAGE_STATUSES),
+      fetchPriorOutboundPropertySet(propertyIds, ["failed"]),
+      fetchOptedOutContactSet(contactIds),
+    ]);
+    if (!contactsResult.ok) return contactsResult;
+    if (!priorSuccessfulResult.ok) return priorSuccessfulResult;
+    if (!priorFailedResult.ok) return priorFailedResult;
+    if (!optedOutResult.ok) return optedOutResult;
+
+    const contacts = contactsResult.data;
+    const successfulPriorContacts = priorSuccessfulResult.data;
+    const priorFailedAttempts = priorFailedResult.data;
+    const priorFailedWithoutSuccessCount = Array.from(priorFailedAttempts).filter(
+      (propertyId) => !successfulPriorContacts.has(propertyId),
+    ).length;
+    const optedOutContacts = optedOutResult.data;
+
+    let estimatedQueueableCount = 0;
+    let successfulPriorContactCount = 0;
+    let missingContactCount = 0;
+    let landlineCount = 0;
+    let unknownLineTypeCount = 0;
+    let optedOutCount = 0;
+
+    for (const row of rows) {
+      if (campaign.skip_if_contacted && successfulPriorContacts.has(row.propertyId)) {
+        successfulPriorContactCount += 1;
+        continue;
+      }
+
+      const contact = row.contactId ? contacts.get(row.contactId) : null;
+      if (!row.contactId || !contact || !contact.phone_1) {
+        missingContactCount += 1;
+        continue;
+      }
+
+      const lineType = contact.phone_1_type ?? "unknown";
+      if (lineType === "landline") {
+        landlineCount += 1;
+        continue;
+      }
+      if (lineType === "unknown") {
+        unknownLineTypeCount += 1;
+        continue;
+      }
+
+      if (optedOutContacts.has(row.contactId)) {
+        optedOutCount += 1;
+        continue;
+      }
+
+      estimatedQueueableCount += 1;
+    }
+
+    return ok({
+      recipientCount: rows.length,
+      estimatedQueueableCount,
+      skipIfContacted: campaign.skip_if_contacted,
+      successfulPriorContactCount,
+      priorFailedAttemptCount: priorFailedWithoutSuccessCount,
+      missingContactCount,
+      landlineCount,
+      unknownLineTypeCount,
+      optedOutCount,
+    });
+  } catch (e) {
+    reportError(e, {
+      tags: { surface: "preview_campaign_launch" },
+      extra: { campaignId },
+    });
+    return errFromUnknown(e, "CAMPAIGN_LAUNCH_PREVIEW_FAILED");
+  }
 }
 
 export async function launchCampaign(

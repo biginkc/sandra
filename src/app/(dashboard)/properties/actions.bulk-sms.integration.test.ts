@@ -666,6 +666,42 @@ describe("bulkQueueSms (integration)", () => {
     expect(queued![0].property_id).toBe(fresh);
   });
 
+  it("skipIfContacted=true does not skip a prior failed outbound attempt", async () => {
+    const orgId = await getOrgId();
+    const { propertyId, contactId } = await seedLead({
+      phone: "+18165550073",
+      address: "73 Retry St",
+    });
+
+    const { error: insertErr } = await testClient.from("messages").insert({
+      org_id: orgId,
+      property_id: propertyId,
+      contact_id: contactId,
+      direction: "outbound",
+      status: "failed",
+      channel: "sms",
+      body: "failed touch",
+      from_address: "+18162804181",
+      to_address: "+18165550073",
+    });
+    if (insertErr) throw new Error(`prior msg seed failed: ${insertErr.message}`);
+
+    const result = await bulkQueueSms([propertyId], adHocOpts({
+      body: "Retry the failed attempt",
+      skipIfContacted: true,
+    }));
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.data.succeeded).toBe(1);
+    expect(result.data.skipped).toBe(0);
+
+    const { count } = await testClient
+      .from("messages")
+      .select("*", { count: "exact", head: true })
+      .eq("status", "queued");
+    expect(count).toBe(1);
+  });
+
   it("skipIfContacted=false (or omitted) queues all eligible prospects regardless of prior messages", async () => {
     const orgId = await getOrgId();
     const { propertyId: alreadyContacted, contactId: contactedContactId } =
@@ -703,7 +739,7 @@ describe("bulkQueueSms (integration)", () => {
     expect(count).toBe(2);
   });
 
-  it("countAlreadyContacted returns the distinct property count from prior outbound messages", async () => {
+  it("countAlreadyContacted returns the distinct property count from prior successful outbound messages", async () => {
     const orgId = await getOrgId();
     const { propertyId: p1, contactId: c1 } = await seedLead({
       phone: "+18165550091",
@@ -713,7 +749,7 @@ describe("bulkQueueSms (integration)", () => {
       phone: "+18165550092",
       address: "92 Count St",
     });
-    const { propertyId: p3 } = await seedLead({
+    const { propertyId: p3, contactId: c3 } = await seedLead({
       phone: "+18165550093",
       address: "93 Count St",
     });
@@ -752,6 +788,17 @@ describe("bulkQueueSms (integration)", () => {
         body: "touch p2",
         from_address: "+18162804181",
         to_address: "+18165550092",
+      },
+      {
+        org_id: orgId,
+        property_id: p3,
+        contact_id: c3,
+        direction: "outbound",
+        status: "failed",
+        channel: "sms",
+        body: "failed touch should not count",
+        from_address: "+18162804181",
+        to_address: "+18165550093",
       },
     ]);
 

@@ -11,6 +11,7 @@ import { callAction } from "@/lib/errors/call-action";
 import {
   archiveCampaign,
   launchCampaign,
+  previewCampaignLaunch,
   unarchiveCampaign,
 } from "./actions";
 
@@ -34,15 +35,50 @@ export function CampaignRowActions({
   const canArchive = !archived && status !== "launching";
 
   const handleLaunch = () => {
-    if (
-      !window.confirm(
-        `Launch "${name}" now?\n\nThis is a one-shot SMS blast. Sandra will queue outbound messages for every prospect in this saved audience.`,
-      )
-    ) {
-      return;
-    }
-
     startTransition(async () => {
+      const preview = await callAction(previewCampaignLaunch(id), {
+        fallbackMessage: "Could not preview campaign launch",
+      });
+      if (!preview.ok) return;
+
+      const p = preview.data;
+      const lines = [
+        `Launch "${name}" now?`,
+        "",
+        `${p.estimatedQueueableCount.toLocaleString()} of ${p.recipientCount.toLocaleString()} recipients are expected to queue.`,
+      ];
+      if (p.skipIfContacted) {
+        lines.push(
+          `${p.successfulPriorContactCount.toLocaleString()} will be skipped because they already have a successful prior SMS.`,
+        );
+      }
+      if (p.priorFailedAttemptCount > 0) {
+        lines.push(
+          `${p.priorFailedAttemptCount.toLocaleString()} have prior failed SMS attempts; those are not treated as contacted.`,
+        );
+      }
+      const blocked: string[] = [];
+      if (p.missingContactCount > 0) {
+        blocked.push(`${p.missingContactCount.toLocaleString()} missing contact/phone`);
+      }
+      if (p.landlineCount > 0) {
+        blocked.push(`${p.landlineCount.toLocaleString()} landline`);
+      }
+      if (p.unknownLineTypeCount > 0) {
+        blocked.push(`${p.unknownLineTypeCount.toLocaleString()} unknown phone type`);
+      }
+      if (p.optedOutCount > 0) {
+        blocked.push(`${p.optedOutCount.toLocaleString()} opted out`);
+      }
+      if (blocked.length > 0) {
+        lines.push(`Other expected skips: ${blocked.join(", ")}.`);
+      }
+      lines.push("", "Quiet hours and opt-outs are re-checked again before each send.");
+
+      if (!window.confirm(lines.join("\n"))) {
+        return;
+      }
+
       const result = await callAction(launchCampaign(id), {
         fallbackMessage: "Could not launch campaign",
       });
@@ -92,7 +128,7 @@ export function CampaignRowActions({
           aria-label="Launch campaign"
         >
           <SendIcon className="mr-1 size-3.5" />
-          {pending ? "Launching…" : "Launch"}
+          {pending ? "Checking…" : "Launch"}
         </Button>
       ) : (
         <span className="text-muted-foreground self-center text-xs italic">
