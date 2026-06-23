@@ -1,7 +1,7 @@
 import { ALL_FIELDS, PROPERTY_FIELDS, type TargetField } from "./schema";
+import { lineTypeFromVendorLabel } from "@/lib/messaging/line-type";
 import {
   classifyAddressFullFailure,
-  normalizeAddress,
   normalizeApn,
   normalizeCountyName,
   normalizePhone,
@@ -83,11 +83,23 @@ function normalizeByType(
       return normalizeCountyName(raw);
     case "enum":
       if (!field.enumValues) return toStringOrNull(raw);
+      if (isPhoneLineTypeField(field)) {
+        const lineType = lineTypeFromVendorLabel(raw);
+        if (lineType !== "unknown") return lineType;
+      }
       const s = raw.trim().toLowerCase().replace(/\s+/g, "_");
       return field.enumValues.includes(s) ? s : null;
     default:
       return toStringOrNull(raw);
   }
+}
+
+function isPhoneLineTypeField(field: TargetField): boolean {
+  return (
+    field.enumValues?.includes("mobile") === true &&
+    field.enumValues.includes("landline") &&
+    field.enumValues.includes("unknown")
+  );
 }
 
 /**

@@ -79,6 +79,55 @@ describe("validateRow", () => {
     expect(phoneError?.value).toBe("not-a-phone");
   });
 
+  it("normalizes vendor phone line-type labels before enum validation", () => {
+    const mapping: Mapping = {
+      ...PROPERTY_MAPPING,
+      homeowner_phone_1: "Phone 1",
+      homeowner_phone_1_type: "Phone 1 Type",
+      homeowner_phone_2: "Phone 2",
+      homeowner_phone_2_type: "Phone 2 Type",
+      agent_phone: "Agent Phone",
+      agent_phone_type: "Agent Phone Type",
+    };
+    const row: RowData = {
+      Address: "123 Main St",
+      State: "MO",
+      "Phone 1": "8165551111",
+      "Phone 1 Type": "Wireless",
+      "Phone 2": "8165552222",
+      "Phone 2 Type": "Land Line",
+      "Agent Phone": "8165553333",
+      "Agent Phone Type": "Cell",
+    };
+    const result = validateRow(row, mapping, 0);
+    expect(result.ok).toBe(true);
+    expect(result.errors).toHaveLength(0);
+    expect(result.normalized.homeowner_phone_1_type).toBe("mobile");
+    expect(result.normalized.homeowner_phone_2_type).toBe("landline");
+    expect(result.normalized.agent_phone_type).toBe("mobile");
+  });
+
+  it("still rejects unrecognized phone line-type labels", () => {
+    const mapping: Mapping = {
+      ...PROPERTY_MAPPING,
+      homeowner_phone_1: "Phone",
+      homeowner_phone_1_type: "Phone Type",
+    };
+    const row: RowData = {
+      Address: "123 Main St",
+      State: "MO",
+      Phone: "8165551111",
+      "Phone Type": "Satellite",
+    };
+    const result = validateRow(row, mapping, 0);
+    expect(result.ok).toBe(false);
+    const lineTypeError = result.errors.find(
+      (e) => e.fieldId === "homeowner_phone_1_type",
+    );
+    expect(lineTypeError?.rule).toBe("invalid_enum");
+    expect(lineTypeError?.value).toBe("Satellite");
+  });
+
   it("treats a completely blank row as empty (no errors, not ok)", () => {
     const row: RowData = { Address: "", City: "", State: "", Zip: "" };
     const result = validateRow(row, PROPERTY_MAPPING, 0);

@@ -49,8 +49,8 @@ const SOURCE_VALUES = [
 
 const CONTACT_TYPE_VALUES = ["person", "entity"] as const;
 
-// Vendor labels normalize to lowercase before the enum check, so
-// "Mobile"/"Landline" columns map cleanly. Anything else (or blank)
+// Vendor labels like "Wireless", "Mobile", "Land Line", and "Landline"
+// normalize to this vocabulary during validation. Anything else (or blank)
 // lands as null → stored as 'unknown'.
 const PHONE_LINE_TYPE_VALUES = ["mobile", "landline", "unknown"] as const;
 
