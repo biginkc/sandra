@@ -171,12 +171,21 @@ export function InboxThreadList({
                   businessPhone={t.threadBusinessPhone}
                   avatarId={t.threadId}
                 />
+                {t.aiResponderStatus ? (
+                  <SandraThreadStatus
+                    threadId={t.threadId}
+                    status={t.aiResponderStatus}
+                    reason={t.aiResponderReason}
+                    deliveryStatus={t.aiLastDeliveryStatus}
+                    deliveryError={t.aiLastDeliveryError}
+                  />
+                ) : null}
                 {t.propertyAddress ? (
-                  <span className="truncate text-[11px] italic text-[#78716c]">
+                  <span className="min-w-0 truncate text-[11px] italic text-[#78716c]">
                     {t.propertyAddress}
                   </span>
                 ) : (
-                  <span className="truncate text-[11px] italic text-[#a8a29e]">
+                  <span className="min-w-0 truncate text-[11px] italic text-[#a8a29e]">
                     No property linked
                   </span>
                 )}
@@ -190,15 +199,6 @@ export function InboxThreadList({
                   </span>
                 ) : null}
               </div>
-              {t.aiResponderStatus ? (
-                <SandraThreadStatus
-                  threadId={t.threadId}
-                  status={t.aiResponderStatus}
-                  reason={t.aiResponderReason}
-                  deliveryStatus={t.aiLastDeliveryStatus}
-                  deliveryError={t.aiLastDeliveryError}
-                />
-              ) : null}
               {t.needsHumanAttention &&
               t.escalationReason &&
               !(t.aiResponderStatus === "escalated" && t.aiResponderReason) ? (
@@ -256,25 +256,21 @@ function SandraThreadStatus({
         : "border-[#d1fae5] bg-[#ecfdf5]";
 
   return (
-    <div
-      className="flex w-full flex-wrap items-center gap-1.5"
+    <span
+      className={`inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full border ${iconTone}`}
       data-testid={`inbox-thread-${threadId}-sandra-status`}
+      aria-label={iconLabel}
+      role="img"
+      title={iconLabel}
     >
-      <span
-        className={`inline-flex h-6 w-6 items-center justify-center rounded-full border ${iconTone}`}
-        aria-label={iconLabel}
-        role="img"
-        title={iconLabel}
-      >
-        {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img
-          src="/icon.png"
-          alt=""
-          aria-hidden="true"
-          className="h-3.5 w-3.5"
-        />
-      </span>
-    </div>
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img
+        src="/icon.png"
+        alt=""
+        aria-hidden="true"
+        className="h-3.5 w-3.5"
+      />
+    </span>
   );
 }
 

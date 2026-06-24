@@ -212,6 +212,36 @@ describe("<InboxThreadList /> realtime subscriptions", () => {
 });
 
 describe("<InboxThreadList /> Sandra state", () => {
+  it("places the Sandra icon inline between the avatar and address metadata", () => {
+    const { getByTestId } = render(
+      <InboxThreadList
+        initial={[
+          makeThread({
+            threadId: "thread-ai-inline",
+            contactName: "Inline Lead",
+            propertyAddress: "449 Example Ave",
+            threadCustomerPhone: "+18165550123",
+            aiResponderStatus: "handled",
+            aiLastDeliveryStatus: "delivered",
+          }),
+        ]}
+        selectedThreadId={null}
+        currentUserId={null}
+        onSelectThread={vi.fn()}
+      />,
+    );
+
+    const avatar = getByTestId("inbox-thread-thread-ai-inline-avatar");
+    const status = getByTestId("inbox-thread-thread-ai-inline-sandra-status");
+    const phone = getByTestId("inbox-thread-thread-ai-inline-phone");
+    const rowChildren = Array.from(status.parentElement?.children ?? []);
+
+    expect(status.parentElement).toBe(avatar.parentElement);
+    expect(status.parentElement).toBe(phone.parentElement);
+    expect(rowChildren.indexOf(status)).toBe(rowChildren.indexOf(avatar) + 1);
+    expect(status).toHaveAccessibleName("Sandra handled. SMS delivered");
+  });
+
   it("keeps Sandra's escalation reason in the icon label only", () => {
     const { getByTestId } = render(
       <InboxThreadList
@@ -232,11 +262,10 @@ describe("<InboxThreadList /> Sandra state", () => {
     );
 
     const status = getByTestId("inbox-thread-thread-ai-escalated-sandra-status");
-    const marker = status.firstElementChild;
     expect(status).not.toHaveTextContent("Sandra escalated");
     expect(status).not.toHaveTextContent("asked for price");
-    expect(marker).toHaveAccessibleName("Sandra escalated: asked for price");
-    expect(marker).toHaveClass("border-[#fed7aa]");
+    expect(status).toHaveAccessibleName("Sandra escalated: asked for price");
+    expect(status).toHaveClass("border-[#fed7aa]");
     expect(
       screen.queryByTestId("inbox-thread-thread-ai-escalated-sandra-reason"),
     ).not.toBeInTheDocument();

@@ -318,12 +318,11 @@ describe("<CockpitView /> chip order (feedback-f E2b)", () => {
       render(<CockpitView {...baseProps} filter="all" threads={[thread]} />);
 
       const status = screen.getByTestId(`inbox-thread-${thread.threadId}-sandra-status`);
-      const marker = status.firstElementChild;
       expect(status).not.toHaveTextContent("Sandra handled");
       expect(status.querySelector("img")).toHaveAttribute("src", "/icon.png");
-      expect(marker).toHaveAccessibleName(label);
-      expect(marker).toHaveAttribute("title", label);
-      expect(marker).toHaveClass(borderClass);
+      expect(status).toHaveAccessibleName(label);
+      expect(status).toHaveAttribute("title", label);
+      expect(status).toHaveClass(borderClass);
       expect(
         screen.queryByTestId(`inbox-thread-${thread.threadId}-sandra-delivery`),
       ).not.toBeInTheDocument();
@@ -342,8 +341,8 @@ describe("<CockpitView /> chip order (feedback-f E2b)", () => {
     const status = screen.getByTestId("inbox-thread-conv-escalated-1-sandra-status");
     expect(status).not.toHaveTextContent("Sandra escalated");
     expect(status.querySelector("img")).toHaveAttribute("src", "/icon.png");
-    expect(status.firstElementChild).toHaveAccessibleName("Sandra escalated");
-    expect(status.firstElementChild).toHaveClass("border-[#fed7aa]");
+    expect(status).toHaveAccessibleName("Sandra escalated");
+    expect(status).toHaveClass("border-[#fed7aa]");
   });
 
   it("renders chips in priority order: Unread, Needs Outcome, Mine, Sandra Escalated, Sandra Handled, then the rest", () => {
