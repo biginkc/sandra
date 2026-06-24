@@ -212,7 +212,7 @@ describe("<InboxThreadList /> realtime subscriptions", () => {
 });
 
 describe("<InboxThreadList /> Sandra state", () => {
-  it("shows Sandra's escalation reason even before the legacy property flag is set", () => {
+  it("keeps Sandra's escalation reason in the icon label only", () => {
     const { getByTestId } = render(
       <InboxThreadList
         initial={[
@@ -231,8 +231,14 @@ describe("<InboxThreadList /> Sandra state", () => {
       />,
     );
 
+    const status = getByTestId("inbox-thread-thread-ai-escalated-sandra-status");
+    const marker = status.firstElementChild;
+    expect(status).not.toHaveTextContent("Sandra escalated");
+    expect(status).not.toHaveTextContent("asked for price");
+    expect(marker).toHaveAccessibleName("Sandra escalated: asked for price");
+    expect(marker).toHaveClass("border-[#fed7aa]");
     expect(
-      getByTestId("inbox-thread-thread-ai-escalated-sandra-reason"),
-    ).toHaveTextContent("asked for price");
+      screen.queryByTestId("inbox-thread-thread-ai-escalated-sandra-reason"),
+    ).not.toBeInTheDocument();
   });
 });
