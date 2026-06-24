@@ -74,6 +74,11 @@ function makeThread(overrides: Partial<Thread> & { threadId: string }): Thread {
     isOptedOut: overrides.isOptedOut ?? false,
     isTestTraffic: overrides.isTestTraffic ?? false,
     needsOutcome: overrides.needsOutcome ?? false,
+    aiResponderStatus: overrides.aiResponderStatus ?? null,
+    aiResponderReason: overrides.aiResponderReason ?? null,
+    aiResponderStatusAt: overrides.aiResponderStatusAt ?? null,
+    aiLastDeliveryStatus: overrides.aiLastDeliveryStatus ?? null,
+    aiLastDeliveryError: overrides.aiLastDeliveryError ?? null,
   };
 }
 

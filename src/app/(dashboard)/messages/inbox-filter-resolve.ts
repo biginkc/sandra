@@ -20,6 +20,7 @@ export function parseInboxFilter(raw: string | undefined): InboxFilter {
     case "unassigned":
     case "unread":
     case "escalated":
+    case "handled":
     case "needs_outcome":
       return raw;
     default:
@@ -35,8 +36,19 @@ export function isThreadFilter(f: InboxFilter): boolean {
     f === "unassigned" ||
     f === "unread" ||
     f === "escalated" ||
+    f === "handled" ||
     f === "needs_outcome"
   );
+}
+
+export function normalizeInboxFilterForUser(
+  filter: InboxFilter,
+  currentUserId: string | null,
+): InboxFilter {
+  if (!currentUserId && (filter === "mine" || filter === "unassigned")) {
+    return "all";
+  }
+  return filter;
 }
 
 /**
@@ -46,8 +58,8 @@ export function isThreadFilter(f: InboxFilter): boolean {
  * - `unassigned` returns only unowned threads.
  * - `unread` returns unread-only, pinning the open thread via
  *   `includeThreadId` so read-on-open doesn't yank it mid-view.
- * - `escalated` returns only threads the AI handed off
- *   (properties.needs_human_attention).
+ * - `escalated` returns only threads Sandra handed off.
+ * - `handled` returns only threads Sandra handled.
  * - `needs_outcome` returns replied early-stage outreach threads that still
  *   lack an outreach outcome.
  */
@@ -65,6 +77,7 @@ export function buildThreadOpts(
     if (ctx.canonicalThreadId) opts.includeThreadId = ctx.canonicalThreadId;
   }
   if (filter === "escalated") opts.escalatedOnly = true;
+  if (filter === "handled") opts.handledOnly = true;
   if (filter === "needs_outcome") opts.needsOutcomeOnly = true;
   return opts;
 }
@@ -97,7 +110,9 @@ export function applyInboxThreadFilter(
           thread.unreadCount > 0 || thread.threadId === ctx.canonicalThreadId,
       );
     case "escalated":
-      return threads.filter((thread) => thread.needsHumanAttention);
+      return threads.filter((thread) => thread.aiResponderStatus === "escalated");
+    case "handled":
+      return threads.filter((thread) => thread.aiResponderStatus === "handled");
     case "needs_outcome":
       return threads.filter((thread) => thread.needsOutcome);
     case "unknown":

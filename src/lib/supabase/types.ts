@@ -2529,6 +2529,11 @@ export type Database = {
       }
       message_threads: {
         Row: {
+          ai_last_delivery_error: string | null
+          ai_last_delivery_status: string | null
+          ai_responder_reason: string | null
+          ai_responder_status: string | null
+          ai_responder_status_at: string | null
           channel: string
           contact_id: string
           conversation_id: string
@@ -2539,6 +2544,11 @@ export type Database = {
           updated_at: string
         }
         Insert: {
+          ai_last_delivery_error?: string | null
+          ai_last_delivery_status?: string | null
+          ai_responder_reason?: string | null
+          ai_responder_status?: string | null
+          ai_responder_status_at?: string | null
           channel: string
           contact_id: string
           conversation_id?: string
@@ -2549,6 +2559,11 @@ export type Database = {
           updated_at?: string
         }
         Update: {
+          ai_last_delivery_error?: string | null
+          ai_last_delivery_status?: string | null
+          ai_responder_reason?: string | null
+          ai_responder_status?: string | null
+          ai_responder_status_at?: string | null
           channel?: string
           contact_id?: string
           conversation_id?: string

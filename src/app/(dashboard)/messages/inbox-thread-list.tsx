@@ -88,6 +88,11 @@ export function InboxThreadList({
           { event: "UPDATE", schema: "public", table: "messages" },
           () => requestRefresh(),
         )
+        .on(
+          "postgres_changes",
+          { event: "*", schema: "public", table: "message_threads" },
+          () => requestRefresh(),
+        )
         .subscribe();
     })();
 
@@ -171,6 +176,14 @@ export function InboxThreadList({
                   </span>
                 )}
               </div>
+              {t.aiResponderStatus ? (
+                <SandraThreadStatus
+                  threadId={t.threadId}
+                  status={t.aiResponderStatus}
+                  deliveryStatus={t.aiLastDeliveryStatus}
+                  deliveryError={t.aiLastDeliveryError}
+                />
+              ) : null}
               {t.needsHumanAttention && t.escalationReason ? (
                 <div className="flex w-full">
                   <EscalationBadge reason={t.escalationReason} />
@@ -195,6 +208,60 @@ export function InboxThreadList({
           );
         })}
       </div>
+    </div>
+  );
+}
+
+function SandraThreadStatus({
+  threadId,
+  status,
+  deliveryStatus,
+  deliveryError,
+}: {
+  threadId: string;
+  status: NonNullable<Thread["aiResponderStatus"]>;
+  deliveryStatus: string | null;
+  deliveryError: string | null;
+}) {
+  const deliveryFailed = deliveryStatus === "failed";
+  const deliveryLabel = deliveryStatus
+    ? deliveryFailed
+      ? `Delivery failed${deliveryError ? `: ${deliveryError}` : ""}`
+      : `Delivery ${deliveryStatus}`
+    : null;
+
+  return (
+    <div
+      className="flex w-full flex-wrap items-center gap-1.5"
+      data-testid={`inbox-thread-${threadId}-sandra-status`}
+    >
+      <span
+        className="inline-flex items-center gap-1 rounded-full border border-[#e5e1df] bg-[#fafaf9] px-2 py-0.5 text-[11px] font-bold text-[#57534e]"
+        title={status === "handled" ? "Sandra handled" : "Sandra escalated"}
+      >
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img
+          src="/brand/mascot.svg"
+          alt=""
+          aria-hidden="true"
+          className="h-3.5 w-3.5 shrink-0"
+        />
+        {status === "handled" ? "Sandra handled" : "Sandra escalated"}
+      </span>
+      {deliveryLabel ? (
+        <span
+          className={`rounded-full px-2 py-0.5 text-[11px] font-bold ${
+            deliveryFailed
+              ? "bg-[#fef2f2] text-[#b91c1c]"
+              : "bg-[#ecfdf5] text-[#047857]"
+          }`}
+          aria-label={deliveryLabel}
+          title={deliveryLabel}
+          data-testid={`inbox-thread-${threadId}-sandra-delivery`}
+        >
+          {deliveryFailed ? "Delivery failed" : deliveryLabel}
+        </span>
+      ) : null}
     </div>
   );
 }

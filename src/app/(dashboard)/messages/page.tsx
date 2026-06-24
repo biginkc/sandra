@@ -10,6 +10,7 @@ import { getQueueStats, listQueuedPage, type QueueStats } from "./actions";
 import { CockpitView } from "./cockpit-view";
 import {
   isThreadFilter,
+  normalizeInboxFilterForUser,
   parseInboxFilter,
   resolveVisibleThreadState,
 } from "./inbox-filter-resolve";
@@ -68,13 +69,15 @@ export default async function MessagesPage({
   const {
     data: { user: currentUser },
   } = await supabase.auth.getUser();
+  const currentUserId = currentUser?.id ?? null;
+  const effectiveFilter = normalizeInboxFilterForUser(filter, currentUserId);
 
   // Translate whatever the URL carries (canonical conversation UUID, or a
   // stale legacy/bare-contact link) into the one true conversation id.
   // Everything downstream — thread pin, detail fetch, mark-read — deals
   // in canonical ids only.
   const canonicalThreadId =
-    isThreadFilter(filter) && selectedThreadId
+    isThreadFilter(effectiveFilter) && selectedThreadId
       ? await canonicalizeThreadId(supabase, selectedThreadId)
       : null;
 
@@ -95,7 +98,7 @@ export default async function MessagesPage({
       ? fetchInboxDetail(supabase, canonicalThreadId)
       : Promise.resolve(null),
     listUnknownSenders(supabase, {}),
-    filter === "dismissed"
+    effectiveFilter === "dismissed"
       ? listUnknownSenders(supabase, { includeDismissed: true })
       : Promise.resolve([]),
     getQueueStats(),
@@ -106,8 +109,8 @@ export default async function MessagesPage({
     unreadCount,
     needsOutcomeCount,
     hiddenDncCount,
-  } = resolveVisibleThreadState(allThreads, filter, {
-    currentUserId: currentUser?.id ?? null,
+  } = resolveVisibleThreadState(allThreads, effectiveFilter, {
+    currentUserId,
     canonicalThreadId,
     hideDnc,
   });
@@ -145,19 +148,19 @@ export default async function MessagesPage({
     ? queuedResult.data
     : { rows: [], hasMore: false };
 
-  if (isThreadFilter(filter) && threadDetail) {
+  if (isThreadFilter(effectiveFilter) && threadDetail) {
     await markMessagesReadForThread(threadDetail.threadId);
   }
 
   const unknownSenders =
-    filter === "dismissed"
+    effectiveFilter === "dismissed"
       ? unknownAll.filter((s) => s.isDismissed)
       : unknownActive;
 
   return (
     <CockpitView
       activeTab={activeTab}
-      filter={filter}
+      filter={effectiveFilter}
       threads={visibleThreads}
       queued={queuedPage.rows}
       queuedHasMore={queuedPage.hasMore}
@@ -168,7 +171,7 @@ export default async function MessagesPage({
       needsOutcomeCount={needsOutcomeCount}
       unreadCount={unreadCount}
       assigneeEmails={assigneeEmails}
-      currentUserId={currentUser?.id ?? null}
+      currentUserId={currentUserId}
       queueStats={queueStats}
       hideDnc={hideDnc}
       hiddenDncCount={hiddenDncCount}

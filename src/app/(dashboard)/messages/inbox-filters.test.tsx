@@ -83,7 +83,13 @@ function makeThread(overrides: Partial<Thread> & { contactId: string }): Thread 
     needsHumanAttention: overrides.needsHumanAttention ?? false,
     escalationReason: overrides.escalationReason ?? null,
     isOptedOut: overrides.isOptedOut ?? false,
+    isTestTraffic: overrides.isTestTraffic ?? false,
     needsOutcome: overrides.needsOutcome ?? false,
+    aiResponderStatus: overrides.aiResponderStatus ?? null,
+    aiResponderReason: overrides.aiResponderReason ?? null,
+    aiResponderStatusAt: overrides.aiResponderStatusAt ?? null,
+    aiLastDeliveryStatus: overrides.aiLastDeliveryStatus ?? null,
+    aiLastDeliveryError: overrides.aiLastDeliveryError ?? null,
   } as Thread;
 }
 
@@ -288,7 +294,53 @@ describe("<CockpitView /> chip order (feedback-f E2b)", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("renders chips in priority order: Unread, Escalated, Needs Outcome, Mine, Unassigned, All, Unknown, Dismissed", () => {
+  it("renders Sandra handled status with failed delivery kept visible", () => {
+    const thread = makeThread({
+      contactId: "handled-1",
+      threadId: "conv-handled-1",
+      aiResponderStatus: "handled",
+      aiLastDeliveryStatus: "failed",
+      aiLastDeliveryError: "Carrier rejected recipient",
+    });
+
+    render(<CockpitView {...baseProps} filter="all" threads={[thread]} />);
+
+    const status = screen.getByTestId("inbox-thread-conv-handled-1-sandra-status");
+    expect(status).toHaveTextContent("Sandra handled");
+    expect(status.querySelector("img")).toHaveAttribute(
+      "src",
+      "/brand/mascot.svg",
+    );
+
+    const delivery = screen.getByTestId(
+      "inbox-thread-conv-handled-1-sandra-delivery",
+    );
+    expect(delivery).toHaveTextContent("Delivery failed");
+    expect(delivery).toHaveAttribute(
+      "aria-label",
+      "Delivery failed: Carrier rejected recipient",
+    );
+    expect(delivery).toHaveAttribute(
+      "title",
+      "Delivery failed: Carrier rejected recipient",
+    );
+  });
+
+  it("renders Sandra escalated status", () => {
+    const thread = makeThread({
+      contactId: "escalated-1",
+      threadId: "conv-escalated-1",
+      aiResponderStatus: "escalated",
+    });
+
+    render(<CockpitView {...baseProps} filter="all" threads={[thread]} />);
+
+    expect(
+      screen.getByTestId("inbox-thread-conv-escalated-1-sandra-status"),
+    ).toHaveTextContent("Sandra escalated");
+  });
+
+  it("renders chips in priority order: Unread, Needs Outcome, Mine, Sandra Escalated, Sandra Handled, then the rest", () => {
     render(<CockpitView {...baseProps} filter="all" threads={[]} />);
 
     const chips = screen
@@ -298,17 +350,26 @@ describe("<CockpitView /> chip order (feedback-f E2b)", () => {
 
     expect(ids).toEqual([
       "filter-unread",
-      "filter-escalated",
       "filter-needs-outcome",
       "filter-mine",
+      "filter-escalated",
+      "filter-handled",
       "filter-unassigned",
       "filter-all",
       "filter-unknown",
       "filter-dismissed",
     ]);
+    expect(screen.getByTestId("filter-escalated").querySelector("img")).toHaveAttribute(
+      "src",
+      "/brand/mascot.svg",
+    );
+    expect(screen.getByTestId("filter-handled").querySelector("img")).toHaveAttribute(
+      "src",
+      "/brand/mascot.svg",
+    );
   });
 
-  it("when no current user, chip order collapses to: Unread, Escalated, Needs Outcome, All, Unknown, Dismissed", () => {
+  it("when no current user, chip order collapses without Mine/Unassigned", () => {
     render(
       <CockpitView
         {...baseProps}
@@ -325,8 +386,9 @@ describe("<CockpitView /> chip order (feedback-f E2b)", () => {
 
     expect(ids).toEqual([
       "filter-unread",
-      "filter-escalated",
       "filter-needs-outcome",
+      "filter-escalated",
+      "filter-handled",
       "filter-all",
       "filter-unknown",
       "filter-dismissed",
@@ -386,14 +448,14 @@ describe("<CockpitView /> chip order (feedback-f E2b)", () => {
 describe("<CockpitView /> escalated chip", () => {
   it("Escalated chip is active and only escalated threads render when filter='escalated'", () => {
     // Mirrors the Mine/Unassigned contract: the page-level Server Component
-    // runs the escalatedOnly query and passes the resulting set as `threads`.
+    // runs the Sandra escalated query and passes that set as `threads`.
     // Here we assert the chip is active and the handed-off rows render.
     const escalated = makeThread({
       contactId: "esc-1",
       contactName: "Escalated Thread",
       lastMessageBody: "I want to talk to a person",
-      needsHumanAttention: true,
-      escalationReason: "keyword:handoff_request",
+      aiResponderStatus: "escalated",
+      aiResponderReason: "keyword:handoff_request",
     });
 
     render(
@@ -424,5 +486,24 @@ describe("<CockpitView /> escalated chip", () => {
       />,
     );
     expect(screen.getByTestId("filter-escalated")).toBeInTheDocument();
+  });
+
+  it("Handled chip is active and renders Sandra-handled threads", () => {
+    const handled = makeThread({
+      contactId: "handled-2",
+      contactName: "Handled Thread",
+      aiResponderStatus: "handled",
+      aiResponderReason: "sent",
+    });
+
+    render(<CockpitView {...baseProps} filter="handled" threads={[handled]} />);
+
+    expect(screen.getByTestId("filter-handled")).toHaveAttribute(
+      "data-active",
+      "true",
+    );
+    expect(
+      screen.getByTestId(`inbox-thread-${handled.threadId}`),
+    ).toBeInTheDocument();
   });
 });
