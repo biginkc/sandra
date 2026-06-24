@@ -175,14 +175,17 @@ export async function runSequenceTick(
         })
         .eq("id", msg.id)
         .eq("status", "queued");
-    } else if (outcome.status === "blocked_no_consent") {
-      // Opted-out rows can never send — terminal-fail instead of
-      // deferring forever, so queued counts / drain ETA stay truthful
-      // and the row surfaces in the failed-today stat for the operator.
+    } else if (
+      outcome.status === "blocked_no_consent" ||
+      outcome.status === "blocked_terminal_dispo"
+    ) {
+      // Opted-out or terminal-disposition rows can never send —
+      // terminal-fail instead of deferring forever, so queued counts /
+      // drain ETA stay truthful and the row surfaces in failed-today.
       await failQueuedMessage(
         supabase,
         msg.id,
-        "Contact opted out — queued message can never send (failed by sequence-tick drain).",
+        `${outcome.reason} (failed by sequence-tick drain).`,
       );
     }
   }

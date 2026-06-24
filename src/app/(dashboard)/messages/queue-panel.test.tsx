@@ -1,7 +1,10 @@
-import { act, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const { listQueuedPage } = vi.hoisted(() => ({ listQueuedPage: vi.fn() }));
+const { listQueuedPage, releaseMessage } = vi.hoisted(() => ({
+  listQueuedPage: vi.fn(),
+  releaseMessage: vi.fn(),
+}));
 
 vi.mock("next/navigation", () => ({
   useRouter: () => ({
@@ -16,7 +19,7 @@ vi.mock("next/navigation", () => ({
 
 vi.mock("./actions", () => ({
   listQueuedPage,
-  releaseMessage: vi.fn(),
+  releaseMessage,
   deleteQueuedMessage: vi.fn(),
   updateQueuedMessage: vi.fn(),
 }));
@@ -49,6 +52,8 @@ vi.mock("sonner", () => ({
 
 // eslint-disable-next-line import/first
 import { QueuePanel, type QueuedRow } from "./queue-panel";
+// eslint-disable-next-line import/first
+import { toast } from "sonner";
 
 function makeRow(n: number): QueuedRow {
   return {
@@ -74,6 +79,7 @@ const disconnect = vi.fn();
 
 beforeEach(() => {
   listQueuedPage.mockReset();
+  releaseMessage.mockReset();
   intersect = null;
   observe.mockClear();
   disconnect.mockClear();
@@ -294,5 +300,30 @@ describe("<QueuePanel /> infinite scroll", () => {
       />,
     );
     expect(screen.getByText("2 queued")).toBeInTheDocument();
+  });
+
+  it("handles terminal-suppressed queued rows as a skip instead of a generic error", async () => {
+    releaseMessage.mockResolvedValue({
+      ok: true,
+      data: {
+        outcome: {
+          status: "blocked_terminal_dispo",
+          reason: "Property is suppressed by terminal disposition: wrong_number.",
+        },
+      },
+    });
+
+    render(<QueuePanel initial={[makeRow(1)]} initialHasMore={false} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+    await waitFor(() => {
+      expect(toast.warning).toHaveBeenCalledWith("Skipped", {
+        description:
+          "Property is suppressed by terminal disposition: wrong_number.",
+      });
+    });
+    expect(screen.queryByText("1 Main St")).not.toBeInTheDocument();
+    expect(toast.error).not.toHaveBeenCalledWith("blocked_terminal_dispo");
   });
 });

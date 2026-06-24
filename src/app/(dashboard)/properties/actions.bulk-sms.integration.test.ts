@@ -60,6 +60,7 @@ async function seedLead(opts: {
   phone?: string | null;
   optOut?: boolean;
   address?: string;
+  outreachDispo?: string | null;
   /** Defaults to 'mobile' — bulk SMS only queues confirmed mobiles, so
    *  most tests want a textable lead. Pass 'landline' / 'unknown' to
    *  exercise the line-type gate. */
@@ -110,6 +111,7 @@ async function seedLead(opts: {
       address: opts.address ?? "1 Bulk SMS St",
       state: "MO",
       status: "prospect",
+      outreach_dispo: opts.outreachDispo ?? null,
       homeowner_contact_id: contactId,
     })
     .select("id")
@@ -422,6 +424,25 @@ describe("bulkQueueSms (integration)", () => {
     if (!result.ok) return;
     expect(result.data.succeeded).toBe(0);
     expect(result.data.skipped).toBe(1);
+
+    const { count } = await testClient
+      .from("messages")
+      .select("*", { count: "exact", head: true });
+    expect(count).toBe(0);
+  });
+
+  it("skips terminal outreach dispositions without queuing a message", async () => {
+    const { propertyId } = await seedLead({
+      phone: "+18165551037",
+      outreachDispo: "wrong_number",
+    });
+
+    const result = await bulkQueueSms([propertyId], adHocOpts({ body: "Hi" }));
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.data.succeeded).toBe(0);
+    expect(result.data.skipped).toBe(1);
+    expect(result.data.failed).toHaveLength(0);
 
     const { count } = await testClient
       .from("messages")

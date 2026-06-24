@@ -129,7 +129,7 @@ describe("sendSmsToContact (integration)", () => {
     }
   });
 
-  it("blocks with no_consent when contact has opted out after opt-in", async () => {
+  it("blocks with blocked_terminal_dispo when contact has opted out after opt-in", async () => {
     const { contactId, propertyId } = await seed({ withConsent: true });
     await recordConsentEvent(supabase, {
       contactId,
@@ -142,10 +142,54 @@ describe("sendSmsToContact (integration)", () => {
       propertyId,
       body: "hi",
     });
-    expect(outcome.status).toBe("blocked_no_consent");
-    if (outcome.status === "blocked_no_consent") {
-      expect(outcome.consentState).toBe("opted_out");
+    expect(outcome.status).toBe("blocked_terminal_dispo");
+  });
+
+  it("blocks immediately on terminal outreach_dispo before inserting a message", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-08T18:00:00Z"));
+    const { contactId, propertyId } = await seed({ withConsent: true });
+    await supabase
+      .from("properties")
+      .update({ outreach_dispo: "wrong_number" })
+      .eq("id", propertyId);
+
+    try {
+      const outcome = await sendSmsToContact(supabase, {
+        contactId,
+        propertyId,
+        body: "should never insert",
+      });
+      expect(outcome.status).toBe("blocked_terminal_dispo");
+
+      const { count } = await supabase
+        .from("messages")
+        .select("*", { count: "exact", head: true });
+      expect(count).toBe(0);
+    } finally {
+      vi.useRealTimers();
     }
+  });
+
+  it("blocks queue creation on terminal outreach_dispo before inserting a queued row", async () => {
+    const { contactId, propertyId } = await seed({ withConsent: false });
+    await supabase
+      .from("properties")
+      .update({ outreach_dispo: "dnc" })
+      .eq("id", propertyId);
+
+    const outcome = await sendSmsToContact(supabase, {
+      contactId,
+      propertyId,
+      body: "should never queue",
+      queueOnly: true,
+    });
+    expect(outcome.status).toBe("blocked_terminal_dispo");
+
+    const { count } = await supabase
+      .from("messages")
+      .select("*", { count: "exact", head: true });
+    expect(count).toBe(0);
   });
 
   it("blocks with no_phone when contact has no phone_1", async () => {
@@ -417,7 +461,7 @@ describe("sendSmsToContact (integration)", () => {
     expect(row?.error_message).toMatch(/landline/i);
   });
 
-  it("release blocks when consent was revoked between queue and release", async () => {
+  it("release permanently fails when consent was revoked between queue and release", async () => {
     const { contactId, propertyId } = await seed({ withConsent: true });
     const queue = await sendSmsToContact(supabase, {
       contactId,
@@ -437,15 +481,43 @@ describe("sendSmsToContact (integration)", () => {
     });
 
     const release = await releaseQueuedMessage(supabase, queue.messageId);
-    expect(release.status).toBe("blocked_no_consent");
+    expect(release.status).toBe("blocked_terminal_dispo");
 
-    // Row stays in queued state (we didn't flip it).
     const { data: row } = await supabase
       .from("messages")
-      .select("status")
+      .select("status, error_message")
       .eq("id", queue.messageId)
       .single();
-    expect(row?.status).toBe("queued");
+    expect(row?.status).toBe("failed");
+    expect(row?.error_message).toMatch(/opted out/i);
+  });
+
+  it("release permanently fails when a queued property's disposition became terminal", async () => {
+    const { contactId, propertyId } = await seed({ withConsent: true });
+    const queue = await sendSmsToContact(supabase, {
+      contactId,
+      propertyId,
+      body: "queued before wrong-number reply",
+      queueOnly: true,
+    });
+    expect(queue.status).toBe("queued");
+    if (queue.status !== "queued") return;
+
+    await supabase
+      .from("properties")
+      .update({ outreach_dispo: "wrong_number" })
+      .eq("id", propertyId);
+
+    const release = await releaseQueuedMessage(supabase, queue.messageId);
+    expect(release.status).toBe("blocked_terminal_dispo");
+
+    const { data: row } = await supabase
+      .from("messages")
+      .select("status, error_message")
+      .eq("id", queue.messageId)
+      .single();
+    expect(row?.status).toBe("failed");
+    expect(row?.error_message).toMatch(/wrong_number/i);
   });
 
   it("release blocks when the queued row belongs to a different provider than the active one", async () => {

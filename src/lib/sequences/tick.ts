@@ -1,6 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { sendSmsToContact } from "@/lib/messaging/send";
+import { SUPPRESSED_DISPOS } from "@/lib/messaging/suppression";
 import type { Database } from "@/lib/supabase/types";
 import { pickFromPool } from "@/lib/templates/pool";
 
@@ -97,13 +98,12 @@ export async function processEnrollmentTick(
 
   // Disqualifying outreach dispos permanently pause sequences — the
   // prospect has opted out, requested DNC, or has a bad number.
-  const DISPO_PAUSE: ReadonlySet<string> = new Set([
-    "wrong_number",
-    "bad_number",
-    "dnc",
-    "opted_out",
-  ]);
-  if (property.outreach_dispo && DISPO_PAUSE.has(property.outreach_dispo)) {
+  if (
+    property.outreach_dispo &&
+    SUPPRESSED_DISPOS.has(
+      property.outreach_dispo as Parameters<typeof SUPPRESSED_DISPOS.has>[0],
+    )
+  ) {
     const permanent = property.outreach_dispo === "dnc" || property.outreach_dispo === "opted_out";
     await client
       .from("sequence_enrollments")
@@ -304,6 +304,11 @@ export async function processEnrollmentTick(
         await markRunSkipped(client, claim.id, "consent_revoked");
         await pauseEnrollment(client, enrollment.id, "consent_revoked", true);
         return { status: "paused", enrollmentId: enrollment.id, reason: "consent_revoked" };
+      }
+      case "blocked_terminal_dispo": {
+        await markRunSkipped(client, claim.id, "paused");
+        await pauseEnrollment(client, enrollment.id, "terminal_dispo", false);
+        return { status: "paused", enrollmentId: enrollment.id, reason: "terminal_dispo" };
       }
       case "blocked_no_phone":
       case "contact_not_found": {
