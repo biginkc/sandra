@@ -35,6 +35,8 @@ Implement Sandra thread-level AI visibility on `/messages`: mascot `Escalated` a
 - Accepted and fixed: no-user direct URLs for `mine` / `unassigned` could show invisible filter states. Fix: normalize those filters to `all` when there is no current user.
 - Accepted and fixed: failed delivery reason was title-only. Fix: add `aria-label` with the full delivery reason while keeping the visible chip compact.
 - Accepted and mitigated: migration lock posture. Fix: add bounded lock/statement timeouts and create the check constraint as `not valid` before validating it. `CREATE INDEX CONCURRENTLY` was not used because this repo has no current Supabase migration convention for transaction-sensitive concurrent index statements.
+- Claude review returned `APPROVED` with medium-high confidence on head `7c2ef42`, with no blocking findings. Claude noted the new `message_threads` realtime subscription needed the table in the Supabase realtime publication; accepted and fixed by adding an idempotent publication update to the migration.
+- The same publication update was applied to the shared Sandra test DB and verified with `pg_publication_tables`, because the test DB had already recorded the earlier migration version during pre-PR verification.
 - Static analysis: `fallow audit --base origin/main --format compact` and diff-file audit were run. Findings were inherited/generated unused exports/deps, existing complexity in old hot functions, and test clone groups; no additional blocking PR defect survived review after the fixes above.
 - Provider docs checked: Supabase JavaScript update docs and Supabase database migration docs. Public Sendillo/Cendilio status-webhook docs were not discoverable; Sendillo-dependent claims were reviewed against the local adapter contract and tests only.
 - Secret review: no new secret-bearing environment variables or credential values were added. Existing test placeholders remained fake values. 1Password storage was not inspected because no new secret was introduced.
@@ -45,6 +47,7 @@ Implement Sandra thread-level AI visibility on `/messages`: mascot `Escalated` a
 - `npm run test:integration -- src/app/api/webhooks/sendillo/status/route.integration.test.ts` passed on rerun, 13 tests. The first run had one transient missing-row failure on the shared test DB; the isolated rerun passed.
 - `npm run typecheck` passed after review fixes.
 - `npm run lint -- <review-fix files>` passed with no warnings after cleanup.
+- GitHub Playwright on head `7c2ef42` failed `e2e/cockpit-realtime.spec.ts` because the client subscribed to `message_threads` before the table was in the realtime publication; the channel did not deliver the existing `messages` event. Migration/test-DB publication fix added after this failure.
 
 ## Notes
 - The clean worktree had no `.env.test.local`; an ignored symlink to the main checkout's existing test env file was used for integration tests. No secret values were copied or printed.

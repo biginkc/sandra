@@ -34,3 +34,16 @@ alter table public.message_threads
 create index if not exists idx_message_threads_ai_responder_status
   on public.message_threads (ai_responder_status)
   where ai_responder_status is not null;
+
+do $$
+begin
+  if not exists (
+    select 1
+    from pg_publication_tables
+    where pubname = 'supabase_realtime'
+      and schemaname = 'public'
+      and tablename = 'message_threads'
+  ) then
+    execute 'alter publication supabase_realtime add table public.message_threads';
+  end if;
+end $$;
