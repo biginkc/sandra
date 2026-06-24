@@ -289,6 +289,8 @@ function MessageBubble({
     message,
     isMostRecentOutbound,
   );
+  const aiGenerated = isAiGeneratedMessage(message);
+  const showMetadataFooter = isLastInGroup || aiGenerated;
 
   // Per-bubble vertical spacing replaces the old blanket `gap-4` on the
   // container. A continuation bubble (same sender, same day) gets a
@@ -325,7 +327,7 @@ function MessageBubble({
           {message.body}
         </div>
       </div>
-      {isLastInGroup ? (
+      {showMetadataFooter ? (
         <div
           className={`mt-1 flex items-center gap-1.5 text-[10px] tabular-nums text-muted-foreground ${
             outbound ? "mr-1" : "ml-1"
@@ -360,27 +362,10 @@ function MessageBubble({
                 ).toUpperCase()}
               </Badge>
             )}
-          {outbound &&
-            message.metadata &&
-            typeof message.metadata === "object" &&
-            (message.metadata as { generated_by?: unknown }).generated_by ===
-              "ai_responder_v1" && (
-              <Badge
-                variant="outline"
-                className="border-border text-muted-foreground text-[10px]"
-                title={`AI-drafted · confidence ${
-                  typeof (message.metadata as { confidence?: unknown })
-                    .confidence === "number"
-                    ? ((message.metadata as { confidence: number }).confidence * 100).toFixed(0) + "%"
-                    : "—"
-                }`}
-              >
-                AI
-              </Badge>
-            )}
+          {aiGenerated ? <SandraReplyBadge message={message} /> : null}
         </div>
       ) : null}
-      {!isLastInGroup && deliveryStatusLabel ? (
+      {!showMetadataFooter && deliveryStatusLabel ? (
         <div
           className={cn(
             `mt-1 text-[11px] font-medium ${outbound ? "mr-1" : "ml-1"}`,
@@ -394,6 +379,44 @@ function MessageBubble({
         </div>
       ) : null}
     </div>
+  );
+}
+
+function SandraReplyBadge({ message }: { message: Message }) {
+  const metadata = message.metadata as { confidence?: unknown };
+  const confidence =
+    typeof metadata.confidence === "number"
+      ? `${(metadata.confidence * 100).toFixed(0)}%`
+      : "unknown";
+
+  return (
+    <span
+      className="inline-flex h-5 min-w-7 items-center justify-center rounded-full border border-[#e5e1df] bg-white px-1.5"
+      title={`Sandra replied · confidence ${confidence}`}
+      role="img"
+      aria-label="Sandra replied"
+      data-testid="messages-thread-sandra-reply-icon"
+    >
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img
+        src="/icon.png"
+        alt=""
+        aria-hidden="true"
+        className="h-3.5 w-3.5 shrink-0"
+      />
+    </span>
+  );
+}
+
+function isAiGeneratedMessage(message: Message): boolean {
+  if (message.direction !== "outbound") return false;
+  const metadata = message.metadata;
+  return (
+    metadata !== null &&
+    typeof metadata === "object" &&
+    !Array.isArray(metadata) &&
+    (metadata as { generated_by?: unknown }).generated_by ===
+      "ai_responder_v1"
   );
 }
 

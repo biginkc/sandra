@@ -292,4 +292,133 @@ describe("<MessagesThread />", () => {
     expect(screen.queryByText("Delivered")).not.toBeInTheDocument();
     expect(screen.queryByText("Not delivered")).not.toBeInTheDocument();
   });
+
+  it("marks AI-generated outbound replies with the Sandra face icon", () => {
+    render(
+      <MessagesThread
+        initial={[
+          makeMessage({
+            id: "sandra-reply",
+            direction: "outbound",
+            status: "delivered",
+            body: "No repairs needed.",
+            metadata: {
+              generated_by: "ai_responder_v1",
+              confidence: 0.92,
+            },
+          }),
+        ]}
+        contactId="contact-1"
+        propertyId="property-1"
+      />,
+    );
+
+    const icon = screen.getByTestId("messages-thread-sandra-reply-icon");
+    expect(
+      screen.getByRole("img", { name: "Sandra replied" }),
+    ).toBeInTheDocument();
+    expect(icon).toHaveAccessibleName("Sandra replied");
+    expect(icon).toHaveAttribute(
+      "title",
+      "Sandra replied · confidence 92%",
+    );
+    expect(screen.queryByText("AI")).not.toBeInTheDocument();
+  });
+
+  it("does not mark manual outbound replies as Sandra replies", () => {
+    render(
+      <MessagesThread
+        initial={[
+          makeMessage({
+            id: "manual-reply",
+            direction: "outbound",
+            status: "delivered",
+            body: "Manual reply",
+            metadata: null,
+          }),
+        ]}
+        contactId="contact-1"
+        propertyId="property-1"
+      />,
+    );
+
+    expect(
+      screen.queryByTestId("messages-thread-sandra-reply-icon"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("marks an AI-generated reply even when a manual outbound follows it", () => {
+    render(
+      <MessagesThread
+        initial={[
+          makeMessage({
+            id: "sandra-reply",
+            direction: "outbound",
+            status: "delivered",
+            body: "Sandra reply",
+            created_at: "2026-06-09T12:00:00.000Z",
+            metadata: {
+              generated_by: "ai_responder_v1",
+              confidence: 0.87,
+            },
+          }),
+          makeMessage({
+            id: "manual-followup",
+            direction: "outbound",
+            status: "sent",
+            body: "Manual follow-up",
+            created_at: "2026-06-09T12:03:00.000Z",
+            metadata: null,
+          }),
+        ]}
+        contactId="contact-1"
+        propertyId="property-1"
+      />,
+    );
+
+    const threadMessages = screen.getAllByTestId("messages-thread-msg");
+    expect(threadMessages[0]).toContainElement(
+      screen.getByTestId("messages-thread-sandra-reply-icon"),
+    );
+    expect(threadMessages[1]).not.toContainElement(
+      screen.getByTestId("messages-thread-sandra-reply-icon"),
+    );
+  });
+
+  it("marks each AI-generated reply in a consecutive outbound burst", () => {
+    render(
+      <MessagesThread
+        initial={[
+          makeMessage({
+            id: "first-sandra-reply",
+            direction: "outbound",
+            status: "delivered",
+            body: "First Sandra reply",
+            created_at: "2026-06-09T12:00:00.000Z",
+            metadata: {
+              generated_by: "ai_responder_v1",
+              confidence: 0.87,
+            },
+          }),
+          makeMessage({
+            id: "second-sandra-reply",
+            direction: "outbound",
+            status: "sent",
+            body: "Second Sandra reply",
+            created_at: "2026-06-09T12:03:00.000Z",
+            metadata: {
+              generated_by: "ai_responder_v1",
+              confidence: 0.91,
+            },
+          }),
+        ]}
+        contactId="contact-1"
+        propertyId="property-1"
+      />,
+    );
+
+    expect(screen.getAllByTestId("messages-thread-sandra-reply-icon")).toHaveLength(
+      2,
+    );
+  });
 });
