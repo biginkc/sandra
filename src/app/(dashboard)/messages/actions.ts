@@ -12,6 +12,14 @@ import {
   restoreDismissedSender as restoreDismissedSenderHelper,
   type ContactRole,
 } from "@/lib/messages/triage";
+import {
+  createPropertyAndResolve,
+  resolveThreadToExistingProperty,
+} from "@/lib/messages/resolve";
+import {
+  listResolverCandidatePropertiesForContact,
+  type ResolverCandidateProperty,
+} from "@/lib/messages/threading";
 import type { Database } from "@/lib/supabase/types";
 
 import type { QueuedRow } from "./queue-panel";
@@ -237,6 +245,8 @@ export type PropertySearchHit = {
   agentContactId: string | null;
 };
 
+export type ResolveCandidateProperty = ResolverCandidateProperty;
+
 /**
  * Search properties by address fragment for the Merge-with-property
  * dialog. Caps at 20 results.
@@ -278,6 +288,79 @@ export async function searchPropertiesForMatch(
       extra: { query: trimmed.slice(0, 64) },
     });
     return errFromUnknown(e, "SEARCH_FAILED");
+  }
+}
+
+export async function listResolveCandidatesAction(input: {
+  sourceConversationId: string;
+  contactId: string;
+}): Promise<Result<ResolveCandidateProperty[]>> {
+  try {
+    const supabase = await createClient();
+    const candidates = await listResolverCandidatePropertiesForContact(
+      supabase,
+      input,
+    );
+    return ok(candidates);
+  } catch (e) {
+    reportError(e, {
+      tags: { surface: "list_resolve_candidates" },
+      extra: {
+        sourceConversationId: input.sourceConversationId,
+        contactId: input.contactId,
+      },
+    });
+    return errFromUnknown(e, "LIST_RESOLVE_CANDIDATES_FAILED");
+  }
+}
+
+export async function resolveThreadToPropertyAction(input: {
+  sourceConversationId: string;
+  contactId: string;
+  propertyId: string;
+  role?: ContactRole | null;
+}): Promise<Result<{ updated: number; conversationId: string }>> {
+  try {
+    const supabase = await createClient();
+    return await resolveThreadToExistingProperty({ supabase, ...input });
+  } catch (e) {
+    reportError(e, {
+      tags: { surface: "resolve_thread_to_property" },
+      extra: {
+        sourceConversationId: input.sourceConversationId,
+        contactId: input.contactId,
+        propertyId: input.propertyId,
+        role: input.role ?? null,
+      },
+    });
+    return errFromUnknown(e, "RESOLVE_THREAD_FAILED");
+  }
+}
+
+export async function createPropertyAndResolveAction(input: {
+  sourceConversationId: string;
+  contactId: string;
+  role: ContactRole;
+  property: {
+    address: string;
+    city?: string | null;
+    state: string;
+    zip?: string | null;
+  };
+}): Promise<Result<{ updated: number; conversationId: string; propertyId: string }>> {
+  try {
+    const supabase = await createClient();
+    return await createPropertyAndResolve({ supabase, ...input });
+  } catch (e) {
+    reportError(e, {
+      tags: { surface: "create_property_and_resolve" },
+      extra: {
+        sourceConversationId: input.sourceConversationId,
+        contactId: input.contactId,
+        role: input.role,
+      },
+    });
+    return errFromUnknown(e, "CREATE_PROPERTY_AND_RESOLVE_FAILED");
   }
 }
 

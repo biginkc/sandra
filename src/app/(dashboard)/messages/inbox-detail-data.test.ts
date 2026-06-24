@@ -306,4 +306,37 @@ describe("fetchInboxDetail", () => {
     ]);
     expect(detail?.propertyAddress).toContain("100 Live Ave");
   });
+
+  it("uses the first non-null property in a mixed conversation, even when the latest row is propertyless", async () => {
+    const supabase = makeSupabaseStub({
+      messages: [
+        makeMessage({
+          id: "older-linked",
+          contact_id: CONTACT_ID,
+          property_id: OLDER_PROPERTY_ID,
+          conversation_id: CONVERSATION_ID,
+          body: "linked context",
+          created_at: "2026-06-08T12:00:00.000Z",
+        }),
+        makeMessage({
+          id: "latest-propertyless",
+          contact_id: CONTACT_ID,
+          property_id: null,
+          conversation_id: CONVERSATION_ID,
+          body: "latest reply without property",
+          created_at: "2026-06-09T12:00:00.000Z",
+        }),
+      ],
+      contacts: [makeContact({ id: CONTACT_ID })],
+      properties: [
+        makeProperty({ id: OLDER_PROPERTY_ID, address: "200 Mixed Row Ave" }),
+      ],
+    });
+
+    const detail = await fetchInboxDetail(supabase as never, CONVERSATION_ID);
+
+    expect(detail).not.toBeNull();
+    expect(detail?.propertyId).toBe(OLDER_PROPERTY_ID);
+    expect(detail?.propertyAddress).toContain("200 Mixed Row Ave");
+  });
 });

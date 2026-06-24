@@ -47,7 +47,9 @@ export async function fetchInboxDetail(
   )?.contact_id;
   if (!contactId) return null;
 
-  const propertyId = messages[messages.length - 1].property_id;
+  const propertyId =
+    messages.find((message) => message.property_id !== null)?.property_id ??
+    null;
 
   const [contactRes, propertyRes] = await Promise.all([
     supabase
