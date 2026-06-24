@@ -242,12 +242,12 @@ function SandraThreadStatus({
   deliveryStatus: string | null;
   deliveryError: string | null;
 }) {
-  const deliveryFailed = deliveryStatus === "failed";
-  const deliveryLabel = deliveryStatus
-    ? deliveryFailed
-      ? `Delivery failed${deliveryError ? `: ${deliveryError}` : ""}`
-      : `Delivery ${deliveryStatus}`
-    : null;
+  const deliveryLabel = formatDeliveryLabel(deliveryStatus, deliveryError);
+  const statusLabel = status === "handled" ? "Sandra handled" : "Sandra escalated";
+  const reasonLabel = status === "escalated" && reason ? `: ${reason}` : "";
+  const iconLabel = deliveryLabel
+    ? `${statusLabel}${reasonLabel}. ${deliveryLabel}`
+    : `${statusLabel}${reasonLabel}`;
 
   return (
     <div
@@ -255,43 +255,40 @@ function SandraThreadStatus({
       data-testid={`inbox-thread-${threadId}-sandra-status`}
     >
       <span
-        className="inline-flex items-center gap-1 rounded-full border border-[#e5e1df] bg-[#fafaf9] px-2 py-0.5 text-[11px] font-bold text-[#57534e]"
-        title={status === "handled" ? "Sandra handled" : "Sandra escalated"}
+        className="inline-flex h-6 w-6 items-center justify-center rounded-full border border-[#e5e1df] bg-[#fafaf9]"
+        aria-label={iconLabel}
+        title={iconLabel}
       >
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img
           src="/icon.png"
           alt=""
           aria-hidden="true"
-          className="h-3.5 w-3.5 shrink-0"
+          className="h-3.5 w-3.5"
         />
-        {status === "handled" ? "Sandra handled" : "Sandra escalated"}
       </span>
       {status === "escalated" && reason ? (
-        <span
-          className="rounded-full bg-[#fff7ed] px-2 py-0.5 text-[11px] font-bold text-[#9a3412]"
-          title={reason}
-          data-testid={`inbox-thread-${threadId}-sandra-reason`}
-        >
+        <span className="sr-only" data-testid={`inbox-thread-${threadId}-sandra-reason`}>
           {reason}
-        </span>
-      ) : null}
-      {deliveryLabel ? (
-        <span
-          className={`rounded-full px-2 py-0.5 text-[11px] font-bold ${
-            deliveryFailed
-              ? "bg-[#fef2f2] text-[#b91c1c]"
-              : "bg-[#ecfdf5] text-[#047857]"
-          }`}
-          aria-label={deliveryLabel}
-          title={deliveryLabel}
-          data-testid={`inbox-thread-${threadId}-sandra-delivery`}
-        >
-          {deliveryFailed ? "Delivery failed" : deliveryLabel}
         </span>
       ) : null}
     </div>
   );
+}
+
+function formatDeliveryLabel(status: string | null, error: string | null) {
+  switch (status) {
+    case "delivered":
+      return "SMS delivered";
+    case "sent":
+      return "SMS sent";
+    case "failed":
+      return `SMS failed${error ? `: ${error}` : ""}`;
+    case null:
+      return null;
+    default:
+      return `SMS ${status}`;
+  }
 }
 
 function ContactAvatar({
