@@ -295,18 +295,18 @@ describe("<CockpitView /> chip order (feedback-f E2b)", () => {
   });
 
   it.each([
-    ["sent", null, "Sandra handled. SMS sent", "border-[#d1fae5]"],
-    ["delivered", null, "Sandra handled. SMS delivered", "border-[#d1fae5]"],
-    ["failed", null, "Sandra handled. SMS failed", "border-[#fecaca]"],
+    ["sent", null, "Sandra handled. SMS sent", "bg-[#10b981]"],
+    ["delivered", null, "Sandra handled. SMS delivered", "bg-[#10b981]"],
+    ["failed", null, "Sandra handled. SMS failed", "bg-[#ef4444]"],
     [
       "failed",
       "Carrier rejected recipient",
       "Sandra handled. SMS failed: Carrier rejected recipient",
-      "border-[#fecaca]",
+      "bg-[#ef4444]",
     ],
   ] as const)(
     "renders Sandra handled %s as an icon-only marker",
-    (deliveryStatus, deliveryError, label, borderClass) => {
+    (deliveryStatus, deliveryError, label, dotClass) => {
       const thread = makeThread({
         contactId: `handled-${deliveryStatus}-${deliveryError ?? "none"}`,
         threadId: `conv-handled-${deliveryStatus}-${deliveryError ?? "none"}`,
@@ -322,7 +322,11 @@ describe("<CockpitView /> chip order (feedback-f E2b)", () => {
       expect(status.querySelector("img")).toHaveAttribute("src", "/icon.png");
       expect(status).toHaveAccessibleName(label);
       expect(status).toHaveAttribute("title", label);
-      expect(status).toHaveClass(borderClass);
+      expect(status).not.toHaveClass("rounded-full");
+      expect(status).not.toHaveClass("border");
+      expect(
+        screen.getByTestId(`inbox-thread-${thread.threadId}-sandra-status-dot`),
+      ).toHaveClass(dotClass);
       expect(
         screen.queryByTestId(`inbox-thread-${thread.threadId}-sandra-delivery`),
       ).not.toBeInTheDocument();
@@ -342,7 +346,11 @@ describe("<CockpitView /> chip order (feedback-f E2b)", () => {
     expect(status).not.toHaveTextContent("Sandra escalated");
     expect(status.querySelector("img")).toHaveAttribute("src", "/icon.png");
     expect(status).toHaveAccessibleName("Sandra escalated");
-    expect(status).toHaveClass("border-[#fed7aa]");
+    expect(status).not.toHaveClass("rounded-full");
+    expect(status).not.toHaveClass("border");
+    expect(
+      screen.getByTestId("inbox-thread-conv-escalated-1-sandra-status-dot"),
+    ).toHaveClass("bg-[#f59e0b]");
   });
 
   it("renders chips in priority order: Unread, Needs Outcome, Mine, Sandra Escalated, Dispo, then the rest", () => {

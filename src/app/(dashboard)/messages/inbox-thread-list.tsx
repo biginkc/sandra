@@ -37,6 +37,17 @@ type Props = {
   onSelectThread: (threadId: string) => void;
 };
 
+const THREAD_DISPO_LABELS: Record<string, string> = {
+  wrong_number: "Wrong #",
+  bad_number: "Bad #",
+  not_interested: "Not interested",
+  needs_sequence: "Needs sequence",
+  opted_out: "Opted out",
+  dnc: "DNC",
+  nurture: "Follow up",
+  callback_requested: "Callback",
+};
+
 /**
  * Conversation list — left rail of the cockpit. Click a thread to
  * surface it in the side panel (URL state: ?thread=<contactId>).
@@ -157,6 +168,10 @@ export function InboxThreadList({
                   <span className="min-w-0 truncate text-sm font-bold text-[#1c1917]">
                     {t.contactName ?? t.contactPhone ?? "Unknown contact"}
                   </span>
+                  <ThreadDispositionPill
+                    dispo={t.outreachDispo}
+                    threadId={t.threadId}
+                  />
                 </span>
                 <span className="shrink-0 text-[11px] tabular-nums text-[#78716c]">
                   {formatDistanceToNow(new Date(t.lastMessageAt), {
@@ -229,6 +244,27 @@ export function InboxThreadList({
   );
 }
 
+function ThreadDispositionPill({
+  dispo,
+  threadId,
+}: {
+  dispo: string | null;
+  threadId: string;
+}) {
+  if (!dispo) return null;
+
+  const label = THREAD_DISPO_LABELS[dispo] ?? dispo;
+  return (
+    <span
+      className="max-w-[7.5rem] shrink-0 truncate rounded-full border border-[#fed7aa] bg-[#fff7ed] px-1.5 py-0.5 text-[10px] font-semibold leading-none text-[#9a3412] sm:max-w-[9rem]"
+      data-testid={`inbox-thread-${threadId}-disposition`}
+      title={label}
+    >
+      {label}
+    </span>
+  );
+}
+
 function SandraThreadStatus({
   threadId,
   status,
@@ -248,16 +284,16 @@ function SandraThreadStatus({
   const iconLabel = deliveryLabel
     ? `${statusLabel}${reasonLabel}. ${deliveryLabel}`
     : `${statusLabel}${reasonLabel}`;
-  const iconTone =
+  const statusDotTone =
     deliveryStatus === "failed"
-      ? "border-[#fecaca] bg-[#fef2f2]"
+      ? "bg-[#ef4444]"
       : status === "escalated"
-        ? "border-[#fed7aa] bg-[#fff7ed]"
-        : "border-[#d1fae5] bg-[#ecfdf5]";
+        ? "bg-[#f59e0b]"
+        : "bg-[#10b981]";
 
   return (
     <span
-      className={`inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full border ${iconTone}`}
+      className="relative inline-flex h-5 w-5 shrink-0 items-center justify-center"
       data-testid={`inbox-thread-${threadId}-sandra-status`}
       aria-label={iconLabel}
       role="img"
@@ -269,6 +305,11 @@ function SandraThreadStatus({
         alt=""
         aria-hidden="true"
         className="h-3.5 w-3.5"
+      />
+      <span
+        aria-hidden="true"
+        className={`absolute -right-0.5 -bottom-0.5 h-1.5 w-1.5 rounded-full ${statusDotTone}`}
+        data-testid={`inbox-thread-${threadId}-sandra-status-dot`}
       />
     </span>
   );
