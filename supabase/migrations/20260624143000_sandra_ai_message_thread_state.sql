@@ -1,6 +1,9 @@
 -- Thread-level current state for Sandra's SMS AI responder.
 -- Forward-only: no historical backfill and no immutable run log in v1.
 
+set lock_timeout = '5s';
+set statement_timeout = '30s';
+
 alter table public.message_threads
   add column if not exists ai_responder_status text,
   add column if not exists ai_responder_reason text,
@@ -21,9 +24,12 @@ begin
       check (
         ai_responder_status is null
         or ai_responder_status in ('handled', 'escalated')
-      );
+      ) not valid;
   end if;
 end $$;
+
+alter table public.message_threads
+  validate constraint message_threads_ai_responder_status_check;
 
 create index if not exists idx_message_threads_ai_responder_status
   on public.message_threads (ai_responder_status)

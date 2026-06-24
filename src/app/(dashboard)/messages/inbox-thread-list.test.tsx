@@ -1,8 +1,56 @@
-import { describe, expect, it } from "vitest";
+import { render, waitFor } from "@testing-library/react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { Thread } from "@/lib/messages/list-threads";
 
-import { applyThreadUpdates, type ThreadUpdate } from "./inbox-thread-list";
+import {
+  applyThreadUpdates,
+  InboxThreadList,
+  type ThreadUpdate,
+} from "./inbox-thread-list";
+
+const supabaseMock = vi.hoisted(() => {
+  const subscriptions: Array<{
+    type: string;
+    filter: Record<string, unknown>;
+    callback: () => void;
+  }> = [];
+  const channel = {
+    on: vi.fn(
+      (
+        type: string,
+        filter: Record<string, unknown>,
+        callback: () => void,
+      ) => {
+        subscriptions.push({ type, filter, callback });
+        return channel;
+      },
+    ),
+    subscribe: vi.fn(() => channel),
+  };
+  return {
+    subscriptions,
+    channel,
+    client: {
+      auth: {
+        getSession: vi.fn(async () => ({ data: { session: null } })),
+      },
+      realtime: { setAuth: vi.fn() },
+      channel: vi.fn(() => channel),
+      removeChannel: vi.fn(),
+    },
+  };
+});
+
+vi.mock("@/lib/supabase/client", () => ({
+  createClient: () => supabaseMock.client,
+}));
+
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({
+    refresh: vi.fn(),
+  }),
+}));
 
 function makeThread(overrides: Partial<Thread> & { threadId: string }): Thread {
   return {
@@ -31,6 +79,16 @@ function makeThread(overrides: Partial<Thread> & { threadId: string }): Thread {
     aiLastDeliveryError: overrides.aiLastDeliveryError ?? null,
   };
 }
+
+beforeEach(() => {
+  supabaseMock.subscriptions.length = 0;
+  supabaseMock.channel.on.mockClear();
+  supabaseMock.channel.subscribe.mockClear();
+  supabaseMock.client.channel.mockClear();
+  supabaseMock.client.removeChannel.mockClear();
+  supabaseMock.client.auth.getSession.mockClear();
+  supabaseMock.client.realtime.setAuth.mockClear();
+});
 
 /**
  * Client-side realtime re-sort — must stay order-aligned with the server
@@ -88,5 +146,37 @@ describe("applyThreadUpdates — recency-only ordering", () => {
 
   it("no updates returns the server order untouched", () => {
     expect(applyThreadUpdates(base, {})).toBe(base);
+  });
+});
+
+describe("<InboxThreadList /> realtime subscriptions", () => {
+  it("refreshes on message_threads changes so Sandra delivery state does not stay stale", async () => {
+    render(
+      <InboxThreadList
+        initial={[]}
+        selectedThreadId={null}
+        currentUserId={null}
+        onSelectThread={vi.fn()}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(supabaseMock.client.channel).toHaveBeenCalledWith(
+        "cockpit:thread-list",
+      );
+    });
+
+    expect(supabaseMock.subscriptions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "postgres_changes",
+          filter: {
+            event: "*",
+            schema: "public",
+            table: "message_threads",
+          },
+        }),
+      ]),
+    );
   });
 });

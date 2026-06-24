@@ -6,6 +6,7 @@ import {
   applyInboxThreadFilter,
   buildThreadOpts,
   isThreadFilter,
+  normalizeInboxFilterForUser,
   parseInboxFilter,
   resolveVisibleThreadState,
 } from "./inbox-filter-resolve";
@@ -81,6 +82,34 @@ describe("isThreadFilter", () => {
   it("treats the unknown-bucket filters as non-thread filters", () => {
     expect(isThreadFilter("unknown")).toBe(false);
     expect(isThreadFilter("dismissed")).toBe(false);
+  });
+});
+
+describe("normalizeInboxFilterForUser", () => {
+  it("falls back to All for assignment filters when there is no current user", () => {
+    expect(normalizeInboxFilterForUser("mine", null)).toBe("all");
+    expect(normalizeInboxFilterForUser("unassigned", null)).toBe("all");
+  });
+
+  it("keeps assignment filters when there is a current user", () => {
+    expect(normalizeInboxFilterForUser("mine", "user-1")).toBe("mine");
+    expect(normalizeInboxFilterForUser("unassigned", "user-1")).toBe(
+      "unassigned",
+    );
+  });
+
+  it("leaves non-assignment filters unchanged without a current user", () => {
+    for (const filter of [
+      "all",
+      "unread",
+      "needs_outcome",
+      "escalated",
+      "handled",
+      "unknown",
+      "dismissed",
+    ] as const) {
+      expect(normalizeInboxFilterForUser(filter, null)).toBe(filter);
+    }
   });
 });
 

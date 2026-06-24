@@ -41,6 +41,16 @@ export function isThreadFilter(f: InboxFilter): boolean {
   );
 }
 
+export function normalizeInboxFilterForUser(
+  filter: InboxFilter,
+  currentUserId: string | null,
+): InboxFilter {
+  if (!currentUserId && (filter === "mine" || filter === "unassigned")) {
+    return "all";
+  }
+  return filter;
+}
+
 /**
  * Translate the active filter into `listThreads` query options.
  *

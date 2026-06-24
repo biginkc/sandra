@@ -28,6 +28,24 @@ Implement Sandra thread-level AI visibility on `/messages`: mascot `Escalated` a
 - Integration: `npm run test:integration -- src/app/api/webhooks/sendillo/status/route.integration.test.ts src/app/api/webhooks/dialpad/sms/route.integration.test.ts src/lib/ai-responder/dispatch.integration.test.ts` passed, 69 tests.
 - Lint: `npm run lint -- <changed files>` passed.
 
+## Manual Review
+- Used `custom-manual-code-review` on PR #312 with three read-only lanes: data/state transitions, Messages UI/filter semantics, and release/migration/test hygiene.
+- Accepted and fixed: Sendillo/status helper could roll thread delivery state forward even when the guarded message update matched zero rows. Fix: return updated ids from the Supabase update and skip the thread rollup when no row was touched. Added `src/lib/messaging/status-events.test.ts`.
+- Accepted and fixed: Messages realtime list could refresh after `messages` update before the later `message_threads` Sandra rollup. Fix: subscribe to `message_threads` changes and refresh.
+- Accepted and fixed: no-user direct URLs for `mine` / `unassigned` could show invisible filter states. Fix: normalize those filters to `all` when there is no current user.
+- Accepted and fixed: failed delivery reason was title-only. Fix: add `aria-label` with the full delivery reason while keeping the visible chip compact.
+- Accepted and mitigated: migration lock posture. Fix: add bounded lock/statement timeouts and create the check constraint as `not valid` before validating it. `CREATE INDEX CONCURRENTLY` was not used because this repo has no current Supabase migration convention for transaction-sensitive concurrent index statements.
+- Static analysis: `fallow audit --base origin/main --format compact` and diff-file audit were run. Findings were inherited/generated unused exports/deps, existing complexity in old hot functions, and test clone groups; no additional blocking PR defect survived review after the fixes above.
+- Provider docs checked: Supabase JavaScript update docs and Supabase database migration docs. Public Sendillo/Cendilio status-webhook docs were not discoverable; Sendillo-dependent claims were reviewed against the local adapter contract and tests only.
+- Secret review: no new secret-bearing environment variables or credential values were added. Existing test placeholders remained fake values. 1Password storage was not inspected because no new secret was introduced.
+
+## Review Fix Verification
+- `npm run test -- src/lib/messaging/status-events.test.ts 'src/app/(dashboard)/messages/inbox-filter-resolve.test.ts'` passed, 26 tests.
+- `npm run test:rtl -- 'src/app/(dashboard)/messages/inbox-thread-list.test.tsx' 'src/app/(dashboard)/messages/inbox-filters.test.tsx'` passed, 23 tests.
+- `npm run test:integration -- src/app/api/webhooks/sendillo/status/route.integration.test.ts` passed on rerun, 13 tests. The first run had one transient missing-row failure on the shared test DB; the isolated rerun passed.
+- `npm run typecheck` passed after review fixes.
+- `npm run lint -- <review-fix files>` passed with no warnings after cleanup.
+
 ## Notes
 - The clean worktree had no `.env.test.local`; an ignored symlink to the main checkout's existing test env file was used for integration tests. No secret values were copied or printed.
 - `src/app/api/cron/sequence-tick/route.ts` had an unrelated local modification and is intentionally excluded from this PR.

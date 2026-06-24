@@ -88,6 +88,11 @@ export function InboxThreadList({
           { event: "UPDATE", schema: "public", table: "messages" },
           () => requestRefresh(),
         )
+        .on(
+          "postgres_changes",
+          { event: "*", schema: "public", table: "message_threads" },
+          () => requestRefresh(),
+        )
         .subscribe();
     })();
 
@@ -250,6 +255,7 @@ function SandraThreadStatus({
               ? "bg-[#fef2f2] text-[#b91c1c]"
               : "bg-[#ecfdf5] text-[#047857]"
           }`}
+          aria-label={deliveryLabel}
           title={deliveryLabel}
           data-testid={`inbox-thread-${threadId}-sandra-delivery`}
         >

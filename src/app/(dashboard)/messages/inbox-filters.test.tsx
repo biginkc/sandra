@@ -317,6 +317,10 @@ describe("<CockpitView /> chip order (feedback-f E2b)", () => {
     );
     expect(delivery).toHaveTextContent("Delivery failed");
     expect(delivery).toHaveAttribute(
+      "aria-label",
+      "Delivery failed: Carrier rejected recipient",
+    );
+    expect(delivery).toHaveAttribute(
       "title",
       "Delivery failed: Carrier rejected recipient",
     );

@@ -67,10 +67,11 @@ export async function applyMessageStatusEvent(
     query = query.neq("status", "delivered");
   }
 
-  const { error: updateError } = await query;
+  const { data: updatedRows, error: updateError } = await query.select("id");
   if (updateError) {
     throw new Error(`status update failed: ${updateError.message}`);
   }
+  if ((updatedRows ?? []).length === 0) return "skipped";
   await recordAiResponderDeliveryForThread(supabase, {
     conversationId: message.conversation_id,
     metadata: message.metadata,
