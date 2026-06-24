@@ -10,6 +10,11 @@ import {
   type BulkSmsQueueBaseOpts,
 } from "@/lib/messaging/bulk-queue";
 import {
+  defaultSmsPaceSeconds,
+  paceValidationMessage,
+  validateSmsPaceSeconds,
+} from "@/lib/messaging/pacing";
+import {
   classifySmsPhoneAvailability,
   type SmsPhoneContact,
 } from "@/lib/messaging/sms-phone";
@@ -160,19 +165,22 @@ function normalizeAudienceSnapshot(
 function normalizePaceSeconds(
   value: CreateCampaignInput["paceSeconds"],
 ): Result<number | null> {
-  if (value == null) return ok(null);
+  if (value == null) return ok(defaultSmsPaceSeconds("saved_campaign"));
 
-  if (!Number.isInteger(value) || value < 10 || value > 600) {
+  const validation = validateSmsPaceSeconds(value, {
+    mode: "saved_campaign",
+  });
+  if (!validation.ok) {
     return {
       ok: false,
       error: {
         code: "VALIDATION",
-        message: "Pacing must be between 10 seconds and 10 minutes.",
+        message: paceValidationMessage("saved_campaign"),
       },
     };
   }
 
-  return ok(value);
+  return ok(validation.paceSeconds);
 }
 
 function parseAudienceSnapshot(
@@ -253,7 +261,21 @@ function parseLaunchOpts(campaign: CampaignRow): Result<LaunchCampaignOpts> {
     typeof campaign.pace_seconds === "number" &&
     Number.isFinite(campaign.pace_seconds)
   ) {
-    opts.paceSeconds = campaign.pace_seconds;
+    const validation = validateSmsPaceSeconds(campaign.pace_seconds, {
+      mode: "saved_campaign",
+    });
+    if (!validation.ok) {
+      return {
+        ok: false,
+        error: {
+          code: "VALIDATION",
+          message: validation.message,
+        },
+      };
+    }
+    opts.paceSeconds = validation.paceSeconds;
+  } else {
+    opts.paceSeconds = defaultSmsPaceSeconds("saved_campaign");
   }
   opts.skipIfContacted = campaign.skip_if_contacted;
 

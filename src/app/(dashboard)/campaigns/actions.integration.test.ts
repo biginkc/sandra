@@ -233,6 +233,65 @@ describe("createCampaign / archiveCampaign / unarchiveCampaign (integration)", (
     });
   });
 
+  it("defaults omitted saved-campaign pacing to 8 seconds", async () => {
+    const orgId = await getOrgId();
+    const email = uniqueCampaignEmail("campaign-create-default-pace");
+    const userId = await createAuthUser(email);
+    currentUserId = userId;
+    currentEmail = email;
+
+    const result = await createCampaign({
+      name: "Default Pace",
+      body: "Checking in from Sandra",
+      paceSeconds: null,
+      audience: {
+        search: "oak",
+        blockStack: [{ id: "vacancy-1", kind: "vacancy", tri: "yes" }],
+      },
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    const { data: row } = await testClient
+      .from("campaigns")
+      .select("org_id, pace_seconds")
+      .eq("id", result.data.id)
+      .single();
+
+    expect(row).toMatchObject({
+      org_id: orgId,
+      pace_seconds: 8,
+    });
+  });
+
+  it("rejects saved-campaign pacing below the custom floor except the 8s default", async () => {
+    const email = uniqueCampaignEmail("campaign-create-invalid-pace");
+    const userId = await createAuthUser(email);
+    currentUserId = userId;
+    currentEmail = email;
+
+    for (const paceSeconds of [7, 9]) {
+      const result = await createCampaign({
+        name: `Too Fast Saved Campaign ${paceSeconds}`,
+        body: "Checking in from Sandra",
+        paceSeconds,
+        audience: {
+          search: "oak",
+          blockStack: [{ id: "vacancy-1", kind: "vacancy", tri: "yes" }],
+        },
+      });
+
+      expect(result).toEqual({
+        ok: false,
+        error: {
+          code: "VALIDATION",
+          message:
+            "Saved campaign pacing must be 8 seconds or between 10 seconds and 10 minutes.",
+        },
+      });
+    }
+  });
+
   it("rejects create when the saved audience only contains no-op filters", async () => {
     const email = uniqueCampaignEmail("campaign-empty-audience");
     const userId = await createAuthUser(email);
@@ -605,9 +664,9 @@ describe("launchCampaign (integration)", () => {
 
     const { data: queuedRows } = await testClient
       .from("messages")
-      .select("property_id, contact_id, campaign_id, status, body")
+      .select("property_id, contact_id, campaign_id, status, body, scheduled_for")
       .eq("campaign_id", campaignId)
-      .order("property_id", { ascending: true });
+      .order("scheduled_for", { ascending: true });
     expect(queuedRows).toHaveLength(2);
     expect(sortIds(queuedRows?.map((row) => row.property_id))).toEqual(
       sortIds([first.propertyId, second.propertyId]),
@@ -615,6 +674,12 @@ describe("launchCampaign (integration)", () => {
     expect(queuedRows?.every((row) => row.body === "Campaign hello")).toBe(true);
     expect(queuedRows?.every((row) => row.status === "queued")).toBe(true);
     expect(queuedRows?.every((row) => row.campaign_id === campaignId)).toBe(true);
+    expect(new Date(queuedRows![0].scheduled_for!).getTime()).toBe(
+      SAFE_NOW.getTime(),
+    );
+    expect(new Date(queuedRows![1].scheduled_for!).getTime()).toBe(
+      SAFE_NOW.getTime() + 8_000,
+    );
 
     const { data: campaignAfterLaunch } = await testClient
       .from("campaigns")

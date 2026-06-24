@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { releaseQueuedMessage, sendSmsToContact } from "@/lib/messaging/send";
 import { recordConsentEvent } from "@/lib/messaging/consent";
 import { recordSmsPhoneSuppression } from "@/lib/messaging/opt-out-phone";
+import { getMockMessageLog } from "@/lib/messaging/providers/mock";
 import { createTestClient } from "@tests/integration/client";
 import { resetTenantTables } from "@tests/integration/reset";
 
@@ -925,5 +926,162 @@ describe("sendSmsToContact (integration)", () => {
       .single();
     expect(msg?.status).toBe("failed");
     expect(msg?.error_message).toMatch(/forced failure/i);
+  });
+
+  it("release defers transient provider failures back to queued with retry metadata", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-06-14T18:00:00Z"));
+    try {
+      const { contactId, propertyId } = await seed({ withConsent: true });
+      const queue = await sendSmsToContact(supabase, {
+        contactId,
+        propertyId,
+        body: "FAIL-RATE_LIMIT: defer this queued message",
+        queueOnly: true,
+      });
+      expect(queue.status).toBe("queued");
+      if (queue.status !== "queued") return;
+
+      const release = await releaseQueuedMessage(supabase, queue.messageId);
+      expect(release.status).toBe("provider_deferred");
+      if (release.status !== "provider_deferred") return;
+      expect(release.attempt).toBe(1);
+
+      const { data: row } = await supabase
+        .from("messages")
+        .select("status, scheduled_for, failed_at, metadata, error_message")
+        .eq("id", queue.messageId)
+        .single();
+      expect(row?.status).toBe("queued");
+      expect(row?.failed_at).toBeNull();
+      expect(row?.error_message).toMatch(/429 rate limit/i);
+      expect(new Date(row!.scheduled_for!).getTime()).toBeGreaterThan(
+        Date.now(),
+      );
+      expect(row?.metadata).toMatchObject({
+        providerRetry: {
+          attempts: 1,
+          transient: true,
+          maxDeferAttempts: 3,
+        },
+      });
+
+      const providerCallsAfterDefer = getMockMessageLog().length;
+      const earlyRelease = await releaseQueuedMessage(supabase, queue.messageId);
+      expect(earlyRelease.status).toBe("blocked_not_due");
+      expect(getMockMessageLog()).toHaveLength(providerCallsAfterDefer);
+
+      const { data: earlyRow } = await supabase
+        .from("messages")
+        .select("status, scheduled_for, metadata")
+        .eq("id", queue.messageId)
+        .single();
+      expect(earlyRow?.status).toBe("queued");
+      expect(earlyRow?.metadata).toMatchObject({
+        providerRetry: {
+          attempts: 1,
+        },
+      });
+
+      await supabase
+        .from("messages")
+        .update({
+          body: "Recovered provider send",
+          scheduled_for: new Date(Date.now() - 1000).toISOString(),
+        })
+        .eq("id", queue.messageId);
+
+      const retryRelease = await releaseQueuedMessage(supabase, queue.messageId);
+      expect(retryRelease.status).toBe("sent");
+
+      const { data: sentRow } = await supabase
+        .from("messages")
+        .select("status, failed_at, error_message")
+        .eq("id", queue.messageId)
+        .single();
+      expect(sentRow?.status).toBe("sent");
+      expect(sentRow?.failed_at).toBeNull();
+      expect(sentRow?.error_message).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("release terminal-fails transient provider errors after the retry cap", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-06-14T18:00:00Z"));
+    try {
+      const { contactId, propertyId } = await seed({ withConsent: true });
+      const queue = await sendSmsToContact(supabase, {
+        contactId,
+        propertyId,
+        body: "FAIL-RATE_LIMIT: cap this queued message",
+        queueOnly: true,
+        metadata: {
+          providerRetry: {
+            attempts: 3,
+          },
+        },
+      });
+      expect(queue.status).toBe("queued");
+      if (queue.status !== "queued") return;
+
+      const release = await releaseQueuedMessage(supabase, queue.messageId);
+      expect(release.status).toBe("provider_failed");
+
+      const { data: row } = await supabase
+        .from("messages")
+        .select("status, failed_at, metadata, error_message")
+        .eq("id", queue.messageId)
+        .single();
+      expect(row?.status).toBe("failed");
+      expect(row?.failed_at).not.toBeNull();
+      expect(row?.error_message).toMatch(/retry cap reached/i);
+      expect(row?.metadata).toMatchObject({
+        providerRetry: {
+          attempts: 4,
+          terminal: true,
+        },
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("release terminal-fails hard provider rejections without retrying", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-06-14T18:00:00Z"));
+    try {
+      const { contactId, propertyId } = await seed({ withConsent: true });
+      const queue = await sendSmsToContact(supabase, {
+        contactId,
+        propertyId,
+        body: "FAIL-CARRIER_BLOCK: do not retry this queued message",
+        queueOnly: true,
+      });
+      expect(queue.status).toBe("queued");
+      if (queue.status !== "queued") return;
+
+      const release = await releaseQueuedMessage(supabase, queue.messageId);
+      expect(release.status).toBe("provider_failed");
+
+      const { data: row } = await supabase
+        .from("messages")
+        .select("status, failed_at, metadata, error_message")
+        .eq("id", queue.messageId)
+        .single();
+      expect(row?.status).toBe("failed");
+      expect(row?.failed_at).not.toBeNull();
+      expect(row?.error_message).toMatch(/carrier blocked/i);
+      expect(row?.metadata).toMatchObject({
+        providerRetry: {
+          attempts: 1,
+          transient: false,
+          terminal: true,
+        },
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

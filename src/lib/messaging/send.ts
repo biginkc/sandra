@@ -1,7 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { normalizePhone } from "@/lib/csv/normalize";
-import { ConfigurationError } from "@/lib/errors/classes";
+import { ConfigurationError, ProviderError } from "@/lib/errors/classes";
 import { ensureConversationIdForThread } from "@/lib/messages/threading";
 import type { Database, Json } from "@/lib/supabase/types";
 import { reconcileStoredStatusEvents } from "./status-events";
@@ -37,6 +37,8 @@ type MessagesUpdate = Database["public"]["Tables"]["messages"]["Update"];
 
 const LANDLINE_BLOCK_REASON =
   "Contact only has landline numbers — SMS can't be delivered. Call or mail instead.";
+const PROVIDER_TRANSIENT_DEFER_MS = 5 * 60_000;
+const PROVIDER_TRANSIENT_MAX_DEFER_ATTEMPTS = 3;
 
 export type SendSmsOutcome =
   | { status: "sent"; messageId: string; externalId: string }
@@ -71,9 +73,21 @@ export type SendSmsOutcome =
       check: QuietHoursCheck;
     }
   | {
+      status: "blocked_not_due";
+      messageId: string;
+      retryAt: string;
+    }
+  | {
       status: "provider_failed";
       messageId: string;
       error: string;
+    }
+  | {
+      status: "provider_deferred";
+      messageId: string;
+      error: string;
+      attempt: number;
+      retryAt: string;
     }
   | { status: "contact_not_found" }
   | { status: "property_not_found" }
@@ -492,7 +506,7 @@ export async function releaseQueuedMessage(
   const { data: msg, error: fetchError } = await supabase
     .from("messages")
     .select(
-      "id, status, provider, org_id, contact_id, property_id, body, from_address, to_address, metadata",
+      "id, status, provider, org_id, contact_id, property_id, body, from_address, to_address, scheduled_for, metadata",
     )
     .eq("id", messageId)
     .maybeSingle();
@@ -508,6 +522,13 @@ export async function releaseQueuedMessage(
       return { status: "sent", messageId: msg.id, externalId: "(already sent)" };
     }
     return { status: "db_error", error: `message is ${msg.status}, not queued` };
+  }
+  if (msg.scheduled_for && new Date(msg.scheduled_for).getTime() > Date.now()) {
+    return {
+      status: "blocked_not_due",
+      messageId: msg.id,
+      retryAt: msg.scheduled_for,
+    };
   }
   if (!msg.contact_id || !msg.property_id || !msg.to_address) {
     return {
@@ -676,21 +697,32 @@ export async function releaseQueuedMessage(
       msg.metadata && typeof msg.metadata === "object" && !Array.isArray(msg.metadata)
         ? msg.metadata
         : null;
-    const { error: updateError } = await supabase
+    const { data: updated, error: updateError } = await supabase
       .from("messages")
       .update({
         status: "sent",
         external_id: result.externalId,
         sent_at: new Date().toISOString(),
+        failed_at: null,
+        error_message: null,
         metadata: {
           ...(currentMetadata ?? {}),
           providerStatus: result.providerStatus,
           raw: result.raw,
         } as Json,
       })
-      .eq("id", msg.id);
+      .eq("id", msg.id)
+      .eq("status", "pending")
+      .select("id")
+      .maybeSingle();
     if (updateError) {
       return { status: "db_error", error: updateError.message };
+    }
+    if (!updated) {
+      return {
+        status: "db_error",
+        error: "queued message changed while marking sent",
+      };
     }
     await reconcileStoredStatusEvents(
       supabase,
@@ -704,16 +736,165 @@ export async function releaseQueuedMessage(
     };
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
-    await supabase
+    const currentMetadata =
+      msg.metadata && typeof msg.metadata === "object" && !Array.isArray(msg.metadata)
+        ? msg.metadata
+        : null;
+    const retry = buildProviderRetryUpdate(e, currentMetadata);
+    if (retry.defer) {
+      const { data: deferred, error: deferError } = await supabase
+        .from("messages")
+        .update({
+          status: "queued",
+          scheduled_for: retry.retryAt,
+          error_message: message,
+          metadata: retry.metadata,
+        })
+        .eq("id", msg.id)
+        .eq("status", "pending")
+        .select("id")
+        .maybeSingle();
+      if (deferError) {
+        return { status: "db_error", error: deferError.message };
+      }
+      if (!deferred) {
+        return {
+          status: "db_error",
+          error: "queued message changed while scheduling provider retry",
+        };
+      }
+      return {
+        status: "provider_deferred",
+        messageId: msg.id,
+        error: message,
+        attempt: retry.attempt,
+        retryAt: retry.retryAt,
+      };
+    }
+
+    const { data: failed, error: failError } = await supabase
       .from("messages")
       .update({
         status: "failed",
         failed_at: new Date().toISOString(),
-        error_message: message,
+        error_message: retry.errorMessage,
+        metadata: retry.metadata,
       })
-      .eq("id", msg.id);
+      .eq("id", msg.id)
+      .eq("status", "pending")
+      .select("id")
+      .maybeSingle();
+    if (failError) {
+      return { status: "db_error", error: failError.message };
+    }
+    if (!failed) {
+      return {
+        status: "db_error",
+        error: "queued message changed while marking provider failure",
+      };
+    }
     return { status: "provider_failed", messageId: msg.id, error: message };
   }
+}
+
+function buildProviderRetryUpdate(
+  error: unknown,
+  currentMetadata: Record<string, unknown> | null,
+):
+  | {
+      defer: true;
+      attempt: number;
+      retryAt: string;
+      metadata: Json;
+    }
+  | {
+      defer: false;
+      errorMessage: string;
+      metadata: Json;
+    } {
+  const message = error instanceof Error ? error.message : String(error);
+  const previous = readProviderRetryMetadata(currentMetadata);
+  const transient = isTransientProviderError(error);
+  const attempt = previous.attempts + 1;
+  const now = new Date();
+  const baseMetadata = currentMetadata ?? {};
+  const providerRetry = {
+    attempts: attempt,
+    lastError: message,
+    lastAttemptAt: now.toISOString(),
+    transient,
+    maxDeferAttempts: PROVIDER_TRANSIENT_MAX_DEFER_ATTEMPTS,
+  };
+
+  if (transient && attempt <= PROVIDER_TRANSIENT_MAX_DEFER_ATTEMPTS) {
+    const retryAt = new Date(
+      now.getTime() + PROVIDER_TRANSIENT_DEFER_MS * attempt,
+    ).toISOString();
+    return {
+      defer: true,
+      attempt,
+      retryAt,
+      metadata: {
+        ...baseMetadata,
+        providerRetry: {
+          ...providerRetry,
+          nextRetryAt: retryAt,
+        },
+      } as Json,
+    };
+  }
+
+  return {
+    defer: false,
+    errorMessage:
+      transient && attempt > PROVIDER_TRANSIENT_MAX_DEFER_ATTEMPTS
+        ? `${message} (provider retry cap reached after ${previous.attempts} deferred attempts).`
+        : message,
+    metadata: {
+      ...baseMetadata,
+      providerRetry: {
+        ...providerRetry,
+        terminal: true,
+      },
+    } as Json,
+  };
+}
+
+function readProviderRetryMetadata(
+  metadata: Record<string, unknown> | null,
+): { attempts: number } {
+  const retry = metadata?.providerRetry;
+  if (!retry || typeof retry !== "object" || Array.isArray(retry)) {
+    return { attempts: 0 };
+  }
+  const attempts = (retry as Record<string, unknown>).attempts;
+  return {
+    attempts:
+      typeof attempts === "number" && Number.isInteger(attempts) ? attempts : 0,
+  };
+}
+
+function isTransientProviderError(error: unknown): boolean {
+  if (error instanceof ProviderError) {
+    const status = error.details?.status;
+    if (
+      typeof status === "number" &&
+      (status === 408 || status === 425 || status === 429 || status >= 500)
+    ) {
+      return true;
+    }
+  }
+  const message = (error instanceof Error ? error.message : String(error)).toLowerCase();
+  if (
+    /carrier blocked|unknown recipient|unknown number|invalid (recipient|phone|number)|opted out|unsubscribed/.test(
+      message,
+    )
+  ) {
+    return false;
+  }
+  return /\b429\b|rate limit|too many requests|timeout|timed out|abort|network|fetch failed|econn|etimedout|temporar|5\d\d/.test(
+    message,
+  );
 }
 
 function consentMessage(state: ConsentState): string {

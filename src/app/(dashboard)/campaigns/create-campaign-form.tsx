@@ -26,6 +26,11 @@ import {
   hasEffectiveAudience,
 } from "@/lib/prospects/effective-audience";
 import type { FilterBlock } from "@/lib/prospects/filter-schema";
+import {
+  SMS_PACING_SECONDS,
+  paceValidationMessage,
+  validateSmsPaceSeconds,
+} from "@/lib/messaging/pacing";
 
 import { createCampaign } from "./actions";
 
@@ -38,7 +43,7 @@ type ValidationErrors = Partial<
   Record<"name" | "body" | "pace" | "audience", string>
 >;
 
-const DEFAULT_PACE_SECONDS = "18";
+const DEFAULT_PACE_SECONDS = String(SMS_PACING_SECONDS.savedCampaignDefault);
 
 function parsePaceSeconds(value: string): number | null {
   const trimmed = value.trim();
@@ -90,8 +95,11 @@ export function CreateCampaignForm({
       nextErrors.body = "Write a message or choose a template pool.";
     }
 
-    if (paceValue !== null && (!Number.isInteger(paceValue) || paceValue < 10 || paceValue > 600)) {
-      nextErrors.pace = "Pacing must be between 10 seconds and 10 minutes.";
+    if (
+      paceValue !== null &&
+      !validateSmsPaceSeconds(paceValue, { mode: "saved_campaign" }).ok
+    ) {
+      nextErrors.pace = paceValidationMessage("saved_campaign");
     }
 
     if (!hasEffectiveAudience({ search: audienceSearch, blockStack: blocks })) {
@@ -235,8 +243,8 @@ export function CreateCampaignForm({
             <Input
               id="campaign-pace-seconds"
               type="number"
-              min={10}
-              max={600}
+              min={SMS_PACING_SECONDS.savedCampaignMin}
+              max={SMS_PACING_SECONDS.max}
               step={1}
               value={paceSeconds}
               onChange={(event) => setPaceSeconds(event.target.value)}
@@ -247,7 +255,9 @@ export function CreateCampaignForm({
               <p className="text-destructive text-xs">{errors.pace}</p>
             ) : (
               <p className="text-muted-foreground text-xs">
-                10 to 600 seconds between queued sends.
+                {SMS_PACING_SECONDS.savedCampaignDefault} seconds default, or{" "}
+                {SMS_PACING_SECONDS.customMin} to {SMS_PACING_SECONDS.max}{" "}
+                seconds custom.
               </p>
             )}
           </div>

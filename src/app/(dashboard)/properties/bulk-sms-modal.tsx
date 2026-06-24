@@ -22,6 +22,11 @@ import {
   countAlreadyContacted,
   listSmsTemplateCategories,
 } from "./actions";
+import {
+  SMS_PACING_JITTER_PCT,
+  SMS_PACING_SECONDS,
+  paceValidationMessage,
+} from "@/lib/messaging/pacing";
 
 type Category = { category: string; count: number };
 
@@ -39,8 +44,8 @@ export function resolvePaceSeconds(value: number, unit: PaceUnit): number {
   return value * (unit === "minutes" ? 60 : 1);
 }
 
-const PACE_MIN_SECONDS = 10;
-const PACE_MAX_SECONDS = 600;
+const PACE_MIN_SECONDS = SMS_PACING_SECONDS.customMin;
+const PACE_MAX_SECONDS = SMS_PACING_SECONDS.max;
 const SKIP_DEFAULT_THRESHOLD = 50;
 
 // Pacing presets (260506-m3a). Each preset is a pace + jitter bundle —
@@ -54,21 +59,21 @@ const PRESETS: Record<
 > = {
   conservative: {
     label: "Conservative",
-    paceSeconds: 14,
+    paceSeconds: SMS_PACING_SECONDS.conservative,
     tagline: "Low and slow — best for warmup or paranoid mode.",
   },
   steady: {
     label: "Steady",
-    paceSeconds: 8,
+    paceSeconds: SMS_PACING_SECONDS.steadyDefault,
     tagline: "Recommended. Continuous 8s pace.",
   },
   push: {
     label: "Push",
-    paceSeconds: 4,
+    paceSeconds: SMS_PACING_SECONDS.push,
     tagline: "Fast continuous drain.",
   },
 };
-const JITTER_PCT = 0.2;
+const JITTER_PCT = SMS_PACING_JITTER_PCT;
 
 /**
  * Mirror the server-side bulkQueueSms drain math so the UI shows the
@@ -239,7 +244,7 @@ export function BulkSmsModal({ open, propertyIds, onClose, onQueued }: Props) {
       return;
     }
     if (paceOutOfRange) {
-      toast.error("Pacing must be between 10 seconds and 10 minutes.");
+      toast.error(paceValidationMessage("bulk"));
       return;
     }
     if (mode === "category" && !selectedCategory) {
@@ -511,7 +516,7 @@ export function BulkSmsModal({ open, propertyIds, onClose, onQueued }: Props) {
                   </div>
                   {paceOutOfRange ? (
                     <p className="text-destructive text-xs" role="alert">
-                      Pacing must be between 10 seconds and 10 minutes.
+                      {paceValidationMessage("bulk")}
                     </p>
                   ) : null}
                 </div>

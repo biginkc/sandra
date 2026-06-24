@@ -13,6 +13,23 @@ const supabase = createTestClient();
 
 const SAFE_NOW = new Date("2026-04-23T18:00:00Z");
 
+type FakeQueryResult = {
+  data: unknown[] | null;
+  error: { message: string } | null;
+};
+
+function fakeQuery(result: FakeQueryResult) {
+  const query = {
+    select: () => query,
+    eq: () => query,
+    not: () => query,
+    lte: () => query,
+    order: () => query,
+    limit: () => Promise.resolve(result),
+  };
+  return query;
+}
+
 async function seedLead(opts: {
   phone: string;
   state?: string;
@@ -93,6 +110,8 @@ describe("runSequenceTick — queue drain (integration)", () => {
 
   it("no-ops cleanly when there are no queued messages due", async () => {
     const summary = await runSequenceTick(supabase);
+    expect(summary.dueMessagesSelected).toBe(0);
+    expect(summary.drainLimitHit).toBe(false);
     expect(summary.processed).toBe(0);
     expect(summary.drained).toBe(0);
     expect(getMockMessageLog()).toHaveLength(0);
@@ -115,6 +134,7 @@ describe("runSequenceTick — queue drain (integration)", () => {
     });
 
     const summary = await runSequenceTick(supabase);
+    expect(summary.dueMessagesSelected).toBe(1);
     expect(summary.drained).toBe(1);
 
     const { data: msg } = await supabase
@@ -215,6 +235,8 @@ describe("runSequenceTick — queue drain (integration)", () => {
     }
 
     const summary = await runSequenceTick(supabase, { drainLimit: 3 });
+    expect(summary.dueMessagesSelected).toBe(3);
+    expect(summary.drainLimitHit).toBe(true);
     expect(summary.drained).toBe(3);
     expect(summary.budgetExhausted).toBe(false);
 
@@ -223,6 +245,23 @@ describe("runSequenceTick — queue drain (integration)", () => {
       .select("*", { count: "exact", head: true })
       .eq("status", "queued");
     expect(count).toBe(1);
+  });
+
+  it("fails the tick when the due queued message query errors", async () => {
+    const failingSupabase = {
+      from(table: string) {
+        return table === "sequence_enrollments"
+          ? fakeQuery({ data: [], error: null })
+          : fakeQuery({
+              data: null,
+              error: { message: "messages query failed" },
+            });
+      },
+    } as unknown as Parameters<typeof runSequenceTick>[0];
+
+    await expect(runSequenceTick(failingSupabase)).rejects.toThrow(
+      "fetch due queued messages failed: messages query failed",
+    );
   });
 
   it("stops draining when the time budget is exhausted and leaves the rest queued", async () => {
@@ -334,5 +373,40 @@ describe("runSequenceTick — queue drain (integration)", () => {
     expect(new Date(msg!.scheduled_for!).getTime()).toBeGreaterThan(
       QUIET_NOW.getTime(),
     );
+  });
+
+  it("defers transient provider failures without terminal-failing queued rows", async () => {
+    const { propertyId, contactId } = await seedLead({
+      phone: "+18165550110",
+    });
+    const msgId = await seedQueuedMessage({
+      propertyId,
+      contactId,
+      toPhone: "+18165550110",
+      scheduledFor: new Date(SAFE_NOW.getTime() - 60 * 60_000),
+      body: "FAIL-RATE_LIMIT cron defer",
+    });
+
+    const summary = await runSequenceTick(supabase);
+    expect(summary.dueMessagesSelected).toBe(1);
+    expect(summary.drained).toBe(0);
+    expect(summary.drainOutcomes.provider_deferred).toBe(1);
+
+    const { data: msg } = await supabase
+      .from("messages")
+      .select("status, scheduled_for, failed_at, metadata")
+      .eq("id", msgId)
+      .single();
+    expect(msg!.status).toBe("queued");
+    expect(msg!.failed_at).toBeNull();
+    expect(new Date(msg!.scheduled_for!).getTime()).toBeGreaterThan(
+      SAFE_NOW.getTime(),
+    );
+    expect(msg!.metadata).toMatchObject({
+      providerRetry: {
+        attempts: 1,
+        transient: true,
+      },
+    });
   });
 });

@@ -19,6 +19,10 @@ import { loadTemplateVars } from "@/lib/sequences/template-vars";
 import { renderTemplate } from "@/lib/sequences/render";
 import type { Database } from "@/lib/supabase/types";
 import {
+  validateSmsPaceSeconds,
+  type SmsPacingProfile,
+} from "@/lib/messaging/pacing";
+import {
   classifySmsPhoneAvailability,
   selectBestSmsPhone,
   type SmsPhoneAvailability,
@@ -34,6 +38,7 @@ export type BulkSmsQueueBaseOpts = {
   body?: string;
   templateCategory?: string;
   paceSeconds?: number;
+  pacingProfile?: SmsPacingProfile;
   skipIfContacted?: boolean;
   jitterPct?: number;
   /**
@@ -111,7 +116,14 @@ export async function queueSmsBatch(
   },
 ): Promise<BulkSmsScheduleState> {
   const { opts, state } = args;
-  const paceSeconds = opts.paceSeconds ?? 18;
+  const paceResult = validateSmsPaceSeconds(opts.paceSeconds, {
+    mode: "bulk",
+    pacingProfile: opts.pacingProfile,
+  });
+  if (!paceResult.ok) {
+    throw new Error(paceResult.message);
+  }
+  const paceSeconds = paceResult.paceSeconds;
   const jitterPct = opts.jitterPct ?? 0;
 
   // Fetch properties in chunks — Supabase PostgREST rejects large IN

@@ -101,6 +101,10 @@ export async function runSequenceTick(
   outcomes: Record<string, number>;
   /** Messages actually handed to the provider this tick (status=sent). */
   drained: number;
+  /** Due queued messages selected for release before per-row outcomes. */
+  dueMessagesSelected: number;
+  /** True when at least one due queued message remains behind the selected page. */
+  drainLimitHit: boolean;
   /** Per-outcome tally of every release attempt, blocked ones included. */
   drainOutcomes: Record<string, number>;
   budgetExhausted: boolean;
@@ -143,14 +147,21 @@ export async function runSequenceTick(
   // left queued for the next tick. Stops at the time budget so the
   // platform never kills us mid-release; whatever is left stays
   // cleanly `queued` for the next tick.
-  const { data: dueMessages } = await supabase
+  const { data: dueMessagesPage, error: dueMessagesError } = await supabase
     .from("messages")
     .select("id")
     .eq("status", "queued")
     .lte("scheduled_for", nowIso)
     .not("scheduled_for", "is", null)
     .order("scheduled_for", { ascending: true })
-    .limit(drainLimit);
+    .limit(drainLimit + 1);
+
+  if (dueMessagesError) {
+    throw new Error(`fetch due queued messages failed: ${dueMessagesError.message}`);
+  }
+
+  const dueMessages = (dueMessagesPage ?? []).slice(0, drainLimit);
+  const drainLimitHit = (dueMessagesPage?.length ?? 0) > drainLimit;
 
   let drained = 0;
   const drainOutcomes: Record<string, number> = {};
@@ -194,6 +205,8 @@ export async function runSequenceTick(
     processed,
     outcomes,
     drained,
+    dueMessagesSelected: dueMessages.length,
+    drainLimitHit,
     drainOutcomes,
     budgetExhausted,
   };

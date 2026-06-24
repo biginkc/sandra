@@ -176,6 +176,14 @@ async function createAuthUser(email: string): Promise<string> {
   if (error || !data.user) {
     throw new Error(`createAuthUser failed: ${error?.message}`);
   }
+  const orgId = await getOrgId();
+  const { error: membershipError } = await testClient
+    .from("memberships")
+    .insert({ user_id: data.user.id, org_id: orgId, role: "member" });
+  if (membershipError) {
+    await testClient.auth.admin.deleteUser(data.user.id);
+    throw new Error(`createAuthUser membership failed: ${membershipError.message}`);
+  }
   createdAuthUsers.push(data.user.id);
   return data.user.id;
 }
@@ -1044,7 +1052,8 @@ describe("bulkQueueSms (integration)", () => {
     ]);
   });
 
-  it("default opts (no jitter) schedule a deterministic paced ramp", async () => {
+  it("explicit canary profile schedules a deterministic 6s paced ramp", async () => {
+    vi.stubEnv("SANDRA_SMS_CANARY_PACING_ENABLED", "true");
     // 3 leads → all schedule spaced by paceSeconds from the anchor.
     const ids = [
       (await seedLead({ phone: "+18165559001", address: "1 NoCap St" }))
@@ -1056,11 +1065,12 @@ describe("bulkQueueSms (integration)", () => {
     ];
     const result = await bulkQueueSms(ids, adHocOpts({
       body: "No cap",
-      paceSeconds: 5,
+      paceSeconds: 6,
+      pacingProfile: "canary",
       // jitterPct omitted (defaults to 0)
     }));
+    if (!result.ok) throw new Error(result.error.message);
     expect(result.ok).toBe(true);
-    if (!result.ok) return;
     expect(result.data.succeeded).toBe(3);
 
     const { data: messages } = await testClient
@@ -1071,8 +1081,51 @@ describe("bulkQueueSms (integration)", () => {
 
     const base = SAFE_NOW.getTime();
     expect(new Date(messages![0].scheduled_for!).getTime()).toBe(base);
-    expect(new Date(messages![1].scheduled_for!).getTime()).toBe(base + 5_000);
-    expect(new Date(messages![2].scheduled_for!).getTime()).toBe(base + 10_000);
+    expect(new Date(messages![1].scheduled_for!).getTime()).toBe(base + 6_000);
+    expect(new Date(messages![2].scheduled_for!).getTime()).toBe(base + 12_000);
+  });
+
+  it("rejects client-supplied 6s canary pacing unless the server enables it", async () => {
+    const { propertyId } = await seedLead({
+      phone: "+18165559014",
+      address: "14 Client Canary St",
+    });
+
+    const result = await bulkQueueSms([propertyId], adHocOpts({
+      body: "Client canary",
+      paceSeconds: 6,
+      pacingProfile: "canary",
+    }));
+
+    expect(result).toEqual({
+      ok: false,
+      error: {
+        code: "VALIDATION",
+        message:
+          "Pacing must use a locked preset (4s push, 8s steady, 14s conservative), the explicit 6s canary profile, or a custom value between 10 seconds and 10 minutes.",
+      },
+    });
+  });
+
+  it("rejects arbitrary sub-10s custom pacing without a locked preset or canary profile", async () => {
+    const { propertyId } = await seedLead({
+      phone: "+18165559004",
+      address: "4 Invalid Pace St",
+    });
+
+    const result = await bulkQueueSms([propertyId], adHocOpts({
+      body: "Too fast",
+      paceSeconds: 5,
+    }));
+
+    expect(result).toEqual({
+      ok: false,
+      error: {
+        code: "VALIDATION",
+        message:
+          "Pacing must use a locked preset (4s push, 8s steady, 14s conservative), the explicit 6s canary profile, or a custom value between 10 seconds and 10 minutes.",
+      },
+    });
   });
 
   it("deferred ad-hoc sends create campaign recipients and serialize the resolved campaignId", async () => {
@@ -1142,12 +1195,16 @@ describe("bulkQueueSms (integration)", () => {
         campaignId?: string | null;
         campaignName?: string | null;
         campaignSource?: string | null;
+        paceSeconds?: number | null;
+        pacingProfile?: string | null;
       };
       property_ids?: string[];
     };
     expect(input.opts?.campaignId).toBe(campaign!.id);
     expect(input.opts?.campaignName).toBeUndefined();
     expect(input.opts?.campaignSource).toBe("ad_hoc_bulk_sms");
+    expect(input.opts?.paceSeconds).toBe(10);
+    expect(input.opts?.pacingProfile).toBeUndefined();
     expect(input.property_ids).toHaveLength(501);
   });
 });
