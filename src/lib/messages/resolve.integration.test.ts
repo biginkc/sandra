@@ -167,7 +167,29 @@ describe("resolveThreadToExistingProperty (integration)", () => {
       address: "101 Resolve Existing Ln",
       homeownerContactId: contactId,
     });
-    const sourceConversationId = await sourceConversation(contactId, phone);
+    const sourceConversationId = randomUUID();
+    const seededMetadata: NonNullable<
+      Database["public"]["Tables"]["messages"]["Insert"]["metadata"]
+    > = {
+      processing: {
+        marker: "gate-3-preserve-metadata",
+        attempts: 2,
+        ready: true,
+      },
+      notification: {
+        channel: "operator",
+        deliveredAt: "2026-06-24T00:00:00.000Z",
+      },
+    };
+    const sourceMessageId = await seedSms({
+      contactId,
+      propertyId: null,
+      conversationId: sourceConversationId,
+      direction: "inbound",
+      phone,
+      body: "which house?",
+      metadata: seededMetadata,
+    });
     const expectedConversationId = await destinationConversation(
       contactId,
       propertyId,
@@ -190,13 +212,15 @@ describe("resolveThreadToExistingProperty (integration)", () => {
 
     const { data: messages } = await supabase
       .from("messages")
-      .select("property_id, conversation_id, metadata")
+      .select("id, property_id, conversation_id, metadata")
       .eq("contact_id", contactId);
     expect(new Set(messages?.map((m) => m.conversation_id))).toEqual(
       new Set([expectedConversationId]),
     );
     expect(messages?.every((m) => m.property_id === propertyId)).toBe(true);
-    expect(messages?.every((m) => m.metadata === null)).toBe(true);
+    expect(messages?.find((m) => m.id === sourceMessageId)?.metadata).toEqual(
+      seededMetadata,
+    );
 
     const threads = (await listThreads(supabase, {})).filter(
       (thread) => thread.contactId === contactId,
@@ -328,6 +352,63 @@ describe("resolveThreadToExistingProperty (integration)", () => {
     }
   });
 
+  it("G5 refuses when source phone maps to a different supplied contact with zero mutation", async () => {
+    const contactA = await seedContact("+18165552125");
+    const contactB = await seedContact("+18165552126");
+    const propertyId = await seedProperty({ address: "125 Wrong Contact Ln" });
+    const sourceConversationId = await sourceConversation(
+      contactA,
+      "+18165552125",
+    );
+
+    const result = await resolveThreadToExistingProperty({
+      supabase,
+      sourceConversationId,
+      contactId: contactB,
+      propertyId,
+      role: "homeowner",
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe("AMBIGUOUS_CONTACT");
+    }
+
+    const [{ data: property }, { data: rows }, { data: detail }, { data: registry }] =
+      await Promise.all([
+        supabase
+          .from("properties")
+          .select("homeowner_contact_id, agent_contact_id")
+          .eq("id", propertyId)
+          .single(),
+        supabase
+          .from("messages")
+          .select("contact_id, property_id, conversation_id")
+          .eq("conversation_id", sourceConversationId),
+        supabase
+          .from("homeowner_details")
+          .select("contact_id")
+          .eq("contact_id", contactB),
+        supabase
+          .from("message_threads")
+          .select("conversation_id")
+          .eq("contact_id", contactB)
+          .eq("property_id", propertyId),
+      ]);
+    expect(property).toMatchObject({
+      homeowner_contact_id: null,
+      agent_contact_id: null,
+    });
+    expect(rows).toHaveLength(1);
+    expect(rows?.[0]).toMatchObject({
+      contact_id: contactA,
+      property_id: null,
+      conversation_id: sourceConversationId,
+    });
+    expect(detail).toEqual([]);
+    expect(registry).toEqual([]);
+  });
+
   it("rejects invalid runtime roles before any mutation", async () => {
     const phone = "+18165552115";
     const contactId = await seedContact(phone);
@@ -425,6 +506,34 @@ describe("resolveThreadToExistingProperty (integration)", () => {
       role: "homeowner",
     });
     expect(sameContact.ok).toBe(true);
+    if (!sameContact.ok) return;
+
+    const [
+      { data: sameContactPropertyRow },
+      { data: sameContactDetails },
+      { data: sameContactRows },
+    ] = await Promise.all([
+      supabase
+        .from("properties")
+        .select("homeowner_contact_id")
+        .eq("id", sameContactProperty)
+        .single(),
+      supabase
+        .from("homeowner_details")
+        .select("contact_id")
+        .eq("contact_id", contactId),
+      supabase
+        .from("messages")
+        .select("property_id, conversation_id")
+        .eq("conversation_id", sameContact.data.conversationId),
+    ]);
+    expect(sameContactPropertyRow?.homeowner_contact_id).toBe(contactId);
+    expect(sameContactDetails).toEqual([{ contact_id: contactId }]);
+    expect(sameContactRows).toHaveLength(1);
+    expect(sameContactRows?.[0]).toMatchObject({
+      property_id: sameContactProperty,
+      conversation_id: sameContact.data.conversationId,
+    });
   });
 
   it("links role sidecars in the contact org instead of the default org", async () => {

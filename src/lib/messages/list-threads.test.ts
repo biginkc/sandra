@@ -435,6 +435,81 @@ describe("listThreads — isOptedOut (DNC) flag", () => {
     });
   });
 
+  it("uses the newest non-null property when one conversation carries two linked properties", async () => {
+    const { supabase } = makeStub({
+      messages: [
+        {
+          contact_id: "c-newest-wins",
+          property_id: "p-recent",
+          conversation_id: "conv-newest-wins",
+          body: "newer linked context",
+          direction: "inbound",
+          created_at: "2026-06-09T12:00:00.000Z",
+          read_at: null,
+        },
+        {
+          contact_id: "c-newest-wins",
+          property_id: "p-older",
+          conversation_id: "conv-newest-wins",
+          body: "older linked context",
+          direction: "outbound",
+          created_at: "2026-06-08T12:00:00.000Z",
+          read_at: null,
+        },
+      ],
+      contacts: new Map([
+        [
+          "c-newest-wins",
+          {
+            id: "c-newest-wins",
+            first_name: "Newest",
+            last_name: "Wins",
+            entity_name: null,
+            phone_1: "+18165550126",
+          },
+        ],
+      ]),
+      properties: new Map([
+        [
+          "p-older",
+          {
+            id: "p-older",
+            address: "100 Older Ave",
+            city: null,
+            state: null,
+            status: "prospect",
+            outreach_dispo: null,
+            assigned_user_id: null,
+          },
+        ],
+        [
+          "p-recent",
+          {
+            id: "p-recent",
+            address: "200 Newer Ave",
+            city: null,
+            state: null,
+            status: "prospect",
+            outreach_dispo: null,
+            assigned_user_id: null,
+          },
+        ],
+      ]),
+      consentEvents: [],
+    });
+
+    const threads = await listThreads(supabase, {});
+
+    expect(threads).toHaveLength(1);
+    expect(threads[0]).toMatchObject({
+      threadId: "conv-newest-wins",
+      contactId: "c-newest-wins",
+      propertyId: "p-recent",
+      propertyAddress: "200 Newer Ave",
+      lastMessageBody: "newer linked context",
+    });
+  });
+
   it("keeps two propertyless conversations for the same contact as separate buckets", async () => {
     const { supabase } = makeStub({
       messages: [

@@ -1,0 +1,50 @@
+
+> sandra@0.1.0 test
+> vitest run src/lib/messages/list-threads.test.ts
+
+
+ RUN  v4.1.5 /Users/jarradhenry/Sites/BMH apps/_codex_worktrees/sandra-messages-resolve-to-property
+
+(node:54338) [DEP0205] DeprecationWarning: `module.register()` is deprecated. Use `module.registerHooks()` instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+ ✓ src/lib/messages/list-threads.test.ts (23 tests) 14ms
+
+ Test Files  1 passed (1)
+      Tests  23 passed (23)
+   Start at  01:51:33
+   Duration  142ms (transform 29ms, setup 0ms, import 37ms, tests 14ms, environment 0ms)
+
+
+> sandra@0.1.0 test:integration
+> vitest run --config vitest.integration.config.ts src/lib/messages/resolve.integration.test.ts src/app/(dashboard)/messages/actions.search.integration.test.ts
+
+
+ RUN  v4.1.5 /Users/jarradhenry/Sites/BMH apps/_codex_worktrees/sandra-messages-resolve-to-property
+
+(node:54353) [DEP0205] DeprecationWarning: `module.register()` is deprecated. Use `module.registerHooks()` instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+ ✓ src/lib/messages/resolve.integration.test.ts (16 tests) 18825ms
+     ✓ G1/G2/G9 resolves to ensureConversationIdForThread and collapses with an existing property thread  2050ms
+     ✓ G3 only restamps the selected source conversation when one contact has two propertyless conversations  1147ms
+     ✓ G4 refuses cross-org properties without updates and allows same-org non-candidates  1320ms
+     ✓ refuses archived properties without updates  960ms
+     ✓ G5 refuses source conversations whose direction-aware phone mapping finds more than one contact  1077ms
+     ✓ G5 refuses when source phone maps to a different supplied contact with zero mutation  930ms
+     ✓ rejects invalid runtime roles before any mutation  750ms
+     ✓ G7 refuses a role held by a different contact with zero mutation, and same-contact role is idempotent  1615ms
+     ✓ links role sidecars in the contact org instead of the default org  1293ms
+     ✓ G8 allows a session-scoped non-admin member to resolve the thread  1501ms
+     ✓ G10 leaves queued outbound rows in the source conversation untouched  1129ms
+     ✓ fails without side effects when the source conversation has no eligible rows  840ms
+     ✓ creates a new property, links the role, and restamps the source conversation  1172ms
+     ✓ creates the property and role sidecar in the source contact org  1228ms
+     ✓ does not create a property when no source rows are eligible  767ms
+     ✓ returns all active linked properties and excludes archived linked properties  964ms
+ ✓ src/app/(dashboard)/messages/actions.search.integration.test.ts (1 test) 1130ms
+     ✓ returns only properties visible to the caller's org  1061ms
+
+ Test Files  2 passed (2)
+      Tests  17 passed (17)
+   Start at  01:51:33
+   Duration  20.71s (transform 79ms, setup 0ms, import 165ms, tests 19.95s, environment 0ms)
+
