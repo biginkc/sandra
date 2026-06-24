@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState, useTransition, useCallback } from "react";
+import { useMemo, useRef, useState, useTransition, useCallback } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -39,13 +39,12 @@ const PRESET_CATEGORIES = [
   "General",
 ];
 
-const sampleVars = buildSampleVars();
-
 type Props = {
   mode: "create" | "edit";
   template?: TemplateRow;
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  senderName?: string;
 };
 
 // SMS character counting
@@ -61,12 +60,22 @@ function getSmsInfo(text: string) {
   return { len, segments, encoding: isGsm7 ? "GSM-7" : "UCS-2", charLimit };
 }
 
-export function TemplateDialog({ mode, template, open, onOpenChange }: Props) {
+export function TemplateDialog({
+  mode,
+  template,
+  open,
+  onOpenChange,
+  senderName = "Mel",
+}: Props) {
   const [name, setName] = useState(template?.name ?? "");
   const [content, setContent] = useState(template?.content ?? "");
   const [category, setCategory] = useState(template?.category ?? "General");
   const [pending, startTransition] = useTransition();
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const sampleVars = useMemo(
+    () => buildSampleVars({ my_first_name: senderName }),
+    [senderName],
+  );
 
   const smsInfo = getSmsInfo(content);
   const preview = renderTemplate(content, sampleVars);
@@ -244,9 +253,7 @@ export function TemplateDialog({ mode, template, open, onOpenChange }: Props) {
               </div>
               <div className="text-muted-foreground mt-4 text-[10px]">
                 <span className="font-semibold">Sample data:</span>{" "}
-                {TEMPLATE_VARIABLES.map((v) => `${v.label}: ${v.example}`).join(
-                  " · ",
-                )}
+                {TEMPLATE_VARIABLES.map((v) => `${v.label}: ${sampleVars[v.name]}`).join(" · ")}
               </div>
             </div>
           </div>

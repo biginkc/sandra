@@ -258,12 +258,8 @@ export async function bulkQueueSms(
   try {
     const supabase = await createClient();
 
-    // Resolve the current session user once so {{my_first_name}} renders
-    // for every property in the batch. Without this, templates referencing
-    // the sender token produced bodies like "Andrew,  here." (canceled in
-    // prod 2026-05-05). Admin client is needed by the resolver to call
-    // auth.admin.getUserById on the lookup; the WR-02 split keeps the
-    // RLS-scoped reads on the session client.
+    // Resolve the current session user for audit/job ownership only.
+    // `{{my_first_name}}` is a fixed outbound sender persona now.
     const {
       data: { user },
     } = await supabase.auth.getUser();
@@ -331,13 +327,11 @@ export async function bulkQueueSms(
     }
 
     if (resolvedPropertyIds.length <= SYNC_BULK_SMS_LIMIT) {
-      const adminClient = createAdminClient();
       let state;
       try {
-        state = await queueSmsBatch(supabase, adminClient, {
+        state = await queueSmsBatch(supabase, {
           propertyIds: resolvedPropertyIds,
           opts: resolvedOpts,
-          enrolledByUserId,
           state: freshScheduleState(Date.now()),
         });
       } catch (e) {
@@ -401,7 +395,6 @@ export async function bulkQueueSms(
         input_params: {
           property_ids: resolvedPropertyIds,
           opts: resolvedOpts,
-          enrolled_by_user_id: enrolledByUserId,
           anchor_ms: Date.now(),
         },
       })

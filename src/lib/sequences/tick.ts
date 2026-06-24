@@ -167,7 +167,6 @@ export async function processEnrollmentTick(
     const vars = await loadTemplateVars(client, {
       propertyId: enrollment.property_id,
       contactId: enrollment.contact_id,
-      enrolledByUserId: enrollment.enrolled_by_user_id,
     });
 
     // Load the sequence to honor its `append_opt_out` setting.

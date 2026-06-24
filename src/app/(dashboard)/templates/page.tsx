@@ -8,6 +8,7 @@ import {
 import { listTemplates, listCategories } from "./actions";
 import { NewTemplateButton } from "./new-template-button";
 import { TemplatesList } from "./templates-list";
+import { getOutboundSenderName } from "@/lib/messaging/sender-persona";
 
 export const TEMPLATES_SORTABLE_COLUMNS = [
   "name",
@@ -42,6 +43,7 @@ export default async function TemplatesPage({
 
   const templates = templatesResult.ok ? templatesResult.data : [];
   const categories = categoriesResult.ok ? categoriesResult.data : [];
+  const senderName = getOutboundSenderName();
 
   const parsed = parseTableSearch<TemplatesFilters>(raw, {
     sortableColumns: TEMPLATES_SORTABLE_COLUMNS,
@@ -61,7 +63,7 @@ export default async function TemplatesPage({
         breadcrumb={[{ label: "Workspace" }, { label: "Templates" }]}
         title="Templates"
         description="Reusable SMS templates with variable interpolation. Use {{first_name | fallback}} syntax for personalization."
-        actions={<NewTemplateButton />}
+        actions={<NewTemplateButton senderName={senderName} />}
       />
 
       {!templatesResult.ok && (
@@ -74,6 +76,7 @@ export default async function TemplatesPage({
         templates={templates}
         categories={categories}
         parsed={parsed}
+        senderName={senderName}
       />
     </Page>
   );

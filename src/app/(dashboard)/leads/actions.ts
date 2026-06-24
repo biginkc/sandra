@@ -1836,8 +1836,8 @@ export async function createLeadNote(
  *
  * Wraps the shared `loadTemplateVars` from sequences — same variable
  * whitelist, same resolution logic. The only difference is that the
- * "enrolled by" user (which populates `{{my_first_name}}`) is the
- * current session user rather than a sequence enrollment author.
+ * outbound sender persona is fixed rather than derived from the
+ * current session user.
  */
 export async function loadLeadVars(
   propertyId: string,
@@ -1864,27 +1864,12 @@ export async function loadLeadVars(
       };
     }
 
-    // 2. Resolve the current user for {{my_first_name}}.
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
-
-    // 3. Delegate to the shared loader. Property / contact / organization
-    //    reads run on the session client (RLS-scoped); the admin client is
-    //    only handed to the user-id → first-name resolver, which needs
-    //    `auth.admin.getUserById`. This narrows the service-role surface
-    //    so a future RLS tightening on `properties` / `contacts` /
-    //    `organizations` is not silently bypassed here (WR-02).
-    const adminClient = createAdminClient();
-    const vars = await loadTemplateVars(
-      supabase,
-      {
-        propertyId,
-        contactId: property.homeowner_contact_id,
-        enrolledByUserId: user?.id ?? null,
-      },
-      adminClient,
-    );
+    // 2. Delegate to the shared loader. Property / contact / organization
+    //    reads run on the session client (RLS-scoped).
+    const vars = await loadTemplateVars(supabase, {
+      propertyId,
+      contactId: property.homeowner_contact_id,
+    });
 
     return ok(vars);
   } catch (e) {

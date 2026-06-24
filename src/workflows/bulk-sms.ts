@@ -45,7 +45,6 @@ export type BulkSmsWorkflowParams = {
 type LoadedBulkSmsJob = {
   propertyIds: string[];
   opts: ResolvedBulkSmsQueueOpts;
-  enrolledByUserId: string | null;
   initialState: BulkSmsScheduleState;
 };
 
@@ -102,7 +101,6 @@ async function loadBulkSmsJob(jobId: string): Promise<LoadedBulkSmsJob> {
   const params = job.input_params as {
     property_ids?: unknown;
     opts?: ResolvedBulkSmsQueueOpts;
-    enrolled_by_user_id?: string | null;
     anchor_ms?: number;
   } | null;
 
@@ -174,7 +172,6 @@ async function loadBulkSmsJob(jobId: string): Promise<LoadedBulkSmsJob> {
       campaignId,
       campaignSource: rawOpts.campaignSource,
     },
-    enrolledByUserId: params?.enrolled_by_user_id ?? null,
     initialState: freshScheduleState(params?.anchor_ms ?? Date.now()),
   };
 }
@@ -211,7 +208,6 @@ async function bulkSmsChunkStep(args: {
   jobId: string;
   propertyIds: string[];
   opts: ResolvedBulkSmsQueueOpts;
-  enrolledByUserId: string | null;
   processedBefore: number;
   state: BulkSmsScheduleState;
 }): Promise<BulkSmsScheduleState> {
@@ -219,10 +215,9 @@ async function bulkSmsChunkStep(args: {
 
   const adminClient = createAdminClient();
   const { queueSmsBatch } = await import("@/lib/messaging/bulk-queue");
-  const state = await queueSmsBatch(adminClient, adminClient, {
+  const state = await queueSmsBatch(adminClient, {
     propertyIds: args.propertyIds,
     opts: args.opts,
-    enrolledByUserId: args.enrolledByUserId,
     state: args.state,
   });
 
@@ -376,7 +371,6 @@ export async function bulkSmsWorkflow(
         jobId: params.jobId,
         propertyIds: loaded.propertyIds.slice(offset, offset + CHUNK_SIZE),
         opts: loaded.opts,
-        enrolledByUserId: loaded.enrolledByUserId,
         processedBefore: offset,
         state,
       });
