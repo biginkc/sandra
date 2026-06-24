@@ -33,6 +33,7 @@ export type InboundIntentInput = {
   body: string;
   receivedAt: Date;
   raw: unknown;
+  mediaUrls: string[] | null;
   webhookEventId: string | null;
   contactId: string | null;
   propertyId: string | null;
@@ -116,14 +117,31 @@ export async function claimInboundSmsIntent(
     );
   }
 
-  await supabase
-    .from("sms_inbound_intents")
-    .update({
-      duplicate_count: duplicate.duplicate_count + 1,
-      last_provider_message_id: input.externalId,
-      updated_at: new Date().toISOString(),
-    })
-    .eq("id", duplicate.id);
+  if (
+    duplicate.first_provider_message_id === input.externalId &&
+    duplicate.status !== "side_effects_complete"
+  ) {
+    await recordDelivery(supabase, {
+      input,
+      intentId: duplicate.id,
+      payloadSha256: fingerprint.payloadSha256,
+      classification: "canonical",
+    });
+    return { duplicate: false, intentId: duplicate.id, mode };
+  }
+
+  const { error: incrementError } = await supabase.rpc(
+    "increment_sms_inbound_intent_duplicate",
+    {
+      p_intent_id: duplicate.id,
+      p_last_provider_message_id: input.externalId,
+    },
+  );
+  if (incrementError) {
+    throw new Error(
+      `increment_sms_inbound_intent_duplicate: ${incrementError.message}`,
+    );
+  }
   await recordDelivery(supabase, {
     input,
     intentId: duplicate.id,
@@ -199,6 +217,7 @@ function buildIntentFingerprint(input: InboundIntentInput): {
   const toAddress = normalizePhone(input.to) ?? input.to;
   const canonicalBody = canonicalizeSmsBody(input.body);
   const bodyFingerprint = sha256(canonicalBody);
+  const mediaFingerprint = sha256(canonicalizeMediaUrls(input.mediaUrls));
   const threadKey =
     input.conversationId ??
     `contact:${input.contactId ?? "none"}:property:${input.propertyId ?? "none"}`;
@@ -211,6 +230,7 @@ function buildIntentFingerprint(input: InboundIntentInput): {
       toAddress,
       threadKey,
       bodyFingerprint,
+      mediaFingerprint,
     ].join("\u001f"),
   );
   const start = input.receivedAt;
@@ -234,6 +254,15 @@ function canonicalizeSmsBody(body: string): string {
     .trim();
 }
 
+function canonicalizeMediaUrls(mediaUrls: string[] | null): string {
+  if (!mediaUrls?.length) return "";
+  return mediaUrls
+    .map((url) => url.trim())
+    .filter(Boolean)
+    .sort()
+    .join("\n");
+}
+
 function sha256(value: string): string {
   return createHash("sha256").update(value).digest("hex");
 }
@@ -245,7 +274,12 @@ async function findOverlappingIntent(
     dedupeScopeHash: string;
     receivedAt: Date;
   },
-): Promise<{ duplicate_count: number; id: string } | null> {
+): Promise<{
+  duplicate_count: number;
+  first_provider_message_id: string;
+  id: string;
+  status: string;
+} | null> {
   const minReceivedAt = new Date(
     args.receivedAt.getTime() - DEDUPE_WINDOW_MS,
   ).toISOString();
@@ -254,7 +288,7 @@ async function findOverlappingIntent(
   ).toISOString();
   const { data, error } = await supabase
     .from("sms_inbound_intents")
-    .select("id, duplicate_count")
+    .select("id, duplicate_count, first_provider_message_id, status")
     .eq("org_id", args.orgId)
     .eq("dedupe_scope_hash", args.dedupeScopeHash)
     .gte("received_at", minReceivedAt)
@@ -276,7 +310,6 @@ async function recordDelivery(
     payloadSha256: string;
     classification:
       | "canonical"
-      | "duplicate_provider_id"
       | "duplicate_semantic"
       | "shadow_semantic";
   },

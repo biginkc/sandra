@@ -235,6 +235,7 @@ export async function handleInboundWebhook(
         body: ev.body,
         receivedAt: ev.receivedAt,
         raw: ev.raw,
+        mediaUrls: ev.mediaUrls ?? null,
         webhookEventId: resumeDecision.webhookEventId,
         contactId,
         propertyId,
@@ -583,6 +584,10 @@ export async function handleInboundWebhook(
           supabase,
           provider.providerId,
           ev.externalId,
+        );
+        await markInboundSmsIntentSideEffectsComplete(
+          supabase,
+          intentClaim.intentId,
         );
         continue;
       }

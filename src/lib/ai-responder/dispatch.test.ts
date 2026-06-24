@@ -74,6 +74,7 @@ type AiClaimRow = {
 
 type MockState = {
   aiClaims: AiClaimRow[];
+  aiClaimInsertError?: boolean;
   contact: {
     first_name: string | null;
     phone_1: string | null;
@@ -414,6 +415,15 @@ function createMockSupabase(state: MockState) {
 
     const execute = () => {
       if (insertData) {
+        if (state.aiClaimInsertError) {
+          return {
+            data: null,
+            error: {
+              code: "42P01",
+              message: "relation ai_response_claims does not exist",
+            },
+          };
+        }
         if (
           state.aiClaims.some(
             (row) =>
@@ -619,6 +629,32 @@ describe("dispatchAiResponse debounce", () => {
     expect([first.outcome, second.outcome].sort()).toEqual(["sent", "skipped"]);
     expect(vi.mocked(generateAiReply)).toHaveBeenCalledTimes(1);
     expect(vi.mocked(sendSmsToContact)).toHaveBeenCalledTimes(1);
+  });
+
+  it("fails closed before generation or send when the AI claim cannot be stored", async () => {
+    const state = createMockState();
+    state.aiClaimInsertError = true;
+    const supabase = createMockSupabase(state);
+    installSendMock(state);
+
+    const outcome = await dispatchAiResponse(
+      supabase as never,
+      {
+        contactId: CONTACT_ID,
+        conversationId: CONVERSATION_ID,
+        inboundBody: "Still interested?",
+        inboundMessageId: "inbound-claim-error",
+        propertyId: PROPERTY_ID,
+      },
+      { anthropic: {} as never },
+    );
+
+    expect(outcome).toEqual({
+      outcome: "skipped",
+      reason: "already_claimed",
+    });
+    expect(vi.mocked(generateAiReply)).not.toHaveBeenCalled();
+    expect(vi.mocked(sendSmsToContact)).not.toHaveBeenCalled();
   });
 
   it("answers identity questions with the fixed Mel with BMH copy without calling Claude", async () => {

@@ -140,7 +140,7 @@ export type Database = {
           inbound_intent_id?: string | null
           inbound_message_id?: string | null
           lease_expires_at?: string
-          org_id?: string
+          org_id: string
           outcome?: string | null
           outbound_message_id?: string | null
           property_id?: string | null
@@ -2349,7 +2349,7 @@ export type Database = {
           created_at?: string
           id?: string
           intent_id?: string | null
-          org_id?: string
+          org_id: string
           payload_sha256: string
           provider: string
           provider_message_id: string
@@ -2430,7 +2430,7 @@ export type Database = {
           from_address: string
           id?: string
           last_provider_message_id: string
-          org_id?: string
+          org_id: string
           property_id?: string | null
           provider: string
           received_at: string
@@ -2947,6 +2947,10 @@ export type Database = {
       }
       merge_duplicate_properties: {
         Args: { keeper_id: string; loser_id: string }
+        Returns: undefined
+      }
+      increment_sms_inbound_intent_duplicate: {
+        Args: { p_intent_id: string; p_last_provider_message_id: string }
         Returns: undefined
       }
       reset_tenant_tables: { Args: never; Returns: undefined }

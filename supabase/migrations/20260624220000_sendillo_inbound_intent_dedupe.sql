@@ -4,7 +4,7 @@ create extension if not exists btree_gist;
 
 create table if not exists public.sms_inbound_intents (
   id uuid primary key default gen_random_uuid(),
-  org_id uuid not null default '00000000-0000-0000-0000-000000000bbb' references public.organizations(id),
+  org_id uuid not null references public.organizations(id),
   provider text not null,
   from_address text not null,
   to_address text not null,
@@ -26,6 +26,9 @@ create table if not exists public.sms_inbound_intents (
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+
+alter table public.sms_inbound_intents
+  alter column org_id drop default;
 
 do $$
 begin
@@ -55,17 +58,20 @@ create index if not exists idx_sms_inbound_intents_canonical_message
 create table if not exists public.sms_inbound_deliveries (
   id uuid primary key default gen_random_uuid(),
   intent_id uuid references public.sms_inbound_intents(id) on delete set null,
-  org_id uuid not null default '00000000-0000-0000-0000-000000000bbb' references public.organizations(id),
+  org_id uuid not null references public.organizations(id),
   webhook_event_id uuid references public.webhook_events(id) on delete set null,
   provider text not null,
   provider_message_id text not null,
   received_at timestamptz not null,
   payload_sha256 text not null,
   classification text not null
-    check (classification in ('canonical','duplicate_provider_id','duplicate_semantic','shadow_semantic')),
+    check (classification in ('canonical','duplicate_semantic','shadow_semantic')),
   created_at timestamptz not null default now(),
   unique (org_id, provider, provider_message_id)
 );
+
+alter table public.sms_inbound_deliveries
+  alter column org_id drop default;
 
 create index if not exists idx_sms_inbound_deliveries_intent
   on public.sms_inbound_deliveries (intent_id, created_at);
@@ -88,7 +94,7 @@ alter table public.sms_inbound_intents
 
 create table if not exists public.ai_response_claims (
   id uuid primary key default gen_random_uuid(),
-  org_id uuid not null default '00000000-0000-0000-0000-000000000bbb' references public.organizations(id),
+  org_id uuid not null references public.organizations(id),
   response_kind text not null default 'sms_ai_responder_v1',
   inbound_message_id uuid references public.messages(id) on delete cascade,
   inbound_intent_id uuid references public.sms_inbound_intents(id) on delete set null,
@@ -107,6 +113,9 @@ create table if not exists public.ai_response_claims (
   updated_at timestamptz not null default now()
 );
 
+alter table public.ai_response_claims
+  alter column org_id drop default;
+
 create unique index if not exists idx_ai_response_claims_inbound_kind_unique
   on public.ai_response_claims (inbound_message_id, response_kind)
   where inbound_message_id is not null;
@@ -114,6 +123,26 @@ create unique index if not exists idx_ai_response_claims_inbound_kind_unique
 create index if not exists idx_ai_response_claims_processing
   on public.ai_response_claims (status, lease_expires_at)
   where status = 'processing';
+
+create or replace function public.increment_sms_inbound_intent_duplicate(
+  p_intent_id uuid,
+  p_last_provider_message_id text
+)
+returns void
+language sql
+security definer
+set search_path = public, pg_temp
+as $$
+  update public.sms_inbound_intents
+  set duplicate_count = duplicate_count + 1,
+      last_provider_message_id = p_last_provider_message_id,
+      updated_at = now()
+  where id = p_intent_id;
+$$;
+
+revoke execute on function public.increment_sms_inbound_intent_duplicate(uuid, text) from public;
+revoke execute on function public.increment_sms_inbound_intent_duplicate(uuid, text) from authenticated;
+grant execute on function public.increment_sms_inbound_intent_duplicate(uuid, text) to service_role;
 
 alter table public.sms_inbound_intents enable row level security;
 alter table public.sms_inbound_deliveries enable row level security;
@@ -180,9 +209,12 @@ begin
     public.ai_response_claims,
     public.sms_inbound_deliveries,
     public.sms_inbound_intents,
+    public.campaign_recipients,
+    public.campaigns,
     public.message_threads,
     public.messages,
     public.consent_events,
+    public.sms_phone_suppressions,
     public.property_merges,
     public.jobs,
     public.csv_imports,
@@ -215,6 +247,9 @@ begin
   where coalesce(system_managed, false) = false
     and deleted_at is null;
 
+  delete from public.saved_filters
+  where coalesce(is_base, false) = false;
+
   insert into public.memberships
   select * from _memberships_snapshot
   on conflict (user_id, org_id) do nothing;
@@ -223,5 +258,6 @@ $$;
 
 revoke execute on function public.reset_tenant_tables() from public;
 revoke execute on function public.reset_tenant_tables() from authenticated;
+grant execute on function public.reset_tenant_tables() to service_role;
 
 commit;

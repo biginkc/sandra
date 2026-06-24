@@ -59,6 +59,14 @@ export async function claimAiResponse(
       tags: { surface: "ai_response_claim_insert" },
       extra: { inboundMessageId: args.inboundMessageId },
     });
+    if (mode === "enforce") {
+      return {
+        claimed: false,
+        claimId: null,
+        mode,
+        reason: "already_claimed",
+      };
+    }
     return { claimed: true, claimId: null, mode };
   }
 
@@ -73,6 +81,14 @@ export async function claimAiResponse(
       tags: { surface: "ai_response_claim_lookup" },
       extra: { inboundMessageId: args.inboundMessageId },
     });
+    if (mode === "enforce") {
+      return {
+        claimed: false,
+        claimId: null,
+        mode,
+        reason: "already_claimed",
+      };
+    }
     return { claimed: true, claimId: null, mode };
   }
 
