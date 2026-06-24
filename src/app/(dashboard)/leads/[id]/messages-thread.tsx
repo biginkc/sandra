@@ -290,6 +290,7 @@ function MessageBubble({
     isMostRecentOutbound,
   );
   const aiGenerated = isAiGeneratedMessage(message);
+  const showMetadataFooter = isLastInGroup || aiGenerated;
 
   // Per-bubble vertical spacing replaces the old blanket `gap-4` on the
   // container. A continuation bubble (same sender, same day) gets a
@@ -326,7 +327,7 @@ function MessageBubble({
           {message.body}
         </div>
       </div>
-      {isLastInGroup ? (
+      {showMetadataFooter ? (
         <div
           className={`mt-1 flex items-center gap-1.5 text-[10px] tabular-nums text-muted-foreground ${
             outbound ? "mr-1" : "ml-1"
@@ -364,7 +365,7 @@ function MessageBubble({
           {aiGenerated ? <SandraReplyBadge message={message} /> : null}
         </div>
       ) : null}
-      {!isLastInGroup && deliveryStatusLabel ? (
+      {!showMetadataFooter && deliveryStatusLabel ? (
         <div
           className={cn(
             `mt-1 text-[11px] font-medium ${outbound ? "mr-1" : "ml-1"}`,
@@ -392,6 +393,7 @@ function SandraReplyBadge({ message }: { message: Message }) {
     <span
       className="inline-flex h-5 min-w-7 items-center justify-center rounded-full border border-[#e5e1df] bg-white px-1.5"
       title={`Sandra replied · confidence ${confidence}`}
+      role="img"
       aria-label="Sandra replied"
       data-testid="messages-thread-sandra-reply-icon"
     >
