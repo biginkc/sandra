@@ -10,6 +10,7 @@ export type InboxFilter =
   | "dismissed"
   | "unread"
   | "escalated"
+  | "handled"
   | "needs_outcome";
 
 type Props = {
@@ -72,22 +73,14 @@ export function InboxFilters({
       className="flex flex-wrap items-center gap-2"
       data-testid="inbox-filters"
     >
-      {/* feedback-f E2b — Unread first, then Escalated (AI handed off →
-         needs me), then Mine, Unassigned, All, then the catch-all buckets.
-         Matches Jarrad's ranked priority for what deserves attention first
-         when the inbox is busy. */}
+      {/* Priority order: immediacy, outcome work, assignment, Sandra state,
+         then the broader catch-all buckets. */}
       <FilterChip
         label="Unread"
         active={active === "unread"}
         badge={unreadCount > 0 ? String(unreadCount) : undefined}
         onClick={() => setFilter("unread")}
         testId="filter-unread"
-      />
-      <FilterChip
-        label="Escalated"
-        active={active === "escalated"}
-        onClick={() => setFilter("escalated")}
-        testId="filter-escalated"
       />
       <FilterChip
         label="Needs Outcome"
@@ -105,12 +98,37 @@ export function InboxFilters({
             testId="filter-mine"
           />
           <FilterChip
-            label="Unassigned"
-            active={active === "unassigned"}
-            onClick={() => setFilter("unassigned")}
-            testId="filter-unassigned"
+            label="Escalated"
+            icon="mascot"
+            active={active === "escalated"}
+            onClick={() => setFilter("escalated")}
+            testId="filter-escalated"
           />
         </>
+      )}
+      {!showAssignmentChips ? (
+        <FilterChip
+          label="Escalated"
+          icon="mascot"
+          active={active === "escalated"}
+          onClick={() => setFilter("escalated")}
+          testId="filter-escalated"
+        />
+      ) : null}
+      <FilterChip
+        label="Handled"
+        icon="mascot"
+        active={active === "handled"}
+        onClick={() => setFilter("handled")}
+        testId="filter-handled"
+      />
+      {showAssignmentChips && (
+        <FilterChip
+          label="Unassigned"
+          active={active === "unassigned"}
+          onClick={() => setFilter("unassigned")}
+          testId="filter-unassigned"
+        />
       )}
       <FilterChip
         label="All"
@@ -196,12 +214,14 @@ function DncToggle({
 
 function FilterChip({
   label,
+  icon,
   active,
   onClick,
   badge,
   testId,
 }: {
   label: string;
+  icon?: "mascot";
   active: boolean;
   onClick: () => void;
   badge?: string;
@@ -220,6 +240,15 @@ function FilterChip({
           : "border border-[#e5e1df] text-[#78716c] hover:bg-[#f5f5f4] hover:text-[#1c1917]"
       }`}
     >
+      {icon === "mascot" ? (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img
+          src="/brand/mascot.svg"
+          alt=""
+          aria-hidden="true"
+          className="h-4 w-4 shrink-0"
+        />
+      ) : null}
       <span>{label}</span>
       {badge ? (
         <span

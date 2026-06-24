@@ -8,6 +8,10 @@ import Anthropic from "@anthropic-ai/sdk";
 
 import { listAdminUserIds } from "@/lib/auth/admins";
 import { findAttributedOutboundMessageId } from "@/lib/messages/attribution";
+import {
+  clearAiResponderThreadState,
+  recordAiResponderOutcomeForThread,
+} from "@/lib/messages/ai-responder-thread-state";
 import { looksLikeTestTraffic } from "@/lib/messages/list-threads";
 import { dispatchAiResponse } from "@/lib/ai-responder/dispatch";
 import { reportError } from "@/lib/errors/report";
@@ -665,10 +669,16 @@ export async function handleInboundWebhook(
               anthropic: new Anthropic(),
             },
           );
+          const completedAt = new Date().toISOString();
+          await recordAiResponderOutcomeForThread(supabase, {
+            conversationId: insertOutcome.conversationId,
+            outcome,
+            completedAt,
+          });
           await markInboundMessageState(supabase, insertOutcome.messageId, {
             aiResponder: {
               ...outcome,
-              completedAt: new Date().toISOString(),
+              completedAt,
             },
           });
         } catch (e) {
@@ -755,6 +765,7 @@ async function insertInboundMessage(
     .select("id, metadata, contact_id, property_id, conversation_id")
     .maybeSingle();
   if (!error) {
+    await clearAiResponderThreadState(supabase, inserted?.conversation_id ?? null);
     return {
       duplicate: false,
       error: null as null,

@@ -2,6 +2,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { computeConsentState } from "@/lib/messaging/consent";
 import type { Database } from "@/lib/supabase/types";
+import type { AiResponderThreadStatus } from "./ai-responder-thread-state";
 
 export type Thread = {
   /** The conversation UUID — the one and only thread identity since
@@ -37,6 +38,12 @@ export type Thread = {
   isTestTraffic: boolean;
   /** True when this replied outreach thread still needs an operator outcome. */
   needsOutcome: boolean;
+  /** Current thread-level state written by Sandra's SMS AI responder. */
+  aiResponderStatus: AiResponderThreadStatus | null;
+  aiResponderReason: string | null;
+  aiResponderStatusAt: string | null;
+  aiLastDeliveryStatus: string | null;
+  aiLastDeliveryError: string | null;
 };
 
 const NEEDS_OUTCOME_STATUSES = new Set(["prospect", "new_lead", "contacted"]);
@@ -91,10 +98,10 @@ export type ListThreadsOpts = {
    *  it. Stale URL formats are translated upstream by
    *  `canonicalizeThreadId` — this is always an exact id. */
   includeThreadId?: string;
-  /** When true, returns only threads the AI responder escalated for human
-   *  review (properties.needs_human_attention). Drives the "Escalated"
-   *  inbox filter chip. */
+  /** When true, returns only threads Sandra escalated for human review. */
   escalatedOnly?: boolean;
+  /** When true, returns only threads Sandra handled. */
+  handledOnly?: boolean;
   /** When true, returns only replied outreach threads with no outreach outcome. */
   needsOutcomeOnly?: boolean;
 };
@@ -186,12 +193,13 @@ export async function listThreads(
         .filter((p): p is string => p !== null),
     ),
   );
+  const threadIds = Array.from(byThread.keys());
 
   // PostgREST rejects oversized IN clauses (URL length limit, ~8 KB).
   // Split into batches so an active inbox with hundreds of contacts still loads.
   const CHUNK = 250;
 
-  const [contactsRows, propsRows, consentRows] = await Promise.all([
+  const [contactsRows, propsRows, consentRows, threadRows] = await Promise.all([
     fetchInChunks(contactIds, CHUNK, (chunk) =>
       supabase
         .from("contacts")
@@ -216,10 +224,21 @@ export async function listThreads(
         .in("contact_id", chunk)
         .order("occurred_at", { ascending: false }),
     ),
+    fetchInChunks(threadIds, CHUNK, (chunk) =>
+      supabase
+        .from("message_threads")
+        .select(
+          "conversation_id, ai_responder_status, ai_responder_reason, ai_responder_status_at, ai_last_delivery_status, ai_last_delivery_error",
+        )
+        .in("conversation_id", chunk),
+    ),
   ]);
 
   const contactById = new Map(contactsRows.map((c) => [c.id, c]));
   const propertyById = new Map(propsRows.map((p) => [p.id, p]));
+  const aiStateByThread = new Map(
+    threadRows.map((row) => [row.conversation_id, row]),
+  );
 
   // Group consent events by contact for one computeConsentState call per
   // contact. Events are already ordered desc by the query.
@@ -238,6 +257,10 @@ export async function listThreads(
     const contactId = bucket.latest.contact_id!;
     const c = contactById.get(contactId);
     const p = bucket.propertyId ? propertyById.get(bucket.propertyId) : null;
+    const aiState = aiStateByThread.get(threadId);
+    const aiResponderStatus = parseAiResponderStatus(
+      aiState?.ai_responder_status ?? null,
+    );
 
     if (opts.assigneeId && p?.assigned_user_id !== opts.assigneeId) continue;
     if (opts.unassignedOnly && p?.assigned_user_id) continue;
@@ -247,7 +270,8 @@ export async function listThreads(
       threadId !== opts.includeThreadId
     )
       continue;
-    if (opts.escalatedOnly && !(p?.needs_human_attention ?? false)) continue;
+    if (opts.escalatedOnly && aiResponderStatus !== "escalated") continue;
+    if (opts.handledOnly && aiResponderStatus !== "handled") continue;
 
     const consentState = computeConsentState(
       consentEventsByContact.get(contactId) ?? [],
@@ -297,6 +321,11 @@ export async function listThreads(
         p ? [p.address, p.city, p.state].filter(Boolean).join(", ") : null,
       ),
       needsOutcome,
+      aiResponderStatus,
+      aiResponderReason: aiState?.ai_responder_reason ?? null,
+      aiResponderStatusAt: aiState?.ai_responder_status_at ?? null,
+      aiLastDeliveryStatus: aiState?.ai_last_delivery_status ?? null,
+      aiLastDeliveryError: aiState?.ai_last_delivery_error ?? null,
     });
   }
 
@@ -306,6 +335,12 @@ export async function listThreads(
   // the "what needs attention" view.
   threads.sort((a, b) => b.lastMessageAt.localeCompare(a.lastMessageAt));
   return threads;
+}
+
+function parseAiResponderStatus(
+  value: string | null,
+): AiResponderThreadStatus | null {
+  return value === "handled" || value === "escalated" ? value : null;
 }
 
 export async function countNeedsOutcomeThreads(

@@ -44,6 +44,14 @@ function makeStub(opts: {
     needs_human_attention?: boolean;
     last_ai_escalation_reason?: string | null;
   }>;
+  messageThreads?: Map<string, {
+    conversation_id: string;
+    ai_responder_status?: string | null;
+    ai_responder_reason?: string | null;
+    ai_responder_status_at?: string | null;
+    ai_last_delivery_status?: string | null;
+    ai_last_delivery_error?: string | null;
+  }>;
   consentEvents?: Array<{
     contact_id: string;
     event_type: string;
@@ -54,6 +62,7 @@ function makeStub(opts: {
     contacts: [],
     properties: [],
     consent_events: [],
+    message_threads: [],
   };
 
   const messagesQuery = {
@@ -77,12 +86,17 @@ function makeStub(opts: {
       }),
   };
 
-  function tableQuery(name: "contacts" | "properties") {
+  function tableQuery(name: "contacts" | "properties" | "message_threads") {
     return {
       select: () => ({
         in: (_col: string, chunk: string[]) => {
           inCalls[name].push(chunk);
-          const source = name === "contacts" ? opts.contacts : opts.properties;
+          const source =
+            name === "contacts"
+              ? opts.contacts
+              : name === "properties"
+                ? opts.properties
+                : opts.messageThreads ?? new Map();
           const data = chunk
             .map((id) => source.get(id))
             .filter((row): row is NonNullable<typeof row> => Boolean(row));
@@ -116,6 +130,7 @@ function makeStub(opts: {
       if (table === "messages") return messagesQuery;
       if (table === "contacts") return tableQuery("contacts");
       if (table === "properties") return tableQuery("properties");
+      if (table === "message_threads") return tableQuery("message_threads");
       if (table === "consent_events") return consentQuery();
       throw new Error(`unexpected table ${table}`);
     },
@@ -190,6 +205,113 @@ describe("listThreads — chunking", () => {
     const tablesHit = fromSpy.mock.calls.map((c) => c[0]);
     expect(tablesHit).not.toContain("contacts");
     expect(tablesHit).not.toContain("properties");
+  });
+});
+
+describe("listThreads — Sandra AI state", () => {
+  it("hydrates thread-level Sandra state and filters handled/escalated from message_threads", async () => {
+    const messages = [
+      {
+        contact_id: "c-handled",
+        property_id: "p-handled",
+        conversation_id: "conv-handled",
+        body: "thanks",
+        direction: "inbound" as const,
+        created_at: "2026-06-24T15:00:00.000Z",
+        read_at: null,
+      },
+      {
+        contact_id: "c-escalated",
+        property_id: "p-escalated",
+        conversation_id: "conv-escalated",
+        body: "call me",
+        direction: "inbound" as const,
+        created_at: "2026-06-24T14:00:00.000Z",
+        read_at: null,
+      },
+      {
+        contact_id: "c-property-attention",
+        property_id: "p-property-attention",
+        conversation_id: "conv-property-attention",
+        body: "legacy attention flag only",
+        direction: "inbound" as const,
+        created_at: "2026-06-24T13:00:00.000Z",
+        read_at: null,
+      },
+    ];
+    const contacts = new Map(
+      messages.map((m) => [
+        m.contact_id,
+        {
+          id: m.contact_id,
+          first_name: null,
+          last_name: null,
+          entity_name: m.contact_id,
+          phone_1: null,
+        },
+      ]),
+    );
+    const properties = new Map(
+      messages.map((m) => [
+        m.property_id,
+        {
+          id: m.property_id,
+          address: null,
+          city: null,
+          state: null,
+          status: "prospect",
+          outreach_dispo: null,
+          assigned_user_id: null,
+          needs_human_attention: m.property_id === "p-property-attention",
+        },
+      ]),
+    );
+    const messageThreads = new Map([
+      [
+        "conv-handled",
+        {
+          conversation_id: "conv-handled",
+          ai_responder_status: "handled",
+          ai_responder_reason: "sent",
+          ai_responder_status_at: "2026-06-24T15:01:00.000Z",
+          ai_last_delivery_status: "failed",
+          ai_last_delivery_error: "Carrier rejected recipient",
+        },
+      ],
+      [
+        "conv-escalated",
+        {
+          conversation_id: "conv-escalated",
+          ai_responder_status: "escalated",
+          ai_responder_reason: "model:needs_human",
+          ai_responder_status_at: "2026-06-24T14:01:00.000Z",
+          ai_last_delivery_status: null,
+          ai_last_delivery_error: null,
+        },
+      ],
+    ]);
+
+    const { supabase } = makeStub({
+      messages,
+      contacts,
+      properties,
+      messageThreads,
+    });
+
+    const all = await listThreads(supabase, {});
+    expect(all.find((t) => t.threadId === "conv-handled")).toMatchObject({
+      aiResponderStatus: "handled",
+      aiResponderReason: "sent",
+      aiLastDeliveryStatus: "failed",
+      aiLastDeliveryError: "Carrier rejected recipient",
+    });
+
+    await expect(listThreads(supabase, { handledOnly: true })).resolves.toMatchObject([
+      { threadId: "conv-handled" },
+    ]);
+    await expect(
+      listThreads(supabase, { escalatedOnly: true }),
+    ).resolves.toMatchObject([{ threadId: "conv-escalated" }]);
   });
 });
 
@@ -646,8 +768,9 @@ describe("listThreads — recency-only sort", () => {
 });
 
 describe("listThreads — escalatedOnly", () => {
-  // Two threads: one the AI handed off (needs_human_attention=true), one it
-  // handled cleanly. escalatedOnly should return only the handed-off thread.
+  // Three threads: one Sandra handed off, one legacy property attention flag
+  // with no thread-level Sandra state, and one Sandra handled cleanly.
+  // escalatedOnly should return only the current thread-level handoff.
   function seedEscalation() {
     const now = Date.now();
     const messages = [
@@ -657,6 +780,14 @@ describe("listThreads — escalatedOnly", () => {
         body: "I want to talk to a human",
         direction: "inbound" as const,
         created_at: new Date(now - 1_000).toISOString(),
+        read_at: new Date(now).toISOString(),
+      },
+      {
+        contact_id: "c-property-attention",
+        property_id: "p-property-attention",
+        body: "legacy property attention only",
+        direction: "inbound" as const,
+        created_at: new Date(now - 1_500).toISOString(),
         read_at: new Date(now).toISOString(),
       },
       {
@@ -690,6 +821,20 @@ describe("listThreads — escalatedOnly", () => {
         },
       ],
       [
+        "p-property-attention",
+        {
+          id: "p-property-attention",
+          address: null,
+          city: null,
+          state: null,
+          status: "prospect",
+          outreach_dispo: null,
+          assigned_user_id: null,
+          needs_human_attention: true,
+          last_ai_escalation_reason: "keyword:handoff_request",
+        },
+      ],
+      [
         "p-calm",
         {
           id: "p-calm",
@@ -704,21 +849,50 @@ describe("listThreads — escalatedOnly", () => {
         },
       ],
     ]);
-    return makeStub({ messages, contacts, properties });
+    const messageThreads = new Map([
+      [
+        "conv:c-esc:p-esc",
+        {
+          conversation_id: "conv:c-esc:p-esc",
+          ai_responder_status: "escalated",
+          ai_responder_reason: "keyword:handoff_request",
+          ai_responder_status_at: new Date(now - 900).toISOString(),
+          ai_last_delivery_status: null,
+          ai_last_delivery_error: null,
+        },
+      ],
+      [
+        "conv:c-calm:p-calm",
+        {
+          conversation_id: "conv:c-calm:p-calm",
+          ai_responder_status: "handled",
+          ai_responder_reason: "sent",
+          ai_responder_status_at: new Date(now - 1_900).toISOString(),
+          ai_last_delivery_status: "sent",
+          ai_last_delivery_error: null,
+        },
+      ],
+    ]);
+    return makeStub({ messages, contacts, properties, messageThreads });
   }
 
-  it("returns only threads the AI escalated for human review", async () => {
+  it("returns only threads Sandra escalated for human review", async () => {
     const { supabase } = seedEscalation();
     const threads = await listThreads(supabase, { escalatedOnly: true });
     expect(threads.map((t) => t.contactId)).toEqual(["c-esc"]);
     expect(threads[0].needsHumanAttention).toBe(true);
     expect(threads[0].escalationReason).toBe("keyword:handoff_request");
+    expect(threads[0].aiResponderStatus).toBe("escalated");
   });
 
-  it("returns both threads when escalatedOnly is not set", async () => {
+  it("returns all threads when escalatedOnly is not set", async () => {
     const { supabase } = seedEscalation();
     const threads = await listThreads(supabase, {});
-    expect(threads.map((t) => t.contactId).sort()).toEqual(["c-calm", "c-esc"]);
+    expect(threads.map((t) => t.contactId).sort()).toEqual([
+      "c-calm",
+      "c-esc",
+      "c-property-attention",
+    ]);
     expect(threads.find((t) => t.contactId === "c-calm")?.escalationReason).toBeNull();
   });
 });

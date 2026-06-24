@@ -1,5 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
+import { recordAiResponderDeliveryForThread } from "@/lib/messages/ai-responder-thread-state";
 import type { Database } from "@/lib/supabase/types";
 import type { SmsStatusEvent } from "./types";
 
@@ -12,6 +13,8 @@ type MessageStatusRow = Pick<
   | "failed_at"
   | "error_message"
   | "created_at"
+  | "conversation_id"
+  | "metadata"
 >;
 
 type MessageStatusUpdate = Database["public"]["Tables"]["messages"]["Update"];
@@ -32,7 +35,9 @@ export async function applyMessageStatusEvent(
 ): Promise<"updated" | "skipped" | "unknown"> {
   const { data: messages, error } = await supabase
     .from("messages")
-    .select("id, status, sent_at, delivered_at, failed_at, error_message, created_at")
+    .select(
+      "id, status, sent_at, delivered_at, failed_at, error_message, created_at, conversation_id, metadata",
+    )
     .eq("external_id", event.externalId)
     .eq("provider", providerId)
     .eq("direction", "outbound")
@@ -66,6 +71,11 @@ export async function applyMessageStatusEvent(
   if (updateError) {
     throw new Error(`status update failed: ${updateError.message}`);
   }
+  await recordAiResponderDeliveryForThread(supabase, {
+    conversationId: message.conversation_id,
+    metadata: message.metadata,
+    event,
+  });
   return "updated";
 }
 

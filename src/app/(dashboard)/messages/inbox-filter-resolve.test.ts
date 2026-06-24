@@ -30,6 +30,11 @@ function makeThread(overrides: Partial<Thread> & { threadId: string }): Thread {
     isOptedOut: overrides.isOptedOut ?? false,
     isTestTraffic: overrides.isTestTraffic ?? false,
     needsOutcome: overrides.needsOutcome ?? false,
+    aiResponderStatus: overrides.aiResponderStatus ?? null,
+    aiResponderReason: overrides.aiResponderReason ?? null,
+    aiResponderStatusAt: overrides.aiResponderStatusAt ?? null,
+    aiLastDeliveryStatus: overrides.aiLastDeliveryStatus ?? null,
+    aiLastDeliveryError: overrides.aiLastDeliveryError ?? null,
   };
 }
 
@@ -42,6 +47,7 @@ describe("parseInboxFilter", () => {
       "unassigned",
       "unread",
       "escalated",
+      "handled",
       "needs_outcome",
     ] as const) {
       expect(parseInboxFilter(f)).toBe(f);
@@ -65,6 +71,7 @@ describe("isThreadFilter", () => {
       "unassigned",
       "unread",
       "escalated",
+      "handled",
       "needs_outcome",
     ] as const) {
       expect(isThreadFilter(f)).toBe(true);
@@ -82,6 +89,10 @@ describe("buildThreadOpts", () => {
 
   it("maps escalated → escalatedOnly and nothing else", () => {
     expect(buildThreadOpts("escalated", ctx)).toEqual({ escalatedOnly: true });
+  });
+
+  it("maps handled → handledOnly and nothing else", () => {
+    expect(buildThreadOpts("handled", ctx)).toEqual({ handledOnly: true });
   });
 
   it("maps mine → assigneeId from the current user", () => {
@@ -135,10 +146,26 @@ describe("buildThreadOpts", () => {
       "unassigned",
       "unread",
       "needs_outcome",
+      "handled",
       "unknown",
       "dismissed",
     ] as const) {
       expect(buildThreadOpts(f, ctx).escalatedOnly).toBeUndefined();
+    }
+  });
+
+  it("never sets handledOnly for non-handled filters", () => {
+    for (const f of [
+      "all",
+      "mine",
+      "unassigned",
+      "unread",
+      "needs_outcome",
+      "escalated",
+      "unknown",
+      "dismissed",
+    ] as const) {
+      expect(buildThreadOpts(f, ctx).handledOnly).toBeUndefined();
     }
   });
 });
@@ -149,7 +176,12 @@ describe("applyInboxThreadFilter", () => {
     makeThread({ threadId: "other", assigneeId: "user-2" }),
     makeThread({ threadId: "open", assigneeId: null }),
     makeThread({ threadId: "unread", unreadCount: 2 }),
-    makeThread({ threadId: "escalated", needsHumanAttention: true }),
+    makeThread({
+      threadId: "property-attention-only",
+      needsHumanAttention: true,
+    }),
+    makeThread({ threadId: "escalated", aiResponderStatus: "escalated" }),
+    makeThread({ threadId: "handled", aiResponderStatus: "handled" }),
     makeThread({ threadId: "needs", needsOutcome: true }),
   ];
 
@@ -161,13 +193,23 @@ describe("applyInboxThreadFilter", () => {
     ]);
     expect(
       applyInboxThreadFilter(threads, "unassigned", ctx).map((t) => t.threadId),
-    ).toEqual(["open", "unread", "escalated", "needs"]);
+    ).toEqual([
+      "open",
+      "unread",
+      "property-attention-only",
+      "escalated",
+      "handled",
+      "needs",
+    ]);
     expect(applyInboxThreadFilter(threads, "unread", ctx).map((t) => t.threadId)).toEqual([
       "unread",
     ]);
     expect(
       applyInboxThreadFilter(threads, "escalated", ctx).map((t) => t.threadId),
     ).toEqual(["escalated"]);
+    expect(
+      applyInboxThreadFilter(threads, "handled", ctx).map((t) => t.threadId),
+    ).toEqual(["handled"]);
     expect(
       applyInboxThreadFilter(threads, "needs_outcome", ctx).map(
         (t) => t.threadId,

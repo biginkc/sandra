@@ -52,6 +52,7 @@ const THREAD_FILTERS = new Set<InboxFilter>([
   "unassigned",
   "unread",
   "escalated",
+  "handled",
   "needs_outcome",
 ]);
 

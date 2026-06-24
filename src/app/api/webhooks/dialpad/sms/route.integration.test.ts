@@ -1324,6 +1324,167 @@ describe("POST /api/webhooks/dialpad/sms (integration)", () => {
     expect(webhookEvent?.processing_status).toBe("processed");
   });
 
+  it("does not clear Sandra state when a retry finds an already-inserted inbound row", async () => {
+    const phone = "+18165559115";
+    const contactId = await seedContact(phone, { optIn: true });
+    const { data: property } = await supabase
+      .from("properties")
+      .insert({
+        address: "6 Sandra Replay Ln",
+        state: "MO",
+        status: "new_lead",
+        homeowner_contact_id: contactId,
+      })
+      .select("id")
+      .single();
+    await supabase.from("messages").insert([
+      {
+        channel: "sms",
+        direction: "outbound",
+        status: "sent",
+        provider: "mock",
+        from_address: "+18163706846",
+        to_address: phone,
+        body: "initial",
+        contact_id: contactId,
+        property_id: property!.id,
+      },
+      {
+        channel: "sms",
+        direction: "inbound",
+        status: "received",
+        provider: "mock",
+        external_id: "msg_dup_sandra_state_001",
+        from_address: phone,
+        to_address: "+18163706846",
+        body: "already inserted",
+        contact_id: contactId,
+        property_id: property!.id,
+      },
+    ]);
+    const { data: existingInbound } = await supabase
+      .from("messages")
+      .select("conversation_id")
+      .eq("external_id", "msg_dup_sandra_state_001")
+      .single();
+    expect(existingInbound?.conversation_id).toBeTruthy();
+    const conversationId = existingInbound!.conversation_id!;
+    await supabase
+      .from("message_threads")
+      .update({
+        ai_responder_status: "handled",
+        ai_responder_reason: "sent",
+        ai_responder_status_at: "2026-06-24T15:00:00.000Z",
+        ai_last_delivery_status: "sent",
+      })
+      .eq("conversation_id", conversationId);
+    await supabase.from("webhook_events").insert({
+      provider: "mock",
+      event_type: "sms_inbound",
+      external_id: "msg_dup_sandra_state_001",
+      signature_verified: true,
+      processing_status: "pending",
+      payload: {
+        externalId: "msg_dup_sandra_state_001",
+        from: phone,
+        to: "+18163706846",
+        body: "already inserted",
+      },
+    });
+
+    const res = await POST(
+      makeRequest({
+        externalId: "msg_dup_sandra_state_001",
+        from: phone,
+        to: "+18163706846",
+        body: "already inserted",
+      }),
+    );
+    expect(res.status).toBe(200);
+
+    const { data: state } = await supabase
+      .from("message_threads")
+      .select(
+        "ai_responder_status, ai_responder_reason, ai_last_delivery_status",
+      )
+      .eq("conversation_id", conversationId)
+      .single();
+    expect(state).toMatchObject({
+      ai_responder_status: "handled",
+      ai_responder_reason: "sent",
+      ai_last_delivery_status: "sent",
+    });
+  });
+
+  it("clears prior Sandra state when a new inbound reopens the conversation", async () => {
+    const phone = "+18165559116";
+    const contactId = await seedContact(phone, { optIn: true });
+    const { data: property } = await supabase
+      .from("properties")
+      .insert({
+        address: "7 Sandra Reopen Ln",
+        state: "MO",
+        status: "new_lead",
+        homeowner_contact_id: contactId,
+      })
+      .select("id")
+      .single();
+    await supabase
+      .from("messages")
+      .insert({
+        channel: "sms",
+        direction: "outbound",
+        status: "sent",
+        provider: "mock",
+        from_address: "+18163706846",
+        to_address: phone,
+        body: "initial",
+        contact_id: contactId,
+        property_id: property!.id,
+      })
+      .select("conversation_id")
+      .single();
+    const { data: existingThread } = await supabase
+      .from("message_threads")
+      .select("conversation_id")
+      .eq("contact_id", contactId)
+      .eq("property_id", property!.id)
+      .single();
+    expect(existingThread?.conversation_id).toBeTruthy();
+    await supabase
+      .from("message_threads")
+      .update({
+        ai_responder_status: "handled",
+        ai_responder_reason: "sent",
+        ai_responder_status_at: "2026-06-24T15:00:00.000Z",
+        ai_last_delivery_status: "sent",
+      })
+      .eq("conversation_id", existingThread!.conversation_id);
+
+    const res = await POST(
+      makeRequest({
+        externalId: "msg_reopen_sandra_state_001",
+        from: phone,
+        to: "+18163706846",
+        body: "following up again",
+      }),
+    );
+    expect(res.status).toBe(200);
+
+    const { data: state } = await supabase
+      .from("message_threads")
+      .select(
+        "ai_responder_status, ai_responder_reason, ai_last_delivery_status",
+      )
+      .eq("conversation_id", existingThread!.conversation_id)
+      .single();
+    expect(state).toMatchObject({
+      ai_responder_status: null,
+      ai_responder_reason: null,
+      ai_last_delivery_status: null,
+    });
+  });
+
   it("does not duplicate owner notifications when a retry resumes after the notification already fired", async () => {
     const phone = "+18165559117";
     const contactId = await seedContact(phone, { optIn: true });

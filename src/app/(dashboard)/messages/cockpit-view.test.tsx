@@ -103,7 +103,13 @@ function makeThread(
     needsHumanAttention: overrides.needsHumanAttention ?? false,
     escalationReason: overrides.escalationReason ?? null,
     isOptedOut: overrides.isOptedOut ?? false,
+    isTestTraffic: overrides.isTestTraffic ?? false,
     needsOutcome: overrides.needsOutcome ?? false,
+    aiResponderStatus: overrides.aiResponderStatus ?? null,
+    aiResponderReason: overrides.aiResponderReason ?? null,
+    aiResponderStatusAt: overrides.aiResponderStatusAt ?? null,
+    aiLastDeliveryStatus: overrides.aiLastDeliveryStatus ?? null,
+    aiLastDeliveryError: overrides.aiLastDeliveryError ?? null,
   } as Thread;
 }
 

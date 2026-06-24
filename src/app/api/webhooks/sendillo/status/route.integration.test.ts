@@ -6,6 +6,7 @@ import { resetTenantTables } from "@tests/integration/reset";
 import * as pathSecretRoute from "./[secret]/route";
 import { POST } from "./route";
 import { reconcileStoredStatusEvents } from "@/lib/messaging/status-events";
+import type { Json } from "@/lib/supabase/types";
 
 const supabase = createTestClient();
 const ORIGINAL_ENV = {
@@ -24,6 +25,10 @@ type SeedMessageInput = {
   deliveredAt?: string | null;
   failedAt?: string | null;
   errorMessage?: string | null;
+  contactId?: string | null;
+  propertyId?: string | null;
+  conversationId?: string | null;
+  metadata?: Json | null;
 };
 
 async function seedOutboundMessage(input: SeedMessageInput) {
@@ -38,10 +43,14 @@ async function seedOutboundMessage(input: SeedMessageInput) {
       from_address: "+18164876899",
       to_address: "+18165550001",
       body: "seed outbound",
+      contact_id: input.contactId ?? null,
+      property_id: input.propertyId ?? null,
+      conversation_id: input.conversationId ?? null,
       sent_at: input.sentAt ?? null,
       delivered_at: input.deliveredAt ?? null,
       failed_at: input.failedAt ?? null,
       error_message: input.errorMessage ?? null,
+      metadata: input.metadata ?? null,
     })
     .select("id")
     .single();
@@ -51,6 +60,52 @@ async function seedOutboundMessage(input: SeedMessageInput) {
   }
 
   return data.id;
+}
+
+async function seedThreadContext(conversationId: string, phone: string) {
+  const { data: contact, error: contactError } = await supabase
+    .from("contacts")
+    .insert({
+      first_name: "Sandra",
+      last_name: "Status",
+      phone_1: phone,
+      phone_1_type: "mobile",
+    })
+    .select("id")
+    .single();
+  if (contactError || !contact) {
+    throw new Error(contactError?.message ?? "failed to seed status contact");
+  }
+
+  const { data: property, error: propertyError } = await supabase
+    .from("properties")
+    .insert({
+      address: "1 Sandra Status Ln",
+      state: "MO",
+      status: "prospect",
+      homeowner_contact_id: contact.id,
+    })
+    .select("id, org_id")
+    .single();
+  if (propertyError || !property) {
+    throw new Error(propertyError?.message ?? "failed to seed status property");
+  }
+
+  const { error: threadError } = await supabase.from("message_threads").insert({
+    org_id: property.org_id,
+    channel: "sms",
+    contact_id: contact.id,
+    property_id: property.id,
+    conversation_id: conversationId,
+    ai_responder_status: "handled",
+    ai_responder_reason: "sent",
+    ai_responder_status_at: "2026-06-10T16:54:10.000Z",
+  });
+  if (threadError) {
+    throw new Error(threadError.message);
+  }
+
+  return { contactId: contact.id, propertyId: property.id };
 }
 
 async function loadMessage(externalId: string) {
@@ -230,6 +285,84 @@ describe("POST /api/webhooks/sendillo/status (integration)", () => {
       "2026-06-10T16:56:30.000Z",
     );
     expect(row?.error_message).toBe("Carrier rejected recipient");
+  });
+
+  it("rolls Sendillo delivery failures up only for Sandra-generated outbound messages", async () => {
+    const aiConversationId = "11111111-1111-4111-8111-111111111111";
+    const humanConversationId = "22222222-2222-4222-8222-222222222222";
+    const aiThread = await seedThreadContext(aiConversationId, "+18165550111");
+    const humanThread = await seedThreadContext(
+      humanConversationId,
+      "+18165550222",
+    );
+    await seedOutboundMessage({
+      externalId: "snd_ai_failed_001",
+      status: "sent",
+      sentAt: "2026-06-10T16:54:00.000Z",
+      contactId: aiThread.contactId,
+      propertyId: aiThread.propertyId,
+      conversationId: aiConversationId,
+      metadata: { generated_by: "ai_responder_v1" },
+    });
+    await seedOutboundMessage({
+      externalId: "snd_human_failed_001",
+      status: "sent",
+      sentAt: "2026-06-10T16:54:00.000Z",
+      contactId: humanThread.contactId,
+      propertyId: humanThread.propertyId,
+      conversationId: humanConversationId,
+      metadata: null,
+    });
+
+    const aiResponse = await POST(
+      makeRequest({
+        event: "message.failed",
+        data: {
+          messageId: "snd_ai_failed_001",
+          failedAt: "2026-06-10T16:56:30.000Z",
+          reason: "Carrier rejected recipient",
+        },
+      }),
+    );
+    const humanResponse = await POST(
+      makeRequest({
+        event: "message.failed",
+        data: {
+          messageId: "snd_human_failed_001",
+          failedAt: "2026-06-10T16:56:35.000Z",
+          reason: "Human message failed",
+        },
+      }),
+    );
+
+    expect(aiResponse.status).toBe(200);
+    expect(humanResponse.status).toBe(200);
+
+    const { data: aiState } = await supabase
+      .from("message_threads")
+      .select(
+        "ai_responder_status, ai_last_delivery_status, ai_last_delivery_error",
+      )
+      .eq("conversation_id", aiConversationId)
+      .single();
+    const { data: humanState } = await supabase
+      .from("message_threads")
+      .select(
+        "ai_responder_status, ai_last_delivery_status, ai_last_delivery_error",
+      )
+      .eq("conversation_id", humanConversationId)
+      .single();
+
+    expect(aiState).toMatchObject({
+      ai_responder_status: "handled",
+      ai_last_delivery_status: "failed",
+      ai_last_delivery_error: "Carrier rejected recipient",
+    });
+    expect(humanState).toMatchObject({
+      ai_responder_status: "handled",
+      ai_last_delivery_status: null,
+      ai_last_delivery_error: null,
+    });
   });
 
   it("does not overwrite a terminal failed row with a later delivered event", async () => {
