@@ -125,6 +125,7 @@ describe("applyMessageStatusEvent", () => {
 
     expect(recordAiResponderDeliveryForThread).toHaveBeenCalledWith(supabase, {
       conversationId: "conv-1",
+      messageId: row.id,
       metadata: row.metadata,
       event,
     });

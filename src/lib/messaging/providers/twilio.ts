@@ -29,6 +29,7 @@ import {
  */
 
 const API_BASE = "https://api.twilio.com";
+const DEFAULT_SEND_TIMEOUT_MS = 10_000;
 
 type TwilioConfig = {
   accountSid: string;
@@ -87,6 +88,8 @@ export class TwilioMessagingProvider implements MessagingProvider {
     );
 
     let response: Response;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), DEFAULT_SEND_TIMEOUT_MS);
     try {
       response = await fetch(url, {
         method: "POST",
@@ -95,12 +98,15 @@ export class TwilioMessagingProvider implements MessagingProvider {
           "Content-Type": "application/x-www-form-urlencoded",
         },
         body: params.toString(),
+        signal: controller.signal,
       });
     } catch (e) {
       throw new ProviderError(
         e instanceof Error ? e.message : String(e),
         "twilio",
       );
+    } finally {
+      clearTimeout(timeout);
     }
 
     const text = await response.text();

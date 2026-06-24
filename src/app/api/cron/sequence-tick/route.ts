@@ -32,10 +32,10 @@ import type { Database } from "@/lib/supabase/types";
 export const maxDuration = 300;
 
 const BATCH_SIZE = 100;
-/** Max queued-message releases per tick. With ~0.5–1s per release
- *  (provider HTTP + status flips) this fits comfortably in the budget
- *  while draining faster than a bulk campaign's ~4s/message schedule. */
-const DRAIN_BATCH_SIZE = 150;
+/** Max queued-message releases per tick. The elapsed-time budget below is
+ *  still the hard safety rail; this cap lets healthy runs catch up faster
+ *  while stopping cleanly before the platform can kill the invocation. */
+export const DRAIN_BATCH_SIZE = 240;
 /** Stop starting new work after this much elapsed time — leaves the
  *  remaining maxDuration as headroom for the in-flight release to
  *  finish and the summary to flush. */

@@ -180,11 +180,14 @@ export function InboxThreadList({
                 <SandraThreadStatus
                   threadId={t.threadId}
                   status={t.aiResponderStatus}
+                  reason={t.aiResponderReason}
                   deliveryStatus={t.aiLastDeliveryStatus}
                   deliveryError={t.aiLastDeliveryError}
                 />
               ) : null}
-              {t.needsHumanAttention && t.escalationReason ? (
+              {t.needsHumanAttention &&
+              t.escalationReason &&
+              !(t.aiResponderStatus === "escalated" && t.aiResponderReason) ? (
                 <div className="flex w-full">
                   <EscalationBadge reason={t.escalationReason} />
                 </div>
@@ -215,11 +218,13 @@ export function InboxThreadList({
 function SandraThreadStatus({
   threadId,
   status,
+  reason,
   deliveryStatus,
   deliveryError,
 }: {
   threadId: string;
   status: NonNullable<Thread["aiResponderStatus"]>;
+  reason: string | null;
   deliveryStatus: string | null;
   deliveryError: string | null;
 }) {
@@ -248,6 +253,15 @@ function SandraThreadStatus({
         />
         {status === "handled" ? "Sandra handled" : "Sandra escalated"}
       </span>
+      {status === "escalated" && reason ? (
+        <span
+          className="rounded-full bg-[#fff7ed] px-2 py-0.5 text-[11px] font-bold text-[#9a3412]"
+          title={reason}
+          data-testid={`inbox-thread-${threadId}-sandra-reason`}
+        >
+          {reason}
+        </span>
+      ) : null}
       {deliveryLabel ? (
         <span
           className={`rounded-full px-2 py-0.5 text-[11px] font-bold ${
