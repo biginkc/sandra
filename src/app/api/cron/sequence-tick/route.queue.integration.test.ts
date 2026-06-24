@@ -7,7 +7,7 @@ import {
   resetMockState,
 } from "@/lib/messaging/providers/mock";
 
-import { runSequenceTick } from "./route";
+import { DRAIN_BATCH_SIZE, runSequenceTick } from "./route";
 
 const supabase = createTestClient();
 
@@ -96,6 +96,10 @@ describe("runSequenceTick — queue drain (integration)", () => {
     expect(summary.processed).toBe(0);
     expect(summary.drained).toBe(0);
     expect(getMockMessageLog()).toHaveLength(0);
+  });
+
+  it("keeps the production default drain cap at 240 queued messages", () => {
+    expect(DRAIN_BATCH_SIZE).toBe(240);
   });
 
   it("releases a queued message whose scheduled_for <= now", async () => {
@@ -193,14 +197,14 @@ describe("runSequenceTick — queue drain (integration)", () => {
     expect(getMockMessageLog()).toHaveLength(0);
   });
 
-  it("caps the drain at 50 messages per tick when more are due", async () => {
+  it("caps the drain at the configured limit when more messages are due", async () => {
     const { propertyId, contactId } = await seedLead({
       phone: "+18165550105",
     });
     const pastTime = new Date(SAFE_NOW.getTime() - 60 * 60_000);
 
-    // Seed 51 queued messages — each needs a unique body so mock externalIds don't clash
-    for (let i = 0; i < 51; i++) {
+    // Each queued message needs a unique body so mock externalIds don't clash.
+    for (let i = 0; i < 4; i++) {
       await seedQueuedMessage({
         propertyId,
         contactId,
@@ -210,8 +214,8 @@ describe("runSequenceTick — queue drain (integration)", () => {
       });
     }
 
-    const summary = await runSequenceTick(supabase, { drainLimit: 50 });
-    expect(summary.drained).toBe(50);
+    const summary = await runSequenceTick(supabase, { drainLimit: 3 });
+    expect(summary.drained).toBe(3);
     expect(summary.budgetExhausted).toBe(false);
 
     const { count } = await supabase

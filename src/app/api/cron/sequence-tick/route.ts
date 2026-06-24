@@ -35,7 +35,7 @@ const BATCH_SIZE = 100;
 /** Max queued-message releases per tick. The elapsed-time budget below is
  *  still the hard safety rail; this cap lets healthy runs catch up faster
  *  while stopping cleanly before the platform can kill the invocation. */
-const DRAIN_BATCH_SIZE = 240;
+export const DRAIN_BATCH_SIZE = 240;
 /** Stop starting new work after this much elapsed time — leaves the
  *  remaining maxDuration as headroom for the in-flight release to
  *  finish and the summary to flush. */

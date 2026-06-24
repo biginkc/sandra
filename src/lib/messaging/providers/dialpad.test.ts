@@ -1,7 +1,18 @@
 import { createHmac } from "node:crypto";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { DialpadMessagingProvider } from "./dialpad";
+
+const ORIGINAL_FETCH = global.fetch;
+
+beforeEach(() => {
+  global.fetch = vi.fn();
+});
+
+afterEach(() => {
+  global.fetch = ORIGINAL_FETCH;
+  vi.restoreAllMocks();
+});
 
 function makeProvider(secret = "shh-test-secret") {
   return new DialpadMessagingProvider("fake-api-key", "+18165550000", secret);
@@ -33,7 +44,7 @@ describe("DialpadMessagingProvider.verifyWebhookSignature (JWT)", () => {
   it("rejects a JWT whose payload was tampered after signing", () => {
     const p = makeProvider();
     const jwt = mintJwt({ ok: true });
-    const [h, _body, sig] = jwt.split(".");
+    const [h, , sig] = jwt.split(".");
     const tampered = Buffer.from(JSON.stringify({ ok: false })).toString(
       "base64url",
     );
@@ -58,6 +69,23 @@ describe("DialpadMessagingProvider.verifyWebhookSignature (JWT)", () => {
   it("rejects an empty body", () => {
     const p = makeProvider();
     expect(p.verifyWebhookSignature("", new Headers())).toBe(false);
+  });
+});
+
+describe("DialpadMessagingProvider.sendSms", () => {
+  it("passes an abort signal so cron drain cannot hang indefinitely", async () => {
+    (global.fetch as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ok: true,
+      status: 200,
+      statusText: "OK",
+      text: async () => JSON.stringify({ id: "dp-msg-1", status: "sent" }),
+    } as unknown as Response);
+
+    const p = makeProvider();
+    await p.sendSms({ to: "+18165551234", body: "hello" });
+
+    const init = (global.fetch as ReturnType<typeof vi.fn>).mock.calls[0][1] as RequestInit;
+    expect(init.signal).toBeInstanceOf(AbortSignal);
   });
 });
 

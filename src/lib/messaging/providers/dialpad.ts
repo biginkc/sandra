@@ -23,6 +23,7 @@ import type {
 const API_BASE = "https://dialpad.com/api/v2";
 const SEND_ENDPOINT = `${API_BASE}/sms`;
 const NUMBERS_ENDPOINT = `${API_BASE}/numbers`;
+const DEFAULT_SEND_TIMEOUT_MS = 10_000;
 
 export class DialpadMessagingProvider implements MessagingProvider {
   readonly providerId = "dialpad";
@@ -45,6 +46,8 @@ export class DialpadMessagingProvider implements MessagingProvider {
     };
 
     let response: Response;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), DEFAULT_SEND_TIMEOUT_MS);
     try {
       response = await fetch(SEND_ENDPOINT, {
         method: "POST",
@@ -53,12 +56,15 @@ export class DialpadMessagingProvider implements MessagingProvider {
           "Content-Type": "application/json",
         },
         body: JSON.stringify(body),
+        signal: controller.signal,
       });
     } catch (e) {
       throw new ProviderError(
         e instanceof Error ? e.message : String(e),
         "dialpad",
       );
+    } finally {
+      clearTimeout(timeout);
     }
 
     const text = await response.text();
@@ -112,6 +118,8 @@ export class DialpadMessagingProvider implements MessagingProvider {
     _headers: Headers,
     _fullUrl?: string,
   ): boolean {
+    void _headers;
+    void _fullUrl;
     return this.decodeSignedJwt(rawBody.trim()) !== null;
   }
 

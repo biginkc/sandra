@@ -108,6 +108,14 @@ async function seedThreadContext(conversationId: string, phone: string) {
   return { contactId: contact.id, propertyId: property.id };
 }
 
+async function bindAiThreadMessage(conversationId: string, messageId: string) {
+  const { error } = await supabase
+    .from("message_threads")
+    .update({ ai_responder_message_id: messageId })
+    .eq("conversation_id", conversationId);
+  if (error) throw new Error(error.message);
+}
+
 async function loadMessage(externalId: string) {
   const { data } = await supabase
     .from("messages")
@@ -295,7 +303,7 @@ describe("POST /api/webhooks/sendillo/status (integration)", () => {
       humanConversationId,
       "+18165550222",
     );
-    await seedOutboundMessage({
+    const aiMessageId = await seedOutboundMessage({
       externalId: "snd_ai_failed_001",
       status: "sent",
       sentAt: "2026-06-10T16:54:00.000Z",
@@ -304,6 +312,7 @@ describe("POST /api/webhooks/sendillo/status (integration)", () => {
       conversationId: aiConversationId,
       metadata: { generated_by: "ai_responder_v1" },
     });
+    await bindAiThreadMessage(aiConversationId, aiMessageId);
     await seedOutboundMessage({
       externalId: "snd_human_failed_001",
       status: "sent",
@@ -360,6 +369,57 @@ describe("POST /api/webhooks/sendillo/status (integration)", () => {
     });
     expect(humanState).toMatchObject({
       ai_responder_status: "handled",
+      ai_last_delivery_status: null,
+      ai_last_delivery_error: null,
+    });
+  });
+
+  it("ignores stale Sendillo callbacks for an older Sandra-generated outbound", async () => {
+    const conversationId = "33333333-3333-4333-8333-333333333333";
+    const thread = await seedThreadContext(conversationId, "+18165550333");
+    const oldMessageId = await seedOutboundMessage({
+      externalId: "snd_ai_old_001",
+      status: "sent",
+      sentAt: "2026-06-10T16:54:00.000Z",
+      contactId: thread.contactId,
+      propertyId: thread.propertyId,
+      conversationId,
+      metadata: { generated_by: "ai_responder_v1" },
+    });
+    const currentMessageId = await seedOutboundMessage({
+      externalId: "snd_ai_current_001",
+      status: "sent",
+      sentAt: "2026-06-10T16:55:00.000Z",
+      contactId: thread.contactId,
+      propertyId: thread.propertyId,
+      conversationId,
+      metadata: { generated_by: "ai_responder_v1" },
+    });
+    expect(oldMessageId).not.toBe(currentMessageId);
+    await bindAiThreadMessage(conversationId, currentMessageId);
+
+    const response = await POST(
+      makeRequest({
+        event: "message.failed",
+        data: {
+          messageId: "snd_ai_old_001",
+          failedAt: "2026-06-10T16:56:30.000Z",
+          reason: "Old callback should not roll up",
+        },
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    const { data: state } = await supabase
+      .from("message_threads")
+      .select(
+        "ai_responder_message_id, ai_last_delivery_status, ai_last_delivery_error",
+      )
+      .eq("conversation_id", conversationId)
+      .single();
+
+    expect(state).toMatchObject({
+      ai_responder_message_id: currentMessageId,
       ai_last_delivery_status: null,
       ai_last_delivery_error: null,
     });

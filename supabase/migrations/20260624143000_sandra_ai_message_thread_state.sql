@@ -8,6 +8,7 @@ alter table public.message_threads
   add column if not exists ai_responder_status text,
   add column if not exists ai_responder_reason text,
   add column if not exists ai_responder_status_at timestamptz,
+  add column if not exists ai_responder_message_id uuid,
   add column if not exists ai_last_delivery_status text,
   add column if not exists ai_last_delivery_error text;
 
@@ -30,10 +31,6 @@ end $$;
 
 alter table public.message_threads
   validate constraint message_threads_ai_responder_status_check;
-
-create index if not exists idx_message_threads_ai_responder_status
-  on public.message_threads (ai_responder_status)
-  where ai_responder_status is not null;
 
 do $$
 begin

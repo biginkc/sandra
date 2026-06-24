@@ -26,6 +26,7 @@ export async function clearAiResponderThreadState(
       ai_responder_status: null,
       ai_responder_reason: null,
       ai_responder_status_at: null,
+      ai_responder_message_id: null,
       ai_last_delivery_status: null,
       ai_last_delivery_error: null,
       updated_at: now,
@@ -75,6 +76,7 @@ export async function recordAiResponderDeliveryForThread(
   supabase: SupabaseClient<Database>,
   args: {
     conversationId: string | null;
+    messageId: string;
     metadata: Json | null;
     event: SmsStatusEvent;
   },
@@ -92,7 +94,8 @@ export async function recordAiResponderDeliveryForThread(
         args.event.kind === "failed" ? args.event.errorMessage ?? null : null,
       updated_at: now,
     })
-    .eq("conversation_id", args.conversationId);
+    .eq("conversation_id", args.conversationId)
+    .eq("ai_responder_message_id", args.messageId);
   if (error) {
     reportError(new Error(error.message), {
       tags: { surface: "ai_responder_thread_delivery_record" },
@@ -127,6 +130,7 @@ async function buildOutcomeUpdate(
         ai_responder_status: "handled",
         ai_responder_reason: "sent",
         ai_responder_status_at: statusAt,
+        ai_responder_message_id: outcome.messageId,
         ai_last_delivery_status: delivery?.status ?? "sent",
         ai_last_delivery_error: delivery?.error_message ?? null,
       };
@@ -137,6 +141,7 @@ async function buildOutcomeUpdate(
         ai_responder_status: "handled",
         ai_responder_reason: outcome.reason,
         ai_responder_status_at: statusAt,
+        ai_responder_message_id: null,
         ai_last_delivery_status: null,
         ai_last_delivery_error: null,
       };
@@ -145,6 +150,7 @@ async function buildOutcomeUpdate(
         ai_responder_status: "escalated",
         ai_responder_reason: outcome.reason,
         ai_responder_status_at: statusAt,
+        ai_responder_message_id: null,
         ai_last_delivery_status: null,
         ai_last_delivery_error: null,
       };
