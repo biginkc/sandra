@@ -223,6 +223,149 @@ describe("POST /api/webhooks/sendillo/sms (integration)", () => {
     });
   });
 
+  it("collapses semantic duplicate Sendillo IDs inside the inbound burst window", async () => {
+    const contactId = await seedContact("+18165550102");
+    const { data: property } = await supabase
+      .from("properties")
+      .insert({
+        address: "3 Sendillo Dedupe Ln",
+        state: "MO",
+        status: "new_lead",
+        homeowner_contact_id: contactId,
+      })
+      .select("id")
+      .single();
+    await supabase.from("messages").insert({
+      channel: "sms",
+      direction: "outbound",
+      status: "sent",
+      provider: "sendillo",
+      from_address: "+18164876899",
+      to_address: "+18165550102",
+      body: "seed outbound",
+      contact_id: contactId,
+      property_id: property!.id,
+    });
+
+    const makeRequest = (messageId: string, receivedAt: string) =>
+      new Request("https://example.invalid/api/webhooks/sendillo/sms", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-sendillo-webhook-secret": "sendillo-secret",
+        },
+        body: JSON.stringify({
+          event: "inbound.received",
+          data: {
+            messageId,
+            from: "+18165550102",
+            to: "+18164876899",
+            body: "Go away",
+            type: "SMS",
+            receivedAt,
+          },
+        }),
+      });
+
+    const [first, second] = await Promise.all([
+      POST(makeRequest("snd_semantic_dup_001", "2026-06-08T19:09:39.000Z")),
+      POST(makeRequest("snd_semantic_dup_002", "2026-06-08T19:09:39.080Z")),
+    ]);
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+
+    const { count: inboundCount } = await supabase
+      .from("messages")
+      .select("*", { count: "exact", head: true })
+      .eq("provider", "sendillo")
+      .eq("direction", "inbound")
+      .eq("contact_id", contactId)
+      .eq("body", "Go away");
+    const { data: intent } = await supabase
+      .from("sms_inbound_intents")
+      .select("id, duplicate_count, canonical_message_id")
+      .eq("contact_id", contactId)
+      .single();
+    const { count: deliveryCount } = await supabase
+      .from("sms_inbound_deliveries")
+      .select("*", { count: "exact", head: true })
+      .eq("intent_id", intent!.id);
+
+    expect(inboundCount).toBe(1);
+    expect(intent).toMatchObject({ duplicate_count: 1 });
+    expect(intent!.canonical_message_id).toBeTruthy();
+    expect(deliveryCount).toBe(2);
+  });
+
+  it("treats the same Sendillo body outside the burst window as a real second inbound", async () => {
+    const contactId = await seedContact("+18165550103");
+    const { data: property } = await supabase
+      .from("properties")
+      .insert({
+        address: "4 Sendillo Repeat Ln",
+        state: "MO",
+        status: "new_lead",
+        homeowner_contact_id: contactId,
+      })
+      .select("id")
+      .single();
+    await supabase.from("messages").insert({
+      channel: "sms",
+      direction: "outbound",
+      status: "sent",
+      provider: "sendillo",
+      from_address: "+18164876899",
+      to_address: "+18165550103",
+      body: "seed outbound",
+      contact_id: contactId,
+      property_id: property!.id,
+    });
+
+    const makeRequest = (messageId: string, receivedAt: string) =>
+      new Request("https://example.invalid/api/webhooks/sendillo/sms", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-sendillo-webhook-secret": "sendillo-secret",
+        },
+        body: JSON.stringify({
+          event: "inbound.received",
+          data: {
+            messageId,
+            from: "+18165550103",
+            to: "+18164876899",
+            body: "Go away",
+            type: "SMS",
+            receivedAt,
+          },
+        }),
+      });
+
+    expect(
+      (await POST(makeRequest("snd_repeat_001", "2026-06-08T19:09:39.000Z")))
+        .status,
+    ).toBe(200);
+    expect(
+      (await POST(makeRequest("snd_repeat_002", "2026-06-08T19:09:42.001Z")))
+        .status,
+    ).toBe(200);
+
+    const { count: inboundCount } = await supabase
+      .from("messages")
+      .select("*", { count: "exact", head: true })
+      .eq("provider", "sendillo")
+      .eq("direction", "inbound")
+      .eq("contact_id", contactId)
+      .eq("body", "Go away");
+    const { count: intentCount } = await supabase
+      .from("sms_inbound_intents")
+      .select("*", { count: "exact", head: true })
+      .eq("contact_id", contactId);
+
+    expect(inboundCount).toBe(2);
+    expect(intentCount).toBe(2);
+  });
+
   it("accepts the shared secret from a header without relying on the query string", async () => {
     const contactId = await seedContact("+18165550003");
     const { data: property } = await supabase

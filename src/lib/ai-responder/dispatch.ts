@@ -13,6 +13,7 @@ import type { Database, Json } from "@/lib/supabase/types";
 import { listAdminUserIds } from "@/lib/auth/admins";
 import { createNotification } from "@/lib/notifications/dispatch";
 
+import { claimAiResponse, completeAiResponseClaim } from "./claims";
 import { classifyAiSkip } from "./classify";
 import {
   classifyProviderFailure,
@@ -172,14 +173,35 @@ export async function dispatchAiResponse(
     }
   }
 
+  const responseClaim = await claimAiResponse(supabase, {
+    orgId: property.org_id,
+    inboundMessageId: input.inboundMessageId,
+    propertyId: input.propertyId,
+    contactId: input.contactId,
+    conversationId: input.conversationId ?? null,
+  });
+  if (!responseClaim.claimed) {
+    return {
+      outcome: "skipped",
+      reason:
+        responseClaim.reason === "already_replied"
+          ? "already_replied"
+          : "already_claimed",
+    };
+  }
+
   if (isIdentityQuestion(input.inboundBody)) {
     const safety = validateAiReplyBody(IDENTITY_REPLY_BODY);
     if (!safety.ok) {
       const reason = `safety:${safety.reason}`;
       await markPropertyNeedsAttention(supabase, input.propertyId, reason);
+      await completeAiResponseClaim(supabase, {
+        claimId: responseClaim.claimId,
+        outcome: "escalated",
+      });
       return { outcome: "escalated", reason };
     }
-    return sendResponderMessage(supabase, {
+    const outcome = await sendResponderMessage(supabase, {
       input,
       body: IDENTITY_REPLY_BODY,
       model: config!.model,
@@ -187,6 +209,12 @@ export async function dispatchAiResponse(
       sentiment: "neutral",
       turn: currentTurn + 1,
     });
+    await completeAiResponseClaim(supabase, {
+      claimId: responseClaim.claimId,
+      outcome: outcome.outcome,
+      outboundMessageId: outcome.outcome === "sent" ? outcome.messageId : null,
+    });
+    return outcome;
   }
 
   // --------------------------------------------------------------------------
@@ -238,6 +266,11 @@ export async function dispatchAiResponse(
         failure: providerFailure,
       });
     }
+    await completeAiResponseClaim(supabase, {
+      claimId: responseClaim.claimId,
+      outcome: "escalated",
+      errorMessage: reason,
+    });
     return { outcome: "escalated", reason };
   }
 
@@ -248,12 +281,20 @@ export async function dispatchAiResponse(
   ) {
     const reason = `low_confidence:${generated.confidence}`;
     await markPropertyNeedsAttention(supabase, input.propertyId, reason);
+    await completeAiResponseClaim(supabase, {
+      claimId: responseClaim.claimId,
+      outcome: "escalated",
+    });
     return { outcome: "escalated", reason };
   }
 
   switch (route.kind) {
     case "escalate":
       await markPropertyNeedsAttention(supabase, input.propertyId, route.reason);
+      await completeAiResponseClaim(supabase, {
+        claimId: responseClaim.claimId,
+        outcome: "escalated",
+      });
       return { outcome: "escalated", reason: route.reason };
     case "opt_out":
       const optOutResult = await applyResponderOptOut(supabase, {
@@ -264,8 +305,17 @@ export async function dispatchAiResponse(
         reason: route.reason,
       });
       if (!optOutResult.updated) {
-        return closeOutcome(optOutResult, route.reason);
+        const outcome = closeOutcome(optOutResult, route.reason);
+        await completeAiResponseClaim(supabase, {
+          claimId: responseClaim.claimId,
+          outcome: outcome.outcome,
+        });
+        return outcome;
       }
+      await completeAiResponseClaim(supabase, {
+        claimId: responseClaim.claimId,
+        outcome: "opted_out",
+      });
       return { outcome: "opted_out", reason: route.reason };
     case "close_dnc":
       const dncResult = await applyResponderDnc(supabase, {
@@ -275,7 +325,12 @@ export async function dispatchAiResponse(
         orgId: property.org_id,
         reason: route.reason,
       });
-      return closeOutcome(dncResult, route.reason);
+      const dncOutcome = closeOutcome(dncResult, route.reason);
+      await completeAiResponseClaim(supabase, {
+        claimId: responseClaim.claimId,
+        outcome: dncOutcome.outcome,
+      });
+      return dncOutcome;
     case "auto_close_wrong_number":
       const wrongNumberResult = await applyWrongNumber(supabase, {
         propertyId: input.propertyId,
@@ -285,14 +340,24 @@ export async function dispatchAiResponse(
         scope: route.scope,
         reason: route.reason,
       });
-      return closeOutcome(wrongNumberResult, route.reason);
+      const wrongNumberOutcome = closeOutcome(wrongNumberResult, route.reason);
+      await completeAiResponseClaim(supabase, {
+        claimId: responseClaim.claimId,
+        outcome: wrongNumberOutcome.outcome,
+      });
+      return wrongNumberOutcome;
     case "auto_close":
       const autoCloseResult = await setResponderDispo(supabase, {
         propertyId: input.propertyId,
         dispo: route.dispo,
         reason: route.reason,
       });
-      return closeOutcome(autoCloseResult, route.reason);
+      const autoCloseOutcome = closeOutcome(autoCloseResult, route.reason);
+      await completeAiResponseClaim(supabase, {
+        claimId: responseClaim.claimId,
+        outcome: autoCloseOutcome.outcome,
+      });
+      return autoCloseOutcome;
     case "send_reply":
     case "deescalate_close": {
       const bodyResult = await resolveOutboundBody(supabase, {
@@ -305,6 +370,10 @@ export async function dispatchAiResponse(
       if (!safety.ok) {
         const reason = `safety:${safety.reason}`;
         await markPropertyNeedsAttention(supabase, input.propertyId, reason);
+        await completeAiResponseClaim(supabase, {
+          claimId: responseClaim.claimId,
+          outcome: "escalated",
+        });
         return { outcome: "escalated", reason };
       }
 
@@ -316,7 +385,13 @@ export async function dispatchAiResponse(
         sentiment: generated.sentiment,
         turn: currentTurn + 1,
       });
-      if (sent.outcome !== "sent") return sent;
+      if (sent.outcome !== "sent") {
+        await completeAiResponseClaim(supabase, {
+          claimId: responseClaim.claimId,
+          outcome: sent.outcome,
+        });
+        return sent;
+      }
 
       if (route.kind === "deescalate_close") {
         const closeResult = await setResponderDispo(supabase, {
@@ -324,9 +399,20 @@ export async function dispatchAiResponse(
           dispo: "not_interested",
           reason: route.reason,
         });
-        return closeOutcome(closeResult, route.reason);
+        const outcome = closeOutcome(closeResult, route.reason);
+        await completeAiResponseClaim(supabase, {
+          claimId: responseClaim.claimId,
+          outcome: outcome.outcome,
+          outboundMessageId: sent.messageId,
+        });
+        return outcome;
       }
 
+      await completeAiResponseClaim(supabase, {
+        claimId: responseClaim.claimId,
+        outcome: "sent",
+        outboundMessageId: sent.messageId,
+      });
       return sent;
     }
     default:

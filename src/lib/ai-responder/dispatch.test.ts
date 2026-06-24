@@ -64,7 +64,16 @@ type MessageRow = {
   status: string;
 };
 
+type AiClaimRow = {
+  id: string;
+  inbound_message_id: string;
+  lease_expires_at: string;
+  response_kind: string;
+  status: string;
+};
+
 type MockState = {
+  aiClaims: AiClaimRow[];
   contact: {
     first_name: string | null;
     phone_1: string | null;
@@ -86,6 +95,7 @@ type MockState = {
   };
   messages: MessageRow[];
   nextMessageId: number;
+  nextClaimId: number;
   property: {
     ai_responder_disabled: boolean;
     id: string;
@@ -121,6 +131,7 @@ function createMockState(): MockState {
       model: "claude-test",
       system_prompt: "Reply briefly.",
     },
+    aiClaims: [],
     contact: {
       first_name: "Sam",
       phone_1: "+18165550001",
@@ -131,6 +142,7 @@ function createMockState(): MockState {
       phone_3_type: null,
     },
     messages: [],
+    nextClaimId: 1,
     nextMessageId: 1,
     property: {
       ai_responder_disabled: false,
@@ -388,6 +400,86 @@ function createMockSupabase(state: MockState) {
     return query;
   }
 
+  function buildAiClaimsQuery() {
+    const eqFilters = new Map<string, unknown>();
+    let insertData: Partial<AiClaimRow> | null = null;
+    let updateData: Partial<AiClaimRow> | null = null;
+
+    const matches = (row: AiClaimRow) => {
+      for (const [field, value] of eqFilters) {
+        if (row[field as keyof AiClaimRow] !== value) return false;
+      }
+      return true;
+    };
+
+    const execute = () => {
+      if (insertData) {
+        if (
+          state.aiClaims.some(
+            (row) =>
+              row.inbound_message_id === insertData!.inbound_message_id &&
+              row.response_kind === insertData!.response_kind,
+          )
+        ) {
+          return {
+            data: null,
+            error: {
+              code: "23505",
+              message: "duplicate key value violates unique constraint",
+            },
+          };
+        }
+        const row: AiClaimRow = {
+          id: `claim-${state.nextClaimId++}`,
+          inbound_message_id: String(insertData.inbound_message_id),
+          lease_expires_at: String(insertData.lease_expires_at),
+          response_kind: String(insertData.response_kind),
+          status: String(insertData.status),
+        };
+        state.aiClaims.push(row);
+        return { data: row, error: null };
+      }
+
+      if (updateData) {
+        const row = state.aiClaims.find(matches);
+        if (!row) return { data: null, error: null };
+        Object.assign(row, updateData);
+        return { data: row, error: null };
+      }
+
+      return {
+        data: state.aiClaims.find(matches) ?? null,
+        error: null,
+      };
+    };
+
+    const query = {
+      eq(field: string, value: unknown) {
+        eqFilters.set(field, value);
+        return query;
+      },
+      insert(value: Partial<AiClaimRow>) {
+        insertData = value;
+        return query;
+      },
+      maybeSingle() {
+        return Promise.resolve(execute());
+      },
+      select() {
+        return query;
+      },
+      single() {
+        return Promise.resolve(execute());
+      },
+      update(value: Partial<AiClaimRow>) {
+        updateData = value;
+        return query;
+      },
+    };
+
+    return query;
+  }
+
   return {
     from(table: string) {
       if (table === "messages") {
@@ -401,6 +493,9 @@ function createMockSupabase(state: MockState) {
       }
       if (table === "contacts") {
         return buildContactsQuery();
+      }
+      if (table === "ai_response_claims") {
+        return buildAiClaimsQuery();
       }
       throw new Error(`Unexpected table: ${table}`);
     },
@@ -487,6 +582,41 @@ describe("dispatchAiResponse debounce", () => {
       outcome: "skipped",
       reason: "duplicate_throttled",
     });
+    expect(vi.mocked(generateAiReply)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(sendSmsToContact)).toHaveBeenCalledTimes(1);
+  });
+
+  it("allows only one concurrent handler to claim the same inbound before sending", async () => {
+    const state = createMockState();
+    const supabase = createMockSupabase(state);
+    installSendMock(state);
+
+    const [first, second] = await Promise.all([
+      dispatchAiResponse(
+        supabase as never,
+        {
+          contactId: CONTACT_ID,
+          conversationId: CONVERSATION_ID,
+          inboundBody: "Still interested?",
+          inboundMessageId: "inbound-race",
+          propertyId: PROPERTY_ID,
+        },
+        { anthropic: {} as never },
+      ),
+      dispatchAiResponse(
+        supabase as never,
+        {
+          contactId: CONTACT_ID,
+          conversationId: CONVERSATION_ID,
+          inboundBody: "Still interested?",
+          inboundMessageId: "inbound-race",
+          propertyId: PROPERTY_ID,
+        },
+        { anthropic: {} as never },
+      ),
+    ]);
+
+    expect([first.outcome, second.outcome].sort()).toEqual(["sent", "skipped"]);
     expect(vi.mocked(generateAiReply)).toHaveBeenCalledTimes(1);
     expect(vi.mocked(sendSmsToContact)).toHaveBeenCalledTimes(1);
   });
