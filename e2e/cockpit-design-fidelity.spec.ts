@@ -152,12 +152,20 @@ test.describe("Messages cockpit — design fidelity", () => {
     await expect(panel).toContainText("4421 Blanco Rd");
     await expect(panel).toContainText(/Assigned:/);
 
-    // Phone button + unified Move to Lead pill
-    await expect(page.getByTestId("inbox-detail-phone")).toBeVisible();
+    // Phone action lives in the More menu; the record link stays in the header.
+    await expect(page.getByTestId("inbox-detail-phone")).toHaveCount(0);
+    await page.getByTestId("inbox-detail-more").click();
+    const actionsMenu = page.getByRole("menu");
+    await expect(actionsMenu.getByTestId("inbox-detail-phone")).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(actionsMenu).toBeHidden();
+    await expect(page.getByTestId("inbox-detail-phone")).toHaveCount(0);
+    await expect(page).toHaveURL(new RegExp(`[?&]thread=${contactId}`));
+    await expect(panel).toBeVisible();
     const openLead = page.getByTestId("inbox-detail-open-lead");
     await expect(openLead).toBeVisible();
-    await expect(openLead).toContainText("Move to Lead");
-    await expect(openLead).toBeDisabled();
+    await expect(openLead).toContainText("Open lead");
+    await expect(openLead).toBeEnabled();
     await expect(openLead).toHaveClass(/rounded-full/);
 
     // Dispo bar — same outcome controls for lead and prospect threads.
