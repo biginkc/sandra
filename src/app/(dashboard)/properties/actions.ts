@@ -27,6 +27,10 @@ import {
   type ResolvedBulkSmsQueueOpts,
 } from "@/lib/messaging/bulk-queue";
 import {
+  type SmsPacingProfile,
+  validateSmsPaceSeconds,
+} from "@/lib/messaging/pacing";
+import {
   buildSnapshotsForProperty,
   type DialerBatchItemSnapshot,
 } from "@/lib/dialer/snapshot-identity";
@@ -123,14 +127,25 @@ function resolveProvidedCampaignId(opts: BulkSmsQueueOpts): string | null {
 }
 
 function baseBulkSmsOpts(opts: BulkSmsQueueOpts): BulkSmsQueueBaseOpts {
+  const pacingProfile = resolveServerOwnedPacingProfile(opts);
   return {
     body: opts.body,
     templateCategory: opts.templateCategory,
     paceSeconds: opts.paceSeconds,
+    pacingProfile,
     skipIfContacted: opts.skipIfContacted,
     jitterPct: opts.jitterPct,
     includeUnknown: opts.includeUnknown,
   };
+}
+
+function resolveServerOwnedPacingProfile(
+  opts: BulkSmsQueueOpts,
+): SmsPacingProfile | undefined {
+  return opts.pacingProfile === "canary" &&
+    process.env.SANDRA_SMS_CANARY_PACING_ENABLED === "true"
+    ? "canary"
+    : undefined;
 }
 
 function uniqueIds(ids: string[]): string[] {
@@ -285,6 +300,20 @@ export async function bulkQueueSms(
 
     if (propertyIds.length === 0) {
       return ok({ succeeded: 0, skipped: 0, failed: [] });
+    }
+
+    const paceValidation = validateSmsPaceSeconds(opts.paceSeconds, {
+      mode: "bulk",
+      pacingProfile: resolveServerOwnedPacingProfile(opts),
+    });
+    if (!paceValidation.ok) {
+      return {
+        ok: false,
+        error: {
+          code: "VALIDATION",
+          message: paceValidation.message,
+        },
+      };
     }
 
     let resolvedPropertyIds = Array.from(new Set(propertyIds));

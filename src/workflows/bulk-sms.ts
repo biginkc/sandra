@@ -166,6 +166,7 @@ async function loadBulkSmsJob(jobId: string): Promise<LoadedBulkSmsJob> {
       body: rawOpts.body,
       templateCategory: rawOpts.templateCategory,
       paceSeconds: rawOpts.paceSeconds,
+      pacingProfile: rawOpts.pacingProfile,
       skipIfContacted: rawOpts.skipIfContacted,
       jitterPct: rawOpts.jitterPct,
       includeUnknown: rawOpts.includeUnknown,

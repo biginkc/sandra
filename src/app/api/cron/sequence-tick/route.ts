@@ -3,8 +3,12 @@ import { createClient as createSupabaseClient } from "@supabase/supabase-js";
 
 import { reportError } from "@/lib/errors/report";
 import { processEnrollmentTick } from "@/lib/sequences/tick";
-import { failQueuedMessage, releaseQueuedMessage } from "@/lib/messaging/send";
-import type { Database } from "@/lib/supabase/types";
+import {
+  failQueuedMessage,
+  PROVIDER_PENDING_STALE_MS,
+  releaseQueuedMessage,
+} from "@/lib/messaging/send";
+import type { Database, Json } from "@/lib/supabase/types";
 
 /**
  * Vercel cron → `/api/cron/sequence-tick` every 5 minutes.
@@ -101,8 +105,14 @@ export async function runSequenceTick(
   outcomes: Record<string, number>;
   /** Messages actually handed to the provider this tick (status=sent). */
   drained: number;
+  /** Due queued messages selected for release before per-row outcomes. */
+  dueMessagesSelected: number;
+  /** True when at least one due queued message remains behind the selected page. */
+  drainLimitHit: boolean;
   /** Per-outcome tally of every release attempt, blocked ones included. */
   drainOutcomes: Record<string, number>;
+  /** Stale provider attempts failed without re-sending. */
+  stalePendingFailed: number;
   budgetExhausted: boolean;
 }> {
   const budgetMs = opts.budgetMs ?? TICK_BUDGET_MS;
@@ -137,20 +147,32 @@ export async function runSequenceTick(
     processed += 1;
   }
 
+  const stalePendingFailed = await failStalePendingProviderAttempts(
+    supabase,
+    Date.now(),
+  );
+
   // Drain scheduled queued messages — release any row where
   // scheduled_for <= now. Consent + quiet-hours are re-checked at
   // release time; unreleasable messages (opted-out, quiet hours) are
   // left queued for the next tick. Stops at the time budget so the
   // platform never kills us mid-release; whatever is left stays
   // cleanly `queued` for the next tick.
-  const { data: dueMessages } = await supabase
+  const { data: dueMessagesPage, error: dueMessagesError } = await supabase
     .from("messages")
     .select("id")
     .eq("status", "queued")
     .lte("scheduled_for", nowIso)
     .not("scheduled_for", "is", null)
     .order("scheduled_for", { ascending: true })
-    .limit(drainLimit);
+    .limit(drainLimit + 1);
+
+  if (dueMessagesError) {
+    throw new Error(`fetch due queued messages failed: ${dueMessagesError.message}`);
+  }
+
+  const dueMessages = (dueMessagesPage ?? []).slice(0, drainLimit);
+  const drainLimitHit = (dueMessagesPage?.length ?? 0) > drainLimit;
 
   let drained = 0;
   const drainOutcomes: Record<string, number> = {};
@@ -194,9 +216,81 @@ export async function runSequenceTick(
     processed,
     outcomes,
     drained,
+    dueMessagesSelected: dueMessages.length,
+    drainLimitHit,
     drainOutcomes,
+    stalePendingFailed,
     budgetExhausted,
   };
+}
+
+async function failStalePendingProviderAttempts(
+  supabase: ReturnType<typeof createServiceRoleClient>,
+  nowMs: number,
+): Promise<number> {
+  const cutoffIso = new Date(nowMs - PROVIDER_PENDING_STALE_MS).toISOString();
+  const { data, error } = await supabase
+    .from("messages")
+    .select("id, metadata")
+    .eq("status", "pending")
+    .eq("channel", "sms")
+    .eq("direction", "outbound")
+    .not("metadata->providerAttempt->>pendingAt", "is", null)
+    .lte("metadata->providerAttempt->>pendingAt", cutoffIso)
+    .order("metadata->providerAttempt->>pendingAt", { ascending: true })
+    .limit(DRAIN_BATCH_SIZE);
+
+  if (error) {
+    throw new Error(`fetch stale pending messages failed: ${error.message}`);
+  }
+
+  let failed = 0;
+  for (const row of data ?? []) {
+    const pendingAt = readProviderAttemptPendingAt(row.metadata);
+    if (pendingAt == null || nowMs - pendingAt.getTime() < PROVIDER_PENDING_STALE_MS) continue;
+    const metadata =
+      row.metadata && typeof row.metadata === "object" && !Array.isArray(row.metadata)
+        ? row.metadata
+        : {};
+    const { data: updated, error: updateError } = await supabase
+      .from("messages")
+      .update({
+        status: "failed",
+        failed_at: new Date(nowMs).toISOString(),
+        error_message:
+          "Provider attempt stayed pending past the recovery window; failed without re-sending to avoid duplicate SMS.",
+        metadata: {
+          ...metadata,
+          providerAttempt: {
+            ...(isRecord(metadata.providerAttempt) ? metadata.providerAttempt : {}),
+            terminal: true,
+            recoveredAt: new Date(nowMs).toISOString(),
+            recoveryReason: "stale_pending_provider_attempt",
+          },
+        } as Json,
+      })
+      .eq("id", row.id)
+      .eq("status", "pending")
+      .select("id")
+      .maybeSingle();
+    if (updateError) {
+      throw new Error(`fail stale pending message failed: ${updateError.message}`);
+    }
+    if (updated) failed += 1;
+  }
+  return failed;
+}
+
+function readProviderAttemptPendingAt(metadata: Json | null): Date | null {
+  if (!isRecord(metadata)) return null;
+  const attempt = metadata.providerAttempt;
+  if (!isRecord(attempt) || typeof attempt.pendingAt !== "string") return null;
+  const pendingAt = new Date(attempt.pendingAt);
+  return Number.isNaN(pendingAt.getTime()) ? null : pendingAt;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
 export async function GET(request: Request) {

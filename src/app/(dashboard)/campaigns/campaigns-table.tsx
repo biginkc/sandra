@@ -29,6 +29,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { SMS_PACING_SECONDS } from "@/lib/messaging/pacing";
 
 import { CampaignRowActions } from "./campaign-row-actions";
 
@@ -232,7 +233,8 @@ export function CampaignsTable({ rows, parsed, total }: Props) {
                     <div className="flex flex-col gap-1">
                       <span className="text-sm">{row.bodyPreview}</span>
                       <span className="text-muted-foreground text-xs">
-                        Pace: {row.pace_seconds ?? 18}s
+                        Pace:{" "}
+                        {row.pace_seconds ?? SMS_PACING_SECONDS.savedCampaignDefault}s
                         {row.skip_if_contacted ? " · Skip contacted" : ""}
                       </span>
                     </div>

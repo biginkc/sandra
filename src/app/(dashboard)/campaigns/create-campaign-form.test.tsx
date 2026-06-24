@@ -166,7 +166,7 @@ describe("<CreateCampaignForm />", () => {
     await user.type(screen.getByLabelText(/message body/i), "Fast blast");
     await addVacancyAudience(user);
     await user.clear(screen.getByLabelText(/pacing \(seconds\)/i));
-    await user.type(screen.getByLabelText(/pacing \(seconds\)/i), "5");
+    await user.type(screen.getByLabelText(/pacing \(seconds\)/i), "9");
 
     await user.click(
       screen.getByRole("button", { name: /create campaign/i }),
@@ -174,7 +174,9 @@ describe("<CreateCampaignForm />", () => {
 
     expect(createCampaign).not.toHaveBeenCalled();
     expect(
-      screen.getByText("Pacing must be between 10 seconds and 10 minutes."),
+      screen.getByText(
+        "Saved campaign pacing must be 8 seconds or between 10 seconds and 10 minutes.",
+      ),
     ).toBeInTheDocument();
   });
 
