@@ -673,6 +673,22 @@ async function upsertContact(
   supabase: SupabaseClient<Database>,
   contact: ContactFields,
 ): Promise<string> {
+  // A matched (existing) contact only reaches an early return — the
+  // trailing INSERT never runs — so compliance flags carried by the
+  // incoming row would be silently dropped on a re-import. Ratchet the
+  // Do Not Contact flag onto the matched row before returning. One-way
+  // (false→true only): a row without the flag must never un-suppress a
+  // contact that a prior import or an inbound STOP already protected.
+  const onMatch = async (id: string): Promise<string> => {
+    if (contact.do_not_contact === true) {
+      await supabase
+        .from("contacts")
+        .update({ do_not_contact: true })
+        .eq("id", id);
+    }
+    return id;
+  };
+
   // Phone-first match
   if (contact.phone_1) {
     const { data } = await supabase
@@ -681,7 +697,7 @@ async function upsertContact(
       .eq("phone_1", contact.phone_1)
       .limit(1)
       .maybeSingle();
-    if (data) return data.id;
+    if (data) return onMatch(data.id);
   }
   // Email match
   if (contact.email) {
@@ -691,7 +707,7 @@ async function upsertContact(
       .ilike("email", contact.email)
       .limit(1)
       .maybeSingle();
-    if (data) return data.id;
+    if (data) return onMatch(data.id);
   }
   // Name match — only for person-type contacts with no phone and no email.
   // The contacts table has a partial unique index on
@@ -717,7 +733,7 @@ async function upsertContact(
       .is("email", null)
       .limit(1)
       .maybeSingle();
-    if (data) return data.id;
+    if (data) return onMatch(data.id);
   }
   // Insert new
   const { data, error } = await supabase
