@@ -82,7 +82,7 @@ async function seedContact(
   phone: string,
   opts: { optIn?: boolean; phone2?: string | null; phone3?: string | null } = {},
 ) {
-  const { data } = await supabase
+  const { data, error } = await supabase
     .from("contacts")
     .insert({
       first_name: "Inbound",
@@ -90,10 +90,15 @@ async function seedContact(
       phone_1: phone,
       phone_1_type: "mobile",
       phone_2: opts.phone2 ?? null,
+      phone_2_type: opts.phone2 ? "mobile" : "unknown",
       phone_3: opts.phone3 ?? null,
+      phone_3_type: opts.phone3 ? "mobile" : "unknown",
     })
     .select("id")
     .single();
+  if (error || !data) {
+    throw new Error(`seedContact failed: ${error?.message ?? "no contact"}`);
+  }
   if (opts.optIn) {
     await supabase.from("consent_events").insert({
       contact_id: data!.id,

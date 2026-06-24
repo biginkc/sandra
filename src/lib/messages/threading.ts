@@ -24,6 +24,19 @@ type ThreadCandidate = {
   latestAt: string;
 };
 
+export type ResolverCandidateProperty = {
+  id: string;
+  address: string;
+  city: string | null;
+  state: string | null;
+  homeownerContactId: string | null;
+  agentContactId: string | null;
+  outreachDispo: string | null;
+  needsHumanAttention: boolean;
+  latestAt: string | null;
+  sources: Array<"recipient_number" | "history" | "linked_property">;
+};
+
 const fallbackConversationLocks = new Map<string, Promise<string>>();
 
 export type ParsedThreadId =
@@ -414,6 +427,106 @@ export async function listCandidatePropertyThreadsForInboundContact(
   return loadCandidates(supabase, input.contactId);
 }
 
+export async function listResolverCandidatePropertiesForContact(
+  supabase: SupabaseClient<Database>,
+  input: {
+    contactId: string;
+    sourceConversationId?: string | null;
+  },
+): Promise<ResolverCandidateProperty[]> {
+  const businessNumbers = input.sourceConversationId
+    ? await loadBusinessNumbersForConversation(
+        supabase,
+        input.sourceConversationId,
+        input.contactId,
+      )
+    : [];
+
+  const [recipientCandidates, historyCandidates, linkedPropertyIds] =
+    await Promise.all([
+      Promise.all(
+        businessNumbers.map((phone) =>
+          loadCandidates(supabase, input.contactId, phone),
+        ),
+      ),
+      loadCandidates(supabase, input.contactId),
+      loadLinkedPropertyIdsForResolver(supabase, input.contactId),
+    ]);
+
+  const byProperty = new Map<
+    string,
+    {
+      latestAt: string | null;
+      sources: Set<ResolverCandidateProperty["sources"][number]>;
+    }
+  >();
+  const addCandidate = (
+    propertyId: string,
+    latestAt: string | null,
+    source: ResolverCandidateProperty["sources"][number],
+  ) => {
+    const existing = byProperty.get(propertyId);
+    if (!existing) {
+      byProperty.set(propertyId, { latestAt, sources: new Set([source]) });
+      return;
+    }
+    existing.sources.add(source);
+    if (
+      latestAt &&
+      (!existing.latestAt || latestAt.localeCompare(existing.latestAt) > 0)
+    ) {
+      existing.latestAt = latestAt;
+    }
+  };
+
+  for (const candidate of recipientCandidates.flat()) {
+    addCandidate(candidate.propertyId, candidate.latestAt, "recipient_number");
+  }
+  for (const candidate of historyCandidates) {
+    addCandidate(candidate.propertyId, candidate.latestAt, "history");
+  }
+  for (const propertyId of linkedPropertyIds) {
+    addCandidate(propertyId, null, "linked_property");
+  }
+
+  const propertyIds = Array.from(byProperty.keys());
+  if (propertyIds.length === 0) return [];
+
+  const { data, error } = await supabase
+    .from("properties")
+    .select(
+      "id, address, city, state, homeowner_contact_id, agent_contact_id, outreach_dispo, needs_human_attention",
+    )
+    .in("id", propertyIds)
+    .is("deleted_at", null);
+  if (error) {
+    throw new Error(`listResolverCandidatePropertiesForContact: ${error.message}`);
+  }
+
+  return (data ?? [])
+    .map((property) => {
+      const meta = byProperty.get(property.id)!;
+      return {
+        id: property.id,
+        address: property.address,
+        city: property.city,
+        state: property.state,
+        homeownerContactId: property.homeowner_contact_id,
+        agentContactId: property.agent_contact_id,
+        outreachDispo: property.outreach_dispo,
+        needsHumanAttention: property.needs_human_attention,
+        latestAt: meta.latestAt,
+        sources: Array.from(meta.sources),
+      };
+    })
+    .sort((left, right) => {
+      const leftRecipient = left.sources.includes("recipient_number") ? 1 : 0;
+      const rightRecipient = right.sources.includes("recipient_number") ? 1 : 0;
+      if (leftRecipient !== rightRecipient) return rightRecipient - leftRecipient;
+      return (right.latestAt ?? "").localeCompare(left.latestAt ?? "");
+    });
+}
+
 /**
  * Resolution for a thread that attaches to a contact but no property.
  * Contact-level threads get a real conversation id too (migration 081) —
@@ -521,6 +634,32 @@ async function loadCandidates(
   return Array.from(byKey.values());
 }
 
+async function loadBusinessNumbersForConversation(
+  supabase: SupabaseClient<Database>,
+  conversationId: string,
+  contactId: string,
+): Promise<string[]> {
+  const { data, error } = await supabase
+    .from("messages")
+    .select("direction, from_address, to_address")
+    .eq("channel", "sms")
+    .eq("conversation_id", conversationId)
+    .eq("contact_id", contactId)
+    .limit(50);
+  if (error) {
+    throw new Error(`loadBusinessNumbersForConversation: ${error.message}`);
+  }
+
+  const phones = new Set<string>();
+  for (const row of data ?? []) {
+    const raw =
+      row.direction === "inbound" ? row.to_address : row.from_address;
+    const normalized = normalizePhone(raw);
+    if (normalized) phones.add(normalized);
+  }
+  return Array.from(phones);
+}
+
 async function loadContactsByPhone(
   supabase: SupabaseClient<Database>,
   normalizedPhone: string | null,
@@ -548,11 +687,28 @@ async function loadLinkedPropertyIds(
   supabase: SupabaseClient<Database>,
   contactId: string,
 ): Promise<string[]> {
+  return loadLinkedPropertyIdsForContact(supabase, contactId, { limit: 2 });
+}
+
+async function loadLinkedPropertyIdsForResolver(
+  supabase: SupabaseClient<Database>,
+  contactId: string,
+): Promise<string[]> {
+  return loadLinkedPropertyIdsForContact(supabase, contactId);
+}
+
+async function loadLinkedPropertyIdsForContact(
+  supabase: SupabaseClient<Database>,
+  contactId: string,
+  options: { limit?: number } = {},
+): Promise<string[]> {
   const { data: linkedProps, error } = await supabase
     .from("properties")
     .select("id")
     .or(`homeowner_contact_id.eq.${contactId},agent_contact_id.eq.${contactId}`)
-    .limit(2);
+    .is("deleted_at", null)
+    .order("created_at", { ascending: false })
+    .limit(options.limit ?? 200);
   if (error) {
     throw new Error(`resolveInboundThread linked property lookup: ${error.message}`);
   }

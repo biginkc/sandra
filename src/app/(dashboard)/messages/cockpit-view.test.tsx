@@ -142,6 +142,8 @@ function makeDetail(contactId: string, body: string): InboxDetailData {
     contactPhone: "+15551234567",
     propertyId,
     propertyAddress: "123 Main St, Albany, NY",
+    homeownerContactId: contactId,
+    agentContactId: null,
     assigneeId: null,
     propertyStatus: "prospect",
     outreachDispo: null,

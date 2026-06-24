@@ -267,6 +267,8 @@ describe("fetchInboxDetail", () => {
     expect(detail?.threadId).toBe(CONVERSATION_ID);
     expect(detail?.conversationId).toBe(CONVERSATION_ID);
     expect(detail?.contactId).toBe(CONTACT_ID);
+    expect(detail?.homeownerContactId).toBeNull();
+    expect(detail?.agentContactId).toBeNull();
   });
 
   it("ignores queued rows in the conversation", async () => {
@@ -293,7 +295,11 @@ describe("fetchInboxDetail", () => {
       ],
       contacts: [makeContact({ id: CONTACT_ID })],
       properties: [
-        makeProperty({ id: OLDER_PROPERTY_ID, address: "100 Live Ave" }),
+        makeProperty({
+          id: OLDER_PROPERTY_ID,
+          address: "100 Live Ave",
+          homeowner_contact_id: CONTACT_ID,
+        }),
       ],
     });
 
@@ -305,5 +311,78 @@ describe("fetchInboxDetail", () => {
       "live-thread",
     ]);
     expect(detail?.propertyAddress).toContain("100 Live Ave");
+    expect(detail?.homeownerContactId).toBe(CONTACT_ID);
+  });
+
+  it("uses the first non-null property in a mixed conversation, even when the latest row is propertyless", async () => {
+    const supabase = makeSupabaseStub({
+      messages: [
+        makeMessage({
+          id: "older-linked",
+          contact_id: CONTACT_ID,
+          property_id: OLDER_PROPERTY_ID,
+          conversation_id: CONVERSATION_ID,
+          body: "linked context",
+          created_at: "2026-06-08T12:00:00.000Z",
+        }),
+        makeMessage({
+          id: "latest-propertyless",
+          contact_id: CONTACT_ID,
+          property_id: null,
+          conversation_id: CONVERSATION_ID,
+          body: "latest reply without property",
+          created_at: "2026-06-09T12:00:00.000Z",
+        }),
+      ],
+      contacts: [makeContact({ id: CONTACT_ID })],
+      properties: [
+        makeProperty({
+          id: OLDER_PROPERTY_ID,
+          address: "200 Mixed Row Ave",
+          agent_contact_id: CONTACT_ID,
+        }),
+      ],
+    });
+
+    const detail = await fetchInboxDetail(supabase as never, CONVERSATION_ID);
+
+    expect(detail).not.toBeNull();
+    expect(detail?.propertyId).toBe(OLDER_PROPERTY_ID);
+    expect(detail?.propertyAddress).toContain("200 Mixed Row Ave");
+    expect(detail?.agentContactId).toBe(CONTACT_ID);
+  });
+
+  it("uses the newest non-null property when a malformed conversation has two linked properties", async () => {
+    const supabase = makeSupabaseStub({
+      messages: [
+        makeMessage({
+          id: "older-linked",
+          contact_id: CONTACT_ID,
+          property_id: OLDER_PROPERTY_ID,
+          conversation_id: CONVERSATION_ID,
+          body: "older linked context",
+          created_at: "2026-06-08T12:00:00.000Z",
+        }),
+        makeMessage({
+          id: "newer-linked",
+          contact_id: CONTACT_ID,
+          property_id: RECENT_PROPERTY_ID,
+          conversation_id: CONVERSATION_ID,
+          body: "newer linked context",
+          created_at: "2026-06-09T12:00:00.000Z",
+        }),
+      ],
+      contacts: [makeContact({ id: CONTACT_ID })],
+      properties: [
+        makeProperty({ id: OLDER_PROPERTY_ID, address: "100 Older Ave" }),
+        makeProperty({ id: RECENT_PROPERTY_ID, address: "200 Newer Ave" }),
+      ],
+    });
+
+    const detail = await fetchInboxDetail(supabase as never, CONVERSATION_ID);
+
+    expect(detail).not.toBeNull();
+    expect(detail?.propertyId).toBe(RECENT_PROPERTY_ID);
+    expect(detail?.propertyAddress).toContain("200 Newer Ave");
   });
 });

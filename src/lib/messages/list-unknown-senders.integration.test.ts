@@ -157,4 +157,37 @@ describe("listUnknownSenders (integration)", () => {
     const dismissedRow = all.find((s) => s.fromAddress === "+18165558031");
     expect(dismissedRow!.isDismissed).toBe(true);
   });
+
+  it("does not return known-contact propertyless conversations", async () => {
+    await seedUnknownInbound({
+      fromAddress: "+18165558040",
+      body: "active unknown",
+    });
+    const { data: contact } = await supabase
+      .from("contacts")
+      .insert({
+        first_name: "Known",
+        last_name: "Propertyless",
+        phone_1: "+18165558041",
+        phone_1_type: "mobile",
+      })
+      .select("id")
+      .single();
+    await supabase.from("messages").insert({
+      channel: "sms",
+      direction: "inbound",
+      status: "received",
+      contact_id: contact!.id,
+      property_id: null,
+      from_address: "+18165558041",
+      to_address: "+18162804181",
+      body: "known contact, no property yet",
+    });
+
+    const senders = await listUnknownSenders(supabase, {});
+
+    expect(senders.map((sender) => sender.fromAddress)).toEqual([
+      "+18165558040",
+    ]);
+  });
 });

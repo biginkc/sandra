@@ -25,6 +25,7 @@ import {
   type OutreachDispo,
 } from "./dispo-actions";
 import { type InboxDetail as InboxDetailData } from "./inbox-detail-data";
+import { ResolveToPropertyDialog } from "./resolve-to-property-dialog";
 
 type Props = {
   data: InboxDetailData | null;
@@ -247,6 +248,7 @@ export function InboxDetail({
   const router = useRouter();
   const searchParams = useSearchParams();
   const [openLeadPending, startOpenLeadTransition] = useTransition();
+  const [resolveOpen, setResolveOpen] = useState(false);
 
   useEffect(() => {
     if (!data) return;
@@ -402,17 +404,48 @@ export function InboxDetail({
             />
           </div>
           <div className="border-t border-border bg-white px-6 py-4">
-            <InlineReply
-              key={`reply-${data.threadId}`}
-              propertyId={data.propertyId}
-              homeownerContactId={data.contactId}
-              homeownerPhone={data.contactPhone}
-            />
+            {data.homeownerContactId === data.contactId ? (
+              <InlineReply
+                key={`reply-${data.threadId}`}
+                propertyId={data.propertyId}
+                homeownerContactId={data.homeownerContactId}
+                homeownerPhone={data.contactPhone}
+              />
+            ) : (
+              <div
+                className="rounded-xl border border-dashed border-[#e5e1df] p-3 text-center text-xs text-[#78716c]"
+                data-testid="inline-reply-unavailable"
+              >
+                SMS replies from Messages are available only when this thread
+                contact is the homeowner.
+              </div>
+            )}
           </div>
         </>
       ) : (
-        <div className="border-t border-border bg-white text-[#78716c] p-4 text-xs">
-          This conversation has no property linked — open a lead to reply.
+        <div className="border-t border-border bg-white p-4">
+          {data.contactId ? (
+            <>
+              <button
+                type="button"
+                onClick={() => setResolveOpen(true)}
+                className="rounded-md border border-[#111827] bg-[#111827] px-3 py-1.5 text-xs font-bold text-white transition-colors hover:bg-[#292524]"
+                data-testid="resolve-to-property-open"
+              >
+                Resolve to property
+              </button>
+              <ResolveToPropertyDialog
+                open={resolveOpen}
+                onOpenChange={setResolveOpen}
+                sourceConversationId={data.conversationId}
+                contactId={data.contactId}
+              />
+            </>
+          ) : (
+            <span className="text-xs text-[#78716c]">
+              This conversation has no contact linked.
+            </span>
+          )}
         </div>
       )}
     </div>

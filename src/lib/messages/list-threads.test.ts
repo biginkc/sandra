@@ -371,6 +371,192 @@ describe("listThreads — isOptedOut (DNC) flag", () => {
     ]);
     expect(new Set(shared.map((thread) => thread.threadId)).size).toBe(2);
   });
+
+  it("merges propertyless and property-stamped messages sharing the same conversation id into one property bucket", async () => {
+    const createdAt = new Date().toISOString();
+    const { supabase } = makeStub({
+      messages: [
+        {
+          contact_id: "c-merged",
+          property_id: null,
+          conversation_id: "conv-merged",
+          body: "which one?",
+          direction: "inbound",
+          created_at: createdAt,
+          read_at: null,
+        },
+        {
+          contact_id: "c-merged",
+          property_id: "p-merged",
+          conversation_id: "conv-merged",
+          body: "about merged property",
+          direction: "outbound",
+          created_at: new Date(Date.now() - 60_000).toISOString(),
+          read_at: null,
+        },
+      ],
+      contacts: new Map([
+        [
+          "c-merged",
+          {
+            id: "c-merged",
+            first_name: "Merged",
+            last_name: "Owner",
+            entity_name: null,
+            phone_1: "+18165550124",
+          },
+        ],
+      ]),
+      properties: new Map([
+        [
+          "p-merged",
+          {
+            id: "p-merged",
+            address: "10 Merged Ave",
+            city: null,
+            state: null,
+            status: "prospect",
+            outreach_dispo: null,
+            assigned_user_id: null,
+          },
+        ],
+      ]),
+      consentEvents: [],
+    });
+
+    const threads = await listThreads(supabase, {});
+
+    expect(threads).toHaveLength(1);
+    expect(threads[0]).toMatchObject({
+      threadId: "conv-merged",
+      contactId: "c-merged",
+      propertyId: "p-merged",
+      propertyAddress: "10 Merged Ave",
+    });
+  });
+
+  it("uses the newest non-null property when one conversation carries two linked properties", async () => {
+    const { supabase } = makeStub({
+      messages: [
+        {
+          contact_id: "c-newest-wins",
+          property_id: "p-recent",
+          conversation_id: "conv-newest-wins",
+          body: "newer linked context",
+          direction: "inbound",
+          created_at: "2026-06-09T12:00:00.000Z",
+          read_at: null,
+        },
+        {
+          contact_id: "c-newest-wins",
+          property_id: "p-older",
+          conversation_id: "conv-newest-wins",
+          body: "older linked context",
+          direction: "outbound",
+          created_at: "2026-06-08T12:00:00.000Z",
+          read_at: null,
+        },
+      ],
+      contacts: new Map([
+        [
+          "c-newest-wins",
+          {
+            id: "c-newest-wins",
+            first_name: "Newest",
+            last_name: "Wins",
+            entity_name: null,
+            phone_1: "+18165550126",
+          },
+        ],
+      ]),
+      properties: new Map([
+        [
+          "p-older",
+          {
+            id: "p-older",
+            address: "100 Older Ave",
+            city: null,
+            state: null,
+            status: "prospect",
+            outreach_dispo: null,
+            assigned_user_id: null,
+          },
+        ],
+        [
+          "p-recent",
+          {
+            id: "p-recent",
+            address: "200 Newer Ave",
+            city: null,
+            state: null,
+            status: "prospect",
+            outreach_dispo: null,
+            assigned_user_id: null,
+          },
+        ],
+      ]),
+      consentEvents: [],
+    });
+
+    const threads = await listThreads(supabase, {});
+
+    expect(threads).toHaveLength(1);
+    expect(threads[0]).toMatchObject({
+      threadId: "conv-newest-wins",
+      contactId: "c-newest-wins",
+      propertyId: "p-recent",
+      propertyAddress: "200 Newer Ave",
+      lastMessageBody: "newer linked context",
+    });
+  });
+
+  it("keeps two propertyless conversations for the same contact as separate buckets", async () => {
+    const { supabase } = makeStub({
+      messages: [
+        {
+          contact_id: "c-two-null",
+          property_id: null,
+          conversation_id: "conv-null-a",
+          body: "first propertyless thread",
+          direction: "inbound",
+          created_at: new Date().toISOString(),
+          read_at: null,
+        },
+        {
+          contact_id: "c-two-null",
+          property_id: null,
+          conversation_id: "conv-null-b",
+          body: "second propertyless thread",
+          direction: "inbound",
+          created_at: new Date(Date.now() - 60_000).toISOString(),
+          read_at: null,
+        },
+      ],
+      contacts: new Map([
+        [
+          "c-two-null",
+          {
+            id: "c-two-null",
+            first_name: "Two",
+            last_name: "Null",
+            entity_name: null,
+            phone_1: "+18165550125",
+          },
+        ],
+      ]),
+      properties: new Map(),
+      consentEvents: [],
+    });
+
+    const threads = await listThreads(supabase, {});
+
+    expect(threads).toHaveLength(2);
+    expect(threads.map((thread) => thread.threadId).sort()).toEqual([
+      "conv-null-a",
+      "conv-null-b",
+    ]);
+    expect(threads.every((thread) => thread.propertyId === null)).toBe(true);
+  });
 });
 
 describe("listThreads — recency-only sort", () => {
