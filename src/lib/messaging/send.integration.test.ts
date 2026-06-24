@@ -921,11 +921,17 @@ describe("sendSmsToContact (integration)", () => {
 
     const { data: msg } = await supabase
       .from("messages")
-      .select("status, error_message")
+      .select("status, error_message, metadata")
       .eq("contact_id", contactId)
       .single();
     expect(msg?.status).toBe("failed");
     expect(msg?.error_message).toMatch(/forced failure/i);
+    expect(msg?.metadata).toMatchObject({
+      providerAttempt: {
+        terminal: true,
+        maxPendingMs: 15 * 60_000,
+      },
+    });
   });
 
   it("release defers transient provider failures back to queued with retry metadata", async () => {

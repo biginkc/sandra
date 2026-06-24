@@ -37,6 +37,7 @@ type MessagesUpdate = Database["public"]["Tables"]["messages"]["Update"];
 
 const LANDLINE_BLOCK_REASON =
   "Contact only has landline numbers — SMS can't be delivered. Call or mail instead.";
+export const PROVIDER_PENDING_STALE_MS = 15 * 60_000;
 const PROVIDER_TRANSIENT_DEFER_MS = 5 * 60_000;
 const PROVIDER_TRANSIENT_MAX_DEFER_ATTEMPTS = 3;
 
@@ -268,6 +269,11 @@ export async function sendSmsToContact(
     ? normalizePhone(fromAddressRaw) ?? fromAddressRaw
     : null;
   const normalizedToPhone = normalizePhone(destination.phone) ?? destination.phone;
+  const inputMetadata =
+    input.metadata && typeof input.metadata === "object" && !Array.isArray(input.metadata)
+      ? input.metadata
+      : null;
+  const pendingAt = new Date().toISOString();
   const { data: pending, error: insertError } = await supabase
     .from("messages")
     .insert({
@@ -282,7 +288,13 @@ export async function sendSmsToContact(
       from_address: fromAddress,
       to_address: normalizedToPhone,
       body: input.body,
-      metadata: input.metadata ?? null,
+      metadata: {
+        ...(inputMetadata ?? {}),
+        providerAttempt: {
+          pendingAt,
+          maxPendingMs: PROVIDER_PENDING_STALE_MS,
+        },
+      } as Json,
     })
     .select("id")
     .single();
@@ -305,9 +317,7 @@ export async function sendSmsToContact(
       external_id: result.externalId,
       sent_at: new Date().toISOString(),
       metadata: {
-        ...(input.metadata && typeof input.metadata === "object" && !Array.isArray(input.metadata)
-          ? input.metadata
-          : {}),
+        ...(inputMetadata ?? {}),
         providerStatus: result.providerStatus,
         raw: result.raw,
       } as Json,
@@ -337,6 +347,14 @@ export async function sendSmsToContact(
         status: "failed",
         failed_at: new Date().toISOString(),
         error_message: message,
+        metadata: {
+          ...(inputMetadata ?? {}),
+          providerAttempt: {
+            pendingAt,
+            maxPendingMs: PROVIDER_PENDING_STALE_MS,
+            terminal: true,
+          },
+        } as Json,
       })
       .eq("id", pending.id);
     return {
@@ -670,9 +688,23 @@ export async function releaseQueuedMessage(
   // double-sending. The `eq("status", "queued")` guard means the UPDATE
   // only applies if nobody else grabbed it first; we check rowcount
   // indirectly via a re-read.
+  const currentMetadata =
+    msg.metadata && typeof msg.metadata === "object" && !Array.isArray(msg.metadata)
+      ? msg.metadata
+      : null;
+  const pendingAt = new Date().toISOString();
   const { data: claimed, error: flipError } = await supabase
     .from("messages")
-    .update({ status: "pending" })
+    .update({
+      status: "pending",
+      metadata: {
+        ...(currentMetadata ?? {}),
+        providerAttempt: {
+          pendingAt,
+          maxPendingMs: PROVIDER_PENDING_STALE_MS,
+        },
+      } as Json,
+    })
     .eq("id", msg.id)
     .eq("status", "queued")
     .select("id")
@@ -693,10 +725,6 @@ export async function releaseQueuedMessage(
       body: msg.body,
       from: msg.from_address ?? undefined,
     });
-    const currentMetadata =
-      msg.metadata && typeof msg.metadata === "object" && !Array.isArray(msg.metadata)
-        ? msg.metadata
-        : null;
     const { data: updated, error: updateError } = await supabase
       .from("messages")
       .update({
@@ -736,10 +764,6 @@ export async function releaseQueuedMessage(
     };
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
-    const currentMetadata =
-      msg.metadata && typeof msg.metadata === "object" && !Array.isArray(msg.metadata)
-        ? msg.metadata
-        : null;
     const retry = buildProviderRetryUpdate(e, currentMetadata);
     if (retry.defer) {
       const { data: deferred, error: deferError } = await supabase

@@ -8,6 +8,7 @@ import {
 } from "@/lib/messaging/providers/mock";
 
 import { DRAIN_BATCH_SIZE, runSequenceTick } from "./route";
+import type { Json } from "@/lib/supabase/types";
 
 const supabase = createTestClient();
 
@@ -76,6 +77,7 @@ async function seedQueuedMessage(opts: {
   scheduledFor: Date | null;
   status?: string;
   body?: string;
+  metadata?: Json;
 }): Promise<string> {
   const { data, error } = await supabase
     .from("messages")
@@ -89,6 +91,7 @@ async function seedQueuedMessage(opts: {
       to_address: opts.toPhone,
       body: opts.body ?? "Queued test message",
       scheduled_for: opts.scheduledFor?.toISOString() ?? null,
+      metadata: opts.metadata ?? null,
     })
     .select("id")
     .single();
@@ -248,9 +251,14 @@ describe("runSequenceTick — queue drain (integration)", () => {
   });
 
   it("fails the tick when the due queued message query errors", async () => {
+    let messageQueries = 0;
     const failingSupabase = {
       from(table: string) {
-        return table === "sequence_enrollments"
+        if (table === "sequence_enrollments") {
+          return fakeQuery({ data: [], error: null });
+        }
+        messageQueries += 1;
+        return messageQueries === 1
           ? fakeQuery({ data: [], error: null })
           : fakeQuery({
               data: null,
@@ -262,6 +270,134 @@ describe("runSequenceTick — queue drain (integration)", () => {
     await expect(runSequenceTick(failingSupabase)).rejects.toThrow(
       "fetch due queued messages failed: messages query failed",
     );
+  });
+
+  it("terminal-fails stale pending provider attempts without re-sending", async () => {
+    const { propertyId, contactId } = await seedLead({
+      phone: "+18165550116",
+    });
+    const stalePendingAt = new Date(SAFE_NOW.getTime() - 20 * 60_000);
+    const msgId = await seedQueuedMessage({
+      propertyId,
+      contactId,
+      toPhone: "+18165550116",
+      scheduledFor: new Date(SAFE_NOW.getTime() - 60 * 60_000),
+      status: "pending",
+      metadata: {
+        providerAttempt: {
+          pendingAt: stalePendingAt.toISOString(),
+          maxPendingMs: 15 * 60_000,
+        },
+      },
+    });
+
+    const summary = await runSequenceTick(supabase);
+    expect(summary.stalePendingFailed).toBe(1);
+    expect(summary.drained).toBe(0);
+    expect(getMockMessageLog()).toHaveLength(0);
+
+    const { data: msg } = await supabase
+      .from("messages")
+      .select("status, failed_at, error_message, metadata")
+      .eq("id", msgId)
+      .single();
+    expect(msg?.status).toBe("failed");
+    expect(new Date(msg!.failed_at!).getTime()).toBe(SAFE_NOW.getTime());
+    expect(msg?.error_message).toMatch(/failed without re-sending/i);
+    expect(msg?.metadata).toMatchObject({
+      providerAttempt: {
+        terminal: true,
+        recoveryReason: "stale_pending_provider_attempt",
+      },
+    });
+  });
+
+  it("recovers stale stamped pending rows even when many fresh rows exist", async () => {
+    const { propertyId, contactId } = await seedLead({
+      phone: "+18165550118",
+    });
+    const freshPendingAt = new Date(SAFE_NOW.getTime() - 5 * 60_000);
+    const stalePendingAt = new Date(SAFE_NOW.getTime() - 20 * 60_000);
+    const rows = Array.from({ length: DRAIN_BATCH_SIZE }, (_, i) => ({
+      channel: "sms",
+      direction: "outbound",
+      status: "pending",
+      provider: "mock",
+      contact_id: contactId,
+      property_id: propertyId,
+      to_address: "+18165550118",
+      body: `fresh pending ${i}`,
+      scheduled_for: new Date(SAFE_NOW.getTime() - 60 * 60_000).toISOString(),
+      metadata: {
+        providerAttempt: {
+          pendingAt: freshPendingAt.toISOString(),
+          maxPendingMs: 15 * 60_000,
+        },
+      },
+    }));
+    const { error: bulkError } = await supabase.from("messages").insert(rows);
+    if (bulkError) throw new Error(`fresh pending seed failed: ${bulkError.message}`);
+    const staleId = await seedQueuedMessage({
+      propertyId,
+      contactId,
+      toPhone: "+18165550118",
+      scheduledFor: new Date(SAFE_NOW.getTime() - 60 * 60_000),
+      status: "pending",
+      body: "stale pending behind fresh page",
+      metadata: {
+        providerAttempt: {
+          pendingAt: stalePendingAt.toISOString(),
+          maxPendingMs: 15 * 60_000,
+        },
+      },
+    });
+
+    const summary = await runSequenceTick(supabase);
+    expect(summary.stalePendingFailed).toBe(1);
+
+    const { data: stale } = await supabase
+      .from("messages")
+      .select("status")
+      .eq("id", staleId)
+      .single();
+    expect(stale?.status).toBe("failed");
+  });
+
+  it("leaves fresh or unstamped pending rows alone", async () => {
+    const { propertyId, contactId } = await seedLead({
+      phone: "+18165550117",
+    });
+    await seedQueuedMessage({
+      propertyId,
+      contactId,
+      toPhone: "+18165550117",
+      scheduledFor: new Date(SAFE_NOW.getTime() - 60 * 60_000),
+      status: "pending",
+      metadata: {
+        providerAttempt: {
+          pendingAt: new Date(SAFE_NOW.getTime() - 5 * 60_000).toISOString(),
+          maxPendingMs: 15 * 60_000,
+        },
+      },
+    });
+    await seedQueuedMessage({
+      propertyId,
+      contactId,
+      toPhone: "+18165550117",
+      scheduledFor: new Date(SAFE_NOW.getTime() - 60 * 60_000),
+      status: "pending",
+      metadata: { legacy: true },
+      body: "legacy unstamped pending",
+    });
+
+    const summary = await runSequenceTick(supabase);
+    expect(summary.stalePendingFailed).toBe(0);
+
+    const { count } = await supabase
+      .from("messages")
+      .select("*", { count: "exact", head: true })
+      .eq("status", "pending");
+    expect(count).toBe(2);
   });
 
   it("stops draining when the time budget is exhausted and leaves the rest queued", async () => {
