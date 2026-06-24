@@ -700,7 +700,7 @@ describe("listThreads — escalatedOnly", () => {
           outreach_dispo: null,
           assigned_user_id: null,
           needs_human_attention: false,
-          last_ai_escalation_reason: null,
+          last_ai_escalation_reason: "model:not_interested",
         },
       ],
     ]);
@@ -719,6 +719,7 @@ describe("listThreads — escalatedOnly", () => {
     const { supabase } = seedEscalation();
     const threads = await listThreads(supabase, {});
     expect(threads.map((t) => t.contactId).sort()).toEqual(["c-calm", "c-esc"]);
+    expect(threads.find((t) => t.contactId === "c-calm")?.escalationReason).toBeNull();
   });
 });
 

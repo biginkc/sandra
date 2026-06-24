@@ -489,15 +489,140 @@ describe("dispatchAiResponse (integration)", () => {
           action: "escalate",
           confidence: 0.8,
           sentiment: "neutral",
-          escalation_reason: "complex situation, needs human",
+          escalation_reason: "needs_review",
         }),
       },
     );
     expect(outcome.outcome).toBe("escalated");
     if (outcome.outcome === "escalated") {
-      expect(outcome.reason).toContain("complex situation");
+      expect(outcome.reason).toBe("model:needs_review");
     }
     expect(getMockMessageLog()).toHaveLength(0);
+  });
+
+  it("Claude returns opt_out → honors phone-level opt-out and does not send", async () => {
+    await seedConfig();
+    const { propertyId, contactId } = await seedLead({
+      phone: "+18167554016",
+    });
+
+    const outcome = await dispatchAiResponse(
+      supabase,
+      { propertyId, contactId, inboundBody: "please delete my number" },
+      {
+        anthropic: stubAnthropic({
+          action: "opt_out",
+          confidence: 0.97,
+          sentiment: "neutral",
+        }),
+      },
+    );
+
+    expect(outcome).toEqual({ outcome: "opted_out", reason: "model:opt_out" });
+    expect(getMockMessageLog()).toHaveLength(0);
+
+    const { data: property } = await supabase
+      .from("properties")
+      .select("outreach_dispo, needs_human_attention")
+      .eq("id", propertyId)
+      .single();
+    expect(property).toMatchObject({
+      outreach_dispo: "opted_out",
+      needs_human_attention: false,
+    });
+    const { data: contact } = await supabase
+      .from("contacts")
+      .select("sms_opted_out")
+      .eq("id", contactId)
+      .single();
+    expect(contact?.sms_opted_out).toBe(true);
+  });
+
+  it("Claude returns close_wrong_number this_property → closes only the property", async () => {
+    await seedConfig();
+    const { propertyId, contactId } = await seedLead({
+      phone: "+18167554017",
+    });
+
+    const outcome = await dispatchAiResponse(
+      supabase,
+      { propertyId, contactId, inboundBody: "I don't own that house" },
+      {
+        anthropic: stubAnthropic({
+          action: "close_wrong_number",
+          wrong_scope: "this_property",
+          confidence: 0.92,
+          sentiment: "neutral",
+        }),
+      },
+    );
+
+    expect(outcome).toEqual({
+      outcome: "auto_closed",
+      reason: "model:wrong_number",
+    });
+    expect(getMockMessageLog()).toHaveLength(0);
+
+    const { data: property } = await supabase
+      .from("properties")
+      .select("outreach_dispo, needs_human_attention")
+      .eq("id", propertyId)
+      .single();
+    expect(property).toMatchObject({
+      outreach_dispo: "wrong_number",
+      needs_human_attention: false,
+    });
+    const { data: contact } = await supabase
+      .from("contacts")
+      .select("sms_opted_out")
+      .eq("id", contactId)
+      .single();
+    expect(contact?.sms_opted_out).toBe(false);
+  });
+
+  it("Claude returns deescalate_close → sends fixed template without humanizer and closes not_interested", async () => {
+    await seedConfig();
+    const { propertyId, contactId } = await seedLead({
+      phone: "+18167554018",
+    });
+    let calls = 0;
+    const anthropic: AnthropicLike = {
+      messages: {
+        create: (async (args: unknown) => {
+          calls += 1;
+          return stubAnthropic({
+            action: "deescalate_close",
+            body: "model draft should be ignored",
+            confidence: 0.9,
+            sentiment: "frustrated",
+          }).messages.create(args as never);
+        }) as unknown as AnthropicLike["messages"]["create"],
+      } as unknown as AnthropicLike["messages"],
+    };
+
+    const outcome = await dispatchAiResponse(
+      supabase,
+      { propertyId, contactId, inboundBody: "ugh is this a scam" },
+      { anthropic },
+    );
+
+    expect(outcome).toEqual({
+      outcome: "auto_closed",
+      reason: "model:deescalate_close",
+    });
+    expect(calls).toBe(1);
+    expect(getMockMessageLog()[0].body).toContain("So sorry to bug you");
+    expect(getMockMessageLog()[0].body).not.toContain("model draft");
+
+    const { data: property } = await supabase
+      .from("properties")
+      .select("outreach_dispo, needs_human_attention")
+      .eq("id", propertyId)
+      .single();
+    expect(property).toMatchObject({
+      outreach_dispo: "not_interested",
+      needs_human_attention: false,
+    });
   });
 
   it("confidence below threshold (0.65 < 0.70) → auto-escalate", async () => {

@@ -41,19 +41,68 @@ export type SkipDecision =
 
 export type AiSentiment = "positive" | "neutral" | "frustrated" | "hostile";
 
-export type AiAction = "send_reply" | "escalate";
+export type AiAction =
+  | "send_reply"
+  | "escalate"
+  | "opt_out"
+  | "close_wrong_number"
+  | "close_not_interested"
+  | "deescalate_close";
 
-export type AiStructuredOutput = {
-  action: AiAction;
-  /** Required when action="send_reply"; unused when action="escalate". */
-  body?: string;
-  /** 0-1 confidence that the reply is on-topic + safe. Below the
-   *  configured `min_confidence` → auto-escalate. */
+export type AiEscalationReason =
+  | "hot_lead"
+  | "price_or_offer"
+  | "distress"
+  | "multi_property"
+  | "call_request"
+  | "third_party"
+  | "needs_review";
+
+export type AiWrongScope = "this_property" | "all";
+
+type AiStructuredBase = {
+  /** 0-1 confidence that the chosen action is correct and safe. */
   confidence: number;
   sentiment: AiSentiment;
-  /** Required when action="escalate". */
-  escalation_reason?: string;
 };
+
+export type AiStructuredOutput =
+  | (AiStructuredBase & {
+      action: "send_reply";
+      body: string;
+      escalation_reason?: never;
+      wrong_scope?: never;
+    })
+  | (AiStructuredBase & {
+      action: "escalate";
+      body?: never;
+      escalation_reason: AiEscalationReason;
+      wrong_scope?: never;
+    })
+  | (AiStructuredBase & {
+      action: "opt_out";
+      body?: never;
+      escalation_reason?: never;
+      wrong_scope?: never;
+    })
+  | (AiStructuredBase & {
+      action: "close_wrong_number";
+      body?: never;
+      escalation_reason?: never;
+      wrong_scope: AiWrongScope;
+    })
+  | (AiStructuredBase & {
+      action: "close_not_interested";
+      body?: never;
+      escalation_reason?: never;
+      wrong_scope?: never;
+    })
+  | (AiStructuredBase & {
+      action: "deescalate_close";
+      body: string;
+      escalation_reason?: never;
+      wrong_scope?: never;
+    });
 
 // ---------- persistence ------------------------------------------------------
 

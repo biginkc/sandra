@@ -20,19 +20,17 @@ import {
   dispatchOwnerMessageAdded,
   dispatchOwnerMessageAddedNeedsTriage,
 } from "@/lib/notifications/dispatch";
-import {
-  pauseContactEnrollments,
-  pausePropertyEnrollments,
-} from "@/lib/sequences/enrollment";
+import { pausePropertyEnrollments } from "@/lib/sequences/enrollment";
 import type { Database, Json } from "@/lib/supabase/types";
+import { applyPhoneLevelOptOut } from "./opt-out-phone";
 import type { MessagingProvider } from "./types";
 
 const UNAMBIGUOUS_STOP_KEYWORDS =
-  /\b(?:stopall|unsubscribe|opt(?:\s|-)?out|remove me)\b|\bstop\b(?!\s+by\b)/i;
+  /\b(?:stopall|unsubscribe|opt(?:\s|-)?out|remove me|take me off|delete my (?:number|info)|leave me alone|quit bothering me|do not contact me|don'?t text me again|lose (?:this|my) number|never contact me)\b|\bstop\b(?!\s+by\b)/i;
 const AMBIGUOUS_STOP_KEYWORDS = /^\s*(end|cancel|quit|remove)\s*$/i;
 const HELP_KEYWORDS = /^\s*(help|info|support)\s*$/i;
 const DNC_KEYWORDS =
-  /do not (call|text|contact|reach out|message)|don'?t (call|text|contact|reach out|message)|stop (texting|calling|contacting) me|take me off|no more (texts|messages|calls)|remove me from|stop reaching out/i;
+  /do not (call|text|contact|reach out|message)|don'?t (call|text|contact|reach out|message)|stop (texting|calling|contacting) me|take me off|no more (texts|messages|calls)|remove me from|stop reaching out|please delete my (number|info)|delete my (number|info)|lose (this|my) number|never contact me/i;
 const WRONG_NUMBER_KEYWORDS =
   /wrong number|wrong person|not the owner|don'?t own|dont own|no longer own/i;
 const WEBHOOK_PROCESSING_LEASE_MS = 5 * 60_000;
@@ -855,96 +853,6 @@ async function markWebhookEventError(
   }
 }
 
-async function applyPhoneLevelOptOut(
-  supabase: SupabaseClient<Database>,
-  input: {
-    contactId: string | null;
-    fromPhone: string;
-    source: string;
-    sourceDetail: Json;
-    occurredAt: Date;
-    providerId: string;
-    surface: "stop" | "dnc";
-    idempotencyKey: string;
-  },
-) {
-  const contactIds = await loadAllContactIdsByPhone(supabase, input.fromPhone);
-  if (input.contactId) {
-    contactIds.add(input.contactId);
-  }
-  for (const contactId of contactIds) {
-    try {
-      await recordConsentEvent(supabase, {
-        contactId,
-        channel: "sms",
-        eventType: "opt_out",
-        source: input.source,
-        sourceDetail: input.sourceDetail,
-        occurredAt: input.occurredAt,
-        idempotencyKey: input.idempotencyKey,
-      });
-    } catch (e) {
-      // Compliance enforcement beats audit perfection: if a contact row
-      // has drifted or a replay-safe insert races oddly, still flip the
-      // opt-out bit and stop future sends rather than 500ing the webhook.
-      reportError(e, {
-        tags: { surface: `${input.providerId}_webhook_opt_out_record` },
-        extra: {
-          contactId,
-          fromPhone: input.fromPhone,
-          surface: input.surface,
-        },
-      });
-    }
-    await supabase
-      .from("contacts")
-      .update({
-        sms_opted_out: true,
-        sms_opted_out_at: input.occurredAt.toISOString(),
-      })
-      .eq("id", contactId);
-    try {
-      await pauseContactEnrollments(supabase, {
-        contactId,
-        reason: "consent_revoked",
-        permanent: true,
-      });
-    } catch (e) {
-      reportError(e, {
-        tags: {
-          surface: `${input.providerId}_webhook_sequence_pause_${input.surface}`,
-        },
-        extra: { contactId, fromPhone: input.fromPhone },
-      });
-    }
-  }
-}
-
-async function loadAllContactIdsByPhone(
-  supabase: SupabaseClient<Database>,
-  rawPhone: string,
-): Promise<Set<string>> {
-  const normalizedPhone = normalizePhone(rawPhone);
-  if (!normalizedPhone) return new Set<string>();
-
-  const results = await Promise.all([
-    supabase.from("contacts").select("id").eq("phone_1", normalizedPhone),
-    supabase.from("contacts").select("id").eq("phone_2", normalizedPhone),
-    supabase.from("contacts").select("id").eq("phone_3", normalizedPhone),
-  ]);
-
-  const contactIds = new Set<string>();
-  for (const result of results) {
-    if (result.error) {
-      throw new Error(`loadAllContactIdsByPhone: ${result.error.message}`);
-    }
-    for (const row of result.data ?? []) {
-      contactIds.add(row.id);
-    }
-  }
-  return contactIds;
-}
-
 function isWebhookProcessingLeaseExpired(
   processingStartedAt: string | null,
 ): boolean {
@@ -967,7 +875,7 @@ type InboundMessageState = {
   ownerNotificationSentAt?: string;
   propertyEnrollmentsPausedAt?: string;
   aiResponder?: {
-    outcome: "sent" | "escalated" | "skipped";
+    outcome: "sent" | "escalated" | "skipped" | "auto_closed" | "opted_out";
     messageId?: string;
     confidence?: number;
     reason?: string;

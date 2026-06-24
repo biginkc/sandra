@@ -14,6 +14,11 @@ describe("matchesStopKeyword", () => {
     expect(matchesStopKeyword("opt out")).toBe(true);
     expect(matchesStopKeyword("opt-out")).toBe(true);
     expect(matchesStopKeyword("optout")).toBe(true);
+    expect(matchesStopKeyword("please delete my number")).toBe(true);
+    expect(matchesStopKeyword("delete my info from your list")).toBe(true);
+    expect(matchesStopKeyword("lose this number")).toBe(true);
+    expect(matchesStopKeyword("never contact me again")).toBe(true);
+    expect(matchesStopKeyword("quit bothering me")).toBe(true);
   });
 
   it("keeps ambiguous keywords whole-message only", () => {

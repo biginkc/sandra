@@ -69,7 +69,10 @@ type MockState = {
   property: {
     ai_responder_disabled: boolean;
     id: string;
+    homeowner_contact_id: string;
+    needs_human_attention: boolean;
     org_id: string;
+    outreach_dispo: string | null;
     state: string;
   };
   threadConversationId: string;
@@ -102,8 +105,11 @@ function createMockState(): MockState {
     nextMessageId: 1,
     property: {
       ai_responder_disabled: false,
+      homeowner_contact_id: CONTACT_ID,
       id: PROPERTY_ID,
+      needs_human_attention: false,
       org_id: "org-1",
+      outreach_dispo: null,
       state: "MO",
     },
     threadConversationId: CONVERSATION_ID,
@@ -439,5 +445,57 @@ describe("dispatchAiResponse debounce", () => {
     expect(second.outcome).toBe("sent");
     expect(vi.mocked(generateAiReply)).toHaveBeenCalledTimes(2);
     expect(vi.mocked(sendSmsToContact)).toHaveBeenCalledTimes(2);
+  });
+
+  it("skips before generation when the property is already human-claimed", async () => {
+    const state = createMockState();
+    state.property.needs_human_attention = true;
+    const supabase = createMockSupabase(state);
+    installSendMock(state);
+
+    const outcome = await dispatchAiResponse(
+      supabase as never,
+      {
+        contactId: CONTACT_ID,
+        conversationId: CONVERSATION_ID,
+        inboundBody: "Still interested?",
+        inboundMessageId: "inbound-claimed",
+        propertyId: PROPERTY_ID,
+      },
+      { anthropic: {} as never },
+    );
+
+    expect(outcome).toEqual({
+      outcome: "skipped",
+      reason: "already_terminal",
+    });
+    expect(vi.mocked(generateAiReply)).not.toHaveBeenCalled();
+    expect(vi.mocked(sendSmsToContact)).not.toHaveBeenCalled();
+  });
+
+  it("skips before generation when the property already has a terminal disposition", async () => {
+    const state = createMockState();
+    state.property.outreach_dispo = "dnc";
+    const supabase = createMockSupabase(state);
+    installSendMock(state);
+
+    const outcome = await dispatchAiResponse(
+      supabase as never,
+      {
+        contactId: CONTACT_ID,
+        conversationId: CONVERSATION_ID,
+        inboundBody: "hello?",
+        inboundMessageId: "inbound-terminal",
+        propertyId: PROPERTY_ID,
+      },
+      { anthropic: {} as never },
+    );
+
+    expect(outcome).toEqual({
+      outcome: "skipped",
+      reason: "already_terminal",
+    });
+    expect(vi.mocked(generateAiReply)).not.toHaveBeenCalled();
+    expect(vi.mocked(sendSmsToContact)).not.toHaveBeenCalled();
   });
 });
