@@ -2,7 +2,7 @@
 
 import { MessageSquareIcon } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { useEffect, useState, useTransition } from "react";
+import { useState, useTransition } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -51,10 +51,8 @@ export function SmsComposer({
   const [fromNumber, setFromNumber] = useState<string>("");
   const [loadingFroms, setLoadingFroms] = useState(false);
 
-  // Fetch the account's phone numbers the first time the dialog opens.
-  // Keep the list cached across opens so the dropdown pops instantly.
-  useEffect(() => {
-    if (!open || fromOptions.length > 0 || loadingFroms) return;
+  const loadFromOptions = () => {
+    if (fromOptions.length > 0 || loadingFroms) return;
     setLoadingFroms(true);
     listFromNumbers()
       .then((result) => {
@@ -76,7 +74,14 @@ export function SmsComposer({
         }
       })
       .finally(() => setLoadingFroms(false));
-  }, [open, fromOptions.length, fromNumber, loadingFroms]);
+  };
+
+  const handleOpenChange = (nextOpen: boolean) => {
+    setOpen(nextOpen);
+    if (nextOpen) {
+      loadFromOptions();
+    }
+  };
 
   const disabled = !homeownerContactId || !homeownerPhone;
   const disabledReason = !homeownerContactId
@@ -91,7 +96,7 @@ export function SmsComposer({
   const sendOrQueue = (queueOnly: boolean) => {
     startTransition(async () => {
       const result = await callAction(
-        sendSmsFromLead(propertyId, body, fromNumber || null, queueOnly),
+        sendSmsFromLead(propertyId, body, fromNumber || null, queueOnly, homeownerPhone),
         { fallbackMessage: queueOnly ? "Queue failed" : "SMS send failed" },
       );
       if (!result.ok) return;
@@ -149,7 +154,7 @@ export function SmsComposer({
   };
 
   return (
-    <Dialog open={open} onOpenChange={setOpen}>
+    <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogTrigger
         render={
           <Button variant="outline" size="sm" disabled={disabled} aria-label="Send SMS">

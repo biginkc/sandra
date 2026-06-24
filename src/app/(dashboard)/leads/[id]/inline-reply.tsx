@@ -6,6 +6,7 @@ import { useEffect, useRef, useState, useTransition } from "react";
 import { toast } from "sonner";
 
 import { callAction } from "@/lib/errors/call-action";
+import { formatPhoneE164 } from "@/lib/phone-format";
 import { renderTemplate } from "@/lib/templates/render";
 import { type TemplateRow } from "@/app/(dashboard)/templates/actions";
 import { TemplatePicker } from "@/app/(dashboard)/templates/template-picker";
@@ -16,8 +17,11 @@ type Props = {
   propertyId: string;
   /** Falsy when the lead has no homeowner contact yet — disables the box. */
   homeownerContactId: string | null;
-  /** Falsy when the homeowner has no phone_1 — disables + explains. */
+  /** Falsy when the homeowner has no usable SMS phone — disables + explains. */
   homeownerPhone: string | null;
+  /** Optional saved contact phone that matches the open Messages thread. */
+  replyToPhone?: string | null;
+  phoneUnavailableMessage?: string;
 };
 
 /**
@@ -32,6 +36,8 @@ export function InlineReply({
   propertyId,
   homeownerContactId,
   homeownerPhone,
+  replyToPhone = null,
+  phoneUnavailableMessage,
 }: Props) {
   const router = useRouter();
   const [body, setBody] = useState("");
@@ -64,18 +70,20 @@ export function InlineReply({
   const disabledReason = !homeownerContactId
     ? "No homeowner contact on this lead — can't reply yet."
     : !homeownerPhone
-      ? "Homeowner has no phone number — add one before replying."
+      ? (phoneUnavailableMessage ??
+        "Homeowner has no phone number — add one before replying.")
       : null;
 
   const length = body.length;
   const tooLong = length > 1600;
   const canSend = !disabled && length > 0 && !tooLong && !pending;
+  const effectiveToPhone = replyToPhone ?? homeownerPhone;
 
   const send = () => {
     if (!canSend) return;
     startTransition(async () => {
       const result = await callAction(
-        sendSmsFromLead(propertyId, body, fromNumber, false),
+        sendSmsFromLead(propertyId, body, fromNumber, false, effectiveToPhone),
         { fallbackMessage: "SMS send failed" },
       );
       if (!result.ok) return;
@@ -84,7 +92,7 @@ export function InlineReply({
       switch (outcome.status) {
         case "sent":
           toast.success("Message sent", {
-            description: `Delivered to ${homeownerPhone}.`,
+            description: `Delivered to ${effectiveToPhone}.`,
           });
           setBody("");
           router.refresh();
@@ -168,6 +176,7 @@ export function InlineReply({
   };
 
   const formattedFrom = formatPhoneE164(fromNumber);
+  const formattedTo = formatPhoneE164(effectiveToPhone);
 
   return (
     <div className="flex flex-col gap-2" data-testid="inline-reply">
@@ -189,6 +198,12 @@ export function InlineReply({
               <span className="shrink-0">From:</span>
               <span className="text-[#1c1917] font-bold tabular-nums truncate">
                 {formattedFrom ?? "—"}
+              </span>
+            </span>
+            <span className="text-[11px] font-medium flex items-center gap-1.5 min-w-0">
+              <span className="shrink-0">To:</span>
+              <span className="text-[#1c1917] font-bold tabular-nums truncate">
+                {formattedTo ?? "—"}
               </span>
             </span>
             <TemplatePicker onSelect={handleTemplateSelect} />
@@ -219,18 +234,4 @@ export function InlineReply({
       </p>
     </div>
   );
-}
-
-function formatPhoneE164(raw: string | null): string | null {
-  if (!raw) return null;
-  // Best-effort US phone formatting for the From: line. Falls back to
-  // the raw value if it doesn't look like a 10/11-digit number.
-  const digits = raw.replace(/\D/g, "");
-  if (digits.length === 11 && digits.startsWith("1")) {
-    return `+1 (${digits.slice(1, 4)}) ${digits.slice(4, 7)}-${digits.slice(7)}`;
-  }
-  if (digits.length === 10) {
-    return `(${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6)}`;
-  }
-  return raw;
 }

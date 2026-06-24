@@ -5,7 +5,9 @@ import { useEffect, useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
 import { EscalationBadge } from "@/components/escalation-badge";
+import { deriveSmsParties } from "@/lib/messages/sms-parties";
 import type { Thread } from "@/lib/messages/list-threads";
+import { formatPhoneE164 } from "@/lib/phone-format";
 import { createClient } from "@/lib/supabase/client";
 import type { Database } from "@/lib/supabase/types";
 
@@ -17,6 +19,8 @@ export type ThreadUpdate = {
   lastMessageDirection: Thread["lastMessageDirection"];
   lastMessageAt: string;
   unreadDelta: number;
+  threadCustomerPhone: string | null;
+  threadBusinessPhone: string | null;
 };
 
 type Props = {
@@ -164,6 +168,7 @@ export function InboxThreadList({
                 <ContactAvatar
                   contactName={t.contactName}
                   contactPhone={t.contactPhone}
+                  businessPhone={t.threadBusinessPhone}
                   avatarId={t.threadId}
                 />
                 {t.propertyAddress ? (
@@ -175,6 +180,15 @@ export function InboxThreadList({
                     No property linked
                   </span>
                 )}
+                {t.threadCustomerPhone ? (
+                  <span
+                    className="max-w-[9rem] shrink-0 truncate rounded-full border border-[#e5e1df] bg-white px-1.5 py-0.5 text-[10px] font-bold tabular-nums text-[#57534e]"
+                    title={`Texting ${t.threadCustomerPhone}`}
+                    data-testid={`inbox-thread-${t.threadId}-phone`}
+                  >
+                    {formatPhoneE164(t.threadCustomerPhone)}
+                  </span>
+                ) : null}
               </div>
               {t.aiResponderStatus ? (
                 <SandraThreadStatus
@@ -283,16 +297,24 @@ function SandraThreadStatus({
 function ContactAvatar({
   contactName,
   contactPhone,
+  businessPhone,
   avatarId,
 }: {
   contactName: string | null;
   contactPhone: string | null;
+  businessPhone: string | null;
   avatarId: string;
 }) {
   const initials = initialsOfContact(contactName, contactPhone);
   return (
     <span
-      title={contactName ?? contactPhone ?? "Unknown contact"}
+      title={[
+        contactName ?? "Unknown contact",
+        contactPhone ? `Texting ${contactPhone}` : null,
+        businessPhone ? `via ${businessPhone}` : null,
+      ]
+        .filter(Boolean)
+        .join(" · ")}
       data-testid={`inbox-thread-${avatarId}-avatar`}
       className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-[#f5f5f4] border border-[#e5e1df] text-[9px] font-bold text-[#78716c]"
     >
@@ -319,12 +341,15 @@ function mergeThreadUpdate(
 
   const threadId = row.conversation_id;
   const previous = updates[threadId];
+  const parties = deriveSmsParties(row);
   return {
     ...updates,
     [threadId]: {
       lastMessageBody: row.body,
       lastMessageDirection: row.direction as Thread["lastMessageDirection"],
       lastMessageAt: row.created_at,
+      threadCustomerPhone: parties.customerPhone,
+      threadBusinessPhone: parties.businessPhone,
       unreadDelta:
         (previous?.unreadDelta ?? 0) +
         (row.direction === "inbound" && row.read_at === null ? 1 : 0),
@@ -348,6 +373,9 @@ export function applyThreadUpdates(
       lastMessageBody: update.lastMessageBody,
       lastMessageDirection: update.lastMessageDirection,
       lastMessageAt: update.lastMessageAt,
+      threadCustomerPhone: update.threadCustomerPhone,
+      threadBusinessPhone: update.threadBusinessPhone,
+      contactPhone: update.threadCustomerPhone,
       unreadCount: thread.unreadCount + update.unreadDelta,
     };
   });

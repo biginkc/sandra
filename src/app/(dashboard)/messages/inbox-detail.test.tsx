@@ -1,9 +1,10 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, it, expect, vi } from "vitest";
 
 import { InboxDetail } from "./inbox-detail";
 import type { InboxDetail as InboxDetailData } from "./inbox-detail-data";
+import { sendSmsFromLead } from "../leads/actions";
 import type { Database } from "@/lib/supabase/types";
 
 type MessageRow = Database["public"]["Tables"]["messages"]["Row"];
@@ -16,6 +17,39 @@ const refreshCalls: number[] = [];
 const pushCalls: string[] = [];
 const setOutreachDispoMock = vi.hoisted(() => vi.fn());
 const moveMessageThreadToLeadMock = vi.hoisted(() => vi.fn());
+const supabaseMock = vi.hoisted(() => {
+  const subscriptions: Array<{
+    type: string;
+    filter: Record<string, unknown>;
+    callback: (payload: { new: MessageRow }) => void;
+  }> = [];
+  const channel = {
+    on: vi.fn(
+      (
+        type: string,
+        filter: Record<string, unknown>,
+        callback: (payload: { new: MessageRow }) => void,
+      ) => {
+        subscriptions.push({ type, filter, callback });
+        return channel;
+      },
+    ),
+    subscribe: vi.fn(() => channel),
+  };
+  return {
+    subscriptions,
+    client: {
+      auth: {
+        getSession: vi.fn(async () => ({ data: { session: null } })),
+      },
+      realtime: {
+        setAuth: vi.fn(),
+      },
+      channel: vi.fn(() => channel),
+      removeChannel: vi.fn(),
+    },
+  };
+});
 
 vi.mock("next/navigation", () => ({
   useRouter: () => ({
@@ -58,27 +92,13 @@ vi.mock("../templates/actions", () => ({
 // MessagesThread + InboxThreadList both subscribe to Supabase Realtime on
 // mount. Stub the browser client so the channel pipeline is a no-op.
 vi.mock("@/lib/supabase/client", () => ({
-  createClient: () => ({
-    auth: {
-      getSession: vi.fn(async () => ({ data: { session: null } })),
-    },
-    realtime: {
-      setAuth: vi.fn(),
-    },
-    channel: () => {
-      const ch = {
-        on: () => ch,
-        subscribe: () => ch,
-      };
-      return ch;
-    },
-    removeChannel: vi.fn(),
-  }),
+  createClient: () => supabaseMock.client,
 }));
 
 vi.mock("sonner", () => ({
   toast: {
     success: vi.fn(),
+    info: vi.fn(),
     warning: vi.fn(),
     error: vi.fn(),
   },
@@ -108,16 +128,27 @@ function makeMessage(overrides: Partial<MessageRow> & { id: string; body: string
 
 function makeData(overrides: Partial<InboxDetailData> & { contactId: string }): InboxDetailData {
   const contactId = overrides.contactId;
-  const propertyId = overrides.propertyId ?? "prop-1";
+  const propertyId = Object.hasOwn(overrides, "propertyId")
+    ? overrides.propertyId!
+    : "prop-1";
   return {
     threadId: overrides.threadId ?? `conv-${contactId}`,
     conversationId: overrides.conversationId ?? `conv-${contactId}`,
     contactId,
     contactName: overrides.contactName ?? "Panel Test",
+    threadCustomerPhone: overrides.threadCustomerPhone ?? "+15551234567",
+    threadBusinessPhone: overrides.threadBusinessPhone ?? "+18162804181",
     contactPhone: overrides.contactPhone ?? "+15551234567",
+    replyToPhone: Object.hasOwn(overrides, "replyToPhone")
+      ? overrides.replyToPhone!
+      : "+15551234567",
     propertyId,
-    propertyAddress: overrides.propertyAddress ?? "123 Main St, Albany, NY",
-    homeownerContactId: overrides.homeownerContactId ?? contactId,
+    propertyAddress: Object.hasOwn(overrides, "propertyAddress")
+      ? overrides.propertyAddress!
+      : "123 Main St, Albany, NY",
+    homeownerContactId: Object.hasOwn(overrides, "homeownerContactId")
+      ? overrides.homeownerContactId!
+      : contactId,
     agentContactId: overrides.agentContactId ?? null,
     assigneeId: overrides.assigneeId ?? null,
     propertyStatus: overrides.propertyStatus ?? "prospect",
@@ -153,12 +184,30 @@ function expectSharedOutcomeControls({
 describe("<InboxDetail />", () => {
   beforeEach(() => {
     pushCalls.length = 0;
+    replaceCalls.length = 0;
+    refreshCalls.length = 0;
     setOutreachDispoMock.mockClear();
     moveMessageThreadToLeadMock.mockClear();
     setOutreachDispoMock.mockResolvedValue({ ok: true });
     moveMessageThreadToLeadMock.mockResolvedValue({
       ok: true,
       alreadyQualified: false,
+    });
+    supabaseMock.subscriptions.length = 0;
+    supabaseMock.client.channel.mockClear();
+    supabaseMock.client.removeChannel.mockClear();
+    supabaseMock.client.auth.getSession.mockClear();
+    supabaseMock.client.realtime.setAuth.mockClear();
+    vi.mocked(sendSmsFromLead).mockReset();
+    vi.mocked(sendSmsFromLead).mockResolvedValue({
+      ok: true,
+      data: { outcome: { status: "sent" } },
+    } as Awaited<ReturnType<typeof sendSmsFromLead>>);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: {
+        writeText: vi.fn(async () => undefined),
+      },
     });
   });
 
@@ -353,6 +402,105 @@ describe("<InboxDetail />", () => {
     expect(screen.getByLabelText("Reply to this lead")).toHaveValue("");
   });
 
+  it("sends inline replies to the same saved thread phone shown in Messages", async () => {
+    const user = userEvent.setup();
+    const data = makeData({
+      contactId: "contact-reply-phone",
+      propertyId: "prop-reply-phone",
+      threadCustomerPhone: "+15550000002",
+      contactPhone: "+15550000002",
+      replyToPhone: "+15550000002",
+      initialMessages: [],
+    });
+
+    render(
+      <InboxDetail
+        data={data}
+        assigneeEmails={{}}
+        currentUserId="user-1"
+      />,
+    );
+
+    expect(screen.getByTestId("inline-reply")).toHaveTextContent(
+      "+1 (555) 000-0002",
+    );
+
+    await user.type(screen.getByLabelText("Reply to this lead"), "Thanks");
+    await user.click(screen.getByTestId("inline-reply-send"));
+
+    await waitFor(() => {
+      expect(sendSmsFromLead).toHaveBeenCalledWith(
+        "prop-reply-phone",
+        "Thanks",
+        null,
+        false,
+        "+15550000002",
+      );
+    });
+  });
+
+  it("pauses Messages replies after a live same-thread insert until server detail refreshes", async () => {
+    const data = makeData({
+      contactId: "contact-live-refresh",
+      propertyId: "prop-live-refresh",
+      threadId: "conv-live-refresh",
+      conversationId: "conv-live-refresh",
+      threadCustomerPhone: "+15550000001",
+      contactPhone: "+15550000001",
+      replyToPhone: "+15550000001",
+      initialMessages: [
+        makeMessage({
+          id: "initial-live-refresh",
+          body: "old phone",
+          direction: "inbound",
+          contact_id: "contact-live-refresh",
+          property_id: "prop-live-refresh",
+          conversation_id: "conv-live-refresh",
+          from_address: "+15550000001",
+        }),
+      ],
+    });
+
+    render(
+      <InboxDetail
+        data={data}
+        assigneeEmails={{}}
+        currentUserId="user-1"
+      />,
+    );
+
+    await waitFor(() => {
+      expect(supabaseMock.subscriptions.length).toBeGreaterThan(0);
+    });
+    const insertSubscription = supabaseMock.subscriptions.find(
+      (subscription) =>
+        subscription.type === "postgres_changes" &&
+        subscription.filter.event === "INSERT",
+    );
+    expect(insertSubscription).toBeDefined();
+
+    await act(async () => {
+      insertSubscription!.callback({
+        new: makeMessage({
+          id: "new-live-refresh",
+          body: "new phone",
+          direction: "inbound",
+          contact_id: "contact-live-refresh",
+          property_id: "prop-live-refresh",
+          conversation_id: "conv-live-refresh",
+          from_address: "+15550000002",
+          created_at: "2026-04-29T12:01:00Z",
+        }),
+      });
+    });
+
+    expect(screen.getByTestId("inline-reply-refreshing")).toHaveTextContent(
+      "Updating the thread phone before reply",
+    );
+    expect(screen.queryByTestId("inline-reply")).not.toBeInTheDocument();
+    expect(refreshCalls.length).toBeGreaterThan(0);
+  });
+
   it("does not render the homeowner reply composer for agent-only threads", () => {
     const data = makeData({
       contactId: "agent-contact",
@@ -532,7 +680,7 @@ describe("<InboxDetail />", () => {
     expect(pushCalls).toContain("/leads/prop-move");
   });
 
-  it("header Move to Lead promotes prospects before opening the lead page", async () => {
+  it("header Open prospect navigates without promoting", async () => {
     const user = userEvent.setup();
     const data = makeData({
       contactId: "contact-header-move",
@@ -551,11 +699,14 @@ describe("<InboxDetail />", () => {
 
     await user.click(screen.getByTestId("inbox-detail-open-lead"));
 
-    expect(moveMessageThreadToLeadMock).toHaveBeenCalledWith("prop-header-move");
+    expect(screen.getByTestId("inbox-detail-open-lead")).toHaveTextContent(
+      "Open prospect",
+    );
+    expect(moveMessageThreadToLeadMock).not.toHaveBeenCalled();
     expect(pushCalls).toContain("/leads/prop-header-move");
   });
 
-  it("already-qualified rows keep the same outcome buttons and disable Move to Lead", async () => {
+  it("already-qualified rows open as leads while keeping outcome promotion disabled", async () => {
     const user = userEvent.setup();
     const data = makeData({
       contactId: "contact-open-lead",
@@ -575,14 +726,15 @@ describe("<InboxDetail />", () => {
     const moveToLead = screen.getByTestId("message-move-to-lead");
     expectSharedOutcomeControls({ moveToLeadDisabled: true });
     expect(screen.getByTestId("inbox-detail-open-lead")).toHaveTextContent(
-      "Move to Lead",
+      "Open lead",
     );
-    expect(screen.getByTestId("inbox-detail-open-lead")).toBeDisabled();
-    expect(screen.queryByTestId("message-open-lead")).not.toBeInTheDocument();
+    expect(screen.getByTestId("inbox-detail-open-lead")).toBeEnabled();
 
     await user.click(moveToLead);
 
     expect(moveMessageThreadToLeadMock).not.toHaveBeenCalled();
+    await user.click(screen.getByTestId("inbox-detail-open-lead"));
+    expect(pushCalls).toContain("/leads/prop-open");
   });
 
   it("disables Move to Lead when the same property refreshes from prospect to lead", () => {
@@ -617,6 +769,108 @@ describe("<InboxDetail />", () => {
     );
 
     expectSharedOutcomeControls({ moveToLeadDisabled: true });
-    expect(screen.getByTestId("inbox-detail-open-lead")).toBeDisabled();
+    expect(screen.getByTestId("inbox-detail-open-lead")).toBeEnabled();
+  });
+
+  it("copies record, conversation, and active thread phone from the More menu", async () => {
+    const user = userEvent.setup();
+    const clipboard = vi.spyOn(navigator.clipboard, "writeText");
+    const data = makeData({
+      contactId: "contact-copy",
+      propertyId: "prop-copy",
+      threadId: "conv-copy",
+      conversationId: "conv-copy",
+      propertyStatus: "prospect",
+      threadCustomerPhone: "+15550000002",
+      threadBusinessPhone: "+18162804181",
+      contactPhone: "+15550000002",
+      replyToPhone: "+15550000002",
+      initialMessages: [],
+    });
+
+    render(
+      <InboxDetail
+        data={data}
+        assigneeEmails={{}}
+        currentUserId="user-1"
+      />,
+    );
+
+    await user.click(screen.getByTestId("inbox-detail-more"));
+    await user.click(await screen.findByTestId("copy-record-link"));
+    await user.click(screen.getByTestId("inbox-detail-more"));
+    await user.click(await screen.findByTestId("copy-conversation-link"));
+    await user.click(screen.getByTestId("inbox-detail-more"));
+    await user.click(await screen.findByTestId("copy-phone-number"));
+
+    await user.click(screen.getByTestId("inbox-detail-more"));
+    expect(await screen.findByTestId("inbox-detail-phone")).toHaveTextContent(
+      "Call +1 (555) 000-0002",
+    );
+
+    expect(clipboard).toHaveBeenCalledWith(
+      `${window.location.origin}/leads/prop-copy`,
+    );
+    expect(clipboard).toHaveBeenCalledWith(
+      `${window.location.origin}/messages?thread=conv-copy`,
+    );
+    expect(clipboard).toHaveBeenCalledWith("+15550000002");
+  });
+
+  it("contact-only threads expose resolve and omit record actions", async () => {
+    const user = userEvent.setup();
+    const data = makeData({
+      contactId: "contact-only",
+      propertyId: null,
+      propertyAddress: null,
+      homeownerContactId: null,
+      propertyStatus: null,
+      threadCustomerPhone: "+15550000003",
+      contactPhone: "+15550000003",
+      replyToPhone: "+15550000003",
+      initialMessages: [],
+    });
+
+    render(
+      <InboxDetail
+        data={data}
+        assigneeEmails={{}}
+        currentUserId="user-1"
+      />,
+    );
+
+    expect(screen.queryByTestId("inbox-detail-open-lead")).not.toBeInTheDocument();
+    expect(screen.getByTestId("resolve-to-property-open")).toBeInTheDocument();
+
+    await user.click(screen.getByTestId("inbox-detail-more"));
+
+    expect(screen.queryByTestId("copy-record-link")).not.toBeInTheDocument();
+    expect(await screen.findByTestId("copy-conversation-link")).toBeInTheDocument();
+    expect(screen.getByTestId("copy-phone-number")).toBeInTheDocument();
+  });
+
+  it("does not reply from Messages when the visible thread phone is not saved on the contact", () => {
+    const data = makeData({
+      contactId: "contact-unsaved-thread-phone",
+      propertyId: "prop-unsaved-thread-phone",
+      homeownerContactId: "contact-unsaved-thread-phone",
+      threadCustomerPhone: "+15550000004",
+      contactPhone: "+15550000004",
+      replyToPhone: null,
+      initialMessages: [],
+    });
+
+    render(
+      <InboxDetail
+        data={data}
+        assigneeEmails={{}}
+        currentUserId="user-1"
+      />,
+    );
+
+    expect(screen.queryByTestId("inline-reply")).not.toBeInTheDocument();
+    expect(
+      screen.getByText(/This thread number is not saved on the homeowner contact/i),
+    ).toBeInTheDocument();
   });
 });

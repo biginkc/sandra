@@ -16,6 +16,7 @@ type Props = {
   contactId: string | null;
   conversationId?: string | null;
   propertyId: string | null;
+  onLiveMessage?: (message: Message) => void;
 };
 
 export function messageBelongsToThread(
@@ -54,6 +55,7 @@ export function MessagesThread({
   contactId,
   conversationId = null,
   propertyId,
+  onLiveMessage,
 }: Props) {
   const [messages, setMessages] = useState<Message[]>(() =>
     filterThreadMessages(initial, {
@@ -107,6 +109,7 @@ export function MessagesThread({
                   a.created_at.localeCompare(b.created_at),
                 );
               });
+              onLiveMessage?.(row);
             }
           },
         )
@@ -128,7 +131,7 @@ export function MessagesThread({
       mounted = false;
       if (channel) supabase.removeChannel(channel);
     };
-  }, [contactId, conversationId, propertyId]);
+  }, [contactId, conversationId, onLiveMessage, propertyId]);
 
   useEffect(() => {
     const frame = window.requestAnimationFrame(() => {

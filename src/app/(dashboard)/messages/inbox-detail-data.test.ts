@@ -140,7 +140,7 @@ function makeSupabaseStub(seed: SeedData) {
     let wantSingle = false;
 
     const builder = {
-      select(_columns?: string) {
+      select() {
         return builder;
       },
       eq(key: string, value: unknown) {
@@ -384,5 +384,137 @@ describe("fetchInboxDetail", () => {
     expect(detail).not.toBeNull();
     expect(detail?.propertyId).toBe(RECENT_PROPERTY_ID);
     expect(detail?.propertyAddress).toContain("200 Newer Ave");
+  });
+
+  it("derives the displayed phone from the latest inbound address pair", async () => {
+    const supabase = makeSupabaseStub({
+      messages: [
+        makeMessage({
+          id: "secondary-inbound",
+          contact_id: CONTACT_ID,
+          property_id: RECENT_PROPERTY_ID,
+          conversation_id: CONVERSATION_ID,
+          from_address: "+15550000002",
+          to_address: "+18162804181",
+          created_at: "2026-06-09T12:00:00.000Z",
+        }),
+      ],
+      contacts: [
+        makeContact({
+          id: CONTACT_ID,
+          phone_1: "+15550000001",
+          phone_2: "+15550000002",
+        }),
+      ],
+      properties: [makeProperty({ id: RECENT_PROPERTY_ID })],
+    });
+
+    const detail = await fetchInboxDetail(supabase as never, CONVERSATION_ID);
+
+    expect(detail?.contactPhone).toBe("+15550000002");
+    expect(detail?.threadCustomerPhone).toBe("+15550000002");
+    expect(detail?.threadBusinessPhone).toBe("+18162804181");
+    expect(detail?.replyToPhone).toBe("+15550000002");
+  });
+
+  it("derives the displayed phone from the latest outbound address pair", async () => {
+    const supabase = makeSupabaseStub({
+      messages: [
+        makeMessage({
+          id: "latest-outbound",
+          contact_id: CONTACT_ID,
+          property_id: RECENT_PROPERTY_ID,
+          conversation_id: CONVERSATION_ID,
+          direction: "outbound",
+          from_address: "+18162804182",
+          to_address: "+15550000003",
+          created_at: "2026-06-09T12:00:00.000Z",
+        }),
+      ],
+      contacts: [
+        makeContact({
+          id: CONTACT_ID,
+          phone_1: "+15550000001",
+          phone_3: "+15550000003",
+        }),
+      ],
+      properties: [makeProperty({ id: RECENT_PROPERTY_ID })],
+    });
+
+    const detail = await fetchInboxDetail(supabase as never, CONVERSATION_ID);
+
+    expect(detail?.threadCustomerPhone).toBe("+15550000003");
+    expect(detail?.threadBusinessPhone).toBe("+18162804182");
+    expect(detail?.replyToPhone).toBe("+15550000003");
+  });
+
+  it("uses the newest message for phone routing even when the conversation has more than 100 rows", async () => {
+    const olderMessages = Array.from({ length: 100 }, (_, index) =>
+      makeMessage({
+        id: `older-${index}`,
+        contact_id: CONTACT_ID,
+        property_id: RECENT_PROPERTY_ID,
+        conversation_id: CONVERSATION_ID,
+        from_address: "+15550000001",
+        to_address: "+18162804181",
+        created_at: new Date(Date.UTC(2026, 5, 9, 10, index, 0)).toISOString(),
+      }),
+    );
+    const supabase = makeSupabaseStub({
+      messages: [
+        ...olderMessages,
+        makeMessage({
+          id: "actual-latest",
+          contact_id: CONTACT_ID,
+          property_id: RECENT_PROPERTY_ID,
+          conversation_id: CONVERSATION_ID,
+          from_address: "+15550000003",
+          to_address: "+18162804182",
+          created_at: "2026-06-09T12:00:00.000Z",
+        }),
+      ],
+      contacts: [
+        makeContact({
+          id: CONTACT_ID,
+          phone_1: "+15550000001",
+          phone_3: "+15550000003",
+        }),
+      ],
+      properties: [makeProperty({ id: RECENT_PROPERTY_ID })],
+    });
+
+    const detail = await fetchInboxDetail(supabase as never, CONVERSATION_ID);
+
+    expect(detail?.initialMessages).toHaveLength(100);
+    expect(detail?.initialMessages.at(-1)?.id).toBe("actual-latest");
+    expect(detail?.threadCustomerPhone).toBe("+15550000003");
+    expect(detail?.threadBusinessPhone).toBe("+18162804182");
+    expect(detail?.replyToPhone).toBe("+15550000003");
+  });
+
+  it("keeps contact-only ambiguous threads propertyless while showing the sender number", async () => {
+    const supabase = makeSupabaseStub({
+      messages: [
+        makeMessage({
+          id: "ambiguous-propertyless",
+          contact_id: CONTACT_ID,
+          property_id: null,
+          conversation_id: CONVERSATION_ID,
+          from_address: "+15550000004",
+          to_address: "+18162804181",
+          metadata: { routing: "ambiguous_recipient_number" },
+        }),
+      ],
+      contacts: [makeContact({ id: CONTACT_ID, phone_2: "+15550000004" })],
+      properties: [],
+    });
+
+    const detail = await fetchInboxDetail(supabase as never, CONVERSATION_ID);
+
+    expect(detail?.propertyId).toBeNull();
+    expect(detail?.propertyAddress).toBeNull();
+    expect(detail?.threadCustomerPhone).toBe("+15550000004");
+    expect(detail?.threadBusinessPhone).toBe("+18162804181");
+    expect(detail?.replyToPhone).toBe("+15550000004");
   });
 });

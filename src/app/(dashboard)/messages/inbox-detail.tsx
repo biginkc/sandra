@@ -1,11 +1,18 @@
 "use client";
 
-import { ChevronDownIcon, PhoneIcon } from "lucide-react";
+import {
+  ChevronDownIcon,
+  CopyIcon,
+  ExternalLinkIcon,
+  MoreHorizontalIcon,
+  PhoneIcon,
+} from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useState, useTransition } from "react";
 
 import { toast } from "sonner";
 
+import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -13,6 +20,8 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { StatusChip, type StatusVariant } from "@/components/ui/status-chip";
+import { copyToClipboard } from "@/lib/csv/export";
+import { formatPhoneE164 } from "@/lib/phone-format";
 import { cn } from "@/lib/utils";
 
 import { InlineReply } from "../leads/[id]/inline-reply";
@@ -26,6 +35,7 @@ import {
 } from "./dispo-actions";
 import { type InboxDetail as InboxDetailData } from "./inbox-detail-data";
 import { ResolveToPropertyDialog } from "./resolve-to-property-dialog";
+import type { Database } from "@/lib/supabase/types";
 
 type Props = {
   data: InboxDetailData | null;
@@ -50,6 +60,11 @@ const DISPO_LABELS: Record<string, string> = {
 };
 
 const VALID_STATUSES: StatusVariant[] = ["replying", "hot", "new", "contacted", "cold", "dead"];
+type MessageRow = Database["public"]["Tables"]["messages"]["Row"];
+type ReplyRefreshGate = {
+  threadId: string;
+  initialMessages: MessageRow[];
+};
 
 function isValidStatus(s: string | null): s is StatusVariant {
   return s !== null && (VALID_STATUSES as string[]).includes(s);
@@ -249,6 +264,8 @@ export function InboxDetail({
   const searchParams = useSearchParams();
   const [openLeadPending, startOpenLeadTransition] = useTransition();
   const [resolveOpen, setResolveOpen] = useState(false);
+  const [replyRefreshGate, setReplyRefreshGate] =
+    useState<ReplyRefreshGate | null>(null);
 
   useEffect(() => {
     if (!data) return;
@@ -293,22 +310,40 @@ export function InboxDetail({
     : isMine
       ? "Me"
       : (assigneeEmail ?? "Teammate");
-  const phoneHref = data.contactPhone ? `tel:${data.contactPhone}` : null;
   const propertyIsLead = data.propertyStatus !== "prospect";
+  const recordLabel = propertyIsLead ? "lead" : "prospect";
   const openLeadFromHeader = () => {
-    if (!data.propertyId || propertyIsLead) return;
-    startOpenLeadTransition(async () => {
-      const result = await moveMessageThreadToLead(data.propertyId!);
-      if (result.ok) {
-        toast.success(
-          result.alreadyQualified ? "Opening lead" : "Moved to lead",
-        );
-        router.push(`/leads/${data.propertyId}`);
-        router.refresh();
-      } else {
-        toast.error(result.error);
-      }
+    if (!data.propertyId) return;
+    startOpenLeadTransition(() => {
+      router.push(`/leads/${data.propertyId}`);
     });
+  };
+  const copy = async (value: string, label: string) => {
+    const ok = await copyToClipboard(value);
+    if (ok) {
+      toast.success(`${label} copied`);
+    } else {
+      toast.error(`Could not copy ${label.toLowerCase()}`);
+    }
+  };
+  const absolutePath = (path: string) =>
+    typeof window === "undefined" ? path : new URL(path, window.location.origin).toString();
+  const conversationLink = absolutePath(`/messages?thread=${encodeURIComponent(data.threadId)}`);
+  const recordLink = data.propertyId
+    ? absolutePath(`/leads/${data.propertyId}`)
+    : null;
+  const phoneHref = data.threadCustomerPhone
+    ? `tel:${data.threadCustomerPhone}`
+    : null;
+  const replyRefreshPending =
+    replyRefreshGate?.threadId === data.threadId &&
+    replyRefreshGate.initialMessages === data.initialMessages;
+  const handleLiveMessage = () => {
+    setReplyRefreshGate({
+      threadId: data.threadId,
+      initialMessages: data.initialMessages,
+    });
+    router.refresh();
   };
 
   return (
@@ -341,19 +376,39 @@ export function InboxDetail({
                 Assigned: {assignedLabel}
               </span>
             </p>
+            <p
+              className="mt-0.5 flex min-w-0 items-center gap-1.5 text-[12px] text-[#78716c]"
+              title={[
+                data.threadCustomerPhone
+                  ? `Customer: ${data.threadCustomerPhone}`
+                  : null,
+                data.threadBusinessPhone ? `Sandra: ${data.threadBusinessPhone}` : null,
+              ]
+                .filter(Boolean)
+                .join(" · ")}
+            >
+              {data.threadCustomerPhone ? (
+                <>
+                  <span className="shrink-0">Texting</span>
+                  <span className="truncate font-bold tabular-nums text-[#1c1917]">
+                    {formatPhoneE164(data.threadCustomerPhone)}
+                  </span>
+                </>
+              ) : (
+                <span className="italic">No SMS number on this thread</span>
+              )}
+              {data.threadBusinessPhone ? (
+                <>
+                  <span aria-hidden className="text-[#a8a29e]">via</span>
+                  <span className="truncate tabular-nums">
+                    {formatPhoneE164(data.threadBusinessPhone)}
+                  </span>
+                </>
+              ) : null}
+            </p>
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-2">
-          {phoneHref ? (
-            <a
-              href={phoneHref}
-              aria-label={`Call ${data.contactName ?? data.contactPhone ?? "contact"}`}
-              data-testid="inbox-detail-phone"
-              className="inline-flex h-9 w-9 items-center justify-center rounded-full text-[#78716c] hover:bg-[#f5f5f4] hover:text-[#111827] transition-colors"
-            >
-              <PhoneIcon className="h-4 w-4" />
-            </a>
-          ) : null}
           {data.propertyId ? (
             <AssignDropdown
               propertyId={data.propertyId}
@@ -363,20 +418,75 @@ export function InboxDetail({
             />
           ) : null}
           {data.propertyId ? (
-            <button
+            <Button
               type="button"
               onClick={openLeadFromHeader}
-              disabled={openLeadPending || propertyIsLead}
+              disabled={openLeadPending}
+              variant="outline"
+              size="sm"
               data-testid="inbox-detail-open-lead"
-              title={propertyIsLead ? "Already a lead" : undefined}
-              className={cn(
-                "inline-flex items-center gap-1 rounded-full border border-[#e5e1df] bg-white px-4 py-1.5",
-                "text-[12px] font-bold text-[#1c1917] transition-colors hover:bg-[#f5f5f4] disabled:cursor-not-allowed disabled:opacity-60",
-              )}
+              aria-label={`Open ${recordLabel}`}
             >
-              Move to Lead
-            </button>
+              <ExternalLinkIcon className="h-3.5 w-3.5" />
+              Open {recordLabel}
+            </Button>
           ) : null}
+          <DropdownMenu>
+            <DropdownMenuTrigger
+              render={
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="icon-sm"
+                  aria-label="Conversation actions"
+                  data-testid="inbox-detail-more"
+                >
+                  <MoreHorizontalIcon className="h-4 w-4" />
+                </Button>
+              }
+            />
+            <DropdownMenuContent align="end" className="min-w-52">
+              <DropdownMenuItem
+                onClick={() => copy(conversationLink, "Conversation link")}
+                data-testid="copy-conversation-link"
+              >
+                <CopyIcon className="h-4 w-4" />
+                Copy conversation link
+              </DropdownMenuItem>
+              {recordLink ? (
+                <DropdownMenuItem
+                  onClick={() => copy(recordLink, `${capitalize(recordLabel)} link`)}
+                  data-testid="copy-record-link"
+                >
+                  <CopyIcon className="h-4 w-4" />
+                  Copy {recordLabel} link
+                </DropdownMenuItem>
+              ) : null}
+              {data.threadCustomerPhone ? (
+                <DropdownMenuItem
+                  onClick={() => copy(data.threadCustomerPhone!, "Phone number")}
+                  data-testid="copy-phone-number"
+                >
+                  <CopyIcon className="h-4 w-4" />
+                  Copy phone number
+                </DropdownMenuItem>
+              ) : null}
+              {phoneHref ? (
+                <DropdownMenuItem
+                  render={
+                    <a
+                      href={phoneHref}
+                      aria-label={`Open phone app to call ${formatPhoneE164(data.threadCustomerPhone!)}`}
+                      data-testid="inbox-detail-phone"
+                    >
+                      <PhoneIcon className="h-4 w-4" />
+                      Call {formatPhoneE164(data.threadCustomerPhone!)}
+                    </a>
+                  }
+                />
+              ) : null}
+            </DropdownMenuContent>
+          </DropdownMenu>
         </div>
       </header>
       <div
@@ -385,13 +495,14 @@ export function InboxDetail({
       >
         {/* Key on the resolved thread so switching conversations remounts
             the component and resets its local snapshot immediately. */}
-        <MessagesThread
-          key={`thread-${data.threadId}`}
-          initial={data.initialMessages}
-          contactId={data.contactId}
-          conversationId={data.conversationId}
-          propertyId={data.propertyId}
-        />
+          <MessagesThread
+            key={`thread-${data.threadId}`}
+            initial={data.initialMessages}
+            contactId={data.contactId}
+            conversationId={data.conversationId}
+            propertyId={data.propertyId}
+            onLiveMessage={handleLiveMessage}
+          />
       </div>
       {data.propertyId ? (
         <>
@@ -404,12 +515,21 @@ export function InboxDetail({
             />
           </div>
           <div className="border-t border-border bg-white px-6 py-4">
-            {data.homeownerContactId === data.contactId ? (
+            {replyRefreshPending ? (
+              <div
+                className="rounded-xl border border-dashed border-[#e5e1df] p-3 text-center text-xs text-[#78716c]"
+                data-testid="inline-reply-refreshing"
+              >
+                Updating the thread phone before reply...
+              </div>
+            ) : data.homeownerContactId === data.contactId ? (
               <InlineReply
                 key={`reply-${data.threadId}`}
                 propertyId={data.propertyId}
                 homeownerContactId={data.homeownerContactId}
-                homeownerPhone={data.contactPhone}
+                homeownerPhone={data.replyToPhone}
+                replyToPhone={data.replyToPhone}
+                phoneUnavailableMessage="This thread number is not saved on the homeowner contact — save or resolve it before replying."
               />
             ) : (
               <div
@@ -450,6 +570,10 @@ export function InboxDetail({
       )}
     </div>
   );
+}
+
+function capitalize(value: string): string {
+  return value.charAt(0).toUpperCase() + value.slice(1);
 }
 
 /**

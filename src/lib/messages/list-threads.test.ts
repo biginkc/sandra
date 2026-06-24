@@ -21,6 +21,8 @@ function makeStub(opts: {
     conversation_id?: string | null;
     body: string;
     direction: "inbound" | "outbound";
+    from_address?: string | null;
+    to_address?: string | null;
     created_at: string;
     read_at: string | null;
   }>;
@@ -30,6 +32,8 @@ function makeStub(opts: {
     last_name: string | null;
     entity_name: string | null;
     phone_1: string | null;
+    phone_2?: string | null;
+    phone_3?: string | null;
     do_not_contact?: boolean;
     sms_opted_out?: boolean;
   }>;
@@ -78,6 +82,12 @@ function makeStub(opts: {
       Promise.resolve({
         data: opts.messages.map((m) => ({
           ...m,
+          from_address:
+            m.from_address ??
+            (m.direction === "inbound" ? "+15551234567" : "+18162804181"),
+          to_address:
+            m.to_address ??
+            (m.direction === "inbound" ? "+18162804181" : "+15551234567"),
           conversation_id:
             m.conversation_id ??
             `conv:${m.contact_id}:${m.property_id ?? "none"}`,
@@ -419,6 +429,54 @@ describe("listThreads — isOptedOut (DNC) flag", () => {
 
     const threads = await listThreads(supabase, {});
     expect(threads[0]?.isOptedOut).toBe(true);
+  });
+
+  it("uses the latest SMS address pair as the displayed thread phone", async () => {
+    const { supabase } = makeStub({
+      messages: [
+        {
+          contact_id: "c-secondary-phone",
+          property_id: "p-secondary-phone",
+          body: "reply from secondary",
+          direction: "inbound",
+          from_address: "+18165559902",
+          to_address: "+18162804181",
+          created_at: new Date().toISOString(),
+          read_at: null,
+        },
+      ],
+      contacts: new Map([
+        [
+          "c-secondary-phone",
+          {
+            id: "c-secondary-phone",
+            first_name: "Secondary",
+            last_name: "Phone",
+            entity_name: null,
+            phone_1: "+18165559901",
+            phone_2: "+18165559902",
+          },
+        ],
+      ]),
+      properties: new Map([
+        [
+          "p-secondary-phone",
+          {
+            id: "p-secondary-phone",
+            address: "200 Secondary St",
+            city: null,
+            state: "MO",
+            assigned_user_id: null,
+          },
+        ],
+      ]),
+    });
+
+    const threads = await listThreads(supabase, {});
+
+    expect(threads[0]?.contactPhone).toBe("+18165559902");
+    expect(threads[0]?.threadCustomerPhone).toBe("+18165559902");
+    expect(threads[0]?.threadBusinessPhone).toBe("+18162804181");
   });
 
   it("returns separate thread rows when one contact has two property conversations", async () => {

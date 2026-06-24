@@ -1,5 +1,9 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
+import {
+  deriveSmsParties,
+  findMatchingSavedContactPhone,
+} from "@/lib/messages/sms-parties";
 import type { Database } from "@/lib/supabase/types";
 
 export type InboxDetail = {
@@ -9,7 +13,14 @@ export type InboxDetail = {
   conversationId: string;
   contactId: string;
   contactName: string | null;
+  /** Actual customer-side phone on the latest SMS in this conversation. */
+  threadCustomerPhone: string | null;
+  /** Actual Sandra/business-side phone on the latest SMS in this conversation. */
+  threadBusinessPhone: string | null;
+  /** Backward-compatible alias for threadCustomerPhone. */
   contactPhone: string | null;
+  /** Saved contact phone that matches the open thread, safe for replying. */
+  replyToPhone: string | null;
   propertyId: string | null;
   propertyAddress: string | null;
   homeownerContactId: string | null;
@@ -34,15 +45,17 @@ export async function fetchInboxDetail(
   supabase: SupabaseClient<Database>,
   conversationId: string,
 ): Promise<InboxDetail | null> {
-  const { data: messages, error } = await supabase
+  const { data: newestMessages, error } = await supabase
     .from("messages")
     .select("*")
     .eq("channel", "sms")
     .eq("conversation_id", conversationId)
     .neq("status", "queued")
-    .order("created_at", { ascending: true })
+    .order("created_at", { ascending: false })
     .limit(100);
-  if (error || !messages || messages.length === 0) return null;
+  if (error || !newestMessages || newestMessages.length === 0) return null;
+
+  const messages = [...newestMessages].reverse();
 
   const contactId = messages.find(
     (message) => message.contact_id !== null,
@@ -57,7 +70,7 @@ export async function fetchInboxDetail(
   const [contactRes, propertyRes] = await Promise.all([
     supabase
       .from("contacts")
-      .select("first_name, last_name, entity_name, phone_1")
+      .select("first_name, last_name, entity_name, phone_1, phone_2, phone_3")
       .eq("id", contactId)
       .maybeSingle(),
     propertyId
@@ -73,6 +86,9 @@ export async function fetchInboxDetail(
 
   const c = contactRes.data;
   const p = propertyRes.data;
+  const latestMessage = messages[messages.length - 1];
+  const parties = deriveSmsParties(latestMessage);
+  const replyToPhone = findMatchingSavedContactPhone(c, parties.customerPhone);
 
   return {
     threadId: conversationId,
@@ -82,7 +98,10 @@ export async function fetchInboxDetail(
       ? (c.entity_name ??
         ([c.first_name, c.last_name].filter(Boolean).join(" ") || null))
       : null,
-    contactPhone: c?.phone_1 ?? null,
+    threadCustomerPhone: parties.customerPhone,
+    threadBusinessPhone: parties.businessPhone,
+    contactPhone: parties.customerPhone,
+    replyToPhone,
     propertyId,
     propertyAddress: p
       ? [p.address, p.city, p.state].filter(Boolean).join(", ")

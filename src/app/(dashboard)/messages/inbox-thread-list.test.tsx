@@ -1,4 +1,4 @@
-import { render, waitFor } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { Thread } from "@/lib/messages/list-threads";
@@ -56,6 +56,8 @@ function makeThread(overrides: Partial<Thread> & { threadId: string }): Thread {
   return {
     contactId: `contact-${overrides.threadId}`,
     contactName: null,
+    threadCustomerPhone: null,
+    threadBusinessPhone: null,
     contactPhone: null,
     propertyId: null,
     propertyAddress: null,
@@ -121,6 +123,8 @@ describe("applyThreadUpdates — recency-only ordering", () => {
         lastMessageBody: "x",
         lastMessageDirection: "inbound",
         lastMessageAt: "2026-06-12T08:00:00.000Z",
+        threadCustomerPhone: null,
+        threadBusinessPhone: null,
         unreadDelta: 3,
       },
     };
@@ -136,6 +140,8 @@ describe("applyThreadUpdates — recency-only ordering", () => {
         lastMessageBody: "fresh inbound",
         lastMessageDirection: "inbound",
         lastMessageAt: "2026-06-12T13:00:00.000Z",
+        threadCustomerPhone: "+15551230000",
+        threadBusinessPhone: "+18162804181",
         unreadDelta: 1,
       },
     };
@@ -150,6 +156,30 @@ describe("applyThreadUpdates — recency-only ordering", () => {
 });
 
 describe("<InboxThreadList /> realtime subscriptions", () => {
+  it("shows the active thread phone in the row before the thread is opened", () => {
+    render(
+      <InboxThreadList
+        initial={[
+          makeThread({
+            threadId: "visible-phone",
+            contactName: "Casey Contact",
+            threadCustomerPhone: "+15550000002",
+            threadBusinessPhone: "+18162804181",
+            contactPhone: "+15550000002",
+            propertyAddress: null,
+          }),
+        ]}
+        selectedThreadId={null}
+        currentUserId={null}
+        onSelectThread={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByTestId("inbox-thread-visible-phone-phone")).toHaveTextContent(
+      "+1 (555) 000-0002",
+    );
+  });
+
   it("refreshes on message_threads changes so Sandra delivery state does not stay stale", async () => {
     render(
       <InboxThreadList

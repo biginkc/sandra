@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   classifySmsPhoneAvailability,
   selectBestSmsPhone,
+  selectSmsPhoneByNumber,
   type SmsPhoneContact,
 } from "./sms-phone";
 
@@ -51,5 +52,35 @@ describe("sms phone selection", () => {
 
   it("classifies none when no saved phone exists", () => {
     expect(classifySmsPhoneAvailability(contact({}))).toBe("none");
+  });
+
+  it("selects a requested saved secondary phone by normalized value", () => {
+    const choice = selectSmsPhoneByNumber(
+      contact({
+        phone_1: "+18165550001",
+        phone_1_type: "mobile",
+        phone_3: "(816) 555-0003",
+        phone_3_type: "unknown",
+      }),
+      "+18165550003",
+    );
+
+    expect(choice).toEqual({
+      phone: "(816) 555-0003",
+      lineType: "unknown",
+      slot: 3,
+    });
+  });
+
+  it("rejects a requested phone that is not saved on the contact", () => {
+    expect(
+      selectSmsPhoneByNumber(
+        contact({
+          phone_1: "+18165550001",
+          phone_2: "+18165550002",
+        }),
+        "+18165559999",
+      ),
+    ).toBeNull();
   });
 });

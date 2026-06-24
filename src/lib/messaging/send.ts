@@ -9,7 +9,7 @@ import { getConsentState, type ConsentState } from "./consent";
 import { checkQuietHours, type QuietHoursCheck } from "./quiet-hours";
 import { isSmsPhoneSuppressed } from "./opt-out-phone";
 import { getMessagingProvider } from "./registry";
-import { selectBestSmsPhone } from "./sms-phone";
+import { selectBestSmsPhone, selectSmsPhoneByNumber } from "./sms-phone";
 import { evaluateSuppression, type SuppressionDecision } from "./suppression";
 
 /**
@@ -92,6 +92,12 @@ export type SendSmsInput = {
    */
   from?: string;
   /**
+   * Optional override for the recipient phone. Used by Messages when the
+   * visible conversation is on a saved secondary contact phone. The value
+   * must match phone_1/2/3 or the send is blocked before provider use.
+   */
+  to?: string;
+  /**
    * Queue the message for later release instead of sending immediately.
    * Inserts the `messages` row with `status='queued'` and returns a
    * `queued` outcome — no provider call, no consent check yet (that
@@ -173,11 +179,15 @@ export async function sendSmsToContact(
     return blockedTerminalDispo(suppression);
   }
 
-  const destination = selectBestSmsPhone(contactResult.data);
+  const destination = input.to
+    ? selectSmsPhoneByNumber(contactResult.data, input.to)
+    : selectBestSmsPhone(contactResult.data);
   if (!destination) {
     return {
       status: "blocked_no_phone",
-      reason: "Contact has no phone number. Add one before sending SMS.",
+      reason: input.to
+        ? "Selected thread phone is not saved on this contact. Resolve the contact phone before replying."
+        : "Contact has no phone number. Add one before sending SMS.",
     };
   }
   if (destination.lineType === "landline") {
@@ -366,11 +376,15 @@ async function queueForLater(
     return blockedTerminalDispo(suppression);
   }
 
-  const destination = selectBestSmsPhone(contactResult.data);
+  const destination = input.to
+    ? selectSmsPhoneByNumber(contactResult.data, input.to)
+    : selectBestSmsPhone(contactResult.data);
   if (!destination) {
     return {
       status: "blocked_no_phone",
-      reason: "Contact has no phone number. Add one before queueing.",
+      reason: input.to
+        ? "Selected thread phone is not saved on this contact. Resolve the contact phone before queueing."
+        : "Contact has no phone number. Add one before queueing.",
     };
   }
   if (destination.lineType === "landline") {

@@ -8,6 +8,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
+import { selectBestSmsPhone } from "@/lib/messaging/sms-phone";
 import { zillowUrl } from "@/lib/utils/zillow-url";
 
 import {
@@ -118,6 +119,7 @@ export default async function LeadDetailPage({
   }
 
   const lead = data as DetailedLead;
+  const homeownerSmsPhone = selectBestSmsPhone(lead.homeowner)?.phone ?? null;
 
   const { prevId, nextId } = await getPropertyNeighbors(
     id,
@@ -157,7 +159,7 @@ export default async function LeadDetailPage({
     .limit(200);
   const initialNotes = (notesRaw ?? []) as LeadNoteRow[];
 
-  const { data: callRollupRaw } = await (supabase as any)
+  const { data: callRollupRaw } = await supabase
     .from("call_activities")
     .select(
       "id, started_at, outcome, disposition, recording_status, transcript_status",
@@ -362,7 +364,7 @@ export default async function LeadDetailPage({
           <SmsComposer
             propertyId={lead.id}
             homeownerContactId={lead.homeowner?.id ?? null}
-            homeownerPhone={lead.homeowner?.phone_1 ?? null}
+            homeownerPhone={homeownerSmsPhone}
             homeownerName={
               lead.homeowner?.contact_type === "entity"
                 ? lead.homeowner.entity_name
@@ -432,7 +434,8 @@ export default async function LeadDetailPage({
             <InlineReply
               propertyId={lead.id}
               homeownerContactId={lead.homeowner?.id ?? null}
-              homeownerPhone={lead.homeowner?.phone_1 ?? null}
+              homeownerPhone={homeownerSmsPhone}
+              replyToPhone={homeownerSmsPhone}
             />
           </div>
         </div>

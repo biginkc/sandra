@@ -1428,6 +1428,7 @@ export async function sendSmsFromLead(
   body: string,
   from?: string | null,
   queueOnly?: boolean,
+  to?: string | null,
 ): Promise<Result<SendSmsPayload>> {
   const trimmed = body.trim();
   if (!trimmed) {
@@ -1483,6 +1484,7 @@ export async function sendSmsFromLead(
       propertyId,
       body: trimmed,
       from: from ?? undefined,
+      to: to ?? undefined,
       queueOnly: queueOnly ?? false,
     });
     return ok({ outcome });
