@@ -7,13 +7,14 @@ export const SUPPRESSED_DISPOS = new Set([
   "opted_out",
 ] as const);
 
-export type SuppressedDispo = typeof SUPPRESSED_DISPOS extends ReadonlySet<infer T>
+type SuppressedDispo = typeof SUPPRESSED_DISPOS extends ReadonlySet<infer T>
   ? T
   : never;
 
 export type SuppressionInput = {
   outreachDispo?: string | null;
   consentState?: ConsentState | null;
+  doNotContact?: boolean | null;
   smsOptedOut?: boolean | null;
 };
 
@@ -24,7 +25,12 @@ export type SuppressionDecision =
   | {
       suppressed: true;
       reason: string;
-      source: "outreach_dispo" | "consent_state" | "sms_opted_out";
+      source:
+        | "outreach_dispo"
+        | "consent_state"
+        | "do_not_contact"
+        | "phone_suppression"
+        | "sms_opted_out";
       outreachDispo?: string | null;
       consentState?: ConsentState | null;
     };
@@ -39,6 +45,16 @@ export function evaluateSuppression(
       outreachDispo: input.outreachDispo,
       consentState: input.consentState ?? null,
       reason: `Property is suppressed by terminal disposition: ${input.outreachDispo}.`,
+    };
+  }
+
+  if (input.doNotContact) {
+    return {
+      suppressed: true,
+      source: "do_not_contact",
+      outreachDispo: input.outreachDispo ?? null,
+      consentState: input.consentState ?? null,
+      reason: "Contact is marked do-not-contact.",
     };
   }
 

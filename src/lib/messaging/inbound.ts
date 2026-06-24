@@ -42,6 +42,18 @@ export function matchesStopKeyword(body: string) {
   );
 }
 
+export function classifyWrongNumberScope(body: string): "this_property" | "all" {
+  if (
+    /\bwrong (?:number|person)\b/i.test(body) ||
+    /\bnever (?:owned|own) (?:any )?propert(?:y|ies)\b/i.test(body) ||
+    /\bnobody by that name\b/i.test(body) ||
+    /\bno one by that name\b/i.test(body)
+  ) {
+    return "all";
+  }
+  return "this_property";
+}
+
 function createServiceRoleClient() {
   const useTestEnv =
     process.env.NODE_ENV === "test" || process.env.VITEST === "true";
@@ -291,6 +303,7 @@ export async function handleInboundWebhook(
       }
 
       if (WRONG_NUMBER_KEYWORDS.test(ev.body)) {
+        const wrongScope = classifyWrongNumberScope(ev.body);
         if (propertyId) {
           await supabase
             .from("properties")
@@ -310,6 +323,23 @@ export async function handleInboundWebhook(
             });
           }
         }
+        if (wrongScope === "all") {
+          await applyPhoneLevelOptOut(supabase, {
+            contactId,
+            fromPhone: ev.from,
+            source,
+            sourceDetail: {
+              externalId: ev.externalId,
+              from: ev.from,
+              keyword: "wrong_number",
+              wrong_scope: wrongScope,
+            },
+            occurredAt: ev.receivedAt,
+            providerId: provider.providerId,
+            surface: "dnc",
+            idempotencyKey: ev.externalId,
+          });
+        }
         const insertOutcome = await insertInboundMessage(supabase, {
           providerId: provider.providerId,
           externalId: ev.externalId,
@@ -323,6 +353,7 @@ export async function handleInboundWebhook(
           metadata: {
             ...jsonObject(baseMetadata),
             keyword: "wrong_number",
+            wrong_scope: wrongScope,
           } as Json,
         });
         if (insertOutcome.error) {

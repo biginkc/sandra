@@ -217,7 +217,7 @@ export async function dispatchAiResponse(
     return { outcome: "escalated", reason };
   }
 
-  if (generated.action === "send_reply" && generated.confidence < config!.min_confidence) {
+  if (generated.confidence < config!.min_confidence) {
     const reason = `low_confidence:${generated.confidence}`;
     await markPropertyNeedsAttention(supabase, input.propertyId, reason);
     return { outcome: "escalated", reason };
@@ -473,7 +473,7 @@ async function setResponderDispo(
 ): Promise<void> {
   const { data: current, error: currentError } = await supabase
     .from("properties")
-    .select("outreach_dispo")
+    .select("outreach_dispo, needs_human_attention")
     .eq("id", args.propertyId)
     .maybeSingle();
   if (currentError) {
@@ -486,9 +486,13 @@ async function setResponderDispo(
   if (!shouldUpdateDispo(current?.outreach_dispo ?? null, args.dispo)) {
     return;
   }
+  if (current?.needs_human_attention) {
+    return;
+  }
 
   const now = new Date().toISOString();
-  const { error } = await supabase
+  const allowedCurrentDispos = allowedCurrentDisposFor(args.dispo);
+  const { data: updated, error } = await supabase
     .from("properties")
     .update({
       outreach_dispo: args.dispo,
@@ -496,12 +500,21 @@ async function setResponderDispo(
       last_ai_escalation_reason: null,
       updated_at: now,
     })
-    .eq("id", args.propertyId);
+    .eq("id", args.propertyId)
+    .eq("needs_human_attention", false)
+    .or(
+      `outreach_dispo.is.null,outreach_dispo.in.(${allowedCurrentDispos.join(",")})`,
+    )
+    .select("id")
+    .maybeSingle();
   if (error) {
     reportError(new Error(error.message), {
       tags: { surface: "ai_responder_set_dispo" },
       extra: { propertyId: args.propertyId, dispo: args.dispo, reason: args.reason },
     });
+    return;
+  }
+  if (!updated) {
     return;
   }
 
@@ -613,7 +626,28 @@ function shouldUpdateDispo(
     opted_out: 3,
     dnc: 4,
   };
+  if (
+    current !== null &&
+    (HUMAN_ONLY_DISPOS.has(current) || current === "bad_number")
+  ) {
+    return false;
+  }
   return (severity[next] ?? 0) >= (current ? (severity[current] ?? 0) : 0);
+}
+
+function allowedCurrentDisposFor(
+  next: "wrong_number" | "not_interested" | "opted_out" | "dnc",
+): string[] {
+  switch (next) {
+    case "not_interested":
+      return ["not_interested"];
+    case "wrong_number":
+      return ["not_interested", "wrong_number"];
+    case "opted_out":
+      return ["not_interested", "wrong_number", "opted_out"];
+    case "dnc":
+      return ["not_interested", "wrong_number", "opted_out", "dnc"];
+  }
 }
 
 function assertNeverRoute(value: never): never {

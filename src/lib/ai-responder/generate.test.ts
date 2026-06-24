@@ -52,6 +52,9 @@ describe("generateAiReply contract", () => {
       "third_party",
       "needs_review",
     ]);
+    expect(SUBMIT_REPLY_TOOL.input_schema.properties.sentiment.description).toMatch(
+      /Informational only; action controls routing/,
+    );
   });
 
   it.each([

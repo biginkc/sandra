@@ -54,6 +54,10 @@ type MessageRow = {
 };
 
 type MockState = {
+  contact: {
+    first_name: string | null;
+    phone_1: string | null;
+  };
   config: {
     active: boolean;
     business_hours_only: boolean;
@@ -100,6 +104,10 @@ function createMockState(): MockState {
       min_confidence: 0.7,
       model: "claude-test",
       system_prompt: "Reply briefly.",
+    },
+    contact: {
+      first_name: "Sam",
+      phone_1: "+18165550001",
     },
     messages: [],
     nextMessageId: 1,
@@ -256,15 +264,50 @@ function createMockSupabase(state: MockState) {
 
   function buildPropertiesQuery() {
     let updateData: Partial<MockState["property"]> | null = null;
+    const eqFilters = new Map<string, unknown>();
+    let allowedDispos: string[] | null = null;
+    let allowsNullDispo = false;
+
+    const matchesCurrentProperty = () => {
+      for (const [field, value] of eqFilters) {
+        if (state.property[field as keyof MockState["property"]] !== value) {
+          return false;
+        }
+      }
+      if (allowedDispos) {
+        const current = state.property.outreach_dispo;
+        if (current === null) return allowsNullDispo;
+        return allowedDispos.includes(current);
+      }
+      return true;
+    };
+
+    const execute = () => {
+      if (updateData) {
+        if (!matchesCurrentProperty()) {
+          return { data: null, error: null };
+        }
+        Object.assign(state.property, updateData);
+        return { data: { id: state.property.id }, error: null };
+      }
+      return { data: state.property, error: null };
+    };
+
     const query = {
-      eq() {
+      eq(field: string, value: unknown) {
+        eqFilters.set(field, value);
         return query;
       },
       maybeSingle() {
-        return Promise.resolve({
-          data: state.property,
-          error: null,
-        });
+        return Promise.resolve(execute());
+      },
+      or(filter: string) {
+        allowsNullDispo = filter.includes("outreach_dispo.is.null");
+        const match = filter.match(/outreach_dispo\.in\.\(([^)]*)\)/);
+        allowedDispos = match?.[1]
+          ? match[1].split(",").filter(Boolean)
+          : null;
+        return query;
       },
       update(value: Partial<MockState["property"]>) {
         updateData = value;
@@ -272,17 +315,11 @@ function createMockSupabase(state: MockState) {
       },
       then<TResult1 = unknown, TResult2 = never>(
         onfulfilled?:
-          | ((value: { data: MockState["property"] | null; error: null }) => TResult1 | PromiseLike<TResult1>)
+          | ((value: ReturnType<typeof execute>) => TResult1 | PromiseLike<TResult1>)
           | null,
         onrejected?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null,
       ) {
-        if (updateData) {
-          Object.assign(state.property, updateData);
-        }
-        return Promise.resolve({ data: state.property, error: null }).then(
-          onfulfilled,
-          onrejected,
-        );
+        return Promise.resolve(execute()).then(onfulfilled, onrejected);
       },
       select() {
         return query;
@@ -311,6 +348,25 @@ function createMockSupabase(state: MockState) {
     return query;
   }
 
+  function buildContactsQuery() {
+    const query = {
+      eq() {
+        return query;
+      },
+      maybeSingle() {
+        return Promise.resolve({
+          data: state.contact,
+          error: null,
+        });
+      },
+      select() {
+        return query;
+      },
+    };
+
+    return query;
+  }
+
   return {
     from(table: string) {
       if (table === "messages") {
@@ -321,6 +377,9 @@ function createMockSupabase(state: MockState) {
       }
       if (table === "ai_responder_configs") {
         return buildConfigQuery();
+      }
+      if (table === "contacts") {
+        return buildContactsQuery();
       }
       throw new Error(`Unexpected table: ${table}`);
     },
@@ -497,5 +556,105 @@ describe("dispatchAiResponse debounce", () => {
     });
     expect(vi.mocked(generateAiReply)).not.toHaveBeenCalled();
     expect(vi.mocked(sendSmsToContact)).not.toHaveBeenCalled();
+  });
+
+  it("low-confidence terminal model actions escalate before mutating state", async () => {
+    const state = createMockState();
+    const supabase = createMockSupabase(state);
+    installSendMock(state);
+    vi.mocked(generateAiReply).mockResolvedValueOnce({
+      action: "close_wrong_number",
+      wrong_scope: "this_property",
+      confidence: 0.4,
+      sentiment: "neutral",
+    });
+
+    const outcome = await dispatchAiResponse(
+      supabase as never,
+      {
+        contactId: CONTACT_ID,
+        conversationId: CONVERSATION_ID,
+        inboundBody: "maybe wrong house",
+        inboundMessageId: "inbound-low-confidence",
+        propertyId: PROPERTY_ID,
+      },
+      { anthropic: {} as never },
+    );
+
+    expect(outcome).toEqual({
+      outcome: "escalated",
+      reason: "low_confidence:0.4",
+    });
+    expect(state.property.outreach_dispo).toBeNull();
+    expect(vi.mocked(sendSmsToContact)).not.toHaveBeenCalled();
+  });
+
+  it("deescalate_close sends the fixed named template without humanizer", async () => {
+    const state = createMockState();
+    const supabase = createMockSupabase(state);
+    installSendMock(state);
+    vi.mocked(generateAiReply).mockResolvedValueOnce({
+      action: "deescalate_close",
+      body: "model draft should be ignored",
+      confidence: 0.9,
+      sentiment: "frustrated",
+    });
+
+    const outcome = await dispatchAiResponse(
+      supabase as never,
+      {
+        contactId: CONTACT_ID,
+        conversationId: CONVERSATION_ID,
+        inboundBody: "ugh is this a scam",
+        inboundMessageId: "inbound-deescalate",
+        propertyId: PROPERTY_ID,
+      },
+      { anthropic: {} as never },
+    );
+
+    expect(outcome).toEqual({
+      outcome: "auto_closed",
+      reason: "model:deescalate_close",
+    });
+    expect(vi.mocked(humanizeReply)).not.toHaveBeenCalled();
+    expect(vi.mocked(sendSmsToContact)).toHaveBeenCalledWith(
+      supabase,
+      expect.objectContaining({
+        body: "So sorry to bug you. Sounds like you get a lot of these. Are you Sam? Just want to make sure we don't bother you again.",
+      }),
+    );
+    expect(state.property.outreach_dispo).toBe("not_interested");
+  });
+
+  it("does not clobber a human-only disposition during the final write", async () => {
+    const state = createMockState();
+    const supabase = createMockSupabase(state);
+    installSendMock(state);
+    vi.mocked(generateAiReply).mockImplementationOnce(async () => {
+      state.property.outreach_dispo = "nurture";
+      return {
+        action: "close_not_interested",
+        confidence: 0.9,
+        sentiment: "neutral",
+      };
+    });
+
+    const outcome = await dispatchAiResponse(
+      supabase as never,
+      {
+        contactId: CONTACT_ID,
+        conversationId: CONVERSATION_ID,
+        inboundBody: "not now",
+        inboundMessageId: "inbound-human-owned",
+        propertyId: PROPERTY_ID,
+      },
+      { anthropic: {} as never },
+    );
+
+    expect(outcome).toEqual({
+      outcome: "auto_closed",
+      reason: "model:not_interested",
+    });
+    expect(state.property.outreach_dispo).toBe("nurture");
   });
 });

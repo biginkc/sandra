@@ -7,6 +7,7 @@ import type { Database, Json } from "@/lib/supabase/types";
 import { reconcileStoredStatusEvents } from "./status-events";
 import { getConsentState, type ConsentState } from "./consent";
 import { checkQuietHours, type QuietHoursCheck } from "./quiet-hours";
+import { isSmsPhoneSuppressed } from "./opt-out-phone";
 import { getMessagingProvider } from "./registry";
 import { selectBestSmsPhone } from "./sms-phone";
 import { evaluateSuppression, type SuppressionDecision } from "./suppression";
@@ -55,6 +56,9 @@ export type SendSmsOutcome =
   | {
       status: "blocked_terminal_dispo";
       reason: string;
+      source: Extract<SuppressionDecision, { suppressed: true }>["source"];
+      outreachDispo?: string | null;
+      consentState?: ConsentState | null;
     }
   | {
       status: "blocked_no_consent";
@@ -139,7 +143,7 @@ export async function sendSmsToContact(
   const [contactResult, propertyResult] = await Promise.all([
     supabase
       .from("contacts")
-      .select("id, phone_1, phone_1_type, phone_2, phone_2_type, phone_3, phone_3_type, sms_opted_out")
+      .select("id, phone_1, phone_1_type, phone_2, phone_2_type, phone_3, phone_3_type, do_not_contact, sms_opted_out")
       .eq("id", input.contactId)
       .maybeSingle(),
     supabase
@@ -162,6 +166,7 @@ export async function sendSmsToContact(
   const suppression = evaluateSuppression({
     outreachDispo: propertyResult.data.outreach_dispo,
     consentState,
+    doNotContact: contactResult.data.do_not_contact,
     smsOptedOut: contactResult.data.sms_opted_out,
   });
   if (suppression.suppressed) {
@@ -177,6 +182,22 @@ export async function sendSmsToContact(
   }
   if (destination.lineType === "landline") {
     return { status: "blocked_landline", reason: LANDLINE_BLOCK_REASON };
+  }
+  try {
+    if (await isSmsPhoneSuppressed(supabase, destination.phone)) {
+      return blockedTerminalDispo({
+        suppressed: true,
+        source: "phone_suppression",
+        outreachDispo: propertyResult.data.outreach_dispo,
+        consentState,
+        reason: "Phone number is suppressed from SMS.",
+      });
+    }
+  } catch (e) {
+    return {
+      status: "db_error",
+      error: e instanceof Error ? e.message : String(e),
+    };
   }
 
   // 3. Consent check — only hard-block explicit opt-outs; no-consent is allowed.
@@ -307,10 +328,10 @@ async function queueForLater(
   providerId: string,
   input: SendSmsInput,
 ): Promise<SendSmsOutcome> {
-  const [contactResult, propertyResult] = await Promise.all([
+  const [contactResult, propertyResult, consentState] = await Promise.all([
     supabase
       .from("contacts")
-      .select("id, phone_1, phone_1_type, phone_2, phone_2_type, phone_3, phone_3_type, sms_opted_out")
+      .select("id, phone_1, phone_1_type, phone_2, phone_2_type, phone_3, phone_3_type, do_not_contact, sms_opted_out")
       .eq("id", input.contactId)
       .maybeSingle(),
     supabase
@@ -318,6 +339,7 @@ async function queueForLater(
       .select("id, outreach_dispo")
       .eq("id", input.propertyId)
       .maybeSingle(),
+    getConsentState(supabase, input.contactId, "sms"),
   ]);
   if (contactResult.error) {
     return { status: "db_error", error: contactResult.error.message };
@@ -330,6 +352,8 @@ async function queueForLater(
 
   const suppression = evaluateSuppression({
     outreachDispo: propertyResult.data.outreach_dispo,
+    consentState,
+    doNotContact: contactResult.data.do_not_contact,
     smsOptedOut: contactResult.data.sms_opted_out,
   });
   if (suppression.suppressed) {
@@ -345,6 +369,22 @@ async function queueForLater(
   }
   if (destination.lineType === "landline") {
     return { status: "blocked_landline", reason: LANDLINE_BLOCK_REASON };
+  }
+  try {
+    if (await isSmsPhoneSuppressed(supabase, destination.phone)) {
+      return blockedTerminalDispo({
+        suppressed: true,
+        source: "phone_suppression",
+        outreachDispo: propertyResult.data.outreach_dispo,
+        consentState,
+        reason: "Phone number is suppressed from SMS.",
+      });
+    }
+  } catch (e) {
+    return {
+      status: "db_error",
+      error: e instanceof Error ? e.message : String(e),
+    };
   }
 
   let conversationId: string;
@@ -488,7 +528,7 @@ export async function releaseQueuedMessage(
     supabase
       .from("contacts")
       .select(
-        "phone_1, phone_1_type, phone_2, phone_2_type, phone_3, phone_3_type, sms_opted_out",
+        "phone_1, phone_1_type, phone_2, phone_2_type, phone_3, phone_3_type, do_not_contact, sms_opted_out",
       )
       .eq("id", msg.contact_id)
       .maybeSingle(),
@@ -508,12 +548,31 @@ export async function releaseQueuedMessage(
   const suppression = evaluateSuppression({
     outreachDispo: propertyResult.data?.outreach_dispo ?? null,
     consentState,
+    doNotContact: releaseContactResult.data?.do_not_contact ?? null,
     smsOptedOut: releaseContactResult.data?.sms_opted_out ?? null,
   });
   if (suppression.suppressed) {
     const outcome = blockedTerminalDispo(suppression);
     await failQueuedMessage(supabase, msg.id, outcome.reason);
     return outcome;
+  }
+  try {
+    if (await isSmsPhoneSuppressed(supabase, msg.to_address)) {
+      const outcome = blockedTerminalDispo({
+        suppressed: true,
+        source: "phone_suppression",
+        outreachDispo: propertyResult.data?.outreach_dispo ?? null,
+        consentState,
+        reason: "Phone number is suppressed from SMS.",
+      });
+      await failQueuedMessage(supabase, msg.id, outcome.reason);
+      return outcome;
+    }
+  } catch (e) {
+    return {
+      status: "db_error",
+      error: e instanceof Error ? e.message : String(e),
+    };
   }
 
   if (consentState === "opted_out") {
@@ -652,6 +711,9 @@ function blockedTerminalDispo(
   return {
     status: "blocked_terminal_dispo",
     reason: decision.reason,
+    source: decision.source,
+    outreachDispo: decision.outreachDispo ?? null,
+    consentState: decision.consentState ?? null,
   };
 }
 

@@ -646,7 +646,7 @@ describe("dispatchAiResponse (integration)", () => {
     }
   });
 
-  it("sentiment=frustrated → auto-escalate regardless of keywords", async () => {
+  it("frustrated sentiment alone does not override the model action", async () => {
     await seedConfig();
     const { propertyId, contactId } = await seedLead({
       phone: "+18167554009",
@@ -661,10 +661,8 @@ describe("dispatchAiResponse (integration)", () => {
         }),
       },
     );
-    expect(outcome.outcome).toBe("escalated");
-    if (outcome.outcome === "escalated") {
-      expect(outcome.reason).toContain("sentiment:frustrated");
-    }
+    expect(outcome.outcome).toBe("sent");
+    expect(getMockMessageLog()).toHaveLength(1);
   });
 
   // --------------------------------------------------------------------------

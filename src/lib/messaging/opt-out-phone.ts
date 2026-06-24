@@ -21,6 +21,26 @@ export async function applyPhoneLevelOptOut(
   supabase: SupabaseClient<Database>,
   input: ApplyPhoneLevelOptOutInput,
 ) {
+  try {
+    await recordSmsPhoneSuppression(supabase, {
+      contactId: input.contactId,
+      fromPhone: input.fromPhone,
+      source: input.source,
+      sourceDetail: input.sourceDetail,
+      occurredAt: input.occurredAt,
+      providerId: input.providerId,
+    });
+  } catch (e) {
+    reportError(e, {
+      tags: { surface: `${input.providerId}_webhook_phone_suppression_record` },
+      extra: {
+        contactId: input.contactId,
+        fromPhone: input.fromPhone,
+        surface: input.surface,
+      },
+    });
+  }
+
   const contactIds = await loadAllContactIdsByPhone(supabase, input.fromPhone);
   if (input.contactId) {
     contactIds.add(input.contactId);
@@ -73,7 +93,92 @@ export async function applyPhoneLevelOptOut(
   }
 }
 
-export async function loadAllContactIdsByPhone(
+export async function recordSmsPhoneSuppression(
+  supabase: SupabaseClient<Database>,
+  input: {
+    contactId: string | null;
+    fromPhone: string;
+    source: string;
+    sourceDetail: Json;
+    occurredAt: Date;
+    providerId: string;
+  },
+): Promise<void> {
+  const phone = normalizePhone(input.fromPhone);
+  if (!phone) return;
+
+  const timestamp = input.occurredAt.toISOString();
+  const { error } = await supabase
+    .from("sms_phone_suppressions")
+    .upsert(
+      {
+        channel: "sms",
+        phone_e164: phone,
+        source: input.source,
+        source_detail: input.sourceDetail,
+        first_contact_id: input.contactId,
+        provider: input.providerId,
+        suppressed_at: timestamp,
+        updated_at: timestamp,
+      },
+      { onConflict: "channel,phone_e164" },
+    );
+  if (error) {
+    throw new Error(`recordSmsPhoneSuppression: ${error.message}`);
+  }
+}
+
+export async function isSmsPhoneSuppressed(
+  supabase: SupabaseClient<Database>,
+  rawPhone: string | null | undefined,
+): Promise<boolean> {
+  const phone = normalizePhone(rawPhone ?? "");
+  if (!phone) return false;
+  const { data, error } = await supabase
+    .from("sms_phone_suppressions")
+    .select("id")
+    .eq("channel", "sms")
+    .eq("phone_e164", phone)
+    .limit(1);
+  if (error) {
+    reportError(new Error(error.message), {
+      tags: { surface: "sms_phone_suppression_lookup" },
+      extra: { phone },
+    });
+    return false;
+  }
+  return (data ?? []).length > 0;
+}
+
+export async function loadSuppressedSmsPhoneSet(
+  supabase: SupabaseClient<Database>,
+  rawPhones: Iterable<string | null | undefined>,
+): Promise<Set<string>> {
+  const phones = Array.from(
+    new Set(
+      Array.from(rawPhones)
+        .map((phone) => normalizePhone(phone ?? ""))
+        .filter((phone): phone is string => typeof phone === "string"),
+    ),
+  );
+  if (phones.length === 0) return new Set<string>();
+
+  const { data, error } = await supabase
+    .from("sms_phone_suppressions")
+    .select("phone_e164")
+    .eq("channel", "sms")
+    .in("phone_e164", phones);
+  if (error) {
+    reportError(new Error(error.message), {
+      tags: { surface: "sms_phone_suppression_bulk_lookup" },
+      extra: { count: phones.length },
+    });
+    return new Set<string>();
+  }
+  return new Set((data ?? []).map((row) => row.phone_e164));
+}
+
+async function loadAllContactIdsByPhone(
   supabase: SupabaseClient<Database>,
   rawPhone: string,
 ): Promise<Set<string>> {

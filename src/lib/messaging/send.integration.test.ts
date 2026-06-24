@@ -16,6 +16,7 @@ const ORIGINAL_ENV = {
 };
 
 async function seed(params: {
+  doNotContact?: boolean;
   phone?: string | null;
   state?: string;
   withConsent?: boolean;
@@ -28,6 +29,7 @@ async function seed(params: {
       last_name: "Test",
       phone_1: phone1,
       phone_1_type: phone1 ? "mobile" : "unknown",
+      do_not_contact: params.doNotContact ?? false,
     })
     .select("id")
     .single();
@@ -143,6 +145,53 @@ describe("sendSmsToContact (integration)", () => {
       body: "hi",
     });
     expect(outcome.status).toBe("blocked_terminal_dispo");
+  });
+
+  it("blocks before insert when contact is marked do_not_contact", async () => {
+    const { contactId, propertyId } = await seed({
+      doNotContact: true,
+      withConsent: true,
+    });
+    const outcome = await sendSmsToContact(supabase, {
+      contactId,
+      propertyId,
+      body: "should never insert",
+    });
+    expect(outcome.status).toBe("blocked_terminal_dispo");
+    if (outcome.status === "blocked_terminal_dispo") {
+      expect(outcome.source).toBe("do_not_contact");
+    }
+
+    const { count } = await supabase
+      .from("messages")
+      .select("*", { count: "exact", head: true });
+    expect(count).toBe(0);
+  });
+
+  it("blocks queue creation when latest consent event is opt_out", async () => {
+    const { contactId, propertyId } = await seed({ withConsent: true });
+    await recordConsentEvent(supabase, {
+      contactId,
+      channel: "sms",
+      eventType: "opt_out",
+      source: "integration-test-queue-opt-out",
+    });
+
+    const outcome = await sendSmsToContact(supabase, {
+      contactId,
+      propertyId,
+      body: "should never queue",
+      queueOnly: true,
+    });
+    expect(outcome.status).toBe("blocked_terminal_dispo");
+    if (outcome.status === "blocked_terminal_dispo") {
+      expect(outcome.source).toBe("consent_state");
+    }
+
+    const { count } = await supabase
+      .from("messages")
+      .select("*", { count: "exact", head: true });
+    expect(count).toBe(0);
   });
 
   it("blocks immediately on terminal outreach_dispo before inserting a message", async () => {

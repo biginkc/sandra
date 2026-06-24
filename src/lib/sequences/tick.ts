@@ -307,7 +307,19 @@ export async function processEnrollmentTick(
       }
       case "blocked_terminal_dispo": {
         await markRunSkipped(client, claim.id, "paused");
-        await pauseEnrollment(client, enrollment.id, "terminal_dispo", false);
+        const permanent =
+          outcome.source === "consent_state" ||
+          outcome.source === "sms_opted_out" ||
+          outcome.source === "do_not_contact" ||
+          outcome.source === "phone_suppression" ||
+          outcome.outreachDispo === "dnc" ||
+          outcome.outreachDispo === "opted_out";
+        await pauseEnrollment(
+          client,
+          enrollment.id,
+          permanent ? "consent_revoked" : "terminal_dispo",
+          permanent,
+        );
         return { status: "paused", enrollmentId: enrollment.id, reason: "terminal_dispo" };
       }
       case "blocked_no_phone":

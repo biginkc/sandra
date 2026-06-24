@@ -20,10 +20,13 @@ import { renderTemplate } from "@/lib/sequences/render";
 import type { Database } from "@/lib/supabase/types";
 import {
   classifySmsPhoneAvailability,
+  selectBestSmsPhone,
   type SmsPhoneAvailability,
   type SmsPhoneContact,
 } from "@/lib/messaging/sms-phone";
 import { isSuppressed } from "@/lib/messaging/suppression";
+import { normalizePhone } from "@/lib/csv/normalize";
+import { loadSuppressedSmsPhoneSet } from "@/lib/messaging/opt-out-phone";
 
 export const CONTACTED_MESSAGE_STATUSES = ["sent", "delivered"] as const;
 
@@ -175,7 +178,10 @@ export async function queueSmsBatch(
   }
 
   const frozenContactAvailability = new Map<string, SmsPhoneAvailability>();
+  const frozenContactDestinationPhone = new Map<string, string>();
+  const frozenContactDoNotContact = new Map<string, boolean>();
   const frozenContactSmsOptedOut = new Map<string, boolean>();
+  const destinationPhones: string[] = [];
   const frozenContactIds = Array.from(
     new Set(
       Array.from(frozenContactByProperty.values()).filter(
@@ -187,14 +193,21 @@ export async function queueSmsBatch(
     const chunk = frozenContactIds.slice(i, i + CHUNK);
     const { data, error } = await client
       .from("contacts")
-      .select("id, phone_1, phone_1_type, phone_2, phone_2_type, phone_3, phone_3_type, sms_opted_out")
+      .select("id, phone_1, phone_1_type, phone_2, phone_2_type, phone_3, phone_3_type, do_not_contact, sms_opted_out")
       .in("id", chunk);
     if (error) {
       throw new Error(`bulk sms frozen contacts fetch: ${error.message}`);
     }
     data?.forEach((row) => {
       if (row.id) {
+        frozenContactDoNotContact.set(row.id, row.do_not_contact);
         frozenContactSmsOptedOut.set(row.id, row.sms_opted_out);
+        const destination = selectBestSmsPhone(row);
+        const destinationPhone = normalizePhone(destination?.phone ?? "");
+        if (destinationPhone) {
+          frozenContactDestinationPhone.set(row.id, destinationPhone);
+          destinationPhones.push(destinationPhone);
+        }
         frozenContactAvailability.set(
           row.id,
           classifySmsPhoneAvailability(row),
@@ -202,6 +215,10 @@ export async function queueSmsBatch(
       }
     });
   }
+  const suppressedFrozenPhones = await loadSuppressedSmsPhoneSet(
+    client,
+    destinationPhones,
+  );
 
   const alreadyQueuedForCampaign = new Set<string>();
   for (let i = 0; i < args.propertyIds.length; i += CHUNK) {
@@ -259,9 +276,15 @@ export async function queueSmsBatch(
     if (
       isSuppressed({
         outreachDispo: property.outreach_dispo,
+        doNotContact: frozenContactDoNotContact.get(contactId) ?? null,
         smsOptedOut: frozenContactSmsOptedOut.get(contactId) ?? null,
       })
     ) {
+      state.skipped++;
+      continue;
+    }
+    const destinationPhone = frozenContactDestinationPhone.get(contactId);
+    if (destinationPhone && suppressedFrozenPhones.has(destinationPhone)) {
       state.skipped++;
       continue;
     }
@@ -308,9 +331,14 @@ export async function queueSmsBatch(
       isSuppressed({
         outreachDispo: property.outreach_dispo,
         consentState,
+        doNotContact: frozenContactDoNotContact.get(contactId) ?? null,
         smsOptedOut: frozenContactSmsOptedOut.get(contactId) ?? null,
       })
     ) {
+      state.skipped++;
+      continue;
+    }
+    if (destinationPhone && suppressedFrozenPhones.has(destinationPhone)) {
       state.skipped++;
       continue;
     }

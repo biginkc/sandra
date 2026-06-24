@@ -21,6 +21,10 @@ describe("messaging suppression", () => {
   });
 
   it("suppresses contact-level SMS opt-outs", () => {
+    expect(evaluateSuppression({ doNotContact: true })).toMatchObject({
+      suppressed: true,
+      source: "do_not_contact",
+    });
     expect(evaluateSuppression({ smsOptedOut: true })).toMatchObject({
       suppressed: true,
       source: "sms_opted_out",

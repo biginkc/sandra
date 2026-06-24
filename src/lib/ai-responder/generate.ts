@@ -33,29 +33,35 @@ export type GenerateInput = {
   conversation: Array<{ role: "user" | "assistant"; content: string }>;
 };
 
-const AI_ACTIONS = [
-  "send_reply",
-  "escalate",
-  "opt_out",
-  "close_wrong_number",
-  "close_not_interested",
-  "deescalate_close",
-] as const satisfies readonly AiAction[];
+const AI_ACTIONS_BY_NAME = {
+  send_reply: true,
+  escalate: true,
+  opt_out: true,
+  close_wrong_number: true,
+  close_not_interested: true,
+  deescalate_close: true,
+} as const satisfies Record<AiAction, true>;
 
-const AI_ESCALATION_REASONS = [
-  "hot_lead",
-  "price_or_offer",
-  "distress",
-  "multi_property",
-  "call_request",
-  "third_party",
-  "needs_review",
-] as const satisfies readonly AiEscalationReason[];
+const AI_ESCALATION_REASONS_BY_NAME = {
+  hot_lead: true,
+  price_or_offer: true,
+  distress: true,
+  multi_property: true,
+  call_request: true,
+  third_party: true,
+  needs_review: true,
+} as const satisfies Record<AiEscalationReason, true>;
 
-const AI_WRONG_SCOPES = [
-  "this_property",
-  "all",
-] as const satisfies readonly AiWrongScope[];
+const AI_WRONG_SCOPES_BY_NAME = {
+  this_property: true,
+  all: true,
+} as const satisfies Record<AiWrongScope, true>;
+
+const AI_ACTIONS = Object.keys(AI_ACTIONS_BY_NAME) as AiAction[];
+const AI_ESCALATION_REASONS = Object.keys(
+  AI_ESCALATION_REASONS_BY_NAME,
+) as AiEscalationReason[];
+const AI_WRONG_SCOPES = Object.keys(AI_WRONG_SCOPES_BY_NAME) as AiWrongScope[];
 
 export const SUBMIT_REPLY_TOOL = {
   name: "submit_reply",
@@ -87,7 +93,7 @@ export const SUBMIT_REPLY_TOOL = {
         type: "string",
         enum: ["positive", "neutral", "frustrated", "hostile"],
         description:
-          "The seller's emotional tone in the inbound message. Frustrated or hostile → the caller auto-escalates.",
+          "The seller's emotional tone in the inbound message. Informational only; action controls routing.",
       },
       escalation_reason: {
         type: "string",
