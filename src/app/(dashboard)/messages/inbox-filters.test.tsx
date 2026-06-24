@@ -340,7 +340,7 @@ describe("<CockpitView /> chip order (feedback-f E2b)", () => {
     ).toHaveTextContent("Sandra escalated");
   });
 
-  it("renders chips in priority order: Unread, Needs Outcome, Mine, Sandra Escalated, Sandra Handled, then the rest", () => {
+  it("renders chips in priority order: Unread, Needs Outcome, Mine, Sandra Escalated, Dispo, then the rest", () => {
     render(<CockpitView {...baseProps} filter="all" threads={[]} />);
 
     const chips = screen
@@ -353,7 +353,7 @@ describe("<CockpitView /> chip order (feedback-f E2b)", () => {
       "filter-needs-outcome",
       "filter-mine",
       "filter-escalated",
-      "filter-handled",
+      "filter-dispo",
       "filter-unassigned",
       "filter-all",
       "filter-unknown",
@@ -363,10 +363,8 @@ describe("<CockpitView /> chip order (feedback-f E2b)", () => {
       "src",
       "/icon.png",
     );
-    expect(screen.getByTestId("filter-handled").querySelector("img")).toHaveAttribute(
-      "src",
-      "/icon.png",
-    );
+    expect(screen.getByTestId("filter-dispo")).toHaveTextContent("Dispo");
+    expect(screen.queryByTestId("filter-handled")).not.toBeInTheDocument();
   });
 
   it("when no current user, chip order collapses without Mine/Unassigned", () => {
@@ -388,7 +386,7 @@ describe("<CockpitView /> chip order (feedback-f E2b)", () => {
       "filter-unread",
       "filter-needs-outcome",
       "filter-escalated",
-      "filter-handled",
+      "filter-dispo",
       "filter-all",
       "filter-unknown",
       "filter-dismissed",
@@ -488,22 +486,22 @@ describe("<CockpitView /> escalated chip", () => {
     expect(screen.getByTestId("filter-escalated")).toBeInTheDocument();
   });
 
-  it("Handled chip is active and renders Sandra-handled threads", () => {
-    const handled = makeThread({
-      contactId: "handled-2",
-      contactName: "Handled Thread",
-      aiResponderStatus: "handled",
-      aiResponderReason: "sent",
+  it("Dispo chip is active and renders dispositioned threads", () => {
+    const dispo = makeThread({
+      contactId: "dispo-2",
+      contactName: "Dispo Thread",
+      outreachDispo: "not_interested",
     });
 
-    render(<CockpitView {...baseProps} filter="handled" threads={[handled]} />);
+    render(<CockpitView {...baseProps} filter="dispo" threads={[dispo]} />);
 
-    expect(screen.getByTestId("filter-handled")).toHaveAttribute(
+    expect(screen.getByTestId("filter-dispo")).toHaveAttribute(
       "data-active",
       "true",
     );
+    expect(screen.queryByTestId("filter-handled")).not.toBeInTheDocument();
     expect(
-      screen.getByTestId(`inbox-thread-${handled.threadId}`),
+      screen.getByTestId(`inbox-thread-${dispo.threadId}`),
     ).toBeInTheDocument();
   });
 });

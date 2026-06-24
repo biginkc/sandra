@@ -219,7 +219,7 @@ describe("listThreads — chunking", () => {
 });
 
 describe("listThreads — Sandra AI state", () => {
-  it("hydrates thread-level Sandra state and filters handled/escalated from message_threads", async () => {
+  it("hydrates thread-level Sandra state and filters escalated from message_threads", async () => {
     const messages = [
       {
         contact_id: "c-handled",
@@ -248,6 +248,15 @@ describe("listThreads — Sandra AI state", () => {
         created_at: "2026-06-24T13:00:00.000Z",
         read_at: null,
       },
+      {
+        contact_id: "c-dispo",
+        property_id: "p-dispo",
+        conversation_id: "conv-dispo",
+        body: "not interested",
+        direction: "inbound" as const,
+        created_at: "2026-06-24T12:00:00.000Z",
+        read_at: null,
+      },
     ];
     const contacts = new Map(
       messages.map((m) => [
@@ -270,7 +279,8 @@ describe("listThreads — Sandra AI state", () => {
           city: null,
           state: null,
           status: "prospect",
-          outreach_dispo: null,
+          outreach_dispo:
+            m.property_id === "p-dispo" ? "not_interested" : null,
           assigned_user_id: null,
           needs_human_attention: m.property_id === "p-property-attention",
         },
@@ -316,12 +326,143 @@ describe("listThreads — Sandra AI state", () => {
       aiLastDeliveryError: "Carrier rejected recipient",
     });
 
-    await expect(listThreads(supabase, { handledOnly: true })).resolves.toMatchObject([
-      { threadId: "conv-handled" },
-    ]);
+    await expect(
+      listThreads(supabase, { dispoOnly: true }),
+    ).resolves.toMatchObject([{ threadId: "conv-dispo" }]);
     await expect(
       listThreads(supabase, { escalatedOnly: true }),
     ).resolves.toMatchObject([{ threadId: "conv-escalated" }]);
+  });
+
+  it("filters Dispo by property outreach disposition, not Sandra AI handled state", async () => {
+    const messages = [
+      {
+        contact_id: "c-ai-handled",
+        property_id: "p-ai-handled",
+        conversation_id: "conv-ai-handled",
+        body: "Sandra replied",
+        direction: "inbound" as const,
+        created_at: "2026-06-24T16:00:00.000Z",
+        read_at: null,
+      },
+      {
+        contact_id: "c-dispo",
+        property_id: "p-dispo",
+        conversation_id: "conv-dispo",
+        body: "not interested",
+        direction: "inbound" as const,
+        created_at: "2026-06-24T15:00:00.000Z",
+        read_at: null,
+      },
+      {
+        contact_id: "c-property-null",
+        property_id: null,
+        conversation_id: "conv-property-null",
+        body: "which house?",
+        direction: "inbound" as const,
+        created_at: "2026-06-24T14:00:00.000Z",
+        read_at: null,
+      },
+      {
+        contact_id: "c-mixed",
+        property_id: null,
+        conversation_id: "conv-mixed",
+        body: "latest contact-level reply",
+        direction: "inbound" as const,
+        created_at: "2026-06-24T13:00:00.000Z",
+        read_at: null,
+      },
+      {
+        contact_id: "c-mixed",
+        property_id: "p-mixed",
+        conversation_id: "conv-mixed",
+        body: "older linked message",
+        direction: "outbound" as const,
+        created_at: "2026-06-24T12:00:00.000Z",
+        read_at: null,
+      },
+    ];
+    const contacts = new Map(
+      Array.from(new Set(messages.map((m) => m.contact_id))).map((contactId) => [
+        contactId,
+        {
+          id: contactId,
+          first_name: null,
+          last_name: null,
+          entity_name: contactId,
+          phone_1: null,
+        },
+      ]),
+    );
+    const properties = new Map([
+      [
+        "p-ai-handled",
+        {
+          id: "p-ai-handled",
+          address: null,
+          city: null,
+          state: null,
+          status: "prospect",
+          outreach_dispo: null,
+          assigned_user_id: null,
+        },
+      ],
+      [
+        "p-dispo",
+        {
+          id: "p-dispo",
+          address: null,
+          city: null,
+          state: null,
+          status: "prospect",
+          outreach_dispo: "not_interested",
+          assigned_user_id: null,
+        },
+      ],
+      [
+        "p-mixed",
+        {
+          id: "p-mixed",
+          address: null,
+          city: null,
+          state: null,
+          status: "prospect",
+          outreach_dispo: "nurture",
+          assigned_user_id: null,
+        },
+      ],
+    ]);
+    const messageThreads = new Map([
+      [
+        "conv-ai-handled",
+        {
+          conversation_id: "conv-ai-handled",
+          ai_responder_status: "handled",
+          ai_responder_reason: "sent",
+        },
+      ],
+    ]);
+
+    const { supabase } = makeStub({
+      messages,
+      contacts,
+      properties,
+      messageThreads,
+    });
+
+    const threads = await listThreads(supabase, { dispoOnly: true });
+
+    expect(threads.map((thread) => thread.threadId)).toEqual([
+      "conv-dispo",
+      "conv-mixed",
+    ]);
+    expect(threads.every((thread) => thread.outreachDispo !== null)).toBe(true);
+    expect(threads.map((thread) => thread.threadId)).not.toContain(
+      "conv-ai-handled",
+    );
+    expect(threads.map((thread) => thread.threadId)).not.toContain(
+      "conv-property-null",
+    );
   });
 });
 

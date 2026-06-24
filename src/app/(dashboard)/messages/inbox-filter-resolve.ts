@@ -20,7 +20,10 @@ export function parseInboxFilter(raw: string | undefined): InboxFilter {
     case "unassigned":
     case "unread":
     case "escalated":
+    case "dispo":
+      return raw;
     case "handled":
+      return "dispo";
     case "needs_outcome":
       return raw;
     default:
@@ -36,7 +39,7 @@ export function isThreadFilter(f: InboxFilter): boolean {
     f === "unassigned" ||
     f === "unread" ||
     f === "escalated" ||
-    f === "handled" ||
+    f === "dispo" ||
     f === "needs_outcome"
   );
 }
@@ -59,7 +62,7 @@ export function normalizeInboxFilterForUser(
  * - `unread` returns unread-only, pinning the open thread via
  *   `includeThreadId` so read-on-open doesn't yank it mid-view.
  * - `escalated` returns only threads Sandra handed off.
- * - `handled` returns only threads Sandra handled.
+ * - `dispo` returns only threads with an applied outreach disposition.
  * - `needs_outcome` returns replied early-stage outreach threads that still
  *   lack an outreach outcome.
  */
@@ -77,7 +80,7 @@ export function buildThreadOpts(
     if (ctx.canonicalThreadId) opts.includeThreadId = ctx.canonicalThreadId;
   }
   if (filter === "escalated") opts.escalatedOnly = true;
-  if (filter === "handled") opts.handledOnly = true;
+  if (filter === "dispo") opts.dispoOnly = true;
   if (filter === "needs_outcome") opts.needsOutcomeOnly = true;
   return opts;
 }
@@ -111,8 +114,8 @@ export function applyInboxThreadFilter(
       );
     case "escalated":
       return threads.filter((thread) => thread.aiResponderStatus === "escalated");
-    case "handled":
-      return threads.filter((thread) => thread.aiResponderStatus === "handled");
+    case "dispo":
+      return threads.filter((thread) => thread.outreachDispo !== null);
     case "needs_outcome":
       return threads.filter((thread) => thread.needsOutcome);
     case "unknown":

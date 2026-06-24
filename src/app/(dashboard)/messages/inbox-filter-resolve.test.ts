@@ -50,11 +50,15 @@ describe("parseInboxFilter", () => {
       "unassigned",
       "unread",
       "escalated",
-      "handled",
+      "dispo",
       "needs_outcome",
     ] as const) {
       expect(parseInboxFilter(f)).toBe(f);
     }
+  });
+
+  it("maps legacy handled links to the Dispo filter", () => {
+    expect(parseInboxFilter("handled")).toBe("dispo");
   });
 
   it("defaults to 'all' for absent, empty, or unrecognized values", () => {
@@ -74,7 +78,7 @@ describe("isThreadFilter", () => {
       "unassigned",
       "unread",
       "escalated",
-      "handled",
+      "dispo",
       "needs_outcome",
     ] as const) {
       expect(isThreadFilter(f)).toBe(true);
@@ -106,7 +110,7 @@ describe("normalizeInboxFilterForUser", () => {
       "unread",
       "needs_outcome",
       "escalated",
-      "handled",
+      "dispo",
       "unknown",
       "dismissed",
     ] as const) {
@@ -122,8 +126,8 @@ describe("buildThreadOpts", () => {
     expect(buildThreadOpts("escalated", ctx)).toEqual({ escalatedOnly: true });
   });
 
-  it("maps handled → handledOnly and nothing else", () => {
-    expect(buildThreadOpts("handled", ctx)).toEqual({ handledOnly: true });
+  it("maps dispo → dispoOnly and nothing else", () => {
+    expect(buildThreadOpts("dispo", ctx)).toEqual({ dispoOnly: true });
   });
 
   it("maps mine → assigneeId from the current user", () => {
@@ -177,7 +181,7 @@ describe("buildThreadOpts", () => {
       "unassigned",
       "unread",
       "needs_outcome",
-      "handled",
+      "dispo",
       "unknown",
       "dismissed",
     ] as const) {
@@ -185,7 +189,7 @@ describe("buildThreadOpts", () => {
     }
   });
 
-  it("never sets handledOnly for non-handled filters", () => {
+  it("never sets dispoOnly for non-dispo filters", () => {
     for (const f of [
       "all",
       "mine",
@@ -196,7 +200,7 @@ describe("buildThreadOpts", () => {
       "unknown",
       "dismissed",
     ] as const) {
-      expect(buildThreadOpts(f, ctx).handledOnly).toBeUndefined();
+      expect(buildThreadOpts(f, ctx).dispoOnly).toBeUndefined();
     }
   });
 });
@@ -212,7 +216,8 @@ describe("applyInboxThreadFilter", () => {
       needsHumanAttention: true,
     }),
     makeThread({ threadId: "escalated", aiResponderStatus: "escalated" }),
-    makeThread({ threadId: "handled", aiResponderStatus: "handled" }),
+    makeThread({ threadId: "ai-handled", aiResponderStatus: "handled" }),
+    makeThread({ threadId: "dispo", outreachDispo: "not_interested" }),
     makeThread({ threadId: "needs", needsOutcome: true }),
   ];
 
@@ -229,7 +234,8 @@ describe("applyInboxThreadFilter", () => {
       "unread",
       "property-attention-only",
       "escalated",
-      "handled",
+      "ai-handled",
+      "dispo",
       "needs",
     ]);
     expect(applyInboxThreadFilter(threads, "unread", ctx).map((t) => t.threadId)).toEqual([
@@ -239,8 +245,8 @@ describe("applyInboxThreadFilter", () => {
       applyInboxThreadFilter(threads, "escalated", ctx).map((t) => t.threadId),
     ).toEqual(["escalated"]);
     expect(
-      applyInboxThreadFilter(threads, "handled", ctx).map((t) => t.threadId),
-    ).toEqual(["handled"]);
+      applyInboxThreadFilter(threads, "dispo", ctx).map((t) => t.threadId),
+    ).toEqual(["dispo"]);
     expect(
       applyInboxThreadFilter(threads, "needs_outcome", ctx).map(
         (t) => t.threadId,

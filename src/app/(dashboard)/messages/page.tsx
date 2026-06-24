@@ -3,6 +3,7 @@ import { createClient } from "@/lib/supabase/server";
 import { listThreads } from "@/lib/messages/list-threads";
 import { listUnknownSenders } from "@/lib/messages/list-unknown-senders";
 import { canonicalizeThreadId } from "@/lib/messages/threading";
+import { redirect } from "next/navigation";
 
 import { markMessagesReadForThread } from "../leads/actions";
 
@@ -38,8 +39,8 @@ export const metadata = {
  *      immediately via the existing send-now path. Replaces the Dialpad
  *      app for live conversation work.
  *
- *      Filters: All (default), Mine (Phase 3), Unassigned (Phase 3),
- *      Unknown (Phase 2), Dismissed (Phase 2).
+ *      Filters: All (default), Unread, Needs Outcome, Mine, Escalated,
+ *      Dispo, Unassigned, Unknown, Dismissed.
  *
  *   2. Outbox — the legacy queue panel: drafts waiting to release with
  *      cadence (Send Next / Auto-send). Unchanged.
@@ -58,6 +59,15 @@ export default async function MessagesPage({
   }>;
 }) {
   const sp = await searchParams;
+  if (sp.filter === "handled") {
+    const canonical = new URLSearchParams();
+    if (sp.tab) canonical.set("tab", sp.tab);
+    if (sp.thread) canonical.set("thread", sp.thread);
+    canonical.set("filter", "dispo");
+    if (sp.hideDnc) canonical.set("hideDnc", sp.hideDnc);
+    redirect(`/messages?${canonical.toString()}`);
+  }
+
   const activeTab = sp.tab === "outbox" ? "outbox" : "inbox";
   const filter = parseInboxFilter(sp.filter);
   // DNC toggle — ON by default per feedback-f E1. Only `?hideDnc=0` flips
