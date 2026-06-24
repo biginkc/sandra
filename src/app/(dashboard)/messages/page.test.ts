@@ -203,12 +203,19 @@ describe("MessagesPage filter-count boundary", () => {
           thread: "conv-1",
           filter: "handled",
           hideDnc: "0",
+          preserved: "yes",
         }),
       }),
-    ).rejects.toThrow("redirect:/messages?tab=inbox&thread=conv-1&filter=dispo&hideDnc=0");
-    expect(mocks.redirect).toHaveBeenCalledWith(
-      "/messages?tab=inbox&thread=conv-1&filter=dispo&hideDnc=0",
-    );
+    ).rejects.toThrow(/^redirect:/);
+    const target = mocks.redirect.mock.calls.at(-1)?.[0] as string;
+    const redirected = new URL(target, "https://sandra.test");
+    expect(redirected.pathname).toBe("/messages");
+    expect(redirected.searchParams.get("tab")).toBe("inbox");
+    expect(redirected.searchParams.get("thread")).toBe("conv-1");
+    expect(redirected.searchParams.get("filter")).toBe("dispo");
+    expect(redirected.searchParams.get("hideDnc")).toBe("0");
+    expect(redirected.searchParams.get("preserved")).toBe("yes");
+    expect(redirected.search).not.toContain("filter=handled");
     expect(mocks.createClient).not.toHaveBeenCalled();
   });
 });

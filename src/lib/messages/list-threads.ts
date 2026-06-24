@@ -106,6 +106,8 @@ export type ListThreadsOpts = {
   includeThreadId?: string;
   /** When true, returns only threads Sandra escalated for human review. */
   escalatedOnly?: boolean;
+  /** When true, returns only threads Sandra's AI responder handled. */
+  handledOnly?: boolean;
   /** When true, returns only threads with an applied outreach disposition. */
   dispoOnly?: boolean;
   /** When true, returns only replied outreach threads with no outreach outcome. */
@@ -277,6 +279,7 @@ export async function listThreads(
     )
       continue;
     if (opts.escalatedOnly && aiResponderStatus !== "escalated") continue;
+    if (opts.handledOnly && aiResponderStatus !== "handled") continue;
     if (opts.dispoOnly && p?.outreach_dispo == null) continue;
 
     const consentState = computeConsentState(

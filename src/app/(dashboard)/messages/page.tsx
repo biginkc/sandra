@@ -51,29 +51,22 @@ export const metadata = {
 export default async function MessagesPage({
   searchParams,
 }: {
-  searchParams: Promise<{
-    tab?: string;
-    thread?: string;
-    filter?: string;
-    hideDnc?: string;
-  }>;
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
   const sp = await searchParams;
-  if (sp.filter === "handled") {
-    const canonical = new URLSearchParams();
-    if (sp.tab) canonical.set("tab", sp.tab);
-    if (sp.thread) canonical.set("thread", sp.thread);
+  const rawFilter = firstSearchParam(sp.filter);
+  if (rawFilter === "handled") {
+    const canonical = searchParamsToUrlParams(sp);
     canonical.set("filter", "dispo");
-    if (sp.hideDnc) canonical.set("hideDnc", sp.hideDnc);
     redirect(`/messages?${canonical.toString()}`);
   }
 
-  const activeTab = sp.tab === "outbox" ? "outbox" : "inbox";
-  const filter = parseInboxFilter(sp.filter);
+  const activeTab = firstSearchParam(sp.tab) === "outbox" ? "outbox" : "inbox";
+  const filter = parseInboxFilter(rawFilter ?? undefined);
   // DNC toggle — ON by default per feedback-f E1. Only `?hideDnc=0` flips
   // it off so we can keep clean URLs the rest of the time.
-  const hideDnc = sp.hideDnc !== "0";
-  const selectedThreadId = sp.thread ?? null;
+  const hideDnc = firstSearchParam(sp.hideDnc) !== "0";
+  const selectedThreadId = firstSearchParam(sp.thread);
 
   const supabase = await createClient();
   const {
@@ -187,4 +180,24 @@ export default async function MessagesPage({
       hiddenDncCount={hiddenDncCount}
     />
   );
+}
+
+function firstSearchParam(value: string | string[] | undefined): string | null {
+  if (Array.isArray(value)) return value[0] ?? null;
+  return value ?? null;
+}
+
+function searchParamsToUrlParams(
+  params: Record<string, string | string[] | undefined>,
+): URLSearchParams {
+  const out = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (value === undefined) continue;
+    if (Array.isArray(value)) {
+      for (const item of value) out.append(key, item);
+      continue;
+    }
+    out.set(key, value);
+  }
+  return out;
 }

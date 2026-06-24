@@ -327,6 +327,9 @@ describe("listThreads — Sandra AI state", () => {
     });
 
     await expect(
+      listThreads(supabase, { handledOnly: true }),
+    ).resolves.toMatchObject([{ threadId: "conv-handled" }]);
+    await expect(
       listThreads(supabase, { dispoOnly: true }),
     ).resolves.toMatchObject([{ threadId: "conv-dispo" }]);
     await expect(
