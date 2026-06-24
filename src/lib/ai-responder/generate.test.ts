@@ -38,6 +38,7 @@ describe("generateAiReply contract", () => {
       "escalate",
       "opt_out",
       "close_wrong_number",
+      "close_dnc",
       "close_not_interested",
       "deescalate_close",
     ]);
@@ -62,6 +63,7 @@ describe("generateAiReply contract", () => {
     { action: "escalate", escalation_reason: "hot_lead" },
     { action: "opt_out" },
     { action: "close_wrong_number", wrong_scope: "this_property" },
+    { action: "close_dnc" },
     { action: "close_not_interested" },
     { action: "deescalate_close", body: "So sorry to bug you. Are you Sam?" },
   ])("accepts action $action", async (shape) => {
@@ -78,6 +80,7 @@ describe("generateAiReply contract", () => {
     "opt_out",
     "escalate",
     "close_wrong_number",
+    "close_dnc",
     "close_not_interested",
   ])("rejects body on action %s", async (action) => {
     await expect(

@@ -38,6 +38,7 @@ const AI_ACTIONS_BY_NAME = {
   escalate: true,
   opt_out: true,
   close_wrong_number: true,
+  close_dnc: true,
   close_not_interested: true,
   deescalate_close: true,
 } as const satisfies Record<AiAction, true>;
@@ -75,7 +76,7 @@ export const SUBMIT_REPLY_TOOL = {
         type: "string",
         enum: AI_ACTIONS,
         description:
-          "send_reply: draft an SMS. escalate: hand off to a human. opt_out/close_*: auto-close without sending. deescalate_close: one fixed system reply, then close.",
+          "send_reply: draft an SMS. escalate: hand off to a human. opt_out/close_*: auto-close without sending. close_dnc suppresses the phone. deescalate_close: one fixed system reply, then close.",
       },
       body: {
         type: "string",
@@ -87,7 +88,7 @@ export const SUBMIT_REPLY_TOOL = {
         minimum: 0,
         maximum: 1,
         description:
-          "How confident you are that this reply is safe, on-topic, and compliant with the system rules. Below 0.70 → the caller will auto-escalate.",
+          "How confident you are that the chosen action is correct and any reply is safe. Below 0.70 only auto-escalates send_reply; no-send terminal actions still proceed.",
       },
       sentiment: {
         type: "string",

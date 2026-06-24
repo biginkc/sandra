@@ -46,6 +46,7 @@ export type AiAction =
   | "escalate"
   | "opt_out"
   | "close_wrong_number"
+  | "close_dnc"
   | "close_not_interested"
   | "deescalate_close";
 
@@ -90,6 +91,12 @@ export type AiStructuredOutput =
       body?: never;
       escalation_reason?: never;
       wrong_scope: AiWrongScope;
+    })
+  | (AiStructuredBase & {
+      action: "close_dnc";
+      body?: never;
+      escalation_reason?: never;
+      wrong_scope?: never;
     })
   | (AiStructuredBase & {
       action: "close_not_interested";

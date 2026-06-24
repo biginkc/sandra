@@ -28,6 +28,10 @@ export type ResponderRoute =
       reason: "model:not_interested";
     }
   | {
+      kind: "close_dnc";
+      reason: "model:threat_dnc";
+    }
+  | {
       kind: "deescalate_close";
       reason: "model:deescalate_close";
     };
@@ -61,6 +65,8 @@ export function resolveResponderOutcome(
         reason: "model:wrong_number",
         scope: signal.wrong_scope,
       };
+    case "close_dnc":
+      return { kind: "close_dnc", reason: "model:threat_dnc" };
     case "close_not_interested":
       return {
         kind: "auto_close",
@@ -70,10 +76,6 @@ export function resolveResponderOutcome(
     case "deescalate_close":
       return { kind: "deescalate_close", reason: "model:deescalate_close" };
     default:
-      return assertNever(signal);
+      return { kind: "escalate", reason: "model:needs_review" };
   }
-}
-
-function assertNever(value: never): never {
-  throw new Error(`Unhandled AI responder action: ${JSON.stringify(value)}`);
 }

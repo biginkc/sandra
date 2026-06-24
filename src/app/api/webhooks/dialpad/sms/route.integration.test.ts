@@ -384,6 +384,12 @@ describe("POST /api/webhooks/dialpad/sms (integration)", () => {
       source: "mock_inbound_webhook",
       first_contact_id: contactId,
     });
+    const { data: propertyAfterStop } = await supabase
+      .from("properties")
+      .select("outreach_dispo")
+      .eq("id", property!.id)
+      .single();
+    expect(propertyAfterStop?.outreach_dispo).toBe("opted_out");
 
     const { data: stopMessage } = await supabase
       .from("messages")
@@ -398,6 +404,51 @@ describe("POST /api/webhooks/dialpad/sms (integration)", () => {
       .from("notifications")
       .select("*", { count: "exact", head: true });
     expect(notifCount).toBe(0);
+  });
+
+  it("STOP keyword does not downgrade an existing dnc property disposition", async () => {
+    const phone = "+18165558887";
+    const contactId = await seedContact(phone, { optIn: true });
+    const { data: property } = await supabase
+      .from("properties")
+      .insert({
+        address: "1 Stop DNC Preserve Ln",
+        state: "MO",
+        status: "new_lead",
+        homeowner_contact_id: contactId,
+        outreach_dispo: "dnc",
+      })
+      .select("id")
+      .single();
+
+    await supabase.from("messages").insert({
+      channel: "sms",
+      direction: "outbound",
+      status: "sent",
+      provider: "mock",
+      from_address: "+18163706846",
+      to_address: phone,
+      body: "Reply STOP to unsubscribe.",
+      contact_id: contactId,
+      property_id: property!.id,
+    });
+
+    const res = await POST(
+      makeRequest({
+        externalId: "msg_stop_preserve_dnc_001",
+        from: phone,
+        to: "+18163706846",
+        body: "STOP",
+      }),
+    );
+    expect(res.status).toBe(200);
+
+    const { data: propertyAfterStop } = await supabase
+      .from("properties")
+      .select("outreach_dispo")
+      .eq("id", property!.id)
+      .single();
+    expect(propertyAfterStop?.outreach_dispo).toBe("dnc");
   });
 
   it("fails soft when attribution lookup errors so STOP still opts out and inserts the inbound", async () => {

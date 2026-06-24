@@ -38,7 +38,7 @@ export async function applyPhoneLevelOptOut(
       tags: { surface: `${input.providerId}_webhook_phone_suppression_record` },
       extra: {
         contactId: input.contactId,
-        fromPhone: input.fromPhone,
+        hasPhone: Boolean(input.fromPhone),
         surface: input.surface,
       },
     });
@@ -72,7 +72,7 @@ export async function applyPhoneLevelOptOut(
         tags: { surface: `${input.providerId}_webhook_opt_out_record` },
         extra: {
           contactId,
-          fromPhone: input.fromPhone,
+          hasPhone: Boolean(input.fromPhone),
           surface: input.surface,
         },
       });
@@ -98,7 +98,7 @@ export async function applyPhoneLevelOptOut(
         tags: {
           surface: `${input.providerId}_webhook_sequence_pause_${input.surface}`,
         },
-        extra: { contactId, fromPhone: input.fromPhone },
+        extra: { contactId, hasPhone: Boolean(input.fromPhone) },
       });
     }
   }
@@ -120,7 +120,18 @@ export async function recordSmsPhoneSuppression(
   },
 ): Promise<void> {
   const phone = normalizePhone(input.fromPhone);
-  if (!phone) return;
+  if (!phone) {
+    reportError(new Error("recordSmsPhoneSuppression missing normalized phone"), {
+      tags: { surface: "sms_phone_suppression_missing_phone" },
+      extra: {
+        contactId: input.contactId,
+        hasPhone: Boolean(input.fromPhone),
+        providerId: input.providerId,
+        source: input.source,
+      },
+    });
+    return;
+  }
 
   const timestamp = input.occurredAt.toISOString();
   const { error } = await supabase
@@ -161,7 +172,7 @@ export async function isSmsPhoneSuppressed(
   if (error) {
     reportError(new Error(error.message), {
       tags: { surface: "sms_phone_suppression_lookup" },
-      extra: { phone },
+      extra: { normalizedPhonePresent: Boolean(phone) },
     });
     throw new Error(`isSmsPhoneSuppressed: ${error.message}`);
   }

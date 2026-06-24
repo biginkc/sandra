@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { getConsentState } from "@/lib/messaging/consent";
+import { applyPhoneLevelOptOut } from "@/lib/messaging/opt-out-phone";
 import { sendSmsToContact } from "@/lib/messaging/send";
 
 import { classifyAiSkip } from "./classify";
@@ -20,6 +21,15 @@ vi.mock("@/lib/messaging/quiet-hours", () => ({
 
 vi.mock("@/lib/messaging/send", () => ({
   sendSmsToContact: vi.fn(),
+}));
+
+vi.mock("@/lib/messaging/opt-out-phone", () => ({
+  applyPhoneLevelOptOut: vi.fn(),
+}));
+
+vi.mock("@/lib/sequences/enrollment", () => ({
+  pauseContactEnrollments: vi.fn(),
+  pausePropertyEnrollments: vi.fn(),
 }));
 
 vi.mock("./classify", () => ({
@@ -431,6 +441,7 @@ describe("dispatchAiResponse debounce", () => {
 
     vi.mocked(getConsentState).mockResolvedValue({} as never);
     vi.mocked(classifyAiSkip).mockReturnValue({ skip: false });
+    vi.mocked(applyPhoneLevelOptOut).mockResolvedValue(undefined);
     vi.mocked(generateAiReply).mockResolvedValue(HAPPY_REPLY);
     vi.mocked(humanizeReply).mockImplementation(async ({ draft }) => draft);
     vi.mocked(validateAiReplyBody).mockReturnValue({ ok: true });
@@ -568,7 +579,7 @@ describe("dispatchAiResponse debounce", () => {
     expect(vi.mocked(sendSmsToContact)).not.toHaveBeenCalled();
   });
 
-  it("low-confidence terminal model actions escalate before mutating state", async () => {
+  it("low-confidence terminal model actions still close without sending", async () => {
     const state = createMockState();
     const supabase = createMockSupabase(state);
     installSendMock(state);
@@ -592,10 +603,92 @@ describe("dispatchAiResponse debounce", () => {
     );
 
     expect(outcome).toEqual({
-      outcome: "escalated",
-      reason: "low_confidence:0.4",
+      outcome: "auto_closed",
+      reason: "model:wrong_number",
     });
-    expect(state.property.outreach_dispo).toBeNull();
+    expect(state.property.outreach_dispo).toBe("wrong_number");
+    expect(state.property.needs_human_attention).toBe(false);
+    expect(vi.mocked(sendSmsToContact)).not.toHaveBeenCalled();
+  });
+
+  it("low-confidence opt_out still suppresses the phone and marks the property opted out", async () => {
+    const state = createMockState();
+    const supabase = createMockSupabase(state);
+    installSendMock(state);
+    vi.mocked(generateAiReply).mockResolvedValueOnce({
+      action: "opt_out",
+      confidence: 0.4,
+      sentiment: "frustrated",
+    });
+
+    const outcome = await dispatchAiResponse(
+      supabase as never,
+      {
+        contactId: CONTACT_ID,
+        conversationId: CONVERSATION_ID,
+        inboundBody: "please delete my number",
+        inboundFromPhone: "+18165550001",
+        inboundMessageId: "inbound-low-confidence-opt-out",
+        propertyId: PROPERTY_ID,
+      },
+      { anthropic: {} as never },
+    );
+
+    expect(outcome).toEqual({
+      outcome: "opted_out",
+      reason: "model:opt_out",
+    });
+    expect(vi.mocked(applyPhoneLevelOptOut)).toHaveBeenCalledWith(
+      supabase,
+      expect.objectContaining({
+        contactId: CONTACT_ID,
+        fromPhone: "+18165550001",
+        source: "ai_responder",
+        surface: "stop",
+      }),
+    );
+    expect(state.property.outreach_dispo).toBe("opted_out");
+    expect(state.property.needs_human_attention).toBe(false);
+    expect(vi.mocked(sendSmsToContact)).not.toHaveBeenCalled();
+  });
+
+  it("close_dnc writes a suppressed DNC disposition and does not send", async () => {
+    const state = createMockState();
+    const supabase = createMockSupabase(state);
+    installSendMock(state);
+    vi.mocked(generateAiReply).mockResolvedValueOnce({
+      action: "close_dnc",
+      confidence: 0.9,
+      sentiment: "hostile",
+    });
+
+    const outcome = await dispatchAiResponse(
+      supabase as never,
+      {
+        contactId: CONTACT_ID,
+        conversationId: CONVERSATION_ID,
+        inboundBody: "I will find you and make you pay",
+        inboundFromPhone: "+18165550001",
+        inboundMessageId: "inbound-threat",
+        propertyId: PROPERTY_ID,
+      },
+      { anthropic: {} as never },
+    );
+
+    expect(outcome).toEqual({
+      outcome: "auto_closed",
+      reason: "model:threat_dnc",
+    });
+    expect(vi.mocked(applyPhoneLevelOptOut)).toHaveBeenCalledWith(
+      supabase,
+      expect.objectContaining({
+        contactId: CONTACT_ID,
+        fromPhone: "+18165550001",
+        source: "ai_responder_threat",
+        surface: "dnc",
+      }),
+    );
+    expect(state.property.outreach_dispo).toBe("dnc");
     expect(vi.mocked(sendSmsToContact)).not.toHaveBeenCalled();
   });
 

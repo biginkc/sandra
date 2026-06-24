@@ -40,7 +40,7 @@ describe("ai responder system prompt v2 artifact", () => {
   it("pins the high-risk examples to the intended terminal actions", () => {
     expect(prompt).toMatch(/8\) "NOT SELLING\. STOP" -> opt_out/);
     expect(prompt).toMatch(/11\) "please delete my number" -> opt_out/);
-    expect(prompt).toMatch(/14\) "I will find you and make you pay" -> close_not_interested/);
+    expect(prompt).toMatch(/14\) "I will find you and make you pay" -> close_dnc/);
   });
 
   it("pins wrong-number examples to the intended scopes", () => {
@@ -67,7 +67,7 @@ describe("ai responder system prompt v2 artifact", () => {
     [11, { action: "opt_out", confidence: 0.97, sentiment: "neutral" }],
     [12, { action: "deescalate_close", body: "So sorry to bug you. Sounds like you get a lot of these. Are you {first_name}? Just want to make sure we don't bother you again.", confidence: 0.9, sentiment: "frustrated" }],
     [13, { action: "deescalate_close", body: "Sorry about that, didn't mean to bug you. Are you {first_name}? I'll make sure we don't keep texting if not.", confidence: 0.88, sentiment: "hostile" }],
-    [14, { action: "close_not_interested", confidence: 0.9, sentiment: "hostile" }],
+    [14, { action: "close_dnc", confidence: 0.9, sentiment: "hostile" }],
     [15, { action: "deescalate_close", body: "Ha, fair enough. Sorry to bug you. Are you {first_name}? Want to make sure we stop reaching the wrong person.", confidence: 0.85, sentiment: "neutral" }],
     [16, { action: "escalate", escalation_reason: "third_party", confidence: 0.9, sentiment: "neutral" }],
   ] as const)("example %s routes through the schema and router", async (_n, output) => {
@@ -84,6 +84,7 @@ describe("ai responder system prompt v2 artifact", () => {
     if (
       parsed.action === "opt_out" ||
       parsed.action === "close_wrong_number" ||
+      parsed.action === "close_dnc" ||
       parsed.action === "close_not_interested" ||
       parsed.action === "escalate"
     ) {

@@ -20,7 +20,7 @@ export type Database = {
           brokerage: string | null
           contact_id: string
           license_number: string | null
-          org_id?: string
+          org_id: string
           removed_at: string | null
         }
         Insert: {
@@ -36,7 +36,7 @@ export type Database = {
           brokerage?: string | null
           contact_id?: string
           license_number?: string | null
-          org_id: string
+          org_id?: string
           removed_at?: string | null
         }
         Relationships: [

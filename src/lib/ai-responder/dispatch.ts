@@ -223,13 +223,16 @@ export async function dispatchAiResponse(
     return { outcome: "escalated", reason };
   }
 
-  if (generated.confidence < config!.min_confidence) {
+  const route = resolveResponderOutcome(generated);
+  if (
+    route.kind === "send_reply" &&
+    generated.confidence < config!.min_confidence
+  ) {
     const reason = `low_confidence:${generated.confidence}`;
     await markPropertyNeedsAttention(supabase, input.propertyId, reason);
     return { outcome: "escalated", reason };
   }
 
-  const route = resolveResponderOutcome(generated);
   switch (route.kind) {
     case "escalate":
       await markPropertyNeedsAttention(supabase, input.propertyId, route.reason);
@@ -246,6 +249,15 @@ export async function dispatchAiResponse(
         return closeOutcome(optOutResult, route.reason);
       }
       return { outcome: "opted_out", reason: route.reason };
+    case "close_dnc":
+      const dncResult = await applyResponderDnc(supabase, {
+        propertyId: input.propertyId,
+        contactId: input.contactId,
+        inboundFromPhone: input.inboundFromPhone ?? null,
+        orgId: property.org_id,
+        reason: route.reason,
+      });
+      return closeOutcome(dncResult, route.reason);
     case "auto_close_wrong_number":
       const wrongNumberResult = await applyWrongNumber(supabase, {
         propertyId: input.propertyId,
@@ -570,6 +582,39 @@ async function applyResponderOptOut(
   });
   if (!result.updated && result.reason === "db_error") {
     throw new Error("ai_responder opt-out disposition write failed");
+  }
+  return result;
+}
+
+async function applyResponderDnc(
+  supabase: SupabaseClient<Database>,
+  args: {
+    propertyId: string;
+    contactId: string;
+    inboundFromPhone: string | null;
+    orgId: string;
+    reason: string;
+  },
+): Promise<ResponderDispoResult> {
+  const contact = await loadContactPhone(supabase, args.contactId);
+  await applyPhoneLevelOptOut(supabase, {
+    contactId: args.contactId,
+    fromPhone: args.inboundFromPhone ?? contact.phone ?? "",
+    orgId: args.orgId,
+    source: "ai_responder_threat",
+    sourceDetail: { propertyId: args.propertyId, reason: args.reason } as Json,
+    occurredAt: new Date(),
+    providerId: "ai_responder",
+    surface: "dnc",
+    idempotencyKey: `ai-responder-dnc:${args.propertyId}:${args.contactId}:${args.reason}`,
+  });
+  const result = await setResponderDispo(supabase, {
+    propertyId: args.propertyId,
+    dispo: "dnc",
+    reason: args.reason,
+  });
+  if (!result.updated && result.reason === "db_error") {
+    throw new Error("ai_responder dnc disposition write failed");
   }
   return result;
 }

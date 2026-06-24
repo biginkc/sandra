@@ -290,6 +290,13 @@ export async function handleInboundWebhook(
           surface: "stop",
           idempotencyKey: ev.externalId,
         });
+        if (propertyId) {
+          await supabase
+            .from("properties")
+            .update({ outreach_dispo: "opted_out" })
+            .eq("id", propertyId)
+            .or("outreach_dispo.is.null,outreach_dispo.in.(not_interested,wrong_number,opted_out)");
+        }
         const insertOutcome = await insertInboundMessage(supabase, {
           providerId: provider.providerId,
           externalId: ev.externalId,

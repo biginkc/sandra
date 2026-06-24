@@ -593,7 +593,7 @@ describe("dispatchAiResponse (integration)", () => {
     });
   });
 
-  it("Claude opt_out suppresses the actual inbound sender when it is phone_2", async () => {
+  it("Claude opt_out suppresses phone_2 without suppressing phone_1", async () => {
     await seedConfig();
     const { propertyId, contactId } = await seedLead({
       phone: "+18167554116",
@@ -830,6 +830,106 @@ describe("dispatchAiResponse (integration)", () => {
     if (outcome.outcome === "escalated") {
       expect(outcome.reason).toContain("low_confidence");
     }
+  });
+
+  it("low-confidence opt_out still writes phone suppression and opted_out disposition", async () => {
+    await seedConfig();
+    const { propertyId, contactId } = await seedLead({
+      phone: "+18167554019",
+    });
+    const outcome = await dispatchAiResponse(
+      supabase,
+      {
+        propertyId,
+        contactId,
+        inboundBody: "please delete my number",
+        inboundFromPhone: "+18167554019",
+      },
+      {
+        anthropic: stubAnthropic({
+          action: "opt_out",
+          confidence: 0.4,
+          sentiment: "frustrated",
+        }),
+      },
+    );
+
+    expect(outcome).toEqual({ outcome: "opted_out", reason: "model:opt_out" });
+    expect(getMockMessageLog()).toHaveLength(0);
+
+    const [{ data: property }, { data: suppression }] = await Promise.all([
+      supabase
+        .from("properties")
+        .select("outreach_dispo, needs_human_attention")
+        .eq("id", propertyId)
+        .single(),
+      supabase
+        .from("sms_phone_suppressions")
+        .select("phone_e164, source, first_contact_id")
+        .eq("phone_e164", "+18167554019")
+        .single(),
+    ]);
+    expect(property).toMatchObject({
+      outreach_dispo: "opted_out",
+      needs_human_attention: false,
+    });
+    expect(suppression).toMatchObject({
+      phone_e164: "+18167554019",
+      source: "ai_responder",
+      first_contact_id: contactId,
+    });
+  });
+
+  it("Claude returns close_dnc → suppresses phone and writes dnc without sending", async () => {
+    await seedConfig();
+    const { propertyId, contactId } = await seedLead({
+      phone: "+18167554020",
+    });
+
+    const outcome = await dispatchAiResponse(
+      supabase,
+      {
+        propertyId,
+        contactId,
+        inboundBody: "I will find you and make you pay",
+        inboundFromPhone: "+18167554020",
+      },
+      {
+        anthropic: stubAnthropic({
+          action: "close_dnc",
+          confidence: 0.9,
+          sentiment: "hostile",
+        }),
+      },
+    );
+
+    expect(outcome).toEqual({
+      outcome: "auto_closed",
+      reason: "model:threat_dnc",
+    });
+    expect(getMockMessageLog()).toHaveLength(0);
+
+    const [{ data: property }, { data: suppression }] = await Promise.all([
+      supabase
+        .from("properties")
+        .select("outreach_dispo, needs_human_attention")
+        .eq("id", propertyId)
+        .single(),
+      supabase
+        .from("sms_phone_suppressions")
+        .select("phone_e164, source, first_contact_id")
+        .eq("phone_e164", "+18167554020")
+        .single(),
+    ]);
+    expect(property).toMatchObject({
+      outreach_dispo: "dnc",
+      needs_human_attention: false,
+    });
+    expect(suppression).toMatchObject({
+      phone_e164: "+18167554020",
+      source: "ai_responder_threat",
+      first_contact_id: contactId,
+    });
   });
 
   it("frustrated sentiment alone does not override the model action", async () => {

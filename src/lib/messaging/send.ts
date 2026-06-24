@@ -594,6 +594,7 @@ export async function releaseQueuedMessage(
   }
 
   if (consentState === "opted_out") {
+    await failQueuedMessage(supabase, msg.id, consentMessage(consentState));
     return {
       status: "blocked_no_consent",
       reason: consentMessage(consentState),

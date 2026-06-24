@@ -3,6 +3,11 @@
 -- STOP/DNC and explicit wrong-number-for-everything signals must outlive the
 -- current contact row snapshot. A later import with the same phone must still
 -- be blocked before any queued row, message insert, or provider call.
+--
+-- Rollback note:
+-- 1. drop table public.sms_phone_suppressions cascade;
+-- 2. restore public.reset_tenant_tables() to the prior migration 084 body so
+--    reset_tenant_tables does not reference the dropped table.
 
 create table if not exists public.sms_phone_suppressions (
   id uuid primary key default gen_random_uuid(),

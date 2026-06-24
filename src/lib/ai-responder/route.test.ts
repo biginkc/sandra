@@ -74,6 +74,13 @@ describe("resolveResponderOutcome", () => {
     });
   });
 
+  it("routes close_dnc to phone-level DNC suppression", () => {
+    expect(resolveResponderOutcome({ ...base, action: "close_dnc" })).toEqual({
+      kind: "close_dnc",
+      reason: "model:threat_dnc",
+    });
+  });
+
   it("routes deescalate_close to the fixed-template send path", () => {
     expect(
       resolveResponderOutcome({
@@ -97,12 +104,22 @@ describe("resolveResponderOutcome", () => {
     ).toEqual({ kind: "escalate", reason: "model:needs_review" });
   });
 
+  it("fails closed to needs_review for an unknown action at runtime", () => {
+    expect(
+      resolveResponderOutcome({
+        ...base,
+        action: "mystery_action",
+      } as unknown as AiStructuredOutput),
+    ).toEqual({ kind: "escalate", reason: "model:needs_review" });
+  });
+
   it("keeps the action union exhaustiveness check compile-visible", () => {
     const _allActions: Record<AiAction, true> = {
       send_reply: true,
       escalate: true,
       opt_out: true,
       close_wrong_number: true,
+      close_dnc: true,
       close_not_interested: true,
       deescalate_close: true,
     };
