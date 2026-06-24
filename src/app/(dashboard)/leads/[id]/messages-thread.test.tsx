@@ -292,4 +292,55 @@ describe("<MessagesThread />", () => {
     expect(screen.queryByText("Delivered")).not.toBeInTheDocument();
     expect(screen.queryByText("Not delivered")).not.toBeInTheDocument();
   });
+
+  it("marks AI-generated outbound replies with the Sandra face icon", () => {
+    render(
+      <MessagesThread
+        initial={[
+          makeMessage({
+            id: "sandra-reply",
+            direction: "outbound",
+            status: "delivered",
+            body: "No repairs needed.",
+            metadata: {
+              generated_by: "ai_responder_v1",
+              confidence: 0.92,
+            },
+          }),
+        ]}
+        contactId="contact-1"
+        propertyId="property-1"
+      />,
+    );
+
+    const icon = screen.getByTestId("messages-thread-sandra-reply-icon");
+    expect(icon).toHaveAccessibleName("Sandra replied");
+    expect(icon).toHaveAttribute(
+      "title",
+      "Sandra replied · confidence 92%",
+    );
+    expect(screen.queryByText("AI")).not.toBeInTheDocument();
+  });
+
+  it("does not mark manual outbound replies as Sandra replies", () => {
+    render(
+      <MessagesThread
+        initial={[
+          makeMessage({
+            id: "manual-reply",
+            direction: "outbound",
+            status: "delivered",
+            body: "Manual reply",
+            metadata: null,
+          }),
+        ]}
+        contactId="contact-1"
+        propertyId="property-1"
+      />,
+    );
+
+    expect(
+      screen.queryByTestId("messages-thread-sandra-reply-icon"),
+    ).not.toBeInTheDocument();
+  });
 });
