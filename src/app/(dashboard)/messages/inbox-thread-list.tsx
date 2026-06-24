@@ -248,6 +248,12 @@ function SandraThreadStatus({
   const iconLabel = deliveryLabel
     ? `${statusLabel}${reasonLabel}. ${deliveryLabel}`
     : `${statusLabel}${reasonLabel}`;
+  const iconTone =
+    deliveryStatus === "failed"
+      ? "border-[#fecaca] bg-[#fef2f2]"
+      : status === "escalated"
+        ? "border-[#fed7aa] bg-[#fff7ed]"
+        : "border-[#d1fae5] bg-[#ecfdf5]";
 
   return (
     <div
@@ -255,8 +261,9 @@ function SandraThreadStatus({
       data-testid={`inbox-thread-${threadId}-sandra-status`}
     >
       <span
-        className="inline-flex h-6 w-6 items-center justify-center rounded-full border border-[#e5e1df] bg-[#fafaf9]"
+        className={`inline-flex h-6 w-6 items-center justify-center rounded-full border ${iconTone}`}
         aria-label={iconLabel}
+        role="img"
         title={iconLabel}
       >
         {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -267,11 +274,6 @@ function SandraThreadStatus({
           className="h-3.5 w-3.5"
         />
       </span>
-      {status === "escalated" && reason ? (
-        <span className="sr-only" data-testid={`inbox-thread-${threadId}-sandra-reason`}>
-          {reason}
-        </span>
-      ) : null}
     </div>
   );
 }

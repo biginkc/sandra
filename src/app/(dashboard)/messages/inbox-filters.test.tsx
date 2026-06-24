@@ -294,31 +294,41 @@ describe("<CockpitView /> chip order (feedback-f E2b)", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("renders Sandra involvement as icon-only with delivery detail in the label", () => {
-    const thread = makeThread({
-      contactId: "handled-1",
-      threadId: "conv-handled-1",
-      aiResponderStatus: "handled",
-      aiLastDeliveryStatus: "failed",
-      aiLastDeliveryError: "Carrier rejected recipient",
-    });
-
-    render(<CockpitView {...baseProps} filter="all" threads={[thread]} />);
-
-    const status = screen.getByTestId("inbox-thread-conv-handled-1-sandra-status");
-    expect(status).not.toHaveTextContent("Sandra handled");
-    expect(status.querySelector("img")).toHaveAttribute(
-      "src",
-      "/icon.png",
-    );
-    expect(status.firstElementChild).toHaveAttribute(
-      "aria-label",
+  it.each([
+    ["sent", null, "Sandra handled. SMS sent", "border-[#d1fae5]"],
+    ["delivered", null, "Sandra handled. SMS delivered", "border-[#d1fae5]"],
+    ["failed", null, "Sandra handled. SMS failed", "border-[#fecaca]"],
+    [
+      "failed",
+      "Carrier rejected recipient",
       "Sandra handled. SMS failed: Carrier rejected recipient",
-    );
-    expect(
-      screen.queryByTestId("inbox-thread-conv-handled-1-sandra-delivery"),
-    ).not.toBeInTheDocument();
-  });
+      "border-[#fecaca]",
+    ],
+  ] as const)(
+    "renders Sandra handled %s as an icon-only marker",
+    (deliveryStatus, deliveryError, label, borderClass) => {
+      const thread = makeThread({
+        contactId: `handled-${deliveryStatus}-${deliveryError ?? "none"}`,
+        threadId: `conv-handled-${deliveryStatus}-${deliveryError ?? "none"}`,
+        aiResponderStatus: "handled",
+        aiLastDeliveryStatus: deliveryStatus,
+        aiLastDeliveryError: deliveryError,
+      });
+
+      render(<CockpitView {...baseProps} filter="all" threads={[thread]} />);
+
+      const status = screen.getByTestId(`inbox-thread-${thread.threadId}-sandra-status`);
+      const marker = status.firstElementChild;
+      expect(status).not.toHaveTextContent("Sandra handled");
+      expect(status.querySelector("img")).toHaveAttribute("src", "/icon.png");
+      expect(marker).toHaveAccessibleName(label);
+      expect(marker).toHaveAttribute("title", label);
+      expect(marker).toHaveClass(borderClass);
+      expect(
+        screen.queryByTestId(`inbox-thread-${thread.threadId}-sandra-delivery`),
+      ).not.toBeInTheDocument();
+    },
+  );
 
   it("renders Sandra escalated status as icon-only", () => {
     const thread = makeThread({
@@ -332,10 +342,8 @@ describe("<CockpitView /> chip order (feedback-f E2b)", () => {
     const status = screen.getByTestId("inbox-thread-conv-escalated-1-sandra-status");
     expect(status).not.toHaveTextContent("Sandra escalated");
     expect(status.querySelector("img")).toHaveAttribute("src", "/icon.png");
-    expect(status.firstElementChild).toHaveAttribute(
-      "aria-label",
-      "Sandra escalated",
-    );
+    expect(status.firstElementChild).toHaveAccessibleName("Sandra escalated");
+    expect(status.firstElementChild).toHaveClass("border-[#fed7aa]");
   });
 
   it("renders chips in priority order: Unread, Needs Outcome, Mine, Sandra Escalated, Sandra Handled, then the rest", () => {
