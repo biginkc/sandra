@@ -1318,6 +1318,63 @@ export type Database = {
         }
         Relationships: []
       }
+      sms_phone_suppressions: {
+        Row: {
+          channel: string
+          created_at: string
+          first_contact_id: string | null
+          id: string
+          org_id: string
+          phone_e164: string
+          provider: string | null
+          source: string
+          source_detail: Json | null
+          suppressed_at: string
+          updated_at: string
+        }
+        Insert: {
+          channel?: string
+          created_at?: string
+          first_contact_id?: string | null
+          id?: string
+          org_id: string
+          phone_e164: string
+          provider?: string | null
+          source: string
+          source_detail?: Json | null
+          suppressed_at?: string
+          updated_at?: string
+        }
+        Update: {
+          channel?: string
+          created_at?: string
+          first_contact_id?: string | null
+          id?: string
+          org_id?: string
+          phone_e164?: string
+          provider?: string | null
+          source?: string
+          source_detail?: Json | null
+          suppressed_at?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "sms_phone_suppressions_first_contact_id_fkey"
+            columns: ["first_contact_id"]
+            isOneToOne: false
+            referencedRelation: "contacts"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "sms_phone_suppressions_org_id_fkey"
+            columns: ["org_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       notifications: {
         Row: {
           body: string | null

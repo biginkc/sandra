@@ -103,6 +103,10 @@ export function InlineReply({
         case "blocked_no_phone":
           toast.error("Blocked: no phone", { description: outcome.reason });
           break;
+        case "blocked_landline":
+        case "blocked_terminal_dispo":
+          toast.warning("Skipped", { description: outcome.reason });
+          break;
         case "blocked_provider_off":
           toast.error("Messaging disabled", { description: outcome.reason });
           break;

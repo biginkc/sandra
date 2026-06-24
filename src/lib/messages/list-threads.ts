@@ -285,7 +285,9 @@ export async function listThreads(
       lastMessageAt: bucket.latest.created_at,
       unreadCount: bucket.unreadCount,
       needsHumanAttention: p?.needs_human_attention ?? false,
-      escalationReason: p?.last_ai_escalation_reason ?? null,
+      escalationReason: p?.needs_human_attention
+        ? (p.last_ai_escalation_reason ?? null)
+        : null,
       isOptedOut,
       isTestTraffic: looksLikeTestTraffic(
         c

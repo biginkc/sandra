@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { matchesStopKeyword } from "./inbound";
+import { classifyWrongNumberScope, matchesStopKeyword } from "./inbound";
 
 describe("matchesStopKeyword", () => {
   it("opts out on deterministic stop keywords that appear mid-message", () => {
@@ -14,6 +14,11 @@ describe("matchesStopKeyword", () => {
     expect(matchesStopKeyword("opt out")).toBe(true);
     expect(matchesStopKeyword("opt-out")).toBe(true);
     expect(matchesStopKeyword("optout")).toBe(true);
+    expect(matchesStopKeyword("please delete my number")).toBe(true);
+    expect(matchesStopKeyword("delete my info from your list")).toBe(true);
+    expect(matchesStopKeyword("lose this number")).toBe(true);
+    expect(matchesStopKeyword("never contact me again")).toBe(true);
+    expect(matchesStopKeyword("quit bothering me")).toBe(true);
   });
 
   it("keeps ambiguous keywords whole-message only", () => {
@@ -29,5 +34,24 @@ describe("matchesStopKeyword", () => {
     expect(matchesStopKeyword("cancel that, I do want to sell")).toBe(false);
     expect(matchesStopKeyword("I might stop by to fix it")).toBe(false);
     expect(matchesStopKeyword("stopped paying")).toBe(false);
+  });
+});
+
+describe("classifyWrongNumberScope", () => {
+  it("defaults property-only wrong-number language to this_property", () => {
+    expect(classifyWrongNumberScope("I don't own that house")).toBe(
+      "this_property",
+    );
+    expect(classifyWrongNumberScope("that's not my property")).toBe(
+      "this_property",
+    );
+  });
+
+  it("uses all only for explicit wrong-number-for-everything signals", () => {
+    expect(classifyWrongNumberScope("you have the wrong number")).toBe("all");
+    expect(classifyWrongNumberScope("I never owned any property")).toBe("all");
+    expect(classifyWrongNumberScope("nobody by that name has this phone")).toBe(
+      "all",
+    );
   });
 });

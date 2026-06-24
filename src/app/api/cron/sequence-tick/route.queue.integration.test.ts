@@ -280,7 +280,7 @@ describe("runSequenceTick — queue drain (integration)", () => {
     // the row is terminal-failed so it stops pinning the head slot.
     const tick1 = await runSequenceTick(supabase, { drainLimit: 1 });
     expect(tick1.drained).toBe(0);
-    expect(tick1.drainOutcomes.blocked_no_consent).toBe(1);
+    expect(tick1.drainOutcomes.blocked_terminal_dispo).toBe(1);
 
     const { data: blocked } = await supabase
       .from("messages")

@@ -1,9 +1,13 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { reportError } from "@/lib/errors/report";
+import { applyPhoneLevelOptOut } from "@/lib/messaging/opt-out-phone";
 import { getConsentState } from "@/lib/messaging/consent";
 import { checkQuietHours } from "@/lib/messaging/quiet-hours";
 import { sendSmsToContact } from "@/lib/messaging/send";
+import { selectBestSmsPhone } from "@/lib/messaging/sms-phone";
+import { SUPPRESSED_DISPOS } from "@/lib/messaging/suppression";
+import { pausePropertyEnrollments } from "@/lib/sequences/enrollment";
 import type { Database, Json } from "@/lib/supabase/types";
 
 import { listAdminUserIds } from "@/lib/auth/admins";
@@ -17,8 +21,9 @@ import {
 } from "./generate";
 import { humanizeReply } from "./humanize";
 import { matchEscalationKeyword } from "./keywords";
+import { resolveResponderOutcome, type ResponderRoute } from "./route";
 import { validateAiReplyBody } from "./safety";
-import type { AiMessageMetadata } from "./types";
+import type { AiMessageMetadata, AiWrongScope } from "./types";
 
 /**
  * Consider an inbound SMS for an AI first-touch reply. This is the
@@ -38,17 +43,30 @@ import type { AiMessageMetadata } from "./types";
 export type AiDispatchOutcome =
   | { outcome: "sent"; messageId: string; confidence: number }
   | { outcome: "escalated"; reason: string }
+  | { outcome: "auto_closed"; reason: string }
+  | { outcome: "opted_out"; reason: string }
   | { outcome: "skipped"; reason: string };
 
 export type AiDispatchInput = {
   propertyId: string;
   contactId: string;
   conversationId?: string | null;
+  inboundFromPhone?: string | null;
   inboundBody: string;
   inboundMessageId?: string | null;
 };
 
 const AI_REPLY_THREAD_DEBOUNCE_MS = 45_000;
+const HUMAN_ONLY_DISPOS = new Set(["nurture", "callback_requested"]);
+
+const DEESCALATION_TEMPLATE_WITH_NAME =
+  "So sorry to bug you. Sounds like you get a lot of these. Are you {first_name}? Just want to make sure we don't bother you again.";
+const DEESCALATION_TEMPLATE_GENERIC =
+  "So sorry to bug you. Sounds like you get a lot of these. Are you the owner here? Want to make sure we don't bother you again.";
+
+type ResponderDispoResult =
+  | { updated: true }
+  | { updated: false; reason: "already_terminal" | "db_error" };
 
 export async function dispatchAiResponse(
   supabase: SupabaseClient<Database>,
@@ -70,11 +88,21 @@ export async function dispatchAiResponse(
   // --------------------------------------------------------------------------
   const { data: property } = await supabase
     .from("properties")
-    .select("id, org_id, state, ai_responder_disabled")
+    .select("id, org_id, state, ai_responder_disabled, outreach_dispo, needs_human_attention, homeowner_contact_id")
     .eq("id", input.propertyId)
     .maybeSingle();
   if (!property) {
     return { outcome: "skipped", reason: "property_not_found" };
+  }
+  if (
+    property.needs_human_attention ||
+    (property.outreach_dispo &&
+      (SUPPRESSED_DISPOS.has(
+        property.outreach_dispo as Parameters<typeof SUPPRESSED_DISPOS.has>[0],
+      ) ||
+        HUMAN_ONLY_DISPOS.has(property.outreach_dispo)))
+  ) {
+    return { outcome: "skipped", reason: "already_terminal" };
   }
 
   const { data: config } = await supabase
@@ -195,124 +223,97 @@ export async function dispatchAiResponse(
     return { outcome: "escalated", reason };
   }
 
-  // --------------------------------------------------------------------------
-  // 5. Escalation gates on model output
-  // --------------------------------------------------------------------------
-  if (generated.action === "escalate") {
-    const reason = `model:${generated.escalation_reason ?? "unspecified"}`;
-    await markPropertyNeedsAttention(supabase, input.propertyId, reason);
-    return { outcome: "escalated", reason };
-  }
-
-  if (generated.confidence < config!.min_confidence) {
+  const route = resolveResponderOutcome(generated);
+  if (
+    route.kind === "send_reply" &&
+    generated.confidence < config!.min_confidence
+  ) {
     const reason = `low_confidence:${generated.confidence}`;
     await markPropertyNeedsAttention(supabase, input.propertyId, reason);
     return { outcome: "escalated", reason };
   }
 
-  if (
-    generated.sentiment === "frustrated" ||
-    generated.sentiment === "hostile"
-  ) {
-    const reason = `sentiment:${generated.sentiment}`;
-    await markPropertyNeedsAttention(supabase, input.propertyId, reason);
-    return { outcome: "escalated", reason };
-  }
+  switch (route.kind) {
+    case "escalate":
+      await markPropertyNeedsAttention(supabase, input.propertyId, route.reason);
+      return { outcome: "escalated", reason: route.reason };
+    case "opt_out":
+      const optOutResult = await applyResponderOptOut(supabase, {
+        propertyId: input.propertyId,
+        contactId: input.contactId,
+        inboundFromPhone: input.inboundFromPhone ?? null,
+        orgId: property.org_id,
+        reason: route.reason,
+      });
+      if (!optOutResult.updated) {
+        return closeOutcome(optOutResult, route.reason);
+      }
+      return { outcome: "opted_out", reason: route.reason };
+    case "close_dnc":
+      const dncResult = await applyResponderDnc(supabase, {
+        propertyId: input.propertyId,
+        contactId: input.contactId,
+        inboundFromPhone: input.inboundFromPhone ?? null,
+        orgId: property.org_id,
+        reason: route.reason,
+      });
+      return closeOutcome(dncResult, route.reason);
+    case "auto_close_wrong_number":
+      const wrongNumberResult = await applyWrongNumber(supabase, {
+        propertyId: input.propertyId,
+        contactId: input.contactId,
+        inboundFromPhone: input.inboundFromPhone ?? null,
+        orgId: property.org_id,
+        scope: route.scope,
+        reason: route.reason,
+      });
+      return closeOutcome(wrongNumberResult, route.reason);
+    case "auto_close":
+      const autoCloseResult = await setResponderDispo(supabase, {
+        propertyId: input.propertyId,
+        dispo: route.dispo,
+        reason: route.reason,
+      });
+      return closeOutcome(autoCloseResult, route.reason);
+    case "send_reply":
+    case "deescalate_close": {
+      const bodyResult = await resolveOutboundBody(supabase, {
+        route,
+        contactId: input.contactId,
+        model: config!.model,
+        anthropic: deps.anthropic,
+      });
+      const safety = validateAiReplyBody(bodyResult.body);
+      if (!safety.ok) {
+        const reason = `safety:${safety.reason}`;
+        await markPropertyNeedsAttention(supabase, input.propertyId, reason);
+        return { outcome: "escalated", reason };
+      }
 
-  // --------------------------------------------------------------------------
-  // 6. Humanizer second-pass — strips AI-tells the first-pass let through
-  //    (em-dashes, AI vocabulary, formal-ish phrasing). Falls back to the
-  //    original draft on any error so this NEVER blocks a send.
-  // --------------------------------------------------------------------------
-  const draft = generated.body?.trim() ?? "";
-  const body = draft
-    ? await humanizeReply(
-        { draft, model: config!.model },
-        { client: deps.anthropic },
-      )
-    : draft;
+      const sent = await sendResponderMessage(supabase, {
+        input,
+        body: bodyResult.body,
+        model: config!.model,
+        confidence: generated.confidence,
+        sentiment: generated.sentiment,
+        turn: currentTurn + 1,
+      });
+      if (sent.outcome !== "sent") return sent;
 
-  // --------------------------------------------------------------------------
-  // 7. Safety validator on the (humanized) body — defense in depth.
-  // --------------------------------------------------------------------------
-  const safety = validateAiReplyBody(body);
-  if (!safety.ok) {
-    const reason = `safety:${safety.reason}`;
-    await markPropertyNeedsAttention(supabase, input.propertyId, reason);
-    return { outcome: "escalated", reason };
-  }
+      if (route.kind === "deescalate_close") {
+        const closeResult = await setResponderDispo(supabase, {
+          propertyId: input.propertyId,
+          dispo: "not_interested",
+          reason: route.reason,
+        });
+        return closeOutcome(closeResult, route.reason);
+      }
 
-  // --------------------------------------------------------------------------
-  // 8. Send via the existing pipeline (enforces quiet hours + consent
-  //    one more time at send time). Stamp AI metadata on the row.
-  // --------------------------------------------------------------------------
-  const sendResult = await sendSmsToContact(supabase, {
-    contactId: input.contactId,
-    propertyId: input.propertyId,
-    body,
-    metadata: input.inboundMessageId
-      ? ({
-          generated_by: "ai_responder_v1",
-          inbound_message_id: input.inboundMessageId,
-        } as Json)
-      : null,
-  });
-
-  if (
-    input.inboundMessageId &&
-    sendResult.status === "db_error" &&
-    isAiReplyDuplicateInsertError(sendResult.error)
-  ) {
-    const existingReply = await findExistingAiReplyForInbound(
-      supabase,
-      input.inboundMessageId,
-    );
-    if (existingReply) {
-      return { outcome: "skipped", reason: "already_replied" };
+      return sent;
     }
+    default:
+      return assertNeverRoute(route);
   }
-
-  if (sendResult.status !== "sent" && sendResult.status !== "queued") {
-    // Pipeline rejected (quiet-hours race, no phone, etc.). Escalate so
-    // a human picks it up.
-    const reason = `send_blocked:${sendResult.status}`;
-    await markPropertyNeedsAttention(supabase, input.propertyId, reason);
-    return { outcome: "escalated", reason };
-  }
-
-  const messageId = sendResult.messageId;
-  const metadata: AiMessageMetadata = {
-    generated_by: "ai_responder_v1",
-    ...(input.inboundMessageId
-      ? { inbound_message_id: input.inboundMessageId }
-      : {}),
-    model: config!.model,
-    confidence: generated.confidence,
-    sentiment: generated.sentiment,
-    turn: currentTurn + 1,
-  };
-  const { data: messageRow, error: messageLookupError } = await supabase
-    .from("messages")
-    .select("metadata")
-    .eq("id", messageId)
-    .maybeSingle();
-  if (messageLookupError) {
-    reportError(new Error(messageLookupError.message), {
-      tags: { surface: "ai_responder_message_metadata_lookup" },
-      extra: { messageId, inboundMessageId: input.inboundMessageId ?? null },
-    });
-  }
-  await supabase
-    .from("messages")
-    .update({
-      metadata: {
-        ...readJsonObject(messageRow?.metadata ?? null),
-        ...metadata,
-      } as Json,
-    })
-    .eq("id", messageId);
-
-  return { outcome: "sent", messageId, confidence: generated.confidence };
 }
 
 async function findExistingAiReplyForInbound(
@@ -377,6 +378,372 @@ async function findRecentAiReplyInThread(
 }
 
 // ---------- helpers ---------------------------------------------------------
+
+async function resolveOutboundBody(
+  supabase: SupabaseClient<Database>,
+  args: {
+    route: Extract<ResponderRoute, { kind: "send_reply" | "deescalate_close" }>;
+    contactId: string;
+    model: string;
+    anthropic: AnthropicLike;
+  },
+): Promise<{ body: string }> {
+  if (args.route.kind === "deescalate_close") {
+    return { body: await buildDeescalationBody(supabase, args.contactId) };
+  }
+
+  const draft = args.route.body.trim();
+  return {
+    body: draft
+      ? await humanizeReply(
+          { draft, model: args.model },
+          { client: args.anthropic },
+        )
+      : draft,
+  };
+}
+
+async function sendResponderMessage(
+  supabase: SupabaseClient<Database>,
+  args: {
+    input: AiDispatchInput;
+    body: string;
+    model: string;
+    confidence: number;
+    sentiment: AiMessageMetadata["sentiment"];
+    turn: number;
+  },
+): Promise<Extract<AiDispatchOutcome, { outcome: "sent" | "escalated" | "skipped" }>> {
+  const sendResult = await sendSmsToContact(supabase, {
+    contactId: args.input.contactId,
+    propertyId: args.input.propertyId,
+    body: args.body,
+    metadata: args.input.inboundMessageId
+      ? ({
+          generated_by: "ai_responder_v1",
+          inbound_message_id: args.input.inboundMessageId,
+        } as Json)
+      : null,
+  });
+
+  if (
+    args.input.inboundMessageId &&
+    sendResult.status === "db_error" &&
+    isAiReplyDuplicateInsertError(sendResult.error)
+  ) {
+    const existingReply = await findExistingAiReplyForInbound(
+      supabase,
+      args.input.inboundMessageId,
+    );
+    if (existingReply) {
+      return { outcome: "skipped", reason: "already_replied" };
+    }
+  }
+
+  if (sendResult.status === "blocked_terminal_dispo") {
+    return { outcome: "skipped", reason: "already_terminal" };
+  }
+
+  if (sendResult.status !== "sent" && sendResult.status !== "queued") {
+    const reason = `send_blocked:${sendResult.status}`;
+    await markPropertyNeedsAttention(supabase, args.input.propertyId, reason);
+    return { outcome: "escalated", reason };
+  }
+
+  const messageId = sendResult.messageId;
+  const metadata: AiMessageMetadata = {
+    generated_by: "ai_responder_v1",
+    ...(args.input.inboundMessageId
+      ? { inbound_message_id: args.input.inboundMessageId }
+      : {}),
+    model: args.model,
+    confidence: args.confidence,
+    sentiment: args.sentiment,
+    turn: args.turn,
+  };
+  const { data: messageRow, error: messageLookupError } = await supabase
+    .from("messages")
+    .select("metadata")
+    .eq("id", messageId)
+    .maybeSingle();
+  if (messageLookupError) {
+    reportError(new Error(messageLookupError.message), {
+      tags: { surface: "ai_responder_message_metadata_lookup" },
+      extra: {
+        messageId,
+        inboundMessageId: args.input.inboundMessageId ?? null,
+      },
+    });
+  }
+  await supabase
+    .from("messages")
+    .update({
+      metadata: {
+        ...readJsonObject(messageRow?.metadata ?? null),
+        ...metadata,
+      } as Json,
+    })
+    .eq("id", messageId);
+
+  return { outcome: "sent", messageId, confidence: args.confidence };
+}
+
+async function setResponderDispo(
+  supabase: SupabaseClient<Database>,
+  args: {
+    propertyId: string;
+    dispo: "wrong_number" | "not_interested" | "opted_out" | "dnc";
+    reason: string;
+  },
+): Promise<ResponderDispoResult> {
+  const { data: current, error: currentError } = await supabase
+    .from("properties")
+    .select("outreach_dispo, needs_human_attention")
+    .eq("id", args.propertyId)
+    .maybeSingle();
+  if (currentError) {
+    reportError(new Error(currentError.message), {
+      tags: { surface: "ai_responder_dispo_read" },
+      extra: { propertyId: args.propertyId, reason: args.reason },
+    });
+    return { updated: false, reason: "db_error" };
+  }
+  if (!shouldUpdateDispo(current?.outreach_dispo ?? null, args.dispo)) {
+    return { updated: false, reason: "already_terminal" };
+  }
+  if (current?.needs_human_attention) {
+    return { updated: false, reason: "already_terminal" };
+  }
+
+  const now = new Date().toISOString();
+  const allowedCurrentDispos = allowedCurrentDisposFor(args.dispo);
+  const { data: updated, error } = await supabase
+    .from("properties")
+    .update({
+      outreach_dispo: args.dispo,
+      needs_human_attention: false,
+      last_ai_escalation_reason: null,
+      updated_at: now,
+    })
+    .eq("id", args.propertyId)
+    .eq("needs_human_attention", false)
+    .or(
+      `outreach_dispo.is.null,outreach_dispo.in.(${allowedCurrentDispos.join(",")})`,
+    )
+    .select("id")
+    .maybeSingle();
+  if (error) {
+    reportError(new Error(error.message), {
+      tags: { surface: "ai_responder_set_dispo" },
+      extra: { propertyId: args.propertyId, dispo: args.dispo, reason: args.reason },
+    });
+    return { updated: false, reason: "db_error" };
+  }
+  if (!updated) {
+    return { updated: false, reason: "already_terminal" };
+  }
+
+  if (args.dispo === "wrong_number") {
+    await pausePropertyEnrollments(supabase, {
+      propertyId: args.propertyId,
+      reason: "inbound_reply",
+      permanent: false,
+    });
+  }
+  return { updated: true };
+}
+
+async function applyResponderOptOut(
+  supabase: SupabaseClient<Database>,
+  args: {
+    propertyId: string;
+    contactId: string;
+    inboundFromPhone: string | null;
+    orgId: string;
+    reason: string;
+  },
+): Promise<ResponderDispoResult> {
+  const contact = await loadContactPhone(supabase, args.contactId);
+  await applyPhoneLevelOptOut(supabase, {
+    contactId: args.contactId,
+    fromPhone: args.inboundFromPhone ?? contact.phone ?? "",
+    orgId: args.orgId,
+    source: "ai_responder",
+    sourceDetail: { propertyId: args.propertyId, reason: args.reason } as Json,
+    occurredAt: new Date(),
+    providerId: "ai_responder",
+    surface: "stop",
+    idempotencyKey: `ai-responder:${args.propertyId}:${args.contactId}:${args.reason}`,
+  });
+  const result = await setResponderDispo(supabase, {
+    propertyId: args.propertyId,
+    dispo: "opted_out",
+    reason: args.reason,
+  });
+  if (!result.updated && result.reason === "db_error") {
+    throw new Error("ai_responder opt-out disposition write failed");
+  }
+  return result;
+}
+
+async function applyResponderDnc(
+  supabase: SupabaseClient<Database>,
+  args: {
+    propertyId: string;
+    contactId: string;
+    inboundFromPhone: string | null;
+    orgId: string;
+    reason: string;
+  },
+): Promise<ResponderDispoResult> {
+  const contact = await loadContactPhone(supabase, args.contactId);
+  await applyPhoneLevelOptOut(supabase, {
+    contactId: args.contactId,
+    fromPhone: args.inboundFromPhone ?? contact.phone ?? "",
+    orgId: args.orgId,
+    source: "ai_responder_threat",
+    sourceDetail: { propertyId: args.propertyId, reason: args.reason } as Json,
+    occurredAt: new Date(),
+    providerId: "ai_responder",
+    surface: "dnc",
+    idempotencyKey: `ai-responder-dnc:${args.propertyId}:${args.contactId}:${args.reason}`,
+  });
+  const result = await setResponderDispo(supabase, {
+    propertyId: args.propertyId,
+    dispo: "dnc",
+    reason: args.reason,
+  });
+  if (!result.updated && result.reason === "db_error") {
+    throw new Error("ai_responder dnc disposition write failed");
+  }
+  return result;
+}
+
+async function applyWrongNumber(
+  supabase: SupabaseClient<Database>,
+  args: {
+    propertyId: string;
+    contactId: string;
+    inboundFromPhone: string | null;
+    orgId: string;
+    scope: AiWrongScope;
+    reason: string;
+  },
+): Promise<ResponderDispoResult> {
+  const result = await setResponderDispo(supabase, {
+    propertyId: args.propertyId,
+    dispo: "wrong_number",
+    reason: args.reason,
+  });
+  if (args.scope !== "all") return result;
+  if (!result.updated && result.reason === "db_error") return result;
+
+  const contact = await loadContactPhone(supabase, args.contactId);
+  await applyPhoneLevelOptOut(supabase, {
+    contactId: args.contactId,
+    fromPhone: args.inboundFromPhone ?? contact.phone ?? "",
+    orgId: args.orgId,
+    source: "ai_responder_wrong_number",
+    sourceDetail: {
+      propertyId: args.propertyId,
+      reason: args.reason,
+      wrong_scope: args.scope,
+    } as Json,
+    occurredAt: new Date(),
+    providerId: "ai_responder",
+    surface: "dnc",
+    idempotencyKey: `ai-responder-wrong-number:${args.propertyId}:${args.contactId}`,
+  });
+  return result;
+}
+
+async function loadContactPhone(
+  supabase: SupabaseClient<Database>,
+  contactId: string,
+): Promise<{ phone: string | null; firstName: string | null }> {
+  const { data, error } = await supabase
+    .from("contacts")
+    .select("phone_1, phone_1_type, phone_2, phone_2_type, phone_3, phone_3_type, first_name")
+    .eq("id", contactId)
+    .maybeSingle();
+  if (error) {
+    reportError(new Error(error.message), {
+      tags: { surface: "ai_responder_contact_lookup" },
+      extra: { contactId },
+    });
+  }
+  const destination = selectBestSmsPhone(data);
+  return {
+    phone: destination?.phone ?? null,
+    firstName: data?.first_name?.trim() || null,
+  };
+}
+
+function closeOutcome(
+  result: ResponderDispoResult,
+  reason: string,
+): Extract<AiDispatchOutcome, { outcome: "auto_closed" | "skipped" | "escalated" }> {
+  if (result.updated) {
+    return { outcome: "auto_closed", reason };
+  }
+  if (result.reason === "already_terminal") {
+    return { outcome: "skipped", reason: "already_terminal" };
+  }
+  return { outcome: "escalated", reason: "disposition_write_failed" };
+}
+
+async function buildDeescalationBody(
+  supabase: SupabaseClient<Database>,
+  contactId: string,
+): Promise<string> {
+  const contact = await loadContactPhone(supabase, contactId);
+  if (!contact.firstName) return DEESCALATION_TEMPLATE_GENERIC;
+  const named = DEESCALATION_TEMPLATE_WITH_NAME.replace(
+    "{first_name}",
+    contact.firstName,
+  );
+  return named.length <= 160 ? named : DEESCALATION_TEMPLATE_GENERIC;
+}
+
+function shouldUpdateDispo(
+  current: string | null,
+  next: "wrong_number" | "not_interested" | "opted_out" | "dnc",
+): boolean {
+  const severity: Record<string, number> = {
+    not_interested: 1,
+    wrong_number: 2,
+    opted_out: 3,
+    dnc: 4,
+  };
+  if (
+    next !== "opted_out" &&
+    next !== "dnc" &&
+    current !== null &&
+    (HUMAN_ONLY_DISPOS.has(current) || current === "bad_number")
+  ) {
+    return false;
+  }
+  return (severity[next] ?? 0) >= (current ? (severity[current] ?? 0) : 0);
+}
+
+function allowedCurrentDisposFor(
+  next: "wrong_number" | "not_interested" | "opted_out" | "dnc",
+): string[] {
+  switch (next) {
+    case "not_interested":
+      return ["not_interested"];
+    case "wrong_number":
+      return ["not_interested", "wrong_number"];
+    case "opted_out":
+      return ["not_interested", "wrong_number", "opted_out"];
+    case "dnc":
+      return ["not_interested", "wrong_number", "opted_out", "dnc"];
+  }
+}
+
+function assertNeverRoute(value: never): never {
+  throw new Error(`Unhandled responder route: ${JSON.stringify(value)}`);
+}
 
 async function markPropertyNeedsAttention(
   supabase: SupabaseClient<Database>,

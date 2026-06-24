@@ -1,6 +1,11 @@
 import Anthropic from "@anthropic-ai/sdk";
 
-import type { AiStructuredOutput } from "./types";
+import type {
+  AiAction,
+  AiEscalationReason,
+  AiStructuredOutput,
+  AiWrongScope,
+} from "./types";
 
 /**
  * Call Claude to generate the next reply + escalation decision.
@@ -28,7 +33,38 @@ export type GenerateInput = {
   conversation: Array<{ role: "user" | "assistant"; content: string }>;
 };
 
-const SUBMIT_REPLY_TOOL = {
+const AI_ACTIONS_BY_NAME = {
+  send_reply: true,
+  escalate: true,
+  opt_out: true,
+  close_wrong_number: true,
+  close_dnc: true,
+  close_not_interested: true,
+  deescalate_close: true,
+} as const satisfies Record<AiAction, true>;
+
+const AI_ESCALATION_REASONS_BY_NAME = {
+  hot_lead: true,
+  price_or_offer: true,
+  distress: true,
+  multi_property: true,
+  call_request: true,
+  third_party: true,
+  needs_review: true,
+} as const satisfies Record<AiEscalationReason, true>;
+
+const AI_WRONG_SCOPES_BY_NAME = {
+  this_property: true,
+  all: true,
+} as const satisfies Record<AiWrongScope, true>;
+
+const AI_ACTIONS = Object.keys(AI_ACTIONS_BY_NAME) as AiAction[];
+const AI_ESCALATION_REASONS = Object.keys(
+  AI_ESCALATION_REASONS_BY_NAME,
+) as AiEscalationReason[];
+const AI_WRONG_SCOPES = Object.keys(AI_WRONG_SCOPES_BY_NAME) as AiWrongScope[];
+
+export const SUBMIT_REPLY_TOOL = {
   name: "submit_reply",
   description:
     "Submit your structured reply or escalation decision. You MUST call this tool exactly once per response.",
@@ -38,32 +74,39 @@ const SUBMIT_REPLY_TOOL = {
     properties: {
       action: {
         type: "string",
-        enum: ["send_reply", "escalate"],
+        enum: AI_ACTIONS,
         description:
-          "send_reply: draft an SMS back to the seller. escalate: hand off to a human and do not send anything.",
+          "send_reply: draft an SMS. escalate: hand off to a human. opt_out/close_*: auto-close without sending. close_dnc suppresses the phone. deescalate_close: one fixed system reply, then close.",
       },
       body: {
         type: "string",
         description:
-          "The reply text to send to the seller. Required when action='send_reply'. Must be under 160 characters.",
+          "Required only when action is send_reply or deescalate_close. Must be under 160 characters.",
       },
       confidence: {
         type: "number",
         minimum: 0,
         maximum: 1,
         description:
-          "How confident you are that this reply is safe, on-topic, and compliant with the system rules. Below 0.70 → the caller will auto-escalate.",
+          "How confident you are that the chosen action is correct and any reply is safe. Below 0.70 only auto-escalates send_reply; no-send terminal actions still proceed.",
       },
       sentiment: {
         type: "string",
         enum: ["positive", "neutral", "frustrated", "hostile"],
         description:
-          "The seller's emotional tone in the inbound message. Frustrated or hostile → the caller auto-escalates.",
+          "The seller's emotional tone in the inbound message. Informational only; action controls routing.",
       },
       escalation_reason: {
         type: "string",
+        enum: AI_ESCALATION_REASONS,
         description:
-          "When action='escalate', a short reason. Examples: 'asked for price', 'mentioned attorney', 'seems frustrated'.",
+          "Required only when action='escalate'.",
+      },
+      wrong_scope: {
+        type: "string",
+        enum: AI_WRONG_SCOPES,
+        description:
+          "Required only when action='close_wrong_number'. Use this_property by default; all only when the phone is wrong for everything.",
       },
     },
   },
@@ -76,6 +119,7 @@ export async function generateAiReply(
   const response = await deps.client.messages.create({
     model: input.model,
     max_tokens: 400,
+    temperature: 0,
     tools: [SUBMIT_REPLY_TOOL],
     tool_choice: { type: "tool", name: "submit_reply" },
     system: [
@@ -95,19 +139,68 @@ export async function generateAiReply(
   if (!toolUse || toolUse.type !== "tool_use") {
     throw new Error("Claude did not return a tool_use block");
   }
-  const parsed = toolUse.input as AiStructuredOutput;
+  const parsed = toolUse.input as Partial<AiStructuredOutput> & {
+    action?: unknown;
+    body?: unknown;
+    confidence?: unknown;
+    escalation_reason?: unknown;
+    sentiment?: unknown;
+    wrong_scope?: unknown;
+  };
 
   // Light shape validation — the tool schema handles most of this, but
   // we double-check the critical invariants so a malformed input is a
   // clean error rather than a runtime surprise downstream.
-  if (parsed.action !== "send_reply" && parsed.action !== "escalate") {
-    throw new Error(`Unexpected action: ${parsed.action}`);
+  if (
+    typeof parsed.action !== "string" ||
+    !AI_ACTIONS.includes(parsed.action as AiAction)
+  ) {
+    throw new Error(`Unexpected action: ${String(parsed.action)}`);
   }
-  if (parsed.action === "send_reply" && !parsed.body?.trim()) {
-    throw new Error("action=send_reply requires a non-empty body");
+  if (
+    (parsed.action === "send_reply" ||
+      parsed.action === "deescalate_close") &&
+    (typeof parsed.body !== "string" || !parsed.body.trim())
+  ) {
+    throw new Error(`action=${parsed.action} requires a non-empty body`);
   }
-  if (parsed.action === "escalate" && !parsed.escalation_reason?.trim()) {
+  if (
+    parsed.action !== "send_reply" &&
+    parsed.action !== "deescalate_close" &&
+    typeof parsed.body === "string" &&
+    parsed.body.trim().length > 0
+  ) {
+    throw new Error(`action=${parsed.action} must not include body`);
+  }
+  if (
+    parsed.action === "escalate" &&
+    (typeof parsed.escalation_reason !== "string" ||
+      !AI_ESCALATION_REASONS.includes(
+        parsed.escalation_reason as AiEscalationReason,
+      ))
+  ) {
     throw new Error("action=escalate requires an escalation_reason");
+  }
+  if (
+    parsed.action !== "escalate" &&
+    typeof parsed.escalation_reason === "string" &&
+    parsed.escalation_reason.trim().length > 0
+  ) {
+    throw new Error(`action=${parsed.action} must not include escalation_reason`);
+  }
+  if (
+    parsed.action === "close_wrong_number" &&
+    (typeof parsed.wrong_scope !== "string" ||
+      !AI_WRONG_SCOPES.includes(parsed.wrong_scope as AiWrongScope))
+  ) {
+    throw new Error("action=close_wrong_number requires wrong_scope");
+  }
+  if (
+    parsed.action !== "close_wrong_number" &&
+    typeof parsed.wrong_scope === "string" &&
+    parsed.wrong_scope.trim().length > 0
+  ) {
+    throw new Error(`action=${parsed.action} must not include wrong_scope`);
   }
   if (
     typeof parsed.confidence !== "number" ||
@@ -116,8 +209,16 @@ export async function generateAiReply(
   ) {
     throw new Error(`Bad confidence: ${parsed.confidence}`);
   }
+  if (
+    parsed.sentiment !== "positive" &&
+    parsed.sentiment !== "neutral" &&
+    parsed.sentiment !== "frustrated" &&
+    parsed.sentiment !== "hostile"
+  ) {
+    throw new Error(`Bad sentiment: ${String(parsed.sentiment)}`);
+  }
 
-  return parsed;
+  return parsed as AiStructuredOutput;
 }
 
 /** Default client factory — reads `ANTHROPIC_API_KEY` from env.

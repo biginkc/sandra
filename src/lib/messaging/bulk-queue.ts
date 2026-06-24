@@ -20,9 +20,13 @@ import { renderTemplate } from "@/lib/sequences/render";
 import type { Database } from "@/lib/supabase/types";
 import {
   classifySmsPhoneAvailability,
+  selectBestSmsPhone,
   type SmsPhoneAvailability,
   type SmsPhoneContact,
 } from "@/lib/messaging/sms-phone";
+import { isSuppressed } from "@/lib/messaging/suppression";
+import { normalizePhone } from "@/lib/csv/normalize";
+import { loadSuppressedSmsPhoneSet } from "@/lib/messaging/opt-out-phone";
 
 export const CONTACTED_MESSAGE_STATUSES = ["sent", "delivered"] as const;
 
@@ -120,6 +124,7 @@ export async function queueSmsBatch(
     id: string;
     homeowner_contact_id: string | null;
     org_id: string | null;
+    outreach_dispo: string | null;
     homeowner: SmsPhoneContact | null;
   }[] = [];
   for (let i = 0; i < args.propertyIds.length; i += CHUNK) {
@@ -127,7 +132,7 @@ export async function queueSmsBatch(
     const { data, error: propError } = await client
       .from("properties")
       .select(
-        `id, homeowner_contact_id, org_id,
+        `id, homeowner_contact_id, org_id, outreach_dispo,
          homeowner:contacts!properties_homeowner_contact_id_fkey(
            phone_1, phone_1_type, phone_2, phone_2_type, phone_3, phone_3_type
          )`,
@@ -173,6 +178,9 @@ export async function queueSmsBatch(
   }
 
   const frozenContactAvailability = new Map<string, SmsPhoneAvailability>();
+  const frozenContactDestinationPhone = new Map<string, string>();
+  const frozenContactDoNotContact = new Map<string, boolean>();
+  const frozenContactSmsOptedOut = new Map<string, boolean>();
   const frozenContactIds = Array.from(
     new Set(
       Array.from(frozenContactByProperty.values()).filter(
@@ -184,19 +192,44 @@ export async function queueSmsBatch(
     const chunk = frozenContactIds.slice(i, i + CHUNK);
     const { data, error } = await client
       .from("contacts")
-      .select("id, phone_1, phone_1_type, phone_2, phone_2_type, phone_3, phone_3_type")
+      .select("id, phone_1, phone_1_type, phone_2, phone_2_type, phone_3, phone_3_type, do_not_contact, sms_opted_out")
       .in("id", chunk);
     if (error) {
       throw new Error(`bulk sms frozen contacts fetch: ${error.message}`);
     }
     data?.forEach((row) => {
       if (row.id) {
+        frozenContactDoNotContact.set(row.id, row.do_not_contact);
+        frozenContactSmsOptedOut.set(row.id, row.sms_opted_out);
+        const destination = selectBestSmsPhone(row);
+        const destinationPhone = normalizePhone(destination?.phone ?? "");
+        if (destinationPhone) {
+          frozenContactDestinationPhone.set(row.id, destinationPhone);
+        }
         frozenContactAvailability.set(
           row.id,
           classifySmsPhoneAvailability(row),
         );
       }
     });
+  }
+  const destinationPhonesByOrg = new Map<string, string[]>();
+  for (const property of allProperties) {
+    if (!property.org_id) continue;
+    const contactId = frozenContactByProperty.get(property.id);
+    if (!contactId) continue;
+    const destinationPhone = frozenContactDestinationPhone.get(contactId);
+    if (!destinationPhone) continue;
+    const phones = destinationPhonesByOrg.get(property.org_id) ?? [];
+    phones.push(destinationPhone);
+    destinationPhonesByOrg.set(property.org_id, phones);
+  }
+  const suppressedFrozenPhonesByOrg = new Map<string, Set<string>>();
+  for (const [orgId, phones] of destinationPhonesByOrg) {
+    suppressedFrozenPhonesByOrg.set(
+      orgId,
+      await loadSuppressedSmsPhoneSet(client, phones, orgId),
+    );
   }
 
   const alreadyQueuedForCampaign = new Set<string>();
@@ -252,6 +285,26 @@ export async function queueSmsBatch(
       continue;
     }
 
+    if (
+      isSuppressed({
+        outreachDispo: property.outreach_dispo,
+        doNotContact: frozenContactDoNotContact.get(contactId) ?? null,
+        smsOptedOut: frozenContactSmsOptedOut.get(contactId) ?? null,
+      })
+    ) {
+      state.skipped++;
+      continue;
+    }
+    const destinationPhone = frozenContactDestinationPhone.get(contactId);
+    if (
+      destinationPhone &&
+      property.org_id &&
+      suppressedFrozenPhonesByOrg.get(property.org_id)?.has(destinationPhone)
+    ) {
+      state.skipped++;
+      continue;
+    }
+
     if (alreadyQueuedForCampaign.has(propertyId)) {
       let nextOffsetMs = state.cumulativeOffsetMs;
       if (state.dayBucketCount > 0) {
@@ -290,7 +343,22 @@ export async function queueSmsBatch(
       contactId,
       "sms",
     );
-    if (consentState === "opted_out") {
+    if (
+      isSuppressed({
+        outreachDispo: property.outreach_dispo,
+        consentState,
+        doNotContact: frozenContactDoNotContact.get(contactId) ?? null,
+        smsOptedOut: frozenContactSmsOptedOut.get(contactId) ?? null,
+      })
+    ) {
+      state.skipped++;
+      continue;
+    }
+    if (
+      destinationPhone &&
+      property.org_id &&
+      suppressedFrozenPhonesByOrg.get(property.org_id)?.has(destinationPhone)
+    ) {
       state.skipped++;
       continue;
     }
@@ -366,6 +434,7 @@ export async function queueSmsBatch(
     } else if (
       outcome.status === "blocked_no_phone" ||
       outcome.status === "blocked_landline" ||
+      outcome.status === "blocked_terminal_dispo" ||
       outcome.status === "contact_not_found" ||
       outcome.status === "property_not_found" ||
       outcome.status === "blocked_no_consent"

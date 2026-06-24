@@ -7,8 +7,10 @@ import type { Database, Json } from "@/lib/supabase/types";
 import { reconcileStoredStatusEvents } from "./status-events";
 import { getConsentState, type ConsentState } from "./consent";
 import { checkQuietHours, type QuietHoursCheck } from "./quiet-hours";
+import { isSmsPhoneSuppressed } from "./opt-out-phone";
 import { getMessagingProvider } from "./registry";
 import { selectBestSmsPhone } from "./sms-phone";
+import { evaluateSuppression, type SuppressionDecision } from "./suppression";
 
 /**
  * Core "send one outbound SMS" operation. Called from the lead-detail
@@ -50,6 +52,13 @@ export type SendSmsOutcome =
   | {
       status: "blocked_landline";
       reason: string;
+    }
+  | {
+      status: "blocked_terminal_dispo";
+      reason: string;
+      source: Extract<SuppressionDecision, { suppressed: true }>["source"];
+      outreachDispo?: string | null;
+      consentState?: ConsentState | null;
     }
   | {
       status: "blocked_no_consent";
@@ -134,12 +143,12 @@ export async function sendSmsToContact(
   const [contactResult, propertyResult] = await Promise.all([
     supabase
       .from("contacts")
-      .select("id, phone_1, phone_1_type, phone_2, phone_2_type, phone_3, phone_3_type")
+      .select("id, phone_1, phone_1_type, phone_2, phone_2_type, phone_3, phone_3_type, do_not_contact, sms_opted_out")
       .eq("id", input.contactId)
       .maybeSingle(),
     supabase
       .from("properties")
-      .select("id, state")
+      .select("id, org_id, state, outreach_dispo")
       .eq("id", input.propertyId)
       .maybeSingle(),
   ]);
@@ -153,6 +162,17 @@ export async function sendSmsToContact(
   }
   if (!propertyResult.data) return { status: "property_not_found" };
 
+  const consentState = await getConsentState(supabase, input.contactId, "sms");
+  const suppression = evaluateSuppression({
+    outreachDispo: propertyResult.data.outreach_dispo,
+    consentState,
+    doNotContact: contactResult.data.do_not_contact,
+    smsOptedOut: contactResult.data.sms_opted_out,
+  });
+  if (suppression.suppressed) {
+    return blockedTerminalDispo(suppression);
+  }
+
   const destination = selectBestSmsPhone(contactResult.data);
   if (!destination) {
     return {
@@ -163,9 +183,30 @@ export async function sendSmsToContact(
   if (destination.lineType === "landline") {
     return { status: "blocked_landline", reason: LANDLINE_BLOCK_REASON };
   }
+  try {
+    if (
+      await isSmsPhoneSuppressed(
+        supabase,
+        destination.phone,
+        propertyResult.data.org_id,
+      )
+    ) {
+      return blockedTerminalDispo({
+        suppressed: true,
+        source: "phone_suppression",
+        outreachDispo: propertyResult.data.outreach_dispo,
+        consentState,
+        reason: "Phone number is suppressed from SMS.",
+      });
+    }
+  } catch (e) {
+    return {
+      status: "db_error",
+      error: e instanceof Error ? e.message : String(e),
+    };
+  }
 
   // 3. Consent check — only hard-block explicit opt-outs; no-consent is allowed.
-  const consentState = await getConsentState(supabase, input.contactId, "sms");
   if (consentState === "opted_out") {
     return {
       status: "blocked_no_consent",
@@ -293,17 +334,18 @@ async function queueForLater(
   providerId: string,
   input: SendSmsInput,
 ): Promise<SendSmsOutcome> {
-  const [contactResult, propertyResult] = await Promise.all([
+  const [contactResult, propertyResult, consentState] = await Promise.all([
     supabase
       .from("contacts")
-      .select("id, phone_1, phone_1_type, phone_2, phone_2_type, phone_3, phone_3_type")
+      .select("id, phone_1, phone_1_type, phone_2, phone_2_type, phone_3, phone_3_type, do_not_contact, sms_opted_out")
       .eq("id", input.contactId)
       .maybeSingle(),
     supabase
       .from("properties")
-      .select("id")
+      .select("id, org_id, outreach_dispo")
       .eq("id", input.propertyId)
       .maybeSingle(),
+    getConsentState(supabase, input.contactId, "sms"),
   ]);
   if (contactResult.error) {
     return { status: "db_error", error: contactResult.error.message };
@@ -314,6 +356,16 @@ async function queueForLater(
   }
   if (!propertyResult.data) return { status: "property_not_found" };
 
+  const suppression = evaluateSuppression({
+    outreachDispo: propertyResult.data.outreach_dispo,
+    consentState,
+    doNotContact: contactResult.data.do_not_contact,
+    smsOptedOut: contactResult.data.sms_opted_out,
+  });
+  if (suppression.suppressed) {
+    return blockedTerminalDispo(suppression);
+  }
+
   const destination = selectBestSmsPhone(contactResult.data);
   if (!destination) {
     return {
@@ -323,6 +375,28 @@ async function queueForLater(
   }
   if (destination.lineType === "landline") {
     return { status: "blocked_landline", reason: LANDLINE_BLOCK_REASON };
+  }
+  try {
+    if (
+      await isSmsPhoneSuppressed(
+        supabase,
+        destination.phone,
+        propertyResult.data.org_id,
+      )
+    ) {
+      return blockedTerminalDispo({
+        suppressed: true,
+        source: "phone_suppression",
+        outreachDispo: propertyResult.data.outreach_dispo,
+        consentState,
+        reason: "Phone number is suppressed from SMS.",
+      });
+    }
+  } catch (e) {
+    return {
+      status: "db_error",
+      error: e instanceof Error ? e.message : String(e),
+    };
   }
 
   let conversationId: string;
@@ -404,7 +478,7 @@ export async function releaseQueuedMessage(
   const { data: msg, error: fetchError } = await supabase
     .from("messages")
     .select(
-      "id, status, provider, contact_id, property_id, body, from_address, to_address, metadata",
+      "id, status, provider, org_id, contact_id, property_id, body, from_address, to_address, metadata",
     )
     .eq("id", messageId)
     .maybeSingle();
@@ -455,13 +529,72 @@ export async function releaseQueuedMessage(
     };
   }
 
-  // Consent re-check — only hard-block if contact explicitly opted out.
-  const consentState = await getConsentState(
-    supabase,
-    msg.contact_id,
-    "sms",
-  );
+  // Line-type re-check — a number can get classified landline between
+  // queue and release (cache backfill, lookup providers), and slot
+  // promotion can move a queued-to landline OUT of phone_1 (slot 2/3),
+  // so the destination must be checked against EVERY current slot, not
+  // just slot 1. Fail permanently rather than blocking so the auto-send
+  // tick doesn't retry it forever.
+  const [consentState, releaseContactResult, propertyResult] = await Promise.all([
+    getConsentState(supabase, msg.contact_id, "sms"),
+    supabase
+      .from("contacts")
+      .select(
+        "phone_1, phone_1_type, phone_2, phone_2_type, phone_3, phone_3_type, do_not_contact, sms_opted_out",
+      )
+      .eq("id", msg.contact_id)
+      .maybeSingle(),
+    supabase
+      .from("properties")
+      .select("org_id, state, outreach_dispo")
+      .eq("id", msg.property_id)
+      .maybeSingle(),
+  ]);
+  if (releaseContactResult.error) {
+    return { status: "db_error", error: releaseContactResult.error.message };
+  }
+  if (propertyResult.error) {
+    return { status: "db_error", error: propertyResult.error.message };
+  }
+
+  const suppression = evaluateSuppression({
+    outreachDispo: propertyResult.data?.outreach_dispo ?? null,
+    consentState,
+    doNotContact: releaseContactResult.data?.do_not_contact ?? null,
+    smsOptedOut: releaseContactResult.data?.sms_opted_out ?? null,
+  });
+  if (suppression.suppressed) {
+    const outcome = blockedTerminalDispo(suppression);
+    await failQueuedMessage(supabase, msg.id, outcome.reason);
+    return outcome;
+  }
+  try {
+    if (
+      await isSmsPhoneSuppressed(
+        supabase,
+        msg.to_address,
+        propertyResult.data?.org_id ?? msg.org_id,
+      )
+    ) {
+      const outcome = blockedTerminalDispo({
+        suppressed: true,
+        source: "phone_suppression",
+        outreachDispo: propertyResult.data?.outreach_dispo ?? null,
+        consentState,
+        reason: "Phone number is suppressed from SMS.",
+      });
+      await failQueuedMessage(supabase, msg.id, outcome.reason);
+      return outcome;
+    }
+  } catch (e) {
+    return {
+      status: "db_error",
+      error: e instanceof Error ? e.message : String(e),
+    };
+  }
+
   if (consentState === "opted_out") {
+    await failQueuedMessage(supabase, msg.id, consentMessage(consentState));
     return {
       status: "blocked_no_consent",
       reason: consentMessage(consentState),
@@ -469,19 +602,7 @@ export async function releaseQueuedMessage(
     };
   }
 
-  // Line-type re-check — a number can get classified landline between
-  // queue and release (cache backfill, lookup providers), and slot
-  // promotion can move a queued-to landline OUT of phone_1 (slot 2/3),
-  // so the destination must be checked against EVERY current slot, not
-  // just slot 1. Fail permanently rather than blocking so the auto-send
-  // tick doesn't retry it forever.
-  const { data: releaseContact } = await supabase
-    .from("contacts")
-    .select(
-      "phone_1, phone_1_type, phone_2, phone_2_type, phone_3, phone_3_type",
-    )
-    .eq("id", msg.contact_id)
-    .maybeSingle();
+  const releaseContact = releaseContactResult.data;
   if (releaseContact) {
     const slots: [string | null, string][] = [
       [releaseContact.phone_1, releaseContact.phone_1_type],
@@ -501,12 +622,7 @@ export async function releaseQueuedMessage(
   }
 
   // Quiet-hours re-check — dominant reason to queue in the first place.
-  const { data: property } = await supabase
-    .from("properties")
-    .select("state")
-    .eq("id", msg.property_id)
-    .maybeSingle();
-  const quiet = checkQuietHours(property?.state ?? null);
+  const quiet = checkQuietHours(propertyResult.data?.state ?? null);
   if (!quiet.ok) {
     return {
       status: "blocked_quiet_hours",
@@ -606,6 +722,18 @@ function quietMessage(check: QuietHoursCheck): string {
     return "Property has no US state — can't determine local time. Add state and retry.";
   }
   return `Quiet hours — it's ${check.localTime} local (${check.zone}). TCPA window is 08:00–21:00.`;
+}
+
+function blockedTerminalDispo(
+  decision: Extract<SuppressionDecision, { suppressed: true }>,
+): Extract<SendSmsOutcome, { status: "blocked_terminal_dispo" }> {
+  return {
+    status: "blocked_terminal_dispo",
+    reason: decision.reason,
+    source: decision.source,
+    outreachDispo: decision.outreachDispo ?? null,
+    consentState: decision.consentState ?? null,
+  };
 }
 
 function providerIdToDefaultFrom(providerId: string): string | null {

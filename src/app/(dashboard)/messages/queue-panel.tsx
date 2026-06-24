@@ -262,6 +262,11 @@ export function QueuePanel({
       case "blocked_no_consent":
         toast.error("Blocked: no consent", { description: outcome.reason });
         return false;
+      case "blocked_landline":
+      case "blocked_terminal_dispo":
+        toast.warning("Skipped", { description: outcome.reason });
+        setRows((prev) => prev.filter((r) => r.id !== row.id));
+        return false;
       case "blocked_quiet_hours":
         toast.warning("Blocked: quiet hours", { description: outcome.reason });
         return false;
