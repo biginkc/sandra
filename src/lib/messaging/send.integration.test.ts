@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { releaseQueuedMessage, sendSmsToContact } from "@/lib/messaging/send";
 import { recordConsentEvent } from "@/lib/messaging/consent";
+import { recordSmsPhoneSuppression } from "@/lib/messaging/opt-out-phone";
 import { createTestClient } from "@tests/integration/client";
 import { resetTenantTables } from "@tests/integration/reset";
 
@@ -18,6 +19,9 @@ const ORIGINAL_ENV = {
 async function seed(params: {
   doNotContact?: boolean;
   phone?: string | null;
+  phone1Type?: "mobile" | "landline" | "unknown";
+  phone2?: string | null;
+  phone2Type?: "mobile" | "landline" | "unknown";
   state?: string;
   withConsent?: boolean;
 }): Promise<{ contactId: string; propertyId: string }> {
@@ -28,7 +32,9 @@ async function seed(params: {
       first_name: "Integration",
       last_name: "Test",
       phone_1: phone1,
-      phone_1_type: phone1 ? "mobile" : "unknown",
+      phone_1_type: phone1 ? (params.phone1Type ?? "mobile") : "unknown",
+      phone_2: params.phone2 ?? null,
+      phone_2_type: params.phone2 ? (params.phone2Type ?? "mobile") : "unknown",
       do_not_contact: params.doNotContact ?? false,
     })
     .select("id")
@@ -51,6 +57,18 @@ async function seed(params: {
     });
   }
   return { contactId: contact!.id, propertyId: property!.id };
+}
+
+async function getOrgId(): Promise<string> {
+  const { data, error } = await supabase
+    .from("organizations")
+    .select("id")
+    .limit(1)
+    .single();
+  if (error || !data) {
+    throw new Error(`org lookup failed: ${error?.message ?? "no org"}`);
+  }
+  return data.id;
 }
 
 describe("sendSmsToContact (integration)", () => {
@@ -168,6 +186,56 @@ describe("sendSmsToContact (integration)", () => {
     expect(count).toBe(0);
   });
 
+  it("blocks a re-imported contact when the same phone is suppressed", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-08T18:00:00Z"));
+    const phone = "+18165551801";
+    const original = await seed({ phone, withConsent: true });
+    const orgId = await getOrgId();
+    await recordSmsPhoneSuppression(supabase, {
+      contactId: original.contactId,
+      fromPhone: phone,
+      orgId,
+      source: "integration-test-reimport",
+      sourceDetail: { reason: "original_contact_opted_out" },
+      occurredAt: new Date("2026-06-08T17:00:00Z"),
+      providerId: "mock",
+    });
+    const reimported = await seed({
+      phone: "+18165551891",
+      phone1Type: "landline",
+      phone2: phone,
+      phone2Type: "mobile",
+      withConsent: true,
+    });
+
+    try {
+      const { data: contact } = await supabase
+        .from("contacts")
+        .select("sms_opted_out")
+        .eq("id", reimported.contactId)
+        .single();
+      expect(contact?.sms_opted_out).toBe(false);
+
+      const outcome = await sendSmsToContact(supabase, {
+        contactId: reimported.contactId,
+        propertyId: reimported.propertyId,
+        body: "should never insert",
+      });
+      expect(outcome.status).toBe("blocked_terminal_dispo");
+      if (outcome.status === "blocked_terminal_dispo") {
+        expect(outcome.source).toBe("phone_suppression");
+      }
+
+      const { count } = await supabase
+        .from("messages")
+        .select("*", { count: "exact", head: true });
+      expect(count).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("blocks queue creation when latest consent event is opt_out", async () => {
     const { contactId, propertyId } = await seed({ withConsent: true });
     await recordConsentEvent(supabase, {
@@ -175,6 +243,7 @@ describe("sendSmsToContact (integration)", () => {
       channel: "sms",
       eventType: "opt_out",
       source: "integration-test-queue-opt-out",
+      occurredAt: new Date(Date.now() + 1000),
     });
 
     const outcome = await sendSmsToContact(supabase, {
@@ -186,6 +255,44 @@ describe("sendSmsToContact (integration)", () => {
     expect(outcome.status).toBe("blocked_terminal_dispo");
     if (outcome.status === "blocked_terminal_dispo") {
       expect(outcome.source).toBe("consent_state");
+    }
+
+    const { count } = await supabase
+      .from("messages")
+      .select("*", { count: "exact", head: true });
+    expect(count).toBe(0);
+  });
+
+  it("blocks queued-row creation for a re-imported suppressed phone", async () => {
+    const phone = "+18165551802";
+    const original = await seed({ phone, withConsent: true });
+    const orgId = await getOrgId();
+    await recordSmsPhoneSuppression(supabase, {
+      contactId: original.contactId,
+      fromPhone: phone,
+      orgId,
+      source: "integration-test-reimport-queue",
+      sourceDetail: { reason: "original_contact_opted_out" },
+      occurredAt: new Date("2026-06-08T17:00:00Z"),
+      providerId: "mock",
+    });
+    const reimported = await seed({
+      phone: "+18165551892",
+      phone1Type: "landline",
+      phone2: phone,
+      phone2Type: "mobile",
+      withConsent: true,
+    });
+
+    const outcome = await sendSmsToContact(supabase, {
+      contactId: reimported.contactId,
+      propertyId: reimported.propertyId,
+      body: "should never queue",
+      queueOnly: true,
+    });
+    expect(outcome.status).toBe("blocked_terminal_dispo");
+    if (outcome.status === "blocked_terminal_dispo") {
+      expect(outcome.source).toBe("phone_suppression");
     }
 
     const { count } = await supabase
@@ -539,6 +646,43 @@ describe("sendSmsToContact (integration)", () => {
       .single();
     expect(row?.status).toBe("failed");
     expect(row?.error_message).toMatch(/opted out/i);
+  });
+
+  it("release permanently fails when the queued phone is suppressed before release", async () => {
+    const phone = "+18165551803";
+    const { contactId, propertyId } = await seed({ phone, withConsent: true });
+    const queue = await sendSmsToContact(supabase, {
+      contactId,
+      propertyId,
+      body: "queued before phone suppression",
+      queueOnly: true,
+    });
+    expect(queue.status).toBe("queued");
+    if (queue.status !== "queued") return;
+
+    await recordSmsPhoneSuppression(supabase, {
+      contactId,
+      fromPhone: phone,
+      orgId: await getOrgId(),
+      source: "integration-test-mid-queue-phone-suppression",
+      sourceDetail: { reason: "queued_phone_opted_out" },
+      occurredAt: new Date("2026-06-08T17:00:00Z"),
+      providerId: "mock",
+    });
+
+    const release = await releaseQueuedMessage(supabase, queue.messageId);
+    expect(release.status).toBe("blocked_terminal_dispo");
+    if (release.status === "blocked_terminal_dispo") {
+      expect(release.source).toBe("phone_suppression");
+    }
+
+    const { data: row } = await supabase
+      .from("messages")
+      .select("status, error_message")
+      .eq("id", queue.messageId)
+      .single();
+    expect(row?.status).toBe("failed");
+    expect(row?.error_message).toMatch(/suppressed/i);
   });
 
   it("release permanently fails when a queued property's disposition became terminal", async () => {

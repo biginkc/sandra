@@ -57,6 +57,11 @@ type MockState = {
   contact: {
     first_name: string | null;
     phone_1: string | null;
+    phone_1_type: string | null;
+    phone_2: string | null;
+    phone_2_type: string | null;
+    phone_3: string | null;
+    phone_3_type: string | null;
   };
   config: {
     active: boolean;
@@ -108,6 +113,11 @@ function createMockState(): MockState {
     contact: {
       first_name: "Sam",
       phone_1: "+18165550001",
+      phone_1_type: "mobile",
+      phone_2: null,
+      phone_2_type: null,
+      phone_3: null,
+      phone_3_type: null,
     },
     messages: [],
     nextMessageId: 1,
@@ -651,10 +661,7 @@ describe("dispatchAiResponse debounce", () => {
       { anthropic: {} as never },
     );
 
-    expect(outcome).toEqual({
-      outcome: "auto_closed",
-      reason: "model:not_interested",
-    });
+    expect(outcome).toEqual({ outcome: "skipped", reason: "already_terminal" });
     expect(state.property.outreach_dispo).toBe("nurture");
   });
 });

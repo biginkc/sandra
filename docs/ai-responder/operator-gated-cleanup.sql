@@ -124,59 +124,62 @@ where needs_human_attention = true
 --   outreach_dispo = coalesce(outreach_dispo, 'opted_out')
 
 -- DNC PROMOTION UPDATE SHAPE. OPERATOR-GATED: run only after B1 preview sign-off.
-update properties
-set
-  outreach_dispo = coalesce(outreach_dispo, 'dnc'),
-  needs_human_attention = false,
-  updated_at = now()
-where needs_human_attention = true
-  and assigned_user_id is null
-  and status = 'prospect'
-  and follow_up_at is null
-  and coalesce(outreach_dispo, '') not in ('nurture', 'callback_requested')
-  and (
-    last_ai_escalation_reason ilike '%demand to stop%'
-    or last_ai_escalation_reason ilike '%lose this number%'
-    or last_ai_escalation_reason ilike '%never contact%'
-    or last_ai_escalation_reason ilike '%violent%'
-  );
+-- Review this shape, then copy into a separately approved execution script:
+-- update properties
+-- set
+--   outreach_dispo = coalesce(outreach_dispo, 'dnc'),
+--   needs_human_attention = false,
+--   updated_at = now()
+-- where needs_human_attention = true
+--   and assigned_user_id is null
+--   and status = 'prospect'
+--   and follow_up_at is null
+--   and coalesce(outreach_dispo, '') not in ('nurture', 'callback_requested')
+--   and (
+--     last_ai_escalation_reason ilike '%demand to stop%'
+--     or last_ai_escalation_reason ilike '%lose this number%'
+--     or last_ai_escalation_reason ilike '%never contact%'
+--     or last_ai_escalation_reason ilike '%violent%'
+--   );
 
 -- U1 UPDATE SHAPE. OPERATOR-GATED: historical wrong-number rows become
 -- property-level wrong_number only. The old rows cannot prove phone-level
 -- wrongness reliably.
-update properties
-set
-  outreach_dispo = coalesce(outreach_dispo, 'wrong_number'),
-  needs_human_attention = false,
-  updated_at = now()
-where needs_human_attention = true
-  and assigned_user_id is null
-  and status = 'prospect'
-  and follow_up_at is null
-  and coalesce(outreach_dispo, '') not in ('nurture', 'callback_requested')
-  and last_ai_escalation_reason ilike 'model:wrong_number%';
+-- Review this shape, then copy into a separately approved execution script:
+-- update properties
+-- set
+--   outreach_dispo = coalesce(outreach_dispo, 'wrong_number'),
+--   needs_human_attention = false,
+--   updated_at = now()
+-- where needs_human_attention = true
+--   and assigned_user_id is null
+--   and status = 'prospect'
+--   and follow_up_at is null
+--   and coalesce(outreach_dispo, '') not in ('nurture', 'callback_requested')
+--   and last_ai_escalation_reason ilike 'model:wrong_number%';
 
 -- U2 UPDATE SHAPE. OPERATOR-GATED: dead-end non-seller rows become
 -- not_interested (re-textable), except rows promoted to DNC above.
-update properties
-set
-  outreach_dispo = coalesce(outreach_dispo, 'not_interested'),
-  needs_human_attention = false,
-  updated_at = now()
-where needs_human_attention = true
-  and assigned_user_id is null
-  and status = 'prospect'
-  and follow_up_at is null
-  and coalesce(outreach_dispo, '') not in ('nurture', 'callback_requested')
-  and coalesce(outreach_dispo, '') <> 'dnc'
-  and (
-    last_ai_escalation_reason ilike 'model:not_selling%'
-    or last_ai_escalation_reason ilike 'model:not_interested%'
-    or last_ai_escalation_reason ilike 'model:hostile%'
-    or last_ai_escalation_reason ilike 'model:frustrated%'
-    or last_ai_escalation_reason ilike 'model:non_serious%'
-    or last_ai_escalation_reason ilike 'model:deescalate_close%'
-  );
+-- Review this shape, then copy into a separately approved execution script:
+-- update properties
+-- set
+--   outreach_dispo = coalesce(outreach_dispo, 'not_interested'),
+--   needs_human_attention = false,
+--   updated_at = now()
+-- where needs_human_attention = true
+--   and assigned_user_id is null
+--   and status = 'prospect'
+--   and follow_up_at is null
+--   and coalesce(outreach_dispo, '') not in ('nurture', 'callback_requested')
+--   and coalesce(outreach_dispo, '') <> 'dnc'
+--   and (
+--     last_ai_escalation_reason ilike 'model:not_selling%'
+--     or last_ai_escalation_reason ilike 'model:not_interested%'
+--     or last_ai_escalation_reason ilike 'model:hostile%'
+--     or last_ai_escalation_reason ilike 'model:frustrated%'
+--     or last_ai_escalation_reason ilike 'model:non_serious%'
+--     or last_ai_escalation_reason ilike 'model:deescalate_close%'
+--   );
 
 -- Residual review preview after the operator-gated updates.
 select

@@ -74,6 +74,57 @@ function createServiceRoleClient() {
   });
 }
 
+async function resolveInboundOrgId(
+  supabase: SupabaseClient<Database>,
+  input: {
+    contactId: string | null;
+    propertyId: string | null;
+    fromPhone: string;
+  },
+): Promise<string | null> {
+  if (input.propertyId) {
+    const { data, error } = await supabase
+      .from("properties")
+      .select("org_id")
+      .eq("id", input.propertyId)
+      .maybeSingle();
+    if (error) {
+      throw new Error(`resolveInboundOrgId property: ${error.message}`);
+    }
+    if (data?.org_id) return data.org_id;
+  }
+
+  if (input.contactId) {
+    const { data, error } = await supabase
+      .from("contacts")
+      .select("org_id")
+      .eq("id", input.contactId)
+      .maybeSingle();
+    if (error) {
+      throw new Error(`resolveInboundOrgId contact: ${error.message}`);
+    }
+    if (data?.org_id) return data.org_id;
+  }
+
+  const phone = normalizePhone(input.fromPhone);
+  if (!phone) return null;
+  const results = await Promise.all([
+    supabase.from("contacts").select("org_id").eq("phone_1", phone),
+    supabase.from("contacts").select("org_id").eq("phone_2", phone),
+    supabase.from("contacts").select("org_id").eq("phone_3", phone),
+  ]);
+  const orgIds = new Set<string>();
+  for (const result of results) {
+    if (result.error) {
+      throw new Error(`resolveInboundOrgId phone: ${result.error.message}`);
+    }
+    for (const row of result.data ?? []) {
+      if (row.org_id) orgIds.add(row.org_id);
+    }
+  }
+  return orgIds.size === 1 ? Array.from(orgIds)[0] : null;
+}
+
 export async function handleInboundWebhook(
   request: Request,
   opts: { includeFullUrl: boolean; provider: MessagingProvider | null },
@@ -136,6 +187,11 @@ export async function handleInboundWebhook(
       const contactId = thread.contactId;
       const propertyId = thread.propertyId;
       const conversationId = thread.conversationId;
+      const orgId = await resolveInboundOrgId(supabase, {
+        contactId,
+        propertyId,
+        fromPhone: ev.from,
+      });
       let attributedOutboundMessageId: string | null = null;
       try {
         attributedOutboundMessageId = await findAttributedOutboundMessageId(supabase, {
@@ -162,10 +218,71 @@ export async function handleInboundWebhook(
         ...(ev.mediaUrls ? { mediaUrls: ev.mediaUrls } : {}),
       } as Json;
 
-      if (matchesStopKeyword(bodyTrimmed)) {
+      if (DNC_KEYWORDS.test(ev.body)) {
+        if (!orgId) {
+          throw new Error("DNC webhook could not resolve org for phone suppression");
+        }
         await applyPhoneLevelOptOut(supabase, {
           contactId,
           fromPhone: ev.from,
+          orgId,
+          source,
+          sourceDetail: {
+            externalId: ev.externalId,
+            from: ev.from,
+            keyword: "dnc",
+          },
+          occurredAt: ev.receivedAt,
+          providerId: provider.providerId,
+          surface: "dnc",
+          idempotencyKey: ev.externalId,
+        });
+        if (propertyId) {
+          await supabase
+            .from("properties")
+            .update({ outreach_dispo: "dnc" })
+            .eq("id", propertyId);
+        }
+        const insertOutcome = await insertInboundMessage(supabase, {
+          providerId: provider.providerId,
+          externalId: ev.externalId,
+          from: ev.from,
+          to: ev.to,
+          body: ev.body,
+          contactId,
+          propertyId,
+          conversationId,
+          attributedOutboundMessageId,
+          metadata: { ...jsonObject(baseMetadata), keyword: "dnc" } as Json,
+        });
+        if (insertOutcome.error) {
+          await markWebhookEventError(
+            supabase,
+            provider.providerId,
+            ev.externalId,
+            insertOutcome.error.message,
+          );
+          return NextResponse.json(
+            { error: "inbound message insert failed" },
+            { status: 500 },
+          );
+        }
+        await markWebhookEventProcessed(
+          supabase,
+          provider.providerId,
+          ev.externalId,
+        );
+        continue;
+      }
+
+      if (matchesStopKeyword(bodyTrimmed)) {
+        if (!orgId) {
+          throw new Error("STOP webhook could not resolve org for phone suppression");
+        }
+        await applyPhoneLevelOptOut(supabase, {
+          contactId,
+          fromPhone: ev.from,
+          orgId,
           source,
           sourceDetail: { externalId: ev.externalId, from: ev.from },
           occurredAt: ev.receivedAt,
@@ -249,59 +366,6 @@ export async function handleInboundWebhook(
         continue;
       }
 
-      if (DNC_KEYWORDS.test(ev.body)) {
-        await applyPhoneLevelOptOut(supabase, {
-          contactId,
-          fromPhone: ev.from,
-          source,
-          sourceDetail: {
-            externalId: ev.externalId,
-            from: ev.from,
-            keyword: "dnc",
-          },
-          occurredAt: ev.receivedAt,
-          providerId: provider.providerId,
-          surface: "dnc",
-          idempotencyKey: ev.externalId,
-        });
-        if (propertyId) {
-          await supabase
-            .from("properties")
-            .update({ outreach_dispo: "dnc" })
-            .eq("id", propertyId);
-        }
-        const insertOutcome = await insertInboundMessage(supabase, {
-          providerId: provider.providerId,
-          externalId: ev.externalId,
-          from: ev.from,
-          to: ev.to,
-          body: ev.body,
-          contactId,
-          propertyId,
-          conversationId,
-          attributedOutboundMessageId,
-          metadata: { ...jsonObject(baseMetadata), keyword: "dnc" } as Json,
-        });
-        if (insertOutcome.error) {
-          await markWebhookEventError(
-            supabase,
-            provider.providerId,
-            ev.externalId,
-            insertOutcome.error.message,
-          );
-          return NextResponse.json(
-            { error: "inbound message insert failed" },
-            { status: 500 },
-          );
-        }
-        await markWebhookEventProcessed(
-          supabase,
-          provider.providerId,
-          ev.externalId,
-        );
-        continue;
-      }
-
       if (WRONG_NUMBER_KEYWORDS.test(ev.body)) {
         const wrongScope = classifyWrongNumberScope(ev.body);
         if (propertyId) {
@@ -324,9 +388,15 @@ export async function handleInboundWebhook(
           }
         }
         if (wrongScope === "all") {
+          if (!orgId) {
+            throw new Error(
+              "wrong-number webhook could not resolve org for phone suppression",
+            );
+          }
           await applyPhoneLevelOptOut(supabase, {
             contactId,
             fromPhone: ev.from,
+            orgId,
             source,
             sourceDetail: {
               externalId: ev.externalId,
@@ -580,6 +650,7 @@ export async function handleInboundWebhook(
               propertyId: effectivePropertyId,
               contactId: effectiveContactId,
               conversationId: insertOutcome.conversationId,
+              inboundFromPhone: ev.from,
               inboundBody: ev.body,
               inboundMessageId: insertOutcome.messageId,
             },

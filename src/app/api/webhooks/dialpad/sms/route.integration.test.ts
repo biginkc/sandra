@@ -373,6 +373,17 @@ describe("POST /api/webhooks/dialpad/sms (integration)", () => {
       .eq("event_type", "opt_out");
     expect(events).toHaveLength(1);
     expect(events?.[0].source).toBe("mock_inbound_webhook");
+    const { data: suppression } = await supabase
+      .from("sms_phone_suppressions")
+      .select("phone_e164, source, first_contact_id")
+      .eq("channel", "sms")
+      .eq("phone_e164", "+18165558888")
+      .single();
+    expect(suppression).toMatchObject({
+      phone_e164: "+18165558888",
+      source: "mock_inbound_webhook",
+      first_contact_id: contactId,
+    });
 
     const { data: stopMessage } = await supabase
       .from("messages")
@@ -1616,6 +1627,13 @@ describe("POST /api/webhooks/dialpad/sms (integration)", () => {
       .eq("id", contactId)
       .single();
     expect(contact?.sms_opted_out).toBe(true);
+
+    const { count: suppressionCount } = await supabase
+      .from("sms_phone_suppressions")
+      .select("*", { count: "exact", head: true })
+      .eq("channel", "sms")
+      .eq("phone_e164", phone);
+    expect(suppressionCount).toBe(1);
   });
 
   it("acknowledges duplicate delivery while another worker is actively processing it", async () => {
@@ -1693,6 +1711,27 @@ describe("POST /api/webhooks/dialpad/sms (integration)", () => {
   it("does not duplicate DNC consent events when replay resumes a pending keyword webhook", async () => {
     const phone = "+18165559115";
     const contactId = await seedContact(phone, { optIn: true });
+    const { data: property } = await supabase
+      .from("properties")
+      .insert({
+        address: "15 DNC Replay Ln",
+        state: "MO",
+        status: "prospect",
+        homeowner_contact_id: contactId,
+      })
+      .select("id")
+      .single();
+    await supabase.from("messages").insert({
+      channel: "sms",
+      direction: "outbound",
+      status: "sent",
+      provider: "mock",
+      from_address: "+18163706846",
+      to_address: phone,
+      body: "initial",
+      contact_id: contactId,
+      property_id: property!.id,
+    });
     await seedPendingKeywordReplay({
       contactId,
       phone,
@@ -1725,6 +1764,13 @@ describe("POST /api/webhooks/dialpad/sms (integration)", () => {
       .eq("id", contactId)
       .single();
     expect(contact?.sms_opted_out).toBe(true);
+
+    const { data: propertyAfter } = await supabase
+      .from("properties")
+      .select("outreach_dispo")
+      .eq("id", property!.id)
+      .single();
+    expect(propertyAfter?.outreach_dispo).toBe("dnc");
   });
 
   // --------------------------------------------------------------------------

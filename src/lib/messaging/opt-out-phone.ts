@@ -9,6 +9,7 @@ import type { Database, Json } from "@/lib/supabase/types";
 export type ApplyPhoneLevelOptOutInput = {
   contactId: string | null;
   fromPhone: string;
+  orgId: string;
   source: string;
   sourceDetail: Json;
   occurredAt: Date;
@@ -21,10 +22,12 @@ export async function applyPhoneLevelOptOut(
   supabase: SupabaseClient<Database>,
   input: ApplyPhoneLevelOptOutInput,
 ) {
+  let suppressionError: unknown = null;
   try {
     await recordSmsPhoneSuppression(supabase, {
       contactId: input.contactId,
       fromPhone: input.fromPhone,
+      orgId: input.orgId,
       source: input.source,
       sourceDetail: input.sourceDetail,
       occurredAt: input.occurredAt,
@@ -39,9 +42,14 @@ export async function applyPhoneLevelOptOut(
         surface: input.surface,
       },
     });
+    suppressionError = e;
   }
 
-  const contactIds = await loadAllContactIdsByPhone(supabase, input.fromPhone);
+  const contactIds = await loadAllContactIdsByPhone(
+    supabase,
+    input.fromPhone,
+    input.orgId,
+  );
   if (input.contactId) {
     contactIds.add(input.contactId);
   }
@@ -69,13 +77,16 @@ export async function applyPhoneLevelOptOut(
         },
       });
     }
-    await supabase
+    const { error: contactUpdateError } = await supabase
       .from("contacts")
       .update({
         sms_opted_out: true,
         sms_opted_out_at: input.occurredAt.toISOString(),
       })
       .eq("id", contactId);
+    if (contactUpdateError) {
+      throw new Error(`applyPhoneLevelOptOut contact update: ${contactUpdateError.message}`);
+    }
     try {
       await pauseContactEnrollments(supabase, {
         contactId,
@@ -91,6 +102,9 @@ export async function applyPhoneLevelOptOut(
       });
     }
   }
+  if (suppressionError) {
+    throw suppressionError;
+  }
 }
 
 export async function recordSmsPhoneSuppression(
@@ -98,6 +112,7 @@ export async function recordSmsPhoneSuppression(
   input: {
     contactId: string | null;
     fromPhone: string;
+    orgId: string;
     source: string;
     sourceDetail: Json;
     occurredAt: Date;
@@ -113,6 +128,7 @@ export async function recordSmsPhoneSuppression(
     .upsert(
       {
         channel: "sms",
+        org_id: input.orgId,
         phone_e164: phone,
         source: input.source,
         source_detail: input.sourceDetail,
@@ -121,7 +137,7 @@ export async function recordSmsPhoneSuppression(
         suppressed_at: timestamp,
         updated_at: timestamp,
       },
-      { onConflict: "channel,phone_e164" },
+      { onConflict: "org_id,channel,phone_e164" },
     );
   if (error) {
     throw new Error(`recordSmsPhoneSuppression: ${error.message}`);
@@ -131,12 +147,14 @@ export async function recordSmsPhoneSuppression(
 export async function isSmsPhoneSuppressed(
   supabase: SupabaseClient<Database>,
   rawPhone: string | null | undefined,
+  orgId: string | null | undefined,
 ): Promise<boolean> {
   const phone = normalizePhone(rawPhone ?? "");
-  if (!phone) return false;
+  if (!phone || !orgId) return false;
   const { data, error } = await supabase
     .from("sms_phone_suppressions")
     .select("id")
+    .eq("org_id", orgId)
     .eq("channel", "sms")
     .eq("phone_e164", phone)
     .limit(1);
@@ -145,7 +163,7 @@ export async function isSmsPhoneSuppressed(
       tags: { surface: "sms_phone_suppression_lookup" },
       extra: { phone },
     });
-    return false;
+    throw new Error(`isSmsPhoneSuppressed: ${error.message}`);
   }
   return (data ?? []).length > 0;
 }
@@ -153,7 +171,9 @@ export async function isSmsPhoneSuppressed(
 export async function loadSuppressedSmsPhoneSet(
   supabase: SupabaseClient<Database>,
   rawPhones: Iterable<string | null | undefined>,
+  orgId: string | null | undefined,
 ): Promise<Set<string>> {
+  if (!orgId) return new Set<string>();
   const phones = Array.from(
     new Set(
       Array.from(rawPhones)
@@ -166,6 +186,7 @@ export async function loadSuppressedSmsPhoneSet(
   const { data, error } = await supabase
     .from("sms_phone_suppressions")
     .select("phone_e164")
+    .eq("org_id", orgId)
     .eq("channel", "sms")
     .in("phone_e164", phones);
   if (error) {
@@ -173,7 +194,7 @@ export async function loadSuppressedSmsPhoneSet(
       tags: { surface: "sms_phone_suppression_bulk_lookup" },
       extra: { count: phones.length },
     });
-    return new Set<string>();
+    throw new Error(`loadSuppressedSmsPhoneSet: ${error.message}`);
   }
   return new Set((data ?? []).map((row) => row.phone_e164));
 }
@@ -181,14 +202,27 @@ export async function loadSuppressedSmsPhoneSet(
 async function loadAllContactIdsByPhone(
   supabase: SupabaseClient<Database>,
   rawPhone: string,
+  orgId: string,
 ): Promise<Set<string>> {
   const normalizedPhone = normalizePhone(rawPhone);
   if (!normalizedPhone) return new Set<string>();
 
   const results = await Promise.all([
-    supabase.from("contacts").select("id").eq("phone_1", normalizedPhone),
-    supabase.from("contacts").select("id").eq("phone_2", normalizedPhone),
-    supabase.from("contacts").select("id").eq("phone_3", normalizedPhone),
+    supabase
+      .from("contacts")
+      .select("id")
+      .eq("org_id", orgId)
+      .eq("phone_1", normalizedPhone),
+    supabase
+      .from("contacts")
+      .select("id")
+      .eq("org_id", orgId)
+      .eq("phone_2", normalizedPhone),
+    supabase
+      .from("contacts")
+      .select("id")
+      .eq("org_id", orgId)
+      .eq("phone_3", normalizedPhone),
   ]);
 
   const contactIds = new Set<string>();

@@ -101,6 +101,8 @@ async function seedConfig(overrides: Partial<{
 
 async function seedLead(opts: {
   phone: string;
+  phone2?: string | null;
+  phone3?: string | null;
   optIn?: boolean;
   disabled?: boolean;
   state?: string;
@@ -112,6 +114,10 @@ async function seedLead(opts: {
       last_name: "Test",
       phone_1: opts.phone,
       phone_1_type: "mobile",
+      phone_2: opts.phone2 ?? null,
+      phone_2_type: opts.phone2 ? "mobile" : "unknown",
+      phone_3: opts.phone3 ?? null,
+      phone_3_type: opts.phone3 ? "mobile" : "unknown",
     })
     .select("id")
     .single();
@@ -148,6 +154,44 @@ describe("dispatchAiResponse (integration)", () => {
   beforeEach(async () => {
     await resetTenantTables(supabase);
     resetMockState();
+  });
+
+  it("Claude opt_out suppresses the actual inbound sender when it is phone_2", async () => {
+    await seedConfig();
+    const { propertyId, contactId } = await seedLead({
+      phone: "+18167554116",
+      phone2: "+18167554117",
+    });
+
+    const outcome = await dispatchAiResponse(
+      supabase,
+      {
+        propertyId,
+        contactId,
+        inboundFromPhone: "+18167554117",
+        inboundBody: "please delete my number",
+      },
+      {
+        anthropic: stubAnthropic({
+          action: "opt_out",
+          confidence: 0.97,
+          sentiment: "neutral",
+        }),
+      },
+    );
+
+    expect(outcome).toEqual({ outcome: "opted_out", reason: "model:opt_out" });
+    const { data: suppression } = await supabase
+      .from("sms_phone_suppressions")
+      .select("phone_e164, source, first_contact_id")
+      .eq("channel", "sms")
+      .eq("phone_e164", "+18167554117")
+      .single();
+    expect(suppression).toMatchObject({
+      phone_e164: "+18167554117",
+      source: "ai_responder",
+      first_contact_id: contactId,
+    });
   });
 
   // --------------------------------------------------------------------------
@@ -536,6 +580,62 @@ describe("dispatchAiResponse (integration)", () => {
       .eq("id", contactId)
       .single();
     expect(contact?.sms_opted_out).toBe(true);
+    const { data: suppression } = await supabase
+      .from("sms_phone_suppressions")
+      .select("phone_e164, source, first_contact_id")
+      .eq("channel", "sms")
+      .eq("phone_e164", "+18167554016")
+      .single();
+    expect(suppression).toMatchObject({
+      phone_e164: "+18167554016",
+      source: "ai_responder",
+      first_contact_id: contactId,
+    });
+  });
+
+  it("Claude opt_out suppresses the actual inbound sender when it is phone_2", async () => {
+    await seedConfig();
+    const { propertyId, contactId } = await seedLead({
+      phone: "+18167554116",
+      phone2: "+18167554117",
+    });
+
+    const outcome = await dispatchAiResponse(
+      supabase,
+      {
+        propertyId,
+        contactId,
+        inboundFromPhone: "+18167554117",
+        inboundBody: "please delete this number",
+      },
+      {
+        anthropic: stubAnthropic({
+          action: "opt_out",
+          confidence: 0.97,
+          sentiment: "neutral",
+        }),
+      },
+    );
+
+    expect(outcome).toEqual({ outcome: "opted_out", reason: "model:opt_out" });
+    const { data: suppression } = await supabase
+      .from("sms_phone_suppressions")
+      .select("phone_e164, source, first_contact_id")
+      .eq("channel", "sms")
+      .eq("phone_e164", "+18167554117")
+      .single();
+    expect(suppression).toMatchObject({
+      phone_e164: "+18167554117",
+      source: "ai_responder",
+      first_contact_id: contactId,
+    });
+
+    const { count: wrongPhoneSuppressionCount } = await supabase
+      .from("sms_phone_suppressions")
+      .select("*", { count: "exact", head: true })
+      .eq("channel", "sms")
+      .eq("phone_e164", "+18167554116");
+    expect(wrongPhoneSuppressionCount).toBe(0);
   });
 
   it("Claude returns close_wrong_number this_property → closes only the property", async () => {
@@ -578,6 +678,92 @@ describe("dispatchAiResponse (integration)", () => {
       .eq("id", contactId)
       .single();
     expect(contact?.sms_opted_out).toBe(false);
+  });
+
+  it("Claude returns close_wrong_number all → suppresses the phone for future imports", async () => {
+    await seedConfig();
+    const { propertyId, contactId } = await seedLead({
+      phone: "+18167554019",
+    });
+
+    const outcome = await dispatchAiResponse(
+      supabase,
+      { propertyId, contactId, inboundBody: "wrong number, I never owned any property" },
+      {
+        anthropic: stubAnthropic({
+          action: "close_wrong_number",
+          wrong_scope: "all",
+          confidence: 0.95,
+          sentiment: "neutral",
+        }),
+      },
+    );
+
+    expect(outcome).toEqual({
+      outcome: "auto_closed",
+      reason: "model:wrong_number",
+    });
+    expect(getMockMessageLog()).toHaveLength(0);
+
+    const { data: contact } = await supabase
+      .from("contacts")
+      .select("sms_opted_out")
+      .eq("id", contactId)
+      .single();
+    expect(contact?.sms_opted_out).toBe(true);
+    const { data: suppression } = await supabase
+      .from("sms_phone_suppressions")
+      .select("phone_e164, source, first_contact_id")
+      .eq("channel", "sms")
+      .eq("phone_e164", "+18167554019")
+      .single();
+    expect(suppression).toMatchObject({
+      phone_e164: "+18167554019",
+      source: "ai_responder_wrong_number",
+      first_contact_id: contactId,
+    });
+  });
+
+  it("Claude close_wrong_number all suppresses the actual inbound sender when it is phone_2", async () => {
+    await seedConfig();
+    const { propertyId, contactId } = await seedLead({
+      phone: "+18167554118",
+      phone2: "+18167554119",
+    });
+
+    const outcome = await dispatchAiResponse(
+      supabase,
+      {
+        propertyId,
+        contactId,
+        inboundFromPhone: "+18167554119",
+        inboundBody: "wrong number, I never owned any property",
+      },
+      {
+        anthropic: stubAnthropic({
+          action: "close_wrong_number",
+          wrong_scope: "all",
+          confidence: 0.95,
+          sentiment: "neutral",
+        }),
+      },
+    );
+
+    expect(outcome).toEqual({
+      outcome: "auto_closed",
+      reason: "model:wrong_number",
+    });
+    const { data: suppression } = await supabase
+      .from("sms_phone_suppressions")
+      .select("phone_e164, source, first_contact_id")
+      .eq("channel", "sms")
+      .eq("phone_e164", "+18167554119")
+      .single();
+    expect(suppression).toMatchObject({
+      phone_e164: "+18167554119",
+      source: "ai_responder_wrong_number",
+      first_contact_id: contactId,
+    });
   });
 
   it("Claude returns deescalate_close → sends fixed template without humanizer and closes not_interested", async () => {

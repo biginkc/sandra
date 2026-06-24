@@ -148,7 +148,7 @@ export async function sendSmsToContact(
       .maybeSingle(),
     supabase
       .from("properties")
-      .select("id, state, outreach_dispo")
+      .select("id, org_id, state, outreach_dispo")
       .eq("id", input.propertyId)
       .maybeSingle(),
   ]);
@@ -184,7 +184,13 @@ export async function sendSmsToContact(
     return { status: "blocked_landline", reason: LANDLINE_BLOCK_REASON };
   }
   try {
-    if (await isSmsPhoneSuppressed(supabase, destination.phone)) {
+    if (
+      await isSmsPhoneSuppressed(
+        supabase,
+        destination.phone,
+        propertyResult.data.org_id,
+      )
+    ) {
       return blockedTerminalDispo({
         suppressed: true,
         source: "phone_suppression",
@@ -336,7 +342,7 @@ async function queueForLater(
       .maybeSingle(),
     supabase
       .from("properties")
-      .select("id, outreach_dispo")
+      .select("id, org_id, outreach_dispo")
       .eq("id", input.propertyId)
       .maybeSingle(),
     getConsentState(supabase, input.contactId, "sms"),
@@ -371,7 +377,13 @@ async function queueForLater(
     return { status: "blocked_landline", reason: LANDLINE_BLOCK_REASON };
   }
   try {
-    if (await isSmsPhoneSuppressed(supabase, destination.phone)) {
+    if (
+      await isSmsPhoneSuppressed(
+        supabase,
+        destination.phone,
+        propertyResult.data.org_id,
+      )
+    ) {
       return blockedTerminalDispo({
         suppressed: true,
         source: "phone_suppression",
@@ -466,7 +478,7 @@ export async function releaseQueuedMessage(
   const { data: msg, error: fetchError } = await supabase
     .from("messages")
     .select(
-      "id, status, provider, contact_id, property_id, body, from_address, to_address, metadata",
+      "id, status, provider, org_id, contact_id, property_id, body, from_address, to_address, metadata",
     )
     .eq("id", messageId)
     .maybeSingle();
@@ -534,7 +546,7 @@ export async function releaseQueuedMessage(
       .maybeSingle(),
     supabase
       .from("properties")
-      .select("state, outreach_dispo")
+      .select("org_id, state, outreach_dispo")
       .eq("id", msg.property_id)
       .maybeSingle(),
   ]);
@@ -557,7 +569,13 @@ export async function releaseQueuedMessage(
     return outcome;
   }
   try {
-    if (await isSmsPhoneSuppressed(supabase, msg.to_address)) {
+    if (
+      await isSmsPhoneSuppressed(
+        supabase,
+        msg.to_address,
+        propertyResult.data?.org_id ?? msg.org_id,
+      )
+    ) {
       const outcome = blockedTerminalDispo({
         suppressed: true,
         source: "phone_suppression",

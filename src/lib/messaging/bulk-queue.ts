@@ -181,7 +181,6 @@ export async function queueSmsBatch(
   const frozenContactDestinationPhone = new Map<string, string>();
   const frozenContactDoNotContact = new Map<string, boolean>();
   const frozenContactSmsOptedOut = new Map<string, boolean>();
-  const destinationPhones: string[] = [];
   const frozenContactIds = Array.from(
     new Set(
       Array.from(frozenContactByProperty.values()).filter(
@@ -206,7 +205,6 @@ export async function queueSmsBatch(
         const destinationPhone = normalizePhone(destination?.phone ?? "");
         if (destinationPhone) {
           frozenContactDestinationPhone.set(row.id, destinationPhone);
-          destinationPhones.push(destinationPhone);
         }
         frozenContactAvailability.set(
           row.id,
@@ -215,10 +213,24 @@ export async function queueSmsBatch(
       }
     });
   }
-  const suppressedFrozenPhones = await loadSuppressedSmsPhoneSet(
-    client,
-    destinationPhones,
-  );
+  const destinationPhonesByOrg = new Map<string, string[]>();
+  for (const property of allProperties) {
+    if (!property.org_id) continue;
+    const contactId = frozenContactByProperty.get(property.id);
+    if (!contactId) continue;
+    const destinationPhone = frozenContactDestinationPhone.get(contactId);
+    if (!destinationPhone) continue;
+    const phones = destinationPhonesByOrg.get(property.org_id) ?? [];
+    phones.push(destinationPhone);
+    destinationPhonesByOrg.set(property.org_id, phones);
+  }
+  const suppressedFrozenPhonesByOrg = new Map<string, Set<string>>();
+  for (const [orgId, phones] of destinationPhonesByOrg) {
+    suppressedFrozenPhonesByOrg.set(
+      orgId,
+      await loadSuppressedSmsPhoneSet(client, phones, orgId),
+    );
+  }
 
   const alreadyQueuedForCampaign = new Set<string>();
   for (let i = 0; i < args.propertyIds.length; i += CHUNK) {
@@ -284,7 +296,11 @@ export async function queueSmsBatch(
       continue;
     }
     const destinationPhone = frozenContactDestinationPhone.get(contactId);
-    if (destinationPhone && suppressedFrozenPhones.has(destinationPhone)) {
+    if (
+      destinationPhone &&
+      property.org_id &&
+      suppressedFrozenPhonesByOrg.get(property.org_id)?.has(destinationPhone)
+    ) {
       state.skipped++;
       continue;
     }
@@ -338,7 +354,11 @@ export async function queueSmsBatch(
       state.skipped++;
       continue;
     }
-    if (destinationPhone && suppressedFrozenPhones.has(destinationPhone)) {
+    if (
+      destinationPhone &&
+      property.org_id &&
+      suppressedFrozenPhonesByOrg.get(property.org_id)?.has(destinationPhone)
+    ) {
       state.skipped++;
       continue;
     }

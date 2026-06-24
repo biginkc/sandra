@@ -5,6 +5,7 @@ import { applyPhoneLevelOptOut } from "@/lib/messaging/opt-out-phone";
 import { getConsentState } from "@/lib/messaging/consent";
 import { checkQuietHours } from "@/lib/messaging/quiet-hours";
 import { sendSmsToContact } from "@/lib/messaging/send";
+import { selectBestSmsPhone } from "@/lib/messaging/sms-phone";
 import { SUPPRESSED_DISPOS } from "@/lib/messaging/suppression";
 import { pausePropertyEnrollments } from "@/lib/sequences/enrollment";
 import type { Database, Json } from "@/lib/supabase/types";
@@ -50,6 +51,7 @@ export type AiDispatchInput = {
   propertyId: string;
   contactId: string;
   conversationId?: string | null;
+  inboundFromPhone?: string | null;
   inboundBody: string;
   inboundMessageId?: string | null;
 };
@@ -61,6 +63,10 @@ const DEESCALATION_TEMPLATE_WITH_NAME =
   "So sorry to bug you. Sounds like you get a lot of these. Are you {first_name}? Just want to make sure we don't bother you again.";
 const DEESCALATION_TEMPLATE_GENERIC =
   "So sorry to bug you. Sounds like you get a lot of these. Are you the owner here? Want to make sure we don't bother you again.";
+
+type ResponderDispoResult =
+  | { updated: true }
+  | { updated: false; reason: "already_terminal" | "db_error" };
 
 export async function dispatchAiResponse(
   supabase: SupabaseClient<Database>,
@@ -229,27 +235,34 @@ export async function dispatchAiResponse(
       await markPropertyNeedsAttention(supabase, input.propertyId, route.reason);
       return { outcome: "escalated", reason: route.reason };
     case "opt_out":
-      await applyResponderOptOut(supabase, {
+      const optOutResult = await applyResponderOptOut(supabase, {
         propertyId: input.propertyId,
         contactId: input.contactId,
+        inboundFromPhone: input.inboundFromPhone ?? null,
+        orgId: property.org_id,
         reason: route.reason,
       });
+      if (!optOutResult.updated) {
+        return closeOutcome(optOutResult, route.reason);
+      }
       return { outcome: "opted_out", reason: route.reason };
     case "auto_close_wrong_number":
-      await applyWrongNumber(supabase, {
+      const wrongNumberResult = await applyWrongNumber(supabase, {
         propertyId: input.propertyId,
         contactId: input.contactId,
+        inboundFromPhone: input.inboundFromPhone ?? null,
+        orgId: property.org_id,
         scope: route.scope,
         reason: route.reason,
       });
-      return { outcome: "auto_closed", reason: route.reason };
+      return closeOutcome(wrongNumberResult, route.reason);
     case "auto_close":
-      await setResponderDispo(supabase, {
+      const autoCloseResult = await setResponderDispo(supabase, {
         propertyId: input.propertyId,
         dispo: route.dispo,
         reason: route.reason,
       });
-      return { outcome: "auto_closed", reason: route.reason };
+      return closeOutcome(autoCloseResult, route.reason);
     case "send_reply":
     case "deescalate_close": {
       const bodyResult = await resolveOutboundBody(supabase, {
@@ -276,12 +289,12 @@ export async function dispatchAiResponse(
       if (sent.outcome !== "sent") return sent;
 
       if (route.kind === "deescalate_close") {
-        await setResponderDispo(supabase, {
+        const closeResult = await setResponderDispo(supabase, {
           propertyId: input.propertyId,
           dispo: "not_interested",
           reason: route.reason,
         });
-        return { outcome: "auto_closed", reason: route.reason };
+        return closeOutcome(closeResult, route.reason);
       }
 
       return sent;
@@ -470,7 +483,7 @@ async function setResponderDispo(
     dispo: "wrong_number" | "not_interested" | "opted_out" | "dnc";
     reason: string;
   },
-): Promise<void> {
+): Promise<ResponderDispoResult> {
   const { data: current, error: currentError } = await supabase
     .from("properties")
     .select("outreach_dispo, needs_human_attention")
@@ -481,13 +494,13 @@ async function setResponderDispo(
       tags: { surface: "ai_responder_dispo_read" },
       extra: { propertyId: args.propertyId, reason: args.reason },
     });
-    return;
+    return { updated: false, reason: "db_error" };
   }
   if (!shouldUpdateDispo(current?.outreach_dispo ?? null, args.dispo)) {
-    return;
+    return { updated: false, reason: "already_terminal" };
   }
   if (current?.needs_human_attention) {
-    return;
+    return { updated: false, reason: "already_terminal" };
   }
 
   const now = new Date().toISOString();
@@ -512,10 +525,10 @@ async function setResponderDispo(
       tags: { surface: "ai_responder_set_dispo" },
       extra: { propertyId: args.propertyId, dispo: args.dispo, reason: args.reason },
     });
-    return;
+    return { updated: false, reason: "db_error" };
   }
   if (!updated) {
-    return;
+    return { updated: false, reason: "already_terminal" };
   }
 
   if (args.dispo === "wrong_number") {
@@ -525,16 +538,24 @@ async function setResponderDispo(
       permanent: false,
     });
   }
+  return { updated: true };
 }
 
 async function applyResponderOptOut(
   supabase: SupabaseClient<Database>,
-  args: { propertyId: string; contactId: string; reason: string },
-): Promise<void> {
+  args: {
+    propertyId: string;
+    contactId: string;
+    inboundFromPhone: string | null;
+    orgId: string;
+    reason: string;
+  },
+): Promise<ResponderDispoResult> {
   const contact = await loadContactPhone(supabase, args.contactId);
   await applyPhoneLevelOptOut(supabase, {
     contactId: args.contactId,
-    fromPhone: contact.phone ?? "",
+    fromPhone: args.inboundFromPhone ?? contact.phone ?? "",
+    orgId: args.orgId,
     source: "ai_responder",
     sourceDetail: { propertyId: args.propertyId, reason: args.reason } as Json,
     occurredAt: new Date(),
@@ -542,11 +563,15 @@ async function applyResponderOptOut(
     surface: "stop",
     idempotencyKey: `ai-responder:${args.propertyId}:${args.contactId}:${args.reason}`,
   });
-  await setResponderDispo(supabase, {
+  const result = await setResponderDispo(supabase, {
     propertyId: args.propertyId,
     dispo: "opted_out",
     reason: args.reason,
   });
+  if (!result.updated && result.reason === "db_error") {
+    throw new Error("ai_responder opt-out disposition write failed");
+  }
+  return result;
 }
 
 async function applyWrongNumber(
@@ -554,21 +579,25 @@ async function applyWrongNumber(
   args: {
     propertyId: string;
     contactId: string;
+    inboundFromPhone: string | null;
+    orgId: string;
     scope: AiWrongScope;
     reason: string;
   },
-): Promise<void> {
-  await setResponderDispo(supabase, {
+): Promise<ResponderDispoResult> {
+  const result = await setResponderDispo(supabase, {
     propertyId: args.propertyId,
     dispo: "wrong_number",
     reason: args.reason,
   });
-  if (args.scope !== "all") return;
+  if (args.scope !== "all") return result;
+  if (!result.updated && result.reason === "db_error") return result;
 
   const contact = await loadContactPhone(supabase, args.contactId);
   await applyPhoneLevelOptOut(supabase, {
     contactId: args.contactId,
-    fromPhone: contact.phone ?? "",
+    fromPhone: args.inboundFromPhone ?? contact.phone ?? "",
+    orgId: args.orgId,
     source: "ai_responder_wrong_number",
     sourceDetail: {
       propertyId: args.propertyId,
@@ -580,6 +609,7 @@ async function applyWrongNumber(
     surface: "dnc",
     idempotencyKey: `ai-responder-wrong-number:${args.propertyId}:${args.contactId}`,
   });
+  return result;
 }
 
 async function loadContactPhone(
@@ -588,7 +618,7 @@ async function loadContactPhone(
 ): Promise<{ phone: string | null; firstName: string | null }> {
   const { data, error } = await supabase
     .from("contacts")
-    .select("phone_1, first_name")
+    .select("phone_1, phone_1_type, phone_2, phone_2_type, phone_3, phone_3_type, first_name")
     .eq("id", contactId)
     .maybeSingle();
   if (error) {
@@ -597,10 +627,24 @@ async function loadContactPhone(
       extra: { contactId },
     });
   }
+  const destination = selectBestSmsPhone(data);
   return {
-    phone: data?.phone_1 ?? null,
+    phone: destination?.phone ?? null,
     firstName: data?.first_name?.trim() || null,
   };
+}
+
+function closeOutcome(
+  result: ResponderDispoResult,
+  reason: string,
+): Extract<AiDispatchOutcome, { outcome: "auto_closed" | "skipped" | "escalated" }> {
+  if (result.updated) {
+    return { outcome: "auto_closed", reason };
+  }
+  if (result.reason === "already_terminal") {
+    return { outcome: "skipped", reason: "already_terminal" };
+  }
+  return { outcome: "escalated", reason: "disposition_write_failed" };
 }
 
 async function buildDeescalationBody(
@@ -627,6 +671,8 @@ function shouldUpdateDispo(
     dnc: 4,
   };
   if (
+    next !== "opted_out" &&
+    next !== "dnc" &&
     current !== null &&
     (HUMAN_ONLY_DISPOS.has(current) || current === "bad_number")
   ) {
