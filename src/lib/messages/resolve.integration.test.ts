@@ -18,7 +18,10 @@ import {
   createPropertyAndResolve,
   resolveThreadToExistingProperty,
 } from "./resolve";
-import { ensureConversationIdForThread } from "./threading";
+import {
+  ensureConversationIdForThread,
+  listResolverCandidatePropertiesForContact,
+} from "./threading";
 
 const supabase = createTestClient();
 const createdUserIds: string[] = [];
@@ -70,6 +73,7 @@ async function seedSms(opts: {
   propertyId: string | null;
   conversationId: string;
   direction: "inbound" | "outbound";
+  orgId?: string;
   status?: string;
   body?: string;
   phone?: string;
@@ -83,6 +87,7 @@ async function seedSms(opts: {
     .from("messages")
     .insert({
       channel: "sms",
+      org_id: opts.orgId ?? BMH_ORG_ID,
       direction: opts.direction,
       status:
         opts.status ?? (opts.direction === "inbound" ? "received" : "sent"),
@@ -101,12 +106,17 @@ async function seedSms(opts: {
   return data.id;
 }
 
-async function sourceConversation(contactId: string, phone: string): Promise<string> {
+async function sourceConversation(
+  contactId: string,
+  phone: string,
+  orgId = BMH_ORG_ID,
+): Promise<string> {
   const conversationId = randomUUID();
   await seedSms({
     contactId,
     propertyId: null,
     conversationId,
+    orgId,
     direction: "inbound",
     phone,
     body: "which house?",
@@ -118,6 +128,7 @@ async function destinationConversation(
   contactId: string,
   propertyId: string,
   phone: string,
+  orgId = BMH_ORG_ID,
 ): Promise<string> {
   const conversationId = await ensureConversationIdForThread(
     supabase,
@@ -128,6 +139,7 @@ async function destinationConversation(
     contactId,
     propertyId,
     conversationId,
+    orgId,
     direction: "outbound",
     phone,
     body: "about the property",
@@ -256,6 +268,33 @@ describe("resolveThreadToExistingProperty (integration)", () => {
     expect(allowed.ok).toBe(true);
   });
 
+  it("refuses archived properties without updates", async () => {
+    const phone = "+18165552114";
+    const contactId = await seedContact(phone);
+    const propertyId = await seedProperty({ address: "114 Archived Ln" });
+    await supabase
+      .from("properties")
+      .update({ deleted_at: new Date().toISOString() })
+      .eq("id", propertyId);
+    const sourceConversationId = await sourceConversation(contactId, phone);
+
+    const result = await resolveThreadToExistingProperty({
+      supabase,
+      sourceConversationId,
+      contactId,
+      propertyId,
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.code).toBe("PROPERTY_ARCHIVED");
+
+    const { data: rows } = await supabase
+      .from("messages")
+      .select("property_id")
+      .eq("conversation_id", sourceConversationId);
+    expect(rows?.every((row) => row.property_id === null)).toBe(true);
+  });
+
   it("G5 refuses source conversations whose direction-aware phone mapping finds more than one contact", async () => {
     const contactA = await seedContact("+18165552105");
     const contactB = await seedContact("+18165552106");
@@ -287,6 +326,44 @@ describe("resolveThreadToExistingProperty (integration)", () => {
     if (!result.ok) {
       expect(result.error.code).toBe("AMBIGUOUS_CONTACT");
     }
+  });
+
+  it("rejects invalid runtime roles before any mutation", async () => {
+    const phone = "+18165552115";
+    const contactId = await seedContact(phone);
+    const propertyId = await seedProperty({ address: "115 Invalid Role Ln" });
+    const sourceConversationId = await sourceConversation(contactId, phone);
+
+    const result = await resolveThreadToExistingProperty({
+      supabase,
+      sourceConversationId,
+      contactId,
+      propertyId,
+      role: "landlord" as never,
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.code).toBe("INVALID_ROLE");
+
+    const [{ data: property }, { data: rows }, { data: details }] =
+      await Promise.all([
+        supabase
+          .from("properties")
+          .select("homeowner_contact_id, agent_contact_id")
+          .eq("id", propertyId)
+          .single(),
+        supabase
+          .from("messages")
+          .select("property_id")
+          .eq("conversation_id", sourceConversationId),
+        supabase.from("agent_details").select("contact_id").eq("contact_id", contactId),
+      ]);
+    expect(property).toMatchObject({
+      homeowner_contact_id: null,
+      agent_contact_id: null,
+    });
+    expect(rows?.every((row) => row.property_id === null)).toBe(true);
+    expect(details).toEqual([]);
   });
 
   it("G7 refuses a role held by a different contact with zero mutation, and same-contact role is idempotent", async () => {
@@ -348,6 +425,51 @@ describe("resolveThreadToExistingProperty (integration)", () => {
       role: "homeowner",
     });
     expect(sameContact.ok).toBe(true);
+  });
+
+  it("links role sidecars in the contact org instead of the default org", async () => {
+    const phone = "+18165552117";
+    const contactId = await seedContact(phone, TEST_ORG_B_ID);
+    const propertyId = await seedProperty({
+      address: "117 Other Org Role Ln",
+      orgId: TEST_ORG_B_ID,
+    });
+    const sourceConversationId = await sourceConversation(
+      contactId,
+      phone,
+      TEST_ORG_B_ID,
+    );
+
+    const result = await resolveThreadToExistingProperty({
+      supabase,
+      sourceConversationId,
+      contactId,
+      propertyId,
+      role: "agent",
+    });
+
+    expect(result.ok).toBe(true);
+
+    const [{ data: property }, { data: detail }] = await Promise.all([
+      supabase
+        .from("properties")
+        .select("agent_contact_id, org_id")
+        .eq("id", propertyId)
+        .single(),
+      supabase
+        .from("agent_details")
+        .select("contact_id, org_id")
+        .eq("contact_id", contactId)
+        .single(),
+    ]);
+    expect(property).toMatchObject({
+      agent_contact_id: contactId,
+      org_id: TEST_ORG_B_ID,
+    });
+    expect(detail).toMatchObject({
+      contact_id: contactId,
+      org_id: TEST_ORG_B_ID,
+    });
   });
 
   it("G8 allows a session-scoped non-admin member to resolve the thread", async () => {
@@ -412,6 +534,55 @@ describe("resolveThreadToExistingProperty (integration)", () => {
     expect(byId.get(queuedId)?.property_id).toBeNull();
     expect(byId.get(queuedId)?.conversation_id).toBe(sourceConversationId);
   });
+
+  it("fails without side effects when the source conversation has no eligible rows", async () => {
+    const phone = "+18165552111";
+    const contactId = await seedContact(phone);
+    const propertyId = await seedProperty({ address: "111 Queued Only Ln" });
+    const sourceConversationId = randomUUID();
+    await seedSms({
+      contactId,
+      propertyId: null,
+      conversationId: sourceConversationId,
+      direction: "outbound",
+      status: "queued",
+      phone,
+    });
+
+    const result = await resolveThreadToExistingProperty({
+      supabase,
+      sourceConversationId,
+      contactId,
+      propertyId,
+      role: "homeowner",
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe("SOURCE_NO_ELIGIBLE_MESSAGES");
+    }
+
+    const [{ data: property }, { data: registry }, { data: detail }] =
+      await Promise.all([
+        supabase
+          .from("properties")
+          .select("homeowner_contact_id")
+          .eq("id", propertyId)
+          .single(),
+        supabase
+          .from("message_threads")
+          .select("conversation_id")
+          .eq("contact_id", contactId)
+          .eq("property_id", propertyId),
+        supabase
+          .from("homeowner_details")
+          .select("contact_id")
+          .eq("contact_id", contactId),
+      ]);
+    expect(property?.homeowner_contact_id).toBeNull();
+    expect(registry).toEqual([]);
+    expect(detail).toEqual([]);
+  });
 });
 
 describe("createPropertyAndResolve (integration)", () => {
@@ -458,5 +629,137 @@ describe("createPropertyAndResolve (integration)", () => {
       .eq("contact_id", contactId);
     expect(messages?.[0].property_id).toBe(result.data.propertyId);
     expect(messages?.[0].conversation_id).toBe(result.data.conversationId);
+  });
+
+  it("creates the property and role sidecar in the source contact org", async () => {
+    const phone = "+18165552202";
+    const contactId = await seedContact(phone, TEST_ORG_B_ID);
+    const sourceConversationId = await sourceConversation(
+      contactId,
+      phone,
+      TEST_ORG_B_ID,
+    );
+
+    const result = await createPropertyAndResolve({
+      supabase,
+      sourceConversationId,
+      contactId,
+      role: "homeowner",
+      property: {
+        address: "202 Other Org Created Ln",
+        city: "Kansas City",
+        state: "MO",
+      },
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    const [{ data: property }, { data: detail }] = await Promise.all([
+      supabase
+        .from("properties")
+        .select("homeowner_contact_id, org_id")
+        .eq("id", result.data.propertyId)
+        .single(),
+      supabase
+        .from("homeowner_details")
+        .select("contact_id, org_id")
+        .eq("contact_id", contactId)
+        .single(),
+    ]);
+    expect(property).toMatchObject({
+      homeowner_contact_id: contactId,
+      org_id: TEST_ORG_B_ID,
+    });
+    expect(detail).toMatchObject({
+      contact_id: contactId,
+      org_id: TEST_ORG_B_ID,
+    });
+  });
+
+  it("does not create a property when no source rows are eligible", async () => {
+    const phone = "+18165552203";
+    const contactId = await seedContact(phone);
+    const sourceConversationId = randomUUID();
+    await seedSms({
+      contactId,
+      propertyId: null,
+      conversationId: sourceConversationId,
+      direction: "outbound",
+      status: "queued",
+      phone,
+    });
+
+    const result = await createPropertyAndResolve({
+      supabase,
+      sourceConversationId,
+      contactId,
+      role: "homeowner",
+      property: {
+        address: "203 Should Not Exist Ln",
+        city: "Kansas City",
+        state: "MO",
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe("SOURCE_NO_ELIGIBLE_MESSAGES");
+    }
+
+    const [{ data: properties }, { data: detail }] = await Promise.all([
+      supabase
+        .from("properties")
+        .select("id")
+        .eq("address", "203 Should Not Exist Ln"),
+      supabase
+        .from("homeowner_details")
+        .select("contact_id")
+        .eq("contact_id", contactId),
+    ]);
+    expect(properties).toEqual([]);
+    expect(detail).toEqual([]);
+  });
+});
+
+describe("listResolverCandidatePropertiesForContact (integration)", () => {
+  beforeEach(async () => {
+    await resetTenantTables(supabase);
+    await seedTwoOrgs(supabase);
+  });
+
+  it("returns all active linked properties and excludes archived linked properties", async () => {
+    const contactId = await seedContact("+18165552301");
+    const linkedA = await seedProperty({
+      address: "301 Linked A Ln",
+      homeownerContactId: contactId,
+    });
+    const linkedB = await seedProperty({
+      address: "301 Linked B Ln",
+      agentContactId: contactId,
+    });
+    const linkedC = await seedProperty({
+      address: "301 Linked C Ln",
+      homeownerContactId: contactId,
+    });
+    const archived = await seedProperty({
+      address: "301 Archived Linked Ln",
+      agentContactId: contactId,
+    });
+    await supabase
+      .from("properties")
+      .update({ deleted_at: new Date().toISOString() })
+      .eq("id", archived);
+
+    const candidates = await listResolverCandidatePropertiesForContact(supabase, {
+      contactId,
+    });
+
+    expect(candidates.map((candidate) => candidate.id).sort()).toEqual(
+      [linkedA, linkedB, linkedC].sort(),
+    );
+    expect(candidates.every((candidate) => candidate.sources.includes("linked_property"))).toBe(
+      true,
+    );
   });
 });

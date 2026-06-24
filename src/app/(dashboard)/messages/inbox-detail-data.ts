@@ -12,6 +12,8 @@ export type InboxDetail = {
   contactPhone: string | null;
   propertyId: string | null;
   propertyAddress: string | null;
+  homeownerContactId: string | null;
+  agentContactId: string | null;
   /** auth.users.id of the property's current assignee, or null. */
   assigneeId: string | null;
   /** Pipeline position — used to show/hide the dispo bar. */
@@ -48,7 +50,8 @@ export async function fetchInboxDetail(
   if (!contactId) return null;
 
   const propertyId =
-    messages.find((message) => message.property_id !== null)?.property_id ??
+    [...messages].reverse().find((message) => message.property_id !== null)
+      ?.property_id ??
     null;
 
   const [contactRes, propertyRes] = await Promise.all([
@@ -60,7 +63,9 @@ export async function fetchInboxDetail(
     propertyId
       ? supabase
           .from("properties")
-          .select("address, city, state, assigned_user_id, status, outreach_dispo")
+          .select(
+            "address, city, state, homeowner_contact_id, agent_contact_id, assigned_user_id, status, outreach_dispo",
+          )
           .eq("id", propertyId)
           .maybeSingle()
       : Promise.resolve({ data: null, error: null }),
@@ -82,6 +87,8 @@ export async function fetchInboxDetail(
     propertyAddress: p
       ? [p.address, p.city, p.state].filter(Boolean).join(", ")
       : null,
+    homeownerContactId: p?.homeowner_contact_id ?? null,
+    agentContactId: p?.agent_contact_id ?? null,
     assigneeId: p?.assigned_user_id ?? null,
     propertyStatus: p?.status ?? null,
     outreachDispo: p?.outreach_dispo ?? null,

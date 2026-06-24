@@ -117,6 +117,8 @@ function makeData(overrides: Partial<InboxDetailData> & { contactId: string }): 
     contactPhone: overrides.contactPhone ?? "+15551234567",
     propertyId,
     propertyAddress: overrides.propertyAddress ?? "123 Main St, Albany, NY",
+    homeownerContactId: overrides.homeownerContactId ?? contactId,
+    agentContactId: overrides.agentContactId ?? null,
     assigneeId: overrides.assigneeId ?? null,
     propertyStatus: overrides.propertyStatus ?? "prospect",
     outreachDispo: overrides.outreachDispo ?? null,
@@ -349,6 +351,29 @@ describe("<InboxDetail />", () => {
     );
 
     expect(screen.getByLabelText("Reply to this lead")).toHaveValue("");
+  });
+
+  it("does not render the homeowner reply composer for agent-only threads", () => {
+    const data = makeData({
+      contactId: "agent-contact",
+      homeownerContactId: "homeowner-contact",
+      agentContactId: "agent-contact",
+      initialMessages: [],
+    });
+
+    render(
+      <InboxDetail
+        data={data}
+        assigneeEmails={{}}
+        currentUserId="user-1"
+      />,
+    );
+
+    expect(screen.queryByTestId("inline-reply")).not.toBeInTheDocument();
+    expect(screen.getByTestId("inline-reply-unavailable")).toHaveTextContent(
+      "thread contact is the homeowner",
+    );
+    expectSharedOutcomeControls({ moveToLeadDisabled: false });
   });
 
   it("renders message outcomes without the old Nurture scheduling popover", () => {

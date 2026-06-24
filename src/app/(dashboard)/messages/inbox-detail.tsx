@@ -404,12 +404,22 @@ export function InboxDetail({
             />
           </div>
           <div className="border-t border-border bg-white px-6 py-4">
-            <InlineReply
-              key={`reply-${data.threadId}`}
-              propertyId={data.propertyId}
-              homeownerContactId={data.contactId}
-              homeownerPhone={data.contactPhone}
-            />
+            {data.homeownerContactId === data.contactId ? (
+              <InlineReply
+                key={`reply-${data.threadId}`}
+                propertyId={data.propertyId}
+                homeownerContactId={data.homeownerContactId}
+                homeownerPhone={data.contactPhone}
+              />
+            ) : (
+              <div
+                className="rounded-xl border border-dashed border-[#e5e1df] p-3 text-center text-xs text-[#78716c]"
+                data-testid="inline-reply-unavailable"
+              >
+                SMS replies from Messages are available only when this thread
+                contact is the homeowner.
+              </div>
+            )}
           </div>
         </>
       ) : (

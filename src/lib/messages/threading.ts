@@ -450,7 +450,7 @@ export async function listResolverCandidatePropertiesForContact(
         ),
       ),
       loadCandidates(supabase, input.contactId),
-      loadLinkedPropertyIds(supabase, input.contactId),
+      loadLinkedPropertyIdsForResolver(supabase, input.contactId),
     ]);
 
   const byProperty = new Map<
@@ -497,7 +497,8 @@ export async function listResolverCandidatePropertiesForContact(
     .select(
       "id, address, city, state, homeowner_contact_id, agent_contact_id, outreach_dispo, needs_human_attention",
     )
-    .in("id", propertyIds);
+    .in("id", propertyIds)
+    .is("deleted_at", null);
   if (error) {
     throw new Error(`listResolverCandidatePropertiesForContact: ${error.message}`);
   }
@@ -686,11 +687,28 @@ async function loadLinkedPropertyIds(
   supabase: SupabaseClient<Database>,
   contactId: string,
 ): Promise<string[]> {
+  return loadLinkedPropertyIdsForContact(supabase, contactId, { limit: 2 });
+}
+
+async function loadLinkedPropertyIdsForResolver(
+  supabase: SupabaseClient<Database>,
+  contactId: string,
+): Promise<string[]> {
+  return loadLinkedPropertyIdsForContact(supabase, contactId);
+}
+
+async function loadLinkedPropertyIdsForContact(
+  supabase: SupabaseClient<Database>,
+  contactId: string,
+  options: { limit?: number } = {},
+): Promise<string[]> {
   const { data: linkedProps, error } = await supabase
     .from("properties")
     .select("id")
     .or(`homeowner_contact_id.eq.${contactId},agent_contact_id.eq.${contactId}`)
-    .limit(2);
+    .is("deleted_at", null)
+    .order("created_at", { ascending: false })
+    .limit(options.limit ?? 200);
   if (error) {
     throw new Error(`resolveInboundThread linked property lookup: ${error.message}`);
   }

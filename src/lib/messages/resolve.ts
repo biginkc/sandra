@@ -5,14 +5,11 @@ import {
   err,
   errFromUnknown,
   ok,
-  type AppErrorShape,
   type Result,
 } from "@/lib/errors/result";
 import type { ContactRole } from "@/lib/messages/triage";
 import { ensureConversationIdForThread } from "@/lib/messages/threading";
 import type { Database } from "@/lib/supabase/types";
-
-type MessageRow = Database["public"]["Tables"]["messages"]["Row"];
 
 export type ResolveThreadToExistingPropertyInput = {
   supabase: SupabaseClient<Database>;
@@ -64,6 +61,8 @@ export async function resolveThreadToExistingProperty(
   input: ResolveThreadToExistingPropertyInput,
 ): Promise<Result<ResolveThreadResult>> {
   const { supabase, sourceConversationId, contactId, propertyId, role } = input;
+  const roleInput = validateOptionalRole(role);
+  if (!roleInput.ok) return roleInput;
   let ensureSnapshot: EnsureSnapshot | null = null;
   let roleSnapshot: RoleSnapshot | null = null;
   let conversationId: string | null = null;
@@ -80,7 +79,7 @@ export async function resolveThreadToExistingProperty(
     });
     if (!property.ok) return property;
 
-    const roleCheck = checkRoleOccupancy(property.data, contactId, role);
+    const roleCheck = checkRoleOccupancy(property.data, contactId, roleInput.data);
     if (!roleCheck.ok) return roleCheck;
 
     ensureSnapshot = await snapshotEnsureSideEffects(supabase, {
@@ -94,13 +93,14 @@ export async function resolveThreadToExistingProperty(
       propertyId,
     );
 
-    if (role) {
+    if (roleInput.data) {
       const roleResult = await applyRoleLink(supabase, {
         contactId,
         propertyId,
-        role,
+        orgId: source.data.contactOrgId,
+        role: roleInput.data,
         previousRoleContactId:
-          role === "homeowner"
+          roleInput.data === "homeowner"
             ? property.data.homeownerContactId
             : property.data.agentContactId,
       });
@@ -118,14 +118,24 @@ export async function resolveThreadToExistingProperty(
       conversationId,
     });
     if (!restamp.ok) {
-      await rollbackRoleLink(supabase, { contactId, propertyId, role, roleSnapshot });
+      await rollbackRoleLink(supabase, {
+        contactId,
+        propertyId,
+        role: roleInput.data,
+        roleSnapshot,
+      });
       await rollbackEnsureSideEffects(supabase, ensureSnapshot, conversationId);
       return restamp;
     }
 
     return ok({ updated: restamp.data.updated, conversationId });
   } catch (e) {
-    await rollbackRoleLink(supabase, { contactId, propertyId, role, roleSnapshot });
+    await rollbackRoleLink(supabase, {
+      contactId,
+      propertyId,
+      role: roleInput.data,
+      roleSnapshot,
+    });
     if (conversationId) {
       await rollbackEnsureSideEffects(supabase, ensureSnapshot, conversationId);
     }
@@ -137,6 +147,8 @@ export async function createPropertyAndResolve(
   input: CreatePropertyAndResolveInput,
 ): Promise<Result<ResolveThreadResult & { propertyId: string }>> {
   const { supabase, sourceConversationId, contactId, role, property } = input;
+  const roleInput = validateRequiredRole(role);
+  if (!roleInput.ok) return roleInput;
   let propertyId: string | null = null;
   let detailExisted = false;
   let ensureSnapshot: EnsureSnapshot | null = null;
@@ -167,8 +179,9 @@ export async function createPropertyAndResolve(
         state: property.state.trim().toUpperCase(),
         zip: property.zip?.trim() || null,
         status: "new_lead",
-        homeowner_contact_id: role === "homeowner" ? contactId : null,
-        agent_contact_id: role === "agent" ? contactId : null,
+        org_id: source.data.contactOrgId,
+        homeowner_contact_id: roleInput.data === "homeowner" ? contactId : null,
+        agent_contact_id: roleInput.data === "agent" ? contactId : null,
       })
       .select("id")
       .single();
@@ -180,7 +193,12 @@ export async function createPropertyAndResolve(
     }
     propertyId = inserted.id;
 
-    const detail = await upsertRoleDetail(supabase, contactId, role);
+    const detail = await upsertRoleDetail(
+      supabase,
+      contactId,
+      roleInput.data,
+      source.data.contactOrgId,
+    );
     if (!detail.ok) {
       await deleteInsertedProperty(supabase, propertyId);
       return detail;
@@ -203,7 +221,7 @@ export async function createPropertyAndResolve(
       conversationId,
     });
     if (!restamp.ok) {
-      if (!detailExisted) await deleteRoleDetail(supabase, contactId, role);
+      if (!detailExisted) await deleteRoleDetail(supabase, contactId, roleInput.data);
       await rollbackEnsureSideEffects(supabase, ensureSnapshot, conversationId);
       await deleteInsertedProperty(supabase, propertyId);
       return restamp;
@@ -212,7 +230,7 @@ export async function createPropertyAndResolve(
     return ok({ ...restamp.data, conversationId, propertyId });
   } catch (e) {
     if (propertyId) {
-      if (!detailExisted) await deleteRoleDetail(supabase, contactId, role);
+      if (!detailExisted) await deleteRoleDetail(supabase, contactId, roleInput.data);
       if (conversationId) {
         await rollbackEnsureSideEffects(supabase, ensureSnapshot, conversationId);
       }
@@ -222,13 +240,33 @@ export async function createPropertyAndResolve(
   }
 }
 
+function validateOptionalRole(
+  role: ContactRole | null | undefined,
+): Result<ContactRole | null> {
+  if (role == null) return ok(null);
+  if (role === "homeowner" || role === "agent") return ok(role);
+  return invalidRole();
+}
+
+function validateRequiredRole(role: ContactRole): Result<ContactRole> {
+  if (role === "homeowner" || role === "agent") return ok(role);
+  return invalidRole();
+}
+
+function invalidRole(): Result<never> {
+  return err({
+    code: "INVALID_ROLE",
+    message: "Role must be homeowner or agent.",
+  });
+}
+
 async function validateSourceConversation(
   supabase: SupabaseClient<Database>,
   input: { sourceConversationId: string; contactId: string },
 ): Promise<Result<SourceValidation>> {
   const { data: rows, error } = await supabase
     .from("messages")
-    .select("direction, from_address, to_address")
+    .select("direction, from_address, to_address, contact_id, property_id, status")
     .eq("channel", "sms")
     .eq("conversation_id", input.sourceConversationId);
   if (error) {
@@ -251,6 +289,19 @@ async function validateSourceConversation(
 
   if (matches.data.length !== 1 || matches.data[0].id !== input.contactId) {
     return ambiguousContact();
+  }
+
+  const hasEligibleSourceRow = (rows ?? []).some(
+    (row) =>
+      row.contact_id === input.contactId &&
+      row.property_id === null &&
+      row.status !== "queued",
+  );
+  if (!hasEligibleSourceRow) {
+    return err({
+      code: "SOURCE_NO_ELIGIBLE_MESSAGES",
+      message: "Source conversation has no propertyless non-queued messages to resolve.",
+    });
   }
 
   return ok({ contactOrgId: matches.data[0].org_id });
@@ -296,7 +347,7 @@ async function validateProperty(
 ): Promise<Result<PropertyValidation>> {
   const { data: property, error } = await supabase
     .from("properties")
-    .select("org_id, homeowner_contact_id, agent_contact_id")
+    .select("org_id, homeowner_contact_id, agent_contact_id, deleted_at")
     .eq("id", input.propertyId)
     .maybeSingle();
   if (error) {
@@ -306,6 +357,12 @@ async function validateProperty(
     return err({
       code: "PROPERTY_FORBIDDEN",
       message: "Property is not available in the caller's organization.",
+    });
+  }
+  if (property.deleted_at !== null) {
+    return err({
+      code: "PROPERTY_ARCHIVED",
+      message: "Archived properties cannot be used to resolve conversations.",
     });
   }
   return ok({
@@ -391,6 +448,7 @@ async function applyRoleLink(
   input: {
     contactId: string;
     propertyId: string;
+    orgId: string;
     role: ContactRole;
     previousRoleContactId: string | null;
   },
@@ -402,7 +460,12 @@ async function applyRoleLink(
   );
   if (!detailBefore.ok) return detailBefore;
 
-  const detail = await upsertRoleDetail(supabase, input.contactId, input.role);
+  const detail = await upsertRoleDetail(
+    supabase,
+    input.contactId,
+    input.role,
+    input.orgId,
+  );
   if (!detail.ok) return detail;
 
   let propertyRoleUpdated = false;
@@ -507,15 +570,22 @@ async function upsertRoleDetail(
   supabase: SupabaseClient<Database>,
   contactId: string,
   role: ContactRole,
+  orgId: string,
 ): Promise<Result<null>> {
   const { error } =
     role === "homeowner"
       ? await supabase
           .from("homeowner_details")
-          .upsert({ contact_id: contactId }, { onConflict: "contact_id" })
+          .upsert(
+            { contact_id: contactId, org_id: orgId },
+            { onConflict: "contact_id" },
+          )
       : await supabase
           .from("agent_details")
-          .upsert({ contact_id: contactId }, { onConflict: "contact_id" });
+          .upsert(
+            { contact_id: contactId, org_id: orgId },
+            { onConflict: "contact_id" },
+          );
   if (error) {
     return err({
       code:
@@ -565,7 +635,14 @@ async function restampSourceMessages(
   if (error) {
     return err({ code: "MESSAGE_UPDATE_FAILED", message: error.message });
   }
-  return ok({ updated: data?.length ?? 0 });
+  const updated = data?.length ?? 0;
+  if (updated === 0) {
+    return err({
+      code: "SOURCE_NO_ELIGIBLE_MESSAGES",
+      message: "Source conversation has no propertyless non-queued messages to resolve.",
+    });
+  }
+  return ok({ updated });
 }
 
 async function deleteInsertedProperty(
@@ -574,5 +651,3 @@ async function deleteInsertedProperty(
 ): Promise<void> {
   await supabase.from("properties").delete().eq("id", propertyId);
 }
-
-export type { AppErrorShape, MessageRow };
