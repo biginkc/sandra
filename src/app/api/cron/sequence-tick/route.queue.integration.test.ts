@@ -7,7 +7,7 @@ import {
   resetMockState,
 } from "@/lib/messaging/providers/mock";
 
-import { runSequenceTick } from "./route";
+import { DRAIN_BATCH_SIZE, runSequenceTick } from "./route";
 
 const supabase = createTestClient();
 
@@ -96,6 +96,10 @@ describe("runSequenceTick — queue drain (integration)", () => {
     expect(summary.processed).toBe(0);
     expect(summary.drained).toBe(0);
     expect(getMockMessageLog()).toHaveLength(0);
+  });
+
+  it("keeps the production default drain cap at 240 queued messages", () => {
+    expect(DRAIN_BATCH_SIZE).toBe(240);
   });
 
   it("releases a queued message whose scheduled_for <= now", async () => {

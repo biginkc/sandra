@@ -2531,6 +2531,7 @@ export type Database = {
         Row: {
           ai_last_delivery_error: string | null
           ai_last_delivery_status: string | null
+          ai_responder_message_id: string | null
           ai_responder_reason: string | null
           ai_responder_status: string | null
           ai_responder_status_at: string | null
@@ -2546,6 +2547,7 @@ export type Database = {
         Insert: {
           ai_last_delivery_error?: string | null
           ai_last_delivery_status?: string | null
+          ai_responder_message_id?: string | null
           ai_responder_reason?: string | null
           ai_responder_status?: string | null
           ai_responder_status_at?: string | null
@@ -2561,6 +2563,7 @@ export type Database = {
         Update: {
           ai_last_delivery_error?: string | null
           ai_last_delivery_status?: string | null
+          ai_responder_message_id?: string | null
           ai_responder_reason?: string | null
           ai_responder_status?: string | null
           ai_responder_status_at?: string | null

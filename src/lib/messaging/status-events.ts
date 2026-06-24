@@ -74,6 +74,7 @@ export async function applyMessageStatusEvent(
   if ((updatedRows ?? []).length === 0) return "skipped";
   await recordAiResponderDeliveryForThread(supabase, {
     conversationId: message.conversation_id,
+    messageId: message.id,
     metadata: message.metadata,
     event,
   });

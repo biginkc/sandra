@@ -180,3 +180,29 @@ describe("<InboxThreadList /> realtime subscriptions", () => {
     );
   });
 });
+
+describe("<InboxThreadList /> Sandra state", () => {
+  it("shows Sandra's escalation reason even before the legacy property flag is set", () => {
+    const { getByTestId } = render(
+      <InboxThreadList
+        initial={[
+          makeThread({
+            threadId: "thread-ai-escalated",
+            contactName: "AI Lead",
+            aiResponderStatus: "escalated",
+            aiResponderReason: "asked for price",
+            needsHumanAttention: false,
+            escalationReason: null,
+          }),
+        ]}
+        selectedThreadId={null}
+        currentUserId={null}
+        onSelectThread={vi.fn()}
+      />,
+    );
+
+    expect(
+      getByTestId("inbox-thread-thread-ai-escalated-sandra-reason"),
+    ).toHaveTextContent("asked for price");
+  });
+});

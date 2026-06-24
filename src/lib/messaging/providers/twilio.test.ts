@@ -76,6 +76,7 @@ describe("TwilioMessagingProvider.sendSms", () => {
     );
     const init = call[1] as RequestInit;
     expect(init.method).toBe("POST");
+    expect(init.signal).toBeInstanceOf(AbortSignal);
     const headers = init.headers as Record<string, string>;
     expect(headers["Content-Type"]).toBe("application/x-www-form-urlencoded");
     const expectedAuth = Buffer.from(`${ACCOUNT_SID}:${AUTH_TOKEN}`).toString(
