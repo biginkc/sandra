@@ -3,6 +3,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { computeConsentState } from "@/lib/messaging/consent";
 import type { Database } from "@/lib/supabase/types";
 import type { AiResponderThreadStatus } from "./ai-responder-thread-state";
+import { deriveSmsParties } from "./sms-parties";
 
 export type Thread = {
   /** The conversation UUID — the one and only thread identity since
@@ -10,6 +11,11 @@ export type Thread = {
   threadId: string;
   contactId: string;
   contactName: string | null;
+  /** Actual customer-side phone on the latest SMS in this conversation. */
+  threadCustomerPhone: string | null;
+  /** Actual Sandra/business-side phone on the latest SMS in this conversation. */
+  threadBusinessPhone: string | null;
+  /** Backward-compatible alias for threadCustomerPhone. */
   contactPhone: string | null;
   propertyId: string | null;
   propertyAddress: string | null;
@@ -138,7 +144,7 @@ export async function listThreads(
   const { data: msgs, error } = await supabase
     .from("messages")
     .select(
-      "contact_id, property_id, conversation_id, body, direction, created_at, read_at",
+      "contact_id, property_id, conversation_id, body, direction, from_address, to_address, created_at, read_at",
     )
     .eq("channel", "sms")
     .not("contact_id", "is", null)
@@ -288,6 +294,7 @@ export async function listThreads(
       isOptedOut,
     });
     if (opts.needsOutcomeOnly && !needsOutcome) continue;
+    const parties = deriveSmsParties(bucket.latest);
 
     threads.push({
       threadId,
@@ -296,7 +303,9 @@ export async function listThreads(
         ? (c.entity_name ??
           ([c.first_name, c.last_name].filter(Boolean).join(" ") || null))
         : null,
-      contactPhone: c?.phone_1 ?? null,
+      threadCustomerPhone: parties.customerPhone,
+      threadBusinessPhone: parties.businessPhone,
+      contactPhone: parties.customerPhone,
       propertyId: bucket.propertyId,
       propertyAddress: p
         ? [p.address, p.city, p.state].filter(Boolean).join(", ")

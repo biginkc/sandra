@@ -59,6 +59,8 @@ function makeThread(overrides: Partial<Thread> & { threadId: string }): Thread {
     threadId: overrides.threadId,
     contactId: overrides.contactId ?? `contact-${overrides.threadId}`,
     contactName: overrides.contactName ?? null,
+    threadCustomerPhone: overrides.threadCustomerPhone ?? null,
+    threadBusinessPhone: overrides.threadBusinessPhone ?? null,
     contactPhone: overrides.contactPhone ?? null,
     propertyId: overrides.propertyId ?? `property-${overrides.threadId}`,
     propertyAddress: overrides.propertyAddress ?? null,

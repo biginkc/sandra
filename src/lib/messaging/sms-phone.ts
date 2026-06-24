@@ -1,3 +1,5 @@
+import { normalizePhone } from "@/lib/csv/normalize";
+
 import { asLineType, type PhoneLineType } from "./line-type";
 
 export type SmsPhoneContact = {
@@ -44,6 +46,19 @@ export function selectBestSmsPhone(
     slots.find((slot) => slot.lineType === "mobile") ??
     slots.find((slot) => slot.lineType === "unknown") ??
     slots.find((slot) => slot.lineType === "landline") ??
+    null
+  );
+}
+
+export function selectSmsPhoneByNumber(
+  contact: SmsPhoneContact | null | undefined,
+  requestedPhone: string | null | undefined,
+): SmsPhoneChoice | null {
+  if (!contact || !requestedPhone) return null;
+  const requested = normalizePhone(requestedPhone);
+  if (!requested) return null;
+  return (
+    phoneSlots(contact).find((slot) => normalizePhone(slot.phone) === requested) ??
     null
   );
 }
