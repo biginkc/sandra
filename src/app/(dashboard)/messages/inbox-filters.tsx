@@ -243,7 +243,7 @@ function FilterChip({
       {icon === "mascot" ? (
         // eslint-disable-next-line @next/next/no-img-element
         <img
-          src="/brand/mascot.svg"
+          src="/icon.png"
           alt=""
           aria-hidden="true"
           className="h-4 w-4 shrink-0"
