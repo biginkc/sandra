@@ -3,6 +3,7 @@ import { createClient } from "@/lib/supabase/server";
 import { listThreads } from "@/lib/messages/list-threads";
 import { listUnknownSenders } from "@/lib/messages/list-unknown-senders";
 import { canonicalizeThreadId } from "@/lib/messages/threading";
+import { redirect } from "next/navigation";
 
 import { markMessagesReadForThread } from "../leads/actions";
 
@@ -38,8 +39,8 @@ export const metadata = {
  *      immediately via the existing send-now path. Replaces the Dialpad
  *      app for live conversation work.
  *
- *      Filters: All (default), Mine (Phase 3), Unassigned (Phase 3),
- *      Unknown (Phase 2), Dismissed (Phase 2).
+ *      Filters: All (default), Unread, Needs Outcome, Mine, Escalated,
+ *      Dispo, Unassigned, Unknown, Dismissed.
  *
  *   2. Outbox — the legacy queue panel: drafts waiting to release with
  *      cadence (Send Next / Auto-send). Unchanged.
@@ -50,20 +51,22 @@ export const metadata = {
 export default async function MessagesPage({
   searchParams,
 }: {
-  searchParams: Promise<{
-    tab?: string;
-    thread?: string;
-    filter?: string;
-    hideDnc?: string;
-  }>;
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
   const sp = await searchParams;
-  const activeTab = sp.tab === "outbox" ? "outbox" : "inbox";
-  const filter = parseInboxFilter(sp.filter);
+  const rawFilter = firstSearchParam(sp.filter);
+  if (rawFilter === "handled") {
+    const canonical = searchParamsToUrlParams(sp);
+    canonical.set("filter", "dispo");
+    redirect(`/messages?${canonical.toString()}`);
+  }
+
+  const activeTab = firstSearchParam(sp.tab) === "outbox" ? "outbox" : "inbox";
+  const filter = parseInboxFilter(rawFilter ?? undefined);
   // DNC toggle — ON by default per feedback-f E1. Only `?hideDnc=0` flips
   // it off so we can keep clean URLs the rest of the time.
-  const hideDnc = sp.hideDnc !== "0";
-  const selectedThreadId = sp.thread ?? null;
+  const hideDnc = firstSearchParam(sp.hideDnc) !== "0";
+  const selectedThreadId = firstSearchParam(sp.thread);
 
   const supabase = await createClient();
   const {
@@ -177,4 +180,24 @@ export default async function MessagesPage({
       hiddenDncCount={hiddenDncCount}
     />
   );
+}
+
+function firstSearchParam(value: string | string[] | undefined): string | null {
+  if (Array.isArray(value)) return value[0] ?? null;
+  return value ?? null;
+}
+
+function searchParamsToUrlParams(
+  params: Record<string, string | string[] | undefined>,
+): URLSearchParams {
+  const out = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (value === undefined) continue;
+    if (Array.isArray(value)) {
+      for (const item of value) out.append(key, item);
+      continue;
+    }
+    out.set(key, value);
+  }
+  return out;
 }

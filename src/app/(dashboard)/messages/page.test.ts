@@ -13,6 +13,9 @@ const mocks = vi.hoisted(() => ({
   canonicalizeThreadId: vi.fn(),
   createClient: vi.fn(),
   createAdminClient: vi.fn(),
+  redirect: vi.fn((url: string) => {
+    throw new Error(`redirect:${url}`);
+  }),
 }));
 
 vi.mock("@/lib/supabase/server", () => ({
@@ -33,6 +36,10 @@ vi.mock("@/lib/messages/list-unknown-senders", () => ({
 
 vi.mock("@/lib/messages/threading", () => ({
   canonicalizeThreadId: mocks.canonicalizeThreadId,
+}));
+
+vi.mock("next/navigation", () => ({
+  redirect: mocks.redirect,
 }));
 
 vi.mock("../leads/actions", () => ({
@@ -154,5 +161,61 @@ describe("MessagesPage filter-count boundary", () => {
     expect(element.props.unreadCount).toBe(1);
     expect(element.props.needsOutcomeCount).toBe(1);
     expect(element.props.hiddenDncCount).toBe(2);
+  });
+
+  it("filters Dispo from the live in-memory thread set", async () => {
+    mocks.listThreads.mockResolvedValue([
+      makeThread({
+        threadId: "ai-handled-only",
+        aiResponderStatus: "handled",
+      }),
+      makeThread({
+        threadId: "dispo",
+        outreachDispo: "not_interested",
+      }),
+      makeThread({
+        threadId: "hidden-dnc-dispo",
+        outreachDispo: "dnc",
+        isOptedOut: true,
+      }),
+    ]);
+
+    const element = (await MessagesPage({
+      searchParams: Promise.resolve({ filter: "dispo" }),
+    })) as ReactElement<{
+      filter: string;
+      threads: Thread[];
+      hiddenDncCount: number;
+    }>;
+
+    expect(element.props.filter).toBe("dispo");
+    expect(element.props.threads.map((thread) => thread.threadId)).toEqual([
+      "dispo",
+    ]);
+    expect(element.props.hiddenDncCount).toBe(1);
+  });
+
+  it("redirects legacy handled filter links to the canonical Dispo URL", async () => {
+    await expect(
+      MessagesPage({
+        searchParams: Promise.resolve({
+          tab: "inbox",
+          thread: "conv-1",
+          filter: "handled",
+          hideDnc: "0",
+          preserved: "yes",
+        }),
+      }),
+    ).rejects.toThrow(/^redirect:/);
+    const target = mocks.redirect.mock.calls.at(-1)?.[0] as string;
+    const redirected = new URL(target, "https://sandra.test");
+    expect(redirected.pathname).toBe("/messages");
+    expect(redirected.searchParams.get("tab")).toBe("inbox");
+    expect(redirected.searchParams.get("thread")).toBe("conv-1");
+    expect(redirected.searchParams.get("filter")).toBe("dispo");
+    expect(redirected.searchParams.get("hideDnc")).toBe("0");
+    expect(redirected.searchParams.get("preserved")).toBe("yes");
+    expect(redirected.search).not.toContain("filter=handled");
+    expect(mocks.createClient).not.toHaveBeenCalled();
   });
 });

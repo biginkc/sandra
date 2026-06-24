@@ -10,7 +10,7 @@ export type InboxFilter =
   | "dismissed"
   | "unread"
   | "escalated"
-  | "handled"
+  | "dispo"
   | "needs_outcome";
 
 type Props = {
@@ -116,11 +116,10 @@ export function InboxFilters({
         />
       ) : null}
       <FilterChip
-        label="Handled"
-        icon="mascot"
-        active={active === "handled"}
-        onClick={() => setFilter("handled")}
-        testId="filter-handled"
+        label="Dispo"
+        active={active === "dispo"}
+        onClick={() => setFilter("dispo")}
+        testId="filter-dispo"
       />
       {showAssignmentChips && (
         <FilterChip
