@@ -29,7 +29,7 @@ export const TEMPLATE_VARIABLES: readonly TemplateVariable[] = [
   { name: "market", label: "Market", group: "Property", example: "DFW" },
 
   // Account fields
-  { name: "my_first_name", label: "Your First Name", group: "Account", example: "Sarah" },
+  { name: "my_first_name", label: "Sender Name", group: "Account", example: "Mel" },
   { name: "company_name", label: "Company Name", group: "Account", example: "Big Ink Consulting" },
 ] as const;
 
@@ -37,10 +37,12 @@ export const TEMPLATE_VARIABLES: readonly TemplateVariable[] = [
  * Build a sample vars object for the live preview panel.
  * Uses the `example` value from each registered variable.
  */
-export function buildSampleVars(): Record<string, string> {
+export function buildSampleVars(
+  overrides: Partial<Record<string, string>> = {},
+): Record<string, string> {
   const vars: Record<string, string> = {};
   for (const v of TEMPLATE_VARIABLES) {
-    vars[v.name] = v.example;
+    vars[v.name] = overrides[v.name] ?? v.example;
   }
   return vars;
 }

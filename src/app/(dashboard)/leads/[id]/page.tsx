@@ -179,7 +179,7 @@ export default async function LeadDetailPage({
     if (t) initialTags.push(t);
   }
 
-  // Admin client — shared for user-email resolution + template-var loading.
+  // Admin client — used for author + assignee email display below.
   const admin = createAdminClient();
 
   // Fetch SMS templates and pre-render them with this property's vars so the
@@ -192,9 +192,7 @@ export default async function LeadDetailPage({
       {
         propertyId: lead.id,
         contactId: homeownerContactId,
-        enrolledByUserId: sessionUser?.id ?? null,
       },
-      admin,
     );
     templateOptions = templatesResult.data.map((t) => ({
       id: t.id,

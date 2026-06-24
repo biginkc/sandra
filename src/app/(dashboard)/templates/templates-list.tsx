@@ -49,6 +49,7 @@ type Props = {
   templates: TemplateRow[];
   categories: string[];
   parsed: ParsedTableSearch<TemplatesFilters>;
+  senderName: string;
 };
 
 const TEMPLATES_SORTABLE_COLUMNS = [
@@ -86,7 +87,7 @@ const BUILD_CONFIG = {
  *   2. Raw <table> → shadcn <Table> for visual continuity with
  *      /properties /lists /jobs.
  */
-export function TemplatesList({ templates, categories, parsed }: Props) {
+export function TemplatesList({ templates, categories, parsed, senderName }: Props) {
   const [editingTemplate, setEditingTemplate] = useState<TemplateRow | null>(
     null,
   );
@@ -331,6 +332,7 @@ export function TemplatesList({ templates, categories, parsed }: Props) {
           onOpenChange={(open) => {
             if (!open) setEditingTemplate(null);
           }}
+          senderName={senderName}
         />
       )}
     </>

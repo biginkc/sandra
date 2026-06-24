@@ -81,6 +81,7 @@ function renderTemplates(
     <TemplatesList
       templates={opts.templates ?? [makeTemplate({ id: "t1" })]}
       categories={opts.categories ?? ["General", "Probate", "Vacant"]}
+      senderName="Mel"
       parsed={{
         ...DEFAULT_PARSED,
         ...opts.parsed,

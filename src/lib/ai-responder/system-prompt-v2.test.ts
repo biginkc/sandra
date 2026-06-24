@@ -62,7 +62,7 @@ describe("ai responder system prompt v2 artifact", () => {
     [6, { action: "escalate", escalation_reason: "price_or_offer", confidence: 0.95, sentiment: "neutral" }],
     [7, { action: "close_not_interested", confidence: 0.93, sentiment: "neutral" }],
     [8, { action: "opt_out", confidence: 0.97, sentiment: "frustrated" }],
-    [9, { action: "send_reply", body: "Your info came up in public property records for the area. Happy to have a teammate explain, or take you off the list.", confidence: 0.88, sentiment: "neutral" }],
+    [9, { action: "send_reply", body: "Your info came up in public property records for the area. Happy to have a teammate explain.", confidence: 0.88, sentiment: "neutral" }],
     [10, { action: "escalate", escalation_reason: "call_request", confidence: 0.95, sentiment: "positive" }],
     [11, { action: "opt_out", confidence: 0.97, sentiment: "neutral" }],
     [12, { action: "deescalate_close", body: "So sorry to bug you. Sounds like you get a lot of these. Are you {first_name}? Just want to make sure we don't bother you again.", confidence: 0.9, sentiment: "frustrated" }],

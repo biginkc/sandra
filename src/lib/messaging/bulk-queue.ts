@@ -97,19 +97,16 @@ export function freshScheduleState(anchorMs: number): BulkSmsScheduleState {
  * Queue one batch of property IDs. `client` is the caller's Supabase
  * client — the session client on the synchronous action path (RLS
  * applies), the admin client on the workflow path (matches the cron
- * releaser's privilege level). `adminClient` is always the admin client
- * (template-var resolution needs auth.admin lookups).
+ * releaser's privilege level).
  *
  * Mutates nothing outside the DB; returns the updated schedule state so
  * chunked callers thread it into the next call.
  */
 export async function queueSmsBatch(
   client: SupabaseClient<Database>,
-  adminClient: SupabaseClient<Database>,
   args: {
     propertyIds: string[];
     opts: ResolvedBulkSmsQueueOpts;
-    enrolledByUserId: string | null;
     state: BulkSmsScheduleState;
   },
 ): Promise<BulkSmsScheduleState> {
@@ -386,9 +383,7 @@ export async function queueSmsBatch(
         {
           propertyId,
           contactId,
-          enrolledByUserId: args.enrolledByUserId,
         },
-        adminClient,
       );
       body = renderTemplate(template.content, vars);
     }

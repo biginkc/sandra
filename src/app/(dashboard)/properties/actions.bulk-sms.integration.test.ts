@@ -10,8 +10,6 @@ vi.mock("@/lib/supabase/server", () => ({
   createClient: async () => testClient,
 }));
 
-// loadTemplateVars uses an admin client to resolve the session user id →
-// first name. In tests we point that at the same service-role test client.
 vi.mock("@/lib/supabase/admin", () => ({
   createAdminClient: () => testClient,
 }));
@@ -22,10 +20,8 @@ vi.mock("next/server", async () => {
   return { ...actual, after: () => {} };
 });
 
-// Stub getUser() so the bulk action can resolve `{{my_first_name}}` from
-// the current session user. Tests opt in by setting currentUserId +
-// currentEmail in their setup; the default null/null preserves the
-// pre-fix behavior so older tests keep their existing assertions.
+// Stub getUser() so the bulk action can stamp audit/job ownership.
+// `{{my_first_name}}` is rendered from the fixed outbound sender persona.
 let currentUserId: string | null = null;
 let currentEmail: string | null = null;
 vi.spyOn(testClient.auth, "getUser").mockImplementation(async () =>
@@ -139,6 +135,28 @@ async function seedTemplate(orgId: string, category: string): Promise<void> {
   if (error) throw new Error(`template seed failed: ${error.message}`);
 }
 
+async function getOnlyMessageBody(propertyId: string): Promise<string> {
+  const { data: messages } = await testClient
+    .from("messages")
+    .select("body")
+    .eq("property_id", propertyId);
+  expect(messages).toHaveLength(1);
+  return messages![0].body;
+}
+
+async function queueTemplateAndGetBody(
+  propertyId: string,
+  templateCategory: string,
+): Promise<string> {
+  const result = await bulkQueueSms([propertyId], adHocOpts({
+    templateCategory,
+  }));
+  expect(result.ok).toBe(true);
+  if (!result.ok) throw new Error(result.error.message);
+  expect(result.data.succeeded).toBe(1);
+  return getOnlyMessageBody(propertyId);
+}
+
 function adHocOpts<T extends Record<string, unknown>>(opts: T): T & {
   campaignName: string;
 } {
@@ -168,12 +186,14 @@ describe("bulkQueueSms (integration)", () => {
     resetMockState();
     currentUserId = null;
     currentEmail = null;
+    vi.stubEnv("OUTBOUND_SENDER_NAME", "");
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(SAFE_NOW);
   });
 
   afterEach(async () => {
     vi.useRealTimers();
+    vi.unstubAllEnvs();
     for (const id of createdAuthUsers) {
       await testClient.auth.admin.deleteUser(id);
     }
@@ -694,12 +714,9 @@ describe("bulkQueueSms (integration)", () => {
     expect(result.data).toEqual({ succeeded: 2, skipped: 1, failed: [] });
   });
 
-  it("renders {{my_first_name}} from the session user when bulk-queuing a template", async () => {
-    // Regression: prior to the fix, bulkQueueSms hardcoded
-    // enrolledByUserId: null which made loadTemplateVars return
-    // my_first_name: null. Templates with `{{my_first_name}}` then
-    // rendered an empty string and produced bodies like "Andrew,  here."
-    // that went out to real prospects (canceled in prod 2026-05-05).
+  it("renders {{my_first_name}} from the outbound sender persona when bulk-queuing a template", async () => {
+    // The sender-facing token must not be derived from the logged-in
+    // operator's email; all outbound SMS uses the fixed persona.
     const userId = await createAuthUser("jarrad+bulk-sender@bmhgroupkc.com");
     currentUserId = userId;
     currentEmail = "jarrad+bulk-sender@bmhgroupkc.com";
@@ -719,23 +736,13 @@ describe("bulkQueueSms (integration)", () => {
       address: "101 Sender Rd",
     });
 
-    const result = await bulkQueueSms([propertyId], adHocOpts({
-      templateCategory: "Test-Sender-Opener",
-    }));
-    expect(result.ok).toBe(true);
-    if (!result.ok) return;
-    expect(result.data.succeeded).toBe(1);
-
-    const { data: messages } = await testClient
-      .from("messages")
-      .select("body")
-      .eq("property_id", propertyId);
-    expect(messages).toHaveLength(1);
-    // local part of email → capitalized first name → "Jarrad+bulk-sender"
-    // Match the prefix so the test doesn't depend on email-suffix handling.
-    expect(messages![0].body).toContain("Jarrad");
+    const body = await queueTemplateAndGetBody(
+      propertyId,
+      "Test-Sender-Opener",
+    );
+    expect(body).toContain("Mel here");
     // No double-space gap where the empty token used to live.
-    expect(messages![0].body).not.toMatch(/,\s\s/);
+    expect(body).not.toMatch(/,\s\s/);
   });
 
   it("loads a template from the pool and renders it with lead vars", async () => {
@@ -746,23 +753,11 @@ describe("bulkQueueSms (integration)", () => {
       address: "61 Template Rd",
     });
 
-    const result = await bulkQueueSms([propertyId], adHocOpts({
-      templateCategory: "Test-Opener",
-    }));
-    expect(result.ok).toBe(true);
-    if (!result.ok) return;
-    expect(result.data.succeeded).toBe(1);
-
-    const { data: messages } = await testClient
-      .from("messages")
-      .select("body")
-      .eq("property_id", propertyId);
-
-    expect(messages).toHaveLength(1);
+    const body = await queueTemplateAndGetBody(propertyId, "Test-Opener");
     // Template: "Hi {{first_name | there}}, interested in selling {{property_address}}?"
     // first_name="Bulk", property_address="61 Template Rd"
-    expect(messages![0].body).toContain("Bulk");
-    expect(messages![0].body).toContain("61 Template Rd");
+    expect(body).toContain("Bulk");
+    expect(body).toContain("61 Template Rd");
   });
 
   // ---------------------------------------------------------------

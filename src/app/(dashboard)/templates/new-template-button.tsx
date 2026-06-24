@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 
 import { TemplateDialog } from "./template-dialog";
 
-export function NewTemplateButton() {
+export function NewTemplateButton({ senderName }: { senderName: string }) {
   const [open, setOpen] = useState(false);
 
   return (
@@ -16,6 +16,7 @@ export function NewTemplateButton() {
         mode="create"
         open={open}
         onOpenChange={setOpen}
+        senderName={senderName}
       />
     </>
   );
