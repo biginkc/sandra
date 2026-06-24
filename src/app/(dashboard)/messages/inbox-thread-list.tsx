@@ -260,7 +260,7 @@ function SandraThreadStatus({
       >
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img
-          src="/brand/mascot.svg"
+          src="/icon.png"
           alt=""
           aria-hidden="true"
           className="h-3.5 w-3.5 shrink-0"

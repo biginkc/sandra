@@ -309,7 +309,7 @@ describe("<CockpitView /> chip order (feedback-f E2b)", () => {
     expect(status).toHaveTextContent("Sandra handled");
     expect(status.querySelector("img")).toHaveAttribute(
       "src",
-      "/brand/mascot.svg",
+      "/icon.png",
     );
 
     const delivery = screen.getByTestId(
@@ -361,11 +361,11 @@ describe("<CockpitView /> chip order (feedback-f E2b)", () => {
     ]);
     expect(screen.getByTestId("filter-escalated").querySelector("img")).toHaveAttribute(
       "src",
-      "/brand/mascot.svg",
+      "/icon.png",
     );
     expect(screen.getByTestId("filter-handled").querySelector("img")).toHaveAttribute(
       "src",
-      "/brand/mascot.svg",
+      "/icon.png",
     );
   });
 
