@@ -117,6 +117,7 @@ export function InboxFilters({
       ) : null}
       <FilterChip
         label="Dispo"
+        icon="mascot"
         active={active === "dispo"}
         onClick={() => setFilter("dispo")}
         testId="filter-dispo"

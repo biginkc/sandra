@@ -368,6 +368,10 @@ describe("<CockpitView /> chip order (feedback-f E2b)", () => {
       "src",
       "/icon.png",
     );
+    expect(screen.getByTestId("filter-dispo").querySelector("img")).toHaveAttribute(
+      "src",
+      "/icon.png",
+    );
     expect(screen.getByTestId("filter-dispo")).toHaveTextContent("Dispo");
     expect(screen.queryByTestId("filter-handled")).not.toBeInTheDocument();
   });
