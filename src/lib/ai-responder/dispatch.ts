@@ -20,6 +20,7 @@ import {
   type AnthropicLike,
 } from "./generate";
 import { humanizeReply } from "./humanize";
+import { IDENTITY_REPLY_BODY, isIdentityQuestion } from "./identity";
 import { matchEscalationKeyword } from "./keywords";
 import { resolveResponderOutcome, type ResponderRoute } from "./route";
 import { validateAiReplyBody } from "./safety";
@@ -169,6 +170,23 @@ export async function dispatchAiResponse(
     if (recentReply) {
       return { outcome: "skipped", reason: "duplicate_throttled" };
     }
+  }
+
+  if (isIdentityQuestion(input.inboundBody)) {
+    const safety = validateAiReplyBody(IDENTITY_REPLY_BODY);
+    if (!safety.ok) {
+      const reason = `safety:${safety.reason}`;
+      await markPropertyNeedsAttention(supabase, input.propertyId, reason);
+      return { outcome: "escalated", reason };
+    }
+    return sendResponderMessage(supabase, {
+      input,
+      body: IDENTITY_REPLY_BODY,
+      model: config!.model,
+      confidence: 1,
+      sentiment: "neutral",
+      turn: currentTurn + 1,
+    });
   }
 
   // --------------------------------------------------------------------------

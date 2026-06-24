@@ -9,6 +9,7 @@ import {
 
 import { dispatchAiResponse } from "./dispatch";
 import type { AnthropicLike } from "./generate";
+import { IDENTITY_REPLY_BODY } from "./identity";
 import type { AiStructuredOutput } from "./types";
 
 // Force quiet-hours "open" for the whole file so the happy-path test is
@@ -236,6 +237,53 @@ describe("dispatchAiResponse (integration)", () => {
     expect(meta.confidence).toBe(0.9);
     expect(meta.sentiment).toBe("positive");
     expect(meta.turn).toBe(1);
+  });
+
+  it("identity challenge → sends fixed Mel with BMH reply without calling Claude", async () => {
+    await seedConfig();
+    const { propertyId, contactId } = await seedLead({
+      phone: "+18167554021",
+    });
+    let claudeCalls = 0;
+    const trackingAnthropic: AnthropicLike = {
+      messages: {
+        create: (async () => {
+          claudeCalls++;
+          return stubAnthropic(HAPPY_OUT).messages.create({} as never);
+        }) as unknown as AnthropicLike["messages"]["create"],
+      } as unknown as AnthropicLike["messages"],
+    };
+
+    const outcome = await dispatchAiResponse(
+      supabase,
+      {
+        propertyId,
+        contactId,
+        inboundBody: "Who is this?",
+        inboundMessageId: "66666666-6666-4666-8666-666666666666",
+      },
+      { anthropic: trackingAnthropic },
+    );
+
+    expect(outcome).toMatchObject({ outcome: "sent", confidence: 1 });
+    expect(claudeCalls).toBe(0);
+    expect(getMockMessageLog()).toHaveLength(1);
+    expect(getMockMessageLog()[0].body).toBe(IDENTITY_REPLY_BODY);
+
+    const { data: outbound } = await supabase
+      .from("messages")
+      .select("body, metadata")
+      .eq("property_id", propertyId)
+      .eq("direction", "outbound")
+      .single();
+    expect(outbound?.body).toBe(IDENTITY_REPLY_BODY);
+    expect(outbound?.metadata).toMatchObject({
+      generated_by: "ai_responder_v1",
+      inbound_message_id: "66666666-6666-4666-8666-666666666666",
+      confidence: 1,
+      sentiment: "neutral",
+      turn: 1,
+    });
   });
 
   it("skips when an AI reply already exists for the same inbound message", async () => {

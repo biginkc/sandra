@@ -8,6 +8,7 @@ import { classifyAiSkip } from "./classify";
 import { dispatchAiResponse } from "./dispatch";
 import { generateAiReply } from "./generate";
 import { humanizeReply } from "./humanize";
+import { IDENTITY_REPLY_BODY } from "./identity";
 import { validateAiReplyBody } from "./safety";
 import type { AiStructuredOutput } from "./types";
 
@@ -488,6 +489,45 @@ describe("dispatchAiResponse debounce", () => {
     });
     expect(vi.mocked(generateAiReply)).toHaveBeenCalledTimes(1);
     expect(vi.mocked(sendSmsToContact)).toHaveBeenCalledTimes(1);
+  });
+
+  it("answers identity questions with the fixed Mel with BMH copy without calling Claude", async () => {
+    const state = createMockState();
+    const supabase = createMockSupabase(state);
+    installSendMock(state);
+
+    const outcome = await dispatchAiResponse(
+      supabase as never,
+      {
+        contactId: CONTACT_ID,
+        conversationId: CONVERSATION_ID,
+        inboundBody: "Who is this?",
+        inboundMessageId: "inbound-identity",
+        propertyId: PROPERTY_ID,
+      },
+      { anthropic: {} as never },
+    );
+
+    expect(outcome).toEqual({
+      outcome: "sent",
+      messageId: "sent-1",
+      confidence: 1,
+    });
+    expect(vi.mocked(generateAiReply)).not.toHaveBeenCalled();
+    expect(vi.mocked(humanizeReply)).not.toHaveBeenCalled();
+    expect(vi.mocked(sendSmsToContact)).toHaveBeenCalledWith(
+      supabase,
+      expect.objectContaining({
+        body: IDENTITY_REPLY_BODY,
+      }),
+    );
+    expect(state.messages[0].metadata).toMatchObject({
+      generated_by: "ai_responder_v1",
+      inbound_message_id: "inbound-identity",
+      confidence: 1,
+      sentiment: "neutral",
+      turn: 1,
+    });
   });
 
   it("allows a second inbound after the 45-second window expires", async () => {
