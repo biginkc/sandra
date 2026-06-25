@@ -12,7 +12,11 @@ import type { UnknownSender } from "@/lib/messages/list-unknown-senders";
 import type { QueueStats } from "./actions";
 import { InboxDetail } from "./inbox-detail";
 import { type InboxDetail as InboxDetailData } from "./inbox-detail-data";
-import { InboxFilters, type InboxFilter } from "./inbox-filters";
+import {
+  InboxFilters,
+  type InboxFilter,
+  type InboxFilterCounts,
+} from "./inbox-filters";
 import { InboxThreadList } from "./inbox-thread-list";
 import { QueuePanel, type QueuedRow } from "./queue-panel";
 import { QueueStatsBanner } from "./queue-stats-banner";
@@ -31,9 +35,7 @@ type Props = {
   selectedThreadId?: string | null;
   threadDetail: InboxDetailData | null;
   unknownSenders: UnknownSender[];
-  unknownActiveCount: number;
-  needsOutcomeCount: number;
-  unreadCount: number;
+  filterCounts: InboxFilterCounts;
   /** auth.users.id → email map for assignee badges. */
   assigneeEmails: Record<string, string>;
   /** auth.users.id of the current viewer. */
@@ -65,9 +67,7 @@ export function CockpitView({
   selectedThreadId = null,
   threadDetail,
   unknownSenders,
-  unknownActiveCount,
-  needsOutcomeCount,
-  unreadCount,
+  filterCounts,
   assigneeEmails,
   currentUserId,
   queueStats,
@@ -200,9 +200,7 @@ export function CockpitView({
         <div className="flex flex-col gap-4">
           <InboxFilters
             active={filter}
-            unknownCount={unknownActiveCount}
-            needsOutcomeCount={needsOutcomeCount}
-            unreadCount={unreadCount}
+            filterCounts={filterCounts}
             showAssignmentChips={currentUserId !== null}
             hideDnc={hideDnc}
             hiddenDncCount={hiddenDncCount}

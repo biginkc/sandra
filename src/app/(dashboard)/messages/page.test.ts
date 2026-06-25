@@ -153,13 +153,17 @@ describe("MessagesPage filter-count boundary", () => {
 
     const element = (await MessagesPage({
       searchParams: Promise.resolve({ filter: "needs_outcome" }),
-    })) as ReactElement<{ threads: Thread[]; unreadCount: number; needsOutcomeCount: number; hiddenDncCount: number }>;
+    })) as ReactElement<{
+      threads: Thread[];
+      filterCounts: Record<string, number>;
+      hiddenDncCount: number;
+    }>;
 
     expect(element.props.threads.map((thread) => thread.threadId)).toEqual([
       "real-needs",
     ]);
-    expect(element.props.unreadCount).toBe(1);
-    expect(element.props.needsOutcomeCount).toBe(1);
+    expect(element.props.filterCounts.unread).toBe(1);
+    expect(element.props.filterCounts.needs_outcome).toBe(1);
     expect(element.props.hiddenDncCount).toBe(2);
   });
 
@@ -217,5 +221,117 @@ describe("MessagesPage filter-count boundary", () => {
     expect(redirected.searchParams.get("preserved")).toBe("yes");
     expect(redirected.search).not.toContain("filter=handled");
     expect(mocks.createClient).not.toHaveBeenCalled();
+  });
+
+  it("normalizes signed-out Mine and Unassigned filters to All counts", async () => {
+    mocks.createClient.mockResolvedValue({
+      auth: {
+        getUser: vi.fn(async () => ({ data: { user: null } })),
+      },
+    });
+    mocks.listThreads.mockResolvedValue([
+      makeThread({ threadId: "mine", assigneeId: "user-1" }),
+      makeThread({ threadId: "unassigned", assigneeId: null }),
+    ]);
+
+    for (const filter of ["mine", "unassigned"] as const) {
+      const element = (await MessagesPage({
+        searchParams: Promise.resolve({ filter }),
+      })) as ReactElement<{
+        filter: string;
+        threads: Thread[];
+        filterCounts: Record<string, number>;
+      }>;
+
+      expect(element.props.filter).toBe("all");
+      expect(element.props.threads.map((thread) => thread.threadId)).toEqual([
+        "mine",
+        "unassigned",
+      ]);
+      expect(element.props.filterCounts.all).toBe(2);
+      expect(element.props.filterCounts.mine).toBe(0);
+      expect(element.props.filterCounts.unassigned).toBe(0);
+    }
+  });
+
+  it("passes Unknown and Dismissed sender-bucket counts separately", async () => {
+    mocks.listThreads.mockResolvedValue([]);
+    mocks.listUnknownSenders.mockResolvedValue([
+      {
+        fromAddress: "+15550000001",
+        toAddress: null,
+        latestBody: "dismissed",
+        latestAt: "2026-06-24T12:00:00Z",
+        messageCount: 1,
+        isDismissed: true,
+      },
+      {
+        fromAddress: "+15550000002",
+        toAddress: null,
+        latestBody: "active",
+        latestAt: "2026-06-24T11:00:00Z",
+        messageCount: 1,
+        isDismissed: false,
+      },
+    ]);
+
+    const dismissedElement = (await MessagesPage({
+      searchParams: Promise.resolve({ filter: "dismissed" }),
+    })) as ReactElement<{
+      unknownSenders: Array<{ fromAddress: string; isDismissed: boolean }>;
+      filterCounts: Record<string, number>;
+    }>;
+
+    expect(dismissedElement.props.unknownSenders).toEqual([
+      expect.objectContaining({
+        fromAddress: "+15550000001",
+        isDismissed: true,
+      }),
+    ]);
+    expect(dismissedElement.props.filterCounts.unknown).toBe(1);
+    expect(dismissedElement.props.filterCounts.dismissed).toBe(1);
+
+    const unknownElement = (await MessagesPage({
+      searchParams: Promise.resolve({ filter: "unknown" }),
+    })) as ReactElement<{
+      unknownSenders: Array<{ fromAddress: string; isDismissed: boolean }>;
+      filterCounts: Record<string, number>;
+    }>;
+
+    expect(unknownElement.props.unknownSenders).toEqual([
+      expect.objectContaining({
+        fromAddress: "+15550000002",
+        isDismissed: false,
+      }),
+    ]);
+    expect(mocks.listUnknownSenders).toHaveBeenCalledWith(
+      expect.anything(),
+      { includeDismissed: true },
+    );
+  });
+
+  it("uses one latest-row sender classification for Unknown and Dismissed", async () => {
+    mocks.listThreads.mockResolvedValue([]);
+    mocks.listUnknownSenders.mockResolvedValue([
+      {
+        fromAddress: "+15550000001",
+        toAddress: null,
+        latestBody: "latest dismissed",
+        latestAt: "2026-06-24T12:00:00Z",
+        messageCount: 2,
+        isDismissed: true,
+      },
+    ]);
+
+    const element = (await MessagesPage({
+      searchParams: Promise.resolve({ filter: "unknown" }),
+    })) as ReactElement<{
+      unknownSenders: Array<{ fromAddress: string; isDismissed: boolean }>;
+      filterCounts: Record<string, number>;
+    }>;
+
+    expect(element.props.unknownSenders).toEqual([]);
+    expect(element.props.filterCounts.unknown).toBe(0);
+    expect(element.props.filterCounts.dismissed).toBe(1);
   });
 });

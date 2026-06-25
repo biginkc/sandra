@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
 import { CockpitView } from "./cockpit-view";
+import type { InboxFilterCounts } from "./inbox-filters";
 
 const replaceCalls: string[] = [];
 
@@ -88,9 +89,17 @@ const baseProps = {
   queued: [],
   threadDetail: null,
   unknownSenders: [],
-  unknownActiveCount: 0,
-  needsOutcomeCount: 0,
-  unreadCount: 0,
+  filterCounts: {
+    all: 0,
+    mine: 0,
+    unassigned: 0,
+    unknown: 0,
+    dismissed: 0,
+    unread: 0,
+    escalated: 0,
+    dispo: 0,
+    needs_outcome: 0,
+  } satisfies InboxFilterCounts,
   assigneeEmails: {},
   currentUserId: "user-1",
   queueStats: {

@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { CockpitView } from "./cockpit-view";
 import type { Thread } from "@/lib/messages/list-threads";
+import type { InboxFilterCounts } from "./inbox-filters";
 
 vi.mock("next/navigation", () => ({
   useRouter: () => ({
@@ -98,9 +99,17 @@ const baseProps = {
   queued: [],
   threadDetail: null,
   unknownSenders: [],
-  unknownActiveCount: 0,
-  needsOutcomeCount: 0,
-  unreadCount: 0,
+  filterCounts: {
+    all: 0,
+    mine: 0,
+    unassigned: 0,
+    unknown: 0,
+    dismissed: 0,
+    unread: 0,
+    escalated: 0,
+    dispo: 0,
+    needs_outcome: 0,
+  } satisfies InboxFilterCounts,
   assigneeEmails: {},
   currentUserId: "user-1",
   queueStats: {
@@ -415,7 +424,7 @@ describe("<CockpitView /> chip order (feedback-f E2b)", () => {
       <CockpitView
         {...baseProps}
         filter="needs_outcome"
-        needsOutcomeCount={3}
+        filterCounts={{ ...baseProps.filterCounts, needs_outcome: 3 }}
         threads={[]}
       />,
     );
@@ -423,8 +432,12 @@ describe("<CockpitView /> chip order (feedback-f E2b)", () => {
     const chip = screen.getByTestId("filter-needs-outcome");
     expect(chip).toHaveAttribute("data-active", "true");
     expect(chip).toHaveAttribute("aria-pressed", "true");
+    expect(chip).toHaveAccessibleName("Needs Outcome (3)");
     expect(chip).toHaveTextContent("Needs Outcome");
     expect(chip).toHaveTextContent("3");
+    expect(screen.getByTestId("filter-needs-outcome-count")).toHaveTextContent(
+      "3",
+    );
   });
 
   it("keeps count badges visible on inactive filter labels", () => {
@@ -433,18 +446,34 @@ describe("<CockpitView /> chip order (feedback-f E2b)", () => {
         {...baseProps}
         filter="all"
         threads={[]}
-        unreadCount={2}
-        needsOutcomeCount={3}
-        unknownActiveCount={4}
+        filterCounts={{
+          ...baseProps.filterCounts,
+          all: 9,
+          mine: 2,
+          unassigned: 1,
+          unread: 2,
+          needs_outcome: 3,
+          escalated: 4,
+          dispo: 5,
+          unknown: 6,
+          dismissed: 7,
+        }}
       />,
     );
 
     const unread = screen.getByTestId("filter-unread");
     const needsOutcome = screen.getByTestId("filter-needs-outcome");
+    const mine = screen.getByTestId("filter-mine");
+    const escalated = screen.getByTestId("filter-escalated");
+    const dispo = screen.getByTestId("filter-dispo");
+    const unassigned = screen.getByTestId("filter-unassigned");
+    const all = screen.getByTestId("filter-all");
     const unknown = screen.getByTestId("filter-unknown");
+    const dismissed = screen.getByTestId("filter-dismissed");
 
     expect(unread).not.toHaveAttribute("data-active");
     expect(unread).toHaveAttribute("aria-pressed", "false");
+    expect(unread).toHaveAccessibleName("Unread (2)");
     expect(unread).toHaveTextContent("Unread");
     expect(unread).toHaveTextContent("2");
 
@@ -453,10 +482,41 @@ describe("<CockpitView /> chip order (feedback-f E2b)", () => {
     expect(needsOutcome).toHaveTextContent("Needs Outcome");
     expect(needsOutcome).toHaveTextContent("3");
 
+    expect(mine).toHaveTextContent("Mine");
+    expect(mine).toHaveTextContent("2");
+    expect(escalated).toHaveTextContent("Escalated");
+    expect(escalated).toHaveTextContent("4");
+    expect(dispo).toHaveTextContent("Dispo");
+    expect(dispo).toHaveTextContent("5");
+    expect(unassigned).toHaveTextContent("Unassigned");
+    expect(unassigned).toHaveTextContent("1");
+    expect(all).toHaveTextContent("All");
+    expect(all).toHaveTextContent("9");
     expect(unknown).not.toHaveAttribute("data-active");
     expect(unknown).toHaveAttribute("aria-pressed", "false");
+    expect(unknown).toHaveAccessibleName("Unknown (6)");
     expect(unknown).toHaveTextContent("Unknown");
-    expect(unknown).toHaveTextContent("4");
+    expect(unknown).toHaveTextContent("6");
+    expect(dismissed).toHaveTextContent("Dismissed");
+    expect(dismissed).toHaveTextContent("7");
+  });
+
+  it("hides zero-count badges on all filters", () => {
+    render(<CockpitView {...baseProps} filter="all" threads={[]} />);
+
+    for (const id of [
+      "filter-unread",
+      "filter-needs-outcome",
+      "filter-mine",
+      "filter-escalated",
+      "filter-dispo",
+      "filter-unassigned",
+      "filter-all",
+      "filter-unknown",
+      "filter-dismissed",
+    ]) {
+      expect(screen.queryByTestId(`${id}-count`)).not.toBeInTheDocument();
+    }
   });
 });
 

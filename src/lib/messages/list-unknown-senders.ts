@@ -13,11 +13,22 @@ export type UnknownSender = {
 
 export type ListUnknownSendersOpts = {
   /**
-   * Include rows where dismissed_at IS NOT NULL. Default false (the
-   * Unknown bucket). Set true to render the Dismissed sub-tab.
+   * Include dismissed sender buckets. Default false returns only active
+   * Unknown buckets. Set true when the caller needs both Unknown and
+   * Dismissed bucket counts from one shared classification.
    */
   includeDismissed?: boolean;
 };
+
+type UnknownSenderRow = {
+  from_address: string | null;
+  to_address: string | null;
+  body: string;
+  created_at: string;
+  dismissed_at: string | null;
+};
+
+const UNKNOWN_SENDER_PAGE_SIZE = 1000;
 
 /**
  * Fetch every inbound SMS row that has no contact_id, group by sender
@@ -33,22 +44,8 @@ export async function listUnknownSenders(
   opts: ListUnknownSendersOpts,
 ): Promise<UnknownSender[]> {
   const includeDismissed = opts.includeDismissed ?? false;
-
-  let query = supabase
-    .from("messages")
-    .select("from_address, to_address, body, created_at, dismissed_at")
-    .eq("channel", "sms")
-    .eq("direction", "inbound")
-    .is("contact_id", null)
-    .not("from_address", "is", null)
-    .order("created_at", { ascending: false });
-  if (!includeDismissed) {
-    query = query.is("dismissed_at", null);
-  }
-
-  const { data, error } = await query;
-  if (error) throw new Error(`listUnknownSenders: ${error.message}`);
-  if (!data || data.length === 0) return [];
+  const data = await fetchUnknownSenderRows(supabase);
+  if (data.length === 0) return [];
 
   type Bucket = {
     latestBody: string;
@@ -86,5 +83,40 @@ export async function listUnknownSenders(
       messageCount: b.messageCount,
       isDismissed: b.isDismissed,
     }))
+    .filter((sender) => includeDismissed || !sender.isDismissed)
     .sort((a, b) => b.latestAt.localeCompare(a.latestAt));
+}
+
+/**
+ * Supabase caps large selects by project/API settings. Page through the
+ * unknown-sender rows so both Unknown and Dismissed buckets are classified
+ * from the full latest-row history instead of a truncated first page.
+ */
+async function fetchUnknownSenderRows(
+  supabase: SupabaseClient<Database>,
+): Promise<UnknownSenderRow[]> {
+  const rows: UnknownSenderRow[] = [];
+
+  for (let from = 0; ; from += UNKNOWN_SENDER_PAGE_SIZE) {
+    const to = from + UNKNOWN_SENDER_PAGE_SIZE - 1;
+    const { data, error } = await supabase
+      .from("messages")
+      .select("from_address, to_address, body, created_at, dismissed_at")
+      .eq("channel", "sms")
+      .eq("direction", "inbound")
+      .is("contact_id", null)
+      .not("from_address", "is", null)
+      .order("created_at", { ascending: false })
+      .range(from, to);
+
+    if (error) throw new Error(`listUnknownSenders: ${error.message}`);
+    if (!data || data.length === 0) break;
+
+    rows.push(...data);
+    if (data.length < UNKNOWN_SENDER_PAGE_SIZE) {
+      break;
+    }
+  }
+
+  return rows;
 }
