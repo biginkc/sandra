@@ -7,6 +7,12 @@ import {
   seedProspects,
 } from "./fixtures";
 import { ensureConversationIdForThread } from "../src/lib/messages/threading";
+import type { SupabaseClient } from "@supabase/supabase-js";
+import type { Database } from "../src/lib/supabase/types";
+
+const SECONDARY_USER_EMAIL = "e2e-assignee@bmhgroupkc.com";
+const DEFAULT_ORG_ID = "00000000-0000-0000-0000-000000000bbb";
+type AuthUser = { id: string; email?: string | null };
 
 /**
  * Feature 8 Phase 3 — Per-user assignment + cockpit ergonomics.
@@ -74,6 +80,7 @@ async function seedAssignedThread(
   if (messageErr) {
     throw new Error(`message seed failed: ${messageErr.message}`);
   }
+  const expectedAssigneeId = opts.assigneeId ?? null;
   await expect(async () => {
     const { data, error } = await admin
       .from("properties")
@@ -83,12 +90,77 @@ async function seedAssignedThread(
       .single();
     expect(error).toBeNull();
     expect(data?.id).toBe(prop.id);
+    expect(data?.assigned_user_id).toBe(expectedAssigneeId);
   }).toPass({ timeout: 10_000 });
   return {
     contactId: contact.id,
     propertyId: prop.id,
     threadId: conversationId,
   };
+}
+
+async function ensureSecondaryTestUser(
+  admin: ReturnType<typeof adminClient>,
+): Promise<{ id: string; email: string }> {
+  const existing = await findAuthUserByEmail(admin, SECONDARY_USER_EMAIL);
+  let userId: string;
+  if (existing) {
+    userId = existing.id;
+  } else {
+    const { data: created, error: createErr } =
+      await admin.auth.admin.createUser({
+        email: SECONDARY_USER_EMAIL,
+        password: "test12345",
+        email_confirm: true,
+      });
+    if (createErr || !created?.user) {
+      throw createErr ?? new Error("createUser returned no secondary user");
+    }
+    userId = created.user.id;
+  }
+
+  type MembershipWriter = {
+    from(table: "memberships"): {
+      upsert(
+        values: { user_id: string; org_id: string; role: "owner" | "member" },
+        options?: { onConflict?: string },
+      ): Promise<{ error: { message: string } | null }>;
+    };
+  };
+  const { error: membershipErr } = await (admin as unknown as MembershipWriter)
+    .from("memberships")
+    .upsert(
+      { user_id: userId, org_id: DEFAULT_ORG_ID, role: "member" },
+      { onConflict: "user_id,org_id" },
+    );
+  if (membershipErr) {
+    throw new Error(
+      `ensureSecondaryTestUser: failed to upsert membership for ${SECONDARY_USER_EMAIL}: ${membershipErr.message}`,
+    );
+  }
+
+  return { id: userId, email: SECONDARY_USER_EMAIL };
+}
+
+async function findAuthUserByEmail(
+  admin: SupabaseClient<Database>,
+  email: string,
+): Promise<AuthUser | null> {
+  let page = 1;
+  const perPage = 200;
+
+  while (true) {
+    const { data, error } = await admin.auth.admin.listUsers({
+      page,
+      perPage,
+    });
+    if (error) throw error;
+
+    const match = data?.users.find((u) => u.email === email);
+    if (match) return match;
+    if (!data?.nextPage || data.users.length === 0) return null;
+    page = data.nextPage;
+  }
 }
 
 test("Each assigned thread row tags itself with the viewer's assignment state", async ({
@@ -116,7 +188,7 @@ test("Each assigned thread row tags itself with the viewer's assignment state", 
   await expect(row).toHaveAttribute("data-assignee-mine", "true");
 });
 
-test('Side panel shows "Assign to me" on an unassigned thread; clicking it assigns', async ({
+test('Side panel shows "Unassigned" picker on an unassigned thread; choosing Me assigns', async ({
   page,
 }) => {
   const admin = adminClient();
@@ -132,9 +204,17 @@ test('Side panel shows "Assign to me" on an unassigned thread; clicking it assig
   await page.goto(`/messages?thread=${encodeURIComponent(unassigned.threadId)}`);
   await expect(page.getByTestId("inbox-detail-panel")).toBeVisible();
 
-  const assignToMe = page.getByTestId("assign-to-me");
-  await expect(assignToMe).toBeVisible();
-  await assignToMe.click();
+  await expect(page.getByTestId("assign-to-me")).toHaveCount(0);
+  const trigger = page.getByTestId("assign-dropdown-trigger");
+  await expect(trigger).toBeVisible();
+  await expect(trigger).toContainText("Unassigned");
+  await trigger.click();
+
+  const selfOption = page.getByTestId("assign-dropdown-me");
+  await expect(selfOption).toBeVisible();
+  await expect(selfOption).toContainText("Me");
+  await expect(page.getByTestId("assign-dropdown-unassign")).toBeVisible();
+  await selfOption.click();
 
   await expect(async () => {
     const { data: p } = await admin
@@ -145,9 +225,49 @@ test('Side panel shows "Assign to me" on an unassigned thread; clicking it assig
     expect(p!.assigned_user_id).toBe(claudeId);
   }).toPass({ timeout: 10_000 });
 
-  // After assignment, the pill is replaced by the dropdown trigger.
   await expect(page.getByTestId("assign-to-me")).toHaveCount(0);
-  await expect(page.getByTestId("assign-dropdown-trigger")).toBeVisible();
+  await expect(page.getByTestId("assign-dropdown-trigger")).toContainText(
+    "Assigned: me",
+  );
+});
+
+test("Assignee dropdown can assign a teammate directly from an unassigned thread", async ({
+  page,
+}) => {
+  const admin = adminClient();
+  await resetTenantTables(admin);
+  await ensureTestUser(admin);
+  const teammate = await ensureSecondaryTestUser(admin);
+
+  const unassigned = await seedAssignedThread(admin, {
+    phone: "+18165562035",
+    addressTag: "TO-TEAMMATE",
+    assigneeId: null,
+  });
+
+  await page.goto(`/messages?thread=${encodeURIComponent(unassigned.threadId)}`);
+  await expect(page.getByTestId("inbox-detail-panel")).toBeVisible();
+
+  const trigger = page.getByTestId("assign-dropdown-trigger");
+  await expect(trigger).toBeVisible();
+  await expect(trigger).toContainText("Unassigned");
+  await trigger.click();
+
+  const teammateOption = page.getByTestId(
+    `assign-dropdown-user-${teammate.id}`,
+  );
+  await expect(teammateOption).toBeVisible();
+  await expect(teammateOption).toContainText(teammate.email);
+  await teammateOption.click();
+
+  await expect(async () => {
+    const { data: p } = await admin
+      .from("properties")
+      .select("assigned_user_id")
+      .eq("id", unassigned.propertyId)
+      .single();
+    expect(p!.assigned_user_id).toBe(teammate.id);
+  }).toPass({ timeout: 10_000 });
 });
 
 test("Assignee dropdown can unassign and reassign via the picker", async ({
@@ -181,6 +301,20 @@ test("Assignee dropdown can unassign and reassign via the picker", async ({
     expect(p!.assigned_user_id).toBeNull();
   }).toPass({ timeout: 10_000 });
 
-  // After unassign, the "Assign to me" pill comes back.
-  await expect(page.getByTestId("assign-to-me")).toBeVisible();
+  await expect(page.getByTestId("assign-to-me")).toHaveCount(0);
+  await expect(trigger).toBeVisible();
+  await expect(trigger).toContainText("Unassigned");
+
+  await trigger.click();
+  await expect(page.getByTestId("assign-dropdown-me")).toBeVisible();
+  await page.getByTestId("assign-dropdown-me").click();
+
+  await expect(async () => {
+    const { data: p } = await admin
+      .from("properties")
+      .select("assigned_user_id")
+      .eq("id", mine.propertyId)
+      .single();
+    expect(p!.assigned_user_id).toBe(claudeId);
+  }).toPass({ timeout: 10_000 });
 });

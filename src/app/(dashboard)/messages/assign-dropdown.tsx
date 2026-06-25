@@ -32,12 +32,33 @@ type Props = {
  * lead-detail `LeadAssigneeWidget`: same dropdown pattern, same server
  * action, but no address-bound copy and no surrounding context.
  *
- * Renders a single button:
- *   - "Assign to me" (one click) when the property is currently unassigned
- *   - "Assigned: <email>" + dropdown when assigned, with options to pick
- *     a different teammate or unassign
+ * Renders a dropdown trigger showing the current assignment state, with
+ * options to pick yourself, a teammate, or unassign.
  */
 export function AssignDropdown({
+  propertyId,
+  initialAssigneeId,
+  initialAssigneeEmail,
+  currentUserId,
+}: Props) {
+  const resetKey = [
+    propertyId,
+    initialAssigneeId ?? "unassigned",
+    initialAssigneeEmail ?? "no-email",
+  ].join(":");
+
+  return (
+    <AssignDropdownContent
+      key={resetKey}
+      propertyId={propertyId}
+      initialAssigneeId={initialAssigneeId}
+      initialAssigneeEmail={initialAssigneeEmail}
+      currentUserId={currentUserId}
+    />
+  );
+}
+
+function AssignDropdownContent({
   propertyId,
   initialAssigneeId,
   initialAssigneeEmail,
@@ -53,16 +74,20 @@ export function AssignDropdown({
   const [members, setMembers] = useState<TeamMember[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [pending, startTransition] = useTransition();
 
   const loadMembers = () => {
     if (loaded || loading) return;
     setLoading(true);
+    setLoadError(null);
     listOrgUsers()
       .then((result) => {
         if (result.ok) {
           setMembers(result.data);
           setLoaded(true);
+        } else {
+          setLoadError("Could not load team members.");
         }
       })
       .finally(() => setLoading(false));
@@ -96,27 +121,14 @@ export function AssignDropdown({
     });
   };
 
-  // Unassigned + we know who the viewer is → show "Assign to me" pill.
-  if (!assigneeId && currentUserId) {
-    return (
-      <Button
-        variant="outline"
-        size="sm"
-        disabled={pending}
-        onClick={() => change(currentUserId)}
-        data-testid="assign-to-me"
-      >
-        <UserIcon className="mr-1 size-3.5" />
-        Assign to me
-      </Button>
-    );
-  }
-
-  const label = assigneeEmail
-    ? assigneeId === currentUserId
-      ? "Mine"
-      : shortenEmail(assigneeEmail)
-    : "Unassigned";
+  const label = !assigneeId
+    ? "Unassigned"
+    : assigneeId === currentUserId
+      ? "Assigned: me"
+      : `Assigned: ${assigneeEmail ? shortenEmail(assigneeEmail) : "Teammate"}`;
+  const hasSelfOption = Boolean(
+    currentUserId && loaded && members.some((m) => m.id === currentUserId),
+  );
 
   return (
     <DropdownMenu onOpenChange={(open) => open && loadMembers()}>
@@ -137,26 +149,25 @@ export function AssignDropdown({
       />
       <DropdownMenuContent align="end" className="max-h-80 overflow-auto">
         {loading && <DropdownMenuItem disabled>Loading team…</DropdownMenuItem>}
-        {loaded && members.length === 0 && (
+        {loadError && <DropdownMenuItem disabled>{loadError}</DropdownMenuItem>}
+        {loaded && members.length === 0 && !hasSelfOption && (
           <DropdownMenuItem disabled>No team members found.</DropdownMenuItem>
         )}
-        {currentUserId &&
-          loaded &&
-          members.some((m) => m.id === currentUserId) && (
-            <>
-              <DropdownMenuItem
-                onClick={() => change(currentUserId)}
-                className="flex items-center justify-between gap-4"
-                data-testid="assign-dropdown-me"
-              >
-                <span>Me</span>
-                {assigneeId === currentUserId ? (
-                  <CheckIcon className="size-4" />
-                ) : null}
-              </DropdownMenuItem>
-              <DropdownMenuSeparator />
-            </>
-          )}
+        {hasSelfOption && currentUserId && (
+          <>
+            <DropdownMenuItem
+              onClick={() => change(currentUserId)}
+              className="flex items-center justify-between gap-4"
+              data-testid="assign-dropdown-me"
+            >
+              <span>Me</span>
+              {assigneeId === currentUserId ? (
+                <CheckIcon className="size-4" />
+              ) : null}
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+          </>
+        )}
         {loaded &&
           members
             .filter((m) => m.id !== currentUserId)
