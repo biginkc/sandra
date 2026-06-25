@@ -21,6 +21,11 @@ import { resolveInboundThread } from "@/lib/messages/threading";
 import { normalizePhone } from "@/lib/csv/normalize";
 import { recordConsentEvent } from "@/lib/messaging/consent";
 import {
+  claimInboundSmsIntent,
+  markInboundSmsIntentMessageInserted,
+  markInboundSmsIntentSideEffectsComplete,
+} from "@/lib/messaging/inbound-intents";
+import {
   dispatchOwnerMessageAdded,
   dispatchOwnerMessageAddedNeedsTriage,
 } from "@/lib/notifications/dispatch";
@@ -221,6 +226,34 @@ export async function handleInboundWebhook(
         routing: thread.resolution,
         ...(ev.mediaUrls ? { mediaUrls: ev.mediaUrls } : {}),
       } as Json;
+      const intentClaim = await claimInboundSmsIntent(supabase, {
+        orgId,
+        providerId: provider.providerId,
+        externalId: ev.externalId,
+        from: ev.from,
+        to: ev.to,
+        body: ev.body,
+        receivedAt: ev.receivedAt,
+        raw: ev.raw,
+        mediaUrls: ev.mediaUrls ?? null,
+        webhookEventId: resumeDecision.webhookEventId,
+        contactId,
+        propertyId,
+        conversationId,
+        routingResolution: thread.resolution,
+      });
+      if (intentClaim.duplicate && intentClaim.mode === "enforce") {
+        await markWebhookEventProcessed(
+          supabase,
+          provider.providerId,
+          ev.externalId,
+        );
+        await markInboundSmsIntentSideEffectsComplete(
+          supabase,
+          intentClaim.intentId,
+        );
+        continue;
+      }
 
       if (DNC_KEYWORDS.test(ev.body)) {
         if (!orgId) {
@@ -256,6 +289,7 @@ export async function handleInboundWebhook(
           contactId,
           propertyId,
           conversationId,
+          inboundIntentId: intentClaim.intentId,
           attributedOutboundMessageId,
           metadata: { ...jsonObject(baseMetadata), keyword: "dnc" } as Json,
         });
@@ -275,6 +309,10 @@ export async function handleInboundWebhook(
           supabase,
           provider.providerId,
           ev.externalId,
+        );
+        await markInboundSmsIntentSideEffectsComplete(
+          supabase,
+          intentClaim.intentId,
         );
         continue;
       }
@@ -310,6 +348,7 @@ export async function handleInboundWebhook(
           contactId,
           propertyId,
           conversationId,
+          inboundIntentId: intentClaim.intentId,
           attributedOutboundMessageId,
           metadata: { ...jsonObject(baseMetadata), keyword: "stop" } as Json,
         });
@@ -329,6 +368,10 @@ export async function handleInboundWebhook(
           supabase,
           provider.providerId,
           ev.externalId,
+        );
+        await markInboundSmsIntentSideEffectsComplete(
+          supabase,
+          intentClaim.intentId,
         );
         continue;
       }
@@ -354,6 +397,7 @@ export async function handleInboundWebhook(
           contactId,
           propertyId,
           conversationId,
+          inboundIntentId: intentClaim.intentId,
           attributedOutboundMessageId,
           metadata: { ...jsonObject(baseMetadata), keyword: "help" } as Json,
         });
@@ -373,6 +417,10 @@ export async function handleInboundWebhook(
           supabase,
           provider.providerId,
           ev.externalId,
+        );
+        await markInboundSmsIntentSideEffectsComplete(
+          supabase,
+          intentClaim.intentId,
         );
         continue;
       }
@@ -430,6 +478,7 @@ export async function handleInboundWebhook(
           contactId,
           propertyId,
           conversationId,
+          inboundIntentId: intentClaim.intentId,
           attributedOutboundMessageId,
           metadata: {
             ...jsonObject(baseMetadata),
@@ -454,6 +503,10 @@ export async function handleInboundWebhook(
           provider.providerId,
           ev.externalId,
         );
+        await markInboundSmsIntentSideEffectsComplete(
+          supabase,
+          intentClaim.intentId,
+        );
         continue;
       }
 
@@ -466,6 +519,7 @@ export async function handleInboundWebhook(
         contactId,
         propertyId,
         conversationId,
+        inboundIntentId: intentClaim.intentId,
         attributedOutboundMessageId,
         metadata: baseMetadata,
       });
@@ -492,6 +546,10 @@ export async function handleInboundWebhook(
           supabase,
           provider.providerId,
           ev.externalId,
+        );
+        await markInboundSmsIntentSideEffectsComplete(
+          supabase,
+          intentClaim.intentId,
         );
         continue;
       }
@@ -526,6 +584,10 @@ export async function handleInboundWebhook(
           supabase,
           provider.providerId,
           ev.externalId,
+        );
+        await markInboundSmsIntentSideEffectsComplete(
+          supabase,
+          intentClaim.intentId,
         );
         continue;
       }
@@ -697,6 +759,10 @@ export async function handleInboundWebhook(
         provider.providerId,
         ev.externalId,
       );
+      await markInboundSmsIntentSideEffectsComplete(
+        supabase,
+        intentClaim.intentId,
+      );
     }
 
     return NextResponse.json({ ok: true });
@@ -720,6 +786,7 @@ async function insertInboundMessage(
     contactId: string | null;
     propertyId: string | null;
     conversationId: string | null;
+    inboundIntentId: string | null;
     attributedOutboundMessageId: string | null;
     metadata: Json | null;
   },
@@ -759,6 +826,7 @@ async function insertInboundMessage(
       contact_id: input.contactId,
       property_id: input.propertyId,
       conversation_id: input.conversationId,
+      inbound_intent_id: input.inboundIntentId,
       attributed_outbound_message_id: input.attributedOutboundMessageId,
       metadata: input.metadata,
     })
@@ -766,6 +834,11 @@ async function insertInboundMessage(
     .maybeSingle();
   if (!error) {
     await clearAiResponderThreadState(supabase, inserted?.conversation_id ?? null);
+    await markInboundSmsIntentMessageInserted(
+      supabase,
+      input.inboundIntentId,
+      inserted?.id ?? null,
+    );
     return {
       duplicate: false,
       error: null as null,
@@ -817,21 +890,25 @@ async function reserveWebhookEvent(
   supabase: SupabaseClient<Database>,
   input: { provider: string; externalId: string; payload: Json },
 ): Promise<
-  | { status: "reserved" }
+  | { status: "reserved"; webhookEventId: string | null }
   | { status: "skip" }
   | { status: "error"; message: string }
 > {
   const now = new Date().toISOString();
-  const { error } = await supabase.from("webhook_events").insert({
-    provider: input.provider,
-    event_type: "sms_inbound",
-    external_id: input.externalId,
-    signature_verified: true,
-    processing_status: "processing",
-    processing_started_at: now,
-    payload: input.payload,
-  });
-  if (!error) return { status: "reserved" };
+  const { data: inserted, error } = await supabase
+    .from("webhook_events")
+    .insert({
+      provider: input.provider,
+      event_type: "sms_inbound",
+      external_id: input.externalId,
+      signature_verified: true,
+      processing_status: "processing",
+      processing_started_at: now,
+      payload: input.payload,
+    })
+    .select("id")
+    .maybeSingle();
+  if (!error) return { status: "reserved", webhookEventId: inserted?.id ?? null };
   if (isMissingWebhookProcessingClaimSupport(error.message)) {
     return reserveWebhookEventLegacy(supabase, input);
   }
@@ -882,26 +959,30 @@ async function reserveWebhookEvent(
     .maybeSingle();
   if (claimError) return { status: "error", message: claimError.message };
   if (!claimed) return { status: "skip" };
-  return { status: "reserved" };
+  return { status: "reserved", webhookEventId: claimed.id };
 }
 
 async function reserveWebhookEventLegacy(
   supabase: SupabaseClient<Database>,
   input: { provider: string; externalId: string; payload: Json },
 ): Promise<
-  | { status: "reserved" }
+  | { status: "reserved"; webhookEventId: string | null }
   | { status: "skip" }
   | { status: "error"; message: string }
 > {
-  const { error } = await supabase.from("webhook_events").insert({
-    provider: input.provider,
-    event_type: "sms_inbound",
-    external_id: input.externalId,
-    signature_verified: true,
-    processing_status: "pending",
-    payload: input.payload,
-  });
-  if (!error) return { status: "reserved" };
+  const { data: inserted, error } = await supabase
+    .from("webhook_events")
+    .insert({
+      provider: input.provider,
+      event_type: "sms_inbound",
+      external_id: input.externalId,
+      signature_verified: true,
+      processing_status: "pending",
+      payload: input.payload,
+    })
+    .select("id")
+    .maybeSingle();
+  if (!error) return { status: "reserved", webhookEventId: inserted?.id ?? null };
   if (error.code !== "23505")
     return { status: "error", message: error.message };
 

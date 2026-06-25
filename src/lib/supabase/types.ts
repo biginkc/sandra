@@ -109,6 +109,109 @@ export type Database = {
           },
         ]
       }
+      ai_response_claims: {
+        Row: {
+          claimed_at: string
+          completed_at: string | null
+          contact_id: string | null
+          conversation_id: string | null
+          created_at: string
+          error_message: string | null
+          id: string
+          inbound_intent_id: string | null
+          inbound_message_id: string | null
+          lease_expires_at: string
+          org_id: string
+          outcome: string | null
+          outbound_message_id: string | null
+          property_id: string | null
+          response_kind: string
+          status: string
+          updated_at: string
+        }
+        Insert: {
+          claimed_at?: string
+          completed_at?: string | null
+          contact_id?: string | null
+          conversation_id?: string | null
+          created_at?: string
+          error_message?: string | null
+          id?: string
+          inbound_intent_id?: string | null
+          inbound_message_id?: string | null
+          lease_expires_at?: string
+          org_id: string
+          outcome?: string | null
+          outbound_message_id?: string | null
+          property_id?: string | null
+          response_kind?: string
+          status?: string
+          updated_at?: string
+        }
+        Update: {
+          claimed_at?: string
+          completed_at?: string | null
+          contact_id?: string | null
+          conversation_id?: string | null
+          created_at?: string
+          error_message?: string | null
+          id?: string
+          inbound_intent_id?: string | null
+          inbound_message_id?: string | null
+          lease_expires_at?: string
+          org_id?: string
+          outcome?: string | null
+          outbound_message_id?: string | null
+          property_id?: string | null
+          response_kind?: string
+          status?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "ai_response_claims_contact_id_fkey"
+            columns: ["contact_id"]
+            isOneToOne: false
+            referencedRelation: "contacts"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "ai_response_claims_inbound_intent_id_fkey"
+            columns: ["inbound_intent_id"]
+            isOneToOne: false
+            referencedRelation: "sms_inbound_intents"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "ai_response_claims_inbound_message_id_fkey"
+            columns: ["inbound_message_id"]
+            isOneToOne: false
+            referencedRelation: "messages"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "ai_response_claims_org_id_fkey"
+            columns: ["org_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "ai_response_claims_outbound_message_id_fkey"
+            columns: ["outbound_message_id"]
+            isOneToOne: false
+            referencedRelation: "messages"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "ai_response_claims_property_id_fkey"
+            columns: ["property_id"]
+            isOneToOne: false
+            referencedRelation: "properties"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       call_activities: {
         Row: {
           contact_id: string
@@ -1188,6 +1291,7 @@ export type Database = {
           failed_at: string | null
           from_address: string | null
           id: string
+          inbound_intent_id: string | null
           metadata: Json | null
           org_id: string
           property_id: string | null
@@ -1215,6 +1319,7 @@ export type Database = {
           failed_at?: string | null
           from_address?: string | null
           id?: string
+          inbound_intent_id?: string | null
           metadata?: Json | null
           org_id?: string
           property_id?: string | null
@@ -1242,6 +1347,7 @@ export type Database = {
           failed_at?: string | null
           from_address?: string | null
           id?: string
+          inbound_intent_id?: string | null
           metadata?: Json | null
           org_id?: string
           property_id?: string | null
@@ -1273,6 +1379,13 @@ export type Database = {
             columns: ["contact_id"]
             isOneToOne: false
             referencedRelation: "contacts"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "messages_inbound_intent_id_fkey"
+            columns: ["inbound_intent_id"]
+            isOneToOne: false
+            referencedRelation: "sms_inbound_intents"
             referencedColumns: ["id"]
           },
           {
@@ -2218,6 +2331,168 @@ export type Database = {
           },
         ]
       }
+      sms_inbound_deliveries: {
+        Row: {
+          classification: string
+          created_at: string
+          id: string
+          intent_id: string | null
+          org_id: string
+          payload_sha256: string
+          provider: string
+          provider_message_id: string
+          received_at: string
+          webhook_event_id: string | null
+        }
+        Insert: {
+          classification: string
+          created_at?: string
+          id?: string
+          intent_id?: string | null
+          org_id: string
+          payload_sha256: string
+          provider: string
+          provider_message_id: string
+          received_at: string
+          webhook_event_id?: string | null
+        }
+        Update: {
+          classification?: string
+          created_at?: string
+          id?: string
+          intent_id?: string | null
+          org_id?: string
+          payload_sha256?: string
+          provider?: string
+          provider_message_id?: string
+          received_at?: string
+          webhook_event_id?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "sms_inbound_deliveries_intent_id_fkey"
+            columns: ["intent_id"]
+            isOneToOne: false
+            referencedRelation: "sms_inbound_intents"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "sms_inbound_deliveries_org_id_fkey"
+            columns: ["org_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "sms_inbound_deliveries_webhook_event_id_fkey"
+            columns: ["webhook_event_id"]
+            isOneToOne: false
+            referencedRelation: "webhook_events"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      sms_inbound_intents: {
+        Row: {
+          body_fingerprint: string
+          canonical_message_id: string | null
+          contact_id: string | null
+          conversation_id: string | null
+          created_at: string
+          dedupe_range: string
+          dedupe_scope_hash: string
+          duplicate_count: number
+          fingerprint_version: number
+          first_provider_message_id: string
+          from_address: string
+          id: string
+          last_provider_message_id: string
+          org_id: string
+          property_id: string | null
+          provider: string
+          received_at: string
+          routing_resolution: string | null
+          status: string
+          to_address: string
+          updated_at: string
+        }
+        Insert: {
+          body_fingerprint: string
+          canonical_message_id?: string | null
+          contact_id?: string | null
+          conversation_id?: string | null
+          created_at?: string
+          dedupe_range: string
+          dedupe_scope_hash: string
+          duplicate_count?: number
+          fingerprint_version?: number
+          first_provider_message_id: string
+          from_address: string
+          id?: string
+          last_provider_message_id: string
+          org_id: string
+          property_id?: string | null
+          provider: string
+          received_at: string
+          routing_resolution?: string | null
+          status?: string
+          to_address: string
+          updated_at?: string
+        }
+        Update: {
+          body_fingerprint?: string
+          canonical_message_id?: string | null
+          contact_id?: string | null
+          conversation_id?: string | null
+          created_at?: string
+          dedupe_range?: string
+          dedupe_scope_hash?: string
+          duplicate_count?: number
+          fingerprint_version?: number
+          first_provider_message_id?: string
+          from_address?: string
+          id?: string
+          last_provider_message_id?: string
+          org_id?: string
+          property_id?: string | null
+          provider?: string
+          received_at?: string
+          routing_resolution?: string | null
+          status?: string
+          to_address?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "sms_inbound_intents_canonical_message_fkey"
+            columns: ["canonical_message_id"]
+            isOneToOne: false
+            referencedRelation: "messages"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "sms_inbound_intents_contact_id_fkey"
+            columns: ["contact_id"]
+            isOneToOne: false
+            referencedRelation: "contacts"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "sms_inbound_intents_org_id_fkey"
+            columns: ["org_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "sms_inbound_intents_property_id_fkey"
+            columns: ["property_id"]
+            isOneToOne: false
+            referencedRelation: "properties"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       tasks: {
         Row: {
           assignee_id: string
@@ -2672,6 +2947,10 @@ export type Database = {
       }
       merge_duplicate_properties: {
         Args: { keeper_id: string; loser_id: string }
+        Returns: undefined
+      }
+      increment_sms_inbound_intent_duplicate: {
+        Args: { p_intent_id: string; p_last_provider_message_id: string }
         Returns: undefined
       }
       reset_tenant_tables: { Args: never; Returns: undefined }
