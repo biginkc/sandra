@@ -91,7 +91,6 @@ export default async function MessagesPage({
     allThreads,
     queuedResult,
     threadDetail,
-    unknownActive,
     unknownAll,
     queueStatsResult,
   ] = await Promise.all([
@@ -100,17 +99,13 @@ export default async function MessagesPage({
     canonicalThreadId
       ? fetchInboxDetail(supabase, canonicalThreadId)
       : Promise.resolve(null),
-    listUnknownSenders(supabase, {}),
-    effectiveFilter === "dismissed"
-      ? listUnknownSenders(supabase, { includeDismissed: true })
-      : Promise.resolve([]),
+    listUnknownSenders(supabase, { includeDismissed: true }),
     getQueueStats(),
   ]);
 
   const {
     threads: visibleThreads,
-    unreadCount,
-    needsOutcomeCount,
+    filterCounts: threadFilterCounts,
     hiddenDncCount,
   } = resolveVisibleThreadState(allThreads, effectiveFilter, {
     currentUserId,
@@ -155,10 +150,15 @@ export default async function MessagesPage({
     await markMessagesReadForThread(threadDetail.threadId);
   }
 
+  const unknownActive = unknownAll.filter((s) => !s.isDismissed);
+  const dismissedUnknown = unknownAll.filter((s) => s.isDismissed);
   const unknownSenders =
-    effectiveFilter === "dismissed"
-      ? unknownAll.filter((s) => s.isDismissed)
-      : unknownActive;
+    effectiveFilter === "dismissed" ? dismissedUnknown : unknownActive;
+  const filterCounts = {
+    ...threadFilterCounts,
+    unknown: unknownActive.length,
+    dismissed: dismissedUnknown.length,
+  };
 
   return (
     <CockpitView
@@ -170,9 +170,7 @@ export default async function MessagesPage({
       selectedThreadId={selectedThreadId}
       threadDetail={threadDetail}
       unknownSenders={unknownSenders}
-      unknownActiveCount={unknownActive.length}
-      needsOutcomeCount={needsOutcomeCount}
-      unreadCount={unreadCount}
+      filterCounts={filterCounts}
       assigneeEmails={assigneeEmails}
       currentUserId={currentUserId}
       queueStats={queueStats}

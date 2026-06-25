@@ -3,7 +3,10 @@ import {
   type Thread,
 } from "@/lib/messages/list-threads";
 
-import { type InboxFilter } from "./inbox-filters";
+import {
+  type InboxFilter,
+  type InboxFilterCounts,
+} from "./inbox-filters";
 
 /**
  * Pure resolvers for the Messages inbox filter, extracted from the page
@@ -87,8 +90,7 @@ export function buildThreadOpts(
 
 export type VisibleThreadState = {
   threads: Thread[];
-  unreadCount: number;
-  needsOutcomeCount: number;
+  filterCounts: InboxFilterCounts;
   hiddenDncCount: number;
 };
 
@@ -148,12 +150,35 @@ export function resolveVisibleThreadState(
 
   return {
     threads,
-    unreadCount: visibleAllThreads.filter((thread) => thread.unreadCount > 0)
-      .length,
-    needsOutcomeCount: visibleAllThreads.filter((thread) => thread.needsOutcome)
-      .length,
+    filterCounts: buildThreadFilterCounts(
+      visibleAllThreads,
+      ctx.currentUserId,
+    ),
     hiddenDncCount: ctx.hideDnc && isThreadFilter(filter)
       ? filteredThreads.filter((thread) => isInboxNoise(thread)).length
       : 0,
+  };
+}
+
+function buildThreadFilterCounts(
+  threads: Thread[],
+  currentUserId: string | null,
+): InboxFilterCounts {
+  return {
+    all: threads.length,
+    mine: currentUserId
+      ? threads.filter((thread) => thread.assigneeId === currentUserId).length
+      : 0,
+    unassigned: currentUserId
+      ? threads.filter((thread) => !thread.assigneeId).length
+      : 0,
+    unread: threads.filter((thread) => thread.unreadCount > 0).length,
+    escalated: threads.filter(
+      (thread) => thread.aiResponderStatus === "escalated",
+    ).length,
+    dispo: threads.filter((thread) => thread.outreachDispo !== null).length,
+    needs_outcome: threads.filter((thread) => thread.needsOutcome).length,
+    unknown: 0,
+    dismissed: 0,
   };
 }

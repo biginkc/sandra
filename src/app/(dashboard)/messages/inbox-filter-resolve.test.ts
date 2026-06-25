@@ -296,8 +296,8 @@ describe("resolveVisibleThreadState", () => {
     expect(state.threads.map((thread) => thread.threadId)).toEqual([
       "real-needs",
     ]);
-    expect(state.needsOutcomeCount).toBe(1);
-    expect(state.unreadCount).toBe(1);
+    expect(state.filterCounts.needs_outcome).toBe(1);
+    expect(state.filterCounts.unread).toBe(1);
     expect(state.hiddenDncCount).toBe(2);
   });
 
@@ -321,8 +321,86 @@ describe("resolveVisibleThreadState", () => {
       "real-needs",
       "test-needs",
     ]);
-    expect(state.needsOutcomeCount).toBe(2);
+    expect(state.filterCounts.needs_outcome).toBe(2);
     expect(state.hiddenDncCount).toBe(0);
+  });
+
+  it("returns count badges for every thread-backed filter from the visible set", () => {
+    const threads = [
+      makeThread({
+        threadId: "mine-unread-needs",
+        assigneeId: "user-1",
+        unreadCount: 1,
+        needsOutcome: true,
+      }),
+      makeThread({
+        threadId: "mine-dispo",
+        assigneeId: "user-1",
+        outreachDispo: "not_interested",
+      }),
+      makeThread({
+        threadId: "unassigned-escalated",
+        assigneeId: null,
+        aiResponderStatus: "escalated",
+      }),
+      makeThread({
+        threadId: "other-unread",
+        assigneeId: "user-2",
+        unreadCount: 2,
+      }),
+      makeThread({
+        threadId: "hidden-test-everything",
+        assigneeId: "user-1",
+        unreadCount: 1,
+        needsOutcome: true,
+        outreachDispo: "nurture",
+        aiResponderStatus: "escalated",
+        isTestTraffic: true,
+      }),
+    ];
+
+    const state = resolveVisibleThreadState(threads, "all", {
+      currentUserId: "user-1",
+      canonicalThreadId: null,
+      hideDnc: true,
+    });
+
+    expect(state.threads.map((thread) => thread.threadId)).toEqual([
+      "mine-unread-needs",
+      "mine-dispo",
+      "unassigned-escalated",
+      "other-unread",
+    ]);
+    expect(state.filterCounts).toMatchObject({
+      all: 4,
+      mine: 2,
+      unassigned: 1,
+      unread: 2,
+      escalated: 1,
+      dispo: 1,
+      needs_outcome: 1,
+      unknown: 0,
+      dismissed: 0,
+    });
+  });
+
+  it("does not include the selected read thread pin in the global Unread count", () => {
+    const threads = [
+      makeThread({ threadId: "open-read" }),
+      makeThread({ threadId: "unread", unreadCount: 1 }),
+    ];
+
+    const state = resolveVisibleThreadState(threads, "unread", {
+      currentUserId: "user-1",
+      canonicalThreadId: "open-read",
+      hideDnc: true,
+    });
+
+    expect(state.threads.map((thread) => thread.threadId)).toEqual([
+      "open-read",
+      "unread",
+    ]);
+    expect(state.filterCounts.unread).toBe(1);
   });
 
   it.each(["unknown", "dismissed"] as const)(

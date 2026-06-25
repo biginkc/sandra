@@ -13,11 +13,11 @@ export type InboxFilter =
   | "dispo"
   | "needs_outcome";
 
+export type InboxFilterCounts = Record<InboxFilter, number>;
+
 type Props = {
   active: InboxFilter;
-  unknownCount: number;
-  needsOutcomeCount: number;
-  unreadCount: number;
+  filterCounts: InboxFilterCounts;
   /** Hide Mine + Unassigned chips when no auth user is on the request. */
   showAssignmentChips: boolean;
   /** True when DNC threads are currently hidden from the list. URL state:
@@ -35,9 +35,7 @@ type Props = {
  */
 export function InboxFilters({
   active,
-  unknownCount,
-  needsOutcomeCount,
-  unreadCount,
+  filterCounts,
   showAssignmentChips,
   hideDnc,
   hiddenDncCount,
@@ -78,14 +76,14 @@ export function InboxFilters({
       <FilterChip
         label="Unread"
         active={active === "unread"}
-        badge={unreadCount > 0 ? String(unreadCount) : undefined}
+        count={filterCounts.unread}
         onClick={() => setFilter("unread")}
         testId="filter-unread"
       />
       <FilterChip
         label="Needs Outcome"
         active={active === "needs_outcome"}
-        badge={needsOutcomeCount > 0 ? String(needsOutcomeCount) : undefined}
+        count={filterCounts.needs_outcome}
         onClick={() => setFilter("needs_outcome")}
         testId="filter-needs-outcome"
       />
@@ -94,6 +92,7 @@ export function InboxFilters({
           <FilterChip
             label="Mine"
             active={active === "mine"}
+            count={filterCounts.mine}
             onClick={() => setFilter("mine")}
             testId="filter-mine"
           />
@@ -101,6 +100,7 @@ export function InboxFilters({
             label="Escalated"
             icon="mascot"
             active={active === "escalated"}
+            count={filterCounts.escalated}
             onClick={() => setFilter("escalated")}
             testId="filter-escalated"
           />
@@ -111,6 +111,7 @@ export function InboxFilters({
           label="Escalated"
           icon="mascot"
           active={active === "escalated"}
+          count={filterCounts.escalated}
           onClick={() => setFilter("escalated")}
           testId="filter-escalated"
         />
@@ -119,6 +120,7 @@ export function InboxFilters({
         label="Dispo"
         icon="mascot"
         active={active === "dispo"}
+        count={filterCounts.dispo}
         onClick={() => setFilter("dispo")}
         testId="filter-dispo"
       />
@@ -126,6 +128,7 @@ export function InboxFilters({
         <FilterChip
           label="Unassigned"
           active={active === "unassigned"}
+          count={filterCounts.unassigned}
           onClick={() => setFilter("unassigned")}
           testId="filter-unassigned"
         />
@@ -133,19 +136,21 @@ export function InboxFilters({
       <FilterChip
         label="All"
         active={active === "all"}
+        count={filterCounts.all}
         onClick={() => setFilter("all")}
         testId="filter-all"
       />
       <FilterChip
         label="Unknown"
         active={active === "unknown"}
-        badge={unknownCount > 0 ? String(unknownCount) : undefined}
+        count={filterCounts.unknown}
         onClick={() => setFilter("unknown")}
         testId="filter-unknown"
       />
       <FilterChip
         label="Dismissed"
         active={active === "dismissed"}
+        count={filterCounts.dismissed}
         onClick={() => setFilter("dismissed")}
         testId="filter-dismissed"
       />
@@ -217,24 +222,28 @@ function FilterChip({
   icon,
   active,
   onClick,
-  badge,
+  count,
   testId,
 }: {
   label: string;
   icon?: "mascot";
   active: boolean;
   onClick: () => void;
-  badge?: string;
+  count?: number;
   testId: string;
 }) {
+  const showCount = typeof count === "number" && count > 0;
+  const ariaLabel = showCount ? `${label} (${count})` : label;
+
   return (
     <button
       type="button"
       onClick={onClick}
+      aria-label={ariaLabel}
       aria-pressed={active}
       data-testid={testId}
       data-active={active || undefined}
-      className={`inline-flex items-center gap-1.5 rounded-full px-4 py-1.5 text-[12px] font-bold transition-colors ${
+      className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-full px-4 py-1.5 text-[12px] font-bold transition-colors ${
         active
           ? "bg-primary text-primary-foreground"
           : "border border-[#e5e1df] text-[#78716c] hover:bg-[#f5f5f4] hover:text-[#1c1917]"
@@ -250,13 +259,14 @@ function FilterChip({
         />
       ) : null}
       <span>{label}</span>
-      {badge ? (
+      {showCount ? (
         <span
-          className={`font-bold ${
+          data-testid={`${testId}-count`}
+          className={`shrink-0 font-bold ${
             active ? "text-primary-foreground" : "text-[#1c1917]"
           }`}
         >
-          {badge}
+          {count}
         </span>
       ) : null}
     </button>
