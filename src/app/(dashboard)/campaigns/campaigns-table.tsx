@@ -88,6 +88,21 @@ function statusClassName(status: CampaignRow["status"]): string {
   }
 }
 
+function statusLabel(status: CampaignRow["status"]): string {
+  switch (status) {
+    case "completed":
+      return "Queue setup: built";
+    case "launching":
+      return "Queue setup: building";
+    case "active":
+      return "Queue setup: not launched";
+    case "paused":
+      return "Queue setup: paused";
+    case "archived":
+      return "Archived";
+  }
+}
+
 export function CampaignsTable({ rows, parsed, total }: Props) {
   const ts = useTableUrlState<CampaignsFilters>({
     basePath: "/campaigns",
@@ -244,7 +259,7 @@ export function CampaignsTable({ rows, parsed, total }: Props) {
                       variant={statusBadgeVariant(row.status)}
                       className={statusClassName(row.status)}
                     >
-                      {row.status}
+                      {statusLabel(row.status)}
                     </Badge>
                   </TableCell>
                   <TableCell className="text-muted-foreground text-sm">

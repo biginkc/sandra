@@ -135,7 +135,7 @@ export function CampaignRowActions({
           {status === "launching"
             ? "Launching"
             : status === "completed"
-              ? "Sent"
+              ? "Queue built"
               : "Locked"}
         </span>
       )}
