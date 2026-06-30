@@ -19,7 +19,7 @@ import { fetchInboxDetail } from "./inbox-detail-data";
 
 const EMPTY_QUEUE_STATS: QueueStats = {
   queued: 0,
-  sentToday: 0,
+  sentOutToday: 0,
   failedToday: 0,
   nextScheduledFor: null,
   lastScheduledFor: null,

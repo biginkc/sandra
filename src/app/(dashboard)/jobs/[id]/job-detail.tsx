@@ -45,6 +45,18 @@ type CsvImport = Pick<
   | "storage_path"
 >;
 
+export type BulkSmsJobMetrics = {
+  queued: number;
+  dueQueued: number;
+  pending: number;
+  sent: number;
+  delivered: number;
+  failed: number;
+  handedOff: number;
+  nextScheduledFor: string | null;
+  lastScheduledFor: string | null;
+};
+
 export type JobDetailProps = {
   job: Job;
   items: JobItem[];
@@ -52,6 +64,8 @@ export type JobDetailProps = {
   /** Renamed from `children` to avoid shadowing React's reserved prop name. */
   childJobs: { id: string; type: string; status: string; title: string | null }[];
   csvImport: CsvImport | null;
+  bulkSmsMetrics?: BulkSmsJobMetrics | null;
+  bulkSmsMetricsError?: string | null;
 };
 
 export function JobDetail({
@@ -60,6 +74,8 @@ export function JobDetail({
   parent,
   childJobs,
   csvImport,
+  bulkSmsMetrics = null,
+  bulkSmsMetricsError = null,
 }: JobDetailProps) {
   const skippedFromCount = Math.max(
     0,
@@ -161,7 +177,12 @@ export function JobDetail({
       </div>
 
       {/* Type-specific panel */}
-      <TypePanel job={job} csvImport={csvImport} />
+      <TypePanel
+        job={job}
+        csvImport={csvImport}
+        bulkSmsMetrics={bulkSmsMetrics}
+        bulkSmsMetricsError={bulkSmsMetricsError}
+      />
 
       {/* Linked jobs */}
       {(parent || childJobs.length > 0) && (
@@ -255,9 +276,13 @@ function Tile({
 function TypePanel({
   job,
   csvImport,
+  bulkSmsMetrics,
+  bulkSmsMetricsError,
 }: {
   job: Job;
   csvImport: CsvImport | null;
+  bulkSmsMetrics: BulkSmsJobMetrics | null;
+  bulkSmsMetricsError: string | null;
 }) {
   switch (job.type) {
     case "csv_import":
@@ -270,6 +295,14 @@ function TypePanel({
       return <CassPanel job={job} />;
     case "skip_trace":
       return <SkipTracePanel job={job} />;
+    case "bulk_sms":
+      return (
+        <BulkSmsPanel
+          job={job}
+          metrics={bulkSmsMetrics}
+          metricsError={bulkSmsMetricsError}
+        />
+      );
     default:
       return <DefaultPanel job={job} />;
   }
@@ -411,6 +444,72 @@ function SkipTracePanel({ job }: { job: Job }) {
             label="Cache hits"
             value={`${summary.cached_hits ?? 0}`}
           />
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function BulkSmsPanel({
+  job,
+  metrics,
+  metricsError,
+}: {
+  job: Job;
+  metrics: BulkSmsJobMetrics | null;
+  metricsError: string | null;
+}) {
+  const campaignId = extractBulkSmsCampaignId(job.input_params);
+
+  return (
+    <Card data-testid="bulk-sms-job-panel">
+      <CardHeader className="pb-3">
+        <CardTitle className="text-sm">Bulk SMS send progress</CardTitle>
+        <CardDescription>
+          Job status tracks queue-building. Message delivery can continue after
+          the job is completed.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-4 pt-0">
+        {campaignId ? (
+          <Link
+            href={`/campaigns/${campaignId}`}
+            className="text-primary text-sm font-semibold hover:underline"
+          >
+            Open campaign live progress
+          </Link>
+        ) : (
+          <div className="text-muted-foreground text-sm">
+            This legacy bulk SMS job was not stamped with a campaign id.
+          </div>
+        )}
+
+        {metricsError ? (
+          <div className="text-destructive text-sm">
+            Failed to load SMS send metrics: {metricsError}
+          </div>
+        ) : metrics ? (
+          <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+            <DetailRow label="Queued to send" value={metrics.queued.toLocaleString()} />
+            <DetailRow label="Due now" value={metrics.dueQueued.toLocaleString()} />
+            <DetailRow
+              label="Pending provider result"
+              value={metrics.pending.toLocaleString()}
+            />
+            <DetailRow
+              label="Handed to provider"
+              value={metrics.handedOff.toLocaleString()}
+            />
+            <DetailRow label="Sent, not delivered" value={metrics.sent.toLocaleString()} />
+            <DetailRow label="Delivered" value={metrics.delivered.toLocaleString()} />
+            <DetailRow label="Failed" value={metrics.failed.toLocaleString()} />
+            <DetailRow label="Next send" value={formatNextRelease(metrics.nextScheduledFor)} />
+            <DetailRow label="Drain ETA" value={formatDrainEta(metrics.lastScheduledFor)} />
+          </div>
+        ) : (
+          <div className="text-muted-foreground text-sm">
+            SMS send metrics are available once a campaign id is present.
+          </div>
         )}
       </CardContent>
     </Card>
@@ -759,6 +858,44 @@ function durationLabel(job: Job): string {
 function fmt(iso: string | null | undefined): string {
   if (!iso) return "—";
   return new Date(iso).toISOString().replace("T", " ").slice(0, 19) + " UTC";
+}
+
+function extractBulkSmsCampaignId(inputParams: Job["input_params"]): string | null {
+  if (!isRecord(inputParams)) return null;
+  const opts = inputParams.opts;
+  if (!isRecord(opts)) return null;
+  return typeof opts.campaignId === "string" && opts.campaignId.trim()
+    ? opts.campaignId.trim()
+    : null;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function formatNextRelease(iso: string | null): string {
+  if (!iso) return "none queued";
+  const target = Date.parse(iso);
+  if (!Number.isFinite(target)) return "—";
+  const diffMs = target - Date.now();
+  if (diffMs <= 0) return "now";
+  const diffS = Math.round(diffMs / 1000);
+  if (diffS < 60) return `in ${diffS}s`;
+  return `in ${Math.round(diffS / 60)}m`;
+}
+
+function formatDrainEta(iso: string | null): string {
+  if (!iso) return "—";
+  const target = Date.parse(iso);
+  if (!Number.isFinite(target)) return "—";
+  const diffMs = target - Date.now();
+  if (diffMs <= 0) return "draining now";
+  if (diffMs < 60_000) return "<1m";
+  const totalMinutes = Math.floor(diffMs / 60_000);
+  if (totalMinutes < 60) return `${totalMinutes}m`;
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  return `${hours}h ${minutes}m`;
 }
 
 function LinkedJobLine({

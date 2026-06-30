@@ -47,7 +47,7 @@ describe("<CampaignScoreboard />", () => {
       screen.getByText("Consider provisioning a new sending number"),
     ).toBeInTheDocument();
     expect(
-      screen.getAllByText("Sent to 100 of 120 audience").length,
+      screen.getAllByText("Provider attempted 100 of 120 audience").length,
     ).toBeGreaterThan(0);
   });
 

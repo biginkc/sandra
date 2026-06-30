@@ -115,7 +115,8 @@ export function CampaignScoreboard({ kpis }: Props) {
                   </div>
                 </div>
                 <div className="text-xs font-medium text-current/80">
-                  Sent to {kpis.attempted.toLocaleString()} of {kpis.audience.toLocaleString()} audience
+                  Provider attempted {kpis.attempted.toLocaleString()} of{" "}
+                  {kpis.audience.toLocaleString()} audience
                 </div>
                 {card.key === "failed" && band !== "green" ? (
                   <div className="rounded-md border border-current/15 bg-white/55 px-3 py-2 text-xs font-medium">

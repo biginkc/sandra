@@ -12,7 +12,7 @@ import { useQueueStats } from "./use-queue-stats";
 
 type Stats = {
   queued: number;
-  sentToday: number;
+  sentOutToday: number;
   failedToday: number;
   nextScheduledFor: string | null;
   lastScheduledFor: string | null;
@@ -21,7 +21,7 @@ type Stats = {
 function makeStats(overrides: Partial<Stats> = {}): Stats {
   return {
     queued: 0,
-    sentToday: 0,
+    sentOutToday: 0,
     failedToday: 0,
     nextScheduledFor: null,
     lastScheduledFor: null,
@@ -60,7 +60,7 @@ describe("useQueueStats (260504-tgq polling, lifted from QueueStatsBanner)", () 
   it("Polls getQueueStats every 30s when document is visible and returns fresh stats", async () => {
     getQueueStats.mockResolvedValue({
       ok: true,
-      data: makeStats({ queued: 8964, sentToday: 385 }),
+      data: makeStats({ queued: 8964, sentOutToday: 385 }),
     });
 
     const { result } = renderHook(() => useQueueStats(makeStats()));
@@ -70,7 +70,7 @@ describe("useQueueStats (260504-tgq polling, lifted from QueueStatsBanner)", () 
     });
     expect(getQueueStats).toHaveBeenCalledTimes(1);
     expect(result.current.queued).toBe(8964);
-    expect(result.current.sentToday).toBe(385);
+    expect(result.current.sentOutToday).toBe(385);
 
     await act(async () => {
       vi.advanceTimersByTime(30_000);
@@ -164,9 +164,9 @@ describe("useQueueStats (260504-tgq polling, lifted from QueueStatsBanner)", () 
     expect(result.current.queued).toBe(100);
 
     // A new RSC render hands down fresh server stats — no polling needed.
-    rerender({ stats: makeStats({ queued: 8964, sentToday: 385 }) });
+    rerender({ stats: makeStats({ queued: 8964, sentOutToday: 385 }) });
     expect(result.current.queued).toBe(8964);
-    expect(result.current.sentToday).toBe(385);
+    expect(result.current.sentOutToday).toBe(385);
     expect(getQueueStats).not.toHaveBeenCalled();
   });
 

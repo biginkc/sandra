@@ -114,7 +114,7 @@ const baseProps = {
   currentUserId: "user-1",
   queueStats: {
     queued: 0,
-    sentToday: 0,
+    sentOutToday: 0,
     failedToday: 0,
     nextScheduledFor: null,
     lastScheduledFor: null,

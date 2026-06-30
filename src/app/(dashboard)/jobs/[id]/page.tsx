@@ -2,10 +2,11 @@ import { notFound } from "next/navigation";
 
 import { Page } from "@/components/page";
 import { PageHeader } from "@/components/page-header";
+import { getOutboundSmsMetrics } from "@/lib/messages/message-metrics";
 import { createClient } from "@/lib/supabase/server";
-import type { Database } from "@/lib/supabase/types";
+import type { Database, Json } from "@/lib/supabase/types";
 
-import { JobDetail } from "./job-detail";
+import { JobDetail, type BulkSmsJobMetrics } from "./job-detail";
 
 export const metadata = {
   title: "Job · Sandra CRM",
@@ -34,10 +35,13 @@ export default async function JobDetailPage({
     notFound();
   }
 
+  const bulkSmsCampaignId =
+    job.type === "bulk_sms" ? extractBulkSmsCampaignId(job.input_params) : null;
+
   // Fetch related rows in parallel — items, parent, children, csv_imports
   // metadata when applicable. Each query is small + indexed; no need to
   // chain them.
-  const [itemsRes, parentRes, childrenRes, csvImportRes] =
+  const [itemsRes, parentRes, childrenRes, csvImportRes, smsMetricsRes] =
     await Promise.all([
       supabase
         .from("job_items")
@@ -66,6 +70,16 @@ export default async function JobDetailPage({
             .eq("id", job.related_import_id)
             .maybeSingle()
         : Promise.resolve({ data: null }),
+      bulkSmsCampaignId
+        ? getOutboundSmsMetrics(supabase, {
+            scope: { campaignId: bulkSmsCampaignId, orgId: job.org_id },
+          })
+            .then((data) => ({ data, error: null }))
+            .catch((error: unknown) => ({
+              data: null,
+              error: error instanceof Error ? error.message : "Unknown error",
+            }))
+        : Promise.resolve({ data: null, error: null }),
     ]);
 
   return (
@@ -86,9 +100,41 @@ export default async function JobDetailPage({
         parent={parentRes.data ?? null}
         childJobs={childrenRes.data ?? []}
         csvImport={csvImportRes.data ?? null}
+        bulkSmsMetrics={toBulkSmsJobMetrics(smsMetricsRes.data)}
+        bulkSmsMetricsError={smsMetricsRes.error}
       />
     </Page>
   );
+}
+
+function extractBulkSmsCampaignId(inputParams: Json | null): string | null {
+  if (!isRecord(inputParams)) return null;
+  const opts = inputParams.opts;
+  if (!isRecord(opts)) return null;
+  return typeof opts.campaignId === "string" && opts.campaignId.trim()
+    ? opts.campaignId.trim()
+    : null;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function toBulkSmsJobMetrics(
+  metrics: Awaited<ReturnType<typeof getOutboundSmsMetrics>> | null,
+): BulkSmsJobMetrics | null {
+  if (!metrics) return null;
+  return {
+    queued: metrics.queued,
+    dueQueued: metrics.dueQueued,
+    pending: metrics.pending,
+    sent: metrics.sent,
+    delivered: metrics.delivered,
+    failed: metrics.failed,
+    handedOff: metrics.handedOff,
+    nextScheduledFor: metrics.nextScheduledFor,
+    lastScheduledFor: metrics.lastScheduledFor,
+  };
 }
 
 function shortenForCrumb(job: Job): string {
