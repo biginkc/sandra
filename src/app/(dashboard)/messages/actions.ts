@@ -1,9 +1,9 @@
 "use server";
 
 import { createClient } from "@/lib/supabase/server";
-import { createAdminClient } from "@/lib/supabase/admin";
 import { errFromUnknown, ok, type Result } from "@/lib/errors/result";
 import { reportError } from "@/lib/errors/report";
+import { getOutboundSmsMetrics } from "@/lib/messages/message-metrics";
 import {
   createContactFromUnknown as createContactFromUnknownHelper,
   dismissUnknownSender as dismissUnknownSenderHelper,
@@ -505,7 +505,7 @@ export async function restoreDismissedSenderAction(
 
 export type QueueStats = {
   queued: number;
-  sentToday: number;
+  sentOutToday: number;
   failedToday: number;
   /** ISO timestamp of the next queued release, or null if nothing is queued. */
   nextScheduledFor: string | null;
@@ -516,88 +516,32 @@ export type QueueStats = {
 /**
  * Aggregate stats for the live banner above the Outbox queue panel.
  *
- * Five sequential reads against `messages`:
- *   - count(*) where status='queued'
- *   - count(*) where status='sent' AND created_at >= todayStartUtc
- *   - count(*) where status='failed' AND failed_at >= todayStartUtc
- *   - min(scheduled_for) where status='queued'  (next release)
- *   - max(scheduled_for) where status='queued'  (last release → drain ETA)
- *
- * UTC midnight is used as the "today" boundary; the banner is a global
- * operator surface, not a per-user view, so a stable boundary is preferred
- * over a per-viewer-timezone one. Surfaces `QUEUE_STATS_FAILED` on any
- * sub-query error so the client falls back to the last-known good stats
- * and the next 30s poll retries.
+ * Uses the same session/RLS surface as the visible Outbox table and the
+ * shared outbound-SMS metrics contract. "Sent out today" counts rows
+ * that have been handed to the provider today by `sent_at`, including
+ * rows that later advanced from `sent` to `delivered`.
  */
 export async function getQueueStats(): Promise<Result<QueueStats>> {
   try {
-    const supabase = createAdminClient();
-    const todayStart = new Date();
-    todayStart.setUTCHours(0, 0, 0, 0);
-    const todayStartIso = todayStart.toISOString();
-
-    // All five reads are independent — run them concurrently. Serial
-    // awaits here turned one slow-DB moment into a 5x page stall (each
-    // poll and first paint pays the sum, not the max).
-    const [queuedRes, sentRes, failedRes, nextRes, lastRes] =
-      await Promise.all([
-        supabase
-          .from("messages")
-          .select("*", { count: "exact", head: true })
-          .eq("status", "queued"),
-        supabase
-          .from("messages")
-          .select("*", { count: "exact", head: true })
-          .eq("status", "sent")
-          .gte("created_at", todayStartIso),
-        supabase
-          .from("messages")
-          .select("*", { count: "exact", head: true })
-          .eq("status", "failed")
-          .gte("failed_at", todayStartIso),
-        supabase
-          .from("messages")
-          .select("scheduled_for")
-          .eq("status", "queued")
-          .order("scheduled_for", { ascending: true })
-          .limit(1),
-        supabase
-          .from("messages")
-          .select("scheduled_for")
-          .eq("status", "queued")
-          .order("scheduled_for", { ascending: false })
-          .limit(1),
-      ]);
-
-    const firstError =
-      queuedRes.error ??
-      sentRes.error ??
-      failedRes.error ??
-      nextRes.error ??
-      lastRes.error;
-    if (firstError) {
-      return {
-        ok: false,
-        error: { code: "QUEUE_STATS_FAILED", message: firstError.message },
-      };
-    }
+    const supabase = await createClient();
+    const stats = await getOutboundSmsMetrics(supabase);
 
     return ok({
-      queued: queuedRes.count ?? 0,
-      sentToday: sentRes.count ?? 0,
-      failedToday: failedRes.count ?? 0,
-      nextScheduledFor:
-        nextRes.data && nextRes.data.length > 0
-          ? (nextRes.data[0].scheduled_for ?? null)
-          : null,
-      lastScheduledFor:
-        lastRes.data && lastRes.data.length > 0
-          ? (lastRes.data[0].scheduled_for ?? null)
-          : null,
+      queued: stats.queued,
+      sentOutToday: stats.handedOffToday,
+      failedToday: stats.failedToday,
+      nextScheduledFor: stats.nextScheduledFor,
+      lastScheduledFor: stats.lastScheduledFor,
     });
   } catch (e) {
     reportError(e, { tags: { surface: "get_queue_stats" } });
-    return errFromUnknown(e, "QUEUE_STATS_FAILED");
+    return {
+      ok: false,
+      error: {
+        code: "QUEUE_STATS_FAILED",
+        message: e instanceof Error ? e.message : "Failed to load queue stats.",
+      },
+    };
   }
 }
 

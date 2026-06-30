@@ -5,7 +5,7 @@ import { QueueStatsBanner } from "./queue-stats-banner";
 
 type Stats = {
   queued: number;
-  sentToday: number;
+  sentOutToday: number;
   failedToday: number;
   nextScheduledFor: string | null;
   lastScheduledFor: string | null;
@@ -14,7 +14,7 @@ type Stats = {
 function makeStats(overrides: Partial<Stats> = {}): Stats {
   return {
     queued: 0,
-    sentToday: 0,
+    sentOutToday: 0,
     failedToday: 0,
     nextScheduledFor: null,
     lastScheduledFor: null,
@@ -35,18 +35,18 @@ afterEach(() => {
 // Polling behavior (30s interval, visibility gating, cleanup) lives in
 // useQueueStats and is covered by use-queue-stats.test.ts.
 describe("<QueueStatsBanner /> (260504-tgq)", () => {
-  it("Renders queued / sent today / failed today counts from stats", () => {
+  it("Renders queued / sent out today / failed today counts from stats", () => {
     render(
       <QueueStatsBanner
         stats={makeStats({
           queued: 2509,
-          sentToday: 12,
+          sentOutToday: 12,
           failedToday: 3,
         })}
       />,
     );
     expect(screen.getByText(/2509 queued/)).toBeInTheDocument();
-    expect(screen.getByText(/12 sent today/)).toBeInTheDocument();
+    expect(screen.getByText(/12 sent out today/)).toBeInTheDocument();
     expect(screen.getByText(/3 failed today/)).toBeInTheDocument();
   });
 

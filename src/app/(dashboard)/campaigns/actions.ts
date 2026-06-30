@@ -1,5 +1,7 @@
 "use server";
 
+import { revalidatePath } from "next/cache";
+
 import { bulkQueueSms, getAllMatchingProspectIds } from "@/app/(dashboard)/properties/actions";
 import { getCallerMemberships } from "@/lib/auth/memberships";
 import { computeConsentState } from "@/lib/messaging/consent";
@@ -23,12 +25,14 @@ import {
   hasEffectiveAudience,
 } from "@/lib/prospects/effective-audience";
 import { decodeFilters, type FilterBlock } from "@/lib/prospects/filter-schema";
+import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
 import type { Database, Json } from "@/lib/supabase/types";
 
 const PROPERTY_CHUNK = 250;
 const RECIPIENT_PAGE = 1000;
 const UPSERT_CHUNK = 500;
+const CADENCE_RESCHEDULE_START_AFTER_SECONDS = 300;
 
 type CampaignRow = Pick<
   Database["public"]["Tables"]["campaigns"]["Row"],
@@ -79,6 +83,39 @@ export type CampaignLaunchPreview = {
   landlineCount: number;
   unknownLineTypeCount: number;
   optedOutCount: number;
+};
+
+export type CampaignCadenceChangeResult = {
+  affectedCount: number;
+  firstScheduledFor: string | null;
+  lastScheduledFor: string | null;
+  paceSeconds: number;
+  startAfterSeconds: number;
+};
+
+type CampaignCadenceRpcRow = {
+  affected_count: number | string | null;
+  first_scheduled_for: string | null;
+  last_scheduled_for: string | null;
+};
+
+type CampaignCadenceRpcName =
+  | "preview_campaign_cadence_reschedule"
+  | "apply_campaign_cadence_reschedule";
+
+type CampaignCadenceRpcClient = {
+  rpc: (
+    fn: CampaignCadenceRpcName,
+    args: {
+      p_campaign_id: string;
+      p_pace_seconds: number;
+      p_start_after_seconds: number;
+      p_operator_confirmed?: boolean;
+    },
+  ) => Promise<{
+    data: CampaignCadenceRpcRow[] | null;
+    error: { message: string } | null;
+  }>;
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -322,6 +359,173 @@ async function campaignExists(
   }
 
   return ok(Boolean(data?.id));
+}
+
+async function requireCampaignCadenceAccess(
+  campaignId: string,
+): Promise<Result<null>> {
+  const supabase = await createClient();
+  const [{ data, error }, memberships] = await Promise.all([
+    supabase
+      .from("campaigns")
+      .select("org_id")
+      .eq("id", campaignId)
+      .maybeSingle(),
+    getCallerMemberships(),
+  ]);
+
+  if (error) {
+    return {
+      ok: false,
+      error: { code: "CAMPAIGN_LOOKUP_FAILED", message: error.message },
+    };
+  }
+  if (!data?.org_id) {
+    return {
+      ok: false,
+      error: { code: "CAMPAIGN_NOT_FOUND", message: "Campaign not found." },
+    };
+  }
+  if (!memberships.some((membership) => membership.org_id === data.org_id)) {
+    return {
+      ok: false,
+      error: {
+        code: "CAMPAIGN_UNAUTHORIZED",
+        message: "You do not have access to this campaign.",
+      },
+    };
+  }
+
+  return ok(null);
+}
+
+function validateCadenceChangeInput(
+  campaignId: string,
+  paceSeconds: number,
+): Result<{ campaignId: string; paceSeconds: number }> {
+  const trimmedCampaignId = campaignId.trim();
+  if (!trimmedCampaignId) {
+    return {
+      ok: false,
+      error: { code: "VALIDATION", message: "Campaign id is required." },
+    };
+  }
+
+  const validation = validateSmsPaceSeconds(paceSeconds, {
+    mode: "saved_campaign",
+  });
+  if (!validation.ok) {
+    return {
+      ok: false,
+      error: { code: "VALIDATION", message: validation.message },
+    };
+  }
+
+  return ok({
+    campaignId: trimmedCampaignId,
+    paceSeconds: validation.paceSeconds,
+  });
+}
+
+function normalizeCadenceRpcRow(
+  row: CampaignCadenceRpcRow | undefined,
+  paceSeconds: number,
+): CampaignCadenceChangeResult {
+  return {
+    affectedCount: Number(row?.affected_count ?? 0),
+    firstScheduledFor: row?.first_scheduled_for ?? null,
+    lastScheduledFor: row?.last_scheduled_for ?? null,
+    paceSeconds,
+    startAfterSeconds: CADENCE_RESCHEDULE_START_AFTER_SECONDS,
+  };
+}
+
+async function runCadenceRpc(
+  fn: CampaignCadenceRpcName,
+  campaignId: string,
+  paceSeconds: number,
+  operatorConfirmed?: boolean,
+  rpcClient?: CampaignCadenceRpcClient,
+): Promise<Result<CampaignCadenceChangeResult>> {
+  const rpc =
+    rpcClient ?? ((await createClient()) as unknown as CampaignCadenceRpcClient);
+  const { data, error } = await rpc.rpc(fn, {
+    p_campaign_id: campaignId,
+    p_pace_seconds: paceSeconds,
+    p_start_after_seconds: CADENCE_RESCHEDULE_START_AFTER_SECONDS,
+    ...(operatorConfirmed === undefined
+      ? {}
+      : { p_operator_confirmed: operatorConfirmed }),
+  });
+
+  if (error) {
+    return {
+      ok: false,
+      error: { code: "CADENCE_CHANGE_FAILED", message: error.message },
+    };
+  }
+
+  return ok(normalizeCadenceRpcRow(data?.[0], paceSeconds));
+}
+
+export async function previewCampaignCadenceChange(
+  campaignId: string,
+  paceSeconds: number,
+): Promise<Result<CampaignCadenceChangeResult>> {
+  const input = validateCadenceChangeInput(campaignId, paceSeconds);
+  if (!input.ok) return input;
+
+  try {
+    return await runCadenceRpc(
+      "preview_campaign_cadence_reschedule",
+      input.data.campaignId,
+      input.data.paceSeconds,
+    );
+  } catch (e) {
+    reportError(e, { tags: { surface: "preview_campaign_cadence_change" } });
+    return errFromUnknown(e, "CADENCE_CHANGE_FAILED");
+  }
+}
+
+export async function applyCampaignCadenceChange(
+  campaignId: string,
+  paceSeconds: number,
+  operatorConfirmed: boolean,
+): Promise<Result<CampaignCadenceChangeResult>> {
+  if (operatorConfirmed !== true) {
+    return {
+      ok: false,
+      error: {
+        code: "OPERATOR_CONFIRMATION_REQUIRED",
+        message:
+          "Preview the cadence change and confirm it before rescheduling queued messages.",
+      },
+    };
+  }
+
+  const input = validateCadenceChangeInput(campaignId, paceSeconds);
+  if (!input.ok) return input;
+
+  try {
+    const access = await requireCampaignCadenceAccess(input.data.campaignId);
+    if (!access.ok) return access;
+
+    const result = await runCadenceRpc(
+      "apply_campaign_cadence_reschedule",
+      input.data.campaignId,
+      input.data.paceSeconds,
+      true,
+      createAdminClient() as unknown as CampaignCadenceRpcClient,
+    );
+    if (result.ok) {
+      revalidatePath(`/campaigns/${input.data.campaignId}`);
+      revalidatePath("/messages");
+    }
+    return result;
+  } catch (e) {
+    reportError(e, { tags: { surface: "apply_campaign_cadence_change" } });
+    return errFromUnknown(e, "CADENCE_CHANGE_FAILED");
+  }
 }
 
 export async function createCampaign(

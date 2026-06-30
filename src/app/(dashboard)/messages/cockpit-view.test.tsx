@@ -42,7 +42,7 @@ vi.mock("./actions", () => ({
     ok: true,
     data: {
       queued: 0,
-      sentToday: 0,
+      sentOutToday: 0,
       failedToday: 0,
       nextScheduledFor: null,
       lastScheduledFor: null,
@@ -193,7 +193,7 @@ const baseProps = {
   currentUserId: "user-1",
   queueStats: {
     queued: 0,
-    sentToday: 0,
+    sentOutToday: 0,
     failedToday: 0,
     nextScheduledFor: null,
     lastScheduledFor: null,
@@ -231,7 +231,7 @@ describe("<CockpitView /> URL deep-linking", () => {
         queueStats={{
           ...baseProps.queueStats,
           queued: 8964,
-          sentToday: 385,
+          sentOutToday: 385,
           failedToday: 2,
         }}
       />,

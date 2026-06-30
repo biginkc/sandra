@@ -5,7 +5,7 @@ import { type QueueStats } from "./actions";
 /**
  * Stats banner above the Outbox queue table.
  *
- * Renders queued / sentToday / failedToday counts, plus the relative
+ * Renders queued / sentOutToday / failedToday counts, plus the relative
  * "next release" time and humanized drain ETA. Polling lives in
  * useQueueStats, owned by CockpitView, so this banner and the Outbox
  * tab badge always show the same numbers.
@@ -14,7 +14,7 @@ export function QueueStatsBanner({ stats }: { stats: QueueStats }) {
   return (
     <div className="bg-card mb-4 rounded-xl border p-4 text-sm">
       <div className="font-medium">
-        {stats.queued} queued · {stats.sentToday} sent today ·{" "}
+        {stats.queued} queued · {stats.sentOutToday} sent out today ·{" "}
         {stats.failedToday} failed today
       </div>
       <div className="text-muted-foreground mt-1">

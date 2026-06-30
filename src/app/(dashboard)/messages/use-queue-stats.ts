@@ -9,7 +9,7 @@ const POLL_INTERVAL_MS = 30_000;
 function sameStats(a: QueueStats, b: QueueStats): boolean {
   return (
     a.queued === b.queued &&
-    a.sentToday === b.sentToday &&
+    a.sentOutToday === b.sentOutToday &&
     a.failedToday === b.failedToday &&
     a.nextScheduledFor === b.nextScheduledFor &&
     a.lastScheduledFor === b.lastScheduledFor
@@ -25,10 +25,9 @@ function sameStats(a: QueueStats, b: QueueStats): boolean {
  * to visible so an operator coming back from another window doesn't
  * have to wait up to 30s for fresh data.
  *
- * `enabled: false` (Inbox tab) skips polling entirely — getQueueStats
- * is five DB reads, and an operator parked on Inbox shouldn't generate
- * that load every 30s. First-paint stats stay fresh enough there: the
- * page is force-dynamic, so every navigation/tab switch re-fetches.
+ * `enabled: false` is kept for tests and future low-activity embeds.
+ * The Messages cockpit uses the default live mode so the Outbox badge
+ * remains current while the operator works the Inbox.
  */
 export function useQueueStats(
   initialStats: QueueStats,

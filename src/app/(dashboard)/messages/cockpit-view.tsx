@@ -79,12 +79,9 @@ export function CockpitView({
 
   // One live stats source for the Outbox tab badge + the stats banner,
   // so the two never show different numbers. Seeds from the server
-  // first-paint stats; polls every 30s while visible, but only while
-  // the Outbox tab is active — Inbox dwellers shouldn't generate
-  // stats-query load (5 DB reads/poll) for a banner they can't see.
-  const liveQueueStats = useQueueStats(queueStats, {
-    enabled: activeTab === "outbox",
-  });
+  // first-paint stats and keeps polling while visible so the Outbox
+  // badge stays current even when the operator is parked on Inbox.
+  const liveQueueStats = useQueueStats(queueStats);
 
   const setTab = (next: string) => {
     const sp = new URLSearchParams(searchParams.toString());
@@ -278,7 +275,7 @@ function TabButton({
   label: string;
   /** Simple count pill (Inbox). */
   count?: number;
-  /** Queue figures: queued · sent today (green) · failed today (red) (Outbox). */
+  /** Queue figures: queued · sent out today (green) · failed today (red) (Outbox). */
   stats?: QueueStats;
   active: boolean;
   onClick: () => void;
@@ -312,14 +309,14 @@ function TabButton({
       {stats && (
         <span
           className="flex items-center gap-1.5 text-[11px] font-bold"
-          title={`${stats.queued} queued · ${stats.sentToday} sent today · ${stats.failedToday} failed today`}
+          title={`${stats.queued} queued · ${stats.sentOutToday} sent out today · ${stats.failedToday} failed today`}
           data-testid={`${testId}-stats`}
         >
           {/* Queued inherits the tab text color; sent/failed keep their
               status colors in both active and inactive states. */}
           <span>{stats.queued}</span>
           <span className="text-[#a8a29e]">·</span>
-          <span className="text-emerald-600">{stats.sentToday}</span>
+          <span className="text-emerald-600">{stats.sentOutToday}</span>
           <span className="text-[#a8a29e]">·</span>
           <span className="text-red-600">{stats.failedToday}</span>
         </span>
