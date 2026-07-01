@@ -151,7 +151,7 @@ export async function listThreads(
     .eq("channel", "sms")
     .not("contact_id", "is", null)
     .not("conversation_id", "is", null)
-    .neq("status", "queued")
+    .not("status", "in", "(queued,paused)")
     .gte("created_at", cutoff)
     .order("created_at", { ascending: false });
   if (error) throw new Error(`listThreads: ${error.message}`);
@@ -368,7 +368,7 @@ export async function countNeedsOutcomeThreads(
     .eq("channel", "sms")
     .not("contact_id", "is", null)
     .not("conversation_id", "is", null)
-    .neq("status", "queued")
+    .not("status", "in", "(queued,paused)")
     .gte("created_at", cutoff)
     .order("created_at", { ascending: false });
   if (error) throw new Error(`countNeedsOutcomeThreads: ${error.message}`);

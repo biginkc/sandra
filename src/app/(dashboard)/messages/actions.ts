@@ -505,6 +505,7 @@ export async function restoreDismissedSenderAction(
 
 export type QueueStats = {
   queued: number;
+  paused: number;
   sentOutToday: number;
   failedToday: number;
   /** ISO timestamp of the next queued release, or null if nothing is queued. */
@@ -528,6 +529,7 @@ export async function getQueueStats(): Promise<Result<QueueStats>> {
 
     return ok({
       queued: stats.queued,
+      paused: stats.paused,
       sentOutToday: stats.handedOffToday,
       failedToday: stats.failedToday,
       nextScheduledFor: stats.nextScheduledFor,

@@ -4,7 +4,7 @@ export const SMS_PACING_SECONDS = {
   push: 4,
   canary: 6,
   savedCampaignDefault: 8,
-  savedCampaignMin: 8,
+  savedCampaignMin: 2,
   customMin: 10,
   max: 600,
 } as const;
@@ -55,7 +55,7 @@ export function validateSmsPaceSeconds(
 
   if (
     value === SMS_PACING_SECONDS.savedCampaignDefault ||
-    value >= SMS_PACING_SECONDS.customMin
+    value >= SMS_PACING_SECONDS.savedCampaignMin
   ) {
     return { ok: true, paceSeconds: value };
   }
@@ -70,7 +70,7 @@ export function defaultSmsPaceSeconds(mode: ValidationMode): number {
 
 export function paceValidationMessage(mode: ValidationMode): string {
   if (mode === "saved_campaign") {
-    return `Saved campaign pacing must be ${SMS_PACING_SECONDS.savedCampaignDefault} seconds or between ${SMS_PACING_SECONDS.customMin} seconds and 10 minutes.`;
+    return `Saved campaign pacing must be between ${SMS_PACING_SECONDS.savedCampaignMin} seconds and 10 minutes.`;
   }
   return (
     "Pacing must use a locked preset (4s push, 8s steady, 14s conservative), " +

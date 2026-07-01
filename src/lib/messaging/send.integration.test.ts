@@ -471,6 +471,93 @@ describe("sendSmsToContact (integration)", () => {
     expect(row?.campaign_id).toBe(campaign!.id);
   });
 
+  it("holds queue-only campaign messages when the campaign is paused", async () => {
+    const { contactId, propertyId } = await seed({ withConsent: false });
+    const scheduledFor = new Date("2026-06-30T18:05:00.000Z");
+    const { data: campaign } = await supabase
+      .from("campaigns")
+      .insert({
+        org_id: "00000000-0000-0000-0000-000000000bbb",
+        name: `Paused Campaign ${crypto.randomUUID()}`,
+        status: "paused",
+      })
+      .select("id")
+      .single();
+
+    const outcome = await sendSmsToContact(supabase, {
+      contactId,
+      propertyId,
+      body: "held campaign send",
+      queueOnly: true,
+      scheduledFor,
+      campaignId: campaign!.id,
+    });
+
+    expect(outcome.status).toBe("paused");
+    if (outcome.status !== "paused") return;
+
+    const { data: row } = await supabase
+      .from("messages")
+      .select("campaign_id, status, scheduled_for, metadata")
+      .eq("id", outcome.messageId)
+      .single();
+    expect(row?.campaign_id).toBe(campaign!.id);
+    expect(row?.status).toBe("paused");
+    expect(row?.scheduled_for).toBeNull();
+    expect(row?.metadata).toMatchObject({
+      campaignPause: {
+        previousScheduledFor: scheduledFor.toISOString(),
+        reason: "operator_pause",
+      },
+    });
+  });
+
+  it("release holds a queued campaign message when the campaign is paused", async () => {
+    const { contactId, propertyId } = await seed({ withConsent: true });
+    const { data: campaign } = await supabase
+      .from("campaigns")
+      .insert({
+        org_id: "00000000-0000-0000-0000-000000000bbb",
+        name: `Release Pause Campaign ${crypto.randomUUID()}`,
+      })
+      .select("id")
+      .single();
+    const queue = await sendSmsToContact(supabase, {
+      contactId,
+      propertyId,
+      body: "queued before pause",
+      queueOnly: true,
+      scheduledFor: new Date(Date.now() - 1000),
+      campaignId: campaign!.id,
+    });
+    expect(queue.status).toBe("queued");
+    if (queue.status !== "queued") return;
+
+    await supabase
+      .from("campaigns")
+      .update({ status: "paused" })
+      .eq("id", campaign!.id);
+
+    const callsBefore = getMockMessageLog().length;
+    const release = await releaseQueuedMessage(supabase, queue.messageId);
+
+    expect(release.status).toBe("blocked_campaign_paused");
+    expect(getMockMessageLog()).toHaveLength(callsBefore);
+
+    const { data: row } = await supabase
+      .from("messages")
+      .select("status, scheduled_for, metadata")
+      .eq("id", queue.messageId)
+      .single();
+    expect(row?.status).toBe("paused");
+    expect(row?.scheduled_for).toBeNull();
+    expect(row?.metadata).toMatchObject({
+      campaignPause: {
+        reason: "operator_pause",
+      },
+    });
+  });
+
   it("reuses one conversation_id for repeated sends on the same contact/property thread", async () => {
     const now = new Date();
     const hour = parseInt(
@@ -1008,6 +1095,55 @@ describe("sendSmsToContact (integration)", () => {
       expect(sentRow?.status).toBe("sent");
       expect(sentRow?.failed_at).toBeNull();
       expect(sentRow?.error_message).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("release holds transient provider retries when the campaign is paused during the provider attempt", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-06-14T18:00:00Z"));
+    try {
+      const { contactId, propertyId } = await seed({ withConsent: true });
+      const { data: campaign } = await supabase
+        .from("campaigns")
+        .insert({
+          org_id: "00000000-0000-0000-0000-000000000bbb",
+          name: `Paused Retry Campaign ${crypto.randomUUID()}`,
+        })
+        .select("id")
+        .single();
+      const queue = await sendSmsToContact(supabase, {
+        contactId,
+        propertyId,
+        body: "FAIL-RATE_LIMIT: defer this queued campaign message",
+        queueOnly: true,
+        scheduledFor: new Date(Date.now() - 1000),
+        campaignId: campaign!.id,
+      });
+      expect(queue.status).toBe("queued");
+      if (queue.status !== "queued") return;
+
+      await supabase
+        .from("campaigns")
+        .update({ status: "paused" })
+        .eq("id", campaign!.id);
+
+      const release = await releaseQueuedMessage(supabase, queue.messageId);
+      expect(release.status).toBe("blocked_campaign_paused");
+
+      const { data: row } = await supabase
+        .from("messages")
+        .select("status, scheduled_for, metadata")
+        .eq("id", queue.messageId)
+        .single();
+      expect(row?.status).toBe("paused");
+      expect(row?.scheduled_for).toBeNull();
+      expect(row?.metadata).toMatchObject({
+        campaignPause: {
+          reason: "operator_pause",
+        },
+      });
     } finally {
       vi.useRealTimers();
     }

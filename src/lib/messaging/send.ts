@@ -44,6 +44,7 @@ const PROVIDER_TRANSIENT_MAX_DEFER_ATTEMPTS = 3;
 export type SendSmsOutcome =
   | { status: "sent"; messageId: string; externalId: string }
   | { status: "queued"; messageId: string }
+  | { status: "paused"; messageId: string }
   | {
       status: "blocked_provider_off";
       reason: string;
@@ -77,6 +78,11 @@ export type SendSmsOutcome =
       status: "blocked_not_due";
       messageId: string;
       retryAt: string;
+    }
+  | {
+      status: "blocked_campaign_paused";
+      messageId?: string;
+      reason: string;
     }
   | {
       status: "provider_failed";
@@ -159,6 +165,12 @@ export async function sendSmsToContact(
   if (input.queueOnly) {
     return queueForLater(supabase, provider.providerId, input);
   }
+
+  const campaignPause = await blockIfCampaignPaused(
+    supabase,
+    input.campaignId,
+  );
+  if (campaignPause) return campaignPause;
 
   // 2. Look up contact + property in parallel.
   const [contactResult, propertyResult] = await Promise.all([
@@ -463,12 +475,18 @@ async function queueForLater(
     ? normalizePhone(fromAddressRaw) ?? fromAddressRaw
     : null;
   const normalizedToPhone = normalizePhone(destination.phone) ?? destination.phone;
+  const campaignPause = await campaignIsPaused(supabase, input.campaignId);
+  if (campaignPause.error) {
+    return { status: "db_error", error: campaignPause.error };
+  }
+  const queuedStatus = campaignPause.paused ? "paused" : "queued";
+  const scheduledFor = input.scheduledFor?.toISOString() ?? null;
   const { data: queued, error } = await supabase
     .from("messages")
     .insert({
       channel: "sms",
       direction: "outbound",
-      status: "queued",
+      status: queuedStatus,
       provider: providerId,
       campaign_id: input.campaignId ?? null,
       contact_id: input.contactId,
@@ -477,8 +495,14 @@ async function queueForLater(
       from_address: fromAddress,
       to_address: normalizedToPhone,
       body: input.body,
-      scheduled_for: input.scheduledFor?.toISOString() ?? null,
-      metadata: input.metadata ?? null,
+      scheduled_for: campaignPause.paused ? null : scheduledFor,
+      metadata: campaignPause.paused
+        ? addCampaignPauseMetadata(
+            input.metadata ?? null,
+            new Date().toISOString(),
+            scheduledFor,
+          )
+        : input.metadata ?? null,
     })
     .select("id")
     .single();
@@ -488,7 +512,7 @@ async function queueForLater(
       error: error?.message ?? "failed to insert queued message",
     };
   }
-  return { status: "queued", messageId: queued.id };
+  return { status: queuedStatus, messageId: queued.id };
 }
 
 /**
@@ -524,7 +548,7 @@ export async function releaseQueuedMessage(
   const { data: msg, error: fetchError } = await supabase
     .from("messages")
     .select(
-      "id, status, provider, org_id, contact_id, property_id, body, from_address, to_address, scheduled_for, metadata",
+      "id, status, provider, org_id, campaign_id, contact_id, property_id, body, from_address, to_address, scheduled_for, metadata",
     )
     .eq("id", messageId)
     .maybeSingle();
@@ -541,6 +565,14 @@ export async function releaseQueuedMessage(
     }
     return { status: "db_error", error: `message is ${msg.status}, not queued` };
   }
+  const campaignPause = await pauseQueuedMessageIfCampaignPaused(
+    supabase,
+    msg.id,
+    msg.campaign_id,
+    msg.metadata,
+    msg.scheduled_for,
+  );
+  if (campaignPause) return campaignPause;
   if (msg.scheduled_for && new Date(msg.scheduled_for).getTime() > Date.now()) {
     return {
       status: "blocked_not_due",
@@ -719,6 +751,40 @@ export async function releaseQueuedMessage(
     };
   }
 
+  const postClaimPause = await campaignIsPaused(supabase, msg.campaign_id);
+  if (postClaimPause.error) {
+    return { status: "db_error", error: postClaimPause.error };
+  }
+  if (postClaimPause.paused) {
+    const { error: pauseClaimedError } = await supabase
+      .from("messages")
+      .update({
+        status: "paused",
+        scheduled_for: null,
+        metadata: addCampaignPauseMetadata(
+          {
+            ...(currentMetadata ?? {}),
+            providerAttempt: {
+              pendingAt,
+              maxPendingMs: PROVIDER_PENDING_STALE_MS,
+            },
+          } as Json,
+          new Date().toISOString(),
+          msg.scheduled_for,
+        ),
+      })
+      .eq("id", msg.id)
+      .eq("status", "pending");
+    if (pauseClaimedError) {
+      return { status: "db_error", error: pauseClaimedError.message };
+    }
+    return {
+      status: "blocked_campaign_paused",
+      messageId: msg.id,
+      reason: "Campaign sends were paused before this SMS reached the provider. It was held until the campaign is resumed.",
+    };
+  }
+
   try {
     const result = await provider.sendSms({
       to: msg.to_address,
@@ -766,13 +832,24 @@ export async function releaseQueuedMessage(
     const message = e instanceof Error ? e.message : String(e);
     const retry = buildProviderRetryUpdate(e, currentMetadata);
     if (retry.defer) {
+      const pauseForRetry = await campaignIsPaused(supabase, msg.campaign_id);
+      if (pauseForRetry.error) {
+        return { status: "db_error", error: pauseForRetry.error };
+      }
+      const retryMetadata = pauseForRetry.paused
+        ? addCampaignPauseMetadata(
+            retry.metadata,
+            new Date().toISOString(),
+            retry.retryAt,
+          )
+        : retry.metadata;
       const { data: deferred, error: deferError } = await supabase
         .from("messages")
         .update({
-          status: "queued",
-          scheduled_for: retry.retryAt,
+          status: pauseForRetry.paused ? "paused" : "queued",
+          scheduled_for: pauseForRetry.paused ? null : retry.retryAt,
           error_message: message,
-          metadata: retry.metadata,
+          metadata: retryMetadata,
         })
         .eq("id", msg.id)
         .eq("status", "pending")
@@ -819,6 +896,110 @@ export async function releaseQueuedMessage(
     }
     return { status: "provider_failed", messageId: msg.id, error: message };
   }
+}
+
+function readMetadataRecord(metadata: Json | null): Record<string, unknown> | null {
+  return metadata && typeof metadata === "object" && !Array.isArray(metadata)
+    ? metadata
+    : null;
+}
+
+function addCampaignPauseMetadata(
+  metadata: Json | null,
+  pausedAt: string,
+  previousScheduledFor: string | null,
+): Json {
+  const baseMetadata = readMetadataRecord(metadata) ?? {};
+  return {
+    ...baseMetadata,
+    campaignPause: {
+      pausedAt,
+      previousScheduledFor,
+      reason: "operator_pause",
+    },
+  } as Json;
+}
+
+async function campaignIsPaused(
+  supabase: SupabaseClient<Database>,
+  campaignId: string | null | undefined,
+): Promise<{ paused: boolean; error: string | null }> {
+  if (!campaignId) return { paused: false, error: null };
+  const { data, error } = await supabase
+    .from("campaigns")
+    .select("status")
+    .eq("id", campaignId)
+    .maybeSingle();
+  if (error) return { paused: false, error: error.message };
+  return { paused: data?.status === "paused", error: null };
+}
+
+async function blockIfCampaignPaused(
+  supabase: SupabaseClient<Database>,
+  campaignId: string | null | undefined,
+): Promise<Extract<SendSmsOutcome, { status: "blocked_campaign_paused" | "db_error" }> | null> {
+  const paused = await campaignIsPaused(supabase, campaignId);
+  if (paused.error) return { status: "db_error", error: paused.error };
+  if (!paused.paused) return null;
+  return {
+    status: "blocked_campaign_paused",
+    reason: "Campaign sends are paused. Resume the campaign before sending or queueing more SMS.",
+  };
+}
+
+async function pauseQueuedMessageIfCampaignPaused(
+  supabase: SupabaseClient<Database>,
+  messageId: string,
+  campaignId: string | null,
+  metadata: Json | null,
+  previousScheduledFor: string | null,
+): Promise<Extract<SendSmsOutcome, { status: "blocked_campaign_paused" | "db_error" | "sent" }> | null> {
+  const paused = await campaignIsPaused(supabase, campaignId);
+  if (paused.error) return { status: "db_error", error: paused.error };
+  if (!paused.paused) return null;
+
+  const { error } = await supabase
+    .from("messages")
+    .update({
+      status: "paused",
+      scheduled_for: null,
+      metadata: addCampaignPauseMetadata(
+        metadata,
+        new Date().toISOString(),
+        previousScheduledFor,
+      ),
+    })
+    .eq("id", messageId)
+    .eq("status", "queued")
+    .select("id")
+    .maybeSingle();
+  if (error) return { status: "db_error", error: error.message };
+
+  const { data: latest, error: latestError } = await supabase
+    .from("messages")
+    .select("id, status, external_id")
+    .eq("id", messageId)
+    .maybeSingle();
+  if (latestError) return { status: "db_error", error: latestError.message };
+  if (latest?.status === "sent") {
+    return {
+      status: "sent",
+      messageId,
+      externalId: latest.external_id ?? "(already sent)",
+    };
+  }
+  if (latest?.status === "pending") {
+    return {
+      status: "db_error",
+      error: "queued message was already claimed before it could be paused",
+    };
+  }
+
+  return {
+    status: "blocked_campaign_paused",
+    messageId,
+    reason: "Campaign sends are paused. This queued SMS was held until the campaign is resumed.",
+  };
 }
 
 function buildProviderRetryUpdate(

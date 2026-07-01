@@ -309,12 +309,18 @@ function TabButton({
       {stats && (
         <span
           className="flex items-center gap-1.5 text-[11px] font-bold"
-          title={`${stats.queued} queued · ${stats.sentOutToday} sent out today · ${stats.failedToday} failed today`}
+          title={`${stats.queued} queued${stats.paused > 0 ? ` · ${stats.paused} paused` : ""} · ${stats.sentOutToday} sent out today · ${stats.failedToday} failed today`}
           data-testid={`${testId}-stats`}
         >
           {/* Queued inherits the tab text color; sent/failed keep their
               status colors in both active and inactive states. */}
           <span>{stats.queued}</span>
+          {stats.paused > 0 ? (
+            <>
+              <span className="text-[#a8a29e]">·</span>
+              <span className="text-amber-600">{stats.paused}</span>
+            </>
+          ) : null}
           <span className="text-[#a8a29e]">·</span>
           <span className="text-emerald-600">{stats.sentOutToday}</span>
           <span className="text-[#a8a29e]">·</span>

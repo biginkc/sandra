@@ -155,6 +155,19 @@ function makeSupabaseStub(seed: SeedData) {
         negativeFilters.push({ key, value });
         return builder;
       },
+      not(key: string, operator: "in", value: string) {
+        if (operator !== "in") {
+          throw new Error("inbox detail test mock only supports not(..., 'in', value)");
+        }
+        const values = value
+          .replace(/^\(|\)$/g, "")
+          .split(",")
+          .map((item) => item.trim());
+        for (const item of values) {
+          negativeFilters.push({ key, value: item });
+        }
+        return builder;
+      },
       order(key: string, options: { ascending: boolean }) {
         orderBy = { key, ascending: options.ascending };
         return builder;
@@ -271,7 +284,7 @@ describe("fetchInboxDetail", () => {
     expect(detail?.agentContactId).toBeNull();
   });
 
-  it("ignores queued rows in the conversation", async () => {
+  it("ignores queued and paused rows in the conversation", async () => {
     const supabase = makeSupabaseStub({
       messages: [
         makeMessage({
@@ -282,6 +295,15 @@ describe("fetchInboxDetail", () => {
           status: "queued",
           body: "queued draft waiting for release",
           created_at: "2026-06-09T12:00:00.000Z",
+        }),
+        makeMessage({
+          id: "paused-draft",
+          contact_id: CONTACT_ID,
+          property_id: OLDER_PROPERTY_ID,
+          conversation_id: CONVERSATION_ID,
+          status: "paused",
+          body: "paused draft waiting for resume",
+          created_at: "2026-06-09T12:01:00.000Z",
         }),
         makeMessage({
           id: "live-thread",

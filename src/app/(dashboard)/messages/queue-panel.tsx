@@ -270,6 +270,10 @@ export function QueuePanel({
       case "blocked_quiet_hours":
         toast.warning("Blocked: quiet hours", { description: outcome.reason });
         return false;
+      case "blocked_campaign_paused":
+        toast.warning("Campaign paused", { description: outcome.reason });
+        setRows((prev) => prev.filter((r) => r.id !== row.id));
+        return false;
       case "provider_failed":
         toast.error("Provider error", { description: outcome.error });
         setRows((prev) => prev.filter((r) => r.id !== row.id));

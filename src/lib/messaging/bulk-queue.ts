@@ -434,7 +434,7 @@ export async function queueSmsBatch(
       scheduledFor,
     });
 
-    if (outcome.status === "queued") {
+    if (outcome.status === "queued" || outcome.status === "paused") {
       state.succeeded++;
       state.cumulativeOffsetMs = nextOffsetMs;
       state.dayBucketCount += 1;

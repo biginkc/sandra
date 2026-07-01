@@ -264,13 +264,13 @@ describe("createCampaign / archiveCampaign / unarchiveCampaign (integration)", (
     });
   });
 
-  it("rejects saved-campaign pacing below the custom floor except the 8s default", async () => {
+  it("rejects saved-campaign pacing outside the supported range", async () => {
     const email = uniqueCampaignEmail("campaign-create-invalid-pace");
     const userId = await createAuthUser(email);
     currentUserId = userId;
     currentEmail = email;
 
-    for (const paceSeconds of [7, 9]) {
+    for (const paceSeconds of [1, 601]) {
       const result = await createCampaign({
         name: `Too Fast Saved Campaign ${paceSeconds}`,
         body: "Checking in from Sandra",
@@ -286,7 +286,7 @@ describe("createCampaign / archiveCampaign / unarchiveCampaign (integration)", (
         error: {
           code: "VALIDATION",
           message:
-            "Saved campaign pacing must be 8 seconds or between 10 seconds and 10 minutes.",
+            "Saved campaign pacing must be between 2 seconds and 10 minutes.",
         },
       });
     }

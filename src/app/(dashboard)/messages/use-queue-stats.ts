@@ -9,6 +9,7 @@ const POLL_INTERVAL_MS = 30_000;
 function sameStats(a: QueueStats, b: QueueStats): boolean {
   return (
     a.queued === b.queued &&
+    a.paused === b.paused &&
     a.sentOutToday === b.sentOutToday &&
     a.failedToday === b.failedToday &&
     a.nextScheduledFor === b.nextScheduledFor &&

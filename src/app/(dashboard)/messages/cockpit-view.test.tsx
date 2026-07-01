@@ -42,6 +42,7 @@ vi.mock("./actions", () => ({
     ok: true,
     data: {
       queued: 0,
+      paused: 0,
       sentOutToday: 0,
       failedToday: 0,
       nextScheduledFor: null,
@@ -193,6 +194,7 @@ const baseProps = {
   currentUserId: "user-1",
   queueStats: {
     queued: 0,
+    paused: 0,
     sentOutToday: 0,
     failedToday: 0,
     nextScheduledFor: null,

@@ -14,6 +14,7 @@ export type CampaignOperationsStats = {
   campaignStatus: string;
   audience: number;
   queued: number;
+  paused: number;
   dueQueued: number;
   pending: number;
   sent: number;
@@ -58,6 +59,7 @@ export function CampaignOperationsPanel({ stats }: Props) {
         <CardContent className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
           <Metric label="Frozen audience" value={stats.audience} />
           <Metric label="Queued to send" value={stats.queued} />
+          <Metric label="Paused" value={stats.paused} />
           <Metric label="Due now" value={stats.dueQueued} />
           <Metric label="Pending provider result" value={stats.pending} />
           <Metric label="Handed to provider" value={stats.handedOff} />
@@ -128,6 +130,7 @@ function describeSetupStatus(stats: CampaignOperationsStats): string {
   }
   if (jobStatus === "failed") return "queue build failed";
   if (jobStatus === "partial") return "queue built with failures";
+  if (stats.campaignStatus === "paused") return "paused";
   if (stats.queued > 0) return "queue built; still sending";
   if (stats.handedOff + stats.failed > 0) return "send run finished";
   return formatJobStatus(stats.campaignStatus);

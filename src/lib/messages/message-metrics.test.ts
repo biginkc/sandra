@@ -235,7 +235,19 @@ describe("getOutboundSmsMetrics", () => {
         status: "queued",
         scheduled_for: "2026-06-30T19:00:00.000Z",
       }),
+      row({
+        status: "paused",
+        scheduled_for: null,
+      }),
       row({ status: "pending" }),
+      row({
+        campaign_id: "campaign-b",
+        status: "paused",
+      }),
+      row({
+        org_id: "org-b",
+        status: "paused",
+      }),
       row({
         campaign_id: "campaign-b",
         status: "sent",
@@ -264,8 +276,9 @@ describe("getOutboundSmsMetrics", () => {
     });
 
     expect(metrics).toMatchObject({
-      outboundRows: 9,
+      outboundRows: 10,
       queued: 2,
+      paused: 1,
       dueQueued: 1,
       pending: 1,
       sent: 1,

@@ -14,8 +14,9 @@ export function QueueStatsBanner({ stats }: { stats: QueueStats }) {
   return (
     <div className="bg-card mb-4 rounded-xl border p-4 text-sm">
       <div className="font-medium">
-        {stats.queued} queued · {stats.sentOutToday} sent out today ·{" "}
-        {stats.failedToday} failed today
+        {stats.queued} queued
+        {stats.paused > 0 ? ` · ${stats.paused} paused` : ""} ·{" "}
+        {stats.sentOutToday} sent out today · {stats.failedToday} failed today
       </div>
       <div className="text-muted-foreground mt-1">
         Next release: {formatNextRelease(stats.nextScheduledFor)} · drain ETA:{" "}
