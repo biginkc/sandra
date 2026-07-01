@@ -88,6 +88,10 @@ const webServerEnv: Record<string, string> = {
 
 export default defineConfig({
   testDir: "./e2e",
+  // Hold the cross-suite Postgres advisory lock for the whole run so e2e
+  // and integration runs (which truncate the same sandra-crm-test tables)
+  // serialize instead of wiping each other's fixtures mid-run.
+  globalSetup: "./e2e/global-setup.ts",
   // phase-1-5-uat.spec.ts is a PROD-ONLY screenshot UAT — it requires
   // PROD_EMAIL / PROD_PASSWORD and runs against sandra-sooty.vercel.app.
   // It must not run in the default CI suite (no creds → it throws in
