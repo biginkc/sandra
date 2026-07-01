@@ -227,7 +227,8 @@ async function validateProvidedCampaignForBulkSms(
   }
   if (
     requestedSenderNumber &&
-    normalizeSenderNumber(requestedSenderNumber) !== campaign.sender_number
+    normalizeSenderNumber(requestedSenderNumber) !==
+      normalizeSenderNumber(campaign.sender_number)
   ) {
     return {
       ok: false,

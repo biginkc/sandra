@@ -65,7 +65,9 @@ export function CampaignDeliveryCard({
       </CardContent>
       {!senderNumber ? (
         <div className="border-t px-6 py-4 text-xs text-muted-foreground">
-          Set a sending number by editing this campaign before launching.
+          No sending number set — this campaign cannot queue SMS. Archive it,
+          then create a campaign with the same name: it revives with the
+          Delivery setup you choose.
         </div>
       ) : null}
     </Card>
