@@ -598,10 +598,13 @@ async function loadCandidates(
   const baseQuery = () =>
     supabase
       .from("messages")
-      .select("conversation_id, property_id, created_at")
+      .select(
+        "conversation_id, property_id, created_at, properties!inner(deleted_at)",
+      )
       .eq("channel", "sms")
       .eq("contact_id", contactId)
       .not("property_id", "is", null)
+      .is("properties.deleted_at", null)
       .order("created_at", { ascending: false })
       .limit(50);
 
@@ -619,9 +622,10 @@ async function loadCandidates(
     }
     for (const row of result.data ?? []) {
       if (!row.property_id) continue;
-      // Dedup key, local to this scan: conversation id when stamped,
-      // else the property (contactId is fixed for the whole call).
-      const key = row.conversation_id ?? `prop:${row.property_id}`;
+      // The resolver must decide how many active properties could own the
+      // reply. A bad historical conversation id shared by multiple properties
+      // must stay ambiguous instead of collapsing to the latest row.
+      const key = row.property_id;
       if (!byKey.has(key)) {
         byKey.set(key, {
           conversationId: row.conversation_id,
