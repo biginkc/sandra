@@ -418,14 +418,18 @@ describe("runIngestion (integration)", () => {
   it("upserts repeated homeowners by phone — two rows, same phone → one contact", async () => {
     const { jobId, csvImportId } = await createImportJob("dealmachine", "Kansas City", 2);
 
+    // The line type must be mapped: the migration-080 hard rule drops
+    // any phone without one before the contact upsert, which would
+    // leave both rows phone-less and defeat the dedupe under test.
     const mapping: Mapping = {
       address: "Address",
       state: "State",
       homeowner_phone_1: "Phone",
+      homeowner_phone_1_type: "PhoneType",
     };
     const rows: RowData[] = [
-      { Address: "10 Oak Ln", State: "MO", Phone: "8165559999" },
-      { Address: "11 Pine Rd", State: "MO", Phone: "8165559999" },
+      { Address: "10 Oak Ln", State: "MO", Phone: "8165559999", PhoneType: "mobile" },
+      { Address: "11 Pine Rd", State: "MO", Phone: "8165559999", PhoneType: "mobile" },
     ];
 
     const summary = await runIngestion(supabase, {

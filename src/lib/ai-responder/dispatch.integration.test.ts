@@ -244,6 +244,19 @@ describe("dispatchAiResponse (integration)", () => {
     const { propertyId, contactId } = await seedLead({
       phone: "+18167554021",
     });
+    // ai_response_claims.inbound_message_id has an FK to messages(id)
+    // (migration 20260624220000), so the inbound row must exist — as it
+    // always does in production, where the webhook inserts it first.
+    const inboundMessageId = "66666666-6666-4666-8666-666666666666";
+    await supabase.from("messages").insert({
+      id: inboundMessageId,
+      channel: "sms",
+      direction: "inbound",
+      status: "received",
+      property_id: propertyId,
+      contact_id: contactId,
+      body: "Who is this?",
+    });
     let claudeCalls = 0;
     const trackingAnthropic: AnthropicLike = {
       messages: {
@@ -260,7 +273,7 @@ describe("dispatchAiResponse (integration)", () => {
         propertyId,
         contactId,
         inboundBody: "Who is this?",
-        inboundMessageId: "66666666-6666-4666-8666-666666666666",
+        inboundMessageId,
       },
       { anthropic: trackingAnthropic },
     );
@@ -279,7 +292,7 @@ describe("dispatchAiResponse (integration)", () => {
     expect(outbound?.body).toBe(IDENTITY_REPLY_BODY);
     expect(outbound?.metadata).toMatchObject({
       generated_by: "ai_responder_v1",
-      inbound_message_id: "66666666-6666-4666-8666-666666666666",
+      inbound_message_id: inboundMessageId,
       confidence: 1,
       sentiment: "neutral",
       turn: 1,
@@ -331,6 +344,17 @@ describe("dispatchAiResponse (integration)", () => {
       phone: "+18167554012",
     });
     const inboundMessageId = "55555555-5555-4555-8555-555555555555";
+    // Real inbound row — the claim table's FK to messages(id) rejects
+    // fabricated ids (migration 20260624220000).
+    await supabase.from("messages").insert({
+      id: inboundMessageId,
+      channel: "sms",
+      direction: "inbound",
+      status: "received",
+      property_id: propertyId,
+      contact_id: contactId,
+      body: "sounds good",
+    });
 
     const firstOutcome = await dispatchAiResponse(
       supabase,
