@@ -57,6 +57,18 @@ type BulkSmsJobFailureArgs = {
   total: number;
 };
 
+type CampaignCadenceRepairRpcClient = {
+  rpc(
+    name: "apply_campaign_cadence_reschedule",
+    args: {
+      p_campaign_id: string;
+      p_pace_seconds: number;
+      p_start_after_seconds: number;
+      p_operator_confirmed: boolean;
+    },
+  ): Promise<{ error: { message: string } | null }>;
+};
+
 async function completeCampaign(
   campaignId: string,
 ): Promise<void> {
@@ -216,6 +228,158 @@ async function failBulkSmsLoadStep(args: {
     .eq("id", args.jobId);
 }
 
+function readPaceSeconds(value: unknown): number | null {
+  return typeof value === "number" && Number.isInteger(value) && value > 0
+    ? value
+    : null;
+}
+
+function readJobPaceSeconds(inputParams: unknown): number | null {
+  if (
+    typeof inputParams !== "object" ||
+    inputParams === null ||
+    !("opts" in inputParams)
+  ) {
+    return null;
+  }
+  const opts = inputParams.opts;
+  if (typeof opts !== "object" || opts === null || !("paceSeconds" in opts)) {
+    return null;
+  }
+  return readPaceSeconds(opts.paceSeconds);
+}
+
+async function readCurrentCampaignPaceSeconds(
+  supabase: ReturnType<typeof createAdminClient>,
+  jobId: string,
+  campaignId: string,
+): Promise<number | null> {
+  const { data: job, error: jobError } = await supabase
+    .from("jobs")
+    .select("input_params")
+    .eq("id", jobId)
+    .maybeSingle();
+
+  if (jobError) {
+    throw new Error(
+      `bulk-sms workflow: failed to refresh job ${jobId} pace: ${jobError.message}`,
+    );
+  }
+
+  const { data: campaign, error } = await supabase
+    .from("campaigns")
+    .select("pace_seconds")
+    .eq("id", campaignId)
+    .maybeSingle();
+
+  if (error) {
+    throw new Error(
+      `bulk-sms workflow: failed to refresh campaign ${campaignId} pace: ${error.message}`,
+    );
+  }
+
+  return (
+    readJobPaceSeconds(job?.input_params) ??
+    readPaceSeconds(campaign?.pace_seconds) ??
+    null
+  );
+}
+
+export async function refreshCampaignScheduleForChunk(
+  supabase: ReturnType<typeof createAdminClient>,
+  jobId: string,
+  propertyIds: string[],
+  opts: ResolvedBulkSmsQueueOpts,
+  state: BulkSmsScheduleState,
+): Promise<{
+  opts: ResolvedBulkSmsQueueOpts;
+  state: BulkSmsScheduleState;
+}> {
+  if (!opts.campaignId) return { opts, state };
+
+  const refreshedPaceSeconds = await readCurrentCampaignPaceSeconds(
+    supabase,
+    jobId,
+    opts.campaignId,
+  );
+  const refreshedOpts = refreshedPaceSeconds !== null ? {
+    ...opts,
+    paceSeconds: refreshedPaceSeconds,
+  } : opts;
+
+  const { data: queuedRows, error: latestQueuedError } = await supabase
+    .from("messages")
+    .select("property_id,scheduled_for")
+    .eq("campaign_id", opts.campaignId)
+    .eq("channel", "sms")
+    .eq("direction", "outbound")
+    .eq("status", "queued")
+    .not("scheduled_for", "is", null)
+    .order("scheduled_for", { ascending: false })
+    .limit(Math.max(propertyIds.length + 1, 25));
+
+  if (latestQueuedError) {
+    throw new Error(
+      `bulk-sms workflow: failed to refresh campaign ${opts.campaignId} queue horizon: ${latestQueuedError.message}`,
+    );
+  }
+
+  const currentChunkPropertyIds = new Set(propertyIds);
+  const latestQueued = (queuedRows ?? []).find((row) => {
+    const propertyId = row.property_id;
+    return typeof propertyId !== "string" || !currentChunkPropertyIds.has(propertyId);
+  });
+  const lastQueuedAtMs = Date.parse(latestQueued?.scheduled_for ?? "");
+  if (!Number.isFinite(lastQueuedAtMs)) {
+    return { opts: refreshedOpts, state };
+  }
+
+  return {
+    opts: refreshedOpts,
+    state: {
+      ...state,
+      cumulativeOffsetMs: 0,
+      dayBucketStartMs: lastQueuedAtMs,
+      dayBucketCount: 1,
+    },
+  };
+}
+
+export async function repairCampaignQueueCadenceAfterChunk(
+  supabase: ReturnType<typeof createAdminClient>,
+  jobId: string,
+  optsUsedForChunk: ResolvedBulkSmsQueueOpts,
+): Promise<void> {
+  if (!optsUsedForChunk.campaignId) return;
+
+  const currentPaceSeconds = await readCurrentCampaignPaceSeconds(
+    supabase,
+    jobId,
+    optsUsedForChunk.campaignId,
+  );
+  if (
+    currentPaceSeconds === null ||
+    currentPaceSeconds === optsUsedForChunk.paceSeconds
+  ) {
+    return;
+  }
+
+  const { error } = await (
+    supabase as unknown as CampaignCadenceRepairRpcClient
+  ).rpc("apply_campaign_cadence_reschedule", {
+    p_campaign_id: optsUsedForChunk.campaignId,
+    p_pace_seconds: currentPaceSeconds,
+    p_start_after_seconds: 300,
+    p_operator_confirmed: true,
+  });
+
+  if (error) {
+    throw new Error(
+      `bulk-sms workflow: failed to repair campaign ${optsUsedForChunk.campaignId} cadence after chunk: ${error.message}`,
+    );
+  }
+}
+
 /**
  * STEP 2 — Queue one slice. Runs under the admin client (same privilege
  * level as the cron releaser that will transmit these messages); the
@@ -232,11 +396,23 @@ async function bulkSmsChunkStep(args: {
 
   const adminClient = createAdminClient();
   const { queueSmsBatch } = await import("@/lib/messaging/bulk-queue");
+  const refreshed = await refreshCampaignScheduleForChunk(
+    adminClient,
+    args.jobId,
+    args.propertyIds,
+    args.opts,
+    args.state,
+  );
   const state = await queueSmsBatch(adminClient, {
     propertyIds: args.propertyIds,
-    opts: args.opts,
-    state: args.state,
+    opts: refreshed.opts,
+    state: refreshed.state,
   });
+  await repairCampaignQueueCadenceAfterChunk(
+    adminClient,
+    args.jobId,
+    refreshed.opts,
+  );
 
   await adminClient
     .from("jobs")
