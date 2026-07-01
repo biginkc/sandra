@@ -3,6 +3,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resetMockState } from "@/lib/messaging/providers/mock";
 import { EMPTY_AUDIENCE_VALIDATION_MESSAGE } from "@/lib/prospects/effective-audience";
 import { createTestClient } from "@tests/integration/client";
+import {
+  MOCK_PROVIDER_CAMPAIGN_ID,
+  MOCK_SENDER_PRIMARY,
+  MOCK_SENDER_SECONDARY,
+  seedProviderCampaignCatalog,
+  seedSenderCatalog,
+} from "@tests/integration/delivery";
 import { resetTenantTables } from "@tests/integration/reset";
 
 const testClient = createTestClient();
@@ -16,7 +23,7 @@ vi.mock("next/server", async () => {
   const actual = await vi.importActual<typeof import("next/server")>(
     "next/server",
   );
-  return { ...actual, after: (_fn: () => unknown) => {} };
+  return { ...actual, after: () => {} };
 });
 
 let currentUserId: string | null = null;
@@ -36,14 +43,14 @@ vi.spyOn(testClient.auth, "getUser").mockImplementation(async () =>
 const SAFE_NOW = new Date("2026-06-14T18:00:00Z");
 const createdAuthUsers: string[] = [];
 
-// eslint-disable-next-line import/first
+ 
 import {
   archiveCampaign,
   createCampaign,
   launchCampaign,
   unarchiveCampaign,
 } from "./actions";
-// eslint-disable-next-line import/first
+ 
 import { bulkSmsWorkflow } from "@/workflows/bulk-sms";
 
 function sortIds(ids?: Array<string | null | undefined>): string[] {
@@ -147,7 +154,19 @@ async function seedCampaign(args: {
   skipIfContacted?: boolean;
   status?: "active" | "launching" | "paused" | "completed" | "archived";
   templateCategory?: string | null;
+  /** Delivery snapshot — defaults to the mock provider's primary sender.
+   *  Pass null explicitly to seed a legacy (pre-Delivery) campaign. */
+  senderNumber?: string | null;
+  senderProvider?: string | null;
 }): Promise<string> {
+  const senderNumber =
+    args.senderNumber === undefined ? MOCK_SENDER_PRIMARY : args.senderNumber;
+  const senderProvider =
+    args.senderProvider === undefined
+      ? senderNumber === null
+        ? null
+        : "mock"
+      : args.senderProvider;
   const { data, error } = await testClient
     .from("campaigns")
     .insert({
@@ -160,6 +179,8 @@ async function seedCampaign(args: {
       status: args.status ?? "active",
       template_category: args.templateCategory ?? null,
       archived_at: args.archivedAt ?? null,
+      sender_number: senderNumber,
+      sender_provider: senderProvider,
     } as never)
     .select("id")
     .single();
@@ -177,6 +198,14 @@ describe("createCampaign / archiveCampaign / unarchiveCampaign (integration)", (
     currentEmail = null;
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(SAFE_NOW);
+    // Delivery setup: createCampaign validates senderNumber against the
+    // synced catalog, which the reset just truncated.
+    const orgId = await getOrgId();
+    await seedSenderCatalog(testClient, orgId, [
+      MOCK_SENDER_PRIMARY,
+      MOCK_SENDER_SECONDARY,
+    ]);
+    await seedProviderCampaignCatalog(testClient, orgId);
   });
 
   afterEach(async () => {
@@ -197,6 +226,8 @@ describe("createCampaign / archiveCampaign / unarchiveCampaign (integration)", (
     const result = await createCampaign({
       name: "Vacant June",
       body: "Checking in from Sandra",
+      senderNumber: MOCK_SENDER_PRIMARY,
+      providerCampaignExternalId: MOCK_PROVIDER_CAMPAIGN_ID,
       templateCategory: "Opener - Homeowner",
       paceSeconds: 45,
       skipIfContacted: true,
@@ -211,7 +242,7 @@ describe("createCampaign / archiveCampaign / unarchiveCampaign (integration)", (
     const { data: row } = await testClient
       .from("campaigns")
       .select(
-        "org_id, name, channel, body, template_category, pace_seconds, skip_if_contacted, created_by, archived_at, audience_snapshot",
+        "org_id, name, channel, body, template_category, pace_seconds, skip_if_contacted, created_by, archived_at, audience_snapshot, sender_provider, sender_number, provider_campaign_external_id, provider_campaign_name",
       )
       .eq("id", result.data.id)
       .single();
@@ -226,6 +257,10 @@ describe("createCampaign / archiveCampaign / unarchiveCampaign (integration)", (
       skip_if_contacted: true,
       created_by: userId,
       archived_at: null,
+      sender_provider: "mock",
+      sender_number: MOCK_SENDER_PRIMARY,
+      provider_campaign_external_id: MOCK_PROVIDER_CAMPAIGN_ID,
+      provider_campaign_name: `Catalog campaign ${MOCK_PROVIDER_CAMPAIGN_ID}`,
     });
     expect(row?.audience_snapshot).toEqual({
       search: "oak",
@@ -243,6 +278,7 @@ describe("createCampaign / archiveCampaign / unarchiveCampaign (integration)", (
     const result = await createCampaign({
       name: "Default Pace",
       body: "Checking in from Sandra",
+      senderNumber: MOCK_SENDER_PRIMARY,
       paceSeconds: null,
       audience: {
         search: "oak",
@@ -274,6 +310,7 @@ describe("createCampaign / archiveCampaign / unarchiveCampaign (integration)", (
       const result = await createCampaign({
         name: `Too Fast Saved Campaign ${paceSeconds}`,
         body: "Checking in from Sandra",
+        senderNumber: MOCK_SENDER_PRIMARY,
         paceSeconds,
         audience: {
           search: "oak",
@@ -301,6 +338,7 @@ describe("createCampaign / archiveCampaign / unarchiveCampaign (integration)", (
     const result = await createCampaign({
       name: "Empty Audience",
       body: "Should never save",
+      senderNumber: MOCK_SENDER_PRIMARY,
       paceSeconds: 18,
       audience: {
         search: null,
@@ -339,6 +377,7 @@ describe("createCampaign / archiveCampaign / unarchiveCampaign (integration)", (
     const first = await createCampaign({
       name: "Revive Me",
       body: "First body",
+      senderNumber: MOCK_SENDER_PRIMARY,
       paceSeconds: 18,
       skipIfContacted: false,
       audience: {
@@ -355,6 +394,7 @@ describe("createCampaign / archiveCampaign / unarchiveCampaign (integration)", (
     const revived = await createCampaign({
       name: "revive me",
       body: "Second body",
+      senderNumber: MOCK_SENDER_PRIMARY,
       paceSeconds: 30,
       skipIfContacted: true,
       audience: {
@@ -420,6 +460,7 @@ describe("createCampaign / archiveCampaign / unarchiveCampaign (integration)", (
     const revived = await createCampaign({
       name: "deterministic revive",
       body: "Fresh body",
+      senderNumber: MOCK_SENDER_PRIMARY,
       paceSeconds: 30,
       skipIfContacted: true,
       audience: {
@@ -491,6 +532,7 @@ describe("createCampaign / archiveCampaign / unarchiveCampaign (integration)", (
     const result = await createCampaign({
       name: "already live",
       body: "Should fail",
+      senderNumber: MOCK_SENDER_PRIMARY,
       paceSeconds: 18,
       audience: {
         search: "oak",
@@ -516,6 +558,7 @@ describe("createCampaign / archiveCampaign / unarchiveCampaign (integration)", (
     const created = await createCampaign({
       name: "Archive Me",
       body: "Body",
+      senderNumber: MOCK_SENDER_PRIMARY,
       paceSeconds: 18,
       skipIfContacted: false,
       audience: {
@@ -547,6 +590,168 @@ describe("createCampaign / archiveCampaign / unarchiveCampaign (integration)", (
       .single());
     expect(row?.status).toBe("active");
     expect(row?.archived_at).toBeNull();
+  });
+
+  it("rejects create with SENDER_NOT_APPROVED when the sender is not in the synced catalog", async () => {
+    const email = uniqueCampaignEmail("campaign-unknown-sender");
+    const userId = await createAuthUser(email);
+    currentUserId = userId;
+    currentEmail = email;
+
+    const result = await createCampaign({
+      name: "Unknown Sender Campaign",
+      body: "Should never save",
+      senderNumber: "+15550001111",
+      paceSeconds: 18,
+      audience: {
+        search: null,
+        blockStack: [{ id: "vacancy-sender", kind: "vacancy", tri: "yes" }],
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe("SENDER_NOT_APPROVED");
+
+    const { count } = await testClient
+      .from("campaigns")
+      .select("*", { count: "exact", head: true });
+    expect(count).toBe(0);
+  });
+
+  it("rejects create with PROVIDER_CAMPAIGN_NOT_FOUND for a provider campaign missing from the catalog", async () => {
+    const email = uniqueCampaignEmail("campaign-bad-provider-campaign");
+    const userId = await createAuthUser(email);
+    currentUserId = userId;
+    currentEmail = email;
+
+    const result = await createCampaign({
+      name: "Bad Provider Campaign",
+      body: "Should never save",
+      senderNumber: MOCK_SENDER_PRIMARY,
+      providerCampaignExternalId: "not-a-synced-provider-campaign",
+      paceSeconds: 18,
+      audience: {
+        search: null,
+        blockStack: [{ id: "vacancy-pc", kind: "vacancy", tri: "yes" }],
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe("PROVIDER_CAMPAIGN_NOT_FOUND");
+  });
+
+  it("locks the sender on a revived campaign that already queued messages (SENDER_LOCKED)", async () => {
+    const orgId = await getOrgId();
+    const email = uniqueCampaignEmail("campaign-sender-locked");
+    const userId = await createAuthUser(email);
+    currentUserId = userId;
+    currentEmail = email;
+
+    const created = await createCampaign({
+      name: "Locked Sender Revive",
+      body: "First body",
+      senderNumber: MOCK_SENDER_PRIMARY,
+      paceSeconds: 18,
+      audience: {
+        search: null,
+        blockStack: [{ id: "vacancy-lock", kind: "vacancy", tri: "yes" }],
+      },
+    });
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+
+    // The campaign has outbound rows → the stored sender is immutable.
+    const { error: msgError } = await testClient.from("messages").insert({
+      org_id: orgId,
+      channel: "sms",
+      direction: "outbound",
+      status: "sent",
+      campaign_id: created.data.id,
+      from_address: MOCK_SENDER_PRIMARY,
+      to_address: "+18165550777",
+      body: "locked sender outbound",
+    });
+    expect(msgError).toBeNull();
+
+    const archived = await archiveCampaign(created.data.id);
+    expect(archived.ok).toBe(true);
+
+    const revived = await createCampaign({
+      name: "locked sender revive",
+      body: "Second body",
+      senderNumber: MOCK_SENDER_SECONDARY,
+      paceSeconds: 18,
+      audience: {
+        search: null,
+        blockStack: [{ id: "vacancy-lock-2", kind: "vacancy", tri: "yes" }],
+      },
+    });
+
+    expect(revived.ok).toBe(false);
+    if (revived.ok) return;
+    expect(revived.error.code).toBe("SENDER_LOCKED");
+    expect(revived.error.message).toContain(MOCK_SENDER_PRIMARY);
+
+    // The archived campaign stays archived with its original sender.
+    const { data: row } = await testClient
+      .from("campaigns")
+      .select("status, sender_number")
+      .eq("id", created.data.id)
+      .single();
+    expect(row).toMatchObject({
+      status: "archived",
+      sender_number: MOCK_SENDER_PRIMARY,
+    });
+  });
+
+  it("restamps the sender when reviving an archived campaign with no outbound messages", async () => {
+    const email = uniqueCampaignEmail("campaign-sender-restamp");
+    const userId = await createAuthUser(email);
+    currentUserId = userId;
+    currentEmail = email;
+
+    const created = await createCampaign({
+      name: "Unlocked Sender Revive",
+      body: "First body",
+      senderNumber: MOCK_SENDER_PRIMARY,
+      paceSeconds: 18,
+      audience: {
+        search: null,
+        blockStack: [{ id: "vacancy-restamp", kind: "vacancy", tri: "yes" }],
+      },
+    });
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+
+    const archived = await archiveCampaign(created.data.id);
+    expect(archived.ok).toBe(true);
+
+    const revived = await createCampaign({
+      name: "unlocked sender revive",
+      body: "Second body",
+      senderNumber: MOCK_SENDER_SECONDARY,
+      paceSeconds: 18,
+      audience: {
+        search: null,
+        blockStack: [{ id: "vacancy-restamp-2", kind: "vacancy", tri: "yes" }],
+      },
+    });
+    expect(revived.ok).toBe(true);
+    if (!revived.ok) return;
+    expect(revived.data.id).toBe(created.data.id);
+
+    const { data: row } = await testClient
+      .from("campaigns")
+      .select("status, sender_provider, sender_number")
+      .eq("id", created.data.id)
+      .single();
+    expect(row).toMatchObject({
+      status: "active",
+      sender_provider: "mock",
+      sender_number: MOCK_SENDER_SECONDARY,
+    });
   });
 
   it("rejects archiving a launching campaign without flipping it to archived", async () => {
@@ -591,6 +796,12 @@ describe("launchCampaign (integration)", () => {
     currentEmail = null;
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(SAFE_NOW);
+    // Campaign launches queue from the campaign's stored sender; the
+    // sender must exist in the synced catalog for the release guard.
+    await seedSenderCatalog(testClient, await getOrgId(), [
+      MOCK_SENDER_PRIMARY,
+      MOCK_SENDER_SECONDARY,
+    ]);
   });
 
   afterEach(async () => {
@@ -664,7 +875,9 @@ describe("launchCampaign (integration)", () => {
 
     const { data: queuedRows } = await testClient
       .from("messages")
-      .select("property_id, contact_id, campaign_id, status, body, scheduled_for")
+      .select(
+        "property_id, contact_id, campaign_id, status, body, scheduled_for, from_address",
+      )
       .eq("campaign_id", campaignId)
       .order("scheduled_for", { ascending: true });
     expect(queuedRows).toHaveLength(2);
@@ -673,6 +886,10 @@ describe("launchCampaign (integration)", () => {
     );
     expect(queuedRows?.every((row) => row.body === "Campaign hello")).toBe(true);
     expect(queuedRows?.every((row) => row.status === "queued")).toBe(true);
+    // Every queued row sends from the campaign's stored Delivery sender.
+    expect(
+      queuedRows?.every((row) => row.from_address === MOCK_SENDER_PRIMARY),
+    ).toBe(true);
     expect(queuedRows?.every((row) => row.campaign_id === campaignId)).toBe(true);
     expect(new Date(queuedRows![0].scheduled_for!).getTime()).toBe(
       SAFE_NOW.getTime(),
@@ -712,6 +929,57 @@ describe("launchCampaign (integration)", () => {
       .select("*", { count: "exact", head: true })
       .eq("campaign_id", campaignId);
     expect(messagesAfterRelaunch).toBe(2);
+  });
+
+  it("rejects launch with CAMPAIGN_SENDER_REQUIRED when the campaign has no stored sender", async () => {
+    const orgId = await getOrgId();
+    const email = uniqueCampaignEmail("campaign-launch-no-sender");
+    const userId = await createAuthUser(email);
+    currentUserId = userId;
+    currentEmail = email;
+
+    const tagId = await seedTag(orgId, "No Sender Launch");
+    await seedTaggedLead({
+      orgId,
+      tagId,
+      address: "1 No Sender Way",
+      phone: "+18165551041",
+    });
+
+    const campaignId = await seedCampaign({
+      orgId,
+      audienceSnapshot: {
+        search: null,
+        blockStack: [
+          {
+            id: "tag-no-sender",
+            kind: "tag",
+            combinator: "any",
+            values: [tagId],
+          },
+        ],
+      },
+      body: "Should never queue",
+      senderNumber: null,
+    });
+
+    const launch = await launchCampaign(campaignId);
+    expect(launch.ok).toBe(false);
+    if (launch.ok) return;
+    expect(launch.error.code).toBe("CAMPAIGN_SENDER_REQUIRED");
+
+    const { count: messageCount } = await testClient
+      .from("messages")
+      .select("*", { count: "exact", head: true })
+      .eq("campaign_id", campaignId);
+    expect(messageCount).toBe(0);
+
+    const { data: campaignRow } = await testClient
+      .from("campaigns")
+      .select("status")
+      .eq("id", campaignId)
+      .single();
+    expect(campaignRow?.status).toBe("active");
   });
 
   it("rejects a concurrent second launch and keeps one outbound message per property", async () => {

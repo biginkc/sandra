@@ -7,8 +7,16 @@ import { EMPTY_AUDIENCE_VALIDATION_MESSAGE } from "@/lib/prospects/effective-aud
 
 import { CreateCampaignForm } from "./create-campaign-form";
 
-const { createCampaign, routerRefresh, callAction } = vi.hoisted(() => ({
+const {
+  createCampaign,
+  listDeliveryOptions,
+  refreshDeliveryCatalog,
+  routerRefresh,
+  callAction,
+} = vi.hoisted(() => ({
   createCampaign: vi.fn(),
+  listDeliveryOptions: vi.fn(),
+  refreshDeliveryCatalog: vi.fn(),
   routerRefresh: vi.fn(),
   callAction: vi.fn((promise: Promise<unknown>) => promise),
 }));
@@ -26,6 +34,9 @@ vi.mock("next/navigation", () => ({
 
 vi.mock("./actions", () => ({
   createCampaign: (...args: unknown[]) => createCampaign(...args),
+  listDeliveryOptions: (...args: unknown[]) => listDeliveryOptions(...args),
+  refreshDeliveryCatalog: (...args: unknown[]) =>
+    refreshDeliveryCatalog(...args),
 }));
 
 vi.mock("@/lib/errors/call-action", () => ({
@@ -53,6 +64,31 @@ const blockOptions: BlockOptions = {
   cassStatuses: ["verified", "unverified"],
 };
 
+const deliveryCatalog = {
+  provider: "test-provider",
+  senders: [
+    {
+      phoneE164: "+15551234567",
+      provider: "test-provider",
+      status: "active",
+      messagingStatus: "approved",
+      lastSyncedAt: "2026-06-30T12:00:00.000Z",
+    },
+  ],
+  providerCampaigns: [
+    {
+      externalId: "pc-1",
+      provider: "test-provider",
+      name: "BMH Outreach",
+      brand: null,
+      useCase: null,
+      status: "active",
+      lastSyncedAt: "2026-06-30T12:00:00.000Z",
+    },
+  ],
+  lastSyncedAt: "2026-06-30T12:00:00.000Z",
+};
+
 function renderForm() {
   return render(
     <CreateCampaignForm
@@ -75,11 +111,32 @@ async function addNoOpVacancyFilter(user: ReturnType<typeof userEvent.setup>) {
   await screen.findByText("Vacancy");
 }
 
+async function selectSender(user: ReturnType<typeof userEvent.setup>) {
+  await screen.findByRole("option", { name: "+15551234567" });
+  await user.selectOptions(
+    screen.getByLabelText(/sending number/i),
+    "+15551234567",
+  );
+}
+
 beforeEach(() => {
   createCampaign.mockReset();
+  listDeliveryOptions.mockReset();
+  refreshDeliveryCatalog.mockReset();
   routerRefresh.mockReset();
   callAction.mockClear();
   callAction.mockImplementation((promise: Promise<unknown>) => promise);
+
+  listDeliveryOptions.mockResolvedValue({ ok: true, data: deliveryCatalog });
+  refreshDeliveryCatalog.mockResolvedValue({
+    ok: true,
+    data: {
+      supported: true,
+      provider: "test-provider",
+      senderCount: 1,
+      providerCampaignCount: 1,
+    },
+  });
 });
 
 afterEach(() => {
@@ -131,6 +188,7 @@ describe("<CreateCampaignForm />", () => {
       "oak",
     );
     await addVacancyAudience(user);
+    await selectSender(user);
 
     await user.click(
       screen.getByRole("button", { name: /create campaign/i }),
@@ -143,6 +201,8 @@ describe("<CreateCampaignForm />", () => {
       templateCategory: null,
       paceSeconds: 45,
       skipIfContacted: true,
+      senderNumber: "+15551234567",
+      providerCampaignExternalId: null,
       audience: {
         search: "oak",
         blockStack: [
@@ -198,5 +258,74 @@ describe("<CreateCampaignForm />", () => {
     expect(
       screen.getByText(EMPTY_AUDIENCE_VALIDATION_MESSAGE),
     ).toBeInTheDocument();
+  });
+
+  it("blocks submit with a delivery error when no sender is selected", async () => {
+    const user = userEvent.setup();
+    createCampaign.mockResolvedValue({ ok: true, data: { id: "camp-5" } });
+
+    renderForm();
+
+    await user.type(screen.getByLabelText(/^name$/i), "No Sender");
+    await user.type(screen.getByLabelText(/message body/i), "Hello there");
+    await addVacancyAudience(user);
+    // Catalog loaded but no sender chosen.
+    await screen.findByRole("option", { name: "+15551234567" });
+
+    await user.click(
+      screen.getByRole("button", { name: /create campaign/i }),
+    );
+
+    expect(createCampaign).not.toHaveBeenCalled();
+    expect(
+      screen.getByText("Choose a sending number."),
+    ).toBeInTheDocument();
+  });
+
+  it("passes the selected sender and provider campaign to createCampaign", async () => {
+    const user = userEvent.setup();
+    createCampaign.mockResolvedValue({ ok: true, data: { id: "camp-6" } });
+
+    renderForm();
+
+    await user.type(screen.getByLabelText(/^name$/i), "With Delivery");
+    await user.type(screen.getByLabelText(/message body/i), "Hello there");
+    await addVacancyAudience(user);
+    await selectSender(user);
+    await user.selectOptions(
+      screen.getByLabelText(/provider campaign \(optional\)/i),
+      "pc-1",
+    );
+
+    await user.click(
+      screen.getByRole("button", { name: /create campaign/i }),
+    );
+
+    await waitFor(() => expect(createCampaign).toHaveBeenCalledTimes(1));
+    expect(createCampaign).toHaveBeenCalledWith(
+      expect.objectContaining({
+        senderNumber: "+15551234567",
+        providerCampaignExternalId: "pc-1",
+      }),
+    );
+  });
+
+  it("renders the empty-catalog sync hint with a Sync button when no senders are synced", async () => {
+    listDeliveryOptions.mockResolvedValue({
+      ok: true,
+      data: {
+        provider: "test-provider",
+        senders: [],
+        providerCampaigns: [],
+        lastSyncedAt: null,
+      },
+    });
+
+    renderForm();
+
+    expect(
+      await screen.findByText(/No approved sending numbers synced yet/i),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Sync" })).toBeInTheDocument();
   });
 });

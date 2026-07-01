@@ -13,6 +13,10 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { getConsentState } from "@/lib/messaging/consent";
+import {
+  loadCampaignDeliverySettings,
+  normalizeSenderNumber,
+} from "@/lib/messaging/delivery";
 import { sendSmsToContact } from "@/lib/messaging/send";
 import { pickFromPool } from "@/lib/templates/pool";
 import { loadTemplateVars } from "@/lib/sequences/template-vars";
@@ -41,6 +45,15 @@ export type BulkSmsQueueBaseOpts = {
   pacingProfile?: SmsPacingProfile;
   skipIfContacted?: boolean;
   jitterPct?: number;
+  /**
+   * Delivery setup: E.164 sending number from the synced approved sender
+   * catalog. Required when the call creates the campaign (ad-hoc bulk
+   * SMS); for an existing campaign it must match the stored sender —
+   * queued rows always send from the campaign's locked sender.
+   */
+  senderNumber?: string;
+  /** Optional Delivery metadata: synced provider campaign external id. */
+  providerCampaignExternalId?: string | null;
   /**
    * Queue to contacts whose best available SMS phone is 'unknown' (never
    * classified). Default false — bulk SMS targets confirmed mobiles
@@ -125,6 +138,19 @@ export async function queueSmsBatch(
   }
   const paceSeconds = paceResult.paceSeconds;
   const jitterPct = opts.jitterPct ?? 0;
+
+  // Shared sender-stamping path: every campaign queue entry point
+  // (campaign launch, bulk SMS sync path, chunked workflow) funnels
+  // through here, so the campaign's Delivery sender is resolved once and
+  // stamped onto every queued row. A campaign with no sender cannot
+  // queue — Delivery setup is required before launch.
+  const delivery = await loadCampaignDeliverySettings(client, opts.campaignId);
+  if (!delivery.senderNumber) {
+    throw new Error(
+      "Campaign has no sending number. Set Delivery (sending number) before queueing SMS.",
+    );
+  }
+  const senderNumber = normalizeSenderNumber(delivery.senderNumber);
 
   // Fetch properties in chunks — Supabase PostgREST rejects large IN
   // clauses (URL length limit, ~8 KB) so we split into batches of 250.
@@ -429,6 +455,7 @@ export async function queueSmsBatch(
       contactId,
       propertyId,
       body,
+      from: senderNumber,
       campaignId: opts.campaignId,
       queueOnly: true,
       scheduledFor,

@@ -7,12 +7,16 @@ const {
   listSmsTemplateCategories,
   countAlreadyContacted,
   assessBulkSmsAudience,
+  listDeliveryOptions,
+  refreshDeliveryCatalog,
   routerPush,
 } = vi.hoisted(() => ({
   bulkQueueSms: vi.fn(),
   listSmsTemplateCategories: vi.fn(),
   countAlreadyContacted: vi.fn(),
   assessBulkSmsAudience: vi.fn(),
+  listDeliveryOptions: vi.fn(),
+  refreshDeliveryCatalog: vi.fn(),
   routerPush: vi.fn(),
 }));
 
@@ -21,6 +25,11 @@ vi.mock("./actions", () => ({
   listSmsTemplateCategories,
   countAlreadyContacted,
   assessBulkSmsAudience,
+}));
+
+vi.mock("../campaigns/actions", () => ({
+  listDeliveryOptions,
+  refreshDeliveryCatalog,
 }));
 
 vi.mock("sonner", () => ({
@@ -67,6 +76,39 @@ async function fillCampaignName(
   );
 }
 
+const deliveryCatalog = {
+  provider: "test-provider",
+  senders: [
+    {
+      phoneE164: "+15551234567",
+      provider: "test-provider",
+      status: "active",
+      messagingStatus: "approved",
+      lastSyncedAt: "2026-06-30T12:00:00.000Z",
+    },
+  ],
+  providerCampaigns: [
+    {
+      externalId: "pc-1",
+      provider: "test-provider",
+      name: "BMH Outreach",
+      brand: null,
+      useCase: null,
+      status: "active",
+      lastSyncedAt: "2026-06-30T12:00:00.000Z",
+    },
+  ],
+  lastSyncedAt: "2026-06-30T12:00:00.000Z",
+};
+
+async function selectSender(user: ReturnType<typeof userEvent.setup>) {
+  await screen.findByRole("option", { name: "+15551234567" });
+  await user.selectOptions(
+    screen.getByLabelText(/sending number/i),
+    "+15551234567",
+  );
+}
+
 beforeEach(() => {
   bulkQueueSms.mockReset();
   listSmsTemplateCategories.mockReset();
@@ -81,6 +123,18 @@ beforeEach(() => {
     ],
   });
   countAlreadyContacted.mockResolvedValue({ ok: true, data: 0 });
+  listDeliveryOptions.mockReset();
+  refreshDeliveryCatalog.mockReset();
+  listDeliveryOptions.mockResolvedValue({ ok: true, data: deliveryCatalog });
+  refreshDeliveryCatalog.mockResolvedValue({
+    ok: true,
+    data: {
+      supported: true,
+      provider: "test-provider",
+      senderCount: 1,
+      providerCampaignCount: 1,
+    },
+  });
   // All-mobile by default so the textable count matches the selection
   // size and pre-existing label/drain assertions hold unchanged.
   assessBulkSmsAudience.mockReset();
@@ -178,6 +232,7 @@ describe("<BulkSmsModal /> pacing + skip-contacted (260504-tgq)", () => {
     await user.type(paceInput, "5");
     await user.selectOptions(paceUnit, "minutes");
     await fillCampaignName(user);
+    await selectSender(user);
 
     await user.click(
       screen.getByRole("button", { name: /Queue 1 message/i }),
@@ -303,6 +358,7 @@ describe("<BulkSmsModal /> pacing + skip-contacted (260504-tgq)", () => {
 
     await user.click(screen.getByRole("radio", { name: /Custom/i }));
     await fillCampaignName(user, "  Skip Contacted Campaign  ");
+    await selectSender(user);
 
     const paceInput = screen.getByLabelText(/^Pacing$/i);
     await user.clear(paceInput);
@@ -400,6 +456,7 @@ describe("<BulkSmsModal /> presets + drain estimate (260506-m3a)", () => {
     renderModal(["p1"]);
     await waitFor(() => expect(listSmsTemplateCategories).toHaveBeenCalled());
     await fillCampaignName(user);
+    await selectSender(user);
 
     // Default = Steady → 8s pace, 0.20 jitter, no cap
     await user.click(screen.getByRole("button", { name: /Queue 1 message/i }));
@@ -420,6 +477,7 @@ describe("<BulkSmsModal /> presets + drain estimate (260506-m3a)", () => {
     renderModal(["p1"]);
     await waitFor(() => expect(listSmsTemplateCategories).toHaveBeenCalled());
     await fillCampaignName(user);
+    await selectSender(user);
 
     await user.click(screen.getByRole("radio", { name: /Push/i }));
     await user.click(screen.getByRole("button", { name: /Queue 1 message/i }));
@@ -440,6 +498,7 @@ describe("<BulkSmsModal /> presets + drain estimate (260506-m3a)", () => {
     renderModal(["p1"]);
     await waitFor(() => expect(listSmsTemplateCategories).toHaveBeenCalled());
     await fillCampaignName(user);
+    await selectSender(user);
 
     await user.click(screen.getByRole("radio", { name: /Custom/i }));
     const paceInput = screen.getByLabelText(/^Pacing$/i);
@@ -464,6 +523,7 @@ describe("<BulkSmsModal /> presets + drain estimate (260506-m3a)", () => {
     await waitFor(() => expect(listSmsTemplateCategories).toHaveBeenCalled());
 
     await fillCampaignName(user, "  Custom Campaign  ");
+    await selectSender(user);
     await user.click(screen.getByRole("button", { name: /Custom message/i }));
     await user.type(
       screen.getByPlaceholderText(/interested in your property/i),
@@ -489,6 +549,7 @@ describe("<BulkSmsModal /> presets + drain estimate (260506-m3a)", () => {
     renderModal(["p1"]);
     await waitFor(() => expect(listSmsTemplateCategories).toHaveBeenCalled());
     await fillCampaignName(user);
+    await selectSender(user);
 
     await user.click(screen.getByRole("button", { name: /Queue 1 message/i }));
 
@@ -515,6 +576,7 @@ describe("<BulkSmsModal /> presets + drain estimate (260506-m3a)", () => {
     renderModal(Array.from({ length: 501 }, (_, i) => `p${i}`));
     await waitFor(() => expect(listSmsTemplateCategories).toHaveBeenCalled());
     await fillCampaignName(user);
+    await selectSender(user);
 
     await user.click(screen.getByRole("button", { name: /Queue 501 messages/i }));
 
@@ -574,6 +636,7 @@ describe("<BulkSmsModal /> line-type assessment", () => {
       name: /Queue 2 messages/i,
     });
     await fillCampaignName(user);
+    await selectSender(user);
 
     await user.click(
       screen.getByRole("checkbox", { name: /Also text 2 unknown/i }),
@@ -598,6 +661,7 @@ describe("<BulkSmsModal /> line-type assessment", () => {
     renderModal(["p1"]);
     await waitFor(() => expect(listSmsTemplateCategories).toHaveBeenCalled());
     await fillCampaignName(user);
+    await selectSender(user);
 
     await user.click(screen.getByRole("button", { name: /Queue 1 message/i }));
     await waitFor(() => expect(bulkQueueSms).toHaveBeenCalled());
@@ -618,6 +682,86 @@ describe("<BulkSmsModal /> line-type assessment", () => {
         screen.getByRole("button", { name: /Queue 0 messages/i }),
       ).toBeDisabled(),
     );
+  });
+});
+
+describe("<BulkSmsModal /> delivery setup", () => {
+  it("blocks submit with 'Choose a sending number.' when no sender is selected", async () => {
+    const user = userEvent.setup();
+    renderModal(["p1"]);
+    await waitFor(() => expect(listDeliveryOptions).toHaveBeenCalled());
+    await fillCampaignName(user);
+
+    await user.click(screen.getByRole("button", { name: /Queue 1 message/i }));
+
+    expect(
+      screen.getByText("Choose a sending number."),
+    ).toBeInTheDocument();
+    expect(bulkQueueSms).not.toHaveBeenCalled();
+  });
+
+  it("passes the selected sender and provider campaign to bulkQueueSms", async () => {
+    const user = userEvent.setup();
+    bulkQueueSms.mockResolvedValue({
+      ok: true,
+      data: { succeeded: 1, skipped: 0, failed: [] },
+    });
+    renderModal(["p1"]);
+    await waitFor(() => expect(listSmsTemplateCategories).toHaveBeenCalled());
+    await fillCampaignName(user);
+    await selectSender(user);
+    await user.selectOptions(
+      screen.getByLabelText(/provider campaign \(optional\)/i),
+      "pc-1",
+    );
+
+    await user.click(screen.getByRole("button", { name: /Queue 1 message/i }));
+
+    await waitFor(() => expect(bulkQueueSms).toHaveBeenCalled());
+    const [, opts] = bulkQueueSms.mock.calls[0];
+    expect(opts.senderNumber).toBe("+15551234567");
+    expect(opts.providerCampaignExternalId).toBe("pc-1");
+  });
+
+  it("surfaces server SENDER_NOT_APPROVED errors on the sender field", async () => {
+    const user = userEvent.setup();
+    bulkQueueSms.mockResolvedValue({
+      ok: false,
+      error: {
+        code: "SENDER_NOT_APPROVED",
+        message:
+          "Sending number is not in the synced approved sender list. Sync Delivery senders and pick an active number.",
+      },
+    });
+    renderModal(["p1"]);
+    await waitFor(() => expect(listSmsTemplateCategories).toHaveBeenCalled());
+    await fillCampaignName(user);
+    await selectSender(user);
+
+    await user.click(screen.getByRole("button", { name: /Queue 1 message/i }));
+
+    expect(
+      await screen.findByText(/not in the synced approved sender list/i),
+    ).toBeInTheDocument();
+    expect(routerPush).not.toHaveBeenCalled();
+  });
+
+  it("renders the empty-catalog sync hint with a Sync button when no senders are synced", async () => {
+    listDeliveryOptions.mockResolvedValue({
+      ok: true,
+      data: {
+        provider: "test-provider",
+        senders: [],
+        providerCampaigns: [],
+        lastSyncedAt: null,
+      },
+    });
+    renderModal(["p1"]);
+
+    expect(
+      await screen.findByText(/No approved sending numbers synced yet/i),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Sync" })).toBeInTheDocument();
   });
 });
 

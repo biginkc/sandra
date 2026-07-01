@@ -3,6 +3,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Result } from "@/lib/errors/result";
 import { ok } from "@/lib/errors/result";
 import type { BulkSmsQueueBaseOpts } from "@/lib/messaging/bulk-queue";
+import { resolveDeliverySelection } from "@/lib/messaging/delivery";
 import type { Database, Json } from "@/lib/supabase/types";
 
 const PROPERTY_CHUNK = 250;
@@ -205,6 +206,27 @@ export async function resolveAdHocBulkSmsCampaign(
     return duplicateNameError(name);
   }
 
+  // Delivery setup is required before any campaign can queue — ad-hoc
+  // bulk SMS creates the campaign here, so the sender is validated and
+  // snapshotted here, through the same resolver as saved campaigns.
+  if (!args.opts.senderNumber) {
+    return {
+      ok: false,
+      error: {
+        code: "SENDER_REQUIRED",
+        message: "Choose a sending number before queueing bulk SMS.",
+      },
+    };
+  }
+  const deliveryResult = await resolveDeliverySelection(
+    supabase,
+    orgId,
+    args.opts.senderNumber,
+    args.opts.providerCampaignExternalId,
+  );
+  if (!deliveryResult.ok) return deliveryResult;
+  const delivery = deliveryResult.data;
+
   const now = new Date().toISOString();
   const { data: campaign, error: insertError } = await supabase
     .from("campaigns")
@@ -223,6 +245,10 @@ export async function resolveAdHocBulkSmsCampaign(
         ? args.opts.paceSeconds
         : null,
       skip_if_contacted: args.opts.skipIfContacted ?? false,
+      sender_provider: delivery.senderProvider,
+      sender_number: delivery.senderNumber,
+      provider_campaign_external_id: delivery.providerCampaignExternalId,
+      provider_campaign_name: delivery.providerCampaignName,
       created_by: args.createdByUserId,
       created_at: now,
       updated_at: now,

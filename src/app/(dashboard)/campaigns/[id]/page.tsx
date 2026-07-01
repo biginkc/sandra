@@ -4,10 +4,12 @@ import { Page } from "@/components/page";
 import { PageHeader } from "@/components/page-header";
 import { Badge } from "@/components/ui/badge";
 import { getOutboundSmsMetrics } from "@/lib/messages/message-metrics";
+import { campaignHasOutboundMessages } from "@/lib/messaging/delivery";
 import { createClient } from "@/lib/supabase/server";
 import type { Database } from "@/lib/supabase/types";
 
 import { CampaignCadenceControl } from "./campaign-cadence-control";
+import { CampaignDeliveryCard } from "./campaign-delivery-card";
 import {
   CampaignOperationsPanel,
   type CampaignJobSummary,
@@ -30,6 +32,10 @@ type Campaign = Pick<
   | "template_category"
   | "pace_seconds"
   | "created_at"
+  | "sender_provider"
+  | "sender_number"
+  | "provider_campaign_external_id"
+  | "provider_campaign_name"
 >;
 
 type CampaignKpis = Database["public"]["Functions"]["campaign_kpis"]["Returns"][number];
@@ -55,7 +61,7 @@ export default async function CampaignDetailPage({
   const campaignRes = await supabase
     .from("campaigns")
     .select(
-      "id, org_id, name, status, archived_at, body, template_category, pace_seconds, created_at",
+      "id, org_id, name, status, archived_at, body, template_category, pace_seconds, created_at, sender_provider, sender_number, provider_campaign_external_id, provider_campaign_name",
     )
     .eq("id", id)
     .maybeSingle();
@@ -65,7 +71,7 @@ export default async function CampaignDetailPage({
   }
 
   const campaign = campaignRes.data as Campaign;
-  const [kpiRes, metricsRes, jobRes] = await Promise.all([
+  const [kpiRes, metricsRes, jobRes, senderLocked] = await Promise.all([
     supabase.rpc("campaign_kpis", { p_campaign_id: id }),
     getOutboundSmsMetrics(supabase, {
       scope: { campaignId: id, orgId: campaign.org_id },
@@ -73,6 +79,7 @@ export default async function CampaignDetailPage({
       .then((data) => ({ ok: true as const, data }))
       .catch((error: unknown) => ({ ok: false as const, error })),
     loadLatestCampaignBulkSmsJob(supabase, id),
+    campaignHasOutboundMessages(supabase, id).catch(() => false),
   ]);
   const kpis = kpiRes.error ? null : normalizeKpis(kpiRes.data?.[0]);
   const liveStats = metricsRes.ok && kpis
@@ -106,6 +113,14 @@ export default async function CampaignDetailPage({
             <span>{describeCampaign(campaign)}</span>
           </span>
         }
+      />
+
+      <CampaignDeliveryCard
+        senderProvider={campaign.sender_provider}
+        senderNumber={campaign.sender_number}
+        providerCampaignExternalId={campaign.provider_campaign_external_id}
+        providerCampaignName={campaign.provider_campaign_name}
+        locked={senderLocked}
       />
 
       {liveStats ? (

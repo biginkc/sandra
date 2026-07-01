@@ -382,6 +382,241 @@ describe("SendilloMessagingProvider status contract", () => {
   });
 });
 
+describe("SendilloMessagingProvider.listPurchasedNumbers", () => {
+  it("GETs the purchased-numbers endpoint with bearer auth", async () => {
+    mockFetch({ status: 200, body: { data: [] } });
+    const provider = new SendilloMessagingProvider(
+      "sendillo-test-key",
+      "+18165550000",
+    );
+
+    await provider.listPurchasedNumbers();
+
+    const [url, init] = (global.fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(url).toBe("https://www.sendillo.com/api/v1/numbers/purchased");
+    expect((init as RequestInit).method).toBe("GET");
+    expect((init as RequestInit).headers).toMatchObject({
+      Authorization: "Bearer sendillo-test-key",
+      Accept: "application/json",
+    });
+  });
+
+  it("parses a {data:[...]} envelope and maps number fields", async () => {
+    mockFetch({
+      status: 200,
+      body: {
+        data: [
+          {
+            id: "num_1",
+            phoneNumber: "+18165550001",
+            status: "active",
+            messagingStatus: "ready",
+          },
+          {
+            numberId: "num_2",
+            phone_number: "+18165550002",
+            status: "active",
+            messaging_status: "pending",
+          },
+        ],
+      },
+    });
+    const provider = new SendilloMessagingProvider(
+      "sendillo-test-key",
+      "+18165550000",
+    );
+
+    const numbers = await provider.listPurchasedNumbers();
+
+    expect(numbers).toHaveLength(2);
+    expect(numbers[0]).toMatchObject({
+      phoneE164: "+18165550001",
+      providerNumberId: "num_1",
+      status: "active",
+      messagingStatus: "ready",
+    });
+    expect(numbers[1]).toMatchObject({
+      phoneE164: "+18165550002",
+      providerNumberId: "num_2",
+      messagingStatus: "pending",
+    });
+    // Raw entries preserved for the catalog audit column.
+    expect(numbers[0].raw).toMatchObject({ id: "num_1" });
+  });
+
+  it("parses a top-level array and accepts number/phone field aliases", async () => {
+    mockFetch({
+      status: 200,
+      body: [
+        { number: "+18165550003", status: "active" },
+        { phone: "+18165550004" },
+      ],
+    });
+    const provider = new SendilloMessagingProvider(
+      "sendillo-test-key",
+      "+18165550000",
+    );
+
+    const numbers = await provider.listPurchasedNumbers();
+
+    expect(numbers.map((n) => n.phoneE164)).toEqual([
+      "+18165550003",
+      "+18165550004",
+    ]);
+    expect(numbers[1].providerNumberId).toBeNull();
+    expect(numbers[1].status).toBeNull();
+  });
+
+  it("skips entries without any recognizable phone number field", async () => {
+    mockFetch({
+      status: 200,
+      body: {
+        items: [
+          { id: "num_missing_phone", status: "active" },
+          { phoneNumber: "+18165550005" },
+        ],
+      },
+    });
+    const provider = new SendilloMessagingProvider(
+      "sendillo-test-key",
+      "+18165550000",
+    );
+
+    const numbers = await provider.listPurchasedNumbers();
+
+    expect(numbers).toHaveLength(1);
+    expect(numbers[0].phoneE164).toBe("+18165550005");
+  });
+
+  it("throws ProviderError including the status on non-OK responses", async () => {
+    mockFetch({
+      status: 503,
+      body: { error: { message: "upstream unavailable" } },
+    });
+    const provider = new SendilloMessagingProvider(
+      "sendillo-test-key",
+      "+18165550000",
+    );
+
+    await expect(provider.listPurchasedNumbers()).rejects.toMatchObject({
+      errorClass: "provider",
+      provider: "sendillo",
+      message: expect.stringContaining("503"),
+      details: expect.objectContaining({ status: 503 }),
+    });
+  });
+
+  it("throws ProviderError when the response is not a list in any known envelope", async () => {
+    mockFetch({ status: 200, body: { data: { unexpected: true } } });
+    const provider = new SendilloMessagingProvider(
+      "sendillo-test-key",
+      "+18165550000",
+    );
+
+    await expect(provider.listPurchasedNumbers()).rejects.toBeInstanceOf(
+      ProviderError,
+    );
+  });
+});
+
+describe("SendilloMessagingProvider.listProviderCampaigns", () => {
+  it("GETs the campaigns endpoint with bearer auth", async () => {
+    mockFetch({ status: 200, body: { data: [] } });
+    const provider = new SendilloMessagingProvider(
+      "sendillo-test-key",
+      "+18165550000",
+    );
+
+    await provider.listProviderCampaigns();
+
+    const [url, init] = (global.fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(url).toBe("https://www.sendillo.com/api/v1/campaigns");
+    expect((init as RequestInit).method).toBe("GET");
+    expect((init as RequestInit).headers).toMatchObject({
+      Authorization: "Bearer sendillo-test-key",
+    });
+  });
+
+  it("parses a {data:[...]} envelope and maps campaign fields", async () => {
+    mockFetch({
+      status: 200,
+      body: {
+        data: [
+          {
+            id: "camp_1",
+            name: "10DLC Main",
+            brand: "BMH",
+            useCase: "low_volume",
+            status: "active",
+          },
+          {
+            campaignId: "camp_2",
+            title: "Titled Campaign",
+            brandName: "Brand Two",
+            use_case: "marketing",
+          },
+        ],
+      },
+    });
+    const provider = new SendilloMessagingProvider(
+      "sendillo-test-key",
+      "+18165550000",
+    );
+
+    const campaigns = await provider.listProviderCampaigns();
+
+    expect(campaigns).toHaveLength(2);
+    expect(campaigns[0]).toMatchObject({
+      externalId: "camp_1",
+      name: "10DLC Main",
+      brand: "BMH",
+      useCase: "low_volume",
+      status: "active",
+    });
+    expect(campaigns[1]).toMatchObject({
+      externalId: "camp_2",
+      name: "Titled Campaign",
+      brand: "Brand Two",
+      useCase: "marketing",
+      status: null,
+    });
+  });
+
+  it("parses a top-level array and skips entries without an id", async () => {
+    mockFetch({
+      status: 200,
+      body: [
+        { name: "No Id Campaign" },
+        { id: "camp_3", name: "Has Id" },
+      ],
+    });
+    const provider = new SendilloMessagingProvider(
+      "sendillo-test-key",
+      "+18165550000",
+    );
+
+    const campaigns = await provider.listProviderCampaigns();
+
+    expect(campaigns).toHaveLength(1);
+    expect(campaigns[0].externalId).toBe("camp_3");
+  });
+
+  it("throws ProviderError including the status on non-OK responses", async () => {
+    mockFetch({ status: 401, body: { message: "bad key" } });
+    const provider = new SendilloMessagingProvider(
+      "sendillo-test-key",
+      "+18165550000",
+    );
+
+    await expect(provider.listProviderCampaigns()).rejects.toMatchObject({
+      errorClass: "provider",
+      provider: "sendillo",
+      message: expect.stringContaining("401"),
+      details: expect.objectContaining({ status: 401 }),
+    });
+  });
+});
+
 describe("sendilloFromEnv / registry", () => {
   it("requires both SENDILLO_API_KEY and SENDILLO_FROM_NUMBER", () => {
     delete process.env.SENDILLO_API_KEY;

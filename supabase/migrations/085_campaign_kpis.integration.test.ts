@@ -333,6 +333,74 @@ describe("Migration 085 — campaign KPI scoreboard RPC", () => {
     ]);
   });
 
+  it("computes identical KPIs when outbound messages carry different sender numbers", async () => {
+    // Dynamic sender selection stamps a per-campaign from_address on
+    // outbound rows. The KPI scoreboard aggregates by campaign_id only —
+    // mixing senders inside a campaign must not change any number.
+    const member = await createUserForOrg(BMH_ORG_ID);
+    const campaignId = await insertCampaign(BMH_ORG_ID, {
+      sender_provider: "mock",
+      sender_number: "+15551234567",
+    });
+
+    const contactA = await insertContact(BMH_ORG_ID, "SenderA");
+    const contactB = await insertContact(BMH_ORG_ID, "SenderB");
+    const propertyA = await insertProperty(BMH_ORG_ID, contactA);
+    const propertyB = await insertProperty(BMH_ORG_ID, contactB);
+
+    await Promise.all([
+      insertCampaignRecipient({ campaignId, propertyId: propertyA, contactId: contactA }),
+      insertCampaignRecipient({ campaignId, propertyId: propertyB, contactId: contactB }),
+    ]);
+
+    // Same campaign, two different senders.
+    const outboundA = await insertMessage(BMH_ORG_ID, {
+      direction: "outbound",
+      status: "delivered",
+      campaign_id: campaignId,
+      property_id: propertyA,
+      contact_id: contactA,
+      from_address: "+15551234567",
+    });
+    await insertMessage(BMH_ORG_ID, {
+      direction: "outbound",
+      status: "delivered",
+      campaign_id: campaignId,
+      property_id: propertyB,
+      contact_id: contactB,
+      from_address: "+15559999999",
+    });
+
+    await insertMessage(BMH_ORG_ID, {
+      direction: "inbound",
+      status: "received",
+      contact_id: contactA,
+      property_id: propertyA,
+      attributed_outbound_message_id: outboundA,
+      body: "Yes, tell me more",
+    });
+
+    const { data, error } = await member.client.rpc("campaign_kpis", {
+      p_campaign_id: campaignId,
+    });
+
+    expect(error).toBeNull();
+    expect(data).toEqual([
+      {
+        audience: 2,
+        attempted: 2,
+        delivered: 2,
+        delivered_rate: 100,
+        failed: 0,
+        failed_rate: 0,
+        replied: 1,
+        reply_rate: 50,
+        opted_out: 0,
+        opt_out_rate: 0,
+      },
+    ]);
+  });
+
   it("rejects callers outside the campaign org", async () => {
     const outsider = await createUserForOrg(TEST_ORG_B_ID);
     const campaignId = await insertCampaign();

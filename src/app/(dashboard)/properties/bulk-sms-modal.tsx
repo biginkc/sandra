@@ -13,9 +13,15 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { callAction } from "@/lib/errors/call-action";
+import type { DeliveryCatalog } from "@/lib/messaging/delivery";
 
 import type { AudienceLineTypeAssessment } from "@/lib/messaging/audience-assessment";
 
+import {
+  listDeliveryOptions,
+  refreshDeliveryCatalog,
+} from "../campaigns/actions";
+import { DeliverySelect } from "../campaigns/delivery-select";
 import {
   assessBulkSmsAudience,
   bulkQueueSms,
@@ -144,6 +150,32 @@ export function BulkSmsModal({ open, propertyIds, onClose, onQueued }: Props) {
   );
   const campaignNameRef = useRef<HTMLInputElement>(null);
 
+  // Delivery setup — synced sender catalog, loaded with the other
+  // reference data when the modal opens. Sender is required; the ad-hoc
+  // bulk path creates the campaign, so the server enforces it too.
+  const [catalog, setCatalog] = useState<DeliveryCatalog | null>(null);
+  const [catalogLoading, setCatalogLoading] = useState(true);
+  const [senderNumber, setSenderNumber] = useState("");
+  const [providerCampaignExternalId, setProviderCampaignExternalId] =
+    useState<string | null>(null);
+  const [senderError, setSenderError] = useState<string | null>(null);
+  const [syncing, setSyncing] = useState(false);
+
+  const syncCatalog = () => {
+    if (syncing) return;
+    setSyncing(true);
+    void (async () => {
+      const result = await callAction(refreshDeliveryCatalog(), {
+        fallbackMessage: "Could not sync the provider catalog",
+      });
+      if (result.ok) {
+        const reloaded = await listDeliveryOptions();
+        if (reloaded.ok) setCatalog(reloaded.data);
+      }
+      setSyncing(false);
+    })();
+  };
+
   // Pacing — preset selector replaces the raw inputs (260506-m3a).
   // Steady is the default. Custom-mode raw inputs are only consulted
   // when presetId === "custom".
@@ -201,6 +233,10 @@ export function BulkSmsModal({ open, propertyIds, onClose, onQueued }: Props) {
     assessBulkSmsAudience(propertyIds).then((result) => {
       if (result.ok) setAssessment(result.data);
     });
+    listDeliveryOptions().then((result) => {
+      if (result.ok) setCatalog(result.data);
+      setCatalogLoading(false);
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, propertyIdsKey]);
 
@@ -243,6 +279,10 @@ export function BulkSmsModal({ open, propertyIds, onClose, onQueued }: Props) {
       campaignNameRef.current?.focus();
       return;
     }
+    if (!senderNumber) {
+      setSenderError("Choose a sending number.");
+      return;
+    }
     if (paceOutOfRange) {
       toast.error(paceValidationMessage("bulk"));
       return;
@@ -262,6 +302,8 @@ export function BulkSmsModal({ open, propertyIds, onClose, onQueued }: Props) {
       jitterPct: JITTER_PCT,
       includeUnknown,
       campaignName: trimmedCampaignName,
+      senderNumber,
+      providerCampaignExternalId,
     };
     const opts =
       mode === "category"
@@ -279,6 +321,12 @@ export function BulkSmsModal({ open, propertyIds, onClose, onQueued }: Props) {
         ) {
           setCampaignNameError(result.error.message);
           campaignNameRef.current?.focus();
+        }
+        if (
+          result.error.code === "SENDER_REQUIRED" ||
+          result.error.code === "SENDER_NOT_APPROVED"
+        ) {
+          setSenderError(result.error.message);
         }
         return;
       }
@@ -321,6 +369,9 @@ export function BulkSmsModal({ open, propertyIds, onClose, onQueued }: Props) {
   const handleClose = () => {
     setCampaignName("");
     setCampaignNameError(null);
+    setSenderNumber("");
+    setProviderCampaignExternalId(null);
+    setSenderError(null);
     onClose();
   };
 
@@ -367,6 +418,23 @@ export function BulkSmsModal({ open, propertyIds, onClose, onQueued }: Props) {
               </p>
             ) : null}
           </div>
+
+          {/* Delivery setup — required sender + optional provider campaign. */}
+          <DeliverySelect
+            senderNumber={senderNumber}
+            onSenderNumberChange={(value) => {
+              setSenderNumber(value);
+              if (senderError && value) setSenderError(null);
+            }}
+            providerCampaignExternalId={providerCampaignExternalId}
+            onProviderCampaignChange={setProviderCampaignExternalId}
+            catalog={catalog}
+            loading={catalogLoading}
+            error={senderError}
+            disabled={pending}
+            onRefresh={syncCatalog}
+            syncing={syncing}
+          />
 
           {/* Mode toggle */}
           <div className="flex gap-2">

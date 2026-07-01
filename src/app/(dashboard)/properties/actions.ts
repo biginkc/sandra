@@ -18,6 +18,7 @@ import {
   assessAudienceLineTypes,
   type AudienceLineTypeAssessment,
 } from "@/lib/messaging/audience-assessment";
+import { normalizeSenderNumber } from "@/lib/messaging/delivery";
 import {
   CONTACTED_MESSAGE_STATUSES,
   freshScheduleState,
@@ -136,6 +137,8 @@ function baseBulkSmsOpts(opts: BulkSmsQueueOpts): BulkSmsQueueBaseOpts {
     skipIfContacted: opts.skipIfContacted,
     jitterPct: opts.jitterPct,
     includeUnknown: opts.includeUnknown,
+    senderNumber: opts.senderNumber,
+    providerCampaignExternalId: opts.providerCampaignExternalId,
   };
 }
 
@@ -183,10 +186,11 @@ async function validateProvidedCampaignForBulkSms(
   supabase: Awaited<ReturnType<typeof createClient>>,
   campaignId: string,
   propertyIds: string[],
+  requestedSenderNumber?: string,
 ): Promise<Result<null>> {
   const { data: campaign, error: campaignError } = await supabase
     .from("campaigns")
-    .select("org_id, status")
+    .select("org_id, status, sender_number")
     .eq("id", campaignId)
     .maybeSingle();
 
@@ -208,6 +212,30 @@ async function validateProvidedCampaignForBulkSms(
       error: {
         code: "CAMPAIGN_STATE_CONFLICT",
         message: "Campaign must be launching before bulk SMS can queue it.",
+      },
+    };
+  }
+  if (!campaign.sender_number) {
+    return {
+      ok: false,
+      error: {
+        code: "CAMPAIGN_SENDER_REQUIRED",
+        message:
+          "Campaign has no sending number. Set Delivery (sending number) before queueing SMS.",
+      },
+    };
+  }
+  if (
+    requestedSenderNumber &&
+    normalizeSenderNumber(requestedSenderNumber) !== campaign.sender_number
+  ) {
+    return {
+      ok: false,
+      error: {
+        code: "SENDER_LOCKED",
+        message:
+          `Campaign sends from ${campaign.sender_number} and its sender is locked. ` +
+          "Create a new campaign to send from a different number.",
       },
     };
   }
@@ -332,6 +360,7 @@ export async function bulkQueueSms(
         supabase,
         providedCampaignId,
         resolvedPropertyIds,
+        opts.senderNumber,
       );
       if (!campaignValidation.ok) return campaignValidation;
       resolvedOpts = {

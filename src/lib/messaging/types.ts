@@ -36,6 +36,31 @@ export type DialpadFromOption = {
   status: string;
 };
 
+export type ProviderSenderNumber = {
+  /** E.164 number the account owns and can send from. */
+  phoneE164: string;
+  /** Provider's stable id for the number, when it exposes one. */
+  providerNumberId: string | null;
+  /** Provider-reported status string, verbatim (e.g. "active"). */
+  status: string | null;
+  /** Provider-reported messaging/10DLC status, when exposed. */
+  messagingStatus: string | null;
+  /** Raw catalog entry — stored in provider_sender_numbers.raw for audit. */
+  raw: unknown;
+};
+
+export type ProviderCampaignSummary = {
+  /** Provider's stable id — the upsert key for the synced catalog. */
+  externalId: string;
+  name: string | null;
+  brand: string | null;
+  useCase: string | null;
+  /** Provider-reported status string, verbatim. */
+  status: string | null;
+  /** Raw catalog entry — stored in provider_campaigns.raw for audit. */
+  raw: unknown;
+};
+
 export type SmsInboundEvent = {
   /** Provider message id — unique across retries. Paired with provider +
    *  event_type to form the idempotency key in `webhook_events`. */
@@ -108,4 +133,20 @@ export interface MessagingProvider {
    * possible empty array gracefully.
    */
   listFromNumbers?(): Promise<DialpadFromOption[]>;
+
+  /**
+   * Read-only catalog: the sender numbers the provider account has
+   * purchased/owns. Synced into provider_sender_numbers so campaign
+   * Delivery setup can offer them and the release guard can validate
+   * queued rows against approved inventory. Presence of this method is
+   * also the signal that the provider participates in sender-inventory
+   * validation at release time.
+   */
+  listPurchasedNumbers?(): Promise<ProviderSenderNumber[]>;
+
+  /**
+   * Read-only catalog: provider-side campaigns (10DLC/brand context).
+   * Optional metadata only — Sandra campaigns never depend on these.
+   */
+  listProviderCampaigns?(): Promise<ProviderCampaignSummary[]>;
 }

@@ -12,6 +12,13 @@ import {
   type BulkSmsQueueBaseOpts,
 } from "@/lib/messaging/bulk-queue";
 import {
+  loadDeliveryCatalog,
+  resolveDeliverySelection,
+  syncProviderCatalog,
+  type CatalogSyncResult,
+  type DeliveryCatalog,
+} from "@/lib/messaging/delivery";
+import {
   defaultSmsPaceSeconds,
   paceValidationMessage,
   validateSmsPaceSeconds,
@@ -40,6 +47,8 @@ type CampaignRow = Pick<
   | "audience_snapshot"
   | "body"
   | "pace_seconds"
+  | "sender_number"
+  | "sender_provider"
   | "skip_if_contacted"
   | "status"
   | "template_category"
@@ -58,6 +67,12 @@ export type CreateCampaignInput = {
   templateCategory?: string | null;
   paceSeconds?: number | null;
   skipIfContacted?: boolean;
+  /** Required Delivery setup: E.164 sending number from the synced
+   *  approved sender catalog. */
+  senderNumber: string;
+  /** Optional Delivery metadata: provider campaign from the synced
+   *  catalog. Never required — Sandra campaigns don't depend on it. */
+  providerCampaignExternalId?: string | null;
   audience: {
     search?: string | null;
     blockStack: FilterBlock[];
@@ -834,6 +849,61 @@ export async function resumeCampaignSends(
   }
 }
 
+/**
+ * Read the synced Delivery catalog (senders + optional provider
+ * campaigns) for the operator's org. Never calls the provider API.
+ */
+export async function listDeliveryOptions(): Promise<Result<DeliveryCatalog>> {
+  try {
+    const supabase = await createClient();
+    const memberships = await getCallerMemberships();
+    const orgId = memberships[0]?.org_id ?? null;
+    if (!orgId) {
+      return {
+        ok: false,
+        error: {
+          code: "DELIVERY_LOOKUP_FAILED",
+          message: "No organization membership found for this user.",
+        },
+      };
+    }
+    return ok(await loadDeliveryCatalog(supabase, orgId));
+  } catch (e) {
+    reportError(e, { tags: { surface: "list_delivery_options" } });
+    return errFromUnknown(e, "DELIVERY_LOOKUP_FAILED");
+  }
+}
+
+/**
+ * Re-sync the provider catalog (read-only GETs against the provider API)
+ * into provider_sender_numbers / provider_campaigns. No provider
+ * mutations — sync/select only.
+ */
+export async function refreshDeliveryCatalog(): Promise<
+  Result<CatalogSyncResult>
+> {
+  try {
+    const memberships = await getCallerMemberships();
+    const orgId = memberships[0]?.org_id ?? null;
+    if (!orgId) {
+      return {
+        ok: false,
+        error: {
+          code: "DELIVERY_SYNC_FAILED",
+          message: "No organization membership found for this user.",
+        },
+      };
+    }
+    const adminClient = createAdminClient();
+    const result = await syncProviderCatalog(adminClient, orgId);
+    revalidatePath("/campaigns");
+    return ok(result);
+  } catch (e) {
+    reportError(e, { tags: { surface: "refresh_delivery_catalog" } });
+    return errFromUnknown(e, "DELIVERY_SYNC_FAILED");
+  }
+}
+
 export async function createCampaign(
   input: CreateCampaignInput,
 ): Promise<Result<{ id: string }>> {
@@ -896,6 +966,15 @@ export async function createCampaign(
       };
     }
 
+    const deliveryResult = await resolveDeliverySelection(
+      supabase,
+      orgId,
+      input.senderNumber,
+      input.providerCampaignExternalId,
+    );
+    if (!deliveryResult.ok) return deliveryResult;
+    const delivery = deliveryResult.data;
+
     const { data: activeCandidates, error: activeLookupError } = await supabase
       .from("campaigns")
       .select("id")
@@ -926,7 +1005,7 @@ export async function createCampaign(
     const { data: archivedCandidates, error: archivedLookupError } =
       await supabase
         .from("campaigns")
-        .select("id, archived_at")
+        .select("id, archived_at, sender_number")
         .eq("org_id", orgId)
         .ilike("name", name)
         .not("archived_at", "is", null)
@@ -944,6 +1023,40 @@ export async function createCampaign(
 
     const archivedCandidate = archivedCandidates?.[0] ?? null;
     if (archivedCandidate) {
+      // Sender lock applies to revived campaigns too: once outbound rows
+      // exist, the stored sender is immutable.
+      const { count: revivedMessageCount, error: revivedCountError } =
+        await supabase
+          .from("messages")
+          .select("id", { count: "exact", head: true })
+          .eq("campaign_id", archivedCandidate.id)
+          .eq("direction", "outbound");
+      if (revivedCountError) {
+        return {
+          ok: false,
+          error: {
+            code: "CAMPAIGN_LOOKUP_FAILED",
+            message: revivedCountError.message,
+          },
+        };
+      }
+      const revivedLocked = (revivedMessageCount ?? 0) > 0;
+      if (
+        revivedLocked &&
+        archivedCandidate.sender_number &&
+        archivedCandidate.sender_number !== delivery.senderNumber
+      ) {
+        return {
+          ok: false,
+          error: {
+            code: "SENDER_LOCKED",
+            message:
+              `"${name}" already queued messages from ${archivedCandidate.sender_number}. ` +
+              "The sender is locked — create a new campaign to send from a different number.",
+          },
+        };
+      }
+
       const now = new Date().toISOString();
       const { data: revivedRow, error } = await supabase
         .from("campaigns")
@@ -956,6 +1069,15 @@ export async function createCampaign(
           template_category: templateCategory,
           pace_seconds: paceResult.data,
           skip_if_contacted: input.skipIfContacted ?? false,
+          ...(revivedLocked
+            ? {}
+            : {
+                sender_provider: delivery.senderProvider,
+                sender_number: delivery.senderNumber,
+                provider_campaign_external_id:
+                  delivery.providerCampaignExternalId,
+                provider_campaign_name: delivery.providerCampaignName,
+              }),
           updated_at: now,
         })
         .eq("id", archivedCandidate.id)
@@ -988,6 +1110,10 @@ export async function createCampaign(
         template_category: templateCategory,
         pace_seconds: paceResult.data,
         skip_if_contacted: input.skipIfContacted ?? false,
+        sender_provider: delivery.senderProvider,
+        sender_number: delivery.senderNumber,
+        provider_campaign_external_id: delivery.providerCampaignExternalId,
+        provider_campaign_name: delivery.providerCampaignName,
         created_by: user?.id ?? null,
       })
       .select("id")
@@ -1013,7 +1139,7 @@ async function loadCampaign(
   const { data, error } = await supabase
     .from("campaigns")
     .select(
-      "id, audience_snapshot, body, pace_seconds, skip_if_contacted, status, template_category",
+      "id, audience_snapshot, body, pace_seconds, sender_number, sender_provider, skip_if_contacted, status, template_category",
     )
     .eq("id", campaignId)
     .maybeSingle();
@@ -1662,7 +1788,6 @@ export async function launchCampaign(
         },
       };
     }
-
     const recoverableLaunching =
       campaign.status === "launching" && messageCount === 0;
     const launchClaimStatuses: CampaignRow["status"][] = [];
@@ -1674,6 +1799,20 @@ export async function launchCampaign(
     }
     if (launchClaimStatuses.length === 0) {
       return buildAlreadyLaunchedResult(campaignId, messageCount);
+    }
+
+    // Delivery gate — only for campaigns that are actually about to
+    // queue. Already-launched campaigns short-circuit above so legacy
+    // (pre-Delivery) campaigns keep returning alreadyLaunched cleanly.
+    if (!campaign.sender_number) {
+      return {
+        ok: false,
+        error: {
+          code: "CAMPAIGN_SENDER_REQUIRED",
+          message:
+            "Campaign has no sending number. Set Delivery (sending number) before launching.",
+        },
+      };
     }
 
     const snapshotResult = parseAudienceSnapshot(campaign.audience_snapshot);

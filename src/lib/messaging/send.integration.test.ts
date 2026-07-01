@@ -2,9 +2,17 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { releaseQueuedMessage, sendSmsToContact } from "@/lib/messaging/send";
 import { recordConsentEvent } from "@/lib/messaging/consent";
-import { recordSmsPhoneSuppression } from "@/lib/messaging/opt-out-phone";
+import {
+  applyPhoneLevelOptOut,
+  recordSmsPhoneSuppression,
+} from "@/lib/messaging/opt-out-phone";
 import { getMockMessageLog } from "@/lib/messaging/providers/mock";
 import { createTestClient } from "@tests/integration/client";
+import {
+  MOCK_SENDER_PRIMARY,
+  MOCK_SENDER_SECONDARY,
+  seedSenderCatalog,
+} from "@tests/integration/delivery";
 import { resetTenantTables } from "@tests/integration/reset";
 
 // MESSAGING_PROVIDER=mock comes from vitest.integration.config.ts — the
@@ -75,6 +83,14 @@ async function getOrgId(): Promise<string> {
 describe("sendSmsToContact (integration)", () => {
   beforeEach(async () => {
     await resetTenantTables(supabase);
+    // Release-time sender guard: queued rows carry from_address (the mock
+    // provider default) and must resolve to an active synced sender.
+    // reset_tenant_tables truncates the catalog, so reseed both mock
+    // numbers for every test; the empty-inventory test deletes them.
+    await seedSenderCatalog(supabase, await getOrgId(), [
+      MOCK_SENDER_PRIMARY,
+      MOCK_SENDER_SECONDARY,
+    ]);
   });
 
   afterEach(() => {
@@ -98,7 +114,7 @@ describe("sendSmsToContact (integration)", () => {
       10,
     );
     if (hour < 8 || hour >= 21) {
-      // eslint-disable-next-line no-console
+       
       console.warn("sendSmsToContact happy-path test skipped — outside 8a–9p CT");
       return;
     }
@@ -569,7 +585,7 @@ describe("sendSmsToContact (integration)", () => {
       10,
     );
     if (hour < 8 || hour >= 21) {
-      // eslint-disable-next-line no-console
+       
       console.warn("conversation_id reuse test skipped — outside 8a–9p CT");
       return;
     }
@@ -618,7 +634,7 @@ describe("sendSmsToContact (integration)", () => {
       10,
     );
     if (hour < 8 || hour >= 21) {
-      // eslint-disable-next-line no-console
+       
       console.warn("queue release happy-path test skipped — outside 8a–9p CT");
       return;
     }
@@ -838,10 +854,16 @@ describe("sendSmsToContact (integration)", () => {
     expect(row?.error_message).toMatch(/belongs to provider mock/i);
   });
 
-  it("release blocks when a queued Sendillo row targets an obsolete sender number", async () => {
+  it("release fails a queued Sendillo row whose sender is not in the synced approved inventory", async () => {
     process.env.MESSAGING_PROVIDER = "sendillo";
     process.env.SENDILLO_API_KEY = "sendillo-test-key";
     process.env.SENDILLO_FROM_NUMBER = "+18164876899";
+
+    // Non-empty sendillo inventory that does NOT contain the row's
+    // from_address — the release guard must fail the row terminally.
+    await seedSenderCatalog(supabase, await getOrgId(), ["+18164876899"], {
+      provider: "sendillo",
+    });
 
     const { contactId, propertyId } = await seed({ withConsent: true });
     const { data: queued } = await supabase
@@ -863,7 +885,7 @@ describe("sendSmsToContact (integration)", () => {
     const outcome = await releaseQueuedMessage(supabase, queued!.id);
     expect(outcome.status).toBe("db_error");
     if (outcome.status === "db_error") {
-      expect(outcome.error).toMatch(/no longer matches active Sendillo sender/i);
+      expect(outcome.error).toMatch(/approved sendillo sender inventory/i);
     }
 
     const { data: row } = await supabase
@@ -872,7 +894,46 @@ describe("sendSmsToContact (integration)", () => {
       .eq("id", queued!.id)
       .single();
     expect(row?.status).toBe("failed");
-    expect(row?.error_message).toMatch(/no longer matches active Sendillo sender/i);
+    expect(row?.error_message).toMatch(/approved sendillo sender inventory/i);
+  });
+
+  it("release defers (leaves queued) when the Sendillo sender inventory has never been synced", async () => {
+    process.env.MESSAGING_PROVIDER = "sendillo";
+    process.env.SENDILLO_API_KEY = "sendillo-test-key";
+    process.env.SENDILLO_FROM_NUMBER = "+18164876899";
+
+    // No sendillo catalog rows at all — a sync/config gap, not bad row
+    // data. Release must defer instead of terminal-failing the row.
+    const { contactId, propertyId } = await seed({ withConsent: true });
+    const { data: queued } = await supabase
+      .from("messages")
+      .insert({
+        channel: "sms",
+        direction: "outbound",
+        status: "queued",
+        provider: "sendillo",
+        contact_id: contactId,
+        property_id: propertyId,
+        from_address: "+18164876899",
+        to_address: "+18165559999",
+        body: "sender inventory never synced",
+      })
+      .select("id")
+      .single();
+
+    const outcome = await releaseQueuedMessage(supabase, queued!.id);
+    expect(outcome.status).toBe("db_error");
+    if (outcome.status === "db_error") {
+      expect(outcome.error).toMatch(/never been synced/i);
+    }
+
+    const { data: row } = await supabase
+      .from("messages")
+      .select("status, error_message")
+      .eq("id", queued!.id)
+      .single();
+    expect(row?.status).toBe("queued");
+    expect(row?.error_message).toBeNull();
   });
 
   it("release preserves queued metadata when the message is sent", async () => {
@@ -1222,6 +1283,249 @@ describe("sendSmsToContact (integration)", () => {
           terminal: true,
         },
       });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // --------------------------------------------------------------------------
+  // Release-time sender guard — dynamic sender selection (2026-07-01). The
+  // mock provider supports listPurchasedNumbers, so every queued row with a
+  // from_address goes through getSenderInventoryState before the provider.
+  // --------------------------------------------------------------------------
+
+  it("release sends a queued campaign message from the campaign's stored sender", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-06-08T18:00:00Z"));
+    try {
+      const { contactId, propertyId } = await seed({ withConsent: true });
+      const { data: campaign } = await supabase
+        .from("campaigns")
+        .insert({
+          org_id: "00000000-0000-0000-0000-000000000bbb",
+          name: `Sender Guard Campaign ${crypto.randomUUID()}`,
+          sender_provider: "mock",
+          sender_number: MOCK_SENDER_SECONDARY,
+        })
+        .select("id")
+        .single();
+
+      const queue = await sendSmsToContact(supabase, {
+        contactId,
+        propertyId,
+        body: "queued from the campaign sender",
+        from: MOCK_SENDER_SECONDARY,
+        campaignId: campaign!.id,
+        queueOnly: true,
+      });
+      expect(queue.status).toBe("queued");
+      if (queue.status !== "queued") return;
+
+      const release = await releaseQueuedMessage(supabase, queue.messageId);
+      expect(release.status).toBe("sent");
+
+      const { data: row } = await supabase
+        .from("messages")
+        .select("status, from_address")
+        .eq("id", queue.messageId)
+        .single();
+      expect(row?.status).toBe("sent");
+      expect(row?.from_address).toBe(MOCK_SENDER_SECONDARY);
+
+      // The provider was actually invoked with from = the stored sender —
+      // never an env default.
+      const lastCall = getMockMessageLog().at(-1);
+      expect(lastCall?.input.from).toBe(MOCK_SENDER_SECONDARY);
+      expect(lastCall?.body).toBe("queued from the campaign sender");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("release fails a queued row whose sender is unknown to the approved mock inventory", async () => {
+    const { contactId, propertyId } = await seed({ withConsent: true });
+    const queue = await sendSmsToContact(supabase, {
+      contactId,
+      propertyId,
+      body: "queued from an unapproved sender",
+      from: "+15550009999",
+      queueOnly: true,
+    });
+    expect(queue.status).toBe("queued");
+    if (queue.status !== "queued") return;
+
+    const callsBefore = getMockMessageLog().length;
+    const release = await releaseQueuedMessage(supabase, queue.messageId);
+    expect(release.status).toBe("db_error");
+    if (release.status === "db_error") {
+      expect(release.error).toMatch(/approved mock sender inventory/i);
+    }
+    // No provider call happened.
+    expect(getMockMessageLog()).toHaveLength(callsBefore);
+
+    const { data: row } = await supabase
+      .from("messages")
+      .select("status, error_message")
+      .eq("id", queue.messageId)
+      .single();
+    expect(row?.status).toBe("failed");
+    expect(row?.error_message).toMatch(/approved mock sender inventory/i);
+  });
+
+  it("release fails a queued row whose sender was soft-deactivated in the inventory", async () => {
+    const { contactId, propertyId } = await seed({ withConsent: true });
+    const queue = await sendSmsToContact(supabase, {
+      contactId,
+      propertyId,
+      body: "queued from a deactivated sender",
+      from: MOCK_SENDER_SECONDARY,
+      queueOnly: true,
+    });
+    expect(queue.status).toBe("queued");
+    if (queue.status !== "queued") return;
+
+    // Soft-deactivate the sender between queue and release (what a
+    // catalog resync does when the number drops off the provider).
+    const { error: deactivateError } = await supabase
+      .from("provider_sender_numbers")
+      .update({ status: "inactive" })
+      .eq("provider", "mock")
+      .eq("phone_e164", MOCK_SENDER_SECONDARY);
+    expect(deactivateError).toBeNull();
+
+    const release = await releaseQueuedMessage(supabase, queue.messageId);
+    expect(release.status).toBe("db_error");
+    if (release.status === "db_error") {
+      expect(release.error).toMatch(/no longer active/i);
+    }
+
+    const { data: row } = await supabase
+      .from("messages")
+      .select("status, error_message")
+      .eq("id", queue.messageId)
+      .single();
+    expect(row?.status).toBe("failed");
+    expect(row?.error_message).toMatch(/no longer active/i);
+  });
+
+  it("release leaves the row queued when the mock sender inventory is empty (never synced)", async () => {
+    const { contactId, propertyId } = await seed({ withConsent: true });
+    const queue = await sendSmsToContact(supabase, {
+      contactId,
+      propertyId,
+      body: "queued before the first catalog sync",
+      queueOnly: true,
+    });
+    expect(queue.status).toBe("queued");
+    if (queue.status !== "queued") return;
+
+    // Simulate a never-synced org: drop every catalog row.
+    const { error: deleteError } = await supabase
+      .from("provider_sender_numbers")
+      .delete()
+      .eq("provider", "mock");
+    expect(deleteError).toBeNull();
+
+    const callsBefore = getMockMessageLog().length;
+    const release = await releaseQueuedMessage(supabase, queue.messageId);
+    expect(release.status).toBe("db_error");
+    if (release.status === "db_error") {
+      expect(release.error).toMatch(/never been synced/i);
+    }
+    expect(getMockMessageLog()).toHaveLength(callsBefore);
+
+    // Deferred, not failed: a later sync can unblock the row.
+    const { data: row } = await supabase
+      .from("messages")
+      .select("status, error_message, failed_at")
+      .eq("id", queue.messageId)
+      .single();
+    expect(row?.status).toBe("queued");
+    expect(row?.error_message).toBeNull();
+    expect(row?.failed_at).toBeNull();
+  });
+
+  // --------------------------------------------------------------------------
+  // STOP/DNC stays phone-level with multiple senders: opting out via ANY
+  // sender suppresses the contact phone for every sender.
+  // --------------------------------------------------------------------------
+
+  it("phone-level STOP received on one sender blocks sends and releases from every sender", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-06-08T18:00:00Z"));
+    try {
+      const phone = "+18165551899";
+      const { contactId, propertyId } = await seed({ phone, withConsent: true });
+      const orgId = await getOrgId();
+
+      // The contact has been messaged from BOTH senders.
+      const primarySend = await sendSmsToContact(supabase, {
+        contactId,
+        propertyId,
+        body: "hello from the primary sender",
+        from: MOCK_SENDER_PRIMARY,
+      });
+      expect(primarySend.status).toBe("sent");
+      const secondarySend = await sendSmsToContact(supabase, {
+        contactId,
+        propertyId,
+        body: "hello from the secondary sender",
+        from: MOCK_SENDER_SECONDARY,
+      });
+      expect(secondarySend.status).toBe("sent");
+
+      // A queued follow-up from the secondary sender is already waiting.
+      const queued = await sendSmsToContact(supabase, {
+        contactId,
+        propertyId,
+        body: "queued follow-up from secondary",
+        from: MOCK_SENDER_SECONDARY,
+        queueOnly: true,
+        scheduledFor: new Date(Date.now() - 1000),
+      });
+      expect(queued.status).toBe("queued");
+      if (queued.status !== "queued") return;
+
+      // STOP arrives (conceptually on the primary sender's thread) —
+      // the opt-out is keyed to the contact phone, not the sender.
+      await applyPhoneLevelOptOut(supabase, {
+        contactId,
+        fromPhone: phone,
+        orgId,
+        source: "integration-test-multi-sender-stop",
+        sourceDetail: { keyword: "stop", to: MOCK_SENDER_PRIMARY },
+        occurredAt: new Date(),
+        providerId: "mock",
+        surface: "stop",
+        idempotencyKey: `multi-sender-stop-${queued.messageId}`,
+      });
+
+      // New sends from EITHER sender are blocked.
+      const primaryAfterStop = await sendSmsToContact(supabase, {
+        contactId,
+        propertyId,
+        body: "should never send (primary)",
+        from: MOCK_SENDER_PRIMARY,
+      });
+      expect(primaryAfterStop.status).toBe("blocked_terminal_dispo");
+      const secondaryAfterStop = await sendSmsToContact(supabase, {
+        contactId,
+        propertyId,
+        body: "should never queue (secondary)",
+        from: MOCK_SENDER_SECONDARY,
+        queueOnly: true,
+      });
+      expect(secondaryAfterStop.status).toBe("blocked_terminal_dispo");
+
+      // The pre-existing queued row perma-fails at release.
+      const release = await releaseQueuedMessage(supabase, queued.messageId);
+      expect(release.status).toBe("blocked_terminal_dispo");
+      const { data: row } = await supabase
+        .from("messages")
+        .select("status")
+        .eq("id", queued.messageId)
+        .single();
+      expect(row?.status).toBe("failed");
     } finally {
       vi.useRealTimers();
     }

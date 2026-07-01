@@ -2,7 +2,7 @@
 
 import { PlusIcon } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { useMemo, useState, useTransition } from "react";
+import { useEffect, useMemo, useState, useTransition } from "react";
 
 import { AddBlockPicker } from "@/app/(dashboard)/properties/_components/add-block-picker";
 import { defaultBlockForKind } from "@/app/(dashboard)/properties/_components/filter-drawer";
@@ -21,6 +21,7 @@ import {
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { callAction } from "@/lib/errors/call-action";
+import type { DeliveryCatalog } from "@/lib/messaging/delivery";
 import {
   EMPTY_AUDIENCE_VALIDATION_MESSAGE,
   hasEffectiveAudience,
@@ -32,7 +33,12 @@ import {
   validateSmsPaceSeconds,
 } from "@/lib/messaging/pacing";
 
-import { createCampaign } from "./actions";
+import {
+  createCampaign,
+  listDeliveryOptions,
+  refreshDeliveryCatalog,
+} from "./actions";
+import { DeliverySelect } from "./delivery-select";
 
 type Props = {
   blockOptions: BlockOptions;
@@ -40,8 +46,14 @@ type Props = {
 };
 
 type ValidationErrors = Partial<
-  Record<"name" | "body" | "pace" | "audience", string>
+  Record<"name" | "body" | "pace" | "audience" | "delivery", string>
 >;
+
+const DELIVERY_ERROR_CODES = new Set([
+  "SENDER_REQUIRED",
+  "SENDER_NOT_APPROVED",
+  "PROVIDER_CAMPAIGN_NOT_FOUND",
+]);
 
 const DEFAULT_PACE_SECONDS = String(SMS_PACING_SECONDS.savedCampaignDefault);
 
@@ -70,6 +82,37 @@ export function CreateCampaignForm({
   const [errors, setErrors] = useState<ValidationErrors>({});
   const [pending, startTransition] = useTransition();
 
+  // Delivery setup — synced sender catalog loaded client-side on mount,
+  // same pattern as the bulk SMS modal's reference data.
+  const [catalog, setCatalog] = useState<DeliveryCatalog | null>(null);
+  const [catalogLoading, setCatalogLoading] = useState(true);
+  const [senderNumber, setSenderNumber] = useState("");
+  const [providerCampaignExternalId, setProviderCampaignExternalId] =
+    useState<string | null>(null);
+  const [syncing, setSyncing] = useState(false);
+
+  useEffect(() => {
+    listDeliveryOptions().then((result) => {
+      if (result.ok) setCatalog(result.data);
+      setCatalogLoading(false);
+    });
+  }, []);
+
+  const syncCatalog = () => {
+    if (syncing) return;
+    setSyncing(true);
+    void (async () => {
+      const result = await callAction(refreshDeliveryCatalog(), {
+        fallbackMessage: "Could not sync the provider catalog",
+      });
+      if (result.ok) {
+        const reloaded = await listDeliveryOptions();
+        if (reloaded.ok) setCatalog(reloaded.data);
+      }
+      setSyncing(false);
+    })();
+  };
+
   const audienceSummary = useMemo(() => {
     const parts: string[] = [];
     if (audienceSearch.trim()) parts.push(`search "${audienceSearch.trim()}"`);
@@ -93,6 +136,10 @@ export function CreateCampaignForm({
 
     if (!trimmedBody && !templateCategory) {
       nextErrors.body = "Write a message or choose a template pool.";
+    }
+
+    if (!senderNumber) {
+      nextErrors.delivery = "Choose a sending number.";
     }
 
     if (
@@ -129,6 +176,8 @@ export function CreateCampaignForm({
     setSkipIfContacted(false);
     setAudienceSearch("");
     setBlocks([]);
+    setSenderNumber("");
+    setProviderCampaignExternalId(null);
     setErrors({});
   };
 
@@ -151,6 +200,8 @@ export function CreateCampaignForm({
           templateCategory: templateCategory || null,
           paceSeconds: parsedPace,
           skipIfContacted,
+          senderNumber,
+          providerCampaignExternalId,
           audience: {
             search: audienceSearch.trim() || null,
             blockStack: blocks,
@@ -165,6 +216,11 @@ export function CreateCampaignForm({
       if (result.ok) {
         resetForm();
         router.refresh();
+      } else if (DELIVERY_ERROR_CODES.has(result.error.code)) {
+        setErrors((current) => ({
+          ...current,
+          delivery: result.error.message,
+        }));
       }
     });
   };
@@ -216,6 +272,28 @@ export function CreateCampaignForm({
               wins at launch.
             </p>
           </div>
+        </div>
+
+        <div className="border-border rounded-md border p-4">
+          <div className="mb-3">
+            <div className="text-sm font-medium">Delivery</div>
+            <div className="text-muted-foreground text-xs">
+              Which provider number this campaign sends from. Locked once the
+              first message queues.
+            </div>
+          </div>
+          <DeliverySelect
+            senderNumber={senderNumber}
+            onSenderNumberChange={(value) => setSenderNumber(value)}
+            providerCampaignExternalId={providerCampaignExternalId}
+            onProviderCampaignChange={setProviderCampaignExternalId}
+            catalog={catalog}
+            loading={catalogLoading}
+            error={errors.delivery}
+            disabled={pending}
+            onRefresh={syncCatalog}
+            syncing={syncing}
+          />
         </div>
 
         <div className="flex flex-col gap-1.5">
