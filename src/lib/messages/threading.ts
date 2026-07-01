@@ -598,10 +598,13 @@ async function loadCandidates(
   const baseQuery = () =>
     supabase
       .from("messages")
-      .select("conversation_id, property_id, created_at")
+      .select(
+        "conversation_id, property_id, created_at, properties!inner(deleted_at)",
+      )
       .eq("channel", "sms")
       .eq("contact_id", contactId)
       .not("property_id", "is", null)
+      .is("properties.deleted_at", null)
       .order("created_at", { ascending: false })
       .limit(50);
 

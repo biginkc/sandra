@@ -1,4 +1,22 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+const dispatchAiResponseSpy = vi.hoisted(() =>
+  vi.fn(async () => ({
+    outcome: "skipped" as const,
+    reason: "no_config",
+  })),
+);
+
+vi.mock("@/lib/ai-responder/dispatch", async () => {
+  const actual = await vi.importActual<typeof import("@/lib/ai-responder/dispatch")>(
+    "@/lib/ai-responder/dispatch",
+  );
+
+  return {
+    ...actual,
+    dispatchAiResponse: dispatchAiResponseSpy,
+  };
+});
 
 import { createTestClient } from "@tests/integration/client";
 import { resetTenantTables } from "@tests/integration/reset";
@@ -45,6 +63,33 @@ async function expectNoMessageOrWebhookReservation(externalId: string) {
   expect(eventCount).toBe(0);
 }
 
+function makeSendilloInboundRequest(input: {
+  messageId: string;
+  from: string;
+  to?: string;
+  body?: string;
+  receivedAt?: string;
+}) {
+  return new Request("https://example.invalid/api/webhooks/sendillo/sms", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-sendillo-webhook-secret": "sendillo-secret",
+    },
+    body: JSON.stringify({
+      event: "inbound.received",
+      data: {
+        messageId: input.messageId,
+        from: input.from,
+        to: input.to ?? "+18164876899",
+        body: input.body ?? "Tell me more",
+        type: "SMS",
+        receivedAt: input.receivedAt ?? "2026-06-08T19:10:39.257Z",
+      },
+    }),
+  });
+}
+
 describe("POST /api/webhooks/sendillo/sms (integration)", () => {
   beforeEach(async () => {
     delete process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -54,6 +99,7 @@ describe("POST /api/webhooks/sendillo/sms (integration)", () => {
     process.env.SENDILLO_FROM_NUMBER = "+18164876899";
     process.env.SENDILLO_WEBHOOK_SECRET = "sendillo-secret";
     process.env.SKIP_INTENT_GATE = "1";
+    dispatchAiResponseSpy.mockClear();
     await resetTenantTables(supabase);
   });
 
@@ -387,6 +433,165 @@ describe("POST /api/webhooks/sendillo/sms (integration)", () => {
       status: "side_effects_complete",
     });
     expect(contactId).toBeTruthy();
+  });
+
+  it("resolves to the only active property when another Sendillo history property is soft-deleted", async () => {
+    const phone = "+18165550107";
+    const contactId = await seedContact(phone);
+    const { data: activeProperty } = await supabase
+      .from("properties")
+      .insert({
+        address: "6 Active Sendillo Ln",
+        state: "MO",
+        status: "new_lead",
+        homeowner_contact_id: contactId,
+      })
+      .select("id")
+      .single();
+    const { data: deletedProperty } = await supabase
+      .from("properties")
+      .insert({
+        address: "7 Deleted Canary Ln",
+        state: "MO",
+        status: "new_lead",
+        homeowner_contact_id: contactId,
+        deleted_at: "2026-06-08T19:00:00.000Z",
+      })
+      .select("id")
+      .single();
+
+    await supabase.from("messages").insert([
+      {
+        channel: "sms",
+        direction: "outbound",
+        status: "sent",
+        provider: "sendillo",
+        from_address: "+18164876899",
+        to_address: phone,
+        body: "active outbound",
+        contact_id: contactId,
+        property_id: activeProperty!.id,
+      },
+      {
+        channel: "sms",
+        direction: "outbound",
+        status: "sent",
+        provider: "sendillo",
+        from_address: "+18164876899",
+        to_address: phone,
+        body: "old canary outbound",
+        contact_id: contactId,
+        property_id: deletedProperty!.id,
+      },
+    ]);
+
+    const res = await POST(
+      makeSendilloInboundRequest({
+        messageId: "snd_soft_deleted_candidate_001",
+        from: phone,
+      }),
+    );
+    expect(res.status).toBe(200);
+
+    const { data: message } = await supabase
+      .from("messages")
+      .select("contact_id, property_id, metadata")
+      .eq("external_id", "snd_soft_deleted_candidate_001")
+      .single();
+    expect(message).toMatchObject({
+      contact_id: contactId,
+      property_id: activeProperty!.id,
+      metadata: {
+        routing: "matched_recipient_number",
+      },
+    });
+    expect(dispatchAiResponseSpy).toHaveBeenCalledTimes(1);
+    expect(dispatchAiResponseSpy).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        contactId,
+        propertyId: activeProperty!.id,
+        inboundMessageId: expect.any(String),
+      }),
+      expect.anything(),
+    );
+  });
+
+  it("keeps a Sendillo reply propertyless and skips AI when active histories are ambiguous", async () => {
+    const phone = "+18165550108";
+    const contactId = await seedContact(phone);
+    const { data: propertyA } = await supabase
+      .from("properties")
+      .insert({
+        address: "8 Active Ambiguous A Ln",
+        state: "MO",
+        status: "new_lead",
+        homeowner_contact_id: contactId,
+      })
+      .select("id")
+      .single();
+    const { data: propertyB } = await supabase
+      .from("properties")
+      .insert({
+        address: "9 Active Ambiguous B Ln",
+        state: "MO",
+        status: "new_lead",
+        homeowner_contact_id: contactId,
+      })
+      .select("id")
+      .single();
+
+    await supabase.from("messages").insert([
+      {
+        channel: "sms",
+        direction: "outbound",
+        status: "sent",
+        provider: "sendillo",
+        from_address: "+18164876899",
+        to_address: phone,
+        body: "active outbound a",
+        contact_id: contactId,
+        property_id: propertyA!.id,
+      },
+      {
+        channel: "sms",
+        direction: "outbound",
+        status: "sent",
+        provider: "sendillo",
+        from_address: "+18164876899",
+        to_address: phone,
+        body: "active outbound b",
+        contact_id: contactId,
+        property_id: propertyB!.id,
+      },
+    ]);
+
+    const res = await POST(
+      makeSendilloInboundRequest({
+        messageId: "snd_active_ambiguous_001",
+        from: phone,
+      }),
+    );
+    expect(res.status).toBe(200);
+
+    const { data: message } = await supabase
+      .from("messages")
+      .select("contact_id, property_id, metadata")
+      .eq("external_id", "snd_active_ambiguous_001")
+      .single();
+    expect(message).toMatchObject({
+      contact_id: contactId,
+      property_id: null,
+      metadata: {
+        routing: "ambiguous_recipient_number",
+      },
+    });
+    expect(message?.metadata).not.toMatchObject({
+      processing: {
+        aiResponder: expect.anything(),
+      },
+    });
+    expect(dispatchAiResponseSpy).not.toHaveBeenCalled();
   });
 
   it("treats the same Sendillo body outside the burst window as a real second inbound", async () => {
