@@ -114,7 +114,7 @@ describe("sendSmsToContact (integration)", () => {
       10,
     );
     if (hour < 8 || hour >= 21) {
-       
+
       console.warn("sendSmsToContact happy-path test skipped — outside 8a–9p CT");
       return;
     }
@@ -585,7 +585,7 @@ describe("sendSmsToContact (integration)", () => {
       10,
     );
     if (hour < 8 || hour >= 21) {
-       
+
       console.warn("conversation_id reuse test skipped — outside 8a–9p CT");
       return;
     }
@@ -634,7 +634,7 @@ describe("sendSmsToContact (integration)", () => {
       10,
     );
     if (hour < 8 || hour >= 21) {
-       
+
       console.warn("queue release happy-path test skipped — outside 8a–9p CT");
       return;
     }

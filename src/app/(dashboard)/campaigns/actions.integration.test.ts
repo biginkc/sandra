@@ -43,14 +43,14 @@ vi.spyOn(testClient.auth, "getUser").mockImplementation(async () =>
 const SAFE_NOW = new Date("2026-06-14T18:00:00Z");
 const createdAuthUsers: string[] = [];
 
- 
+
 import {
   archiveCampaign,
   createCampaign,
   launchCampaign,
   unarchiveCampaign,
 } from "./actions";
- 
+
 import { bulkSmsWorkflow } from "@/workflows/bulk-sms";
 
 function sortIds(ids?: Array<string | null | undefined>): string[] {
@@ -640,6 +640,67 @@ describe("createCampaign / archiveCampaign / unarchiveCampaign (integration)", (
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.error.code).toBe("PROVIDER_CAMPAIGN_NOT_FOUND");
+  });
+
+  it("revive of a legacy campaign with outbound rows but NO stored sender applies the chosen Delivery", async () => {
+    const orgId = await getOrgId();
+    const email = uniqueCampaignEmail("campaign-legacy-revive");
+    const userId = await createAuthUser(email);
+    currentUserId = userId;
+    currentEmail = email;
+
+    // Pre-Delivery legacy shape: archived campaign with outbound rows
+    // but sender columns null (created before the feature existed).
+    const { data: legacy } = await testClient
+      .from("campaigns")
+      .insert({
+        org_id: orgId,
+        name: "Legacy Revive Target",
+        channel: "sms",
+        status: "archived",
+        archived_at: new Date().toISOString(),
+      })
+      .select("id")
+      .single();
+    if (!legacy) throw new Error("legacy campaign seed failed");
+    const { error: msgError } = await testClient.from("messages").insert({
+      org_id: orgId,
+      channel: "sms",
+      direction: "outbound",
+      status: "sent",
+      campaign_id: legacy.id,
+      from_address: "+18165550001",
+      to_address: "+18165550778",
+      body: "legacy outbound",
+    });
+    expect(msgError).toBeNull();
+
+    const revived = await createCampaign({
+      name: "legacy revive target",
+      body: "Fresh body",
+      senderNumber: MOCK_SENDER_SECONDARY,
+      paceSeconds: 18,
+      audience: {
+        search: null,
+        blockStack: [{ id: "vacancy-legacy", kind: "vacancy", tri: "yes" }],
+      },
+    });
+
+    // Nothing snapshotted to protect — the chosen Delivery applies and
+    // becomes the locked sender going forward.
+    expect(revived.ok).toBe(true);
+    if (!revived.ok) return;
+    expect(revived.data.id).toBe(legacy.id);
+    const { data: row } = await testClient
+      .from("campaigns")
+      .select("status, sender_provider, sender_number")
+      .eq("id", legacy.id)
+      .single();
+    expect(row).toMatchObject({
+      status: "active",
+      sender_provider: "mock",
+      sender_number: MOCK_SENDER_SECONDARY,
+    });
   });
 
   it("locks the sender on a revived campaign that already queued messages (SENDER_LOCKED)", async () => {

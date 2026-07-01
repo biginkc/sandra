@@ -1396,6 +1396,47 @@ describe("bulkQueueSms (integration)", () => {
     expect(count).toBe(0);
   });
 
+  it("fails closed when the campaign's Delivery provider is not the active messaging provider", async () => {
+    const orgId = await getOrgId();
+    const lead = await seedLead({
+      phone: "+18165552047",
+      address: "1 Wrong Provider St",
+    });
+    // Snapshot says sendillo; the active test provider is mock.
+    const { data: campaign } = await testClient
+      .from("campaigns")
+      .insert({
+        org_id: orgId,
+        name: "Wrong Provider Campaign",
+        channel: "sms",
+        status: "launching",
+        sender_provider: "sendillo",
+        sender_number: MOCK_SENDER_PRIMARY,
+      })
+      .select("id")
+      .single();
+    if (!campaign) throw new Error("campaign seed failed");
+    await testClient.from("campaign_recipients").insert({
+      campaign_id: campaign.id,
+      property_id: lead.propertyId,
+      contact_id: lead.contactId,
+    });
+
+    const result = await bulkQueueSms([lead.propertyId], {
+      body: "Should never queue",
+      campaignId: campaign.id,
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.message).toContain("configured for provider sendillo");
+
+    const { count } = await testClient
+      .from("messages")
+      .select("*", { count: "exact", head: true });
+    expect(count).toBe(0);
+  });
+
   it("rejects the saved-campaign path with SENDER_LOCKED when the requested sender differs from the stored one", async () => {
     const orgId = await getOrgId();
     const lead = await seedLead({

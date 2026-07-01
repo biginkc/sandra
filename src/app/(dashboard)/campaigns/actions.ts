@@ -1041,11 +1041,17 @@ export async function createCampaign(
           },
         };
       }
-      const revivedLocked = (revivedMessageCount ?? 0) > 0;
+      // The lock protects the stored sender snapshot. A legacy locked
+      // campaign with NO stored sender has nothing to protect — the
+      // chosen Delivery applies and becomes the locked sender going
+      // forward (this is the documented archive-and-recreate path for
+      // pre-Delivery campaigns).
+      const revivedLocked =
+        (revivedMessageCount ?? 0) > 0 &&
+        Boolean(archivedCandidate.sender_number);
       if (
         revivedLocked &&
-        archivedCandidate.sender_number &&
-        normalizeSenderNumber(archivedCandidate.sender_number) !==
+        normalizeSenderNumber(archivedCandidate.sender_number!) !==
           delivery.senderNumber
       ) {
         return {

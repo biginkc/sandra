@@ -17,6 +17,7 @@ import {
   loadCampaignDeliverySettings,
   normalizeSenderNumber,
 } from "@/lib/messaging/delivery";
+import { getMessagingProvider } from "@/lib/messaging/registry";
 import { sendSmsToContact } from "@/lib/messaging/send";
 import { pickFromPool } from "@/lib/templates/pool";
 import { loadTemplateVars } from "@/lib/sequences/template-vars";
@@ -148,6 +149,22 @@ export async function queueSmsBatch(
   if (!delivery.senderNumber) {
     throw new Error(
       "Campaign has no sending number. Set Delivery (sending number) before queueing SMS.",
+    );
+  }
+  // The provider is part of the campaign's Delivery snapshot. If the
+  // configured provider has changed since the campaign was set up, fail
+  // closed instead of stamping the old sender under the new provider —
+  // release would either fail those rows or send through the wrong
+  // adapter.
+  const currentProvider = getMessagingProvider();
+  if (
+    delivery.senderProvider &&
+    delivery.senderProvider !== currentProvider?.providerId
+  ) {
+    throw new Error(
+      `Campaign Delivery is configured for provider ${delivery.senderProvider}, ` +
+        `but the active messaging provider is ${currentProvider?.providerId ?? "off"}. ` +
+        "Re-create the campaign under the active provider before queueing.",
     );
   }
   const senderNumber = normalizeSenderNumber(delivery.senderNumber);
