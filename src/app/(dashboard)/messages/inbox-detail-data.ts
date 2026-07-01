@@ -50,7 +50,7 @@ export async function fetchInboxDetail(
     .select("*")
     .eq("channel", "sms")
     .eq("conversation_id", conversationId)
-    .neq("status", "queued")
+    .not("status", "in", "(queued,paused)")
     .order("created_at", { ascending: false })
     .limit(100);
   if (error || !newestMessages || newestMessages.length === 0) return null;

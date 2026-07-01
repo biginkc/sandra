@@ -12,6 +12,7 @@ import { useQueueStats } from "./use-queue-stats";
 
 type Stats = {
   queued: number;
+  paused: number;
   sentOutToday: number;
   failedToday: number;
   nextScheduledFor: string | null;
@@ -21,6 +22,7 @@ type Stats = {
 function makeStats(overrides: Partial<Stats> = {}): Stats {
   return {
     queued: 0,
+    paused: 0,
     sentOutToday: 0,
     failedToday: 0,
     nextScheduledFor: null,

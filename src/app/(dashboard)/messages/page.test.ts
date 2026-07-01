@@ -116,6 +116,7 @@ describe("MessagesPage filter-count boundary", () => {
       ok: true,
       data: {
         queued: 0,
+        paused: 0,
         sentOutToday: 0,
         failedToday: 0,
         nextScheduledFor: null,

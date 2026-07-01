@@ -93,15 +93,30 @@ export type CampaignCadenceChangeResult = {
   startAfterSeconds: number;
 };
 
+export type CampaignQueuePauseResult = {
+  affectedCount: number;
+  pendingCount: number;
+  pausedCount: number;
+};
+
 type CampaignCadenceRpcRow = {
   affected_count: number | string | null;
   first_scheduled_for: string | null;
   last_scheduled_for: string | null;
 };
 
+type CampaignQueuePauseRpcRow = {
+  affected_count: number | string | null;
+  pending_count: number | string | null;
+  paused_count: number | string | null;
+};
+
 type CampaignCadenceRpcName =
   | "preview_campaign_cadence_reschedule"
-  | "apply_campaign_cadence_reschedule";
+  | "apply_campaign_cadence_reschedule"
+  | "resume_campaign_queue";
+
+type CampaignPauseRpcName = "pause_campaign_queue";
 
 type CampaignCadenceRpcClient = {
   rpc: (
@@ -114,6 +129,19 @@ type CampaignCadenceRpcClient = {
     },
   ) => Promise<{
     data: CampaignCadenceRpcRow[] | null;
+    error: { message: string } | null;
+  }>;
+};
+
+type CampaignPauseRpcClient = {
+  rpc: (
+    fn: CampaignPauseRpcName,
+    args: {
+      p_campaign_id: string;
+      p_operator_confirmed: boolean;
+    },
+  ) => Promise<{
+    data: CampaignQueuePauseRpcRow[] | null;
     error: { message: string } | null;
   }>;
 };
@@ -361,7 +389,7 @@ async function campaignExists(
   return ok(Boolean(data?.id));
 }
 
-async function requireCampaignCadenceAccess(
+async function requireCampaignAccess(
   campaignId: string,
 ): Promise<Result<null>> {
   const supabase = await createClient();
@@ -399,10 +427,7 @@ async function requireCampaignCadenceAccess(
   return ok(null);
 }
 
-function validateCadenceChangeInput(
-  campaignId: string,
-  paceSeconds: number,
-): Result<{ campaignId: string; paceSeconds: number }> {
+function validateCampaignId(campaignId: string): Result<string> {
   const trimmedCampaignId = campaignId.trim();
   if (!trimmedCampaignId) {
     return {
@@ -410,6 +435,16 @@ function validateCadenceChangeInput(
       error: { code: "VALIDATION", message: "Campaign id is required." },
     };
   }
+
+  return ok(trimmedCampaignId);
+}
+
+function validateCadenceChangeInput(
+  campaignId: string,
+  paceSeconds: number,
+): Result<{ campaignId: string; paceSeconds: number }> {
+  const id = validateCampaignId(campaignId);
+  if (!id.ok) return id;
 
   const validation = validateSmsPaceSeconds(paceSeconds, {
     mode: "saved_campaign",
@@ -422,7 +457,7 @@ function validateCadenceChangeInput(
   }
 
   return ok({
-    campaignId: trimmedCampaignId,
+    campaignId: id.data,
     paceSeconds: validation.paceSeconds,
   });
 }
@@ -437,6 +472,16 @@ function normalizeCadenceRpcRow(
     lastScheduledFor: row?.last_scheduled_for ?? null,
     paceSeconds,
     startAfterSeconds: CADENCE_RESCHEDULE_START_AFTER_SECONDS,
+  };
+}
+
+function normalizePauseRpcRow(
+  row: CampaignQueuePauseRpcRow | undefined,
+): CampaignQueuePauseResult {
+  return {
+    affectedCount: Number(row?.affected_count ?? 0),
+    pendingCount: Number(row?.pending_count ?? 0),
+    pausedCount: Number(row?.paused_count ?? 0),
   };
 }
 
@@ -507,7 +552,7 @@ export async function applyCampaignCadenceChange(
   if (!input.ok) return input;
 
   try {
-    const access = await requireCampaignCadenceAccess(input.data.campaignId);
+    const access = await requireCampaignAccess(input.data.campaignId);
     if (!access.ok) return access;
 
     const result = await runCadenceRpc(
@@ -519,12 +564,100 @@ export async function applyCampaignCadenceChange(
     );
     if (result.ok) {
       revalidatePath(`/campaigns/${input.data.campaignId}`);
+      revalidatePath("/campaigns");
       revalidatePath("/messages");
     }
     return result;
   } catch (e) {
     reportError(e, { tags: { surface: "apply_campaign_cadence_change" } });
     return errFromUnknown(e, "CADENCE_CHANGE_FAILED");
+  }
+}
+
+export async function pauseCampaignSends(
+  campaignId: string,
+  operatorConfirmed: boolean,
+): Promise<Result<CampaignQueuePauseResult>> {
+  if (operatorConfirmed !== true) {
+    return {
+      ok: false,
+      error: {
+        code: "OPERATOR_CONFIRMATION_REQUIRED",
+        message:
+          "Confirm that campaign sends should pause before stopping queued messages.",
+      },
+    };
+  }
+
+  const id = validateCampaignId(campaignId);
+  if (!id.ok) return id;
+
+  try {
+    const access = await requireCampaignAccess(id.data);
+    if (!access.ok) return access;
+
+    const rpc = createAdminClient() as unknown as CampaignPauseRpcClient;
+    const { data, error } = await rpc.rpc("pause_campaign_queue", {
+      p_campaign_id: id.data,
+      p_operator_confirmed: true,
+    });
+
+    if (error) {
+      return {
+        ok: false,
+        error: { code: "CAMPAIGN_PAUSE_FAILED", message: error.message },
+      };
+    }
+
+    revalidatePath(`/campaigns/${id.data}`);
+    revalidatePath("/campaigns");
+    revalidatePath("/messages");
+    return ok(normalizePauseRpcRow(data?.[0]));
+  } catch (e) {
+    reportError(e, { tags: { surface: "pause_campaign_sends" } });
+    return errFromUnknown(e, "CAMPAIGN_PAUSE_FAILED");
+  }
+}
+
+export async function resumeCampaignSends(
+  campaignId: string,
+  paceSeconds: number,
+  operatorConfirmed: boolean,
+): Promise<Result<CampaignCadenceChangeResult>> {
+  if (operatorConfirmed !== true) {
+    return {
+      ok: false,
+      error: {
+        code: "OPERATOR_CONFIRMATION_REQUIRED",
+        message:
+          "Confirm that paused campaign sends should resume before rescheduling messages.",
+      },
+    };
+  }
+
+  const input = validateCadenceChangeInput(campaignId, paceSeconds);
+  if (!input.ok) return input;
+
+  try {
+    const access = await requireCampaignAccess(input.data.campaignId);
+    if (!access.ok) return access;
+
+    const result = await runCadenceRpc(
+      "resume_campaign_queue",
+      input.data.campaignId,
+      input.data.paceSeconds,
+      true,
+      createAdminClient() as unknown as CampaignCadenceRpcClient,
+    );
+    if (result.ok) {
+      revalidatePath(`/campaigns/${input.data.campaignId}`);
+      revalidatePath("/campaigns");
+      revalidatePath("/messages");
+    }
+    return result;
+  } catch (e) {
+    reportError(e, { tags: { surface: "resume_campaign_sends" } });
+    return errFromUnknown(e, "CAMPAIGN_RESUME_FAILED");
   }
 }
 
@@ -1213,6 +1346,15 @@ export async function previewCampaignLaunch(
         },
       };
     }
+    if (campaign.status === "paused") {
+      return {
+        ok: false,
+        error: {
+          code: "CAMPAIGN_PAUSED",
+          message: "Paused campaigns cannot build or send more queued messages until resumed.",
+        },
+      };
+    }
 
     const rowsResult = await resolvePreviewRecipientRows(campaignId, campaign);
     if (!rowsResult.ok) return rowsResult;
@@ -1335,6 +1477,15 @@ export async function launchCampaign(
         error: {
           code: "CAMPAIGN_ARCHIVED",
           message: "Archived campaigns cannot be launched.",
+        },
+      };
+    }
+    if (campaign.status === "paused") {
+      return {
+        ok: false,
+        error: {
+          code: "CAMPAIGN_PAUSED",
+          message: "Resume the campaign before launching or continuing queue setup.",
         },
       };
     }

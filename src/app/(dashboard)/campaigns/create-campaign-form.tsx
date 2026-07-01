@@ -256,7 +256,7 @@ export function CreateCampaignForm({
             ) : (
               <p className="text-muted-foreground text-xs">
                 {SMS_PACING_SECONDS.savedCampaignDefault} seconds default, or{" "}
-                {SMS_PACING_SECONDS.customMin} to {SMS_PACING_SECONDS.max}{" "}
+                {SMS_PACING_SECONDS.savedCampaignMin} to {SMS_PACING_SECONDS.max}{" "}
                 seconds custom.
               </p>
             )}

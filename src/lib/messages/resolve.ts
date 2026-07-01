@@ -630,7 +630,7 @@ async function restampSourceMessages(
     .eq("conversation_id", input.sourceConversationId)
     .eq("contact_id", input.contactId)
     .is("property_id", null)
-    .neq("status", "queued")
+    .not("status", "in", "(queued,paused)")
     .select("id");
   if (error) {
     return err({ code: "MESSAGE_UPDATE_FAILED", message: error.message });

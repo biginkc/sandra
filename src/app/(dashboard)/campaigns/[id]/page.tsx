@@ -113,6 +113,10 @@ export default async function CampaignDetailPage({
           <CampaignOperationsPanel stats={liveStats} />
           <CampaignCadenceControl
             campaignId={campaign.id}
+            campaignStatus={campaign.status}
+            queuedCount={liveStats.queued}
+            pausedCount={liveStats.paused}
+            pendingCount={liveStats.pending}
             currentPaceSeconds={campaign.pace_seconds}
           />
         </>
@@ -181,6 +185,7 @@ function toOperationsStats(args: {
     campaignStatus: args.campaign.status,
     audience: args.kpis.audience,
     queued: args.metrics.queued,
+    paused: args.metrics.paused,
     dueQueued: args.metrics.dueQueued,
     pending: args.metrics.pending,
     sent: args.metrics.sent,
@@ -235,6 +240,8 @@ function formatCampaignSetupBadge(campaign: Campaign): string {
       return "Queue setup: building";
     case "active":
       return "Queue setup: not launched";
+    case "paused":
+      return "Sends paused";
     case "failed":
       return "Queue setup: failed";
     default:

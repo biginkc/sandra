@@ -39,7 +39,9 @@ vi.mock("@/lib/errors/report", () => ({
 
 import {
   applyCampaignCadenceChange,
+  pauseCampaignSends,
   previewCampaignCadenceChange,
+  resumeCampaignSends,
 } from "./actions";
 
 const rpcRow = {
@@ -130,6 +132,55 @@ describe("campaign cadence actions", () => {
       p_operator_confirmed: true,
     });
     expect(revalidatePath).toHaveBeenCalledWith("/campaigns/campaign-1");
+    expect(revalidatePath).toHaveBeenCalledWith("/campaigns");
+    expect(revalidatePath).toHaveBeenCalledWith("/messages");
+  });
+
+  it("pauses campaign sends through the service RPC only when confirmed and authorized", async () => {
+    const rpc = vi.fn().mockResolvedValue({
+      data: [{ affected_count: "9", pending_count: "2", paused_count: "9" }],
+      error: null,
+    });
+    createClient.mockResolvedValue(campaignLookupClient("org-1"));
+    getCallerMemberships.mockResolvedValue([
+      { user_id: "user-1", org_id: "org-1", role: "member" },
+    ]);
+    createAdminClient.mockReturnValue({ rpc });
+
+    const result = await pauseCampaignSends("campaign-1", true);
+
+    expect(result).toEqual({
+      ok: true,
+      data: { affectedCount: 9, pendingCount: 2, pausedCount: 9 },
+    });
+    expect(rpc).toHaveBeenCalledWith("pause_campaign_queue", {
+      p_campaign_id: "campaign-1",
+      p_operator_confirmed: true,
+    });
+    expect(revalidatePath).toHaveBeenCalledWith("/campaigns/campaign-1");
+    expect(revalidatePath).toHaveBeenCalledWith("/campaigns");
+    expect(revalidatePath).toHaveBeenCalledWith("/messages");
+  });
+
+  it("resumes paused campaign sends through the service RPC with cadence", async () => {
+    const rpc = vi.fn().mockResolvedValue({ data: [rpcRow], error: null });
+    createClient.mockResolvedValue(campaignLookupClient("org-1"));
+    getCallerMemberships.mockResolvedValue([
+      { user_id: "user-1", org_id: "org-1", role: "member" },
+    ]);
+    createAdminClient.mockReturnValue({ rpc });
+
+    const result = await resumeCampaignSends("campaign-1", 2, true);
+
+    expect(result.ok).toBe(true);
+    expect(rpc).toHaveBeenCalledWith("resume_campaign_queue", {
+      p_campaign_id: "campaign-1",
+      p_pace_seconds: 2,
+      p_start_after_seconds: 300,
+      p_operator_confirmed: true,
+    });
+    expect(revalidatePath).toHaveBeenCalledWith("/campaigns/campaign-1");
+    expect(revalidatePath).toHaveBeenCalledWith("/campaigns");
     expect(revalidatePath).toHaveBeenCalledWith("/messages");
   });
 });

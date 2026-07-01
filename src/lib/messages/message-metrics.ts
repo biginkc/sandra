@@ -38,6 +38,7 @@ export type OutboundSmsMetricsScope = {
 export type OutboundSmsMetrics = {
   outboundRows: number;
   queued: number;
+  paused: number;
   dueQueued: number;
   pending: number;
   sent: number;
@@ -216,6 +217,7 @@ export async function getOutboundSmsMetrics(
   const [
     outboundRows,
     queued,
+    paused,
     dueQueued,
     pending,
     sent,
@@ -230,6 +232,7 @@ export async function getOutboundSmsMetrics(
   ] = await Promise.all([
     outboundCountQuery(supabase, scope),
     outboundCountQuery(supabase, scope).eq("status", "queued"),
+    outboundCountQuery(supabase, scope).eq("status", "paused"),
     outboundCountQuery(supabase, scope)
       .eq("status", "queued")
       .not("scheduled_for", "is", null)
@@ -279,6 +282,7 @@ export async function getOutboundSmsMetrics(
   return {
     outboundRows: assertCount("outboundRows", outboundRows),
     queued: assertCount("queued", queued),
+    paused: assertCount("paused", paused),
     dueQueued: assertCount("dueQueued", dueQueued),
     pending: assertCount("pending", pending),
     sent: sentCount,

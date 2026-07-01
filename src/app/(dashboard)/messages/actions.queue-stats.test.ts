@@ -23,6 +23,7 @@ import { getQueueStats } from "./actions";
 const metrics = {
   outboundRows: 19,
   queued: 42,
+  paused: 4,
   dueQueued: 3,
   pending: 1,
   sent: 7,
@@ -57,6 +58,7 @@ describe("getQueueStats", () => {
       ok: true,
       data: {
         queued: 42,
+        paused: 4,
         sentOutToday: 9,
         failedToday: 1,
         nextScheduledFor: "2026-06-30T18:00:00.000Z",

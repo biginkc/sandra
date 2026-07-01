@@ -61,6 +61,18 @@ async function completeCampaign(
   campaignId: string,
 ): Promise<void> {
   const supabase = createAdminClient();
+  const { data: current, error: currentError } = await supabase
+    .from("campaigns")
+    .select("status")
+    .eq("id", campaignId)
+    .maybeSingle();
+  if (currentError) {
+    throw new Error(`bulk-sms workflow: failed to load campaign ${campaignId}: ${currentError.message}`);
+  }
+  if (current?.status === "paused") {
+    return;
+  }
+
   const { data, error } = await supabase
     .from("campaigns")
     .update({
@@ -143,7 +155,11 @@ async function loadBulkSmsJob(jobId: string): Promise<LoadedBulkSmsJob> {
       `bulk-sms workflow: campaign ${campaignId} does not match job org`,
     );
   }
-  if (campaign.status !== "launching" && campaign.status !== "completed") {
+  if (
+    campaign.status !== "launching" &&
+    campaign.status !== "completed" &&
+    campaign.status !== "paused"
+  ) {
     throw new Error(
       `bulk-sms workflow: campaign ${campaignId} is not launchable`,
     );
