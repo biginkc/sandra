@@ -265,6 +265,27 @@ describe("resolveDeliverySelection (integration)", () => {
     expect(result.error.code).toBe("SENDER_NOT_APPROVED");
   });
 
+  it("rejects a sender approved only under a different provider with SENDER_NOT_APPROVED", async () => {
+    const orgId = await getOrgId();
+    // Active catalog row exists, but for a provider that is not the
+    // currently configured one (mock) — must not be selectable.
+    await seedSenderCatalog(supabase, orgId, ["+15550007777"], {
+      provider: "sendillo",
+      status: "active",
+    });
+
+    const result = await resolveDeliverySelection(
+      supabase,
+      orgId,
+      "+15550007777",
+      null,
+    );
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe("SENDER_NOT_APPROVED");
+  });
+
   it("rejects a soft-deactivated (inactive) sender with SENDER_NOT_APPROVED", async () => {
     const orgId = await getOrgId();
     await seedSenderCatalog(supabase, orgId, [MOCK_SENDER_PRIMARY], {

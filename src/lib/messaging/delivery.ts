@@ -331,10 +331,37 @@ export async function resolveDeliverySelection(
     };
   }
 
+  // Scope to the CURRENT provider — a number that is only approved under
+  // a previously-configured provider must not be selectable, or queued
+  // rows would stamp a sender the active provider can't release.
+  let currentProvider: MessagingProvider | null;
+  try {
+    currentProvider = getMessagingProvider();
+  } catch (e) {
+    return {
+      ok: false,
+      error: {
+        code: "DELIVERY_LOOKUP_FAILED",
+        message: e instanceof Error ? e.message : String(e),
+      },
+    };
+  }
+  if (!currentProvider) {
+    return {
+      ok: false,
+      error: {
+        code: "DELIVERY_LOOKUP_FAILED",
+        message:
+          "Messaging is off — set MESSAGING_PROVIDER before configuring Delivery.",
+      },
+    };
+  }
+
   const { data: senderRows, error: senderError } = await client
     .from("provider_sender_numbers")
     .select("provider, phone_e164, status")
     .eq("org_id", orgId)
+    .eq("provider", currentProvider.providerId)
     .eq("phone_e164", senderNumber);
   if (senderError) {
     return {

@@ -13,6 +13,7 @@ import {
 } from "@/lib/messaging/bulk-queue";
 import {
   loadDeliveryCatalog,
+  normalizeSenderNumber,
   resolveDeliverySelection,
   syncProviderCatalog,
   type CatalogSyncResult,
@@ -1044,7 +1045,8 @@ export async function createCampaign(
       if (
         revivedLocked &&
         archivedCandidate.sender_number &&
-        archivedCandidate.sender_number !== delivery.senderNumber
+        normalizeSenderNumber(archivedCandidate.sender_number) !==
+          delivery.senderNumber
       ) {
         return {
           ok: false,
