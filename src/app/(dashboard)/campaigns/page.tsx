@@ -24,7 +24,13 @@ export const CAMPAIGNS_SORTABLE_COLUMNS = [
   "created_at",
 ] as const;
 
-type CampaignStatus = "active" | "launching" | "paused" | "completed" | "archived";
+type CampaignStatus =
+  | "active"
+  | "launching"
+  | "paused"
+  | "completed"
+  | "failed"
+  | "archived";
 
 const CAMPAIGNS_BUILD_CONFIG = {
   defaultSort: "created_at" as const,
