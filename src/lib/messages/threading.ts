@@ -622,9 +622,10 @@ async function loadCandidates(
     }
     for (const row of result.data ?? []) {
       if (!row.property_id) continue;
-      // Dedup key, local to this scan: conversation id when stamped,
-      // else the property (contactId is fixed for the whole call).
-      const key = row.conversation_id ?? `prop:${row.property_id}`;
+      // The resolver must decide how many active properties could own the
+      // reply. A bad historical conversation id shared by multiple properties
+      // must stay ambiguous instead of collapsing to the latest row.
+      const key = row.property_id;
       if (!byKey.has(key)) {
         byKey.set(key, {
           conversationId: row.conversation_id,

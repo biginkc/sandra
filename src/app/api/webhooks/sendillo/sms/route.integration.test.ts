@@ -520,6 +520,7 @@ describe("POST /api/webhooks/sendillo/sms (integration)", () => {
   it("keeps a Sendillo reply propertyless and skips AI when active histories are ambiguous", async () => {
     const phone = "+18165550108";
     const contactId = await seedContact(phone);
+    const sharedConversationId = "11111111-2222-4333-8444-555555555555";
     const { data: propertyA } = await supabase
       .from("properties")
       .insert({
@@ -552,6 +553,7 @@ describe("POST /api/webhooks/sendillo/sms (integration)", () => {
         body: "active outbound a",
         contact_id: contactId,
         property_id: propertyA!.id,
+        conversation_id: sharedConversationId,
       },
       {
         channel: "sms",
@@ -563,6 +565,7 @@ describe("POST /api/webhooks/sendillo/sms (integration)", () => {
         body: "active outbound b",
         contact_id: contactId,
         property_id: propertyB!.id,
+        conversation_id: sharedConversationId,
       },
     ]);
 
