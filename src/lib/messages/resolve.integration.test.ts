@@ -21,6 +21,7 @@ import {
 import {
   ensureConversationIdForThread,
   listResolverCandidatePropertiesForContact,
+  resolveInboundThread,
 } from "./threading";
 
 const supabase = createTestClient();
@@ -870,5 +871,133 @@ describe("listResolverCandidatePropertiesForContact (integration)", () => {
     expect(candidates.every((candidate) => candidate.sources.includes("linked_property"))).toBe(
       true,
     );
+  });
+});
+
+describe("resolveInboundThread multi-sender routing (integration)", () => {
+  beforeEach(async () => {
+    await resetTenantTables(supabase);
+    await seedTwoOrgs(supabase);
+  });
+
+  it("routes an inbound reply to the property whose thread used the receiving sender number", async () => {
+    // One seller phone, two properties, two DIFFERENT sending numbers —
+    // the dynamic-sender case. The `to` number of the inbound reply must
+    // select the property that was messaged from that sender.
+    const sellerPhone = "+18165552401";
+    const senderA = "+15551234567";
+    const senderB = "+15559999999";
+
+    const contactId = await seedContact(sellerPhone);
+    const propertyA = await seedProperty({
+      address: "401 Sender A Property",
+      homeownerContactId: contactId,
+    });
+    const propertyB = await seedProperty({
+      address: "402 Sender B Property",
+      homeownerContactId: contactId,
+    });
+
+    const conversationA = await ensureConversationIdForThread(
+      supabase,
+      contactId,
+      propertyA,
+    );
+    const conversationB = await ensureConversationIdForThread(
+      supabase,
+      contactId,
+      propertyB,
+    );
+
+    await seedSms({
+      contactId,
+      propertyId: propertyA,
+      conversationId: conversationA,
+      direction: "outbound",
+      phone: sellerPhone,
+      businessPhone: senderA,
+      body: "about property A",
+    });
+    await seedSms({
+      contactId,
+      propertyId: propertyB,
+      conversationId: conversationB,
+      direction: "outbound",
+      phone: sellerPhone,
+      businessPhone: senderB,
+      body: "about property B",
+    });
+
+    // Reply to sender B → property B's thread.
+    const toB = await resolveInboundThread(supabase, sellerPhone, senderB);
+    expect(toB).toMatchObject({
+      contactId,
+      propertyId: propertyB,
+      conversationId: conversationB,
+      resolution: "matched_recipient_number",
+    });
+
+    // Reply to sender A → property A's thread.
+    const toA = await resolveInboundThread(supabase, sellerPhone, senderA);
+    expect(toA).toMatchObject({
+      contactId,
+      propertyId: propertyA,
+      conversationId: conversationA,
+      resolution: "matched_recipient_number",
+    });
+  });
+
+  it("stays contact-level (ambiguous) when one sender messaged multiple properties for the same contact", async () => {
+    const sellerPhone = "+18165552402";
+    const sharedSender = "+15551234567";
+
+    const contactId = await seedContact(sellerPhone);
+    const propertyA = await seedProperty({
+      address: "403 Shared Sender A",
+      homeownerContactId: contactId,
+    });
+    const propertyB = await seedProperty({
+      address: "404 Shared Sender B",
+      homeownerContactId: contactId,
+    });
+
+    const conversationA = await ensureConversationIdForThread(
+      supabase,
+      contactId,
+      propertyA,
+    );
+    const conversationB = await ensureConversationIdForThread(
+      supabase,
+      contactId,
+      propertyB,
+    );
+
+    await seedSms({
+      contactId,
+      propertyId: propertyA,
+      conversationId: conversationA,
+      direction: "outbound",
+      phone: sellerPhone,
+      businessPhone: sharedSender,
+      body: "about property A",
+    });
+    await seedSms({
+      contactId,
+      propertyId: propertyB,
+      conversationId: conversationB,
+      direction: "outbound",
+      phone: sellerPhone,
+      businessPhone: sharedSender,
+      body: "about property B",
+    });
+
+    const resolved = await resolveInboundThread(
+      supabase,
+      sellerPhone,
+      sharedSender,
+    );
+    expect(resolved.resolution).toBe("ambiguous_recipient_number");
+    expect(resolved.contactId).toBe(contactId);
+    expect(resolved.propertyId).toBeNull();
   });
 });

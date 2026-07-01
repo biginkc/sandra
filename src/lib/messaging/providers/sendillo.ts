@@ -3,6 +3,8 @@ import { timingSafeEqual } from "node:crypto";
 import { ConfigurationError, ProviderError } from "@/lib/errors/classes";
 import type {
   MessagingProvider,
+  ProviderCampaignSummary,
+  ProviderSenderNumber,
   SmsInboundEvent,
   SmsOutboundInput,
   SmsSendResult,
@@ -11,6 +13,8 @@ import type {
 
 const API_BASE = "https://www.sendillo.com/api/v1";
 const SEND_ENDPOINT = `${API_BASE}/messages`;
+const PURCHASED_NUMBERS_ENDPOINT = `${API_BASE}/numbers/purchased`;
+const CAMPAIGNS_ENDPOINT = `${API_BASE}/campaigns`;
 const DEFAULT_SEND_TIMEOUT_MS = 10_000;
 
 type JsonObject = Record<string, unknown>;
@@ -89,6 +93,121 @@ export class SendilloMessagingProvider implements MessagingProvider {
         "accepted",
       raw: parsed,
     };
+  }
+
+  /**
+   * Read-only catalog sync: purchased sender numbers via
+   * GET /api/v1/numbers/purchased. Parsing is defensive (same posture as
+   * sendSms) because the OpenAPI document confirms the endpoint but not
+   * every field name across plans.
+   */
+  async listPurchasedNumbers(): Promise<ProviderSenderNumber[]> {
+    const entries = await this.fetchCatalogList(
+      PURCHASED_NUMBERS_ENDPOINT,
+      "purchased numbers",
+    );
+    const numbers: ProviderSenderNumber[] = [];
+    for (const entry of entries) {
+      const phone =
+        readString(entry, "phoneNumber") ??
+        readString(entry, "phone_number") ??
+        readString(entry, "number") ??
+        readString(entry, "phone");
+      if (!phone) continue;
+      numbers.push({
+        phoneE164: phone,
+        providerNumberId:
+          readString(entry, "id") ?? readString(entry, "numberId"),
+        status: readString(entry, "status"),
+        messagingStatus:
+          readString(entry, "messagingStatus") ??
+          readString(entry, "messaging_status") ??
+          readString(entry, "smsStatus"),
+        raw: entry,
+      });
+    }
+    return numbers;
+  }
+
+  /**
+   * Read-only catalog sync: provider campaigns via GET /api/v1/campaigns.
+   */
+  async listProviderCampaigns(): Promise<ProviderCampaignSummary[]> {
+    const entries = await this.fetchCatalogList(
+      CAMPAIGNS_ENDPOINT,
+      "campaigns",
+    );
+    const campaigns: ProviderCampaignSummary[] = [];
+    for (const entry of entries) {
+      const externalId =
+        readString(entry, "id") ?? readString(entry, "campaignId");
+      if (!externalId) continue;
+      campaigns.push({
+        externalId,
+        name: readString(entry, "name") ?? readString(entry, "title"),
+        brand:
+          readString(entry, "brand") ?? readString(entry, "brandName"),
+        useCase:
+          readString(entry, "useCase") ?? readString(entry, "use_case"),
+        status: readString(entry, "status"),
+        raw: entry,
+      });
+    }
+    return campaigns;
+  }
+
+  private async fetchCatalogList(
+    endpoint: string,
+    label: string,
+  ): Promise<JsonObject[]> {
+    let response: Response;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), DEFAULT_SEND_TIMEOUT_MS);
+    try {
+      response = await fetch(endpoint, {
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${this.apiKey}`,
+          Accept: "application/json",
+        },
+        signal: controller.signal,
+      });
+    } catch (e) {
+      throw new ProviderError(
+        e instanceof Error ? e.message : String(e),
+        "sendillo",
+      );
+    } finally {
+      clearTimeout(timeout);
+    }
+
+    const text = await response.text();
+    const parsed = safeParseJson(text);
+    if (!response.ok) {
+      const errorMessage = extractErrorMessage(parsed) || text || response.statusText;
+      throw new ProviderError(
+        `Sendillo ${label} ${response.status}: ${errorMessage}`,
+        "sendillo",
+        { status: response.status, response: parsed },
+      );
+    }
+
+    const list =
+      arrayValue(parsed) ??
+      arrayValue(objectValue(parsed, "data")) ??
+      arrayValue((parsed as JsonObject | null)?.["items"]) ??
+      arrayValue((parsed as JsonObject | null)?.["results"]);
+    if (!list) {
+      throw new ProviderError(
+        `Sendillo ${label} response was not a list`,
+        "sendillo",
+        { response: parsed },
+      );
+    }
+    return list.filter(
+      (entry): entry is JsonObject =>
+        Boolean(entry) && typeof entry === "object" && !Array.isArray(entry),
+    );
   }
 
   /**
@@ -246,6 +365,10 @@ function parseWebhookEnvelope(rawBody: string, errorMessage: string) {
       readString(root, "type"),
     payload: objectValue(root, "data") ?? root,
   };
+}
+
+function arrayValue(value: unknown): unknown[] | null {
+  return Array.isArray(value) ? value : null;
 }
 
 function objectValue(
