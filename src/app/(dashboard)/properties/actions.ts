@@ -139,6 +139,26 @@ function baseBulkSmsOpts(opts: BulkSmsQueueOpts): BulkSmsQueueBaseOpts {
   };
 }
 
+function validateBulkSmsQueuePace(
+  opts: BulkSmsQueueOpts,
+  mode: "bulk" | "saved_campaign",
+): Result<number> {
+  const paceValidation = validateSmsPaceSeconds(opts.paceSeconds, {
+    mode,
+    pacingProfile: resolveServerOwnedPacingProfile(opts),
+  });
+  if (!paceValidation.ok) {
+    return {
+      ok: false,
+      error: {
+        code: "VALIDATION",
+        message: paceValidation.message,
+      },
+    };
+  }
+  return ok(paceValidation.paceSeconds);
+}
+
 function resolveServerOwnedPacingProfile(
   opts: BulkSmsQueueOpts,
 ): SmsPacingProfile | undefined {
@@ -302,24 +322,12 @@ export async function bulkQueueSms(
       return ok({ succeeded: 0, skipped: 0, failed: [] });
     }
 
-    const paceValidation = validateSmsPaceSeconds(opts.paceSeconds, {
-      mode: "bulk",
-      pacingProfile: resolveServerOwnedPacingProfile(opts),
-    });
-    if (!paceValidation.ok) {
-      return {
-        ok: false,
-        error: {
-          code: "VALIDATION",
-          message: paceValidation.message,
-        },
-      };
-    }
-
     let resolvedPropertyIds = Array.from(new Set(propertyIds));
     let resolvedOpts: ResolvedBulkSmsQueueOpts;
 
     if (providedCampaignId) {
+      const paceValidation = validateBulkSmsQueuePace(opts, "saved_campaign");
+      if (!paceValidation.ok) return paceValidation;
       const campaignValidation = await validateProvidedCampaignForBulkSms(
         supabase,
         providedCampaignId,
@@ -328,20 +336,27 @@ export async function bulkQueueSms(
       if (!campaignValidation.ok) return campaignValidation;
       resolvedOpts = {
         ...baseBulkSmsOpts(opts),
+        paceSeconds: paceValidation.data,
         campaignId: providedCampaignId,
         campaignSource: "saved_campaign",
       };
     } else if ("campaignName" in opts && typeof opts.campaignName === "string") {
+      const paceValidation = validateBulkSmsQueuePace(opts, "bulk");
+      if (!paceValidation.ok) return paceValidation;
+      const baseOpts = {
+        ...baseBulkSmsOpts(opts),
+        paceSeconds: paceValidation.data,
+      };
       const campaignResult = await resolveAdHocBulkSmsCampaign(supabase, {
         campaignName: opts.campaignName,
         createdByUserId: enrolledByUserId,
-        opts: baseBulkSmsOpts(opts),
+        opts: baseOpts,
         propertyIds,
       });
       if (!campaignResult.ok) return campaignResult;
       resolvedPropertyIds = campaignResult.data.propertyIds;
       resolvedOpts = {
-        ...baseBulkSmsOpts(opts),
+        ...baseOpts,
         campaignId: campaignResult.data.campaignId,
         campaignSource: "ad_hoc_bulk_sms",
       };

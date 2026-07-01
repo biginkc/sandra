@@ -372,6 +372,40 @@ describe("bulkQueueSms (integration)", () => {
     expect(message?.contact_id).not.toBe(replacement.id);
   });
 
+  it("allows saved campaign launch pacing below the ad-hoc bulk custom minimum", async () => {
+    const orgId = await getOrgId();
+    const lead = await seedLead({
+      phone: "+18165551037",
+      address: "2 Second Saved Campaign St",
+    });
+    const { data: campaign } = await testClient
+      .from("campaigns")
+      .insert({
+        org_id: orgId,
+        name: "Two Second Saved Campaign",
+        channel: "sms",
+        status: "launching",
+      })
+      .select("id")
+      .single();
+    if (!campaign) throw new Error("campaign seed failed");
+    await testClient.from("campaign_recipients").insert({
+      campaign_id: campaign.id,
+      property_id: lead.propertyId,
+      contact_id: lead.contactId,
+    });
+
+    const result = await bulkQueueSms([lead.propertyId], {
+      body: "Saved campaign fast pace",
+      campaignId: campaign.id,
+      paceSeconds: 2,
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.data.succeeded).toBe(1);
+  });
+
   it("rejects duplicate ad-hoc campaign names before queueing", async () => {
     const orgId = await getOrgId();
     const { propertyId } = await seedLead({ phone: "+18165551034" });

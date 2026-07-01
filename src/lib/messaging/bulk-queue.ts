@@ -117,7 +117,7 @@ export async function queueSmsBatch(
 ): Promise<BulkSmsScheduleState> {
   const { opts, state } = args;
   const paceResult = validateSmsPaceSeconds(opts.paceSeconds, {
-    mode: "bulk",
+    mode: opts.campaignSource === "saved_campaign" ? "saved_campaign" : "bulk",
     pacingProfile: opts.pacingProfile,
   });
   if (!paceResult.ok) {

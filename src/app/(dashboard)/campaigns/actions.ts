@@ -146,8 +146,137 @@ type CampaignPauseRpcClient = {
   }>;
 };
 
+const ACTIVE_BULK_SMS_JOB_STATUSES = [
+  "queued",
+  "running",
+  "finalizing",
+];
+
+type SyncedBulkSmsJobPace = {
+  id: string;
+  inputParams: Json | null;
+};
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+async function syncActiveBulkSmsJobPace(
+  client: ReturnType<typeof createAdminClient>,
+  campaignId: string,
+  orgId: string,
+  paceSeconds: number,
+): Promise<Result<SyncedBulkSmsJobPace[]>> {
+  const { data, error } = await client
+    .from("jobs")
+    .select("id,input_params")
+    .eq("type", "bulk_sms")
+    .eq("org_id", orgId)
+    .contains("input_params", { opts: { campaignId } })
+    .in("status", ACTIVE_BULK_SMS_JOB_STATUSES);
+
+  if (error) {
+    return {
+      ok: false,
+      error: { code: "CAMPAIGN_JOB_PACE_SYNC_FAILED", message: error.message },
+    };
+  }
+
+  const jobs = (data ?? []).filter((job) => {
+    const inputParams = job.input_params;
+    if (!isRecord(inputParams) || !isRecord(inputParams.opts)) return false;
+    return inputParams.opts.campaignId === campaignId;
+  });
+
+  const syncedJobs: SyncedBulkSmsJobPace[] = [];
+
+  for (const job of jobs) {
+    const inputParams = isRecord(job.input_params) ? job.input_params : {};
+    const opts = isRecord(inputParams.opts) ? inputParams.opts : {};
+    const nextInputParams = {
+      ...inputParams,
+      opts: {
+        ...opts,
+        paceSeconds,
+      },
+    } as Json;
+
+    const { error: updateError } = await client
+      .from("jobs")
+      .update({ input_params: nextInputParams })
+      .eq("id", job.id)
+      .eq("type", "bulk_sms")
+      .eq("org_id", orgId)
+      .contains("input_params", { opts: { campaignId } })
+      .in("status", ACTIVE_BULK_SMS_JOB_STATUSES);
+
+    if (updateError) {
+      return {
+        ok: false,
+        error: {
+          code: "CAMPAIGN_JOB_PACE_SYNC_FAILED",
+          message: updateError.message,
+        },
+      };
+    }
+    syncedJobs.push({
+      id: job.id,
+      inputParams: (job.input_params ?? null) as Json | null,
+    });
+  }
+
+  return ok(syncedJobs);
+}
+
+async function restoreActiveBulkSmsJobInputs(
+  client: ReturnType<typeof createAdminClient>,
+  campaignId: string,
+  orgId: string,
+  jobs: SyncedBulkSmsJobPace[],
+): Promise<Result<null>> {
+  for (const job of jobs) {
+    const { error } = await client
+      .from("jobs")
+      .update({ input_params: job.inputParams })
+      .eq("id", job.id)
+      .eq("type", "bulk_sms")
+      .eq("org_id", orgId)
+      .contains("input_params", { opts: { campaignId } })
+      .in("status", ACTIVE_BULK_SMS_JOB_STATUSES);
+
+    if (error) {
+      return {
+        ok: false,
+        error: { code: "CAMPAIGN_JOB_PACE_RESTORE_FAILED", message: error.message },
+      };
+    }
+  }
+
+  return ok(null);
+}
+
+async function persistCampaignPace(
+  client: ReturnType<typeof createAdminClient>,
+  campaignId: string,
+  orgId: string,
+  paceSeconds: number,
+): Promise<Result<null>> {
+  const { error } = await client
+    .from("campaigns")
+    .update({ pace_seconds: paceSeconds, updated_at: new Date().toISOString() })
+    .eq("id", campaignId)
+    .eq("org_id", orgId)
+    .select("id")
+    .maybeSingle();
+
+  if (error) {
+    return {
+      ok: false,
+      error: { code: "CAMPAIGN_PACE_SYNC_FAILED", message: error.message },
+    };
+  }
+
+  return ok(null);
 }
 
 function normalizeAudienceSnapshot(
@@ -391,7 +520,7 @@ async function campaignExists(
 
 async function requireCampaignAccess(
   campaignId: string,
-): Promise<Result<null>> {
+): Promise<Result<{ orgId: string }>> {
   const supabase = await createClient();
   const [{ data, error }, memberships] = await Promise.all([
     supabase
@@ -424,7 +553,7 @@ async function requireCampaignAccess(
     };
   }
 
-  return ok(null);
+  return ok({ orgId: data.org_id });
 }
 
 function validateCampaignId(campaignId: string): Result<string> {
@@ -555,14 +684,40 @@ export async function applyCampaignCadenceChange(
     const access = await requireCampaignAccess(input.data.campaignId);
     if (!access.ok) return access;
 
+    const adminClient = createAdminClient();
+    const jobSync = await syncActiveBulkSmsJobPace(
+      adminClient,
+      input.data.campaignId,
+      access.data.orgId,
+      input.data.paceSeconds,
+    );
+    if (!jobSync.ok) return jobSync;
+
     const result = await runCadenceRpc(
       "apply_campaign_cadence_reschedule",
       input.data.campaignId,
       input.data.paceSeconds,
       true,
-      createAdminClient() as unknown as CampaignCadenceRpcClient,
+      adminClient as unknown as CampaignCadenceRpcClient,
     );
+    if (!result.ok) {
+      const restore = await restoreActiveBulkSmsJobInputs(
+        adminClient,
+        input.data.campaignId,
+        access.data.orgId,
+        jobSync.data,
+      );
+      if (!restore.ok) return restore;
+    }
     if (result.ok) {
+      const paceSync = await persistCampaignPace(
+        adminClient,
+        input.data.campaignId,
+        access.data.orgId,
+        input.data.paceSeconds,
+      );
+      if (!paceSync.ok) return paceSync;
+
       revalidatePath(`/campaigns/${input.data.campaignId}`);
       revalidatePath("/campaigns");
       revalidatePath("/messages");
@@ -642,13 +797,31 @@ export async function resumeCampaignSends(
     const access = await requireCampaignAccess(input.data.campaignId);
     if (!access.ok) return access;
 
+    const adminClient = createAdminClient();
+    const jobSync = await syncActiveBulkSmsJobPace(
+      adminClient,
+      input.data.campaignId,
+      access.data.orgId,
+      input.data.paceSeconds,
+    );
+    if (!jobSync.ok) return jobSync;
+
     const result = await runCadenceRpc(
       "resume_campaign_queue",
       input.data.campaignId,
       input.data.paceSeconds,
       true,
-      createAdminClient() as unknown as CampaignCadenceRpcClient,
+      adminClient as unknown as CampaignCadenceRpcClient,
     );
+    if (!result.ok) {
+      const restore = await restoreActiveBulkSmsJobInputs(
+        adminClient,
+        input.data.campaignId,
+        access.data.orgId,
+        jobSync.data,
+      );
+      if (!restore.ok) return restore;
+    }
     if (result.ok) {
       revalidatePath(`/campaigns/${input.data.campaignId}`);
       revalidatePath("/campaigns");
