@@ -68,6 +68,24 @@ beforeEach(() => {
 });
 
 describe("<CampaignsTable />", () => {
+  it("renders unambiguous queue setup labels for every campaign table status", () => {
+    renderCampaigns([
+      campaign({ id: "active", status: "active" }),
+      campaign({ id: "launching", status: "launching" }),
+      campaign({ id: "paused", status: "paused" }),
+      campaign({ id: "completed", status: "completed" }),
+      campaign({ id: "failed", status: "failed" }),
+      campaign({ id: "archived", status: "archived", archived_at: "2026-06-30T20:00:00.000Z" }),
+    ]);
+
+    expect(screen.getByText("Queue setup: not launched")).toBeInTheDocument();
+    expect(screen.getByText("Queue setup: building")).toBeInTheDocument();
+    expect(screen.getByText("Queue setup: paused")).toBeInTheDocument();
+    expect(screen.getByText("Queue setup: built")).toBeInTheDocument();
+    expect(screen.getByText("Queue setup: failed")).toBeInTheDocument();
+    expect(screen.getByText("Archived")).toBeInTheDocument();
+  });
+
   it("labels completed campaigns as queue setup instead of implying every text has sent", () => {
     renderCampaigns([
       campaign({
@@ -81,5 +99,18 @@ describe("<CampaignsTable />", () => {
     expect(screen.getByText("Queue built")).toBeInTheDocument();
     expect(screen.queryByText("completed")).toBeNull();
     expect(screen.queryByText("Sent")).toBeNull();
+  });
+
+  it("labels failed campaigns as queue setup failures", () => {
+    renderCampaigns([
+      campaign({
+        id: "campaign-1",
+        status: "failed",
+        name: "June campaign",
+      }),
+    ]);
+
+    expect(screen.getByText("Queue setup: failed")).toBeInTheDocument();
+    expect(screen.getByText("Queue failed")).toBeInTheDocument();
   });
 });

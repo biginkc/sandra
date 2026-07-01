@@ -41,7 +41,13 @@ export type CampaignsFilters = { archived: boolean };
 export type CampaignRow = {
   id: string;
   name: string;
-  status: "active" | "launching" | "paused" | "completed" | "archived";
+  status:
+    | "active"
+    | "launching"
+    | "paused"
+    | "completed"
+    | "failed"
+    | "archived";
   archived_at: string | null;
   created_at: string;
   audienceSummary: string;
@@ -70,7 +76,9 @@ const BUILD_CONFIG = {
 };
 
 function statusBadgeVariant(status: CampaignRow["status"]): "secondary" | "outline" {
-  return status === "completed" || status === "archived" ? "outline" : "secondary";
+  return status === "completed" || status === "archived" || status === "failed"
+    ? "outline"
+    : "secondary";
 }
 
 function statusClassName(status: CampaignRow["status"]): string {
@@ -81,6 +89,8 @@ function statusClassName(status: CampaignRow["status"]): string {
       return "border-emerald-300 bg-emerald-50 text-emerald-800";
     case "paused":
       return "border-slate-300 bg-slate-100 text-slate-700";
+    case "failed":
+      return "border-red-300 bg-red-50 text-red-700";
     case "archived":
       return "text-muted-foreground";
     default:
@@ -98,6 +108,8 @@ function statusLabel(status: CampaignRow["status"]): string {
       return "Queue setup: not launched";
     case "paused":
       return "Queue setup: paused";
+    case "failed":
+      return "Queue setup: failed";
     case "archived":
       return "Archived";
   }

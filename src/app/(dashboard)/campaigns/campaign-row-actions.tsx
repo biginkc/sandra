@@ -18,7 +18,13 @@ import {
 type Props = {
   id: string;
   name: string;
-  status: "active" | "launching" | "paused" | "completed" | "archived";
+  status:
+    | "active"
+    | "launching"
+    | "paused"
+    | "completed"
+    | "failed"
+    | "archived";
   archived: boolean;
 };
 
@@ -136,6 +142,8 @@ export function CampaignRowActions({
             ? "Launching"
             : status === "completed"
               ? "Queue built"
+              : status === "failed"
+                ? "Queue failed"
               : "Locked"}
         </span>
       )}
