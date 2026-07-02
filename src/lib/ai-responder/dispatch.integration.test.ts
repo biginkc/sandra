@@ -398,6 +398,63 @@ describe("dispatchAiResponse (integration)", () => {
     });
   });
 
+  it("does not duplicate the current inbound in the model prompt when its row already exists", async () => {
+    // Codex review of PR #336 (P2): the webhook inserts the inbound row
+    // before dispatch, and loadConversation used to read it back while
+    // dispatch appended inboundBody again — the model saw the message it
+    // was answering twice.
+    await seedConfig();
+    const { propertyId, contactId } = await seedLead({
+      phone: "+18167554022",
+    });
+    const conversationId = "88888888-8888-4888-8888-888888888888";
+    const inboundMessageId = "99999999-9999-4999-8999-999999999999";
+    const inboundBody = "yes I'd consider selling";
+    await supabase.from("messages").insert({
+      id: inboundMessageId,
+      channel: "sms",
+      direction: "inbound",
+      status: "received",
+      property_id: propertyId,
+      contact_id: contactId,
+      conversation_id: conversationId,
+      body: inboundBody,
+    });
+
+    let capturedMessages: Array<{ role: string; content: string }> = [];
+    const capturingAnthropic: AnthropicLike = {
+      messages: {
+        create: (async (args: { messages: Array<{ role: string; content: string }> }) => {
+          if (capturedMessages.length === 0) {
+            capturedMessages = args.messages;
+          }
+          return stubAnthropic(HAPPY_OUT).messages.create(args as never);
+        }) as unknown as AnthropicLike["messages"]["create"],
+      } as unknown as AnthropicLike["messages"],
+    };
+
+    const outcome = await dispatchAiResponse(
+      supabase,
+      {
+        propertyId,
+        contactId,
+        conversationId,
+        inboundBody,
+        inboundMessageId,
+      },
+      { anthropic: capturingAnthropic },
+    );
+
+    expect(outcome.outcome).toBe("sent");
+    const occurrences = capturedMessages.filter(
+      (message) => message.content === inboundBody,
+    );
+    expect(occurrences).toHaveLength(1);
+    expect(capturedMessages[capturedMessages.length - 1]?.content).toBe(
+      inboundBody,
+    );
+  });
+
   it("scopes AI turn count and conversation history to the actual thread, not the whole property", async () => {
     await seedConfig({ max_turns: 1 });
     const { propertyId, contactId } = await seedLead({
