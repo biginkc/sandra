@@ -83,6 +83,35 @@ async function seedOutbound(args: {
   if (error) throw new Error(`message seed failed: ${error.message}`);
 }
 
+async function seedOutboundBatch(
+  rows: Array<{
+    contactId: string;
+    propertyId: string;
+    fromAddress: string;
+    toAddress: string;
+    body: string;
+    createdAt: string;
+  }>,
+): Promise<void> {
+  const orgId = await getOrgId();
+  const { error } = await supabase.from("messages").insert(
+    rows.map((row) => ({
+      org_id: orgId,
+      channel: "sms",
+      direction: "outbound",
+      status: "sent",
+      provider: "sendillo",
+      from_address: row.fromAddress,
+      to_address: row.toAddress,
+      body: row.body,
+      contact_id: row.contactId,
+      property_id: row.propertyId,
+      created_at: row.createdAt,
+    })),
+  );
+  if (error) throw new Error(`message batch seed failed: ${error.message}`);
+}
+
 describe("resolveInboundThread sender-number routing", () => {
   beforeEach(async () => {
     await resetTenantTables(supabase);
@@ -160,7 +189,7 @@ describe("resolveInboundThread sender-number routing", () => {
     expect(resolution.conversationId).toBeTruthy();
   });
 
-  it("parks ambiguous replies when one property has more than 50 newer same-sender messages", async () => {
+  it("parks ambiguous replies when one property has more than a raw PostgREST page of newer same-sender messages", async () => {
     const phone = "+18165553003";
     const sender = "+18164870004";
     const contactId = await seedContact(phone);
@@ -175,8 +204,8 @@ describe("resolveInboundThread sender-number routing", () => {
       body: "older ambiguous outbound b",
       createdAt: "2026-06-01T12:00:00.000Z",
     });
-    for (let i = 0; i < 60; i += 1) {
-      await seedOutbound({
+    await seedOutboundBatch(
+      Array.from({ length: 1_005 }, (_, i) => ({
         contactId,
         propertyId: propertyA,
         fromAddress: sender,
@@ -185,8 +214,8 @@ describe("resolveInboundThread sender-number routing", () => {
         createdAt: new Date(
           Date.UTC(2026, 5, 2, 12, i, 0),
         ).toISOString(),
-      });
-    }
+      })),
+    );
 
     const resolution = await resolveInboundThread(supabase, phone, sender);
 

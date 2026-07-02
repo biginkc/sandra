@@ -3139,6 +3139,14 @@ export type Database = {
         }
         Returns: undefined
       }
+      sms_thread_candidate_properties: {
+        Args: { p_business_phone?: string | null; p_contact_id: string }
+        Returns: {
+          conversation_id: string | null
+          latest_at: string
+          property_id: string
+        }[]
+      }
       increment_sms_inbound_intent_duplicate: {
         Args: { p_intent_id: string; p_last_provider_message_id: string }
         Returns: undefined

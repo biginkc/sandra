@@ -598,46 +598,18 @@ async function loadCandidates(
   contactId: string,
   normalizedAddress?: string | null,
 ): Promise<ThreadCandidate[]> {
-  const baseQuery = () =>
-    supabase
-      .from("messages")
-      .select(
-        "conversation_id, property_id, created_at, properties!inner(deleted_at)",
-      )
-      .eq("channel", "sms")
-      .eq("contact_id", contactId)
-      .not("property_id", "is", null)
-      .is("properties.deleted_at", null)
-      .order("created_at", { ascending: false });
-
-  const resultSets = normalizedAddress
-    ? await Promise.all([
-        baseQuery().eq("from_address", normalizedAddress),
-        baseQuery().eq("to_address", normalizedAddress),
-      ])
-    : [await baseQuery()];
-
-  const byKey = new Map<string, ThreadCandidate>();
-  for (const result of resultSets) {
-    if (result.error) {
-      throw new Error(`loadCandidates: ${result.error.message}`);
-    }
-    for (const row of result.data ?? []) {
-      if (!row.property_id) continue;
-      // The resolver must decide how many active properties could own the
-      // reply. A bad historical conversation id shared by multiple properties
-      // must stay ambiguous instead of collapsing to the latest row.
-      const key = row.property_id;
-      if (!byKey.has(key)) {
-        byKey.set(key, {
-          conversationId: row.conversation_id,
-          propertyId: row.property_id,
-          latestAt: row.created_at,
-        });
-      }
-    }
+  const { data, error } = await supabase.rpc("sms_thread_candidate_properties", {
+    p_contact_id: contactId,
+    p_business_phone: normalizedAddress ?? null,
+  });
+  if (error) {
+    throw new Error(`loadCandidates: ${error.message}`);
   }
-  return Array.from(byKey.values());
+  return (data ?? []).map((row) => ({
+    conversationId: row.conversation_id,
+    propertyId: row.property_id,
+    latestAt: row.latest_at,
+  }));
 }
 
 async function loadBusinessNumbersForConversation(
