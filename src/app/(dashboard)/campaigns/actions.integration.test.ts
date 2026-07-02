@@ -721,7 +721,7 @@ describe("createCampaign / archiveCampaign / unarchiveCampaign (integration)", (
       direction: "outbound",
       status: "sent",
       campaign_id: legacy.id,
-      from_address: "+18165550001",
+      from_address: MOCK_SENDER_SECONDARY,
       to_address: "+18165550778",
       body: "legacy outbound",
     });
@@ -738,8 +738,9 @@ describe("createCampaign / archiveCampaign / unarchiveCampaign (integration)", (
       },
     });
 
-    // Nothing snapshotted to protect — the chosen Delivery applies and
-    // becomes the locked sender going forward.
+    // No canonical settings row exists, but outbound rows are stamped. The
+    // chosen Delivery can repair the missing settings only when it matches
+    // the already-stamped sender.
     expect(revived.ok).toBe(true);
     if (!revived.ok) return;
     expect(revived.data.id).toBe(legacy.id);
@@ -869,6 +870,98 @@ describe("createCampaign / archiveCampaign / unarchiveCampaign (integration)", (
       sender_number: MOCK_SENDER_PRIMARY,
       from_address: MOCK_SENDER_PRIMARY,
     });
+  });
+
+  it("rejects moving locked delivery settings to a decoy campaign and blocks replacement sender inserts", async () => {
+    const orgId = await getOrgId();
+    const email = uniqueCampaignEmail("campaign-db-sender-swap-bypass");
+    const userId = await createAuthUser(email);
+    currentUserId = userId;
+    currentEmail = email;
+
+    const created = await createCampaign({
+      name: "DB Sender Swap Bypass",
+      body: "First body",
+      senderNumber: MOCK_SENDER_PRIMARY,
+      paceSeconds: 18,
+      audience: {
+        search: null,
+        blockStack: [{ id: "vacancy-db-swap", kind: "vacancy", tri: "yes" }],
+      },
+    });
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+
+    const { error: lockedMessageError } = await testClient.from("messages").insert({
+      org_id: orgId,
+      channel: "sms",
+      direction: "outbound",
+      status: "sent",
+      campaign_id: created.data.id,
+      from_address: MOCK_SENDER_PRIMARY,
+      to_address: "+18165550774",
+      body: "locked sender sent",
+    });
+    expect(lockedMessageError).toBeNull();
+
+    const decoyCampaignId = await seedCampaign({
+      orgId,
+      name: "DB Sender Swap Decoy",
+      audienceSnapshot: {
+        search: null,
+        blockStack: [{ id: "vacancy-db-swap-decoy", kind: "vacancy", tri: "yes" }],
+      },
+      senderNumber: null,
+    });
+
+    const { error: campaignIdSwapError } = await testClient
+      .from("campaign_delivery_settings")
+      .update({ campaign_id: decoyCampaignId })
+      .eq("campaign_id", created.data.id);
+    expect(campaignIdSwapError?.message).toMatch(/sender is locked/i);
+
+    const backfillCampaignId = await seedCampaign({
+      orgId,
+      name: "DB Sender Swap Backfill",
+      audienceSnapshot: {
+        search: null,
+        blockStack: [{ id: "vacancy-db-swap-backfill", kind: "vacancy", tri: "yes" }],
+      },
+      senderNumber: null,
+    });
+    const { error: backfillMessageError } = await testClient.from("messages").insert({
+      org_id: orgId,
+      channel: "sms",
+      direction: "outbound",
+      status: "sent",
+      campaign_id: backfillCampaignId,
+      from_address: MOCK_SENDER_PRIMARY,
+      to_address: "+18165550773",
+      body: "backfill stamped sender",
+    });
+    expect(backfillMessageError).toBeNull();
+
+    const { error: wrongInsertError } = await testClient
+      .from("campaign_delivery_settings")
+      .insert({
+        campaign_id: backfillCampaignId,
+        org_id: orgId,
+        provider: "mock",
+        sender_number: MOCK_SENDER_SECONDARY,
+        from_address: MOCK_SENDER_SECONDARY,
+      });
+    expect(wrongInsertError?.message).toMatch(/sender is locked/i);
+
+    const { error: repairInsertError } = await testClient
+      .from("campaign_delivery_settings")
+      .insert({
+        campaign_id: backfillCampaignId,
+        org_id: orgId,
+        provider: "mock",
+        sender_number: MOCK_SENDER_PRIMARY,
+        from_address: MOCK_SENDER_PRIMARY,
+      });
+    expect(repairInsertError).toBeNull();
   });
 
   it("revive lock reads canonical delivery settings instead of stale campaign mirror columns", async () => {

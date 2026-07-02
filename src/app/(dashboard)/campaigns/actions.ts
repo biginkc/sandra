@@ -1063,24 +1063,69 @@ export async function createCampaign(
         archivedDeliverySettings?.from_address ??
         archivedDeliverySettings?.sender_number ??
         null;
-      // The lock protects the canonical delivery settings row. A legacy
-      // campaign with outbound rows but no canonical delivery-settings row has
-      // nothing to compare against, so the chosen Delivery becomes the sender
-      // going forward.
+      let stampedSenderMismatch = false;
+      let stampedSender: string | null = null;
+      if ((revivedMessageCount ?? 0) > 0 && !lockedSender) {
+        const { count: matchingStampedSenderCount, error: matchingSenderError } =
+          await supabase
+            .from("messages")
+            .select("id", { count: "exact", head: true })
+            .eq("campaign_id", archivedCandidate.id)
+            .eq("direction", "outbound")
+            .eq("from_address", delivery.senderNumber);
+        if (matchingSenderError) {
+          return {
+            ok: false,
+            error: {
+              code: "CAMPAIGN_LOOKUP_FAILED",
+              message: matchingSenderError.message,
+            },
+          };
+        }
+        stampedSenderMismatch =
+          (matchingStampedSenderCount ?? 0) !== (revivedMessageCount ?? 0);
+        if (stampedSenderMismatch) {
+          const { data: stampedSenderRow, error: stampedSenderError } =
+            await supabase
+              .from("messages")
+              .select("from_address")
+              .eq("campaign_id", archivedCandidate.id)
+              .eq("direction", "outbound")
+              .not("from_address", "is", null)
+              .order("created_at", { ascending: false })
+              .limit(1)
+              .maybeSingle();
+          if (stampedSenderError) {
+            return {
+              ok: false,
+              error: {
+                code: "CAMPAIGN_LOOKUP_FAILED",
+                message: stampedSenderError.message,
+              },
+            };
+          }
+          stampedSender = stampedSenderRow?.from_address ?? null;
+        }
+      }
+      // The lock first protects canonical delivery settings. Legacy campaigns
+      // with outbound rows but no settings can only be repaired with the sender
+      // already stamped on those outbound rows; a different sender is a swap.
       const revivedLocked =
-        (revivedMessageCount ?? 0) > 0 &&
-        Boolean(lockedSender);
+        ((revivedMessageCount ?? 0) > 0 && Boolean(lockedSender)) ||
+        stampedSenderMismatch;
       if (
         revivedLocked &&
-        normalizeSenderNumber(lockedSender!) !==
-          delivery.senderNumber
+        (stampedSenderMismatch ||
+          normalizeSenderNumber(lockedSender!) !== delivery.senderNumber)
       ) {
+        const lockedSenderLabel =
+          lockedSender ?? stampedSender ?? "an existing stamped sender";
         return {
           ok: false,
           error: {
             code: "SENDER_LOCKED",
             message:
-              `"${name}" already queued messages from ${lockedSender}. ` +
+              `"${name}" already queued messages from ${lockedSenderLabel}. ` +
               "The sender is locked — create a new campaign to send from a different number.",
           },
         };
