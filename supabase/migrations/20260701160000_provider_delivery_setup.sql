@@ -54,67 +54,11 @@ alter table public.campaigns
   add column if not exists provider_campaign_external_id text,
   add column if not exists provider_campaign_name text;
 
-create table if not exists public.campaign_delivery_settings (
-  id uuid primary key default gen_random_uuid(),
-  campaign_id uuid not null references public.campaigns(id) on delete cascade,
-  org_id uuid not null references public.organizations(id) on delete cascade,
-  provider text not null check (length(trim(provider)) > 0),
-  sender_number text not null check (length(trim(sender_number)) > 0),
-  from_address text not null check (length(trim(from_address)) > 0),
-  provider_campaign_id text,
-  provider_campaign_name text,
-  created_at timestamptz not null default now(),
-  updated_at timestamptz not null default now(),
-  unique (campaign_id)
-);
-
-create index if not exists idx_campaign_delivery_settings_org_provider
-  on public.campaign_delivery_settings (org_id, provider);
-
--- Backfill any campaigns created by earlier branch iterations. This table
--- stores literal snapshots only; it intentionally does not FK into the synced
--- provider catalog.
-insert into public.campaign_delivery_settings (
-  campaign_id,
-  org_id,
-  provider,
-  sender_number,
-  from_address,
-  provider_campaign_id,
-  provider_campaign_name,
-  created_at,
-  updated_at
-)
-select
-  c.id,
-  c.org_id,
-  c.sender_provider,
-  c.sender_number,
-  c.sender_number,
-  c.provider_campaign_external_id,
-  c.provider_campaign_name,
-  c.created_at,
-  c.updated_at
-from public.campaigns c
-where c.sender_provider is not null
-  and c.sender_number is not null
-on conflict (campaign_id) do update
-set
-  org_id = excluded.org_id,
-  provider = excluded.provider,
-  sender_number = excluded.sender_number,
-  from_address = excluded.from_address,
-  provider_campaign_id = excluded.provider_campaign_id,
-  provider_campaign_name = excluded.provider_campaign_name,
-  updated_at = excluded.updated_at;
-
 alter table public.provider_sender_numbers enable row level security;
 alter table public.provider_campaigns enable row level security;
-alter table public.campaign_delivery_settings enable row level security;
 
--- Provider catalogs are read-only for operators; sync writes go through the
--- service role (admin client). Campaign delivery settings are operator-owned
--- setup rows scoped by campaign org.
+-- Read-only for operators; sync writes go through the service role
+-- (admin client), so no insert/update policies for authenticated.
 do $$
 begin
   if not exists (
@@ -137,80 +81,6 @@ begin
     create policy provider_campaigns_org_select on public.provider_campaigns
       for select to authenticated
       using (org_id in (select org_id from public.memberships where user_id = auth.uid()));
-  end if;
-
-  if not exists (
-    select 1 from pg_policies
-    where schemaname = 'public'
-      and tablename = 'campaign_delivery_settings'
-      and policyname = 'campaign_delivery_settings_org_select'
-  ) then
-    create policy campaign_delivery_settings_org_select on public.campaign_delivery_settings
-      for select to authenticated
-      using (
-        exists (
-          select 1
-          from public.campaigns c
-          join public.memberships m
-            on m.org_id = c.org_id
-          where c.id = campaign_delivery_settings.campaign_id
-            and c.org_id = campaign_delivery_settings.org_id
-            and m.user_id = auth.uid()
-        )
-      );
-  end if;
-
-  if not exists (
-    select 1 from pg_policies
-    where schemaname = 'public'
-      and tablename = 'campaign_delivery_settings'
-      and policyname = 'campaign_delivery_settings_org_insert'
-  ) then
-    create policy campaign_delivery_settings_org_insert on public.campaign_delivery_settings
-      for insert to authenticated
-      with check (
-        exists (
-          select 1
-          from public.campaigns c
-          join public.memberships m
-            on m.org_id = c.org_id
-          where c.id = campaign_delivery_settings.campaign_id
-            and c.org_id = campaign_delivery_settings.org_id
-            and m.user_id = auth.uid()
-        )
-      );
-  end if;
-
-  if not exists (
-    select 1 from pg_policies
-    where schemaname = 'public'
-      and tablename = 'campaign_delivery_settings'
-      and policyname = 'campaign_delivery_settings_org_update'
-  ) then
-    create policy campaign_delivery_settings_org_update on public.campaign_delivery_settings
-      for update to authenticated
-      using (
-        exists (
-          select 1
-          from public.campaigns c
-          join public.memberships m
-            on m.org_id = c.org_id
-          where c.id = campaign_delivery_settings.campaign_id
-            and c.org_id = campaign_delivery_settings.org_id
-            and m.user_id = auth.uid()
-        )
-      )
-      with check (
-        exists (
-          select 1
-          from public.campaigns c
-          join public.memberships m
-            on m.org_id = c.org_id
-          where c.id = campaign_delivery_settings.campaign_id
-            and c.org_id = campaign_delivery_settings.org_id
-            and m.user_id = auth.uid()
-        )
-      );
   end if;
 end $$;
 
@@ -242,7 +112,6 @@ begin
     public.sms_inbound_deliveries,
     public.sms_inbound_intents,
     public.campaign_recipients,
-    public.campaign_delivery_settings,
     public.campaigns,
     public.provider_sender_numbers,
     public.provider_campaigns,

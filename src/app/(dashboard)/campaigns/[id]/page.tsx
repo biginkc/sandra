@@ -83,7 +83,13 @@ export default async function CampaignDetailPage({
       .catch((error: unknown) => ({ ok: false as const, error })),
     loadLatestCampaignBulkSmsJob(supabase, id),
     campaignHasOutboundMessages(supabase, id).catch(() => false),
-    loadCampaignDeliverySettings(supabase, id),
+    loadCampaignDeliverySettings(supabase, id).catch(() => ({
+      senderProvider: campaign.sender_provider,
+      senderNumber: campaign.sender_number,
+      fromAddress: campaign.sender_number,
+      providerCampaignExternalId: campaign.provider_campaign_external_id,
+      providerCampaignName: campaign.provider_campaign_name,
+    })),
   ]);
   const kpis = kpiRes.error ? null : normalizeKpis(kpiRes.data?.[0]);
   const liveStats = metricsRes.ok && kpis

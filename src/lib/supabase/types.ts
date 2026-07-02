@@ -3127,6 +3127,18 @@ export type Database = {
         Args: { keeper_id: string; loser_id: string }
         Returns: undefined
       }
+      persist_campaign_delivery_settings: {
+        Args: {
+          p_campaign_id: string
+          p_from_address: string
+          p_org_id: string
+          p_provider: string
+          p_provider_campaign_id?: string | null
+          p_provider_campaign_name?: string | null
+          p_sender_number: string
+        }
+        Returns: undefined
+      }
       increment_sms_inbound_intent_duplicate: {
         Args: { p_intent_id: string; p_last_provider_message_id: string }
         Returns: undefined

@@ -401,6 +401,126 @@ describe("Migration 085 — campaign KPI scoreboard RPC", () => {
     ]);
   });
 
+  it("computes the same KPIs for canonical delivery settings and legacy sender columns", async () => {
+    const member = await createUserForOrg(BMH_ORG_ID);
+    const legacyCampaignId = await insertCampaign(BMH_ORG_ID, {
+      sender_provider: "mock",
+      sender_number: "+15551234567",
+    });
+    const settingsCampaignId = await insertCampaign(BMH_ORG_ID, {
+      sender_provider: "mock",
+      sender_number: "+15551234567",
+    });
+    const { error: settingsError } = await serviceClient
+      .from("campaign_delivery_settings")
+      .insert({
+        campaign_id: settingsCampaignId,
+        org_id: BMH_ORG_ID,
+        provider: "mock",
+        sender_number: "+15551234567",
+        from_address: "+15551234567",
+      } as never);
+    expect(settingsError).toBeNull();
+
+    async function seedOutcomes(campaignId: string, label: string) {
+      const repliedContact = await insertContact(BMH_ORG_ID, `${label}Reply`);
+      const failedContact = await insertContact(BMH_ORG_ID, `${label}Fail`);
+      const optOutContact = await insertContact(BMH_ORG_ID, `${label}Stop`);
+      const deliveredContact = await insertContact(BMH_ORG_ID, `${label}Delivered`);
+      const repliedProperty = await insertProperty(BMH_ORG_ID, repliedContact);
+      const failedProperty = await insertProperty(BMH_ORG_ID, failedContact);
+      const optOutProperty = await insertProperty(BMH_ORG_ID, optOutContact);
+      const deliveredProperty = await insertProperty(BMH_ORG_ID, deliveredContact);
+
+      await Promise.all([
+        insertCampaignRecipient({ campaignId, propertyId: repliedProperty, contactId: repliedContact }),
+        insertCampaignRecipient({ campaignId, propertyId: failedProperty, contactId: failedContact }),
+        insertCampaignRecipient({ campaignId, propertyId: optOutProperty, contactId: optOutContact }),
+        insertCampaignRecipient({ campaignId, propertyId: deliveredProperty, contactId: deliveredContact }),
+      ]);
+
+      const repliedOutbound = await insertMessage(BMH_ORG_ID, {
+        direction: "outbound",
+        status: "delivered",
+        campaign_id: campaignId,
+        property_id: repliedProperty,
+        contact_id: repliedContact,
+        from_address: "+15551234567",
+      });
+      await insertMessage(BMH_ORG_ID, {
+        direction: "outbound",
+        status: "failed",
+        campaign_id: campaignId,
+        property_id: failedProperty,
+        contact_id: failedContact,
+        from_address: "+15551234567",
+      });
+      const optOutOutbound = await insertMessage(BMH_ORG_ID, {
+        direction: "outbound",
+        status: "delivered",
+        campaign_id: campaignId,
+        property_id: optOutProperty,
+        contact_id: optOutContact,
+        from_address: "+15551234567",
+      });
+      await insertMessage(BMH_ORG_ID, {
+        direction: "outbound",
+        status: "delivered",
+        campaign_id: campaignId,
+        property_id: deliveredProperty,
+        contact_id: deliveredContact,
+        from_address: "+15551234567",
+      });
+      await insertMessage(BMH_ORG_ID, {
+        direction: "inbound",
+        status: "received",
+        contact_id: repliedContact,
+        property_id: repliedProperty,
+        attributed_outbound_message_id: repliedOutbound,
+        body: "Yes",
+      });
+      await insertMessage(BMH_ORG_ID, {
+        direction: "inbound",
+        status: "received",
+        contact_id: optOutContact,
+        property_id: optOutProperty,
+        attributed_outbound_message_id: optOutOutbound,
+        body: "STOP",
+        metadata: { keyword: "stop" },
+      });
+    }
+
+    await seedOutcomes(legacyCampaignId, "Legacy");
+    await seedOutcomes(settingsCampaignId, "Settings");
+
+    const { data: legacyData, error: legacyError } = await member.client.rpc(
+      "campaign_kpis",
+      { p_campaign_id: legacyCampaignId },
+    );
+    const { data: settingsData, error: dynamicError } = await member.client.rpc(
+      "campaign_kpis",
+      { p_campaign_id: settingsCampaignId },
+    );
+
+    expect(legacyError).toBeNull();
+    expect(dynamicError).toBeNull();
+    expect(settingsData).toEqual(legacyData);
+    expect(settingsData).toEqual([
+      {
+        audience: 4,
+        attempted: 4,
+        delivered: 3,
+        delivered_rate: 75,
+        failed: 1,
+        failed_rate: 25,
+        replied: 1,
+        reply_rate: 25,
+        opted_out: 1,
+        opt_out_rate: 25,
+      },
+    ]);
+  });
+
   it("rejects callers outside the campaign org", async () => {
     const outsider = await createUserForOrg(TEST_ORG_B_ID);
     const campaignId = await insertCampaign();
