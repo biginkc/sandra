@@ -144,6 +144,33 @@ export default async function LeadDetailPage({
     .order("created_at", { ascending: true })
     .limit(200);
   const initialMessages = (threadRaw ?? []) as MessageRow[];
+  let latestInboundSenderQuery = supabase
+    .from("messages")
+    .select("to_address")
+    .eq("channel", "sms")
+    .eq("direction", "inbound")
+    .eq("property_id", lead.id)
+    .not("to_address", "is", null)
+    .order("created_at", { ascending: false })
+    .limit(1);
+  if (lead.homeowner?.id) {
+    latestInboundSenderQuery = latestInboundSenderQuery.eq(
+      "contact_id",
+      lead.homeowner.id,
+    );
+  }
+  const { data: latestInboundSender } =
+    await latestInboundSenderQuery.maybeSingle();
+  const preferredFromNumber = latestInboundSender?.to_address ??
+    [...initialMessages]
+      .reverse()
+      .find(
+        (message) =>
+          message.direction === "inbound" &&
+          message.to_address &&
+          (!lead.homeowner?.id || message.contact_id === lead.homeowner.id) &&
+          message.property_id === lead.id,
+      )?.to_address ?? null;
 
   // Opening a lead acknowledges any unread inbound SMS on it. Fire-and-forget
   // so the page renders fast; the kanban card's red dot will clear on next
@@ -374,6 +401,7 @@ export default async function LeadDetailPage({
                       .join(" ") || null
                   : null
             }
+            preferredFromNumber={preferredFromNumber}
             templates={templateOptions}
           />
         </div>
@@ -436,6 +464,7 @@ export default async function LeadDetailPage({
               homeownerContactId={lead.homeowner?.id ?? null}
               homeownerPhone={homeownerSmsPhone}
               replyToPhone={homeownerSmsPhone}
+              preferredFromNumber={preferredFromNumber}
             />
           </div>
         </div>

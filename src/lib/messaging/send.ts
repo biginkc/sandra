@@ -9,6 +9,7 @@ import { getConsentState, type ConsentState } from "./consent";
 import { checkQuietHours, type QuietHoursCheck } from "./quiet-hours";
 import {
   getSenderInventoryState,
+  loadCampaignDeliverySettings,
   providerSupportsSenderInventory,
   type SenderInventoryState,
 } from "./delivery";
@@ -112,9 +113,8 @@ export type SendSmsInput = {
   propertyId: string;
   body: string;
   /**
-   * Optional override for the provider's default from-number. Comes from
-   * the composer's "send from" picker. When omitted, the provider uses
-   * its env-configured default sender.
+   * Optional explicit from-number. Inventory-aware providers validate this
+   * against the approved sender catalog before any provider call.
    */
   from?: string;
   /**
@@ -137,6 +137,12 @@ export type SendSmsInput = {
   scheduledFor?: Date | null;
   metadata?: Json | null;
   campaignId?: string | null;
+  /**
+   * Reply/automation paths must be sender-sticky: prior inbound business
+   * number, then campaign Delivery snapshot, then fail instead of falling
+   * back to a provider/env default.
+   */
+  requireStickyFrom?: boolean;
 };
 
 export async function sendSmsToContact(
@@ -281,11 +287,19 @@ export async function sendSmsToContact(
       error: e instanceof Error ? e.message : String(e),
     };
   }
-  const fromAddressRaw = input.from ?? provider.getDefaultFromNumber?.() ?? null;
-  const fromAddress = fromAddressRaw
-    ? normalizePhone(fromAddressRaw) ?? fromAddressRaw
-    : null;
   const normalizedToPhone = normalizePhone(destination.phone) ?? destination.phone;
+  const fromResolution = await resolveOutboundFromAddress(supabase, {
+    provider,
+    orgId: propertyResult.data.org_id,
+    contactId: input.contactId,
+    propertyId: input.propertyId,
+    toAddress: normalizedToPhone,
+    explicitFrom: input.from,
+    campaignId: input.campaignId,
+    requireStickyFrom: input.requireStickyFrom ?? false,
+  });
+  if (!fromResolution.ok) return fromResolution.outcome;
+  const fromAddress = fromResolution.fromAddress;
   const inputMetadata =
     input.metadata && typeof input.metadata === "object" && !Array.isArray(input.metadata)
       ? input.metadata
@@ -327,7 +341,7 @@ export async function sendSmsToContact(
     const result = await provider.sendSms({
       to: destination.phone,
       body: input.body,
-      from: input.from,
+      from: fromAddress ?? undefined,
     });
     const updates: MessagesUpdate = {
       status: "sent",
@@ -475,11 +489,26 @@ async function queueForLater(
       error: e instanceof Error ? e.message : String(e),
     };
   }
-  const fromAddressRaw = input.from ?? providerIdToDefaultFrom(providerId) ?? null;
-  const fromAddress = fromAddressRaw
-    ? normalizePhone(fromAddressRaw) ?? fromAddressRaw
-    : null;
   const normalizedToPhone = normalizePhone(destination.phone) ?? destination.phone;
+  const provider = getMessagingProvider();
+  if (!provider || provider.providerId !== providerId) {
+    return {
+      status: "blocked_provider_off",
+      reason: "Messaging provider changed while queueing this SMS.",
+    };
+  }
+  const fromResolution = await resolveOutboundFromAddress(supabase, {
+    provider,
+    orgId: propertyResult.data.org_id,
+    contactId: input.contactId,
+    propertyId: input.propertyId,
+    toAddress: normalizedToPhone,
+    explicitFrom: input.from,
+    campaignId: input.campaignId,
+    requireStickyFrom: input.requireStickyFrom ?? false,
+  });
+  if (!fromResolution.ok) return fromResolution.outcome;
+  const fromAddress = fromResolution.fromAddress;
   const campaignPause = await campaignIsPaused(supabase, input.campaignId);
   if (campaignPause.error) {
     return { status: "db_error", error: campaignPause.error };
@@ -602,14 +631,14 @@ export async function releaseQueuedMessage(
   }
   // Sender guard: the row must send from the sender it was queued with,
   // and that sender must be in the synced approved inventory — never an
-  // env-default fallback. Unknown/inactive/never-synced senders fail the
-  // row loudly so the operator sees a real release error.
+  // env-default fallback. Unknown/inactive senders fail the row loudly;
+  // empty/never-synced inventory is deferred so first deploys do not
+  // terminally kill every queued row before the first catalog sync.
   if (providerSupportsSenderInventory(provider)) {
     if (!msg.from_address) {
       const error =
         `queued message is missing from_address; Delivery sender is required for provider ${provider.providerId}`;
-      await failQueuedMessage(supabase, msg.id, error);
-      return { status: "db_error", error };
+      return deferQueuedMessage(supabase, msg.id, error, msg.metadata);
     }
 
     let inventory: SenderInventoryState;
@@ -627,17 +656,16 @@ export async function releaseQueuedMessage(
       };
     }
     if (inventory.state !== "approved") {
+      if (inventory.state === "empty") {
+        const error =
+          `queued message sender ${msg.from_address} is blocked because no approved sender inventory has been synced for provider ${provider.providerId}`;
+        return deferQueuedMessage(supabase, msg.id, error, msg.metadata);
+      }
       const senderState =
-        inventory.state === "inactive"
-          ? "no longer active"
-          : inventory.state === "empty"
-            ? "blocked because no approved sender inventory has been synced"
-            : "not";
+        inventory.state === "inactive" ? "no longer active" : "not";
       const error =
-        inventory.state === "empty"
-          ? `queued message sender ${msg.from_address} is ${senderState} for provider ${provider.providerId}`
-          : `queued message sender ${msg.from_address} is ${senderState} ` +
-            `in the approved ${provider.providerId} sender inventory`;
+        `queued message sender ${msg.from_address} is ${senderState} ` +
+        `in the approved ${provider.providerId} sender inventory`;
       await failQueuedMessage(supabase, msg.id, error);
       return {
         status: "db_error",
@@ -818,6 +846,9 @@ export async function releaseQueuedMessage(
   }
 
   try {
+    // Accepted race: an operator-triggered catalog sync can deactivate this
+    // sender in the milliseconds after validation and before the provider call.
+    // The queued row keeps the exact sender snapshot for audit/retry review.
     const result = await provider.sendSms({
       to: msg.to_address,
       body: msg.body,
@@ -1168,10 +1199,152 @@ function blockedTerminalDispo(
   };
 }
 
-function providerIdToDefaultFrom(providerId: string): string | null {
-  const provider = getMessagingProvider();
-  if (!provider || provider.providerId !== providerId) return null;
-  return provider.getDefaultFromNumber?.() ?? null;
+type ResolvedProvider = NonNullable<ReturnType<typeof getMessagingProvider>>;
+
+type ResolveFromArgs = {
+  provider: ResolvedProvider;
+  orgId: string;
+  contactId: string;
+  propertyId: string;
+  toAddress: string;
+  explicitFrom?: string | null;
+  campaignId?: string | null;
+  requireStickyFrom: boolean;
+};
+
+type ResolveFromResult =
+  | { ok: true; fromAddress: string | null }
+  | { ok: false; outcome: SendSmsOutcome };
+
+async function resolveOutboundFromAddress(
+  supabase: SupabaseClient<Database>,
+  args: ResolveFromArgs,
+): Promise<ResolveFromResult> {
+  const supportsInventory = providerSupportsSenderInventory(args.provider);
+  let fromAddress: string | null = null;
+
+  if (args.explicitFrom && args.explicitFrom.trim()) {
+    fromAddress = normalizePhone(args.explicitFrom) ?? args.explicitFrom.trim();
+  } else {
+    try {
+      fromAddress = await loadLatestInboundBusinessNumber(supabase, {
+        contactId: args.contactId,
+        propertyId: args.propertyId,
+        toAddress: args.toAddress,
+      });
+    } catch (e) {
+      return {
+        ok: false,
+        outcome: {
+          status: "db_error",
+          error: e instanceof Error ? e.message : String(e),
+        },
+      };
+    }
+
+    if (!fromAddress && args.campaignId) {
+      try {
+        const delivery = await loadCampaignDeliverySettings(
+          supabase,
+          args.campaignId,
+        );
+        fromAddress = delivery.fromAddress ?? delivery.senderNumber;
+      } catch (e) {
+        return {
+          ok: false,
+          outcome: {
+            status: "db_error",
+            error: e instanceof Error ? e.message : String(e),
+          },
+        };
+      }
+    }
+
+    if (!fromAddress && (!args.requireStickyFrom || !supportsInventory)) {
+      const fallback = args.provider.getDefaultFromNumber?.() ?? null;
+      fromAddress = fallback ? normalizePhone(fallback) ?? fallback : null;
+    }
+  }
+
+  if (supportsInventory) {
+    if (!fromAddress) {
+      return {
+        ok: false,
+        outcome: {
+          status: "db_error",
+          error:
+            "No sticky sending number found for this SMS. Reply from the business number the contact last texted, choose an approved sender, or configure campaign Delivery.",
+        },
+      };
+    }
+
+    let inventory: SenderInventoryState;
+    try {
+      inventory = await getSenderInventoryState(
+        supabase,
+        args.orgId,
+        args.provider.providerId,
+        fromAddress,
+      );
+    } catch (e) {
+      return {
+        ok: false,
+        outcome: {
+          status: "db_error",
+          error: e instanceof Error ? e.message : String(e),
+        },
+      };
+    }
+    if (inventory.state !== "approved") {
+      const detail =
+        inventory.state === "empty"
+          ? "no approved sender inventory has been synced"
+          : inventory.state === "inactive"
+            ? "the sender is no longer active"
+            : "the sender is not in the approved sender inventory";
+      return {
+        ok: false,
+        outcome: {
+          status: "db_error",
+          error: `Cannot send from ${fromAddress}: ${detail} for provider ${args.provider.providerId}.`,
+        },
+      };
+    }
+  }
+
+  return { ok: true, fromAddress };
+}
+
+async function loadLatestInboundBusinessNumber(
+  supabase: SupabaseClient<Database>,
+  args: {
+    contactId: string;
+    propertyId: string;
+    toAddress: string;
+  },
+): Promise<string | null> {
+  const normalizedTo = normalizePhone(args.toAddress) ?? args.toAddress;
+  let query = supabase
+    .from("messages")
+    .select("to_address")
+    .eq("channel", "sms")
+    .eq("direction", "inbound")
+    .eq("contact_id", args.contactId)
+    .eq("property_id", args.propertyId)
+    .not("to_address", "is", null)
+    .order("created_at", { ascending: false })
+    .limit(1);
+
+  if (normalizedTo) {
+    query = query.eq("from_address", normalizedTo);
+  }
+
+  const { data, error } = await query;
+  if (error) {
+    throw new Error(`latest inbound sender lookup failed: ${error.message}`);
+  }
+  const raw = data?.[0]?.to_address ?? null;
+  return raw ? normalizePhone(raw) ?? raw : null;
 }
 
 /**
@@ -1194,4 +1367,39 @@ export async function failQueuedMessage(
     })
     .eq("id", messageId)
     .eq("status", "queued");
+}
+
+async function deferQueuedMessage(
+  supabase: SupabaseClient<Database>,
+  messageId: string,
+  errorMessage: string,
+  metadata: Json | null,
+): Promise<Extract<SendSmsOutcome, { status: "provider_deferred" | "db_error" }>> {
+  const retryAt = new Date(Date.now() + PROVIDER_TRANSIENT_DEFER_MS).toISOString();
+  const currentMetadata = readMetadataRecord(metadata) ?? {};
+  const { error } = await supabase
+    .from("messages")
+    .update({
+      status: "queued",
+      scheduled_for: retryAt,
+      error_message: errorMessage,
+      metadata: {
+        ...currentMetadata,
+        senderGuard: {
+          deferredAt: new Date().toISOString(),
+          reason: errorMessage,
+          nextRetryAt: retryAt,
+        },
+      } as Json,
+    })
+    .eq("id", messageId)
+    .eq("status", "queued");
+  if (error) return { status: "db_error", error: error.message };
+  return {
+    status: "provider_deferred",
+    messageId,
+    error: errorMessage,
+    attempt: 0,
+    retryAt,
+  };
 }

@@ -257,6 +257,7 @@ export async function processEnrollmentTick(
       contactId: enrollment.contact_id,
       propertyId: enrollment.property_id,
       body: finalBody,
+      requireStickyFrom: true,
     });
 
     switch (outcome.status) {

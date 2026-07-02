@@ -739,6 +739,7 @@ export async function handleInboundWebhook(
             contactId: effectiveContactId,
             conversationId: insertOutcome.conversationId,
             inboundFromPhone: ev.from,
+            inboundToPhone: ev.to,
             inboundBody: ev.body,
             inboundMessageId: insertOutcome.messageId,
           };
@@ -795,6 +796,7 @@ export async function handleInboundWebhook(
                       contactId: effectiveContactId,
                       conversationId: insertOutcome.conversationId,
                       inboundFromPhone: ev.from,
+                      inboundToPhone: ev.to,
                       inboundBody: ev.body,
                       inboundMessageId: insertOutcome.messageId,
                       delaySeconds,

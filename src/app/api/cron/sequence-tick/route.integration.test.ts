@@ -8,6 +8,10 @@ import {
   getMockMessageLog,
   resetMockState,
 } from "@/lib/messaging/providers/mock";
+import {
+  MOCK_SENDER_PRIMARY,
+  seedSenderCatalog,
+} from "@tests/integration/delivery";
 
 import { runSequenceTick } from "./route";
 
@@ -98,6 +102,16 @@ async function seedLead(opts: {
     .select("id")
     .single();
   if (!property) throw new Error("property seed failed");
+  await supabase.from("messages").insert({
+    channel: "sms",
+    direction: "inbound",
+    status: "received",
+    property_id: property.id,
+    contact_id: contact.id,
+    from_address: opts.phone,
+    to_address: MOCK_SENDER_PRIMARY,
+    body: "seed inbound business sender",
+  });
   return { propertyId: property.id, contactId: contact.id };
 }
 
@@ -105,6 +119,7 @@ describe("runSequenceTick (integration)", () => {
   beforeEach(async () => {
     await resetTenantTables(supabase);
     resetMockState();
+    await seedSenderCatalog(supabase, await getOrgId(), [MOCK_SENDER_PRIMARY]);
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(SAFE_NOW);
   });

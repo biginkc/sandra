@@ -2,7 +2,7 @@
 
 import { SendIcon } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { useEffect, useRef, useState, useTransition } from "react";
+import { useRef, useState, useTransition } from "react";
 import { toast } from "sonner";
 
 import { callAction } from "@/lib/errors/call-action";
@@ -11,7 +11,7 @@ import { renderTemplate } from "@/lib/templates/render";
 import { type TemplateRow } from "@/app/(dashboard)/templates/actions";
 import { TemplatePicker } from "@/app/(dashboard)/templates/template-picker";
 
-import { listFromNumbers, sendSmsFromLead, loadLeadVars } from "../actions";
+import { sendSmsFromLead, loadLeadVars } from "../actions";
 
 type Props = {
   propertyId: string;
@@ -21,6 +21,7 @@ type Props = {
   homeownerPhone: string | null;
   /** Optional saved contact phone that matches the open Messages thread. */
   replyToPhone?: string | null;
+  preferredFromNumber?: string | null;
   phoneUnavailableMessage?: string;
 };
 
@@ -28,15 +29,15 @@ type Props = {
  * Inline reply box under the SMS thread. Sends via the existing
  * `sendSmsFromLead` server action — same TCPA + quiet-hours guardrails
  * as the modal composer. Kept intentionally minimal: no from-number
- * picker here (provider default), no "queue later" branch (that's what
- * the modal composer is for). VAs reacting to an inbound reply just
- * want to type and hit send.
+ * picker here; it replies from the business number the seller most
+ * recently texted. The modal composer handles explicit sender changes.
  */
 export function InlineReply({
   propertyId,
   homeownerContactId,
   homeownerPhone,
   replyToPhone = null,
+  preferredFromNumber = null,
   phoneUnavailableMessage,
 }: Props) {
   const router = useRouter();
@@ -47,24 +48,7 @@ export function InlineReply({
   // just picked (WR-04). Hooks must run before the early-return for the
   // disabled state, so this lives at the top of the component body.
   const templateRequestToken = useRef(0);
-  // Fetch the first provider-owned number once on mount and use it as the
-  // sender when the active adapter exposes a numbers list. This avoids the
-  // "default sender is unusable" footgun on providers that distinguish
-  // between owned numbers and unassigned/available inventory. The modal
-  // composer keeps an explicit picker; the inline reply stays minimal by
-  // auto-selecting the first usable number.
-  const [fromNumber, setFromNumber] = useState<string | null>(null);
-  useEffect(() => {
-    let cancelled = false;
-    listFromNumbers().then((result) => {
-      if (cancelled || !result.ok) return;
-      const sendable = result.data.find((o) => o.status !== "available");
-      if (sendable) setFromNumber(sendable.number);
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+  const fromNumber = preferredFromNumber;
 
   const disabled = !homeownerContactId || !homeownerPhone;
   const disabledReason = !homeownerContactId
