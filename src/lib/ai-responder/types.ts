@@ -123,3 +123,10 @@ export type AiMessageMetadata = {
   /** 1-based turn number within this thread. */
   turn: number;
 };
+
+export type AiReplyDelayProcessingMetadata = {
+  outcome: "delayed";
+  delaySeconds: number;
+  scheduledAt: string;
+  workflowRunId?: string;
+};

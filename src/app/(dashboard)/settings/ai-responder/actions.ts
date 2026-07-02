@@ -15,6 +15,8 @@ export type AiResponderConfigRow = {
   max_turns: number;
   min_confidence: number;
   business_hours_only: boolean;
+  reply_delay_min_seconds: number;
+  reply_delay_max_seconds: number;
   escalation_keywords: string[];
   updated_at: string;
 };
@@ -39,7 +41,7 @@ export async function getAiResponderConfig(): Promise<
     const { data, error } = await supabase
       .from("ai_responder_configs")
       .select(
-        "id, active, model, system_prompt, max_turns, min_confidence, business_hours_only, escalation_keywords, updated_at",
+        "id, active, model, system_prompt, max_turns, min_confidence, business_hours_only, reply_delay_min_seconds, reply_delay_max_seconds, escalation_keywords, updated_at",
       )
       .eq("org_id", org.id)
       .eq("active", true)
@@ -64,6 +66,8 @@ export type UpdateAiResponderInput = {
   max_turns: number;
   min_confidence: number;
   business_hours_only: boolean;
+  reply_delay_min_seconds: number;
+  reply_delay_max_seconds: number;
 };
 
 /**
@@ -91,6 +95,20 @@ export async function updateAiResponderConfig(
       error: {
         code: "VALIDATION",
         message: "Min confidence must be between 0 and 1.",
+      },
+    };
+  }
+  if (
+    input.reply_delay_min_seconds < 0 ||
+    input.reply_delay_max_seconds < 0 ||
+    input.reply_delay_max_seconds > 900 ||
+    input.reply_delay_min_seconds > input.reply_delay_max_seconds
+  ) {
+    return {
+      ok: false,
+      error: {
+        code: "VALIDATION",
+        message: "Reply delay must be 0 <= min <= max <= 900 seconds.",
       },
     };
   }
@@ -127,6 +145,8 @@ export async function updateAiResponderConfig(
         max_turns: input.max_turns,
         min_confidence: input.min_confidence,
         business_hours_only: input.business_hours_only,
+        reply_delay_min_seconds: input.reply_delay_min_seconds,
+        reply_delay_max_seconds: input.reply_delay_max_seconds,
         updated_at: new Date().toISOString(),
       })
       .eq("id", input.configId);
