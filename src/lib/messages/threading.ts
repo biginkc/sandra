@@ -608,8 +608,7 @@ async function loadCandidates(
       .eq("contact_id", contactId)
       .not("property_id", "is", null)
       .is("properties.deleted_at", null)
-      .order("created_at", { ascending: false })
-      .limit(50);
+      .order("created_at", { ascending: false });
 
   const resultSets = normalizedAddress
     ? await Promise.all([
@@ -651,8 +650,7 @@ async function loadBusinessNumbersForConversation(
     .select("direction, from_address, to_address")
     .eq("channel", "sms")
     .eq("conversation_id", conversationId)
-    .eq("contact_id", contactId)
-    .limit(50);
+    .eq("contact_id", contactId);
   if (error) {
     throw new Error(`loadBusinessNumbersForConversation: ${error.message}`);
   }

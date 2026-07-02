@@ -64,6 +64,7 @@ async function seedOutbound(args: {
   fromAddress: string;
   toAddress: string;
   body?: string;
+  createdAt?: string;
 }): Promise<void> {
   const orgId = await getOrgId();
   const { error } = await supabase.from("messages").insert({
@@ -77,6 +78,7 @@ async function seedOutbound(args: {
     body: args.body ?? `seed ${crypto.randomUUID()}`,
     contact_id: args.contactId,
     property_id: args.propertyId,
+    created_at: args.createdAt,
   });
   if (error) throw new Error(`message seed failed: ${error.message}`);
 }
@@ -147,6 +149,44 @@ describe("resolveInboundThread sender-number routing", () => {
       toAddress: phone,
       body: "ambiguous outbound b",
     });
+
+    const resolution = await resolveInboundThread(supabase, phone, sender);
+
+    expect(resolution).toMatchObject({
+      contactId,
+      propertyId: null,
+      resolution: "ambiguous_recipient_number",
+    });
+    expect(resolution.conversationId).toBeTruthy();
+  });
+
+  it("parks ambiguous replies when one property has more than 50 newer same-sender messages", async () => {
+    const phone = "+18165553003";
+    const sender = "+18164870004";
+    const contactId = await seedContact(phone);
+    const propertyA = await seedProperty(contactId, "5 Long History A Ln");
+    const propertyB = await seedProperty(contactId, "6 Old History B Ln");
+
+    await seedOutbound({
+      contactId,
+      propertyId: propertyB,
+      fromAddress: sender,
+      toAddress: phone,
+      body: "older ambiguous outbound b",
+      createdAt: "2026-06-01T12:00:00.000Z",
+    });
+    for (let i = 0; i < 60; i += 1) {
+      await seedOutbound({
+        contactId,
+        propertyId: propertyA,
+        fromAddress: sender,
+        toAddress: phone,
+        body: `newer long negotiation a ${i}`,
+        createdAt: new Date(
+          Date.UTC(2026, 5, 2, 12, i, 0),
+        ).toISOString(),
+      });
+    }
 
     const resolution = await resolveInboundThread(supabase, phone, sender);
 

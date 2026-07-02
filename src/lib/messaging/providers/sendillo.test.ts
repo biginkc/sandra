@@ -392,6 +392,7 @@ describe("SendilloMessagingProvider.listPurchasedNumbers", () => {
 
     await provider.listPurchasedNumbers();
 
+    expect(global.fetch).toHaveBeenCalledTimes(1);
     const [url, init] = (global.fetch as ReturnType<typeof vi.fn>).mock.calls[0];
     expect(url).toBe("https://www.sendillo.com/api/v1/numbers/purchased");
     expect((init as RequestInit).method).toBe("GET");
@@ -468,6 +469,7 @@ describe("SendilloMessagingProvider.listPurchasedNumbers", () => {
   });
 
   it("skips entries without any recognizable phone number field", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     mockFetch({
       status: 200,
       body: {
@@ -486,6 +488,17 @@ describe("SendilloMessagingProvider.listPurchasedNumbers", () => {
 
     expect(numbers).toHaveLength(1);
     expect(numbers[0].phoneE164).toBe("+18165550005");
+    expect(errorSpy).toHaveBeenCalledWith(
+      "[reportError]",
+      expect.objectContaining({
+        tags: { surface: "sendillo_catalog_parse" },
+        extra: expect.objectContaining({
+          label: "purchased numbers",
+          providerEntryId: "num_missing_phone",
+          reason: "missing phone",
+        }),
+      }),
+    );
   });
 
   it("throws ProviderError including the status on non-OK responses", async () => {
@@ -529,6 +542,7 @@ describe("SendilloMessagingProvider.listProviderCampaigns", () => {
 
     await provider.listProviderCampaigns();
 
+    expect(global.fetch).toHaveBeenCalledTimes(1);
     const [url, init] = (global.fetch as ReturnType<typeof vi.fn>).mock.calls[0];
     expect(url).toBe("https://www.sendillo.com/api/v1/campaigns");
     expect((init as RequestInit).method).toBe("GET");
@@ -583,6 +597,7 @@ describe("SendilloMessagingProvider.listProviderCampaigns", () => {
   });
 
   it("parses a top-level array and skips entries without an id", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     mockFetch({
       status: 200,
       body: [
@@ -599,6 +614,17 @@ describe("SendilloMessagingProvider.listProviderCampaigns", () => {
 
     expect(campaigns).toHaveLength(1);
     expect(campaigns[0].externalId).toBe("camp_3");
+    expect(errorSpy).toHaveBeenCalledWith(
+      "[reportError]",
+      expect.objectContaining({
+        tags: { surface: "sendillo_catalog_parse" },
+        extra: expect.objectContaining({
+          label: "campaigns",
+          providerEntryId: null,
+          reason: "missing id",
+        }),
+      }),
+    );
   });
 
   it("throws ProviderError including the status on non-OK responses", async () => {

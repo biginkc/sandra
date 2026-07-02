@@ -158,6 +158,21 @@ describe("syncProviderCatalog (integration)", () => {
     ]);
   });
 
+  it("aborts a sender sync that would deactivate every active sender", async () => {
+    const orgId = await getOrgId();
+    await syncProviderCatalog(supabase, orgId);
+
+    setMockPurchasedNumbers([]);
+    await sleep(25);
+    await expect(syncProviderCatalog(supabase, orgId)).rejects.toThrow(
+      /refusing to deactivate 2 active sender/i,
+    );
+
+    const rows = await listSenderRows(orgId);
+    expect(rows).toHaveLength(2);
+    expect(rows.every((row) => row.status === "active")).toBe(true);
+  });
+
   it("soft-deactivates provider campaigns that drop out of the catalog", async () => {
     const orgId = await getOrgId();
     await syncProviderCatalog(supabase, orgId);

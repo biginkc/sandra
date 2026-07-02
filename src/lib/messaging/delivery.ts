@@ -10,20 +10,22 @@
  *    messages stamp from_address. Neither depends on live catalog rows.
  *  - Catalog rows are soft-deactivated when they drop out of a sync,
  *    never deleted, so historical senders stay auditable.
- *  - Release-time validation fails closed: unknown/inactive/never-synced
- *    senders fail the row loudly. There is no fallback to an env-default
- *    sender.
+ *  - Release-time validation fails closed: unknown/inactive senders fail the
+ *    row loudly. Never-synced inventory is deferred, not terminal-failed, so
+ *    first deploys cannot mass-kill the queue before the first catalog sync.
  */
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { normalizePhone } from "@/lib/csv/normalize";
+import { reportError } from "@/lib/errors/report";
 import { ok, type Result } from "@/lib/errors/result";
 import type { Database, Json } from "@/lib/supabase/types";
 import { getMessagingProvider } from "./registry";
 import type { MessagingProvider } from "./types";
 
 type Supabase = SupabaseClient<Database>;
+const catalogSyncInflight = new Map<string, Promise<CatalogSyncResult>>();
 
 export type DeliverySenderOption = {
   phoneE164: string;
@@ -86,6 +88,22 @@ export async function syncProviderCatalog(
     return { supported: false, provider: provider?.providerId ?? null };
   }
 
+  const syncKey = `${orgId}:${provider.providerId}`;
+  const inflight = catalogSyncInflight.get(syncKey);
+  if (inflight) return inflight;
+
+  const sync = syncProviderCatalogOnce(client, orgId, provider).finally(() => {
+    catalogSyncInflight.delete(syncKey);
+  });
+  catalogSyncInflight.set(syncKey, sync);
+  return sync;
+}
+
+async function syncProviderCatalogOnce(
+  client: Supabase,
+  orgId: string,
+  provider: MessagingProvider,
+): Promise<CatalogSyncResult> {
   const nowIso = new Date().toISOString();
 
   const purchased = await provider.listPurchasedNumbers!();
@@ -108,6 +126,10 @@ export async function syncProviderCatalog(
     });
   }
   if (senderRows.length > 0) {
+    // Upsert by E.164 phone intentionally: queued messages and release
+    // validation store the sender phone, Sendillo's OpenAPI only promises an
+    // object response for purchased numbers, and provider_number_id can be
+    // absent. The provider id is still stored for audit/diagnostics.
     const { error } = await client
       .from("provider_sender_numbers")
       .upsert(senderRows, { onConflict: "org_id,provider,phone_e164" });
@@ -116,6 +138,28 @@ export async function syncProviderCatalog(
     }
   }
   {
+    const { count: activeSenderCount, error: activeSenderError } = await client
+      .from("provider_sender_numbers")
+      .select("id", { count: "exact", head: true })
+      .eq("org_id", orgId)
+      .eq("provider", provider.providerId)
+      .eq("status", "active");
+    if (activeSenderError) {
+      throw new Error(
+        `sender catalog active-count read failed: ${activeSenderError.message}`,
+      );
+    }
+    if (senderRows.length === 0 && (activeSenderCount ?? 0) > 0) {
+      const error = new Error(
+        `sender catalog sync returned zero ${provider.providerId} purchased numbers; refusing to deactivate ${activeSenderCount} active sender(s)`,
+      );
+      reportError(error, {
+        tags: { surface: "provider_catalog_sync_mass_deactivation_guard" },
+        extra: { orgId, provider: provider.providerId, activeSenderCount },
+      });
+      throw error;
+    }
+
     // Soft-deactivate rows the provider no longer reports.
     const { error } = await client
       .from("provider_sender_numbers")
@@ -450,54 +494,23 @@ export async function persistCampaignDeliverySettings(
     delivery: ResolvedDeliverySelection;
   },
 ): Promise<Result<null>> {
-  const nowIso = new Date().toISOString();
   const fromAddress = normalizeSenderNumber(args.delivery.fromAddress);
 
-  const { error: settingsError } = await client
-    .from("campaign_delivery_settings")
-    .upsert(
-      {
-        campaign_id: args.campaignId,
-        org_id: args.orgId,
-        provider: args.delivery.senderProvider,
-        sender_number: args.delivery.senderNumber,
-        from_address: fromAddress,
-        provider_campaign_id: args.delivery.providerCampaignExternalId,
-        provider_campaign_name: args.delivery.providerCampaignName,
-        updated_at: nowIso,
-      },
-      { onConflict: "campaign_id" },
-    );
-  if (settingsError) {
+  const { error } = await client.rpc("persist_campaign_delivery_settings", {
+    p_campaign_id: args.campaignId,
+    p_org_id: args.orgId,
+    p_provider: args.delivery.senderProvider,
+    p_sender_number: args.delivery.senderNumber,
+    p_from_address: fromAddress,
+    p_provider_campaign_id: args.delivery.providerCampaignExternalId,
+    p_provider_campaign_name: args.delivery.providerCampaignName,
+  });
+  if (error) {
     return {
       ok: false,
       error: {
         code: "DELIVERY_SETTINGS_SAVE_FAILED",
-        message: settingsError.message,
-      },
-    };
-  }
-
-  // Compatibility projection for existing list/detail queries. The
-  // campaign_delivery_settings row is the canonical Delivery snapshot.
-  const { error: mirrorError } = await client
-    .from("campaigns")
-    .update({
-      sender_provider: args.delivery.senderProvider,
-      sender_number: args.delivery.senderNumber,
-      provider_campaign_external_id:
-        args.delivery.providerCampaignExternalId,
-      provider_campaign_name: args.delivery.providerCampaignName,
-      updated_at: nowIso,
-    })
-    .eq("id", args.campaignId)
-    .eq("org_id", args.orgId);
-  if (mirrorError) {
-    return {
-      ok: false,
-      error: {
-        code: "DELIVERY_SETTINGS_SAVE_FAILED",
-        message: mirrorError.message,
+        message: error.message,
       },
     };
   }
