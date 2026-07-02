@@ -602,11 +602,16 @@ export async function releaseQueuedMessage(
   }
   // Sender guard: the row must send from the sender it was queued with,
   // and that sender must be in the synced approved inventory — never an
-  // env-default fallback. Unknown/inactive senders fail the row loudly.
-  // An EMPTY inventory (catalog never synced) defers instead of failing
-  // terminally: that is a sync/config gap, not bad row data, and failing
-  // would mass-kill queued rows on first deploy before the first sync.
-  if (providerSupportsSenderInventory(provider) && msg.from_address) {
+  // env-default fallback. Unknown/inactive/never-synced senders fail the
+  // row loudly so the operator sees a real release error.
+  if (providerSupportsSenderInventory(provider)) {
+    if (!msg.from_address) {
+      const error =
+        `queued message is missing from_address; Delivery sender is required for provider ${provider.providerId}`;
+      await failQueuedMessage(supabase, msg.id, error);
+      return { status: "db_error", error };
+    }
+
     let inventory: SenderInventoryState;
     try {
       inventory = await getSenderInventoryState(
@@ -621,18 +626,18 @@ export async function releaseQueuedMessage(
         error: e instanceof Error ? e.message : String(e),
       };
     }
-    if (inventory.state === "empty") {
-      return {
-        status: "db_error",
-        error:
-          `sender inventory for provider ${provider.providerId} has never been synced — ` +
-          `sync Delivery senders before releasing queued messages (message left queued)`,
-      };
-    }
     if (inventory.state !== "approved") {
+      const senderState =
+        inventory.state === "inactive"
+          ? "no longer active"
+          : inventory.state === "empty"
+            ? "blocked because no approved sender inventory has been synced"
+            : "not";
       const error =
-        `queued message sender ${msg.from_address} is ${inventory.state === "inactive" ? "no longer active" : "not"} ` +
-        `in the approved ${provider.providerId} sender inventory`;
+        inventory.state === "empty"
+          ? `queued message sender ${msg.from_address} is ${senderState} for provider ${provider.providerId}`
+          : `queued message sender ${msg.from_address} is ${senderState} ` +
+            `in the approved ${provider.providerId} sender inventory`;
       await failQueuedMessage(supabase, msg.id, error);
       return {
         status: "db_error",

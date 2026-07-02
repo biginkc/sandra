@@ -266,6 +266,58 @@ describe("createCampaign / archiveCampaign / unarchiveCampaign (integration)", (
       search: "oak",
       blockStack: [{ id: "vacancy-1", kind: "vacancy", tri: "yes" }],
     });
+
+    const { data: settings } = await testClient
+      .from("campaign_delivery_settings")
+      .select(
+        "org_id, provider, sender_number, from_address, provider_campaign_id, provider_campaign_name",
+      )
+      .eq("campaign_id", result.data.id)
+      .single();
+
+    expect(settings).toMatchObject({
+      org_id: orgId,
+      provider: "mock",
+      sender_number: MOCK_SENDER_PRIMARY,
+      from_address: MOCK_SENDER_PRIMARY,
+      provider_campaign_id: MOCK_PROVIDER_CAMPAIGN_ID,
+      provider_campaign_name: `Catalog campaign ${MOCK_PROVIDER_CAMPAIGN_ID}`,
+    });
+  });
+
+  it("creates delivery settings with a nullable provider campaign", async () => {
+    const orgId = await getOrgId();
+    const email = uniqueCampaignEmail("campaign-create-null-provider-campaign");
+    const userId = await createAuthUser(email);
+    currentUserId = userId;
+    currentEmail = email;
+
+    const result = await createCampaign({
+      name: "Nullable Provider Campaign",
+      body: "Provider campaign intentionally blank",
+      senderNumber: MOCK_SENDER_SECONDARY,
+      providerCampaignExternalId: null,
+      audience: {
+        search: "oak",
+        blockStack: [{ id: "vacancy-1", kind: "vacancy", tri: "yes" }],
+      },
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    const { data: settings } = await testClient
+      .from("campaign_delivery_settings")
+      .select("org_id, provider, sender_number, from_address, provider_campaign_id")
+      .eq("campaign_id", result.data.id)
+      .single();
+
+    expect(settings).toMatchObject({
+      org_id: orgId,
+      provider: "mock",
+      sender_number: MOCK_SENDER_SECONDARY,
+      from_address: MOCK_SENDER_SECONDARY,
+      provider_campaign_id: null,
+    });
   });
 
   it("defaults omitted saved-campaign pacing to 8 seconds", async () => {

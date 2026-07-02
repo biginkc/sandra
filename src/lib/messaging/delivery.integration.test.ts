@@ -223,6 +223,7 @@ describe("resolveDeliverySelection (integration)", () => {
     expect(result.data).toEqual({
       senderProvider: "mock",
       senderNumber: MOCK_SENDER_PRIMARY,
+      fromAddress: MOCK_SENDER_PRIMARY,
       providerCampaignExternalId: MOCK_PROVIDER_CAMPAIGN_ID,
       providerCampaignName: "Mock 10DLC Campaign",
     });
@@ -244,6 +245,7 @@ describe("resolveDeliverySelection (integration)", () => {
     expect(result.data).toEqual({
       senderProvider: "mock",
       senderNumber: MOCK_SENDER_SECONDARY,
+      fromAddress: MOCK_SENDER_SECONDARY,
       providerCampaignExternalId: null,
       providerCampaignName: null,
     });

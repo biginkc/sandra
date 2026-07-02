@@ -165,6 +165,8 @@ function makeSendilloInboundRequest(input: {
 
 describe("POST /api/webhooks/sendillo/sms (integration)", () => {
   beforeEach(async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-06-08T19:10:39.257Z"));
     delete process.env.SUPABASE_SERVICE_ROLE_KEY;
     process.env.NEXT_PUBLIC_SUPABASE_URL = process.env.TEST_SUPABASE_URL;
     delete process.env.MESSAGING_PROVIDER;
@@ -183,6 +185,7 @@ describe("POST /api/webhooks/sendillo/sms (integration)", () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     process.env.MESSAGING_PROVIDER = ORIGINAL_ENV.MESSAGING_PROVIDER;
     process.env.SENDILLO_API_KEY = ORIGINAL_ENV.SENDILLO_API_KEY;
     process.env.SENDILLO_FROM_NUMBER = ORIGINAL_ENV.SENDILLO_FROM_NUMBER;
@@ -1038,12 +1041,13 @@ describe("POST /api/webhooks/sendillo/sms (integration)", () => {
 
     const { data: message } = await supabase
       .from("messages")
-      .select("contact_id, property_id, metadata")
+      .select("contact_id, property_id, to_address, metadata")
       .eq("external_id", "snd_active_ambiguous_001")
       .single();
     expect(message).toMatchObject({
       contact_id: contactId,
       property_id: null,
+      to_address: "+18164876899",
       metadata: {
         routing: "ambiguous_recipient_number",
       },

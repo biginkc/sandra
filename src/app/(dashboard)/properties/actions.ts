@@ -18,7 +18,10 @@ import {
   assessAudienceLineTypes,
   type AudienceLineTypeAssessment,
 } from "@/lib/messaging/audience-assessment";
-import { normalizeSenderNumber } from "@/lib/messaging/delivery";
+import {
+  loadCampaignDeliverySettings,
+  normalizeSenderNumber,
+} from "@/lib/messaging/delivery";
 import {
   CONTACTED_MESSAGE_STATUSES,
   freshScheduleState,
@@ -190,7 +193,7 @@ async function validateProvidedCampaignForBulkSms(
 ): Promise<Result<null>> {
   const { data: campaign, error: campaignError } = await supabase
     .from("campaigns")
-    .select("org_id, status, sender_number")
+    .select("org_id, status")
     .eq("id", campaignId)
     .maybeSingle();
 
@@ -215,7 +218,8 @@ async function validateProvidedCampaignForBulkSms(
       },
     };
   }
-  if (!campaign.sender_number) {
+  const delivery = await loadCampaignDeliverySettings(supabase, campaignId);
+  if (!delivery.senderNumber) {
     return {
       ok: false,
       error: {
@@ -228,14 +232,14 @@ async function validateProvidedCampaignForBulkSms(
   if (
     requestedSenderNumber &&
     normalizeSenderNumber(requestedSenderNumber) !==
-      normalizeSenderNumber(campaign.sender_number)
+      normalizeSenderNumber(delivery.senderNumber)
   ) {
     return {
       ok: false,
       error: {
         code: "SENDER_LOCKED",
         message:
-          `Campaign sends from ${campaign.sender_number} and its sender is locked. ` +
+          `Campaign sends from ${delivery.senderNumber} and its sender is locked. ` +
           "Create a new campaign to send from a different number.",
       },
     };

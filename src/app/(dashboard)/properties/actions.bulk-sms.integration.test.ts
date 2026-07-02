@@ -1305,6 +1305,18 @@ describe("bulkQueueSms (integration)", () => {
       sender_number: MOCK_SENDER_SECONDARY,
     });
 
+    const { data: settings } = await testClient
+      .from("campaign_delivery_settings")
+      .select("provider, sender_number, from_address, provider_campaign_id")
+      .eq("campaign_id", campaign!.id)
+      .single();
+    expect(settings).toMatchObject({
+      provider: "mock",
+      sender_number: MOCK_SENDER_SECONDARY,
+      from_address: MOCK_SENDER_SECONDARY,
+      provider_campaign_id: null,
+    });
+
     const { data: messages } = await testClient
       .from("messages")
       .select("from_address, status, campaign_id");

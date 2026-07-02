@@ -3,7 +3,10 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Result } from "@/lib/errors/result";
 import { ok } from "@/lib/errors/result";
 import type { BulkSmsQueueBaseOpts } from "@/lib/messaging/bulk-queue";
-import { resolveDeliverySelection } from "@/lib/messaging/delivery";
+import {
+  persistCampaignDeliverySettings,
+  resolveDeliverySelection,
+} from "@/lib/messaging/delivery";
 import type { Database, Json } from "@/lib/supabase/types";
 
 const PROPERTY_CHUNK = 250;
@@ -268,6 +271,16 @@ export async function resolveAdHocBulkSmsCampaign(
       ok: false,
       error: { code: "CAMPAIGN_CREATE_FAILED", message },
     };
+  }
+
+  const deliveryPersistResult = await persistCampaignDeliverySettings(supabase, {
+    campaignId: campaign.id,
+    orgId,
+    delivery,
+  });
+  if (!deliveryPersistResult.ok) {
+    await settleAdHocCampaignAfterQueueFailure(supabase, campaign.id);
+    return deliveryPersistResult;
   }
 
   const recipientsResult = await persistRecipients(

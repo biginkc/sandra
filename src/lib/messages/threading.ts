@@ -341,6 +341,9 @@ export async function resolveInboundThread(
     return materializeThreadCandidate(supabase, recipientCandidates[0], "matched_recipient_number");
   }
   if (recipientCandidates.length > 1) {
+    // Manual-triage rule: a reply to a business sender that still maps to
+    // multiple active properties must stay contact-level. Picking the most
+    // recent property would silently put the seller's reply on the wrong lead.
     return contactLevelResolution(
       supabase,
       contacts.length === 1 ? contacts[0].id : null,

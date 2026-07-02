@@ -487,6 +487,60 @@ export type Database = {
           },
         ]
       }
+      campaign_delivery_settings: {
+        Row: {
+          campaign_id: string
+          created_at: string
+          from_address: string
+          id: string
+          org_id: string
+          provider: string
+          provider_campaign_id: string | null
+          provider_campaign_name: string | null
+          sender_number: string
+          updated_at: string
+        }
+        Insert: {
+          campaign_id: string
+          created_at?: string
+          from_address: string
+          id?: string
+          org_id: string
+          provider: string
+          provider_campaign_id?: string | null
+          provider_campaign_name?: string | null
+          sender_number: string
+          updated_at?: string
+        }
+        Update: {
+          campaign_id?: string
+          created_at?: string
+          from_address?: string
+          id?: string
+          org_id?: string
+          provider?: string
+          provider_campaign_id?: string | null
+          provider_campaign_name?: string | null
+          sender_number?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "campaign_delivery_settings_campaign_id_fkey"
+            columns: ["campaign_id"]
+            isOneToOne: true
+            referencedRelation: "campaigns"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "campaign_delivery_settings_org_id_fkey"
+            columns: ["org_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       campaign_recipients: {
         Row: {
           campaign_id: string

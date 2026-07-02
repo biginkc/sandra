@@ -6,7 +6,10 @@ import {
   applyPhoneLevelOptOut,
   recordSmsPhoneSuppression,
 } from "@/lib/messaging/opt-out-phone";
-import { getMockMessageLog } from "@/lib/messaging/providers/mock";
+import {
+  getMockMessageLog,
+  resetMockState,
+} from "@/lib/messaging/providers/mock";
 import { createTestClient } from "@tests/integration/client";
 import {
   MOCK_SENDER_PRIMARY,
@@ -82,6 +85,7 @@ async function getOrgId(): Promise<string> {
 
 describe("sendSmsToContact (integration)", () => {
   beforeEach(async () => {
+    resetMockState();
     await resetTenantTables(supabase);
     // Release-time sender guard: queued rows carry from_address (the mock
     // provider default) and must resolve to an active synced sender.
@@ -897,13 +901,56 @@ describe("sendSmsToContact (integration)", () => {
     expect(row?.error_message).toMatch(/approved sendillo sender inventory/i);
   });
 
-  it("release defers (leaves queued) when the Sendillo sender inventory has never been synced", async () => {
+  it("release fails a queued Sendillo row with no from_address instead of falling back to the env sender", async () => {
     process.env.MESSAGING_PROVIDER = "sendillo";
     process.env.SENDILLO_API_KEY = "sendillo-test-key";
     process.env.SENDILLO_FROM_NUMBER = "+18164876899";
 
-    // No sendillo catalog rows at all — a sync/config gap, not bad row
-    // data. Release must defer instead of terminal-failing the row.
+    await seedSenderCatalog(supabase, await getOrgId(), ["+18164876899"], {
+      provider: "sendillo",
+    });
+
+    const { contactId, propertyId } = await seed({ withConsent: true });
+    const { data: queued } = await supabase
+      .from("messages")
+      .insert({
+        channel: "sms",
+        direction: "outbound",
+        status: "queued",
+        provider: "sendillo",
+        contact_id: contactId,
+        property_id: propertyId,
+        from_address: null,
+        to_address: "+18165559999",
+        body: "missing sender snapshot",
+      })
+      .select("id")
+      .single();
+
+    const outcome = await releaseQueuedMessage(supabase, queued!.id);
+    expect(outcome.status).toBe("db_error");
+    if (outcome.status === "db_error") {
+      expect(outcome.error).toMatch(/missing from_address/i);
+    }
+    expect(getMockMessageLog()).toHaveLength(0);
+
+    const { data: row } = await supabase
+      .from("messages")
+      .select("status, error_message, external_id")
+      .eq("id", queued!.id)
+      .single();
+    expect(row?.status).toBe("failed");
+    expect(row?.external_id).toBeNull();
+    expect(row?.error_message).toMatch(/missing from_address/i);
+  });
+
+  it("release fails a queued Sendillo row when the sender inventory has never been synced", async () => {
+    process.env.MESSAGING_PROVIDER = "sendillo";
+    process.env.SENDILLO_API_KEY = "sendillo-test-key";
+    process.env.SENDILLO_FROM_NUMBER = "+18164876899";
+
+    // No sendillo catalog rows at all — release must fail closed instead
+    // of falling back to SENDILLO_FROM_NUMBER.
     const { contactId, propertyId } = await seed({ withConsent: true });
     const { data: queued } = await supabase
       .from("messages")
@@ -924,7 +971,7 @@ describe("sendSmsToContact (integration)", () => {
     const outcome = await releaseQueuedMessage(supabase, queued!.id);
     expect(outcome.status).toBe("db_error");
     if (outcome.status === "db_error") {
-      expect(outcome.error).toMatch(/never been synced/i);
+      expect(outcome.error).toMatch(/no approved sender inventory has been synced/i);
     }
 
     const { data: row } = await supabase
@@ -932,8 +979,8 @@ describe("sendSmsToContact (integration)", () => {
       .select("status, error_message")
       .eq("id", queued!.id)
       .single();
-    expect(row?.status).toBe("queued");
-    expect(row?.error_message).toBeNull();
+    expect(row?.status).toBe("failed");
+    expect(row?.error_message).toMatch(/no approved sender inventory has been synced/i);
   });
 
   it("release preserves queued metadata when the message is sent", async () => {
@@ -1408,7 +1455,7 @@ describe("sendSmsToContact (integration)", () => {
     expect(row?.error_message).toMatch(/no longer active/i);
   });
 
-  it("release leaves the row queued when the mock sender inventory is empty (never synced)", async () => {
+  it("release fails the row when the mock sender inventory is empty (never synced)", async () => {
     const { contactId, propertyId } = await seed({ withConsent: true });
     const queue = await sendSmsToContact(supabase, {
       contactId,
@@ -1430,19 +1477,22 @@ describe("sendSmsToContact (integration)", () => {
     const release = await releaseQueuedMessage(supabase, queue.messageId);
     expect(release.status).toBe("db_error");
     if (release.status === "db_error") {
-      expect(release.error).toMatch(/never been synced/i);
+      expect(release.error).toMatch(
+        /no approved sender inventory has been synced/i,
+      );
     }
     expect(getMockMessageLog()).toHaveLength(callsBefore);
 
-    // Deferred, not failed: a later sync can unblock the row.
     const { data: row } = await supabase
       .from("messages")
       .select("status, error_message, failed_at")
       .eq("id", queue.messageId)
       .single();
-    expect(row?.status).toBe("queued");
-    expect(row?.error_message).toBeNull();
-    expect(row?.failed_at).toBeNull();
+    expect(row?.status).toBe("failed");
+    expect(row?.error_message).toMatch(
+      /no approved sender inventory has been synced/i,
+    );
+    expect(row?.failed_at).toEqual(expect.any(String));
   });
 
   // --------------------------------------------------------------------------

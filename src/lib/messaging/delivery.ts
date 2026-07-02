@@ -10,10 +10,9 @@
  *    messages stamp from_address. Neither depends on live catalog rows.
  *  - Catalog rows are soft-deactivated when they drop out of a sync,
  *    never deleted, so historical senders stay auditable.
- *  - Release-time validation fails closed: unknown/inactive senders fail
- *    the row loudly; an empty (never-synced) inventory defers the row
- *    without terminal failure so a sync can unblock it. There is no
- *    fallback to an env-default sender.
+ *  - Release-time validation fails closed: unknown/inactive/never-synced
+ *    senders fail the row loudly. There is no fallback to an env-default
+ *    sender.
  */
 
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -304,6 +303,7 @@ export async function getSenderInventoryState(
 export type ResolvedDeliverySelection = {
   senderProvider: string;
   senderNumber: string;
+  fromAddress: string;
   providerCampaignExternalId: string | null;
   providerCampaignName: string | null;
 };
@@ -392,6 +392,7 @@ export async function resolveDeliverySelection(
     return ok({
       senderProvider: activeSender.provider,
       senderNumber,
+      fromAddress: senderNumber,
       providerCampaignExternalId: null,
       providerCampaignName: null,
     });
@@ -427,6 +428,7 @@ export async function resolveDeliverySelection(
   return ok({
     senderProvider: activeSender.provider,
     senderNumber,
+    fromAddress: senderNumber,
     providerCampaignExternalId: providerCampaign.external_id,
     providerCampaignName: providerCampaign.name,
   });
@@ -435,29 +437,114 @@ export async function resolveDeliverySelection(
 export type CampaignDeliverySettings = {
   senderProvider: string | null;
   senderNumber: string | null;
+  fromAddress: string | null;
   providerCampaignExternalId: string | null;
   providerCampaignName: string | null;
 };
+
+export async function persistCampaignDeliverySettings(
+  client: Supabase,
+  args: {
+    campaignId: string;
+    orgId: string;
+    delivery: ResolvedDeliverySelection;
+  },
+): Promise<Result<null>> {
+  const nowIso = new Date().toISOString();
+  const fromAddress = normalizeSenderNumber(args.delivery.fromAddress);
+
+  const { error: settingsError } = await client
+    .from("campaign_delivery_settings")
+    .upsert(
+      {
+        campaign_id: args.campaignId,
+        org_id: args.orgId,
+        provider: args.delivery.senderProvider,
+        sender_number: args.delivery.senderNumber,
+        from_address: fromAddress,
+        provider_campaign_id: args.delivery.providerCampaignExternalId,
+        provider_campaign_name: args.delivery.providerCampaignName,
+        updated_at: nowIso,
+      },
+      { onConflict: "campaign_id" },
+    );
+  if (settingsError) {
+    return {
+      ok: false,
+      error: {
+        code: "DELIVERY_SETTINGS_SAVE_FAILED",
+        message: settingsError.message,
+      },
+    };
+  }
+
+  // Compatibility projection for existing list/detail queries. The
+  // campaign_delivery_settings row is the canonical Delivery snapshot.
+  const { error: mirrorError } = await client
+    .from("campaigns")
+    .update({
+      sender_provider: args.delivery.senderProvider,
+      sender_number: args.delivery.senderNumber,
+      provider_campaign_external_id:
+        args.delivery.providerCampaignExternalId,
+      provider_campaign_name: args.delivery.providerCampaignName,
+      updated_at: nowIso,
+    })
+    .eq("id", args.campaignId)
+    .eq("org_id", args.orgId);
+  if (mirrorError) {
+    return {
+      ok: false,
+      error: {
+        code: "DELIVERY_SETTINGS_SAVE_FAILED",
+        message: mirrorError.message,
+      },
+    };
+  }
+
+  return ok(null);
+}
 
 export async function loadCampaignDeliverySettings(
   client: Supabase,
   campaignId: string,
 ): Promise<CampaignDeliverySettings> {
-  const { data, error } = await client
+  const { data: settings, error: settingsError } = await client
+    .from("campaign_delivery_settings")
+    .select(
+      "provider, sender_number, from_address, provider_campaign_id, provider_campaign_name",
+    )
+    .eq("campaign_id", campaignId)
+    .maybeSingle();
+  if (settingsError) {
+    throw new Error(`campaign delivery settings read failed: ${settingsError.message}`);
+  }
+  if (settings) {
+    return {
+      senderProvider: settings.provider,
+      senderNumber: settings.sender_number,
+      fromAddress: settings.from_address,
+      providerCampaignExternalId: settings.provider_campaign_id,
+      providerCampaignName: settings.provider_campaign_name,
+    };
+  }
+
+  const { data: campaign, error: campaignError } = await client
     .from("campaigns")
     .select(
       "sender_provider, sender_number, provider_campaign_external_id, provider_campaign_name",
     )
     .eq("id", campaignId)
     .maybeSingle();
-  if (error) {
-    throw new Error(`campaign delivery read failed: ${error.message}`);
+  if (campaignError) {
+    throw new Error(`campaign delivery read failed: ${campaignError.message}`);
   }
   return {
-    senderProvider: data?.sender_provider ?? null,
-    senderNumber: data?.sender_number ?? null,
-    providerCampaignExternalId: data?.provider_campaign_external_id ?? null,
-    providerCampaignName: data?.provider_campaign_name ?? null,
+    senderProvider: campaign?.sender_provider ?? null,
+    senderNumber: campaign?.sender_number ?? null,
+    fromAddress: campaign?.sender_number ?? null,
+    providerCampaignExternalId: campaign?.provider_campaign_external_id ?? null,
+    providerCampaignName: campaign?.provider_campaign_name ?? null,
   };
 }
 

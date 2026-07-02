@@ -167,7 +167,9 @@ export async function queueSmsBatch(
         "Re-create the campaign under the active provider before queueing.",
     );
   }
-  const senderNumber = normalizeSenderNumber(delivery.senderNumber);
+  const senderNumber = normalizeSenderNumber(
+    delivery.fromAddress ?? delivery.senderNumber,
+  );
 
   // Fetch properties in chunks — Supabase PostgREST rejects large IN
   // clauses (URL length limit, ~8 KB) so we split into batches of 250.

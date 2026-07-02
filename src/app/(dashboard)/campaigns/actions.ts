@@ -12,8 +12,10 @@ import {
   type BulkSmsQueueBaseOpts,
 } from "@/lib/messaging/bulk-queue";
 import {
+  loadCampaignDeliverySettings,
   loadDeliveryCatalog,
   normalizeSenderNumber,
+  persistCampaignDeliverySettings,
   resolveDeliverySelection,
   syncProviderCatalog,
   type CatalogSyncResult,
@@ -1104,6 +1106,18 @@ export async function createCampaign(
         );
       }
 
+      if (!revivedLocked) {
+        const deliveryPersistResult = await persistCampaignDeliverySettings(
+          supabase,
+          {
+            campaignId: revivedRow.id,
+            orgId,
+            delivery,
+          },
+        );
+        if (!deliveryPersistResult.ok) return deliveryPersistResult;
+      }
+
       return ok({ id: revivedRow.id });
     }
 
@@ -1132,6 +1146,16 @@ export async function createCampaign(
         error: { code: "CAMPAIGN_CREATE_FAILED", message: error.message },
       };
     }
+
+    const deliveryPersistResult = await persistCampaignDeliverySettings(
+      supabase,
+      {
+        campaignId: inserted.id,
+        orgId,
+        delivery,
+      },
+    );
+    if (!deliveryPersistResult.ok) return deliveryPersistResult;
 
     return ok({ id: inserted.id });
   } catch (e) {
@@ -1812,7 +1836,8 @@ export async function launchCampaign(
     // Delivery gate — only for campaigns that are actually about to
     // queue. Already-launched campaigns short-circuit above so legacy
     // (pre-Delivery) campaigns keep returning alreadyLaunched cleanly.
-    if (!campaign.sender_number) {
+    const delivery = await loadCampaignDeliverySettings(supabase, campaignId);
+    if (!delivery.senderNumber) {
       return {
         ok: false,
         error: {
