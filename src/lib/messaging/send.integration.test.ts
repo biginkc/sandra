@@ -6,7 +6,10 @@ import {
   applyPhoneLevelOptOut,
   recordSmsPhoneSuppression,
 } from "@/lib/messaging/opt-out-phone";
-import { getMockMessageLog } from "@/lib/messaging/providers/mock";
+import {
+  getMockMessageLog,
+  resetMockState,
+} from "@/lib/messaging/providers/mock";
 import { createTestClient } from "@tests/integration/client";
 import {
   MOCK_SENDER_PRIMARY,
@@ -24,6 +27,17 @@ const ORIGINAL_ENV = {
   SENDILLO_API_KEY: process.env.SENDILLO_API_KEY,
   SENDILLO_FROM_NUMBER: process.env.SENDILLO_FROM_NUMBER,
 };
+const SAFE_SEND_WINDOW = new Date("2026-07-02T18:00:00Z");
+
+async function withSafeSendWindow<T>(fn: () => Promise<T>): Promise<T> {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(SAFE_SEND_WINDOW);
+  try {
+    return await fn();
+  } finally {
+    vi.useRealTimers();
+  }
+}
 
 async function seed(params: {
   doNotContact?: boolean;
@@ -82,6 +96,7 @@ async function getOrgId(): Promise<string> {
 
 describe("sendSmsToContact (integration)", () => {
   beforeEach(async () => {
+    resetMockState();
     await resetTenantTables(supabase);
     // Release-time sender guard: queued rows carry from_address (the mock
     // provider default) and must resolve to an active synced sender.
@@ -100,46 +115,108 @@ describe("sendSmsToContact (integration)", () => {
   });
 
   it("happy path: marketing consent + business hours → message row sent", async () => {
-    // Pin a time inside the send window by letting the wall clock
-    // decide. Test skips itself outside business hours to stay
-    // deterministic even when run at 2am. (CI will be set to a fixed
-    // zone later; for now local-dev runs may see this skip.)
-    const now = new Date();
-    const hour = parseInt(
-      new Intl.DateTimeFormat("en-US", {
-        timeZone: "America/Chicago",
-        hour: "2-digit",
-        hour12: false,
-      }).format(now),
-      10,
-    );
-    if (hour < 8 || hour >= 21) {
+    await withSafeSendWindow(async () => {
+      const { contactId, propertyId } = await seed({ withConsent: true });
 
-      console.warn("sendSmsToContact happy-path test skipped — outside 8a–9p CT");
-      return;
-    }
-    const { contactId, propertyId } = await seed({ withConsent: true });
+      const outcome = await sendSmsToContact(supabase, {
+        contactId,
+        propertyId,
+        body: "Hey — quick question about your property",
+      });
+      expect(outcome.status).toBe("sent");
 
-    const outcome = await sendSmsToContact(supabase, {
-      contactId,
-      propertyId,
-      body: "Hey — quick question about your property",
+      const { data: msg } = await supabase
+        .from("messages")
+        .select(
+          "status, direction, external_id, body, contact_id, property_id, conversation_id, campaign_id",
+        )
+        .eq("contact_id", contactId)
+        .single();
+      expect(msg?.status).toBe("sent");
+      expect(msg?.direction).toBe("outbound");
+      expect(msg?.external_id).toMatch(/^mock_/);
+      expect(msg?.property_id).toBe(propertyId);
+      expect(msg?.conversation_id).toBeTruthy();
+      expect(msg?.campaign_id).toBeNull();
     });
-    expect(outcome.status).toBe("sent");
+  });
 
-    const { data: msg } = await supabase
-      .from("messages")
-      .select(
-        "status, direction, external_id, body, contact_id, property_id, conversation_id, campaign_id",
-      )
-      .eq("contact_id", contactId)
-      .single();
-    expect(msg?.status).toBe("sent");
-    expect(msg?.direction).toBe("outbound");
-    expect(msg?.external_id).toMatch(/^mock_/);
-    expect(msg?.property_id).toBe(propertyId);
-    expect(msg?.conversation_id).toBeTruthy();
-    expect(msg?.campaign_id).toBeNull();
+  it("sends a sticky reply from the most recent inbound business number", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-07-02T18:00:00Z"));
+    try {
+      const phone = "+18165559999";
+      const { contactId, propertyId } = await seed({
+        phone,
+        withConsent: true,
+      });
+      await supabase.from("messages").insert({
+        channel: "sms",
+        direction: "inbound",
+        status: "received",
+        provider: "mock",
+        contact_id: contactId,
+        property_id: propertyId,
+        from_address: phone,
+        to_address: MOCK_SENDER_SECONDARY,
+        body: "seller texted secondary sender",
+      });
+
+      const outcome = await sendSmsToContact(supabase, {
+        contactId,
+        propertyId,
+        body: "Reply from the same sender",
+        to: phone,
+        requireStickyFrom: true,
+      });
+
+      expect(outcome.status).toBe("sent");
+      const lastCall = getMockMessageLog().at(-1);
+      expect(lastCall?.input.from).toBe(MOCK_SENDER_SECONDARY);
+
+      const { data: outbound } = await supabase
+        .from("messages")
+        .select("from_address, to_address, body")
+        .eq("direction", "outbound")
+        .eq("contact_id", contactId)
+        .single();
+      expect(outbound).toMatchObject({
+        from_address: MOCK_SENDER_SECONDARY,
+        to_address: phone,
+        body: "Reply from the same sender",
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("blocks an explicit unapproved immediate sender before provider use", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-07-02T18:00:00Z"));
+    try {
+      const { contactId, propertyId } = await seed({ withConsent: true });
+      const callsBefore = getMockMessageLog().length;
+
+      const outcome = await sendSmsToContact(supabase, {
+        contactId,
+        propertyId,
+        body: "Do not send this",
+        from: "+15550009999",
+      });
+
+      expect(outcome.status).toBe("db_error");
+      if (outcome.status === "db_error") {
+        expect(outcome.error).toMatch(/approved sender inventory/i);
+      }
+      expect(getMockMessageLog()).toHaveLength(callsBefore);
+      const { count } = await supabase
+        .from("messages")
+        .select("*", { count: "exact", head: true })
+        .eq("contact_id", contactId);
+      expect(count).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("does not block when no consent event exists and quiet hours allow sending", async () => {
@@ -575,92 +652,66 @@ describe("sendSmsToContact (integration)", () => {
   });
 
   it("reuses one conversation_id for repeated sends on the same contact/property thread", async () => {
-    const now = new Date();
-    const hour = parseInt(
-      new Intl.DateTimeFormat("en-US", {
-        timeZone: "America/Chicago",
-        hour: "2-digit",
-        hour12: false,
-      }).format(now),
-      10,
-    );
-    if (hour < 8 || hour >= 21) {
+    await withSafeSendWindow(async () => {
+      const { contactId, propertyId } = await seed({ withConsent: true });
 
-      console.warn("conversation_id reuse test skipped — outside 8a–9p CT");
-      return;
-    }
+      const first = await sendSmsToContact(supabase, {
+        contactId,
+        propertyId,
+        body: "first send",
+      });
+      expect(first.status).toBe("sent");
 
-    const { contactId, propertyId } = await seed({ withConsent: true });
+      const second = await sendSmsToContact(supabase, {
+        contactId,
+        propertyId,
+        body: "second send",
+      });
+      expect(second.status).toBe("sent");
 
-    const first = await sendSmsToContact(supabase, {
-      contactId,
-      propertyId,
-      body: "first send",
+      const { data: rows } = await supabase
+        .from("messages")
+        .select("conversation_id")
+        .eq("contact_id", contactId)
+        .eq("property_id", propertyId)
+        .order("created_at", { ascending: true });
+      expect(rows).toBeDefined();
+      expect(
+        new Set(
+          (rows ?? [])
+            .map((row) => row.conversation_id)
+            .filter((value): value is string => typeof value === "string"),
+        ).size,
+      ).toBe(1);
     });
-    expect(first.status).toBe("sent");
-
-    const second = await sendSmsToContact(supabase, {
-      contactId,
-      propertyId,
-      body: "second send",
-    });
-    expect(second.status).toBe("sent");
-
-    const { data: rows } = await supabase
-      .from("messages")
-      .select("conversation_id")
-      .eq("contact_id", contactId)
-      .eq("property_id", propertyId)
-      .order("created_at", { ascending: true });
-    expect(rows).toBeDefined();
-    expect(
-      new Set(
-        (rows ?? [])
-          .map((row) => row.conversation_id)
-          .filter((value): value is string => typeof value === "string"),
-      ).size,
-    ).toBe(1);
   });
 
   it("release path: queued → sent, requires fresh consent check", async () => {
-    // Same time-window gate.
-    const now = new Date();
-    const hour = parseInt(
-      new Intl.DateTimeFormat("en-US", {
-        timeZone: "America/Chicago",
-        hour: "2-digit",
-        hour12: false,
-      }).format(now),
-      10,
-    );
-    if (hour < 8 || hour >= 21) {
+    await withSafeSendWindow(async () => {
+      const { contactId, propertyId } = await seed({ withConsent: true });
 
-      console.warn("queue release happy-path test skipped — outside 8a–9p CT");
-      return;
-    }
-    const { contactId, propertyId } = await seed({ withConsent: true });
+      // Queue first.
+      const queue = await sendSmsToContact(supabase, {
+        contactId,
+        propertyId,
+        body: "queued then released",
+        queueOnly: true,
+      });
+      expect(queue.status).toBe("queued");
+      if (queue.status !== "queued") return;
 
-    // Queue first.
-    const queue = await sendSmsToContact(supabase, {
-      contactId,
-      propertyId,
-      body: "queued then released",
-      queueOnly: true,
+      // Release.
+      const release = await releaseQueuedMessage(supabase, queue.messageId);
+      expect(release.status).toBe("sent");
+
+      const { data: row } = await supabase
+        .from("messages")
+        .select("status, external_id")
+        .eq("id", queue.messageId)
+        .single();
+      expect(row?.status).toBe("sent");
+      expect(row?.external_id).toMatch(/^mock_/);
     });
-    expect(queue.status).toBe("queued");
-    if (queue.status !== "queued") return;
-
-    // Release.
-    const release = await releaseQueuedMessage(supabase, queue.messageId);
-    expect(release.status).toBe("sent");
-
-    const { data: row } = await supabase
-      .from("messages")
-      .select("status, external_id")
-      .eq("id", queue.messageId)
-      .single();
-    expect(row?.status).toBe("sent");
-    expect(row?.external_id).toMatch(/^mock_/);
   });
 
   it("blocks with blocked_landline when phone_1 is classified landline", async () => {
@@ -897,13 +948,59 @@ describe("sendSmsToContact (integration)", () => {
     expect(row?.error_message).toMatch(/approved sendillo sender inventory/i);
   });
 
-  it("release defers (leaves queued) when the Sendillo sender inventory has never been synced", async () => {
+  it("release defers a queued Sendillo row with no from_address instead of falling back to the env sender", async () => {
     process.env.MESSAGING_PROVIDER = "sendillo";
     process.env.SENDILLO_API_KEY = "sendillo-test-key";
     process.env.SENDILLO_FROM_NUMBER = "+18164876899";
 
-    // No sendillo catalog rows at all — a sync/config gap, not bad row
-    // data. Release must defer instead of terminal-failing the row.
+    await seedSenderCatalog(supabase, await getOrgId(), ["+18164876899"], {
+      provider: "sendillo",
+    });
+
+    const { contactId, propertyId } = await seed({ withConsent: true });
+    const { data: queued } = await supabase
+      .from("messages")
+      .insert({
+        channel: "sms",
+        direction: "outbound",
+        status: "queued",
+        provider: "sendillo",
+        contact_id: contactId,
+        property_id: propertyId,
+        from_address: null,
+        to_address: "+18165559999",
+        body: "missing sender snapshot",
+      })
+      .select("id")
+      .single();
+
+    const outcome = await releaseQueuedMessage(supabase, queued!.id);
+    expect(outcome.status).toBe("provider_deferred");
+    if (outcome.status === "provider_deferred") {
+      expect(outcome.error).toMatch(/missing from_address/i);
+      expect(new Date(outcome.retryAt).getTime()).toBeGreaterThan(Date.now());
+    }
+    expect(getMockMessageLog()).toHaveLength(0);
+
+    const { data: row } = await supabase
+      .from("messages")
+      .select("status, error_message, external_id, failed_at, scheduled_for")
+      .eq("id", queued!.id)
+      .single();
+    expect(row?.status).toBe("queued");
+    expect(row?.external_id).toBeNull();
+    expect(row?.failed_at).toBeNull();
+    expect(row?.scheduled_for).toEqual(expect.any(String));
+    expect(row?.error_message).toMatch(/missing from_address/i);
+  });
+
+  it("release defers a queued Sendillo row when the sender inventory has never been synced", async () => {
+    process.env.MESSAGING_PROVIDER = "sendillo";
+    process.env.SENDILLO_API_KEY = "sendillo-test-key";
+    process.env.SENDILLO_FROM_NUMBER = "+18164876899";
+
+    // No sendillo catalog rows at all — release must fail closed instead
+    // of falling back to SENDILLO_FROM_NUMBER.
     const { contactId, propertyId } = await seed({ withConsent: true });
     const { data: queued } = await supabase
       .from("messages")
@@ -922,58 +1019,51 @@ describe("sendSmsToContact (integration)", () => {
       .single();
 
     const outcome = await releaseQueuedMessage(supabase, queued!.id);
-    expect(outcome.status).toBe("db_error");
-    if (outcome.status === "db_error") {
-      expect(outcome.error).toMatch(/never been synced/i);
+    expect(outcome.status).toBe("provider_deferred");
+    if (outcome.status === "provider_deferred") {
+      expect(outcome.error).toMatch(/no approved sender inventory has been synced/i);
     }
 
     const { data: row } = await supabase
       .from("messages")
-      .select("status, error_message")
+      .select("status, error_message, failed_at, scheduled_for")
       .eq("id", queued!.id)
       .single();
     expect(row?.status).toBe("queued");
-    expect(row?.error_message).toBeNull();
+    expect(row?.error_message).toMatch(/no approved sender inventory has been synced/i);
+    expect(row?.failed_at).toBeNull();
+    expect(row?.scheduled_for).toEqual(expect.any(String));
   });
 
   it("release preserves queued metadata when the message is sent", async () => {
-    const now = new Date();
-    const hour = parseInt(
-      new Intl.DateTimeFormat("en-US", {
-        timeZone: "America/Chicago",
-        hour: "2-digit",
-        hour12: false,
-      }).format(now),
-      10,
-    );
-    if (hour < 8 || hour >= 21) return;
+    await withSafeSendWindow(async () => {
+      const { contactId, propertyId } = await seed({ withConsent: true });
+      const queue = await sendSmsToContact(supabase, {
+        contactId,
+        propertyId,
+        body: "queued metadata survives release",
+        queueOnly: true,
+        metadata: {
+          source: "send.integration.test",
+          nested: { keep: true },
+        },
+      });
+      expect(queue.status).toBe("queued");
+      if (queue.status !== "queued") return;
 
-    const { contactId, propertyId } = await seed({ withConsent: true });
-    const queue = await sendSmsToContact(supabase, {
-      contactId,
-      propertyId,
-      body: "queued metadata survives release",
-      queueOnly: true,
-      metadata: {
+      const release = await releaseQueuedMessage(supabase, queue.messageId);
+      expect(release.status).toBe("sent");
+
+      const { data: row } = await supabase
+        .from("messages")
+        .select("metadata")
+        .eq("id", queue.messageId)
+        .single();
+      expect(row?.metadata).toMatchObject({
         source: "send.integration.test",
         nested: { keep: true },
-      },
-    });
-    expect(queue.status).toBe("queued");
-    if (queue.status !== "queued") return;
-
-    const release = await releaseQueuedMessage(supabase, queue.messageId);
-    expect(release.status).toBe("sent");
-
-    const { data: row } = await supabase
-      .from("messages")
-      .select("metadata")
-      .eq("id", queue.messageId)
-      .single();
-    expect(row?.metadata).toMatchObject({
-      source: "send.integration.test",
-      nested: { keep: true },
-      providerStatus: "sent",
+        providerStatus: "sent",
+      });
     });
   });
 
@@ -983,34 +1073,26 @@ describe("sendSmsToContact (integration)", () => {
   // path explicitly so a regression that breaks live-reply gets caught.
   // --------------------------------------------------------------------------
   it("send-now: explicit queueOnly=false fires the provider immediately, no queued row sits around", async () => {
-    const now = new Date();
-    const hour = parseInt(
-      new Intl.DateTimeFormat("en-US", {
-        timeZone: "America/Chicago",
-        hour: "2-digit",
-        hour12: false,
-      }).format(now),
-      10,
-    );
-    if (hour < 8 || hour >= 21) return;
-    const { contactId, propertyId } = await seed({ withConsent: true });
+    await withSafeSendWindow(async () => {
+      const { contactId, propertyId } = await seed({ withConsent: true });
 
-    const outcome = await sendSmsToContact(supabase, {
-      contactId,
-      propertyId,
-      body: "live reply from cockpit",
-      queueOnly: false,
+      const outcome = await sendSmsToContact(supabase, {
+        contactId,
+        propertyId,
+        body: "live reply from cockpit",
+        queueOnly: false,
+      });
+      expect(outcome.status).toBe("sent");
+
+      const { data: rows } = await supabase
+        .from("messages")
+        .select("status")
+        .eq("contact_id", contactId);
+      expect(rows).toHaveLength(1);
+      expect(rows![0].status).toBe("sent");
+      // Specifically: no row in 'queued' state.
+      expect(rows!.some((r) => r.status === "queued")).toBe(false);
     });
-    expect(outcome.status).toBe("sent");
-
-    const { data: rows } = await supabase
-      .from("messages")
-      .select("status")
-      .eq("contact_id", contactId);
-    expect(rows).toHaveLength(1);
-    expect(rows![0].status).toBe("sent");
-    // Specifically: no row in 'queued' state.
-    expect(rows!.some((r) => r.status === "queued")).toBe(false);
   });
 
   it("send-now: consent + quiet-hours gates still apply with queueOnly=false", async () => {
@@ -1047,38 +1129,28 @@ describe("sendSmsToContact (integration)", () => {
   });
 
   it("records provider_failed when the mock provider errors on FAIL prefix", async () => {
-    // Same time-window gate as the happy path test.
-    const now = new Date();
-    const hour = parseInt(
-      new Intl.DateTimeFormat("en-US", {
-        timeZone: "America/Chicago",
-        hour: "2-digit",
-        hour12: false,
-      }).format(now),
-      10,
-    );
-    if (hour < 8 || hour >= 21) return;
+    await withSafeSendWindow(async () => {
+      const { contactId, propertyId } = await seed({ withConsent: true });
+      const outcome = await sendSmsToContact(supabase, {
+        contactId,
+        propertyId,
+        body: "FAIL: force the mock to reject",
+      });
+      expect(outcome.status).toBe("provider_failed");
 
-    const { contactId, propertyId } = await seed({ withConsent: true });
-    const outcome = await sendSmsToContact(supabase, {
-      contactId,
-      propertyId,
-      body: "FAIL: force the mock to reject",
-    });
-    expect(outcome.status).toBe("provider_failed");
-
-    const { data: msg } = await supabase
-      .from("messages")
-      .select("status, error_message, metadata")
-      .eq("contact_id", contactId)
-      .single();
-    expect(msg?.status).toBe("failed");
-    expect(msg?.error_message).toMatch(/forced failure/i);
-    expect(msg?.metadata).toMatchObject({
-      providerAttempt: {
-        terminal: true,
-        maxPendingMs: 15 * 60_000,
-      },
+      const { data: msg } = await supabase
+        .from("messages")
+        .select("status, error_message, metadata")
+        .eq("contact_id", contactId)
+        .single();
+      expect(msg?.status).toBe("failed");
+      expect(msg?.error_message).toMatch(/forced failure/i);
+      expect(msg?.metadata).toMatchObject({
+        providerAttempt: {
+          terminal: true,
+          maxPendingMs: 15 * 60_000,
+        },
+      });
     });
   });
 
@@ -1344,18 +1416,24 @@ describe("sendSmsToContact (integration)", () => {
 
   it("release fails a queued row whose sender is unknown to the approved mock inventory", async () => {
     const { contactId, propertyId } = await seed({ withConsent: true });
-    const queue = await sendSmsToContact(supabase, {
-      contactId,
-      propertyId,
-      body: "queued from an unapproved sender",
-      from: "+15550009999",
-      queueOnly: true,
-    });
-    expect(queue.status).toBe("queued");
-    if (queue.status !== "queued") return;
+    const { data: queued } = await supabase
+      .from("messages")
+      .insert({
+        channel: "sms",
+        direction: "outbound",
+        status: "queued",
+        provider: "mock",
+        contact_id: contactId,
+        property_id: propertyId,
+        from_address: "+15550009999",
+        to_address: "+18165559999",
+        body: "queued from an unapproved sender",
+      })
+      .select("id")
+      .single();
 
     const callsBefore = getMockMessageLog().length;
-    const release = await releaseQueuedMessage(supabase, queue.messageId);
+    const release = await releaseQueuedMessage(supabase, queued!.id);
     expect(release.status).toBe("db_error");
     if (release.status === "db_error") {
       expect(release.error).toMatch(/approved mock sender inventory/i);
@@ -1366,7 +1444,7 @@ describe("sendSmsToContact (integration)", () => {
     const { data: row } = await supabase
       .from("messages")
       .select("status, error_message")
-      .eq("id", queue.messageId)
+      .eq("id", queued!.id)
       .single();
     expect(row?.status).toBe("failed");
     expect(row?.error_message).toMatch(/approved mock sender inventory/i);
@@ -1408,7 +1486,7 @@ describe("sendSmsToContact (integration)", () => {
     expect(row?.error_message).toMatch(/no longer active/i);
   });
 
-  it("release leaves the row queued when the mock sender inventory is empty (never synced)", async () => {
+  it("release defers the row when the mock sender inventory is empty (never synced)", async () => {
     const { contactId, propertyId } = await seed({ withConsent: true });
     const queue = await sendSmsToContact(supabase, {
       contactId,
@@ -1428,21 +1506,25 @@ describe("sendSmsToContact (integration)", () => {
 
     const callsBefore = getMockMessageLog().length;
     const release = await releaseQueuedMessage(supabase, queue.messageId);
-    expect(release.status).toBe("db_error");
-    if (release.status === "db_error") {
-      expect(release.error).toMatch(/never been synced/i);
+    expect(release.status).toBe("provider_deferred");
+    if (release.status === "provider_deferred") {
+      expect(release.error).toMatch(
+        /no approved sender inventory has been synced/i,
+      );
     }
     expect(getMockMessageLog()).toHaveLength(callsBefore);
 
-    // Deferred, not failed: a later sync can unblock the row.
     const { data: row } = await supabase
       .from("messages")
-      .select("status, error_message, failed_at")
+      .select("status, error_message, failed_at, scheduled_for")
       .eq("id", queue.messageId)
       .single();
     expect(row?.status).toBe("queued");
-    expect(row?.error_message).toBeNull();
+    expect(row?.error_message).toMatch(
+      /no approved sender inventory has been synced/i,
+    );
     expect(row?.failed_at).toBeNull();
+    expect(row?.scheduled_for).toEqual(expect.any(String));
   });
 
   // --------------------------------------------------------------------------

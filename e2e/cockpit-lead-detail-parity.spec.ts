@@ -2,6 +2,7 @@ import { expect, test } from "@playwright/test";
 
 import {
   adminClient,
+  E2E_MOCK_BUSINESS_NUMBER,
   ensureTestUser,
   resetTenantTables,
   seedProspects,
@@ -70,7 +71,7 @@ async function seedConsentedLead(
     conversation_id: conversationId,
     contact_id: contact.id,
     property_id: prop.id,
-    from_address: "+18162804181",
+    from_address: E2E_MOCK_BUSINESS_NUMBER,
     to_address: opts.phone,
     body: "previous outbound",
   });
@@ -83,7 +84,7 @@ async function seedConsentedLead(
     contact_id: contact.id,
     property_id: prop.id,
     from_address: opts.phone,
-    to_address: "+18162804181",
+    to_address: E2E_MOCK_BUSINESS_NUMBER,
     body: "starting the thread",
   });
 
@@ -226,7 +227,7 @@ test("Realtime cross-surface: both surfaces update from the other (test 31)", as
       data: {
         externalId: `e2e_parity31_${Date.now()}`,
         from: phone,
-        to: "+18162804181",
+        to: E2E_MOCK_BUSINESS_NUMBER,
         body: inboundBody,
       },
     });

@@ -324,7 +324,8 @@ export function BulkSmsModal({ open, propertyIds, onClose, onQueued }: Props) {
         }
         if (
           result.error.code === "SENDER_REQUIRED" ||
-          result.error.code === "SENDER_NOT_APPROVED"
+          result.error.code === "SENDER_NOT_APPROVED" ||
+          result.error.code === "DELIVERY_SETTINGS_SAVE_FAILED"
         ) {
           setSenderError(result.error.message);
         }

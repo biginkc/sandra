@@ -1,6 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createTestClient } from "@tests/integration/client";
+import {
+  MOCK_SENDER_PRIMARY,
+  seedSenderCatalog,
+} from "@tests/integration/delivery";
 import { resetTenantTables } from "@tests/integration/reset";
 
 import {
@@ -92,6 +96,19 @@ async function seedLeadBatch(
     if (propError || !prop) {
       throw new Error(`seedLeadBatch property[${i}] failed: ${propError?.message ?? "missing row"}`);
     }
+    const { error: inboundError } = await supabase.from("messages").insert({
+      channel: "sms",
+      direction: "inbound",
+      status: "received",
+      property_id: prop.id,
+      contact_id: contact.id,
+      from_address: phone,
+      to_address: MOCK_SENDER_PRIMARY,
+      body: "seed inbound business sender",
+    });
+    if (inboundError) {
+      throw new Error(`seedLeadBatch inbound[${i}] failed: ${inboundError.message}`);
+    }
     leads.push({ propertyId: prop.id, contactId: contact.id, phone });
 
     const persona = opts.personaFor?.(i) ?? null;
@@ -151,6 +168,7 @@ describe("Sequences scaled simulation (integration)", () => {
 
     await resetTenantTables(supabase);
     resetMockState();
+    await seedSenderCatalog(supabase, await getOrgId(), [MOCK_SENDER_PRIMARY]);
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(T0);
   });

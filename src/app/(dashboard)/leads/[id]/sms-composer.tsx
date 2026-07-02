@@ -32,6 +32,7 @@ type Props = {
   homeownerContactId: string | null;
   homeownerPhone: string | null;
   homeownerName: string | null;
+  preferredFromNumber?: string | null;
   templates?: TemplatePick[];
 };
 
@@ -40,6 +41,7 @@ export function SmsComposer({
   homeownerContactId,
   homeownerPhone,
   homeownerName,
+  preferredFromNumber = null,
   templates = [],
 }: Props) {
   const router = useRouter();
@@ -48,7 +50,7 @@ export function SmsComposer({
   const [selectedTemplateId, setSelectedTemplateId] = useState("");
   const [pending, startTransition] = useTransition();
   const [fromOptions, setFromOptions] = useState<DialpadFromOption[]>([]);
-  const [fromNumber, setFromNumber] = useState<string>("");
+  const [fromNumber, setFromNumber] = useState<string>(preferredFromNumber ?? "");
   const [loadingFroms, setLoadingFroms] = useState(false);
 
   const loadFromOptions = () => {
@@ -63,7 +65,19 @@ export function SmsComposer({
           const sendable = result.data.filter(
             (o) => o.status !== "available",
           );
-          setFromOptions(sendable);
+          const options = preferredFromNumber &&
+            !sendable.some((o) => o.number === preferredFromNumber)
+              ? [
+                  {
+                    number: preferredFromNumber,
+                    ownerName: "Thread sender",
+                    ownerType: "thread",
+                    status: "thread",
+                  },
+                  ...sendable,
+                ]
+              : sendable;
+          setFromOptions(options);
           if (sendable.length > 0 && !fromNumber) {
             setFromNumber(sendable[0].number);
           }

@@ -4,7 +4,10 @@ import { Page } from "@/components/page";
 import { PageHeader } from "@/components/page-header";
 import { Badge } from "@/components/ui/badge";
 import { getOutboundSmsMetrics } from "@/lib/messages/message-metrics";
-import { campaignHasOutboundMessages } from "@/lib/messaging/delivery";
+import {
+  campaignHasOutboundMessages,
+  loadCampaignDeliverySettings,
+} from "@/lib/messaging/delivery";
 import { createClient } from "@/lib/supabase/server";
 import type { Database } from "@/lib/supabase/types";
 
@@ -71,7 +74,7 @@ export default async function CampaignDetailPage({
   }
 
   const campaign = campaignRes.data as Campaign;
-  const [kpiRes, metricsRes, jobRes, senderLocked] = await Promise.all([
+  const [kpiRes, metricsRes, jobRes, senderLocked, deliverySettings] = await Promise.all([
     supabase.rpc("campaign_kpis", { p_campaign_id: id }),
     getOutboundSmsMetrics(supabase, {
       scope: { campaignId: id, orgId: campaign.org_id },
@@ -80,6 +83,13 @@ export default async function CampaignDetailPage({
       .catch((error: unknown) => ({ ok: false as const, error })),
     loadLatestCampaignBulkSmsJob(supabase, id),
     campaignHasOutboundMessages(supabase, id).catch(() => false),
+    loadCampaignDeliverySettings(supabase, id).catch(() => ({
+      senderProvider: campaign.sender_provider,
+      senderNumber: campaign.sender_number,
+      fromAddress: campaign.sender_number,
+      providerCampaignExternalId: campaign.provider_campaign_external_id,
+      providerCampaignName: campaign.provider_campaign_name,
+    })),
   ]);
   const kpis = kpiRes.error ? null : normalizeKpis(kpiRes.data?.[0]);
   const liveStats = metricsRes.ok && kpis
@@ -116,10 +126,10 @@ export default async function CampaignDetailPage({
       />
 
       <CampaignDeliveryCard
-        senderProvider={campaign.sender_provider}
-        senderNumber={campaign.sender_number}
-        providerCampaignExternalId={campaign.provider_campaign_external_id}
-        providerCampaignName={campaign.provider_campaign_name}
+        senderProvider={deliverySettings.senderProvider}
+        senderNumber={deliverySettings.senderNumber}
+        providerCampaignExternalId={deliverySettings.providerCampaignExternalId}
+        providerCampaignName={deliverySettings.providerCampaignName}
         locked={senderLocked}
       />
 

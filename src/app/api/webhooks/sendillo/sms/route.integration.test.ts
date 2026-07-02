@@ -157,7 +157,7 @@ function makeSendilloInboundRequest(input: {
         to: input.to ?? "+18164876899",
         body: input.body ?? "Tell me more",
         type: "SMS",
-        receivedAt: input.receivedAt ?? "2026-06-08T19:10:39.257Z",
+        receivedAt: input.receivedAt ?? "2026-07-02T19:10:39.257Z",
       },
     }),
   });
@@ -165,6 +165,10 @@ function makeSendilloInboundRequest(input: {
 
 describe("POST /api/webhooks/sendillo/sms (integration)", () => {
   beforeEach(async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    // Keep DB now() inserts and app-clock payload dates inside the semantic
+    // dedupe recency window; update these together if the window changes.
+    vi.setSystemTime(new Date("2026-07-02T19:10:39.257Z"));
     delete process.env.SUPABASE_SERVICE_ROLE_KEY;
     process.env.NEXT_PUBLIC_SUPABASE_URL = process.env.TEST_SUPABASE_URL;
     delete process.env.MESSAGING_PROVIDER;
@@ -183,6 +187,7 @@ describe("POST /api/webhooks/sendillo/sms (integration)", () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     process.env.MESSAGING_PROVIDER = ORIGINAL_ENV.MESSAGING_PROVIDER;
     process.env.SENDILLO_API_KEY = ORIGINAL_ENV.SENDILLO_API_KEY;
     process.env.SENDILLO_FROM_NUMBER = ORIGINAL_ENV.SENDILLO_FROM_NUMBER;
@@ -283,14 +288,14 @@ describe("POST /api/webhooks/sendillo/sms (integration)", () => {
 
     const body = JSON.stringify({
       event: "inbound.received",
-      timestamp: "2026-06-08T19:07:39.264912233Z",
+      timestamp: "2026-07-02T19:07:39.264912233Z",
       data: {
         messageId: "snd_realish_001",
         from: "+18165550002",
         to: "+18164876899",
         body: "YES",
         type: "SMS",
-        receivedAt: "2026-06-08T19:07:39.257Z",
+        receivedAt: "2026-07-02T19:07:39.257Z",
       },
     });
     const makeRequest = () =>
@@ -395,9 +400,9 @@ describe("POST /api/webhooks/sendillo/sms (integration)", () => {
       });
 
     const [first, second, third] = await Promise.all([
-      POST(makeRequest("snd_semantic_dup_001", "2026-06-08T19:09:39.000Z")),
-      POST(makeRequest("snd_semantic_dup_002", "2026-06-08T19:09:39.080Z")),
-      POST(makeRequest("snd_semantic_dup_003", "2026-06-08T19:09:39.120Z")),
+      POST(makeRequest("snd_semantic_dup_001", "2026-07-02T19:09:39.000Z")),
+      POST(makeRequest("snd_semantic_dup_002", "2026-07-02T19:09:39.080Z")),
+      POST(makeRequest("snd_semantic_dup_003", "2026-07-02T19:09:39.120Z")),
     ]);
     expect(first.status).toBe(200);
     expect(second.status).toBe(200);
@@ -440,7 +445,7 @@ describe("POST /api/webhooks/sendillo/sms (integration)", () => {
       from: "+18165550104",
       to: "+18164876899",
       body: "Go away",
-      receivedAt: new Date("2026-06-08T19:09:39.000Z"),
+      receivedAt: new Date("2026-07-02T19:09:39.000Z"),
       raw: { data: { messageId: "snd_partial_retry_001" } },
       mediaUrls: null,
       webhookEventId: null,
@@ -485,7 +490,7 @@ describe("POST /api/webhooks/sendillo/sms (integration)", () => {
           to: "+18164876899",
           body: "Who is this?",
           type: "SMS",
-          receivedAt: "2026-06-08T19:09:39.000Z",
+          receivedAt: "2026-07-02T19:09:39.000Z",
         },
       }),
     });
@@ -534,7 +539,7 @@ describe("POST /api/webhooks/sendillo/sms (integration)", () => {
         state: "MO",
         status: "new_lead",
         homeowner_contact_id: contactId,
-        deleted_at: "2026-06-08T19:00:00.000Z",
+        deleted_at: "2026-07-02T19:00:00.000Z",
       })
       .select("id")
       .single();
@@ -1038,12 +1043,13 @@ describe("POST /api/webhooks/sendillo/sms (integration)", () => {
 
     const { data: message } = await supabase
       .from("messages")
-      .select("contact_id, property_id, metadata")
+      .select("contact_id, property_id, to_address, metadata")
       .eq("external_id", "snd_active_ambiguous_001")
       .single();
     expect(message).toMatchObject({
       contact_id: contactId,
       property_id: null,
+      to_address: "+18164876899",
       metadata: {
         routing: "ambiguous_recipient_number",
       },
@@ -1101,11 +1107,11 @@ describe("POST /api/webhooks/sendillo/sms (integration)", () => {
       });
 
     expect(
-      (await POST(makeRequest("snd_repeat_001", "2026-06-08T19:09:39.000Z")))
+      (await POST(makeRequest("snd_repeat_001", "2026-07-02T19:09:39.000Z")))
         .status,
     ).toBe(200);
     expect(
-      (await POST(makeRequest("snd_repeat_002", "2026-06-08T19:09:42.001Z")))
+      (await POST(makeRequest("snd_repeat_002", "2026-07-02T19:09:42.001Z")))
         .status,
     ).toBe(200);
 
@@ -1164,7 +1170,7 @@ describe("POST /api/webhooks/sendillo/sms (integration)", () => {
             to: "+18164876899",
             body: "See this",
             type: "SMS",
-            receivedAt: "2026-06-08T19:09:39.080Z",
+            receivedAt: "2026-07-02T19:09:39.080Z",
             mediaUrls: [mediaUrl],
           },
         }),
@@ -1227,7 +1233,7 @@ describe("POST /api/webhooks/sendillo/sms (integration)", () => {
             to: "+18164876899",
             body: "HEADER OK",
             type: "SMS",
-            receivedAt: "2026-06-08T19:08:39.257Z",
+            receivedAt: "2026-07-02T19:08:39.257Z",
           },
         }),
       },

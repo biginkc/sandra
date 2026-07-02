@@ -2,6 +2,7 @@ import { expect, test } from "@playwright/test";
 
 import {
   adminClient,
+  E2E_MOCK_BUSINESS_NUMBER,
   ensureTestUser,
   resetTenantTables,
   seedProspects,
@@ -78,7 +79,7 @@ async function seedConsentedThread(
     contact_id: contact.id,
     property_id: prop.id,
     from_address: opts.phone,
-    to_address: "+18162804181",
+    to_address: E2E_MOCK_BUSINESS_NUMBER,
     body: "asking the question",
   });
 

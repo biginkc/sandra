@@ -54,6 +54,7 @@ export type AiDispatchInput = {
   contactId: string;
   conversationId?: string | null;
   inboundFromPhone?: string | null;
+  inboundToPhone?: string | null;
   inboundBody: string;
   inboundMessageId?: string | null;
 };
@@ -635,10 +636,33 @@ async function sendResponderMessage(
     turn: number;
   },
 ): Promise<Extract<AiDispatchOutcome, { outcome: "sent" | "escalated" | "skipped" }>> {
+  let inboundToPhone = args.input.inboundToPhone ?? null;
+  if (!inboundToPhone && args.input.inboundMessageId) {
+    try {
+      inboundToPhone = await loadInboundBusinessNumber(
+        supabase,
+        args.input.inboundMessageId,
+      );
+    } catch (e) {
+      const reason = "send_blocked:db_error";
+      reportError(e, {
+        tags: { surface: "ai_responder_inbound_sender_lookup" },
+        extra: {
+          propertyId: args.input.propertyId,
+          inboundMessageId: args.input.inboundMessageId,
+        },
+      });
+      await markPropertyNeedsAttention(supabase, args.input.propertyId, reason);
+      return { outcome: "escalated", reason };
+    }
+  }
   const sendResult = await sendSmsToContact(supabase, {
     contactId: args.input.contactId,
     propertyId: args.input.propertyId,
     body: args.body,
+    from: inboundToPhone ?? undefined,
+    to: args.input.inboundFromPhone ?? undefined,
+    requireStickyFrom: true,
     metadata: args.input.inboundMessageId
       ? ({
           generated_by: "ai_responder_v1",
@@ -960,6 +984,22 @@ function allowedCurrentDisposFor(
     case "dnc":
       return ["not_interested", "wrong_number", "opted_out", "dnc"];
   }
+}
+
+async function loadInboundBusinessNumber(
+  supabase: SupabaseClient<Database>,
+  inboundMessageId: string,
+): Promise<string | null> {
+  const { data, error } = await supabase
+    .from("messages")
+    .select("to_address")
+    .eq("id", inboundMessageId)
+    .eq("direction", "inbound")
+    .maybeSingle();
+  if (error) {
+    throw new Error(`AI inbound sender lookup failed: ${error.message}`);
+  }
+  return data?.to_address ?? null;
 }
 
 function assertNeverRoute(value: never): never {

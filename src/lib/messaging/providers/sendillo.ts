@@ -1,6 +1,7 @@
 import { timingSafeEqual } from "node:crypto";
 
 import { ConfigurationError, ProviderError } from "@/lib/errors/classes";
+import { reportError } from "@/lib/errors/report";
 import type {
   MessagingProvider,
   ProviderCampaignSummary,
@@ -113,7 +114,10 @@ export class SendilloMessagingProvider implements MessagingProvider {
         readString(entry, "phone_number") ??
         readString(entry, "number") ??
         readString(entry, "phone");
-      if (!phone) continue;
+      if (!phone) {
+        reportMalformedCatalogEntry(entry, "purchased numbers", "missing phone");
+        continue;
+      }
       numbers.push({
         phoneE164: phone,
         providerNumberId:
@@ -141,7 +145,10 @@ export class SendilloMessagingProvider implements MessagingProvider {
     for (const entry of entries) {
       const externalId =
         readString(entry, "id") ?? readString(entry, "campaignId");
-      if (!externalId) continue;
+      if (!externalId) {
+        reportMalformedCatalogEntry(entry, "campaigns", "missing id");
+        continue;
+      }
       campaigns.push({
         externalId,
         name: readString(entry, "name") ?? readString(entry, "title"),
@@ -192,6 +199,10 @@ export class SendilloMessagingProvider implements MessagingProvider {
       );
     }
 
+    // Sendillo OpenAPI checked 2026-07-02: GET /api/v1/campaigns and
+    // GET /api/v1/numbers/purchased expose no pagination parameters, and the
+    // 200 schema is only "object". Treat the returned list as complete until
+    // the contract adds explicit page/cursor fields.
     const list =
       arrayValue(parsed) ??
       arrayValue(objectValue(parsed, "data")) ??
@@ -340,6 +351,31 @@ export function sendilloFromEnv(): SendilloMessagingProvider {
     );
   }
   return new SendilloMessagingProvider(apiKey, fromNumber, webhookSecret);
+}
+
+function reportMalformedCatalogEntry(
+  entry: JsonObject,
+  label: string,
+  reason: string,
+): void {
+  reportError(
+    new ProviderError(
+      `Sendillo ${label} catalog entry skipped: ${reason}`,
+      "sendillo",
+    ),
+    {
+      tags: { surface: "sendillo_catalog_parse" },
+      extra: {
+        label,
+        reason,
+        providerEntryId:
+          readString(entry, "id") ??
+          readString(entry, "numberId") ??
+          readString(entry, "campaignId") ??
+          null,
+      },
+    },
+  );
 }
 
 function safeParseJson(s: string): unknown {

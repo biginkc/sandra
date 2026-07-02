@@ -6,6 +6,10 @@ import {
   getMockMessageLog,
   resetMockState,
 } from "@/lib/messaging/providers/mock";
+import {
+  MOCK_SENDER_PRIMARY,
+  seedSenderCatalog,
+} from "@tests/integration/delivery";
 
 import { dispatchAiResponse } from "./dispatch";
 import type { AnthropicLike } from "./generate";
@@ -155,6 +159,7 @@ describe("dispatchAiResponse (integration)", () => {
   beforeEach(async () => {
     await resetTenantTables(supabase);
     resetMockState();
+    await seedSenderCatalog(supabase, await getOrgId(), [MOCK_SENDER_PRIMARY]);
   });
 
   it("Claude opt_out suppresses the actual inbound sender when it is phone_2", async () => {
@@ -209,6 +214,7 @@ describe("dispatchAiResponse (integration)", () => {
       {
         propertyId,
         contactId,
+        inboundToPhone: MOCK_SENDER_PRIMARY,
         inboundBody: "yeah I'm interested, tell me more",
       },
       { anthropic: stubAnthropic(HAPPY_OUT) },
@@ -255,6 +261,8 @@ describe("dispatchAiResponse (integration)", () => {
       status: "received",
       property_id: propertyId,
       contact_id: contactId,
+      from_address: "+18167554021",
+      to_address: MOCK_SENDER_PRIMARY,
       body: "Who is this?",
     });
     let claudeCalls = 0;
@@ -272,6 +280,8 @@ describe("dispatchAiResponse (integration)", () => {
       {
         propertyId,
         contactId,
+        inboundFromPhone: "+18167554021",
+        inboundToPhone: MOCK_SENDER_PRIMARY,
         inboundBody: "Who is this?",
         inboundMessageId,
       },
@@ -353,6 +363,8 @@ describe("dispatchAiResponse (integration)", () => {
       status: "received",
       property_id: propertyId,
       contact_id: contactId,
+      from_address: "+18167554012",
+      to_address: MOCK_SENDER_PRIMARY,
       body: "sounds good",
     });
 
@@ -418,6 +430,8 @@ describe("dispatchAiResponse (integration)", () => {
       property_id: propertyId,
       contact_id: contactId,
       conversation_id: conversationId,
+      from_address: "+18167554024",
+      to_address: MOCK_SENDER_PRIMARY,
       body: inboundBody,
     });
 
@@ -439,6 +453,8 @@ describe("dispatchAiResponse (integration)", () => {
         propertyId,
         contactId,
         conversationId,
+        inboundFromPhone: "+18167554024",
+        inboundToPhone: MOCK_SENDER_PRIMARY,
         inboundBody,
         inboundMessageId,
       },
@@ -473,6 +489,8 @@ describe("dispatchAiResponse (integration)", () => {
         property_id: propertyId,
         contact_id: contactId,
         conversation_id: conversationId,
+        from_address: "+18167554022",
+        to_address: MOCK_SENDER_PRIMARY,
         body: "first inbound",
         created_at: "2026-07-01T15:00:00.000Z",
       },
@@ -484,6 +502,8 @@ describe("dispatchAiResponse (integration)", () => {
         property_id: propertyId,
         contact_id: contactId,
         conversation_id: conversationId,
+        from_address: "+18167554022",
+        to_address: MOCK_SENDER_PRIMARY,
         body: "newer inbound",
         created_at: "2026-07-01T15:00:02.000Z",
       },
@@ -540,6 +560,8 @@ describe("dispatchAiResponse (integration)", () => {
         property_id: propertyId,
         contact_id: contactId,
         conversation_id: conversationId,
+        from_address: "+18167554023",
+        to_address: MOCK_SENDER_PRIMARY,
         body: "first inbound",
         created_at: "2026-07-01T15:00:00.000Z",
       },
@@ -551,6 +573,8 @@ describe("dispatchAiResponse (integration)", () => {
         property_id: propertyId,
         contact_id: contactId,
         conversation_id: conversationId,
+        from_address: "+18167554023",
+        to_address: MOCK_SENDER_PRIMARY,
         body: "newer inbound",
         created_at: "2026-07-01T15:00:02.000Z",
       },
@@ -605,6 +629,8 @@ describe("dispatchAiResponse (integration)", () => {
         property_id: propertyId,
         contact_id: siblingContact!.id,
         conversation_id: siblingConversationId,
+        from_address: "+18167554913",
+        to_address: MOCK_SENDER_PRIMARY,
         body: "sibling conversation inbound",
       },
       {
@@ -630,6 +656,8 @@ describe("dispatchAiResponse (integration)", () => {
         property_id: propertyId,
         contact_id: contactId,
         conversation_id: activeConversationId,
+        from_address: "+18167554013",
+        to_address: MOCK_SENDER_PRIMARY,
         body: "my earlier thread message",
       },
     ]);
@@ -652,6 +680,7 @@ describe("dispatchAiResponse (integration)", () => {
         propertyId,
         contactId,
         conversationId: activeConversationId,
+        inboundToPhone: MOCK_SENDER_PRIMARY,
         inboundBody: "active thread latest inbound",
       },
       { anthropic: trackingAnthropic },
@@ -1034,7 +1063,12 @@ describe("dispatchAiResponse (integration)", () => {
 
     const outcome = await dispatchAiResponse(
       supabase,
-      { propertyId, contactId, inboundBody: "ugh is this a scam" },
+      {
+        propertyId,
+        contactId,
+        inboundToPhone: MOCK_SENDER_PRIMARY,
+        inboundBody: "ugh is this a scam",
+      },
       { anthropic },
     );
 
@@ -1185,7 +1219,12 @@ describe("dispatchAiResponse (integration)", () => {
     });
     const outcome = await dispatchAiResponse(
       supabase,
-      { propertyId, contactId, inboundBody: "you people are useless" },
+      {
+        propertyId,
+        contactId,
+        inboundToPhone: MOCK_SENDER_PRIMARY,
+        inboundBody: "you people are useless",
+      },
       {
         anthropic: stubAnthropic({
           ...HAPPY_OUT,

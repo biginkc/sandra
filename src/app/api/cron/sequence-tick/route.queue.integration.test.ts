@@ -6,6 +6,10 @@ import {
   getMockMessageLog,
   resetMockState,
 } from "@/lib/messaging/providers/mock";
+import {
+  MOCK_SENDER_PRIMARY,
+  seedSenderCatalog,
+} from "@tests/integration/delivery";
 
 import { DRAIN_BATCH_SIZE, runSequenceTick } from "./route";
 import type { Json } from "@/lib/supabase/types";
@@ -13,6 +17,16 @@ import type { Json } from "@/lib/supabase/types";
 const supabase = createTestClient();
 
 const SAFE_NOW = new Date("2026-04-23T18:00:00Z");
+
+async function getOrgId(): Promise<string> {
+  const { data } = await supabase
+    .from("organizations")
+    .select("id")
+    .limit(1)
+    .maybeSingle();
+  if (!data?.id) throw new Error("no org");
+  return data.id;
+}
 
 type FakeQueryResult = {
   data: unknown[] | null;
@@ -78,6 +92,7 @@ async function seedQueuedMessage(opts: {
   status?: string;
   body?: string;
   metadata?: Json;
+  fromPhone?: string | null;
 }): Promise<string> {
   const { data, error } = await supabase
     .from("messages")
@@ -88,6 +103,8 @@ async function seedQueuedMessage(opts: {
       provider: "mock",
       contact_id: opts.contactId,
       property_id: opts.propertyId,
+      from_address:
+        opts.fromPhone === undefined ? MOCK_SENDER_PRIMARY : opts.fromPhone,
       to_address: opts.toPhone,
       body: opts.body ?? "Queued test message",
       scheduled_for: opts.scheduledFor?.toISOString() ?? null,
@@ -103,6 +120,7 @@ describe("runSequenceTick — queue drain (integration)", () => {
   beforeEach(async () => {
     await resetTenantTables(supabase);
     resetMockState();
+    await seedSenderCatalog(supabase, await getOrgId(), [MOCK_SENDER_PRIMARY]);
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(SAFE_NOW);
   });

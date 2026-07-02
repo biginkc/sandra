@@ -1486,6 +1486,7 @@ export async function sendSmsFromLead(
       from: from ?? undefined,
       to: to ?? undefined,
       queueOnly: queueOnly ?? false,
+      requireStickyFrom: true,
     });
     return ok({ outcome });
   } catch (e) {

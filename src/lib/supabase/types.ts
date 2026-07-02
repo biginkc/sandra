@@ -487,6 +487,60 @@ export type Database = {
           },
         ]
       }
+      campaign_delivery_settings: {
+        Row: {
+          campaign_id: string
+          created_at: string
+          from_address: string
+          id: string
+          org_id: string
+          provider: string
+          provider_campaign_id: string | null
+          provider_campaign_name: string | null
+          sender_number: string
+          updated_at: string
+        }
+        Insert: {
+          campaign_id: string
+          created_at?: string
+          from_address: string
+          id?: string
+          org_id: string
+          provider: string
+          provider_campaign_id?: string | null
+          provider_campaign_name?: string | null
+          sender_number: string
+          updated_at?: string
+        }
+        Update: {
+          campaign_id?: string
+          created_at?: string
+          from_address?: string
+          id?: string
+          org_id?: string
+          provider?: string
+          provider_campaign_id?: string | null
+          provider_campaign_name?: string | null
+          sender_number?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "campaign_delivery_settings_campaign_id_fkey"
+            columns: ["campaign_id"]
+            isOneToOne: true
+            referencedRelation: "campaigns"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "campaign_delivery_settings_org_id_fkey"
+            columns: ["org_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       campaign_recipients: {
         Row: {
           campaign_id: string
@@ -3072,6 +3126,26 @@ export type Database = {
       merge_duplicate_properties: {
         Args: { keeper_id: string; loser_id: string }
         Returns: undefined
+      }
+      persist_campaign_delivery_settings: {
+        Args: {
+          p_campaign_id: string
+          p_from_address: string
+          p_org_id: string
+          p_provider: string
+          p_provider_campaign_id?: string | null
+          p_provider_campaign_name?: string | null
+          p_sender_number: string
+        }
+        Returns: undefined
+      }
+      sms_thread_candidate_properties: {
+        Args: { p_business_phone?: string | null; p_contact_id: string }
+        Returns: {
+          conversation_id: string | null
+          latest_at: string
+          property_id: string
+        }[]
       }
       increment_sms_inbound_intent_duplicate: {
         Args: { p_intent_id: string; p_last_provider_message_id: string }

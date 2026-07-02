@@ -14,6 +14,7 @@ export type AiReplyDelayParams = {
   contactId: string;
   conversationId: string | null;
   inboundFromPhone?: string | null;
+  inboundToPhone?: string | null;
   inboundBody: string;
   inboundMessageId: string;
   delaySeconds: number;
@@ -32,6 +33,7 @@ async function dispatchStep(
       contactId: params.contactId,
       conversationId: params.conversationId,
       inboundFromPhone: params.inboundFromPhone ?? null,
+      inboundToPhone: params.inboundToPhone ?? null,
       inboundBody: params.inboundBody,
       inboundMessageId: params.inboundMessageId,
     },

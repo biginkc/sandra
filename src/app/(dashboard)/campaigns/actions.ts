@@ -12,8 +12,10 @@ import {
   type BulkSmsQueueBaseOpts,
 } from "@/lib/messaging/bulk-queue";
 import {
+  loadCampaignDeliverySettings,
   loadDeliveryCatalog,
   normalizeSenderNumber,
+  persistCampaignDeliverySettings,
   resolveDeliverySelection,
   syncProviderCatalog,
   type CatalogSyncResult,
@@ -1006,7 +1008,7 @@ export async function createCampaign(
     const { data: archivedCandidates, error: archivedLookupError } =
       await supabase
         .from("campaigns")
-        .select("id, archived_at, sender_number")
+        .select("id, archived_at")
         .eq("org_id", orgId)
         .ilike("name", name)
         .not("archived_at", "is", null)
@@ -1041,25 +1043,89 @@ export async function createCampaign(
           },
         };
       }
-      // The lock protects the stored sender snapshot. A legacy locked
-      // campaign with NO stored sender has nothing to protect — the
-      // chosen Delivery applies and becomes the locked sender going
-      // forward (this is the documented archive-and-recreate path for
-      // pre-Delivery campaigns).
+      const { data: archivedDeliverySettings, error: archivedDeliveryError } =
+        await supabase
+          .from("campaign_delivery_settings")
+          .select("sender_number, from_address")
+          .eq("campaign_id", archivedCandidate.id)
+          .maybeSingle();
+      if (archivedDeliveryError) {
+        return {
+          ok: false,
+          error: {
+            code: "CAMPAIGN_LOOKUP_FAILED",
+            message: archivedDeliveryError.message,
+          },
+        };
+      }
+
+      const lockedSender =
+        archivedDeliverySettings?.from_address ??
+        archivedDeliverySettings?.sender_number ??
+        null;
+      let stampedSenderMismatch = false;
+      let stampedSender: string | null = null;
+      if ((revivedMessageCount ?? 0) > 0 && !lockedSender) {
+        const { count: matchingStampedSenderCount, error: matchingSenderError } =
+          await supabase
+            .from("messages")
+            .select("id", { count: "exact", head: true })
+            .eq("campaign_id", archivedCandidate.id)
+            .eq("direction", "outbound")
+            .eq("from_address", delivery.senderNumber);
+        if (matchingSenderError) {
+          return {
+            ok: false,
+            error: {
+              code: "CAMPAIGN_LOOKUP_FAILED",
+              message: matchingSenderError.message,
+            },
+          };
+        }
+        stampedSenderMismatch =
+          (matchingStampedSenderCount ?? 0) !== (revivedMessageCount ?? 0);
+        if (stampedSenderMismatch) {
+          const { data: stampedSenderRow, error: stampedSenderError } =
+            await supabase
+              .from("messages")
+              .select("from_address")
+              .eq("campaign_id", archivedCandidate.id)
+              .eq("direction", "outbound")
+              .not("from_address", "is", null)
+              .order("created_at", { ascending: false })
+              .limit(1)
+              .maybeSingle();
+          if (stampedSenderError) {
+            return {
+              ok: false,
+              error: {
+                code: "CAMPAIGN_LOOKUP_FAILED",
+                message: stampedSenderError.message,
+              },
+            };
+          }
+          stampedSender = stampedSenderRow?.from_address ?? null;
+        }
+      }
+      // The lock first protects canonical delivery settings. Legacy campaigns
+      // with outbound rows but no settings can only be repaired with the sender
+      // already stamped on those outbound rows; a different sender is a swap.
       const revivedLocked =
-        (revivedMessageCount ?? 0) > 0 &&
-        Boolean(archivedCandidate.sender_number);
+        ((revivedMessageCount ?? 0) > 0 && Boolean(lockedSender)) ||
+        stampedSenderMismatch;
       if (
         revivedLocked &&
-        normalizeSenderNumber(archivedCandidate.sender_number!) !==
-          delivery.senderNumber
+        (stampedSenderMismatch ||
+          normalizeSenderNumber(lockedSender!) !== delivery.senderNumber)
       ) {
+        const lockedSenderLabel =
+          lockedSender ?? stampedSender ?? "an existing stamped sender";
         return {
           ok: false,
           error: {
             code: "SENDER_LOCKED",
             message:
-              `"${name}" already queued messages from ${archivedCandidate.sender_number}. ` +
+              `"${name}" already queued messages from ${lockedSenderLabel}. ` +
               "The sender is locked — create a new campaign to send from a different number.",
           },
         };
@@ -1104,6 +1170,24 @@ export async function createCampaign(
         );
       }
 
+      if (!revivedLocked) {
+        const deliveryPersistResult = await persistCampaignDeliverySettings(
+          supabase,
+          {
+            campaignId: revivedRow.id,
+            orgId,
+            delivery,
+          },
+        );
+        if (!deliveryPersistResult.ok) {
+          await settleCampaignAfterDeliveryPersistFailure(
+            supabase,
+            revivedRow.id,
+          );
+          return deliveryPersistResult;
+        }
+      }
+
       return ok({ id: revivedRow.id });
     }
 
@@ -1133,11 +1217,47 @@ export async function createCampaign(
       };
     }
 
+    const deliveryPersistResult = await persistCampaignDeliverySettings(
+      supabase,
+      {
+        campaignId: inserted.id,
+        orgId,
+        delivery,
+      },
+    );
+    if (!deliveryPersistResult.ok) {
+      await settleCampaignAfterDeliveryPersistFailure(supabase, inserted.id);
+      return deliveryPersistResult;
+    }
+
     return ok({ id: inserted.id });
   } catch (e) {
     reportError(e, { tags: { surface: "create_campaign" } });
     return errFromUnknown(e, "CAMPAIGN_CREATE_FAILED");
   }
+}
+
+async function settleCampaignAfterDeliveryPersistFailure(
+  supabase: Awaited<ReturnType<typeof createClient>>,
+  campaignId: string,
+): Promise<void> {
+  const { count } = await supabase
+    .from("messages")
+    .select("id", { count: "exact", head: true })
+    .eq("campaign_id", campaignId)
+    .eq("direction", "outbound");
+  if ((count ?? 0) > 0) return;
+
+  const now = new Date().toISOString();
+  await supabase
+    .from("campaigns")
+    .update({
+      status: "archived",
+      archived_at: now,
+      updated_at: now,
+    })
+    .eq("id", campaignId)
+    .in("status", ["active", "launching"]);
 }
 
 async function loadCampaign(
@@ -1812,7 +1932,8 @@ export async function launchCampaign(
     // Delivery gate — only for campaigns that are actually about to
     // queue. Already-launched campaigns short-circuit above so legacy
     // (pre-Delivery) campaigns keep returning alreadyLaunched cleanly.
-    if (!campaign.sender_number) {
+    const delivery = await loadCampaignDeliverySettings(supabase, campaignId);
+    if (!delivery.senderNumber) {
       return {
         ok: false,
         error: {

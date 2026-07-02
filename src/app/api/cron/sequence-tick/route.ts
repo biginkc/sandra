@@ -185,6 +185,11 @@ export async function runSequenceTick(
     drainOutcomes[outcome.status] = (drainOutcomes[outcome.status] ?? 0) + 1;
     if (outcome.status === "sent") {
       drained += 1;
+    } else if (outcome.status === "db_error") {
+      reportError(new Error(outcome.error), {
+        tags: { surface: "cron_sequence_tick_drain_release" },
+        extra: { messageId: msg.id, outcomeStatus: outcome.status },
+      });
     } else if (outcome.status === "blocked_quiet_hours") {
       // Quiet-hours rows become sendable later — defer them out of the
       // due-window so they stop occupying oldest-first head slots.
