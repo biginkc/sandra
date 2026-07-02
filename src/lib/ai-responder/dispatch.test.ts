@@ -165,10 +165,17 @@ function createMockSupabase(state: MockState) {
       contains: Map<string, Record<string, unknown>>;
       eq: Map<string, unknown>;
       in: Map<string, unknown[]>;
+      neq: Map<string, unknown>;
     },
   ): boolean {
     for (const [field, value] of filters.eq) {
       if (row[field as keyof MessageRow] !== value) {
+        return false;
+      }
+    }
+
+    for (const [field, value] of filters.neq) {
+      if (row[field as keyof MessageRow] === value) {
         return false;
       }
     }
@@ -199,6 +206,7 @@ function createMockSupabase(state: MockState) {
       contains: new Map<string, Record<string, unknown>>(),
       eq: new Map<string, unknown>(),
       in: new Map<string, unknown[]>(),
+      neq: new Map<string, unknown>(),
     };
     let limitCount: number | null = null;
     let orderBy: { ascending: boolean; field: keyof MessageRow } | null = null;
@@ -258,6 +266,10 @@ function createMockSupabase(state: MockState) {
       },
       in(field: string, values: unknown[]) {
         filters.in.set(field, values);
+        return query;
+      },
+      neq(field: string, value: unknown) {
+        filters.neq.set(field, value);
         return query;
       },
       limit(value: number) {

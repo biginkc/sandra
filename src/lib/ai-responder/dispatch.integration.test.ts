@@ -244,6 +244,9 @@ describe("dispatchAiResponse (integration)", () => {
     const { propertyId, contactId } = await seedLead({
       phone: "+18167554021",
     });
+    // ai_response_claims.inbound_message_id has an FK to messages(id)
+    // (migration 20260624220000), so the inbound row must exist — as it
+    // always does in production, where the webhook inserts it first.
     const inboundMessageId = "66666666-6666-4666-8666-666666666666";
     await supabase.from("messages").insert({
       id: inboundMessageId,
@@ -341,6 +344,8 @@ describe("dispatchAiResponse (integration)", () => {
       phone: "+18167554012",
     });
     const inboundMessageId = "55555555-5555-4555-8555-555555555555";
+    // Real inbound row — the claim table's FK to messages(id) rejects
+    // fabricated ids (migration 20260624220000).
     await supabase.from("messages").insert({
       id: inboundMessageId,
       channel: "sms",
@@ -391,6 +396,63 @@ describe("dispatchAiResponse (integration)", () => {
       generated_by: "ai_responder_v1",
       inbound_message_id: inboundMessageId,
     });
+  });
+
+  it("does not duplicate the current inbound in the model prompt when its row already exists", async () => {
+    // Codex review of PR #336 (P2): the webhook inserts the inbound row
+    // before dispatch, and loadConversation used to read it back while
+    // dispatch appended inboundBody again — the model saw the message it
+    // was answering twice.
+    await seedConfig();
+    const { propertyId, contactId } = await seedLead({
+      phone: "+18167554024",
+    });
+    const conversationId = "88888888-8888-4888-8888-888888888884";
+    const inboundMessageId = "99999999-9999-4999-8999-999999999999";
+    const inboundBody = "yes I'd consider selling";
+    await supabase.from("messages").insert({
+      id: inboundMessageId,
+      channel: "sms",
+      direction: "inbound",
+      status: "received",
+      property_id: propertyId,
+      contact_id: contactId,
+      conversation_id: conversationId,
+      body: inboundBody,
+    });
+
+    let capturedMessages: Array<{ role: string; content: string }> = [];
+    const capturingAnthropic: AnthropicLike = {
+      messages: {
+        create: (async (args: { messages: Array<{ role: string; content: string }> }) => {
+          if (capturedMessages.length === 0) {
+            capturedMessages = args.messages;
+          }
+          return stubAnthropic(HAPPY_OUT).messages.create(args as never);
+        }) as unknown as AnthropicLike["messages"]["create"],
+      } as unknown as AnthropicLike["messages"],
+    };
+
+    const outcome = await dispatchAiResponse(
+      supabase,
+      {
+        propertyId,
+        contactId,
+        conversationId,
+        inboundBody,
+        inboundMessageId,
+      },
+      { anthropic: capturingAnthropic },
+    );
+
+    expect(outcome.outcome).toBe("sent");
+    const occurrences = capturedMessages.filter(
+      (message) => message.content === inboundBody,
+    );
+    expect(occurrences).toHaveLength(1);
+    expect(capturedMessages[capturedMessages.length - 1]?.content).toBe(
+      inboundBody,
+    );
   });
 
   it("skips an older inbound when delayed workflow fire-time superseded checking is enabled", async () => {

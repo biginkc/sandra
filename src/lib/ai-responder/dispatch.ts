@@ -288,9 +288,11 @@ export async function dispatchAiResponse(
     input.propertyId,
     input.contactId,
     input.conversationId ?? null,
+    input.inboundMessageId ?? null,
   );
-  // Append the current inbound body (it was just inserted by the
-  // webhook; include it explicitly so the model sees it).
+  // Append the current inbound body explicitly. The webhook inserts the
+  // inbound row before dispatching, so loadConversation excludes it by
+  // id — otherwise the model would see the current message twice.
   conversation.push({ role: "user", content: input.inboundBody });
 
   let generated;
@@ -1034,6 +1036,7 @@ async function loadConversation(
   propertyId: string,
   contactId: string,
   conversationId: string | null,
+  excludeMessageId: string | null,
 ): Promise<Array<{ role: "user" | "assistant"; content: string }>> {
   let query = supabase
     .from("messages")
@@ -1044,6 +1047,10 @@ async function loadConversation(
   query = conversationId
     ? query.eq("conversation_id", conversationId)
     : query.eq("contact_id", contactId);
+  // The current inbound is appended by the caller; its row already
+  // exists (webhook inserts before dispatch), so drop it here or the
+  // model sees the message it is answering twice.
+  if (excludeMessageId) query = query.neq("id", excludeMessageId);
   const { data } = await query;
   const rows = (data ?? []).slice().reverse(); // chronological
   return rows.map((r) => ({
