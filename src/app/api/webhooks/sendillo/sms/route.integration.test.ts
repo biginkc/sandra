@@ -166,6 +166,8 @@ function makeSendilloInboundRequest(input: {
 describe("POST /api/webhooks/sendillo/sms (integration)", () => {
   beforeEach(async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
+    // Keep DB now() inserts and app-clock payload dates inside the semantic
+    // dedupe recency window; update these together if the window changes.
     vi.setSystemTime(new Date("2026-07-02T19:10:39.257Z"));
     delete process.env.SUPABASE_SERVICE_ROLE_KEY;
     process.env.NEXT_PUBLIC_SUPABASE_URL = process.env.TEST_SUPABASE_URL;
