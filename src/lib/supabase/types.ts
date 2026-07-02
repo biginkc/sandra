@@ -68,6 +68,8 @@ export type Database = {
           min_confidence: number
           model: string
           org_id: string
+          reply_delay_max_seconds: number
+          reply_delay_min_seconds: number
           system_prompt: string
           updated_at: string
         }
@@ -82,6 +84,8 @@ export type Database = {
           min_confidence?: number
           model?: string
           org_id: string
+          reply_delay_max_seconds?: number
+          reply_delay_min_seconds?: number
           system_prompt: string
           updated_at?: string
         }
@@ -96,6 +100,8 @@ export type Database = {
           min_confidence?: number
           model?: string
           org_id?: string
+          reply_delay_max_seconds?: number
+          reply_delay_min_seconds?: number
           system_prompt?: string
           updated_at?: string
         }
@@ -420,6 +426,10 @@ export type Database = {
           name: string
           org_id: string
           pace_seconds: number | null
+          provider_campaign_external_id: string | null
+          provider_campaign_name: string | null
+          sender_number: string | null
+          sender_provider: string | null
           skip_if_contacted: boolean
           status: string
           template_category: string | null
@@ -437,6 +447,10 @@ export type Database = {
           name: string
           org_id: string
           pace_seconds?: number | null
+          provider_campaign_external_id?: string | null
+          provider_campaign_name?: string | null
+          sender_number?: string | null
+          sender_provider?: string | null
           skip_if_contacted?: boolean
           status?: string
           template_category?: string | null
@@ -454,6 +468,10 @@ export type Database = {
           name?: string
           org_id?: string
           pace_seconds?: number | null
+          provider_campaign_external_id?: string | null
+          provider_campaign_name?: string | null
+          sender_number?: string | null
+          sender_provider?: string | null
           skip_if_contacted?: boolean
           status?: string
           template_category?: string | null
@@ -1920,6 +1938,112 @@ export type Database = {
             columns: ["tag_id"]
             isOneToOne: false
             referencedRelation: "tags"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      provider_campaigns: {
+        Row: {
+          brand: string | null
+          created_at: string
+          external_id: string
+          id: string
+          last_synced_at: string
+          name: string | null
+          org_id: string
+          provider: string
+          provider_status: string | null
+          raw: Json | null
+          status: string
+          updated_at: string
+          use_case: string | null
+        }
+        Insert: {
+          brand?: string | null
+          created_at?: string
+          external_id: string
+          id?: string
+          last_synced_at?: string
+          name?: string | null
+          org_id: string
+          provider: string
+          provider_status?: string | null
+          raw?: Json | null
+          status?: string
+          updated_at?: string
+          use_case?: string | null
+        }
+        Update: {
+          brand?: string | null
+          created_at?: string
+          external_id?: string
+          id?: string
+          last_synced_at?: string
+          name?: string | null
+          org_id?: string
+          provider?: string
+          provider_status?: string | null
+          raw?: Json | null
+          status?: string
+          updated_at?: string
+          use_case?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "provider_campaigns_org_id_fkey"
+            columns: ["org_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      provider_sender_numbers: {
+        Row: {
+          created_at: string
+          id: string
+          last_synced_at: string
+          messaging_status: string | null
+          org_id: string
+          phone_e164: string
+          provider: string
+          provider_number_id: string | null
+          raw: Json | null
+          status: string
+          updated_at: string
+        }
+        Insert: {
+          created_at?: string
+          id?: string
+          last_synced_at?: string
+          messaging_status?: string | null
+          org_id: string
+          phone_e164: string
+          provider: string
+          provider_number_id?: string | null
+          raw?: Json | null
+          status?: string
+          updated_at?: string
+        }
+        Update: {
+          created_at?: string
+          id?: string
+          last_synced_at?: string
+          messaging_status?: string | null
+          org_id?: string
+          phone_e164?: string
+          provider?: string
+          provider_number_id?: string | null
+          raw?: Json | null
+          status?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "provider_sender_numbers_org_id_fkey"
+            columns: ["org_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
             referencedColumns: ["id"]
           },
         ]

@@ -1,6 +1,8 @@
 import type {
   DialpadFromOption,
   MessagingProvider,
+  ProviderCampaignSummary,
+  ProviderSenderNumber,
   SmsInboundEvent,
   SmsOutboundInput,
   SmsSendResult,
@@ -116,6 +118,37 @@ let replyCounter = 0;
  *  opt_outer so the STOP reply only fires once per enrollment. */
 const firstSendSeen = new Set<string>();
 
+const DEFAULT_MOCK_PURCHASED_NUMBERS: ProviderSenderNumber[] = [
+  {
+    phoneE164: "+15551234567",
+    providerNumberId: "mock-num-1",
+    status: "active",
+    messagingStatus: "ready",
+    raw: { mock: true, number: "+15551234567" },
+  },
+  {
+    phoneE164: "+15559999999",
+    providerNumberId: "mock-num-2",
+    status: "active",
+    messagingStatus: "ready",
+    raw: { mock: true, number: "+15559999999" },
+  },
+];
+
+const DEFAULT_MOCK_PROVIDER_CAMPAIGNS: ProviderCampaignSummary[] = [
+  {
+    externalId: "mock-provider-campaign-1",
+    name: "Mock 10DLC Campaign",
+    brand: "Mock Brand",
+    useCase: "low_volume",
+    status: "active",
+    raw: { mock: true, id: "mock-provider-campaign-1" },
+  },
+];
+
+let mockPurchasedNumbers = [...DEFAULT_MOCK_PURCHASED_NUMBERS];
+let mockProviderCampaigns = [...DEFAULT_MOCK_PROVIDER_CAMPAIGNS];
+
 // ---------------------------------------------------------------------------
 // Public simulation API
 // ---------------------------------------------------------------------------
@@ -127,6 +160,22 @@ export function resetMockState(): void {
   pendingReplies.length = 0;
   replyCounter = 0;
   firstSendSeen.clear();
+  mockPurchasedNumbers = [...DEFAULT_MOCK_PURCHASED_NUMBERS];
+  mockProviderCampaigns = [...DEFAULT_MOCK_PROVIDER_CAMPAIGNS];
+}
+
+/** Override the purchased-numbers catalog the mock provider reports. */
+export function setMockPurchasedNumbers(
+  numbers: ProviderSenderNumber[],
+): void {
+  mockPurchasedNumbers = [...numbers];
+}
+
+/** Override the provider-campaign catalog the mock provider reports. */
+export function setMockProviderCampaigns(
+  campaigns: ProviderCampaignSummary[],
+): void {
+  mockProviderCampaigns = [...campaigns];
 }
 
 /**
@@ -291,6 +340,14 @@ export class MockMessagingProvider implements MessagingProvider {
 
   verifyWebhookSignature(_rawBody: string, headers: Headers): boolean {
     return headers.get("x-mock-signature") === "valid";
+  }
+
+  async listPurchasedNumbers(): Promise<ProviderSenderNumber[]> {
+    return Promise.resolve([...mockPurchasedNumbers]);
+  }
+
+  async listProviderCampaigns(): Promise<ProviderCampaignSummary[]> {
+    return Promise.resolve([...mockProviderCampaigns]);
   }
 
   async listFromNumbers(): Promise<DialpadFromOption[]> {

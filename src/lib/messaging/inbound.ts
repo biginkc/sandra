@@ -3,6 +3,7 @@ import {
   createClient as createSupabaseClient,
   type SupabaseClient,
 } from "@supabase/supabase-js";
+import { start } from "workflow/api";
 
 import Anthropic from "@anthropic-ai/sdk";
 
@@ -13,7 +14,18 @@ import {
   recordAiResponderOutcomeForThread,
 } from "@/lib/messages/ai-responder-thread-state";
 import { looksLikeTestTraffic } from "@/lib/messages/list-threads";
-import { dispatchAiResponse } from "@/lib/ai-responder/dispatch";
+import {
+  applyKeywordEscalation,
+  checkAiResponderDispatchPreGates,
+  dispatchAiResponse,
+  markPropertyNeedsAttention,
+  type AiDispatchInput,
+  type AiDispatchOutcome,
+} from "@/lib/ai-responder/dispatch";
+import {
+  computeReplyDelaySeconds,
+  loadAiReplyDelayConfig,
+} from "@/lib/ai-responder/delay";
 import { reportError } from "@/lib/errors/report";
 import { classifyReplyIntent } from "@/lib/leads/classify-reply-intent";
 import { qualifyProperty } from "@/lib/leads/qualify";
@@ -26,11 +38,16 @@ import {
   markInboundSmsIntentSideEffectsComplete,
 } from "@/lib/messaging/inbound-intents";
 import {
+  markInboundMessageState,
+  readInboundMessageState,
+} from "@/lib/messaging/inbound-state";
+import {
   dispatchOwnerMessageAdded,
   dispatchOwnerMessageAddedNeedsTriage,
 } from "@/lib/notifications/dispatch";
 import { pausePropertyEnrollments } from "@/lib/sequences/enrollment";
 import type { Database, Json } from "@/lib/supabase/types";
+import { aiReplyDelayWorkflow } from "@/workflows/ai-reply-delay";
 import { applyPhoneLevelOptOut } from "./opt-out-phone";
 import type { MessagingProvider } from "./types";
 
@@ -717,32 +734,144 @@ export async function handleInboundWebhook(
 
       if (effectiveContactId && !inboundState.aiResponder) {
         try {
-          const outcome = await dispatchAiResponse(
-            supabase,
-            {
-              propertyId: effectivePropertyId,
-              contactId: effectiveContactId,
-              conversationId: insertOutcome.conversationId,
-              inboundFromPhone: ev.from,
-              inboundBody: ev.body,
-              inboundMessageId: insertOutcome.messageId,
-            },
-            {
-              anthropic: new Anthropic(),
-            },
-          );
-          const completedAt = new Date().toISOString();
-          await recordAiResponderOutcomeForThread(supabase, {
+          const dispatchInput: AiDispatchInput = {
+            propertyId: effectivePropertyId,
+            contactId: effectiveContactId,
             conversationId: insertOutcome.conversationId,
-            outcome,
-            completedAt,
-          });
-          await markInboundMessageState(supabase, insertOutcome.messageId, {
-            aiResponder: {
-              ...outcome,
-              completedAt,
-            },
-          });
+            inboundFromPhone: ev.from,
+            inboundBody: ev.body,
+            inboundMessageId: insertOutcome.messageId,
+          };
+          const delayConfig = await loadAiReplyDelayConfig(
+            supabase,
+            effectivePropertyId,
+          );
+          const delaySeconds = delayConfig
+            ? computeReplyDelaySeconds({
+                minSeconds: delayConfig.delayMinSeconds,
+                maxSeconds: delayConfig.delayMaxSeconds,
+                inboundLength: ev.body.length,
+                propertyState: delayConfig.propertyState,
+              })
+            : 0;
+
+          if (delaySeconds === 0) {
+            await dispatchAndStampAiResponder(supabase, dispatchInput);
+          } else {
+            const preGates = await checkAiResponderDispatchPreGates(
+              supabase,
+              dispatchInput,
+            );
+            if (!preGates.ok) {
+              await stampAiResponderTerminalOutcome(supabase, {
+                messageId: insertOutcome.messageId,
+                conversationId: insertOutcome.conversationId,
+                outcome: preGates.outcome,
+              });
+            } else {
+              const keywordEscalation = await applyKeywordEscalation(supabase, {
+                propertyId: effectivePropertyId,
+                inboundBody: ev.body,
+                escalationKeywords: delayConfig!.escalationKeywords,
+              });
+
+              if (keywordEscalation.escalated) {
+                await stampAiResponderTerminalOutcome(supabase, {
+                  messageId: insertOutcome.messageId,
+                  conversationId: insertOutcome.conversationId,
+                  outcome: {
+                    outcome: "escalated",
+                    reason: keywordEscalation.reason,
+                  },
+                });
+              } else {
+                const scheduledAt = new Date(
+                  Date.now() + delaySeconds * 1000,
+                ).toISOString();
+                try {
+                  const run = await start(aiReplyDelayWorkflow, [
+                    {
+                      propertyId: effectivePropertyId,
+                      contactId: effectiveContactId,
+                      conversationId: insertOutcome.conversationId,
+                      inboundFromPhone: ev.from,
+                      inboundBody: ev.body,
+                      inboundMessageId: insertOutcome.messageId,
+                      delaySeconds,
+                    },
+                  ]);
+
+                  try {
+                    await markInboundMessageState(
+                      supabase,
+                      insertOutcome.messageId,
+                      {
+                        aiResponder: {
+                          outcome: "delayed",
+                          delaySeconds,
+                          scheduledAt,
+                          workflowRunId: run.runId,
+                        },
+                      },
+                    );
+                  } catch (stampError) {
+                    reportError(stampError, {
+                      tags: {
+                        surface: `${provider.providerId}_webhook_ai_responder_workflow_stamp`,
+                      },
+                      extra: {
+                        propertyId: effectivePropertyId,
+                        externalId: ev.externalId,
+                        inboundMessageId: insertOutcome.messageId,
+                        workflowRunId: run.runId,
+                      },
+                    });
+                  }
+                } catch (e) {
+                  reportError(e, {
+                    tags: {
+                      surface: `${provider.providerId}_webhook_ai_responder_workflow_start`,
+                    },
+                    extra: {
+                      propertyId: effectivePropertyId,
+                      externalId: ev.externalId,
+                      inboundMessageId: insertOutcome.messageId,
+                    },
+                  });
+                  try {
+                    await dispatchAndStampAiResponder(supabase, dispatchInput);
+                  } catch (fallbackError) {
+                    reportError(fallbackError, {
+                      tags: {
+                        surface: `${provider.providerId}_webhook_ai_responder_workflow_fallback`,
+                      },
+                      extra: {
+                        propertyId: effectivePropertyId,
+                        externalId: ev.externalId,
+                        inboundMessageId: insertOutcome.messageId,
+                      },
+                    });
+                    await markPropertyNeedsAttention(
+                      supabase,
+                      effectivePropertyId,
+                      "workflow_start_and_fallback_failed",
+                    );
+                    await markInboundMessageState(
+                      supabase,
+                      insertOutcome.messageId,
+                      {
+                        aiResponder: {
+                          outcome: "error",
+                          reason: "workflow_start_and_fallback_failed",
+                          completedAt: new Date().toISOString(),
+                        },
+                      },
+                    );
+                  }
+                }
+              }
+            }
+          }
         } catch (e) {
           reportError(e, {
             tags: { surface: `${provider.providerId}_webhook_ai_responder` },
@@ -1071,69 +1200,39 @@ function isMissingWebhookProcessingClaimSupport(message: string): boolean {
   );
 }
 
-type InboundMessageState = {
-  autoQualifiedAt?: string;
-  ownerNotificationSentAt?: string;
-  propertyEnrollmentsPausedAt?: string;
-  aiResponder?: {
-    outcome: "sent" | "escalated" | "skipped" | "auto_closed" | "opted_out";
-    messageId?: string;
-    confidence?: number;
-    reason?: string;
-    completedAt?: string;
-  };
-};
-
-function readInboundMessageState(metadata: Json | null): InboundMessageState {
-  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
-    return {};
-  }
-  const processing = (metadata as Record<string, unknown>).processing;
-  if (
-    !processing ||
-    typeof processing !== "object" ||
-    Array.isArray(processing)
-  ) {
-    return {};
-  }
-  return processing as InboundMessageState;
+async function dispatchAndStampAiResponder(
+  supabase: SupabaseClient<Database>,
+  input: AiDispatchInput,
+): Promise<AiDispatchOutcome> {
+  const outcome = await dispatchAiResponse(supabase, input, {
+    anthropic: new Anthropic(),
+  });
+  await stampAiResponderTerminalOutcome(supabase, {
+    messageId: input.inboundMessageId!,
+    conversationId: input.conversationId ?? null,
+    outcome,
+  });
+  return outcome;
 }
 
-async function markInboundMessageState(
+async function stampAiResponderTerminalOutcome(
   supabase: SupabaseClient<Database>,
-  messageId: string,
-  patch: InboundMessageState,
+  args: {
+    messageId: string;
+    conversationId: string | null;
+    outcome: AiDispatchOutcome;
+  },
 ): Promise<void> {
-  const { data: row, error: fetchError } = await supabase
-    .from("messages")
-    .select("metadata")
-    .eq("id", messageId)
-    .maybeSingle();
-  if (fetchError) {
-    throw new Error(`markInboundMessageState fetch: ${fetchError.message}`);
-  }
-
-  const currentMetadata =
-    row?.metadata &&
-    typeof row.metadata === "object" &&
-    !Array.isArray(row.metadata)
-      ? (row.metadata as Record<string, unknown>)
-      : {};
-  const currentState = readInboundMessageState(row?.metadata ?? null);
-
-  const { error: updateError } = await supabase
-    .from("messages")
-    .update({
-      metadata: {
-        ...currentMetadata,
-        processing: {
-          ...currentState,
-          ...patch,
-        },
-      } as Json,
-    })
-    .eq("id", messageId);
-  if (updateError) {
-    throw new Error(`markInboundMessageState update: ${updateError.message}`);
-  }
+  const completedAt = new Date().toISOString();
+  await recordAiResponderOutcomeForThread(supabase, {
+    conversationId: args.conversationId,
+    outcome: args.outcome,
+    completedAt,
+  });
+  await markInboundMessageState(supabase, args.messageId, {
+    aiResponder: {
+      ...args.outcome,
+      completedAt,
+    },
+  });
 }

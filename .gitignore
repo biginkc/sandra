@@ -61,3 +61,4 @@ next-env.d.ts
 /test-results/
 /playwright/.cache/
 .env*.local
+supabase/.temp/

@@ -58,6 +58,10 @@ export type AiDispatchInput = {
   inboundMessageId?: string | null;
 };
 
+export type AiDispatchOptions = {
+  checkSuperseded?: boolean;
+};
+
 const AI_REPLY_THREAD_DEBOUNCE_MS = 45_000;
 const HUMAN_ONLY_DISPOS = new Set(["nurture", "callback_requested"]);
 
@@ -70,42 +74,101 @@ type ResponderDispoResult =
   | { updated: true }
   | { updated: false; reason: "already_terminal" | "db_error" };
 
-export async function dispatchAiResponse(
+type AiDispatchPropertyGateRow = Pick<
+  Database["public"]["Tables"]["properties"]["Row"],
+  | "ai_responder_disabled"
+  | "homeowner_contact_id"
+  | "id"
+  | "needs_human_attention"
+  | "org_id"
+  | "outreach_dispo"
+  | "state"
+>;
+
+export type AiDispatchPreGateResult =
+  | { ok: true; property: AiDispatchPropertyGateRow }
+  | { ok: false; outcome: AiDispatchOutcome };
+
+export async function applyKeywordEscalation(
+  supabase: SupabaseClient<Database>,
+  args: {
+    propertyId: string;
+    inboundBody: string;
+    escalationKeywords?: ReadonlyArray<string> | null;
+  },
+): Promise<{ escalated: true; reason: string } | { escalated: false }> {
+  const keywordMatch = matchEscalationKeyword(args.inboundBody, {
+    allowedPhrases: args.escalationKeywords ?? undefined,
+  });
+  if (!keywordMatch) return { escalated: false };
+
+  const reason = `keyword:${keywordMatch.tier}`;
+  await markPropertyNeedsAttention(supabase, args.propertyId, reason);
+  return { escalated: true, reason };
+}
+
+export async function checkAiResponderDispatchPreGates(
   supabase: SupabaseClient<Database>,
   input: AiDispatchInput,
-  deps: { anthropic: AnthropicLike },
-): Promise<AiDispatchOutcome> {
+  options: AiDispatchOptions = {},
+): Promise<AiDispatchPreGateResult> {
   if (input.inboundMessageId) {
     const existingReply = await findExistingAiReplyForInbound(
       supabase,
       input.inboundMessageId,
     );
     if (existingReply) {
-      return { outcome: "skipped", reason: "already_replied" };
+      return {
+        ok: false,
+        outcome: { outcome: "skipped", reason: "already_replied" },
+      };
+    }
+
+    if (options.checkSuperseded === true) {
+      const latestInbound = await findLatestInboundInThread(supabase, input);
+      if (latestInbound && latestInbound.id !== input.inboundMessageId) {
+        return {
+          ok: false,
+          outcome: { outcome: "skipped", reason: "superseded_by_newer_inbound" },
+        };
+      }
     }
   }
 
-  // --------------------------------------------------------------------------
-  // 1. Load property + org + config
-  // --------------------------------------------------------------------------
   const { data: property } = await supabase
     .from("properties")
     .select("id, org_id, state, ai_responder_disabled, outreach_dispo, needs_human_attention, homeowner_contact_id")
     .eq("id", input.propertyId)
     .maybeSingle();
   if (!property) {
-    return { outcome: "skipped", reason: "property_not_found" };
+    return {
+      ok: false,
+      outcome: { outcome: "skipped", reason: "property_not_found" },
+    };
   }
-  if (
-    property.needs_human_attention ||
-    (property.outreach_dispo &&
-      (SUPPRESSED_DISPOS.has(
-        property.outreach_dispo as Parameters<typeof SUPPRESSED_DISPOS.has>[0],
-      ) ||
-        HUMAN_ONLY_DISPOS.has(property.outreach_dispo)))
-  ) {
-    return { outcome: "skipped", reason: "already_terminal" };
+  if (isTerminalAiResponderProperty(property)) {
+    return {
+      ok: false,
+      outcome: { outcome: "skipped", reason: "already_terminal" },
+    };
   }
+
+  return { ok: true, property };
+}
+
+export async function dispatchAiResponse(
+  supabase: SupabaseClient<Database>,
+  input: AiDispatchInput,
+  deps: { anthropic: AnthropicLike } & AiDispatchOptions,
+): Promise<AiDispatchOutcome> {
+  // --------------------------------------------------------------------------
+  // 1. Load property + org + config
+  // --------------------------------------------------------------------------
+  const preGates = await checkAiResponderDispatchPreGates(supabase, input, {
+    checkSuperseded: deps.checkSuperseded,
+  });
+  if (!preGates.ok) return preGates.outcome;
+  const { property } = preGates;
 
   const { data: config } = await supabase
     .from("ai_responder_configs")
@@ -121,14 +184,14 @@ export async function dispatchAiResponse(
   //    signal on lead detail regardless). If no config and no match,
   //    we'll skip below.
   // --------------------------------------------------------------------------
-  const keywordMatch = matchEscalationKeyword(input.inboundBody, {
-    allowedPhrases: config?.escalation_keywords ?? undefined,
+  const keywordEscalation = await applyKeywordEscalation(supabase, {
+    propertyId: input.propertyId,
+    inboundBody: input.inboundBody,
+    escalationKeywords: config?.escalation_keywords ?? null,
   });
 
-  if (keywordMatch) {
-    const reason = `keyword:${keywordMatch.tier}`;
-    await markPropertyNeedsAttention(supabase, input.propertyId, reason);
-    return { outcome: "escalated", reason };
+  if (keywordEscalation.escalated) {
+    return { outcome: "escalated", reason: keywordEscalation.reason };
   }
 
   // --------------------------------------------------------------------------
@@ -442,6 +505,58 @@ async function findExistingAiReplyForInbound(
     reportError(new Error(error.message), {
       tags: { surface: "ai_responder_existing_reply_lookup" },
       extra: { inboundMessageId },
+    });
+    return null;
+  }
+  return data ?? null;
+}
+
+function isTerminalAiResponderProperty(
+  property: Pick<
+    AiDispatchPropertyGateRow,
+    "needs_human_attention" | "outreach_dispo"
+  >,
+): boolean {
+  return (
+    property.needs_human_attention ||
+    Boolean(
+      property.outreach_dispo &&
+        (SUPPRESSED_DISPOS.has(
+          property.outreach_dispo as Parameters<typeof SUPPRESSED_DISPOS.has>[0],
+        ) ||
+          HUMAN_ONLY_DISPOS.has(property.outreach_dispo)),
+    )
+  );
+}
+
+async function findLatestInboundInThread(
+  supabase: SupabaseClient<Database>,
+  input: AiDispatchInput,
+): Promise<{ id: string } | null> {
+  let query = supabase
+    .from("messages")
+    .select("id")
+    .eq("property_id", input.propertyId)
+    .eq("direction", "inbound")
+    .eq("channel", "sms");
+  query = input.conversationId
+    ? query.eq("conversation_id", input.conversationId)
+    : query.eq("contact_id", input.contactId);
+
+  const { data, error } = await query
+    .order("created_at", { ascending: false })
+    .order("id", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error) {
+    reportError(new Error(error.message), {
+      tags: { surface: "ai_responder_latest_inbound_lookup" },
+      extra: {
+        propertyId: input.propertyId,
+        contactId: input.contactId,
+        conversationId: input.conversationId ?? null,
+        inboundMessageId: input.inboundMessageId ?? null,
+      },
     });
     return null;
   }
@@ -851,7 +966,7 @@ function assertNeverRoute(value: never): never {
   throw new Error(`Unhandled responder route: ${JSON.stringify(value)}`);
 }
 
-async function markPropertyNeedsAttention(
+export async function markPropertyNeedsAttention(
   supabase: SupabaseClient<Database>,
   propertyId: string,
   reason: string,

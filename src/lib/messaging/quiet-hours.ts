@@ -8,6 +8,9 @@
  * Window: [08:00, 21:00) local. At 21:00:00 exactly we block.
  */
 
+export const QUIET_HOURS_OPEN_HOUR = 8;
+export const QUIET_HOURS_CLOSE_HOUR = 21;
+
 /**
  * State (USPS 2-letter) -> IANA timezone string. Re-exported for cross-module
  * reuse by the dialer (Jitter Phase 1, migration 058).
@@ -84,6 +87,14 @@ export type QuietHoursCheck =
       zone: string | null;
     };
 
+export type QuietHoursLocalTime = {
+  hour: number;
+  localTime: string;
+  minute: number;
+  second: number;
+  zone: string;
+};
+
 function currentQuietHoursTime(): Date {
   const override = process.env.E2E_QUIET_HOURS_NOW;
   if (override) {
@@ -91,6 +102,42 @@ function currentQuietHoursTime(): Date {
     if (!Number.isNaN(parsed.getTime())) return parsed;
   }
   return new Date();
+}
+
+export function getQuietHoursLocalTime(
+  state: string | null | undefined,
+  now: Date = currentQuietHoursTime(),
+): QuietHoursLocalTime | null {
+  if (!state) return null;
+  const zone = STATE_TO_TZ[state.trim().toUpperCase()];
+  if (!zone) return null;
+
+  const fmt = new Intl.DateTimeFormat("en-US", {
+    timeZone: zone,
+    hour12: false,
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+  const parts = fmt.formatToParts(now);
+  const hourStr = parts.find((p) => p.type === "hour")?.value ?? "00";
+  const minuteStr = parts.find((p) => p.type === "minute")?.value ?? "00";
+  const secondStr = parts.find((p) => p.type === "second")?.value ?? "00";
+
+  const parsedHour = parseInt(hourStr, 10);
+  const parsedMinute = parseInt(minuteStr, 10);
+  const parsedSecond = parseInt(secondStr, 10);
+  const hour = Number.isNaN(parsedHour) ? 0 : parsedHour % 24;
+  const minute = Number.isNaN(parsedMinute) ? 0 : parsedMinute;
+  const second = Number.isNaN(parsedSecond) ? 0 : parsedSecond;
+
+  return {
+    hour,
+    localTime: `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`,
+    minute,
+    second,
+    zone,
+  };
 }
 
 /**
@@ -101,7 +148,8 @@ export function checkQuietHours(
   state: string | null | undefined,
   now: Date = currentQuietHoursTime(),
 ): QuietHoursCheck {
-  if (!state) {
+  const local = getQuietHoursLocalTime(state, now);
+  if (!local) {
     return {
       ok: false,
       reason: "unknown_state",
@@ -109,35 +157,18 @@ export function checkQuietHours(
       zone: null,
     };
   }
-  const zone = STATE_TO_TZ[state.trim().toUpperCase()];
-  if (!zone) {
-    return {
-      ok: false,
-      reason: "unknown_state",
-      localTime: null,
-      zone: null,
-    };
-  }
-
-  // Use Intl to format hour + minute in the recipient's zone.
-  const fmt = new Intl.DateTimeFormat("en-US", {
-    timeZone: zone,
-    hour12: false,
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-  const parts = fmt.formatToParts(now);
-  const hourStr = parts.find((p) => p.type === "hour")?.value ?? "00";
-  const minStr = parts.find((p) => p.type === "minute")?.value ?? "00";
-  // Intl formats midnight as "24" in some node versions — normalize.
-  const hour = parseInt(hourStr, 10) % 24;
-  const minute = parseInt(minStr, 10);
-  const localTime = `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
 
   // Window: [08:00, 21:00).
-  const withinWindow = hour >= 8 && hour < 21;
+  const withinWindow =
+    local.hour >= QUIET_HOURS_OPEN_HOUR &&
+    local.hour < QUIET_HOURS_CLOSE_HOUR;
   if (!withinWindow) {
-    return { ok: false, reason: "outside_window", localTime, zone };
+    return {
+      ok: false,
+      reason: "outside_window",
+      localTime: local.localTime,
+      zone: local.zone,
+    };
   }
-  return { ok: true, localTime, zone };
+  return { ok: true, localTime: local.localTime, zone: local.zone };
 }

@@ -7,6 +7,11 @@ import type { Database, Json } from "@/lib/supabase/types";
 import { reconcileStoredStatusEvents } from "./status-events";
 import { getConsentState, type ConsentState } from "./consent";
 import { checkQuietHours, type QuietHoursCheck } from "./quiet-hours";
+import {
+  getSenderInventoryState,
+  providerSupportsSenderInventory,
+  type SenderInventoryState,
+} from "./delivery";
 import { isSmsPhoneSuppressed } from "./opt-out-phone";
 import { getMessagingProvider } from "./registry";
 import { selectBestSmsPhone, selectSmsPhoneByNumber } from "./sms-phone";
@@ -595,23 +600,45 @@ export async function releaseQueuedMessage(
       error,
     };
   }
-  const currentDefaultFromRaw = provider.getDefaultFromNumber?.() ?? null;
-  const currentDefaultFrom = currentDefaultFromRaw
-    ? normalizePhone(currentDefaultFromRaw) ?? currentDefaultFromRaw
-    : null;
-  if (
-    provider.providerId === "sendillo" &&
-    msg.from_address &&
-    currentDefaultFrom &&
-    msg.from_address !== currentDefaultFrom
-  ) {
-    const error =
-      `queued message sender ${msg.from_address} no longer matches active Sendillo sender ${currentDefaultFrom}`;
-    await failQueuedMessage(supabase, msg.id, error);
-    return {
-      status: "db_error",
-      error,
-    };
+  // Sender guard: the row must send from the sender it was queued with,
+  // and that sender must be in the synced approved inventory — never an
+  // env-default fallback. Unknown/inactive senders fail the row loudly.
+  // An EMPTY inventory (catalog never synced) defers instead of failing
+  // terminally: that is a sync/config gap, not bad row data, and failing
+  // would mass-kill queued rows on first deploy before the first sync.
+  if (providerSupportsSenderInventory(provider) && msg.from_address) {
+    let inventory: SenderInventoryState;
+    try {
+      inventory = await getSenderInventoryState(
+        supabase,
+        msg.org_id,
+        provider.providerId,
+        msg.from_address,
+      );
+    } catch (e) {
+      return {
+        status: "db_error",
+        error: e instanceof Error ? e.message : String(e),
+      };
+    }
+    if (inventory.state === "empty") {
+      return {
+        status: "db_error",
+        error:
+          `sender inventory for provider ${provider.providerId} has never been synced — ` +
+          `sync Delivery senders before releasing queued messages (message left queued)`,
+      };
+    }
+    if (inventory.state !== "approved") {
+      const error =
+        `queued message sender ${msg.from_address} is ${inventory.state === "inactive" ? "no longer active" : "not"} ` +
+        `in the approved ${provider.providerId} sender inventory`;
+      await failQueuedMessage(supabase, msg.id, error);
+      return {
+        status: "db_error",
+        error,
+      };
+    }
   }
 
   // Line-type re-check — a number can get classified landline between

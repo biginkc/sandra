@@ -1,6 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createTestClient } from "@tests/integration/client";
+import {
+  MOCK_SENDER_PRIMARY,
+  MOCK_SENDER_SECONDARY,
+  seedSenderCatalog,
+} from "@tests/integration/delivery";
 import { resetTenantTables } from "@tests/integration/reset";
 import { resetMockState } from "@/lib/messaging/providers/mock";
 import { recordSmsPhoneSuppression } from "@/lib/messaging/opt-out-phone";
@@ -159,11 +164,15 @@ async function queueTemplateAndGetBody(
 
 function adHocOpts<T extends Record<string, unknown>>(opts: T): T & {
   campaignName: string;
+  senderNumber: string;
 } {
   return {
+    // Delivery setup: ad-hoc bulk SMS requires a sending number from the
+    // synced catalog (seeded in beforeEach). Callers may override it.
+    senderNumber: MOCK_SENDER_PRIMARY,
     ...opts,
     campaignName: `Bulk Test ${Math.random().toString(36).slice(2)}`,
-  };
+  } as T & { campaignName: string; senderNumber: string };
 }
 
 const createdAuthUsers: string[] = [];
@@ -197,6 +206,12 @@ describe("bulkQueueSms (integration)", () => {
     vi.stubEnv("OUTBOUND_SENDER_NAME", "");
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(SAFE_NOW);
+    // Delivery setup: bulk SMS validates the sending number against the
+    // synced sender catalog, which reset_tenant_tables just truncated.
+    await seedSenderCatalog(testClient, await getOrgId(), [
+      MOCK_SENDER_PRIMARY,
+      MOCK_SENDER_SECONDARY,
+    ]);
   });
 
   afterEach(async () => {
@@ -262,6 +277,7 @@ describe("bulkQueueSms (integration)", () => {
       {
         body: "Auto campaign hello",
         campaignName: "Auto Campaign Sync",
+        senderNumber: MOCK_SENDER_PRIMARY,
         paceSeconds: 10,
         skipIfContacted: true,
       },
@@ -341,6 +357,8 @@ describe("bulkQueueSms (integration)", () => {
         name: "Frozen Recipient Campaign",
         channel: "sms",
         status: "launching",
+        sender_provider: "mock",
+        sender_number: MOCK_SENDER_PRIMARY,
       })
       .select("id")
       .single();
@@ -385,6 +403,8 @@ describe("bulkQueueSms (integration)", () => {
         name: "Two Second Saved Campaign",
         channel: "sms",
         status: "launching",
+        sender_provider: "mock",
+        sender_number: MOCK_SENDER_PRIMARY,
       })
       .select("id")
       .single();
@@ -420,6 +440,7 @@ describe("bulkQueueSms (integration)", () => {
     const result = await bulkQueueSms([propertyId], {
       body: "Should not queue",
       campaignName: "duplicate bulk",
+      senderNumber: MOCK_SENDER_PRIMARY,
     });
     expect(result).toEqual({
       ok: false,
@@ -1199,6 +1220,7 @@ describe("bulkQueueSms (integration)", () => {
     const result = await bulkQueueSms(ids, {
       body: "Deferred bulk",
       campaignName: "Deferred Auto Campaign",
+      senderNumber: MOCK_SENDER_PRIMARY,
       paceSeconds: 10,
     });
     expect(result.ok).toBe(true);
@@ -1240,5 +1262,277 @@ describe("bulkQueueSms (integration)", () => {
     expect(input.opts?.paceSeconds).toBe(10);
     expect(input.opts?.pacingProfile).toBeUndefined();
     expect(input.property_ids).toHaveLength(501);
+  });
+
+  // ---------------------------------------------------------------
+  // Delivery setup — dynamic sender selection (2026-07-01)
+  // ---------------------------------------------------------------
+
+  it("stamps every queued row's from_address with the campaign sender and snapshots delivery on the campaign", async () => {
+    const first = await seedLead({
+      phone: "+18165552041",
+      address: "1 Sender Stamp St",
+    });
+    const second = await seedLead({
+      phone: "+18165552042",
+      address: "2 Sender Stamp St",
+    });
+    const third = await seedLead({
+      phone: "+18165552043",
+      address: "3 Sender Stamp St",
+    });
+
+    const result = await bulkQueueSms(
+      [first.propertyId, second.propertyId, third.propertyId],
+      {
+        body: "Stamped sender hello",
+        campaignName: "Sender Stamp Campaign",
+        senderNumber: MOCK_SENDER_SECONDARY,
+        paceSeconds: 10,
+      },
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.data.succeeded).toBe(3);
+
+    const { data: campaign } = await testClient
+      .from("campaigns")
+      .select("id, sender_provider, sender_number")
+      .eq("name", "Sender Stamp Campaign")
+      .single();
+    expect(campaign).toMatchObject({
+      sender_provider: "mock",
+      sender_number: MOCK_SENDER_SECONDARY,
+    });
+
+    const { data: messages } = await testClient
+      .from("messages")
+      .select("from_address, status, campaign_id");
+    expect(messages).toHaveLength(3);
+    expect(
+      messages?.every((row) => row.from_address === MOCK_SENDER_SECONDARY),
+    ).toBe(true);
+    expect(
+      messages?.every((row) => row.campaign_id === campaign!.id),
+    ).toBe(true);
+  });
+
+  it("rejects ad-hoc bulk SMS without a sending number (SENDER_REQUIRED)", async () => {
+    const { propertyId } = await seedLead({ phone: "+18165552044" });
+
+    const result = await bulkQueueSms([propertyId], {
+      body: "No sender",
+      campaignName: "No Sender Bulk",
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe("SENDER_REQUIRED");
+
+    const { count: messageCount } = await testClient
+      .from("messages")
+      .select("*", { count: "exact", head: true });
+    expect(messageCount).toBe(0);
+    const { count: campaignCount } = await testClient
+      .from("campaigns")
+      .select("*", { count: "exact", head: true });
+    expect(campaignCount).toBe(0);
+  });
+
+  it("rejects ad-hoc bulk SMS with a sender missing from the synced catalog (SENDER_NOT_APPROVED)", async () => {
+    const { propertyId } = await seedLead({ phone: "+18165552045" });
+
+    const result = await bulkQueueSms([propertyId], {
+      body: "Unapproved sender",
+      campaignName: "Unapproved Sender Bulk",
+      senderNumber: "+15550002222",
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe("SENDER_NOT_APPROVED");
+
+    const { count: messageCount } = await testClient
+      .from("messages")
+      .select("*", { count: "exact", head: true });
+    expect(messageCount).toBe(0);
+  });
+
+  it("rejects the saved-campaign path with CAMPAIGN_SENDER_REQUIRED when the campaign has no sender", async () => {
+    const orgId = await getOrgId();
+    const lead = await seedLead({
+      phone: "+18165552046",
+      address: "1 No Sender Saved St",
+    });
+    const { data: campaign } = await testClient
+      .from("campaigns")
+      .insert({
+        org_id: orgId,
+        name: "Legacy No Sender Campaign",
+        channel: "sms",
+        status: "launching",
+      })
+      .select("id")
+      .single();
+    if (!campaign) throw new Error("campaign seed failed");
+    await testClient.from("campaign_recipients").insert({
+      campaign_id: campaign.id,
+      property_id: lead.propertyId,
+      contact_id: lead.contactId,
+    });
+
+    const result = await bulkQueueSms([lead.propertyId], {
+      body: "Should never queue",
+      campaignId: campaign.id,
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe("CAMPAIGN_SENDER_REQUIRED");
+
+    const { count } = await testClient
+      .from("messages")
+      .select("*", { count: "exact", head: true });
+    expect(count).toBe(0);
+  });
+
+  it("fails closed when the campaign's Delivery provider is not the active messaging provider", async () => {
+    const orgId = await getOrgId();
+    const lead = await seedLead({
+      phone: "+18165552047",
+      address: "1 Wrong Provider St",
+    });
+    // Snapshot says sendillo; the active test provider is mock.
+    const { data: campaign } = await testClient
+      .from("campaigns")
+      .insert({
+        org_id: orgId,
+        name: "Wrong Provider Campaign",
+        channel: "sms",
+        status: "launching",
+        sender_provider: "sendillo",
+        sender_number: MOCK_SENDER_PRIMARY,
+      })
+      .select("id")
+      .single();
+    if (!campaign) throw new Error("campaign seed failed");
+    await testClient.from("campaign_recipients").insert({
+      campaign_id: campaign.id,
+      property_id: lead.propertyId,
+      contact_id: lead.contactId,
+    });
+
+    const result = await bulkQueueSms([lead.propertyId], {
+      body: "Should never queue",
+      campaignId: campaign.id,
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.message).toContain("configured for provider sendillo");
+
+    const { count } = await testClient
+      .from("messages")
+      .select("*", { count: "exact", head: true });
+    expect(count).toBe(0);
+  });
+
+  it("rejects the saved-campaign path with SENDER_LOCKED when the requested sender differs from the stored one", async () => {
+    const orgId = await getOrgId();
+    const lead = await seedLead({
+      phone: "+18165552047",
+      address: "1 Locked Sender St",
+    });
+    const { data: campaign } = await testClient
+      .from("campaigns")
+      .insert({
+        org_id: orgId,
+        name: "Locked Sender Saved Campaign",
+        channel: "sms",
+        status: "launching",
+        sender_provider: "mock",
+        sender_number: MOCK_SENDER_PRIMARY,
+      })
+      .select("id")
+      .single();
+    if (!campaign) throw new Error("campaign seed failed");
+    await testClient.from("campaign_recipients").insert({
+      campaign_id: campaign.id,
+      property_id: lead.propertyId,
+      contact_id: lead.contactId,
+    });
+
+    const result = await bulkQueueSms([lead.propertyId], {
+      body: "Should never queue",
+      campaignId: campaign.id,
+      senderNumber: MOCK_SENDER_SECONDARY,
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe("SENDER_LOCKED");
+
+    const { count } = await testClient
+      .from("messages")
+      .select("*", { count: "exact", head: true });
+    expect(count).toBe(0);
+  });
+
+  it("saved-campaign queueing stamps the stored campaign sender on every row", async () => {
+    const orgId = await getOrgId();
+    const first = await seedLead({
+      phone: "+18165552048",
+      address: "1 Saved Sender St",
+    });
+    const second = await seedLead({
+      phone: "+18165552049",
+      address: "2 Saved Sender St",
+    });
+    const { data: campaign } = await testClient
+      .from("campaigns")
+      .insert({
+        org_id: orgId,
+        name: "Saved Sender Stamp Campaign",
+        channel: "sms",
+        status: "launching",
+        sender_provider: "mock",
+        sender_number: MOCK_SENDER_SECONDARY,
+      })
+      .select("id")
+      .single();
+    if (!campaign) throw new Error("campaign seed failed");
+    await testClient.from("campaign_recipients").insert([
+      {
+        campaign_id: campaign.id,
+        property_id: first.propertyId,
+        contact_id: first.contactId,
+      },
+      {
+        campaign_id: campaign.id,
+        property_id: second.propertyId,
+        contact_id: second.contactId,
+      },
+    ]);
+
+    const result = await bulkQueueSms(
+      [first.propertyId, second.propertyId],
+      {
+        body: "Saved sender hello",
+        campaignId: campaign.id,
+      },
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.data.succeeded).toBe(2);
+
+    const { data: messages } = await testClient
+      .from("messages")
+      .select("from_address, status")
+      .eq("campaign_id", campaign.id);
+    expect(messages).toHaveLength(2);
+    expect(
+      messages?.every((row) => row.from_address === MOCK_SENDER_SECONDARY),
+    ).toBe(true);
+    expect(messages?.every((row) => row.status === "queued")).toBe(true);
   });
 });
