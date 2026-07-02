@@ -70,6 +70,24 @@ type ResponderDispoResult =
   | { updated: true }
   | { updated: false; reason: "already_terminal" | "db_error" };
 
+export async function applyKeywordEscalation(
+  supabase: SupabaseClient<Database>,
+  args: {
+    propertyId: string;
+    inboundBody: string;
+    escalationKeywords?: ReadonlyArray<string> | null;
+  },
+): Promise<{ escalated: true; reason: string } | { escalated: false }> {
+  const keywordMatch = matchEscalationKeyword(args.inboundBody, {
+    allowedPhrases: args.escalationKeywords ?? undefined,
+  });
+  if (!keywordMatch) return { escalated: false };
+
+  const reason = `keyword:${keywordMatch.tier}`;
+  await markPropertyNeedsAttention(supabase, args.propertyId, reason);
+  return { escalated: true, reason };
+}
+
 export async function dispatchAiResponse(
   supabase: SupabaseClient<Database>,
   input: AiDispatchInput,
@@ -82,6 +100,11 @@ export async function dispatchAiResponse(
     );
     if (existingReply) {
       return { outcome: "skipped", reason: "already_replied" };
+    }
+
+    const latestInbound = await findLatestInboundInThread(supabase, input);
+    if (latestInbound && latestInbound.id !== input.inboundMessageId) {
+      return { outcome: "skipped", reason: "superseded_by_newer_inbound" };
     }
   }
 
@@ -121,14 +144,14 @@ export async function dispatchAiResponse(
   //    signal on lead detail regardless). If no config and no match,
   //    we'll skip below.
   // --------------------------------------------------------------------------
-  const keywordMatch = matchEscalationKeyword(input.inboundBody, {
-    allowedPhrases: config?.escalation_keywords ?? undefined,
+  const keywordEscalation = await applyKeywordEscalation(supabase, {
+    propertyId: input.propertyId,
+    inboundBody: input.inboundBody,
+    escalationKeywords: config?.escalation_keywords ?? null,
   });
 
-  if (keywordMatch) {
-    const reason = `keyword:${keywordMatch.tier}`;
-    await markPropertyNeedsAttention(supabase, input.propertyId, reason);
-    return { outcome: "escalated", reason };
+  if (keywordEscalation.escalated) {
+    return { outcome: "escalated", reason: keywordEscalation.reason };
   }
 
   // --------------------------------------------------------------------------
@@ -440,6 +463,40 @@ async function findExistingAiReplyForInbound(
     reportError(new Error(error.message), {
       tags: { surface: "ai_responder_existing_reply_lookup" },
       extra: { inboundMessageId },
+    });
+    return null;
+  }
+  return data ?? null;
+}
+
+async function findLatestInboundInThread(
+  supabase: SupabaseClient<Database>,
+  input: AiDispatchInput,
+): Promise<{ id: string } | null> {
+  let query = supabase
+    .from("messages")
+    .select("id")
+    .eq("property_id", input.propertyId)
+    .eq("direction", "inbound")
+    .eq("channel", "sms");
+  query = input.conversationId
+    ? query.eq("conversation_id", input.conversationId)
+    : query.eq("contact_id", input.contactId);
+
+  const { data, error } = await query
+    .order("created_at", { ascending: false })
+    .order("id", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error) {
+    reportError(new Error(error.message), {
+      tags: { surface: "ai_responder_latest_inbound_lookup" },
+      extra: {
+        propertyId: input.propertyId,
+        contactId: input.contactId,
+        conversationId: input.conversationId ?? null,
+        inboundMessageId: input.inboundMessageId ?? null,
+      },
     });
     return null;
   }

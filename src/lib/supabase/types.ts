@@ -68,6 +68,8 @@ export type Database = {
           min_confidence: number
           model: string
           org_id: string
+          reply_delay_max_seconds: number
+          reply_delay_min_seconds: number
           system_prompt: string
           updated_at: string
         }
@@ -82,6 +84,8 @@ export type Database = {
           min_confidence?: number
           model?: string
           org_id: string
+          reply_delay_max_seconds?: number
+          reply_delay_min_seconds?: number
           system_prompt: string
           updated_at?: string
         }
@@ -96,6 +100,8 @@ export type Database = {
           min_confidence?: number
           model?: string
           org_id?: string
+          reply_delay_max_seconds?: number
+          reply_delay_min_seconds?: number
           system_prompt?: string
           updated_at?: string
         }

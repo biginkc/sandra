@@ -20,6 +20,12 @@ export function AiResponderConfigForm({
   const [systemPrompt, setSystemPrompt] = useState(initial.system_prompt);
   const [maxTurns, setMaxTurns] = useState(initial.max_turns);
   const [minConfidence, setMinConfidence] = useState(initial.min_confidence);
+  const [replyDelayMin, setReplyDelayMin] = useState(
+    initial.reply_delay_min_seconds,
+  );
+  const [replyDelayMax, setReplyDelayMax] = useState(
+    initial.reply_delay_max_seconds,
+  );
   const [businessHours, setBusinessHours] = useState(
     initial.business_hours_only,
   );
@@ -36,6 +42,8 @@ export function AiResponderConfigForm({
           max_turns: maxTurns,
           min_confidence: minConfidence,
           business_hours_only: businessHours,
+          reply_delay_min_seconds: replyDelayMin,
+          reply_delay_max_seconds: replyDelayMax,
         }),
         {
           successMessage: "AI responder config saved",
@@ -132,6 +140,38 @@ export function AiResponderConfigForm({
           />
           <span className="text-muted-foreground text-xs">
             Model confidence below this → escalate.
+          </span>
+        </label>
+
+        <label className="flex flex-col gap-1 text-sm">
+          <span className="font-medium">Reply delay min (seconds)</span>
+          <Input
+            type="number"
+            min={0}
+            max={900}
+            value={replyDelayMin}
+            onChange={(e) =>
+              setReplyDelayMin(Math.max(0, Math.min(900, Number(e.target.value))))
+            }
+          />
+          <span className="text-muted-foreground text-xs">
+            0 / 0 = reply instantly.
+          </span>
+        </label>
+
+        <label className="flex flex-col gap-1 text-sm">
+          <span className="font-medium">Reply delay max (seconds)</span>
+          <Input
+            type="number"
+            min={0}
+            max={900}
+            value={replyDelayMax}
+            onChange={(e) =>
+              setReplyDelayMax(Math.max(0, Math.min(900, Number(e.target.value))))
+            }
+          />
+          <span className="text-muted-foreground text-xs">
+            0 / 0 = reply instantly.
           </span>
         </label>
 
