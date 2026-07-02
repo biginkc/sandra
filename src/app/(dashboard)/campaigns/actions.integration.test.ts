@@ -964,6 +964,103 @@ describe("createCampaign / archiveCampaign / unarchiveCampaign (integration)", (
     expect(repairInsertError).toBeNull();
   });
 
+  it("rejects re-pointing unlocked delivery settings onto a locked legacy campaign unless the sender matches", async () => {
+    const orgId = await getOrgId();
+    const email = uniqueCampaignEmail("campaign-db-sender-repoint-bypass");
+    const userId = await createAuthUser(email);
+    currentUserId = userId;
+    currentEmail = email;
+
+    const settingsSourceCampaignId = await seedCampaign({
+      orgId,
+      name: "DB Sender Repoint Source",
+      audienceSnapshot: {
+        search: null,
+        blockStack: [{ id: "vacancy-db-repoint-source", kind: "vacancy", tri: "yes" }],
+      },
+      senderNumber: null,
+    });
+    const { error: sourceSettingsError } = await testClient
+      .from("campaign_delivery_settings")
+      .insert({
+        campaign_id: settingsSourceCampaignId,
+        org_id: orgId,
+        provider: "mock",
+        sender_number: MOCK_SENDER_SECONDARY,
+        from_address: MOCK_SENDER_SECONDARY,
+      });
+    expect(sourceSettingsError).toBeNull();
+
+    const lockedWrongSenderCampaignId = await seedCampaign({
+      orgId,
+      name: "DB Sender Repoint Locked Wrong",
+      audienceSnapshot: {
+        search: null,
+        blockStack: [{ id: "vacancy-db-repoint-wrong", kind: "vacancy", tri: "yes" }],
+      },
+      senderNumber: null,
+    });
+    const { error: wrongTargetMessageError } = await testClient
+      .from("messages")
+      .insert({
+        org_id: orgId,
+        channel: "sms",
+        direction: "outbound",
+        status: "sent",
+        campaign_id: lockedWrongSenderCampaignId,
+        from_address: MOCK_SENDER_PRIMARY,
+        to_address: "+18165550772",
+        body: "legacy locked wrong sender",
+      });
+    expect(wrongTargetMessageError).toBeNull();
+
+    const { error: wrongRepointError } = await testClient
+      .from("campaign_delivery_settings")
+      .update({ campaign_id: lockedWrongSenderCampaignId })
+      .eq("campaign_id", settingsSourceCampaignId);
+    expect(wrongRepointError?.message).toMatch(/sender is locked/i);
+
+    const lockedMatchingSenderCampaignId = await seedCampaign({
+      orgId,
+      name: "DB Sender Repoint Locked Matching",
+      audienceSnapshot: {
+        search: null,
+        blockStack: [{ id: "vacancy-db-repoint-match", kind: "vacancy", tri: "yes" }],
+      },
+      senderNumber: null,
+    });
+    const { error: matchingTargetMessageError } = await testClient
+      .from("messages")
+      .insert({
+        org_id: orgId,
+        channel: "sms",
+        direction: "outbound",
+        status: "sent",
+        campaign_id: lockedMatchingSenderCampaignId,
+        from_address: MOCK_SENDER_SECONDARY,
+        to_address: "+18165550771",
+        body: "legacy locked matching sender",
+      });
+    expect(matchingTargetMessageError).toBeNull();
+
+    const { error: matchingRepointError } = await testClient
+      .from("campaign_delivery_settings")
+      .update({ campaign_id: lockedMatchingSenderCampaignId })
+      .eq("campaign_id", settingsSourceCampaignId);
+    expect(matchingRepointError).toBeNull();
+
+    const { data: repairedSettings } = await testClient
+      .from("campaign_delivery_settings")
+      .select("campaign_id, sender_number, from_address")
+      .eq("campaign_id", lockedMatchingSenderCampaignId)
+      .single();
+    expect(repairedSettings).toMatchObject({
+      campaign_id: lockedMatchingSenderCampaignId,
+      sender_number: MOCK_SENDER_SECONDARY,
+      from_address: MOCK_SENDER_SECONDARY,
+    });
+  });
+
   it("revive lock reads canonical delivery settings instead of stale campaign mirror columns", async () => {
     const orgId = await getOrgId();
     const email = uniqueCampaignEmail("campaign-canonical-revive-lock");

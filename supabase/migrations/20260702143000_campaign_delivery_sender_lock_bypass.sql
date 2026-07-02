@@ -23,6 +23,24 @@ begin
       using errcode = '23514';
   end if;
 
+  if old.campaign_id is distinct from new.campaign_id
+    and exists (
+      select 1
+      from public.messages m
+      where m.campaign_id = new.campaign_id
+        and m.direction = 'outbound'
+        and (
+          m.from_address is null or
+          new.from_address is distinct from m.from_address or
+          new.sender_number is distinct from m.from_address
+        )
+      limit 1
+    ) then
+    raise exception
+      'campaign delivery sender is locked after outbound messages exist'
+      using errcode = '23514';
+  end if;
+
   new.updated_at := now();
   return new;
 end;
