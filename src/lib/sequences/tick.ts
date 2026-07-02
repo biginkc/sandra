@@ -11,6 +11,9 @@ import { evaluatePause } from "./pause-rules";
 import { renderTemplate } from "./render";
 import { loadTemplateVars } from "./template-vars";
 
+const FIRST_TOUCH_SENDER_PAUSE_REASON =
+  "no approved sender for first-touch sequence send";
+
 /**
  * Single-enrollment processor — called by the `/api/cron/sequence-tick`
  * endpoint in a loop over due rows. Each call is idempotent: it claims
@@ -258,6 +261,7 @@ export async function processEnrollmentTick(
       propertyId: enrollment.property_id,
       body: finalBody,
       requireStickyFrom: true,
+      allowDefaultFromWhenNoSticky: true,
     });
 
     switch (outcome.status) {
@@ -327,6 +331,20 @@ export async function processEnrollmentTick(
         await markRunSkipped(client, claim.id, "no_phone");
         await pauseEnrollment(client, enrollment.id, "inbound_reply", false);
         return { status: "paused", enrollmentId: enrollment.id, reason: "no_phone" };
+      }
+      case "blocked_no_approved_sender": {
+        await markRunSkipped(client, claim.id, "provider_failed");
+        await pauseEnrollment(
+          client,
+          enrollment.id,
+          FIRST_TOUCH_SENDER_PAUSE_REASON,
+          false,
+        );
+        return {
+          status: "paused",
+          enrollmentId: enrollment.id,
+          reason: FIRST_TOUCH_SENDER_PAUSE_REASON,
+        };
       }
       case "provider_failed":
       case "blocked_provider_off":

@@ -56,6 +56,10 @@ export type SendSmsOutcome =
       reason: string;
     }
   | {
+      status: "blocked_no_approved_sender";
+      reason: string;
+    }
+  | {
       status: "blocked_no_phone";
       reason: string;
     }
@@ -139,10 +143,16 @@ export type SendSmsInput = {
   campaignId?: string | null;
   /**
    * Reply/automation paths must be sender-sticky: prior inbound business
-   * number, then campaign Delivery snapshot, then fail instead of falling
-   * back to a provider/env default.
+   * number, then campaign Delivery snapshot. Cold sequence first-touches opt
+   * into a separate provider-default fallback below; replies stay strict.
    */
   requireStickyFrom?: boolean;
+  /**
+   * Sequence first-touches can have no prior inbound and no campaign snapshot.
+   * When true, the provider default may be used, but inventory-aware providers
+   * still validate it against the approved sender catalog before any send.
+   */
+  allowDefaultFromWhenNoSticky?: boolean;
 };
 
 export async function sendSmsToContact(
@@ -297,6 +307,7 @@ export async function sendSmsToContact(
     explicitFrom: input.from,
     campaignId: input.campaignId,
     requireStickyFrom: input.requireStickyFrom ?? false,
+    allowDefaultFromWhenNoSticky: input.allowDefaultFromWhenNoSticky ?? false,
   });
   if (!fromResolution.ok) return fromResolution.outcome;
   const fromAddress = fromResolution.fromAddress;
@@ -506,6 +517,7 @@ async function queueForLater(
     explicitFrom: input.from,
     campaignId: input.campaignId,
     requireStickyFrom: input.requireStickyFrom ?? false,
+    allowDefaultFromWhenNoSticky: input.allowDefaultFromWhenNoSticky ?? false,
   });
   if (!fromResolution.ok) return fromResolution.outcome;
   const fromAddress = fromResolution.fromAddress;
@@ -634,6 +646,9 @@ export async function releaseQueuedMessage(
   // env-default fallback. Unknown/inactive senders fail the row loudly;
   // empty/never-synced inventory is deferred so first deploys do not
   // terminally kill every queued row before the first catalog sync.
+  // Accepted v1 risk: same-org direct INSERT can still queue an approved but
+  // wrong sender on a locked campaign. Release validates org inventory, not
+  // campaign lock; official campaign paths stamp and lock the sender earlier.
   if (providerSupportsSenderInventory(provider)) {
     if (!msg.from_address) {
       const error =
@@ -1210,6 +1225,7 @@ type ResolveFromArgs = {
   explicitFrom?: string | null;
   campaignId?: string | null;
   requireStickyFrom: boolean;
+  allowDefaultFromWhenNoSticky: boolean;
 };
 
 type ResolveFromResult =
@@ -1222,9 +1238,11 @@ async function resolveOutboundFromAddress(
 ): Promise<ResolveFromResult> {
   const supportsInventory = providerSupportsSenderInventory(args.provider);
   let fromAddress: string | null = null;
+  let fromSource: "explicit" | "sticky" | "campaign" | "default" | null = null;
 
   if (args.explicitFrom && args.explicitFrom.trim()) {
     fromAddress = normalizePhone(args.explicitFrom) ?? args.explicitFrom.trim();
+    fromSource = "explicit";
   } else {
     try {
       fromAddress = await loadLatestInboundBusinessNumber(supabase, {
@@ -1232,6 +1250,7 @@ async function resolveOutboundFromAddress(
         propertyId: args.propertyId,
         toAddress: args.toAddress,
       });
+      if (fromAddress) fromSource = "sticky";
     } catch (e) {
       return {
         ok: false,
@@ -1249,6 +1268,7 @@ async function resolveOutboundFromAddress(
           args.campaignId,
         );
         fromAddress = delivery.fromAddress ?? delivery.senderNumber;
+        if (fromAddress) fromSource = "campaign";
       } catch (e) {
         return {
           ok: false,
@@ -1260,14 +1280,29 @@ async function resolveOutboundFromAddress(
       }
     }
 
-    if (!fromAddress && (!args.requireStickyFrom || !supportsInventory)) {
+    if (
+      !fromAddress &&
+      (args.allowDefaultFromWhenNoSticky ||
+        !args.requireStickyFrom ||
+        !supportsInventory)
+    ) {
       const fallback = args.provider.getDefaultFromNumber?.() ?? null;
       fromAddress = fallback ? normalizePhone(fallback) ?? fallback : null;
+      if (fromAddress) fromSource = "default";
     }
   }
 
   if (supportsInventory) {
     if (!fromAddress) {
+      if (args.allowDefaultFromWhenNoSticky) {
+        return {
+          ok: false,
+          outcome: {
+            status: "blocked_no_approved_sender",
+            reason: "no approved sender for first-touch sequence send",
+          },
+        };
+      }
       return {
         ok: false,
         outcome: {
@@ -1302,6 +1337,15 @@ async function resolveOutboundFromAddress(
           : inventory.state === "inactive"
             ? "the sender is no longer active"
             : "the sender is not in the approved sender inventory";
+      if (args.allowDefaultFromWhenNoSticky && fromSource === "default") {
+        return {
+          ok: false,
+          outcome: {
+            status: "blocked_no_approved_sender",
+            reason: "no approved sender for first-touch sequence send",
+          },
+        };
+      }
       return {
         ok: false,
         outcome: {

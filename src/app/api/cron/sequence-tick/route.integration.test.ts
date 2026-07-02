@@ -69,6 +69,7 @@ async function seedLead(opts: {
   address?: string;
   propertyStatus?: string;
   optIn?: boolean;
+  seedInbound?: boolean;
 }): Promise<{ propertyId: string; contactId: string }> {
   const { data: contact } = await supabase
     .from("contacts")
@@ -102,16 +103,18 @@ async function seedLead(opts: {
     .select("id")
     .single();
   if (!property) throw new Error("property seed failed");
-  await supabase.from("messages").insert({
-    channel: "sms",
-    direction: "inbound",
-    status: "received",
-    property_id: property.id,
-    contact_id: contact.id,
-    from_address: opts.phone,
-    to_address: MOCK_SENDER_PRIMARY,
-    body: "seed inbound business sender",
-  });
+  if (opts.seedInbound !== false) {
+    await supabase.from("messages").insert({
+      channel: "sms",
+      direction: "inbound",
+      status: "received",
+      property_id: property.id,
+      contact_id: contact.id,
+      from_address: opts.phone,
+      to_address: MOCK_SENDER_PRIMARY,
+      body: "seed inbound business sender",
+    });
+  }
   return { propertyId: property.id, contactId: contact.id };
 }
 
@@ -161,6 +164,104 @@ describe("runSequenceTick (integration)", () => {
     expect(log[0].to).toBe("+18165551001");
     expect(log[0].body).toContain("Hi Cron, cash offer on 1 Cron Ln?");
   });
+
+  it("uses the approved provider default for a cold first-touch sequence send with no prior inbound", async () => {
+    const seqId = await seedSequence({
+      name: "Cold default sender",
+      steps: [{ delay: 0, body: "Hi {{first_name}}, cash offer?" }],
+    });
+    const { propertyId, contactId } = await seedLead({
+      phone: "+18165551101",
+      seedInbound: false,
+    });
+    const enrolled = await enrollLead(supabase, { sequenceId: seqId, propertyId });
+    if (enrolled.status !== "enrolled") throw new Error("enroll failed");
+
+    const summary = await runSequenceTick(supabase);
+
+    expect(summary.processed).toBe(1);
+    expect(summary.outcomes.sent).toBe(1);
+    const log = getMockMessageLog();
+    expect(log).toHaveLength(1);
+    expect(log[0].input.from).toBe(MOCK_SENDER_PRIMARY);
+
+    const { data: outbound } = await supabase
+      .from("messages")
+      .select("from_address, to_address")
+      .eq("direction", "outbound")
+      .eq("contact_id", contactId)
+      .single();
+    expect(outbound).toMatchObject({
+      from_address: MOCK_SENDER_PRIMARY,
+      to_address: "+18165551101",
+    });
+  });
+
+  it.each([
+    {
+      name: "empty inventory",
+      seedInventory: async () => {
+        await supabase
+          .from("provider_sender_numbers")
+          .delete()
+          .eq("provider", "mock");
+      },
+    },
+    {
+      name: "default sender missing from inventory",
+      seedInventory: async () => {
+        await supabase
+          .from("provider_sender_numbers")
+          .delete()
+          .eq("provider", "mock");
+        await seedSenderCatalog(supabase, await getOrgId(), ["+15559999999"]);
+      },
+    },
+  ])(
+    "pauses a cold first-touch sequence send with $name and does not retry hot",
+    async ({ seedInventory }) => {
+      await seedInventory();
+      const seqId = await seedSequence({
+        name: `Cold sender blocked ${crypto.randomUUID()}`,
+        steps: [{ delay: 0, body: "Hi {{first_name}}, cash offer?" }],
+      });
+      const { propertyId } = await seedLead({
+        phone: "+18165551102",
+        seedInbound: false,
+      });
+      const enrolled = await enrollLead(supabase, {
+        sequenceId: seqId,
+        propertyId,
+      });
+      if (enrolled.status !== "enrolled") throw new Error("enroll failed");
+
+      const first = await runSequenceTick(supabase);
+      expect(first.processed).toBe(1);
+      expect(first.outcomes.paused).toBe(1);
+      expect(getMockMessageLog()).toHaveLength(0);
+
+      const { data: enrollment } = await supabase
+        .from("sequence_enrollments")
+        .select("status, pause_reason")
+        .eq("id", enrolled.enrollmentId)
+        .single();
+      expect(enrollment).toMatchObject({
+        status: "paused",
+        pause_reason: "no approved sender for first-touch sequence send",
+      });
+
+      const { data: run } = await supabase
+        .from("sequence_step_runs")
+        .select("skipped_reason")
+        .eq("enrollment_id", enrolled.enrollmentId)
+        .single();
+      expect(run?.skipped_reason).toBe("provider_failed");
+
+      const second = await runSequenceTick(supabase);
+      expect(second.processed).toBe(0);
+      expect(getMockMessageLog()).toHaveLength(0);
+    },
+  );
 
   it("auto-appends a rotated opt-out phrase when the sequence has append_opt_out=true and the body has no STOP", async () => {
     const seqId = await seedSequence({
