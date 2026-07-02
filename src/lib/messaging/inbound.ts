@@ -16,7 +16,9 @@ import {
 import { looksLikeTestTraffic } from "@/lib/messages/list-threads";
 import {
   applyKeywordEscalation,
+  checkAiResponderDispatchPreGates,
   dispatchAiResponse,
+  markPropertyNeedsAttention,
   type AiDispatchInput,
   type AiDispatchOutcome,
 } from "@/lib/ai-responder/dispatch";
@@ -48,8 +50,6 @@ import type { Database, Json } from "@/lib/supabase/types";
 import { aiReplyDelayWorkflow } from "@/workflows/ai-reply-delay";
 import { applyPhoneLevelOptOut } from "./opt-out-phone";
 import type { MessagingProvider } from "./types";
-
-export { markInboundMessageState } from "@/lib/messaging/inbound-state";
 
 const UNAMBIGUOUS_STOP_KEYWORDS =
   /\b(?:stopall|unsubscribe|opt(?:\s|-)?out|remove me|take me off|delete my (?:number|info)|leave me alone|quit bothering me|do not contact me|don'?t text me again|lose (?:this|my) number|never contact me)\b|\bstop\b(?!\s+by\b)/i;
@@ -734,133 +734,140 @@ export async function handleInboundWebhook(
 
       if (effectiveContactId && !inboundState.aiResponder) {
         try {
+          const dispatchInput: AiDispatchInput = {
+            propertyId: effectivePropertyId,
+            contactId: effectiveContactId,
+            conversationId: insertOutcome.conversationId,
+            inboundFromPhone: ev.from,
+            inboundBody: ev.body,
+            inboundMessageId: insertOutcome.messageId,
+          };
           const delayConfig = await loadAiReplyDelayConfig(
             supabase,
             effectivePropertyId,
           );
-          const keywordEscalation = await applyKeywordEscalation(supabase, {
-            propertyId: effectivePropertyId,
-            inboundBody: ev.body,
-            escalationKeywords: delayConfig?.escalationKeywords ?? null,
-          });
+          const delaySeconds = delayConfig
+            ? computeReplyDelaySeconds({
+                minSeconds: delayConfig.delayMinSeconds,
+                maxSeconds: delayConfig.delayMaxSeconds,
+                inboundLength: ev.body.length,
+                propertyState: delayConfig.propertyState,
+              })
+            : 0;
 
-          if (keywordEscalation.escalated) {
-            await stampAiResponderTerminalOutcome(supabase, {
-              messageId: insertOutcome.messageId,
-              conversationId: insertOutcome.conversationId,
-              outcome: {
-                outcome: "escalated",
-                reason: keywordEscalation.reason,
-              },
-            });
+          if (delaySeconds === 0) {
+            await dispatchAndStampAiResponder(supabase, dispatchInput);
           } else {
-            const delaySeconds = delayConfig
-              ? computeReplyDelaySeconds({
-                  minSeconds: delayConfig.delayMinSeconds,
-                  maxSeconds: delayConfig.delayMaxSeconds,
-                  inboundLength: ev.body.length,
-                  propertyState: delayConfig.propertyState,
-                })
-              : 0;
-
-            if (delaySeconds === 0) {
-              await dispatchAndStampAiResponder(supabase, {
-                propertyId: effectivePropertyId,
-                contactId: effectiveContactId,
+            const preGates = await checkAiResponderDispatchPreGates(
+              supabase,
+              dispatchInput,
+            );
+            if (!preGates.ok) {
+              await stampAiResponderTerminalOutcome(supabase, {
+                messageId: insertOutcome.messageId,
                 conversationId: insertOutcome.conversationId,
-                inboundFromPhone: ev.from,
-                inboundBody: ev.body,
-                inboundMessageId: insertOutcome.messageId,
+                outcome: preGates.outcome,
               });
             } else {
-              const scheduledAt = new Date(
-                Date.now() + delaySeconds * 1000,
-              ).toISOString();
-              await markInboundMessageState(supabase, insertOutcome.messageId, {
-                aiResponder: {
-                  outcome: "delayed",
-                  delaySeconds,
-                  scheduledAt,
-                },
+              const keywordEscalation = await applyKeywordEscalation(supabase, {
+                propertyId: effectivePropertyId,
+                inboundBody: ev.body,
+                escalationKeywords: delayConfig!.escalationKeywords,
               });
 
-              let workflowRunId: string | null = null;
-              try {
-                const run = await start(aiReplyDelayWorkflow, [
-                  {
-                    propertyId: effectivePropertyId,
-                    contactId: effectiveContactId,
-                    conversationId: insertOutcome.conversationId,
-                    inboundFromPhone: ev.from,
-                    inboundBody: ev.body,
-                    inboundMessageId: insertOutcome.messageId,
-                    delaySeconds,
-                  },
-                ]);
-                workflowRunId = run.runId;
-              } catch (e) {
-                reportError(e, {
-                  tags: {
-                    surface: `${provider.providerId}_webhook_ai_responder_workflow_start`,
-                  },
-                  extra: {
-                    propertyId: effectivePropertyId,
-                    externalId: ev.externalId,
-                    inboundMessageId: insertOutcome.messageId,
+              if (keywordEscalation.escalated) {
+                await stampAiResponderTerminalOutcome(supabase, {
+                  messageId: insertOutcome.messageId,
+                  conversationId: insertOutcome.conversationId,
+                  outcome: {
+                    outcome: "escalated",
+                    reason: keywordEscalation.reason,
                   },
                 });
+              } else {
+                const scheduledAt = new Date(
+                  Date.now() + delaySeconds * 1000,
+                ).toISOString();
                 try {
-                  await dispatchAndStampAiResponder(supabase, {
-                    propertyId: effectivePropertyId,
-                    contactId: effectiveContactId,
-                    conversationId: insertOutcome.conversationId,
-                    inboundFromPhone: ev.from,
-                    inboundBody: ev.body,
-                    inboundMessageId: insertOutcome.messageId,
-                  });
-                } catch (fallbackError) {
-                  reportError(fallbackError, {
-                    tags: {
-                      surface: `${provider.providerId}_webhook_ai_responder_workflow_fallback`,
-                    },
-                    extra: {
-                      propertyId: effectivePropertyId,
-                      externalId: ev.externalId,
-                      inboundMessageId: insertOutcome.messageId,
-                    },
-                  });
-                  await markInboundMessageState(
-                    supabase,
-                    insertOutcome.messageId,
+                  const run = await start(aiReplyDelayWorkflow, [
                     {
-                      aiResponder: {
-                        outcome: "error",
-                        reason: "workflow_start_and_fallback_failed",
-                        completedAt: new Date().toISOString(),
-                      },
+                      propertyId: effectivePropertyId,
+                      contactId: effectiveContactId,
+                      conversationId: insertOutcome.conversationId,
+                      inboundFromPhone: ev.from,
+                      inboundBody: ev.body,
+                      inboundMessageId: insertOutcome.messageId,
+                      delaySeconds,
                     },
-                  );
-                }
-              }
+                  ]);
 
-              if (workflowRunId) {
-                try {
-                  await stampAiResponderWorkflowRunId(supabase, {
-                    messageId: insertOutcome.messageId,
-                    workflowRunId,
-                  });
+                  try {
+                    await markInboundMessageState(
+                      supabase,
+                      insertOutcome.messageId,
+                      {
+                        aiResponder: {
+                          outcome: "delayed",
+                          delaySeconds,
+                          scheduledAt,
+                          workflowRunId: run.runId,
+                        },
+                      },
+                    );
+                  } catch (stampError) {
+                    reportError(stampError, {
+                      tags: {
+                        surface: `${provider.providerId}_webhook_ai_responder_workflow_stamp`,
+                      },
+                      extra: {
+                        propertyId: effectivePropertyId,
+                        externalId: ev.externalId,
+                        inboundMessageId: insertOutcome.messageId,
+                        workflowRunId: run.runId,
+                      },
+                    });
+                  }
                 } catch (e) {
                   reportError(e, {
                     tags: {
-                      surface: `${provider.providerId}_webhook_ai_responder_workflow_run_stamp`,
+                      surface: `${provider.providerId}_webhook_ai_responder_workflow_start`,
                     },
                     extra: {
                       propertyId: effectivePropertyId,
                       externalId: ev.externalId,
                       inboundMessageId: insertOutcome.messageId,
-                      workflowRunId,
                     },
                   });
+                  try {
+                    await dispatchAndStampAiResponder(supabase, dispatchInput);
+                  } catch (fallbackError) {
+                    reportError(fallbackError, {
+                      tags: {
+                        surface: `${provider.providerId}_webhook_ai_responder_workflow_fallback`,
+                      },
+                      extra: {
+                        propertyId: effectivePropertyId,
+                        externalId: ev.externalId,
+                        inboundMessageId: insertOutcome.messageId,
+                      },
+                    });
+                    await markPropertyNeedsAttention(
+                      supabase,
+                      effectivePropertyId,
+                      "workflow_start_and_fallback_failed",
+                    );
+                    await markInboundMessageState(
+                      supabase,
+                      insertOutcome.messageId,
+                      {
+                        aiResponder: {
+                          outcome: "error",
+                          reason: "workflow_start_and_fallback_failed",
+                          completedAt: new Date().toISOString(),
+                        },
+                      },
+                    );
+                  }
                 }
               }
             }
@@ -1226,30 +1233,6 @@ async function stampAiResponderTerminalOutcome(
     aiResponder: {
       ...args.outcome,
       completedAt,
-    },
-  });
-}
-
-async function stampAiResponderWorkflowRunId(
-  supabase: SupabaseClient<Database>,
-  args: { messageId: string; workflowRunId: string },
-): Promise<void> {
-  const { data: row, error } = await supabase
-    .from("messages")
-    .select("metadata")
-    .eq("id", args.messageId)
-    .maybeSingle();
-  if (error) {
-    throw new Error(`stampAiResponderWorkflowRunId fetch: ${error.message}`);
-  }
-
-  const state = readInboundMessageState(row?.metadata ?? null);
-  if (state.aiResponder?.outcome !== "delayed") return;
-
-  await markInboundMessageState(supabase, args.messageId, {
-    aiResponder: {
-      ...state.aiResponder,
-      workflowRunId: args.workflowRunId,
     },
   });
 }

@@ -37,6 +37,7 @@ async function dispatchStep(
     },
     {
       anthropic: new Anthropic(),
+      checkSuperseded: true,
     },
   );
   const completedAt = new Date().toISOString();

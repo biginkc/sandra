@@ -393,7 +393,7 @@ describe("dispatchAiResponse (integration)", () => {
     });
   });
 
-  it("skips an older inbound when a newer inbound exists on the same thread", async () => {
+  it("skips an older inbound when delayed workflow fire-time superseded checking is enabled", async () => {
     await seedConfig();
     const { propertyId, contactId } = await seedLead({
       phone: "+18167554022",
@@ -436,7 +436,7 @@ describe("dispatchAiResponse (integration)", () => {
         inboundBody: "first inbound",
         inboundMessageId: olderInboundId,
       },
-      { anthropic: stubAnthropic(HAPPY_OUT) },
+      { anthropic: stubAnthropic(HAPPY_OUT), checkSuperseded: true },
     );
     expect(olderOutcome).toEqual({
       outcome: "skipped",
@@ -457,6 +457,56 @@ describe("dispatchAiResponse (integration)", () => {
     );
 
     expect(newerOutcome.outcome).toBe("sent");
+    expect(getMockMessageLog()).toHaveLength(1);
+  });
+
+  it("does not run the superseded inbound check on the default synchronous path", async () => {
+    await seedConfig();
+    const { propertyId, contactId } = await seedLead({
+      phone: "+18167554023",
+    });
+    const conversationId = "88888888-8888-4888-8888-888888888883";
+    const olderInboundId = "99999999-9999-4999-8999-999999999983";
+    const newerInboundId = "99999999-9999-4999-8999-999999999984";
+
+    await supabase.from("messages").insert([
+      {
+        id: olderInboundId,
+        channel: "sms",
+        direction: "inbound",
+        status: "received",
+        property_id: propertyId,
+        contact_id: contactId,
+        conversation_id: conversationId,
+        body: "first inbound",
+        created_at: "2026-07-01T15:00:00.000Z",
+      },
+      {
+        id: newerInboundId,
+        channel: "sms",
+        direction: "inbound",
+        status: "received",
+        property_id: propertyId,
+        contact_id: contactId,
+        conversation_id: conversationId,
+        body: "newer inbound",
+        created_at: "2026-07-01T15:00:02.000Z",
+      },
+    ]);
+
+    const olderOutcome = await dispatchAiResponse(
+      supabase,
+      {
+        propertyId,
+        contactId,
+        conversationId,
+        inboundBody: "first inbound",
+        inboundMessageId: olderInboundId,
+      },
+      { anthropic: stubAnthropic(HAPPY_OUT) },
+    );
+
+    expect(olderOutcome.outcome).toBe("sent");
     expect(getMockMessageLog()).toHaveLength(1);
   });
 

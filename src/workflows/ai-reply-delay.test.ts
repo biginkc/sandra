@@ -71,7 +71,7 @@ describe("aiReplyDelayWorkflow", () => {
         inboundBody: "tell me more",
         inboundMessageId: "message-1",
       },
-      { anthropic: expect.any(Anthropic) },
+      { anthropic: expect.any(Anthropic), checkSuperseded: true },
     );
     expect(recordAiResponderOutcomeForThread).toHaveBeenCalledWith(
       expect.anything(),

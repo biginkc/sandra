@@ -29,6 +29,7 @@ import { createTestClient } from "@tests/integration/client";
 import { resetTenantTables } from "@tests/integration/reset";
 
 import { claimInboundSmsIntent } from "@/lib/messaging/inbound-intents";
+import type { Json } from "@/lib/supabase/types";
 import { aiReplyDelayWorkflow } from "@/workflows/ai-reply-delay";
 
 import { POST } from "./route";
@@ -654,6 +655,57 @@ describe("POST /api/webhooks/sendillo/sms (integration)", () => {
     });
   });
 
+  it("keeps the origin-main synchronous AI path when active reply delay is 0/0", async () => {
+    await seedAiResponderConfig({
+      delayMinSeconds: 0,
+      delayMaxSeconds: 0,
+      escalationKeywords: ["offer"],
+    });
+    const { propertyId } = await seedPropertyThread({
+      phone: "+18165550136",
+      address: "36 Sendillo Zero Delay Ln",
+    });
+    dispatchAiResponseSpy.mockResolvedValueOnce({
+      outcome: "skipped",
+      reason: "no_config",
+    });
+
+    const res = await POST(
+      makeSendilloInboundRequest({
+        messageId: "snd_ai_zero_delay_001",
+        from: "+18165550136",
+        body: "What is your offer?",
+      }),
+    );
+    expect(res.status).toBe(200);
+
+    expect(start).not.toHaveBeenCalled();
+    expect(dispatchAiResponseSpy).toHaveBeenCalledTimes(1);
+    const { data: property } = await supabase
+      .from("properties")
+      .select("needs_human_attention, last_ai_escalation_reason")
+      .eq("id", propertyId)
+      .single();
+    expect(property).toMatchObject({
+      needs_human_attention: false,
+      last_ai_escalation_reason: null,
+    });
+
+    const { data: inbound } = await supabase
+      .from("messages")
+      .select("metadata")
+      .eq("external_id", "snd_ai_zero_delay_001")
+      .single();
+    const metadata = inbound!.metadata as {
+      processing?: { aiResponder?: Record<string, unknown> };
+    };
+    expect(metadata.processing?.aiResponder).toEqual({
+      outcome: "skipped",
+      reason: "no_config",
+      completedAt: expect.any(String),
+    });
+  });
+
   it("does not double-start the delayed workflow when a webhook replay resumes the inbound row", async () => {
     await seedAiResponderConfig({ delayMinSeconds: 45, delayMaxSeconds: 180 });
     await seedPropertyThread({
@@ -677,6 +729,15 @@ describe("POST /api/webhooks/sendillo/sms (integration)", () => {
       .eq("provider", "sendillo")
       .eq("event_type", "sms_inbound")
       .eq("external_id", "snd_ai_delay_replay_001");
+    const { data: inbound } = await supabase
+      .from("messages")
+      .select("id")
+      .eq("external_id", "snd_ai_delay_replay_001")
+      .single();
+    await supabase
+      .from("sms_inbound_intents")
+      .update({ status: "message_inserted" })
+      .eq("canonical_message_id", inbound!.id);
 
     expect((await POST(makeSendilloInboundRequest(requestInput))).status).toBe(200);
 
@@ -684,7 +745,63 @@ describe("POST /api/webhooks/sendillo/sms (integration)", () => {
     expect(dispatchAiResponseSpy).not.toHaveBeenCalled();
   });
 
-  it("falls back synchronously and overwrites delayed state when workflow start fails", async () => {
+  it("allows a webhook replay after workflow start but before delayed stamp to start a duplicate workflow", async () => {
+    await seedAiResponderConfig({ delayMinSeconds: 45, delayMaxSeconds: 180 });
+    await seedPropertyThread({
+      phone: "+18165550137",
+      address: "37 Sendillo Delay Replay Window Ln",
+    });
+    const requestInput = {
+      messageId: "snd_ai_delay_replay_window_001",
+      from: "+18165550137",
+      body: "Tell me more about this",
+    };
+
+    expect((await POST(makeSendilloInboundRequest(requestInput))).status).toBe(200);
+    const { data: inbound } = await supabase
+      .from("messages")
+      .select("id, metadata")
+      .eq("external_id", "snd_ai_delay_replay_window_001")
+      .single();
+    const metadata = (inbound!.metadata ?? {}) as Record<string, unknown>;
+    const processing =
+      metadata.processing &&
+      typeof metadata.processing === "object" &&
+      !Array.isArray(metadata.processing)
+        ? { ...(metadata.processing as Record<string, unknown>) }
+        : {};
+    delete processing.aiResponder;
+    await supabase
+      .from("messages")
+      .update({
+        metadata: {
+          ...metadata,
+          processing,
+        } as Json,
+      })
+      .eq("id", inbound!.id);
+    await supabase
+      .from("webhook_events")
+      .update({
+        processing_status: "pending",
+        processed_at: null,
+        processing_started_at: null,
+      })
+      .eq("provider", "sendillo")
+      .eq("event_type", "sms_inbound")
+      .eq("external_id", "snd_ai_delay_replay_window_001");
+    await supabase
+      .from("sms_inbound_intents")
+      .update({ status: "message_inserted" })
+      .eq("canonical_message_id", inbound!.id);
+
+    expect((await POST(makeSendilloInboundRequest(requestInput))).status).toBe(200);
+
+    expect(start).toHaveBeenCalledTimes(2);
+    expect(dispatchAiResponseSpy).not.toHaveBeenCalled();
+  });
+
+  it("falls back synchronously when workflow start fails", async () => {
     await seedAiResponderConfig({ delayMinSeconds: 45, delayMaxSeconds: 180 });
     await seedPropertyThread({
       phone: "+18165550133",
@@ -724,7 +841,7 @@ describe("POST /api/webhooks/sendillo/sms (integration)", () => {
 
   it("marks workflow start plus fallback failure as an error instead of leaving a delayed marker", async () => {
     await seedAiResponderConfig({ delayMinSeconds: 45, delayMaxSeconds: 180 });
-    await seedPropertyThread({
+    const { propertyId } = await seedPropertyThread({
       phone: "+18165550134",
       address: "34 Sendillo Delay Hard Failure Ln",
     });
@@ -753,6 +870,15 @@ describe("POST /api/webhooks/sendillo/sms (integration)", () => {
           completedAt: expect.any(String),
         },
       },
+    });
+    const { data: property } = await supabase
+      .from("properties")
+      .select("needs_human_attention, last_ai_escalation_reason")
+      .eq("id", propertyId)
+      .single();
+    expect(property).toMatchObject({
+      needs_human_attention: true,
+      last_ai_escalation_reason: "workflow_start_and_fallback_failed",
     });
   });
 
@@ -796,6 +922,57 @@ describe("POST /api/webhooks/sendillo/sms (integration)", () => {
           completedAt: expect.any(String),
         },
       },
+    });
+  });
+
+  it("does not keyword-escalate delayed inbounds after dispatch pre-gates reject the property", async () => {
+    await seedAiResponderConfig({ delayMinSeconds: 45, delayMaxSeconds: 180 });
+    const { propertyId } = await seedPropertyThread({
+      phone: "+18165550138",
+      address: "38 Sendillo Delay Terminal Keyword Ln",
+    });
+    await supabase
+      .from("properties")
+      .update({
+        needs_human_attention: true,
+        last_ai_escalation_reason: "existing_human_claim",
+        outreach_dispo: "dnc",
+      })
+      .eq("id", propertyId);
+
+    const res = await POST(
+      makeSendilloInboundRequest({
+        messageId: "snd_ai_delay_terminal_keyword_001",
+        from: "+18165550138",
+        body: "What is your offer?",
+      }),
+    );
+    expect(res.status).toBe(200);
+
+    expect(start).not.toHaveBeenCalled();
+    expect(dispatchAiResponseSpy).not.toHaveBeenCalled();
+    const { data: property } = await supabase
+      .from("properties")
+      .select("needs_human_attention, last_ai_escalation_reason, outreach_dispo")
+      .eq("id", propertyId)
+      .single();
+    expect(property).toMatchObject({
+      needs_human_attention: true,
+      last_ai_escalation_reason: "existing_human_claim",
+      outreach_dispo: "dnc",
+    });
+    const { data: inbound } = await supabase
+      .from("messages")
+      .select("metadata")
+      .eq("external_id", "snd_ai_delay_terminal_keyword_001")
+      .single();
+    const metadata = inbound!.metadata as {
+      processing?: { aiResponder?: Record<string, unknown> };
+    };
+    expect(metadata.processing?.aiResponder).toEqual({
+      outcome: "skipped",
+      reason: "already_terminal",
+      completedAt: expect.any(String),
     });
   });
 

@@ -1,10 +1,13 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
-import { checkQuietHours, STATE_TO_TZ } from "@/lib/messaging/quiet-hours";
+import {
+  checkQuietHours,
+  getQuietHoursLocalTime,
+  QUIET_HOURS_CLOSE_HOUR,
+} from "@/lib/messaging/quiet-hours";
 import type { Database } from "@/lib/supabase/types";
 
-const QUIET_HOURS_CLOSE_HOUR = 21;
-const WINDOW_CLOSE_BUFFER_SECONDS = 60;
+const WINDOW_CLOSE_BUFFER_SECONDS = 120;
 
 export type ReplyDelayConfig = {
   delayMinSeconds: number;
@@ -79,15 +82,14 @@ function clampToQuietHoursWindow(
   propertyState: string | null | undefined,
   now: Date = new Date(),
 ): number {
-  if (!propertyState) return delaySeconds;
+  if (!propertyState) return 0;
 
   const quiet = checkQuietHours(propertyState, now);
   if (!quiet.ok) return 0;
 
-  const zone = STATE_TO_TZ[propertyState.trim().toUpperCase()];
-  if (!zone) return 0;
+  const local = getQuietHoursLocalTime(propertyState, now);
+  if (!local) return 0;
 
-  const local = localTimeParts(now, zone);
   const secondsSinceMidnight =
     local.hour * 60 * 60 + local.minute * 60 + local.second;
   const secondsUntilClose =
@@ -98,32 +100,6 @@ function clampToQuietHoursWindow(
   );
 
   return Math.min(delaySeconds, maxDelay);
-}
-
-function localTimeParts(date: Date, zone: string) {
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone: zone,
-    hour12: false,
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-  }).formatToParts(date);
-
-  const hour = parseInt(parts.find((p) => p.type === "hour")?.value ?? "0", 10);
-  const minute = parseInt(
-    parts.find((p) => p.type === "minute")?.value ?? "0",
-    10,
-  );
-  const second = parseInt(
-    parts.find((p) => p.type === "second")?.value ?? "0",
-    10,
-  );
-
-  return {
-    hour: Number.isNaN(hour) ? 0 : hour % 24,
-    minute: Number.isNaN(minute) ? 0 : minute,
-    second: Number.isNaN(second) ? 0 : second,
-  };
 }
 
 function clamp(value: number, min: number, max: number): number {
