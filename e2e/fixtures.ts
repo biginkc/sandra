@@ -1,6 +1,13 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
 import type { Database } from "../src/lib/supabase/types";
+import {
+  MOCK_PROVIDER_CAMPAIGN_ID,
+  MOCK_SENDER_PRIMARY,
+  MOCK_SENDER_SECONDARY,
+  seedProviderCampaignCatalog,
+  seedSenderCatalog,
+} from "../tests/integration/delivery";
 
 /**
  * Helpers shared across E2E specs. Everything here runs OUT OF BAND from
@@ -11,6 +18,7 @@ import type { Database } from "../src/lib/supabase/types";
 
 export const TEST_USER_EMAIL = "e2e-test@bmhgroupkc.com";
 export const TEST_USER_PASSWORD = "test12345";
+export const E2E_MOCK_BUSINESS_NUMBER = MOCK_SENDER_PRIMARY;
 
 export function adminClient(): SupabaseClient<Database> {
   const url =
@@ -43,6 +51,7 @@ export async function resetTenantTables(
     const { error } = await client.rpc("reset_tenant_tables");
     if (!error) {
       await deleteTenantCoreRows(client);
+      await seedMockDeliveryCatalog(client);
       return;
     }
 
@@ -87,6 +96,18 @@ async function deleteTenantCoreRows(
 
   await deleteAllRows(client, "contacts");
   await deleteAllRows(client, "properties");
+}
+
+async function seedMockDeliveryCatalog(
+  client: SupabaseClient<Database>,
+): Promise<void> {
+  await seedSenderCatalog(client, DEFAULT_ORG_ID, [
+    MOCK_SENDER_PRIMARY,
+    MOCK_SENDER_SECONDARY,
+  ]);
+  await seedProviderCampaignCatalog(client, DEFAULT_ORG_ID, [
+    MOCK_PROVIDER_CAMPAIGN_ID,
+  ]);
 }
 
 /**
