@@ -62,6 +62,11 @@ export default function LoginPage() {
 
 function LoginForm() {
   const [state, formAction, pending] = useActionState(signIn, null);
+  // Driving the SSO action through useActionState gives us a pending flag
+  // shared across both forms, so a rapid double-submit (or a password
+  // submit racing an SSO redirect) can't start concurrent PKCE flows and
+  // clobber the single code-verifier cookie.
+  const [, ssoAction, ssoPending] = useActionState(signInWithBmhId, undefined);
   const [resetState, resetAction, resetPending] = useActionState(
     requestPasswordReset,
     null,
@@ -147,10 +152,11 @@ function LoginForm() {
     <>
       {BMH_ID_SSO_ENABLED ? (
         <div className="mt-6 flex flex-col gap-4">
-          <form action={signInWithBmhId}>
+          <form action={ssoAction}>
             <input type="hidden" name="next" value={next} />
             <Button
               type="submit"
+              disabled={ssoPending || pending}
               className="h-12 w-full text-[15px] text-white"
               style={{
                 background:
@@ -159,7 +165,7 @@ function LoginForm() {
                 boxShadow: BUTTON_GLOW,
               }}
             >
-              Continue with BMH ID
+              {ssoPending ? "Redirecting…" : "Continue with BMH ID"}
             </Button>
           </form>
           <div className="flex items-center gap-3" aria-hidden="true">
@@ -185,6 +191,7 @@ function LoginForm() {
             autoComplete="email"
             placeholder="Email"
             required
+            disabled={ssoPending}
             className={INPUT_CLASS}
           />
         </div>
@@ -199,6 +206,7 @@ function LoginForm() {
               autoComplete="current-password"
               placeholder="Password"
               required
+              disabled={ssoPending}
               className={`${INPUT_CLASS} pr-[62px]`}
             />
             <button
@@ -221,7 +229,7 @@ function LoginForm() {
 
         <Button
           type="submit"
-          disabled={pending}
+          disabled={pending || ssoPending}
           className="mt-2 h-14 w-full text-base text-white"
           style={{
             background:

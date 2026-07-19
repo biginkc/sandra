@@ -1,9 +1,9 @@
 "use server";
 
-import type { Provider } from "@supabase/supabase-js";
 import { headers } from "next/headers";
 import { redirect } from "next/navigation";
 
+import { sanitizeNextPath } from "@/lib/auth/safe-next";
 import { createClient } from "@/lib/supabase/server";
 import { errFromUnknown, ok, type Result } from "@/lib/errors/result";
 import { reportError } from "@/lib/errors/report";
@@ -69,15 +69,21 @@ export async function requestPasswordReset(
  *
  * A same-site `next` path survives the round trip via the `next` query
  * param on the callback URL, mirroring the password flow's behavior.
+ *
+ * Takes `_prevState` so the client can drive it through `useActionState`
+ * (the repo's pending-state idiom) and lock the forms while it runs.
  */
-export async function signInWithBmhId(formData: FormData): Promise<void> {
-  const nextRaw = String(formData.get("next") ?? "");
-  const next =
-    nextRaw.startsWith("/") &&
-    !nextRaw.startsWith("//") &&
-    !nextRaw.startsWith("/login")
-      ? nextRaw
-      : "";
+export async function signInWithBmhId(
+  _prevState: void,
+  formData: FormData,
+): Promise<void> {
+  // Fail closed: the NEXT_PUBLIC flag only hides the button client-side.
+  // Anyone can POST the action directly, so enforce the gate here too.
+  if (process.env.NEXT_PUBLIC_BMH_ID_SSO !== "1") {
+    redirect("/login");
+  }
+
+  const next = sanitizeNextPath(formData.get("next"));
 
   let authUrl: string | null = null;
   try {
@@ -90,9 +96,9 @@ export async function signInWithBmhId(formData: FormData): Promise<void> {
 
     const supabase = await createClient();
     const { data, error } = await supabase.auth.signInWithOAuth({
-      // Custom OIDC providers use the `custom:` prefix, which predates
-      // supabase-js's Provider union — cast narrowly.
-      provider: "custom:bmh" as Provider,
+      // Custom OIDC providers use the `custom:` prefix; supabase-js's
+      // Provider union accepts `custom:${string}` natively.
+      provider: "custom:bmh",
       options: { redirectTo },
     });
 
@@ -108,7 +114,13 @@ export async function signInWithBmhId(formData: FormData): Promise<void> {
   }
 
   if (!authUrl) {
-    redirect("/login?error=sso");
+    // Preserve the destination so the password fallback still lands the
+    // user on the lead/property they were headed to.
+    redirect(
+      next
+        ? `/login?error=sso&next=${encodeURIComponent(next)}`
+        : "/login?error=sso",
+    );
   }
   redirect(authUrl);
 }
@@ -119,16 +131,8 @@ export async function signIn(
 ): Promise<Result<null>> {
   const email = String(formData.get("email") ?? "").trim();
   const password = String(formData.get("password") ?? "");
-  const nextRaw = String(formData.get("next") ?? "");
-  // Open-redirect protection: only honor same-site relative paths.
-  // Reject anything that doesn't start with "/" or that contains a scheme,
-  // or that points back at /login (would loop).
-  const next =
-    nextRaw.startsWith("/") &&
-    !nextRaw.startsWith("//") &&
-    !nextRaw.startsWith("/login")
-      ? nextRaw
-      : "/dashboard";
+  // Open-redirect protection — shared with the SSO flow (see safe-next.ts).
+  const next = sanitizeNextPath(formData.get("next"), "/dashboard");
 
   if (!email || !password) {
     return {
