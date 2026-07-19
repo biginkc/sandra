@@ -241,10 +241,15 @@ function LoginForm() {
           {pending ? "Signing in…" : "Sign in"}
         </Button>
 
+        {/* The reset flow shares the single Supabase PKCE verifier cookie, so
+            it stays locked whenever either sign-in flow is in flight — a
+            mid-flight reset submit would clobber the SSO verifier and break
+            the callback. */}
         <button
           type="button"
           onClick={() => setShowReset(true)}
-          className="-mt-1 self-end text-[13.5px] text-[#7e889c] underline-offset-4 transition-colors hover:text-[#bcd0f0] hover:underline"
+          disabled={ssoPending || pending}
+          className="-mt-1 self-end text-[13.5px] text-[#7e889c] underline-offset-4 transition-colors hover:text-[#bcd0f0] hover:underline disabled:pointer-events-none disabled:opacity-50"
         >
           Forgot password?
         </button>

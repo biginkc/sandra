@@ -103,6 +103,17 @@ describe("login page — BMH ID SSO", () => {
     expect(screen.getByRole("button", { name: /sign in/i })).toBeDisabled();
     expect(screen.getByLabelText("Email")).toBeDisabled();
     expect(screen.getByLabelText("Password")).toBeDisabled();
+    // Password recovery shares the same PKCE verifier cookie — the reset
+    // entry point must be inert too, or a mid-flight reset submit clobbers
+    // the SSO verifier and breaks the callback.
+    const forgotButton = screen.getByRole("button", {
+      name: /forgot password/i,
+    });
+    expect(forgotButton).toBeDisabled();
+    fireEvent.click(forgotButton);
+    expect(
+      screen.queryByRole("button", { name: /send link/i }),
+    ).not.toBeInTheDocument();
 
     // Rapid double-submit: clicking the (now disabled) button again must
     // not start a concurrent flow — disabled buttons have no activation
@@ -117,6 +128,9 @@ describe("login page — BMH ID SSO", () => {
       ).toBeEnabled(),
     );
     expect(screen.getByRole("button", { name: /sign in/i })).toBeEnabled();
+    expect(
+      screen.getByRole("button", { name: /forgot password/i }),
+    ).toBeEnabled();
   });
 
   it("locks the SSO button while a password sign-in is pending", async () => {
@@ -144,6 +158,11 @@ describe("login page — BMH ID SSO", () => {
     );
     expect(
       screen.getByRole("button", { name: /continue with bmh id/i }),
+    ).toBeDisabled();
+    // Same cross-form idiom: the reset entry point is locked while a
+    // password sign-in is in flight.
+    expect(
+      screen.getByRole("button", { name: /forgot password/i }),
     ).toBeDisabled();
 
     resolveSignIn(null);
