@@ -161,9 +161,16 @@ describe("login page — BMH ID SSO", () => {
     ).toBeDisabled();
     // Same cross-form idiom: the reset entry point is locked while a
     // password sign-in is in flight.
+    const forgotButton = screen.getByRole("button", {
+      name: /forgot password/i,
+    });
+    expect(forgotButton).toBeDisabled();
+    // The disabled toggle must be inert: clicking it never opens the reset
+    // view, so no mid-flight reset submit can race the sign-in.
+    fireEvent.click(forgotButton);
     expect(
-      screen.getByRole("button", { name: /forgot password/i }),
-    ).toBeDisabled();
+      screen.queryByRole("button", { name: /send link/i }),
+    ).not.toBeInTheDocument();
 
     resolveSignIn(null);
     await waitFor(() =>
@@ -171,5 +178,8 @@ describe("login page — BMH ID SSO", () => {
         screen.getByRole("button", { name: /continue with bmh id/i }),
       ).toBeEnabled(),
     );
+    expect(
+      screen.getByRole("button", { name: /forgot password/i }),
+    ).toBeEnabled();
   });
 });
