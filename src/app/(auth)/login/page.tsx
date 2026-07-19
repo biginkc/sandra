@@ -6,8 +6,11 @@ import { Suspense, useActionState, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 
-import { requestPasswordReset, signIn } from "./actions";
+import { requestPasswordReset, signIn, signInWithBmhId } from "./actions";
 import { LoginBackground } from "./login-background";
+
+// Flipped on per-app (Vercel env var) once the BMH ID pilot gate passes.
+const BMH_ID_SSO_ENABLED = process.env.NEXT_PUBLIC_BMH_ID_SSO === "1";
 
 const CARD_GLOW =
   "0 0 0 1px rgba(60,130,255,0.16), 0 0 22px rgba(46,128,255,0.42), 0 0 60px rgba(46,128,255,0.22), 0 0 120px rgba(46,128,255,0.12), inset 0 1px 0 rgba(160,200,255,0.18), inset 0 0 26px rgba(46,128,255,0.06)";
@@ -79,7 +82,9 @@ function LoginForm() {
       ? "This CRM is restricted to bmhgroupkc.com accounts. Sign in with a bmhgroupkc.com email or ask an admin for an invite."
       : urlError === "invite_failed"
         ? "Invite link couldn't be verified. Ask an admin to resend it."
-        : null);
+        : urlError === "sso"
+          ? "BMH ID sign-in couldn't start. Try again, or sign in with your password."
+          : null);
 
   if (showReset) {
     return (
@@ -139,74 +144,104 @@ function LoginForm() {
   }
 
   return (
-    <form action={formAction} className="mt-6 flex flex-col gap-4">
-      <input type="hidden" name="next" value={next} />
-
-      <div className="flex flex-col gap-2">
-        <Input
-          id="email"
-          aria-label="Email"
-          name="email"
-          type="email"
-          autoComplete="email"
-          placeholder="Email"
-          required
-          className={INPUT_CLASS}
-        />
-      </div>
-
-      <div className="flex flex-col gap-2">
-        <div className="relative">
-          <Input
-            id="password"
-            aria-label="Password"
-            name="password"
-            type={showPw ? "text" : "password"}
-            autoComplete="current-password"
-            placeholder="Password"
-            required
-            className={`${INPUT_CLASS} pr-[62px]`}
-          />
-          <button
-            type="button"
-            onClick={() => setShowPw((v) => !v)}
-            aria-label={showPw ? "Hide characters" : "Show characters"}
-            aria-pressed={showPw}
-            className="absolute top-1/2 right-2 -translate-y-1/2 rounded-lg px-2.5 py-2 text-[12.5px] font-semibold text-[#7e889c] transition-colors hover:bg-white/5 hover:text-[#bcd0f0]"
-          >
-            {showPw ? "Hide" : "Show"}
-          </button>
+    <>
+      {BMH_ID_SSO_ENABLED ? (
+        <div className="mt-6 flex flex-col gap-4">
+          <form action={signInWithBmhId}>
+            <input type="hidden" name="next" value={next} />
+            <Button
+              type="submit"
+              className="h-12 w-full text-[15px] text-white"
+              style={{
+                background:
+                  "linear-gradient(180deg, rgba(28,46,82,0.65), rgba(14,24,46,0.7))",
+                border: "1.5px solid rgba(120,176,255,0.7)",
+                boxShadow: BUTTON_GLOW,
+              }}
+            >
+              Continue with BMH ID
+            </Button>
+          </form>
+          <div className="flex items-center gap-3" aria-hidden="true">
+            <span className="h-px flex-1 bg-white/10" />
+            <span className="text-[12.5px] text-[#5b6479]">or</span>
+            <span className="h-px flex-1 bg-white/10" />
+          </div>
         </div>
-      </div>
-
-      {errorMessage ? (
-        <p className="rounded-[10px] border border-[rgba(255,90,90,0.25)] bg-[rgba(255,80,80,0.08)] px-3 py-2 text-[13px] text-[#ff9a9a]">
-          {errorMessage}
-        </p>
       ) : null}
 
-      <Button
-        type="submit"
-        disabled={pending}
-        className="mt-2 h-14 w-full text-base text-white"
-        style={{
-          background:
-            "linear-gradient(180deg, rgba(28,46,82,0.65), rgba(14,24,46,0.7))",
-          border: "1.5px solid rgba(120,176,255,0.7)",
-          boxShadow: BUTTON_GLOW,
-        }}
+      <form
+        action={formAction}
+        className={`${BMH_ID_SSO_ENABLED ? "mt-4" : "mt-6"} flex flex-col gap-4`}
       >
-        {pending ? "Signing in…" : "Sign in"}
-      </Button>
+        <input type="hidden" name="next" value={next} />
 
-      <button
-        type="button"
-        onClick={() => setShowReset(true)}
-        className="-mt-1 self-end text-[13.5px] text-[#7e889c] underline-offset-4 transition-colors hover:text-[#bcd0f0] hover:underline"
-      >
-        Forgot password?
-      </button>
-    </form>
+        <div className="flex flex-col gap-2">
+          <Input
+            id="email"
+            aria-label="Email"
+            name="email"
+            type="email"
+            autoComplete="email"
+            placeholder="Email"
+            required
+            className={INPUT_CLASS}
+          />
+        </div>
+
+        <div className="flex flex-col gap-2">
+          <div className="relative">
+            <Input
+              id="password"
+              aria-label="Password"
+              name="password"
+              type={showPw ? "text" : "password"}
+              autoComplete="current-password"
+              placeholder="Password"
+              required
+              className={`${INPUT_CLASS} pr-[62px]`}
+            />
+            <button
+              type="button"
+              onClick={() => setShowPw((v) => !v)}
+              aria-label={showPw ? "Hide characters" : "Show characters"}
+              aria-pressed={showPw}
+              className="absolute top-1/2 right-2 -translate-y-1/2 rounded-lg px-2.5 py-2 text-[12.5px] font-semibold text-[#7e889c] transition-colors hover:bg-white/5 hover:text-[#bcd0f0]"
+            >
+              {showPw ? "Hide" : "Show"}
+            </button>
+          </div>
+        </div>
+
+        {errorMessage ? (
+          <p className="rounded-[10px] border border-[rgba(255,90,90,0.25)] bg-[rgba(255,80,80,0.08)] px-3 py-2 text-[13px] text-[#ff9a9a]">
+            {errorMessage}
+          </p>
+        ) : null}
+
+        <Button
+          type="submit"
+          disabled={pending}
+          className="mt-2 h-14 w-full text-base text-white"
+          style={{
+            background:
+              "linear-gradient(180deg, rgba(28,46,82,0.65), rgba(14,24,46,0.7))",
+            border: "1.5px solid rgba(120,176,255,0.7)",
+            boxShadow: BUTTON_GLOW,
+          }}
+        >
+          {pending ? "Signing in…" : "Sign in"}
+        </Button>
+
+        <button
+          type="button"
+          onClick={() => setShowReset(true)}
+          className="-mt-1 self-end text-[13.5px] text-[#7e889c] underline-offset-4 transition-colors hover:text-[#bcd0f0] hover:underline"
+        >
+          Forgot password?
+        </button>
+      </form>
+    </>
   );
 }
 

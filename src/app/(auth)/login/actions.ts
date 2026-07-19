@@ -1,5 +1,6 @@
 "use server";
 
+import type { Provider } from "@supabase/supabase-js";
 import { headers } from "next/headers";
 import { redirect } from "next/navigation";
 
@@ -55,6 +56,61 @@ export async function requestPasswordReset(
     // doesn't betray whether the address exists.
     return ok(null);
   }
+}
+
+/**
+ * Start the BMH ID single-sign-on flow. Sandra's own Supabase project is
+ * configured (in the dashboard, at rollout time) with a Custom OIDC
+ * provider named `custom:bmh` that points at the central bmh-auth IdP.
+ * `signInWithOAuth` returns the IdP authorization URL and drops the PKCE
+ * code-verifier cookie; we redirect the browser there, and the IdP sends
+ * the user back to `/auth/callback?code=...` (existing infra), which
+ * exchanges the code for a session and enforces the allowlist.
+ *
+ * A same-site `next` path survives the round trip via the `next` query
+ * param on the callback URL, mirroring the password flow's behavior.
+ */
+export async function signInWithBmhId(formData: FormData): Promise<void> {
+  const nextRaw = String(formData.get("next") ?? "");
+  const next =
+    nextRaw.startsWith("/") &&
+    !nextRaw.startsWith("//") &&
+    !nextRaw.startsWith("/login")
+      ? nextRaw
+      : "";
+
+  let authUrl: string | null = null;
+  try {
+    const h = await headers();
+    const proto = h.get("x-forwarded-proto") ?? "https";
+    const host = h.get("host") ?? "sandra-sooty.vercel.app";
+    const redirectTo = `${proto}://${host}/auth/callback${
+      next ? `?next=${encodeURIComponent(next)}` : ""
+    }`;
+
+    const supabase = await createClient();
+    const { data, error } = await supabase.auth.signInWithOAuth({
+      // Custom OIDC providers use the `custom:` prefix, which predates
+      // supabase-js's Provider union — cast narrowly.
+      provider: "custom:bmh" as Provider,
+      options: { redirectTo },
+    });
+
+    if (error) {
+      reportError(new Error(error.message), {
+        tags: { surface: "bmh_id_sso" },
+      });
+    } else {
+      authUrl = data.url;
+    }
+  } catch (e) {
+    reportError(e, { tags: { surface: "bmh_id_sso" } });
+  }
+
+  if (!authUrl) {
+    redirect("/login?error=sso");
+  }
+  redirect(authUrl);
 }
 
 export async function signIn(
