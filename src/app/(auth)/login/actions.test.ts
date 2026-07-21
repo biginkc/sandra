@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const { createClient, headersMock, redirectMock } = vi.hoisted(() => {
+const { createClient, cookiesMock, cookieSet, headersMock, redirectMock } = vi.hoisted(() => {
   class RedirectSignal extends Error {
     constructor(public readonly url: string) {
       super(`NEXT_REDIRECT:${url}`);
@@ -8,6 +8,8 @@ const { createClient, headersMock, redirectMock } = vi.hoisted(() => {
   }
   return {
     createClient: vi.fn(),
+    cookiesMock: vi.fn(),
+    cookieSet: vi.fn(),
     headersMock: vi.fn(),
     redirectMock: vi.fn((url: string): never => {
       throw new RedirectSignal(url);
@@ -17,7 +19,7 @@ const { createClient, headersMock, redirectMock } = vi.hoisted(() => {
 
 vi.mock("@/lib/supabase/server", () => ({ createClient }));
 vi.mock("@/lib/errors/report", () => ({ reportError: vi.fn() }));
-vi.mock("next/headers", () => ({ headers: headersMock }));
+vi.mock("next/headers", () => ({ headers: headersMock, cookies: cookiesMock }));
 vi.mock("next/navigation", () => ({ redirect: redirectMock }));
 
 import { signInWithHugo } from "./actions";
@@ -47,6 +49,7 @@ beforeEach(() => {
       "x-forwarded-host": "sandra.test",
     }),
   );
+  cookiesMock.mockResolvedValue({ set: cookieSet });
 });
 
 afterEach(() => {
@@ -79,12 +82,25 @@ describe("signInWithHugo", () => {
       const target = await redirectedTo(() =>
         signInWithHugo(undefined, formData("/leads/5")),
       );
-      expect(signInWithOAuth).toHaveBeenCalledWith({
-        provider: "custom:hugo",
-        options: {
-          redirectTo: "https://sandra.test/auth/callback?next=%2Fleads%2F5",
-        },
-      });
+      const request = signInWithOAuth.mock.calls[0][0];
+      expect(request.provider).toBe("custom:hugo");
+      const redirectTo = new URL(request.options.redirectTo);
+      expect(`${redirectTo.origin}${redirectTo.pathname}`).toBe(
+        "https://sandra.test/auth/callback",
+      );
+      expect(redirectTo.searchParams.get("next")).toBe("/leads/5");
+      const nonce = redirectTo.searchParams.get("hugo_flow");
+      expect(nonce).toMatch(/^[A-Za-z0-9_-]{43}$/);
+      expect(cookieSet).toHaveBeenCalledWith(
+        "sandra_hugo_flow",
+        nonce,
+        expect.objectContaining({
+          httpOnly: true,
+          sameSite: "lax",
+          path: "/auth/callback",
+          maxAge: 600,
+        }),
+      );
       expect(target).toBe("https://hugo.test/authorize");
     });
 
@@ -96,10 +112,14 @@ describe("signInWithHugo", () => {
       "/login?error=loop",
     ])("drops unsafe next value %j", async (next) => {
       await redirectedTo(() => signInWithHugo(undefined, formData(next)));
-      expect(signInWithOAuth).toHaveBeenCalledWith({
-        provider: "custom:hugo",
-        options: { redirectTo: "https://sandra.test/auth/callback" },
-      });
+      const redirectTo = new URL(
+        signInWithOAuth.mock.calls[0][0].options.redirectTo,
+      );
+      expect(`${redirectTo.origin}${redirectTo.pathname}`).toBe(
+        "https://sandra.test/auth/callback",
+      );
+      expect(redirectTo.searchParams.get("next")).toBeNull();
+      expect(redirectTo.searchParams.get("hugo_flow")).toBeTruthy();
     });
 
     it("keeps a sanitized next when Hugo initiation fails", async () => {

@@ -1,7 +1,15 @@
+import { timingSafeEqual } from "node:crypto";
+
 import { NextResponse, type NextRequest } from "next/server";
 
 import { isEmailAllowed } from "@/lib/auth/allowlist";
 import { sanitizeNextPath } from "@/lib/auth/safe-next";
+import {
+  HUGO_FLOW_COOKIE,
+  HUGO_FLOW_COOKIE_PATH,
+  HUGO_FLOW_QUERY,
+  hugoFlowCookieOptions,
+} from "@/lib/auth/start-hugo";
 import { createClient } from "@/lib/supabase/server";
 
 const EMAIL_FLOW_TYPES = new Set([
@@ -13,54 +21,47 @@ const EMAIL_FLOW_TYPES = new Set([
   "email",
 ]);
 const HUGO_PROVIDER = "custom:hugo";
-const MAX_IDENTITY_AMR_SKEW_SECONDS = 5;
 
-function isCurrentHugoIdentity(amr: unknown, identities: unknown): boolean {
+function hasHugoOAuthProof(amr: unknown, identities: unknown): boolean {
   if (!Array.isArray(amr) || !Array.isArray(identities)) return false;
   const oauthMethods = new Set(["oauth", "oauth_provider/authorization_code"]);
-  const oauthTimestamps = amr.flatMap((entry) => {
-    if (
-      typeof entry !== "object" ||
-      entry === null ||
-      !("method" in entry) ||
-      !("timestamp" in entry) ||
-      typeof entry.method !== "string" ||
-      !oauthMethods.has(entry.method) ||
-      typeof entry.timestamp !== "number" ||
-      !Number.isFinite(entry.timestamp)
-    ) {
-      return [];
-    }
-    return [entry.timestamp];
-  });
+  const hasOAuthAmr = amr.some(
+    (entry) =>
+      typeof entry === "object" &&
+      entry !== null &&
+      "method" in entry &&
+      typeof entry.method === "string" &&
+      oauthMethods.has(entry.method),
+  );
+  const hasHugoIdentity = identities.some(
+    (identity) =>
+      typeof identity === "object" &&
+      identity !== null &&
+      "provider" in identity &&
+      identity.provider === HUGO_PROVIDER,
+  );
+  return hasOAuthAmr && hasHugoIdentity;
+}
 
-  return oauthTimestamps.some((oauthTimestamp) => {
-    const currentIdentities = identities.filter((identity) => {
-      if (
-        typeof identity !== "object" ||
-        identity === null ||
-        !("last_sign_in_at" in identity) ||
-        typeof identity.last_sign_in_at !== "string"
-      ) {
-        return false;
-      }
-      const identityTimestamp = Date.parse(identity.last_sign_in_at) / 1000;
-      return (
-        Number.isFinite(identityTimestamp) &&
-        Math.abs(identityTimestamp - oauthTimestamp) <=
-          MAX_IDENTITY_AMR_SKEW_SECONDS
-      );
-    });
+function flowNonceMatches(request: NextRequest): boolean {
+  const queryNonce = request.nextUrl.searchParams.get(HUGO_FLOW_QUERY);
+  const cookieNonce = request.cookies.get(HUGO_FLOW_COOKIE)?.value;
+  if (!queryNonce || !cookieNonce) return false;
+  const query = Buffer.from(queryNonce);
+  const cookie = Buffer.from(cookieNonce);
+  return query.length === cookie.length && timingSafeEqual(query, cookie);
+}
 
-    // Fail closed if multiple linked identities appear current. This proves
-    // that the OAuth method in the signed JWT belongs to Hugo specifically,
-    // not merely that the user has linked Hugo at some point in the past.
-    return (
-      currentIdentities.length === 1 &&
-      "provider" in currentIdentities[0] &&
-      currentIdentities[0].provider === HUGO_PROVIDER
-    );
+function redirectAndConsumeFlow(request: NextRequest, location: string) {
+  const response = NextResponse.redirect(
+    new URL(location, request.nextUrl.origin),
+  );
+  response.cookies.set(HUGO_FLOW_COOKIE, "", {
+    ...hugoFlowCookieOptions(),
+    path: HUGO_FLOW_COOKIE_PATH,
+    maxAge: 0,
   });
+  return response;
 }
 
 /**
@@ -71,22 +72,22 @@ function isCurrentHugoIdentity(amr: unknown, identities: unknown): boolean {
  * a Sandra session even while an old email is still in someone's inbox.
  */
 export async function GET(request: NextRequest) {
-  const { searchParams, origin } = request.nextUrl;
+  const { searchParams } = request.nextUrl;
   const code = searchParams.get("code");
   const type = searchParams.get("type")?.toLowerCase();
   const tokenHash = searchParams.get("token_hash");
 
   if (tokenHash || (type && EMAIL_FLOW_TYPES.has(type))) {
-    return NextResponse.redirect(`${origin}/login?error=password_disabled`);
+    return redirectAndConsumeFlow(request, "/login?error=password_disabled");
   }
-  if (!code) {
-    return NextResponse.redirect(`${origin}/login?error=sso`);
+  if (!code || !flowNonceMatches(request)) {
+    return redirectAndConsumeFlow(request, "/login?error=sso");
   }
 
   const supabase = await createClient();
   const { error, data } = await supabase.auth.exchangeCodeForSession(code);
   if (error || !data.session) {
-    return NextResponse.redirect(`${origin}/login?error=sso`);
+    return redirectAndConsumeFlow(request, "/login?error=sso");
   }
 
   // Email PKCE links can arrive with only `?code=...` and no `type` marker.
@@ -96,18 +97,18 @@ export async function GET(request: NextRequest) {
     await supabase.auth.getClaims(data.session.access_token);
   if (
     claimsError ||
-    !isCurrentHugoIdentity(
+    !hasHugoOAuthProof(
       claimsData?.claims.amr,
       data.session.user.identities,
     )
   ) {
     await supabase.auth.signOut({ scope: "local" });
-    return NextResponse.redirect(`${origin}/login?error=password_disabled`);
+    return redirectAndConsumeFlow(request, "/login?error=password_disabled");
   }
 
   if (!isEmailAllowed(data.session.user.email)) {
     await supabase.auth.signOut({ scope: "local" });
-    return NextResponse.redirect(`${origin}/login?error=domain`);
+    return redirectAndConsumeFlow(request, "/login?error=domain");
   }
 
   const { data: memberships, error: membershipError } = await supabase
@@ -117,9 +118,9 @@ export async function GET(request: NextRequest) {
     .limit(1);
   if (membershipError || !memberships?.length) {
     await supabase.auth.signOut({ scope: "local" });
-    return NextResponse.redirect(`${origin}/login?error=access`);
+    return redirectAndConsumeFlow(request, "/login?error=access");
   }
 
   const target = sanitizeNextPath(searchParams.get("next"), "/dashboard");
-  return NextResponse.redirect(`${origin}${target}`);
+  return redirectAndConsumeFlow(request, target);
 }

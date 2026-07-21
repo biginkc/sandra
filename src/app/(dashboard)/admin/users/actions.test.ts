@@ -11,6 +11,13 @@ vi.mock("@/lib/errors/report", () => ({ reportError: vi.fn() }));
 
 import { grantUserAccess } from "./actions";
 
+type MockUser = {
+  id: string;
+  email: string;
+  email_confirmed_at: string | null;
+  app_metadata: Record<string, unknown>;
+};
+
 function mockAdminSession(email = "jarrad@bmhgroupkc.com") {
   createClient.mockResolvedValue({
     auth: {
@@ -22,35 +29,105 @@ function mockAdminSession(email = "jarrad@bmhgroupkc.com") {
 }
 
 function mockAdminClient({
-  users = [] as Array<{
-    id: string;
-    email: string;
-    email_confirmed_at?: string | null;
-  }>,
-  createUser = vi.fn().mockResolvedValue({
-    data: {
-      user: {
-        id: "created-user",
-        email: "newperson@bmhgroupkc.com",
-        email_confirmed_at: "2026-07-21T00:00:00Z",
+  users = [] as MockUser[],
+  membership = null as { role: string } | null,
+  upsertError = null as { message: string } | null,
+  beforeUpsert,
+}: {
+  users?: MockUser[];
+  membership?: { role: string } | null;
+  upsertError?: { message: string } | null;
+  beforeUpsert?: (state: {
+    users: MockUser[];
+    membership: { role: string } | null;
+  }) => Promise<void>;
+} = {}) {
+  const state = { users: [...users], membership };
+  const listUsers = vi.fn().mockImplementation(async () => ({
+    data: { users: state.users },
+    error: null,
+  }));
+  const createUser = vi.fn().mockImplementation(async (input) => {
+    if (state.users.some((user) => user.email === input.email)) {
+      return {
+        data: { user: null },
+        error: { message: "A user with this email already exists" },
+      };
+    }
+    const user: MockUser = {
+      id: "created-user",
+      email: input.email,
+      email_confirmed_at: input.email_confirm ? "2026-07-21T00:00:00Z" : null,
+      app_metadata: input.app_metadata ?? {},
+    };
+    state.users.push(user);
+    return { data: { user }, error: null };
+  });
+  const updateUserById = vi.fn().mockImplementation(async (id, changes) => {
+    const user = state.users.find((candidate) => candidate.id === id);
+    if (!user) return { data: { user: null }, error: { message: "not found" } };
+    if (changes.email_confirm) {
+      user.email_confirmed_at = "2026-07-21T00:00:00Z";
+    }
+    if (changes.app_metadata) user.app_metadata = changes.app_metadata;
+    return { data: { user }, error: null };
+  });
+  const getUserById = vi.fn().mockImplementation(async (id) => ({
+    data: { user: state.users.find((candidate) => candidate.id === id) ?? null },
+    error: null,
+  }));
+  const deleteUser = vi.fn().mockImplementation(async (id) => {
+    state.users = state.users.filter((candidate) => candidate.id !== id);
+    return { error: null };
+  });
+  const maybeSingle = vi.fn().mockImplementation(async () => ({
+    data: state.membership,
+    error: null,
+  }));
+  const secondEq = vi.fn(() => ({ maybeSingle }));
+  const firstEq = vi.fn(() => ({ eq: secondEq }));
+  const select = vi.fn(() => ({ eq: firstEq }));
+  const upsert = vi.fn().mockImplementation(async (values) => {
+    await beforeUpsert?.(state);
+    if (upsertError) return { error: upsertError };
+    state.membership ??= { role: values.role };
+    return { error: null };
+  });
+  const from = vi.fn(() => ({ select, upsert }));
+  createAdminClient.mockReturnValue({
+    auth: {
+      admin: {
+        listUsers,
+        createUser,
+        updateUserById,
+        getUserById,
+        deleteUser,
       },
     },
-    error: null,
-  }),
-  updateUserById = vi.fn(),
-  deleteUser = vi.fn().mockResolvedValue({ error: null }),
-  upsert = vi.fn().mockResolvedValue({ error: null }),
-} = {}) {
-  const listUsers = vi.fn().mockResolvedValue({
-    data: { users },
-    error: null,
-  });
-  const from = vi.fn(() => ({ upsert }));
-  createAdminClient.mockReturnValue({
-    auth: { admin: { listUsers, createUser, updateUserById, deleteUser } },
     from,
   });
-  return { listUsers, createUser, updateUserById, deleteUser, upsert, from };
+  return {
+    state,
+    listUsers,
+    createUser,
+    updateUserById,
+    getUserById,
+    deleteUser,
+    upsert,
+  };
+}
+
+function existingUser(
+  email = "owner@bmhgroupkc.com",
+  overrides: Partial<MockUser> = {},
+): MockUser {
+  return {
+    id: "canonical-user",
+    email,
+    email_confirmed_at: "2026-07-20T00:00:00Z",
+    app_metadata: {},
+    ...overrides,
+  };
 }
 
 beforeEach(() => {
@@ -64,8 +141,8 @@ afterEach(() => {
 });
 
 describe("grantUserAccess", () => {
-  it("creates a confirmed passwordless user and grants membership without email", async () => {
-    const { createUser, upsert } = mockAdminClient();
+  it("creates a confirmed passwordless user, grants membership, and marks it ready", async () => {
+    const { state, createUser, updateUserById, upsert } = mockAdminClient();
 
     const result = await grantUserAccess("newperson@bmhgroupkc.com");
 
@@ -80,6 +157,10 @@ describe("grantUserAccess", () => {
     expect(createUser).toHaveBeenCalledWith({
       email: "newperson@bmhgroupkc.com",
       email_confirm: true,
+      app_metadata: {
+        sandra_provisioning_state: "pending",
+        sandra_provisioning_attempt: expect.any(String),
+      },
     });
     expect(createUser.mock.calls[0][0]).not.toHaveProperty("password");
     expect(upsert).toHaveBeenCalledWith(
@@ -88,107 +169,127 @@ describe("grantUserAccess", () => {
         org_id: "00000000-0000-0000-0000-000000000bbb",
         role: "member",
       },
-      { onConflict: "user_id,org_id" },
+      { onConflict: "user_id,org_id", ignoreDuplicates: true },
     );
+    expect(updateUserById).toHaveBeenLastCalledWith(
+      "created-user",
+      expect.objectContaining({
+        app_metadata: expect.objectContaining({
+          sandra_provisioning_state: "ready",
+          sandra_provisioning_attempt: null,
+        }),
+      }),
+    );
+    expect(state.membership).toEqual({ role: "member" });
   });
 
-  it("is idempotent and preserves the existing exact-email UID", async () => {
-    const { createUser, upsert } = mockAdminClient({
-      users: [
-        {
-          id: "canonical-user",
-          email: "owner@bmhgroupkc.com",
-          email_confirmed_at: "2026-07-20T00:00:00Z",
-        },
-      ],
+  it("preserves the existing owner UID and role when the UI uses defaults", async () => {
+    const { createUser, upsert, state } = mockAdminClient({
+      users: [existingUser()],
+      membership: { role: "owner" },
+    });
+
+    const result = await grantUserAccess("OWNER@bmhgroupkc.com");
+
+    expect(result).toMatchObject({
+      ok: true,
+      data: { userId: "canonical-user", created: false },
+    });
+    expect(createUser).not.toHaveBeenCalled();
+    expect(upsert).not.toHaveBeenCalled();
+    expect(state.membership).toEqual({ role: "owner" });
+  });
+
+  it("ignores a conflicting requested role for an existing membership", async () => {
+    const { upsert, state } = mockAdminClient({
+      users: [existingUser()],
+      membership: { role: "owner" },
     });
 
     const result = await grantUserAccess(
-      "OWNER@bmhgroupkc.com",
-      "00000000-0000-0000-0000-000000000ccc",
-      "owner",
+      "owner@bmhgroupkc.com",
+      "00000000-0000-0000-0000-000000000bbb",
+      "member",
     );
 
-    expect(result).toEqual({
-      ok: true,
-      data: {
-        grantedEmail: "owner@bmhgroupkc.com",
-        userId: "canonical-user",
-        created: false,
-      },
-    });
-    expect(createUser).not.toHaveBeenCalled();
-    expect(upsert).toHaveBeenCalledWith(
-      {
-        user_id: "canonical-user",
-        org_id: "00000000-0000-0000-0000-000000000ccc",
-        role: "owner",
-      },
-      { onConflict: "user_id,org_id" },
-    );
+    expect(result.ok).toBe(true);
+    expect(upsert).not.toHaveBeenCalled();
+    expect(state.membership).toEqual({ role: "owner" });
   });
 
-  it("confirms an existing pending user without changing its UID", async () => {
-    const updateUserById = vi.fn().mockResolvedValue({
-      data: {
-        user: {
-          id: "pending-user",
-          email: "pending@bmhgroupkc.com",
-          email_confirmed_at: "2026-07-21T00:00:00Z",
-        },
-      },
-      error: null,
-    });
-    const { createUser } = mockAdminClient({
+  it("confirms an existing unconfirmed canonical user without changing its UID", async () => {
+    const { createUser, updateUserById } = mockAdminClient({
       users: [
-        {
+        existingUser("pending@bmhgroupkc.com", {
           id: "pending-user",
-          email: "pending@bmhgroupkc.com",
           email_confirmed_at: null,
-        },
+        }),
       ],
-      updateUserById,
     });
 
     const result = await grantUserAccess("pending@bmhgroupkc.com");
 
-    expect(result.ok).toBe(true);
+    expect(result).toMatchObject({
+      ok: true,
+      data: { userId: "pending-user", created: false },
+    });
     expect(updateUserById).toHaveBeenCalledWith("pending-user", {
       email_confirm: true,
     });
     expect(createUser).not.toHaveBeenCalled();
   });
 
-  it("confirms the exact-email user found after a concurrent create race", async () => {
-    const racedUser = {
-      id: "raced-user",
-      email: "raced@bmhgroupkc.com",
-      email_confirmed_at: null,
-    };
-    const createUser = vi.fn().mockResolvedValue({
-      data: { user: null },
-      error: { message: "A user with this email already exists" },
+  it("does not adopt or report success for another pending no-membership attempt", async () => {
+    const { updateUserById, deleteUser, upsert } = mockAdminClient({
+      users: [
+        existingUser("raced@bmhgroupkc.com", {
+          email_confirmed_at: null,
+          app_metadata: {
+            sandra_provisioning_state: "pending",
+            sandra_provisioning_attempt: "other-attempt",
+          },
+        }),
+      ],
     });
-    const updateUserById = vi.fn().mockResolvedValue({
-      data: {
-        user: { ...racedUser, email_confirmed_at: "2026-07-21T00:00:00Z" },
-      },
-      error: null,
-    });
-    const { listUsers } = mockAdminClient({ createUser, updateUserById });
-    listUsers
-      .mockResolvedValueOnce({ data: { users: [] }, error: null })
-      .mockResolvedValueOnce({ data: { users: [racedUser] }, error: null });
 
     const result = await grantUserAccess("raced@bmhgroupkc.com");
 
     expect(result).toMatchObject({
-      ok: true,
-      data: { userId: "raced-user", created: false },
+      ok: false,
+      error: { code: "GRANT_IN_PROGRESS" },
     });
-    expect(updateUserById).toHaveBeenCalledWith("raced-user", {
-      email_confirm: true,
+    expect(updateUserById).not.toHaveBeenCalled();
+    expect(upsert).not.toHaveBeenCalled();
+    expect(deleteUser).not.toHaveBeenCalled();
+  });
+
+  it("deterministically blocks a concurrent grant while the creator is pending", async () => {
+    let releaseUpsert!: () => void;
+    let enteredUpsert!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      enteredUpsert = resolve;
     });
+    const release = new Promise<void>((resolve) => {
+      releaseUpsert = resolve;
+    });
+    const { deleteUser } = mockAdminClient({
+      beforeUpsert: async () => {
+        enteredUpsert();
+        await release;
+      },
+    });
+
+    const first = grantUserAccess("concurrent@bmhgroupkc.com");
+    await entered;
+    const second = await grantUserAccess("concurrent@bmhgroupkc.com");
+    expect(second).toMatchObject({
+      ok: false,
+      error: { code: "GRANT_IN_PROGRESS" },
+    });
+    expect(deleteUser).not.toHaveBeenCalled();
+
+    releaseUpsert();
+    expect(await first).toMatchObject({ ok: true, data: { created: true } });
   });
 
   it("rejects non-BMH emails before accessing Auth admin", async () => {
@@ -200,11 +301,9 @@ describe("grantUserAccess", () => {
     expect(createAdminClient).not.toHaveBeenCalled();
   });
 
-  it("rolls back only a newly created user when membership upsert fails", async () => {
+  it("rolls back only when the failed attempt still owns an unprovisioned user", async () => {
     const { createUser, deleteUser } = mockAdminClient({
-      upsert: vi.fn().mockResolvedValue({
-        error: { message: "membership unavailable" },
-      }),
+      upsertError: { message: "membership unavailable" },
     });
     const result = await grantUserAccess("newperson@bmhgroupkc.com");
     expect(createUser).toHaveBeenCalledOnce();
@@ -215,18 +314,28 @@ describe("grantUserAccess", () => {
     });
   });
 
-  it("preserves an existing auth user when membership upsert fails", async () => {
+  it("does not delete a user if another attempt takes ownership before rollback", async () => {
     const { deleteUser } = mockAdminClient({
-      users: [
-        {
-          id: "canonical-user",
-          email: "owner@bmhgroupkc.com",
-          email_confirmed_at: "2026-07-20T00:00:00Z",
-        },
-      ],
-      upsert: vi.fn().mockResolvedValue({
-        error: { message: "membership unavailable" },
-      }),
+      upsertError: { message: "membership unavailable" },
+      beforeUpsert: async (state) => {
+        state.users[0].app_metadata.sandra_provisioning_attempt =
+          "replacement-attempt";
+      },
+    });
+
+    const result = await grantUserAccess("handoff@bmhgroupkc.com");
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: { code: "GRANT_MEMBERSHIP_FAILED" },
+    });
+    expect(deleteUser).not.toHaveBeenCalled();
+  });
+
+  it("never deletes an existing canonical user when membership creation fails", async () => {
+    const { deleteUser } = mockAdminClient({
+      users: [existingUser()],
+      upsertError: { message: "membership unavailable" },
     });
     const result = await grantUserAccess("owner@bmhgroupkc.com");
     expect(deleteUser).not.toHaveBeenCalled();

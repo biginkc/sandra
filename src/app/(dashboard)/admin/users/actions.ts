@@ -1,33 +1,59 @@
 "use server";
 
+import { randomUUID } from "node:crypto";
+
 import { ALLOWED_DOMAIN, isAdminEmail } from "@/lib/auth/allowlist";
 import { errFromUnknown, ok, type Result } from "@/lib/errors/result";
 import { reportError } from "@/lib/errors/report";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
 
+type MembershipRole = "owner" | "member";
+type MembershipRow = { role: string };
 type MembershipAdminClient = {
   from(table: "memberships"): {
+    select(columns: "role"): {
+      eq(column: "user_id", value: string): {
+        eq(column: "org_id", value: string): {
+          maybeSingle(): Promise<{
+            data: MembershipRow | null;
+            error: { message: string } | null;
+          }>;
+        };
+      };
+    };
     upsert(
       values: {
         user_id: string;
         org_id: string;
-        role: "owner" | "member";
+        role: MembershipRole;
       },
-      options: { onConflict: "user_id,org_id" },
+      options: {
+        onConflict: "user_id,org_id";
+        ignoreDuplicates: true;
+      },
     ): Promise<{ error: { message: string } | null }>;
   };
 };
 
+const PROVISIONING_STATE = "sandra_provisioning_state";
+const PROVISIONING_ATTEMPT = "sandra_provisioning_attempt";
+
+function pendingAttempt(user: { app_metadata?: Record<string, unknown> }) {
+  if (user.app_metadata?.[PROVISIONING_STATE] !== "pending") return null;
+  const marker = user.app_metadata[PROVISIONING_ATTEMPT];
+  return typeof marker === "string" && marker ? marker : null;
+}
+
 /**
  * Grant Sandra access without issuing a Sandra password or authentication
- * email. Repeated grants preserve the canonical auth UID and simply upsert
- * the requested organization membership. Hugo owns identity activation.
+ * email. Repeated grants preserve the canonical auth UID and any existing
+ * organization role. Hugo owns identity activation.
  */
 export async function grantUserAccess(
   email: string,
   orgId = "00000000-0000-0000-0000-000000000bbb",
-  role: "owner" | "member" = "member",
+  role: MembershipRole = "member",
 ): Promise<Result<{ grantedEmail: string; userId: string; created: boolean }>> {
   const trimmed = email.trim().toLowerCase();
   if (!trimmed.endsWith(`@${ALLOWED_DOMAIN}`)) {
@@ -37,6 +63,12 @@ export async function grantUserAccess(
         code: "INVALID_DOMAIN",
         message: `Email must end in @${ALLOWED_DOMAIN}.`,
       },
+    };
+  }
+  if (role !== "owner" && role !== "member") {
+    return {
+      ok: false,
+      error: { code: "INVALID_ROLE", message: "Role must be owner or member." },
     };
   }
 
@@ -56,6 +88,8 @@ export async function grantUserAccess(
     }
 
     const admin = createAdminClient();
+    const membershipAdmin = admin as unknown as MembershipAdminClient;
+    const attempt = randomUUID();
     const findExactUser = async () => {
       for (let page = 1; page <= 100; page += 1) {
         const { data, error } = await admin.auth.admin.listUsers({
@@ -70,6 +104,29 @@ export async function grantUserAccess(
       }
       throw new Error("User lookup exceeded the supported page limit.");
     };
+    const findMembership = async (userId: string) => {
+      const { data, error } = await membershipAdmin
+        .from("memberships")
+        .select("role")
+        .eq("user_id", userId)
+        .eq("org_id", orgId)
+        .maybeSingle();
+      if (error) throw new Error(error.message);
+      return data;
+    };
+    const rollbackIfOwnedAndUnprovisioned = async (userId: string) => {
+      const { data, error } = await admin.auth.admin.getUserById(userId);
+      if (error || !data.user || pendingAttempt(data.user) !== attempt) return;
+      const membership = await findMembership(userId);
+      if (membership) return;
+      const { error: rollbackError } = await admin.auth.admin.deleteUser(userId);
+      if (rollbackError) {
+        reportError(new Error(rollbackError.message), {
+          tags: { surface: "grant_user_access_rollback" },
+          extra: { email: trimmed, userId },
+        });
+      }
+    };
 
     let target = await findExactUser();
     let created = false;
@@ -77,6 +134,10 @@ export async function grantUserAccess(
       const { data, error } = await admin.auth.admin.createUser({
         email: trimmed,
         email_confirm: true,
+        app_metadata: {
+          [PROVISIONING_STATE]: "pending",
+          [PROVISIONING_ATTEMPT]: attempt,
+        },
       });
       if (error || !data.user) {
         // A concurrent grant may have created the same exact-email account
@@ -97,6 +158,23 @@ export async function grantUserAccess(
       }
     }
 
+    let existingMembership = await findMembership(target.id);
+    const targetPendingAttempt = pendingAttempt(target);
+    if (
+      !existingMembership &&
+      targetPendingAttempt &&
+      targetPendingAttempt !== attempt
+    ) {
+      return {
+        ok: false,
+        error: {
+          code: "GRANT_IN_PROGRESS",
+          message:
+            "Access provisioning is already in progress. Try again shortly.",
+        },
+      };
+    }
+
     if (!target.email_confirmed_at) {
       const { data, error } = await admin.auth.admin.updateUserById(target.id, {
         email_confirm: true,
@@ -113,32 +191,51 @@ export async function grantUserAccess(
       target = data.user;
     }
 
-    const { error: membershipError } = await (
-      admin as unknown as MembershipAdminClient
-    )
-      .from("memberships")
-      .upsert(
-        { user_id: target.id, org_id: orgId, role },
-        { onConflict: "user_id,org_id" },
-      );
-    if (membershipError) {
-      if (created) {
-        const { error: rollbackError } = await admin.auth.admin.deleteUser(
-          target.id,
+    if (!existingMembership) {
+      const { error: membershipError } = await membershipAdmin
+        .from("memberships")
+        .upsert(
+          { user_id: target.id, org_id: orgId, role },
+          { onConflict: "user_id,org_id", ignoreDuplicates: true },
         );
-        if (rollbackError) {
-          reportError(new Error(rollbackError.message), {
-            tags: { surface: "grant_user_access_rollback" },
-            extra: { email: trimmed, userId: target.id },
-          });
-        }
+      if (membershipError) {
+        if (created) await rollbackIfOwnedAndUnprovisioned(target.id);
+        return {
+          ok: false,
+          error: {
+            code: "GRANT_MEMBERSHIP_FAILED",
+            message: membershipError.message,
+          },
+        };
       }
+      existingMembership = await findMembership(target.id);
+    }
+
+    if (!existingMembership) {
+      if (created) await rollbackIfOwnedAndUnprovisioned(target.id);
       return {
         ok: false,
         error: {
           code: "GRANT_MEMBERSHIP_FAILED",
-          message: membershipError.message,
+          message: "Membership could not be verified after provisioning.",
         },
+      };
+    }
+
+    const { error: finalizeError } = await admin.auth.admin.updateUserById(
+      target.id,
+      {
+        app_metadata: {
+          ...target.app_metadata,
+          [PROVISIONING_STATE]: "ready",
+          [PROVISIONING_ATTEMPT]: null,
+        },
+      },
+    );
+    if (finalizeError) {
+      return {
+        ok: false,
+        error: { code: "GRANT_FINALIZE_FAILED", message: finalizeError.message },
       };
     }
 
