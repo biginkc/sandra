@@ -26,6 +26,7 @@ import {
 async function seedDesignThread(admin: ReturnType<typeof adminClient>): Promise<{
   contactId: string;
   propertyId: string;
+  threadId: string;
 }> {
   const { data: contact } = await admin
     .from("contacts")
@@ -94,22 +95,39 @@ async function seedDesignThread(admin: ReturnType<typeof adminClient>): Promise<
       offsetMin: -117,
     },
   ];
+  let threadId: string | null = null;
   for (const m of messages) {
-    await admin.from("messages").insert({
-      channel: "sms",
-      direction: m.direction,
-      status: m.direction === "inbound" ? "received" : "sent",
-      contact_id: contact.id,
-      property_id: prop.id,
-      from_address: m.direction === "inbound" ? "+12105550192" : "+18162804181",
-      to_address: m.direction === "inbound" ? "+18162804181" : "+12105550192",
-      body: m.body,
-      created_at: new Date(baseTime + m.offsetMin * 60_000).toISOString(),
-      read_at: m.direction === "inbound" ? new Date().toISOString() : null,
-    });
+    const { data: inserted, error: insertError } = await admin
+      .from("messages")
+      .insert({
+        channel: "sms",
+        direction: m.direction,
+        status: m.direction === "inbound" ? "received" : "sent",
+        contact_id: contact.id,
+        property_id: prop.id,
+        from_address:
+          m.direction === "inbound" ? "+12105550192" : "+18162804181",
+        to_address:
+          m.direction === "inbound" ? "+18162804181" : "+12105550192",
+        body: m.body,
+        created_at: new Date(baseTime + m.offsetMin * 60_000).toISOString(),
+        read_at: m.direction === "inbound" ? new Date().toISOString() : null,
+      })
+      .select("conversation_id")
+      .single();
+    if (insertError || !inserted?.conversation_id) {
+      throw new Error(
+        `message seed failed: ${insertError?.message ?? "missing conversation_id"}`,
+      );
+    }
+    if (threadId && threadId !== inserted.conversation_id) {
+      throw new Error("design messages were assigned to different conversations");
+    }
+    threadId = inserted.conversation_id;
   }
 
-  return { contactId: contact.id, propertyId: prop.id };
+  if (!threadId) throw new Error("design thread seed returned no conversation");
+  return { contactId: contact.id, propertyId: prop.id, threadId };
 }
 
 test.describe("Messages cockpit — design fidelity", () => {
@@ -117,10 +135,10 @@ test.describe("Messages cockpit — design fidelity", () => {
     const admin = adminClient();
     await resetTenantTables(admin);
     await ensureTestUser(admin);
-    const { contactId } = await seedDesignThread(admin);
+    const { threadId } = await seedDesignThread(admin);
 
     await page.setViewportSize({ width: 1440, height: 900 });
-    await page.goto(`/messages?thread=${contactId}`);
+    await page.goto(`/messages?thread=${threadId}`);
     await page.waitForSelector('[data-testid="inbox-detail-panel"]');
 
     // Page-level chrome
@@ -160,7 +178,7 @@ test.describe("Messages cockpit — design fidelity", () => {
     await page.keyboard.press("Escape");
     await expect(actionsMenu).toBeHidden();
     await expect(page.getByTestId("inbox-detail-phone")).toHaveCount(0);
-    await expect(page).toHaveURL(new RegExp(`[?&]thread=${contactId}`));
+    await expect(page).toHaveURL(new RegExp(`[?&]thread=${threadId}`));
     await expect(panel).toBeVisible();
     const openLead = page.getByTestId("inbox-detail-open-lead");
     await expect(openLead).toBeVisible();
