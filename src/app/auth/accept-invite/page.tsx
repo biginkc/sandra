@@ -1,5 +1,6 @@
-import { AcceptInviteClient } from "./accept-invite-client";
+import { redirect } from "next/navigation";
 
+/** Historical Sandra invite links no longer establish app sessions. */
 export default function AcceptInvitePage() {
-  return <AcceptInviteClient />;
+  redirect("/login?error=password_disabled");
 }

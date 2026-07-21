@@ -1,7 +1,5 @@
 "use server";
 
-import { headers } from "next/headers";
-
 import { ALLOWED_DOMAIN, isAdminEmail } from "@/lib/auth/allowlist";
 import { errFromUnknown, ok, type Result } from "@/lib/errors/result";
 import { reportError } from "@/lib/errors/report";
@@ -21,46 +19,16 @@ type MembershipAdminClient = {
   };
 };
 
-const FALLBACK_SITE_URL = "https://sandra-sooty.vercel.app";
-
-function firstForwarded(value: string | null): string | null {
-  const first = value?.split(",")[0]?.trim();
-  return first && first.length > 0 ? first : null;
-}
-
-async function inviteRedirectTo(): Promise<string> {
-  try {
-    const h = await headers();
-    const proto = firstForwarded(h.get("x-forwarded-proto")) ?? "https";
-    const host = firstForwarded(h.get("x-forwarded-host")) ?? h.get("host");
-
-    if (host) {
-      return `${proto}://${host}/auth/accept-invite`;
-    }
-  } catch {
-    // Some test and script contexts have no active request store.
-  }
-
-  const configured = process.env.NEXT_PUBLIC_SITE_URL?.trim();
-  const base = configured && configured.length > 0 ? configured : FALLBACK_SITE_URL;
-  return `${base.replace(/\/$/, "")}/auth/accept-invite`;
-}
-
 /**
- * Invite a teammate. Admin-only. Uses Supabase's built-in invite flow:
- * Supabase sends a branded email with a one-time link. Admin invites are
- * implicit-flow links, so the browser lands on /auth/accept-invite to store
- * the fragment tokens as cookies before redirecting to /auth/set-password.
- *
- * Strict about the email: must be `@bmhgroupkc.com` (the allowed
- * domain). Non-admins can't call this — they'd hit the same guard on
- * /admin/users and wouldn't see the form.
+ * Grant Sandra access without issuing a Sandra password or authentication
+ * email. Repeated grants preserve the canonical auth UID and simply upsert
+ * the requested organization membership. Hugo owns identity activation.
  */
-export async function inviteUser(
+export async function grantUserAccess(
   email: string,
   orgId = "00000000-0000-0000-0000-000000000bbb",
   role: "owner" | "member" = "member",
-): Promise<Result<{ invitedEmail: string }>> {
+): Promise<Result<{ grantedEmail: string; userId: string; created: boolean }>> {
   const trimmed = email.trim().toLowerCase();
   if (!trimmed.endsWith(`@${ALLOWED_DOMAIN}`)) {
     return {
@@ -82,30 +50,67 @@ export async function inviteUser(
         ok: false,
         error: {
           code: "NOT_ADMIN",
-          message: "Only admins can invite teammates.",
+          message: "Only admins can grant teammate access.",
         },
       };
     }
 
     const admin = createAdminClient();
-    const redirectTo = await inviteRedirectTo();
-    const { data, error } = await admin.auth.admin.inviteUserByEmail(
-      trimmed,
-      {
-        redirectTo,
-      },
-    );
-    if (error) {
-      return {
-        ok: false,
-        error: { code: "INVITE_FAILED", message: error.message },
-      };
+    const findExactUser = async () => {
+      for (let page = 1; page <= 100; page += 1) {
+        const { data, error } = await admin.auth.admin.listUsers({
+          page,
+          perPage: 200,
+        });
+        if (error) throw error;
+        const exact = data.users.find(
+          (candidate) => candidate.email?.toLowerCase() === trimmed,
+        );
+        if (exact || data.users.length < 200) return exact ?? null;
+      }
+      throw new Error("User lookup exceeded the supported page limit.");
+    };
+
+    let target = await findExactUser();
+    let created = false;
+    if (!target) {
+      const { data, error } = await admin.auth.admin.createUser({
+        email: trimmed,
+        email_confirm: true,
+      });
+      if (error || !data.user) {
+        // A concurrent grant may have created the same exact-email account
+        // after our initial lookup. Re-read once before returning failure.
+        target = await findExactUser();
+        if (!target) {
+          return {
+            ok: false,
+            error: {
+              code: "GRANT_FAILED",
+              message: error?.message ?? "User creation returned no user.",
+            },
+          };
+        }
+      } else {
+        target = data.user;
+        created = true;
+      }
     }
-    if (!data.user?.id) {
-      return {
-        ok: false,
-        error: { code: "INVITE_FAILED", message: "Invite did not return a user." },
-      };
+
+    if (!target.email_confirmed_at) {
+      const { data, error } = await admin.auth.admin.updateUserById(target.id, {
+        email_confirm: true,
+      });
+      if (error || !data.user) {
+        return {
+          ok: false,
+          error: {
+            code: "GRANT_FAILED",
+            message: error?.message ?? "Could not activate the existing user.",
+          },
+        };
+      }
+      target = data.user;
     }
 
     const { error: membershipError } = await (
@@ -113,27 +118,26 @@ export async function inviteUser(
     )
       .from("memberships")
       .upsert(
-        { user_id: data.user.id, org_id: orgId, role },
+        { user_id: target.id, org_id: orgId, role },
         { onConflict: "user_id,org_id" },
       );
     if (membershipError) {
-      await admin.auth.admin.deleteUser(data.user.id);
       return {
         ok: false,
         error: {
-          code: "INVITE_MEMBERSHIP_FAILED",
+          code: "GRANT_MEMBERSHIP_FAILED",
           message: membershipError.message,
         },
       };
     }
 
-    return ok({ invitedEmail: trimmed });
+    return ok({ grantedEmail: trimmed, userId: target.id, created });
   } catch (e) {
     reportError(e, {
-      tags: { surface: "invite_user" },
+      tags: { surface: "grant_user_access" },
       extra: { email: trimmed },
     });
-    return errFromUnknown(e, "INVITE_FAILED");
+    return errFromUnknown(e, "GRANT_FAILED");
   }
 }
 

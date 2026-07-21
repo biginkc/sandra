@@ -1,11 +1,10 @@
-import type { EmailOtpType } from "@supabase/supabase-js";
 import { NextResponse, type NextRequest } from "next/server";
 
-import { createClient } from "@/lib/supabase/server";
 import { isEmailAllowed } from "@/lib/auth/allowlist";
 import { sanitizeNextPath } from "@/lib/auth/safe-next";
+import { createClient } from "@/lib/supabase/server";
 
-const EMAIL_OTP_TYPES = new Set<string>([
+const EMAIL_FLOW_TYPES = new Set([
   "signup",
   "invite",
   "magiclink",
@@ -14,75 +13,64 @@ const EMAIL_OTP_TYPES = new Set<string>([
   "email",
 ]);
 
+function isOAuthAuthenticationMethod(amr: unknown): boolean {
+  if (!Array.isArray(amr)) return false;
+  const oauthMethods = new Set(["oauth", "oauth_provider/authorization_code"]);
+  return amr.some(
+    (entry) =>
+      (typeof entry === "string" && oauthMethods.has(entry)) ||
+      (typeof entry === "object" &&
+        entry !== null &&
+        "method" in entry &&
+        typeof entry.method === "string" &&
+        oauthMethods.has(entry.method)),
+  );
+}
+
 /**
- * Supabase OAuth / invite / magic-link callback. Exchanges the one-time
- * `code` param from the email link for a durable session cookie, then
- * redirects the user onward.
+ * Complete only Hugo's OIDC/PKCE code exchange.
  *
- * Invite flow: the user opens their "You've been invited to Sandra CRM"
- * email → clicks the link → lands here with `?code=...&type=invite`
- * → we exchange for a session → redirect to `/auth/set-password` so
- * they can set a password before anything else.
- *
- * Future OAuth (Google/Apple/etc.) will land here with `type=oauth`
- * and we'll route to `/leads` (or the `next` param).
+ * Historical invite, recovery, signup, and magic-link callbacks are rejected
+ * before token verification or code exchange so those links cannot establish
+ * a Sandra session even while an old email is still in someone's inbox.
  */
 export async function GET(request: NextRequest) {
   const { searchParams, origin } = request.nextUrl;
   const code = searchParams.get("code");
-  const type = searchParams.get("type");
+  const type = searchParams.get("type")?.toLowerCase();
   const tokenHash = searchParams.get("token_hash");
-  const next = searchParams.get("next");
 
-  if (tokenHash && type && EMAIL_OTP_TYPES.has(type)) {
-    const supabase = await createClient();
-    const { error, data } = await supabase.auth.verifyOtp({
-      token_hash: tokenHash,
-      type: type as EmailOtpType,
-    });
-    if (error || !data.session) {
-      return NextResponse.redirect(`${origin}/login?error=invite_failed`);
-    }
-
-    const email = data.session.user.email;
-    if (!isEmailAllowed(email)) {
-      await supabase.auth.signOut();
-      return NextResponse.redirect(`${origin}/login?error=domain`);
-    }
-
-    if (type === "invite" || type === "recovery" || type === "signup") {
-      return NextResponse.redirect(`${origin}/auth/set-password`);
-    }
-
-    const target = sanitizeNextPath(next, "/dashboard");
-    return NextResponse.redirect(`${origin}${target}`);
+  if (tokenHash || (type && EMAIL_FLOW_TYPES.has(type))) {
+    return NextResponse.redirect(`${origin}/login?error=password_disabled`);
   }
-
   if (!code) {
-    return NextResponse.redirect(`${origin}/login?error=invite_failed`);
+    return NextResponse.redirect(`${origin}/login?error=sso`);
   }
 
   const supabase = await createClient();
   const { error, data } = await supabase.auth.exchangeCodeForSession(code);
   if (error || !data.session) {
-    return NextResponse.redirect(`${origin}/login?error=invite_failed`);
+    return NextResponse.redirect(`${origin}/login?error=sso`);
   }
 
-  // Domain allowlist — if Supabase somehow authed a non-allowed email
-  // (e.g. a stale invite for a user whose domain changed), sign out
-  // immediately so they can't proceed.
-  const email = data.session.user.email;
-  if (!isEmailAllowed(email)) {
-    await supabase.auth.signOut();
+  // Email PKCE links can arrive with only `?code=...` and no `type` marker.
+  // Verify the signed AMR claim instead of trusting callback parameters so a
+  // stale magic, invite, or recovery link cannot create a Sandra session.
+  const { data: claimsData, error: claimsError } =
+    await supabase.auth.getClaims(data.session.access_token);
+  if (
+    claimsError ||
+    !isOAuthAuthenticationMethod(claimsData?.claims.amr)
+  ) {
+    await supabase.auth.signOut({ scope: "local" });
+    return NextResponse.redirect(`${origin}/login?error=password_disabled`);
+  }
+
+  if (!isEmailAllowed(data.session.user.email)) {
+    await supabase.auth.signOut({ scope: "local" });
     return NextResponse.redirect(`${origin}/login?error=domain`);
   }
 
-  // Invite / recovery / first-time flows route to set-password so the
-  // new team member can pick their credentials before landing in the app.
-  if (type === "invite" || type === "recovery" || type === "signup") {
-    return NextResponse.redirect(`${origin}/auth/set-password`);
-  }
-
-  const target = sanitizeNextPath(next, "/dashboard");
+  const target = sanitizeNextPath(searchParams.get("next"), "/dashboard");
   return NextResponse.redirect(`${origin}${target}`);
 }

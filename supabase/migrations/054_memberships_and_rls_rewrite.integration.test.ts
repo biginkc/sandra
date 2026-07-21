@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { AuthorizationError } from "@/lib/errors/classes";
 import { requireOrgMembershipByResource } from "@/lib/auth/require-org-membership";
-import { inviteUser } from "@/app/(dashboard)/admin/users/actions";
+import { grantUserAccess } from "@/app/(dashboard)/admin/users/actions";
 import { createTestClient } from "@tests/integration/client";
 import { resetTenantTables } from "@tests/integration/reset";
 import {
@@ -231,7 +231,7 @@ describe("Migration 054 — memberships foundation + RLS rewrite", () => {
     ]);
   });
 
-  it("creates memberships from inviteUser and rolls back auth users on membership failure", async () => {
+  it("creates memberships from passwordless grants and preserves users on membership failure", async () => {
     const invitedUserId = crypto.randomUUID();
     const upsert = vi.fn().mockResolvedValue({ error: null });
     mocks.serverClient = {
@@ -244,17 +244,24 @@ describe("Migration 054 — memberships foundation + RLS rewrite", () => {
     mocks.adminClient = {
       auth: {
         admin: {
-          inviteUserByEmail: vi.fn().mockResolvedValue({
+          listUsers: vi.fn().mockResolvedValue({
+            data: { users: [] },
+            error: null,
+          }),
+          createUser: vi.fn().mockResolvedValue({
             data: { user: { id: invitedUserId } },
             error: null,
           }),
-          deleteUser: vi.fn().mockResolvedValue({ error: null }),
         },
       },
       from: vi.fn(() => ({ upsert })),
     };
 
-    const result = await inviteUser("newperson@bmhgroupkc.com", TEST_ORG_B_ID, "owner");
+    const result = await grantUserAccess(
+      "newperson@bmhgroupkc.com",
+      TEST_ORG_B_ID,
+      "owner",
+    );
     expect(result.ok).toBe(true);
     expect(upsert).toHaveBeenCalledWith(
       {
@@ -265,16 +272,18 @@ describe("Migration 054 — memberships foundation + RLS rewrite", () => {
       { onConflict: "user_id,org_id" },
     );
 
-    const rollbackUserId = crypto.randomUUID();
-    const deleteUser = vi.fn().mockResolvedValue({ error: null });
+    const preservedUserId = crypto.randomUUID();
     mocks.adminClient = {
       auth: {
         admin: {
-          inviteUserByEmail: vi.fn().mockResolvedValue({
-            data: { user: { id: rollbackUserId } },
+          listUsers: vi.fn().mockResolvedValue({
+            data: { users: [] },
             error: null,
           }),
-          deleteUser,
+          createUser: vi.fn().mockResolvedValue({
+            data: { user: { id: preservedUserId } },
+            error: null,
+          }),
         },
       },
       from: vi.fn(() => ({
@@ -284,9 +293,11 @@ describe("Migration 054 — memberships foundation + RLS rewrite", () => {
       })),
     };
 
-    const failure = await inviteUser("rollback@bmhgroupkc.com");
+    const failure = await grantUserAccess("preserve@bmhgroupkc.com");
     expect(failure.ok).toBe(false);
-    expect(deleteUser).toHaveBeenCalledWith(rollbackUserId);
+    expect(failure).toMatchObject({
+      error: { code: "GRANT_MEMBERSHIP_FAILED" },
+    });
   });
 
   it("throws AuthorizationError when resource lookup is hidden by RLS", async () => {

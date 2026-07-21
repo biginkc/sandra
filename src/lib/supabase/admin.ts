@@ -4,8 +4,8 @@ import type { Database } from "./types";
 
 /**
  * Build a Supabase client with the service-role key — bypasses RLS and
- * unlocks the `auth.admin.*` methods (inviteUserByEmail, listUsers,
- * deleteUser, etc.) that the app uses for team management.
+ * unlocks the `auth.admin.*` methods (createUser, listUsers, deleteUser,
+ * etc.) that the app uses for team management.
  *
  * NEVER return this from a server component rendered for an untrusted
  * user. Only call from server actions that have already checked the

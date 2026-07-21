@@ -55,7 +55,7 @@ export default async function AdminUsersPage() {
       <PageHeader
         breadcrumb={[{ label: "Admin" }, { label: "Team" }]}
         title="Team"
-        description="Invite a teammate to Sandra CRM. They get a one-time sign-in link by email, pick a password, and land in the app. Only emails on the bmhgroupkc.com domain are permitted."
+        description="Grant a teammate access to Sandra without creating a separate password or sending a Sandra invite. They sign in through Hugo with the same bmhgroupkc.com email."
       />
 
       {error ? (
@@ -137,4 +137,3 @@ function UserRowView({ row }: { row: UserRow }) {
     </TableRow>
   );
 }
-

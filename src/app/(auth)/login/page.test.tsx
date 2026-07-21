@@ -1,124 +1,61 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const { requestPasswordReset, signIn, signInWithHugo } = vi.hoisted(() => ({
-  requestPasswordReset: vi.fn(),
-  signIn: vi.fn(),
-  signInWithHugo: vi.fn(),
-}));
+const { signInWithHugo } = vi.hoisted(() => ({ signInWithHugo: vi.fn() }));
 
-vi.mock("./actions", () => ({
-  requestPasswordReset,
-  signIn,
-  signInWithHugo,
-}));
-
-vi.mock("./login-background", () => ({
-  // jsdom can't play <video>; the background is visual-only.
-  LoginBackground: () => null,
-}));
-
+vi.mock("./actions", () => ({ signInWithHugo }));
+vi.mock("./login-background", () => ({ LoginBackground: () => null }));
 vi.mock("next/navigation", () => ({
   useSearchParams: () => new URLSearchParams("next=%2Fleads%2F5"),
 }));
 
-async function renderLoginPage(flag: string | undefined) {
-  vi.stubEnv("NEXT_PUBLIC_HUGO_SSO", flag ?? "");
-  vi.resetModules();
+async function renderLoginPage() {
   const { default: LoginPage } = await import("./page");
-  const view = render(<LoginPage />);
-  // Let the page's Suspense boundary settle inside act() before asserting.
-  // ("Forgot password?" only exists in the real form, not the fallback.)
-  await screen.findByText(/forgot password/i);
-  return view;
+  render(<LoginPage />);
+  await screen.findByRole("button", { name: /continue with hugo/i });
 }
 
 beforeEach(() => {
-  signIn.mockResolvedValue(null);
-  requestPasswordReset.mockResolvedValue({ ok: true, data: null });
+  signInWithHugo.mockResolvedValue(undefined);
 });
 
 afterEach(() => {
   vi.clearAllMocks();
-  vi.unstubAllEnvs();
 });
 
-describe("login page — Hugo SSO", () => {
-  it("hides the SSO button when the flag is off", async () => {
-    await renderLoginPage(undefined);
-    expect(
-      screen.queryByRole("button", { name: /continue with hugo/i }),
-    ).not.toBeInTheDocument();
-  });
-
-  it("shows the SSO button when the flag is on", async () => {
-    await renderLoginPage("1");
+describe("Hugo-only login page", () => {
+  it("exposes only Continue with Hugo and no password or recovery controls", async () => {
+    await renderLoginPage();
     expect(
       screen.getByRole("button", { name: /continue with hugo/i }),
     ).toBeInTheDocument();
+    expect(screen.queryByLabelText(/email/i)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/password/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/forgot password/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/^sign in$/i)).not.toBeInTheDocument();
   });
 
-  it("passes the sanitized-on-the-server next value through the SSO form", async () => {
-    let resolveSso: () => void = () => {};
-    signInWithHugo.mockImplementation(
-      () =>
-        new Promise<void>((resolve) => {
-          resolveSso = resolve;
-        }),
-    );
-    await renderLoginPage("1");
-
-    fireEvent.click(
-      screen.getByRole("button", { name: /continue with hugo/i }),
-    );
+  it("passes next to server-side sanitization", async () => {
+    await renderLoginPage();
+    fireEvent.click(screen.getByRole("button", { name: /continue with hugo/i }));
 
     await waitFor(() => expect(signInWithHugo).toHaveBeenCalledTimes(1));
-    const formData = signInWithHugo.mock.calls[0][1] as FormData;
-    expect(formData.get("next")).toBe("/leads/5");
-    resolveSso();
+    const submitted = signInWithHugo.mock.calls[0][1] as FormData;
+    expect(submitted.get("next")).toBe("/leads/5");
   });
 
-  it("locks both forms while SSO initiation is pending and blocks duplicate submits", async () => {
+  it("locks the sole auth control and prevents duplicate PKCE starts", async () => {
     let resolveSso: () => void = () => {};
     signInWithHugo.mockImplementation(
-      () =>
-        new Promise<void>((resolve) => {
-          resolveSso = resolve;
-        }),
+      () => new Promise<void>((resolve) => { resolveSso = resolve; }),
     );
-    await renderLoginPage("1");
+    await renderLoginPage();
 
-    const ssoButton = screen.getByRole("button", {
-      name: /continue with hugo/i,
-    });
-    fireEvent.click(ssoButton);
-
-    // While the PKCE initiation is in flight, every path that could start
-    // a second auth flow (and clobber the single verifier cookie) is off.
+    fireEvent.click(screen.getByRole("button", { name: /continue with hugo/i }));
     await waitFor(() =>
-      expect(
-        screen.getByRole("button", { name: /redirecting/i }),
-      ).toBeDisabled(),
+      expect(screen.getByRole("button", { name: /opening hugo/i })).toBeDisabled(),
     );
-    expect(screen.getByRole("button", { name: /sign in/i })).toBeDisabled();
-    expect(screen.getByLabelText("Email")).toBeDisabled();
-    expect(screen.getByLabelText("Password")).toBeDisabled();
-    // Password recovery shares the same PKCE verifier cookie — the reset
-    // entry point must be inert too, or a mid-flight reset submit clobbers
-    // the SSO verifier and breaks the callback.
-    const forgotButton = screen.getByRole("button", {
-      name: /forgot password/i,
-    });
-    expect(forgotButton).toBeDisabled();
-    fireEvent.click(forgotButton);
-    expect(
-      screen.queryByRole("button", { name: /send link/i }),
-    ).not.toBeInTheDocument();
-
-    // Rapid double-submit: clicking the (now disabled) button again must
-    // not start a concurrent flow — disabled buttons have no activation
-    // behavior, so no second form submission happens.
-    fireEvent.click(screen.getByRole("button", { name: /redirecting/i }));
+    fireEvent.click(screen.getByRole("button", { name: /opening hugo/i }));
     expect(signInWithHugo).toHaveBeenCalledTimes(1);
 
     resolveSso();
@@ -127,59 +64,5 @@ describe("login page — Hugo SSO", () => {
         screen.getByRole("button", { name: /continue with hugo/i }),
       ).toBeEnabled(),
     );
-    expect(screen.getByRole("button", { name: /sign in/i })).toBeEnabled();
-    expect(
-      screen.getByRole("button", { name: /forgot password/i }),
-    ).toBeEnabled();
-  });
-
-  it("locks the SSO button while a password sign-in is pending", async () => {
-    let resolveSignIn: (v: null) => void = () => {};
-    signIn.mockImplementation(
-      () =>
-        new Promise<null>((resolve) => {
-          resolveSignIn = resolve;
-        }),
-    );
-    await renderLoginPage("1");
-
-    fireEvent.change(screen.getByLabelText("Email"), {
-      target: { value: "user@bmhgroupkc.com" },
-    });
-    fireEvent.change(screen.getByLabelText("Password"), {
-      target: { value: "hunter22" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: /^sign in$/i }));
-
-    await waitFor(() =>
-      expect(
-        screen.getByRole("button", { name: /signing in/i }),
-      ).toBeDisabled(),
-    );
-    expect(
-      screen.getByRole("button", { name: /continue with hugo/i }),
-    ).toBeDisabled();
-    // Same cross-form idiom: the reset entry point is locked while a
-    // password sign-in is in flight.
-    const forgotButton = screen.getByRole("button", {
-      name: /forgot password/i,
-    });
-    expect(forgotButton).toBeDisabled();
-    // The disabled toggle must be inert: clicking it never opens the reset
-    // view, so no mid-flight reset submit can race the sign-in.
-    fireEvent.click(forgotButton);
-    expect(
-      screen.queryByRole("button", { name: /send link/i }),
-    ).not.toBeInTheDocument();
-
-    resolveSignIn(null);
-    await waitFor(() =>
-      expect(
-        screen.getByRole("button", { name: /continue with hugo/i }),
-      ).toBeEnabled(),
-    );
-    expect(
-      screen.getByRole("button", { name: /forgot password/i }),
-    ).toBeEnabled();
   });
 });
