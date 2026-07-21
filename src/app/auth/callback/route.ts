@@ -3,6 +3,7 @@ import { NextResponse, type NextRequest } from "next/server";
 
 import { createClient } from "@/lib/supabase/server";
 import { isEmailAllowed } from "@/lib/auth/allowlist";
+import { sanitizeNextPath } from "@/lib/auth/safe-next";
 
 const EMAIL_OTP_TYPES = new Set<string>([
   "signup",
@@ -53,7 +54,7 @@ export async function GET(request: NextRequest) {
       return NextResponse.redirect(`${origin}/auth/set-password`);
     }
 
-    const target = next && next.startsWith("/") ? next : "/dashboard";
+    const target = sanitizeNextPath(next, "/dashboard");
     return NextResponse.redirect(`${origin}${target}`);
   }
 
@@ -82,6 +83,6 @@ export async function GET(request: NextRequest) {
     return NextResponse.redirect(`${origin}/auth/set-password`);
   }
 
-  const target = next && next.startsWith("/") ? next : "/dashboard";
+  const target = sanitizeNextPath(next, "/dashboard");
   return NextResponse.redirect(`${origin}${target}`);
 }
