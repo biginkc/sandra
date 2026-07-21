@@ -9,7 +9,6 @@ export function isPublicPath(path: string): boolean {
     path.startsWith("/auth") ||
     path.startsWith("/brand") ||
     path.startsWith("/api/webhooks") ||
-    path.startsWith("/api/oauth") ||
     path.startsWith("/api/cron") ||
     path.startsWith("/api/internal/jitter") ||
     path.startsWith("/api/internal/closer/practice-outcomes/") ||

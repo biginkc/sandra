@@ -37,10 +37,16 @@ function mockProtectedSession({
 }
 
 describe("isPublicPath", () => {
-  it("allows OAuth and webhook routes to handle their own auth", () => {
-    expect(isPublicPath("/api/oauth/slack/start")).toBe(true);
-    expect(isPublicPath("/api/oauth/slack/callback")).toBe(true);
+  it("keeps browser-session OAuth routes behind Sandra membership", () => {
+    expect(isPublicPath("/api/oauth/google/start")).toBe(false);
+    expect(isPublicPath("/api/oauth/google/callback")).toBe(false);
+    expect(isPublicPath("/api/oauth/slack/start")).toBe(false);
+    expect(isPublicPath("/api/oauth/slack/callback")).toBe(false);
+  });
+
+  it("preserves independently authenticated webhook and cron exemptions", () => {
     expect(isPublicPath("/api/webhooks/slack/actions")).toBe(true);
+    expect(isPublicPath("/api/cron/sequence-tick")).toBe(true);
   });
 
   it("allows signed Jitter internal API routes to handle their own auth", () => {
@@ -142,4 +148,60 @@ describe("updateSession membership authorization", () => {
       "https://sandra.test/login?error=access",
     );
   });
+
+  it.each([
+    "/api/oauth/google/start",
+    "/api/oauth/google/callback?code=seeded&state=seeded",
+    "/api/oauth/slack/start",
+    "/api/oauth/slack/callback?code=seeded&state=seeded",
+  ])("denies stale no-membership sessions before browser OAuth route %s", async (path) => {
+    const { from, signOut } = mockProtectedSession();
+    const response = await updateSession(
+      new NextRequest(`https://sandra.test${path}`, {
+        headers: {
+          cookie:
+            "sb-copflsklaefwzipsrjqz-auth-token.0=stale-session-chunk",
+        },
+      }),
+    );
+
+    expect(from).toHaveBeenCalledWith("memberships");
+    expect(signOut).toHaveBeenCalledWith({ scope: "local" });
+    expect(response.headers.get("location")).toBe(
+      "https://sandra.test/login?error=access",
+    );
+  });
+
+  it.each([
+    "/api/oauth/google/start",
+    "/api/oauth/google/callback?code=member&state=member",
+    "/api/oauth/slack/start",
+    "/api/oauth/slack/callback?code=member&state=member",
+  ])("lets provisioned Hugo users reach browser OAuth route %s", async (path) => {
+    const { signOut } = mockProtectedSession({
+      memberships: [{ user_id: "seeded-auth-user" }],
+    });
+
+    const response = await updateSession(
+      new NextRequest(`https://sandra.test${path}`),
+    );
+
+    expect(response.status).toBe(200);
+    expect(signOut).not.toHaveBeenCalled();
+  });
+
+  it.each(["/login", "/auth/hugo", "/auth/callback?code=hugo"]) (
+    "keeps the public login flow loop-free at %s",
+    async (path) => {
+      const { from, signOut } = mockProtectedSession();
+
+      const response = await updateSession(
+        new NextRequest(`https://sandra.test${path}`),
+      );
+
+      expect(response.status).toBe(200);
+      expect(from).not.toHaveBeenCalled();
+      expect(signOut).not.toHaveBeenCalled();
+    },
+  );
 });
