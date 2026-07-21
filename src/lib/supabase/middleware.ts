@@ -64,12 +64,47 @@ export async function updateSession(request: NextRequest) {
   // /login error banner itself is reachable + /auth/* flows can
   // complete before we enforce.
   if (user && !isPublic && !isEmailAllowed(user.email)) {
-    await supabase.auth.signOut();
+    try {
+      await supabase.auth.signOut();
+    } catch {
+      // Access is denied by the redirect even if Auth cookie cleanup fails.
+    }
     const url = request.nextUrl.clone();
     url.pathname = "/login";
     url.search = "";
     url.searchParams.set("error", "domain");
     return NextResponse.redirect(url);
+  }
+
+  // Callback cleanup is best-effort: auth-js can return an API error before
+  // removing its local session cookies. Re-authorize every protected request
+  // against Sandra's own membership table so a surviving BMH-domain Auth
+  // cookie can never become application access.
+  if (user && !isPublic) {
+    let hasMembership = false;
+    try {
+      const { data, error } = await supabase
+        .from("memberships")
+        .select("user_id")
+        .eq("user_id", user.id)
+        .limit(1);
+      hasMembership = !error && Boolean(data?.length);
+    } catch {
+      hasMembership = false;
+    }
+
+    if (!hasMembership) {
+      try {
+        await supabase.auth.signOut({ scope: "local" });
+      } catch {
+        // The membership gate still denies this request if cleanup fails.
+      }
+      const url = request.nextUrl.clone();
+      url.pathname = "/login";
+      url.search = "";
+      url.searchParams.set("error", "access");
+      return NextResponse.redirect(url);
+    }
   }
 
   return supabaseResponse;

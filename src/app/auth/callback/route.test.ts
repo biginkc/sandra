@@ -365,5 +365,21 @@ describe("auth callback route", () => {
       );
       expectFlowConsumed(response);
     });
+
+    it("still consumes the flow if fail-closed sign-out returns an error", async () => {
+      const { getClaims, signOut } = mockAuth();
+      getClaims.mockRejectedValue(new Error("claims unavailable"));
+      signOut.mockResolvedValue({
+        error: { message: "remote sign-out failed before cookie removal" },
+      });
+
+      const response = await GET(hugoCallbackRequest("code=signout-error"));
+
+      expect(signOut).toHaveBeenCalledWith({ scope: "local" });
+      expect(response.headers.get("location")).toBe(
+        "https://sandra.test/login?error=access",
+      );
+      expectFlowConsumed(response);
+    });
   });
 });
