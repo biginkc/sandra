@@ -6,7 +6,7 @@ import { Suspense, useActionState, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 
-import { requestPasswordReset, signIn, signInWithBmhId } from "./actions";
+import { requestPasswordReset, signIn, signInWithHugo } from "./actions";
 import { LoginBackground } from "./login-background";
 
 // Flipped on per-app (Vercel env var) once the Hugo pilot gate passes.
@@ -66,7 +66,7 @@ function LoginForm() {
   // shared across both forms, so a rapid double-submit (or a password
   // submit racing an SSO redirect) can't start concurrent PKCE flows and
   // clobber the single code-verifier cookie.
-  const [, ssoAction, ssoPending] = useActionState(signInWithBmhId, undefined);
+  const [, ssoAction, ssoPending] = useActionState(signInWithHugo, undefined);
   const [resetState, resetAction, resetPending] = useActionState(
     requestPasswordReset,
     null,

@@ -73,7 +73,7 @@ export async function requestPasswordReset(
  * Takes `_prevState` so the client can drive it through `useActionState`
  * (the repo's pending-state idiom) and lock the forms while it runs.
  */
-export async function signInWithBmhId(
+export async function signInWithHugo(
   _prevState: void,
   formData: FormData,
 ): Promise<void> {

@@ -33,7 +33,7 @@ vi.mock("next/navigation", () => ({
   redirect: redirectMock,
 }));
 
-import { signIn, signInWithBmhId } from "./actions";
+import { signIn, signInWithHugo } from "./actions";
 
 /** Run an action and capture the URL it redirected to (or null). */
 async function redirectedTo(run: () => Promise<unknown>): Promise<string | null> {
@@ -65,12 +65,12 @@ afterEach(() => {
   vi.unstubAllEnvs();
 });
 
-describe("signInWithBmhId", () => {
+describe("signInWithHugo", () => {
   describe("flag enforcement (fail closed)", () => {
     it("redirects to /login without touching Supabase when the flag is unset", async () => {
       vi.stubEnv("NEXT_PUBLIC_HUGO_SSO", "");
       const target = await redirectedTo(() =>
-        signInWithBmhId(undefined, ssoFormData("/leads/5")),
+        signInWithHugo(undefined, ssoFormData("/leads/5")),
       );
       expect(target).toBe("/login");
       expect(createClient).not.toHaveBeenCalled();
@@ -79,7 +79,7 @@ describe("signInWithBmhId", () => {
     it('redirects to /login when the flag is any value other than "1"', async () => {
       vi.stubEnv("NEXT_PUBLIC_HUGO_SSO", "true");
       const target = await redirectedTo(() =>
-        signInWithBmhId(undefined, ssoFormData()),
+        signInWithHugo(undefined, ssoFormData()),
       );
       expect(target).toBe("/login");
       expect(createClient).not.toHaveBeenCalled();
@@ -100,7 +100,7 @@ describe("signInWithBmhId", () => {
 
     it("wires the custom:hugo provider and callback redirect, then redirects to the IdP", async () => {
       const target = await redirectedTo(() =>
-        signInWithBmhId(undefined, ssoFormData("/leads/5")),
+        signInWithHugo(undefined, ssoFormData("/leads/5")),
       );
       expect(signInWithOAuth).toHaveBeenCalledWith({
         provider: "custom:hugo",
@@ -112,7 +112,7 @@ describe("signInWithBmhId", () => {
     });
 
     it("omits next from the callback URL when none is supplied", async () => {
-      await redirectedTo(() => signInWithBmhId(undefined, ssoFormData()));
+      await redirectedTo(() => signInWithHugo(undefined, ssoFormData()));
       expect(signInWithOAuth).toHaveBeenCalledWith({
         provider: "custom:hugo",
         options: { redirectTo: "https://sandra.test/auth/callback" },
@@ -127,7 +127,7 @@ describe("signInWithBmhId", () => {
       "/leads\r\nSet-Cookie: x=1",
       "/login?error=loop",
     ])("drops malicious or looping next value %j", async (bad) => {
-      await redirectedTo(() => signInWithBmhId(undefined, ssoFormData(bad)));
+      await redirectedTo(() => signInWithHugo(undefined, ssoFormData(bad)));
       expect(signInWithOAuth).toHaveBeenCalledWith({
         provider: "custom:hugo",
         options: { redirectTo: "https://sandra.test/auth/callback" },
@@ -140,7 +140,7 @@ describe("signInWithBmhId", () => {
         error: { message: "provider unavailable" },
       });
       const target = await redirectedTo(() =>
-        signInWithBmhId(undefined, ssoFormData("/leads/5")),
+        signInWithHugo(undefined, ssoFormData("/leads/5")),
       );
       expect(target).toBe("/login?error=sso&next=%2Fleads%2F5");
     });
@@ -151,7 +151,7 @@ describe("signInWithBmhId", () => {
         error: { message: "provider unavailable" },
       });
       const target = await redirectedTo(() =>
-        signInWithBmhId(undefined, ssoFormData()),
+        signInWithHugo(undefined, ssoFormData()),
       );
       expect(target).toBe("/login?error=sso");
     });
@@ -162,7 +162,7 @@ describe("signInWithBmhId", () => {
         error: { message: "provider unavailable" },
       });
       const target = await redirectedTo(() =>
-        signInWithBmhId(undefined, ssoFormData("//evil.com")),
+        signInWithHugo(undefined, ssoFormData("//evil.com")),
       );
       expect(target).toBe("/login?error=sso");
     });
@@ -170,7 +170,7 @@ describe("signInWithBmhId", () => {
     it("redirects to /login?error=sso when Supabase throws", async () => {
       createClient.mockRejectedValue(new Error("boom"));
       const target = await redirectedTo(() =>
-        signInWithBmhId(undefined, ssoFormData()),
+        signInWithHugo(undefined, ssoFormData()),
       );
       expect(target).toBe("/login?error=sso");
     });

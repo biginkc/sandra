@@ -1,16 +1,16 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const { requestPasswordReset, signIn, signInWithBmhId } = vi.hoisted(() => ({
+const { requestPasswordReset, signIn, signInWithHugo } = vi.hoisted(() => ({
   requestPasswordReset: vi.fn(),
   signIn: vi.fn(),
-  signInWithBmhId: vi.fn(),
+  signInWithHugo: vi.fn(),
 }));
 
 vi.mock("./actions", () => ({
   requestPasswordReset,
   signIn,
-  signInWithBmhId,
+  signInWithHugo,
 }));
 
 vi.mock("./login-background", () => ({
@@ -60,7 +60,7 @@ describe("login page — Hugo SSO", () => {
 
   it("passes the sanitized-on-the-server next value through the SSO form", async () => {
     let resolveSso: () => void = () => {};
-    signInWithBmhId.mockImplementation(
+    signInWithHugo.mockImplementation(
       () =>
         new Promise<void>((resolve) => {
           resolveSso = resolve;
@@ -72,15 +72,15 @@ describe("login page — Hugo SSO", () => {
       screen.getByRole("button", { name: /continue with hugo/i }),
     );
 
-    await waitFor(() => expect(signInWithBmhId).toHaveBeenCalledTimes(1));
-    const formData = signInWithBmhId.mock.calls[0][1] as FormData;
+    await waitFor(() => expect(signInWithHugo).toHaveBeenCalledTimes(1));
+    const formData = signInWithHugo.mock.calls[0][1] as FormData;
     expect(formData.get("next")).toBe("/leads/5");
     resolveSso();
   });
 
   it("locks both forms while SSO initiation is pending and blocks duplicate submits", async () => {
     let resolveSso: () => void = () => {};
-    signInWithBmhId.mockImplementation(
+    signInWithHugo.mockImplementation(
       () =>
         new Promise<void>((resolve) => {
           resolveSso = resolve;
@@ -119,7 +119,7 @@ describe("login page — Hugo SSO", () => {
     // not start a concurrent flow — disabled buttons have no activation
     // behavior, so no second form submission happens.
     fireEvent.click(screen.getByRole("button", { name: /redirecting/i }));
-    expect(signInWithBmhId).toHaveBeenCalledTimes(1);
+    expect(signInWithHugo).toHaveBeenCalledTimes(1);
 
     resolveSso();
     await waitFor(() =>
