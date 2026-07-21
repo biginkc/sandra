@@ -269,6 +269,7 @@ describe("auth callback route", () => {
     });
 
     it("reports an SSO error when the code exchange fails", async () => {
+      const signOut = vi.fn();
       createClient.mockResolvedValue({
         auth: {
           exchangeCodeForSession: vi.fn().mockResolvedValue({
@@ -276,7 +277,7 @@ describe("auth callback route", () => {
             error: { message: "invalid code" },
           }),
           getClaims: vi.fn(),
-          signOut: vi.fn(),
+          signOut,
         },
       });
       const response = await GET(
@@ -285,6 +286,84 @@ describe("auth callback route", () => {
       expect(response.headers.get("location")).toBe(
         "https://sandra.test/login?error=sso",
       );
+      expect(signOut).not.toHaveBeenCalled();
+      expectFlowConsumed(response);
+    });
+
+    it("signs out and consumes the flow when code exchange throws", async () => {
+      const signOut = vi.fn();
+      createClient.mockResolvedValue({
+        auth: {
+          exchangeCodeForSession: vi
+            .fn()
+            .mockRejectedValue(new Error("exchange transport failed")),
+          getClaims: vi.fn(),
+          signOut,
+        },
+      });
+
+      const response = await GET(hugoCallbackRequest("code=exchange-throw"));
+
+      expect(signOut).toHaveBeenCalledWith({ scope: "local" });
+      expect(response.headers.get("location")).toBe(
+        "https://sandra.test/login?error=sso",
+      );
+      expectFlowConsumed(response);
+    });
+
+    it("signs out if an anomalous exchange returns both a session and an error", async () => {
+      const { exchangeCodeForSession, signOut } = mockAuth();
+      exchangeCodeForSession.mockResolvedValue({
+        data: { session },
+        error: { message: "ambiguous exchange" },
+      });
+
+      const response = await GET(hugoCallbackRequest("code=ambiguous"));
+
+      expect(signOut).toHaveBeenCalledWith({ scope: "local" });
+      expect(response.headers.get("location")).toBe(
+        "https://sandra.test/login?error=sso",
+      );
+      expectFlowConsumed(response);
+    });
+
+    it("signs out and consumes the flow when claims verification throws after exchange", async () => {
+      const { getClaims, signOut } = mockAuth();
+      getClaims.mockRejectedValue(new Error("claims unavailable"));
+
+      const response = await GET(hugoCallbackRequest("code=claims-throw"));
+
+      expect(signOut).toHaveBeenCalledWith({ scope: "local" });
+      expect(response.headers.get("location")).toBe(
+        "https://sandra.test/login?error=access",
+      );
+      expectFlowConsumed(response);
+    });
+
+    it("signs out and consumes the flow when membership verification throws", async () => {
+      const { limit, signOut } = mockAuth();
+      limit.mockRejectedValue(new Error("membership unavailable"));
+
+      const response = await GET(hugoCallbackRequest("code=membership-throw"));
+
+      expect(signOut).toHaveBeenCalledWith({ scope: "local" });
+      expect(response.headers.get("location")).toBe(
+        "https://sandra.test/login?error=access",
+      );
+      expectFlowConsumed(response);
+    });
+
+    it("still consumes the flow if fail-closed sign-out itself throws", async () => {
+      const { getClaims, signOut } = mockAuth();
+      getClaims.mockRejectedValue(new Error("claims unavailable"));
+      signOut.mockRejectedValue(new Error("sign out unavailable"));
+
+      const response = await GET(hugoCallbackRequest("code=double-throw"));
+
+      expect(response.headers.get("location")).toBe(
+        "https://sandra.test/login?error=access",
+      );
+      expectFlowConsumed(response);
     });
   });
 });

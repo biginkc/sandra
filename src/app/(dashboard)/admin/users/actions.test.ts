@@ -32,11 +32,15 @@ function mockAdminClient({
   users = [] as MockUser[],
   membership = null as { role: string } | null,
   upsertError = null as { message: string } | null,
+  membershipReads,
+  upsertThrows,
   beforeUpsert,
 }: {
   users?: MockUser[];
   membership?: { role: string } | null;
   upsertError?: { message: string } | null;
+  membershipReads?: Array<{ role: string } | null | Error>;
+  upsertThrows?: Error;
   beforeUpsert?: (state: {
     users: MockUser[];
     membership: { role: string } | null;
@@ -80,15 +84,21 @@ function mockAdminClient({
     state.users = state.users.filter((candidate) => candidate.id !== id);
     return { error: null };
   });
-  const maybeSingle = vi.fn().mockImplementation(async () => ({
-    data: state.membership,
-    error: null,
-  }));
+  const queuedMembershipReads = [...(membershipReads ?? [])];
+  const maybeSingle = vi.fn().mockImplementation(async () => {
+    const next = queuedMembershipReads.shift();
+    if (next instanceof Error) throw next;
+    return {
+      data: next === undefined ? state.membership : next,
+      error: null,
+    };
+  });
   const secondEq = vi.fn(() => ({ maybeSingle }));
   const firstEq = vi.fn(() => ({ eq: secondEq }));
   const select = vi.fn(() => ({ eq: firstEq }));
   const upsert = vi.fn().mockImplementation(async (values) => {
     await beforeUpsert?.(state);
+    if (upsertThrows) throw upsertThrows;
     if (upsertError) return { error: upsertError };
     state.membership ??= { role: values.role };
     return { error: null };
@@ -136,6 +146,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.clearAllMocks();
   vi.unstubAllEnvs();
 });
@@ -160,6 +171,7 @@ describe("grantUserAccess", () => {
       app_metadata: {
         sandra_provisioning_state: "pending",
         sandra_provisioning_attempt: expect.any(String),
+        sandra_provisioning_started_at: expect.any(String),
       },
     });
     expect(createUser.mock.calls[0][0]).not.toHaveProperty("password");
@@ -177,6 +189,7 @@ describe("grantUserAccess", () => {
         app_metadata: expect.objectContaining({
           sandra_provisioning_state: "ready",
           sandra_provisioning_attempt: null,
+          sandra_provisioning_started_at: null,
         }),
       }),
     );
@@ -247,6 +260,7 @@ describe("grantUserAccess", () => {
           app_metadata: {
             sandra_provisioning_state: "pending",
             sandra_provisioning_attempt: "other-attempt",
+            sandra_provisioning_started_at: new Date().toISOString(),
           },
         }),
       ],
@@ -301,35 +315,133 @@ describe("grantUserAccess", () => {
     expect(createAdminClient).not.toHaveBeenCalled();
   });
 
-  it("rolls back only when the failed attempt still owns an unprovisioned user", async () => {
-    const { createUser, deleteUser } = mockAdminClient({
+  it("leaves a failed new user pending and recoverable instead of deleting it", async () => {
+    const { createUser, deleteUser, state } = mockAdminClient({
       upsertError: { message: "membership unavailable" },
     });
     const result = await grantUserAccess("newperson@bmhgroupkc.com");
     expect(createUser).toHaveBeenCalledOnce();
-    expect(deleteUser).toHaveBeenCalledWith("created-user");
+    expect(deleteUser).not.toHaveBeenCalled();
+    expect(state.users[0].app_metadata).toMatchObject({
+      sandra_provisioning_state: "pending",
+      sandra_provisioning_attempt: expect.any(String),
+      sandra_provisioning_started_at: expect.any(String),
+    });
     expect(result).toMatchObject({
       ok: false,
       error: { code: "GRANT_MEMBERSHIP_FAILED" },
     });
   });
 
-  it("does not delete a user if another attempt takes ownership before rollback", async () => {
-    const { deleteUser } = mockAdminClient({
-      upsertError: { message: "membership unavailable" },
-      beforeUpsert: async (state) => {
-        state.users[0].app_metadata.sandra_provisioning_attempt =
-          "replacement-attempt";
+  it("fails closed without deleting when the initial membership SDK read throws", async () => {
+    const { deleteUser, state } = mockAdminClient({
+      membershipReads: [new Error("membership read unavailable")],
+    });
+
+    const result = await grantUserAccess("read-failure@bmhgroupkc.com");
+
+    expect(result).toMatchObject({ ok: false, error: { code: "GRANT_FAILED" } });
+    expect(deleteUser).not.toHaveBeenCalled();
+    expect(state.membership).toBeNull();
+    expect(state.users[0].app_metadata.sandra_provisioning_state).toBe("pending");
+  });
+
+  it("fails closed without deleting when the membership upsert SDK throws", async () => {
+    const { deleteUser, state } = mockAdminClient({
+      upsertThrows: new Error("upsert transport failed"),
+    });
+
+    const result = await grantUserAccess("upsert-throw@bmhgroupkc.com");
+
+    expect(result).toMatchObject({ ok: false, error: { code: "GRANT_FAILED" } });
+    expect(deleteUser).not.toHaveBeenCalled();
+    expect(state.membership).toBeNull();
+    expect(state.users[0].app_metadata.sandra_provisioning_state).toBe("pending");
+  });
+
+  it("does not delete when membership verification throws after a successful upsert", async () => {
+    const { deleteUser, state } = mockAdminClient({
+      membershipReads: [null, new Error("verification unavailable")],
+    });
+
+    const result = await grantUserAccess("verify-throw@bmhgroupkc.com");
+
+    expect(result).toMatchObject({ ok: false, error: { code: "GRANT_FAILED" } });
+    expect(deleteUser).not.toHaveBeenCalled();
+    expect(state.membership).toEqual({ role: "member" });
+    expect(state.users[0].app_metadata.sandra_provisioning_state).toBe("pending");
+  });
+
+  it("takes over an expired pending lease and completes the original user", async () => {
+    const pendingUser = existingUser("stale@bmhgroupkc.com", {
+      id: "stale-user",
+      app_metadata: {
+        sandra_provisioning_state: "pending",
+        sandra_provisioning_attempt: "abandoned-attempt",
+        sandra_provisioning_started_at: "2026-07-21T00:00:00.000Z",
+      },
+    });
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-21T00:06:00.000Z"));
+    const { createUser, updateUserById, state } = mockAdminClient({
+      users: [pendingUser],
+    });
+
+    const result = await grantUserAccess("stale@bmhgroupkc.com");
+
+    expect(result).toMatchObject({
+      ok: true,
+      data: { userId: "stale-user", created: false },
+    });
+    expect(createUser).not.toHaveBeenCalled();
+    expect(updateUserById).toHaveBeenCalledWith(
+      "stale-user",
+      expect.objectContaining({
+        app_metadata: expect.objectContaining({
+          sandra_provisioning_state: "pending",
+          sandra_provisioning_attempt: expect.not.stringContaining("abandoned"),
+          sandra_provisioning_started_at: "2026-07-21T00:06:00.000Z",
+        }),
+      }),
+    );
+    expect(state.membership).toEqual({ role: "member" });
+    expect(state.users[0].app_metadata.sandra_provisioning_state).toBe("ready");
+  });
+
+  it("reports a role conflict when concurrent grants race on one existing UID", async () => {
+    let entered = 0;
+    let release!: () => void;
+    const bothAtUpsert = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const { state } = mockAdminClient({
+      users: [existingUser("race-role@bmhgroupkc.com")],
+      beforeUpsert: async () => {
+        entered += 1;
+        if (entered === 2) release();
+        await bothAtUpsert;
       },
     });
 
-    const result = await grantUserAccess("handoff@bmhgroupkc.com");
+    const [ownerResult, memberResult] = await Promise.all([
+      grantUserAccess(
+        "race-role@bmhgroupkc.com",
+        "00000000-0000-0000-0000-000000000bbb",
+        "owner",
+      ),
+      grantUserAccess(
+        "race-role@bmhgroupkc.com",
+        "00000000-0000-0000-0000-000000000bbb",
+        "member",
+      ),
+    ]);
 
-    expect(result).toMatchObject({
+    expect(state.membership?.role).toBe("owner");
+    expect(ownerResult).toMatchObject({ ok: true });
+    expect(memberResult).toMatchObject({
       ok: false,
-      error: { code: "GRANT_MEMBERSHIP_FAILED" },
+      error: { code: "GRANT_ROLE_CONFLICT" },
     });
-    expect(deleteUser).not.toHaveBeenCalled();
   });
 
   it("never deletes an existing canonical user when membership creation fails", async () => {

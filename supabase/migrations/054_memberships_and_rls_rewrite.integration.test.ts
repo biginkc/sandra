@@ -231,9 +231,8 @@ describe("Migration 054 — memberships foundation + RLS rewrite", () => {
     ]);
   });
 
-  it("creates memberships from passwordless grants and rolls back a newly created user on membership failure", async () => {
-    const invitedUserId = crypto.randomUUID();
-    const upsert = vi.fn().mockResolvedValue({ error: null });
+  it("creates and verifies a hosted membership from a passwordless grant", async () => {
+    const grantedEmail = uniqueEmail("passwordless-grant");
     mocks.serverClient = {
       auth: {
         getUser: vi.fn().mockResolvedValue({
@@ -241,77 +240,46 @@ describe("Migration 054 — memberships foundation + RLS rewrite", () => {
         }),
       },
     };
-    mocks.adminClient = {
-      auth: {
-        admin: {
-          listUsers: vi.fn().mockResolvedValue({
-            data: { users: [] },
-            error: null,
-          }),
-          createUser: vi.fn().mockResolvedValue({
-            data: {
-              user: {
-                id: invitedUserId,
-                email_confirmed_at: "2026-07-21T00:00:00Z",
-              },
-            },
-            error: null,
-          }),
-          deleteUser: vi.fn().mockResolvedValue({ error: null }),
-        },
-      },
-      from: vi.fn(() => ({ upsert })),
-    };
+    mocks.adminClient = serviceClient;
 
     const result = await grantUserAccess(
-      "newperson@bmhgroupkc.com",
+      grantedEmail,
       TEST_ORG_B_ID,
       "owner",
     );
-    expect(result.ok).toBe(true);
-    expect(upsert).toHaveBeenCalledWith(
-      {
-        user_id: invitedUserId,
-        org_id: TEST_ORG_B_ID,
-        role: "owner",
-      },
-      { onConflict: "user_id,org_id" },
-    );
-
-    const rollbackUserId = crypto.randomUUID();
-    const deleteUser = vi.fn().mockResolvedValue({ error: null });
-    mocks.adminClient = {
-      auth: {
-        admin: {
-          listUsers: vi.fn().mockResolvedValue({
-            data: { users: [] },
-            error: null,
-          }),
-          createUser: vi.fn().mockResolvedValue({
-            data: {
-              user: {
-                id: rollbackUserId,
-                email_confirmed_at: "2026-07-21T00:00:00Z",
-              },
-            },
-            error: null,
-          }),
-          deleteUser,
-        },
-      },
-      from: vi.fn(() => ({
-        upsert: vi.fn().mockResolvedValue({
-          error: { message: "membership insert failed" },
-        }),
-      })),
-    };
-
-    const failure = await grantUserAccess("preserve@bmhgroupkc.com");
-    expect(failure.ok).toBe(false);
-    expect(failure).toMatchObject({
-      error: { code: "GRANT_MEMBERSHIP_FAILED" },
+    expect(result).toMatchObject({
+      ok: true,
+      data: { grantedEmail, created: true },
     });
-    expect(deleteUser).toHaveBeenCalledWith(rollbackUserId);
+    if (!result.ok) throw new Error(result.error.message);
+    createdUserIds.push(result.data.userId);
+
+    const { data: membership, error: membershipError } = await serviceClient
+      .from("memberships")
+      .select("user_id, org_id, role")
+      .eq("user_id", result.data.userId)
+      .eq("org_id", TEST_ORG_B_ID)
+      .single();
+    expect(membershipError).toBeNull();
+    expect(membership).toEqual({
+      user_id: result.data.userId,
+      org_id: TEST_ORG_B_ID,
+      role: "owner",
+    });
+
+    const { data: authUser, error: authError } =
+      await serviceClient.auth.admin.getUserById(result.data.userId);
+    expect(authError).toBeNull();
+    expect(authUser.user?.email_confirmed_at).toBeTruthy();
+    expect(authUser.user?.app_metadata).toMatchObject({
+      sandra_provisioning_state: "ready",
+    });
+    expect(authUser.user?.app_metadata).not.toHaveProperty(
+      "sandra_provisioning_attempt",
+    );
+    expect(authUser.user?.app_metadata).not.toHaveProperty(
+      "sandra_provisioning_started_at",
+    );
   });
 
   it("throws AuthorizationError when resource lookup is hidden by RLS", async () => {

@@ -38,9 +38,14 @@ export default defineConfig({
     // so parallel execution would race.
     fileParallelism: false,
     env: {
-      TEST_SUPABASE_URL: env.TEST_SUPABASE_URL ?? "",
-      TEST_SUPABASE_ANON_KEY: env.TEST_SUPABASE_ANON_KEY ?? "",
-      TEST_SUPABASE_SERVICE_ROLE_KEY: env.TEST_SUPABASE_SERVICE_ROLE_KEY ?? "",
+      TEST_SUPABASE_URL:
+        process.env.TEST_SUPABASE_URL ?? env.TEST_SUPABASE_URL ?? "",
+      TEST_SUPABASE_ANON_KEY:
+        process.env.TEST_SUPABASE_ANON_KEY ?? env.TEST_SUPABASE_ANON_KEY ?? "",
+      TEST_SUPABASE_SERVICE_ROLE_KEY:
+        process.env.TEST_SUPABASE_SERVICE_ROLE_KEY ??
+        env.TEST_SUPABASE_SERVICE_ROLE_KEY ??
+        "",
       // Force the mock address verifier so integration tests never call
       // SmartyStreets for real. Real CASS coverage lives in the
       // `smartystreets.test.ts` unit suite.

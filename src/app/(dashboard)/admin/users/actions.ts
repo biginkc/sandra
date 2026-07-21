@@ -38,11 +38,24 @@ type MembershipAdminClient = {
 
 const PROVISIONING_STATE = "sandra_provisioning_state";
 const PROVISIONING_ATTEMPT = "sandra_provisioning_attempt";
+const PROVISIONING_STARTED_AT = "sandra_provisioning_started_at";
+const PROVISIONING_LEASE_MS = 5 * 60 * 1000;
 
 function pendingAttempt(user: { app_metadata?: Record<string, unknown> }) {
   if (user.app_metadata?.[PROVISIONING_STATE] !== "pending") return null;
   const marker = user.app_metadata[PROVISIONING_ATTEMPT];
   return typeof marker === "string" && marker ? marker : null;
+}
+
+function pendingLeaseIsActive(
+  user: { app_metadata?: Record<string, unknown> },
+  now = Date.now(),
+) {
+  if (!pendingAttempt(user)) return false;
+  const startedAt = user.app_metadata?.[PROVISIONING_STARTED_AT];
+  if (typeof startedAt !== "string") return false;
+  const startedAtMs = Date.parse(startedAt);
+  return Number.isFinite(startedAtMs) && now - startedAtMs < PROVISIONING_LEASE_MS;
 }
 
 /**
@@ -90,6 +103,7 @@ export async function grantUserAccess(
     const admin = createAdminClient();
     const membershipAdmin = admin as unknown as MembershipAdminClient;
     const attempt = randomUUID();
+    const leaseStartedAt = new Date().toISOString();
     const findExactUser = async () => {
       for (let page = 1; page <= 100; page += 1) {
         const { data, error } = await admin.auth.admin.listUsers({
@@ -114,19 +128,6 @@ export async function grantUserAccess(
       if (error) throw new Error(error.message);
       return data;
     };
-    const rollbackIfOwnedAndUnprovisioned = async (userId: string) => {
-      const { data, error } = await admin.auth.admin.getUserById(userId);
-      if (error || !data.user || pendingAttempt(data.user) !== attempt) return;
-      const membership = await findMembership(userId);
-      if (membership) return;
-      const { error: rollbackError } = await admin.auth.admin.deleteUser(userId);
-      if (rollbackError) {
-        reportError(new Error(rollbackError.message), {
-          tags: { surface: "grant_user_access_rollback" },
-          extra: { email: trimmed, userId },
-        });
-      }
-    };
 
     let target = await findExactUser();
     let created = false;
@@ -137,6 +138,7 @@ export async function grantUserAccess(
         app_metadata: {
           [PROVISIONING_STATE]: "pending",
           [PROVISIONING_ATTEMPT]: attempt,
+          [PROVISIONING_STARTED_AT]: leaseStartedAt,
         },
       });
       if (error || !data.user) {
@@ -159,20 +161,63 @@ export async function grantUserAccess(
     }
 
     let existingMembership = await findMembership(target.id);
+    const hadMembershipBeforeGrant = Boolean(existingMembership);
     const targetPendingAttempt = pendingAttempt(target);
     if (
       !existingMembership &&
       targetPendingAttempt &&
       targetPendingAttempt !== attempt
     ) {
-      return {
-        ok: false,
-        error: {
-          code: "GRANT_IN_PROGRESS",
-          message:
-            "Access provisioning is already in progress. Try again shortly.",
-        },
-      };
+      if (pendingLeaseIsActive(target)) {
+        return {
+          ok: false,
+          error: {
+            code: "GRANT_IN_PROGRESS",
+            message:
+              "Access provisioning is already in progress. Try again shortly.",
+          },
+        };
+      }
+
+      // A failed SDK call or interrupted request can leave a new Auth user in
+      // the fail-closed pending state. Take over only after its lease expires,
+      // then re-read the marker before doing any membership work. We never
+      // delete a user when membership status is unknown.
+      const { data: claimed, error: claimError } =
+        await admin.auth.admin.updateUserById(target.id, {
+          app_metadata: {
+            ...target.app_metadata,
+            [PROVISIONING_STATE]: "pending",
+            [PROVISIONING_ATTEMPT]: attempt,
+            [PROVISIONING_STARTED_AT]: leaseStartedAt,
+          },
+        });
+      if (claimError || !claimed.user) {
+        return {
+          ok: false,
+          error: {
+            code: "GRANT_FAILED",
+            message: claimError?.message ?? "Could not recover provisioning.",
+          },
+        };
+      }
+      const { data: ownership, error: ownershipError } =
+        await admin.auth.admin.getUserById(target.id);
+      if (
+        ownershipError ||
+        !ownership.user ||
+        pendingAttempt(ownership.user) !== attempt
+      ) {
+        return {
+          ok: false,
+          error: {
+            code: "GRANT_IN_PROGRESS",
+            message:
+              "Access provisioning was claimed by another request. Try again shortly.",
+          },
+        };
+      }
+      target = ownership.user;
     }
 
     if (!target.email_confirmed_at) {
@@ -199,7 +244,6 @@ export async function grantUserAccess(
           { onConflict: "user_id,org_id", ignoreDuplicates: true },
         );
       if (membershipError) {
-        if (created) await rollbackIfOwnedAndUnprovisioned(target.id);
         return {
           ok: false,
           error: {
@@ -212,12 +256,21 @@ export async function grantUserAccess(
     }
 
     if (!existingMembership) {
-      if (created) await rollbackIfOwnedAndUnprovisioned(target.id);
       return {
         ok: false,
         error: {
           code: "GRANT_MEMBERSHIP_FAILED",
           message: "Membership could not be verified after provisioning.",
+        },
+      };
+    }
+    if (!hadMembershipBeforeGrant && existingMembership.role !== role) {
+      return {
+        ok: false,
+        error: {
+          code: "GRANT_ROLE_CONFLICT",
+          message:
+            "Another request granted this user a different role. Refresh and review their access.",
         },
       };
     }
@@ -229,6 +282,7 @@ export async function grantUserAccess(
           ...target.app_metadata,
           [PROVISIONING_STATE]: "ready",
           [PROVISIONING_ATTEMPT]: null,
+          [PROVISIONING_STARTED_AT]: null,
         },
       },
     );
@@ -245,7 +299,8 @@ export async function grantUserAccess(
       tags: { surface: "grant_user_access" },
       extra: { email: trimmed },
     });
-    return errFromUnknown(e, "GRANT_FAILED");
+    const failure = errFromUnknown(e, "GRANT_FAILED");
+    return { ...failure, error: { ...failure.error, code: "GRANT_FAILED" } };
   }
 }
 

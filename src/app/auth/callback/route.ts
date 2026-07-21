@@ -64,6 +64,19 @@ function redirectAndConsumeFlow(request: NextRequest, location: string) {
   return response;
 }
 
+async function signOutAndConsumeFlow(
+  request: NextRequest,
+  supabase: Awaited<ReturnType<typeof createClient>>,
+  location: string,
+) {
+  try {
+    await supabase.auth.signOut({ scope: "local" });
+  } catch {
+    // Cookie cleanup below must still run if the Auth SDK itself throws.
+  }
+  return redirectAndConsumeFlow(request, location);
+}
+
 /**
  * Complete only Hugo's OIDC/PKCE code exchange.
  *
@@ -84,43 +97,66 @@ export async function GET(request: NextRequest) {
     return redirectAndConsumeFlow(request, "/login?error=sso");
   }
 
-  const supabase = await createClient();
-  const { error, data } = await supabase.auth.exchangeCodeForSession(code);
+  let supabase: Awaited<ReturnType<typeof createClient>>;
+  try {
+    supabase = await createClient();
+  } catch {
+    return redirectAndConsumeFlow(request, "/login?error=sso");
+  }
+  let exchange: Awaited<
+    ReturnType<typeof supabase.auth.exchangeCodeForSession>
+  >;
+  try {
+    exchange = await supabase.auth.exchangeCodeForSession(code);
+  } catch {
+    return signOutAndConsumeFlow(request, supabase, "/login?error=sso");
+  }
+  const { error, data } = exchange;
   if (error || !data.session) {
+    if (data.session) {
+      return signOutAndConsumeFlow(request, supabase, "/login?error=sso");
+    }
     return redirectAndConsumeFlow(request, "/login?error=sso");
   }
 
-  // Email PKCE links can arrive with only `?code=...` and no `type` marker.
-  // Verify the signed AMR claim instead of trusting callback parameters so a
-  // stale magic, invite, or recovery link cannot create a Sandra session.
-  const { data: claimsData, error: claimsError } =
-    await supabase.auth.getClaims(data.session.access_token);
-  if (
-    claimsError ||
-    !hasHugoOAuthProof(
-      claimsData?.claims.amr,
-      data.session.user.identities,
-    )
-  ) {
-    await supabase.auth.signOut({ scope: "local" });
-    return redirectAndConsumeFlow(request, "/login?error=password_disabled");
-  }
+  try {
+    // Email PKCE links can arrive with only `?code=...` and no `type` marker.
+    // Verify the signed AMR claim instead of trusting callback parameters so a
+    // stale magic, invite, or recovery link cannot create a Sandra session.
+    const { data: claimsData, error: claimsError } =
+      await supabase.auth.getClaims(data.session.access_token);
+    if (
+      claimsError ||
+      !hasHugoOAuthProof(
+        claimsData?.claims.amr,
+        data.session.user.identities,
+      )
+    ) {
+      return signOutAndConsumeFlow(
+        request,
+        supabase,
+        "/login?error=password_disabled",
+      );
+    }
 
-  if (!isEmailAllowed(data.session.user.email)) {
-    await supabase.auth.signOut({ scope: "local" });
-    return redirectAndConsumeFlow(request, "/login?error=domain");
-  }
+    if (!isEmailAllowed(data.session.user.email)) {
+      return signOutAndConsumeFlow(request, supabase, "/login?error=domain");
+    }
 
-  const { data: memberships, error: membershipError } = await supabase
-    .from("memberships")
-    .select("user_id")
-    .eq("user_id", data.session.user.id)
-    .limit(1);
-  if (membershipError || !memberships?.length) {
-    await supabase.auth.signOut({ scope: "local" });
-    return redirectAndConsumeFlow(request, "/login?error=access");
-  }
+    const { data: memberships, error: membershipError } = await supabase
+      .from("memberships")
+      .select("user_id")
+      .eq("user_id", data.session.user.id)
+      .limit(1);
+    if (membershipError || !memberships?.length) {
+      return signOutAndConsumeFlow(request, supabase, "/login?error=access");
+    }
 
-  const target = sanitizeNextPath(searchParams.get("next"), "/dashboard");
-  return redirectAndConsumeFlow(request, target);
+    const target = sanitizeNextPath(searchParams.get("next"), "/dashboard");
+    return redirectAndConsumeFlow(request, target);
+  } catch {
+    // The code exchange may already have written session cookies. Any
+    // verification exception must therefore explicitly remove that session.
+    return signOutAndConsumeFlow(request, supabase, "/login?error=access");
+  }
 }
