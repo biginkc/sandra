@@ -68,7 +68,7 @@ afterEach(() => {
 describe("signInWithBmhId", () => {
   describe("flag enforcement (fail closed)", () => {
     it("redirects to /login without touching Supabase when the flag is unset", async () => {
-      vi.stubEnv("NEXT_PUBLIC_BMH_ID_SSO", "");
+      vi.stubEnv("NEXT_PUBLIC_HUGO_SSO", "");
       const target = await redirectedTo(() =>
         signInWithBmhId(undefined, ssoFormData("/leads/5")),
       );
@@ -77,7 +77,7 @@ describe("signInWithBmhId", () => {
     });
 
     it('redirects to /login when the flag is any value other than "1"', async () => {
-      vi.stubEnv("NEXT_PUBLIC_BMH_ID_SSO", "true");
+      vi.stubEnv("NEXT_PUBLIC_HUGO_SSO", "true");
       const target = await redirectedTo(() =>
         signInWithBmhId(undefined, ssoFormData()),
       );
@@ -90,7 +90,7 @@ describe("signInWithBmhId", () => {
     const signInWithOAuth = vi.fn();
 
     beforeEach(() => {
-      vi.stubEnv("NEXT_PUBLIC_BMH_ID_SSO", "1");
+      vi.stubEnv("NEXT_PUBLIC_HUGO_SSO", "1");
       signInWithOAuth.mockReset().mockResolvedValue({
         data: { url: "https://idp.bmh.test/authorize?abc" },
         error: null,
@@ -98,12 +98,12 @@ describe("signInWithBmhId", () => {
       createClient.mockResolvedValue({ auth: { signInWithOAuth } });
     });
 
-    it("wires the custom:bmh provider and callback redirect, then redirects to the IdP", async () => {
+    it("wires the custom:hugo provider and callback redirect, then redirects to the IdP", async () => {
       const target = await redirectedTo(() =>
         signInWithBmhId(undefined, ssoFormData("/leads/5")),
       );
       expect(signInWithOAuth).toHaveBeenCalledWith({
-        provider: "custom:bmh",
+        provider: "custom:hugo",
         options: {
           redirectTo: "https://sandra.test/auth/callback?next=%2Fleads%2F5",
         },
@@ -114,7 +114,7 @@ describe("signInWithBmhId", () => {
     it("omits next from the callback URL when none is supplied", async () => {
       await redirectedTo(() => signInWithBmhId(undefined, ssoFormData()));
       expect(signInWithOAuth).toHaveBeenCalledWith({
-        provider: "custom:bmh",
+        provider: "custom:hugo",
         options: { redirectTo: "https://sandra.test/auth/callback" },
       });
     });
@@ -129,7 +129,7 @@ describe("signInWithBmhId", () => {
     ])("drops malicious or looping next value %j", async (bad) => {
       await redirectedTo(() => signInWithBmhId(undefined, ssoFormData(bad)));
       expect(signInWithOAuth).toHaveBeenCalledWith({
-        provider: "custom:bmh",
+        provider: "custom:hugo",
         options: { redirectTo: "https://sandra.test/auth/callback" },
       });
     });

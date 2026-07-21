@@ -23,7 +23,7 @@ vi.mock("next/navigation", () => ({
 }));
 
 async function renderLoginPage(flag: string | undefined) {
-  vi.stubEnv("NEXT_PUBLIC_BMH_ID_SSO", flag ?? "");
+  vi.stubEnv("NEXT_PUBLIC_HUGO_SSO", flag ?? "");
   vi.resetModules();
   const { default: LoginPage } = await import("./page");
   const view = render(<LoginPage />);
@@ -43,18 +43,18 @@ afterEach(() => {
   vi.unstubAllEnvs();
 });
 
-describe("login page — BMH ID SSO", () => {
+describe("login page — Hugo SSO", () => {
   it("hides the SSO button when the flag is off", async () => {
     await renderLoginPage(undefined);
     expect(
-      screen.queryByRole("button", { name: /continue with bmh id/i }),
+      screen.queryByRole("button", { name: /continue with hugo/i }),
     ).not.toBeInTheDocument();
   });
 
   it("shows the SSO button when the flag is on", async () => {
     await renderLoginPage("1");
     expect(
-      screen.getByRole("button", { name: /continue with bmh id/i }),
+      screen.getByRole("button", { name: /continue with hugo/i }),
     ).toBeInTheDocument();
   });
 
@@ -69,7 +69,7 @@ describe("login page — BMH ID SSO", () => {
     await renderLoginPage("1");
 
     fireEvent.click(
-      screen.getByRole("button", { name: /continue with bmh id/i }),
+      screen.getByRole("button", { name: /continue with hugo/i }),
     );
 
     await waitFor(() => expect(signInWithBmhId).toHaveBeenCalledTimes(1));
@@ -89,7 +89,7 @@ describe("login page — BMH ID SSO", () => {
     await renderLoginPage("1");
 
     const ssoButton = screen.getByRole("button", {
-      name: /continue with bmh id/i,
+      name: /continue with hugo/i,
     });
     fireEvent.click(ssoButton);
 
@@ -124,7 +124,7 @@ describe("login page — BMH ID SSO", () => {
     resolveSso();
     await waitFor(() =>
       expect(
-        screen.getByRole("button", { name: /continue with bmh id/i }),
+        screen.getByRole("button", { name: /continue with hugo/i }),
       ).toBeEnabled(),
     );
     expect(screen.getByRole("button", { name: /sign in/i })).toBeEnabled();
@@ -157,7 +157,7 @@ describe("login page — BMH ID SSO", () => {
       ).toBeDisabled(),
     );
     expect(
-      screen.getByRole("button", { name: /continue with bmh id/i }),
+      screen.getByRole("button", { name: /continue with hugo/i }),
     ).toBeDisabled();
     // Same cross-form idiom: the reset entry point is locked while a
     // password sign-in is in flight.
@@ -175,7 +175,7 @@ describe("login page — BMH ID SSO", () => {
     resolveSignIn(null);
     await waitFor(() =>
       expect(
-        screen.getByRole("button", { name: /continue with bmh id/i }),
+        screen.getByRole("button", { name: /continue with hugo/i }),
       ).toBeEnabled(),
     );
     expect(

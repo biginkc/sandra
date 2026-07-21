@@ -9,8 +9,8 @@ import { Input } from "@/components/ui/input";
 import { requestPasswordReset, signIn, signInWithBmhId } from "./actions";
 import { LoginBackground } from "./login-background";
 
-// Flipped on per-app (Vercel env var) once the BMH ID pilot gate passes.
-const BMH_ID_SSO_ENABLED = process.env.NEXT_PUBLIC_BMH_ID_SSO === "1";
+// Flipped on per-app (Vercel env var) once the Hugo pilot gate passes.
+const HUGO_SSO_ENABLED = process.env.NEXT_PUBLIC_HUGO_SSO === "1";
 
 const CARD_GLOW =
   "0 0 0 1px rgba(60,130,255,0.16), 0 0 22px rgba(46,128,255,0.42), 0 0 60px rgba(46,128,255,0.22), 0 0 120px rgba(46,128,255,0.12), inset 0 1px 0 rgba(160,200,255,0.18), inset 0 0 26px rgba(46,128,255,0.06)";
@@ -88,7 +88,7 @@ function LoginForm() {
       : urlError === "invite_failed"
         ? "Invite link couldn't be verified. Ask an admin to resend it."
         : urlError === "sso"
-          ? "BMH ID sign-in couldn't start. Try again, or sign in with your password."
+          ? "Hugo sign-in couldn't start. Try again, or sign in with your password."
           : null);
 
   if (showReset) {
@@ -150,7 +150,7 @@ function LoginForm() {
 
   return (
     <>
-      {BMH_ID_SSO_ENABLED ? (
+      {HUGO_SSO_ENABLED ? (
         <div className="mt-6 flex flex-col gap-4">
           <form action={ssoAction}>
             <input type="hidden" name="next" value={next} />
@@ -165,7 +165,7 @@ function LoginForm() {
                 boxShadow: BUTTON_GLOW,
               }}
             >
-              {ssoPending ? "Redirecting…" : "Continue with BMH ID"}
+              {ssoPending ? "Redirecting…" : "Continue with Hugo"}
             </Button>
           </form>
           <div className="flex items-center gap-3" aria-hidden="true">
@@ -178,7 +178,7 @@ function LoginForm() {
 
       <form
         action={formAction}
-        className={`${BMH_ID_SSO_ENABLED ? "mt-4" : "mt-6"} flex flex-col gap-4`}
+        className={`${HUGO_SSO_ENABLED ? "mt-4" : "mt-6"} flex flex-col gap-4`}
       >
         <input type="hidden" name="next" value={next} />
 

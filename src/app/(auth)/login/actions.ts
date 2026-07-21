@@ -59,9 +59,9 @@ export async function requestPasswordReset(
 }
 
 /**
- * Start the BMH ID single-sign-on flow. Sandra's own Supabase project is
+ * Start the Hugo single-sign-on flow. Sandra's own Supabase project is
  * configured (in the dashboard, at rollout time) with a Custom OIDC
- * provider named `custom:bmh` that points at the central bmh-auth IdP.
+ * provider named `custom:hugo` that points at the central bmh-auth IdP.
  * `signInWithOAuth` returns the IdP authorization URL and drops the PKCE
  * code-verifier cookie; we redirect the browser there, and the IdP sends
  * the user back to `/auth/callback?code=...` (existing infra), which
@@ -79,7 +79,7 @@ export async function signInWithBmhId(
 ): Promise<void> {
   // Fail closed: the NEXT_PUBLIC flag only hides the button client-side.
   // Anyone can POST the action directly, so enforce the gate here too.
-  if (process.env.NEXT_PUBLIC_BMH_ID_SSO !== "1") {
+  if (process.env.NEXT_PUBLIC_HUGO_SSO !== "1") {
     redirect("/login");
   }
 
@@ -98,19 +98,19 @@ export async function signInWithBmhId(
     const { data, error } = await supabase.auth.signInWithOAuth({
       // Custom OIDC providers use the `custom:` prefix; supabase-js's
       // Provider union accepts `custom:${string}` natively.
-      provider: "custom:bmh",
+      provider: "custom:hugo",
       options: { redirectTo },
     });
 
     if (error) {
       reportError(new Error(error.message), {
-        tags: { surface: "bmh_id_sso" },
+        tags: { surface: "hugo_sso" },
       });
     } else {
       authUrl = data.url;
     }
   } catch (e) {
-    reportError(e, { tags: { surface: "bmh_id_sso" } });
+    reportError(e, { tags: { surface: "hugo_sso" } });
   }
 
   if (!authUrl) {
