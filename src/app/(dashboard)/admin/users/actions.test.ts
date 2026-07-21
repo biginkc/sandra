@@ -38,6 +38,7 @@ function mockAdminClient({
     error: null,
   }),
   updateUserById = vi.fn(),
+  deleteUser = vi.fn().mockResolvedValue({ error: null }),
   upsert = vi.fn().mockResolvedValue({ error: null }),
 } = {}) {
   const listUsers = vi.fn().mockResolvedValue({
@@ -46,10 +47,10 @@ function mockAdminClient({
   });
   const from = vi.fn(() => ({ upsert }));
   createAdminClient.mockReturnValue({
-    auth: { admin: { listUsers, createUser, updateUserById } },
+    auth: { admin: { listUsers, createUser, updateUserById, deleteUser } },
     from,
   });
-  return { listUsers, createUser, updateUserById, upsert, from };
+  return { listUsers, createUser, updateUserById, deleteUser, upsert, from };
 }
 
 beforeEach(() => {
@@ -199,14 +200,36 @@ describe("grantUserAccess", () => {
     expect(createAdminClient).not.toHaveBeenCalled();
   });
 
-  it("does not delete a newly created user when membership upsert fails", async () => {
-    const { createUser } = mockAdminClient({
+  it("rolls back only a newly created user when membership upsert fails", async () => {
+    const { createUser, deleteUser } = mockAdminClient({
       upsert: vi.fn().mockResolvedValue({
         error: { message: "membership unavailable" },
       }),
     });
     const result = await grantUserAccess("newperson@bmhgroupkc.com");
     expect(createUser).toHaveBeenCalledOnce();
+    expect(deleteUser).toHaveBeenCalledWith("created-user");
+    expect(result).toMatchObject({
+      ok: false,
+      error: { code: "GRANT_MEMBERSHIP_FAILED" },
+    });
+  });
+
+  it("preserves an existing auth user when membership upsert fails", async () => {
+    const { deleteUser } = mockAdminClient({
+      users: [
+        {
+          id: "canonical-user",
+          email: "owner@bmhgroupkc.com",
+          email_confirmed_at: "2026-07-20T00:00:00Z",
+        },
+      ],
+      upsert: vi.fn().mockResolvedValue({
+        error: { message: "membership unavailable" },
+      }),
+    });
+    const result = await grantUserAccess("owner@bmhgroupkc.com");
+    expect(deleteUser).not.toHaveBeenCalled();
     expect(result).toMatchObject({
       ok: false,
       error: { code: "GRANT_MEMBERSHIP_FAILED" },

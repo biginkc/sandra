@@ -231,7 +231,7 @@ describe("Migration 054 — memberships foundation + RLS rewrite", () => {
     ]);
   });
 
-  it("creates memberships from passwordless grants and preserves users on membership failure", async () => {
+  it("creates memberships from passwordless grants and rolls back a newly created user on membership failure", async () => {
     const invitedUserId = crypto.randomUUID();
     const upsert = vi.fn().mockResolvedValue({ error: null });
     mocks.serverClient = {
@@ -249,9 +249,15 @@ describe("Migration 054 — memberships foundation + RLS rewrite", () => {
             error: null,
           }),
           createUser: vi.fn().mockResolvedValue({
-            data: { user: { id: invitedUserId } },
+            data: {
+              user: {
+                id: invitedUserId,
+                email_confirmed_at: "2026-07-21T00:00:00Z",
+              },
+            },
             error: null,
           }),
+          deleteUser: vi.fn().mockResolvedValue({ error: null }),
         },
       },
       from: vi.fn(() => ({ upsert })),
@@ -272,7 +278,8 @@ describe("Migration 054 — memberships foundation + RLS rewrite", () => {
       { onConflict: "user_id,org_id" },
     );
 
-    const preservedUserId = crypto.randomUUID();
+    const rollbackUserId = crypto.randomUUID();
+    const deleteUser = vi.fn().mockResolvedValue({ error: null });
     mocks.adminClient = {
       auth: {
         admin: {
@@ -281,9 +288,15 @@ describe("Migration 054 — memberships foundation + RLS rewrite", () => {
             error: null,
           }),
           createUser: vi.fn().mockResolvedValue({
-            data: { user: { id: preservedUserId } },
+            data: {
+              user: {
+                id: rollbackUserId,
+                email_confirmed_at: "2026-07-21T00:00:00Z",
+              },
+            },
             error: null,
           }),
+          deleteUser,
         },
       },
       from: vi.fn(() => ({
@@ -298,6 +311,7 @@ describe("Migration 054 — memberships foundation + RLS rewrite", () => {
     expect(failure).toMatchObject({
       error: { code: "GRANT_MEMBERSHIP_FAILED" },
     });
+    expect(deleteUser).toHaveBeenCalledWith(rollbackUserId);
   });
 
   it("throws AuthorizationError when resource lookup is hidden by RLS", async () => {

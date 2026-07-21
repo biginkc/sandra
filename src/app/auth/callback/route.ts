@@ -12,19 +12,55 @@ const EMAIL_FLOW_TYPES = new Set([
   "email_change",
   "email",
 ]);
+const HUGO_PROVIDER = "custom:hugo";
+const MAX_IDENTITY_AMR_SKEW_SECONDS = 5;
 
-function isOAuthAuthenticationMethod(amr: unknown): boolean {
-  if (!Array.isArray(amr)) return false;
+function isCurrentHugoIdentity(amr: unknown, identities: unknown): boolean {
+  if (!Array.isArray(amr) || !Array.isArray(identities)) return false;
   const oauthMethods = new Set(["oauth", "oauth_provider/authorization_code"]);
-  return amr.some(
-    (entry) =>
-      (typeof entry === "string" && oauthMethods.has(entry)) ||
-      (typeof entry === "object" &&
-        entry !== null &&
-        "method" in entry &&
-        typeof entry.method === "string" &&
-        oauthMethods.has(entry.method)),
-  );
+  const oauthTimestamps = amr.flatMap((entry) => {
+    if (
+      typeof entry !== "object" ||
+      entry === null ||
+      !("method" in entry) ||
+      !("timestamp" in entry) ||
+      typeof entry.method !== "string" ||
+      !oauthMethods.has(entry.method) ||
+      typeof entry.timestamp !== "number" ||
+      !Number.isFinite(entry.timestamp)
+    ) {
+      return [];
+    }
+    return [entry.timestamp];
+  });
+
+  return oauthTimestamps.some((oauthTimestamp) => {
+    const currentIdentities = identities.filter((identity) => {
+      if (
+        typeof identity !== "object" ||
+        identity === null ||
+        !("last_sign_in_at" in identity) ||
+        typeof identity.last_sign_in_at !== "string"
+      ) {
+        return false;
+      }
+      const identityTimestamp = Date.parse(identity.last_sign_in_at) / 1000;
+      return (
+        Number.isFinite(identityTimestamp) &&
+        Math.abs(identityTimestamp - oauthTimestamp) <=
+          MAX_IDENTITY_AMR_SKEW_SECONDS
+      );
+    });
+
+    // Fail closed if multiple linked identities appear current. This proves
+    // that the OAuth method in the signed JWT belongs to Hugo specifically,
+    // not merely that the user has linked Hugo at some point in the past.
+    return (
+      currentIdentities.length === 1 &&
+      "provider" in currentIdentities[0] &&
+      currentIdentities[0].provider === HUGO_PROVIDER
+    );
+  });
 }
 
 /**
@@ -60,7 +96,10 @@ export async function GET(request: NextRequest) {
     await supabase.auth.getClaims(data.session.access_token);
   if (
     claimsError ||
-    !isOAuthAuthenticationMethod(claimsData?.claims.amr)
+    !isCurrentHugoIdentity(
+      claimsData?.claims.amr,
+      data.session.user.identities,
+    )
   ) {
     await supabase.auth.signOut({ scope: "local" });
     return NextResponse.redirect(`${origin}/login?error=password_disabled`);
@@ -69,6 +108,16 @@ export async function GET(request: NextRequest) {
   if (!isEmailAllowed(data.session.user.email)) {
     await supabase.auth.signOut({ scope: "local" });
     return NextResponse.redirect(`${origin}/login?error=domain`);
+  }
+
+  const { data: memberships, error: membershipError } = await supabase
+    .from("memberships")
+    .select("user_id")
+    .eq("user_id", data.session.user.id)
+    .limit(1);
+  if (membershipError || !memberships?.length) {
+    await supabase.auth.signOut({ scope: "local" });
+    return NextResponse.redirect(`${origin}/login?error=access`);
   }
 
   const target = sanitizeNextPath(searchParams.get("next"), "/dashboard");

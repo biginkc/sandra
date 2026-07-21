@@ -122,6 +122,17 @@ export async function grantUserAccess(
         { onConflict: "user_id,org_id" },
       );
     if (membershipError) {
+      if (created) {
+        const { error: rollbackError } = await admin.auth.admin.deleteUser(
+          target.id,
+        );
+        if (rollbackError) {
+          reportError(new Error(rollbackError.message), {
+            tags: { surface: "grant_user_access_rollback" },
+            extra: { email: trimmed, userId: target.id },
+          });
+        }
+      }
       return {
         ok: false,
         error: {

@@ -61,6 +61,8 @@ function LoginForm() {
   const errorMessage =
     urlError === "domain"
       ? "This Sandra account is not authorized. Ask an admin to grant access, then use the same email in Hugo."
+      : urlError === "access"
+        ? "Your Hugo identity is valid, but Sandra access has not been granted. Ask a Sandra admin for access."
       : urlError === "sso_disabled"
         ? "Hugo sign-in is temporarily unavailable."
         : urlError === "password_disabled"
