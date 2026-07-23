@@ -103,7 +103,8 @@ function mockAdminClient({
     data: state.membership ? [{ user_id: "canonical-user" }] : [],
     error: null,
   }));
-  const removalEq = vi.fn(() => ({ limit: removalLimit }));
+  const removalOrgEq = vi.fn(() => ({ limit: removalLimit }));
+  const removalEq = vi.fn(() => ({ eq: removalOrgEq }));
   const select = vi.fn((columns: string) =>
     columns === "user_id" ? { eq: removalEq } : { eq: firstEq },
   );
@@ -114,11 +115,12 @@ function mockAdminClient({
     state.membership ??= { role: values.role };
     return { error: null };
   });
-  const deleteEq = vi.fn().mockImplementation(async () => {
+  const deleteOrgEq = vi.fn().mockImplementation(async () => {
     if (deleteMembershipError) return { error: deleteMembershipError };
     if (!preserveMembershipOnDelete) state.membership = null;
     return { error: null };
   });
+  const deleteEq = vi.fn(() => ({ eq: deleteOrgEq }));
   const deleteMembership = vi.fn(() => ({ eq: deleteEq }));
   const from = vi.fn(() => ({ select, upsert, delete: deleteMembership }));
   createAdminClient.mockReturnValue({
@@ -142,6 +144,8 @@ function mockAdminClient({
     deleteUser,
     deleteMembership,
     deleteEq,
+    deleteOrgEq,
+    removalOrgEq,
     upsert,
   };
 }
@@ -161,6 +165,7 @@ function existingUser(
 
 beforeEach(() => {
   vi.stubEnv("ADMIN_EMAILS", "jarrad@bmhgroupkc.com");
+  vi.stubEnv("NEXT_PUBLIC_HUGO_SSO", "1");
   mockAdminSession();
 });
 
@@ -171,6 +176,38 @@ afterEach(() => {
 });
 
 describe("grantUserAccess", () => {
+  it("does not create an unusable passwordless user while Hugo is off", async () => {
+    vi.stubEnv("NEXT_PUBLIC_HUGO_SSO", "");
+    const { createUser } = mockAdminClient();
+
+    const result = await grantUserAccess("newperson@bmhgroupkc.com");
+
+    expect(result).toEqual({
+      ok: false,
+      error: {
+        code: "HUGO_REQUIRED",
+        message: "Hugo must be active before granting a new teammate access.",
+      },
+    });
+    expect(createUser).not.toHaveBeenCalled();
+  });
+
+  it("does not re-grant membership to an existing passwordless user while Hugo is off", async () => {
+    vi.stubEnv("NEXT_PUBLIC_HUGO_SSO", "");
+    const { upsert } = mockAdminClient({
+      users: [existingUser("passwordless@bmhgroupkc.com")],
+      membership: null,
+    });
+
+    const result = await grantUserAccess("passwordless@bmhgroupkc.com");
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: { code: "HUGO_REQUIRED" },
+    });
+    expect(upsert).not.toHaveBeenCalled();
+  });
+
   it("creates a confirmed passwordless user, grants membership, and marks it ready", async () => {
     const { state, createUser, updateUserById, upsert } = mockAdminClient();
 
@@ -240,7 +277,6 @@ describe("grantUserAccess", () => {
 
     const result = await grantUserAccess(
       "owner@bmhgroupkc.com",
-      "00000000-0000-0000-0000-000000000bbb",
       "member",
     );
 
@@ -445,12 +481,10 @@ describe("grantUserAccess", () => {
     const [ownerResult, memberResult] = await Promise.all([
       grantUserAccess(
         "race-role@bmhgroupkc.com",
-        "00000000-0000-0000-0000-000000000bbb",
         "owner",
       ),
       grantUserAccess(
         "race-role@bmhgroupkc.com",
-        "00000000-0000-0000-0000-000000000bbb",
         "member",
       ),
     ]);

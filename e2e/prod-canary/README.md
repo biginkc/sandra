@@ -22,7 +22,8 @@ Local env loading:
 Required environment:
 
 - `PROD_EMAIL`
-- `PROD_PASSWORD`
+- `PROD_HUGO_STORAGE_STATE` pointing to an ignored Playwright state captured
+  after a real Hugo login on `https://sandra.bmhgroupkc.com`
 - `PROD_BASE_URL` when testing a non-default deployed URL
 - `NEXT_PUBLIC_SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` for canaries that
   verify persisted production state directly

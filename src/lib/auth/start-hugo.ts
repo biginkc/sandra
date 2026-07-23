@@ -14,10 +14,43 @@ export type HugoStartResult =
       reason: "disabled" | "in_progress" | "unavailable";
     };
 
-export const HUGO_FLOW_COOKIE = "sandra_hugo_flow";
+export const HUGO_FLOW_COOKIE = "sandra_hugo_flow_";
 export const HUGO_FLOW_QUERY = "hugo_flow";
 export const HUGO_FLOW_COOKIE_PATH = "/";
 export const HUGO_FLOW_SOURCE_QUERY = "hugo_source";
+const FLOW_NONCE_PATTERN = /^[A-Za-z0-9_-]{43}$/;
+const PKCE_COOKIE_PATTERN =
+  /^sb-[a-z0-9]+-auth-token-code-verifier(?:\.(?:0|[1-9]\d*))?$/;
+
+type StoredPkceCookie = { name: string; value: string };
+
+export function hugoFlowCookieName(nonce: string): string | null {
+  return FLOW_NONCE_PATTERN.test(nonce) ? `${HUGO_FLOW_COOKIE}${nonce}` : null;
+}
+
+export function decodeHugoPkceState(raw: string): StoredPkceCookie[] {
+  try {
+    const parsed = JSON.parse(
+      Buffer.from(raw, "base64url").toString("utf8"),
+    ) as unknown;
+    if (!Array.isArray(parsed) || parsed.length === 0) return [];
+    return parsed.filter(
+      (entry): entry is StoredPkceCookie =>
+        Boolean(
+          entry &&
+            typeof entry === "object" &&
+            "name" in entry &&
+            typeof entry.name === "string" &&
+            PKCE_COOKIE_PATTERN.test(entry.name) &&
+            "value" in entry &&
+            typeof entry.value === "string" &&
+            entry.value.length > 0,
+        ),
+    );
+  } catch {
+    return [];
+  }
+}
 
 export function hugoFlowCookieOptions() {
   return {
@@ -41,12 +74,11 @@ export async function startHugoSignIn(
 
   try {
     const cookieStore = await cookies();
-    if (cookieStore.get(HUGO_FLOW_COOKIE)?.value) {
-      // Supabase stores one PKCE verifier per project. Refuse a second launch
-      // instead of overwriting the first tab's verifier and nonce.
-      return { ok: false, next, reason: "in_progress" };
-    }
     const flowNonce = randomBytes(32).toString("base64url");
+    const flowCookieName = hugoFlowCookieName(flowNonce);
+    if (!flowCookieName) {
+      return { ok: false, next, reason: "unavailable" };
+    }
     const redirectTo = new URL(
       "/auth/callback",
       `${origin.replace(/\/$/, "")}/`,
@@ -54,13 +86,20 @@ export async function startHugoSignIn(
     redirectTo.searchParams.set(HUGO_FLOW_QUERY, flowNonce);
     redirectTo.searchParams.set(HUGO_FLOW_SOURCE_QUERY, "hugo");
     if (next) redirectTo.searchParams.set("next", next);
-    const supabase = await createClient();
+    const cookieMutations: StoredPkceCookie[] = [];
+    const supabase = await createClient({
+      onCookieMutation: ({ name, value }) => {
+        if (PKCE_COOKIE_PATTERN.test(name)) {
+          cookieMutations.push({ name, value });
+        }
+      },
+    });
     const { data, error } = await supabase.auth.signInWithOAuth({
       provider: "custom:hugo",
       options: { redirectTo: redirectTo.toString() },
     });
 
-    if (error || !data.url) {
+    if (error || !data.url || cookieMutations.length === 0) {
       if (error) {
         reportError(new Error(error.message), {
           tags: { surface: "hugo_sso" },
@@ -68,7 +107,11 @@ export async function startHugoSignIn(
       }
       return { ok: false, next, reason: "unavailable" };
     }
-    cookieStore.set(HUGO_FLOW_COOKIE, flowNonce, hugoFlowCookieOptions());
+    cookieStore.set(
+      flowCookieName,
+      Buffer.from(JSON.stringify(cookieMutations)).toString("base64url"),
+      hugoFlowCookieOptions(),
+    );
     return { ok: true, authUrl: data.url };
   } catch (error) {
     reportError(error, { tags: { surface: "hugo_sso" } });

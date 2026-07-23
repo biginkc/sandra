@@ -8,6 +8,8 @@ import { reportError } from "@/lib/errors/report";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
 
+import { SANDRA_ORG_ID } from "@/lib/auth/sandra-org";
+
 type MembershipRole = "owner" | "member";
 type MembershipRow = { role: string };
 type MembershipAdminClient = {
@@ -39,17 +41,21 @@ type MembershipAdminClient = {
 type MembershipRemovalAdminClient = {
   from(table: "memberships"): {
     delete(): {
-      eq(
-        column: "user_id",
-        value: string,
-      ): Promise<{ error: { message: string } | null }>;
+      eq(column: "user_id", value: string): {
+        eq(
+          column: "org_id",
+          value: string,
+        ): Promise<{ error: { message: string } | null }>;
+      };
     };
     select(columns: "user_id"): {
       eq(column: "user_id", value: string): {
-        limit(count: 1): Promise<{
-          data: Array<{ user_id: string }> | null;
-          error: { message: string } | null;
-        }>;
+        eq(column: "org_id", value: string): {
+          limit(count: 1): Promise<{
+            data: Array<{ user_id: string }> | null;
+            error: { message: string } | null;
+          }>;
+        };
       };
     };
   };
@@ -84,7 +90,6 @@ function pendingLeaseIsActive(
  */
 export async function grantUserAccess(
   email: string,
-  orgId = "00000000-0000-0000-0000-000000000bbb",
   role: MembershipRole = "member",
 ): Promise<
   Result<{
@@ -110,6 +115,7 @@ export async function grantUserAccess(
       error: { code: "INVALID_ROLE", message: "Role must be owner or member." },
     };
   }
+  const orgId = SANDRA_ORG_ID;
 
   try {
     const supabase = await createClient();
@@ -158,6 +164,16 @@ export async function grantUserAccess(
     let target = await findExactUser();
     let created = false;
     if (!target) {
+      if (process.env.NEXT_PUBLIC_HUGO_SSO !== "1") {
+        return {
+          ok: false,
+          error: {
+            code: "HUGO_REQUIRED",
+            message:
+              "Hugo must be active before granting a new teammate access.",
+          },
+        };
+      }
       const { data, error } = await admin.auth.admin.createUser({
         email: trimmed,
         email_confirm: true,
@@ -187,6 +203,18 @@ export async function grantUserAccess(
     }
 
     let existingMembership = await findMembership(target.id);
+    if (
+      !existingMembership &&
+      process.env.NEXT_PUBLIC_HUGO_SSO !== "1"
+    ) {
+      return {
+        ok: false,
+        error: {
+          code: "HUGO_REQUIRED",
+          message: "Hugo must be active before granting teammate access.",
+        },
+      };
+    }
     const hadMembershipBeforeGrant = Boolean(existingMembership);
     const targetPendingAttempt = pendingAttempt(target);
     if (
@@ -375,7 +403,8 @@ export async function removeUser(
     const { error: removeError } = await membershipAdmin
       .from("memberships")
       .delete()
-      .eq("user_id", userId);
+      .eq("user_id", userId)
+      .eq("org_id", SANDRA_ORG_ID);
     if (removeError) {
       return {
         ok: false,
@@ -387,6 +416,7 @@ export async function removeUser(
       .from("memberships")
       .select("user_id")
       .eq("user_id", userId)
+      .eq("org_id", SANDRA_ORG_ID)
       .limit(1);
     if (verifyError || remaining?.length) {
       return {

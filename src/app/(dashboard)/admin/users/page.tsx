@@ -22,6 +22,7 @@ import {
   RemoveUserButton,
   type UserRow,
 } from "./invite-panel";
+import { loadSandraMemberships } from "./membership-inventory";
 
 export const metadata = {
   title: "Team · Sandra CRM",
@@ -57,15 +58,8 @@ export default async function AdminUsersPage() {
     }
   }
 
-  const { data: memberships, error: membershipError } = await admin
-    .from("memberships")
-    .select("user_id,role");
-  const membershipByUser = new Map(
-    (memberships ?? []).map((membership) => [
-      membership.user_id,
-      membership.role === "owner" ? "owner" : "member",
-    ] as const),
-  );
+  const { membershipByUser, error: membershipError } =
+    await loadSandraMemberships(admin);
 
   const rows: UserRow[] = authUsers.map((u) => ({
     id: u.id,
@@ -93,7 +87,7 @@ export default async function AdminUsersPage() {
 
       {authError || membershipError ? (
         <div className="text-destructive text-sm">
-          Failed to load complete access state: {authError ?? membershipError?.message}
+          Failed to load complete access state: {authError ?? membershipError}
         </div>
       ) : null}
 

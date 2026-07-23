@@ -11,6 +11,7 @@ type CookieMutation = {
 
 type CreateClientOptions = {
   onCookieMutation?: (cookie: CookieMutation) => void;
+  cookieOverrides?: ReadonlyArray<{ name: string; value: string }>;
 };
 
 export async function createClient(options: CreateClientOptions = {}) {
@@ -22,7 +23,13 @@ export async function createClient(options: CreateClientOptions = {}) {
     {
       cookies: {
         getAll() {
-          return cookieStore.getAll();
+          const byName = new Map(
+            cookieStore.getAll().map((cookie) => [cookie.name, cookie]),
+          );
+          for (const override of options.cookieOverrides ?? []) {
+            byName.set(override.name, override);
+          }
+          return [...byName.values()];
         },
         setAll(cookiesToSet) {
           cookiesToSet.forEach(({ name, value, options: cookieOptions }) =>

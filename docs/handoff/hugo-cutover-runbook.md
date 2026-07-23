@@ -20,30 +20,44 @@ rejects password sessions on protected routes.
 
 ## Release order
 
-1. Add `NEXT_PUBLIC_HUGO_SSO=1` to the target deployment environment.
-2. Deploy the reviewed commit. Do not enable the provider yet.
-3. Verify health, `/login`, and `/auth/hugo`; the login must show only **Sign in
-   with Hugo**, and the launcher should fail closed while the provider is off.
-4. Enable `custom:hugo` last.
-5. In real Chrome, complete Hugo login and verify the same Sandra UID,
+1. Deploy the reviewed commit with `NEXT_PUBLIC_HUGO_SSO` unset. Verify health,
+   password login, and password recovery before changing any provider.
+2. Enable `custom:hugo`. This does not remove the working password fallback.
+3. Add `NEXT_PUBLIC_HUGO_SSO=1` and deploy the reviewed commit. Verify `/login`
+   now shows only **Sign in with Hugo** and `/auth/hugo` reaches Hugo.
+4. In real Chrome, complete Hugo login and verify the same Sandra UID,
    membership role, and CRM data remain. Reload the dashboard and inspect the
    browser console. Repeat at desktop and mobile widths.
-6. Treat password-injected Playwright sessions as support evidence only; they
-   do not satisfy Hugo acceptance.
+5. Capture a temporary, ignored Playwright storage-state file from that real
+   Hugo session and run the production canaries with
+   `PROD_HUGO_STORAGE_STATE=/absolute/path/to/state.json`. The storage state is
+   a credential: never commit it or copy it into the vault.
+6. Inventory every enabled Supabase authentication provider. After every active
+   teammate has proved Hugo access, disable email/password and every provider
+   except `custom:hugo`, then revoke legacy refresh sessions.
+7. Prove a fresh password sign-in fails and a captured legacy refresh token can
+   no longer mint an access token. Wait at least the configured access-token
+   lifetime, then prove the old token cannot query a protected PostgREST table
+   while a fresh Hugo token can. Only then describe Sandra as Hugo-only at the
+   data boundary.
 
 ## Rollback
 
-1. Disable `custom:hugo` first.
-2. remove `NEXT_PUBLIC_HUGO_SSO` from the deployment environment.
-3. redeploy the recorded password-login build, or deploy the reviewed build
-   with the flag unset.
-4. Verify `/login` exposes email and password again and `/auth/hugo` fails
-   closed. Do not delete Auth users, identities, memberships, or CRM records.
+Before the provider shutdown in release step 6, remove `NEXT_PUBLIC_HUGO_SSO`,
+deploy the reviewed flag-off build, verify a known password account and
+recovery, then disable Hugo.
+
+After provider shutdown, keep Hugo active while restoring email/password in
+Supabase. Prove a fresh password sign-in and recovery email work, then deploy
+the flag-off build and repeat the dashboard proof. Disable Hugo only after that
+password rollback passes. Do not delete Auth users, identities, memberships, or
+CRM records.
 
 ## Legacy sessions
 
 The app rejects non-Hugo sessions on protected routes while the flag is on and
-explicitly expires their cookies. After successful acceptance, disable the
-Supabase email provider and revoke legacy refresh sessions only after every
-active teammate has confirmed Hugo access. Existing JWTs may remain valid until
-their configured expiry, so keep the application-side provider check in place.
+explicitly expires their cookies. Database RLS cannot distinguish the current
+Hugo provider from another linked OAuth identity, so the operational email-auth
+shutdown, refresh-session revocation, access-token expiry wait, and direct
+PostgREST rejection proof are mandatory release gates rather than optional
+cleanup.

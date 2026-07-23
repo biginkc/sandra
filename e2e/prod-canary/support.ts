@@ -15,7 +15,6 @@ export const PROD_CANARY_AUTH_FILE = "e2e/.auth/prod-canary.json";
 export type ProdCanaryEnv = {
   baseURL: string;
   email: string;
-  password: string;
   runId: string;
   label: string;
 };
@@ -61,7 +60,6 @@ function chunks<T>(items: T[], size: number): T[][] {
 export function requireProdCanaryEnv(): ProdCanaryEnv {
   const baseURL = process.env.PROD_BASE_URL ?? DEFAULT_PROD_BASE_URL;
   const email = process.env.PROD_EMAIL;
-  const password = process.env.PROD_PASSWORD;
 
   if (process.env.RUN_PROD_CANARIES !== "1") {
     throw new Error(
@@ -71,9 +69,9 @@ export function requireProdCanaryEnv(): ProdCanaryEnv {
   if (!baseURL.startsWith("https://") || baseURL.includes("localhost")) {
     throw new Error(`PROD_BASE_URL must be a deployed https URL. Got ${baseURL}`);
   }
-  if (!email || !password) {
+  if (!email) {
     throw new Error(
-      "Set PROD_EMAIL and PROD_PASSWORD for the dedicated Sandra canary user.",
+      "Set PROD_EMAIL to the Hugo-authenticated Sandra canary user.",
     );
   }
 
@@ -84,7 +82,6 @@ export function requireProdCanaryEnv(): ProdCanaryEnv {
   return {
     baseURL,
     email,
-    password,
     runId,
     label: `PROD-CANARY ${runId}`,
   };

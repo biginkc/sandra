@@ -1,12 +1,13 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const { signIn, signInWithHugo } = vi.hoisted(() => ({
+const { requestPasswordReset, signIn, signInWithHugo } = vi.hoisted(() => ({
+  requestPasswordReset: vi.fn(),
   signIn: vi.fn(),
   signInWithHugo: vi.fn(),
 }));
 
-vi.mock("./actions", () => ({ signIn, signInWithHugo }));
+vi.mock("./actions", () => ({ requestPasswordReset, signIn, signInWithHugo }));
 vi.mock("./login-background", () => ({ LoginBackground: () => null }));
 vi.mock("next/navigation", () => ({
   useSearchParams: () => new URLSearchParams("next=%2Fleads%2F5"),
@@ -26,6 +27,7 @@ beforeEach(() => {
   vi.stubEnv("NEXT_PUBLIC_HUGO_SSO", "1");
   signIn.mockResolvedValue({ ok: true, data: null });
   signInWithHugo.mockResolvedValue(undefined);
+  requestPasswordReset.mockResolvedValue({ ok: true, data: null });
 });
 
 afterEach(() => {
@@ -84,7 +86,20 @@ describe("Hugo-only login page", () => {
     expect(screen.getByLabelText(/^password$/i)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /^sign in$/i })).toBeEnabled();
     expect(
+      screen.getByRole("button", { name: /forgot password/i }),
+    ).toBeEnabled();
+    expect(
       screen.queryByRole("button", { name: /sign in with hugo/i }),
     ).not.toBeInTheDocument();
+  });
+
+  it("restores password recovery only while Hugo is off", async () => {
+    vi.stubEnv("NEXT_PUBLIC_HUGO_SSO", "");
+    await renderPage();
+
+    fireEvent.click(screen.getByRole("button", { name: /forgot password/i }));
+
+    expect(screen.getByText(/send a password-reset link/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /send link/i })).toBeEnabled();
   });
 });

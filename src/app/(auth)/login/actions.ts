@@ -107,3 +107,52 @@ export async function signIn(
   redirect(next);
   return ok(null);
 }
+
+/** Emergency rollback recovery only; Hugo owns recovery after cutover. */
+export async function requestPasswordReset(
+  _prevState: Result<null> | null,
+  formData: FormData,
+): Promise<Result<null>> {
+  if (process.env.NEXT_PUBLIC_HUGO_SSO === "1") {
+    return {
+      ok: false,
+      error: {
+        code: "PASSWORD_DISABLED",
+        message: "Sandra password recovery is disabled. Continue with Hugo.",
+      },
+    };
+  }
+
+  const email = String(formData.get("email") ?? "").trim().toLowerCase();
+  if (!email) {
+    return {
+      ok: false,
+      error: { code: "VALIDATION", message: "Email is required." },
+    };
+  }
+
+  try {
+    const h = await headers();
+    const proto = firstForwarded(h.get("x-forwarded-proto")) ?? "https";
+    const host = firstForwarded(h.get("x-forwarded-host")) ?? h.get("host");
+    const configuredOrigin = process.env.NEXT_PUBLIC_SITE_URL?.trim();
+    const origin = host
+      ? `${proto}://${host}`
+      : configuredOrigin?.replace(/\/$/, "") ||
+        "https://sandra.bmhgroupkc.com";
+    const supabase = await createClient();
+    const { error } = await supabase.auth.resetPasswordForEmail(email, {
+      redirectTo: `${origin}/auth/callback`,
+    });
+    if (error) {
+      reportError(new Error(error.message), {
+        tags: { surface: "request_password_reset" },
+      });
+    }
+  } catch (error) {
+    reportError(error, { tags: { surface: "request_password_reset" } });
+  }
+
+  // Do not reveal whether an Auth user exists for the submitted email.
+  return ok(null);
+}

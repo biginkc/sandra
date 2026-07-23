@@ -1,5 +1,9 @@
 import { defineConfig, devices } from "@playwright/test";
-import { loadProdCanaryEnvFiles } from "./src/lib/prod-canary/env";
+import { requireHugoAuthStorageState } from "./e2e/hugo-auth-state";
+import {
+  DEFAULT_PROD_BASE_URL,
+  loadProdCanaryEnvFiles,
+} from "./src/lib/prod-canary/env";
 
 /**
  * Production-grade Playwright canaries.
@@ -19,6 +23,11 @@ import { loadProdCanaryEnvFiles } from "./src/lib/prod-canary/env";
  */
 
 loadProdCanaryEnvFiles(__dirname);
+const baseURL = process.env.PROD_BASE_URL ?? DEFAULT_PROD_BASE_URL;
+const hugoAuthStorageState = requireHugoAuthStorageState(
+  "PROD_HUGO_STORAGE_STATE",
+  baseURL,
+);
 
 export default defineConfig({
   testDir: "./e2e/prod-canary",
@@ -30,7 +39,7 @@ export default defineConfig({
   timeout: 90_000,
   expect: { timeout: 10_000 },
   use: {
-    baseURL: process.env.PROD_BASE_URL ?? "https://sandra-sooty.vercel.app",
+    baseURL,
     trace: "retain-on-failure",
     screenshot: "only-on-failure",
     viewport: { width: 1440, height: 900 },
@@ -39,6 +48,7 @@ export default defineConfig({
     {
       name: "setup",
       testMatch: /auth\.setup\.ts$/,
+      use: { storageState: hugoAuthStorageState },
     },
     {
       name: "chromium",

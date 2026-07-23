@@ -7,7 +7,17 @@ vi.mock("@/lib/supabase/server", () => ({ createClient }));
 
 import { GET } from "./route";
 
-const FLOW_NONCE = "test-hugo-flow-nonce";
+const FLOW_NONCE = "a".repeat(43);
+const SECOND_FLOW_NONCE = "b".repeat(43);
+const OLDER_FLOW_NONCE = "c".repeat(43);
+const FLOW_STATE = Buffer.from(
+  JSON.stringify([
+    {
+      name: "sb-copflsklaefwzipsrjqz-auth-token-code-verifier",
+      value: "flow-specific-verifier",
+    },
+  ]),
+).toString("base64url");
 
 function hugoCallbackRequest(
   query: string,
@@ -27,7 +37,7 @@ function hugoCallbackRequest(
         ? {
             cookie: [
               ...(cookieNonce
-                ? [`sandra_hugo_flow=${cookieNonce}`]
+                ? [`sandra_hugo_flow_${cookieNonce}=${FLOW_STATE}`]
                 : []),
               ...additionalCookies,
             ].join("; "),
@@ -36,8 +46,10 @@ function hugoCallbackRequest(
   });
 }
 
-function expectFlowConsumed(response: Response) {
-  expect(response.headers.get("set-cookie")).toContain("sandra_hugo_flow=");
+function expectFlowConsumed(response: Response, nonce = FLOW_NONCE) {
+  expect(response.headers.get("set-cookie")).toContain(
+    `sandra_hugo_flow_${nonce}=`,
+  );
   expect(response.headers.get("set-cookie")).toContain("Max-Age=0");
   expect(response.headers.get("set-cookie")).toContain("Path=/");
 }
@@ -70,9 +82,39 @@ describe("auth callback route", () => {
       "https://sandra.test/login?error=password_disabled",
     );
     expect(response.headers.get("set-cookie") ?? "").not.toContain(
-      "sandra_hugo_flow=",
+      "sandra_hugo_flow_",
     );
     expect(createClient).not.toHaveBeenCalled();
+  });
+
+  it("completes a password-recovery callback while Hugo is off", async () => {
+    vi.stubEnv("NEXT_PUBLIC_HUGO_SSO", "");
+    const exchangeCodeForSession = vi.fn().mockResolvedValue({
+      data: {
+        session: {
+          access_token: "recovery-token",
+          user: { email: "person@bmhgroupkc.com" },
+        },
+      },
+      error: null,
+    });
+    const getClaims = vi.fn().mockResolvedValue({
+      data: { claims: { amr: [{ method: "recovery", timestamp: 1 }] } },
+      error: null,
+    });
+    createClient.mockResolvedValue({
+      auth: { exchangeCodeForSession, getClaims, signOut: vi.fn() },
+    });
+
+    const response = await GET(
+      new NextRequest("https://sandra.test/auth/callback?code=recovery-code"),
+    );
+
+    expect(exchangeCodeForSession).toHaveBeenCalledWith("recovery-code");
+    expect(response.headers.get("location")).toBe(
+      "https://sandra.test/auth/set-password",
+    );
+    expect(response.headers.get("cache-control")).toContain("no-store");
   });
 
   describe("Hugo code exchange and safe next", () => {
@@ -118,14 +160,24 @@ describe("auth callback route", () => {
         data: memberships,
         error: null,
       });
-      const eq = vi.fn(() => ({ limit }));
+      const orgEq = vi.fn(() => ({ limit }));
+      const eq = vi.fn(() => ({ eq: orgEq }));
       const select = vi.fn(() => ({ eq }));
       const from = vi.fn(() => ({ select }));
       createClient.mockResolvedValue({
         auth: { exchangeCodeForSession, getClaims, signOut },
         from,
       });
-      return { exchangeCodeForSession, getClaims, signOut, from, select, eq, limit };
+      return {
+        exchangeCodeForSession,
+        getClaims,
+        signOut,
+        from,
+        select,
+        eq,
+        orgEq,
+        limit,
+      };
     }
 
     async function codeFlowLocation(next?: string) {
@@ -273,7 +325,7 @@ describe("auth callback route", () => {
         "https://sandra.test/login?error=sso",
       );
       expect(response.headers.get("set-cookie") ?? "").not.toContain(
-        "sandra_hugo_flow=;",
+        "sandra_hugo_flow_",
       );
     });
 
@@ -293,21 +345,29 @@ describe("auth callback route", () => {
     it("preserves the active second-tab flow when an older callback arrives first", async () => {
       const { exchangeCodeForSession } = mockAuth();
       const stale = await GET(
-        hugoCallbackRequest("code=older-tab", "newer-flow", "older-flow"),
+        hugoCallbackRequest(
+          "code=older-tab",
+          SECOND_FLOW_NONCE,
+          OLDER_FLOW_NONCE,
+        ),
       );
 
       expect(exchangeCodeForSession).not.toHaveBeenCalled();
       expect(stale.headers.get("set-cookie") ?? "").not.toContain(
-        "sandra_hugo_flow=;",
+        "sandra_hugo_flow_",
       );
 
       const current = await GET(
-        hugoCallbackRequest("code=newer-tab", "newer-flow", "newer-flow"),
+        hugoCallbackRequest(
+          "code=newer-tab",
+          SECOND_FLOW_NONCE,
+          SECOND_FLOW_NONCE,
+        ),
       );
       expect(current.headers.get("location")).toBe(
         "https://sandra.test/dashboard",
       );
-      expectFlowConsumed(current);
+      expectFlowConsumed(current, SECOND_FLOW_NONCE);
     });
 
     it("rejects replay after the browser consumes the one-use launch cookie", async () => {
@@ -326,7 +386,7 @@ describe("auth callback route", () => {
         "https://sandra.test/login?error=sso",
       );
       expect(replay.headers.get("set-cookie") ?? "").not.toContain(
-        "sandra_hugo_flow=;",
+        "sandra_hugo_flow_",
       );
     });
 

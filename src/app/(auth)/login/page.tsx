@@ -6,7 +6,7 @@ import { Suspense, useActionState, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 
-import { signIn, signInWithHugo } from "./actions";
+import { requestPasswordReset, signIn, signInWithHugo } from "./actions";
 import { LoginBackground } from "./login-background";
 
 const CARD_GLOW =
@@ -121,7 +121,12 @@ function HugoLoginForm() {
 
 function PasswordRollbackForm() {
   const [state, formAction, pending] = useActionState(signIn, null);
+  const [resetState, resetAction, resetPending] = useActionState(
+    requestPasswordReset,
+    null,
+  );
   const [showPassword, setShowPassword] = useState(false);
+  const [showReset, setShowReset] = useState(false);
   const searchParams = useSearchParams();
   const next = searchParams.get("next") ?? "";
   const errorMessage =
@@ -130,6 +135,48 @@ function PasswordRollbackForm() {
       : searchParams.get("error") === "domain"
         ? "This CRM is restricted to authorized bmhgroupkc.com accounts."
         : null;
+
+  if (showReset) {
+    return (
+      <form action={resetAction} aria-busy={resetPending} className="mt-6 flex flex-col gap-4">
+        <p className="text-[14px] text-[#7e889c]">
+          Enter your email and we&apos;ll send a password-reset link.
+        </p>
+        <Input
+          aria-label="Email"
+          name="email"
+          type="email"
+          autoComplete="email"
+          placeholder="Email"
+          required
+          className={INPUT_CLASS}
+        />
+        {resetState?.ok ? (
+          <p role="status" className="rounded-[10px] border border-white/10 bg-white/[0.05] px-3 py-2 text-[13px] text-[#cdd6e6]">
+            If that email is on file, a reset link is on its way.
+          </p>
+        ) : resetState ? (
+          <p role="alert" className="rounded-[10px] border border-[rgba(255,90,90,0.25)] bg-[rgba(255,80,80,0.08)] px-3 py-2 text-[13px] text-[#ff9a9a]">
+            {resetState.error.message}
+          </p>
+        ) : null}
+        <div className="flex gap-2">
+          <Button
+            type="button"
+            variant="outline"
+            onClick={() => setShowReset(false)}
+            disabled={resetPending}
+            className="h-12 flex-1"
+          >
+            Back
+          </Button>
+          <Button type="submit" disabled={resetPending} className="h-12 flex-1">
+            {resetPending ? "Sending…" : "Send link"}
+          </Button>
+        </div>
+      </form>
+    );
+  }
 
   return (
     <form action={formAction} aria-busy={pending} className="mt-6 flex flex-col gap-4">
@@ -181,6 +228,13 @@ function PasswordRollbackForm() {
       >
         {pending ? "Signing in…" : "Sign in"}
       </Button>
+      <button
+        type="button"
+        onClick={() => setShowReset(true)}
+        className="-mt-1 self-end text-[13.5px] text-[#7e889c] underline-offset-4 transition-colors hover:text-[#bcd0f0] hover:underline"
+      >
+        Forgot password?
+      </button>
       <p className="text-center text-xs text-[#7e889c]">
         Hugo is not active on this deployment; the existing Sandra login remains available.
       </p>

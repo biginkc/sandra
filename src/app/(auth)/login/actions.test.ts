@@ -23,7 +23,7 @@ vi.mock("@/lib/errors/report", () => ({ reportError: vi.fn() }));
 vi.mock("next/headers", () => ({ headers: headersMock, cookies: cookiesMock }));
 vi.mock("next/navigation", () => ({ redirect: redirectMock }));
 
-import { signIn, signInWithHugo } from "./actions";
+import { requestPasswordReset, signIn, signInWithHugo } from "./actions";
 
 async function redirectedTo(run: () => Promise<unknown>): Promise<string | null> {
   try {
@@ -77,7 +77,14 @@ describe("signInWithHugo", () => {
         data: { url: "https://hugo.test/authorize" },
         error: null,
       });
-      createClient.mockResolvedValue({ auth: { signInWithOAuth } });
+      createClient.mockImplementation(async (options) => {
+        options?.onCookieMutation?.({
+          name: "sb-copflsklaefwzipsrjqz-auth-token-code-verifier",
+          value: "flow-specific-verifier",
+          options: {},
+        });
+        return { auth: { signInWithOAuth } };
+      });
     });
 
     it("uses custom:hugo and the current Sandra callback", async () => {
@@ -95,8 +102,8 @@ describe("signInWithHugo", () => {
       const nonce = redirectTo.searchParams.get("hugo_flow");
       expect(nonce).toMatch(/^[A-Za-z0-9_-]{43}$/);
       expect(cookieSet).toHaveBeenCalledWith(
-        "sandra_hugo_flow",
-        nonce,
+        `sandra_hugo_flow_${nonce}`,
+        expect.any(String),
         expect.objectContaining({
           httpOnly: true,
           sameSite: "lax",
@@ -137,16 +144,19 @@ describe("signInWithHugo", () => {
       ).toBe("/login?error=sso&next=%2Fleads%2F5");
     });
 
-    it("does not overwrite another tab's active Hugo flow", async () => {
-      cookieGet.mockReturnValue({ name: "sandra_hugo_flow", value: "active" });
+    it("keeps concurrent tab PKCE state in separate flow cookies", async () => {
+      const [first, second] = await Promise.all([
+        redirectedTo(() => signInWithHugo(undefined, formData("/leads/5"))),
+        redirectedTo(() => signInWithHugo(undefined, formData("/leads/6"))),
+      ]);
 
-      expect(
-        await redirectedTo(() =>
-          signInWithHugo(undefined, formData("/leads/5")),
-        ),
-      ).toBe("/login?error=sso_in_progress&next=%2Fleads%2F5");
-      expect(signInWithOAuth).not.toHaveBeenCalled();
-      expect(cookieSet).not.toHaveBeenCalled();
+      expect(first).toBe("https://hugo.test/authorize");
+      expect(second).toBe("https://hugo.test/authorize");
+      const names = cookieSet.mock.calls.map(([name]) => name);
+      expect(names).toHaveLength(2);
+      expect(names[0]).toMatch(/^sandra_hugo_flow_[A-Za-z0-9_-]{43}$/);
+      expect(names[1]).toMatch(/^sandra_hugo_flow_[A-Za-z0-9_-]{43}$/);
+      expect(names[0]).not.toBe(names[1]);
     });
   });
 });
@@ -159,6 +169,37 @@ describe("password rollback login", () => {
     data.set("password", "not-a-real-password");
 
     const result = await signIn(null, data);
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: { code: "PASSWORD_DISABLED" },
+    });
+    expect(createClient).not.toHaveBeenCalled();
+  });
+
+  it("keeps password recovery available as a flag-off rollback path", async () => {
+    vi.stubEnv("NEXT_PUBLIC_HUGO_SSO", "");
+    const resetPasswordForEmail = vi.fn().mockResolvedValue({ error: null });
+    createClient.mockResolvedValue({ auth: { resetPasswordForEmail } });
+    const data = new FormData();
+    data.set("email", "person@bmhgroupkc.com");
+
+    await expect(requestPasswordReset(null, data)).resolves.toEqual({
+      ok: true,
+      data: null,
+    });
+    expect(resetPasswordForEmail).toHaveBeenCalledWith(
+      "person@bmhgroupkc.com",
+      { redirectTo: "https://sandra.test/auth/callback" },
+    );
+  });
+
+  it("rejects password recovery calls after Hugo is enabled", async () => {
+    vi.stubEnv("NEXT_PUBLIC_HUGO_SSO", "1");
+    const data = new FormData();
+    data.set("email", "person@bmhgroupkc.com");
+
+    const result = await requestPasswordReset(null, data);
 
     expect(result).toMatchObject({
       ok: false,

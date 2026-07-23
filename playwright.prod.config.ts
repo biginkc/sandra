@@ -9,14 +9,14 @@ import { defineConfig, devices } from "@playwright/test";
  *
  * Add to .env.local (gitignored):
  *   PROD_EMAIL=you@example.com
- *   PROD_PASSWORD=yourpassword
+ *   PROD_HUGO_STORAGE_STATE=/absolute/path/to/sandra-hugo-state.json
  *
  * Then run:
  *   npx playwright test e2e/phase-1-5-uat.spec.ts \
  *     --config playwright.prod.config.ts --headed --slow-mo=600
  */
 
-// Load .env.local so PROD_EMAIL / PROD_PASSWORD are available to the spec
+// Load .env.local so the ignored Hugo storage-state path is available
 // without needing to type them in the terminal.
 function loadEnvLocal() {
   const filepath = path.resolve(__dirname, ".env.local");
@@ -45,7 +45,7 @@ export default defineConfig({
   timeout: 60_000,
   expect: { timeout: 10_000 },
   use: {
-    baseURL: "https://sandra-sooty.vercel.app",
+    baseURL: "https://sandra.bmhgroupkc.com",
     trace: "retain-on-failure",
     screenshot: "only-on-failure",
     viewport: { width: 1440, height: 900 },

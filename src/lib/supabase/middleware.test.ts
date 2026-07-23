@@ -43,14 +43,15 @@ function mockProtectedSession({
   const limit = membershipThrows
     ? vi.fn().mockRejectedValue(new Error("membership unavailable"))
     : vi.fn().mockResolvedValue({ data: memberships, error: null });
-  const eq = vi.fn(() => ({ limit }));
+  const orgEq = vi.fn(() => ({ limit }));
+  const eq = vi.fn(() => ({ eq: orgEq }));
   const select = vi.fn(() => ({ eq }));
   const from = vi.fn(() => ({ select }));
   createServerClient.mockReturnValue({
     auth: { getUser, getClaims, signOut },
     from,
   });
-  return { getUser, getClaims, signOut, from, select, eq, limit };
+  return { getUser, getClaims, signOut, from, select, eq, orgEq, limit };
 }
 
 beforeEach(() => {

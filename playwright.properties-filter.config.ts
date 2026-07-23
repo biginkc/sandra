@@ -1,9 +1,10 @@
 import { defineConfig, devices } from "@playwright/test";
+import { requireHugoAuthStorageState } from "./e2e/hugo-auth-state";
 
 const baseURL =
   process.env.FILTER_UI_BASE_URL ??
   process.env.PROD_BASE_URL ??
-  "https://sandra-sooty.vercel.app";
+  "https://sandra.bmhgroupkc.com";
 const targetLabel = (process.env.FILTER_UI_TARGET ?? "prod").replace(
   /[^a-zA-Z0-9_-]/g,
   "-",
@@ -11,6 +12,10 @@ const targetLabel = (process.env.FILTER_UI_TARGET ?? "prod").replace(
 const authFile =
   process.env.PROPERTIES_FILTER_AUTH_FILE ??
   `test-results/properties-filter-characterization/auth-${targetLabel}.json`;
+const hugoAuthStorageState = requireHugoAuthStorageState(
+  "PROPERTIES_FILTER_HUGO_STORAGE_STATE",
+  baseURL,
+);
 const timeout = Number(process.env.PROPERTIES_FILTER_TEST_TIMEOUT_MS ?? 600_000);
 
 export default defineConfig({
@@ -39,6 +44,7 @@ export default defineConfig({
     {
       name: "setup",
       testMatch: /properties-filter-characterization\.auth\.setup\.ts$/,
+      use: { storageState: hugoAuthStorageState },
     },
     {
       name: "chromium",

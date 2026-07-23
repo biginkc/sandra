@@ -1,16 +1,20 @@
 import { timingSafeEqual } from "node:crypto";
 
+import type { EmailOtpType } from "@supabase/supabase-js";
 import { NextResponse, type NextRequest } from "next/server";
 
 import { isEmailAllowed } from "@/lib/auth/allowlist";
 import { hasCurrentHugoOAuthProof } from "@/lib/auth/hugo-proof";
 import { applyAuthNoCache } from "@/lib/auth/response";
 import { sanitizeNextPath } from "@/lib/auth/safe-next";
+import { SANDRA_ORG_ID } from "@/lib/auth/sandra-org";
 import {
   HUGO_FLOW_COOKIE,
   HUGO_FLOW_COOKIE_PATH,
   HUGO_FLOW_QUERY,
   HUGO_FLOW_SOURCE_QUERY,
+  decodeHugoPkceState,
+  hugoFlowCookieName,
   hugoFlowCookieOptions,
 } from "@/lib/auth/start-hugo";
 import {
@@ -27,14 +31,81 @@ const EMAIL_FLOW_TYPES = new Set([
   "email_change",
   "email",
 ]);
+const PASSWORD_SETUP_METHODS = new Set(["signup", "invite", "recovery"]);
+
+function rollbackRedirect(request: NextRequest, location: string) {
+  return applyAuthNoCache(
+    NextResponse.redirect(new URL(location, request.nextUrl.origin)),
+  );
+}
+
+async function completeRollbackEmailFlow(
+  request: NextRequest,
+  code: string | null,
+  tokenHash: string | null,
+  type: string | null,
+) {
+  if (!code && !(tokenHash && type && EMAIL_FLOW_TYPES.has(type))) {
+    return rollbackRedirect(request, "/login?error=invite_failed");
+  }
+
+  try {
+    const supabase = await createClient();
+    const result = tokenHash && type && EMAIL_FLOW_TYPES.has(type)
+      ? await supabase.auth.verifyOtp({
+          token_hash: tokenHash,
+          type: type as EmailOtpType,
+        })
+      : await supabase.auth.exchangeCodeForSession(code!);
+    if (result.error || !result.data.session) {
+      return rollbackRedirect(request, "/login?error=invite_failed");
+    }
+
+    if (!isEmailAllowed(result.data.session.user.email)) {
+      try {
+        await supabase.auth.signOut({ scope: "local" });
+      } catch {
+        // The callback still denies navigation if cleanup fails.
+      }
+      return rollbackRedirect(request, "/login?error=domain");
+    }
+
+    let passwordSetup = Boolean(type && PASSWORD_SETUP_METHODS.has(type));
+    if (!type) {
+      const { data } = await supabase.auth.getClaims(
+        result.data.session.access_token,
+      );
+      const methods = Array.isArray(data?.claims.amr) ? data.claims.amr : [];
+      passwordSetup = methods.some((entry) => {
+        const method =
+          typeof entry === "string"
+            ? entry
+            : entry && typeof entry === "object" && "method" in entry
+              ? entry.method
+              : null;
+        return typeof method === "string" && PASSWORD_SETUP_METHODS.has(method);
+      });
+    }
+
+    const target = passwordSetup
+      ? "/auth/set-password"
+      : sanitizeNextPath(request.nextUrl.searchParams.get("next"), "/dashboard");
+    return rollbackRedirect(request, target);
+  } catch {
+    return rollbackRedirect(request, "/login?error=invite_failed");
+  }
+}
 
 function flowNonceMatches(request: NextRequest): boolean {
   const queryNonce = request.nextUrl.searchParams.get(HUGO_FLOW_QUERY);
-  const cookieNonce = request.cookies.get(HUGO_FLOW_COOKIE)?.value;
-  if (!queryNonce || !cookieNonce) return false;
+  const cookieName = queryNonce ? hugoFlowCookieName(queryNonce) : null;
+  const state = cookieName ? request.cookies.get(cookieName)?.value : null;
+  if (!queryNonce || !state || decodeHugoPkceState(state).length === 0) {
+    return false;
+  }
   const query = Buffer.from(queryNonce);
-  const cookie = Buffer.from(cookieNonce);
-  return query.length === cookie.length && timingSafeEqual(query, cookie);
+  const cookieSuffix = Buffer.from(cookieName!.slice(HUGO_FLOW_COOKIE.length));
+  return query.length === cookieSuffix.length && timingSafeEqual(query, cookieSuffix);
 }
 
 function authRedirect(
@@ -50,12 +121,16 @@ function authRedirect(
     new URL(location, request.nextUrl.origin),
   );
   if (options.consumeFlow) {
-    response.cookies.set(HUGO_FLOW_COOKIE, "", {
-      ...hugoFlowCookieOptions(),
-      path: HUGO_FLOW_COOKIE_PATH,
-      maxAge: 0,
-      expires: new Date(0),
-    });
+    const queryNonce = request.nextUrl.searchParams.get(HUGO_FLOW_QUERY);
+    const cookieName = queryNonce ? hugoFlowCookieName(queryNonce) : null;
+    if (cookieName) {
+      response.cookies.set(cookieName, "", {
+        ...hugoFlowCookieOptions(),
+        path: HUGO_FLOW_COOKIE_PATH,
+        maxAge: 0,
+        expires: new Date(0),
+      });
+    }
   }
   if (options.expirePkce) {
     expireSupabasePkceCookies(
@@ -92,17 +167,20 @@ export async function GET(request: NextRequest) {
   const code = searchParams.get("code");
   const type = searchParams.get("type")?.toLowerCase();
   const tokenHash = searchParams.get("token_hash");
-  const cookieNonce = request.cookies.get(HUGO_FLOW_COOKIE)?.value;
   const validFlow = flowNonceMatches(request);
   const markedHugoFlow =
     searchParams.get(HUGO_FLOW_SOURCE_QUERY) === "hugo";
+
+  if (process.env.NEXT_PUBLIC_HUGO_SSO !== "1" && !markedHugoFlow) {
+    return completeRollbackEmailFlow(request, code, tokenHash, type ?? null);
+  }
 
   // Do not let an unrelated stale link destroy a different tab's active Hugo
   // flow. Only the callback carrying the matching nonce may consume it.
   const rejectUnmarked = (location: string) =>
     authRedirect(request, location, {
       consumeFlow: validFlow,
-      expirePkce: validFlow || !cookieNonce,
+      expirePkce: validFlow,
     });
 
   if (tokenHash || (type && EMAIL_FLOW_TYPES.has(type))) {
@@ -129,8 +207,14 @@ export async function GET(request: NextRequest) {
   const writtenCookieNames = new Set<string>();
   let supabase: Awaited<ReturnType<typeof createClient>>;
   try {
+    const queryNonce = searchParams.get(HUGO_FLOW_QUERY)!;
+    const flowCookieName = hugoFlowCookieName(queryNonce)!;
+    const cookieOverrides = decodeHugoPkceState(
+      request.cookies.get(flowCookieName)!.value,
+    );
     supabase = await createClient({
       onCookieMutation: ({ name }) => writtenCookieNames.add(name),
+      cookieOverrides,
     });
   } catch {
     return authRedirect(request, "/login?error=sso", {
@@ -194,6 +278,7 @@ export async function GET(request: NextRequest) {
       .from("memberships")
       .select("user_id")
       .eq("user_id", data.session.user.id)
+      .eq("org_id", SANDRA_ORG_ID)
       .limit(1);
     if (membershipError || !memberships?.length) {
       return rejectExchangedSession(

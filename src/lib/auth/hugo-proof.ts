@@ -46,7 +46,8 @@ export function hasCurrentHugoOAuthProof(
     const identityTimestamp = Date.parse(identity.last_sign_in_at) / 1000;
     return (
       Number.isFinite(identityTimestamp) &&
-      identityTimestamp >= currentOAuthTimestamp - CLOCK_SKEW_SECONDS
+      Math.abs(identityTimestamp - currentOAuthTimestamp) <=
+        CLOCK_SKEW_SECONDS
     );
   });
 }

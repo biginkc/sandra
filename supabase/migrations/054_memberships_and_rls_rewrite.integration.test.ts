@@ -3,6 +3,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { AuthorizationError } from "@/lib/errors/classes";
 import { requireOrgMembershipByResource } from "@/lib/auth/require-org-membership";
 import { grantUserAccess } from "@/app/(dashboard)/admin/users/actions";
+import { SANDRA_ORG_ID } from "@/lib/auth/sandra-org";
 import { createTestClient } from "@tests/integration/client";
 import { resetTenantTables } from "@tests/integration/reset";
 import {
@@ -242,11 +243,7 @@ describe("Migration 054 — memberships foundation + RLS rewrite", () => {
     };
     mocks.adminClient = serviceClient;
 
-    const result = await grantUserAccess(
-      grantedEmail,
-      TEST_ORG_B_ID,
-      "owner",
-    );
+    const result = await grantUserAccess(grantedEmail, "owner");
     expect(result).toMatchObject({
       ok: true,
       data: { grantedEmail, created: true },
@@ -258,12 +255,12 @@ describe("Migration 054 — memberships foundation + RLS rewrite", () => {
       .from("memberships")
       .select("user_id, org_id, role")
       .eq("user_id", result.data.userId)
-      .eq("org_id", TEST_ORG_B_ID)
+      .eq("org_id", SANDRA_ORG_ID)
       .single();
     expect(membershipError).toBeNull();
     expect(membership).toEqual({
       user_id: result.data.userId,
-      org_id: TEST_ORG_B_ID,
+      org_id: SANDRA_ORG_ID,
       role: "owner",
     });
 

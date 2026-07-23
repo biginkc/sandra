@@ -3,6 +3,7 @@ import { NextResponse, type NextRequest } from "next/server";
 
 import { isEmailAllowed } from "@/lib/auth/allowlist";
 import { hasCurrentHugoOAuthProof } from "@/lib/auth/hugo-proof";
+import { SANDRA_ORG_ID } from "@/lib/auth/sandra-org";
 import { expireSupabaseAuthCookies } from "@/lib/auth/supabase-cookies";
 
 export function isPublicPath(path: string): boolean {
@@ -125,6 +126,7 @@ export async function updateSession(request: NextRequest) {
         .from("memberships")
         .select("user_id")
         .eq("user_id", user.id)
+        .eq("org_id", SANDRA_ORG_ID)
         .limit(1);
       hasMembership = !error && Boolean(data?.length);
     } catch {
