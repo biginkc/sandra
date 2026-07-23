@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
 
 const { createClient } = vi.hoisted(() => ({ createClient: vi.fn() }));
@@ -13,24 +13,47 @@ function hugoCallbackRequest(
   query: string,
   cookieNonce: string | null = FLOW_NONCE,
   queryNonce = FLOW_NONCE,
+  additionalCookies: string[] = [],
 ) {
   const url = new URL("https://sandra.test/auth/callback");
   for (const [key, value] of new URLSearchParams(query)) {
     url.searchParams.set(key, value);
   }
   if (queryNonce) url.searchParams.set("hugo_flow", queryNonce);
+  url.searchParams.set("hugo_source", "hugo");
   return new NextRequest(url, {
-    headers: cookieNonce
-      ? { cookie: `sandra_hugo_flow=${cookieNonce}` }
-      : undefined,
+    headers:
+      cookieNonce || additionalCookies.length
+        ? {
+            cookie: [
+              ...(cookieNonce
+                ? [`sandra_hugo_flow=${cookieNonce}`]
+                : []),
+              ...additionalCookies,
+            ].join("; "),
+          }
+        : undefined,
   });
 }
 
 function expectFlowConsumed(response: Response) {
   expect(response.headers.get("set-cookie")).toContain("sandra_hugo_flow=");
   expect(response.headers.get("set-cookie")).toContain("Max-Age=0");
-  expect(response.headers.get("set-cookie")).toContain("Path=/auth/callback");
+  expect(response.headers.get("set-cookie")).toContain("Path=/");
 }
+
+beforeEach(() => {
+  vi.stubEnv("NEXT_PUBLIC_HUGO_SSO", "1");
+  vi.stubEnv(
+    "NEXT_PUBLIC_SUPABASE_URL",
+    "https://copflsklaefwzipsrjqz.supabase.co",
+  );
+});
+
+afterEach(() => {
+  vi.clearAllMocks();
+  vi.unstubAllEnvs();
+});
 
 describe("auth callback route", () => {
   it.each([
@@ -46,7 +69,9 @@ describe("auth callback route", () => {
     expect(response.headers.get("location")).toBe(
       "https://sandra.test/login?error=password_disabled",
     );
-    expectFlowConsumed(response);
+    expect(response.headers.get("set-cookie") ?? "").not.toContain(
+      "sandra_hugo_flow=",
+    );
     expect(createClient).not.toHaveBeenCalled();
   });
 
@@ -218,7 +243,7 @@ describe("auth callback route", () => {
       );
     });
 
-    it("accepts a repeated Hugo login even when the linked identity timestamp is stale", async () => {
+    it("rejects another OAuth login when Hugo is only a stale linked identity", async () => {
       const { signOut } = mockAuth("person@bmhgroupkc.com", [
         {
           provider: "custom:hugo",
@@ -228,9 +253,9 @@ describe("auth callback route", () => {
       const response = await GET(
         hugoCallbackRequest("code=repeated-hugo"),
       );
-      expect(signOut).not.toHaveBeenCalled();
+      expect(signOut).toHaveBeenCalledWith({ scope: "local" });
       expect(response.headers.get("location")).toBe(
-        "https://sandra.test/dashboard",
+        "https://sandra.test/login?error=password_disabled",
       );
     });
 
@@ -238,7 +263,7 @@ describe("auth callback route", () => {
       ["missing", null, FLOW_NONCE],
       ["mismatched", "different-cookie", FLOW_NONCE],
       ["missing query", FLOW_NONCE, ""],
-    ])("rejects a %s launch nonce and consumes the cookie", async (_label, cookie, query) => {
+    ])("rejects a %s launch nonce without destroying another active flow", async (_label, cookie, query) => {
       const { exchangeCodeForSession } = mockAuth();
       const response = await GET(
         hugoCallbackRequest("code=hugo-code", cookie, query),
@@ -247,7 +272,42 @@ describe("auth callback route", () => {
       expect(response.headers.get("location")).toBe(
         "https://sandra.test/login?error=sso",
       );
+      expect(response.headers.get("set-cookie") ?? "").not.toContain(
+        "sandra_hugo_flow=;",
+      );
+    });
+
+    it("stops a matching callback immediately when the rollout flag is turned off", async () => {
+      vi.stubEnv("NEXT_PUBLIC_HUGO_SSO", "");
+      const { exchangeCodeForSession } = mockAuth();
+
+      const response = await GET(hugoCallbackRequest("code=hugo-code"));
+
+      expect(exchangeCodeForSession).not.toHaveBeenCalled();
+      expect(response.headers.get("location")).toBe(
+        "https://sandra.test/login?error=sso_disabled",
+      );
       expectFlowConsumed(response);
+    });
+
+    it("preserves the active second-tab flow when an older callback arrives first", async () => {
+      const { exchangeCodeForSession } = mockAuth();
+      const stale = await GET(
+        hugoCallbackRequest("code=older-tab", "newer-flow", "older-flow"),
+      );
+
+      expect(exchangeCodeForSession).not.toHaveBeenCalled();
+      expect(stale.headers.get("set-cookie") ?? "").not.toContain(
+        "sandra_hugo_flow=;",
+      );
+
+      const current = await GET(
+        hugoCallbackRequest("code=newer-tab", "newer-flow", "newer-flow"),
+      );
+      expect(current.headers.get("location")).toBe(
+        "https://sandra.test/dashboard",
+      );
+      expectFlowConsumed(current);
     });
 
     it("rejects replay after the browser consumes the one-use launch cookie", async () => {
@@ -265,7 +325,9 @@ describe("auth callback route", () => {
       expect(replay.headers.get("location")).toBe(
         "https://sandra.test/login?error=sso",
       );
-      expectFlowConsumed(replay);
+      expect(replay.headers.get("set-cookie") ?? "").not.toContain(
+        "sandra_hugo_flow=;",
+      );
     });
 
     it("reports an SSO error when the code exchange fails", async () => {
@@ -286,7 +348,7 @@ describe("auth callback route", () => {
       expect(response.headers.get("location")).toBe(
         "https://sandra.test/login?error=sso",
       );
-      expect(signOut).not.toHaveBeenCalled();
+      expect(signOut).toHaveBeenCalledWith({ scope: "local" });
       expectFlowConsumed(response);
     });
 
@@ -380,6 +442,38 @@ describe("auth callback route", () => {
         "https://sandra.test/login?error=access",
       );
       expectFlowConsumed(response);
+    });
+
+    it("explicitly expires every written or incoming Auth cookie when rejection cleanup fails", async () => {
+      const { getClaims, signOut } = mockAuth();
+      getClaims.mockResolvedValue({
+        data: { claims: { amr: [{ method: "password", timestamp: 1 }] } },
+        error: null,
+      });
+      signOut.mockResolvedValue({
+        error: { message: "remote sign-out failed before cookie cleanup" },
+      });
+      const request = hugoCallbackRequest(
+        "code=password-session",
+        FLOW_NONCE,
+        FLOW_NONCE,
+        [
+          "sb-copflsklaefwzipsrjqz-auth-token.0=session",
+          "sb-copflsklaefwzipsrjqz-auth-token-code-verifier=verifier",
+        ],
+      );
+
+      const response = await GET(request);
+      const setCookie = response.headers.get("set-cookie") ?? "";
+
+      expect(setCookie).toContain(
+        "sb-copflsklaefwzipsrjqz-auth-token.0=",
+      );
+      expect(setCookie).toContain(
+        "sb-copflsklaefwzipsrjqz-auth-token-code-verifier=",
+      );
+      expect(setCookie).toContain("Max-Age=0");
+      expect(response.headers.get("cache-control")).toContain("no-store");
     });
   });
 });

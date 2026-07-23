@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const { createClient, cookiesMock, cookieSet, headersMock, redirectMock } = vi.hoisted(() => {
+const { createClient, cookiesMock, cookieGet, cookieSet, headersMock, redirectMock } = vi.hoisted(() => {
   class RedirectSignal extends Error {
     constructor(public readonly url: string) {
       super(`NEXT_REDIRECT:${url}`);
@@ -9,6 +9,7 @@ const { createClient, cookiesMock, cookieSet, headersMock, redirectMock } = vi.h
   return {
     createClient: vi.fn(),
     cookiesMock: vi.fn(),
+    cookieGet: vi.fn(),
     cookieSet: vi.fn(),
     headersMock: vi.fn(),
     redirectMock: vi.fn((url: string): never => {
@@ -22,7 +23,7 @@ vi.mock("@/lib/errors/report", () => ({ reportError: vi.fn() }));
 vi.mock("next/headers", () => ({ headers: headersMock, cookies: cookiesMock }));
 vi.mock("next/navigation", () => ({ redirect: redirectMock }));
 
-import { signInWithHugo } from "./actions";
+import { signIn, signInWithHugo } from "./actions";
 
 async function redirectedTo(run: () => Promise<unknown>): Promise<string | null> {
   try {
@@ -49,7 +50,8 @@ beforeEach(() => {
       "x-forwarded-host": "sandra.test",
     }),
   );
-  cookiesMock.mockResolvedValue({ set: cookieSet });
+  cookieGet.mockReturnValue(undefined);
+  cookiesMock.mockResolvedValue({ get: cookieGet, set: cookieSet });
 });
 
 afterEach(() => {
@@ -89,6 +91,7 @@ describe("signInWithHugo", () => {
         "https://sandra.test/auth/callback",
       );
       expect(redirectTo.searchParams.get("next")).toBe("/leads/5");
+      expect(redirectTo.searchParams.get("hugo_source")).toBe("hugo");
       const nonce = redirectTo.searchParams.get("hugo_flow");
       expect(nonce).toMatch(/^[A-Za-z0-9_-]{43}$/);
       expect(cookieSet).toHaveBeenCalledWith(
@@ -97,7 +100,7 @@ describe("signInWithHugo", () => {
         expect.objectContaining({
           httpOnly: true,
           sameSite: "lax",
-          path: "/auth/callback",
+          path: "/",
           maxAge: 600,
         }),
       );
@@ -132,6 +135,51 @@ describe("signInWithHugo", () => {
           signInWithHugo(undefined, formData("/leads/5")),
         ),
       ).toBe("/login?error=sso&next=%2Fleads%2F5");
+    });
+
+    it("does not overwrite another tab's active Hugo flow", async () => {
+      cookieGet.mockReturnValue({ name: "sandra_hugo_flow", value: "active" });
+
+      expect(
+        await redirectedTo(() =>
+          signInWithHugo(undefined, formData("/leads/5")),
+        ),
+      ).toBe("/login?error=sso_in_progress&next=%2Fleads%2F5");
+      expect(signInWithOAuth).not.toHaveBeenCalled();
+      expect(cookieSet).not.toHaveBeenCalled();
+    });
+  });
+});
+
+describe("password rollback login", () => {
+  it("rejects direct password action calls after Hugo is enabled", async () => {
+    vi.stubEnv("NEXT_PUBLIC_HUGO_SSO", "1");
+    const data = new FormData();
+    data.set("email", "person@bmhgroupkc.com");
+    data.set("password", "not-a-real-password");
+
+    const result = await signIn(null, data);
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: { code: "PASSWORD_DISABLED" },
+    });
+    expect(createClient).not.toHaveBeenCalled();
+  });
+
+  it("keeps password login available as a flag-off rollback path", async () => {
+    vi.stubEnv("NEXT_PUBLIC_HUGO_SSO", "");
+    const signInWithPassword = vi.fn().mockResolvedValue({ error: null });
+    createClient.mockResolvedValue({ auth: { signInWithPassword } });
+    const data = new FormData();
+    data.set("email", "person@bmhgroupkc.com");
+    data.set("password", "rollback-password");
+    data.set("next", "/dashboard");
+
+    expect(await redirectedTo(() => signIn(null, data))).toBe("/dashboard");
+    expect(signInWithPassword).toHaveBeenCalledWith({
+      email: "person@bmhgroupkc.com",
+      password: "rollback-password",
     });
   });
 });

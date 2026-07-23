@@ -36,6 +36,25 @@ type MembershipAdminClient = {
   };
 };
 
+type MembershipRemovalAdminClient = {
+  from(table: "memberships"): {
+    delete(): {
+      eq(
+        column: "user_id",
+        value: string,
+      ): Promise<{ error: { message: string } | null }>;
+    };
+    select(columns: "user_id"): {
+      eq(column: "user_id", value: string): {
+        limit(count: 1): Promise<{
+          data: Array<{ user_id: string }> | null;
+          error: { message: string } | null;
+        }>;
+      };
+    };
+  };
+};
+
 const PROVISIONING_STATE = "sandra_provisioning_state";
 const PROVISIONING_ATTEMPT = "sandra_provisioning_attempt";
 const PROVISIONING_STARTED_AT = "sandra_provisioning_started_at";
@@ -67,7 +86,14 @@ export async function grantUserAccess(
   email: string,
   orgId = "00000000-0000-0000-0000-000000000bbb",
   role: MembershipRole = "member",
-): Promise<Result<{ grantedEmail: string; userId: string; created: boolean }>> {
+): Promise<
+  Result<{
+    grantedEmail: string;
+    userId: string;
+    created: boolean;
+    warning?: string;
+  }>
+> {
   const trimmed = email.trim().toLowerCase();
   if (!trimmed.endsWith(`@${ALLOWED_DOMAIN}`)) {
     return {
@@ -287,10 +313,20 @@ export async function grantUserAccess(
       },
     );
     if (finalizeError) {
-      return {
-        ok: false,
-        error: { code: "GRANT_FINALIZE_FAILED", message: finalizeError.message },
-      };
+      // The verified membership is Sandra's authorization commit point. Do
+      // not tell the operator access failed after it is already live; retain a
+      // warning so the bookkeeping update can be retried safely.
+      reportError(new Error(finalizeError.message), {
+        tags: { surface: "grant_user_access_finalize" },
+        extra: { userId: target.id },
+      });
+      return ok({
+        grantedEmail: trimmed,
+        userId: target.id,
+        created,
+        warning:
+          "Sandra access is active, but provisioning status could not be finalized. Retry the grant to repair it.",
+      });
     }
 
     return ok({ grantedEmail: trimmed, userId: target.id, created });
@@ -305,10 +341,10 @@ export async function grantUserAccess(
 }
 
 /**
- * Kick a user out of Sandra. Admin-only. Revokes sessions + deletes
- * the auth record. Contacts / property ownership rows stay intact —
- * we don't cascade those because they represent real customer data
- * that survives a team member leaving.
+ * Remove a user's Sandra membership without deleting their canonical Auth
+ * identity. Membership is the authorization boundary, so existing sessions
+ * are denied on their next protected request while CRM history and the UID
+ * remain available for a later re-grant.
  */
 export async function removeUser(
   userId: string,
@@ -335,11 +371,32 @@ export async function removeUser(
     }
 
     const admin = createAdminClient();
-    const { error } = await admin.auth.admin.deleteUser(userId);
-    if (error) {
+    const membershipAdmin = admin as unknown as MembershipRemovalAdminClient;
+    const { error: removeError } = await membershipAdmin
+      .from("memberships")
+      .delete()
+      .eq("user_id", userId);
+    if (removeError) {
       return {
         ok: false,
-        error: { code: "REMOVE_FAILED", message: error.message },
+        error: { code: "REMOVE_FAILED", message: removeError.message },
+      };
+    }
+
+    const { data: remaining, error: verifyError } = await membershipAdmin
+      .from("memberships")
+      .select("user_id")
+      .eq("user_id", userId)
+      .limit(1);
+    if (verifyError || remaining?.length) {
+      return {
+        ok: false,
+        error: {
+          code: "REMOVE_FAILED",
+          message:
+            verifyError?.message ??
+            "Sandra membership still exists after removal.",
+        },
       };
     }
     return ok(null);

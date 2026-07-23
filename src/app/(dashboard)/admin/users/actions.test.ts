@@ -9,7 +9,7 @@ vi.mock("@/lib/supabase/server", () => ({ createClient }));
 vi.mock("@/lib/supabase/admin", () => ({ createAdminClient }));
 vi.mock("@/lib/errors/report", () => ({ reportError: vi.fn() }));
 
-import { grantUserAccess } from "./actions";
+import { grantUserAccess, removeUser } from "./actions";
 
 type MockUser = {
   id: string;
@@ -35,12 +35,16 @@ function mockAdminClient({
   membershipReads,
   upsertThrows,
   beforeUpsert,
+  deleteMembershipError = null as { message: string } | null,
+  preserveMembershipOnDelete = false,
 }: {
   users?: MockUser[];
   membership?: { role: string } | null;
   upsertError?: { message: string } | null;
   membershipReads?: Array<{ role: string } | null | Error>;
   upsertThrows?: Error;
+  deleteMembershipError?: { message: string } | null;
+  preserveMembershipOnDelete?: boolean;
   beforeUpsert?: (state: {
     users: MockUser[];
     membership: { role: string } | null;
@@ -95,7 +99,14 @@ function mockAdminClient({
   });
   const secondEq = vi.fn(() => ({ maybeSingle }));
   const firstEq = vi.fn(() => ({ eq: secondEq }));
-  const select = vi.fn(() => ({ eq: firstEq }));
+  const removalLimit = vi.fn().mockImplementation(async () => ({
+    data: state.membership ? [{ user_id: "canonical-user" }] : [],
+    error: null,
+  }));
+  const removalEq = vi.fn(() => ({ limit: removalLimit }));
+  const select = vi.fn((columns: string) =>
+    columns === "user_id" ? { eq: removalEq } : { eq: firstEq },
+  );
   const upsert = vi.fn().mockImplementation(async (values) => {
     await beforeUpsert?.(state);
     if (upsertThrows) throw upsertThrows;
@@ -103,7 +114,13 @@ function mockAdminClient({
     state.membership ??= { role: values.role };
     return { error: null };
   });
-  const from = vi.fn(() => ({ select, upsert }));
+  const deleteEq = vi.fn().mockImplementation(async () => {
+    if (deleteMembershipError) return { error: deleteMembershipError };
+    if (!preserveMembershipOnDelete) state.membership = null;
+    return { error: null };
+  });
+  const deleteMembership = vi.fn(() => ({ eq: deleteEq }));
+  const from = vi.fn(() => ({ select, upsert, delete: deleteMembership }));
   createAdminClient.mockReturnValue({
     auth: {
       admin: {
@@ -123,6 +140,8 @@ function mockAdminClient({
     updateUserById,
     getUserById,
     deleteUser,
+    deleteMembership,
+    deleteEq,
     upsert,
   };
 }
@@ -455,5 +474,62 @@ describe("grantUserAccess", () => {
       ok: false,
       error: { code: "GRANT_MEMBERSHIP_FAILED" },
     });
+  });
+
+  it("reports live access as success when only final bookkeeping fails", async () => {
+    const user = existingUser("finalize@bmhgroupkc.com");
+    const { updateUserById, state } = mockAdminClient({ users: [user] });
+    updateUserById.mockImplementation(async (id, changes) => {
+      if (changes.app_metadata?.sandra_provisioning_state === "ready") {
+        return { data: { user: null }, error: { message: "metadata unavailable" } };
+      }
+      return { data: { user }, error: null };
+    });
+
+    const result = await grantUserAccess("finalize@bmhgroupkc.com");
+
+    expect(result).toMatchObject({
+      ok: true,
+      data: {
+        userId: "canonical-user",
+        warning: expect.stringContaining("access is active"),
+      },
+    });
+    expect(state.membership).toEqual({ role: "member" });
+  });
+});
+
+describe("removeUser", () => {
+  it("removes Sandra membership without deleting the canonical Auth user", async () => {
+    const canonical = existingUser();
+    const { state, deleteMembership, deleteUser } = mockAdminClient({
+      users: [canonical],
+      membership: { role: "member" },
+    });
+
+    const result = await removeUser(canonical.id);
+
+    expect(result).toEqual({ ok: true, data: null });
+    expect(deleteMembership).toHaveBeenCalledOnce();
+    expect(deleteUser).not.toHaveBeenCalled();
+    expect(state.membership).toBeNull();
+    expect(state.users).toContainEqual(canonical);
+  });
+
+  it("fails if membership still exists after deletion", async () => {
+    const canonical = existingUser();
+    const { deleteUser } = mockAdminClient({
+      users: [canonical],
+      membership: { role: "member" },
+      preserveMembershipOnDelete: true,
+    });
+
+    const result = await removeUser(canonical.id);
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: { code: "REMOVE_FAILED" },
+    });
+    expect(deleteUser).not.toHaveBeenCalled();
   });
 });

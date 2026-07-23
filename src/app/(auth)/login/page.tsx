@@ -1,17 +1,20 @@
 "use client";
 
 import { useSearchParams } from "next/navigation";
-import { Suspense, useActionState } from "react";
+import { Suspense, useActionState, useState } from "react";
 
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 
-import { signInWithHugo } from "./actions";
+import { signIn, signInWithHugo } from "./actions";
 import { LoginBackground } from "./login-background";
 
 const CARD_GLOW =
   "0 0 0 1px rgba(60,130,255,0.16), 0 0 22px rgba(46,128,255,0.42), 0 0 60px rgba(46,128,255,0.22), 0 0 120px rgba(46,128,255,0.12), inset 0 1px 0 rgba(160,200,255,0.18), inset 0 0 26px rgba(46,128,255,0.06)";
 const BUTTON_GLOW =
   "0 0 0 1px rgba(60,130,255,0.18), 0 0 18px rgba(46,128,255,0.45), 0 0 44px rgba(46,128,255,0.22), inset 0 1px 0 rgba(160,200,255,0.25), inset 0 0 18px rgba(46,128,255,0.1)";
+const INPUT_CLASS =
+  "h-12 rounded-xl border-[1.5px] border-white/10 bg-white/[0.025] px-4 text-[15px] text-[#f3f6fb] placeholder:text-[#5b6479] transition-colors focus-visible:border-[#78b0ff] focus-visible:ring-[#2e80ff]/25 hover:border-white/20";
 
 export default function LoginPage() {
   return (
@@ -54,6 +57,14 @@ export default function LoginPage() {
 }
 
 function LoginForm() {
+  return process.env.NEXT_PUBLIC_HUGO_SSO === "1" ? (
+    <HugoLoginForm />
+  ) : (
+    <PasswordRollbackForm />
+  );
+}
+
+function HugoLoginForm() {
   const [, formAction, pending] = useActionState(signInWithHugo, undefined);
   const searchParams = useSearchParams();
   const next = searchParams.get("next") ?? "";
@@ -63,6 +74,8 @@ function LoginForm() {
       ? "This Sandra account is not authorized. Ask an admin to grant access, then use the same email in Hugo."
       : urlError === "access"
         ? "Your Hugo identity is valid, but Sandra access has not been granted. Ask a Sandra admin for access."
+      : urlError === "sso_in_progress"
+        ? "A Hugo sign-in is already in progress in this browser. Finish that sign-in or wait a few minutes before trying again."
       : urlError === "sso_disabled"
         ? "Hugo sign-in is temporarily unavailable."
         : urlError === "password_disabled"
@@ -81,12 +94,12 @@ function LoginForm() {
       </div>
 
       {errorMessage ? (
-        <p className="rounded-[10px] border border-[rgba(255,90,90,0.25)] bg-[rgba(255,80,80,0.08)] px-3 py-2 text-[13px] text-[#ff9a9a]">
+        <p role="alert" aria-live="assertive" className="rounded-[10px] border border-[rgba(255,90,90,0.25)] bg-[rgba(255,80,80,0.08)] px-3 py-2 text-[13px] text-[#ff9a9a]">
           {errorMessage}
         </p>
       ) : null}
 
-      <form action={formAction}>
+      <form action={formAction} aria-busy={pending}>
         <input type="hidden" name="next" value={next} />
         <Button
           type="submit"
@@ -99,10 +112,79 @@ function LoginForm() {
             boxShadow: BUTTON_GLOW,
           }}
         >
-          {pending ? "Opening Hugo…" : "Continue with Hugo"}
+          {pending ? "Opening Hugo…" : "Sign in with Hugo"}
         </Button>
       </form>
     </div>
+  );
+}
+
+function PasswordRollbackForm() {
+  const [state, formAction, pending] = useActionState(signIn, null);
+  const [showPassword, setShowPassword] = useState(false);
+  const searchParams = useSearchParams();
+  const next = searchParams.get("next") ?? "";
+  const errorMessage =
+    state && !state.ok
+      ? state.error.message
+      : searchParams.get("error") === "domain"
+        ? "This CRM is restricted to authorized bmhgroupkc.com accounts."
+        : null;
+
+  return (
+    <form action={formAction} aria-busy={pending} className="mt-6 flex flex-col gap-4">
+      <input type="hidden" name="next" value={next} />
+      <Input
+        aria-label="Email"
+        name="email"
+        type="email"
+        autoComplete="email"
+        placeholder="Email"
+        required
+        className={INPUT_CLASS}
+      />
+      <div className="relative">
+        <Input
+          aria-label="Password"
+          name="password"
+          type={showPassword ? "text" : "password"}
+          autoComplete="current-password"
+          placeholder="Password"
+          required
+          className={`${INPUT_CLASS} pr-[62px]`}
+        />
+        <button
+          type="button"
+          onClick={() => setShowPassword((shown) => !shown)}
+          aria-label={showPassword ? "Hide characters" : "Show characters"}
+          aria-pressed={showPassword}
+          className="absolute top-1/2 right-2 -translate-y-1/2 rounded-lg px-2.5 py-2 text-[12.5px] font-semibold text-[#7e889c]"
+        >
+          {showPassword ? "Hide" : "Show"}
+        </button>
+      </div>
+      {errorMessage ? (
+        <p role="alert" aria-live="assertive" className="rounded-[10px] border border-[rgba(255,90,90,0.25)] bg-[rgba(255,80,80,0.08)] px-3 py-2 text-[13px] text-[#ff9a9a]">
+          {errorMessage}
+        </p>
+      ) : null}
+      <Button
+        type="submit"
+        disabled={pending}
+        className="mt-2 h-14 w-full text-base text-white"
+        style={{
+          background:
+            "linear-gradient(180deg, rgba(28,46,82,0.65), rgba(14,24,46,0.7))",
+          border: "1.5px solid rgba(120,176,255,0.7)",
+          boxShadow: BUTTON_GLOW,
+        }}
+      >
+        {pending ? "Signing in…" : "Sign in"}
+      </Button>
+      <p className="text-center text-xs text-[#7e889c]">
+        Hugo is not active on this deployment; the existing Sandra login remains available.
+      </p>
+    </form>
   );
 }
 

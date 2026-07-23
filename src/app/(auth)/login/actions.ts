@@ -3,7 +3,11 @@
 import { headers } from "next/headers";
 import { redirect } from "next/navigation";
 
+import { sanitizeNextPath } from "@/lib/auth/safe-next";
 import { startHugoSignIn } from "@/lib/auth/start-hugo";
+import { errFromUnknown, ok, type Result } from "@/lib/errors/result";
+import { reportError } from "@/lib/errors/report";
+import { createClient } from "@/lib/supabase/server";
 
 function firstForwarded(value: string | null): string | null {
   const first = value?.split(",")[0]?.trim();
@@ -35,6 +39,13 @@ export async function signInWithHugo(
     if (result.reason === "disabled") {
       redirect("/login?error=sso_disabled");
     }
+    if (result.reason === "in_progress") {
+      redirect(
+        result.next
+          ? `/login?error=sso_in_progress&next=${encodeURIComponent(result.next)}`
+          : "/login?error=sso_in_progress",
+      );
+    }
     redirect(
       result.next
         ? `/login?error=sso&next=${encodeURIComponent(result.next)}`
@@ -42,4 +53,57 @@ export async function signInWithHugo(
     );
   }
   redirect(result.authUrl);
+}
+
+/**
+ * Rollback path only. The password form is rendered only while Hugo is off,
+ * and this action independently enforces the same gate so it cannot be called
+ * directly after the cutover.
+ */
+export async function signIn(
+  _prevState: Result<null> | null,
+  formData: FormData,
+): Promise<Result<null>> {
+  if (process.env.NEXT_PUBLIC_HUGO_SSO === "1") {
+    return {
+      ok: false,
+      error: {
+        code: "PASSWORD_DISABLED",
+        message: "Sandra passwords are disabled. Continue with Hugo.",
+      },
+    };
+  }
+
+  const email = String(formData.get("email") ?? "").trim();
+  const password = String(formData.get("password") ?? "");
+  const next = sanitizeNextPath(formData.get("next"), "/dashboard");
+  if (!email || !password) {
+    return {
+      ok: false,
+      error: {
+        code: "VALIDATION",
+        message: "Email and password are required.",
+      },
+    };
+  }
+
+  try {
+    const supabase = await createClient();
+    const { error } = await supabase.auth.signInWithPassword({
+      email,
+      password,
+    });
+    if (error) {
+      return {
+        ok: false,
+        error: { code: "AUTH_FAILED", message: error.message },
+      };
+    }
+  } catch (error) {
+    reportError(error, { tags: { surface: "login_action" } });
+    return errFromUnknown(error, "AUTH_FAILED");
+  }
+
+  redirect(next);
+  return ok(null);
 }

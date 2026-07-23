@@ -67,6 +67,11 @@ const webServerEnv: Record<string, string> = {
   NEXT_PUBLIC_SUPABASE_URL: supabaseUrl,
   NEXT_PUBLIC_SUPABASE_ANON_KEY: supabaseAnonKey,
   SUPABASE_SERVICE_ROLE_KEY: supabaseServiceRoleKey,
+  NEXT_PUBLIC_HUGO_SSO: "1",
+  // The broad golden-path suite seeds a test-project password session only as
+  // support evidence. Production code refuses this bypass, and real Hugo
+  // acceptance remains a separate Chrome gate.
+  E2E_AUTH_BYPASS: "1",
   // Mocks match the integration-test setup — no real Dialpad / SmartyStreets.
   MESSAGING_PROVIDER: "mock",
   ADDRESS_VERIFIER_PROVIDER: "mock",

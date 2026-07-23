@@ -23,7 +23,7 @@ setup("authenticate", async ({ page }) => {
 
   await page.goto("/login");
   await expect(
-    page.getByRole("button", { name: /continue with hugo/i }),
+    page.getByRole("button", { name: /sign in with hugo/i }),
   ).toBeVisible();
   await expect(page.getByLabel("Email")).toHaveCount(0);
   await expect(page.getByLabel("Password")).toHaveCount(0);

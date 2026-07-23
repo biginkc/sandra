@@ -16,8 +16,9 @@ export type UserRow = {
   email: string;
   createdAt: string;
   lastSignInAt: string | null;
-  confirmed: boolean;
-  isAdmin: boolean;
+  hugoLinked: boolean;
+  membershipRole: "owner" | "member" | null;
+  provisioningState: string | null;
   isSelf: boolean;
 };
 
@@ -35,11 +36,15 @@ export function InvitePanel() {
         fallbackMessage: "Access grant failed",
       });
       if (result.ok) {
-        toast.success(
-          result.data.created
-            ? `Sandra access granted to ${result.data.grantedEmail}`
-            : `Sandra access updated for ${result.data.grantedEmail}`,
-        );
+        if (result.data.warning) {
+          toast.warning(result.data.warning);
+        } else {
+          toast.success(
+            result.data.created
+              ? `Sandra access granted to ${result.data.grantedEmail}`
+              : `Sandra access updated for ${result.data.grantedEmail}`,
+          );
+        }
         setEmail("");
         router.refresh();
       }
@@ -79,7 +84,7 @@ export function RemoveUserButton({ id }: { id: string }) {
   const click = () => {
     if (
       !window.confirm(
-        "Remove this user? They lose access immediately but their contacts + property rows stay.",
+        "Remove this user's Sandra access? Their account and CRM history stay intact, and access can be granted again later.",
       )
     ) {
       return;

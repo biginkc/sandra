@@ -1,5 +1,5 @@
 import { NextRequest } from "next/server";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const { createServerClient } = vi.hoisted(() => ({
   createServerClient: vi.fn(),
@@ -14,14 +14,28 @@ function mockProtectedSession({
   membershipThrows = false,
   signOutResult = { error: null } as { error: unknown },
   signOutThrows = false,
+  authMethod = "oauth",
+  identityProvider = "custom:hugo",
 } = {}) {
   const getUser = vi.fn().mockResolvedValue({
     data: {
       user: {
         id: "seeded-auth-user",
         email: "seeded@bmhgroupkc.com",
+        identities: [
+          {
+            provider: identityProvider,
+            last_sign_in_at: "2026-07-21T06:54:00.000Z",
+          },
+        ],
       },
     },
+  });
+  const getClaims = vi.fn().mockResolvedValue({
+    data: {
+      claims: { amr: [{ method: authMethod, timestamp: 1784616840 }] },
+    },
+    error: null,
   });
   const signOut = signOutThrows
     ? vi.fn().mockRejectedValue(new Error("sign-out storage failed"))
@@ -32,9 +46,25 @@ function mockProtectedSession({
   const eq = vi.fn(() => ({ limit }));
   const select = vi.fn(() => ({ eq }));
   const from = vi.fn(() => ({ select }));
-  createServerClient.mockReturnValue({ auth: { getUser, signOut }, from });
-  return { getUser, signOut, from, select, eq, limit };
+  createServerClient.mockReturnValue({
+    auth: { getUser, getClaims, signOut },
+    from,
+  });
+  return { getUser, getClaims, signOut, from, select, eq, limit };
 }
+
+beforeEach(() => {
+  vi.stubEnv("NEXT_PUBLIC_HUGO_SSO", "1");
+  vi.stubEnv(
+    "NEXT_PUBLIC_SUPABASE_URL",
+    "https://copflsklaefwzipsrjqz.supabase.co",
+  );
+});
+
+afterEach(() => {
+  vi.clearAllMocks();
+  vi.unstubAllEnvs();
+});
 
 describe("isPublicPath", () => {
   it("keeps browser-session OAuth routes behind Sandra membership", () => {
@@ -101,6 +131,46 @@ describe("updateSession membership authorization", () => {
     expect(signOut).not.toHaveBeenCalled();
   });
 
+  it("rejects a password-authenticated member and explicitly expires the session", async () => {
+    const { from, signOut } = mockProtectedSession({
+      memberships: [{ user_id: "seeded-auth-user" }],
+      authMethod: "password",
+    });
+    const request = new NextRequest("https://sandra.test/dashboard", {
+      headers: {
+        cookie:
+          "sb-copflsklaefwzipsrjqz-auth-token.0=password-session-chunk",
+      },
+    });
+
+    const response = await updateSession(request);
+
+    expect(from).not.toHaveBeenCalled();
+    expect(signOut).toHaveBeenCalledWith({ scope: "local" });
+    expect(response.headers.get("location")).toBe(
+      "https://sandra.test/login?error=password_disabled",
+    );
+    expect(response.headers.get("set-cookie")).toContain(
+      "sb-copflsklaefwzipsrjqz-auth-token.0=",
+    );
+    expect(response.headers.get("set-cookie")).toContain("Max-Age=0");
+  });
+
+  it("keeps the password rollback path working while Hugo is off", async () => {
+    vi.stubEnv("NEXT_PUBLIC_HUGO_SSO", "");
+    const { signOut } = mockProtectedSession({
+      memberships: [{ user_id: "seeded-auth-user" }],
+      authMethod: "password",
+    });
+
+    const response = await updateSession(
+      new NextRequest("https://sandra.test/dashboard"),
+    );
+
+    expect(response.status).toBe(200);
+    expect(signOut).not.toHaveBeenCalled();
+  });
+
   it("denies a seeded auth cookie when sign-out returns an error", async () => {
     const { signOut } = mockProtectedSession({
       signOutResult: { error: { message: "remote sign-out failed" } },
@@ -118,6 +188,9 @@ describe("updateSession membership authorization", () => {
     expect(response.headers.get("location")).toBe(
       "https://sandra.test/login?error=access",
     );
+    expect(response.headers.get("set-cookie")).toContain(
+      "sb-copflsklaefwzipsrjqz-auth-token.0=",
+    );
   });
 
   it("denies a seeded auth cookie when sign-out throws", async () => {
@@ -134,6 +207,9 @@ describe("updateSession membership authorization", () => {
     expect(signOut).toHaveBeenCalledWith({ scope: "local" });
     expect(response.headers.get("location")).toBe(
       "https://sandra.test/login?error=access",
+    );
+    expect(response.headers.get("set-cookie")).toContain(
+      "sb-copflsklaefwzipsrjqz-auth-token-code-verifier=",
     );
   });
 

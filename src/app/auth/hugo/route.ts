@@ -15,7 +15,11 @@ export async function GET(request: NextRequest) {
   const login = new URL("/login", request.nextUrl.origin);
   login.searchParams.set(
     "error",
-    result.reason === "disabled" ? "sso_disabled" : "sso",
+    result.reason === "disabled"
+      ? "sso_disabled"
+      : result.reason === "in_progress"
+        ? "sso_in_progress"
+        : "sso",
   );
   if (result.next) login.searchParams.set("next", result.next);
   return NextResponse.redirect(login);

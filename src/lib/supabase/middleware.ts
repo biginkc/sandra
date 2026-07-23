@@ -2,6 +2,8 @@ import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
 
 import { isEmailAllowed } from "@/lib/auth/allowlist";
+import { hasCurrentHugoOAuthProof } from "@/lib/auth/hugo-proof";
+import { expireSupabaseAuthCookies } from "@/lib/auth/supabase-cookies";
 
 export function isPublicPath(path: string): boolean {
   return (
@@ -18,6 +20,7 @@ export function isPublicPath(path: string): boolean {
 
 export async function updateSession(request: NextRequest) {
   let supabaseResponse = NextResponse.next({ request });
+  const writtenCookieNames = new Set<string>();
 
   const supabase = createServerClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -28,6 +31,7 @@ export async function updateSession(request: NextRequest) {
           return request.cookies.getAll();
         },
         setAll(cookiesToSet) {
+          cookiesToSet.forEach(({ name }) => writtenCookieNames.add(name));
           cookiesToSet.forEach(({ name, value }) =>
             request.cookies.set(name, value),
           );
@@ -46,6 +50,22 @@ export async function updateSession(request: NextRequest) {
 
   const path = request.nextUrl.pathname;
   const isPublic = isPublicPath(path);
+  const allowLocalE2ePasswordSession =
+    process.env.NODE_ENV !== "production" &&
+    process.env.E2E_AUTH_BYPASS === "1";
+  const hugoRequired = process.env.NEXT_PUBLIC_HUGO_SSO === "1";
+
+  const denyAndClear = (error: "access" | "domain" | "password_disabled") => {
+    const url = request.nextUrl.clone();
+    url.pathname = "/login";
+    url.search = "";
+    url.searchParams.set("error", error);
+    return expireSupabaseAuthCookies(
+      request,
+      NextResponse.redirect(url),
+      writtenCookieNames,
+    );
+  };
 
   if (!user && !isPublic) {
     // Preserve the original path + query so the login flow can bounce the
@@ -68,11 +88,30 @@ export async function updateSession(request: NextRequest) {
     } catch {
       // Access is denied by the redirect even if Auth cookie cleanup fails.
     }
-    const url = request.nextUrl.clone();
-    url.pathname = "/login";
-    url.search = "";
-    url.searchParams.set("error", "domain");
-    return NextResponse.redirect(url);
+    return denyAndClear("domain");
+  }
+
+  // Password UI removal is not an authorization boundary. Re-check the
+  // current session's provider proof on every protected request so a legacy
+  // password session or a different OAuth identity cannot enter Sandra.
+  if (user && !isPublic && hugoRequired && !allowLocalE2ePasswordSession) {
+    let hasHugoProof = false;
+    try {
+      const { data, error } = await supabase.auth.getClaims();
+      hasHugoProof =
+        !error &&
+        hasCurrentHugoOAuthProof(data?.claims.amr, user.identities);
+    } catch {
+      hasHugoProof = false;
+    }
+    if (!hasHugoProof) {
+      try {
+        await supabase.auth.signOut({ scope: "local" });
+      } catch {
+        // Explicit cookie expiry below remains the fail-closed boundary.
+      }
+      return denyAndClear("password_disabled");
+    }
   }
 
   // Callback cleanup is best-effort: auth-js can return an API error before
@@ -98,11 +137,7 @@ export async function updateSession(request: NextRequest) {
       } catch {
         // The membership gate still denies this request if cleanup fails.
       }
-      const url = request.nextUrl.clone();
-      url.pathname = "/login";
-      url.search = "";
-      url.searchParams.set("error", "access");
-      return NextResponse.redirect(url);
+      return denyAndClear("access");
     }
   }
 
