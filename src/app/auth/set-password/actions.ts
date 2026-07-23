@@ -1,15 +1,20 @@
 "use server";
 
-import { createClient } from "@/lib/supabase/server";
 import { errFromUnknown, ok, type Result } from "@/lib/errors/result";
 import { reportError } from "@/lib/errors/report";
+import { createClient } from "@/lib/supabase/server";
 
-/**
- * Update the authenticated user's password. Called from the
- * /auth/set-password form (first-time invite acceptance) and
- * reused if we add a change-password UI later.
- */
+/** Password updates exist only for the flag-off emergency rollback path. */
 export async function setPassword(password: string): Promise<Result<null>> {
+  if (process.env.NEXT_PUBLIC_HUGO_SSO === "1") {
+    return {
+      ok: false,
+      error: {
+        code: "PASSWORD_DISABLED",
+        message: "Sandra passwords are disabled. Continue with Hugo.",
+      },
+    };
+  }
   if (password.length < 8) {
     return {
       ok: false,
@@ -29,8 +34,8 @@ export async function setPassword(password: string): Promise<Result<null>> {
       };
     }
     return ok(null);
-  } catch (e) {
-    reportError(e, { tags: { surface: "set_password" } });
-    return errFromUnknown(e, "PASSWORD_UPDATE_FAILED");
+  } catch (error) {
+    reportError(error, { tags: { surface: "set_password" } });
+    return errFromUnknown(error, "PASSWORD_UPDATE_FAILED");
   }
 }

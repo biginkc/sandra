@@ -4,11 +4,10 @@
  * Rule: the authenticated user's email must end in `@bmhgroupkc.com`
  * (the BMH Group Google Workspace domain).
  *
- * Enforced in middleware on every request — a user who's somehow
- * authenticated with a non-allowed email gets signed out and bounced
- * to `/login?error=domain`. Supabase-level password auth is still the
- * only sign-in method, so this is primarily defense-in-depth against
- * future OAuth providers, not the first line of access control.
+ * Enforced in middleware on every request — a Hugo-authenticated user with a
+ * non-allowed email gets signed out and bounced to `/login?error=domain`.
+ * Supabase also has sign-up disabled, so Hugo can link only to an existing
+ * Sandra auth user that an admin provisioned deliberately.
  */
 
 export const ALLOWED_DOMAIN = "bmhgroupkc.com";

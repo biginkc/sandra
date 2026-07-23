@@ -3,11 +3,16 @@ import path from "node:path";
 
 import { expect, test } from "@playwright/test";
 
+import {
+  assertExpectedSandraUser,
+  requireHugoAuthStorageState,
+} from "./hugo-auth-state";
+
 /**
  * Phase 1.5 Visual UAT — runs against prod (https://sandra-sooty.vercel.app).
  *
  * Use with playwright.prod.config.ts:
- *   PROD_EMAIL=you@example.com PROD_PASSWORD=xxx \
+ *   PROD_HUGO_STORAGE_STATE=/tmp/sandra-hugo-auth.json \
  *   npx playwright test e2e/phase-1-5-uat.spec.ts \
  *     --config playwright.prod.config.ts --headed --slow-mo=600
  *
@@ -31,34 +36,10 @@ async function screenshot(page: import("@playwright/test").Page, name: string) {
 // Auth — runs once before all tests via test.beforeAll
 // ---------------------------------------------------------------------------
 
-test.beforeAll(async ({ browser }) => {
-  const email = process.env.PROD_EMAIL;
-  const password = process.env.PROD_PASSWORD;
-
-  if (!email || !password) {
-    throw new Error(
-      "Set PROD_EMAIL and PROD_PASSWORD before running this spec.\n" +
-        "  PROD_EMAIL=you@example.com PROD_PASSWORD=xxx npx playwright test ...",
-    );
-  }
-
-  const context = await browser.newContext();
-  const page = await context.newPage();
-
-  await page.goto("/login");
-  await page.getByLabel("Email").fill(email);
-  await page.getByLabel("Password").fill(password);
-  await page.getByRole("button", { name: /^sign in$/i }).click();
-  await page.waitForURL((url) => !url.pathname.startsWith("/login"), {
-    timeout: 20_000,
-  });
-
-  // Save session so all test workers reuse it
-  await context.storageState({ path: "e2e/.auth/prod-uat.json" });
-  await context.close();
+test.use({ storageState: requireHugoAuthStorageState() });
+test.beforeEach(async ({ page }) => {
+  await assertExpectedSandraUser(page);
 });
-
-test.use({ storageState: "e2e/.auth/prod-uat.json" });
 
 // ---------------------------------------------------------------------------
 // Test 1: /properties — DataTableShell + CircularPagination + SearchInputPill

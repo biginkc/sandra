@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+import { createClient } from "@supabase/supabase-js";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -250,24 +250,19 @@ function writeUiResults(
   );
 }
 
-async function userClient(): Promise<SupabaseClient<Database>> {
+function cleanupClient() {
   const url = requiredEnv("NEXT_PUBLIC_SUPABASE_URL", "SUPABASE_URL");
-  const anon = requiredEnv(
-    "NEXT_PUBLIC_SUPABASE_ANON_KEY",
-    "NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY",
-  );
-  const email = requiredEnv("PROD_EMAIL");
-  const password = requiredEnv("PROD_PASSWORD");
-  const client = createClient<Database>(url, anon, {
+  const serviceRole = requiredEnv("SUPABASE_SERVICE_ROLE_KEY");
+  return createClient<Database>(url, serviceRole, {
     auth: { persistSession: false, autoRefreshToken: false },
   });
-  const { error } = await client.auth.signInWithPassword({ email, password });
-  if (error) throw error;
-  return client;
 }
 
 async function deleteSavedFilterByName(name: string): Promise<void> {
-  const client = await userClient();
+  if (!name.startsWith("PROD-CANARY Filter Characterization ")) {
+    throw new Error("Refusing to delete a non-canary saved filter.");
+  }
+  const client = cleanupClient();
   const { error } = await client
     .from("saved_filters")
     .delete()

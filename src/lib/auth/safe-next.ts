@@ -14,8 +14,8 @@
  * Defense in depth: after the character-level checks, the candidate is
  * resolved against a canonical origin and must stay on that origin.
  *
- * Shared by BOTH the password flow (`signIn`) and the SSO flow
- * (`signInWithBmhId`) so the validation can never drift between them.
+ * Shared by every auth entry point so post-login destination validation
+ * cannot drift between them.
  */
 
 const CONTROL_CHARS_OR_BACKSLASH = /[\u0000-\u001f\u007f\\]/;

@@ -1,10 +1,15 @@
 import { expect, test, type Page } from "@playwright/test";
 
+import {
+  assertExpectedSandraUser,
+  requireHugoAuthStorageState,
+} from "./hugo-auth-state";
+
 const RUN_PROD_FILTER_DATA_TESTS =
   process.env.RUN_PROD_FILTER_DATA_TESTS === "1";
 
 const PROD_FILTER_BASE_URL =
-  process.env.PROD_FILTER_BASE_URL ?? "https://sandra-sooty.vercel.app";
+  process.env.PROD_FILTER_BASE_URL ?? "https://sandra.bmhgroupkc.com";
 
 function filterParam(blocks: Array<Record<string, unknown>>) {
   return encodeURIComponent(JSON.stringify({ v: 1, blocks }));
@@ -19,20 +24,6 @@ function parseProspectCount(header: string) {
   const match = header.match(/of\s+([\d,]+)\s+prospect/i);
   if (!match) throw new Error(`Could not parse prospect count from: ${header}`);
   return Number(match[1].replace(/,/g, ""));
-}
-
-async function signIn(page: Page) {
-  if (!process.env.PROD_EMAIL || !process.env.PROD_PASSWORD) {
-    throw new Error("Set PROD_EMAIL and PROD_PASSWORD to run prod filter tests.");
-  }
-
-  await page.goto("/login");
-  await page.locator("input[name=email]").fill(process.env.PROD_EMAIL);
-  await page.locator("input[name=password]").fill(process.env.PROD_PASSWORD);
-  await Promise.all([
-    page.waitForURL(/\/dashboard/, { timeout: 15_000 }),
-    page.getByRole("button", { name: /sign in/i }).click(),
-  ]);
 }
 
 async function readFilteredPage(
@@ -64,10 +55,18 @@ async function readFilteredPage(
 
 test.describe("Production data filter smoke", () => {
   test.skip(!RUN_PROD_FILTER_DATA_TESTS, "Set RUN_PROD_FILTER_DATA_TESTS=1.");
-  test.use({ baseURL: PROD_FILTER_BASE_URL });
+  test.use({
+    baseURL: PROD_FILTER_BASE_URL,
+    storageState: RUN_PROD_FILTER_DATA_TESTS
+      ? requireHugoAuthStorageState(
+          "PROD_HUGO_STORAGE_STATE",
+          PROD_FILTER_BASE_URL,
+        )
+      : undefined,
+  });
 
   test.beforeEach(async ({ page }) => {
-    await signIn(page);
+    await assertExpectedSandraUser(page);
   });
 
   test("CASS filters partition the current production prospect set", async ({

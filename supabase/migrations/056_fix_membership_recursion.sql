@@ -30,7 +30,7 @@
 --
 -- Fix: drop the recursive policies. memberships_self_select (`user_id =
 -- auth.uid()`) remains and is sufficient for v1 — there is no admin UI for
--- org-member management yet. Service role (inviteUser action) bypasses RLS
+-- org-member management yet. Service role (grantUserAccess action) bypasses RLS
 -- and continues to manage membership rows. If/when an org-admin UI lands,
 -- replace these with SECURITY DEFINER functions, not recursive subqueries.
 --

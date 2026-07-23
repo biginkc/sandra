@@ -9,15 +9,16 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { callAction } from "@/lib/errors/call-action";
 
-import { inviteUser, removeUser } from "./actions";
+import { grantUserAccess, removeUser } from "./actions";
 
 export type UserRow = {
   id: string;
   email: string;
   createdAt: string;
   lastSignInAt: string | null;
-  confirmed: boolean;
-  isAdmin: boolean;
+  hugoLinked: boolean;
+  membershipRole: "owner" | "member" | null;
+  provisioningState: string | null;
   isSelf: boolean;
 };
 
@@ -31,11 +32,19 @@ export function InvitePanel() {
     const trimmed = email.trim();
     if (!trimmed) return;
     startTransition(async () => {
-      const result = await callAction(inviteUser(trimmed), {
-        fallbackMessage: "Invite failed",
+      const result = await callAction(grantUserAccess(trimmed), {
+        fallbackMessage: "Access grant failed",
       });
       if (result.ok) {
-        toast.success(`Invite sent to ${result.data.invitedEmail}`);
+        if (result.data.warning) {
+          toast.warning(result.data.warning);
+        } else {
+          toast.success(
+            result.data.created
+              ? `Sandra access granted to ${result.data.grantedEmail}`
+              : `Sandra access updated for ${result.data.grantedEmail}`,
+          );
+        }
         setEmail("");
         router.refresh();
       }
@@ -49,7 +58,7 @@ export function InvitePanel() {
     >
       <div className="flex flex-col gap-1.5">
         <Label htmlFor="invite-email" className="text-xs">
-          Invite teammate (bmhgroupkc.com only)
+          Grant Sandra access (bmhgroupkc.com only)
         </Label>
         <Input
           id="invite-email"
@@ -63,7 +72,7 @@ export function InvitePanel() {
         />
       </div>
       <Button type="submit" disabled={pending || !email.trim()}>
-        {pending ? "Sending…" : "Send invite"}
+        {pending ? "Granting…" : "Grant access"}
       </Button>
     </form>
   );
@@ -75,7 +84,7 @@ export function RemoveUserButton({ id }: { id: string }) {
   const click = () => {
     if (
       !window.confirm(
-        "Remove this user? They lose access immediately but their contacts + property rows stay.",
+        "Remove this user's Sandra access? Their account and CRM history stay intact, and access can be granted again later.",
       )
     ) {
       return;

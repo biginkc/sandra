@@ -1,7 +1,7 @@
 "use client";
 
-import { useActionState, useEffect } from "react";
 import { useRouter } from "next/navigation";
+import { useActionState, useEffect } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -15,7 +15,7 @@ type State = { ok: true } | { ok: false; message: string } | null;
 export function SetPasswordForm({ email }: { email: string }) {
   const router = useRouter();
   const [state, formAction, pending] = useActionState<State, FormData>(
-    async (_prev, formData) => {
+    async (_previous, formData) => {
       const password = String(formData.get("password") ?? "");
       const confirm = String(formData.get("confirm") ?? "");
       if (password.length < 8) {
@@ -25,49 +25,36 @@ export function SetPasswordForm({ email }: { email: string }) {
         return { ok: false, message: "Passwords don't match." };
       }
       const result = await setPassword(password);
-      if (!result.ok) return { ok: false, message: result.error.message };
-      return { ok: true };
+      return result.ok
+        ? { ok: true }
+        : { ok: false, message: result.error.message };
     },
     null,
   );
 
   useEffect(() => {
-    if (state && state.ok) {
+    if (state?.ok) {
       toast.success("Password set — you're in");
       router.push("/leads");
     }
-  }, [state, router]);
+  }, [router, state]);
 
   return (
-    <form action={formAction} className="flex flex-col gap-4">
+    <form action={formAction} className="flex flex-col gap-4" aria-busy={pending}>
       <div className="flex flex-col gap-2">
         <Label htmlFor="email">Email</Label>
         <Input id="email" value={email} readOnly disabled />
       </div>
       <div className="flex flex-col gap-2">
         <Label htmlFor="password">New password</Label>
-        <Input
-          id="password"
-          name="password"
-          type="password"
-          autoComplete="new-password"
-          minLength={8}
-          required
-        />
+        <Input id="password" name="password" type="password" autoComplete="new-password" minLength={8} required />
       </div>
       <div className="flex flex-col gap-2">
         <Label htmlFor="confirm">Confirm password</Label>
-        <Input
-          id="confirm"
-          name="confirm"
-          type="password"
-          autoComplete="new-password"
-          minLength={8}
-          required
-        />
+        <Input id="confirm" name="confirm" type="password" autoComplete="new-password" minLength={8} required />
       </div>
       {state && !state.ok ? (
-        <div className="border-destructive/30 bg-destructive/10 text-destructive rounded-md border px-3 py-2 text-sm">
+        <div role="alert" className="border-destructive/30 bg-destructive/10 text-destructive rounded-md border px-3 py-2 text-sm">
           {state.message}
         </div>
       ) : null}

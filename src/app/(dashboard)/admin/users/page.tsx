@@ -1,5 +1,6 @@
 import { formatDistanceToNow } from "date-fns/formatDistanceToNow";
 import { notFound } from "next/navigation";
+import type { User } from "@supabase/supabase-js";
 
 import { Page } from "@/components/page";
 import { PageHeader } from "@/components/page-header";
@@ -21,6 +22,7 @@ import {
   RemoveUserButton,
   type UserRow,
 } from "./invite-panel";
+import { loadSandraMemberships } from "./membership-inventory";
 
 export const metadata = {
   title: "Team · Sandra CRM",
@@ -38,15 +40,40 @@ export default async function AdminUsersPage() {
   }
 
   const admin = createAdminClient();
-  const { data, error } = await admin.auth.admin.listUsers({ perPage: 200 });
+  const authUsers: User[] = [];
+  let authError: string | null = null;
+  for (let page = 1; page <= 100; page += 1) {
+    const { data, error } = await admin.auth.admin.listUsers({
+      page,
+      perPage: 200,
+    });
+    if (error) {
+      authError = error.message;
+      break;
+    }
+    authUsers.push(...data.users);
+    if (data.users.length < 200) break;
+    if (page === 100) {
+      authError = "User inventory exceeded the supported page limit.";
+    }
+  }
 
-  const rows: UserRow[] = (data?.users ?? []).map((u) => ({
+  const { membershipByUser, error: membershipError } =
+    await loadSandraMemberships(admin);
+
+  const rows: UserRow[] = authUsers.map((u) => ({
     id: u.id,
     email: u.email ?? "(no email)",
     createdAt: u.created_at,
     lastSignInAt: u.last_sign_in_at ?? null,
-    confirmed: !!u.email_confirmed_at,
-    isAdmin: isAdminEmail(u.email),
+    hugoLinked: Boolean(
+      u.identities?.some((identity) => identity.provider === "custom:hugo"),
+    ),
+    membershipRole: membershipByUser.get(u.id) ?? null,
+    provisioningState:
+      typeof u.app_metadata?.sandra_provisioning_state === "string"
+        ? u.app_metadata.sandra_provisioning_state
+        : null,
     isSelf: u.id === user.id,
   }));
 
@@ -55,12 +82,12 @@ export default async function AdminUsersPage() {
       <PageHeader
         breadcrumb={[{ label: "Admin" }, { label: "Team" }]}
         title="Team"
-        description="Invite a teammate to Sandra CRM. They get a one-time sign-in link by email, pick a password, and land in the app. Only emails on the bmhgroupkc.com domain are permitted."
+        description="Grant a teammate access to Sandra without creating a separate password or sending a Sandra invite. They sign in through Hugo with the same bmhgroupkc.com email."
       />
 
-      {error ? (
+      {authError || membershipError ? (
         <div className="text-destructive text-sm">
-          Failed to load users: {error.message}
+          Failed to load complete access state: {authError ?? membershipError}
         </div>
       ) : null}
 
@@ -72,7 +99,8 @@ export default async function AdminUsersPage() {
             <TableRow>
               <TableHead>Email</TableHead>
               <TableHead>Role</TableHead>
-              <TableHead>Confirmed</TableHead>
+              <TableHead>Access</TableHead>
+              <TableHead>Hugo linked</TableHead>
               <TableHead>Last sign-in</TableHead>
               <TableHead>Joined</TableHead>
               <TableHead className="text-right">Actions</TableHead>
@@ -82,7 +110,7 @@ export default async function AdminUsersPage() {
             {rows.length === 0 ? (
               <TableRow>
                 <TableCell
-                  colSpan={6}
+                  colSpan={7}
                   className="text-muted-foreground py-8 text-center"
                 >
                   No users yet.
@@ -108,17 +136,28 @@ function UserRowView({ row }: { row: UserRow }) {
         ) : null}
       </TableCell>
       <TableCell>
-        {row.isAdmin ? (
-          <Badge>admin</Badge>
-        ) : (
+        {row.membershipRole === "owner" ? (
+          <Badge>owner</Badge>
+        ) : row.membershipRole === "member" ? (
           <Badge variant="outline">member</Badge>
+        ) : (
+          <span className="text-muted-foreground text-sm">—</span>
         )}
       </TableCell>
       <TableCell>
-        {row.confirmed ? (
+        {row.membershipRole ? (
+          <Badge variant="secondary">active</Badge>
+        ) : row.provisioningState === "pending" ? (
+          <Badge variant="outline">provisioning</Badge>
+        ) : (
+          <Badge variant="outline">not granted</Badge>
+        )}
+      </TableCell>
+      <TableCell>
+        {row.hugoLinked ? (
           <Badge variant="secondary">yes</Badge>
         ) : (
-          <Badge variant="outline">pending</Badge>
+          <Badge variant="outline">not yet</Badge>
         )}
       </TableCell>
       <TableCell className="text-muted-foreground text-sm">
@@ -132,9 +171,10 @@ function UserRowView({ row }: { row: UserRow }) {
         {formatDistanceToNow(new Date(row.createdAt), { addSuffix: true })}
       </TableCell>
       <TableCell className="text-right">
-        {row.isSelf || row.isAdmin ? null : <RemoveUserButton id={row.id} />}
+        {row.isSelf || !row.membershipRole ? null : (
+          <RemoveUserButton id={row.id} />
+        )}
       </TableCell>
     </TableRow>
   );
 }
-

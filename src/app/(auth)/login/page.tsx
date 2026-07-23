@@ -6,14 +6,13 @@ import { Suspense, useActionState, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 
-import { requestPasswordReset, signIn } from "./actions";
+import { requestPasswordReset, signIn, signInWithHugo } from "./actions";
 import { LoginBackground } from "./login-background";
 
 const CARD_GLOW =
   "0 0 0 1px rgba(60,130,255,0.16), 0 0 22px rgba(46,128,255,0.42), 0 0 60px rgba(46,128,255,0.22), 0 0 120px rgba(46,128,255,0.12), inset 0 1px 0 rgba(160,200,255,0.18), inset 0 0 26px rgba(46,128,255,0.06)";
 const BUTTON_GLOW =
   "0 0 0 1px rgba(60,130,255,0.18), 0 0 18px rgba(46,128,255,0.45), 0 0 44px rgba(46,128,255,0.22), inset 0 1px 0 rgba(160,200,255,0.25), inset 0 0 18px rgba(46,128,255,0.1)";
-
 const INPUT_CLASS =
   "h-12 rounded-xl border-[1.5px] border-white/10 bg-white/[0.025] px-4 text-[15px] text-[#f3f6fb] placeholder:text-[#5b6479] transition-colors focus-visible:border-[#78b0ff] focus-visible:ring-[#2e80ff]/25 hover:border-white/20";
 
@@ -41,7 +40,7 @@ export default function LoginPage() {
       </div>
 
       <div
-        className="relative w-full max-w-[430px] rounded-[26px] border-[1.5px] px-[34px] pt-[34px] pb-[26px]"
+        className="relative w-full max-w-[430px] rounded-[26px] border-[1.5px] px-[34px] pt-[34px] pb-[30px]"
         style={{
           background:
             "linear-gradient(180deg, rgba(13,19,33,0.94) 0%, rgba(9,13,24,0.96) 100%)",
@@ -58,56 +57,107 @@ export default function LoginPage() {
 }
 
 function LoginForm() {
+  return process.env.NEXT_PUBLIC_HUGO_SSO === "1" ? (
+    <HugoLoginForm />
+  ) : (
+    <PasswordRollbackForm />
+  );
+}
+
+function HugoLoginForm() {
+  const [, formAction, pending] = useActionState(signInWithHugo, undefined);
+  const searchParams = useSearchParams();
+  const next = searchParams.get("next") ?? "";
+  const urlError = searchParams.get("error");
+  const errorMessage =
+    urlError === "domain"
+      ? "This Sandra account is not authorized. Ask an admin to grant access, then use the same email in Hugo."
+      : urlError === "access"
+        ? "Your Hugo identity is valid, but Sandra access has not been granted. Ask a Sandra admin for access."
+      : urlError === "sso_in_progress"
+        ? "A Hugo sign-in is already in progress in this browser. Finish that sign-in or wait a few minutes before trying again."
+      : urlError === "sso_disabled"
+        ? "Hugo sign-in is temporarily unavailable."
+        : urlError === "password_disabled"
+          ? "Sandra passwords and email sign-in links are disabled. Continue with Hugo."
+          : urlError
+            ? "Hugo sign-in could not be completed. Please try again."
+            : null;
+
+  return (
+    <div className="mt-2 flex flex-col gap-5">
+      <div>
+        <h1 className="text-xl font-semibold text-[#f3f6fb]">Sign in to Sandra</h1>
+        <p className="mt-2 text-[14px] leading-6 text-[#7e889c]">
+          Use your Hugo identity. Sandra no longer accepts a separate password.
+        </p>
+      </div>
+
+      {errorMessage ? (
+        <p role="alert" aria-live="assertive" className="rounded-[10px] border border-[rgba(255,90,90,0.25)] bg-[rgba(255,80,80,0.08)] px-3 py-2 text-[13px] text-[#ff9a9a]">
+          {errorMessage}
+        </p>
+      ) : null}
+
+      <form action={formAction} aria-busy={pending}>
+        <input type="hidden" name="next" value={next} />
+        <Button
+          type="submit"
+          disabled={pending}
+          className="h-14 w-full text-base text-white"
+          style={{
+            background:
+              "linear-gradient(180deg, rgba(28,46,82,0.65), rgba(14,24,46,0.7))",
+            border: "1.5px solid rgba(120,176,255,0.7)",
+            boxShadow: BUTTON_GLOW,
+          }}
+        >
+          {pending ? "Opening Hugo…" : "Sign in with Hugo"}
+        </Button>
+      </form>
+    </div>
+  );
+}
+
+function PasswordRollbackForm() {
   const [state, formAction, pending] = useActionState(signIn, null);
   const [resetState, resetAction, resetPending] = useActionState(
     requestPasswordReset,
     null,
   );
+  const [showPassword, setShowPassword] = useState(false);
   const [showReset, setShowReset] = useState(false);
-  const [showPw, setShowPw] = useState(false);
-
-  const actionError = state && !state.ok ? state.error.message : null;
-  const resetError = resetState && !resetState.ok ? resetState.error.message : null;
-  const resetSuccess = resetState && resetState.ok;
   const searchParams = useSearchParams();
   const next = searchParams.get("next") ?? "";
-  const urlError = searchParams.get("error");
-
   const errorMessage =
-    actionError ??
-    (urlError === "domain"
-      ? "This CRM is restricted to bmhgroupkc.com accounts. Sign in with a bmhgroupkc.com email or ask an admin for an invite."
-      : urlError === "invite_failed"
-        ? "Invite link couldn't be verified. Ask an admin to resend it."
-        : null);
+    state && !state.ok
+      ? state.error.message
+      : searchParams.get("error") === "domain"
+        ? "This CRM is restricted to authorized bmhgroupkc.com accounts."
+        : null;
 
   if (showReset) {
     return (
-      <form action={resetAction} className="mt-6 flex flex-col gap-4">
+      <form action={resetAction} aria-busy={resetPending} className="mt-6 flex flex-col gap-4">
         <p className="text-[14px] text-[#7e889c]">
           Enter your email and we&apos;ll send a password-reset link.
         </p>
-        <div className="flex flex-col gap-2">
-          <Input
-            id="reset-email"
-            aria-label="Email"
-            name="email"
-            type="email"
-            autoComplete="email"
-            placeholder="Email"
-            required
-            className={INPUT_CLASS}
-          />
-        </div>
-        {resetSuccess ? (
-          <p className="rounded-[10px] border border-white/10 bg-white/[0.05] px-3 py-2 text-[13px] text-[#cdd6e6]">
-            If that email is on file, a reset link is on its way. Check your
-            inbox (and spam).
+        <Input
+          aria-label="Email"
+          name="email"
+          type="email"
+          autoComplete="email"
+          placeholder="Email"
+          required
+          className={INPUT_CLASS}
+        />
+        {resetState?.ok ? (
+          <p role="status" className="rounded-[10px] border border-white/10 bg-white/[0.05] px-3 py-2 text-[13px] text-[#cdd6e6]">
+            If that email is on file, a reset link is on its way.
           </p>
-        ) : null}
-        {resetError ? (
-          <p className="rounded-[10px] border border-[rgba(255,90,90,0.25)] bg-[rgba(255,80,80,0.08)] px-3 py-2 text-[13px] text-[#ff9a9a]">
-            {resetError}
+        ) : resetState ? (
+          <p role="alert" className="rounded-[10px] border border-[rgba(255,90,90,0.25)] bg-[rgba(255,80,80,0.08)] px-3 py-2 text-[13px] text-[#ff9a9a]">
+            {resetState.error.message}
           </p>
         ) : null}
         <div className="flex gap-2">
@@ -120,17 +170,7 @@ function LoginForm() {
           >
             Back
           </Button>
-          <Button
-            type="submit"
-            disabled={resetPending}
-            className="h-12 flex-1 text-white"
-            style={{
-              background:
-                "linear-gradient(180deg, rgba(28,46,82,0.65), rgba(14,24,46,0.7))",
-              border: "1.5px solid rgba(120,176,255,0.7)",
-              boxShadow: BUTTON_GLOW,
-            }}
-          >
+          <Button type="submit" disabled={resetPending} className="h-12 flex-1">
             {resetPending ? "Sending…" : "Send link"}
           </Button>
         </div>
@@ -139,52 +179,42 @@ function LoginForm() {
   }
 
   return (
-    <form action={formAction} className="mt-6 flex flex-col gap-4">
+    <form action={formAction} aria-busy={pending} className="mt-6 flex flex-col gap-4">
       <input type="hidden" name="next" value={next} />
-
-      <div className="flex flex-col gap-2">
+      <Input
+        aria-label="Email"
+        name="email"
+        type="email"
+        autoComplete="email"
+        placeholder="Email"
+        required
+        className={INPUT_CLASS}
+      />
+      <div className="relative">
         <Input
-          id="email"
-          aria-label="Email"
-          name="email"
-          type="email"
-          autoComplete="email"
-          placeholder="Email"
+          aria-label="Password"
+          name="password"
+          type={showPassword ? "text" : "password"}
+          autoComplete="current-password"
+          placeholder="Password"
           required
-          className={INPUT_CLASS}
+          className={`${INPUT_CLASS} pr-[62px]`}
         />
+        <button
+          type="button"
+          onClick={() => setShowPassword((shown) => !shown)}
+          aria-label={showPassword ? "Hide characters" : "Show characters"}
+          aria-pressed={showPassword}
+          className="absolute top-1/2 right-2 -translate-y-1/2 rounded-lg px-2.5 py-2 text-[12.5px] font-semibold text-[#7e889c]"
+        >
+          {showPassword ? "Hide" : "Show"}
+        </button>
       </div>
-
-      <div className="flex flex-col gap-2">
-        <div className="relative">
-          <Input
-            id="password"
-            aria-label="Password"
-            name="password"
-            type={showPw ? "text" : "password"}
-            autoComplete="current-password"
-            placeholder="Password"
-            required
-            className={`${INPUT_CLASS} pr-[62px]`}
-          />
-          <button
-            type="button"
-            onClick={() => setShowPw((v) => !v)}
-            aria-label={showPw ? "Hide characters" : "Show characters"}
-            aria-pressed={showPw}
-            className="absolute top-1/2 right-2 -translate-y-1/2 rounded-lg px-2.5 py-2 text-[12.5px] font-semibold text-[#7e889c] transition-colors hover:bg-white/5 hover:text-[#bcd0f0]"
-          >
-            {showPw ? "Hide" : "Show"}
-          </button>
-        </div>
-      </div>
-
       {errorMessage ? (
-        <p className="rounded-[10px] border border-[rgba(255,90,90,0.25)] bg-[rgba(255,80,80,0.08)] px-3 py-2 text-[13px] text-[#ff9a9a]">
+        <p role="alert" aria-live="assertive" className="rounded-[10px] border border-[rgba(255,90,90,0.25)] bg-[rgba(255,80,80,0.08)] px-3 py-2 text-[13px] text-[#ff9a9a]">
           {errorMessage}
         </p>
       ) : null}
-
       <Button
         type="submit"
         disabled={pending}
@@ -198,7 +228,6 @@ function LoginForm() {
       >
         {pending ? "Signing in…" : "Sign in"}
       </Button>
-
       <button
         type="button"
         onClick={() => setShowReset(true)}
@@ -206,25 +235,23 @@ function LoginForm() {
       >
         Forgot password?
       </button>
+      <p className="text-center text-xs text-[#7e889c]">
+        Hugo is not active on this deployment; the existing Sandra login remains available.
+      </p>
     </form>
   );
 }
 
 function LoginFormFallback() {
   return (
-    <div className="mt-6 flex flex-col gap-4">
-      <div className="flex flex-col gap-2">
-        <Input aria-label="Email" type="email" disabled className={INPUT_CLASS} />
+    <div className="mt-2 flex flex-col gap-5">
+      <div>
+        <h1 className="text-xl font-semibold text-[#f3f6fb]">Sign in to Sandra</h1>
+        <p className="mt-2 text-[14px] leading-6 text-[#7e889c]">
+          Use your Hugo identity.
+        </p>
       </div>
-      <div className="flex flex-col gap-2">
-        <Input
-          aria-label="Password"
-          type="password"
-          disabled
-          className={INPUT_CLASS}
-        />
-      </div>
-      <Button disabled className="mt-2 h-14 w-full text-base text-white">
+      <Button disabled className="h-14 w-full text-base text-white">
         Loading…
       </Button>
     </div>

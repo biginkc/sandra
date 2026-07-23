@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 
-export const DEFAULT_PROD_BASE_URL = "https://sandra-sooty.vercel.app";
+export const DEFAULT_PROD_BASE_URL = "https://sandra.bmhgroupkc.com";
 export const PROD_PROJECT_REF = "copflsklaefwzipsrjqz";
 export const TEST_PROJECT_REF = "ncsngxlcyxylaeskiteu";
 export const PROD_CANARY_ENV_FILES = [
