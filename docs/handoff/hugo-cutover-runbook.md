@@ -8,9 +8,11 @@ rejects password sessions on protected routes.
 
 1. Confirm the production deployment points at the production Supabase project.
 2. Confirm the Supabase Site URL is `https://sandra.bmhgroupkc.com`.
-3. Allow both `https://sandra.bmhgroupkc.com/auth/callback` and the exact
-   preview callback used for acceptance. Supabase requires `redirectTo` to
-   match the redirect allowlist.
+3. Allow `https://sandra.bmhgroupkc.com/auth/callback` and an exact preview
+   origin wildcard such as `https://<deployment-host>/**` for acceptance. The
+   callback carries per-flow query parameters, so a bare preview callback URL
+   does not match Supabase's redirect allowlist. Remove the preview entry after
+   acceptance.
 4. Confirm the existing `custom:hugo` provider has the correct Hugo issuer and
    client, uses PKCE, and remains disabled.
 5. Confirm each intended teammate already has a Sandra membership using the
