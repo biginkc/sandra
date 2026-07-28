@@ -84,7 +84,7 @@ immutable
 set search_path = public, pg_temp
 as $$
   select encode(
-    digest(convert_to(coalesce(p_payload, '{}'::jsonb)::text, 'UTF8'), 'sha256'),
+    extensions.digest(convert_to(coalesce(p_payload, '{}'::jsonb)::text, 'UTF8'), 'sha256'),
     'hex'
   );
 $$;
