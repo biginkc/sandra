@@ -34,6 +34,7 @@ type MembershipLookupClient = {
                   deletion_prepared_at?: string | null;
                 }
               | null;
+            error?: { code?: string; message?: string } | null;
           }>;
         };
       };
@@ -62,14 +63,19 @@ export async function requireOrgMembership(
     throw new AuthorizationError("Not authenticated", { reason: "no_session" });
   }
 
-  const { data } = await (supabase as unknown as MembershipLookupClient)
+  const hugoRequired = process.env.NEXT_PUBLIC_HUGO_SSO === "1";
+  const { data, error } = await (supabase as unknown as MembershipLookupClient)
     .from("memberships")
-    .select("role, access_status, access_expires_at, deletion_prepared_at")
+    .select(
+      hugoRequired
+        ? "role, access_status, access_expires_at, deletion_prepared_at"
+        : "role",
+    )
     .eq("user_id", user.id)
     .eq("org_id", orgId)
     .maybeSingle();
 
-  if (!data || !hasActiveSandraAccess(data)) {
+  if (error || !data || (hugoRequired && !hasActiveSandraAccess(data))) {
     throw new AuthorizationError("Forbidden", { reason: "not_member" });
   }
 

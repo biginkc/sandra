@@ -36,6 +36,7 @@ function mockMembershipClient(responses: MembershipResponse | MembershipResponse
 beforeEach(() => {
   vi.stubEnv("NODE_ENV", "development");
   vi.stubEnv("E2E_AUTH_BYPASS", "1");
+  vi.stubEnv("NEXT_PUBLIC_HUGO_SSO", "1");
 });
 
 afterEach(() => {
@@ -44,6 +45,20 @@ afterEach(() => {
 });
 
 describe("getCallerMemberships", () => {
+  it("uses the legacy membership shape while Hugo SSO is disabled", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+    vi.stubEnv("E2E_AUTH_BYPASS", "");
+    vi.stubEnv("NEXT_PUBLIC_HUGO_SSO", "");
+    const { select } = mockMembershipClient({
+      data: [activeMembership],
+      error: null,
+    });
+
+    await expect(getCallerMemberships()).resolves.toEqual([activeMembership]);
+    expect(select).toHaveBeenCalledOnce();
+    expect(select).toHaveBeenCalledWith("user_id, org_id, role");
+  });
+
   it("filters inactive memberships after the Hugo access query succeeds", async () => {
     const { select } = mockMembershipClient({
       data: [

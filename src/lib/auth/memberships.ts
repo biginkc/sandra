@@ -25,6 +25,12 @@ type MembershipReader = {
 export async function getCallerMemberships(): Promise<Membership[]> {
   const supabase = await createClient();
   const reader = supabase as unknown as MembershipReader;
+  const hugoRequired = process.env.NEXT_PUBLIC_HUGO_SSO === "1";
+  if (!hugoRequired) {
+    const legacy = await reader.from("memberships").select("user_id, org_id, role");
+    return legacy.error ? [] : legacy.data ?? [];
+  }
+
   const { data, error } = await reader
     .from("memberships")
     .select(

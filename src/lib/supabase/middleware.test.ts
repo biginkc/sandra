@@ -218,7 +218,8 @@ describe("updateSession membership authorization", () => {
 
   it("keeps the password rollback path working while Hugo is off", async () => {
     vi.stubEnv("NEXT_PUBLIC_HUGO_SSO", "");
-    const { signOut } = mockProtectedSession({
+    vi.stubEnv("NODE_ENV", "production");
+    const { signOut, select, limit } = mockProtectedSession({
       memberships: [{ user_id: "seeded-auth-user" }],
       authMethod: "password",
     });
@@ -229,6 +230,8 @@ describe("updateSession membership authorization", () => {
 
     expect(response.status).toBe(200);
     expect(signOut).not.toHaveBeenCalled();
+    expect(select).toHaveBeenCalledWith("user_id");
+    expect(limit).toHaveBeenCalledOnce();
   });
 
   it("denies a seeded auth cookie when sign-out returns an error", async () => {
