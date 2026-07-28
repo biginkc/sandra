@@ -17,6 +17,13 @@ const inventoryMigration = readFileSync(
   ),
   "utf8",
 );
+const hardDeleteMigration = readFileSync(
+  resolve(
+    process.cwd(),
+    "supabase/migrations/20260728110000_hugo_auth_hard_delete.sql",
+  ),
+  "utf8",
+);
 
 describe("Hugo/Sandra SQL connector contract", () => {
   it("keeps the frozen PostgREST RPC names and argument order", () => {
@@ -113,5 +120,43 @@ describe("Hugo/Sandra SQL connector contract", () => {
       "grant execute on function public.hugo_list_access() to service_role;",
     );
     expect(inventoryMigration).not.toMatch(/\binsert\s+into\b|\bupdate\s+[^\n]+\bset\b|\bdelete\s+from\b/i);
+  });
+
+  it("hard-deletes Auth after the guarded local cleanup and keeps retries safe", () => {
+    const missingMembershipBranch = hardDeleteMigration.slice(
+      hardDeleteMigration.indexOf("if not found then"),
+      hardDeleteMigration.indexOf("elsif v_membership.deletion_prepared_at is null"),
+    );
+    expect(missingMembershipBranch).toContain(
+      "v_activity := public.hugo_has_durable_activity(v_user_id);",
+    );
+    expect(missingMembershipBranch).toContain("v_should_delete_auth := true;");
+    expect(hardDeleteMigration.indexOf("delete from public.memberships")).toBeLessThan(
+      hardDeleteMigration.indexOf("delete from auth.users"),
+    );
+    expect(hardDeleteMigration).toContain(
+      "delete from auth.users where id = v_user_id;",
+    );
+    expect(hardDeleteMigration).toContain(
+      "get diagnostics v_deleted_count = row_count;",
+    );
+    expect(hardDeleteMigration).toContain(
+      "if v_deleted_count not in (0, 1) then",
+    );
+    expect(hardDeleteMigration).toContain("HUGO_AUTH_DELETE_FAILED");
+    expect(hardDeleteMigration).toContain(
+      "-- Zero rows is an idempotent retry or a concurrent already-completed",
+    );
+    expect(hardDeleteMigration).toContain(
+      "where operation_id = p_operation_id;",
+    );
+    expect(hardDeleteMigration).toContain("return v_prior;");
+    expect(hardDeleteMigration).toContain("on conflict (operation_id) do nothing;");
+    expect(hardDeleteMigration).toContain(
+      "revoke execute on function public.hugo_delete_identity(uuid, text) from authenticated;",
+    );
+    expect(hardDeleteMigration).toContain(
+      "grant execute on function public.hugo_delete_identity(uuid, text) to service_role;",
+    );
   });
 });
