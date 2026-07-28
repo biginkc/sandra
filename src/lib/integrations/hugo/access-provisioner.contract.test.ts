@@ -24,6 +24,13 @@ const hardDeleteMigration = readFileSync(
   ),
   "utf8",
 );
+const forwardHashMigration = readFileSync(
+  resolve(
+    process.cwd(),
+    "supabase/migrations/20260728130000_hugo_access_operation_request_hash.sql",
+  ),
+  "utf8",
+);
 
 describe("Hugo/Sandra SQL connector contract", () => {
   it("keeps the frozen PostgREST RPC names and argument order", () => {
@@ -93,6 +100,36 @@ describe("Hugo/Sandra SQL connector contract", () => {
     expect(migration).not.toContain("if (v_receipt->>'ok')::boolean then\n    insert into public.hugo_access_operations");
     expect(hardDeleteMigration).toContain("v_prior_hash is distinct from v_request_hash");
     expect(hardDeleteMigration).toContain("public.hugo_store_access_operation(p_operation_id, 'deleteIdentity'");
+  });
+
+  it("ships a forward-only hash migration for already-provisioned environments", () => {
+    expect(forwardHashMigration).toContain(
+      "alter table public.hugo_access_operations\n  add column if not exists request_hash text;",
+    );
+    expect(forwardHashMigration).toContain(
+      "create or replace function public.hugo_sandra_canonical_request_payload(",
+    );
+    expect(forwardHashMigration).toContain(
+      "create trigger trg_hugo_sandra_access_operation_hash",
+    );
+    expect(forwardHashMigration).toContain(
+      "alter function public.hugo_apply_access(uuid, text, text, jsonb, text, timestamptz)\n      rename to hugo_apply_access_unhashed;",
+    );
+    expect(forwardHashMigration).toContain(
+      "v_prior_hash = v_hash",
+    );
+    expect(forwardHashMigration).toContain(
+      "Operation id was already used with a different request.",
+    );
+    expect(forwardHashMigration).toContain(
+      "hugo_prepare_pristine_delete_unhashed",
+    );
+    expect(forwardHashMigration).toContain(
+      "hugo_delete_identity_unhashed",
+    );
+    expect(forwardHashMigration).toContain(
+      "p_operation_id, p_email, p_role, v_config, p_status, p_access_expires_at",
+    );
   });
 
   it("serializes owner checks with a shared lifecycle lock", () => {
