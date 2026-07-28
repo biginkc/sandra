@@ -6,6 +6,15 @@ export const SANDRA_HUGO_APP_ID = "sandra" as const;
 export const SANDRA_HUGO_ROLES = ["owner", "member"] as const;
 export type SandraHugoRole = (typeof SANDRA_HUGO_ROLES)[number];
 export type SandraHugoStatus = "active" | "suspended" | "revoked";
+export type HugoAccessInventoryEntry = {
+  email: string | null;
+  app_user_id: string | null;
+  role: string | null;
+  config: HugoConfig;
+  status: SandraHugoStatus | "missing";
+  access_expires_at: string | null;
+  has_durable_activity: boolean | null;
+};
 
 export type ProvisionerReceipt = {
   operation_id: string;
@@ -46,6 +55,10 @@ type RpcClient = {
   rpc(
     fn: "hugo_inspect_access",
     args: { p_email: string },
+  ): Promise<{ data: unknown; error: { message: string; code?: string } | null }>;
+  rpc(
+    fn: "hugo_list_access",
+    args: Record<string, never>,
   ): Promise<{ data: unknown; error: { message: string; code?: string } | null }>;
   rpc(
     fn: "hugo_prepare_pristine_delete",
@@ -258,6 +271,65 @@ async function callRpc(
       code: "PROVISIONER_RPC_FAILED",
       message: "Sandra could not apply the requested access change.",
     });
+  }
+}
+
+function parseInventory(data: unknown): HugoAccessInventoryEntry[] {
+  const rows = Array.isArray(data) ? data : data ? [data] : [];
+  const inventory = rows.map((row): HugoAccessInventoryEntry => {
+    if (!row || typeof row !== "object" || Array.isArray(row)) {
+      throw new Error("Sandra returned an invalid access inventory.");
+    }
+    const raw = row as Record<string, unknown>;
+    const status = raw.status;
+    if (
+      status !== "active" &&
+      status !== "suspended" &&
+      status !== "revoked" &&
+      status !== "missing"
+    ) {
+      throw new Error("Sandra returned an invalid access inventory.");
+    }
+    return {
+      email: typeof raw.email === "string" ? normalizedEmail(raw.email) : null,
+      app_user_id: typeof raw.app_user_id === "string" ? raw.app_user_id : null,
+      role: typeof raw.role === "string" ? raw.role : null,
+      config: safeConfig(raw.config) ?? {},
+      status,
+      access_expires_at:
+        typeof raw.access_expires_at === "string" ? raw.access_expires_at : null,
+      has_durable_activity:
+        typeof raw.has_durable_activity === "boolean"
+          ? raw.has_durable_activity
+          : null,
+    };
+  });
+  return inventory.sort((left, right) => {
+    const leftEmail = left.email ?? "";
+    const rightEmail = right.email ?? "";
+    if (leftEmail < rightEmail) return -1;
+    if (leftEmail > rightEmail) return 1;
+    const leftUser = left.app_user_id ?? "";
+    const rightUser = right.app_user_id ?? "";
+    return leftUser < rightUser ? -1 : leftUser > rightUser ? 1 : 0;
+  });
+}
+
+export async function listHugoAccess(): Promise<HugoAccessInventoryEntry[]> {
+  try {
+    const result = await (rpcClient() as unknown as {
+      rpc(
+        name: string,
+        args: Record<string, never>,
+      ): Promise<{
+        data: unknown;
+        error: { message: string; code?: string } | null;
+      }>;
+    }).rpc("hugo_list_access", {});
+    if (result.error) throw new Error("Sandra access inventory failed.");
+    return parseInventory(result.data);
+  } catch {
+    throw new Error("Sandra access inventory failed.");
   }
 }
 
@@ -484,6 +556,7 @@ export const hugoAccessProvisioner = {
   reactivate: reactivateHugoAccess,
   revoke: revokeHugoAccess,
   inspect: inspectHugoAccess,
+  list: listHugoAccess,
   preparePristineDelete: prepareHugoPristineDelete,
   deleteIdentity: deleteHugoIdentity,
 };

@@ -17,6 +17,7 @@ import {
   deleteHugoIdentity,
   hugoAccessProvisioner,
   inspectHugoAccess,
+  listHugoAccess,
   suspendHugoAccess,
 } from "./access-provisioner";
 
@@ -190,6 +191,59 @@ describe("Sandra Hugo access provisioner", () => {
     });
   });
 
+  it("lists deterministic sanitized access inventory without creating identities", async () => {
+    mocks.rpc.mockResolvedValue({
+      data: [
+        {
+          email: "Zed@BMHGROUPKC.COM",
+          app_user_id: "33333333-3333-4333-8333-333333333333",
+          role: "member",
+          config: { timezone: "America/Chicago", api_token: "must-not-leak" },
+          status: "active",
+          access_expires_at: null,
+          has_durable_activity: true,
+        },
+        {
+          email: "alice@bmhgroupkc.com",
+          app_user_id: USER_ID,
+          role: "owner",
+          config: { timezone: "America/Chicago" },
+          status: "suspended",
+          access_expires_at: "2026-08-01T00:00:00.000Z",
+          has_durable_activity: false,
+        },
+      ],
+      error: null,
+    });
+
+    const result = await listHugoAccess();
+
+    expect(result).toEqual([
+      expect.objectContaining({
+        email: "alice@bmhgroupkc.com",
+        status: "suspended",
+        has_durable_activity: false,
+      }),
+      expect.objectContaining({
+        email: "zed@bmhgroupkc.com",
+        config: {},
+        has_durable_activity: true,
+      }),
+    ]);
+    expect(mocks.createUser).not.toHaveBeenCalled();
+    expect(mocks.rpc).toHaveBeenCalledWith("hugo_list_access", {});
+  });
+
+  it("sanitizes inventory RPC failures instead of exposing provider details", async () => {
+    mocks.rpc.mockResolvedValue({
+      data: null,
+      error: { message: "service_role=super-secret provider detail" },
+    });
+
+    await expect(listHugoAccess()).rejects.toThrow("Sandra access inventory failed.");
+    await expect(listHugoAccess()).rejects.not.toThrow("super-secret");
+  });
+
   it("deletes Auth only after the SQL identity connector succeeds", async () => {
     mocks.listUsers.mockResolvedValue({
       data: { users: [{ id: USER_ID, email: "member@bmhgroupkc.com" }] },
@@ -228,6 +282,7 @@ describe("Sandra Hugo access provisioner", () => {
       "reactivate",
       "revoke",
       "inspect",
+      "list",
       "preparePristineDelete",
       "deleteIdentity",
     ]);

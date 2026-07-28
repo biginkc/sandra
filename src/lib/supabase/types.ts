@@ -3153,6 +3153,18 @@ export type Database = {
         Args: { p_email: string }
         Returns: Json
       }
+      hugo_list_access: {
+        Args: Record<PropertyKey, never>
+        Returns: {
+          access_expires_at: string | null
+          app_user_id: string
+          config: Json
+          email: string
+          has_durable_activity: boolean
+          role: string
+          status: string
+        }[]
+      }
       hugo_prepare_pristine_delete: {
         Args: { p_email: string; p_operation_id: string }
         Returns: Json

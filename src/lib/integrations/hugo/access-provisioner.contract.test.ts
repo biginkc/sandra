@@ -10,6 +10,13 @@ const migration = readFileSync(
   ),
   "utf8",
 );
+const inventoryMigration = readFileSync(
+  resolve(
+    process.cwd(),
+    "supabase/migrations/20260728090000_hugo_access_inventory.sql",
+  ),
+  "utf8",
+);
 
 describe("Hugo/Sandra SQL connector contract", () => {
   it("keeps the frozen PostgREST RPC names and argument order", () => {
@@ -48,5 +55,34 @@ describe("Hugo/Sandra SQL connector contract", () => {
     expect(migration).toContain("FINAL_OWNER_GUARD");
     expect(migration).toContain("trg_hugo_membership_owner_guard");
     expect(migration).toContain("REVOKED_NOT_REACTIVATABLE");
+  });
+
+  it("defines a deterministic service-role-only read-only inventory", () => {
+    expect(inventoryMigration).toContain(
+      "create or replace function public.hugo_list_access()",
+    );
+    expect(inventoryMigration).toContain("returns table (");
+    for (const field of [
+      "email text",
+      "app_user_id uuid",
+      "role text",
+      "config jsonb",
+      "status text",
+      "access_expires_at timestamptz",
+      "has_durable_activity boolean",
+    ]) {
+      expect(inventoryMigration).toContain(field);
+    }
+    expect(inventoryMigration).toContain("perform public.hugo_require_service_role();");
+    expect(inventoryMigration).toContain(
+      "order by lower(trim(coalesce(u.email, ''))), m.user_id;",
+    );
+    expect(inventoryMigration).toContain(
+      "revoke execute on function public.hugo_list_access() from public, anon, authenticated;",
+    );
+    expect(inventoryMigration).toContain(
+      "grant execute on function public.hugo_list_access() to service_role;",
+    );
+    expect(inventoryMigration).not.toMatch(/\binsert\s+into\b|\bupdate\s+[^\n]+\bset\b|\bdelete\s+from\b/i);
   });
 });
