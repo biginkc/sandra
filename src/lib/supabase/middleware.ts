@@ -2,21 +2,13 @@ import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
 
 import { isEmailAllowed } from "@/lib/auth/allowlist";
-import { hasActiveSandraAccess } from "@/lib/auth/access-state";
+import {
+  hasActiveSandraAccess,
+  isMissingHugoAccessColumnError,
+} from "@/lib/auth/access-state";
 import { hasCurrentHugoOAuthProof } from "@/lib/auth/hugo-proof";
 import { SANDRA_ORG_ID } from "@/lib/auth/sandra-org";
 import { expireSupabaseAuthCookies } from "@/lib/auth/supabase-cookies";
-
-function isMissingHugoAccessColumnError(error: unknown): boolean {
-  if (!error || typeof error !== "object") return false;
-  const candidate = error as { code?: unknown; message?: unknown };
-  const message = typeof candidate.message === "string" ? candidate.message : "";
-  const code = typeof candidate.code === "string" ? candidate.code : "";
-  return (
-    (code === "PGRST204" || /schema cache|does not exist/i.test(message)) &&
-    /access_status|access_expires_at|deletion_prepared_at/i.test(message)
-  );
-}
 
 export function isPublicPath(path: string): boolean {
   return (

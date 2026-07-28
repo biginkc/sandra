@@ -1,6 +1,36 @@
 import { describe, expect, it } from "vitest";
 
-import { hasActiveSandraAccess } from "./access-state";
+import {
+  hasActiveSandraAccess,
+  isMissingHugoAccessColumnError,
+} from "./access-state";
+
+describe("isMissingHugoAccessColumnError", () => {
+  it("recognizes the PostgREST schema-cache error for Hugo access columns", () => {
+    expect(
+      isMissingHugoAccessColumnError({
+        code: "PGRST204",
+        message:
+          "Could not find the 'access_status' column of 'memberships' in the schema cache",
+      }),
+    ).toBe(true);
+  });
+
+  it("does not treat unrelated schema errors as a local compatibility case", () => {
+    expect(
+      isMissingHugoAccessColumnError({
+        code: "PGRST204",
+        message: "Could not find the 'role' column of 'memberships' in the schema cache",
+      }),
+    ).toBe(false);
+    expect(
+      isMissingHugoAccessColumnError({
+        code: "23505",
+        message: "duplicate key value violates unique constraint",
+      }),
+    ).toBe(false);
+  });
+});
 
 describe("hasActiveSandraAccess", () => {
   const now = Date.parse("2026-07-27T12:00:00.000Z");
