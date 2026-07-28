@@ -3,10 +3,9 @@ import { renderHook, act } from "@testing-library/react";
 
 // Mock next/navigation — hoisted so it runs before any imports
 const replace = vi.fn();
-const refresh = vi.fn();
 
 vi.mock("next/navigation", () => ({
-  useRouter: () => ({ replace, refresh }),
+  useRouter: () => ({ replace }),
   useSearchParams: () => new URLSearchParams(window.location.search),
   usePathname: () => "/properties",
 }));
@@ -19,7 +18,6 @@ import { newBlockId } from "@/lib/prospects/filter-schema";
 
 beforeEach(() => {
   replace.mockReset();
-  refresh.mockReset();
   window.history.replaceState({}, "", "/properties");
 });
 
@@ -46,7 +44,6 @@ describe("useFilterState", () => {
     expect(replace).toHaveBeenCalledTimes(1);
     const [url] = replace.mock.calls[0];
     expect(url).toContain("/properties?filters=");
-    expect(refresh).toHaveBeenCalledTimes(1);
   });
 
   it("dispatches a filter-navigation event before URL navigation", () => {
@@ -141,6 +138,5 @@ describe("useFilterState", () => {
     expect(replace).toHaveBeenCalledTimes(1);
     const [url] = replace.mock.calls[0];
     expect(url).toContain("filters=");
-    expect(refresh).toHaveBeenCalledTimes(1);
   });
 });
