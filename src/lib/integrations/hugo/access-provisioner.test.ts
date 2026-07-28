@@ -270,7 +270,7 @@ describe("Sandra Hugo access provisioner", () => {
     await expect(listHugoAccess()).rejects.not.toThrow("super-secret");
   });
 
-  it("deletes Auth only after the SQL identity connector succeeds", async () => {
+  it("lets the SQL identity connector own the Auth deletion", async () => {
     mocks.listUsers.mockResolvedValue({
       data: { users: [{ id: USER_ID, email: "member@bmhgroupkc.com" }] },
       error: null,
@@ -298,7 +298,7 @@ describe("Sandra Hugo access provisioner", () => {
       p_operation_id: OPERATION_ID,
       p_email: "member@bmhgroupkc.com",
     });
-    expect(mocks.deleteUser).toHaveBeenCalledWith(USER_ID);
+    expect(mocks.deleteUser).not.toHaveBeenCalled();
   });
 
   it("exports the complete frozen lifecycle surface", () => {

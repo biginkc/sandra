@@ -538,20 +538,11 @@ export async function deleteHugoIdentity(input: {
     { p_operation_id: operationId, p_email: email },
     { operationId, status: "revoked", appUserId: existing?.id ?? null, code: "PROVISIONER_RPC_FAILED", message: "Sandra could not delete the identity." },
   );
-  if (!receipt.ok || !existing) return receipt;
-  try {
-    const { error } = await (createAdminClient() as unknown as AuthAdmin).auth.admin.deleteUser(existing.id);
-    if (!error) return receipt;
-  } catch {
-    // Keep this boundary secret-free and retryable. The SQL receipt remains
-    // idempotent; the next delete call retries the Auth identity removal.
-  }
-  return {
-    ...receipt,
-    ok: false,
-    error_code: "IDENTITY_DELETE_FAILED",
-    error_message: "Sandra access was prepared, but the local identity could not be removed.",
-  };
+  // The service-role SQL connector owns the transaction, including the Auth
+  // row deletion. Do not issue a second client-side delete after a successful
+  // receipt: Auth would report a missing user and turn a completed operation
+  // into a false failure.
+  return receipt;
 }
 
 export const hugoAccessProvisioner = {
