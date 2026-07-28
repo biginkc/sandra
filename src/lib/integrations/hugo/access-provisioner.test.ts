@@ -23,11 +23,13 @@ import {
 
 const OPERATION_ID = "11111111-1111-4111-8111-111111111111";
 const USER_ID = "22222222-2222-4222-8222-222222222222";
+const REQUEST_HASH = "a".repeat(64);
 
 function receipt(overrides: Record<string, unknown> = {}) {
   return {
     operation_id: OPERATION_ID,
     app_id: "sandra",
+    request_hash: REQUEST_HASH,
     app_user_id: USER_ID,
     requested: {
       role: "member",
@@ -133,6 +135,78 @@ describe("Sandra Hugo access provisioner", () => {
       p_status: "suspended",
       p_access_expires_at: null,
     });
+  });
+
+  it("preserves an exact successful replay and surfaces a bounded hash conflict", async () => {
+    mocks.rpc
+      .mockResolvedValueOnce({ data: receipt({ requested: { role: "member", config: {}, status: "suspended", access_expires_at: null } }), error: null })
+      .mockResolvedValueOnce({ data: receipt({ requested: { role: "member", config: {}, status: "suspended", access_expires_at: null } }), error: null })
+      .mockResolvedValueOnce({
+        data: receipt({
+          requested: { role: "owner", config: {}, status: "suspended", access_expires_at: null },
+          ok: false,
+          error_code: "OPERATION_CONFLICT",
+          error_message: "Operation id was already used with a different request.",
+        }),
+        error: null,
+      });
+
+    const base = {
+      operationId: OPERATION_ID,
+      email: "member@bmhgroupkc.com",
+      role: "member" as const,
+      config: {},
+      status: "suspended" as const,
+    };
+    const first = await applyHugoAccess(base);
+    const exactReplay = await applyHugoAccess(base);
+    const mismatchedReplay = await applyHugoAccess({ ...base, role: "owner" });
+
+    expect(first).toMatchObject({ ok: true, request_hash: REQUEST_HASH });
+    expect(exactReplay).toEqual(first);
+    expect(mismatchedReplay).toMatchObject({
+      ok: false,
+      error_code: "OPERATION_CONFLICT",
+      error_message: "Sandra provisioner rejected this request.",
+    });
+    expect(mismatchedReplay.error_message).not.toContain("different request");
+  });
+
+  it("preserves an exact failed replay and rejects a changed failed payload", async () => {
+    const failure = receipt({
+      requested: { role: "member", config: {}, status: "suspended", access_expires_at: null },
+      ok: false,
+      error_code: "IDENTITY_NOT_FOUND",
+      error_message: "Sandra identity was not found for this email.",
+    });
+    mocks.rpc
+      .mockResolvedValueOnce({ data: failure, error: null })
+      .mockResolvedValueOnce({ data: failure, error: null })
+      .mockResolvedValueOnce({
+        data: receipt({
+          requested: { role: "member", config: { region: "other" }, status: "suspended", access_expires_at: null },
+          ok: false,
+          error_code: "OPERATION_CONFLICT",
+          error_message: "Operation id was already used with a different request.",
+        }),
+        error: null,
+      });
+
+    const base = {
+      operationId: OPERATION_ID,
+      email: "member@bmhgroupkc.com",
+      role: "member" as const,
+      config: {},
+      status: "suspended" as const,
+    };
+    const first = await applyHugoAccess(base);
+    const exactReplay = await applyHugoAccess(base);
+    const mismatchedReplay = await applyHugoAccess({ ...base, config: { region: "other" } });
+
+    expect(first).toMatchObject({ ok: false, error_code: "IDENTITY_NOT_FOUND", request_hash: REQUEST_HASH });
+    expect(exactReplay).toEqual(first);
+    expect(mismatchedReplay).toMatchObject({ ok: false, error_code: "OPERATION_CONFLICT" });
+    expect(mismatchedReplay.error_message).not.toContain("different request");
   });
 
   it("rejects credential-shaped config before it reaches PostgREST", async () => {

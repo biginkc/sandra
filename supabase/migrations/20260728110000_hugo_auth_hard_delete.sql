@@ -12,10 +12,19 @@ set search_path = public, auth, pg_temp
 as $$
 declare
   v_email text := lower(trim(coalesce(p_email, '')));
+  v_requested jsonb := jsonb_build_object('status', 'revoked');
+  v_request_hash text := public.hugo_request_hash(
+    lower(trim(coalesce(p_email, ''))),
+    null,
+    '{}'::jsonb,
+    'revoked',
+    null
+  );
   v_user_id uuid;
   v_membership public.memberships%rowtype;
   v_prior jsonb;
   v_operation text;
+  v_prior_hash text;
   v_receipt jsonb;
   v_activity boolean;
   v_should_delete_auth boolean := false;
@@ -23,14 +32,17 @@ declare
 begin
   perform public.hugo_require_service_role();
   perform pg_advisory_xact_lock(hashtextextended('hugo-sandra-privileged-lifecycle-v1', 0));
-  select operation, receipt into v_operation, v_prior
+  select operation, request_hash, receipt into v_operation, v_prior_hash, v_prior
   from public.hugo_access_operations
   where operation_id = p_operation_id;
   if found then
-    if v_operation <> 'deleteIdentity' then
-      return public.hugo_receipt(p_operation_id, null, null, '{}'::jsonb, 'revoked', null, null, '{}'::jsonb, 'missing', null, false, false, 'OPERATION_CONFLICT', 'Operation id was already used for another lifecycle action.');
+    if v_operation <> 'deleteIdentity' or v_prior_hash is distinct from v_request_hash then
+      return public.hugo_receipt_with_request_hash(
+        public.hugo_receipt(p_operation_id, null, null, '{}'::jsonb, 'revoked', null, null, '{}'::jsonb, 'missing', null, false, false, 'OPERATION_CONFLICT', 'Operation id was already used with a different request.'),
+        v_request_hash
+      );
     end if;
-    return v_prior;
+    return public.hugo_receipt_with_request_hash(v_prior, v_request_hash);
   end if;
   v_user_id := public.hugo_find_user_id(v_email);
   if v_user_id is null then
@@ -88,11 +100,8 @@ begin
     );
   end if;
 
-  if (v_receipt->>'ok')::boolean then
-    insert into public.hugo_access_operations(operation_id, operation, email, app_user_id, requested, receipt)
-    values (p_operation_id, 'deleteIdentity', v_email, v_user_id, jsonb_build_object('status', 'revoked'), v_receipt)
-    on conflict (operation_id) do nothing;
-  end if;
+  v_receipt := public.hugo_receipt_with_request_hash(v_receipt, v_request_hash);
+  perform public.hugo_store_access_operation(p_operation_id, 'deleteIdentity', v_email, v_user_id, v_requested, v_request_hash, v_receipt);
   return v_receipt;
 end;
 $$;

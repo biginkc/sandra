@@ -19,6 +19,8 @@ export type HugoAccessInventoryEntry = {
 export type ProvisionerReceipt = {
   operation_id: string;
   app_id: typeof SANDRA_HUGO_APP_ID;
+  /** Canonical request binding returned by the SQL connector for replay audit. */
+  request_hash?: string;
   app_user_id: string | null;
   requested: {
     role: string | null;
@@ -191,6 +193,10 @@ function parseReceipt(
   const observed = receipt.observed as ProvisionerReceipt["observed"];
   return {
     ...(receipt as ProvisionerReceipt),
+    request_hash:
+      typeof receipt.request_hash === "string" && /^[0-9a-f]{64}$/i.test(receipt.request_hash)
+        ? receipt.request_hash.toLowerCase()
+        : undefined,
     requested: {
       ...requested,
       config: safeConfig(requested.config) ?? {},

@@ -79,6 +79,22 @@ describe("Hugo/Sandra SQL connector contract", () => {
     expect(migration).toContain("REVOKED_NOT_REACTIVATABLE");
   });
 
+  it("binds every lifecycle receipt to a canonical request hash", () => {
+    expect(migration).toContain("request_hash text");
+    expect(migration).toContain("create or replace function public.hugo_request_hash(");
+    expect(migration).toContain("digest(");
+    expect(migration).toContain("'{request_hash}'");
+    expect(migration).toContain("create or replace function public.hugo_store_access_operation(");
+    expect(migration).toContain("public.hugo_store_access_operation(p_operation_id, v_operation");
+    expect(migration).toContain("public.hugo_store_access_operation(p_operation_id, 'preparePristineDelete'");
+    expect(migration).toContain("public.hugo_store_access_operation(p_operation_id, 'deleteIdentity'");
+    expect(migration).toContain("v_prior_hash is distinct from v_request_hash");
+    expect(migration).toContain("Operation id was already used with a different request.");
+    expect(migration).not.toContain("if (v_receipt->>'ok')::boolean then\n    insert into public.hugo_access_operations");
+    expect(hardDeleteMigration).toContain("v_prior_hash is distinct from v_request_hash");
+    expect(hardDeleteMigration).toContain("public.hugo_store_access_operation(p_operation_id, 'deleteIdentity'");
+  });
+
   it("serializes owner checks with a shared lifecycle lock", () => {
     expect(migration).toContain(
       "hashtextextended('hugo-sandra-privileged-lifecycle-v1', 0)",
@@ -150,8 +166,10 @@ describe("Hugo/Sandra SQL connector contract", () => {
     expect(hardDeleteMigration).toContain(
       "where operation_id = p_operation_id;",
     );
-    expect(hardDeleteMigration).toContain("return v_prior;");
-    expect(hardDeleteMigration).toContain("on conflict (operation_id) do nothing;");
+    expect(hardDeleteMigration).toContain("return public.hugo_receipt_with_request_hash(v_prior, v_request_hash);");
+    expect(hardDeleteMigration).toContain(
+      "perform public.hugo_store_access_operation(p_operation_id, 'deleteIdentity'",
+    );
     expect(hardDeleteMigration).toContain(
       "revoke execute on function public.hugo_delete_identity(uuid, text) from authenticated;",
     );
