@@ -26,6 +26,9 @@ describe("Hugo/Sandra SQL connector contract", () => {
     expect(migration).toContain(
       "create or replace function public.hugo_inspect_access(p_email text)",
     );
+    expect(migration).toContain("array_agg(id order by id)");
+    expect(migration).toContain("HUGO_IDENTITY_AMBIGUOUS");
+    expect(migration).not.toContain("order by id\n  limit 1");
     expect(migration).toContain(
       "create or replace function public.hugo_prepare_pristine_delete(\n  p_operation_id uuid,\n  p_email text",
     );

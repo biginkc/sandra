@@ -78,17 +78,18 @@ security definer
 set search_path = public, auth, pg_temp
 as $$
 declare
-  v_user_id uuid;
+  v_user_ids uuid[];
 begin
   if p_email is null or length(trim(p_email)) = 0 then
     return null;
   end if;
-  select id into v_user_id
+  select array_agg(id order by id) into v_user_ids
   from auth.users
-  where lower(email) = lower(trim(p_email))
-  order by id
-  limit 1;
-  return v_user_id;
+  where lower(email) = lower(trim(p_email));
+  if coalesce(array_length(v_user_ids, 1), 0) > 1 then
+    raise exception 'HUGO_IDENTITY_AMBIGUOUS' using errcode = 'P0001';
+  end if;
+  return v_user_ids[1];
 end;
 $$;
 

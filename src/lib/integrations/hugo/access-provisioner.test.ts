@@ -169,6 +169,32 @@ describe("Sandra Hugo access provisioner", () => {
     expect(mocks.rpc).not.toHaveBeenCalled();
   });
 
+  it("fails closed when Auth returns duplicate identities for an email", async () => {
+    mocks.listUsers.mockResolvedValue({
+      data: {
+        users: [
+          { id: USER_ID, email: "member@bmhgroupkc.com" },
+          { id: "33333333-3333-4333-8333-333333333333", email: "MEMBER@BMHGROUPKC.COM" },
+        ],
+      },
+      error: null,
+    });
+
+    const result = await applyHugoAccess({
+      operationId: OPERATION_ID,
+      email: "member@bmhgroupkc.com",
+      role: "member",
+      status: "active",
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      error_code: "IDENTITY_PROVISION_FAILED",
+    });
+    expect(result.error_message).not.toContain("33333333");
+    expect(mocks.rpc).not.toHaveBeenCalled();
+  });
+
   it("surfaces inspect receipts without inventing local state", async () => {
     mocks.rpc.mockResolvedValue({
       data: receipt({

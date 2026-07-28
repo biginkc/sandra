@@ -210,17 +210,21 @@ async function findExactUser(
   email: string,
 ): Promise<AuthUser | null> {
   const seen = new Set<string>();
+  let exactMatch: AuthUser | null = null;
   for (let page = 1; page <= 100; page += 1) {
     const { data, error } = await admin.auth.admin.listUsers({
       page,
       perPage: USER_PAGE_SIZE,
     });
     if (error) throw new Error("Sandra identity lookup failed.");
-    const exact = data.users.find(
+    const exact = data.users.filter(
       (candidate) => normalizedEmail(candidate.email ?? "") === email,
     );
-    if (exact) return exact;
-    if (data.users.length < USER_PAGE_SIZE) return null;
+    if (exact.length > 1 || (exact.length === 1 && exactMatch)) {
+      throw new Error("Sandra identity lookup is ambiguous.");
+    }
+    if (exact.length === 1) exactMatch = exact[0];
+    if (data.users.length < USER_PAGE_SIZE) return exactMatch;
     const fingerprint = data.users.map((candidate) => candidate.id).join(":");
     if (seen.has(fingerprint)) throw new Error("Sandra identity lookup repeated a page.");
     seen.add(fingerprint);
