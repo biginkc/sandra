@@ -274,9 +274,13 @@ begin
     v_activity := public.hugo_has_durable_activity(v_user_id);
     if v_membership.deletion_prepared_at is not null then
       v_receipt := public.hugo_receipt(p_operation_id, v_user_id, p_role, p_config, p_status, p_access_expires_at, v_membership.role, v_membership.hugo_config, v_membership.access_status, v_membership.access_expires_at, v_activity, false, 'IDENTITY_DELETE_PREPARED', 'Identity is already prepared for deletion.');
-    elsif v_membership.access_status = p_status and v_membership.role = p_role then
-      -- Repeating the same lifecycle state is a successful no-op, including
-      -- a suspended/revoked owner when no replacement owner exists.
+    elsif v_membership.access_status = p_status
+      and v_membership.role = p_role
+      and v_membership.hugo_config = coalesce(p_config, '{}'::jsonb)
+      and v_membership.access_expires_at is not distinct from p_access_expires_at then
+      -- Repeating the complete lifecycle state is a successful no-op, including
+      -- a suspended/revoked owner when no replacement owner exists. Config and
+      -- expiry are part of that state; mismatches fall through to apply them.
       v_receipt := public.hugo_receipt(p_operation_id, v_user_id, p_role, p_config, p_status, p_access_expires_at, v_membership.role, v_membership.hugo_config, v_membership.access_status, v_membership.access_expires_at, v_activity, true);
     elsif v_membership.access_status = 'revoked' and p_status = 'active' then
       v_receipt := public.hugo_receipt(p_operation_id, v_user_id, p_role, p_config, p_status, p_access_expires_at, v_membership.role, v_membership.hugo_config, 'revoked', v_membership.access_expires_at, v_activity, false, 'REVOKED_NOT_REACTIVATABLE', 'A revoked Sandra grant cannot be reactivated.');

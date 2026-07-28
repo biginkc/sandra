@@ -53,6 +53,18 @@ describe("Hugo/Sandra SQL connector contract", () => {
 
   it("contains expiry, durable-activity, idempotency, and final-owner guards", () => {
     expect(migration).toContain("access_expires_at timestamptz");
+    expect(migration).toContain(
+      "and v_membership.hugo_config = coalesce(p_config, '{}'::jsonb)",
+    );
+    expect(migration).toContain(
+      "and v_membership.access_expires_at is not distinct from p_access_expires_at",
+    );
+    expect(migration).toContain(
+      "mismatches fall through to apply them.",
+    );
+    expect(migration).not.toContain(
+      "elsif v_membership.access_status = p_status and v_membership.role = p_role then",
+    );
     expect(migration).toContain("hugo_access_operations");
     expect(migration).toContain("hugo_has_durable_activity");
     expect(migration).toContain("FINAL_OWNER_GUARD");
