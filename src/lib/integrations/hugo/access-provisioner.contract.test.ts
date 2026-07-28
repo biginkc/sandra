@@ -72,6 +72,20 @@ describe("Hugo/Sandra SQL connector contract", () => {
     expect(migration).toContain("REVOKED_NOT_REACTIVATABLE");
   });
 
+  it("serializes owner checks with a shared lifecycle lock", () => {
+    expect(migration).toContain(
+      "hashtextextended('hugo-sandra-privileged-lifecycle-v1', 0)",
+    );
+    expect(migration).not.toContain(
+      "hashtextextended(p_operation_id::text, 0)",
+    );
+    expect(
+      migration.match(
+        /hashtextextended\('hugo-sandra-privileged-lifecycle-v1', 0\)/g,
+      ),
+    ).toHaveLength(4);
+  });
+
   it("defines a deterministic service-role-only read-only inventory", () => {
     expect(inventoryMigration).toContain(
       "create or replace function public.hugo_list_access()",

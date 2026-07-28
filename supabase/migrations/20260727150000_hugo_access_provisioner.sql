@@ -130,6 +130,14 @@ as $$
 declare
   v_other_owner boolean;
 begin
+  -- Serialize every owner transition in this organization.  Locking only
+  -- the target membership (or an operation id) lets two concurrent owner
+  -- demotions each observe the other owner as active and remove the final
+  -- owner together.  The shared key also serializes retries before the
+  -- idempotency receipt lookup.
+  if old.role = 'owner' then
+    perform pg_advisory_xact_lock(hashtextextended('hugo-sandra-privileged-lifecycle-v1', 0));
+  end if;
   if old.role = 'owner'
      and (
        tg_op = 'DELETE'
@@ -228,6 +236,7 @@ declare
   v_other_owner boolean;
 begin
   perform public.hugo_require_service_role();
+  perform pg_advisory_xact_lock(hashtextextended('hugo-sandra-privileged-lifecycle-v1', 0));
 
   if p_operation_id is null or v_email = '' then
     return public.hugo_receipt(p_operation_id, null, p_role, p_config, p_status, p_access_expires_at, null, '{}'::jsonb, 'missing', null, false, false, 'INVALID_REQUEST', 'A valid operation and email are required.');
@@ -397,6 +406,7 @@ declare
   v_other_owner boolean;
 begin
   perform public.hugo_require_service_role();
+  perform pg_advisory_xact_lock(hashtextextended('hugo-sandra-privileged-lifecycle-v1', 0));
   select operation, receipt into v_operation, v_prior
   from public.hugo_access_operations
   where operation_id = p_operation_id;
@@ -469,6 +479,7 @@ declare
   v_activity boolean;
 begin
   perform public.hugo_require_service_role();
+  perform pg_advisory_xact_lock(hashtextextended('hugo-sandra-privileged-lifecycle-v1', 0));
   select operation, receipt into v_operation, v_prior
   from public.hugo_access_operations
   where operation_id = p_operation_id;
