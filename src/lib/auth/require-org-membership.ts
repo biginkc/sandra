@@ -1,4 +1,5 @@
 import { AuthorizationError } from "@/lib/errors/classes";
+import { hasActiveSandraAccess } from "@/lib/auth/access-state";
 import { createClient } from "@/lib/supabase/server";
 
 export type ResolvedMembership = {
@@ -21,10 +22,19 @@ type ResourceTable =
 
 type MembershipLookupClient = {
   from(table: "memberships"): {
-    select(columns: "role"): {
+    select(columns: string): {
       eq(column: "user_id", value: string): {
         eq(column: "org_id", value: string): {
-          maybeSingle(): Promise<{ data: { role: string } | null }>;
+          maybeSingle(): Promise<{
+            data:
+              | {
+                  role: string;
+                  access_status?: string | null;
+                  access_expires_at?: string | null;
+                  deletion_prepared_at?: string | null;
+                }
+              | null;
+          }>;
         };
       };
     };
@@ -54,12 +64,12 @@ export async function requireOrgMembership(
 
   const { data } = await (supabase as unknown as MembershipLookupClient)
     .from("memberships")
-    .select("role")
+    .select("role, access_status, access_expires_at, deletion_prepared_at")
     .eq("user_id", user.id)
     .eq("org_id", orgId)
     .maybeSingle();
 
-  if (!data) {
+  if (!data || !hasActiveSandraAccess(data)) {
     throw new AuthorizationError("Forbidden", { reason: "not_member" });
   }
 

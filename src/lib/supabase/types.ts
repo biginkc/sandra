@@ -1316,21 +1316,36 @@ export type Database = {
       }
       memberships: {
         Row: {
+          access_expires_at: string | null
+          access_status: string
           created_at: string
+          deletion_operation_id: string | null
+          deletion_prepared_at: string | null
+          hugo_config: Json
           id: string
           org_id: string
           role: string
           user_id: string
         }
         Insert: {
+          access_expires_at?: string | null
+          access_status?: string
           created_at?: string
+          deletion_operation_id?: string | null
+          deletion_prepared_at?: string | null
+          hugo_config?: Json
           id?: string
           org_id: string
           role?: string
           user_id: string
         }
         Update: {
+          access_expires_at?: string | null
+          access_status?: string
           created_at?: string
+          deletion_operation_id?: string | null
+          deletion_prepared_at?: string | null
+          hugo_config?: Json
           id?: string
           org_id?: string
           role?: string
@@ -3118,6 +3133,29 @@ export type Database = {
           refresh_token: string
           scopes: string[]
         }[]
+      }
+      hugo_apply_access: {
+        Args: {
+          p_access_expires_at: string | null
+          p_config: Json
+          p_email: string
+          p_operation_id: string
+          p_role: string
+          p_status: string
+        }
+        Returns: Json
+      }
+      hugo_delete_identity: {
+        Args: { p_email: string; p_operation_id: string }
+        Returns: Json
+      }
+      hugo_inspect_access: {
+        Args: { p_email: string }
+        Returns: Json
+      }
+      hugo_prepare_pristine_delete: {
+        Args: { p_email: string; p_operation_id: string }
+        Returns: Json
       }
       ensure_sms_conversation_id: {
         Args: { p_contact_id: string; p_property_id: string | null }

@@ -4,6 +4,7 @@ import type { EmailOtpType } from "@supabase/supabase-js";
 import { NextResponse, type NextRequest } from "next/server";
 
 import { isEmailAllowed } from "@/lib/auth/allowlist";
+import { hasActiveSandraAccess } from "@/lib/auth/access-state";
 import { hasCurrentHugoOAuthProof } from "@/lib/auth/hugo-proof";
 import { applyAuthNoCache } from "@/lib/auth/response";
 import { sanitizeNextPath } from "@/lib/auth/safe-next";
@@ -276,11 +277,18 @@ export async function GET(request: NextRequest) {
 
     const { data: memberships, error: membershipError } = await supabase
       .from("memberships")
-      .select("user_id")
+      .select("user_id, access_status, access_expires_at, deletion_prepared_at")
       .eq("user_id", data.session.user.id)
       .eq("org_id", SANDRA_ORG_ID)
       .limit(1);
-    if (membershipError || !memberships?.length) {
+    const membership = memberships?.[0] as
+      | {
+          access_status?: string | null;
+          access_expires_at?: string | null;
+          deletion_prepared_at?: string | null;
+        }
+      | undefined;
+    if (membershipError || !hasActiveSandraAccess(membership)) {
       return rejectExchangedSession(
         request,
         supabase,

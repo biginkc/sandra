@@ -2,6 +2,7 @@ import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
 
 import { isEmailAllowed } from "@/lib/auth/allowlist";
+import { hasActiveSandraAccess } from "@/lib/auth/access-state";
 import { hasCurrentHugoOAuthProof } from "@/lib/auth/hugo-proof";
 import { SANDRA_ORG_ID } from "@/lib/auth/sandra-org";
 import { expireSupabaseAuthCookies } from "@/lib/auth/supabase-cookies";
@@ -124,11 +125,18 @@ export async function updateSession(request: NextRequest) {
     try {
       const { data, error } = await supabase
         .from("memberships")
-        .select("user_id")
+        .select("user_id, access_status, access_expires_at, deletion_prepared_at")
         .eq("user_id", user.id)
         .eq("org_id", SANDRA_ORG_ID)
         .limit(1);
-      hasMembership = !error && Boolean(data?.length);
+      const membership = data?.[0] as
+        | {
+            access_status?: string | null;
+            access_expires_at?: string | null;
+            deletion_prepared_at?: string | null;
+          }
+        | undefined;
+      hasMembership = !error && hasActiveSandraAccess(membership);
     } catch {
       hasMembership = false;
     }
