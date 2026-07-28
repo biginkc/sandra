@@ -3156,6 +3156,17 @@ export type Database = {
         }
         Returns: Json
       }
+      hugo_record_identity_provision_failure: {
+        Args: {
+          p_access_expires_at: string | null
+          p_config: Json
+          p_email: string
+          p_operation_id: string
+          p_role: string
+          p_status: string
+        }
+        Returns: Json
+      }
       hugo_delete_identity: {
         Args: { p_email: string; p_operation_id: string }
         Returns: Json

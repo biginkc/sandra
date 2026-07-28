@@ -140,6 +140,23 @@ describe("Hugo/Sandra SQL connector contract", () => {
   });
 
   it("ships a forward-only authorization repair for hosted environments", () => {
+    for (const helper of [
+      "hugo_request_hash(",
+      "hugo_config_is_safe(",
+      "hugo_sandra_config_is_safe(",
+      "hugo_find_user_id(",
+      "hugo_has_durable_activity(",
+      "hugo_has_prior_sign_in(",
+      "hugo_membership_owner_guard()",
+      "hugo_apply_access(",
+      "hugo_prepare_pristine_delete(",
+      "hugo_delete_identity(",
+      "hugo_list_access()",
+    ]) {
+      expect(authorizationHardeningMigration).toContain(
+        `create or replace function public.${helper}`,
+      );
+    }
     expect(authorizationHardeningMigration).toContain(
       "create policy memberships_self_select",
     );
@@ -156,6 +173,23 @@ describe("Hugo/Sandra SQL connector contract", () => {
     expect(authorizationHardeningMigration).toContain(
       "create or replace function public.hugo_has_active_org_access(p_org_id uuid)",
     );
+    for (const policy of [
+      "skip_trace_cache_authenticated_select",
+      "saved_filters_read_own_plus_base",
+      "saved_filters_insert_own",
+      "saved_filters_update_own",
+      "saved_filters_delete_own",
+      "user_oauth_tokens_self_read",
+      "user_integration_prefs_self_all",
+      '"authenticated users can read metric snapshots"',
+      "counties_authenticated_select",
+      "fips_codes_authenticated_select",
+      "zip_county_xref_authenticated_select",
+    ]) {
+      expect(authorizationHardeningMigration).toContain(
+        `create policy ${policy}`,
+      );
+    }
     for (const privateRpc of [
       "delete_contact_hugo_unchecked",
       "merge_duplicate_properties_hugo_unchecked",
@@ -178,20 +212,81 @@ describe("Hugo/Sandra SQL connector contract", () => {
       "'proceed', true, 'request_hash', v_hash",
     );
     expect(authorizationHardeningMigration).toContain(
-      "and v_claim_hash <> v_hash",
+      "v_claim_hash <> v_hash",
     );
     expect(authorizationHardeningMigration).toContain(
       "set consumed_at = now()",
     );
     expect(authorizationHardeningMigration).toContain(
-      "hugo_apply_access_claimed_unchecked",
+      "create or replace function public.hugo_record_identity_provision_failure(",
+    );
+    expect(authorizationHardeningMigration).toContain(
+      "'IDENTITY_PROVISION_FAILED'",
+    );
+    expect(authorizationHardeningMigration).toContain(
+      "'OPERATION_PREFLIGHT_REQUIRED'",
+    );
+    expect(authorizationHardeningMigration).toContain(
+      "grant execute on function public.hugo_record_identity_provision_failure(",
+    );
+    expect(authorizationHardeningMigration).not.toContain(
+      "v_receipt := public.hugo_apply_access_claimed_unchecked",
     );
   });
 
-  it("protects owner expiry and every pristine-delete proof", () => {
+  it("keeps one active non-expiring owner after every membership mutation", () => {
     expect(authorizationHardeningMigration).toContain(
-      "or m.access_expires_at > v_required_until",
+      "before insert or update or delete on public.memberships",
     );
+    expect(authorizationHardeningMigration).toContain(
+      "hashtextextended('hugo-sandra-permanent-owner-v2', 0)",
+    );
+    expect(authorizationHardeningMigration).toContain(
+      "create table if not exists public.hugo_owner_guard_serialization",
+    );
+    expect(authorizationHardeningMigration).toContain(
+      "set version = version + 1",
+    );
+    expect(authorizationHardeningMigration).toContain(
+      "and m.access_expires_at is null",
+    );
+    expect(authorizationHardeningMigration).toContain(
+      "HUGO_PERMANENT_OWNER_REQUIRED",
+    );
+  });
+
+  it("checks stored retries before current identity and lifecycle state", () => {
+    for (const [signature, identityLookup] of [
+      [
+        "create or replace function public.hugo_apply_access(",
+        "v_user_id := public.hugo_find_user_id(v_email);",
+      ],
+      [
+        "create or replace function public.hugo_prepare_pristine_delete(",
+        "v_user_id := public.hugo_find_user_id(v_email);",
+      ],
+      [
+        "create or replace function public.hugo_delete_identity(",
+        "v_user_id := public.hugo_find_user_id(v_email);",
+      ],
+    ]) {
+      const body = authorizationHardeningMigration.slice(
+        authorizationHardeningMigration.lastIndexOf(signature),
+      );
+      expect(body.indexOf("select op.operation, op.request_hash, op.receipt"))
+        .toBeGreaterThan(-1);
+      expect(body.indexOf("select op.operation, op.request_hash, op.receipt"))
+        .toBeLessThan(body.indexOf(identityLookup));
+    }
+    expect(authorizationHardeningMigration).not.toContain(
+      "v_receipt := public.hugo_prepare_pristine_delete_authorization_unchecked",
+    );
+    expect(authorizationHardeningMigration).not.toContain(
+      "v_receipt := public.hugo_delete_identity_authorization_unchecked",
+    );
+  });
+
+  it("protects every pristine-delete proof", () => {
     expect(authorizationHardeningMigration).toContain(
       "public.hugo_has_prior_sign_in(v_user_id)",
     );
@@ -206,6 +301,33 @@ describe("Hugo/Sandra SQL connector contract", () => {
     );
     expect(authorizationHardeningMigration).toContain(
       "PRISTINE_DELETE_REQUIRED",
+    );
+  });
+
+  it("pseudonymizes deleted identifiers without changing retry evidence", () => {
+    expect(authorizationHardeningMigration).toContain(
+      "create or replace function public.hugo_pseudonymize_deleted_identity(",
+    );
+    for (const identifier of [
+      "set email = v_pseudonym_email",
+      "app_user_id = v_pseudonym_id",
+      "requested = replace(",
+      "receipt = jsonb_set(",
+      "update public.hugo_access_operation_claims claim",
+    ]) {
+      expect(authorizationHardeningMigration).toContain(identifier);
+    }
+    expect(authorizationHardeningMigration).toContain(
+      "current_setting('hugo.pseudonymizing', true) = '1'",
+    );
+    expect(authorizationHardeningMigration).toContain(
+      "new.request_hash := old.request_hash",
+    );
+    expect(authorizationHardeningMigration).toContain(
+      "perform public.hugo_pseudonymize_deleted_identity(v_email, v_user_id)",
+    );
+    expect(authorizationHardeningMigration).toContain(
+      "HUGO_IDENTITY_PSEUDONYMIZATION_FAILED",
     );
   });
 

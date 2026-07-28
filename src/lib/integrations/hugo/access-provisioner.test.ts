@@ -292,8 +292,38 @@ describe("Sandra Hugo access provisioner", () => {
     expect(mocks.rpc).not.toHaveBeenCalled();
   });
 
-  it("fails closed when Auth returns duplicate identities for an email", async () => {
-    mocks.rpc.mockResolvedValueOnce({ data: preflight(), error: null });
+  it("durably records an Auth identity failure and binds its exact and changed retries", async () => {
+    const identityFailure = receipt({
+      app_user_id: null,
+      ok: false,
+      error_code: "IDENTITY_PROVISION_FAILED",
+      error_message: "Sandra identity could not be provisioned.",
+    });
+    mocks.rpc
+      .mockResolvedValueOnce({ data: preflight(), error: null })
+      .mockResolvedValueOnce({ data: identityFailure, error: null })
+      .mockResolvedValueOnce({
+        data: preflight({ proceed: false, receipt: identityFailure }),
+        error: null,
+      })
+      .mockResolvedValueOnce({
+        data: preflight({
+          proceed: false,
+          receipt: receipt({
+            app_user_id: null,
+            requested: {
+              role: "owner",
+              config: { timezone: "America/Chicago" },
+              status: "active",
+              access_expires_at: null,
+            },
+            ok: false,
+            error_code: "OPERATION_CONFLICT",
+            error_message: "Operation id was already used with a different request.",
+          }),
+        }),
+        error: null,
+      });
     mocks.listUsers.mockResolvedValue({
       data: {
         users: [
@@ -304,21 +334,96 @@ describe("Sandra Hugo access provisioner", () => {
       error: null,
     });
 
-    const result = await applyHugoAccess({
+    const request = {
       operationId: OPERATION_ID,
       email: "member@bmhgroupkc.com",
-      role: "member",
-      status: "active",
-    });
+      role: "member" as const,
+      config: { timezone: "America/Chicago" },
+      status: "active" as const,
+    };
+    const result = await applyHugoAccess(request);
+    const exactRetry = await applyHugoAccess(request);
+    const changedRetry = await applyHugoAccess({ ...request, role: "owner" });
 
     expect(result).toMatchObject({
       ok: false,
       error_code: "IDENTITY_PROVISION_FAILED",
+      request_hash: REQUEST_HASH,
+    });
+    expect(exactRetry).toEqual(result);
+    expect(changedRetry).toMatchObject({
+      ok: false,
+      error_code: "OPERATION_CONFLICT",
+      request_hash: REQUEST_HASH,
     });
     expect(result.error_message).not.toContain("33333333");
-    expect(mocks.rpc).toHaveBeenCalledOnce();
-    expect(mocks.rpc).toHaveBeenCalledWith(
+    expect(mocks.listUsers).toHaveBeenCalledOnce();
+    expect(mocks.rpc).toHaveBeenNthCalledWith(
+      1,
       "hugo_preflight_access_operation",
+      expect.any(Object),
+    );
+    expect(mocks.rpc).toHaveBeenNthCalledWith(
+      2,
+      "hugo_record_identity_provision_failure",
+      {
+        p_operation_id: OPERATION_ID,
+        p_email: "member@bmhgroupkc.com",
+        p_role: "member",
+        p_config: { timezone: "America/Chicago" },
+        p_status: "active",
+        p_access_expires_at: null,
+      },
+    );
+  });
+
+  it("lets the database reconcile an Auth create that committed after its response was lost", async () => {
+    const reconciled = receipt({
+      app_user_id: USER_ID,
+      ok: true,
+      error_code: null,
+      error_message: null,
+    });
+    mocks.rpc
+      .mockResolvedValueOnce({ data: preflight(), error: null })
+      .mockResolvedValueOnce({ data: reconciled, error: null });
+    mocks.listUsers
+      .mockResolvedValueOnce({ data: { users: [] }, error: null })
+      .mockRejectedValueOnce(new Error("Auth re-read response was lost"));
+    mocks.createUser.mockResolvedValueOnce({
+      data: { user: null },
+      error: { message: "Auth create response was lost" },
+    });
+
+    const result = await applyHugoAccess({
+      operationId: OPERATION_ID,
+      email: "member@bmhgroupkc.com",
+      role: "member",
+      config: { timezone: "America/Chicago" },
+      status: "active",
+    });
+
+    expect(result).toMatchObject({
+      ok: true,
+      app_user_id: USER_ID,
+      request_hash: REQUEST_HASH,
+    });
+    expect(mocks.listUsers).toHaveBeenCalledTimes(2);
+    expect(mocks.createUser).toHaveBeenCalledOnce();
+    expect(mocks.rpc).toHaveBeenNthCalledWith(
+      2,
+      "hugo_record_identity_provision_failure",
+      {
+        p_operation_id: OPERATION_ID,
+        p_email: "member@bmhgroupkc.com",
+        p_role: "member",
+        p_config: { timezone: "America/Chicago" },
+        p_status: "active",
+        p_access_expires_at: null,
+      },
+    );
+    expect(mocks.rpc).not.toHaveBeenCalledWith(
+      "hugo_apply_access",
       expect.any(Object),
     );
   });
@@ -498,6 +603,7 @@ describe("Sandra Hugo access provisioner", () => {
       p_operation_id: OPERATION_ID,
       p_email: "member@bmhgroupkc.com",
     });
+    expect(mocks.listUsers).not.toHaveBeenCalled();
     expect(mocks.deleteUser).not.toHaveBeenCalled();
   });
 

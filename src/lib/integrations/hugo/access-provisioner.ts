@@ -66,6 +66,17 @@ type RpcClient = {
     },
   ): Promise<{ data: unknown; error: { message: string; code?: string } | null }>;
   rpc(
+    fn: "hugo_record_identity_provision_failure",
+    args: {
+      p_operation_id: string;
+      p_email: string;
+      p_role: SandraHugoRole;
+      p_config: HugoConfig;
+      p_status: SandraHugoStatus;
+      p_access_expires_at: string | null;
+    },
+  ): Promise<{ data: unknown; error: { message: string; code?: string } | null }>;
+  rpc(
     fn: "hugo_inspect_access",
     args: { p_email: string },
   ): Promise<{ data: unknown; error: { message: string; code?: string } | null }>;
@@ -336,7 +347,12 @@ async function ensureLocalIdentity(email: string): Promise<AuthUser> {
 }
 
 async function callRpc(
-  fn: "hugo_apply_access" | "hugo_inspect_access" | "hugo_prepare_pristine_delete" | "hugo_delete_identity",
+  fn:
+    | "hugo_apply_access"
+    | "hugo_record_identity_provision_failure"
+    | "hugo_inspect_access"
+    | "hugo_prepare_pristine_delete"
+    | "hugo_delete_identity",
   args: Record<string, unknown>,
   fallback: Parameters<typeof failureReceipt>[0],
 ): Promise<ProvisionerReceipt> {
@@ -508,15 +524,41 @@ export async function applyHugoAccess(
     try {
       user = await ensureLocalIdentity(email);
     } catch {
-      return failureReceipt({
-        operationId,
-        role: input.role,
-        config,
-        status: input.status,
-        expiresAt,
-        code: "IDENTITY_PROVISION_FAILED",
-        message: "Sandra identity could not be provisioned.",
-      });
+      const receipt = await callRpc(
+        "hugo_record_identity_provision_failure",
+        {
+          p_operation_id: operationId,
+          p_email: email,
+          p_role: input.role,
+          p_config: config,
+          p_status: input.status,
+          p_access_expires_at: expiresAt,
+        },
+        {
+          operationId,
+          role: input.role,
+          config,
+          status: input.status,
+          expiresAt,
+          code: "PROVISIONER_RPC_FAILED",
+          message: "Sandra could not record the identity provisioning failure.",
+        },
+      );
+      if (
+        receipt.error_code !== "PROVISIONER_RPC_FAILED" &&
+        receipt.request_hash !== preflight.requestHash
+      ) {
+        return failureReceipt({
+          operationId,
+          role: input.role,
+          config,
+          status: input.status,
+          expiresAt,
+          code: "INVALID_RECEIPT",
+          message: "Sandra returned a receipt for a different request.",
+        });
+      }
+      return receipt;
     }
   }
 
@@ -639,21 +681,14 @@ export async function deleteHugoIdentity(input: {
   if (!validOperationId(operationId)) {
     return failureReceipt({ operationId, status: "revoked", code: "INVALID_OPERATION_ID", message: "Operation id must be a UUID." });
   }
-  let existing: AuthUser | null = null;
-  try {
-    existing = await findExactUser(createAdminClient() as unknown as AuthAdmin, email);
-  } catch {
-    return failureReceipt({ operationId, status: "revoked", code: "IDENTITY_LOOKUP_FAILED", message: "Sandra identity could not be inspected for deletion." });
-  }
   const receipt = await callRpc(
     "hugo_delete_identity",
     { p_operation_id: operationId, p_email: email },
-    { operationId, status: "revoked", appUserId: existing?.id ?? null, code: "PROVISIONER_RPC_FAILED", message: "Sandra could not delete the identity." },
+    { operationId, status: "revoked", code: "PROVISIONER_RPC_FAILED", message: "Sandra could not delete the identity." },
   );
-  // The service-role SQL connector owns the transaction, including the Auth
-  // row deletion. Do not issue a second client-side delete after a successful
-  // receipt: Auth would report a missing user and turn a completed operation
-  // into a false failure.
+  // SQL owns both the identity lookup and Auth deletion. Keeping all current
+  // state checks behind the receipt lookup makes a completed exact retry
+  // independent of the now-missing Auth row.
   return receipt;
 }
 
