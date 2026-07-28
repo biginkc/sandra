@@ -44,6 +44,17 @@ type HugoConfig = Record<string, unknown>;
 
 type RpcClient = {
   rpc(
+    fn: "hugo_preflight_access_operation",
+    args: {
+      p_operation_id: string;
+      p_email: string;
+      p_role: SandraHugoRole;
+      p_config: HugoConfig;
+      p_status: SandraHugoStatus;
+      p_access_expires_at: string | null;
+    },
+  ): Promise<{ data: unknown; error: { message: string; code?: string } | null }>;
+  rpc(
     fn: "hugo_apply_access",
     args: {
       p_operation_id: string;
@@ -96,8 +107,7 @@ type AuthAdmin = {
 const USER_PAGE_SIZE = 200;
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const SECRET_KEY_PATTERN =
-  /(?:secret|token|password|passwd|private[_-]?key|access[_-]?key|authorization|cookie)/i;
+const SANDRA_HUGO_CONFIG_KEYS = new Set(["cohort", "timezone"]);
 
 function rpcClient(): RpcClient {
   return createAdminClient() as unknown as RpcClient;
@@ -109,22 +119,17 @@ function normalizedEmail(email: string): string {
 
 function safeConfig(value: unknown): HugoConfig | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  const walk = (input: unknown): unknown => {
-    if (Array.isArray(input)) return input.map(walk);
-    if (!input || typeof input !== "object") return input;
-    const output: Record<string, unknown> = {};
-    for (const [key, child] of Object.entries(input)) {
-      if (SECRET_KEY_PATTERN.test(key)) return null;
-      const next = walk(child);
-      if (next === null && child !== null) return null;
-      output[key] = next;
+  const result: HugoConfig = {};
+  for (const [key, child] of Object.entries(value)) {
+    if (
+      !SANDRA_HUGO_CONFIG_KEYS.has(key) ||
+      (child !== null && typeof child !== "string")
+    ) {
+      return null;
     }
-    return output;
-  };
-  const result = walk(value);
-  return result && typeof result === "object" && !Array.isArray(result)
-    ? (result as HugoConfig)
-    : null;
+    result[key] = child;
+  }
+  return result;
 }
 
 function validOperationId(operationId: string): boolean {
@@ -167,6 +172,7 @@ function failureReceipt(input: {
 function parseReceipt(
   data: unknown,
   fallback: Parameters<typeof failureReceipt>[0],
+  requireRequestHash = false,
 ): ProvisionerReceipt {
   if (!data || typeof data !== "object" || Array.isArray(data)) {
     return failureReceipt({
@@ -191,12 +197,24 @@ function parseReceipt(
   }
   const requested = receipt.requested as ProvisionerReceipt["requested"];
   const observed = receipt.observed as ProvisionerReceipt["observed"];
+  const requestHash =
+    typeof receipt.request_hash === "string" &&
+    /^[0-9a-f]{64}$/i.test(receipt.request_hash)
+      ? receipt.request_hash.toLowerCase()
+      : undefined;
+  if (
+    requireRequestHash &&
+    (!requestHash || receipt.operation_id !== fallback.operationId)
+  ) {
+    return failureReceipt({
+      ...fallback,
+      code: "INVALID_RECEIPT",
+      message: "Sandra returned an unbound provisioner receipt.",
+    });
+  }
   return {
     ...(receipt as ProvisionerReceipt),
-    request_hash:
-      typeof receipt.request_hash === "string" && /^[0-9a-f]{64}$/i.test(receipt.request_hash)
-        ? receipt.request_hash.toLowerCase()
-        : undefined,
+    request_hash: requestHash,
     requested: {
       ...requested,
       config: safeConfig(requested.config) ?? {},
@@ -209,6 +227,68 @@ function parseReceipt(
       ? "Sandra provisioner rejected this request."
       : null,
   };
+}
+
+type PreflightResult =
+  | { proceed: true; requestHash: string }
+  | { proceed: false; receipt: ProvisionerReceipt };
+
+async function preflightAccessOperation(
+  args: {
+    operationId: string;
+    email: string;
+    role: SandraHugoRole;
+    config: HugoConfig;
+    status: SandraHugoStatus;
+    expiresAt: string | null;
+  },
+): Promise<PreflightResult> {
+  const fallback = {
+    operationId: args.operationId,
+    role: args.role,
+    config: args.config,
+    status: args.status,
+    expiresAt: args.expiresAt,
+    code: "OPERATION_PREFLIGHT_FAILED",
+    message: "Sandra could not reserve the requested access change.",
+  };
+  try {
+    const result = await rpcClient().rpc("hugo_preflight_access_operation", {
+      p_operation_id: args.operationId,
+      p_email: args.email,
+      p_role: args.role,
+      p_config: args.config,
+      p_status: args.status,
+      p_access_expires_at: args.expiresAt,
+    });
+    if (result.error || !result.data || typeof result.data !== "object") {
+      return { proceed: false, receipt: failureReceipt(fallback) };
+    }
+    const preflight = result.data as {
+      proceed?: unknown;
+      request_hash?: unknown;
+      receipt?: unknown;
+    };
+    if (
+      preflight.proceed === true &&
+      typeof preflight.request_hash === "string" &&
+      /^[0-9a-f]{64}$/i.test(preflight.request_hash)
+    ) {
+      return {
+        proceed: true,
+        requestHash: preflight.request_hash.toLowerCase(),
+      };
+    }
+    if (preflight.proceed === false && preflight.receipt) {
+      return {
+        proceed: false,
+        receipt: parseReceipt(preflight.receipt, fallback, true),
+      };
+    }
+    return { proceed: false, receipt: failureReceipt(fallback) };
+  } catch {
+    return { proceed: false, receipt: failureReceipt(fallback) };
+  }
 }
 
 async function findExactUser(
@@ -274,7 +354,7 @@ async function callRpc(
         message: "Sandra could not apply the requested access change.",
       });
     }
-    return parseReceipt(result.data, fallback);
+    return parseReceipt(result.data, fallback, fn !== "hugo_inspect_access");
   } catch {
     return failureReceipt({
       ...fallback,
@@ -413,6 +493,16 @@ export async function applyHugoAccess(
     });
   }
 
+  const preflight = await preflightAccessOperation({
+    operationId,
+    email,
+    role: input.role,
+    config,
+    status: input.status,
+    expiresAt,
+  });
+  if (!preflight.proceed) return preflight.receipt;
+
   let user: AuthUser | null = null;
   if (input.status === "active") {
     try {
@@ -430,7 +520,7 @@ export async function applyHugoAccess(
     }
   }
 
-  return callRpc(
+  const receipt = await callRpc(
     "hugo_apply_access",
     {
       p_operation_id: operationId,
@@ -442,6 +532,22 @@ export async function applyHugoAccess(
     },
     { operationId, role: input.role, config, status: input.status, expiresAt, appUserId: user?.id ?? null, code: "PROVISIONER_RPC_FAILED", message: "Sandra could not apply the requested access change." },
   );
+  if (
+    receipt.error_code !== "PROVISIONER_RPC_FAILED" &&
+    receipt.request_hash !== preflight.requestHash
+  ) {
+    return failureReceipt({
+      operationId,
+      role: input.role,
+      config,
+      status: input.status,
+      expiresAt,
+      appUserId: user?.id ?? null,
+      code: "INVALID_RECEIPT",
+      message: "Sandra returned a receipt for a different request.",
+    });
+  }
+  return receipt;
 }
 
 export async function inspectHugoAccess(email: string): Promise<ProvisionerReceipt> {

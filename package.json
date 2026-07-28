@@ -17,6 +17,7 @@
     "test:e2e": "playwright test",
     "test:e2e:prod-canary": "playwright test --config playwright.canary.config.ts",
     "test:e2e:properties-filter": "playwright test --config playwright.properties-filter.config.ts",
+    "verify:hugo-sql": "node scripts/verify-hugo-access-migrations.mjs",
     "typecheck": "tsc --noEmit",
     "verify": "npm run typecheck && npm run test && npm run test:rtl",
     "filters:characterize:pass1": "tsx scripts/properties-filter-characterization.ts",

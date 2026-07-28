@@ -31,6 +31,13 @@ const forwardHashMigration = readFileSync(
   ),
   "utf8",
 );
+const authorizationHardeningMigration = readFileSync(
+  resolve(
+    process.cwd(),
+    "supabase/migrations/20260728150000_hugo_access_authorization_hardening.sql",
+  ),
+  "utf8",
+);
 
 describe("Hugo/Sandra SQL connector contract", () => {
   it("keeps the frozen PostgREST RPC names and argument order", () => {
@@ -132,6 +139,76 @@ describe("Hugo/Sandra SQL connector contract", () => {
     );
   });
 
+  it("ships a forward-only authorization repair for hosted environments", () => {
+    expect(authorizationHardeningMigration).toContain(
+      "create policy memberships_self_select",
+    );
+    for (const lifecyclePredicate of [
+      "access_status = 'active'",
+      "deletion_prepared_at is null",
+      "access_expires_at is null or access_expires_at > now()",
+    ]) {
+      expect(authorizationHardeningMigration).toContain(lifecyclePredicate);
+    }
+    expect(authorizationHardeningMigration).toContain(
+      "create trigger trg_hugo_membership_lifecycle_service_guard",
+    );
+    expect(authorizationHardeningMigration).toContain(
+      "create or replace function public.hugo_has_active_org_access(p_org_id uuid)",
+    );
+    for (const privateRpc of [
+      "delete_contact_hugo_unchecked",
+      "merge_duplicate_properties_hugo_unchecked",
+      "ensure_sms_conversation_id_hugo_unchecked",
+      "campaign_kpis_hugo_unchecked",
+      "preview_campaign_cadence_reschedule_hugo_unchecked",
+    ]) {
+      expect(authorizationHardeningMigration).toContain(privateRpc);
+    }
+  });
+
+  it("reserves operation ids before Auth provisioning and verifies the claim", () => {
+    expect(authorizationHardeningMigration).toContain(
+      "create table if not exists public.hugo_access_operation_claims",
+    );
+    expect(authorizationHardeningMigration).toContain(
+      "create or replace function public.hugo_preflight_access_operation(",
+    );
+    expect(authorizationHardeningMigration).toContain(
+      "'proceed', true, 'request_hash', v_hash",
+    );
+    expect(authorizationHardeningMigration).toContain(
+      "and v_claim_hash <> v_hash",
+    );
+    expect(authorizationHardeningMigration).toContain(
+      "set consumed_at = now()",
+    );
+    expect(authorizationHardeningMigration).toContain(
+      "hugo_apply_access_claimed_unchecked",
+    );
+  });
+
+  it("protects owner expiry and every pristine-delete proof", () => {
+    expect(authorizationHardeningMigration).toContain(
+      "or m.access_expires_at > v_required_until",
+    );
+    expect(authorizationHardeningMigration).toContain(
+      "public.hugo_has_prior_sign_in(v_user_id)",
+    );
+    expect(authorizationHardeningMigration).toContain(
+      "c.confrelid = 'auth.users'::regclass",
+    );
+    expect(authorizationHardeningMigration).toContain(
+      "op.operation = 'preparePristineDelete'",
+    );
+    expect(authorizationHardeningMigration).toContain(
+      "op.receipt->>'ok' = 'true'",
+    );
+    expect(authorizationHardeningMigration).toContain(
+      "PRISTINE_DELETE_REQUIRED",
+    );
+  });
+
   it("serializes owner checks with a shared lifecycle lock", () => {
     expect(migration).toContain(
       "hashtextextended('hugo-sandra-privileged-lifecycle-v1', 0)",
@@ -181,8 +258,9 @@ describe("Hugo/Sandra SQL connector contract", () => {
       hardDeleteMigration.indexOf("elsif v_membership.deletion_prepared_at is null"),
     );
     expect(missingMembershipBranch).toContain(
-      "v_activity := public.hugo_has_durable_activity(v_user_id);",
+      "v_activity := public.hugo_has_durable_activity(v_user_id)\n        or public.hugo_has_prior_sign_in(v_user_id);",
     );
+    expect(missingMembershipBranch).toContain("elsif not v_has_prepare then");
     expect(missingMembershipBranch).toContain("v_should_delete_auth := true;");
     expect(hardDeleteMigration.indexOf("delete from public.memberships")).toBeLessThan(
       hardDeleteMigration.indexOf("delete from auth.users"),

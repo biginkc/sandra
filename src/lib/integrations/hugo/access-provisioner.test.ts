@@ -51,6 +51,16 @@ function receipt(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function preflight(
+  overrides: Record<string, unknown> = {},
+) {
+  return {
+    proceed: true,
+    request_hash: REQUEST_HASH,
+    ...overrides,
+  };
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.createAdminClient.mockReturnValue({
@@ -72,7 +82,9 @@ beforeEach(() => {
 });
 describe("Sandra Hugo access provisioner", () => {
   it("creates the exact local identity and sends the frozen apply RPC shape", async () => {
-    mocks.rpc.mockResolvedValue({ data: receipt(), error: null });
+    mocks.rpc
+      .mockResolvedValueOnce({ data: preflight(), error: null })
+      .mockResolvedValueOnce({ data: receipt(), error: null });
 
     const result = await applyHugoAccess({
       operationId: OPERATION_ID,
@@ -91,7 +103,15 @@ describe("Sandra Hugo access provisioner", () => {
         app_metadata: { provisioning_origin: "hugo" },
       }),
     );
-    expect(mocks.rpc).toHaveBeenCalledWith("hugo_apply_access", {
+    expect(mocks.rpc).toHaveBeenNthCalledWith(1, "hugo_preflight_access_operation", {
+      p_operation_id: OPERATION_ID,
+      p_email: "member@bmhgroupkc.com",
+      p_role: "member",
+      p_config: { timezone: "America/Chicago" },
+      p_status: "active",
+      p_access_expires_at: null,
+    });
+    expect(mocks.rpc).toHaveBeenNthCalledWith(2, "hugo_apply_access", {
       p_operation_id: OPERATION_ID,
       p_email: "member@bmhgroupkc.com",
       p_role: "member",
@@ -115,6 +135,7 @@ describe("Sandra Hugo access provisioner", () => {
         }),
         error: null,
       })
+      .mockResolvedValueOnce({ data: preflight(), error: null })
       .mockResolvedValueOnce({ data: receipt({ ok: true }), error: null });
 
     const result = await suspendHugoAccess({
@@ -127,7 +148,15 @@ describe("Sandra Hugo access provisioner", () => {
     expect(mocks.rpc).toHaveBeenNthCalledWith(1, "hugo_inspect_access", {
       p_email: "owner@bmhgroupkc.com",
     });
-    expect(mocks.rpc).toHaveBeenNthCalledWith(2, "hugo_apply_access", {
+    expect(mocks.rpc).toHaveBeenNthCalledWith(2, "hugo_preflight_access_operation", {
+      p_operation_id: OPERATION_ID,
+      p_email: "owner@bmhgroupkc.com",
+      p_role: "owner",
+      p_config: { timezone: "America/Chicago" },
+      p_status: "suspended",
+      p_access_expires_at: null,
+    });
+    expect(mocks.rpc).toHaveBeenNthCalledWith(3, "hugo_apply_access", {
       p_operation_id: OPERATION_ID,
       p_email: "owner@bmhgroupkc.com",
       p_role: "owner",
@@ -138,15 +167,25 @@ describe("Sandra Hugo access provisioner", () => {
   });
 
   it("preserves an exact successful replay and surfaces a bounded hash conflict", async () => {
+    const successfulReplay = receipt({
+      requested: { role: "member", config: {}, status: "suspended", access_expires_at: null },
+    });
     mocks.rpc
-      .mockResolvedValueOnce({ data: receipt({ requested: { role: "member", config: {}, status: "suspended", access_expires_at: null } }), error: null })
-      .mockResolvedValueOnce({ data: receipt({ requested: { role: "member", config: {}, status: "suspended", access_expires_at: null } }), error: null })
+      .mockResolvedValueOnce({ data: preflight(), error: null })
+      .mockResolvedValueOnce({ data: successfulReplay, error: null })
       .mockResolvedValueOnce({
-        data: receipt({
-          requested: { role: "owner", config: {}, status: "suspended", access_expires_at: null },
-          ok: false,
-          error_code: "OPERATION_CONFLICT",
-          error_message: "Operation id was already used with a different request.",
+        data: preflight({ proceed: false, receipt: successfulReplay }),
+        error: null,
+      })
+      .mockResolvedValueOnce({
+        data: preflight({
+          proceed: false,
+          receipt: receipt({
+            requested: { role: "owner", config: {}, status: "suspended", access_expires_at: null },
+            ok: false,
+            error_code: "OPERATION_CONFLICT",
+            error_message: "Operation id was already used with a different request.",
+          }),
         }),
         error: null,
       });
@@ -180,14 +219,21 @@ describe("Sandra Hugo access provisioner", () => {
       error_message: "Sandra identity was not found for this email.",
     });
     mocks.rpc
-      .mockResolvedValueOnce({ data: failure, error: null })
+      .mockResolvedValueOnce({ data: preflight(), error: null })
       .mockResolvedValueOnce({ data: failure, error: null })
       .mockResolvedValueOnce({
-        data: receipt({
-          requested: { role: "member", config: { region: "other" }, status: "suspended", access_expires_at: null },
-          ok: false,
-          error_code: "OPERATION_CONFLICT",
-          error_message: "Operation id was already used with a different request.",
+        data: preflight({ proceed: false, receipt: failure }),
+        error: null,
+      })
+      .mockResolvedValueOnce({
+        data: preflight({
+          proceed: false,
+          receipt: receipt({
+            requested: { role: "member", config: { cohort: "other" }, status: "suspended", access_expires_at: null },
+            ok: false,
+            error_code: "OPERATION_CONFLICT",
+            error_message: "Operation id was already used with a different request.",
+          }),
         }),
         error: null,
       });
@@ -201,7 +247,7 @@ describe("Sandra Hugo access provisioner", () => {
     };
     const first = await applyHugoAccess(base);
     const exactReplay = await applyHugoAccess(base);
-    const mismatchedReplay = await applyHugoAccess({ ...base, config: { region: "other" } });
+    const mismatchedReplay = await applyHugoAccess({ ...base, config: { cohort: "other" } });
 
     expect(first).toMatchObject({ ok: false, error_code: "IDENTITY_NOT_FOUND", request_hash: REQUEST_HASH });
     expect(exactReplay).toEqual(first);
@@ -209,23 +255,26 @@ describe("Sandra Hugo access provisioner", () => {
     expect(mismatchedReplay.error_message).not.toContain("different request");
   });
 
-  it("rejects credential-shaped config before it reaches PostgREST", async () => {
-    const result = await applyHugoAccess({
-      operationId: OPERATION_ID,
-      email: "member@bmhgroupkc.com",
-      role: "member",
-      config: { api_token: "must-never-leave-this-process" },
-      status: "active",
-    });
+  it.each(["api_token", "apiKey", "api_key", "credential", "region"])(
+    "rejects non-contract config key %s before it reaches PostgREST",
+    async (key) => {
+      const result = await applyHugoAccess({
+        operationId: OPERATION_ID,
+        email: "member@bmhgroupkc.com",
+        role: "member",
+        config: { [key]: "must-never-leave-this-process" },
+        status: "active",
+      });
 
-    expect(result).toMatchObject({
-      ok: false,
-      error_code: "INVALID_CONFIG",
-      error_message: expect.not.stringContaining("must-never"),
-    });
-    expect(mocks.rpc).not.toHaveBeenCalled();
-    expect(mocks.createUser).not.toHaveBeenCalled();
-  });
+      expect(result).toMatchObject({
+        ok: false,
+        error_code: "INVALID_CONFIG",
+        error_message: expect.not.stringContaining("must-never"),
+      });
+      expect(mocks.rpc).not.toHaveBeenCalled();
+      expect(mocks.createUser).not.toHaveBeenCalled();
+    },
+  );
 
   it("rejects non-BMH domains before creating a local identity", async () => {
     const result = await applyHugoAccess({
@@ -244,6 +293,7 @@ describe("Sandra Hugo access provisioner", () => {
   });
 
   it("fails closed when Auth returns duplicate identities for an email", async () => {
+    mocks.rpc.mockResolvedValueOnce({ data: preflight(), error: null });
     mocks.listUsers.mockResolvedValue({
       data: {
         users: [
@@ -266,7 +316,83 @@ describe("Sandra Hugo access provisioner", () => {
       error_code: "IDENTITY_PROVISION_FAILED",
     });
     expect(result.error_message).not.toContain("33333333");
-    expect(mocks.rpc).not.toHaveBeenCalled();
+    expect(mocks.rpc).toHaveBeenCalledOnce();
+    expect(mocks.rpc).toHaveBeenCalledWith(
+      "hugo_preflight_access_operation",
+      expect.any(Object),
+    );
+  });
+
+  it("returns an operation conflict before creating a changed active identity", async () => {
+    mocks.rpc.mockResolvedValueOnce({
+      data: preflight({
+        proceed: false,
+        receipt: receipt({
+          ok: false,
+          error_code: "OPERATION_CONFLICT",
+          error_message: "Operation id was already used with a different request.",
+        }),
+      }),
+      error: null,
+    });
+
+    const result = await applyHugoAccess({
+      operationId: OPERATION_ID,
+      email: "changed@bmhgroupkc.com",
+      role: "member",
+      config: {},
+      status: "active",
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      error_code: "OPERATION_CONFLICT",
+      request_hash: REQUEST_HASH,
+    });
+    expect(mocks.createUser).not.toHaveBeenCalled();
+    expect(mocks.listUsers).not.toHaveBeenCalled();
+    expect(mocks.rpc).toHaveBeenCalledOnce();
+  });
+
+  it("fails closed when a mutating RPC returns a receipt without request binding", async () => {
+    const unbound = { ...receipt(), request_hash: undefined };
+    mocks.rpc
+      .mockResolvedValueOnce({ data: preflight(), error: null })
+      .mockResolvedValueOnce({ data: unbound, error: null });
+
+    const result = await suspendHugoAccess({
+      operationId: OPERATION_ID,
+      email: "member@bmhgroupkc.com",
+      role: "member",
+      config: {},
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      error_code: "INVALID_RECEIPT",
+    });
+  });
+
+  it("fails closed when apply returns a different request hash than preflight", async () => {
+    mocks.rpc
+      .mockResolvedValueOnce({ data: preflight(), error: null })
+      .mockResolvedValueOnce({
+        data: receipt({ request_hash: "b".repeat(64) }),
+        error: null,
+      });
+
+    const result = await applyHugoAccess({
+      operationId: OPERATION_ID,
+      email: "member@bmhgroupkc.com",
+      role: "member",
+      config: {},
+      status: "suspended",
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      error_code: "INVALID_RECEIPT",
+    });
   });
 
   it("surfaces inspect receipts without inventing local state", async () => {

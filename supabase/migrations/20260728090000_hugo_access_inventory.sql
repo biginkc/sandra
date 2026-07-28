@@ -11,35 +11,20 @@ begin;
 -- another service process as well: unsafe config is represented as {}.
 create or replace function public.hugo_config_is_safe(p_value jsonb)
 returns boolean
-language plpgsql
+language sql
 immutable
 set search_path = public, pg_temp
 as $$
-declare
-  v_pair record;
-  v_child jsonb;
-begin
-  if p_value is null then
-    return true;
-  end if;
-  if jsonb_typeof(p_value) = 'object' then
-    for v_pair in select * from jsonb_each(p_value) loop
-      if v_pair.key ~* '(secret|token|password|passwd|private[_-]?key|access[_-]?key|authorization|cookie)' then
-        return false;
-      end if;
-      if not public.hugo_config_is_safe(v_pair.value) then
-        return false;
-      end if;
-    end loop;
-  elsif jsonb_typeof(p_value) = 'array' then
-    for v_child in select value from jsonb_array_elements(p_value) loop
-      if not public.hugo_config_is_safe(v_child) then
-        return false;
-      end if;
-    end loop;
-  end if;
-  return true;
-end;
+  select coalesce(
+    jsonb_typeof(p_value) = 'object'
+    and not exists (
+      select 1
+      from jsonb_each(p_value) as entry(key, value)
+      where entry.key not in ('cohort', 'timezone')
+         or jsonb_typeof(entry.value) not in ('string', 'null')
+    ),
+    false
+  );
 $$;
 
 revoke all on function public.hugo_config_is_safe(jsonb) from public, anon, authenticated;

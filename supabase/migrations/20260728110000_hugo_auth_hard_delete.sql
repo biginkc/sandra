@@ -27,6 +27,7 @@ declare
   v_prior_hash text;
   v_receipt jsonb;
   v_activity boolean;
+  v_has_prepare boolean := false;
   v_should_delete_auth boolean := false;
   v_deleted_count integer := 0;
 begin
@@ -44,25 +45,47 @@ begin
     end if;
     return public.hugo_receipt_with_request_hash(v_prior, v_request_hash);
   end if;
+  if p_operation_id is null or v_email = '' then
+    v_receipt := public.hugo_receipt(p_operation_id, null, null, '{}'::jsonb, 'revoked', null, null, '{}'::jsonb, 'missing', null, false, false, 'INVALID_REQUEST', 'A valid operation and email are required.');
+    return public.hugo_receipt_with_request_hash(v_receipt, v_request_hash);
+  end if;
+  if v_email !~ '^[^@[:space:]]+@bmhgroupkc\.com$' then
+    v_receipt := public.hugo_receipt(p_operation_id, null, null, '{}'::jsonb, 'revoked', null, null, '{}'::jsonb, 'missing', null, false, false, 'INVALID_DOMAIN', 'Sandra access is limited to the BMH Group email domain.');
+    perform public.hugo_store_access_operation(p_operation_id, 'deleteIdentity', v_email, null, v_requested, v_request_hash, v_receipt);
+    return public.hugo_receipt_with_request_hash(v_receipt, v_request_hash);
+  end if;
   v_user_id := public.hugo_find_user_id(v_email);
   if v_user_id is null then
     v_receipt := public.hugo_receipt(p_operation_id, null, null, '{}'::jsonb, 'revoked', null, null, '{}'::jsonb, 'missing', null, false, true);
   else
+    select exists (
+      select 1
+      from public.hugo_access_operations op
+      where op.operation = 'preparePristineDelete'
+        and op.email = v_email
+        and op.app_user_id = v_user_id
+        and op.receipt->>'ok' = 'true'
+    ) into v_has_prepare;
     select * into v_membership from public.memberships
     where user_id = v_user_id and org_id = '00000000-0000-0000-0000-000000000bbb'::uuid
     for update;
     if not found then
-      v_activity := public.hugo_has_durable_activity(v_user_id);
+      v_activity := public.hugo_has_durable_activity(v_user_id)
+        or public.hugo_has_prior_sign_in(v_user_id);
       if v_activity then
         v_receipt := public.hugo_receipt(p_operation_id, v_user_id, null, '{}'::jsonb, 'revoked', null, null, '{}'::jsonb, 'missing', null, true, false, 'NON_PRISTINE', 'Sandra identity has durable business activity.');
+      elsif not v_has_prepare then
+        v_receipt := public.hugo_receipt(p_operation_id, v_user_id, null, '{}'::jsonb, 'revoked', null, null, '{}'::jsonb, 'missing', null, false, false, 'PRISTINE_DELETE_REQUIRED', 'Identity must be prepared for deletion first.');
       else
         v_should_delete_auth := true;
       end if;
     elsif v_membership.deletion_prepared_at is null then
-      v_activity := public.hugo_has_durable_activity(v_user_id);
+      v_activity := public.hugo_has_durable_activity(v_user_id)
+        or public.hugo_has_prior_sign_in(v_user_id);
       v_receipt := public.hugo_receipt(p_operation_id, v_user_id, v_membership.role, v_membership.hugo_config, 'revoked', v_membership.access_expires_at, v_membership.role, v_membership.hugo_config, v_membership.access_status, v_membership.access_expires_at, v_activity, false, 'PRISTINE_DELETE_REQUIRED', 'Identity must be prepared for deletion first.');
     else
-      v_activity := public.hugo_has_durable_activity(v_user_id);
+      v_activity := public.hugo_has_durable_activity(v_user_id)
+        or public.hugo_has_prior_sign_in(v_user_id);
       if v_activity then
         v_receipt := public.hugo_receipt(p_operation_id, v_user_id, v_membership.role, v_membership.hugo_config, 'revoked', v_membership.access_expires_at, v_membership.role, v_membership.hugo_config, v_membership.access_status, v_membership.access_expires_at, true, false, 'NON_PRISTINE', 'Sandra identity has durable business activity.');
       else

@@ -7,6 +7,21 @@
 
 begin;
 
+create schema if not exists extensions;
+do $$
+begin
+  if exists (
+    select 1
+    from pg_extension e
+    join pg_namespace n on n.oid = e.extnamespace
+    where e.extname = 'pgcrypto'
+      and n.nspname <> 'extensions'
+  ) then
+    alter extension pgcrypto set schema extensions;
+  end if;
+end;
+$$;
+
 alter table public.memberships
   add column if not exists access_status text not null default 'active',
   add column if not exists hugo_config jsonb not null default '{}'::jsonb,
@@ -68,7 +83,7 @@ immutable
 set search_path = public, pg_temp
 as $$
   select encode(
-    digest(
+    extensions.digest(
       convert_to(
         jsonb_build_object(
           'email', lower(trim(coalesce(p_email, ''))),
@@ -86,6 +101,26 @@ as $$
 $$;
 
 revoke all on function public.hugo_request_hash(text, text, jsonb, text, timestamptz) from public;
+
+create or replace function public.hugo_config_is_safe(p_value jsonb)
+returns boolean
+language sql
+immutable
+set search_path = public, pg_temp
+as $$
+  select coalesce(
+    jsonb_typeof(p_value) = 'object'
+    and not exists (
+      select 1
+      from jsonb_each(p_value) as entry(key, value)
+      where entry.key not in ('cohort', 'timezone')
+         or jsonb_typeof(entry.value) not in ('string', 'null')
+    ),
+    false
+  );
+$$;
+
+revoke all on function public.hugo_config_is_safe(jsonb) from public, anon, authenticated;
 
 -- Existing installations may already have successful receipts. Backfill their
 -- binding before making the new column mandatory, and keep the receipt itself
@@ -225,26 +260,96 @@ revoke all on function public.hugo_find_user_id(text) from public;
 
 create or replace function public.hugo_has_durable_activity(p_user_id uuid)
 returns boolean
-language sql
+language plpgsql
 security definer
 set search_path = public, pg_temp
 as $$
-  select exists (select 1 from public.csv_imports where user_id = p_user_id)
-      or exists (select 1 from public.jobs where created_by = p_user_id)
-      or exists (select 1 from public.property_merges where merged_by = p_user_id)
-      or exists (select 1 from public.notifications where user_id = p_user_id)
-      or exists (select 1 from public.lead_notes where author_user_id = p_user_id)
-      or exists (select 1 from public.lists where created_by = p_user_id)
-      or exists (select 1 from public.sms_templates where created_by = p_user_id)
-      or exists (select 1 from public.sequences where created_by = p_user_id)
-      or exists (select 1 from public.sequence_enrollments where enrolled_by_user_id = p_user_id)
-      or exists (select 1 from public.tasks where assignee_id = p_user_id or created_by = p_user_id)
-      or exists (select 1 from public.saved_filters where user_id = p_user_id)
-      or exists (select 1 from public.user_oauth_tokens where user_id = p_user_id)
-      or exists (select 1 from public.user_integration_prefs where user_id = p_user_id);
+declare
+  v_reference record;
+  v_exists boolean;
+begin
+  -- Treat every public foreign-key reference to auth.users as durable evidence.
+  -- This fails safely when a future migration adds another attributed table:
+  -- the deletion gate discovers it from the catalog without maintaining a
+  -- hand-written allowlist. The membership row is the connector-owned identity
+  -- link and is deliberately checked/deleted by the guarded workflow itself.
+  for v_reference in
+    select c.conrelid::regclass as relation_name, a.attname as column_name
+    from pg_constraint c
+    join pg_class rel on rel.oid = c.conrelid
+    join pg_namespace n on n.oid = rel.relnamespace
+    join pg_attribute a
+      on a.attrelid = c.conrelid
+     and a.attnum = c.conkey[1]
+    where c.contype = 'f'
+      and c.confrelid = 'auth.users'::regclass
+      and array_length(c.conkey, 1) = 1
+      and n.nspname = 'public'
+      and rel.relname <> 'memberships'
+  loop
+    execute format(
+      'select exists (select 1 from %s where %I = $1)',
+      v_reference.relation_name,
+      v_reference.column_name
+    )
+    into v_exists
+    using p_user_id;
+    if v_exists then
+      return true;
+    end if;
+  end loop;
+
+  -- Storage ownership is not consistently represented by a foreign key across
+  -- Supabase Storage versions, so inspect either supported ownership column.
+  if to_regclass('storage.objects') is not null then
+    if exists (
+      select 1 from pg_attribute
+      where attrelid = 'storage.objects'::regclass
+        and attname = 'owner_id'
+        and not attisdropped
+    ) then
+      execute 'select exists (select 1 from storage.objects where owner_id::text = $1::text)'
+        into v_exists
+        using p_user_id;
+      if v_exists then return true; end if;
+    end if;
+    if exists (
+      select 1 from pg_attribute
+      where attrelid = 'storage.objects'::regclass
+        and attname = 'owner'
+        and not attisdropped
+    ) then
+      execute 'select exists (select 1 from storage.objects where owner::text = $1::text)'
+        into v_exists
+        using p_user_id;
+      if v_exists then return true; end if;
+    end if;
+  end if;
+
+  return false;
+end;
 $$;
 
 revoke all on function public.hugo_has_durable_activity(uuid) from public;
+
+create or replace function public.hugo_has_prior_sign_in(p_user_id uuid)
+returns boolean
+language sql
+security definer
+set search_path = auth, pg_temp
+as $$
+  select coalesce(
+    (select u.last_sign_in_at is not null from auth.users u where u.id = p_user_id),
+    false
+  ) or exists (
+    select 1
+    from auth.identities i
+    where i.user_id = p_user_id
+      and i.last_sign_in_at is not null
+  );
+$$;
+
+revoke all on function public.hugo_has_prior_sign_in(uuid) from public;
 
 -- Keep the final-owner rule inside the database. The Hugo RPC checks it before
 -- changing a row, while this trigger also protects legacy admin actions or a
@@ -257,6 +362,7 @@ set search_path = public, pg_temp
 as $$
 declare
   v_other_owner boolean;
+  v_required_until timestamptz;
 begin
   -- Serialize every owner transition in this organization.  Locking only
   -- the target membership (or an operation id) lets two concurrent owner
@@ -266,18 +372,44 @@ begin
   if old.role = 'owner' then
     perform pg_advisory_xact_lock(hashtextextended('hugo-sandra-privileged-lifecycle-v1', 0));
   end if;
-  if old.role = 'owner'
-     and (
-       tg_op = 'DELETE'
-       or (tg_op = 'UPDATE' and (new.role <> 'owner' or new.access_status in ('suspended', 'revoked')))
-     ) then
+  if old.role = 'owner' and (
+    tg_op = 'DELETE'
+    or (
+      tg_op = 'UPDATE'
+      and (
+        new.role <> 'owner'
+        or new.access_status <> 'active'
+        or (
+          new.deletion_prepared_at is not null
+          and new.deletion_prepared_at is distinct from old.deletion_prepared_at
+        )
+        or (
+          new.access_expires_at is not null
+          and new.access_expires_at is distinct from old.access_expires_at
+        )
+      )
+    )
+  ) then
+    v_required_until := case
+      when tg_op = 'UPDATE'
+        and new.role = 'owner'
+        and new.access_status = 'active'
+        and new.deletion_prepared_at is null
+        and new.access_expires_at is not null
+        then greatest(new.access_expires_at, now())
+      else now()
+    end;
     select exists (
       select 1 from public.memberships m
       where m.org_id = old.org_id
         and m.user_id <> old.user_id
         and m.role = 'owner'
         and m.access_status = 'active'
-        and (m.access_expires_at is null or m.access_expires_at > now())
+        and m.deletion_prepared_at is null
+        and (
+          m.access_expires_at is null
+          or m.access_expires_at > v_required_until
+        )
     ) into v_other_owner;
     if not v_other_owner then
       raise exception 'FINAL_OWNER_GUARD' using errcode = 'P0001';
@@ -396,6 +528,25 @@ begin
     return public.hugo_receipt_with_request_hash(v_prior, v_request_hash);
   end if;
 
+  if not public.hugo_config_is_safe(coalesce(p_config, '{}'::jsonb)) then
+    v_requested := jsonb_build_object(
+      'role', p_role,
+      'config', '{}'::jsonb,
+      'status', p_status,
+      'access_expires_at', p_access_expires_at
+    );
+    v_request_hash := public.hugo_request_hash(
+      v_email,
+      p_role,
+      '{}'::jsonb,
+      p_status,
+      p_access_expires_at
+    );
+    v_receipt := public.hugo_receipt(p_operation_id, null, p_role, '{}'::jsonb, p_status, p_access_expires_at, null, '{}'::jsonb, 'missing', null, false, false, 'INVALID_CONFIG', 'Sandra access configuration is invalid.');
+    perform public.hugo_store_access_operation(p_operation_id, 'grant', v_email, null, v_requested, v_request_hash, v_receipt);
+    return public.hugo_receipt_with_request_hash(v_receipt, v_request_hash);
+  end if;
+
   if p_operation_id is null or v_email = '' then
     v_receipt := public.hugo_receipt(p_operation_id, null, p_role, p_config, p_status, p_access_expires_at, null, '{}'::jsonb, 'missing', null, false, false, 'INVALID_REQUEST', 'A valid operation and email are required.');
     perform public.hugo_store_access_operation(p_operation_id, 'grant', v_email, null, v_requested, v_request_hash, v_receipt);
@@ -416,7 +567,6 @@ begin
     perform public.hugo_store_access_operation(p_operation_id, 'grant', v_email, null, v_requested, v_request_hash, v_receipt);
     return public.hugo_receipt_with_request_hash(v_receipt, v_request_hash);
   end if;
-
   v_user_id := public.hugo_find_user_id(v_email);
   if v_user_id is null then
     v_receipt := public.hugo_receipt(p_operation_id, null, p_role, p_config, p_status, p_access_expires_at, null, '{}'::jsonb, 'missing', null, false, false, 'IDENTITY_NOT_FOUND', 'Sandra identity was not found for this email.');
@@ -451,6 +601,31 @@ begin
       v_receipt := public.hugo_receipt(p_operation_id, v_user_id, p_role, p_config, p_status, p_access_expires_at, v_membership.role, v_membership.hugo_config, v_membership.access_status, v_membership.access_expires_at, v_activity, true);
     elsif v_membership.access_status = 'revoked' and p_status = 'active' then
       v_receipt := public.hugo_receipt(p_operation_id, v_user_id, p_role, p_config, p_status, p_access_expires_at, v_membership.role, v_membership.hugo_config, 'revoked', v_membership.access_expires_at, v_activity, false, 'REVOKED_NOT_REACTIVATABLE', 'A revoked Sandra grant cannot be reactivated.');
+    elsif v_membership.role = 'owner'
+      and p_role = 'owner'
+      and p_status = 'active'
+      and p_access_expires_at is not null
+      and p_access_expires_at is distinct from v_membership.access_expires_at then
+      select exists (
+        select 1 from public.memberships m
+        where m.org_id = v_membership.org_id
+          and m.role = 'owner'
+          and m.user_id <> v_user_id
+          and m.access_status = 'active'
+          and m.deletion_prepared_at is null
+          and (
+            m.access_expires_at is null
+            or m.access_expires_at > greatest(p_access_expires_at, now())
+          )
+      ) into v_other_owner;
+      if not v_other_owner then
+        v_receipt := public.hugo_receipt(p_operation_id, v_user_id, p_role, p_config, p_status, p_access_expires_at, v_membership.role, v_membership.hugo_config, v_membership.access_status, v_membership.access_expires_at, v_activity, false, 'FINAL_OWNER_GUARD', 'Sandra must retain at least one active owner.');
+      else
+        update public.memberships
+        set hugo_config = coalesce(p_config, '{}'::jsonb), access_expires_at = p_access_expires_at
+        where user_id = v_user_id and org_id = v_membership.org_id;
+        v_receipt := public.hugo_receipt(p_operation_id, v_user_id, p_role, p_config, p_status, p_access_expires_at, v_membership.role, coalesce(p_config, '{}'::jsonb), p_status, p_access_expires_at, v_activity, true);
+      end if;
     elsif v_membership.role = 'owner' and p_role = 'member' then
       select exists (
         select 1 from public.memberships m
@@ -458,6 +633,7 @@ begin
           and m.role = 'owner'
           and m.user_id <> v_user_id
           and m.access_status = 'active'
+          and m.deletion_prepared_at is null
           and (m.access_expires_at is null or m.access_expires_at > now())
       ) into v_other_owner;
       if not v_other_owner then
@@ -475,6 +651,7 @@ begin
           and m.role = 'owner'
           and m.user_id <> v_user_id
           and m.access_status = 'active'
+          and m.deletion_prepared_at is null
           and (m.access_expires_at is null or m.access_expires_at > now())
       ) into v_other_owner;
       if not v_other_owner then
@@ -583,6 +760,15 @@ begin
     end if;
     return public.hugo_receipt_with_request_hash(v_prior, v_request_hash);
   end if;
+  if p_operation_id is null or v_email = '' then
+    v_receipt := public.hugo_receipt(p_operation_id, null, null, '{}'::jsonb, 'revoked', null, null, '{}'::jsonb, 'missing', null, false, false, 'INVALID_REQUEST', 'A valid operation and email are required.');
+    return public.hugo_receipt_with_request_hash(v_receipt, v_request_hash);
+  end if;
+  if v_email !~ '^[^@[:space:]]+@bmhgroupkc\.com$' then
+    v_receipt := public.hugo_receipt(p_operation_id, null, null, '{}'::jsonb, 'revoked', null, null, '{}'::jsonb, 'missing', null, false, false, 'INVALID_DOMAIN', 'Sandra access is limited to the BMH Group email domain.');
+    perform public.hugo_store_access_operation(p_operation_id, 'preparePristineDelete', v_email, null, v_requested, v_request_hash, v_receipt);
+    return public.hugo_receipt_with_request_hash(v_receipt, v_request_hash);
+  end if;
   v_user_id := public.hugo_find_user_id(v_email);
   if v_user_id is null then
     v_receipt := public.hugo_receipt(p_operation_id, null, null, '{}'::jsonb, 'revoked', null, null, '{}'::jsonb, 'missing', null, false, true);
@@ -593,11 +779,14 @@ begin
     if not found then
       v_receipt := public.hugo_receipt(p_operation_id, v_user_id, null, '{}'::jsonb, 'revoked', null, null, '{}'::jsonb, 'missing', null, false, true);
     else
-      v_activity := public.hugo_has_durable_activity(v_user_id);
+      v_activity := public.hugo_has_durable_activity(v_user_id)
+        or public.hugo_has_prior_sign_in(v_user_id);
       select exists (
         select 1 from public.memberships m
         where m.org_id = v_membership.org_id and m.role = 'owner' and m.user_id <> v_user_id
-          and m.access_status = 'active' and (m.access_expires_at is null or m.access_expires_at > now())
+          and m.access_status = 'active'
+          and m.deletion_prepared_at is null
+          and (m.access_expires_at is null or m.access_expires_at > now())
       ) into v_other_owner;
       if v_activity then
         v_receipt := public.hugo_receipt(p_operation_id, v_user_id, v_membership.role, v_membership.hugo_config, 'revoked', v_membership.access_expires_at, v_membership.role, v_membership.hugo_config, v_membership.access_status, v_membership.access_expires_at, true, false, 'NON_PRISTINE', 'Sandra identity has durable business activity.');
@@ -675,10 +864,12 @@ begin
     if not found then
       v_receipt := public.hugo_receipt(p_operation_id, v_user_id, null, '{}'::jsonb, 'revoked', null, null, '{}'::jsonb, 'missing', null, false, true);
     elsif v_membership.deletion_prepared_at is null then
-      v_activity := public.hugo_has_durable_activity(v_user_id);
+      v_activity := public.hugo_has_durable_activity(v_user_id)
+        or public.hugo_has_prior_sign_in(v_user_id);
       v_receipt := public.hugo_receipt(p_operation_id, v_user_id, v_membership.role, v_membership.hugo_config, 'revoked', v_membership.access_expires_at, v_membership.role, v_membership.hugo_config, v_membership.access_status, v_membership.access_expires_at, v_activity, false, 'PRISTINE_DELETE_REQUIRED', 'Identity must be prepared for deletion first.');
     else
-      v_activity := public.hugo_has_durable_activity(v_user_id);
+      v_activity := public.hugo_has_durable_activity(v_user_id)
+        or public.hugo_has_prior_sign_in(v_user_id);
       if v_activity then
         v_receipt := public.hugo_receipt(p_operation_id, v_user_id, v_membership.role, v_membership.hugo_config, 'revoked', v_membership.access_expires_at, v_membership.role, v_membership.hugo_config, v_membership.access_status, v_membership.access_expires_at, true, false, 'NON_PRISTINE', 'Sandra identity has durable business activity.');
       else

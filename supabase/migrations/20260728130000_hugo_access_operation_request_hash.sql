@@ -6,6 +6,21 @@
 
 begin;
 
+create schema if not exists extensions;
+do $$
+begin
+  if exists (
+    select 1
+    from pg_extension e
+    join pg_namespace n on n.oid = e.extnamespace
+    where e.extname = 'pgcrypto'
+      and n.nspname <> 'extensions'
+  ) then
+    alter extension pgcrypto set schema extensions;
+  end if;
+end;
+$$;
+
 alter table public.hugo_access_operations
   add column if not exists request_hash text;
 
@@ -14,35 +29,20 @@ comment on column public.hugo_access_operations.request_hash is
 
 create or replace function public.hugo_sandra_config_is_safe(p_value jsonb)
 returns boolean
-language plpgsql
+language sql
 immutable
 set search_path = public, pg_temp
 as $$
-declare
-  v_pair record;
-  v_child jsonb;
-begin
-  if p_value is null then
-    return true;
-  end if;
-  if jsonb_typeof(p_value) = 'object' then
-    for v_pair in select * from jsonb_each(p_value) loop
-      if v_pair.key ~* '(secret|token|password|passwd|private[_-]?key|access[_-]?key|authorization|cookie)' then
-        return false;
-      end if;
-      if not public.hugo_sandra_config_is_safe(v_pair.value) then
-        return false;
-      end if;
-    end loop;
-  elsif jsonb_typeof(p_value) = 'array' then
-    for v_child in select value from jsonb_array_elements(p_value) loop
-      if not public.hugo_sandra_config_is_safe(v_child) then
-        return false;
-      end if;
-    end loop;
-  end if;
-  return true;
-end;
+  select coalesce(
+    jsonb_typeof(p_value) = 'object'
+    and not exists (
+      select 1
+      from jsonb_each(p_value) as entry(key, value)
+      where entry.key not in ('cohort', 'timezone')
+         or jsonb_typeof(entry.value) not in ('string', 'null')
+    ),
+    false
+  );
 $$;
 
 revoke all on function public.hugo_sandra_config_is_safe(jsonb) from public, anon, authenticated;
@@ -300,6 +300,46 @@ begin
         p_operation_id, p_role, p_status, p_access_expires_at, v_hash
       );
     end if;
+  end if;
+
+  if not public.hugo_sandra_config_is_safe(coalesce(p_config, '{}'::jsonb)) then
+    v_receipt := public.hugo_sandra_receipt_with_request_hash(
+      public.hugo_receipt(
+        p_operation_id,
+        null,
+        p_role,
+        '{}'::jsonb,
+        p_status,
+        p_access_expires_at,
+        null,
+        '{}'::jsonb,
+        'missing',
+        null,
+        false,
+        false,
+        'INVALID_CONFIG',
+        'Sandra access configuration is invalid.'
+      ),
+      v_hash
+    );
+    if p_operation_id is not null then
+      insert into public.hugo_access_operations(
+        operation_id, operation, email, app_user_id, requested, receipt
+      ) values (
+        p_operation_id,
+        'grant',
+        v_email,
+        null,
+        jsonb_build_object(
+          'role', p_role,
+          'config', '{}'::jsonb,
+          'status', p_status,
+          'access_expires_at', p_access_expires_at
+        ),
+        v_receipt
+      );
+    end if;
+    return v_receipt;
   end if;
 
   v_receipt := public.hugo_apply_access_unhashed(
