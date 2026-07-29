@@ -256,8 +256,24 @@ describe("Sandra Hugo access provisioner", () => {
   });
 
   it.each(["api_token", "apiKey", "api_key", "credential", "region"])(
-    "rejects non-contract config key %s before it reaches PostgREST",
+    "hash-binds non-contract config key %s before any Auth mutation",
     async (key) => {
+      const invalid = receipt({
+        app_user_id: null,
+        requested: {
+          role: "member",
+          config: {},
+          status: "active",
+          access_expires_at: null,
+        },
+        ok: false,
+        error_code: "INVALID_CONFIG",
+        error_message: "Sandra access configuration is invalid.",
+      });
+      mocks.rpc.mockResolvedValueOnce({
+        data: preflight({ proceed: false, receipt: invalid }),
+        error: null,
+      });
       const result = await applyHugoAccess({
         operationId: OPERATION_ID,
         email: "member@bmhgroupkc.com",
@@ -271,12 +287,38 @@ describe("Sandra Hugo access provisioner", () => {
         error_code: "INVALID_CONFIG",
         error_message: expect.not.stringContaining("must-never"),
       });
-      expect(mocks.rpc).not.toHaveBeenCalled();
+      expect(mocks.rpc).toHaveBeenCalledWith(
+        "hugo_preflight_access_operation",
+        {
+          p_operation_id: OPERATION_ID,
+          p_email: "member@bmhgroupkc.com",
+          p_role: "member",
+          p_config: { [key]: "must-never-leave-this-process" },
+          p_status: "active",
+          p_access_expires_at: null,
+        },
+      );
       expect(mocks.createUser).not.toHaveBeenCalled();
     },
   );
 
   it("rejects non-BMH domains before creating a local identity", async () => {
+    const invalid = receipt({
+      app_user_id: null,
+      requested: {
+        role: "member",
+        config: {},
+        status: "active",
+        access_expires_at: null,
+      },
+      ok: false,
+      error_code: "INVALID_DOMAIN",
+      error_message: "Sandra access is limited to the BMH Group email domain.",
+    });
+    mocks.rpc.mockResolvedValueOnce({
+      data: preflight({ proceed: false, receipt: invalid }),
+      error: null,
+    });
     const result = await applyHugoAccess({
       operationId: OPERATION_ID,
       email: "outsider@example.com",
@@ -289,7 +331,159 @@ describe("Sandra Hugo access provisioner", () => {
       error_code: "INVALID_DOMAIN",
     });
     expect(mocks.createUser).not.toHaveBeenCalled();
-    expect(mocks.rpc).not.toHaveBeenCalled();
+    expect(mocks.rpc).toHaveBeenCalledWith(
+      "hugo_preflight_access_operation",
+      {
+        p_operation_id: OPERATION_ID,
+        p_email: "outsider@example.com",
+        p_role: "member",
+        p_config: {},
+        p_status: "active",
+        p_access_expires_at: null,
+      },
+    );
+  });
+
+  it.each([
+    {
+      name: "malformed email",
+      email: "not-an-email",
+      role: "member",
+      errorCode: "INVALID_EMAIL",
+      safeRole: "member",
+    },
+    {
+      name: "unknown role",
+      email: "member@bmhgroupkc.com",
+      role: "superadmin",
+      errorCode: "INVALID_ROLE",
+      safeRole: null,
+    },
+  ])("hash-binds $name without retaining the invalid role", async ({
+    email,
+    role,
+    errorCode,
+    safeRole,
+  }) => {
+    const invalid = receipt({
+      app_user_id: null,
+      requested: {
+        role: safeRole,
+        config: {},
+        status: "active",
+        access_expires_at: null,
+      },
+      ok: false,
+      error_code: errorCode,
+      error_message: "Sandra rejected the invalid access request.",
+    });
+    mocks.rpc.mockResolvedValueOnce({
+      data: preflight({ proceed: false, receipt: invalid }),
+      error: null,
+    });
+
+    const result = await applyHugoAccess({
+      operationId: OPERATION_ID,
+      email,
+      role: role as "member",
+      status: "active",
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      error_code: errorCode,
+      requested: { role: safeRole },
+    });
+    expect(JSON.stringify(result)).not.toContain("superadmin");
+    expect(mocks.rpc).toHaveBeenCalledWith(
+      "hugo_preflight_access_operation",
+      {
+        p_operation_id: OPERATION_ID,
+        p_email: email,
+        p_role: role,
+        p_config: {},
+        p_status: "active",
+        p_access_expires_at: null,
+      },
+    );
+    expect(mocks.createUser).not.toHaveBeenCalled();
+  });
+
+  it("replays an exact invalid request and blocks changed reuse without creating Auth users", async () => {
+    const invalid = receipt({
+      app_user_id: null,
+      requested: {
+        role: "member",
+        config: {},
+        status: "active",
+        access_expires_at: null,
+      },
+      ok: false,
+      error_code: "INVALID_CONFIG",
+      error_message: "Sandra access configuration is invalid.",
+    });
+    const conflict = receipt({
+      app_user_id: null,
+      requested: {
+        role: "member",
+        config: {},
+        status: "active",
+        access_expires_at: null,
+      },
+      ok: false,
+      error_code: "OPERATION_CONFLICT",
+      error_message: "Operation id was already used with a different request.",
+    });
+    mocks.rpc
+      .mockResolvedValueOnce({
+        data: preflight({ proceed: false, receipt: invalid }),
+        error: null,
+      })
+      .mockResolvedValueOnce({
+        data: preflight({ proceed: false, receipt: invalid }),
+        error: null,
+      })
+      .mockResolvedValueOnce({
+        data: preflight({ proceed: false, receipt: conflict }),
+        error: null,
+      });
+
+    const base = {
+      operationId: OPERATION_ID,
+      email: "member@bmhgroupkc.com",
+      role: "member" as const,
+      config: { api_token: "first-secret" },
+      status: "active" as const,
+    };
+    const first = await applyHugoAccess(base);
+    const exact = await applyHugoAccess(base);
+    const changed = await applyHugoAccess({
+      ...base,
+      config: { api_token: "second-secret" },
+    });
+
+    expect(first).toMatchObject({
+      ok: false,
+      error_code: "INVALID_CONFIG",
+      request_hash: REQUEST_HASH,
+      requested: { config: {} },
+    });
+    expect(exact).toEqual(first);
+    expect(changed).toMatchObject({
+      ok: false,
+      error_code: "OPERATION_CONFLICT",
+      request_hash: REQUEST_HASH,
+      requested: { config: {} },
+    });
+    expect(JSON.stringify([first, exact, changed])).not.toContain(
+      "first-secret",
+    );
+    expect(JSON.stringify([first, exact, changed])).not.toContain(
+      "second-secret",
+    );
+    expect(mocks.createUser).not.toHaveBeenCalled();
+    expect(mocks.listUsers).not.toHaveBeenCalled();
+    expect(mocks.rpc).toHaveBeenCalledTimes(3);
   });
 
   it("durably records an Auth identity failure and binds its exact and changed retries", async () => {

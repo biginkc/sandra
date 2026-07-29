@@ -571,7 +571,175 @@ try {
     do $$
     declare
       v jsonb;
+      v_invalid jsonb;
     begin
+      v_invalid := public.hugo_preflight_access_operation(
+        '10000000-0000-4000-8000-000000000001',
+        'outsider@example.com',
+        'member',
+        '{"api_token":"must-never-persist"}'::jsonb,
+        'active',
+        null
+      );
+      assert v_invalid->>'proceed' = 'false';
+      assert v_invalid->'receipt'->>'error_code' = 'INVALID_DOMAIN';
+      v := public.hugo_preflight_access_operation(
+        '10000000-0000-4000-8000-000000000001',
+        'outsider@example.com',
+        'member',
+        '{"api_token":"must-never-persist"}'::jsonb,
+        'active',
+        null
+      );
+      assert v = v_invalid,
+        'exact invalid-domain retry did not replay its receipt';
+      v := public.hugo_preflight_access_operation(
+        '10000000-0000-4000-8000-000000000001',
+        'member@bmhgroupkc.com',
+        'member',
+        '{}'::jsonb,
+        'active',
+        null
+      );
+      assert v->'receipt'->>'error_code' = 'OPERATION_CONFLICT',
+        'changed valid request reused an invalid-domain operation id';
+
+      v_invalid := public.hugo_preflight_access_operation(
+        '10000000-0000-4000-8000-000000000002',
+        'member@bmhgroupkc.com',
+        'member',
+        '{"api_token":"first-secret"}'::jsonb,
+        'active',
+        null
+      );
+      assert v_invalid->'receipt'->>'error_code' = 'INVALID_CONFIG';
+      v := public.hugo_preflight_access_operation(
+        '10000000-0000-4000-8000-000000000002',
+        'member@bmhgroupkc.com',
+        'member',
+        '{"api_token":"first-secret"}'::jsonb,
+        'active',
+        null
+      );
+      assert v = v_invalid,
+        'exact invalid-config retry did not replay its receipt';
+      v := public.hugo_preflight_access_operation(
+        '10000000-0000-4000-8000-000000000002',
+        'member@bmhgroupkc.com',
+        'member',
+        '{"api_token":"second-secret"}'::jsonb,
+        'active',
+        null
+      );
+      assert v->'receipt'->>'error_code' = 'OPERATION_CONFLICT',
+        'distinct invalid configs collapsed to one request hash';
+
+      v_invalid := public.hugo_preflight_access_operation(
+        '10000000-0000-4000-8000-000000000003',
+        'not-an-email',
+        'member',
+        '{}'::jsonb,
+        'active',
+        null
+      );
+      assert v_invalid->'receipt'->>'error_code' = 'INVALID_EMAIL';
+      v := public.hugo_preflight_access_operation(
+        '10000000-0000-4000-8000-000000000003',
+        'not-an-email',
+        'member',
+        '{}'::jsonb,
+        'active',
+        null
+      );
+      assert v = v_invalid,
+        'exact invalid-email retry did not replay its receipt';
+      v := public.hugo_preflight_access_operation(
+        '10000000-0000-4000-8000-000000000003',
+        'member@bmhgroupkc.com',
+        'member',
+        '{}'::jsonb,
+        'active',
+        null
+      );
+      assert v->'receipt'->>'error_code' = 'OPERATION_CONFLICT',
+        'changed valid request reused an invalid-email operation id';
+
+      v_invalid := public.hugo_preflight_access_operation(
+        '10000000-0000-4000-8000-000000000004',
+        'member@bmhgroupkc.com',
+        'superadmin',
+        '{}'::jsonb,
+        'active',
+        null
+      );
+      assert v_invalid->'receipt'->>'error_code' = 'INVALID_ROLE';
+      v := public.hugo_preflight_access_operation(
+        '10000000-0000-4000-8000-000000000004',
+        'member@bmhgroupkc.com',
+        'superadmin',
+        '{}'::jsonb,
+        'active',
+        null
+      );
+      assert v = v_invalid,
+        'exact invalid-role retry did not replay its receipt';
+      v := public.hugo_preflight_access_operation(
+        '10000000-0000-4000-8000-000000000004',
+        'member@bmhgroupkc.com',
+        'member',
+        '{}'::jsonb,
+        'active',
+        null
+      );
+      assert v->'receipt'->>'error_code' = 'OPERATION_CONFLICT',
+        'changed valid request reused an invalid-role operation id';
+
+      assert not exists (
+        select 1
+        from public.hugo_access_operations op
+        where op.operation_id in (
+          '10000000-0000-4000-8000-000000000001'::uuid,
+          '10000000-0000-4000-8000-000000000002'::uuid,
+          '10000000-0000-4000-8000-000000000003'::uuid,
+          '10000000-0000-4000-8000-000000000004'::uuid
+        )
+          and (
+            lower(op.email) = 'outsider@example.com'
+            or position('outsider@example.com' in op.requested::text) > 0
+            or position('outsider@example.com' in op.receipt::text) > 0
+            or position('not-an-email' in op.requested::text) > 0
+            or position('not-an-email' in op.receipt::text) > 0
+            or position('superadmin' in op.requested::text) > 0
+            or position('superadmin' in op.receipt::text) > 0
+            or position('first-secret' in op.requested::text) > 0
+            or position('first-secret' in op.receipt::text) > 0
+            or position('must-never-persist' in op.requested::text) > 0
+            or position('must-never-persist' in op.receipt::text) > 0
+          )
+      ), 'invalid request journal retained raw email or secret';
+      assert (
+        select count(*)
+        from public.hugo_access_operations op
+        where op.operation_id in (
+          '10000000-0000-4000-8000-000000000001'::uuid,
+          '10000000-0000-4000-8000-000000000002'::uuid,
+          '10000000-0000-4000-8000-000000000003'::uuid,
+          '10000000-0000-4000-8000-000000000004'::uuid
+        )
+          and op.request_hash ~ '^[0-9a-f]{64}$'
+          and op.receipt->>'request_hash' = op.request_hash
+      ) = 4, 'invalid request receipts were not hash-bound';
+      assert not exists (
+        select 1
+        from public.hugo_access_operation_claims claim
+        where claim.operation_id in (
+          '10000000-0000-4000-8000-000000000001'::uuid,
+          '10000000-0000-4000-8000-000000000002'::uuid,
+          '10000000-0000-4000-8000-000000000003'::uuid,
+          '10000000-0000-4000-8000-000000000004'::uuid
+        )
+      ), 'invalid request created a raw preflight claim';
+
       v := public.hugo_preflight_access_operation(
         '20000000-0000-4000-8000-000000000001',
         'owner.one@bmhgroupkc.com',
@@ -1688,11 +1856,21 @@ try {
           'authenticated',
           'public.hugo_record_identity_provision_failure(uuid,text,text,jsonb,text,timestamptz)',
           'EXECUTE'
+        ) || '|' ||
+        has_table_privilege(
+          'service_role',
+          'public.hugo_access_operations',
+          'INSERT'
+        ) || '|' ||
+        has_table_privilege(
+          'service_role',
+          'public.hugo_access_operation_claims',
+          'INSERT'
         );
     `,
     { capture: true, extraArgs: ["-Atq"] },
   ).trim();
-  if (privileges !== "true|false|false|true|false") {
+  if (privileges !== "true|false|false|true|false|false|false") {
     throw new Error(`Unexpected Hugo connector grants: ${privileges}`);
   }
 
@@ -1708,6 +1886,8 @@ try {
     forwardReplay: 2,
     assertions: {
       hostedSnapshotHash: lane === "hosted-snapshot-forward" ? "pass" : "n/a",
+      invalidReceiptBinding: "pass",
+      invalidRequestRedaction: "pass",
       preflightConflictBeforeAuth: "pass",
       applyRequiresPreflight: "pass",
       receiptBinding: "pass",

@@ -139,6 +139,30 @@ describe("Hugo/Sandra SQL connector contract", () => {
     );
   });
 
+  it("hash-binds invalid requests without retaining their raw values", () => {
+    expect(forwardHashMigration).toContain(
+      "'config', coalesce(p_requested_config, '{}'::jsonb)",
+    );
+    expect(authorizationHardeningMigration).toContain(
+      "current_setting('hugo.preserve_request_hash', true) = '1'",
+    );
+    expect(authorizationHardeningMigration).toContain(
+      "perform set_config('hugo.preserve_request_hash', '1', true)",
+    );
+    expect(authorizationHardeningMigration).toContain(
+      "else 'redacted@invalid'",
+    );
+    expect(authorizationHardeningMigration).toContain(
+      "p_operation_id, null, v_safe_role, v_config, v_safe_status",
+    );
+    expect(authorizationHardeningMigration).toContain(
+      "revoke all on table public.hugo_access_operations",
+    );
+    expect(authorizationHardeningMigration).toContain(
+      "revoke all on table public.hugo_access_operation_claims",
+    );
+  });
+
   it("ships a forward-only authorization repair for hosted environments", () => {
     for (const helper of [
       "hugo_request_hash(",

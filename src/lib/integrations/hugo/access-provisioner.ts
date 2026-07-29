@@ -25,7 +25,7 @@ export type ProvisionerReceipt = {
   requested: {
     role: string | null;
     config: Record<string, unknown>;
-    status: SandraHugoStatus;
+    status: SandraHugoStatus | null;
     access_expires_at: string | null;
   };
   observed: {
@@ -48,9 +48,9 @@ type RpcClient = {
     args: {
       p_operation_id: string;
       p_email: string;
-      p_role: SandraHugoRole;
-      p_config: HugoConfig;
-      p_status: SandraHugoStatus;
+      p_role: string;
+      p_config: unknown;
+      p_status: string;
       p_access_expires_at: string | null;
     },
   ): Promise<{ data: unknown; error: { message: string; code?: string } | null }>;
@@ -149,9 +149,9 @@ function validOperationId(operationId: string): boolean {
 
 function failureReceipt(input: {
   operationId: string;
-  role?: SandraHugoRole | null;
+  role?: string | null;
   config?: HugoConfig;
-  status: SandraHugoStatus;
+  status: SandraHugoStatus | null;
   expiresAt?: string | null;
   code: string;
   message: string;
@@ -208,6 +208,17 @@ function parseReceipt(
   }
   const requested = receipt.requested as ProvisionerReceipt["requested"];
   const observed = receipt.observed as ProvisionerReceipt["observed"];
+  const requestedRole = SANDRA_HUGO_ROLES.includes(
+    requested.role as SandraHugoRole,
+  )
+    ? requested.role
+    : null;
+  const requestedStatus =
+    requested.status === "active" ||
+    requested.status === "suspended" ||
+    requested.status === "revoked"
+      ? requested.status
+      : null;
   const requestHash =
     typeof receipt.request_hash === "string" &&
     /^[0-9a-f]{64}$/i.test(receipt.request_hash)
@@ -228,6 +239,8 @@ function parseReceipt(
     request_hash: requestHash,
     requested: {
       ...requested,
+      role: requestedRole,
+      status: requestedStatus,
       config: safeConfig(requested.config) ?? {},
     },
     observed: {
@@ -248,17 +261,26 @@ async function preflightAccessOperation(
   args: {
     operationId: string;
     email: string;
-    role: SandraHugoRole;
-    config: HugoConfig;
-    status: SandraHugoStatus;
+    role: string;
+    config: unknown;
+    status: string;
     expiresAt: string | null;
   },
 ): Promise<PreflightResult> {
+  const safeRole = SANDRA_HUGO_ROLES.includes(args.role as SandraHugoRole)
+    ? (args.role as SandraHugoRole)
+    : null;
+  const safeStatus: SandraHugoStatus | null =
+    args.status === "active" ||
+    args.status === "suspended" ||
+    args.status === "revoked"
+      ? (args.status as SandraHugoStatus)
+      : null;
   const fallback = {
     operationId: args.operationId,
-    role: args.role,
-    config: args.config,
-    status: args.status,
+    role: safeRole,
+    config: safeConfig(args.config) ?? {},
+    status: safeStatus,
     expiresAt: args.expiresAt,
     code: "OPERATION_PREFLIGHT_FAILED",
     message: "Sandra could not reserve the requested access change.",
@@ -453,7 +475,8 @@ export async function applyHugoAccess(
 ): Promise<ProvisionerReceipt> {
   const operationId = input.operationId ?? randomUUID();
   const email = normalizedEmail(input.email);
-  const config = safeConfig(input.config ?? {});
+  const rawConfig: unknown = input.config ?? {};
+  const config = safeConfig(rawConfig);
   const expiresAt = input.accessExpiresAt ?? null;
   if (!validOperationId(operationId)) {
     return failureReceipt({
@@ -466,58 +489,32 @@ export async function applyHugoAccess(
       message: "Operation id must be a UUID.",
     });
   }
-  if (!email || !email.includes("@")) {
-    return failureReceipt({
-      operationId,
-      role: input.role,
-      config: config ?? {},
-      status: input.status,
-      expiresAt,
-      code: "INVALID_EMAIL",
-      message: "A valid email is required.",
-    });
-  }
-  if (!email.endsWith("@bmhgroupkc.com")) {
-    return failureReceipt({
-      operationId,
-      role: input.role,
-      config: config ?? {},
-      status: input.status,
-      expiresAt,
-      code: "INVALID_DOMAIN",
-      message: "Sandra access is limited to the BMH Group email domain.",
-    });
-  }
-  if (!SANDRA_HUGO_ROLES.includes(input.role)) {
-    return failureReceipt({
-      operationId,
-      config: config ?? {},
-      status: input.status,
-      expiresAt,
-      code: "INVALID_ROLE",
-      message: "Sandra role must be owner or member.",
-    });
-  }
-  if (!config) {
-    return failureReceipt({
-      operationId,
-      role: input.role,
-      status: input.status,
-      expiresAt,
-      code: "INVALID_CONFIG",
-      message: "Sandra access configuration cannot contain credentials.",
-    });
-  }
 
   const preflight = await preflightAccessOperation({
     operationId,
     email,
     role: input.role,
-    config,
+    config: rawConfig,
     status: input.status,
     expiresAt,
   });
   if (!preflight.proceed) return preflight.receipt;
+  if (
+    !email ||
+    !email.endsWith("@bmhgroupkc.com") ||
+    !SANDRA_HUGO_ROLES.includes(input.role) ||
+    !config
+  ) {
+    return failureReceipt({
+      operationId,
+      role: SANDRA_HUGO_ROLES.includes(input.role) ? input.role : null,
+      config: config ?? {},
+      status: input.status,
+      expiresAt,
+      code: "INVALID_RECEIPT",
+      message: "Sandra approved an invalid access request.",
+    });
+  }
 
   let user: AuthUser | null = null;
   if (input.status === "active") {

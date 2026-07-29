@@ -25,7 +25,7 @@ alter table public.hugo_access_operations
   add column if not exists request_hash text;
 
 comment on column public.hugo_access_operations.request_hash is
-  'SHA-256 of the canonical, sanitized Hugo/Sandra request payload. It rejects operation-id reuse with different inputs.';
+  'SHA-256 of the canonical Hugo/Sandra request payload. Raw invalid values are hashed for binding but are never persisted.';
 
 create or replace function public.hugo_sandra_config_is_safe(p_value jsonb)
 returns boolean
@@ -64,11 +64,7 @@ as $$
     'operation', p_operation,
     'email', lower(trim(coalesce(p_email, ''))),
     'role', p_requested_role,
-    'config', case
-      when public.hugo_sandra_config_is_safe(coalesce(p_requested_config, '{}'::jsonb))
-        then coalesce(p_requested_config, '{}'::jsonb)
-      else '{}'::jsonb
-    end,
+    'config', coalesce(p_requested_config, '{}'::jsonb),
     'status', p_requested_status,
     'access_expires_at', p_requested_expires_at
   );
