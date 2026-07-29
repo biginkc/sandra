@@ -573,23 +573,26 @@ try {
       v jsonb;
       v_invalid jsonb;
     begin
-      v_invalid := public.hugo_preflight_access_operation(
+      v_invalid := public.hugo_record_invalid_access_request(
         '10000000-0000-4000-8000-000000000001',
-        'outsider@example.com',
+        repeat('1', 64),
+        'redacted@invalid',
         'member',
-        '{"api_token":"must-never-persist"}'::jsonb,
+        '{}'::jsonb,
         'active',
-        null
+        null,
+        'INVALID_DOMAIN'
       );
-      assert v_invalid->>'proceed' = 'false';
-      assert v_invalid->'receipt'->>'error_code' = 'INVALID_DOMAIN';
-      v := public.hugo_preflight_access_operation(
+      assert v_invalid->>'error_code' = 'INVALID_DOMAIN';
+      v := public.hugo_record_invalid_access_request(
         '10000000-0000-4000-8000-000000000001',
-        'outsider@example.com',
+        repeat('1', 64),
+        'redacted@invalid',
         'member',
-        '{"api_token":"must-never-persist"}'::jsonb,
+        '{}'::jsonb,
         'active',
-        null
+        null,
+        'INVALID_DOMAIN'
       );
       assert v = v_invalid,
         'exact invalid-domain retry did not replay its receipt';
@@ -604,52 +607,62 @@ try {
       assert v->'receipt'->>'error_code' = 'OPERATION_CONFLICT',
         'changed valid request reused an invalid-domain operation id';
 
-      v_invalid := public.hugo_preflight_access_operation(
+      v_invalid := public.hugo_record_invalid_access_request(
         '10000000-0000-4000-8000-000000000002',
+        repeat('2', 64),
         'member@bmhgroupkc.com',
         'member',
-        '{"api_token":"first-secret"}'::jsonb,
+        '{}'::jsonb,
         'active',
-        null
+        null,
+        'INVALID_CONFIG'
       );
-      assert v_invalid->'receipt'->>'error_code' = 'INVALID_CONFIG';
-      v := public.hugo_preflight_access_operation(
+      assert v_invalid->>'error_code' = 'INVALID_CONFIG';
+      v := public.hugo_record_invalid_access_request(
         '10000000-0000-4000-8000-000000000002',
+        repeat('2', 64),
         'member@bmhgroupkc.com',
         'member',
-        '{"api_token":"first-secret"}'::jsonb,
+        '{}'::jsonb,
         'active',
-        null
+        null,
+        'INVALID_CONFIG'
       );
       assert v = v_invalid,
         'exact invalid-config retry did not replay its receipt';
-      v := public.hugo_preflight_access_operation(
+      v := public.hugo_record_invalid_access_request(
         '10000000-0000-4000-8000-000000000002',
+        repeat('3', 64),
         'member@bmhgroupkc.com',
         'member',
-        '{"api_token":"second-secret"}'::jsonb,
+        '{}'::jsonb,
         'active',
-        null
+        null,
+        'INVALID_CONFIG'
       );
-      assert v->'receipt'->>'error_code' = 'OPERATION_CONFLICT',
+      assert v->>'error_code' = 'OPERATION_CONFLICT',
         'distinct invalid configs collapsed to one request hash';
 
-      v_invalid := public.hugo_preflight_access_operation(
+      v_invalid := public.hugo_record_invalid_access_request(
         '10000000-0000-4000-8000-000000000003',
-        'not-an-email',
+        repeat('4', 64),
+        'redacted@invalid',
         'member',
         '{}'::jsonb,
         'active',
-        null
+        null,
+        'INVALID_EMAIL'
       );
-      assert v_invalid->'receipt'->>'error_code' = 'INVALID_EMAIL';
-      v := public.hugo_preflight_access_operation(
+      assert v_invalid->>'error_code' = 'INVALID_EMAIL';
+      v := public.hugo_record_invalid_access_request(
         '10000000-0000-4000-8000-000000000003',
-        'not-an-email',
+        repeat('4', 64),
+        'redacted@invalid',
         'member',
         '{}'::jsonb,
         'active',
-        null
+        null,
+        'INVALID_EMAIL'
       );
       assert v = v_invalid,
         'exact invalid-email retry did not replay its receipt';
@@ -664,22 +677,26 @@ try {
       assert v->'receipt'->>'error_code' = 'OPERATION_CONFLICT',
         'changed valid request reused an invalid-email operation id';
 
-      v_invalid := public.hugo_preflight_access_operation(
+      v_invalid := public.hugo_record_invalid_access_request(
         '10000000-0000-4000-8000-000000000004',
+        repeat('5', 64),
         'member@bmhgroupkc.com',
-        'superadmin',
+        null,
         '{}'::jsonb,
         'active',
-        null
+        null,
+        'INVALID_ROLE'
       );
-      assert v_invalid->'receipt'->>'error_code' = 'INVALID_ROLE';
-      v := public.hugo_preflight_access_operation(
+      assert v_invalid->>'error_code' = 'INVALID_ROLE';
+      v := public.hugo_record_invalid_access_request(
         '10000000-0000-4000-8000-000000000004',
+        repeat('5', 64),
         'member@bmhgroupkc.com',
-        'superadmin',
+        null,
         '{}'::jsonb,
         'active',
-        null
+        null,
+        'INVALID_ROLE'
       );
       assert v = v_invalid,
         'exact invalid-role retry did not replay its receipt';
@@ -704,17 +721,11 @@ try {
           '10000000-0000-4000-8000-000000000004'::uuid
         )
           and (
-            lower(op.email) = 'outsider@example.com'
-            or position('outsider@example.com' in op.requested::text) > 0
-            or position('outsider@example.com' in op.receipt::text) > 0
-            or position('not-an-email' in op.requested::text) > 0
-            or position('not-an-email' in op.receipt::text) > 0
-            or position('superadmin' in op.requested::text) > 0
-            or position('superadmin' in op.receipt::text) > 0
-            or position('first-secret' in op.requested::text) > 0
-            or position('first-secret' in op.receipt::text) > 0
-            or position('must-never-persist' in op.requested::text) > 0
-            or position('must-never-persist' in op.receipt::text) > 0
+            lower(op.email) not in (
+              'redacted@invalid', 'member@bmhgroupkc.com'
+            )
+            or op.requested->>'role' not in ('member')
+            or op.requested->'config' <> '{}'::jsonb
           )
       ), 'invalid request journal retained raw email or secret';
       assert (
@@ -1857,6 +1868,16 @@ try {
           'public.hugo_record_identity_provision_failure(uuid,text,text,jsonb,text,timestamptz)',
           'EXECUTE'
         ) || '|' ||
+        has_function_privilege(
+          'service_role',
+          'public.hugo_record_invalid_access_request(uuid,text,text,text,jsonb,text,timestamptz,text)',
+          'EXECUTE'
+        ) || '|' ||
+        has_function_privilege(
+          'authenticated',
+          'public.hugo_record_invalid_access_request(uuid,text,text,text,jsonb,text,timestamptz,text)',
+          'EXECUTE'
+        ) || '|' ||
         has_table_privilege(
           'service_role',
           'public.hugo_access_operations',
@@ -1870,7 +1891,7 @@ try {
     `,
     { capture: true, extraArgs: ["-Atq"] },
   ).trim();
-  if (privileges !== "true|false|false|true|false|false|false") {
+  if (privileges !== "true|false|false|true|false|true|false|false|false") {
     throw new Error(`Unexpected Hugo connector grants: ${privileges}`);
   }
 

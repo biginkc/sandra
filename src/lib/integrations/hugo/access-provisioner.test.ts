@@ -61,6 +61,16 @@ function preflight(
   };
 }
 
+function mockBoundReceipt(value: Record<string, unknown>) {
+  mocks.rpc.mockImplementationOnce(
+    (_name: string, args: { p_request_hash?: string }) =>
+      Promise.resolve({
+        data: { ...value, request_hash: args.p_request_hash },
+        error: null,
+      }),
+  );
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.createAdminClient.mockReturnValue({
@@ -270,10 +280,7 @@ describe("Sandra Hugo access provisioner", () => {
         error_code: "INVALID_CONFIG",
         error_message: "Sandra access configuration is invalid.",
       });
-      mocks.rpc.mockResolvedValueOnce({
-        data: preflight({ proceed: false, receipt: invalid }),
-        error: null,
-      });
+      mockBoundReceipt(invalid);
       const result = await applyHugoAccess({
         operationId: OPERATION_ID,
         email: "member@bmhgroupkc.com",
@@ -288,15 +295,20 @@ describe("Sandra Hugo access provisioner", () => {
         error_message: expect.not.stringContaining("must-never"),
       });
       expect(mocks.rpc).toHaveBeenCalledWith(
-        "hugo_preflight_access_operation",
+        "hugo_record_invalid_access_request",
         {
           p_operation_id: OPERATION_ID,
+          p_request_hash: expect.stringMatching(/^[0-9a-f]{64}$/),
           p_email: "member@bmhgroupkc.com",
           p_role: "member",
-          p_config: { [key]: "must-never-leave-this-process" },
+          p_config: {},
           p_status: "active",
           p_access_expires_at: null,
+          p_error_code: "INVALID_CONFIG",
         },
+      );
+      expect(JSON.stringify(mocks.rpc.mock.calls)).not.toContain(
+        "must-never-leave-this-process",
       );
       expect(mocks.createUser).not.toHaveBeenCalled();
     },
@@ -315,10 +327,7 @@ describe("Sandra Hugo access provisioner", () => {
       error_code: "INVALID_DOMAIN",
       error_message: "Sandra access is limited to the BMH Group email domain.",
     });
-    mocks.rpc.mockResolvedValueOnce({
-      data: preflight({ proceed: false, receipt: invalid }),
-      error: null,
-    });
+    mockBoundReceipt(invalid);
     const result = await applyHugoAccess({
       operationId: OPERATION_ID,
       email: "outsider@example.com",
@@ -332,15 +341,20 @@ describe("Sandra Hugo access provisioner", () => {
     });
     expect(mocks.createUser).not.toHaveBeenCalled();
     expect(mocks.rpc).toHaveBeenCalledWith(
-      "hugo_preflight_access_operation",
+      "hugo_record_invalid_access_request",
       {
         p_operation_id: OPERATION_ID,
-        p_email: "outsider@example.com",
+        p_request_hash: expect.stringMatching(/^[0-9a-f]{64}$/),
+        p_email: "redacted@invalid",
         p_role: "member",
         p_config: {},
         p_status: "active",
         p_access_expires_at: null,
+        p_error_code: "INVALID_DOMAIN",
       },
+    );
+    expect(JSON.stringify(mocks.rpc.mock.calls)).not.toContain(
+      "outsider@example.com",
     );
   });
 
@@ -377,10 +391,7 @@ describe("Sandra Hugo access provisioner", () => {
       error_code: errorCode,
       error_message: "Sandra rejected the invalid access request.",
     });
-    mocks.rpc.mockResolvedValueOnce({
-      data: preflight({ proceed: false, receipt: invalid }),
-      error: null,
-    });
+    mockBoundReceipt(invalid);
 
     const result = await applyHugoAccess({
       operationId: OPERATION_ID,
@@ -396,15 +407,21 @@ describe("Sandra Hugo access provisioner", () => {
     });
     expect(JSON.stringify(result)).not.toContain("superadmin");
     expect(mocks.rpc).toHaveBeenCalledWith(
-      "hugo_preflight_access_operation",
+      "hugo_record_invalid_access_request",
       {
         p_operation_id: OPERATION_ID,
-        p_email: email,
-        p_role: role,
+        p_request_hash: expect.stringMatching(/^[0-9a-f]{64}$/),
+        p_email:
+          errorCode === "INVALID_EMAIL" ? "redacted@invalid" : email,
+        p_role: safeRole,
         p_config: {},
         p_status: "active",
         p_access_expires_at: null,
+        p_error_code: errorCode,
       },
+    );
+    expect(JSON.stringify(mocks.rpc.mock.calls)).not.toContain(
+      errorCode === "INVALID_EMAIL" ? email : role,
     );
     expect(mocks.createUser).not.toHaveBeenCalled();
   });
@@ -434,19 +451,9 @@ describe("Sandra Hugo access provisioner", () => {
       error_code: "OPERATION_CONFLICT",
       error_message: "Operation id was already used with a different request.",
     });
-    mocks.rpc
-      .mockResolvedValueOnce({
-        data: preflight({ proceed: false, receipt: invalid }),
-        error: null,
-      })
-      .mockResolvedValueOnce({
-        data: preflight({ proceed: false, receipt: invalid }),
-        error: null,
-      })
-      .mockResolvedValueOnce({
-        data: preflight({ proceed: false, receipt: conflict }),
-        error: null,
-      });
+    mockBoundReceipt(invalid);
+    mockBoundReceipt(invalid);
+    mockBoundReceipt(conflict);
 
     const base = {
       operationId: OPERATION_ID,
@@ -465,14 +472,14 @@ describe("Sandra Hugo access provisioner", () => {
     expect(first).toMatchObject({
       ok: false,
       error_code: "INVALID_CONFIG",
-      request_hash: REQUEST_HASH,
+      request_hash: expect.stringMatching(/^[0-9a-f]{64}$/),
       requested: { config: {} },
     });
     expect(exact).toEqual(first);
     expect(changed).toMatchObject({
       ok: false,
       error_code: "OPERATION_CONFLICT",
-      request_hash: REQUEST_HASH,
+      request_hash: expect.stringMatching(/^[0-9a-f]{64}$/),
       requested: { config: {} },
     });
     expect(JSON.stringify([first, exact, changed])).not.toContain(
@@ -484,6 +491,17 @@ describe("Sandra Hugo access provisioner", () => {
     expect(mocks.createUser).not.toHaveBeenCalled();
     expect(mocks.listUsers).not.toHaveBeenCalled();
     expect(mocks.rpc).toHaveBeenCalledTimes(3);
+    const invalidCalls = mocks.rpc.mock.calls.map(
+      ([, args]) => args as { p_request_hash: string },
+    );
+    expect(invalidCalls[0].p_request_hash).toBe(
+      invalidCalls[1].p_request_hash,
+    );
+    expect(invalidCalls[2].p_request_hash).not.toBe(
+      invalidCalls[0].p_request_hash,
+    );
+    expect(JSON.stringify(mocks.rpc.mock.calls)).not.toContain("first-secret");
+    expect(JSON.stringify(mocks.rpc.mock.calls)).not.toContain("second-secret");
   });
 
   it("durably records an Auth identity failure and binds its exact and changed retries", async () => {

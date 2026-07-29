@@ -141,7 +141,13 @@ describe("Hugo/Sandra SQL connector contract", () => {
 
   it("hash-binds invalid requests without retaining their raw values", () => {
     expect(forwardHashMigration).toContain(
-      "'config', coalesce(p_requested_config, '{}'::jsonb)",
+      "when public.hugo_sandra_config_is_safe(coalesce(p_requested_config, '{}'::jsonb))",
+    );
+    expect(authorizationHardeningMigration).toContain(
+      "create or replace function public.hugo_record_invalid_access_request(",
+    );
+    expect(authorizationHardeningMigration).toContain(
+      "p_request_hash !~ '^[0-9a-f]{64}$'",
     );
     expect(authorizationHardeningMigration).toContain(
       "current_setting('hugo.preserve_request_hash', true) = '1'",
@@ -153,7 +159,7 @@ describe("Hugo/Sandra SQL connector contract", () => {
       "else 'redacted@invalid'",
     );
     expect(authorizationHardeningMigration).toContain(
-      "p_operation_id, null, v_safe_role, v_config, v_safe_status",
+      "p_operation_id, null, v_role, v_config, v_status",
     );
     expect(authorizationHardeningMigration).toContain(
       "revoke all on table public.hugo_access_operations",

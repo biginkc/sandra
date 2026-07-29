@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import { createAdminClient } from "@/lib/supabase/admin";
 
@@ -43,6 +43,24 @@ export type ProvisionerReceipt = {
 type HugoConfig = Record<string, unknown>;
 
 type RpcClient = {
+  rpc(
+    fn: "hugo_record_invalid_access_request",
+    args: {
+      p_operation_id: string;
+      p_request_hash: string;
+      p_email: string;
+      p_role: SandraHugoRole | null;
+      p_config: HugoConfig;
+      p_status: SandraHugoStatus | null;
+      p_access_expires_at: string | null;
+      p_error_code:
+        | "INVALID_EMAIL"
+        | "INVALID_DOMAIN"
+        | "INVALID_ROLE"
+        | "INVALID_STATUS"
+        | "INVALID_CONFIG";
+    },
+  ): Promise<{ data: unknown; error: { message: string; code?: string } | null }>;
   rpc(
     fn: "hugo_preflight_access_operation",
     args: {
@@ -118,6 +136,7 @@ type AuthAdmin = {
 const USER_PAGE_SIZE = 200;
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const BMH_EMAIL_PATTERN = /^[^@\s]+@bmhgroupkc\.com$/;
 const SANDRA_HUGO_CONFIG_KEYS = new Set(["cohort", "timezone"]);
 
 function rpcClient(): RpcClient {
@@ -145,6 +164,69 @@ function safeConfig(value: unknown): HugoConfig | null {
 
 function validOperationId(operationId: string): boolean {
   return UUID_PATTERN.test(operationId);
+}
+
+function canonicalHashValue(
+  value: unknown,
+  seen = new Map<object, number>(),
+): string {
+  if (value === null) return "null";
+  switch (typeof value) {
+    case "string":
+      return `string:${JSON.stringify(value)}`;
+    case "boolean":
+      return `boolean:${value}`;
+    case "number":
+      return `number:${Object.is(value, -0) ? "-0" : String(value)}`;
+    case "bigint":
+      return `bigint:${value.toString(10)}`;
+    case "undefined":
+      return "undefined";
+    case "symbol":
+      return `symbol:${JSON.stringify(value.description ?? "")}`;
+    case "function":
+      return `function:${JSON.stringify(value.name)}`;
+    case "object": {
+      const prior = seen.get(value);
+      if (prior !== undefined) return `reference:${prior}`;
+      seen.set(value, seen.size);
+      if (Array.isArray(value)) {
+        return `array:[${value
+          .map((child) => canonicalHashValue(child, seen))
+          .join(",")}]`;
+      }
+      const record = value as Record<string, unknown>;
+      return `object:{${Object.keys(record)
+        .sort()
+        .map(
+          (key) =>
+            `${JSON.stringify(key)}:${canonicalHashValue(record[key], seen)}`,
+        )
+        .join(",")}}`;
+    }
+  }
+  throw new TypeError("Unsupported access request value.");
+}
+
+function invalidRequestHash(input: {
+  email: string;
+  role: string;
+  config: unknown;
+  status: string;
+  expiresAt: string | null;
+}): string {
+  return createHash("sha256")
+    .update(
+      canonicalHashValue({
+        operation: "hugo_apply_access",
+        email: input.email,
+        role: input.role,
+        config: input.config,
+        status: input.status,
+        access_expires_at: input.expiresAt,
+      }),
+    )
+    .digest("hex");
 }
 
 function failureReceipt(input: {
@@ -256,6 +338,77 @@ function parseReceipt(
 type PreflightResult =
   | { proceed: true; requestHash: string }
   | { proceed: false; receipt: ProvisionerReceipt };
+
+type InvalidAccessCode =
+  | "INVALID_EMAIL"
+  | "INVALID_DOMAIN"
+  | "INVALID_ROLE"
+  | "INVALID_STATUS"
+  | "INVALID_CONFIG";
+
+async function recordInvalidAccessRequest(args: {
+  operationId: string;
+  requestHash: string;
+  email: string;
+  role: string;
+  config: unknown;
+  status: string;
+  expiresAt: string | null;
+  code: InvalidAccessCode;
+}): Promise<ProvisionerReceipt> {
+  const safeRole = SANDRA_HUGO_ROLES.includes(args.role as SandraHugoRole)
+    ? (args.role as SandraHugoRole)
+    : null;
+  const safeStatus: SandraHugoStatus | null =
+    args.status === "active" ||
+    args.status === "suspended" ||
+    args.status === "revoked"
+      ? (args.status as SandraHugoStatus)
+      : null;
+  const safeEmail = BMH_EMAIL_PATTERN.test(args.email)
+    ? args.email
+    : "redacted@invalid";
+  const safeRequestConfig = safeConfig(args.config) ?? {};
+  const fallback = {
+    operationId: args.operationId,
+    role: safeRole,
+    config: safeRequestConfig,
+    status: safeStatus,
+    expiresAt: args.expiresAt,
+    code: "INVALID_REQUEST_RECORD_FAILED",
+    message: "Sandra could not record the invalid access request.",
+  };
+  try {
+    const result = await rpcClient().rpc(
+      "hugo_record_invalid_access_request",
+      {
+        p_operation_id: args.operationId,
+        p_request_hash: args.requestHash,
+        p_email: safeEmail,
+        p_role: safeRole,
+        p_config: safeRequestConfig,
+        p_status: safeStatus,
+        p_access_expires_at: args.expiresAt,
+        p_error_code: args.code,
+      },
+    );
+    if (result.error) return failureReceipt(fallback);
+    const receipt = parseReceipt(result.data, fallback, true);
+    if (
+      receipt.error_code !== "INVALID_REQUEST_RECORD_FAILED" &&
+      receipt.request_hash !== args.requestHash
+    ) {
+      return failureReceipt({
+        ...fallback,
+        code: "INVALID_RECEIPT",
+        message: "Sandra returned a receipt for a different request.",
+      });
+    }
+    return receipt;
+  } catch {
+    return failureReceipt(fallback);
+  }
+}
 
 async function preflightAccessOperation(
   args: {
@@ -490,18 +643,53 @@ export async function applyHugoAccess(
     });
   }
 
+  let invalidCode: InvalidAccessCode | null = null;
+  if (!email || !/^[^@\s]+@[^@\s]+$/.test(email)) {
+    invalidCode = "INVALID_EMAIL";
+  } else if (!BMH_EMAIL_PATTERN.test(email)) {
+    invalidCode = "INVALID_DOMAIN";
+  } else if (!SANDRA_HUGO_ROLES.includes(input.role)) {
+    invalidCode = "INVALID_ROLE";
+  } else if (
+    input.status !== "active" &&
+    input.status !== "suspended" &&
+    input.status !== "revoked"
+  ) {
+    invalidCode = "INVALID_STATUS";
+  } else if (!config) {
+    invalidCode = "INVALID_CONFIG";
+  }
+  if (invalidCode) {
+    return recordInvalidAccessRequest({
+      operationId,
+      requestHash: invalidRequestHash({
+        email,
+        role: input.role,
+        config: rawConfig,
+        status: input.status,
+        expiresAt,
+      }),
+      email,
+      role: input.role,
+      config: rawConfig,
+      status: input.status,
+      expiresAt,
+      code: invalidCode,
+    });
+  }
+
   const preflight = await preflightAccessOperation({
     operationId,
     email,
     role: input.role,
-    config: rawConfig,
+    config,
     status: input.status,
     expiresAt,
   });
   if (!preflight.proceed) return preflight.receipt;
   if (
     !email ||
-    !email.endsWith("@bmhgroupkc.com") ||
+    !BMH_EMAIL_PATTERN.test(email) ||
     !SANDRA_HUGO_ROLES.includes(input.role) ||
     !config
   ) {

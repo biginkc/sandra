@@ -90,9 +90,9 @@ revoke all on function public.hugo_config_is_safe(jsonb)
 revoke all on function public.hugo_sandra_config_is_safe(jsonb)
   from public, anon, authenticated;
 
--- Bind invalid requests by their raw canonical values without retaining those
--- values in the operation journal. Existing valid rows keep the same hash
--- because their raw and sanitized configurations are identical.
+-- Keep normal connector hashing limited to values that are safe to transport.
+-- Invalid raw values are hashed in the server adapter and enter the database
+-- only through hugo_record_invalid_access_request as a one-way digest.
 create or replace function public.hugo_sandra_canonical_request_payload(
   p_operation text,
   p_email text,
@@ -110,7 +110,11 @@ as $$
     'operation', p_operation,
     'email', lower(trim(coalesce(p_email, ''))),
     'role', p_requested_role,
-    'config', coalesce(p_requested_config, '{}'::jsonb),
+    'config', case
+      when public.hugo_sandra_config_is_safe(coalesce(p_requested_config, '{}'::jsonb))
+        then coalesce(p_requested_config, '{}'::jsonb)
+      else '{}'::jsonb
+    end,
     'status', p_requested_status,
     'access_expires_at', p_requested_expires_at
   );
@@ -257,6 +261,115 @@ revoke all on function public.hugo_store_access_operation(
 -- private raw-request-hash handoff by writing either journal table directly.
 revoke all on table public.hugo_access_operations
   from public, anon, authenticated, service_role;
+
+create or replace function public.hugo_record_invalid_access_request(
+  p_operation_id uuid,
+  p_request_hash text,
+  p_email text,
+  p_role text,
+  p_config jsonb,
+  p_status text,
+  p_access_expires_at timestamptz,
+  p_error_code text
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public, auth, pg_temp
+as $$
+declare
+  v_email text := lower(trim(coalesce(p_email, '')));
+  v_role text := case when p_role in ('owner', 'member') then p_role else null end;
+  v_status text := case
+    when p_status in ('active', 'suspended', 'revoked') then p_status
+    else null
+  end;
+  v_config jsonb := case
+    when public.hugo_sandra_config_is_safe(coalesce(p_config, '{}'::jsonb))
+      then coalesce(p_config, '{}'::jsonb)
+    else '{}'::jsonb
+  end;
+  v_prior_hash text;
+  v_prior jsonb;
+  v_message text;
+  v_receipt jsonb;
+begin
+  perform public.hugo_require_service_role();
+  perform pg_advisory_xact_lock(
+    hashtextextended('hugo-sandra-privileged-lifecycle-v1', 0)
+  );
+  if p_operation_id is null
+     or p_request_hash is null
+     or p_request_hash !~ '^[0-9a-f]{64}$' then
+    raise exception 'HUGO_INVALID_REQUEST_BINDING' using errcode = 'P0001';
+  end if;
+  if v_email <> 'redacted@invalid'
+     and v_email !~ '^[^@[:space:]]+@bmhgroupkc\.com$' then
+    raise exception 'HUGO_UNSAFE_INVALID_REQUEST_EMAIL' using errcode = 'P0001';
+  end if;
+  if p_error_code not in (
+    'INVALID_EMAIL', 'INVALID_DOMAIN', 'INVALID_ROLE',
+    'INVALID_STATUS', 'INVALID_CONFIG'
+  ) then
+    raise exception 'HUGO_INVALID_REQUEST_ERROR_CODE' using errcode = 'P0001';
+  end if;
+
+  select op.request_hash, op.receipt
+    into v_prior_hash, v_prior
+  from public.hugo_access_operations op
+  where op.operation_id = p_operation_id;
+  if found then
+    if v_prior_hash = p_request_hash then
+      return public.hugo_sandra_receipt_with_request_hash(
+        v_prior, p_request_hash
+      );
+    end if;
+    return public.hugo_sandra_operation_payload_conflict_receipt(
+      p_operation_id, v_role, v_status,
+      p_access_expires_at, p_request_hash
+    );
+  end if;
+
+  v_message := case p_error_code
+    when 'INVALID_EMAIL' then 'A valid email is required.'
+    when 'INVALID_DOMAIN' then
+      'Sandra access is limited to the BMH Group email domain.'
+    when 'INVALID_ROLE' then 'Sandra role must be owner or member.'
+    when 'INVALID_STATUS' then 'Sandra access status is invalid.'
+    else 'Sandra access configuration is invalid.'
+  end;
+  v_receipt := public.hugo_sandra_receipt_with_request_hash(
+    public.hugo_receipt(
+      p_operation_id, null, v_role, v_config, v_status,
+      p_access_expires_at, null, '{}'::jsonb, 'missing', null,
+      false, false, p_error_code, v_message
+    ),
+    p_request_hash
+  );
+  perform public.hugo_store_access_operation(
+    p_operation_id,
+    'grant',
+    v_email,
+    null,
+    jsonb_build_object(
+      'role', v_role,
+      'config', v_config,
+      'status', v_status,
+      'access_expires_at', p_access_expires_at
+    ),
+    p_request_hash,
+    v_receipt
+  );
+  return v_receipt;
+end;
+$$;
+
+revoke all on function public.hugo_record_invalid_access_request(
+  uuid, text, text, text, jsonb, text, timestamptz, text
+) from public, anon, authenticated;
+grant execute on function public.hugo_record_invalid_access_request(
+  uuid, text, text, text, jsonb, text, timestamptz, text
+) to service_role;
 
 -- An authenticated session can only expose its membership while the grant is
 -- usable. Every tenant-table RLS policy resolves through this row, so an older
@@ -915,7 +1028,7 @@ begin
       'hugo_apply_access',
       v_email,
       p_role,
-      coalesce(p_config, '{}'::jsonb),
+      v_config,
       p_status,
       to_jsonb(p_access_expires_at)
     )
@@ -1074,7 +1187,7 @@ begin
       'hugo_apply_access',
       v_email,
       p_role,
-      coalesce(p_config, '{}'::jsonb),
+      v_config,
       p_status,
       to_jsonb(p_access_expires_at)
     )
@@ -1403,7 +1516,7 @@ begin
       'hugo_apply_access',
       v_email,
       p_role,
-      coalesce(p_config, '{}'::jsonb),
+      v_config,
       p_status,
       to_jsonb(p_access_expires_at)
     )
