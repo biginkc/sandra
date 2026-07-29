@@ -23,6 +23,8 @@ const freshMigrationNames = [
   "20260728150000_hugo_access_authorization_hardening.sql",
   "20260729010000_hugo_auth_identity_key_lifecycle_lock.sql",
 ];
+const rollbackArtifactName =
+  "20260729010000_hugo_auth_identity_key_lifecycle_lock.sql";
 const hostedSnapshotNames = freshMigrationNames.slice(0, 4);
 const forwardMigrationNames = freshMigrationNames.slice(
   hostedSnapshotNames.length,
@@ -57,16 +59,20 @@ if (lane === "all") {
   process.exit(0);
 }
 
-if (!["hosted-snapshot-forward", "fresh-full-chain"].includes(lane)) {
+if (
+  !["hosted-snapshot-forward", "fresh-full-chain", "rollback-roundtrip"].includes(
+    lane,
+  )
+) {
   throw new Error(`Unknown Sandra Hugo verification lane: ${lane}`);
 }
 
 const migrationNames =
-  lane === "fresh-full-chain"
+  lane === "fresh-full-chain" || lane === "rollback-roundtrip"
     ? freshMigrationNames
     : [...hostedSnapshotNames, ...forwardMigrationNames];
 const migrations =
-  lane === "fresh-full-chain"
+  lane === "fresh-full-chain" || lane === "rollback-roundtrip"
     ? freshMigrationNames.map((name) =>
         join(root, "supabase", "migrations", name),
       )
@@ -555,6 +561,211 @@ async function freePort() {
   return port;
 }
 
+async function verifyRollbackRoundTrip(port, socket) {
+  const rollbackArtifact = join(
+    root,
+    "supabase",
+    "rollbacks",
+    rollbackArtifactName,
+  );
+  const forwardMigration = join(
+    root,
+    "supabase",
+    "migrations",
+    rollbackArtifactName,
+  );
+  const userId = "70000000-0000-4000-8000-000000000071";
+  const email = "rollback-delta@bmhgroupkc.com";
+
+  // Seed a real durable identity and a receipt before rollback. The counts
+  // are captured from the database, then checked after both DDL transitions;
+  // a rollback that merely compiles but mutates rows cannot pass this proof.
+  sql(port, socket, `
+    select set_config('request.jwt.claim.role', 'service_role', false);
+    insert into auth.users(id, email) values
+      ('${userId}', '${email}');
+    insert into public.user_activity(actor_user_id) values ('${userId}');
+    do $$
+    declare
+      v_receipt jsonb;
+    begin
+      v_receipt := public.hugo_prepare_pristine_delete(
+        '70000000-0000-4000-8000-000000000071',
+        '${email}'
+      );
+      assert v_receipt->>'error_code' = 'NON_PRISTINE',
+        'forward helper did not produce the durable refusal fixture';
+      assert (
+        select count(*) from public.hugo_access_operations
+        where operation_id =
+          '70000000-0000-4000-8000-000000000071'::uuid
+      ) = 1, 'forward helper did not persist its receipt';
+    end $$;
+  `);
+  const before = sql(
+    port,
+    socket,
+    `
+      select
+        (select count(*) from auth.users where id = '${userId}'::uuid) || '|' ||
+        (select count(*) from public.user_activity where actor_user_id = '${userId}'::uuid) || '|' ||
+        (select count(*) from public.hugo_access_operations where email = '${email}');
+    `,
+    { capture: true, extraArgs: ["-Atq"] },
+  ).trim();
+  if (before !== "1|1|1") {
+    throw new Error(`Unexpected rollback fixture baseline: ${before}`);
+  }
+
+  run(
+    "psql",
+    [
+      "-h",
+      socket,
+      "-p",
+      String(port),
+      "-U",
+      "postgres",
+      "-v",
+      "ON_ERROR_STOP=1",
+      "-f",
+      rollbackArtifact,
+    ],
+  );
+
+  sql(port, socket, `
+    select set_config('request.jwt.claim.role', 'service_role', false);
+    do $$
+    declare
+      v_prepare jsonb;
+      v_delete jsonb;
+      v_prepare_definition text;
+      v_delete_definition text;
+    begin
+      assert to_regprocedure(
+        'public.hugo_store_non_pristine_email_receipt(uuid,text,text,text)'
+      ) is null, 'manual rollback left the extracted helper installed';
+      v_prepare_definition := pg_get_functiondef(
+        'public.hugo_prepare_pristine_delete(uuid,text)'::regprocedure
+      );
+      v_delete_definition := pg_get_functiondef(
+        'public.hugo_delete_identity(uuid,text)'::regprocedure
+      );
+      assert position('hugo_store_non_pristine_email_receipt' in v_prepare_definition) = 0,
+        'manual rollback prepare still delegates to the extracted helper';
+      assert position('hugo_store_non_pristine_email_receipt' in v_delete_definition) = 0,
+        'manual rollback delete still delegates to the extracted helper';
+      v_prepare := public.hugo_prepare_pristine_delete(
+        '70000000-0000-4000-8000-000000000072',
+        '${email}'
+      );
+      v_delete := public.hugo_delete_identity(
+        '70000000-0000-4000-8000-000000000073',
+        '${email}'
+      );
+      assert v_prepare->>'error_code' = 'NON_PRISTINE',
+        'inline prepare rollback path lost durable refusal behavior';
+      assert v_delete->>'error_code' = 'NON_PRISTINE',
+        'inline delete rollback path lost durable refusal behavior';
+      assert (
+        select count(*) from public.hugo_access_operations
+        where email = '${email}'
+      ) = 3, 'manual rollback did not preserve/persist lifecycle receipts';
+      assert (
+        select count(*) from auth.users where id = '${userId}'::uuid
+      ) = 1, 'manual rollback changed the Auth identity row';
+      assert (
+        select count(*) from public.user_activity where actor_user_id = '${userId}'::uuid
+      ) = 1, 'manual rollback changed durable activity';
+    end $$;
+  `);
+
+  // Reapply the exact forward migration after the manual rollback. This is a
+  // real deployment replay: the helper is recreated, the public wrappers are
+  // restored to the current forward shape, and all prior data remains.
+  run(
+    "psql",
+    [
+      "-h",
+      socket,
+      "-p",
+      String(port),
+      "-U",
+      "postgres",
+      "-v",
+      "ON_ERROR_STOP=1",
+      "-f",
+      forwardMigration,
+    ],
+  );
+  sql(port, socket, `
+    select set_config('request.jwt.claim.role', 'service_role', false);
+    do $$
+    declare
+      v_prepare jsonb;
+      v_delete jsonb;
+      v_prepare_definition text;
+      v_delete_definition text;
+    begin
+      assert to_regprocedure(
+        'public.hugo_store_non_pristine_email_receipt(uuid,text,text,text)'
+      ) is not null, 'forward replay did not recreate the helper';
+      v_prepare_definition := pg_get_functiondef(
+        'public.hugo_prepare_pristine_delete(uuid,text)'::regprocedure
+      );
+      v_delete_definition := pg_get_functiondef(
+        'public.hugo_delete_identity(uuid,text)'::regprocedure
+      );
+      assert position('hugo_store_non_pristine_email_receipt' in v_prepare_definition) > 0,
+        'forward replay prepare did not restore helper delegation';
+      assert position('hugo_store_non_pristine_email_receipt' in v_delete_definition) > 0,
+        'forward replay delete did not restore helper delegation';
+      v_prepare := public.hugo_prepare_pristine_delete(
+        '70000000-0000-4000-8000-000000000074',
+        '${email}'
+      );
+      v_delete := public.hugo_delete_identity(
+        '70000000-0000-4000-8000-000000000075',
+        '${email}'
+      );
+      assert v_prepare->>'error_code' = 'NON_PRISTINE',
+        'forward replay helper path lost durable refusal behavior';
+      assert v_delete->>'error_code' = 'NON_PRISTINE',
+        'forward replay helper path lost durable refusal behavior';
+      assert (
+        select count(*) from public.hugo_access_operations
+        where email = '${email}'
+      ) = 5, 'forward replay changed lifecycle receipt persistence';
+      assert (
+        select count(*) from auth.users where id = '${userId}'::uuid
+      ) = 1, 'forward replay changed the Auth identity row';
+      assert (
+        select count(*) from public.user_activity where actor_user_id = '${userId}'::uuid
+      ) = 1, 'forward replay changed durable activity';
+      assert has_function_privilege(
+        'service_role',
+        'public.hugo_prepare_pristine_delete(uuid,text)',
+        'execute'
+      ), 'forward replay lost service-role prepare access';
+      assert has_function_privilege(
+        'service_role',
+        'public.hugo_delete_identity(uuid,text)',
+        'execute'
+      ), 'forward replay lost service-role delete access';
+      assert not has_function_privilege(
+        'authenticated',
+        'public.hugo_prepare_pristine_delete(uuid,text)',
+        'execute'
+      ), 'forward replay widened prepare access';
+      assert not has_function_privilege(
+        'authenticated',
+        'public.hugo_delete_identity(uuid,text)',
+        'execute'
+      ), 'forward replay widened delete access';
+    end $$;
+  `);
+}
+
 const cluster = await mkdtemp(join(tmpdir(), "sandra-hugo-migrations-"));
 const port = await freePort();
 let started = false;
@@ -905,6 +1116,10 @@ try {
       ],
       { stdio: ["ignore", "ignore", "inherit"] },
     );
+  }
+
+  if (lane === "rollback-roundtrip") {
+    await verifyRollbackRoundTrip(port, cluster);
   }
 
   sql(port, cluster, `
