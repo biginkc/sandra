@@ -23,13 +23,19 @@ describe("hasCurrentHugoOAuthProof", () => {
     ).toBe(true);
   });
 
-  it("accepts a repeat Hugo exchange when Hugo last_sign_in_at advances", () => {
+  it("rejects a malformed updated_at on the exact Hugo identity", () => {
     expect(
       hasCurrentHugoOAuthProof(
         [{ method: "oauth", timestamp: oauthAt }],
-        hugoIdentity(oauthAt + 30),
+        [
+          {
+            provider: "custom:hugo",
+            last_sign_in_at: new Date((oauthAt - 600) * 1_000).toISOString(),
+            updated_at: "not-a-date",
+          },
+        ],
       ),
-    ).toBe(true);
+    ).toBe(false);
   });
 
   it("accepts hosted custom-provider exchanges when updated_at advances but last_sign_in_at stays stale", () => {
@@ -70,7 +76,13 @@ describe("hasCurrentHugoOAuthProof", () => {
     expect(
       hasCurrentHugoOAuthProof(
         [{ method: "oauth", timestamp: oauthAt }],
-        hugoIdentity(oauthAt - 61),
+        [
+          {
+            provider: "custom:hugo",
+            last_sign_in_at: new Date((oauthAt - 61) * 1_000).toISOString(),
+            updated_at: new Date((oauthAt - 62) * 1_000).toISOString(),
+          },
+        ],
       ),
     ).toBe(false);
   });
