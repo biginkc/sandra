@@ -19,10 +19,15 @@ declare
     'public.hugo_apply_access(uuid,text,text,jsonb,text,timestamptz)'::regprocedure;
   v_definition text := pg_get_functiondef(v_signature);
   v_installed text;
+  v_body_sha256 text;
   v_owner oid;
   v_preflight_owner oid;
   v_security_definer boolean;
   v_config text[];
+  v_old_body_sha256 constant text :=
+    '8037b3168964219172dc0c5607ef46e97dc2fad34dbda31c5204ed0042a68818';
+  v_new_body_sha256 constant text :=
+    'ce70f8c85614ec3bae4947e91068c55b8be02145603fa771fe9a18b9cc430e2d';
   v_old_pattern constant text :=
     $pattern$elsif[[:space:]]+v_membership\.access_status[[:space:]]*=[[:space:]]*'revoked'[[:space:]]+and[[:space:]]+p_status[[:space:]]*=[[:space:]]*'active'[[:space:]]+then$pattern$;
   v_new_pattern constant text :=
@@ -32,12 +37,27 @@ declare
   v_new_message constant text :=
     'A revoked Sandra grant is terminal and cannot be changed.';
 begin
-  if regexp_count(v_definition, v_new_pattern, 1, 'i') = 1
-     and regexp_count(v_definition, v_old_pattern, 1, 'i') = 0
-     and position(v_new_message in v_definition) > 0 then
-    v_installed := v_definition;
+  -- prosrc is the body rendered inside pg_get_functiondef(). Normalize only
+  -- line endings so every other byte remains covered by the fingerprint.
+  select encode(
+    extensions.digest(
+      convert_to(
+        replace(function_row.prosrc, E'\r\n', E'\n'),
+        'UTF8'
+      ),
+      'sha256'
+    ),
+    'hex'
+  )
+    into v_body_sha256
+  from pg_catalog.pg_proc function_row
+  where function_row.oid = v_signature;
+
+  if v_body_sha256 = v_new_body_sha256 then
+    null;
   else
-    if regexp_count(v_definition, v_old_pattern, 1, 'i') <> 1
+    if v_body_sha256 is distinct from v_old_body_sha256
+       or regexp_count(v_definition, v_old_pattern, 1, 'i') <> 1
        or regexp_count(v_definition, v_new_pattern, 1, 'i') <> 0
        or (
          length(v_definition) - length(replace(v_definition, v_old_message, ''))
@@ -54,8 +74,27 @@ begin
     );
     v_definition := replace(v_definition, v_old_message, v_new_message);
     execute v_definition;
+  end if;
 
-    v_installed := pg_get_functiondef(v_signature);
+  select
+    pg_get_functiondef(v_signature),
+    encode(
+      extensions.digest(
+        convert_to(
+          replace(function_row.prosrc, E'\r\n', E'\n'),
+          'UTF8'
+        ),
+        'sha256'
+      ),
+      'hex'
+    )
+    into v_installed, v_body_sha256
+  from pg_catalog.pg_proc function_row
+  where function_row.oid = v_signature;
+
+  if v_body_sha256 is distinct from v_new_body_sha256 then
+    raise exception 'HUGO_REVOKED_TERMINAL_INSTALL_STATE_CHANGED'
+      using errcode = '55000';
   end if;
 
   select function_row.proowner, function_row.prosecdef, function_row.proconfig

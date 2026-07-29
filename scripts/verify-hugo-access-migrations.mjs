@@ -1174,17 +1174,21 @@ try {
           'public.hugo_apply_access(uuid,text,text,jsonb,text,timestamptz)'::regprocedure
         );
       begin
-        if position(
-          'A revoked Sandra grant cannot be reactivated.'
-          in v_definition
-        ) = 0 then
+        if regexp_count(v_definition, '''hugo_apply_access''') <> 1 then
           raise exception 'TERMINAL_REVOCATION_DRIFT_FIXTURE_MISSING';
         end if;
         v_definition := replace(
           v_definition,
-          'A revoked Sandra grant cannot be reactivated.',
-          'A deliberately drifted revoked-grant message.'
+          '''hugo_apply_access''',
+          '''hugo_apply_accesx'''
         );
+        if octet_length(v_definition) <> octet_length(
+          pg_get_functiondef(
+            'public.hugo_apply_access(uuid,text,text,jsonb,text,timestamptz)'::regprocedure
+          )
+        ) then
+          raise exception 'TERMINAL_REVOCATION_DRIFT_NOT_SINGLE_BYTE';
+        end if;
         execute v_definition;
       end
       $perturb_terminal_revocation_source$;
@@ -1266,6 +1270,167 @@ try {
     "postgres",
     terminalInstalledDriftDatabase,
   ]);
+  run(
+    "psql",
+    [
+      "-h",
+      cluster,
+      "-p",
+      String(port),
+      "-U",
+      "postgres",
+      "-d",
+      terminalInstalledDriftDatabase,
+      "-v",
+      "ON_ERROR_STOP=1",
+      "-f",
+      authorizationHardeningMigration,
+    ],
+    { stdio: ["ignore", "ignore", "inherit"] },
+  );
+  sql(
+    port,
+    cluster,
+    `
+      do $hand_patch_terminal_revocation_source$
+      declare
+        v_definition text := pg_get_functiondef(
+          'public.hugo_apply_access(uuid,text,text,jsonb,text,timestamptz)'::regprocedure
+        );
+      begin
+        v_definition := replace(
+          v_definition,
+          'elsif v_membership.access_status = ''revoked'' and p_status = ''active'' then',
+          'elsif v_membership.access_status = ''revoked'' then'
+        );
+        v_definition := replace(
+          v_definition,
+          'A revoked Sandra grant cannot be reactivated.',
+          'A revoked Sandra grant is terminal and cannot be changed.'
+        );
+        execute v_definition;
+      end
+      $hand_patch_terminal_revocation_source$;
+    `,
+    { database: terminalInstalledDriftDatabase },
+  );
+  run(
+    "psql",
+    [
+      "-h",
+      cluster,
+      "-p",
+      String(port),
+      "-U",
+      "postgres",
+      "-d",
+      terminalInstalledDriftDatabase,
+      "-v",
+      "ON_ERROR_STOP=1",
+      "-f",
+      terminalRevocationMigration,
+    ],
+    { stdio: ["ignore", "ignore", "inherit"] },
+  );
+  sql(
+    port,
+    cluster,
+    `
+      do $perturb_installed_terminal_revocation_source$
+      declare
+        v_definition text := pg_get_functiondef(
+          'public.hugo_apply_access(uuid,text,text,jsonb,text,timestamptz)'::regprocedure
+        );
+      begin
+        if regexp_count(v_definition, '''hugo_apply_access''') <> 1 then
+          raise exception 'INSTALLED_TERMINAL_REVOCATION_DRIFT_FIXTURE_MISSING';
+        end if;
+        v_definition := replace(
+          v_definition,
+          '''hugo_apply_access''',
+          '''hugo_apply_accesx'''
+        );
+        if octet_length(v_definition) <> octet_length(
+          pg_get_functiondef(
+            'public.hugo_apply_access(uuid,text,text,jsonb,text,timestamptz)'::regprocedure
+          )
+        ) then
+          raise exception 'INSTALLED_TERMINAL_REVOCATION_DRIFT_NOT_SINGLE_BYTE';
+        end if;
+        execute v_definition;
+      end
+      $perturb_installed_terminal_revocation_source$;
+    `,
+    { database: terminalInstalledDriftDatabase },
+  );
+  const installedBodyDriftDefinition = sql(
+    port,
+    cluster,
+    `
+      select pg_get_functiondef(
+        'public.hugo_apply_access(uuid,text,text,jsonb,text,timestamptz)'::regprocedure
+      );
+    `,
+    {
+      capture: true,
+      database: terminalInstalledDriftDatabase,
+      extraArgs: ["-Atq"],
+    },
+  ).trim();
+  let installedBodyDriftFailure = "";
+  try {
+    run(
+      "psql",
+      [
+        "-h",
+        cluster,
+        "-p",
+        String(port),
+        "-U",
+        "postgres",
+        "-d",
+        terminalInstalledDriftDatabase,
+        "-v",
+        "ON_ERROR_STOP=1",
+        "-f",
+        terminalRevocationMigration,
+      ],
+      { stdio: ["ignore", "pipe", "pipe"], encoding: "utf8" },
+    );
+  } catch (error) {
+    installedBodyDriftFailure = `${error.stderr ?? error.message}`;
+  }
+  if (
+    !installedBodyDriftFailure.includes(
+      "HUGO_REVOKED_TERMINAL_INSTALL_STATE_CHANGED",
+    )
+  ) {
+    throw new Error(
+      "Terminal revocation migration accepted a single-byte-corrupted " +
+        `installed body: ${installedBodyDriftFailure}`,
+    );
+  }
+  const afterInstalledBodyDriftFailureDefinition = sql(
+    port,
+    cluster,
+    `
+      select pg_get_functiondef(
+        'public.hugo_apply_access(uuid,text,text,jsonb,text,timestamptz)'::regprocedure
+      );
+    `,
+    {
+      capture: true,
+      database: terminalInstalledDriftDatabase,
+      extraArgs: ["-Atq"],
+    },
+  ).trim();
+  if (
+    afterInstalledBodyDriftFailureDefinition !== installedBodyDriftDefinition
+  ) {
+    throw new Error(
+      "Installed terminal-revocation drift failure changed the function",
+    );
+  }
   for (const migration of [
     authorizationHardeningMigration,
     terminalRevocationMigration,
@@ -1289,24 +1454,6 @@ try {
       { stdio: ["ignore", "ignore", "inherit"] },
     );
   }
-  run(
-    "psql",
-    [
-      "-h",
-      cluster,
-      "-p",
-      String(port),
-      "-U",
-      "postgres",
-      "-d",
-      terminalInstalledDriftDatabase,
-      "-v",
-      "ON_ERROR_STOP=1",
-      "-f",
-      terminalRevocationMigration,
-    ],
-    { stdio: ["ignore", "ignore", "inherit"] },
-  );
   sql(
     port,
     cluster,
@@ -3097,8 +3244,10 @@ try {
       applyRetryOrdering: "pass",
       configExpiryApply: "pass",
       terminalRevocation: "pass",
-      terminalRevocationInstallDriftFailClosed: "pass",
+      terminalRevocationOldBodyByteDriftFailClosed: "pass",
       terminalRevocationAlreadyInstalledReplay: "pass",
+      terminalRevocationAlreadyHandPatched: "pass",
+      terminalRevocationNewBodyByteDriftFailClosed: "pass",
       terminalRevocationInstalledStateSelfCheck: "pass",
       permanentOwnerInvariant: "pass",
       concurrentOwnerTransitions: "pass",
