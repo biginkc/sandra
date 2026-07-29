@@ -120,3 +120,47 @@
 - Final read-only Claude Code verdict: `REVIEW_CLEAN` after the active-access
   server guard. Its remaining expired-row proof suggestion was added and passes
   against `sandra-crm-test`.
+
+## EXECUTE 2/3 — independent-review repairs (2026-07-29)
+
+- Baseline PR head: `47e5539256207da29776881ce6a6cb3a7de228dc`
+  on PR #344.
+- Accepted P1: the server action checked only `ADMIN_EMAILS` before opening the
+  service-role client. It now queries the caller's own membership through the
+  caller-scoped Supabase client and requires active, non-deletion-prepared,
+  unexpired Sandra access before creating the service-role client. The caller
+  and target guards use the same timestamp and lifecycle predicate.
+- Accepted P2: the Hugo URL parser trusted `new URL()` protocol normalization.
+  It now rejects ASCII controls and userinfo and requires a literal `https://`
+  prefix, or a literal `http://` prefix plus an allowed loopback host outside
+  production.
+- The former integration success path with an allowlisted Auth UUID but no
+  membership now proves denial. Real-JWT integration cases also prove denial
+  for suspended, expired, and deletion-prepared callers while Auth remains
+  valid; each verifies the service-role factory is not called and the target
+  role stays unchanged. A separate active-caller case preserves the success
+  contract.
+- Focused unit proof:
+  `npm test -- 'src/app/(dashboard)/admin/users/actions.test.ts' 'src/app/(dashboard)/admin/users/hugo-url.test.ts'`
+  passed 29/29.
+- Hosted proof, using the existing gitignored test configuration without
+  printing or persisting credential values:
+  `npx vitest run --config vitest.integration.config.ts ./supabase/migrations/054_memberships_and_rls_rewrite.integration.test.ts`
+  passed 18/18 against `sandra-crm-test`. No migration was applied.
+- Broad proof: `npm run verify` passed typecheck, 1,510 unit tests, and 499 RTL
+  tests. Changed-file ESLint and `git diff --check` passed.
+- Three fresh read-only manual-review lanes covered authorization/Supabase,
+  parser/config security, and tests/runtime/scope. All returned no findings.
+  Human browser review was judged non-material for this server-only and
+  deterministic-parser repair.
+- Fallow reported inherited unused dependencies and admin-page clones plus
+  intentional integration-fixture duplication/test-helper complexity; none is
+  a valid repair finding. A high-confidence diff scan found no committed
+  credential pattern.
+- Residual, not hidden: a suspend that races between the caller lookup and the
+  target update is not atomic. Closing that narrower in-flight window would
+  require a database RPC/migration, which this EXECUTE block forbids. A caller
+  who is already suspended, expired, deletion-prepared, or missing membership
+  is denied.
+- No SQL migration was added or changed. No production state was read or
+  mutated. PR #344 remains unmerged for Claude's 3/3 review.

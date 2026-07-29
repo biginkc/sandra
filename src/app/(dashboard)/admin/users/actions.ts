@@ -80,6 +80,32 @@ export async function updateMembershipRole(
       };
     }
 
+    const activeAt = new Date().toISOString();
+    const { data: callerMembership, error: callerMembershipError } =
+      await supabase
+        .from("memberships")
+        .select("user_id")
+        .eq("user_id", user.id)
+        .eq("org_id", SANDRA_ORG_ID)
+        .eq("access_status", "active")
+        .is("deletion_prepared_at", null)
+        .or(
+          `access_expires_at.is.null,access_expires_at.gt.${activeAt}`,
+        )
+        .maybeSingle();
+    if (
+      callerMembershipError ||
+      callerMembership?.user_id !== user.id
+    ) {
+      return {
+        ok: false,
+        error: {
+          code: "NOT_ADMIN",
+          message: "Only admins with active Sandra access can change roles.",
+        },
+      };
+    }
+
     const membershipAdmin =
       createAdminClient() as unknown as MembershipRoleAdminClient;
     const { data, error } = await membershipAdmin
@@ -90,7 +116,7 @@ export async function updateMembershipRole(
       .eq("access_status", "active")
       .is("deletion_prepared_at", null)
       .or(
-        `access_expires_at.is.null,access_expires_at.gt.${new Date().toISOString()}`,
+        `access_expires_at.is.null,access_expires_at.gt.${activeAt}`,
       )
       .select("user_id,role")
       .maybeSingle();

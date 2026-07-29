@@ -35,4 +35,25 @@ describe("parseHugoUrl", () => {
       parseHugoUrl("http://identity.example.test/team", "development"),
     ).toBeNull();
   });
+
+  it.each([
+    "https://hugo.bmhgroupkc.com@evil.example/team",
+    "https://user:secret@identity.example.test/team",
+  ])("rejects URLs containing userinfo: %s", (configured) => {
+    expect(parseHugoUrl(configured, "production")).toBeNull();
+  });
+
+  it.each([
+    "https:evil.example/team",
+    "http:localhost:3001/team",
+  ])("rejects slashless URL schemes: %s", (configured) => {
+    expect(parseHugoUrl(configured, "development")).toBeNull();
+  });
+
+  it.each([
+    "https://identity.example.test/\nteam",
+    "https://identity.example.test/\u007Fteam",
+  ])("rejects ASCII control characters: %s", (configured) => {
+    expect(parseHugoUrl(configured, "production")).toBeNull();
+  });
 });

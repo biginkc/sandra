@@ -20,16 +20,58 @@ vi.mock("@/lib/errors/report", () => ({
   reportError: mocks.reportError,
 }));
 
-function mockSession(email: string | null = "admin@bmhgroupkc.com") {
+function mockSession({
+  email = "admin@bmhgroupkc.com",
+  userId = "admin-user",
+  membershipData,
+  membershipError = null,
+  membershipThrown,
+}: {
+  email?: string | null;
+  userId?: string;
+  membershipData?: { user_id: string } | null;
+  membershipError?: { message: string } | null;
+  membershipThrown?: Error;
+} = {}) {
+  const maybeSingle = vi.fn().mockImplementation(async () => {
+    if (membershipThrown) throw membershipThrown;
+    return {
+      data:
+        membershipData === undefined ? { user_id: userId } : membershipData,
+      error: membershipError,
+    };
+  });
+  const query = {
+    eq: vi.fn(),
+    is: vi.fn(),
+    or: vi.fn(),
+    maybeSingle,
+  };
+  query.eq.mockReturnValue(query);
+  query.is.mockReturnValue(query);
+  query.or.mockReturnValue(query);
+  const select = vi.fn(() => query);
+  const from = vi.fn(() => ({ select }));
+
   mocks.createClient.mockResolvedValue({
     auth: {
       getUser: vi.fn().mockResolvedValue({
         data: {
-          user: email ? { id: "admin-user", email } : null,
+          user: email ? { id: userId, email } : null,
         },
       }),
     },
+    from,
   });
+
+  return {
+    from,
+    select,
+    eq: query.eq,
+    is: query.is,
+    or: query.or,
+    maybeSingle,
+  };
 }
 
 function mockRoleUpdate({
@@ -89,6 +131,7 @@ describe("updateMembershipRole", () => {
   ] as const)(
     "updates only the existing membership role to %s",
     async (requestedRole, savedRole) => {
+      const caller = mockSession();
       const client = mockRoleUpdate({
         data: { user_id: "member-user", role: savedRole },
       });
@@ -99,6 +142,26 @@ describe("updateMembershipRole", () => {
         ok: true,
         data: { userId: "member-user", role: savedRole },
       });
+      expect(caller.from).toHaveBeenCalledWith("memberships");
+      expect(caller.select).toHaveBeenCalledWith("user_id");
+      expect(caller.eq).toHaveBeenNthCalledWith(1, "user_id", "admin-user");
+      expect(caller.eq).toHaveBeenNthCalledWith(
+        2,
+        "org_id",
+        "00000000-0000-0000-0000-000000000bbb",
+      );
+      expect(caller.eq).toHaveBeenNthCalledWith(
+        3,
+        "access_status",
+        "active",
+      );
+      expect(caller.is).toHaveBeenCalledWith("deletion_prepared_at", null);
+      expect(caller.or).toHaveBeenCalledWith(
+        expect.stringMatching(
+          /^access_expires_at\.is\.null,access_expires_at\.gt\.\d{4}-\d{2}-\d{2}T/,
+        ),
+      );
+      expect(caller.maybeSingle).toHaveBeenCalledOnce();
       expect(client.from).toHaveBeenCalledWith("memberships");
       expect(client.update).toHaveBeenCalledWith({ role: requestedRole });
       expect(client.eq).toHaveBeenNthCalledWith(1, "user_id", "member-user");
@@ -165,13 +228,61 @@ describe("updateMembershipRole", () => {
   });
 
   it("requires the existing Sandra admin allowlist", async () => {
-    mockSession("member@bmhgroupkc.com");
+    mockSession({ email: "member@bmhgroupkc.com" });
 
     const result = await updateMembershipRole("member-user", "owner");
 
     expect(result).toMatchObject({
       ok: false,
       error: { code: "NOT_ADMIN" },
+    });
+    expect(mocks.createAdminClient).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    {
+      label: "has no active Sandra membership",
+      membershipData: null,
+      membershipError: null,
+    },
+    {
+      label: "has a mismatched membership result",
+      membershipData: { user_id: "different-user" },
+      membershipError: null,
+    },
+    {
+      label: "cannot verify their membership",
+      membershipData: null,
+      membershipError: { message: "membership lookup unavailable" },
+    },
+  ])(
+    "denies an allowlisted admin who $label before opening an admin client",
+    async ({ membershipData, membershipError }) => {
+      mockSession({ membershipData, membershipError });
+
+      const result = await updateMembershipRole("member-user", "owner");
+
+      expect(result).toEqual({
+        ok: false,
+        error: {
+          code: "NOT_ADMIN",
+          message: "Only admins with active Sandra access can change roles.",
+        },
+      });
+      expect(mocks.createAdminClient).not.toHaveBeenCalled();
+    },
+  );
+
+  it("fails closed when the caller membership lookup throws", async () => {
+    mockSession({
+      membershipThrown: new Error("caller membership transport unavailable"),
+    });
+
+    const result = await updateMembershipRole("member-user", "owner");
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: { code: "ROLE_UPDATE_FAILED" },
     });
     expect(mocks.createAdminClient).not.toHaveBeenCalled();
   });
