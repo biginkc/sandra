@@ -38,6 +38,13 @@ const authorizationHardeningMigration = readFileSync(
   ),
   "utf8",
 );
+const terminalRevocationMigration = readFileSync(
+  resolve(
+    process.cwd(),
+    "supabase/migrations/20260729170000_hugo_revoked_access_terminal.sql",
+  ),
+  "utf8",
+);
 
 describe("Hugo/Sandra SQL connector contract", () => {
   it("keeps the frozen PostgREST RPC names and argument order", () => {
@@ -65,10 +72,18 @@ describe("Hugo/Sandra SQL connector contract", () => {
       "hugo_prepare_pristine_delete(uuid, text)",
       "hugo_delete_identity(uuid, text)",
     ]) {
-      expect(migration).toContain(`revoke execute on function public.${fn} from public;`);
-      expect(migration).toContain(`revoke execute on function public.${fn} from anon;`);
-      expect(migration).toContain(`revoke execute on function public.${fn} from authenticated;`);
-      expect(migration).toContain(`grant execute on function public.${fn} to service_role;`);
+      expect(migration).toContain(
+        `revoke execute on function public.${fn} from public;`,
+      );
+      expect(migration).toContain(
+        `revoke execute on function public.${fn} from anon;`,
+      );
+      expect(migration).toContain(
+        `revoke execute on function public.${fn} from authenticated;`,
+      );
+      expect(migration).toContain(
+        `grant execute on function public.${fn} to service_role;`,
+      );
     }
   });
 
@@ -80,9 +95,7 @@ describe("Hugo/Sandra SQL connector contract", () => {
     expect(migration).toContain(
       "and v_membership.access_expires_at is not distinct from p_access_expires_at",
     );
-    expect(migration).toContain(
-      "mismatches fall through to apply them.",
-    );
+    expect(migration).toContain("mismatches fall through to apply them.");
     expect(migration).not.toContain(
       "elsif v_membership.access_status = p_status and v_membership.role = p_role then",
     );
@@ -93,20 +106,56 @@ describe("Hugo/Sandra SQL connector contract", () => {
     expect(migration).toContain("REVOKED_NOT_REACTIVATABLE");
   });
 
+  it("ships a forward-only repair that makes revoked access terminal", () => {
+    expect(terminalRevocationMigration).toContain(
+      "p_status[[:space:]]*<>[[:space:]]*'revoked'",
+    );
+    expect(terminalRevocationMigration).toContain(
+      "A revoked Sandra grant is terminal and cannot change status.",
+    );
+    expect(terminalRevocationMigration).toContain(
+      "HUGO_REVOKED_TERMINAL_INSTALL_STATE_CHANGED",
+    );
+    expect(terminalRevocationMigration).toContain(
+      "HUGO_REVOKED_TERMINAL_INSTALL_FAILED",
+    );
+    expect(terminalRevocationMigration).toContain(
+      "hashtextextended('hugo-sandra-privileged-lifecycle-v1', 0)",
+    );
+  });
+
   it("binds every lifecycle receipt to a canonical request hash", () => {
     expect(migration).toContain("request_hash text");
-    expect(migration).toContain("create or replace function public.hugo_request_hash(");
+    expect(migration).toContain(
+      "create or replace function public.hugo_request_hash(",
+    );
     expect(migration).toContain("digest(");
     expect(migration).toContain("'{request_hash}'");
-    expect(migration).toContain("create or replace function public.hugo_store_access_operation(");
-    expect(migration).toContain("public.hugo_store_access_operation(p_operation_id, v_operation");
-    expect(migration).toContain("public.hugo_store_access_operation(p_operation_id, 'preparePristineDelete'");
-    expect(migration).toContain("public.hugo_store_access_operation(p_operation_id, 'deleteIdentity'");
+    expect(migration).toContain(
+      "create or replace function public.hugo_store_access_operation(",
+    );
+    expect(migration).toContain(
+      "public.hugo_store_access_operation(p_operation_id, v_operation",
+    );
+    expect(migration).toContain(
+      "public.hugo_store_access_operation(p_operation_id, 'preparePristineDelete'",
+    );
+    expect(migration).toContain(
+      "public.hugo_store_access_operation(p_operation_id, 'deleteIdentity'",
+    );
     expect(migration).toContain("v_prior_hash is distinct from v_request_hash");
-    expect(migration).toContain("Operation id was already used with a different request.");
-    expect(migration).not.toContain("if (v_receipt->>'ok')::boolean then\n    insert into public.hugo_access_operations");
-    expect(hardDeleteMigration).toContain("v_prior_hash is distinct from v_request_hash");
-    expect(hardDeleteMigration).toContain("public.hugo_store_access_operation(p_operation_id, 'deleteIdentity'");
+    expect(migration).toContain(
+      "Operation id was already used with a different request.",
+    );
+    expect(migration).not.toContain(
+      "if (v_receipt->>'ok')::boolean then\n    insert into public.hugo_access_operations",
+    );
+    expect(hardDeleteMigration).toContain(
+      "v_prior_hash is distinct from v_request_hash",
+    );
+    expect(hardDeleteMigration).toContain(
+      "public.hugo_store_access_operation(p_operation_id, 'deleteIdentity'",
+    );
   });
 
   it("ships a forward-only hash migration for already-provisioned environments", () => {
@@ -122,18 +171,14 @@ describe("Hugo/Sandra SQL connector contract", () => {
     expect(forwardHashMigration).toContain(
       "alter function public.hugo_apply_access(uuid, text, text, jsonb, text, timestamptz)\n      rename to hugo_apply_access_unhashed;",
     );
-    expect(forwardHashMigration).toContain(
-      "v_prior_hash = v_hash",
-    );
+    expect(forwardHashMigration).toContain("v_prior_hash = v_hash");
     expect(forwardHashMigration).toContain(
       "Operation id was already used with a different request.",
     );
     expect(forwardHashMigration).toContain(
       "hugo_prepare_pristine_delete_unhashed",
     );
-    expect(forwardHashMigration).toContain(
-      "hugo_delete_identity_unhashed",
-    );
+    expect(forwardHashMigration).toContain("hugo_delete_identity_unhashed");
     expect(forwardHashMigration).toContain(
       "p_operation_id, p_email, p_role, v_config, p_status, p_access_expires_at",
     );
@@ -241,9 +286,7 @@ describe("Hugo/Sandra SQL connector contract", () => {
     expect(authorizationHardeningMigration).toContain(
       "'proceed', true, 'request_hash', v_hash",
     );
-    expect(authorizationHardeningMigration).toContain(
-      "v_claim_hash <> v_hash",
-    );
+    expect(authorizationHardeningMigration).toContain("v_claim_hash <> v_hash");
     expect(authorizationHardeningMigration).toContain(
       "set consumed_at = now()",
     );
@@ -303,10 +346,12 @@ describe("Hugo/Sandra SQL connector contract", () => {
       const body = authorizationHardeningMigration.slice(
         authorizationHardeningMigration.lastIndexOf(signature),
       );
-      expect(body.indexOf("select op.operation, op.request_hash, op.receipt"))
-        .toBeGreaterThan(-1);
-      expect(body.indexOf("select op.operation, op.request_hash, op.receipt"))
-        .toBeLessThan(body.indexOf(identityLookup));
+      expect(
+        body.indexOf("select op.operation, op.request_hash, op.receipt"),
+      ).toBeGreaterThan(-1);
+      expect(
+        body.indexOf("select op.operation, op.request_hash, op.receipt"),
+      ).toBeLessThan(body.indexOf(identityLookup));
     }
     expect(authorizationHardeningMigration).not.toContain(
       "v_receipt := public.hugo_prepare_pristine_delete_authorization_unchecked",
@@ -391,7 +436,9 @@ describe("Hugo/Sandra SQL connector contract", () => {
     ]) {
       expect(inventoryMigration).toContain(field);
     }
-    expect(inventoryMigration).toContain("perform public.hugo_require_service_role();");
+    expect(inventoryMigration).toContain(
+      "perform public.hugo_require_service_role();",
+    );
     expect(inventoryMigration).toContain(
       "order by lower(trim(coalesce(u.email, ''))), m.user_id;",
     );
@@ -401,22 +448,26 @@ describe("Hugo/Sandra SQL connector contract", () => {
     expect(inventoryMigration).toContain(
       "grant execute on function public.hugo_list_access() to service_role;",
     );
-    expect(inventoryMigration).not.toMatch(/\binsert\s+into\b|\bupdate\s+[^\n]+\bset\b|\bdelete\s+from\b/i);
+    expect(inventoryMigration).not.toMatch(
+      /\binsert\s+into\b|\bupdate\s+[^\n]+\bset\b|\bdelete\s+from\b/i,
+    );
   });
 
   it("hard-deletes Auth after the guarded local cleanup and keeps retries safe", () => {
     const missingMembershipBranch = hardDeleteMigration.slice(
       hardDeleteMigration.indexOf("if not found then"),
-      hardDeleteMigration.indexOf("elsif v_membership.deletion_prepared_at is null"),
+      hardDeleteMigration.indexOf(
+        "elsif v_membership.deletion_prepared_at is null",
+      ),
     );
     expect(missingMembershipBranch).toContain(
       "v_activity := public.hugo_has_durable_activity(v_user_id)\n        or public.hugo_has_prior_sign_in(v_user_id);",
     );
     expect(missingMembershipBranch).toContain("elsif not v_has_prepare then");
     expect(missingMembershipBranch).toContain("v_should_delete_auth := true;");
-    expect(hardDeleteMigration.indexOf("delete from public.memberships")).toBeLessThan(
-      hardDeleteMigration.indexOf("delete from auth.users"),
-    );
+    expect(
+      hardDeleteMigration.indexOf("delete from public.memberships"),
+    ).toBeLessThan(hardDeleteMigration.indexOf("delete from auth.users"));
     expect(hardDeleteMigration).toContain(
       "delete from auth.users where id = v_user_id;",
     );
@@ -433,7 +484,9 @@ describe("Hugo/Sandra SQL connector contract", () => {
     expect(hardDeleteMigration).toContain(
       "where operation_id = p_operation_id;",
     );
-    expect(hardDeleteMigration).toContain("return public.hugo_receipt_with_request_hash(v_prior, v_request_hash);");
+    expect(hardDeleteMigration).toContain(
+      "return public.hugo_receipt_with_request_hash(v_prior, v_request_hash);",
+    );
     expect(hardDeleteMigration).toContain(
       "perform public.hugo_store_access_operation(p_operation_id, 'deleteIdentity'",
     );

@@ -22,6 +22,7 @@ const freshMigrationNames = [
   "20260728130000_hugo_access_operation_request_hash.sql",
   "20260728150000_hugo_access_authorization_hardening.sql",
   "20260729010000_hugo_auth_identity_key_lifecycle_lock.sql",
+  "20260729170000_hugo_revoked_access_terminal.sql",
 ];
 const rollbackArtifactName =
   "20260729010000_hugo_auth_identity_key_lifecycle_lock.sql";
@@ -29,8 +30,7 @@ const hostedSnapshotNames = freshMigrationNames.slice(0, 4);
 const forwardMigrationNames = freshMigrationNames.slice(
   hostedSnapshotNames.length,
 );
-const hostedSnapshotSourceCommit =
-  "415c283cec47b71ac03cd1cdbb3aa1149a4ef4c5";
+const hostedSnapshotSourceCommit = "415c283cec47b71ac03cd1cdbb3aa1149a4ef4c5";
 const hostedSnapshotHashes = {
   "20260727150000_hugo_access_provisioner.sql":
     "4b2ff1db73dc4e1c45c0073c48f4c9efc8f28a7137e7f8f1f456699adcfc6fe6",
@@ -52,17 +52,21 @@ if (lane === "all") {
       stdio: "inherit",
     });
   }
-  console.log(JSON.stringify({
-    ok: true,
-    lanes: ["hosted-snapshot-forward", "fresh-full-chain"],
-  }));
+  console.log(
+    JSON.stringify({
+      ok: true,
+      lanes: ["hosted-snapshot-forward", "fresh-full-chain"],
+    }),
+  );
   process.exit(0);
 }
 
 if (
-  !["hosted-snapshot-forward", "fresh-full-chain", "rollback-roundtrip"].includes(
-    lane,
-  )
+  ![
+    "hosted-snapshot-forward",
+    "fresh-full-chain",
+    "rollback-roundtrip",
+  ].includes(lane)
 ) {
   throw new Error(`Unknown Sandra Hugo verification lane: ${lane}`);
 }
@@ -95,9 +99,7 @@ if (lane === "hosted-snapshot-forward") {
       name,
     );
     const fixture = readFileSync(path);
-    const actualHash = createHash("sha256")
-      .update(fixture)
-      .digest("hex");
+    const actualHash = createHash("sha256").update(fixture).digest("hex");
     if (actualHash !== expectedHash) {
       throw new Error(
         `Hosted migration snapshot changed: ${name} ${actualHash}`,
@@ -107,10 +109,7 @@ if (lane === "hosted-snapshot-forward") {
     try {
       immutableSource = execFileSync(
         "git",
-        [
-          "show",
-          `${hostedSnapshotSourceCommit}:supabase/migrations/${name}`,
-        ],
+        ["show", `${hostedSnapshotSourceCommit}:supabase/migrations/${name}`],
         { cwd: root },
       );
     } catch {
@@ -148,7 +147,7 @@ function sql(port, socket, statement, options = {}) {
       "postgres",
       "-v",
       "ON_ERROR_STOP=1",
-      ...options.extraArgs ?? [],
+      ...(options.extraArgs ?? []),
     ],
     {
       input: statement,
@@ -264,7 +263,10 @@ async function waitForMatchingAdvisoryWait(
 }
 
 async function verifyAuthIdentityKeySerialization(port, socket) {
-  const insertSession = sqlAsync(port, socket, `
+  const insertSession = sqlAsync(
+    port,
+    socket,
+    `
     set application_name = 'hugo-auth-insert-identity-race';
     begin;
     insert into auth.users(id, email) values (
@@ -273,14 +275,14 @@ async function verifyAuthIdentityKeySerialization(port, socket) {
     );
     select pg_sleep(1);
     commit;
-  `);
-  await waitForActiveQuery(
+  `,
+  );
+  await waitForActiveQuery(port, socket, "hugo-auth-insert-identity-race");
+
+  const insertLifecycle = sqlAsync(
     port,
     socket,
-    "hugo-auth-insert-identity-race",
-  );
-
-  const insertLifecycle = sqlAsync(port, socket, `
+    `
     set application_name = 'hugo-auth-insert-lifecycle-race';
     begin;
     select set_config('request.jwt.claim.role', 'service_role', false);
@@ -295,7 +297,8 @@ async function verifyAuthIdentityKeySerialization(port, socket) {
       'auth-insert-race@bmhgroupkc.com'
     );
     commit;
-  `);
+  `,
+  );
   await waitForMatchingAdvisoryWait(
     port,
     socket,
@@ -312,7 +315,7 @@ async function verifyAuthIdentityKeySerialization(port, socket) {
     throw new Error(
       `Auth insert serialization failed: ${JSON.stringify(
         insertResults.map((result) =>
-          result.status === "fulfilled" ? "fulfilled" : result.reason.message
+          result.status === "fulfilled" ? "fulfilled" : result.reason.message,
         ),
       )}`,
     );
@@ -343,7 +346,7 @@ async function verifyAuthIdentityKeySerialization(port, socket) {
   ).trim();
   if (
     insertReceipt !==
-      "preparePristineDelete:missing:true:none|deleteIdentity:missing:true:none"
+    "preparePristineDelete:missing:true:none|deleteIdentity:missing:true:none"
   ) {
     throw new Error(
       `Lifecycle did not observe and delete the serialized Auth insert: ${insertReceipt}`,
@@ -366,15 +369,22 @@ async function verifyAuthIdentityKeySerialization(port, socket) {
     );
   }
 
-  sql(port, socket, `
+  sql(
+    port,
+    socket,
+    `
     insert into auth.users(id, email, last_sign_in_at) values (
       '70000000-0000-4000-8000-000000000011',
       'before-auth-email-race@bmhgroupkc.com',
       now()
     );
-  `);
+  `,
+  );
 
-  const updateSession = sqlAsync(port, socket, `
+  const updateSession = sqlAsync(
+    port,
+    socket,
+    `
     set application_name = 'hugo-auth-email-update-identity-race';
     begin;
     update auth.users
@@ -382,14 +392,18 @@ async function verifyAuthIdentityKeySerialization(port, socket) {
     where id = '70000000-0000-4000-8000-000000000011'::uuid;
     select pg_sleep(1);
     commit;
-  `);
+  `,
+  );
   await waitForActiveQuery(
     port,
     socket,
     "hugo-auth-email-update-identity-race",
   );
 
-  const updateLifecycle = sqlAsync(port, socket, `
+  const updateLifecycle = sqlAsync(
+    port,
+    socket,
+    `
     set application_name = 'hugo-auth-email-update-lifecycle-race';
     begin;
     select set_config('request.jwt.claim.role', 'service_role', false);
@@ -404,7 +418,8 @@ async function verifyAuthIdentityKeySerialization(port, socket) {
       'after-auth-email-race@bmhgroupkc.com'
     );
     commit;
-  `);
+  `,
+  );
   await waitForMatchingAdvisoryWait(
     port,
     socket,
@@ -421,7 +436,7 @@ async function verifyAuthIdentityKeySerialization(port, socket) {
     throw new Error(
       `Auth email-update serialization failed: ${JSON.stringify(
         updateResults.map((result) =>
-          result.status === "fulfilled" ? "fulfilled" : result.reason.message
+          result.status === "fulfilled" ? "fulfilled" : result.reason.message,
         ),
       )}`,
     );
@@ -453,7 +468,7 @@ async function verifyAuthIdentityKeySerialization(port, socket) {
   ).trim();
   if (
     updateReceipt !==
-      "preparePristineDelete:missing:true:false:NON_PRISTINE|" +
+    "preparePristineDelete:missing:true:false:NON_PRISTINE|" +
       "deleteIdentity:missing:true:false:NON_PRISTINE"
   ) {
     throw new Error(
@@ -461,7 +476,10 @@ async function verifyAuthIdentityKeySerialization(port, socket) {
     );
   }
 
-  sql(port, socket, `
+  sql(
+    port,
+    socket,
+    `
     select set_config('request.jwt.claim.role', 'service_role', false);
     do $$
     declare
@@ -517,7 +535,8 @@ async function verifyAuthIdentityKeySerialization(port, socket) {
             operation.request_hash
       ) = 2, 'durable lifecycle receipts lost exact request hashes';
     end $$;
-  `);
+  `,
+  );
 
   const retainedUpdatedIdentity = sql(
     port,
@@ -535,7 +554,10 @@ async function verifyAuthIdentityKeySerialization(port, socket) {
     );
   }
 
-  sql(port, socket, `
+  sql(
+    port,
+    socket,
+    `
     delete from auth.users
     where id = '70000000-0000-4000-8000-000000000011'::uuid;
     delete from public.hugo_access_operations
@@ -545,7 +567,8 @@ async function verifyAuthIdentityKeySerialization(port, socket) {
       '70000000-0000-4000-8000-000000000012'::uuid,
       '70000000-0000-4000-8000-000000000013'::uuid
     );
-  `);
+  `,
+  );
 }
 
 async function freePort() {
@@ -580,7 +603,10 @@ async function verifyRollbackRoundTrip(port, socket) {
   // Seed a real durable identity and a receipt before rollback. The counts
   // are captured from the database, then checked after both DDL transitions;
   // a rollback that merely compiles but mutates rows cannot pass this proof.
-  sql(port, socket, `
+  sql(
+    port,
+    socket,
+    `
     select set_config('request.jwt.claim.role', 'service_role', false);
     insert into auth.users(id, email) values
       ('${userId}', '${email}');
@@ -601,7 +627,8 @@ async function verifyRollbackRoundTrip(port, socket) {
           '70000000-0000-4000-8000-000000000071'::uuid
       ) = 1, 'forward helper did not persist its receipt';
     end $$;
-  `);
+  `,
+  );
   const before = sql(
     port,
     socket,
@@ -617,23 +644,23 @@ async function verifyRollbackRoundTrip(port, socket) {
     throw new Error(`Unexpected rollback fixture baseline: ${before}`);
   }
 
-  run(
-    "psql",
-    [
-      "-h",
-      socket,
-      "-p",
-      String(port),
-      "-U",
-      "postgres",
-      "-v",
-      "ON_ERROR_STOP=1",
-      "-f",
-      rollbackArtifact,
-    ],
-  );
+  run("psql", [
+    "-h",
+    socket,
+    "-p",
+    String(port),
+    "-U",
+    "postgres",
+    "-v",
+    "ON_ERROR_STOP=1",
+    "-f",
+    rollbackArtifact,
+  ]);
 
-  sql(port, socket, `
+  sql(
+    port,
+    socket,
+    `
     select set_config('request.jwt.claim.role', 'service_role', false);
     do $$
     declare
@@ -678,27 +705,28 @@ async function verifyRollbackRoundTrip(port, socket) {
         select count(*) from public.user_activity where actor_user_id = '${userId}'::uuid
       ) = 1, 'manual rollback changed durable activity';
     end $$;
-  `);
+  `,
+  );
 
   // Reapply the exact forward migration after the manual rollback. This is a
   // real deployment replay: the helper is recreated, the public wrappers are
   // restored to the current forward shape, and all prior data remains.
-  run(
-    "psql",
-    [
-      "-h",
-      socket,
-      "-p",
-      String(port),
-      "-U",
-      "postgres",
-      "-v",
-      "ON_ERROR_STOP=1",
-      "-f",
-      forwardMigration,
-    ],
-  );
-  sql(port, socket, `
+  run("psql", [
+    "-h",
+    socket,
+    "-p",
+    String(port),
+    "-U",
+    "postgres",
+    "-v",
+    "ON_ERROR_STOP=1",
+    "-f",
+    forwardMigration,
+  ]);
+  sql(
+    port,
+    socket,
+    `
     select set_config('request.jwt.claim.role', 'service_role', false);
     do $$
     declare
@@ -763,7 +791,8 @@ async function verifyRollbackRoundTrip(port, socket) {
         'execute'
       ), 'forward replay widened delete access';
     end $$;
-  `);
+  `,
+  );
 }
 
 const cluster = await mkdtemp(join(tmpdir(), "sandra-hugo-migrations-"));
@@ -791,14 +820,9 @@ try {
 
   for (let attempt = 0; attempt < 50; attempt += 1) {
     try {
-      run("pg_isready", [
-        "-h",
-        cluster,
-        "-p",
-        String(port),
-        "-U",
-        "postgres",
-      ], { stdio: "ignore" });
+      run("pg_isready", ["-h", cluster, "-p", String(port), "-U", "postgres"], {
+        stdio: "ignore",
+      });
       break;
     } catch (error) {
       if (attempt === 49) throw error;
@@ -806,7 +830,10 @@ try {
     }
   }
 
-  sql(port, cluster, `
+  sql(
+    port,
+    cluster,
+    `
     create schema extensions;
     create extension if not exists pgcrypto with schema extensions;
     -- The committed hosted snapshots straddle both resolution surfaces:
@@ -1076,7 +1103,8 @@ try {
       '10000000-0000-4000-8000-000000000004',
       '00000000-0000-0000-0000-000000000bbb'
     );
-  `);
+  `,
+  );
 
   for (const migration of migrations) {
     run(
@@ -1122,7 +1150,10 @@ try {
     await verifyRollbackRoundTrip(port, cluster);
   }
 
-  sql(port, cluster, `
+  sql(
+    port,
+    cluster,
+    `
     do $$
     declare
       v_function_definition text;
@@ -1273,9 +1304,13 @@ try {
         in lower(v_trigger_definition)
       ) > 0, 'Auth lifecycle UPDATE lock must be restricted to the email key';
     end $$;
-  `);
+  `,
+  );
 
-  sql(port, cluster, `
+  sql(
+    port,
+    cluster,
+    `
     select set_config('request.jwt.claim.role', 'service_role', false);
 
     do $$
@@ -1665,7 +1700,8 @@ try {
     insert into public.counties(name) values ('Synthetic County');
     insert into public.fips_codes(code) values ('00000');
     insert into public.zip_county_xref(zip) values ('00000');
-  `);
+  `,
+  );
 
   const visibleMemberships = sql(
     port,
@@ -1682,7 +1718,10 @@ try {
       where user_id = '30000000-0000-4000-8000-000000000001';
     `,
     { capture: true, extraArgs: ["-Atq"] },
-  ).trim().split("\n").at(-1);
+  )
+    .trim()
+    .split("\n")
+    .at(-1);
   if (visibleMemberships !== "0") {
     throw new Error(
       `Suspended membership remained visible through RLS: ${visibleMemberships}`,
@@ -1711,7 +1750,10 @@ try {
         (select count(*) from public.zip_county_xref);
     `,
     { capture: true, extraArgs: ["-Atq"] },
-  ).trim().split("\n").at(-1);
+  )
+    .trim()
+    .split("\n")
+    .at(-1);
   if (suspendedPolicyVisibility !== "0|0|0|0|0|0|0|0") {
     throw new Error(
       `Suspended direct-policy data remained visible: ${suspendedPolicyVisibility}`,
@@ -1740,7 +1782,10 @@ try {
           (select count(*) from public.zip_county_xref);
       `,
       { capture: true, extraArgs: ["-Atq"] },
-    ).trim().split("\n").at(-1);
+    )
+      .trim()
+      .split("\n")
+      .at(-1);
     if (policyVisibility !== "0|0|0|0|0|0|0|0") {
       throw new Error(
         `${fixture} direct-policy data remained visible: ${policyVisibility}`,
@@ -1748,7 +1793,10 @@ try {
     }
   }
 
-  sql(port, cluster, `
+  sql(
+    port,
+    cluster,
+    `
     set role authenticated;
     select set_config('request.jwt.claim.role', 'authenticated', false);
     select set_config(
@@ -1801,9 +1849,13 @@ try {
       assert v_count = 0, 'suspended integration-pref delete reached a row';
     end $$;
     reset role;
-  `);
+  `,
+  );
 
-  sql(port, cluster, `
+  sql(
+    port,
+    cluster,
+    `
     select set_config('request.jwt.claim.role', 'service_role', false);
     insert into auth.users(id, email) values
       ('30000000-0000-4000-8000-000000000021',
@@ -1883,6 +1935,92 @@ try {
         now() + interval '2 days'
       );
       assert (v->>'ok')::boolean, 'suspended RPC fixture failed';
+
+      v := public.hugo_preflight_access_operation(
+        '51000000-0000-4000-8000-000000000001',
+        'config.member@bmhgroupkc.com',
+        'member',
+        '{"cohort":"beta","timezone":"America/Chicago"}'::jsonb,
+        'revoked',
+        now() + interval '2 days'
+      );
+      assert v->>'proceed' = 'true', 'revocation preflight failed';
+      v := public.hugo_apply_access(
+        '51000000-0000-4000-8000-000000000001',
+        'config.member@bmhgroupkc.com',
+        'member',
+        '{"cohort":"beta","timezone":"America/Chicago"}'::jsonb,
+        'revoked',
+        now() + interval '2 days'
+      );
+      assert (v->>'ok')::boolean, 'revocation failed';
+
+      v := public.hugo_preflight_access_operation(
+        '51000000-0000-4000-8000-000000000002',
+        'config.member@bmhgroupkc.com',
+        'member',
+        '{"cohort":"beta","timezone":"America/Chicago"}'::jsonb,
+        'suspended',
+        now() + interval '2 days'
+      );
+      assert v->>'proceed' = 'true',
+        'revoked-to-suspended preflight failed';
+      v := public.hugo_apply_access(
+        '51000000-0000-4000-8000-000000000002',
+        'config.member@bmhgroupkc.com',
+        'member',
+        '{"cohort":"beta","timezone":"America/Chicago"}'::jsonb,
+        'suspended',
+        now() + interval '2 days'
+      );
+      assert not (v->>'ok')::boolean,
+        'revoked access changed to suspended';
+      assert v->>'error_code' = 'REVOKED_NOT_REACTIVATABLE',
+        'revoked-to-suspended returned the wrong error';
+      assert (
+        select m.access_status = 'revoked'
+        from public.memberships m
+        where m.user_id = '30000000-0000-4000-8000-000000000021'
+      ), 'revoked-to-suspended changed stored access';
+
+      v_first_failure := v;
+      v := public.hugo_apply_access(
+        '51000000-0000-4000-8000-000000000002',
+        'config.member@bmhgroupkc.com',
+        'member',
+        '{"cohort":"beta","timezone":"America/Chicago"}'::jsonb,
+        'suspended',
+        now() + interval '2 days'
+      );
+      assert v = v_first_failure,
+        'revoked-to-suspended exact retry changed the receipt';
+
+      v := public.hugo_preflight_access_operation(
+        '51000000-0000-4000-8000-000000000003',
+        'config.member@bmhgroupkc.com',
+        'member',
+        '{"cohort":"beta","timezone":"America/Chicago"}'::jsonb,
+        'active',
+        now() + interval '2 days'
+      );
+      assert v->>'proceed' = 'true', 'revoked-to-active preflight failed';
+      v := public.hugo_apply_access(
+        '51000000-0000-4000-8000-000000000003',
+        'config.member@bmhgroupkc.com',
+        'member',
+        '{"cohort":"beta","timezone":"America/Chicago"}'::jsonb,
+        'active',
+        now() + interval '2 days'
+      );
+      assert not (v->>'ok')::boolean,
+        'revoked access reactivated';
+      assert v->>'error_code' = 'REVOKED_NOT_REACTIVATABLE',
+        'revoked-to-active returned the wrong error';
+      assert (
+        select m.access_status = 'revoked'
+        from public.memberships m
+        where m.user_id = '30000000-0000-4000-8000-000000000021'
+      ), 'revoked-to-active changed stored access';
 
       v := public.hugo_preflight_access_operation(
         '50000000-0000-4000-8000-000000000003',
@@ -2052,9 +2190,13 @@ try {
           if sqlerrm <> 'HUGO_IDENTITY_AMBIGUOUS' then raise; end if;
       end;
     end $$;
-  `);
+  `,
+  );
 
-  sql(port, cluster, `
+  sql(
+    port,
+    cluster,
+    `
     select set_config('request.jwt.claim.role', 'service_role', false);
     insert into public.organizations(id, name) values
       ('00000000-0000-0000-0000-000000000ccc', 'Concurrency Fixture'),
@@ -2138,10 +2280,14 @@ try {
         'owner'
       );
     end $$;
-  `);
+  `,
+  );
 
   const concurrentOwnerUpdates = await Promise.allSettled([
-    sqlAsync(port, cluster, `
+    sqlAsync(
+      port,
+      cluster,
+      `
       begin;
       select set_config('request.jwt.claim.role', 'service_role', false);
       update public.memberships
@@ -2149,15 +2295,20 @@ try {
       where user_id = '30000000-0000-4000-8000-000000000011';
       select pg_sleep(0.25);
       commit;
-    `),
-    sqlAsync(port, cluster, `
+    `,
+    ),
+    sqlAsync(
+      port,
+      cluster,
+      `
       begin;
       select set_config('request.jwt.claim.role', 'service_role', false);
       update public.memberships
       set role = 'member'
       where user_id = '30000000-0000-4000-8000-000000000012';
       commit;
-    `),
+    `,
+    ),
   ]);
   const ownerUpdateSuccesses = concurrentOwnerUpdates.filter(
     (result) => result.status === "fulfilled",
@@ -2172,7 +2323,7 @@ try {
     throw new Error(
       `Concurrent final-owner guard mismatch: ${JSON.stringify(
         concurrentOwnerUpdates.map((result) =>
-          result.status === "fulfilled" ? "fulfilled" : result.reason.message
+          result.status === "fulfilled" ? "fulfilled" : result.reason.message,
         ),
       )}`,
     );
@@ -2199,7 +2350,10 @@ try {
   }
 
   const repeatableReadOwnerUpdates = await Promise.allSettled([
-    sqlAsync(port, cluster, `
+    sqlAsync(
+      port,
+      cluster,
+      `
       begin isolation level repeatable read;
       select set_config('request.jwt.claim.role', 'service_role', false);
       select count(*) from public.memberships;
@@ -2208,8 +2362,12 @@ try {
       where user_id = '30000000-0000-4000-8000-000000000015';
       select pg_sleep(0.75);
       commit;
-    `),
-    sqlAsync(port, cluster, `
+    `,
+    ),
+    sqlAsync(
+      port,
+      cluster,
+      `
       begin isolation level repeatable read;
       select set_config('request.jwt.claim.role', 'service_role', false);
       select count(*) from public.memberships;
@@ -2218,7 +2376,8 @@ try {
       set role = 'member'
       where user_id = '30000000-0000-4000-8000-000000000016';
       commit;
-    `),
+    `,
+    ),
   ]);
   const repeatableReadSuccesses = repeatableReadOwnerUpdates.filter(
     (result) => result.status === "fulfilled",
@@ -2227,16 +2386,14 @@ try {
     (result) =>
       result.status === "rejected" &&
       result.reason instanceof Error &&
-      (
-        result.reason.message.includes("could not serialize access") ||
-        result.reason.message.includes("FINAL_OWNER_GUARD")
-      ),
+      (result.reason.message.includes("could not serialize access") ||
+        result.reason.message.includes("FINAL_OWNER_GUARD")),
   ).length;
   if (repeatableReadSuccesses !== 1 || repeatableReadFailures !== 1) {
     throw new Error(
       `Repeatable-read owner guard mismatch: ${JSON.stringify(
         repeatableReadOwnerUpdates.map((result) =>
-          result.status === "fulfilled" ? "fulfilled" : result.reason.message
+          result.status === "fulfilled" ? "fulfilled" : result.reason.message,
         ),
       )}`,
     );
@@ -2261,7 +2418,10 @@ try {
     );
   }
 
-  sql(port, cluster, `
+  sql(
+    port,
+    cluster,
+    `
     set role authenticated;
     select set_config('request.jwt.claim.role', 'authenticated', false);
     select set_config(
@@ -2317,9 +2477,13 @@ try {
       assert v_count = 1, 'active integration-pref delete was blocked';
     end $$;
     reset role;
-  `);
+  `,
+  );
 
-  sql(port, cluster, `
+  sql(
+    port,
+    cluster,
+    `
     set role authenticated;
     select set_config('request.jwt.claim.role', 'authenticated', false);
       select set_config(
@@ -2340,9 +2504,13 @@ try {
       end;
     end $$;
     reset role;
-  `);
+  `,
+  );
 
-  sql(port, cluster, `
+  sql(
+    port,
+    cluster,
+    `
     select set_config('request.jwt.claim.role', 'service_role', false);
     insert into auth.users(id, email, last_sign_in_at) values
       ('30000000-0000-4000-8000-000000000003',
@@ -2485,9 +2653,13 @@ try {
       assert (v->>'ok')::boolean,
         'durable-reference race identity prepare failed';
     end $$;
-  `);
+  `,
+  );
 
-  const inFlightDurableActivity = sqlAsync(port, cluster, `
+  const inFlightDurableActivity = sqlAsync(
+    port,
+    cluster,
+    `
     set application_name = 'hugo-hard-delete-durable-race';
     begin;
     select set_config('request.jwt.claim.role', 'service_role', false);
@@ -2495,13 +2667,13 @@ try {
     values ('30000000-0000-4000-8000-000000000026');
     select pg_sleep(1);
     commit;
-  `);
-  await waitForActiveQuery(
+  `,
+  );
+  await waitForActiveQuery(port, cluster, "hugo-hard-delete-durable-race");
+  const racedHardDelete = sqlAsync(
     port,
     cluster,
-    "hugo-hard-delete-durable-race",
-  );
-  const racedHardDelete = sqlAsync(port, cluster, `
+    `
     begin;
     select set_config('request.jwt.claim.role', 'service_role', false);
     insert into public.hugo_test_delete_race_receipts(receipt)
@@ -2510,7 +2682,8 @@ try {
       'race.delete@bmhgroupkc.com'
     );
     commit;
-  `);
+  `,
+  );
   const hardDeleteRace = await Promise.allSettled([
     inFlightDurableActivity,
     racedHardDelete,
@@ -2519,7 +2692,7 @@ try {
     throw new Error(
       `Hard-delete durable-reference race failed: ${JSON.stringify(
         hardDeleteRace.map((result) =>
-          result.status === "fulfilled" ? "fulfilled" : result.reason.message
+          result.status === "fulfilled" ? "fulfilled" : result.reason.message,
         ),
       )}`,
     );
@@ -2607,45 +2780,46 @@ try {
     throw new Error(`Unexpected Hugo connector grants: ${privileges}`);
   }
 
-  console.log(JSON.stringify({
-    ok: true,
-    lane,
-    postgres: 17,
-    migrations: migrationNames,
-    hostedSnapshotSourceCommit:
-      lane === "hosted-snapshot-forward"
-        ? hostedSnapshotSourceCommit
-        : null,
-    forwardReplay: forwardMigrationNames.map((name) => ({
-      migration: name,
-      applications: 2,
-    })),
-    assertions: {
-      hostedSnapshotHash: lane === "hosted-snapshot-forward" ? "pass" : "n/a",
-      invalidReceiptBinding: "pass",
-      invalidRequestRedaction: "pass",
-      preflightConflictBeforeAuth: "pass",
-      applyRequiresPreflight: "pass",
-      receiptBinding: "pass",
-      authFailureReceiptReplay: "pass",
-      authLostResponseReconciliation: "pass",
-      applyRetryOrdering: "pass",
-      configExpiryApply: "pass",
-      permanentOwnerInvariant: "pass",
-      concurrentOwnerTransitions: "pass",
-      repeatableReadOwnerTransitions: "pass",
-      suspendedRls: "pass",
-      directPolicyMatrix: "pass",
-      suspendedSecurityDefinerRpc: "pass",
-      pristinePrepareProof: "pass",
-      hardDeletePseudonymization: "pass",
-      hardDeleteDurableReferenceRace: "pass",
-      authIdentityKeySerialization: "pass",
-      priorSignIn: "pass",
-      dynamicDurableActivity: "pass",
-      privileges,
-    },
-  }));
+  console.log(
+    JSON.stringify({
+      ok: true,
+      lane,
+      postgres: 17,
+      migrations: migrationNames,
+      hostedSnapshotSourceCommit:
+        lane === "hosted-snapshot-forward" ? hostedSnapshotSourceCommit : null,
+      forwardReplay: forwardMigrationNames.map((name) => ({
+        migration: name,
+        applications: 2,
+      })),
+      assertions: {
+        hostedSnapshotHash: lane === "hosted-snapshot-forward" ? "pass" : "n/a",
+        invalidReceiptBinding: "pass",
+        invalidRequestRedaction: "pass",
+        preflightConflictBeforeAuth: "pass",
+        applyRequiresPreflight: "pass",
+        receiptBinding: "pass",
+        authFailureReceiptReplay: "pass",
+        authLostResponseReconciliation: "pass",
+        applyRetryOrdering: "pass",
+        configExpiryApply: "pass",
+        terminalRevocation: "pass",
+        permanentOwnerInvariant: "pass",
+        concurrentOwnerTransitions: "pass",
+        repeatableReadOwnerTransitions: "pass",
+        suspendedRls: "pass",
+        directPolicyMatrix: "pass",
+        suspendedSecurityDefinerRpc: "pass",
+        pristinePrepareProof: "pass",
+        hardDeletePseudonymization: "pass",
+        hardDeleteDurableReferenceRace: "pass",
+        authIdentityKeySerialization: "pass",
+        priorSignIn: "pass",
+        dynamicDurableActivity: "pass",
+        privileges,
+      },
+    }),
+  );
 } finally {
   if (started) {
     try {
