@@ -74,9 +74,9 @@ The **must-pass-five** subset is at the bottom — if you only have time for the
 ## Tier 3 — Onboarding the VA (one-time, you only)
 
 ### 11. Add a VA user
-- From `/admin/users`, invite a VA email
-- Invite email arrives, set-password flow works
-- VA logs in, lands on Overview
+- In Hugo, create the VA account and grant Sandra access
+- In Sandra `/admin/users`, set the existing member's Sandra role
+- VA signs in through Hugo and lands on Overview
 - Sidebar shows VA-appropriate items (no Team / no AI responder)
 
 ### 12. Permissions sanity

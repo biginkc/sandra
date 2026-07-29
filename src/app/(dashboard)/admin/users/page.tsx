@@ -19,9 +19,11 @@ import { createClient } from "@/lib/supabase/server";
 
 import {
   InvitePanel,
-  RemoveUserButton,
+  MembershipAccessBadge,
+  MembershipRoleControl,
   type UserRow,
 } from "./invite-panel";
+import { parseHugoUrl } from "./hugo-url";
 import { loadSandraMemberships } from "./membership-inventory";
 
 export const metadata = {
@@ -61,28 +63,27 @@ export default async function AdminUsersPage() {
   const { membershipByUser, error: membershipError } =
     await loadSandraMemberships(admin);
 
-  const rows: UserRow[] = authUsers.map((u) => ({
-    id: u.id,
-    email: u.email ?? "(no email)",
-    createdAt: u.created_at,
-    lastSignInAt: u.last_sign_in_at ?? null,
-    hugoLinked: Boolean(
-      u.identities?.some((identity) => identity.provider === "custom:hugo"),
-    ),
-    membershipRole: membershipByUser.get(u.id) ?? null,
-    provisioningState:
-      typeof u.app_metadata?.sandra_provisioning_state === "string"
-        ? u.app_metadata.sandra_provisioning_state
-        : null,
-    isSelf: u.id === user.id,
-  }));
+  const rows: UserRow[] = authUsers.map((u) => {
+    const membership = membershipByUser.get(u.id) ?? null;
+    return {
+      id: u.id,
+      email: u.email ?? "(no email)",
+      createdAt: u.created_at,
+      lastSignInAt: u.last_sign_in_at ?? null,
+      hugoLinked: Boolean(
+        u.identities?.some((identity) => identity.provider === "custom:hugo"),
+      ),
+      membership,
+      isSelf: u.id === user.id,
+    };
+  });
 
   return (
     <Page>
       <PageHeader
         breadcrumb={[{ label: "Admin" }, { label: "Team" }]}
         title="Team"
-        description="Grant a teammate access to Sandra without creating a separate password or sending a Sandra invite. They sign in through Hugo with the same bmhgroupkc.com email."
+        description="View the Sandra team and manage app roles. Hugo owns accounts and Sandra access."
       />
 
       {authError || membershipError ? (
@@ -91,7 +92,7 @@ export default async function AdminUsersPage() {
         </div>
       ) : null}
 
-      <InvitePanel />
+      <InvitePanel hugoUrl={parseHugoUrl(process.env.NEXT_PUBLIC_HUGO_URL)} />
 
       <div className="border-border rounded-md border">
         <Table>
@@ -103,14 +104,13 @@ export default async function AdminUsersPage() {
               <TableHead>Hugo linked</TableHead>
               <TableHead>Last sign-in</TableHead>
               <TableHead>Joined</TableHead>
-              <TableHead className="text-right">Actions</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {rows.length === 0 ? (
               <TableRow>
                 <TableCell
-                  colSpan={7}
+                  colSpan={6}
                   className="text-muted-foreground py-8 text-center"
                 >
                   No users yet.
@@ -136,22 +136,14 @@ function UserRowView({ row }: { row: UserRow }) {
         ) : null}
       </TableCell>
       <TableCell>
-        {row.membershipRole === "owner" ? (
-          <Badge>owner</Badge>
-        ) : row.membershipRole === "member" ? (
-          <Badge variant="outline">member</Badge>
-        ) : (
-          <span className="text-muted-foreground text-sm">—</span>
-        )}
+        <MembershipRoleControl
+          userId={row.id}
+          email={row.email}
+          membership={row.membership}
+        />
       </TableCell>
       <TableCell>
-        {row.membershipRole ? (
-          <Badge variant="secondary">active</Badge>
-        ) : row.provisioningState === "pending" ? (
-          <Badge variant="outline">provisioning</Badge>
-        ) : (
-          <Badge variant="outline">not granted</Badge>
-        )}
+        <MembershipAccessBadge membership={row.membership} />
       </TableCell>
       <TableCell>
         {row.hugoLinked ? (
@@ -169,11 +161,6 @@ function UserRowView({ row }: { row: UserRow }) {
       </TableCell>
       <TableCell className="text-muted-foreground text-sm">
         {formatDistanceToNow(new Date(row.createdAt), { addSuffix: true })}
-      </TableCell>
-      <TableCell className="text-right">
-        {row.isSelf || !row.membershipRole ? null : (
-          <RemoveUserButton id={row.id} />
-        )}
       </TableCell>
     </TableRow>
   );
