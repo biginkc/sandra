@@ -38,6 +38,13 @@ const authorizationHardeningMigration = readFileSync(
   ),
   "utf8",
 );
+const terminalRevocationMigration = readFileSync(
+  resolve(
+    process.cwd(),
+    "supabase/migrations/20260729170000_hugo_revoked_access_terminal.sql",
+  ),
+  "utf8",
+);
 
 describe("Hugo/Sandra SQL connector contract", () => {
   it("keeps the frozen PostgREST RPC names and argument order", () => {
@@ -91,6 +98,37 @@ describe("Hugo/Sandra SQL connector contract", () => {
     expect(migration).toContain("FINAL_OWNER_GUARD");
     expect(migration).toContain("trg_hugo_membership_owner_guard");
     expect(migration).toContain("REVOKED_NOT_REACTIVATABLE");
+  });
+
+  it("ships a forward-only repair that makes revoked access terminal", () => {
+    expect(terminalRevocationMigration).toContain(
+      "v_membership\\.access_status[[:space:]]*=[[:space:]]*'revoked'[[:space:]]+then",
+    );
+    expect(terminalRevocationMigration).toContain(
+      "A revoked Sandra grant is terminal and cannot be changed.",
+    );
+    expect(terminalRevocationMigration).toContain(
+      "HUGO_REVOKED_TERMINAL_INSTALL_STATE_CHANGED",
+    );
+    expect(terminalRevocationMigration).toContain(
+      "HUGO_REVOKED_TERMINAL_INSTALL_FAILED",
+    );
+    expect(terminalRevocationMigration).toContain("execute v_definition");
+    expect(terminalRevocationMigration).toContain(
+      "regexp_count(v_definition, v_old_pattern, 1, 'i') <> 1",
+    );
+    expect(terminalRevocationMigration).toContain(
+      "'search_path=public, auth, pg_temp'",
+    );
+    expect(terminalRevocationMigration).toContain(
+      "v_owner is distinct from v_preflight_owner",
+    );
+    expect(terminalRevocationMigration).toContain(
+      "hashtextextended('hugo-sandra-privileged-lifecycle-v1', 0)",
+    );
+    expect(terminalRevocationMigration).toContain(
+      "set local lock_timeout = '10s'",
+    );
   });
 
   it("binds every lifecycle receipt to a canonical request hash", () => {

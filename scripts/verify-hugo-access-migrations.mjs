@@ -22,6 +22,7 @@ const freshMigrationNames = [
   "20260728130000_hugo_access_operation_request_hash.sql",
   "20260728150000_hugo_access_authorization_hardening.sql",
   "20260729010000_hugo_auth_identity_key_lifecycle_lock.sql",
+  "20260729170000_hugo_revoked_access_terminal.sql",
 ];
 const rollbackArtifactName =
   "20260729010000_hugo_auth_identity_key_lifecycle_lock.sql";
@@ -148,6 +149,7 @@ function sql(port, socket, statement, options = {}) {
       "postgres",
       "-v",
       "ON_ERROR_STOP=1",
+      ...options.database ? ["-d", options.database] : [],
       ...options.extraArgs ?? [],
     ],
     {
@@ -1118,6 +1120,404 @@ try {
     );
   }
 
+  const terminalDriftDatabase =
+    `hugo_terminal_revocation_drift_${lane.replaceAll("-", "_")}`;
+  run("createdb", [
+    "-h",
+    cluster,
+    "-p",
+    String(port),
+    "-U",
+    "postgres",
+    "-T",
+    "postgres",
+    terminalDriftDatabase,
+  ]);
+  const authorizationHardeningMigration = migrations.find((migration) =>
+    migration.endsWith(
+      "20260728150000_hugo_access_authorization_hardening.sql",
+    ),
+  );
+  const terminalRevocationMigration = migrations.find((migration) =>
+    migration.endsWith(
+      "20260729170000_hugo_revoked_access_terminal.sql",
+    ),
+  );
+  if (!authorizationHardeningMigration || !terminalRevocationMigration) {
+    throw new Error("Terminal-revocation verifier migration paths are missing");
+  }
+  run(
+    "psql",
+    [
+      "-h",
+      cluster,
+      "-p",
+      String(port),
+      "-U",
+      "postgres",
+      "-d",
+      terminalDriftDatabase,
+      "-v",
+      "ON_ERROR_STOP=1",
+      "-f",
+      authorizationHardeningMigration,
+    ],
+    { stdio: ["ignore", "ignore", "inherit"] },
+  );
+  sql(
+    port,
+    cluster,
+    `
+      do $perturb_terminal_revocation_source$
+      declare
+        v_definition text := pg_get_functiondef(
+          'public.hugo_apply_access(uuid,text,text,jsonb,text,timestamptz)'::regprocedure
+        );
+      begin
+        if regexp_count(v_definition, '''hugo_apply_access''') <> 1 then
+          raise exception 'TERMINAL_REVOCATION_DRIFT_FIXTURE_MISSING';
+        end if;
+        v_definition := replace(
+          v_definition,
+          '''hugo_apply_access''',
+          '''hugo_apply_accesx'''
+        );
+        if octet_length(v_definition) <> octet_length(
+          pg_get_functiondef(
+            'public.hugo_apply_access(uuid,text,text,jsonb,text,timestamptz)'::regprocedure
+          )
+        ) then
+          raise exception 'TERMINAL_REVOCATION_DRIFT_NOT_SINGLE_BYTE';
+        end if;
+        execute v_definition;
+      end
+      $perturb_terminal_revocation_source$;
+    `,
+    { database: terminalDriftDatabase },
+  );
+  const driftedApplyDefinition = sql(
+    port,
+    cluster,
+    `
+      select pg_get_functiondef(
+        'public.hugo_apply_access(uuid,text,text,jsonb,text,timestamptz)'::regprocedure
+      );
+    `,
+    {
+      capture: true,
+      database: terminalDriftDatabase,
+      extraArgs: ["-Atq"],
+    },
+  ).trim();
+  let driftFailure = "";
+  try {
+    run(
+      "psql",
+      [
+        "-h",
+        cluster,
+        "-p",
+        String(port),
+        "-U",
+        "postgres",
+        "-d",
+        terminalDriftDatabase,
+        "-v",
+        "ON_ERROR_STOP=1",
+        "-f",
+        terminalRevocationMigration,
+      ],
+      { stdio: ["ignore", "pipe", "pipe"], encoding: "utf8" },
+    );
+  } catch (error) {
+    driftFailure = `${error.stderr ?? error.message}`;
+  }
+  if (!driftFailure.includes("HUGO_REVOKED_TERMINAL_INSTALL_STATE_CHANGED")) {
+    throw new Error(
+      `Terminal revocation migration did not fail closed on drift: ${driftFailure}`,
+    );
+  }
+  const afterDriftFailureDefinition = sql(
+    port,
+    cluster,
+    `
+      select pg_get_functiondef(
+        'public.hugo_apply_access(uuid,text,text,jsonb,text,timestamptz)'::regprocedure
+      );
+    `,
+    {
+      capture: true,
+      database: terminalDriftDatabase,
+      extraArgs: ["-Atq"],
+    },
+  ).trim();
+  if (afterDriftFailureDefinition !== driftedApplyDefinition) {
+    throw new Error(
+      "Terminal revocation drift failure changed the installed function",
+    );
+  }
+
+  const terminalInstalledDriftDatabase =
+    `hugo_terminal_installed_drift_${lane.replaceAll("-", "_")}`;
+  run("createdb", [
+    "-h",
+    cluster,
+    "-p",
+    String(port),
+    "-U",
+    "postgres",
+    "-T",
+    "postgres",
+    terminalInstalledDriftDatabase,
+  ]);
+  run(
+    "psql",
+    [
+      "-h",
+      cluster,
+      "-p",
+      String(port),
+      "-U",
+      "postgres",
+      "-d",
+      terminalInstalledDriftDatabase,
+      "-v",
+      "ON_ERROR_STOP=1",
+      "-f",
+      authorizationHardeningMigration,
+    ],
+    { stdio: ["ignore", "ignore", "inherit"] },
+  );
+  sql(
+    port,
+    cluster,
+    `
+      do $hand_patch_terminal_revocation_source$
+      declare
+        v_definition text := pg_get_functiondef(
+          'public.hugo_apply_access(uuid,text,text,jsonb,text,timestamptz)'::regprocedure
+        );
+      begin
+        v_definition := replace(
+          v_definition,
+          'elsif v_membership.access_status = ''revoked'' and p_status = ''active'' then',
+          'elsif v_membership.access_status = ''revoked'' then'
+        );
+        v_definition := replace(
+          v_definition,
+          'A revoked Sandra grant cannot be reactivated.',
+          'A revoked Sandra grant is terminal and cannot be changed.'
+        );
+        execute v_definition;
+      end
+      $hand_patch_terminal_revocation_source$;
+    `,
+    { database: terminalInstalledDriftDatabase },
+  );
+  run(
+    "psql",
+    [
+      "-h",
+      cluster,
+      "-p",
+      String(port),
+      "-U",
+      "postgres",
+      "-d",
+      terminalInstalledDriftDatabase,
+      "-v",
+      "ON_ERROR_STOP=1",
+      "-f",
+      terminalRevocationMigration,
+    ],
+    { stdio: ["ignore", "ignore", "inherit"] },
+  );
+  sql(
+    port,
+    cluster,
+    `
+      do $perturb_installed_terminal_revocation_source$
+      declare
+        v_definition text := pg_get_functiondef(
+          'public.hugo_apply_access(uuid,text,text,jsonb,text,timestamptz)'::regprocedure
+        );
+      begin
+        if regexp_count(v_definition, '''hugo_apply_access''') <> 1 then
+          raise exception 'INSTALLED_TERMINAL_REVOCATION_DRIFT_FIXTURE_MISSING';
+        end if;
+        v_definition := replace(
+          v_definition,
+          '''hugo_apply_access''',
+          '''hugo_apply_accesx'''
+        );
+        if octet_length(v_definition) <> octet_length(
+          pg_get_functiondef(
+            'public.hugo_apply_access(uuid,text,text,jsonb,text,timestamptz)'::regprocedure
+          )
+        ) then
+          raise exception 'INSTALLED_TERMINAL_REVOCATION_DRIFT_NOT_SINGLE_BYTE';
+        end if;
+        execute v_definition;
+      end
+      $perturb_installed_terminal_revocation_source$;
+    `,
+    { database: terminalInstalledDriftDatabase },
+  );
+  const installedBodyDriftDefinition = sql(
+    port,
+    cluster,
+    `
+      select pg_get_functiondef(
+        'public.hugo_apply_access(uuid,text,text,jsonb,text,timestamptz)'::regprocedure
+      );
+    `,
+    {
+      capture: true,
+      database: terminalInstalledDriftDatabase,
+      extraArgs: ["-Atq"],
+    },
+  ).trim();
+  let installedBodyDriftFailure = "";
+  try {
+    run(
+      "psql",
+      [
+        "-h",
+        cluster,
+        "-p",
+        String(port),
+        "-U",
+        "postgres",
+        "-d",
+        terminalInstalledDriftDatabase,
+        "-v",
+        "ON_ERROR_STOP=1",
+        "-f",
+        terminalRevocationMigration,
+      ],
+      { stdio: ["ignore", "pipe", "pipe"], encoding: "utf8" },
+    );
+  } catch (error) {
+    installedBodyDriftFailure = `${error.stderr ?? error.message}`;
+  }
+  if (
+    !installedBodyDriftFailure.includes(
+      "HUGO_REVOKED_TERMINAL_INSTALL_STATE_CHANGED",
+    )
+  ) {
+    throw new Error(
+      "Terminal revocation migration accepted a single-byte-corrupted " +
+        `installed body: ${installedBodyDriftFailure}`,
+    );
+  }
+  const afterInstalledBodyDriftFailureDefinition = sql(
+    port,
+    cluster,
+    `
+      select pg_get_functiondef(
+        'public.hugo_apply_access(uuid,text,text,jsonb,text,timestamptz)'::regprocedure
+      );
+    `,
+    {
+      capture: true,
+      database: terminalInstalledDriftDatabase,
+      extraArgs: ["-Atq"],
+    },
+  ).trim();
+  if (
+    afterInstalledBodyDriftFailureDefinition !== installedBodyDriftDefinition
+  ) {
+    throw new Error(
+      "Installed terminal-revocation drift failure changed the function",
+    );
+  }
+  for (const migration of [
+    authorizationHardeningMigration,
+    terminalRevocationMigration,
+  ]) {
+    run(
+      "psql",
+      [
+        "-h",
+        cluster,
+        "-p",
+        String(port),
+        "-U",
+        "postgres",
+        "-d",
+        terminalInstalledDriftDatabase,
+        "-v",
+        "ON_ERROR_STOP=1",
+        "-f",
+        migration,
+      ],
+      { stdio: ["ignore", "ignore", "inherit"] },
+    );
+  }
+  sql(
+    port,
+    cluster,
+    `
+      alter function public.hugo_apply_access(
+        uuid, text, text, jsonb, text, timestamptz
+      ) security invoker;
+    `,
+    { database: terminalInstalledDriftDatabase },
+  );
+  let installedDriftFailure = "";
+  try {
+    run(
+      "psql",
+      [
+        "-h",
+        cluster,
+        "-p",
+        String(port),
+        "-U",
+        "postgres",
+        "-d",
+        terminalInstalledDriftDatabase,
+        "-v",
+        "ON_ERROR_STOP=1",
+        "-f",
+        terminalRevocationMigration,
+      ],
+      { stdio: ["ignore", "pipe", "pipe"], encoding: "utf8" },
+    );
+  } catch (error) {
+    installedDriftFailure = `${error.stderr ?? error.message}`;
+  }
+  if (
+    !installedDriftFailure.includes(
+      "HUGO_REVOKED_TERMINAL_INSTALL_FAILED",
+    )
+  ) {
+    throw new Error(
+      "Terminal revocation migration accepted an installed function " +
+        `with drifted security attributes: ${installedDriftFailure}`,
+    );
+  }
+  const installedDriftSecurityDefiner = sql(
+    port,
+    cluster,
+    `
+      select prosecdef
+      from pg_catalog.pg_proc
+      where oid =
+        'public.hugo_apply_access(uuid,text,text,jsonb,text,timestamptz)'::regprocedure;
+    `,
+    {
+      capture: true,
+      database: terminalInstalledDriftDatabase,
+      extraArgs: ["-Atq"],
+    },
+  ).trim();
+  if (installedDriftSecurityDefiner !== "f") {
+    throw new Error(
+      "Failed installed-state replay changed the drifted function",
+    );
+  }
+
   if (lane === "rollback-roundtrip") {
     await verifyRollbackRoundTrip(port, cluster);
   }
@@ -1126,6 +1526,11 @@ try {
     do $$
     declare
       v_function_definition text;
+      v_apply_definition text;
+      v_apply_config text[];
+      v_apply_owner oid;
+      v_preflight_owner oid;
+      v_apply_security_definer boolean;
       v_receipt_helper_definition text;
       v_prepare_definition text;
       v_delete_definition text;
@@ -1135,6 +1540,25 @@ try {
       v_function_definition := pg_get_functiondef(
         'public.hugo_lock_auth_identity_key_lifecycle()'::regprocedure
       );
+      v_apply_definition := pg_get_functiondef(
+        'public.hugo_apply_access(uuid,text,text,jsonb,text,timestamptz)'::regprocedure
+      );
+      select
+        function_row.proowner,
+        function_row.prosecdef,
+        function_row.proconfig
+      into
+        v_apply_owner,
+        v_apply_security_definer,
+        v_apply_config
+      from pg_catalog.pg_proc function_row
+      where function_row.oid =
+        'public.hugo_apply_access(uuid,text,text,jsonb,text,timestamptz)'::regprocedure;
+      select function_row.proowner
+        into v_preflight_owner
+      from pg_catalog.pg_proc function_row
+      where function_row.oid =
+        'public.hugo_preflight_access_operation(uuid,text,text,jsonb,text,timestamptz)'::regprocedure;
       v_receipt_helper_definition := pg_get_functiondef(
         'public.hugo_store_non_pristine_email_receipt(uuid,text,text,text)'::regprocedure
       );
@@ -1167,6 +1591,38 @@ try {
         ))
       ) / length('hugo-sandra-privileged-lifecycle-v1') = 1,
         'Auth identity-key trigger must take exactly one shared lifecycle lock';
+      assert regexp_count(
+        v_apply_definition,
+        $pattern$elsif[[:space:]]+v_membership\.access_status[[:space:]]*=[[:space:]]*'revoked'[[:space:]]+then$pattern$,
+        1,
+        'i'
+      ) = 1, 'installed apply does not make revoked access terminal';
+      assert regexp_count(
+        v_apply_definition,
+        $pattern$v_membership\.access_status[[:space:]]*=[[:space:]]*'revoked'[[:space:]]+and[[:space:]]+p_status[[:space:]]*=[[:space:]]*'active'$pattern$,
+        1,
+        'i'
+      ) = 0, 'installed apply retained the revoked-to-active-only guard';
+      assert v_apply_security_definer,
+        'installed apply lost SECURITY DEFINER';
+      assert v_apply_owner = v_preflight_owner,
+        'installed apply owner differs from the preflight owner';
+      assert array_position(
+        v_apply_config,
+        'search_path=public, auth, pg_temp'
+      ) is not null, 'installed apply lost its fixed search_path';
+      assert regexp_count(
+        v_apply_definition,
+        'hugo-sandra-privileged-lifecycle-v1',
+        1,
+        'i'
+      ) = 1, 'installed apply must take exactly one shared lifecycle lock';
+      assert regexp_count(
+        v_apply_definition,
+        $pattern$hugo_require_service_role\(\)$pattern$,
+        1,
+        'i'
+      ) = 1, 'installed apply must require service role exactly once';
       assert not has_function_privilege(
         'service_role',
         'public.hugo_lock_auth_identity_key_lifecycle()',
@@ -1885,6 +2341,154 @@ try {
       assert (v->>'ok')::boolean, 'suspended RPC fixture failed';
 
       v := public.hugo_preflight_access_operation(
+        '51000000-0000-4000-8000-000000000001',
+        'config.member@bmhgroupkc.com',
+        'member',
+        '{"cohort":"beta","timezone":"America/Chicago"}'::jsonb,
+        'revoked',
+        now() + interval '2 days'
+      );
+      assert v->>'proceed' = 'true', 'revocation preflight failed';
+      v := public.hugo_apply_access(
+        '51000000-0000-4000-8000-000000000001',
+        'config.member@bmhgroupkc.com',
+        'member',
+        '{"cohort":"beta","timezone":"America/Chicago"}'::jsonb,
+        'revoked',
+        now() + interval '2 days'
+      );
+      assert (v->>'ok')::boolean, 'revocation failed';
+
+      v := public.hugo_preflight_access_operation(
+        '51000000-0000-4000-8000-000000000002',
+        'config.member@bmhgroupkc.com',
+        'member',
+        '{"cohort":"beta","timezone":"America/Chicago"}'::jsonb,
+        'suspended',
+        now() + interval '2 days'
+      );
+      assert v->>'proceed' = 'true',
+        'revoked-to-suspended preflight failed';
+      v := public.hugo_apply_access(
+        '51000000-0000-4000-8000-000000000002',
+        'config.member@bmhgroupkc.com',
+        'member',
+        '{"cohort":"beta","timezone":"America/Chicago"}'::jsonb,
+        'suspended',
+        now() + interval '2 days'
+      );
+      assert not (v->>'ok')::boolean,
+        'revoked access changed to suspended';
+      assert v->>'error_code' = 'REVOKED_NOT_REACTIVATABLE',
+        'revoked-to-suspended returned the wrong error';
+      assert (
+        select m.access_status = 'revoked'
+        from public.memberships m
+        where m.user_id = '30000000-0000-4000-8000-000000000021'
+      ), 'revoked-to-suspended changed stored access';
+
+      v_first_failure := v;
+      v := public.hugo_apply_access(
+        '51000000-0000-4000-8000-000000000002',
+        'config.member@bmhgroupkc.com',
+        'member',
+        '{"cohort":"beta","timezone":"America/Chicago"}'::jsonb,
+        'suspended',
+        now() + interval '2 days'
+      );
+      assert v = v_first_failure,
+        'revoked-to-suspended exact retry changed the receipt';
+
+      v := public.hugo_preflight_access_operation(
+        '51000000-0000-4000-8000-000000000003',
+        'config.member@bmhgroupkc.com',
+        'member',
+        '{"cohort":"beta","timezone":"America/Chicago"}'::jsonb,
+        'active',
+        now() + interval '2 days'
+      );
+      assert v->>'proceed' = 'true', 'revoked-to-active preflight failed';
+      v := public.hugo_apply_access(
+        '51000000-0000-4000-8000-000000000003',
+        'config.member@bmhgroupkc.com',
+        'member',
+        '{"cohort":"beta","timezone":"America/Chicago"}'::jsonb,
+        'active',
+        now() + interval '2 days'
+      );
+      assert not (v->>'ok')::boolean,
+        'revoked access reactivated';
+      assert v->>'error_code' = 'REVOKED_NOT_REACTIVATABLE',
+        'revoked-to-active returned the wrong error';
+      assert (
+        select m.access_status = 'revoked'
+        from public.memberships m
+        where m.user_id = '30000000-0000-4000-8000-000000000021'
+      ), 'revoked-to-active changed stored access';
+
+      v_first_failure := v;
+      v := public.hugo_apply_access(
+        '51000000-0000-4000-8000-000000000003',
+        'config.member@bmhgroupkc.com',
+        'member',
+        '{"cohort":"beta","timezone":"America/Chicago"}'::jsonb,
+        'active',
+        now() + interval '2 days'
+      );
+      assert v = v_first_failure,
+        'revoked-to-active exact retry changed the receipt';
+
+      v := public.hugo_preflight_access_operation(
+        '51000000-0000-4000-8000-000000000004',
+        'config.member@bmhgroupkc.com',
+        'member',
+        '{"cohort":"beta","timezone":"America/Chicago"}'::jsonb,
+        'revoked',
+        now() + interval '2 days'
+      );
+      assert v->>'proceed' = 'true', 'identical re-revoke preflight failed';
+      v := public.hugo_apply_access(
+        '51000000-0000-4000-8000-000000000004',
+        'config.member@bmhgroupkc.com',
+        'member',
+        '{"cohort":"beta","timezone":"America/Chicago"}'::jsonb,
+        'revoked',
+        now() + interval '2 days'
+      );
+      assert (v->>'ok')::boolean
+        and v->'observed'->>'status' = 'revoked',
+        'identical re-revoke was not an idempotent no-op';
+
+      v := public.hugo_preflight_access_operation(
+        '51000000-0000-4000-8000-000000000005',
+        'config.member@bmhgroupkc.com',
+        'owner',
+        '{"cohort":"gamma"}'::jsonb,
+        'revoked',
+        null
+      );
+      assert v->>'proceed' = 'true', 'changed re-revoke preflight failed';
+      v := public.hugo_apply_access(
+        '51000000-0000-4000-8000-000000000005',
+        'config.member@bmhgroupkc.com',
+        'owner',
+        '{"cohort":"gamma"}'::jsonb,
+        'revoked',
+        null
+      );
+      assert not (v->>'ok')::boolean
+        and v->>'error_code' = 'REVOKED_NOT_REACTIVATABLE',
+        'changed re-revoke modified terminal metadata';
+      assert (
+        select m.access_status = 'revoked'
+          and m.role = 'member'
+          and m.hugo_config =
+            '{"cohort":"beta","timezone":"America/Chicago"}'::jsonb
+        from public.memberships m
+        where m.user_id = '30000000-0000-4000-8000-000000000021'
+      ), 'changed re-revoke mutated terminal membership state';
+
+      v := public.hugo_preflight_access_operation(
         '50000000-0000-4000-8000-000000000003',
         'auth.failure@bmhgroupkc.com',
         'member',
@@ -2566,6 +3170,11 @@ try {
           'EXECUTE'
         ) || '|' ||
         has_function_privilege(
+          'service_role',
+          'public.hugo_apply_access(uuid,text,text,jsonb,text,timestamptz)',
+          'EXECUTE'
+        ) || '|' ||
+        has_function_privilege(
           'authenticated',
           'public.hugo_apply_access(uuid,text,text,jsonb,text,timestamptz)',
           'EXECUTE'
@@ -2603,7 +3212,10 @@ try {
     `,
     { capture: true, extraArgs: ["-Atq"] },
   ).trim();
-  if (privileges !== "true|false|false|true|false|true|false|false|false") {
+  if (
+    privileges !==
+    "true|false|true|false|true|false|true|false|false|false"
+  ) {
     throw new Error(`Unexpected Hugo connector grants: ${privileges}`);
   }
 
@@ -2631,6 +3243,12 @@ try {
       authLostResponseReconciliation: "pass",
       applyRetryOrdering: "pass",
       configExpiryApply: "pass",
+      terminalRevocation: "pass",
+      terminalRevocationOldBodyByteDriftFailClosed: "pass",
+      terminalRevocationAlreadyInstalledReplay: "pass",
+      terminalRevocationAlreadyHandPatched: "pass",
+      terminalRevocationNewBodyByteDriftFailClosed: "pass",
+      terminalRevocationInstalledStateSelfCheck: "pass",
       permanentOwnerInvariant: "pass",
       concurrentOwnerTransitions: "pass",
       repeatableReadOwnerTransitions: "pass",
