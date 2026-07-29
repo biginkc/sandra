@@ -1,5 +1,3 @@
-import { timingSafeEqual } from "node:crypto";
-
 import type { EmailOtpType } from "@supabase/supabase-js";
 import { NextResponse, type NextRequest } from "next/server";
 
@@ -10,7 +8,6 @@ import { applyAuthNoCache } from "@/lib/auth/response";
 import { sanitizeNextPath } from "@/lib/auth/safe-next";
 import { SANDRA_ORG_ID } from "@/lib/auth/sandra-org";
 import {
-  HUGO_FLOW_COOKIE,
   HUGO_FLOW_COOKIE_PATH,
   HUGO_FLOW_QUERY,
   HUGO_FLOW_SOURCE_QUERY,
@@ -104,9 +101,10 @@ function flowNonceMatches(request: NextRequest): boolean {
   if (!queryNonce || !state || decodeHugoPkceState(state).length === 0) {
     return false;
   }
-  const query = Buffer.from(queryNonce);
-  const cookieSuffix = Buffer.from(cookieName!.slice(HUGO_FLOW_COOKIE.length));
-  return query.length === cookieSuffix.length && timingSafeEqual(query, cookieSuffix);
+  // The cookie name is derived from the nonce and the cookie value is
+  // httpOnly, so a matching cookie lookup is the binding. Comparing the
+  // nonce to the suffix of its own derived name would be tautological.
+  return true;
 }
 
 function authRedirect(

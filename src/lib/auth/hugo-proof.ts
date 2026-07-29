@@ -5,7 +5,6 @@ type AuthenticationMethod =
 type AuthIdentity = {
   provider?: string;
   last_sign_in_at?: string;
-  updated_at?: string;
 };
 
 const HUGO_PROVIDER = "custom:hugo";
@@ -15,8 +14,9 @@ const CLOCK_SKEW_SECONDS = 60;
  * Prove that Hugo, rather than merely some OAuth provider, authenticated the
  * current session. A linked Hugo identity alone is not enough: users can have
  * multiple identities, while AMR only says "oauth". Supabase sets
- * last_sign_in_at when an identity is first linked, then updates updated_at on
- * later exchanges, so either timestamp can identify the current exchange.
+ * last_sign_in_at when that identity is used to sign in. Do not use the
+ * identity's generic updated_at field: a different linked provider or a
+ * profile update can advance it without Hugo authenticating this session.
  */
 export function hasCurrentHugoOAuthProof(
   methods: unknown,
@@ -41,14 +41,11 @@ export function hasCurrentHugoOAuthProof(
   return (identities as AuthIdentity[]).some((identity) => {
     if (identity.provider !== HUGO_PROVIDER) return false;
 
-    return [identity.last_sign_in_at, identity.updated_at].some((value) => {
-      if (typeof value !== "string") return false;
-      const identityTimestamp = Date.parse(value) / 1000;
-      return (
-        Number.isFinite(identityTimestamp) &&
-        Math.abs(identityTimestamp - currentOAuthTimestamp) <=
-          CLOCK_SKEW_SECONDS
-      );
-    });
+    if (typeof identity.last_sign_in_at !== "string") return false;
+    const identityTimestamp = Date.parse(identity.last_sign_in_at) / 1000;
+    return (
+      Number.isFinite(identityTimestamp) &&
+      Math.abs(identityTimestamp - currentOAuthTimestamp) <= CLOCK_SKEW_SECONDS
+    );
   });
 }
