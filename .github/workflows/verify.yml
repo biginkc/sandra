@@ -25,3 +25,22 @@ jobs:
 
       - name: Run verify
         run: npm run verify
+
+  hugo-postgres:
+    name: Hugo lifecycle migrations on PostgreSQL 17
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - uses: ankane/setup-postgres@e9cd5bc1babecb0e441a640646d782056dbb67f5
+        with:
+          postgres-version: 17
+
+      - name: Replay Hugo lifecycle migrations and rollback
+        env:
+          SANDRA_POSTGRES_BIN: /usr/lib/postgresql/17/bin
+        run: npm run verify:hugo-sql && npm run verify:hugo-rollback

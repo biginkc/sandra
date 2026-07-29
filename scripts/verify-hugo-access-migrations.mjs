@@ -1289,6 +1289,24 @@ try {
       { stdio: ["ignore", "ignore", "inherit"] },
     );
   }
+  run(
+    "psql",
+    [
+      "-h",
+      cluster,
+      "-p",
+      String(port),
+      "-U",
+      "postgres",
+      "-d",
+      terminalInstalledDriftDatabase,
+      "-v",
+      "ON_ERROR_STOP=1",
+      "-f",
+      terminalRevocationMigration,
+    ],
+    { stdio: ["ignore", "ignore", "inherit"] },
+  );
   sql(
     port,
     cluster,
@@ -3080,6 +3098,7 @@ try {
       configExpiryApply: "pass",
       terminalRevocation: "pass",
       terminalRevocationInstallDriftFailClosed: "pass",
+      terminalRevocationAlreadyInstalledReplay: "pass",
       terminalRevocationInstalledStateSelfCheck: "pass",
       permanentOwnerInvariant: "pass",
       concurrentOwnerTransitions: "pass",

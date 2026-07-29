@@ -2,6 +2,8 @@
 -- revoked back into suspended, because a later reactivate could then restore
 -- access.
 -- Requires PostgreSQL 15 or newer for regexp_count().
+-- The existing REVOKED_NOT_REACTIVATABLE receipt code is retained for connector
+-- compatibility even though it now covers every changed terminal grant.
 
 begin;
 
