@@ -22,6 +22,7 @@ const freshMigrationNames = [
   "20260728130000_hugo_access_operation_request_hash.sql",
   "20260728150000_hugo_access_authorization_hardening.sql",
   "20260729010000_hugo_auth_identity_key_lifecycle_lock.sql",
+  "20260729170000_hugo_revoked_access_terminal.sql",
 ];
 const rollbackArtifactName =
   "20260729010000_hugo_auth_identity_key_lifecycle_lock.sql";
@@ -1885,6 +1886,92 @@ try {
       assert (v->>'ok')::boolean, 'suspended RPC fixture failed';
 
       v := public.hugo_preflight_access_operation(
+        '51000000-0000-4000-8000-000000000001',
+        'config.member@bmhgroupkc.com',
+        'member',
+        '{"cohort":"beta","timezone":"America/Chicago"}'::jsonb,
+        'revoked',
+        now() + interval '2 days'
+      );
+      assert v->>'proceed' = 'true', 'revocation preflight failed';
+      v := public.hugo_apply_access(
+        '51000000-0000-4000-8000-000000000001',
+        'config.member@bmhgroupkc.com',
+        'member',
+        '{"cohort":"beta","timezone":"America/Chicago"}'::jsonb,
+        'revoked',
+        now() + interval '2 days'
+      );
+      assert (v->>'ok')::boolean, 'revocation failed';
+
+      v := public.hugo_preflight_access_operation(
+        '51000000-0000-4000-8000-000000000002',
+        'config.member@bmhgroupkc.com',
+        'member',
+        '{"cohort":"beta","timezone":"America/Chicago"}'::jsonb,
+        'suspended',
+        now() + interval '2 days'
+      );
+      assert v->>'proceed' = 'true',
+        'revoked-to-suspended preflight failed';
+      v := public.hugo_apply_access(
+        '51000000-0000-4000-8000-000000000002',
+        'config.member@bmhgroupkc.com',
+        'member',
+        '{"cohort":"beta","timezone":"America/Chicago"}'::jsonb,
+        'suspended',
+        now() + interval '2 days'
+      );
+      assert not (v->>'ok')::boolean,
+        'revoked access changed to suspended';
+      assert v->>'error_code' = 'REVOKED_NOT_REACTIVATABLE',
+        'revoked-to-suspended returned the wrong error';
+      assert (
+        select m.access_status = 'revoked'
+        from public.memberships m
+        where m.user_id = '30000000-0000-4000-8000-000000000021'
+      ), 'revoked-to-suspended changed stored access';
+
+      v_first_failure := v;
+      v := public.hugo_apply_access(
+        '51000000-0000-4000-8000-000000000002',
+        'config.member@bmhgroupkc.com',
+        'member',
+        '{"cohort":"beta","timezone":"America/Chicago"}'::jsonb,
+        'suspended',
+        now() + interval '2 days'
+      );
+      assert v = v_first_failure,
+        'revoked-to-suspended exact retry changed the receipt';
+
+      v := public.hugo_preflight_access_operation(
+        '51000000-0000-4000-8000-000000000003',
+        'config.member@bmhgroupkc.com',
+        'member',
+        '{"cohort":"beta","timezone":"America/Chicago"}'::jsonb,
+        'active',
+        now() + interval '2 days'
+      );
+      assert v->>'proceed' = 'true', 'revoked-to-active preflight failed';
+      v := public.hugo_apply_access(
+        '51000000-0000-4000-8000-000000000003',
+        'config.member@bmhgroupkc.com',
+        'member',
+        '{"cohort":"beta","timezone":"America/Chicago"}'::jsonb,
+        'active',
+        now() + interval '2 days'
+      );
+      assert not (v->>'ok')::boolean,
+        'revoked access reactivated';
+      assert v->>'error_code' = 'REVOKED_NOT_REACTIVATABLE',
+        'revoked-to-active returned the wrong error';
+      assert (
+        select m.access_status = 'revoked'
+        from public.memberships m
+        where m.user_id = '30000000-0000-4000-8000-000000000021'
+      ), 'revoked-to-active changed stored access';
+
+      v := public.hugo_preflight_access_operation(
         '50000000-0000-4000-8000-000000000003',
         'auth.failure@bmhgroupkc.com',
         'member',
@@ -2631,6 +2718,7 @@ try {
       authLostResponseReconciliation: "pass",
       applyRetryOrdering: "pass",
       configExpiryApply: "pass",
+      terminalRevocation: "pass",
       permanentOwnerInvariant: "pass",
       concurrentOwnerTransitions: "pass",
       repeatableReadOwnerTransitions: "pass",
