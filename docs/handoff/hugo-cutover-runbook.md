@@ -15,9 +15,10 @@ rejects password sessions on protected routes.
    acceptance.
 4. Confirm the existing `custom:hugo` provider has the correct Hugo issuer and
    client, uses PKCE, and remains disabled.
-5. Confirm each intended teammate already has a Sandra membership using the
-   same exact email as Hugo. Granting access must preserve any existing Auth UID
-   and membership role.
+5. Use Hugo to grant each intended teammate Sandra access with the same exact
+   email. Sandra may change the resulting `memberships.role`, but it must not
+   create the account, add or remove the membership, or mutate Hugo-owned
+   access-lifecycle fields.
 6. Verify the password rollback deployment and record its deployment ID.
 
 ## Release order
@@ -25,8 +26,10 @@ rejects password sessions on protected routes.
 1. Deploy the reviewed commit with `NEXT_PUBLIC_HUGO_SSO` unset. Verify health,
    password login, and password recovery before changing any provider.
 2. Enable `custom:hugo`. This does not remove the working password fallback.
-3. Add `NEXT_PUBLIC_HUGO_SSO=1` and deploy the reviewed commit. Verify `/login`
-   now shows only **Sign in with Hugo** and `/auth/hugo` reaches Hugo.
+3. Add `NEXT_PUBLIC_HUGO_SSO=1` and set `NEXT_PUBLIC_HUGO_URL` to the Hugo
+   account-management page before deploying the reviewed commit. Verify
+   `/login` now shows only **Sign in with Hugo**, `/auth/hugo` reaches Hugo, and
+   Sandra's Team page links to that configured Hugo page.
 4. In real Chrome, complete Hugo login and verify the same Sandra UID,
    membership role, and CRM data remain. Reload the dashboard and inspect the
    browser console. Repeat at desktop and mobile widths.

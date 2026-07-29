@@ -1,9 +1,18 @@
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { createClient } from "@supabase/supabase-js";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
 
+import { updateMembershipRole } from "@/app/(dashboard)/admin/users/actions";
 import { AuthorizationError } from "@/lib/errors/classes";
 import { requireOrgMembershipByResource } from "@/lib/auth/require-org-membership";
-import { grantUserAccess } from "@/app/(dashboard)/admin/users/actions";
-import { SANDRA_ORG_ID } from "@/lib/auth/sandra-org";
+import type { Database } from "@/lib/supabase/types";
 import { createTestClient } from "@tests/integration/client";
 import { resetTenantTables } from "@tests/integration/reset";
 import {
@@ -17,6 +26,7 @@ import {
 const mocks = vi.hoisted(() => ({
   serverClient: undefined as unknown,
   adminClient: undefined as unknown,
+  createAdminClient: vi.fn(),
 }));
 
 vi.mock("@/lib/supabase/server", () => ({
@@ -24,7 +34,7 @@ vi.mock("@/lib/supabase/server", () => ({
 }));
 
 vi.mock("@/lib/supabase/admin", () => ({
-  createAdminClient: () => mocks.adminClient,
+  createAdminClient: mocks.createAdminClient,
 }));
 
 const serviceClient = createTestClient();
@@ -47,9 +57,11 @@ type MembershipTestClient = {
             column: string,
             value: string,
           ): Promise<{
-            data:
-              | Array<{ user_id: string; org_id: string; role: string }>
-              | null;
+            data: Array<{
+              user_id: string;
+              org_id: string;
+              role: string;
+            }> | null;
             error: { message: string } | null;
           }>;
         };
@@ -60,14 +72,63 @@ function uniqueEmail(label: string): string {
   return `stage1-${label}-${Date.now()}-${Math.random().toString(36).slice(2)}@bmhgroupkc.com`;
 }
 
-async function createUserForOrg(orgId: string, role: "owner" | "member") {
+async function createUserForOrg(
+  orgId: string,
+  role: "owner" | "member",
+  email = uniqueEmail(`${orgId.slice(-3)}-${role}`),
+) {
   const user = await createOrgUser(serviceClient, {
     orgId,
-    email: uniqueEmail(`${orgId.slice(-3)}-${role}`),
+    email,
     role,
   });
   createdUserIds.push(user.userId);
-  return { ...user, client: clientForUser(user.jwt) };
+  return { ...user, email, client: clientForUser(user.jwt) };
+}
+
+async function useActiveAdminCaller(label: string) {
+  const email = uniqueEmail(label);
+  const caller = await createUserForOrg(BMH_ORG_ID, "owner", email);
+  vi.stubEnv("ADMIN_EMAILS", email);
+  mocks.serverClient = caller.client;
+  mocks.adminClient = serviceClient;
+  return caller;
+}
+
+async function createAuthenticatedUserWithoutMembership(label: string) {
+  const email = uniqueEmail(label);
+  const password = `Sandra-caller-${crypto.randomUUID()}`;
+  const { data: created, error: createError } =
+    await serviceClient.auth.admin.createUser({
+      email,
+      password,
+      email_confirm: true,
+    });
+  if (createError || !created.user) {
+    throw new Error(
+      `caller auth create failed: ${createError?.message ?? "no user"}`,
+    );
+  }
+  createdUserIds.push(created.user.id);
+
+  const anon = createClient<Database>(
+    process.env.TEST_SUPABASE_URL!,
+    process.env.TEST_SUPABASE_ANON_KEY!,
+    { auth: { persistSession: false, autoRefreshToken: false } },
+  );
+  const { data: session, error: signInError } =
+    await anon.auth.signInWithPassword({ email, password });
+  if (signInError || !session.session?.access_token) {
+    throw new Error(
+      `caller sign-in failed: ${signInError?.message ?? "no token"}`,
+    );
+  }
+
+  return {
+    userId: created.user.id,
+    email,
+    client: clientForUser(session.session.access_token),
+  };
 }
 
 async function insertProperty(orgId: string, address: string): Promise<string> {
@@ -83,9 +144,15 @@ async function insertProperty(orgId: string, address: string): Promise<string> {
 }
 
 beforeAll(async () => {
-  vi.stubEnv("ADMIN_EMAILS", "jarrad@bmhgroupkc.com");
+  vi.stubEnv("ADMIN_EMAILS", "admin@bmhgroupkc.com");
+  mocks.createAdminClient.mockImplementation(() => mocks.adminClient);
   await resetTenantTables(serviceClient);
   await seedTwoOrgs(serviceClient);
+});
+
+afterEach(() => {
+  mocks.createAdminClient.mockClear();
+  vi.stubEnv("ADMIN_EMAILS", "admin@bmhgroupkc.com");
 });
 
 afterAll(async () => {
@@ -148,9 +215,11 @@ describe("Migration 054 — memberships foundation + RLS rewrite", () => {
 
   it("blocks cross-org inserts through direct org policies", async () => {
     const orgBUser = await createUserForOrg(TEST_ORG_B_ID, "member");
-    const { error } = await orgBUser.client
-      .from("properties")
-      .insert({ org_id: BMH_ORG_ID, address: "053 blocked insert", state: "MO" });
+    const { error } = await orgBUser.client.from("properties").insert({
+      org_id: BMH_ORG_ID,
+      address: "053 blocked insert",
+      state: "MO",
+    });
     expect(error).not.toBeNull();
     expect(error?.message).toMatch(/row-level security|violates row-level/i);
   });
@@ -188,12 +257,18 @@ describe("Migration 054 — memberships foundation + RLS rewrite", () => {
 
     const { error: ownError } = await bmhUser.client.storage
       .from("csv-imports")
-      .upload(bmhPath, new Blob(["address,state\n1 Main,MO\n"], { type: "text/csv" }));
+      .upload(
+        bmhPath,
+        new Blob(["address,state\n1 Main,MO\n"], { type: "text/csv" }),
+      );
     expect(ownError).toBeNull();
 
     const { error: crossError } = await bmhUser.client.storage
       .from("csv-imports")
-      .upload(orgBPath, new Blob(["address,state\n2 Main,MO\n"], { type: "text/csv" }));
+      .upload(
+        orgBPath,
+        new Blob(["address,state\n2 Main,MO\n"], { type: "text/csv" }),
+      );
     expect(crossError).not.toBeNull();
   });
 
@@ -232,56 +307,239 @@ describe("Migration 054 — memberships foundation + RLS rewrite", () => {
     ]);
   });
 
-  it("creates and verifies a hosted membership from a passwordless grant", async () => {
-    const grantedEmail = uniqueEmail("passwordless-grant");
-    mocks.serverClient = {
-      auth: {
-        getUser: vi.fn().mockResolvedValue({
-          data: { user: { id: crypto.randomUUID(), email: "jarrad@bmhgroupkc.com" } },
-        }),
-      },
-    };
+  it("rejects an allowlisted authenticated caller with no Sandra membership", async () => {
+    const managedUser = await createUserForOrg(BMH_ORG_ID, "member");
+    const caller =
+      await createAuthenticatedUserWithoutMembership("no-membership-admin");
+    vi.stubEnv("ADMIN_EMAILS", caller.email);
+    mocks.serverClient = caller.client;
     mocks.adminClient = serviceClient;
 
-    const result = await grantUserAccess(grantedEmail, "owner");
-    expect(result).toMatchObject({
-      ok: true,
-      data: { grantedEmail, created: true },
+    await expect(
+      updateMembershipRole(managedUser.userId, "owner"),
+    ).resolves.toEqual({
+      ok: false,
+      error: {
+        code: "NOT_ADMIN",
+        message: "Only admins with active Sandra access can change roles.",
+      },
     });
-    if (!result.ok) throw new Error(result.error.message);
-    createdUserIds.push(result.data.userId);
+    expect(mocks.createAdminClient).not.toHaveBeenCalled();
 
-    const { data: membership, error: membershipError } = await serviceClient
-      .from("memberships")
-      .select("user_id, org_id, role")
-      .eq("user_id", result.data.userId)
-      .eq("org_id", SANDRA_ORG_ID)
-      .single();
-    expect(membershipError).toBeNull();
-    expect(membership).toEqual({
-      user_id: result.data.userId,
-      org_id: SANDRA_ORG_ID,
-      role: "owner",
-    });
-
-    const { data: authUser, error: authError } =
-      await serviceClient.auth.admin.getUserById(result.data.userId);
-    expect(authError).toBeNull();
-    expect(authUser.user?.email_confirmed_at).toBeTruthy();
-    expect(authUser.user?.app_metadata).toMatchObject({
-      sandra_provisioning_state: "ready",
-    });
-    expect(authUser.user?.app_metadata).not.toHaveProperty(
-      "sandra_provisioning_attempt",
-    );
-    expect(authUser.user?.app_metadata).not.toHaveProperty(
-      "sandra_provisioning_started_at",
-    );
+    const { data: savedMembership, error: savedMembershipError } =
+      await serviceClient
+        .from("memberships")
+        .select("role")
+        .eq("user_id", managedUser.userId)
+        .eq("org_id", BMH_ORG_ID)
+        .single();
+    expect(savedMembershipError).toBeNull();
+    expect(savedMembership).toEqual({ role: "member" });
   });
+
+  it("persists a role change from an active admin without breaking a fresh sign-in", async () => {
+    const email = uniqueEmail("role-change");
+    const password = `Sandra-role-${crypto.randomUUID()}`;
+    const { data: created, error: createError } =
+      await serviceClient.auth.admin.createUser({
+        email,
+        password,
+        email_confirm: true,
+      });
+    expect(createError).toBeNull();
+    expect(created.user).not.toBeNull();
+    const userId = created.user!.id;
+    createdUserIds.push(userId);
+
+    const { error: membershipError } = await serviceClient
+      .from("memberships")
+      .insert({ user_id: userId, org_id: BMH_ORG_ID, role: "member" });
+    expect(membershipError).toBeNull();
+
+    await useActiveAdminCaller("active-role-admin");
+
+    await expect(updateMembershipRole(userId, "owner")).resolves.toEqual({
+      ok: true,
+      data: { userId, role: "owner" },
+    });
+
+    const { data: savedMembership, error: savedMembershipError } =
+      await serviceClient
+        .from("memberships")
+        .select("role,access_status,access_expires_at,deletion_prepared_at")
+        .eq("user_id", userId)
+        .eq("org_id", BMH_ORG_ID)
+        .single();
+    expect(savedMembershipError).toBeNull();
+    expect(savedMembership).toEqual({
+      role: "owner",
+      access_status: "active",
+      access_expires_at: null,
+      deletion_prepared_at: null,
+    });
+
+    const signedInClient = createClient<Database>(
+      process.env.TEST_SUPABASE_URL!,
+      process.env.TEST_SUPABASE_ANON_KEY!,
+      { auth: { persistSession: false, autoRefreshToken: false } },
+    );
+    const { data: signedIn, error: signInError } =
+      await signedInClient.auth.signInWithPassword({ email, password });
+    expect(signInError).toBeNull();
+    expect(signedIn.user?.id).toBe(userId);
+
+    const { data: ownMembership, error: ownMembershipError } =
+      await signedInClient
+        .from("memberships")
+        .select("role")
+        .eq("org_id", BMH_ORG_ID)
+        .single();
+    expect(ownMembershipError).toBeNull();
+    expect(ownMembership).toEqual({ role: "owner" });
+  });
+
+  it.each([
+    {
+      label: "suspended",
+      lifecycle: {
+        access_status: "suspended",
+        access_expires_at: null,
+        deletion_prepared_at: null,
+      },
+    },
+    {
+      label: "expired",
+      lifecycle: {
+        access_status: "active",
+        access_expires_at: new Date(Date.now() - 60_000).toISOString(),
+        deletion_prepared_at: null,
+      },
+    },
+    {
+      label: "deletion-prepared",
+      lifecycle: {
+        access_status: "active",
+        access_expires_at: null,
+        deletion_prepared_at: new Date().toISOString(),
+      },
+    },
+  ])(
+    "rejects a still-authenticated, allowlisted $label caller",
+    async ({ label, lifecycle }) => {
+      const managedUser = await createUserForOrg(BMH_ORG_ID, "member");
+      const caller = await useActiveAdminCaller(`inactive-${label}-admin`);
+      const { error: lifecycleError } = await serviceClient
+        .from("memberships")
+        .update(lifecycle)
+        .eq("user_id", caller.userId)
+        .eq("org_id", BMH_ORG_ID);
+      expect(lifecycleError).toBeNull();
+
+      const {
+        data: { user: authenticatedCaller },
+        error: callerAuthError,
+      } = await caller.client.auth.getUser();
+      expect(callerAuthError).toBeNull();
+      expect(authenticatedCaller?.id).toBe(caller.userId);
+
+      await expect(
+        updateMembershipRole(managedUser.userId, "owner"),
+      ).resolves.toEqual({
+        ok: false,
+        error: {
+          code: "NOT_ADMIN",
+          message: "Only admins with active Sandra access can change roles.",
+        },
+      });
+      expect(mocks.createAdminClient).not.toHaveBeenCalled();
+
+      const { data: savedMembership, error: savedMembershipError } =
+        await serviceClient
+          .from("memberships")
+          .select("role")
+          .eq("user_id", managedUser.userId)
+          .eq("org_id", BMH_ORG_ID)
+          .single();
+      expect(savedMembershipError).toBeNull();
+      expect(savedMembership).toEqual({ role: "member" });
+    },
+  );
+
+  it.each([
+    {
+      label: "suspended and deletion-prepared",
+      lifecycle: {
+        access_status: "suspended",
+        access_expires_at: "2026-08-31T17:00:00.000Z",
+        deletion_prepared_at: "2026-07-29T17:00:00.000Z",
+      },
+    },
+    {
+      label: "active but expired",
+      lifecycle: {
+        access_status: "active",
+        access_expires_at: "2026-07-01T17:00:00.000Z",
+        deletion_prepared_at: null,
+      },
+    },
+  ])(
+    "rejects a $label role change and preserves Hugo lifecycle state",
+    async ({ lifecycle }) => {
+      const managedUser = await createUserForOrg(BMH_ORG_ID, "member");
+      const { error: lifecycleError } = await serviceClient
+        .from("memberships")
+        .update(lifecycle)
+        .eq("user_id", managedUser.userId)
+        .eq("org_id", BMH_ORG_ID);
+      expect(lifecycleError).toBeNull();
+      const { data: lifecycleBefore, error: lifecycleBeforeError } =
+        await serviceClient
+          .from("memberships")
+          .select("role,access_status,access_expires_at,deletion_prepared_at")
+          .eq("user_id", managedUser.userId)
+          .eq("org_id", BMH_ORG_ID)
+          .single();
+      expect(lifecycleBeforeError).toBeNull();
+      expect(lifecycleBefore).toMatchObject({
+        role: "member",
+        access_status: lifecycle.access_status,
+        access_expires_at: expect.any(String),
+        deletion_prepared_at: lifecycle.deletion_prepared_at
+          ? expect.any(String)
+          : null,
+      });
+
+      await useActiveAdminCaller("target-lifecycle-admin");
+
+      await expect(
+        updateMembershipRole(managedUser.userId, "owner"),
+      ).resolves.toEqual({
+        ok: false,
+        error: {
+          code: "MEMBERSHIP_NOT_FOUND",
+          message:
+            "This person does not have active Sandra access. Add or reactivate them in Hugo first.",
+        },
+      });
+
+      const { data: savedMembership, error: savedMembershipError } =
+        await serviceClient
+          .from("memberships")
+          .select("role,access_status,access_expires_at,deletion_prepared_at")
+          .eq("user_id", managedUser.userId)
+          .eq("org_id", BMH_ORG_ID)
+          .single();
+      expect(savedMembershipError).toBeNull();
+      expect(savedMembership).toEqual(lifecycleBefore);
+    },
+  );
 
   it("throws AuthorizationError when resource lookup is hidden by RLS", async () => {
     const orgBUser = await createUserForOrg(TEST_ORG_B_ID, "member");
-    const bmhPropertyId = await insertProperty(BMH_ORG_ID, "053 hidden resource");
+    const bmhPropertyId = await insertProperty(
+      BMH_ORG_ID,
+      "053 hidden resource",
+    );
     mocks.serverClient = orgBUser.client;
 
     await expect(
@@ -305,8 +563,7 @@ describe("Migration 054 — memberships foundation + RLS rewrite", () => {
           error: { message: string } | null;
         }>;
       }
-    )
-      .eq("user_id", user.userId);
+    ).eq("user_id", user.userId);
     expect(error).toBeNull();
     expect(data).toEqual([
       expect.objectContaining({
