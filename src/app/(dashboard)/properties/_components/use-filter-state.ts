@@ -85,7 +85,6 @@ export function useFilterState(): UseFilterState {
       const url = qs ? `${pathname}?${qs}` : pathname;
       startTransition(() => {
         router.replace(url, { scroll: false });
-        router.refresh();
       });
     },
     [pathname, params, router],

@@ -2,6 +2,10 @@ import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
 
 import { isEmailAllowed } from "@/lib/auth/allowlist";
+import {
+  hasActiveSandraAccess,
+  isMissingHugoAccessColumnError,
+} from "@/lib/auth/access-state";
 import { hasCurrentHugoOAuthProof } from "@/lib/auth/hugo-proof";
 import { SANDRA_ORG_ID } from "@/lib/auth/sandra-org";
 import { expireSupabaseAuthCookies } from "@/lib/auth/supabase-cookies";
@@ -122,13 +126,47 @@ export async function updateSession(request: NextRequest) {
   if (user && !isPublic) {
     let hasMembership = false;
     try {
-      const { data, error } = await supabase
-        .from("memberships")
-        .select("user_id")
-        .eq("user_id", user.id)
-        .eq("org_id", SANDRA_ORG_ID)
-        .limit(1);
-      hasMembership = !error && Boolean(data?.length);
+      if (!hugoRequired) {
+        const legacy = await supabase
+          .from("memberships")
+          .select("user_id")
+          .eq("user_id", user.id)
+          .eq("org_id", SANDRA_ORG_ID)
+          .limit(1);
+        hasMembership = !legacy.error && Boolean(legacy.data?.length);
+      } else {
+        const membershipQuery = supabase
+          .from("memberships")
+          .select("user_id, access_status, access_expires_at, deletion_prepared_at")
+          .eq("user_id", user.id)
+          .eq("org_id", SANDRA_ORG_ID);
+        const { data, error } = await membershipQuery.limit(1);
+        const membership = data?.[0] as
+          | {
+              access_status?: string | null;
+              access_expires_at?: string | null;
+              deletion_prepared_at?: string | null;
+          }
+          | undefined;
+        if (!error) {
+          hasMembership = hasActiveSandraAccess(membership);
+        } else if (
+          allowLocalE2ePasswordSession &&
+          isMissingHugoAccessColumnError(error)
+        ) {
+          // The shared E2E project is intentionally migrated after merge, while
+          // pull-request runs execute against the previous schema. Keep this
+          // compatibility path local to the password-session test bypass; a
+          // production schema mismatch remains fail-closed above.
+          const legacy = await supabase
+            .from("memberships")
+            .select("user_id")
+            .eq("user_id", user.id)
+            .eq("org_id", SANDRA_ORG_ID)
+            .limit(1);
+          hasMembership = !legacy.error && Boolean(legacy.data?.length);
+        }
+      }
     } catch {
       hasMembership = false;
     }

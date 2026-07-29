@@ -14,9 +14,11 @@ const CLOCK_SKEW_SECONDS = 60;
 /**
  * Prove that Hugo, rather than merely some OAuth provider, authenticated the
  * current session. A linked Hugo identity alone is not enough: users can have
- * multiple identities, while AMR only says "oauth". Supabase sets
- * last_sign_in_at when an identity is first linked, then updates updated_at on
- * later exchanges, so either timestamp can identify the current exchange.
+ * multiple identities, while AMR only says "oauth". Hosted custom providers
+ * currently advance either last_sign_in_at or
+ * updated_at on the exact provider identity. Require that timestamp to match
+ * the current OAuth AMR entry; a recent timestamp on a different linked
+ * provider is never accepted.
  */
 export function hasCurrentHugoOAuthProof(
   methods: unknown,
@@ -46,8 +48,7 @@ export function hasCurrentHugoOAuthProof(
       const identityTimestamp = Date.parse(value) / 1000;
       return (
         Number.isFinite(identityTimestamp) &&
-        Math.abs(identityTimestamp - currentOAuthTimestamp) <=
-          CLOCK_SKEW_SECONDS
+        Math.abs(identityTimestamp - currentOAuthTimestamp) <= CLOCK_SKEW_SECONDS
       );
     });
   });

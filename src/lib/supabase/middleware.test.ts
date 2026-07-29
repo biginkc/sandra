@@ -12,6 +12,8 @@ import { isPublicPath, updateSession } from "./middleware";
 function mockProtectedSession({
   memberships = [] as Array<{ user_id: string }>,
   membershipThrows = false,
+  membershipError = null as { code?: string; message?: string } | null,
+  legacyMemberships = [] as Array<{ user_id: string }>,
   signOutResult = { error: null } as { error: unknown },
   signOutThrows = false,
   authMethod = "oauth",
@@ -40,9 +42,24 @@ function mockProtectedSession({
   const signOut = signOutThrows
     ? vi.fn().mockRejectedValue(new Error("sign-out storage failed"))
     : vi.fn().mockResolvedValue(signOutResult);
+  let membershipQueryCount = 0;
   const limit = membershipThrows
     ? vi.fn().mockRejectedValue(new Error("membership unavailable"))
-    : vi.fn().mockResolvedValue({ data: memberships, error: null });
+    : vi.fn().mockImplementation(async () => {
+        membershipQueryCount += 1;
+        if (membershipQueryCount === 1 && membershipError) {
+          return { data: [], error: membershipError };
+        }
+        return {
+          data:
+            membershipQueryCount === 1
+              ? memberships
+              : legacyMemberships.length > 0
+                ? legacyMemberships
+                : memberships,
+          error: null,
+        };
+      });
   const orgEq = vi.fn(() => ({ limit }));
   const eq = vi.fn(() => ({ eq: orgEq }));
   const select = vi.fn(() => ({ eq }));
@@ -132,6 +149,48 @@ describe("updateSession membership authorization", () => {
     expect(signOut).not.toHaveBeenCalled();
   });
 
+  it("uses the legacy membership shape only for the local E2E bypass", async () => {
+    vi.stubEnv("E2E_AUTH_BYPASS", "1");
+    const { signOut, limit } = mockProtectedSession({
+      membershipError: {
+        code: "PGRST204",
+        message:
+          "Could not find the 'access_status' column of 'memberships' in the schema cache",
+      },
+      memberships: [],
+      legacyMemberships: [{ user_id: "seeded-auth-user" }],
+    });
+
+    const response = await updateSession(
+      new NextRequest("https://sandra.test/dashboard"),
+    );
+
+    expect(response.status).toBe(200);
+    expect(limit).toHaveBeenCalledTimes(2);
+    expect(signOut).not.toHaveBeenCalled();
+  });
+
+  it("fails closed on a Hugo-column schema error outside the local E2E bypass", async () => {
+    const { signOut, limit } = mockProtectedSession({
+      membershipError: {
+        code: "PGRST204",
+        message:
+          "Could not find the 'access_status' column of 'memberships' in the schema cache",
+      },
+      memberships: [],
+    });
+
+    const response = await updateSession(
+      new NextRequest("https://sandra.test/dashboard"),
+    );
+
+    expect(response.headers.get("location")).toBe(
+      "https://sandra.test/login?error=access",
+    );
+    expect(limit).toHaveBeenCalledTimes(1);
+    expect(signOut).toHaveBeenCalledWith({ scope: "local" });
+  });
+
   it("rejects a password-authenticated member and explicitly expires the session", async () => {
     const { from, signOut } = mockProtectedSession({
       memberships: [{ user_id: "seeded-auth-user" }],
@@ -159,7 +218,8 @@ describe("updateSession membership authorization", () => {
 
   it("keeps the password rollback path working while Hugo is off", async () => {
     vi.stubEnv("NEXT_PUBLIC_HUGO_SSO", "");
-    const { signOut } = mockProtectedSession({
+    vi.stubEnv("NODE_ENV", "production");
+    const { signOut, select, limit } = mockProtectedSession({
       memberships: [{ user_id: "seeded-auth-user" }],
       authMethod: "password",
     });
@@ -170,6 +230,8 @@ describe("updateSession membership authorization", () => {
 
     expect(response.status).toBe(200);
     expect(signOut).not.toHaveBeenCalled();
+    expect(select).toHaveBeenCalledWith("user_id");
+    expect(limit).toHaveBeenCalledOnce();
   });
 
   it("denies a seeded auth cookie when sign-out returns an error", async () => {

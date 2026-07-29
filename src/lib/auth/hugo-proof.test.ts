@@ -13,19 +13,6 @@ function hugoIdentity(timestamp: number) {
   ];
 }
 
-function hugoIdentityWithUpdatedAt(
-  lastSignInTimestamp: number,
-  updatedTimestamp: number,
-) {
-  return [
-    {
-      provider: "custom:hugo",
-      last_sign_in_at: new Date(lastSignInTimestamp * 1_000).toISOString(),
-      updated_at: new Date(updatedTimestamp * 1_000).toISOString(),
-    },
-  ];
-}
-
 describe("hasCurrentHugoOAuthProof", () => {
   it("accepts a Hugo identity updated by the current OAuth exchange", () => {
     expect(
@@ -36,20 +23,66 @@ describe("hasCurrentHugoOAuthProof", () => {
     ).toBe(true);
   });
 
-  it("accepts a repeat Hugo exchange when only updated_at advances", () => {
+  it("rejects a malformed updated_at on the exact Hugo identity", () => {
     expect(
       hasCurrentHugoOAuthProof(
         [{ method: "oauth", timestamp: oauthAt }],
-        hugoIdentityWithUpdatedAt(oauthAt - 600, oauthAt + 30),
+        [
+          {
+            provider: "custom:hugo",
+            last_sign_in_at: new Date((oauthAt - 600) * 1_000).toISOString(),
+            updated_at: "not-a-date",
+          },
+        ],
+      ),
+    ).toBe(false);
+  });
+
+  it("accepts hosted custom-provider exchanges when updated_at advances but last_sign_in_at stays stale", () => {
+    expect(
+      hasCurrentHugoOAuthProof(
+        [{ method: "oauth", timestamp: oauthAt }],
+        [
+          {
+            provider: "custom:hugo",
+            last_sign_in_at: new Date((oauthAt - 600) * 1_000).toISOString(),
+            updated_at: new Date((oauthAt + 30) * 1_000).toISOString(),
+          },
+        ],
       ),
     ).toBe(true);
+  });
+
+  it("rejects a recent updated_at from another linked provider", () => {
+    expect(
+      hasCurrentHugoOAuthProof(
+        [{ method: "oauth", timestamp: oauthAt }],
+        [
+          {
+            provider: "custom:hugo",
+            last_sign_in_at: new Date((oauthAt - 600) * 1_000).toISOString(),
+          },
+          {
+            provider: "google",
+            last_sign_in_at: new Date((oauthAt - 600) * 1_000).toISOString(),
+            updated_at: new Date((oauthAt + 30) * 1_000).toISOString(),
+          },
+        ],
+      ),
+    ).toBe(false);
   });
 
   it("rejects a repeat exchange when both identity timestamps are stale", () => {
     expect(
       hasCurrentHugoOAuthProof(
         [{ method: "oauth", timestamp: oauthAt }],
-        hugoIdentityWithUpdatedAt(oauthAt - 600, oauthAt - 61),
+        [
+          {
+            provider: "custom:hugo",
+            last_sign_in_at: new Date((oauthAt - 61) * 1_000).toISOString(),
+            updated_at: new Date((oauthAt - 62) * 1_000).toISOString(),
+          },
+        ],
       ),
     ).toBe(false);
   });
