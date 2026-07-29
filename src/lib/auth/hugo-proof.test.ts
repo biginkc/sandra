@@ -32,6 +32,21 @@ describe("hasCurrentHugoOAuthProof", () => {
     ).toBe(true);
   });
 
+  it("accepts hosted custom-provider exchanges when updated_at advances but last_sign_in_at stays stale", () => {
+    expect(
+      hasCurrentHugoOAuthProof(
+        [{ method: "oauth", timestamp: oauthAt }],
+        [
+          {
+            provider: "custom:hugo",
+            last_sign_in_at: new Date((oauthAt - 600) * 1_000).toISOString(),
+            updated_at: new Date((oauthAt + 30) * 1_000).toISOString(),
+          },
+        ],
+      ),
+    ).toBe(true);
+  });
+
   it("rejects a recent updated_at from another linked provider", () => {
     expect(
       hasCurrentHugoOAuthProof(
