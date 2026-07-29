@@ -21,8 +21,12 @@ const freshMigrationNames = [
   "20260728110000_hugo_auth_hard_delete.sql",
   "20260728130000_hugo_access_operation_request_hash.sql",
   "20260728150000_hugo_access_authorization_hardening.sql",
+  "20260729010000_hugo_auth_identity_key_lifecycle_lock.sql",
 ];
 const hostedSnapshotNames = freshMigrationNames.slice(0, 4);
+const forwardMigrationNames = freshMigrationNames.slice(
+  hostedSnapshotNames.length,
+);
 const hostedSnapshotSourceCommit =
   "415c283cec47b71ac03cd1cdbb3aa1149a4ef4c5";
 const hostedSnapshotHashes = {
@@ -60,7 +64,7 @@ if (!["hosted-snapshot-forward", "fresh-full-chain"].includes(lane)) {
 const migrationNames =
   lane === "fresh-full-chain"
     ? freshMigrationNames
-    : [...hostedSnapshotNames, freshMigrationNames.at(-1)];
+    : [...hostedSnapshotNames, ...forwardMigrationNames];
 const migrations =
   lane === "fresh-full-chain"
     ? freshMigrationNames.map((name) =>
@@ -70,11 +74,8 @@ const migrations =
         ...hostedSnapshotNames.map((name) =>
           join(root, "scripts", "fixtures", "hugo-hosted-snapshot", name),
         ),
-        join(
-          root,
-          "supabase",
-          "migrations",
-          freshMigrationNames.at(-1),
+        ...forwardMigrationNames.map((name) =>
+          join(root, "supabase", "migrations", name),
         ),
       ];
 
@@ -200,6 +201,342 @@ async function waitForActiveQuery(port, socket, applicationName) {
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
   throw new Error(`Timed out waiting for SQL fixture: ${applicationName}`);
+}
+
+async function waitForMatchingAdvisoryWait(
+  port,
+  socket,
+  applicationName,
+  concurrentSession,
+  label,
+) {
+  let sessionSettled = false;
+  concurrentSession.then(
+    () => {
+      sessionSettled = true;
+    },
+    () => {
+      sessionSettled = true;
+    },
+  );
+
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const waitCount = sql(
+      port,
+      socket,
+      `
+        select count(*)
+        from pg_catalog.pg_locks waiting_lock
+        join pg_catalog.pg_stat_activity waiting_session
+          on waiting_session.pid = waiting_lock.pid
+        join pg_catalog.pg_locks held_lock
+          on held_lock.locktype = waiting_lock.locktype
+         and held_lock.database is not distinct from waiting_lock.database
+         and held_lock.classid is not distinct from waiting_lock.classid
+         and held_lock.objid is not distinct from waiting_lock.objid
+         and held_lock.objsubid is not distinct from waiting_lock.objsubid
+         and held_lock.pid <> waiting_lock.pid
+         and held_lock.granted
+        where waiting_session.application_name = '${applicationName}'
+          and waiting_lock.locktype = 'advisory'
+          and not waiting_lock.granted;
+      `,
+      { capture: true, extraArgs: ["-Atq"] },
+    ).trim();
+    if (waitCount === "1") return;
+
+    if (sessionSettled) {
+      await concurrentSession;
+      throw new Error(
+        `${label} completed without waiting for the matching lifecycle lock`,
+      );
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+
+  throw new Error(`Timed out proving ${label} advisory-lock serialization`);
+}
+
+async function verifyAuthIdentityKeySerialization(port, socket) {
+  const insertSession = sqlAsync(port, socket, `
+    set application_name = 'hugo-auth-insert-identity-race';
+    begin;
+    insert into auth.users(id, email) values (
+      '70000000-0000-4000-8000-000000000001',
+      'auth-insert-race@bmhgroupkc.com'
+    );
+    select pg_sleep(1);
+    commit;
+  `);
+  await waitForActiveQuery(
+    port,
+    socket,
+    "hugo-auth-insert-identity-race",
+  );
+
+  const insertLifecycle = sqlAsync(port, socket, `
+    set application_name = 'hugo-auth-insert-lifecycle-race';
+    begin;
+    select set_config('request.jwt.claim.role', 'service_role', false);
+    select public.hugo_prepare_pristine_delete(
+      '70000000-0000-4000-8000-000000000002',
+      'auth-insert-race@bmhgroupkc.com'
+    );
+    commit;
+    begin;
+    select public.hugo_delete_identity(
+      '70000000-0000-4000-8000-000000000003',
+      'auth-insert-race@bmhgroupkc.com'
+    );
+    commit;
+  `);
+  await waitForMatchingAdvisoryWait(
+    port,
+    socket,
+    "hugo-auth-insert-lifecycle-race",
+    insertLifecycle,
+    "lifecycle calls racing an Auth insert",
+  );
+
+  const insertResults = await Promise.allSettled([
+    insertSession,
+    insertLifecycle,
+  ]);
+  if (insertResults.some((result) => result.status === "rejected")) {
+    throw new Error(
+      `Auth insert serialization failed: ${JSON.stringify(
+        insertResults.map((result) =>
+          result.status === "fulfilled" ? "fulfilled" : result.reason.message
+        ),
+      )}`,
+    );
+  }
+
+  const insertReceipt = sql(
+    port,
+    socket,
+    `
+      select string_agg(
+        concat_ws(
+          ':',
+          operation,
+          receipt #>> '{observed,status}',
+          receipt ->> 'ok',
+          coalesce(receipt ->> 'error_code', 'none')
+        ),
+        '|'
+        order by operation_id
+      )
+      from public.hugo_access_operations
+      where operation_id in (
+        '70000000-0000-4000-8000-000000000002'::uuid,
+        '70000000-0000-4000-8000-000000000003'::uuid
+      );
+    `,
+    { capture: true, extraArgs: ["-Atq"] },
+  ).trim();
+  if (
+    insertReceipt !==
+      "preparePristineDelete:missing:true:none|deleteIdentity:missing:true:none"
+  ) {
+    throw new Error(
+      `Lifecycle did not observe and delete the serialized Auth insert: ${insertReceipt}`,
+    );
+  }
+
+  const insertedIdentityCount = sql(
+    port,
+    socket,
+    `
+      select count(*)
+      from auth.users
+      where id = '70000000-0000-4000-8000-000000000001'::uuid;
+    `,
+    { capture: true, extraArgs: ["-Atq"] },
+  ).trim();
+  if (insertedIdentityCount !== "0") {
+    throw new Error(
+      `Serialized Auth insert left ${insertedIdentityCount} identity rows`,
+    );
+  }
+
+  sql(port, socket, `
+    insert into auth.users(id, email, last_sign_in_at) values (
+      '70000000-0000-4000-8000-000000000011',
+      'before-auth-email-race@bmhgroupkc.com',
+      now()
+    );
+  `);
+
+  const updateSession = sqlAsync(port, socket, `
+    set application_name = 'hugo-auth-email-update-identity-race';
+    begin;
+    update auth.users
+    set email = 'after-auth-email-race@bmhgroupkc.com'
+    where id = '70000000-0000-4000-8000-000000000011'::uuid;
+    select pg_sleep(1);
+    commit;
+  `);
+  await waitForActiveQuery(
+    port,
+    socket,
+    "hugo-auth-email-update-identity-race",
+  );
+
+  const updateLifecycle = sqlAsync(port, socket, `
+    set application_name = 'hugo-auth-email-update-lifecycle-race';
+    begin;
+    select set_config('request.jwt.claim.role', 'service_role', false);
+    select public.hugo_prepare_pristine_delete(
+      '70000000-0000-4000-8000-000000000012',
+      'after-auth-email-race@bmhgroupkc.com'
+    );
+    commit;
+    begin;
+    select public.hugo_delete_identity(
+      '70000000-0000-4000-8000-000000000013',
+      'after-auth-email-race@bmhgroupkc.com'
+    );
+    commit;
+  `);
+  await waitForMatchingAdvisoryWait(
+    port,
+    socket,
+    "hugo-auth-email-update-lifecycle-race",
+    updateLifecycle,
+    "lifecycle calls racing an Auth email update",
+  );
+
+  const updateResults = await Promise.allSettled([
+    updateSession,
+    updateLifecycle,
+  ]);
+  if (updateResults.some((result) => result.status === "rejected")) {
+    throw new Error(
+      `Auth email-update serialization failed: ${JSON.stringify(
+        updateResults.map((result) =>
+          result.status === "fulfilled" ? "fulfilled" : result.reason.message
+        ),
+      )}`,
+    );
+  }
+
+  const updateReceipt = sql(
+    port,
+    socket,
+    `
+      select string_agg(
+        concat_ws(
+          ':',
+          operation,
+          receipt #>> '{observed,status}',
+          receipt #>> '{observed,has_durable_activity}',
+          receipt ->> 'ok',
+          coalesce(receipt ->> 'error_code', 'none')
+        ),
+        '|'
+        order by operation_id
+      )
+      from public.hugo_access_operations
+      where operation_id in (
+        '70000000-0000-4000-8000-000000000012'::uuid,
+        '70000000-0000-4000-8000-000000000013'::uuid
+      );
+    `,
+    { capture: true, extraArgs: ["-Atq"] },
+  ).trim();
+  if (
+    updateReceipt !==
+      "preparePristineDelete:missing:true:false:NON_PRISTINE|" +
+      "deleteIdentity:missing:true:false:NON_PRISTINE"
+  ) {
+    throw new Error(
+      `Lifecycle did not observe durable state at the updated Auth email: ${updateReceipt}`,
+    );
+  }
+
+  sql(port, socket, `
+    select set_config('request.jwt.claim.role', 'service_role', false);
+    do $$
+    declare
+      v_prepare jsonb;
+      v_delete jsonb;
+      v_changed jsonb;
+    begin
+      select receipt
+      into v_prepare
+      from public.hugo_access_operations
+      where operation_id =
+        '70000000-0000-4000-8000-000000000012'::uuid;
+      select receipt
+      into v_delete
+      from public.hugo_access_operations
+      where operation_id =
+        '70000000-0000-4000-8000-000000000013'::uuid;
+
+      assert public.hugo_prepare_pristine_delete(
+        '70000000-0000-4000-8000-000000000012',
+        'AFTER-AUTH-EMAIL-RACE@BMHGROUPKC.COM'
+      ) = v_prepare, 'durable prepare exact retry changed its receipt';
+      assert public.hugo_delete_identity(
+        '70000000-0000-4000-8000-000000000013',
+        'AFTER-AUTH-EMAIL-RACE@BMHGROUPKC.COM'
+      ) = v_delete, 'durable delete exact retry changed its receipt';
+
+      v_changed := public.hugo_prepare_pristine_delete(
+        '70000000-0000-4000-8000-000000000012',
+        'before-auth-email-race@bmhgroupkc.com'
+      );
+      assert v_changed->>'error_code' = 'OPERATION_CONFLICT',
+        'durable prepare changed request did not conflict';
+      v_changed := public.hugo_delete_identity(
+        '70000000-0000-4000-8000-000000000013',
+        'before-auth-email-race@bmhgroupkc.com'
+      );
+      assert v_changed->>'error_code' = 'OPERATION_CONFLICT',
+        'durable delete changed request did not conflict';
+
+      assert (
+        select count(*)
+        from public.hugo_access_operations operation
+        where operation.operation_id in (
+          '70000000-0000-4000-8000-000000000012'::uuid,
+          '70000000-0000-4000-8000-000000000013'::uuid
+        )
+          and operation.request_hash ~ '^[0-9a-f]{64}$'
+          and operation.receipt->>'request_hash' =
+            operation.request_hash
+      ) = 2, 'durable lifecycle receipts lost exact request hashes';
+    end $$;
+  `);
+
+  const retainedUpdatedIdentity = sql(
+    port,
+    socket,
+    `
+      select email
+      from auth.users
+      where id = '70000000-0000-4000-8000-000000000011'::uuid;
+    `,
+    { capture: true, extraArgs: ["-Atq"] },
+  ).trim();
+  if (retainedUpdatedIdentity !== "after-auth-email-race@bmhgroupkc.com") {
+    throw new Error(
+      `Durable Auth email-update identity was not retained: ${retainedUpdatedIdentity}`,
+    );
+  }
+
+  sql(port, socket, `
+    delete from auth.users
+    where id = '70000000-0000-4000-8000-000000000011'::uuid;
+    delete from public.hugo_access_operations
+    where operation_id in (
+      '70000000-0000-4000-8000-000000000002'::uuid,
+      '70000000-0000-4000-8000-000000000003'::uuid,
+      '70000000-0000-4000-8000-000000000012'::uuid,
+      '70000000-0000-4000-8000-000000000013'::uuid
+    );
+  `);
 }
 
 async function freePort() {
@@ -546,24 +883,134 @@ try {
     );
   }
 
-  // Replaying the forward repair proves a deployment retry does not create a
-  // second private-function chain or lose public grants.
-  run(
-    "psql",
-    [
-      "-h",
-      cluster,
-      "-p",
-      String(port),
-      "-U",
-      "postgres",
-      "-v",
-      "ON_ERROR_STOP=1",
-      "-f",
-      migrations.at(-1),
-    ],
-    { stdio: ["ignore", "ignore", "inherit"] },
-  );
+  // Replaying each forward repair proves a deployment retry does not create a
+  // second private-function chain, lose public grants, or weaken trigger shape.
+  for (const migration of migrations.slice(-forwardMigrationNames.length)) {
+    run(
+      "psql",
+      [
+        "-h",
+        cluster,
+        "-p",
+        String(port),
+        "-U",
+        "postgres",
+        "-v",
+        "ON_ERROR_STOP=1",
+        "-f",
+        migration,
+      ],
+      { stdio: ["ignore", "ignore", "inherit"] },
+    );
+  }
+
+  sql(port, cluster, `
+    do $$
+    declare
+      v_function_definition text;
+      v_prepare_definition text;
+      v_delete_definition text;
+      v_trigger_definition text;
+      v_trigger_type smallint;
+    begin
+      v_function_definition := pg_get_functiondef(
+        'public.hugo_lock_auth_identity_key_lifecycle()'::regprocedure
+      );
+      v_prepare_definition := pg_get_functiondef(
+        'public.hugo_prepare_pristine_delete(uuid,text)'::regprocedure
+      );
+      v_delete_definition := pg_get_functiondef(
+        'public.hugo_delete_identity(uuid,text)'::regprocedure
+      );
+
+      select
+        pg_get_triggerdef(trigger_row.oid),
+        trigger_row.tgtype
+      into
+        v_trigger_definition,
+        v_trigger_type
+      from pg_catalog.pg_trigger trigger_row
+      where trigger_row.tgrelid = 'auth.users'::regclass
+        and trigger_row.tgname = 'hugo_auth_users_lifecycle_lock'
+        and not trigger_row.tgisinternal
+        and trigger_row.tgfoid =
+          'public.hugo_lock_auth_identity_key_lifecycle()'::regprocedure;
+
+      assert (
+        length(v_function_definition) -
+        length(replace(
+          v_function_definition,
+          'hugo-sandra-privileged-lifecycle-v1',
+          ''
+        ))
+      ) / length('hugo-sandra-privileged-lifecycle-v1') = 1,
+        'Auth identity-key trigger must take exactly one shared lifecycle lock';
+      assert not has_function_privilege(
+        'service_role',
+        'public.hugo_lock_auth_identity_key_lifecycle()',
+        'execute'
+      ), 'Auth identity-key trigger function must remain private';
+      assert not has_function_privilege(
+        'service_role',
+        'public.hugo_email_has_durable_activity(text)',
+        'execute'
+      ), 'normalized-email durable proof must remain private';
+      assert not has_function_privilege(
+        'service_role',
+        'public.hugo_prepare_pristine_delete_without_email_durable_guard(uuid,text)',
+        'execute'
+      ), 'unguarded prepare implementation must remain private';
+      assert not has_function_privilege(
+        'service_role',
+        'public.hugo_delete_identity_without_email_durable_guard(uuid,text)',
+        'execute'
+      ), 'unguarded delete implementation must remain private';
+      assert has_function_privilege(
+        'service_role',
+        'public.hugo_prepare_pristine_delete(uuid,text)',
+        'execute'
+      ), 'service role lost public prepare execution';
+      assert has_function_privilege(
+        'service_role',
+        'public.hugo_delete_identity(uuid,text)',
+        'execute'
+      ), 'service role lost public delete execution';
+      assert not has_function_privilege(
+        'authenticated',
+        'public.hugo_prepare_pristine_delete(uuid,text)',
+        'execute'
+      ), 'authenticated role gained public prepare execution';
+      assert not has_function_privilege(
+        'authenticated',
+        'public.hugo_delete_identity(uuid,text)',
+        'execute'
+      ), 'authenticated role gained public delete execution';
+      assert (
+        length(v_prepare_definition) -
+        length(replace(
+          v_prepare_definition,
+          'hugo_email_has_durable_activity',
+          ''
+        ))
+      ) / length('hugo_email_has_durable_activity') = 1,
+        'public prepare must call normalized-email durable proof exactly once';
+      assert (
+        length(v_delete_definition) -
+        length(replace(
+          v_delete_definition,
+          'hugo_email_has_durable_activity',
+          ''
+        ))
+      ) / length('hugo_email_has_durable_activity') = 1,
+        'public delete must call normalized-email durable proof exactly once';
+      assert v_trigger_type = 22,
+        'Auth lifecycle lock must be BEFORE INSERT OR UPDATE OF email at statement level';
+      assert position(
+        'before insert or update of email on auth.users'
+        in lower(v_trigger_definition)
+      ) > 0, 'Auth lifecycle UPDATE lock must be restricted to the email key';
+    end $$;
+  `);
 
   sql(port, cluster, `
     select set_config('request.jwt.claim.role', 'service_role', false);
@@ -1838,6 +2285,8 @@ try {
     );
   }
 
+  await verifyAuthIdentityKeySerialization(port, cluster);
+
   const privileges = sql(
     port,
     cluster,
@@ -1904,7 +2353,10 @@ try {
       lane === "hosted-snapshot-forward"
         ? hostedSnapshotSourceCommit
         : null,
-    forwardReplay: 2,
+    forwardReplay: forwardMigrationNames.map((name) => ({
+      migration: name,
+      applications: 2,
+    })),
     assertions: {
       hostedSnapshotHash: lane === "hosted-snapshot-forward" ? "pass" : "n/a",
       invalidReceiptBinding: "pass",
@@ -1925,6 +2377,7 @@ try {
       pristinePrepareProof: "pass",
       hardDeletePseudonymization: "pass",
       hardDeleteDurableReferenceRace: "pass",
+      authIdentityKeySerialization: "pass",
       priorSignIn: "pass",
       dynamicDurableActivity: "pass",
       privileges,
