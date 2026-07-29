@@ -474,6 +474,9 @@ async function verifyAuthIdentityKeySerialization(port, socket) {
       where operation_id =
         '70000000-0000-4000-8000-000000000013'::uuid;
 
+      assert v_prepare - 'operation_id' - 'request_hash' =
+        v_delete - 'operation_id' - 'request_hash',
+        'prepare/delete durable refusal receipts drifted in shared shape';
       assert public.hugo_prepare_pristine_delete(
         '70000000-0000-4000-8000-000000000012',
         'AFTER-AUTH-EMAIL-RACE@BMHGROUPKC.COM'
@@ -908,6 +911,7 @@ try {
     do $$
     declare
       v_function_definition text;
+      v_receipt_helper_definition text;
       v_prepare_definition text;
       v_delete_definition text;
       v_trigger_definition text;
@@ -915,6 +919,9 @@ try {
     begin
       v_function_definition := pg_get_functiondef(
         'public.hugo_lock_auth_identity_key_lifecycle()'::regprocedure
+      );
+      v_receipt_helper_definition := pg_get_functiondef(
+        'public.hugo_store_non_pristine_email_receipt(uuid,text,text,text)'::regprocedure
       );
       v_prepare_definition := pg_get_functiondef(
         'public.hugo_prepare_pristine_delete(uuid,text)'::regprocedure
@@ -957,6 +964,29 @@ try {
       ), 'normalized-email durable proof must remain private';
       assert not has_function_privilege(
         'service_role',
+        'public.hugo_store_non_pristine_email_receipt(uuid,text,text,text)',
+        'execute'
+      ), 'shared NON_PRISTINE receipt helper must remain private';
+      assert (
+        length(v_receipt_helper_definition) -
+        length(replace(
+          v_receipt_helper_definition,
+          'public.hugo_receipt(',
+          ''
+        ))
+      ) / length('public.hugo_receipt(') = 1,
+        'shared NON_PRISTINE helper must construct exactly one receipt';
+      assert (
+        length(v_receipt_helper_definition) -
+        length(replace(
+          v_receipt_helper_definition,
+          'public.hugo_store_access_operation(',
+          ''
+        ))
+      ) / length('public.hugo_store_access_operation(') = 1,
+        'shared NON_PRISTINE helper must persist exactly one receipt';
+      assert not has_function_privilege(
+        'service_role',
         'public.hugo_prepare_pristine_delete_without_email_durable_guard(uuid,text)',
         'execute'
       ), 'unguarded prepare implementation must remain private';
@@ -995,6 +1025,15 @@ try {
       ) / length('hugo_email_has_durable_activity') = 1,
         'public prepare must call normalized-email durable proof exactly once';
       assert (
+        length(v_prepare_definition) -
+        length(replace(
+          v_prepare_definition,
+          'hugo_store_non_pristine_email_receipt',
+          ''
+        ))
+      ) / length('hugo_store_non_pristine_email_receipt') = 1,
+        'public prepare must call shared NON_PRISTINE receipt helper exactly once';
+      assert (
         length(v_delete_definition) -
         length(replace(
           v_delete_definition,
@@ -1003,6 +1042,15 @@ try {
         ))
       ) / length('hugo_email_has_durable_activity') = 1,
         'public delete must call normalized-email durable proof exactly once';
+      assert (
+        length(v_delete_definition) -
+        length(replace(
+          v_delete_definition,
+          'hugo_store_non_pristine_email_receipt',
+          ''
+        ))
+      ) / length('hugo_store_non_pristine_email_receipt') = 1,
+        'public delete must call shared NON_PRISTINE receipt helper exactly once';
       assert v_trigger_type = 22,
         'Auth lifecycle lock must be BEFORE INSERT OR UPDATE OF email at statement level';
       assert position(

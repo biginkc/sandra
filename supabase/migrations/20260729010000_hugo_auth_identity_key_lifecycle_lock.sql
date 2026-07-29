@@ -67,6 +67,108 @@ $$;
 revoke all on function public.hugo_email_has_durable_activity(text)
   from public, anon, authenticated, service_role;
 
+-- Construct and persist the durable-evidence refusal in one place so prepare
+-- and delete cannot drift into different receipt shapes.
+create or replace function public.hugo_store_non_pristine_email_receipt(
+  p_operation_id uuid,
+  p_email text,
+  p_operation text,
+  p_request_hash text
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public, auth, pg_temp
+as $$
+declare
+  v_email text := lower(trim(coalesce(p_email, '')));
+  v_user_id uuid;
+  v_membership public.memberships%rowtype;
+  v_has_membership boolean := false;
+  v_receipt jsonb;
+begin
+  if p_operation_id is null
+     or v_email !~ '^[^@[:space:]]+@bmhgroupkc\.com$'
+     or p_operation is null
+     or p_operation not in ('preparePristineDelete', 'deleteIdentity')
+     or p_request_hash is null
+     or p_request_hash !~ '^[0-9a-f]{64}$' then
+    raise exception 'HUGO_INVALID_NON_PRISTINE_RECEIPT_REQUEST'
+      using errcode = 'P0001';
+  end if;
+
+  select auth_user.id
+  into v_user_id
+  from auth.users auth_user
+  where lower(trim(coalesce(auth_user.email, ''))) = v_email
+  order by auth_user.id
+  limit 1;
+
+  if v_user_id is null then
+    raise exception 'HUGO_NON_PRISTINE_IDENTITY_NOT_FOUND'
+      using errcode = 'P0001';
+  end if;
+
+  select *
+  into v_membership
+  from public.memberships membership
+  where membership.user_id = v_user_id
+    and membership.org_id =
+      '00000000-0000-0000-0000-000000000bbb'::uuid
+  for update;
+  v_has_membership := found;
+
+  v_receipt := public.hugo_sandra_receipt_with_request_hash(
+    public.hugo_receipt(
+      p_operation_id,
+      v_user_id,
+      case when v_has_membership then v_membership.role else null end,
+      case when v_has_membership
+        then coalesce(v_membership.hugo_config, '{}'::jsonb)
+        else '{}'::jsonb
+      end,
+      'revoked',
+      case when v_has_membership
+        then v_membership.access_expires_at
+        else null
+      end,
+      case when v_has_membership then v_membership.role else null end,
+      case when v_has_membership
+        then coalesce(v_membership.hugo_config, '{}'::jsonb)
+        else '{}'::jsonb
+      end,
+      case when v_has_membership
+        then v_membership.access_status
+        else 'missing'
+      end,
+      case when v_has_membership
+        then v_membership.access_expires_at
+        else null
+      end,
+      true,
+      false,
+      'NON_PRISTINE',
+      'Sandra identity has prior sign-in or durable business activity.'
+    ),
+    p_request_hash
+  );
+  perform public.hugo_store_access_operation(
+    p_operation_id,
+    p_operation,
+    v_email,
+    v_user_id,
+    '{"status":"revoked"}'::jsonb,
+    p_request_hash,
+    v_receipt
+  );
+  return v_receipt;
+end;
+$$;
+
+revoke all on function public.hugo_store_non_pristine_email_receipt(
+  uuid, text, text, text
+) from public, anon, authenticated, service_role;
+
 -- Preserve the complete hosted lifecycle implementations behind private
 -- wrappers. Replays leave this one-hop chain intact.
 do $$
@@ -117,10 +219,6 @@ declare
   v_prior_hash text;
   v_prior_operation text;
   v_prior jsonb;
-  v_user_id uuid;
-  v_membership public.memberships%rowtype;
-  v_has_membership boolean := false;
-  v_receipt jsonb;
 begin
   perform public.hugo_require_service_role();
   perform pg_advisory_xact_lock(
@@ -156,66 +254,12 @@ begin
   if p_operation_id is not null
      and v_email ~ '^[^@[:space:]]+@bmhgroupkc\.com$'
      and public.hugo_email_has_durable_activity(v_email) then
-    select auth_user.id
-    into v_user_id
-    from auth.users auth_user
-    where lower(trim(coalesce(auth_user.email, ''))) = v_email
-    order by auth_user.id
-    limit 1;
-
-    select *
-    into v_membership
-    from public.memberships membership
-    where membership.user_id = v_user_id
-      and membership.org_id =
-        '00000000-0000-0000-0000-000000000bbb'::uuid
-    for update;
-    v_has_membership := found;
-
-    v_receipt := public.hugo_sandra_receipt_with_request_hash(
-      public.hugo_receipt(
-        p_operation_id,
-        v_user_id,
-        case when v_has_membership then v_membership.role else null end,
-        case when v_has_membership
-          then coalesce(v_membership.hugo_config, '{}'::jsonb)
-          else '{}'::jsonb
-        end,
-        'revoked',
-        case when v_has_membership
-          then v_membership.access_expires_at
-          else null
-        end,
-        case when v_has_membership then v_membership.role else null end,
-        case when v_has_membership
-          then coalesce(v_membership.hugo_config, '{}'::jsonb)
-          else '{}'::jsonb
-        end,
-        case when v_has_membership
-          then v_membership.access_status
-          else 'missing'
-        end,
-        case when v_has_membership
-          then v_membership.access_expires_at
-          else null
-        end,
-        true,
-        false,
-        'NON_PRISTINE',
-        'Sandra identity has prior sign-in or durable business activity.'
-      ),
+    return public.hugo_store_non_pristine_email_receipt(
+      p_operation_id,
+      v_email,
+      'preparePristineDelete',
       v_hash
     );
-    perform public.hugo_store_access_operation(
-      p_operation_id,
-      'preparePristineDelete',
-      v_email,
-      v_user_id,
-      '{"status":"revoked"}'::jsonb,
-      v_hash,
-      v_receipt
-    );
-    return v_receipt;
   end if;
 
   return public.hugo_prepare_pristine_delete_without_email_durable_guard(
@@ -245,10 +289,6 @@ declare
   v_prior_hash text;
   v_prior_operation text;
   v_prior jsonb;
-  v_user_id uuid;
-  v_membership public.memberships%rowtype;
-  v_has_membership boolean := false;
-  v_receipt jsonb;
 begin
   perform public.hugo_require_service_role();
   perform pg_advisory_xact_lock(
@@ -283,66 +323,12 @@ begin
   if p_operation_id is not null
      and v_email ~ '^[^@[:space:]]+@bmhgroupkc\.com$'
      and public.hugo_email_has_durable_activity(v_email) then
-    select auth_user.id
-    into v_user_id
-    from auth.users auth_user
-    where lower(trim(coalesce(auth_user.email, ''))) = v_email
-    order by auth_user.id
-    limit 1;
-
-    select *
-    into v_membership
-    from public.memberships membership
-    where membership.user_id = v_user_id
-      and membership.org_id =
-        '00000000-0000-0000-0000-000000000bbb'::uuid
-    for update;
-    v_has_membership := found;
-
-    v_receipt := public.hugo_sandra_receipt_with_request_hash(
-      public.hugo_receipt(
-        p_operation_id,
-        v_user_id,
-        case when v_has_membership then v_membership.role else null end,
-        case when v_has_membership
-          then coalesce(v_membership.hugo_config, '{}'::jsonb)
-          else '{}'::jsonb
-        end,
-        'revoked',
-        case when v_has_membership
-          then v_membership.access_expires_at
-          else null
-        end,
-        case when v_has_membership then v_membership.role else null end,
-        case when v_has_membership
-          then coalesce(v_membership.hugo_config, '{}'::jsonb)
-          else '{}'::jsonb
-        end,
-        case when v_has_membership
-          then v_membership.access_status
-          else 'missing'
-        end,
-        case when v_has_membership
-          then v_membership.access_expires_at
-          else null
-        end,
-        true,
-        false,
-        'NON_PRISTINE',
-        'Sandra identity has prior sign-in or durable business activity.'
-      ),
+    return public.hugo_store_non_pristine_email_receipt(
+      p_operation_id,
+      v_email,
+      'deleteIdentity',
       v_hash
     );
-    perform public.hugo_store_access_operation(
-      p_operation_id,
-      'deleteIdentity',
-      v_email,
-      v_user_id,
-      '{"status":"revoked"}'::jsonb,
-      v_hash,
-      v_receipt
-    );
-    return v_receipt;
   end if;
 
   return public.hugo_delete_identity_without_email_durable_guard(
@@ -371,11 +357,16 @@ comment on trigger hugo_auth_users_lifecycle_lock on auth.users is
 do $$
 declare
   v_function_definition text;
+  v_receipt_helper_definition text;
   v_prepare_definition text;
   v_delete_definition text;
   v_lock_count integer;
+  v_receipt_constructor_count integer;
+  v_receipt_store_count integer;
   v_prepare_guard_count integer;
   v_delete_guard_count integer;
+  v_prepare_receipt_helper_count integer;
+  v_delete_receipt_helper_count integer;
   v_trigger_definition text;
   v_trigger_type smallint;
 begin
@@ -392,6 +383,28 @@ begin
       ))
     ) / length('hugo-sandra-privileged-lifecycle-v1');
 
+  v_receipt_helper_definition := pg_get_functiondef(
+    'public.hugo_store_non_pristine_email_receipt(uuid,text,text,text)'::regprocedure
+  );
+  v_receipt_constructor_count :=
+    (
+      length(v_receipt_helper_definition) -
+      length(replace(
+        v_receipt_helper_definition,
+        'public.hugo_receipt(',
+        ''
+      ))
+    ) / length('public.hugo_receipt(');
+  v_receipt_store_count :=
+    (
+      length(v_receipt_helper_definition) -
+      length(replace(
+        v_receipt_helper_definition,
+        'public.hugo_store_access_operation(',
+        ''
+      ))
+    ) / length('public.hugo_store_access_operation(');
+
   v_prepare_definition := pg_get_functiondef(
     'public.hugo_prepare_pristine_delete(uuid,text)'::regprocedure
   );
@@ -404,6 +417,15 @@ begin
         ''
       ))
     ) / length('hugo_email_has_durable_activity');
+  v_prepare_receipt_helper_count :=
+    (
+      length(v_prepare_definition) -
+      length(replace(
+        v_prepare_definition,
+        'hugo_store_non_pristine_email_receipt',
+        ''
+      ))
+    ) / length('hugo_store_non_pristine_email_receipt');
 
   v_delete_definition := pg_get_functiondef(
     'public.hugo_delete_identity(uuid,text)'::regprocedure
@@ -417,6 +439,15 @@ begin
         ''
       ))
     ) / length('hugo_email_has_durable_activity');
+  v_delete_receipt_helper_count :=
+    (
+      length(v_delete_definition) -
+      length(replace(
+        v_delete_definition,
+        'hugo_store_non_pristine_email_receipt',
+        ''
+      ))
+    ) / length('hugo_store_non_pristine_email_receipt');
 
   select
     pg_get_triggerdef(trigger_row.oid),
@@ -432,11 +463,20 @@ begin
       'public.hugo_lock_auth_identity_key_lifecycle()'::regprocedure;
 
   if v_lock_count <> 1
+    or v_receipt_constructor_count <> 1
+    or v_receipt_store_count <> 1
     or v_prepare_guard_count <> 1
     or v_delete_guard_count <> 1
+    or v_prepare_receipt_helper_count <> 1
+    or v_delete_receipt_helper_count <> 1
     or has_function_privilege(
       'service_role',
       'public.hugo_email_has_durable_activity(text)',
+      'execute'
+    )
+    or has_function_privilege(
+      'service_role',
+      'public.hugo_store_non_pristine_email_receipt(uuid,text,text,text)',
       'execute'
     )
     or has_function_privilege(
