@@ -250,13 +250,42 @@ export function loadLocalMigrationVersions(migrationsDir) {
     );
   }
   const files = readdirSync(migrationsDir).filter((name) => name.endsWith(".sql"));
-  return files.map((name) => {
+  const migrations = files.map((name) => {
     const match = /^(\d+)_/.exec(name);
     if (!match) {
       throw new Error(`Migration file "${name}" does not start with a numeric version prefix.`);
     }
     return { file: name, version: match[1] };
   });
+
+  // Round-6 review finding P2: duplicate BASELINE entries were already
+  // rejected (loadBaseline), but two local migration FILES normalizing to
+  // the same version were not -- e.g. two files both named/prefixed `087_*`
+  // (or any pair whose version strings normalize to the same identity, such
+  // as "087" and "0087"). `evaluateSafety` only ever asked "is this version
+  // already applied" and "is it older than the high-water mark"; neither
+  // question notices two DIFFERENT files claiming the same version, so a
+  // colliding pair silently passed with `ok: true`. This whole gate exists
+  // because of migration-version collisions -- letting one through
+  // undetected in the local file set is squarely the class of bug it is
+  // supposed to catch. `supabase db push` orders and dedupes by version
+  // string internally in a way this gate cannot predict or reproduce
+  // (which of the two files would actually apply, if either, is undefined
+  // from here), so refuse outright and name both paths.
+  const seenBy = new Map(); // identityKey -> the first file that produced it
+  for (const entry of migrations) {
+    const key = identityKey(entry.version);
+    if (seenBy.has(key)) {
+      throw new Error(
+        `Two local migration files normalize to the same version (${entry.version}): ` +
+          `"${seenBy.get(key)}" and "${entry.file}". Refusing: which file \`supabase db push\` would ` +
+          "actually apply, and in what order, is undefined from here -- rename or remove one of them.",
+      );
+    }
+    seenBy.set(key, entry.file);
+  }
+
+  return migrations;
 }
 
 // --- Checked == pushed, binding 2: independent project-identity binding ----

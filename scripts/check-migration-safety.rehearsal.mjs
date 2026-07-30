@@ -638,6 +638,33 @@ try {
     );
   }
 
+  // --- Scenario 10 (round 6, P2): duplicate local migration versions ---------
+  console.log("\n[10] Duplicate local migration versions (Codex's exact repro: two files both at 087)");
+  {
+    const repo = initScratchGitRepo();
+    commitDefaultBaseline(repo, { [T]: simpleTarget([]) });
+    resetHistoryTable();
+    insertHistoryRow("086", false);
+    const dir = join(repo, "supabase", "migrations");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "086_x.sql"), "-- fixture\nselect 1;\n");
+    writeFileSync(join(dir, "087_first.sql"), "-- fixture\nselect 1;\n");
+    writeFileSync(join(dir, "087_second.sql"), "-- fixture\nselect 1;\n");
+    const result = runGate(repo, { target: T });
+    expect(
+      "exit code 1 (refuses; the pre-fix version returned {ok:true} here per Codex's repro)",
+      result.status === 1,
+      result.stdout + result.stderr,
+    );
+    expect(
+      "names both colliding files and the shared version",
+      /Two local migration files normalize to the same version \(087\): "087_first\.sql" and "087_second\.sql"/.test(
+        result.stderr,
+      ),
+      result.stderr,
+    );
+  }
+
   console.log(`\n${failures === 0 ? "ALL SCENARIOS PASSED" : `${failures} SCENARIO CHECK(S) FAILED`}`);
   process.exitCode = failures === 0 ? 0 : 1;
 } finally {

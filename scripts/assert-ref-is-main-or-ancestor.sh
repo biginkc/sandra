@@ -2,20 +2,53 @@
 set -euo pipefail
 
 # Refuses (non-zero exit) unless the checked-out HEAD commit is `main`
-# itself or an ancestor of it. The ONLY sanctioned guard for db-migrate.yml's
-# migrate-prod job (round-5 review finding P1-2).
+# itself or an ancestor of it.
 #
-# Why this exists: db-migrate.yml has `workflow_dispatch:` enabled so
-# migrate-test can be manually re-run for debugging. But `workflow_dispatch`
-# lets anyone with write access run the ENTIRE workflow -- including
-# migrate-prod's real `supabase db push` -- against ANY branch, tag, or
-# explicit commit SHA via the GitHub UI or API, not just what a branch-name
-# dropdown implies. Without this check, a dispatched, unmerged branch could
-# alter the migrations, the safety-gate baseline (scripts/migration-safety-baseline.json),
-# or this workflow's own logic and still reach a real production push,
-# entirely outside review. The migration safety gate cannot defend against
-# this on its own: a dispatched branch controls the gate's own source too.
+# ---------------------------------------------------------------------------
+# THIS SCRIPT IS DEFENSE-IN-DEPTH, NOT THE REAL PROTECTION (round-6 review)
+# ---------------------------------------------------------------------------
+# Round-5 review treated this script as the fix for workflow_dispatch
+# reaching production. Round-6 review correctly rejected that: this script
+# runs FROM the same ref it is meant to police. An unmerged branch can
+# simply delete the step that calls this file, or replace this file's body
+# with `exit 0`, before it is ever checked out and run -- there is no way
+# for in-repo code to prove it is "the real check" when the thing being
+# checked controls the checker's own source. Any attempt to close that
+# (hashing this file against a known-good value, re-fetching it from main
+# and diffing, etc.) is still code running on the attacker-controlled ref,
+# so it is theatre, not a fix.
 #
+# The REAL fix is in db-migrate.yml: the migrate-prod job carries
+# `if: github.event_name != 'workflow_dispatch'`, evaluated by GitHub's own
+# workflow engine from trigger metadata BEFORE any code on the dispatched
+# ref is checked out or run. That is what makes it real -- it is not
+# sourced from repo content at all, so the dispatched ref cannot edit it
+# away. workflow_dispatch is excluded from migrate-prod entirely; it is
+# only kept on migrate-test.
+#
+# This script still runs in migrate-prod as a second, independent check for
+# the PUSH-triggered path -- which `on.push.branches: [main]` already
+# restricts to main by itself, so this is redundant-by-design belt-and-
+# suspenders, not something new that closes a remaining gap.
+#
+# ---------------------------------------------------------------------------
+# Known, undefended residual: the force-push race
+# ---------------------------------------------------------------------------
+# This script fetches origin/main ONCE and checks ancestry at that moment.
+# The real `supabase db push` happens several steps later in the same job.
+# A force-push of `main` to unrelated history in the window between those
+# two points could let a commit through that was correctly refused a moment
+# earlier -- normal fast-forward advancement of main is safe (see case C in
+# the test file), but a rewritten history is not something an ancestry
+# snapshot can catch after the fact. Re-checking immediately before the push
+# narrows this window but cannot eliminate a race against an external actor
+# actively rewriting the ref. The only real fix is a GitHub repo setting:
+# enable "Do not allow force pushes" on the `main` branch protection rule.
+# That is a platform control this script cannot simulate or substitute for.
+#
+# ---------------------------------------------------------------------------
+# What this script DOES catch (real ancestry, not a ref-name string check)
+# ---------------------------------------------------------------------------
 # Checked via `git merge-base --is-ancestor HEAD origin/main` against the
 # actual commit graph, NOT a string comparison against `github.ref` --
 # that catches every way workflow_dispatch can point somewhere other than

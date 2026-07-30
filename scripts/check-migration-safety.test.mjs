@@ -23,6 +23,7 @@ import {
   evaluateSafety,
   identityKey,
   loadBaseline,
+  loadLocalMigrationVersions,
   namespaceOf,
   numericValue,
   readGitTrackedBaseline,
@@ -133,6 +134,16 @@ function outsideRepoTempDir() {
   return mkdtempSync(join(tmpdir(), "sandra-mig-safety-outside-"));
 }
 
+// A plain (non-git) directory of migration fixture files, for
+// loadLocalMigrationVersions() tests that don't need a full scratch repo.
+function writeMigrationsFixtureDir(files) {
+  const dir = mkdtempSync(join(tmpdir(), "sandra-mig-safety-localfiles-"));
+  for (const file of files) {
+    writeFileSync(join(dir, file), "-- fixture\nselect 1;\n");
+  }
+  return dir;
+}
+
 test.after(() => {
   for (const dir of scratchRepos) {
     rmSync(dir, { recursive: true, force: true });
@@ -146,6 +157,50 @@ test("refuses when zero local migrations are found, even with non-empty history"
   assert.equal(result.ok, false);
   assert.equal(result.reason, "NO_LOCAL_MIGRATIONS");
 });
+
+// --- P2 (round 6): duplicate LOCAL migration filenames must be refused -----
+//
+// Duplicate BASELINE entries were already rejected (loadBaseline), but two
+// local .sql files normalizing to the same version were not: Codex's round-6
+// review evaluated two pending files both at version "087" and got back
+// {ok: true}. `evaluateSafety` only ever asks "is this version already
+// applied" and "is it older than the high-water mark" -- neither question
+// notices two DIFFERENT files claiming the SAME version. This whole gate
+// exists because of migration-version collisions, so a colliding pair in
+// the local file set itself is squarely in scope. `supabase db push`'s own
+// behavior in the face of two files sharing a version is not something this
+// gate can predict or reproduce, so it refuses outright rather than guess.
+
+test("loadLocalMigrationVersions refuses two files that share the exact same version string (Codex's exact repro: two files at 087)", () => {
+  const dir = writeMigrationsFixtureDir(["086_x.sql", "087_first.sql", "087_second.sql"]);
+  assert.throws(
+    () => loadLocalMigrationVersions(dir),
+    /Two local migration files normalize to the same version \(087\): "087_first\.sql" and "087_second\.sql"/,
+  );
+});
+
+test("loadLocalMigrationVersions refuses two files whose versions normalize to the same identity despite different formatting (\"087\" and \"0087\")", () => {
+  const dir = writeMigrationsFixtureDir(["086_x.sql", "087_first.sql", "0087_second.sql"]);
+  assert.throws(
+    () => loadLocalMigrationVersions(dir),
+    /Two local migration files normalize to the same version/,
+  );
+});
+
+test("loadLocalMigrationVersions still accepts a clean set with no version collisions", () => {
+  const dir = writeMigrationsFixtureDir(["086_x.sql", "087_y.sql", "20260730120000_z.sql"]);
+  const result = loadLocalMigrationVersions(dir);
+  assert.equal(result.length, 3);
+});
+
+// Full CLI, end-to-end proof (real local Postgres, real subprocess) that a
+// colliding local pair is refused: see "[10] Duplicate local migration
+// versions" in check-migration-safety.rehearsal.mjs. main()'s ordering
+// asserts connection identity (which needs a real database, even for an
+// identity-unbound target -- the combined identity+history query is
+// unconditional) before it ever reaches the local migrations directory, so
+// this specific end-to-end path cannot be exercised without a live
+// database; it isn't meaningful to fake here.
 
 // --- Defect 2: identity must normalize formatting, not string-compare ------
 
