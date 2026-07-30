@@ -10,11 +10,12 @@
 // re-applies every migration missing from remote history, in filename order,
 // with no notion of whether a later migration already touched the same
 // objects. That re-apply reverted 6 hardened functions and broke user
-// provisioning for hours. Sandra's db-migrate.yml runs the exact same
-// `db push --include-all` pattern against Sandra's prod project
-// (copflsklaefwzipsrjqz) on every push to main that touches
-// supabase/migrations/** — and Sandra is the only BMH app with real
-// production users.
+// provisioning for hours. Sandra's db-migrate-prod.yml (triggered only by
+// db-migrate-test.yml completing successfully on main -- see that file's
+// header for why production has no direct push or workflow_dispatch
+// trigger of its own) runs the exact same `db push --include-all` pattern
+// against Sandra's prod project (copflsklaefwzipsrjqz) — and Sandra is the
+// only BMH app with real production users.
 //
 // This is an independent implementation for Sandra, not a straight port of
 // the Institute script (BMH Institute PR #155). Both guards have been through

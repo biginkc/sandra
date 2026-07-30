@@ -5,31 +5,44 @@ set -euo pipefail
 # itself or an ancestor of it.
 #
 # ---------------------------------------------------------------------------
-# THIS SCRIPT IS DEFENSE-IN-DEPTH, NOT THE REAL PROTECTION (round-6 review)
+# THIS SCRIPT IS DEFENSE-IN-DEPTH, NOT THE REAL PROTECTION (round-7 review)
 # ---------------------------------------------------------------------------
 # Round-5 review treated this script as the fix for workflow_dispatch
 # reaching production. Round-6 review correctly rejected that: this script
-# runs FROM the same ref it is meant to police. An unmerged branch can
-# simply delete the step that calls this file, or replace this file's body
-# with `exit 0`, before it is ever checked out and run -- there is no way
-# for in-repo code to prove it is "the real check" when the thing being
-# checked controls the checker's own source. Any attempt to close that
-# (hashing this file against a known-good value, re-fetching it from main
-# and diffing, etc.) is still code running on the attacker-controlled ref,
-# so it is theatre, not a fix.
+# runs FROM the same ref it is meant to police, so an unmerged branch can
+# simply delete the step that calls it, or replace its body with `exit 0`,
+# before it is ever checked out and run. Round 6's replacement -- a
+# job-level `if: github.event_name != 'workflow_dispatch'` inside the same
+# workflow file -- was ALSO wrong, and round-7 review caught it: for
+# `workflow_dispatch`, GitHub runs the workflow DEFINITION from whichever
+# ref the user selects when dispatching, not from `main`. An attacker
+# branch could delete that `if:` line from its own copy and dispatch
+# itself, and GitHub would run the edited version with production fully
+# enabled -- the exact same self-authentication problem, reintroduced one
+# layer up inside the fix meant to close it. Any attempt to close this
+# in-repo (hashing this file, re-fetching a known-good copy from main and
+# diffing, adding yet another `if:` condition) is still code running on the
+# attacker-controlled ref, so it is theatre, not a fix.
 #
-# The REAL fix is in db-migrate.yml: the migrate-prod job carries
-# `if: github.event_name != 'workflow_dispatch'`, evaluated by GitHub's own
-# workflow engine from trigger metadata BEFORE any code on the dispatched
-# ref is checked out or run. That is what makes it real -- it is not
-# sourced from repo content at all, so the dispatched ref cannot edit it
-# away. workflow_dispatch is excluded from migrate-prod entirely; it is
-# only kept on migrate-test.
+# The REAL fix is a file split: db-migrate-prod.yml (which runs this
+# script) declares NO `workflow_dispatch:` trigger anywhere in its `on:`
+# block, on any branch that could plausibly become `main`'s copy. GitHub
+# only offers `workflow_dispatch` as a manually-runnable option for a
+# workflow file if that trigger exists in the copy ON THE DEFAULT BRANCH --
+# a branch cannot make a workflow file dispatchable by adding the trigger
+# to its own copy. So there is no "Run workflow" button or API call that
+# can invoke db-migrate-prod.yml against any ref, ever; it is only reachable
+# via `on.workflow_run` from db-migrate-test.yml completing successfully
+# with `head_branch == 'main'`. See db-migrate-prod.yml's own header for the
+# full reasoning, including why that property is only as strong as branch
+# protection on `main` (a force-push that reintroduced a `workflow_dispatch`
+# trigger into that exact file would recreate this hole).
 #
-# This script still runs in migrate-prod as a second, independent check for
-# the PUSH-triggered path -- which `on.push.branches: [main]` already
-# restricts to main by itself, so this is redundant-by-design belt-and-
-# suspenders, not something new that closes a remaining gap.
+# This script still runs in db-migrate-prod.yml as a second, independent
+# check against the specific commit that workflow pins (the SHA
+# db-migrate-test.yml verified) -- in case the workflow_run wiring above is
+# ever changed in a way that weakens those guarantees. It is not, on its
+# own, what stops a dispatched or unmerged ref from reaching production.
 #
 # ---------------------------------------------------------------------------
 # Known, undefended residual: the force-push race
