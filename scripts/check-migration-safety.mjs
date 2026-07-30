@@ -189,15 +189,73 @@ export function loadLocalMigrationVersions(migrationsDir) {
 // placeholder row (one that appears after this baseline was written) is
 // exactly the "history is not a trustworthy signal" situation this gate must
 // still catch, so it still refuses on those.
+//
+// The baseline file is itself a security control, not a convenience default.
+// It must fail CLOSED on every way it can go missing or wrong: absent file,
+// unreadable file, invalid JSON, wrong shape, or malformed entries. A missing
+// or empty-but-should-not-be baseline must never silently degrade to "zero
+// accepted placeholders" and let the rest of the gate quietly decide whether
+// that happens to matter -- deleting/renaming/corrupting this file is the
+// single highest-value thing that could disable this guard, and it must
+// break loudly, not go green. There is deliberately no auto-repair,
+// auto-seed, or auto-create-on-missing behavior here: a guard that
+// regenerates its own baseline when it can't find one is the same fail-open
+// with extra steps.
 export function loadBaseline(baselinePath) {
   if (!existsSync(baselinePath)) {
-    return { acceptedPlaceholderVersions: new Set() };
+    throw new Error(
+      `Baseline file "${baselinePath}" does not exist. A missing baseline must not be treated as ` +
+        '"zero accepted placeholders" -- restore scripts/migration-safety-baseline.json (or pass ' +
+        "--baseline pointing at the real file) before this gate will run.",
+    );
   }
-  const raw = JSON.parse(readFileSync(baselinePath, "utf8"));
-  const list = Array.isArray(raw.acceptedPlaceholderVersions)
-    ? raw.acceptedPlaceholderVersions
-    : [];
-  return { acceptedPlaceholderVersions: new Set(list.map((v) => identityKey(String(v)))) };
+
+  let text;
+  try {
+    text = readFileSync(baselinePath, "utf8");
+  } catch (error) {
+    throw new Error(`Baseline file "${baselinePath}" exists but could not be read: ${error.message}`);
+  }
+
+  let raw;
+  try {
+    raw = JSON.parse(text);
+  } catch (error) {
+    throw new Error(`Baseline file "${baselinePath}" is not valid JSON: ${error.message}`);
+  }
+
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error(
+      `Baseline file "${baselinePath}" must be a JSON object with an "acceptedPlaceholderVersions" ` +
+        `array, got ${Array.isArray(raw) ? "an array" : typeof raw}.`,
+    );
+  }
+  if (!Array.isArray(raw.acceptedPlaceholderVersions)) {
+    throw new Error(
+      `Baseline file "${baselinePath}" is missing a valid "acceptedPlaceholderVersions" array ` +
+        `(got ${typeof raw.acceptedPlaceholderVersions}). An intentionally empty baseline must still ` +
+        'be an explicit "acceptedPlaceholderVersions": [] -- not a missing key.',
+    );
+  }
+
+  const normalized = new Set();
+  for (const entry of raw.acceptedPlaceholderVersions) {
+    if (typeof entry !== "string" && typeof entry !== "number") {
+      throw new Error(
+        `Baseline file "${baselinePath}" contains a non-version-shaped entry: ${JSON.stringify(entry)}.`,
+      );
+    }
+    let key;
+    try {
+      key = identityKey(String(entry));
+    } catch (error) {
+      throw new Error(
+        `Baseline file "${baselinePath}" contains a malformed version entry ${JSON.stringify(entry)}: ${error.message}`,
+      );
+    }
+    normalized.add(key);
+  }
+  return { acceptedPlaceholderVersions: normalized };
 }
 
 // --- Core decision (pure, unit-testable without a database) -----------------

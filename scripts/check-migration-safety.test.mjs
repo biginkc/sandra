@@ -1,11 +1,19 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, writeFileSync, chmodSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import {
   evaluateSafety,
   identityKey,
+  loadBaseline,
   namespaceOf,
   numericValue,
 } from "./check-migration-safety.mjs";
+
+function tempDir() {
+  return mkdtempSync(join(tmpdir(), "sandra-mig-safety-baseline-unit-"));
+}
 
 // --- Defect 1: empty/wrong migrations directory must not silently pass -----
 
@@ -204,4 +212,155 @@ test("empty history refuses rather than assuming a baseline", () => {
   const result = evaluateSafety([], [{ file: "001_x.sql", version: "001" }]);
   assert.equal(result.ok, false);
   assert.equal(result.reason, "EMPTY_HISTORY");
+});
+
+// --- P1 fix: baseline integrity must fail CLOSED, never silently degrade ---
+//
+// Codex's adversarial review of the first version of this gate demonstrated:
+// missing baseline file + clean (no-placeholder) history => {"ok":true}.
+// That means deleting/renaming/emptying/corrupting
+// scripts/migration-safety-baseline.json silently disabled the entire gate.
+// Every case below must throw from loadBaseline() (which main() converts to
+// a REFUSING message and a non-zero exit) -- never fall back to an empty
+// Set and let evaluateSafety() decide whether that happens to matter.
+
+test("loadBaseline refuses when the baseline file is missing (Codex's exact repro)", () => {
+  const dir = tempDir();
+  const missingPath = join(dir, "does-not-exist.json");
+  assert.throws(() => loadBaseline(missingPath), /does not exist/);
+});
+
+test("a missing baseline must refuse even when history has zero placeholders", () => {
+  // This is the precise shape Codex demonstrated: with the old
+  // implementation, a missing baseline degraded to an empty Set, and since
+  // there were no placeholder rows to check it against, evaluateSafety()
+  // returned {ok:true} -- a fully green result with the guard silently
+  // disabled. loadBaseline() must now throw before evaluateSafety() is even
+  // reached, regardless of what history looks like.
+  const dir = tempDir();
+  const missingPath = join(dir, "does-not-exist.json");
+  assert.throws(() => loadBaseline(missingPath));
+  // (evaluateSafety itself is still correct in isolation -- clean history
+  // with an explicit empty baseline legitimately passes. The bug was never
+  // in evaluateSafety; it was loadBaseline silently manufacturing that empty
+  // baseline instead of refusing to run at all.)
+  const historyWithNoPlaceholders = [{ version: "086", isPlaceholder: false }];
+  const local = [{ file: "086_x.sql", version: "086" }];
+  const result = evaluateSafety(historyWithNoPlaceholders, local, {
+    acceptedPlaceholderVersions: new Set(),
+  });
+  assert.equal(result.ok, true);
+});
+
+test("loadBaseline refuses when the baseline file is unreadable (permission denied)", () => {
+  const dir = tempDir();
+  const path = join(dir, "unreadable.json");
+  writeFileSync(path, JSON.stringify({ acceptedPlaceholderVersions: [] }));
+  chmodSync(path, 0o000);
+  try {
+    assert.throws(() => loadBaseline(path), /could not be read|EACCES|permission/i);
+  } finally {
+    chmodSync(path, 0o644); // restore so temp-dir cleanup can delete it
+  }
+});
+
+test("loadBaseline refuses when the baseline file is not valid JSON", () => {
+  const dir = tempDir();
+  const path = join(dir, "invalid.json");
+  writeFileSync(path, "{ this is not json");
+  assert.throws(() => loadBaseline(path), /not valid JSON/);
+});
+
+test("loadBaseline refuses when the baseline JSON is a bare array, not an object", () => {
+  const dir = tempDir();
+  const path = join(dir, "wrong-shape-array.json");
+  writeFileSync(path, JSON.stringify(["001", "002"]));
+  assert.throws(() => loadBaseline(path), /must be a JSON object/);
+});
+
+test("loadBaseline refuses when the baseline JSON is a bare string or number", () => {
+  const dir = tempDir();
+  const path = join(dir, "wrong-shape-string.json");
+  writeFileSync(path, JSON.stringify("not an object"));
+  assert.throws(() => loadBaseline(path), /must be a JSON object/);
+});
+
+test("loadBaseline refuses when the baseline JSON is null", () => {
+  const dir = tempDir();
+  const path = join(dir, "null.json");
+  writeFileSync(path, "null");
+  assert.throws(() => loadBaseline(path), /must be a JSON object/);
+});
+
+test("loadBaseline refuses when acceptedPlaceholderVersions key is missing entirely", () => {
+  const dir = tempDir();
+  const path = join(dir, "missing-key.json");
+  writeFileSync(path, JSON.stringify({ someOtherKey: [] }));
+  assert.throws(() => loadBaseline(path), /missing a valid "acceptedPlaceholderVersions"/);
+});
+
+test("loadBaseline refuses when acceptedPlaceholderVersions is the wrong type (not an array)", () => {
+  const dir = tempDir();
+  const path = join(dir, "wrong-type.json");
+  writeFileSync(path, JSON.stringify({ acceptedPlaceholderVersions: "001,002" }));
+  assert.throws(() => loadBaseline(path), /missing a valid "acceptedPlaceholderVersions"/);
+});
+
+test("loadBaseline refuses on a malformed (non-version-shaped) entry: object", () => {
+  const dir = tempDir();
+  const path = join(dir, "malformed-object.json");
+  writeFileSync(path, JSON.stringify({ acceptedPlaceholderVersions: ["001", { evil: true }] }));
+  assert.throws(() => loadBaseline(path), /non-version-shaped entry/);
+});
+
+test("loadBaseline refuses on a malformed (non-numeric) entry: arbitrary string", () => {
+  const dir = tempDir();
+  const path = join(dir, "malformed-string.json");
+  writeFileSync(path, JSON.stringify({ acceptedPlaceholderVersions: ["001", "not-a-version"] }));
+  assert.throws(() => loadBaseline(path), /malformed version entry/);
+});
+
+test("loadBaseline refuses on a malformed entry: null", () => {
+  const dir = tempDir();
+  const path = join(dir, "malformed-null.json");
+  writeFileSync(path, JSON.stringify({ acceptedPlaceholderVersions: ["001", null] }));
+  assert.throws(() => loadBaseline(path), /non-version-shaped entry/);
+});
+
+test("loadBaseline accepts a legitimately empty baseline (explicit empty array is valid shape)", () => {
+  const dir = tempDir();
+  const path = join(dir, "empty-valid.json");
+  writeFileSync(path, JSON.stringify({ acceptedPlaceholderVersions: [] }));
+  const baseline = loadBaseline(path);
+  assert.equal(baseline.acceptedPlaceholderVersions.size, 0);
+});
+
+test("an explicit-but-empty baseline still refuses on real placeholder rows (not a bypass)", () => {
+  // Proves the "empty baseline + placeholders exist in history" case refuses
+  // -- an empty accepted set never silently absorbs real placeholder rows.
+  const dir = tempDir();
+  const path = join(dir, "empty-valid-2.json");
+  writeFileSync(path, JSON.stringify({ acceptedPlaceholderVersions: [] }));
+  const baseline = loadBaseline(path);
+  const history = [
+    { version: "001", isPlaceholder: true },
+    { version: "086", isPlaceholder: false },
+  ];
+  const local = [
+    { file: "001_x.sql", version: "001" },
+    { file: "086_y.sql", version: "086" },
+  ];
+  const result = evaluateSafety(history, local, {
+    acceptedPlaceholderVersions: baseline.acceptedPlaceholderVersions,
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "UNKNOWN_PLACEHOLDER_HISTORY");
+});
+
+test("loadBaseline round-trips the real committed baseline file without error", () => {
+  const realBaselinePath = join(import.meta.dirname, "migration-safety-baseline.json");
+  const baseline = loadBaseline(realBaselinePath);
+  assert.ok(baseline.acceptedPlaceholderVersions.size >= 36);
+  assert.ok(baseline.acceptedPlaceholderVersions.has(identityKey("001")));
+  assert.ok(baseline.acceptedPlaceholderVersions.has(identityKey("20260729010000")));
 });

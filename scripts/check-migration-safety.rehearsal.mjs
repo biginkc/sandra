@@ -213,6 +213,37 @@ try {
     );
   }
 
+  console.log(
+    "\n[3d] Codex's exact repro: missing baseline file + CLEAN history (zero placeholders) must " +
+      "refuse, not pass",
+  );
+  resetHistoryTable();
+  insertHistoryRow("086", false);
+  insertHistoryRow("20260729170000", false);
+  {
+    const missingBaselinePath = join(
+      mkdtempSync(join(tmpdir(), "sandra-mig-safety-missing-baseline-")),
+      "does-not-exist.json",
+    );
+    const dir = writeMigrationsDir(["086_x.sql", "20260729170000_z.sql"]);
+    const result = runGate(dir, { baselinePath: missingBaselinePath });
+    expect(
+      "exit code 1 (refuses; the pre-fix version returned {ok:true} here)",
+      result.status === 1,
+      result.stdout + result.stderr,
+    );
+    expect(
+      "stdout/stderr never claims ok:true",
+      !/"ok"\s*:\s*true/.test(result.stdout + result.stderr) && !/^OK:/m.test(result.stdout),
+      result.stdout + result.stderr,
+    );
+    expect(
+      "names the missing baseline file as the reason",
+      /does not exist/.test(result.stderr),
+      result.stderr,
+    );
+  }
+
   // --- Scenario 4: Sandra's mixed version scheme (legacy vs timestamp) ------
   console.log("\n[4] Mixed scheme: legacy 3-digit vs 14-digit timestamp ordering, both directions");
   resetHistoryTable();
