@@ -62,6 +62,7 @@ on:
       - "supabase/migrations/**"
       - ".github/workflows/db-migrate.yml"
       - "scripts/check-migration-safety.mjs"
+      - "scripts/check-migration-safety-cli.mjs"
       - "scripts/migration-safety-baseline.json"
   workflow_dispatch: {}
 
@@ -122,7 +123,7 @@ jobs:
           export PGUSER="${{ steps.pooler.outputs.user }}"
           export PGPASSWORD="$TEST_SUPABASE_DB_PASSWORD"
           export PGSSLMODE="require"
-          node scripts/check-migration-safety.mjs
+          node scripts/check-migration-safety-cli.mjs
 
       - name: Preview pending migrations (dry run, surfaced before the real push)
         run: supabase db push --include-all --dry-run --password "${{ secrets.TEST_SUPABASE_DB_PASSWORD }}"
@@ -189,7 +190,7 @@ jobs:
           export PGUSER="${{ steps.pooler.outputs.user }}"
           export PGPASSWORD="$PROD_SUPABASE_DB_PASSWORD"
           export PGSSLMODE="require"
-          node scripts/check-migration-safety.mjs
+          node scripts/check-migration-safety-cli.mjs
 
       - name: Preview pending migrations (dry run, surfaced before the real push)
         run: supabase db push --include-all --dry-run --password "${{ secrets.PROD_SUPABASE_DB_PASSWORD }}"

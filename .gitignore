@@ -12,8 +12,6 @@
 
 # testing
 /coverage
-# ephemeral fixtures for scripts/check-migration-safety.{test,rehearsal}.mjs
-/scripts/.test-tmp-baseline
 
 # next.js
 /.next/
