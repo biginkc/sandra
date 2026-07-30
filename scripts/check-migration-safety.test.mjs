@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import {
+  chmodSync,
   existsSync,
   linkSync,
   readFileSync,
@@ -15,15 +16,47 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import {
+  assertDeclaredIdentity,
+  assertNoSymlinkInMigrationsPath,
+  canonicalMigrationsDir,
   evaluateSafety,
   identityKey,
   loadBaseline,
   namespaceOf,
   numericValue,
+  readGitTrackedBaseline,
 } from "./check-migration-safety.mjs";
 
 const REAL_BASELINE_PATH = join(import.meta.dirname, "migration-safety-baseline.json");
 const CLI_PATH = join(import.meta.dirname, "check-migration-safety-cli.mjs");
+
+// Runs `fn` with the given PG* env vars temporarily set, restoring whatever
+// was there before (including "unset") afterward. assertDeclaredIdentity()
+// reads process.env directly, by design -- it is the exact same connection
+// context runPsqlCsv/runPsqlSingleJson use, so there is nothing to pass as a
+// parameter that isn't already implicitly true of the process.
+function withEnv(overrides, fn) {
+  const previous = {};
+  for (const key of Object.keys(overrides)) {
+    previous[key] = process.env[key];
+    if (overrides[key] === undefined) {
+      delete process.env[key];
+    } else {
+      process.env[key] = overrides[key];
+    }
+  }
+  try {
+    return fn();
+  } finally {
+    for (const key of Object.keys(overrides)) {
+      if (previous[key] === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = previous[key];
+      }
+    }
+  }
+}
 
 // loadBaseline() reads the baseline's content from git's object database
 // (`git show HEAD:path`), never from the working-tree file directly -- see
@@ -56,6 +89,24 @@ function commitFile(repoDir, relativePath, content) {
   execFileSync("git", ["-C", repoDir, "add", relativePath]);
   execFileSync("git", ["-C", repoDir, "commit", "-q", "-m", `add ${relativePath}`]);
   return fullPath;
+}
+
+// Convenience for the common case: one target, arbitrary placeholder
+// versions, identity left unbound (project_ref/database/db_system_identifier
+// all null) unless overridden -- matching how most of these tests only care
+// about placeholder-acceptance behavior, not identity binding (which has its
+// own dedicated test section below).
+function commitTargetedBaseline(repoDir, targets, relativePath = "baseline.json") {
+  return commitFile(repoDir, relativePath, JSON.stringify({ targets }));
+}
+
+function simpleTarget(placeholderVersions, identity = {}) {
+  return {
+    project_ref: identity.projectRef ?? null,
+    database: identity.database ?? null,
+    db_system_identifier: identity.systemIdentifier ?? null,
+    placeholder_versions: placeholderVersions,
+  };
 }
 
 function stageFileWithoutCommitting(repoDir, relativePath, content) {
@@ -289,11 +340,13 @@ test("empty history refuses rather than assuming a baseline", () => {
 // {"ok":true}. That meant deleting/renaming/emptying/corrupting
 // scripts/migration-safety-baseline.json silently disabled the entire gate.
 
+const T = "test-target"; // arbitrary target name used throughout this file
+
 test("loadBaseline refuses when the baseline path does not exist in any commit (missing file, Codex's round-1 repro)", () => {
   const repo = initScratchGitRepo();
   const missingPath = join(repo, "does-not-exist.json");
   assert.throws(
-    () => loadBaseline(missingPath, { repoRoot: repo }),
+    () => loadBaseline(missingPath, { repoRoot: repo, target: T }),
     /could not be read from git HEAD|does not exist/,
   );
 });
@@ -301,7 +354,7 @@ test("loadBaseline refuses when the baseline path does not exist in any commit (
 test("a missing baseline must refuse even when history has zero placeholders (round-1 exact repro)", () => {
   const repo = initScratchGitRepo();
   const missingPath = join(repo, "does-not-exist.json");
-  assert.throws(() => loadBaseline(missingPath, { repoRoot: repo }));
+  assert.throws(() => loadBaseline(missingPath, { repoRoot: repo, target: T }));
   // evaluateSafety itself is, and always was, correct in isolation -- clean
   // history with an explicit empty accepted set legitimately passes. The
   // bug was never in evaluateSafety; it was loadBaseline manufacturing a
@@ -314,63 +367,54 @@ test("a missing baseline must refuse even when history has zero placeholders (ro
   assert.equal(result.ok, true);
 });
 
-test("loadBaseline refuses when the committed blob is not valid JSON", () => {
+test("loadBaseline requires a target", () => {
   const repo = initScratchGitRepo();
-  const path = commitFile(repo, "baseline.json", "{ this is not json");
-  assert.throws(() => loadBaseline(path, { repoRoot: repo }), /not valid JSON/);
+  const path = commitTargetedBaseline(repo, { [T]: simpleTarget([]) });
+  assert.throws(() => loadBaseline(path, { repoRoot: repo }), /requires a target/);
 });
 
-test("loadBaseline refuses when the committed JSON is a bare array, not an object", () => {
+test("loadBaseline refuses an unknown target", () => {
   const repo = initScratchGitRepo();
-  const path = commitFile(repo, "baseline.json", JSON.stringify(["001", "002"]));
-  assert.throws(() => loadBaseline(path, { repoRoot: repo }), /must be a JSON object/);
-});
-
-test("loadBaseline refuses when the committed JSON is a bare string", () => {
-  const repo = initScratchGitRepo();
-  const path = commitFile(repo, "baseline.json", JSON.stringify("not an object"));
-  assert.throws(() => loadBaseline(path, { repoRoot: repo }), /must be a JSON object/);
-});
-
-test("loadBaseline refuses when the committed JSON is null", () => {
-  const repo = initScratchGitRepo();
-  const path = commitFile(repo, "baseline.json", "null");
-  assert.throws(() => loadBaseline(path, { repoRoot: repo }), /must be a JSON object/);
-});
-
-test("loadBaseline refuses when acceptedPlaceholderVersions key is missing entirely", () => {
-  const repo = initScratchGitRepo();
-  const path = commitFile(repo, "baseline.json", JSON.stringify({ someOtherKey: [] }));
+  const path = commitTargetedBaseline(repo, { [T]: simpleTarget([]) });
   assert.throws(
-    () => loadBaseline(path, { repoRoot: repo }),
-    /missing a valid "acceptedPlaceholderVersions"/,
+    () => loadBaseline(path, { repoRoot: repo, target: "nonexistent-target" }),
+    /No baseline entry for target "nonexistent-target"/,
   );
 });
 
-test("loadBaseline refuses when acceptedPlaceholderVersions is the wrong type (not an array)", () => {
+test("loadBaseline refuses when the committed blob is not valid JSON", () => {
+  const repo = initScratchGitRepo();
+  const path = commitFile(repo, "baseline.json", "{ this is not json");
+  assert.throws(() => loadBaseline(path, { repoRoot: repo, target: T }), /not valid JSON/);
+});
+
+test("loadBaseline refuses when the committed JSON has no \"targets\" object", () => {
+  const repo = initScratchGitRepo();
+  const path = commitFile(repo, "baseline.json", JSON.stringify({ acceptedPlaceholderVersions: [] }));
+  assert.throws(() => loadBaseline(path, { repoRoot: repo, target: T }), /"targets" object/);
+});
+
+test("loadBaseline refuses when a target entry is missing a required identity key", () => {
   const repo = initScratchGitRepo();
   const path = commitFile(
     repo,
     "baseline.json",
-    JSON.stringify({ acceptedPlaceholderVersions: "001,002" }),
+    JSON.stringify({ targets: { [T]: { project_ref: null, placeholder_versions: [] } } }),
   );
-  assert.throws(
-    () => loadBaseline(path, { repoRoot: repo }),
-    /missing a valid "acceptedPlaceholderVersions"/,
-  );
+  assert.throws(() => loadBaseline(path, { repoRoot: repo, target: T }), /has no "database" key/);
 });
 
 test("loadBaseline accepts a legitimately empty, committed baseline (explicit empty array is valid shape)", () => {
   const repo = initScratchGitRepo();
-  const path = commitFile(repo, "baseline.json", JSON.stringify({ acceptedPlaceholderVersions: [] }));
-  const baseline = loadBaseline(path, { repoRoot: repo });
+  const path = commitTargetedBaseline(repo, { [T]: simpleTarget([]) });
+  const baseline = loadBaseline(path, { repoRoot: repo, target: T });
   assert.equal(baseline.acceptedPlaceholderVersions.size, 0);
 });
 
 test("an explicit-but-empty committed baseline still refuses on real placeholder rows (not a bypass)", () => {
   const repo = initScratchGitRepo();
-  const path = commitFile(repo, "baseline.json", JSON.stringify({ acceptedPlaceholderVersions: [] }));
-  const baseline = loadBaseline(path, { repoRoot: repo });
+  const path = commitTargetedBaseline(repo, { [T]: simpleTarget([]) });
+  const baseline = loadBaseline(path, { repoRoot: repo, target: T });
   const history = [
     { version: "001", isPlaceholder: true },
     { version: "086", isPlaceholder: false },
@@ -386,98 +430,64 @@ test("an explicit-but-empty committed baseline still refuses on real placeholder
   assert.equal(result.reason, "UNKNOWN_PLACEHOLDER_HISTORY");
 });
 
-test("loadBaseline round-trips the REAL committed baseline file in THIS repo, using the default repoRoot", () => {
+test("loadBaseline round-trips the REAL committed baseline file in THIS repo, both real targets, using the default repoRoot", () => {
   // No repoRoot override -- exercises the actual production path: the real
   // scripts/migration-safety-baseline.json, read via git HEAD in this
   // actual repo checkout.
-  const baseline = loadBaseline(REAL_BASELINE_PATH);
-  assert.ok(baseline.acceptedPlaceholderVersions.size >= 36);
-  assert.ok(baseline.acceptedPlaceholderVersions.has(identityKey("001")));
-  assert.ok(baseline.acceptedPlaceholderVersions.has(identityKey("20260729010000")));
+  const prod = loadBaseline(REAL_BASELINE_PATH, { target: "sandra-production" });
+  assert.ok(prod.acceptedPlaceholderVersions.size >= 36);
+  assert.ok(prod.acceptedPlaceholderVersions.has(identityKey("001")));
+  assert.ok(prod.acceptedPlaceholderVersions.has(identityKey("20260729010000")));
+
+  const test_ = loadBaseline(REAL_BASELINE_PATH, { target: "sandra-test" });
+  assert.equal(test_.acceptedPlaceholderVersions.size, 35);
+  assert.ok(!test_.acceptedPlaceholderVersions.has(identityKey("20260729010000")));
 });
 
 // --- P1 round 2, part A (duplicates / numeric coercion) --------------------
 
 test("loadBaseline refuses literal duplicate entries and names the duplicate", () => {
   const repo = initScratchGitRepo();
-  const path = commitFile(
-    repo,
-    "baseline.json",
-    JSON.stringify({ acceptedPlaceholderVersions: ["001", "002", "001"] }),
-  );
-  assert.throws(() => loadBaseline(path, { repoRoot: repo }), /duplicate entries for version "001"/);
+  const path = commitTargetedBaseline(repo, { [T]: simpleTarget(["001", "002", "001"]) });
+  assert.throws(() => loadBaseline(path, { repoRoot: repo, target: T }), /duplicate entries for version "001"/);
 });
 
 test("loadBaseline refuses cross-formatted duplicate entries (\"001\" and \"1\" normalize the same)", () => {
   const repo = initScratchGitRepo();
-  const path = commitFile(
-    repo,
-    "baseline.json",
-    JSON.stringify({ acceptedPlaceholderVersions: ["001", "1"] }),
-  );
-  assert.throws(() => loadBaseline(path, { repoRoot: repo }), /duplicate entries/);
+  const path = commitTargetedBaseline(repo, { [T]: simpleTarget(["001", "1"]) });
+  assert.throws(() => loadBaseline(path, { repoRoot: repo, target: T }), /duplicate entries/);
 });
 
 test("loadBaseline refuses a numeric entry instead of coercing it (Codex's round-2 repro: 1 -> \"001\")", () => {
   const repo = initScratchGitRepo();
-  const path = commitFile(repo, "baseline.json", JSON.stringify({ acceptedPlaceholderVersions: [1] }));
-  assert.throws(() => loadBaseline(path, { repoRoot: repo }), /non-string entry.*1.*number/s);
+  const path = commitTargetedBaseline(repo, { [T]: simpleTarget([1]) });
+  assert.throws(() => loadBaseline(path, { repoRoot: repo, target: T }), /non-string version.*1.*number/s);
 });
 
 test("loadBaseline refuses a mixed valid/invalid array (object entry)", () => {
   const repo = initScratchGitRepo();
-  const path = commitFile(
-    repo,
-    "baseline.json",
-    JSON.stringify({ acceptedPlaceholderVersions: ["001", "002", { evil: true }, "004"] }),
-  );
-  assert.throws(() => loadBaseline(path, { repoRoot: repo }), /non-string entry/);
-});
-
-test("loadBaseline refuses a null entry", () => {
-  const repo = initScratchGitRepo();
-  const path = commitFile(
-    repo,
-    "baseline.json",
-    JSON.stringify({ acceptedPlaceholderVersions: ["001", null] }),
-  );
-  assert.throws(() => loadBaseline(path, { repoRoot: repo }), /non-string entry/);
+  const path = commitTargetedBaseline(repo, { [T]: simpleTarget(["001", "002", { evil: true }, "004"]) });
+  assert.throws(() => loadBaseline(path, { repoRoot: repo, target: T }), /non-string version/);
 });
 
 test("loadBaseline accepts a clean, valid, non-duplicated, all-string committed baseline", () => {
   const repo = initScratchGitRepo();
-  const path = commitFile(
-    repo,
-    "baseline.json",
-    JSON.stringify({ acceptedPlaceholderVersions: ["001", "002", "20260729010000"] }),
-  );
-  const baseline = loadBaseline(path, { repoRoot: repo });
+  const path = commitTargetedBaseline(repo, { [T]: simpleTarget(["001", "002", "20260729010000"]) });
+  const baseline = loadBaseline(path, { repoRoot: repo, target: T });
   assert.equal(baseline.acceptedPlaceholderVersions.size, 3);
 });
 
 // --- P1 round 2, part B / round 3: provenance and TOCTOU --------------------
-//
-// Round 2 found that checking "is this an in-repo, non-symlinked, regular
-// file" (round 1's fix) proves the PATH sits in the tree but not that the
-// CONTENT is the tracked, reviewed blob -- a hardlink shares an inode with
-// content anywhere else on disk while looking like a normal in-repo file,
-// and an untracked/staged-only file passes every filesystem check without
-// ever having been reviewed. There was also a TOCTOU gap between validating
-// the path and later opening it. The round-3 fix removes the filesystem
-// read path entirely: content comes only from `git show HEAD:path`, which
-// (a) fails for anything not committed at HEAD, and (b) has no concept of
-// inodes/hardlinks/symlinks at all, because the working tree is never
-// consulted for the bytes.
 
 test("loadBaseline refuses an untracked in-repo baseline file (present on disk, never git-added)", () => {
   const repo = initScratchGitRepo();
   const path = writeUntracked(
     repo,
     "baseline.json",
-    JSON.stringify({ acceptedPlaceholderVersions: ["001"] }),
+    JSON.stringify({ targets: { [T]: simpleTarget(["001"]) } }),
   );
   assert.throws(
-    () => loadBaseline(path, { repoRoot: repo }),
+    () => loadBaseline(path, { repoRoot: repo, target: T }),
     /could not be read from git HEAD|not in .HEAD./,
   );
 });
@@ -487,63 +497,41 @@ test("loadBaseline refuses a staged-but-uncommitted baseline file", () => {
   const path = stageFileWithoutCommitting(
     repo,
     "baseline.json",
-    JSON.stringify({ acceptedPlaceholderVersions: ["001"] }),
+    JSON.stringify({ targets: { [T]: simpleTarget(["001"]) } }),
   );
   assert.throws(
-    () => loadBaseline(path, { repoRoot: repo }),
+    () => loadBaseline(path, { repoRoot: repo, target: T }),
     /could not be read from git HEAD|not in .HEAD./,
   );
 });
 
 test("loadBaseline refuses a HARDLINK at an in-repo pathname pointing at malicious content outside the repo", () => {
-  // The hardlinked path shares an inode with the outside file -- a plain
-  // filesystem stat/read of the in-repo pathname would return the outside
-  // file's bytes verbatim. The in-repo pathname itself was never
-  // `git add`ed, so it is untracked at HEAD regardless of what its inode
-  // points at. This is the exact provenance hole round 2 found: proving it
-  // now refuses, not just that it "looks like" a normal file.
   const repo = initScratchGitRepo();
   const outside = outsideRepoTempDir();
   const outsideFile = join(outside, "evil.json");
-  writeFileSync(outsideFile, JSON.stringify({ acceptedPlaceholderVersions: ["999999999999999"] }));
+  writeFileSync(outsideFile, JSON.stringify({ targets: { [T]: simpleTarget(["999999999999999"]) } }));
   const hardlinkedPath = join(repo, "hardlinked-baseline.json");
   linkSync(outsideFile, hardlinkedPath);
-  // Sanity: confirm the hardlink actually shares content (proves this test
-  // is exercising a real hardlink, not silently no-op'ing).
   assert.match(readFileSync(hardlinkedPath, "utf8"), /999999999999999/);
   assert.throws(
-    () => loadBaseline(hardlinkedPath, { repoRoot: repo }),
+    () => loadBaseline(hardlinkedPath, { repoRoot: repo, target: T }),
     /could not be read from git HEAD|not in .HEAD./,
   );
 });
 
 test("a symlink swapped in AFTER a baseline is committed still reads the committed content, never the symlink's target (no TOCTOU window)", () => {
   const repo = initScratchGitRepo();
-  const path = commitFile(
-    repo,
-    "baseline.json",
-    JSON.stringify({ acceptedPlaceholderVersions: ["001", "002"] }),
-  );
-  // Load once to establish the legitimate baseline.
-  const before = loadBaseline(path, { repoRoot: repo });
+  const path = commitTargetedBaseline(repo, { [T]: simpleTarget(["001", "002"]) });
+  const before = loadBaseline(path, { repoRoot: repo, target: T });
   assert.equal(before.acceptedPlaceholderVersions.size, 2);
 
-  // Now simulate an attacker (or a careless automated loop) swapping the
-  // WORKING-TREE file at that exact path for a symlink to attacker-controlled
-  // content, after the legitimate commit already exists.
   const outside = outsideRepoTempDir();
   const maliciousFile = join(outside, "malicious.json");
-  writeFileSync(maliciousFile, JSON.stringify({ acceptedPlaceholderVersions: ["666666666666666"] }));
+  writeFileSync(maliciousFile, JSON.stringify({ targets: { [T]: simpleTarget(["666666666666666"]) } }));
   unlinkSync(path);
   symlinkSync(maliciousFile, path);
 
-  // loadBaseline reads from git HEAD, not the working-tree path -- the
-  // working-tree swap must have NO effect on what is returned. If this were
-  // still vulnerable to the round-2 TOCTOU, this call would either read the
-  // malicious content directly or throw as "a symlink," neither of which
-  // is what we assert below: it must return the ORIGINAL committed content,
-  // completely unaffected by the disk-level swap.
-  const after = loadBaseline(path, { repoRoot: repo });
+  const after = loadBaseline(path, { repoRoot: repo, target: T });
   assert.deepEqual(
     [...after.acceptedPlaceholderVersions].sort(),
     [...before.acceptedPlaceholderVersions].sort(),
@@ -551,19 +539,215 @@ test("a symlink swapped in AFTER a baseline is committed still reads the committ
   assert.ok(!after.acceptedPlaceholderVersions.has(identityKey("666666666666666")));
 });
 
-test("loadBaseline refuses /dev/stdin as a baseline path (still closed, now via the containment check rather than a symlink check)", { skip: !existsSync("/dev/stdin") }, () => {
+test("loadBaseline refuses /dev/stdin as a baseline path (still closed, now via the containment check)", { skip: !existsSync("/dev/stdin") }, () => {
   const repo = initScratchGitRepo();
-  assert.throws(() => loadBaseline("/dev/stdin", { repoRoot: repo }));
+  assert.throws(() => loadBaseline("/dev/stdin", { repoRoot: repo, target: T }));
 });
 
 test("loadBaseline refuses a baseline path that resolves outside the repo via ..", () => {
   const repo = initScratchGitRepo();
   const outside = outsideRepoTempDir();
   const outsideFile = join(outside, "not-in-repo.json");
-  writeFileSync(outsideFile, JSON.stringify({ acceptedPlaceholderVersions: ["001"] }));
-  assert.throws(() => loadBaseline(outsideFile, { repoRoot: repo }), /outside the repository root/);
+  writeFileSync(outsideFile, JSON.stringify({ targets: { [T]: simpleTarget(["001"]) } }));
+  assert.throws(
+    () => loadBaseline(outsideFile, { repoRoot: repo, target: T }),
+    /outside the repository root/,
+  );
 });
 
+// --- P2 (round 4): git show must not hang ------------------------------------
+//
+// `execFileSync("git", ...)` had no timeout: a wedged git process (lock
+// contention, a hung filesystem, a misbehaving credential helper) could hang
+// until the CI job's outer 5-minute timeout. It would still fail closed
+// against the push eventually, but delays incident visibility far longer
+// than reading one small committed JSON blob should ever take. Proven here
+// with a fake `git` executable that only sleeps, confirming the gate's own
+// short timeout kills it and refuses, rather than waiting for the process to
+// finish naturally.
+
+test("readGitTrackedBaseline refuses (does not hang) when git itself hangs past the timeout", () => {
+  const fakeGitDir = mkdtempSync(join(tmpdir(), "sandra-mig-safety-fakegit-"));
+  const fakeGitPath = join(fakeGitDir, "git");
+  writeFileSync(fakeGitPath, "#!/bin/sh\nsleep 5\n");
+  chmodSync(fakeGitPath, 0o755);
+
+  const repo = initScratchGitRepo();
+  commitTargetedBaseline(repo, { [T]: simpleTarget([]) });
+
+  const originalPath = process.env.PATH;
+  process.env.PATH = `${fakeGitDir}:${originalPath}`;
+  try {
+    const startedAt = Date.now();
+    assert.throws(
+      () => readGitTrackedBaseline(join(repo, "baseline.json"), repo, { timeoutMs: 300 }),
+      /did not complete within 300ms and was killed/,
+    );
+    const elapsedMs = Date.now() - startedAt;
+    assert.ok(elapsedMs < 4000, `expected the short timeout to fire well before the fake git's 5s sleep, took ${elapsedMs}ms`);
+  } finally {
+    process.env.PATH = originalPath;
+  }
+});
+
+// --- P1-1 (round 4): the gate must inspect the SAME directory the push uses -
+//
+// `--migrations-dir` was caller-controlled: the gate validated whatever
+// directory it was handed while `supabase db push` always reads the linked
+// project's canonical `supabase/migrations`. A caller could point the gate
+// at a clean directory, get a green result, then push something else
+// entirely -- the check and the actual operation would be evaluating
+// different files. Fixed by removing the option: the CLI now always derives
+// the migrations directory as <repoRoot>/supabase/migrations, and refuses
+// outright if --migrations-dir is passed at all.
+
+test("canonicalMigrationsDir always derives <repoRoot>/supabase/migrations", () => {
+  const repo = initScratchGitRepo();
+  assert.equal(canonicalMigrationsDir(repo), join(repo, "supabase", "migrations"));
+});
+
+test("the CLI refuses outright when --migrations-dir is passed, instead of honoring a caller-controlled directory", () => {
+  const repo = initScratchGitRepo();
+  mkdirSync(join(repo, "supabase", "migrations"), { recursive: true });
+  writeFileSync(join(repo, "supabase", "migrations", "086_x.sql"), "select 1;\n");
+  commitTargetedBaseline(repo, { [T]: simpleTarget([]) });
+
+  const decoyDir = mkdtempSync(join(tmpdir(), "sandra-mig-safety-decoy-"));
+  writeFileSync(join(decoyDir, "999_looks_clean.sql"), "select 1;\n");
+
+  const result = spawnSync(
+    process.execPath,
+    [CLI_PATH, `--target=${T}`, `--repo-root=${repo}`, `--migrations-dir=${decoyDir}`],
+    {
+      encoding: "utf8",
+      timeout: 15_000,
+      env: { ...process.env, PGHOST: undefined, PGPORT: undefined, PGDATABASE: undefined, PGUSER: undefined, PGPASSWORD: undefined },
+    },
+  );
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /--migrations-dir is not accepted/);
+});
+
+test("assertNoSymlinkInMigrationsPath refuses when the migrations directory itself is a symlink", () => {
+  const repo = initScratchGitRepo();
+  const realElsewhere = mkdtempSync(join(tmpdir(), "sandra-mig-safety-realmigrations-"));
+  writeFileSync(join(realElsewhere, "086_x.sql"), "select 1;\n");
+  mkdirSync(join(repo, "supabase"), { recursive: true });
+  symlinkSync(realElsewhere, join(repo, "supabase", "migrations"));
+
+  assert.throws(
+    () => assertNoSymlinkInMigrationsPath(canonicalMigrationsDir(repo), repo),
+    /is a symlink/,
+  );
+});
+
+test("assertNoSymlinkInMigrationsPath refuses when an ancestor path component (supabase/) is a symlink", () => {
+  const repo = initScratchGitRepo();
+  const realElsewhere = mkdtempSync(join(tmpdir(), "sandra-mig-safety-realsupabase-"));
+  mkdirSync(join(realElsewhere, "migrations"), { recursive: true });
+  writeFileSync(join(realElsewhere, "migrations", "086_x.sql"), "select 1;\n");
+  symlinkSync(realElsewhere, join(repo, "supabase"));
+
+  assert.throws(
+    () => assertNoSymlinkInMigrationsPath(canonicalMigrationsDir(repo), repo),
+    /is a symlink/,
+  );
+});
+
+test("assertNoSymlinkInMigrationsPath passes for an ordinary, non-symlinked canonical directory", () => {
+  const repo = initScratchGitRepo();
+  mkdirSync(join(repo, "supabase", "migrations"), { recursive: true });
+  assert.doesNotThrow(() => assertNoSymlinkInMigrationsPath(canonicalMigrationsDir(repo), repo));
+});
+
+// --- P1-2 (round 4): independent project-identity binding -------------------
+//
+// The gate used to trust whatever PGHOST/PGUSER/password it was handed --
+// it never verified the database it queried was actually the pinned
+// project. Fixed with two layers: assertDeclaredIdentity (exact, anchored
+// parse of PGUSER/PGHOST against the baseline's expected project_ref/
+// database -- never a substring test) and assertLiveIdentity (a live query
+// against the connection; exercised in the rehearsal harness, which has a
+// real database to query). This section covers assertDeclaredIdentity,
+// which is pure with respect to a database (it reads only the declared env).
+
+test("assertDeclaredIdentity returns 'not bound' when the baseline's project_ref is null (disposable local target)", () => {
+  const result = withEnv({ PGUSER: "postgres", PGHOST: "localhost", PGDATABASE: "postgres" }, () =>
+    assertDeclaredIdentity(T, { projectRef: null, database: null }),
+  );
+  assert.match(result, /not bound/);
+});
+
+test("assertDeclaredIdentity accepts an exact PGUSER match (postgres.<ref>)", () => {
+  const ref = "abcdefghijklmnopqrst"; // 20 lowercase letters
+  const result = withEnv({ PGUSER: `postgres.${ref}`, PGHOST: "aws-1-us-east-1.pooler.supabase.com", PGDATABASE: "postgres" }, () =>
+    assertDeclaredIdentity(T, { projectRef: ref, database: "postgres" }),
+  );
+  assert.match(result, /exact match/);
+});
+
+test("assertDeclaredIdentity refuses a hostname that merely CONTAINS the expected ref as a substring (not the same as declaring it)", () => {
+  const ref = "abcdefghijklmnopqrst";
+  assert.throws(
+    () =>
+      withEnv(
+        {
+          // Deliberately NOT of the form postgres.<ref> or db.<ref>.supabase.co --
+          // a substring match would incorrectly accept this.
+          PGUSER: `some-other-user-${ref}-suffix`,
+          PGHOST: "unrelated-host.example.com",
+          PGDATABASE: "postgres",
+        },
+        () => assertDeclaredIdentity(T, { projectRef: ref, database: "postgres" }),
+      ),
+    /Cannot parse a Supabase project ref/,
+  );
+});
+
+test("assertDeclaredIdentity refuses when PGUSER declares a DIFFERENT ref than expected", () => {
+  const expectedRef = "abcdefghijklmnopqrst";
+  const wrongRef = "zzzzzzzzzzzzzzzzzzzz";
+  assert.throws(
+    () =>
+      withEnv({ PGUSER: `postgres.${wrongRef}`, PGHOST: "", PGDATABASE: "postgres" }, () =>
+        assertDeclaredIdentity(T, { projectRef: expectedRef, database: "postgres" }),
+      ),
+    new RegExp(`expects "${expectedRef}"`),
+  );
+});
+
+test("assertDeclaredIdentity refuses when PGUSER and PGHOST declare DIFFERENT refs (disagreement, not just mismatch vs expected)", () => {
+  const refA = "abcdefghijklmnopqrst";
+  const refB = "zzzzzzzzzzzzzzzzzzzz";
+  assert.throws(
+    () =>
+      withEnv({ PGUSER: `postgres.${refA}`, PGHOST: `db.${refB}.supabase.co`, PGDATABASE: "postgres" }, () =>
+        assertDeclaredIdentity(T, { projectRef: refA, database: "postgres" }),
+      ),
+    /PGUSER declares project ref .* but PGHOST declares/,
+  );
+});
+
+test("assertDeclaredIdentity refuses on a PGDATABASE mismatch even when the project ref matches", () => {
+  const ref = "abcdefghijklmnopqrst";
+  assert.throws(
+    () =>
+      withEnv({ PGUSER: `postgres.${ref}`, PGHOST: "", PGDATABASE: "wrong_db" }, () =>
+        assertDeclaredIdentity(T, { projectRef: ref, database: "postgres" }),
+      ),
+    /PGDATABASE is "wrong_db" but target .* expects "postgres"/,
+  );
+});
+
+test("assertDeclaredIdentity refuses when the baseline's project_ref is malformed (not 20 lowercase letters, not null)", () => {
+  assert.throws(
+    () =>
+      withEnv({ PGUSER: "postgres.short", PGHOST: "", PGDATABASE: "postgres" }, () =>
+        assertDeclaredIdentity(T, { projectRef: "not-a-valid-ref", database: "postgres" }),
+      ),
+    /is not a 20-lowercase-letter Supabase ref or null/,
+  );
+});
 
 // --- P1-3: symlinked invocation must still run the gate ---------------------
 //
@@ -581,14 +765,11 @@ test("invoking the CLI wrapper through a symlink still runs the gate and still r
   const symlinkToCli = join(dir, "run-gate-via-symlink.mjs");
   symlinkSync(CLI_PATH, symlinkToCli);
 
-  const missingMigrationsDir = join(dir, "does-not-exist-migrations");
-  const result = spawnSync(process.execPath, [symlinkToCli, `--migrations-dir=${missingMigrationsDir}`], {
+  const result = spawnSync(process.execPath, [symlinkToCli], {
     encoding: "utf8",
     timeout: 15_000,
     env: {
       ...process.env,
-      // Deliberately no PG* env vars -- the gate must refuse on that before
-      // ever needing a real database, which is enough to prove main() ran.
       PGHOST: undefined,
       PGPORT: undefined,
       PGDATABASE: undefined,
@@ -608,9 +789,7 @@ test("invoking the CLI wrapper through a symlink still runs the gate and still r
 });
 
 test("invoking the CLI wrapper directly (not through a symlink) still runs the gate, for comparison", () => {
-  const dir = mkdtempSync(join(tmpdir(), "sandra-mig-safety-direct-invoke-"));
-  const missingMigrationsDir = join(dir, "does-not-exist-migrations");
-  const result = spawnSync(process.execPath, [CLI_PATH, `--migrations-dir=${missingMigrationsDir}`], {
+  const result = spawnSync(process.execPath, [CLI_PATH], {
     encoding: "utf8",
     timeout: 15_000,
     env: {
@@ -627,12 +806,5 @@ test("invoking the CLI wrapper directly (not through a symlink) still runs the g
 });
 
 test("importing check-migration-safety.mjs as a library never runs main() as an import side effect", () => {
-  // Guards the library/entrypoint split itself: if main() were ever
-  // reintroduced as a module-level side effect, every test in this file
-  // that imports { evaluateSafety, loadBaseline, ... } from
-  // check-migration-safety.mjs would already have triggered it (and almost
-  // certainly thrown/exited, since no PG* env vars are set for most of this
-  // suite). Reaching this point in the test file at all is part of the
-  // proof; this assertion documents the intent explicitly.
   assert.equal(typeof loadBaseline, "function");
 });

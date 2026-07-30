@@ -17,13 +17,12 @@
 // production users.
 //
 // This is an independent implementation for Sandra, not a straight port of
-// the Institute script (BMH Institute PR #155). That script was adversarially
-// reviewed and blocked with defects that would either fail OPEN (silently
-// pass when it should refuse) or fail CLOSED PERMANENTLY (refuse forever,
-// even for legitimate pushes). Both failure shapes are unacceptable against
-// Sandra's production database. This file's design deliberately closes each
-// of those gaps — see the block comment above each check below for which gap
-// it closes.
+// the Institute script (BMH Institute PR #155). Both guards have been through
+// several rounds of adversarial review and independently arrived at the same
+// two "checked == pushed" bindings below (round-4 review, Codex) -- this file
+// deliberately CONVERGES on the same mechanism as BMH Institute's guard
+// (scripts/migration-rehearsal/check-migration-safety.mjs) for both, rather
+// than inventing a second shape, per explicit coordination instruction.
 //
 // This script only inspects and reports. It never runs `supabase db push`,
 // `supabase migration repair`, or any writing SQL itself.
@@ -34,22 +33,30 @@
 // Usage:
 //   PGHOST=... PGPORT=... PGDATABASE=... PGUSER=... PGPASSWORD=... [PGSSLMODE=require] \
 //     node scripts/check-migration-safety-cli.mjs \
-//       [--migrations-dir=supabase/migrations] \
+//       --target=sandra-production \
 //       [--baseline=scripts/migration-safety-baseline.json]
+//
+// Deliberately NO --migrations-dir option reachable here (round-4 finding
+// P1-1): the gate always inspects <repoRoot>/supabase/migrations, the exact
+// path `supabase db push` reads, so the two can never diverge. A test-only
+// `--repo-root` override exists for pointing the ENTIRE resolution (baseline
+// git reads AND the canonical migrations directory) at a disposable scratch
+// repo; it cannot be used to point the migrations directory somewhere else
+// while leaving everything else pointed at the real repo.
 //
 // Exit code 0: safe to proceed to a `db push --include-all --dry-run` review.
 // Exit code 1: refuse. Print the reason and let a human resolve it.
 
 import { execFileSync } from "node:child_process";
-import { existsSync, readdirSync, statSync } from "node:fs";
+import { existsSync, lstatSync, readdirSync, statSync } from "node:fs";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const DEFAULT_MIGRATIONS_DIR = "supabase/migrations";
 const DEFAULT_BASELINE_PATH = "scripts/migration-safety-baseline.json";
 // This file lives at <repo>/scripts/check-migration-safety.mjs, so its
 // grandparent directory is the repo root. Used to enforce that a baseline
-// path can never resolve outside the repository (see loadBaseline).
+// path can never resolve outside the repository (see loadBaseline), and to
+// derive the one and only migrations directory this gate will ever inspect.
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 // Overall wall-clock budget for the psql round trip. A blackholed network
 // (dropped packets, a security-group change, a misconfigured pooler) must
@@ -58,6 +65,16 @@ const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 // PGCONNECT_TIMEOUT (seconds) so the TCP/auth handshake itself times out
 // before we fall back to this outer kill.
 const PSQL_TIMEOUT_MS = 20_000;
+// Round-4 fix (P2): reading the baseline blob is a single `git show` against
+// a LOCAL repository -- it should be near-instant. A generous but bounded
+// timeout still catches a wedged git process (lock contention, a hung
+// filesystem, a misbehaving credential helper invoked by git for no reason
+// on a local read) instead of hanging until the CI job's outer timeout.
+const GIT_SHOW_TIMEOUT_MS = 10_000;
+// Supabase project refs are exactly 20 lowercase letters. Anchored, not a
+// substring test -- see assertDeclaredIdentity.
+const PGUSER_REF = /^postgres\.([a-z]{20})$/;
+const PGHOST_REF = /^db\.([a-z]{20})\.supabase\.co$/;
 
 export function parseArguments(argv) {
   const map = {};
@@ -163,6 +180,97 @@ export function runPsqlCsv(sql, options = {}) {
   }
 }
 
+function runPsqlSingleJson(sql, options = {}) {
+  const requiredEnv = ["PGHOST", "PGPORT", "PGDATABASE", "PGUSER", "PGPASSWORD"];
+  const missing = requiredEnv.filter((name) => process.env[name] === undefined);
+  if (missing.length > 0) {
+    throw new Error(
+      `Missing required psql connection env var(s): ${missing.join(", ")}. ` +
+        "Export PGHOST/PGPORT/PGDATABASE/PGUSER/PGPASSWORD (and PGSSLMODE for hosted projects) before running this gate.",
+    );
+  }
+  const timeoutMs = options.timeoutMs ?? PSQL_TIMEOUT_MS;
+  const connectTimeoutSeconds = Math.max(1, Math.floor(timeoutMs / 1000));
+  let output;
+  try {
+    output = execFileSync(
+      "psql",
+      ["--no-psqlrc", "--quiet", "--no-align", "--tuples-only", "--set", "ON_ERROR_STOP=1", "-c", sql],
+      {
+        encoding: "utf8",
+        timeout: timeoutMs,
+        killSignal: "SIGKILL",
+        stdio: ["ignore", "pipe", "pipe"],
+        env: { ...process.env, PGCONNECT_TIMEOUT: String(connectTimeoutSeconds) },
+      },
+    );
+  } catch (error) {
+    if (error.signal === "SIGKILL" || error.killed) {
+      throw new Error(
+        `psql did not complete within ${timeoutMs}ms and was killed. Treating this as a ` +
+          "connection failure: refusing rather than guessing the database is reachable.",
+      );
+    }
+    const stderr = typeof error.stderr === "string" ? error.stderr.trim() : "";
+    throw new Error(`psql could not read the live connection identity: ${stderr || error.message}`);
+  }
+  try {
+    return JSON.parse(String(output).trim());
+  } catch {
+    throw new Error(`psql returned output that is not the expected JSON payload: ${String(output).slice(0, 400)}`);
+  }
+}
+
+// --- Checked == pushed, binding 1: canonical migrations directory ----------
+//
+// Round-4 review finding P1-1: `--migrations-dir` was caller-controlled. The
+// gate validated whatever directory it was handed while `supabase db push`
+// always reads the linked project's canonical `supabase/migrations`. A
+// caller could point the gate at a clean directory, get a green result, then
+// push something entirely different -- the safety check and the actual
+// operation would be evaluating different files, making the gate decorative.
+//
+// Fixed by removing the option rather than validating it: this gate has
+// exactly one migrations directory it will ever inspect, always derived as
+// <repoRoot>/supabase/migrations, never independently specified. A symlink
+// anywhere between repoRoot and that directory would let the gate and
+// `supabase db push` resolve the same string to two different physical
+// directories, so every path component is lstat-checked (not just the
+// final one) and refused if any of them is a symlink.
+export function canonicalMigrationsDir(repoRoot) {
+  return resolve(repoRoot, "supabase", "migrations");
+}
+
+export function assertNoSymlinkInMigrationsPath(migrationsDir, repoRoot) {
+  const rest = relative(repoRoot, migrationsDir);
+  const insideRepo = rest !== "" && !rest.startsWith(`..${sep}`) && !isAbsolute(rest);
+  const chain = [];
+  if (insideRepo) {
+    let current = repoRoot;
+    for (const part of rest.split(sep).filter(Boolean)) {
+      current = resolve(current, part);
+      chain.push(current);
+    }
+  } else {
+    chain.push(migrationsDir);
+  }
+  for (const candidate of chain) {
+    let info;
+    try {
+      info = lstatSync(candidate);
+    } catch {
+      continue; // absence is reported by loadLocalMigrationVersions instead
+    }
+    if (info.isSymbolicLink()) {
+      throw new Error(
+        `Migrations path component "${candidate}" is a symlink. Refusing: \`supabase db push\` reads ` +
+          "the repository path directly, so a symlink would let the gate inspect one directory while " +
+          "the push applies another.",
+      );
+    }
+  }
+}
+
 // --- Local migration files ---------------------------------------------------
 
 export function loadLocalMigrationVersions(migrationsDir) {
@@ -182,27 +290,152 @@ export function loadLocalMigrationVersions(migrationsDir) {
   });
 }
 
+// --- Checked == pushed, binding 2: independent project-identity binding ----
+//
+// Round-4 review finding P1-2: the gate trusted whatever PGHOST/PGUSER/
+// password it was handed. The workflow derives them from `supabase link` +
+// `supabase/.temp/pooler-url`, but the gate itself never verified the
+// database it queried was actually the pinned project -- meaning the gate
+// could read history from one database while the push writes another, with
+// nothing in the gate's own logic to catch a misconfigured secret, a swapped
+// environment variable, or a future refactor that breaks that derivation
+// chain silently.
+//
+// Two layers, matching BMH Institute's converged design exactly:
+//
+// 1. DECLARED identity (assertDeclaredIdentity): the project ref is parsed
+//    from PGUSER (`postgres.<ref>`) and/or PGHOST (`db.<ref>.supabase.co`) by
+//    ANCHORED pattern -- never a substring test. A hostname or username that
+//    merely CONTAINS the expected ref no longer passes. If both PGUSER and
+//    PGHOST parse, they must agree. This is not circular even though it
+//    reads our own connection env: Supabase's pooler (Supavisor) routes
+//    purely by the authenticated username, so successfully authenticating
+//    AS `postgres.<ref>` and having the pooler accept it is exactly the
+//    server-enforced boundary that prevents landing on a different
+//    project's backend while presenting that identity.
+//
+// 2. LIVE identity (assertLiveIdentity): a real query sent over the
+//    established connection, `current_database()` plus (opportunistically)
+//    `pg_control_system().system_identifier`, cross-checked against the
+//    baseline's expectations. This is the "query the connected database for
+//    its own identity" step Codex asked for -- it does not merely re-read
+//    the env vars we already had, it asks the SERVER to attest to what it
+//    is and fails closed if that attestation cannot be obtained or does not
+//    match.
+//
+// NOTE on db_system_identifier: pg_control_system()'s system_identifier is
+// normally unique per physical cluster (assigned once at initdb). While
+// verifying this for Sandra's real projects, prod and test returned the
+// IDENTICAL system_identifier -- strong evidence that Supabase provisions at
+// least some managed projects from a shared template/snapshot rather than a
+// fresh initdb per project, so this value is NOT a reliable per-project
+// discriminator on Supabase's infrastructure specifically. Sandra's baseline
+// therefore leaves db_system_identifier UNPINNED (null) for both real
+// targets rather than pinning a value that would not actually distinguish
+// prod from test. The mechanism is still wired in (any target CAN pin it,
+// and the check enforces it when pinned) in case that changes or is
+// confirmed reliable later; project_ref (exactly parsed, never a substring)
+// plus the live current_database() check are the enforced signals today.
+export function assertDeclaredIdentity(target, expected) {
+  const user = process.env.PGUSER ?? "";
+  const host = process.env.PGHOST ?? "";
+  const database = process.env.PGDATABASE ?? "";
+
+  if (expected.database !== null && database !== expected.database) {
+    throw new Error(
+      `PGDATABASE is "${database}" but target "${target}" expects "${expected.database}". Refusing.`,
+    );
+  }
+
+  if (expected.projectRef === null) {
+    return "not bound (baseline project_ref is null -- disposable local cluster only)";
+  }
+  if (typeof expected.projectRef !== "string" || !/^[a-z]{20}$/.test(expected.projectRef)) {
+    throw new Error(
+      `Baseline project_ref for target "${target}" is not a 20-lowercase-letter Supabase ref or null. Refusing.`,
+    );
+  }
+
+  const fromUser = PGUSER_REF.exec(user)?.[1] ?? null;
+  const fromHost = PGHOST_REF.exec(host)?.[1] ?? null;
+  if (fromUser === null && fromHost === null) {
+    throw new Error(
+      `Cannot parse a Supabase project ref from this connection for target "${target}". ` +
+        `PGUSER="${user}" must match postgres.<ref>, or PGHOST="${host}" must match db.<ref>.supabase.co. ` +
+        "Refusing: identity is parsed exactly, never inferred from a substring, so that a hostname or " +
+        "username that merely contains the ref cannot authorize a push.",
+    );
+  }
+  if (fromUser !== null && fromHost !== null && fromUser !== fromHost) {
+    throw new Error(
+      `PGUSER declares project ref "${fromUser}" but PGHOST declares "${fromHost}". Refusing.`,
+    );
+  }
+  const declared = fromUser ?? fromHost;
+  if (declared !== expected.projectRef) {
+    throw new Error(
+      `Connection declares project ref "${declared}" but target "${target}" expects "${expected.projectRef}". ` +
+        "Refusing: running this gate against one database and pushing to another is the failure mode " +
+        "this binding exists to stop.",
+    );
+  }
+  return `declared ref ${declared} (exact match)`;
+}
+
+const LIVE_IDENTITY_SQL =
+  "select json_build_object('database', current_database(), " +
+  "'system_identifier', (select system_identifier::text from pg_control_system()))::text;";
+
+export function assertLiveIdentity(target, expected, options = {}) {
+  let observed;
+  try {
+    observed = runPsqlSingleJson(LIVE_IDENTITY_SQL, options);
+  } catch (error) {
+    throw new Error(`Live identity probe failed for target "${target}": ${error.message}`);
+  }
+  if (expected.database !== null && observed.database !== expected.database) {
+    throw new Error(
+      `Live connection reports current_database() = "${observed.database}" but target "${target}" ` +
+        `expects "${expected.database}". Refusing.`,
+    );
+  }
+  if (expected.systemIdentifier === null) {
+    return `live database "${observed.database}", cluster ${observed.system_identifier} (not pinned)`;
+  }
+  if (String(observed.system_identifier) !== String(expected.systemIdentifier)) {
+    throw new Error(
+      `Live cluster system_identifier is ${observed.system_identifier} but target "${target}" is ` +
+        `pinned to ${expected.systemIdentifier}. Refusing: this connection is not the physical ` +
+        "database this target was reviewed against.",
+    );
+  }
+  return `live database "${observed.database}", cluster ${observed.system_identifier} (pinned, matched)`;
+}
+
 // --- Baseline placeholder acceptance -----------------------------------------
 //
 // `supabase migration repair` marks a version as reconciled by inserting a
 // row with `statements = NULL`. Sandra's production history already has 36
 // such rows from repairs that predate this gate (36 of 127 as of 2026-07-30):
 // versions 001-035 plus 20260729010000. Refusing to proceed whenever ANY
-// placeholder row exists (the Institute script's behavior) would refuse
-// every single push against Sandra forever — the legitimate repair workflow
-// can never reach a push. Fixed by scoping the refusal to placeholder rows
-// NOT already present in a checked-in, human-reviewed baseline: pre-existing
-// placeholders are an accepted fact of this database's history; a NEW
-// placeholder row (one that appears after this baseline was written) is
-// exactly the "history is not a trustworthy signal" situation this gate must
-// still catch, so it still refuses on those.
+// placeholder row exists (the Institute script's original behavior) would
+// refuse every single push against Sandra forever — the legitimate repair
+// workflow can never reach a push. Fixed by scoping the refusal to
+// placeholder rows NOT already present in a checked-in, human-reviewed,
+// PER-TARGET baseline: pre-existing placeholders are an accepted fact of
+// that target's history; a NEW placeholder row (one that appears after this
+// baseline was written) is exactly the "history is not a trustworthy
+// signal" situation this gate must still catch, so it still refuses on
+// those. Per-target (rather than one flat list) also means an acknowledged
+// TEST placeholder can never be silently reused to authorize a PRODUCTION
+// push and vice versa.
 //
 // The baseline file is itself a security control, not a convenience default.
 // It must fail CLOSED on every way it can go missing, wrong, or be
 // substituted out from under the gate: absent file, unreadable file, invalid
-// JSON, wrong shape, malformed/duplicate/non-string entries, or a path that
-// does not point at a real, ordinary, in-repo file. A missing or
-// empty-but-should-not-be baseline must never silently degrade to "zero
+// JSON, wrong shape, malformed/duplicate/non-string entries, unknown target,
+// or a path that does not point at a real, ordinary, in-repo file. A missing
+// or empty-but-should-not-be baseline must never silently degrade to "zero
 // accepted placeholders" and let the rest of the gate quietly decide whether
 // that happens to matter -- deleting/renaming/corrupting/redirecting this
 // file is the single highest-value thing that could disable this guard, and
@@ -212,39 +445,20 @@ export function loadLocalMigrationVersions(migrationsDir) {
 // with extra steps.
 //
 // Provenance (round 2 of adversarial review found the round-1 fix
-// incomplete): checking that the baseline path resolves to a regular,
-// non-symlinked file INSIDE the repo (round 1's fix) proves the path sits in
+// incomplete, round 3 closed it): checking that the baseline path resolves
+// to a regular, non-symlinked file INSIDE the repo proves the path sits in
 // the tree -- it does NOT prove the FILE CONTENT is the tracked, reviewed
-// blob. Two ways that check still lied:
-//   - A hardlink at an in-repo pathname shares its inode with a file
-//     anywhere else on disk. `lstat`/`realpath` see a normal in-repo regular
-//     file; the bytes actually read can be anything.
-//   - An untracked or merely-staged-but-uncommitted in-repo file passes
-//     every filesystem check while never having been reviewed at all.
-// There was also a TOCTOU gap: lstat-validate-then-later-readFileSync(path)
-// is two steps over a mutable filesystem path, with a window between them
-// where the path could be swapped for a symlink/FIFO/device and then
-// followed unvalidated by the later open.
+// blob. A hardlink at an in-repo pathname shares its inode with a file
+// anywhere else on disk; an untracked or merely-staged-but-uncommitted
+// in-repo file passes every filesystem check while never having been
+// reviewed; lstat-validate-then-later-readFileSync(path) is two steps over a
+// mutable filesystem path with a TOCTOU window between them.
 //
-// Fix: don't read the working-tree file at all. Read the content directly
-// out of git's object database, addressed by the exact commit
-// (`HEAD:relative/path`), via a single `git show` call. This makes
-// "reviewed" structural rather than merely checked:
-//   - `git show HEAD:path` only succeeds if `path` is recorded in HEAD's
-//     tree -- an untracked, uncommitted, or merely-staged file fails with a
-//     clear git error, refused below.
-//   - The content comes from git's content-addressed blob store, which has
-//     no concept of filesystem inodes, hardlinks, or symlinks at all -- a
-//     hardlink or symlink at that pathname on disk is irrelevant, because
-//     the disk is never consulted for the bytes.
-//   - There is no separate "validate" step followed by a later "open" step
-//     over a mutable path -- the read IS the check, in one atomic
-//     subprocess call against an immutable, commit-qualified git ref. There
-//     is no window in which the working tree can be swapped out from under
-//     it, because the working tree is never the source of the bytes.
-// A lightweight lexical check (no filesystem or git calls) still rejects an
-// obviously-escaping path (`..`, absolute-outside-root) fast, with a clear
-// message, before ever shelling out to git.
+// Fixed by never reading the working-tree file: content comes directly out
+// of git's object database, addressed by the exact commit (`HEAD:relative/
+// path`), via a single `git show` call, bounded by a short timeout (round-4
+// finding P2 -- a wedged git process must not hang the CI job's whole
+// timeout budget before failing closed against the push).
 export function resolveGitTrackedBaselinePath(baselinePath, repoRoot) {
   const resolvedArgPath = resolve(baselinePath);
   const relativePath = relative(repoRoot, resolvedArgPath);
@@ -258,14 +472,24 @@ export function resolveGitTrackedBaselinePath(baselinePath, repoRoot) {
   return relativePath.split(sep).join("/");
 }
 
-export function readGitTrackedBaseline(baselinePath, repoRoot) {
+export function readGitTrackedBaseline(baselinePath, repoRoot, options = {}) {
   const gitRelativePath = resolveGitTrackedBaselinePath(baselinePath, repoRoot);
+  const timeoutMs = options.timeoutMs ?? GIT_SHOW_TIMEOUT_MS;
   try {
     return execFileSync("git", ["-C", repoRoot, "show", `HEAD:${gitRelativePath}`], {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
+      timeout: timeoutMs,
+      killSignal: "SIGKILL",
     });
   } catch (error) {
+    if (error.signal === "SIGKILL" || error.killed) {
+      throw new Error(
+        `git show did not complete within ${timeoutMs}ms and was killed while reading baseline path ` +
+          `"${gitRelativePath}" from "${repoRoot}". Refusing rather than hanging: a wedged git process ` +
+          "must fail closed, not delay incident visibility until the CI job's outer timeout.",
+      );
+    }
     const stderr = typeof error.stderr === "string" ? error.stderr.trim() : "";
     throw new Error(
       `Baseline path "${gitRelativePath}" could not be read from git HEAD in "${repoRoot}". It must ` +
@@ -277,7 +501,15 @@ export function readGitTrackedBaseline(baselinePath, repoRoot) {
 
 export function loadBaseline(baselinePath, options = {}) {
   const repoRoot = options.repoRoot ?? REPO_ROOT;
-  const text = readGitTrackedBaseline(baselinePath, repoRoot);
+  const target = options.target;
+  if (!target) {
+    throw new Error(
+      "loadBaseline requires a target (e.g. \"sandra-production\"). It selects which acknowledged " +
+        "placeholder baseline AND which expected project identity applies, so a gate run against TEST " +
+        "cannot be reused to authorize a PRODUCTION push.",
+    );
+  }
+  const text = readGitTrackedBaseline(baselinePath, repoRoot, options);
 
   let raw;
   try {
@@ -286,17 +518,50 @@ export function loadBaseline(baselinePath, options = {}) {
     throw new Error(`Baseline at "${baselinePath}" (read from git HEAD) is not valid JSON: ${error.message}`);
   }
 
-  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+  if (raw === null || typeof raw !== "object" || typeof raw.targets !== "object" || raw.targets === null) {
     throw new Error(
-      `Baseline file "${baselinePath}" must be a JSON object with an "acceptedPlaceholderVersions" ` +
-        `array, got ${Array.isArray(raw) ? "an array" : typeof raw}.`,
+      `Baseline file "${baselinePath}" must be a JSON object with a "targets" object keyed by target name.`,
     );
   }
-  if (!Array.isArray(raw.acceptedPlaceholderVersions)) {
+  if (!Object.hasOwn(raw.targets, target)) {
     throw new Error(
-      `Baseline file "${baselinePath}" is missing a valid "acceptedPlaceholderVersions" array ` +
-        `(got ${typeof raw.acceptedPlaceholderVersions}). An intentionally empty baseline must still ` +
-        'be an explicit "acceptedPlaceholderVersions": [] -- not a missing key.',
+      `No baseline entry for target "${target}" in "${baselinePath}". Known targets: ` +
+        `${Object.keys(raw.targets).join(", ") || "(none)"}. Refusing: an unrecognized target is ` +
+        "either a typo or an unreviewed new database.",
+    );
+  }
+  const entry = raw.targets[target];
+  if (entry === null || typeof entry !== "object") {
+    throw new Error(`Baseline entry for target "${target}" is not an object.`);
+  }
+  for (const key of ["project_ref", "database", "db_system_identifier", "placeholder_versions"]) {
+    if (!Object.hasOwn(entry, key)) {
+      throw new Error(
+        `Baseline entry for target "${target}" has no "${key}" key. Every identity key must be ` +
+          "present explicitly (use null to opt out deliberately) -- an absent key would be an " +
+          "accidental opt-out.",
+      );
+    }
+  }
+  if (
+    entry.project_ref !== null &&
+    typeof entry.project_ref !== "string"
+  ) {
+    throw new Error(`Baseline entry for target "${target}" has a non-string, non-null "project_ref".`);
+  }
+  if (entry.database !== null && typeof entry.database !== "string") {
+    throw new Error(`Baseline entry for target "${target}" has a non-string, non-null "database".`);
+  }
+  if (entry.db_system_identifier !== null && typeof entry.db_system_identifier !== "string") {
+    throw new Error(
+      `Baseline entry for target "${target}" has a non-string, non-null "db_system_identifier".`,
+    );
+  }
+  if (!Array.isArray(entry.placeholder_versions)) {
+    throw new Error(
+      `Baseline entry for target "${target}" has a non-array "placeholder_versions" ` +
+        `(got ${typeof entry.placeholder_versions}). Use [] when the target legitimately has no ` +
+        "placeholder rows -- not a missing key.",
     );
   }
 
@@ -306,20 +571,20 @@ export function loadBaseline(baselinePath, options = {}) {
   // to the guard but different things to a human reviewing the file's diff.
   const normalized = new Set();
   const seenBy = new Map(); // identityKey -> the first raw entry that produced it
-  for (const entry of raw.acceptedPlaceholderVersions) {
-    if (typeof entry !== "string") {
+  for (const version of entry.placeholder_versions) {
+    if (typeof version !== "string") {
       throw new Error(
-        `Baseline file "${baselinePath}" contains a non-string entry: ${JSON.stringify(entry)} ` +
-          `(${typeof entry}). Every entry must be a version string, e.g. "001" or "20260729010000" -- ` +
+        `Baseline entry for target "${target}" contains a non-string version: ${JSON.stringify(version)} ` +
+          `(${typeof version}). Every entry must be a version string, e.g. "001" or "20260729010000" -- ` +
           "numbers are not accepted, even if they look like a valid version.",
       );
     }
     let key;
     try {
-      key = identityKey(entry);
+      key = identityKey(version);
     } catch (error) {
       throw new Error(
-        `Baseline file "${baselinePath}" contains a malformed version entry ${JSON.stringify(entry)}: ${error.message}`,
+        `Baseline entry for target "${target}" contains a malformed version ${JSON.stringify(version)}: ${error.message}`,
       );
     }
     // Duplicate detection is on normalized identity, not raw string equality,
@@ -328,15 +593,20 @@ export function loadBaseline(baselinePath, options = {}) {
     // widening of the control that a reviewer skimming the file could miss.
     if (seenBy.has(key)) {
       throw new Error(
-        `Baseline file "${baselinePath}" contains duplicate entries for version "${entry}": ` +
-          `${JSON.stringify(seenBy.get(key))} and ${JSON.stringify(entry)} both normalize to the same ` +
+        `Baseline entry for target "${target}" contains duplicate entries for version "${version}": ` +
+          `${JSON.stringify(seenBy.get(key))} and ${JSON.stringify(version)} both normalize to the same ` +
           "version. Refusing -- an unvalidated control file is how a widened baseline slips past review.",
       );
     }
-    seenBy.set(key, entry);
+    seenBy.set(key, version);
     normalized.add(key);
   }
-  return { acceptedPlaceholderVersions: normalized };
+  return {
+    projectRef: entry.project_ref,
+    database: entry.database,
+    systemIdentifier: entry.db_system_identifier,
+    acceptedPlaceholderVersions: normalized,
+  };
 }
 
 // --- Core decision (pure, unit-testable without a database) -----------------
@@ -429,9 +699,9 @@ function printRefusal(result) {
   switch (result.reason) {
     case "NO_LOCAL_MIGRATIONS":
       console.error(
-        "REFUSING: the local migrations directory has zero .sql files, but remote history is " +
-          "non-empty. This is either a wrong/empty --migrations-dir or a broken checkout — not " +
-          "proof that nothing is pending.",
+        "REFUSING: the canonical migrations directory has zero .sql files, but remote history is " +
+          "non-empty. This is either a broken checkout or a repo laid out unexpectedly — not proof " +
+          "that nothing is pending.",
       );
       break;
     case "EMPTY_HISTORY":
@@ -440,7 +710,7 @@ function printRefusal(result) {
     case "UNKNOWN_PLACEHOLDER_HISTORY":
       console.error(
         "REFUSING: schema_migrations contains placeholder row(s) with NULL statements that are " +
-          "NOT in the accepted baseline (scripts/migration-safety-baseline.json):",
+          "NOT in the accepted baseline (scripts/migration-safety-baseline.json) for this target:",
       );
       for (const row of result.unknownPlaceholders) {
         console.error(`  - ${row.version}`);
@@ -450,7 +720,8 @@ function printRefusal(result) {
         "A new placeholder row means `supabase migration repair` ran since the baseline was " +
           "written and history is not a trustworthy signal at that version. A human must confirm " +
           "the repair was intentional (reading live schema state, not just history) and add the " +
-          "version to the baseline file in the same change before this gate will accept it.",
+          "version to the baseline file's entry for this target in the same change before this gate " +
+          "will accept it.",
       );
       break;
     case "UNKNOWN_VERSION_NAMESPACE":
@@ -488,22 +759,70 @@ function printRefusal(result) {
 
 export function main() {
   const args = parseArguments(process.argv.slice(2));
-  const migrationsDir = resolve(args["migrations-dir"] ?? DEFAULT_MIGRATIONS_DIR);
-  const baselinePath = resolve(args["baseline"] ?? DEFAULT_BASELINE_PATH);
-  // Overridable only for tests, which point it at a disposable scratch git
-  // repo to prove git-tracked-provenance behavior without touching this
-  // repo's own history. Real invocations (CI, local) never pass this and get
-  // the real repo root.
+  // Overridable only for tests, which point the ENTIRE resolution (baseline
+  // git reads AND the canonical migrations directory, both derived from this
+  // one value) at a disposable scratch git repo, to prove target/identity/
+  // canonical-path behavior without touching this repo's own history or its
+  // real supabase/migrations. There is deliberately no separate override for
+  // the migrations directory alone (see canonicalMigrationsDir above) --
+  // that is exactly the P1-1 gap this round closes.
   const repoRoot = args["repo-root"] ? resolve(args["repo-root"]) : REPO_ROOT;
+  // The default baseline path is resolved against repoRoot, NOT process.cwd()
+  // -- otherwise a --repo-root override would redirect the migrations
+  // directory but silently leave the default baseline pointed at whatever
+  // directory the process happened to be launched from, defeating the
+  // "entire resolution moves together" guarantee above. An explicit
+  // --baseline is still resolved as a normal path (cwd-relative if not
+  // absolute), matching how --repo-root itself is resolved.
+  const baselinePath = args["baseline"] ? resolve(args["baseline"]) : resolve(repoRoot, DEFAULT_BASELINE_PATH);
+  const target = args["target"];
 
   console.log("== Migration safety gate ==");
-  console.log(`Migrations directory: ${migrationsDir}`);
+  console.log(`Target: ${target ?? "(missing)"}`);
   console.log(`Baseline file: ${baselinePath} (read from git HEAD in ${repoRoot})`);
 
+  if (!target) {
+    console.error("");
+    console.error(
+      "REFUSING: --target=<label> is required. It selects which acknowledged placeholder baseline " +
+        "AND which expected project identity applies, so a gate run against TEST cannot be reused to " +
+        "authorize a PRODUCTION push.",
+    );
+    process.exitCode = 1;
+    return;
+  }
+  if (args["migrations-dir"] !== undefined) {
+    console.error("");
+    console.error(
+      "REFUSING: --migrations-dir is not accepted. The gate always inspects " +
+        `${canonicalMigrationsDir(repoRoot)} to guarantee it matches what \`supabase db push\` reads. ` +
+        "A caller-controlled migrations directory is exactly the gap that made the gate decorative " +
+        "(round-4 review finding P1-1).",
+    );
+    process.exitCode = 1;
+    return;
+  }
+
+  const migrationsDir = canonicalMigrationsDir(repoRoot);
+  console.log(`Migrations directory (canonical, not overridable): ${migrationsDir}`);
+
+  let baseline;
+  let declaredIdentity;
+  let liveIdentity;
   let historyRows;
   let local;
-  let baseline;
   try {
+    baseline = loadBaseline(baselinePath, { repoRoot, target });
+
+    // Identity MUST be asserted before any history read is trusted (round-4
+    // review instruction, verbatim): declared (env-derived, exact-parsed)
+    // first, then a live round trip against the actual connection.
+    declaredIdentity = assertDeclaredIdentity(target, baseline);
+    liveIdentity = assertLiveIdentity(target, baseline);
+
+    assertNoSymlinkInMigrationsPath(migrationsDir, repoRoot);
+    local = loadLocalMigrationVersions(migrationsDir);
+
     const historyCsv = runPsqlCsv(
       "select version, (statements is null) as is_placeholder " +
         "from supabase_migrations.schema_migrations order by version",
@@ -512,14 +831,15 @@ export function main() {
       version,
       isPlaceholder: isPlaceholder === "t",
     }));
-    local = loadLocalMigrationVersions(migrationsDir);
-    baseline = loadBaseline(baselinePath, { repoRoot });
   } catch (error) {
     console.error("");
     console.error(`REFUSING: ${error.message}`);
     process.exitCode = 1;
     return;
   }
+
+  console.log(`Declared connection identity: ${declaredIdentity}`);
+  console.log(`Live connection identity: ${liveIdentity}`);
 
   const result = evaluateSafety(historyRows, local, {
     acceptedPlaceholderVersions: baseline.acceptedPlaceholderVersions,
@@ -534,8 +854,8 @@ export function main() {
   console.log(`Locally pending (not in schema_migrations, by any accepted formatting): ${result.pending.length}`);
   console.log("");
   console.log(
-    "OK: no unknown placeholder rows, and every pending migration is newer than history's " +
-      "high-water mark within its own version scheme.",
+    "OK: connection identity matches the target, no unknown placeholder rows, and every pending " +
+      "migration is newer than history's high-water mark within its own version scheme.",
   );
   if (result.pending.length > 0) {
     console.log("Pending migrations (safe to include in a reviewed dry-run):");
