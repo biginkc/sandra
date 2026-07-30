@@ -1,0 +1,10 @@
+{
+  "_comment": "Accepted-placeholder baseline for scripts/check-migration-safety.mjs. A placeholder row (schema_migrations.statements IS NULL) means `supabase migration repair` ran at that version; history cannot prove real content is applied there. The gate refuses on any placeholder NOT in this list. Seeded 2026-07-30 from a live read-only query against both Sandra projects (schema_migrations only, no writes): prod (copflsklaefwzipsrjqz) had 36 placeholder rows (001-035 plus 20260729010000), test (ncsngxlcyxylaeskiteu) had 35 (001-035). This file is the union of both, since a version accepted here that happens not to be a placeholder in a given project is a no-op. Extend this list ONLY after a human confirms a new `migration repair` was intentional and has verified live schema state directly (not just history) at that version — add the version in the same PR/commit as the repair.",
+  "acceptedPlaceholderVersions": [
+    "001", "002", "003", "004", "005", "006", "007", "008", "009", "010",
+    "011", "012", "013", "014", "015", "016", "017", "018", "019", "020",
+    "021", "022", "023", "024", "025", "026", "027", "028", "029", "030",
+    "031", "032", "033", "034", "035",
+    "20260729010000"
+  ]
+}

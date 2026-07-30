@@ -19,6 +19,8 @@
     "test:e2e:properties-filter": "playwright test --config playwright.properties-filter.config.ts",
     "verify:hugo-sql": "node scripts/verify-hugo-access-migrations.mjs",
     "verify:hugo-rollback": "SANDRA_HUGO_VERIFY_LANE=rollback-roundtrip node scripts/verify-hugo-access-migrations.mjs",
+    "verify:migration-safety-unit": "node --test scripts/check-migration-safety.test.mjs",
+    "verify:migration-safety-rehearsal": "LC_ALL=C node scripts/check-migration-safety.rehearsal.mjs",
     "typecheck": "tsc --noEmit",
     "verify": "npm run typecheck && npm run test && npm run test:rtl",
     "filters:characterize:pass1": "tsx scripts/properties-filter-characterization.ts",

@@ -14,6 +14,25 @@ name: Apply Supabase migrations to prod and test
 # silently failed for days because the column the page queried didn't
 # exist on the test DB. Both jobs below close those gaps.
 #
+# migrate-prod now REQUIRES migrate-test to succeed first (`needs:` below),
+# and requires manual approval via the `production-database` GitHub
+# Environment. This closes a 2026-07-30 gap: the two jobs used to run in
+# parallel with no dependency, so a broken/dangerous migration could reach
+# prod via the same push that broke test, with nothing to stop it and no
+# human in the loop. See scripts/check-migration-safety.mjs for the other
+# half of that gap (an unrelated 2026-07-30 incident on BMH Institute, where
+# `db push --include-all` re-applied an old, already-superseded migration
+# out of order because it had no schema_migrations row, reverting 6 hardened
+# functions on production for hours). Both jobs below run that gate before
+# their real push, and preview `--dry-run` output before applying for real.
+#
+# IMPORTANT — the `environment: production-database` gate below only takes
+# effect once a human configures required reviewers for it in GitHub:
+# repo Settings -> Environments -> production-database -> Required reviewers.
+# Until that's done, this workflow does not enforce a manual approval step;
+# it only creates the environment binding for GitHub to enforce once
+# reviewers are configured.
+#
 # Required secrets (set in GitHub → repo settings → Secrets → Actions):
 #   SUPABASE_ACCESS_TOKEN
 #     A personal access token from
@@ -29,10 +48,12 @@ name: Apply Supabase migrations to prod and test
 #     (Connection info → Database password).
 #
 # Failure mode: a failed migration leaves the affected project's DB
-# partially-migrated (depending on what failed). Each job runs
-# independently so a test-only failure doesn't block prod and vice
-# versa. Investigate the logs, fix the migration, push a new one —
-# `supabase db push` is idempotent and skips already-applied files.
+# partially-migrated (depending on what failed). migrate-test failing now
+# also blocks migrate-prod from running at all (see `needs:` below) — that
+# is intentional; a migration that can't even apply to test has no business
+# reaching production unattended. Investigate the logs, fix the migration,
+# push a new one — `supabase db push` is idempotent and skips
+# already-applied files.
 
 on:
   push:
@@ -43,28 +64,6 @@ on:
   workflow_dispatch: {}
 
 jobs:
-  migrate-prod:
-    name: Apply migrations to prod
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-
-    env:
-      PROD_PROJECT_REF: copflsklaefwzipsrjqz
-      SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
-
-    steps:
-      - uses: actions/checkout@v5
-
-      - uses: supabase/setup-cli@v1
-        with:
-          version: latest
-
-      - name: Link to prod project
-        run: supabase link --project-ref "$PROD_PROJECT_REF"
-
-      - name: Apply pending migrations
-        run: supabase db push --include-all --password "${{ secrets.PROD_SUPABASE_DB_PASSWORD }}"
-
   migrate-test:
     name: Apply migrations to test
     runs-on: ubuntu-latest
@@ -84,8 +83,114 @@ jobs:
         with:
           version: latest
 
+      - name: Install PostgreSQL client
+        run: sudo apt-get update && sudo apt-get install --yes postgresql-client
+
       - name: Link to test project
         run: supabase link --project-ref "$TEST_PROJECT_REF"
 
+      - name: Resolve pooler connection info
+        id: pooler
+        # `supabase link` caches the project's resolved Supavisor pooler host
+        # (region/shard) at supabase/.temp/pooler-url. Reading that instead of
+        # hardcoding a pooler hostname avoids guessing wrong shard/region —
+        # this is the same connection the CLI itself just proved reachable.
+        run: |
+          node -e '
+            const fs = require("node:fs");
+            const raw = fs.readFileSync("supabase/.temp/pooler-url", "utf8").trim();
+            const u = new URL(raw);
+            const out = [
+              `host=${u.hostname}`,
+              `port=${u.port || "5432"}`,
+              `user=${decodeURIComponent(u.username)}`,
+            ].join("\n");
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, out + "\n");
+          '
+
+      - name: Migration safety gate (refuse out-of-order / unknown-placeholder history)
+        # See scripts/check-migration-safety.mjs for why this exists.
+        env:
+          TEST_SUPABASE_DB_PASSWORD: ${{ secrets.TEST_SUPABASE_DB_PASSWORD }}
+        run: |
+          echo "::add-mask::$TEST_SUPABASE_DB_PASSWORD"
+          export PGHOST="${{ steps.pooler.outputs.host }}"
+          export PGPORT="${{ steps.pooler.outputs.port }}"
+          export PGDATABASE="postgres"
+          export PGUSER="${{ steps.pooler.outputs.user }}"
+          export PGPASSWORD="$TEST_SUPABASE_DB_PASSWORD"
+          export PGSSLMODE="require"
+          node scripts/check-migration-safety.mjs
+
+      - name: Preview pending migrations (dry run, surfaced before the real push)
+        run: supabase db push --include-all --dry-run --password "${{ secrets.TEST_SUPABASE_DB_PASSWORD }}"
+
       - name: Apply pending migrations
         run: supabase db push --include-all --password "${{ secrets.TEST_SUPABASE_DB_PASSWORD }}"
+
+  migrate-prod:
+    name: Apply migrations to prod
+    needs: migrate-test
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Requires required-reviewer configuration in GitHub repo settings to
+    # actually gate anything — see the note at the top of this file.
+    environment: production-database
+
+    env:
+      PROD_PROJECT_REF: copflsklaefwzipsrjqz
+      SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      - name: Install PostgreSQL client
+        run: sudo apt-get update && sudo apt-get install --yes postgresql-client
+
+      - name: Link to prod project
+        run: supabase link --project-ref "$PROD_PROJECT_REF"
+
+      - name: Resolve pooler connection info
+        id: pooler
+        run: |
+          node -e '
+            const fs = require("node:fs");
+            const raw = fs.readFileSync("supabase/.temp/pooler-url", "utf8").trim();
+            const u = new URL(raw);
+            const out = [
+              `host=${u.hostname}`,
+              `port=${u.port || "5432"}`,
+              `user=${decodeURIComponent(u.username)}`,
+            ].join("\n");
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, out + "\n");
+          '
+
+      - name: Migration safety gate (refuse out-of-order / unknown-placeholder history)
+        # See scripts/check-migration-safety.mjs for why this exists: an
+        # unrelated 2026-07-30 incident on BMH Institute prod, where
+        # `db push --include-all` re-applied an old, already-superseded
+        # migration out of order because it had no schema_migrations row,
+        # reverting 6 hardened functions and locking out a real user for
+        # hours. Sandra is the only BMH app with real production users, so
+        # this gate runs here too, in addition to migrate-test above.
+        env:
+          PROD_SUPABASE_DB_PASSWORD: ${{ secrets.PROD_SUPABASE_DB_PASSWORD }}
+        run: |
+          echo "::add-mask::$PROD_SUPABASE_DB_PASSWORD"
+          export PGHOST="${{ steps.pooler.outputs.host }}"
+          export PGPORT="${{ steps.pooler.outputs.port }}"
+          export PGDATABASE="postgres"
+          export PGUSER="${{ steps.pooler.outputs.user }}"
+          export PGPASSWORD="$PROD_SUPABASE_DB_PASSWORD"
+          export PGSSLMODE="require"
+          node scripts/check-migration-safety.mjs
+
+      - name: Preview pending migrations (dry run, surfaced before the real push)
+        run: supabase db push --include-all --dry-run --password "${{ secrets.PROD_SUPABASE_DB_PASSWORD }}"
+
+      - name: Apply pending migrations
+        run: supabase db push --include-all --password "${{ secrets.PROD_SUPABASE_DB_PASSWORD }}"
