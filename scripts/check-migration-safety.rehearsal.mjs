@@ -16,7 +16,7 @@
 // violated. Always tears down the disposable cluster, even on failure.
 
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -27,6 +27,20 @@ const socketDir = mkdtempSync("/tmp/sgsock-"); // short path: unix socket path-l
 const port = 5433 + Math.floor(Math.random() * 500);
 let started = false;
 let failures = 0;
+
+// loadBaseline() now requires the baseline path to resolve inside the repo
+// (round-2 fix: containment check against symlinked/escaping paths). Baseline
+// FIXTURE files built for scenarios below must therefore live inside the
+// repo, not under the system tmpdir -- otherwise they'd trip the containment
+// check itself instead of exercising the scenario each one is meant to
+// prove. (A genuinely-missing baseline path is the one exception: existence
+// is checked before containment, so its location doesn't matter -- but it's
+// still built here for consistency.) Removed in the `finally` block below.
+const REPO_TEST_TMP_ROOT = fileURLToPath(new URL("./.test-tmp-baseline", import.meta.url));
+mkdirSync(REPO_TEST_TMP_ROOT, { recursive: true });
+function repoBaselineDir() {
+  return mkdtempSync(join(REPO_TEST_TMP_ROOT, "case-"));
+}
 
 function run(name, args, options = {}) {
   return execFileSync(name, args, { stdio: "inherit", ...options });
@@ -96,7 +110,7 @@ function expect(label, condition, detail) {
   }
 }
 
-const emptyBaseline = join(mkdtempSync(join(tmpdir(), "sandra-mig-safety-baseline-")), "baseline.json");
+const emptyBaseline = join(repoBaselineDir(), "baseline.json");
 writeFileSync(emptyBaseline, JSON.stringify({ acceptedPlaceholderVersions: [] }));
 const realBaselinePath = fileURLToPath(
   new URL("./migration-safety-baseline.json", import.meta.url),
@@ -183,10 +197,7 @@ try {
   }
   console.log("\n[3b] Same placeholder version, but present in the baseline -> passes");
   {
-    const baselinePath = join(
-      mkdtempSync(join(tmpdir(), "sandra-mig-safety-baseline2-")),
-      "baseline.json",
-    );
+    const baselinePath = join(repoBaselineDir(), "baseline.json");
     writeFileSync(baselinePath, JSON.stringify({ acceptedPlaceholderVersions: ["20260730090000"] }));
     const dir = writeMigrationsDir(["086_x.sql", "20260730090000_repaired.sql"]);
     const result = runGate(dir, { baselinePath });
@@ -333,4 +344,5 @@ try {
   }
   rmSync(cluster, { recursive: true, force: true });
   rmSync(socketDir, { recursive: true, force: true });
+  rmSync(REPO_TEST_TMP_ROOT, { recursive: true, force: true });
 }

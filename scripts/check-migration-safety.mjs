@@ -38,12 +38,16 @@
 // Exit code 1: refuse. Print the reason and let a human resolve it.
 
 import { execFileSync } from "node:child_process";
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { resolve } from "node:path";
+import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const DEFAULT_MIGRATIONS_DIR = "supabase/migrations";
 const DEFAULT_BASELINE_PATH = "scripts/migration-safety-baseline.json";
+// This file lives at <repo>/scripts/check-migration-safety.mjs, so its
+// grandparent directory is the repo root. Used to enforce that a baseline
+// path can never resolve outside the repository (see loadBaseline).
+const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 // Overall wall-clock budget for the psql round trip. A blackholed network
 // (dropped packets, a security-group change, a misconfigured pooler) must
 // fail this gate closed within a bounded time, not hang the CI job forever
@@ -191,68 +195,146 @@ export function loadLocalMigrationVersions(migrationsDir) {
 // still catch, so it still refuses on those.
 //
 // The baseline file is itself a security control, not a convenience default.
-// It must fail CLOSED on every way it can go missing or wrong: absent file,
-// unreadable file, invalid JSON, wrong shape, or malformed entries. A missing
-// or empty-but-should-not-be baseline must never silently degrade to "zero
+// It must fail CLOSED on every way it can go missing, wrong, or be
+// substituted out from under the gate: absent file, unreadable file, invalid
+// JSON, wrong shape, malformed/duplicate/non-string entries, or a path that
+// does not point at a real, ordinary, in-repo file. A missing or
+// empty-but-should-not-be baseline must never silently degrade to "zero
 // accepted placeholders" and let the rest of the gate quietly decide whether
-// that happens to matter -- deleting/renaming/corrupting this file is the
-// single highest-value thing that could disable this guard, and it must
-// break loudly, not go green. There is deliberately no auto-repair,
+// that happens to matter -- deleting/renaming/corrupting/redirecting this
+// file is the single highest-value thing that could disable this guard, and
+// it must break loudly, not go green. There is deliberately no auto-repair,
 // auto-seed, or auto-create-on-missing behavior here: a guard that
 // regenerates its own baseline when it can't find one is the same fail-open
 // with extra steps.
-export function loadBaseline(baselinePath) {
-  if (!existsSync(baselinePath)) {
+//
+// Path-safety (symlinks / escaping the repo): the baseline's entire security
+// value rests on "you can only widen it via a commit someone reviewed." A
+// symlink at the baseline path breaks that -- the file tracked in the repo
+// can look innocuous while the bytes actually read come from anywhere else
+// (another file on disk, a FIFO, /dev/stdin, a path an automated loop
+// controls). `lstat` (which does NOT follow the final symlink, unlike
+// `stat`/`existsSync`) is used to inspect the path's own type before ever
+// reading it, and refuses anything other than a plain regular file. Then the
+// fully-resolved real path (with ALL symlinks in ancestor directories
+// resolved too, via `realpath`) must still sit inside the repo root -- this
+// catches both `..`-style traversal and a symlinked ancestor directory
+// silently redirecting an otherwise-innocent-looking in-repo path.
+function assertSafeBaselinePath(baselinePath) {
+  const resolvedArgPath = resolve(baselinePath);
+
+  let linkStat;
+  try {
+    linkStat = lstatSync(resolvedArgPath);
+  } catch (error) {
     throw new Error(
-      `Baseline file "${baselinePath}" does not exist. A missing baseline must not be treated as ` +
+      `Baseline file "${resolvedArgPath}" does not exist. A missing baseline must not be treated as ` +
         '"zero accepted placeholders" -- restore scripts/migration-safety-baseline.json (or pass ' +
-        "--baseline pointing at the real file) before this gate will run.",
+        `--baseline pointing at the real file) before this gate will run. (${error.message})`,
     );
   }
 
+  if (linkStat.isSymbolicLink()) {
+    throw new Error(
+      `Baseline file "${resolvedArgPath}" is a symlink. Refusing -- the baseline must be a real, ` +
+        "reviewed file committed to the repo, not something that can be redirected at runtime " +
+        "(including to /dev/stdin, a process substitution, or a path outside version control).",
+    );
+  }
+  if (!linkStat.isFile()) {
+    const kind = linkStat.isDirectory()
+      ? "a directory"
+      : linkStat.isFIFO()
+        ? "a FIFO"
+        : linkStat.isCharacterDevice() || linkStat.isBlockDevice()
+          ? "a device"
+          : linkStat.isSocket()
+            ? "a socket"
+            : "not a regular file";
+    throw new Error(`Baseline file "${resolvedArgPath}" is ${kind}, not a regular file. Refusing.`);
+  }
+
+  // Now safe to fully resolve (the final component is confirmed to be a
+  // plain file, not a symlink) -- this still resolves any symlinked
+  // ancestor directory, which the checks above cannot see.
+  const realPath = realpathSync(resolvedArgPath);
+  const realRoot = realpathSync(REPO_ROOT);
+  const relativeToRoot = relative(realRoot, realPath);
+  if (relativeToRoot === "" || relativeToRoot.startsWith(`..${sep}`) || isAbsolute(relativeToRoot)) {
+    throw new Error(
+      `Baseline file "${resolvedArgPath}" resolves to "${realPath}", which is outside the ` +
+        `repository root "${realRoot}". Refusing -- the baseline must be a file committed inside this repo.`,
+    );
+  }
+
+  return realPath;
+}
+
+export function loadBaseline(baselinePath) {
+  const safePath = assertSafeBaselinePath(baselinePath);
+
   let text;
   try {
-    text = readFileSync(baselinePath, "utf8");
+    text = readFileSync(safePath, "utf8");
   } catch (error) {
-    throw new Error(`Baseline file "${baselinePath}" exists but could not be read: ${error.message}`);
+    throw new Error(`Baseline file "${safePath}" exists but could not be read: ${error.message}`);
   }
 
   let raw;
   try {
     raw = JSON.parse(text);
   } catch (error) {
-    throw new Error(`Baseline file "${baselinePath}" is not valid JSON: ${error.message}`);
+    throw new Error(`Baseline file "${safePath}" is not valid JSON: ${error.message}`);
   }
 
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
     throw new Error(
-      `Baseline file "${baselinePath}" must be a JSON object with an "acceptedPlaceholderVersions" ` +
+      `Baseline file "${safePath}" must be a JSON object with an "acceptedPlaceholderVersions" ` +
         `array, got ${Array.isArray(raw) ? "an array" : typeof raw}.`,
     );
   }
   if (!Array.isArray(raw.acceptedPlaceholderVersions)) {
     throw new Error(
-      `Baseline file "${baselinePath}" is missing a valid "acceptedPlaceholderVersions" array ` +
+      `Baseline file "${safePath}" is missing a valid "acceptedPlaceholderVersions" array ` +
         `(got ${typeof raw.acceptedPlaceholderVersions}). An intentionally empty baseline must still ` +
         'be an explicit "acceptedPlaceholderVersions": [] -- not a missing key.',
     );
   }
 
+  // Every entry must be a STRING that looks like a version. Numbers are
+  // rejected outright rather than coerced -- silent coercion in an allowlist
+  // is how `"001"` (string) and `1` (number) end up meaning the same thing
+  // to the guard but different things to a human reviewing the file's diff.
   const normalized = new Set();
+  const seenBy = new Map(); // identityKey -> the first raw entry that produced it
   for (const entry of raw.acceptedPlaceholderVersions) {
-    if (typeof entry !== "string" && typeof entry !== "number") {
+    if (typeof entry !== "string") {
       throw new Error(
-        `Baseline file "${baselinePath}" contains a non-version-shaped entry: ${JSON.stringify(entry)}.`,
+        `Baseline file "${safePath}" contains a non-string entry: ${JSON.stringify(entry)} ` +
+          `(${typeof entry}). Every entry must be a version string, e.g. "001" or "20260729010000" -- ` +
+          "numbers are not accepted, even if they look like a valid version.",
       );
     }
     let key;
     try {
-      key = identityKey(String(entry));
+      key = identityKey(entry);
     } catch (error) {
       throw new Error(
-        `Baseline file "${baselinePath}" contains a malformed version entry ${JSON.stringify(entry)}: ${error.message}`,
+        `Baseline file "${safePath}" contains a malformed version entry ${JSON.stringify(entry)}: ${error.message}`,
       );
     }
+    // Duplicate detection is on normalized identity, not raw string equality,
+    // so both a literal repeat ("001" twice) and a differently-formatted
+    // repeat ("001" and "1") are caught -- either shape is an unreviewed
+    // widening of the control that a reviewer skimming the file could miss.
+    if (seenBy.has(key)) {
+      throw new Error(
+        `Baseline file "${safePath}" contains duplicate entries for version "${entry}": ` +
+          `${JSON.stringify(seenBy.get(key))} and ${JSON.stringify(entry)} both normalize to the same ` +
+          "version. Refusing -- an unvalidated control file is how a widened baseline slips past review.",
+      );
+    }
+    seenBy.set(key, entry);
     normalized.add(key);
   }
   return { acceptedPlaceholderVersions: normalized };

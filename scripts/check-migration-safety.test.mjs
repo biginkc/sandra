@@ -1,7 +1,15 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, chmodSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+  chmodSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import test from "node:test";
 import {
   evaluateSafety,
@@ -11,9 +19,28 @@ import {
   numericValue,
 } from "./check-migration-safety.mjs";
 
+// loadBaseline() now requires the baseline path to resolve inside the repo
+// (see the round-2 fix below), so test fixtures for everything EXCEPT the
+// "does it correctly reject an outside-the-repo path" cases must themselves
+// live inside the repo, not under the system tmpdir. This directory is
+// created fresh per test file run and removed in test.after() below --
+// gitignored via scripts/.test-tmp-baseline (see .gitignore).
+const REPO_TEST_TMP_ROOT = join(import.meta.dirname, ".test-tmp-baseline");
+
 function tempDir() {
-  return mkdtempSync(join(tmpdir(), "sandra-mig-safety-baseline-unit-"));
+  mkdirSync(REPO_TEST_TMP_ROOT, { recursive: true });
+  return mkdtempSync(join(REPO_TEST_TMP_ROOT, "case-"));
 }
+
+// Deliberately OUTSIDE the repo -- only for tests proving the containment
+// check itself refuses a path that resolves outside the repo root.
+function outsideRepoTempDir() {
+  return mkdtempSync(join(tmpdir(), "sandra-mig-safety-outside-"));
+}
+
+test.after(() => {
+  rmSync(REPO_TEST_TMP_ROOT, { recursive: true, force: true });
+});
 
 // --- Defect 1: empty/wrong migrations directory must not silently pass -----
 
@@ -306,11 +333,11 @@ test("loadBaseline refuses when acceptedPlaceholderVersions is the wrong type (n
   assert.throws(() => loadBaseline(path), /missing a valid "acceptedPlaceholderVersions"/);
 });
 
-test("loadBaseline refuses on a malformed (non-version-shaped) entry: object", () => {
+test("loadBaseline refuses on a malformed (non-string) entry: object", () => {
   const dir = tempDir();
   const path = join(dir, "malformed-object.json");
   writeFileSync(path, JSON.stringify({ acceptedPlaceholderVersions: ["001", { evil: true }] }));
-  assert.throws(() => loadBaseline(path), /non-version-shaped entry/);
+  assert.throws(() => loadBaseline(path), /non-string entry/);
 });
 
 test("loadBaseline refuses on a malformed (non-numeric) entry: arbitrary string", () => {
@@ -320,11 +347,11 @@ test("loadBaseline refuses on a malformed (non-numeric) entry: arbitrary string"
   assert.throws(() => loadBaseline(path), /malformed version entry/);
 });
 
-test("loadBaseline refuses on a malformed entry: null", () => {
+test("loadBaseline refuses on a malformed (non-string) entry: null", () => {
   const dir = tempDir();
   const path = join(dir, "malformed-null.json");
   writeFileSync(path, JSON.stringify({ acceptedPlaceholderVersions: ["001", null] }));
-  assert.throws(() => loadBaseline(path), /non-version-shaped entry/);
+  assert.throws(() => loadBaseline(path), /non-string entry/);
 });
 
 test("loadBaseline accepts a legitimately empty baseline (explicit empty array is valid shape)", () => {
@@ -363,4 +390,104 @@ test("loadBaseline round-trips the real committed baseline file without error", 
   assert.ok(baseline.acceptedPlaceholderVersions.size >= 36);
   assert.ok(baseline.acceptedPlaceholderVersions.has(identityKey("001")));
   assert.ok(baseline.acceptedPlaceholderVersions.has(identityKey("20260729010000")));
+});
+
+// --- P1 round 2 fix: symlinks, path escape, duplicates, numeric coercion ---
+//
+// Codex round-2 adversarial review demonstrated three residual holes in the
+// round-1 fix: a symlinked baseline path (including /dev/stdin) loaded
+// through and passed; duplicate entries loaded silently; numeric entries
+// were coerced to strings instead of refused. All three are security-control
+// integrity issues -- the baseline's value depends entirely on "you can only
+// widen it via a reviewed commit," and each hole above is a way to bypass
+// that without touching the committed file's own reviewed content.
+
+test("loadBaseline refuses a baseline path that is a symlink to a legitimate file elsewhere", () => {
+  const dir = tempDir();
+  const realFile = join(dir, "real-baseline.json");
+  writeFileSync(realFile, JSON.stringify({ acceptedPlaceholderVersions: ["001"] }));
+  const symlinkPath = join(dir, "baseline-symlink.json");
+  symlinkSync(realFile, symlinkPath);
+  assert.throws(() => loadBaseline(symlinkPath), /is a symlink/);
+});
+
+test("loadBaseline refuses /dev/stdin as a baseline path (Codex's exact repro)", { skip: !existsSync("/dev/stdin") }, () => {
+  // On this platform /dev/stdin is itself a symlink (-> /dev/fd/0), so the
+  // lstat-based symlink check catches it directly. Even on a platform where
+  // /dev/stdin were a bare character device instead, the isFile() check
+  // below would catch it as "not a regular file" -- either layer refuses.
+  assert.throws(() => loadBaseline("/dev/stdin"), /is a symlink|not a regular file/);
+});
+
+test("loadBaseline refuses a directory at the baseline path", () => {
+  const dir = tempDir();
+  const subdir = join(dir, "a-directory.json");
+  mkdirSync(subdir);
+  assert.throws(() => loadBaseline(subdir), /is a directory/);
+});
+
+test("loadBaseline refuses a baseline path that resolves outside the repo via ..", () => {
+  // Escapes the repo root entirely, e.g. --baseline=../../../../etc/hosts
+  // relative to the script. Use a real file outside the repo so the failure
+  // being tested is specifically the containment check, not "file missing."
+  const outside = outsideRepoTempDir();
+  const outsideFile = join(outside, "not-in-repo.json");
+  writeFileSync(outsideFile, JSON.stringify({ acceptedPlaceholderVersions: ["001"] }));
+  assert.throws(() => loadBaseline(outsideFile), /outside the repository root/);
+});
+
+test("loadBaseline refuses a symlinked ancestor directory that redirects an in-repo-looking path outside the repo", () => {
+  // Even if the final path component is a real file (not itself a symlink),
+  // a symlinked PARENT directory can redirect it entirely outside the repo.
+  // realpath-based containment (not just lexical .. detection) must catch
+  // this.
+  const outside = outsideRepoTempDir();
+  const outsideFile = join(outside, "baseline.json");
+  writeFileSync(outsideFile, JSON.stringify({ acceptedPlaceholderVersions: ["001"] }));
+  const dir = tempDir();
+  const symlinkedDir = join(dir, "looks-local");
+  symlinkSync(outside, symlinkedDir);
+  const pathThroughSymlinkedDir = join(symlinkedDir, "baseline.json");
+  assert.throws(() => loadBaseline(pathThroughSymlinkedDir), /outside the repository root/);
+});
+
+test("loadBaseline accepts the real committed baseline path without any path-safety false positive", () => {
+  const realBaselinePath = resolve(import.meta.dirname, "migration-safety-baseline.json");
+  assert.doesNotThrow(() => loadBaseline(realBaselinePath));
+});
+
+test("loadBaseline refuses literal duplicate entries and names the duplicate", () => {
+  const dir = tempDir();
+  const path = join(dir, "dup-literal.json");
+  writeFileSync(path, JSON.stringify({ acceptedPlaceholderVersions: ["001", "002", "001"] }));
+  assert.throws(() => loadBaseline(path), /duplicate entries for version "001"/);
+});
+
+test("loadBaseline refuses cross-formatted duplicate entries (\"001\" and \"1\" normalize the same)", () => {
+  const dir = tempDir();
+  const path = join(dir, "dup-cross-format.json");
+  writeFileSync(path, JSON.stringify({ acceptedPlaceholderVersions: ["001", "1"] }));
+  assert.throws(() => loadBaseline(path), /duplicate entries/);
+});
+
+test("loadBaseline refuses a numeric entry instead of coercing it (Codex's exact repro: 1 -> \"001\")", () => {
+  const dir = tempDir();
+  const path = join(dir, "numeric-entry.json");
+  writeFileSync(path, JSON.stringify({ acceptedPlaceholderVersions: [1] }));
+  assert.throws(() => loadBaseline(path), /non-string entry.*1.*number/s);
+});
+
+test("loadBaseline refuses a mixed valid/invalid array, naming the first invalid entry", () => {
+  const dir = tempDir();
+  const path = join(dir, "mixed.json");
+  writeFileSync(path, JSON.stringify({ acceptedPlaceholderVersions: ["001", "002", 3, "004"] }));
+  assert.throws(() => loadBaseline(path), /non-string entry/);
+});
+
+test("loadBaseline still accepts a clean, valid, non-duplicated, all-string baseline", () => {
+  const dir = tempDir();
+  const path = join(dir, "clean.json");
+  writeFileSync(path, JSON.stringify({ acceptedPlaceholderVersions: ["001", "002", "20260729010000"] }));
+  const baseline = loadBaseline(path);
+  assert.equal(baseline.acceptedPlaceholderVersions.size, 3);
 });
