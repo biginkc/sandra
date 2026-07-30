@@ -17,6 +17,7 @@ import { dirname, join } from "node:path";
 import test from "node:test";
 import {
   assertDeclaredIdentity,
+  assertLiveIdentity,
   assertNoSymlinkInMigrationsPath,
   canonicalMigrationsDir,
   evaluateSafety,
@@ -33,8 +34,9 @@ const CLI_PATH = join(import.meta.dirname, "check-migration-safety-cli.mjs");
 // Runs `fn` with the given PG* env vars temporarily set, restoring whatever
 // was there before (including "unset") afterward. assertDeclaredIdentity()
 // reads process.env directly, by design -- it is the exact same connection
-// context runPsqlCsv/runPsqlSingleJson use, so there is nothing to pass as a
-// parameter that isn't already implicitly true of the process.
+// context the gate's own single combined psql call (fetchIdentityAndHistory)
+// uses, so there is nothing to pass as a parameter that isn't already
+// implicitly true of the process.
 function withEnv(overrides, fn) {
   const previous = {};
   for (const key of Object.keys(overrides)) {
@@ -746,6 +748,67 @@ test("assertDeclaredIdentity refuses when the baseline's project_ref is malforme
         assertDeclaredIdentity(T, { projectRef: "not-a-valid-ref", database: "postgres" }),
       ),
     /is not a 20-lowercase-letter Supabase ref or null/,
+  );
+});
+
+// --- P1-1 (round 5): identity assertion is now pure, decoupled from I/O ----
+//
+// Round-5 review found assertLiveIdentity() and the history query used to
+// be two SEPARATE `psql` connections built from the same env vars but not
+// provably the same session -- fixed by fetching both in one combined query
+// (fetchIdentityAndHistory, exercised end to end in the rehearsal harness,
+// which has a real database). Splitting the FETCH from the ASSERTION also
+// made assertLiveIdentity a pure function of its inputs, so its logic is
+// unit-testable here without spawning psql at all.
+
+test("assertLiveIdentity accepts a matching observed database with no system_identifier pin", () => {
+  const result = assertLiveIdentity(
+    T,
+    { database: "postgres", systemIdentifier: null },
+    { database: "postgres", system_identifier: "12345" },
+  );
+  assert.match(result, /not pinned/);
+});
+
+test("assertLiveIdentity refuses when the observed current_database() does not match the target's expected database", () => {
+  assert.throws(
+    () =>
+      assertLiveIdentity(
+        T,
+        { database: "postgres", systemIdentifier: null },
+        { database: "some_other_db", system_identifier: "12345" },
+      ),
+    /current_database\(\) = "some_other_db" but target .* expects "postgres"/,
+  );
+});
+
+test("assertLiveIdentity passes when database is unbound (null) regardless of what is observed", () => {
+  const result = assertLiveIdentity(
+    T,
+    { database: null, systemIdentifier: null },
+    { database: "anything", system_identifier: "anything" },
+  );
+  assert.match(result, /not pinned/);
+});
+
+test("assertLiveIdentity accepts a matching pinned system_identifier", () => {
+  const result = assertLiveIdentity(
+    T,
+    { database: "postgres", systemIdentifier: "7626352619084395911" },
+    { database: "postgres", system_identifier: "7626352619084395911" },
+  );
+  assert.match(result, /pinned, matched/);
+});
+
+test("assertLiveIdentity refuses a mismatched pinned system_identifier, even with a matching database", () => {
+  assert.throws(
+    () =>
+      assertLiveIdentity(
+        T,
+        { database: "postgres", systemIdentifier: "7626352619084395911" },
+        { database: "postgres", system_identifier: "9999999999999999999" },
+      ),
+    /system_identifier is 9999999999999999999 but target .* pinned to 7626352619084395911/,
   );
 });
 

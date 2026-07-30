@@ -138,47 +138,16 @@ export function namespaceOf(version) {
 }
 
 // --- psql -------------------------------------------------------------------
-
-export function runPsqlCsv(sql, options = {}) {
-  const requiredEnv = ["PGHOST", "PGPORT", "PGDATABASE", "PGUSER", "PGPASSWORD"];
-  const missing = requiredEnv.filter((name) => process.env[name] === undefined);
-  if (missing.length > 0) {
-    throw new Error(
-      `Missing required psql connection env var(s): ${missing.join(", ")}. ` +
-        "Export PGHOST/PGPORT/PGDATABASE/PGUSER/PGPASSWORD (and PGSSLMODE for hosted projects) before running this gate.",
-    );
-  }
-  const timeoutMs = options.timeoutMs ?? PSQL_TIMEOUT_MS;
-  const connectTimeoutSeconds = Math.max(1, Math.floor(timeoutMs / 1000));
-  try {
-    const output = execFileSync(
-      "psql",
-      ["--csv", "--quiet", "--tuples-only", "--set", "ON_ERROR_STOP=1", "-c", sql],
-      {
-        encoding: "utf8",
-        timeout: timeoutMs,
-        killSignal: "SIGKILL",
-        env: {
-          ...process.env,
-          // Client-side connect timeout, in seconds. Bounds the TCP/TLS/auth
-          // handshake specifically, ahead of the coarser process-level kill
-          // above (which also bounds query execution once connected).
-          PGCONNECT_TIMEOUT: String(connectTimeoutSeconds),
-        },
-      },
-    );
-    const lines = output.trim().split("\n").filter((line) => line.length > 0);
-    return lines.map((line) => line.split(","));
-  } catch (error) {
-    if (error.signal === "SIGKILL" || error.killed) {
-      throw new Error(
-        `psql did not complete within ${timeoutMs}ms and was killed. Treating this as a ` +
-          "connection failure: refusing rather than guessing the database is reachable.",
-      );
-    }
-    throw error;
-  }
-}
+//
+// Round-5 fix: there used to be a separate CSV-based history query
+// (runPsqlCsv) invoked as its own `psql` process alongside the identity
+// probe's own separate process -- two connections built from the same env
+// vars but not the same session. Removed in favor of a single combined
+// JSON query (fetchIdentityAndHistory, below) so identity and history can
+// never come from two different connections by construction. Keeping a
+// general-purpose "run arbitrary SQL over its own new connection" helper
+// around would be a standing invitation to reintroduce that split by
+// accident in a future change, so it is gone rather than left unused.
 
 function runPsqlSingleJson(sql, options = {}) {
   const requiredEnv = ["PGHOST", "PGPORT", "PGDATABASE", "PGUSER", "PGPASSWORD"];
@@ -323,6 +292,52 @@ export function loadLocalMigrationVersions(migrationsDir) {
 //    is and fails closed if that attestation cannot be obtained or does not
 //    match.
 //
+// Round-5 review finding P1-1: layer 2 and the schema_migrations history
+// read used to be two SEPARATE `psql` invocations -- two separate TCP
+// connections/sessions, even though built from the same PG* env vars. That
+// means the database this gate VERIFIED and the database it READ HISTORY
+// FROM were not provably the same database at the protocol level: routing
+// or credential drift between the two calls (a misbehaving pooler, a
+// mid-run secret rotation, anything that could make two back-to-back
+// connections land differently) would defeat the binding entirely, even
+// though it would look identical in the logs. Fixed by fetching identity
+// AND history in a single SQL statement over a single `psql` connection
+// (fetchIdentityAndHistory / IDENTITY_AND_HISTORY_SQL below) -- the
+// attestation and the data it gates are now structurally inseparable: they
+// are two fields of one JSON object returned by one query.
+//
+// What this does NOT close, stated explicitly rather than implied: the
+// subsequent `supabase db push` (and its `--dry-run` preview) is run by the
+// Supabase CLI as a THIRD, separate process/connection, built by the CLI
+// itself from the same PG* environment in the same workflow job step --
+// same credentials, same host, same moment in time -- but not literally the
+// same TCP session this gate just verified. There is no hook into the
+// Supabase CLI's connection lifecycle to bind that third connection into
+// this one's session; closing that link would require an upstream change to
+// the CLI itself. This gate's guarantee is therefore: "the identity this run
+// verified and the history it evaluated are provably the same read," not
+// "the push that follows is provably the same connection as the gate." The
+// residual gap is the push step trusting the same PG* env vars the gate just
+// validated, not the gate's own internal consistency.
+//
+// Pooler vs. direct connection: Supabase's general guidance favors a DIRECT
+// connection for migration-style operations. This gate (and, necessarily,
+// `supabase db push` itself in this environment) uses the Supavisor POOLER
+// instead. That is not a choice made for convenience: Sandra's direct
+// connection host (`db.<ref>.supabase.co`) resolves to an AAAA record only
+// (confirmed by direct DNS lookup while building this gate) with no A
+// record, and GitHub Actions' standard runners have no outbound IPv6 route
+// -- a direct connection is categorically unreachable from this CI
+// environment, not merely discouraged. The pooler is therefore not a
+// mismatch this gate introduced; it is the only network-reachable option
+// here, and `supabase db push` itself has necessarily been relying on
+// pooler-reachable (or equivalently IPv4-reachable) infrastructure all
+// along for this workflow to have ever worked. Conclusion: the direct-vs-
+// pooler guidance does not add residual risk beyond what the existing,
+// unmodified push mechanism already carries in this specific CI network
+// environment -- it is a platform constraint, not a gap this gate could
+// close by switching connection modes.
+//
 // NOTE on db_system_identifier: pg_control_system()'s system_identifier is
 // normally unique per physical cluster (assigned once at initdb). While
 // verifying this for Sandra's real projects, prod and test returned the
@@ -382,17 +397,25 @@ export function assertDeclaredIdentity(target, expected) {
   return `declared ref ${declared} (exact match)`;
 }
 
-const LIVE_IDENTITY_SQL =
-  "select json_build_object('database', current_database(), " +
-  "'system_identifier', (select system_identifier::text from pg_control_system()))::text;";
+// ONE statement, ONE connection: identity fields and history rows travel
+// together in a single JSON payload. See the round-5 note above -- this is
+// what makes the identity attestation and the history it gates inseparable.
+const IDENTITY_AND_HISTORY_SQL =
+  "select json_build_object(" +
+  "'database', current_database(), " +
+  "'system_identifier', (select system_identifier::text from pg_control_system()), " +
+  "'history', coalesce(" +
+  "(select json_agg(json_build_object('version', version, 'placeholder', statements is null) order by version) " +
+  "from supabase_migrations.schema_migrations), " +
+  "'[]'::json)" +
+  ")::text;";
 
-export function assertLiveIdentity(target, expected, options = {}) {
-  let observed;
-  try {
-    observed = runPsqlSingleJson(LIVE_IDENTITY_SQL, options);
-  } catch (error) {
-    throw new Error(`Live identity probe failed for target "${target}": ${error.message}`);
-  }
+// Pure assertion, no I/O: takes an ALREADY-FETCHED observation (from
+// fetchIdentityAndHistory below, or a caller-constructed object for unit
+// tests) and checks it against the target's expected identity. Separated
+// from the fetch so the fetch itself is provably singular (see
+// fetchIdentityAndHistory) while this logic stays independently testable.
+export function assertLiveIdentity(target, expected, observed) {
   if (expected.database !== null && observed.database !== expected.database) {
     throw new Error(
       `Live connection reports current_database() = "${observed.database}" but target "${target}" ` +
@@ -410,6 +433,40 @@ export function assertLiveIdentity(target, expected, options = {}) {
     );
   }
   return `live database "${observed.database}", cluster ${observed.system_identifier} (pinned, matched)`;
+}
+
+// The ONLY place this gate queries the live database. One psql
+// process, one connection, one statement -- returns both the identity
+// fields for assertLiveIdentity and the schema_migrations rows for
+// evaluateSafety, read together so neither can silently drift from the
+// other between two separate connections.
+export function fetchIdentityAndHistory(target, options = {}) {
+  let payload;
+  try {
+    payload = runPsqlSingleJson(IDENTITY_AND_HISTORY_SQL, options);
+  } catch (error) {
+    throw new Error(`Combined identity+history read failed for target "${target}": ${error.message}`);
+  }
+  if (payload === null || typeof payload !== "object") {
+    throw new Error(
+      `Combined identity+history query for target "${target}" did not return a JSON object.`,
+    );
+  }
+  if (!Array.isArray(payload.history)) {
+    throw new Error(
+      `Combined identity+history query for target "${target}" did not return a "history" array.`,
+    );
+  }
+  const historyRows = payload.history.map((row) => {
+    if (row === null || typeof row !== "object") {
+      throw new Error(`History row for target "${target}" is not an object: ${JSON.stringify(row)}`);
+    }
+    return { version: String(row.version), isPlaceholder: row.placeholder === true };
+  });
+  return {
+    observedIdentity: { database: payload.database, system_identifier: payload.system_identifier },
+    historyRows,
+  };
 }
 
 // --- Baseline placeholder acceptance -----------------------------------------
@@ -815,22 +872,19 @@ export function main() {
     baseline = loadBaseline(baselinePath, { repoRoot, target });
 
     // Identity MUST be asserted before any history read is trusted (round-4
-    // review instruction, verbatim): declared (env-derived, exact-parsed)
-    // first, then a live round trip against the actual connection.
+    // review instruction, verbatim). Round 5 additionally requires identity
+    // and history to come from the SAME connection/session, so declared
+    // (env-derived, exact-parsed, no I/O) is checked first, then ONE live
+    // query fetches both the live identity fields AND the history rows
+    // together (fetchIdentityAndHistory) -- there is no second connection
+    // for history to drift from the one identity was verified against.
     declaredIdentity = assertDeclaredIdentity(target, baseline);
-    liveIdentity = assertLiveIdentity(target, baseline);
+    const { observedIdentity, historyRows: fetchedHistoryRows } = fetchIdentityAndHistory(target);
+    liveIdentity = assertLiveIdentity(target, baseline, observedIdentity);
+    historyRows = fetchedHistoryRows;
 
     assertNoSymlinkInMigrationsPath(migrationsDir, repoRoot);
     local = loadLocalMigrationVersions(migrationsDir);
-
-    const historyCsv = runPsqlCsv(
-      "select version, (statements is null) as is_placeholder " +
-        "from supabase_migrations.schema_migrations order by version",
-    );
-    historyRows = historyCsv.map(([version, isPlaceholder]) => ({
-      version,
-      isPlaceholder: isPlaceholder === "t",
-    }));
   } catch (error) {
     console.error("");
     console.error(`REFUSING: ${error.message}`);

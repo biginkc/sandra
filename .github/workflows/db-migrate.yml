@@ -54,6 +54,21 @@ name: Apply Supabase migrations to prod and test
 # reaching production unattended. Investigate the logs, fix the migration,
 # push a new one — `supabase db push` is idempotent and skips
 # already-applied files.
+#
+# migrate-prod ALSO refuses to run unless the checked-out commit is `main`
+# or an ancestor of it (round-5 review finding P1-2). `workflow_dispatch`
+# (enabled above) lets anyone with write access manually run this workflow
+# against ANY branch, tag, or explicit commit SHA via the GitHub UI or API —
+# not just what a branch-name dropdown suggests. Without this check, an
+# unmerged branch could alter the migrations, the safety-gate baseline, or
+# the workflow logic itself and still reach a real production push, entirely
+# outside review — the gate cannot defend against this because a dispatched
+# branch controls the gate's own source too. The "Refuse unless this is
+# main" step below is the actual enforcement; it runs before anything else
+# in the job. workflow_dispatch stays available for migrate-test, which has
+# no such restriction, since manually re-running test-only migrations
+# against an arbitrary branch is a legitimate debugging need and carries
+# none of production's risk.
 
 on:
   push:
@@ -64,6 +79,7 @@ on:
       - "scripts/check-migration-safety.mjs"
       - "scripts/check-migration-safety-cli.mjs"
       - "scripts/migration-safety-baseline.json"
+      - "scripts/assert-ref-is-main-or-ancestor.sh"
   workflow_dispatch: {}
 
 jobs:
@@ -146,6 +162,25 @@ jobs:
 
     steps:
       - uses: actions/checkout@v5
+        with:
+          # Full history (not the default shallow clone) so the ancestor
+          # check below can actually walk from HEAD back to origin/main
+          # instead of hitting the edge of a shallow fetch and guessing.
+          fetch-depth: 0
+
+      - name: Refuse unless this ref is main or an ancestor of main (round-5 review finding P1-2)
+        # workflow_dispatch (see the `on:` block at the top of this file) can
+        # target any branch, tag, or explicit commit SHA -- not just what a
+        # branch-name dropdown implies. A dispatched, unmerged branch could
+        # change the migrations, the safety-gate baseline, or this workflow
+        # file itself and still reach a real production push, entirely
+        # outside review. See scripts/assert-ref-is-main-or-ancestor.sh for
+        # the full rationale and scripts/assert-ref-is-main-or-ancestor.test.sh
+        # for its test coverage (four cases against real disposable git
+        # repos: main's own tip, a divergent branch, an old-but-real main
+        # tip after main advances, and an explicit orphaned SHA that was
+        # never merged into main -- the raw-SHA workflow_dispatch case).
+        run: bash scripts/assert-ref-is-main-or-ancestor.sh
 
       - uses: supabase/setup-cli@v1
         with:
