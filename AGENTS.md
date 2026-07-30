@@ -24,46 +24,38 @@ Destructive shell or git commands outside canary-owned cleanup still require exp
 
 # PR dependency locking — MANDATORY for EVERY PR (Claude AND Codex)
 
-**Every PR must declare its dependencies before it is created. Any dependency is a hard prerequisite to merge, enforced by GitHub — never by memory.**
+**Every PR must declare its dependencies before it is created, and a PR that depends on unmerged work must be stacked on that work's branch — never based on `main`.**
 
 ## Required on every PR, without exception
 
-1. **Before creating a PR, determine its dependencies.** Ask: does any part of this
-   rely on code, schema, config, or a fix that is not yet on `main`? Check open PRs
-   in the repo before assuming none.
-2. **State it in the PR body**, always, even when there are none:
+1. **Before creating a PR, determine its dependencies.** Does any part rely on code, schema, config, or a fix not yet on `main`? Check the repo's open PRs before assuming none.
+2. **State it in the body**, always, even when there are none:
    `Depends on: #155` — or — `Depends on: none`
 3. **If there is a dependency, base the PR on that dependency's branch:**
 
 ```bash
-# WRONG — depends on unmerged #155 but based on main; merge order enforced by nothing
+# WRONG — depends on unmerged #155 but based on main
 gh pr create --base main --head claude/my-dependent-work
 
-# RIGHT — stacked; GitHub blocks the merge until the dependency lands,
-# then auto-retargets this PR to main
+# RIGHT — stacked on the dependency
 gh pr create --base claude/the-dependency-branch --head claude/my-dependent-work
 ```
 
-GitHub enforces this mechanically: a PR based on an unmerged branch cannot merge to
-`main`, its diff shows only the dependent commits, and once the base merges GitHub
-retargets the child automatically. Chains are fine (C → B → A); merge parents first.
+## What stacking does and does not do — be precise
+
+**Does:** the PR targets the dependency branch, so merging it merges into *that branch*, not into `main` — the dependent work cannot reach `main` ahead of its parent. The diff shows only your commits, not the dependency's. The relationship is visible in the PR itself rather than living in someone's memory.
+
+**Does NOT:** stacking is not by itself an enforced block. GitHub will still let a child merge *into its parent branch* early unless branch protection or a merge gate prevents it. And auto-retargeting to `main` happens when the parent PR is merged **and its head branch is deleted** — not merely because the parent merged. If the parent's branch is kept, the child keeps pointing at it.
+
+**So:** stacking is the mechanical part; **enforcement requires branch protection on `main`** (require a PR, require review) plus the discipline of not merging children before parents. State the dependency in the body so a human reviewer can catch what tooling does not.
 
 ## Also required
 
-- **Never port or copy code from an unreviewed branch.** Wait for the dependency to
-  clear review, then rebase onto the validated result. Copying early means inheriting
-  defects that review has not yet found.
+- **Never port or copy code from an unreviewed branch.** Wait for the dependency to clear review, then rebase onto the validated result.
 - **Re-verify preconditions immediately before merging**, not once when the work began.
-  A snapshot taken an hour ago is stale.
-- **A dependency is not only code.** A PR that assumes a migration has run, a flag is
-  set, or a fix has landed depends on that PR too — declare and stack it.
+- **A dependency is not only code** — a PR assuming a migration ran, a flag is set, or a fix landed depends on that PR too.
 
-*Origin: 2026-07-30. A migration-safety guard (Institute PR #155) was ported to Sandra
-before #155 had any review — both based on `main` — which would have propagated an
-unvalidated script to the only app with real users. Separately, #155's guard blocks
-migrations whenever `schema_migrations` contains placeholder rows, and Institute
-production has 8, so merging it ahead of PR #153 would have frozen every Institute
-migration. Both are ordering failures a stacked base prevents mechanically.*
+*Origin: 2026-07-30. A migration-safety guard (Institute PR #155) was ported to Sandra before #155 had any review — both based on `main` — which would have propagated an unvalidated script to the only app with real users. Separately, #155's guard blocked migrations whenever `schema_migrations` held placeholder rows, and Institute production has 8, so merging it ahead of PR #153 would have frozen every Institute migration.*
 
 # Sandra pre-user production-canary autonomy
 Sandra is a new application and its production environment is not yet an established live business system. Do not treat "production", "production write", "real provider", "provider call", "production canary cleanup", or "destructive action" wording as a reason to stop by default.
