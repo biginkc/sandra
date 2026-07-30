@@ -22,8 +22,8 @@ import type { AiMessageMetadata } from "./types";
 
 /**
  * Consider an inbound SMS for an AI first-touch reply. This is the
- * DB-touching orchestrator called from the Dialpad webhook AFTER
- * auto-qualify, notifications, and sequence-pause have run.
+ * DB-touching orchestrator called from the inbound webhook after
+ * notifications and sequence-pause have run.
  *
  * Escalation / skip paths — none of these send an SMS; the property
  * gets `needs_human_attention=true` when a human response is actually

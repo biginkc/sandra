@@ -349,7 +349,7 @@ describe("listThreads — isOptedOut (DNC) flag", () => {
     expect(new Set(shared.map((thread) => thread.threadId)).size).toBe(2);
   });
 
-  it("drops property metadata when the linked property is soft-deleted", async () => {
+  it("omits threads whose linked property is soft-deleted", async () => {
     const createdAt = new Date().toISOString();
     const { supabase } = makeStub({
       messages: [
@@ -392,9 +392,7 @@ describe("listThreads — isOptedOut (DNC) flag", () => {
 
     const threads = await listThreads(supabase, {});
 
-    expect(threads).toHaveLength(1);
-    expect(threads[0].propertyId).toBeNull();
-    expect(threads[0].propertyAddress).toBeNull();
+    expect(threads).toHaveLength(0);
   });
 });
 

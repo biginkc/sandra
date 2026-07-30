@@ -193,6 +193,9 @@ export async function listThreads(
     const c = contactById.get(contactId);
     const p = bucket.propertyId ? propertyById.get(bucket.propertyId) : null;
 
+    // Soft-deleted leads should disappear from the operator inbox entirely.
+    if (bucket.propertyId && !p) continue;
+
     if (opts.assigneeId && p?.assigned_user_id !== opts.assigneeId) continue;
     if (opts.unassignedOnly && p?.assigned_user_id) continue;
     if (
@@ -215,7 +218,7 @@ export async function listThreads(
           ([c.first_name, c.last_name].filter(Boolean).join(" ") || null))
         : null,
       contactPhone: c?.phone_1 ?? null,
-      propertyId: p ? bucket.propertyId : null,
+      propertyId: bucket.propertyId,
       propertyAddress: p
         ? [p.address, p.city, p.state].filter(Boolean).join(", ")
         : null,

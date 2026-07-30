@@ -224,8 +224,7 @@ export async function updateLeadMotivation(
  * returns ok.
  *
  * The `qualifier` is either a user id (manual action from /properties) or
- * a system marker like 'system:inbound_reply' (auto-qualify from the
- * Dialpad webhook).
+ * a trusted system marker used by maintenance/test flows.
  */
 async function qualifyLead(
   propertyId: string,

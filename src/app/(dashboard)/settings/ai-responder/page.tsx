@@ -44,7 +44,7 @@ export default async function AiResponderSettingsPage() {
       <PageHeader
         breadcrumb={[{ label: "Settings" }, { label: "AI responder" }]}
         title="AI responder"
-        description="AI-drafted first-touch reply for inbound SMS. Runs after auto-qualify + notifications + sequence-pause in the inbound webhook. Safety rails live in four places: keyword escalator, skip classifier, model-side confidence/sentiment checks, and the output safety validator."
+        description="AI-drafted first-touch reply for inbound SMS. Runs after notifications and sequence-pause in the inbound webhook. Safety rails live in four places: keyword escalator, skip classifier, model-side confidence/sentiment checks, and the output safety validator."
       />
       <AiResponderConfigForm initial={result.data} />
     </Page>

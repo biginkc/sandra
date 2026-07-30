@@ -67,6 +67,7 @@ export async function fetchInboxDetail(
 
   const c = contactRes.data;
   const p = propertyRes.data;
+  if (propertyId && !p) return null;
 
   return {
     threadId: conversationId,
@@ -77,7 +78,7 @@ export async function fetchInboxDetail(
         ([c.first_name, c.last_name].filter(Boolean).join(" ") || null))
       : null,
     contactPhone: c?.phone_1 ?? null,
-    propertyId: p ? propertyId : null,
+    propertyId,
     propertyAddress: p
       ? [p.address, p.city, p.state].filter(Boolean).join(", ")
       : null,

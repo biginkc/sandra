@@ -1,6 +1,6 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, it, expect, vi } from "vitest";
+import { beforeEach, describe, it, expect, vi } from "vitest";
 
 import { InboxDetail } from "./inbox-detail";
 import type { InboxDetail as InboxDetailData } from "./inbox-detail-data";
@@ -13,6 +13,15 @@ type MessageRow = Database["public"]["Tables"]["messages"]["Row"];
 // would push.
 const replaceCalls: string[] = [];
 const refreshCalls: number[] = [];
+const promoteProspectToLeadActionMock = vi.hoisted(() =>
+  vi.fn(async () => ({ ok: true, alreadyQualified: false })),
+);
+const toastMock = vi.hoisted(() => ({
+  success: vi.fn(),
+  warning: vi.fn(),
+  error: vi.fn(),
+  info: vi.fn(),
+}));
 
 vi.mock("next/navigation", () => ({
   useRouter: () => ({
@@ -41,6 +50,10 @@ vi.mock("../leads/actions", () => ({
   updateLeadAssignee: vi.fn(),
 }));
 
+vi.mock("./promote-actions", () => ({
+  promoteProspectToLeadAction: promoteProspectToLeadActionMock,
+}));
+
 vi.mock("../templates/actions", () => ({
   listTemplates: vi.fn(async () => ({ ok: true, data: [] })),
 }));
@@ -67,11 +80,7 @@ vi.mock("@/lib/supabase/client", () => ({
 }));
 
 vi.mock("sonner", () => ({
-  toast: {
-    success: vi.fn(),
-    warning: vi.fn(),
-    error: vi.fn(),
-  },
+  toast: toastMock,
 }));
 
 function makeMessage(overrides: Partial<MessageRow> & { id: string; body: string; direction: "inbound" | "outbound" }): MessageRow {
@@ -98,7 +107,8 @@ function makeMessage(overrides: Partial<MessageRow> & { id: string; body: string
 
 function makeData(overrides: Partial<InboxDetailData> & { contactId: string }): InboxDetailData {
   const contactId = overrides.contactId;
-  const propertyId = overrides.propertyId ?? "prop-1";
+  const propertyId =
+    overrides.propertyId === undefined ? "prop-1" : overrides.propertyId;
   return {
     threadId: overrides.threadId ?? `conv-${contactId}`,
     conversationId: overrides.conversationId ?? `conv-${contactId}`,
@@ -115,6 +125,20 @@ function makeData(overrides: Partial<InboxDetailData> & { contactId: string }): 
 }
 
 describe("<InboxDetail />", () => {
+  beforeEach(() => {
+    replaceCalls.length = 0;
+    refreshCalls.length = 0;
+    promoteProspectToLeadActionMock.mockReset();
+    promoteProspectToLeadActionMock.mockResolvedValue({
+      ok: true,
+      alreadyQualified: false,
+    });
+    toastMock.success.mockReset();
+    toastMock.warning.mockReset();
+    toastMock.error.mockReset();
+    toastMock.info.mockReset();
+  });
+
   it("renders the empty placeholder when no thread is selected (test 14 baseline)", () => {
     render(
       <InboxDetail
@@ -165,9 +189,6 @@ describe("<InboxDetail />", () => {
   });
 
   it("ESC closes the panel by clearing ?thread (test 16)", async () => {
-    replaceCalls.length = 0;
-    refreshCalls.length = 0;
-
     const user = userEvent.setup();
     const data = makeData({
       contactId: "contact-esc",
@@ -197,6 +218,75 @@ describe("<InboxDetail />", () => {
     // round-trip.
     expect(replaceCalls).toContain("/messages");
     expect(refreshCalls.length).toBeGreaterThan(0);
+  });
+
+  it("shows prospect status and promotes a prospect from Messages detail", async () => {
+    const user = userEvent.setup();
+    const data = makeData({
+      contactId: "contact-prospect",
+      propertyId: "prop-prospect",
+      propertyStatus: "prospect",
+    });
+
+    render(
+      <InboxDetail
+        data={data}
+        assigneeEmails={{}}
+        currentUserId="user-1"
+      />,
+    );
+
+    expect(screen.getByText("Prospect")).toBeInTheDocument();
+    await user.click(screen.getByTestId("inbox-detail-promote-lead"));
+
+    await waitFor(() =>
+      expect(promoteProspectToLeadActionMock).toHaveBeenCalledWith(
+        "prop-prospect",
+      ),
+    );
+    await waitFor(() => expect(refreshCalls.length).toBeGreaterThan(0));
+    expect(toastMock.success).toHaveBeenCalledWith("Promoted to lead.");
+  });
+
+  it("hides Promote to Lead when the linked property is not a prospect", () => {
+    const data = makeData({
+      contactId: "contact-lead",
+      propertyStatus: "new_lead",
+    });
+
+    render(
+      <InboxDetail
+        data={data}
+        assigneeEmails={{}}
+        currentUserId="user-1"
+      />,
+    );
+
+    expect(screen.getByText("New Lead")).toBeInTheDocument();
+    expect(
+      screen.queryByTestId("inbox-detail-promote-lead"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("hides Promote to Lead when no property is linked", () => {
+    const data = makeData({
+      contactId: "contact-no-property",
+      propertyId: null,
+      propertyAddress: null,
+      propertyStatus: null,
+    });
+
+    render(
+      <InboxDetail
+        data={data}
+        assigneeEmails={{}}
+        currentUserId="user-1"
+      />,
+    );
+
+    expect(
+      screen.queryByTestId("inbox-detail-promote-lead"),
+    ).not.toBeInTheDocument();
   });
 
   it("switching threads remounts MessagesThread with the new contact (test 17)", () => {

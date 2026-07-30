@@ -170,6 +170,22 @@ describe("listThreads (integration)", () => {
     expect(new Set(mine.map((thread) => thread.threadId)).size).toBe(2);
   });
 
+  it("omits threads whose property was soft-deleted", async () => {
+    const seeded = await seedConversation({
+      phone: "+18165550177",
+      messages: [{ direction: "inbound", body: "archived lead thread" }],
+    });
+
+    await supabase
+      .from("properties")
+      .update({ deleted_at: new Date().toISOString() })
+      .eq("id", seeded.propertyId);
+
+    const threads = await listThreads(supabase, {});
+
+    expect(threads.find((thread) => thread.contactId === seeded.contactId)).toBeUndefined();
+  });
+
   it("uses one conversation id for concurrent first-send and first-reply races", async () => {
     const { data: contact } = await supabase
       .from("contacts")

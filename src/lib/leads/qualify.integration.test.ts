@@ -77,11 +77,7 @@ describe("qualifyProperty (integration)", () => {
       .single();
     expect(data).not.toBeNull();
 
-    const outcome = await qualifyProperty(
-      supabase,
-      data!.id,
-      "system:inbound_reply",
-    );
+    const outcome = await qualifyProperty(supabase, data!.id, "system:test");
     expect(outcome.status).toBe("already_qualified");
 
     const { data: row } = await supabase
@@ -103,13 +99,9 @@ describe("qualifyProperty (integration)", () => {
     expect(outcome.status).toBe("not_found");
   });
 
-  it("accepts the system qualifier marker for auto-qualify from inbound webhook", async () => {
-    const id = await seedProspect("789 Auto Ave");
-    const outcome = await qualifyProperty(
-      supabase,
-      id,
-      "system:inbound_reply",
-    );
+  it("accepts trusted system qualifier markers for maintenance callers", async () => {
+    const id = await seedProspect("789 Maintenance Ave");
+    const outcome = await qualifyProperty(supabase, id, "system:maintenance");
     expect(outcome.status).toBe("qualified");
 
     const { data } = await supabase
@@ -117,7 +109,7 @@ describe("qualifyProperty (integration)", () => {
       .select("qualified_by, status")
       .eq("id", id)
       .single();
-    expect(data?.qualified_by).toBe("system:inbound_reply");
+    expect(data?.qualified_by).toBe("system:maintenance");
     expect(data?.status).toBe("new_lead");
   });
 });

@@ -38,8 +38,8 @@ async function seedAssignedInboundThread(
   }
 
   const [prop] = await seedProspects(admin, 1, opts.addressTag);
-  // Promote out of prospect so the auto-qualify doesn't race with our
-  // Realtime assertion. We're testing notifications, not qualify.
+  // Seed as a lead so this scenario stays focused on notifications, not
+  // the separate human promotion flow.
   const { error: propertyErr } = await admin
     .from("properties")
     .update({

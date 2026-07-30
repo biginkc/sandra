@@ -5,8 +5,8 @@ export type ReplyIntent = "positive" | "negative" | "neutral";
 /**
  * Classifies an inbound SMS body as positive (seller shows genuine interest),
  * negative (clear disinterest/hostility), or neutral (ambiguous, confused,
- * one-word acknowledgment). Used to gate auto-qualification — only positive
- * replies promote a prospect to new_lead.
+ * one-word acknowledgment). Kept as a standalone classifier for experiments
+ * or reporting; inbound replies no longer auto-promote prospects.
  *
  * Uses Haiku for cost efficiency (~100 tokens in + 1 token out). Falls back
  * to "neutral" on any parse error so the caller can decide the safe default.

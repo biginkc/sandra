@@ -1,6 +1,6 @@
 "use client";
 
-import { PhoneIcon } from "lucide-react";
+import { ArrowUpRightIcon, PhoneIcon } from "lucide-react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useState, useTransition } from "react";
@@ -20,6 +20,7 @@ import { AssignDropdown } from "./assign-dropdown";
 import { AssigneeSelect } from "./_components/assignee-select";
 import { setOutreachDispo, type OutreachDispo } from "./dispo-actions";
 import { type InboxDetail as InboxDetailData } from "./inbox-detail-data";
+import { promoteProspectToLeadAction } from "./promote-actions";
 
 type Props = {
   data: InboxDetailData | null;
@@ -42,10 +43,31 @@ const DISPO_LABELS: Record<OutreachDispo, string> = {
   callback_requested: "Callback",
 };
 
-const VALID_STATUSES: StatusVariant[] = ["replying", "hot", "new", "contacted", "cold", "dead"];
-
-function isValidStatus(s: string | null): s is StatusVariant {
-  return s !== null && (VALID_STATUSES as string[]).includes(s);
+function propertyStatusChip(
+  status: string | null,
+): { status: StatusVariant; label: string } | null {
+  switch (status) {
+    case "prospect":
+      return { status: "cold", label: "Prospect" };
+    case "new_lead":
+      return { status: "new", label: "New Lead" };
+    case "contacted":
+      return { status: "contacted", label: "Contacted" };
+    case "interested":
+      return { status: "hot", label: "Interested" };
+    case "offer_sent":
+      return { status: "hot", label: "Offer Sent" };
+    case "offer_declined":
+      return { status: "dead", label: "Offer Declined" };
+    case "under_contract":
+      return { status: "replying", label: "Under Contract" };
+    case "closed":
+      return { status: "hot", label: "Closed" };
+    case "dead":
+      return { status: "dead", label: "Dead" };
+    default:
+      return null;
+  }
 }
 
 function initialsOfName(name: string | null): string {
@@ -208,6 +230,42 @@ function DispoBar({
   );
 }
 
+function PromoteToLeadButton({ propertyId }: { propertyId: string }) {
+  const router = useRouter();
+  const [pending, startTransition] = useTransition();
+
+  function promote() {
+    startTransition(async () => {
+      const result = await promoteProspectToLeadAction(propertyId);
+      if (result.ok) {
+        toast.success(
+          result.alreadyQualified
+            ? "Already promoted to lead."
+            : "Promoted to lead.",
+        );
+        router.refresh();
+      } else {
+        toast.error(result.error);
+      }
+    });
+  }
+
+  return (
+    <Button
+      type="button"
+      size="sm"
+      variant="outline"
+      disabled={pending}
+      onClick={promote}
+      data-testid="inbox-detail-promote-lead"
+      className="rounded-full border-[#e5e1df] bg-white px-4 text-[12px] font-bold text-[#1c1917] hover:bg-[#f5f5f4]"
+    >
+      <ArrowUpRightIcon className="h-3.5 w-3.5" />
+      {pending ? "Promoting..." : "Promote to Lead"}
+    </Button>
+  );
+}
+
 /**
  * Right-side detail panel of the cockpit. Renders the existing
  * MessagesThread + InlineReply components — same building blocks as the
@@ -271,6 +329,7 @@ export function InboxDetail({
       ? "Me"
       : (assigneeEmail ?? "Teammate");
   const phoneHref = data.contactPhone ? `tel:${data.contactPhone}` : null;
+  const statusChip = propertyStatusChip(data.propertyStatus);
 
   return (
     <div
@@ -287,9 +346,12 @@ export function InboxDetail({
               <h2 className="truncate text-[18px] font-bold leading-tight text-[#1c1917]">
                 {data.contactName ?? data.contactPhone ?? "Unknown contact"}
               </h2>
-              {isValidStatus(data.propertyStatus) && (
-                <StatusChip status={data.propertyStatus} />
-              )}
+              {statusChip ? (
+                <StatusChip
+                  status={statusChip.status}
+                  label={statusChip.label}
+                />
+              ) : null}
             </div>
             <p className="text-[13px] text-[#78716c] flex items-center gap-2 min-w-0">
               {data.propertyAddress ? (
@@ -322,6 +384,9 @@ export function InboxDetail({
               initialAssigneeEmail={assigneeEmail}
               currentUserId={currentUserId}
             />
+          ) : null}
+          {data.propertyId && data.propertyStatus === "prospect" ? (
+            <PromoteToLeadButton propertyId={data.propertyId} />
           ) : null}
           {data.propertyId ? (
             <Link

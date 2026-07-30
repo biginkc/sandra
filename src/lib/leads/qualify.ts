@@ -11,12 +11,12 @@ export type QualifyOutcome =
 /**
  * Promote a prospect to `new_lead`. Idempotent: if the property is already
  * past `prospect` the call is a no-op. Uses a double-guard write so that
- * concurrent promotions (VA manual-qualify racing with the inbound webhook
- * auto-qualify) don't clobber the first `qualified_at` timestamp.
+ * concurrent manual promotions don't clobber the first `qualified_at`
+ * timestamp.
  *
  * The caller supplies the supabase client so this works from both a
- * server-action (cookie-based user client) and the Dialpad webhook
- * (service-role client with no RLS).
+ * server-action (cookie-based user client) and trusted server-side
+ * maintenance paths.
  */
 export async function qualifyProperty(
   supabase: SupabaseClient<Database>,

@@ -11,8 +11,6 @@ import { findAttributedOutboundMessageId } from "@/lib/messages/attribution";
 import { looksLikeTestTraffic } from "@/lib/messages/list-threads";
 import { dispatchAiResponse } from "@/lib/ai-responder/dispatch";
 import { reportError } from "@/lib/errors/report";
-import { classifyReplyIntent } from "@/lib/leads/classify-reply-intent";
-import { qualifyProperty } from "@/lib/leads/qualify";
 import { resolveInboundThread } from "@/lib/messages/threading";
 import { normalizePhone } from "@/lib/csv/normalize";
 import { recordConsentEvent } from "@/lib/messaging/consent";
@@ -418,56 +416,6 @@ export async function handleInboundWebhook(
           ev.externalId,
         );
         continue;
-      }
-
-      const { data: cur } = await supabase
-        .from("properties")
-        .select("status")
-        .eq("id", effectivePropertyId)
-        .maybeSingle();
-
-      if (
-        cur?.status === "prospect" &&
-        ev.body &&
-        !inboundState.autoQualifiedAt
-      ) {
-        let shouldQualify = false;
-        if (process.env.SKIP_INTENT_GATE === "1") {
-          shouldQualify = true;
-        } else {
-          try {
-            const intent = await classifyReplyIntent(ev.body, new Anthropic());
-            shouldQualify = intent === "positive";
-          } catch (e) {
-            reportError(e, {
-              tags: {
-                surface: `${provider.providerId}_webhook_classify_intent`,
-              },
-              extra: { propertyId, externalId: ev.externalId },
-            });
-          }
-        }
-
-        if (shouldQualify) {
-          const qOutcome = await qualifyProperty(
-            supabase,
-            effectivePropertyId,
-            "system:inbound_reply",
-          );
-          if (qOutcome.status === "failed") {
-            reportError(new Error(qOutcome.message), {
-              tags: { surface: `${provider.providerId}_webhook_auto_qualify` },
-              extra: {
-                propertyId: effectivePropertyId,
-                externalId: ev.externalId,
-              },
-            });
-          } else {
-            await markInboundMessageState(supabase, insertOutcome.messageId, {
-              autoQualifiedAt: new Date().toISOString(),
-            });
-          }
-        }
       }
 
       if (!inboundState.ownerNotificationSentAt) {

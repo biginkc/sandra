@@ -82,7 +82,7 @@ async function seedContact(
   phone: string,
   opts: { optIn?: boolean; phone2?: string | null; phone3?: string | null } = {},
 ) {
-  const { data } = await supabase
+  const { data, error } = await supabase
     .from("contacts")
     .insert({
       first_name: "Inbound",
@@ -90,19 +90,24 @@ async function seedContact(
       phone_1: phone,
       phone_1_type: "mobile",
       phone_2: opts.phone2 ?? null,
+      phone_2_type: opts.phone2 ? "mobile" : "unknown",
       phone_3: opts.phone3 ?? null,
+      phone_3_type: opts.phone3 ? "mobile" : "unknown",
     })
     .select("id")
     .single();
+  if (error || !data) {
+    throw new Error(`seedContact failed: ${error?.message ?? "no row"}`);
+  }
   if (opts.optIn) {
     await supabase.from("consent_events").insert({
-      contact_id: data!.id,
+      contact_id: data.id,
       channel: "sms",
       event_type: "opt_in_marketing_written",
       source: "test-seed",
     });
   }
-  return data!.id;
+  return data.id;
 }
 
 async function seedCampaign(namePrefix = "Campaign") {
@@ -172,7 +177,6 @@ describe("POST /api/webhooks/dialpad/sms (integration)", () => {
     // handler falls back to it when SUPABASE_SERVICE_ROLE_KEY is unset.
     delete process.env.SUPABASE_SERVICE_ROLE_KEY;
     process.env.NEXT_PUBLIC_SUPABASE_URL = process.env.TEST_SUPABASE_URL;
-    process.env.SKIP_INTENT_GATE = "1";
     process.env.ADMIN_EMAILS = ORIGINAL_ADMIN_EMAILS ?? "";
     inboundAttributionState.shouldThrow = false;
     reportErrorSpy.mockReset();
@@ -605,17 +609,21 @@ describe("POST /api/webhooks/dialpad/sms (integration)", () => {
     );
   });
 
-  it("auto-qualifies the threaded prospect on first inbound reply", async () => {
+  it("keeps the threaded prospect as a prospect on first inbound reply", async () => {
     const phone = "+18165552600";
     const contactId = await seedContact(phone, { optIn: true });
+    const assignee = await createAuthUser(
+      `manual-review-assignee-${Date.now()}@test.invalid`,
+    );
 
     const { data: property } = await supabase
       .from("properties")
       .insert({
-        address: "1 Auto-Qualify Ln",
+        address: "1 Manual Review Ln",
         state: "MO",
         status: "prospect",
         homeowner_contact_id: contactId,
+        assigned_user_id: assignee,
       })
       .select("id")
       .single();
@@ -627,14 +635,14 @@ describe("POST /api/webhooks/dialpad/sms (integration)", () => {
       status: "sent",
       from_address: "+18163706846",
       to_address: phone,
-      body: "Hi, are you the owner of 1 Auto-Qualify Ln?",
+      body: "Hi, are you the owner of 1 Manual Review Ln?",
       contact_id: contactId,
       property_id: property!.id,
     });
 
     const res = await POST(
       makeRequest({
-        externalId: "msg_autoq_001",
+        externalId: "msg_manual_review_001",
         from: phone,
         to: "+18163706846",
         body: "Yeah that's me — what's the offer?",
@@ -647,9 +655,34 @@ describe("POST /api/webhooks/dialpad/sms (integration)", () => {
       .select("status, qualified_at, qualified_by")
       .eq("id", property!.id)
       .single();
-    expect(after?.status).toBe("new_lead");
-    expect(after?.qualified_by).toBe("system:inbound_reply");
-    expect(after?.qualified_at).not.toBeNull();
+    expect(after?.status).toBe("prospect");
+    expect(after?.qualified_by).toBeNull();
+    expect(after?.qualified_at).toBeNull();
+
+    const { data: inbound } = await supabase
+      .from("messages")
+      .select("property_id, contact_id, metadata")
+      .eq("external_id", "msg_manual_review_001")
+      .single();
+    expect(inbound?.property_id).toBe(property!.id);
+    expect(inbound?.contact_id).toBe(contactId);
+    const metadata = inbound?.metadata as Record<string, unknown> | null;
+    const processing = metadata?.processing as
+      | Record<string, unknown>
+      | undefined;
+    expect(processing?.autoQualifiedAt).toBeUndefined();
+    expect(processing?.ownerNotificationSentAt).toEqual(expect.any(String));
+    expect(processing?.propertyEnrollmentsPausedAt).toEqual(expect.any(String));
+    expect(
+      (processing?.aiResponder as Record<string, unknown> | undefined)
+        ?.completedAt,
+    ).toEqual(expect.any(String));
+
+    const { count: notifCount } = await supabase
+      .from("notifications")
+      .select("*", { count: "exact", head: true })
+      .eq("user_id", assignee);
+    expect(notifCount).toBe(1);
   });
 
   it("routes the inbound reply to the property that used the recipient number", async () => {
@@ -1064,7 +1097,7 @@ describe("POST /api/webhooks/dialpad/sms (integration)", () => {
     expect(inbound?.attributed_outbound_message_id).toBeNull();
   });
 
-  it("auto-qualify is a no-op when the property is already past prospect", async () => {
+  it("leaves already-qualified property status unchanged on inbound reply", async () => {
     const phone = "+18165552700";
     const contactId = await seedContact(phone, { optIn: true });
 

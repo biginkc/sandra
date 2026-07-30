@@ -7,19 +7,13 @@ import { adminClient, resetTenantTables, seedProspects } from "./fixtures";
  * POSTing to /api/webhooks/dialpad/sms with the mock provider's
  * signature, then asserts:
  *   1. the inbound message renders in the lead-detail thread
- *   2. auto-qualify flipped the property from prospect → new_lead
+ *   2. the property stays a prospect until a human promotes it
  *
  * Exercises the full path: external event → webhook handler → DB →
  * server-rendered lead detail. Integration tests cover the handler
  * alone; this one adds browser + auth + routing on top.
- *
- * The route gates auto-qualify on a Haiku intent classifier (production)
- * but the e2e workflow sets SKIP_INTENT_GATE=1 — there's no Anthropic
- * key in CI, and the classifier itself is unit-tested directly in
- * src/lib/leads/classify-reply-intent.test.ts. This test verifies the
- * downstream qualify path beyond the gate.
  */
-test("inbound webhook lands in thread and auto-qualifies the prospect", async ({
+test("inbound webhook lands in thread and leaves the prospect for manual review", async ({
   page,
   request,
   baseURL,
@@ -77,15 +71,16 @@ test("inbound webhook lands in thread and auto-qualifies the prospect", async ({
   });
   expect(res.status()).toBe(200);
 
-  // Auto-qualify: prospect → new_lead, stamped by the system marker.
+  // Inbound replies no longer promote prospects automatically.
   await expect(async () => {
     const { data } = await admin
       .from("properties")
-      .select("status, qualified_by")
+      .select("status, qualified_at, qualified_by")
       .eq("id", prop.id)
       .single();
-    expect(data?.status).toBe("new_lead");
-    expect(data?.qualified_by).toBe("system:inbound_reply");
+    expect(data?.status).toBe("prospect");
+    expect(data?.qualified_at).toBeNull();
+    expect(data?.qualified_by).toBeNull();
   }).toPass({ timeout: 5_000 });
 
   // Inbound message is threaded to the property and renders in the

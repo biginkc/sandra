@@ -307,7 +307,7 @@ describe("fetchInboxDetail", () => {
     expect(detail?.propertyAddress).toContain("100 Live Ave");
   });
 
-  it("hides property metadata when the linked property was soft-deleted", async () => {
+  it("returns null when the linked property was soft-deleted", async () => {
     const supabase = makeSupabaseStub({
       messages: [
         makeMessage({
@@ -330,10 +330,6 @@ describe("fetchInboxDetail", () => {
 
     const detail = await fetchInboxDetail(supabase as never, CONVERSATION_ID);
 
-    expect(detail).not.toBeNull();
-    expect(detail?.propertyId).toBeNull();
-    expect(detail?.propertyAddress).toBeNull();
-    expect(detail?.propertyStatus).toBeNull();
-    expect(detail?.outreachDispo).toBeNull();
+    expect(detail).toBeNull();
   });
 });
