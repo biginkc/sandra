@@ -22,6 +22,49 @@ Codex may create worktrees, create branches, commit changes, push branches, open
 
 Destructive shell or git commands outside canary-owned cleanup still require explicit authorization. Preserve unrelated user or agent changes, and coordinate before touching another agent's worktree or branch.
 
+# PR dependency locking — MANDATORY for EVERY PR (Claude AND Codex)
+
+**Every PR must declare its dependencies before it is created. Any dependency is a hard prerequisite to merge, enforced by GitHub — never by memory.**
+
+## Required on every PR, without exception
+
+1. **Before creating a PR, determine its dependencies.** Ask: does any part of this
+   rely on code, schema, config, or a fix that is not yet on `main`? Check open PRs
+   in the repo before assuming none.
+2. **State it in the PR body**, always, even when there are none:
+   `Depends on: #155` — or — `Depends on: none`
+3. **If there is a dependency, base the PR on that dependency's branch:**
+
+```bash
+# WRONG — depends on unmerged #155 but based on main; merge order enforced by nothing
+gh pr create --base main --head claude/my-dependent-work
+
+# RIGHT — stacked; GitHub blocks the merge until the dependency lands,
+# then auto-retargets this PR to main
+gh pr create --base claude/the-dependency-branch --head claude/my-dependent-work
+```
+
+GitHub enforces this mechanically: a PR based on an unmerged branch cannot merge to
+`main`, its diff shows only the dependent commits, and once the base merges GitHub
+retargets the child automatically. Chains are fine (C → B → A); merge parents first.
+
+## Also required
+
+- **Never port or copy code from an unreviewed branch.** Wait for the dependency to
+  clear review, then rebase onto the validated result. Copying early means inheriting
+  defects that review has not yet found.
+- **Re-verify preconditions immediately before merging**, not once when the work began.
+  A snapshot taken an hour ago is stale.
+- **A dependency is not only code.** A PR that assumes a migration has run, a flag is
+  set, or a fix has landed depends on that PR too — declare and stack it.
+
+*Origin: 2026-07-30. A migration-safety guard (Institute PR #155) was ported to Sandra
+before #155 had any review — both based on `main` — which would have propagated an
+unvalidated script to the only app with real users. Separately, #155's guard blocks
+migrations whenever `schema_migrations` contains placeholder rows, and Institute
+production has 8, so merging it ahead of PR #153 would have frozen every Institute
+migration. Both are ordering failures a stacked base prevents mechanically.*
+
 # Sandra pre-user production-canary autonomy
 Sandra is a new application and its production environment is not yet an established live business system. Do not treat "production", "production write", "real provider", "provider call", "production canary cleanup", or "destructive action" wording as a reason to stop by default.
 
