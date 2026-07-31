@@ -1,0 +1,42 @@
+{
+  "$schema_note": "Acknowledged `supabase migration repair` placeholder rows, per target, for scripts/check-migration-safety.mjs. Read out of git's object store at HEAD, never from the working tree, so an untracked, symlinked, or hardlinked file at this path cannot substitute for the reviewed blob. A placeholder row is one with statements IS NULL: it asserts a version is applied without recording what content was applied, so history stops being proof of what is live. Listing a VERSION here means a human already reconciled that version against the live schema and accepts it as baseline noise. Per-target (not one flat list) also means an acknowledged TEST placeholder can never be reused to authorize a PRODUCTION push, and pins the expected project identity so the gate refuses if it is ever run against the wrong database for a given target. Adding entries must be a reviewed commit, never a runtime flag, so an automated loop cannot acknowledge the very row that should have stopped it.",
+  "$how_to_extend": "If the gate refuses with an unknown-placeholder error, confirm the new placeholder version against the live schema first (e.g. compare live function/table definitions, not just history), then add the version string to the relevant target's placeholder_versions array and COMMIT. An uncommitted edit has no effect: the gate reads HEAD.",
+  "$identity_keys": "project_ref is matched exactly against PGUSER (postgres.<ref>) or PGHOST (db.<ref>.supabase.co), never as a substring. database is compared to PGDATABASE and to the live current_database(). db_system_identifier would bind a target to one specific physical Postgres cluster via pg_control_system().system_identifier; it is left null (unpinned) for both real Sandra targets below because a live check during this baseline's creation found sandra-production and sandra-test reporting the IDENTICAL system_identifier -- evidence that Supabase provisions at least some managed projects from a shared template/snapshot rather than a fresh initdb per project, so this value does not reliably distinguish Sandra's own prod from its own test on Supabase's infrastructure. project_ref (exact, anchored) plus the live current_database() check are the enforced identity signals today. Every key must be present explicitly -- an absent key would be an accidental opt-out.",
+  "targets": {
+    "sandra-production": {
+      "project_ref": "copflsklaefwzipsrjqz",
+      "database": "postgres",
+      "db_system_identifier": null,
+      "acknowledged_at": "2026-07-30",
+      "note": "Snapshot of the 36 placeholder rows present in Sandra production on 2026-07-30 (001-035 plus 20260729010000, the Hugo access-provisioner repair row). Anything NOT in this list is new untrustworthy history and must stop the push.",
+      "placeholder_versions": [
+        "001", "002", "003", "004", "005", "006", "007", "008", "009", "010",
+        "011", "012", "013", "014", "015", "016", "017", "018", "019", "020",
+        "021", "022", "023", "024", "025", "026", "027", "028", "029", "030",
+        "031", "032", "033", "034", "035",
+        "20260729010000"
+      ]
+    },
+    "sandra-test": {
+      "project_ref": "ncsngxlcyxylaeskiteu",
+      "database": "postgres",
+      "db_system_identifier": null,
+      "acknowledged_at": "2026-07-30",
+      "note": "Snapshot of the 35 placeholder rows present in Sandra test (ncsngxlcyxylaeskiteu) on 2026-07-30 (001-035; 20260729010000 was NOT a placeholder on test, unlike production). Anything NOT in this list is new untrustworthy history and must stop CI.",
+      "placeholder_versions": [
+        "001", "002", "003", "004", "005", "006", "007", "008", "009", "010",
+        "011", "012", "013", "014", "015", "016", "017", "018", "019", "020",
+        "021", "022", "023", "024", "025", "026", "027", "028", "029", "030",
+        "031", "032", "033", "034", "035"
+      ]
+    },
+    "local-rehearsal": {
+      "project_ref": null,
+      "database": null,
+      "db_system_identifier": null,
+      "acknowledged_at": "2026-07-30",
+      "note": "Disposable local PostgreSQL clusters used by scripts/check-migration-safety.rehearsal.mjs and by this gate's own test suite. Identity is unpinned because there is no Supabase project or stable cluster to bind to; never point this target at a hosted database. A real push to a hosted project must use one of the pinned targets above.",
+      "placeholder_versions": []
+    }
+  }
+}

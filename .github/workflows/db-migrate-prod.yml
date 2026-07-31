@@ -1,0 +1,200 @@
+name: Apply Supabase migrations to prod
+
+# Applies unapplied Supabase migrations to PRODUCTION, triggered ONLY by a
+# successful completion of db-migrate-test.yml's "Apply Supabase migrations
+# to test" workflow (see `on.workflow_run` below) whose SOURCE branch was
+# `main`. There is deliberately no `push:` trigger and no `workflow_dispatch:`
+# anywhere in this file.
+#
+# ---------------------------------------------------------------------------
+# Why this file has NO workflow_dispatch trigger (round-7 review correction)
+# ---------------------------------------------------------------------------
+# An earlier version of this split (round 6) kept prod and test as two jobs
+# in ONE workflow file, with `workflow_dispatch:` enabled at the top and a
+# job-level `if: github.event_name != 'workflow_dispatch'` on the prod job,
+# reasoned to be "evaluated by GitHub before any code on the dispatched ref
+# runs." That reasoning was WRONG and the claim was overclaimed in this
+# file's comments at the time: for `workflow_dispatch`, GitHub runs the
+# workflow DEFINITION from the ref the user selects when dispatching, not
+# from `main`. An attacker branch could simply delete that `if:` line from
+# its own copy of the workflow file, dispatch itself, and GitHub would run
+# the EDITED version with the production job fully enabled. That is the
+# exact same "the checker is authored by the thing it's checking"
+# self-authentication problem the round-5 ancestor-ref script already had —
+# reintroduced one layer up, inside the fix that was supposed to close it.
+#
+# The property that is actually true, and the reason this file is split out:
+# GitHub only offers `workflow_dispatch` as a way to manually run a workflow
+# if that trigger is declared in the copy of the workflow file ON THE
+# DEFAULT BRANCH. A branch cannot make a workflow file dispatchable by
+# adding `workflow_dispatch:` to its own copy -- dispatch eligibility for a
+# given workflow file is read from `main`, not from whatever ref you're
+# trying to dispatch. So: this file (db-migrate-prod.yml) simply never
+# declares `workflow_dispatch:`, on ANY branch that could plausibly become
+# `main`'s copy, and there is therefore no "Run workflow" button or API call
+# that can invoke it manually against any ref, ever -- not because a
+# condition is checked and passes, but because the invocation mechanism
+# does not exist for this file at all.
+#
+# This property lives entirely in `main`'s copy of this file. It is
+# therefore only as strong as branch protection on `main` — see "What this
+# guard does NOT protect against" in PR #345's description: a force-push to
+# `main` that reintroduced a `workflow_dispatch:` trigger into this exact
+# file would recreate the hole this split closes. That is one of the
+# concrete reasons "Do not allow force pushes" on `main`'s branch protection
+# rule matters here, not just for the ancestor-ref script's TOCTOU window.
+#
+# ---------------------------------------------------------------------------
+# How "needs: migrate-test" semantics are preserved across two files
+# ---------------------------------------------------------------------------
+# GitHub Actions' `needs:` only orders jobs WITHIN one workflow file, so
+# splitting into two files loses that mechanism directly. Replaced with
+# `on.workflow_run`, which fires when the named upstream workflow (by its
+# top-level `name:`, matched exactly below) completes, plus two checks
+# neither of which the upstream workflow's own file can influence (because,
+# like `workflow_dispatch` eligibility, `workflow_run`-triggered runs ALWAYS
+# use the DEFAULT BRANCH's copy of the triggered file, regardless of what
+# ref the upstream run was against):
+#   - `github.event.workflow_run.conclusion == 'success'` -- a failed or
+#     cancelled test run never reaches production, same as `needs:` would
+#     have enforced.
+#   - `github.event.workflow_run.head_branch == 'main'` -- without this,
+#     someone manually dispatching db-migrate-test.yml against an unrelated
+#     branch and having it pass would still fire this workflow_run event;
+#     this check is what stops that from reaching production. (A dispatched
+#     test run's `head_branch` is the actual dispatched branch name — not
+#     attacker-controllable independent of what ref was really selected.)
+# The checkout below pins the EXACT commit that was tested
+# (`github.event.workflow_run.head_sha`) rather than re-reading whatever
+# `main` happens to point at when this job starts, so production always
+# deploys precisely what test just verified — at least as precise as the
+# original single-workflow `needs:` design, which checked out the same SHA
+# for both jobs by construction.
+#
+# ---------------------------------------------------------------------------
+# Everything else (the safety gate, the ancestor-ref script as
+# defense-in-depth, the environment approval gate) is unchanged from before
+# the split -- see scripts/check-migration-safety.mjs and
+# scripts/assert-ref-is-main-or-ancestor.sh for their own documentation.
+# ---------------------------------------------------------------------------
+#
+# Required secrets (set in GitHub → repo settings → Secrets → Actions):
+#   SUPABASE_ACCESS_TOKEN
+#     A personal access token from
+#     https://supabase.com/dashboard/account/tokens.
+#   PROD_SUPABASE_DB_PASSWORD
+#     The prod database password — visible at:
+#     https://supabase.com/dashboard/project/copflsklaefwzipsrjqz/settings/database
+#     (Connection info → Database password).
+#
+# The `environment: Production` gate below is LIVE as of 2026-07-30:
+# required reviewer `biginkc` is configured and `can_admins_bypass` is set to
+# false, both verified via the GitHub API. This uses the repo's pre-existing
+# `Production` environment rather than a second one, so there is a single
+# place to configure production approval.
+#
+# This protection is a GitHub repo setting, NOT something this workflow file
+# can enforce on its own — if someone clears the required reviewers or
+# re-enables admin bypass, this line keeps working while gating nothing.
+
+on:
+  workflow_run:
+    workflows: ["Apply Supabase migrations to test"]
+    types: [completed]
+
+jobs:
+  migrate-prod:
+    name: Apply migrations to prod
+    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # GitHub-native control (a repo Environment), not a script. Reviewer +
+    # no-admin-bypass are configured and verified — see the note at the top.
+    environment: Production
+
+    env:
+      PROD_PROJECT_REF: copflsklaefwzipsrjqz
+      SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # Pin the EXACT commit that db-migrate-test.yml just verified,
+          # rather than re-reading whatever `main` points at when this job
+          # happens to start (main could have advanced in between). This
+          # preserves the original single-workflow `needs:` design's
+          # property of both jobs operating on the identical commit.
+          ref: ${{ github.event.workflow_run.head_sha }}
+          # Full history (not the default shallow clone) so the ancestor
+          # check below can actually walk from HEAD back to origin/main
+          # instead of hitting the edge of a shallow fetch and guessing.
+          fetch-depth: 0
+
+      - name: Refuse unless this ref is main or an ancestor of main (defense-in-depth; the real workflow_dispatch protection is this file declaring no workflow_dispatch trigger at all)
+        # This step is NOT the primary defense against a dispatched or
+        # unmerged ref reaching production -- that's the structural fact
+        # (explained at the top of this file) that db-migrate-prod.yml
+        # cannot be dispatched at all, plus the `head_branch == 'main'`
+        # check on the job above. This script remains a second, independent
+        # check against the pinned commit, in case the workflow_run wiring
+        # is ever changed in a way that weakens those guarantees. See
+        # scripts/assert-ref-is-main-or-ancestor.sh for the full rationale
+        # and scripts/assert-ref-is-main-or-ancestor.test.sh for its test
+        # coverage. Known, undefended residual: this checks ancestry once,
+        # then the real push happens several steps later -- a force-push to
+        # `main` in between could let a previously-unmergeable commit
+        # through. Closing that needs "Do not allow force pushes" enabled
+        # on the `main` branch protection rule in GitHub repo settings; it
+        # is not something a script re-check can fully eliminate.
+        run: bash scripts/assert-ref-is-main-or-ancestor.sh
+
+      - uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      - name: Install PostgreSQL client
+        run: sudo apt-get update && sudo apt-get install --yes postgresql-client
+
+      - name: Link to prod project
+        run: supabase link --project-ref "$PROD_PROJECT_REF"
+
+      - name: Resolve pooler connection info
+        id: pooler
+        run: |
+          node -e '
+            const fs = require("node:fs");
+            const raw = fs.readFileSync("supabase/.temp/pooler-url", "utf8").trim();
+            const u = new URL(raw);
+            const out = [
+              `host=${u.hostname}`,
+              `port=${u.port || "5432"}`,
+              `user=${decodeURIComponent(u.username)}`,
+            ].join("\n");
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, out + "\n");
+          '
+
+      - name: Migration safety gate (refuse out-of-order / unknown-placeholder history)
+        # See scripts/check-migration-safety.mjs for why this exists: an
+        # unrelated 2026-07-30 incident on BMH Institute prod, where
+        # `db push --include-all` re-applied an old, already-superseded
+        # migration out of order because it had no schema_migrations row,
+        # reverting 6 hardened functions and locking out a real user for
+        # hours. Sandra is the only BMH app with real production users, so
+        # this gate runs here too, in addition to migrate-test's own run.
+        env:
+          PROD_SUPABASE_DB_PASSWORD: ${{ secrets.PROD_SUPABASE_DB_PASSWORD }}
+        run: |
+          echo "::add-mask::$PROD_SUPABASE_DB_PASSWORD"
+          export PGHOST="${{ steps.pooler.outputs.host }}"
+          export PGPORT="${{ steps.pooler.outputs.port }}"
+          export PGDATABASE="postgres"
+          export PGUSER="${{ steps.pooler.outputs.user }}"
+          export PGPASSWORD="$PROD_SUPABASE_DB_PASSWORD"
+          export PGSSLMODE="require"
+          node scripts/check-migration-safety-cli.mjs --target=sandra-production
+
+      - name: Preview pending migrations (dry run, surfaced before the real push)
+        run: supabase db push --include-all --dry-run --password "${{ secrets.PROD_SUPABASE_DB_PASSWORD }}"
+
+      - name: Apply pending migrations
+        run: supabase db push --include-all --password "${{ secrets.PROD_SUPABASE_DB_PASSWORD }}"

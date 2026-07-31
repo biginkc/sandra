@@ -1,0 +1,129 @@
+name: Apply Supabase migrations to test
+
+# Auto-applies any unapplied Supabase migrations to the TEST project on push
+# to `main`. Runs only when `supabase/migrations/**` changes so we don't
+# waste a CI run on every code-only commit. Also manually dispatchable
+# (`workflow_dispatch:` below) for debugging test-only migration issues
+# against an arbitrary branch -- that carries none of production's risk, so
+# it stays unrestricted here.
+#
+# This workflow's successful completion is what db-migrate-prod.yml listens
+# for (via `on.workflow_run`) to run the real production push. See
+# db-migrate-prod.yml's own header for why production lives in a SEPARATE
+# file rather than a second job here, and why that split is the actual fix
+# for a `workflow_dispatch` self-authentication problem a job-level `if:`
+# condition cannot close (round-7 review).
+#
+# Why this exists: prod migrations USED to be a manual step. Migration
+# 029 (job_items.error_class taxonomy) shipped in PR #62 but the
+# constraint wasn't extended in prod until we manually ran the
+# migration mid-deploy — meaning the freshly-shipped code would have
+# silently dropped error_class writes for a window. Later, migration
+# 035 (sequence_step_template_ref) shipped in PR #71 but never reached
+# the test project — Playwright tests against the sequences edit page
+# silently failed for days because the column the page queried didn't
+# exist on the test DB. This workflow (and db-migrate-prod.yml) close
+# those gaps.
+#
+# See scripts/check-migration-safety.mjs for the migration SAFETY gate this
+# job runs before its real push (an unrelated 2026-07-30 incident on BMH
+# Institute, where `db push --include-all` re-applied an old,
+# already-superseded migration out of order because it had no
+# schema_migrations row, reverting 6 hardened functions on production for
+# hours). Sandra is the only BMH app with real production users.
+#
+# Required secrets (set in GitHub → repo settings → Secrets → Actions):
+#   SUPABASE_ACCESS_TOKEN
+#     A personal access token from
+#     https://supabase.com/dashboard/account/tokens. Lets the CLI
+#     authenticate to the Supabase API.
+#   TEST_SUPABASE_DB_PASSWORD
+#     The test database password — visible at:
+#     https://supabase.com/dashboard/project/ncsngxlcyxylaeskiteu/settings/database
+#     (Connection info → Database password).
+#
+# Failure mode: a failed migration leaves the test project's DB
+# partially-migrated. A failure here also means db-migrate-prod.yml's
+# `workflow_run` trigger fires with `conclusion != 'success'`, so the
+# production job's `if:` condition skips it — production is never reached
+# from a push whose test run failed. Investigate the logs, fix the
+# migration, push a new one — `supabase db push` is idempotent and skips
+# already-applied files.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "supabase/migrations/**"
+      - ".github/workflows/db-migrate-test.yml"
+      - ".github/workflows/db-migrate-prod.yml"
+      - "scripts/check-migration-safety.mjs"
+      - "scripts/check-migration-safety-cli.mjs"
+      - "scripts/migration-safety-baseline.json"
+      - "scripts/assert-ref-is-main-or-ancestor.sh"
+  workflow_dispatch: {}
+
+jobs:
+  migrate-test:
+    name: Apply migrations to test
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    env:
+      # Pinned project ref — Sandra's E2E / integration test project.
+      # Kept in lockstep with prod so the Playwright suite never asserts
+      # against a stale schema.
+      TEST_PROJECT_REF: ncsngxlcyxylaeskiteu
+      SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      - name: Install PostgreSQL client
+        run: sudo apt-get update && sudo apt-get install --yes postgresql-client
+
+      - name: Link to test project
+        run: supabase link --project-ref "$TEST_PROJECT_REF"
+
+      - name: Resolve pooler connection info
+        id: pooler
+        # `supabase link` caches the project's resolved Supavisor pooler host
+        # (region/shard) at supabase/.temp/pooler-url. Reading that instead of
+        # hardcoding a pooler hostname avoids guessing wrong shard/region —
+        # this is the same connection the CLI itself just proved reachable.
+        run: |
+          node -e '
+            const fs = require("node:fs");
+            const raw = fs.readFileSync("supabase/.temp/pooler-url", "utf8").trim();
+            const u = new URL(raw);
+            const out = [
+              `host=${u.hostname}`,
+              `port=${u.port || "5432"}`,
+              `user=${decodeURIComponent(u.username)}`,
+            ].join("\n");
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, out + "\n");
+          '
+
+      - name: Migration safety gate (refuse out-of-order / unknown-placeholder history)
+        # See scripts/check-migration-safety.mjs for why this exists.
+        env:
+          TEST_SUPABASE_DB_PASSWORD: ${{ secrets.TEST_SUPABASE_DB_PASSWORD }}
+        run: |
+          echo "::add-mask::$TEST_SUPABASE_DB_PASSWORD"
+          export PGHOST="${{ steps.pooler.outputs.host }}"
+          export PGPORT="${{ steps.pooler.outputs.port }}"
+          export PGDATABASE="postgres"
+          export PGUSER="${{ steps.pooler.outputs.user }}"
+          export PGPASSWORD="$TEST_SUPABASE_DB_PASSWORD"
+          export PGSSLMODE="require"
+          node scripts/check-migration-safety-cli.mjs --target=sandra-test
+
+      - name: Preview pending migrations (dry run, surfaced before the real push)
+        run: supabase db push --include-all --dry-run --password "${{ secrets.TEST_SUPABASE_DB_PASSWORD }}"
+
+      - name: Apply pending migrations
+        run: supabase db push --include-all --password "${{ secrets.TEST_SUPABASE_DB_PASSWORD }}"
