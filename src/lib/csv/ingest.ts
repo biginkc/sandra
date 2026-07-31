@@ -415,16 +415,47 @@ async function ingestRow(
   // Upsert homeowner contact + sidecar when any homeowner fields are present.
   let homeownerContactId: string | null = null;
   if (hasHomeownerFields(n)) {
-    homeownerContactId = await upsertContact(supabase, {
-      contact_type: deriveHomeownerContactType(n),
-      first_name: normalizeName(n.homeowner_first_name as string | null),
-      last_name: normalizeName(n.homeowner_last_name as string | null),
-      entity_name: normalizeName(n.homeowner_entity_name as string | null),
-      ...phoneSlots.contactFields,
-      email: (n.homeowner_email as string | null)?.trim().toLowerCase() ?? null,
-      do_not_contact:
-        (n.homeowner_do_not_contact as boolean | null) ?? undefined,
-    });
+    // A DNC-flagged row must be able to match an existing contact via a
+    // phone that compactTypedPhones() just dropped (a DNC label normalizes
+    // to 'unknown' and is never written to a slot) — otherwise a row whose
+    // only identifier is the DNC-labeled phone can never find the contact
+    // it's supposed to suppress (Codex PR #310 finding 1). Scoped to
+    // DNC-flagged rows only: an ordinary row that merely lacks a line-type
+    // mapping (no compliance signal at all) keeps the existing phone_1-only
+    // match semantics — widening matching for every unlabeled-phone drop is
+    // a bigger, unrelated behavior change this PR isn't making.
+    const isDncRow =
+      (n.homeowner_do_not_contact as boolean | null) === true;
+    const primaryPhone = phoneSlots.contactFields.phone_1;
+    // Unchanged from before this PR: match on phone_1 only, same field the
+    // old single-phone check used — this branch must not silently start
+    // matching on phone_2/phone_3, which is a separate, bigger behavior
+    // change this PR isn't making.
+    const matchPhones = isDncRow
+      ? [
+          ...new Set(
+            [primaryPhone, ...phoneSlots.droppedPhones].filter(
+              (p): p is string => !!p,
+            ),
+          ),
+        ]
+      : primaryPhone
+        ? [primaryPhone]
+        : [];
+    homeownerContactId = await upsertContact(
+      supabase,
+      {
+        contact_type: deriveHomeownerContactType(n),
+        first_name: normalizeName(n.homeowner_first_name as string | null),
+        last_name: normalizeName(n.homeowner_last_name as string | null),
+        entity_name: normalizeName(n.homeowner_entity_name as string | null),
+        ...phoneSlots.contactFields,
+        email: (n.homeowner_email as string | null)?.trim().toLowerCase() ?? null,
+        do_not_contact:
+          (n.homeowner_do_not_contact as boolean | null) ?? undefined,
+      },
+      matchPhones,
+    );
     await supabase
       .from("homeowner_details")
       .upsert(
@@ -592,8 +623,15 @@ function compactTypedPhones(n: Readonly<Record<string, unknown>>): {
     | "phone_3_type"
   >;
   dropped: number;
+  /** Raw phone numbers dropped under the hard rule (no line type, or a
+   *  DNC label) — never written to a contact's phone slots, but still
+   *  needed by the caller to MATCH an existing contact (Codex PR #310
+   *  finding 1: a DNC-labeled phone that's the only identifier on the
+   *  row must still be able to find the contact it protects). */
+  droppedPhones: string[];
 } {
   const typed: { phone: string; type: PhoneLineType }[] = [];
+  const droppedPhones: string[] = [];
   let dropped = 0;
   for (const slot of [1, 2, 3] as const) {
     const phone = (n[`homeowner_phone_${slot}`] as string | null) ?? null;
@@ -601,6 +639,7 @@ function compactTypedPhones(n: Readonly<Record<string, unknown>>): {
     const type = asLineType(n[`homeowner_phone_${slot}_type`] as string | null);
     if (type === "unknown") {
       dropped++;
+      droppedPhones.push(phone);
       continue;
     }
     typed.push({ phone, type });
@@ -615,6 +654,7 @@ function compactTypedPhones(n: Readonly<Record<string, unknown>>): {
       phone_3_type: typed[2]?.type ?? "unknown",
     },
     dropped,
+    droppedPhones,
   };
 }
 
@@ -628,6 +668,12 @@ function hasHomeownerFields(n: Readonly<Record<string, unknown>>): boolean {
     "homeowner_phone_3",
     "homeowner_email",
     "homeowner_mailing_address",
+    // A row-level DNC signal must reach upsertContact even when it's the
+    // ONLY homeowner field present — REISift's "DNC Excluded" sentinel
+    // nulls the phone before this row ever reaches ingest, leaving nothing
+    // else on the row (Codex PR #310 finding 3). Without this, a DNC-only
+    // row skips the upsert entirely and an existing contact stays callable.
+    "homeowner_do_not_contact",
   ];
   return keys.some((k) => n[k] != null);
 }
@@ -672,6 +718,13 @@ type ContactFields = Pick<
 async function upsertContact(
   supabase: SupabaseClient<Database>,
   contact: ContactFields,
+  /** Every phone number this row carries, including ones dropped from
+   *  `contact.phone_1/2/3` under the no-line-type hard rule (a DNC label
+   *  normalizes to 'unknown' and gets dropped). Matching must still check
+   *  these — a DNC-only row's whole purpose is finding and suppressing the
+   *  contact that owns the flagged number. Defaults to just `phone_1` for
+   *  callers (agent contacts) that don't pass it explicitly. */
+  matchPhones: string[] = contact.phone_1 ? [contact.phone_1] : [],
 ): Promise<string> {
   // A matched (existing) contact only reaches an early return — the
   // trailing INSERT never runs — so compliance flags carried by the
@@ -679,22 +732,35 @@ async function upsertContact(
   // Do Not Contact flag onto the matched row before returning. One-way
   // (false→true only): a row without the flag must never un-suppress a
   // contact that a prior import or an inbound STOP already protected.
+  // The write is verified — a failed ratchet update must fail the row
+  // (bubbles up through ingestRow to processIngestChunk's catch, which
+  // marks it `error_class: "database"`) rather than silently reporting the
+  // import as successful while the contact stays callable (Codex PR #310
+  // finding 2).
   const onMatch = async (id: string): Promise<string> => {
     if (contact.do_not_contact === true) {
-      await supabase
+      const { error } = await supabase
         .from("contacts")
         .update({ do_not_contact: true })
         .eq("id", id);
+      if (error) {
+        throw new Error(
+          `do_not_contact ratchet update failed for contact ${id}: ${error.message}`,
+        );
+      }
     }
     return id;
   };
 
-  // Phone-first match
-  if (contact.phone_1) {
+  // Phone match — check every phone this row carries, not just the
+  // surviving phone_1 (Codex PR #310 finding 1). A DNC-labeled phone that
+  // was the row's only identifier must still be able to match an existing
+  // contact so the ratchet above can suppress it.
+  for (const phone of matchPhones) {
     const { data } = await supabase
       .from("contacts")
       .select("id")
-      .eq("phone_1", contact.phone_1)
+      .eq("phone_1", phone)
       .limit(1)
       .maybeSingle();
     if (data) return onMatch(data.id);

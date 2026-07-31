@@ -403,3 +403,262 @@ describe("processIngestChunk → hard rule: unlabeled phones are never saved", (
     expect(result.succeeded).toBe(1);
   });
 });
+
+describe("processIngestChunk → DealMachine DNC ratchet (Codex PR #310 findings 1-3)", () => {
+  const baseChunkParams = {
+    jobId: "job-1",
+    csvImportId: "import-1",
+    source: "dealmachine",
+    market: "Buchanan County MO",
+    countyId: "buchanan-county-id",
+    offset: 0,
+    autoTagIds: [],
+    listId: null,
+    userId: null,
+  };
+
+  it("matches + ratchets an existing contact via a DNC phone that is the row's ONLY identifier (finding 1)", async () => {
+    // The DNC phone is dropped from phone_1 by the hard rule before any
+    // match happens — with no name/email mapped, the old matcher (checking
+    // only the surviving phone_1, now null) would fall through to INSERT
+    // a brand-new contact while the real match sat unsuppressed.
+    const row = {
+      Address: "1 Compliance Way",
+      State: "MO",
+      "Phone 1": "8165557777",
+      "Phone 1 Type": "DO NOT CALL",
+    };
+
+    responseQueue = [
+      { data: { id: "existing-1" }, error: null }, // 1. phone match hit
+      { data: null, error: null }, // 2. do_not_contact ratchet update
+      { data: null, error: null }, // 3. homeowner_details upsert
+      { data: null, error: null }, // 4. address dedup miss
+      { data: { id: "prop-1" }, error: null }, // 5. property insert
+      { data: null, error: null }, // 6. job_items insert
+      { data: null, error: null }, // 7. jobs progress update
+    ];
+
+    const result = await processIngestChunk(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      makeSupabase() as any,
+      {
+        ...baseChunkParams,
+        mapping: {
+          address: "Address",
+          state: "State",
+          homeowner_phone_1: "Phone 1",
+          homeowner_phone_1_type: "Phone 1 Type",
+        },
+        rows: [row],
+      },
+    );
+
+    expect(result.succeeded).toBe(1);
+    expect(result.failed).toBe(0);
+    expect(
+      calls.find((c) => c.table === "contacts" && c.op === "insert"),
+    ).toBeUndefined();
+    const ratchet = calls.find(
+      (c) => c.table === "contacts" && c.op === "update",
+    );
+    expect(ratchet).toBeDefined();
+    expect(ratchet!.insertPayload).toEqual({ do_not_contact: true });
+    expect(ratchet!.filters).toContainEqual({ op: "eq", args: ["id", "existing-1"] });
+  });
+
+  it("matches + ratchets an existing contact via a DNC phone in a SECONDARY slot (Phone 2), with a clean unmatched Phone 1 (secondary-slot match)", async () => {
+    const row = {
+      Address: "2 Compliance Way",
+      State: "MO",
+      "Phone 1": "8165551111",
+      "Phone 1 Type": "Mobile",
+      "Phone 2": "8165557777",
+      "Phone 2 Type": "DO NOT CALL",
+    };
+
+    responseQueue = [
+      { data: null, error: null }, // 1. phone_1 (clean, survives) → no match
+      { data: { id: "existing-2" }, error: null }, // 2. dropped Phone 2 (DNC) → match
+      { data: null, error: null }, // 3. do_not_contact ratchet update
+      { data: null, error: null }, // 4. homeowner_details upsert
+      { data: null, error: null }, // 5. address dedup miss
+      { data: { id: "prop-2" }, error: null }, // 6. property insert
+      { data: null, error: null }, // 7. job_items insert
+      { data: null, error: null }, // 8. jobs progress update
+    ];
+
+    const result = await processIngestChunk(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      makeSupabase() as any,
+      {
+        ...baseChunkParams,
+        mapping: {
+          address: "Address",
+          state: "State",
+          homeowner_phone_1: "Phone 1",
+          homeowner_phone_1_type: "Phone 1 Type",
+          homeowner_phone_2: "Phone 2",
+          homeowner_phone_2_type: "Phone 2 Type",
+        },
+        rows: [row],
+      },
+    );
+
+    expect(result.succeeded).toBe(1);
+    expect(
+      calls.find((c) => c.table === "contacts" && c.op === "insert"),
+    ).toBeUndefined();
+    const ratchet = calls.find(
+      (c) => c.table === "contacts" && c.op === "update",
+    );
+    expect(ratchet).toBeDefined();
+    expect(ratchet!.filters).toContainEqual({ op: "eq", args: ["id", "existing-2"] });
+    // Slot 1's clean number was checked FIRST (priority order preserved)
+    // and correctly missed before slot 2's dropped DNC number matched.
+    const phoneSelects = calls.filter(
+      (c) => c.table === "contacts" && c.op === "select",
+    );
+    expect(phoneSelects.length).toBeGreaterThanOrEqual(2);
+    expect(phoneSelects[0].filters).toContainEqual({
+      op: "eq",
+      args: ["phone_1", "+18165551111"],
+    });
+    expect(phoneSelects[1].filters).toContainEqual({
+      op: "eq",
+      args: ["phone_1", "+18165557777"],
+    });
+  });
+
+  it("fails the row (job_items error, database class) when the do_not_contact ratchet update returns a DB error (finding 2)", async () => {
+    const row = {
+      Address: "3 Compliance Way",
+      State: "MO",
+      "Phone 1": "8165557777",
+      "Phone 1 Type": "DO NOT CALL",
+    };
+
+    responseQueue = [
+      { data: { id: "existing-1" }, error: null }, // 1. phone match hit
+      { data: null, error: { message: "connection reset" } }, // 2. ratchet update FAILS
+      { data: null, error: null }, // 3. job_items error insert
+      { data: null, error: null }, // 4. jobs progress update
+    ];
+
+    const result = await processIngestChunk(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      makeSupabase() as any,
+      {
+        ...baseChunkParams,
+        mapping: {
+          address: "Address",
+          state: "State",
+          homeowner_phone_1: "Phone 1",
+          homeowner_phone_1_type: "Phone 1 Type",
+        },
+        rows: [row],
+      },
+    );
+
+    expect(result.succeeded).toBe(0);
+    expect(result.failed).toBe(1);
+    expect(result.errors[0]?.message).toContain("do_not_contact ratchet update failed");
+    const errorItem = calls.find(
+      (c) => c.table === "job_items" && c.op === "insert",
+    );
+    expect(errorItem).toBeDefined();
+    const payload = errorItem!.insertPayload as Record<string, unknown>;
+    expect(payload.status).toBe("error");
+    expect(payload.error_class).toBe("database");
+  });
+
+  it("creates a flagged contact for a DNC-only row with no name/email/surviving phone (REISift/PropStream-shape, finding 3)", async () => {
+    // REISift's "DNC Excluded" sentinel nulls the phone entirely; when the
+    // row carries no other homeowner identifier, the old hasHomeownerFields()
+    // skipped upsertContact() completely — the flag was dropped on the
+    // floor with no contact to attach it to.
+    const row = {
+      Address: "4 Compliance Way",
+      State: "MO",
+      "DNC Flag": "true",
+    };
+
+    responseQueue = [
+      { data: { id: "contact-new" }, error: null }, // 1. contacts insert (no match possible)
+      { data: null, error: null }, // 2. homeowner_details upsert
+      { data: null, error: null }, // 3. address dedup miss
+      { data: { id: "prop-4" }, error: null }, // 4. property insert
+      { data: null, error: null }, // 5. job_items insert
+      { data: null, error: null }, // 6. jobs progress update
+    ];
+
+    const result = await processIngestChunk(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      makeSupabase() as any,
+      {
+        ...baseChunkParams,
+        mapping: {
+          address: "Address",
+          state: "State",
+          homeowner_do_not_contact: "DNC Flag",
+        },
+        rows: [row],
+      },
+    );
+
+    expect(result.succeeded).toBe(1);
+    const contactInsert = calls.find(
+      (c) => c.table === "contacts" && c.op === "insert",
+    );
+    expect(contactInsert).toBeDefined();
+    const payload = contactInsert!.insertPayload as Record<string, unknown>;
+    expect(payload.do_not_contact).toBe(true);
+  });
+
+  it("ratchets an existing contact matched by a clean phone when the DNC flag arrives pre-decoded (PropStream/REISift shape — the flag was set by the vendor preset, not Pass 1b)", async () => {
+    const row = {
+      Address: "5 Compliance Way",
+      State: "MO",
+      Phone: "8165551111",
+      "Phone Type": "Mobile",
+      "DNC Flag": "true",
+    };
+
+    responseQueue = [
+      { data: { id: "existing-3" }, error: null }, // 1. phone match hit
+      { data: null, error: null }, // 2. do_not_contact ratchet update
+      { data: null, error: null }, // 3. homeowner_details upsert
+      { data: null, error: null }, // 4. address dedup miss
+      { data: { id: "prop-5" }, error: null }, // 5. property insert
+      { data: null, error: null }, // 6. job_items insert
+      { data: null, error: null }, // 7. jobs progress update
+    ];
+
+    const result = await processIngestChunk(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      makeSupabase() as any,
+      {
+        ...baseChunkParams,
+        mapping: {
+          address: "Address",
+          state: "State",
+          homeowner_phone_1: "Phone",
+          homeowner_phone_1_type: "Phone Type",
+          homeowner_do_not_contact: "DNC Flag",
+        },
+        rows: [row],
+      },
+    );
+
+    expect(result.succeeded).toBe(1);
+    expect(
+      calls.find((c) => c.table === "contacts" && c.op === "insert"),
+    ).toBeUndefined();
+    const ratchet = calls.find(
+      (c) => c.table === "contacts" && c.op === "update",
+    );
+    expect(ratchet).toBeDefined();
+    expect(ratchet!.insertPayload).toEqual({ do_not_contact: true });
+    expect(ratchet!.filters).toContainEqual({ op: "eq", args: ["id", "existing-3"] });
+  });
+});

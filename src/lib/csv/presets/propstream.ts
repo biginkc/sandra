@@ -99,18 +99,20 @@ export const propstreamPreset: VendorPreset = {
         if (dnc) anyDnc = true;
         slots.push({ phone, type: (next[typeKey] ?? "").trim(), dnc });
       }
-      // Drop DNC slots first, mobiles before landlines within each
-      // band (everything downstream texts slot 1, so a known mobile
-      // must win it), then keep the first 3 survivors. If we run out
-      // of non-DNC slots we leave the trailing slots empty.
+      // Drop DNC slots — never store one, even to fill a trailing empty
+      // slot when fewer than 3 clean numbers survive. Matches this PR's
+      // "drop-but-flag, not keep-the-number" decision: the row-level
+      // do_not_contact flag (set below) already blocks all outreach to
+      // this contact, but a DNC number physically sitting in a phone slot
+      // is a landmine for any future path that reads phone_N without
+      // rechecking the contact-level flag. Mobiles before landlines
+      // within the survivors (everything downstream texts slot 1, so a
+      // known mobile must win it), then keep the first 3.
       const mobileFirst = (list: Slot[]) => [
         ...list.filter((s) => lineTypeFromVendorLabel(s.type) === "mobile"),
         ...list.filter((s) => lineTypeFromVendorLabel(s.type) !== "mobile"),
       ];
-      const ranked = [
-        ...mobileFirst(slots.filter((s) => !s.dnc)),
-        ...mobileFirst(slots.filter((s) => s.dnc)),
-      ].slice(0, 3);
+      const ranked = mobileFirst(slots.filter((s) => !s.dnc)).slice(0, 3);
       for (let i = 1; i <= 3; i++) {
         const target = `homeowner_phone_${i}`;
         const typeTarget = `homeowner_phone_${i}_type`;

@@ -96,6 +96,30 @@ describe("propstreamPreset.transform — phone fold", () => {
     ]).toEqual(["mobile", "mobile", "landline"]);
     expect(r.homeowner_do_not_contact).toBe("true");
   });
+  it("never stores a DNC number, even to fill a trailing slot when fewer than 3 clean numbers survive (Codex PR #310 non-blocking note)", () => {
+    // Only 1 clean mobile + 1 DNC mobile: with the old "append DNC slots
+    // after non-DNC ones" fallback, slot 2 would have been filled with the
+    // DNC number. The contact-level flag already blocks all outreach, but
+    // storing the number is a landmine for any future path that reads
+    // phone_N without rechecking do_not_contact — drop it unconditionally.
+    const result = propstreamPreset.transform(
+      [
+        row({
+          "Phone 2 DNC": "Yes",
+          "Phone 3": "", "Phone 3 Type": "", "Phone 3 DNC": "",
+          "Phone 4": "", "Phone 4 Type": "", "Phone 4 DNC": "",
+          "Phone 5": "", "Phone 5 Type": "", "Phone 5 DNC": "",
+        }),
+      ],
+      FULL_HEADERS,
+    );
+    const r = result.rows[0];
+    expect(r.homeowner_phone_1).toBe("8165551001");
+    expect(r.homeowner_phone_2).toBe("");
+    expect(r.homeowner_phone_3).toBe("");
+    expect(r.homeowner_do_not_contact).toBe("true");
+  });
+
   it("all-empty phones → no DNC flag, slots empty", () => {
     const empty = row({
       "Phone 1": "", "Phone 2": "", "Phone 3": "", "Phone 4": "", "Phone 5": "",

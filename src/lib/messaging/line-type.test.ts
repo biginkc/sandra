@@ -45,6 +45,13 @@ describe("isDoNotCallLabel", () => {
     expect(isDoNotCallLabel("Do Not Contact")).toBe(true);
   });
 
+  it("recognizes hyphenated and punctuated variants (Codex PR #310 non-blocking note)", () => {
+    expect(isDoNotCallLabel("DO-NOT-CALL")).toBe(true);
+    expect(isDoNotCallLabel("DO NOT CALL!")).toBe(true);
+    expect(isDoNotCallLabel("D.N.C.")).toBe(true);
+    expect(isDoNotCallLabel("Do-Not-Contact")).toBe(true);
+  });
+
   it("does not flag real line types or empty values", () => {
     expect(isDoNotCallLabel("Mobile")).toBe(false);
     expect(isDoNotCallLabel("Landline")).toBe(false);

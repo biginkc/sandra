@@ -36,6 +36,10 @@ export function lineTypeFromVendorLabel(
  * count.
  */
 export function isDoNotCallLabel(label: string | null | undefined): boolean {
-  const v = (label ?? "").trim().toLowerCase().replace(/[\s_]+/g, "");
+  // Strip everything but letters/digits — not just spaces/underscores —
+  // so hyphenated or punctuated vendor variants ("DO-NOT-CALL",
+  // "DO NOT CALL!") still match. Compliance-protective: false positives
+  // only cost an over-suppressed number, never a wrongly-texted one.
+  const v = (label ?? "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "");
   return v === "donotcall" || v === "dnc" || v === "donotcontact";
 }

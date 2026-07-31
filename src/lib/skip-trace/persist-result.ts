@@ -180,6 +180,15 @@ export async function persistSkipTraceResult(
       return a.rank - b.rank;
     });
 
+  // The provider's `dnc` flag is filtered out of candidatePhones above (the
+  // number itself is never packed into a slot), but the compliance signal
+  // was previously dropped along with it — the contact stayed callable via
+  // its other numbers. Ratchet do_not_contact=true when the chosen owner
+  // carries ANY DNC-flagged phone (Codex PR #310 finding 4). One-way: only
+  // ever set true below, never false — a run with no DNC phone must not
+  // un-suppress a contact a prior run/import/inbound STOP already protected.
+  const hasDncPhone = owner.phones.some((p) => !!p.number && p.dnc);
+
   // Slot packing is re-runnable with a ban list so a phone_1 unique
   // conflict can drop ONLY the conflicting number and keep salvageable
   // lower-ranked ones (rather than reverting every slot wholesale).
@@ -254,6 +263,9 @@ export async function persistSkipTraceResult(
     phone_3_type: slotTypes[2],
     email: emailToWrite,
   };
+  if (hasDncPhone) {
+    updates.do_not_contact = true;
+  }
   if (!currentContact.first_name && owner.firstName) {
     updates.first_name = owner.firstName;
   }
@@ -355,14 +367,18 @@ type OwnerPerson = {
 };
 
 /** Find an existing contact in this org holding the owner's top-ranked
- *  non-DNC phone in any slot. */
+ *  phone in any slot. Includes DNC-flagged numbers — compliance status
+ *  must never block identity matching (Codex PR #310 finding 4 corollary):
+ *  a DNC-only skip-trace hit still needs to find + ratchet the existing
+ *  contact it's protecting, not spin up a duplicate that leaves the real
+ *  contact callable. */
 async function resolveContactByPhone(
   supabase: SupabaseClient<Database>,
   orgId: string,
   owner: OwnerPerson,
 ): Promise<string | null> {
   const topPhone = owner.phones
-    .filter((p) => !!p.number && !p.dnc)
+    .filter((p) => !!p.number)
     .sort((a, b) => a.rank - b.rank)[0]?.number;
   if (!topPhone) return null;
   const normalized = normalizePhone(topPhone);

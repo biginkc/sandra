@@ -1,8 +1,20 @@
-import { lineTypeFromVendorLabel } from "@/lib/messaging/line-type";
+import { isDoNotCallLabel, lineTypeFromVendorLabel } from "@/lib/messaging/line-type";
+import type { Database } from "@/lib/supabase/types";
 
 import { normalizePhone } from "../normalize";
 
 import type { SubOperationModule } from "./types";
+
+type ContactPhoneUpdate = Pick<
+  Database["public"]["Tables"]["contacts"]["Update"],
+  | "phone_1"
+  | "phone_1_type"
+  | "phone_2"
+  | "phone_2_type"
+  | "phone_3"
+  | "phone_3_type"
+  | "do_not_contact"
+>;
 
 type Role = "homeowner" | "agent";
 
@@ -70,16 +82,9 @@ export function buildPhonesOp(role: Role): SubOperationModule {
       // Hard rule (migration 080): every written phone needs its line
       // type in the same update — both so the trigger accepts the write
       // and so a new number can't ride on the previous number's type.
-      const update: Partial<
-        Record<
-          | (typeof slots)[number]
-          | "phone_1_type"
-          | "phone_2_type"
-          | "phone_3_type",
-          string
-        >
-      > = {};
+      const update: Partial<ContactPhoneUpdate> = {};
       let anyValid = false;
+      let dncFlagged = false;
 
       for (let i = 0; i < slots.length; i++) {
         const raw = (parsedRow[headerNames[i]] ?? "").trim();
@@ -94,10 +99,19 @@ export function buildPhonesOp(role: Role): SubOperationModule {
             detail: `"${raw}" in column "${headerNames[i]}" is not a valid US phone (need 10 digits or 11 with leading 1).`,
           };
         }
-        const lineType = lineTypeFromVendorLabel(
-          (parsedRow[typeHeaderNames[i]] ?? "").trim(),
-        );
+        const typeRaw = (parsedRow[typeHeaderNames[i]] ?? "").trim();
+        const lineType = lineTypeFromVendorLabel(typeRaw);
         if (lineType === "unknown") {
+          if (isDoNotCallLabel(typeRaw)) {
+            // Drop-but-flag, same as the CSV-import DNC path: the number
+            // itself is never saved to this slot (no do_not_call line
+            // type exists), but the compliance signal must survive as a
+            // contact-level flag so this update can't silently leave a
+            // suppressed number's contact callable (Codex PR #310
+            // finding 5). One-way — only ever set true below.
+            dncFlagged = true;
+            continue;
+          }
           return {
             kind: "rejected",
             rowIndex,
@@ -108,6 +122,11 @@ export function buildPhonesOp(role: Role): SubOperationModule {
         }
         update[slots[i]] = normalized;
         update[`${slots[i]}_type` as const] = lineType;
+        anyValid = true;
+      }
+
+      if (dncFlagged) {
+        update.do_not_contact = true;
         anyValid = true;
       }
 
