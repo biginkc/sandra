@@ -49,7 +49,24 @@ export default async function LeadsPage({
        homeowner:contacts!properties_homeowner_contact_id_fkey(first_name, last_name, entity_name)`,
     )
     .neq("status", "prospect")
-    .is("deleted_at", null);
+    .is("deleted_at", null)
+    // Hide leads that were dispositioned dead — but only while they're
+    // still pre-traction (new_lead/contacted). `outreach_dispo` is a
+    // separate axis from `status` (migration 045) and setOutreachDispo()
+    // never touches `status`, so without this filter a lead marked
+    // wrong-number / not-interested / DNC stays in the kanban forever.
+    // Without the status guard, though, the filter would also hide real
+    // deal progress — e.g. under_contract + a stale `dnc` dispo, or
+    // offer_sent + `not_interested` — since dispo can be set (or left
+    // stale) independent of how far the deal has actually moved. Once a
+    // lead has advanced past contacted, deal status is the source of
+    // truth and outreach_dispo no longer hides it.
+    // Keep nurture + callback_requested (live follow-ups) and any lead
+    // never dispositioned (outreach_dispo IS NULL) — the explicit is.null
+    // disjunct is required because Postgres `NOT IN` drops NULL rows.
+    .or(
+      "outreach_dispo.is.null,outreach_dispo.not.in.(wrong_number,bad_number,not_interested,opted_out,dnc),status.not.in.(new_lead,contacted)",
+    );
 
   // Dashboard click-through: hot leads (interested + offer_sent).
   if (params.status === "hot") {
