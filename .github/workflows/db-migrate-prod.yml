@@ -87,12 +87,15 @@ name: Apply Supabase migrations to prod
 #     https://supabase.com/dashboard/project/copflsklaefwzipsrjqz/settings/database
 #     (Connection info → Database password).
 #
-# IMPORTANT — the `environment: production-database` gate below only takes
-# effect once a human configures required reviewers for it in GitHub:
-# repo Settings -> Environments -> production-database -> Required reviewers.
-# Until that's done, this workflow creates the environment binding but does
-# not block on approval. This is a GitHub repo setting, not something this
-# workflow file can enforce on its own.
+# The `environment: Production` gate below is LIVE as of 2026-07-30:
+# required reviewer `biginkc` is configured and `can_admins_bypass` is set to
+# false, both verified via the GitHub API. This uses the repo's pre-existing
+# `Production` environment rather than a second one, so there is a single
+# place to configure production approval.
+#
+# This protection is a GitHub repo setting, NOT something this workflow file
+# can enforce on its own — if someone clears the required reviewers or
+# re-enables admin bypass, this line keeps working while gating nothing.
 
 on:
   workflow_run:
@@ -105,10 +108,9 @@ jobs:
     if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main'
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    # Requires required-reviewer configuration in GitHub repo settings to
-    # actually gate anything — see the note at the top of this file. This is
-    # a GitHub-native control (a repo Environment), not a script.
-    environment: production-database
+    # GitHub-native control (a repo Environment), not a script. Reviewer +
+    # no-admin-bypass are configured and verified — see the note at the top.
+    environment: Production
 
     env:
       PROD_PROJECT_REF: copflsklaefwzipsrjqz
