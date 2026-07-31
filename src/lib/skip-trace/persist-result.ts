@@ -366,32 +366,39 @@ type OwnerPerson = {
   phones: Array<{ number: string; dnc: boolean; rank: number }>;
 };
 
-/** Find an existing contact in this org holding the owner's top-ranked
- *  phone in any slot. Includes DNC-flagged numbers — compliance status
- *  must never block identity matching (Codex PR #310 finding 4 corollary):
- *  a DNC-only skip-trace hit still needs to find + ratchet the existing
- *  contact it's protecting, not spin up a duplicate that leaves the real
- *  contact callable. */
+/** Find an existing contact in this org holding ANY of the owner's phones,
+ *  in any of the contact's 3 slots. Checks every phone the provider
+ *  returned, not just the top-ranked one — storage is capped at 3 slots,
+ *  but identity matching has no such limit (Codex PR #310 round-4
+ *  finding: this previously checked only `owner.phones[0]` by rank, so a
+ *  DNC number further down the list — often the ONLY number matching the
+ *  existing contact — was never even queried, and Sandra would spin up a
+ *  suppressed duplicate while the real contact stayed callable). Includes
+ *  DNC-flagged numbers — compliance status must never block identity
+ *  matching: a DNC-only skip-trace hit still needs to find + ratchet the
+ *  existing contact it's protecting. */
 async function resolveContactByPhone(
   supabase: SupabaseClient<Database>,
   orgId: string,
   owner: OwnerPerson,
 ): Promise<string | null> {
-  const topPhone = owner.phones
+  const candidates = [...owner.phones]
     .filter((p) => !!p.number)
-    .sort((a, b) => a.rank - b.rank)[0]?.number;
-  if (!topPhone) return null;
-  const normalized = normalizePhone(topPhone);
-  const { data: existing } = await supabase
-    .from("contacts")
-    .select("id")
-    .eq("org_id", orgId)
-    .or(
-      `phone_1.eq.${normalized},phone_2.eq.${normalized},phone_3.eq.${normalized}`,
-    )
-    .limit(1)
-    .maybeSingle();
-  return existing?.id ?? null;
+    .sort((a, b) => a.rank - b.rank)
+    .map((p) => normalizePhone(p.number));
+  for (const normalized of candidates) {
+    const { data: existing } = await supabase
+      .from("contacts")
+      .select("id")
+      .eq("org_id", orgId)
+      .or(
+        `phone_1.eq.${normalized},phone_2.eq.${normalized},phone_3.eq.${normalized}`,
+      )
+      .limit(1)
+      .maybeSingle();
+    if (existing) return existing.id;
+  }
+  return null;
 }
 
 /** Find an existing NAME-ONLY person contact (no phone, no email) with
