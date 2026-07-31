@@ -541,4 +541,173 @@ describe("runIngestion (integration)", () => {
     expect(prop?.state).toBe("MO");
     expect(prop?.zip).toBe("65801");
   });
+
+  // ---- DealMachine DO NOT CALL → Do Not Contact (TCPA compliance) ----
+
+  const DNC_MAPPING: Mapping = {
+    address: "Address",
+    state: "State",
+    homeowner_first_name: "First",
+    homeowner_last_name: "Last",
+    homeowner_phone_1: "Phone 1",
+    homeowner_phone_1_type: "Phone 1 Type",
+    homeowner_phone_2: "Phone 2",
+    homeowner_phone_2_type: "Phone 2 Type",
+  };
+
+  it("sets do_not_contact on a NEW contact when DealMachine marks a phone DO NOT CALL", async () => {
+    const { jobId, csvImportId } = await createImportJob(
+      "dealmachine",
+      "Kansas City",
+      1,
+    );
+    const rows: RowData[] = [
+      {
+        Address: "100 Compliance Way",
+        State: "MO",
+        First: "Patrick",
+        Last: "Grace",
+        "Phone 1": "8165557777",
+        "Phone 1 Type": "Mobile",
+        "Phone 2": "8165558888",
+        "Phone 2 Type": "DO NOT CALL",
+      },
+    ];
+
+    const summary = await runIngestion(supabase, {
+      jobId,
+      csvImportId,
+      source: "dealmachine",
+      market: "Kansas City",
+      mapping: DNC_MAPPING,
+      rows,
+    });
+    expect(summary.succeeded).toBe(1);
+    expect(summary.failed).toBe(0);
+
+    const { data: contacts } = await supabase
+      .from("contacts")
+      .select("do_not_contact, phone_1, phone_2");
+    expect(contacts).toHaveLength(1);
+    // The textable mobile survives; the DNC number drops under the hard
+    // rule; the contact is suppressed.
+    expect(contacts?.[0].do_not_contact).toBe(true);
+    expect(contacts?.[0].phone_1).not.toBeNull();
+    expect(contacts?.[0].phone_2).toBeNull();
+  });
+
+  it("updates do_not_contact on an EXISTING matched contact (the upsert early-return bug)", async () => {
+    // Import A: the contact already exists, NOT suppressed.
+    const a = await createImportJob("dealmachine", "Kansas City", 1);
+    await runIngestion(supabase, {
+      jobId: a.jobId,
+      csvImportId: a.csvImportId,
+      source: "dealmachine",
+      market: "Kansas City",
+      mapping: DNC_MAPPING,
+      rows: [
+        {
+          Address: "1 Prior Import St",
+          State: "MO",
+          First: "Patrick",
+          Last: "Grace",
+          "Phone 1": "8165557777",
+          "Phone 1 Type": "Mobile",
+        },
+      ],
+    });
+    const { data: before } = await supabase
+      .from("contacts")
+      .select("id, do_not_contact");
+    expect(before).toHaveLength(1);
+    expect(before?.[0].do_not_contact).toBe(false);
+    const existingId = before?.[0].id;
+
+    // Import B: DealMachine now flags one of the contact's numbers DO NOT
+    // CALL. The contact matches the existing row by phone, so it only
+    // reaches upsertContact's early return — the bug left it unsuppressed.
+    const b = await createImportJob("dealmachine", "Kansas City", 1);
+    await runIngestion(supabase, {
+      jobId: b.jobId,
+      csvImportId: b.csvImportId,
+      source: "dealmachine",
+      market: "Kansas City",
+      mapping: DNC_MAPPING,
+      rows: [
+        {
+          Address: "2 New List Ave",
+          State: "MO",
+          First: "Patrick",
+          Last: "Grace",
+          "Phone 1": "8165557777",
+          "Phone 1 Type": "Mobile",
+          "Phone 2": "8165558888",
+          "Phone 2 Type": "DO NOT CALL",
+        },
+      ],
+    });
+
+    const { data: after } = await supabase
+      .from("contacts")
+      .select("id, do_not_contact");
+    // Same contact, now suppressed — no duplicate created.
+    expect(after).toHaveLength(1);
+    expect(after?.[0].id).toBe(existingId);
+    expect(after?.[0].do_not_contact).toBe(true);
+  });
+
+  it("never clears do_not_contact on re-import of a contact already suppressed (one-way ratchet)", async () => {
+    // Import A: contact arrives flagged DO NOT CALL.
+    const a = await createImportJob("dealmachine", "Kansas City", 1);
+    await runIngestion(supabase, {
+      jobId: a.jobId,
+      csvImportId: a.csvImportId,
+      source: "dealmachine",
+      market: "Kansas City",
+      mapping: DNC_MAPPING,
+      rows: [
+        {
+          Address: "1 Ratchet Rd",
+          State: "MO",
+          First: "Patrick",
+          Last: "Grace",
+          "Phone 1": "8165557777",
+          "Phone 1 Type": "Mobile",
+          "Phone 2": "8165558888",
+          "Phone 2 Type": "DO NOT CALL",
+        },
+      ],
+    });
+    const { data: before } = await supabase
+      .from("contacts")
+      .select("do_not_contact");
+    expect(before?.[0].do_not_contact).toBe(true);
+
+    // Import B: a later list lacks the DNC marker. The flag must stick —
+    // a missing marker is not consent to contact.
+    const b = await createImportJob("dealmachine", "Kansas City", 1);
+    await runIngestion(supabase, {
+      jobId: b.jobId,
+      csvImportId: b.csvImportId,
+      source: "dealmachine",
+      market: "Kansas City",
+      mapping: DNC_MAPPING,
+      rows: [
+        {
+          Address: "2 Ratchet Rd",
+          State: "MO",
+          First: "Patrick",
+          Last: "Grace",
+          "Phone 1": "8165557777",
+          "Phone 1 Type": "Mobile",
+        },
+      ],
+    });
+
+    const { data: after } = await supabase
+      .from("contacts")
+      .select("do_not_contact");
+    expect(after).toHaveLength(1);
+    expect(after?.[0].do_not_contact).toBe(true);
+  });
 });

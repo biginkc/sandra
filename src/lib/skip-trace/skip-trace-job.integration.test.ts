@@ -169,6 +169,152 @@ describe("runSkipTraceEnrichment (integration, mock provider)", () => {
     expect(contact!.phone_3).toBeNull();
   });
 
+  it("a provider DNC phone ratchets do_not_contact=true on the contact, not just drops the number (Codex PR #310 finding 4)", async () => {
+    const { propertyId, contactId } = await seedProperty({
+      address: "600 Dnc Ratchet Ln",
+      withContact: true,
+    });
+
+    const result: SkipTraceResult = {
+      propertyId,
+      hit: true,
+      persons: [
+        {
+          firstName: "Owner",
+          lastName: "Six",
+          phones: [
+            { number: "+18165550600", type: "Mobile", dnc: false, rank: 1 },
+            { number: "+18165550601", type: "Mobile", dnc: true, rank: 2 },
+          ],
+          emails: [],
+          isOwner: true,
+        },
+      ],
+      creditsDeducted: 1,
+      raw: {},
+    };
+
+    await persistSkipTraceResult(supabase, result);
+
+    const { data: contact } = await supabase
+      .from("contacts")
+      .select("phone_1, phone_2, phone_3, do_not_contact")
+      .eq("id", contactId!)
+      .single();
+    // The clean mobile is kept; the DNC-flagged number never lands in a
+    // slot; the contact-level flag is ratcheted regardless.
+    expect(contact!.phone_1).toBe("+18165550600");
+    expect(contact!.phone_2).toBeNull();
+    expect(contact!.phone_3).toBeNull();
+    expect(contact!.do_not_contact).toBe(true);
+  });
+
+  it("finds + ratchets an existing contact via a LOWER-ranked DNC phone, not just the top-ranked one (Codex round-4 finding)", async () => {
+    // The provider returns 2 phones for this owner: rank 1 is a clean,
+    // brand-new number nobody has; rank 2 is DNC-flagged and already
+    // belongs to a DIFFERENT existing contact. resolveContactByPhone()
+    // previously checked only the top-ranked phone (rank 1 → miss), so it
+    // fell through to insert a brand-new contact — a suppressed duplicate
+    // — while the real contact (holding the DNC number) stayed callable.
+    const orgId = await getOrgId();
+    const { data: existingContact } = await supabase
+      .from("contacts")
+      .insert({
+        org_id: orgId,
+        first_name: "Existing",
+        last_name: "Owner",
+        phone_1: "+18165550620",
+        phone_1_type: "mobile",
+      })
+      .select("id")
+      .single();
+
+    const { propertyId } = await seedProperty({
+      address: "620 Dnc Rank Ln",
+      withContact: false,
+    });
+
+    const result: SkipTraceResult = {
+      propertyId,
+      hit: true,
+      persons: [
+        {
+          firstName: "Owner",
+          lastName: "Eight",
+          phones: [
+            { number: "+18165550621", type: "Mobile", dnc: false, rank: 1 },
+            { number: "+18165550620", type: "Mobile", dnc: true, rank: 2 },
+          ],
+          emails: [],
+          isOwner: true,
+        },
+      ],
+      creditsDeducted: 1,
+      raw: {},
+    };
+
+    await persistSkipTraceResult(supabase, result);
+
+    // Reused the EXISTING contact — no duplicate created — and ratcheted it.
+    const { count: contactCount } = await supabase
+      .from("contacts")
+      .select("*", { count: "exact", head: true })
+      .eq("org_id", orgId);
+    expect(contactCount).toBe(1);
+
+    const { data: contact } = await supabase
+      .from("contacts")
+      .select("id, do_not_contact")
+      .eq("id", existingContact!.id)
+      .single();
+    expect(contact!.do_not_contact).toBe(true);
+
+    const { data: property } = await supabase
+      .from("properties")
+      .select("homeowner_contact_id")
+      .eq("id", propertyId)
+      .single();
+    expect(property!.homeowner_contact_id).toBe(existingContact!.id);
+  });
+
+  it("never clears an already-suppressed contact when a later skip-trace hit carries no DNC phone (one-way ratchet)", async () => {
+    const { propertyId, contactId } = await seedProperty({
+      address: "610 Dnc Ratchet Ln",
+      withContact: true,
+    });
+    await supabase
+      .from("contacts")
+      .update({ do_not_contact: true })
+      .eq("id", contactId!);
+
+    const result: SkipTraceResult = {
+      propertyId,
+      hit: true,
+      persons: [
+        {
+          firstName: "Owner",
+          lastName: "Seven",
+          phones: [
+            { number: "+18165550610", type: "Mobile", dnc: false, rank: 1 },
+          ],
+          emails: [],
+          isOwner: true,
+        },
+      ],
+      creditsDeducted: 1,
+      raw: {},
+    };
+
+    await persistSkipTraceResult(supabase, result);
+
+    const { data: contact } = await supabase
+      .from("contacts")
+      .select("do_not_contact")
+      .eq("id", contactId!)
+      .single();
+    expect(contact!.do_not_contact).toBe(true);
+  });
+
   it("async path: 3 properties → batch submitted, job stays running with provider_run_id", async () => {
     const props = await Promise.all([
       seedProperty({ address: "10 Async Ln" }),

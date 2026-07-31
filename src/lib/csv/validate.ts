@@ -1,5 +1,5 @@
 import { ALL_FIELDS, PROPERTY_FIELDS, type TargetField } from "./schema";
-import { lineTypeFromVendorLabel } from "@/lib/messaging/line-type";
+import { isDoNotCallLabel, lineTypeFromVendorLabel } from "@/lib/messaging/line-type";
 import {
   classifyAddressFullFailure,
   normalizeApn,
@@ -86,6 +86,12 @@ function normalizeByType(
       if (isPhoneLineTypeField(field)) {
         const lineType = lineTypeFromVendorLabel(raw);
         if (lineType !== "unknown") return lineType;
+        // A do-not-call marker (DealMachine writes "DO NOT CALL" into the
+        // line-type column) isn't a real line type. Normalize it to the
+        // valid 'unknown' value so the number drops under the no-line-type
+        // hard rule instead of failing the whole row on invalid_enum — the
+        // protective signal is carried separately by validateRow Pass 1b.
+        if (isDoNotCallLabel(raw)) return "unknown";
       }
       const s = raw.trim().toLowerCase().replace(/\s+/g, "_");
       return field.enumValues.includes(s) ? s : null;
@@ -127,6 +133,21 @@ export function validateRow(
   for (const field of ALL_FIELDS) {
     const raw = rawFor(row, mapping, field.id);
     normalized[field.id] = normalizeByType(field, raw);
+  }
+
+  // Pass 1b: decode per-phone do-not-call markers. DealMachine flags a
+  // number "DO NOT CALL" inside its line-type column instead of a
+  // separate DNC field; that label normalizes to 'unknown' so the number
+  // itself drops at ingest (migration 080), but the protective signal
+  // must survive as a contact-level Do Not Contact flag. Mirrors
+  // PropStream's `Phone N DNC` fold and REISift's "DNC Excluded" sentinel.
+  // One-way: only ever raises the flag, never clears an explicit `false`.
+  for (const slot of [1, 2, 3] as const) {
+    const phoneRaw = rawFor(row, mapping, `homeowner_phone_${slot}`);
+    const typeRaw = rawFor(row, mapping, `homeowner_phone_${slot}_type`);
+    if (phoneRaw != null && isDoNotCallLabel(typeRaw)) {
+      normalized.homeowner_do_not_contact = true;
+    }
   }
 
   // Pass 2: derive address/city/state/zip from a combined-address column

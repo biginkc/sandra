@@ -180,6 +180,15 @@ export async function persistSkipTraceResult(
       return a.rank - b.rank;
     });
 
+  // The provider's `dnc` flag is filtered out of candidatePhones above (the
+  // number itself is never packed into a slot), but the compliance signal
+  // was previously dropped along with it — the contact stayed callable via
+  // its other numbers. Ratchet do_not_contact=true when the chosen owner
+  // carries ANY DNC-flagged phone (Codex PR #310 finding 4). One-way: only
+  // ever set true below, never false — a run with no DNC phone must not
+  // un-suppress a contact a prior run/import/inbound STOP already protected.
+  const hasDncPhone = owner.phones.some((p) => !!p.number && p.dnc);
+
   // Slot packing is re-runnable with a ban list so a phone_1 unique
   // conflict can drop ONLY the conflicting number and keep salvageable
   // lower-ranked ones (rather than reverting every slot wholesale).
@@ -254,6 +263,9 @@ export async function persistSkipTraceResult(
     phone_3_type: slotTypes[2],
     email: emailToWrite,
   };
+  if (hasDncPhone) {
+    updates.do_not_contact = true;
+  }
   if (!currentContact.first_name && owner.firstName) {
     updates.first_name = owner.firstName;
   }
@@ -354,28 +366,39 @@ type OwnerPerson = {
   phones: Array<{ number: string; dnc: boolean; rank: number }>;
 };
 
-/** Find an existing contact in this org holding the owner's top-ranked
- *  non-DNC phone in any slot. */
+/** Find an existing contact in this org holding ANY of the owner's phones,
+ *  in any of the contact's 3 slots. Checks every phone the provider
+ *  returned, not just the top-ranked one — storage is capped at 3 slots,
+ *  but identity matching has no such limit (Codex PR #310 round-4
+ *  finding: this previously checked only `owner.phones[0]` by rank, so a
+ *  DNC number further down the list — often the ONLY number matching the
+ *  existing contact — was never even queried, and Sandra would spin up a
+ *  suppressed duplicate while the real contact stayed callable). Includes
+ *  DNC-flagged numbers — compliance status must never block identity
+ *  matching: a DNC-only skip-trace hit still needs to find + ratchet the
+ *  existing contact it's protecting. */
 async function resolveContactByPhone(
   supabase: SupabaseClient<Database>,
   orgId: string,
   owner: OwnerPerson,
 ): Promise<string | null> {
-  const topPhone = owner.phones
-    .filter((p) => !!p.number && !p.dnc)
-    .sort((a, b) => a.rank - b.rank)[0]?.number;
-  if (!topPhone) return null;
-  const normalized = normalizePhone(topPhone);
-  const { data: existing } = await supabase
-    .from("contacts")
-    .select("id")
-    .eq("org_id", orgId)
-    .or(
-      `phone_1.eq.${normalized},phone_2.eq.${normalized},phone_3.eq.${normalized}`,
-    )
-    .limit(1)
-    .maybeSingle();
-  return existing?.id ?? null;
+  const candidates = [...owner.phones]
+    .filter((p) => !!p.number)
+    .sort((a, b) => a.rank - b.rank)
+    .map((p) => normalizePhone(p.number));
+  for (const normalized of candidates) {
+    const { data: existing } = await supabase
+      .from("contacts")
+      .select("id")
+      .eq("org_id", orgId)
+      .or(
+        `phone_1.eq.${normalized},phone_2.eq.${normalized},phone_3.eq.${normalized}`,
+      )
+      .limit(1)
+      .maybeSingle();
+    if (existing) return existing.id;
+  }
+  return null;
 }
 
 /** Find an existing NAME-ONLY person contact (no phone, no email) with

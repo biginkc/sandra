@@ -132,6 +132,68 @@ describe("update-homeowner-phones sub-op (integration)", () => {
     expect(phones.phone_1).toBe("+18165551234");
   });
 
+  it("DO NOT CALL label on Phone 1 → do_not_contact ratcheted true, no phone written, no rejection (Codex PR #310 finding 5)", async () => {
+    const contactId = await seedContact();
+    await seedPropertyWithHomeowner("500 Dnc St", contactId);
+    const result = await applyRow({
+      Address: "500 Dnc St",
+      "Phone 1": "8165550500",
+      "Phone 1 Type": "DO NOT CALL",
+    });
+    // Drop-but-flag, same as the CSV-import DNC path — never a plain
+    // rejection that leaves the contact silently callable.
+    expect(result.kind).toBe("updated");
+    const { data: contact } = await supabase
+      .from("contacts")
+      .select("phone_1, do_not_contact")
+      .eq("id", contactId)
+      .single();
+    expect(contact?.phone_1).toBeNull();
+    expect(contact?.do_not_contact).toBe(true);
+  });
+
+  it("DO NOT CALL on Phone 1 alongside a clean mobile in Phone 2 → phone_2 written AND do_not_contact ratcheted", async () => {
+    const contactId = await seedContact();
+    await seedPropertyWithHomeowner("510 Dnc Mixed St", contactId);
+    const result = await applyRow({
+      Address: "510 Dnc Mixed St",
+      "Phone 1": "8165550510",
+      "Phone 1 Type": "DO NOT CALL",
+      "Phone 2": "8165550511",
+      "Phone 2 Type": "Mobile",
+    });
+    expect(result.kind).toBe("updated");
+    const { data: contact } = await supabase
+      .from("contacts")
+      .select("phone_1, phone_2, do_not_contact")
+      .eq("id", contactId)
+      .single();
+    expect(contact?.phone_1).toBeNull();
+    expect(contact?.phone_2).toBe("+18165550511");
+    expect(contact?.do_not_contact).toBe(true);
+  });
+
+  it("never clears an already-suppressed contact when a later row has no DNC marker (one-way ratchet)", async () => {
+    const contactId = await seedContact();
+    await supabase
+      .from("contacts")
+      .update({ do_not_contact: true })
+      .eq("id", contactId);
+    await seedPropertyWithHomeowner("520 Ratchet St", contactId);
+    const result = await applyRow({
+      Address: "520 Ratchet St",
+      "Phone 1": "8165550520",
+      "Phone 1 Type": "Mobile",
+    });
+    expect(result.kind).toBe("updated");
+    const { data: contact } = await supabase
+      .from("contacts")
+      .select("do_not_contact")
+      .eq("id", contactId)
+      .single();
+    expect(contact?.do_not_contact).toBe(true);
+  });
+
   it("Phone 2 / Phone 3 columns optional, fill in order; existing slots untouched if blank", async () => {
     const contactId = await seedContact();
     await supabase

@@ -128,6 +128,72 @@ describe("validateRow", () => {
     expect(lineTypeError?.value).toBe("Satellite");
   });
 
+  it("decodes a DealMachine DO NOT CALL line-type into the Do Not Contact flag", () => {
+    // DealMachine writes "DO NOT CALL" into the phone's line-type column.
+    // The row must stay valid (not fail on invalid_enum), the number must
+    // drop (type normalizes to 'unknown' → ingest hard rule), and the
+    // protective contact-level flag must be raised.
+    const mapping: Mapping = {
+      ...PROPERTY_MAPPING,
+      homeowner_phone_1: "Phone",
+      homeowner_phone_1_type: "Phone Type",
+    };
+    const row: RowData = {
+      Address: "123 Main St",
+      State: "MO",
+      Phone: "8165551111",
+      "Phone Type": "DO NOT CALL",
+    };
+    const result = validateRow(row, mapping, 0);
+    expect(result.ok).toBe(true);
+    expect(result.errors).toHaveLength(0);
+    expect(result.normalized.homeowner_phone_1_type).toBe("unknown");
+    expect(result.normalized.homeowner_do_not_contact).toBe(true);
+  });
+
+  it("does not raise Do Not Contact for a DNC marker with no phone in the slot", () => {
+    const mapping: Mapping = {
+      ...PROPERTY_MAPPING,
+      homeowner_phone_1: "Phone",
+      homeowner_phone_1_type: "Phone Type",
+    };
+    const row: RowData = {
+      Address: "123 Main St",
+      State: "MO",
+      Phone: "",
+      "Phone Type": "DO NOT CALL",
+    };
+    const result = validateRow(row, mapping, 0);
+    expect(result.ok).toBe(true);
+    expect(result.normalized.homeowner_do_not_contact).not.toBe(true);
+  });
+
+  it("lets a per-phone DNC marker override an explicit Do Not Contact = false", () => {
+    // Protective one-way OR: if any number says DO NOT CALL, the contact
+    // is suppressed even when a row-level column claims otherwise.
+    const mapping: Mapping = {
+      ...PROPERTY_MAPPING,
+      homeowner_phone_1: "Phone 1",
+      homeowner_phone_1_type: "Phone 1 Type",
+      homeowner_phone_2: "Phone 2",
+      homeowner_phone_2_type: "Phone 2 Type",
+      homeowner_do_not_contact: "DNC",
+    };
+    const row: RowData = {
+      Address: "123 Main St",
+      State: "MO",
+      "Phone 1": "8165551111",
+      "Phone 1 Type": "Mobile",
+      "Phone 2": "8165552222",
+      "Phone 2 Type": "DO NOT CALL",
+      DNC: "false",
+    };
+    const result = validateRow(row, mapping, 0);
+    expect(result.ok).toBe(true);
+    expect(result.normalized.homeowner_phone_1_type).toBe("mobile");
+    expect(result.normalized.homeowner_do_not_contact).toBe(true);
+  });
+
   it("treats a completely blank row as empty (no errors, not ok)", () => {
     const row: RowData = { Address: "", City: "", State: "", Zip: "" };
     const result = validateRow(row, PROPERTY_MAPPING, 0);

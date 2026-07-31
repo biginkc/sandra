@@ -23,3 +23,23 @@ export function lineTypeFromVendorLabel(
   if (v === "landline") return "landline";
   return "unknown";
 }
+
+/**
+ * Some skip-trace exports (DealMachine) flag a do-not-call number inside
+ * the line-type column itself — the value reads "DO NOT CALL" rather than
+ * "Mobile"/"Landline". Such a label has no usable line type, so the
+ * number drops under the no-line-type hard rule (migration 080); this
+ * predicate lets ingest still raise a contact-level Do Not Contact flag,
+ * mirroring PropStream's `Phone N DNC` fold and REISift's "DNC Excluded"
+ * sentinel. Compliance-protective: we'd rather over-suppress than text a
+ * flagged number, so abbreviations and the "Do Not Contact" spelling both
+ * count.
+ */
+export function isDoNotCallLabel(label: string | null | undefined): boolean {
+  // Strip everything but letters/digits — not just spaces/underscores —
+  // so hyphenated or punctuated vendor variants ("DO-NOT-CALL",
+  // "DO NOT CALL!") still match. Compliance-protective: false positives
+  // only cost an over-suppressed number, never a wrongly-texted one.
+  const v = (label ?? "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "");
+  return v === "donotcall" || v === "dnc" || v === "donotcontact";
+}

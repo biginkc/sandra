@@ -80,13 +80,17 @@ describe("propstreamPreset.transform — phone fold", () => {
     expect(r.homeowner_phone_3_type).toBe("mobile");
     expect(r.homeowner_do_not_contact).toBeUndefined();
   });
-  it("drops DNC slot first; keeps next 3 non-DNC mobiles-first", () => {
+  it("drops DNC slot from storage; keeps next 3 non-DNC mobiles-first; carries the DNC number on the identity-only channel", () => {
     const result = propstreamPreset.transform(
       [row({ "Phone 2 DNC": "Yes" })],
       FULL_HEADERS,
     );
     const r = result.rows[0];
-    // Slot 2 dropped; non-DNC mobiles {1,4} lead, then landline 3.
+    // Slot 2 never lands in a storage slot; non-DNC mobiles {1,4} lead,
+    // then landline 3. This case has 3 clean survivors already filling
+    // all 3 slots — exactly the shape Codex's round-3 finding covers:
+    // the DNC number must still reach `homeowner_dnc_phones` for identity
+    // matching even though `.slice(0, 3)` on the storage array excludes it.
     expect([r.homeowner_phone_1, r.homeowner_phone_2, r.homeowner_phone_3])
       .toEqual(["8165551001", "8165551004", "8165551003"]);
     expect([
@@ -95,7 +99,69 @@ describe("propstreamPreset.transform — phone fold", () => {
       r.homeowner_phone_3_type,
     ]).toEqual(["mobile", "mobile", "landline"]);
     expect(r.homeowner_do_not_contact).toBe("true");
+    expect(r.homeowner_dnc_phones).toBe("+18165551002");
   });
+
+  it("a DNC number is NEVER stored as a normal typed phone, even when fewer than 3 clean numbers survive — only present on the identity-only channel (Codex PR #310 round-2/3 findings)", () => {
+    // Only 1 clean mobile + 1 DNC mobile: storage (homeowner_phone_1/2/3)
+    // must never carry the DNC number, no matter how much room is left —
+    // that's a separate concern from identity matching, and conflating
+    // them (via a trailing-slot fallback with an empty type) was itself a
+    // gap: it still capped the DNC list at 3-minus-clean-survivors.
+    const result = propstreamPreset.transform(
+      [
+        row({
+          "Phone 2 DNC": "Yes",
+          "Phone 3": "", "Phone 3 Type": "", "Phone 3 DNC": "",
+          "Phone 4": "", "Phone 4 Type": "", "Phone 4 DNC": "",
+          "Phone 5": "", "Phone 5 Type": "", "Phone 5 DNC": "",
+        }),
+      ],
+      FULL_HEADERS,
+    );
+    const r = result.rows[0];
+    expect(r.homeowner_phone_1).toBe("8165551001");
+    expect(r.homeowner_phone_1_type).toBe("mobile");
+    expect(r.homeowner_phone_2).toBe("");
+    expect(r.homeowner_phone_2_type).toBe("");
+    expect(r.homeowner_phone_3).toBe("");
+    expect(r.homeowner_do_not_contact).toBe("true");
+    expect(r.homeowner_dnc_phones).toBe("+18165551002");
+  });
+
+  it("3 clean phones + 1 DNC phone: the DNC number survives on the identity channel even though .slice(0, 3) excludes it from storage (Codex PR #310 round-3 finding)", () => {
+    // This is the exact shape Codex flagged: cleanRanked already has 3
+    // entries before the DNC number is even considered for a slot, so the
+    // old code's `[...cleanRanked, ...dncSlots].slice(0, 3)` silently
+    // dropped the DNC number everywhere — including from the identity
+    // channel, since there wasn't one yet. The fix separates the two
+    // concerns entirely: storage always slices to 3 clean survivors;
+    // EVERY DNC number, regardless of count, reaches homeowner_dnc_phones.
+    const result = propstreamPreset.transform(
+      [
+        row({
+          "Phone 2 DNC": "Yes",
+          "Phone 5": "8165559999",
+          "Phone 5 Type": "Mobile",
+          "Phone 5 DNC": "Yes",
+        }),
+      ],
+      FULL_HEADERS,
+    );
+    const r = result.rows[0];
+    // Storage: 3 clean survivors only (1, 4, 3), never a DNC number.
+    expect([r.homeowner_phone_1, r.homeowner_phone_2, r.homeowner_phone_3])
+      .toEqual(["8165551001", "8165551004", "8165551003"]);
+    // Identity channel: BOTH DNC numbers present, pipe-delimited.
+    expect(r.homeowner_dnc_phones).toBe("+18165551002|+18165559999");
+  });
+
+  it("no DNC-flagged phones → homeowner_dnc_phones is not set", () => {
+    const result = propstreamPreset.transform([row()], FULL_HEADERS);
+    const r = result.rows[0];
+    expect(r.homeowner_dnc_phones).toBeUndefined();
+  });
+
   it("all-empty phones → no DNC flag, slots empty", () => {
     const empty = row({
       "Phone 1": "", "Phone 2": "", "Phone 3": "", "Phone 4": "", "Phone 5": "",
