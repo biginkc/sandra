@@ -68,6 +68,10 @@ function makeBuilder(record: CallRecord): Record<string, unknown> {
     record.filters.push({ op: "eq", args });
     return builder;
   };
+  builder.or = (...args: unknown[]) => {
+    record.filters.push({ op: "or", args });
+    return builder;
+  };
   builder.ilike = (...args: unknown[]) => {
     record.filters.push({ op: "ilike", args });
     return builder;
@@ -521,12 +525,16 @@ describe("processIngestChunk → DealMachine DNC ratchet (Codex PR #310 findings
     );
     expect(phoneSelects.length).toBeGreaterThanOrEqual(2);
     expect(phoneSelects[0].filters).toContainEqual({
-      op: "eq",
-      args: ["phone_1", "+18165551111"],
+      op: "or",
+      args: [
+        "phone_1.eq.+18165551111,phone_2.eq.+18165551111,phone_3.eq.+18165551111",
+      ],
     });
     expect(phoneSelects[1].filters).toContainEqual({
-      op: "eq",
-      args: ["phone_1", "+18165557777"],
+      op: "or",
+      args: [
+        "phone_1.eq.+18165557777,phone_2.eq.+18165557777,phone_3.eq.+18165557777",
+      ],
     });
   });
 
@@ -660,5 +668,104 @@ describe("processIngestChunk → DealMachine DNC ratchet (Codex PR #310 findings
     expect(ratchet).toBeDefined();
     expect(ratchet!.insertPayload).toEqual({ do_not_contact: true });
     expect(ratchet!.filters).toContainEqual({ op: "eq", args: ["id", "existing-3"] });
+  });
+
+  it("PropStream-shaped row: a DNC number with no clean phone still matches + ratchets an existing contact (Codex round-2 finding B)", async () => {
+    // Mirrors what propstreamPreset.transform() now produces when a DNC
+    // number is the ONLY phone on the row: the number itself lands in
+    // homeowner_phone_1, but its type column is empty (never the vendor's
+    // real Mobile/Landline label) so ingest.ts's hard rule drops it from
+    // storage while still carrying it into matchPhones via droppedPhones.
+    const row = {
+      Address: "6 Compliance Way",
+      State: "MO",
+      Phone: "8165551111",
+      "Phone Type": "", // PropStream writes "" for a DNC slot's type
+      "DNC Flag": "true",
+    };
+
+    responseQueue = [
+      { data: { id: "existing-4" }, error: null }, // 1. dropped DNC phone matches
+      { data: null, error: null }, // 2. do_not_contact ratchet update
+      { data: null, error: null }, // 3. homeowner_details upsert
+      { data: null, error: null }, // 4. address dedup miss
+      { data: { id: "prop-6" }, error: null }, // 5. property insert
+      { data: null, error: null }, // 6. job_items insert
+      { data: null, error: null }, // 7. jobs progress update
+    ];
+
+    const result = await processIngestChunk(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      makeSupabase() as any,
+      {
+        ...baseChunkParams,
+        mapping: {
+          address: "Address",
+          state: "State",
+          homeowner_phone_1: "Phone",
+          homeowner_phone_1_type: "Phone Type",
+          homeowner_do_not_contact: "DNC Flag",
+        },
+        rows: [row],
+      },
+    );
+
+    expect(result.succeeded).toBe(1);
+    expect(
+      calls.find((c) => c.table === "contacts" && c.op === "insert"),
+    ).toBeUndefined();
+    const ratchet = calls.find(
+      (c) => c.table === "contacts" && c.op === "update",
+    );
+    expect(ratchet).toBeDefined();
+    expect(ratchet!.filters).toContainEqual({ op: "eq", args: ["id", "existing-4"] });
+  });
+
+  it("matching queries phone_1, phone_2, AND phone_3 on the existing contact — not just phone_1 (Codex round-2 finding A)", async () => {
+    // A DNC number could already be sitting in an existing contact's
+    // phone_2 or phone_3 slot (e.g. packed there by an earlier skip-trace
+    // run). A phone_1-only lookup would never find it.
+    const row = {
+      Address: "7 Compliance Way",
+      State: "MO",
+      "Phone 1": "8165557777",
+      "Phone 1 Type": "DO NOT CALL",
+    };
+
+    responseQueue = [
+      { data: { id: "existing-5" }, error: null }, // 1. match (any slot)
+      { data: null, error: null }, // 2. do_not_contact ratchet update
+      { data: null, error: null }, // 3. homeowner_details upsert
+      { data: null, error: null }, // 4. address dedup miss
+      { data: { id: "prop-7" }, error: null }, // 5. property insert
+      { data: null, error: null }, // 6. job_items insert
+      { data: null, error: null }, // 7. jobs progress update
+    ];
+
+    await processIngestChunk(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      makeSupabase() as any,
+      {
+        ...baseChunkParams,
+        mapping: {
+          address: "Address",
+          state: "State",
+          homeowner_phone_1: "Phone 1",
+          homeowner_phone_1_type: "Phone 1 Type",
+        },
+        rows: [row],
+      },
+    );
+
+    const phoneSelect = calls.find(
+      (c) => c.table === "contacts" && c.op === "select",
+    );
+    expect(phoneSelect).toBeDefined();
+    expect(phoneSelect!.filters).toContainEqual({
+      op: "or",
+      args: [
+        "phone_1.eq.+18165557777,phone_2.eq.+18165557777,phone_3.eq.+18165557777",
+      ],
+    });
   });
 });

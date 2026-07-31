@@ -99,26 +99,38 @@ export const propstreamPreset: VendorPreset = {
         if (dnc) anyDnc = true;
         slots.push({ phone, type: (next[typeKey] ?? "").trim(), dnc });
       }
-      // Drop DNC slots — never store one, even to fill a trailing empty
-      // slot when fewer than 3 clean numbers survive. Matches this PR's
-      // "drop-but-flag, not keep-the-number" decision: the row-level
-      // do_not_contact flag (set below) already blocks all outreach to
-      // this contact, but a DNC number physically sitting in a phone slot
-      // is a landmine for any future path that reads phone_N without
-      // rechecking the contact-level flag. Mobiles before landlines
-      // within the survivors (everything downstream texts slot 1, so a
+      // Never store a DNC number as a normal typed phone — a clean survivor
+      // always wins a slot over a DNC one. Mobiles before landlines among
+      // the clean survivors (everything downstream texts slot 1, so a
       // known mobile must win it), then keep the first 3.
       const mobileFirst = (list: Slot[]) => [
         ...list.filter((s) => lineTypeFromVendorLabel(s.type) === "mobile"),
         ...list.filter((s) => lineTypeFromVendorLabel(s.type) !== "mobile"),
       ];
-      const ranked = mobileFirst(slots.filter((s) => !s.dnc)).slice(0, 3);
+      const cleanRanked = mobileFirst(slots.filter((s) => !s.dnc));
+      // If a trailing slot is still empty, fill it with a DNC number ONLY
+      // for identity — never as a normal typed phone. ingest.ts's DNC hard
+      // rule drops any phone whose type doesn't resolve to mobile/landline,
+      // so writing an empty type here (never the vendor's real Mobile/
+      // Landline label) guarantees it's never stored, while still landing
+      // in ingest.ts's `droppedPhones` list so a DNC-only row can still
+      // find + suppress the existing contact that owns the number (Codex
+      // PR #310 round-2 finding: the earlier "just drop every DNC slot"
+      // fix destroyed the only identifier a DNC-only row had before the
+      // matcher ever ran).
+      const ranked: Array<Slot & { keepAsIdentityOnly?: boolean }> = [
+        ...cleanRanked,
+        ...slots
+          .filter((s) => s.dnc)
+          .map((s) => ({ ...s, keepAsIdentityOnly: true })),
+      ].slice(0, 3);
       for (let i = 1; i <= 3; i++) {
         const target = `homeowner_phone_${i}`;
         const typeTarget = `homeowner_phone_${i}_type`;
         const slot = ranked[i - 1];
         next[target] = slot ? slot.phone : "";
-        next[typeTarget] = slot ? lineTypeFromVendorLabel(slot.type) : "";
+        next[typeTarget] =
+          slot && !slot.keepAsIdentityOnly ? lineTypeFromVendorLabel(slot.type) : "";
         if (!columnsAdded.includes(target)) columnsAdded.push(target);
         if (!columnsAdded.includes(typeTarget)) columnsAdded.push(typeTarget);
       }

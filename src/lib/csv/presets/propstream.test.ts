@@ -96,12 +96,17 @@ describe("propstreamPreset.transform — phone fold", () => {
     ]).toEqual(["mobile", "mobile", "landline"]);
     expect(r.homeowner_do_not_contact).toBe("true");
   });
-  it("never stores a DNC number, even to fill a trailing slot when fewer than 3 clean numbers survive (Codex PR #310 non-blocking note)", () => {
-    // Only 1 clean mobile + 1 DNC mobile: with the old "append DNC slots
-    // after non-DNC ones" fallback, slot 2 would have been filled with the
-    // DNC number. The contact-level flag already blocks all outreach, but
-    // storing the number is a landmine for any future path that reads
-    // phone_N without rechecking do_not_contact — drop it unconditionally.
+  it("a DNC number filling a trailing slot carries an empty (unusable) type — never stored as a normal typed phone, but still present for identity matching (Codex PR #310 round-2 finding)", () => {
+    // Only 1 clean mobile + 1 DNC mobile. A clean survivor always wins a
+    // slot over a DNC one, but when a slot is still empty, the DNC number
+    // now fills it WITH AN EMPTY TYPE — ingest.ts's hard rule drops any
+    // phone whose type isn't mobile/landline, so this number is never
+    // stored, but it still reaches ingest.ts's droppedPhones list so a
+    // DNC-only row can find + suppress the existing contact it belongs to.
+    // (Earlier this PR unconditionally dropped DNC slots, which closed the
+    // storage leak but reopened the exact TCPA hole this PR exists to fix:
+    // a DNC number that's the ONLY identifier on the row could no longer
+    // find the contact it should suppress.)
     const result = propstreamPreset.transform(
       [
         row({
@@ -115,9 +120,26 @@ describe("propstreamPreset.transform — phone fold", () => {
     );
     const r = result.rows[0];
     expect(r.homeowner_phone_1).toBe("8165551001");
-    expect(r.homeowner_phone_2).toBe("");
+    expect(r.homeowner_phone_1_type).toBe("mobile");
+    expect(r.homeowner_phone_2).toBe("8165551002");
+    expect(r.homeowner_phone_2_type).toBe("");
     expect(r.homeowner_phone_3).toBe("");
     expect(r.homeowner_do_not_contact).toBe("true");
+  });
+
+  it("a clean number always wins a slot over a DNC one, even when the DNC number was ranked earlier", () => {
+    // 3 clean survivors already fill all 3 slots — the DNC number (slot 2)
+    // has nowhere to go and is dropped entirely, matching the first test's
+    // "drops DNC slot first" case but asserted explicitly for the
+    // identity-carrying code path.
+    const result = propstreamPreset.transform(
+      [row({ "Phone 2 DNC": "Yes" })],
+      FULL_HEADERS,
+    );
+    const r = result.rows[0];
+    expect([r.homeowner_phone_1, r.homeowner_phone_2, r.homeowner_phone_3]).not.toContain(
+      "8165551002",
+    );
   });
 
   it("all-empty phones → no DNC flag, slots empty", () => {

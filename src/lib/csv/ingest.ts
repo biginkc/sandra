@@ -753,14 +753,18 @@ async function upsertContact(
   };
 
   // Phone match — check every phone this row carries, not just the
-  // surviving phone_1 (Codex PR #310 finding 1). A DNC-labeled phone that
-  // was the row's only identifier must still be able to match an existing
-  // contact so the ratchet above can suppress it.
+  // surviving phone_1 (Codex PR #310 finding 1), against every slot an
+  // EXISTING contact might hold that number in (phone_1/2/3), not just
+  // their phone_1 (Codex PR #310 round-2 finding: a DNC number already
+  // sitting in an existing contact's phone_2/phone_3 was invisible to a
+  // phone_1-only lookup). A DNC-labeled phone that was the row's only
+  // identifier must still be able to match an existing contact so the
+  // ratchet above can suppress it.
   for (const phone of matchPhones) {
     const { data } = await supabase
       .from("contacts")
       .select("id")
-      .eq("phone_1", phone)
+      .or(`phone_1.eq.${phone},phone_2.eq.${phone},phone_3.eq.${phone}`)
       .limit(1)
       .maybeSingle();
     if (data) return onMatch(data.id);
