@@ -12,7 +12,10 @@
  * Transform highlights:
  *   - Phone fold: drop slots whose `Phone N DNC` is truthy first, then
  *     keep the first 3 of the survivors. Any DNC-flagged slot promotes
- *     `homeowner_do_not_contact = true` for the whole row.
+ *     `homeowner_do_not_contact = true` for the whole row AND its
+ *     normalized number is carried on `homeowner_dnc_phones` (identity
+ *     matching only, never stored) so a DNC number crowded out of the
+ *     3 storage slots can still find + suppress the existing contact.
  *   - Email fold: `Email 1..4` → `homeowner_email` (first non-empty).
  *   - Owner names: `Owner 1 First Name` / `Owner 1 Last Name` →
  *     `homeowner_first_name` / `homeowner_last_name`. Owner 2 dropped
@@ -21,7 +24,7 @@
  *
  * No row-level dedup — PropStream is already one-row-per-property.
  */
-import { toBoolOrNull } from "@/lib/csv/normalize";
+import { normalizePhone, toBoolOrNull } from "@/lib/csv/normalize";
 import { lineTypeFromVendorLabel } from "@/lib/messaging/line-type";
 
 import type { TransformResult, VendorPreset } from "./types";
@@ -99,40 +102,45 @@ export const propstreamPreset: VendorPreset = {
         if (dnc) anyDnc = true;
         slots.push({ phone, type: (next[typeKey] ?? "").trim(), dnc });
       }
-      // Never store a DNC number as a normal typed phone — a clean survivor
-      // always wins a slot over a DNC one. Mobiles before landlines among
-      // the clean survivors (everything downstream texts slot 1, so a
-      // known mobile must win it), then keep the first 3.
+      // Storage (3 phone slots) and identity matching are two different
+      // concerns that must not share one array. A clean survivor always
+      // wins a slot over a DNC one; mobiles before landlines among the
+      // clean survivors (everything downstream texts slot 1, so a known
+      // mobile must win it); keep the first 3 — never a DNC number.
       const mobileFirst = (list: Slot[]) => [
         ...list.filter((s) => lineTypeFromVendorLabel(s.type) === "mobile"),
         ...list.filter((s) => lineTypeFromVendorLabel(s.type) !== "mobile"),
       ];
-      const cleanRanked = mobileFirst(slots.filter((s) => !s.dnc));
-      // If a trailing slot is still empty, fill it with a DNC number ONLY
-      // for identity — never as a normal typed phone. ingest.ts's DNC hard
-      // rule drops any phone whose type doesn't resolve to mobile/landline,
-      // so writing an empty type here (never the vendor's real Mobile/
-      // Landline label) guarantees it's never stored, while still landing
-      // in ingest.ts's `droppedPhones` list so a DNC-only row can still
-      // find + suppress the existing contact that owns the number (Codex
-      // PR #310 round-2 finding: the earlier "just drop every DNC slot"
-      // fix destroyed the only identifier a DNC-only row had before the
-      // matcher ever ran).
-      const ranked: Array<Slot & { keepAsIdentityOnly?: boolean }> = [
-        ...cleanRanked,
-        ...slots
-          .filter((s) => s.dnc)
-          .map((s) => ({ ...s, keepAsIdentityOnly: true })),
-      ].slice(0, 3);
+      const ranked = mobileFirst(slots.filter((s) => !s.dnc)).slice(0, 3);
       for (let i = 1; i <= 3; i++) {
         const target = `homeowner_phone_${i}`;
         const typeTarget = `homeowner_phone_${i}_type`;
         const slot = ranked[i - 1];
         next[target] = slot ? slot.phone : "";
-        next[typeTarget] =
-          slot && !slot.keepAsIdentityOnly ? lineTypeFromVendorLabel(slot.type) : "";
+        next[typeTarget] = slot ? lineTypeFromVendorLabel(slot.type) : "";
         if (!columnsAdded.includes(target)) columnsAdded.push(target);
         if (!columnsAdded.includes(typeTarget)) columnsAdded.push(typeTarget);
+      }
+      // Identity channel: EVERY DNC-flagged number on the row, regardless
+      // of how many clean phones already filled the 3 storage slots. The
+      // 3-slot cap above is a storage constraint; matching an existing
+      // contact by a DNC number has no such limit — a row with 3 clean
+      // phones AND a 4th/5th DNC one must still be able to find the
+      // contact that owns the DNC number if none of the 3 clean numbers
+      // match it (Codex PR #310 round-3 finding: `.slice(0, 3)` was
+      // silently discarding the DNC number before ingest.ts ever saw it).
+      // Never written to a contact's phone_1/2/3 — ingest.ts reads this
+      // column ONLY to widen its existing-contact match candidates on a
+      // DNC-flagged row.
+      const dncPhones = slots
+        .filter((s) => s.dnc)
+        .map((s) => normalizePhone(s.phone))
+        .filter((p): p is string => !!p);
+      if (dncPhones.length > 0) {
+        next.homeowner_dnc_phones = [...new Set(dncPhones)].join("|");
+        if (!columnsAdded.includes("homeowner_dnc_phones")) {
+          columnsAdded.push("homeowner_dnc_phones");
+        }
       }
       // Drop the per-phone source columns from the row.
       for (const i of PHONE_SLOTS) {

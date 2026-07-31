@@ -427,6 +427,19 @@ async function ingestRow(
     const isDncRow =
       (n.homeowner_do_not_contact as boolean | null) === true;
     const primaryPhone = phoneSlots.contactFields.phone_1;
+    // `homeowner_dnc_phones` (set by preset transforms like propstream.ts)
+    // is a pipe-delimited identity-only channel for DNC numbers that don't
+    // fit the 3 storage slots at all — the 3-slot cap is a STORAGE
+    // constraint; matching has no such limit (Codex PR #310 round-3
+    // finding: `.slice(0, 3)` in propstream.ts silently discarded a DNC
+    // number whenever 3 clean phones already filled the row's slots,
+    // before ingest.ts ever got a chance to use it as a match candidate).
+    const identityOnlyDncPhones = (
+      (n.homeowner_dnc_phones as string | null) ?? ""
+    )
+      .split("|")
+      .map((p) => p.trim())
+      .filter((p) => p.length > 0);
     // Unchanged from before this PR: match on phone_1 only, same field the
     // old single-phone check used — this branch must not silently start
     // matching on phone_2/phone_3, which is a separate, bigger behavior
@@ -434,9 +447,11 @@ async function ingestRow(
     const matchPhones = isDncRow
       ? [
           ...new Set(
-            [primaryPhone, ...phoneSlots.droppedPhones].filter(
-              (p): p is string => !!p,
-            ),
+            [
+              primaryPhone,
+              ...phoneSlots.droppedPhones,
+              ...identityOnlyDncPhones,
+            ].filter((p): p is string => !!p),
           ),
         ]
       : primaryPhone

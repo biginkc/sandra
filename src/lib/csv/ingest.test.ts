@@ -768,4 +768,85 @@ describe("processIngestChunk → DealMachine DNC ratchet (Codex PR #310 findings
       ],
     });
   });
+
+  it("3 clean phones fill all storage slots, but the DNC number on the identity-only channel is what finds and ratchets the existing contact (Codex round-3 finding)", async () => {
+    // Mirrors what propstreamPreset.transform() produces for a row with 3
+    // clean phones AND a 4th DNC-flagged one: homeowner_phone_1/2/3 are
+    // full (no room for the DNC number), but homeowner_dnc_phones still
+    // carries it. The incoming phone_1 doesn't match anything — only the
+    // DNC identity number does — so the phone-match loop must reach past
+    // the surviving phone_1 into identityOnlyDncPhones to find it. (Only
+    // phone_1 among the row's SURVIVING phones is ever checked — matching
+    // on incoming phone_2/phone_3 is unchanged, out-of-scope behavior;
+    // this test exercises the identity-only channel specifically.)
+    const row = {
+      Address: "8 Compliance Way",
+      State: "MO",
+      "Phone 1": "8165551001",
+      "Phone 1 Type": "Mobile",
+      "Phone 2": "8165551002",
+      "Phone 2 Type": "Mobile",
+      "Phone 3": "8165551003",
+      "Phone 3 Type": "Mobile",
+      // `homeowner_dnc_phones` is a "text" field (validate.ts's Pass 1
+      // does not run phone normalization on it) — the value here is
+      // pre-normalized, exactly as propstreamPreset.transform() would
+      // have written it via normalizePhone() before this row ever reaches
+      // validate.ts.
+      "DNC Phones": "+18165559999",
+      "DNC Flag": "true",
+    };
+
+    responseQueue = [
+      { data: null, error: null }, // 1. incoming phone_1 → miss
+      { data: { id: "existing-6" }, error: null }, // 2. DNC identity phone → match
+      { data: null, error: null }, // 3. do_not_contact ratchet update
+      { data: null, error: null }, // 4. homeowner_details upsert
+      { data: null, error: null }, // 5. address dedup miss
+      { data: { id: "prop-8" }, error: null }, // 6. property insert
+      { data: null, error: null }, // 7. job_items insert
+      { data: null, error: null }, // 8. jobs progress update
+    ];
+
+    const result = await processIngestChunk(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      makeSupabase() as any,
+      {
+        ...baseChunkParams,
+        mapping: {
+          address: "Address",
+          state: "State",
+          homeowner_phone_1: "Phone 1",
+          homeowner_phone_1_type: "Phone 1 Type",
+          homeowner_phone_2: "Phone 2",
+          homeowner_phone_2_type: "Phone 2 Type",
+          homeowner_phone_3: "Phone 3",
+          homeowner_phone_3_type: "Phone 3 Type",
+          homeowner_dnc_phones: "DNC Phones",
+          homeowner_do_not_contact: "DNC Flag",
+        },
+        rows: [row],
+      },
+    );
+
+    expect(result.succeeded).toBe(1);
+    expect(
+      calls.find((c) => c.table === "contacts" && c.op === "insert"),
+    ).toBeUndefined();
+    const ratchet = calls.find(
+      (c) => c.table === "contacts" && c.op === "update",
+    );
+    expect(ratchet).toBeDefined();
+    expect(ratchet!.filters).toContainEqual({ op: "eq", args: ["id", "existing-6"] });
+    const phoneSelects = calls.filter(
+      (c) => c.table === "contacts" && c.op === "select",
+    );
+    expect(phoneSelects).toHaveLength(2);
+    expect(phoneSelects[1].filters).toContainEqual({
+      op: "or",
+      args: [
+        "phone_1.eq.+18165559999,phone_2.eq.+18165559999,phone_3.eq.+18165559999",
+      ],
+    });
+  });
 });

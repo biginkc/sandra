@@ -106,6 +106,15 @@ export const HOMEOWNER_FIELDS: readonly TargetField[] = [
   { id: "homeowner_mailing_state", label: "Mailing State", section: "homeowner", type: "state" },
   { id: "homeowner_mailing_zip", label: "Mailing ZIP", section: "homeowner", type: "zip" },
   { id: "homeowner_do_not_contact", label: "Do Not Contact", section: "homeowner", type: "boolean" },
+  // Identity-only channel, never stored to a contact's phone_1/2/3 columns.
+  // A vendor's DNC-flagged phone number MUST still be able to find and
+  // suppress an existing contact even when it doesn't fit any of the 3
+  // storage slots (e.g. PropStream's 5-phone pool already has 3 clean
+  // survivors) — the 3-slot cap is a STORAGE constraint, identity matching
+  // has no such limit. Pipe-delimited list of normalized phone numbers, set
+  // by preset transforms (propstream.ts) alongside homeowner_do_not_contact.
+  // Read only by ingest.ts's DNC-scoped matching; never written to the DB.
+  { id: "homeowner_dnc_phones", label: "DNC Phone Numbers (identity only)", section: "homeowner", type: "text" },
 ];
 
 export const AGENT_FIELDS: readonly TargetField[] = [
