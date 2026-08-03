@@ -67,13 +67,22 @@ export function JobFailureNotifier() {
       }
     };
 
-    // Initial check + interval
-    check();
-    const id = setInterval(check, POLL_INTERVAL_MS);
+    const checkIfVisible = () => {
+      if (document.visibilityState === "visible") {
+        void check();
+      }
+    };
+
+    // Initial check + interval while visible. Refresh immediately when the
+    // tab becomes visible again so the next interval does not delay it.
+    checkIfVisible();
+    const id = setInterval(checkIfVisible, POLL_INTERVAL_MS);
+    document.addEventListener("visibilitychange", checkIfVisible);
 
     return () => {
       alive = false;
       clearInterval(id);
+      document.removeEventListener("visibilitychange", checkIfVisible);
     };
   }, []);
 

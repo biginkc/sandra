@@ -52,6 +52,13 @@ export function NotificationsBell({ userId }: { userId: string }) {
       if (r.ok) setUnreadCount(r.data);
     };
 
+    const fetchCountIfVisible = async () => {
+      if (document.visibilityState === "visible") {
+        await fetchCount();
+      }
+    };
+    document.addEventListener("visibilitychange", fetchCountIfVisible);
+
     const start = async () => {
       // Must await setAuth() BEFORE subscribing — same race as
       // step-progress.tsx. Token resolves to the current session's access
@@ -94,10 +101,10 @@ export function NotificationsBell({ userId }: { userId: string }) {
         )
         .subscribe();
 
-      await fetchCount();
+      await fetchCountIfVisible();
 
       // Safety-net poll — low-frequency, catches rare socket drops.
-      pollId = setInterval(fetchCount, 15000);
+      pollId = setInterval(fetchCountIfVisible, 15000);
     };
 
     void start();
@@ -105,6 +112,7 @@ export function NotificationsBell({ userId }: { userId: string }) {
     return () => {
       mounted = false;
       if (pollId) clearInterval(pollId);
+      document.removeEventListener("visibilitychange", fetchCountIfVisible);
       if (channel) void supabase.removeChannel(channel);
     };
   }, [userId]);
