@@ -24,9 +24,9 @@
  *    client from src/lib/supabase/server.ts.
  *
  * Performance notes:
- *  - Engagement's common 4-bucket paths use relationship joins. Rare mixed
- *    combinations that cannot be expressed as one PostgREST relationship
- *    predicate retain the legacy side-read fallback for exact semantics.
+ *  - Engagement's common 4-bucket paths use relationship joins. Mixed paths
+ *    containing `never_contacted` use a relationship boolean expression;
+ *    other uncommon mixed paths retain the legacy side-read fallback.
  *  - List Count uses the indexed `property_stack_counts` view (not a
  *    correlated subquery). Two round-trips, single-digit ms each at v1.
  *  - equity_pct relies on the stored generated column from migration 057;
@@ -187,6 +187,12 @@ export function filterSelectFragment(blocks: BlockStack): string | null {
       continue;
     }
 
+    if (block.values.length > 1 && block.values.includes("never_contacted")) {
+      fragments.add("engagement_inbound:messages(direction)");
+      fragments.add("engagement_outbound:messages(direction)");
+      continue;
+    }
+
     if (block.values.length !== 1) continue;
     const bucket = block.values[0];
     if (bucket === "never_contacted") {
@@ -206,6 +212,9 @@ export function filterSelectFragment(blocks: BlockStack): string | null {
       fragments.add("contacted_messages:messages!inner(direction)");
     } else if (isNoInboundBlock(block)) {
       fragments.add("replied_messages:messages!inner(direction)");
+    } else if (block.values.length > 1 && block.values.includes("never_contacted")) {
+      fragments.add("engagement_inbound:messages(direction)");
+      fragments.add("engagement_outbound:messages(direction)");
     }
   }
 
@@ -736,15 +745,10 @@ async function applyListCountBlock(
  *   replied         → ≥1 inbound
  *   opted_out       → outreach_dispo IN ('opted_out', 'dnc') (per migration 045)
  *
- * v1 perf-acceptable at 1,462 prospects; denorm at 10k. Implementation
- * fetches all message direction rows, computes set membership in JS,
- * applies .in("id", union) for "any" / .not("id","in",union) for "not".
- *
- * For the opted_out bucket, no messages query is needed — outreach_dispo
- * is on `properties` directly, but mixing column predicates with the .in
- * pattern from other buckets gets messy. v1 simplification: pre-fetch the
- * properties whose outreach_dispo is in the opt-out set and union with the
- * messages-derived sets.
+ * Message-state combinations containing `never_contacted` use two embedded
+ * message relationships and one PostgREST boolean expression. This keeps the
+ * anti-join on the database side; the paginated parent query never receives a
+ * copied property-id universe.
  */
 async function applyEngagementBlock(
   builder: ProspectsBuilder,
@@ -813,6 +817,19 @@ async function applyEngagementBlock(
     }
   }
 
+  // `never_contacted` is the only bucket whose inclusion is an anti-join.
+  // For a mixed selection, express the complete truth table over the three
+  // mutually exclusive message states (never, attempted, replied). Opted-out
+  // is orthogonal and is folded into the same expression. This preserves the
+  // old set-union/set-complement semantics without materializing IDs.
+  if (
+    block.values.length > 1 &&
+    block.values.includes("never_contacted") &&
+    (block.combinator === "any" || block.combinator === "not")
+  ) {
+    return { builder: applyMixedEngagementJoin(builder, block) };
+  }
+
   const wantedBuckets = new Set(block.values);
 
   // Pre-fetch all messages with a property_id so we can categorize.
@@ -841,26 +858,17 @@ async function applyEngagementBlock(
     );
   }
 
-  // Compute per-bucket sets.
+  // Compute per-bucket sets for the remaining uncommon fallback paths.
   const repliedPids = inboundPids;
   const attemptedPids = new Set<string>();
   for (const pid of outboundPids) {
     if (!inboundPids.has(pid)) attemptedPids.add(pid);
   }
-  // never_contacted = NOT in inbound AND NOT in outbound. We can't enumerate
-  // this set without a properties query; instead, we use the negation
-  // strategy: collect the union of contacted-or-replied as the EXCLUDED set,
-  // then apply .not("id","in", ...) for the never_contacted bucket alone.
-  // For combinator='any' across multiple buckets including never_contacted,
-  // we OR in JS by computing the inclusion set per bucket and unioning.
-  // never_contacted's inclusion set = "all properties minus contacted union".
-  // To avoid a properties enumeration, we represent never_contacted by
-  // applying .not("id","in", contactedUnion) directly; if the user combines
-  // it with other buckets, we promote to a properties enumeration.
 
   const contactedUnion = new Set<string>([...inboundPids, ...outboundPids]);
 
-  // Single-bucket fast paths
+  // Single-bucket fallback paths for the uncommon buckets not covered by the
+  // relationship aliases above.
   if (block.values.length === 1) {
     const onlyBucket = block.values[0];
     if (onlyBucket === "replied") {
@@ -923,27 +931,13 @@ async function applyEngagementBlock(
     }
   }
 
-  // Multi-bucket case (combinator any/all): compute the inclusion union.
-  // For never_contacted in a multi-bucket selection we'd need to enumerate
-  // the universe; pre-fetch all property_ids (RLS-scoped, soft-delete
-  // filtered) once.
+  // Remaining multi-bucket cases do not contain never_contacted, so their
+  // inclusion/complement sets can still be represented by side-read IDs.
   const includeIds = new Set<string>();
-  let needsUniverse = false;
   for (const bucket of block.values) {
     if (bucket === "replied") for (const id of repliedPids) includeIds.add(id);
     else if (bucket === "attempted") for (const id of attemptedPids) includeIds.add(id);
     else if (bucket === "opted_out") for (const id of optedPids) includeIds.add(id);
-    else if (bucket === "never_contacted") needsUniverse = true;
-  }
-
-  if (needsUniverse) {
-    const { data: allRows } = await sb
-      .from("properties")
-      .select("id")
-      .is("deleted_at", null);
-    for (const r of (allRows ?? []) as Array<{ id: string }>) {
-      if (!contactedUnion.has(r.id)) includeIds.add(r.id);
-    }
   }
 
   const ids = [...includeIds];
@@ -959,6 +953,60 @@ async function applyEngagementBlock(
       ? builder.in("id", ids)
       : builder.in("id", NO_MATCH_SENTINEL),
   };
+}
+
+function applyMixedEngagementJoin(
+  builder: ProspectsBuilder,
+  block: Extract<FilterBlock, { kind: "engagement" }>,
+): ProspectsBuilder {
+  const inbound = "engagement_inbound.not.is.null";
+  const noInbound = "engagement_inbound.is.null";
+  const outbound = "engagement_outbound.not.is.null";
+  const noOutbound = "engagement_outbound.is.null";
+  const never = `and(${noInbound},${noOutbound})`;
+  const attempted = `and(${outbound},${noInbound})`;
+  const replied = inbound;
+  type MessageBucket = "never_contacted" | "attempted" | "replied";
+  const messageBuckets = new Set<MessageBucket>([
+    "never_contacted",
+    "attempted",
+    "replied",
+  ]);
+  const optedOut = "outreach_dispo.in.(opted_out,dnc)";
+  const notOptedOut =
+    "and(outreach_dispo.is.null,outreach_dispo.not.in.(opted_out,dnc))";
+
+  const selectedMessageBuckets = new Set<MessageBucket>(
+    block.values.filter(
+      (value): value is MessageBucket => messageBuckets.has(value as MessageBucket),
+    ),
+  );
+  const selectedOptedOut = block.values.includes("opted_out");
+  const stateTerms = new Map([
+    ["never_contacted", never],
+    ["attempted", attempted],
+    ["replied", replied],
+  ]);
+
+  const terms =
+    block.combinator === "any"
+      ? block.values.map((value) =>
+          value === "opted_out"
+            ? optedOut
+            : stateTerms.get(value as MessageBucket)!,
+        )
+      : [...stateTerms.entries()]
+          .filter(([value]) => !selectedMessageBuckets.has(value as MessageBucket))
+          .map(([, term]) => term);
+
+  if (selectedOptedOut && block.combinator === "not") {
+    for (let i = 0; i < terms.length; i++) {
+      terms[i] = `and(${terms[i]},${notOptedOut})`;
+    }
+  }
+
+  if (terms.length === 0) return builder.in("id", NO_MATCH_SENTINEL);
+  return builder.or(terms.join(","));
 }
 
 /**

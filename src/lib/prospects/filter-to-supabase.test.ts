@@ -1208,6 +1208,20 @@ describe("filterSelectFragment", () => {
     ).toBe("inbound_messages:messages(direction)");
   });
 
+  it("adds bounded anti-join aliases for mixed never_contacted + replied engagement", () => {
+    expect(
+      filterSelectFragment([
+        block({
+          kind: "engagement",
+          combinator: "any",
+          values: ["never_contacted", "replied"],
+        }) as FilterBlock,
+      ]),
+    ).toBe(
+      "engagement_inbound:messages(direction), engagement_outbound:messages(direction)",
+    );
+  });
+
   it("adds the list-count anti-join alias for max-only ranges", () => {
     expect(
       filterSelectFragment([
@@ -1552,6 +1566,42 @@ describe("applyBlock: engagement (4-bucket pre-fetch)", () => {
     expect(calls).toEqual([
       "eq(inbound_messages.direction,inbound)",
       "is(inbound_messages,null)",
+    ]);
+  });
+  it("mixed never_contacted + replied uses a relationship boolean expression without side reads", async () => {
+    const { proxy, calls } = mockBuilder();
+    const m = mockSupabaseClient(
+      new Map([
+        [
+          "messages",
+          {
+            data: [
+              { property_id: "p-never", direction: "outbound" },
+              { property_id: "p-replied", direction: "inbound" },
+            ],
+            error: null,
+          },
+        ],
+        [
+          "properties",
+          { data: [{ id: "p-never" }, { id: "p-replied" }], error: null },
+        ],
+      ]),
+    );
+
+    await applyBlock(
+      proxy,
+      block({
+        kind: "engagement",
+        combinator: "any",
+        values: ["never_contacted", "replied"],
+      }) as FilterBlock,
+      m.sb,
+    );
+
+    expect(m.calls).toEqual([]);
+    expect(calls).toEqual([
+      "or(and(engagement_inbound.is.null,engagement_outbound.is.null),engagement_inbound.not.is.null)",
     ]);
   });
   it("not never_contacted → filters through contacted messages without id expansion", async () => {
