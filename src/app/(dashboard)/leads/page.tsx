@@ -5,6 +5,7 @@ import { PageHeader } from "@/components/page-header";
 import { buttonVariants } from "@/components/ui/button";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
+import type { Database } from "@/lib/supabase/types";
 
 import { Kanban } from "./kanban";
 import { truncateMessagePreview } from "../properties/prospects-query";
@@ -21,6 +22,31 @@ type LeadsSearchParams = {
   skip_traced?: string;
   stale?: string;
   sequence_ended?: string;
+};
+
+const LEAD_PAGE_SIZE = 500;
+const LEAD_SELECT = `id, address, city, state, zip, market, status, is_vacant, cass_status, absentee_flag, assigned_user_id, motivation_level, homeowner, has_unread`;
+
+type LeadRow = Pick<
+  Database["public"]["Tables"]["properties"]["Row"],
+  | "id"
+  | "address"
+  | "city"
+  | "state"
+  | "zip"
+  | "market"
+  | "status"
+  | "is_vacant"
+  | "cass_status"
+  | "absentee_flag"
+  | "assigned_user_id"
+  | "motivation_level"
+> & {
+  homeowner: Pick<
+    Database["public"]["Tables"]["contacts"]["Row"],
+    "first_name" | "last_name" | "entity_name"
+  > | null;
+  has_unread: boolean;
 };
 
 export default async function LeadsPage({
@@ -42,12 +68,12 @@ export default async function LeadsPage({
   // Prospects live on /properties (the data-lake surface) and are promoted
   // into the kanban via qualifyLead(). Filter them out server-side so the
   // kanban query returns only workable pipeline leads.
+  // The view performs the skip-trace anti-join in Postgres.  It avoids both
+  // unbounded cache reads and an URL-sized property-id/address list.
+  const leadTable = params.skip_traced === "false" ? "leads_unskip_traced" : "leads_board";
   let q = supabase
-    .from("properties")
-    .select(
-      `id, address, city, state, zip, market, status, is_vacant, cass_status, absentee_flag, assigned_user_id, motivation_level,
-       homeowner:contacts!properties_homeowner_contact_id_fkey(first_name, last_name, entity_name)`,
-    )
+    .from(leadTable)
+    .select(LEAD_SELECT)
     .neq("status", "prospect")
     .is("deleted_at", null)
     // Hide leads that were dispositioned dead — but only while they're
@@ -99,93 +125,73 @@ export default async function LeadsPage({
     }
   }
 
-  // Dashboard click-through: leads with no skip-trace cache row for their
-  // address — the "phone numbers gathering" gap. Two-step: collect traced
-  // property ids (UUIDs), then exclude them. Going via id (not the raw
-  // address) keeps the not-in clause safe regardless of address content.
-  if (params.skip_traced === "false") {
-    const { data: tracedAddresses } = await supabase
-      .from("skip_trace_cache")
-      .select("address_normalized");
-    const addrs = (tracedAddresses ?? [])
-      .map((r) => r.address_normalized)
-      .filter((v): v is string => Boolean(v));
-    if (addrs.length > 0) {
-      const { data: tracedProps } = await supabase
-        .from("properties")
-        .select("id")
-        .in("address_normalized", addrs);
-      const tracedIds = (tracedProps ?? []).map((p) => p.id);
-      if (tracedIds.length > 0) {
-        q = q.not("id", "in", `(${tracedIds.join(",")})`);
-      }
-    }
-  }
-
-  const { data: leads, error } = await q
+  const { data: fetchedLeads, error } = await q
     .order("created_at", { ascending: false })
-    .limit(500);
+    .limit(LEAD_PAGE_SIZE + 1);
+  const wasTruncated = (fetchedLeads?.length ?? 0) > LEAD_PAGE_SIZE;
+  const leads = (fetchedLeads ?? []).slice(0, LEAD_PAGE_SIZE) as LeadRow[];
   const activeFilter = describeFilter(params);
 
-  // Which properties have any unread inbound messages? One tiny query against
-  // the partial index `idx_messages_unread_inbound`, deduped to a Set that
-  // the kanban uses to render a red dot on the card.
-  const { data: unreadRows } = await supabase
-    .from("messages")
-    .select("property_id")
-    .eq("direction", "inbound")
-    .is("read_at", null)
-    .not("property_id", "is", null);
+  // `has_unread` is computed by the board view, so this page does not issue an
+  // unbounded messages query or send a 500-id URL to PostgREST.
+  const visibleLeadIds = leads.map((l) => l.id);
+  const shownPropertyIds = visibleLeadIds;
+  const lastMessagesPromise = shownPropertyIds.length
+    ? supabase
+        .from("messages")
+        .select("property_id, body, created_at")
+        .in("property_id", shownPropertyIds)
+        .order("created_at", { ascending: false })
+    : Promise.resolve({ data: [] as { property_id: string | null; body: string | null; created_at: string }[] });
+  const membershipsPromise = shownPropertyIds.length
+    ? supabase
+        .from("property_lists")
+        .select("property_id, list_id, lists!property_lists_list_id_fkey(name, color, archived_at)")
+        .in("property_id", shownPropertyIds)
+    : Promise.resolve({ data: [] as never[] });
+  const tagsPromise = shownPropertyIds.length
+    ? supabase
+        .from("property_tags")
+        .select("property_id, tag_id, tags!property_tags_tag_id_fkey(name, color, category)")
+        .in("property_id", shownPropertyIds)
+    : Promise.resolve({ data: [] as never[] });
+  const [{ data: lastMsgRows }, { data: memberships }, { data: pTags }] =
+    await Promise.all([lastMessagesPromise, membershipsPromise, tagsPromise]);
   const unreadPropertyIds = new Set<string>();
-  for (const r of unreadRows ?? []) {
-    if (r.property_id) unreadPropertyIds.add(r.property_id);
+  for (const lead of leads) {
+    if (lead.has_unread) unreadPropertyIds.add(lead.id);
   }
 
   // Latest message per property in the visible kanban — drives the
   // italic-quoted preview under each lead card. Same shape as the
   // prospects table's last-message column. Single batched query, then
   // walk in JS taking the first row per property_id (ordered desc).
-  const visibleLeadIds = (leads ?? []).map((l) => l.id);
   const lastMessageByPropertyId: Record<string, string> = {};
-  if (visibleLeadIds.length > 0) {
-    const { data: lastMsgRows } = await supabase
-      .from("messages")
-      .select("property_id, body, created_at")
-      .in("property_id", visibleLeadIds)
-      .order("created_at", { ascending: false });
-    for (const m of lastMsgRows ?? []) {
-      if (!m.property_id) continue;
-      if (lastMessageByPropertyId[m.property_id] !== undefined) continue;
-      const preview = truncateMessagePreview(m.body ?? null);
-      if (preview) lastMessageByPropertyId[m.property_id] = preview;
-    }
+  for (const m of lastMsgRows ?? []) {
+    if (!m.property_id) continue;
+    if (lastMessageByPropertyId[m.property_id] !== undefined) continue;
+    const preview = truncateMessagePreview(m.body ?? null);
+    if (preview) lastMessageByPropertyId[m.property_id] = preview;
   }
 
   // List memberships for the shown properties. One query, then group in
   // JS — PostgREST embedded resource with a filter would need the FK name
   // dance, and a flat join is simpler. The kanban card renders up to 3
   // list name badges and a "3 lists" stack chip.
-  const shownPropertyIds = (leads ?? []).map((l) => l.id);
   const listMembershipsByProperty = new Map<
     string,
     { listId: string; name: string; color: string | null }[]
   >();
-  if (shownPropertyIds.length > 0) {
-    const { data: memberships } = await supabase
-      .from("property_lists")
-      .select("property_id, list_id, lists!property_lists_list_id_fkey(name, color, archived_at)")
-      .in("property_id", shownPropertyIds);
-    for (const m of memberships ?? []) {
-      // Exclude archived lists — memberships stay in the table, but the
-      // card shouldn't advertise a cohort that's been retired.
-      const list = m.lists as
-        | { name: string; color: string | null; archived_at: string | null }
-        | null;
-      if (!list || list.archived_at) continue;
-      const arr = listMembershipsByProperty.get(m.property_id) ?? [];
-      arr.push({ listId: m.list_id, name: list.name, color: list.color });
-      listMembershipsByProperty.set(m.property_id, arr);
-    }
+  for (const m of memberships ?? []) {
+    // Exclude archived lists — memberships stay in the table, but the
+    // card shouldn't advertise a cohort that's been retired.
+    const list = m.lists as
+      | { name: string; color: string | null; archived_at: string | null }
+      | null;
+    if (!list || list.archived_at) continue;
+    const arr = listMembershipsByProperty.get(m.property_id) ?? [];
+    arr.push({ listId: m.list_id, name: list.name, color: list.color });
+    listMembershipsByProperty.set(m.property_id, arr);
   }
   // Serialize to a plain object for the client component boundary.
   const listMemberships: Record<
@@ -201,20 +207,14 @@ export default async function LeadsPage({
     string,
     { tagId: string; name: string; color: string | null }[]
   >();
-  if (shownPropertyIds.length > 0) {
-    const { data: pTags } = await supabase
-      .from("property_tags")
-      .select("property_id, tag_id, tags!property_tags_tag_id_fkey(name, color, category)")
-      .in("property_id", shownPropertyIds);
-    for (const r of pTags ?? []) {
-      const tag = r.tags as
-        | { name: string; color: string | null; category: string }
-        | null;
-      if (!tag || tag.category !== "custom") continue;
-      const arr = customTagsByProperty.get(r.property_id) ?? [];
-      arr.push({ tagId: r.tag_id, name: tag.name, color: tag.color });
-      customTagsByProperty.set(r.property_id, arr);
-    }
+  for (const r of pTags ?? []) {
+    const tag = r.tags as
+      | { name: string; color: string | null; category: string }
+      | null;
+    if (!tag || tag.category !== "custom") continue;
+    const arr = customTagsByProperty.get(r.property_id) ?? [];
+    arr.push({ tagId: r.tag_id, name: tag.name, color: tag.color });
+    customTagsByProperty.set(r.property_id, arr);
   }
   const customTags: Record<
     string,
@@ -253,8 +253,12 @@ export default async function LeadsPage({
         description={
           <>
             Drag to move leads through the pipeline.
-            {leads?.length ? (
-              <> · Showing the latest {leads.length} of your lead pool.</>
+            {leads.length ? (
+              <>
+                {" · Showing the latest "}
+                {leads.length}
+                {wasTruncated ? " of 500+" : ""} of your lead pool.
+              </>
             ) : null}
           </>
         }
@@ -287,7 +291,7 @@ export default async function LeadsPage({
         <div className="text-destructive text-sm">
           Failed to load leads: {error.message}
         </div>
-      ) : leads && leads.length > 0 ? (
+      ) : leads.length > 0 ? (
         <Kanban
           initialLeads={leads}
           unreadPropertyIds={Array.from(unreadPropertyIds)}
