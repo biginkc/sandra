@@ -49,15 +49,19 @@ where not exists (
   -- street|city|state[|zip] key) directly with properties.address_normalized
   -- (the ingest/CASS writer's free-form address string), so it excluded no
   -- normally written leads.  Rebuild the cache key from the property
-  -- columns, matching normalizeAddress(): lowercase, trim, omit blank
-  -- components, then join with '|'.  Therefore this filter intentionally
+  -- columns, matching skip-trace/cache.ts normalizeAddress(): filter raw
+  -- falsy values first, then lowercase/trim the survivors and join with '|'.
+  -- In particular, whitespace-only values are truthy in TypeScript, so they
+  -- survive as empty pipe positions after trim.  Therefore this filter intentionally
   -- changes the operator's "Not skip-traced" board: leads with a matching
   -- cache row now disappear from that board, and leads without one remain.
-  where st.address_normalized = concat_ws(
-    '|',
-    nullif(lower(trim(b.address)), ''),
-    nullif(lower(trim(b.city)), ''),
-    nullif(lower(trim(b.state)), ''),
-    nullif(lower(trim(b.zip)), '')
+  where st.address_normalized = array_to_string(
+    array(
+      select lower(trim(component))
+      from unnest(array[b.address, b.city, b.state, b.zip]) as address_parts(component)
+      where component is not null
+        and component <> ''
+    ),
+    '|'
   )
 );
