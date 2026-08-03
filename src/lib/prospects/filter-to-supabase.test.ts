@@ -1218,6 +1218,20 @@ describe("filterSelectFragment", () => {
       ]),
     ).toBe("stack_exclusion:property_stack_counts(stack_count)");
   });
+
+  it("adds bounded relationship aliases for unread inbound and open tasks", () => {
+    expect(
+      filterSelectFragment([
+        block({ kind: "has_unread_inbound", tri: "yes" }) as FilterBlock,
+        block({ kind: "has_open_tasks", tri: "no" }) as FilterBlock,
+      ]),
+    ).toBe(
+      [
+        "unread_inbound_messages:messages!inner(property_id,direction,read_at)",
+        "open_tasks:tasks(related_property_id,status)",
+      ].join(", "),
+    );
+  });
 });
 
 describe("applyBlock: tag (pre-fetch via property_tags)", () => {
@@ -1576,18 +1590,20 @@ describe("applyBlock: engagement (4-bucket pre-fetch)", () => {
   });
 });
 
-describe("applyBlock: has_unread_inbound (tri-state pre-fetch)", () => {
-  it("'yes' → pre-fetches messages where direction=inbound + read_at is null", async () => {
+describe("applyBlock: has_unread_inbound (tri-state relationship join)", () => {
+  it("'yes' → filters the embedded inbound unread relationship", async () => {
     const { proxy, calls } = mockBuilder();
     const m = mockSupabaseClient();
-    m.setReturn("messages", [{ property_id: "pX" }]);
     await applyBlock(
       proxy,
       block({ kind: "has_unread_inbound", tri: "yes" }) as FilterBlock,
       m.sb,
     );
-    expect(m.calls.some((c) => c.startsWith("from(messages)"))).toBe(true);
-    expect(calls.some((c) => c.startsWith("in(id,"))).toBe(true);
+    expect(m.calls).toEqual([]);
+    expect(calls).toEqual([
+      "eq(unread_inbound_messages.direction,inbound)",
+      "is(unread_inbound_messages.read_at,null)",
+    ]);
   });
   it("'any' → no pre-fetch, no predicate", async () => {
     const { proxy, calls } = mockBuilder();
@@ -1600,43 +1616,48 @@ describe("applyBlock: has_unread_inbound (tri-state pre-fetch)", () => {
     expect(m.calls.length).toBe(0);
     expect(calls).toEqual([]);
   });
-  it("'no' empty pre-fetch → no predicate (everyone qualifies as 'no unread')", async () => {
+  it("'no' → applies an anti-join over the embedded inbound unread relationship", async () => {
     const { proxy, calls } = mockBuilder();
     const m = mockSupabaseClient();
-    m.setReturn("messages", []);
     await applyBlock(
       proxy,
       block({ kind: "has_unread_inbound", tri: "no" }) as FilterBlock,
       m.sb,
     );
-    // No predicate (empty negative set means nothing is excluded).
-    expect(calls).toEqual([]);
+    expect(m.calls).toEqual([]);
+    expect(calls).toEqual([
+      "eq(unread_inbound_messages.direction,inbound)",
+      "is(unread_inbound_messages.read_at,null)",
+      "is(unread_inbound_messages,null)",
+    ]);
   });
 });
 
-describe("applyBlock: has_open_tasks (tri-state pre-fetch via tasks)", () => {
-  it("'yes' → pre-fetches tasks where status='open', applies .in('id', property_ids)", async () => {
+describe("applyBlock: has_open_tasks (tri-state relationship join)", () => {
+  it("'yes' → filters the embedded open-task relationship", async () => {
     const { proxy, calls } = mockBuilder();
     const m = mockSupabaseClient();
-    m.setReturn("tasks", [{ related_property_id: "pX" }]);
     await applyBlock(
       proxy,
       block({ kind: "has_open_tasks", tri: "yes" }) as FilterBlock,
       m.sb,
     );
-    expect(m.calls.some((c) => c.startsWith("from(tasks)"))).toBe(true);
-    expect(calls.some((c) => c.startsWith("in(id,"))).toBe(true);
+    expect(m.calls).toEqual([]);
+    expect(calls).toEqual(["eq(open_tasks.status,open)"]);
   });
-  it("'no' with task rows → .not('id','in', ...)", async () => {
+  it("'no' → applies an anti-join over the embedded open-task relationship", async () => {
     const { proxy, calls } = mockBuilder();
     const m = mockSupabaseClient();
-    m.setReturn("tasks", [{ related_property_id: "pX" }]);
     await applyBlock(
       proxy,
       block({ kind: "has_open_tasks", tri: "no" }) as FilterBlock,
       m.sb,
     );
-    expect(calls.some((c) => c.startsWith("not(id,in,"))).toBe(true);
+    expect(m.calls).toEqual([]);
+    expect(calls).toEqual([
+      "eq(open_tasks.status,open)",
+      "is(open_tasks,null)",
+    ]);
   });
 });
 

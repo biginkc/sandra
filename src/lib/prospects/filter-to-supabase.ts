@@ -14,19 +14,19 @@
  *  - Soft-delete (.is('deleted_at', null)) is the CALLER's responsibility,
  *    not this function's. The base query in page.tsx adds it before the
  *    translator runs.
- *  - Pre-fetch helpers (list, list_count, engagement, has_unread_inbound,
- *    has_open_tasks, tag) issue a side query through the supabase client
- *    `sb`, then layer .in("id", ids) on the main builder. When the pre-fetch
- *    yields zero IDs, the helper short-circuits with an impossible-but-valid
- *    UUID so the page renders 0 rows instead of erroring on an empty .in()
- *    list or sending an invalid UUID to PostgREST.
+ *  - Pre-fetch helpers (list, engagement, tag) may issue side queries through
+ *    the Supabase client `sb`, then layer predicates on the main builder.
+ *    The unread-inbound and open-task blocks use relationship joins instead,
+ *    so their result sets are bounded by the paginated parent query rather
+ *    than copied into an outer `id IN (...)` list.
  *  - The RLS layer (migration 054) is what enforces org-scoping; this file
  *    never bypasses it. The supabase client passed in is the user-bound
  *    client from src/lib/supabase/server.ts.
  *
  * Performance notes:
- *  - Engagement 4-bucket logic uses two messages reads + JS set arithmetic.
- *    v1 perf-acceptable at 1,462 prospects; denorm at 10k.
+ *  - Engagement's common 4-bucket paths use relationship joins. Rare mixed
+ *    combinations that cannot be expressed as one PostgREST relationship
+ *    predicate retain the legacy side-read fallback for exact semantics.
  *  - List Count uses the indexed `property_stack_counts` view (not a
  *    correlated subquery). Two round-trips, single-digit ms each at v1.
  *  - equity_pct relies on the stored generated column from migration 057;
@@ -80,32 +80,35 @@ export async function applyFilters(
   const useEmbeddedNegativeTagBlocks =
     blocks.filter(isEmbeddedNegativeTagBlock).length <= 1;
 
-  for (const block of blocks) {
-    if (block.kind === "list") {
-      const r = await applyListBlock(
-        b,
-        block,
-        sb,
-        useEmbeddedPositiveListBlocks,
-        useEmbeddedNegativeListBlocks,
-      );
-      b = r.builder;
-      continue;
-    }
-    if (block.kind === "tag") {
-      const r = await applyTagBlock(
-        b,
-        block,
-        sb,
-        useEmbeddedPositiveTagBlocks,
-        useEmbeddedNegativeTagBlocks,
-      );
-      b = r.builder;
-      continue;
-    }
-    const r = await applyBlock(b, block, sb);
-    b = r.builder;
-  }
+  // The side reads are independent: each block only reads from `sb` and
+  // returns a predicate to add to the same base builder. Start them together,
+  // then apply the returned predicates in stack order so the filter contract
+  // remains unchanged while network latency is paid once per wave.
+  const results = await Promise.all(
+    blocks.map((block) => {
+      if (block.kind === "list") {
+        return applyListBlock(
+          b,
+          block,
+          sb,
+          useEmbeddedPositiveListBlocks,
+          useEmbeddedNegativeListBlocks,
+        );
+      }
+      if (block.kind === "tag") {
+        return applyTagBlock(
+          b,
+          block,
+          sb,
+          useEmbeddedPositiveTagBlocks,
+          useEmbeddedNegativeTagBlocks,
+        );
+      }
+      return applyBlock(b, block, sb);
+    }),
+  );
+
+  for (const r of results) b = r.builder;
   return { builder: b };
 }
 
@@ -203,6 +206,23 @@ export function filterSelectFragment(blocks: BlockStack): string | null {
       fragments.add("contacted_messages:messages!inner(direction)");
     } else if (isNoInboundBlock(block)) {
       fragments.add("replied_messages:messages!inner(direction)");
+    }
+  }
+
+  for (const block of blocks) {
+    if (block.kind === "has_unread_inbound" && block.tri !== "any") {
+      fragments.add(
+        block.tri === "yes"
+          ? "unread_inbound_messages:messages!inner(property_id,direction,read_at)"
+          : "unread_inbound_messages:messages(property_id,direction,read_at)",
+      );
+    }
+    if (block.kind === "has_open_tasks" && block.tri !== "any") {
+      fragments.add(
+        block.tri === "yes"
+          ? "open_tasks:tasks!inner(related_property_id,status)"
+          : "open_tasks:tasks(related_property_id,status)",
+      );
     }
   }
 
@@ -346,9 +366,14 @@ export async function applyBlock(
     case "engagement":
       return await applyEngagementBlock(builder, block, sb);
     case "has_unread_inbound":
-      return await applyHasUnreadInboundBlock(builder, block.tri, sb);
+      return {
+        builder: applyHasUnreadInboundJoin(
+          builder,
+          block.tri,
+        ),
+      };
     case "has_open_tasks":
-      return await applyHasOpenTasksBlock(builder, block.tri, sb);
+      return { builder: applyHasOpenTasksJoin(builder, block.tri) };
 
     default: {
       const _exhaustive: never = block;
@@ -941,40 +966,17 @@ async function applyEngagementBlock(
  * (per CONTEXT line 21) — direction='inbound' AND read_at IS NULL.
  * tri-state: any = no-op, yes = .in(id, unread_pids), no = .not on the set.
  */
-async function applyHasUnreadInboundBlock(
+function applyHasUnreadInboundJoin(
   builder: ProspectsBuilder,
   tri: TriBool,
-  sb: SbClient,
-): Promise<BuilderResult> {
-  if (tri === "any") return { builder };
-
-  const { data } = await sb
-    .from("messages")
-    .select("property_id")
-    .eq("direction", "inbound")
-    .is("read_at", null)
-    .not("property_id", "is", null);
-
-  const ids = Array.from(
-    new Set(
-      ((data ?? []) as Array<{ property_id: string | null }>)
-        .map((r) => r.property_id)
-        .filter((x): x is string => typeof x === "string"),
-    ),
-  );
-
-  if (tri === "yes") {
-    return {
-      builder: ids.length
-        ? builder.in("id", ids)
-        : builder.in("id", NO_MATCH_SENTINEL),
-    };
-  }
-  // tri === "no"
-  if (ids.length === 0) return { builder }; // empty negative set → no predicate
-  return {
-    builder: builder.not("id", "in", `(${ids.map((id) => `"${id}"`).join(",")})`),
-  };
+): ProspectsBuilder {
+  if (tri === "any") return builder;
+  const filtered = builder
+    .eq("unread_inbound_messages.direction", "inbound")
+    .is("unread_inbound_messages.read_at", null);
+  return tri === "yes"
+    ? filtered
+    : filtered.is("unread_inbound_messages", null);
 }
 
 /**
@@ -982,36 +984,11 @@ async function applyHasUnreadInboundBlock(
  * `idx_tasks_assignee_open_due` partial-on-status='open'. We filter by
  * status only; the index covers the predicate.
  */
-async function applyHasOpenTasksBlock(
+function applyHasOpenTasksJoin(
   builder: ProspectsBuilder,
   tri: TriBool,
-  sb: SbClient,
-): Promise<BuilderResult> {
-  if (tri === "any") return { builder };
-
-  const { data } = await sb
-    .from("tasks")
-    .select("related_property_id")
-    .eq("status", "open");
-
-  const ids = Array.from(
-    new Set(
-      ((data ?? []) as Array<{ related_property_id: string | null }>)
-        .map((r) => r.related_property_id)
-        .filter((x): x is string => typeof x === "string"),
-    ),
-  );
-
-  if (tri === "yes") {
-    return {
-      builder: ids.length
-        ? builder.in("id", ids)
-        : builder.in("id", NO_MATCH_SENTINEL),
-    };
-  }
-  // tri === "no"
-  if (ids.length === 0) return { builder };
-  return {
-    builder: builder.not("id", "in", `(${ids.map((id) => `"${id}"`).join(",")})`),
-  };
+): ProspectsBuilder {
+  if (tri === "any") return builder;
+  const filtered = builder.eq("open_tasks.status", "open");
+  return tri === "yes" ? filtered : filtered.is("open_tasks", null);
 }
