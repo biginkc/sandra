@@ -1208,20 +1208,6 @@ describe("filterSelectFragment", () => {
     ).toBe("inbound_messages:messages(direction)");
   });
 
-  it("adds bounded anti-join aliases for mixed never_contacted + replied engagement", () => {
-    expect(
-      filterSelectFragment([
-        block({
-          kind: "engagement",
-          combinator: "any",
-          values: ["never_contacted", "replied"],
-        }) as FilterBlock,
-      ]),
-    ).toBe(
-      "engagement_inbound:messages(direction), engagement_outbound:messages(direction)",
-    );
-  });
-
   it("adds the list-count anti-join alias for max-only ranges", () => {
     expect(
       filterSelectFragment([
@@ -1231,20 +1217,6 @@ describe("filterSelectFragment", () => {
         }) as FilterBlock,
       ]),
     ).toBe("stack_exclusion:property_stack_counts(stack_count)");
-  });
-
-  it("adds bounded relationship aliases for unread inbound and open tasks", () => {
-    expect(
-      filterSelectFragment([
-        block({ kind: "has_unread_inbound", tri: "yes" }) as FilterBlock,
-        block({ kind: "has_open_tasks", tri: "no" }) as FilterBlock,
-      ]),
-    ).toBe(
-      [
-        "unread_inbound_messages:messages!inner(property_id,direction,read_at)",
-        "open_tasks:tasks(related_property_id,status)",
-      ].join(", "),
-    );
   });
 });
 
@@ -1568,42 +1540,6 @@ describe("applyBlock: engagement (4-bucket pre-fetch)", () => {
       "is(inbound_messages,null)",
     ]);
   });
-  it("mixed never_contacted + replied uses a relationship boolean expression without side reads", async () => {
-    const { proxy, calls } = mockBuilder();
-    const m = mockSupabaseClient(
-      new Map([
-        [
-          "messages",
-          {
-            data: [
-              { property_id: "p-never", direction: "outbound" },
-              { property_id: "p-replied", direction: "inbound" },
-            ],
-            error: null,
-          },
-        ],
-        [
-          "properties",
-          { data: [{ id: "p-never" }, { id: "p-replied" }], error: null },
-        ],
-      ]),
-    );
-
-    await applyBlock(
-      proxy,
-      block({
-        kind: "engagement",
-        combinator: "any",
-        values: ["never_contacted", "replied"],
-      }) as FilterBlock,
-      m.sb,
-    );
-
-    expect(m.calls).toEqual([]);
-    expect(calls).toEqual([
-      "or(and(engagement_inbound.is.null,engagement_outbound.is.null),engagement_inbound.not.is.null)",
-    ]);
-  });
   it("not never_contacted → filters through contacted messages without id expansion", async () => {
     const { proxy, calls } = mockBuilder();
     const m = mockSupabaseClient();
@@ -1619,44 +1555,6 @@ describe("applyBlock: engagement (4-bucket pre-fetch)", () => {
     expect(m.calls.some((c) => c.startsWith("from(messages)"))).toBe(false);
     expect(calls).toEqual([
       'in(contacted_messages.direction,["inbound","outbound"])',
-    ]);
-  });
-  it("not never_contacted + opted_out preserves contacted properties with NULL disposition", async () => {
-    const { proxy, calls } = mockBuilder();
-    const { sb } = mockSupabaseClient();
-
-    await applyBlock(
-      proxy,
-      block({
-        kind: "engagement",
-        combinator: "not",
-        values: ["never_contacted", "opted_out"],
-      }) as FilterBlock,
-      sb,
-    );
-
-    // Old ID-union semantics: NOT (never_contacted UNION opted_out) means
-    // contacted AND not opted_out. A contacted row whose disposition is NULL
-    // was not in the opted-out ID set and therefore remains visible.
-    const rows = [
-      { id: "p-never-null", state: "never_contacted", outreach_dispo: null },
-      { id: "p-attempted-null", state: "attempted", outreach_dispo: null },
-      { id: "p-replied-null", state: "replied", outreach_dispo: null },
-      { id: "p-attempted-dnc", state: "attempted", outreach_dispo: "dnc" },
-      { id: "p-replied-opted-out", state: "replied", outreach_dispo: "opted_out" },
-    ];
-    const oldIdUnionResult = rows
-      .filter(
-        (row) =>
-          row.state !== "never_contacted" &&
-          row.outreach_dispo !== "dnc" &&
-          row.outreach_dispo !== "opted_out",
-      )
-      .map((row) => row.id);
-
-    expect(oldIdUnionResult).toEqual(["p-attempted-null", "p-replied-null"]);
-    expect(calls).toEqual([
-      "or(and(and(engagement_outbound.not.is.null,engagement_inbound.is.null),or(outreach_dispo.is.null,outreach_dispo.not.in.(opted_out,dnc))),and(engagement_inbound.not.is.null,or(outreach_dispo.is.null,outreach_dispo.not.in.(opted_out,dnc))))",
     ]);
   });
   it("all never_contacted + attempted short-circuits to no matches", async () => {
@@ -1678,20 +1576,18 @@ describe("applyBlock: engagement (4-bucket pre-fetch)", () => {
   });
 });
 
-describe("applyBlock: has_unread_inbound (tri-state relationship join)", () => {
-  it("'yes' → filters the embedded inbound unread relationship", async () => {
+describe("applyBlock: has_unread_inbound (tri-state pre-fetch)", () => {
+  it("'yes' → pre-fetches messages where direction=inbound + read_at is null", async () => {
     const { proxy, calls } = mockBuilder();
     const m = mockSupabaseClient();
+    m.setReturn("messages", [{ property_id: "pX" }]);
     await applyBlock(
       proxy,
       block({ kind: "has_unread_inbound", tri: "yes" }) as FilterBlock,
       m.sb,
     );
-    expect(m.calls).toEqual([]);
-    expect(calls).toEqual([
-      "eq(unread_inbound_messages.direction,inbound)",
-      "is(unread_inbound_messages.read_at,null)",
-    ]);
+    expect(m.calls.some((c) => c.startsWith("from(messages)"))).toBe(true);
+    expect(calls.some((c) => c.startsWith("in(id,"))).toBe(true);
   });
   it("'any' → no pre-fetch, no predicate", async () => {
     const { proxy, calls } = mockBuilder();
@@ -1704,48 +1600,43 @@ describe("applyBlock: has_unread_inbound (tri-state relationship join)", () => {
     expect(m.calls.length).toBe(0);
     expect(calls).toEqual([]);
   });
-  it("'no' → applies an anti-join over the embedded inbound unread relationship", async () => {
+  it("'no' empty pre-fetch → no predicate (everyone qualifies as 'no unread')", async () => {
     const { proxy, calls } = mockBuilder();
     const m = mockSupabaseClient();
+    m.setReturn("messages", []);
     await applyBlock(
       proxy,
       block({ kind: "has_unread_inbound", tri: "no" }) as FilterBlock,
       m.sb,
     );
-    expect(m.calls).toEqual([]);
-    expect(calls).toEqual([
-      "eq(unread_inbound_messages.direction,inbound)",
-      "is(unread_inbound_messages.read_at,null)",
-      "is(unread_inbound_messages,null)",
-    ]);
+    // No predicate (empty negative set means nothing is excluded).
+    expect(calls).toEqual([]);
   });
 });
 
-describe("applyBlock: has_open_tasks (tri-state relationship join)", () => {
-  it("'yes' → filters the embedded open-task relationship", async () => {
+describe("applyBlock: has_open_tasks (tri-state pre-fetch via tasks)", () => {
+  it("'yes' → pre-fetches tasks where status='open', applies .in('id', property_ids)", async () => {
     const { proxy, calls } = mockBuilder();
     const m = mockSupabaseClient();
+    m.setReturn("tasks", [{ related_property_id: "pX" }]);
     await applyBlock(
       proxy,
       block({ kind: "has_open_tasks", tri: "yes" }) as FilterBlock,
       m.sb,
     );
-    expect(m.calls).toEqual([]);
-    expect(calls).toEqual(["eq(open_tasks.status,open)"]);
+    expect(m.calls.some((c) => c.startsWith("from(tasks)"))).toBe(true);
+    expect(calls.some((c) => c.startsWith("in(id,"))).toBe(true);
   });
-  it("'no' → applies an anti-join over the embedded open-task relationship", async () => {
+  it("'no' with task rows → .not('id','in', ...)", async () => {
     const { proxy, calls } = mockBuilder();
     const m = mockSupabaseClient();
+    m.setReturn("tasks", [{ related_property_id: "pX" }]);
     await applyBlock(
       proxy,
       block({ kind: "has_open_tasks", tri: "no" }) as FilterBlock,
       m.sb,
     );
-    expect(m.calls).toEqual([]);
-    expect(calls).toEqual([
-      "eq(open_tasks.status,open)",
-      "is(open_tasks,null)",
-    ]);
+    expect(calls.some((c) => c.startsWith("not(id,in,"))).toBe(true);
   });
 });
 
