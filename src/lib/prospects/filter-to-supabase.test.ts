@@ -1621,6 +1621,44 @@ describe("applyBlock: engagement (4-bucket pre-fetch)", () => {
       'in(contacted_messages.direction,["inbound","outbound"])',
     ]);
   });
+  it("not never_contacted + opted_out preserves contacted properties with NULL disposition", async () => {
+    const { proxy, calls } = mockBuilder();
+    const { sb } = mockSupabaseClient();
+
+    await applyBlock(
+      proxy,
+      block({
+        kind: "engagement",
+        combinator: "not",
+        values: ["never_contacted", "opted_out"],
+      }) as FilterBlock,
+      sb,
+    );
+
+    // Old ID-union semantics: NOT (never_contacted UNION opted_out) means
+    // contacted AND not opted_out. A contacted row whose disposition is NULL
+    // was not in the opted-out ID set and therefore remains visible.
+    const rows = [
+      { id: "p-never-null", state: "never_contacted", outreach_dispo: null },
+      { id: "p-attempted-null", state: "attempted", outreach_dispo: null },
+      { id: "p-replied-null", state: "replied", outreach_dispo: null },
+      { id: "p-attempted-dnc", state: "attempted", outreach_dispo: "dnc" },
+      { id: "p-replied-opted-out", state: "replied", outreach_dispo: "opted_out" },
+    ];
+    const oldIdUnionResult = rows
+      .filter(
+        (row) =>
+          row.state !== "never_contacted" &&
+          row.outreach_dispo !== "dnc" &&
+          row.outreach_dispo !== "opted_out",
+      )
+      .map((row) => row.id);
+
+    expect(oldIdUnionResult).toEqual(["p-attempted-null", "p-replied-null"]);
+    expect(calls).toEqual([
+      "or(and(and(engagement_outbound.not.is.null,engagement_inbound.is.null),or(outreach_dispo.is.null,outreach_dispo.not.in.(opted_out,dnc))),and(engagement_inbound.not.is.null,or(outreach_dispo.is.null,outreach_dispo.not.in.(opted_out,dnc))))",
+    ]);
+  });
   it("all never_contacted + attempted short-circuits to no matches", async () => {
     const { proxy, calls } = mockBuilder();
     const m = mockSupabaseClient();

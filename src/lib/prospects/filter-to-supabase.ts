@@ -974,7 +974,7 @@ function applyMixedEngagementJoin(
   ]);
   const optedOut = "outreach_dispo.in.(opted_out,dnc)";
   const notOptedOut =
-    "and(outreach_dispo.is.null,outreach_dispo.not.in.(opted_out,dnc))";
+    "or(outreach_dispo.is.null,outreach_dispo.not.in.(opted_out,dnc))";
 
   const selectedMessageBuckets = new Set<MessageBucket>(
     block.values.filter(
