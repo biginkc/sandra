@@ -44,8 +44,20 @@ from public.leads_board b
 where not exists (
   select 1
   from public.skip_trace_cache st
-  where st.address_normalized = (
-    lower(trim(b.address)) || '|' || lower(trim(b.city)) || '|' || lower(trim(b.state)) ||
-    case when b.zip is not null and trim(b.zip) <> '' then '|' || lower(trim(b.zip)) else '' end
+  -- This deliberately fixes the old page's broken comparison.  The old
+  -- page compared st.address_normalized (the skip-trace writer's
+  -- street|city|state[|zip] key) directly with properties.address_normalized
+  -- (the ingest/CASS writer's free-form address string), so it excluded no
+  -- normally written leads.  Rebuild the cache key from the property
+  -- columns, matching normalizeAddress(): lowercase, trim, omit blank
+  -- components, then join with '|'.  Therefore this filter intentionally
+  -- changes the operator's "Not skip-traced" board: leads with a matching
+  -- cache row now disappear from that board, and leads without one remain.
+  where st.address_normalized = concat_ws(
+    '|',
+    nullif(lower(trim(b.address)), ''),
+    nullif(lower(trim(b.city)), ''),
+    nullif(lower(trim(b.state)), ''),
+    nullif(lower(trim(b.zip)), '')
   )
 );
