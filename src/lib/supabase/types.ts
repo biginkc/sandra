@@ -3111,6 +3111,31 @@ export type Database = {
         }[]
       }
       dashboard_summary: { Args: never; Returns: Json }
+      outbound_sms_metrics: {
+        Args: {
+          p_campaign_id?: string | null
+          p_day_end?: string | null
+          p_day_start?: string | null
+          p_now?: string | null
+          p_org_id?: string | null
+        }
+        Returns: {
+          delivered: number
+          delivered_without_sent_at_today: number
+          due_queued: number
+          failed: number
+          failed_after_handoff: number
+          failed_today: number
+          handed_off_via_sent_at_today: number
+          last_scheduled_for: string | null
+          next_scheduled_for: string | null
+          outbound_rows: number
+          paused: number
+          pending: number
+          queued: number
+          sent: number
+        }[]
+      }
       delete_contact: {
         Args: { p_contact_id: string; p_reason: string }
         Returns: undefined
