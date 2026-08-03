@@ -130,50 +130,56 @@ async function loadBlockOptions(
   const memberships = await getCallerMemberships();
   const orgId = memberships[0]?.org_id ?? "";
 
-  const { data: countyRows } = await supabase
-    .from("counties")
-    .select("market")
-    .order("market", { ascending: true });
-  const markets: string[] = (countyRows ?? []).map((c) => c.market);
+  const assigneesPromise = orgId
+    ? (async () => {
+        try {
+          const { data } = await createAdminClient().auth.admin.listUsers({
+            perPage: 200,
+          });
+          return (data?.users ?? [])
+            .filter((user) => !!user.email)
+            .map((user) => ({ id: user.id, email: user.email as string }))
+            .sort((a, b) => a.email.localeCompare(b.email));
+        } catch {
+          return [];
+        }
+      })()
+    : Promise.resolve([] as Array<{ id: string; email: string }>);
 
-  const { data: stateRows } = await supabase
-    .from("properties")
-    .select("state")
-    .is("deleted_at", null)
-    .not("state", "is", null);
+  const [countyResult, stateResult, listResult, tagResult, assignees] =
+    await Promise.all([
+      supabase
+        .from("counties")
+        .select("market")
+        .order("market", { ascending: true }),
+      supabase
+        .from("properties")
+        .select("state")
+        .is("deleted_at", null)
+        .not("state", "is", null),
+      supabase
+        .from("lists")
+        .select("id, name, color, archived_at, system_managed")
+        .is("archived_at", null)
+        .order("system_managed", { ascending: false })
+        .order("name", { ascending: true }),
+      supabase
+        .from("tags")
+        .select("id, name, color")
+        .eq("category", "custom")
+        .eq("system_managed", false)
+        .order("name", { ascending: true }),
+      assigneesPromise,
+    ]);
+
+  const markets: string[] = (countyResult.data ?? []).map((c) => c.market);
   const states: string[] = Array.from(
-    new Set((stateRows ?? []).map((row) => row.state).filter(Boolean) as string[]),
+    new Set(
+      (stateResult.data ?? []).map((row) => row.state).filter(Boolean) as string[],
+    ),
   ).sort();
-
-  const { data: listRows } = await supabase
-    .from("lists")
-    .select("id, name, color, archived_at, system_managed")
-    .is("archived_at", null)
-    .order("system_managed", { ascending: false })
-    .order("name", { ascending: true });
-
-  const { data: tagRows } = await supabase
-    .from("tags")
-    .select("id, name, color")
-    .eq("category", "custom")
-    .eq("system_managed", false)
-    .order("name", { ascending: true });
-
-  let assignees: Array<{ id: string; email: string }> = [];
-  if (orgId) {
-    try {
-      const admin = createAdminClient();
-      const { data: usersPage } = await admin.auth.admin.listUsers({
-        perPage: 200,
-      });
-      assignees = (usersPage?.users ?? [])
-        .filter((user) => !!user.email)
-        .map((user) => ({ id: user.id, email: user.email as string }))
-        .sort((a, b) => a.email.localeCompare(b.email));
-    } catch {
-      assignees = [];
-    }
-  }
+  const listRows = listResult.data;
+  const tagRows = tagResult.data;
 
   return {
     lists: (listRows ?? []).map((row) => ({
