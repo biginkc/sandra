@@ -47,40 +47,10 @@ export function NotificationsBell({ userId }: { userId: string }) {
     let channel: ReturnType<typeof supabase.channel> | null = null;
 
     const fetchCount = async () => {
-      try {
-        const r = await getUnreadCount();
-        if (!mounted) return;
-        if (r.ok) setUnreadCount(r.data);
-      } catch {
-        // A failed poll must not stop the interval from trying again.
-      }
+      const r = await getUnreadCount();
+      if (!mounted) return;
+      if (r.ok) setUnreadCount(r.data);
     };
-
-    const stopPolling = () => {
-      if (pollId === null) return;
-      clearInterval(pollId);
-      pollId = null;
-    };
-
-    const startPolling = () => {
-      stopPolling();
-      if (document.visibilityState !== "visible") return;
-
-      void fetchCount();
-      pollId = setInterval(() => {
-        void fetchCount();
-      }, 15000);
-    };
-
-    const handleVisibilityChange = () => {
-      if (document.visibilityState === "hidden") {
-        stopPolling();
-      } else {
-        startPolling();
-      }
-    };
-    document.addEventListener("visibilitychange", handleVisibilityChange);
-    startPolling();
 
     const start = async () => {
       // Must await setAuth() BEFORE subscribing — same race as
@@ -124,14 +94,17 @@ export function NotificationsBell({ userId }: { userId: string }) {
         )
         .subscribe();
 
+      await fetchCount();
+
+      // Safety-net poll — low-frequency, catches rare socket drops.
+      pollId = setInterval(fetchCount, 15000);
     };
 
     void start();
 
     return () => {
       mounted = false;
-      stopPolling();
-      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      if (pollId) clearInterval(pollId);
       if (channel) void supabase.removeChannel(channel);
     };
   }, [userId]);
