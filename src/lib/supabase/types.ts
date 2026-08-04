@@ -3070,6 +3070,50 @@ export type Database = {
       }
     }
     Views: {
+      leads_board: {
+        Row: {
+          absentee_flag: boolean | null
+          address: string
+          assigned_user_id: string | null
+          cass_status: string | null
+          city: string
+          created_at: string
+          deleted_at: string | null
+          has_unread: boolean
+          homeowner: Json | null
+          id: string
+          is_vacant: boolean | null
+          market: string | null
+          motivation_level: string | null
+          outreach_dispo: string | null
+          state: string
+          status: string
+          zip: string | null
+        }
+        Relationships: []
+      }
+      leads_unskip_traced: {
+        Row: {
+          absentee_flag: boolean | null
+          address: string
+          assigned_user_id: string | null
+          cass_status: string | null
+          city: string
+          created_at: string
+          deleted_at: string | null
+          has_unread: boolean
+          homeowner: Json | null
+          id: string
+          is_vacant: boolean | null
+          market: string | null
+          motivation_level: string | null
+          outreach_dispo: string | null
+          state: string
+          status: string
+          zip: string | null
+        }
+        Relationships: []
+      }
       property_stack_counts: {
         Row: {
           list_ids: string[] | null
