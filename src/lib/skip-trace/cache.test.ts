@@ -7,7 +7,7 @@ import { normalizeAddress } from "./cache";
 const unskipTracedMigration = readFileSync(
   path.resolve(
     process.cwd(),
-    "supabase/migrations/20260803120000_leads_unskip_traced_view.sql",
+    "supabase/migrations/20260804130000_leads_unskip_traced_view.sql",
   ),
   "utf8",
 );
