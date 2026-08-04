@@ -152,42 +152,90 @@ export default async function PropertiesPage({
   // .eq("status","prospect") so that block's values fully define the active
   // status set (e.g., a saved preset that filters to "lead | contract | closed"
   // shouldn't be ANDed with "prospect" → empty).
-  const hasPipelineStatusBlock = blockStack.some(
-    (b) => b.kind === "pipeline_status",
-  );
-  const propertyListSelect = filterSelectFragment(blockStack);
-  const propertiesSelect = [
-    "id, address, city, state, zip, market, cass_status, is_vacant, created_at, outreach_dispo",
-    propertyListSelect,
-  ]
-    .filter(Boolean)
-    .join(", ");
+  const propertiesPromise = (async () => {
+    const hasPipelineStatusBlock = blockStack.some(
+      (b) => b.kind === "pipeline_status",
+    );
+    const propertyListSelect = filterSelectFragment(blockStack);
+    const propertiesSelect = [
+      "id, address, city, state, zip, market, cass_status, is_vacant, created_at, outreach_dispo",
+      propertyListSelect,
+    ]
+      .filter(Boolean)
+      .join(", ");
 
-  let query = supabase
-    .from("properties")
-    .select(propertiesSelect, { count: "exact" })
-    .is("deleted_at", null);
-  if (!hasPipelineStatusBlock) {
-    query = query.eq("status", "prospect");
-  }
-  if (search) {
-    query = query.ilike("address", `%${search}%`);
-  }
-  // Plan 04 translator — applies all 23 block kinds (vacancy / cass /
-  // engagement / market / assignee / source / state / motivation_level /
-  // pipeline_status / outreach_dispo / list / tag / list_count / beds /
-  // baths / year_built / estimated_value / equity_pct / absentee /
-  // created_date / has_unread_inbound / needs_human_attention /
-  // has_open_tasks). Single source of truth for the Supabase filter
-  // chain — the page no longer hand-rolls per-chip predicates.
-  query = (await applyFilters(query, blockStack, supabase)).builder;
+    let query = supabase
+      .from("properties")
+      .select(propertiesSelect, { count: "exact" })
+      .is("deleted_at", null);
+    if (!hasPipelineStatusBlock) {
+      query = query.eq("status", "prospect");
+    }
+    if (search) {
+      query = query.ilike("address", `%${search}%`);
+    }
+    // Plan 04 translator — applies all 23 block kinds (vacancy / cass /
+    // engagement / market / assignee / source / state / motivation_level /
+    // pipeline_status / outreach_dispo / list / tag / list_count / beds /
+    // baths / year_built / estimated_value / equity_pct / absentee /
+    // created_date / has_unread_inbound / needs_human_attention /
+    // has_open_tasks). Single source of truth for the Supabase filter
+    // chain — the page no longer hand-rolls per-chip predicates.
+    query = (await applyFilters(query, blockStack, supabase)).builder;
 
-  // Stable secondary order on id breaks ties so pagination doesn't skip
-  // or repeat rows when many rows share the primary sort value.
-  const { data: propertyRows, count, error } = await query
-    .order(sort, { ascending: dir === "asc" })
-    .order("id", { ascending: true })
-    .range(from, to);
+    // Stable secondary order on id breaks ties so pagination doesn't skip
+    // or repeat rows when many rows share the primary sort value.
+    return {
+      query: query
+        .order(sort, { ascending: dir === "asc" })
+        .order("id", { ascending: true })
+        .range(from, to),
+    };
+  })();
+
+  // These option reads do not depend on the paginated property rows. Keep
+  // them in one latency wave with the properties query; this is the page's
+  // largest set of independent top-level reads.
+  const optionsPromise = Promise.all([
+    supabase.from("counties").select("market").order("market", { ascending: true }),
+    supabase
+      .from("properties")
+      .select("state")
+      .is("deleted_at", null)
+      .not("state", "is", null),
+    supabase
+      .from("lists")
+      .select("id, name, color, archived_at, system_managed")
+      .is("archived_at", null)
+      .order("system_managed", { ascending: false })
+      .order("name", { ascending: true }),
+    supabase
+      .from("tags")
+      .select("id, name, color")
+      .eq("category", "custom")
+      .eq("system_managed", false)
+      .order("name", { ascending: true }),
+    (async () => {
+      try {
+        const admin = createAdminClient();
+        return await admin.auth.admin.listUsers({ perPage: 200 });
+      } catch {
+        return { data: null };
+      }
+    })(),
+    supabase
+      .from("saved_filters")
+      .select("id, name, filters_json, starred, is_base")
+      .eq("org_id", orgId)
+      .order("is_base", { ascending: false })
+      .order("name", { ascending: true }),
+  ]);
+
+  const [
+    { query: propertyQuery },
+    [countyResult, stateResult, listResult, tagResult, usersResult, presetResult],
+  ] = await Promise.all([propertiesPromise, optionsPromise]);
+  const { data: propertyRows, count, error } = await propertyQuery;
   // Relationship embeds above are select-only filter helpers; the table
   // consumes only property columns, but the optional fields remain typed so
   // future readers can see why the select may include list_filter/list_exclusion.
@@ -251,31 +299,19 @@ export default async function PropertiesPage({
   // ---------------------------------------------------------------
 
   // Markets list — from counties (D-07), already used by the legacy chip.
-  const { data: countyRows } = await supabase
-    .from("counties")
-    .select("market")
-    .order("market", { ascending: true });
+  const { data: countyRows } = countyResult;
   const markets: string[] = (countyRows ?? []).map((c) => c.market);
 
   // Distinct states — pulled live from properties so the picker only
   // surfaces options the org actually has data in. RLS scopes to org.
-  const { data: stateRows } = await supabase
-    .from("properties")
-    .select("state")
-    .is("deleted_at", null)
-    .not("state", "is", null);
+  const { data: stateRows } = stateResult;
   const states: string[] = Array.from(
     new Set((stateRows ?? []).map((r) => r.state).filter(Boolean) as string[]),
   ).sort();
 
   // Active lists — feeds Add to list/Remove from list bulk submenus and
   // the list-block picker in the drawer.
-  const { data: listRows } = await supabase
-    .from("lists")
-    .select("id, name, color, archived_at, system_managed")
-    .is("archived_at", null)
-    .order("system_managed", { ascending: false })
-    .order("name", { ascending: true });
+  const { data: listRows } = listResult;
   const lists: ListOption[] = (listRows ?? []).map((l) => ({
     id: l.id,
     name: l.name,
@@ -284,12 +320,7 @@ export default async function PropertiesPage({
 
   // Custom-category tags only — Feature 3's strict journey-marker model
   // forbids applying source / uploaded / skip-trace tags by hand.
-  const { data: tagRows } = await supabase
-    .from("tags")
-    .select("id, name, color")
-    .eq("category", "custom")
-    .eq("system_managed", false)
-    .order("name", { ascending: true });
+  const { data: tagRows } = tagResult;
   const tags: TagOption[] = (tagRows ?? []).map((t) => ({
     id: t.id,
     name: t.name,
@@ -298,19 +329,11 @@ export default async function PropertiesPage({
 
   // Team members for the Assign submenu + assignee block picker.
   // Admin-only API; non-fatal on failure (the picker just renders empty).
-  let teamMembers: TeamMemberOption[] = [];
-  try {
-    const admin = createAdminClient();
-    const { data: usersPage } = await admin.auth.admin.listUsers({
-      perPage: 200,
-    });
-    teamMembers = (usersPage?.users ?? [])
-      .filter((u) => !!u.email)
-      .map((u) => ({ id: u.id, email: u.email as string }))
-      .sort((a, b) => a.email.localeCompare(b.email));
-  } catch {
-    // Leave teamMembers empty — submenu renders a subtle empty state.
-  }
+  const usersPage = usersResult.data;
+  const teamMembers: TeamMemberOption[] = (usersPage?.users ?? [])
+    .filter((u) => !!u.email)
+    .map((u) => ({ id: u.id, email: u.email as string }))
+    .sort((a, b) => a.email.localeCompare(b.email));
 
   const isAdmin = isAdminEmail(user?.email);
 
@@ -318,12 +341,7 @@ export default async function PropertiesPage({
   // reach (base + their own, starred or not). The QuickFiltersBar fetches
   // its own narrower set (is_base OR (mine AND starred)) for the inline
   // chip row above the table.
-  const { data: presetRows } = await supabase
-    .from("saved_filters")
-    .select("id, name, filters_json, starred, is_base")
-    .eq("org_id", orgId)
-    .order("is_base", { ascending: false })
-    .order("name", { ascending: true });
+  const { data: presetRows } = presetResult;
   const presets = (presetRows ?? []) as Preset[];
 
   // BlockOptions widens `color: string | null` → `color?: string` per the
