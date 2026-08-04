@@ -20,148 +20,60 @@ type MessageRecord = {
   scheduled_for: string | null;
 };
 
-type Filter =
-  | { op: "eq"; column: keyof MessageRecord; value: unknown }
-  | { op: "in"; column: keyof MessageRecord; values: unknown[] }
-  | { op: "not-null"; column: keyof MessageRecord }
-  | { op: "is-null"; column: keyof MessageRecord }
-  | { op: "gte" | "lte" | "lt"; column: keyof MessageRecord; value: string };
-
-class MessageQuery {
-  private readonly filters: Filter[] = [];
-  private isCount = false;
-  private orderColumn: keyof MessageRecord | null = null;
-  private ascending = true;
-  private limitCount: number | null = null;
-
-  constructor(private readonly rows: MessageRecord[]) {}
-
-  select(_columns: string, opts?: { count?: "exact"; head?: boolean }) {
-    this.isCount = opts?.count === "exact" && opts?.head === true;
-    return this;
-  }
-
-  eq(column: keyof MessageRecord, value: unknown) {
-    this.filters.push({ op: "eq", column, value });
-    return this;
-  }
-
-  in(column: keyof MessageRecord, values: unknown[]) {
-    this.filters.push({ op: "in", column, values });
-    return this;
-  }
-
-  not(column: keyof MessageRecord, operator: "is", value: null) {
-    if (operator !== "is" || value !== null) {
-      throw new Error("message metrics test mock only supports not(..., 'is', null)");
-    }
-    this.filters.push({ op: "not-null", column });
-    return this;
-  }
-
-  is(column: keyof MessageRecord, value: null) {
-    if (value !== null) {
-      throw new Error("message metrics test mock only supports is(..., null)");
-    }
-    this.filters.push({ op: "is-null", column });
-    return this;
-  }
-
-  gte(column: keyof MessageRecord, value: string) {
-    this.filters.push({ op: "gte", column, value });
-    return this;
-  }
-
-  lte(column: keyof MessageRecord, value: string) {
-    this.filters.push({ op: "lte", column, value });
-    return this;
-  }
-
-  lt(column: keyof MessageRecord, value: string) {
-    this.filters.push({ op: "lt", column, value });
-    return this;
-  }
-
-  order(column: keyof MessageRecord, opts?: { ascending?: boolean }) {
-    this.orderColumn = column;
-    this.ascending = opts?.ascending ?? true;
-    return this;
-  }
-
-  limit(count: number) {
-    this.limitCount = count;
-    return this;
-  }
-
-  then<TResult1 = unknown, TResult2 = never>(
-    onFulfilled?:
-      | ((value: {
-          count?: number | null;
-          data?: Array<{ scheduled_for: string | null }> | null;
-          error: null;
-        }) => TResult1 | PromiseLike<TResult1>)
-      | null,
-    onRejected?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null,
-  ) {
-    return Promise.resolve(this.execute()).then(onFulfilled, onRejected);
-  }
-
-  private execute() {
-    let filtered = this.rows.filter((row) =>
-      this.filters.every((filter) => matchesFilter(row, filter)),
-    );
-
-    if (this.orderColumn) {
-      const column = this.orderColumn;
-      const direction = this.ascending ? 1 : -1;
-      filtered = [...filtered].sort((a, b) =>
-        String(a[column] ?? "").localeCompare(String(b[column] ?? "")) *
-        direction,
-      );
-    }
-
-    if (this.limitCount !== null) {
-      filtered = filtered.slice(0, this.limitCount);
-    }
-
-    if (this.isCount) {
-      return { count: filtered.length, error: null };
-    }
-
-    return {
-      data: filtered.map((row) => ({ scheduled_for: row.scheduled_for })),
-      error: null,
-    };
-  }
-}
-
-function matchesFilter(row: MessageRecord, filter: Filter): boolean {
-  const value = row[filter.column];
-  switch (filter.op) {
-    case "eq":
-      return value === filter.value;
-    case "in":
-      return filter.values.includes(value);
-    case "not-null":
-      return value !== null && value !== undefined;
-    case "is-null":
-      return value === null || value === undefined;
-    case "gte":
-      return typeof value === "string" && value >= filter.value;
-    case "lte":
-      return typeof value === "string" && value <= filter.value;
-    case "lt":
-      return typeof value === "string" && value < filter.value;
-  }
-}
-
 function createSupabase(rows: MessageRecord[]): SupabaseClient<Database> {
   return {
-    from: vi.fn((table: string) => {
-      if (table !== "messages") {
-        throw new Error(`unexpected table ${table}`);
-      }
-      return new MessageQuery(rows);
+    rpc: vi.fn((_name, args) => {
+      const scoped = rows.filter(
+        (message) =>
+          message.channel === "sms" &&
+          message.direction === "outbound" &&
+          (!args.p_campaign_id || message.campaign_id === args.p_campaign_id) &&
+          (!args.p_org_id || message.org_id === args.p_org_id),
+      );
+      const count = (predicate: (message: MessageRecord) => boolean) =>
+        scoped.filter(predicate).length;
+      const scheduled = scoped
+        .filter((message) => message.status === "queued" && message.scheduled_for)
+        .map((message) => message.scheduled_for as string)
+        .sort();
+      const inDay = (value: string | null) =>
+        value !== null && value >= args.p_day_start && value < args.p_day_end;
+      return Promise.resolve({
+        data: [
+          {
+            outbound_rows: scoped.length,
+            queued: count((m) => m.status === "queued"),
+            paused: count((m) => m.status === "paused"),
+            due_queued: count(
+              (m) =>
+                m.status === "queued" &&
+                m.scheduled_for !== null &&
+                m.scheduled_for <= args.p_now,
+            ),
+            pending: count((m) => m.status === "pending"),
+            sent: count((m) => m.status === "sent"),
+            delivered: count((m) => m.status === "delivered"),
+            failed: count((m) => m.status === "failed"),
+            failed_after_handoff: count(
+              (m) => m.status === "failed" && m.sent_at !== null,
+            ),
+            handed_off_via_sent_at_today: count((m) => inDay(m.sent_at)),
+            delivered_without_sent_at_today: count(
+              (m) =>
+                m.status === "delivered" &&
+                m.sent_at === null &&
+                m.delivered_at !== null &&
+                inDay(m.delivered_at),
+            ),
+            failed_today: count(
+              (m) => m.status === "failed" && inDay(m.failed_at),
+            ),
+            next_scheduled_for: scheduled[0] ?? null,
+            last_scheduled_for: scheduled.at(-1) ?? null,
+          },
+        ],
+        error: null,
+      });
     }),
   } as unknown as SupabaseClient<Database>;
 }
@@ -290,6 +202,15 @@ describe("getOutboundSmsMetrics", () => {
       failedToday: 2,
       nextScheduledFor: "2026-06-30T17:59:00.000Z",
       lastScheduledFor: "2026-06-30T19:00:00.000Z",
+    });
+
+    expect(supabase.rpc).toHaveBeenCalledTimes(1);
+    expect(supabase.rpc).toHaveBeenCalledWith("outbound_sms_metrics", {
+      p_campaign_id: "campaign-a",
+      p_org_id: "org-a",
+      p_now: "2026-06-30T18:00:00.000Z",
+      p_day_start: "2026-06-30T05:00:00.000Z",
+      p_day_end: "2026-07-01T05:00:00.000Z",
     });
   });
 });
