@@ -58,8 +58,19 @@ vi.mock("@/lib/supabase/client", () => ({
 }));
 
 afterEach(() => {
+  Object.defineProperty(document, "visibilityState", {
+    configurable: true,
+    value: "visible",
+  });
   vi.clearAllMocks();
 });
+
+function setVisibility(state: "hidden" | "visible") {
+  Object.defineProperty(document, "visibilityState", {
+    configurable: true,
+    value: state,
+  });
+}
 
 const HOUR_MS = 60 * 60 * 1000;
 
@@ -68,6 +79,42 @@ function isoMinusHours(h: number): string {
 }
 
 describe("<NotificationsBell />", () => {
+  it("does not overlap an initial count request with a visibility refresh", async () => {
+    let resolveCount!: (value: { ok: true; data: number }) => void;
+    getUnreadCount.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveCount = resolve;
+        }),
+    );
+
+    render(<NotificationsBell userId="u-1" />);
+    expect(getUnreadCount).toHaveBeenCalledTimes(1);
+
+    document.dispatchEvent(new Event("visibilitychange"));
+    expect(getUnreadCount).toHaveBeenCalledTimes(1);
+
+    resolveCount({ ok: true, data: 2 });
+    await waitFor(() => {
+      expect(screen.getByTestId("notifications-badge")).toHaveTextContent("2");
+    });
+  });
+
+  it("fetches once when a hidden-at-mount bell resumes", async () => {
+    setVisibility("hidden");
+    getUnreadCount.mockResolvedValue({ ok: true, data: 1 });
+
+    render(<NotificationsBell userId="u-1" />);
+    expect(getUnreadCount).not.toHaveBeenCalled();
+
+    setVisibility("visible");
+    document.dispatchEvent(new Event("visibilitychange"));
+
+    await waitFor(() => {
+      expect(getUnreadCount).toHaveBeenCalledTimes(1);
+    });
+  });
+
   it("renders a relative timestamp under each notification once the dropdown opens", async () => {
     const user = userEvent.setup();
     getUnreadCount.mockResolvedValue({ ok: true, data: 2 });

@@ -43,13 +43,23 @@ export function NotificationsBell({ userId }: { userId: string }) {
   useEffect(() => {
     const supabase = createClient();
     let mounted = true;
+    let isFetching = false;
+    let latestRequest = 0;
     let pollId: ReturnType<typeof setInterval> | null = null;
     let channel: ReturnType<typeof supabase.channel> | null = null;
 
     const fetchCount = async () => {
-      const r = await getUnreadCount();
-      if (!mounted) return;
-      if (r.ok) setUnreadCount(r.data);
+      if (!mounted || isFetching) return;
+
+      isFetching = true;
+      const requestId = ++latestRequest;
+      try {
+        const r = await getUnreadCount();
+        if (!mounted || requestId !== latestRequest) return;
+        if (r.ok) setUnreadCount(r.data);
+      } finally {
+        isFetching = false;
+      }
     };
 
     const fetchCountIfVisible = async () => {
@@ -58,6 +68,10 @@ export function NotificationsBell({ userId }: { userId: string }) {
       }
     };
     document.addEventListener("visibilitychange", fetchCountIfVisible);
+    // Make exactly one initial request from the effect setup. In particular,
+    // a hidden mount waits for visibilitychange; it is not fetched again by
+    // the async realtime setup when the tab resumes during getSession().
+    void fetchCountIfVisible();
 
     const start = async () => {
       // Must await setAuth() BEFORE subscribing — same race as
@@ -100,8 +114,6 @@ export function NotificationsBell({ userId }: { userId: string }) {
           },
         )
         .subscribe();
-
-      await fetchCountIfVisible();
 
       // Safety-net poll — low-frequency, catches rare socket drops.
       pollId = setInterval(fetchCountIfVisible, 15000);

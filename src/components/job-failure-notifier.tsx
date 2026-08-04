@@ -33,37 +33,47 @@ export function JobFailureNotifier() {
   useEffect(() => {
     const supabase = createClient();
     let alive = true;
+    let isChecking = false;
 
     const check = async () => {
-      const { data, error } = await supabase
-        .from("jobs")
-        .select("id, status, title, type, error_message, created_at")
-        .in("status", ["failed", "partial"])
-        .gte("created_at", mountedAtRef.current)
-        .order("created_at", { ascending: false })
-        .limit(20);
+      if (isChecking) return;
+      isChecking = true;
 
-      if (!alive || error || !data) return;
+      try {
+        const { data, error } = await supabase
+          .from("jobs")
+          .select("id, status, title, type, error_message, created_at")
+          .in("status", ["failed", "partial"])
+          .gte("created_at", mountedAtRef.current)
+          .order("created_at", { ascending: false })
+          .limit(20);
 
-      for (const job of data) {
-        if (notifiedRef.current.has(job.id)) continue;
-        if (!TERMINAL_BAD_STATUSES.has(job.status)) continue;
+        if (!alive || error || !data) return;
 
-        const verb = job.status === "partial" ? "finished with errors" : "failed";
-        const title = job.title ?? `Job ${job.id.slice(0, 8)}`;
+        for (const job of data) {
+          if (notifiedRef.current.has(job.id)) continue;
+          if (!TERMINAL_BAD_STATUSES.has(job.status)) continue;
 
-        toast.error(`${title} ${verb}`, {
-          description: job.error_message ?? "Some rows did not import cleanly.",
-          action: {
-            label: "View job",
-            onClick: () => {
-              window.location.href = `/jobs/${job.id}`;
+          // Claim before showing the toast. The in-flight gate prevents a
+          // second check from observing the same unclaimed job concurrently.
+          notifiedRef.current.add(job.id);
+
+          const verb = job.status === "partial" ? "finished with errors" : "failed";
+          const title = job.title ?? `Job ${job.id.slice(0, 8)}`;
+
+          toast.error(`${title} ${verb}`, {
+            description: job.error_message ?? "Some rows did not import cleanly.",
+            action: {
+              label: "View job",
+              onClick: () => {
+                window.location.href = `/jobs/${job.id}`;
+              },
             },
-          },
-          duration: 10_000,
-        });
-
-        notifiedRef.current.add(job.id);
+            duration: 10_000,
+          });
+        }
+      } finally {
+        isChecking = false;
       }
     };
 
