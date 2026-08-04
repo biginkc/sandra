@@ -33,12 +33,8 @@ export function JobFailureNotifier() {
   useEffect(() => {
     const supabase = createClient();
     let alive = true;
-    let isChecking = false;
 
     const check = async () => {
-      if (isChecking) return;
-      isChecking = true;
-
       try {
         const { data, error } = await supabase
           .from("jobs")
@@ -54,8 +50,8 @@ export function JobFailureNotifier() {
           if (notifiedRef.current.has(job.id)) continue;
           if (!TERMINAL_BAD_STATUSES.has(job.status)) continue;
 
-          // Claim before showing the toast. The in-flight gate prevents a
-          // second check from observing the same unclaimed job concurrently.
+          // Claim before showing the toast so later polling cycles do not
+          // repeat the notification.
           notifiedRef.current.add(job.id);
 
           const verb = job.status === "partial" ? "finished with errors" : "failed";
@@ -72,27 +68,46 @@ export function JobFailureNotifier() {
             duration: 10_000,
           });
         }
-      } finally {
-        isChecking = false;
+      } catch {
+        // A failed poll must not stop the interval from trying again.
       }
     };
 
-    const checkIfVisible = () => {
-      if (document.visibilityState === "visible") {
+    let pollId: ReturnType<typeof setInterval> | null = null;
+
+    const stopPolling = () => {
+      if (pollId === null) return;
+      clearInterval(pollId);
+      pollId = null;
+    };
+
+    const startPolling = () => {
+      stopPolling();
+      if (document.visibilityState !== "visible") return;
+
+      void check();
+      pollId = setInterval(() => {
         void check();
+      }, POLL_INTERVAL_MS);
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "hidden") {
+        stopPolling();
+      } else {
+        startPolling();
       }
     };
 
-    // Initial check + interval while visible. Refresh immediately when the
-    // tab becomes visible again so the next interval does not delay it.
-    checkIfVisible();
-    const id = setInterval(checkIfVisible, POLL_INTERVAL_MS);
-    document.addEventListener("visibilitychange", checkIfVisible);
+    // The interval exists only while visible. Becoming visible performs the
+    // immediate refresh before resuming the regular polling cadence.
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    startPolling();
 
     return () => {
       alive = false;
-      clearInterval(id);
-      document.removeEventListener("visibilitychange", checkIfVisible);
+      stopPolling();
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
   }, []);
 

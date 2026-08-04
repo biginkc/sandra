@@ -58,6 +58,7 @@ vi.mock("@/lib/supabase/client", () => ({
 }));
 
 afterEach(() => {
+  vi.useRealTimers();
   Object.defineProperty(document, "visibilityState", {
     configurable: true,
     value: "visible",
@@ -79,25 +80,49 @@ function isoMinusHours(h: number): string {
 }
 
 describe("<NotificationsBell />", () => {
-  it("does not overlap an initial count request with a visibility refresh", async () => {
-    let resolveCount!: (value: { ok: true; data: number }) => void;
-    getUnreadCount.mockImplementation(
-      () =>
-        new Promise((resolve) => {
-          resolveCount = resolve;
-        }),
-    );
+  it("tears down polling while hidden and fetches once before resuming when visible", () => {
+    vi.useFakeTimers();
+    getUnreadCount.mockResolvedValue({ ok: true, data: 0 });
 
-    render(<NotificationsBell userId="u-1" />);
+    const { unmount } = render(<NotificationsBell userId="u-1" />);
     expect(getUnreadCount).toHaveBeenCalledTimes(1);
 
+    setVisibility("hidden");
     document.dispatchEvent(new Event("visibilitychange"));
+    vi.advanceTimersByTime(30_000);
     expect(getUnreadCount).toHaveBeenCalledTimes(1);
 
-    resolveCount({ ok: true, data: 2 });
-    await waitFor(() => {
-      expect(screen.getByTestId("notifications-badge")).toHaveTextContent("2");
-    });
+    setVisibility("visible");
+    document.dispatchEvent(new Event("visibilitychange"));
+    expect(getUnreadCount).toHaveBeenCalledTimes(2);
+    vi.advanceTimersByTime(15_000);
+    expect(getUnreadCount).toHaveBeenCalledTimes(3);
+
+    unmount();
+    vi.advanceTimersByTime(15_000);
+    expect(getUnreadCount).toHaveBeenCalledTimes(3);
+  });
+
+  it("keeps polling after a rejected request", () => {
+    vi.useFakeTimers();
+    getUnreadCount
+      .mockRejectedValueOnce(new Error("temporary failure"))
+      .mockResolvedValue({ ok: true, data: 1 });
+
+    const { unmount } = render(<NotificationsBell userId="u-1" />);
+    vi.advanceTimersByTime(15_000);
+    expect(getUnreadCount).toHaveBeenCalledTimes(2);
+    unmount();
+  });
+
+  it("keeps the timer alive when a request never settles", () => {
+    vi.useFakeTimers();
+    getUnreadCount.mockImplementation(() => new Promise(() => {}));
+
+    const { unmount } = render(<NotificationsBell userId="u-1" />);
+    vi.advanceTimersByTime(45_000);
+    expect(getUnreadCount).toHaveBeenCalledTimes(4);
+    unmount();
   });
 
   it("fetches once when a hidden-at-mount bell resumes", async () => {

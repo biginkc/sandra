@@ -33,36 +33,24 @@ vi.mock("@/lib/supabase/client", () => ({
 }));
 
 afterEach(() => {
+  vi.useRealTimers();
+  Object.defineProperty(document, "visibilityState", {
+    configurable: true,
+    value: "visible",
+  });
   vi.clearAllMocks();
 });
 
+function setVisibility(state: "hidden" | "visible") {
+  Object.defineProperty(document, "visibilityState", {
+    configurable: true,
+    value: state,
+  });
+}
+
 describe("<JobFailureNotifier />", () => {
-  it("does not duplicate a job when visibility refreshes during a poll", async () => {
-    let resolveQuery!: (value: {
-      data: Array<{
-        id: string;
-        status: "failed";
-        title: string;
-        type: string;
-        error_message: string | null;
-        created_at: string;
-      }>;
-      error: null;
-    }) => void;
-    limitMock.mockImplementation(
-      () =>
-        new Promise((resolve) => {
-          resolveQuery = resolve;
-        }),
-    );
-
-    render(<JobFailureNotifier />);
-    expect(limitMock).toHaveBeenCalledTimes(1);
-
-    document.dispatchEvent(new Event("visibilitychange"));
-    expect(limitMock).toHaveBeenCalledTimes(1);
-
-    resolveQuery({
+  it("does not duplicate a job across polling cycles", async () => {
+    limitMock.mockResolvedValue({
       data: [
         {
           id: "job-1",
@@ -76,8 +64,62 @@ describe("<JobFailureNotifier />", () => {
       error: null,
     });
 
+    const { unmount } = render(<JobFailureNotifier />);
     await waitFor(() => expect(toastError).toHaveBeenCalledTimes(1));
+    setVisibility("hidden");
     document.dispatchEvent(new Event("visibilitychange"));
-    await waitFor(() => expect(toastError).toHaveBeenCalledTimes(1));
+    setVisibility("visible");
+    document.dispatchEvent(new Event("visibilitychange"));
+    await waitFor(() => expect(limitMock).toHaveBeenCalledTimes(2));
+    expect(toastError).toHaveBeenCalledTimes(1);
+
+    unmount();
+  });
+
+  it("tears down polling while hidden and fetches once before resuming when visible", () => {
+    vi.useFakeTimers();
+    limitMock.mockResolvedValue({ data: [], error: null });
+
+    const { unmount } = render(<JobFailureNotifier />);
+    expect(limitMock).toHaveBeenCalledTimes(1);
+
+    setVisibility("hidden");
+    document.dispatchEvent(new Event("visibilitychange"));
+    vi.advanceTimersByTime(15_000);
+    expect(limitMock).toHaveBeenCalledTimes(1);
+
+    setVisibility("visible");
+    document.dispatchEvent(new Event("visibilitychange"));
+    expect(limitMock).toHaveBeenCalledTimes(2);
+    vi.advanceTimersByTime(5_000);
+    expect(limitMock).toHaveBeenCalledTimes(3);
+
+    unmount();
+    vi.advanceTimersByTime(5_000);
+    expect(limitMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("keeps polling after a rejected request", () => {
+    vi.useFakeTimers();
+    limitMock
+      .mockRejectedValueOnce(new Error("temporary failure"))
+      .mockResolvedValue({ data: [], error: null });
+
+    const { unmount } = render(<JobFailureNotifier />);
+    vi.advanceTimersByTime(5_000);
+    expect(limitMock).toHaveBeenCalledTimes(2);
+
+    unmount();
+  });
+
+  it("keeps the timer alive when a request never settles", () => {
+    vi.useFakeTimers();
+    limitMock.mockImplementation(() => new Promise(() => {}));
+
+    const { unmount } = render(<JobFailureNotifier />);
+    vi.advanceTimersByTime(15_000);
+    expect(limitMock).toHaveBeenCalledTimes(4);
+
+    unmount();
   });
 });
