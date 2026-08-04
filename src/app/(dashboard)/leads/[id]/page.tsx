@@ -186,6 +186,24 @@ export default async function LeadDetailPage({
     .limit(200);
   const initialNotes = (notesRaw ?? []) as LeadNoteRow[];
 
+  // listUsers() always fetches the whole team; it has no user-id filter.
+  // Start it as soon as the note-derived IDs are known and consume it after
+  // the other independent lead-detail work completes.
+  const userIdsNeeded = new Set<string>();
+  if (lead.assigned_user_id) userIdsNeeded.add(lead.assigned_user_id);
+  for (const n of initialNotes) {
+    if (n.author_user_id) userIdsNeeded.add(n.author_user_id);
+  }
+  const admin = createAdminClient();
+  const usersPromise = (async () => {
+    try {
+      const { data } = await admin.auth.admin.listUsers({ perPage: 200 });
+      return data?.users ?? [];
+    } catch {
+      return [];
+    }
+  })();
+
   const { data: callRollupRaw } = await supabase
     .from("call_activities")
     .select(
@@ -208,9 +226,6 @@ export default async function LeadDetailPage({
     if (t) initialTags.push(t);
   }
 
-  // Admin client — used for author + assignee email display below.
-  const admin = createAdminClient();
-
   // Fetch SMS templates and pre-render them with this property's vars so the
   // composer picker can just do a straight body injection on selection.
   const templatesResult = await listTemplates();
@@ -232,29 +247,16 @@ export default async function LeadDetailPage({
 
   // Resolve author + assignee emails via the admin client (auth.users isn't
   // RLS-accessible to end-users). Batched into a single listUsers() call.
-  const userIdsNeeded = new Set<string>();
-  if (lead.assigned_user_id) userIdsNeeded.add(lead.assigned_user_id);
-  for (const n of initialNotes) {
-    if (n.author_user_id) userIdsNeeded.add(n.author_user_id);
-  }
   const authorEmails: Record<string, string> = {};
   let assigneeEmail: string | null = null;
-  if (userIdsNeeded.size > 0) {
-    try {
-      const { data: usersPage } = await admin.auth.admin.listUsers({
-        perPage: 200,
-      });
-      for (const u of usersPage?.users ?? []) {
-        if (u.email && userIdsNeeded.has(u.id)) {
-          authorEmails[u.id] = u.email;
-        }
-      }
-      if (lead.assigned_user_id) {
-        assigneeEmail = authorEmails[lead.assigned_user_id] ?? null;
-      }
-    } catch {
-      // Non-fatal — emails just won't display pretty. The IDs stay intact.
+  const assigneeUsers = await usersPromise;
+  for (const u of assigneeUsers) {
+    if (u.email && userIdsNeeded.has(u.id)) {
+      authorEmails[u.id] = u.email;
     }
+  }
+  if (lead.assigned_user_id) {
+    assigneeEmail = authorEmails[lead.assigned_user_id] ?? null;
   }
 
   const zillowHref = zillowUrl({
