@@ -32,12 +32,27 @@ export default async function DashboardPage() {
   } = await supabase.auth.getUser();
   if (!user) redirect("/login");
 
-  const [summary, balance, myTasks, sendilloSmsHealth] = await Promise.all([
-    fetchDashboardSummary(),
-    getSkipTraceBalance(),
-    fetchMyTasks(user.id),
-    fetchDashboardSendilloSmsHealth(),
-  ]);
+  // listUsers() always fetches the whole team; it has no assignee-id filter.
+  // Start it with the dashboard data and filter the result after the batch.
+  const assigneeUsersPromise = (async () => {
+    try {
+      const { data } = await createAdminClient().auth.admin.listUsers({
+        perPage: 200,
+      });
+      return data?.users ?? [];
+    } catch {
+      return [];
+    }
+  })();
+
+  const [summary, balance, myTasks, sendilloSmsHealth, assigneeUsers] =
+    await Promise.all([
+      fetchDashboardSummary(),
+      getSkipTraceBalance(),
+      fetchMyTasks(user.id),
+      fetchDashboardSendilloSmsHealth(),
+      assigneeUsersPromise,
+    ]);
 
   if (!summary) {
     return (
@@ -73,19 +88,9 @@ export default async function DashboardPage() {
   // /leads uses). The RPC can't reach auth.users under security invoker.
   const assigneeEmails: Record<string, string> = {};
   const assigneeIds = new Set(summary.assigned.map((a) => a.user_id));
-  if (assigneeIds.size > 0) {
-    try {
-      const admin = createAdminClient();
-      const { data: usersPage } = await admin.auth.admin.listUsers({
-        perPage: 200,
-      });
-      for (const u of usersPage?.users ?? []) {
-        if (u.email && assigneeIds.has(u.id)) {
-          assigneeEmails[u.id] = u.email;
-        }
-      }
-    } catch {
-      // Non-fatal — labels fall back to the user_id slug.
+  for (const u of assigneeUsers) {
+    if (u.email && assigneeIds.has(u.id)) {
+      assigneeEmails[u.id] = u.email;
     }
   }
 
