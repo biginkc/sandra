@@ -15,8 +15,8 @@ type Props = {
 export function SkipTraceCredits({ balance, isAdmin }: Props) {
   if (!balance.available) {
     return (
-      <div className="border-border bg-card flex items-center justify-between rounded-2xl border px-6 py-5">
-        <div>
+      <div className="border-border bg-card flex flex-col items-start justify-between gap-4 rounded-2xl border px-6 py-5 sm:flex-row sm:items-center">
+        <div className="min-w-0">
           <div className="text-muted-foreground text-[11px] font-bold tracking-widest uppercase">
             Skip-trace credits
           </div>
@@ -27,7 +27,7 @@ export function SkipTraceCredits({ balance, isAdmin }: Props) {
           </div>
         </div>
         {isAdmin && (
-          <div className="flex items-center gap-3">
+          <div className="flex w-full flex-wrap items-center gap-3 sm:w-auto sm:justify-end">
             <RefreshCreditsButton />
             <Link
               href="/admin/skip-trace-settings"
@@ -52,14 +52,14 @@ export function SkipTraceCredits({ balance, isAdmin }: Props) {
     balance.tier === "ok" ? "Healthy" : balance.tier === "low" ? "Low" : "Critical";
 
   return (
-    <div className="border-border bg-card flex items-center justify-between gap-6 rounded-2xl border px-6 py-5">
-      <div className="flex items-center gap-4">
+    <div className="border-border bg-card flex flex-col items-start justify-between gap-6 rounded-2xl border px-6 py-5 sm:flex-row sm:items-center">
+      <div className="flex min-w-0 items-center gap-4">
         <span className={`size-3 shrink-0 rounded-full ${dotColor}`} aria-hidden />
         <div>
           <div className="text-muted-foreground text-[11px] font-bold tracking-widest uppercase">
             Skip-trace credits
           </div>
-          <div className="mt-1 flex items-baseline gap-2">
+          <div className="mt-1 flex flex-wrap items-baseline gap-2">
             <span className="text-foreground text-4xl font-extrabold tracking-tight">
               {balance.credits.toLocaleString()}
             </span>
@@ -75,7 +75,7 @@ export function SkipTraceCredits({ balance, isAdmin }: Props) {
         </div>
       </div>
       {isAdmin && (
-        <div className="flex items-center gap-3">
+        <div className="flex w-full flex-wrap items-center gap-3 sm:w-auto sm:justify-end">
           <RefreshCreditsButton />
           <Link
             href="/admin/skip-trace-settings"

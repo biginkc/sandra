@@ -30,7 +30,7 @@ describe("SkipTraceCredits", () => {
   });
 
   it("keeps settings recovery beside refresh before the first snapshot", () => {
-    render(
+    const { container } = render(
       <SkipTraceCredits
         isAdmin
         balance={{ available: false, reason: "not_checked" }}
@@ -39,6 +39,7 @@ describe("SkipTraceCredits", () => {
     expect(screen.getByText("No balance check has completed yet")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Refresh" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /Open settings/ })).toBeInTheDocument();
+    expect(container.firstElementChild).toHaveClass("flex-col", "sm:flex-row");
   });
 
   it("does not expose provider controls to a non-admin", () => {
@@ -55,5 +56,26 @@ describe("SkipTraceCredits", () => {
     );
     expect(screen.queryByRole("button", { name: "Refresh" })).not.toBeInTheDocument();
     expect(screen.queryByRole("link", { name: /Add credits/ })).not.toBeInTheDocument();
+  });
+
+  it("stacks the balance and controls at phone widths", () => {
+    const { container } = render(
+      <SkipTraceCredits
+        isAdmin
+        balance={{
+          available: true,
+          credits: 6692,
+          tier: "ok",
+          capturedAt: "2026-08-10T16:15:00.000Z",
+        }}
+      />,
+    );
+
+    expect(container.firstElementChild).toHaveClass("flex-col", "sm:flex-row");
+    expect(screen.getByRole("button", { name: "Refresh" }).parentElement).toHaveClass(
+      "w-full",
+      "flex-wrap",
+      "sm:w-auto",
+    );
   });
 });
