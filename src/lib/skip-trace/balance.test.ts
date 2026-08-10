@@ -78,10 +78,12 @@ describe("skip-trace credit snapshots", () => {
     const from = vi.fn(() => ({
       select: () => ({ eq: () => ({ order: () => ({ limit }) }) }),
     }));
-    await expect(getStoredSkipTraceBalance({ from } as never)).resolves.toEqual({
-      available: false,
-      reason: "not_checked",
-    });
+    await expect(getStoredSkipTraceBalance({ from } as never)).resolves.toEqual(
+      {
+        available: false,
+        reason: "not_checked",
+      },
+    );
   });
 
   it("persists a valid provider value through the atomic newer-wins RPC", async () => {
@@ -137,5 +139,33 @@ describe("skip-trace credit snapshots", () => {
     await expect(
       captureSkipTraceBalanceSnapshot({ rpc } as never),
     ).rejects.toThrow("database unavailable");
+  });
+
+  it("returns the newer stored reading when an overlapping write wins", async () => {
+    getSkipTraceProvider.mockReturnValue({
+      getBalance: vi.fn().mockResolvedValue(400),
+    });
+    const rpc = vi.fn().mockResolvedValue({ data: false, error: null });
+    const limit = vi.fn().mockResolvedValue({
+      data: [{ numerator: 500, captured_at: "2026-08-10T18:01:00.000Z" }],
+      error: null,
+    });
+    const from = vi.fn(() => ({
+      select: () => ({
+        eq: () => ({ order: () => ({ limit }) }),
+      }),
+    }));
+
+    await expect(
+      captureSkipTraceBalanceSnapshot(
+        { rpc, from } as never,
+        new Date("2026-08-10T18:00:00.000Z"),
+      ),
+    ).resolves.toEqual({
+      available: true,
+      credits: 500,
+      tier: "ok",
+      capturedAt: "2026-08-10T18:01:00.000Z",
+    });
   });
 });

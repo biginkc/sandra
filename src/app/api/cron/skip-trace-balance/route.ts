@@ -25,10 +25,7 @@ async function handle(request: Request) {
   }
 
   try {
-    const snapshot = await captureSkipTraceBalanceSnapshot(
-      createAdminClient(),
-      now,
-    );
+    const snapshot = await captureSkipTraceBalanceSnapshot(createAdminClient());
     return NextResponse.json({
       ok: true,
       credits: snapshot.credits,

@@ -59,7 +59,7 @@ export async function getStoredSkipTraceBalance(
  */
 export async function captureSkipTraceBalanceSnapshot(
   supabase: SupabaseClient<Database>,
-  now = new Date(),
+  capturedAtOverride?: Date,
 ): Promise<Extract<SkipTraceBalance, { available: true }>> {
   const provider = getSkipTraceProvider();
   if (!provider) throw new Error("Skip-trace provider is not configured");
@@ -69,13 +69,27 @@ export async function captureSkipTraceBalanceSnapshot(
     throw new Error("Skip-trace provider returned an invalid credit balance");
   }
 
-  const capturedAt = now.toISOString();
-  const { error } = await supabase.rpc("upsert_skip_trace_credit_snapshot", {
-    p_credits: credits,
-    p_captured_at: capturedAt,
-  });
+  // Timestamp the completed reading, not the request start. If a slow cron
+  // overlaps a faster manual refresh, completion order is the closest safe
+  // proxy for which provider reading is newest.
+  const capturedAt = (capturedAtOverride ?? new Date()).toISOString();
+  const { data: changed, error } = await supabase.rpc(
+    "upsert_skip_trace_credit_snapshot",
+    {
+      p_credits: credits,
+      p_captured_at: capturedAt,
+    },
+  );
   if (error) {
     throw new Error(`Could not store skip-trace balance: ${error.message}`);
+  }
+
+  // Another overlapping request may have persisted a newer reading first.
+  // Return what is actually stored instead of reporting an unpersisted value.
+  if (changed !== true) {
+    const stored = await getStoredSkipTraceBalance(supabase);
+    if (stored.available) return stored;
+    throw new Error("Could not confirm the stored skip-trace balance");
   }
 
   return {
