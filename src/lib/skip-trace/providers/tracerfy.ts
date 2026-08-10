@@ -33,6 +33,7 @@ import type {
  */
 
 const BASE_URL = "https://tracerfy.com/v1/api";
+const BALANCE_REQUEST_TIMEOUT_MS = 8_000;
 
 type TracerfyPhone = {
   number: string;
@@ -304,6 +305,8 @@ export class TracerfyProvider implements SkipTraceProvider {
     const data = await this.request<TracerfyAnalyticsResponse>(
       "GET",
       "/analytics/",
+      undefined,
+      AbortSignal.timeout(BALANCE_REQUEST_TIMEOUT_MS),
     );
     return data.balance ?? 0;
   }
@@ -312,6 +315,7 @@ export class TracerfyProvider implements SkipTraceProvider {
     method: "GET" | "POST",
     path: string,
     body?: unknown,
+    signal?: AbortSignal,
   ): Promise<T> {
     const url = `${BASE_URL}${path}`;
     let response: Response;
@@ -324,10 +328,17 @@ export class TracerfyProvider implements SkipTraceProvider {
           Accept: "application/json",
         },
         body: body !== undefined ? JSON.stringify(body) : undefined,
+        signal,
       });
     } catch (e) {
+      const message =
+        e instanceof DOMException && e.name === "TimeoutError"
+          ? "Tracerfy balance request timed out"
+          : e instanceof Error
+            ? e.message
+            : String(e);
       throw new ProviderError(
-        e instanceof Error ? e.message : String(e),
+        message,
         "tracerfy",
       );
     }

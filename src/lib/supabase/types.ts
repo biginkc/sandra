@@ -3132,6 +3132,10 @@ export type Database = {
       }
     }
     Functions: {
+      upsert_skip_trace_credit_snapshot: {
+        Args: { p_captured_at: string; p_credits: number }
+        Returns: boolean
+      }
       campaign_kpis: {
         Args: { p_campaign_id: string }
         Returns: {

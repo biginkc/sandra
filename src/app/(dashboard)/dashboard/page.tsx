@@ -3,7 +3,7 @@ import { redirect } from "next/navigation";
 import { Page } from "@/components/page";
 import { PageHeader } from "@/components/page-header";
 import { isAdminEmail } from "@/lib/auth/allowlist";
-import { getSkipTraceBalance } from "@/lib/skip-trace/balance";
+import { getStoredSkipTraceBalance } from "@/lib/skip-trace/balance";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
 
@@ -48,7 +48,7 @@ export default async function DashboardPage() {
   const [summary, balance, myTasks, sendilloSmsHealth, assigneeUsers] =
     await Promise.all([
       fetchDashboardSummary(),
-      getSkipTraceBalance(),
+      getStoredSkipTraceBalance(supabase),
       fetchMyTasks(user.id),
       fetchDashboardSendilloSmsHealth(),
       assigneeUsersPromise,
