@@ -2,6 +2,8 @@ import Link from "next/link";
 
 import type { SkipTraceBalance } from "@/lib/skip-trace/balance";
 
+import { RefreshCreditsButton } from "./refresh-credits-button";
+
 type Props = {
   balance: SkipTraceBalance;
   /** Only admins see the "Add credits →" / "Open settings →" CTAs. The
@@ -19,18 +21,21 @@ export function SkipTraceCredits({ balance, isAdmin }: Props) {
             Skip-trace credits
           </div>
           <div className="text-foreground mt-1 text-base font-medium">
-            {balance.reason === "unconfigured"
-              ? "Provider not configured"
-              : "Balance unavailable — check settings"}
+            {balance.reason === "not_checked"
+              ? "No balance check has completed yet"
+              : "Stored balance unavailable"}
           </div>
         </div>
         {isAdmin && (
-          <Link
-            href="/admin/skip-trace-settings"
-            className="text-foreground text-sm font-bold underline-offset-4 hover:underline"
-          >
-            Open settings →
-          </Link>
+          <div className="flex items-center gap-3">
+            <RefreshCreditsButton />
+            <Link
+              href="/admin/skip-trace-settings"
+              className="text-foreground text-sm font-bold underline-offset-4 hover:underline"
+            >
+              Open settings →
+            </Link>
+          </div>
         )}
       </div>
     );
@@ -62,16 +67,37 @@ export function SkipTraceCredits({ balance, isAdmin }: Props) {
               credits remaining · {tierLabel}
             </span>
           </div>
+          <div className="text-muted-foreground mt-1 text-xs">
+            <time dateTime={balance.capturedAt}>
+              Last checked {formatSnapshotTime(balance.capturedAt)}
+            </time>
+          </div>
         </div>
       </div>
       {isAdmin && (
-        <Link
-          href="/admin/skip-trace-settings"
-          className="bg-foreground text-background rounded-full px-5 py-2.5 text-sm font-bold transition-opacity hover:opacity-90"
-        >
-          Add credits →
-        </Link>
+        <div className="flex items-center gap-3">
+          <RefreshCreditsButton />
+          <Link
+            href="/admin/skip-trace-settings"
+            className="bg-foreground text-background rounded-full px-5 py-2.5 text-sm font-bold transition-opacity hover:opacity-90"
+          >
+            Add credits →
+          </Link>
+        </div>
       )}
     </div>
   );
+}
+
+function formatSnapshotTime(capturedAt: string): string {
+  const captured = new Date(capturedAt);
+  if (!Number.isFinite(captured.getTime())) return "at an unknown time";
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Chicago",
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    timeZoneName: "short",
+  }).format(captured);
 }

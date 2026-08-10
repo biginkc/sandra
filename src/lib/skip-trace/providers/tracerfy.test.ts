@@ -612,5 +612,17 @@ describe("TracerfyProvider — getBalance", () => {
     const p = new TracerfyProvider("k");
     const balance = await p.getBalance();
     expect(balance).toBe(1234);
+    const init = (global.fetch as ReturnType<typeof vi.fn>).mock.calls[0][1] as RequestInit;
+    expect(init.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it("surfaces a bounded timeout as a provider failure", async () => {
+    (global.fetch as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new DOMException("The operation was aborted due to timeout", "TimeoutError"),
+    );
+    const p = new TracerfyProvider("k");
+    await expect(p.getBalance()).rejects.toThrow(
+      "Tracerfy balance request timed out",
+    );
   });
 });
