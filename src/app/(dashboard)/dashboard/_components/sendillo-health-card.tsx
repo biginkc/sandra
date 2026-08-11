@@ -17,16 +17,32 @@ export function SendilloHealthCard({ result }: Props) {
     >
       <div className="flex flex-col gap-1 sm:flex-row sm:items-end sm:justify-between">
         <div>
-          <h2 id="sendillo-health-heading" className="text-foreground text-base font-bold">
+          <h2
+            id="sendillo-health-heading"
+            className="text-foreground text-base font-bold"
+          >
             Sendillo SMS health
           </h2>
           <p className="text-muted-foreground mt-1 text-sm">
             Sendillo-era SMS only. Dialpad history is excluded.
           </p>
         </div>
-        <p className="text-muted-foreground text-xs font-medium">
-          {result.status === "available" ? formatWindow(health) : "Unavailable"}
-        </p>
+        <div className="text-muted-foreground text-xs font-medium sm:text-right">
+          <p>
+            {result.status === "available"
+              ? formatWindow(health)
+              : "Unavailable"}
+          </p>
+          {result.status === "available" && (
+            <time
+              dateTime={result.updatedAt}
+              className={result.stale ? "text-amber-600" : undefined}
+            >
+              {result.stale ? "Data delayed · " : ""}Last updated{" "}
+              {formatSnapshotTime(result.updatedAt)}
+            </time>
+          )}
+        </div>
       </div>
 
       {result.status === "available" ? (
@@ -68,7 +84,8 @@ export function SendilloHealthCard({ result }: Props) {
             Sendillo SMS health unavailable
           </div>
           <div className="text-muted-foreground mt-1 text-xs font-medium">
-            Refresh later or check server logs before trusting the Sendillo KPI totals.
+            Refresh later or check server logs before trusting the Sendillo KPI
+            totals.
           </div>
         </div>
       )}
@@ -93,13 +110,16 @@ function MetricTile({
       <div className="text-foreground mt-2 text-3xl font-extrabold tracking-tight tabular-nums">
         {value}
       </div>
-      <div className="text-muted-foreground mt-1 text-xs font-medium">{helper}</div>
+      <div className="text-muted-foreground mt-1 text-xs font-medium">
+        {helper}
+      </div>
     </div>
   );
 }
 
 function formatWindow(health: SendilloSmsHealth): string {
-  if (!health.firstMessageAt || !health.latestMessageAt) return "No Sendillo rows yet";
+  if (!health.firstMessageAt || !health.latestMessageAt)
+    return "No Sendillo rows yet";
   return `${formatDate(health.firstMessageAt)} - ${formatDate(health.latestMessageAt)}`;
 }
 
@@ -107,6 +127,17 @@ function formatDate(iso: string): string {
   return new Intl.DateTimeFormat("en-US", {
     month: "short",
     day: "numeric",
-    timeZone: "UTC",
+    timeZone: "America/Chicago",
+  }).format(new Date(iso));
+}
+
+function formatSnapshotTime(iso: string): string {
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Chicago",
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    timeZoneName: "short",
   }).format(new Date(iso));
 }
