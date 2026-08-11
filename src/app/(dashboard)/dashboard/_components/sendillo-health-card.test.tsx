@@ -55,6 +55,7 @@ describe("<SendilloHealthCard />", () => {
     expect(
       screen.getByText("Last updated Jun 18, 2:40 PM CDT"),
     ).toBeInTheDocument();
+    expect(screen.getByText("Jun 9 - Jun 18")).toBeInTheDocument();
   });
 
   it("labels an old stored snapshot as delayed without hiding its counts", () => {

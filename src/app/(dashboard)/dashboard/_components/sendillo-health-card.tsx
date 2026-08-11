@@ -127,7 +127,7 @@ function formatDate(iso: string): string {
   return new Intl.DateTimeFormat("en-US", {
     month: "short",
     day: "numeric",
-    timeZone: "UTC",
+    timeZone: "America/Chicago",
   }).format(new Date(iso));
 }
 

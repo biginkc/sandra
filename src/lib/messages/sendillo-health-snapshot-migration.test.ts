@@ -20,6 +20,7 @@ describe("Sendillo health snapshot migration", () => {
     expect(sql).toContain(
       "grant select on table public.dashboard_snapshots to authenticated",
     );
+    expect(sql).toContain("using (public.hugo_has_any_active_access())");
     expect(sql).not.toContain(
       "grant insert on table public.dashboard_snapshots to authenticated",
     );

@@ -16,7 +16,7 @@ create policy "authenticated users can read dashboard snapshots"
   on public.dashboard_snapshots
   for select
   to authenticated
-  using (true);
+  using (public.hugo_has_any_active_access());
 
 create index dashboard_snapshots_captured_at_idx
   on public.dashboard_snapshots (captured_at desc);

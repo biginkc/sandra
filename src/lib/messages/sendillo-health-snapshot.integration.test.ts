@@ -1,6 +1,10 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeEach, describe, expect, it } from "vitest";
 
 import { createTestClient } from "@tests/integration/client";
+import {
+  clientForUser,
+  createOrgUser,
+} from "@tests/integration/fixtures/multi-user";
 import { resetTenantTables } from "@tests/integration/reset";
 
 import type { SendilloSmsHealthMessageRow } from "./sendillo-health";
@@ -8,6 +12,13 @@ import { summarizeSendilloSmsHealth } from "./sendillo-health";
 import { captureSendilloSmsHealthSnapshot } from "./sendillo-health-snapshot";
 
 const supabase = createTestClient();
+const createdUserIds: string[] = [];
+
+afterAll(async () => {
+  for (const userId of createdUserIds) {
+    await supabase.auth.admin.deleteUser(userId);
+  }
+});
 
 async function getOrgId(): Promise<string> {
   const { data } = await supabase
@@ -192,5 +203,41 @@ describe("Sendillo health snapshot SQL parity", () => {
     expect(new Date(older.updatedAt).toISOString()).toBe(
       "2026-08-10T12:00:00.000Z",
     );
+  });
+
+  it("allows active users to read the global snapshot and blocks suspended users", async () => {
+    const orgId = await getOrgId();
+    await captureSendilloSmsHealthSnapshot(
+      supabase,
+      new Date("2026-08-10T12:00:00.000Z"),
+    );
+    const user = await createOrgUser(supabase, {
+      orgId,
+      email: `snapshot-access-${crypto.randomUUID()}@bmhgroupkc.com`,
+      role: "member",
+    });
+    createdUserIds.push(user.userId);
+    const userClient = clientForUser(user.jwt);
+
+    const activeRead = await userClient
+      .from("dashboard_snapshots")
+      .select("snapshot_key")
+      .eq("snapshot_key", "sendillo_sms_health");
+    expect(activeRead.error).toBeNull();
+    expect(activeRead.data).toEqual([{ snapshot_key: "sendillo_sms_health" }]);
+
+    const { error: suspendError } = await supabase
+      .from("memberships")
+      .update({ access_status: "suspended" })
+      .eq("user_id", user.userId)
+      .eq("org_id", orgId);
+    expect(suspendError).toBeNull();
+
+    const suspendedRead = await userClient
+      .from("dashboard_snapshots")
+      .select("snapshot_key")
+      .eq("snapshot_key", "sendillo_sms_health");
+    expect(suspendedRead.error).toBeNull();
+    expect(suspendedRead.data).toEqual([]);
   });
 });
