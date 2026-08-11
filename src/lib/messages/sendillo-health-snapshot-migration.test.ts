@@ -10,6 +10,13 @@ const sql = readFileSync(
   ),
   "utf8",
 ).toLowerCase();
+const accessHardeningSql = readFileSync(
+  join(
+    process.cwd(),
+    "supabase/migrations/20260811144500_harden_dashboard_snapshot_access.sql",
+  ),
+  "utf8",
+).toLowerCase();
 
 describe("Sendillo health snapshot migration", () => {
   it("keeps compute and capture functions service-role-only with fixed paths", () => {
@@ -39,6 +46,18 @@ describe("Sendillo health snapshot migration", () => {
     expect(sql).toContain("'smsrows', (select count(*) from sendillo_rows)");
     expect(sql).toContain(
       "'firstmessageat', (select min(created_at) from sendillo_rows)",
+    );
+  });
+
+  it("ships the forward access correction for already-migrated databases", () => {
+    expect(accessHardeningSql).toContain(
+      'drop policy if exists "authenticated users can read dashboard snapshots"',
+    );
+    expect(accessHardeningSql).toContain(
+      'create policy "authenticated users can read dashboard snapshots"',
+    );
+    expect(accessHardeningSql).toContain(
+      "using (public.hugo_has_any_active_access())",
     );
   });
 });
