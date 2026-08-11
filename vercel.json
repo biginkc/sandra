@@ -19,6 +19,10 @@
     {
       "path": "/api/cron/skip-trace-balance",
       "schedule": "*/15 * * * *"
+    },
+    {
+      "path": "/api/cron/sendillo-health-snapshot",
+      "schedule": "*/15 * * * *"
     }
   ]
 }

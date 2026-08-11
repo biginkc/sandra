@@ -10,6 +10,7 @@ describe("<SendilloHealthCard />", () => {
         result={{
           status: "available",
           updatedAt: "2026-06-18T19:40:00Z",
+          stale: false,
           health: {
             smsRows: 10262,
             outboundMessages: 9643,
@@ -29,10 +30,15 @@ describe("<SendilloHealthCard />", () => {
     expect(
       screen.getByRole("heading", { name: "Sendillo SMS health" }),
     ).toBeInTheDocument();
-    expect(screen.getByText("Sendillo-era SMS only. Dialpad history is excluded."))
-      .toBeInTheDocument();
+    expect(
+      screen.getByText("Sendillo-era SMS only. Dialpad history is excluded."),
+    ).toBeInTheDocument();
 
-    expectMetric("Outbound / inbound SMS rows", "9,643 / 619", "10,262 total Sendillo rows");
+    expectMetric(
+      "Outbound / inbound SMS rows",
+      "9,643 / 619",
+      "10,262 total Sendillo rows",
+    );
     expectMetric("Sendillo conversations", "9,375", "Non-queued SMS threads");
     expectMetric(
       "Inbound SMS rows",
@@ -46,6 +52,35 @@ describe("<SendilloHealthCard />", () => {
       "Unread inbound on an undispositioned property",
     );
     expectMetric("Human attention", "51", "Flagged and still undispositioned");
+    expect(
+      screen.getByText("Last updated Jun 18, 2:40 PM CDT"),
+    ).toBeInTheDocument();
+  });
+
+  it("labels an old stored snapshot as delayed without hiding its counts", () => {
+    render(
+      <SendilloHealthCard
+        result={{
+          status: "available",
+          updatedAt: "2026-06-18T19:40:00Z",
+          stale: true,
+          health: {
+            smsRows: 1,
+            outboundMessages: 1,
+            inboundMessages: 0,
+            conversations: 1,
+            latestInboundMissingDisposition: 0,
+            unreadMissingDisposition: 0,
+            humanAttentionMissingDisposition: 0,
+            anyInboundMissingDisposition: 0,
+            firstMessageAt: "2026-06-18T19:30:00Z",
+            latestMessageAt: "2026-06-18T19:30:00Z",
+          },
+        }}
+      />,
+    );
+    expect(screen.getByText(/Data delayed · Last updated/)).toBeInTheDocument();
+    expect(screen.getByText("1 total Sendillo rows")).toBeInTheDocument();
   });
 
   it("renders an unavailable state instead of false zeroes", () => {
@@ -70,7 +105,9 @@ describe("<SendilloHealthCard />", () => {
       />,
     );
 
-    expect(screen.getByText("Sendillo SMS health unavailable")).toBeInTheDocument();
+    expect(
+      screen.getByText("Sendillo SMS health unavailable"),
+    ).toBeInTheDocument();
     expect(screen.queryByText("0 total Sendillo rows")).not.toBeInTheDocument();
   });
 });

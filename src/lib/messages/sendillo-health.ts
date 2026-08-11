@@ -42,6 +42,7 @@ export type SendilloSmsHealthResult =
       status: "available";
       health: SendilloSmsHealth;
       updatedAt: string;
+      stale: boolean;
     }
   | {
       status: "unavailable";

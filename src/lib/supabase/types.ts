@@ -1491,6 +1491,24 @@ export type Database = {
           },
         ]
       }
+      dashboard_snapshots: {
+        Row: {
+          captured_at: string
+          payload: Json
+          snapshot_key: string
+        }
+        Insert: {
+          captured_at: string
+          payload: Json
+          snapshot_key: string
+        }
+        Update: {
+          captured_at?: string
+          payload?: Json
+          snapshot_key?: string
+        }
+        Relationships: []
+      }
       metric_snapshots: {
         Row: {
           captured_at: string
@@ -3132,6 +3150,14 @@ export type Database = {
       }
     }
     Functions: {
+      capture_sendillo_sms_health_snapshot: {
+        Args: { p_captured_at?: string }
+        Returns: {
+          captured_at: string
+          payload: Json
+        }[]
+      }
+      compute_sendillo_sms_health: { Args: never; Returns: Json }
       upsert_skip_trace_credit_snapshot: {
         Args: { p_captured_at: string; p_credits: number }
         Returns: boolean
