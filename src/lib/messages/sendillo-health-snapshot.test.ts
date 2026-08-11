@@ -1,5 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+const mocks = vi.hoisted(() => ({ reportError: vi.fn() }));
+vi.mock("@/lib/errors/report", () => ({ reportError: mocks.reportError }));
+
 import {
   captureSendilloSmsHealthSnapshot,
   getStoredSendilloSmsHealth,
@@ -103,6 +106,25 @@ describe("Sendillo health snapshots", () => {
         }) as never,
       ),
     ).resolves.toMatchObject({ status: "unavailable" });
+  });
+
+  it("reports a stored-read failure before returning unavailable", async () => {
+    const client = {
+      from: () => ({
+        select: () => ({
+          eq: () => ({
+            maybeSingle: vi.fn().mockResolvedValue({
+              data: null,
+              error: { message: "database unavailable" },
+            }),
+          }),
+        }),
+      }),
+    };
+    await expect(
+      getStoredSendilloSmsHealth(client as never),
+    ).resolves.toMatchObject({ status: "unavailable" });
+    expect(mocks.reportError).toHaveBeenCalledOnce();
   });
 
   it("captures and returns the row persisted by the atomic RPC", async () => {

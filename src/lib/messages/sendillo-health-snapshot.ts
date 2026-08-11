@@ -1,5 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
+import { reportError } from "@/lib/errors/report";
 import { isWithinCreditRefreshWindow } from "@/lib/skip-trace/balance";
 import type { Database, Json } from "@/lib/supabase/types";
 
@@ -27,7 +28,16 @@ export async function getStoredSendilloSmsHealth(
     .eq("snapshot_key", SENDILLO_HEALTH_SNAPSHOT_KEY)
     .maybeSingle();
 
-  if (error || !data) return unavailable();
+  if (error) {
+    reportError(
+      new Error(`Could not read Sendillo SMS health: ${error.message}`),
+      {
+        tags: { surface: "dashboard_sendillo_health_snapshot" },
+      },
+    );
+    return unavailable();
+  }
+  if (!data) return unavailable();
   const row = data as SnapshotRow;
   const health = parseSendilloSmsHealth(row.payload);
   if (!health) return unavailable();
