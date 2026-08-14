@@ -76,9 +76,15 @@ alter table public.tasks
   add constraint tasks_related_property_linkage_check
   check ((type <> 'appointment' and related_property_id is not null) or type = 'appointment');
 
+-- Bidirectional: every appointment HAS a bounded window (end after
+-- start), every other type has none. A durationless appointment would
+-- leave overlap detection and calendar sync guessing.
 alter table public.tasks
   add constraint tasks_end_at_check
-  check (end_at is null or (type = 'appointment' and end_at > due_at));
+  check (
+    ((type = 'appointment') = (end_at is not null))
+    and (end_at is null or end_at > due_at)
+  );
 
 -- Terminal appointments REQUIRE an outcome (and only terminal ones may
 -- carry one): a REST client or future code path setting an appointment

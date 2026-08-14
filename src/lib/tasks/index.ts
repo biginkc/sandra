@@ -39,10 +39,29 @@ export type CreateTaskInput = {
   createdBy: string;
 };
 
+const APPOINTMENT_REQUIRES_END = {
+  code: "TASK_CREATE_INVALID",
+  message: "Appointments require an end time after their start time.",
+} as const;
+
 export async function createTask(
   supabase: SupabaseClient<Database>,
   input: CreateTaskInput,
 ): Promise<Result<Task>> {
+  // Mirrors the DB's bidirectional end_at CHECK so callers get a typed
+  // error instead of a constraint violation. endAt stays optional on the
+  // shared input type; the requirement is appointment-only.
+  if (input.type === "appointment") {
+    if (
+      !input.endAt ||
+      new Date(input.endAt).getTime() <= new Date(input.dueAt).getTime()
+    ) {
+      return err(APPOINTMENT_REQUIRES_END);
+    }
+  } else if (input.endAt !== undefined) {
+    return err(APPOINTMENT_REQUIRES_END);
+  }
+
   const { data, error } = await supabase
     .from("tasks")
     .insert({

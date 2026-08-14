@@ -222,10 +222,14 @@ describe("Migration 20260814150000 — appointments schema", () => {
 
     it("rejects an outcome on an open appointment (outcome check)", async () => {
       const assignee = await createUserForOrg(BMH_ORG_ID);
+      const dueAt = new Date(Date.now() + 3600_000).toISOString();
+      const endAt = new Date(Date.now() + 7200_000).toISOString();
       const { error } = await insertTask({
         type: "appointment",
         assignee_id: assignee.userId,
         created_by: assignee.userId,
+        due_at: dueAt,
+        end_at: endAt,
         calendar_chain_id: crypto.randomUUID(),
         status: "open",
         outcome: "held",
@@ -236,10 +240,14 @@ describe("Migration 20260814150000 — appointments schema", () => {
 
     it("accepts a valid outcome on a completed appointment", async () => {
       const assignee = await createUserForOrg(BMH_ORG_ID);
+      const dueAt = new Date(Date.now() + 3600_000).toISOString();
+      const endAt = new Date(Date.now() + 7200_000).toISOString();
       const { data, error } = await insertTask({
         type: "appointment",
         assignee_id: assignee.userId,
         created_by: assignee.userId,
+        due_at: dueAt,
+        end_at: endAt,
         calendar_chain_id: crypto.randomUUID(),
         status: "completed",
         outcome: "held",
@@ -263,10 +271,14 @@ describe("Migration 20260814150000 — appointments schema", () => {
 
     it("rejects an appointment task with no calendar_chain_id (chain invariant)", async () => {
       const assignee = await createUserForOrg(BMH_ORG_ID);
+      const dueAt = new Date(Date.now() + 3600_000).toISOString();
+      const endAt = new Date(Date.now() + 7200_000).toISOString();
       const { error } = await insertTask({
         type: "appointment",
         assignee_id: assignee.userId,
         created_by: assignee.userId,
+        due_at: dueAt,
+        end_at: endAt,
         calendar_chain_id: null,
       });
       expect(error).not.toBeNull();
@@ -542,6 +554,7 @@ describe("Migration 20260814150000 — appointments schema", () => {
           status: "open",
           title: "Teammate booking",
           due_at: new Date(Date.now() + 3600_000).toISOString(),
+          end_at: new Date(Date.now() + 7200_000).toISOString(),
           assignee_id: teammate.userId,
           created_by: owner.userId,
           calendar_chain_id: crypto.randomUUID(),
@@ -1288,11 +1301,15 @@ describe("Migration 20260814150000 — appointments schema", () => {
       const assignee = await createUserForOrg(BMH_ORG_ID);
       const propertyId = await insertProperty();
       const chainId = crypto.randomUUID();
+      const dueAt = new Date(Date.now() + 3600_000).toISOString();
+      const endAt = new Date(Date.now() + 7200_000).toISOString();
       const { data: task, error: taskError } = await insertTask({
         type: "appointment",
         assignee_id: assignee.userId,
         created_by: assignee.userId,
         related_property_id: propertyId,
+        due_at: dueAt,
+        end_at: endAt,
         calendar_chain_id: chainId,
       });
       expect(taskError).toBeNull();
@@ -1353,11 +1370,15 @@ describe("Migration 20260814150000 — appointments schema", () => {
     it("deleting a contact succeeds and nulls contact_id even though the task's assignee membership was since suspended", async () => {
       const assignee = await createUserForOrg(BMH_ORG_ID);
       const contactId = await insertContact(BMH_ORG_ID, "Historical Contact");
+      const dueAt = new Date(Date.now() + 3600_000).toISOString();
+      const endAt = new Date(Date.now() + 7200_000).toISOString();
       const { data, error: taskError } = await insertTask({
         type: "appointment",
         assignee_id: assignee.userId,
         created_by: assignee.userId,
         contact_id: contactId,
+        due_at: dueAt,
+        end_at: endAt,
         calendar_chain_id: crypto.randomUUID(),
         status: "completed",
         // round-9's rewritten tasks_outcome_check requires terminal
@@ -1813,6 +1834,91 @@ describe("Migration 20260814150000 — appointments schema", () => {
       expect(
         (data as { calendar_chain_id: string | null } | null)?.calendar_chain_id,
       ).toBeNull();
+    });
+
+    // These three mirror createTask's runtime pre-check (src/lib/tasks/index.ts)
+    // against the DB's own bidirectional tasks_end_at_check — proving the two
+    // layers agree on shape, exercised here as an authenticated org member
+    // (not the service client used by insertTask elsewhere in this file),
+    // matching the RLS path createTask actually runs under in production.
+    it("rejects an appointment insert with NULL end_at (tasks_end_at_check)", async () => {
+      const self = await createUserForOrg(BMH_ORG_ID);
+      const dueAt = new Date(Date.now() + 3600_000).toISOString();
+
+      const { error } = await self.client
+        .from("tasks" as never)
+        .insert({
+          org_id: BMH_ORG_ID,
+          assignee_id: self.userId,
+          related_property_id: null,
+          contact_id: null,
+          type: "appointment",
+          title: "No end time",
+          description: null,
+          due_at: dueAt,
+          end_at: null,
+          calendar_chain_id: crypto.randomUUID(),
+          created_by: self.userId,
+        } as never);
+
+      expect(error).not.toBeNull();
+      expect((error as { message: string }).message).toMatch(
+        /tasks_end_at_check|violates check/i,
+      );
+    });
+
+    it("rejects an appointment insert with end_at <= due_at (tasks_end_at_check)", async () => {
+      const self = await createUserForOrg(BMH_ORG_ID);
+      const dueAt = new Date(Date.now() + 3600_000).toISOString();
+
+      const { error } = await self.client
+        .from("tasks" as never)
+        .insert({
+          org_id: BMH_ORG_ID,
+          assignee_id: self.userId,
+          related_property_id: null,
+          contact_id: null,
+          type: "appointment",
+          title: "End before start",
+          description: null,
+          due_at: dueAt,
+          end_at: dueAt,
+          calendar_chain_id: crypto.randomUUID(),
+          created_by: self.userId,
+        } as never);
+
+      expect(error).not.toBeNull();
+      expect((error as { message: string }).message).toMatch(
+        /tasks_end_at_check|violates check/i,
+      );
+    });
+
+    it("rejects a non-appointment insert carrying end_at (tasks_end_at_check)", async () => {
+      const self = await createUserForOrg(BMH_ORG_ID);
+      const propertyId = await insertProperty();
+      const dueAt = new Date(Date.now() + 3600_000).toISOString();
+      const endAt = new Date(Date.now() + 7200_000).toISOString();
+
+      const { error } = await self.client
+        .from("tasks" as never)
+        .insert({
+          org_id: BMH_ORG_ID,
+          assignee_id: self.userId,
+          related_property_id: propertyId,
+          contact_id: null,
+          type: "follow_up",
+          title: "Follow up with an end_at it shouldn't have",
+          description: null,
+          due_at: dueAt,
+          end_at: endAt,
+          calendar_chain_id: null,
+          created_by: self.userId,
+        } as never);
+
+      expect(error).not.toBeNull();
+      expect((error as { message: string }).message).toMatch(
+        /tasks_end_at_check|violates check/i,
+      );
     });
   });
 });

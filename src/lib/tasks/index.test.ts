@@ -229,6 +229,72 @@ describe("createTask", () => {
     expect(result.error.code).toBe("TASK_CREATE_FAILED");
     expect(result.error.message).toBe("rls denied");
   });
+
+  it("returns err(TASK_CREATE_INVALID) for an appointment with no endAt, issuing no insert", async () => {
+    const result = await createTask(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      makeSupabase() as any,
+      {
+        orgId: "org-1",
+        assigneeId: "user-2",
+        type: "appointment",
+        title: "Book a call",
+        dueAt: "2026-05-08T14:00:00Z",
+        createdBy: "user-1",
+      },
+    );
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe("TASK_CREATE_INVALID");
+    expect(result.error.message).toBe(
+      "Appointments require an end time after their start time.",
+    );
+    expect(calls.find((c) => c.table === "tasks" && c.op === "insert")).toBeUndefined();
+  });
+
+  it("returns err(TASK_CREATE_INVALID) for an appointment with endAt <= dueAt, issuing no insert", async () => {
+    const result = await createTask(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      makeSupabase() as any,
+      {
+        orgId: "org-1",
+        assigneeId: "user-2",
+        type: "appointment",
+        title: "Book a call",
+        dueAt: "2026-05-08T14:00:00Z",
+        endAt: "2026-05-08T14:00:00Z",
+        createdBy: "user-1",
+      },
+    );
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe("TASK_CREATE_INVALID");
+    expect(calls.find((c) => c.table === "tasks" && c.op === "insert")).toBeUndefined();
+  });
+
+  it("returns err(TASK_CREATE_INVALID) for a follow_up carrying endAt, issuing no insert", async () => {
+    const result = await createTask(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      makeSupabase() as any,
+      {
+        orgId: "org-1",
+        assigneeId: "user-2",
+        relatedPropertyId: "prop-3",
+        type: "follow_up",
+        title: "Follow up",
+        dueAt: "2026-05-08T14:00:00Z",
+        endAt: "2026-05-08T14:30:00Z",
+        createdBy: "user-1",
+      },
+    );
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe("TASK_CREATE_INVALID");
+    expect(calls.find((c) => c.table === "tasks" && c.op === "insert")).toBeUndefined();
+  });
 });
 
 describe("completeTask", () => {
