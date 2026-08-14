@@ -1272,24 +1272,56 @@ describe("Migration 20260814150000 — appointments schema", () => {
       // exactly like the ordinary (non-race) reassign-to-suspended case;
       // reassigning to an active member must succeed and clear the
       // dangling state.
+      //
+      // This row is type='appointment' (inserted above for the race), and
+      // round 11 added a reassignment guard scoped to exactly that type: a
+      // bare assignee_id change on an appointment is rejected outright,
+      // active target or not, unless the transaction carries the
+      // sandra.allow_appointment_time_move escape hatch. Left unflagged,
+      // both updates below would be rejected by that guard instead of by
+      // the membership check this test actually exercises — the
+      // reassign-to-active assertion would flip from proving membership
+      // semantics to (silently) proving the wrong guard. Route both
+      // through a flagged raw-pg transaction so the appointment guard is
+      // bypassed and only the membership check can reject or allow them.
+      const flaggedConn = new Client({ connectionString: testDbUrl() });
+      await flaggedConn.connect();
+      await flaggedConn.query("set statement_timeout = 0");
+
       const anotherSuspended = await createUserForOrg(BMH_ORG_ID);
       await setMembershipAccessStatus(anotherSuspended.userId, BMH_ORG_ID, "suspended");
 
-      const { error: reassignToInactiveError } = await db
-        .from("tasks")
-        .update({ assignee_id: anotherSuspended.userId })
-        .eq("id", taskId);
-      expect(reassignToInactiveError).not.toBeNull();
-      expect(reassignToInactiveError?.message).toMatch(/tasks_tenant_integrity_guard/i);
+      await flaggedConn.query("begin");
+      await flaggedConn.query(
+        "select set_config('sandra.allow_appointment_time_move', 'on', true)",
+      );
+      await expect(
+        flaggedConn.query("update tasks set assignee_id = $1 where id = $2", [
+          anotherSuspended.userId,
+          taskId,
+        ]),
+      ).rejects.toThrow(/tasks_tenant_integrity_guard: assignee .* has no active membership/i);
+      await flaggedConn.query("rollback").catch(() => {});
 
       const activeReplacement = await createUserForOrg(BMH_ORG_ID);
-      const { data: reassigned, error: reassignToActiveError } = await db
+      await flaggedConn.query("begin");
+      await flaggedConn.query(
+        "select set_config('sandra.allow_appointment_time_move', 'on', true)",
+      );
+      const reassignResult = await flaggedConn.query<{ assignee_id: string }>(
+        "update tasks set assignee_id = $1 where id = $2 returning assignee_id",
+        [activeReplacement.userId, taskId],
+      );
+      expect(reassignResult.rows[0].assignee_id).toBe(activeReplacement.userId);
+      await flaggedConn.query("commit");
+      await flaggedConn.end().catch(() => {});
+
+      const { data: reassigned, error: readBackError } = await db
         .from("tasks")
-        .update({ assignee_id: activeReplacement.userId })
-        .eq("id", taskId)
         .select("assignee_id")
+        .eq("id", taskId)
         .single();
-      expect(reassignToActiveError).toBeNull();
+      expect(readBackError).toBeNull();
       expect((reassigned as { assignee_id: string }).assignee_id).toBe(
         activeReplacement.userId,
       );
@@ -1754,6 +1786,93 @@ describe("Migration 20260814150000 — appointments schema", () => {
         expect(
           (after as { calendar_chain_id: string | null }).calendar_chain_id,
         ).toBeNull();
+      });
+    });
+  });
+
+  // Appointment reassignment guard (round 11, section 3 of this migration):
+  // a bare assignee_id change on an appointment is lifecycle-owned, same as
+  // time moves and identity — the reassign RPC (PR 3) needs to move the
+  // Google event between accounts inside the flagged transaction. Every
+  // test below reassigns to a freshly created, ACTIVE org member, so the
+  // membership check (further down the same trigger) would happily allow
+  // the change — the ONLY thing that can reject it is this guard.
+  describe("appointment reassignment guard", () => {
+    it.each([
+      ["service-role", async () => db],
+      [
+        "authenticated org member",
+        async () => (await createUserForOrg(BMH_ORG_ID, "owner")).client,
+      ],
+    ] as const)(
+      "%s: rejects a direct assignee_id update on an appointment even when the target assignee is an active member",
+      async (_label, getClient) => {
+        const appt = await insertValidAppointment();
+        const newAssignee = await createUserForOrg(BMH_ORG_ID);
+        const client = await getClient();
+
+        const { error } = await client
+          .from("tasks" as never)
+          .update({ assignee_id: newAssignee.userId } as never)
+          .eq("id", appt.id);
+
+        expect(error).not.toBeNull();
+        expect((error as { message: string }).message).toMatch(
+          /appointment reassignment goes through the calendar lifecycle/i,
+        );
+
+        const { data: after } = await db
+          .from("tasks")
+          .select("assignee_id")
+          .eq("id", appt.id)
+          .single();
+        expect((after as { assignee_id: string }).assignee_id).toBe(
+          appt.assigneeId,
+        );
+      },
+    );
+
+    // Raw pg connection (same pattern as the time-move / identity escape
+    // hatches above): the Supabase JS client auto-commits every request, so
+    // it can't hold set_config('...', true) (transaction-local) across the
+    // set_config call and the subsequent UPDATE in the same transaction.
+    describe("escape hatch — sandra.allow_appointment_time_move covers reassignment too (raw pg, same transaction)", () => {
+      let conn: Client;
+
+      beforeEach(async () => {
+        conn = new Client({ connectionString: testDbUrl() });
+        await conn.connect();
+        await conn.query("set statement_timeout = 0");
+      });
+
+      afterEach(async () => {
+        await conn.query("rollback").catch(() => {});
+        await conn.end().catch(() => {});
+      });
+
+      it("allows the assignee_id change (proving PR 3's lifecycle path) once the flag is set to 'on' in the same transaction", async () => {
+        const appt = await insertValidAppointment();
+        const newAssignee = await createUserForOrg(BMH_ORG_ID);
+
+        await conn.query("begin");
+        await conn.query(
+          "select set_config('sandra.allow_appointment_time_move', 'on', true)",
+        );
+        const result = await conn.query<{ assignee_id: string }>(
+          "update tasks set assignee_id = $1 where id = $2 returning assignee_id",
+          [newAssignee.userId, appt.id],
+        );
+        expect(result.rows[0].assignee_id).toBe(newAssignee.userId);
+        await conn.query("commit");
+
+        const { data: after } = await db
+          .from("tasks")
+          .select("assignee_id")
+          .eq("id", appt.id)
+          .single();
+        expect((after as { assignee_id: string }).assignee_id).toBe(
+          newAssignee.userId,
+        );
       });
     });
   });

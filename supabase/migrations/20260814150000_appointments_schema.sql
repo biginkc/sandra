@@ -300,6 +300,20 @@ begin
         'tasks_tenant_integrity_guard: appointment identity (type/calendar chain) is immutable outside the lifecycle'
         using errcode = 'P0001';
     end if;
+
+    -- Appointment ownership is lifecycle-owned too: a bare assignee swap
+    -- would leave the Google event under the old teammate's account with
+    -- no ledger record to move it. The reassign RPC (PR 3) deletes the
+    -- old-account event and recreates it under the new assignee inside
+    -- the flagged transaction.
+    if old.type = 'appointment'
+       and new.assignee_id is distinct from old.assignee_id
+       and coalesce(current_setting('sandra.allow_appointment_time_move', true), '') <> 'on'
+    then
+      raise exception
+        'tasks_tenant_integrity_guard: appointment reassignment goes through the calendar lifecycle'
+        using errcode = 'P0001';
+    end if;
   end if;
 
   -- Each relation validates independently, only when it (or the org)

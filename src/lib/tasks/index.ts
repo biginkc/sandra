@@ -226,6 +226,10 @@ export async function reassignTask(
   newAssigneeId: string,
 ): Promise<Result<Task>> {
   const now = new Date().toISOString();
+  // Appointments reassign only through the calendar lifecycle (PR 3):
+  // ownership moves the Google event between accounts, which needs the
+  // ledger. Same atomic-predicate pattern as complete/snooze; the DB
+  // trigger backstops any other caller.
   const { data, error } = await supabase
     .from("tasks")
     .update({
@@ -233,13 +237,33 @@ export async function reassignTask(
       updated_at: now,
     })
     .eq("id", taskId)
+    .neq("type", "appointment")
     .select()
-    .single();
+    .maybeSingle();
 
-  if (error || !data) {
+  if (error) {
     return err({
       code: "TASK_REASSIGN_FAILED",
-      message: error?.message ?? "Failed to reassign task",
+      message: error.message,
+    });
+  }
+
+  if (!data) {
+    const { data: existing } = await supabase
+      .from("tasks")
+      .select("type")
+      .eq("id", taskId)
+      .maybeSingle();
+    if (existing?.type === "appointment") {
+      return err({
+        code: "TASK_REASSIGN_UNSUPPORTED",
+        message:
+          "Appointments are reassigned from the appointment itself, moving the calendar event with them.",
+      });
+    }
+    return err({
+      code: "TASK_REASSIGN_FAILED",
+      message: "Failed to reassign task",
     });
   }
   return ok(data);

@@ -639,7 +639,7 @@ describe("snoozeTask", () => {
 });
 
 describe("reassignTask", () => {
-  it("updates assignee_id and bumps updated_at", async () => {
+  it("updates assignee_id and bumps updated_at, excluding appointments via the atomic predicate", async () => {
     responseQueue = [
       {
         data: { id: "task-1", assignee_id: "user-2" },
@@ -655,19 +655,50 @@ describe("reassignTask", () => {
     );
 
     expect(result.ok).toBe(true);
-    const update = calls.find(
-      (c) => c.table === "tasks" && c.op === "update",
-    );
-    expect(update).toBeDefined();
-    const payload = update!.updatePayload as Record<string, unknown>;
+    const taskCalls = calls.filter((c) => c.table === "tasks");
+    expect(taskCalls).toHaveLength(1);
+    const update = taskCalls[0];
+    expect(update.op).toBe("update");
+    const payload = update.updatePayload as Record<string, unknown>;
     expect(payload.assignee_id).toBe("user-2");
     expect(typeof payload.updated_at).toBe("string");
+    expect(update.filters).toEqual([
+      { op: "eq", args: ["id", "task-1"] },
+      { op: "neq", args: ["type", "appointment"] },
+    ]);
   });
 
-  it("returns err when supabase fails", async () => {
+  it("refuses to reassign an appointment — UPDATE excludes it (neq predicate), follow-up read confirms type, returns TASK_REASSIGN_UNSUPPORTED", async () => {
     responseQueue = [
-      { data: null, error: { message: "fk violation" } },
+      // UPDATE's neq predicate excludes the row: zero rows back.
+      { data: null, error: null },
+      // Follow-up type read distinguishes appointment from missing.
+      { data: { type: "appointment" }, error: null },
     ];
+
+    const result = await reassignTask(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      makeSupabase() as any,
+      "task-1",
+      "user-2",
+    );
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe("TASK_REASSIGN_UNSUPPORTED");
+    }
+    const taskCalls = calls.filter((c) => c.table === "tasks");
+    expect(taskCalls).toHaveLength(2);
+    expect(taskCalls[0].op).toBe("update");
+    expect(taskCalls[0].filters).toEqual([
+      { op: "eq", args: ["id", "task-1"] },
+      { op: "neq", args: ["type", "appointment"] },
+    ]);
+    expect(taskCalls[1].op).toBe("select");
+  });
+
+  it("fails closed when the UPDATE errors — no follow-up read, no fall-through write", async () => {
+    responseQueue = [{ data: null, error: { message: "connection reset" } }];
 
     const result = await reassignTask(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -675,9 +706,38 @@ describe("reassignTask", () => {
       "task-1",
       "user-bogus",
     );
+
     expect(result.ok).toBe(false);
-    if (result.ok) return;
-    expect(result.error.code).toBe("TASK_REASSIGN_FAILED");
+    if (!result.ok) {
+      expect(result.error.code).toBe("TASK_REASSIGN_FAILED");
+      expect(result.error.message).toBe("connection reset");
+    }
+    // The error short-circuits before any follow-up read.
+    const taskCalls = calls.filter((c) => c.table === "tasks");
+    expect(taskCalls).toHaveLength(1);
+    expect(taskCalls[0].op).toBe("update");
+  });
+
+  it("returns TASK_REASSIGN_FAILED when the task doesn't exist (UPDATE and follow-up read both empty)", async () => {
+    responseQueue = [
+      { data: null, error: null },
+      { data: null, error: null },
+    ];
+
+    const result = await reassignTask(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      makeSupabase() as any,
+      "missing-task",
+      "user-2",
+    );
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe("TASK_REASSIGN_FAILED");
+      expect(result.error.message).toBe("Failed to reassign task");
+    }
+    const taskCalls = calls.filter((c) => c.table === "tasks");
+    expect(taskCalls).toHaveLength(2);
   });
 });
 
