@@ -3,12 +3,14 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const {
   createClient,
+  fetchAssigneeEmails,
   fetchCalendarAppointments,
   fetchOrgRoster,
   getCallerMemberships,
   loadIntegrationPrefs,
 } = vi.hoisted(() => ({
   createClient: vi.fn(),
+  fetchAssigneeEmails: vi.fn(async () => ({})),
   fetchCalendarAppointments: vi.fn(),
   fetchOrgRoster: vi.fn(),
   getCallerMemberships: vi.fn(),
@@ -22,17 +24,30 @@ const {
 vi.mock("@/lib/supabase/server", () => ({ createClient }));
 vi.mock("@/lib/auth/memberships", () => ({ getCallerMemberships }));
 vi.mock("@/lib/integrations/prefs", () => ({ loadIntegrationPrefs }));
-vi.mock("./queries", () => ({ fetchCalendarAppointments, fetchOrgRoster }));
+vi.mock("./queries", () => ({
+  fetchAssigneeEmails,
+  fetchCalendarAppointments,
+  fetchOrgRoster,
+}));
 // The `_components` lane's real CalendarView is a "use client" component
 // that reads next/navigation hooks — irrelevant to what this page-level
 // test is verifying (the error/empty/degraded-roster branching in
 // page.tsx itself), so it's stubbed to a plain marker that surfaces the
 // props this test cares about.
 vi.mock("./_components/calendar-view", () => ({
-  CalendarView: (props: { appointments: unknown[]; assignees: Record<string, string> }) => (
+  CalendarView: (props: {
+    appointments: unknown[];
+    assignees: Record<string, string>;
+    assigneeLabels: Record<string, string>;
+  }) => (
     <div data-testid="calendar-view-stub">
       <span data-testid="appointment-count">{props.appointments.length}</span>
       <span data-testid="assignee-count">{Object.keys(props.assignees).length}</span>
+      {Object.entries(props.assigneeLabels).map(([id, label]) => (
+        <span key={id} data-testid={`assignee-label-${id}`}>
+          {label}
+        </span>
+      ))}
     </div>
   ),
 }));
@@ -165,5 +180,93 @@ describe("CalendarPage — roster labels degraded (identity known, emails unreso
     expect(screen.getByTestId("calendar-view-stub")).toBeInTheDocument();
     expect(screen.getByTestId("assignee-count")).toHaveTextContent("2");
     expect(screen.getByText(/names are unavailable/i)).toBeInTheDocument();
+  });
+});
+
+describe("CalendarPage — appointment owned by an inactive/former assignee (Codex round 4)", () => {
+  it("resolves a former-teammate label for an assignee off the active roster, without adding them to the filter roster", async () => {
+    mockUser("user-1", "owner@bmh.com");
+    fetchCalendarAppointments.mockResolvedValue({
+      ok: true,
+      rows: [
+        {
+          id: "appt-1",
+          title: "Walkthrough",
+          description: null,
+          due_at: "2026-05-05T15:00:00.000Z",
+          end_at: "2026-05-05T15:30:00.000Z",
+          status: "completed",
+          outcome: "held",
+          assignee_id: "rep-suspended",
+          property_id: null,
+          address: null,
+          city: null,
+          state: null,
+          contact_id: null,
+          contact_name: null,
+        },
+      ],
+    });
+    // The suspended rep is NOT on the active roster — only user-1 is.
+    fetchOrgRoster.mockResolvedValue({
+      ok: true,
+      labelsDegraded: false,
+      roster: [{ id: "user-1", label: "owner@bmh.com" }],
+    });
+    // No email resolvable for the suspended id — falls back to the
+    // id-prefix label rather than dropping the attribution.
+    fetchAssigneeEmails.mockResolvedValue({});
+
+    const jsx = await CalendarPage({ searchParams: Promise.resolve({}) });
+    render(jsx);
+
+    // Filter/roster stays active-roster-only (just the owner).
+    expect(screen.getByTestId("assignee-count")).toHaveTextContent("1");
+    // But the label map used for per-row attribution covers the inactive
+    // assignee too, with a "Former teammate" fallback carrying the id
+    // prefix — never silently dropped.
+    expect(screen.getByTestId("assignee-label-rep-suspended")).toHaveTextContent(
+      "Former teammate (rep-susp)",
+    );
+    expect(fetchAssigneeEmails).toHaveBeenCalledWith(["rep-suspended"]);
+  });
+
+  it("prefers a resolved email over the fallback label when one is available for the inactive assignee", async () => {
+    mockUser("user-1", "owner@bmh.com");
+    fetchCalendarAppointments.mockResolvedValue({
+      ok: true,
+      rows: [
+        {
+          id: "appt-1",
+          title: "Walkthrough",
+          description: null,
+          due_at: "2026-05-05T15:00:00.000Z",
+          end_at: "2026-05-05T15:30:00.000Z",
+          status: "open",
+          outcome: null,
+          assignee_id: "rep-former",
+          property_id: null,
+          address: null,
+          city: null,
+          state: null,
+          contact_id: null,
+          contact_name: null,
+        },
+      ],
+    });
+    fetchOrgRoster.mockResolvedValue({
+      ok: true,
+      labelsDegraded: false,
+      roster: [{ id: "user-1", label: "owner@bmh.com" }],
+    });
+    fetchAssigneeEmails.mockResolvedValue({ "rep-former": "former@bmh.com" });
+
+    const jsx = await CalendarPage({ searchParams: Promise.resolve({}) });
+    render(jsx);
+
+    expect(screen.getByTestId("assignee-count")).toHaveTextContent("1");
+    expect(screen.getByTestId("assignee-label-rep-former")).toHaveTextContent(
+      "former@bmh.com",
+    );
   });
 });

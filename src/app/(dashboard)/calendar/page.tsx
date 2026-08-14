@@ -7,7 +7,7 @@ import { loadIntegrationPrefs } from "@/lib/integrations/prefs";
 import { createClient } from "@/lib/supabase/server";
 import { addDaysInZone, getDayBoundsInZone, wallTimeToUtc } from "@/lib/time/zoned";
 
-import { fetchCalendarAppointments, fetchOrgRoster } from "./queries";
+import { fetchAssigneeEmails, fetchCalendarAppointments, fetchOrgRoster } from "./queries";
 import { resolveAssigneeId } from "./scoping";
 import type {
   CalendarDayBounds,
@@ -248,6 +248,32 @@ export default async function CalendarPage({
   // the real id prefix) — only the display note changes.
   const labelsDegraded = rosterResult.labelsDegraded;
 
+  // Codex round 4 — the roster (`assignees`, active memberships only) is
+  // NOT the full set of ids that can show up on an appointment row: a
+  // teammate suspended/removed after being assigned an appointment still
+  // owns that row, and dropping their label would misattribute it (silent
+  // "no owner shown" on a real row) instead of degrading gracefully. Build
+  // a superset label map — active roster + a resolved-or-fallback label
+  // for every OTHER assignee_id actually referenced in this week's rows —
+  // and keep it entirely separate from `assignees`, which stays
+  // roster-only so the filter never offers a former teammate as an option.
+  const rosterIds = new Set(rosterResult.roster.map((entry) => entry.id));
+  const inactiveAssigneeIds = Array.from(
+    new Set(
+      appointments
+        .map((appt) => appt.assignee_id)
+        .filter((id) => !rosterIds.has(id)),
+    ),
+  );
+  const inactiveEmails =
+    inactiveAssigneeIds.length > 0
+      ? await fetchAssigneeEmails(inactiveAssigneeIds)
+      : {};
+  const assigneeLabels: Record<string, string> = { ...assignees };
+  for (const id of inactiveAssigneeIds) {
+    assigneeLabels[id] = inactiveEmails[id] ?? `Former teammate (${id.slice(0, 8)})`;
+  }
+
   return (
     <Page>
       <PageHeader
@@ -272,6 +298,7 @@ export default async function CalendarPage({
         timezone={timezone}
         viewerRole={viewerRole}
         assignees={assignees}
+        assigneeLabels={assigneeLabels}
         currentUserId={user.id}
       />
     </Page>

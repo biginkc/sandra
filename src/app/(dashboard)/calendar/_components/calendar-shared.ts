@@ -4,20 +4,101 @@ import type { StatusVariant } from "@/components/ui/status-chip";
 
 import type { CalendarAppointmentRow, CalendarDayBounds } from "../types";
 
+/** Zone-local YYYY-MM-DD calendar-date key, used to detect a cross-midnight
+ *  range (formatTimeRange) without trusting a locale string's shape. */
+function zonedDateKeyForRange(instant: Date, timeZone: string): string {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(instant);
+  const map: Record<string, string> = {};
+  for (const p of parts) if (p.type !== "literal") map[p.type] = p.value;
+  return `${map.year}-${map.month}-${map.day}`;
+}
+
+/** Zone-local minutes-since-midnight, via a 24h formatter so "1 AM" vs
+ *  "1 PM" ambiguity never enters the comparison (formatTimeRange's DST
+ *  fall-back detection needs a numeric, not string, comparison). */
+function zonedMinutesOfDay(instant: Date, timeZone: string): number {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    hourCycle: "h23",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).formatToParts(instant);
+  const map: Record<string, string> = {};
+  for (const p of parts) if (p.type !== "literal") map[p.type] = p.value;
+  return Number(map.hour) * 60 + Number(map.minute);
+}
+
+/** Short zone abbreviation/offset ("CDT", "CST", "GMT-5", ...) for an
+ *  instant in `timeZone` — used only to disambiguate a DST fall-back
+ *  wall-clock collision in formatTimeRange. */
+function zoneAbbrev(instant: Date, timeZone: string): string {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    timeZoneName: "short",
+  }).formatToParts(instant);
+  return parts.find((p) => p.type === "timeZoneName")?.value ?? "";
+}
+
 /** "2:00–2:30 PM" in the given timezone. Appointment rows always carry a
  *  non-null `end_at` per the PR 1 CHECK, so unlike TasksPanel's variant of
- *  this helper there's no null-`endAt` fallback branch to handle. */
+ *  this helper there's no null-`endAt` fallback branch to handle.
+ *
+ * Two edge cases the bare wall-clock labels can't represent on their own
+ * (Codex round 4):
+ *
+ * - Cross-midnight: `due_at`/`end_at` land on different zone-local
+ *   calendar dates (an overnight block). Bare labels like
+ *   "11:30 PM–12:15 AM" read as same-day or even negative, so a next-day
+ *   marker is appended: "11:30 PM–12:15 AM → Fri".
+ * - DST fall-back: within America/* zones, the repeated hour when clocks
+ *   fall back means two different real instants can format to the SAME
+ *   wall-clock label (or make the end label appear to precede the start
+ *   label) despite `end_at` being strictly after `due_at`. Detected as
+ *   "same zone-local date, real positive duration, but end's wall-clock
+ *   minutes-of-day <= start's" — disambiguated with short zone
+ *   abbreviations: "1:30 AM CDT–1:30 AM CST".
+ */
 export function formatTimeRange(
   dueAt: string,
   endAt: string,
   timeZone: string,
 ): string {
+  const start = new Date(dueAt);
+  const end = new Date(endAt);
+
   const fmt = new Intl.DateTimeFormat("en-US", {
     timeZone,
     hour: "numeric",
     minute: "2-digit",
   });
-  return `${fmt.format(new Date(dueAt))}–${fmt.format(new Date(endAt))}`;
+  const startLabel = fmt.format(start);
+  const endLabel = fmt.format(end);
+
+  const startDateKey = zonedDateKeyForRange(start, timeZone);
+  const endDateKey = zonedDateKeyForRange(end, timeZone);
+
+  if (startDateKey !== endDateKey) {
+    const weekday = new Intl.DateTimeFormat("en-US", {
+      timeZone,
+      weekday: "short",
+    }).format(end);
+    return `${startLabel}–${endLabel} → ${weekday}`;
+  }
+
+  const hasRealDuration = end.getTime() > start.getTime();
+  const startMinutes = zonedMinutesOfDay(start, timeZone);
+  const endMinutes = zonedMinutesOfDay(end, timeZone);
+
+  if (hasRealDuration && endMinutes <= startMinutes) {
+    return `${startLabel} ${zoneAbbrev(start, timeZone)}–${endLabel} ${zoneAbbrev(end, timeZone)}`;
+  }
+
+  return `${startLabel}–${endLabel}`;
 }
 
 /**

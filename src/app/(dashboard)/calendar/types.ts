@@ -78,11 +78,21 @@ export type CalendarViewProps = {
    *  `user_integration_prefs.timezone` (loadIntegrationPrefs, self). */
   timezone: string;
   viewerRole: CalendarViewerRole;
-  /** user_id -> email, for every assignee referenced in `appointments`
-   *  (and the full org roster when `viewerRole === 'owner'`, for the
-   *  assignee filter control). Empty map is a valid state (lookup
+  /** user_id -> email, for the ACTIVE org roster only (both roles now get
+   *  the filter). This is the set the assignee filter's option list is
+   *  built from — it must NEVER include a former/inactive member (Codex
+   *  round 4), since offering an id you can no longer assign appointments
+   *  to would be a dead filter option. Empty map is a valid state (lookup
    *  failure degrades to showing no email labels, never breaks the page). */
   assignees: Record<string, string>;
+  /** user_id -> label for EVERY assignee referenced by `appointments`
+   *  (Codex round 4) — a superset of `assignees` that also covers a
+   *  suspended/former teammate still attributed on a past appointment row
+   *  (fallback label `"Former teammate (<id-prefix>)"` when no email is
+   *  resolvable). Used ONLY for the per-appointment "whose appointment"
+   *  label — never for the filter's option list, so an inactive id can be
+   *  labeled without becoming a selectable filter value. */
+  assigneeLabels: Record<string, string>;
   currentUserId: string;
 };
 

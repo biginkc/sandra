@@ -52,6 +52,7 @@ export function CalendarView({
   timezone,
   viewerRole,
   assignees,
+  assigneeLabels,
   currentUserId,
 }: CalendarViewProps) {
   const pathname = usePathname();
@@ -178,7 +179,7 @@ export function CalendarView({
             appointments={appointments}
             timezone={timezone}
             viewerRole={viewerRole}
-            assignees={assignees}
+            assignees={assigneeLabels}
           />
         </div>
       ) : null}
@@ -193,7 +194,7 @@ export function CalendarView({
           appointments={appointments}
           timezone={timezone}
           viewerRole={viewerRole}
-          assignees={assignees}
+          assignees={assigneeLabels}
         />
       </div>
     </div>

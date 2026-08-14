@@ -123,6 +123,7 @@ function baseProps(overrides: Partial<React.ComponentProps<typeof CalendarView>>
     timezone: CHI,
     viewerRole: "owner" as const,
     assignees: {},
+    assigneeLabels: {},
     currentUserId: "user-1",
     ...overrides,
   };

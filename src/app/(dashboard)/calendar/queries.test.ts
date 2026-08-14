@@ -6,8 +6,19 @@ const mocks = vi.hoisted(() => ({
 
 let queuedData: unknown[] | null = [];
 let queuedError: { message: string; code?: string } | null = null;
+// Multi-page override (Codex round 4 pagination tests): when set, each
+// `.range()` call shifts the next entry off this queue instead of
+// returning the (single-page) `queuedData`/`queuedError` pair above — lets
+// a test simulate several `.range()` round-trips, including a failure on
+// a later page. `null` (the default) preserves every pre-pagination test
+// below exactly as written.
+let queuedPages:
+  | Array<{ data: unknown[] | null; error: { message: string; code?: string } | null }>
+  | null = null;
 let eqCalls: Array<[string, unknown]> = [];
 let selectCalls: string[] = [];
+let orderCalls: Array<[string, unknown]> = [];
+let rangeCalls: Array<[number, number]> = [];
 
 function makeBuilder(): Record<string, unknown> {
   const builder: Record<string, unknown> = {};
@@ -22,18 +33,35 @@ function makeBuilder(): Record<string, unknown> {
   builder.in = () => builder;
   builder.gte = () => builder;
   builder.lt = () => builder;
-  builder.order = () => Promise.resolve({ data: queuedData, error: queuedError });
+  builder.order = (col: string, opts: unknown) => {
+    orderCalls.push([col, opts]);
+    return builder;
+  };
+  builder.range = (from: number, to: number) => {
+    rangeCalls.push([from, to]);
+    if (queuedPages && queuedPages.length > 0) {
+      return Promise.resolve(queuedPages.shift()!);
+    }
+    return Promise.resolve({ data: queuedData, error: queuedError });
+  };
   return builder;
 }
 
 // .from("memberships").select().eq("org_id",…).eq("access_status","active")
-// .is("deletion_prepared_at", null).or(activeAt filter) — mirrors
-// `listBookingAssignees`'s predicate (book-appointment-action.test.ts).
+// .is("deletion_prepared_at", null).or(activeAt filter).order("user_id")
+// .range(from,to) — mirrors `listBookingAssignees`'s predicate
+// (book-appointment-action.test.ts).
 let membershipRows: Array<{ user_id: string }> | null = [];
 let membershipError: { message: string; code?: string } | null = null;
+// Same multi-page override pattern as `queuedPages` above.
+let membershipPages:
+  | Array<{ data: Array<{ user_id: string }> | null; error: { message: string; code?: string } | null }>
+  | null = null;
 let membershipEqCalls: Array<[string, unknown]> = [];
 let membershipIsCalls: Array<[string, unknown]> = [];
 let membershipOrCalls: string[] = [];
+let membershipOrderCalls: Array<[string, unknown]> = [];
+let membershipRangeCalls: Array<[number, number]> = [];
 
 function makeMembershipsBuilder(): Record<string, unknown> {
   const builder: Record<string, unknown> = {};
@@ -48,6 +76,17 @@ function makeMembershipsBuilder(): Record<string, unknown> {
   };
   builder.or = (filter: string) => {
     membershipOrCalls.push(filter);
+    return builder;
+  };
+  builder.order = (col: string, opts: unknown) => {
+    membershipOrderCalls.push([col, opts]);
+    return builder;
+  };
+  builder.range = (from: number, to: number) => {
+    membershipRangeCalls.push([from, to]);
+    if (membershipPages && membershipPages.length > 0) {
+      return Promise.resolve(membershipPages.shift()!);
+    }
     return Promise.resolve({ data: membershipRows, error: membershipError });
   };
   return builder;
@@ -79,14 +118,38 @@ beforeEach(() => {
   vi.clearAllMocks();
   queuedData = [];
   queuedError = null;
+  queuedPages = null;
   eqCalls = [];
   selectCalls = [];
+  orderCalls = [];
+  rangeCalls = [];
   membershipRows = [];
   membershipError = null;
+  membershipPages = null;
   membershipEqCalls = [];
   membershipIsCalls = [];
   membershipOrCalls = [];
+  membershipOrderCalls = [];
+  membershipRangeCalls = [];
 });
+
+function appointmentRow(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    id: "t-1",
+    title: "Walkthrough",
+    description: null,
+    due_at: "2026-05-05T15:00:00.000Z",
+    end_at: "2026-05-05T15:30:00.000Z",
+    status: "open",
+    outcome: null,
+    assignee_id: "user-1",
+    related_property_id: null,
+    contact_id: null,
+    properties: null,
+    contacts: null,
+    ...overrides,
+  };
+}
 
 describe("fetchCalendarAppointments", () => {
   it("scopes to org + type='appointment' + open/completed status + the due_at window", async () => {
@@ -253,6 +316,78 @@ describe("fetchCalendarAppointments", () => {
       weekEndUtc: "2026-05-10T05:00:00.000Z",
     });
     expect(result).toEqual({ ok: false });
+  });
+
+  describe("pagination (Codex round 4)", () => {
+    const PAGE_SIZE = 1_000;
+
+    it("sorts by due_at then id for a stable, gap-free page cursor", async () => {
+      queuedData = [appointmentRow()];
+      await fetchCalendarAppointments("org-1", {
+        weekStartUtc: "2026-05-03T05:00:00.000Z",
+        weekEndUtc: "2026-05-10T05:00:00.000Z",
+      });
+
+      expect(orderCalls).toEqual([
+        ["due_at", { ascending: true }],
+        ["id", { ascending: true }],
+      ]);
+    });
+
+    it("pages through and aggregates every row when a week's appointments exceed one page", async () => {
+      const firstPage = Array.from({ length: PAGE_SIZE }, (_, i) =>
+        appointmentRow({ id: `t-${i}` }),
+      );
+      const secondPage = [appointmentRow({ id: "t-last" })];
+      queuedPages = [
+        { data: firstPage, error: null },
+        { data: secondPage, error: null },
+      ];
+
+      const result = await fetchCalendarAppointments("org-1", {
+        weekStartUtc: "2026-05-03T05:00:00.000Z",
+        weekEndUtc: "2026-05-10T05:00:00.000Z",
+      });
+
+      if (!result.ok) throw new Error("expected ok:true");
+      expect(result.rows).toHaveLength(PAGE_SIZE + 1);
+      expect(result.rows.map((r) => r.id)).toContain("t-last");
+      // Two full `.range()` round-trips: [0, PAGE_SIZE-1] then
+      // [PAGE_SIZE, 2*PAGE_SIZE-1] — the short second page stops the loop.
+      expect(rangeCalls).toEqual([
+        [0, PAGE_SIZE - 1],
+        [PAGE_SIZE, 2 * PAGE_SIZE - 1],
+      ]);
+    });
+
+    it("stops after exactly one page when the first page comes back short", async () => {
+      queuedData = [appointmentRow()];
+      await fetchCalendarAppointments("org-1", {
+        weekStartUtc: "2026-05-03T05:00:00.000Z",
+        weekEndUtc: "2026-05-10T05:00:00.000Z",
+      });
+      expect(rangeCalls).toEqual([[0, PAGE_SIZE - 1]]);
+    });
+
+    it("fails the whole load (ok:false) when a LATER page errors, even though the first page succeeded", async () => {
+      const firstPage = Array.from({ length: PAGE_SIZE }, (_, i) =>
+        appointmentRow({ id: `t-${i}` }),
+      );
+      queuedPages = [
+        { data: firstPage, error: null },
+        { data: null, error: { message: "boom on page 2" } },
+      ];
+
+      const result = await fetchCalendarAppointments("org-1", {
+        weekStartUtc: "2026-05-03T05:00:00.000Z",
+        weekEndUtc: "2026-05-10T05:00:00.000Z",
+      });
+
+      expect(result).toEqual({ ok: false });
+      // Confirms the failure really did happen on the second round-trip,
+      // not that the loop silently stopped after page 1.
+      expect(rangeCalls).toHaveLength(2);
+    });
   });
 });
 
@@ -432,6 +567,60 @@ describe("fetchOrgRoster", () => {
         { id: "user-1", label: "owner@bmh.com" },
         { id: "rep-2", label: "Teammate (rep-2)" },
       ],
+    });
+  });
+
+  describe("pagination (Codex round 4)", () => {
+    const PAGE_SIZE = 1_000;
+
+    it("orders by user_id for a stable, gap-free page cursor", async () => {
+      membershipRows = [{ user_id: "user-1" }];
+      await fetchOrgRoster("org-1");
+      expect(membershipOrderCalls).toEqual([["user_id", { ascending: true }]]);
+    });
+
+    it("pages through and aggregates every membership when the org exceeds one page", async () => {
+      const firstPage = Array.from({ length: PAGE_SIZE }, (_, i) => ({
+        user_id: `user-${i}`,
+      }));
+      const secondPage = [{ user_id: "user-last" }];
+      membershipPages = [
+        { data: firstPage, error: null },
+        { data: secondPage, error: null },
+      ];
+      // Labels are cosmetic here — leave listUsers unmocked (empty
+      // results) so every id falls back, and assert on identity only.
+
+      const result = await fetchOrgRoster("org-1");
+      if (!result.ok) throw new Error("expected ok:true");
+      expect(result.roster).toHaveLength(PAGE_SIZE + 1);
+      expect(result.roster.map((r) => r.id)).toContain("user-last");
+      expect(membershipRangeCalls).toEqual([
+        [0, PAGE_SIZE - 1],
+        [PAGE_SIZE, 2 * PAGE_SIZE - 1],
+      ]);
+    });
+
+    it("stops after exactly one page when the first page comes back short", async () => {
+      membershipRows = [{ user_id: "user-1" }];
+      await fetchOrgRoster("org-1");
+      expect(membershipRangeCalls).toEqual([[0, PAGE_SIZE - 1]]);
+    });
+
+    it("fails the whole roster load (ok:false) when a LATER page errors, even though the first page succeeded", async () => {
+      const firstPage = Array.from({ length: PAGE_SIZE }, (_, i) => ({
+        user_id: `user-${i}`,
+      }));
+      membershipPages = [
+        { data: firstPage, error: null },
+        { data: null, error: { message: "boom on page 2" } },
+      ];
+
+      const result = await fetchOrgRoster("org-1");
+      expect(result).toEqual({ ok: false });
+      expect(membershipRangeCalls).toHaveLength(2);
+      // A failed identity load never falls through to resolving labels.
+      expect(mocks.listUsers).not.toHaveBeenCalled();
     });
   });
 });

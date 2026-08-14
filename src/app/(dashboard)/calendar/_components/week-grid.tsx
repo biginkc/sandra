@@ -16,6 +16,10 @@ type Props = {
   appointments: CalendarAppointmentRow[];
   timezone: string;
   viewerRole: CalendarViewerRole;
+  /** Fed `assigneeLabels` (not the roster-only `assignees`) by
+   *  `CalendarView` — a superset covering an inactive/former assignee too
+   *  (Codex round 4), since this is only ever used for the per-row
+   *  "whose appointment" label, never a selectable option list. */
   assignees: Record<string, string>;
   currentUserId: string;
 };

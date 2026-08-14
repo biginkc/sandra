@@ -29,17 +29,25 @@ export type FetchCalendarAppointmentsResult =
  * Cancelled appointments are excluded (lifecycle policy — cancel closes
  * the task with a terminal status other than 'open'/'completed', and the
  * calendar surface never shows them).
+ *
+ * Paginates internally (Codex round 4) with the same PAGE_SIZE/MAX_PAGES
+ * shape as `admin/users/membership-inventory.ts`'s `loadSandraMemberships`
+ * — deterministic order + explicit `.range()` windows until a short page,
+ * capped so a pathological org can't spin forever. See the loop below for
+ * why a query failure on ANY page fails the whole load.
  */
-export async function fetchCalendarAppointments(
-  orgId: string,
-  opts: {
-    assigneeId?: string;
-    weekStartUtc: string;
-    weekEndUtc: string;
-  },
-): Promise<FetchCalendarAppointmentsResult> {
-  const supabase = await createClient();
+// Same PAGE_SIZE/MAX_PAGES pagination shape as
+// `admin/users/membership-inventory.ts`'s `loadSandraMemberships` — page
+// with a deterministic order + explicit `.range()` windows until a short
+// page, capped so a pathological org can't spin forever.
+const APPOINTMENTS_PAGE_SIZE = 1_000;
+const MAX_PAGES = 100;
 
+function buildAppointmentsQuery(
+  supabase: Awaited<ReturnType<typeof createClient>>,
+  orgId: string,
+  opts: { assigneeId?: string; weekStartUtc: string; weekEndUtc: string },
+) {
   let query = supabase
     .from("tasks")
     .select(
@@ -55,19 +63,53 @@ export async function fetchCalendarAppointments(
     query = query.eq("assignee_id", opts.assigneeId);
   }
 
-  const { data, error } = await query.order("due_at", { ascending: true });
+  return query;
+}
 
-  if (error || !data) {
-    if (error) {
-      console.error("[calendar] fetchCalendarAppointments failed", {
-        message: error.message,
-        code: error.code,
-      });
+type AppointmentQueryResult = Awaited<ReturnType<typeof buildAppointmentsQuery>>;
+type RawAppointmentRow = NonNullable<AppointmentQueryResult["data"]>[number];
+
+export async function fetchCalendarAppointments(
+  orgId: string,
+  opts: {
+    assigneeId?: string;
+    weekStartUtc: string;
+    weekEndUtc: string;
+  },
+): Promise<FetchCalendarAppointmentsResult> {
+  const supabase = await createClient();
+
+  const allRows: RawAppointmentRow[] = [];
+
+  // Deterministic pagination (Codex round 4): `due_at` alone can tie
+  // (multiple appointments in the same minute), so `id` is a secondary
+  // sort key giving every page a stable, gap-free cursor — without it,
+  // Postgres is free to reorder tied rows between page requests and a row
+  // can be silently skipped or duplicated across pages. ANY page failure
+  // fails the whole load (`ok: false`) rather than returning a
+  // truncated week as if it were complete.
+  for (let page = 0; page < MAX_PAGES; page += 1) {
+    const from = page * APPOINTMENTS_PAGE_SIZE;
+    const { data, error } = await buildAppointmentsQuery(supabase, orgId, opts)
+      .order("due_at", { ascending: true })
+      .order("id", { ascending: true })
+      .range(from, from + APPOINTMENTS_PAGE_SIZE - 1);
+
+    if (error || !data) {
+      if (error) {
+        console.error("[calendar] fetchCalendarAppointments failed", {
+          message: error.message,
+          code: error.code,
+        });
+      }
+      return { ok: false };
     }
-    return { ok: false };
+
+    allRows.push(...data);
+    if (data.length < APPOINTMENTS_PAGE_SIZE) break;
   }
 
-  const rows = data.map((row) => {
+  const rows = allRows.map((row) => {
     const prop = row.properties as unknown as {
       address: string | null;
       city: string | null;
@@ -158,25 +200,43 @@ export type FetchOrgRosterResult =
   | { ok: true; roster: OrgRosterEntry[]; labelsDegraded: boolean }
   | { ok: false };
 
+const ROSTER_PAGE_SIZE = 1_000;
+
 export async function fetchOrgRoster(orgId: string): Promise<FetchOrgRosterResult> {
   const admin = createAdminClient();
   const activeAt = new Date().toISOString();
-  const { data: memberships, error } = await admin
-    .from("memberships")
-    .select("user_id")
-    .eq("org_id", orgId)
-    .eq("access_status", "active")
-    .is("deletion_prepared_at", null)
-    .or(`access_expires_at.is.null,access_expires_at.gt.${activeAt}`);
 
-  if (error || !memberships) {
-    if (error) {
-      console.error("[calendar] fetchOrgRoster failed (membership identity)", {
-        message: error.message,
-        code: error.code,
-      });
+  const memberships: { user_id: string }[] = [];
+
+  // Same page-until-short-page shape as the appointments query above —
+  // deterministic `user_id` ordering + explicit `.range()` windows, any
+  // page failure fails the whole roster load (Codex round 4: a large org's
+  // roster silently truncating would drop real teammates from BOTH the
+  // filter and ownership attribution, not just cosmetics).
+  for (let page = 0; page < MAX_PAGES; page += 1) {
+    const from = page * ROSTER_PAGE_SIZE;
+    const { data, error } = await admin
+      .from("memberships")
+      .select("user_id")
+      .eq("org_id", orgId)
+      .eq("access_status", "active")
+      .is("deletion_prepared_at", null)
+      .or(`access_expires_at.is.null,access_expires_at.gt.${activeAt}`)
+      .order("user_id", { ascending: true })
+      .range(from, from + ROSTER_PAGE_SIZE - 1);
+
+    if (error || !data) {
+      if (error) {
+        console.error("[calendar] fetchOrgRoster failed (membership identity)", {
+          message: error.message,
+          code: error.code,
+        });
+      }
+      return { ok: false };
     }
-    return { ok: false };
+
+    memberships.push(...data);
+    if (data.length < ROSTER_PAGE_SIZE) break;
   }
 
   const ids = memberships.map((m) => m.user_id as string);
