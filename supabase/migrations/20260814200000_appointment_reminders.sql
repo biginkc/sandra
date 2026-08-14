@@ -41,6 +41,44 @@
 begin;
 
 -- ----------------------------------------------------------------------------
+-- 0. task_reminder_deliveries — retry-claim lease + fencing columns, and a
+--    terminal 'suppressed' status (Codex round 1)
+--
+-- Same lease/fencing model as task_calendar_mutations
+-- (20260814170000:275-316, round 6/7): next_attempt_at is the claim lease
+-- (NULL or <= now() = eligible; the claim sets it to now()+2min so a
+-- same-sweep or concurrent claim can't see the row again until the lease
+-- expires), claim_token is the fencing token (a fresh uuid every claim; the
+-- worker's completion write is scoped WHERE id=<mine> AND
+-- claim_token=<mine> AND status=<the status this worker was handed>, so a
+-- stalled worker whose lease was reclaimed writes zero rows instead of
+-- clobbering the new owner). 'suppressed' is the terminal status
+-- fn_claim_reminder_retries transitions a retry candidate to when its
+-- revalidation (active membership / channel still enabled / appointment
+-- still open with due_at still future) fails — the delivery is never
+-- retried again (out of the failed/pending eligibility window) and never
+-- silently sent.
+-- ----------------------------------------------------------------------------
+alter table public.task_reminder_deliveries
+  add column claim_token uuid,
+  add column next_attempt_at timestamptz;
+
+comment on column public.task_reminder_deliveries.claim_token is
+  'Fencing token (Codex round 1, same model as task_calendar_mutations). fn_claim_reminder_retries mints a fresh uuid on every claim of a still-valid row; the worker''s markDelivery write is scoped WHERE id=<mine> AND claim_token=<mine> AND status=<the status handed to the worker>, so a stalled worker whose lease expired and was reclaimed writes zero rows instead of clobbering the new claim. NULL for rows never claimed by the retry sweep (fresh rows from fn_claim_appointment_reminders need no lease — ON CONFLICT DO NOTHING already gives that insert exactly-once ownership).';
+
+comment on column public.task_reminder_deliveries.next_attempt_at is
+  'Claim lease / retry-backoff stamp (Codex round 1). NULL or <= now() means eligible for fn_claim_reminder_retries to claim; the claim sets it to now()+2 minutes on every still-valid claim so a concurrent/same-sweep reclaim is impossible within the lease.';
+
+alter table public.task_reminder_deliveries
+  drop constraint task_reminder_deliveries_status_check;
+alter table public.task_reminder_deliveries
+  add constraint task_reminder_deliveries_status_check
+  check (status in ('pending', 'sent', 'failed', 'suppressed'));
+
+comment on constraint task_reminder_deliveries_status_check on public.task_reminder_deliveries is
+  'suppressed (Codex round 1) is terminal: fn_claim_reminder_retries lands a retry candidate here when its revalidation fails (assignee suspended, channel disabled, or the appointment closed/passed its due_at since the original claim) instead of delivering a now-stale reminder.';
+
+-- ----------------------------------------------------------------------------
 -- 1. fn_claim_appointment_reminders — primary window claim
 -- ----------------------------------------------------------------------------
 create or replace function public.fn_claim_appointment_reminders()
@@ -172,15 +210,42 @@ revoke all on function public.fn_claim_appointment_reminders() from public, anon
 grant execute on function public.fn_claim_appointment_reminders() to service_role;
 
 -- ----------------------------------------------------------------------------
--- 2. fn_claim_reminder_retries — crash-safety complement
+-- 2. fn_claim_reminder_retries — atomic claim + lease/fencing + revalidation
+--    (Codex round 1 rewrite — was a read-only SELECT with none of the
+--    three properties below; see PR review findings 2/3)
 --
--- Read-only: no lock survives past this call (a plain RPC's implicit
--- transaction ends when the function returns), so this is intentionally
--- an at-least-once hand-off, same posture the plan documents for
--- slack/sms delivery generally. Bounded by the delivery row's own
--- attempts<3 cap plus the app-layer mark-sent/mark-failed write after
--- each attempt, so duplicate work here is rare and self-limiting rather
--- than open-ended.
+-- Three things this version adds over the original read-only SELECT:
+--
+--   1. Atomic claim, not a bare read. UPDATE ... FROM (SELECT ... FOR
+--      UPDATE SKIP LOCKED) over the eligible rows — same idiom as
+--      fn_claim_calendar_mutations (20260814210000). attempts<3 now
+--      gates BOTH the failed branch AND the previously-uncapped
+--      stale-pending branch, so a delivery that keeps crashing before
+--      ever reaching a mark-sent/mark-failed write cannot be reclaimed
+--      forever. The still-valid branch bumps attempts (this claim IS the
+--      next attempt), sets a fresh claim_token, and leases the row via
+--      next_attempt_at = now()+2min — a concurrent or same-sweep claim
+--      can no longer see it until the lease expires, closing the
+--      unbounded-duplicate-SMS/Slack-send hole.
+--   2. Revalidation inside the SAME locked selection (finding 3): assignee
+--      still has ACTIVE org membership, the channel is still enabled
+--      (bell is always fine; slack checks the slack pref; sms checks
+--      sms_reminder enabled AND a phone still on file), and the
+--      appointment is still open with due_at still in the future. A row
+--      that fails ANY of these is transitioned to the terminal
+--      'suppressed' status (with last_error recording why) instead of
+--      being handed to the worker for delivery or left to be reclaimed
+--      forever.
+--   3. Fencing metadata returned to the caller: claim_token (the fresh
+--      token this claim minted) and claimed_status (the row's status as
+--      of just before this claim — 'pending' or 'failed', unchanged by a
+--      still-valid claim) so the worker's completion write can be scoped
+--      WHERE id=<mine> AND claim_token=<mine> AND status=<claimed_status>
+--      with one-row verification, the same fencing contract as
+--      task_calendar_mutations.
+--
+-- Only still-valid rows are returned — a suppressed row is written but
+-- never handed to the worker.
 -- ----------------------------------------------------------------------------
 create or replace function public.fn_claim_reminder_retries(p_limit integer default 50)
 returns table (
@@ -189,6 +254,8 @@ returns table (
   org_id uuid,
   channel text,
   attempts integer,
+  claim_token uuid,
+  claimed_status text,
   task_title text,
   task_due_at timestamptz,
   task_end_at timestamptz,
@@ -200,49 +267,118 @@ language sql
 security definer
 set search_path = public, pg_temp
 as $$
-  with stale as (
-    select d.id, d.task_id, d.org_id, d.channel, d.attempts
+  with candidates as (
+    select d.id, d.task_id, d.org_id, d.channel, d.attempts, d.status
     from public.task_reminder_deliveries d
-    join public.tasks t on t.id = d.task_id
-    -- A cancelled/completed appointment's outstanding reminder work is
-    -- moot — no point retrying a notification for an appointment that no
-    -- longer needs one.
-    where t.status = 'open'
-      and (
+    where (
         (d.status = 'failed' and d.attempts < 3)
-        or (d.status = 'pending' and d.created_at < now() - interval '10 minutes')
+        or (d.status = 'pending' and d.attempts < 3 and d.created_at < now() - interval '10 minutes')
       )
+      and (d.next_attempt_at is null or d.next_attempt_at <= now())
     order by d.created_at
+    for update skip locked
     limit greatest(p_limit, 0)
+  ),
+  revalidated as (
+    select
+      c.id, c.task_id, c.org_id, c.channel, c.attempts, c.status,
+      t.status as task_status, t.due_at, t.end_at, t.title, t.assignee_id,
+      exists (
+        select 1
+        from public.memberships m
+        where m.user_id = t.assignee_id
+          and m.org_id = c.org_id
+          and m.access_status = 'active'
+          and m.deletion_prepared_at is null
+          and (m.access_expires_at is null or m.access_expires_at > now())
+      ) as assignee_active,
+      case c.channel
+        when 'bell' then true
+        when 'slack' then coalesce(
+          (
+            select uip.enabled from public.user_integration_prefs uip
+            where uip.user_id = t.assignee_id and uip.channel = 'slack'
+          ),
+          false
+        )
+        when 'sms' then coalesce(
+          (
+            select uip.enabled and uip.reminder_phone is not null
+            from public.user_integration_prefs uip
+            where uip.user_id = t.assignee_id and uip.channel = 'sms_reminder'
+          ),
+          false
+        )
+        else false
+      end as channel_still_enabled,
+      coalesce(
+        (
+          select uip.timezone from public.user_integration_prefs uip
+          where uip.user_id = t.assignee_id and uip.channel = 'google_calendar'
+          limit 1
+        ),
+        (
+          select uip.timezone from public.user_integration_prefs uip
+          where uip.user_id = t.assignee_id
+          limit 1
+        ),
+        'America/Chicago'
+      ) as assignee_timezone,
+      (
+        select uip.reminder_phone from public.user_integration_prefs uip
+        where uip.user_id = t.assignee_id and uip.channel = 'sms_reminder'
+        limit 1
+      ) as assignee_reminder_phone
+    from candidates c
+    join public.tasks t on t.id = c.task_id
+  ),
+  eligible as (
+    select
+      r.*,
+      (
+        r.assignee_active
+        and r.task_status = 'open'
+        and r.due_at > now()
+        and r.channel_still_enabled
+      ) as still_valid
+    from revalidated r
+  ),
+  claimed as (
+    update public.task_reminder_deliveries d
+    set
+      attempts = case when e.still_valid then d.attempts + 1 else d.attempts end,
+      claim_token = case when e.still_valid then gen_random_uuid() else d.claim_token end,
+      next_attempt_at = case when e.still_valid then now() + interval '2 minutes' else d.next_attempt_at end,
+      status = case when e.still_valid then d.status else 'suppressed' end,
+      last_error = case
+        when e.still_valid then d.last_error
+        else 'retry_suppressed: ' || (
+          case
+            when not e.assignee_active then 'assignee_inactive'
+            when e.task_status <> 'open' then 'appointment_not_open'
+            when e.due_at <= now() then 'appointment_due_passed'
+            else 'channel_disabled'
+          end
+        )
+      end
+    from eligible e
+    where d.id = e.id
+    returning
+      d.id, d.task_id, d.org_id, d.channel, d.attempts, d.claim_token, d.status,
+      e.title, e.due_at, e.end_at, e.assignee_id, e.assignee_timezone, e.assignee_reminder_phone,
+      e.still_valid
   )
   select
-    s.id as delivery_id, s.task_id, s.org_id, s.channel, s.attempts,
-    t.title as task_title, t.due_at as task_due_at, t.end_at as task_end_at,
-    t.assignee_id,
-    coalesce(
-      (
-        select uip.timezone from public.user_integration_prefs uip
-        where uip.user_id = t.assignee_id and uip.channel = 'google_calendar'
-        limit 1
-      ),
-      (
-        select uip.timezone from public.user_integration_prefs uip
-        where uip.user_id = t.assignee_id
-        limit 1
-      ),
-      'America/Chicago'
-    ) as assignee_timezone,
-    (
-      select uip.reminder_phone from public.user_integration_prefs uip
-      where uip.user_id = t.assignee_id and uip.channel = 'sms_reminder'
-      limit 1
-    ) as assignee_reminder_phone
-  from stale s
-  join public.tasks t on t.id = s.task_id;
+    c.id as delivery_id, c.task_id, c.org_id, c.channel, c.attempts, c.claim_token,
+    c.status as claimed_status,
+    c.title as task_title, c.due_at as task_due_at, c.end_at as task_end_at,
+    c.assignee_id, c.assignee_timezone, c.assignee_reminder_phone
+  from claimed c
+  where c.still_valid;
 $$;
 
 comment on function public.fn_claim_reminder_retries(integer) is
-  'Service-role-only retry selection for the reminder sweep: task_reminder_deliveries rows with status=failed AND attempts<3, or status=pending older than 10 minutes (a sweep that crashed mid-delivery). Read-only — no lock survives past the call, same at-least-once posture as the rest of the slack/sms delivery path. Skips deliveries for appointments no longer open.';
+  'Service-role-only atomic retry claim (Codex round 1 rewrite). UPDATE ... FROM (SELECT ... FOR UPDATE SKIP LOCKED) over task_reminder_deliveries WHERE (status=failed OR status=pending-stale-10min) AND attempts<3 AND lease-eligible; still-valid rows get attempts+1, a fresh claim_token, and a 2-minute lease (next_attempt_at) — same fencing model as task_calendar_mutations. Inside the SAME locked selection, re-validates assignee active membership, channel still enabled, and appointment still open with due_at still future; a row failing any check is transitioned to terminal status=suppressed (last_error records why) and is NOT returned. Returns claim_token + claimed_status (pre-claim status) so the worker''s completion write can be scoped WHERE id=<mine> AND claim_token=<mine> AND status=<claimed_status> with one-row verification.';
 
 revoke all on function public.fn_claim_reminder_retries(integer) from public, anon, authenticated;
 grant execute on function public.fn_claim_reminder_retries(integer) to service_role;

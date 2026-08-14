@@ -264,6 +264,23 @@ async function ledgerRowsForChain(chainId: string): Promise<LedgerRow[]> {
   return data ?? [];
 }
 
+/** Simulates the calendar-mutation-sweep worker finalizing every
+ *  not-yet-finalized ledger row for a chain — direct service-role write
+ *  (no worker running in these DB-only tests), so the chain-serialization
+ *  guard (`phase in (pending, provider_done, needs_repair)`) clears and a
+ *  subsequent lifecycle RPC on the same chain can proceed. */
+async function finalizeLedgerRowsForChain(chainId: string): Promise<void> {
+  const rows = await ledgerRowsForChain(chainId);
+  for (const row of rows) {
+    if (row.phase === "finalized") continue;
+    const { error } = await ledgerReader()
+      .from("task_calendar_mutations")
+      .update({ phase: "finalized" })
+      .eq("id", row.id);
+    expect(error).toBeNull();
+  }
+}
+
 async function setTimezonePref(userId: string, timezone = "America/Chicago"): Promise<void> {
   const { error } = await db
     .from("user_integration_prefs")
@@ -667,20 +684,121 @@ describe("Migration 20260814210000 — appointment lifecycle RPCs", () => {
       });
     });
 
-    it("a repeat call already landed on the target assignee is a no-op success", async () => {
+    it("Codex round 1 (finding 5): an UNKEYED repeat call is a fresh operation, serialized (not silently no-op'd) by the chain lock — it errors while the first ledger row is still unfinalized", async () => {
+      const actor = await createUserForOrg(BMH_ORG_ID);
+      const newAssignee = await createUserForOrg(BMH_ORG_ID);
+      const { taskId } = await insertOpenAppointment({ assigneeId: actor.userId, createdBy: actor.userId });
+      const first = await reassignAppointment(actor.client, { p_task: taskId, p_new_assignee: newAssignee.userId });
+      expect(first.error).toBeNull();
+
+      // The old "already on target assignee" no-op inference is REMOVED
+      // (finding 5) — an unkeyed repeat is a fresh operation, and the
+      // chain-mutation-in-progress guard now correctly blocks it while the
+      // first reassign's ledger row is still pending (no worker has
+      // finalized it in this DB-only test).
+      const second = await reassignAppointment(actor.client, { p_task: taskId, p_new_assignee: newAssignee.userId });
+
+      expect(second.error?.message).toMatch(/calendar sync in progress/i);
+    });
+
+    it("Codex round 1 (finding 5): an UNKEYED repeat call AFTER the first finalizes creates a fresh, second ledger row — no accidental idempotency without a key", async () => {
       const actor = await createUserForOrg(BMH_ORG_ID);
       const newAssignee = await createUserForOrg(BMH_ORG_ID);
       const { taskId, chainId } = await insertOpenAppointment({ assigneeId: actor.userId, createdBy: actor.userId });
       const first = await reassignAppointment(actor.client, { p_task: taskId, p_new_assignee: newAssignee.userId });
       expect(first.error).toBeNull();
+      await finalizeLedgerRowsForChain(chainId);
 
-      const second = await reassignAppointment(actor.client, { p_task: taskId, p_new_assignee: newAssignee.userId });
+      // A genuinely fresh unkeyed call — the appointment happens to already
+      // be on the target assignee, but with no key there is no replay
+      // lookup at all; this is validated purely on current state (still
+      // 'open', assignee already newAssignee) and proceeds as a real
+      // (degenerate but harmless) reassign-to-self.
+      const second = await reassignAppointment(actor.client, {
+        p_task: taskId,
+        p_new_assignee: newAssignee.userId,
+      });
 
       expect(second.error).toBeNull();
-      expect(second.data?.duplicate).toBe(true);
-      // No second ledger row from the no-op replay.
+      expect(second.data?.duplicate).toBe(false);
       const ledgerRows = await ledgerRowsForChain(chainId);
-      expect(ledgerRows).toHaveLength(1);
+      expect(ledgerRows).toHaveLength(2);
+    });
+
+    it("Codex round 1 (finding 5): a KEYED replay of A->B, issued after an intervening B->A already restored the original assignee, returns the ORIGINAL A->B result as duplicate WITHOUT touching current state", async () => {
+      const userA = await createUserForOrg(BMH_ORG_ID);
+      const userB = await createUserForOrg(BMH_ORG_ID);
+      const { taskId, chainId } = await insertOpenAppointment({ assigneeId: userA.userId, createdBy: userA.userId });
+      const keyAB = randomUUID();
+      const keyBA = randomUUID();
+
+      const ab = await reassignAppointment(userA.client, {
+        p_task: taskId,
+        p_new_assignee: userB.userId,
+        p_idempotency_key: keyAB,
+      });
+      expect(ab.error).toBeNull();
+      expect(ab.data?.duplicate).toBe(false);
+      await finalizeLedgerRowsForChain(chainId);
+
+      const ba = await reassignAppointment(userB.client, {
+        p_task: taskId,
+        p_new_assignee: userA.userId,
+        p_idempotency_key: keyBA,
+      });
+      expect(ba.error).toBeNull();
+      expect(ba.data?.duplicate).toBe(false);
+      await finalizeLedgerRowsForChain(chainId);
+
+      // Delayed replay of the ORIGINAL A->B call (same key as `ab`) arrives
+      // now, after the B->A above already restored userA as assignee. The
+      // old "already on target assignee" inference would see current
+      // assignee=userA (not userB) and fall through to a genuine
+      // reassignment — undoing the B->A. The keyed replay must instead
+      // return ab's OWN result untouched.
+      const replay = await reassignAppointment(userA.client, {
+        p_task: taskId,
+        p_new_assignee: userB.userId,
+        p_idempotency_key: keyAB,
+      });
+
+      expect(replay.error).toBeNull();
+      expect(replay.data).toMatchObject({
+        task_id: taskId,
+        old_assignee_id: userA.userId,
+        new_assignee_id: userB.userId,
+        duplicate: true,
+      });
+
+      // Current state is UNTOUCHED — still userA (from the B->A), no third
+      // ledger row created by the replay.
+      const { data: row } = await db.from("tasks").select("assignee_id").eq("id", taskId).single();
+      expect(row?.assignee_id).toBe(userA.userId);
+      const ledgerRows = await ledgerRowsForChain(chainId);
+      expect(ledgerRows).toHaveLength(2);
+    });
+
+    it("Codex round 1 (finding 5): a key reused against a different p_new_assignee is rejected as a mismatched replay", async () => {
+      const actor = await createUserForOrg(BMH_ORG_ID);
+      const targetA = await createUserForOrg(BMH_ORG_ID);
+      const targetB = await createUserForOrg(BMH_ORG_ID);
+      const { taskId } = await insertOpenAppointment({ assigneeId: actor.userId, createdBy: actor.userId });
+      const key = randomUUID();
+
+      const first = await reassignAppointment(actor.client, {
+        p_task: taskId,
+        p_new_assignee: targetA.userId,
+        p_idempotency_key: key,
+      });
+      expect(first.error).toBeNull();
+
+      const mismatched = await reassignAppointment(actor.client, {
+        p_task: taskId,
+        p_new_assignee: targetB.userId,
+        p_idempotency_key: key,
+      });
+
+      expect(mismatched.error?.message).toMatch(/idempotency key reuse with different request/i);
     });
 
     it("rejects a new assignee with no active membership in the org", async () => {

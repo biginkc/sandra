@@ -1,7 +1,9 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+import { Client } from "pg";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import { createTestClient } from "@tests/integration/client";
+import { loadTestEnv } from "@tests/integration/env";
 import { resetTenantTables } from "@tests/integration/reset";
 import {
   BMH_ORG_ID,
@@ -31,6 +33,13 @@ type ClaimedReminderRow = {
   assignee_reminder_phone: string | null;
 };
 
+/** fn_claim_reminder_retries only (Codex round 1 lease/fencing rewrite) —
+ *  fn_claim_appointment_reminders's fresh inserts carry no lease. */
+type RetryClaimedReminderRow = ClaimedReminderRow & {
+  claim_token: string;
+  claimed_status: "pending" | "failed";
+};
+
 type RpcResult<T> = { data: T | null; error: { message: string; code?: string } | null };
 
 type ReminderRpcClient = {
@@ -38,7 +47,7 @@ type ReminderRpcClient = {
   rpc(
     fn: "fn_claim_reminder_retries",
     args: { p_limit: number },
-  ): Promise<RpcResult<ClaimedReminderRow[]>>;
+  ): Promise<RpcResult<RetryClaimedReminderRow[]>>;
 };
 
 function asReminderRpcClient(client: SupabaseClient<Database>): ReminderRpcClient {
@@ -54,8 +63,19 @@ function claimAppointmentReminders(
 function claimReminderRetries(
   client: SupabaseClient<Database>,
   limit = 50,
-): Promise<RpcResult<ClaimedReminderRow[]>> {
+): Promise<RpcResult<RetryClaimedReminderRow[]>> {
   return asReminderRpcClient(client).rpc("fn_claim_reminder_retries", { p_limit: limit });
+}
+
+function testDbUrl(): string {
+  const env = loadTestEnv();
+  const url = process.env.TEST_SUPABASE_DB_URL ?? env.TEST_SUPABASE_DB_URL;
+  if (!url) {
+    throw new Error(
+      "Missing TEST_SUPABASE_DB_URL in .env.test.local — see tests/integration/README.md.",
+    );
+  }
+  return url;
 }
 
 const serviceClient = createTestClient();
@@ -470,6 +490,244 @@ describe("Migration 20260814200000 — appointment reminder claim RPCs", () => {
       expect(error).toBeNull();
       const rows = (data ?? []).filter((r) => r.task_id === appt.id);
       expect(rows.length).toBe(0);
+    });
+
+    it("the attempts<3 cap also gates the stale-pending branch, not just failed", async () => {
+      const member = await createUserForOrg(BMH_ORG_ID);
+      await setPrefs(member.userId);
+      const appt = await insertDueAppointment(member.userId, 10);
+      await claimAppointmentReminders(db);
+      const { data: delivery } = await db
+        .from("task_reminder_deliveries")
+        .select("id")
+        .eq("task_id", appt.id)
+        .eq("channel", "bell")
+        .single();
+
+      await db
+        .from("task_reminder_deliveries")
+        .update({ attempts: 3, created_at: new Date(Date.now() - 11 * 60_000).toISOString() })
+        .eq("id", delivery!.id);
+
+      const { data, error } = await claimReminderRetries(db);
+      expect(error).toBeNull();
+      expect((data ?? []).some((r) => r.delivery_id === delivery!.id)).toBe(false);
+    });
+  });
+
+  /** Direct writes to tasks.status/outcome/due_at for an appointment row are
+   *  blocked by trg_tasks_tenant_integrity_guard (20260814150000) unless
+   *  `sandra.allow_appointment_time_move` is set transaction-locally — the
+   *  trigger fires for every role, service-role PostgREST writes included.
+   *  These revalidation tests need to move an appointment past-due or
+   *  cancel it WITHOUT going through the (PR 3, separately-tested)
+   *  lifecycle RPCs, so they open a raw pg connection and set the flag
+   *  themselves — same idiom as the lifecycle migration's uniform-lock-
+   *  protocol test (20260814210000...integration.test.ts:869-877). */
+  async function flaggedTaskUpdate(sql: string, params: unknown[]): Promise<void> {
+    const conn = new Client({ connectionString: testDbUrl() });
+    await conn.connect();
+    try {
+      await conn.query("begin");
+      await conn.query("select set_config('sandra.allow_appointment_time_move', 'on', true)");
+      await conn.query(sql, params);
+      await conn.query("commit");
+    } finally {
+      await conn.end();
+    }
+  }
+
+  describe("fn_claim_reminder_retries — lease/fencing + revalidation (Codex round 1)", () => {
+    async function failedBellDelivery(minutesFromNow = 10) {
+      const member = await createUserForOrg(BMH_ORG_ID);
+      await setPrefs(member.userId);
+      const appt = await insertDueAppointment(member.userId, minutesFromNow);
+      await claimAppointmentReminders(db);
+      const { data: delivery } = await db
+        .from("task_reminder_deliveries")
+        .select("id")
+        .eq("task_id", appt.id)
+        .eq("channel", "bell")
+        .single();
+      await db
+        .from("task_reminder_deliveries")
+        .update({ status: "failed", attempts: 1 })
+        .eq("id", delivery!.id);
+      return { member, appt, deliveryId: delivery!.id };
+    }
+
+    it("returns a fresh claim_token and the pre-claim status (claimed_status), and leases the row (next lookalike claim excludes it)", async () => {
+      const { deliveryId } = await failedBellDelivery();
+
+      const { data, error } = await claimReminderRetries(db);
+      expect(error).toBeNull();
+      const claimed = (data ?? []).find((r) => r.delivery_id === deliveryId);
+      expect(claimed?.claim_token).toBeTruthy();
+      expect(claimed?.claimed_status).toBe("failed");
+
+      // Leased (next_attempt_at pushed out ~2 minutes) — an immediate
+      // second claim call must not see it again.
+      const second = await claimReminderRetries(db);
+      expect(second.error).toBeNull();
+      expect((second.data ?? []).some((r) => r.delivery_id === deliveryId)).toBe(false);
+    });
+
+    it("two concurrent claims never return the same delivery row (FOR UPDATE SKIP LOCKED)", async () => {
+      const a = await failedBellDelivery();
+      const b = await failedBellDelivery();
+
+      const [first, second] = await Promise.all([
+        claimReminderRetries(db, 1),
+        claimReminderRetries(db, 1),
+      ]);
+      expect(first.error).toBeNull();
+      expect(second.error).toBeNull();
+
+      const firstIds = (first.data ?? []).map((r) => r.delivery_id);
+      const secondIds = (second.data ?? []).map((r) => r.delivery_id);
+      const overlap = firstIds.filter((id) => secondIds.includes(id));
+      expect(overlap).toHaveLength(0);
+      // Between the two size-1 claims, both eligible rows were claimed
+      // exactly once (order not guaranteed).
+      expect([...firstIds, ...secondIds].sort()).toEqual([a.deliveryId, b.deliveryId].sort());
+    });
+
+    it("suppresses (terminal, never delivers) a retry whose assignee lost active membership since the original claim", async () => {
+      const { member, deliveryId } = await failedBellDelivery();
+      await setMembershipAccessStatus(member.userId, BMH_ORG_ID, "suspended");
+
+      const { data, error } = await claimReminderRetries(db);
+      expect(error).toBeNull();
+      expect((data ?? []).some((r) => r.delivery_id === deliveryId)).toBe(false);
+
+      const { data: row } = await db
+        .from("task_reminder_deliveries")
+        .select("status, last_error")
+        .eq("id", deliveryId)
+        .single();
+      expect(row?.status).toBe("suppressed");
+      expect(row?.last_error).toMatch(/assignee_inactive/);
+    });
+
+    it("suppresses a slack retry whose channel was disabled since the original claim", async () => {
+      const member = await createUserForOrg(BMH_ORG_ID);
+      await setPrefs(member.userId, { slackEnabled: true });
+      const appt = await insertDueAppointment(member.userId, 10);
+      await claimAppointmentReminders(db);
+      const { data: delivery } = await db
+        .from("task_reminder_deliveries")
+        .select("id")
+        .eq("task_id", appt.id)
+        .eq("channel", "slack")
+        .single();
+      expect(delivery).not.toBeNull();
+      await db
+        .from("task_reminder_deliveries")
+        .update({ status: "failed", attempts: 1 })
+        .eq("id", delivery!.id);
+
+      await setPrefs(member.userId, { slackEnabled: false });
+
+      const { data, error } = await claimReminderRetries(db);
+      expect(error).toBeNull();
+      expect((data ?? []).some((r) => r.delivery_id === delivery!.id)).toBe(false);
+
+      const { data: row } = await db
+        .from("task_reminder_deliveries")
+        .select("status, last_error")
+        .eq("id", delivery!.id)
+        .single();
+      expect(row?.status).toBe("suppressed");
+      expect(row?.last_error).toMatch(/channel_disabled/);
+    });
+
+    it("suppresses a retry whose appointment was cancelled since the original claim", async () => {
+      const { appt, deliveryId } = await failedBellDelivery();
+      await flaggedTaskUpdate(
+        "update tasks set status = 'cancelled', outcome = 'cancelled' where id = $1",
+        [appt.id],
+      );
+
+      const { data, error } = await claimReminderRetries(db);
+      expect(error).toBeNull();
+      expect((data ?? []).some((r) => r.delivery_id === deliveryId)).toBe(false);
+
+      const { data: row } = await db
+        .from("task_reminder_deliveries")
+        .select("status, last_error")
+        .eq("id", deliveryId)
+        .single();
+      expect(row?.status).toBe("suppressed");
+      expect(row?.last_error).toMatch(/appointment_not_open/);
+    });
+
+    it("suppresses a retry whose appointment's due_at has now passed", async () => {
+      const { appt, deliveryId } = await failedBellDelivery(10);
+      await flaggedTaskUpdate("update tasks set due_at = $2 where id = $1", [
+        appt.id,
+        new Date(Date.now() - 60_000).toISOString(),
+      ]);
+
+      const { data, error } = await claimReminderRetries(db);
+      expect(error).toBeNull();
+      expect((data ?? []).some((r) => r.delivery_id === deliveryId)).toBe(false);
+
+      const { data: row } = await db
+        .from("task_reminder_deliveries")
+        .select("status, last_error")
+        .eq("id", deliveryId)
+        .single();
+      expect(row?.status).toBe("suppressed");
+      expect(row?.last_error).toMatch(/appointment_due_passed/);
+    });
+  });
+
+  // ----------------------------------------------------------------------------
+  // Raw-pg proof that the claim genuinely locks (FOR UPDATE SKIP LOCKED),
+  // not merely that two RPC calls happen not to race — same idiom as the
+  // lifecycle RPCs' uniform-lock-protocol tests
+  // (20260814210000...integration.test.ts).
+  // ----------------------------------------------------------------------------
+  describe("fn_claim_reminder_retries — row lock holds for the statement's duration", () => {
+    let conn: Client;
+
+    beforeEach(async () => {
+      conn = new Client({ connectionString: testDbUrl() });
+      await conn.connect();
+      await conn.query("set statement_timeout = 0");
+    });
+
+    afterEach(async () => {
+      await conn.query("rollback").catch(() => {});
+      await conn.end().catch(() => {});
+    });
+
+    it("a delivery row locked by an open transaction is skipped (not double-claimed) by a concurrent claim", async () => {
+      const member = await createUserForOrg(BMH_ORG_ID);
+      await setPrefs(member.userId);
+      const appt = await insertDueAppointment(member.userId, 10);
+      await claimAppointmentReminders(db);
+      const { data: delivery } = await db
+        .from("task_reminder_deliveries")
+        .select("id")
+        .eq("task_id", appt.id)
+        .eq("channel", "bell")
+        .single();
+      await db
+        .from("task_reminder_deliveries")
+        .update({ status: "failed", attempts: 1 })
+        .eq("id", delivery!.id);
+
+      await conn.query("begin");
+      await conn.query('select id from task_reminder_deliveries where id = $1 for update', [
+        delivery!.id,
+      ]);
+
+      const { data, error } = await claimReminderRetries(db);
+      expect(error).toBeNull();
+      expect((data ?? []).some((r) => r.delivery_id === delivery!.id)).toBe(false);
+
+      await conn.query("commit");
     });
   });
 });

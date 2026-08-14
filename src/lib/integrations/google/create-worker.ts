@@ -90,6 +90,20 @@ export type CalendarMutationOutcome =
   | { status: "no_event"; ledgerId: string }
   | { status: "pref_disabled"; ledgerId: string }
   | { status: "no_token"; ledgerId: string }
+  /** Codex round 1 fix: a KNOWN Google event exists for this cancel/
+   *  reschedule/reassign (claimed.event_id, or — for reassign — the new
+   *  assignee side) and the token/pref needed to act on it is missing
+   *  RIGHT NOW. Unlike `no_token`/`pref_disabled` (which mean "no event
+   *  ever existed, nothing to reconcile"), finalizing this as success
+   *  would leave a real Google event silently stale (the local task's
+   *  outcome never happened, or happened on the wrong account). Retryable
+   *  — the token may return — with `result_reason` set to the honest
+   *  'no_token_stale_event' / 'pref_disabled_stale_event' so
+   *  `fn_expire_exhausted_calendar_mutations` routes exhaustion to
+   *  `needs_repair` (keeps the chain-serialization slot held) instead of
+   *  the ordinary `failed` (which would free it over a still-unreconciled
+   *  event). */
+  | { status: "stale_event_needs_token"; ledgerId: string; error: string }
   | { status: "retryable_error"; ledgerId: string; error: string }
   | { status: "permanent_error"; ledgerId: string; error: string }
   /** Provider succeeded and `provider_done` was persisted, but the
@@ -809,6 +823,46 @@ async function markRetryableFailure(
   return { applied: result.applied, lost: !result.applied };
 }
 
+/**
+ * Codex round 1 fix: for cancel/reschedule/reassign where a Google event is
+ * KNOWN to exist (or, for reassign, is being created on the new assignee's
+ * side of an event that DID exist under the old one) and the token/pref
+ * needed to act on it is currently missing, this is the honest outcome —
+ * NOT `finalizeNoEvent`, which would mark the ledger `finalized` (success)
+ * over a real, un-reconciled Google event. Same backoff formula as
+ * `markRetryableFailure` (attempts * 2min), phase left as-is (still
+ * 'pending' — no provider call was made), but `result_reason` is set to the
+ * honest reason NOW rather than left null, so
+ * `fn_expire_exhausted_calendar_mutations` can route exhaustion of THIS row
+ * to `needs_repair` (chain slot held) instead of the ordinary `failed`
+ * (chain slot freed over a still-stale event) — see that function's CASE
+ * in 20260814210000.
+ */
+async function markStaleEventRetryable(
+  supabase: Supabase,
+  ledgerId: string,
+  claimToken: string,
+  resultReason: "no_token_stale_event" | "pref_disabled_stale_event",
+  message: string,
+  attempts: number,
+): Promise<{ lost: boolean }> {
+  const nextAttemptAt = new Date(Date.now() + attempts * RETRY_BACKOFF_UNIT_MS).toISOString();
+  const result = await applyLedgerTransition(supabase, ledgerId, claimToken, "pending", {
+    result_reason: resultReason,
+    last_error: message,
+    next_attempt_at: nextAttemptAt,
+    updated_at: nowIso(),
+  });
+  if (result.error) {
+    reportError(new Error(result.error), {
+      tags: { surface: "calendar_worker_stale_event_retryable" },
+      extra: { ledgerId, resultReason },
+    });
+    return { lost: false };
+  }
+  return { lost: !result.applied };
+}
+
 // ----------------------------------------------------------------------------
 // cancel
 // ----------------------------------------------------------------------------
@@ -872,12 +926,24 @@ async function processClaimedCancel(
       tokenType: "user",
     });
     if (!token) {
-      // Nothing this worker can do without a token — the event may still
-      // exist in Google, but there is no cleanup path available. Same
-      // no-op posture as create's no_token branch.
-      const r = await finalizeNoEvent(supabase, ledgerId, claimToken, "no_token");
+      // Codex round 1 fix: claimed.event_id EXISTS at this point (the
+      // !claimed.event_id branch above already returned) — a Google event
+      // is known to still be there. Finalizing this as success (the old
+      // no-op posture) would leave that event silently un-deleted forever
+      // with the ledger claiming the operation is done. Retryable instead
+      // — the assignee's token may return — with the honest result_reason
+      // so exhaustion routes to needs_repair, not failed.
+      const message = "no token for old assignee; event may still exist and be stale";
+      const r = await markStaleEventRetryable(
+        supabase,
+        ledgerId,
+        claimToken,
+        "no_token_stale_event",
+        message,
+        claimed.attempts,
+      );
       if (r.lost) return { status: "lease_lost", ledgerId };
-      return { status: "no_token", ledgerId };
+      return { status: "stale_event_needs_token", ledgerId, error: message };
     }
 
     let calendar: CalendarClient;
@@ -1094,9 +1160,22 @@ async function processClaimedReschedule(
       tokenType: "user",
     });
     if (!token) {
-      const r = await finalizeNoEvent(supabase, ledgerId, claimToken, "no_token");
+      // Codex round 1 fix: claimed.event_id EXISTS (see the !claimed.event_id
+      // branch above) — the Google event is still out there with the OLD
+      // due_at/end_at, not the successor's. Finalizing this as success would
+      // leave that event silently stale forever. Retryable — same posture
+      // as cancel's analogous fix.
+      const message = "no token for old assignee; event may still exist at the old time";
+      const r = await markStaleEventRetryable(
+        supabase,
+        ledgerId,
+        claimToken,
+        "no_token_stale_event",
+        message,
+        claimed.attempts,
+      );
       if (r.lost) return { status: "lease_lost", ledgerId };
-      return { status: "no_token", ledgerId };
+      return { status: "stale_event_needs_token", ledgerId, error: message };
     }
 
     let calendar: CalendarClient;
@@ -1375,8 +1454,31 @@ async function processClaimedReassign(
       // we can't access" posture as cancel's no_token branch).
     }
 
+    // Codex round 1 fix: claimed.event_id (truthy here) means an old event
+    // existed that this reassign needs to migrate. If the NEW assignee's
+    // calendar is disabled or unconnected, finalizing as success would
+    // leave the appointment with NO calendar event anywhere (old
+    // deleted-or-attempted, new never created) while the ledger claims the
+    // operation is done — the same silent-stale-outcome bug as cancel/
+    // reschedule. Only a reassign with NO old event to migrate (never
+    // connected to Calendar in the first place) is a genuine clean no-op.
+    const hadEventToMigrate = Boolean(claimed.event_id);
+
     const newPrefs = await loadIntegrationPrefs(supabase, newAssigneeId);
     if (!newPrefs.calendarEnabled) {
+      if (hadEventToMigrate) {
+        const message = "new assignee's calendar is disabled; old event was migrated to nowhere";
+        const r = await markStaleEventRetryable(
+          supabase,
+          ledgerId,
+          claimToken,
+          "pref_disabled_stale_event",
+          message,
+          claimed.attempts,
+        );
+        if (r.lost) return { status: "lease_lost", ledgerId };
+        return { status: "stale_event_needs_token", ledgerId, error: message };
+      }
       const r = await finalizeNoEvent(supabase, ledgerId, claimToken, "pref_disabled");
       if (r.lost) return { status: "lease_lost", ledgerId };
       return { status: "pref_disabled", ledgerId };
@@ -1388,6 +1490,19 @@ async function processClaimedReassign(
       tokenType: "user",
     });
     if (!newToken) {
+      if (hadEventToMigrate) {
+        const message = "no token for new assignee; old event was migrated to nowhere";
+        const r = await markStaleEventRetryable(
+          supabase,
+          ledgerId,
+          claimToken,
+          "no_token_stale_event",
+          message,
+          claimed.attempts,
+        );
+        if (r.lost) return { status: "lease_lost", ledgerId };
+        return { status: "stale_event_needs_token", ledgerId, error: message };
+      }
       const r = await finalizeNoEvent(supabase, ledgerId, claimToken, "no_token");
       if (r.lost) return { status: "lease_lost", ledgerId };
       return { status: "no_token", ledgerId };

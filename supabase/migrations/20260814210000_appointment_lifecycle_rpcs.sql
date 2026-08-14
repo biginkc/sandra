@@ -16,21 +16,19 @@
 --    ledger row. All four lifecycle RPCs below are SECURITY DEFINER with a
 --    pinned search_path and do their own explicit auth/membership checks
 --    rather than relying on RLS.
--- 2. fn_reassign_appointment's p_idempotency_key is accepted for signature
---    symmetry with fn_reschedule_appointment but is not persisted anywhere
---    (there is no ledger column to key it on, and reassign — unlike
---    reschedule — never creates a new task row to replay-match against).
---    Retry-safety instead falls out of the natural idempotency of the
---    operation: a repeat call that finds the task already on the target
---    assignee (see the "duplicate" short-circuit below) returns success
---    without re-running the delete/create cycle a second time. This is
---    weaker than reschedule/booking's key-based replay (it can't detect a
---    stale key reused against a DIFFERENT reassignment target), but reassign
---    has no successor row whose fields a mismatched replay could corrupt —
---    worst case is a caller's own retry racing a legitimate concurrent
---    change, which the FOR UPDATE lock below already serializes correctly
---    (the second caller sees the post-reassignment state and its own
---    duplicate/status check resolves it).
+-- 2. [SUPERSEDED by Codex round 1, finding 5 — kept for history.]
+--    fn_reassign_appointment's p_idempotency_key was originally accepted
+--    for signature symmetry with fn_reschedule_appointment but not
+--    persisted; retry-safety relied on inferring "no-op" from "task already
+--    on the target assignee". That inference was wrong: a delayed replay of
+--    an EARLIER A->B call, arriving after an intervening B->A reassignment
+--    had already restored the original assignee, would NOT match "already
+--    on target" (current assignee is A, not B) and would fall through to a
+--    genuine reassignment — silently undoing the intervening B->A the
+--    caller never asked to touch. The key is now persisted
+--    (task_calendar_mutations.reassign_idempotency_key, section 3b below)
+--    and is the ONLY no-op replay path — see fn_reassign_appointment's own
+--    comment for the full rationale.
 -- 3. Claim RPC rename + widening, no compatibility shim.
 --    fn_claim_calendar_creations(integer) (PR 2, `create`-only) is DROPped
 --    and replaced by fn_claim_calendar_mutations(integer), widened to
@@ -486,7 +484,41 @@ revoke all on function public.fn_reschedule_appointment(uuid, timestamptz, times
 grant execute on function public.fn_reschedule_appointment(uuid, timestamptz, timestamptz, text, uuid) to authenticated;
 
 -- ----------------------------------------------------------------------------
+-- 3b. task_calendar_mutations — reassign replay key (Codex round 1)
+--
+-- Same shape as tasks.booking_idempotency_key (20260814170000): nullable,
+-- populated only by a keyed caller, unique per (org_id, key) so two
+-- DIFFERENT chains can never collide on an accidentally-reused client key.
+-- fn_reassign_appointment looks it up scoped to the specific chain (a
+-- chain-wide uniqueness would be redundant given the org-scoped index, but
+-- the lookup itself only ever needs "this chain's" row).
+-- ----------------------------------------------------------------------------
+alter table public.task_calendar_mutations
+  add column reassign_idempotency_key uuid;
+
+comment on column public.task_calendar_mutations.reassign_idempotency_key is
+  'Codex round 1 (finding 5): replay key for fn_reassign_appointment, stamped on the ledger row a keyed reassign call creates. A repeat call presenting the SAME key returns THIS row''s original result (duplicate:true) regardless of the appointment''s CURRENT assignee — closes the A->B->A replay hazard where inferring "no-op" from "already on target assignee" would silently undo an intervening B->A reassignment. NULL for unkeyed reassigns; each unkeyed call is a fresh operation, serialized (never raced) by the RPC''s own row lock.';
+
+create unique index idx_task_calendar_mutations_reassign_idem
+  on public.task_calendar_mutations (org_id, reassign_idempotency_key)
+  where operation = 'reassign' and reassign_idempotency_key is not null;
+
+-- ----------------------------------------------------------------------------
 -- 4. fn_reassign_appointment — swaps assignee under the flag
+--
+-- Codex round 1 (finding 5) rewrite: p_idempotency_key is now PERSISTED
+-- (task_calendar_mutations.reassign_idempotency_key, ALTERed in below) and
+-- is the ONLY no-op replay path. The old "already on target assignee"
+-- inference is removed entirely — it made A->B->A replayable-wrong: a
+-- delayed retry of an EARLIER A->B call, arriving after an intervening
+-- B->A reassignment already restored the original assignee, would read
+-- "assignee_id = p_new_assignee (B)? no, it's A" and — before this fix —
+-- fall through to a genuine C->B-shaped reassignment, silently undoing the
+-- intervening operation the caller never asked to undo. A keyed replay
+-- looks up the SAME ledger row by key and returns ITS original result
+-- (duplicate:true) regardless of the appointment's CURRENT assignee; an
+-- unkeyed call is always a fresh operation, serialized (never raced) by
+-- this function's own `select ... for update` row lock.
 -- ----------------------------------------------------------------------------
 create or replace function public.fn_reassign_appointment(
   p_task uuid,
@@ -501,6 +533,7 @@ as $$
 declare
   v_actor uuid := auth.uid();
   v_task public.tasks;
+  v_existing_ledger public.task_calendar_mutations;
   v_old_assignee uuid;
   v_old_event_id text;
   v_new_generation integer;
@@ -534,14 +567,38 @@ begin
       using errcode = 'P0001';
   end if;
 
-  -- p_idempotency_key is accepted but not persisted — see migration header
-  -- deviation 2. A repeat call that already landed on the target assignee
-  -- is a no-op success; this is checked BEFORE the expected-status raise
-  -- below so a retry after the appointment later closes for an unrelated
-  -- reason still gets a clean "already reassigned" rather than the generic
-  -- not-open error, as long as it lands on an open row.
-  if v_task.status = 'open' and v_task.assignee_id = p_new_assignee then
-    return jsonb_build_object('task_id', p_task, 'assignee_id', p_new_assignee, 'duplicate', true);
+  -- Replay-before-validation (same idiom as fn_book_appointment /
+  -- fn_reschedule_appointment): a keyed retry must return the ORIGINAL
+  -- operation's result, found by key alone — never inferred from the
+  -- appointment's current assignee, which may have moved again since (the
+  -- A->B->A hazard this rewrite closes). Chain-scoped, not task-scoped: a
+  -- reassign's source_task_id IS this task for as long as the chain hasn't
+  -- also been through a reschedule in between; the mismatched-request
+  -- check below still catches a key reused against a genuinely different
+  -- request (different task in the chain, or a different target).
+  if p_idempotency_key is not null then
+    select * into v_existing_ledger
+    from public.task_calendar_mutations
+    where calendar_chain_id = v_task.calendar_chain_id
+      and operation = 'reassign'
+      and reassign_idempotency_key = p_idempotency_key
+    order by created_at desc
+    limit 1;
+
+    if found then
+      if v_existing_ledger.source_task_id is distinct from p_task
+         or v_existing_ledger.new_assignee_id is distinct from p_new_assignee
+      then
+        raise exception 'fn_reassign_appointment: idempotency key reuse with different request'
+          using errcode = 'P0001';
+      end if;
+      return jsonb_build_object(
+        'task_id', v_existing_ledger.source_task_id,
+        'old_assignee_id', v_existing_ledger.old_assignee_id,
+        'new_assignee_id', v_existing_ledger.new_assignee_id,
+        'duplicate', true
+      );
+    end if;
   end if;
 
   if v_task.status <> 'open' then
@@ -589,10 +646,12 @@ begin
 
   insert into public.task_calendar_mutations (
     org_id, calendar_chain_id, operation, phase,
-    source_task_id, old_assignee_id, new_assignee_id, event_id, expected_generation
+    source_task_id, old_assignee_id, new_assignee_id, event_id, expected_generation,
+    reassign_idempotency_key
   ) values (
     v_task.org_id, v_task.calendar_chain_id, 'reassign', 'pending',
-    p_task, v_old_assignee, p_new_assignee, v_old_event_id, v_new_generation
+    p_task, v_old_assignee, p_new_assignee, v_old_event_id, v_new_generation,
+    p_idempotency_key
   )
   returning id into v_ledger_id;
 
@@ -702,7 +761,17 @@ grant execute on function public.fn_claim_calendar_mutations(integer) to service
 -- ----------------------------------------------------------------------------
 -- 6. fn_expire_exhausted_calendar_mutations — widened, renamed from PR 2's
 --    fn_expire_exhausted_calendar_creations. Same failed/needs_repair split;
---    the only change is dropping the `operation = 'create'` filter.
+--    the only change from PR 2 was dropping the `operation = 'create'`
+--    filter. Codex round 1 (finding 4) adds a SECOND needs_repair trigger:
+--    a row still at phase='pending' whose result_reason is
+--    'no_token_stale_event' or 'pref_disabled_stale_event' — the
+--    create-worker's markStaleEventRetryable (create-worker.ts) — never
+--    reached phase='provider_done' (no provider call was ever made; the
+--    token/pref was missing before that point) but still represents a
+--    KNOWN Google event this operation could not reconcile. Routing it to
+--    plain 'failed' would free the chain-serialization slot over a
+--    genuinely unreconciled event; needs_repair correctly keeps it held
+--    (same rationale as the provider_done branch).
 -- ----------------------------------------------------------------------------
 create or replace function public.fn_expire_exhausted_calendar_mutations()
 returns table (failed_count integer, needs_repair_count integer, needs_repair_ids uuid[])
@@ -717,9 +786,18 @@ declare
 begin
   with expired as (
     update public.task_calendar_mutations
-    set phase = case when phase = 'provider_done' then 'needs_repair' else 'failed' end,
+    set phase = case
+          when phase = 'provider_done' then 'needs_repair'
+          when phase = 'pending'
+               and result_reason in ('no_token_stale_event', 'pref_disabled_stale_event')
+            then 'needs_repair'
+          else 'failed'
+        end,
         result_reason = case
           when phase = 'provider_done' then 'finalize_needs_repair'
+          when phase = 'pending'
+               and result_reason in ('no_token_stale_event', 'pref_disabled_stale_event')
+            then result_reason
           else 'retries_exhausted'
         end,
         updated_at = now()
@@ -745,7 +823,7 @@ end;
 $$;
 
 comment on function public.fn_expire_exhausted_calendar_mutations() is
-  'PR 3 rename+widening of fn_expire_exhausted_calendar_creations to cover every ledger operation, not just create — a stuck reschedule/reassign/cancel row would otherwise hold its chain-serialization slot open forever with no exhaustion path at all. Same failed/needs_repair split and rationale as PR 2.';
+  'PR 3 rename+widening of fn_expire_exhausted_calendar_creations to cover every ledger operation, not just create — a stuck reschedule/reassign/cancel row would otherwise hold its chain-serialization slot open forever with no exhaustion path at all. Same failed/needs_repair split and rationale as PR 2, PLUS (Codex round 1, finding 4): a still-pending row whose result_reason is no_token_stale_event/pref_disabled_stale_event (a KNOWN Google event the worker could not reconcile before ever calling Google) also routes to needs_repair, not failed — freeing the chain slot over a genuinely unreconciled event would be wrong.';
 
 revoke all on function public.fn_expire_exhausted_calendar_mutations() from public, anon, authenticated;
 grant execute on function public.fn_expire_exhausted_calendar_mutations() to service_role;

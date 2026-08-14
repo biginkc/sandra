@@ -18,6 +18,8 @@ type RawRow = {
   org_id: string;
   channel: "bell" | "slack" | "sms";
   attempts: number;
+  claim_token?: string | null;
+  claimed_status?: "pending" | "failed" | null;
   task_title: string;
   task_due_at: string;
   task_end_at: string | null;
@@ -105,6 +107,34 @@ describe("runAppointmentReminderSweep", () => {
         orgId: "org-1",
         channel: "sms",
         assigneeReminderPhone: "+18165551234",
+      }),
+    );
+  });
+
+  it("maps claim_token/claimed_status from a retry-claimed row so the worker can fence its write, and leaves them null for a primary-claimed row", async () => {
+    const supabase = fakeSupabase(
+      [rawRow("a")],
+      [rawRow("b", { claim_token: "token-123", claimed_status: "failed", attempts: 2 })],
+    );
+    mocks.deliverAppointmentReminder.mockResolvedValue({
+      status: "sent",
+      deliveryId: "x",
+      channel: "bell",
+    });
+
+    await runAppointmentReminderSweep(supabase, { budgetMs: 60_000 });
+
+    expect(mocks.deliverAppointmentReminder).toHaveBeenCalledWith(
+      supabase,
+      expect.objectContaining({ deliveryId: "a", claimToken: null, claimedStatus: null }),
+    );
+    expect(mocks.deliverAppointmentReminder).toHaveBeenCalledWith(
+      supabase,
+      expect.objectContaining({
+        deliveryId: "b",
+        claimToken: "token-123",
+        claimedStatus: "failed",
+        attempts: 2,
       }),
     );
   });

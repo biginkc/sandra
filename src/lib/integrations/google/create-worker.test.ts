@@ -602,6 +602,27 @@ describe("processClaimedCancel (via processClaimedCalendarMutation)", () => {
 
     expect(outcome).toEqual({ status: "lease_lost", ledgerId: "ledger-1" });
   });
+
+  it("Codex round 1 (finding 4): no token but event_id EXISTS — retryable stale-event outcome, NOT finalized as a no-op (the Google event would go silently stale)", async () => {
+    vi.mocked(getDecryptedToken).mockResolvedValueOnce(null);
+    const buildCalendarClientCallsBefore = vi.mocked(buildCalendarClient).mock.calls.length;
+    const supabase = fakeSupabase({
+      task_calendar_mutations: [ledgerWrite()], // markStaleEventRetryable's single write
+    });
+
+    const outcome = await processClaimedCalendarMutation(supabase, {
+      ...BASE_CLAIMED,
+      operation: "cancel",
+      event_id: "evt-old",
+    });
+
+    expect(outcome).toEqual({
+      status: "stale_event_needs_token",
+      ledgerId: "ledger-1",
+      error: expect.stringContaining("no token"),
+    });
+    expect(vi.mocked(buildCalendarClient).mock.calls.length).toBe(buildCalendarClientCallsBefore);
+  });
 });
 
 describe("processClaimedReschedule (via processClaimedCalendarMutation)", () => {
@@ -688,6 +709,23 @@ describe("processClaimedReschedule (via processClaimedCalendarMutation)", () => 
 
     expect(outcome.status).toBe("permanent_error");
   });
+
+  it("Codex round 1 (finding 4): no token but event_id EXISTS — retryable stale-event outcome, NOT finalized as a no-op (the event would stay at the OLD time forever)", async () => {
+    vi.mocked(getDecryptedToken).mockResolvedValueOnce(null);
+    const buildCalendarClientCallsBefore = vi.mocked(buildCalendarClient).mock.calls.length;
+    const supabase = fakeSupabase({
+      task_calendar_mutations: [ledgerWrite()],
+    });
+
+    const outcome = await processClaimedCalendarMutation(supabase, RESCHEDULE_CLAIMED);
+
+    expect(outcome).toEqual({
+      status: "stale_event_needs_token",
+      ledgerId: "ledger-1",
+      error: expect.stringContaining("no token"),
+    });
+    expect(vi.mocked(buildCalendarClient).mock.calls.length).toBe(buildCalendarClientCallsBefore);
+  });
 });
 
 describe("processClaimedReassign (via processClaimedCalendarMutation)", () => {
@@ -739,7 +777,7 @@ describe("processClaimedReassign (via processClaimedCalendarMutation)", () => {
     expect(outcome).toEqual({ status: "reassigned", ledgerId: "ledger-1", eventId: "evt-new-2" });
   });
 
-  it("new assignee has no token: finalizes as a no_token no-op (old event is still deleted first)", async () => {
+  it("Codex round 1 (finding 4): new assignee has no token, but an old event EXISTED to migrate — retryable stale-event outcome, NOT finalized as a no_token no-op (old event deleted, task now has assignee but no calendar event anywhere)", async () => {
     const del = vi.fn().mockResolvedValue({});
     vi.mocked(buildCalendarClient).mockReturnValue({
       events: { delete: del },
@@ -749,12 +787,57 @@ describe("processClaimedReassign (via processClaimedCalendarMutation)", () => {
       .mockResolvedValueOnce(FAKE_TOKEN) // old-account delete
       .mockResolvedValueOnce(null); // new-account create
     const supabase = fakeSupabase({
-      task_calendar_mutations: [ledgerWrite()], // finalize no-op
+      task_calendar_mutations: [ledgerWrite()], // markStaleEventRetryable's single write
     });
 
     const outcome = await processClaimedCalendarMutation(supabase, REASSIGN_CLAIMED);
 
     expect(del).toHaveBeenCalled();
+    expect(outcome).toEqual({
+      status: "stale_event_needs_token",
+      ledgerId: "ledger-1",
+      error: expect.stringContaining("no token"),
+    });
+  });
+
+  it("Codex round 1 (finding 4): new assignee's calendar disabled, but an old event EXISTED to migrate — retryable stale-event outcome, NOT finalized as a pref_disabled no-op", async () => {
+    const del = vi.fn().mockResolvedValue({});
+    vi.mocked(buildCalendarClient).mockReturnValue({
+      events: { delete: del },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any);
+    vi.mocked(loadIntegrationPrefs).mockResolvedValueOnce({
+      calendarEnabled: false,
+      slackEnabled: true,
+      timezone: "America/Chicago",
+      smsRemindersEnabled: false,
+      reminderPhone: null,
+    });
+    const supabase = fakeSupabase({
+      task_calendar_mutations: [ledgerWrite()],
+    });
+
+    const outcome = await processClaimedCalendarMutation(supabase, REASSIGN_CLAIMED);
+
+    expect(del).toHaveBeenCalled();
+    expect(outcome).toEqual({
+      status: "stale_event_needs_token",
+      ledgerId: "ledger-1",
+      error: expect.stringContaining("disabled"),
+    });
+  });
+
+  it("new assignee has no token, and there was NO old event to migrate: genuine clean no-op, finalizes as no_token", async () => {
+    vi.mocked(getDecryptedToken).mockResolvedValueOnce(null); // new-account create — no old event_id, so no old-account delete call happens
+    const supabase = fakeSupabase({
+      task_calendar_mutations: [ledgerWrite()], // finalize no-op
+    });
+
+    const outcome = await processClaimedCalendarMutation(supabase, {
+      ...REASSIGN_CLAIMED,
+      event_id: null,
+    });
+
     expect(outcome).toEqual({ status: "no_token", ledgerId: "ledger-1" });
   });
 

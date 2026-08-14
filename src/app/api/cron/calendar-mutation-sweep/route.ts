@@ -228,7 +228,14 @@ export async function runCalendarMutationSweep(
       continue;
     }
     outcomes[outcome.status] = (outcomes[outcome.status] ?? 0) + 1;
-    if (outcome.status === "retryable_error" || outcome.status === "permanent_error") {
+    if (
+      outcome.status === "retryable_error" ||
+      outcome.status === "permanent_error" ||
+      // Codex round 1 (finding 4): a known Google event the worker
+      // couldn't act on yet (missing token/pref) — same observability as
+      // retryable_error, since it's the same "keep an eye on this" shape.
+      outcome.status === "stale_event_needs_token"
+    ) {
       reportError(new Error(outcome.error), {
         tags: { surface: "cron_calendar_mutation_sweep_outcome" },
         extra: { ledgerId: outcome.ledgerId, outcomeStatus: outcome.status },

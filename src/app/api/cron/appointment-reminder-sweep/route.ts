@@ -64,6 +64,11 @@ type ClaimedReminderRpcRow = {
   org_id: string;
   channel: "bell" | "slack" | "sms";
   attempts: number;
+  /** Only present on rows from `fn_claim_reminder_retries` (Codex round 1
+   *  lease/fencing rewrite) — `fn_claim_appointment_reminders`'s fresh
+   *  inserts carry no lease and never populate these. */
+  claim_token?: string | null;
+  claimed_status?: "pending" | "failed" | null;
   task_title: string;
   task_due_at: string;
   task_end_at: string | null;
@@ -93,6 +98,8 @@ function toClaimedRow(row: ClaimedReminderRpcRow): ClaimedReminderRow {
     orgId: row.org_id,
     channel: row.channel,
     attempts: row.attempts,
+    claimToken: row.claim_token ?? null,
+    claimedStatus: row.claimed_status ?? null,
     taskTitle: row.task_title,
     taskDueAt: row.task_due_at,
     taskEndAt: row.task_end_at,
