@@ -34,8 +34,8 @@ vi.mock("@/lib/integrations/prefs", () => ({ loadIntegrationPrefs }));
 vi.mock("@/lib/tasks", () => ({ completeTask }));
 vi.mock("@/lib/errors/report", () => ({ reportError }));
 vi.mock("@slack/web-api", () => ({
-  WebClient: function MockWebClient(token: string) {
-    webClientConstructor(token);
+  WebClient: function MockWebClient(token: string, options?: unknown) {
+    webClientConstructor(token, options);
     return {
       conversations: { open: conversationsOpen },
       chat: { postMessage: chatPostMessage, update: chatUpdate },
@@ -353,6 +353,26 @@ describe("slack/dispatch", () => {
       reason: "no_token",
     });
     expect(conversationsOpen).not.toHaveBeenCalled();
+  });
+
+  // Codex round 6 (finding 2): the reminder sweep is budget-bound (45s
+  // phase budget, route.ts) — an unbounded WebClient (no timeout, 10
+  // SDK-internal retries over ~30 minutes by default) can blow through it
+  // on a single call. Scoped to this path only; dispatchTaskAssignedSlack
+  // (the seller-facing send) must be untouched — asserted separately below.
+  it("dispatchAppointmentReminderSlack constructs its WebClient with an explicit timeout and zero SDK retries", async () => {
+    await dispatchAppointmentReminderSlack(reminderInput);
+
+    expect(webClientConstructor).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ timeout: expect.any(Number), retryConfig: { retries: 0 } }),
+    );
+  });
+
+  it("dispatchTaskAssignedSlack (seller-facing) does NOT get the reminder path's timeout/retry override", async () => {
+    await dispatchTaskAssignedSlack(dispatchInput);
+
+    expect(webClientConstructor).toHaveBeenCalledWith(expect.any(String), undefined);
   });
 
   it("dispatchAppointmentReminderSlack posts appointment-reminder blocks with the time-of-day in the assignee's zone", async () => {

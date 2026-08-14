@@ -19,6 +19,29 @@ const TASK_TYPE_LABELS: Record<string, string> = {
   callback: "Callback",
 };
 
+/** Codex round 6 (finding 2): the Slack SDK's `WebClient` has no request
+ *  timeout by default and retries transient failures up to 10 times over
+ *  ~30 minutes (`retryConfig` default is `tenRetriesInAboutThirtyMinutes`)
+ *  — either alone can blow through the reminder sweep's 45s phase budget
+ *  (route.ts) on a single call. Scoped to the REMINDER path only
+ *  (`dispatchAppointmentReminderSlack` below) — the seller-facing
+ *  `dispatchTaskAssignedSlack` send path is untouched; its call isn't
+ *  budget-bound the same way and a low retry count there would trade a
+ *  transient Slack blip for a dropped assignment notification for no
+ *  reminder-sweep benefit. `retryConfig: { retries: 0 }` (node-retry's
+ *  `OperationOptions`) disables the SDK's own retry loop entirely — the
+ *  route-level Promise.race deadline (reminders.ts / route.ts) is the
+ *  single source of truth for how long one delivery gets; a retrying SDK
+ *  underneath it would just re-arm work that budget already gave up on.
+ *  `timeout` is a generous upper bound on the underlying HTTP call itself
+ *  (independent of, and smaller than, the sweep's whole 45s budget) so a
+ *  hung socket can't outlive the process by much even in the discarded-
+ *  promise case the route's deadline race creates. */
+const SLACK_REMINDER_CLIENT_OPTIONS = {
+  timeout: 10_000,
+  retryConfig: { retries: 0 },
+} as const;
+
 type AdminClient = ReturnType<typeof createAdminClient>;
 
 export interface DispatchSlackTaskInput {
@@ -145,7 +168,7 @@ export async function dispatchAppointmentReminderSlack(
     });
     if (!token?.externalAccountId) return { sent: false, reason: "no_token" };
 
-    const slack = new WebClient(token.accessToken.reveal());
+    const slack = new WebClient(token.accessToken.reveal(), SLACK_REMINDER_CLIENT_OPTIONS);
     const opened = await slack.conversations.open({
       users: token.externalAccountId,
     });

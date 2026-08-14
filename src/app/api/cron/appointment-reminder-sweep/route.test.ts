@@ -2,11 +2,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   deliverAppointmentReminder: vi.fn(),
+  markReminderDeliveryTimedOut: vi.fn(),
   reportError: vi.fn(),
 }));
 
 vi.mock("@/lib/notifications/reminders", () => ({
   deliverAppointmentReminder: mocks.deliverAppointmentReminder,
+  markReminderDeliveryTimedOut: mocks.markReminderDeliveryTimedOut,
 }));
 vi.mock("@/lib/errors/report", () => ({ reportError: mocks.reportError }));
 
@@ -449,6 +451,60 @@ describe("runAppointmentReminderSweep", () => {
       expect(summary.claimed).toBe(5);
       expect(summary.retried).toBeGreaterThan(0);
       expect(summary.budgetExhausted).toBe(true);
+    });
+  });
+
+  describe("Codex round 6 (finding 2): per-delivery deadlines", () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("a hung retry delivery times out at the phase-1 boundary — phase 2 still claims and processes a primary", async () => {
+      // Retry row is slack (provider-call channel, in scope for the
+      // deadline race); primary row is the rawRow() default (bell) so its
+      // delivery resolves immediately with no timer involved, isolating
+      // what this test is actually proving: that the hang doesn't block
+      // the sweep from reaching phase 2.
+      const supabase = fakeSupabase(
+        [[rawRow("primary-1")]],
+        [rawRow("retry-1", { channel: "slack" })],
+      );
+      mocks.deliverAppointmentReminder
+        .mockImplementationOnce(() => new Promise(() => {})) // never resolves
+        .mockResolvedValueOnce({ status: "sent", deliveryId: "primary-1", channel: "bell" });
+
+      const budgetMs = 10_000;
+      const summaryPromise = runAppointmentReminderSweep(supabase, { budgetMs });
+
+      // Phase 1's deadline for this row is halfBudgetMs (5s) — advance past
+      // it so the route's Promise.race times the hung call out, then drain
+      // the rest of the sweep (phase 2's primary resolves immediately, no
+      // further timer needed).
+      await vi.advanceTimersByTimeAsync(budgetMs / 2 + 100);
+      await vi.advanceTimersByTimeAsync(budgetMs / 2);
+
+      const summary = await summaryPromise;
+
+      // The hung retry was claimed and attempted, but recorded as a timed-
+      // out failure instead of blocking the loop.
+      expect(summary.retried).toBe(1);
+      expect(summary.outcomes.failed).toBe(1);
+      expect(mocks.markReminderDeliveryTimedOut).toHaveBeenCalledTimes(1);
+      const failureCall = mocks.reportError.mock.calls.find(
+        (call) =>
+          (call[1] as { tags?: { surface?: string } })?.tags?.surface ===
+          "cron_appointment_reminder_sweep_outcome",
+      );
+      expect((failureCall?.[0] as Error)?.message).toBe("delivery timeout");
+
+      // Phase 2 still ran and claimed/delivered the primary appointment.
+      expect(summary.claimed).toBe(1);
+      expect(summary.outcomes.sent).toBe(1);
+      expect(summary.processed).toBe(2);
     });
   });
 });

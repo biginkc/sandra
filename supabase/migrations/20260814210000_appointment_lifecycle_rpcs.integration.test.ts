@@ -158,6 +158,9 @@ function ledgerReader(client: SupabaseClient<Database> = db) {
         source_task_id: string;
         old_assignee_id: string;
         expected_generation: number;
+        attempts?: number;
+        next_attempt_at?: string | null;
+        result_reason?: string | null;
       }): Promise<{ data: null; error: { message: string; code?: string } | null }>;
       update(values: { attempts?: number; next_attempt_at?: string | null; phase?: string }): {
         eq(column: "id", value: string): Promise<{ data: null; error: { message: string } | null }>;
@@ -954,6 +957,61 @@ describe("Migration 20260814210000 — appointment lifecycle RPCs", () => {
       expect(data?.[0]?.failed_count).toBeGreaterThanOrEqual(1);
       const rows = await ledgerRowsForChain(chainId);
       expect(rows.find((r) => r.id === ledgerId)?.phase).toBe("failed");
+    });
+
+    // Codex round 6, finding 1: calendar_client_error_stale_event is the
+    // THIRD stale-event reason markStaleEventRetryable can write
+    // (create-worker.ts) alongside no_token_stale_event and
+    // pref_disabled_stale_event. The original predicate here enumerated
+    // only the first two, so an exhausted row with this reason fell
+    // through to plain 'failed' — wrongly freeing the chain-serialization
+    // slot over a KNOWN, still-unreconciled Google event. Now matched via
+    // the `*_stale_event` naming convention instead of an enumerated list.
+    it("exhausted calendar_client_error_stale_event row routes to needs_repair, chain slot held", async () => {
+      const actor = await createUserForOrg(BMH_ORG_ID);
+      // Task stays OPEN (unlike the failed_count test above, which cancels
+      // it) so the post-expiry chain-serialization check below is
+      // unconfounded by "not open" — the only way completeAppointment can
+      // be rejected is the still-held chain slot.
+      const { taskId, chainId } = await insertOpenAppointment({ assigneeId: actor.userId, createdBy: actor.userId });
+
+      const past = new Date(Date.now() - 1000).toISOString();
+      const { error: insertError } = await ledgerReader()
+        .from("task_calendar_mutations")
+        .insert({
+          org_id: BMH_ORG_ID,
+          calendar_chain_id: chainId,
+          operation: "reschedule",
+          phase: "pending",
+          source_task_id: taskId,
+          old_assignee_id: actor.userId,
+          expected_generation: 0,
+          attempts: 5,
+          next_attempt_at: past,
+          result_reason: "calendar_client_error_stale_event",
+        });
+      expect(insertError).toBeNull();
+      const inserted = await ledgerRowsForChain(chainId);
+      const ledgerId = inserted[0].id;
+
+      const { data, error } = await expireExhaustedCalendarMutations(db);
+
+      expect(error).toBeNull();
+      expect(data?.[0]?.needs_repair_count).toBeGreaterThanOrEqual(1);
+      expect(data?.[0]?.needs_repair_ids).toContain(ledgerId);
+      const rows = await ledgerRowsForChain(chainId);
+      const row = rows.find((r) => r.id === ledgerId);
+      expect(row?.phase).toBe("needs_repair");
+      expect(row).toMatchObject({ operation: "reschedule" });
+
+      // Chain slot still held: a subsequent lifecycle RPC on the same
+      // (still-open) chain must be rejected by the chain-serialization
+      // guard, not by any task-status check.
+      const { error: completeError } = await completeAppointment(actor.client, {
+        p_task: taskId,
+        p_outcome: "held",
+      });
+      expect(completeError?.message).toMatch(/calendar sync in progress/i);
     });
   });
 

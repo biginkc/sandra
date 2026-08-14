@@ -791,15 +791,28 @@ grant execute on function public.fn_claim_calendar_mutations(integer) to service
 --    fn_expire_exhausted_calendar_creations. Same failed/needs_repair split;
 --    the only change from PR 2 was dropping the `operation = 'create'`
 --    filter. Codex round 1 (finding 4) adds a SECOND needs_repair trigger:
---    a row still at phase='pending' whose result_reason is
---    'no_token_stale_event' or 'pref_disabled_stale_event' — the
---    create-worker's markStaleEventRetryable (create-worker.ts) — never
---    reached phase='provider_done' (no provider call was ever made; the
---    token/pref was missing before that point) but still represents a
---    KNOWN Google event this operation could not reconcile. Routing it to
---    plain 'failed' would free the chain-serialization slot over a
---    genuinely unreconciled event; needs_repair correctly keeps it held
---    (same rationale as the provider_done branch).
+--    a row still at phase='pending' whose result_reason ends in
+--    '_stale_event' — the create-worker's markStaleEventRetryable
+--    (create-worker.ts) — never reached phase='provider_done' (no provider
+--    call was ever made; the token/pref/client error happened before that
+--    point) but still represents a KNOWN Google event this operation could
+--    not reconcile. Routing it to plain 'failed' would free the
+--    chain-serialization slot over a genuinely unreconciled event;
+--    needs_repair correctly keeps it held (same rationale as the
+--    provider_done branch).
+--
+--    Codex round 6 (finding 1): the worker has THREE stale-event reasons
+--    (no_token_stale_event, pref_disabled_stale_event,
+--    calendar_client_error_stale_event — see markStaleEventRetryable's
+--    resultReason union in create-worker.ts) and the original predicate
+--    enumerated only the first two, so an exhausted
+--    calendar_client_error_stale_event row at phase='pending' fell through
+--    to the `else` branch and was wrongly terminalized to 'failed',
+--    freeing the chain slot over a live-but-unreconciled Google event.
+--    Switched to `result_reason like '%\_stale\_event' escape '\'` (a
+--    naming-convention match, not an enumerated list) so any FUTURE
+--    `*_stale_event` reason the worker introduces is covered without a
+--    follow-up migration. Underscore is a LIKE wildcard, hence the escape.
 -- ----------------------------------------------------------------------------
 create or replace function public.fn_expire_exhausted_calendar_mutations()
 returns table (failed_count integer, needs_repair_count integer, needs_repair_ids uuid[])
@@ -817,14 +830,14 @@ begin
     set phase = case
           when phase = 'provider_done' then 'needs_repair'
           when phase = 'pending'
-               and result_reason in ('no_token_stale_event', 'pref_disabled_stale_event')
+               and result_reason like '%\_stale\_event' escape '\'
             then 'needs_repair'
           else 'failed'
         end,
         result_reason = case
           when phase = 'provider_done' then 'finalize_needs_repair'
           when phase = 'pending'
-               and result_reason in ('no_token_stale_event', 'pref_disabled_stale_event')
+               and result_reason like '%\_stale\_event' escape '\'
             then result_reason
           else 'retries_exhausted'
         end,
@@ -851,7 +864,7 @@ end;
 $$;
 
 comment on function public.fn_expire_exhausted_calendar_mutations() is
-  'PR 3 rename+widening of fn_expire_exhausted_calendar_creations to cover every ledger operation, not just create — a stuck reschedule/reassign/cancel row would otherwise hold its chain-serialization slot open forever with no exhaustion path at all. Same failed/needs_repair split and rationale as PR 2, PLUS (Codex round 1, finding 4): a still-pending row whose result_reason is no_token_stale_event/pref_disabled_stale_event (a KNOWN Google event the worker could not reconcile before ever calling Google) also routes to needs_repair, not failed — freeing the chain slot over a genuinely unreconciled event would be wrong.';
+  'PR 3 rename+widening of fn_expire_exhausted_calendar_creations to cover every ledger operation, not just create — a stuck reschedule/reassign/cancel row would otherwise hold its chain-serialization slot open forever with no exhaustion path at all. Same failed/needs_repair split and rationale as PR 2, PLUS (Codex round 1, finding 4): a still-pending row whose result_reason is a *_stale_event reason (a KNOWN Google event the worker could not reconcile before ever calling Google) also routes to needs_repair, not failed — freeing the chain slot over a genuinely unreconciled event would be wrong. Codex round 6, finding 1: matched via `like ''%_stale_event''` (naming convention) rather than an enumerated list, after calendar_client_error_stale_event was found missing from the original two-value enum and falling through to failed.';
 
 revoke all on function public.fn_expire_exhausted_calendar_mutations() from public, anon, authenticated;
 grant execute on function public.fn_expire_exhausted_calendar_mutations() to service_role;

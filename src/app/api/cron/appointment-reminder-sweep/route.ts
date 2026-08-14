@@ -4,6 +4,7 @@ import { createClient as createSupabaseClient } from "@supabase/supabase-js";
 import { reportError } from "@/lib/errors/report";
 import {
   deliverAppointmentReminder,
+  markReminderDeliveryTimedOut,
   type ClaimedReminderRow,
   type ReminderDeliveryOutcome,
 } from "@/lib/notifications/reminders";
@@ -104,6 +105,61 @@ const MAX_APPOINTMENTS_PER_SWEEP = 50;
  *  first — the item cap alone isn't enough if individual deliveries are
  *  slow. */
 const RETRY_RESERVED_QUOTA = 10;
+
+/** Codex round 6 (finding 2): a single slack/sms provider call has no bound
+ *  of its own (Slack SDK: no default request timeout; Sendillo: same) and
+ *  could otherwise consume this row's remaining phase budget or the whole
+ *  `SWEEP_BUDGET_MS` sweep, starving every row behind it. `deliverRow`
+ *  below races `deliverAppointmentReminder` against a per-row deadline
+ *  derived from whichever budget boundary applies to the CURRENT phase
+ *  (phase 1's `halfBudgetMs` reservation cap, or the plain overall budget
+ *  for phases 2/3) — see `withDeliveryDeadline`. Bell is exempt: it's a
+ *  direct DB write (`createNotification`), not an external provider call,
+ *  so it isn't in scope for this finding and isn't raced. */
+const REMINDER_TIMEOUT_ERROR = "delivery timeout";
+
+/**
+ * Races one delivery against `deadlineMs`. A timed-out call is recorded as
+ * a retryable failure (`markReminderDeliveryTimedOut`, same fenced write
+ * every other outcome uses) so the sweep loop can move on to the next
+ * row/phase instead of blocking. The abandoned promise is NOT cancelled —
+ * Slack/Sendillo may still receive and process the request — so it's given
+ * a `.catch` to report (not rethrow) whatever it eventually resolves or
+ * rejects with, since nothing is awaiting it after the race settles.
+ */
+async function withDeliveryDeadline(
+  supabase: ReturnType<typeof createServiceRoleClient>,
+  row: ClaimedReminderRow,
+  deadlineMs: number,
+): Promise<ReminderDeliveryOutcome> {
+  const runPromise = deliverAppointmentReminder(supabase, row);
+  runPromise.catch((error) => {
+    reportError(error instanceof Error ? error : new Error(String(error)), {
+      tags: { surface: "cron_appointment_reminder_sweep_late_rejection" },
+      extra: { deliveryId: row.deliveryId, channel: row.channel },
+    });
+  });
+
+  const TIMED_OUT = Symbol("delivery-timed-out");
+  let timer: ReturnType<typeof setTimeout>;
+  const timeoutPromise = new Promise<typeof TIMED_OUT>((resolve) => {
+    timer = setTimeout(() => resolve(TIMED_OUT), Math.max(0, deadlineMs));
+  });
+
+  const result = await Promise.race([runPromise, timeoutPromise]);
+  clearTimeout(timer!);
+  if (result !== TIMED_OUT) {
+    return result;
+  }
+
+  await markReminderDeliveryTimedOut(supabase, row);
+  return {
+    status: "failed",
+    deliveryId: row.deliveryId,
+    channel: row.channel,
+    error: REMINDER_TIMEOUT_ERROR,
+  };
+}
 
 function createServiceRoleClient() {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
@@ -243,6 +299,11 @@ export async function runAppointmentReminderSweep(
   const primaryClaimLimit = opts.primaryClaimLimit ?? MAX_APPOINTMENTS_PER_SWEEP;
   const startedAt = Date.now();
   const rpcClient = supabase as unknown as ReminderClaimRpcClient;
+  // Phase 1's reservation boundary (see the scheduling doc comment above) —
+  // hoisted above its original single use site so `deliverRow` /
+  // `claimAndDeliverOneRetryRow` can derive each delivery's timeout
+  // deadline from it too (Codex round 6, finding 2).
+  const halfBudgetMs = budgetMs / 2;
 
   const outcomes: Record<string, number> = {};
   let processed = 0;
@@ -251,14 +312,20 @@ export async function runAppointmentReminderSweep(
   async function deliverRow(
     raw: ClaimedReminderRpcRow,
     attemptsAlreadyBumped: boolean,
+    deadlineMs: number,
   ): Promise<void> {
     processed += 1;
+    const claimedRow = toClaimedRow(raw, { attemptsAlreadyBumped });
     let outcome: ReminderDeliveryOutcome;
     try {
-      outcome = await deliverAppointmentReminder(
-        supabase,
-        toClaimedRow(raw, { attemptsAlreadyBumped }),
-      );
+      // Codex round 6 (finding 2): bell is a direct DB write
+      // (`createNotification`), not an external provider call — no bound
+      // needed. Slack/sms go through the race so a hung provider call can't
+      // consume this row's phase/sweep budget.
+      outcome =
+        raw.channel === "bell"
+          ? await deliverAppointmentReminder(supabase, claimedRow)
+          : await withDeliveryDeadline(supabase, claimedRow, deadlineMs);
     } catch (e) {
       reportError(e, {
         tags: { surface: "cron_appointment_reminder_sweep_unhandled" },
@@ -303,11 +370,13 @@ export async function runAppointmentReminderSweep(
     if (!claimedRows || claimedRows.length === 0) return false; // nothing due right now
     claimedAppointments += 1;
     for (const raw of claimedRows) {
-      if (Date.now() - startedAt >= budgetMs) {
+      const elapsed = Date.now() - startedAt;
+      if (elapsed >= budgetMs) {
         budgetExhausted = true;
         break;
       }
-      await deliverRow(raw, false);
+      // Phase 2 has no boundary short of the overall budget.
+      await deliverRow(raw, false, budgetMs - elapsed);
     }
     return true;
   }
@@ -329,7 +398,11 @@ export async function runAppointmentReminderSweep(
   // is simply never claimed this pass, left for the next sweep with
   // attempts untouched — same contract as the primary claim.
   const retryRows: ClaimedReminderRpcRow[] = [];
-  async function claimAndDeliverOneRetryRow(): Promise<boolean> {
+  /** `phaseBoundaryMs` is `halfBudgetMs` for phase 1's calls (so a hung
+   *  delivery is timed out at the phase-1/phase-2 boundary, not just the
+   *  overall budget) and `budgetMs` for phase 3's (no boundary short of the
+   *  overall budget by then) — Codex round 6, finding 2. */
+  async function claimAndDeliverOneRetryRow(phaseBoundaryMs: number): Promise<boolean> {
     if (Date.now() - startedAt >= budgetMs) {
       budgetExhausted = true;
       return false;
@@ -343,11 +416,13 @@ export async function runAppointmentReminderSweep(
     if (!data || data.length === 0) return false; // nothing eligible right now
     retryRows.push(...data);
     for (const raw of data) {
-      if (Date.now() - startedAt >= budgetMs) {
+      const elapsed = Date.now() - startedAt;
+      if (elapsed >= budgetMs) {
         budgetExhausted = true;
         break;
       }
-      await deliverRow(raw, true);
+      const deadlineMs = Math.min(phaseBoundaryMs, budgetMs) - elapsed;
+      await deliverRow(raw, true, deadlineMs);
     }
     return true;
   }
@@ -356,14 +431,13 @@ export async function runAppointmentReminderSweep(
   // the scheduling rationale in the module doc comment). Stops at
   // RETRY_RESERVED_QUOTA rows, at half the budget, on budget exhaustion, or
   // when nothing more is eligible — whichever comes first.
-  const halfBudgetMs = budgetMs / 2;
   const retryFirstPassCap = Math.min(retryLimit, RETRY_RESERVED_QUOTA);
   while (
     retryRows.length < retryFirstPassCap &&
     !budgetExhausted &&
     Date.now() - startedAt < halfBudgetMs
   ) {
-    const claimed = await claimAndDeliverOneRetryRow();
+    const claimed = await claimAndDeliverOneRetryRow(halfBudgetMs);
     if (!claimed) break;
   }
 
@@ -379,7 +453,7 @@ export async function runAppointmentReminderSweep(
   // retry backlog deeper than phase 1's reserved quota still gets processed
   // this sweep when there's room, instead of banking unused budget.
   while (!budgetExhausted && retryRows.length < retryLimit) {
-    const claimed = await claimAndDeliverOneRetryRow();
+    const claimed = await claimAndDeliverOneRetryRow(budgetMs);
     if (!claimed) break;
   }
 

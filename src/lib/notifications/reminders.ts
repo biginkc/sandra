@@ -219,6 +219,34 @@ async function markDelivery(
   }
 }
 
+/**
+ * Codex round 6 (finding 2): the sweep route (route.ts) races each
+ * slack/sms delivery against a deadline derived from the remaining phase
+ * budget — a single provider call with no bound could otherwise blow
+ * through the phase boundary or the whole 45s sweep budget (the Slack SDK
+ * has no default request timeout; Sendillo's HTTP client is likewise
+ * unbounded here). When the race times out, the route calls this to record
+ * a retryable failure using the SAME fenced write as every other outcome
+ * (`markDelivery`, scoped by `claim_token`/`claimedStatus`) — so if the
+ * abandoned call later actually lands (success or failure), ITS OWN write
+ * simply no-ops (the row already moved off the expected status). That
+ * leaves one accepted gap: a timed-out delivery that later actually
+ * succeeds records neither the real provider_message_id nor a "sent"
+ * status, so a subsequent retry claim (attempts<3) will re-send rather
+ * than reconcile — the same duplicate-risk category `deliverSlack`/
+ * `deliverSms`'s own doc comments already carry for crash-before-write,
+ * not a new failure mode this introduces.
+ */
+export async function markReminderDeliveryTimedOut(
+  supabase: SupabaseClient<Database>,
+  row: Pick<
+    ClaimedReminderRow,
+    "deliveryId" | "attempts" | "attemptsAlreadyBumped" | "claimToken" | "claimedStatus"
+  >,
+): Promise<void> {
+  await markDelivery(supabase, row, "failed", { lastError: "delivery timeout" });
+}
+
 async function deliverBell(
   supabase: SupabaseClient<Database>,
   row: ClaimedReminderRow,
