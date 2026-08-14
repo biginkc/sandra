@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { ProviderError } from "@/lib/errors/classes";
+
 const mocks = vi.hoisted(() => ({
   listPurchasedNumbers: vi.fn(),
   sendSms: vi.fn(),
@@ -221,6 +223,36 @@ describe("sendRepSmsReminder", () => {
       reason: "aborted_ambiguous",
       message: "fetch failed: aborted",
     });
+  });
+
+  // Codex round 9 (finding 1): sendillo.ts's own internal
+  // DEFAULT_SEND_TIMEOUT_MS can fire and abort the underlying fetch BEFORE
+  // the caller's own deadline signal does — the caller's signal is still
+  // live (never aborted) at catch time here, so detection can't rely on
+  // `params.signal?.aborted`. Must still classify as aborted_ambiguous via
+  // the `ProviderError.details.isAbort` flag sendillo.ts now sets.
+  it("returns aborted_ambiguous when the provider's own internal timeout fires while the caller's deadline signal is still live", async () => {
+    const controller = new AbortController();
+    mocks.sendSms.mockRejectedValueOnce(
+      new ProviderError("This operation was aborted", "sendillo", { isAbort: true }),
+    );
+
+    const result = await sendRepSmsReminder({
+      to: "+18165551234",
+      body: "Appointment in 30 min",
+      signal: controller.signal,
+    });
+
+    expect(controller.signal.aborted).toBe(false);
+    expect(result).toEqual({
+      ok: false,
+      reason: "aborted_ambiguous",
+      message: "This operation was aborted",
+    });
+    expect(mocks.reportError).toHaveBeenCalledWith(
+      expect.any(Error),
+      expect.objectContaining({ tags: { surface: "rep_sms_send_aborted_ambiguous" } }),
+    );
   });
 
   it("still returns provider_error when sendSms rejects and the signal was never aborted (a genuine provider failure, unrelated to any deadline)", async () => {

@@ -88,6 +88,27 @@ type ClaimMutationRow = {
 
 type ExpireExhaustedRow = { failed_count: number; needs_repair_count: number; needs_repair_ids: string[] };
 
+// Codex round 9 (finding 2): PR 2's original (create-only) claim/exhaustion
+// RPC shapes, kept alongside the widened PR 3 RPCs above as compatibility
+// shims — see 20260814210000_appointment_lifecycle_rpcs.sql sections 5b/6b.
+type ClaimCreationRow = {
+  ledger_id: string;
+  org_id: string;
+  calendar_chain_id: string;
+  source_task_id: string;
+  expected_generation: number;
+  client_event_id: string | null;
+  attempts: number;
+  phase: string;
+  new_event_id: string | null;
+  result_reason: string | null;
+  claim_token: string;
+  task_due_at: string;
+  task_end_at: string;
+  task_title: string;
+  task_assignee_id: string;
+};
+
 type LifecycleRpcClient = {
   rpc(fn: "fn_complete_appointment", args: CompleteArgs): Promise<RpcResult<CompleteRow>>;
   rpc(fn: "fn_cancel_appointment", args: CancelArgs): Promise<RpcResult<CancelRow>>;
@@ -98,6 +119,11 @@ type LifecycleRpcClient = {
     args: { p_limit: number },
   ): Promise<RpcResult<ClaimMutationRow[]>>;
   rpc(fn: "fn_expire_exhausted_calendar_mutations"): Promise<RpcResult<ExpireExhaustedRow[]>>;
+  rpc(
+    fn: "fn_claim_calendar_creations",
+    args: { p_limit: number },
+  ): Promise<RpcResult<ClaimCreationRow[]>>;
+  rpc(fn: "fn_expire_exhausted_calendar_creations"): Promise<RpcResult<ExpireExhaustedRow[]>>;
 };
 
 function asLifecycleRpcClient(client: SupabaseClient<Database>): LifecycleRpcClient {
@@ -121,6 +147,13 @@ function claimCalendarMutations(client: SupabaseClient<Database>, limit: number)
 }
 function expireExhaustedCalendarMutations(client: SupabaseClient<Database>) {
   return asLifecycleRpcClient(client).rpc("fn_expire_exhausted_calendar_mutations");
+}
+// Codex round 9 (finding 2): old-name compatibility shims.
+function claimCalendarCreations(client: SupabaseClient<Database>, limit: number) {
+  return asLifecycleRpcClient(client).rpc("fn_claim_calendar_creations", { p_limit: limit });
+}
+function expireExhaustedCalendarCreations(client: SupabaseClient<Database>) {
+  return asLifecycleRpcClient(client).rpc("fn_expire_exhausted_calendar_creations");
 }
 
 // task_calendar_mutations / tasks columns not on the generated Database type
@@ -1012,6 +1045,104 @@ describe("Migration 20260814210000 — appointment lifecycle RPCs", () => {
         p_outcome: "held",
       });
       expect(completeError?.message).toMatch(/calendar sync in progress/i);
+    });
+  });
+
+  // Codex round 9 (finding 2): fn_claim_calendar_creations /
+  // fn_expire_exhausted_calendar_creations are PR 2's original names, kept
+  // (never dropped) as compatibility shims so a deployed build still
+  // calling the old names during a rollout-skew window keeps working —
+  // see the migration's sections 5b/6b for the full rationale.
+  describe("old-name compatibility shims (fn_claim_calendar_creations / fn_expire_exhausted_calendar_creations)", () => {
+    it("fn_claim_calendar_creations claims a create-operation row in the exact PR 2 return shape", async () => {
+      const actor = await createUserForOrg(BMH_ORG_ID);
+      const { taskId, chainId } = await insertOpenAppointment({ assigneeId: actor.userId, createdBy: actor.userId });
+      await insertActiveLedgerMutation(taskId, chainId, BMH_ORG_ID, actor.userId);
+
+      const { data, error } = await claimCalendarCreations(db, 5);
+
+      expect(error).toBeNull();
+      const claimed = (data ?? []).find((r) => r.source_task_id === taskId);
+      expect(claimed).toMatchObject({
+        source_task_id: taskId,
+        phase: "pending",
+        task_assignee_id: actor.userId,
+      });
+      expect(claimed?.claim_token).toBeTruthy();
+      // Only PR 2's original columns — never operation/target_task_id/etc.
+      expect(claimed).not.toHaveProperty("operation");
+      expect(claimed).not.toHaveProperty("target_task_id");
+    });
+
+    it("fn_claim_calendar_creations does NOT claim (or consume the lease of) a reschedule/reassign/cancel row", async () => {
+      const actor = await createUserForOrg(BMH_ORG_ID);
+      const { taskId } = await insertOpenAppointment({
+        assigneeId: actor.userId,
+        createdBy: actor.userId,
+        googleEventId: "evt-shim-cancel-me",
+      });
+      await cancelAppointment(actor.client, { p_task: taskId });
+
+      const { data: shimData, error: shimError } = await claimCalendarCreations(db, 5);
+      expect(shimError).toBeNull();
+      expect((shimData ?? []).find((r) => r.source_task_id === taskId)).toBeUndefined();
+
+      // The cancel row must still be claimable via the real (wide) RPC —
+      // proves the shim's operation='create' filter excluded it at the
+      // claim/lock stage rather than claiming-then-discarding it (which
+      // would have bumped its attempts/claim_token for no reason and left
+      // it silently unprocessed).
+      const { data: wideData } = await claimCalendarMutations(db, 5);
+      const claimed = (wideData ?? []).find((r) => r.source_task_id === taskId);
+      expect(claimed).toMatchObject({ operation: "cancel", attempts: 1 });
+    });
+
+    it("fn_expire_exhausted_calendar_creations terminalizes an exhausted create/pending row to failed", async () => {
+      const actor = await createUserForOrg(BMH_ORG_ID);
+      const { taskId, chainId } = await insertOpenAppointment({ assigneeId: actor.userId, createdBy: actor.userId });
+      await insertActiveLedgerMutation(taskId, chainId, BMH_ORG_ID, actor.userId);
+      const ledgerRows = await ledgerRowsForChain(chainId);
+      const ledgerId = ledgerRows[0].id;
+
+      const past = new Date(Date.now() - 1000).toISOString();
+      const { error: updateError } = await ledgerReader()
+        .from("task_calendar_mutations")
+        .update({ attempts: 5, next_attempt_at: past })
+        .eq("id", ledgerId);
+      expect(updateError).toBeNull();
+
+      const { data, error } = await expireExhaustedCalendarCreations(db);
+
+      expect(error).toBeNull();
+      expect(data?.[0]?.failed_count).toBeGreaterThanOrEqual(1);
+      const rows = await ledgerRowsForChain(chainId);
+      expect(rows.find((r) => r.id === ledgerId)?.phase).toBe("failed");
+    });
+
+    it("fn_expire_exhausted_calendar_creations does not touch an exhausted cancel row (operation='create' constrained)", async () => {
+      const actor = await createUserForOrg(BMH_ORG_ID);
+      const { taskId, chainId } = await insertOpenAppointment({
+        assigneeId: actor.userId,
+        createdBy: actor.userId,
+      });
+      await cancelAppointment(actor.client, { p_task: taskId });
+      const ledgerRows = await ledgerRowsForChain(chainId);
+      const ledgerId = ledgerRows[0].id;
+
+      const past = new Date(Date.now() - 1000).toISOString();
+      const { error: updateError } = await ledgerReader()
+        .from("task_calendar_mutations")
+        .update({ attempts: 5, next_attempt_at: past })
+        .eq("id", ledgerId);
+      expect(updateError).toBeNull();
+
+      const { data, error } = await expireExhaustedCalendarCreations(db);
+
+      expect(error).toBeNull();
+      const rows = await ledgerRowsForChain(chainId);
+      // Still 'pending' — the create-only shim must never terminalize a
+      // cancel row, unlike the real (wide) fn_expire_exhausted_calendar_mutations.
+      expect(rows.find((r) => r.id === ledgerId)?.phase).toBe("pending");
     });
   });
 

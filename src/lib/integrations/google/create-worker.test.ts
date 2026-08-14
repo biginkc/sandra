@@ -1,4 +1,4 @@
-import { describe, expect, it, vi, beforeEach } from "vitest";
+import { afterEach, describe, expect, it, vi, beforeEach } from "vitest";
 
 vi.mock("./dispatch", () => ({
   buildCalendarClient: vi.fn(),
@@ -178,10 +178,16 @@ describe("processClaimedCalendarCreation", () => {
 
     const outcome = await processClaimedCalendarCreation(supabase, BASE_CLAIMED);
 
-    expect(insert).toHaveBeenCalledWith({
-      calendarId: "primary",
-      requestBody: expect.objectContaining({ id: "evtclient1" }),
-    });
+    expect(insert).toHaveBeenCalledWith(
+      {
+        calendarId: "primary",
+        requestBody: expect.objectContaining({ id: "evtclient1" }),
+      },
+      // Codex round 9 (finding 3): every Google call is bounded — retry
+      // disabled (this file's own attempts/backoff is the durable retry
+      // layer, not gaxios's opaque in-call one).
+      { timeout: expect.any(Number), retry: false },
+    );
     expect(outcome).toEqual({ status: "created", ledgerId: "ledger-1", eventId: "evt-1" });
   });
 
@@ -203,7 +209,10 @@ describe("processClaimedCalendarCreation", () => {
 
     const outcome = await processClaimedCalendarCreation(supabase, BASE_CLAIMED);
 
-    expect(get).toHaveBeenCalledWith({ calendarId: "primary", eventId: "evtclient1" });
+    expect(get).toHaveBeenCalledWith(
+      { calendarId: "primary", eventId: "evtclient1" },
+      { timeout: expect.any(Number), retry: false },
+    );
     expect(outcome).toEqual({
       status: "reconciled_409",
       ledgerId: "ledger-1",
@@ -547,7 +556,10 @@ describe("processClaimedCancel (via processClaimedCalendarMutation)", () => {
       client_event_id: null,
     });
 
-    expect(del).toHaveBeenCalledWith({ calendarId: "primary", eventId: "evt-old" });
+    expect(del).toHaveBeenCalledWith(
+      { calendarId: "primary", eventId: "evt-old" },
+      { timeout: expect.any(Number), retry: false },
+    );
     expect(outcome).toEqual({ status: "deleted", ledgerId: "ledger-1" });
   });
 
@@ -655,14 +667,17 @@ describe("processClaimedReschedule (via processClaimedCalendarMutation)", () => 
 
     const outcome = await processClaimedCalendarMutation(supabase, RESCHEDULE_CLAIMED);
 
-    expect(patch).toHaveBeenCalledWith({
-      calendarId: "primary",
-      eventId: "evt-old",
-      requestBody: {
-        start: { dateTime: "2026-09-02T15:00:00.000Z" },
-        end: { dateTime: "2026-09-02T15:30:00.000Z" },
+    expect(patch).toHaveBeenCalledWith(
+      {
+        calendarId: "primary",
+        eventId: "evt-old",
+        requestBody: {
+          start: { dateTime: "2026-09-02T15:00:00.000Z" },
+          end: { dateTime: "2026-09-02T15:30:00.000Z" },
+        },
       },
-    });
+      { timeout: expect.any(Number), retry: false },
+    );
     expect(outcome).toEqual({ status: "updated", ledgerId: "ledger-1", eventId: "evt-old" });
   });
 
@@ -762,11 +777,17 @@ describe("processClaimedReassign (via processClaimedCalendarMutation)", () => {
 
     const outcome = await processClaimedCalendarMutation(supabase, REASSIGN_CLAIMED);
 
-    expect(del).toHaveBeenCalledWith({ calendarId: "primary", eventId: "evt-old" });
-    expect(insert).toHaveBeenCalledWith({
-      calendarId: "primary",
-      requestBody: expect.objectContaining({ id: "evtclient-reassign" }),
-    });
+    expect(del).toHaveBeenCalledWith(
+      { calendarId: "primary", eventId: "evt-old" },
+      { timeout: expect.any(Number), retry: false },
+    );
+    expect(insert).toHaveBeenCalledWith(
+      {
+        calendarId: "primary",
+        requestBody: expect.objectContaining({ id: "evtclient-reassign" }),
+      },
+      { timeout: expect.any(Number), retry: false },
+    );
     expect(outcome).toEqual({ status: "reassigned", ledgerId: "ledger-1", eventId: "evt-new" });
   });
 
@@ -925,11 +946,17 @@ describe("processClaimedReassign (via processClaimedCalendarMutation)", () => {
 
       const outcome = await processClaimedCalendarMutation(supabase, REASSIGN_CLAIMED);
 
-      expect(insert).toHaveBeenCalledWith({
-        calendarId: "primary",
-        requestBody: expect.objectContaining({ id: "evtclient-reassign" }),
-      });
-      expect(del).toHaveBeenCalledWith({ calendarId: "primary", eventId: "evt-old" });
+      expect(insert).toHaveBeenCalledWith(
+        {
+          calendarId: "primary",
+          requestBody: expect.objectContaining({ id: "evtclient-reassign" }),
+        },
+        { timeout: expect.any(Number), retry: false },
+      );
+      expect(del).toHaveBeenCalledWith(
+        { calendarId: "primary", eventId: "evt-old" },
+        { timeout: expect.any(Number), retry: false },
+      );
       // The create call happens strictly before the delete call.
       expect(insertCallOrder.indexOf("insert")).toBeLessThan(insertCallOrder.indexOf("delete"));
       expect(outcome).toEqual({ status: "reassigned", ledgerId: "ledger-1", eventId: "evt-new" });
@@ -958,7 +985,10 @@ describe("processClaimedReassign (via processClaimedCalendarMutation)", () => {
       });
 
       expect(insert).not.toHaveBeenCalled();
-      expect(del).toHaveBeenCalledWith({ calendarId: "primary", eventId: "evt-old" });
+      expect(del).toHaveBeenCalledWith(
+        { calendarId: "primary", eventId: "evt-old" },
+        { timeout: expect.any(Number), retry: false },
+      );
       // Only the old-account token lookup for the delete — no new-account
       // lookup, since the create step (and its token fetch) is skipped.
       expect(vi.mocked(getDecryptedToken).mock.calls.length).toBe(getDecryptedTokenCallsBefore + 1);
@@ -991,7 +1021,10 @@ describe("processClaimedReassign (via processClaimedCalendarMutation)", () => {
       });
 
       expect(insert).not.toHaveBeenCalled();
-      expect(del).toHaveBeenCalledWith({ calendarId: "primary", eventId: "evt-old" });
+      expect(del).toHaveBeenCalledWith(
+        { calendarId: "primary", eventId: "evt-old" },
+        { timeout: expect.any(Number), retry: false },
+      );
       expect(outcome.status).toBe("retryable_error");
     });
 
@@ -1074,10 +1107,13 @@ describe("processClaimedReassign (via processClaimedCalendarMutation)", () => {
       // Only the new-account token lookup — no old-account lookup, since
       // the delete step (and its token fetch) is skipped entirely on resume.
       expect(vi.mocked(getDecryptedToken).mock.calls.length).toBe(getDecryptedTokenCallsBefore + 1);
-      expect(insert).toHaveBeenCalledWith({
-        calendarId: "primary",
-        requestBody: expect.objectContaining({ id: "evtclient-reassign" }),
-      });
+      expect(insert).toHaveBeenCalledWith(
+        {
+          calendarId: "primary",
+          requestBody: expect.objectContaining({ id: "evtclient-reassign" }),
+        },
+        { timeout: expect.any(Number), retry: false },
+      );
       expect(outcome).toEqual({
         status: "reassigned",
         ledgerId: "ledger-1",
@@ -1121,15 +1157,138 @@ describe("processClaimedReassign (via processClaimedCalendarMutation)", () => {
 
       expect(del).not.toHaveBeenCalled();
       expect(vi.mocked(getDecryptedToken).mock.calls.length).toBe(getDecryptedTokenCallsBefore + 1);
-      expect(insert).toHaveBeenCalledWith({
-        calendarId: "primary",
-        requestBody: expect.objectContaining({ id: "evtclient-reassign" }),
-      });
+      expect(insert).toHaveBeenCalledWith(
+        {
+          calendarId: "primary",
+          requestBody: expect.objectContaining({ id: "evtclient-reassign" }),
+        },
+        { timeout: expect.any(Number), retry: false },
+      );
       expect(outcome).toEqual({
         status: "reassigned",
         ledgerId: "ledger-1",
         eventId: "evt-new-resumed",
       });
     });
+  });
+});
+
+// ----------------------------------------------------------------------------
+// Codex round 9 (finding 3): every Google call is bounded to a caller-
+// supplied `timeoutMs` (see `googleCallOptions`/route.ts's
+// `remainingCallTimeoutMs`-derived `timeoutMs`) instead of running
+// unbounded — a hung/never-resolving Google call could otherwise hold the
+// sweep route open past its platform `maxDuration`. These tests simulate a
+// mock Google client honoring the SAME `timeout` field real gaxios reads
+// (node_modules/gaxios's `#appendTimeoutToSignal` wires `opts.timeout` to
+// `AbortSignal.timeout()`) — proving `processClaimedCalendarMutation`
+// itself returns promptly (never hangs) once that timeout elapses, and
+// that each operation's outcome lands where finding 3 specifies:
+// idempotent ops (create/cancel) -> retryable; patch (reschedule) ->
+// retryable, current phase untouched.
+// ----------------------------------------------------------------------------
+describe("per-call Google timeout (Codex round 9, finding 3): a hung call never outlives its timeoutMs", () => {
+  /** Rejects after exactly `options.timeout` ms — the same field
+   *  `googleCallOptions` sets and real gaxios reads — with a
+   *  TimeoutError-shaped rejection matching what `AbortSignal.timeout()`
+   *  produces when it aborts a fetch. Never resolves on its own; if this
+   *  file's code failed to bound the call, `vi.advanceTimersByTimeAsync`
+   *  below would never unblock it and the test would hang/time out. */
+  function neverResolvingUntilTimeout() {
+    return vi.fn((_params: unknown, options?: { timeout?: number }) => {
+      return new Promise((_resolve, reject) => {
+        setTimeout(() => {
+          const err = new Error("The operation was aborted due to timeout");
+          err.name = "TimeoutError";
+          reject(err);
+        }, options?.timeout ?? 0);
+      });
+    });
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("create: a hung insert resolves retryable_error at exactly its timeoutMs, never past it", async () => {
+    const insert = neverResolvingUntilTimeout();
+    vi.mocked(buildCalendarClient).mockReturnValue({
+      events: { insert, get: vi.fn() },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any);
+    const supabase = fakeSupabase({
+      task_calendar_mutations: [ledgerWrite()], // markRetryableFailure's single write
+    });
+
+    const outcomePromise = processClaimedCalendarMutation(supabase, BASE_CLAIMED, {
+      timeoutMs: 5_000,
+    });
+    await vi.advanceTimersByTimeAsync(5_000);
+    const outcome = await outcomePromise;
+
+    expect(insert).toHaveBeenCalledWith(expect.anything(), { timeout: 5_000, retry: false });
+    expect(outcome.status).toBe("retryable_error");
+  });
+
+  it("cancel: a hung delete resolves retryable_error — delete is naturally idempotent, so leaving it retryable never risks a duplicate", async () => {
+    const del = neverResolvingUntilTimeout();
+    vi.mocked(buildCalendarClient).mockReturnValue({
+      events: { delete: del },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any);
+    const supabase = fakeSupabase({
+      task_calendar_mutations: [ledgerWrite()],
+    });
+
+    const outcomePromise = processClaimedCalendarMutation(
+      supabase,
+      { ...BASE_CLAIMED, operation: "cancel", event_id: "evt-old", client_event_id: null },
+      { timeoutMs: 5_000 },
+    );
+    await vi.advanceTimersByTimeAsync(5_000);
+    const outcome = await outcomePromise;
+
+    expect(del).toHaveBeenCalledWith(expect.anything(), { timeout: 5_000, retry: false });
+    expect(outcome.status).toBe("retryable_error");
+  });
+
+  it("reschedule: a hung patch resolves retryable_error — never advances to provider_done on an unconfirmed patch, so a retry safely re-applies the same idempotent time write", async () => {
+    const patch = neverResolvingUntilTimeout();
+    vi.mocked(buildCalendarClient).mockReturnValue({
+      events: { patch },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any);
+    const supabase = fakeSupabase({
+      // Only markRetryableFailure's single write — if the code wrongly
+      // advanced to provider_done or attempted a finalize CAS despite the
+      // patch never confirming, the second (unqueued) `.from()` call below
+      // would throw and this test would fail loudly instead of silently
+      // passing.
+      task_calendar_mutations: [ledgerWrite()],
+    });
+
+    const outcomePromise = processClaimedCalendarMutation(
+      supabase,
+      {
+        ...BASE_CLAIMED,
+        operation: "reschedule",
+        event_id: "evt-old",
+        client_event_id: null,
+        target_task_id: "succ-1",
+        target_due_at: "2026-09-02T15:00:00.000Z",
+        target_end_at: "2026-09-02T15:30:00.000Z",
+        target_title: "Walkthrough",
+        target_assignee_id: "assignee-1",
+      },
+      { timeoutMs: 5_000 },
+    );
+    await vi.advanceTimersByTimeAsync(5_000);
+    const outcome = await outcomePromise;
+
+    expect(patch).toHaveBeenCalledWith(expect.anything(), { timeout: 5_000, retry: false });
+    expect(outcome.status).toBe("retryable_error");
   });
 });

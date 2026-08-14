@@ -1,3 +1,4 @@
+import { ProviderError } from "@/lib/errors/classes";
 import { reportError } from "@/lib/errors/report";
 import { SendilloMessagingProvider } from "@/lib/messaging/providers/sendillo";
 
@@ -161,16 +162,31 @@ export async function sendRepSmsReminder(params: {
     );
     return { ok: true, externalId: result.externalId };
   } catch (error) {
-    // Codex round 8: distinguish an abort (deadline fired mid-call, or a
-    // test simulating one) from a genuine provider rejection BEFORE the
-    // generic report/return below runs. Checked two ways since either can
-    // surface the abort: `err.name === "AbortError"` (what a raw aborted
-    // fetch/DOMException carries) and `params.signal?.aborted` at catch
-    // time (still true even after `sendillo.ts` re-wraps the rejection into
-    // a `ProviderError`, which loses the original error's `name`). Neither
-    // alone is reliable in every path, so both are checked.
+    // Codex round 8, extended round 9 (finding 1): distinguish an abort
+    // (deadline fired mid-call, or the provider's own internal timeout
+    // fired, or a test simulating either) from a genuine provider rejection
+    // BEFORE the generic report/return below runs. Checked three ways,
+    // since no single one is reliable across every path:
+    //  1. `err.name === "AbortError"` — a raw aborted fetch/DOMException.
+    //  2. `error instanceof ProviderError && error.details?.isAbort` —
+    //     `sendillo.ts` re-wraps an AbortError into a `ProviderError`
+    //     (losing the original error's `name`) but now preserves abort
+    //     provenance via `details.isAbort`. This is the ONLY signal that
+    //     catches Sendillo's own internal `DEFAULT_SEND_TIMEOUT_MS` firing
+    //     while `params.signal` (this call's external deadline) is still
+    //     live — check 3 below stays false in that case, since nothing
+    //     external ever aborted.
+    //  3. `params.signal?.aborted` at catch time — true even when neither
+    //     of the above fires (belt-and-suspenders for the external-deadline
+    //     path).
+    // Round 9 deliberately maps EITHER an internal or an external abort to
+    // the SAME `aborted_ambiguous` outcome: from this function's caller's
+    // perspective, "Sendillo's own clock ran out" and "our deadline ran
+    // out" are equally non-evidence of delivery — see sendillo.ts's sendSms
+    // doc comment.
     const aborted =
       (error instanceof Error && error.name === "AbortError") ||
+      (error instanceof ProviderError && error.details?.isAbort === true) ||
       params.signal?.aborted === true;
     if (aborted) {
       // Distinct tag from the ordinary provider-error report below — this

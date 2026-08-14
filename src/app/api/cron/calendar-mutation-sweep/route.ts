@@ -51,6 +51,21 @@ export const maxDuration = 60;
 const MAX_ROWS_PER_SWEEP = 50;
 const SWEEP_BUDGET_MS = 45_000;
 
+/**
+ * Codex round 9 (finding 3): floor for the per-Google-call timeout derived
+ * from the sweep's remaining budget (see `remainingCallTimeoutMs` below).
+ * Below this, a real (non-hung) Google round trip would start failing on
+ * ordinary network latency alone, burning attempts on rows that were never
+ * actually stuck — a call that's ACTUALLY hung is bounded either way (this
+ * floor is what makes it bounded at all), so there's no reason to shrink
+ * the per-call window to razor-thin slivers as the sweep's soft budget runs
+ * low. The gap between `SWEEP_BUDGET_MS` (45s) and the route's own
+ * `maxDuration` (60s) is exactly the slack this floor spends: worst case,
+ * one already-in-flight row gets a bit more runway than the soft budget
+ * technically had left, comfortably inside the platform's hard limit.
+ */
+const CALENDAR_CALL_TIMEOUT_FLOOR_MS = 5_000;
+
 function createServiceRoleClient() {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
   const key =
@@ -210,6 +225,23 @@ export async function runCalendarMutationSweep(
     if (!row) break;
 
     claimed += 1;
+    // Codex round 9 (finding 3): every Google call this row's handler makes
+    // is bounded to the sweep's REMAINING budget (floored — see
+    // CALENDAR_CALL_TIMEOUT_FLOOR_MS above), not a fixed constant — a claim
+    // late in a busy sweep gets a shorter leash than one claimed right at
+    // the start, so a single hung/slow provider call can never carry the
+    // whole route past its platform `maxDuration`. Snapshotted once per
+    // claimed row (not re-derived after each of a multi-Google-call row's
+    // individual calls, e.g. reassign's delete-then-create) — the DB writes
+    // between those calls are fast, and re-threading a shrinking budget
+    // through every handler would be a much larger refactor for a benefit
+    // this floor already covers: see `googleCallOptions`'s doc comment in
+    // create-worker.ts for why a bounded call is always safe to leave
+    // retryable regardless of how many of them one row makes.
+    const timeoutMs = Math.max(
+      CALENDAR_CALL_TIMEOUT_FLOOR_MS,
+      budgetMs - (Date.now() - startedAt),
+    );
     // Defense-in-depth: `processClaimedCalendarMutation` is documented to
     // never throw, but this loop must not bet the whole sweep on that
     // invariant holding forever — a claimed row already burned its
@@ -217,7 +249,7 @@ export async function runCalendarMutationSweep(
     // next claimed row (or the next sweep iteration) from being processed.
     let outcome: CalendarMutationOutcome;
     try {
-      outcome = await processClaimedCalendarMutation(supabase, row);
+      outcome = await processClaimedCalendarMutation(supabase, row, { timeoutMs });
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
       reportError(e, {

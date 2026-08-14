@@ -29,23 +29,37 @@
 --    (task_calendar_mutations.reassign_idempotency_key, section 3b below)
 --    and is the ONLY no-op replay path — see fn_reassign_appointment's own
 --    comment for the full rationale.
--- 3. Claim RPC rename + widening, no compatibility shim.
---    fn_claim_calendar_creations(integer) (PR 2, `create`-only) is DROPped
---    and replaced by fn_claim_calendar_mutations(integer), widened to
+-- 3. Claim RPC rename + widening, WITH a compatibility shim (Codex round 9,
+--    finding 2 — supersedes the original "no compatibility shim" text
+--    below, kept for history).
+--    fn_claim_calendar_creations(integer) (PR 2, `create`-only) is
+--    superseded by fn_claim_calendar_mutations(integer), widened to
 --    operation IN ('create','reschedule','reassign','cancel') and returning
 --    both the source task's and (nullable, reschedule-only) the target
 --    successor's due_at/end_at/title/assignee_id so create-worker.ts can
---    dispatch by `operation` without a second round trip. No back-compat
---    signature is kept: the sole caller is
---    src/app/api/cron/calendar-mutation-sweep/route.ts, owned by this same
---    PR, and its call site is updated alongside this migration in one
---    atomic change. fn_expire_exhausted_calendar_creations() is renamed the
---    same way, to fn_expire_exhausted_calendar_mutations(), and its WHERE
---    clause drops the `operation = 'create'` filter — a stuck
---    reschedule/reassign/cancel row at attempts>=5 would otherwise hold its
---    chain-serialization slot open forever with no terminal-exhaustion path
---    at all, which is strictly worse than the create-only gap it already
---    closed in PR 2.
+--    dispatch by `operation` without a second round trip.
+--    [SUPERSEDED] The original text here claimed no back-compat signature
+--    was needed because the sole caller (calendar-mutation-sweep/route.ts)
+--    and this migration are "owned by this same PR" and update together —
+--    but a Supabase migration and the Vercel deploy that swaps the RPC name
+--    in that route are two SEPARATE rollouts with no atomicity between
+--    them. A window where this migration is already live but the OLD
+--    build of the route is still deployed (or a rollback restores the old
+--    build after this migration already ran) would 42883 on every
+--    claim/expire call, silently halting calendar delivery. The old names
+--    are therefore kept as CREATE OR REPLACE compatibility shims — see
+--    section 5b/6b below — never dropped by this migration, delegating to
+--    the same underlying claim/expire logic via private `_by_ops` helpers,
+--    constrained to operation='create', returned in PR 2's original
+--    (20260814170000) shape exactly. Removed in a later cleanup migration
+--    once rollout has fully landed. fn_expire_exhausted_calendar_creations()
+--    keeps the same shim treatment, alongside the widening described below.
+--    fn_expire_exhausted_calendar_creations() is superseded the same way,
+--    by fn_expire_exhausted_calendar_mutations(), whose WHERE clause drops
+--    the `operation = 'create'` filter — a stuck reschedule/reassign/cancel
+--    row at attempts>=5 would otherwise hold its chain-serialization slot
+--    open forever with no terminal-exhaustion path at all, which is
+--    strictly worse than the create-only gap it already closed in PR 2.
 -- 4. Cross-operation event-id source of truth. Every provider step below
 --    (delete for cancel, update for reschedule, delete-then-create for
 --    reassign) reads the Google event id the ledger row CAPTURED at
@@ -707,12 +721,21 @@ grant execute on function public.fn_reassign_appointment(uuid, uuid, uuid) to au
 
 -- ----------------------------------------------------------------------------
 -- 5. fn_claim_calendar_mutations — widened claim, renamed from PR 2's
---    fn_claim_calendar_creations. See migration header, deviation 3.
+--    fn_claim_calendar_creations. See migration header, deviation 3, and
+--    5b below for the Codex round 9 (finding 2) compatibility shim.
 -- ----------------------------------------------------------------------------
-drop function if exists public.fn_claim_calendar_creations(integer);
-drop function if exists public.fn_expire_exhausted_calendar_creations();
 
-create or replace function public.fn_claim_calendar_mutations(p_limit integer)
+-- Private: the actual claim logic, parameterized by which operations are
+-- eligible. Both fn_claim_calendar_mutations (all four operations) and the
+-- fn_claim_calendar_creations compatibility shim (create only, 5b below)
+-- delegate here — a single UPDATE...RETURNING, never duplicated, so the
+-- shim can never drift from the real (wide) claim behavior for the rows it
+-- claims. Not part of the public RPC surface: revoked the same as its
+-- callers, only ever invoked from inside another SECURITY DEFINER function.
+create or replace function public.fn_claim_calendar_mutations_by_ops(
+  p_limit integer,
+  p_operations text[]
+)
 returns table (
   ledger_id uuid,
   org_id uuid,
@@ -753,7 +776,7 @@ as $$
     from (
       select id
       from public.task_calendar_mutations
-      where operation in ('create', 'reschedule', 'reassign', 'cancel')
+      where operation = any(p_operations)
         and phase in ('pending', 'provider_done')
         and attempts < 5
         and (next_attempt_at is null or next_attempt_at <= now())
@@ -780,11 +803,102 @@ as $$
   left join public.tasks tgt on tgt.id = claimed.target_task_id;
 $$;
 
+revoke all on function public.fn_claim_calendar_mutations_by_ops(integer, text[]) from public, anon, authenticated;
+grant execute on function public.fn_claim_calendar_mutations_by_ops(integer, text[]) to service_role;
+
+create or replace function public.fn_claim_calendar_mutations(p_limit integer)
+returns table (
+  ledger_id uuid,
+  org_id uuid,
+  calendar_chain_id uuid,
+  operation text,
+  phase text,
+  source_task_id uuid,
+  target_task_id uuid,
+  old_assignee_id uuid,
+  new_assignee_id uuid,
+  event_id text,
+  new_event_id text,
+  client_event_id text,
+  result_reason text,
+  old_event_deleted_at timestamptz,
+  expected_generation integer,
+  attempts integer,
+  claim_token uuid,
+  source_due_at timestamptz,
+  source_end_at timestamptz,
+  source_title text,
+  source_assignee_id uuid,
+  target_due_at timestamptz,
+  target_end_at timestamptz,
+  target_title text,
+  target_assignee_id uuid
+)
+language sql
+security definer
+set search_path = public, pg_temp
+as $$
+  select * from public.fn_claim_calendar_mutations_by_ops(
+    p_limit,
+    array['create', 'reschedule', 'reassign', 'cancel']
+  );
+$$;
+
 comment on function public.fn_claim_calendar_mutations(integer) is
-  'Service-role-only claim for the durable calendar-mutation sweep worker — PR 3 rename+widening of PR 2''s fn_claim_calendar_creations (no compatibility shim; sole caller calendar-mutation-sweep/route.ts updated in this PR). Same FOR UPDATE SKIP LOCKED / 2-minute lease / claim_token fencing, widened to operation IN (create, reschedule, reassign, cancel). LEFT JOINs the nullable target/successor task (reschedule only) alongside the source task so the worker can dispatch on `operation` without a second round trip.';
+  'Service-role-only claim for the durable calendar-mutation sweep worker — PR 3 rename+widening of PR 2''s fn_claim_calendar_creations, which is kept (not dropped) as a compatibility shim, see fn_claim_calendar_creations below. Same FOR UPDATE SKIP LOCKED / 2-minute lease / claim_token fencing, widened to operation IN (create, reschedule, reassign, cancel) via fn_claim_calendar_mutations_by_ops. LEFT JOINs the nullable target/successor task (reschedule only) alongside the source task so the worker can dispatch on `operation` without a second round trip.';
 
 revoke all on function public.fn_claim_calendar_mutations(integer) from public, anon, authenticated;
 grant execute on function public.fn_claim_calendar_mutations(integer) to service_role;
+
+-- ----------------------------------------------------------------------------
+-- 5b. fn_claim_calendar_creations — Codex round 9 (finding 2) compatibility
+--     shim. NOT dropped: migration header deviation 3 originally assumed
+--     this migration and the Vercel deploy swapping create-worker.ts's RPC
+--     name always land atomically, which they don't. Kept as a
+--     CREATE OR REPLACE over the EXACT same signature/return shape PR 2
+--     (20260814170000, section 4) originally defined, so a deployed build
+--     still calling this name during a rollout-skew window (forward OR a
+--     rollback) keeps working — delegating to
+--     fn_claim_calendar_mutations_by_ops constrained to operation='create'
+--     rather than duplicating the claim SQL a second time. Remove in a
+--     later cleanup migration once rollout has fully landed and no
+--     deployed build still calls this name.
+-- ----------------------------------------------------------------------------
+create or replace function public.fn_claim_calendar_creations(p_limit integer)
+returns table (
+  ledger_id uuid,
+  org_id uuid,
+  calendar_chain_id uuid,
+  source_task_id uuid,
+  expected_generation integer,
+  client_event_id text,
+  attempts integer,
+  phase text,
+  new_event_id text,
+  result_reason text,
+  claim_token uuid,
+  task_due_at timestamptz,
+  task_end_at timestamptz,
+  task_title text,
+  task_assignee_id uuid
+)
+language sql
+security definer
+set search_path = public, pg_temp
+as $$
+  select
+    ledger_id, org_id, calendar_chain_id, source_task_id, expected_generation,
+    client_event_id, attempts, phase, new_event_id, result_reason, claim_token,
+    source_due_at as task_due_at, source_end_at as task_end_at,
+    source_title as task_title, source_assignee_id as task_assignee_id
+  from public.fn_claim_calendar_mutations_by_ops(p_limit, array['create']);
+$$;
+
+comment on function public.fn_claim_calendar_creations(integer) is
+  'Codex round 9 (finding 2) compatibility shim, kept for rollout skew: PR 2''s original claim RPC, no longer the primary implementation (superseded by fn_claim_calendar_mutations) but never dropped, so a deployed create-worker.ts build still calling this name keeps working. Delegates to fn_claim_calendar_mutations_by_ops constrained to operation=create, mapped back to the exact original 20260814170000 return shape (task_due_at/task_end_at/task_title/task_assignee_id, not source_*). Remove once rollout has fully landed and no deployed build still calls this name.';
+
+revoke all on function public.fn_claim_calendar_creations(integer) from public, anon, authenticated;
+grant execute on function public.fn_claim_calendar_creations(integer) to service_role;
 
 -- ----------------------------------------------------------------------------
 -- 6. fn_expire_exhausted_calendar_mutations — widened, renamed from PR 2's
@@ -814,7 +928,14 @@ grant execute on function public.fn_claim_calendar_mutations(integer) to service
 --    `*_stale_event` reason the worker introduces is covered without a
 --    follow-up migration. Underscore is a LIKE wildcard, hence the escape.
 -- ----------------------------------------------------------------------------
-create or replace function public.fn_expire_exhausted_calendar_mutations()
+-- Private: the actual exhaustion sweep, parameterized by which operations
+-- are eligible — same "single implementation, both RPC names delegate"
+-- structure as fn_claim_calendar_mutations_by_ops above, for the identical
+-- Codex round 9 (finding 2) rollout-skew reason. Not part of the public RPC
+-- surface: revoked the same as its callers.
+create or replace function public.fn_expire_exhausted_calendar_mutations_by_ops(
+  p_operations text[]
+)
 returns table (failed_count integer, needs_repair_count integer, needs_repair_ids uuid[])
 language plpgsql
 security definer
@@ -842,7 +963,7 @@ begin
           else 'retries_exhausted'
         end,
         updated_at = now()
-    where operation in ('create', 'reschedule', 'reassign', 'cancel')
+    where operation = any(p_operations)
       and phase in ('pending', 'provider_done')
       and phase <> 'finalized'
       and attempts >= 5
@@ -863,10 +984,52 @@ begin
 end;
 $$;
 
+revoke all on function public.fn_expire_exhausted_calendar_mutations_by_ops(text[]) from public, anon, authenticated;
+grant execute on function public.fn_expire_exhausted_calendar_mutations_by_ops(text[]) to service_role;
+
+create or replace function public.fn_expire_exhausted_calendar_mutations()
+returns table (failed_count integer, needs_repair_count integer, needs_repair_ids uuid[])
+language sql
+security definer
+set search_path = public, pg_temp
+as $$
+  select * from public.fn_expire_exhausted_calendar_mutations_by_ops(
+    array['create', 'reschedule', 'reassign', 'cancel']
+  );
+$$;
+
 comment on function public.fn_expire_exhausted_calendar_mutations() is
-  'PR 3 rename+widening of fn_expire_exhausted_calendar_creations to cover every ledger operation, not just create — a stuck reschedule/reassign/cancel row would otherwise hold its chain-serialization slot open forever with no exhaustion path at all. Same failed/needs_repair split and rationale as PR 2, PLUS (Codex round 1, finding 4): a still-pending row whose result_reason is a *_stale_event reason (a KNOWN Google event the worker could not reconcile before ever calling Google) also routes to needs_repair, not failed — freeing the chain slot over a genuinely unreconciled event would be wrong. Codex round 6, finding 1: matched via `like ''%_stale_event''` (naming convention) rather than an enumerated list, after calendar_client_error_stale_event was found missing from the original two-value enum and falling through to failed.';
+  'PR 3 rename+widening of fn_expire_exhausted_calendar_creations (kept, not dropped, as a compatibility shim — see fn_expire_exhausted_calendar_creations below) to cover every ledger operation, not just create — a stuck reschedule/reassign/cancel row would otherwise hold its chain-serialization slot open forever with no exhaustion path at all. Same failed/needs_repair split and rationale as PR 2, PLUS (Codex round 1, finding 4): a still-pending row whose result_reason is a *_stale_event reason (a KNOWN Google event the worker could not reconcile before ever calling Google) also routes to needs_repair, not failed — freeing the chain slot over a genuinely unreconciled event would be wrong. Codex round 6, finding 1: matched via `like ''%_stale_event''` (naming convention) rather than an enumerated list, after calendar_client_error_stale_event was found missing from the original two-value enum and falling through to failed. Codex round 9, finding 2: the actual UPDATE now lives in fn_expire_exhausted_calendar_mutations_by_ops, shared with the compatibility shim.';
 
 revoke all on function public.fn_expire_exhausted_calendar_mutations() from public, anon, authenticated;
 grant execute on function public.fn_expire_exhausted_calendar_mutations() to service_role;
+
+-- ----------------------------------------------------------------------------
+-- 6b. fn_expire_exhausted_calendar_creations — Codex round 9 (finding 2)
+--     compatibility shim. Same rationale/lifecycle as fn_claim_calendar_creations
+--     (5b above) — kept over PR 2's original signature/return shape, never
+--     dropped, delegating to fn_expire_exhausted_calendar_mutations_by_ops
+--     constrained to operation='create'. This DOES pick up the round 1/6
+--     stale-event needs_repair routing above for create rows — a strict
+--     improvement over PR 2's original create-only logic (routes a known,
+--     unreconciled Google event to needs_repair instead of wrongly freeing
+--     the chain slot as failed), not a behavior regression callers need to
+--     opt into, so there is no reason to fork the classification logic
+--     just to keep the shim "pure" PR 2 behavior.
+-- ----------------------------------------------------------------------------
+create or replace function public.fn_expire_exhausted_calendar_creations()
+returns table (failed_count integer, needs_repair_count integer, needs_repair_ids uuid[])
+language sql
+security definer
+set search_path = public, pg_temp
+as $$
+  select * from public.fn_expire_exhausted_calendar_mutations_by_ops(array['create']);
+$$;
+
+comment on function public.fn_expire_exhausted_calendar_creations() is
+  'Codex round 9 (finding 2) compatibility shim, kept for rollout skew: PR 2''s original exhaustion-sweep RPC, no longer the primary implementation (superseded by fn_expire_exhausted_calendar_mutations) but never dropped, so a deployed build still calling this name keeps working. Delegates to fn_expire_exhausted_calendar_mutations_by_ops constrained to operation=create, same return shape as PR 2''s 20260814170000 original. Remove once rollout has fully landed and no deployed build still calls this name.';
+
+revoke all on function public.fn_expire_exhausted_calendar_creations() from public, anon, authenticated;
+grant execute on function public.fn_expire_exhausted_calendar_creations() to service_role;
 
 commit;

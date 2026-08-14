@@ -41,9 +41,22 @@ export class SendilloMessagingProvider implements MessagingProvider {
    * ONLY: aborting a fetch mid-flight doesn't tell us whether Sendillo's
    * server had already received the request before the abort landed (the
    * standard fetch API surface here has no hook for "was the body fully
-   * flushed"), so an abort still throws the same `ProviderError` as any
-   * other network failure — callers must NOT treat it as a confirmed
-   * non-delivery, only as "we stopped waiting."
+   * flushed"), so an abort still throws a `ProviderError` — never a raw
+   * `AbortError` — as any other network failure would. Callers must NOT
+   * treat it as a confirmed non-delivery, only as "we stopped waiting."
+   *
+   * Codex round 9 (finding 1): EITHER trigger — this method's own internal
+   * `DEFAULT_SEND_TIMEOUT_MS` timer, or the caller's external `opts.signal`
+   * — aborts the SAME `controller`, so both land in the catch block below
+   * indistinguishably from each other (and, before this round, from a
+   * genuine network failure). The re-thrown `ProviderError` now carries
+   * `details.isAbort = true` whenever the underlying rejection was an
+   * `AbortError`, regardless of which of the two triggered it — a caller
+   * has no way to tell "my deadline fired" from "the provider's own 10s
+   * timer fired while my deadline was still live" from outside this
+   * method, and both are equally non-evidence of delivery, so both must be
+   * classified identically (see `sendRepSmsReminder` in rep-sms.ts, which
+   * reads this flag to map either case to `aborted_ambiguous`).
    */
   async sendSms(
     input: SmsOutboundInput,
@@ -71,9 +84,18 @@ export class SendilloMessagingProvider implements MessagingProvider {
         signal: controller.signal,
       });
     } catch (e) {
+      // Codex round 9 (finding 1): preserve abort provenance. `e.name` is
+      // "AbortError" whether THIS method's own internal timeout fired or
+      // the caller's `opts.signal` fired (both abort the same
+      // `controller`) — either way the fetch was torn down, not rejected
+      // by Sendillo, so it is not evidence of non-delivery. `details` is
+      // the one channel `ProviderError` already exposes for exactly this
+      // kind of caller-facing classification (see errors/classes.ts).
+      const isAbort = e instanceof Error && e.name === "AbortError";
       throw new ProviderError(
         e instanceof Error ? e.message : String(e),
         "sendillo",
+        isAbort ? { isAbort: true } : undefined,
       );
     } finally {
       clearTimeout(timeout);

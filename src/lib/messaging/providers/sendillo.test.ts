@@ -119,6 +119,56 @@ describe("SendilloMessagingProvider.sendSms", () => {
       provider.sendSms({ to: "+18165551234", body: "hello there" }),
     ).rejects.toBeInstanceOf(ProviderError);
   });
+
+  // Codex round 9 (finding 1): the internal DEFAULT_SEND_TIMEOUT_MS timer
+  // aborts the SAME controller as an external opts.signal — no caller
+  // signal is passed at all here, so this proves the internal timer alone
+  // produces a ProviderError with abort provenance preserved.
+  it("marks details.isAbort on the thrown ProviderError when its own internal send timeout fires (no external signal)", async () => {
+    vi.useFakeTimers();
+    (global.fetch as ReturnType<typeof vi.fn>).mockImplementation(
+      (_url: string, init?: RequestInit) =>
+        new Promise((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => {
+            const abortError = new Error("This operation was aborted");
+            abortError.name = "AbortError";
+            reject(abortError);
+          });
+        }),
+    );
+    const provider = new SendilloMessagingProvider(
+      "sendillo-test-key",
+      "+18165550000",
+    );
+
+    const pending = provider.sendSms({ to: "+18165551234", body: "hello there" });
+    const assertion = expect(pending).rejects.toMatchObject({
+      errorClass: "provider",
+      provider: "sendillo",
+      details: expect.objectContaining({ isAbort: true }),
+    });
+    await vi.advanceTimersByTimeAsync(10_000);
+    await assertion;
+    vi.useRealTimers();
+  });
+
+  it("does not mark details.isAbort for an ordinary (non-abort) network failure", async () => {
+    (global.fetch as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new Error("getaddrinfo ENOTFOUND www.sendillo.com"),
+    );
+    const provider = new SendilloMessagingProvider(
+      "sendillo-test-key",
+      "+18165550000",
+    );
+
+    await expect(
+      provider.sendSms({ to: "+18165551234", body: "hello there" }),
+    ).rejects.toMatchObject({
+      errorClass: "provider",
+      provider: "sendillo",
+      details: undefined,
+    });
+  });
 });
 
 describe("SendilloMessagingProvider inbound contract", () => {
