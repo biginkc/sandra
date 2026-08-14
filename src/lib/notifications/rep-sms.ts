@@ -1,5 +1,6 @@
 import { ProviderError } from "@/lib/errors/classes";
 import { reportError } from "@/lib/errors/report";
+import { normalizeSenderNumber } from "@/lib/messaging/delivery";
 import { SendilloMessagingProvider } from "@/lib/messaging/providers/sendillo";
 
 /**
@@ -100,7 +101,16 @@ async function purchasedNumberCatalog(
   }
   const provider = new SendilloMessagingProvider(apiKey, fromNumber);
   const list = await provider.listPurchasedNumbers();
-  const numbers = new Set(list.map((entry) => entry.phoneE164));
+  // Sendillo's purchased-number catalog returns bare NANP digits
+  // ("18162939379"), not E.164 — the campaign catalog sync already runs
+  // every entry through normalizeSenderNumber for exactly this reason
+  // (delivery.ts). Without it the set-membership test below compared
+  // "+1816..." against "1816..." and the preflight failed closed on a
+  // number the account genuinely owns (caught live: first prod SMS
+  // reminder failed with "not in Sendillo's purchased-number catalog").
+  const numbers = new Set(
+    list.map((entry) => normalizeSenderNumber(entry.phoneE164)),
+  );
   catalogCache = { fromNumber, numbers, fetchedAt: now };
   return numbers;
 }
@@ -136,7 +146,7 @@ export async function checkRepSmsFromNumberReady(): Promise<RepSmsReadyResult> {
     };
   }
 
-  if (!numbers.has(env.fromNumber)) {
+  if (!numbers.has(normalizeSenderNumber(env.fromNumber))) {
     return {
       ready: false,
       reason: "number_not_in_catalog",
