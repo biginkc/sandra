@@ -32,6 +32,7 @@ function claimedRow(
     new_event_id: null,
     client_event_id: "evtclient1",
     result_reason: null,
+    old_event_deleted_at: null,
     expected_generation: 0,
     attempts: 1,
     claim_token: `token-${id}`,

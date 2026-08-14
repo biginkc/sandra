@@ -2,20 +2,38 @@
 -- Sandra Appointments — PR 3: reminder claim + retry RPCs
 --
 -- Two service-role-only functions:
---   - fn_claim_appointment_reminders(): the primary 30-minute-window sweep.
---     Takes NO time params — now() is derived internally so the window
---     [now(), now()+30m] (both bounds) is fixed inside the function, not
---     supplied by (and therefore not spoofable by) the caller. Single
---     statement, chained writable CTEs: locks open, unclaimed appointments
---     due in the window (FOR UPDATE SKIP LOCKED, active-assignee-membership
---     gated), stamps reminder_claimed_at, then inserts one
---     task_reminder_deliveries row per enabled channel (bell always; slack
---     when the assignee's slack pref is enabled; sms when sms_reminder is
---     enabled AND a reminder_phone is on file) with ON CONFLICT DO NOTHING
---     against the (task_id, channel) unique constraint (20260814150000).
---     Returns the freshly-inserted delivery rows joined with task +
---     assignee context so the sweep route can deliver without a second
---     round trip.
+--   - fn_claim_appointment_reminders(p_limit): the primary 30-minute-window
+--     sweep. now() is derived internally so the window [now(), now()+30m]
+--     (both bounds) is fixed inside the function, not supplied by (and
+--     therefore not spoofable by) the caller — only the claim SIZE is a
+--     caller param. Single statement, chained writable CTEs: locks up to
+--     `p_limit` open, unclaimed appointments due in the window (FOR UPDATE
+--     SKIP LOCKED, active-assignee-membership gated, oldest due_at first),
+--     stamps reminder_claimed_at, then inserts one task_reminder_deliveries
+--     row per enabled channel (bell always; slack when the assignee's slack
+--     pref is enabled; sms when sms_reminder is enabled AND a
+--     reminder_phone is on file) with ON CONFLICT DO NOTHING against the
+--     (task_id, channel) unique constraint (20260814150000). Returns the
+--     freshly-inserted delivery rows joined with task + assignee context so
+--     the sweep route can deliver without a second round trip.
+--
+--     Codex round 3 (finding 1): `p_limit` was added because the original
+--     no-arg version claimed EVERY appointment due in the window in one
+--     unbounded call — stamping reminder_claimed_at (never revisited by
+--     this function again) and inserting leased delivery rows for all of
+--     them regardless of whether the sweep route had budget left to
+--     process them. A burst of many appointments due in the same window
+--     could out-claim the route's 45s budget, leaving delivery rows sitting
+--     leased-but-pending until the retry claim's 10-minute stale-pending
+--     threshold picked them up — nothing lost, but ownership was taken well
+--     before the worker was actually about to act on it. Mirroring
+--     calendar-mutation-sweep's solved pattern: the route now calls this
+--     with p_limit=1 in a budget-checked loop, one appointment at a time,
+--     so a claim only happens immediately before that appointment's
+--     deliveries are attempted — an appointment the budget runs out before
+--     reaching is simply left UNCLAIMED (reminder_claimed_at still null)
+--     for the next sweep, which starts within 5 minutes, comfortably inside
+--     the 30-minute window.
 --   - fn_claim_reminder_retries(p_limit): the crash-safety complement.
 --     Reads task_reminder_deliveries directly for rows that need another
 --     attempt — status='failed' AND attempts<3, OR status='pending' older
@@ -55,9 +73,9 @@ begin;
 -- clobbering the new owner). 'suppressed' is the terminal status
 -- fn_claim_reminder_retries transitions a retry candidate to when its
 -- revalidation (active membership / channel still enabled / appointment
--- still open with due_at still future) fails — the delivery is never
--- retried again (out of the failed/pending eligibility window) and never
--- silently sent.
+-- still open with due_at within a 15-minute grace of due, per Codex round
+-- 3 finding 1) fails — the delivery is never retried again (out of the
+-- failed/pending eligibility window) and never silently sent.
 -- ----------------------------------------------------------------------------
 alter table public.task_reminder_deliveries
   add column claim_token uuid,
@@ -81,7 +99,7 @@ comment on constraint task_reminder_deliveries_status_check on public.task_remin
 -- ----------------------------------------------------------------------------
 -- 1. fn_claim_appointment_reminders — primary window claim
 -- ----------------------------------------------------------------------------
-create or replace function public.fn_claim_appointment_reminders()
+create or replace function public.fn_claim_appointment_reminders(p_limit integer default 1)
 returns table (
   delivery_id uuid,
   task_id uuid,
@@ -135,6 +153,7 @@ begin
       )
     order by t.due_at
     for update skip locked
+    limit greatest(p_limit, 0)
   ),
   claimed as (
     update public.tasks t
@@ -217,11 +236,11 @@ begin
 end;
 $$;
 
-comment on function public.fn_claim_appointment_reminders() is
-  'Service-role-only reminder sweep. Derives now() internally (window [now(), now()+30m], both bounds — no late reminders for overdue appointments); FOR UPDATE SKIP LOCKED over open, unclaimed appointments whose assignee has active org membership; stamps reminder_claimed_at (via the sandra.allow_appointment_time_move flag, set_config transaction-local) and inserts one task_reminder_deliveries row per enabled channel (bell always, slack/sms per prefs) with ON CONFLICT DO NOTHING, minting a fresh claim_token and a 2-minute lease (next_attempt_at) on every inserted row (Codex round 2) — same fencing model as fn_claim_reminder_retries, from the first attempt. Returns the freshly-inserted delivery rows (claim_token + claimed_status=pending included) joined with task+assignee context.';
+comment on function public.fn_claim_appointment_reminders(integer) is
+  'Service-role-only reminder sweep. Derives now() internally (window [now(), now()+30m], both bounds — no late reminders for overdue appointments); FOR UPDATE SKIP LOCKED over open, unclaimed appointments whose assignee has active org membership, oldest due_at first, capped at p_limit (Codex round 3, finding 1 — callers claim one appointment at a time inside a budget loop, same pattern as fn_claim_calendar_mutations, so an appointment the sweep has no budget left to process is simply never claimed rather than claimed-but-undelivered); stamps reminder_claimed_at (via the sandra.allow_appointment_time_move flag, set_config transaction-local) and inserts one task_reminder_deliveries row per enabled channel (bell always, slack/sms per prefs) with ON CONFLICT DO NOTHING, minting a fresh claim_token and a 2-minute lease (next_attempt_at) on every inserted row (Codex round 2) — same fencing model as fn_claim_reminder_retries, from the first attempt. Returns the freshly-inserted delivery rows (claim_token + claimed_status=pending included) joined with task+assignee context.';
 
-revoke all on function public.fn_claim_appointment_reminders() from public, anon, authenticated;
-grant execute on function public.fn_claim_appointment_reminders() to service_role;
+revoke all on function public.fn_claim_appointment_reminders(integer) from public, anon, authenticated;
+grant execute on function public.fn_claim_appointment_reminders(integer) to service_role;
 
 -- ----------------------------------------------------------------------------
 -- 2. fn_claim_reminder_retries — atomic claim + lease/fencing + revalidation
@@ -245,11 +264,29 @@ grant execute on function public.fn_claim_appointment_reminders() to service_rol
 --      still has ACTIVE org membership, the channel is still enabled
 --      (bell is always fine; slack checks the slack pref; sms checks
 --      sms_reminder enabled AND a phone still on file), and the
---      appointment is still open with due_at still in the future. A row
---      that fails ANY of these is transitioned to the terminal
---      'suppressed' status (with last_error recording why) instead of
---      being handed to the worker for delivery or left to be reclaimed
---      forever.
+--      appointment is still open with due_at still within a 15-minute
+--      GRACE window past the original due time (Codex round 3, finding 1's
+--      compounding hazard — see below). A row that fails ANY of these is
+--      transitioned to the terminal 'suppressed' status (with last_error
+--      recording why) instead of being handed to the worker for delivery
+--      or left to be reclaimed forever.
+--
+--      Grace window rationale: fn_claim_appointment_reminders (Codex round
+--      3, finding 1) now claims one appointment at a time inside a
+--      budget-checked loop, so a near-due appointment can be claimed with
+--      only seconds left before due_at. If that delivery isn't processed
+--      before the sweep's budget runs out, it sits status='pending' and
+--      isn't retry-eligible until the stale-pending threshold
+--      (created_at < now() - 10 minutes) — by which point the strict
+--      `due_at > now()` check this revalidation used to run would ALREADY
+--      be false, suppressing a delivery that was claimed on time and
+--      simply hadn't been sent yet. That's a real compounding hazard: the
+--      very mechanism that makes overflow claims cheap (claim right before
+--      processing) would otherwise turn every near-due overflow into a
+--      guaranteed suppression at the very next retry pass. 15 minutes
+--      covers the worst case (claimed the instant due_at arrives, first
+--      retry-eligible 10 minutes later) with headroom for sweep-interval
+--      jitter, while still bounding how late a reminder can ever go out.
 --   3. Fencing metadata returned to the caller: claim_token (the fresh
 --      token this claim minted) and claimed_status (the row's status as
 --      of just before this claim — 'pending' or 'failed', unchanged by a
@@ -352,7 +389,11 @@ as $$
       (
         r.assignee_active
         and r.task_status = 'open'
-        and r.due_at > now()
+        -- Codex round 3 (finding 1): 15-minute grace past due_at, not a
+        -- strict `> now()` — see the function-level comment above for why
+        -- a bare due_at check would suppress an overflow row the very
+        -- first time it's retried.
+        and r.due_at > now() - interval '15 minutes'
         and r.channel_still_enabled
       ) as still_valid
     from revalidated r
@@ -370,7 +411,11 @@ as $$
           case
             when not e.assignee_active then 'assignee_inactive'
             when e.task_status <> 'open' then 'appointment_not_open'
-            when e.due_at <= now() then 'appointment_due_passed'
+            -- Codex round 3 (finding 1): matches still_valid's grace window
+            -- above — a due_at within the last 15 minutes is NOT this
+            -- branch (still_valid would be true), so reaching here means
+            -- due_at is genuinely more than 15 minutes stale.
+            when e.due_at <= now() - interval '15 minutes' then 'appointment_due_passed'
             else 'channel_disabled'
           end
         )
@@ -392,7 +437,7 @@ as $$
 $$;
 
 comment on function public.fn_claim_reminder_retries(integer) is
-  'Service-role-only atomic retry claim (Codex round 1 rewrite). UPDATE ... FROM (SELECT ... FOR UPDATE SKIP LOCKED) over task_reminder_deliveries WHERE (status=failed OR status=pending-stale-10min) AND attempts<3 AND lease-eligible; still-valid rows get attempts+1, a fresh claim_token, and a 2-minute lease (next_attempt_at) — same fencing model as task_calendar_mutations. Inside the SAME locked selection, re-validates assignee active membership, channel still enabled, and appointment still open with due_at still future; a row failing any check is transitioned to terminal status=suppressed (last_error records why) and is NOT returned. Returns claim_token + claimed_status (pre-claim status) so the worker''s completion write can be scoped WHERE id=<mine> AND claim_token=<mine> AND status=<claimed_status> with one-row verification.';
+  'Service-role-only atomic retry claim (Codex round 1 rewrite). UPDATE ... FROM (SELECT ... FOR UPDATE SKIP LOCKED) over task_reminder_deliveries WHERE (status=failed OR status=pending-stale-10min) AND attempts<3 AND lease-eligible; still-valid rows get attempts+1, a fresh claim_token, and a 2-minute lease (next_attempt_at) — same fencing model as task_calendar_mutations. Inside the SAME locked selection, re-validates assignee active membership, channel still enabled, and appointment still open with due_at still within a 15-minute grace past due (Codex round 3, finding 1 — widened from a strict due_at>now() so a near-due appointment claimed by fn_claim_appointment_reminders''s one-at-a-time overflow behavior is not suppressed by its own first retry pass); a row failing any check is transitioned to terminal status=suppressed (last_error records why) and is NOT returned. Returns claim_token + claimed_status (pre-claim status) so the worker''s completion write can be scoped WHERE id=<mine> AND claim_token=<mine> AND status=<claimed_status> with one-row verification.';
 
 revoke all on function public.fn_claim_reminder_retries(integer) from public, anon, authenticated;
 grant execute on function public.fn_claim_reminder_retries(integer) to service_role;

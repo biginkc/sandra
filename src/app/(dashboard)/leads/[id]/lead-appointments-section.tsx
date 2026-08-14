@@ -16,14 +16,25 @@ export type LeadAppointmentRow = {
 
 type Props = {
   appointments: LeadAppointmentRow[];
+  /** Zone to render due/end times in — the viewer's own saved timezone
+   *  (same `user_integration_prefs.timezone` source TasksPanel's
+   *  `fetchMyTasks` reads, loaded via `loadIntegrationPrefs` and passed
+   *  down by the lead page). Without an explicit `timeZone`,
+   *  `Intl.DateTimeFormat` falls back to the runtime's device/OS zone,
+   *  which silently disagrees with the viewer's saved preference whenever
+   *  they differ (e.g. a rep traveling, or a server render in a different
+   *  region than the viewer). */
+  timezone: string;
 };
 
-function formatTimeRange(dueAt: string, endAt: string | null): string {
+function formatTimeRange(dueAt: string, endAt: string | null, timeZone: string): string {
   const fmt = new Intl.DateTimeFormat("en-US", {
+    timeZone,
     hour: "numeric",
     minute: "2-digit",
   });
   const dateFmt = new Intl.DateTimeFormat("en-US", {
+    timeZone,
     month: "short",
     day: "numeric",
   });
@@ -41,7 +52,7 @@ function formatTimeRange(dueAt: string, endAt: string | null): string {
  * appointments aren't necessarily all owned by the viewer), so the
  * assignee id comes from the row, not the session user.
  */
-export function LeadAppointmentsSection({ appointments }: Props) {
+export function LeadAppointmentsSection({ appointments, timezone }: Props) {
   if (appointments.length === 0) {
     return (
       <div
@@ -70,7 +81,7 @@ export function LeadAppointmentsSection({ appointments }: Props) {
                 {appt.title}
               </div>
               <div className="text-muted-foreground truncate text-xs font-medium">
-                {formatTimeRange(appt.due_at, appt.end_at)}
+                {formatTimeRange(appt.due_at, appt.end_at, timezone)}
               </div>
             </div>
             {isPastDue ? (

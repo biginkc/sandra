@@ -9,6 +9,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
+import { loadIntegrationPrefs } from "@/lib/integrations/prefs";
 import { selectBestSmsPhone } from "@/lib/messaging/sms-phone";
 import { zillowUrl } from "@/lib/utils/zillow-url";
 
@@ -144,6 +145,16 @@ export default async function LeadDetailPage({
   const {
     data: { user: sessionUser },
   } = await supabase.auth.getUser();
+
+  // Viewer's own saved timezone (same user_integration_prefs.timezone
+  // source TasksPanel's fetchMyTasks reads) — LeadAppointmentsSection
+  // needs this to format appointment times without silently falling back
+  // to the render environment's device zone (loadIntegrationPrefs already
+  // falls back to "America/Chicago" when unset).
+  const viewerPrefs = sessionUser
+    ? await loadIntegrationPrefs(supabase, sessionUser.id)
+    : null;
+  const viewerTimezone = viewerPrefs?.timezone ?? "America/Chicago";
 
   // Fetch existing SMS thread — messages linked either to the property
   // directly or to the homeowner (catches inbound that lands pre-linkage).
@@ -521,7 +532,10 @@ export default async function LeadDetailPage({
         </Section>
 
         <Section title="Appointments">
-          <LeadAppointmentsSection appointments={initialAppointments} />
+          <LeadAppointmentsSection
+            appointments={initialAppointments}
+            timezone={viewerTimezone}
+          />
         </Section>
 
         <Section title="Address quality (USPS)">

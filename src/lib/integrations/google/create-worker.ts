@@ -58,6 +58,24 @@ export type ClaimedCalendarMutationRow = {
   new_event_id: string | null;
   client_event_id: string | null;
   result_reason: string | null;
+  /** Codex round 3 fix (finding 2): reassign-only delete-progress marker,
+   *  persisted independently of `result_reason`. Before this column
+   *  existed, the reassign handler read `result_reason ===
+   *  "old_event_deleted"` to decide whether the old-account delete had
+   *  already happened — but `result_reason` is also the field every
+   *  OTHER failure path (markStaleEventRetryable, markRetryableFailure,
+   *  markPermanentFailure) overwrites with its own reason. A crash
+   *  sequence of delete-succeeds -> new-token-missing (stale reason
+   *  recorded) would clobber "old_event_deleted" with
+   *  "no_token_stale_event", so the next retry re-read `result_reason`,
+   *  saw a mismatch, and attempted to re-delete an event that was
+   *  already gone (against a possibly-now-revoked old token). Non-null
+   *  here is the sole, durable signal that the old-account delete step
+   *  is done — set once, at the point of that success, never touched by
+   *  any later failure write. NULL for every non-reassign operation and
+   *  for a reassign that hasn't reached (or never needs) the delete
+   *  step. */
+  old_event_deleted_at: string | null;
   expected_generation: number;
   attempts: number;
   /** Round 7 fencing token: minted fresh by the claim RPC on every
@@ -149,6 +167,9 @@ type LedgerLeaseUpdateClient = {
       phase?: string;
       new_event_id?: string;
       result_reason?: string;
+      /** Codex round 3 fix (finding 2) — see ClaimedCalendarMutationRow's
+       *  doc comment. */
+      old_event_deleted_at?: string;
       last_error?: string;
       next_attempt_at?: string;
       updated_at?: string;
@@ -183,6 +204,9 @@ async function applyLedgerTransition(
     phase?: string;
     new_event_id?: string;
     result_reason?: string;
+    /** Codex round 3 fix (finding 2) — see ClaimedCalendarMutationRow's
+     *  doc comment. */
+    old_event_deleted_at?: string;
     last_error?: string;
     next_attempt_at?: string;
     updated_at?: string;
@@ -1429,7 +1453,19 @@ async function processClaimedReassign(
   // time here — 'provider_done' is reserved for "new event created" (see the
   // branch at the top of this function) — so this has to be a separate,
   // persisted signal rather than reusing the phase enum.
-  const oldEventAlreadyDeleted = claimed.result_reason === "old_event_deleted";
+  //
+  // Codex round 3 fix (finding 2): that signal is `old_event_deleted_at`
+  // (non-null), NOT `result_reason` — round 2's original implementation
+  // read `result_reason === "old_event_deleted"`, but result_reason is the
+  // same field every downstream failure write (markStaleEventRetryable
+  // below included) overwrites with its own reason. A crash sequence of
+  // delete-succeeds -> new-token-missing would clobber "old_event_deleted"
+  // with "no_token_stale_event", making the next retry think the delete
+  // never happened and attempt to re-delete under the (possibly now
+  // revoked) old token. `old_event_deleted_at` is written once, at the
+  // point the delete step durably succeeds (below), and no other write in
+  // this function ever touches it.
+  const oldEventAlreadyDeleted = claimed.old_event_deleted_at !== null;
 
   try {
     // Delete under the OLD account first. No client_event_id needed for a
@@ -1502,8 +1538,16 @@ async function processClaimedReassign(
       }
       if (!renewedAfterDelete.applied) return { status: "lease_lost", ledgerId };
 
+      // Codex round 3 fix (finding 2): `old_event_deleted_at` is the
+      // durable, never-overwritten delete-progress marker `oldEventAlreadyDeleted`
+      // reads above — result_reason is still stamped "old_event_deleted"
+      // here too (it stays useful as the last-transition label for
+      // observability) but no longer anything this function relies on to
+      // decide whether the delete already happened; every later failure
+      // write is free to overwrite it with its own reason.
       const deletePersisted = await applyLedgerTransition(supabase, ledgerId, claimToken, "pending", {
         result_reason: "old_event_deleted",
+        old_event_deleted_at: nowIso(),
         updated_at: nowIso(),
       });
       if (deletePersisted.error) {

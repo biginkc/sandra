@@ -504,6 +504,32 @@ create unique index idx_task_calendar_mutations_reassign_idem
   where operation = 'reassign' and reassign_idempotency_key is not null;
 
 -- ----------------------------------------------------------------------------
+-- 3c. task_calendar_mutations — old_event_deleted_at (Codex round 3,
+--     finding 2)
+--
+-- Reassign-only delete-progress marker, written by create-worker.ts
+-- (never by any RPC here) independently of `result_reason`. Before this
+-- column existed, the reassign handler detected "the old-account delete
+-- already happened" by reading `result_reason = 'old_event_deleted'` — but
+-- result_reason is the SAME field every other failure path on this row
+-- (markStaleEventRetryable, markRetryableFailure, markPermanentFailure)
+-- overwrites with its own reason. A crash sequence of delete-succeeds ->
+-- new-token-missing (stale reason recorded) would clobber
+-- 'old_event_deleted' with 'no_token_stale_event', so the next retry read
+-- result_reason, saw no match, and attempted to re-delete an event that
+-- was already gone — against a possibly-now-revoked old-assignee token.
+-- Non-null here is now the sole, durable signal that the delete step is
+-- done: set once, at the point of that success, and never touched by any
+-- later failure write. NULL for every non-reassign operation and for a
+-- reassign that hasn't reached (or never needs) the delete step.
+-- ----------------------------------------------------------------------------
+alter table public.task_calendar_mutations
+  add column old_event_deleted_at timestamptz;
+
+comment on column public.task_calendar_mutations.old_event_deleted_at is
+  'Codex round 3 (finding 2): reassign-only delete-progress marker, independent of result_reason. Written once by create-worker.ts (processClaimedReassign) the instant the old-account Google event delete durably succeeds; never overwritten by any later failure write on this row (unlike result_reason, which every failure path reuses). Non-null is the sole signal that a resumed reassign should skip straight to the create-under-new-assignee step instead of re-deleting.';
+
+-- ----------------------------------------------------------------------------
 -- 4. fn_reassign_appointment — swaps assignee under the flag
 --
 -- Codex round 1 (finding 5) rewrite: p_idempotency_key is now PERSISTED
@@ -701,6 +727,7 @@ returns table (
   new_event_id text,
   client_event_id text,
   result_reason text,
+  old_event_deleted_at timestamptz,
   expected_generation integer,
   attempts integer,
   claim_token uuid,
@@ -738,13 +765,14 @@ as $$
     returning
       m.id, m.org_id, m.calendar_chain_id, m.operation, m.phase, m.source_task_id,
       m.target_task_id, m.old_assignee_id, m.new_assignee_id, m.event_id, m.new_event_id,
-      m.client_event_id, m.result_reason, m.expected_generation, m.attempts, m.claim_token
+      m.client_event_id, m.result_reason, m.old_event_deleted_at, m.expected_generation,
+      m.attempts, m.claim_token
   )
   select
     claimed.id, claimed.org_id, claimed.calendar_chain_id, claimed.operation, claimed.phase,
     claimed.source_task_id, claimed.target_task_id, claimed.old_assignee_id, claimed.new_assignee_id,
     claimed.event_id, claimed.new_event_id, claimed.client_event_id, claimed.result_reason,
-    claimed.expected_generation, claimed.attempts, claimed.claim_token,
+    claimed.old_event_deleted_at, claimed.expected_generation, claimed.attempts, claimed.claim_token,
     src.due_at, src.end_at, src.title, src.assignee_id,
     tgt.due_at, tgt.end_at, tgt.title, tgt.assignee_id
   from claimed

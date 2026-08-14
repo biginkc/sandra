@@ -105,6 +105,7 @@ const BASE_CLAIMED: ClaimedCalendarMutationRow = {
   attempts: 1,
   new_event_id: null,
   result_reason: null,
+  old_event_deleted_at: null,
   claim_token: "token-1",
   source_due_at: "2026-09-01T15:00:00.000Z",
   source_end_at: "2026-09-01T15:30:00.000Z",
@@ -746,8 +747,9 @@ describe("processClaimedReassign (via processClaimedCalendarMutation)", () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
     } as any);
     const supabase = fakeSupabase({
-      // 1: renewLease after delete, 2: persist result_reason='old_event_deleted',
-      // 3: renewLease after create, 4: phase->provider_done, 5: finalize.
+      // 1: renewLease after delete, 2: persist old_event_deleted_at
+      // (+ result_reason='old_event_deleted'), 3: renewLease after create,
+      // 4: phase->provider_done, 5: finalize.
       task_calendar_mutations: [
         ledgerWrite(),
         ledgerWrite(),
@@ -801,7 +803,7 @@ describe("processClaimedReassign (via processClaimedCalendarMutation)", () => {
       .mockResolvedValueOnce(FAKE_TOKEN) // old-account delete
       .mockResolvedValueOnce(null); // new-account create
     const supabase = fakeSupabase({
-      // 1: renewLease after delete, 2: persist old_event_deleted,
+      // 1: renewLease after delete, 2: persist old_event_deleted_at,
       // 3: markStaleEventRetryable's write.
       task_calendar_mutations: [ledgerWrite(), ledgerWrite(), ledgerWrite()],
     });
@@ -830,7 +832,7 @@ describe("processClaimedReassign (via processClaimedCalendarMutation)", () => {
       reminderPhone: null,
     });
     const supabase = fakeSupabase({
-      // 1: renewLease after delete, 2: persist old_event_deleted,
+      // 1: renewLease after delete, 2: persist old_event_deleted_at,
       // 3: markStaleEventRetryable's write.
       task_calendar_mutations: [ledgerWrite(), ledgerWrite(), ledgerWrite()],
     });
@@ -908,7 +910,7 @@ describe("processClaimedReassign (via processClaimedCalendarMutation)", () => {
       expect(outcome.status).toBe("retryable_error");
     });
 
-    it("crash-between-delete-and-create recovery: a resumed row (result_reason='old_event_deleted', still phase='pending') skips straight to create — no re-delete, no duplicate event", async () => {
+    it("crash-between-delete-and-create recovery: a resumed row (old_event_deleted_at set, still phase='pending') skips straight to create — no re-delete, no duplicate event", async () => {
       const del = vi.fn();
       const insert = vi.fn().mockResolvedValue({ data: { id: "evt-new-resumed" } });
       vi.mocked(buildCalendarClient).mockReturnValue({
@@ -926,12 +928,59 @@ describe("processClaimedReassign (via processClaimedCalendarMutation)", () => {
 
       const outcome = await processClaimedCalendarMutation(supabase, {
         ...REASSIGN_CLAIMED,
-        result_reason: "old_event_deleted",
+        old_event_deleted_at: "2026-01-01T00:00:00.000Z",
       });
 
       expect(del).not.toHaveBeenCalled();
       // Only the new-account token lookup — no old-account lookup, since
       // the delete step (and its token fetch) is skipped entirely on resume.
+      expect(vi.mocked(getDecryptedToken).mock.calls.length).toBe(getDecryptedTokenCallsBefore + 1);
+      expect(insert).toHaveBeenCalledWith({
+        calendarId: "primary",
+        requestBody: expect.objectContaining({ id: "evtclient-reassign" }),
+      });
+      expect(outcome).toEqual({
+        status: "reassigned",
+        ledgerId: "ledger-1",
+        eventId: "evt-new-resumed",
+      });
+    });
+
+    it("Codex round 3 fix (finding 2): delete-progress is read from old_event_deleted_at, not result_reason — a retry survives result_reason being overwritten by an intervening stale-token failure, and never re-fetches the (now-revoked) old token", async () => {
+      const del = vi.fn();
+      const insert = vi.fn().mockResolvedValue({ data: { id: "evt-new-resumed" } });
+      vi.mocked(buildCalendarClient).mockReturnValue({
+        events: { delete: del, insert, get: vi.fn() },
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } as any);
+      // Only ONE token lookup is expected to happen — the new assignee's,
+      // for the create step. If the pre-fix bug were still present, the
+      // worker would also fetch the OLD assignee's token to re-attempt the
+      // delete; mocking a single resolved value here means that second
+      // lookup (if it happened) would get `undefined`, surfacing as a
+      // failure the assertions below catch.
+      vi.mocked(getDecryptedToken).mockResolvedValueOnce(FAKE_TOKEN);
+      const supabase = fakeSupabase({
+        // renewLease after create, phase->provider_done, finalize — no
+        // delete-related writes, proving the delete branch never runs.
+        task_calendar_mutations: [ledgerWrite(), ledgerWrite(), ledgerWrite()],
+        tasks: [{ data: { id: "task-1" }, error: null }],
+      });
+      const getDecryptedTokenCallsBefore = vi.mocked(getDecryptedToken).mock.calls.length;
+
+      const outcome = await processClaimedCalendarMutation(supabase, {
+        ...REASSIGN_CLAIMED,
+        // The old-account delete succeeded and was durably persisted on an
+        // earlier pass...
+        old_event_deleted_at: "2026-01-01T00:00:00.000Z",
+        // ...but a LATER pass's new-token-missing failure overwrote
+        // result_reason with its own reason — clobbering the
+        // "old_event_deleted" label the pre-fix code relied on to detect
+        // delete-progress.
+        result_reason: "no_token_stale_event",
+      });
+
+      expect(del).not.toHaveBeenCalled();
       expect(vi.mocked(getDecryptedToken).mock.calls.length).toBe(getDecryptedTokenCallsBefore + 1);
       expect(insert).toHaveBeenCalledWith({
         calendarId: "primary",

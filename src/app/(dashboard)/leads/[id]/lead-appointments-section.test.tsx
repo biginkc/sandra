@@ -1,5 +1,5 @@
 import { render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   LeadAppointmentsSection,
@@ -45,9 +45,11 @@ function makeRow(overrides: Partial<LeadAppointmentRow> & { id: string }): LeadA
   };
 }
 
+const TZ = "America/Chicago";
+
 describe("<LeadAppointmentsSection />", () => {
   it("renders an empty state when the lead has no open appointments", () => {
-    render(<LeadAppointmentsSection appointments={[]} />);
+    render(<LeadAppointmentsSection appointments={[]} timezone={TZ} />);
 
     expect(screen.getByTestId("lead-appointments-empty")).toHaveTextContent(
       "No open appointments",
@@ -62,6 +64,7 @@ describe("<LeadAppointmentsSection />", () => {
         appointments={[
           makeRow({ id: "appt-1", due_at: yesterday, assignee_id: "user-2" }),
         ]}
+        timezone={TZ}
       />,
     );
 
@@ -80,6 +83,7 @@ describe("<LeadAppointmentsSection />", () => {
         appointments={[
           makeRow({ id: "appt-2", due_at: tomorrow, assignee_id: "user-3" }),
         ]}
+        timezone={TZ}
       />,
     );
 
@@ -107,6 +111,7 @@ describe("<LeadAppointmentsSection />", () => {
             due_at: new Date(now + 60 * 60 * 1000).toISOString(),
           }),
         ]}
+        timezone={TZ}
       />,
     );
 
@@ -115,5 +120,38 @@ describe("<LeadAppointmentsSection />", () => {
     expect(items).toHaveLength(2);
     expect(screen.getByText("Appointment — 123 Main St")).toBeInTheDocument();
     expect(screen.getByText("Appointment — 456 Oak Ave")).toBeInTheDocument();
+  });
+
+  describe("device-timezone display (Codex round 3)", () => {
+    const originalTz = process.env.TZ;
+
+    beforeEach(() => {
+      // Simulate a render environment (or a rep's device) whose local zone
+      // differs from the viewer's saved `timezone` prop — without an
+      // explicit `timeZone` in the Intl.DateTimeFormat calls, formatting
+      // would silently follow this runtime zone instead of the prop.
+      process.env.TZ = "America/New_York";
+    });
+
+    afterEach(() => {
+      process.env.TZ = originalTz;
+    });
+
+    it("formats the appointment time in the passed timezone prop, not the runtime's local zone", () => {
+      // 2026-01-15T17:30:00Z = 12:30 PM in America/Chicago, 9:30 AM in
+      // America/Los_Angeles, 12:30 PM in America/New_York (the runtime
+      // zone stubbed above) — three different clock times make it
+      // unambiguous which zone actually rendered.
+      const dueAt = "2026-01-15T17:30:00.000Z";
+      render(
+        <LeadAppointmentsSection
+          appointments={[makeRow({ id: "appt-1", due_at: dueAt, end_at: null })]}
+          timezone="America/Los_Angeles"
+        />,
+      );
+
+      expect(screen.getByText(/9:30\s*AM/)).toBeInTheDocument();
+      expect(screen.queryByText(/12:30\s*PM/)).not.toBeInTheDocument();
+    });
   });
 });

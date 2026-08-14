@@ -42,7 +42,10 @@ type ClaimedReminderRow = {
 type RpcResult<T> = { data: T | null; error: { message: string; code?: string } | null };
 
 type ReminderRpcClient = {
-  rpc(fn: "fn_claim_appointment_reminders"): Promise<RpcResult<ClaimedReminderRow[]>>;
+  rpc(
+    fn: "fn_claim_appointment_reminders",
+    args?: { p_limit: number },
+  ): Promise<RpcResult<ClaimedReminderRow[]>>;
   rpc(
     fn: "fn_claim_reminder_retries",
     args: { p_limit: number },
@@ -53,10 +56,19 @@ function asReminderRpcClient(client: SupabaseClient<Database>): ReminderRpcClien
   return client as unknown as ReminderRpcClient;
 }
 
+/** Codex round 3 (finding 1): fn_claim_appointment_reminders now takes
+ *  `p_limit` (default 1, matching the sweep route's one-appointment-at-a-
+ *  time claim loop). Omitting `limit` here keeps every pre-existing
+ *  single-appointment test unchanged (default 1 claims that one
+ *  appointment); tests exercising the limit itself pass it explicitly. */
 function claimAppointmentReminders(
   client: SupabaseClient<Database>,
+  limit?: number,
 ): Promise<RpcResult<ClaimedReminderRow[]>> {
-  return asReminderRpcClient(client).rpc("fn_claim_appointment_reminders");
+  return asReminderRpcClient(client).rpc(
+    "fn_claim_appointment_reminders",
+    limit === undefined ? undefined : { p_limit: limit },
+  );
 }
 
 function claimReminderRetries(
@@ -342,6 +354,61 @@ describe("Migration 20260814200000 — appointment reminder claim RPCs", () => {
       const { data, error } = await claimAppointmentReminders(db);
       expect(error).toBeNull();
       expect((data ?? []).some((r) => r.task_id === appt.id)).toBe(false);
+    });
+  });
+
+  // Codex round 3 (finding 1): the sweep route now calls this RPC with
+  // p_limit=1 in a budget-checked loop instead of one unbounded call — see
+  // the route's own module comment and the migration header block above.
+  describe("p_limit — one appointment claimed at a time", () => {
+    it("p_limit bounds how many due appointments a single call claims, oldest due_at first", async () => {
+      const member = await createUserForOrg(BMH_ORG_ID);
+      await setPrefs(member.userId);
+      const soonest = await insertDueAppointment(member.userId, 5);
+      const later = await insertDueAppointment(member.userId, 20);
+
+      const { data, error } = await claimAppointmentReminders(db, 1);
+      expect(error).toBeNull();
+      const taskIds = new Set((data ?? []).map((r) => r.task_id));
+      expect(taskIds.has(soonest.id)).toBe(true);
+      expect(taskIds.has(later.id)).toBe(false);
+
+      const { data: laterTask } = await db
+        .from("tasks")
+        .select("reminder_claimed_at")
+        .eq("id", later.id)
+        .single();
+      // Left UNCLAIMED, not claimed-but-undelivered — reminder_claimed_at
+      // still null, so this appointment is still a live candidate.
+      expect(laterTask?.reminder_claimed_at).toBeNull();
+    });
+
+    it("near-due overflow left unclaimed by a limited call is claimed by the very next call (stands in for the next sweep, still inside the 30-minute window)", async () => {
+      const member = await createUserForOrg(BMH_ORG_ID);
+      await setPrefs(member.userId);
+      const first = await insertDueAppointment(member.userId, 5);
+      const overflow = await insertDueAppointment(member.userId, 25);
+
+      const sweepOne = await claimAppointmentReminders(db, 1);
+      expect(sweepOne.error).toBeNull();
+      expect((sweepOne.data ?? []).some((r) => r.task_id === first.id)).toBe(true);
+      expect((sweepOne.data ?? []).some((r) => r.task_id === overflow.id)).toBe(false);
+
+      // "Next sweep" — same call, standing in for the cron firing again 5
+      // minutes later. overflow.due_at is still comfortably inside
+      // [now, now+30m], so it's a live candidate and gets claimed cleanly.
+      const sweepTwo = await claimAppointmentReminders(db, 1);
+      expect(sweepTwo.error).toBeNull();
+      const overflowRow = (sweepTwo.data ?? []).find((r) => r.task_id === overflow.id);
+      expect(overflowRow).toBeTruthy();
+      expect(overflowRow?.claimed_status).toBe("pending");
+
+      const { data: overflowTask } = await db
+        .from("tasks")
+        .select("reminder_claimed_at")
+        .eq("id", overflow.id)
+        .single();
+      expect(overflowTask?.reminder_claimed_at).not.toBeNull();
     });
   });
 
@@ -806,11 +873,15 @@ describe("Migration 20260814200000 — appointment reminder claim RPCs", () => {
       expect(row?.last_error).toMatch(/appointment_not_open/);
     });
 
-    it("suppresses a retry whose appointment's due_at has now passed", async () => {
+    it("suppresses a retry whose appointment's due_at passed more than the 15-minute grace ago", async () => {
       const { appt, deliveryId } = await failedBellDelivery(10);
+      // Codex round 3 (finding 1): grace is 15 minutes — this must be
+      // clearly past it (20 minutes) to still exercise suppression; a
+      // due_at inside the grace is covered by the "delivers within the
+      // 15-minute grace window" test below.
       await flaggedTaskUpdate("update tasks set due_at = $2 where id = $1", [
         appt.id,
-        new Date(Date.now() - 60_000).toISOString(),
+        new Date(Date.now() - 20 * 60_000).toISOString(),
       ]);
 
       const { data, error } = await claimReminderRetries(db);
@@ -824,6 +895,42 @@ describe("Migration 20260814200000 — appointment reminder claim RPCs", () => {
         .single();
       expect(row?.status).toBe("suppressed");
       expect(row?.last_error).toMatch(/appointment_due_passed/);
+    });
+
+    // Codex round 3 (finding 1): fn_claim_appointment_reminders now claims
+    // one appointment at a time inside the sweep route's budget loop, so a
+    // near-due appointment can be claimed with only seconds left before
+    // due_at. If that delivery isn't sent before the sweep's budget runs
+    // out, it sits pending and isn't retry-eligible until the stale-pending
+    // threshold (10 minutes) — by which point due_at has already passed.
+    // Without the grace window, THIS retry pass (the very first one that
+    // could ever pick the row back up) would suppress it outright. This
+    // test proves the compounding hazard is closed: a due_at inside the
+    // 15-minute grace still delivers.
+    it("delivers a retry whose appointment's due_at passed within the 15-minute grace window (the overflow-claim compounding hazard)", async () => {
+      const { appt, deliveryId } = await failedBellDelivery(10);
+      // 8 minutes past due — comfortably inside the 15-minute grace, and
+      // past the worst case this closes (claimed the instant due_at
+      // arrived, first retry-eligible 10 minutes later).
+      await flaggedTaskUpdate("update tasks set due_at = $2 where id = $1", [
+        appt.id,
+        new Date(Date.now() - 8 * 60_000).toISOString(),
+      ]);
+
+      const { data, error } = await claimReminderRetries(db);
+      expect(error).toBeNull();
+      const claimed = (data ?? []).find((r) => r.delivery_id === deliveryId);
+      expect(claimed).toBeTruthy();
+
+      const { data: row } = await db
+        .from("task_reminder_deliveries")
+        .select("status, last_error")
+        .eq("id", deliveryId)
+        .single();
+      // Still eligible for delivery — status is left as-is (failed, from
+      // failedBellDelivery), NOT transitioned to suppressed, and the claim
+      // bumped attempts/leased the row same as any other still-valid retry.
+      expect(row?.status).toBe("failed");
     });
   });
 

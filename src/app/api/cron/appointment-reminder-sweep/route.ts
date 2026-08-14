@@ -17,10 +17,11 @@ import type { Database } from "@/lib/supabase/types";
  * staggering idiom as every other cron in vercel.json).
  *
  * Two claims per invocation:
- *   1. `fn_claim_appointment_reminders()` — the primary window claim.
- *      Takes no params (window is fixed inside the function); returns
- *      every freshly-inserted delivery row for appointments newly due in
- *      [now, now+30m].
+ *   1. `fn_claim_appointment_reminders(p_limit)` — the primary window
+ *      claim, one appointment at a time (see the budget-loop comment
+ *      below). Window is fixed inside the function; each call returns the
+ *      freshly-inserted delivery row(s) — one per enabled channel — for a
+ *      single appointment newly due in [now, now+30m].
  *   2. `fn_claim_reminder_retries()` — crash-safety complement: failed
  *      deliveries with attempts<3, or pending deliveries stuck >10min
  *      (a sweep that claimed but crashed before marking sent/failed).
@@ -31,6 +32,21 @@ import type { Database } from "@/lib/supabase/types";
  * loop: one row's unexpected rejection must never abort the rest of the
  * sweep.
  *
+ * Codex round 3 (finding 1): the primary claim used to be a single
+ * unbounded call — every appointment due in the window, claimed (and
+ * leased) in one shot regardless of whether this sweep had budget left to
+ * process them. Mirrors calendar-mutation-sweep's solved pattern instead:
+ * `fn_claim_appointment_reminders` now takes `p_limit` and the route calls
+ * it with `p_limit: 1` inside a budget-checked loop, one appointment at a
+ * time, so reminder_claimed_at/lease is only spent on an appointment this
+ * sweep is actually about to attempt — an appointment the budget runs out
+ * before reaching is left UNCLAIMED for the next sweep (starts within 5
+ * minutes, comfortably inside the 30-minute window). The migration also
+ * widens `fn_claim_reminder_retries`'s due_at revalidation to a 15-minute
+ * grace past due (was a strict `> now()`) — a near-due overflow row
+ * claimed with only seconds to spare would otherwise be suppressed by its
+ * own first retry pass once it goes stale-pending 10 minutes later.
+ *
  * Full plan: reactive-puzzling-crane.md v9, PR 3 "Atomic claim RPC" +
  * "Delivery semantics".
  */
@@ -38,6 +54,10 @@ export const maxDuration = 60;
 
 const SWEEP_BUDGET_MS = 45_000;
 const RETRY_CLAIM_LIMIT = 50;
+/** Max appointments the primary window claim will process in one sweep —
+ *  not a batch-claim size; `fn_claim_appointment_reminders` is always
+ *  called with `p_limit: 1` (see module comment above). */
+const MAX_APPOINTMENTS_PER_SWEEP = 50;
 
 function createServiceRoleClient() {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
@@ -79,7 +99,10 @@ type ClaimedReminderRpcRow = {
 };
 
 type ReminderClaimRpcClient = {
-  rpc(fn: "fn_claim_appointment_reminders"): Promise<{
+  rpc(
+    fn: "fn_claim_appointment_reminders",
+    args: { p_limit: number },
+  ): Promise<{
     data: ClaimedReminderRpcRow[] | null;
     error: { message: string } | null;
   }>;
@@ -147,65 +170,48 @@ async function handle(request: Request) {
  */
 export async function runAppointmentReminderSweep(
   supabase: ReturnType<typeof createServiceRoleClient>,
-  opts: { budgetMs?: number; retryLimit?: number } = {},
+  opts: { budgetMs?: number; retryLimit?: number; primaryClaimLimit?: number } = {},
 ): Promise<{
+  /** Appointments claimed by the primary window this sweep — the claim's
+   *  own unit (one at a time, see module comment), NOT delivery rows; one
+   *  claimed appointment can carry 1-3 delivery rows (bell/slack/sms). */
   claimed: number;
+  /** Delivery rows claimed by the retry RPC. */
   retried: number;
+  /** Total delivery rows actually handed to the delivery worker, from
+   *  either source. */
   processed: number;
   outcomes: Record<string, number>;
   budgetExhausted: boolean;
 }> {
   const budgetMs = opts.budgetMs ?? SWEEP_BUDGET_MS;
   const retryLimit = opts.retryLimit ?? RETRY_CLAIM_LIMIT;
+  const primaryClaimLimit = opts.primaryClaimLimit ?? MAX_APPOINTMENTS_PER_SWEEP;
   const startedAt = Date.now();
   const rpcClient = supabase as unknown as ReminderClaimRpcClient;
 
-  const { data: claimedRows, error: claimError } = await rpcClient.rpc(
-    "fn_claim_appointment_reminders",
-  );
-  if (claimError) {
-    throw new Error(`fn_claim_appointment_reminders failed: ${claimError.message}`);
-  }
-
-  const { data: retryRows, error: retryError } = await rpcClient.rpc(
-    "fn_claim_reminder_retries",
-    { p_limit: retryLimit },
-  );
-  if (retryError) {
-    throw new Error(`fn_claim_reminder_retries failed: ${retryError.message}`);
-  }
-
-  // Tagged per source rather than folded into one untyped list: the
-  // primary claim's rows have NOT had `attempts` bumped by the claim
-  // itself (this delivery IS the first attempt), while the retry claim's
-  // rows already have (Codex round 1) — `toClaimedRow` needs to know which
-  // is which per row, not just per RPC name, so the tag travels with each
-  // row through the single work loop below.
-  const work: { row: ClaimedReminderRpcRow; attemptsAlreadyBumped: boolean }[] = [
-    ...(claimedRows ?? []).map((row) => ({ row, attemptsAlreadyBumped: false })),
-    ...(retryRows ?? []).map((row) => ({ row, attemptsAlreadyBumped: true })),
-  ];
   const outcomes: Record<string, number> = {};
   let processed = 0;
   let budgetExhausted = false;
 
-  for (const { row: raw, attemptsAlreadyBumped } of work) {
-    if (Date.now() - startedAt >= budgetMs) {
-      budgetExhausted = true;
-      break;
-    }
+  async function deliverRow(
+    raw: ClaimedReminderRpcRow,
+    attemptsAlreadyBumped: boolean,
+  ): Promise<void> {
     processed += 1;
-
     let outcome: ReminderDeliveryOutcome;
     try {
-      outcome = await deliverAppointmentReminder(supabase, toClaimedRow(raw, { attemptsAlreadyBumped }));
+      outcome = await deliverAppointmentReminder(
+        supabase,
+        toClaimedRow(raw, { attemptsAlreadyBumped }),
+      );
     } catch (e) {
       reportError(e, {
         tags: { surface: "cron_appointment_reminder_sweep_unhandled" },
         extra: { deliveryId: raw.delivery_id, channel: raw.channel },
       });
       outcomes.sweep_level_error = (outcomes.sweep_level_error ?? 0) + 1;
-      continue;
+      return;
     }
     outcomes[outcome.status] = (outcomes[outcome.status] ?? 0) + 1;
     if (outcome.status === "failed") {
@@ -216,9 +222,64 @@ export async function runAppointmentReminderSweep(
     }
   }
 
+  // Primary window claim: one appointment at a time, budget-checked BEFORE
+  // every claim call — mirrors calendar-mutation-sweep's solved pattern
+  // (Codex round 3, finding 1). Claiming immediately before processing
+  // means reminder_claimed_at/the delivery lease is only spent on an
+  // appointment this sweep is actually about to attempt; an appointment
+  // the budget runs out before reaching is simply never claimed, left for
+  // the next sweep 5 minutes later (well inside the 30-minute window).
+  let claimedAppointments = 0;
+  while (claimedAppointments < primaryClaimLimit) {
+    if (Date.now() - startedAt >= budgetMs) {
+      budgetExhausted = true;
+      break;
+    }
+    const { data: claimedRows, error: claimError } = await rpcClient.rpc(
+      "fn_claim_appointment_reminders",
+      { p_limit: 1 },
+    );
+    if (claimError) {
+      throw new Error(`fn_claim_appointment_reminders failed: ${claimError.message}`);
+    }
+    if (!claimedRows || claimedRows.length === 0) break; // nothing due right now
+    claimedAppointments += 1;
+
+    for (const raw of claimedRows) {
+      if (Date.now() - startedAt >= budgetMs) {
+        budgetExhausted = true;
+        break;
+      }
+      await deliverRow(raw, false);
+    }
+    if (budgetExhausted) break;
+  }
+
+  // Retry claim: crash-safety complement, bulk claim (already atomically
+  // leased/fenced per row by fn_claim_reminder_retries) bounded by
+  // retryLimit — only attempted if the primary claim left budget.
+  let retryRows: ClaimedReminderRpcRow[] = [];
+  if (!budgetExhausted) {
+    const { data, error: retryError } = await rpcClient.rpc("fn_claim_reminder_retries", {
+      p_limit: retryLimit,
+    });
+    if (retryError) {
+      throw new Error(`fn_claim_reminder_retries failed: ${retryError.message}`);
+    }
+    retryRows = data ?? [];
+
+    for (const raw of retryRows) {
+      if (Date.now() - startedAt >= budgetMs) {
+        budgetExhausted = true;
+        break;
+      }
+      await deliverRow(raw, true);
+    }
+  }
+
   return {
-    claimed: claimedRows?.length ?? 0,
-    retried: retryRows?.length ?? 0,
+    claimed: claimedAppointments,
+    retried: retryRows.length,
     processed,
     outcomes,
     budgetExhausted,

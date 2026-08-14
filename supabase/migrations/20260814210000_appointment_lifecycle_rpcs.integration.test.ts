@@ -69,6 +69,10 @@ type ClaimMutationRow = {
   new_event_id: string | null;
   client_event_id: string | null;
   result_reason: string | null;
+  /** Codex round 3 (finding 2): reassign-only delete-progress marker,
+   *  independent of result_reason — see the migration's own comment on
+   *  this column. */
+  old_event_deleted_at: string | null;
   expected_generation: number;
   attempts: number;
   claim_token: string;
@@ -921,6 +925,9 @@ describe("Migration 20260814210000 — appointment lifecycle RPCs", () => {
         old_assignee_id: actor.userId,
         new_assignee_id: newAssignee.userId,
         event_id: "evt-reassign-me",
+        // Codex round 3 (finding 2): fresh off fn_reassign_appointment's
+        // INSERT, no delete has happened yet.
+        old_event_deleted_at: null,
       });
       expect(claimed?.client_event_id).toBeTruthy();
     });

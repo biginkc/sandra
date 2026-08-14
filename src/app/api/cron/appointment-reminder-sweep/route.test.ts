@@ -51,11 +51,22 @@ function rawRow(id: string, overrides: Partial<RawRow> = {}): RawRow {
   };
 }
 
-/** Fake Supabase client: `rpc` special-cases the two claim functions. */
-function fakeSupabase(claimed: RawRow[], retried: RawRow[] = []) {
+/**
+ * Fake Supabase client: `rpc` special-cases the two claim functions.
+ *
+ * Codex round 3 (finding 1): the primary claim is now one appointment at
+ * a time (`p_limit: 1`), so `primaryBatches` is a queue of BATCHES — each
+ * entry is the one-to-three delivery rows (bell/slack/sms) one claimed
+ * appointment produces — and `rpc("fn_claim_appointment_reminders", ...)`
+ * shifts one batch per call, same idiom as calendar-mutation-sweep's
+ * route.test.ts one-row-per-call queue.
+ */
+function fakeSupabase(primaryBatches: RawRow[][], retried: RawRow[] = []) {
+  const queue = [...primaryBatches];
   const rpc = vi.fn(async (fn: string) => {
     if (fn === "fn_claim_appointment_reminders") {
-      return { data: claimed, error: null };
+      const batch = queue.shift();
+      return { data: batch ?? [], error: null };
     }
     if (fn === "fn_claim_reminder_retries") {
       return { data: retried, error: null };
@@ -64,6 +75,14 @@ function fakeSupabase(claimed: RawRow[], retried: RawRow[] = []) {
   });
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   return { rpc } as any;
+}
+
+/** Calls to `rpc("fn_claim_appointment_reminders", ...)` only. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function primaryClaimCalls(supabase: any) {
+  return supabase.rpc.mock.calls.filter(
+    (call: unknown[]) => call[0] === "fn_claim_appointment_reminders",
+  );
 }
 
 beforeEach(() => {
@@ -75,8 +94,8 @@ afterEach(() => {
 });
 
 describe("runAppointmentReminderSweep", () => {
-  it("claims both the primary window and retries, then delivers every row", async () => {
-    const supabase = fakeSupabase([rawRow("a"), rawRow("b")], [rawRow("c")]);
+  it("claims appointments one at a time (p_limit: 1), delivers every channel row of each, then claims retries", async () => {
+    const supabase = fakeSupabase([[rawRow("a")], [rawRow("b")]], [rawRow("c")]);
     mocks.deliverAppointmentReminder.mockResolvedValue({
       status: "sent",
       deliveryId: "x",
@@ -85,7 +104,12 @@ describe("runAppointmentReminderSweep", () => {
 
     const summary = await runAppointmentReminderSweep(supabase, { budgetMs: 60_000 });
 
-    expect(supabase.rpc).toHaveBeenCalledWith("fn_claim_appointment_reminders");
+    for (const call of primaryClaimCalls(supabase)) {
+      expect(call[1]).toEqual({ p_limit: 1 });
+    }
+    // Two successful claims (a, b) plus the third call that comes back
+    // empty and ends the primary loop.
+    expect(primaryClaimCalls(supabase)).toHaveLength(3);
     expect(supabase.rpc).toHaveBeenCalledWith("fn_claim_reminder_retries", { p_limit: 50 });
     expect(mocks.deliverAppointmentReminder).toHaveBeenCalledTimes(3);
     expect(summary.claimed).toBe(2);
@@ -93,9 +117,74 @@ describe("runAppointmentReminderSweep", () => {
     expect(summary.processed).toBe(3);
   });
 
+  it("Codex round 3 (finding 1): budget exhaustion between claim calls leaves the next appointment UNCLAIMED, not pending — no claim call is made for it", async () => {
+    // startedAt read once; the budget check runs before every claim call.
+    // Sequence: 0 (startedAt), 0 (check before claim #1 — proceeds),
+    // budgetMs+1 (check before delivering claim #1's row — still
+    // processes it, since the check inside the row loop runs after this
+    // read too)... to keep this deterministic, drive it so exactly one
+    // appointment is claimed+delivered and the second claim call never
+    // happens.
+    const budgetMs = 1_000;
+    const times = [0, 0, 0, budgetMs + 1];
+    let call = 0;
+    vi.spyOn(Date, "now").mockImplementation(
+      () => times[Math.min(call++, times.length - 1)],
+    );
+
+    const supabase = fakeSupabase([[rawRow("a")], [rawRow("b")]]);
+    mocks.deliverAppointmentReminder.mockResolvedValue({
+      status: "sent",
+      deliveryId: "a",
+      channel: "bell",
+    });
+
+    const summary = await runAppointmentReminderSweep(supabase, { budgetMs });
+
+    expect(primaryClaimCalls(supabase)).toHaveLength(1);
+    expect(mocks.deliverAppointmentReminder).toHaveBeenCalledTimes(1);
+    expect(summary.claimed).toBe(1);
+    expect(summary.processed).toBe(1);
+    expect(summary.budgetExhausted).toBe(true);
+    // Retry claim is skipped entirely once the primary loop exhausts the
+    // budget — nothing left to spend on it this sweep.
+    expect(supabase.rpc).not.toHaveBeenCalledWith(
+      "fn_claim_reminder_retries",
+      expect.anything(),
+    );
+  });
+
+  it("stops claiming when the primary RPC returns nothing due, without treating it as budget exhaustion", async () => {
+    const supabase = fakeSupabase([]);
+
+    const summary = await runAppointmentReminderSweep(supabase, { budgetMs: 60_000 });
+
+    expect(primaryClaimCalls(supabase)).toHaveLength(1);
+    expect(mocks.deliverAppointmentReminder).not.toHaveBeenCalled();
+    expect(summary.claimed).toBe(0);
+    expect(summary.budgetExhausted).toBe(false);
+  });
+
+  it("caps appointments claimed per sweep at primaryClaimLimit", async () => {
+    const supabase = fakeSupabase([[rawRow("a")], [rawRow("b")], [rawRow("c")]]);
+    mocks.deliverAppointmentReminder.mockResolvedValue({
+      status: "sent",
+      deliveryId: "a",
+      channel: "bell",
+    });
+
+    const summary = await runAppointmentReminderSweep(supabase, {
+      budgetMs: 60_000,
+      primaryClaimLimit: 2,
+    });
+
+    expect(primaryClaimCalls(supabase)).toHaveLength(2);
+    expect(summary.claimed).toBe(2);
+  });
+
   it("maps the raw RPC row shape to the worker's camelCase row before delivering", async () => {
     const supabase = fakeSupabase([
-      rawRow("a", { assignee_reminder_phone: "+18165551234", channel: "sms" }),
+      [rawRow("a", { assignee_reminder_phone: "+18165551234", channel: "sms" })],
     ]);
     mocks.deliverAppointmentReminder.mockResolvedValue({
       status: "sent",
@@ -119,7 +208,7 @@ describe("runAppointmentReminderSweep", () => {
 
   it("maps claim_token/claimed_status from both claim RPCs (Codex round 2: the primary claim now leases/tokens too), and tags attemptsAlreadyBumped by source", async () => {
     const supabase = fakeSupabase(
-      [rawRow("a", { claim_token: "token-a", claimed_status: "pending" })],
+      [[rawRow("a", { claim_token: "token-a", claimed_status: "pending" })]],
       [rawRow("b", { claim_token: "token-123", claimed_status: "failed", attempts: 2 })],
     );
     mocks.deliverAppointmentReminder.mockResolvedValue({
@@ -155,7 +244,7 @@ describe("runAppointmentReminderSweep", () => {
   });
 
   it("tallies outcomes by status and reports failed deliveries", async () => {
-    const supabase = fakeSupabase([rawRow("a"), rawRow("b")]);
+    const supabase = fakeSupabase([[rawRow("a")], [rawRow("b")]]);
     mocks.deliverAppointmentReminder
       .mockResolvedValueOnce({ status: "sent", deliveryId: "a", channel: "bell" })
       .mockResolvedValueOnce({ status: "failed", deliveryId: "b", channel: "bell", error: "boom" });
@@ -171,7 +260,7 @@ describe("runAppointmentReminderSweep", () => {
   });
 
   it("a rejecting delivery doesn't prevent the next row from being processed", async () => {
-    const supabase = fakeSupabase([rawRow("a"), rawRow("b")]);
+    const supabase = fakeSupabase([[rawRow("a")], [rawRow("b")]]);
     mocks.deliverAppointmentReminder
       .mockRejectedValueOnce(new Error("transport blew up"))
       .mockResolvedValueOnce({ status: "sent", deliveryId: "b", channel: "bell" });
@@ -185,27 +274,6 @@ describe("runAppointmentReminderSweep", () => {
       expect.any(Error),
       expect.objectContaining({ tags: { surface: "cron_appointment_reminder_sweep_unhandled" } }),
     );
-  });
-
-  it("stops processing once the budget is exhausted mid-sweep", async () => {
-    const budgetMs = 1_000;
-    const times = [0, 0, budgetMs + 1];
-    let call = 0;
-    vi.spyOn(Date, "now").mockImplementation(
-      () => times[Math.min(call++, times.length - 1)],
-    );
-
-    const supabase = fakeSupabase([rawRow("a"), rawRow("b")]);
-    mocks.deliverAppointmentReminder.mockResolvedValue({
-      status: "sent",
-      deliveryId: "a",
-      channel: "bell",
-    });
-
-    const summary = await runAppointmentReminderSweep(supabase, { budgetMs });
-
-    expect(summary.processed).toBe(1);
-    expect(summary.budgetExhausted).toBe(true);
   });
 
   it("throws if the primary claim RPC errors", async () => {
