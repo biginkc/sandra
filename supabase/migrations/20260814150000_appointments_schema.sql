@@ -265,6 +265,20 @@ begin
         'tasks_tenant_integrity_guard: appointment times move only through the reschedule lifecycle'
         using errcode = 'P0001';
     end if;
+
+    -- Appointment identity is immutable: without this, a member could flip
+    -- an appointment to 'custom' (clearing its chain), move due_at while
+    -- the time guard is blind, and flip it back — resynchronizing nothing.
+    -- Type transitions across the appointment boundary and any
+    -- calendar_chain_id change are lifecycle-only operations.
+    if ((old.type = 'appointment') <> (new.type = 'appointment')
+        or new.calendar_chain_id is distinct from old.calendar_chain_id)
+       and coalesce(current_setting('sandra.allow_appointment_time_move', true), '') <> 'on'
+    then
+      raise exception
+        'tasks_tenant_integrity_guard: appointment identity (type/calendar chain) is immutable outside the lifecycle'
+        using errcode = 'P0001';
+    end if;
   end if;
 
   -- Each relation validates independently, only when it (or the org)

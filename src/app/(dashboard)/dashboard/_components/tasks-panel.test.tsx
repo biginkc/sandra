@@ -153,9 +153,11 @@ describe("<TasksPanel />", () => {
     expect(wrapper.tagName).toBe("DIV");
     expect(wrapper.querySelector("a")).toBeNull();
 
-    // Appointments are rescheduled, never snoozed — no snooze control.
+    // Appointments have no generic actions row at all (no Done, no
+    // Snooze) — the outcome flow (held / no-show / rescheduled) arrives
+    // in PR 3.
+    expect(screen.queryByTestId("task-done-t1")).toBeNull();
     expect(screen.queryByTestId("task-snooze-t1")).toBeNull();
-    expect(screen.getByTestId("task-done-t1")).toBeInTheDocument();
   });
 
   it("links a contact-only row (no property) to the Messages thread", () => {

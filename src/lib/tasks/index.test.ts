@@ -220,7 +220,7 @@ describe("createTask", () => {
 });
 
 describe("completeTask", () => {
-  it("flips status to completed and stamps completed_at + completed_by", async () => {
+  it("flips status to completed and stamps completed_at + completed_by, excluding appointments via the atomic predicate", async () => {
     const fakeRow = {
       id: "task-1",
       status: "completed",
@@ -237,31 +237,91 @@ describe("completeTask", () => {
     );
 
     expect(result.ok).toBe(true);
-    const update = calls.find(
-      (c) => c.table === "tasks" && c.op === "update",
-    );
-    expect(update).toBeDefined();
-    const payload = update!.updatePayload as Record<string, unknown>;
+    const taskCalls = calls.filter((c) => c.table === "tasks");
+    expect(taskCalls).toHaveLength(1);
+    const update = taskCalls[0];
+    expect(update.op).toBe("update");
+    const payload = update.updatePayload as Record<string, unknown>;
     expect(payload.status).toBe("completed");
     expect(payload.completed_by).toBe("user-1");
     expect(typeof payload.completed_at).toBe("string");
     expect(typeof payload.updated_at).toBe("string");
 
-    expect(update!.filters).toEqual([{ op: "eq", args: ["id", "task-1"] }]);
+    expect(update.filters).toEqual([
+      { op: "eq", args: ["id", "task-1"] },
+      { op: "neq", args: ["type", "appointment"] },
+    ]);
   });
 
-  it("returns err when row is missing", async () => {
-    responseQueue = [{ data: null, error: { message: "no row" } }];
+  it("refuses to complete an appointment — UPDATE excludes it (neq predicate), follow-up read confirms type, returns TASK_COMPLETE_UNSUPPORTED", async () => {
+    responseQueue = [
+      // UPDATE's neq predicate excludes the row: zero rows back.
+      { data: null, error: null },
+      // Follow-up type read distinguishes appointment from missing.
+      { data: { type: "appointment" }, error: null },
+    ];
 
     const result = await completeTask(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       makeSupabase() as any,
-      "missing",
+      "task-1",
       "user-1",
     );
+
     expect(result.ok).toBe(false);
-    if (result.ok) return;
-    expect(result.error.code).toBe("TASK_COMPLETE_FAILED");
+    if (!result.ok) {
+      expect(result.error.code).toBe("TASK_COMPLETE_UNSUPPORTED");
+    }
+    const taskCalls = calls.filter((c) => c.table === "tasks");
+    expect(taskCalls).toHaveLength(2);
+    expect(taskCalls[0].op).toBe("update");
+    expect(taskCalls[0].filters).toEqual([
+      { op: "eq", args: ["id", "task-1"] },
+      { op: "neq", args: ["type", "appointment"] },
+    ]);
+    expect(taskCalls[1].op).toBe("select");
+  });
+
+  it("fails closed when the UPDATE errors — no follow-up read, no fall-through write", async () => {
+    responseQueue = [{ data: null, error: { message: "connection reset" } }];
+
+    const result = await completeTask(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      makeSupabase() as any,
+      "task-1",
+      "user-1",
+    );
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe("TASK_COMPLETE_FAILED");
+      expect(result.error.message).toBe("connection reset");
+    }
+    // The error short-circuits before any follow-up read.
+    const taskCalls = calls.filter((c) => c.table === "tasks");
+    expect(taskCalls).toHaveLength(1);
+    expect(taskCalls[0].op).toBe("update");
+  });
+
+  it("returns TASK_COMPLETE_FAILED when the task doesn't exist (UPDATE and follow-up read both empty)", async () => {
+    responseQueue = [
+      { data: null, error: null },
+      { data: null, error: null },
+    ];
+
+    const result = await completeTask(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      makeSupabase() as any,
+      "missing-task",
+      "user-1",
+    );
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe("TASK_COMPLETE_FAILED");
+    }
+    const taskCalls = calls.filter((c) => c.table === "tasks");
+    expect(taskCalls).toHaveLength(2);
   });
 });
 

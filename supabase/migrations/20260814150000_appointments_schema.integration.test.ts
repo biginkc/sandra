@@ -905,8 +905,8 @@ describe("Migration 20260814150000 — appointments schema", () => {
   // Proves the `FOR SHARE OF m` clause in tasks_tenant_integrity_guard()
   // (section 3 of this migration) actually serializes a task
   // insert/reassign against a concurrent membership suspension, rather
-  // than both racing through under READ COMMITTED and leaving an
-  // appointment assigned to a suspended member.
+  // than both racing through under READ COMMITTED and reading a stale
+  // membership snapshot.
   //
   // The Supabase JS client can't hold a transaction open across two
   // separate calls (every PostgREST request auto-commits), so this uses
@@ -917,13 +917,22 @@ describe("Migration 20260814150000 — appointments schema", () => {
   // regression that drops the lock (silent race instead of serialization)
   // fails loudly instead of just getting lucky on timing.
   //
-  // What this proves: the two orderings that matter for this trigger
-  // (suspend-then-insert, insert-then-suspend) each resolve to exactly one
-  // consistent outcome, never a state where a live appointment ends up
-  // assigned to an inactive member. What it does NOT prove: throughput
-  // under real contention, behavior with more than two concurrent writers,
-  // or the UPDATE-path (reassign) trigger firing — only the INSERT path is
-  // exercised here; the trigger's scope-gate for UPDATE is unconditional
+  // What this proves — and what it does NOT: the trigger's actual contract
+  // is ASSIGNMENT-TIME validation against a stable membership snapshot. It
+  // does not, and must not, promise that a later suspension is blocked by
+  // whatever open tasks that member happens to hold — revocation can never
+  // be made blockable by dangling work, or an admin loses the ability to
+  // suspend someone until every one of their tasks is manually reassigned
+  // first. So "insert wins" (insert committed while a suspension was
+  // blocked on the row lock) is a TOLERATED end state: the task keeps
+  // pointing at the now-inactive assignee. The system's actual guarantee
+  // for that state lives elsewhere — claims skip inactive-assignee tasks,
+  // the owner view surfaces them for reassignment, and reassigning to
+  // another inactive user still fails outright (asserted below). What this
+  // does NOT prove: throughput under real contention, behavior with more
+  // than two concurrent writers, or the UPDATE-path (reassign) trigger
+  // firing under a live race — only the INSERT path is exercised here for
+  // the race itself; the trigger's scope-gate for UPDATE is unconditional
   // on the same FOR SHARE clause, so the same lock behavior applies, but
   // that specific interleaving isn't separately exercised.
   describe("tasks_tenant_integrity_guard — membership-suspension race (raw pg, two connections)", () => {
@@ -997,7 +1006,7 @@ describe("Migration 20260814150000 — appointments schema", () => {
       await expect(insertPromise).rejects.toThrow(/no active membership/i);
     });
 
-    it("insert wins: an insert committed while a suspension is blocked on the row lock leaves the task validly assigned", async () => {
+    it("insert wins: an insert committed while a suspension is blocked on the row lock leaves the task in the tolerated dangling-assignee state — reassigning it to another inactive user still fails, to an active member still succeeds", async () => {
       const assignee = await createUserForOrg(BMH_ORG_ID);
       const chainId = crypto.randomUUID();
       const dueAt = new Date(Date.now() + 3600_000).toISOString();
@@ -1026,10 +1035,13 @@ describe("Migration 20260814150000 — appointments schema", () => {
       await connA.query("commit");
       await suspendPromise; // now unblocks and succeeds
 
-      // The insert committed while the assignee was still active. It must
-      // exist, still assigned to that member — proving this ordering also
-      // resolves to one consistent outcome rather than a corrupted state
-      // where the trigger's earlier read is stale by the time it commits.
+      // The insert committed while the assignee was still active, validated
+      // against a stable snapshot at that instant. It must exist, still
+      // assigned to that now-suspended member, and the later suspension
+      // must have committed cleanly too — the trigger does not, and must
+      // not, retroactively block a suspension because of this dangling
+      // task. This is the TOLERATED state, not a bug: revocation can never
+      // be made blockable by open work.
       const { data, error } = await db
         .from("tasks")
         .select("id, assignee_id")
@@ -1045,6 +1057,35 @@ describe("Migration 20260814150000 — appointments schema", () => {
         .eq("org_id", BMH_ORG_ID)
         .single();
       expect((membership as { access_status: string }).access_status).toBe("suspended");
+
+      // The actual contract for this tolerated state: claims skip
+      // inactive-assignee tasks and the owner view surfaces them for
+      // reassignment — but reassignment itself is still validated at
+      // assignment time. Reassigning to another inactive member must fail
+      // exactly like the ordinary (non-race) reassign-to-suspended case;
+      // reassigning to an active member must succeed and clear the
+      // dangling state.
+      const anotherSuspended = await createUserForOrg(BMH_ORG_ID);
+      await setMembershipAccessStatus(anotherSuspended.userId, BMH_ORG_ID, "suspended");
+
+      const { error: reassignToInactiveError } = await db
+        .from("tasks")
+        .update({ assignee_id: anotherSuspended.userId })
+        .eq("id", taskId);
+      expect(reassignToInactiveError).not.toBeNull();
+      expect(reassignToInactiveError?.message).toMatch(/tasks_tenant_integrity_guard/i);
+
+      const activeReplacement = await createUserForOrg(BMH_ORG_ID);
+      const { data: reassigned, error: reassignToActiveError } = await db
+        .from("tasks")
+        .update({ assignee_id: activeReplacement.userId })
+        .eq("id", taskId)
+        .select("assignee_id")
+        .single();
+      expect(reassignToActiveError).toBeNull();
+      expect((reassigned as { assignee_id: string }).assignee_id).toBe(
+        activeReplacement.userId,
+      );
     });
   });
 
@@ -1303,6 +1344,197 @@ describe("Migration 20260814150000 — appointments schema", () => {
         ).rejects.toThrow(
           /appointment times move only through the reschedule lifecycle/i,
         );
+      });
+    });
+  });
+
+  // Identity-immutability guard (section 3 of this migration, round 8):
+  // closes the gap the time-move guard alone left open. Before this, a
+  // caller could flip an appointment's type away from 'appointment'
+  // (clearing calendar_chain_id, nulling end_at, attaching a property — all
+  // individually legal under the CHECK constraints), and the time-move
+  // guard would no longer see OLD.type = 'appointment' on a subsequent
+  // due_at move, since the row now reads as an ordinary task. Flipping
+  // back afterward would silently resynchronize nothing. The guard fires
+  // on any UPDATE that crosses the appointment boundary in either
+  // direction, or that changes calendar_chain_id at all — gated behind the
+  // same `sandra.allow_appointment_time_move` escape hatch the lifecycle
+  // RPCs (PR 3) use.
+  describe("appointment identity immutability guard", () => {
+    it.each([
+      ["service-role", async () => db],
+      [
+        "authenticated org member",
+        async () => (await createUserForOrg(BMH_ORG_ID, "owner")).client,
+      ],
+    ] as const)(
+      "%s: rejects flipping an appointment to type='custom' even while satisfying every other CHECK (property attached, chain and end_at cleared)",
+      async (_label, getClient) => {
+        const appt = await insertValidAppointment();
+        const propertyId = await insertProperty();
+        const client = await getClient();
+
+        const { error } = await client
+          .from("tasks" as never)
+          .update({
+            type: "custom",
+            calendar_chain_id: null,
+            end_at: null,
+            related_property_id: propertyId,
+          } as never)
+          .eq("id", appt.id);
+
+        expect(error).not.toBeNull();
+        expect((error as { message: string }).message).toMatch(
+          /identity \(type\/calendar chain\) is immutable/i,
+        );
+
+        const { data: after } = await db
+          .from("tasks")
+          .select("type, calendar_chain_id")
+          .eq("id", appt.id)
+          .single();
+        expect((after as { type: string }).type).toBe("appointment");
+        expect(
+          (after as { calendar_chain_id: string | null }).calendar_chain_id,
+        ).toBe(appt.chainId);
+      },
+    );
+
+    it.each([
+      ["service-role", async () => db],
+      [
+        "authenticated org member",
+        async () => (await createUserForOrg(BMH_ORG_ID, "owner")).client,
+      ],
+    ] as const)(
+      "%s: rejects changing calendar_chain_id alone, with type left untouched",
+      async (_label, getClient) => {
+        const appt = await insertValidAppointment();
+        const client = await getClient();
+
+        const { error } = await client
+          .from("tasks" as never)
+          .update({ calendar_chain_id: crypto.randomUUID() } as never)
+          .eq("id", appt.id);
+
+        expect(error).not.toBeNull();
+        expect((error as { message: string }).message).toMatch(
+          /identity \(type\/calendar chain\) is immutable/i,
+        );
+      },
+    );
+
+    it.each([
+      ["service-role", async () => db],
+      [
+        "authenticated org member",
+        async () => (await createUserForOrg(BMH_ORG_ID, "owner")).client,
+      ],
+    ] as const)(
+      "%s: the multi-statement bypass sequence (flip → move due_at → flip back) never gets past the first statement",
+      async (_label, getClient) => {
+        const appt = await insertValidAppointment();
+        const propertyId = await insertProperty();
+        const client = await getClient();
+
+        // Statement 1: the flip that, pre-round-8, would have escaped the
+        // time-move guard by making the row no longer read as an
+        // appointment. It must fail outright — statements 2 and 3 of the
+        // attack (moving due_at, flipping back) are never reachable.
+        const { error: flipError } = await client
+          .from("tasks" as never)
+          .update({
+            type: "custom",
+            calendar_chain_id: null,
+            end_at: null,
+            related_property_id: propertyId,
+          } as never)
+          .eq("id", appt.id);
+        expect(flipError).not.toBeNull();
+
+        const { data: unchanged } = await db
+          .from("tasks")
+          .select("type, calendar_chain_id, due_at")
+          .eq("id", appt.id)
+          .single();
+        const row = unchanged as {
+          type: string;
+          calendar_chain_id: string | null;
+          due_at: string;
+        };
+        expect(row.type).toBe("appointment");
+        expect(row.calendar_chain_id).toBe(appt.chainId);
+
+        // Statement 2 attempted anyway: with the row still reading as an
+        // appointment, the (separate) time-move guard rejects it too — the
+        // bypass gains nothing even if attempted out of order.
+        const bypassDueAt = new Date(Date.now() + 10800_000).toISOString();
+        const { error: moveError } = await db
+          .from("tasks")
+          .update({ due_at: bypassDueAt })
+          .eq("id", appt.id);
+        expect(moveError).not.toBeNull();
+
+        const { data: stillUnchanged } = await db
+          .from("tasks")
+          .select("due_at")
+          .eq("id", appt.id)
+          .single();
+        expect((stillUnchanged as { due_at: string }).due_at).toBe(row.due_at);
+      },
+    );
+
+    // Raw pg connection (same pattern as the time-move escape hatch above):
+    // the Supabase JS client auto-commits every request, so it can't hold
+    // set_config('...', true) (transaction-local) across the set_config
+    // call and the subsequent UPDATE in the same transaction.
+    describe("escape hatch — sandra.allow_appointment_time_move covers identity too (raw pg, same transaction)", () => {
+      let conn: Client;
+
+      beforeEach(async () => {
+        conn = new Client({ connectionString: testDbUrl() });
+        await conn.connect();
+        await conn.query("set statement_timeout = 0");
+      });
+
+      afterEach(async () => {
+        await conn.query("rollback").catch(() => {});
+        await conn.end().catch(() => {});
+      });
+
+      it("allows the type flip (proving PR 3's lifecycle path) once the flag is set to 'on' in the same transaction", async () => {
+        const appt = await insertValidAppointment();
+        const propertyId = await insertProperty();
+
+        await conn.query("begin");
+        await conn.query(
+          "select set_config('sandra.allow_appointment_time_move', 'on', true)",
+        );
+        const result = await conn.query<{
+          type: string;
+          calendar_chain_id: string | null;
+        }>(
+          `update tasks
+             set type = 'custom', calendar_chain_id = null, end_at = null,
+                 related_property_id = $1
+           where id = $2
+           returning type, calendar_chain_id`,
+          [propertyId, appt.id],
+        );
+        expect(result.rows[0].type).toBe("custom");
+        expect(result.rows[0].calendar_chain_id).toBeNull();
+        await conn.query("commit");
+
+        const { data: after } = await db
+          .from("tasks")
+          .select("type, calendar_chain_id")
+          .eq("id", appt.id)
+          .single();
+        expect((after as { type: string }).type).toBe("custom");
+        expect(
+          (after as { calendar_chain_id: string | null }).calendar_chain_id,
+        ).toBeNull();
       });
     });
   });

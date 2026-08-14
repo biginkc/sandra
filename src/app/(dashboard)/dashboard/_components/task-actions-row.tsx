@@ -14,13 +14,7 @@ import {
 
 import { completeTaskAction, snoozeTaskAction } from "../../tasks/actions";
 
-type Props = {
-  taskId: string;
-  /** Appointments are rescheduled through the calendar lifecycle (PR 3),
-   *  never snoozed — a snooze would move the Sandra window while the
-   *  legacy calendar updater rebuilds the Google event at 30 minutes. */
-  canSnooze?: boolean;
-};
+type Props = { taskId: string };
 
 const SNOOZE_PRESETS: ReadonlyArray<{ label: string; days: number }> = [
   { label: "1 day", days: 1 },
@@ -33,7 +27,7 @@ const SNOOZE_PRESETS: ReadonlyArray<{ label: string; days: number }> = [
  * trigger revalidation of /dashboard, so the panel re-renders without
  * the completed / snoozed task naturally on the next router pass.
  */
-export function TaskActionsRow({ taskId, canSnooze = true }: Props) {
+export function TaskActionsRow({ taskId }: Props) {
   const [pending, startTransition] = useTransition();
 
   function complete() {
@@ -65,7 +59,6 @@ export function TaskActionsRow({ taskId, canSnooze = true }: Props) {
         <CheckIcon className="mr-1 size-3.5" />
         Done
       </Button>
-      {canSnooze ? (
       <Popover>
         <PopoverTrigger
           render={
@@ -97,7 +90,6 @@ export function TaskActionsRow({ taskId, canSnooze = true }: Props) {
           ))}
         </PopoverContent>
       </Popover>
-      ) : null}
     </div>
   );
 }

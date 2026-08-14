@@ -81,6 +81,11 @@ export async function completeTask(
   userId: string,
 ): Promise<Result<Task>> {
   const now = new Date().toISOString();
+  // Appointments complete only through the outcome flow (PR 3): closing
+  // one without held/no-show semantics would hide it from the queue with
+  // no record of what happened and no calendar lifecycle coordination.
+  // Same atomic-predicate pattern as snoozeTask — never a raceable
+  // pre-read.
   const { data, error } = await supabase
     .from("tasks")
     .update({
@@ -90,13 +95,33 @@ export async function completeTask(
       updated_at: now,
     })
     .eq("id", taskId)
+    .neq("type", "appointment")
     .select()
-    .single();
+    .maybeSingle();
 
-  if (error || !data) {
+  if (error) {
     return err({
       code: "TASK_COMPLETE_FAILED",
-      message: error?.message ?? "Failed to complete task",
+      message: error.message,
+    });
+  }
+
+  if (!data) {
+    const { data: existing } = await supabase
+      .from("tasks")
+      .select("type")
+      .eq("id", taskId)
+      .maybeSingle();
+    if (existing?.type === "appointment") {
+      return err({
+        code: "TASK_COMPLETE_UNSUPPORTED",
+        message:
+          "Appointments close through their outcome (held / no-show / rescheduled), not the generic Done action.",
+      });
+    }
+    return err({
+      code: "TASK_COMPLETE_FAILED",
+      message: "Failed to complete task",
     });
   }
   return ok(data);
