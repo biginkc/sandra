@@ -111,6 +111,11 @@ export async function checkRepSmsFromNumberReady(): Promise<RepSmsReadyResult> {
 export async function sendRepSmsReminder(params: {
   to: string;
   body: string;
+  /** Codex round 7 (finding 1, item 5): the reminder sweep's per-delivery
+   *  deadline, forwarded through to Sendillo's fetch call for best-effort
+   *  cancellation. See `SendilloMessagingProvider.sendSms` for why this is
+   *  cleanup only and doesn't change how a resulting error is interpreted. */
+  signal?: AbortSignal;
 }): Promise<RepSmsSendResult> {
   const ready = await checkRepSmsFromNumberReady();
   if (!ready.ready) {
@@ -130,11 +135,14 @@ export async function sendRepSmsReminder(params: {
 
   const provider = new SendilloMessagingProvider(env.apiKey, env.fromNumber);
   try {
-    const result = await provider.sendSms({
-      to: params.to,
-      body: params.body,
-      from: env.fromNumber,
-    });
+    const result = await provider.sendSms(
+      {
+        to: params.to,
+        body: params.body,
+        from: env.fromNumber,
+      },
+      { signal: params.signal },
+    );
     return { ok: true, externalId: result.externalId };
   } catch (error) {
     reportError(error, {

@@ -96,7 +96,25 @@ export type ReminderDeliveryOutcome =
       channel: ReminderChannel;
       providerMessageId?: string | null;
     }
-  | { status: "failed"; deliveryId: string; channel: ReminderChannel; error: string };
+  | { status: "failed"; deliveryId: string; channel: ReminderChannel; error: string }
+  | {
+      /** Codex round 7 (finding 1): the sweep's own per-delivery deadline
+       *  elapsed while the provider call was still in flight — see
+       *  `markReminderDeliveryTimedOut` and `resolveTimedOutReminderDelivery`
+       *  below. NOT a confirmed failure: completion is genuinely unknown at
+       *  this point, so this must never be treated as retryable. */
+      status: "timeout_ambiguous";
+      deliveryId: string;
+      channel: ReminderChannel;
+    };
+
+/** Every status `markDelivery` (and its callers) can write or fence
+ *  against. Deliberately broader than `ClaimedReminderRow.claimedStatus`
+ *  ("pending" | "failed", the only two a FRESH claim can hand a worker) —
+ *  `timeout_ambiguous` is a status the SWEEP ROUTE itself transitions a row
+ *  into and back out of, mid-delivery, never something a claim RPC hands
+ *  out. */
+type MarkableDeliveryStatus = "pending" | "failed" | "timeout_ambiguous";
 
 type DeliveryUpdateBuilder = {
   eq(column: "id" | "claim_token" | "status", value: string): DeliveryUpdateBuilder;
@@ -109,7 +127,7 @@ type DeliveryUpdateBuilder = {
 type DeliveryUpdateClient = {
   from(table: "task_reminder_deliveries"): {
     update(values: {
-      status: "sent" | "failed";
+      status: "sent" | "failed" | "timeout_ambiguous";
       attempts: number;
       provider_message_id?: string | null;
       last_error?: string | null;
@@ -156,15 +174,27 @@ function sleep(ms: number): Promise<void> {
  * (the retry claim already bumped it) and `row.attempts + 1` otherwise (a
  * fresh initial-claim row, whose attempts the claim itself never touches).
  * See `ClaimedReminderRow.attemptsAlreadyBumped`.
+ *
+ * `expectedStatus` (Codex round 7, finding 1) defaults to `row.claimedStatus`
+ * — every pre-round-7 call site's original fencing predicate, unchanged.
+ * It's overridable so `resolveTimedOutReminderDelivery` below can fence a
+ * SECOND transition off `timeout_ambiguous` (the status the sweep route's
+ * deadline race left the row in) instead of the row's ORIGINAL pre-claim
+ * status, which no longer reflects reality by the time a late provider
+ * response comes back.
  */
 async function markDelivery(
   supabase: SupabaseClient<Database>,
-  row: Pick<
-    ClaimedReminderRow,
-    "deliveryId" | "attempts" | "attemptsAlreadyBumped" | "claimToken" | "claimedStatus"
-  >,
-  status: "sent" | "failed",
+  row: {
+    deliveryId: string;
+    attempts: number;
+    attemptsAlreadyBumped: boolean;
+    claimToken: string;
+    claimedStatus: MarkableDeliveryStatus;
+  },
+  status: "sent" | "failed" | "timeout_ambiguous",
   extra: { providerMessageId?: string | null; lastError?: string | null },
+  expectedStatus: MarkableDeliveryStatus = row.claimedStatus,
 ): Promise<void> {
   const attempts = row.attemptsAlreadyBumped ? row.attempts : row.attempts + 1;
   const values = {
@@ -182,7 +212,7 @@ async function markDelivery(
       .update(values)
       .eq("id", row.deliveryId)
       .eq("claim_token", row.claimToken)
-      .eq("status", row.claimedStatus)
+      .eq("status", expectedStatus)
       .select("id");
 
     if (!error) {
@@ -220,22 +250,38 @@ async function markDelivery(
 }
 
 /**
- * Codex round 6 (finding 2): the sweep route (route.ts) races each
- * slack/sms delivery against a deadline derived from the remaining phase
- * budget — a single provider call with no bound could otherwise blow
- * through the phase boundary or the whole 45s sweep budget (the Slack SDK
- * has no default request timeout; Sendillo's HTTP client is likewise
- * unbounded here). When the race times out, the route calls this to record
- * a retryable failure using the SAME fenced write as every other outcome
- * (`markDelivery`, scoped by `claim_token`/`claimedStatus`) — so if the
- * abandoned call later actually lands (success or failure), ITS OWN write
- * simply no-ops (the row already moved off the expected status). That
- * leaves one accepted gap: a timed-out delivery that later actually
- * succeeds records neither the real provider_message_id nor a "sent"
- * status, so a subsequent retry claim (attempts<3) will re-send rather
- * than reconcile — the same duplicate-risk category `deliverSlack`/
- * `deliverSms`'s own doc comments already carry for crash-before-write,
- * not a new failure mode this introduces.
+ * Codex round 6 (finding 2), superseded by round 7 (finding 1): the sweep
+ * route (route.ts) races each slack/sms delivery against a deadline derived
+ * from the remaining phase budget — a single provider call with no bound
+ * could otherwise blow through the phase boundary or the whole 45s sweep
+ * budget (the Slack SDK has no default request timeout; Sendillo's HTTP
+ * client is likewise unbounded here absent the round-7 AbortSignal, which
+ * is only best-effort — see `deliverSms`). When the race times out, the
+ * route calls this to fence the row `claimedStatus -> timeout_ambiguous`
+ * (NOT `failed`) using the same `claim_token`-scoped write every other
+ * outcome uses (`markDelivery`).
+ *
+ * Round 6 originally marked this a retryable `failed` — but the abandoned
+ * provider call is NOT cancelled (true cross-SDK cancellation isn't
+ * reliable; see the round-7 plan), so it may still reach Slack/Sendillo
+ * after this write lands. A `failed` row is immediately retry-eligible
+ * (`fn_claim_reminder_retries`), and a LATE provider success can't persist
+ * over it (the fence expects `failed`, not the eventual real outcome) — the
+ * retry worker would then re-send on top of a delivery that may already
+ * have gone out, a guaranteed duplicate under a slow provider.
+ * `timeout_ambiguous` is a non-resend holding state instead: excluded from
+ * `fn_claim_reminder_retries`'s eligibility by construction (its candidates
+ * CTE only ever matches `status IN ('failed', 'pending')` — see
+ * 20260814200000_appointment_reminders.sql), so nothing can pick this row
+ * up while its outcome is unknown. `resolveTimedOutReminderDelivery` below
+ * is the row's only way out: the route's `after()` continuation awaits the
+ * SAME still-running provider promise and fences the row's real resolution
+ * (sent, with the provider id; or failed, now safely retryable because the
+ * provider definitively did not deliver) off THIS `timeout_ambiguous`
+ * status. A continuation that never resolves (process killed, provider
+ * call truly hangs) leaves the row here permanently — surfaced by the
+ * sweep's hourly lingering-`timeout_ambiguous` telemetry for manual
+ * operator reconciliation.
  */
 export async function markReminderDeliveryTimedOut(
   supabase: SupabaseClient<Database>,
@@ -244,7 +290,60 @@ export async function markReminderDeliveryTimedOut(
     "deliveryId" | "attempts" | "attemptsAlreadyBumped" | "claimToken" | "claimedStatus"
   >,
 ): Promise<void> {
-  await markDelivery(supabase, row, "failed", { lastError: "delivery timeout" });
+  await markDelivery(supabase, row, "timeout_ambiguous", {
+    lastError: "delivery timeout, completion ambiguous",
+  });
+}
+
+/**
+ * Codex round 7 (finding 1): resolves a row `markReminderDeliveryTimedOut`
+ * previously fenced into `timeout_ambiguous`, once the provider call that
+ * was still in flight at the deadline finally settles. Called from the
+ * sweep route's `after()` continuation (post-response, so it doesn't hold
+ * up the sweep's own HTTP response) with whatever `deliverAppointmentReminder`
+ * eventually resolved to for this row.
+ *
+ * Fenced the same way as every other write here, but against
+ * `timeout_ambiguous` specifically (NOT `row`'s original pre-claim
+ * `claimedStatus`, which is stale by now) — so if this row's lease was
+ * somehow reclaimed a second time in between (a later sweep's retry claim
+ * — though it can't, since `timeout_ambiguous` is excluded from that
+ * claim's eligibility by construction), this write would correctly no-op
+ * rather than clobber a newer owner.
+ *
+ * - `outcome.status === "sent"`: the provider DID deliver — persist the
+ *   real `provider_message_id` and mark sent, exactly as an on-time success
+ *   would have.
+ * - `outcome.status === "failed"`: the provider definitively did NOT
+ *   deliver — the row is now safely retryable (the standard `failed`
+ *   state), unlike immediately after the deadline where "did it deliver?"
+ *   was still unknown.
+ *
+ * `outcome.status === "timeout_ambiguous"` never reaches here — that
+ * variant is only ever returned BY `withDeliveryDeadline` itself when a
+ * race times out; the promise this function awaits is the raw
+ * `deliverAppointmentReminder` call, which never produces it.
+ */
+export async function resolveTimedOutReminderDelivery(
+  supabase: SupabaseClient<Database>,
+  row: Pick<ClaimedReminderRow, "deliveryId" | "attempts" | "attemptsAlreadyBumped" | "claimToken">,
+  outcome: ReminderDeliveryOutcome,
+): Promise<void> {
+  const scopedRow = { ...row, claimedStatus: "timeout_ambiguous" as const };
+  if (outcome.status === "sent") {
+    await markDelivery(supabase, scopedRow, "sent", {
+      providerMessageId: outcome.providerMessageId ?? null,
+    });
+    return;
+  }
+  if (outcome.status === "failed") {
+    await markDelivery(supabase, scopedRow, "failed", { lastError: outcome.error });
+    return;
+  }
+  // Unreachable per the doc comment above — defense in depth only.
+  await markDelivery(supabase, scopedRow, "failed", {
+    lastError: "unexpected timeout_ambiguous outcome from a settled delivery promise",
+  });
 }
 
 async function deliverBell(
@@ -329,6 +428,7 @@ async function deliverSlack(
 async function deliverSms(
   supabase: SupabaseClient<Database>,
   row: ClaimedReminderRow,
+  opts: { signal?: AbortSignal } = {},
 ): Promise<ReminderDeliveryOutcome> {
   // Delivery-time defense (finding 3): both claim RPCs already gate this
   // row's existence/re-eligibility on (sms_reminder enabled AND
@@ -384,7 +484,19 @@ async function deliverSms(
   // Send to the LIVE phone number, not the (possibly stale) claimed value
   // — same "trust the live re-check, not the claim" posture as the
   // enabled-flag check above.
-  const result = await sendRepSmsReminder({ to: prefs.reminderPhone, body });
+  //
+  // Codex round 7 (finding 1, item 5): `opts.signal` is the sweep route's
+  // per-delivery deadline (see `withDeliveryDeadline`) — passed through so
+  // Sendillo's underlying fetch can be torn down proactively instead of
+  // running to its own 10s internal timeout after this row has already
+  // moved to `timeout_ambiguous`. This is best-effort resource cleanup
+  // ONLY: whether an abort fired before or after Sendillo actually received
+  // the request isn't cleanly detectable through the standard fetch API
+  // (see `SendilloMessagingProvider.sendSms`'s doc comment), so an abort
+  // still surfaces as an ordinary provider error here and is reconciled
+  // through the SAME ambiguous-until-resolved path as any other late
+  // outcome — never auto-marked "definitely not sent".
+  const result = await sendRepSmsReminder({ to: prefs.reminderPhone, body, signal: opts.signal });
   if (result.ok) {
     await markDelivery(supabase, row, "sent", { providerMessageId: result.externalId });
     return {
@@ -404,10 +516,17 @@ async function deliverSms(
  * exception from any channel's provider call is caught, the delivery
  * marked failed, and a `failed` outcome returned, so one row's crash
  * never aborts the sweep loop calling this.
+ *
+ * `opts.signal` (Codex round 7, finding 1, item 5) is only forwarded to the
+ * sms channel — Sendillo's client is fetch-based, so it's the only provider
+ * call here that can be proactively cancelled. Bell is a direct DB write
+ * (no provider call to cancel); Slack's SDK has no signal plumbing in
+ * scope for this fix.
  */
 export async function deliverAppointmentReminder(
   supabase: SupabaseClient<Database>,
   row: ClaimedReminderRow,
+  opts: { signal?: AbortSignal } = {},
 ): Promise<ReminderDeliveryOutcome> {
   try {
     switch (row.channel) {
@@ -416,7 +535,7 @@ export async function deliverAppointmentReminder(
       case "slack":
         return await deliverSlack(supabase, row);
       case "sms":
-        return await deliverSms(supabase, row);
+        return await deliverSms(supabase, row, opts);
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

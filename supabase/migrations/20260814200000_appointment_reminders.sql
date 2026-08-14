@@ -91,10 +91,10 @@ alter table public.task_reminder_deliveries
   drop constraint task_reminder_deliveries_status_check;
 alter table public.task_reminder_deliveries
   add constraint task_reminder_deliveries_status_check
-  check (status in ('pending', 'sent', 'failed', 'suppressed'));
+  check (status in ('pending', 'sent', 'failed', 'suppressed', 'timeout_ambiguous'));
 
 comment on constraint task_reminder_deliveries_status_check on public.task_reminder_deliveries is
-  'suppressed (Codex round 1) is terminal: fn_claim_reminder_retries lands a retry candidate here when its revalidation fails (assignee suspended, channel disabled, or the appointment closed/passed its due_at since the original claim) instead of delivering a now-stale reminder.';
+  'suppressed (Codex round 1) is terminal: fn_claim_reminder_retries lands a retry candidate here when its revalidation fails (assignee suspended, channel disabled, or the appointment closed/passed its due_at since the original claim) instead of delivering a now-stale reminder. timeout_ambiguous (Codex round 7, finding 1) is a NON-RESEND holding state, not terminal: the sweep route (route.ts) transitions a row here, fenced by claim_token, when its own per-delivery deadline elapses while the provider call is still in flight (see withDeliveryDeadline) — the send may or may not have reached Slack/Sendillo, so it must never be auto-resent. The still-running call gets a continuation (route.ts, via after()) that fences timeout_ambiguous->sent (with the provider_message_id) on late success, or timeout_ambiguous->failed (now safely retryable — the provider definitively did not deliver) on late definite failure. fn_claim_reminder_retries''s candidates CTE below matches ONLY status IN (''failed'', ''pending'') — timeout_ambiguous is excluded by construction, not by an extra predicate, so it can never be picked up by a retry claim while ambiguous. A row whose continuation never resolves (process killed, provider call truly hangs) is surfaced by the sweep route''s hourly lingering-timeout_ambiguous telemetry for manual operator reconciliation (check the Slack/Sendillo dashboard, then update the row to sent or failed directly).';
 
 -- ----------------------------------------------------------------------------
 -- 1. fn_claim_appointment_reminders — primary window claim
@@ -327,6 +327,12 @@ security definer
 set search_path = public, pg_temp
 as $$
   with candidates as (
+    -- Codex round 7 (finding 1): this WHERE only ever matches
+    -- status='failed' or status='pending' — timeout_ambiguous (and
+    -- suppressed) rows are excluded by construction, not by an extra
+    -- predicate that could drift out of sync. Verified explicitly by the
+    -- integration test "never selects a timeout_ambiguous delivery, even
+    -- with attempts < 3 and a stale created_at" below this migration.
     select d.id, d.task_id, d.org_id, d.channel, d.attempts, d.status
     from public.task_reminder_deliveries d
     where (

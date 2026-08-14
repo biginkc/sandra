@@ -3,14 +3,31 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
   deliverAppointmentReminder: vi.fn(),
   markReminderDeliveryTimedOut: vi.fn(),
+  resolveTimedOutReminderDelivery: vi.fn(),
   reportError: vi.fn(),
+  after: vi.fn(),
 }));
 
 vi.mock("@/lib/notifications/reminders", () => ({
   deliverAppointmentReminder: mocks.deliverAppointmentReminder,
   markReminderDeliveryTimedOut: mocks.markReminderDeliveryTimedOut,
+  resolveTimedOutReminderDelivery: mocks.resolveTimedOutReminderDelivery,
 }));
 vi.mock("@/lib/errors/report", () => ({ reportError: mocks.reportError }));
+// Codex round 7 (finding 1): `withDeliveryDeadline` now registers a
+// post-response continuation via `after()` on a timeout. `after()` throws
+// outside a real Next.js request scope — which is exactly how these tests
+// call `runAppointmentReminderSweep` (directly, not through GET/POST) — so
+// it's stubbed the same way as the Slack actions webhook route test
+// (src/app/api/webhooks/slack/actions/route.test.ts) to just capture the
+// callback instead of invoking it inline.
+vi.mock("next/server", async () => {
+  const actual = await vi.importActual<typeof import("next/server")>("next/server");
+  return {
+    ...actual,
+    after: (fn: () => Promise<void>) => mocks.after(fn),
+  };
+});
 
 import { runAppointmentReminderSweep } from "./route";
 
@@ -272,6 +289,9 @@ describe("runAppointmentReminderSweep", () => {
 
     await runAppointmentReminderSweep(supabase, { budgetMs: 60_000 });
 
+    // sms goes through `withDeliveryDeadline` (Codex round 6), which now
+    // also passes the deadline's AbortSignal as a third arg (Codex round 7,
+    // finding 1, item 5).
     expect(mocks.deliverAppointmentReminder).toHaveBeenCalledWith(
       supabase,
       expect.objectContaining({
@@ -281,6 +301,7 @@ describe("runAppointmentReminderSweep", () => {
         channel: "sms",
         assigneeReminderPhone: "+18165551234",
       }),
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );
   });
 
@@ -489,22 +510,128 @@ describe("runAppointmentReminderSweep", () => {
 
       const summary = await summaryPromise;
 
-      // The hung retry was claimed and attempted, but recorded as a timed-
-      // out failure instead of blocking the loop.
+      // The hung retry was claimed and attempted, but recorded as
+      // timeout_ambiguous instead of blocking the loop or (Codex round 7,
+      // finding 1 — supersedes round 6) being marked an immediately
+      // retryable "failed", which would risk a duplicate send if the
+      // abandoned call later actually reaches the provider.
       expect(summary.retried).toBe(1);
-      expect(summary.outcomes.failed).toBe(1);
+      expect(summary.outcomes.timeout_ambiguous).toBe(1);
+      expect(summary.outcomes.failed).toBeUndefined();
       expect(mocks.markReminderDeliveryTimedOut).toHaveBeenCalledTimes(1);
-      const failureCall = mocks.reportError.mock.calls.find(
+      const ambiguousCall = mocks.reportError.mock.calls.find(
         (call) =>
           (call[1] as { tags?: { surface?: string } })?.tags?.surface ===
-          "cron_appointment_reminder_sweep_outcome",
+          "cron_appointment_reminder_sweep_outcome_ambiguous",
       );
-      expect((failureCall?.[0] as Error)?.message).toBe("delivery timeout");
+      expect((ambiguousCall?.[0] as Error)?.message).toBe(
+        "delivery timeout, completion ambiguous",
+      );
+
+      // A continuation was registered via after() to reconcile the still-
+      // running call once it settles.
+      expect(mocks.after).toHaveBeenCalledTimes(1);
 
       // Phase 2 still ran and claimed/delivered the primary appointment.
       expect(summary.claimed).toBe(1);
       expect(summary.outcomes.sent).toBe(1);
       expect(summary.processed).toBe(2);
+    });
+  });
+
+  describe("Codex round 7 (finding 1): late resolution after a timeout", () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    /** Drives a single sms row past its delivery deadline (never-resolving
+     *  provider promise until the test manually resolves `deferred`), then
+     *  returns the `after()` continuation callback that was registered so
+     *  the test can invoke it directly — same pattern the sweep route
+     *  itself uses in production, just not wired to a real Next.js request
+     *  scope here (see the `next/server` mock above). */
+    async function driveOneTimedOutDelivery(): Promise<{
+      resolveDeferred: (outcome: unknown) => void;
+      continuation: () => Promise<void>;
+    }> {
+      let resolveDeferred!: (outcome: unknown) => void;
+      const deferred = new Promise((resolve) => {
+        resolveDeferred = resolve;
+      });
+      const supabase = fakeSupabase([[rawRow("a", { channel: "sms" })]]);
+      mocks.deliverAppointmentReminder.mockReturnValueOnce(deferred);
+
+      const budgetMs = 10_000;
+      const summaryPromise = runAppointmentReminderSweep(supabase, { budgetMs });
+      await vi.advanceTimersByTimeAsync(budgetMs / 2 + 100);
+      await vi.advanceTimersByTimeAsync(budgetMs / 2);
+      await summaryPromise;
+
+      expect(mocks.after).toHaveBeenCalledTimes(1);
+      const continuation = mocks.after.mock.calls[0][0] as () => Promise<void>;
+      return { resolveDeferred, continuation };
+    }
+
+    it("late success reconciles the row to sent with the real provider id — no second provider call", async () => {
+      const { resolveDeferred, continuation } = await driveOneTimedOutDelivery();
+
+      resolveDeferred({ status: "sent", deliveryId: "a", channel: "sms", providerMessageId: "snd_late_1" });
+      await continuation();
+
+      expect(mocks.resolveTimedOutReminderDelivery).toHaveBeenCalledTimes(1);
+      expect(mocks.resolveTimedOutReminderDelivery).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ deliveryId: "a" }),
+        expect.objectContaining({ status: "sent", providerMessageId: "snd_late_1" }),
+      );
+      // The delivery worker itself was only ever invoked once for this row
+      // — the continuation reconciles the SAME settled promise, it never
+      // triggers a second provider call.
+      expect(mocks.deliverAppointmentReminder).toHaveBeenCalledTimes(1);
+    });
+
+    it("late definite failure reconciles the row to failed (now safely retryable)", async () => {
+      const { resolveDeferred, continuation } = await driveOneTimedOutDelivery();
+
+      resolveDeferred({ status: "failed", deliveryId: "a", channel: "sms", error: "provider rejected" });
+      await continuation();
+
+      expect(mocks.resolveTimedOutReminderDelivery).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ deliveryId: "a" }),
+        expect.objectContaining({ status: "failed", error: "provider rejected" }),
+      );
+    });
+
+    it("an unexpected rejection is reported but the row is left ambiguous, not guessed at", async () => {
+      let rejectDeferred!: (error: unknown) => void;
+      const deferred = new Promise((_resolve, reject) => {
+        rejectDeferred = reject;
+      });
+      const supabase = fakeSupabase([[rawRow("a", { channel: "sms" })]]);
+      mocks.deliverAppointmentReminder.mockReturnValueOnce(deferred);
+
+      const budgetMs = 10_000;
+      const summaryPromise = runAppointmentReminderSweep(supabase, { budgetMs });
+      await vi.advanceTimersByTimeAsync(budgetMs / 2 + 100);
+      await vi.advanceTimersByTimeAsync(budgetMs / 2);
+      await summaryPromise;
+
+      const continuation = mocks.after.mock.calls[0][0] as () => Promise<void>;
+      rejectDeferred(new Error("truly unexpected"));
+      await continuation();
+
+      expect(mocks.resolveTimedOutReminderDelivery).not.toHaveBeenCalled();
+      const lateRejectionCall = mocks.reportError.mock.calls.find(
+        (call) =>
+          (call[1] as { tags?: { surface?: string } })?.tags?.surface ===
+          "cron_appointment_reminder_sweep_late_rejection",
+      );
+      expect((lateRejectionCall?.[0] as Error)?.message).toBe("truly unexpected");
     });
   });
 });

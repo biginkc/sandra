@@ -17,7 +17,12 @@ vi.mock("./rep-sms", () => ({ sendRepSmsReminder: mocks.sendRepSmsReminder }));
 vi.mock("@/lib/integrations/prefs", () => ({ loadIntegrationPrefs: mocks.loadIntegrationPrefs }));
 vi.mock("@/lib/errors/report", () => ({ reportError: mocks.reportError }));
 
-import { deliverAppointmentReminder, type ClaimedReminderRow } from "./reminders";
+import {
+  deliverAppointmentReminder,
+  markReminderDeliveryTimedOut,
+  resolveTimedOutReminderDelivery,
+  type ClaimedReminderRow,
+} from "./reminders";
 
 function baseRow(overrides: Partial<ClaimedReminderRow> = {}): ClaimedReminderRow {
   return {
@@ -616,6 +621,84 @@ describe("Codex round 4 (finding 3): bounded retry on the mark-sent write", () =
     const outcome = await deliverAppointmentReminder(supabase, baseRow({ channel: "bell" }));
 
     expect(outcome.status).toBe("sent");
+    expect(supabase.updates).toHaveLength(1);
+    expect(mocks.reportError).not.toHaveBeenCalled();
+  });
+});
+
+describe("Codex round 7 (finding 1): timeout_ambiguous fencing", () => {
+  it("markReminderDeliveryTimedOut fences claimed(original claimedStatus) -> timeout_ambiguous, not 'failed'", async () => {
+    const supabase = fakeSupabase();
+    const row = baseRow({ claimToken: "tok-1", claimedStatus: "pending" });
+
+    await markReminderDeliveryTimedOut(supabase, row);
+
+    expect(supabase.updates).toHaveLength(1);
+    const [update] = supabase.updates;
+    expect(update.payload).toMatchObject({
+      status: "timeout_ambiguous",
+      last_error: "delivery timeout, completion ambiguous",
+    });
+    // Fenced by the row's ORIGINAL pre-claim status — this is the FIRST
+    // transition, off whatever the claim RPC handed the worker.
+    expect(update.eqs).toContainEqual(["claim_token", "tok-1"]);
+    expect(update.eqs).toContainEqual(["status", "pending"]);
+  });
+
+  it("resolveTimedOutReminderDelivery (late success) fences timeout_ambiguous -> sent with the real provider id, NOT off the row's original claimedStatus", async () => {
+    const supabase = fakeSupabase();
+    const row = baseRow({ claimToken: "tok-1", claimedStatus: "failed" });
+
+    await resolveTimedOutReminderDelivery(supabase, row, {
+      status: "sent",
+      deliveryId: row.deliveryId,
+      channel: "sms",
+      providerMessageId: "snd_late_1",
+    });
+
+    expect(supabase.updates).toHaveLength(1);
+    const [update] = supabase.updates;
+    expect(update.payload).toMatchObject({
+      status: "sent",
+      provider_message_id: "snd_late_1",
+    });
+    // Fenced against timeout_ambiguous — the status the deadline race left
+    // the row in — NOT the row's stale original claimedStatus ("failed"
+    // here). A write scoped by the original status would silently no-op
+    // (0 rows matched) instead of persisting the real outcome.
+    expect(update.eqs).toContainEqual(["claim_token", "tok-1"]);
+    expect(update.eqs).toContainEqual(["status", "timeout_ambiguous"]);
+    expect(update.eqs).not.toContainEqual(["status", "failed"]);
+  });
+
+  it("resolveTimedOutReminderDelivery (late definite failure) fences timeout_ambiguous -> failed — now safely retryable", async () => {
+    const supabase = fakeSupabase();
+    const row = baseRow({ claimToken: "tok-1", claimedStatus: "pending" });
+
+    await resolveTimedOutReminderDelivery(supabase, row, {
+      status: "failed",
+      deliveryId: row.deliveryId,
+      channel: "sms",
+      error: "provider rejected",
+    });
+
+    expect(supabase.updates).toHaveLength(1);
+    const [update] = supabase.updates;
+    expect(update.payload).toMatchObject({ status: "failed", last_error: "provider rejected" });
+    expect(update.eqs).toContainEqual(["status", "timeout_ambiguous"]);
+  });
+
+  it("a lost fence (row reclaimed/resolved out from under the continuation) is a silent no-op, same posture as every other markDelivery write", async () => {
+    const supabase = fakeSupabase({ matchedRows: 0 });
+    const row = baseRow({ claimToken: "tok-1", claimedStatus: "pending" });
+
+    await resolveTimedOutReminderDelivery(supabase, row, {
+      status: "sent",
+      deliveryId: row.deliveryId,
+      channel: "sms",
+      providerMessageId: "snd_late_1",
+    });
+
     expect(supabase.updates).toHaveLength(1);
     expect(mocks.reportError).not.toHaveBeenCalled();
   });

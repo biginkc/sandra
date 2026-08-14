@@ -633,6 +633,40 @@ describe("Migration 20260814200000 — appointment reminder claim RPCs", () => {
       expect(error).toBeNull();
       expect((data ?? []).some((r) => r.delivery_id === delivery!.id)).toBe(false);
     });
+
+    it("Codex round 7 (finding 1): never selects a timeout_ambiguous delivery, even with attempts < 3 and a stale created_at — excluded by construction, not an extra predicate", async () => {
+      const member = await createUserForOrg(BMH_ORG_ID);
+      await setPrefs(member.userId);
+      const appt = await insertDueAppointment(member.userId, 10);
+      await claimAppointmentReminders(db);
+      const { data: delivery } = await db
+        .from("task_reminder_deliveries")
+        .select("id")
+        .eq("task_id", appt.id)
+        .eq("channel", "bell")
+        .single();
+      expect(delivery).not.toBeNull();
+
+      // The sweep route (route.ts, withDeliveryDeadline) transitions a row
+      // here when its own per-delivery deadline elapses while the provider
+      // call is still in flight — the CHECK constraint (this migration)
+      // accepts it, but it must never come back out through the retry
+      // claim while ambiguous, regardless of how low attempts is or how
+      // stale created_at looks (both would make it eligible if it were
+      // status='failed' or 'pending').
+      await db
+        .from("task_reminder_deliveries")
+        .update({
+          status: "timeout_ambiguous",
+          attempts: 0,
+          created_at: new Date(Date.now() - 11 * 60_000).toISOString(),
+        })
+        .eq("id", delivery!.id);
+
+      const { data, error } = await claimReminderRetries(db);
+      expect(error).toBeNull();
+      expect((data ?? []).some((r) => r.delivery_id === delivery!.id)).toBe(false);
+    });
   });
 
   /** Direct writes to tasks.status/outcome/due_at for an appointment row are

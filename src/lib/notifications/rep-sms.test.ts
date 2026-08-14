@@ -107,12 +107,33 @@ describe("sendRepSmsReminder", () => {
     const result = await sendRepSmsReminder({ to: "+18165551234", body: "Appointment in 30 min" });
 
     expect(mocks.constructorSpy).toHaveBeenCalledWith("test-key", "+18165550000");
-    expect(mocks.sendSms).toHaveBeenCalledWith({
+    // Codex round 7 (finding 1, item 5): the deadline AbortSignal is now
+    // forwarded as a second arg (undefined when the caller doesn't pass
+    // one, as here).
+    expect(mocks.sendSms).toHaveBeenCalledWith(
+      {
+        to: "+18165551234",
+        body: "Appointment in 30 min",
+        from: "+18165550000",
+      },
+      { signal: undefined },
+    );
+    expect(result).toEqual({ ok: true, externalId: "sms-ext-1" });
+  });
+
+  it("forwards a caller-supplied AbortSignal through to the provider (Codex round 7, finding 1, item 5)", async () => {
+    const controller = new AbortController();
+
+    await sendRepSmsReminder({
       to: "+18165551234",
       body: "Appointment in 30 min",
-      from: "+18165550000",
+      signal: controller.signal,
     });
-    expect(result).toEqual({ ok: true, externalId: "sms-ext-1" });
+
+    expect(mocks.sendSms).toHaveBeenCalledWith(
+      expect.objectContaining({ to: "+18165551234" }),
+      { signal: controller.signal },
+    );
   });
 
   it("fails closed without calling the provider when env is missing", async () => {

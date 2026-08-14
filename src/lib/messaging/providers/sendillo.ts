@@ -33,7 +33,22 @@ export class SendilloMessagingProvider implements MessagingProvider {
     return this.fromNumber;
   }
 
-  async sendSms(input: SmsOutboundInput): Promise<SmsSendResult> {
+  /**
+   * `opts.signal` (Codex round 7, finding 1, item 5): an external deadline
+   * — the reminder sweep's per-delivery timeout — combined with this
+   * method's own `DEFAULT_SEND_TIMEOUT_MS` controller so whichever fires
+   * first tears down the request. This is best-effort local cancellation
+   * ONLY: aborting a fetch mid-flight doesn't tell us whether Sendillo's
+   * server had already received the request before the abort landed (the
+   * standard fetch API surface here has no hook for "was the body fully
+   * flushed"), so an abort still throws the same `ProviderError` as any
+   * other network failure — callers must NOT treat it as a confirmed
+   * non-delivery, only as "we stopped waiting."
+   */
+  async sendSms(
+    input: SmsOutboundInput,
+    opts: { signal?: AbortSignal } = {},
+  ): Promise<SmsSendResult> {
     const payload = {
       from: input.from ?? this.fromNumber,
       to: input.to,
@@ -43,6 +58,8 @@ export class SendilloMessagingProvider implements MessagingProvider {
     let response: Response;
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), DEFAULT_SEND_TIMEOUT_MS);
+    const onExternalAbort = () => controller.abort();
+    opts.signal?.addEventListener("abort", onExternalAbort);
     try {
       response = await fetch(SEND_ENDPOINT, {
         method: "POST",
@@ -60,6 +77,7 @@ export class SendilloMessagingProvider implements MessagingProvider {
       );
     } finally {
       clearTimeout(timeout);
+      opts.signal?.removeEventListener("abort", onExternalAbort);
     }
 
     const text = await response.text();

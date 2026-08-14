@@ -1,10 +1,11 @@
-import { NextResponse } from "next/server";
+import { after, NextResponse } from "next/server";
 import { createClient as createSupabaseClient } from "@supabase/supabase-js";
 
 import { reportError } from "@/lib/errors/report";
 import {
   deliverAppointmentReminder,
   markReminderDeliveryTimedOut,
+  resolveTimedOutReminderDelivery,
   type ClaimedReminderRow,
   type ReminderDeliveryOutcome,
 } from "@/lib/notifications/reminders";
@@ -107,43 +108,69 @@ const MAX_APPOINTMENTS_PER_SWEEP = 50;
 const RETRY_RESERVED_QUOTA = 10;
 
 /** Codex round 6 (finding 2): a single slack/sms provider call has no bound
- *  of its own (Slack SDK: no default request timeout; Sendillo: same) and
- *  could otherwise consume this row's remaining phase budget or the whole
- *  `SWEEP_BUDGET_MS` sweep, starving every row behind it. `deliverRow`
- *  below races `deliverAppointmentReminder` against a per-row deadline
- *  derived from whichever budget boundary applies to the CURRENT phase
- *  (phase 1's `halfBudgetMs` reservation cap, or the plain overall budget
- *  for phases 2/3) — see `withDeliveryDeadline`. Bell is exempt: it's a
- *  direct DB write (`createNotification`), not an external provider call,
- *  so it isn't in scope for this finding and isn't raced. */
-const REMINDER_TIMEOUT_ERROR = "delivery timeout";
+ *  of its own (Slack SDK: no default request timeout; Sendillo: same,
+ *  though round 7 adds best-effort cancellation via AbortSignal — see
+ *  `withDeliveryDeadline`) and could otherwise consume this row's
+ *  remaining phase budget or the whole `SWEEP_BUDGET_MS` sweep, starving
+ *  every row behind it. `deliverRow` below races `deliverAppointmentReminder`
+ *  against a per-row deadline derived from whichever budget boundary
+ *  applies to the CURRENT phase (phase 1's `halfBudgetMs` reservation cap,
+ *  or the plain overall budget for phases 2/3) — see `withDeliveryDeadline`.
+ *  Bell is exempt: it's a direct DB write (`createNotification`), not an
+ *  external provider call, so it isn't in scope for this finding and isn't
+ *  raced. */
+const REMINDER_TIMED_OUT_LAST_ERROR = "delivery timeout, completion ambiguous";
 
 /**
- * Races one delivery against `deadlineMs`. A timed-out call is recorded as
- * a retryable failure (`markReminderDeliveryTimedOut`, same fenced write
- * every other outcome uses) so the sweep loop can move on to the next
- * row/phase instead of blocking. The abandoned promise is NOT cancelled —
- * Slack/Sendillo may still receive and process the request — so it's given
- * a `.catch` to report (not rethrow) whatever it eventually resolves or
- * rejects with, since nothing is awaiting it after the race settles.
+ * Races one delivery against `deadlineMs`.
+ *
+ * Codex round 7 (finding 1): round 6 recorded a timeout as a retryable
+ * `failed` outcome — but the abandoned provider call is NOT cancelled (true
+ * cross-SDK cancellation isn't reliable), so it can still reach Slack/
+ * Sendillo AFTER that write lands. A `failed` row is immediately
+ * retry-eligible; a late provider SUCCESS can't persist over it (the fence
+ * expects `failed`, not the real eventual status), so the retry worker
+ * re-sends on top of a delivery that may already have gone out — a
+ * guaranteed duplicate under a slow provider.
+ *
+ * Fix: a timed-out row is fenced into `timeout_ambiguous` instead (see
+ * `markReminderDeliveryTimedOut`'s doc comment) — a non-resend holding
+ * state, excluded from `fn_claim_reminder_retries`'s eligibility by
+ * construction. The still-running `runPromise` gets a continuation (via
+ * `after()`, so it survives past this sweep's own HTTP response) that
+ * fences the row's REAL resolution once it settles:
+ * `resolveTimedOutReminderDelivery` writes `timeout_ambiguous -> sent`
+ * (with the real provider id) on late success, or `timeout_ambiguous ->
+ * failed` (now safely retryable — the provider definitively did not
+ * deliver) on late definite failure. A continuation that itself never
+ * resolves leaves the row in `timeout_ambiguous` — surfaced by
+ * `reportLingeringAmbiguousDeliveries` below once it's been stuck an hour,
+ * for manual operator reconciliation.
  */
 async function withDeliveryDeadline(
   supabase: ReturnType<typeof createServiceRoleClient>,
   row: ClaimedReminderRow,
   deadlineMs: number,
 ): Promise<ReminderDeliveryOutcome> {
-  const runPromise = deliverAppointmentReminder(supabase, row);
-  runPromise.catch((error) => {
-    reportError(error instanceof Error ? error : new Error(String(error)), {
-      tags: { surface: "cron_appointment_reminder_sweep_late_rejection" },
-      extra: { deliveryId: row.deliveryId, channel: row.channel },
-    });
+  // Codex round 7 (finding 1, item 5): best-effort cancellation for the sms
+  // channel's fetch-based Sendillo call (bell/slack ignore this signal —
+  // see deliverAppointmentReminder's doc comment). Tearing down the
+  // connection at the deadline shrinks how long a timed-out row can sit
+  // ambiguous waiting for `runPromise` to settle on its own; it does NOT
+  // change how the eventual outcome is interpreted (see
+  // SendilloMessagingProvider.sendSms's doc comment for why not).
+  const deadlineController = new AbortController();
+  const runPromise = deliverAppointmentReminder(supabase, row, {
+    signal: deadlineController.signal,
   });
 
   const TIMED_OUT = Symbol("delivery-timed-out");
   let timer: ReturnType<typeof setTimeout>;
   const timeoutPromise = new Promise<typeof TIMED_OUT>((resolve) => {
-    timer = setTimeout(() => resolve(TIMED_OUT), Math.max(0, deadlineMs));
+    timer = setTimeout(() => {
+      deadlineController.abort();
+      resolve(TIMED_OUT);
+    }, Math.max(0, deadlineMs));
   });
 
   const result = await Promise.race([runPromise, timeoutPromise]);
@@ -153,12 +180,26 @@ async function withDeliveryDeadline(
   }
 
   await markReminderDeliveryTimedOut(supabase, row);
-  return {
-    status: "failed",
-    deliveryId: row.deliveryId,
-    channel: row.channel,
-    error: REMINDER_TIMEOUT_ERROR,
-  };
+
+  after(async () => {
+    try {
+      const lateOutcome = await runPromise;
+      await resolveTimedOutReminderDelivery(supabase, row, lateOutcome);
+    } catch (error) {
+      // deliverAppointmentReminder never throws (see its own doc comment)
+      // — this is defense-in-depth for a genuinely unexpected rejection.
+      // The true outcome is unknown here (unlike a definite sent/failed
+      // result), so the row is deliberately left in timeout_ambiguous
+      // rather than guessed at — the hourly lingering-ambiguous telemetry
+      // surfaces it for manual reconciliation.
+      reportError(error instanceof Error ? error : new Error(String(error)), {
+        tags: { surface: "cron_appointment_reminder_sweep_late_rejection" },
+        extra: { deliveryId: row.deliveryId, channel: row.channel },
+      });
+    }
+  });
+
+  return { status: "timeout_ambiguous", deliveryId: row.deliveryId, channel: row.channel };
 }
 
 function createServiceRoleClient() {
@@ -263,12 +304,71 @@ async function handle(request: Request) {
   try {
     const supabase = createServiceRoleClient();
     const summary = await runAppointmentReminderSweep(supabase);
+    // Codex round 7 (finding 1), item 4: kept OUTSIDE
+    // `runAppointmentReminderSweep` deliberately — that function's own unit
+    // tests drive it against an `rpc`-only fake Supabase client, and this
+    // telemetry query is a `.from(...)` call unrelated to the claim/delivery
+    // loop's own budget/outcome contract. Never lets a telemetry failure
+    // fail the sweep's own response — see its own try/catch.
+    await reportLingeringAmbiguousDeliveries(supabase);
     return NextResponse.json({ ok: true, ...summary });
   } catch (e) {
     reportError(e, { tags: { surface: "cron_appointment_reminder_sweep" } });
     return NextResponse.json(
       { error: e instanceof Error ? e.message : "unknown" },
       { status: 500 },
+    );
+  }
+}
+
+const AMBIGUOUS_STALE_THRESHOLD_MS = 60 * 60 * 1000;
+
+/**
+ * Codex round 7 (finding 1), item 4: `timeout_ambiguous` rows are
+ * deliberately excluded from `fn_claim_reminder_retries`'s eligibility (its
+ * candidates CTE only ever matches `status IN ('failed', 'pending')` — see
+ * 20260814200000_appointment_reminders.sql) so a row this route can't
+ * confirm sent/failed is NEVER auto-resent. That means a row whose
+ * continuation (see `withDeliveryDeadline`'s `after()` call) never
+ * resolves — the provider call itself hung past this function's own
+ * `maxDuration`, or the continuation was killed before finishing — has no
+ * automatic path out of `timeout_ambiguous`.
+ *
+ * Surfaces any such row older than an hour so an operator notices and
+ * reconciles it manually: check the Slack/Sendillo dashboard for whether
+ * the message actually went out, then `update task_reminder_deliveries set
+ * status = 'sent' | 'failed' where id = ...` directly (no RPC needed —
+ * this table is service-role-only).
+ *
+ * `created_at` is used as the staleness clock in lieu of a dedicated
+ * `ambiguous_since`/`resolved_at` column: a delivery row is only ever
+ * inserted right before its first provider call (at claim time, near
+ * `due_at`), so it's a close proxy for "how long has this been
+ * unresolved" without a schema change beyond this fix's scope.
+ */
+export async function reportLingeringAmbiguousDeliveries(
+  supabase: ReturnType<typeof createServiceRoleClient>,
+): Promise<void> {
+  const cutoff = new Date(Date.now() - AMBIGUOUS_STALE_THRESHOLD_MS).toISOString();
+  const { count, error } = await supabase
+    .from("task_reminder_deliveries")
+    .select("id", { count: "exact", head: true })
+    .eq("status", "timeout_ambiguous")
+    .lt("created_at", cutoff);
+
+  if (error) {
+    reportError(new Error(`lingering timeout_ambiguous count query failed: ${error.message}`), {
+      tags: { surface: "cron_appointment_reminder_sweep_ambiguous_telemetry" },
+    });
+    return;
+  }
+  if (count && count > 0) {
+    reportError(
+      new Error(`${count} appointment reminder deliveries stuck in timeout_ambiguous >1h`),
+      {
+        tags: { surface: "cron_appointment_reminder_sweep_ambiguous_telemetry" },
+        extra: { count },
+      },
     );
   }
 }
@@ -338,6 +438,16 @@ export async function runAppointmentReminderSweep(
     if (outcome.status === "failed") {
       reportError(new Error(outcome.error), {
         tags: { surface: "cron_appointment_reminder_sweep_outcome" },
+        extra: { deliveryId: raw.delivery_id, channel: raw.channel },
+      });
+    } else if (outcome.status === "timeout_ambiguous") {
+      // Codex round 7 (finding 1): distinct from a genuine `failed` — this
+      // row isn't retryable yet, just unresolved. Reported immediately
+      // (per-occurrence) as a lower-severity signal; `timeout_ambiguous`
+      // rows still stuck an hour later are separately escalated by
+      // `reportLingeringAmbiguousDeliveries`.
+      reportError(new Error(REMINDER_TIMED_OUT_LAST_ERROR), {
+        tags: { surface: "cron_appointment_reminder_sweep_outcome_ambiguous" },
         extra: { deliveryId: raw.delivery_id, channel: raw.channel },
       });
     }
