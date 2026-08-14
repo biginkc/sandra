@@ -17,8 +17,9 @@ type Props = {
   appt: CalendarAppointmentRow;
   timezone: string;
   viewerRole: CalendarViewerRole;
-  /** user_id -> email, for the assignee-email line (owner view only). */
+  /** user_id -> email, for the whose-appointment line (any non-self row). */
   assignees: Record<string, string>;
+  currentUserId: string;
   nowMs: number;
 };
 
@@ -38,12 +39,16 @@ export function AppointmentBlock({
   timezone,
   viewerRole,
   assignees,
+  currentUserId,
   nowMs,
 }: Props) {
   const href = appointmentHref(appt);
   const label = appointmentLabel(appt);
+  // Label whose appointment this is whenever it isn't the viewer's own —
+  // members can view teammates (scoping.ts honors ?assignee=), so the
+  // label follows the row's owner, not the viewer's role.
   const assigneeEmail =
-    viewerRole === "owner" ? assignees[appt.assignee_id] : undefined;
+    appt.assignee_id !== currentUserId ? assignees[appt.assignee_id] : undefined;
   const chip =
     appt.status === "completed" && appt.outcome
       ? outcomeChip(appt.outcome)

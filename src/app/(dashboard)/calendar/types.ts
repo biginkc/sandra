@@ -93,9 +93,12 @@ export type CalendarSearchParams = {
    *  the week works (page derives that day's own week start). Defaults to
    *  "today" in the viewer's zone when absent/unparseable. */
   week?: string;
-  /** A specific assignee's user id, or the literal `"me"`. Owner default:
-   *  unset (org-wide). Member default: `"me"` (enforced by the page
-   *  regardless of the raw param, since members may not view org-wide). */
+  /** A specific assignee's user id, or the sentinel `"me"`/`"all"` — see
+   *  `resolveAssigneeId` in page.tsx. Owner default (param absent):
+   *  org-wide. Member default (param absent): `"me"`. Both roles can set
+   *  an explicit `?assignee=` to see a teammate or `"all"` (plan decision
+   *  7 — "own items" is a default, not a lockout, since the booking flow
+   *  already lets a member book on a teammate's behalf). */
   assignee?: string;
   view?: CalendarViewMode;
 };

@@ -69,7 +69,7 @@ describe("<AgendaList />", () => {
 
   it("shows the empty state when there are no appointments", () => {
     const days = buildWeek(new Date("2026-08-19T12:00:00Z"), CHI);
-    render(<AgendaList days={days} appointments={[]} timezone={CHI} viewerRole="owner" assignees={{}} />);
+    render(<AgendaList days={days} appointments={[]} timezone={CHI} viewerRole="owner" assignees={{}} currentUserId="viewer-1" />);
     expect(screen.getByTestId("calendar-agenda-empty")).toBeInTheDocument();
   });
 
@@ -102,7 +102,7 @@ describe("<AgendaList />", () => {
         appointments={[later, earlier, tomorrow]}
         timezone={CHI}
         viewerRole="owner"
-        assignees={{}}
+        assignees={{}} currentUserId="viewer-1"
       />,
     );
 
@@ -132,7 +132,7 @@ describe("<AgendaList />", () => {
     );
 
     render(
-      <AgendaList days={days} appointments={appointments} timezone={CHI} viewerRole="owner" assignees={{}} />,
+      <AgendaList days={days} appointments={appointments} timezone={CHI} viewerRole="owner" assignees={{}} currentUserId="viewer-1" />,
     );
 
     expect(screen.getAllByTestId(/^calendar-appointment-appt-/)).toHaveLength(40);
@@ -166,7 +166,7 @@ describe("<AgendaList />", () => {
     });
 
     render(
-      <AgendaList days={days} appointments={[pastDue, future]} timezone={CHI} viewerRole="owner" assignees={{}} />,
+      <AgendaList days={days} appointments={[pastDue, future]} timezone={CHI} viewerRole="owner" assignees={{}} currentUserId="viewer-1" />,
     );
 
     expect(screen.getByTestId("stub-outcome-row-past-due")).toBeInTheDocument();

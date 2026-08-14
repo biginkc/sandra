@@ -17,6 +17,7 @@ type Props = {
   timezone: string;
   viewerRole: CalendarViewerRole;
   assignees: Record<string, string>;
+  currentUserId: string;
 };
 
 const VISIBLE_ROW_CAP = 40;
@@ -39,6 +40,7 @@ export function AgendaList({
   timezone,
   viewerRole,
   assignees,
+  currentUserId,
 }: Props) {
   const [expanded, setExpanded] = useState(false);
   // eslint-disable-next-line react-hooks/purity
@@ -91,6 +93,7 @@ export function AgendaList({
             {rows.map((appt) => (
               <li key={appt.id} className="py-1.5 first:pt-0 last:pb-0">
                 <AppointmentBlock
+                  currentUserId={currentUserId}
                   appt={appt}
                   timezone={timezone}
                   viewerRole={viewerRole}

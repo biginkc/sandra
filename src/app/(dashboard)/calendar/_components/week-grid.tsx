@@ -17,6 +17,7 @@ type Props = {
   timezone: string;
   viewerRole: CalendarViewerRole;
   assignees: Record<string, string>;
+  currentUserId: string;
 };
 
 /**
@@ -33,6 +34,7 @@ export function WeekGrid({
   timezone,
   viewerRole,
   assignees,
+  currentUserId,
 }: Props) {
   const todayKey = todayDateKeyInZone(timezone);
   // Server-rendered-once-per-request pattern (matches TasksPanel's own
@@ -68,6 +70,7 @@ export function WeekGrid({
               ) : (
                 dayAppointments.map((appt) => (
                   <AppointmentBlock
+                  currentUserId={currentUserId}
                     key={appt.id}
                     appt={appt}
                     timezone={timezone}

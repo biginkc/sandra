@@ -26,6 +26,33 @@ function makeBuilder(): Record<string, unknown> {
   return builder;
 }
 
+// .from("memberships").select().eq("org_id",…).eq("access_status","active")
+// .is("deletion_prepared_at", null).or(activeAt filter) — mirrors
+// `listBookingAssignees`'s predicate (book-appointment-action.test.ts).
+let membershipRows: Array<{ user_id: string }> | null = [];
+let membershipError: { message: string; code?: string } | null = null;
+let membershipEqCalls: Array<[string, unknown]> = [];
+let membershipIsCalls: Array<[string, unknown]> = [];
+let membershipOrCalls: string[] = [];
+
+function makeMembershipsBuilder(): Record<string, unknown> {
+  const builder: Record<string, unknown> = {};
+  builder.select = () => builder;
+  builder.eq = (col: string, val: unknown) => {
+    membershipEqCalls.push([col, val]);
+    return builder;
+  };
+  builder.is = (col: string, val: unknown) => {
+    membershipIsCalls.push([col, val]);
+    return builder;
+  };
+  builder.or = (filter: string) => {
+    membershipOrCalls.push(filter);
+    return Promise.resolve({ data: membershipRows, error: membershipError });
+  };
+  return builder;
+}
+
 vi.mock("@/lib/supabase/server", () => ({
   createClient: vi.fn(async () => ({
     from: vi.fn(() => makeBuilder()),
@@ -35,10 +62,18 @@ vi.mock("@/lib/supabase/server", () => ({
 vi.mock("@/lib/supabase/admin", () => ({
   createAdminClient: vi.fn(() => ({
     auth: { admin: { listUsers: mocks.listUsers } },
+    from: vi.fn((table: string) => {
+      if (table === "memberships") return makeMembershipsBuilder();
+      throw new Error(`Unexpected admin table in test: ${table}`);
+    }),
   })),
 }));
 
-import { fetchAssigneeEmails, fetchCalendarAppointments } from "./queries";
+import {
+  fetchAssigneeEmails,
+  fetchCalendarAppointments,
+  fetchOrgAssigneeEmails,
+} from "./queries";
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -46,6 +81,11 @@ beforeEach(() => {
   queuedError = null;
   eqCalls = [];
   selectCalls = [];
+  membershipRows = [];
+  membershipError = null;
+  membershipEqCalls = [];
+  membershipIsCalls = [];
+  membershipOrCalls = [];
 });
 
 describe("fetchCalendarAppointments", () => {
@@ -247,5 +287,63 @@ describe("fetchAssigneeEmails", () => {
     });
     const result = await fetchAssigneeEmails(["user-1"]);
     expect(result).toEqual({});
+  });
+});
+
+describe("fetchOrgAssigneeEmails", () => {
+  it("returns emails for every active org membership, independent of any appointment rows (Codex round 1)", async () => {
+    // A teammate with zero appointments this week still appears — this
+    // query never touches `tasks`/`appointments`, only `memberships`.
+    membershipRows = [{ user_id: "user-1" }, { user_id: "rep-2" }];
+    mocks.listUsers.mockResolvedValueOnce({
+      data: {
+        users: [
+          { id: "user-1", email: "owner@bmh.com" },
+          { id: "rep-2", email: "rep2@bmh.com" },
+        ],
+        nextPage: null,
+      },
+      error: null,
+    });
+
+    const result = await fetchOrgAssigneeEmails("org-1");
+    expect(result).toEqual({ "user-1": "owner@bmh.com", "rep-2": "rep2@bmh.com" });
+  });
+
+  it("scopes to the org and to active, non-deletion-prepared, unexpired memberships", async () => {
+    membershipRows = [];
+    await fetchOrgAssigneeEmails("org-1");
+
+    expect(membershipEqCalls).toContainEqual(["org_id", "org-1"]);
+    expect(membershipEqCalls).toContainEqual(["access_status", "active"]);
+    expect(membershipIsCalls).toContainEqual(["deletion_prepared_at", null]);
+    expect(membershipOrCalls[0]).toMatch(/^access_expires_at\.is\.null,access_expires_at\.gt\./);
+  });
+
+  it("keeps the full roster available even when the current week's appointments are empty (decoupled from `fetchCalendarAppointments`)", async () => {
+    queuedData = [];
+    membershipRows = [{ user_id: "rep-2" }];
+    mocks.listUsers.mockResolvedValueOnce({
+      data: { users: [{ id: "rep-2", email: "rep2@bmh.com" }], nextPage: null },
+      error: null,
+    });
+
+    const appointments = await fetchCalendarAppointments("org-1", {
+      weekStartUtc: "2026-05-03T05:00:00.000Z",
+      weekEndUtc: "2026-05-10T05:00:00.000Z",
+    });
+    expect(appointments).toEqual([]);
+
+    const result = await fetchOrgAssigneeEmails("org-1");
+    expect(result).toEqual({ "rep-2": "rep2@bmh.com" });
+  });
+
+  it("returns an empty map on a memberships query error", async () => {
+    membershipRows = null;
+    membershipError = { message: "boom" };
+
+    const result = await fetchOrgAssigneeEmails("org-1");
+    expect(result).toEqual({});
+    expect(mocks.listUsers).not.toHaveBeenCalled();
   });
 });

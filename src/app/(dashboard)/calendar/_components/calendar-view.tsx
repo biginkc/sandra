@@ -28,7 +28,8 @@ const TAB_INACTIVE = "text-muted-foreground hover:text-foreground";
 
 /**
  * Calendar page's top-level client component: view switcher (Week/Agenda),
- * week navigation, an owner-only assignee filter, "+ New", and the
+ * week navigation, an assignee filter (both roles — Codex round 1; a
+ * member's default is their own items, not a lockout), "+ New", and the
  * WeekGrid/AgendaList surfaces below. Everything view-affecting lives in
  * the URL (`?view=&week=&assignee=`) so the page stays deep-linkable; every
  * control except the assignee `<Select>` (which needs an onChange) is a
@@ -69,17 +70,23 @@ export function CalendarView({
 
   const todayKey = todayDateKeyInZone(timezone);
   const rawAssignee = searchParams.get("assignee");
-  const assigneeValue =
-    viewerRole === "owner" ? (rawAssignee ?? ALL) : (rawAssignee ?? ME);
+  // No param -> the role's default (owner: everyone; member: me). Once a
+  // value is picked, it's always written explicitly (including "all"), so
+  // "Everyone" round-trips through the URL instead of collapsing back to
+  // "no param" — which would silently re-default to "me" for a member
+  // (page.tsx's `resolveAssigneeId` treats absence and role differently).
+  const assigneeValue = rawAssignee ?? (viewerRole === "owner" ? ALL : ME);
 
   const onAssigneeChange = (value: string | null) => {
     if (!value) return;
-    router.replace(buildHref({ assignee: value === ALL ? null : value }));
+    router.replace(buildHref({ assignee: value }));
   };
 
   // Full org roster minus the viewer (who already has the dedicated "Me"
-  // option) — `assignees` is the full roster for an owner per the shared
-  // contract, not just the ids referenced in the current appointment set.
+  // option) — `assignees` is the full active-membership roster per the
+  // shared contract (Codex round 1: loaded independently of the week's
+  // appointments), not just the ids referenced in the current appointment
+  // set, and available to both roles now that members get the filter too.
   const memberOptions = Object.entries(assignees)
     .filter(([id]) => id !== currentUserId)
     .sort(([, a], [, b]) => a.localeCompare(b));
@@ -138,26 +145,27 @@ export function CalendarView({
         </div>
 
         <div className="flex items-center gap-2">
-          {viewerRole === "owner" ? (
-            <Select value={assigneeValue} onValueChange={onAssigneeChange}>
-              <SelectTrigger
-                size="sm"
-                className="w-40"
-                data-testid="calendar-assignee-filter"
-              >
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value={ALL}>Everyone</SelectItem>
-                <SelectItem value={ME}>Me</SelectItem>
-                {memberOptions.map(([id, email]) => (
-                  <SelectItem key={id} value={id}>
-                    {email}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          ) : null}
+          {/* Both roles get the filter (Codex round 1) — "own items" is
+              a default for members, not a lockout, and the booking flow
+              already lets a member act on a teammate's behalf. */}
+          <Select value={assigneeValue} onValueChange={onAssigneeChange}>
+            <SelectTrigger
+              size="sm"
+              className="w-40"
+              data-testid="calendar-assignee-filter"
+            >
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value={ALL}>Everyone</SelectItem>
+              <SelectItem value={ME}>Me</SelectItem>
+              {memberOptions.map(([id, email]) => (
+                <SelectItem key={id} value={id}>
+                  {email}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
           <NewBlockButton currentUserId={currentUserId} />
         </div>
       </div>
@@ -165,6 +173,7 @@ export function CalendarView({
       {view === "week" ? (
         <div className="hidden md:block">
           <WeekGrid
+          currentUserId={currentUserId}
             days={days}
             appointments={appointments}
             timezone={timezone}
@@ -179,6 +188,7 @@ export function CalendarView({
         data-testid="calendar-agenda-wrapper"
       >
         <AgendaList
+          currentUserId={currentUserId}
           days={days}
           appointments={appointments}
           timezone={timezone}

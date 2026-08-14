@@ -102,6 +102,45 @@ export async function fetchCalendarAppointments(
 }
 
 /**
+ * Full ACTIVE-membership roster for `orgId`, mapped user_id -> email —
+ * used to populate the calendar's assignee filter (and per-appointment
+ * assignee labels) independently of which appointments happen to fall in
+ * the displayed week (Codex round 1 — the previous roster was built only
+ * from the current week's `appointments` + the caller, so a teammate with
+ * zero appointments this week silently dropped out of the filter, and
+ * switching filters after an empty week had nothing to switch to).
+ *
+ * Reuses the exact active/non-deletion-prepared/unexpired membership
+ * predicate `listBookingAssignees` uses
+ * (`components/appointments/book-appointment-action.ts`) so "who can be
+ * assigned an appointment" and "who shows up in the calendar filter" never
+ * disagree.
+ */
+export async function fetchOrgAssigneeEmails(orgId: string): Promise<Record<string, string>> {
+  const admin = createAdminClient();
+  const activeAt = new Date().toISOString();
+  const { data: memberships, error } = await admin
+    .from("memberships")
+    .select("user_id")
+    .eq("org_id", orgId)
+    .eq("access_status", "active")
+    .is("deletion_prepared_at", null)
+    .or(`access_expires_at.is.null,access_expires_at.gt.${activeAt}`);
+
+  if (error || !memberships) {
+    if (error) {
+      console.error("[calendar] fetchOrgAssigneeEmails failed", {
+        message: error.message,
+        code: error.code,
+      });
+    }
+    return {};
+  }
+
+  return fetchAssigneeEmails(memberships.map((m) => m.user_id as string));
+}
+
+/**
  * user_id -> email for every id in `userIds`. `auth.users` isn't
  * RLS-accessible to end-users, so this goes through the admin client's
  * `listUsers`, same pattern as `leads/[id]/page.tsx` (batched, filtered to

@@ -186,12 +186,41 @@ describe("<CalendarView />", () => {
     expect(screen.getByTestId("calendar-agenda-wrapper")).toHaveClass("block");
   });
 
-  it("renders the assignee filter only for the owner role", () => {
+  it("renders the assignee filter for both owner and member roles (Codex round 1 — member default is own items, not a lockout)", () => {
     const { rerender } = render(<CalendarView {...baseProps({ viewerRole: "owner" })} />);
     expect(screen.getByTestId("calendar-assignee-filter")).toBeInTheDocument();
 
     rerender(<CalendarView {...baseProps({ viewerRole: "member" })} />);
-    expect(screen.queryByTestId("calendar-assignee-filter")).not.toBeInTheDocument();
+    expect(screen.getByTestId("calendar-assignee-filter")).toBeInTheDocument();
+  });
+
+  it("defaults the filter value to Everyone for an owner and Me for a member when ?assignee= is absent", () => {
+    nav.search = "";
+    const { rerender } = render(<CalendarView {...baseProps({ viewerRole: "owner" })} />);
+    expect(screen.getByTestId("calendar-assignee-filter-value")).toHaveTextContent("all");
+
+    rerender(<CalendarView {...baseProps({ viewerRole: "member" })} />);
+    expect(screen.getByTestId("calendar-assignee-filter-value")).toHaveTextContent("me");
+  });
+
+  it("lets a member switch to a teammate or Everyone, writing an explicit ?assignee= param that round-trips (not relying on 'param absent' — that means 'me' for a member)", async () => {
+    nav.search = "view=week";
+    render(
+      <CalendarView
+        {...baseProps({
+          viewerRole: "member",
+          currentUserId: "user-1",
+          assignees: { "user-1": "me@bmh.com", "rep-2": "rep2@bmh.com" },
+        })}
+      />,
+    );
+
+    const user = userEvent.setup();
+    await user.click(screen.getByTestId("select-item-rep-2"));
+    expect(nav.replace).toHaveBeenCalledWith("/calendar?view=week&assignee=rep-2");
+
+    await user.click(screen.getByTestId("select-item-all"));
+    expect(nav.replace).toHaveBeenCalledWith("/calendar?view=week&assignee=all");
   });
 
   it("renders +New with the current user id", () => {

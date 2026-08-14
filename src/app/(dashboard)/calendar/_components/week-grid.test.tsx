@@ -81,7 +81,7 @@ describe("<WeekGrid />", () => {
         appointments={[]}
         timezone={LA}
         viewerRole="owner"
-        assignees={{}}
+        assignees={{}} currentUserId="viewer-1"
       />,
     );
 
@@ -114,7 +114,7 @@ describe("<WeekGrid />", () => {
         appointments={[appt]}
         timezone={LA}
         viewerRole="owner"
-        assignees={{}}
+        assignees={{}} currentUserId="viewer-1"
       />,
     );
 
@@ -132,7 +132,7 @@ describe("<WeekGrid />", () => {
         appointments={[appt]}
         timezone="America/New_York"
         viewerRole="owner"
-        assignees={{}}
+        assignees={{}} currentUserId="viewer-1"
       />,
     );
     expect(screen.getByTestId("calendar-appointment-appt-1")).not.toHaveTextContent(
@@ -147,7 +147,7 @@ describe("<WeekGrid />", () => {
     vi.setSystemTime(new Date(new Date(today.startUtc).getTime() + 60 * 60 * 1000));
 
     render(
-      <WeekGrid days={days} appointments={[]} timezone={LA} viewerRole="owner" assignees={{}} />,
+      <WeekGrid days={days} appointments={[]} timezone={LA} viewerRole="owner" assignees={{}} currentUserId="viewer-1" />,
     );
 
     expect(screen.getByTestId(`calendar-day-column-${today.date}`)).toHaveAttribute(
@@ -169,13 +169,16 @@ describe("<WeekGrid />", () => {
     });
     const assignees = { "rep-1": "rep@bmh.com" };
 
+    // The label follows the ROW's owner, not the viewer's role: any
+    // non-self appointment is labeled (members can view teammates), and
+    // your own rows never are.
     const { rerender } = render(
-      <WeekGrid days={days} appointments={[appt]} timezone={LA} viewerRole="owner" assignees={assignees} />,
+      <WeekGrid days={days} appointments={[appt]} timezone={LA} viewerRole="member" assignees={assignees} currentUserId="viewer-1" />,
     );
     expect(screen.getByText("rep@bmh.com")).toBeInTheDocument();
 
     rerender(
-      <WeekGrid days={days} appointments={[appt]} timezone={LA} viewerRole="member" assignees={assignees} />,
+      <WeekGrid days={days} appointments={[appt]} timezone={LA} viewerRole="member" assignees={assignees} currentUserId="rep-1" />,
     );
     expect(screen.queryByText("rep@bmh.com")).not.toBeInTheDocument();
   });
@@ -191,7 +194,7 @@ describe("<WeekGrid />", () => {
     ];
 
     const { container } = render(
-      <WeekGrid days={days} appointments={appointments} timezone={LA} viewerRole="owner" assignees={{}} />,
+      <WeekGrid days={days} appointments={appointments} timezone={LA} viewerRole="owner" assignees={{}} currentUserId="viewer-1" />,
     );
 
     expect(container.querySelector("a[href='/leads/prop-1']")).not.toBeNull();
@@ -232,7 +235,7 @@ describe("<WeekGrid />", () => {
         appointments={[pastDueOpen, futureOpen, completed]}
         timezone={LA}
         viewerRole="owner"
-        assignees={{}}
+        assignees={{}} currentUserId="viewer-1"
       />,
     );
 

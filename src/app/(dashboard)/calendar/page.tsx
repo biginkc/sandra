@@ -5,7 +5,8 @@ import { loadIntegrationPrefs } from "@/lib/integrations/prefs";
 import { createClient } from "@/lib/supabase/server";
 import { addDaysInZone, getDayBoundsInZone, wallTimeToUtc } from "@/lib/time/zoned";
 
-import { fetchAssigneeEmails, fetchCalendarAppointments } from "./queries";
+import { fetchCalendarAppointments, fetchOrgAssigneeEmails } from "./queries";
+import { resolveAssigneeId } from "./scoping";
 import type {
   CalendarDayBounds,
   CalendarSearchParams,
@@ -152,18 +153,7 @@ export default async function CalendarPage({
   const orgId = activeMemberships[0].org_id;
   const viewerRole: CalendarViewerRole = activeMemberships[0].role;
 
-  // Scoping (locked decision #7 — owner org-view, VA own-items): a member
-  // ALWAYS sees only their own appointments, regardless of any `assignee`
-  // param — this is enforced here, not just defaulted, since a
-  // teammate's schedule is other-org-member data a VA shouldn't be able
-  // to pull into view by editing the URL. Only an owner can filter by an
-  // arbitrary assignee or go org-wide (param absent).
-  const assigneeId =
-    viewerRole === "member"
-      ? user.id
-      : params.assignee === "me"
-        ? user.id
-        : (params.assignee ?? undefined);
+  const assigneeId = resolveAssigneeId(viewerRole, params.assignee, user.id);
 
   const prefs = await loadIntegrationPrefs(supabase, user.id);
   const timezone = prefs.timezone;
@@ -178,9 +168,12 @@ export default async function CalendarPage({
     weekEndUtc,
   });
 
-  const assigneeIds = new Set(appointments.map((a) => a.assignee_id));
-  assigneeIds.add(user.id);
-  const assignees = await fetchAssigneeEmails(Array.from(assigneeIds));
+  // Loaded independently of `appointments` — the org roster (Codex round
+  // 1), not just the ids referenced in the current week's rows, so the
+  // filter dropdown (both roles, now that members get one too) always
+  // lists every active teammate, including one with zero appointments in
+  // the displayed week.
+  const assignees = await fetchOrgAssigneeEmails(orgId);
 
   return (
     <Page>
