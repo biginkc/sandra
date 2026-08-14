@@ -10,7 +10,8 @@ export type EventType =
   | "bulk_action_completed"
   | "skip_trace_requested"
   | "task_assigned"
-  | "ai_responder_provider_failure";
+  | "ai_responder_provider_failure"
+  | "task_appointment_reminder";
 
 export type EntityType = "property" | "job" | "task" | "message";
 

@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import * as React from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -9,6 +9,7 @@ import {
   checkAppointmentOverlap,
   getMemberTimezone,
 } from "./book-appointment-action";
+import { rescheduleAppointmentAction } from "./lifecycle-actions";
 
 // Mirrors the assign-dropdown.test.tsx convention: mock the base-ui-backed
 // ui/* primitives (no ResizeObserver/PointerEvent polyfills in this jsdom
@@ -132,6 +133,10 @@ vi.mock("./book-appointment-action", () => ({
   bookAppointment: vi.fn(),
   checkAppointmentOverlap: vi.fn(),
   getMemberTimezone: vi.fn(),
+}));
+
+vi.mock("./lifecycle-actions", () => ({
+  rescheduleAppointmentAction: vi.fn(),
 }));
 
 async function openAndFillHappyPath() {
@@ -328,5 +333,94 @@ describe("<BookAppointmentPopover />", () => {
       await screen.findByTestId("book-appointment-overlap-warning"),
     ).toHaveTextContent("book anyway?");
     expect(screen.getByTestId("book-appointment-submit")).toBeEnabled();
+  });
+
+  describe('mode="reschedule"', () => {
+    beforeEach(() => {
+      vi.mocked(rescheduleAppointmentAction).mockReset();
+    });
+
+    it("hides the assignee select and note, and fixes the timezone lookup to the given assigneeId", async () => {
+      render(
+        <BookAppointmentPopover
+          mode="reschedule"
+          taskId="task-1"
+          assigneeId="user-2"
+          currentUserId="user-2"
+        />,
+      );
+      const user = userEvent.setup();
+      await user.click(screen.getByTestId("book-appointment-trigger"));
+
+      expect(getMemberTimezone).toHaveBeenCalledWith("user-2");
+      expect(screen.queryByTestId("assignee-select")).not.toBeInTheDocument();
+      expect(screen.queryByTestId("book-appointment-note")).not.toBeInTheDocument();
+      expect(screen.getByTestId("book-appointment-submit")).toHaveTextContent(
+        "Reschedule",
+      );
+    });
+
+    it("submits via rescheduleAppointmentAction with the taskId and picked date/time (no assignee/title/note fields) and calls onRescheduled", async () => {
+      vi.mocked(rescheduleAppointmentAction).mockResolvedValue({
+        ok: true,
+        data: { taskId: "task-2", oldTaskId: "task-1", chainId: "chain-1", duplicate: false },
+      });
+      const onRescheduled = vi.fn();
+      render(
+        <BookAppointmentPopover
+          mode="reschedule"
+          taskId="task-1"
+          assigneeId="user-2"
+          currentUserId="user-2"
+          onRescheduled={onRescheduled}
+        />,
+      );
+      await openAndFillHappyPath();
+      await screen.findByTestId("book-appointment-end-label");
+      await userEvent.setup().click(screen.getByTestId("book-appointment-submit"));
+
+      await waitFor(() =>
+        expect(rescheduleAppointmentAction).toHaveBeenCalledTimes(1),
+      );
+      expect(rescheduleAppointmentAction).toHaveBeenCalledWith({
+        taskId: "task-1",
+        date: "2026-06-15",
+        time: "14:00",
+        timeZone: "America/Chicago",
+        durationMinutes: 30,
+        idempotencyKey: expect.stringMatching(
+          /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+        ),
+      });
+      expect(bookAppointment).not.toHaveBeenCalled();
+      await waitFor(() =>
+        expect(onRescheduled).toHaveBeenCalledWith({
+          taskId: "task-2",
+          oldTaskId: "task-1",
+          chainId: "chain-1",
+          duplicate: false,
+        }),
+      );
+    });
+
+    it("opens via an externally-clicked triggerRef, not just a direct user click", async () => {
+      const ref = { current: null as HTMLButtonElement | null };
+      render(
+        <BookAppointmentPopover
+          mode="reschedule"
+          taskId="task-1"
+          assigneeId="user-2"
+          currentUserId="user-2"
+          triggerRef={ref}
+        />,
+      );
+
+      expect(screen.queryByTestId("book-appointment-calendar")).not.toBeInTheDocument();
+      act(() => {
+        ref.current?.click();
+      });
+
+      expect(await screen.findByTestId("book-appointment-calendar")).toBeInTheDocument();
+    });
   });
 });

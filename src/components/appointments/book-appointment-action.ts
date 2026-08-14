@@ -205,19 +205,31 @@ export async function checkAppointmentOverlap(
   assigneeId: string,
   startUtc: string,
   endUtc: string,
+  /** Codex round 12 (finding 5): the reschedule popover reuses this same
+   *  soft-overlap check, and the appointment being rescheduled hasn't
+   *  moved yet — its own row still occupies its OLD due_at/end_at, which
+   *  overlaps ANY target window that keeps or partially keeps the
+   *  original time. Without excluding it, the row self-matches as a false
+   *  conflict on every reschedule. Because the query is `.limit(1)`, an
+   *  unexcluded self-match can also HIDE a genuine second conflicting
+   *  appointment (the self-row wins the one row the query returns).
+   *  Omitted (the book flow) applies no exclusion. */
+  excludeTaskId?: string,
 ): Promise<Result<{ hasOverlap: boolean; conflictStartAt: string | null }>> {
   try {
     const supabase = await createClient();
-    const { data, error } = await supabase
+    let query = supabase
       .from("tasks")
       .select("due_at")
       .eq("assignee_id", assigneeId)
       .eq("type", "appointment")
       .eq("status", "open")
       .lt("due_at", endUtc)
-      .gt("end_at", startUtc)
-      .limit(1)
-      .maybeSingle();
+      .gt("end_at", startUtc);
+    if (excludeTaskId) {
+      query = query.neq("id", excludeTaskId);
+    }
+    const { data, error } = await query.limit(1).maybeSingle();
     if (error) {
       return err({ code: "OVERLAP_CHECK_FAILED", message: error.message });
     }

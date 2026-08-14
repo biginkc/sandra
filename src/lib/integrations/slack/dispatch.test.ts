@@ -34,8 +34,8 @@ vi.mock("@/lib/integrations/prefs", () => ({ loadIntegrationPrefs }));
 vi.mock("@/lib/tasks", () => ({ completeTask }));
 vi.mock("@/lib/errors/report", () => ({ reportError }));
 vi.mock("@slack/web-api", () => ({
-  WebClient: function MockWebClient(token: string) {
-    webClientConstructor(token);
+  WebClient: function MockWebClient(token: string, options?: unknown) {
+    webClientConstructor(token, options);
     return {
       conversations: { open: conversationsOpen },
       chat: { postMessage: chatPostMessage, update: chatUpdate },
@@ -45,6 +45,7 @@ vi.mock("@slack/web-api", () => ({
 
 import {
   completeTaskFromSlack,
+  dispatchAppointmentReminderSlack,
   dispatchTaskAssignedSlack,
   refreshSlackMessage,
 } from "./dispatch";
@@ -318,6 +319,130 @@ describe("slack/dispatch", () => {
     expect(reportError).toHaveBeenCalledWith(
       expect.any(Error),
       expect.objectContaining({ tags: { surface: "slack_task_dispatch" } }),
+    );
+  });
+
+  const reminderInput = {
+    taskId: "22222222-2222-4222-8222-222222222222",
+    assigneeId: "user-1",
+    taskTitle: "Walkthrough with seller",
+    dueAt: "2026-08-15T20:00:00.000Z",
+    timezone: "America/Chicago",
+    deepLink: "https://sandra-sooty.vercel.app/tasks/22222222-2222-4222-8222-222222222222",
+  };
+
+  it("dispatchAppointmentReminderSlack short-circuits when pref disabled", async () => {
+    loadIntegrationPrefs.mockResolvedValueOnce({
+      slackEnabled: false,
+      calendarEnabled: true,
+      timezone: "America/Chicago",
+    });
+
+    await expect(dispatchAppointmentReminderSlack(reminderInput)).resolves.toEqual({
+      outcome: "failed",
+      reason: "pref_disabled",
+    });
+    expect(getDecryptedToken).not.toHaveBeenCalled();
+  });
+
+  it("dispatchAppointmentReminderSlack short-circuits when no bot token row", async () => {
+    getDecryptedToken.mockResolvedValueOnce(null);
+
+    await expect(dispatchAppointmentReminderSlack(reminderInput)).resolves.toEqual({
+      outcome: "failed",
+      reason: "no_token",
+    });
+    expect(conversationsOpen).not.toHaveBeenCalled();
+  });
+
+  // Codex round 6 (finding 2): the reminder sweep is budget-bound (45s
+  // phase budget, route.ts) — an unbounded WebClient (no timeout, 10
+  // SDK-internal retries over ~30 minutes by default) can blow through it
+  // on a single call. Scoped to this path only; dispatchTaskAssignedSlack
+  // (the seller-facing send) must be untouched — asserted separately below.
+  it("dispatchAppointmentReminderSlack constructs its WebClient with an explicit timeout and zero SDK retries", async () => {
+    await dispatchAppointmentReminderSlack(reminderInput);
+
+    expect(webClientConstructor).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ timeout: expect.any(Number), retryConfig: { retries: 0 } }),
+    );
+  });
+
+  it("dispatchTaskAssignedSlack (seller-facing) does NOT get the reminder path's timeout/retry override", async () => {
+    await dispatchTaskAssignedSlack(dispatchInput);
+
+    expect(webClientConstructor).toHaveBeenCalledWith(expect.any(String), undefined);
+  });
+
+  it("dispatchAppointmentReminderSlack posts appointment-reminder blocks with the time-of-day in the assignee's zone", async () => {
+    await dispatchAppointmentReminderSlack(reminderInput);
+
+    expect(chatPostMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        channel: "D123",
+        text: expect.stringContaining("Appointment in 30 min: Walkthrough with seller at"),
+        blocks: expect.arrayContaining([
+          expect.objectContaining({ type: "header" }),
+          expect.objectContaining({ type: "context" }),
+        ]),
+      }),
+    );
+  });
+
+  it("dispatchAppointmentReminderSlack never includes a Mark Done action block", async () => {
+    await dispatchAppointmentReminderSlack(reminderInput);
+
+    const call = chatPostMessage.mock.calls[0]?.[0] as { blocks: { type: string }[] };
+    expect(call.blocks.some((block) => block.type === "actions")).toBe(false);
+  });
+
+  it("dispatchAppointmentReminderSlack does not call loadIntegrationPrefs when slackEnabled is passed explicitly", async () => {
+    await dispatchAppointmentReminderSlack({ ...reminderInput, slackEnabled: true });
+
+    expect(loadIntegrationPrefs).not.toHaveBeenCalled();
+  });
+
+  // Codex round 12 (finding 1): a postMessage exception happens AFTER
+  // transmission may have started — never provable non-delivery, so this
+  // must be `ambiguous`, not the old two-way `sent:false`.
+  it("dispatchAppointmentReminderSlack on chat.postMessage rejection reports the exception as ambiguous (transmission may have started) and does not throw", async () => {
+    chatPostMessage.mockRejectedValueOnce(new Error("Slack unavailable"));
+
+    await expect(dispatchAppointmentReminderSlack(reminderInput)).resolves.toEqual({
+      outcome: "ambiguous",
+      reason: "Slack unavailable",
+    });
+    expect(reportError).toHaveBeenCalledWith(
+      expect.any(Error),
+      expect.objectContaining({ tags: { surface: "slack_appointment_reminder_dispatch" } }),
+    );
+  });
+
+  // Codex round 12 (finding 1): a definite PRE-SEND failure (nothing was
+  // ever transmitted) must stay a retryable `failed`, distinct from the
+  // ambiguous send-stage case above.
+  it("dispatchAppointmentReminderSlack on conversations.open rejection reports a definite failed (pre-send, nothing transmitted)", async () => {
+    conversationsOpen.mockRejectedValueOnce(new Error("channel open blew up"));
+
+    await expect(dispatchAppointmentReminderSlack(reminderInput)).resolves.toEqual({
+      outcome: "failed",
+      reason: "pre_send_error",
+    });
+    expect(chatPostMessage).not.toHaveBeenCalled();
+  });
+
+  // Codex round 12 (finding 1): a receipt-less success (2xx-shaped, but no
+  // ts) is the SAME uncertainty class as an exception mid-call.
+  it("dispatchAppointmentReminderSlack reports ambiguous when chat.postMessage resolves without a ts", async () => {
+    chatPostMessage.mockResolvedValueOnce({ ok: true, ts: undefined });
+
+    const result = await dispatchAppointmentReminderSlack(reminderInput);
+
+    expect(result.outcome).toBe("ambiguous");
+    expect(reportError).toHaveBeenCalledWith(
+      expect.any(Error),
+      expect.objectContaining({ tags: { surface: "slack_appointment_reminder_dispatch" } }),
     );
   });
 

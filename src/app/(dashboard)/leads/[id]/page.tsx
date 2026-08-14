@@ -9,6 +9,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
+import { loadIntegrationPrefs } from "@/lib/integrations/prefs";
 import { selectBestSmsPhone } from "@/lib/messaging/sms-phone";
 import { zillowUrl } from "@/lib/utils/zillow-url";
 
@@ -39,6 +40,7 @@ import {
   LeadCallSummary,
   type CallActivityRollupRow,
 } from "./lead-call-summary";
+import { LeadAppointmentsSection } from "./lead-appointments-section";
 import { LeadTaskWidget } from "./lead-task-widget";
 import { SmsComposer } from "./sms-composer";
 import { TagsSection } from "./tags-section";
@@ -122,6 +124,18 @@ export default async function LeadDetailPage({
   const lead = data as DetailedLead;
   const homeownerSmsPhone = selectBestSmsPhone(lead.homeowner)?.phone ?? null;
 
+  // Started early, consumed just before render (same parallel-fetch shape
+  // as `usersPromise` below) — this lead's own open appointments, each
+  // with its own outcome/reschedule/cancel controls (Appointments
+  // section).
+  const appointmentsPromise = supabase
+    .from("tasks")
+    .select("id, title, due_at, end_at, assignee_id")
+    .eq("type", "appointment")
+    .eq("related_property_id", lead.id)
+    .eq("status", "open")
+    .order("due_at", { ascending: true });
+
   const { prevId, nextId } = await getPropertyNeighbors(
     id,
     lead.status === "prospect" ? "prospect" : "lead",
@@ -131,6 +145,16 @@ export default async function LeadDetailPage({
   const {
     data: { user: sessionUser },
   } = await supabase.auth.getUser();
+
+  // Viewer's own saved timezone (same user_integration_prefs.timezone
+  // source TasksPanel's fetchMyTasks reads) — LeadAppointmentsSection
+  // needs this to format appointment times without silently falling back
+  // to the render environment's device zone (loadIntegrationPrefs already
+  // falls back to "America/Chicago" when unset).
+  const viewerPrefs = sessionUser
+    ? await loadIntegrationPrefs(supabase, sessionUser.id)
+    : null;
+  const viewerTimezone = viewerPrefs?.timezone ?? "America/Chicago";
 
   // Fetch existing SMS thread — messages linked either to the property
   // directly or to the homeowner (catches inbound that lands pre-linkage).
@@ -215,6 +239,25 @@ export default async function LeadDetailPage({
     .limit(20);
   const initialCallRows =
     (callRollupRaw ?? []) as unknown as CallActivityRollupRow[];
+
+  const { data: appointmentsRaw, error: appointmentsError } =
+    await appointmentsPromise;
+  if (appointmentsError && appointmentsError.code !== "42703") {
+    // 42703 = post-deploy pre-migration window (end_at/type='appointment'
+    // don't exist yet) — degrade to an empty section rather than failing
+    // the whole page; any other error still just logs.
+    console.error("[leads] appointments fetch failed", {
+      message: appointmentsError.message,
+      code: appointmentsError.code,
+    });
+  }
+  const initialAppointments = (appointmentsRaw ?? []) as Array<{
+    id: string;
+    title: string;
+    due_at: string;
+    end_at: string | null;
+    assignee_id: string;
+  }>;
 
   // Tags attached to this property, with the tag row joined inline.
   const { data: tagRowsRaw } = await supabase
@@ -485,6 +528,13 @@ export default async function LeadDetailPage({
             address={lead.address}
             currentUserId={sessionUser?.id ?? null}
             initialAssigneeId={lead.assigned_user_id}
+          />
+        </Section>
+
+        <Section title="Appointments">
+          <LeadAppointmentsSection
+            appointments={initialAppointments}
+            timezone={viewerTimezone}
           />
         </Section>
 

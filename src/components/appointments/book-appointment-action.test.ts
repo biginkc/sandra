@@ -83,9 +83,11 @@ function makeSupabaseMock(opts: {
     }),
   };
 
-  // .from("tasks").select().eq().eq().eq().lt().gt().limit().maybeSingle()
+  // .from("tasks").select().eq().eq().eq().lt().gt().neq().limit().maybeSingle()
+  // (Codex round 12, finding 5: `.neq("id", excludeTaskId)` is chained in
+  // only when a reschedule caller passes `excludeTaskId`.)
   const tasksBuilder: Record<string, ReturnType<typeof vi.fn>> = {};
-  for (const method of ["select", "eq", "lt", "gt", "limit"]) {
+  for (const method of ["select", "eq", "lt", "gt", "neq", "limit"]) {
     tasksBuilder[method] = vi.fn(() => tasksBuilder);
   }
   tasksBuilder.maybeSingle = vi.fn().mockResolvedValue({
@@ -201,6 +203,68 @@ describe("checkAppointmentOverlap", () => {
     ).resolves.toEqual({
       ok: true,
       data: { hasOverlap: true, conflictStartAt: "2026-06-15T19:00:00.000Z" },
+    });
+  });
+
+  // Codex round 12 (finding 5): the reschedule popover passes the task's
+  // own id so its not-yet-moved row (still occupying its OLD window) never
+  // self-matches as a false conflict.
+  describe("Codex round 12 (finding 5): excludeTaskId — reschedule self-exclusion", () => {
+    it("omitting excludeTaskId (the book flow) never calls .neq — unchanged behavior", async () => {
+      const mock = makeSupabaseMock({ overlapRow: null });
+      createClient.mockResolvedValue(mock);
+
+      await checkAppointmentOverlap(
+        "user-1",
+        "2026-06-15T19:00:00.000Z",
+        "2026-06-15T19:30:00.000Z",
+      );
+
+      const tasksBuilder = mock.from("tasks") as { neq: ReturnType<typeof import("vitest")["vi"]["fn"]> };
+      expect(tasksBuilder.neq).not.toHaveBeenCalled();
+    });
+
+    it("passing excludeTaskId (reschedule) excludes that task's own row, reporting no overlap when it was the only match", async () => {
+      // The mock's default overlap query still "finds" a row (its own,
+      // not-yet-moved slot) — but with `.neq("id", excludeTaskId)` applied,
+      // a REAL Supabase query would exclude it. This test asserts the
+      // exclusion filter is actually wired into the query chain.
+      const mock = makeSupabaseMock({ overlapRow: null });
+      createClient.mockResolvedValue(mock);
+
+      await checkAppointmentOverlap(
+        "user-1",
+        "2026-06-15T19:00:00.000Z",
+        "2026-06-15T19:30:00.000Z",
+        "task-being-rescheduled",
+      );
+
+      const tasksBuilder = mock.from("tasks") as { neq: ReturnType<typeof import("vitest")["vi"]["fn"]> };
+      expect(tasksBuilder.neq).toHaveBeenCalledWith("id", "task-being-rescheduled");
+    });
+
+    it("still detects a genuine SECOND conflicting appointment when excludeTaskId is set — the self-match doesn't hide it", async () => {
+      // Simulates the exclusion having already removed the self-row at the
+      // DB level: the single row the (excluding) query returns is a real,
+      // different conflicting appointment.
+      const mock = makeSupabaseMock({
+        overlapRow: { due_at: "2026-06-15T19:15:00.000Z" },
+      });
+      createClient.mockResolvedValue(mock);
+
+      const result = await checkAppointmentOverlap(
+        "user-1",
+        "2026-06-15T19:00:00.000Z",
+        "2026-06-15T19:30:00.000Z",
+        "task-being-rescheduled",
+      );
+
+      expect(result).toEqual({
+        ok: true,
+        data: { hasOverlap: true, conflictStartAt: "2026-06-15T19:15:00.000Z" },
+      });
+      const tasksBuilder = mock.from("tasks") as { neq: ReturnType<typeof import("vitest")["vi"]["fn"]> };
+      expect(tasksBuilder.neq).toHaveBeenCalledWith("id", "task-being-rescheduled");
     });
   });
 });

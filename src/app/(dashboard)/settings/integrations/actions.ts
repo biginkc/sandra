@@ -9,6 +9,7 @@ import { reportError } from "@/lib/errors/report";
 import {
   loadIntegrationPrefs,
   setChannelEnabled,
+  setReminderPhone,
   setTimezone,
   type IntegrationChannel,
 } from "@/lib/integrations/prefs";
@@ -16,15 +17,24 @@ import {
   deleteOAuthTokens,
   getDecryptedToken,
 } from "@/lib/integrations/tokens/store";
+import { checkRepSmsFromNumberReady } from "@/lib/notifications/rep-sms";
 import { createClient } from "@/lib/supabase/server";
 
 export interface IntegrationStatus {
   slack: { connected: boolean; enabled: boolean; teamName?: string | null };
   google: { connected: boolean; enabled: boolean; email?: string | null };
+  /** PR 3 — `available` is a server-checked env gate (REP_SMS_FROM_NUMBER
+   *  present): the SMS reminder card is hidden entirely on the client
+   *  when this is false, never just disabled. */
+  sms: { available: boolean; enabled: boolean; phone: string | null };
   timezone: string;
 }
 
 type Provider = "slack" | "google";
+
+/** E.164 — mirrors the DB CHECK
+ *  (`user_integration_prefs_reminder_phone_format_check`, 20260814150000). */
+const E164_RE = /^\+[1-9][0-9]{6,14}$/;
 
 const ALLOWED_TIMEZONES = [
   "America/Chicago",
@@ -82,6 +92,11 @@ export async function getIntegrationStatus(): Promise<
         enabled: prefs.calendarEnabled,
         email: googleRow?.external_account_id ?? null,
       },
+      sms: {
+        available: Boolean(process.env.REP_SMS_FROM_NUMBER),
+        enabled: prefs.smsRemindersEnabled,
+        phone: prefs.reminderPhone,
+      },
       timezone: prefs.timezone,
     });
   } catch (error) {
@@ -106,12 +121,70 @@ export async function setChannelEnabledAction(
       };
     }
 
+    // R2-4/R3-3: enabling sms_reminder is gated on the same preflight the
+    // sweep's send path fail-closes on server-side — an enabled DB row
+    // must never outlive what's actually deliverable. Disabling always
+    // succeeds unconditionally.
+    if (channel === "sms_reminder" && enabled) {
+      const ready = await checkRepSmsFromNumberReady();
+      if (!ready.ready) {
+        return {
+          ok: false,
+          error: { code: "SMS_REMINDERS_NOT_CONFIGURED", message: ready.message },
+        };
+      }
+
+      const prefs = await loadIntegrationPrefs(supabase, user.id);
+      if (!prefs.reminderPhone) {
+        return {
+          ok: false,
+          error: {
+            code: "SMS_REMINDERS_NO_PHONE",
+            message: "Add a phone number before turning on SMS reminders.",
+          },
+        };
+      }
+    }
+
     await setChannelEnabled(supabase, user.id, channel, enabled);
     revalidatePath("/settings/integrations");
     return ok(null);
   } catch (error) {
     reportError(error, { tags: { surface: "set_integration_enabled" } });
     return errFromUnknown(error, "INTEGRATION_PREF_UPDATE_FAILED");
+  }
+}
+
+export async function setReminderPhoneAction(phone: string): Promise<Result<null>> {
+  const trimmed = phone.trim();
+  if (!E164_RE.test(trimmed)) {
+    return {
+      ok: false,
+      error: {
+        code: "VALIDATION",
+        message: "Enter a phone number in E.164 format, e.g. +18165551234.",
+      },
+    };
+  }
+
+  try {
+    const supabase = await createClient();
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    if (!user) {
+      return {
+        ok: false,
+        error: { code: "AUTH", message: "Sign in to manage integrations." },
+      };
+    }
+
+    await setReminderPhone(supabase, user.id, trimmed);
+    revalidatePath("/settings/integrations");
+    return ok(null);
+  } catch (error) {
+    reportError(error, { tags: { surface: "set_reminder_phone" } });
+    return errFromUnknown(error, "REMINDER_PHONE_UPDATE_FAILED");
   }
 }
 

@@ -578,7 +578,7 @@ create table public.task_calendar_mutations (
 comment on table public.task_calendar_mutations is
   'Durable ledger for Google Calendar mutations on appointment tasks (PR 3 lifecycle RPCs write it). Full lineage per calendar_chain_id: which task owns which event, under whose account, at what generation. Retry sweeps read phase IN (pending, provider_done); the chain-scoped partial unique index below serializes concurrent mutations on the same logical appointment.';
 comment on column public.task_calendar_mutations.result_reason is
-  'Nullable terminal-phase diagnostic (PR 3): e.g. pref_disabled, no_token, auth_permanent, event_created, reconciled_409.';
+  'Nullable terminal-phase diagnostic (PR 3): e.g. pref_disabled, no_token, auth_permanent, event_created, reconciled_409. Also used mid-flight on reassign, still phase=pending: old_event_deleted marks the old-account delete as durably done so a crash before the new-account create/finalize resumes without re-deleting or duplicating.';
 comment on column public.task_calendar_mutations.client_event_id is
   'Deterministic client-supplied Google event id (PR 3), persisted before the provider call so a crash-and-retry reconciles via 409 instead of creating a duplicate event.';
 

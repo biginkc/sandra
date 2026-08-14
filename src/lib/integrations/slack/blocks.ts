@@ -64,6 +64,43 @@ export function buildTaskAssignedBlocks(
   ];
 }
 
+export interface AppointmentReminderBlockInput {
+  taskTitle: string;
+  /** Wall-clock time-of-day in the assignee's zone, e.g. "3:00 PM CDT". */
+  timeLabel: string;
+  deepLink: string;
+}
+
+/**
+ * PR 3 reminder sweep — same header + context shape as
+ * `buildTaskAssignedBlocks` but no "Mark Done" action row: a reminder is
+ * informational, not an assignment the recipient needs to act on from
+ * Slack.
+ */
+export function buildAppointmentReminderBlocks(
+  input: AppointmentReminderBlockInput,
+): KnownBlock[] {
+  return [
+    {
+      type: "header",
+      text: {
+        type: "plain_text",
+        text: `Appointment in 30 min: ${input.taskTitle}`,
+        emoji: true,
+      },
+    },
+    {
+      type: "context",
+      elements: [
+        {
+          type: "mrkdwn",
+          text: `*${input.timeLabel}* · <${input.deepLink}|Open in Sandra>`,
+        },
+      ],
+    },
+  ];
+}
+
 export function buildMarkedDoneBlocks(
   input: MarkedDoneBlockInput,
 ): KnownBlock[] {

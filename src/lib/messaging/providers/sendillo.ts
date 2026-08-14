@@ -33,16 +33,80 @@ export class SendilloMessagingProvider implements MessagingProvider {
     return this.fromNumber;
   }
 
-  async sendSms(input: SmsOutboundInput): Promise<SmsSendResult> {
+  /**
+   * `opts.signal` (Codex round 7, finding 1, item 5): an external deadline
+   * — the reminder sweep's per-delivery timeout — combined with this
+   * method's own `DEFAULT_SEND_TIMEOUT_MS` controller so whichever fires
+   * first tears down the request. This is best-effort local cancellation
+   * ONLY: aborting a fetch mid-flight doesn't tell us whether Sendillo's
+   * server had already received the request before the abort landed (the
+   * standard fetch API surface here has no hook for "was the body fully
+   * flushed"), so an abort still throws a `ProviderError` — never a raw
+   * `AbortError` — as any other network failure would. Callers must NOT
+   * treat it as a confirmed non-delivery, only as "we stopped waiting."
+   *
+   * Codex round 9 (finding 1): EITHER trigger — this method's own internal
+   * `DEFAULT_SEND_TIMEOUT_MS` timer, or the caller's external `opts.signal`
+   * — aborts the SAME `controller`, so both land in the catch block below
+   * indistinguishably from each other (and, before this round, from a
+   * genuine network failure). The re-thrown `ProviderError` now carries
+   * `details.isAbort = true` whenever the underlying rejection was an
+   * `AbortError`, regardless of which of the two triggered it — a caller
+   * has no way to tell "my deadline fired" from "the provider's own 10s
+   * timer fired while my deadline was still live" from outside this
+   * method, and both are equally non-evidence of delivery, so both must be
+   * classified identically (see `sendRepSmsReminder` in rep-sms.ts, which
+   * reads this flag to map either case to `aborted_ambiguous`).
+   *
+   * Codex round 10 (finding 4): a signal that's ALREADY aborted when this
+   * method is called is a distinct, stronger case from a mid-flight abort
+   * above — checked BEFORE the fetch is ever issued (and rechecked
+   * immediately after the abort listener is attached, closing the race
+   * where the signal fires in the gap between the two checks). No request
+   * ever leaves this process in either case, so it's PROVABLY non-delivery
+   * — not "we stopped waiting," but "we never started." Thrown with
+   * `details.notSent = true` (alongside `isAbort`) so `sendRepSmsReminder`
+   * can route it to its own `not_sent` reason, distinct from
+   * `aborted_ambiguous` — see `RepSmsSendResult` in rep-sms.ts.
+   */
+  async sendSms(
+    input: SmsOutboundInput,
+    opts: { signal?: AbortSignal } = {},
+  ): Promise<SmsSendResult> {
     const payload = {
       from: input.from ?? this.fromNumber,
       to: input.to,
       body: input.body,
     };
 
+    if (opts.signal?.aborted) {
+      throw new ProviderError(
+        "Sendillo send not attempted: deadline signal was already aborted",
+        "sendillo",
+        { isAbort: true, notSent: true },
+      );
+    }
+
     let response: Response;
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), DEFAULT_SEND_TIMEOUT_MS);
+    const onExternalAbort = () => controller.abort();
+    opts.signal?.addEventListener("abort", onExternalAbort);
+    // Recheck immediately after attaching the listener — closes the race
+    // where the signal aborted BETWEEN the check above and the listener
+    // attach (a window with no listener wired up yet, so `onExternalAbort`
+    // would never fire and the fetch below would proceed unbounded by the
+    // caller's own deadline, bounded only by this method's own internal
+    // timer instead).
+    if (opts.signal?.aborted) {
+      clearTimeout(timeout);
+      opts.signal.removeEventListener("abort", onExternalAbort);
+      throw new ProviderError(
+        "Sendillo send not attempted: deadline signal was already aborted",
+        "sendillo",
+        { isAbort: true, notSent: true },
+      );
+    }
     try {
       response = await fetch(SEND_ENDPOINT, {
         method: "POST",
@@ -54,22 +118,54 @@ export class SendilloMessagingProvider implements MessagingProvider {
         signal: controller.signal,
       });
     } catch (e) {
+      // Codex round 9 (finding 1): preserve abort provenance. `e.name` is
+      // "AbortError" whether THIS method's own internal timeout fired or
+      // the caller's `opts.signal` fired (both abort the same
+      // `controller`) — either way the fetch was torn down, not rejected
+      // by Sendillo, so it is not evidence of non-delivery. `details` is
+      // the one channel `ProviderError` already exposes for exactly this
+      // kind of caller-facing classification (see errors/classes.ts).
+      const isAbort = e instanceof Error && e.name === "AbortError";
+      // Codex round 12 (finding 1): a NON-abort rejection here means
+      // `fetch()` itself threw — a raw transport failure (connection
+      // reset, DNS blip, socket error) with no HTTP response ever
+      // received. Unlike a `!response.ok` rejection below (Sendillo DID
+      // respond, with an explicit error — provable non-delivery), a
+      // transport-level exception proves nothing about whether the
+      // request reached Sendillo before the connection dropped: it may
+      // have been received and processed, or never left this process.
+      // Flagged `transportFailure` (distinct from `isAbort`, though both
+      // ultimately mean "we don't know") so `sendRepSmsReminder` can route
+      // it to `aborted_ambiguous` alongside an actual abort, rather than
+      // the ordinary `provider_error` (which callers treat as a confirmed,
+      // safely-retryable non-delivery).
       throw new ProviderError(
         e instanceof Error ? e.message : String(e),
         "sendillo",
+        isAbort ? { isAbort: true } : { transportFailure: true },
       );
     } finally {
       clearTimeout(timeout);
+      opts.signal?.removeEventListener("abort", onExternalAbort);
     }
 
     const text = await response.text();
     const parsed = safeParseJson(text);
     if (!response.ok) {
       const errorMessage = extractErrorMessage(parsed) || text || response.statusText;
+      // A 5xx does not prove non-delivery — the provider can accept and
+      // send before erroring — so it carries ambiguousDelivery for callers
+      // (rep-sms) that must never retry an unproven non-send. 4xx semantics
+      // are documented rejections and stay definitively retryable. The
+      // seller-facing path reads only `status` (unchanged behavior).
       throw new ProviderError(
         `Sendillo ${response.status}: ${errorMessage}`,
         "sendillo",
-        { status: response.status, response: parsed },
+        {
+          status: response.status,
+          response: parsed,
+          ...(response.status >= 500 ? { ambiguousDelivery: true } : {}),
+        },
       );
     }
 
@@ -79,10 +175,19 @@ export class SendilloMessagingProvider implements MessagingProvider {
       readString(parsed, "data", "id") ??
       readString(parsed, "id");
     if (!externalId) {
+      // Codex round 12 (finding 1): Sendillo returned a 2xx — the request
+      // definitely reached them and they accepted it — but the response
+      // carried no id we can reconcile against later. This is "accepted
+      // without a provable receipt," the SAME class of uncertainty as a
+      // transport failure mid-flight or an abort: the message plausibly
+      // went out, we just can't confirm it durably. `acceptedWithoutId`
+      // routes this to `aborted_ambiguous` in `sendRepSmsReminder`, not the
+      // confirmed-non-delivery `provider_error` a genuine `!response.ok`
+      // rejection gets.
       throw new ProviderError(
         "Sendillo send succeeded but response had no messageId",
         "sendillo",
-        { response: parsed },
+        { response: parsed, acceptedWithoutId: true },
       );
     }
 

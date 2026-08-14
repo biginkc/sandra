@@ -1317,6 +1317,20 @@ function readProviderRetryMetadata(
   };
 }
 
+// Codex round 9 (finding 1): sendillo.ts now stamps `details.isAbort = true`
+// on a ProviderError thrown from either its own internal send timeout or an
+// external AbortSignal (see that file's sendSms doc comment). This
+// classifier deliberately does NOT read that flag — it only ever looks at
+// `details?.status` (an HTTP status Sendillo returned), so an ambiguous
+// abort/timeout here keeps its EXISTING classification: not transient, one
+// terminal `provider_failed`/deferred-cap write, same as before this round.
+// Verified deliberately, not by omission: this queue's retry semantics are
+// keyed on HTTP status codes (408/425/429/5xx) that imply the provider
+// itself said "try again" — a timeout where the provider never responded at
+// all doesn't map onto that vocabulary, and folding `isAbort` in here would
+// be a real behavior change (retry-on-ambiguous-timeout for seller-facing
+// sends) out of scope for this round, which only concerns the rep-SMS
+// aborted_ambiguous path (rep-sms.ts).
 function isTransientProviderError(error: unknown): boolean {
   if (error instanceof ProviderError) {
     const status = error.details?.status;

@@ -8,16 +8,19 @@ import type { IntegrationStatus } from "./actions";
 const {
   disconnectIntegration,
   setChannelEnabledAction,
+  setReminderPhoneAction,
   setTimezoneAction,
 } = vi.hoisted(() => ({
   disconnectIntegration: vi.fn(async () => ({ ok: true, data: null })),
   setChannelEnabledAction: vi.fn(async () => ({ ok: true, data: null })),
+  setReminderPhoneAction: vi.fn(async () => ({ ok: true, data: null })),
   setTimezoneAction: vi.fn(async () => ({ ok: true, data: null })),
 }));
 
 vi.mock("./actions", () => ({
   disconnectIntegration,
   setChannelEnabledAction,
+  setReminderPhoneAction,
   setTimezoneAction,
 }));
 
@@ -29,6 +32,7 @@ describe("<IntegrationsForm />", () => {
   beforeEach(() => {
     disconnectIntegration.mockClear();
     setChannelEnabledAction.mockClear();
+    setReminderPhoneAction.mockClear();
     setTimezoneAction.mockClear();
   });
 
@@ -167,7 +171,67 @@ function status(
   return {
     slack: { connected: false, enabled: true, teamName: null },
     google: { connected: false, enabled: true, email: null },
+    sms: { available: false, enabled: false, phone: null },
     timezone: "America/Chicago",
     ...overrides,
   };
 }
+
+describe("<IntegrationsForm /> — SMS reminders", () => {
+  beforeEach(() => {
+    setChannelEnabledAction.mockClear();
+    setReminderPhoneAction.mockClear();
+  });
+
+  it("hides the SMS card entirely when unavailable (REP_SMS_FROM_NUMBER unset)", () => {
+    render(<IntegrationsForm initial={status({ sms: { available: false, enabled: false, phone: null } })} />);
+
+    expect(screen.queryByLabelText("Phone number")).toBeNull();
+    expect(screen.queryByRole("switch", { name: "Send text reminders" })).toBeNull();
+  });
+
+  it("shows the SMS card when available, with the toggle disabled until a phone is saved", () => {
+    render(
+      <IntegrationsForm
+        initial={status({ sms: { available: true, enabled: false, phone: null } })}
+      />,
+    );
+
+    expect(screen.getByLabelText("Phone number")).toBeVisible();
+    expect(screen.getByRole("switch", { name: "Send text reminders" })).toBeDisabled();
+  });
+
+  it("saving a phone number calls the reminder-phone action", async () => {
+    const user = userEvent.setup();
+    render(
+      <IntegrationsForm
+        initial={status({ sms: { available: true, enabled: false, phone: null } })}
+      />,
+    );
+
+    await user.type(screen.getByLabelText("Phone number"), "+18165551234");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(setReminderPhoneAction).toHaveBeenCalledWith("+18165551234");
+    });
+  });
+
+  it("enables the toggle once a phone is on file, and toggling calls the channel action", async () => {
+    const user = userEvent.setup();
+    render(
+      <IntegrationsForm
+        initial={status({ sms: { available: true, enabled: false, phone: "+18165551234" } })}
+      />,
+    );
+
+    const toggle = screen.getByRole("switch", { name: "Send text reminders" });
+    expect(toggle).not.toBeDisabled();
+
+    await user.click(toggle);
+
+    await waitFor(() => {
+      expect(setChannelEnabledAction).toHaveBeenCalledWith("sms_reminder", true);
+    });
+  });
+});

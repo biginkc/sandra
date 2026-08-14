@@ -75,6 +75,27 @@ export function humanDueDate(
 }
 
 /**
+ * Renders an ISO instant as a wall-clock time-of-day in `timeZone` (e.g.
+ * "3:00 PM CDT") — the literal clock time for a reminder message, distinct
+ * from `humanDueDate`'s relative-day bucketing above. Defensive the same
+ * way `humanDueDate` is: an unparseable ISO string degrades to "soon"
+ * instead of throwing out of a render path.
+ */
+export function formatTimeOfDay(
+  iso: string,
+  timeZone: string = DEFAULT_NOTIFICATION_TIME_ZONE,
+): string {
+  const instant = new Date(iso);
+  if (Number.isNaN(instant.getTime())) return "soon";
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone: normalizeTimeZone(timeZone),
+    hour: "numeric",
+    minute: "2-digit",
+    timeZoneName: "short",
+  }).format(instant);
+}
+
+/**
  * Build title + body for a notification given the event type and a
  * loose-typed payload. Pure — no DB, no fetch. Defensive about
  * missing fields so a dispatch hook that's missing one lookup still
@@ -149,6 +170,19 @@ export function formatNotification(
       return {
         title: `Task assigned: ${titleSuffix}`,
         body: `Due ${due} · ${typeLabel}`,
+      };
+    }
+    case "task_appointment_reminder": {
+      const rawTitle = payload.taskTitle?.trim() ?? "";
+      const truncated =
+        rawTitle.length > 60 ? `${rawTitle.slice(0, 57)}...` : rawTitle;
+      const titleSuffix = truncated || "your appointment";
+      const timeLabel = payload.dueAt
+        ? formatTimeOfDay(payload.dueAt, payload.timezone ?? undefined)
+        : "soon";
+      return {
+        title: "Appointment reminder",
+        body: `Appointment in 30 min: ${titleSuffix} at ${timeLabel}`,
       };
     }
     case "ai_responder_provider_failure": {

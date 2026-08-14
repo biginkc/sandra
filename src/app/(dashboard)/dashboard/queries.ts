@@ -70,6 +70,10 @@ export type TaskRow = {
   title: string;
   /** ISO timestamptz */
   due_at: string;
+  /** ISO timestamptz — appointment-only (PR 1 CHECK ties this to
+   *  type='appointment'); null for every other task type. Drives the
+   *  compact time-range subtitle on appointment rows. */
+  end_at: string | null;
   /** Null for personal blocks and contact-only appointments — no property
    *  attached. Address/city/state are null exactly when this is null. */
   property_id: string | null;
@@ -157,17 +161,17 @@ export async function fetchMyTasks(userId: string): Promise<{
   let { data, error } = await supabase
     .from("tasks")
     .select(
-      "id, type, title, due_at, related_property_id, contact_id, properties(address, city, state, deleted_at)",
+      "id, type, title, due_at, end_at, related_property_id, contact_id, properties(address, city, state, deleted_at)",
     )
     .eq("assignee_id", userId)
     .eq("status", "open")
     .order("due_at", { ascending: true });
 
-  // Post-deploy pre-migration window: contact_id doesn't exist yet and
-  // Postgres answers 42703 (undefined column). Retry with the legacy
+  // Post-deploy pre-migration window: contact_id/end_at don't exist yet
+  // and Postgres answers 42703 (undefined column). Retry with the legacy
   // column list rather than hiding every task behind the "all caught up"
-  // empty state; contact_id maps to null (no contact-only rows can exist
-  // before the schema does).
+  // empty state; both map to null (no appointment rows can exist before
+  // the schema does).
   if (error?.code === "42703") {
     const legacy = await supabase
       .from("tasks")
@@ -178,7 +182,9 @@ export async function fetchMyTasks(userId: string): Promise<{
       .eq("status", "open")
       .order("due_at", { ascending: true });
     error = legacy.error;
-    data = legacy.data?.map((row) => ({ ...row, contact_id: null })) ?? null;
+    data =
+      legacy.data?.map((row) => ({ ...row, contact_id: null, end_at: null })) ??
+      null;
   }
 
   if (error || !data) {
@@ -218,6 +224,7 @@ export async function fetchMyTasks(userId: string): Promise<{
       type: row.type,
       title: row.title,
       due_at: row.due_at,
+      end_at: row.end_at ?? null,
       property_id: propertyLinked ? row.related_property_id : null,
       contact_id: row.contact_id,
       address: propertyLinked ? (prop!.address ?? null) : null,

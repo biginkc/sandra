@@ -1,6 +1,12 @@
 "use client";
 
-import { useEffect, useMemo, useState, useTransition } from "react";
+import {
+  useEffect,
+  useMemo,
+  useState,
+  useTransition,
+  type Ref,
+} from "react";
 import { CalendarIcon } from "lucide-react";
 
 import { AssigneeSelect } from "@/app/(dashboard)/messages/_components/assignee-select";
@@ -28,6 +34,7 @@ import {
   getMemberTimezone,
   type BookAppointmentResult,
 } from "./book-appointment-action";
+import { rescheduleAppointmentAction } from "./lifecycle-actions";
 
 type Props = {
   /** Property this appointment links to, if any. */
@@ -44,6 +51,25 @@ type Props = {
   triggerSize?: "default" | "sm" | "xs";
   disabled?: boolean;
   onBooked?: (result: BookAppointmentResult) => void;
+  /** "book" (default) creates a new appointment via `bookAppointment`.
+   *  "reschedule" reuses the SAME date/time/duration picker to move an
+   *  existing appointment via `rescheduleAppointment` instead — the
+   *  assignee never changes on a reschedule, so the assignee select is
+   *  hidden and `assigneeId` below is fixed rather than user-editable. */
+  mode?: "book" | "reschedule";
+  /** Required when `mode` is "reschedule": the appointment task being
+   *  moved. */
+  taskId?: string;
+  /** Required when `mode` is "reschedule": the appointment's current
+   *  (unchangeable) assignee — drives the timezone lookup in place of
+   *  the AssigneeSelect. */
+  assigneeId?: string;
+  onRescheduled?: (result: { taskId: string }) => void;
+  /** Optional ref to the trigger button — lets a caller (e.g. an
+   *  overflow dropdown menu item) open this popover programmatically via
+   *  `ref.current?.click()` instead of the user clicking the trigger
+   *  directly. */
+  triggerRef?: Ref<HTMLButtonElement>;
 };
 
 const DURATION_OPTIONS = [15, 30, 45, 60, 90] as const;
@@ -111,14 +137,22 @@ export function BookAppointmentPopover({
   triggerSize = "sm",
   disabled,
   onBooked,
+  mode = "book",
+  taskId,
+  assigneeId: fixedAssigneeId,
+  onRescheduled,
+  triggerRef,
 }: Props) {
+  const isReschedule = mode === "reschedule";
   const [open, setOpen] = useState(false);
   const [date, setDate] = useState<Date | undefined>(undefined);
   const [time, setTime] = useState<string>("");
   const [durationMinutes, setDurationMinutes] = useState<number>(
     DEFAULT_DURATION_MINUTES,
   );
-  const [assigneeId, setAssigneeId] = useState<string | null>(currentUserId);
+  const [assigneeId, setAssigneeId] = useState<string | null>(
+    isReschedule ? (fixedAssigneeId ?? null) : currentUserId,
+  );
   const [note, setNote] = useState("");
   // One key per open, reused across every submit attempt for this booking
   // (retries after a dropped response resubmit the SAME key, so the RPC
@@ -145,11 +179,11 @@ export function BookAppointmentPopover({
     setDate(undefined);
     setTime("");
     setDurationMinutes(DEFAULT_DURATION_MINUTES);
-    setAssigneeId(currentUserId);
+    setAssigneeId(isReschedule ? (fixedAssigneeId ?? null) : currentUserId);
     setNote("");
     setOverlap(null);
     setIdempotencyKey(crypto.randomUUID());
-  }, [open, currentUserId]);
+  }, [open, currentUserId, isReschedule, fixedAssigneeId]);
 
   useEffect(() => {
     // Gated on `open` — the trigger renders on every row/detail panel, and
@@ -209,6 +243,10 @@ export function BookAppointmentPopover({
         assigneeId,
         startUtc.toISOString(),
         endUtc.toISOString(),
+        // Codex round 12 (finding 5): reschedule must exclude the
+        // appointment's own not-yet-moved row from the overlap check —
+        // otherwise it always self-matches as a false conflict.
+        isReschedule ? taskId : undefined,
       ).then((result) => {
         if (result.ok) setOverlap(result.data);
       });
@@ -221,6 +259,30 @@ export function BookAppointmentPopover({
 
   const submit = () => {
     if (!canSubmit || !assigneeId || !timezone) return;
+    if (isReschedule) {
+      if (!taskId) return;
+      startTransition(async () => {
+        const result = await callAction(
+          rescheduleAppointmentAction({
+            taskId,
+            date: dateKey,
+            time,
+            timeZone: timezone,
+            durationMinutes,
+            idempotencyKey,
+          }),
+          {
+            successMessage: "Appointment rescheduled",
+            fallbackMessage: "Could not reschedule the appointment",
+          },
+        );
+        if (result.ok) {
+          setOpen(false);
+          onRescheduled?.(result.data);
+        }
+      });
+      return;
+    }
     const title = subjectLabel
       ? `Appointment — ${subjectLabel}`
       : "Appointment";
@@ -263,6 +325,7 @@ export function BookAppointmentPopover({
       <PopoverTrigger
         render={
           <Button
+            ref={triggerRef}
             type="button"
             variant={triggerVariant}
             size={triggerSize}
@@ -341,17 +404,19 @@ export function BookAppointmentPopover({
             </p>
           ) : null}
 
-          <label className="flex flex-col gap-1 text-xs font-medium text-muted-foreground">
-            Assignee
-            <AssigneeSelect
-              value={assigneeId}
-              onChange={setAssigneeId}
-              currentUserId={currentUserId}
-              propertyId={propertyId}
-              contactId={contactId}
-              disabled={pending}
-            />
-          </label>
+          {!isReschedule ? (
+            <label className="flex flex-col gap-1 text-xs font-medium text-muted-foreground">
+              Assignee
+              <AssigneeSelect
+                value={assigneeId}
+                onChange={setAssigneeId}
+                currentUserId={currentUserId}
+                propertyId={propertyId}
+                contactId={contactId}
+                disabled={pending}
+              />
+            </label>
+          ) : null}
 
           {zoneLabel ? (
             <p
@@ -364,14 +429,16 @@ export function BookAppointmentPopover({
             <p className="text-xs text-destructive">{timezoneError}</p>
           ) : null}
 
-          <Textarea
-            placeholder="Note (optional)"
-            value={note}
-            onChange={(e) => setNote(e.target.value)}
-            disabled={pending}
-            data-testid="book-appointment-note"
-            className="min-h-14 text-sm"
-          />
+          {!isReschedule ? (
+            <Textarea
+              placeholder="Note (optional)"
+              value={note}
+              onChange={(e) => setNote(e.target.value)}
+              disabled={pending}
+              data-testid="book-appointment-note"
+              className="min-h-14 text-sm"
+            />
+          ) : null}
 
           {dstError ? (
             <p
@@ -398,7 +465,13 @@ export function BookAppointmentPopover({
             onClick={submit}
             data-testid="book-appointment-submit"
           >
-            {pending ? "Booking…" : "Book appointment"}
+            {isReschedule
+              ? pending
+                ? "Rescheduling…"
+                : "Reschedule"
+              : pending
+                ? "Booking…"
+                : "Book appointment"}
           </Button>
         </div>
       </PopoverContent>

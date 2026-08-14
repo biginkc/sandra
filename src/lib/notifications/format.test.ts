@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { formatNotification, humanDueDate } from "./format";
+import { formatNotification, formatTimeOfDay, humanDueDate } from "./format";
 
 describe("formatNotification", () => {
   it("owner_message_added → 'New SMS reply' + address in body", () => {
@@ -73,6 +73,29 @@ describe("formatNotification", () => {
         failed: 0,
       }).title.toLowerCase(),
     ).toContain("cancel");
+  });
+
+  it("task_appointment_reminder → 'Appointment reminder' title + title/time in body", () => {
+    const out = formatNotification("task_appointment_reminder", {
+      taskTitle: "Walkthrough with seller",
+      dueAt: "2026-08-15T20:00:00.000Z",
+      timezone: "America/Chicago",
+    });
+    expect(out.title).toBe("Appointment reminder");
+    expect(out.body).toContain("Appointment in 30 min: Walkthrough with seller at");
+    expect(out.body).toContain("3:00");
+  });
+
+  it("task_appointment_reminder truncates a long title and falls back gracefully on missing fields", () => {
+    const truncated = formatNotification("task_appointment_reminder", {
+      taskTitle: "A".repeat(70),
+      dueAt: "2026-08-15T20:00:00.000Z",
+    });
+    expect(truncated.body).toContain(`${"A".repeat(57)}...`);
+
+    const fallback = formatNotification("task_appointment_reminder", {});
+    expect(fallback.body).toContain("your appointment");
+    expect(fallback.body).toContain("soon");
   });
 
   it("tolerates missing / null fields without crashing (defensive fallbacks)", () => {
@@ -197,5 +220,29 @@ describe("humanDueDate", () => {
     // A UTC-day-bucketed implementation would wrongly call this "today".
     const dueNY = "2026-05-06T04:10:00Z";
     expect(humanDueDate(dueNY, nowNY, "America/New_York")).toBe("tomorrow");
+  });
+});
+
+describe("formatTimeOfDay", () => {
+  it("renders a wall-clock time with zone abbreviation for a named zone", () => {
+    // 2026-08-15T20:00:00Z = 3:00 PM CDT
+    expect(formatTimeOfDay("2026-08-15T20:00:00.000Z", "America/Chicago")).toContain("3:00");
+  });
+
+  it("uses the default America/Chicago zone when none is passed", () => {
+    expect(formatTimeOfDay("2026-08-15T20:00:00.000Z")).toContain("3:00");
+  });
+
+  it("degrades a garbage timezone to America/Chicago via normalizeTimeZone", () => {
+    expect(formatTimeOfDay("2026-08-15T20:00:00.000Z", "Not/A_Real_Zone")).toContain("3:00");
+  });
+
+  it("returns 'soon' for an unparseable ISO string", () => {
+    expect(formatTimeOfDay("not-a-date")).toBe("soon");
+  });
+
+  it("reflects a different zone for the same instant", () => {
+    // 2026-08-15T20:00:00Z = 1:00 PM PDT
+    expect(formatTimeOfDay("2026-08-15T20:00:00.000Z", "America/Los_Angeles")).toContain("1:00");
   });
 });

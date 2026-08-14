@@ -13,12 +13,21 @@ import {
 } from "./recipients";
 import type { EntityType, EventType, FormatPayload } from "./types";
 
+/** Postgres unique_violation SQLSTATE. */
+const UNIQUE_VIOLATION = "23505";
+
 /**
  * Low-level helper: format a title/body once and insert one notification
  * row per recipient. Never throws across the boundary — notifications
  * are best-effort and must not block the underlying action (a webhook
  * reply, an assignment, a job termination). Any insert error is reported
- * and the dispatch returns `{ inserted: 0 }` instead of bubbling.
+ * and the dispatch returns `{ inserted: 0, conflict: false }` instead of
+ * bubbling — EXCEPT a unique-constraint violation (SQLSTATE 23505), which
+ * is the expected shape of a duplicate dedupe-by-index insert (e.g. the
+ * bell reminder's (user_id, entity_id) partial unique index): that case is
+ * NOT reported as an error and comes back as `{ inserted: 0, conflict:
+ * true }` so a caller can tell "already exists, desired end state holds"
+ * apart from a genuine transport/RLS/schema failure.
  *
  * Returns the number of rows inserted so callers can log / assert.
  */
@@ -32,9 +41,9 @@ export async function createNotification(
     payload: FormatPayload;
     recipients: readonly string[];
   },
-): Promise<{ inserted: number }> {
+): Promise<{ inserted: number; conflict: boolean }> {
   if (params.recipients.length === 0) {
-    return { inserted: 0 };
+    return { inserted: 0, conflict: false };
   }
   const { title, body } = formatNotification(params.eventType, params.payload);
   const rows = params.recipients.map((userId) => ({
@@ -48,6 +57,9 @@ export async function createNotification(
   }));
   const { error } = await supabase.from("notifications").insert(rows);
   if (error) {
+    if (error.code === UNIQUE_VIOLATION) {
+      return { inserted: 0, conflict: true };
+    }
     reportError(new Error(error.message), {
       tags: { surface: "notifications_insert" },
       extra: {
@@ -56,9 +68,9 @@ export async function createNotification(
         recipients: params.recipients.length,
       },
     });
-    return { inserted: 0 };
+    return { inserted: 0, conflict: false };
   }
-  return { inserted: rows.length };
+  return { inserted: rows.length, conflict: false };
 }
 
 /**

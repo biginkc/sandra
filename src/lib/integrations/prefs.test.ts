@@ -99,6 +99,8 @@ describe("integration prefs", () => {
         slackEnabled: false,
         calendarEnabled: true,
         timezone: "America/Chicago",
+        smsRemindersEnabled: false,
+        reminderPhone: null,
       },
     );
   });

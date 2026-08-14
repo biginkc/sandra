@@ -27,6 +27,10 @@
     {
       "path": "/api/cron/calendar-mutation-sweep",
       "schedule": "4-59/5 * * * *"
+    },
+    {
+      "path": "/api/cron/appointment-reminder-sweep",
+      "schedule": "2-59/5 * * * *"
     }
   ]
 }

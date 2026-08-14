@@ -119,7 +119,7 @@ describe("dispatchTaskAssigned", () => {
       dueAt: "2026-08-20T15:00:00.000Z",
     });
 
-    expect(result).toEqual({ inserted: 1 });
+    expect(result).toEqual({ inserted: 1, conflict: false });
     expect(insert).toHaveBeenCalledWith([
       expect.objectContaining({
         org_id: "org-1",
