@@ -30,18 +30,43 @@ export type FetchCalendarAppointmentsResult =
  * the task with a terminal status other than 'open'/'completed', and the
  * calendar surface never shows them).
  *
- * Paginates internally (Codex round 4) with the same PAGE_SIZE/MAX_PAGES
- * shape as `admin/users/membership-inventory.ts`'s `loadSandraMemberships`
- * — deterministic order + explicit `.range()` windows until a short page,
- * capped so a pathological org can't spin forever. See the loop below for
- * why a query failure on ANY page fails the whole load.
+ * Paginates internally with KEYSET pagination (Codex round 5 — `.range()`
+ * offset pagination skips/duplicates rows when concurrent writes shift the
+ * result set between page requests: a delete before the cursor position
+ * shifts every later row left by one, so an offset-based next page
+ * re-reads one row and silently drops another). Each page after the first
+ * filters strictly beyond the last (due_at, id) tuple already seen instead
+ * of trusting a numeric offset, so mutation between page requests can
+ * never skip or duplicate a row. See the loop below for why a query
+ * failure on ANY page — or exhausting MAX_PAGES on a still-full final
+ * page — fails the whole load rather than returning a truncated result.
  */
-// Same PAGE_SIZE/MAX_PAGES pagination shape as
-// `admin/users/membership-inventory.ts`'s `loadSandraMemberships` — page
-// with a deterministic order + explicit `.range()` windows until a short
-// page, capped so a pathological org can't spin forever.
 const APPOINTMENTS_PAGE_SIZE = 1_000;
 const MAX_PAGES = 100;
+
+/** Keyset cursor: the (due_at, id) of the last row on the previous page. */
+type AppointmentsCursor = { dueAt: string; id: string };
+
+/**
+ * PostgREST `.or()` keyset filter for "strictly after (due_at, id)" —
+ * same raw-grammar-with-quoted-timestamp shape as
+ * `messages/queued-cursor.ts`'s `buildQueuedCursorFilter`. Unlike that
+ * cursor, `dueAt`/`id` here are never client input — they come straight
+ * off the previous page's own row data — so they don't need that file's
+ * closed-form validation against injection; they only need correct
+ * PostgREST encoding (ISO timestamp double-quoted so the colons in it
+ * can't be misparsed as filter grammar).
+ *
+ * `due_at` is NOT NULL for `type='appointment'` rows (PR 1 CHECK), so
+ * there's no null-tail case to handle (contrast the outbox cursor, whose
+ * `scheduled_for` can be null).
+ */
+function buildAppointmentsKeysetFilter(cursor: AppointmentsCursor): string {
+  return (
+    `due_at.gt."${cursor.dueAt}",` +
+    `and(due_at.eq."${cursor.dueAt}",id.gt.${cursor.id})`
+  );
+}
 
 function buildAppointmentsQuery(
   supabase: Awaited<ReturnType<typeof createClient>>,
@@ -88,12 +113,19 @@ export async function fetchCalendarAppointments(
   // can be silently skipped or duplicated across pages. ANY page failure
   // fails the whole load (`ok: false`) rather than returning a
   // truncated week as if it were complete.
+  let cursor: AppointmentsCursor | null = null;
+  let complete = false;
+
   for (let page = 0; page < MAX_PAGES; page += 1) {
-    const from = page * APPOINTMENTS_PAGE_SIZE;
-    const { data, error } = await buildAppointmentsQuery(supabase, orgId, opts)
+    let query = buildAppointmentsQuery(supabase, orgId, opts);
+    if (cursor) {
+      query = query.or(buildAppointmentsKeysetFilter(cursor));
+    }
+
+    const { data, error } = await query
       .order("due_at", { ascending: true })
       .order("id", { ascending: true })
-      .range(from, from + APPOINTMENTS_PAGE_SIZE - 1);
+      .limit(APPOINTMENTS_PAGE_SIZE);
 
     if (error || !data) {
       if (error) {
@@ -106,7 +138,27 @@ export async function fetchCalendarAppointments(
     }
 
     allRows.push(...data);
-    if (data.length < APPOINTMENTS_PAGE_SIZE) break;
+    if (data.length < APPOINTMENTS_PAGE_SIZE) {
+      complete = true;
+      break;
+    }
+    const last = data[data.length - 1] as unknown as {
+      due_at: string;
+      id: string;
+    };
+    cursor = { dueAt: last.due_at, id: last.id };
+  }
+
+  // MAX_PAGES exhausted with the final page still full — there could be
+  // more rows beyond it. Never return that as a truncated success; a
+  // pathological org should surface as a load failure, not silent data
+  // loss (Codex round 5).
+  if (!complete) {
+    console.error(
+      "[calendar] fetchCalendarAppointments exhausted MAX_PAGES without a short page",
+      { orgId, maxPages: MAX_PAGES },
+    );
+    return { ok: false };
   }
 
   const rows = allRows.map((row) => {
@@ -208,22 +260,33 @@ export async function fetchOrgRoster(orgId: string): Promise<FetchOrgRosterResul
 
   const memberships: { user_id: string }[] = [];
 
-  // Same page-until-short-page shape as the appointments query above —
-  // deterministic `user_id` ordering + explicit `.range()` windows, any
-  // page failure fails the whole roster load (Codex round 4: a large org's
-  // roster silently truncating would drop real teammates from BOTH the
-  // filter and ownership attribution, not just cosmetics).
+  // KEYSET pagination on `user_id` (Codex round 5 — same rationale as the
+  // appointments query above: `.range()` offsets skip/duplicate rows when
+  // a membership is added or removed between page requests). `user_id` is
+  // unique per row here (one active membership per user per org), so a
+  // plain `.gt("user_id", cursor)` is enough — no composite tie-break
+  // needed. Any page failure, or exhausting MAX_PAGES on a still-full
+  // final page, fails the whole roster load (Codex round 4/5: a large
+  // org's roster silently truncating would drop real teammates from BOTH
+  // the filter and ownership attribution, not just cosmetics).
+  let cursor: string | null = null;
+  let complete = false;
+
   for (let page = 0; page < MAX_PAGES; page += 1) {
-    const from = page * ROSTER_PAGE_SIZE;
-    const { data, error } = await admin
+    let query = admin
       .from("memberships")
       .select("user_id")
       .eq("org_id", orgId)
       .eq("access_status", "active")
       .is("deletion_prepared_at", null)
-      .or(`access_expires_at.is.null,access_expires_at.gt.${activeAt}`)
+      .or(`access_expires_at.is.null,access_expires_at.gt.${activeAt}`);
+    if (cursor) {
+      query = query.gt("user_id", cursor);
+    }
+
+    const { data, error } = await query
       .order("user_id", { ascending: true })
-      .range(from, from + ROSTER_PAGE_SIZE - 1);
+      .limit(ROSTER_PAGE_SIZE);
 
     if (error || !data) {
       if (error) {
@@ -236,7 +299,19 @@ export async function fetchOrgRoster(orgId: string): Promise<FetchOrgRosterResul
     }
 
     memberships.push(...data);
-    if (data.length < ROSTER_PAGE_SIZE) break;
+    if (data.length < ROSTER_PAGE_SIZE) {
+      complete = true;
+      break;
+    }
+    cursor = data[data.length - 1].user_id as string;
+  }
+
+  if (!complete) {
+    console.error(
+      "[calendar] fetchOrgRoster exhausted MAX_PAGES without a short page",
+      { orgId, maxPages: MAX_PAGES },
+    );
+    return { ok: false };
   }
 
   const ids = memberships.map((m) => m.user_id as string);

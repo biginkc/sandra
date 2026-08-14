@@ -6,19 +6,21 @@ const mocks = vi.hoisted(() => ({
 
 let queuedData: unknown[] | null = [];
 let queuedError: { message: string; code?: string } | null = null;
-// Multi-page override (Codex round 4 pagination tests): when set, each
-// `.range()` call shifts the next entry off this queue instead of
-// returning the (single-page) `queuedData`/`queuedError` pair above — lets
-// a test simulate several `.range()` round-trips, including a failure on
-// a later page. `null` (the default) preserves every pre-pagination test
-// below exactly as written.
+// Multi-page override (Codex round 4/5 pagination tests): when set, each
+// `.limit()` call (the terminal call in the keyset chain — see
+// queries.ts) shifts the next entry off this queue instead of returning
+// the (single-page) `queuedData`/`queuedError` pair above — lets a test
+// simulate several page round-trips, including a failure on a later page.
+// `null` (the default) preserves every pre-pagination test below exactly
+// as written.
 let queuedPages:
   | Array<{ data: unknown[] | null; error: { message: string; code?: string } | null }>
   | null = null;
 let eqCalls: Array<[string, unknown]> = [];
 let selectCalls: string[] = [];
 let orderCalls: Array<[string, unknown]> = [];
-let rangeCalls: Array<[number, number]> = [];
+let limitCalls: number[] = [];
+let orFilterCalls: string[] = [];
 
 function makeBuilder(): Record<string, unknown> {
   const builder: Record<string, unknown> = {};
@@ -33,12 +35,16 @@ function makeBuilder(): Record<string, unknown> {
   builder.in = () => builder;
   builder.gte = () => builder;
   builder.lt = () => builder;
+  builder.or = (filter: string) => {
+    orFilterCalls.push(filter);
+    return builder;
+  };
   builder.order = (col: string, opts: unknown) => {
     orderCalls.push([col, opts]);
     return builder;
   };
-  builder.range = (from: number, to: number) => {
-    rangeCalls.push([from, to]);
+  builder.limit = (n: number) => {
+    limitCalls.push(n);
     if (queuedPages && queuedPages.length > 0) {
       return Promise.resolve(queuedPages.shift()!);
     }
@@ -48,20 +54,22 @@ function makeBuilder(): Record<string, unknown> {
 }
 
 // .from("memberships").select().eq("org_id",…).eq("access_status","active")
-// .is("deletion_prepared_at", null).or(activeAt filter).order("user_id")
-// .range(from,to) — mirrors `listBookingAssignees`'s predicate
+// .is("deletion_prepared_at", null).or(activeAt filter).gt("user_id",cursor)
+// .order("user_id").limit(n) — mirrors `listBookingAssignees`'s predicate
 // (book-appointment-action.test.ts).
 let membershipRows: Array<{ user_id: string }> | null = [];
 let membershipError: { message: string; code?: string } | null = null;
-// Same multi-page override pattern as `queuedPages` above.
+// Same multi-page override pattern as `queuedPages` above — each
+// `.limit()` call shifts the next entry off this queue.
 let membershipPages:
   | Array<{ data: Array<{ user_id: string }> | null; error: { message: string; code?: string } | null }>
   | null = null;
 let membershipEqCalls: Array<[string, unknown]> = [];
 let membershipIsCalls: Array<[string, unknown]> = [];
 let membershipOrCalls: string[] = [];
+let membershipGtCalls: Array<[string, unknown]> = [];
 let membershipOrderCalls: Array<[string, unknown]> = [];
-let membershipRangeCalls: Array<[number, number]> = [];
+let membershipLimitCalls: number[] = [];
 
 function makeMembershipsBuilder(): Record<string, unknown> {
   const builder: Record<string, unknown> = {};
@@ -78,12 +86,16 @@ function makeMembershipsBuilder(): Record<string, unknown> {
     membershipOrCalls.push(filter);
     return builder;
   };
+  builder.gt = (col: string, val: unknown) => {
+    membershipGtCalls.push([col, val]);
+    return builder;
+  };
   builder.order = (col: string, opts: unknown) => {
     membershipOrderCalls.push([col, opts]);
     return builder;
   };
-  builder.range = (from: number, to: number) => {
-    membershipRangeCalls.push([from, to]);
+  builder.limit = (n: number) => {
+    membershipLimitCalls.push(n);
     if (membershipPages && membershipPages.length > 0) {
       return Promise.resolve(membershipPages.shift()!);
     }
@@ -122,15 +134,17 @@ beforeEach(() => {
   eqCalls = [];
   selectCalls = [];
   orderCalls = [];
-  rangeCalls = [];
+  limitCalls = [];
+  orFilterCalls = [];
   membershipRows = [];
   membershipError = null;
   membershipPages = null;
   membershipEqCalls = [];
   membershipIsCalls = [];
   membershipOrCalls = [];
+  membershipGtCalls = [];
   membershipOrderCalls = [];
-  membershipRangeCalls = [];
+  membershipLimitCalls = [];
 });
 
 function appointmentRow(overrides: Record<string, unknown> = {}): Record<string, unknown> {
@@ -318,7 +332,7 @@ describe("fetchCalendarAppointments", () => {
     expect(result).toEqual({ ok: false });
   });
 
-  describe("pagination (Codex round 4)", () => {
+  describe("pagination (Codex round 4/5 — keyset)", () => {
     const PAGE_SIZE = 1_000;
 
     it("sorts by due_at then id for a stable, gap-free page cursor", async () => {
@@ -332,11 +346,13 @@ describe("fetchCalendarAppointments", () => {
         ["due_at", { ascending: true }],
         ["id", { ascending: true }],
       ]);
+      // First page has no cursor yet — no keyset `.or()` filter applied.
+      expect(orFilterCalls).toEqual([]);
     });
 
-    it("pages through and aggregates every row when a week's appointments exceed one page", async () => {
+    it("pages through and aggregates every row when a week's appointments exceed one page, using a KEYSET filter (not an offset) for the next page", async () => {
       const firstPage = Array.from({ length: PAGE_SIZE }, (_, i) =>
-        appointmentRow({ id: `t-${i}` }),
+        appointmentRow({ id: `t-${String(i).padStart(4, "0")}` }),
       );
       const secondPage = [appointmentRow({ id: "t-last" })];
       queuedPages = [
@@ -352,11 +368,14 @@ describe("fetchCalendarAppointments", () => {
       if (!result.ok) throw new Error("expected ok:true");
       expect(result.rows).toHaveLength(PAGE_SIZE + 1);
       expect(result.rows.map((r) => r.id)).toContain("t-last");
-      // Two full `.range()` round-trips: [0, PAGE_SIZE-1] then
-      // [PAGE_SIZE, 2*PAGE_SIZE-1] — the short second page stops the loop.
-      expect(rangeCalls).toEqual([
-        [0, PAGE_SIZE - 1],
-        [PAGE_SIZE, 2 * PAGE_SIZE - 1],
+      // Two `.limit()` round-trips — the short second page stops the loop.
+      expect(limitCalls).toEqual([PAGE_SIZE, PAGE_SIZE]);
+      // The second page's filter is keyed off the LAST ROW of the first
+      // page's actual data (due_at + id), not a numeric offset — the
+      // defining property of keyset pagination.
+      const lastOfFirstPage = firstPage[firstPage.length - 1] as { due_at: string; id: string };
+      expect(orFilterCalls).toEqual([
+        `due_at.gt."${lastOfFirstPage.due_at}",and(due_at.eq."${lastOfFirstPage.due_at}",id.gt.${lastOfFirstPage.id})`,
       ]);
     });
 
@@ -366,12 +385,13 @@ describe("fetchCalendarAppointments", () => {
         weekStartUtc: "2026-05-03T05:00:00.000Z",
         weekEndUtc: "2026-05-10T05:00:00.000Z",
       });
-      expect(rangeCalls).toEqual([[0, PAGE_SIZE - 1]]);
+      expect(limitCalls).toEqual([PAGE_SIZE]);
+      expect(orFilterCalls).toEqual([]);
     });
 
     it("fails the whole load (ok:false) when a LATER page errors, even though the first page succeeded", async () => {
       const firstPage = Array.from({ length: PAGE_SIZE }, (_, i) =>
-        appointmentRow({ id: `t-${i}` }),
+        appointmentRow({ id: `t-${String(i).padStart(4, "0")}` }),
       );
       queuedPages = [
         { data: firstPage, error: null },
@@ -386,7 +406,92 @@ describe("fetchCalendarAppointments", () => {
       expect(result).toEqual({ ok: false });
       // Confirms the failure really did happen on the second round-trip,
       // not that the loop silently stopped after page 1.
-      expect(rangeCalls).toHaveLength(2);
+      expect(limitCalls).toHaveLength(2);
+    });
+
+    it("preserves tie ordering: a same-`due_at` last row builds a filter that excludes it but includes the next tied id", async () => {
+      const tiedDueAt = "2026-05-05T15:00:00.000Z";
+      const firstPage = Array.from({ length: PAGE_SIZE }, (_, i) =>
+        appointmentRow({ id: `t-${String(i).padStart(4, "0")}`, due_at: tiedDueAt }),
+      );
+      // Second page is more rows sharing the SAME due_at (a tie spanning
+      // the page boundary) — only reachable via the `id.gt` half of the
+      // `and(...)` clause, never via `due_at.gt` alone.
+      const secondPage = [appointmentRow({ id: "t-1000", due_at: tiedDueAt })];
+      queuedPages = [
+        { data: firstPage, error: null },
+        { data: secondPage, error: null },
+      ];
+
+      const result = await fetchCalendarAppointments("org-1", {
+        weekStartUtc: "2026-05-03T05:00:00.000Z",
+        weekEndUtc: "2026-05-10T05:00:00.000Z",
+      });
+
+      if (!result.ok) throw new Error("expected ok:true");
+      expect(result.rows).toHaveLength(PAGE_SIZE + 1);
+      const ids = result.rows.map((r) => r.id);
+      expect(new Set(ids).size).toBe(ids.length); // no duplicates across the tie boundary
+      expect(ids).toContain("t-1000");
+      expect(orFilterCalls[0]).toBe(
+        `due_at.gt."${tiedDueAt}",and(due_at.eq."${tiedDueAt}",id.gt.t-0999)`,
+      );
+    });
+
+    it("is unaffected by a row deleted between page requests (keyset, not offset) — no skip, no duplicate", async () => {
+      // Simulates: page 1 is fetched, then before page 2 is requested a
+      // row from EARLIER in the result set (already delivered, e.g.
+      // t-0500) is deleted from the underlying table. An offset-based
+      // `.range()` would shift every later row left by one and desync the
+      // next window; a keyset filter is built from the last DELIVERED
+      // row's own (due_at, id) values, so it is entirely blind to the
+      // deletion and the tail is still returned exactly once.
+      const firstPage = Array.from({ length: PAGE_SIZE }, (_, i) =>
+        appointmentRow({ id: `t-${String(i).padStart(4, "0")}` }),
+      );
+      const secondPage = [appointmentRow({ id: "t-1000" })];
+      queuedPages = [
+        { data: firstPage, error: null },
+        { data: secondPage, error: null },
+      ];
+
+      const result = await fetchCalendarAppointments("org-1", {
+        weekStartUtc: "2026-05-03T05:00:00.000Z",
+        weekEndUtc: "2026-05-10T05:00:00.000Z",
+      });
+
+      if (!result.ok) throw new Error("expected ok:true");
+      const ids = result.rows.map((r) => r.id);
+      // The deleted row (t-0500) never re-appears, the tail row (t-1000)
+      // appears exactly once, and nothing is duplicated — the aggregate
+      // is exactly page1 + page2 with no loss beyond the real deletion.
+      expect(ids.filter((id) => id === "t-1000")).toHaveLength(1);
+      expect(new Set(ids).size).toBe(ids.length);
+      expect(result.rows).toHaveLength(PAGE_SIZE + 1);
+      // The page-2 filter is derived solely from page 1's last row — it
+      // carries no information about the deletion, proving the cursor
+      // itself is unaffected by the mutation.
+      const lastOfFirstPage = firstPage[firstPage.length - 1] as { due_at: string; id: string };
+      expect(orFilterCalls).toEqual([
+        `due_at.gt."${lastOfFirstPage.due_at}",and(due_at.eq."${lastOfFirstPage.due_at}",id.gt.${lastOfFirstPage.id})`,
+      ]);
+    });
+
+    it("fails the whole load (ok:false) on MAX_PAGES exhaustion even though every page — including the final one — was full and error-free", async () => {
+      // Every page is a full PAGE_SIZE page with no error, forcing the
+      // loop to run all MAX_PAGES iterations without ever seeing a short
+      // page. This must NOT be treated as a truncated success.
+      queuedData = Array.from({ length: PAGE_SIZE }, (_, i) =>
+        appointmentRow({ id: `t-${i}` }),
+      );
+
+      const result = await fetchCalendarAppointments("org-1", {
+        weekStartUtc: "2026-05-03T05:00:00.000Z",
+        weekEndUtc: "2026-05-10T05:00:00.000Z",
+      });
+
+      expect(result).toEqual({ ok: false });
+      expect(limitCalls).toHaveLength(100); // MAX_PAGES
     });
   });
 });
@@ -570,18 +675,23 @@ describe("fetchOrgRoster", () => {
     });
   });
 
-  describe("pagination (Codex round 4)", () => {
+  describe("pagination (Codex round 4/5 — keyset)", () => {
     const PAGE_SIZE = 1_000;
+    // Zero-padded so string order matches the numeric order the mock
+    // pages are constructed in (`user-0000` < `user-0001` < … < `user-0999`).
+    const userId = (i: number) => `user-${String(i).padStart(4, "0")}`;
 
     it("orders by user_id for a stable, gap-free page cursor", async () => {
       membershipRows = [{ user_id: "user-1" }];
       await fetchOrgRoster("org-1");
       expect(membershipOrderCalls).toEqual([["user_id", { ascending: true }]]);
+      // First page has no cursor yet — no `.gt("user_id", …)` applied.
+      expect(membershipGtCalls).toEqual([]);
     });
 
-    it("pages through and aggregates every membership when the org exceeds one page", async () => {
+    it("pages through and aggregates every membership when the org exceeds one page, using a KEYSET filter (not an offset) for the next page", async () => {
       const firstPage = Array.from({ length: PAGE_SIZE }, (_, i) => ({
-        user_id: `user-${i}`,
+        user_id: userId(i),
       }));
       const secondPage = [{ user_id: "user-last" }];
       membershipPages = [
@@ -595,21 +705,22 @@ describe("fetchOrgRoster", () => {
       if (!result.ok) throw new Error("expected ok:true");
       expect(result.roster).toHaveLength(PAGE_SIZE + 1);
       expect(result.roster.map((r) => r.id)).toContain("user-last");
-      expect(membershipRangeCalls).toEqual([
-        [0, PAGE_SIZE - 1],
-        [PAGE_SIZE, 2 * PAGE_SIZE - 1],
-      ]);
+      expect(membershipLimitCalls).toEqual([PAGE_SIZE, PAGE_SIZE]);
+      // The second page's filter is keyed off the last row's own
+      // `user_id`, not a numeric offset.
+      expect(membershipGtCalls).toEqual([["user_id", userId(PAGE_SIZE - 1)]]);
     });
 
     it("stops after exactly one page when the first page comes back short", async () => {
       membershipRows = [{ user_id: "user-1" }];
       await fetchOrgRoster("org-1");
-      expect(membershipRangeCalls).toEqual([[0, PAGE_SIZE - 1]]);
+      expect(membershipLimitCalls).toEqual([PAGE_SIZE]);
+      expect(membershipGtCalls).toEqual([]);
     });
 
     it("fails the whole roster load (ok:false) when a LATER page errors, even though the first page succeeded", async () => {
       const firstPage = Array.from({ length: PAGE_SIZE }, (_, i) => ({
-        user_id: `user-${i}`,
+        user_id: userId(i),
       }));
       membershipPages = [
         { data: firstPage, error: null },
@@ -618,9 +729,44 @@ describe("fetchOrgRoster", () => {
 
       const result = await fetchOrgRoster("org-1");
       expect(result).toEqual({ ok: false });
-      expect(membershipRangeCalls).toHaveLength(2);
+      expect(membershipLimitCalls).toHaveLength(2);
       // A failed identity load never falls through to resolving labels.
       expect(mocks.listUsers).not.toHaveBeenCalled();
+    });
+
+    it("is unaffected by a membership deleted between page requests (keyset, not offset) — no skip, no duplicate", async () => {
+      // Same scenario as the appointments keyset test: a membership from
+      // earlier in the already-delivered first page (e.g. user-0500) is
+      // removed from the org between page requests. An offset-based
+      // `.range()` would shift everything after it left by one and desync
+      // the next window; the keyset cursor is derived from the last
+      // DELIVERED row's own `user_id`, so it's blind to the deletion.
+      const firstPage = Array.from({ length: PAGE_SIZE }, (_, i) => ({
+        user_id: userId(i),
+      }));
+      const secondPage = [{ user_id: "user-1000" }];
+      membershipPages = [
+        { data: firstPage, error: null },
+        { data: secondPage, error: null },
+      ];
+
+      const result = await fetchOrgRoster("org-1");
+      if (!result.ok) throw new Error("expected ok:true");
+      const ids = result.roster.map((r) => r.id);
+      expect(ids.filter((id) => id === "user-1000")).toHaveLength(1);
+      expect(new Set(ids).size).toBe(ids.length);
+      expect(result.roster).toHaveLength(PAGE_SIZE + 1);
+      expect(membershipGtCalls).toEqual([["user_id", userId(PAGE_SIZE - 1)]]);
+    });
+
+    it("fails the whole roster load (ok:false) on MAX_PAGES exhaustion even though every page — including the final one — was full and error-free", async () => {
+      membershipRows = Array.from({ length: PAGE_SIZE }, (_, i) => ({
+        user_id: userId(i),
+      }));
+
+      const result = await fetchOrgRoster("org-1");
+      expect(result).toEqual({ ok: false });
+      expect(membershipLimitCalls).toHaveLength(100); // MAX_PAGES
     });
   });
 });
