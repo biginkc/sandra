@@ -97,6 +97,10 @@ import {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // mockReset (not just clear) drops unconsumed mockResolvedValueOnce
+  // queues — early-exit code paths consume fewer responses than tests
+  // enqueue, and leftovers must never leak into the next test.
+  mocks.listUsers.mockReset();
   queuedData = [];
   queuedError = null;
   eqCalls = [];
@@ -392,20 +396,63 @@ describe("fetchAssigneeEmails", () => {
     expect(result).toEqual({ "user-1": "a@example.com" });
   });
 
-  it("paginates through listUsers until nextPage is null", async () => {
-    mocks.listUsers
-      .mockResolvedValueOnce({
-        data: { users: [{ id: "user-1", email: "a@example.com" }], nextPage: 2 },
-        error: null,
-      })
-      .mockResolvedValueOnce({
-        data: { users: [{ id: "user-2", email: "b@example.com" }], nextPage: null },
-        error: null,
-      });
+  // Full page of filler users (perPage = 200), each reporting nextPage: 1 —
+  // reproduces the installed auth-js's mis-parse of multi-digit Link-header
+  // pages (page 9 reports nextPage=1). Page numbers must still advance from
+  // the caller's own local counter, never from this field.
+  function fullFillerPage(pageNum: number, extra: Array<{ id: string; email: string }> = []) {
+    const filler = Array.from({ length: 200 }, (_, i) => ({
+      id: `filler-p${pageNum}-${i}`,
+      email: `filler-p${pageNum}-${i}@example.com`,
+    }));
+    return { data: { users: [...filler, ...extra], nextPage: 1 }, error: null };
+  }
+
+  it("advances page numbers locally across a repeated nextPage:1 (9-to-10 boundary regression) and terminates on the short page without re-requesting page 1", async () => {
+    for (let page = 1; page <= 9; page++) {
+      mocks.listUsers.mockResolvedValueOnce(fullFillerPage(page));
+    }
+    mocks.listUsers.mockResolvedValueOnce({
+      data: { users: [{ id: "user-final", email: "final@example.com" }], nextPage: 1 },
+      error: null,
+    });
+
+    const result = await fetchAssigneeEmails(["user-final"]);
+    expect(result).toEqual({ "user-final": "final@example.com" });
+    expect(mocks.listUsers).toHaveBeenCalledTimes(10);
+
+    const pagesRequested = mocks.listUsers.mock.calls.map(
+      (call) => (call[0] as { page: number }).page,
+    );
+    expect(pagesRequested).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    expect(pagesRequested.filter((p) => p === 1)).toHaveLength(1);
+  });
+
+  it("stops after exactly one call when every needed id resolves on page 1", async () => {
+    mocks.listUsers.mockResolvedValueOnce({
+      data: {
+        users: [
+          { id: "user-1", email: "a@example.com" },
+          { id: "user-2", email: "b@example.com" },
+        ],
+        nextPage: 1,
+      },
+      error: null,
+    });
 
     const result = await fetchAssigneeEmails(["user-1", "user-2"]);
     expect(result).toEqual({ "user-1": "a@example.com", "user-2": "b@example.com" });
-    expect(mocks.listUsers).toHaveBeenCalledTimes(2);
+    expect(mocks.listUsers).toHaveBeenCalledTimes(1);
+  });
+
+  it("stops at the MAX_AUTH_PAGES hard bound instead of hanging when pages never go short and identities never resolve", async () => {
+    for (let page = 1; page <= 25; page++) {
+      mocks.listUsers.mockResolvedValueOnce(fullFillerPage(page));
+    }
+
+    const result = await fetchAssigneeEmails(["user-never-found"]);
+    expect(result).toEqual({});
+    expect(mocks.listUsers).toHaveBeenCalledTimes(25);
   });
 
   it("returns an empty map on a listUsers error", async () => {

@@ -294,9 +294,14 @@ export async function fetchAssigneeEmails(
 
   try {
     const admin = createAdminClient();
-    let page = 1;
     const perPage = 200;
-    while (true) {
+    // Page numbers advance LOCALLY, never from data.nextPage: the installed
+    // @supabase/auth-js (2.104.x) mis-parses multi-digit page numbers from
+    // the Link header (page 9 reports nextPage=1), which would loop this
+    // privileged call forever on projects with 1,800+ users. Termination:
+    // short page, every needed identity resolved, or the hard page bound.
+    const MAX_AUTH_PAGES = 25; // 25 * 200 = 5,000 users — far beyond this app
+    for (let page = 1; page <= MAX_AUTH_PAGES; page++) {
       const { data, error } = await admin.auth.admin.listUsers({ page, perPage });
       if (error) {
         console.error("[calendar] fetchAssigneeEmails failed", {
@@ -304,11 +309,12 @@ export async function fetchAssigneeEmails(
         });
         return emails;
       }
-      for (const u of data?.users ?? []) {
+      const users = data?.users ?? [];
+      for (const u of users) {
         if (u.email && needed.has(u.id)) emails[u.id] = u.email;
       }
-      if (!data?.nextPage || (data?.users.length ?? 0) === 0) break;
-      page = data.nextPage;
+      const allResolved = Object.keys(emails).length >= needed.size;
+      if (users.length < perPage || allResolved) break;
     }
   } catch (e) {
     console.error("[calendar] fetchAssigneeEmails threw", { error: e });
