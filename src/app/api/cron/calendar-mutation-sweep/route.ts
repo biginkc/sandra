@@ -68,6 +68,7 @@ function createServiceRoleClient() {
  *  not (and, per this PR's scope, must not be) in the generated
  *  Database["public"]["Functions"] map — same local-cast pattern as the
  *  booking RPC call sites. */
+type ExpireExhaustedRow = { failed_count: number; needs_repair_count: number };
 type ClaimRpcClient = {
   rpc(
     fn: "fn_claim_calendar_creations",
@@ -76,8 +77,12 @@ type ClaimRpcClient = {
     data: ClaimedCalendarCreationRow[] | null;
     error: { message: string } | null;
   }>;
+  /** Round 7: returns one row of (failed_count, needs_repair_count) — a
+   *  provider_done exhaustion is a repair state, not a plain failure, and
+   *  the split needs to be visible in the sweep response for
+   *  observability rather than folded into one opaque total. */
   rpc(fn: "fn_expire_exhausted_calendar_creations"): Promise<{
-    data: number | null;
+    data: ExpireExhaustedRow[] | null;
     error: { message: string } | null;
   }>;
 };
@@ -119,6 +124,7 @@ export async function runCalendarMutationSweep(
 ): Promise<{
   claimed: number;
   expired: number;
+  needsRepair: number;
   outcomes: Record<string, number>;
   budgetExhausted: boolean;
 }> {
@@ -131,15 +137,19 @@ export async function runCalendarMutationSweep(
   // per claim iteration, since the claim loop below calls the claim RPC
   // with p_limit:1 up to claimLimit times. A row stuck at attempts>=5
   // holds idx_task_calendar_mutations_chain_serialization's slot open
-  // (that partial index excludes only 'failed') until it's moved there,
-  // which would otherwise block PR 3's lifecycle mutations on the same
-  // appointment forever.
-  const { data: expiredCount, error: expireError } = await rpcClient.rpc(
+  // (that partial index excludes only 'failed'/'provider_done'/'pending')
+  // until it's moved there, which would otherwise block PR 3's lifecycle
+  // mutations on the same appointment forever. Round 7: a provider_done
+  // exhaustion moves to needs_repair (not failed) and deliberately keeps
+  // that slot held — needsRepair surfaces that split for observability.
+  const { data: expireRows, error: expireError } = await rpcClient.rpc(
     "fn_expire_exhausted_calendar_creations",
   );
   if (expireError) {
     throw new Error(`fn_expire_exhausted_calendar_creations failed: ${expireError.message}`);
   }
+  const expiredCount = expireRows?.[0]?.failed_count ?? 0;
+  const needsRepairCount = expireRows?.[0]?.needs_repair_count ?? 0;
 
   const outcomes: Record<string, number> = {};
   let claimed = 0;
@@ -174,7 +184,7 @@ export async function runCalendarMutationSweep(
     }
   }
 
-  return { claimed, expired: expiredCount ?? 0, outcomes, budgetExhausted };
+  return { claimed, expired: expiredCount, needsRepair: needsRepairCount, outcomes, budgetExhausted };
 }
 
 export async function GET(request: Request) {

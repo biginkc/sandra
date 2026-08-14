@@ -39,6 +39,10 @@ export type ClaimedCalendarCreationRow = {
   phase: "pending" | "provider_done";
   new_event_id: string | null;
   result_reason: string | null;
+  /** Round 7 fencing token: minted fresh by the claim RPC on every
+   *  claim/reclaim. Every write this worker makes to the row is scoped by
+   *  this value — see the module-level fencing comment below. */
+  claim_token: string;
   task_due_at: string;
   task_end_at: string;
   task_title: string;
@@ -59,24 +63,45 @@ export type CalendarCreationOutcome =
    *  bare `create` (nothing can race it before PR 3's chain-serialization
    *  index admits a second mutation), guarded anyway for the same reason
    *  PR 3's real finalize CAS is guarded. */
-  | { status: "finalize_conflict"; ledgerId: string; eventId: string };
+  | { status: "finalize_conflict"; ledgerId: string; eventId: string }
+  /** Round 7 fencing: this worker's claim_token (or expected phase) no
+   *  longer matched the row at write time — another worker already
+   *  reclaimed the expired lease and is (or already has) processed it.
+   *  Not an error: the row is abandoned silently, ownership belongs to
+   *  whoever holds the current token. */
+  | { status: "lease_lost"; ledgerId: string };
 
 type Supabase = SupabaseClient<Database>;
 
-/** task_calendar_mutations.next_attempt_at is added by this PR's migration
- *  (20260814170000) and, per this PR's scope, must not be added to the
- *  generated Database["public"]["Tables"] map yet — same local-cast
- *  pattern used for the claim RPC row shape above and the booking RPCs'
- *  call sites. */
+/** task_calendar_mutations.next_attempt_at / claim_token are added by this
+ *  PR's migration (20260814170000) and, per this PR's scope, must not be
+ *  added to the generated Database["public"]["Tables"] map yet — same
+ *  local-cast pattern used for the claim RPC row shape above and the
+ *  booking RPCs' call sites.
+ *
+ *  Round 7: every write is chained through `.eq("id", ...).eq("claim_token",
+ *  ...).eq("phase", ...).select("id")` so the caller can see exactly how
+ *  many rows matched (0 or 1) rather than trusting a bare `{error: null}`
+ *  — a 0-row match is the "lost the lease" signal, not a database error.
+ */
+type LedgerMutationRow = { id: string };
+type TokenedLedgerUpdateBuilder = {
+  eq(column: "id" | "claim_token" | "phase", value: string): TokenedLedgerUpdateBuilder;
+  select(columns: "id"): PromiseLike<{
+    data: LedgerMutationRow[] | null;
+    error: { message: string } | null;
+  }>;
+};
 type LedgerLeaseUpdateClient = {
   from(table: "task_calendar_mutations"): {
     update(values: {
+      phase?: string;
+      new_event_id?: string;
+      result_reason?: string;
       last_error?: string;
       next_attempt_at?: string;
       updated_at?: string;
-    }): {
-      eq(column: "id", value: string): PromiseLike<{ error: { message: string } | null }>;
-    };
+    }): TokenedLedgerUpdateBuilder;
   };
 };
 
@@ -84,16 +109,73 @@ const nowIso = () => new Date().toISOString();
 
 /** Matches the claim RPC's flat 2-minute lease (migration 20260814170000).
  *  Worker-side backoff scales it by `attempts` so repeated failures push
- *  the row further out each time instead of retrying at a fixed interval. */
+ *  the row further out each time instead of retrying at a fixed interval.
+ *  Also reused as the lease-renewal window (see `renewLease` below). */
 const RETRY_BACKOFF_UNIT_MS = 2 * 60 * 1000;
 
 /**
+ * Every write to `task_calendar_mutations` after the claim goes through
+ * this: scoped by the row id, this worker's `claim_token`, AND the exact
+ * phase this worker expects to find the row in. A 0-row result means the
+ * lease was lost — reclaimed by another worker (different token) or the
+ * row already moved past the expected phase by some other path — and the
+ * caller must abandon the row silently rather than treat it as failure.
+ * No transition is ever called with `expectedPhase: "finalized"`, so a
+ * finalized row structurally can never be written by any transition here.
+ */
+async function applyLedgerTransition(
+  supabase: Supabase,
+  ledgerId: string,
+  claimToken: string,
+  expectedPhase: "pending" | "provider_done",
+  values: {
+    phase?: string;
+    new_event_id?: string;
+    result_reason?: string;
+    last_error?: string;
+    next_attempt_at?: string;
+    updated_at?: string;
+  },
+): Promise<{ applied: boolean; error?: string }> {
+  const { data, error } = await (supabase as unknown as LedgerLeaseUpdateClient)
+    .from("task_calendar_mutations")
+    .update(values)
+    .eq("id", ledgerId)
+    .eq("claim_token", claimToken)
+    .eq("phase", expectedPhase)
+    .select("id");
+  if (error) return { applied: false, error: error.message };
+  return { applied: (data?.length ?? 0) > 0 };
+}
+
+/**
+ * Renew the claim lease immediately after a (potentially long) Google API
+ * call returns, before any other DB write — closes the window where a
+ * slow provider call outlives the 2-minute lease and a concurrent sweep
+ * reclaims the row while this worker is still mid-flight. Still
+ * token-conditioned: if the lease was already reclaimed by the time this
+ * runs, this affects zero rows and the caller abandons the row instead of
+ * writing provider_done/new_event_id over the new owner.
+ */
+async function renewLease(
+  supabase: Supabase,
+  ledgerId: string,
+  claimToken: string,
+  expectedPhase: "pending" | "provider_done",
+): Promise<{ applied: boolean; error?: string }> {
+  return applyLedgerTransition(supabase, ledgerId, claimToken, expectedPhase, {
+    next_attempt_at: new Date(Date.now() + RETRY_BACKOFF_UNIT_MS).toISOString(),
+    updated_at: nowIso(),
+  });
+}
+
+/**
  * Process one claimed `task_calendar_mutations` row, already
- * attempts-bumped and lease-stamped by the claim RPC. Never throws —
- * every branch is a typed outcome; unexpected errors are caught,
- * reported, and treated as retryable (left in place with `last_error` and
- * a backed-off `next_attempt_at` set) rather than silently swallowed or
- * crashing the sweep.
+ * attempts-bumped and lease-stamped (with a fresh `claim_token`, round 7)
+ * by the claim RPC. Never throws — every branch is a typed outcome;
+ * unexpected errors are caught, reported, and treated as retryable (left
+ * in place with `last_error` and a backed-off `next_attempt_at` set)
+ * rather than silently swallowed or crashing the sweep.
  *
  * `phase='provider_done'` (round 6) means a prior attempt already created
  * the Google event but crashed before the task CAS / ledger finalize
@@ -104,13 +186,15 @@ export async function processClaimedCalendarCreation(
   claimed: ClaimedCalendarCreationRow,
 ): Promise<CalendarCreationOutcome> {
   const ledgerId = claimed.ledger_id;
+  const claimToken = claimed.claim_token;
   if (claimed.phase === "provider_done") {
     return resumeProviderDoneCreation(supabase, claimed);
   }
   try {
     const prefs = await loadIntegrationPrefs(supabase, claimed.task_assignee_id);
     if (!prefs.calendarEnabled) {
-      await finalizeNoEvent(supabase, ledgerId, "pref_disabled");
+      const r = await finalizeNoEvent(supabase, ledgerId, claimToken, "pref_disabled");
+      if (r.lost) return { status: "lease_lost", ledgerId };
       return { status: "pref_disabled", ledgerId };
     }
 
@@ -120,7 +204,8 @@ export async function processClaimedCalendarCreation(
       tokenType: "user",
     });
     if (!token) {
-      await finalizeNoEvent(supabase, ledgerId, "no_token");
+      const r = await finalizeNoEvent(supabase, ledgerId, claimToken, "no_token");
+      if (r.lost) return { status: "lease_lost", ledgerId };
       return { status: "no_token", ledgerId };
     }
 
@@ -130,7 +215,8 @@ export async function processClaimedCalendarCreation(
       // calling Google with an undefined id and creating an
       // unreconcilable event on retry.
       const message = "ledger row has no client_event_id";
-      await markPermanentFailure(supabase, ledgerId, message);
+      const r = await markPermanentFailure(supabase, ledgerId, claimToken, "pending", message);
+      if (r.lost) return { status: "lease_lost", ledgerId };
       return { status: "permanent_error", ledgerId, error: message };
     }
 
@@ -139,7 +225,8 @@ export async function processClaimedCalendarCreation(
       calendar = buildCalendarClient(claimed.task_assignee_id, token);
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
-      await markPermanentFailure(supabase, ledgerId, message);
+      const r = await markPermanentFailure(supabase, ledgerId, claimToken, "pending", message);
+      if (r.lost) return { status: "lease_lost", ledgerId };
       return { status: "permanent_error", ledgerId, error: message };
     }
 
@@ -171,36 +258,73 @@ export async function processClaimedCalendarCreation(
           eventId = existing.data.id;
           reconciled = true;
         } catch (reconcileError) {
-          return await handleProviderFailure(supabase, ledgerId, reconcileError, claimed.attempts);
+          return await handleProviderFailure(
+            supabase,
+            ledgerId,
+            claimToken,
+            "pending",
+            reconcileError,
+            claimed.attempts,
+          );
         }
       } else {
-        return await handleProviderFailure(supabase, ledgerId, e, claimed.attempts);
+        return await handleProviderFailure(
+          supabase,
+          ledgerId,
+          claimToken,
+          "pending",
+          e,
+          claimed.attempts,
+        );
       }
     }
+
+    // Round 7: renew the lease right after the (potentially long) Google
+    // call returns, before writing provider_done — see `renewLease`.
+    const renewed = await renewLease(supabase, ledgerId, claimToken, "pending");
+    if (renewed.error) {
+      const r = await markRetryableFailure(
+        supabase,
+        ledgerId,
+        claimToken,
+        "pending",
+        renewed.error,
+        claimed.attempts,
+      );
+      if (r.lost) return { status: "lease_lost", ledgerId };
+      return { status: "retryable_error", ledgerId, error: renewed.error };
+    }
+    if (!renewed.applied) return { status: "lease_lost", ledgerId };
 
     // result_reason is written here too (not just at finalize) so a crash
     // between this write and the finalize below leaves a provider_done row
     // that a later resume (resumeProviderDoneCreation) can read back to
     // know whether the original attempt was a fresh create or a 409
     // reconcile, instead of guessing 'event_created' by default.
-    const { error: providerDoneError } = await supabase
-      .from("task_calendar_mutations")
-      .update({
-        phase: "provider_done",
-        new_event_id: eventId,
-        result_reason: reconciled ? "reconciled_409" : "event_created",
-        updated_at: nowIso(),
-      })
-      .eq("id", ledgerId)
-      .eq("phase", "pending");
-    if (providerDoneError) {
-      await markRetryableFailure(supabase, ledgerId, providerDoneError.message, claimed.attempts);
-      return { status: "retryable_error", ledgerId, error: providerDoneError.message };
+    const providerDone = await applyLedgerTransition(supabase, ledgerId, claimToken, "pending", {
+      phase: "provider_done",
+      new_event_id: eventId,
+      result_reason: reconciled ? "reconciled_409" : "event_created",
+      updated_at: nowIso(),
+    });
+    if (providerDone.error) {
+      const r = await markRetryableFailure(
+        supabase,
+        ledgerId,
+        claimToken,
+        "pending",
+        providerDone.error,
+        claimed.attempts,
+      );
+      if (r.lost) return { status: "lease_lost", ledgerId };
+      return { status: "retryable_error", ledgerId, error: providerDone.error };
     }
+    if (!providerDone.applied) return { status: "lease_lost", ledgerId };
 
     return await finalizeCreation(
       supabase,
       ledgerId,
+      claimToken,
       claimed.source_task_id,
       claimed.expected_generation,
       eventId,
@@ -213,7 +337,19 @@ export async function processClaimedCalendarCreation(
       tags: { surface: "calendar_creation_worker" },
       extra: { ledgerId, sourceTaskId: claimed.source_task_id },
     });
-    await markRetryableFailure(supabase, ledgerId, message, claimed.attempts).catch(() => {});
+    // Everything in this try block up to the provider_done write either
+    // hasn't run yet or already returned a typed outcome without throwing
+    // (finalizeCreation never throws) — so an exception reaching here
+    // always means the row is still 'pending'.
+    const r = await markRetryableFailure(
+      supabase,
+      ledgerId,
+      claimToken,
+      "pending",
+      message,
+      claimed.attempts,
+    ).catch(() => ({ applied: false, lost: false }));
+    if (r.lost) return { status: "lease_lost", ledgerId };
     return { status: "retryable_error", ledgerId, error: message };
   }
 }
@@ -224,13 +360,16 @@ export async function processClaimedCalendarCreation(
  * the task CAS / ledger finalize completed. Never calls Google except in
  * the (structurally-shouldn't-happen) fallback where new_event_id itself
  * is missing — the normal case goes straight to finalizeCreation reusing
- * the recorded event id and result_reason.
+ * the recorded event id and result_reason. The row is 'provider_done'
+ * throughout this whole function, so every transition below expects that
+ * phase.
  */
 async function resumeProviderDoneCreation(
   supabase: Supabase,
   claimed: ClaimedCalendarCreationRow,
 ): Promise<CalendarCreationOutcome> {
   const ledgerId = claimed.ledger_id;
+  const claimToken = claimed.claim_token;
   let eventId = claimed.new_event_id;
   let reconciled = claimed.result_reason === "reconciled_409";
 
@@ -238,7 +377,14 @@ async function resumeProviderDoneCreation(
     if (!claimed.client_event_id) {
       const message =
         "provider_done ledger row has no new_event_id or client_event_id to reconcile";
-      await markPermanentFailure(supabase, ledgerId, message);
+      const r = await markPermanentFailure(
+        supabase,
+        ledgerId,
+        claimToken,
+        "provider_done",
+        message,
+      );
+      if (r.lost) return { status: "lease_lost", ledgerId };
       return { status: "permanent_error", ledgerId, error: message };
     }
 
@@ -255,7 +401,15 @@ async function resumeProviderDoneCreation(
     });
     if (!token) {
       const message = "provider_done row missing new_event_id and has no token to reconcile it";
-      await markRetryableFailure(supabase, ledgerId, message, claimed.attempts);
+      const r = await markRetryableFailure(
+        supabase,
+        ledgerId,
+        claimToken,
+        "provider_done",
+        message,
+        claimed.attempts,
+      );
+      if (r.lost) return { status: "lease_lost", ledgerId };
       return { status: "retryable_error", ledgerId, error: message };
     }
 
@@ -264,7 +418,14 @@ async function resumeProviderDoneCreation(
       calendar = buildCalendarClient(claimed.task_assignee_id, token);
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
-      await markPermanentFailure(supabase, ledgerId, message);
+      const r = await markPermanentFailure(
+        supabase,
+        ledgerId,
+        claimToken,
+        "provider_done",
+        message,
+      );
+      if (r.lost) return { status: "lease_lost", ledgerId };
       return { status: "permanent_error", ledgerId, error: message };
     }
 
@@ -279,23 +440,57 @@ async function resumeProviderDoneCreation(
       eventId = existing.data.id;
       reconciled = true;
     } catch (e) {
-      return await handleProviderFailure(supabase, ledgerId, e, claimed.attempts);
+      return await handleProviderFailure(
+        supabase,
+        ledgerId,
+        claimToken,
+        "provider_done",
+        e,
+        claimed.attempts,
+      );
     }
 
-    const { error: newEventIdError } = await supabase
-      .from("task_calendar_mutations")
-      .update({ new_event_id: eventId, result_reason: "reconciled_409", updated_at: nowIso() })
-      .eq("id", ledgerId)
-      .eq("phase", "provider_done");
-    if (newEventIdError) {
-      await markRetryableFailure(supabase, ledgerId, newEventIdError.message, claimed.attempts);
-      return { status: "retryable_error", ledgerId, error: newEventIdError.message };
+    // Round 7: renew before writing new_event_id, same rationale as the
+    // fresh-create path — the events.get call above can be slow too.
+    const renewed = await renewLease(supabase, ledgerId, claimToken, "provider_done");
+    if (renewed.error) {
+      const r = await markRetryableFailure(
+        supabase,
+        ledgerId,
+        claimToken,
+        "provider_done",
+        renewed.error,
+        claimed.attempts,
+      );
+      if (r.lost) return { status: "lease_lost", ledgerId };
+      return { status: "retryable_error", ledgerId, error: renewed.error };
     }
+    if (!renewed.applied) return { status: "lease_lost", ledgerId };
+
+    const newEventId = await applyLedgerTransition(supabase, ledgerId, claimToken, "provider_done", {
+      new_event_id: eventId,
+      result_reason: "reconciled_409",
+      updated_at: nowIso(),
+    });
+    if (newEventId.error) {
+      const r = await markRetryableFailure(
+        supabase,
+        ledgerId,
+        claimToken,
+        "provider_done",
+        newEventId.error,
+        claimed.attempts,
+      );
+      if (r.lost) return { status: "lease_lost", ledgerId };
+      return { status: "retryable_error", ledgerId, error: newEventId.error };
+    }
+    if (!newEventId.applied) return { status: "lease_lost", ledgerId };
   }
 
   return finalizeCreation(
     supabase,
     ledgerId,
+    claimToken,
     claimed.source_task_id,
     claimed.expected_generation,
     eventId,
@@ -307,16 +502,20 @@ async function resumeProviderDoneCreation(
 /**
  * Task google_calendar_event_id CAS + ledger finalize — shared by the
  * fresh-create path (after a successful Google call) and the
- * provider_done resume path. Idempotent by construction: the finalize
- * update is scoped `.eq("phase", "provider_done")`, so calling this twice
- * against an already-finalized row (e.g. a resume racing a sweep that
- * already finished it) is a harmless no-op on the second call rather than
- * an error, and the CAS re-applying the same event id to an unchanged
- * generation is a no-op too.
+ * provider_done resume path. The task CAS itself is unrelated to the
+ * claim_token fence (it's scoped by `calendar_generation`, a different
+ * concurrency axis entirely — PR 3's lifecycle mutations, not competing
+ * creation workers); only the ledger finalize write below is
+ * token-conditioned. Idempotent by construction: a 0-row finalize result
+ * because the row was already finalized by a concurrent resume looks
+ * identical to a lost lease here (both are "someone else already handled
+ * this"), so it's reported as `lease_lost` rather than an error — the
+ * caller of finalizeCreation never mistakes this for a real failure.
  */
 async function finalizeCreation(
   supabase: Supabase,
   ledgerId: string,
+  claimToken: string,
   sourceTaskId: string,
   expectedGeneration: number,
   eventId: string,
@@ -335,26 +534,39 @@ async function finalizeCreation(
     .select("id")
     .maybeSingle();
   if (taskUpdateError) {
-    await markRetryableFailure(supabase, ledgerId, taskUpdateError.message, attempts);
+    const r = await markRetryableFailure(
+      supabase,
+      ledgerId,
+      claimToken,
+      "provider_done",
+      taskUpdateError.message,
+      attempts,
+    );
+    if (r.lost) return { status: "lease_lost", ledgerId };
     return { status: "retryable_error", ledgerId, error: taskUpdateError.message };
   }
   if (!taskUpdated) {
     return { status: "finalize_conflict", ledgerId, eventId };
   }
 
-  const { error: finalizeError } = await supabase
-    .from("task_calendar_mutations")
-    .update({
-      phase: "finalized",
-      result_reason: reconciled ? "reconciled_409" : "event_created",
-      updated_at: nowIso(),
-    })
-    .eq("id", ledgerId)
-    .eq("phase", "provider_done");
-  if (finalizeError) {
-    await markRetryableFailure(supabase, ledgerId, finalizeError.message, attempts);
-    return { status: "retryable_error", ledgerId, error: finalizeError.message };
+  const finalized = await applyLedgerTransition(supabase, ledgerId, claimToken, "provider_done", {
+    phase: "finalized",
+    result_reason: reconciled ? "reconciled_409" : "event_created",
+    updated_at: nowIso(),
+  });
+  if (finalized.error) {
+    const r = await markRetryableFailure(
+      supabase,
+      ledgerId,
+      claimToken,
+      "provider_done",
+      finalized.error,
+      attempts,
+    );
+    if (r.lost) return { status: "lease_lost", ledgerId };
+    return { status: "retryable_error", ledgerId, error: finalized.error };
   }
+  if (!finalized.applied) return { status: "lease_lost", ledgerId };
 
   return reconciled
     ? { status: "reconciled_409", ledgerId, eventId }
@@ -364,19 +576,31 @@ async function finalizeCreation(
 async function handleProviderFailure(
   supabase: Supabase,
   ledgerId: string,
+  claimToken: string,
+  expectedPhase: "pending" | "provider_done",
   error: unknown,
   attempts: number,
 ): Promise<CalendarCreationOutcome> {
   const message = error instanceof Error ? error.message : String(error);
-  if (isGoogleAuthPermanent(error)) {
-    await markPermanentFailure(supabase, ledgerId, message);
+  if (classifyGoogleFailure(error) === "permanent") {
+    const r = await markPermanentFailure(supabase, ledgerId, claimToken, expectedPhase, message);
+    if (r.lost) return { status: "lease_lost", ledgerId };
     return { status: "permanent_error", ledgerId, error: message };
   }
   // Fail closed toward "retryable" for anything not positively identified
   // as permanent — an unrecognized error shape left in place (attempts
   // already bumped, next_attempt_at backed off) is safer than silently
-  // terminal-failing a transient blip.
-  await markRetryableFailure(supabase, ledgerId, message, attempts);
+  // terminal-failing a transient blip. Exhaustion (attempts>=5) is what
+  // eventually terminalizes a row that never actually recovers.
+  const r = await markRetryableFailure(
+    supabase,
+    ledgerId,
+    claimToken,
+    expectedPhase,
+    message,
+    attempts,
+  );
+  if (r.lost) return { status: "lease_lost", ledgerId };
   return { status: "retryable_error", ledgerId, error: message };
 }
 
@@ -392,59 +616,70 @@ function buildEvent(claimed: ClaimedCalendarCreationRow): calendar_v3.Schema$Eve
 /** pref_disabled / no_token: an immediate no-op finalize — no event was
  *  ever created, so there's nothing to reconcile. Releases the chain's
  *  serialization slot instantly so booking without Google connected never
- *  blocks a later lifecycle mutation. */
+ *  blocks a later lifecycle mutation. Always called with the row still at
+ *  'pending'. */
 async function finalizeNoEvent(
   supabase: Supabase,
   ledgerId: string,
+  claimToken: string,
   reason: "pref_disabled" | "no_token",
-): Promise<void> {
-  const { error } = await supabase
-    .from("task_calendar_mutations")
-    .update({ phase: "finalized", result_reason: reason, updated_at: nowIso() })
-    .eq("id", ledgerId)
-    .eq("phase", "pending");
-  if (error) {
-    reportError(new Error(error.message), {
+): Promise<{ lost: boolean }> {
+  const result = await applyLedgerTransition(supabase, ledgerId, claimToken, "pending", {
+    phase: "finalized",
+    result_reason: reason,
+    updated_at: nowIso(),
+  });
+  if (result.error) {
+    reportError(new Error(result.error), {
       tags: { surface: "calendar_creation_worker_finalize_noop" },
       extra: { ledgerId, reason },
     });
+    return { lost: false };
   }
+  return { lost: !result.applied };
 }
 
+/**
+ * Round 7: takes `expectedPhase` explicitly rather than guessing — this is
+ * called from both the fresh-create ('pending') path and the
+ * provider_done resume path, and each call site knows exactly which phase
+ * the row is in at that point (the fencing WHERE clause needs the exact
+ * value, not a blanket omission). A 0-row result (lease already lost,
+ * including the finalized-is-never-a-valid-expectedPhase case) is
+ * reported via `lost`, not as an error — this write is bookkeeping, not
+ * the underlying Google failure the caller already knows about.
+ */
 async function markPermanentFailure(
   supabase: Supabase,
   ledgerId: string,
+  claimToken: string,
+  expectedPhase: "pending" | "provider_done",
   message: string,
-): Promise<void> {
-  // No `.eq("phase", ...)` guard — round 6 calls this from both the
-  // 'pending' fresh-create path and the 'provider_done' resume path
-  // (resumeProviderDoneCreation), and the claim lease already gives this
-  // worker exclusive ownership of the row either way. A phase-scoped
-  // filter here would silently no-op (0 rows matched, no error surfaced)
-  // whenever called from the provider_done side, stranding the row.
-  const { error } = await supabase
-    .from("task_calendar_mutations")
-    .update({
-      phase: "failed",
-      result_reason: "auth_permanent",
-      last_error: message,
-      updated_at: nowIso(),
-    })
-    .eq("id", ledgerId);
-  if (error) {
-    reportError(new Error(error.message), {
+): Promise<{ lost: boolean }> {
+  const result = await applyLedgerTransition(supabase, ledgerId, claimToken, expectedPhase, {
+    phase: "failed",
+    result_reason: "auth_permanent",
+    last_error: message,
+    updated_at: nowIso(),
+  });
+  if (result.error) {
+    reportError(new Error(result.error), {
       tags: { surface: "calendar_creation_worker_permanent_fail" },
       extra: { ledgerId },
     });
+    return { lost: false };
   }
+  return { lost: !result.applied };
 }
 
 async function markRetryableFailure(
   supabase: Supabase,
   ledgerId: string,
+  claimToken: string,
+  expectedPhase: "pending" | "provider_done",
   message: string,
   attempts: number,
-): Promise<void> {
+): Promise<{ applied: boolean; lost: boolean }> {
   // Phase intentionally left as-is ('pending' or 'provider_done') — the
   // claim RPC already bumped attempts and set a flat 2-minute lease; this
   // explicitly pushes next_attempt_at out further, scaled by attempts, so
@@ -452,20 +687,83 @@ async function markRetryableFailure(
   // interval every sweep. The exhaustion cap (attempts < 5 to reclaim,
   // fn_expire_exhausted_calendar_creations to terminalize) is what
   // eventually stops a permanently-broken row from being reclaimed
-  // forever — not a phase transition here. No `.eq("phase", ...)` guard:
-  // the lease already gives this worker exclusive ownership of the row
-  // for the backoff window, so nothing else can be racing this update.
+  // forever — not a phase transition here.
   const nextAttemptAt = new Date(Date.now() + attempts * RETRY_BACKOFF_UNIT_MS).toISOString();
-  const { error } = await (supabase as unknown as LedgerLeaseUpdateClient)
-    .from("task_calendar_mutations")
-    .update({ last_error: message, next_attempt_at: nextAttemptAt, updated_at: nowIso() })
-    .eq("id", ledgerId);
-  if (error) {
-    reportError(new Error(error.message), {
+  const result = await applyLedgerTransition(supabase, ledgerId, claimToken, expectedPhase, {
+    last_error: message,
+    next_attempt_at: nextAttemptAt,
+    updated_at: nowIso(),
+  });
+  if (result.error) {
+    reportError(new Error(result.error), {
       tags: { surface: "calendar_creation_worker_retryable_fail" },
       extra: { ledgerId },
     });
+    return { applied: false, lost: false };
   }
+  return { applied: result.applied, lost: !result.applied };
+}
+
+// ----------------------------------------------------------------------------
+// Google error classification (round 7)
+//
+// A bare HTTP status collapses cases that need different handling: a 403
+// can mean "you'll never be allowed to do this" (insufficientPermissions,
+// accessNotConfigured) or "you're allowed, just not right now"
+// (rateLimitExceeded, userRateLimitExceeded). Terminal-failing the second
+// case strands a row that would have succeeded on the next sweep; retrying
+// the first case forever wastes attempts on a request that can never
+// succeed. The Calendar API (and the OAuth2 token endpoint, for
+// invalid_grant) surface a structured `reason` for exactly this — prefer
+// it when present, and fall back to bare HTTP status only when it isn't.
+// ----------------------------------------------------------------------------
+
+/** Reasons observed on `err.response.data.error.errors[].reason` for the
+ *  googleapis/gaxios error shape used throughout this file (same `status`/
+ *  `code` fields as dispatch.ts's isGoogleConflict/isGoogleNotFound). */
+const RETRYABLE_GOOGLE_REASONS = new Set([
+  "rateLimitExceeded",
+  "userRateLimitExceeded",
+  "quotaExceeded",
+  "backendError",
+  "internalError",
+]);
+
+/** insufficientPermissions/accessNotConfigured/forbidden/authError are all
+ *  credential- or grant-level failures that will never resolve by
+ *  retrying; invalid_grant is the OAuth2 token-endpoint error shape (a
+ *  bare string body, not an errors[] array — see extractGoogleReasons). */
+const PERMANENT_GOOGLE_REASONS = new Set([
+  "authError",
+  "insufficientPermissions",
+  "accessNotConfigured",
+  "forbidden",
+  "invalid_grant",
+]);
+
+type GoogleErrorLike = {
+  status?: unknown;
+  code?: unknown;
+  response?: {
+    data?: {
+      error?:
+        | string
+        | {
+            errors?: Array<{ reason?: unknown }>;
+          };
+    };
+  };
+};
+
+function extractGoogleReasons(error: unknown): string[] {
+  if (!error || typeof error !== "object") return [];
+  const body = (error as GoogleErrorLike).response?.data?.error;
+  if (!body) return [];
+  if (typeof body === "string") return [body];
+  if (!Array.isArray(body.errors)) return [];
+  return body.errors
+    .map((e) => (typeof e.reason === "string" ? e.reason : null))
+    .filter((r): r is string => r !== null);
 }
 
 function extractGoogleStatus(error: unknown): number | undefined {
@@ -476,7 +774,26 @@ function extractGoogleStatus(error: unknown): number | undefined {
   return undefined;
 }
 
-function isGoogleAuthPermanent(error: unknown): boolean {
+/**
+ * Classify a Google API failure as retryable or permanent. Structured
+ * `reason` values take priority over bare HTTP status when present; an
+ * unrecognized/absent reason falls back to status (401 permanent, 429 and
+ * all 5xx retryable). An unlisted 403 reason — including no reason at all
+ * — defaults to RETRYABLE: exhaustion (attempts>=5,
+ * fn_expire_exhausted_calendar_creations) is what eventually terminalizes
+ * a row that never actually recovers, which is a safer failure mode than
+ * burying a transient block permanently on a guess.
+ */
+function classifyGoogleFailure(error: unknown): "retryable" | "permanent" {
+  const reasons = extractGoogleReasons(error);
+  if (reasons.some((r) => PERMANENT_GOOGLE_REASONS.has(r))) return "permanent";
+  if (reasons.some((r) => RETRYABLE_GOOGLE_REASONS.has(r))) return "retryable";
+
   const status = extractGoogleStatus(error);
-  return status === 401 || status === 403;
+  if (status === 401) return "permanent";
+  if (status === 429) return "retryable";
+  if (typeof status === "number" && status >= 500 && status < 600) return "retryable";
+  // status === 403 with no recognized reason, or any other/unknown shape:
+  // fail toward retry.
+  return "retryable";
 }

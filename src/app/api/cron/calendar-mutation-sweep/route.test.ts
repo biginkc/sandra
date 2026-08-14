@@ -26,6 +26,7 @@ function claimedRow(id: string): ClaimedCalendarCreationRow {
     phase: "pending",
     new_event_id: null,
     result_reason: null,
+    claim_token: `token-${id}`,
     task_due_at: "2026-09-01T15:00:00.000Z",
     task_end_at: "2026-09-01T15:30:00.000Z",
     task_title: "Walkthrough",
@@ -38,11 +39,18 @@ function claimedRow(id: string): ClaimedCalendarCreationRow {
  *  and otherwise hands back one queued row per call so the route's
  *  one-at-a-time claim (`p_limit: 1`) is exercised the same way the real
  *  RPC would be — a fresh claim call per row, not one upfront batch. */
-function fakeSupabase(rows: ClaimedCalendarCreationRow[], expiredCount = 0) {
+function fakeSupabase(
+  rows: ClaimedCalendarCreationRow[],
+  expiredCount = 0,
+  needsRepairCount = 0,
+) {
   const queue = [...rows];
   const rpc = vi.fn(async (fn: string) => {
     if (fn === "fn_expire_exhausted_calendar_creations") {
-      return { data: expiredCount, error: null };
+      return {
+        data: [{ failed_count: expiredCount, needs_repair_count: needsRepairCount }],
+        error: null,
+      };
     }
     const row = queue.shift();
     return { data: row ? [row] : [], error: null };
@@ -148,8 +156,8 @@ describe("runCalendarMutationSweep", () => {
     expect(summary.claimed).toBe(2);
   });
 
-  it("runs the exhaustion sweep once per invocation, before any claiming, and surfaces its count", async () => {
-    const supabase = fakeSupabase([claimedRow("a")], 3);
+  it("runs the exhaustion sweep once per invocation, before any claiming, and surfaces failed/needs_repair separately", async () => {
+    const supabase = fakeSupabase([claimedRow("a")], 3, 2);
     mocks.processClaimedCalendarCreation.mockResolvedValue({
       status: "created",
       ledgerId: "a",
@@ -159,6 +167,7 @@ describe("runCalendarMutationSweep", () => {
     const summary = await runCalendarMutationSweep(supabase, { budgetMs: 60_000 });
 
     expect(summary.expired).toBe(3);
+    expect(summary.needsRepair).toBe(2);
     const calls = supabase.rpc.mock.calls;
     expect(calls[0][0]).toBe("fn_expire_exhausted_calendar_creations");
     expect(calls.filter((c: unknown[]) => c[0] === "fn_expire_exhausted_calendar_creations")).toHaveLength(1);

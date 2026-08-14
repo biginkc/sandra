@@ -134,18 +134,26 @@ type ClaimCalendarCreationsRow = {
   phase: "pending" | "provider_done";
   new_event_id: string | null;
   result_reason: string | null;
+  /** Round 7 fencing token — fresh per claim/reclaim; every worker write
+   *  after the claim is scoped by it (see create-worker.ts). */
+  claim_token: string;
   task_due_at: string;
   task_end_at: string;
   task_title: string;
   task_assignee_id: string;
 };
 
+/** Round 7: fn_expire_exhausted_calendar_creations now returns one row of
+ *  (failed_count, needs_repair_count) instead of a bare integer — a
+ *  provider_done exhaustion is a repair state, not a plain failure. */
+type ExpireExhaustedRow = { failed_count: number; needs_repair_count: number };
+
 type ClaimRpcClient = {
   rpc(
     fn: "fn_claim_calendar_creations",
     args: { p_limit: number },
   ): Promise<RpcResult<ClaimCalendarCreationsRow[]>>;
-  rpc(fn: "fn_expire_exhausted_calendar_creations"): Promise<RpcResult<number>>;
+  rpc(fn: "fn_expire_exhausted_calendar_creations"): Promise<RpcResult<ExpireExhaustedRow[]>>;
 };
 
 function claimCalendarCreations(
@@ -159,7 +167,7 @@ function claimCalendarCreations(
 
 function expireExhaustedCalendarCreations(
   client: SupabaseClient<Database>,
-): Promise<RpcResult<number>> {
+): Promise<RpcResult<ExpireExhaustedRow[]>> {
   return (client as unknown as ClaimRpcClient).rpc("fn_expire_exhausted_calendar_creations");
 }
 
@@ -179,6 +187,7 @@ function ledgerLeaseReader(client: SupabaseClient<Database> = db) {
       update(values: {
         next_attempt_at?: string | null;
         attempts?: number;
+        phase?: string;
       }): {
         eq(
           column: "id",
@@ -1313,6 +1322,10 @@ describe("Migration 20260814170000 — appointment booking RPCs", () => {
         task_assignee_id: assignee.userId,
       });
       expect(claimed!.client_event_id).toMatch(/^[a-v0-9]{5,1024}$/);
+      // Round 7 fencing token: a fresh uuid minted by this claim.
+      expect(claimed!.claim_token).toMatch(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
+      );
 
       const { data: ledgerRow } = await db
         .from("task_calendar_mutations")
@@ -1405,6 +1418,10 @@ describe("Migration 20260814170000 — appointment booking RPCs", () => {
       const reclaimed = afterBackoff!.find((row) => row.ledger_id === claimed!.ledger_id);
       expect(reclaimed).toBeDefined();
       expect(reclaimed!.attempts).toBe(2); // bumped again by the second claim
+      // Round 7 fencing: a reclaim mints a fresh claim_token, so the
+      // worker holding the original one can never write over the row
+      // again even if it wakes up after the fact.
+      expect(reclaimed!.claim_token).not.toBe(claimed!.claim_token);
     });
 
     describe("fn_expire_exhausted_calendar_creations", () => {
@@ -1440,10 +1457,11 @@ describe("Migration 20260814170000 — appointment booking RPCs", () => {
           .eq("id", ledgerId);
         expect(bumpErr).toBeNull();
 
-        const { data: expiredCount, error: expireErr } =
+        const { data: expireRows, error: expireErr } =
           await expireExhaustedCalendarCreations(serviceClient);
         expect(expireErr).toBeNull();
-        expect(expiredCount).toBeGreaterThanOrEqual(1);
+        expect(expireRows![0].failed_count).toBeGreaterThanOrEqual(1);
+        expect(expireRows![0].needs_repair_count).toBe(0);
 
         const { data: ledgerAfter } = await ledgerLeaseReader()
           .from("task_calendar_mutations")
@@ -1453,10 +1471,12 @@ describe("Migration 20260814170000 — appointment booking RPCs", () => {
         expect(ledgerAfter?.phase).toBe("failed");
 
         // Chain slot freed: idx_task_calendar_mutations_chain_serialization
-        // only excludes 'failed', so once this row terminalizes, a fresh
-        // pending/provider_done row on the SAME chain no longer collides
-        // with it — proving the exhaustion sweep is what actually frees
-        // PR 3's lifecycle mutations, not just the attempts<5 claim filter.
+        // only excludes 'failed'/'provider_done'/'pending' (round 7 adds
+        // 'needs_repair'), so once this row terminalizes to 'failed', a
+        // fresh pending/provider_done row on the SAME chain no longer
+        // collides with it — proving the exhaustion sweep is what
+        // actually frees PR 3's lifecycle mutations, not just the
+        // attempts<5 claim filter.
         const { error: insertErr } = await ledgerLeaseReader(db)
           .from("task_calendar_mutations")
           .insert({
@@ -1469,6 +1489,70 @@ describe("Migration 20260814170000 — appointment booking RPCs", () => {
             expected_generation: 0,
           });
         expect(insertErr).toBeNull();
+      });
+
+      it("terminalizes an exhausted provider_done row to phase='needs_repair' (a repair state, not abandonment) and KEEPS the chain-serialization slot held", async () => {
+        const booker = await createUserForOrg(BMH_ORG_ID);
+        const assignee = await createUserForOrg(BMH_ORG_ID);
+        const { p_start, p_end } = windowArgs();
+
+        const { data: booking, error: bookErr } = await bookAppointment(booker.client, {
+          p_org: BMH_ORG_ID,
+          p_assignee: assignee.userId,
+          p_start,
+          p_end,
+          p_timezone: "America/Chicago",
+          p_title: "Provider-done exhaustion probe",
+        });
+        expect(bookErr).toBeNull();
+
+        const { data: ledgerBefore } = await db
+          .from("task_calendar_mutations")
+          .select("id")
+          .eq("source_task_id", booking!.task_id)
+          .single();
+        const ledgerId = (ledgerBefore as { id: string }).id;
+
+        // The Google event WAS created (phase='provider_done') but local
+        // finalize kept failing until attempts hit the cap — this is NOT
+        // a clean abandonment, unlike a 'pending' exhaustion above.
+        const past = new Date(Date.now() - 1_000).toISOString();
+        const { error: bumpErr } = await ledgerLeaseReader()
+          .from("task_calendar_mutations")
+          .update({ phase: "provider_done", attempts: 5, next_attempt_at: past })
+          .eq("id", ledgerId);
+        expect(bumpErr).toBeNull();
+
+        const { data: expireRows, error: expireErr } =
+          await expireExhaustedCalendarCreations(serviceClient);
+        expect(expireErr).toBeNull();
+        expect(expireRows![0].needs_repair_count).toBeGreaterThanOrEqual(1);
+
+        const { data: ledgerAfter } = await ledgerLeaseReader()
+          .from("task_calendar_mutations")
+          .select("phase, attempts, next_attempt_at")
+          .eq("id", ledgerId)
+          .single();
+        expect(ledgerAfter?.phase).toBe("needs_repair");
+
+        // Chain slot still held: unlike 'failed', 'needs_repair' remains
+        // inside idx_task_calendar_mutations_chain_serialization's WHERE
+        // clause — an unreconciled Google event must not be raced by a
+        // later lifecycle mutation on the same chain, so this insert must
+        // fail with the same unique-violation a live 'pending'/
+        // 'provider_done' row would produce.
+        const { error: insertErr } = await ledgerLeaseReader(db)
+          .from("task_calendar_mutations")
+          .insert({
+            org_id: BMH_ORG_ID,
+            calendar_chain_id: booking!.calendar_chain_id,
+            operation: "reschedule",
+            phase: "pending",
+            source_task_id: booking!.task_id,
+            old_assignee_id: assignee.userId,
+            expected_generation: 0,
+          });
+        expect(insertErr).not.toBeNull();
       });
 
       it("does not touch a row still within its lease window even at attempts>=5", async () => {

@@ -56,6 +56,13 @@ function fakeSupabase(
   } as any;
 }
 
+/** A round-7 ledger write (task_calendar_mutations, post-claim) resolves via
+ *  `.select("id")`, so "one row changed" is `data: [{id}]` and "lease lost /
+ *  already advanced past the expected phase" is `data: []`. */
+function ledgerWrite(applied = true) {
+  return { data: applied ? [{ id: "ledger-1" }] : [], error: null };
+}
+
 const BASE_CLAIMED: ClaimedCalendarCreationRow = {
   ledger_id: "ledger-1",
   org_id: "org-1",
@@ -67,6 +74,7 @@ const BASE_CLAIMED: ClaimedCalendarCreationRow = {
   phase: "pending",
   new_event_id: null,
   result_reason: null,
+  claim_token: "token-1",
   task_due_at: "2026-09-01T15:00:00.000Z",
   task_end_at: "2026-09-01T15:30:00.000Z",
   task_title: "Walkthrough",
@@ -92,7 +100,7 @@ describe("processClaimedCalendarCreation", () => {
       timezone: "America/Chicago",
     });
     const supabase = fakeSupabase({
-      task_calendar_mutations: [{ data: null, error: null }], // finalize no-op
+      task_calendar_mutations: [ledgerWrite()], // finalize no-op
     });
 
     const outcome = await processClaimedCalendarCreation(supabase, BASE_CLAIMED);
@@ -104,7 +112,7 @@ describe("processClaimedCalendarCreation", () => {
   it("no_token: finalizes with a NULL event, no calendar client built", async () => {
     vi.mocked(getDecryptedToken).mockResolvedValue(null);
     const supabase = fakeSupabase({
-      task_calendar_mutations: [{ data: null, error: null }], // finalize no-op
+      task_calendar_mutations: [ledgerWrite()], // finalize no-op
     });
 
     const outcome = await processClaimedCalendarCreation(supabase, BASE_CLAIMED);
@@ -113,7 +121,7 @@ describe("processClaimedCalendarCreation", () => {
     expect(buildCalendarClient).not.toHaveBeenCalled();
   });
 
-  it("created: happy path advances provider_done -> finalized and stamps the task", async () => {
+  it("created: happy path renews the lease, advances provider_done -> finalized, and stamps the task", async () => {
     const insert = vi.fn().mockResolvedValue({ data: { id: "evt-1" } });
     vi.mocked(buildCalendarClient).mockReturnValue({
       events: { insert, get: vi.fn() },
@@ -121,8 +129,9 @@ describe("processClaimedCalendarCreation", () => {
     } as any);
     const supabase = fakeSupabase({
       task_calendar_mutations: [
-        { data: null, error: null }, // provider_done
-        { data: null, error: null }, // finalized
+        ledgerWrite(), // lease renewal after the Google call returns
+        ledgerWrite(), // provider_done
+        ledgerWrite(), // finalized
       ],
       tasks: [{ data: { id: "task-1" }, error: null }], // finalize CAS success
     });
@@ -145,8 +154,9 @@ describe("processClaimedCalendarCreation", () => {
     } as any);
     const supabase = fakeSupabase({
       task_calendar_mutations: [
-        { data: null, error: null }, // provider_done
-        { data: null, error: null }, // finalized
+        ledgerWrite(), // lease renewal
+        ledgerWrite(), // provider_done
+        ledgerWrite(), // finalized
       ],
       tasks: [{ data: { id: "task-1" }, error: null }],
     });
@@ -168,27 +178,12 @@ describe("processClaimedCalendarCreation", () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
     } as any);
     const supabase = fakeSupabase({
-      task_calendar_mutations: [{ data: null, error: null }], // last_error update, stays pending
+      task_calendar_mutations: [ledgerWrite()], // last_error update, stays pending
     });
 
     const outcome = await processClaimedCalendarCreation(supabase, BASE_CLAIMED);
 
     expect(outcome.status).toBe("retryable_error");
-  });
-
-  it("permanent_error: a 403 terminal-fails the ledger row", async () => {
-    const insert = vi.fn().mockRejectedValue({ status: 403, message: "forbidden" });
-    vi.mocked(buildCalendarClient).mockReturnValue({
-      events: { insert, get: vi.fn() },
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    } as any);
-    const supabase = fakeSupabase({
-      task_calendar_mutations: [{ data: null, error: null }], // phase='failed' write
-    });
-
-    const outcome = await processClaimedCalendarCreation(supabase, BASE_CLAIMED);
-
-    expect(outcome.status).toBe("permanent_error");
   });
 
   it("finalize CAS: provider succeeds but the task's generation moved — leaves provider_done, never resurrects", async () => {
@@ -198,7 +193,10 @@ describe("processClaimedCalendarCreation", () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
     } as any);
     const supabase = fakeSupabase({
-      task_calendar_mutations: [{ data: null, error: null }], // provider_done write succeeds
+      task_calendar_mutations: [
+        ledgerWrite(), // lease renewal
+        ledgerWrite(), // provider_done write succeeds
+      ],
       tasks: [{ data: null, error: null }], // CAS: 0 rows matched — generation moved
     });
 
@@ -208,6 +206,129 @@ describe("processClaimedCalendarCreation", () => {
       status: "finalize_conflict",
       ledgerId: "ledger-1",
       eventId: "evt-3",
+    });
+  });
+
+  describe("round 7: fencing token / lease loss", () => {
+    it("lease_lost: the retryable-failure write is a no-op when the claim_token was already reclaimed", async () => {
+      const insert = vi.fn().mockRejectedValue({ status: 503, message: "backend error" });
+      vi.mocked(buildCalendarClient).mockReturnValue({
+        events: { insert, get: vi.fn() },
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } as any);
+      const supabase = fakeSupabase({
+        // 0 rows: another worker already reclaimed this row's lease
+        // (fresh claim_token) or moved it past 'pending' by the time this
+        // write lands — this worker must abandon it silently, not error.
+        task_calendar_mutations: [ledgerWrite(false)],
+      });
+
+      const outcome = await processClaimedCalendarCreation(supabase, BASE_CLAIMED);
+
+      expect(outcome).toEqual({ status: "lease_lost", ledgerId: "ledger-1" });
+    });
+
+    it("lease_lost: the finalize write is a no-op — not an error — when the row was already finalized by the current owner", async () => {
+      const insert = vi.fn().mockResolvedValue({ data: { id: "evt-4" } });
+      vi.mocked(buildCalendarClient).mockReturnValue({
+        events: { insert, get: vi.fn() },
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } as any);
+      const supabase = fakeSupabase({
+        task_calendar_mutations: [
+          ledgerWrite(), // lease renewal
+          ledgerWrite(), // provider_done
+          ledgerWrite(false), // finalize: 0 rows — WHERE phase='provider_done' no
+          // longer matches (already finalized/reclaimed) — a finalized row can
+          // never be re-written by this or any other transition.
+        ],
+        tasks: [{ data: { id: "task-1" }, error: null }],
+      });
+
+      const outcome = await processClaimedCalendarCreation(supabase, BASE_CLAIMED);
+
+      expect(outcome).toEqual({ status: "lease_lost", ledgerId: "ledger-1" });
+    });
+
+    it("lease_lost: the permanent-failure write is a no-op when the token no longer matches", async () => {
+      const insert = vi
+        .fn()
+        .mockRejectedValue({ status: 403, response: { data: { error: { errors: [{ reason: "insufficientPermissions" }] } } } });
+      vi.mocked(buildCalendarClient).mockReturnValue({
+        events: { insert, get: vi.fn() },
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } as any);
+      const supabase = fakeSupabase({
+        task_calendar_mutations: [ledgerWrite(false)],
+      });
+
+      const outcome = await processClaimedCalendarCreation(supabase, BASE_CLAIMED);
+
+      expect(outcome).toEqual({ status: "lease_lost", ledgerId: "ledger-1" });
+    });
+  });
+
+  describe("round 7: structured Google error classification", () => {
+    function insertRejecting(error: unknown) {
+      const insert = vi.fn().mockRejectedValue(error);
+      vi.mocked(buildCalendarClient).mockReturnValue({
+        events: { insert, get: vi.fn() },
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } as any);
+    }
+
+    it("403 rateLimitExceeded retries", async () => {
+      insertRejecting({
+        status: 403,
+        response: { data: { error: { errors: [{ reason: "rateLimitExceeded" }] } } },
+      });
+      const supabase = fakeSupabase({ task_calendar_mutations: [ledgerWrite()] });
+
+      const outcome = await processClaimedCalendarCreation(supabase, BASE_CLAIMED);
+
+      expect(outcome.status).toBe("retryable_error");
+    });
+
+    it("403 insufficientPermissions is terminal", async () => {
+      insertRejecting({
+        status: 403,
+        response: { data: { error: { errors: [{ reason: "insufficientPermissions" }] } } },
+      });
+      const supabase = fakeSupabase({ task_calendar_mutations: [ledgerWrite()] });
+
+      const outcome = await processClaimedCalendarCreation(supabase, BASE_CLAIMED);
+
+      expect(outcome.status).toBe("permanent_error");
+    });
+
+    it("401 is terminal", async () => {
+      insertRejecting({ status: 401, message: "invalid credentials" });
+      const supabase = fakeSupabase({ task_calendar_mutations: [ledgerWrite()] });
+
+      const outcome = await processClaimedCalendarCreation(supabase, BASE_CLAIMED);
+
+      expect(outcome.status).toBe("permanent_error");
+    });
+
+    it("an unrecognized 403 reason defaults to retryable (fail toward retry)", async () => {
+      insertRejecting({
+        status: 403,
+        response: { data: { error: { errors: [{ reason: "somethingNeverSeenBefore" }] } } },
+      });
+      const supabase = fakeSupabase({ task_calendar_mutations: [ledgerWrite()] });
+
+      const outcome = await processClaimedCalendarCreation(supabase, BASE_CLAIMED);
+
+      expect(outcome.status).toBe("retryable_error");
+    });
+
+    it("a bare 403 with no structured reason at all also defaults to retryable", async () => {
+      insertRejecting({ status: 403, message: "forbidden" });
+      const supabase = fakeSupabase({ task_calendar_mutations: [ledgerWrite()] });
+
+      const outcome = await processClaimedCalendarCreation(supabase, BASE_CLAIMED);
+
+      expect(outcome.status).toBe("retryable_error");
     });
   });
 
@@ -229,7 +350,7 @@ describe("processClaimedCalendarCreation", () => {
       const buildCalendarClientCallsBefore = vi.mocked(buildCalendarClient).mock.calls.length;
       const supabase = fakeSupabase({
         tasks: [{ data: { id: "task-1" }, error: null }], // finalize CAS success
-        task_calendar_mutations: [{ data: null, error: null }], // finalized
+        task_calendar_mutations: [ledgerWrite()], // finalized
       });
 
       const outcome = await processClaimedCalendarCreation(supabase, PROVIDER_DONE_CLAIMED);
@@ -242,7 +363,7 @@ describe("processClaimedCalendarCreation", () => {
     it("preserves reconciled_409 from the original attempt across the resume", async () => {
       const supabase = fakeSupabase({
         tasks: [{ data: { id: "task-1" }, error: null }],
-        task_calendar_mutations: [{ data: null, error: null }],
+        task_calendar_mutations: [ledgerWrite()],
       });
 
       const outcome = await processClaimedCalendarCreation(supabase, {
@@ -260,7 +381,7 @@ describe("processClaimedCalendarCreation", () => {
     it("task-update failure recovers on a subsequent claim", async () => {
       const failingSupabase = fakeSupabase({
         tasks: [{ data: null, error: { message: "connection reset" } }],
-        task_calendar_mutations: [{ data: null, error: null }], // markRetryableFailure's backoff write
+        task_calendar_mutations: [ledgerWrite()], // markRetryableFailure's backoff write
       });
       const first = await processClaimedCalendarCreation(failingSupabase, PROVIDER_DONE_CLAIMED);
       expect(first.status).toBe("retryable_error");
@@ -269,7 +390,7 @@ describe("processClaimedCalendarCreation", () => {
       // changed), this time the task CAS and finalize both succeed.
       const recoveredSupabase = fakeSupabase({
         tasks: [{ data: { id: "task-1" }, error: null }],
-        task_calendar_mutations: [{ data: null, error: null }],
+        task_calendar_mutations: [ledgerWrite()],
       });
       const second = await processClaimedCalendarCreation(
         recoveredSupabase,
@@ -283,7 +404,7 @@ describe("processClaimedCalendarCreation", () => {
         tasks: [{ data: { id: "task-1" }, error: null }],
         task_calendar_mutations: [
           { data: null, error: { message: "deadlock detected" } }, // finalize update fails
-          { data: null, error: null }, // markRetryableFailure's backoff write
+          ledgerWrite(), // markRetryableFailure's backoff write
         ],
       });
       const first = await processClaimedCalendarCreation(failingSupabase, PROVIDER_DONE_CLAIMED);
@@ -291,7 +412,7 @@ describe("processClaimedCalendarCreation", () => {
 
       const recoveredSupabase = fakeSupabase({
         tasks: [{ data: { id: "task-1" }, error: null }],
-        task_calendar_mutations: [{ data: null, error: null }],
+        task_calendar_mutations: [ledgerWrite()],
       });
       const second = await processClaimedCalendarCreation(
         recoveredSupabase,
@@ -300,24 +421,25 @@ describe("processClaimedCalendarCreation", () => {
       expect(second).toEqual({ status: "created", ledgerId: "ledger-1", eventId: "evt-resumed" });
     });
 
-    it("double-finalize is idempotent: finalizing an already-finalized row still returns a clean success outcome", async () => {
+    it("double-finalize: a concurrent worker finalizing first leaves this one with a clean lease_lost, not an error", async () => {
       const supabase = fakeSupabase({
         tasks: [{ data: { id: "task-1" }, error: null }],
-        task_calendar_mutations: [{ data: null, error: null }],
+        task_calendar_mutations: [ledgerWrite()],
       });
       const first = await processClaimedCalendarCreation(supabase, PROVIDER_DONE_CLAIMED);
       expect(first).toEqual({ status: "created", ledgerId: "ledger-1", eventId: "evt-resumed" });
 
       // Same row claimed again (e.g. a race with another sweep that
-      // already finalized it) — the finalize update's phase='provider_done'
-      // filter matches 0 rows server-side, but that's a no-op, not an
-      // error; the CAS re-applying the same event id is a no-op too.
+      // already finalized it) — the finalize update's
+      // phase='provider_done' + claim_token filter now matches 0 rows
+      // server-side (round 7): lease_lost, not a re-success and not an
+      // error — the row belongs to whoever finalized it first.
       const secondSupabase = fakeSupabase({
         tasks: [{ data: { id: "task-1" }, error: null }],
-        task_calendar_mutations: [{ data: null, error: null }],
+        task_calendar_mutations: [ledgerWrite(false)],
       });
       const second = await processClaimedCalendarCreation(secondSupabase, PROVIDER_DONE_CLAIMED);
-      expect(second).toEqual({ status: "created", ledgerId: "ledger-1", eventId: "evt-resumed" });
+      expect(second).toEqual({ status: "lease_lost", ledgerId: "ledger-1" });
     });
   });
 });

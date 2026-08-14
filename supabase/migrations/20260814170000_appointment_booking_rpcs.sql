@@ -291,6 +291,65 @@ comment on column public.task_calendar_mutations.next_attempt_at is
   'Claim lease / retry-backoff stamp (round 6). NULL or <= now() means eligible to claim; the claim RPC sets it to now() + 2 minutes on every claim, and a retryable worker outcome pushes it further out (attempts * 2 minutes) so repeated failures back off instead of hammering the provider every sweep tick.';
 
 -- ----------------------------------------------------------------------------
+-- 0c. task_calendar_mutations — fencing token (Codex round 7)
+--
+-- next_attempt_at alone bounds a lease in TIME, but a worker that stalls
+-- past its lease (long GC pause, frozen container) and then wakes up has
+-- no way to know a second worker already reclaimed and is now processing
+-- the same row — it would write phase/new_event_id changes over top of
+-- the new owner's work. claim_token closes that: the claim RPC mints a
+-- fresh uuid on every claim (including a reclaim of an expired lease) and
+-- every subsequent write from create-worker.ts is scoped
+-- `WHERE id = X AND claim_token = <the one this worker was handed> AND
+-- phase = <the exact phase this worker expects to find>`. A worker whose
+-- token no longer matches (reclaimed) or whose expected phase no longer
+-- matches (already advanced by someone else, including to 'finalized' —
+-- no transition is ever called with expected phase 'finalized', so a
+-- finalized row can never be written by any transition) affects zero rows
+-- and must abandon the row silently rather than raise: the row now
+-- belongs to whoever holds the current token. NULL means "never claimed".
+-- ----------------------------------------------------------------------------
+alter table public.task_calendar_mutations
+  add column claim_token uuid;
+
+comment on column public.task_calendar_mutations.claim_token is
+  'Fencing token (round 7). The claim RPC sets a fresh uuid on every claim/reclaim; every worker write to this row after the claim is scoped WHERE claim_token = <mine> AND phase = <expected>, so a stalled worker that wakes after its lease expired and was reclaimed affects zero rows instead of clobbering the new owner''s writes — the worker treats zero rows as "lost the lease" and abandons the row silently.';
+
+-- ----------------------------------------------------------------------------
+-- 0d. task_calendar_mutations — needs_repair phase (Codex round 7)
+--
+-- fn_expire_exhausted_calendar_creations (below) terminalizes exhausted
+-- rows differently by their phase at exhaustion: a 'pending' row (Google
+-- was never successfully called) is a clean abandonment -> 'failed'. A
+-- 'provider_done' row (the Google event WAS created; only the local
+-- task-CAS/ledger-finalize step kept failing) is NOT a clean abandonment
+-- — there is a live, unreconciled Google event with no finalized local
+-- record of it — so it moves to this new 'needs_repair' state instead of
+-- 'failed', for a human/future-PR-3 reconciliation path rather than
+-- silent data loss. The phase CHECK (originally on the merged 150000
+-- migration) is widened here via DROP/ADD CONSTRAINT since this table
+-- predates this migration.
+-- ----------------------------------------------------------------------------
+alter table public.task_calendar_mutations
+  drop constraint task_calendar_mutations_phase_check;
+
+alter table public.task_calendar_mutations
+  add constraint task_calendar_mutations_phase_check
+  check (phase in ('pending', 'provider_done', 'finalized', 'failed', 'needs_repair'));
+
+-- needs_repair deliberately KEEPS the chain-serialization slot (unlike
+-- 'failed'): an unreconciled Google event is still an open, unresolved
+-- mutation on this logical appointment, so a later lifecycle mutation on
+-- the same chain (PR 3's reschedule/reassign/cancel) must not proceed
+-- until it's resolved. The index from 150000 is replaced here to include
+-- the new phase value.
+drop index if exists public.idx_task_calendar_mutations_chain_serialization;
+
+create unique index idx_task_calendar_mutations_chain_serialization
+  on public.task_calendar_mutations (calendar_chain_id)
+  where phase in ('pending', 'provider_done', 'needs_repair');
+
+-- ----------------------------------------------------------------------------
 -- 1. fn_uuid_to_base32hex — deterministic Google Calendar event id
 --
 -- Pure/immutable transform, no table access: encodes a uuid's 128 bits as
@@ -759,6 +818,7 @@ returns table (
   phase text,
   new_event_id text,
   result_reason text,
+  claim_token uuid,
   task_due_at timestamptz,
   task_end_at timestamptz,
   task_title text,
@@ -772,6 +832,10 @@ as $$
     update public.task_calendar_mutations m
     set attempts = m.attempts + 1,
         next_attempt_at = now() + interval '2 minutes',
+        -- Round 7 fencing: a fresh token every claim/reclaim, so a stalled
+        -- worker whose lease already expired and was reclaimed by someone
+        -- else can never write over the new owner (see column comment).
+        claim_token = gen_random_uuid(),
         updated_at = now()
     from (
       select id
@@ -788,19 +852,19 @@ as $$
     returning
       m.id, m.org_id, m.calendar_chain_id, m.source_task_id,
       m.expected_generation, m.client_event_id, m.attempts, m.phase,
-      m.new_event_id, m.result_reason
+      m.new_event_id, m.result_reason, m.claim_token
   )
   select
     claimed.id, claimed.org_id, claimed.calendar_chain_id, claimed.source_task_id,
     claimed.expected_generation, claimed.client_event_id, claimed.attempts, claimed.phase,
-    claimed.new_event_id, claimed.result_reason,
+    claimed.new_event_id, claimed.result_reason, claimed.claim_token,
     t.due_at, t.end_at, t.title, t.assignee_id
   from claimed
   join public.tasks t on t.id = claimed.source_task_id;
 $$;
 
 comment on function public.fn_claim_calendar_creations(integer) is
-  'Service-role-only claim for the durable calendar-creation sweep worker (PR 2 pull-forward of PR 3''s ledger consumer, create operation only). FOR UPDATE SKIP LOCKED over task_calendar_mutations WHERE operation=create AND phase IN (pending, provider_done) AND attempts<5 AND (next_attempt_at IS NULL OR next_attempt_at<=now()); sets next_attempt_at=now()+2min (lease) alongside attempts+updated_at atomically with the claim, so same-sweep/concurrent reclaim is impossible within the lease and a crashed worker recovers on expiry. Returns phase/new_event_id/result_reason so the worker can resume a provider_done row without re-hitting Google. attempts>=5 rows are never reclaimed regardless of lease state.';
+  'Service-role-only claim for the durable calendar-creation sweep worker (PR 2 pull-forward of PR 3''s ledger consumer, create operation only). FOR UPDATE SKIP LOCKED over task_calendar_mutations WHERE operation=create AND phase IN (pending, provider_done) AND attempts<5 AND (next_attempt_at IS NULL OR next_attempt_at<=now()); sets next_attempt_at=now()+2min (lease) and a fresh claim_token (round 7 fencing) alongside attempts+updated_at atomically with the claim, so same-sweep/concurrent reclaim is impossible within the lease and a crashed-then-woken worker cannot clobber whoever reclaimed the row after it. Returns phase/new_event_id/result_reason so the worker can resume a provider_done row without re-hitting Google. attempts>=5 rows are never reclaimed regardless of lease state.';
 
 revoke all on function public.fn_claim_calendar_creations(integer) from public, anon, authenticated;
 grant execute on function public.fn_claim_calendar_creations(integer) to service_role;
@@ -827,37 +891,64 @@ grant execute on function public.fn_claim_calendar_creations(integer) to service
 -- Service-role-only, called once per sweep by the cron route before the
 -- claim loop starts — not folded into fn_claim_calendar_creations itself,
 -- so a p_limit:1 claim loop doesn't re-run this scan on every iteration.
+--
+-- Round 7: a 'pending' exhaustion is a clean abandonment (Google was never
+-- called) and still terminalizes to 'failed'. A 'provider_done' exhaustion
+-- is NOT abandonment — the Google event exists, only the local
+-- CAS/finalize kept failing — so it moves to 'needs_repair' instead,
+-- which (unlike 'failed') still holds the chain-serialization slot open
+-- deliberately (see the index comment in section 0d) so a later lifecycle
+-- mutation on the same chain can't race an unreconciled Google event.
+-- Returns both counts so the sweep route can surface needs_repair rows
+-- for observability rather than folding them into a single opaque total.
+-- The prior signature returned a bare integer; CREATE OR REPLACE cannot
+-- change a function's return type, so the old form is dropped first.
 -- ----------------------------------------------------------------------------
+drop function if exists public.fn_expire_exhausted_calendar_creations();
+
 create or replace function public.fn_expire_exhausted_calendar_creations()
-returns integer
+returns table (failed_count integer, needs_repair_count integer)
 language plpgsql
 security definer
 set search_path = public, pg_temp
 as $$
 declare
-  v_count integer;
+  v_failed integer;
+  v_needs_repair integer;
 begin
   with expired as (
     update public.task_calendar_mutations
-    set phase = 'failed',
+    set phase = case when phase = 'provider_done' then 'needs_repair' else 'failed' end,
         result_reason = case
-          when phase = 'provider_done' then 'finalize_retries_exhausted'
+          when phase = 'provider_done' then 'finalize_needs_repair'
           else 'retries_exhausted'
         end,
         updated_at = now()
     where operation = 'create'
       and phase in ('pending', 'provider_done')
+      -- Explicit belt-and-suspenders exclusion, on top of the IN clause
+      -- above: this sweep must never be able to touch a finalized row.
+      and phase <> 'finalized'
       and attempts >= 5
       and next_attempt_at <= now()
-    returning 1
+    -- RETURNING sees the row's NEW (post-update) values, so `phase` here
+    -- already holds this row's classification ('failed'/'needs_repair')
+    -- directly — no CASE needed (unlike the SET clause above, whose
+    -- expressions evaluate against the pre-update row).
+    returning phase as new_phase
   )
-  select count(*) into v_count from expired;
-  return v_count;
+  select
+    count(*) filter (where new_phase = 'failed'),
+    count(*) filter (where new_phase = 'needs_repair')
+  into v_failed, v_needs_repair
+  from expired;
+
+  return query select coalesce(v_failed, 0), coalesce(v_needs_repair, 0);
 end;
 $$;
 
 comment on function public.fn_expire_exhausted_calendar_creations() is
-  'Service-role-only terminal-exhaustion sweep (round 6): rows at attempts>=5 whose lease has expired (phase IN (pending, provider_done) AND next_attempt_at<=now()) move to phase=failed with result_reason retries_exhausted (pending) or finalize_retries_exhausted (provider_done — the Google event exists, only local finalize kept failing); last_error is preserved. Frees idx_task_calendar_mutations_chain_serialization''s slot so a stuck creation cannot block PR 3''s lifecycle mutations on the same chain forever. Called once per sweep by the cron route, not per claim.';
+  'Service-role-only terminal-exhaustion sweep (round 6, split round 7): rows at attempts>=5 whose lease has expired (phase IN (pending, provider_done) AND phase<>finalized AND next_attempt_at<=now()) move to phase=failed (from pending, result_reason=retries_exhausted) or phase=needs_repair (from provider_done, result_reason=finalize_needs_repair — the Google event exists, only local finalize kept failing); last_error is preserved either way. needs_repair deliberately keeps idx_task_calendar_mutations_chain_serialization''s slot held (failed frees it) so an unreconciled event cannot be raced by a later lifecycle mutation on the same chain. Returns (failed_count, needs_repair_count) so the cron route can surface needs_repair rows for observability. Called once per sweep, not per claim.';
 
 revoke all on function public.fn_expire_exhausted_calendar_creations() from public, anon, authenticated;
 grant execute on function public.fn_expire_exhausted_calendar_creations() to service_role;
