@@ -1167,10 +1167,12 @@ describe("Migration 20260814210000 — appointment lifecycle RPCs", () => {
       await conn.end().catch(() => {});
     });
 
-    async function stillBlockedAfter(promise: Promise<unknown>, ms: number): Promise<"blocked" | "resolved"> {
+    async function stillBlockedAfter(promise: Promise<unknown> | PromiseLike<unknown>, ms: number): Promise<"blocked" | "resolved"> {
       const sentinel = Symbol("timeout");
       const raced = await Promise.race([
-        promise.catch(() => sentinel),
+        // PostgREST builders are thenable but not real Promises (no .catch)
+        // — normalize first, which also kicks off the lazy request.
+        Promise.resolve(promise).catch(() => sentinel),
         new Promise((resolve) => setTimeout(() => resolve(sentinel), ms)).then(() => "timeout-won" as const),
       ]);
       return raced === "timeout-won" ? "blocked" : "resolved";
@@ -1190,17 +1192,44 @@ describe("Migration 20260814210000 — appointment lifecycle RPCs", () => {
         [taskId],
       );
 
-      const completePromise = completeAppointment(actor.client, {
-        p_task: taskId,
-        p_outcome: "held",
-      });
+      // Normalized ONCE: PostgREST builders re-execute on every .then, so
+      // racing the raw builder and awaiting it again later would issue TWO
+      // RPCs (Codex: the first could land after the lock releases and
+      // mutate state while the second reports "not open"). One native
+      // Promise = one request, used for both the race and the result.
+      const completePromise = Promise.resolve(
+        completeAppointment(actor.client, {
+          p_task: taskId,
+          p_outcome: "held",
+        }),
+      );
 
       expect(await stillBlockedAfter(completePromise, 1500)).toBe("blocked");
 
       await conn.query("commit");
 
-      const { error } = await completePromise;
+      const { error } = (await completePromise) as {
+        error: { message: string } | null;
+      };
       expect(error?.message).toMatch(/not open/i);
+
+      // Post-conditions the test's name promises: the cancel outcome stood
+      // (complete mutated nothing) and the ledger was not touched by the
+      // losing complete call.
+      const { data: finalTask } = await db
+        .from("tasks")
+        .select("status, outcome")
+        .eq("id", taskId)
+        .single();
+      expect(finalTask).toMatchObject({ status: "cancelled", outcome: "cancelled" });
+      const { data: ledgerRows } = await db
+        .from("task_calendar_mutations")
+        .select("operation")
+        .eq("source_task_id", taskId);
+      // insertOpenAppointment seeds the task directly (no booking RPC), so
+      // the chain starts with ZERO ledger rows — and the losing complete
+      // call must not have added any.
+      expect(ledgerRows ?? []).toHaveLength(0);
     });
   });
 });
