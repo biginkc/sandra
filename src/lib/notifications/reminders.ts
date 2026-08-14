@@ -34,26 +34,41 @@ export type ClaimedReminderRow = {
   /** Prior attempts already recorded on the delivery row, straight off
    *  the claim RPC.
    *
-   *  Semantics differ by which claim produced this row (see `claimToken`):
-   *  from `fn_claim_appointment_reminders` (fresh insert, no lease needed)
-   *  this is the attempt count BEFORE this delivery, and `markDelivery`
-   *  writes `attempts + 1`. From `fn_claim_reminder_retries` the claim
-   *  itself already bumped attempts atomically (Codex round 1, same
-   *  convention as `task_calendar_mutations`'s claim), so this IS the
-   *  attempt count for this delivery and `markDelivery` writes it as-is. */
+   *  Semantics differ by which claim produced this row (see
+   *  `attemptsAlreadyBumped`): from `fn_claim_appointment_reminders` (fresh
+   *  insert) this is the attempt count BEFORE this delivery (table default
+   *  0), and `markDelivery` writes `attempts + 1`. From
+   *  `fn_claim_reminder_retries` the claim itself already bumped attempts
+   *  atomically (Codex round 1, same convention as
+   *  `task_calendar_mutations`'s claim), so this IS the attempt count for
+   *  this delivery and `markDelivery` writes it as-is. */
   attempts: number;
-  /** Fencing token minted by `fn_claim_reminder_retries` on this claim, or
-   *  `null` for a fresh row from `fn_claim_appointment_reminders` (that
-   *  insert's ON CONFLICT DO NOTHING already gives exactly-once ownership
-   *  — no lease/token needed). When present, `markDelivery`'s write is
-   *  scoped `WHERE id=<mine> AND claim_token=<mine> AND
+  /** True for a row from `fn_claim_reminder_retries` (attempts already
+   *  bumped by the claim itself); false for a fresh row from
+   *  `fn_claim_appointment_reminders` (this delivery IS attempt
+   *  `attempts + 1`, not yet reflected in `attempts`). Purely an
+   *  attempts-bookkeeping distinction now — see `claimToken` below for why
+   *  it no longer also gates fencing. */
+  attemptsAlreadyBumped: boolean;
+  /** Fencing token minted by the claim RPC — by `fn_claim_reminder_retries`
+   *  on a reclaim, or (Codex round 2 fix) by `fn_claim_appointment_reminders`
+   *  itself on the initial insert. Before round 2, a fresh row from the
+   *  primary claim carried no token, so its own sent/failed write was
+   *  scoped only by delivery id; once the stale-pending retry claim
+   *  reclaimed the same row (still status=pending, now with a fresh
+   *  token) after 10 minutes, a slow initial provider call finishing late
+   *  could race the retry owner's write with no fencing between them.
+   *  Every claimed row now carries a token, and `markDelivery`'s write is
+   *  unconditionally scoped `WHERE id=<mine> AND claim_token=<mine> AND
    *  status=<claimedStatus>` — a stalled worker whose lease was reclaimed
-   *  writes zero rows instead of clobbering the new owner. */
-  claimToken: string | null;
-  /** The delivery's status as of just before this claim ('pending' or
-   *  'failed') — the "expected status" half of the fenced write. Always
-   *  present alongside `claimToken`; `null` when `claimToken` is null. */
-  claimedStatus: "pending" | "failed" | null;
+   *  (by a retry claim, or a later retry-of-the-retry) writes zero rows
+   *  instead of clobbering the new owner. */
+  claimToken: string;
+  /** The delivery's status as of just before this claim ('pending' for
+   *  every fresh row and most retries, or 'failed' for a retry of a
+   *  previously-failed delivery) — the "expected status" half of the
+   *  fenced write. */
+  claimedStatus: "pending" | "failed";
   taskTitle: string;
   taskDueAt: string;
   taskEndAt: string | null;
@@ -92,32 +107,36 @@ type DeliveryUpdateClient = {
 };
 
 /**
- * Writes the delivery outcome. For a row claimed by `fn_claim_reminder_retries`
- * (`claimToken` present), the write is fenced — scoped `WHERE id=<mine> AND
- * claim_token=<mine> AND status=<claimedStatus>` and verified to affect
- * exactly one row (`.select("id")`) — same contract as
- * `task_calendar_mutations`'s `applyLedgerTransition` (create-worker.ts).
- * Zero rows matched means the lease was lost (reclaimed by a later sweep
- * after this worker stalled past its 2-minute lease): not an error, the
- * row is abandoned silently — ownership belongs to whoever holds the
- * current token, and their own delivery attempt (or lack thereof) is
- * authoritative. A fresh row from `fn_claim_appointment_reminders` carries
- * no token and needs no fencing (ON CONFLICT DO NOTHING already gave that
- * insert exactly-once ownership) — its write is a plain `WHERE id=<mine>`.
+ * Writes the delivery outcome. Codex round 2 fix: every row — whether from
+ * `fn_claim_appointment_reminders` (initial) or `fn_claim_reminder_retries`
+ * (retry) — now carries a `claim_token`/`claimedStatus`, so the write is
+ * unconditionally fenced — scoped `WHERE id=<mine> AND claim_token=<mine>
+ * AND status=<claimedStatus>` and verified to affect exactly one row
+ * (`.select("id")`) — same contract as `task_calendar_mutations`'s
+ * `applyLedgerTransition` (create-worker.ts). Zero rows matched means the
+ * lease was lost — reclaimed by a later sweep (retry-of-a-retry) after this
+ * worker stalled past its 2-minute lease, OR by the stale-pending retry
+ * claim taking over an initial delivery that stalled past ITS lease: not an
+ * error, the row is abandoned silently — ownership belongs to whoever holds
+ * the current token, and their own delivery attempt (or lack thereof) is
+ * authoritative.
  *
- * `attempts` written is `row.attempts` as-is for a fenced (retry-claimed)
- * row — the claim already bumped it — and `row.attempts + 1` for an
- * unfenced (primary-claimed) row, which never has its attempts touched by
- * the claim itself. See `ClaimedReminderRow.attempts`.
+ * `attempts` written is `row.attempts` as-is when `attemptsAlreadyBumped`
+ * (the retry claim already bumped it) and `row.attempts + 1` otherwise (a
+ * fresh initial-claim row, whose attempts the claim itself never touches).
+ * See `ClaimedReminderRow.attemptsAlreadyBumped`.
  */
 async function markDelivery(
   supabase: SupabaseClient<Database>,
-  row: Pick<ClaimedReminderRow, "deliveryId" | "attempts" | "claimToken" | "claimedStatus">,
+  row: Pick<
+    ClaimedReminderRow,
+    "deliveryId" | "attempts" | "attemptsAlreadyBumped" | "claimToken" | "claimedStatus"
+  >,
   status: "sent" | "failed",
   extra: { providerMessageId?: string | null; lastError?: string | null },
 ): Promise<void> {
-  const attempts = row.claimToken ? row.attempts : row.attempts + 1;
-  let query = (supabase as unknown as DeliveryUpdateClient)
+  const attempts = row.attemptsAlreadyBumped ? row.attempts : row.attempts + 1;
+  const { data, error } = await (supabase as unknown as DeliveryUpdateClient)
     .from("task_reminder_deliveries")
     .update({
       status,
@@ -126,14 +145,10 @@ async function markDelivery(
       last_error: extra.lastError ?? null,
       sent_at: status === "sent" ? new Date().toISOString() : null,
     })
-    .eq("id", row.deliveryId);
-  if (row.claimToken) {
-    query = query.eq("claim_token", row.claimToken);
-    if (row.claimedStatus) {
-      query = query.eq("status", row.claimedStatus);
-    }
-  }
-  const { data, error } = await query.select("id");
+    .eq("id", row.deliveryId)
+    .eq("claim_token", row.claimToken)
+    .eq("status", row.claimedStatus)
+    .select("id");
   if (error) {
     reportError(new Error(error.message), {
       tags: { surface: "reminder_delivery_mark" },
@@ -141,7 +156,7 @@ async function markDelivery(
     });
     return;
   }
-  if (row.claimToken && (data?.length ?? 0) === 0) {
+  if ((data?.length ?? 0) === 0) {
     // Lease lost — reclaimed by a later sweep. Not an error; abandon
     // silently (see doc comment above).
     return;

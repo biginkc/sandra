@@ -88,6 +88,8 @@ returns table (
   org_id uuid,
   channel text,
   attempts integer,
+  claim_token uuid,
+  claimed_status text,
   task_title text,
   task_due_at timestamptz,
   task_end_at timestamptz,
@@ -181,10 +183,20 @@ begin
     where sms_enabled
   ),
   inserted as (
-    insert into public.task_reminder_deliveries (org_id, task_id, channel)
-    select org_id, task_id, channel from channels
+    -- Codex round 2 fix: mint the same claim_token + 2-minute lease
+    -- (next_attempt_at) on the INITIAL claim that fn_claim_reminder_retries
+    -- already mints on a reclaim. Before this, a fresh row here carried a
+    -- NULL claim_token, so its own sent/failed write was scoped only by
+    -- delivery id — a slow initial SMS/Slack call could outlive nothing
+    -- (no lease existed to outlive), get reclaimed by the stale-pending
+    -- retry path once >10min passed, and then both workers would write the
+    -- same row's outcome with no fencing between them. Every delivery now
+    -- starts leased/tokened, so the initial and retry paths share one
+    -- fencing contract from the first attempt.
+    insert into public.task_reminder_deliveries (org_id, task_id, channel, claim_token, next_attempt_at)
+    select org_id, task_id, channel, gen_random_uuid(), v_now + interval '2 minutes' from channels
     on conflict (task_id, channel) do nothing
-    returning id, task_id, org_id, channel, attempts
+    returning id, task_id, org_id, channel, attempts, claim_token, status
   )
   select
     i.id as delivery_id,
@@ -192,6 +204,8 @@ begin
     i.org_id,
     i.channel,
     i.attempts,
+    i.claim_token,
+    i.status as claimed_status,
     ch.title as task_title,
     ch.due_at as task_due_at,
     ch.end_at as task_end_at,
@@ -204,7 +218,7 @@ end;
 $$;
 
 comment on function public.fn_claim_appointment_reminders() is
-  'Service-role-only reminder sweep. Derives now() internally (window [now(), now()+30m], both bounds — no late reminders for overdue appointments); FOR UPDATE SKIP LOCKED over open, unclaimed appointments whose assignee has active org membership; stamps reminder_claimed_at (via the sandra.allow_appointment_time_move flag, set_config transaction-local) and inserts one task_reminder_deliveries row per enabled channel (bell always, slack/sms per prefs) with ON CONFLICT DO NOTHING. Returns the freshly-inserted delivery rows joined with task+assignee context.';
+  'Service-role-only reminder sweep. Derives now() internally (window [now(), now()+30m], both bounds — no late reminders for overdue appointments); FOR UPDATE SKIP LOCKED over open, unclaimed appointments whose assignee has active org membership; stamps reminder_claimed_at (via the sandra.allow_appointment_time_move flag, set_config transaction-local) and inserts one task_reminder_deliveries row per enabled channel (bell always, slack/sms per prefs) with ON CONFLICT DO NOTHING, minting a fresh claim_token and a 2-minute lease (next_attempt_at) on every inserted row (Codex round 2) — same fencing model as fn_claim_reminder_retries, from the first attempt. Returns the freshly-inserted delivery rows (claim_token + claimed_status=pending included) joined with task+assignee context.';
 
 revoke all on function public.fn_claim_appointment_reminders() from public, anon, authenticated;
 grant execute on function public.fn_claim_appointment_reminders() to service_role;

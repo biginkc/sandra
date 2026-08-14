@@ -19,25 +19,24 @@ import type { Database, TablesInsert } from "@/lib/supabase/types";
 // Database["public"]["Functions"] map — same local-cast rationale as PR 1/2's
 // hand-written RPC signatures.
 // ----------------------------------------------------------------------------
+/** Codex round 2: fn_claim_appointment_reminders now mints a claim_token +
+ *  2-minute lease (next_attempt_at) on every row it inserts, same as
+ *  fn_claim_reminder_retries always has — both RPCs return this same
+ *  fencing-complete shape. */
 type ClaimedReminderRow = {
   delivery_id: string;
   task_id: string;
   org_id: string;
   channel: "bell" | "slack" | "sms";
   attempts: number;
+  claim_token: string;
+  claimed_status: "pending" | "failed";
   task_title: string;
   task_due_at: string;
   task_end_at: string | null;
   assignee_id: string;
   assignee_timezone: string;
   assignee_reminder_phone: string | null;
-};
-
-/** fn_claim_reminder_retries only (Codex round 1 lease/fencing rewrite) —
- *  fn_claim_appointment_reminders's fresh inserts carry no lease. */
-type RetryClaimedReminderRow = ClaimedReminderRow & {
-  claim_token: string;
-  claimed_status: "pending" | "failed";
 };
 
 type RpcResult<T> = { data: T | null; error: { message: string; code?: string } | null };
@@ -47,7 +46,7 @@ type ReminderRpcClient = {
   rpc(
     fn: "fn_claim_reminder_retries",
     args: { p_limit: number },
-  ): Promise<RpcResult<RetryClaimedReminderRow[]>>;
+  ): Promise<RpcResult<ClaimedReminderRow[]>>;
 };
 
 function asReminderRpcClient(client: SupabaseClient<Database>): ReminderRpcClient {
@@ -63,8 +62,46 @@ function claimAppointmentReminders(
 function claimReminderRetries(
   client: SupabaseClient<Database>,
   limit = 50,
-): Promise<RpcResult<RetryClaimedReminderRow[]>> {
+): Promise<RpcResult<ClaimedReminderRow[]>> {
   return asReminderRpcClient(client).rpc("fn_claim_reminder_retries", { p_limit: limit });
+}
+
+/** `claim_token` / `next_attempt_at` are added by this migration but, per
+ *  its own scope, must not be added to the generated
+ *  `Database["public"]["Tables"]` map yet (same rationale as the RPC row
+ *  shapes above) — so direct writes/reads/`.eq()` filters on those columns
+ *  need this local cast, same idiom as `create-worker.ts`'s
+ *  `LedgerLeaseUpdateClient` / reminders.ts's `DeliveryUpdateClient`. */
+type FencedDeliveryUpdateBuilder = {
+  eq(column: "id" | "claim_token" | "status", value: string): FencedDeliveryUpdateBuilder;
+  select(columns: "id"): PromiseLike<{
+    data: { id: string }[] | null;
+    error: { message: string } | null;
+  }>;
+};
+type ReminderDeliveryFencingClient = {
+  from(table: "task_reminder_deliveries"): {
+    update(values: {
+      status?: string;
+      attempts?: number;
+      sent_at?: string | null;
+      created_at?: string;
+      next_attempt_at?: string | null;
+    }): FencedDeliveryUpdateBuilder;
+    select(columns: "status, claim_token"): {
+      eq(column: "id", value: string): {
+        single(): Promise<{
+          data: { status: string; claim_token: string } | null;
+          error: { message: string } | null;
+        }>;
+      };
+    };
+  };
+};
+function asReminderDeliveryFencingClient(
+  client: SupabaseClient<Database>,
+): ReminderDeliveryFencingClient {
+  return client as unknown as ReminderDeliveryFencingClient;
 }
 
 function testDbUrl(): string {
@@ -470,10 +507,20 @@ describe("Migration 20260814200000 — appointment reminder claim RPCs", () => {
         .eq("channel", "bell")
         .single();
 
-      await db
+      // Codex round 2: fn_claim_appointment_reminders now stamps its own
+      // 2-minute lease (next_attempt_at) on insert, same as a retry claim
+      // does. Backdating created_at alone no longer simulates a genuinely
+      // stalled row — in production the lease would ALSO be long expired
+      // by the time 10 real minutes have passed, so this test backdates
+      // both to match.
+      await asReminderDeliveryFencingClient(db)
         .from("task_reminder_deliveries")
-        .update({ created_at: new Date(Date.now() - 11 * 60_000).toISOString() })
-        .eq("id", delivery!.id);
+        .update({
+          created_at: new Date(Date.now() - 11 * 60_000).toISOString(),
+          next_attempt_at: new Date(Date.now() - 60_000).toISOString(),
+        })
+        .eq("id", delivery!.id)
+        .select("id"); // trigger execution — same PostgrestFilterBuilder either way
 
       const { data, error } = await claimReminderRetries(db);
       expect(error).toBeNull();
@@ -536,6 +583,104 @@ describe("Migration 20260814200000 — appointment reminder claim RPCs", () => {
       await conn.end();
     }
   }
+
+  describe("fn_claim_appointment_reminders — lease/fencing (Codex round 2)", () => {
+    it("mints a claim_token and leaves the row status=pending (claimed_status) on every freshly-inserted row", async () => {
+      const member = await createUserForOrg(BMH_ORG_ID);
+      await setPrefs(member.userId);
+      const appt = await insertDueAppointment(member.userId, 10);
+
+      const { data, error } = await claimAppointmentReminders(db);
+      expect(error).toBeNull();
+      const claimed = (data ?? []).find((r) => r.task_id === appt.id && r.channel === "bell");
+      expect(claimed?.claim_token).toBeTruthy();
+      expect(claimed?.claimed_status).toBe("pending");
+    });
+
+    // Codex round 2 (finding 2): before this, an initial-claim row's
+    // claim_token/next_attempt_at were NULL, so a slow initial worker's
+    // eventual sent/failed write was scoped only by delivery id — nothing
+    // stopped it from clobbering a retry worker's outcome (or vice versa)
+    // once the stale-pending path (fn_claim_reminder_retries, >10min old)
+    // reclaimed the same still-pending row out from under it. Two separate
+    // client connections stand in for the two overlapping workers: the
+    // "initial" worker holds the token from the primary claim; the "retry"
+    // worker calls fn_claim_reminder_retries against the SAME row once it
+    // looks stalled, and gets a fresh token. Both then race to write the
+    // delivery outcome exactly as `markDelivery` (reminders.ts) does — a
+    // fenced UPDATE ... WHERE id=<mine> AND claim_token=<mine> AND
+    // status=<claimedStatus>.
+    it("overlapping initial+retry claim: a stalled initial worker's fenced write is a no-op once the retry claim reclaims the same row (two-connection race)", async () => {
+      const initialWorkerConn = db;
+      const retryWorkerConn = createTestClient();
+
+      const member = await createUserForOrg(BMH_ORG_ID);
+      await setPrefs(member.userId);
+      const appt = await insertDueAppointment(member.userId, 10);
+
+      const { data: initialClaim, error: initialClaimError } =
+        await claimAppointmentReminders(initialWorkerConn);
+      expect(initialClaimError).toBeNull();
+      const initialRow = (initialClaim ?? []).find(
+        (r) => r.task_id === appt.id && r.channel === "bell",
+      );
+      expect(initialRow?.claim_token).toBeTruthy();
+      const staleToken = initialRow!.claim_token;
+
+      // Simulate the initial worker stalling past its lease AND past the
+      // stale-pending threshold (both created_at and next_attempt_at need
+      // to be in the past — see the sibling test above this one for why).
+      await asReminderDeliveryFencingClient(db)
+        .from("task_reminder_deliveries")
+        .update({
+          created_at: new Date(Date.now() - 11 * 60_000).toISOString(),
+          next_attempt_at: new Date(Date.now() - 60_000).toISOString(),
+        })
+        .eq("id", initialRow!.delivery_id)
+        .select("id");
+
+      const { data: retryClaim, error: retryClaimError } =
+        await claimReminderRetries(retryWorkerConn);
+      expect(retryClaimError).toBeNull();
+      const retryRow = (retryClaim ?? []).find((r) => r.delivery_id === initialRow!.delivery_id);
+      expect(retryRow).toBeTruthy();
+      expect(retryRow!.claim_token).not.toBe(staleToken);
+      const freshToken = retryRow!.claim_token;
+
+      // The stalled initial worker finally finishes and tries to write its
+      // outcome with the TOKEN IT WAS ORIGINALLY HANDED — same fenced shape
+      // as reminders.ts's markDelivery. Zero rows must match: the row now
+      // belongs to the retry worker's token.
+      const staleWrite = await asReminderDeliveryFencingClient(initialWorkerConn)
+        .from("task_reminder_deliveries")
+        .update({ status: "sent", attempts: 1, sent_at: new Date().toISOString() })
+        .eq("id", initialRow!.delivery_id)
+        .eq("claim_token", staleToken)
+        .eq("status", "pending")
+        .select("id");
+      expect(staleWrite.error).toBeNull();
+      expect(staleWrite.data ?? []).toHaveLength(0);
+
+      // The retry worker's own fenced write, with the fresh token, succeeds.
+      const retryWrite = await asReminderDeliveryFencingClient(retryWorkerConn)
+        .from("task_reminder_deliveries")
+        .update({ status: "sent", attempts: retryRow!.attempts, sent_at: new Date().toISOString() })
+        .eq("id", initialRow!.delivery_id)
+        .eq("claim_token", freshToken)
+        .eq("status", retryRow!.claimed_status)
+        .select("id");
+      expect(retryWrite.error).toBeNull();
+      expect(retryWrite.data ?? []).toHaveLength(1);
+
+      const { data: finalRow } = await asReminderDeliveryFencingClient(db)
+        .from("task_reminder_deliveries")
+        .select("status, claim_token")
+        .eq("id", initialRow!.delivery_id)
+        .single();
+      expect(finalRow?.status).toBe("sent");
+      expect(finalRow?.claim_token).toBe(freshToken);
+    });
+  });
 
   describe("fn_claim_reminder_retries — lease/fencing + revalidation (Codex round 1)", () => {
     async function failedBellDelivery(minutesFromNow = 10) {

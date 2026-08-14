@@ -1422,36 +1422,103 @@ async function processClaimedReassign(
     }
   }
 
+  // Codex round 2 fix: a resumed row (crashed after the delete succeeded but
+  // before the new event was created/finalized) carries this marker so the
+  // retry skips straight to the create step instead of re-issuing a delete
+  // against an event that is already gone. Phase stays 'pending' the whole
+  // time here — 'provider_done' is reserved for "new event created" (see the
+  // branch at the top of this function) — so this has to be a separate,
+  // persisted signal rather than reusing the phase enum.
+  const oldEventAlreadyDeleted = claimed.result_reason === "old_event_deleted";
+
   try {
     // Delete under the OLD account first. No client_event_id needed for a
-    // delete — 404 is idempotent success (same contract as cancel).
-    if (claimed.event_id) {
+    // delete — 404 is idempotent success (same contract as cancel). Codex
+    // round 2 fix: this step must be verified/persisted BEFORE the new event
+    // is created or the chain finalized — a missing old-assignee token used
+    // to fall through and finalize successfully, leaving a duplicate event
+    // under both accounts with the ledger claiming reconciliation happened.
+    if (claimed.event_id && !oldEventAlreadyDeleted) {
       const oldToken = await getDecryptedToken({
         userId: claimed.old_assignee_id,
         provider: "google",
         tokenType: "user",
       });
-      if (oldToken) {
-        try {
-          const oldCalendar = buildCalendarClient(claimed.old_assignee_id, oldToken);
-          await oldCalendar.events.delete({ calendarId: "primary", eventId: claimed.event_id });
-        } catch (e) {
-          if (!isGoogleNotFound(e)) {
-            return await handleProviderFailure(
-              supabase,
-              ledgerId,
-              claimToken,
-              "pending",
-              e,
-              claimed.attempts,
-            );
-          }
-          // 404 = already gone — fall through to the create-under-new-account step.
-        }
+      if (!oldToken) {
+        // Same honest-retry posture as cancel's/reassign's other no-token
+        // branches: a real Google event is known to still exist under the
+        // old account. Finalizing here would strand it. Retryable — the
+        // token may return — with the honest result_reason so exhaustion
+        // routes to needs_repair, not failed.
+        const message = "no token for old assignee; old event may still exist and be stale";
+        const r = await markStaleEventRetryable(
+          supabase,
+          ledgerId,
+          claimToken,
+          "no_token_stale_event",
+          message,
+          claimed.attempts,
+        );
+        if (r.lost) return { status: "lease_lost", ledgerId };
+        return { status: "stale_event_needs_token", ledgerId, error: message };
       }
-      // No old token: can't delete, but that must not block getting the new
-      // assignee a working event — fall through (same "can't clean up what
-      // we can't access" posture as cancel's no_token branch).
+
+      try {
+        const oldCalendar = buildCalendarClient(claimed.old_assignee_id, oldToken);
+        await oldCalendar.events.delete({ calendarId: "primary", eventId: claimed.event_id });
+      } catch (e) {
+        if (!isGoogleNotFound(e)) {
+          return await handleProviderFailure(
+            supabase,
+            ledgerId,
+            claimToken,
+            "pending",
+            e,
+            claimed.attempts,
+          );
+        }
+        // 404 = already gone = idempotent success (plan's explicit contract) — fall through.
+      }
+
+      // Close the lease-race window immediately after the (potentially
+      // slow) delete call returns, same as every other provider-call site
+      // in this file, then persist delete-done as its own durable write —
+      // atomically-with-or-before the create step, never after — so a
+      // crash here resumes via `oldEventAlreadyDeleted` above instead of
+      // re-deleting or, worse, creating a second event on top of an
+      // unreconciled first one.
+      const renewedAfterDelete = await renewLease(supabase, ledgerId, claimToken, "pending");
+      if (renewedAfterDelete.error) {
+        const r = await markRetryableFailure(
+          supabase,
+          ledgerId,
+          claimToken,
+          "pending",
+          renewedAfterDelete.error,
+          claimed.attempts,
+        );
+        if (r.lost) return { status: "lease_lost", ledgerId };
+        return { status: "retryable_error", ledgerId, error: renewedAfterDelete.error };
+      }
+      if (!renewedAfterDelete.applied) return { status: "lease_lost", ledgerId };
+
+      const deletePersisted = await applyLedgerTransition(supabase, ledgerId, claimToken, "pending", {
+        result_reason: "old_event_deleted",
+        updated_at: nowIso(),
+      });
+      if (deletePersisted.error) {
+        const r = await markRetryableFailure(
+          supabase,
+          ledgerId,
+          claimToken,
+          "pending",
+          deletePersisted.error,
+          claimed.attempts,
+        );
+        if (r.lost) return { status: "lease_lost", ledgerId };
+        return { status: "retryable_error", ledgerId, error: deletePersisted.error };
+      }
+      if (!deletePersisted.applied) return { status: "lease_lost", ledgerId };
     }
 
     // Codex round 1 fix: claimed.event_id (truthy here) means an old event

@@ -64,11 +64,12 @@ type ClaimedReminderRpcRow = {
   org_id: string;
   channel: "bell" | "slack" | "sms";
   attempts: number;
-  /** Only present on rows from `fn_claim_reminder_retries` (Codex round 1
-   *  lease/fencing rewrite) — `fn_claim_appointment_reminders`'s fresh
-   *  inserts carry no lease and never populate these. */
-  claim_token?: string | null;
-  claimed_status?: "pending" | "failed" | null;
+  /** Codex round 2 fix: both claim RPCs now mint a fresh claim_token +
+   *  2-minute lease on every row they hand back — `fn_claim_appointment_reminders`
+   *  on the initial insert, `fn_claim_reminder_retries` on a reclaim — so
+   *  this is never null coming back from either. */
+  claim_token: string;
+  claimed_status: "pending" | "failed";
   task_title: string;
   task_due_at: string;
   task_end_at: string | null;
@@ -91,15 +92,19 @@ type ReminderClaimRpcClient = {
   }>;
 };
 
-function toClaimedRow(row: ClaimedReminderRpcRow): ClaimedReminderRow {
+function toClaimedRow(
+  row: ClaimedReminderRpcRow,
+  opts: { attemptsAlreadyBumped: boolean },
+): ClaimedReminderRow {
   return {
     deliveryId: row.delivery_id,
     taskId: row.task_id,
     orgId: row.org_id,
     channel: row.channel,
     attempts: row.attempts,
-    claimToken: row.claim_token ?? null,
-    claimedStatus: row.claimed_status ?? null,
+    attemptsAlreadyBumped: opts.attemptsAlreadyBumped,
+    claimToken: row.claim_token,
+    claimedStatus: row.claimed_status,
     taskTitle: row.task_title,
     taskDueAt: row.task_due_at,
     taskEndAt: row.task_end_at,
@@ -170,12 +175,21 @@ export async function runAppointmentReminderSweep(
     throw new Error(`fn_claim_reminder_retries failed: ${retryError.message}`);
   }
 
-  const work: ClaimedReminderRpcRow[] = [...(claimedRows ?? []), ...(retryRows ?? [])];
+  // Tagged per source rather than folded into one untyped list: the
+  // primary claim's rows have NOT had `attempts` bumped by the claim
+  // itself (this delivery IS the first attempt), while the retry claim's
+  // rows already have (Codex round 1) — `toClaimedRow` needs to know which
+  // is which per row, not just per RPC name, so the tag travels with each
+  // row through the single work loop below.
+  const work: { row: ClaimedReminderRpcRow; attemptsAlreadyBumped: boolean }[] = [
+    ...(claimedRows ?? []).map((row) => ({ row, attemptsAlreadyBumped: false })),
+    ...(retryRows ?? []).map((row) => ({ row, attemptsAlreadyBumped: true })),
+  ];
   const outcomes: Record<string, number> = {};
   let processed = 0;
   let budgetExhausted = false;
 
-  for (const raw of work) {
+  for (const { row: raw, attemptsAlreadyBumped } of work) {
     if (Date.now() - startedAt >= budgetMs) {
       budgetExhausted = true;
       break;
@@ -184,7 +198,7 @@ export async function runAppointmentReminderSweep(
 
     let outcome: ReminderDeliveryOutcome;
     try {
-      outcome = await deliverAppointmentReminder(supabase, toClaimedRow(raw));
+      outcome = await deliverAppointmentReminder(supabase, toClaimedRow(raw, { attemptsAlreadyBumped }));
     } catch (e) {
       reportError(e, {
         tags: { surface: "cron_appointment_reminder_sweep_unhandled" },

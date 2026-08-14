@@ -26,8 +26,13 @@ function baseRow(overrides: Partial<ClaimedReminderRow> = {}): ClaimedReminderRo
     orgId: "org-1",
     channel: "bell",
     attempts: 0,
-    claimToken: null,
-    claimedStatus: null,
+    // Codex round 2: every claimed row now carries a token, minted by
+    // fn_claim_appointment_reminders on the initial insert (this) or by
+    // fn_claim_reminder_retries on a reclaim (attemptsAlreadyBumped: true
+    // overrides below). "pending" is the initial-claim default status.
+    attemptsAlreadyBumped: false,
+    claimToken: "initial-token",
+    claimedStatus: "pending",
     taskTitle: "Walkthrough with seller",
     taskDueAt: "2026-08-15T20:00:00.000Z",
     taskEndAt: "2026-08-15T20:30:00.000Z",
@@ -313,7 +318,7 @@ describe("deliverAppointmentReminder — defense in depth", () => {
     });
   });
 
-  it("uses attempts+1 straight off the claimed row for an UNFENCED (primary-claim) row, not a fresh read", async () => {
+  it("uses attempts+1 straight off the claimed row for a fresh initial-claim row (attemptsAlreadyBumped: false), not a fresh read", async () => {
     const supabase = fakeSupabase();
     const row = baseRow({ channel: "bell", attempts: 2 });
 
@@ -337,11 +342,12 @@ describe("deliverAppointmentReminder — defense in depth", () => {
 });
 
 describe("deliverAppointmentReminder — retry-claim fencing (Codex round 1)", () => {
-  it("a retry-claimed row (claimToken present) writes attempts AS-IS (the claim already bumped it) and fences the write by id+claim_token+claimed_status", async () => {
+  it("a retry-claimed row (attemptsAlreadyBumped) writes attempts AS-IS (the claim already bumped it) and fences the write by id+claim_token+claimed_status", async () => {
     const supabase = fakeSupabase();
     const row = baseRow({
       channel: "bell",
       attempts: 2,
+      attemptsAlreadyBumped: true,
       claimToken: "token-abc",
       claimedStatus: "failed",
     });
@@ -358,14 +364,26 @@ describe("deliverAppointmentReminder — retry-claim fencing (Codex round 1)", (
     });
   });
 
-  it("an unfenced (primary-claim) row's write carries no claim_token/status condition", async () => {
+  it("a fresh initial-claim row (attemptsAlreadyBumped: false) is ALSO fenced by its own id+claim_token+claimed_status", async () => {
     const supabase = fakeSupabase();
-    const row = baseRow({ channel: "bell", claimToken: null, claimedStatus: null });
+    const row = baseRow({
+      channel: "bell",
+      attempts: 0,
+      attemptsAlreadyBumped: false,
+      claimToken: "initial-token",
+      claimedStatus: "pending",
+    });
 
     await deliverAppointmentReminder(supabase, row);
 
-    const eqColumns = supabase.updates[0].eqs.map(([col]: [string, unknown]) => col);
-    expect(eqColumns).toEqual(["id"]);
+    expect(supabase.updates[0]).toMatchObject({
+      payload: expect.objectContaining({ status: "sent", attempts: 1 }),
+      eqs: expect.arrayContaining([
+        ["id", "delivery-1"],
+        ["claim_token", "initial-token"],
+        ["status", "pending"],
+      ]),
+    });
   });
 
   it("a lost lease (0 rows matched by the fenced write) is abandoned silently — no reportError call", async () => {
@@ -373,6 +391,7 @@ describe("deliverAppointmentReminder — retry-claim fencing (Codex round 1)", (
     const row = baseRow({
       channel: "bell",
       attempts: 2,
+      attemptsAlreadyBumped: true,
       claimToken: "stale-token",
       claimedStatus: "failed",
     });
@@ -385,6 +404,47 @@ describe("deliverAppointmentReminder — retry-claim fencing (Codex round 1)", (
     // reclaimed token's own attempt). Losing the lease means SOME other
     // claim now owns bookkeeping for this row.
     expect(outcome.status).toBe("sent");
+    expect(mocks.reportError).not.toHaveBeenCalled();
+  });
+
+  it("Codex round 2: a STALE-TOKEN INITIAL worker's sent/failed writes are no-ops (0 rows matched) — the retry claim already reclaimed this row out from under it", async () => {
+    // Simulates: fn_claim_appointment_reminders claims the row (token A,
+    // status pending), the initial provider call stalls past the
+    // 2-minute lease, fn_claim_reminder_retries reclaims the SAME row
+    // (fresh token B, still status pending) and starts its own delivery.
+    // The stalled initial worker's eventual sent/failed write must be a
+    // no-op, not a clobber of the retry owner's outcome.
+    const supabase = fakeSupabase({ matchedRows: 0 });
+    const staleInitialRow = baseRow({
+      channel: "sms",
+      attempts: 0,
+      attemptsAlreadyBumped: false,
+      claimToken: "token-A-stale",
+      claimedStatus: "pending",
+    });
+
+    const sentOutcome = await deliverAppointmentReminder(supabase, staleInitialRow);
+    expect(sentOutcome.status).toBe("sent");
+    expect(supabase.updates[0]).toMatchObject({
+      eqs: expect.arrayContaining([
+        ["id", "delivery-1"],
+        ["claim_token", "token-A-stale"],
+        ["status", "pending"],
+      ]),
+    });
+    expect(mocks.reportError).not.toHaveBeenCalled();
+
+    mocks.sendRepSmsReminder.mockResolvedValueOnce({ ok: false, reason: "boom", message: "boom" });
+    const failedOutcome = await deliverAppointmentReminder(supabase, staleInitialRow);
+    expect(failedOutcome.status).toBe("failed");
+    expect(supabase.updates[1]).toMatchObject({
+      payload: expect.objectContaining({ status: "failed" }),
+      eqs: expect.arrayContaining([
+        ["id", "delivery-1"],
+        ["claim_token", "token-A-stale"],
+        ["status", "pending"],
+      ]),
+    });
     expect(mocks.reportError).not.toHaveBeenCalled();
   });
 });

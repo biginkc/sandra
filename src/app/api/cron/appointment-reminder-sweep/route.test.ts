@@ -18,8 +18,8 @@ type RawRow = {
   org_id: string;
   channel: "bell" | "slack" | "sms";
   attempts: number;
-  claim_token?: string | null;
-  claimed_status?: "pending" | "failed" | null;
+  claim_token: string;
+  claimed_status: "pending" | "failed";
   task_title: string;
   task_due_at: string;
   task_end_at: string | null;
@@ -28,6 +28,10 @@ type RawRow = {
   assignee_reminder_phone: string | null;
 };
 
+// Codex round 2 fix: fn_claim_appointment_reminders now mints a
+// claim_token + lease on every row it returns (same as
+// fn_claim_reminder_retries always has) — a raw row from either RPC always
+// carries one, so the default here isn't a "retry-only" value anymore.
 function rawRow(id: string, overrides: Partial<RawRow> = {}): RawRow {
   return {
     delivery_id: id,
@@ -35,6 +39,8 @@ function rawRow(id: string, overrides: Partial<RawRow> = {}): RawRow {
     org_id: "org-1",
     channel: "bell",
     attempts: 0,
+    claim_token: `token-${id}`,
+    claimed_status: "pending",
     task_title: "Walkthrough",
     task_due_at: "2026-09-01T15:00:00.000Z",
     task_end_at: "2026-09-01T15:30:00.000Z",
@@ -111,9 +117,9 @@ describe("runAppointmentReminderSweep", () => {
     );
   });
 
-  it("maps claim_token/claimed_status from a retry-claimed row so the worker can fence its write, and leaves them null for a primary-claimed row", async () => {
+  it("maps claim_token/claimed_status from both claim RPCs (Codex round 2: the primary claim now leases/tokens too), and tags attemptsAlreadyBumped by source", async () => {
     const supabase = fakeSupabase(
-      [rawRow("a")],
+      [rawRow("a", { claim_token: "token-a", claimed_status: "pending" })],
       [rawRow("b", { claim_token: "token-123", claimed_status: "failed", attempts: 2 })],
     );
     mocks.deliverAppointmentReminder.mockResolvedValue({
@@ -124,10 +130,18 @@ describe("runAppointmentReminderSweep", () => {
 
     await runAppointmentReminderSweep(supabase, { budgetMs: 60_000 });
 
+    // Primary-claimed row: carries its own token/status, but the claim
+    // never touched attempts — the worker must still write attempts + 1.
     expect(mocks.deliverAppointmentReminder).toHaveBeenCalledWith(
       supabase,
-      expect.objectContaining({ deliveryId: "a", claimToken: null, claimedStatus: null }),
+      expect.objectContaining({
+        deliveryId: "a",
+        claimToken: "token-a",
+        claimedStatus: "pending",
+        attemptsAlreadyBumped: false,
+      }),
     );
+    // Retry-claimed row: the claim already bumped attempts.
     expect(mocks.deliverAppointmentReminder).toHaveBeenCalledWith(
       supabase,
       expect.objectContaining({
@@ -135,6 +149,7 @@ describe("runAppointmentReminderSweep", () => {
         claimToken: "token-123",
         claimedStatus: "failed",
         attempts: 2,
+        attemptsAlreadyBumped: true,
       }),
     );
   });
