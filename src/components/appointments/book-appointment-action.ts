@@ -9,10 +9,10 @@ import {
 } from "@/lib/auth/require-org-membership";
 import { errFromUnknown, err, ok, type Result } from "@/lib/errors/result";
 import { reportError } from "@/lib/errors/report";
-import { dispatchTaskCalendarEvent } from "@/lib/integrations/google/dispatch";
 import { loadIntegrationPrefs } from "@/lib/integrations/prefs";
 import { dispatchTaskAssignedSlack } from "@/lib/integrations/slack/dispatch";
 import { dispatchTaskAssigned } from "@/lib/notifications/dispatch";
+import { pausePropertyEnrollments } from "@/lib/sequences/enrollment";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
 import { wallTimeToUtc } from "@/lib/time/zoned";
@@ -96,6 +96,68 @@ type AppointmentRpcClient = {
 const MIN_DURATION_MINUTES = 15;
 const MAX_DURATION_MINUTES = 24 * 60;
 const DEFAULT_TIMEZONE = "America/Chicago";
+
+/**
+ * Org resolution shared by `bookAppointment` and `listBookingAssignees`
+ * (Codex round 2, assignee-picker scoping): linked bookings derive org
+ * from the resource; a personal block (no property, no contact — locked
+ * decision #5) falls back to the caller's own single ACTIVE membership,
+ * erroring explicitly on zero or multiple memberships rather than
+ * guessing. Active-only (R2-2 hardening, Codex round 1): a stale/suspended
+ * membership row must not count toward "which org" — without this filter,
+ * a caller who is active in one org and merely has HISTORY (suspended,
+ * expired, deletion-prepared) in another would see two rows and get a
+ * spurious AMBIGUOUS_ORG, or worse, could resolve into an org they no
+ * longer have access to. Same active-membership predicates as
+ * hasActiveSandraAccess / getCallerMemberships, expressed as PostgREST
+ * filters (mirrors updateMembershipRole in admin/users/actions.ts).
+ */
+async function resolveBookingOrgId(
+  supabase: Awaited<ReturnType<typeof createClient>>,
+  user: { id: string },
+  ctx: { propertyId?: string; contactId?: string },
+): Promise<Result<string>> {
+  if (ctx.propertyId) {
+    const { orgId } = await requireOrgMembershipByResource(
+      "properties",
+      ctx.propertyId,
+    );
+    return ok(orgId);
+  }
+  if (ctx.contactId) {
+    const { orgId } = await requireOrgMembershipByResource(
+      "contacts",
+      ctx.contactId,
+    );
+    return ok(orgId);
+  }
+
+  const activeAt = new Date().toISOString();
+  const { data: memberships, error: membershipErr } = await supabase
+    .from("memberships")
+    .select("org_id")
+    .eq("user_id", user.id)
+    .eq("access_status", "active")
+    .is("deletion_prepared_at", null)
+    .or(`access_expires_at.is.null,access_expires_at.gt.${activeAt}`);
+  if (membershipErr) {
+    return err({
+      code: "MEMBERSHIP_LOOKUP_FAILED",
+      message: membershipErr.message,
+    });
+  }
+  if (!memberships || memberships.length !== 1) {
+    return err({
+      code: "AMBIGUOUS_ORG",
+      message:
+        memberships && memberships.length > 1
+          ? "You belong to more than one org — book from a linked lead or contact instead."
+          : "You don't belong to an org.",
+    });
+  }
+  const { orgId } = await requireOrgMembership(memberships[0].org_id);
+  return ok(orgId);
+}
 
 /**
  * Looks up a teammate's authoritative reminder/calendar timezone through
@@ -221,54 +283,12 @@ export async function bookAppointment(
       return err({ code: "UNAUTHENTICATED", message: "Not signed in" });
     }
 
-    // Org resolution (R2-2): linked bookings derive org from the resource;
-    // a personal block (no property, no contact — locked decision #5)
-    // falls back to the caller's own single active membership, erroring
-    // explicitly on zero or multiple memberships rather than guessing.
-    let orgId: string;
-    if (input.propertyId) {
-      orgId = (
-        await requireOrgMembershipByResource("properties", input.propertyId)
-      ).orgId;
-    } else if (input.contactId) {
-      orgId = (
-        await requireOrgMembershipByResource("contacts", input.contactId)
-      ).orgId;
-    } else {
-      // Active-only (R2-2 hardening, Codex round 1): a stale/suspended
-      // membership row must not count toward "which org do I book into" —
-      // without this filter, a caller who is active in one org and merely
-      // has HISTORY (suspended, expired, deletion-prepared) in another
-      // would see two rows and get a spurious AMBIGUOUS_ORG, or worse,
-      // could resolve into an org they no longer have access to. Same
-      // active-membership predicates as hasActiveSandraAccess /
-      // getCallerMemberships, expressed as PostgREST filters (mirrors
-      // updateMembershipRole in admin/users/actions.ts).
-      const activeAt = new Date().toISOString();
-      const { data: memberships, error: membershipErr } = await supabase
-        .from("memberships")
-        .select("org_id")
-        .eq("user_id", user.id)
-        .eq("access_status", "active")
-        .is("deletion_prepared_at", null)
-        .or(`access_expires_at.is.null,access_expires_at.gt.${activeAt}`);
-      if (membershipErr) {
-        return err({
-          code: "MEMBERSHIP_LOOKUP_FAILED",
-          message: membershipErr.message,
-        });
-      }
-      if (!memberships || memberships.length !== 1) {
-        return err({
-          code: "AMBIGUOUS_ORG",
-          message:
-            memberships && memberships.length > 1
-              ? "You belong to more than one org — book from a linked lead or contact instead."
-              : "You don't belong to an org.",
-        });
-      }
-      orgId = (await requireOrgMembership(memberships[0].org_id)).orgId;
-    }
+    const orgResult = await resolveBookingOrgId(supabase, user, {
+      propertyId: input.propertyId,
+      contactId: input.contactId,
+    });
+    if (!orgResult.ok) return orgResult;
+    const orgId = orgResult.data;
 
     const rpcClient = supabase as unknown as AppointmentRpcClient;
     const { data, error } = await rpcClient.rpc("fn_book_appointment", {
@@ -294,9 +314,9 @@ export async function bookAppointment(
     // SUCCESS, not an error — it's the RPC recognizing a retry and handing
     // back the original booking rather than a fresh one. Treated exactly
     // like a fresh booking below, except the assignment side effects
-    // (notification/Slack/calendar-event dispatch) are skipped: those
-    // already fired for the original call, and a retry re-dispatching them
-    // would double-notify the assignee for one appointment.
+    // (notification/Slack dispatch) are skipped: those already fired for
+    // the original call, and a retry re-dispatching them would
+    // double-notify the assignee for one appointment.
     const result: BookAppointmentResult = {
       taskId: data.task_id,
       alreadyQualified: data.already_qualified,
@@ -304,6 +324,15 @@ export async function bookAppointment(
       duplicate: data.duplicate,
     };
 
+    // Single-owner rule for Google Calendar event creation: fn_book_appointment
+    // already opened the task_calendar_mutations ledger row (phase='pending')
+    // in the same transaction that created the task — that ledger row IS the
+    // durable intent to create the calendar event, and PR 3's provider worker
+    // is the only thing that executes it. This action must NOT also call
+    // dispatchTaskCalendarEvent (the legacy fire-and-forget path used by
+    // plain task creation) — doing so would give the event two independent
+    // creators racing each other with no shared idempotency key. Slack/bell
+    // notifications have no such ledger and keep firing here.
     if (input.assigneeId !== user.id && !result.duplicate) {
       const admin = createAdminClient();
       const prefs = await loadIntegrationPrefs(admin, input.assigneeId);
@@ -333,19 +362,35 @@ export async function bookAppointment(
             timezone: prefs.timezone,
             slackEnabled: prefs.slackEnabled,
           }),
-          dispatchTaskCalendarEvent({
-            taskId: result.taskId,
-            assigneeId: input.assigneeId,
-            taskTitle: input.title,
-            propertyAddress: subjectLabel,
-            dueAt: startUtc.toISOString(),
-            endAt: endUtc.toISOString(),
-            timezone: prefs.timezone,
-            deepLink,
-            calendarEnabled: prefs.calendarEnabled,
-          }),
         ]);
       });
+    }
+
+    // Outbound suppression boundary (Codex round 2, critical): a booked
+    // appointment is a human-owned outcome — pause every active sequence
+    // enrollment on this property so a scheduled automated touch doesn't
+    // land on someone who just booked. Best-effort: booking has already
+    // succeeded (task + ledger row committed), so a pause failure must
+    // never surface as a booking failure. The property-level dispo write
+    // (outreach_dispo='booked_appointment', done inside the RPC) already
+    // blocks the AI responder and sequence-tick sends going forward — this
+    // additionally stops any enrollment that's already past its dispo
+    // check and just waiting on next_run_at. Property-only: a personal
+    // block / contact-only booking has no property-scoped enrollments to
+    // pause.
+    if (input.propertyId) {
+      try {
+        await pausePropertyEnrollments(supabase, {
+          propertyId: input.propertyId,
+          reason: "appointment_booked",
+          permanent: false,
+        });
+      } catch (e) {
+        reportError(e, {
+          tags: { surface: "book_appointment_pause_enrollments" },
+          extra: { propertyId: input.propertyId },
+        });
+      }
     }
 
     if (input.propertyId) revalidatePath(`/leads/${input.propertyId}`);
@@ -385,4 +430,95 @@ function buildAppointmentDeepLink(propertyId?: string, contactId?: string): stri
   if (propertyId) return `${normalizedBaseUrl}/leads/${propertyId}`;
   if (contactId) return `${normalizedBaseUrl}/messages?thread=${contactId}`;
   return `${normalizedBaseUrl}/dashboard`;
+}
+
+export type TeamMember = { id: string; email: string };
+
+export type BookingAssigneeContext = {
+  /** Property this booking is linked to, if any — mirrors BookAppointmentInput. */
+  propertyId?: string;
+  /** Contact this booking is linked to, if any (independent of property). */
+  contactId?: string;
+};
+
+type AuthUserPageUser = { id: string; email?: string | null };
+
+async function listAllAuthUsers(
+  admin: ReturnType<typeof createAdminClient>,
+): Promise<Result<AuthUserPageUser[]>> {
+  const users: AuthUserPageUser[] = [];
+  let page = 1;
+  const perPage = 200;
+
+  while (true) {
+    const { data, error } = await admin.auth.admin.listUsers({ page, perPage });
+    if (error) {
+      return err({ code: "TEAM_FETCH_FAILED", message: error.message });
+    }
+    users.push(...((data?.users ?? []) as AuthUserPageUser[]));
+    if (!data?.nextPage || data.users.length === 0) break;
+    page = data.nextPage;
+  }
+
+  return ok(users);
+}
+
+/**
+ * Assignee picker for the booking popover (Codex round 2 — the popover
+ * previously reused `leads/actions.ts`'s `listOrgUsers`, which unions
+ * every org the caller has EVER belonged to — including stale/suspended
+ * memberships — and lists every member of ALL of those orgs, including
+ * inactive ones. A multi-org caller could see (and pick) a member from
+ * the WRONG org, and every caller could pick an inactive teammate whose
+ * membership would immediately fail `fn_book_appointment`'s own
+ * assignee-membership check.
+ *
+ * This scopes to exactly one org — resolved the same way `bookAppointment`
+ * resolves the org it books into (`resolveBookingOrgId`: linked resource,
+ * or the caller's single active membership for a personal block) — and
+ * returns only members with an ACTIVE, non-deletion-prepared,
+ * non-expired membership in THAT org.
+ */
+export async function listBookingAssignees(
+  ctx: BookingAssigneeContext,
+): Promise<Result<TeamMember[]>> {
+  try {
+    const supabase = await createClient();
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    if (!user) {
+      return err({ code: "UNAUTHENTICATED", message: "Not signed in" });
+    }
+
+    const orgResult = await resolveBookingOrgId(supabase, user, ctx);
+    if (!orgResult.ok) return orgResult;
+
+    const admin = createAdminClient();
+    const activeAt = new Date().toISOString();
+    const { data: orgMemberships, error: orgMembershipsError } = await admin
+      .from("memberships")
+      .select("user_id")
+      .eq("org_id", orgResult.data)
+      .eq("access_status", "active")
+      .is("deletion_prepared_at", null)
+      .or(`access_expires_at.is.null,access_expires_at.gt.${activeAt}`);
+    if (orgMembershipsError) {
+      return err({ code: "TEAM_FETCH_FAILED", message: orgMembershipsError.message });
+    }
+
+    const memberIds = new Set((orgMemberships ?? []).map((m) => m.user_id));
+    if (memberIds.size === 0) return ok([]);
+
+    const users = await listAllAuthUsers(admin);
+    if (!users.ok) return users;
+    const members: TeamMember[] = users.data
+      .filter((u) => memberIds.has(u.id) && !!u.email)
+      .map((u) => ({ id: u.id, email: u.email as string }))
+      .sort((a, b) => a.email.localeCompare(b.email));
+    return ok(members);
+  } catch (e) {
+    reportError(e, { tags: { surface: "list_booking_assignees" }, extra: ctx });
+    return errFromUnknown(e, "TEAM_FETCH_FAILED");
+  }
 }

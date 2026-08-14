@@ -347,6 +347,8 @@ export function BookAppointmentPopover({
               value={assigneeId}
               onChange={setAssigneeId}
               currentUserId={currentUserId}
+              propertyId={propertyId}
+              contactId={contactId}
               disabled={pending}
             />
           </label>

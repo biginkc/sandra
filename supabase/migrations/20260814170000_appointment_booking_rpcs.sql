@@ -452,25 +452,53 @@ begin
     raise exception 'fn_book_appointment: no authenticated caller' using errcode = '28000';
   end if;
 
-  if p_title is null or btrim(p_title) = '' then
-    raise exception 'fn_book_appointment: title is required' using errcode = 'P0001';
-  end if;
-
-  if p_end <= p_start then
-    raise exception 'fn_book_appointment: end must be after start' using errcode = 'P0001';
-  end if;
-
   -- Actor must be an active member of the org being booked into.
+  -- FOR SHARE OF m (Codex round 2, actor-suspension race): same idiom
+  -- tasks_tenant_integrity_guard already uses for its assignee check
+  -- (20260814150000) — under READ COMMITTED an unlocked PERFORM could
+  -- observe the actor's still-active row while a concurrent transaction
+  -- suspends them, letting both a suspension and this booking commit. The
+  -- share lock makes the suspender wait for this transaction (or vice
+  -- versa), so one order wins cleanly instead of racing.
   perform 1
   from public.memberships m
   where m.user_id = v_actor
     and m.org_id = p_org
     and m.access_status = 'active'
     and m.deletion_prepared_at is null
-    and (m.access_expires_at is null or m.access_expires_at > now());
+    and (m.access_expires_at is null or m.access_expires_at > now())
+  for share of m;
   if not found then
     raise exception 'fn_book_appointment: caller has no active membership in org %', p_org
       using errcode = 'P0001';
+  end if;
+
+  -- Replay-before-validation (Codex round 2): the idempotency-key lookup
+  -- runs immediately after actor auth/membership and BEFORE
+  -- assignee-membership/timezone/title/time validation. A replay of a
+  -- COMMITTED booking must return the original winner even if, since that
+  -- booking happened, the assignee was suspended or changed their
+  -- timezone preference — those describe the world at replay time, not at
+  -- booking time, and validating a replay against them would turn a
+  -- harmless retry into a spurious failure for a booking that already
+  -- exists. Concurrent replay (both callers miss this SELECT) is still
+  -- handled by the unique_violation catch below, after those validations
+  -- run for whichever caller actually reaches the insert.
+  if p_idempotency_key is not null then
+    select t.id, t.calendar_chain_id
+    into v_task_id, v_chain_id
+    from public.tasks t
+    where t.org_id = p_org
+      and t.booking_idempotency_key = p_idempotency_key;
+
+    if found then
+      return jsonb_build_object(
+        'task_id', v_task_id,
+        'calendar_chain_id', v_chain_id,
+        'already_qualified', false,
+        'duplicate', true
+      );
+    end if;
   end if;
 
   -- Assignee must also be an active member of the same org. The tasks
@@ -513,24 +541,12 @@ begin
       using errcode = 'P0001';
   end if;
 
-  -- Sequential replay: a caller resubmitting the same idempotency key
-  -- (e.g. after a dropped response) hits this SELECT and returns the
-  -- original booking untouched — no second write attempted at all.
-  if p_idempotency_key is not null then
-    select t.id, t.calendar_chain_id
-    into v_task_id, v_chain_id
-    from public.tasks t
-    where t.org_id = p_org
-      and t.booking_idempotency_key = p_idempotency_key;
+  if p_title is null or btrim(p_title) = '' then
+    raise exception 'fn_book_appointment: title is required' using errcode = 'P0001';
+  end if;
 
-    if found then
-      return jsonb_build_object(
-        'task_id', v_task_id,
-        'calendar_chain_id', v_chain_id,
-        'already_qualified', false,
-        'duplicate', true
-      );
-    end if;
+  if p_end <= p_start then
+    raise exception 'fn_book_appointment: end must be after start' using errcode = 'P0001';
   end if;
 
   -- Concurrent replay: two callers both miss the SELECT above (neither

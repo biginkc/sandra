@@ -84,3 +84,41 @@ export function evaluateSuppression(
 export function isSuppressed(input: SuppressionInput): boolean {
   return evaluateSuppression(input).suppressed;
 }
+
+/**
+ * Dispositions that represent a human-owned outcome: nurture / callback /
+ * a booked appointment. These are deliberately NOT in SUPPRESSED_DISPOS
+ * above — SUPPRESSED_DISPOS blocks every sender (manual composer included)
+ * for consent/compliance reasons, but a human agent must still be able to
+ * manually text someone who just booked ("see you at 2pm tomorrow!") or is
+ * in nurture. `shouldSuppressAutomatedSend` below is the authoritative
+ * boundary for automated/unattended senders (AI responder, sequence tick,
+ * bulk-queue) — it combines both sets so a future disposition only has to
+ * be added in one place to be covered everywhere automated.
+ */
+export const HUMAN_OWNED_DISPOS = new Set([
+  "nurture",
+  "callback_requested",
+  "booked_appointment",
+] as const);
+
+type HumanOwnedDispo = typeof HUMAN_OWNED_DISPOS extends ReadonlySet<infer T>
+  ? T
+  : never;
+
+/**
+ * The authoritative outbound suppression check for automated/unattended
+ * senders. Every consumer that fires SMS without a human reviewing that
+ * specific message body — the AI responder, sequence tick, bulk-queue —
+ * must gate on this (or an equivalent local check keyed off the same two
+ * sets) before calling `sendSmsToContact`. `sendSmsToContact` itself only
+ * enforces `isSuppressed` (SUPPRESSED_DISPOS) so the manual reply composer
+ * stays unaffected by HUMAN_OWNED_DISPOS.
+ */
+export function shouldSuppressAutomatedSend(input: SuppressionInput): boolean {
+  if (isSuppressed(input)) return true;
+  return Boolean(
+    input.outreachDispo &&
+      HUMAN_OWNED_DISPOS.has(input.outreachDispo as HumanOwnedDispo),
+  );
+}

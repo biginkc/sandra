@@ -24,7 +24,8 @@ export type PauseReason =
   | "inbound_reply"
   | "status_terminal"
   | "status_acquisition_active"
-  | "consent_revoked";
+  | "consent_revoked"
+  | "appointment_booked";
 
 export type PauseDecision = {
   shouldPause: boolean;

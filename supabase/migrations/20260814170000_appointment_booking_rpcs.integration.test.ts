@@ -586,6 +586,122 @@ describe("Migration 20260814170000 — appointment booking RPCs", () => {
     });
   });
 
+  // The Supabase JS client auto-commits every PostgREST call, so proving the
+  // ACTOR's `FOR SHARE OF m` check (Codex round 2) actually serializes
+  // against a concurrent suspension needs two raw `pg` connections holding
+  // uncommitted work open — same capability/rationale as
+  // 20260814150000_appointments_schema.integration.test.ts's
+  // membership-suspension race describe block (mirrored here for the
+  // ACTOR side rather than the assignee side, and for fn_book_appointment
+  // rather than a bare tasks INSERT).
+  describe("fn_book_appointment — actor-suspension race (raw pg, two connections)", () => {
+    let connA: Client;
+    let connB: Client;
+
+    beforeEach(async () => {
+      connA = new Client({ connectionString: testDbUrl() });
+      connB = new Client({ connectionString: testDbUrl() });
+      await connA.connect();
+      await connB.connect();
+      await connA.query("set statement_timeout = 0");
+      await connB.query("set statement_timeout = 0");
+    });
+
+    afterEach(async () => {
+      await connA.query("rollback").catch(() => {});
+      await connB.query("rollback").catch(() => {});
+      await connA.end().catch(() => {});
+      await connB.end().catch(() => {});
+    });
+
+    async function stillBlockedAfter(
+      promise: Promise<unknown>,
+      ms: number,
+    ): Promise<"blocked" | "resolved"> {
+      const sentinel = Symbol("timeout");
+      const raced = await Promise.race([
+        promise.catch(() => sentinel),
+        new Promise((resolve) => setTimeout(() => resolve(sentinel), ms)).then(
+          () => "timeout-won" as const,
+        ),
+      ]);
+      return raced === "timeout-won" ? "blocked" : "resolved";
+    }
+
+    const RPC_SQL = `
+      select public.fn_book_appointment(
+        p_org => $1::uuid, p_assignee => $2::uuid, p_start => $3::timestamptz,
+        p_end => $4::timestamptz, p_timezone => $5::text, p_title => $6::text
+      ) as result
+    `;
+
+    it("suspend wins: a suspension committed while the booking is blocked on FOR SHARE fails the booking", async () => {
+      const booker = await createUserForOrg(BMH_ORG_ID);
+      const assignee = await createUserForOrg(BMH_ORG_ID);
+      const { p_start, p_end } = windowArgs();
+      const jwtClaims = JSON.stringify({ sub: booker.userId, role: "authenticated" });
+      const args = [BMH_ORG_ID, assignee.userId, p_start, p_end, "America/Chicago", "Race test"];
+
+      // connA holds a ROW EXCLUSIVE lock on the booker's own membership row
+      // until commit. connB's booking call runs the actor check's
+      // `FOR SHARE OF m` against that same row and must block on it.
+      await connA.query("begin");
+      await connA.query(
+        "update memberships set access_status = 'suspended' where user_id = $1 and org_id = $2",
+        [booker.userId, BMH_ORG_ID],
+      );
+
+      await connB.query("begin");
+      await connB.query("select set_config('request.jwt.claims', $1, true)", [jwtClaims]);
+      const bookPromise = connB.query(RPC_SQL, args);
+
+      expect(await stillBlockedAfter(bookPromise, 1500)).toBe("blocked");
+
+      // Commit the suspension: connB's blocked FOR SHARE proceeds and now
+      // observes access_status = 'suspended' — the function must raise the
+      // same "no active membership" error as the non-race hostile case.
+      await connA.query("commit");
+
+      await expect(bookPromise).rejects.toThrow(/caller has no active membership/i);
+    });
+
+    it("book wins: a booking committed while a suspension is blocked on the row lock still succeeds; the suspension commits cleanly right after", async () => {
+      const booker = await createUserForOrg(BMH_ORG_ID);
+      const assignee = await createUserForOrg(BMH_ORG_ID);
+      const { p_start, p_end } = windowArgs();
+      const jwtClaims = JSON.stringify({ sub: booker.userId, role: "authenticated" });
+      const args = [BMH_ORG_ID, assignee.userId, p_start, p_end, "America/Chicago", "Race test"];
+
+      // connA's booking call takes the FOR SHARE lock on the booker's own
+      // membership row and — because the transaction stays open — holds it
+      // past the call's completion, until commit. connB's suspension needs
+      // ROW EXCLUSIVE on that same row and must block until then.
+      await connA.query("begin");
+      await connA.query("select set_config('request.jwt.claims', $1, true)", [jwtClaims]);
+      const booked = await connA.query<{ result: BookAppointmentRow }>(RPC_SQL, args);
+
+      const suspendPromise = connB.query(
+        "update memberships set access_status = 'suspended' where user_id = $1 and org_id = $2",
+        [booker.userId, BMH_ORG_ID],
+      );
+
+      expect(await stillBlockedAfter(suspendPromise, 1500)).toBe("blocked");
+
+      await connA.query("commit");
+      await suspendPromise;
+
+      expect(booked.rows[0].result.duplicate).toBe(false);
+
+      const { data: membership } = await db
+        .from("memberships")
+        .select("access_status")
+        .eq("user_id", booker.userId)
+        .eq("org_id", BMH_ORG_ID)
+        .single();
+      expect((membership as { access_status: string }).access_status).toBe("suspended");
+    });
+  });
+
   describe("fn_book_appointment — idempotent re-booking", () => {
     it("a second booking on the same property creates a second appointment on a new chain, without breaking", async () => {
       const booker = await createUserForOrg(BMH_ORG_ID);
@@ -679,6 +795,87 @@ describe("Migration 20260814170000 — appointment booking RPCs", () => {
       expect(rowsErr).toBeNull();
       expect(rows).toHaveLength(1);
       expect(rows![0].title).toBe("First attempt");
+    });
+
+    it("replay-before-validation: a replay after the assignee was suspended still returns the original booking", async () => {
+      const booker = await createUserForOrg(BMH_ORG_ID);
+      const assignee = await createUserForOrg(BMH_ORG_ID);
+      const key = crypto.randomUUID();
+      const { p_start, p_end } = windowArgs();
+
+      const first = await bookAppointment(booker.client, {
+        p_org: BMH_ORG_ID,
+        p_assignee: assignee.userId,
+        p_start,
+        p_end,
+        p_timezone: "America/Chicago",
+        p_title: "Booked while assignee was active",
+        p_idempotency_key: key,
+      });
+      expect(first.error).toBeNull();
+      expect(first.data!.duplicate).toBe(false);
+
+      // The assignee's membership going inactive AFTER the original booking
+      // committed must not turn a same-key replay into an error — the
+      // idempotency lookup runs before the assignee-membership check
+      // (Codex round 2), so it never re-evaluates a fact the original
+      // booking already settled.
+      await setMembershipAccessStatus(assignee.userId, BMH_ORG_ID, "suspended");
+
+      const retry = await bookAppointment(booker.client, {
+        p_org: BMH_ORG_ID,
+        p_assignee: assignee.userId,
+        p_start,
+        p_end,
+        p_timezone: "America/Chicago",
+        p_title: "Booked while assignee was active",
+        p_idempotency_key: key,
+      });
+
+      expect(retry.error).toBeNull();
+      expect(retry.data!.duplicate).toBe(true);
+      expect(retry.data!.task_id).toBe(first.data!.task_id);
+    });
+
+    it("replay-before-validation: a replay after the assignee's timezone pref changed still returns the original booking", async () => {
+      const booker = await createUserForOrg(BMH_ORG_ID);
+      const assignee = await createUserForOrg(BMH_ORG_ID);
+      await setTimezonePref(assignee.userId, "America/Chicago");
+      const key = crypto.randomUUID();
+      const { p_start, p_end } = windowArgs();
+
+      const first = await bookAppointment(booker.client, {
+        p_org: BMH_ORG_ID,
+        p_assignee: assignee.userId,
+        p_start,
+        p_end,
+        p_timezone: "America/Chicago",
+        p_title: "Booked under Chicago pref",
+        p_idempotency_key: key,
+      });
+      expect(first.error).toBeNull();
+      expect(first.data!.duplicate).toBe(false);
+
+      // Change the assignee's authoritative pref after booking. A replay
+      // sent with the now-STALE "America/Chicago" label would fail the
+      // timezone-mismatch check if that check ran — proving the idempotency
+      // lookup really does short-circuit before it, not just that the
+      // label happens to still agree.
+      await setTimezonePref(assignee.userId, "America/Denver");
+
+      const retry = await bookAppointment(booker.client, {
+        p_org: BMH_ORG_ID,
+        p_assignee: assignee.userId,
+        p_start,
+        p_end,
+        p_timezone: "America/Chicago",
+        p_title: "Booked under Chicago pref",
+        p_idempotency_key: key,
+      });
+
+      expect(retry.error).toBeNull();
+      expect(retry.data!.duplicate).toBe(true);
+      expect(retry.data!.task_id).toBe(first.data!.task_id);
     });
 
     it("different keys create distinct tasks", async () => {

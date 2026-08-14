@@ -6,7 +6,10 @@ import { getConsentState } from "@/lib/messaging/consent";
 import { checkQuietHours } from "@/lib/messaging/quiet-hours";
 import { sendSmsToContact } from "@/lib/messaging/send";
 import { selectBestSmsPhone } from "@/lib/messaging/sms-phone";
-import { SUPPRESSED_DISPOS } from "@/lib/messaging/suppression";
+import {
+  HUMAN_OWNED_DISPOS,
+  shouldSuppressAutomatedSend,
+} from "@/lib/messaging/suppression";
 import { pausePropertyEnrollments } from "@/lib/sequences/enrollment";
 import type { Database, Json } from "@/lib/supabase/types";
 
@@ -64,16 +67,18 @@ export type AiDispatchOptions = {
 };
 
 const AI_REPLY_THREAD_DEBOUNCE_MS = 45_000;
-// booked_appointment (appointments PR 2) joins this set for the same
-// reason nurture/callback_requested are here: a human-owned outcome that
+// Sourced from suppression.ts's HUMAN_OWNED_DISPOS (the single disposition
+// spine, Codex round 2) rather than a locally-duplicated literal set — a
+// human-owned outcome (nurture/callback_requested/booked_appointment) that
 // the AI responder must neither dispatch against nor clobber. Both
-// isTerminalAiResponderProperty (pre-generation gate) and
-// shouldUpdateDispo's preservation check (final-write gate) key off this
-// same Set, so adding the value here covers both call sites — a
-// consent-class outcome (opted_out/dnc) still overwrites it, same as it
-// overwrites nurture/callback_requested, via shouldUpdateDispo's existing
+// isTerminalAiResponderProperty (pre-generation gate, via
+// shouldSuppressAutomatedSend) and shouldUpdateDispo's preservation check
+// (final-write gate) key off this same Set, so adding a value in
+// suppression.ts covers both call sites — a consent-class outcome
+// (opted_out/dnc) still overwrites it, same as it overwrites
+// nurture/callback_requested, via shouldUpdateDispo's existing
 // `next !== "opted_out" && next !== "dnc"` carve-out.
-const HUMAN_ONLY_DISPOS = new Set(["nurture", "callback_requested", "booked_appointment"]);
+const HUMAN_ONLY_DISPOS: ReadonlySet<string> = HUMAN_OWNED_DISPOS;
 
 const DEESCALATION_TEMPLATE_WITH_NAME =
   "So sorry to bug you. Sounds like you get a lot of these. Are you {first_name}? Just want to make sure we don't bother you again.";
@@ -529,13 +534,7 @@ function isTerminalAiResponderProperty(
 ): boolean {
   return (
     property.needs_human_attention ||
-    Boolean(
-      property.outreach_dispo &&
-        (SUPPRESSED_DISPOS.has(
-          property.outreach_dispo as Parameters<typeof SUPPRESSED_DISPOS.has>[0],
-        ) ||
-          HUMAN_ONLY_DISPOS.has(property.outreach_dispo)),
-    )
+    shouldSuppressAutomatedSend({ outreachDispo: property.outreach_dispo })
   );
 }
 

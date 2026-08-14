@@ -1,7 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { sendSmsToContact } from "@/lib/messaging/send";
-import { SUPPRESSED_DISPOS } from "@/lib/messaging/suppression";
+import { shouldSuppressAutomatedSend } from "@/lib/messaging/suppression";
 import type { Database } from "@/lib/supabase/types";
 import { pickFromPool } from "@/lib/templates/pool";
 
@@ -99,13 +99,17 @@ export async function processEnrollmentTick(
     return { status: "failed", enrollmentId: enrollment.id, message: propErr?.message ?? "property missing" };
   }
 
-  // Disqualifying outreach dispos permanently pause sequences — the
-  // prospect has opted out, requested DNC, or has a bad number.
+  // Disqualifying outreach dispos pause sequences — either permanently
+  // (opted out, DNC, bad number: SUPPRESSED_DISPOS) or resumably (a
+  // human-owned outcome — nurture/callback_requested/booked_appointment —
+  // via HUMAN_OWNED_DISPOS, folded in by shouldSuppressAutomatedSend). A
+  // booked appointment reaching this far means the tick fired between
+  // booking and the enrollment's own pause landing (best-effort, fired
+  // from bookAppointment's post-RPC path) — this is the safety net that
+  // still catches it.
   if (
     property.outreach_dispo &&
-    SUPPRESSED_DISPOS.has(
-      property.outreach_dispo as Parameters<typeof SUPPRESSED_DISPOS.has>[0],
-    )
+    shouldSuppressAutomatedSend({ outreachDispo: property.outreach_dispo })
   ) {
     const permanent = property.outreach_dispo === "dnc" || property.outreach_dispo === "opted_out";
     await client

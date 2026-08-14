@@ -7,8 +7,8 @@ const {
   createClient,
   dispatchTaskAssigned,
   dispatchTaskAssignedSlack,
-  dispatchTaskCalendarEvent,
   loadIntegrationPrefs,
+  pausePropertyEnrollments,
   requireOrgMembership,
   requireOrgMembershipByResource,
   revalidatePath,
@@ -21,12 +21,12 @@ const {
   createClient: vi.fn(),
   dispatchTaskAssigned: vi.fn(),
   dispatchTaskAssignedSlack: vi.fn(),
-  dispatchTaskCalendarEvent: vi.fn(),
   loadIntegrationPrefs: vi.fn(async () => ({
     slackEnabled: true,
     calendarEnabled: true,
     timezone: "America/Chicago",
   })),
+  pausePropertyEnrollments: vi.fn().mockResolvedValue({ paused: 0 }),
   requireOrgMembership: vi.fn(),
   requireOrgMembershipByResource: vi.fn(),
   revalidatePath: vi.fn(),
@@ -37,10 +37,10 @@ vi.mock("@/lib/supabase/admin", () => ({ createAdminClient }));
 vi.mock("@/lib/errors/report", () => ({ reportError: vi.fn() }));
 vi.mock("next/cache", () => ({ revalidatePath }));
 vi.mock("next/server", () => ({ after: afterMock }));
-vi.mock("@/lib/integrations/google/dispatch", () => ({ dispatchTaskCalendarEvent }));
 vi.mock("@/lib/integrations/prefs", () => ({ loadIntegrationPrefs }));
 vi.mock("@/lib/integrations/slack/dispatch", () => ({ dispatchTaskAssignedSlack }));
 vi.mock("@/lib/notifications/dispatch", () => ({ dispatchTaskAssigned }));
+vi.mock("@/lib/sequences/enrollment", () => ({ pausePropertyEnrollments }));
 vi.mock("@/lib/auth/require-org-membership", () => ({
   requireOrgMembership,
   requireOrgMembershipByResource,
@@ -50,6 +50,7 @@ import {
   bookAppointment,
   checkAppointmentOverlap,
   getMemberTimezone,
+  listBookingAssignees,
 } from "./book-appointment-action";
 
 type RpcResult = { data: unknown; error: { message: string } | null };
@@ -475,13 +476,80 @@ describe("bookAppointment — RPC + side effects", () => {
     expect(dispatchTaskAssignedSlack).toHaveBeenCalledWith(
       expect.objectContaining({ assigneeId: "user-2", propertyAddress: "123 Main St" }),
     );
-    expect(dispatchTaskCalendarEvent).toHaveBeenCalledWith(
-      expect.objectContaining({
-        assigneeId: "user-2",
-        dueAt: "2026-06-15T19:00:00.000Z",
-        endAt: "2026-06-15T19:30:00.000Z",
+  });
+
+  it("never dispatches the legacy calendar-event path — the ledger row + PR 3 worker are the single owner of Google event creation", async () => {
+    createClient.mockResolvedValue(
+      makeSupabaseMock({
+        userId: "user-1",
+        propertyAddress: "123 Main St",
+        rpcResult: {
+          data: { task_id: "task-1", already_qualified: false, calendar_chain_id: "chain-1" },
+          error: null,
+        },
       }),
     );
+
+    await bookAppointment({ ...VALID_INPUT, assigneeId: "user-2" });
+    await afterCallbacks[0]?.();
+
+    // No dispatchTaskCalendarEvent import exists in the module under test
+    // anymore — asserting only the two side effects that remain confirms
+    // the calendar dispatch was actually removed, not merely unasserted.
+    expect(dispatchTaskAssigned).toHaveBeenCalledTimes(1);
+    expect(dispatchTaskAssignedSlack).toHaveBeenCalledTimes(1);
+  });
+
+  it("pauses active sequence enrollments on the property after a successful booking", async () => {
+    createClient.mockResolvedValue(
+      makeSupabaseMock({
+        userId: "user-1",
+        rpcResult: {
+          data: { task_id: "task-1", already_qualified: false, calendar_chain_id: "chain-1" },
+          error: null,
+        },
+      }),
+    );
+
+    await bookAppointment(VALID_INPUT);
+
+    expect(pausePropertyEnrollments).toHaveBeenCalledWith(
+      expect.anything(),
+      { propertyId: "prop-1", reason: "appointment_booked", permanent: false },
+    );
+  });
+
+  it("skips pausing enrollments for a booking with no linked property", async () => {
+    createClient.mockResolvedValue(
+      makeSupabaseMock({
+        userId: "user-1",
+        rpcResult: {
+          data: { task_id: "task-1", already_qualified: false, calendar_chain_id: "chain-1" },
+          error: null,
+        },
+      }),
+    );
+
+    await bookAppointment({ ...VALID_INPUT, propertyId: undefined, contactId: "contact-1" });
+
+    expect(pausePropertyEnrollments).not.toHaveBeenCalled();
+  });
+
+  it("does not fail the booking when pausing enrollments throws — best-effort, booking already committed", async () => {
+    createClient.mockResolvedValue(
+      makeSupabaseMock({
+        userId: "user-1",
+        rpcResult: {
+          data: { task_id: "task-1", already_qualified: false, calendar_chain_id: "chain-1" },
+          error: null,
+        },
+      }),
+    );
+    pausePropertyEnrollments.mockRejectedValueOnce(new Error("db down"));
+
+    const result = await bookAppointment(VALID_INPUT);
+
+    expect(result.ok).toBe(true);
   });
 
   it("skips assignment side effects when booking for oneself", async () => {
@@ -516,5 +584,118 @@ describe("bookAppointment — RPC + side effects", () => {
     expect(revalidatePath).toHaveBeenCalledWith("/leads/prop-1");
     expect(revalidatePath).toHaveBeenCalledWith("/messages");
     expect(revalidatePath).toHaveBeenCalledWith("/dashboard");
+  });
+});
+
+describe("listBookingAssignees", () => {
+  function makeAdminMock(opts: {
+    orgMemberUserIds?: string[];
+    orgMembersError?: { message: string } | null;
+    users?: { id: string; email?: string | null }[];
+  }) {
+    const membershipsBuilder = {
+      select: vi.fn(function (this: unknown) {
+        return this;
+      }),
+      eq: vi.fn(function (this: unknown) {
+        return this;
+      }),
+      is: vi.fn(function (this: unknown) {
+        return this;
+      }),
+      or: vi.fn().mockResolvedValue({
+        data: (opts.orgMemberUserIds ?? []).map((user_id) => ({ user_id })),
+        error: opts.orgMembersError ?? null,
+      }),
+    };
+    return {
+      from: vi.fn((table: string) => {
+        if (table === "memberships") return membershipsBuilder;
+        throw new Error(`Unexpected admin table in test: ${table}`);
+      }),
+      auth: {
+        admin: {
+          listUsers: vi.fn().mockResolvedValue({
+            data: { users: opts.users ?? [], nextPage: null },
+            error: null,
+          }),
+        },
+      },
+      __membershipsBuilder: membershipsBuilder,
+    };
+  }
+
+  it("excludes inactive members — the query is scoped to active, non-deletion-prepared, unexpired memberships", async () => {
+    requireOrgMembershipByResource.mockResolvedValue({
+      userId: "user-1",
+      orgId: "org-1",
+      role: "member",
+      resourceId: "prop-1",
+    });
+    createClient.mockResolvedValue(makeSupabaseMock({ userId: "user-1" }));
+    const admin = makeAdminMock({
+      orgMemberUserIds: ["active-1"],
+      users: [{ id: "active-1", email: "active@example.test" }],
+    });
+    createAdminClient.mockReturnValue(admin as never);
+
+    const result = await listBookingAssignees({ propertyId: "prop-1" });
+
+    expect(result).toEqual({ ok: true, data: [{ id: "active-1", email: "active@example.test" }] });
+    expect(admin.__membershipsBuilder.eq).toHaveBeenCalledWith("access_status", "active");
+    expect(admin.__membershipsBuilder.is).toHaveBeenCalledWith("deletion_prepared_at", null);
+    expect(admin.__membershipsBuilder.or).toHaveBeenCalledWith(
+      expect.stringMatching(/^access_expires_at\.is\.null,access_expires_at\.gt\.\d{4}-\d{2}-\d{2}T/),
+    );
+  });
+
+  it("cross-org members are never returned — scoped to the ONE org the booking resolves into", async () => {
+    requireOrgMembershipByResource.mockResolvedValue({
+      userId: "user-1",
+      orgId: "org-1",
+      role: "member",
+      resourceId: "contact-1",
+    });
+    createClient.mockResolvedValue(makeSupabaseMock({ userId: "user-1" }));
+    const admin = makeAdminMock({ orgMemberUserIds: [] });
+    createAdminClient.mockReturnValue(admin as never);
+
+    await listBookingAssignees({ contactId: "contact-1" });
+
+    expect(requireOrgMembershipByResource).toHaveBeenCalledWith("contacts", "contact-1");
+    expect(admin.__membershipsBuilder.eq).toHaveBeenCalledWith("org_id", "org-1");
+  });
+
+  it("an unlinked personal-block context (no property, no contact) uses the caller's single active org", async () => {
+    createClient.mockResolvedValue(
+      makeSupabaseMock({ userId: "user-1", membershipsRows: [{ org_id: "org-9" }] }),
+    );
+    requireOrgMembership.mockResolvedValue({
+      userId: "user-1",
+      orgId: "org-9",
+      role: "member",
+    });
+    const admin = makeAdminMock({ orgMemberUserIds: [] });
+    createAdminClient.mockReturnValue(admin as never);
+
+    await listBookingAssignees({});
+
+    expect(requireOrgMembershipByResource).not.toHaveBeenCalled();
+    expect(requireOrgMembership).toHaveBeenCalledWith("org-9");
+    expect(admin.__membershipsBuilder.eq).toHaveBeenCalledWith("org_id", "org-9");
+  });
+
+  it("errors on an ambiguous personal block, same as bookAppointment's org resolution", async () => {
+    createClient.mockResolvedValue(
+      makeSupabaseMock({
+        userId: "user-1",
+        membershipsRows: [{ org_id: "org-9" }, { org_id: "org-10" }],
+      }),
+    );
+
+    const result = await listBookingAssignees({});
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.code).toBe("AMBIGUOUS_ORG");
   });
 });

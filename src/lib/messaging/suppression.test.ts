@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 
-import { evaluateSuppression, isSuppressed, SUPPRESSED_DISPOS } from "./suppression";
+import {
+  evaluateSuppression,
+  HUMAN_OWNED_DISPOS,
+  isSuppressed,
+  shouldSuppressAutomatedSend,
+  SUPPRESSED_DISPOS,
+} from "./suppression";
 
 describe("messaging suppression", () => {
   it.each([
@@ -41,6 +47,42 @@ describe("messaging suppression", () => {
       "dnc",
       "opted_out",
       "wrong_number",
+    ]);
+  });
+});
+
+describe("shouldSuppressAutomatedSend (outbound suppression boundary)", () => {
+  it.each(["nurture", "callback_requested", "booked_appointment"])(
+    "blocks automated senders on human-owned dispo %s",
+    (outreachDispo) => {
+      expect(shouldSuppressAutomatedSend({ outreachDispo })).toBe(true);
+    },
+  );
+
+  it.each(["wrong_number", "bad_number", "dnc", "opted_out"])(
+    "still blocks automated senders on every SUPPRESSED_DISPOS value (%s)",
+    (outreachDispo) => {
+      expect(shouldSuppressAutomatedSend({ outreachDispo })).toBe(true);
+    },
+  );
+
+  it("does not block automated senders on a non-terminal, non-human-owned dispo", () => {
+    expect(shouldSuppressAutomatedSend({ outreachDispo: "not_interested" })).toBe(false);
+    expect(shouldSuppressAutomatedSend({ outreachDispo: null })).toBe(false);
+  });
+
+  it.each(["nurture", "callback_requested", "booked_appointment"])(
+    "does NOT block the manual reply path (isSuppressed) on human-owned dispo %s — a human agent can still text them",
+    (outreachDispo) => {
+      expect(isSuppressed({ outreachDispo })).toBe(false);
+    },
+  );
+
+  it("keeps HUMAN_OWNED_DISPOS narrow", () => {
+    expect(Array.from(HUMAN_OWNED_DISPOS).sort()).toEqual([
+      "booked_appointment",
+      "callback_requested",
+      "nurture",
     ]);
   });
 });
