@@ -2174,6 +2174,89 @@ describe("Migration 20260814150000 — appointments schema", () => {
       },
     );
 
+    // Round-15: the trigger's UPDATE branch now folds completed_at,
+    // completed_by, and snoozed_until into the same lifecycle-state guard
+    // as status/outcome/reminder_claimed_at/calendar_generation — a direct
+    // REST write could otherwise forge completion metadata or a snooze
+    // deadline while leaving status untouched, satisfying every CHECK and
+    // slipping past the round-13 tests above (which only exercise the
+    // combined status+outcome+completed_at/by write). Same message, same
+    // escape hatch.
+    it.each([
+      ["service-role", async () => db],
+      [
+        "authenticated org member",
+        async () => (await createUserForOrg(BMH_ORG_ID, "owner")).client,
+      ],
+    ] as const)(
+      "%s: rejects a metadata-only completed_at+completed_by forged update (status untouched)",
+      async (_label, getClient) => {
+        const appt = await insertValidAppointment();
+        const client = await getClient();
+
+        const { error } = await client
+          .from("tasks" as never)
+          .update({
+            completed_at: new Date().toISOString(),
+            completed_by: appt.assigneeId,
+          } as never)
+          .eq("id", appt.id);
+
+        expect(error).not.toBeNull();
+        expect((error as { message: string }).message).toMatch(
+          /appointment lifecycle state changes only through the lifecycle/i,
+        );
+
+        const { data: after } = await db
+          .from("tasks")
+          .select("status, completed_at, completed_by")
+          .eq("id", appt.id)
+          .single();
+        expect((after as { status: string }).status).toBe("open");
+        expect(
+          (after as { completed_at: string | null }).completed_at,
+        ).toBeNull();
+        expect(
+          (after as { completed_by: string | null }).completed_by,
+        ).toBeNull();
+      },
+    );
+
+    it.each([
+      ["service-role", async () => db],
+      [
+        "authenticated org member",
+        async () => (await createUserForOrg(BMH_ORG_ID, "owner")).client,
+      ],
+    ] as const)(
+      "%s: rejects a metadata-only snoozed_until forged update",
+      async (_label, getClient) => {
+        const appt = await insertValidAppointment();
+        const client = await getClient();
+
+        const { error } = await client
+          .from("tasks" as never)
+          .update({
+            snoozed_until: new Date(Date.now() + 3600_000).toISOString(),
+          } as never)
+          .eq("id", appt.id);
+
+        expect(error).not.toBeNull();
+        expect((error as { message: string }).message).toMatch(
+          /appointment lifecycle state changes only through the lifecycle/i,
+        );
+
+        const { data: after } = await db
+          .from("tasks")
+          .select("snoozed_until")
+          .eq("id", appt.id)
+          .single();
+        expect(
+          (after as { snoozed_until: string | null }).snoozed_until,
+        ).toBeNull();
+      },
+    );
+
     // Raw pg connection (same pattern as the other lifecycle-guard escape
     // hatches above): the Supabase JS client auto-commits every request, so
     // it can't hold set_config('...', true) (transaction-local) across the
@@ -2217,6 +2300,47 @@ describe("Migration 20260814150000 — appointments schema", () => {
           .single();
         expect((after as { status: string }).status).toBe("completed");
         expect((after as { outcome: string }).outcome).toBe("held");
+      });
+
+      it("allows a metadata-only completed_at+completed_by+snoozed_until update once the flag is set to 'on' in the same transaction", async () => {
+        const appt = await insertValidAppointment();
+
+        await conn.query("begin");
+        await conn.query(
+          "select set_config('sandra.allow_appointment_time_move', 'on', true)",
+        );
+        const result = await conn.query<{
+          completed_at: string;
+          completed_by: string;
+          snoozed_until: string;
+        }>(
+          `update tasks
+             set completed_at = now(),
+                 completed_by = $2,
+                 snoozed_until = now() + interval '1 hour'
+           where id = $1
+           returning completed_at, completed_by, snoozed_until`,
+          [appt.id, appt.assigneeId],
+        );
+        expect(result.rows[0].completed_at).not.toBeNull();
+        expect(result.rows[0].completed_by).toBe(appt.assigneeId);
+        expect(result.rows[0].snoozed_until).not.toBeNull();
+        await conn.query("commit");
+
+        const { data: after } = await db
+          .from("tasks")
+          .select("completed_at, completed_by, snoozed_until")
+          .eq("id", appt.id)
+          .single();
+        expect(
+          (after as { completed_at: string }).completed_at,
+        ).not.toBeNull();
+        expect((after as { completed_by: string }).completed_by).toBe(
+          appt.assigneeId,
+        );
+        expect(
+          (after as { snoozed_until: string }).snoozed_until,
+        ).not.toBeNull();
       });
     });
   });

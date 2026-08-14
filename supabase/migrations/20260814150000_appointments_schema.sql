@@ -350,7 +350,10 @@ begin
        and (new.status is distinct from old.status
             or new.outcome is distinct from old.outcome
             or new.reminder_claimed_at is distinct from old.reminder_claimed_at
-            or new.calendar_generation is distinct from old.calendar_generation)
+            or new.calendar_generation is distinct from old.calendar_generation
+            or new.completed_at is distinct from old.completed_at
+            or new.completed_by is distinct from old.completed_by
+            or new.snoozed_until is distinct from old.snoozed_until)
        and coalesce(current_setting('sandra.allow_appointment_time_move', true), '') <> 'on'
     then
       raise exception
