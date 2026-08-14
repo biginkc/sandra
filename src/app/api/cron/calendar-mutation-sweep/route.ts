@@ -19,19 +19,34 @@ import type { Database } from "@/lib/supabase/types";
  * the `create`/`pending` slice only (PR 3 adds the sibling sweep for
  * reschedule/reassign/cancel). Claims via the service-role-only
  * `fn_claim_calendar_creations` RPC (FOR UPDATE SKIP LOCKED, attempts
- * bumped atomically with the claim), then hands each row to
+ * bumped atomically with the claim), then hands the row to
  * `processClaimedCalendarCreation`, which talks to Google and advances
  * the ledger through provider_done -> finalized (or leaves it pending
  * with `last_error` set for a transient failure, or fails it terminally
  * for a permanent auth/config error).
  *
+ * Claiming is one row at a time (`p_limit: 1`), not one upfront batch.
+ * This route processes rows sequentially under a wall-clock budget, and
+ * the claim RPC bumps `attempts` the instant it claims — if it claimed a
+ * whole batch upfront, rows past wherever the budget ran out would have
+ * an attempt burned with no Google call ever made against them, and
+ * repeated slow sweeps could exhaust a row's attempts (and strand it)
+ * without it ever reaching the provider. Claiming immediately before
+ * processing each row means `attempts` only increments when the worker
+ * is actually about to act on it. `claimLimit` now bounds how many rows
+ * a single sweep will process, not the size of one claim call.
+ *
  * Time budget: same rationale as sequence-tick — this route must never
  * rely on an unbounded loop; it stops cleanly before the platform kill
- * and reports `budgetExhausted` so a partial run is visible.
+ * and reports `budgetExhausted` so a partial run is visible. The budget
+ * is checked before every claim, so we never claim (and burn an
+ * attempt on) a row we don't have budget left to process.
  */
 export const maxDuration = 60;
 
-const CLAIM_LIMIT = 50;
+/** Max rows a single sweep run will claim+process, one at a time — not a
+ *  batch-claim size (see the module comment above). */
+const MAX_ROWS_PER_SWEEP = 50;
 const SWEEP_BUDGET_MS = 45_000;
 
 function createServiceRoleClient() {
@@ -102,24 +117,28 @@ export async function runCalendarMutationSweep(
   budgetExhausted: boolean;
 }> {
   const budgetMs = opts.budgetMs ?? SWEEP_BUDGET_MS;
-  const claimLimit = opts.claimLimit ?? CLAIM_LIMIT;
+  const claimLimit = opts.claimLimit ?? MAX_ROWS_PER_SWEEP;
   const startedAt = Date.now();
-
-  const { data: claimedRows, error } = await (
-    supabase as unknown as ClaimRpcClient
-  ).rpc("fn_claim_calendar_creations", { p_limit: claimLimit });
-  if (error) {
-    throw new Error(`fn_claim_calendar_creations failed: ${error.message}`);
-  }
 
   const outcomes: Record<string, number> = {};
   let claimed = 0;
   let budgetExhausted = false;
-  for (const row of claimedRows ?? []) {
+
+  while (claimed < claimLimit) {
     if (Date.now() - startedAt >= budgetMs) {
       budgetExhausted = true;
       break;
     }
+
+    const { data: claimedRows, error } = await (
+      supabase as unknown as ClaimRpcClient
+    ).rpc("fn_claim_calendar_creations", { p_limit: 1 });
+    if (error) {
+      throw new Error(`fn_claim_calendar_creations failed: ${error.message}`);
+    }
+    const row = claimedRows?.[0];
+    if (!row) break;
+
     claimed += 1;
     const outcome: CalendarCreationOutcome = await processClaimedCalendarCreation(
       supabase,
