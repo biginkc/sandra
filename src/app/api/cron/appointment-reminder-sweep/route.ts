@@ -51,6 +51,36 @@ import type { Database } from "@/lib/supabase/types";
  * claimed with only seconds to spare would otherwise be suppressed by its
  * own first retry pass once it goes stale-pending 10 minutes later.
  *
+ * Codex round 5 (finding 1) — claim SCHEDULING inside the shared budget:
+ * round 3/4 made both claims budget-checked and one-row-at-a-time, but the
+ * route still ran the primary loop to completion (up to
+ * `primaryClaimLimit` appointments) BEFORE ever attempting a retry. Under
+ * sustained primary volume the primary loop alone can consume the entire
+ * `SWEEP_BUDGET_MS`, so the retry loop never runs at all — an eligible
+ * retry (a recoverable Slack/SMS failure) sits unclaimed while its 15-
+ * minute grace (see above) keeps ticking. Two sweeps in a row starved this
+ * way (10 minutes) leaves only one more sweep before the grace expires and
+ * `fn_claim_reminder_retries` permanently suppresses the row — a
+ * transient delivery failure becomes a silently dropped reminder.
+ *
+ * Fix: three phases inside the same budget, not one-way primary-then-retry:
+ *   1. Retries FIRST, up to `RETRY_RESERVED_QUOTA` (10) rows or half the
+ *      remaining budget, whichever comes first. Retries are closest to
+ *      expiry (they've already failed once), so they always get first
+ *      claim on budget every sweep, regardless of primary backlog size —
+ *      this is what guarantees an eligible retry is attempted before its
+ *      grace can expire across two consecutive sweeps.
+ *   2. Primaries, for whatever budget remains. The phase-1 cap (10 rows /
+ *      half-budget) is a reservation in the other direction: a retry
+ *      backlog can never consume the FULL budget in phase 1, so primaries
+ *      are guaranteed to run every sweep too.
+ *   3. Any budget still unused after primaries goes back to retries — so a
+ *      light primary load doesn't leave banked budget on the table when
+ *      there's a deeper retry backlog than phase 1's reserved quota.
+ * Each phase reuses the same one-row-at-a-time, budget-checked-before-every-
+ * claim discipline from rounds 3/4; only the ORDER and the phase-1 cap are
+ * new.
+ *
  * Full plan: reactive-puzzling-crane.md v9, PR 3 "Atomic claim RPC" +
  * "Delivery semantics".
  */
@@ -66,6 +96,14 @@ const RETRY_CLAIM_LIMIT = 50;
  *  not a batch-claim size; `fn_claim_appointment_reminders` is always
  *  called with `p_limit: 1` (see module comment above). */
 const MAX_APPOINTMENTS_PER_SWEEP = 50;
+/** Codex round 5 (finding 1): the reserved "retries go first" quota — the
+ *  retry phase (phase 1, see the scheduling rationale above) stops after
+ *  this many rows even if more are eligible and budget remains, so a deep
+ *  retry backlog can't consume the whole sweep before primaries get a
+ *  turn. Phase 1 also stops at half the remaining budget, whichever comes
+ *  first — the item cap alone isn't enough if individual deliveries are
+ *  slow. */
+const RETRY_RESERVED_QUOTA = 10;
 
 function createServiceRoleClient() {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
@@ -238,18 +276,22 @@ export async function runAppointmentReminderSweep(
     }
   }
 
-  // Primary window claim: one appointment at a time, budget-checked BEFORE
-  // every claim call — mirrors calendar-mutation-sweep's solved pattern
-  // (Codex round 3, finding 1). Claiming immediately before processing
-  // means reminder_claimed_at/the delivery lease is only spent on an
-  // appointment this sweep is actually about to attempt; an appointment
-  // the budget runs out before reaching is simply never claimed, left for
-  // the next sweep 5 minutes later (well inside the 30-minute window).
+  // Claim one appointment via the primary window claim (p_limit: 1) and
+  // deliver every channel row it produced. Budget-checked BEFORE the claim
+  // call and again before each row's delivery — mirrors calendar-mutation-
+  // sweep's solved pattern (Codex round 3, finding 1). Claiming immediately
+  // before processing means reminder_claimed_at/the delivery lease is only
+  // spent on an appointment this sweep is actually about to attempt; an
+  // appointment the budget runs out before reaching is simply never
+  // claimed, left for the next sweep 5 minutes later (well inside the
+  // 30-minute window). Returns false when the budget was already spent
+  // (sets `budgetExhausted`) or nothing was due — either way the caller's
+  // loop should stop.
   let claimedAppointments = 0;
-  while (claimedAppointments < primaryClaimLimit) {
+  async function claimAndDeliverOnePrimaryAppointment(): Promise<boolean> {
     if (Date.now() - startedAt >= budgetMs) {
       budgetExhausted = true;
-      break;
+      return false;
     }
     const { data: claimedRows, error: claimError } = await rpcClient.rpc(
       "fn_claim_appointment_reminders",
@@ -258,9 +300,8 @@ export async function runAppointmentReminderSweep(
     if (claimError) {
       throw new Error(`fn_claim_appointment_reminders failed: ${claimError.message}`);
     }
-    if (!claimedRows || claimedRows.length === 0) break; // nothing due right now
+    if (!claimedRows || claimedRows.length === 0) return false; // nothing due right now
     claimedAppointments += 1;
-
     for (const raw of claimedRows) {
       if (Date.now() - startedAt >= budgetMs) {
         budgetExhausted = true;
@@ -268,49 +309,78 @@ export async function runAppointmentReminderSweep(
       }
       await deliverRow(raw, false);
     }
-    if (budgetExhausted) break;
+    return true;
   }
 
-  // Retry claim: crash-safety complement. Codex round 4 (finding 1): same
-  // budget-checked, one-row-at-a-time pattern as the primary claim above —
-  // NOT a single bulk call for up to retryLimit rows. fn_claim_reminder_retries
-  // atomically bumps `attempts` (and mints a fresh lease) on every row it
-  // claims within that one call, regardless of whether this sweep's delivery
-  // loop actually gets to all of them before the budget runs out. A bulk
-  // claim of, say, 50 rows followed by a budget-exhausted delivery loop left
-  // the undelivered remainder with attempts already spent on a lease they
-  // never got a chance to use — nudging rows toward the attempts<3 cap
-  // without ever being attempted, the exact bug the primary claim's p_limit:1
-  // loop (above) already solved. Claiming one row immediately before
-  // delivering it means a row's attempts/lease are only spent right before
-  // this sweep is actually about to act on it; a row the budget runs out
-  // before reaching is simply never claimed this pass, left for the next
-  // sweep with attempts untouched — same contract as the primary claim.
+  // Claim one delivery row via the retry claim (crash-safety complement)
+  // and deliver it. Codex round 4 (finding 1): same budget-checked,
+  // one-row-at-a-time pattern as the primary claim — NOT a single bulk call
+  // for up to retryLimit rows. fn_claim_reminder_retries atomically bumps
+  // `attempts` (and mints a fresh lease) on every row it claims within that
+  // one call, regardless of whether this sweep's delivery loop actually
+  // gets to all of them before the budget runs out. A bulk claim of, say,
+  // 50 rows followed by a budget-exhausted delivery loop left the
+  // undelivered remainder with attempts already spent on a lease they never
+  // got a chance to use — nudging rows toward the attempts<3 cap without
+  // ever being attempted, the exact bug the primary claim's p_limit:1 loop
+  // already solved. Claiming one row immediately before delivering it means
+  // a row's attempts/lease are only spent right before this sweep is
+  // actually about to act on it; a row the budget runs out before reaching
+  // is simply never claimed this pass, left for the next sweep with
+  // attempts untouched — same contract as the primary claim.
   const retryRows: ClaimedReminderRpcRow[] = [];
-  if (!budgetExhausted) {
-    while (retryRows.length < retryLimit) {
+  async function claimAndDeliverOneRetryRow(): Promise<boolean> {
+    if (Date.now() - startedAt >= budgetMs) {
+      budgetExhausted = true;
+      return false;
+    }
+    const { data, error: retryError } = await rpcClient.rpc("fn_claim_reminder_retries", {
+      p_limit: 1,
+    });
+    if (retryError) {
+      throw new Error(`fn_claim_reminder_retries failed: ${retryError.message}`);
+    }
+    if (!data || data.length === 0) return false; // nothing eligible right now
+    retryRows.push(...data);
+    for (const raw of data) {
       if (Date.now() - startedAt >= budgetMs) {
         budgetExhausted = true;
         break;
       }
-      const { data, error: retryError } = await rpcClient.rpc("fn_claim_reminder_retries", {
-        p_limit: 1,
-      });
-      if (retryError) {
-        throw new Error(`fn_claim_reminder_retries failed: ${retryError.message}`);
-      }
-      if (!data || data.length === 0) break; // nothing eligible right now
-      retryRows.push(...data);
-
-      for (const raw of data) {
-        if (Date.now() - startedAt >= budgetMs) {
-          budgetExhausted = true;
-          break;
-        }
-        await deliverRow(raw, true);
-      }
-      if (budgetExhausted) break;
+      await deliverRow(raw, true);
     }
+    return true;
+  }
+
+  // Phase 1 — retries first, reserved quota (Codex round 5, finding 1: see
+  // the scheduling rationale in the module doc comment). Stops at
+  // RETRY_RESERVED_QUOTA rows, at half the budget, on budget exhaustion, or
+  // when nothing more is eligible — whichever comes first.
+  const halfBudgetMs = budgetMs / 2;
+  const retryFirstPassCap = Math.min(retryLimit, RETRY_RESERVED_QUOTA);
+  while (
+    retryRows.length < retryFirstPassCap &&
+    !budgetExhausted &&
+    Date.now() - startedAt < halfBudgetMs
+  ) {
+    const claimed = await claimAndDeliverOneRetryRow();
+    if (!claimed) break;
+  }
+
+  // Phase 2 — primaries get whatever budget remains after phase 1's
+  // reservation. Phase 1's cap guarantees this phase always gets a turn,
+  // even under a deep retry backlog.
+  while (!budgetExhausted && claimedAppointments < primaryClaimLimit) {
+    const claimed = await claimAndDeliverOnePrimaryAppointment();
+    if (!claimed) break;
+  }
+
+  // Phase 3 — any budget left after primaries goes back to retries, so a
+  // retry backlog deeper than phase 1's reserved quota still gets processed
+  // this sweep when there's room, instead of banking unused budget.
+  while (!budgetExhausted && retryRows.length < retryLimit) {
+    const claimed = await claimAndDeliverOneRetryRow();
+    if (!claimed) break;
   }
 
   return {

@@ -110,7 +110,7 @@ afterEach(() => {
 });
 
 describe("runAppointmentReminderSweep", () => {
-  it("claims appointments one at a time (p_limit: 1), delivers every channel row of each, then claims retries", async () => {
+  it("claims appointments one at a time (p_limit: 1), delivers every channel row of each, and claims retries (first pass, then remainder)", async () => {
     const supabase = fakeSupabase([[rawRow("a")], [rawRow("b")]], [rawRow("c")]);
     mocks.deliverAppointmentReminder.mockResolvedValue({
       status: "sent",
@@ -126,13 +126,15 @@ describe("runAppointmentReminderSweep", () => {
     // Two successful claims (a, b) plus the third call that comes back
     // empty and ends the primary loop.
     expect(primaryClaimCalls(supabase)).toHaveLength(3);
-    // Codex round 4 (finding 1): retry claim is also one row at a time —
-    // one call that returns "c", plus the second call that comes back
-    // empty and ends the retry loop.
+    // Codex round 5 (finding 1): retries are claimed in phase 1 (before
+    // primaries) — one call that returns "c", plus the second call that
+    // comes back empty and ends phase 1 — and phase 3 makes one more empty
+    // call after primaries, since budget remains and retryRows.length is
+    // still under retryLimit.
     for (const call of retryClaimCalls(supabase)) {
       expect(call[1]).toEqual({ p_limit: 1 });
     }
-    expect(retryClaimCalls(supabase)).toHaveLength(2);
+    expect(retryClaimCalls(supabase)).toHaveLength(3);
     expect(mocks.deliverAppointmentReminder).toHaveBeenCalledTimes(3);
     expect(summary.claimed).toBe(2);
     expect(summary.retried).toBe(1);
@@ -140,15 +142,17 @@ describe("runAppointmentReminderSweep", () => {
   });
 
   it("Codex round 4 (finding 1): retry claims one row at a time inside the budget loop — a row the budget runs out before reaching is never claimed, so its attempts are never bumped by an unattempted claim", async () => {
-    // Two retry-eligible rows queued. Budget allows exactly one claim +
-    // delivery cycle before the loop's pre-claim budget check trips —
-    // mirrors the primary-claim budget test's Date.now() sequencing.
+    // Two retry-eligible rows queued, no primary backlog. Codex round 5:
+    // retries now run in phase 1, BEFORE primaries, so this plays out
+    // entirely inside phase 1 — the primary loop (phase 2) never even
+    // starts once budget is exhausted here.
     const budgetMs = 1_000;
     const times = [
       0, // startedAt
-      0, // primary loop: pre-claim check #1 — proceeds, claims nothing (empty batches), breaks
+      0, // phase 1 while-condition (elapsed < half-budget) — proceeds
       0, // retry loop: pre-claim check #1 — proceeds, claims "a"
       0, // retry loop: pre-delivery check for "a" — proceeds, delivers it
+      0, // phase 1 while-condition (2nd iteration) — still under half-budget, proceeds
       budgetMs + 1, // retry loop: pre-claim check #2 — budget exhausted, "b" never claimed
     ];
     let call = 0;
@@ -170,6 +174,9 @@ describe("runAppointmentReminderSweep", () => {
     // bumps atomically on every row it claims) were never spent on a
     // delivery attempt that couldn't happen this sweep.
     expect(retryClaimCalls(supabase)).toHaveLength(1);
+    // Budget was already exhausted by the time phase 1 broke out, so phase
+    // 2 (primaries) never ran at all — no primary claim call either.
+    expect(primaryClaimCalls(supabase)).toHaveLength(0);
     expect(mocks.deliverAppointmentReminder).toHaveBeenCalledTimes(1);
     expect(mocks.deliverAppointmentReminder).toHaveBeenCalledWith(
       supabase,
@@ -181,15 +188,20 @@ describe("runAppointmentReminderSweep", () => {
   });
 
   it("Codex round 3 (finding 1): budget exhaustion between claim calls leaves the next appointment UNCLAIMED, not pending — no claim call is made for it", async () => {
+    // No retry-eligible rows queued, so phase 1 makes exactly one (empty)
+    // retry-claim call and falls straight through to phase 2 (primaries).
     // startedAt read once; the budget check runs before every claim call.
-    // Sequence: 0 (startedAt), 0 (check before claim #1 — proceeds),
-    // budgetMs+1 (check before delivering claim #1's row — still
-    // processes it, since the check inside the row loop runs after this
-    // read too)... to keep this deterministic, drive it so exactly one
-    // appointment is claimed+delivered and the second claim call never
-    // happens.
+    // Drive it so exactly one appointment is claimed+delivered in phase 2
+    // and the second primary claim call never happens.
     const budgetMs = 1_000;
-    const times = [0, 0, 0, budgetMs + 1];
+    const times = [
+      0, // startedAt
+      0, // phase 1 while-condition (elapsed < half-budget) — proceeds
+      0, // retry loop: pre-claim check — proceeds, claims nothing (no retries queued), breaks phase 1
+      0, // phase 2: pre-claim check for appointment "a" — proceeds, claims it
+      0, // phase 2: pre-delivery check for "a" — proceeds, delivers it
+      budgetMs + 1, // phase 2: pre-claim check for "b" — budget exhausted, never claimed
+    ];
     let call = 0;
     vi.spyOn(Date, "now").mockImplementation(
       () => times[Math.min(call++, times.length - 1)],
@@ -207,14 +219,15 @@ describe("runAppointmentReminderSweep", () => {
     expect(primaryClaimCalls(supabase)).toHaveLength(1);
     expect(mocks.deliverAppointmentReminder).toHaveBeenCalledTimes(1);
     expect(summary.claimed).toBe(1);
+    expect(summary.retried).toBe(0);
     expect(summary.processed).toBe(1);
     expect(summary.budgetExhausted).toBe(true);
-    // Retry claim is skipped entirely once the primary loop exhausts the
-    // budget — nothing left to spend on it this sweep.
-    expect(supabase.rpc).not.toHaveBeenCalledWith(
-      "fn_claim_reminder_retries",
-      expect.anything(),
-    );
+    // Codex round 5: phase 1 (retries-first) always makes at least one
+    // retry-claim call before primaries — here it returns empty since
+    // nothing is retry-eligible — but phase 3 (retry remainder) is skipped
+    // because budget was exhausted by phase 2, so the retry RPC was called
+    // exactly once, not skipped entirely.
+    expect(retryClaimCalls(supabase)).toHaveLength(1);
   });
 
   it("stops claiming when the primary RPC returns nothing due, without treating it as budget exhaustion", async () => {
@@ -375,5 +388,67 @@ describe("runAppointmentReminderSweep", () => {
     expect(summary.retried).toBe(0);
     expect(summary.processed).toBe(0);
     expect(mocks.deliverAppointmentReminder).not.toHaveBeenCalled();
+  });
+
+  describe("Codex round 5 (finding 1): retries-first scheduling", () => {
+    // Slow-delivery model: each delivery "costs" 2s of simulated time, so a
+    // small budget only fits a few claim+deliver cycles — lets these tests
+    // deterministically prove which phase got to run without hand-indexing
+    // a Date.now() sequence for dozens of calls.
+    const DELIVERY_COST_MS = 2_000;
+
+    beforeEach(() => {
+      vi.useFakeTimers();
+      mocks.deliverAppointmentReminder.mockImplementation(async () => {
+        await vi.advanceTimersByTimeAsync(DELIVERY_COST_MS);
+        return { status: "sent", deliveryId: "x", channel: "bell" };
+      });
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("a sustained primary backlog does not starve an eligible retry within the sweep", async () => {
+      // 20 primary appointments queued (sustained backlog) vs. a single
+      // eligible retry. Budget only fits ~2 deliveries total.
+      const primaryBatches = Array.from({ length: 20 }, (_, i) => [rawRow(`p${i}`)]);
+      const supabase = fakeSupabase(primaryBatches, [rawRow("retry-1")]);
+
+      const summary = await runAppointmentReminderSweep(supabase, {
+        budgetMs: 5_000,
+        retryLimit: 50,
+        primaryClaimLimit: 50,
+      });
+
+      // The retry was processed in phase 1, before the primary backlog got
+      // any budget at all — it is never starved regardless of how deep the
+      // primary backlog is.
+      expect(summary.retried).toBe(1);
+      expect(summary.budgetExhausted).toBe(true);
+    });
+
+    it("a deep retry backlog does not fully starve primaries within the sweep", async () => {
+      // 20 retry-eligible rows queued (deeper than RETRY_RESERVED_QUOTA)
+      // vs. only 5 primary appointments. Budget is large enough that phase
+      // 1's half-budget cap kicks in before its item cap or the full
+      // budget, leaving room for phase 2 to claim every primary.
+      const retried = Array.from({ length: 20 }, (_, i) => rawRow(`r${i}`));
+      const primaryBatches = Array.from({ length: 5 }, (_, i) => [rawRow(`p${i}`)]);
+      const supabase = fakeSupabase(primaryBatches, retried);
+
+      const summary = await runAppointmentReminderSweep(supabase, {
+        budgetMs: 30_000,
+        retryLimit: 50,
+        primaryClaimLimit: 50,
+      });
+
+      // All 5 primaries got claimed and delivered despite the much deeper
+      // retry backlog — phase 1's reservation cap kept retries from
+      // consuming the whole budget before primaries got a turn.
+      expect(summary.claimed).toBe(5);
+      expect(summary.retried).toBeGreaterThan(0);
+      expect(summary.budgetExhausted).toBe(true);
+    });
   });
 });
