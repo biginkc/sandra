@@ -160,10 +160,11 @@ export async function refreshSlackMessage(input: {
     });
     if (!token) return { ok: false };
 
-    const propertyAddress = await loadPropertyAddress(
-      admin,
-      task.related_property_id,
-    );
+    // Property-less tasks (personal blocks, contact-only appointments)
+    // degrade to a "Personal block" label rather than skipping the lookup.
+    const propertyAddress = task.related_property_id
+      ? await loadPropertyAddress(admin, task.related_property_id)
+      : "Personal block";
     const deepLink = buildTaskDeepLink(input.taskId);
     const slack = new WebClient(token.accessToken.reveal());
     await slack.chat.update({

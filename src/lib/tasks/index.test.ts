@@ -159,6 +159,38 @@ describe("createTask", () => {
     expect(payload.created_by).toBe("user-1");
   });
 
+  it("inserts a property-less appointment with contact/description/endAt and nulls related_property_id", async () => {
+    const fakeRow = { id: "task-2", title: "Book a call", status: "open" };
+    responseQueue = [{ data: fakeRow, error: null }];
+
+    const result = await createTask(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      makeSupabase() as any,
+      {
+        orgId: "org-1",
+        assigneeId: "user-2",
+        contactId: "contact-9",
+        type: "appointment",
+        title: "Book a call",
+        description: "Discuss offer terms",
+        dueAt: "2026-05-08T14:00:00Z",
+        endAt: "2026-05-08T14:30:00Z",
+        createdBy: "user-1",
+      },
+    );
+
+    expect(result.ok).toBe(true);
+    const insert = calls.find(
+      (c) => c.table === "tasks" && c.op === "insert",
+    );
+    const payload = insert!.insertPayload as Record<string, unknown>;
+    expect(payload.related_property_id).toBeNull();
+    expect(payload.contact_id).toBe("contact-9");
+    expect(payload.description).toBe("Discuss offer terms");
+    expect(payload.end_at).toBe("2026-05-08T14:30:00Z");
+    expect(payload.type).toBe("appointment");
+  });
+
   it("returns err with TASK_CREATE_FAILED when supabase errors", async () => {
     responseQueue = [{ data: null, error: { message: "rls denied" } }];
 
@@ -302,6 +334,86 @@ describe("snoozeTask", () => {
       deepLink: "https://app.test/messages?property_id=property-3",
       calendarEnabled: true,
     });
+  });
+
+  it("schedules a title-only calendar update and a thread deep link for a contact-only task (no property)", async () => {
+    responseQueue = [
+      {
+        data: {
+          id: "task-1",
+          assignee_id: "user-2",
+          related_property_id: null,
+          contact_id: "contact-9",
+          title: "Call the owner",
+          due_at: "2026-05-09T14:00:00Z",
+        },
+        error: null,
+      },
+    ];
+    loadIntegrationPrefs.mockResolvedValueOnce({
+      slackEnabled: true,
+      calendarEnabled: true,
+      timezone: "America/Denver",
+    });
+
+    const result = await snoozeTask(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      makeSupabase() as any,
+      "task-1",
+      "2026-05-09T14:00:00Z",
+    );
+
+    expect(result.ok).toBe(true);
+    // No property lookup should fire — only the tasks update call.
+    expect(calls.filter((c) => c.table === "properties")).toHaveLength(0);
+    await flushAfterCallbacks();
+
+    expect(dispatchTaskCalendarEventUpdate).toHaveBeenCalledWith({
+      taskId: "task-1",
+      assigneeId: "user-2",
+      taskTitle: "Call the owner",
+      propertyAddress: "Call the owner",
+      dueAt: "2026-05-09T14:00:00Z",
+      timezone: "America/Denver",
+      deepLink: "https://app.test/messages?thread=contact-9",
+      calendarEnabled: true,
+    });
+  });
+
+  it("falls back to the base URL deep link for a fully unlinked personal block", async () => {
+    responseQueue = [
+      {
+        data: {
+          id: "task-1",
+          assignee_id: "user-2",
+          related_property_id: null,
+          contact_id: null,
+          title: "Block 2pm-3pm",
+          due_at: "2026-05-09T14:00:00Z",
+        },
+        error: null,
+      },
+    ];
+    loadIntegrationPrefs.mockResolvedValueOnce({
+      slackEnabled: true,
+      calendarEnabled: true,
+      timezone: "America/Denver",
+    });
+
+    await snoozeTask(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      makeSupabase() as any,
+      "task-1",
+      "2026-05-09T14:00:00Z",
+    );
+    await flushAfterCallbacks();
+
+    expect(dispatchTaskCalendarEventUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        propertyAddress: "Block 2pm-3pm",
+        deepLink: "https://app.test",
+      }),
+    );
   });
 });
 

@@ -8,7 +8,7 @@ import { loadIntegrationPrefs } from "@/lib/integrations/prefs";
 import type { Database, Tables } from "@/lib/supabase/types";
 
 export type Task = Tables<"tasks">;
-export type TaskType = "follow_up" | "callback" | "custom";
+export type TaskType = "follow_up" | "callback" | "custom" | "appointment";
 export type TaskStatus = "open" | "snoozed" | "completed" | "cancelled";
 
 /**
@@ -25,11 +25,17 @@ export function dispoToTaskType(
 export type CreateTaskInput = {
   orgId: string;
   assigneeId: string;
-  relatedPropertyId: string;
+  /** Optional as of the appointments migration — appointment-type tasks
+   *  may be personal blocks or contact-only, with no property attached. */
+  relatedPropertyId?: string;
+  contactId?: string;
   type: TaskType;
   title: string;
+  description?: string;
   /** ISO timestamptz */
   dueAt: string;
+  /** ISO timestamptz — appointment-only; end of the booked window. */
+  endAt?: string;
   createdBy: string;
 };
 
@@ -42,10 +48,13 @@ export async function createTask(
     .insert({
       org_id: input.orgId,
       assignee_id: input.assigneeId,
-      related_property_id: input.relatedPropertyId,
+      related_property_id: input.relatedPropertyId ?? null,
+      contact_id: input.contactId ?? null,
       type: input.type,
       title: input.title,
+      description: input.description ?? null,
       due_at: input.dueAt,
+      end_at: input.endAt ?? null,
       created_by: input.createdBy,
     })
     .select()
@@ -152,14 +161,19 @@ async function scheduleCalendarUpdateAfterSnooze(
   supabase: SupabaseClient<Database>,
   task: Task,
 ): Promise<void> {
-  if (!task.assignee_id || !task.related_property_id || !task.due_at) return;
+  if (!task.assignee_id || !task.due_at) return;
 
-  const propertyAddress = await loadTaskPropertyAddress(
-    supabase,
-    task.related_property_id,
-  );
+  // Property-less tasks (personal blocks, contact-only appointments)
+  // still get a calendar update — just a title-only payload instead of
+  // an address-based one, since there's no property to summarize.
+  const propertyAddress = task.related_property_id
+    ? await loadTaskPropertyAddress(supabase, task.related_property_id)
+    : task.title;
   const prefs = await loadIntegrationPrefs(supabase, task.assignee_id);
-  const deepLink = buildTaskDeepLink(task.related_property_id);
+  const deepLink = buildTaskDeepLink(
+    task.related_property_id,
+    task.contact_id,
+  );
 
   after(async () => {
     await dispatchTaskCalendarEventUpdate({
@@ -187,7 +201,10 @@ async function loadTaskPropertyAddress(
   return data?.address ?? "Property";
 }
 
-function buildTaskDeepLink(propertyId: string): string {
+function buildTaskDeepLink(
+  propertyId: string | null,
+  contactId: string | null,
+): string {
   const baseUrl =
     process.env.NEXT_PUBLIC_APP_URL ??
     process.env.APP_URL ??
@@ -195,5 +212,10 @@ function buildTaskDeepLink(propertyId: string): string {
   const normalizedBaseUrl = baseUrl.startsWith("http")
     ? baseUrl
     : `https://${baseUrl}`;
-  return `${normalizedBaseUrl}/messages?property_id=${propertyId}`;
+  if (propertyId) return `${normalizedBaseUrl}/messages?property_id=${propertyId}`;
+  // Contact-only tasks (no property) deep-link to the Messages thread
+  // instead — canonicalizeThreadId resolves a raw contact id to its
+  // conversation.
+  if (contactId) return `${normalizedBaseUrl}/messages?thread=${contactId}`;
+  return normalizedBaseUrl;
 }

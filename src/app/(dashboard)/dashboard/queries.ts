@@ -1,6 +1,8 @@
 import { createClient } from "@/lib/supabase/server";
+import { loadIntegrationPrefs } from "@/lib/integrations/prefs";
 import { type SendilloSmsHealthResult } from "@/lib/messages/sendillo-health";
 import { getStoredSendilloSmsHealth } from "@/lib/messages/sendillo-health-snapshot";
+import { getDayBoundsInZone } from "@/lib/time/zoned";
 
 export type AssignedRow = {
   user_id: string;
@@ -68,10 +70,15 @@ export type TaskRow = {
   title: string;
   /** ISO timestamptz */
   due_at: string;
-  property_id: string;
-  address: string;
+  /** Null for personal blocks and contact-only appointments — no property
+   *  attached. Address/city/state are null exactly when this is null. */
+  property_id: string | null;
+  /** Set on contact-only rows (no property) so the panel can link to the
+   *  Messages thread instead. */
+  contact_id: string | null;
+  address: string | null;
   city: string | null;
-  state: string;
+  state: string | null;
 };
 
 export type DashboardSummary = {
@@ -114,34 +121,41 @@ export async function fetchDashboardSendilloSmsHealth(): Promise<SendilloSmsHeal
 }
 
 /**
- * Loads the viewer's open tasks split into Today / Upcoming buckets.
+ * Loads the viewer's open tasks split into Overdue / Today / Upcoming
+ * buckets, in the assignee's own timezone.
  *
- * Today = due_at on the current calendar day (server timezone, which is
- * UTC on Vercel — adequate for the dashboard panel; per-user timezone
- * support lands with the V2 Calendar integration when we already need
- * timezone resolution for event creation).
+ * Overdue = due_at before the assignee's zone-local day start (status is
+ * already 'open' — everything returned by this query is, by filter).
+ * Today = due_at within the assignee's zone-local day.
+ * Upcoming = due_at on or after the assignee's zone-local tomorrow.
  *
- * Upcoming = due_at strictly after today (the partial index on
- * (assignee_id, due_at) WHERE status='open' covers this filter).
+ * Day boundaries come from getDayBoundsInZone, which does the DST-safe
+ * wall-time math; the zone itself is the assignee's
+ * user_integration_prefs.timezone (loadIntegrationPrefs already falls
+ * back to "America/Chicago" when unset).
+ *
+ * The property join is now a LEFT join — appointment-type tasks may have
+ * no related_property_id (personal blocks, contact-only appointments),
+ * so a property-less row is legitimate, not an error. property_id/
+ * address/city/state come back null together in that case.
  *
  * Returns empty buckets on error rather than null — the panel renders
  * the all-clear empty state, which is a reasonable failure mode.
  */
 export async function fetchMyTasks(
   userId: string,
-): Promise<{ today: TaskRow[]; upcoming: TaskRow[] }> {
+): Promise<{ overdue: TaskRow[]; today: TaskRow[]; upcoming: TaskRow[] }> {
   const supabase = await createClient();
-  const todayStart = new Date();
-  todayStart.setUTCHours(0, 0, 0, 0);
+  const prefs = await loadIntegrationPrefs(supabase, userId);
+  const { dayStart, dayEnd } = getDayBoundsInZone(new Date(), prefs.timezone);
 
   const { data, error } = await supabase
     .from("tasks")
     .select(
-      "id, type, title, due_at, related_property_id, properties!inner(address, city, state, deleted_at)",
+      "id, type, title, due_at, related_property_id, contact_id, properties(address, city, state, deleted_at)",
     )
     .eq("assignee_id", userId)
     .eq("status", "open")
-    .gte("due_at", todayStart.toISOString())
     .order("due_at", { ascending: true });
 
   if (error || !data) {
@@ -151,47 +165,52 @@ export async function fetchMyTasks(
         code: error.code,
       });
     }
-    return { today: [], upcoming: [] };
+    return { overdue: [], today: [], upcoming: [] };
   }
 
-  const tomorrowStart = new Date(todayStart);
-  tomorrowStart.setUTCDate(tomorrowStart.getUTCDate() + 1);
-  const tomorrowMs = tomorrowStart.getTime();
+  const dayStartMs = dayStart.getTime();
+  const dayEndMs = dayEnd.getTime();
 
+  const overdue: TaskRow[] = [];
   const today: TaskRow[] = [];
   const upcoming: TaskRow[] = [];
 
   for (const row of data) {
-    // Drop tasks whose property has been soft-deleted — the !inner join
-    // already excluded properties without a row, but `deleted_at IS NULL`
-    // can't ride along an !inner select shorthand, so we filter in JS.
+    // The left join returns null for property-less tasks (expected —
+    // personal blocks / contact-only appointments), plus soft-deleted or
+    // malformed property rows, both of which we also degrade to "no
+    // property" rather than dropping the task entirely.
     const prop = row.properties as unknown as {
       address: string | null;
       city: string | null;
       state: string | null;
       deleted_at: string | null;
     } | null;
-    if (!prop || prop.deleted_at !== null) continue;
-    if (!prop.address || !prop.state) continue;
+    const propertyLinked = Boolean(
+      prop && prop.deleted_at === null && prop.address && prop.state,
+    );
 
     const taskRow: TaskRow = {
       id: row.id,
       type: row.type,
       title: row.title,
       due_at: row.due_at,
-      property_id: row.related_property_id,
-      address: prop.address,
-      city: prop.city,
-      state: prop.state,
+      property_id: propertyLinked ? row.related_property_id : null,
+      contact_id: row.contact_id,
+      address: propertyLinked ? (prop!.address ?? null) : null,
+      city: propertyLinked ? (prop!.city ?? null) : null,
+      state: propertyLinked ? (prop!.state ?? null) : null,
     };
 
     const dueMs = new Date(row.due_at).getTime();
-    if (dueMs < tomorrowMs) {
+    if (dueMs < dayStartMs) {
+      overdue.push(taskRow);
+    } else if (dueMs < dayEndMs) {
       today.push(taskRow);
     } else {
       upcoming.push(taskRow);
     }
   }
 
-  return { today, upcoming };
+  return { overdue, today, upcoming };
 }

@@ -2707,15 +2707,22 @@ export type Database = {
       tasks: {
         Row: {
           assignee_id: string
+          calendar_chain_id: string | null
+          calendar_generation: number
           completed_at: string | null
           completed_by: string | null
+          contact_id: string | null
           created_at: string
           created_by: string
+          description: string | null
           due_at: string
+          end_at: string | null
           google_calendar_event_id: string | null
           id: string
           org_id: string
-          related_property_id: string
+          outcome: string | null
+          related_property_id: string | null
+          reminder_claimed_at: string | null
           slack_channel_id: string | null
           slack_message_ts: string | null
           snoozed_until: string | null
@@ -2726,15 +2733,22 @@ export type Database = {
         }
         Insert: {
           assignee_id: string
+          calendar_chain_id?: string | null
+          calendar_generation?: number
           completed_at?: string | null
           completed_by?: string | null
+          contact_id?: string | null
           created_at?: string
           created_by: string
+          description?: string | null
           due_at: string
+          end_at?: string | null
           google_calendar_event_id?: string | null
           id?: string
           org_id: string
-          related_property_id: string
+          outcome?: string | null
+          related_property_id?: string | null
+          reminder_claimed_at?: string | null
           slack_channel_id?: string | null
           slack_message_ts?: string | null
           snoozed_until?: string | null
@@ -2745,15 +2759,22 @@ export type Database = {
         }
         Update: {
           assignee_id?: string
+          calendar_chain_id?: string | null
+          calendar_generation?: number
           completed_at?: string | null
           completed_by?: string | null
+          contact_id?: string | null
           created_at?: string
           created_by?: string
+          description?: string | null
           due_at?: string
+          end_at?: string | null
           google_calendar_event_id?: string | null
           id?: string
           org_id?: string
-          related_property_id?: string
+          outcome?: string | null
+          related_property_id?: string | null
+          reminder_claimed_at?: string | null
           slack_channel_id?: string | null
           slack_message_ts?: string | null
           snoozed_until?: string | null
@@ -2775,6 +2796,13 @@ export type Database = {
             columns: ["related_property_id"]
             isOneToOne: false
             referencedRelation: "properties"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "tasks_contact_id_fkey"
+            columns: ["contact_id"]
+            isOneToOne: false
+            referencedRelation: "contacts"
             referencedColumns: ["id"]
           },
         ]

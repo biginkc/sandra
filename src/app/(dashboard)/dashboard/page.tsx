@@ -122,7 +122,11 @@ export default async function DashboardPage() {
 
         {/* Right rail */}
         <div className="space-y-6">
-          <TasksPanel today={myTasks.today} upcoming={myTasks.upcoming} />
+          <TasksPanel
+            overdue={myTasks.overdue}
+            today={myTasks.today}
+            upcoming={myTasks.upcoming}
+          />
           <ThreadsNeedingAttention
             threads={summary.threads_needing_attention}
             totalCount={escalatedTotal}
