@@ -226,6 +226,7 @@ describe("processClaimedCalendarCreation", () => {
       status: "finalize_conflict",
       ledgerId: "ledger-1",
       eventId: "evt-3",
+      taskId: "task-1",
     });
   });
 

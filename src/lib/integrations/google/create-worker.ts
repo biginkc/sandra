@@ -63,7 +63,7 @@ export type CalendarCreationOutcome =
    *  bare `create` (nothing can race it before PR 3's chain-serialization
    *  index admits a second mutation), guarded anyway for the same reason
    *  PR 3's real finalize CAS is guarded. */
-  | { status: "finalize_conflict"; ledgerId: string; eventId: string }
+  | { status: "finalize_conflict"; ledgerId: string; eventId: string; taskId: string }
   /** Round 7 fencing: this worker's claim_token (or expected phase) no
    *  longer matched the row at write time — another worker already
    *  reclaimed the expired lease and is (or already has) processed it.
@@ -574,7 +574,7 @@ async function finalizeCreation(
     return { status: "retryable_error", ledgerId, error: taskUpdateError.message };
   }
   if (!taskUpdated) {
-    return { status: "finalize_conflict", ledgerId, eventId };
+    return { status: "finalize_conflict", ledgerId, eventId, taskId: sourceTaskId };
   }
 
   const finalized = await applyLedgerTransition(supabase, ledgerId, claimToken, "provider_done", {

@@ -201,6 +201,68 @@ describe("runCalendarMutationSweep", () => {
     );
   });
 
+  it("reports needs_repair telemetry with the count and row ids when the exhaustion sweep finds repair rows", async () => {
+    const supabase = fakeSupabase([], 0, 0);
+    supabase.rpc = vi.fn(async (fn: string) => {
+      if (fn === "fn_expire_exhausted_calendar_creations") {
+        return {
+          data: [
+            {
+              failed_count: 0,
+              needs_repair_count: 2,
+              needs_repair_ids: ["ledger-x", "ledger-y"],
+            },
+          ],
+          error: null,
+        };
+      }
+      return { data: [], error: null };
+    });
+
+    const summary = await runCalendarMutationSweep(supabase, { budgetMs: 60_000 });
+
+    expect(summary.needsRepair).toBe(2);
+    expect(mocks.reportError).toHaveBeenCalledWith(
+      expect.any(Error),
+      expect.objectContaining({
+        tags: { surface: "calendar-mutation-sweep", kind: "needs_repair" },
+        extra: { needsRepairCount: 2, needsRepairIds: ["ledger-x", "ledger-y"] },
+      }),
+    );
+  });
+
+  it("does not report needs_repair telemetry when the exhaustion sweep finds nothing to repair", async () => {
+    const supabase = fakeSupabase([], 0, 0);
+
+    await runCalendarMutationSweep(supabase, { budgetMs: 60_000 });
+
+    expect(mocks.reportError).not.toHaveBeenCalledWith(
+      expect.any(Error),
+      expect.objectContaining({ tags: expect.objectContaining({ kind: "needs_repair" }) }),
+    );
+  });
+
+  it("reports finalize_conflict telemetry with the ledger id and task id", async () => {
+    const supabase = fakeSupabase([claimedRow("a")]);
+    mocks.processClaimedCalendarCreation.mockResolvedValue({
+      status: "finalize_conflict",
+      ledgerId: "a",
+      eventId: "evt-a",
+      taskId: "task-a",
+    });
+
+    const summary = await runCalendarMutationSweep(supabase, { budgetMs: 60_000 });
+
+    expect(summary.outcomes.finalize_conflict).toBe(1);
+    expect(mocks.reportError).toHaveBeenCalledWith(
+      expect.any(Error),
+      expect.objectContaining({
+        tags: { surface: "cron_calendar_mutation_sweep_outcome", kind: "finalize_conflict" },
+        extra: { ledgerId: "a", taskId: "task-a" },
+      }),
+    );
+  });
+
   it("throws if the exhaustion sweep RPC errors, without claiming anything", async () => {
     const supabase = fakeSupabase([claimedRow("a")]);
     supabase.rpc = vi.fn(async (fn: string) =>

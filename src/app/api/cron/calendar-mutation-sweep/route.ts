@@ -68,7 +68,14 @@ function createServiceRoleClient() {
  *  not (and, per this PR's scope, must not be) in the generated
  *  Database["public"]["Functions"] map — same local-cast pattern as the
  *  booking RPC call sites. */
-type ExpireExhaustedRow = { failed_count: number; needs_repair_count: number };
+type ExpireExhaustedRow = {
+  failed_count: number;
+  needs_repair_count: number;
+  /** Round 9: ledger row ids that just transitioned to needs_repair this
+   *  sweep, so the telemetry event below can name the exact rows an
+   *  operator needs to look at instead of a bare count. */
+  needs_repair_ids: string[];
+};
 type ClaimRpcClient = {
   rpc(
     fn: "fn_claim_calendar_creations",
@@ -150,6 +157,35 @@ export async function runCalendarMutationSweep(
   }
   const expiredCount = expireRows?.[0]?.failed_count ?? 0;
   const needsRepairCount = expireRows?.[0]?.needs_repair_count ?? 0;
+  const needsRepairIds = expireRows?.[0]?.needs_repair_ids ?? [];
+
+  // Round 9: needs_repair is not a passive count — every row in it is a
+  // live, unreconciled Google event with no finalized local record, and
+  // (unlike 'failed') nothing else re-surfaces it once the exhaustion
+  // sweep runs. Without a dedicated, tagged error here, a growing
+  // needs_repair backlog is invisible outside a manual DB query. One event
+  // per sweep (not per row) carries the count and the exact ledger ids so
+  // an operator can act without re-deriving them.
+  //
+  // Repair workflow for a needs_repair row: 1) look up the Google Calendar
+  // event by this ledger row's client_event_id (fn_uuid_to_base32hex(id))
+  // on the assignee's calendar — the event exists, only the local
+  // finalize kept failing; 2) once found, manually set
+  // tasks.google_calendar_event_id to that event's id for the row's
+  // source_task_id; 3) finalize the ledger row itself (phase='finalized',
+  // result_reason left as 'finalize_needs_repair' or updated to note the
+  // manual repair) so it stops holding the chain-serialization slot. If
+  // the event can't be found at all, treat it as a permanent loss and
+  // move the row to phase='failed' instead.
+  if (needsRepairCount > 0) {
+    reportError(
+      new Error(`calendar-mutation-sweep: ${needsRepairCount} row(s) need manual repair`),
+      {
+        tags: { surface: "calendar-mutation-sweep", kind: "needs_repair" },
+        extra: { needsRepairCount, needsRepairIds },
+      },
+    );
+  }
 
   const outcomes: Record<string, number> = {};
   let claimed = 0;
@@ -194,6 +230,23 @@ export async function runCalendarMutationSweep(
         tags: { surface: "cron_calendar_mutation_sweep_outcome" },
         extra: { ledgerId: outcome.ledgerId, outcomeStatus: outcome.status },
       });
+    }
+    // Round 9: finalize_conflict is rare (nothing should race a bare
+    // `create` ahead of PR 3's chain-serialization index) but silent —
+    // unlike retryable/permanent_error it isn't a Google failure, it's the
+    // task's calendar_generation moving out from under this create between
+    // claim and finalize, leaving the row stuck at provider_done with an
+    // orphaned Google event until PR 3's reconciliation lands. Every
+    // occurrence is reported individually (not batched like needs_repair
+    // above) since it's expected to be effectively zero in steady state.
+    if (outcome.status === "finalize_conflict") {
+      reportError(
+        new Error("calendar-mutation-sweep: finalize CAS lost (calendar_generation moved)"),
+        {
+          tags: { surface: "cron_calendar_mutation_sweep_outcome", kind: "finalize_conflict" },
+          extra: { ledgerId: outcome.ledgerId, taskId: outcome.taskId },
+        },
+      );
     }
   }
 

@@ -525,6 +525,12 @@ declare
   v_already_qualified boolean := false;
   v_duplicate boolean := false;
   v_conflict_constraint text;
+  -- Round 9: holds the replayed-against task's full immutable-field set
+  -- (both the pre-write lookup below and the unique_violation handler use
+  -- it) so a same-key request that disagrees with the ORIGINAL booking on
+  -- any of those fields is rejected rather than silently handed someone
+  -- else's linkage.
+  v_existing record;
 begin
   if v_actor is null then
     raise exception 'fn_book_appointment: no authenticated caller' using errcode = '28000';
@@ -562,19 +568,47 @@ begin
   -- exists. Concurrent replay (both callers miss this SELECT) is still
   -- handled by the unique_violation catch below, after those validations
   -- run for whichever caller actually reaches the insert.
+  --
+  -- Round 9: before trusting the key, validate the request against EVERY
+  -- immutable booking field of the task it resolves to —
+  -- related_property_id, contact_id, assignee_id, due_at, end_at, title,
+  -- description. Without this, a reused key presented with a DIFFERENT
+  -- property/contact/assignee/time/title (client bug, or a hostile caller
+  -- replaying a stolen key against a different record) would silently
+  -- return the ORIGINAL booking's linkage as if it belonged to the new
+  -- request — and the server action derives post-booking effects
+  -- (enrollment pause, revalidation, dispo state) from that linkage. Any
+  -- mismatch is a hard reject; the caller never gets acknowledgement of
+  -- the wrong booking.
   if p_idempotency_key is not null then
-    select t.id, t.calendar_chain_id
-    into v_task_id, v_chain_id
+    select t.id, t.calendar_chain_id, t.related_property_id, t.contact_id,
+           t.assignee_id, t.due_at, t.end_at, t.title, t.description
+    into v_existing
     from public.tasks t
     where t.org_id = p_org
       and t.booking_idempotency_key = p_idempotency_key;
 
     if found then
+      if v_existing.related_property_id is distinct from p_property
+         or v_existing.contact_id is distinct from p_contact
+         or v_existing.assignee_id is distinct from p_assignee
+         or v_existing.due_at is distinct from p_start
+         or v_existing.end_at is distinct from p_end
+         or v_existing.title is distinct from p_title
+         or v_existing.description is distinct from p_description
+      then
+        raise exception
+          'fn_book_appointment: idempotency key reuse with different request'
+          using errcode = 'P0001';
+      end if;
+
       return jsonb_build_object(
-        'task_id', v_task_id,
-        'calendar_chain_id', v_chain_id,
+        'task_id', v_existing.id,
+        'calendar_chain_id', v_existing.calendar_chain_id,
         'already_qualified', false,
-        'duplicate', true
+        'duplicate', true,
+        'related_property_id', v_existing.related_property_id,
+        'contact_id', v_existing.contact_id
       );
     end if;
   end if;
@@ -706,8 +740,13 @@ begin
         raise;
       end if;
 
-      select t.id, t.calendar_chain_id
-      into v_task_id, v_chain_id
+      -- Round 9: same mismatch guard as the pre-write replay check above —
+      -- a concurrent race just means two callers reached the insert before
+      -- either committed, not that the request-vs-persisted-row check is
+      -- any less required for the loser's reply.
+      select t.id, t.calendar_chain_id, t.related_property_id, t.contact_id,
+             t.assignee_id, t.due_at, t.end_at, t.title, t.description
+      into v_existing
       from public.tasks t
       where t.org_id = p_org
         and t.booking_idempotency_key = p_idempotency_key;
@@ -716,6 +755,21 @@ begin
         raise;
       end if;
 
+      if v_existing.related_property_id is distinct from p_property
+         or v_existing.contact_id is distinct from p_contact
+         or v_existing.assignee_id is distinct from p_assignee
+         or v_existing.due_at is distinct from p_start
+         or v_existing.end_at is distinct from p_end
+         or v_existing.title is distinct from p_title
+         or v_existing.description is distinct from p_description
+      then
+        raise exception
+          'fn_book_appointment: idempotency key reuse with different request'
+          using errcode = 'P0001';
+      end if;
+
+      v_task_id := v_existing.id;
+      v_chain_id := v_existing.calendar_chain_id;
       v_duplicate := true;
   end;
 
@@ -724,7 +778,9 @@ begin
       'task_id', v_task_id,
       'calendar_chain_id', v_chain_id,
       'already_qualified', false,
-      'duplicate', true
+      'duplicate', true,
+      'related_property_id', v_existing.related_property_id,
+      'contact_id', v_existing.contact_id
     );
   end if;
 
@@ -763,13 +819,15 @@ begin
     'task_id', v_task_id,
     'calendar_chain_id', v_chain_id,
     'already_qualified', v_already_qualified,
-    'duplicate', false
+    'duplicate', false,
+    'related_property_id', p_property,
+    'contact_id', p_contact
   );
 end;
 $$;
 
 comment on function public.fn_book_appointment(uuid, uuid, timestamptz, timestamptz, text, text, uuid, uuid, text, uuid) is
-  'Atomic appointment booking: creates the task, opens its calendar-mutation ledger row, and (property bookings only) promotes prospect->lead + sets booked_appointment dispo. SECURITY DEFINER (see migration header for why this deviates from the plan''s SECURITY INVOKER wording) — actor is always auth.uid(), never a parameter. p_idempotency_key (optional, trailing) makes retries of the same booking safe: same key returns the original task with duplicate:true instead of creating a second row, covering both sequential replay and a genuine concurrent race via the unique_violation handler.';
+  'Atomic appointment booking: creates the task, opens its calendar-mutation ledger row, and (property bookings only) promotes prospect->lead + sets booked_appointment dispo. SECURITY DEFINER (see migration header for why this deviates from the plan''s SECURITY INVOKER wording) — actor is always auth.uid(), never a parameter. p_idempotency_key (optional, trailing) makes retries of the same booking safe: same key returns the original task with duplicate:true instead of creating a second row, covering both sequential replay and a genuine concurrent race via the unique_violation handler — round 9 validates the request against every immutable field of the replayed-against task (property/contact/assignee/time/title/description) and rejects a mismatch rather than acknowledging the wrong booking. The returned jsonb always carries related_property_id/contact_id from the PERSISTED row (never echoed request params on the duplicate path) so callers can derive post-booking effects from the actual linkage.';
 
 revoke all on function public.fn_book_appointment(uuid, uuid, timestamptz, timestamptz, text, text, uuid, uuid, text, uuid)
   from public, anon;
@@ -907,7 +965,7 @@ grant execute on function public.fn_claim_calendar_creations(integer) to service
 drop function if exists public.fn_expire_exhausted_calendar_creations();
 
 create or replace function public.fn_expire_exhausted_calendar_creations()
-returns table (failed_count integer, needs_repair_count integer)
+returns table (failed_count integer, needs_repair_count integer, needs_repair_ids uuid[])
 language plpgsql
 security definer
 set search_path = public, pg_temp
@@ -915,6 +973,11 @@ as $$
 declare
   v_failed integer;
   v_needs_repair integer;
+  -- Round 9: the ledger row ids that just transitioned to needs_repair,
+  -- so the cron route can attach them to a telemetry event instead of
+  -- reporting a bare count with no way to find the rows that need a
+  -- human's attention.
+  v_needs_repair_ids uuid[];
 begin
   with expired as (
     update public.task_calendar_mutations
@@ -935,20 +998,24 @@ begin
     -- already holds this row's classification ('failed'/'needs_repair')
     -- directly — no CASE needed (unlike the SET clause above, whose
     -- expressions evaluate against the pre-update row).
-    returning phase as new_phase
+    returning id, phase as new_phase
   )
   select
     count(*) filter (where new_phase = 'failed'),
-    count(*) filter (where new_phase = 'needs_repair')
-  into v_failed, v_needs_repair
+    count(*) filter (where new_phase = 'needs_repair'),
+    array_agg(id) filter (where new_phase = 'needs_repair')
+  into v_failed, v_needs_repair, v_needs_repair_ids
   from expired;
 
-  return query select coalesce(v_failed, 0), coalesce(v_needs_repair, 0);
+  return query select
+    coalesce(v_failed, 0),
+    coalesce(v_needs_repair, 0),
+    coalesce(v_needs_repair_ids, array[]::uuid[]);
 end;
 $$;
 
 comment on function public.fn_expire_exhausted_calendar_creations() is
-  'Service-role-only terminal-exhaustion sweep (round 6, split round 7): rows at attempts>=5 whose lease has expired (phase IN (pending, provider_done) AND phase<>finalized AND next_attempt_at<=now()) move to phase=failed (from pending, result_reason=retries_exhausted) or phase=needs_repair (from provider_done, result_reason=finalize_needs_repair — the Google event exists, only local finalize kept failing); last_error is preserved either way. needs_repair deliberately keeps idx_task_calendar_mutations_chain_serialization''s slot held (failed frees it) so an unreconciled event cannot be raced by a later lifecycle mutation on the same chain. Returns (failed_count, needs_repair_count) so the cron route can surface needs_repair rows for observability. Called once per sweep, not per claim.';
+  'Service-role-only terminal-exhaustion sweep (round 6, split round 7, ids added round 9): rows at attempts>=5 whose lease has expired (phase IN (pending, provider_done) AND phase<>finalized AND next_attempt_at<=now()) move to phase=failed (from pending, result_reason=retries_exhausted) or phase=needs_repair (from provider_done, result_reason=finalize_needs_repair — the Google event exists, only local finalize kept failing); last_error is preserved either way. needs_repair deliberately keeps idx_task_calendar_mutations_chain_serialization''s slot held (failed frees it) so an unreconciled event cannot be raced by a later lifecycle mutation on the same chain. Returns (failed_count, needs_repair_count, needs_repair_ids) so the cron route can surface needs_repair rows for observability and attach the exact ledger ids to a telemetry event rather than an opaque count. Called once per sweep, not per claim.';
 
 revoke all on function public.fn_expire_exhausted_calendar_creations() from public, anon, authenticated;
 grant execute on function public.fn_expire_exhausted_calendar_creations() to service_role;

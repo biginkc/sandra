@@ -84,6 +84,14 @@ type AppointmentRpcClient = {
       already_qualified: boolean;
       calendar_chain_id: string;
       duplicate: boolean;
+      /** Round 9: the PERSISTED linkage of the booked (or replayed-and-
+       *  matched) task, straight from the RPC — never derived from the
+       *  request. Every post-booking effect below must read these fields,
+       *  not `input.propertyId`/`input.contactId`, so a duplicate response
+       *  (even a legitimate one) can never be steered at a different
+       *  record than the one the RPC actually booked/matched. */
+      related_property_id: string | null;
+      contact_id: string | null;
     } | null;
     error: { message: string; code?: string } | null;
   }>;
@@ -324,6 +332,19 @@ export async function bookAppointment(
       duplicate: data.duplicate,
     };
 
+    // Round 9: every post-booking effect below reads the RPC's RETURNED
+    // linkage, never `input.propertyId`/`input.contactId`. The RPC now
+    // rejects an idempotency-key replay whose request disagrees with the
+    // original booking on property/contact/assignee/time/title, so these
+    // two are structurally guaranteed to match the task that was actually
+    // booked (or matched) — but deriving effects from the request anyway
+    // would still be the wrong layer to trust: a future bug in that guard,
+    // or any other path that reaches this branch, must not be able to
+    // pause enrollments or reveal UI state for a DIFFERENT property than
+    // the one the persisted task is actually linked to.
+    const linkedPropertyId = data.related_property_id ?? undefined;
+    const linkedContactId = data.contact_id ?? undefined;
+
     // Single-owner rule for Google Calendar event creation: fn_book_appointment
     // already opened the task_calendar_mutations ledger row (phase='pending')
     // in the same transaction that created the task — that ledger row IS the
@@ -336,10 +357,10 @@ export async function bookAppointment(
     if (input.assigneeId !== user.id && !result.duplicate) {
       const admin = createAdminClient();
       const prefs = await loadIntegrationPrefs(admin, input.assigneeId);
-      const subjectLabel = input.propertyId
-        ? await loadPropertyAddress(supabase, input.propertyId)
+      const subjectLabel = linkedPropertyId
+        ? await loadPropertyAddress(supabase, linkedPropertyId)
         : input.title;
-      const deepLink = buildAppointmentDeepLink(input.propertyId, input.contactId);
+      const deepLink = buildAppointmentDeepLink(linkedPropertyId, linkedContactId);
       after(async () => {
         await Promise.allSettled([
           dispatchTaskAssigned(supabase, {
@@ -349,7 +370,7 @@ export async function bookAppointment(
             taskTitle: input.title,
             taskType: "appointment",
             dueAt: startUtc.toISOString(),
-            propertyAddress: input.propertyId ? subjectLabel : null,
+            propertyAddress: linkedPropertyId ? subjectLabel : null,
           }),
           dispatchTaskAssignedSlack({
             taskId: result.taskId,
@@ -377,23 +398,24 @@ export async function bookAppointment(
     // additionally stops any enrollment that's already past its dispo
     // check and just waiting on next_run_at. Property-only: a personal
     // block / contact-only booking has no property-scoped enrollments to
-    // pause.
-    if (input.propertyId) {
+    // pause. Gated + scoped on `linkedPropertyId` (RPC-returned), not
+    // `input.propertyId` — round 9.
+    if (linkedPropertyId) {
       try {
         await pausePropertyEnrollments(supabase, {
-          propertyId: input.propertyId,
+          propertyId: linkedPropertyId,
           reason: "appointment_booked",
           permanent: false,
         });
       } catch (e) {
         reportError(e, {
           tags: { surface: "book_appointment_pause_enrollments" },
-          extra: { propertyId: input.propertyId },
+          extra: { propertyId: linkedPropertyId },
         });
       }
     }
 
-    if (input.propertyId) revalidatePath(`/leads/${input.propertyId}`);
+    if (linkedPropertyId) revalidatePath(`/leads/${linkedPropertyId}`);
     revalidatePath("/messages");
     revalidatePath("/dashboard");
 

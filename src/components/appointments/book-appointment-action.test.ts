@@ -451,7 +451,13 @@ describe("bookAppointment — RPC + side effects", () => {
         userId: "user-1",
         propertyAddress: "123 Main St",
         rpcResult: {
-          data: { task_id: "task-1", already_qualified: false, calendar_chain_id: "chain-1" },
+          data: {
+            task_id: "task-1",
+            already_qualified: false,
+            calendar_chain_id: "chain-1",
+            related_property_id: "prop-1",
+            contact_id: null,
+          },
           error: null,
         },
       }),
@@ -484,7 +490,13 @@ describe("bookAppointment — RPC + side effects", () => {
         userId: "user-1",
         propertyAddress: "123 Main St",
         rpcResult: {
-          data: { task_id: "task-1", already_qualified: false, calendar_chain_id: "chain-1" },
+          data: {
+            task_id: "task-1",
+            already_qualified: false,
+            calendar_chain_id: "chain-1",
+            related_property_id: "prop-1",
+            contact_id: null,
+          },
           error: null,
         },
       }),
@@ -505,7 +517,13 @@ describe("bookAppointment — RPC + side effects", () => {
       makeSupabaseMock({
         userId: "user-1",
         rpcResult: {
-          data: { task_id: "task-1", already_qualified: false, calendar_chain_id: "chain-1" },
+          data: {
+            task_id: "task-1",
+            already_qualified: false,
+            calendar_chain_id: "chain-1",
+            related_property_id: "prop-1",
+            contact_id: null,
+          },
           error: null,
         },
       }),
@@ -516,6 +534,42 @@ describe("bookAppointment — RPC + side effects", () => {
     expect(pausePropertyEnrollments).toHaveBeenCalledWith(
       expect.anything(),
       { propertyId: "prop-1", reason: "appointment_booked", permanent: false },
+    );
+  });
+
+  // Round 9: the RPC-returned linkage is the only thing post-booking
+  // effects may trust — a request whose propertyId disagrees with what the
+  // RPC actually booked/matched (which, per the RPC's own round-9 guard,
+  // can only legitimately happen on a mismatched idempotency replay that
+  // the RPC itself rejects — this test proves the ACTION's independent
+  // defense-in-depth, not the RPC's validation) must never leak into the
+  // pause call.
+  it("pauses using the RPC-returned related_property_id, never the request's propertyId", async () => {
+    createClient.mockResolvedValue(
+      makeSupabaseMock({
+        userId: "user-1",
+        rpcResult: {
+          data: {
+            task_id: "task-1",
+            already_qualified: false,
+            calendar_chain_id: "chain-1",
+            related_property_id: "prop-RETURNED",
+            contact_id: null,
+          },
+          error: null,
+        },
+      }),
+    );
+
+    await bookAppointment({ ...VALID_INPUT, propertyId: "prop-REQUEST" });
+
+    expect(pausePropertyEnrollments).toHaveBeenCalledWith(
+      expect.anything(),
+      { propertyId: "prop-RETURNED", reason: "appointment_booked", permanent: false },
+    );
+    expect(pausePropertyEnrollments).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ propertyId: "prop-REQUEST" }),
     );
   });
 
@@ -540,7 +594,13 @@ describe("bookAppointment — RPC + side effects", () => {
       makeSupabaseMock({
         userId: "user-1",
         rpcResult: {
-          data: { task_id: "task-1", already_qualified: false, calendar_chain_id: "chain-1" },
+          data: {
+            task_id: "task-1",
+            already_qualified: false,
+            calendar_chain_id: "chain-1",
+            related_property_id: "prop-1",
+            contact_id: null,
+          },
           error: null,
         },
       }),
@@ -549,6 +609,7 @@ describe("bookAppointment — RPC + side effects", () => {
 
     const result = await bookAppointment(VALID_INPUT);
 
+    expect(pausePropertyEnrollments).toHaveBeenCalled();
     expect(result.ok).toBe(true);
   });
 
@@ -573,7 +634,13 @@ describe("bookAppointment — RPC + side effects", () => {
       makeSupabaseMock({
         userId: "user-1",
         rpcResult: {
-          data: { task_id: "task-1", already_qualified: false, calendar_chain_id: "chain-1" },
+          data: {
+            task_id: "task-1",
+            already_qualified: false,
+            calendar_chain_id: "chain-1",
+            related_property_id: "prop-1",
+            contact_id: null,
+          },
           error: null,
         },
       }),
@@ -584,6 +651,29 @@ describe("bookAppointment — RPC + side effects", () => {
     expect(revalidatePath).toHaveBeenCalledWith("/leads/prop-1");
     expect(revalidatePath).toHaveBeenCalledWith("/messages");
     expect(revalidatePath).toHaveBeenCalledWith("/dashboard");
+  });
+
+  it("revalidates using the RPC-returned related_property_id, never the request's propertyId", async () => {
+    createClient.mockResolvedValue(
+      makeSupabaseMock({
+        userId: "user-1",
+        rpcResult: {
+          data: {
+            task_id: "task-1",
+            already_qualified: false,
+            calendar_chain_id: "chain-1",
+            related_property_id: "prop-RETURNED",
+            contact_id: null,
+          },
+          error: null,
+        },
+      }),
+    );
+
+    await bookAppointment({ ...VALID_INPUT, propertyId: "prop-REQUEST" });
+
+    expect(revalidatePath).toHaveBeenCalledWith("/leads/prop-RETURNED");
+    expect(revalidatePath).not.toHaveBeenCalledWith("/leads/prop-REQUEST");
   });
 });
 

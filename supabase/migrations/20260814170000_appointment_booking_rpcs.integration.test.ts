@@ -60,6 +60,11 @@ type BookAppointmentRow = {
   calendar_chain_id: string;
   already_qualified: boolean;
   duplicate: boolean;
+  /** Round 9: the persisted task's linkage, always echoed back so callers
+   *  derive post-booking effects from what was actually booked/matched,
+   *  never from the request. */
+  related_property_id: string | null;
+  contact_id: string | null;
 };
 
 type RpcResult<T> = {
@@ -145,8 +150,14 @@ type ClaimCalendarCreationsRow = {
 
 /** Round 7: fn_expire_exhausted_calendar_creations now returns one row of
  *  (failed_count, needs_repair_count) instead of a bare integer — a
- *  provider_done exhaustion is a repair state, not a plain failure. */
-type ExpireExhaustedRow = { failed_count: number; needs_repair_count: number };
+ *  provider_done exhaustion is a repair state, not a plain failure. Round
+ *  9 adds needs_repair_ids so the cron route can attach the exact ledger
+ *  rows to a telemetry event. */
+type ExpireExhaustedRow = {
+  failed_count: number;
+  needs_repair_count: number;
+  needs_repair_ids: string[];
+};
 
 type ClaimRpcClient = {
   rpc(
@@ -1142,6 +1153,211 @@ describe("Migration 20260814170000 — appointment booking RPCs", () => {
       expect(a.data!.duplicate).toBe(false);
       expect(b.data!.duplicate).toBe(false);
       expect(a.data!.task_id).not.toBe(b.data!.task_id);
+    });
+
+    describe("round 9 — replay validates the request against every immutable field", () => {
+      it("a matched replay returns duplicate:true with the persisted property/contact linkage, not the request's", async () => {
+        const booker = await createUserForOrg(BMH_ORG_ID);
+        const assignee = await createUserForOrg(BMH_ORG_ID);
+        const contactId = await insertContact();
+        const propertyId = await insertProperty(BMH_ORG_ID, "prospect");
+        const key = crypto.randomUUID();
+        const { p_start, p_end } = windowArgs();
+        const args = {
+          p_org: BMH_ORG_ID,
+          p_assignee: assignee.userId,
+          p_start,
+          p_end,
+          p_timezone: "America/Chicago",
+          p_title: "Canonical linkage",
+          p_contact: contactId,
+          p_property: propertyId,
+          p_description: "Bring comps",
+          p_idempotency_key: key,
+        };
+
+        const first = await bookAppointment(booker.client, args);
+        expect(first.error).toBeNull();
+        expect(first.data!.duplicate).toBe(false);
+        expect(first.data!.related_property_id).toBe(propertyId);
+        expect(first.data!.contact_id).toBe(contactId);
+
+        const retry = await bookAppointment(booker.client, args);
+        expect(retry.error).toBeNull();
+        expect(retry.data!.duplicate).toBe(true);
+        expect(retry.data!.task_id).toBe(first.data!.task_id);
+        expect(retry.data!.related_property_id).toBe(propertyId);
+        expect(retry.data!.contact_id).toBe(contactId);
+      });
+
+      it("rejects a replay whose property disagrees with the original booking", async () => {
+        const booker = await createUserForOrg(BMH_ORG_ID);
+        const assignee = await createUserForOrg(BMH_ORG_ID);
+        const propertyA = await insertProperty(BMH_ORG_ID, "prospect");
+        const propertyB = await insertProperty(BMH_ORG_ID, "prospect");
+        const key = crypto.randomUUID();
+        const { p_start, p_end } = windowArgs();
+
+        const first = await bookAppointment(booker.client, {
+          p_org: BMH_ORG_ID,
+          p_assignee: assignee.userId,
+          p_start,
+          p_end,
+          p_timezone: "America/Chicago",
+          p_title: "Original booking",
+          p_property: propertyA,
+          p_idempotency_key: key,
+        });
+        expect(first.error).toBeNull();
+
+        const { data, error } = await bookAppointment(booker.client, {
+          p_org: BMH_ORG_ID,
+          p_assignee: assignee.userId,
+          p_start,
+          p_end,
+          p_timezone: "America/Chicago",
+          p_title: "Original booking",
+          p_property: propertyB, // mismatched
+          p_idempotency_key: key,
+        });
+
+        expect(data).toBeNull();
+        expect(error).not.toBeNull();
+        expect(error?.message).toMatch(/idempotency key reuse with different request/i);
+      });
+
+      it("rejects a replay whose contact disagrees with the original booking", async () => {
+        const booker = await createUserForOrg(BMH_ORG_ID);
+        const assignee = await createUserForOrg(BMH_ORG_ID);
+        const contactA = await insertContact();
+        const contactB = await insertContact();
+        const key = crypto.randomUUID();
+        const { p_start, p_end } = windowArgs();
+
+        const first = await bookAppointment(booker.client, {
+          p_org: BMH_ORG_ID,
+          p_assignee: assignee.userId,
+          p_start,
+          p_end,
+          p_timezone: "America/Chicago",
+          p_title: "Original booking",
+          p_contact: contactA,
+          p_idempotency_key: key,
+        });
+        expect(first.error).toBeNull();
+
+        const { data, error } = await bookAppointment(booker.client, {
+          p_org: BMH_ORG_ID,
+          p_assignee: assignee.userId,
+          p_start,
+          p_end,
+          p_timezone: "America/Chicago",
+          p_title: "Original booking",
+          p_contact: contactB, // mismatched
+          p_idempotency_key: key,
+        });
+
+        expect(data).toBeNull();
+        expect(error).not.toBeNull();
+        expect(error?.message).toMatch(/idempotency key reuse with different request/i);
+      });
+
+      it("rejects a replay whose assignee disagrees with the original booking", async () => {
+        const booker = await createUserForOrg(BMH_ORG_ID);
+        const assigneeA = await createUserForOrg(BMH_ORG_ID);
+        const assigneeB = await createUserForOrg(BMH_ORG_ID);
+        const key = crypto.randomUUID();
+        const { p_start, p_end } = windowArgs();
+
+        const first = await bookAppointment(booker.client, {
+          p_org: BMH_ORG_ID,
+          p_assignee: assigneeA.userId,
+          p_start,
+          p_end,
+          p_timezone: "America/Chicago",
+          p_title: "Original booking",
+          p_idempotency_key: key,
+        });
+        expect(first.error).toBeNull();
+
+        const { data, error } = await bookAppointment(booker.client, {
+          p_org: BMH_ORG_ID,
+          p_assignee: assigneeB.userId, // mismatched
+          p_start,
+          p_end,
+          p_timezone: "America/Chicago",
+          p_title: "Original booking",
+          p_idempotency_key: key,
+        });
+
+        expect(data).toBeNull();
+        expect(error).not.toBeNull();
+        expect(error?.message).toMatch(/idempotency key reuse with different request/i);
+      });
+
+      it("rejects a replay whose start/end window disagrees with the original booking", async () => {
+        const booker = await createUserForOrg(BMH_ORG_ID);
+        const assignee = await createUserForOrg(BMH_ORG_ID);
+        const key = crypto.randomUUID();
+        const { p_start, p_end } = windowArgs();
+
+        const first = await bookAppointment(booker.client, {
+          p_org: BMH_ORG_ID,
+          p_assignee: assignee.userId,
+          p_start,
+          p_end,
+          p_timezone: "America/Chicago",
+          p_title: "Original booking",
+          p_idempotency_key: key,
+        });
+        expect(first.error).toBeNull();
+
+        const { data, error } = await bookAppointment(booker.client, {
+          p_org: BMH_ORG_ID,
+          p_assignee: assignee.userId,
+          p_start: new Date(new Date(p_start).getTime() + 1_800_000).toISOString(), // mismatched
+          p_end: new Date(new Date(p_end).getTime() + 1_800_000).toISOString(), // mismatched
+          p_timezone: "America/Chicago",
+          p_title: "Original booking",
+          p_idempotency_key: key,
+        });
+
+        expect(data).toBeNull();
+        expect(error).not.toBeNull();
+        expect(error?.message).toMatch(/idempotency key reuse with different request/i);
+      });
+
+      it("rejects a replay whose title disagrees with the original booking", async () => {
+        const booker = await createUserForOrg(BMH_ORG_ID);
+        const assignee = await createUserForOrg(BMH_ORG_ID);
+        const key = crypto.randomUUID();
+        const { p_start, p_end } = windowArgs();
+
+        const first = await bookAppointment(booker.client, {
+          p_org: BMH_ORG_ID,
+          p_assignee: assignee.userId,
+          p_start,
+          p_end,
+          p_timezone: "America/Chicago",
+          p_title: "Original title",
+          p_idempotency_key: key,
+        });
+        expect(first.error).toBeNull();
+
+        const { data, error } = await bookAppointment(booker.client, {
+          p_org: BMH_ORG_ID,
+          p_assignee: assignee.userId,
+          p_start,
+          p_end,
+          p_timezone: "America/Chicago",
+          p_title: "Different title", // mismatched
+          p_idempotency_key: key,
+        });
+
+        expect(data).toBeNull();
+        expect(error).not.toBeNull();
+        expect(error?.message).toMatch(/idempotency key reuse with different request/i);
+      });
     });
 
     // The Supabase JS client auto-commits every PostgREST call, so proving
