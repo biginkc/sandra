@@ -86,9 +86,12 @@ export async function createOrgUser(
   // project; a suite creating one user per test trips it mid-run and every
   // later test dies with "Request rate limit reached". Back off and retry
   // (only on rate-limit errors) instead of failing the whole tail of a run.
+  // Total worst-case sleep (1+2+3+4+5 = 15s) stays comfortably inside the
+  // suite's 30s per-test timeout — a longer backoff would just convert a
+  // throttled sign-in into a test timeout with extra auth traffic behind it.
   let jwt: string | null = null;
   let signInMessage = "no token";
-  for (let attempt = 1; attempt <= 7; attempt += 1) {
+  for (let attempt = 1; attempt <= 6; attempt += 1) {
     const { data: session, error: signInError } =
       await anon.auth.signInWithPassword({ email, password });
     if (!signInError && session.session?.access_token) {
@@ -96,8 +99,8 @@ export async function createOrgUser(
       break;
     }
     signInMessage = signInError?.message ?? "no token";
-    if (!/rate limit/i.test(signInMessage) || attempt === 7) break;
-    await new Promise((r) => setTimeout(r, Math.min(60_000, 2_000 * 2 ** attempt)));
+    if (!/rate limit/i.test(signInMessage) || attempt === 6) break;
+    await new Promise((r) => setTimeout(r, 1_000 * attempt));
   }
   if (!jwt) {
     await serviceClient.auth.admin.deleteUser(created.user.id);
