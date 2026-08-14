@@ -6,6 +6,7 @@ import { useState, useTransition } from "react";
 import {
   CalendarDays,
   CheckCircle2,
+  MessageCircle,
   MessageSquare,
   XCircle,
 } from "lucide-react";
@@ -26,6 +27,7 @@ import { cn } from "@/lib/utils";
 import {
   disconnectIntegration,
   setChannelEnabledAction,
+  setReminderPhoneAction,
   setTimezoneAction,
   type IntegrationStatus,
 } from "./actions";
@@ -42,6 +44,9 @@ export function IntegrationsForm({ initial }: { initial: IntegrationStatus }) {
   const [slackEnabled, setSlackEnabled] = useState(initial.slack.enabled);
   const [googleEnabled, setGoogleEnabled] = useState(initial.google.enabled);
   const [timezone, setTimezoneValue] = useState(initial.timezone);
+  const [smsEnabled, setSmsEnabled] = useState(initial.sms.enabled);
+  const [savedPhone, setSavedPhone] = useState(initial.sms.phone);
+  const [phoneInput, setPhoneInput] = useState(initial.sms.phone ?? "");
   const [pending, startTransition] = useTransition();
 
   const toggleSlack = (next: boolean) => {
@@ -80,6 +85,31 @@ export function IntegrationsForm({ initial }: { initial: IntegrationStatus }) {
         fallbackMessage: "Could not update timezone",
       });
       if (!result.ok) setTimezoneValue(previous);
+    });
+  };
+
+  const toggleSms = (next: boolean) => {
+    const previous = smsEnabled;
+    setSmsEnabled(next);
+    startTransition(async () => {
+      const result = await callAction(
+        setChannelEnabledAction("sms_reminder", next),
+        {
+          successMessage: next ? "Text reminders turned on" : "Text reminders turned off",
+          fallbackMessage: "Could not update text reminder preference",
+        },
+      );
+      if (!result.ok) setSmsEnabled(previous);
+    });
+  };
+
+  const savePhone = () => {
+    startTransition(async () => {
+      const result = await callAction(setReminderPhoneAction(phoneInput), {
+        successMessage: "Reminder phone number saved",
+        fallbackMessage: "Could not save phone number",
+      });
+      if (result.ok) setSavedPhone(phoneInput.trim());
     });
   };
 
@@ -157,6 +187,62 @@ export function IntegrationsForm({ initial }: { initial: IntegrationStatus }) {
           </p>
         </div>
       </section>
+
+      {initial.sms.available && (
+        <section className="rounded-md border p-4">
+          <div className="flex max-w-xl flex-col gap-4">
+            <div className="flex items-center gap-2 font-medium">
+              <MessageCircle aria-hidden className="size-4" />
+              Text message reminders
+            </div>
+            <p className="text-muted-foreground text-sm">
+              Get a text 30 minutes before an appointment.
+            </p>
+            <div className="flex flex-col gap-2">
+              <label htmlFor="reminder-phone" className="text-sm font-medium">
+                Phone number
+              </label>
+              <div className="flex gap-2">
+                <input
+                  id="reminder-phone"
+                  type="tel"
+                  value={phoneInput}
+                  disabled={pending}
+                  onChange={(event) => setPhoneInput(event.target.value)}
+                  placeholder="+18165551234"
+                  className="border-input bg-background h-10 flex-1 rounded-md border px-3 text-sm"
+                />
+                <Button
+                  type="button"
+                  size="sm"
+                  disabled={pending || phoneInput.trim() === (savedPhone ?? "")}
+                  onClick={savePhone}
+                >
+                  Save
+                </Button>
+              </div>
+            </div>
+            <label className="flex items-center justify-between gap-4 rounded-md border p-3 text-sm">
+              <span className="flex flex-col gap-1">
+                <span className="font-medium">Send text reminders</span>
+                <span className="text-muted-foreground text-xs">
+                  Requires a saved phone number.
+                </span>
+              </span>
+              <input
+                type="checkbox"
+                role="switch"
+                checked={smsEnabled}
+                disabled={pending || !savedPhone}
+                onChange={(event) => toggleSms(event.target.checked)}
+                data-testid="sms-enabled-toggle"
+                className="accent-primary size-5"
+                aria-label="Send text reminders"
+              />
+            </label>
+          </div>
+        </section>
+      )}
     </div>
   );
 }

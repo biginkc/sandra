@@ -3,9 +3,9 @@ import { createClient as createSupabaseClient } from "@supabase/supabase-js";
 
 import { reportError } from "@/lib/errors/report";
 import {
-  processClaimedCalendarCreation,
-  type CalendarCreationOutcome,
-  type ClaimedCalendarCreationRow,
+  processClaimedCalendarMutation,
+  type CalendarMutationOutcome,
+  type ClaimedCalendarMutationRow,
 } from "@/lib/integrations/google/create-worker";
 import type { Database } from "@/lib/supabase/types";
 
@@ -15,15 +15,17 @@ import type { Database } from "@/lib/supabase/types";
  * sweep-stuck-skip-trace/phone-coverage-snapshot's staggered schedules so
  * every 5-minute cron doesn't fire in the same tick).
  *
- * PR-2 pull-forward of PR 3's durable calendar-mutation ledger consumer —
- * the `create`/`pending` slice only (PR 3 adds the sibling sweep for
- * reschedule/reassign/cancel). Claims via the service-role-only
- * `fn_claim_calendar_creations` RPC (FOR UPDATE SKIP LOCKED, attempts
- * bumped atomically with the claim), then hands the row to
- * `processClaimedCalendarCreation`, which talks to Google and advances
- * the ledger through provider_done -> finalized (or leaves it pending
- * with `last_error` set for a transient failure, or fails it terminally
- * for a permanent auth/config error).
+ * Durable calendar-mutation ledger consumer. PR 2 introduced this as a
+ * `create`/`pending`-only pull-forward; PR 3 (migration 20260814210000)
+ * widened the claim RPC (renamed fn_claim_calendar_creations ->
+ * fn_claim_calendar_mutations) to operation IN (create, reschedule,
+ * reassign, cancel), so this route now drains all four. Claims via the
+ * service-role-only `fn_claim_calendar_mutations` RPC (FOR UPDATE SKIP
+ * LOCKED, attempts bumped atomically with the claim), then hands the row
+ * to `processClaimedCalendarMutation`, which dispatches by `operation`,
+ * talks to Google, and advances the ledger through provider_done ->
+ * finalized (or leaves it pending with `last_error` set for a transient
+ * failure, or fails it terminally for a permanent auth/config error).
  *
  * Claiming is one row at a time (`p_limit: 1`), not one upfront batch.
  * This route processes rows sequentially under a wall-clock budget, and
@@ -64,7 +66,7 @@ function createServiceRoleClient() {
   });
 }
 
-/** fn_claim_calendar_creations / fn_expire_exhausted_calendar_creations are
+/** fn_claim_calendar_mutations / fn_expire_exhausted_calendar_mutations are
  *  not (and, per this PR's scope, must not be) in the generated
  *  Database["public"]["Functions"] map — same local-cast pattern as the
  *  booking RPC call sites. */
@@ -78,17 +80,18 @@ type ExpireExhaustedRow = {
 };
 type ClaimRpcClient = {
   rpc(
-    fn: "fn_claim_calendar_creations",
+    fn: "fn_claim_calendar_mutations",
     args: { p_limit: number },
   ): Promise<{
-    data: ClaimedCalendarCreationRow[] | null;
+    data: ClaimedCalendarMutationRow[] | null;
     error: { message: string } | null;
   }>;
   /** Round 7: returns one row of (failed_count, needs_repair_count) — a
    *  provider_done exhaustion is a repair state, not a plain failure, and
    *  the split needs to be visible in the sweep response for
-   *  observability rather than folded into one opaque total. */
-  rpc(fn: "fn_expire_exhausted_calendar_creations"): Promise<{
+   *  observability rather than folded into one opaque total. PR 3 widened
+   *  this from create-only to every operation. */
+  rpc(fn: "fn_expire_exhausted_calendar_mutations"): Promise<{
     data: ExpireExhaustedRow[] | null;
     error: { message: string } | null;
   }>;
@@ -150,10 +153,10 @@ export async function runCalendarMutationSweep(
   // exhaustion moves to needs_repair (not failed) and deliberately keeps
   // that slot held — needsRepair surfaces that split for observability.
   const { data: expireRows, error: expireError } = await rpcClient.rpc(
-    "fn_expire_exhausted_calendar_creations",
+    "fn_expire_exhausted_calendar_mutations",
   );
   if (expireError) {
-    throw new Error(`fn_expire_exhausted_calendar_creations failed: ${expireError.message}`);
+    throw new Error(`fn_expire_exhausted_calendar_mutations failed: ${expireError.message}`);
   }
   const expiredCount = expireRows?.[0]?.failed_count ?? 0;
   const needsRepairCount = expireRows?.[0]?.needs_repair_count ?? 0;
@@ -197,24 +200,24 @@ export async function runCalendarMutationSweep(
       break;
     }
 
-    const { data: claimedRows, error } = await rpcClient.rpc("fn_claim_calendar_creations", {
+    const { data: claimedRows, error } = await rpcClient.rpc("fn_claim_calendar_mutations", {
       p_limit: 1,
     });
     if (error) {
-      throw new Error(`fn_claim_calendar_creations failed: ${error.message}`);
+      throw new Error(`fn_claim_calendar_mutations failed: ${error.message}`);
     }
     const row = claimedRows?.[0];
     if (!row) break;
 
     claimed += 1;
-    // Defense-in-depth: `processClaimedCalendarCreation` is documented to
+    // Defense-in-depth: `processClaimedCalendarMutation` is documented to
     // never throw, but this loop must not bet the whole sweep on that
     // invariant holding forever — a claimed row already burned its
     // attempt, and one row's unexpected rejection must never prevent the
     // next claimed row (or the next sweep iteration) from being processed.
-    let outcome: CalendarCreationOutcome;
+    let outcome: CalendarMutationOutcome;
     try {
-      outcome = await processClaimedCalendarCreation(supabase, row);
+      outcome = await processClaimedCalendarMutation(supabase, row);
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
       reportError(e, {

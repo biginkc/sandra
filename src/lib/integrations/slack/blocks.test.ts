@@ -1,6 +1,10 @@
 import { describe, it, expect } from "vitest";
 
-import { buildMarkedDoneBlocks, buildTaskAssignedBlocks } from "./blocks";
+import {
+  buildAppointmentReminderBlocks,
+  buildMarkedDoneBlocks,
+  buildTaskAssignedBlocks,
+} from "./blocks";
 
 const fixture = {
   taskTitle: "Call the owner",
@@ -89,6 +93,27 @@ describe("slack/blocks", () => {
         ],
       },
     ]);
+  });
+
+  it("buildAppointmentReminderBlocks returns header + context, no actions block", () => {
+    const blocks = buildAppointmentReminderBlocks({
+      taskTitle: "Walkthrough with seller",
+      timeLabel: "3:00 PM CDT",
+      deepLink: fixture.deepLink,
+    });
+
+    expect(blocks).toHaveLength(2);
+    expect(blocks[0]).toMatchObject({
+      type: "header",
+      text: { text: "Appointment in 30 min: Walkthrough with seller" },
+    });
+    expect(blocks[1]).toMatchObject({
+      type: "context",
+      elements: [
+        { text: `*3:00 PM CDT* · <${fixture.deepLink}|Open in Sandra>` },
+      ],
+    });
+    expect(blocks.some((block) => (block as { type?: string }).type === "actions")).toBe(false);
   });
 
   it("snapshot matches a known-good fixture for follow-up + due tomorrow", () => {

@@ -1,0 +1,305 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+const {
+  afterCallbacks,
+  afterMock,
+  cancelAppointment,
+  completeAppointment,
+  createAdminClient,
+  createClient,
+  dispatchTaskAssigned,
+  dispatchTaskAssignedSlack,
+  loadIntegrationPrefs,
+  reassignAppointment,
+  rescheduleAppointment,
+  revalidatePath,
+} = vi.hoisted(() => ({
+  afterCallbacks: [] as Array<() => Promise<void> | void>,
+  afterMock: vi.fn((callback: () => Promise<void> | void) => {
+    afterCallbacks.push(callback);
+  }),
+  cancelAppointment: vi.fn(),
+  completeAppointment: vi.fn(),
+  createAdminClient: vi.fn(() => ({ __admin: true })),
+  createClient: vi.fn(),
+  dispatchTaskAssigned: vi.fn(),
+  dispatchTaskAssignedSlack: vi.fn(),
+  loadIntegrationPrefs: vi.fn(async () => ({
+    slackEnabled: true,
+    calendarEnabled: true,
+    timezone: "America/Chicago",
+  })),
+  reassignAppointment: vi.fn(),
+  rescheduleAppointment: vi.fn(),
+  revalidatePath: vi.fn(),
+}));
+
+vi.mock("@/lib/supabase/server", () => ({ createClient }));
+vi.mock("@/lib/supabase/admin", () => ({ createAdminClient }));
+vi.mock("@/lib/errors/report", () => ({ reportError: vi.fn() }));
+vi.mock("next/cache", () => ({ revalidatePath }));
+vi.mock("next/server", () => ({ after: afterMock }));
+vi.mock("@/lib/integrations/prefs", () => ({ loadIntegrationPrefs }));
+vi.mock("@/lib/integrations/slack/dispatch", () => ({ dispatchTaskAssignedSlack }));
+vi.mock("@/lib/notifications/dispatch", () => ({ dispatchTaskAssigned }));
+vi.mock("@/lib/appointments/lifecycle", () => ({
+  cancelAppointment,
+  completeAppointment,
+  reassignAppointment,
+  rescheduleAppointment,
+}));
+
+import {
+  cancelAppointmentAction,
+  completeAppointmentAction,
+  reassignAppointmentAction,
+  rescheduleAppointmentAction,
+} from "./lifecycle-actions";
+
+type TaskRow = {
+  org_id: string;
+  title: string;
+  due_at: string;
+  related_property_id: string | null;
+  contact_id: string | null;
+};
+
+function makeSupabaseMock(opts: {
+  userId?: string | null;
+  taskRow?: TaskRow | null;
+  propertyAddress?: string | null;
+}) {
+  const tasksBuilder: Record<string, unknown> = {
+    select: vi.fn(function (this: unknown) {
+      return this;
+    }),
+    eq: vi.fn(function (this: unknown) {
+      return this;
+    }),
+    maybeSingle: vi.fn().mockResolvedValue({ data: opts.taskRow ?? null, error: null }),
+  };
+  const propertiesBuilder: Record<string, unknown> = {
+    select: vi.fn(function (this: unknown) {
+      return this;
+    }),
+    eq: vi.fn(function (this: unknown) {
+      return this;
+    }),
+    maybeSingle: vi.fn().mockResolvedValue({
+      data: opts.propertyAddress !== undefined ? { address: opts.propertyAddress } : null,
+      error: null,
+    }),
+  };
+  const from = vi.fn((table: string) => {
+    if (table === "tasks") return tasksBuilder;
+    if (table === "properties") return propertiesBuilder;
+    throw new Error(`Unexpected table in test: ${table}`);
+  });
+
+  return {
+    auth: {
+      getUser: vi.fn().mockResolvedValue({
+        data: { user: opts.userId ? { id: opts.userId } : null },
+      }),
+    },
+    from,
+  };
+}
+
+beforeEach(() => {
+  vi.clearAllMocks();
+});
+
+afterEach(() => {
+  afterCallbacks.length = 0;
+});
+
+describe("completeAppointmentAction", () => {
+  it("rejects when unauthenticated, never calling the lib function", async () => {
+    createClient.mockResolvedValue(makeSupabaseMock({ userId: null }));
+
+    const result = await completeAppointmentAction("task-1", "held");
+
+    expect(result).toEqual({ ok: false, error: { code: "UNAUTHENTICATED", message: "Not signed in" } });
+    expect(completeAppointment).not.toHaveBeenCalled();
+  });
+
+  it("delegates to the lib and revalidates on success", async () => {
+    createClient.mockResolvedValue(
+      makeSupabaseMock({
+        userId: "user-1",
+        taskRow: { org_id: "org-1", title: "Call", due_at: "2026-09-01T15:00:00Z", related_property_id: "prop-1", contact_id: null },
+      }),
+    );
+    completeAppointment.mockResolvedValue({
+      ok: true,
+      data: { taskId: "task-1", status: "completed", outcome: "held" },
+    });
+
+    const result = await completeAppointmentAction("task-1", "held");
+
+    expect(completeAppointment).toHaveBeenCalledWith(expect.anything(), "task-1", "held");
+    expect(result.ok).toBe(true);
+    expect(revalidatePath).toHaveBeenCalledWith("/leads/prop-1");
+    expect(revalidatePath).toHaveBeenCalledWith("/messages");
+    expect(revalidatePath).toHaveBeenCalledWith("/dashboard");
+  });
+
+  it("does not revalidate when the RPC fails", async () => {
+    createClient.mockResolvedValue(makeSupabaseMock({ userId: "user-1" }));
+    completeAppointment.mockResolvedValue({
+      ok: false,
+      error: { code: "COMPLETE_APPOINTMENT_FAILED", message: "not open" },
+    });
+
+    const result = await completeAppointmentAction("task-1", "held");
+
+    expect(result.ok).toBe(false);
+    expect(revalidatePath).not.toHaveBeenCalled();
+  });
+});
+
+describe("cancelAppointmentAction", () => {
+  it("delegates to the lib and revalidates on success", async () => {
+    createClient.mockResolvedValue(
+      makeSupabaseMock({
+        userId: "user-1",
+        taskRow: { org_id: "org-1", title: "Call", due_at: "2026-09-01T15:00:00Z", related_property_id: null, contact_id: "contact-1" },
+      }),
+    );
+    cancelAppointment.mockResolvedValue({
+      ok: true,
+      data: { taskId: "task-1", status: "cancelled", ledgerId: "ledger-1" },
+    });
+
+    const result = await cancelAppointmentAction("task-1");
+
+    expect(cancelAppointment).toHaveBeenCalledWith(expect.anything(), "task-1");
+    expect(result.ok).toBe(true);
+    expect(revalidatePath).toHaveBeenCalledWith("/messages");
+    expect(revalidatePath).toHaveBeenCalledWith("/dashboard");
+    // No property linkage on this task — no /leads/* revalidation.
+    expect(revalidatePath).not.toHaveBeenCalledWith(expect.stringMatching(/^\/leads\//));
+  });
+});
+
+describe("rescheduleAppointmentAction", () => {
+  const validInput = {
+    taskId: "task-1",
+    date: "2026-09-02",
+    time: "15:00",
+    timeZone: "America/Chicago",
+    durationMinutes: 30,
+  };
+
+  it("rejects an invalid duration before touching the network", async () => {
+    const result = await rescheduleAppointmentAction({ ...validInput, durationMinutes: 0 });
+
+    expect(result.ok).toBe(false);
+    expect(createClient).not.toHaveBeenCalled();
+  });
+
+  it("converts the wall time server-side and delegates to the lib", async () => {
+    createClient.mockResolvedValue(makeSupabaseMock({ userId: "user-1" }));
+    rescheduleAppointment.mockResolvedValue({
+      ok: true,
+      data: { taskId: "succ-1", oldTaskId: "task-1", chainId: "chain-1", duplicate: false },
+    });
+
+    const result = await rescheduleAppointmentAction(validInput);
+
+    expect(result.ok).toBe(true);
+    expect(rescheduleAppointment).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        taskId: "task-1",
+        timeZone: "America/Chicago",
+      }),
+    );
+    expect(revalidatePath).toHaveBeenCalledWith("/messages");
+  });
+});
+
+describe("reassignAppointmentAction", () => {
+  it("fires the assignment notification/Slack side effects for a real (non-duplicate, non-self) reassignment", async () => {
+    createClient.mockResolvedValue(
+      makeSupabaseMock({
+        userId: "user-1",
+        taskRow: {
+          org_id: "org-1",
+          title: "Walkthrough",
+          due_at: "2026-09-01T15:00:00Z",
+          related_property_id: "prop-1",
+          contact_id: null,
+        },
+        propertyAddress: "123 Main St",
+      }),
+    );
+    reassignAppointment.mockResolvedValue({
+      ok: true,
+      data: { taskId: "task-1", oldAssigneeId: "user-1", newAssigneeId: "user-2", duplicate: false },
+    });
+
+    const result = await reassignAppointmentAction("task-1", "user-2");
+
+    expect(result.ok).toBe(true);
+    expect(afterCallbacks).toHaveLength(1);
+    await afterCallbacks[0]();
+    expect(dispatchTaskAssigned).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ taskId: "task-1", assigneeId: "user-2", taskType: "appointment" }),
+    );
+    expect(dispatchTaskAssignedSlack).toHaveBeenCalledWith(
+      expect.objectContaining({ taskId: "task-1", assigneeId: "user-2" }),
+    );
+    expect(revalidatePath).toHaveBeenCalledWith("/leads/prop-1");
+  });
+
+  it("skips the notification when the result is a duplicate (no-op) reassignment", async () => {
+    createClient.mockResolvedValue(
+      makeSupabaseMock({
+        userId: "user-1",
+        taskRow: { org_id: "org-1", title: "Walkthrough", due_at: "2026-09-01T15:00:00Z", related_property_id: null, contact_id: null },
+      }),
+    );
+    reassignAppointment.mockResolvedValue({
+      ok: true,
+      data: { taskId: "task-1", oldAssigneeId: "user-2", newAssigneeId: "user-2", duplicate: true },
+    });
+
+    await reassignAppointmentAction("task-1", "user-2");
+
+    expect(afterCallbacks).toHaveLength(0);
+  });
+
+  it("skips the notification when the actor reassigns the appointment to themselves", async () => {
+    createClient.mockResolvedValue(
+      makeSupabaseMock({
+        userId: "user-1",
+        taskRow: { org_id: "org-1", title: "Walkthrough", due_at: "2026-09-01T15:00:00Z", related_property_id: null, contact_id: null },
+      }),
+    );
+    reassignAppointment.mockResolvedValue({
+      ok: true,
+      data: { taskId: "task-1", oldAssigneeId: "user-2", newAssigneeId: "user-1", duplicate: false },
+    });
+
+    await reassignAppointmentAction("task-1", "user-1");
+
+    expect(afterCallbacks).toHaveLength(0);
+  });
+
+  it("does not revalidate or notify when the RPC fails", async () => {
+    createClient.mockResolvedValue(makeSupabaseMock({ userId: "user-1" }));
+    reassignAppointment.mockResolvedValue({
+      ok: false,
+      error: { code: "REASSIGN_APPOINTMENT_FAILED", message: "not open" },
+    });
+
+    const result = await reassignAppointmentAction("task-1", "user-2");
+
+    expect(result.ok).toBe(false);
+    expect(afterCallbacks).toHaveLength(0);
+    expect(revalidatePath).not.toHaveBeenCalled();
+  });
+});

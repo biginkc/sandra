@@ -19,7 +19,20 @@ vi.mock("sonner", () => ({
   },
 }));
 
+// Appointment lifecycle controls are covered in their own test file
+// (appointment-outcome-row.test.tsx) — stub them here so this suite only
+// asserts TasksPanel picks the right control per row, not their internals.
+vi.mock("@/components/appointments/appointment-outcome-row", () => ({
+  AppointmentOutcomeRow: ({ taskId }: { taskId: string }) => (
+    <div data-testid={`stub-outcome-row-${taskId}`}>outcome row</div>
+  ),
+  AppointmentUpcomingActions: ({ taskId }: { taskId: string }) => (
+    <div data-testid={`stub-upcoming-actions-${taskId}`}>upcoming actions</div>
+  ),
+}));
+
 const TZ = "America/Chicago";
+const VIEWER_ID = "user-1";
 
 function makeRow(overrides: Partial<TaskRow> & { id: string }): TaskRow {
   // Plain spread (not `??`) so an explicit `null` override — e.g.
@@ -29,6 +42,7 @@ function makeRow(overrides: Partial<TaskRow> & { id: string }): TaskRow {
     type: "follow_up",
     title: "Follow up on 123 Main",
     due_at: new Date().toISOString(),
+    end_at: null,
     property_id: "prop-1",
     contact_id: null,
     address: "123 Main St",
@@ -40,7 +54,15 @@ function makeRow(overrides: Partial<TaskRow> & { id: string }): TaskRow {
 
 describe("<TasksPanel />", () => {
   it("renders the all-clear empty state when all buckets are empty", () => {
-    render(<TasksPanel overdue={[]} today={[]} upcoming={[]} timezone={TZ} />);
+    render(
+      <TasksPanel
+        overdue={[]}
+        today={[]}
+        upcoming={[]}
+        timezone={TZ}
+        currentUserId={VIEWER_ID}
+      />,
+    );
     expect(screen.getByText("My Tasks")).toBeInTheDocument();
     expect(screen.getByText(/all caught up/i)).toBeInTheDocument();
     expect(screen.queryByTestId("tasks-panel")).not.toBeInTheDocument();
@@ -51,7 +73,15 @@ describe("<TasksPanel />", () => {
       makeRow({ id: "t1", address: "111 First St" }),
       makeRow({ id: "t2", address: "222 Second Ave", type: "callback" }),
     ];
-    render(<TasksPanel overdue={[]} today={today} upcoming={[]} timezone={TZ} />);
+    render(
+      <TasksPanel
+        overdue={[]}
+        today={today}
+        upcoming={[]}
+        timezone={TZ}
+        currentUserId={VIEWER_ID}
+      />,
+    );
 
     expect(screen.getByTestId("tasks-panel")).toBeInTheDocument();
     expect(screen.getByText("Today")).toBeInTheDocument();
@@ -85,6 +115,7 @@ describe("<TasksPanel />", () => {
           }),
         ]}
         timezone={TZ}
+        currentUserId={VIEWER_ID}
       />,
     );
 
@@ -109,6 +140,7 @@ describe("<TasksPanel />", () => {
         today={[]}
         upcoming={[]}
         timezone={TZ}
+        currentUserId={VIEWER_ID}
       />,
     );
 
@@ -121,7 +153,13 @@ describe("<TasksPanel />", () => {
   it("each row links to the property's messages thread", () => {
     const today = [makeRow({ id: "t1", property_id: "prop-abc" })];
     const { container } = render(
-      <TasksPanel overdue={[]} today={today} upcoming={[]} timezone={TZ} />,
+      <TasksPanel
+        overdue={[]}
+        today={today}
+        upcoming={[]}
+        timezone={TZ}
+        currentUserId={VIEWER_ID}
+      />,
     );
 
     const link = container.querySelector(
@@ -146,7 +184,15 @@ describe("<TasksPanel />", () => {
         state: null,
       }),
     ];
-    render(<TasksPanel overdue={[]} today={today} upcoming={[]} timezone={TZ} />);
+    render(
+      <TasksPanel
+        overdue={[]}
+        today={today}
+        upcoming={[]}
+        timezone={TZ}
+        currentUserId={VIEWER_ID}
+      />,
+    );
 
     expect(screen.getByText("Personal block")).toBeInTheDocument();
     const wrapper = screen.getByTestId("task-row-t1-unlinked");
@@ -173,7 +219,13 @@ describe("<TasksPanel />", () => {
       }),
     ];
     const { container } = render(
-      <TasksPanel overdue={[]} today={today} upcoming={[]} timezone={TZ} />,
+      <TasksPanel
+        overdue={[]}
+        today={today}
+        upcoming={[]}
+        timezone={TZ}
+        currentUserId={VIEWER_ID}
+      />,
     );
 
     expect(screen.getByText("Call the owner")).toBeInTheDocument();
@@ -185,10 +237,82 @@ describe("<TasksPanel />", () => {
 
   it("each row exposes Done and Snooze action buttons", () => {
     const today = [makeRow({ id: "t1" })];
-    render(<TasksPanel overdue={[]} today={today} upcoming={[]} timezone={TZ} />);
+    render(
+      <TasksPanel
+        overdue={[]}
+        today={today}
+        upcoming={[]}
+        timezone={TZ}
+        currentUserId={VIEWER_ID}
+      />,
+    );
 
     expect(screen.getByTestId("task-done-t1")).toBeInTheDocument();
     expect(screen.getByTestId("task-snooze-t1")).toBeInTheDocument();
+  });
+
+  it("renders the outcome row (not the generic actions row) for a past-due open appointment", () => {
+    const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    const overdue = [
+      makeRow({
+        id: "appt-1",
+        type: "appointment",
+        title: "Appointment — 123 Main St",
+        due_at: yesterday,
+        end_at: new Date(
+          new Date(yesterday).getTime() + 30 * 60 * 1000,
+        ).toISOString(),
+      }),
+    ];
+    render(
+      <TasksPanel
+        overdue={overdue}
+        today={[]}
+        upcoming={[]}
+        timezone={TZ}
+        currentUserId={VIEWER_ID}
+      />,
+    );
+
+    expect(screen.getByTestId("stub-outcome-row-appt-1")).toBeInTheDocument();
+    expect(
+      screen.queryByTestId("stub-upcoming-actions-appt-1"),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByTestId("task-done-appt-1")).toBeNull();
+  });
+
+  it("renders the compact upcoming overflow (not the outcome row) for an appointment not yet due, with the time range in the panel's timezone", () => {
+    const tomorrow = new Date(Date.now() + 24 * 60 * 60 * 1000);
+    tomorrow.setUTCHours(19, 0, 0, 0); // 2:00 PM America/Chicago (UTC-5)
+    const dueAt = tomorrow.toISOString();
+    const endAt = new Date(tomorrow.getTime() + 30 * 60 * 1000).toISOString();
+    const upcoming = [
+      makeRow({
+        id: "appt-2",
+        type: "appointment",
+        title: "Appointment — 456 Oak Ave",
+        address: "456 Oak Ave",
+        due_at: dueAt,
+        end_at: endAt,
+      }),
+    ];
+    render(
+      <TasksPanel
+        overdue={[]}
+        today={[]}
+        upcoming={upcoming}
+        timezone={TZ}
+        currentUserId={VIEWER_ID}
+      />,
+    );
+
+    expect(
+      screen.getByTestId("stub-upcoming-actions-appt-2"),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByTestId("stub-outcome-row-appt-2"),
+    ).not.toBeInTheDocument();
+    expect(screen.getByText(/2:00.*2:30 PM/)).toBeInTheDocument();
   });
 
   describe("near-midnight due labeling (upcoming bucket)", () => {
@@ -215,6 +339,7 @@ describe("<TasksPanel />", () => {
           today={[]}
           upcoming={upcoming}
           timezone="America/Los_Angeles"
+          currentUserId={VIEWER_ID}
         />,
       );
 

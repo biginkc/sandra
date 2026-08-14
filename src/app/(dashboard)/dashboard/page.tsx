@@ -127,6 +127,7 @@ export default async function DashboardPage() {
             today={myTasks.today}
             upcoming={myTasks.upcoming}
             timezone={myTasks.timezone}
+            currentUserId={user.id}
           />
           <ThreadsNeedingAttention
             threads={summary.threads_needing_attention}

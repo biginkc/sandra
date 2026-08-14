@@ -3,12 +3,16 @@ import { WebClient } from "@slack/web-api";
 import { reportError } from "@/lib/errors/report";
 import { loadIntegrationPrefs } from "@/lib/integrations/prefs";
 import { getDecryptedToken } from "@/lib/integrations/tokens/store";
-import { humanDueDate } from "@/lib/notifications/format";
+import { formatTimeOfDay, humanDueDate } from "@/lib/notifications/format";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { normalizeTimeZone } from "@/lib/time/zoned";
 import { completeTask } from "@/lib/tasks";
 
-import { buildMarkedDoneBlocks, buildTaskAssignedBlocks } from "./blocks";
+import {
+  buildAppointmentReminderBlocks,
+  buildMarkedDoneBlocks,
+  buildTaskAssignedBlocks,
+} from "./blocks";
 
 const TASK_TYPE_LABELS: Record<string, string> = {
   follow_up: "Follow-up",
@@ -97,6 +101,76 @@ export async function dispatchTaskAssignedSlack(
   } catch (error) {
     reportError(error, {
       tags: { surface: "slack_task_dispatch" },
+      extra: { taskId: input.taskId, assigneeId: input.assigneeId },
+    });
+    return { sent: false, reason: "error" };
+  }
+}
+
+export interface DispatchAppointmentReminderSlackInput {
+  taskId: string;
+  assigneeId: string;
+  taskTitle: string;
+  /** ISO timestamptz — the appointment's due_at. */
+  dueAt: string;
+  timezone: string;
+  deepLink: string;
+  /** Same short-circuit as `DispatchSlackTaskInput.slackEnabled`: pass the
+   *  already-loaded pref so this function never re-loads it. */
+  slackEnabled?: boolean;
+}
+
+/**
+ * PR 3 reminder sweep — same shape as `dispatchTaskAssignedSlack` (open a
+ * 1:1 DM, post blocks) but for the appointment-reminder template. Kept as
+ * a separate function rather than a branch on the existing one: the two
+ * templates diverge (no "Mark Done" action row here, and the reminder
+ * fires from the reminder worker's already-loaded prefs/timezone, not a
+ * fresh `loadIntegrationPrefs` call inside a task-assignment flow).
+ */
+export async function dispatchAppointmentReminderSlack(
+  input: DispatchAppointmentReminderSlackInput,
+): Promise<DispatchSlackResult> {
+  try {
+    const admin = createAdminClient();
+    const slackEnabled =
+      input.slackEnabled ??
+      (await loadIntegrationPrefs(admin, input.assigneeId)).slackEnabled;
+    if (!slackEnabled) return { sent: false, reason: "pref_disabled" };
+
+    const token = await getDecryptedToken({
+      userId: input.assigneeId,
+      provider: "slack",
+      tokenType: "bot",
+    });
+    if (!token?.externalAccountId) return { sent: false, reason: "no_token" };
+
+    const slack = new WebClient(token.accessToken.reveal());
+    const opened = await slack.conversations.open({
+      users: token.externalAccountId,
+    });
+    const channel = opened.channel?.id;
+    if (!channel) return { sent: false, reason: "error" };
+
+    const taskTitle = truncateTaskTitle(input.taskTitle);
+    const timeLabel = formatTimeOfDay(input.dueAt, normalizeTimeZone(input.timezone));
+    const blocks = buildAppointmentReminderBlocks({
+      taskTitle,
+      timeLabel,
+      deepLink: input.deepLink,
+    });
+    const posted = await slack.chat.postMessage({
+      channel,
+      blocks,
+      text: `Appointment in 30 min: ${taskTitle} at ${timeLabel}`,
+    });
+    const messageTs = posted.ts;
+    if (!messageTs) return { sent: false, reason: "error" };
+
+    return { sent: true, channel, messageTs };
+  } catch (error) {
+    reportError(error, {
+      tags: { surface: "slack_appointment_reminder_dispatch" },
       extra: { taskId: input.taskId, assigneeId: input.assigneeId },
     });
     return { sent: false, reason: "error" };
@@ -226,7 +300,9 @@ async function loadPropertyAddress(
   return data?.address ?? "Property";
 }
 
-function buildTaskDeepLink(taskId: string): string {
+/** Exported for reuse by other reminder channels (e.g. the SMS/bell
+ *  delivery worker) that need the same deep-link shape Slack uses. */
+export function buildTaskDeepLink(taskId: string): string {
   const baseUrl =
     process.env.NEXT_PUBLIC_APP_URL ??
     process.env.VERCEL_PROJECT_PRODUCTION_URL ??

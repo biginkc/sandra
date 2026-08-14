@@ -7,6 +7,11 @@ vi.mock("./dispatch", () => ({
     const candidate = error as { status?: unknown; code?: unknown };
     return candidate.status === 409 || candidate.code === 409;
   },
+  isGoogleNotFound: (error: unknown) => {
+    if (!error || typeof error !== "object") return false;
+    const candidate = error as { status?: unknown; code?: unknown };
+    return candidate.status === 404 || candidate.code === 404;
+  },
 }));
 vi.mock("@/lib/integrations/prefs", () => ({
   loadIntegrationPrefs: vi.fn(),
@@ -20,7 +25,8 @@ vi.mock("@/lib/errors/report", () => ({
 
 import {
   processClaimedCalendarCreation,
-  type ClaimedCalendarCreationRow,
+  processClaimedCalendarMutation,
+  type ClaimedCalendarMutationRow,
 } from "./create-worker";
 import { buildCalendarClient } from "./dispatch";
 import { loadIntegrationPrefs } from "@/lib/integrations/prefs";
@@ -83,22 +89,31 @@ function ledgerWrite(applied = true) {
   return { data: applied ? [{ id: "ledger-1" }] : [], error: null };
 }
 
-const BASE_CLAIMED: ClaimedCalendarCreationRow = {
+const BASE_CLAIMED: ClaimedCalendarMutationRow = {
   ledger_id: "ledger-1",
   org_id: "org-1",
   calendar_chain_id: "chain-1",
+  operation: "create",
+  phase: "pending",
   source_task_id: "task-1",
+  target_task_id: null,
+  old_assignee_id: "assignee-1",
+  new_assignee_id: null,
+  event_id: null,
   expected_generation: 0,
   client_event_id: "evtclient1",
   attempts: 1,
-  phase: "pending",
   new_event_id: null,
   result_reason: null,
   claim_token: "token-1",
-  task_due_at: "2026-09-01T15:00:00.000Z",
-  task_end_at: "2026-09-01T15:30:00.000Z",
-  task_title: "Walkthrough",
-  task_assignee_id: "assignee-1",
+  source_due_at: "2026-09-01T15:00:00.000Z",
+  source_end_at: "2026-09-01T15:30:00.000Z",
+  source_title: "Walkthrough",
+  source_assignee_id: "assignee-1",
+  target_due_at: null,
+  target_end_at: null,
+  target_title: null,
+  target_assignee_id: null,
 };
 
 const FAKE_TOKEN = { accessToken: { reveal: () => "tok" } } as never;
@@ -108,6 +123,8 @@ beforeEach(() => {
     calendarEnabled: true,
     slackEnabled: true,
     timezone: "America/Chicago",
+    smsRemindersEnabled: false,
+    reminderPhone: null,
   });
   vi.mocked(getDecryptedToken).mockResolvedValue(FAKE_TOKEN);
 });
@@ -118,6 +135,8 @@ describe("processClaimedCalendarCreation", () => {
       calendarEnabled: false,
       slackEnabled: true,
       timezone: "America/Chicago",
+      smsRemindersEnabled: false,
+      reminderPhone: null,
     });
     const supabase = fakeSupabase({
       task_calendar_mutations: [ledgerWrite()], // finalize no-op
@@ -354,7 +373,7 @@ describe("processClaimedCalendarCreation", () => {
   });
 
   describe("provider_done resume (round 6 durable lease)", () => {
-    const PROVIDER_DONE_CLAIMED: ClaimedCalendarCreationRow = {
+    const PROVIDER_DONE_CLAIMED: ClaimedCalendarMutationRow = {
       ...BASE_CLAIMED,
       attempts: 2,
       phase: "provider_done",
@@ -485,5 +504,268 @@ describe("processClaimedCalendarCreation", () => {
       const second = await processClaimedCalendarCreation(secondSupabase, PROVIDER_DONE_CLAIMED);
       expect(second).toEqual({ status: "lease_lost", ledgerId: "ledger-1" });
     });
+  });
+});
+
+describe("processClaimedCalendarMutation dispatch", () => {
+  it("routes operation:create to the create handler", async () => {
+    vi.mocked(loadIntegrationPrefs).mockResolvedValueOnce({
+      calendarEnabled: false,
+      slackEnabled: true,
+      timezone: "America/Chicago",
+      smsRemindersEnabled: false,
+      reminderPhone: null,
+    });
+    const supabase = fakeSupabase({ task_calendar_mutations: [ledgerWrite()] });
+
+    const outcome = await processClaimedCalendarMutation(supabase, {
+      ...BASE_CLAIMED,
+      operation: "create",
+    });
+
+    expect(outcome).toEqual({ status: "pref_disabled", ledgerId: "ledger-1" });
+  });
+});
+
+describe("processClaimedCancel (via processClaimedCalendarMutation)", () => {
+  it("deletes the event and clears the task's event id, marking deleted", async () => {
+    const del = vi.fn().mockResolvedValue({});
+    vi.mocked(buildCalendarClient).mockReturnValue({
+      events: { delete: del },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any);
+    const supabase = fakeSupabase({
+      task_calendar_mutations: [ledgerWrite(), ledgerWrite(), ledgerWrite()],
+      tasks: [{ data: null, error: null }],
+    });
+
+    const outcome = await processClaimedCalendarMutation(supabase, {
+      ...BASE_CLAIMED,
+      operation: "cancel",
+      event_id: "evt-old",
+      client_event_id: null,
+    });
+
+    expect(del).toHaveBeenCalledWith({ calendarId: "primary", eventId: "evt-old" });
+    expect(outcome).toEqual({ status: "deleted", ledgerId: "ledger-1" });
+  });
+
+  it("404 on delete (plan's explicit contract): idempotent success, same as a fresh delete", async () => {
+    const del = vi.fn().mockRejectedValue({ status: 404 });
+    vi.mocked(buildCalendarClient).mockReturnValue({
+      events: { delete: del },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any);
+    const supabase = fakeSupabase({
+      task_calendar_mutations: [ledgerWrite(), ledgerWrite(), ledgerWrite()],
+      tasks: [{ data: null, error: null }],
+    });
+
+    const outcome = await processClaimedCalendarMutation(supabase, {
+      ...BASE_CLAIMED,
+      operation: "cancel",
+      event_id: "evt-gone",
+    });
+
+    expect(outcome).toEqual({ status: "deleted", ledgerId: "ledger-1" });
+  });
+
+  it("no event_id: finalizes immediately as no_event, no calendar client built", async () => {
+    const buildCalendarClientCallsBefore = vi.mocked(buildCalendarClient).mock.calls.length;
+    const supabase = fakeSupabase({ task_calendar_mutations: [ledgerWrite()] });
+
+    const outcome = await processClaimedCalendarMutation(supabase, {
+      ...BASE_CLAIMED,
+      operation: "cancel",
+      event_id: null,
+    });
+
+    expect(outcome).toEqual({ status: "no_event", ledgerId: "ledger-1" });
+    expect(vi.mocked(buildCalendarClient).mock.calls.length).toBe(buildCalendarClientCallsBefore);
+  });
+
+  it("lease_lost: renewLease is a fenced no-op after a successful delete — never advances phase for a lost lease", async () => {
+    const del = vi.fn().mockResolvedValue({});
+    vi.mocked(buildCalendarClient).mockReturnValue({
+      events: { delete: del },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any);
+    const supabase = fakeSupabase({
+      task_calendar_mutations: [ledgerWrite(false)], // renewLease: 0 rows — lease already reclaimed
+    });
+
+    const outcome = await processClaimedCalendarMutation(supabase, {
+      ...BASE_CLAIMED,
+      operation: "cancel",
+      event_id: "evt-old",
+    });
+
+    expect(outcome).toEqual({ status: "lease_lost", ledgerId: "ledger-1" });
+  });
+});
+
+describe("processClaimedReschedule (via processClaimedCalendarMutation)", () => {
+  const RESCHEDULE_CLAIMED: ClaimedCalendarMutationRow = {
+    ...BASE_CLAIMED,
+    operation: "reschedule",
+    event_id: "evt-old",
+    client_event_id: null,
+    target_task_id: "succ-1",
+    target_due_at: "2026-09-02T15:00:00.000Z",
+    target_end_at: "2026-09-02T15:30:00.000Z",
+    target_title: "Walkthrough",
+    target_assignee_id: "assignee-1",
+  };
+
+  it("updates the event under the OLD assignee's token to the successor's new window, then CAS-moves the event id old -> successor", async () => {
+    const patch = vi.fn().mockResolvedValue({ data: { id: "evt-old" } });
+    vi.mocked(buildCalendarClient).mockReturnValue({
+      events: { patch },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any);
+    const supabase = fakeSupabase({
+      task_calendar_mutations: [ledgerWrite(), ledgerWrite(), ledgerWrite()],
+      tasks: [
+        { data: { id: "succ-1" }, error: null }, // CAS onto successor
+        { data: null, error: null }, // best-effort clear on source
+      ],
+    });
+
+    const outcome = await processClaimedCalendarMutation(supabase, RESCHEDULE_CLAIMED);
+
+    expect(patch).toHaveBeenCalledWith({
+      calendarId: "primary",
+      eventId: "evt-old",
+      requestBody: {
+        start: { dateTime: "2026-09-02T15:00:00.000Z" },
+        end: { dateTime: "2026-09-02T15:30:00.000Z" },
+      },
+    });
+    expect(outcome).toEqual({ status: "updated", ledgerId: "ledger-1", eventId: "evt-old" });
+  });
+
+  it("finalize CAS lost: the successor's generation moved before the transfer landed — finalize_conflict, never resurrects", async () => {
+    const patch = vi.fn().mockResolvedValue({ data: { id: "evt-old" } });
+    vi.mocked(buildCalendarClient).mockReturnValue({
+      events: { patch },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any);
+    const supabase = fakeSupabase({
+      task_calendar_mutations: [ledgerWrite(), ledgerWrite()],
+      tasks: [{ data: null, error: null }], // CAS onto successor: 0 rows matched
+    });
+
+    const outcome = await processClaimedCalendarMutation(supabase, RESCHEDULE_CLAIMED);
+
+    expect(outcome).toEqual({
+      status: "finalize_conflict",
+      ledgerId: "ledger-1",
+      eventId: "evt-old",
+      taskId: "succ-1",
+    });
+  });
+
+  it("no event_id: finalizes immediately as no_event, no calendar client built", async () => {
+    const buildCalendarClientCallsBefore = vi.mocked(buildCalendarClient).mock.calls.length;
+    const supabase = fakeSupabase({ task_calendar_mutations: [ledgerWrite()] });
+
+    const outcome = await processClaimedCalendarMutation(supabase, {
+      ...RESCHEDULE_CLAIMED,
+      event_id: null,
+    });
+
+    expect(outcome).toEqual({ status: "no_event", ledgerId: "ledger-1" });
+    expect(vi.mocked(buildCalendarClient).mock.calls.length).toBe(buildCalendarClientCallsBefore);
+  });
+
+  it("missing target_task_id is a structural permanent failure, not a silent no-op", async () => {
+    const supabase = fakeSupabase({ task_calendar_mutations: [ledgerWrite()] });
+
+    const outcome = await processClaimedCalendarMutation(supabase, {
+      ...RESCHEDULE_CLAIMED,
+      target_task_id: null,
+    });
+
+    expect(outcome.status).toBe("permanent_error");
+  });
+});
+
+describe("processClaimedReassign (via processClaimedCalendarMutation)", () => {
+  const REASSIGN_CLAIMED: ClaimedCalendarMutationRow = {
+    ...BASE_CLAIMED,
+    operation: "reassign",
+    event_id: "evt-old",
+    old_assignee_id: "assignee-1",
+    new_assignee_id: "assignee-2",
+    client_event_id: "evtclient-reassign",
+  };
+
+  it("deletes under the old account (idempotent 404-tolerant) and creates under the new account with a fresh client_event_id", async () => {
+    const del = vi.fn().mockResolvedValue({});
+    const insert = vi.fn().mockResolvedValue({ data: { id: "evt-new" } });
+    vi.mocked(buildCalendarClient).mockReturnValue({
+      events: { delete: del, insert, get: vi.fn() },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any);
+    const supabase = fakeSupabase({
+      task_calendar_mutations: [ledgerWrite(), ledgerWrite(), ledgerWrite()],
+      tasks: [{ data: { id: "task-1" }, error: null }],
+    });
+
+    const outcome = await processClaimedCalendarMutation(supabase, REASSIGN_CLAIMED);
+
+    expect(del).toHaveBeenCalledWith({ calendarId: "primary", eventId: "evt-old" });
+    expect(insert).toHaveBeenCalledWith({
+      calendarId: "primary",
+      requestBody: expect.objectContaining({ id: "evtclient-reassign" }),
+    });
+    expect(outcome).toEqual({ status: "reassigned", ledgerId: "ledger-1", eventId: "evt-new" });
+  });
+
+  it("old event already gone (404) still proceeds to create under the new account", async () => {
+    const del = vi.fn().mockRejectedValue({ status: 404 });
+    const insert = vi.fn().mockResolvedValue({ data: { id: "evt-new-2" } });
+    vi.mocked(buildCalendarClient).mockReturnValue({
+      events: { delete: del, insert, get: vi.fn() },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any);
+    const supabase = fakeSupabase({
+      task_calendar_mutations: [ledgerWrite(), ledgerWrite(), ledgerWrite()],
+      tasks: [{ data: { id: "task-1" }, error: null }],
+    });
+
+    const outcome = await processClaimedCalendarMutation(supabase, REASSIGN_CLAIMED);
+
+    expect(outcome).toEqual({ status: "reassigned", ledgerId: "ledger-1", eventId: "evt-new-2" });
+  });
+
+  it("new assignee has no token: finalizes as a no_token no-op (old event is still deleted first)", async () => {
+    const del = vi.fn().mockResolvedValue({});
+    vi.mocked(buildCalendarClient).mockReturnValue({
+      events: { delete: del },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any);
+    vi.mocked(getDecryptedToken)
+      .mockResolvedValueOnce(FAKE_TOKEN) // old-account delete
+      .mockResolvedValueOnce(null); // new-account create
+    const supabase = fakeSupabase({
+      task_calendar_mutations: [ledgerWrite()], // finalize no-op
+    });
+
+    const outcome = await processClaimedCalendarMutation(supabase, REASSIGN_CLAIMED);
+
+    expect(del).toHaveBeenCalled();
+    expect(outcome).toEqual({ status: "no_token", ledgerId: "ledger-1" });
+  });
+
+  it("missing new_assignee_id is a structural permanent failure, not a silent no-op", async () => {
+    const supabase = fakeSupabase({ task_calendar_mutations: [ledgerWrite()] });
+
+    const outcome = await processClaimedCalendarMutation(supabase, {
+      ...REASSIGN_CLAIMED,
+      new_assignee_id: null,
+    });
+
+    expect(outcome.status).toBe("permanent_error");
   });
 });

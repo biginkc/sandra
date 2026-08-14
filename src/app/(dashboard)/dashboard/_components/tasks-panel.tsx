@@ -1,6 +1,10 @@
 import Link from "next/link";
 
 import { humanDueDate } from "@/lib/notifications/format";
+import {
+  AppointmentOutcomeRow,
+  AppointmentUpcomingActions,
+} from "@/components/appointments/appointment-outcome-row";
 
 import type { TaskRow } from "../queries";
 
@@ -14,6 +18,10 @@ type Props = {
    *  labels must be formatted in the same zone or a row can sit under
    *  Upcoming while its label reads "today". */
   timezone: string;
+  /** The viewer these tasks belong to (fetchMyTasks always scopes to
+   *  `assignee_id = viewer`) — appointment rows need this to drive the
+   *  reschedule popover's timezone lookup. */
+  currentUserId: string;
 };
 
 const TYPE_LABELS: Record<string, string> = {
@@ -36,8 +44,19 @@ const TYPE_LABELS: Record<string, string> = {
  *     canonical thread param the cockpit itself reads/writes
  *     (canonicalizeThreadId resolves a raw contact id to its conversation)
  *   - fully unlinked (personal block) → "Personal block", no link
+ *
+ * Appointment rows get their own action area instead of the generic
+ * Done/Snooze row: once `due_at` has passed, the "How'd it go?" outcome
+ * row (held / no-show / reschedule / cancel); before that, a compact
+ * "..." overflow with just Reschedule/Cancel.
  */
-export function TasksPanel({ overdue, today, upcoming, timezone }: Props) {
+export function TasksPanel({
+  overdue,
+  today,
+  upcoming,
+  timezone,
+  currentUserId,
+}: Props) {
   const total = overdue.length + today.length + upcoming.length;
 
   if (total === 0) {
@@ -50,6 +69,12 @@ export function TasksPanel({ overdue, today, upcoming, timezone }: Props) {
       </div>
     );
   }
+
+  // Server components render once per request; capturing request time
+  // here is intentional and stable for the duration of the response —
+  // same convention as dashboard/page.tsx's own `nowMs`.
+  // eslint-disable-next-line react-hooks/purity
+  const nowMs = Date.now();
 
   return (
     <div
@@ -64,13 +89,34 @@ export function TasksPanel({ overdue, today, upcoming, timezone }: Props) {
       </div>
 
       {overdue.length > 0 ? (
-        <Section label="Overdue" tasks={overdue} variant="overdue" timezone={timezone} />
+        <Section
+          label="Overdue"
+          tasks={overdue}
+          variant="overdue"
+          timezone={timezone}
+          nowMs={nowMs}
+          currentUserId={currentUserId}
+        />
       ) : null}
       {today.length > 0 ? (
-        <Section label="Today" tasks={today} variant="today" timezone={timezone} />
+        <Section
+          label="Today"
+          tasks={today}
+          variant="today"
+          timezone={timezone}
+          nowMs={nowMs}
+          currentUserId={currentUserId}
+        />
       ) : null}
       {upcoming.length > 0 ? (
-        <Section label="Upcoming" tasks={upcoming} variant="upcoming" timezone={timezone} />
+        <Section
+          label="Upcoming"
+          tasks={upcoming}
+          variant="upcoming"
+          timezone={timezone}
+          nowMs={nowMs}
+          currentUserId={currentUserId}
+        />
       ) : null}
     </div>
   );
@@ -94,16 +140,56 @@ function taskPrimaryLabel(t: TaskRow): string {
   return t.title;
 }
 
+/** "2:00–2:30 PM" in the panel's timezone; just the start time when
+ *  `end_at` is missing (shouldn't happen for a real appointment, but a
+ *  malformed row degrades gracefully rather than throwing). */
+function formatTimeRange(
+  dueAt: string,
+  endAt: string | null,
+  timeZone: string,
+): string {
+  const fmt = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    hour: "numeric",
+    minute: "2-digit",
+  });
+  const start = fmt.format(new Date(dueAt));
+  if (!endAt) return start;
+  return `${start}–${fmt.format(new Date(endAt))}`;
+}
+
+/** Subtitle for an appointment row: the usual day label (today / overdue
+ *  / relative date) plus the appointment's own time range, so a row in
+ *  the (possibly multi-day) Upcoming bucket still reads as a specific
+ *  time, not just "in 3 days". */
+function appointmentSubtitle(
+  t: TaskRow,
+  variant: "overdue" | "today" | "upcoming",
+  timezone: string,
+): string {
+  const dayLabel =
+    variant === "today"
+      ? "today"
+      : variant === "overdue"
+        ? "overdue"
+        : humanDueDate(t.due_at, undefined, timezone);
+  return `${dayLabel}, ${formatTimeRange(t.due_at, t.end_at, timezone)}`;
+}
+
 function Section({
   label,
   tasks,
   variant,
   timezone,
+  nowMs,
+  currentUserId,
 }: {
   label: string;
   tasks: TaskRow[];
   variant: "overdue" | "today" | "upcoming";
   timezone: string;
+  nowMs: number;
+  currentUserId: string;
 }) {
   return (
     <div className="mb-4 last:mb-0">
@@ -118,6 +204,7 @@ function Section({
         {tasks.map((t) => {
           const href = taskHref(t);
           const primary = taskPrimaryLabel(t);
+          const isAppointment = t.type === "appointment";
           const rowContent = (
             <>
               <div className="text-foreground truncate text-sm font-bold">
@@ -125,14 +212,32 @@ function Section({
               </div>
               <div className="text-muted-foreground truncate text-xs font-medium">
                 {(TYPE_LABELS[t.type] ?? "Task")} ·{" "}
-                {variant === "today"
-                  ? "today"
-                  : variant === "overdue"
-                    ? "overdue"
-                    : humanDueDate(t.due_at, undefined, timezone)}
+                {isAppointment
+                  ? appointmentSubtitle(t, variant, timezone)
+                  : variant === "today"
+                    ? "today"
+                    : variant === "overdue"
+                      ? "overdue"
+                      : humanDueDate(t.due_at, undefined, timezone)}
               </div>
             </>
           );
+
+          let actions: React.ReactNode;
+          if (!isAppointment) {
+            actions = <TaskActionsRow taskId={t.id} />;
+          } else if (new Date(t.due_at).getTime() < nowMs) {
+            actions = (
+              <AppointmentOutcomeRow taskId={t.id} assigneeId={currentUserId} />
+            );
+          } else {
+            actions = (
+              <AppointmentUpcomingActions
+                taskId={t.id}
+                assigneeId={currentUserId}
+              />
+            );
+          }
 
           return (
             <li
@@ -156,9 +261,7 @@ function Section({
                     {rowContent}
                   </div>
                 )}
-                {t.type !== "appointment" ? (
-                  <TaskActionsRow taskId={t.id} />
-                ) : null}
+                {actions}
               </div>
             </li>
           );
