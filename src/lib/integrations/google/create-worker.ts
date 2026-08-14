@@ -866,12 +866,22 @@ async function markStaleEventRetryable(
   supabase: Supabase,
   ledgerId: string,
   claimToken: string,
-  resultReason: "no_token_stale_event" | "pref_disabled_stale_event",
+  resultReason:
+    | "no_token_stale_event"
+    | "pref_disabled_stale_event"
+    | "calendar_client_error_stale_event",
   message: string,
   attempts: number,
+  // Codex round 4 (finding 2): reassign's create-then-delete restructure
+  // means this can now fire from EITHER phase — 'pending' (destination
+  // validation, before the new event exists) or 'provider_done' (the old
+  // event still exists after the new one was already created). Callers
+  // must pass whichever phase the row is actually in right now; cancel/
+  // reschedule's call sites are always 'pending'.
+  expectedPhase: "pending" | "provider_done" = "pending",
 ): Promise<{ lost: boolean }> {
   const nextAttemptAt = new Date(Date.now() + attempts * RETRY_BACKOFF_UNIT_MS).toISOString();
-  const result = await applyLedgerTransition(supabase, ledgerId, claimToken, "pending", {
+  const result = await applyLedgerTransition(supabase, ledgerId, claimToken, expectedPhase, {
     result_reason: resultReason,
     last_error: message,
     next_attempt_at: nextAttemptAt,
@@ -1382,13 +1392,39 @@ async function finalizeReschedule(
 // ----------------------------------------------------------------------------
 
 /**
- * Deletes the ledger-recorded event under the OLD assignee's token (404 =
- * idempotent success), then creates a fresh event under the NEW assignee's
- * token using the ledger row's deterministic `client_event_id` (R6-2,
- * same derivation as create) — finalizing via the same task-CAS +
- * ledger-finalize shape as `finalizeCreation` (wrapped as
- * `finalizeReassign` purely to report a distinct `reassigned` status for
- * sweep telemetry).
+ * Codex round 4 rewrite (finding 2): validates the destination and creates
+ * the new event under the NEW assignee's token FIRST, and only deletes the
+ * OLD assignee's event once that new event durably exists (create-progress
+ * — phase='provider_done' + new_event_id — persisted before the delete
+ * step ever runs). Finalizes via the same task-CAS + ledger-finalize shape
+ * as `finalizeCreation` (wrapped as `finalizeReassign` purely to report a
+ * distinct `reassigned` status for sweep telemetry).
+ *
+ * This inverts the order from rounds 1-3 (delete-old, then create-new),
+ * which could permanently destroy the only copy of the appointment's
+ * calendar event: a missing new-assignee token/pref, or a
+ * `buildCalendarClient` failure, discovered AFTER the old event was
+ * already gone, left nothing to resume into except a stale ledger row and
+ * a task with no calendar event anywhere. Under the new order, any
+ * destination-validation failure happens before either event is touched
+ * — nothing is deleted, nothing is created, the row is simply retried
+ * later. The accepted trade-off (see plan) is the mirror-image risk: a
+ * brief window where BOTH the old and new events exist simultaneously
+ * between create succeeding and delete succeeding (and, if delete keeps
+ * failing, for as long as the row keeps retrying) — a transient duplicate
+ * is always recoverable by deleting the leftover; a destroyed-and-never-
+ * recreated event is not.
+ *
+ * Resumability: `claimed.phase === 'provider_done'` (new_event_id set)
+ * means the create step already succeeded — skip straight to delete (if
+ * not already done) + finalize, never re-create. `old_event_deleted_at`
+ * non-null means the delete step already succeeded (persisted
+ * independently of `result_reason`, which every failure write below is
+ * free to overwrite) — skip straight to finalize. A legacy in-flight row
+ * from the old delete-first ordering (phase still 'pending' but
+ * `old_event_deleted_at` already set) is handled by the same skip: the
+ * create step below runs, and the delete block after it is a no-op
+ * because `oldEventAlreadyDeleted` is already true.
  */
 async function processClaimedReassign(
   supabase: Supabase,
@@ -1405,75 +1441,229 @@ async function processClaimedReassign(
     return { status: "permanent_error", ledgerId, error: message };
   }
 
-  if (claimed.phase === "provider_done") {
-    try {
+  // Codex round 1 fix (retained): claimed.event_id (truthy) means an old
+  // event exists that this reassign needs to migrate. If the NEW
+  // assignee's calendar is disabled/unconnected/unbuildable, finalizing as
+  // success would leave the appointment's event silently stranded on the
+  // wrong account (or, if the delete step already ran on a legacy row,
+  // with no event anywhere) while the ledger claims the operation is
+  // done. Only a reassign with NO old event to migrate (never connected to
+  // Calendar in the first place) is a genuine clean no-op.
+  const hadEventToMigrate = Boolean(claimed.event_id);
+
+  // Tracks which phase the NEXT fenced write should expect — starts at
+  // whatever the claim handed us, flips to 'provider_done' the instant the
+  // create step's progress write lands (or trivially, if we resumed
+  // already past it). Every write below — including the catch-all at the
+  // bottom — must use this, not a hardcoded 'pending', now that a crash
+  // can happen either before OR after the create step.
+  let currentPhase: "pending" | "provider_done" = claimed.phase;
+  let newEventId = claimed.new_event_id;
+  let reconciled = claimed.result_reason === "reconciled_409";
+
+  try {
+    // ------------------------------------------------------------------
+    // Step 1: validate the destination + create the new event. Skipped
+    // entirely when resuming at phase='provider_done' — the create step
+    // already succeeded and persisted new_event_id.
+    // ------------------------------------------------------------------
+    if (claimed.phase !== "provider_done") {
+      const newPrefs = await loadIntegrationPrefs(supabase, newAssigneeId);
+      if (!newPrefs.calendarEnabled) {
+        if (hadEventToMigrate) {
+          const message =
+            "new assignee's calendar is disabled; reassign not attempted, old event untouched";
+          const r = await markStaleEventRetryable(
+            supabase,
+            ledgerId,
+            claimToken,
+            "pref_disabled_stale_event",
+            message,
+            claimed.attempts,
+            "pending",
+          );
+          if (r.lost) return { status: "lease_lost", ledgerId };
+          return { status: "stale_event_needs_token", ledgerId, error: message };
+        }
+        const r = await finalizeNoEvent(supabase, ledgerId, claimToken, "pref_disabled");
+        if (r.lost) return { status: "lease_lost", ledgerId };
+        return { status: "pref_disabled", ledgerId };
+      }
+
+      const newToken = await getDecryptedToken({
+        userId: newAssigneeId,
+        provider: "google",
+        tokenType: "user",
+      });
+      if (!newToken) {
+        if (hadEventToMigrate) {
+          const message = "no token for new assignee; reassign not attempted, old event untouched";
+          const r = await markStaleEventRetryable(
+            supabase,
+            ledgerId,
+            claimToken,
+            "no_token_stale_event",
+            message,
+            claimed.attempts,
+            "pending",
+          );
+          if (r.lost) return { status: "lease_lost", ledgerId };
+          return { status: "stale_event_needs_token", ledgerId, error: message };
+        }
+        const r = await finalizeNoEvent(supabase, ledgerId, claimToken, "no_token");
+        if (r.lost) return { status: "lease_lost", ledgerId };
+        return { status: "no_token", ledgerId };
+      }
+
+      if (!claimed.client_event_id) {
+        const message = "reassign ledger row has no client_event_id for the new-account create";
+        const r = await markPermanentFailure(supabase, ledgerId, claimToken, "pending", message);
+        if (r.lost) return { status: "lease_lost", ledgerId };
+        return { status: "permanent_error", ledgerId, error: message };
+      }
+
+      let newCalendar: CalendarClient;
+      try {
+        newCalendar = buildCalendarClient(newAssigneeId, newToken);
+      } catch (e) {
+        // Codex round 4 (finding 2): previously always permanent-failed —
+        // now, since nothing has been touched yet, this is treated the
+        // same as the other destination-validation failures above:
+        // retryable (stale, if there's an old event to eventually
+        // migrate) rather than terminal, in case the failure is a
+        // transient config/credential blip rather than a permanent one.
+        const message = e instanceof Error ? e.message : String(e);
+        if (hadEventToMigrate) {
+          const r = await markStaleEventRetryable(
+            supabase,
+            ledgerId,
+            claimToken,
+            "calendar_client_error_stale_event",
+            message,
+            claimed.attempts,
+            "pending",
+          );
+          if (r.lost) return { status: "lease_lost", ledgerId };
+          return { status: "stale_event_needs_token", ledgerId, error: message };
+        }
+        const r = await markRetryableFailure(supabase, ledgerId, claimToken, "pending", message, claimed.attempts);
+        if (r.lost) return { status: "lease_lost", ledgerId };
+        return { status: "retryable_error", ledgerId, error: message };
+      }
+
+      let eventId: string;
+      try {
+        const response = await newCalendar.events.insert({
+          calendarId: "primary",
+          requestBody: buildEvent(
+            claimed.client_event_id,
+            claimed.source_title,
+            claimed.source_due_at,
+            claimed.source_end_at,
+          ),
+        });
+        if (!response.data.id) throw new Error("Google returned no event id");
+        eventId = response.data.id;
+      } catch (e) {
+        if (isGoogleConflict(e)) {
+          try {
+            const existing = await newCalendar.events.get({
+              calendarId: "primary",
+              eventId: claimed.client_event_id,
+            });
+            if (!existing.data.id) throw new Error("409-reconcile lookup returned no event id");
+            eventId = existing.data.id;
+            reconciled = true;
+          } catch (reconcileError) {
+            return await handleProviderFailure(
+              supabase,
+              ledgerId,
+              claimToken,
+              "pending",
+              reconcileError,
+              claimed.attempts,
+            );
+          }
+        } else {
+          return await handleProviderFailure(
+            supabase,
+            ledgerId,
+            claimToken,
+            "pending",
+            e,
+            claimed.attempts,
+          );
+        }
+      }
+
+      const renewed = await renewLease(supabase, ledgerId, claimToken, "pending");
+      if (renewed.error) {
+        const r = await markRetryableFailure(
+          supabase,
+          ledgerId,
+          claimToken,
+          "pending",
+          renewed.error,
+          claimed.attempts,
+        );
+        if (r.lost) return { status: "lease_lost", ledgerId };
+        return { status: "retryable_error", ledgerId, error: renewed.error };
+      }
+      if (!renewed.applied) return { status: "lease_lost", ledgerId };
+
+      // Codex round 4 (finding 2): persist the new event as create-progress
+      // — phase -> 'provider_done', new_event_id set — BEFORE the old
+      // event is ever touched. A crash between here and the delete step
+      // below resumes with phase='provider_done' and new_event_id already
+      // set: the `claimed.phase !== "provider_done"` check above skips
+      // this entire create block on the next attempt and goes straight to
+      // the delete step, never re-creating.
+      const providerDone = await applyLedgerTransition(supabase, ledgerId, claimToken, "pending", {
+        phase: "provider_done",
+        new_event_id: eventId,
+        result_reason: reconciled ? "reconciled_409" : "event_created",
+        updated_at: nowIso(),
+      });
+      if (providerDone.error) {
+        const r = await markRetryableFailure(
+          supabase,
+          ledgerId,
+          claimToken,
+          "pending",
+          providerDone.error,
+          claimed.attempts,
+        );
+        if (r.lost) return { status: "lease_lost", ledgerId };
+        return { status: "retryable_error", ledgerId, error: providerDone.error };
+      }
+      if (!providerDone.applied) return { status: "lease_lost", ledgerId };
+
+      newEventId = eventId;
+      currentPhase = "provider_done";
+    } else {
+      // Resumed at provider_done — the create step already succeeded and
+      // persisted new_event_id in an earlier attempt.
       if (!claimed.new_event_id) {
-        // Structurally shouldn't happen — see the analogous comment in
-        // resumeProviderDoneCreation. Simpler fallback here (no
-        // client-id reconcile branch): permanent-fail rather than
+        // Structurally shouldn't happen — mirrors the analogous fallback
+        // in resumeProviderDoneCreation. Permanent-fail rather than
         // re-deriving via a second Google round trip.
         const message = "reassign provider_done row has no new_event_id to finalize";
         const r = await markPermanentFailure(supabase, ledgerId, claimToken, "provider_done", message);
         if (r.lost) return { status: "lease_lost", ledgerId };
         return { status: "permanent_error", ledgerId, error: message };
       }
-      return await finalizeReassign(
-        supabase,
-        ledgerId,
-        claimToken,
-        claimed.source_task_id,
-        claimed.expected_generation,
-        claimed.new_event_id,
-        claimed.result_reason === "reconciled_409",
-        claimed.attempts,
-      );
-    } catch (e) {
-      const message = e instanceof Error ? e.message : String(e);
-      reportError(e, {
-        tags: { surface: "calendar_reassign_worker_resume" },
-        extra: { ledgerId, sourceTaskId: claimed.source_task_id },
-      });
-      const r = await markRetryableFailure(
-        supabase,
-        ledgerId,
-        claimToken,
-        "provider_done",
-        message,
-        claimed.attempts,
-      ).catch(() => ({ applied: false, lost: false }));
-      if (r.lost) return { status: "lease_lost", ledgerId };
-      return { status: "retryable_error", ledgerId, error: message };
+      newEventId = claimed.new_event_id;
     }
-  }
 
-  // Codex round 2 fix: a resumed row (crashed after the delete succeeded but
-  // before the new event was created/finalized) carries this marker so the
-  // retry skips straight to the create step instead of re-issuing a delete
-  // against an event that is already gone. Phase stays 'pending' the whole
-  // time here — 'provider_done' is reserved for "new event created" (see the
-  // branch at the top of this function) — so this has to be a separate,
-  // persisted signal rather than reusing the phase enum.
-  //
-  // Codex round 3 fix (finding 2): that signal is `old_event_deleted_at`
-  // (non-null), NOT `result_reason` — round 2's original implementation
-  // read `result_reason === "old_event_deleted"`, but result_reason is the
-  // same field every downstream failure write (markStaleEventRetryable
-  // below included) overwrites with its own reason. A crash sequence of
-  // delete-succeeds -> new-token-missing would clobber "old_event_deleted"
-  // with "no_token_stale_event", making the next retry think the delete
-  // never happened and attempt to re-delete under the (possibly now
-  // revoked) old token. `old_event_deleted_at` is written once, at the
-  // point the delete step durably succeeds (below), and no other write in
-  // this function ever touches it.
-  const oldEventAlreadyDeleted = claimed.old_event_deleted_at !== null;
-
-  try {
-    // Delete under the OLD account first. No client_event_id needed for a
-    // delete — 404 is idempotent success (same contract as cancel). Codex
-    // round 2 fix: this step must be verified/persisted BEFORE the new event
-    // is created or the chain finalized — a missing old-assignee token used
-    // to fall through and finalize successfully, leaving a duplicate event
-    // under both accounts with the ledger claiming reconciliation happened.
+    // ------------------------------------------------------------------
+    // Step 2: delete the OLD event under the OLD account, now that the
+    // new event durably exists. Skipped when there was no old event to
+    // migrate, or the delete already happened (fresh success this pass,
+    // a resumed row, or a legacy pre-round-4 row that deleted before it
+    // created). No client_event_id needed for a delete — 404 is
+    // idempotent success (same contract as cancel).
+    // ------------------------------------------------------------------
+    const oldEventAlreadyDeleted = claimed.old_event_deleted_at !== null;
     if (claimed.event_id && !oldEventAlreadyDeleted) {
       const oldToken = await getDecryptedToken({
         userId: claimed.old_assignee_id,
@@ -1481,12 +1671,12 @@ async function processClaimedReassign(
         tokenType: "user",
       });
       if (!oldToken) {
-        // Same honest-retry posture as cancel's/reassign's other no-token
-        // branches: a real Google event is known to still exist under the
-        // old account. Finalizing here would strand it. Retryable — the
-        // token may return — with the honest result_reason so exhaustion
-        // routes to needs_repair, not failed.
-        const message = "no token for old assignee; old event may still exist and be stale";
+        // The new event already exists (durably persisted above) — this
+        // is now an honest "both events exist, old one is stale" state,
+        // not "nothing happened yet". Retryable — the token may return —
+        // with the honest result_reason so exhaustion routes to
+        // needs_repair, not failed.
+        const message = "no token for old assignee; new event created, old event still exists and is stale";
         const r = await markStaleEventRetryable(
           supabase,
           ledgerId,
@@ -1494,6 +1684,7 @@ async function processClaimedReassign(
           "no_token_stale_event",
           message,
           claimed.attempts,
+          "provider_done",
         );
         if (r.lost) return { status: "lease_lost", ledgerId };
         return { status: "stale_event_needs_token", ledgerId, error: message };
@@ -1508,7 +1699,7 @@ async function processClaimedReassign(
             supabase,
             ledgerId,
             claimToken,
-            "pending",
+            "provider_done",
             e,
             claimed.attempts,
           );
@@ -1518,18 +1709,16 @@ async function processClaimedReassign(
 
       // Close the lease-race window immediately after the (potentially
       // slow) delete call returns, same as every other provider-call site
-      // in this file, then persist delete-done as its own durable write —
-      // atomically-with-or-before the create step, never after — so a
-      // crash here resumes via `oldEventAlreadyDeleted` above instead of
-      // re-deleting or, worse, creating a second event on top of an
-      // unreconciled first one.
-      const renewedAfterDelete = await renewLease(supabase, ledgerId, claimToken, "pending");
+      // in this file, then persist delete-done as its own durable write
+      // so a crash here resumes via `oldEventAlreadyDeleted` above instead
+      // of re-deleting.
+      const renewedAfterDelete = await renewLease(supabase, ledgerId, claimToken, "provider_done");
       if (renewedAfterDelete.error) {
         const r = await markRetryableFailure(
           supabase,
           ledgerId,
           claimToken,
-          "pending",
+          "provider_done",
           renewedAfterDelete.error,
           claimed.attempts,
         );
@@ -1538,14 +1727,14 @@ async function processClaimedReassign(
       }
       if (!renewedAfterDelete.applied) return { status: "lease_lost", ledgerId };
 
-      // Codex round 3 fix (finding 2): `old_event_deleted_at` is the
-      // durable, never-overwritten delete-progress marker `oldEventAlreadyDeleted`
-      // reads above — result_reason is still stamped "old_event_deleted"
-      // here too (it stays useful as the last-transition label for
-      // observability) but no longer anything this function relies on to
-      // decide whether the delete already happened; every later failure
-      // write is free to overwrite it with its own reason.
-      const deletePersisted = await applyLedgerTransition(supabase, ledgerId, claimToken, "pending", {
+      // `old_event_deleted_at` is the durable, never-overwritten
+      // delete-progress marker `oldEventAlreadyDeleted` reads above —
+      // result_reason is still stamped "old_event_deleted" here too (it
+      // stays useful as the last-transition label for observability) but
+      // no longer anything this function relies on to decide whether the
+      // delete already happened; every later failure write is free to
+      // overwrite it with its own reason.
+      const deletePersisted = await applyLedgerTransition(supabase, ledgerId, claimToken, "provider_done", {
         result_reason: "old_event_deleted",
         old_event_deleted_at: nowIso(),
         updated_at: nowIso(),
@@ -1555,7 +1744,7 @@ async function processClaimedReassign(
           supabase,
           ledgerId,
           claimToken,
-          "pending",
+          "provider_done",
           deletePersisted.error,
           claimed.attempts,
         );
@@ -1565,165 +1754,16 @@ async function processClaimedReassign(
       if (!deletePersisted.applied) return { status: "lease_lost", ledgerId };
     }
 
-    // Codex round 1 fix: claimed.event_id (truthy here) means an old event
-    // existed that this reassign needs to migrate. If the NEW assignee's
-    // calendar is disabled or unconnected, finalizing as success would
-    // leave the appointment with NO calendar event anywhere (old
-    // deleted-or-attempted, new never created) while the ledger claims the
-    // operation is done — the same silent-stale-outcome bug as cancel/
-    // reschedule. Only a reassign with NO old event to migrate (never
-    // connected to Calendar in the first place) is a genuine clean no-op.
-    const hadEventToMigrate = Boolean(claimed.event_id);
-
-    const newPrefs = await loadIntegrationPrefs(supabase, newAssigneeId);
-    if (!newPrefs.calendarEnabled) {
-      if (hadEventToMigrate) {
-        const message = "new assignee's calendar is disabled; old event was migrated to nowhere";
-        const r = await markStaleEventRetryable(
-          supabase,
-          ledgerId,
-          claimToken,
-          "pref_disabled_stale_event",
-          message,
-          claimed.attempts,
-        );
-        if (r.lost) return { status: "lease_lost", ledgerId };
-        return { status: "stale_event_needs_token", ledgerId, error: message };
-      }
-      const r = await finalizeNoEvent(supabase, ledgerId, claimToken, "pref_disabled");
-      if (r.lost) return { status: "lease_lost", ledgerId };
-      return { status: "pref_disabled", ledgerId };
-    }
-
-    const newToken = await getDecryptedToken({
-      userId: newAssigneeId,
-      provider: "google",
-      tokenType: "user",
-    });
-    if (!newToken) {
-      if (hadEventToMigrate) {
-        const message = "no token for new assignee; old event was migrated to nowhere";
-        const r = await markStaleEventRetryable(
-          supabase,
-          ledgerId,
-          claimToken,
-          "no_token_stale_event",
-          message,
-          claimed.attempts,
-        );
-        if (r.lost) return { status: "lease_lost", ledgerId };
-        return { status: "stale_event_needs_token", ledgerId, error: message };
-      }
-      const r = await finalizeNoEvent(supabase, ledgerId, claimToken, "no_token");
-      if (r.lost) return { status: "lease_lost", ledgerId };
-      return { status: "no_token", ledgerId };
-    }
-
-    if (!claimed.client_event_id) {
-      const message = "reassign ledger row has no client_event_id for the new-account create";
-      const r = await markPermanentFailure(supabase, ledgerId, claimToken, "pending", message);
-      if (r.lost) return { status: "lease_lost", ledgerId };
-      return { status: "permanent_error", ledgerId, error: message };
-    }
-
-    let newCalendar: CalendarClient;
-    try {
-      newCalendar = buildCalendarClient(newAssigneeId, newToken);
-    } catch (e) {
-      const message = e instanceof Error ? e.message : String(e);
-      const r = await markPermanentFailure(supabase, ledgerId, claimToken, "pending", message);
-      if (r.lost) return { status: "lease_lost", ledgerId };
-      return { status: "permanent_error", ledgerId, error: message };
-    }
-
-    let eventId: string;
-    let reconciled = false;
-    try {
-      const response = await newCalendar.events.insert({
-        calendarId: "primary",
-        requestBody: buildEvent(
-          claimed.client_event_id,
-          claimed.source_title,
-          claimed.source_due_at,
-          claimed.source_end_at,
-        ),
-      });
-      if (!response.data.id) throw new Error("Google returned no event id");
-      eventId = response.data.id;
-    } catch (e) {
-      if (isGoogleConflict(e)) {
-        try {
-          const existing = await newCalendar.events.get({
-            calendarId: "primary",
-            eventId: claimed.client_event_id,
-          });
-          if (!existing.data.id) throw new Error("409-reconcile lookup returned no event id");
-          eventId = existing.data.id;
-          reconciled = true;
-        } catch (reconcileError) {
-          return await handleProviderFailure(
-            supabase,
-            ledgerId,
-            claimToken,
-            "pending",
-            reconcileError,
-            claimed.attempts,
-          );
-        }
-      } else {
-        return await handleProviderFailure(
-          supabase,
-          ledgerId,
-          claimToken,
-          "pending",
-          e,
-          claimed.attempts,
-        );
-      }
-    }
-
-    const renewed = await renewLease(supabase, ledgerId, claimToken, "pending");
-    if (renewed.error) {
-      const r = await markRetryableFailure(
-        supabase,
-        ledgerId,
-        claimToken,
-        "pending",
-        renewed.error,
-        claimed.attempts,
-      );
-      if (r.lost) return { status: "lease_lost", ledgerId };
-      return { status: "retryable_error", ledgerId, error: renewed.error };
-    }
-    if (!renewed.applied) return { status: "lease_lost", ledgerId };
-
-    const providerDone = await applyLedgerTransition(supabase, ledgerId, claimToken, "pending", {
-      phase: "provider_done",
-      new_event_id: eventId,
-      result_reason: reconciled ? "reconciled_409" : "event_created",
-      updated_at: nowIso(),
-    });
-    if (providerDone.error) {
-      const r = await markRetryableFailure(
-        supabase,
-        ledgerId,
-        claimToken,
-        "pending",
-        providerDone.error,
-        claimed.attempts,
-      );
-      if (r.lost) return { status: "lease_lost", ledgerId };
-      return { status: "retryable_error", ledgerId, error: providerDone.error };
-    }
-    if (!providerDone.applied) return { status: "lease_lost", ledgerId };
-
+    // ------------------------------------------------------------------
+    // Step 3: finalize (task CAS onto new_event_id + ledger 'finalized').
+    // ------------------------------------------------------------------
     return await finalizeReassign(
       supabase,
       ledgerId,
       claimToken,
       claimed.source_task_id,
       claimed.expected_generation,
-      eventId,
+      newEventId!,
       reconciled,
       claimed.attempts,
     );
@@ -1737,7 +1777,7 @@ async function processClaimedReassign(
       supabase,
       ledgerId,
       claimToken,
-      "pending",
+      currentPhase,
       message,
       claimed.attempts,
     ).catch(() => ({ applied: false, lost: false }));

@@ -312,7 +312,15 @@ returns table (
   task_end_at timestamptz,
   assignee_id uuid,
   assignee_timezone text,
-  assignee_reminder_phone text
+  assignee_reminder_phone text,
+  -- Codex round 4 (finding 3): non-null on a row whose PREVIOUS attempt
+  -- already reached the provider (Slack/SMS returned a message id) before
+  -- crashing on its own mark-sent write — the worker must reconcile
+  -- (mark sent using this id) instead of re-sending. Null for a row whose
+  -- provider call never completed (a genuine failed/stuck-pending row) or
+  -- for bell (which never sets it; dedupe is the notifications unique
+  -- index instead).
+  provider_message_id text
 )
 language sql
 security definer
@@ -424,6 +432,7 @@ as $$
     where d.id = e.id
     returning
       d.id, d.task_id, d.org_id, d.channel, d.attempts, d.claim_token, d.status,
+      d.provider_message_id,
       e.title, e.due_at, e.end_at, e.assignee_id, e.assignee_timezone, e.assignee_reminder_phone,
       e.still_valid
   )
@@ -431,13 +440,13 @@ as $$
     c.id as delivery_id, c.task_id, c.org_id, c.channel, c.attempts, c.claim_token,
     c.status as claimed_status,
     c.title as task_title, c.due_at as task_due_at, c.end_at as task_end_at,
-    c.assignee_id, c.assignee_timezone, c.assignee_reminder_phone
+    c.assignee_id, c.assignee_timezone, c.assignee_reminder_phone, c.provider_message_id
   from claimed c
   where c.still_valid;
 $$;
 
 comment on function public.fn_claim_reminder_retries(integer) is
-  'Service-role-only atomic retry claim (Codex round 1 rewrite). UPDATE ... FROM (SELECT ... FOR UPDATE SKIP LOCKED) over task_reminder_deliveries WHERE (status=failed OR status=pending-stale-10min) AND attempts<3 AND lease-eligible; still-valid rows get attempts+1, a fresh claim_token, and a 2-minute lease (next_attempt_at) — same fencing model as task_calendar_mutations. Inside the SAME locked selection, re-validates assignee active membership, channel still enabled, and appointment still open with due_at still within a 15-minute grace past due (Codex round 3, finding 1 — widened from a strict due_at>now() so a near-due appointment claimed by fn_claim_appointment_reminders''s one-at-a-time overflow behavior is not suppressed by its own first retry pass); a row failing any check is transitioned to terminal status=suppressed (last_error records why) and is NOT returned. Returns claim_token + claimed_status (pre-claim status) so the worker''s completion write can be scoped WHERE id=<mine> AND claim_token=<mine> AND status=<claimed_status> with one-row verification.';
+  'Service-role-only atomic retry claim (Codex round 1 rewrite). UPDATE ... FROM (SELECT ... FOR UPDATE SKIP LOCKED) over task_reminder_deliveries WHERE (status=failed OR status=pending-stale-10min) AND attempts<3 AND lease-eligible; still-valid rows get attempts+1, a fresh claim_token, and a 2-minute lease (next_attempt_at) — same fencing model as task_calendar_mutations. Inside the SAME locked selection, re-validates assignee active membership, channel still enabled, and appointment still open with due_at still within a 15-minute grace past due (Codex round 3, finding 1 — widened from a strict due_at>now() so a near-due appointment claimed by fn_claim_appointment_reminders''s one-at-a-time overflow behavior is not suppressed by its own first retry pass); a row failing any check is transitioned to terminal status=suppressed (last_error records why) and is NOT returned. Returns claim_token + claimed_status (pre-claim status) so the worker''s completion write can be scoped WHERE id=<mine> AND claim_token=<mine> AND status=<claimed_status> with one-row verification. Also returns provider_message_id (Codex round 4, finding 3) — non-null means a PRIOR attempt already reached the provider (Slack/SMS) and only crashed on its own mark-sent write; the worker reconciles (marks sent using this id) instead of re-sending, since Slack/SMS have no send-side idempotency key to make a re-send itself safe.';
 
 revoke all on function public.fn_claim_reminder_retries(integer) from public, anon, authenticated;
 grant execute on function public.fn_claim_reminder_retries(integer) to service_role;

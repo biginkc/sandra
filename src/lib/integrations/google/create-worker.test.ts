@@ -793,57 +793,233 @@ describe("processClaimedReassign (via processClaimedCalendarMutation)", () => {
     expect(outcome).toEqual({ status: "reassigned", ledgerId: "ledger-1", eventId: "evt-new-2" });
   });
 
-  it("Codex round 1 (finding 4): new assignee has no token, but an old event EXISTED to migrate — retryable stale-event outcome, NOT finalized as a no_token no-op (old event deleted, task now has assignee but no calendar event anywhere)", async () => {
-    const del = vi.fn().mockResolvedValue({});
-    vi.mocked(buildCalendarClient).mockReturnValue({
-      events: { delete: del },
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    } as any);
-    vi.mocked(getDecryptedToken)
-      .mockResolvedValueOnce(FAKE_TOKEN) // old-account delete
-      .mockResolvedValueOnce(null); // new-account create
-    const supabase = fakeSupabase({
-      // 1: renewLease after delete, 2: persist old_event_deleted_at,
-      // 3: markStaleEventRetryable's write.
-      task_calendar_mutations: [ledgerWrite(), ledgerWrite(), ledgerWrite()],
+  describe("Codex round 4 fix (finding 2): destination validated BEFORE the old event is ever touched", () => {
+    it("destination-disabled → source untouched: new assignee's calendar disabled, old event still exists — retryable stale-event outcome, but nothing was deleted or created", async () => {
+      const del = vi.fn();
+      const insert = vi.fn();
+      vi.mocked(buildCalendarClient).mockReturnValue({
+        events: { delete: del, insert, get: vi.fn() },
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } as any);
+      vi.mocked(loadIntegrationPrefs).mockResolvedValueOnce({
+        calendarEnabled: false,
+        slackEnabled: true,
+        timezone: "America/Chicago",
+        smsRemindersEnabled: false,
+        reminderPhone: null,
+      });
+      const getDecryptedTokenCallsBefore = vi.mocked(getDecryptedToken).mock.calls.length;
+      const supabase = fakeSupabase({
+        // Only markStaleEventRetryable's single write — no delete-related
+        // writes happen because the delete step is never reached.
+        task_calendar_mutations: [ledgerWrite()],
+      });
+
+      const outcome = await processClaimedCalendarMutation(supabase, REASSIGN_CLAIMED);
+
+      expect(del).not.toHaveBeenCalled();
+      expect(insert).not.toHaveBeenCalled();
+      // Destination-validation failed before even reaching a token lookup.
+      expect(vi.mocked(getDecryptedToken).mock.calls.length).toBe(getDecryptedTokenCallsBefore);
+      expect(outcome).toEqual({
+        status: "stale_event_needs_token",
+        ledgerId: "ledger-1",
+        error: expect.stringContaining("disabled"),
+      });
     });
 
-    const outcome = await processClaimedCalendarMutation(supabase, REASSIGN_CLAIMED);
+    it("new assignee has no token, old event still exists — retryable stale-event outcome, nothing deleted or created", async () => {
+      const del = vi.fn();
+      const insert = vi.fn();
+      vi.mocked(buildCalendarClient).mockReturnValue({
+        events: { delete: del, insert, get: vi.fn() },
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } as any);
+      vi.mocked(getDecryptedToken).mockResolvedValueOnce(null); // new-account lookup fails; old-account lookup never happens
+      const supabase = fakeSupabase({
+        task_calendar_mutations: [ledgerWrite()], // markStaleEventRetryable's single write
+      });
 
-    expect(del).toHaveBeenCalled();
-    expect(outcome).toEqual({
-      status: "stale_event_needs_token",
-      ledgerId: "ledger-1",
-      error: expect.stringContaining("no token"),
-    });
-  });
+      const outcome = await processClaimedCalendarMutation(supabase, REASSIGN_CLAIMED);
 
-  it("Codex round 1 (finding 4): new assignee's calendar disabled, but an old event EXISTED to migrate — retryable stale-event outcome, NOT finalized as a pref_disabled no-op", async () => {
-    const del = vi.fn().mockResolvedValue({});
-    vi.mocked(buildCalendarClient).mockReturnValue({
-      events: { delete: del },
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    } as any);
-    vi.mocked(loadIntegrationPrefs).mockResolvedValueOnce({
-      calendarEnabled: false,
-      slackEnabled: true,
-      timezone: "America/Chicago",
-      smsRemindersEnabled: false,
-      reminderPhone: null,
-    });
-    const supabase = fakeSupabase({
-      // 1: renewLease after delete, 2: persist old_event_deleted_at,
-      // 3: markStaleEventRetryable's write.
-      task_calendar_mutations: [ledgerWrite(), ledgerWrite(), ledgerWrite()],
+      expect(del).not.toHaveBeenCalled();
+      expect(insert).not.toHaveBeenCalled();
+      expect(outcome).toEqual({
+        status: "stale_event_needs_token",
+        ledgerId: "ledger-1",
+        error: expect.stringContaining("no token"),
+      });
     });
 
-    const outcome = await processClaimedCalendarMutation(supabase, REASSIGN_CLAIMED);
+    it("new-account calendar client fails to build — retryable stale-event outcome (Codex round 4: previously permanent-failed; now retried like the other destination checks since nothing was touched), nothing deleted or created", async () => {
+      const del = vi.fn();
+      vi.mocked(buildCalendarClient).mockImplementation(() => {
+        throw new Error("bad oauth config");
+      });
+      const supabase = fakeSupabase({
+        task_calendar_mutations: [ledgerWrite()], // markStaleEventRetryable's single write
+      });
 
-    expect(del).toHaveBeenCalled();
-    expect(outcome).toEqual({
-      status: "stale_event_needs_token",
-      ledgerId: "ledger-1",
-      error: expect.stringContaining("disabled"),
+      const outcome = await processClaimedCalendarMutation(supabase, REASSIGN_CLAIMED);
+
+      expect(del).not.toHaveBeenCalled();
+      expect(outcome).toEqual({
+        status: "stale_event_needs_token",
+        ledgerId: "ledger-1",
+        error: "bad oauth config",
+      });
+    });
+
+    it("create fails with a non-conflict provider error — retryable_error, the OLD event is never touched (this is the exact bug the round-4 reorder fixes: the old ordering deleted first, so a create failure here used to strand the appointment with no event anywhere)", async () => {
+      const del = vi.fn();
+      const insert = vi.fn().mockRejectedValue({ status: 500, message: "backend blip" });
+      vi.mocked(buildCalendarClient).mockReturnValue({
+        events: { delete: del, insert, get: vi.fn() },
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } as any);
+      const supabase = fakeSupabase({
+        task_calendar_mutations: [ledgerWrite()], // handleProviderFailure's markRetryableFailure write
+      });
+
+      const outcome = await processClaimedCalendarMutation(supabase, REASSIGN_CLAIMED);
+
+      expect(del).not.toHaveBeenCalled();
+      expect(outcome.status).toBe("retryable_error");
+    });
+
+    it("full happy path: validates destination, creates under the new account first, THEN deletes the old event, then finalizes", async () => {
+      const del = vi.fn().mockResolvedValue({});
+      const insert = vi.fn().mockResolvedValue({ data: { id: "evt-new" } });
+      const insertCallOrder: string[] = [];
+      vi.mocked(buildCalendarClient).mockImplementation((userId: string) => {
+        insertCallOrder.push(userId);
+        return {
+          events: {
+            delete: async (...args: unknown[]) => {
+              insertCallOrder.push("delete");
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              return del(...(args as any));
+            },
+            insert: async (...args: unknown[]) => {
+              insertCallOrder.push("insert");
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              return insert(...(args as any));
+            },
+            get: vi.fn(),
+          },
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        } as any;
+      });
+      const supabase = fakeSupabase({
+        // renewLease-after-create, phase->provider_done, renewLease-after-
+        // delete, persist old_event_deleted_at, finalize.
+        task_calendar_mutations: [
+          ledgerWrite(),
+          ledgerWrite(),
+          ledgerWrite(),
+          ledgerWrite(),
+          ledgerWrite(),
+        ],
+        tasks: [{ data: { id: "task-1" }, error: null }],
+      });
+
+      const outcome = await processClaimedCalendarMutation(supabase, REASSIGN_CLAIMED);
+
+      expect(insert).toHaveBeenCalledWith({
+        calendarId: "primary",
+        requestBody: expect.objectContaining({ id: "evtclient-reassign" }),
+      });
+      expect(del).toHaveBeenCalledWith({ calendarId: "primary", eventId: "evt-old" });
+      // The create call happens strictly before the delete call.
+      expect(insertCallOrder.indexOf("insert")).toBeLessThan(insertCallOrder.indexOf("delete"));
+      expect(outcome).toEqual({ status: "reassigned", ledgerId: "ledger-1", eventId: "evt-new" });
+    });
+
+    it("create-then-crash resume: phase='provider_done' with new_event_id already set skips straight to delete — no re-create — then finalizes", async () => {
+      const del = vi.fn().mockResolvedValue({});
+      const insert = vi.fn();
+      vi.mocked(buildCalendarClient).mockReturnValue({
+        events: { delete: del, insert, get: vi.fn() },
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } as any);
+      const getDecryptedTokenCallsBefore = vi.mocked(getDecryptedToken).mock.calls.length;
+      const supabase = fakeSupabase({
+        // renewLease after delete, persist old_event_deleted_at, finalize —
+        // no create-related writes, proving the create step never re-runs.
+        task_calendar_mutations: [ledgerWrite(), ledgerWrite(), ledgerWrite()],
+        tasks: [{ data: { id: "task-1" }, error: null }],
+      });
+
+      const outcome = await processClaimedCalendarMutation(supabase, {
+        ...REASSIGN_CLAIMED,
+        phase: "provider_done",
+        new_event_id: "evt-new-from-earlier-attempt",
+        result_reason: "event_created",
+      });
+
+      expect(insert).not.toHaveBeenCalled();
+      expect(del).toHaveBeenCalledWith({ calendarId: "primary", eventId: "evt-old" });
+      // Only the old-account token lookup for the delete — no new-account
+      // lookup, since the create step (and its token fetch) is skipped.
+      expect(vi.mocked(getDecryptedToken).mock.calls.length).toBe(getDecryptedTokenCallsBefore + 1);
+      expect(outcome).toEqual({
+        status: "reassigned",
+        ledgerId: "ledger-1",
+        eventId: "evt-new-from-earlier-attempt",
+      });
+    });
+
+    it("delete-fails retry preserves both markers: resumed at provider_done, delete fails with a non-404 — retryable_error, no re-create, new_event_id/phase untouched so the next retry resumes at the same point", async () => {
+      const del = vi.fn().mockRejectedValue({ status: 500, message: "backend blip" });
+      const insert = vi.fn();
+      vi.mocked(buildCalendarClient).mockReturnValue({
+        events: { delete: del, insert, get: vi.fn() },
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } as any);
+      const supabase = fakeSupabase({
+        // Only handleProviderFailure's markRetryableFailure write (phase
+        // stays 'provider_done', old_event_deleted_at stays null) — no
+        // create write, no finalize write.
+        task_calendar_mutations: [ledgerWrite()],
+      });
+
+      const outcome = await processClaimedCalendarMutation(supabase, {
+        ...REASSIGN_CLAIMED,
+        phase: "provider_done",
+        new_event_id: "evt-new-from-earlier-attempt",
+        result_reason: "event_created",
+      });
+
+      expect(insert).not.toHaveBeenCalled();
+      expect(del).toHaveBeenCalledWith({ calendarId: "primary", eventId: "evt-old" });
+      expect(outcome.status).toBe("retryable_error");
+    });
+
+    it("delete step: old-account token missing after create succeeded — retryable stale-event outcome (new event exists, old event is now the stale one)", async () => {
+      const del = vi.fn();
+      const insert = vi.fn();
+      vi.mocked(buildCalendarClient).mockReturnValue({
+        events: { delete: del, insert, get: vi.fn() },
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } as any);
+      vi.mocked(getDecryptedToken).mockResolvedValueOnce(null); // old-account lookup for the delete step
+      const supabase = fakeSupabase({
+        task_calendar_mutations: [ledgerWrite()], // markStaleEventRetryable's single write
+      });
+
+      const outcome = await processClaimedCalendarMutation(supabase, {
+        ...REASSIGN_CLAIMED,
+        phase: "provider_done",
+        new_event_id: "evt-new-from-earlier-attempt",
+        result_reason: "event_created",
+      });
+
+      expect(del).not.toHaveBeenCalled();
+      expect(outcome).toEqual({
+        status: "stale_event_needs_token",
+        ledgerId: "ledger-1",
+        error: expect.stringContaining("no token for old assignee"),
+      });
     });
   });
 
@@ -872,44 +1048,7 @@ describe("processClaimedReassign (via processClaimedCalendarMutation)", () => {
     expect(outcome.status).toBe("permanent_error");
   });
 
-  describe("Codex round 2 fix (finding 1): the reassign branch must not reach finalized while the old assignee's event still exists", () => {
-    it("no old-assignee token: retryable stale-event outcome, no delete attempted, no create, no finalize — never falls through to create a duplicate event under the new account", async () => {
-      vi.mocked(getDecryptedToken).mockResolvedValueOnce(null); // old-account delete lookup
-      const buildCalendarClientCallsBefore = vi.mocked(buildCalendarClient).mock.calls.length;
-      const supabase = fakeSupabase({
-        task_calendar_mutations: [ledgerWrite()], // markStaleEventRetryable's single write
-      });
-
-      const outcome = await processClaimedCalendarMutation(supabase, REASSIGN_CLAIMED);
-
-      // No calendar client was ever built for this row — the missing-token
-      // branch must return before any delete or create call is attempted.
-      expect(vi.mocked(buildCalendarClient).mock.calls.length).toBe(buildCalendarClientCallsBefore);
-      expect(outcome).toEqual({
-        status: "stale_event_needs_token",
-        ledgerId: "ledger-1",
-        error: expect.stringContaining("no token for old assignee"),
-      });
-    });
-
-    it("delete fails with a non-404 provider error: retryable_error, no create attempted, no finalize, old event's fate stays open for the next retry", async () => {
-      const del = vi.fn().mockRejectedValue({ status: 500, message: "backend blip" });
-      const insert = vi.fn();
-      vi.mocked(buildCalendarClient).mockReturnValue({
-        events: { delete: del, insert, get: vi.fn() },
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      } as any);
-      const supabase = fakeSupabase({
-        task_calendar_mutations: [ledgerWrite()], // handleProviderFailure's markRetryableFailure write
-      });
-
-      const outcome = await processClaimedCalendarMutation(supabase, REASSIGN_CLAIMED);
-
-      expect(del).toHaveBeenCalledWith({ calendarId: "primary", eventId: "evt-old" });
-      expect(insert).not.toHaveBeenCalled();
-      expect(outcome.status).toBe("retryable_error");
-    });
-
+  describe("legacy resume: a row still in-flight under the pre-round-4 delete-first ordering (old_event_deleted_at already set, phase still 'pending') is honored as-is — never re-deleted, and the create step runs exactly like a fresh row", () => {
     it("crash-between-delete-and-create recovery: a resumed row (old_event_deleted_at set, still phase='pending') skips straight to create — no re-delete, no duplicate event", async () => {
       const del = vi.fn();
       const insert = vi.fn().mockResolvedValue({ data: { id: "evt-new-resumed" } });

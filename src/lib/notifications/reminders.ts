@@ -75,6 +75,18 @@ export type ClaimedReminderRow = {
   assigneeId: string;
   assigneeTimezone: string;
   assigneeReminderPhone: string | null;
+  /** Codex round 4 (finding 3): only ever non-null on a row from
+   *  `fn_claim_reminder_retries` whose PREVIOUS attempt already reached
+   *  Slack/Sendillo (got a provider message id back) and then crashed
+   *  before its own mark-sent write landed. Slack/SMS have no send-side
+   *  idempotency key (see `deliverSlack`/`deliverSms`'s doc comments), so
+   *  re-sending on a retry would risk a real duplicate message; when this
+   *  is set, the channel handler skips the provider call entirely and
+   *  reconciles (marks sent using this same id) instead. Always null for a
+   *  fresh row from `fn_claim_appointment_reminders`, and always null for
+   *  bell (dedup there comes from the notifications unique index, not
+   *  this field). */
+  providerMessageId: string | null;
 };
 
 export type ReminderDeliveryOutcome =
@@ -106,6 +118,22 @@ type DeliveryUpdateClient = {
   };
 };
 
+/** Codex round 4 (finding 3): bounded retry for the mark-sent write. A
+ *  crash between a successful Slack/Sendillo send and this write landing
+ *  is the one place a real message already went out but our own
+ *  bookkeeping doesn't know it — leaving the row retryable would (absent
+ *  the round 4 reconciliation-on-retry check in `deliverSlack`/
+ *  `deliverSms` below) risk sending it again. A handful of quick retries
+ *  against a transient DB blip closes most of that window cheaply; ONLY
+ *  after they're all exhausted does the row fall back to the pre-round-4
+ *  posture (left retryable, reported with a duplicate-risk tag). */
+const MARK_DELIVERY_WRITE_ATTEMPTS = 3;
+const MARK_DELIVERY_RETRY_BACKOFF_MS = 200;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 /**
  * Writes the delivery outcome. Codex round 2 fix: every row — whether from
  * `fn_claim_appointment_reminders` (initial) or `fn_claim_reminder_retries`
@@ -119,7 +147,10 @@ type DeliveryUpdateClient = {
  * claim taking over an initial delivery that stalled past ITS lease: not an
  * error, the row is abandoned silently — ownership belongs to whoever holds
  * the current token, and their own delivery attempt (or lack thereof) is
- * authoritative.
+ * authoritative. That's not something a retry loop can fix (the fencing
+ * predicate will never start matching again), so only a genuine write
+ * ERROR (transient DB failure) triggers a retry attempt here — a clean
+ * zero-rows result returns immediately on the first try, same as before.
  *
  * `attempts` written is `row.attempts` as-is when `attemptsAlreadyBumped`
  * (the retry claim already bumped it) and `row.attempts + 1` otherwise (a
@@ -136,29 +167,54 @@ async function markDelivery(
   extra: { providerMessageId?: string | null; lastError?: string | null },
 ): Promise<void> {
   const attempts = row.attemptsAlreadyBumped ? row.attempts : row.attempts + 1;
-  const { data, error } = await (supabase as unknown as DeliveryUpdateClient)
-    .from("task_reminder_deliveries")
-    .update({
-      status,
-      attempts,
-      provider_message_id: extra.providerMessageId ?? null,
-      last_error: extra.lastError ?? null,
-      sent_at: status === "sent" ? new Date().toISOString() : null,
-    })
-    .eq("id", row.deliveryId)
-    .eq("claim_token", row.claimToken)
-    .eq("status", row.claimedStatus)
-    .select("id");
-  if (error) {
-    reportError(new Error(error.message), {
-      tags: { surface: "reminder_delivery_mark" },
+  const values = {
+    status,
+    attempts,
+    provider_message_id: extra.providerMessageId ?? null,
+    last_error: extra.lastError ?? null,
+    sent_at: status === "sent" ? new Date().toISOString() : null,
+  };
+
+  let lastErrorMessage: string | null = null;
+  for (let attempt = 1; attempt <= MARK_DELIVERY_WRITE_ATTEMPTS; attempt += 1) {
+    const { error } = await (supabase as unknown as DeliveryUpdateClient)
+      .from("task_reminder_deliveries")
+      .update(values)
+      .eq("id", row.deliveryId)
+      .eq("claim_token", row.claimToken)
+      .eq("status", row.claimedStatus)
+      .select("id");
+
+    if (!error) {
+      // Success (including the legitimate 0-rows "lease lost" case — see
+      // the doc comment above for why that's not retried; the caller
+      // never distinguishes the two, so the row count isn't inspected).
+      return;
+    }
+
+    lastErrorMessage = error.message;
+    if (attempt < MARK_DELIVERY_WRITE_ATTEMPTS) {
+      await sleep(MARK_DELIVERY_RETRY_BACKOFF_MS * attempt);
+    }
+  }
+
+  {
+    // Codex round 4 (finding 3): a `status: "sent"` write that never
+    // durably lands, WITH a provider_message_id, is the specific
+    // duplicate-risk case — the provider call already succeeded, so a
+    // future retry claim will attempt to send again unless it can see
+    // that id (which it can't, since this write is exactly the one that
+    // would have persisted it). Tagged distinctly so this is triageable
+    // apart from ordinary mark-failed write errors, which carry no such
+    // risk (the row staying retryable there is simply correct).
+    const duplicateRisk = status === "sent" && Boolean(extra.providerMessageId);
+    reportError(new Error(lastErrorMessage ?? "mark delivery failed"), {
+      tags: {
+        surface: "reminder_delivery_mark",
+        ...(duplicateRisk ? { duplicate_risk: true } : {}),
+      },
       extra: { deliveryId: row.deliveryId, status },
     });
-    return;
-  }
-  if ((data?.length ?? 0) === 0) {
-    // Lease lost — reclaimed by a later sweep. Not an error; abandon
-    // silently (see doc comment above).
     return;
   }
 }
@@ -202,6 +258,25 @@ async function deliverSlack(
   supabase: SupabaseClient<Database>,
   row: ClaimedReminderRow,
 ): Promise<ReminderDeliveryOutcome> {
+  // Codex round 4 (finding 3): Slack's Web API has no client-supplied
+  // idempotency/dedupe key for chat.postMessage — a re-send is a real
+  // second message, not a safely-ignored duplicate (documented at the top
+  // of `sendillo.ts`'s send-side investigation for the SMS half of this
+  // same finding; Slack was never in scope for that check, but carries
+  // the identical risk). If a PRIOR attempt already reached Slack —
+  // `providerMessageId` set by `fn_claim_reminder_retries` off this row's
+  // own `provider_message_id` column — this crashed only on its own
+  // mark-sent write, not on the send. Reconcile instead of re-sending.
+  if (row.providerMessageId) {
+    await markDelivery(supabase, row, "sent", { providerMessageId: row.providerMessageId });
+    return {
+      status: "sent",
+      deliveryId: row.deliveryId,
+      channel: "slack",
+      providerMessageId: row.providerMessageId,
+    };
+  }
+
   const result = await dispatchAppointmentReminderSlack({
     taskId: row.taskId,
     assigneeId: row.assigneeId,
@@ -235,6 +310,32 @@ async function deliverSms(
   // between claim and this delivery where the assignee could still
   // disable the channel or clear their number. Same posture as Slack's
   // own live pref re-check inside dispatchAppointmentReminderSlack.
+  // Codex round 4 (finding 3): investigated whether Sendillo's outbound
+  // send API (`POST /api/v1/messages`, see `sendSms` in
+  // `src/lib/messaging/providers/sendillo.ts`) accepts a client-supplied
+  // reference/idempotency field to key by `row.deliveryId` and get
+  // provider-side dedupe on a re-send. It does not: the confirmed public
+  // OpenAPI/request shape is `{ from, to, body }` only (no
+  // clientReference/idempotencyKey/externalId-on-send field), and the
+  // adapter's own send-side code sends exactly that payload — see
+  // `docs/handoff/2026-06-08-sendillo-adapter-status.md` for the fuller
+  // evidence trail on what Sendillo's docs do and don't confirm. So the
+  // SAME posture as Slack applies here: if a PRIOR attempt's send already
+  // reached Sendillo (`providerMessageId` off this row's own
+  // `provider_message_id` column, populated by `fn_claim_reminder_retries`)
+  // and only crashed on its own mark-sent write, reconcile instead of
+  // calling `sendRepSmsReminder` again — a real second SMS is not a safely
+  // ignored duplicate.
+  if (row.providerMessageId) {
+    await markDelivery(supabase, row, "sent", { providerMessageId: row.providerMessageId });
+    return {
+      status: "sent",
+      deliveryId: row.deliveryId,
+      channel: "sms",
+      providerMessageId: row.providerMessageId,
+    };
+  }
+
   const prefs = await loadIntegrationPrefs(supabase, row.assigneeId);
   if (!prefs.smsRemindersEnabled) {
     const errorMessage = "sms reminders disabled";

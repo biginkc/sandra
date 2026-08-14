@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   createNotification: vi.fn(),
@@ -39,6 +39,10 @@ function baseRow(overrides: Partial<ClaimedReminderRow> = {}): ClaimedReminderRo
     assigneeId: "assignee-1",
     assigneeTimezone: "America/Chicago",
     assigneeReminderPhone: null,
+    // Codex round 4: only ever non-null on a retry-claimed row whose prior
+    // attempt already reached Slack/Sendillo. Default null matches every
+    // pre-round-4 test's assumptions (provider always gets called).
+    providerMessageId: null,
     ...overrides,
   };
 }
@@ -49,11 +53,28 @@ function baseRow(overrides: Partial<ClaimedReminderRow> = {}): ClaimedReminderRo
  *  how many rows `.select("id")` reports as affected — 1 (default) for an
  *  ordinary successful write, 0 to simulate a fenced write losing the race
  *  (lease reclaimed by another sweep). */
+/** One `.select("id")` resolution: `error` set simulates a write failure
+ *  (Codex round 4's retry loop retries these); `matchedRows` (default 1)
+ *  controls how many rows a successful write reports as affected. */
+type UpdateResult = { error?: { message: string } | null; matchedRows?: number };
+
 function fakeSupabase(
-  opts: { updateError?: { message: string } | null; matchedRows?: number } = {},
+  opts: {
+    updateError?: { message: string } | null;
+    matchedRows?: number;
+    /** Codex round 4: a QUEUE of per-call results, consumed in order —
+     *  one entry per `.select("id")` call — for exercising the mark-
+     *  delivery retry loop (e.g. two errors then a success). Falls back
+     *  to the static `updateError`/`matchedRows` behavior (repeated on
+     *  every call) when omitted, same as every pre-round-4 test. */
+    updateResults?: UpdateResult[];
+  } = {},
 ) {
-  const updateError = opts.updateError ?? null;
-  const matchedRows = opts.matchedRows ?? 1;
+  const staticResult: UpdateResult = {
+    error: opts.updateError ?? null,
+    matchedRows: opts.matchedRows ?? 1,
+  };
+  const resultQueue = opts.updateResults ? [...opts.updateResults] : null;
   const updates: { table: string; payload: unknown; eqs: [string, unknown][] }[] = [];
   const from = vi.fn((table: string) => ({
     update: vi.fn((payload: unknown) => {
@@ -65,12 +86,16 @@ function fakeSupabase(
           eqs.push([column, value]);
           return builder;
         }),
-        select: vi.fn(async () => ({
-          data: updateError
-            ? null
-            : Array.from({ length: matchedRows }, (_, i) => ({ id: `row-${i}` })),
-          error: updateError,
-        })),
+        select: vi.fn(async () => {
+          const result =
+            resultQueue && resultQueue.length > 0 ? resultQueue.shift()! : staticResult;
+          const error = result.error ?? null;
+          const matchedRows = result.matchedRows ?? 1;
+          return {
+            data: error ? null : Array.from({ length: matchedRows }, (_, i) => ({ id: `row-${i}` })),
+            error,
+          };
+        }),
       };
       return builder;
     }),
@@ -95,6 +120,10 @@ beforeEach(() => {
     smsRemindersEnabled: true,
     reminderPhone: "+18165551234",
   });
+});
+
+afterEach(() => {
+  vi.useRealTimers();
 });
 
 describe("deliverAppointmentReminder — bell", () => {
@@ -445,6 +474,149 @@ describe("deliverAppointmentReminder — retry-claim fencing (Codex round 1)", (
         ["status", "pending"],
       ]),
     });
+    expect(mocks.reportError).not.toHaveBeenCalled();
+  });
+});
+
+describe("Codex round 4 (finding 3): reconciliation-on-retry — provider already reached, don't re-send", () => {
+  it("slack: a retry-claimed row that already carries providerMessageId reconciles (marks sent with that id) WITHOUT calling dispatchAppointmentReminderSlack again", async () => {
+    const supabase = fakeSupabase();
+    const row = baseRow({
+      channel: "slack",
+      attemptsAlreadyBumped: true,
+      claimToken: "retry-token",
+      claimedStatus: "failed",
+      providerMessageId: "1710000000.000999",
+    });
+
+    const outcome = await deliverAppointmentReminder(supabase, row);
+
+    expect(mocks.dispatchAppointmentReminderSlack).not.toHaveBeenCalled();
+    expect(outcome).toEqual({
+      status: "sent",
+      deliveryId: "delivery-1",
+      channel: "slack",
+      providerMessageId: "1710000000.000999",
+    });
+    expect(supabase.updates[0]).toMatchObject({
+      payload: expect.objectContaining({
+        status: "sent",
+        provider_message_id: "1710000000.000999",
+      }),
+    });
+  });
+
+  it("sms: a retry-claimed row that already carries providerMessageId reconciles (marks sent with that id) WITHOUT calling sendRepSmsReminder again", async () => {
+    const supabase = fakeSupabase();
+    const row = baseRow({
+      channel: "sms",
+      attemptsAlreadyBumped: true,
+      claimToken: "retry-token",
+      claimedStatus: "failed",
+      providerMessageId: "sms-ext-prior",
+    });
+
+    const outcome = await deliverAppointmentReminder(supabase, row);
+
+    expect(mocks.sendRepSmsReminder).not.toHaveBeenCalled();
+    // The live prefs re-check is also skipped — reconciliation never
+    // needs to send, so there's nothing to re-validate a phone number for.
+    expect(mocks.loadIntegrationPrefs).not.toHaveBeenCalled();
+    expect(outcome).toEqual({
+      status: "sent",
+      deliveryId: "delivery-1",
+      channel: "sms",
+      providerMessageId: "sms-ext-prior",
+    });
+    expect(supabase.updates[0]).toMatchObject({
+      payload: expect.objectContaining({
+        status: "sent",
+        provider_message_id: "sms-ext-prior",
+      }),
+    });
+  });
+
+  it("bell rows never carry a providerMessageId and are unaffected — createNotification still runs normally", async () => {
+    const supabase = fakeSupabase();
+    const row = baseRow({ channel: "bell", providerMessageId: null });
+
+    const outcome = await deliverAppointmentReminder(supabase, row);
+
+    expect(mocks.createNotification).toHaveBeenCalled();
+    expect(outcome.status).toBe("sent");
+  });
+});
+
+describe("Codex round 4 (finding 3): bounded retry on the mark-sent write", () => {
+  it("retries a transient write error and succeeds on a later attempt, without reporting any error", async () => {
+    vi.useFakeTimers();
+    const supabase = fakeSupabase({
+      updateResults: [
+        { error: { message: "db blip 1" } },
+        { error: { message: "db blip 2" } },
+        { error: null, matchedRows: 1 },
+      ],
+    });
+
+    const outcomePromise = deliverAppointmentReminder(supabase, baseRow({ channel: "bell" }));
+    await vi.runAllTimersAsync();
+    const outcome = await outcomePromise;
+
+    expect(outcome.status).toBe("sent");
+    // Three separate .update() calls — two failed, one succeeded — all
+    // against the SAME delivery row.
+    expect(supabase.updates).toHaveLength(3);
+    expect(mocks.reportError).not.toHaveBeenCalled();
+  });
+
+  it("exhausts all 3 attempts, reports the failure WITHOUT a duplicate-risk tag when marking 'failed' (no provider send occurred, so re-trying is simply correct)", async () => {
+    vi.useFakeTimers();
+    mocks.dispatchAppointmentReminderSlack.mockResolvedValueOnce({
+      sent: false,
+      reason: "pref_disabled",
+    });
+    const supabase = fakeSupabase({ updateError: { message: "db down" } });
+
+    const outcomePromise = deliverAppointmentReminder(supabase, baseRow({ channel: "slack" }));
+    await vi.runAllTimersAsync();
+    await outcomePromise;
+
+    expect(supabase.updates).toHaveLength(3);
+    expect(mocks.reportError).toHaveBeenCalledTimes(1);
+    const [, context] = mocks.reportError.mock.calls[0];
+    expect(context.tags).toEqual({ surface: "reminder_delivery_mark" });
+    expect(context.tags.duplicate_risk).toBeUndefined();
+  });
+
+  it("exhausts all 3 attempts marking 'sent' with a providerMessageId — reports the failure WITH an explicit duplicate-risk tag, since the provider send already succeeded and the row is left retryable", async () => {
+    vi.useFakeTimers();
+    const supabase = fakeSupabase({ updateError: { message: "db down" } });
+
+    const outcomePromise = deliverAppointmentReminder(supabase, baseRow({ channel: "slack" }));
+    await vi.runAllTimersAsync();
+    const outcome = await outcomePromise;
+
+    // The delivery still reports its own "sent" outcome — the provider
+    // call genuinely succeeded; only the bookkeeping write failed.
+    expect(outcome.status).toBe("sent");
+    expect(supabase.updates).toHaveLength(3);
+    expect(mocks.reportError).toHaveBeenCalledTimes(1);
+    expect(mocks.reportError).toHaveBeenCalledWith(
+      expect.any(Error),
+      expect.objectContaining({
+        tags: { surface: "reminder_delivery_mark", duplicate_risk: true },
+        extra: { deliveryId: "delivery-1", status: "sent" },
+      }),
+    );
+  });
+
+  it("does NOT retry a clean 0-rows 'lease lost' result — that's a legitimate outcome, not a write error", async () => {
+    const supabase = fakeSupabase({ matchedRows: 0 });
+
+    const outcome = await deliverAppointmentReminder(supabase, baseRow({ channel: "bell" }));
+
+    expect(outcome.status).toBe("sent");
+    expect(supabase.updates).toHaveLength(1);
     expect(mocks.reportError).not.toHaveBeenCalled();
   });
 });

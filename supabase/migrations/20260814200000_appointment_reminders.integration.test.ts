@@ -37,6 +37,12 @@ type ClaimedReminderRow = {
   assignee_id: string;
   assignee_timezone: string;
   assignee_reminder_phone: string | null;
+  /** Codex round 4 (finding 3): only `fn_claim_reminder_retries` returns
+   *  this — non-null means a prior attempt already reached the provider
+   *  before crashing on its own mark-sent write; absent (undefined) on
+   *  every `fn_claim_appointment_reminders` row, which shares this same
+   *  row shape in this test file's RPC typing. */
+  provider_message_id?: string | null;
 };
 
 type RpcResult<T> = { data: T | null; error: { message: string; code?: string } | null };

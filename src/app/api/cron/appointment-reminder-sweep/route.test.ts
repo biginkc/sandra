@@ -60,16 +60,24 @@ function rawRow(id: string, overrides: Partial<RawRow> = {}): RawRow {
  * appointment produces — and `rpc("fn_claim_appointment_reminders", ...)`
  * shifts one batch per call, same idiom as calendar-mutation-sweep's
  * route.test.ts one-row-per-call queue.
+ *
+ * Codex round 4 (finding 1): the retry claim is now the SAME shape —
+ * `retryRows` is a queue of one-row batches (`fn_claim_reminder_retries`
+ * only ever claims a single delivery row per `p_limit: 1` call, unlike
+ * the primary claim's up-to-3-rows-per-appointment fanout), and
+ * `rpc("fn_claim_reminder_retries", ...)` shifts one row per call.
  */
 function fakeSupabase(primaryBatches: RawRow[][], retried: RawRow[] = []) {
-  const queue = [...primaryBatches];
+  const primaryQueue = [...primaryBatches];
+  const retryQueue = [...retried];
   const rpc = vi.fn(async (fn: string) => {
     if (fn === "fn_claim_appointment_reminders") {
-      const batch = queue.shift();
+      const batch = primaryQueue.shift();
       return { data: batch ?? [], error: null };
     }
     if (fn === "fn_claim_reminder_retries") {
-      return { data: retried, error: null };
+      const row = retryQueue.shift();
+      return { data: row ? [row] : [], error: null };
     }
     return { data: [], error: null };
   });
@@ -82,6 +90,14 @@ function fakeSupabase(primaryBatches: RawRow[][], retried: RawRow[] = []) {
 function primaryClaimCalls(supabase: any) {
   return supabase.rpc.mock.calls.filter(
     (call: unknown[]) => call[0] === "fn_claim_appointment_reminders",
+  );
+}
+
+/** Calls to `rpc("fn_claim_reminder_retries", ...)` only. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function retryClaimCalls(supabase: any) {
+  return supabase.rpc.mock.calls.filter(
+    (call: unknown[]) => call[0] === "fn_claim_reminder_retries",
   );
 }
 
@@ -110,11 +126,58 @@ describe("runAppointmentReminderSweep", () => {
     // Two successful claims (a, b) plus the third call that comes back
     // empty and ends the primary loop.
     expect(primaryClaimCalls(supabase)).toHaveLength(3);
-    expect(supabase.rpc).toHaveBeenCalledWith("fn_claim_reminder_retries", { p_limit: 50 });
+    // Codex round 4 (finding 1): retry claim is also one row at a time —
+    // one call that returns "c", plus the second call that comes back
+    // empty and ends the retry loop.
+    for (const call of retryClaimCalls(supabase)) {
+      expect(call[1]).toEqual({ p_limit: 1 });
+    }
+    expect(retryClaimCalls(supabase)).toHaveLength(2);
     expect(mocks.deliverAppointmentReminder).toHaveBeenCalledTimes(3);
     expect(summary.claimed).toBe(2);
     expect(summary.retried).toBe(1);
     expect(summary.processed).toBe(3);
+  });
+
+  it("Codex round 4 (finding 1): retry claims one row at a time inside the budget loop — a row the budget runs out before reaching is never claimed, so its attempts are never bumped by an unattempted claim", async () => {
+    // Two retry-eligible rows queued. Budget allows exactly one claim +
+    // delivery cycle before the loop's pre-claim budget check trips —
+    // mirrors the primary-claim budget test's Date.now() sequencing.
+    const budgetMs = 1_000;
+    const times = [
+      0, // startedAt
+      0, // primary loop: pre-claim check #1 — proceeds, claims nothing (empty batches), breaks
+      0, // retry loop: pre-claim check #1 — proceeds, claims "a"
+      0, // retry loop: pre-delivery check for "a" — proceeds, delivers it
+      budgetMs + 1, // retry loop: pre-claim check #2 — budget exhausted, "b" never claimed
+    ];
+    let call = 0;
+    vi.spyOn(Date, "now").mockImplementation(
+      () => times[Math.min(call++, times.length - 1)],
+    );
+
+    const supabase = fakeSupabase([], [rawRow("a"), rawRow("b")]);
+    mocks.deliverAppointmentReminder.mockResolvedValue({
+      status: "sent",
+      deliveryId: "a",
+      channel: "bell",
+    });
+
+    const summary = await runAppointmentReminderSweep(supabase, { budgetMs });
+
+    // Only ONE retry claim call was ever made — "b" was never claimed by
+    // fn_claim_reminder_retries at all, so its attempts (which that RPC
+    // bumps atomically on every row it claims) were never spent on a
+    // delivery attempt that couldn't happen this sweep.
+    expect(retryClaimCalls(supabase)).toHaveLength(1);
+    expect(mocks.deliverAppointmentReminder).toHaveBeenCalledTimes(1);
+    expect(mocks.deliverAppointmentReminder).toHaveBeenCalledWith(
+      supabase,
+      expect.objectContaining({ deliveryId: "a" }),
+    );
+    expect(summary.retried).toBe(1);
+    expect(summary.processed).toBe(1);
+    expect(summary.budgetExhausted).toBe(true);
   });
 
   it("Codex round 3 (finding 1): budget exhaustion between claim calls leaves the next appointment UNCLAIMED, not pending — no claim call is made for it", async () => {

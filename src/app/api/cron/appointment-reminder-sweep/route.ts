@@ -22,9 +22,13 @@ import type { Database } from "@/lib/supabase/types";
  *      below). Window is fixed inside the function; each call returns the
  *      freshly-inserted delivery row(s) — one per enabled channel — for a
  *      single appointment newly due in [now, now+30m].
- *   2. `fn_claim_reminder_retries()` — crash-safety complement: failed
- *      deliveries with attempts<3, or pending deliveries stuck >10min
- *      (a sweep that claimed but crashed before marking sent/failed).
+ *   2. `fn_claim_reminder_retries(p_limit)` — crash-safety complement:
+ *      failed deliveries with attempts<3, or pending deliveries stuck
+ *      >10min (a sweep that claimed but crashed before marking
+ *      sent/failed). Codex round 4 (finding 1): claimed one row at a time
+ *      inside its own budget-checked loop, same pattern as the primary
+ *      claim — see that round's comment on the retry loop below for why a
+ *      bulk `p_limit: retryLimit` call was wrong.
  *
  * Every claimed row is delivered via `deliverAppointmentReminder`, which
  * never throws (see its own doc comment) — this loop's try/catch is
@@ -53,6 +57,10 @@ import type { Database } from "@/lib/supabase/types";
 export const maxDuration = 60;
 
 const SWEEP_BUDGET_MS = 45_000;
+/** Max delivery rows the retry claim will process in one sweep — not a
+ *  batch-claim size; `fn_claim_reminder_retries` is always called with
+ *  `p_limit: 1` inside a budget-checked loop (Codex round 4, finding 1),
+ *  same pattern as the primary claim. */
 const RETRY_CLAIM_LIMIT = 50;
 /** Max appointments the primary window claim will process in one sweep —
  *  not a batch-claim size; `fn_claim_appointment_reminders` is always
@@ -96,6 +104,13 @@ type ClaimedReminderRpcRow = {
   assignee_id: string;
   assignee_timezone: string;
   assignee_reminder_phone: string | null;
+  /** Codex round 4 (finding 3): only `fn_claim_reminder_retries` ever
+   *  populates this (undefined on every `fn_claim_appointment_reminders`
+   *  row, which shares this same RPC row shape) — non-null means a PRIOR
+   *  attempt already reached the provider (Slack/SMS) and only crashed on
+   *  its own mark-sent write. `deliverAppointmentReminder` reconciles
+   *  (marks sent using this id) instead of re-sending. */
+  provider_message_id?: string | null;
 };
 
 type ReminderClaimRpcClient = {
@@ -134,6 +149,7 @@ function toClaimedRow(
     assigneeId: row.assignee_id,
     assigneeTimezone: row.assignee_timezone,
     assigneeReminderPhone: row.assignee_reminder_phone,
+    providerMessageId: row.provider_message_id ?? null,
   };
 }
 
@@ -255,25 +271,45 @@ export async function runAppointmentReminderSweep(
     if (budgetExhausted) break;
   }
 
-  // Retry claim: crash-safety complement, bulk claim (already atomically
-  // leased/fenced per row by fn_claim_reminder_retries) bounded by
-  // retryLimit — only attempted if the primary claim left budget.
-  let retryRows: ClaimedReminderRpcRow[] = [];
+  // Retry claim: crash-safety complement. Codex round 4 (finding 1): same
+  // budget-checked, one-row-at-a-time pattern as the primary claim above —
+  // NOT a single bulk call for up to retryLimit rows. fn_claim_reminder_retries
+  // atomically bumps `attempts` (and mints a fresh lease) on every row it
+  // claims within that one call, regardless of whether this sweep's delivery
+  // loop actually gets to all of them before the budget runs out. A bulk
+  // claim of, say, 50 rows followed by a budget-exhausted delivery loop left
+  // the undelivered remainder with attempts already spent on a lease they
+  // never got a chance to use — nudging rows toward the attempts<3 cap
+  // without ever being attempted, the exact bug the primary claim's p_limit:1
+  // loop (above) already solved. Claiming one row immediately before
+  // delivering it means a row's attempts/lease are only spent right before
+  // this sweep is actually about to act on it; a row the budget runs out
+  // before reaching is simply never claimed this pass, left for the next
+  // sweep with attempts untouched — same contract as the primary claim.
+  const retryRows: ClaimedReminderRpcRow[] = [];
   if (!budgetExhausted) {
-    const { data, error: retryError } = await rpcClient.rpc("fn_claim_reminder_retries", {
-      p_limit: retryLimit,
-    });
-    if (retryError) {
-      throw new Error(`fn_claim_reminder_retries failed: ${retryError.message}`);
-    }
-    retryRows = data ?? [];
-
-    for (const raw of retryRows) {
+    while (retryRows.length < retryLimit) {
       if (Date.now() - startedAt >= budgetMs) {
         budgetExhausted = true;
         break;
       }
-      await deliverRow(raw, true);
+      const { data, error: retryError } = await rpcClient.rpc("fn_claim_reminder_retries", {
+        p_limit: 1,
+      });
+      if (retryError) {
+        throw new Error(`fn_claim_reminder_retries failed: ${retryError.message}`);
+      }
+      if (!data || data.length === 0) break; // nothing eligible right now
+      retryRows.push(...data);
+
+      for (const raw of data) {
+        if (Date.now() - startedAt >= budgetMs) {
+          budgetExhausted = true;
+          break;
+        }
+        await deliverRow(raw, true);
+      }
+      if (budgetExhausted) break;
     }
   }
 
