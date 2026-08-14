@@ -314,6 +314,25 @@ begin
         'tasks_tenant_integrity_guard: appointment reassignment goes through the calendar lifecycle'
         using errcode = 'P0001';
     end if;
+
+    -- Lifecycle state is lifecycle-owned end to end: a direct REST write
+    -- could otherwise close an appointment (status/outcome), suppress its
+    -- reminders (reminder_claimed_at), or fake a calendar version
+    -- (calendar_generation) while satisfying every CHECK — bypassing the
+    -- ledger exactly like the DELETE case. One flag covers all
+    -- appointment-owned facets; PR 3's RPCs (outcome, claim, reschedule,
+    -- reassign, cancel) set it transaction-locally.
+    if old.type = 'appointment'
+       and (new.status is distinct from old.status
+            or new.outcome is distinct from old.outcome
+            or new.reminder_claimed_at is distinct from old.reminder_claimed_at
+            or new.calendar_generation is distinct from old.calendar_generation)
+       and coalesce(current_setting('sandra.allow_appointment_time_move', true), '') <> 'on'
+    then
+      raise exception
+        'tasks_tenant_integrity_guard: appointment lifecycle state changes only through the lifecycle'
+        using errcode = 'P0001';
+    end if;
   end if;
 
   -- Each relation validates independently, only when it (or the org)

@@ -338,44 +338,59 @@ describe("Migration 20260814150000 — appointments schema", () => {
       return { taskId: data!.id, owner };
     }
 
+    // Round-13's lifecycle-state guard fires on ANY status/outcome change
+    // to an appointment before the CHECK constraint gets a look, so these
+    // four tests now run inside a flagged raw-pg transaction — same pattern
+    // as every other appointment-owned facet's escape hatch below. Flagging
+    // is what lets the CHECK-violation tests keep proving the CHECK itself
+    // fires, instead of just re-proving the (already-tested) guard.
+    let conn: Client;
+
+    beforeEach(async () => {
+      conn = new Client({ connectionString: testDbUrl() });
+      await conn.connect();
+      await conn.query("set statement_timeout = 0");
+    });
+
+    afterEach(async () => {
+      await conn.query("rollback").catch(() => {});
+      await conn.end().catch(() => {});
+    });
+
     it("rejects status='completed' with a NULL outcome", async () => {
       const { taskId, owner } = await createOpenAppointment();
-      const { error } = await owner.client
-        .from("tasks" as never)
-        .update({
-          status: "completed",
-          completed_at: new Date().toISOString(),
-          completed_by: owner.userId,
-        } as never)
-        .eq("id", taskId);
-      expect(error).not.toBeNull();
-      expect((error as { message: string }).message).toMatch(
-        /tasks_outcome_check|violates check/i,
+      await conn.query("begin");
+      await conn.query(
+        "select set_config('sandra.allow_appointment_time_move', 'on', true)",
       );
+      await expect(
+        conn.query(
+          "update tasks set status = 'completed', completed_at = now(), completed_by = $2 where id = $1",
+          [taskId, owner.userId],
+        ),
+      ).rejects.toThrow(/tasks_outcome_check|violates check/i);
     });
 
     it("rejects status='cancelled' with a NULL outcome", async () => {
-      const { taskId, owner } = await createOpenAppointment();
-      const { error } = await owner.client
-        .from("tasks" as never)
-        .update({ status: "cancelled" } as never)
-        .eq("id", taskId);
-      expect(error).not.toBeNull();
-      expect((error as { message: string }).message).toMatch(
-        /tasks_outcome_check|violates check/i,
+      const { taskId } = await createOpenAppointment();
+      await conn.query("begin");
+      await conn.query(
+        "select set_config('sandra.allow_appointment_time_move', 'on', true)",
       );
+      await expect(
+        conn.query("update tasks set status = 'cancelled' where id = $1", [taskId]),
+      ).rejects.toThrow(/tasks_outcome_check|violates check/i);
     });
 
     it("rejects setting an outcome while the appointment stays open", async () => {
-      const { taskId, owner } = await createOpenAppointment();
-      const { error } = await owner.client
-        .from("tasks" as never)
-        .update({ outcome: "held" } as never)
-        .eq("id", taskId);
-      expect(error).not.toBeNull();
-      expect((error as { message: string }).message).toMatch(
-        /tasks_outcome_check|violates check/i,
+      const { taskId } = await createOpenAppointment();
+      await conn.query("begin");
+      await conn.query(
+        "select set_config('sandra.allow_appointment_time_move', 'on', true)",
       );
+      await expect(
+        conn.query("update tasks set outcome = 'held' where id = $1", [taskId]),
+      ).rejects.toThrow(/tasks_outcome_check|violates check/i);
     });
 
     it("accepts status='completed' with outcome='held', leaving due_at/end_at untouched (no time-move guard trip)", async () => {
@@ -386,29 +401,33 @@ describe("Migration 20260814150000 — appointments schema", () => {
         .eq("id", taskId)
         .single();
 
-      const { data, error } = await owner.client
-        .from("tasks" as never)
-        .update({
-          status: "completed",
-          outcome: "held",
-          completed_at: new Date().toISOString(),
-          completed_by: owner.userId,
-        } as never)
-        .eq("id", taskId)
-        .select("status, outcome, due_at, end_at")
-        .single();
-
-      expect(error).toBeNull();
-      const row = data as {
+      await conn.query("begin");
+      await conn.query(
+        "select set_config('sandra.allow_appointment_time_move', 'on', true)",
+      );
+      const result = await conn.query<{
         status: string;
         outcome: string;
-        due_at: string;
-        end_at: string;
-      } | null;
-      expect(row?.status).toBe("completed");
-      expect(row?.outcome).toBe("held");
-      expect(row?.due_at).toBe((before as { due_at: string }).due_at);
-      expect(row?.end_at).toBe((before as { end_at: string }).end_at);
+        due_at: Date;
+        end_at: Date;
+      }>(
+        `update tasks
+           set status = 'completed', outcome = 'held', completed_at = now(), completed_by = $2
+         where id = $1
+         returning status, outcome, due_at, end_at`,
+        [taskId, owner.userId],
+      );
+      await conn.query("commit");
+
+      const row = result.rows[0];
+      expect(row.status).toBe("completed");
+      expect(row.outcome).toBe("held");
+      expect(row.due_at.toISOString()).toBe(
+        new Date((before as { due_at: string }).due_at).toISOString(),
+      );
+      expect(row.end_at.toISOString()).toBe(
+        new Date((before as { end_at: string }).end_at).toISOString(),
+      );
     });
 
     it("rejects an outcome set on a non-appointment task", async () => {
@@ -569,9 +588,14 @@ describe("Migration 20260814150000 — appointments schema", () => {
       const appt = await insertValidAppointment();
       await setMembershipAccessStatus(appt.assigneeId, BMH_ORG_ID, "suspended");
 
+      // title is untouched by the relation re-checks under test here AND by
+      // round-13's appointment lifecycle-state guard (status/outcome/
+      // reminder_claimed_at/calendar_generation) — reminder_claimed_at
+      // itself no longer works as the "unrelated column" here since it's
+      // now lifecycle-owned (see the dedicated guard describe below).
       const { error } = await db
         .from("tasks")
-        .update({ reminder_claimed_at: new Date().toISOString() })
+        .update({ title: "Updated title" })
         .eq("id", appt.id);
       expect(error).toBeNull();
     });
@@ -1610,7 +1634,13 @@ describe("Migration 20260814150000 — appointments schema", () => {
       );
     });
 
-    it("completing an appointment (status/outcome/completed_at) succeeds without the escape-hatch flag, and leaves due_at/end_at untouched", async () => {
+    // Round-13 folded status/outcome/completed_at into the lifecycle-state
+    // guard (a separate check further down the same trigger), so this now
+    // needs the same sandra.allow_appointment_time_move flag as every other
+    // appointment-owned facet — raw pg, same transaction pattern as the
+    // escape-hatch describes, since the Supabase JS client can't hold a
+    // transaction-local set_config across the set_config and UPDATE calls.
+    it("completing an appointment (status/outcome/completed_at) succeeds when flagged, and leaves due_at/end_at untouched", async () => {
       const appt = await insertValidAppointment();
       const { data: before } = await db
         .from("tasks")
@@ -1618,30 +1648,37 @@ describe("Migration 20260814150000 — appointments schema", () => {
         .eq("id", appt.id)
         .single();
 
-      const completedAt = new Date().toISOString();
-      const { data, error } = await db
-        .from("tasks")
-        .update({
-          status: "completed",
-          outcome: "held",
-          completed_at: completedAt,
-          completed_by: appt.assigneeId,
-        })
-        .eq("id", appt.id)
-        .select("id, status, outcome, due_at, end_at")
-        .single();
-
-      expect(error).toBeNull();
-      const row = data as {
+      const conn = new Client({ connectionString: testDbUrl() });
+      await conn.connect();
+      await conn.query("set statement_timeout = 0");
+      await conn.query("begin");
+      await conn.query(
+        "select set_config('sandra.allow_appointment_time_move', 'on', true)",
+      );
+      const result = await conn.query<{
         status: string;
         outcome: string;
-        due_at: string;
-        end_at: string;
-      };
+        due_at: Date;
+        end_at: Date;
+      }>(
+        `update tasks
+           set status = 'completed', outcome = 'held', completed_at = now(), completed_by = $2
+         where id = $1
+         returning status, outcome, due_at, end_at`,
+        [appt.id, appt.assigneeId],
+      );
+      await conn.query("commit");
+      await conn.end().catch(() => {});
+
+      const row = result.rows[0];
       expect(row.status).toBe("completed");
       expect(row.outcome).toBe("held");
-      expect(row.due_at).toBe((before as { due_at: string }).due_at);
-      expect(row.end_at).toBe((before as { end_at: string }).end_at);
+      expect(row.due_at.toISOString()).toBe(
+        new Date((before as { due_at: string }).due_at).toISOString(),
+      );
+      expect(row.end_at.toISOString()).toBe(
+        new Date((before as { end_at: string }).end_at).toISOString(),
+      );
     });
 
     // Raw pg connection (same pattern as the membership-race describe
@@ -1988,6 +2025,166 @@ describe("Migration 20260814150000 — appointments schema", () => {
         expect((after as { assignee_id: string }).assignee_id).toBe(
           newAssignee.userId,
         );
+      });
+    });
+  });
+
+  // Appointment lifecycle-state guard (round 13, section 3 of this
+  // migration): status/outcome, reminder_claimed_at, and calendar_generation
+  // are lifecycle-owned like time/identity/reassignment above — a direct
+  // REST write could otherwise close an appointment, suppress its
+  // reminders, or fake a calendar version while satisfying every CHECK,
+  // bypassing the ledger exactly like the DELETE case. Same
+  // sandra.allow_appointment_time_move escape hatch as every other
+  // appointment-owned facet; PR 3's RPCs (outcome, claim, reschedule,
+  // reassign, cancel) set it transaction-locally.
+  describe("appointment lifecycle-state guard (round 13)", () => {
+    it.each([
+      ["service-role", async () => db],
+      [
+        "authenticated org member",
+        async () => (await createUserForOrg(BMH_ORG_ID, "owner")).client,
+      ],
+    ] as const)(
+      "%s: rejects status='completed'+outcome='held' directly on an appointment",
+      async (_label, getClient) => {
+        const appt = await insertValidAppointment();
+        const client = await getClient();
+
+        const { error } = await client
+          .from("tasks" as never)
+          .update({
+            status: "completed",
+            outcome: "held",
+            completed_at: new Date().toISOString(),
+            completed_by: appt.assigneeId,
+          } as never)
+          .eq("id", appt.id);
+
+        expect(error).not.toBeNull();
+        expect((error as { message: string }).message).toMatch(
+          /appointment lifecycle state changes only through the lifecycle/i,
+        );
+
+        const { data: after } = await db
+          .from("tasks")
+          .select("status, outcome")
+          .eq("id", appt.id)
+          .single();
+        expect((after as { status: string }).status).toBe("open");
+        expect((after as { outcome: string | null }).outcome).toBeNull();
+      },
+    );
+
+    it.each([
+      ["service-role", async () => db],
+      [
+        "authenticated org member",
+        async () => (await createUserForOrg(BMH_ORG_ID, "owner")).client,
+      ],
+    ] as const)(
+      "%s: rejects a direct reminder_claimed_at update on an appointment",
+      async (_label, getClient) => {
+        const appt = await insertValidAppointment();
+        const client = await getClient();
+
+        const { error } = await client
+          .from("tasks" as never)
+          .update({ reminder_claimed_at: new Date().toISOString() } as never)
+          .eq("id", appt.id);
+
+        expect(error).not.toBeNull();
+        expect((error as { message: string }).message).toMatch(
+          /appointment lifecycle state changes only through the lifecycle/i,
+        );
+
+        const { data: after } = await db
+          .from("tasks")
+          .select("reminder_claimed_at")
+          .eq("id", appt.id)
+          .single();
+        expect(
+          (after as { reminder_claimed_at: string | null }).reminder_claimed_at,
+        ).toBeNull();
+      },
+    );
+
+    it.each([
+      ["service-role", async () => db],
+      [
+        "authenticated org member",
+        async () => (await createUserForOrg(BMH_ORG_ID, "owner")).client,
+      ],
+    ] as const)(
+      "%s: rejects a direct calendar_generation bump on an appointment",
+      async (_label, getClient) => {
+        const appt = await insertValidAppointment();
+        const client = await getClient();
+
+        const { error } = await client
+          .from("tasks" as never)
+          .update({ calendar_generation: 1 } as never)
+          .eq("id", appt.id);
+
+        expect(error).not.toBeNull();
+        expect((error as { message: string }).message).toMatch(
+          /appointment lifecycle state changes only through the lifecycle/i,
+        );
+
+        const { data: after } = await db
+          .from("tasks")
+          .select("calendar_generation")
+          .eq("id", appt.id)
+          .single();
+        expect(
+          (after as { calendar_generation: number }).calendar_generation,
+        ).toBe(0);
+      },
+    );
+
+    // Raw pg connection (same pattern as the other lifecycle-guard escape
+    // hatches above): the Supabase JS client auto-commits every request, so
+    // it can't hold set_config('...', true) (transaction-local) across the
+    // set_config call and the subsequent UPDATE in the same transaction.
+    describe("escape hatch — sandra.allow_appointment_time_move covers lifecycle state too (raw pg, same transaction)", () => {
+      let conn: Client;
+
+      beforeEach(async () => {
+        conn = new Client({ connectionString: testDbUrl() });
+        await conn.connect();
+        await conn.query("set statement_timeout = 0");
+      });
+
+      afterEach(async () => {
+        await conn.query("rollback").catch(() => {});
+        await conn.end().catch(() => {});
+      });
+
+      it("allows status='completed'+outcome='held' (proving PR 3's lifecycle path) once the flag is set to 'on' in the same transaction", async () => {
+        const appt = await insertValidAppointment();
+
+        await conn.query("begin");
+        await conn.query(
+          "select set_config('sandra.allow_appointment_time_move', 'on', true)",
+        );
+        const result = await conn.query<{ status: string; outcome: string }>(
+          `update tasks
+             set status = 'completed', outcome = 'held', completed_at = now(), completed_by = $2
+           where id = $1
+           returning status, outcome`,
+          [appt.id, appt.assigneeId],
+        );
+        expect(result.rows[0].status).toBe("completed");
+        expect(result.rows[0].outcome).toBe("held");
+        await conn.query("commit");
+
+        const { data: after } = await db
+          .from("tasks")
+          .select("status, outcome")
+          .eq("id", appt.id)
+          .single();
+        expect((after as { status: string }).status).toBe("completed");
+        expect((after as { outcome: string }).outcome).toBe("held");
       });
     });
   });
