@@ -213,17 +213,29 @@ async function setPrefs(
     {
       user_id: userId,
       channel: "google_calendar",
+      // Explicit: PostgREST bulk upserts unify columns across rows, so when
+      // a slack/sms row in the same payload carries `enabled`, omitting it
+      // here sends NULL (not the column default) and violates NOT NULL.
+      enabled: true,
       timezone: overrides.timezone ?? "America/Chicago",
     },
   ];
+  // Every row carries explicit enabled + timezone for the same
+  // column-unification reason as above (timezone is NOT NULL).
   if (overrides.slackEnabled !== undefined) {
-    rows.push({ user_id: userId, channel: "slack", enabled: overrides.slackEnabled });
+    rows.push({
+      user_id: userId,
+      channel: "slack",
+      enabled: overrides.slackEnabled,
+      timezone: overrides.timezone ?? "America/Chicago",
+    });
   }
   if (overrides.smsEnabled !== undefined || overrides.reminderPhone !== undefined) {
     rows.push({
       user_id: userId,
       channel: "sms_reminder",
       enabled: overrides.smsEnabled ?? false,
+      timezone: overrides.timezone ?? "America/Chicago",
       reminder_phone: overrides.reminderPhone ?? null,
     });
   }
@@ -551,9 +563,16 @@ describe("Migration 20260814200000 — appointment reminder claim RPCs", () => {
         .single();
       expect(delivery).not.toBeNull();
 
-      await db
+      await asReminderDeliveryFencingClient(db)
         .from("task_reminder_deliveries")
-        .update({ status: "failed", attempts: 2 })
+        .update({
+          status: "failed",
+          attempts: 2,
+          // Expire the initial claim's 2-minute lease — a freshly-failed row
+          // is retry-eligible only once next_attempt_at has passed (the
+          // outcome write deliberately leaves the lease untouched).
+          next_attempt_at: new Date(Date.now() - 60_000).toISOString(),
+        })
         .eq("id", delivery!.id);
 
       const eligible = await claimReminderRetries(db);
@@ -880,9 +899,14 @@ describe("Migration 20260814200000 — appointment reminder claim RPCs", () => {
         .eq("task_id", appt.id)
         .eq("channel", "bell")
         .single();
-      await db
+      await asReminderDeliveryFencingClient(db)
         .from("task_reminder_deliveries")
-        .update({ status: "failed", attempts: 1 })
+        .update({
+          status: "failed",
+          attempts: 1,
+          // Expire the initial claim's lease (see the first retry test).
+          next_attempt_at: new Date(Date.now() - 60_000).toISOString(),
+        })
         .eq("id", delivery!.id);
       return { member, appt, deliveryId: delivery!.id };
     }
@@ -952,9 +976,14 @@ describe("Migration 20260814200000 — appointment reminder claim RPCs", () => {
         .eq("channel", "slack")
         .single();
       expect(delivery).not.toBeNull();
-      await db
+      await asReminderDeliveryFencingClient(db)
         .from("task_reminder_deliveries")
-        .update({ status: "failed", attempts: 1 })
+        .update({
+          status: "failed",
+          attempts: 1,
+          // Expire the initial claim's lease (see the first retry test).
+          next_attempt_at: new Date(Date.now() - 60_000).toISOString(),
+        })
         .eq("id", delivery!.id);
 
       await setPrefs(member.userId, { slackEnabled: false });
@@ -1084,9 +1113,14 @@ describe("Migration 20260814200000 — appointment reminder claim RPCs", () => {
         .eq("task_id", appt.id)
         .eq("channel", "bell")
         .single();
-      await db
+      await asReminderDeliveryFencingClient(db)
         .from("task_reminder_deliveries")
-        .update({ status: "failed", attempts: 1 })
+        .update({
+          status: "failed",
+          attempts: 1,
+          // Expire the initial claim's lease (see the first retry test).
+          next_attempt_at: new Date(Date.now() - 60_000).toISOString(),
+        })
         .eq("id", delivery!.id);
 
       await conn.query("begin");

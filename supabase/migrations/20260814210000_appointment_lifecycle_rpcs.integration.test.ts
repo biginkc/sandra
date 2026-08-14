@@ -1167,10 +1167,12 @@ describe("Migration 20260814210000 — appointment lifecycle RPCs", () => {
       await conn.end().catch(() => {});
     });
 
-    async function stillBlockedAfter(promise: Promise<unknown>, ms: number): Promise<"blocked" | "resolved"> {
+    async function stillBlockedAfter(promise: Promise<unknown> | PromiseLike<unknown>, ms: number): Promise<"blocked" | "resolved"> {
       const sentinel = Symbol("timeout");
       const raced = await Promise.race([
-        promise.catch(() => sentinel),
+        // PostgREST builders are thenable but not real Promises (no .catch)
+        // — normalize first, which also kicks off the lazy request.
+        Promise.resolve(promise).catch(() => sentinel),
         new Promise((resolve) => setTimeout(() => resolve(sentinel), ms)).then(() => "timeout-won" as const),
       ]);
       return raced === "timeout-won" ? "blocked" : "resolved";

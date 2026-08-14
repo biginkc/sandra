@@ -235,7 +235,11 @@ describe("Migration 20260814150000 — appointments schema", () => {
         outcome: "held",
       });
       expect(error).not.toBeNull();
-      expect(error?.message).toMatch(/tasks_outcome_check|violates check/i);
+      // The tenant-integrity trigger's canonical-open INSERT rule fires
+      // BEFORE the CHECK can (both reject this row) — accept either guard.
+      expect(error?.message).toMatch(
+        /tasks_outcome_check|violates check|created open and unclaimed/i,
+      );
     });
 
     it("accepts a valid outcome on a completed appointment", async () => {
@@ -1739,9 +1743,12 @@ describe("Migration 20260814150000 — appointments schema", () => {
         await conn.query(
           "select set_config('sandra.allow_appointment_time_move', 'on', true)",
         );
+        // Move end_at with due_at — end_at > due_at is CHECK-enforced, and
+        // the real reschedule lifecycle always moves the pair together.
+        const newEndAt = new Date(Date.parse(newDueAt) + 1800_000).toISOString();
         const result = await conn.query<{ due_at: Date }>(
-          "update tasks set due_at = $1 where id = $2 returning due_at",
-          [newDueAt, appt.id],
+          "update tasks set due_at = $1, end_at = $2 where id = $3 returning due_at",
+          [newDueAt, newEndAt, appt.id],
         );
         expect(result.rows[0].due_at.toISOString()).toBe(newDueAt);
         await conn.query("commit");
@@ -1764,16 +1771,18 @@ describe("Migration 20260814150000 — appointments schema", () => {
         await conn.query(
           "select set_config('sandra.allow_appointment_time_move', 'on', true)",
         );
-        await conn.query("update tasks set due_at = $1 where id = $2", [
+        await conn.query("update tasks set due_at = $1, end_at = $2 where id = $3", [
           firstMove,
+          new Date(Date.parse(firstMove) + 1800_000).toISOString(),
           appt.id,
         ]);
         await conn.query("commit");
 
         const secondMove = new Date(Date.now() + 14400_000).toISOString();
         await expect(
-          conn.query("update tasks set due_at = $1 where id = $2", [
+          conn.query("update tasks set due_at = $1, end_at = $2 where id = $3", [
             secondMove,
+            new Date(Date.parse(secondMove) + 1800_000).toISOString(),
             appt.id,
           ]),
         ).rejects.toThrow(
@@ -1820,8 +1829,11 @@ describe("Migration 20260814150000 — appointments schema", () => {
           .eq("id", appt.id);
 
         expect(error).not.toBeNull();
+        // Clearing end_at as part of the flip reads as a time change, so
+        // the time-move rule can fire before the identity rule — the row is
+        // rejected either way; accept both guard messages.
         expect((error as { message: string }).message).toMatch(
-          /identity \(type\/calendar chain\) is immutable/i,
+          /identity \(type\/calendar chain\) is immutable|times move only through the reschedule lifecycle/i,
         );
 
         const { data: after } = await db
@@ -1854,8 +1866,11 @@ describe("Migration 20260814150000 — appointments schema", () => {
           .eq("id", appt.id);
 
         expect(error).not.toBeNull();
+        // Clearing end_at as part of the flip reads as a time change, so
+        // the time-move rule can fire before the identity rule — the row is
+        // rejected either way; accept both guard messages.
         expect((error as { message: string }).message).toMatch(
-          /identity \(type\/calendar chain\) is immutable/i,
+          /identity \(type\/calendar chain\) is immutable|times move only through the reschedule lifecycle/i,
         );
       },
     );

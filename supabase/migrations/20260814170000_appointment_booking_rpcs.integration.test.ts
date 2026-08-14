@@ -431,8 +431,6 @@ describe("Migration 20260814170000 — appointment booking RPCs", () => {
         related_property_id: propertyId,
         title: "Walkthrough",
         description: "Bring comps",
-        due_at: p_start,
-        end_at: p_end,
         calendar_chain_id: chainId,
         calendar_generation: 0,
         // Actor is always derived server-side from auth.uid() — there is
@@ -442,6 +440,10 @@ describe("Migration 20260814170000 — appointment booking RPCs", () => {
         outcome: null,
         reminder_claimed_at: null,
       });
+      // timestamptz round-trip: PostgREST serializes +00:00, the inputs are
+      // Z-suffixed — compare instants, not strings.
+      expect(new Date(task!.due_at as string).toISOString()).toBe(p_start);
+      expect(new Date(task!.end_at as string).toISOString()).toBe(p_end);
 
       const { data: ledgerRows, error: ledgerErr } = await db
         .from("task_calendar_mutations")
@@ -993,22 +995,36 @@ describe("Migration 20260814170000 — appointment booking RPCs", () => {
       expect(first.data!.duplicate).toBe(false);
 
       // Simulates the client never seeing the first response (dropped
-      // connection) and retrying with the SAME key and a slightly
-      // different title — the retry must return the ORIGINAL booking
-      // untouched, not create a second task or update the title.
+      // connection) and retrying with the SAME key and the SAME payload —
+      // the retry must return the ORIGINAL booking untouched, not create a
+      // second task. (A changed field with a reused key is NOT a replay:
+      // the RPC's immutable-field comparison rejects it — asserted below.)
       const retry = await bookAppointment(booker.client, {
         p_org: BMH_ORG_ID,
         p_assignee: assignee.userId,
         p_start,
         p_end,
         p_timezone: "America/Chicago",
-        p_title: "Retry after dropped response",
+        p_title: "First attempt",
         p_idempotency_key: key,
       });
       expect(retry.error).toBeNull();
       expect(retry.data!.duplicate).toBe(true);
       expect(retry.data!.task_id).toBe(first.data!.task_id);
       expect(retry.data!.calendar_chain_id).toBe(first.data!.calendar_chain_id);
+
+      // Key reuse with a DIFFERENT request is rejected, never silently
+      // merged into the original booking.
+      const reused = await bookAppointment(booker.client, {
+        p_org: BMH_ORG_ID,
+        p_assignee: assignee.userId,
+        p_start,
+        p_end,
+        p_timezone: "America/Chicago",
+        p_title: "Different request, same key",
+        p_idempotency_key: key,
+      });
+      expect(reused.error?.message).toMatch(/idempotency key reuse/i);
 
       const { data: rows, error: rowsErr } = await tasksByIdempotencyKey(key);
       expect(rowsErr).toBeNull();
@@ -1532,11 +1548,11 @@ describe("Migration 20260814170000 — appointment booking RPCs", () => {
         phase: "pending",
         new_event_id: null,
         result_reason: null,
-        task_due_at: p_start,
-        task_end_at: p_end,
         task_title: "Claim probe",
         task_assignee_id: assignee.userId,
       });
+      expect(new Date(claimed!.task_due_at).toISOString()).toBe(p_start);
+      expect(new Date(claimed!.task_end_at).toISOString()).toBe(p_end);
       expect(claimed!.client_event_id).toMatch(/^[a-v0-9]{5,1024}$/);
       // Round 7 fencing token: a fresh uuid minted by this claim.
       expect(claimed!.claim_token).toMatch(

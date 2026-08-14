@@ -82,16 +82,29 @@ export async function createOrgUser(
   const anon = createClient<Database>(testUrl(), anonKey(), {
     auth: { persistSession: false, autoRefreshToken: false },
   });
-  const { data: session, error: signInError } =
-    await anon.auth.signInWithPassword({ email, password });
-  if (signInError || !session.session?.access_token) {
+  // The password-grant endpoint is rate-limited per IP on the shared test
+  // project; a suite creating one user per test trips it mid-run and every
+  // later test dies with "Request rate limit reached". Back off and retry
+  // (only on rate-limit errors) instead of failing the whole tail of a run.
+  let jwt: string | null = null;
+  let signInMessage = "no token";
+  for (let attempt = 1; attempt <= 7; attempt += 1) {
+    const { data: session, error: signInError } =
+      await anon.auth.signInWithPassword({ email, password });
+    if (!signInError && session.session?.access_token) {
+      jwt = session.session.access_token;
+      break;
+    }
+    signInMessage = signInError?.message ?? "no token";
+    if (!/rate limit/i.test(signInMessage) || attempt === 7) break;
+    await new Promise((r) => setTimeout(r, Math.min(60_000, 2_000 * 2 ** attempt)));
+  }
+  if (!jwt) {
     await serviceClient.auth.admin.deleteUser(created.user.id);
-    throw new Error(
-      `createOrgUser sign-in failed: ${signInError?.message ?? "no token"}`,
-    );
+    throw new Error(`createOrgUser sign-in failed: ${signInMessage}`);
   }
 
-  return { userId: created.user.id, jwt: session.session.access_token };
+  return { userId: created.user.id, jwt };
 }
 
 export function clientForUser(jwt: string): SupabaseClient<Database> {
