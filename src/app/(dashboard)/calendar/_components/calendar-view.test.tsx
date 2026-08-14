@@ -273,4 +273,18 @@ describe("<CalendarView />", () => {
     expect(screen.getByTestId("calendar-assignee-filter-value").textContent).toBe("me");
   });
 
+  it("canonicalizes a deep link to the viewer's own raw id as 'me' (Codex round 11)", () => {
+    nav.search = "assignee=owner-1";
+    render(
+      <CalendarView
+        {...baseProps({
+          viewerRole: "owner",
+          assignees: { "owner-1": "jarrad@bmhgroupkc.com", "rep-1": "rep@bmh.com" },
+          currentUserId: "owner-1",
+        })}
+      />,
+    );
+    expect(screen.getByTestId("calendar-assignee-filter-value").textContent).toBe("me");
+  });
+
 });

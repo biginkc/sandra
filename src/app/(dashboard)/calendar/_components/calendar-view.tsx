@@ -75,14 +75,17 @@ export function CalendarView({
   // (scoping.ts): an unknown or removed teammate in a deep link must render
   // the same value the query actually used — never a blank selector over
   // differently-scoped results (Codex round 10).
+  // Own raw user id canonicalizes to ME — the selector's self option is
+  // 'me', so a ?assignee=<own-id> deep link must render it (round 11).
   const normalizedAssignee =
-    rawAssignee === null ||
-    rawAssignee === ALL ||
-    rawAssignee === ME ||
-    rawAssignee === currentUserId ||
-    Object.prototype.hasOwnProperty.call(assignees, rawAssignee)
-      ? rawAssignee
-      : null;
+    rawAssignee === currentUserId
+      ? ME
+      : rawAssignee === null ||
+          rawAssignee === ALL ||
+          rawAssignee === ME ||
+          Object.prototype.hasOwnProperty.call(assignees, rawAssignee)
+        ? rawAssignee
+        : null;
   // No param -> the role's default (owner: everyone; member: me). Once a
   // value is picked, it's always written explicitly (including "all"), so
   // "Everyone" round-trips through the URL instead of collapsing back to
