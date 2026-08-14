@@ -42,8 +42,13 @@ const WEEKDAY_INDEX: Record<string, number> = {
  * of what zone the server process itself runs in.
  */
 function weekdayIndexInZone(instant: Date, timeZone: string): number {
+  // Explicit `timeZone: timeZone` (not shorthand) — Turbopack's production
+  // minifier inlined this helper into resolveWeek, renamed the parameter,
+  // and left the shorthand key referencing a now-undefined `timeZone`
+  // global: /calendar crashed in production with "ReferenceError: timeZone
+  // is not defined" while dev, tests, and typecheck all passed.
   const label = new Intl.DateTimeFormat("en-US", {
-    timeZone,
+    timeZone: timeZone,
     weekday: "short",
   }).format(instant);
   return WEEKDAY_INDEX[label] ?? 0;
@@ -57,8 +62,9 @@ function weekdayIndexInZone(instant: Date, timeZone: string): number {
  * a locale's formatted output to always come back in a fixed shape.
  */
 function zonedDateLabel(instant: Date, timeZone: string): string {
+  // Explicit key for the same minifier-inlining hazard as weekdayIndexInZone.
   const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone,
+    timeZone: timeZone,
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
