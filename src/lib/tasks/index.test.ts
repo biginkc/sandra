@@ -262,8 +262,13 @@ describe("completeTask", () => {
 });
 
 describe("snoozeTask", () => {
-  it("bumps due_at and snoozed_until forward and leaves status unchanged in payload", async () => {
+  it("bumps due_at and snoozed_until forward, leaves status unchanged, and omits end_at for a non-appointment row", async () => {
     responseQueue = [
+      // existing-row read (type/due_at/end_at) — non-appointment, no end_at
+      {
+        data: { type: "follow_up", due_at: "2026-05-08T14:00:00Z", end_at: null },
+        error: null,
+      },
       { data: { id: "task-1", due_at: "2026-05-09T14:00:00Z" }, error: null },
     ];
 
@@ -283,10 +288,71 @@ describe("snoozeTask", () => {
     expect(payload.due_at).toBe("2026-05-09T14:00:00Z");
     expect(payload.snoozed_until).toBe("2026-05-09T14:00:00Z");
     expect(payload.status).toBeUndefined();
+    expect(payload.end_at).toBeUndefined();
+  });
+
+  it("shifts end_at by the same delta as due_at for an appointment, preserving duration", async () => {
+    responseQueue = [
+      // existing-row read — appointment with a 30-minute window.
+      {
+        data: {
+          type: "appointment",
+          due_at: "2026-05-09T14:00:00Z",
+          end_at: "2026-05-09T14:30:00Z",
+        },
+        error: null,
+      },
+      { data: { id: "task-1" }, error: null },
+    ];
+
+    // Snoozed forward by 1 day + 2 hours — the delta the end_at shift must
+    // mirror exactly.
+    const result = await snoozeTask(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      makeSupabase() as any,
+      "task-1",
+      "2026-05-10T16:00:00Z",
+    );
+
+    expect(result.ok).toBe(true);
+    const update = calls.find(
+      (c) => c.table === "tasks" && c.op === "update",
+    );
+    const payload = update!.updatePayload as Record<string, unknown>;
+    expect(payload.due_at).toBe("2026-05-10T16:00:00Z");
+    // Duration preserved: still exactly 30 minutes after due_at.
+    expect(payload.end_at).toBe("2026-05-10T16:30:00.000Z");
+  });
+
+  it("omits end_at when an appointment row has no end_at to shift", async () => {
+    responseQueue = [
+      {
+        data: { type: "appointment", due_at: "2026-05-09T14:00:00Z", end_at: null },
+        error: null,
+      },
+      { data: { id: "task-1" }, error: null },
+    ];
+
+    await snoozeTask(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      makeSupabase() as any,
+      "task-1",
+      "2026-05-10T16:00:00Z",
+    );
+
+    const update = calls.find(
+      (c) => c.table === "tasks" && c.op === "update",
+    );
+    const payload = update!.updatePayload as Record<string, unknown>;
+    expect(payload.end_at).toBeUndefined();
   });
 
   it("schedules a Google Calendar update when snooze changes due_at", async () => {
     responseQueue = [
+      {
+        data: { type: "follow_up", due_at: "2026-05-08T14:00:00Z", end_at: null },
+        error: null,
+      },
       {
         data: {
           id: "task-1",
@@ -339,6 +405,10 @@ describe("snoozeTask", () => {
   it("schedules a title-only calendar update and a thread deep link for a contact-only task (no property)", async () => {
     responseQueue = [
       {
+        data: { type: "follow_up", due_at: "2026-05-08T14:00:00Z", end_at: null },
+        error: null,
+      },
+      {
         data: {
           id: "task-1",
           assignee_id: "user-2",
@@ -382,6 +452,10 @@ describe("snoozeTask", () => {
 
   it("falls back to the base URL deep link for a fully unlinked personal block", async () => {
     responseQueue = [
+      {
+        data: { type: "follow_up", due_at: "2026-05-08T14:00:00Z", end_at: null },
+        error: null,
+      },
       {
         data: {
           id: "task-1",

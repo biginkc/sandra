@@ -410,6 +410,155 @@ describe("Migration 20260814150000 — appointments schema", () => {
     });
   });
 
+  describe("composite parent FKs — properties/contacts (id, org_id)", () => {
+    // A dual-org membership is what makes these a meaningful test of the
+    // FK at all: without it, RLS rejects TEST_ORG_B_ID writes outright for
+    // an ordinary single-org caller and the attempt proves nothing about
+    // the constraint added in this migration. With dual membership the
+    // caller is plausibly allowed to touch rows scoped to either org, so
+    // whichever layer actually stops the org_id move — RLS's WITH CHECK or
+    // the composite (id, org_id) FK — the row must not move while a task
+    // still references it under its old org_id. That's the guarantee
+    // under test; the service-role variants below isolate the FK itself,
+    // matching this file's existing convention (CHECK/trigger tests above
+    // all assert directly against the service client) for the case where
+    // fixtures can't stand up a dual-org authenticated caller.
+    async function createDualOrgUser() {
+      const user = await createUserForOrg(BMH_ORG_ID);
+      const { error } = await db.from("memberships").insert({
+        user_id: user.userId,
+        org_id: TEST_ORG_B_ID,
+        role: "member",
+      });
+      expect(error).toBeNull();
+      return user;
+    }
+
+    it("rejects an authenticated dual-org user's attempt to move a referenced property's org_id", async () => {
+      const dualUser = await createDualOrgUser();
+      const propertyId = await insertProperty(BMH_ORG_ID);
+      const { error: taskError } = await insertTask({
+        assignee_id: dualUser.userId,
+        created_by: dualUser.userId,
+        related_property_id: propertyId,
+      });
+      expect(taskError).toBeNull();
+
+      const { error } = await dualUser.client
+        .from("properties" as never)
+        .update({ org_id: TEST_ORG_B_ID } as never)
+        .eq("id", propertyId);
+      expect(error).not.toBeNull();
+
+      const { data: after } = await db
+        .from("properties")
+        .select("org_id")
+        .eq("id", propertyId)
+        .single();
+      expect((after as { org_id: string }).org_id).toBe(BMH_ORG_ID);
+    });
+
+    it("rejects an authenticated dual-org user's attempt to move a referenced contact's org_id", async () => {
+      const dualUser = await createDualOrgUser();
+      const propertyId = await insertProperty(BMH_ORG_ID);
+      const contactId = await insertContact(BMH_ORG_ID);
+      const { error: taskError } = await insertTask({
+        assignee_id: dualUser.userId,
+        created_by: dualUser.userId,
+        related_property_id: propertyId,
+        contact_id: contactId,
+      });
+      expect(taskError).toBeNull();
+
+      const { error } = await dualUser.client
+        .from("contacts" as never)
+        .update({ org_id: TEST_ORG_B_ID } as never)
+        .eq("id", contactId);
+      expect(error).not.toBeNull();
+
+      const { data: after } = await db
+        .from("contacts")
+        .select("org_id")
+        .eq("id", contactId)
+        .single();
+      expect((after as { org_id: string }).org_id).toBe(BMH_ORG_ID);
+    });
+
+    it("service-role: rejects moving a referenced property's org_id (tasks_related_property_org_fkey)", async () => {
+      const assignee = await createUserForOrg(BMH_ORG_ID);
+      const propertyId = await insertProperty();
+      const { error: taskError } = await insertTask({
+        assignee_id: assignee.userId,
+        created_by: assignee.userId,
+        related_property_id: propertyId,
+      });
+      expect(taskError).toBeNull();
+
+      const { error } = await db
+        .from("properties")
+        .update({ org_id: TEST_ORG_B_ID })
+        .eq("id", propertyId);
+      expect(error).not.toBeNull();
+      expect(error?.message).toMatch(/foreign key|violates/i);
+    });
+
+    it("service-role: rejects moving a referenced contact's org_id (tasks_contact_org_fkey)", async () => {
+      const assignee = await createUserForOrg(BMH_ORG_ID);
+      const propertyId = await insertProperty();
+      const contactId = await insertContact();
+      const { error: taskError } = await insertTask({
+        assignee_id: assignee.userId,
+        created_by: assignee.userId,
+        related_property_id: propertyId,
+        contact_id: contactId,
+      });
+      expect(taskError).toBeNull();
+
+      const { error } = await db
+        .from("contacts")
+        .update({ org_id: TEST_ORG_B_ID })
+        .eq("id", contactId);
+      expect(error).not.toBeNull();
+      expect(error?.message).toMatch(/foreign key|violates/i);
+    });
+
+    it("deleting a referenced contact nulls only tasks.contact_id — org_id and the row itself survive", async () => {
+      const assignee = await createUserForOrg(BMH_ORG_ID);
+      const propertyId = await insertProperty();
+      const contactId = await insertContact();
+      const { data, error: taskError } = await insertTask({
+        assignee_id: assignee.userId,
+        created_by: assignee.userId,
+        related_property_id: propertyId,
+        contact_id: contactId,
+      });
+      expect(taskError).toBeNull();
+      const taskId = data!.id;
+
+      const { error: deleteError } = await db
+        .from("contacts")
+        .delete()
+        .eq("id", contactId);
+      expect(deleteError).toBeNull();
+
+      const { data: after } = await db
+        .from("tasks")
+        .select("id, org_id, contact_id, related_property_id")
+        .eq("id", taskId)
+        .single();
+      expect(after).toBeTruthy();
+      const row = after as {
+        id: string;
+        org_id: string;
+        contact_id: string | null;
+        related_property_id: string | null;
+      };
+      expect(row.contact_id).toBeNull();
+      expect(row.org_id).toBe(BMH_ORG_ID);
+      expect(row.related_property_id).toBe(propertyId);
+    });
+  });
+
   describe("notifications — bell exactly-once", () => {
     it("rejects a second task_appointment_reminder notification for the same (user, entity)", async () => {
       const user = await createUserForOrg(BMH_ORG_ID);

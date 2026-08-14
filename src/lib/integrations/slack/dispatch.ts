@@ -5,6 +5,7 @@ import { loadIntegrationPrefs } from "@/lib/integrations/prefs";
 import { getDecryptedToken } from "@/lib/integrations/tokens/store";
 import { humanDueDate } from "@/lib/notifications/format";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { normalizeTimeZone } from "@/lib/time/zoned";
 import { completeTask } from "@/lib/tasks";
 
 import { buildMarkedDoneBlocks, buildTaskAssignedBlocks } from "./blocks";
@@ -44,10 +45,13 @@ export async function dispatchTaskAssignedSlack(
 ): Promise<DispatchSlackResult> {
   try {
     const admin = createAdminClient();
-    // Prefs are loaded unconditionally now: timezone labels the due date in
-    // the assignee's own zone even when slackEnabled was passed in.
-    const prefs = await loadIntegrationPrefs(admin, input.assigneeId);
-    const slackEnabled = input.slackEnabled ?? prefs.slackEnabled;
+    // input.timezone is the authoritative zone — the caller loaded the
+    // assignee's prefs once and threads the result through. Re-loading here
+    // would silently swap in the Chicago default whenever the prefs read
+    // transiently failed, discarding a zone the caller already knew.
+    const slackEnabled =
+      input.slackEnabled ??
+      (await loadIntegrationPrefs(admin, input.assigneeId)).slackEnabled;
     if (!slackEnabled) return { sent: false, reason: "pref_disabled" };
 
     const token = await getDecryptedToken({
@@ -68,7 +72,7 @@ export async function dispatchTaskAssignedSlack(
     const blocks = buildTaskAssignedBlocks({
       taskTitle,
       propertyAddress: input.propertyAddress,
-      dueLabel: humanDueDate(input.dueAt, undefined, prefs.timezone),
+      dueLabel: humanDueDate(input.dueAt, undefined, normalizeTimeZone(input.timezone)),
       taskTypeLabel: TASK_TYPE_LABELS[input.taskType] ?? "Task",
       taskId: input.taskId,
       deepLink: input.deepLink,

@@ -38,7 +38,7 @@ alter table public.tasks
   alter column related_property_id drop not null;
 
 alter table public.tasks
-  add column contact_id uuid references public.contacts(id) on delete set null,
+  add column contact_id uuid,
   add column description text,
   add column end_at timestamptz,
   add column outcome text,
@@ -108,6 +108,31 @@ alter table public.tasks
   add constraint tasks_id_org_id_key unique (id, org_id);
 alter table public.tasks
   add constraint tasks_id_org_id_calendar_chain_id_key unique (id, org_id, calendar_chain_id);
+
+-- Tenant agreement with PARENTS is structural, not trigger-only: composite
+-- FKs pin a task's property/contact to the task's own org, so a dual-org
+-- user cannot move a referenced parent's org_id out from under its tasks
+-- (the FK blocks the parent move and the mismatched insert alike). The
+-- trigger (section 3) remains as defense in depth and for the
+-- active-assignee check, which no FK can express.
+alter table public.properties
+  add constraint properties_id_org_id_key unique (id, org_id);
+alter table public.contacts
+  add constraint contacts_id_org_id_key unique (id, org_id);
+
+alter table public.tasks
+  drop constraint tasks_related_property_id_fkey;
+alter table public.tasks
+  add constraint tasks_related_property_org_fkey
+  foreign key (related_property_id, org_id)
+  references public.properties (id, org_id) on delete cascade;
+
+-- PG15+ column-list SET NULL: only contact_id is nulled on contact
+-- deletion — org_id must survive (NOT NULL).
+alter table public.tasks
+  add constraint tasks_contact_org_fkey
+  foreign key (contact_id, org_id)
+  references public.contacts (id, org_id) on delete set null (contact_id);
 
 -- ----------------------------------------------------------------------------
 -- 2. Pre-install audit — abort the migration if existing tasks already

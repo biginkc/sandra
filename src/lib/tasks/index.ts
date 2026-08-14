@@ -117,13 +117,41 @@ export async function snoozeTask(
   snoozedUntil: string,
 ): Promise<Result<Task>> {
   const now = new Date().toISOString();
+
+  // Appointments carry an end_at window; moving due_at alone would either
+  // violate the end_at > due_at constraint (pushed past its end) or
+  // silently change the booked duration (pulled earlier). Shift both ends
+  // by the same delta so the duration is preserved. One extra read only
+  // for appointment-capable rows — cheap, and the update below still
+  // guards with .eq("id").
+  const { data: existing } = await supabase
+    .from("tasks")
+    .select("type, due_at, end_at")
+    .eq("id", taskId)
+    .single();
+
+  const update: {
+    due_at: string;
+    snoozed_until: string;
+    updated_at: string;
+    end_at?: string;
+  } = {
+    due_at: snoozedUntil,
+    snoozed_until: snoozedUntil,
+    updated_at: now,
+  };
+
+  if (existing?.type === "appointment" && existing.end_at && existing.due_at) {
+    const deltaMs =
+      new Date(snoozedUntil).getTime() - new Date(existing.due_at).getTime();
+    update.end_at = new Date(
+      new Date(existing.end_at).getTime() + deltaMs,
+    ).toISOString();
+  }
+
   const { data, error } = await supabase
     .from("tasks")
-    .update({
-      due_at: snoozedUntil,
-      snoozed_until: snoozedUntil,
-      updated_at: now,
-    })
+    .update(update)
     .eq("id", taskId)
     .select()
     .single();
