@@ -49,19 +49,29 @@ export async function createTask(
       org_id: input.orgId,
       assignee_id: input.assigneeId,
       related_property_id: input.relatedPropertyId ?? null,
-      contact_id: input.contactId ?? null,
       type: input.type,
       title: input.title,
-      description: input.description ?? null,
       due_at: input.dueAt,
-      end_at: input.endAt ?? null,
+      created_by: input.createdBy,
+      // Migration-added columns ride along only when the call actually
+      // uses them. During the brief new-code/old-schema window after a
+      // deploy (migrations apply post-merge via the guard workflows),
+      // legacy follow_up/callback creation must keep working — an
+      // unconditional payload would fail every insert until the
+      // migration lands. Appointment creation cannot predate the schema
+      // (no booking UI ships before PR 2).
+      ...(input.contactId !== undefined ? { contact_id: input.contactId } : {}),
+      ...(input.description !== undefined
+        ? { description: input.description }
+        : {}),
+      ...(input.endAt !== undefined ? { end_at: input.endAt } : {}),
       // The DB's chain invariant requires every appointment to carry a
       // calendar_chain_id (and forbids one on any other type) — it is the
       // durable identity of the logical appointment across reschedule
       // successors, born here at creation.
-      calendar_chain_id:
-        input.type === "appointment" ? crypto.randomUUID() : null,
-      created_by: input.createdBy,
+      ...(input.type === "appointment"
+        ? { calendar_chain_id: crypto.randomUUID() }
+        : {}),
     })
     .select()
     .single();

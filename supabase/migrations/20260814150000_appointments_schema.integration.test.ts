@@ -299,6 +299,127 @@ describe("Migration 20260814150000 — appointments schema", () => {
     });
   });
 
+  // Round-9: the outcome CHECK moved from a one-way OR (`outcome is null OR
+  // ...`) to an equality between terminal status and a non-null outcome, so
+  // both directions are enforced — an open appointment can no longer carry
+  // an outcome, and a terminal one can no longer lack one. These exercise
+  // the coupling through UPDATEs on an authenticated org member's own
+  // client (not the service-role INSERTs above), since that's the path the
+  // app's own outcome-recording flow (PR 3) actually uses.
+  describe("appointment outcome coupling (authenticated client)", () => {
+    async function createOpenAppointment(): Promise<{
+      taskId: string;
+      owner: Awaited<ReturnType<typeof createUserForOrg>>;
+    }> {
+      const owner = await createUserForOrg(BMH_ORG_ID, "owner");
+      const dueAt = new Date(Date.now() + 3600_000).toISOString();
+      const endAt = new Date(Date.now() + 7200_000).toISOString();
+      const { data, error } = await insertTask({
+        type: "appointment",
+        assignee_id: owner.userId,
+        created_by: owner.userId,
+        due_at: dueAt,
+        end_at: endAt,
+        calendar_chain_id: crypto.randomUUID(),
+      });
+      expect(error).toBeNull();
+      return { taskId: data!.id, owner };
+    }
+
+    it("rejects status='completed' with a NULL outcome", async () => {
+      const { taskId, owner } = await createOpenAppointment();
+      const { error } = await owner.client
+        .from("tasks" as never)
+        .update({
+          status: "completed",
+          completed_at: new Date().toISOString(),
+          completed_by: owner.userId,
+        } as never)
+        .eq("id", taskId);
+      expect(error).not.toBeNull();
+      expect((error as { message: string }).message).toMatch(
+        /tasks_outcome_check|violates check/i,
+      );
+    });
+
+    it("rejects status='cancelled' with a NULL outcome", async () => {
+      const { taskId, owner } = await createOpenAppointment();
+      const { error } = await owner.client
+        .from("tasks" as never)
+        .update({ status: "cancelled" } as never)
+        .eq("id", taskId);
+      expect(error).not.toBeNull();
+      expect((error as { message: string }).message).toMatch(
+        /tasks_outcome_check|violates check/i,
+      );
+    });
+
+    it("rejects setting an outcome while the appointment stays open", async () => {
+      const { taskId, owner } = await createOpenAppointment();
+      const { error } = await owner.client
+        .from("tasks" as never)
+        .update({ outcome: "held" } as never)
+        .eq("id", taskId);
+      expect(error).not.toBeNull();
+      expect((error as { message: string }).message).toMatch(
+        /tasks_outcome_check|violates check/i,
+      );
+    });
+
+    it("accepts status='completed' with outcome='held', leaving due_at/end_at untouched (no time-move guard trip)", async () => {
+      const { taskId, owner } = await createOpenAppointment();
+      const { data: before } = await db
+        .from("tasks")
+        .select("due_at, end_at")
+        .eq("id", taskId)
+        .single();
+
+      const { data, error } = await owner.client
+        .from("tasks" as never)
+        .update({
+          status: "completed",
+          outcome: "held",
+          completed_at: new Date().toISOString(),
+          completed_by: owner.userId,
+        } as never)
+        .eq("id", taskId)
+        .select("status, outcome, due_at, end_at")
+        .single();
+
+      expect(error).toBeNull();
+      const row = data as {
+        status: string;
+        outcome: string;
+        due_at: string;
+        end_at: string;
+      } | null;
+      expect(row?.status).toBe("completed");
+      expect(row?.outcome).toBe("held");
+      expect(row?.due_at).toBe((before as { due_at: string }).due_at);
+      expect(row?.end_at).toBe((before as { end_at: string }).end_at);
+    });
+
+    it("rejects an outcome set on a non-appointment task", async () => {
+      const owner = await createUserForOrg(BMH_ORG_ID, "owner");
+      const propertyId = await insertProperty();
+      const { data, error: taskError } = await insertTask({
+        assignee_id: owner.userId,
+        created_by: owner.userId,
+        related_property_id: propertyId,
+      });
+      expect(taskError).toBeNull();
+
+      const { error } = await owner.client
+        .from("tasks" as never)
+        .update({ outcome: "held" } as never)
+        .eq("id", data!.id);
+      expect(error).not.toBeNull();
+      expect((error as { message: string }).message).toMatch(
+        /tasks_outcome_check|violates check/i,
+      );
+    });
+  });
+
   describe("user_integration_prefs — SMS reminder fail-closed", () => {
     it("rejects a reminder_phone that is not E.164", async () => {
       const user = await createUserForOrg(BMH_ORG_ID);
@@ -440,6 +561,79 @@ describe("Migration 20260814150000 — appointments schema", () => {
         .update({ reminder_claimed_at: new Date().toISOString() })
         .eq("id", appt.id);
       expect(error).toBeNull();
+    });
+  });
+
+  // Round-9: org_id became flatly immutable on UPDATE — the trigger used to
+  // revalidate a changed org_id against the new tenant's relations; now it
+  // raises before any of that. A personal (unlinked) appointment has no
+  // parent FK to fall back on for this guarantee (properties/contacts get
+  // theirs from the composite parent FKs below), so this is the only layer
+  // protecting it.
+  describe("tasks_tenant_integrity_guard — org immutability", () => {
+    async function createDualOrgUser() {
+      const user = await createUserForOrg(BMH_ORG_ID);
+      const { error } = await db.from("memberships").insert({
+        user_id: user.userId,
+        org_id: TEST_ORG_B_ID,
+        role: "member",
+      });
+      expect(error).toBeNull();
+      return user;
+    }
+
+    it("rejects an authenticated dual-org member's attempt to move a personal appointment's org_id to their other org", async () => {
+      const dualUser = await createDualOrgUser();
+      const dueAt = new Date(Date.now() + 3600_000).toISOString();
+      const endAt = new Date(Date.now() + 7200_000).toISOString();
+      const { data, error: taskError } = await insertTask({
+        type: "appointment",
+        assignee_id: dualUser.userId,
+        created_by: dualUser.userId,
+        due_at: dueAt,
+        end_at: endAt,
+        calendar_chain_id: crypto.randomUUID(),
+      });
+      expect(taskError).toBeNull();
+      const taskId = data!.id;
+
+      const { error } = await dualUser.client
+        .from("tasks" as never)
+        .update({ org_id: TEST_ORG_B_ID } as never)
+        .eq("id", taskId);
+
+      expect(error).not.toBeNull();
+      expect((error as { message: string }).message).toMatch(
+        /tasks cannot change org/i,
+      );
+
+      const { data: after } = await db
+        .from("tasks")
+        .select("org_id")
+        .eq("id", taskId)
+        .single();
+      expect((after as { org_id: string }).org_id).toBe(BMH_ORG_ID);
+    });
+
+    it("rejects a service-role attempt to move a personal appointment's org_id", async () => {
+      const appt = await insertValidAppointment();
+
+      const { error } = await db
+        .from("tasks")
+        .update({ org_id: TEST_ORG_B_ID })
+        .eq("id", appt.id);
+
+      expect(error).not.toBeNull();
+      expect((error as { message: string }).message).toMatch(
+        /tasks cannot change org/i,
+      );
+
+      const { data: after } = await db
+        .from("tasks")
+        .select("org_id")
+        .eq("id", appt.id)
+        .single();
+      expect((after as { org_id: string }).org_id).toBe(BMH_ORG_ID);
     });
   });
 
@@ -1166,6 +1360,10 @@ describe("Migration 20260814150000 — appointments schema", () => {
         contact_id: contactId,
         calendar_chain_id: crypto.randomUUID(),
         status: "completed",
+        // round-9's rewritten tasks_outcome_check requires terminal
+        // appointments to carry an outcome (equality, not the old one-way
+        // OR) — this insert predates that and must supply one now.
+        outcome: "held",
       });
       expect(taskError).toBeNull();
       const taskId = data!.id;

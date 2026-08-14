@@ -161,6 +161,14 @@ describe("createTask", () => {
     expect(payload.title).toBe("Follow up on 123 Main");
     expect(payload.due_at).toBe("2026-05-08T14:00:00Z");
     expect(payload.created_by).toBe("user-1");
+    // Migration-added columns must be entirely absent (not merely null) from
+    // a legacy follow_up payload — the conditional spreads only ride along
+    // when their inputs are actually provided, so old-schema-compatible
+    // inserts keep working during the post-deploy pre-migration window.
+    expect("contact_id" in payload).toBe(false);
+    expect("description" in payload).toBe(false);
+    expect("end_at" in payload).toBe(false);
+    expect("calendar_chain_id" in payload).toBe(false);
   });
 
   it("inserts a property-less appointment with contact/description/endAt and nulls related_property_id", async () => {
@@ -193,6 +201,10 @@ describe("createTask", () => {
     expect(payload.description).toBe("Discuss offer terms");
     expect(payload.end_at).toBe("2026-05-08T14:30:00Z");
     expect(payload.type).toBe("appointment");
+    // calendar_chain_id rides along too — the DB's chain invariant requires
+    // every appointment to carry one, generated here at creation.
+    expect(typeof payload.calendar_chain_id).toBe("string");
+    expect((payload.calendar_chain_id as string).length).toBeGreaterThan(0);
   });
 
   it("returns err with TASK_CREATE_FAILED when supabase errors", async () => {

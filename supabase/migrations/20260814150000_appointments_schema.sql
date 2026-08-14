@@ -80,14 +80,19 @@ alter table public.tasks
   add constraint tasks_end_at_check
   check (end_at is null or (type = 'appointment' and end_at > due_at));
 
+-- Terminal appointments REQUIRE an outcome (and only terminal ones may
+-- carry one): a REST client or future code path setting an appointment
+-- to completed/cancelled without held/no-show semantics would hide it
+-- from open-task flows while bypassing the outcome lifecycle. Equality
+-- of the two predicates encodes both directions at once.
 alter table public.tasks
   add constraint tasks_outcome_check
   check (
-    outcome is null
+    (type <> 'appointment' and outcome is null)
     or (
       type = 'appointment'
-      and status in ('completed', 'cancelled')
-      and outcome in ('held', 'no_show', 'rescheduled', 'cancelled')
+      and ((status in ('completed', 'cancelled')) = (outcome is not null))
+      and (outcome is null or outcome in ('held', 'no_show', 'rescheduled', 'cancelled'))
     )
   );
 
@@ -245,7 +250,17 @@ declare
   v_assignee_changed boolean := true;
 begin
   if tg_op = 'UPDATE' then
-    v_org_changed := new.org_id is distinct from old.org_id;
+    -- tasks.org_id is immutable: no lifecycle moves a task between
+    -- tenants. Property/contact-linked tasks are already anchored by
+    -- composite parent FKs, but a personal appointment has no parent —
+    -- without this, a dual-org member could carry one (and its calendar
+    -- chain) across the tenant boundary with no audit trail.
+    if new.org_id is distinct from old.org_id then
+      raise exception
+        'tasks_tenant_integrity_guard: tasks cannot change org'
+        using errcode = 'P0001';
+    end if;
+    v_org_changed := false;
     v_contact_changed := new.contact_id is distinct from old.contact_id;
     v_property_changed := new.related_property_id is distinct from old.related_property_id;
     v_assignee_changed := new.assignee_id is distinct from old.assignee_id;
