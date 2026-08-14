@@ -135,8 +135,10 @@ describe("fetchCalendarAppointments", () => {
       weekEndUtc: "2026-05-10T05:00:00.000Z",
     });
 
-    expect(result).toHaveLength(1);
-    expect(result[0]).toMatchObject({
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok:true");
+    expect(result.rows).toHaveLength(1);
+    expect(result.rows[0]).toMatchObject({
       id: "t-1",
       property_id: "prop-1",
       address: "1 Main St",
@@ -166,7 +168,8 @@ describe("fetchCalendarAppointments", () => {
       weekStartUtc: "2026-05-03T05:00:00.000Z",
       weekEndUtc: "2026-05-10T05:00:00.000Z",
     });
-    expect(result[0].contact_name).toBe("Jane Doe");
+    if (!result.ok) throw new Error("expected ok:true");
+    expect(result.rows[0].contact_name).toBe("Jane Doe");
   });
 
   it("degrades a soft-deleted property to null property fields instead of dropping the row", async () => {
@@ -196,8 +199,9 @@ describe("fetchCalendarAppointments", () => {
       weekStartUtc: "2026-05-03T05:00:00.000Z",
       weekEndUtc: "2026-05-10T05:00:00.000Z",
     });
-    expect(result[0].property_id).toBeNull();
-    expect(result[0].address).toBeNull();
+    if (!result.ok) throw new Error("expected ok:true");
+    expect(result.rows[0].property_id).toBeNull();
+    expect(result.rows[0].address).toBeNull();
   });
 
   it("treats a personal block (no property, no contact) as null/null rather than dropping it", async () => {
@@ -222,14 +226,25 @@ describe("fetchCalendarAppointments", () => {
       weekStartUtc: "2026-05-03T05:00:00.000Z",
       weekEndUtc: "2026-05-10T05:00:00.000Z",
     });
-    expect(result[0]).toMatchObject({
+    if (!result.ok) throw new Error("expected ok:true");
+    expect(result.rows[0]).toMatchObject({
       property_id: null,
       contact_id: null,
       contact_name: null,
     });
   });
 
-  it("returns an empty array on a query error", async () => {
+  it("returns ok:true with an empty rows array for a genuinely empty week", async () => {
+    queuedData = [];
+
+    const result = await fetchCalendarAppointments("org-1", {
+      weekStartUtc: "2026-05-03T05:00:00.000Z",
+      weekEndUtc: "2026-05-10T05:00:00.000Z",
+    });
+    expect(result).toEqual({ ok: true, rows: [] });
+  });
+
+  it("returns ok:false (never a bare empty array) on a query error — distinguishable from a genuinely empty week", async () => {
     queuedData = null;
     queuedError = { message: "boom" };
 
@@ -237,7 +252,7 @@ describe("fetchCalendarAppointments", () => {
       weekStartUtc: "2026-05-03T05:00:00.000Z",
       weekEndUtc: "2026-05-10T05:00:00.000Z",
     });
-    expect(result).toEqual([]);
+    expect(result).toEqual({ ok: false });
   });
 });
 
@@ -307,7 +322,10 @@ describe("fetchOrgAssigneeEmails", () => {
     });
 
     const result = await fetchOrgAssigneeEmails("org-1");
-    expect(result).toEqual({ "user-1": "owner@bmh.com", "rep-2": "rep2@bmh.com" });
+    expect(result).toEqual({
+      ok: true,
+      emails: { "user-1": "owner@bmh.com", "rep-2": "rep2@bmh.com" },
+    });
   });
 
   it("scopes to the org and to active, non-deletion-prepared, unexpired memberships", async () => {
@@ -332,18 +350,18 @@ describe("fetchOrgAssigneeEmails", () => {
       weekStartUtc: "2026-05-03T05:00:00.000Z",
       weekEndUtc: "2026-05-10T05:00:00.000Z",
     });
-    expect(appointments).toEqual([]);
+    expect(appointments).toEqual({ ok: true, rows: [] });
 
     const result = await fetchOrgAssigneeEmails("org-1");
-    expect(result).toEqual({ "rep-2": "rep2@bmh.com" });
+    expect(result).toEqual({ ok: true, emails: { "rep-2": "rep2@bmh.com" } });
   });
 
-  it("returns an empty map on a memberships query error", async () => {
+  it("returns ok:false (roster failure) on a memberships query error, distinguishable from an org with no members", async () => {
     membershipRows = null;
     membershipError = { message: "boom" };
 
     const result = await fetchOrgAssigneeEmails("org-1");
-    expect(result).toEqual({});
+    expect(result).toEqual({ ok: false });
     expect(mocks.listUsers).not.toHaveBeenCalled();
   });
 });

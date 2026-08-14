@@ -1,3 +1,5 @@
+import Link from "next/link";
+
 import { Page } from "@/components/page";
 import { PageHeader } from "@/components/page-header";
 import { getCallerMemberships } from "@/lib/auth/memberships";
@@ -114,6 +116,21 @@ function resolveWeek(
   return { weekStartDate: days[0].date, days };
 }
 
+/**
+ * Rebuilds the current `/calendar` URL from the already-parsed
+ * `searchParams` (Codex round 2 retry link) — a plain re-request of the
+ * same view/week/assignee, not a reset to defaults, so retrying after a
+ * transient failure lands back where the viewer was.
+ */
+function currentCalendarHref(params: CalendarSearchParams): string {
+  const sp = new URLSearchParams();
+  if (params.week) sp.set("week", params.week);
+  if (params.assignee) sp.set("assignee", params.assignee);
+  if (params.view) sp.set("view", params.view);
+  const qs = sp.toString();
+  return qs ? `/calendar?${qs}` : "/calendar";
+}
+
 export default async function CalendarPage({
   searchParams,
 }: {
@@ -162,18 +179,51 @@ export default async function CalendarPage({
   const weekStartUtc = days[0].startUtc;
   const weekEndUtc = days[6].endUtc;
 
-  const appointments = await fetchCalendarAppointments(orgId, {
+  const appointmentsResult = await fetchCalendarAppointments(orgId, {
     assigneeId,
     weekStartUtc,
     weekEndUtc,
   });
+
+  // A query failure is NOT an empty week (Codex round 2) — render an
+  // explicit retry state instead of silently showing "no appointments".
+  // The link re-requests the exact same view/week/assignee, not a reset.
+  if (!appointmentsResult.ok) {
+    return (
+      <Page>
+        <PageHeader
+          breadcrumb={[{ label: "Workspace" }, { label: "Calendar" }]}
+          title="Calendar"
+        />
+        <div className="text-destructive flex items-center gap-2 text-sm">
+          <span>Calendar couldn&apos;t load.</span>
+          <Link
+            href={currentCalendarHref(params)}
+            className="font-bold underline underline-offset-4"
+          >
+            Retry
+          </Link>
+        </div>
+      </Page>
+    );
+  }
+  const appointments = appointmentsResult.rows;
 
   // Loaded independently of `appointments` — the org roster (Codex round
   // 1), not just the ids referenced in the current week's rows, so the
   // filter dropdown (both roles, now that members get one too) always
   // lists every active teammate, including one with zero appointments in
   // the displayed week.
-  const assignees = await fetchOrgAssigneeEmails(orgId);
+  const assigneesResult = await fetchOrgAssigneeEmails(orgId);
+  // Roster failure degrades rather than failing the whole page (Codex
+  // round 2 — the appointments themselves, the primary content, already
+  // loaded fine at this point): fall back to a viewer-only roster (just
+  // the caller) so the assignee filter still renders "Me" correctly, and
+  // surface a muted note rather than silently hiding the teammate list.
+  const assignees = assigneesResult.ok
+    ? assigneesResult.emails
+    : { [user.id]: user.email ?? "" };
+  const rosterDegraded = !assigneesResult.ok;
 
   return (
     <Page>
@@ -186,6 +236,12 @@ export default async function CalendarPage({
             : "Your appointments."
         }
       />
+      {rosterDegraded && (
+        <div className="text-muted-foreground text-xs">
+          Couldn&apos;t load the team roster — showing your own appointments
+          only.
+        </div>
+      )}
       <CalendarView
         view={view}
         week={weekStartDate}

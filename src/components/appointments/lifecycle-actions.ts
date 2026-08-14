@@ -86,6 +86,13 @@ function revalidateAppointmentPaths(task: TaskLookupRow | null): void {
   if (task?.related_property_id) revalidatePath(`/leads/${task.related_property_id}`);
   revalidatePath("/messages");
   revalidatePath("/dashboard");
+  // Codex round 2: every lifecycle mutation (complete/cancel/reschedule/
+  // reassign) changes what the calendar surface (PR 4) shows for this
+  // appointment — a completed/cancelled task drops off or changes state,
+  // a reschedule moves it to a new due_at, a reassign changes its column.
+  // Without this the calendar page kept serving a stale cached render
+  // until something else happened to revalidate it.
+  revalidatePath("/calendar");
 }
 
 /**

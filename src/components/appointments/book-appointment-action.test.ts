@@ -715,6 +715,7 @@ describe("bookAppointment — RPC + side effects", () => {
     expect(revalidatePath).toHaveBeenCalledWith("/leads/prop-1");
     expect(revalidatePath).toHaveBeenCalledWith("/messages");
     expect(revalidatePath).toHaveBeenCalledWith("/dashboard");
+    expect(revalidatePath).toHaveBeenCalledWith("/calendar");
   });
 
   it("revalidates using the RPC-returned related_property_id, never the request's propertyId", async () => {

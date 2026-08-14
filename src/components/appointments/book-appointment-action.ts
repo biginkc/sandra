@@ -430,6 +430,11 @@ export async function bookAppointment(
     if (linkedPropertyId) revalidatePath(`/leads/${linkedPropertyId}`);
     revalidatePath("/messages");
     revalidatePath("/dashboard");
+    // Codex round 2: a fresh booking (or a duplicate-key replay of one)
+    // must show up on the calendar surface (PR 4) without a stale cache
+    // hanging around — same rationale as the lifecycle actions' identical
+    // addition.
+    revalidatePath("/calendar");
 
     return ok(result);
   } catch (e) {

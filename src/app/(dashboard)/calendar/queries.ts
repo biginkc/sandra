@@ -4,6 +4,17 @@ import { createClient } from "@/lib/supabase/server";
 import type { CalendarAppointmentRow } from "./types";
 
 /**
+ * Discriminated result so a query failure is never indistinguishable from a
+ * genuinely empty week (Codex round 2 — the previous signature coerced
+ * both to `[]`, which made the calendar silently render "no appointments
+ * this week" on a DB error). `page.tsx` renders an explicit retry state on
+ * `{ ok: false }` and only shows the empty-week UI for `{ ok: true, rows: [] }`.
+ */
+export type FetchCalendarAppointmentsResult =
+  | { ok: true; rows: CalendarAppointmentRow[] }
+  | { ok: false };
+
+/**
  * Loads open + completed appointment-type tasks whose `due_at` falls in
  * `[weekStartUtc, weekEndUtc)`, left-joined to `properties` (personal
  * blocks / contact-only appointments legitimately have none — same
@@ -26,7 +37,7 @@ export async function fetchCalendarAppointments(
     weekStartUtc: string;
     weekEndUtc: string;
   },
-): Promise<CalendarAppointmentRow[]> {
+): Promise<FetchCalendarAppointmentsResult> {
   const supabase = await createClient();
 
   let query = supabase
@@ -53,10 +64,10 @@ export async function fetchCalendarAppointments(
         code: error.code,
       });
     }
-    return [];
+    return { ok: false };
   }
 
-  return data.map((row) => {
+  const rows = data.map((row) => {
     const prop = row.properties as unknown as {
       address: string | null;
       city: string | null;
@@ -99,6 +110,8 @@ export async function fetchCalendarAppointments(
     };
     return appt;
   });
+
+  return { ok: true, rows };
 }
 
 /**
@@ -115,8 +128,27 @@ export async function fetchCalendarAppointments(
  * (`components/appointments/book-appointment-action.ts`) so "who can be
  * assigned an appointment" and "who shows up in the calendar filter" never
  * disagree.
+ *
+ * Discriminated result (Codex round 2, same rationale as
+ * `fetchCalendarAppointments`): a `memberships` query failure returns
+ * `{ ok: false }` rather than `{}`, so `page.tsx` can tell "roster failed
+ * to load" apart from "org genuinely has one member" and degrade instead of
+ * silently rendering a roster of one. Chosen degrade: roster failure never
+ * fails the whole calendar page — it falls back to a viewer-only roster
+ * (just the caller) plus a muted note, since the appointments themselves
+ * (the primary content) may have loaded fine. A downstream failure inside
+ * `fetchAssigneeEmails` (the `auth.users` lookup) is treated as `ok: true`
+ * with a partial map — that's the existing "missing label, not missing
+ * page" degrade this function already relied on before this change, and it
+ * only affects display strings, not which teammates are selectable.
  */
-export async function fetchOrgAssigneeEmails(orgId: string): Promise<Record<string, string>> {
+export type FetchOrgAssigneeEmailsResult =
+  | { ok: true; emails: Record<string, string> }
+  | { ok: false };
+
+export async function fetchOrgAssigneeEmails(
+  orgId: string,
+): Promise<FetchOrgAssigneeEmailsResult> {
   const admin = createAdminClient();
   const activeAt = new Date().toISOString();
   const { data: memberships, error } = await admin
@@ -134,10 +166,11 @@ export async function fetchOrgAssigneeEmails(orgId: string): Promise<Record<stri
         code: error.code,
       });
     }
-    return {};
+    return { ok: false };
   }
 
-  return fetchAssigneeEmails(memberships.map((m) => m.user_id as string));
+  const emails = await fetchAssigneeEmails(memberships.map((m) => m.user_id as string));
+  return { ok: true, emails };
 }
 
 /**
