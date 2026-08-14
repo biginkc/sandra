@@ -718,6 +718,38 @@ describe("bookAppointment — RPC + side effects", () => {
     expect(revalidatePath).toHaveBeenCalledWith("/calendar");
   });
 
+  it("returns the committed booking even when revalidation throws — commit honesty (PR 4 confirmation round)", async () => {
+    const { reportError } = await import("@/lib/errors/report");
+    createClient.mockResolvedValue(
+      makeSupabaseMock({
+        userId: "user-1",
+        rpcResult: {
+          data: {
+            task_id: "task-1",
+            already_qualified: false,
+            calendar_chain_id: "chain-1",
+            related_property_id: "prop-1",
+            contact_id: null,
+          },
+          error: null,
+        },
+      }),
+    );
+    revalidatePath.mockImplementationOnce(() => {
+      throw new Error("revalidate exploded");
+    });
+
+    const result = await bookAppointment(VALID_INPUT);
+
+    expect(result.ok).toBe(true);
+    expect(reportError).toHaveBeenCalledWith(
+      expect.any(Error),
+      expect.objectContaining({
+        tags: { surface: "book_appointment_revalidate" },
+      }),
+    );
+  });
+
   it("revalidates using the RPC-returned related_property_id, never the request's propertyId", async () => {
     createClient.mockResolvedValue(
       makeSupabaseMock({
