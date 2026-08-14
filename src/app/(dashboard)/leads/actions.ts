@@ -1490,6 +1490,7 @@ export async function sendSmsFromLead(
     }
 
     const outcome = await sendSmsToContact(supabase, {
+      origin: "manual",
       contactId: property.homeowner_contact_id,
       propertyId,
       body: trimmed,

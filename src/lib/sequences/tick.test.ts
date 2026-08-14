@@ -1,6 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 
+import { sendSmsToContact } from "@/lib/messaging/send";
+
 import { processEnrollmentTick } from "./tick";
+
+vi.mock("@/lib/messaging/send", () => ({
+  sendSmsToContact: vi.fn(),
+}));
 
 /**
  * Minimal chainable/thenable query-builder stub — every chain method
@@ -161,5 +167,68 @@ describe("processEnrollmentTick — outbound suppression boundary", () => {
     const outcome = await processEnrollmentTick(client, BASE_ENROLLMENT);
 
     expect(outcome.status).not.toBe("paused");
+  });
+});
+
+describe("processEnrollmentTick — send_sms race: booking lands after the early gate", () => {
+  it("pauses (resumably) without advancing when send.ts's fresh check catches a booking that landed after the early gate passed", async () => {
+    // The early gate (step 2) sees a clean dispo and lets the tick proceed
+    // into send_sms. The flip to booked_appointment is simulated as having
+    // happened inside send.ts's own immediately-before-provider-call
+    // re-check — represented here by mocking sendSmsToContact to return
+    // exactly what that fresh check now returns instead of "sent".
+    const cleanPropertyRow = {
+      status: "lead",
+      state: "MO",
+      address: "123 Main St",
+      city: "Kansas City",
+      zip: "64111",
+      market: "KC",
+      org_id: null,
+      outreach_dispo: null,
+    };
+    const from = vi.fn((table: string) => {
+      if (table === "sequence_steps") return makeQueryResult(STEP_ROW);
+      if (table === "properties") return makeQueryResult(cleanPropertyRow);
+      if (table === "contacts") return makeQueryResult({ first_name: "Sam", last_name: "Test" });
+      if (table === "sequences") return makeQueryResult({ append_opt_out: true });
+      if (table === "sequence_step_runs") {
+        const builder: Record<string, unknown> = {};
+        builder.insert = () => builder;
+        builder.update = () => builder;
+        builder.select = () => builder;
+        builder.eq = () => builder;
+        builder.single = () => Promise.resolve({ data: { id: "run-1" }, error: null });
+        builder.then = (resolve: (v: { data: unknown; error: unknown }) => unknown) =>
+          resolve({ data: null, error: null });
+        return builder;
+      }
+      if (table === "sequence_enrollments") return makeQueryResult(null);
+      throw new Error(`Unexpected table in test: ${table}`);
+    });
+    const client = { from } as never;
+
+    vi.mocked(sendSmsToContact).mockResolvedValue({
+      status: "blocked_automated_suppressed",
+      messageId: "msg-race-1",
+      reason:
+        "Property has a human-owned disposition: booked_appointment. Automated sends are suppressed.",
+      source: "human_owned_dispo",
+      outreachDispo: "booked_appointment",
+      consentState: null,
+    });
+
+    const outcome = await processEnrollmentTick(client, BASE_ENROLLMENT);
+
+    expect(outcome).toEqual({
+      status: "paused",
+      enrollmentId: "enrollment-1",
+      reason: "terminal_dispo",
+    });
+    expect(vi.mocked(sendSmsToContact)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(sendSmsToContact)).toHaveBeenCalledWith(
+      client,
+      expect.objectContaining({ origin: "automated" }),
+    );
   });
 });

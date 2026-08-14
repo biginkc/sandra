@@ -264,6 +264,7 @@ export function QueuePanel({
         return false;
       case "blocked_landline":
       case "blocked_terminal_dispo":
+      case "blocked_automated_suppressed":
         toast.warning("Skipped", { description: outcome.reason });
         setRows((prev) => prev.filter((r) => r.id !== row.id));
         return false;

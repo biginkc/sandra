@@ -261,6 +261,7 @@ export async function processEnrollmentTick(
     });
 
     const outcome = await sendSmsToContact(client, {
+      origin: "automated",
       contactId: enrollment.contact_id,
       propertyId: enrollment.property_id,
       body: finalBody,
@@ -313,7 +314,8 @@ export async function processEnrollmentTick(
         await pauseEnrollment(client, enrollment.id, "consent_revoked", true);
         return { status: "paused", enrollmentId: enrollment.id, reason: "consent_revoked" };
       }
-      case "blocked_terminal_dispo": {
+      case "blocked_terminal_dispo":
+      case "blocked_automated_suppressed": {
         await markRunSkipped(client, claim.id, "paused");
         const permanent =
           outcome.source === "consent_state" ||

@@ -471,6 +471,7 @@ export async function queueSmsBatch(
     }
     const scheduledFor = new Date(state.dayBucketStartMs + nextOffsetMs);
     const outcome = await sendSmsToContact(client, {
+      origin: "automated",
       contactId,
       propertyId,
       body,

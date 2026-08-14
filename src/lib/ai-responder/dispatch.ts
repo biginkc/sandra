@@ -665,6 +665,7 @@ async function sendResponderMessage(
     }
   }
   const sendResult = await sendSmsToContact(supabase, {
+    origin: "automated",
     contactId: args.input.contactId,
     propertyId: args.input.propertyId,
     body: args.body,
@@ -693,7 +694,10 @@ async function sendResponderMessage(
     }
   }
 
-  if (sendResult.status === "blocked_terminal_dispo") {
+  if (
+    sendResult.status === "blocked_terminal_dispo" ||
+    sendResult.status === "blocked_automated_suppressed"
+  ) {
     return { outcome: "skipped", reason: "already_terminal" };
   }
 

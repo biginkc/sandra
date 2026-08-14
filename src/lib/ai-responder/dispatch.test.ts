@@ -823,6 +823,48 @@ describe("dispatchAiResponse debounce", () => {
     expect(vi.mocked(sendSmsToContact)).not.toHaveBeenCalled();
   });
 
+  it("treats a blocked_automated_suppressed send outcome as already_terminal — booking landed between the early gate and the provider call", async () => {
+    // Property is NOT booked at gate-check time, so the early
+    // isTerminalAiResponderProperty gate passes and generation runs.
+    // send.ts's own fresh re-check (immediately before the provider call)
+    // is what catches the flip here — simulated by the mock returning
+    // blocked_automated_suppressed instead of sent.
+    const state = createMockState();
+    const supabase = createMockSupabase(state);
+    vi.mocked(sendSmsToContact).mockResolvedValue({
+      status: "blocked_automated_suppressed",
+      messageId: "msg-race-1",
+      reason:
+        "Property has a human-owned disposition: booked_appointment. Automated sends are suppressed.",
+      source: "human_owned_dispo",
+      outreachDispo: "booked_appointment",
+      consentState: null,
+    });
+
+    const outcome = await dispatchAiResponse(
+      supabase as never,
+      {
+        contactId: CONTACT_ID,
+        conversationId: CONVERSATION_ID,
+        inboundBody: "hello?",
+        inboundMessageId: "inbound-race-booking",
+        propertyId: PROPERTY_ID,
+      },
+      { anthropic: {} as never },
+    );
+
+    expect(outcome).toEqual({
+      outcome: "skipped",
+      reason: "already_terminal",
+    });
+    expect(vi.mocked(generateAiReply)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(sendSmsToContact)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(sendSmsToContact)).toHaveBeenCalledWith(
+      supabase,
+      expect.objectContaining({ origin: "automated" }),
+    );
+  });
+
   it("low-confidence terminal model actions still close without sending", async () => {
     const state = createMockState();
     const supabase = createMockSupabase(state);

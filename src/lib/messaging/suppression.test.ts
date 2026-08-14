@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  evaluateAutomatedSuppression,
   evaluateSuppression,
   HUMAN_OWNED_DISPOS,
   isSuppressed,
@@ -84,5 +85,36 @@ describe("shouldSuppressAutomatedSend (outbound suppression boundary)", () => {
       "callback_requested",
       "nurture",
     ]);
+  });
+});
+
+describe("evaluateAutomatedSuppression (the decision shouldSuppressAutomatedSend is built on)", () => {
+  it("surfaces a distinct source for a human-owned dispo", () => {
+    expect(
+      evaluateAutomatedSuppression({ outreachDispo: "booked_appointment" }),
+    ).toMatchObject({
+      suppressed: true,
+      source: "human_owned_dispo",
+      outreachDispo: "booked_appointment",
+    });
+  });
+
+  it("still surfaces the original source for a SUPPRESSED_DISPOS/consent/DNC hit — human-owned check never masks it", () => {
+    expect(evaluateAutomatedSuppression({ outreachDispo: "dnc" })).toMatchObject({
+      suppressed: true,
+      source: "outreach_dispo",
+    });
+    expect(
+      evaluateAutomatedSuppression({ consentState: "opted_out" }),
+    ).toMatchObject({
+      suppressed: true,
+      source: "consent_state",
+    });
+  });
+
+  it("is not suppressed when nothing applies", () => {
+    expect(evaluateAutomatedSuppression({ outreachDispo: "not_interested" })).toEqual({
+      suppressed: false,
+    });
   });
 });
