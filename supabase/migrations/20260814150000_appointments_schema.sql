@@ -503,6 +503,7 @@ begin
     public.call_activities,
     public.dialer_batch_items,
     public.dialer_batches,
+    public.dashboard_snapshots,
     public.metric_snapshots,
     public.memberships,
     public.task_reminder_deliveries,
@@ -578,5 +579,6 @@ $$;
 
 revoke execute on function public.reset_tenant_tables() from public;
 revoke execute on function public.reset_tenant_tables() from authenticated;
+grant execute on function public.reset_tenant_tables() to service_role;
 
 commit;

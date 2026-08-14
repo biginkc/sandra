@@ -159,6 +159,25 @@ export function addDaysInZone(day: Date, days: number, timeZone: string): Date {
   );
 }
 
+/**
+ * Returns `timeZone` when it is a usable IANA identifier, otherwise
+ * "America/Chicago". The prefs column is free text (legacy writes,
+ * imports), and Intl.DateTimeFormat throws RangeError on an unknown zone —
+ * one malformed persisted value must degrade to the default, never crash a
+ * dashboard render or a notification formatter. Callers that want the
+ * fallback to be observable should log before calling; this helper itself
+ * stays pure and synchronous.
+ */
+export function normalizeTimeZone(timeZone: string | null | undefined): string {
+  if (!timeZone) return "America/Chicago";
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone });
+    return timeZone;
+  } catch {
+    return "America/Chicago";
+  }
+}
+
 const DATE_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
 const TIME_RE = /^(\d{2}):(\d{2})(?::(\d{2}))?$/;
 

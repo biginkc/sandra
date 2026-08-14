@@ -1,4 +1,4 @@
-import { formatRelativeDay } from "@/lib/time/zoned";
+import { formatRelativeDay, normalizeTimeZone } from "@/lib/time/zoned";
 
 import type { EventType, FormatPayload } from "./types";
 
@@ -63,7 +63,9 @@ export function humanDueDate(
   const due = new Date(iso);
   if (Number.isNaN(due.getTime())) return "soon";
 
-  const label = formatRelativeDay(due, timeZone, now);
+  // Payload/stored zones are free text — normalize so one malformed value
+  // degrades to the default instead of throwing out of a render path.
+  const label = formatRelativeDay(due, normalizeTimeZone(timeZone), now);
   if (label === "Today") return "today";
   if (label === "Tomorrow") return "tomorrow";
   // "Yesterday" and the weekday/date fallback both read fine as-is; the old

@@ -55,6 +55,12 @@ export async function createTask(
       description: input.description ?? null,
       due_at: input.dueAt,
       end_at: input.endAt ?? null,
+      // The DB's chain invariant requires every appointment to carry a
+      // calendar_chain_id (and forbids one on any other type) — it is the
+      // durable identity of the logical appointment across reschedule
+      // successors, born here at creation.
+      calendar_chain_id:
+        input.type === "appointment" ? crypto.randomUUID() : null,
       created_by: input.createdBy,
     })
     .select()

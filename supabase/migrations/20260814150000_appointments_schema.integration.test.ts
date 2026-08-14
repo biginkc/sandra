@@ -775,4 +775,83 @@ describe("Migration 20260814150000 — appointments schema", () => {
       expect(ledgerAfter).toHaveLength(0);
     });
   });
+
+  // createTask (src/lib/tasks/index.ts) builds its insert payload straight
+  // from CreateTaskInput, under RLS, as the acting authenticated user — not
+  // the service client used everywhere else in this file. These two tests
+  // reproduce its exact insert shape end-to-end so a future change to the
+  // chain invariant / linkage CHECKs / tenant-integrity trigger that breaks
+  // the lib is caught here, not in production.
+  describe("createTask insert shape under real RLS", () => {
+    it("accepts a contact-only appointment insert shaped exactly like createTask's payload", async () => {
+      const self = await createUserForOrg(BMH_ORG_ID);
+      const contactId = await insertContact(BMH_ORG_ID, "Appt Contact");
+      const dueAt = new Date(Date.now() + 3600_000).toISOString();
+      const endAt = new Date(Date.now() + 7200_000).toISOString();
+
+      // Mirrors createTask's insert exactly: related_property_id null,
+      // contact_id set, calendar_chain_id generated at creation because
+      // type === 'appointment' (the DB chain invariant requires this).
+      const { data, error } = await self.client
+        .from("tasks" as never)
+        .insert({
+          org_id: BMH_ORG_ID,
+          assignee_id: self.userId,
+          related_property_id: null,
+          contact_id: contactId,
+          type: "appointment",
+          title: "Meet at coffee shop",
+          description: null,
+          due_at: dueAt,
+          end_at: endAt,
+          calendar_chain_id: crypto.randomUUID(),
+          created_by: self.userId,
+        } as never)
+        .select("id, type, related_property_id, contact_id, calendar_chain_id")
+        .single();
+
+      expect(error).toBeNull();
+      expect((data as { id: string } | null)?.id).toBeTruthy();
+      expect(
+        (data as { calendar_chain_id: string | null } | null)?.calendar_chain_id,
+      ).toBeTruthy();
+      expect(
+        (data as { related_property_id: string | null } | null)?.related_property_id,
+      ).toBeNull();
+      expect((data as { contact_id: string | null } | null)?.contact_id).toBe(contactId);
+    });
+
+    it("accepts a legacy follow_up insert shaped like createTask's pre-appointments payload (no chain id)", async () => {
+      const self = await createUserForOrg(BMH_ORG_ID);
+      const propertyId = await insertProperty();
+      const dueAt = new Date(Date.now() + 3600_000).toISOString();
+
+      // Mirrors createTask's insert for a non-appointment type: end_at and
+      // calendar_chain_id both null (input.type !== 'appointment'), a
+      // property attached (still required for non-appointment types).
+      const { data, error } = await self.client
+        .from("tasks" as never)
+        .insert({
+          org_id: BMH_ORG_ID,
+          assignee_id: self.userId,
+          related_property_id: propertyId,
+          contact_id: null,
+          type: "follow_up",
+          title: "Call back next week",
+          description: null,
+          due_at: dueAt,
+          end_at: null,
+          calendar_chain_id: null,
+          created_by: self.userId,
+        } as never)
+        .select("id, type, calendar_chain_id")
+        .single();
+
+      expect(error).toBeNull();
+      expect((data as { id: string } | null)?.id).toBeTruthy();
+      expect(
+        (data as { calendar_chain_id: string | null } | null)?.calendar_chain_id,
+      ).toBeNull();
+    });
+  });
 });

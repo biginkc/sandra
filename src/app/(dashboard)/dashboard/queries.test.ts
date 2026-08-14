@@ -179,4 +179,22 @@ describe("fetchMyTasks", () => {
     );
     expect(result.timezone).toBe("America/Denver");
   });
+
+  it("passes prefs.timezone straight through to the returned timezone field, even when it's the fallback", async () => {
+    // Malformed persisted timezones are normalized inside loadIntegrationPrefs
+    // itself (see src/lib/integrations/prefs.test.ts) — by the time fetchMyTasks
+    // sees it, a garbage value has already become "America/Chicago". This just
+    // asserts fetchMyTasks doesn't re-derive or drop the value; it forwards
+    // whatever loadIntegrationPrefs resolved to.
+    mocks.loadIntegrationPrefs.mockResolvedValue({
+      slackEnabled: true,
+      calendarEnabled: true,
+      timezone: "America/Chicago",
+    });
+    queuedData = [];
+
+    const result = await fetchMyTasks("user-1");
+
+    expect(result.timezone).toBe("America/Chicago");
+  });
 });

@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 
-import { addDaysInZone, formatRelativeDay, getDayBoundsInZone, wallTimeToUtc } from "./zoned";
+import {
+  addDaysInZone,
+  formatRelativeDay,
+  getDayBoundsInZone,
+  normalizeTimeZone,
+  wallTimeToUtc,
+} from "./zoned";
 
 const CHI = "America/Chicago";
 
@@ -130,5 +136,21 @@ describe("formatRelativeDay", () => {
     const now = new Date("2026-06-15T02:00:00Z"); // Chicago June 14, 21:00 CDT
     const target = new Date("2026-06-15T04:00:00Z"); // Chicago June 14, 23:00 CDT
     expect(formatRelativeDay(target, CHI, now)).toBe("Today");
+  });
+});
+
+describe("normalizeTimeZone", () => {
+  it("passes through a valid IANA zone unchanged", () => {
+    expect(normalizeTimeZone("America/New_York")).toBe("America/New_York");
+  });
+
+  it("falls back to America/Chicago for a garbage zone string", () => {
+    expect(normalizeTimeZone("Mars/Olympus")).toBe("America/Chicago");
+  });
+
+  it("falls back to America/Chicago for empty, null, and undefined", () => {
+    expect(normalizeTimeZone("")).toBe("America/Chicago");
+    expect(normalizeTimeZone(null)).toBe("America/Chicago");
+    expect(normalizeTimeZone(undefined)).toBe("America/Chicago");
   });
 });
