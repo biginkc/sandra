@@ -1371,6 +1371,10 @@ export async function createLeadTaskAction(
             taskTitle,
             propertyAddress: property.address,
             dueAt: input.dueAt,
+            // createLeadTaskAction only creates follow_up/callback tasks
+            // (guarded above) — never an appointment, so no end_at exists
+            // to thread through; the 30-minute default applies.
+            endAt: undefined,
             timezone: prefs.timezone,
             deepLink,
             calendarEnabled: prefs.calendarEnabled,

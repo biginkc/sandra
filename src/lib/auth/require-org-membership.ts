@@ -18,7 +18,8 @@ type ResourceTable =
   | "csv_imports"
   | "lists"
   | "tasks"
-  | "lead_notes";
+  | "lead_notes"
+  | "contacts";
 
 type MembershipLookupClient = {
   from(table: "memberships"): {

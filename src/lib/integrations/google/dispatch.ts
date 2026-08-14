@@ -17,6 +17,9 @@ export interface DispatchCalendarTaskInput {
   taskTitle: string;
   propertyAddress: string;
   dueAt: string;
+  /** ISO timestamptz — appointment-only. When present, the event spans
+   *  dueAt..endAt instead of the 30-minute default. */
+  endAt?: string;
   timezone: string;
   deepLink: string;
   calendarEnabled?: boolean;
@@ -183,7 +186,9 @@ function buildCalendarEvent(
   input: DispatchCalendarTaskInput,
 ): calendar_v3.Schema$Event {
   const start = new Date(input.dueAt);
-  const end = new Date(start.getTime() + THIRTY_MINUTES_MS);
+  const end = input.endAt
+    ? new Date(input.endAt)
+    : new Date(start.getTime() + THIRTY_MINUTES_MS);
   return {
     summary: `Follow up: ${input.propertyAddress}`,
     description: `${input.taskTitle}\n\n${input.deepLink}`,

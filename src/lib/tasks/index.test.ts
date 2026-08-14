@@ -551,10 +551,50 @@ describe("snoozeTask", () => {
       taskTitle: "Call the owner",
       propertyAddress: "123 Snooze Ln",
       dueAt: "2026-05-09T14:00:00Z",
+      endAt: undefined,
       timezone: "America/Denver",
       deepLink: "https://app.test/messages?property_id=property-3",
       calendarEnabled: true,
     });
+  });
+
+  it("threads end_at through to the calendar update when the row carries one", async () => {
+    responseQueue = [
+      {
+        data: {
+          id: "task-1",
+          assignee_id: "user-2",
+          related_property_id: "property-3",
+          title: "Call the owner",
+          due_at: "2026-05-09T14:00:00Z",
+          end_at: "2026-05-09T14:30:00Z",
+        },
+        error: null,
+      },
+      {
+        data: { address: "123 Snooze Ln" },
+        error: null,
+      },
+    ];
+    loadIntegrationPrefs.mockResolvedValueOnce({
+      slackEnabled: true,
+      calendarEnabled: true,
+      timezone: "America/Denver",
+    });
+
+    const result = await snoozeTask(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      makeSupabase() as any,
+      "task-1",
+      "2026-05-09T14:00:00Z",
+    );
+
+    expect(result.ok).toBe(true);
+    await flushAfterCallbacks();
+
+    expect(dispatchTaskCalendarEventUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({ endAt: "2026-05-09T14:30:00Z" }),
+    );
   });
 
   it("schedules a title-only calendar update and a thread deep link for a contact-only task (no property)", async () => {
@@ -595,6 +635,7 @@ describe("snoozeTask", () => {
       taskTitle: "Call the owner",
       propertyAddress: "Call the owner",
       dueAt: "2026-05-09T14:00:00Z",
+      endAt: undefined,
       timezone: "America/Denver",
       deepLink: "https://app.test/messages?thread=contact-9",
       calendarEnabled: true,

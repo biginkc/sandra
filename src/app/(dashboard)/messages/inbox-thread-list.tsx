@@ -46,6 +46,7 @@ const THREAD_DISPO_LABELS: Record<string, string> = {
   dnc: "DNC",
   nurture: "Follow up",
   callback_requested: "Callback",
+  booked_appointment: "Booked appt",
 };
 
 /**

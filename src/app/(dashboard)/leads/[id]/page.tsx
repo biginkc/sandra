@@ -2,6 +2,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { ChevronLeft, ChevronRight, ExternalLink } from "lucide-react";
 
+import { BookAppointmentPopover } from "@/components/appointments/book-appointment-popover";
 import { Page } from "@/components/page";
 import { PageHeader } from "@/components/page-header";
 import { Badge } from "@/components/ui/badge";
@@ -364,6 +365,13 @@ export default async function LeadDetailPage({
             initial={lead.motivation_level as MotivationLevel | null}
           />
           <EnrollInSequenceWidget propertyId={lead.id} />
+          <BookAppointmentPopover
+            propertyId={lead.id}
+            contactId={lead.homeowner?.id ?? undefined}
+            subjectLabel={lead.address}
+            currentUserId={sessionUser?.id ?? null}
+            triggerLabel="Book appt"
+          />
           <AiResponderToggle
             propertyId={lead.id}
             initialDisabled={lead.ai_responder_disabled}
