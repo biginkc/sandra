@@ -199,6 +199,56 @@ describe("slack/dispatch", () => {
     );
   });
 
+  it("dispatchTaskAssignedSlack always loads prefs for the dueLabel timezone, even when slackEnabled is passed explicitly — prefs.timezone wins over input.timezone", async () => {
+    vi.useFakeTimers();
+    try {
+      // now = 2026-08-15 01:00 CDT / 2026-08-14 23:00 PDT — Chicago's
+      // calendar day is already the 15th; LA's is still the 14th.
+      vi.setSystemTime(new Date("2026-08-15T06:00:00Z"));
+
+      loadIntegrationPrefs.mockResolvedValueOnce({
+        slackEnabled: true,
+        calendarEnabled: true,
+        timezone: "America/Los_Angeles",
+      });
+
+      await dispatchTaskAssignedSlack({
+        ...dispatchInput,
+        // Explicit slackEnabled used to short-circuit loadIntegrationPrefs
+        // entirely; it must still be called now, for the timezone.
+        slackEnabled: true,
+        // input.timezone is stale/irrelevant — prefs.timezone must be used
+        // instead for the dueLabel.
+        timezone: "America/Chicago",
+        // 2026-08-15T07:30:00Z = 02:30 CDT (still Chicago's 15th, "today")
+        // but 00:30 PDT (LA's 15th — one day after LA's "now" of the 14th,
+        // "tomorrow"). Chicago and LA disagree on the label for this pair.
+        dueAt: "2026-08-15T07:30:00Z",
+      });
+
+      expect(loadIntegrationPrefs).toHaveBeenCalledWith(
+        expect.anything(),
+        dispatchInput.assigneeId,
+      );
+      expect(chatPostMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          blocks: expect.arrayContaining([
+            expect.objectContaining({
+              type: "context",
+              elements: expect.arrayContaining([
+                expect.objectContaining({
+                  text: expect.stringContaining("Due tomorrow"),
+                }),
+              ]),
+            }),
+          ]),
+        }),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("dispatchTaskAssignedSlack on chat.postMessage rejection reportErrors and does not throw", async () => {
     chatPostMessage.mockRejectedValueOnce(new Error("Slack unavailable"));
 

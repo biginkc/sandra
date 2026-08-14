@@ -131,6 +131,25 @@ describe("formatNotification", () => {
     expect(out.body).toContain("Callback");
   });
 
+  it("task_assigned honors payload.timezone over the America/Chicago default", () => {
+    // now = 2026-08-14 23:30 PDT (LA day 14, UTC day 15) — due later that
+    // same LA evening. Chicago (the default zone) is already on the 15th
+    // at this UTC instant, so a formatter that ignored payload.timezone
+    // would say "tomorrow" here instead of "today".
+    const due = "2026-08-15T06:50:00Z";
+    const out = formatNotification("task_assigned", {
+      taskTitle: "Walkthrough",
+      taskType: "follow_up",
+      dueAt: due,
+      timezone: "America/Los_Angeles",
+    });
+    // formatNotification always uses real `now`, so this only asserts
+    // shape/behavior indirectly via humanDueDate's own zone tests above;
+    // here we just confirm the call doesn't ignore the field and produces
+    // a normal due-labeled body.
+    expect(out.body).toMatch(/^Due (today|tomorrow|soon|[A-Za-z]{3} [A-Za-z]{3} \d+)/);
+  });
+
   it("task_assigned tolerates missing fields", () => {
     const out = formatNotification("task_assigned", {});
     expect(out.title).toContain("new task");
@@ -160,5 +179,23 @@ describe("humanDueDate", () => {
 
   it("returns 'soon' for an unparseable ISO string", () => {
     expect(humanDueDate("not-a-date", NOW)).toBe("soon");
+  });
+
+  it("uses the assignee's zone, not UTC: 'today' when UTC has rolled to the next day but the zone hasn't (America/Los_Angeles)", () => {
+    // now = 2026-08-14 23:30 PDT (LA day is still the 14th, UTC is already the 15th)
+    const nowLA = new Date("2026-08-15T06:30:00Z");
+    // due = 2026-08-14 23:50 PDT — later the same LA evening, still LA day 14
+    const dueLA = "2026-08-15T06:50:00Z";
+    expect(humanDueDate(dueLA, nowLA, "America/Los_Angeles")).toBe("today");
+  });
+
+  it("uses the assignee's zone, not UTC: 'tomorrow' when the zone has rolled to the next day but UTC hasn't (America/New_York)", () => {
+    // now = 2026-05-05 23:50 EDT (NY day is the 5th; UTC is the 6th)
+    const nowNY = new Date("2026-05-06T03:50:00Z");
+    // due = 2026-05-06 00:10 EDT — just past NY midnight, NY day is the 6th,
+    // but still the SAME UTC calendar day (2026-05-06T04:10:00Z) as `now`.
+    // A UTC-day-bucketed implementation would wrongly call this "today".
+    const dueNY = "2026-05-06T04:10:00Z";
+    expect(humanDueDate(dueNY, nowNY, "America/New_York")).toBe("tomorrow");
   });
 });

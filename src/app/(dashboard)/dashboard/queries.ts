@@ -142,9 +142,14 @@ export async function fetchDashboardSendilloSmsHealth(): Promise<SendilloSmsHeal
  * Returns empty buckets on error rather than null — the panel renders
  * the all-clear empty state, which is a reasonable failure mode.
  */
-export async function fetchMyTasks(
-  userId: string,
-): Promise<{ overdue: TaskRow[]; today: TaskRow[]; upcoming: TaskRow[] }> {
+export async function fetchMyTasks(userId: string): Promise<{
+  overdue: TaskRow[];
+  today: TaskRow[];
+  upcoming: TaskRow[];
+  /** The zone the buckets were computed in — the panel must format due
+   *  labels with this same zone or labels and buckets can disagree. */
+  timezone: string;
+}> {
   const supabase = await createClient();
   const prefs = await loadIntegrationPrefs(supabase, userId);
   const { dayStart, dayEnd } = getDayBoundsInZone(new Date(), prefs.timezone);
@@ -165,7 +170,7 @@ export async function fetchMyTasks(
         code: error.code,
       });
     }
-    return { overdue: [], today: [], upcoming: [] };
+    return { overdue: [], today: [], upcoming: [], timezone: prefs.timezone };
   }
 
   const dayStartMs = dayStart.getTime();
@@ -212,5 +217,5 @@ export async function fetchMyTasks(
     }
   }
 
-  return { overdue, today, upcoming };
+  return { overdue, today, upcoming, timezone: prefs.timezone };
 }

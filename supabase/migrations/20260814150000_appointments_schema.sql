@@ -325,19 +325,19 @@ create index idx_task_reminder_deliveries_org_id
 
 alter table public.task_reminder_deliveries enable row level security;
 
+-- Server-owned table: org members may READ their org's rows (owner views,
+-- diagnostics) but never write — a member who could insert/update/delete
+-- here could pre-occupy the (task_id, channel) unique key, mark deliveries
+-- sent, or delete pending work, suppressing teammates' reminders. All
+-- writes go through service-role sweeps (PR 3), which bypass RLS; the
+-- explicit REVOKE below is defense in depth on top of the absent write
+-- policies.
 create policy task_reminder_deliveries_org_select on public.task_reminder_deliveries
   for select to authenticated
   using (public.hugo_has_active_org_access(org_id));
-create policy task_reminder_deliveries_org_insert on public.task_reminder_deliveries
-  for insert to authenticated
-  with check (public.hugo_has_active_org_access(org_id));
-create policy task_reminder_deliveries_org_update on public.task_reminder_deliveries
-  for update to authenticated
-  using (public.hugo_has_active_org_access(org_id))
-  with check (public.hugo_has_active_org_access(org_id));
-create policy task_reminder_deliveries_org_delete on public.task_reminder_deliveries
-  for delete to authenticated
-  using (public.hugo_has_active_org_access(org_id));
+
+revoke insert, update, delete on public.task_reminder_deliveries
+  from anon, authenticated;
 
 -- ----------------------------------------------------------------------------
 -- 6. task_calendar_mutations — durable calendar mutation ledger
@@ -404,19 +404,17 @@ create index idx_task_calendar_mutations_target_task
 
 alter table public.task_calendar_mutations enable row level security;
 
+-- Server-owned ledger: readable by org members, writable only through the
+-- PR 3 lifecycle RPCs (SECURITY DEFINER / service role, with explicit
+-- caller, task, generation, and state-transition checks). A member who
+-- could write here directly could forge ledger phases or event ids and
+-- corrupt provider retry/reconciliation state.
 create policy task_calendar_mutations_org_select on public.task_calendar_mutations
   for select to authenticated
   using (public.hugo_has_active_org_access(org_id));
-create policy task_calendar_mutations_org_insert on public.task_calendar_mutations
-  for insert to authenticated
-  with check (public.hugo_has_active_org_access(org_id));
-create policy task_calendar_mutations_org_update on public.task_calendar_mutations
-  for update to authenticated
-  using (public.hugo_has_active_org_access(org_id))
-  with check (public.hugo_has_active_org_access(org_id));
-create policy task_calendar_mutations_org_delete on public.task_calendar_mutations
-  for delete to authenticated
-  using (public.hugo_has_active_org_access(org_id));
+
+revoke insert, update, delete on public.task_calendar_mutations
+  from anon, authenticated;
 
 -- ----------------------------------------------------------------------------
 -- 7. notifications — widen event_type, bell exactly-once

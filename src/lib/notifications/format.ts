@@ -136,7 +136,13 @@ export function formatNotification(
       const truncated =
         rawTitle.length > 60 ? `${rawTitle.slice(0, 57)}...` : rawTitle;
       const titleSuffix = truncated || "new task";
-      const due = payload.dueAt ? humanDueDate(payload.dueAt) : "soon";
+      const due = payload.dueAt
+        ? humanDueDate(
+            payload.dueAt,
+            undefined,
+            payload.timezone ?? undefined,
+          )
+        : "soon";
       const typeLabel = TASK_TYPE_LABELS[payload.taskType ?? ""] ?? "Task";
       return {
         title: `Task assigned: ${titleSuffix}`,

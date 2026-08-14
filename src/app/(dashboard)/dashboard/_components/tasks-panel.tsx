@@ -10,6 +10,10 @@ type Props = {
   overdue: TaskRow[];
   today: TaskRow[];
   upcoming: TaskRow[];
+  /** Zone the buckets were computed in (fetchMyTasks.timezone) — due
+   *  labels must be formatted in the same zone or a row can sit under
+   *  Upcoming while its label reads "today". */
+  timezone: string;
 };
 
 const TYPE_LABELS: Record<string, string> = {
@@ -33,7 +37,7 @@ const TYPE_LABELS: Record<string, string> = {
  *     (canonicalizeThreadId resolves a raw contact id to its conversation)
  *   - fully unlinked (personal block) → "Personal block", no link
  */
-export function TasksPanel({ overdue, today, upcoming }: Props) {
+export function TasksPanel({ overdue, today, upcoming, timezone }: Props) {
   const total = overdue.length + today.length + upcoming.length;
 
   if (total === 0) {
@@ -60,13 +64,13 @@ export function TasksPanel({ overdue, today, upcoming }: Props) {
       </div>
 
       {overdue.length > 0 ? (
-        <Section label="Overdue" tasks={overdue} variant="overdue" />
+        <Section label="Overdue" tasks={overdue} variant="overdue" timezone={timezone} />
       ) : null}
       {today.length > 0 ? (
-        <Section label="Today" tasks={today} variant="today" />
+        <Section label="Today" tasks={today} variant="today" timezone={timezone} />
       ) : null}
       {upcoming.length > 0 ? (
-        <Section label="Upcoming" tasks={upcoming} variant="upcoming" />
+        <Section label="Upcoming" tasks={upcoming} variant="upcoming" timezone={timezone} />
       ) : null}
     </div>
   );
@@ -94,10 +98,12 @@ function Section({
   label,
   tasks,
   variant,
+  timezone,
 }: {
   label: string;
   tasks: TaskRow[];
   variant: "overdue" | "today" | "upcoming";
+  timezone: string;
 }) {
   return (
     <div className="mb-4 last:mb-0">
@@ -123,7 +129,7 @@ function Section({
                   ? "today"
                   : variant === "overdue"
                     ? "overdue"
-                    : humanDueDate(t.due_at)}
+                    : humanDueDate(t.due_at, undefined, timezone)}
               </div>
             </>
           );

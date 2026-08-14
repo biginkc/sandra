@@ -96,6 +96,7 @@ describe("fetchMyTasks", () => {
     expect(result.overdue.map((r) => r.id)).toEqual(["t-overdue"]);
     expect(result.today.map((r) => r.id)).toEqual(["t-today"]);
     expect(result.upcoming.map((r) => r.id)).toEqual(["t-upcoming"]);
+    expect(result.timezone).toBe("America/Chicago");
   });
 
   it("degrades a property-less row (left join) to null property fields instead of dropping it", async () => {
@@ -150,7 +151,12 @@ describe("fetchMyTasks", () => {
     queuedError = { message: "boom" };
 
     const result = await fetchMyTasks("user-1");
-    expect(result).toEqual({ overdue: [], today: [], upcoming: [] });
+    expect(result).toEqual({
+      overdue: [],
+      today: [],
+      upcoming: [],
+      timezone: "America/Chicago",
+    });
   });
 
   it("resolves day boundaries from the assignee's own timezone pref", async () => {
@@ -161,7 +167,7 @@ describe("fetchMyTasks", () => {
     });
     queuedData = [];
 
-    await fetchMyTasks("user-1");
+    const result = await fetchMyTasks("user-1");
 
     expect(mocks.loadIntegrationPrefs).toHaveBeenCalledWith(
       expect.anything(),
@@ -171,5 +177,6 @@ describe("fetchMyTasks", () => {
       expect.any(Date),
       "America/Denver",
     );
+    expect(result.timezone).toBe("America/Denver");
   });
 });

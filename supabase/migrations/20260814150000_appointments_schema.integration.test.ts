@@ -484,6 +484,67 @@ describe("Migration 20260814150000 — appointments schema", () => {
       expect(error).toBeNull();
       expect(data).toHaveLength(0);
     });
+
+    it("denies an INSERT from an active same-org member (server-owned table)", async () => {
+      const appt = await insertValidAppointment();
+      const member = await createUserForOrg(BMH_ORG_ID);
+      const { error } = await member.client
+        .from("task_reminder_deliveries" as never)
+        .insert({ org_id: BMH_ORG_ID, task_id: appt.id, channel: "bell" } as never);
+      expect(error).not.toBeNull();
+      expect(error?.message).toMatch(/row-level security|permission denied/i);
+    });
+
+    it("denies an UPDATE from an active same-org member (server-owned table)", async () => {
+      const appt = await insertValidAppointment();
+      const { data: row } = await db
+        .from("task_reminder_deliveries")
+        .insert({ org_id: BMH_ORG_ID, task_id: appt.id, channel: "slack" })
+        .select("id")
+        .single();
+      const member = await createUserForOrg(BMH_ORG_ID);
+      const { data, error } = await member.client
+        .from("task_reminder_deliveries" as never)
+        .update({ sent_at: new Date().toISOString() } as never)
+        .eq("id", (row as { id: string }).id)
+        .select("id");
+      if (error) {
+        expect(error.message).toMatch(/row-level security|permission denied/i);
+      } else {
+        expect(data).toHaveLength(0);
+      }
+      const { data: after } = await db
+        .from("task_reminder_deliveries")
+        .select("sent_at")
+        .eq("id", (row as { id: string }).id)
+        .single();
+      expect((after as { sent_at: string | null }).sent_at).toBeNull();
+    });
+
+    it("denies a DELETE from an active same-org member (server-owned table)", async () => {
+      const appt = await insertValidAppointment();
+      const { data: row } = await db
+        .from("task_reminder_deliveries")
+        .insert({ org_id: BMH_ORG_ID, task_id: appt.id, channel: "sms" })
+        .select("id")
+        .single();
+      const member = await createUserForOrg(BMH_ORG_ID);
+      const { data, error } = await member.client
+        .from("task_reminder_deliveries" as never)
+        .delete()
+        .eq("id", (row as { id: string }).id)
+        .select("id");
+      if (error) {
+        expect(error.message).toMatch(/row-level security|permission denied/i);
+      } else {
+        expect(data).toHaveLength(0);
+      }
+      const { data: after } = await db
+        .from("task_reminder_deliveries")
+        .select("id")
+        .eq("id", (row as { id: string }).id);
+      expect(after).toHaveLength(1);
+    });
   });
 
   describe("task_calendar_mutations — composite FK + org isolation", () => {
@@ -574,6 +635,88 @@ describe("Migration 20260814150000 — appointments schema", () => {
         .eq("id", (row as { id: string }).id);
       expect(error).toBeNull();
       expect(data).toHaveLength(0);
+    });
+
+    it("denies an INSERT from an active same-org member (server-owned table)", async () => {
+      const appt = await insertValidAppointment();
+      const member = await createUserForOrg(BMH_ORG_ID);
+      const { error } = await member.client
+        .from("task_calendar_mutations" as never)
+        .insert({
+          org_id: BMH_ORG_ID,
+          calendar_chain_id: appt.chainId,
+          operation: "create",
+          source_task_id: appt.id,
+          old_assignee_id: appt.assigneeId,
+          expected_generation: 0,
+        } as never);
+      expect(error).not.toBeNull();
+      expect(error?.message).toMatch(/row-level security|permission denied/i);
+    });
+
+    it("denies an UPDATE from an active same-org member (server-owned table)", async () => {
+      const appt = await insertValidAppointment();
+      const { data: row } = await db
+        .from("task_calendar_mutations")
+        .insert({
+          org_id: BMH_ORG_ID,
+          calendar_chain_id: appt.chainId,
+          operation: "create",
+          source_task_id: appt.id,
+          old_assignee_id: appt.assigneeId,
+          expected_generation: 0,
+        })
+        .select("id")
+        .single();
+      const member = await createUserForOrg(BMH_ORG_ID);
+      const { data, error } = await member.client
+        .from("task_calendar_mutations" as never)
+        .update({ phase: "finalized" } as never)
+        .eq("id", (row as { id: string }).id)
+        .select("id");
+      if (error) {
+        expect(error.message).toMatch(/row-level security|permission denied/i);
+      } else {
+        expect(data).toHaveLength(0);
+      }
+      const { data: after } = await db
+        .from("task_calendar_mutations")
+        .select("phase")
+        .eq("id", (row as { id: string }).id)
+        .single();
+      expect((after as { phase: string }).phase).toBe("pending");
+    });
+
+    it("denies a DELETE from an active same-org member (server-owned table)", async () => {
+      const appt = await insertValidAppointment();
+      const { data: row } = await db
+        .from("task_calendar_mutations")
+        .insert({
+          org_id: BMH_ORG_ID,
+          calendar_chain_id: appt.chainId,
+          operation: "create",
+          source_task_id: appt.id,
+          old_assignee_id: appt.assigneeId,
+          expected_generation: 0,
+        })
+        .select("id")
+        .single();
+      const member = await createUserForOrg(BMH_ORG_ID);
+      const { data, error } = await member.client
+        .from("task_calendar_mutations" as never)
+        .delete()
+        .eq("id", (row as { id: string }).id)
+        .select("id");
+      if (error) {
+        expect(error.message).toMatch(/row-level security|permission denied/i);
+      } else {
+        expect(data).toHaveLength(0);
+      }
+      const { data: after } = await db
+        .from("task_calendar_mutations")
+        .select("id")
+        .eq("id", (row as { id: string }).id);
+      expect(after).toHaveLength(1);
     });
   });
 

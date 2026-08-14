@@ -1,6 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { reportError } from "@/lib/errors/report";
+import { loadIntegrationPrefs } from "@/lib/integrations/prefs";
 import type { Database } from "@/lib/supabase/types";
 
 import { formatNotification } from "./format";
@@ -242,6 +243,9 @@ export async function dispatchTaskAssigned(
     propertyAddress?: string | null;
   },
 ): Promise<{ inserted: number }> {
+  // Stamp the assignee's timezone into the payload so the formatter labels
+  // the due date in their zone, not the Chicago default.
+  const { timezone } = await loadIntegrationPrefs(supabase, params.assigneeId);
   return createNotification(supabase, {
     orgId: params.orgId,
     eventType: "task_assigned",
@@ -251,6 +255,7 @@ export async function dispatchTaskAssigned(
       taskTitle: params.taskTitle,
       taskType: params.taskType,
       dueAt: params.dueAt,
+      timezone,
       propertyAddress: params.propertyAddress,
     },
     recipients: [params.assigneeId],

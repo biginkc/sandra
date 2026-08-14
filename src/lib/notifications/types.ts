@@ -57,6 +57,9 @@ export type FormatPayload = {
   taskType?: string;
   /** For task_assigned: ISO timestamptz of due_at. */
   dueAt?: string;
+  /** For task_assigned: the recipient's IANA timezone, stamped at emit time
+   *  so the formatter labels the due date in the assignee's own zone. */
+  timezone?: string;
   /** For ai_responder_provider_failure: which account-level failure. */
   providerFailure?: "billing" | "auth";
 };

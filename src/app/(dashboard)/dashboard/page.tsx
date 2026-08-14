@@ -126,6 +126,7 @@ export default async function DashboardPage() {
             overdue={myTasks.overdue}
             today={myTasks.today}
             upcoming={myTasks.upcoming}
+            timezone={myTasks.timezone}
           />
           <ThreadsNeedingAttention
             threads={summary.threads_needing_attention}

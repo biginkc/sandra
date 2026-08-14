@@ -44,9 +44,10 @@ export async function dispatchTaskAssignedSlack(
 ): Promise<DispatchSlackResult> {
   try {
     const admin = createAdminClient();
-    const slackEnabled =
-      input.slackEnabled ??
-      (await loadIntegrationPrefs(admin, input.assigneeId)).slackEnabled;
+    // Prefs are loaded unconditionally now: timezone labels the due date in
+    // the assignee's own zone even when slackEnabled was passed in.
+    const prefs = await loadIntegrationPrefs(admin, input.assigneeId);
+    const slackEnabled = input.slackEnabled ?? prefs.slackEnabled;
     if (!slackEnabled) return { sent: false, reason: "pref_disabled" };
 
     const token = await getDecryptedToken({
@@ -67,7 +68,7 @@ export async function dispatchTaskAssignedSlack(
     const blocks = buildTaskAssignedBlocks({
       taskTitle,
       propertyAddress: input.propertyAddress,
-      dueLabel: humanDueDate(input.dueAt),
+      dueLabel: humanDueDate(input.dueAt, undefined, prefs.timezone),
       taskTypeLabel: TASK_TYPE_LABELS[input.taskType] ?? "Task",
       taskId: input.taskId,
       deepLink: input.deepLink,

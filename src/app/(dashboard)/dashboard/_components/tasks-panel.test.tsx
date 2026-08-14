@@ -1,5 +1,5 @@
 import { render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { TaskRow } from "../queries";
 
@@ -18,6 +18,8 @@ vi.mock("sonner", () => ({
     success: vi.fn(),
   },
 }));
+
+const TZ = "America/Chicago";
 
 function makeRow(overrides: Partial<TaskRow> & { id: string }): TaskRow {
   // Plain spread (not `??`) so an explicit `null` override — e.g.
@@ -38,7 +40,7 @@ function makeRow(overrides: Partial<TaskRow> & { id: string }): TaskRow {
 
 describe("<TasksPanel />", () => {
   it("renders the all-clear empty state when all buckets are empty", () => {
-    render(<TasksPanel overdue={[]} today={[]} upcoming={[]} />);
+    render(<TasksPanel overdue={[]} today={[]} upcoming={[]} timezone={TZ} />);
     expect(screen.getByText("My Tasks")).toBeInTheDocument();
     expect(screen.getByText(/all caught up/i)).toBeInTheDocument();
     expect(screen.queryByTestId("tasks-panel")).not.toBeInTheDocument();
@@ -49,7 +51,7 @@ describe("<TasksPanel />", () => {
       makeRow({ id: "t1", address: "111 First St" }),
       makeRow({ id: "t2", address: "222 Second Ave", type: "callback" }),
     ];
-    render(<TasksPanel overdue={[]} today={today} upcoming={[]} />);
+    render(<TasksPanel overdue={[]} today={today} upcoming={[]} timezone={TZ} />);
 
     expect(screen.getByTestId("tasks-panel")).toBeInTheDocument();
     expect(screen.getByText("Today")).toBeInTheDocument();
@@ -82,6 +84,7 @@ describe("<TasksPanel />", () => {
             due_at: tomorrow,
           }),
         ]}
+        timezone={TZ}
       />,
     );
 
@@ -105,6 +108,7 @@ describe("<TasksPanel />", () => {
         ]}
         today={[]}
         upcoming={[]}
+        timezone={TZ}
       />,
     );
 
@@ -117,7 +121,7 @@ describe("<TasksPanel />", () => {
   it("each row links to the property's messages thread", () => {
     const today = [makeRow({ id: "t1", property_id: "prop-abc" })];
     const { container } = render(
-      <TasksPanel overdue={[]} today={today} upcoming={[]} />,
+      <TasksPanel overdue={[]} today={today} upcoming={[]} timezone={TZ} />,
     );
 
     const link = container.querySelector(
@@ -142,7 +146,7 @@ describe("<TasksPanel />", () => {
         state: null,
       }),
     ];
-    render(<TasksPanel overdue={[]} today={today} upcoming={[]} />);
+    render(<TasksPanel overdue={[]} today={today} upcoming={[]} timezone={TZ} />);
 
     expect(screen.getByText("Personal block")).toBeInTheDocument();
     const wrapper = screen.getByTestId("task-row-t1-unlinked");
@@ -163,7 +167,7 @@ describe("<TasksPanel />", () => {
       }),
     ];
     const { container } = render(
-      <TasksPanel overdue={[]} today={today} upcoming={[]} />,
+      <TasksPanel overdue={[]} today={today} upcoming={[]} timezone={TZ} />,
     );
 
     expect(screen.getByText("Call the owner")).toBeInTheDocument();
@@ -175,9 +179,41 @@ describe("<TasksPanel />", () => {
 
   it("each row exposes Done and Snooze action buttons", () => {
     const today = [makeRow({ id: "t1" })];
-    render(<TasksPanel overdue={[]} today={today} upcoming={[]} />);
+    render(<TasksPanel overdue={[]} today={today} upcoming={[]} timezone={TZ} />);
 
     expect(screen.getByTestId("task-done-t1")).toBeInTheDocument();
     expect(screen.getByTestId("task-snooze-t1")).toBeInTheDocument();
+  });
+
+  describe("near-midnight due labeling (upcoming bucket)", () => {
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("labels an upcoming row 'today' — not 'tomorrow' — when UTC has rolled to the next day but the assignee's zone hasn't", () => {
+      // "now" = 2026-08-14 23:30 PDT; UTC is already 2026-08-15.
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-08-15T06:30:00Z"));
+
+      const upcoming = [
+        makeRow({
+          id: "t1",
+          address: "999 Late Night Ln",
+          // due later the same LA evening (23:50 PDT), still LA day 14.
+          due_at: "2026-08-15T06:50:00Z",
+        }),
+      ];
+      render(
+        <TasksPanel
+          overdue={[]}
+          today={[]}
+          upcoming={upcoming}
+          timezone="America/Los_Angeles"
+        />,
+      );
+
+      expect(screen.getByText(/Follow-up · today/)).toBeInTheDocument();
+      expect(screen.queryByText(/Follow-up · tomorrow/)).not.toBeInTheDocument();
+    });
   });
 });
