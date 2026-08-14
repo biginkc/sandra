@@ -55,7 +55,12 @@ export type FetchCalendarAppointmentsResult =
  * surfaces as the existing `ok:false` / "couldn't load, Retry" state
  * instead of silently rendering a truncated week as complete.
  */
-const APPOINTMENTS_CAP = 2_000; // generous: far above any real org's appointments/week
+// MUST stay strictly below PostgREST's silent 1,000-row response ceiling
+// (documented at properties/actions.ts PAGE=1000): the overflow sentinel is
+// CAP+1, and a sentinel the transport can never deliver would turn the
+// fail-closed cap into silent truncation. 900+1 <= 1000, so the extra row
+// always arrives when the week genuinely overflows.
+const APPOINTMENTS_CAP = 900; // far above any real org's appointments/week, sentinel-safe under PostgREST's 1000-row ceiling
 
 function buildAppointmentsQuery(
   supabase: Awaited<ReturnType<typeof createClient>>,
@@ -218,7 +223,7 @@ export type FetchOrgRosterResult =
 // `APPOINTMENTS_CAP` above: a membership add/remove between page requests
 // could desync a multi-page keyset load exactly like a reschedule desyncs
 // the appointments one, and a per-org roster is just as naturally bounded.
-const ROSTER_CAP = 500; // generous: far above any real org's active membership count
+const ROSTER_CAP = 400; // sentinel-safe under the same 1000-row transport ceiling
 
 export async function fetchOrgRoster(orgId: string): Promise<FetchOrgRosterResult> {
   const admin = createAdminClient();

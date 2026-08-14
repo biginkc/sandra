@@ -298,7 +298,7 @@ describe("fetchCalendarAppointments", () => {
   });
 
   describe("single-statement read (Codex round 6 — replaces keyset pagination)", () => {
-    const CAP = 2_000;
+    const CAP = 900;
 
     it("sorts by due_at then id for a deterministic row order, in exactly ONE round trip", async () => {
       queuedData = [appointmentRow()];
@@ -549,7 +549,7 @@ describe("fetchOrgRoster", () => {
   });
 
   describe("single-statement read (Codex round 6 — replaces keyset pagination)", () => {
-    const CAP = 500;
+    const CAP = 400;
     const userId = (i: number) => `user-${String(i).padStart(4, "0")}`;
 
     it("orders by user_id for a deterministic row order, in exactly ONE round trip", async () => {
