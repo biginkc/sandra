@@ -1174,22 +1174,26 @@ describe("processClaimedReassign (via processClaimedCalendarMutation)", () => {
 });
 
 // ----------------------------------------------------------------------------
-// Codex round 9 (finding 3): every Google call is bounded to a caller-
-// supplied `timeoutMs` (see `googleCallOptions`/route.ts's
-// `remainingCallTimeoutMs`-derived `timeoutMs`) instead of running
-// unbounded — a hung/never-resolving Google call could otherwise hold the
-// sweep route open past its platform `maxDuration`. These tests simulate a
+// Codex round 9 (finding 3) + round 10 (finding 1): every Google call is
+// bounded to the remaining time until an ABSOLUTE `deadlineAt` (epoch ms),
+// recomputed immediately before EACH call (`nextGoogleCallOptions`) rather
+// than a single duration snapshotted once per row (round 9's original
+// `timeoutMs`) — a hung/never-resolving Google call could otherwise hold
+// the sweep route open past its platform `maxDuration`, and (round 10's fix)
+// a slow-but-successful first call could otherwise leave a LATER call in
+// the same row with a stale, too-generous window. These tests simulate a
 // mock Google client honoring the SAME `timeout` field real gaxios reads
 // (node_modules/gaxios's `#appendTimeoutToSignal` wires `opts.timeout` to
 // `AbortSignal.timeout()`) — proving `processClaimedCalendarMutation`
-// itself returns promptly (never hangs) once that timeout elapses, and
-// that each operation's outcome lands where finding 3 specifies:
-// idempotent ops (create/cancel) -> retryable; patch (reschedule) ->
-// retryable, current phase untouched.
+// itself returns promptly (never hangs) once that timeout elapses, that
+// each operation's outcome lands where finding 3 specifies (idempotent ops
+// -> retryable, current phase untouched), and that a multi-call row
+// (reassign) never spends more than `deadlineAt` regardless of how many
+// Google calls it makes or how slow the earlier ones were.
 // ----------------------------------------------------------------------------
-describe("per-call Google timeout (Codex round 9, finding 3): a hung call never outlives its timeoutMs", () => {
+describe("per-call Google timeout / deadline recompute (Codex round 9 finding 3 + round 10 finding 1)", () => {
   /** Rejects after exactly `options.timeout` ms — the same field
-   *  `googleCallOptions` sets and real gaxios reads — with a
+   *  `nextGoogleCallOptions` sets and real gaxios reads — with a
    *  TimeoutError-shaped rejection matching what `AbortSignal.timeout()`
    *  produces when it aborts a fetch. Never resolves on its own; if this
    *  file's code failed to bound the call, `vi.advanceTimersByTimeAsync`
@@ -1206,6 +1210,34 @@ describe("per-call Google timeout (Codex round 9, finding 3): a hung call never 
     });
   }
 
+  /** Resolves after `delayMs`, echoing whatever `result` was supplied — used
+   *  to simulate a SLOW-BUT-SUCCESSFUL Google call (as opposed to
+   *  `neverResolvingUntilTimeout`'s hung one) so a later call in the same
+   *  row's handler sees a shrunk remaining window. */
+  function slowResolving<T>(result: T, delayMs: number) {
+    return vi.fn((_params: unknown, _options?: { timeout?: number }) =>
+      new Promise<T>((resolve) => setTimeout(() => resolve(result), delayMs)),
+    );
+  }
+
+  /** Rejects after `delayMs` with `rejection` — the slow-but-settled
+   *  counterpart to `slowResolving`, for a call that eventually fails
+   *  (e.g. a 409 conflict) rather than hanging or succeeding. */
+  function slowRejecting(rejection: unknown, delayMs: number) {
+    return vi.fn((_params: unknown, _options?: { timeout?: number }) =>
+      new Promise((_resolve, reject) => setTimeout(() => reject(rejection), delayMs)),
+    );
+  }
+
+  const REASSIGN_ROW: ClaimedCalendarMutationRow = {
+    ...BASE_CLAIMED,
+    operation: "reassign",
+    event_id: "evt-old",
+    old_assignee_id: "assignee-1",
+    new_assignee_id: "assignee-2",
+    client_event_id: "evtclient-reassign",
+  };
+
   beforeEach(() => {
     vi.useFakeTimers();
   });
@@ -1213,7 +1245,10 @@ describe("per-call Google timeout (Codex round 9, finding 3): a hung call never 
     vi.useRealTimers();
   });
 
-  it("create: a hung insert resolves retryable_error at exactly its timeoutMs, never past it", async () => {
+  // `deadlineAt` chosen as `now + 8_000` so remaining = deadlineAt - now -
+  // DB_FINALIZE_RESERVE_MS(3_000) = 5_000 at call time, exactly reproducing
+  // round 9's original `{ timeoutMs: 5_000 }` fixtures below.
+  it("create: a hung insert resolves retryable_error at exactly its remaining-time budget, never past it", async () => {
     const insert = neverResolvingUntilTimeout();
     vi.mocked(buildCalendarClient).mockReturnValue({
       events: { insert, get: vi.fn() },
@@ -1223,8 +1258,9 @@ describe("per-call Google timeout (Codex round 9, finding 3): a hung call never 
       task_calendar_mutations: [ledgerWrite()], // markRetryableFailure's single write
     });
 
+    const deadlineAt = Date.now() + 8_000;
     const outcomePromise = processClaimedCalendarMutation(supabase, BASE_CLAIMED, {
-      timeoutMs: 5_000,
+      deadlineAt,
     });
     await vi.advanceTimersByTimeAsync(5_000);
     const outcome = await outcomePromise;
@@ -1243,10 +1279,11 @@ describe("per-call Google timeout (Codex round 9, finding 3): a hung call never 
       task_calendar_mutations: [ledgerWrite()],
     });
 
+    const deadlineAt = Date.now() + 8_000;
     const outcomePromise = processClaimedCalendarMutation(
       supabase,
       { ...BASE_CLAIMED, operation: "cancel", event_id: "evt-old", client_event_id: null },
-      { timeoutMs: 5_000 },
+      { deadlineAt },
     );
     await vi.advanceTimersByTimeAsync(5_000);
     const outcome = await outcomePromise;
@@ -1270,6 +1307,7 @@ describe("per-call Google timeout (Codex round 9, finding 3): a hung call never 
       task_calendar_mutations: [ledgerWrite()],
     });
 
+    const deadlineAt = Date.now() + 8_000;
     const outcomePromise = processClaimedCalendarMutation(
       supabase,
       {
@@ -1283,12 +1321,87 @@ describe("per-call Google timeout (Codex round 9, finding 3): a hung call never 
         target_title: "Walkthrough",
         target_assignee_id: "assignee-1",
       },
-      { timeoutMs: 5_000 },
+      { deadlineAt },
     );
     await vi.advanceTimersByTimeAsync(5_000);
     const outcome = await outcomePromise;
 
     expect(patch).toHaveBeenCalledWith(expect.anything(), { timeout: 5_000, retry: false });
+    expect(outcome.status).toBe("retryable_error");
+  });
+
+  // Codex round 10 (finding 1): the core of this finding — a multi-call row
+  // (reassign: insert, an optional 409-reconcile get, delete) must recompute
+  // its remaining time before EACH call, not reuse one snapshot from the
+  // start of the row.
+  it("reassign: a slow-but-successful insert leaves a strictly smaller window for the reconcile get and the old-event delete that follow it, and never exceeds the deadline", async () => {
+    const CALL_DELAY_MS = 3_000;
+    const insert = slowRejecting({ status: 409 }, CALL_DELAY_MS);
+    const get = slowResolving({ data: { id: "evt-new-reconciled" } }, CALL_DELAY_MS);
+    const del = slowResolving({}, CALL_DELAY_MS);
+    vi.mocked(buildCalendarClient).mockReturnValue({
+      events: { insert, get, delete: del },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any);
+    const supabase = fakeSupabase({
+      // renewLease+provider_done after create, renewLease+delete-persisted
+      // after delete, finalize.
+      task_calendar_mutations: [
+        ledgerWrite(),
+        ledgerWrite(),
+        ledgerWrite(),
+        ledgerWrite(),
+        ledgerWrite(),
+      ],
+      tasks: [{ data: { id: "task-1" }, error: null }],
+    });
+
+    const start = Date.now();
+    const deadlineAt = start + 30_000;
+    const outcomePromise = processClaimedCalendarMutation(supabase, REASSIGN_ROW, { deadlineAt });
+    await vi.advanceTimersByTimeAsync(CALL_DELAY_MS); // insert settles (409)
+    await vi.advanceTimersByTimeAsync(CALL_DELAY_MS); // reconcile get settles
+    await vi.advanceTimersByTimeAsync(CALL_DELAY_MS); // old-event delete settles
+    const outcome = await outcomePromise;
+
+    const insertTimeout = insert.mock.calls[0]?.[1]?.timeout ?? -1;
+    const getTimeout = get.mock.calls[0]?.[1]?.timeout ?? -1;
+    const deleteTimeout = del.mock.calls[0]?.[1]?.timeout ?? -1;
+
+    // Strictly decreasing: each call's own elapsed wall-clock time is
+    // subtracted from what the NEXT call sees, proving the window is
+    // recomputed fresh immediately before each call rather than reused from
+    // a single snapshot taken at the start of the row.
+    expect(insertTimeout).toBeGreaterThan(getTimeout);
+    expect(getTimeout).toBeGreaterThan(deleteTimeout);
+    expect(Date.now() - start).toBeLessThanOrEqual(30_000);
+    expect(outcome.status).toBe("reassigned");
+  });
+
+  it("reassign: a call attempted with too little of the deadline left is skipped entirely — never issued to Google — and the row is left retryable instead of hanging past the deadline", async () => {
+    // deadlineAt - insertDelay - DB_FINALIZE_RESERVE_MS(3_000) works out
+    // negative, well under PER_CALL_TIMEOUT_FLOOR_MS(2_000) — the delete
+    // step must give up before ever calling `del`.
+    const insert = slowResolving({ data: { id: "evt-new" } }, 8_000);
+    const del = vi.fn();
+    vi.mocked(buildCalendarClient).mockReturnValue({
+      events: { insert, get: vi.fn(), delete: del },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any);
+    const supabase = fakeSupabase({
+      // renewLease + provider_done write after the (slow) insert, then
+      // markRetryableFailure's write when the delete step gives up without
+      // ever calling Google.
+      task_calendar_mutations: [ledgerWrite(), ledgerWrite(), ledgerWrite()],
+    });
+
+    const deadlineAt = Date.now() + 10_000;
+    const outcomePromise = processClaimedCalendarMutation(supabase, REASSIGN_ROW, { deadlineAt });
+    await vi.advanceTimersByTimeAsync(8_000);
+    const outcome = await outcomePromise;
+
+    expect(insert).toHaveBeenCalled();
+    expect(del).not.toHaveBeenCalled();
     expect(outcome.status).toBe("retryable_error");
   });
 });

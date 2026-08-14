@@ -544,13 +544,31 @@ async function deliverSms(
     // which — via the sweep's `after()` continuation replaying this same
     // outcome through `resolveTimedOutReminderDelivery` — transitioned the
     // row `timeout_ambiguous -> failed` and made it retry-eligible despite
-    // completion being genuinely unknown). No markDelivery call here: this
-    // function doesn't know whether the row is still at its original
-    // `claimedStatus` or has already been fenced into `timeout_ambiguous`
-    // by the sweep's own deadline race (`withDeliveryDeadline`) — only
-    // `resolveTimedOutReminderDelivery` (the continuation that owns this
-    // outcome once the race has already resolved) knows which, and is
-    // responsible for the actual write.
+    // completion being genuinely unknown).
+    //
+    // Codex round 10 (finding 2): round 8's comment here used to say "no
+    // markDelivery call here" on the theory that only
+    // `resolveTimedOutReminderDelivery` (reached via `withDeliveryDeadline`'s
+    // OWN timeout race) ever needs to fence this row. That's true when the
+    // SWEEP's deadline is what fired — but `sendRepSmsReminder` can also
+    // resolve `aborted_ambiguous` because SENDILLO'S OWN internal timeout
+    // won the race (see sendillo.ts's `DEFAULT_SEND_TIMEOUT_MS`), which can
+    // settle BEFORE the sweep's own deadline ever elapses. In that direct
+    // race, this function's return value goes straight back through
+    // `withDeliveryDeadline`'s `Promise.race` (the `result !== TIMED_OUT`
+    // branch) without `markReminderDeliveryTimedOut` ever running — the row
+    // is left sitting at its original `claimedStatus` (`pending`/`failed`),
+    // still eligible for `fn_claim_reminder_retries` to reclaim and re-send
+    // on top of a delivery whose outcome is genuinely unknown. Fence it
+    // HERE, unconditionally: if the sweep's own deadline race already won
+    // and fenced the row (the OTHER scenario), this write's
+    // `expectedStatus` (`row.claimedStatus`, the now-stale pre-claim value)
+    // simply matches zero rows and is the same benign "lease lost" no-op
+    // `markDelivery` already treats every other 0-row result as — the real
+    // fence in that scenario is still `resolveTimedOutReminderDelivery`'s.
+    await markDelivery(supabase, row, "timeout_ambiguous", {
+      lastError: result.message,
+    });
     return {
       status: "aborted_ambiguous",
       deliveryId: row.deliveryId,
@@ -558,6 +576,12 @@ async function deliverSms(
       lastError: result.message,
     };
   }
+  // Codex round 10 (finding 4): `result.reason === "not_sent"` (the deadline
+  // signal was already aborted before Sendillo's fetch ever went out) lands
+  // here too — deliberately. Unlike `aborted_ambiguous` above, it's
+  // PROVABLY non-delivery (see `RepSmsSendResult`'s `not_sent` variant in
+  // rep-sms.ts), so the ordinary retryable `failed` write below is the
+  // correct, honest outcome — no ambiguous-holding-state fencing needed.
   await markDelivery(supabase, row, "failed", { lastError: result.message });
   return { status: "failed", deliveryId: row.deliveryId, channel: "sms", error: result.message };
 }

@@ -305,23 +305,21 @@ describe("runCalendarMutationSweep", () => {
     expect(mocks.processClaimedCalendarMutation).toHaveBeenCalledWith(
       supabase,
       expect.objectContaining({ operation: "cancel" }),
-      expect.objectContaining({ timeoutMs: expect.any(Number) }),
+      expect.objectContaining({ deadlineAt: expect.any(Number) }),
     );
     expect(summary.outcomes.deleted).toBe(1);
   });
 
-  // Codex round 9 (finding 3): every Google call this row's handler makes
-  // must be bounded to the sweep's REMAINING budget, not a fixed constant —
-  // proves the timeout threaded into processClaimedCalendarMutation shrinks
-  // as the sweep's soft budget is consumed, floored so it never goes below
-  // CALENDAR_CALL_TIMEOUT_FLOOR_MS (5s).
-  describe("per-row Google call timeout (Codex round 9, finding 3)", () => {
-    it("threads a timeoutMs derived from the remaining budget into processClaimedCalendarMutation", async () => {
-      // Date.now() is called 3x for one processed row: startedAt, the
-      // pre-claim budget check, and the timeoutMs derivation right before
-      // dispatch — all pinned to 0 so the elapsed time is exactly 0 and the
-      // assertion below isn't flaky against real wall-clock jitter.
-      vi.spyOn(Date, "now").mockReturnValue(0);
+  // Codex round 10 (finding 1): the sweep threads an ABSOLUTE deadline
+  // (epoch ms) into processClaimedCalendarMutation instead of round 9's
+  // one-shot per-row `timeoutMs` — every Google call any claimed row's
+  // handler makes recomputes its own remaining time against this SAME
+  // value (create-worker.ts's `nextGoogleCallOptions`), so a claim late in
+  // a busy sweep naturally gets a shorter leash without the route itself
+  // re-deriving anything per row.
+  describe("per-sweep absolute deadline (Codex round 10, finding 1)", () => {
+    it("threads deadlineAt = startedAt + budgetMs into processClaimedCalendarMutation", async () => {
+      vi.spyOn(Date, "now").mockReturnValue(1_000);
 
       const supabase = fakeSupabase([claimedRow("a")]);
       mocks.processClaimedCalendarMutation.mockResolvedValue({
@@ -335,36 +333,33 @@ describe("runCalendarMutationSweep", () => {
       expect(mocks.processClaimedCalendarMutation).toHaveBeenCalledWith(
         supabase,
         expect.objectContaining({ ledger_id: "a" }),
-        { timeoutMs: 60_000 },
+        { deadlineAt: 61_000 },
       );
     });
 
-    it("floors the per-call timeout at 5s even when almost no budget remains", async () => {
-      // startedAt=0; budget check reads elapsed=1 (1 < 1000, still inside
-      // budget, claim proceeds); the timeoutMs derivation right after reads
-      // elapsed=999 — budgetMs(1000) - 999 = 1ms, which the floor bumps up
-      // to CALENDAR_CALL_TIMEOUT_FLOOR_MS (5000) rather than handing the
-      // Google call an unusably tiny window.
-      const times = [0, 1, 999];
+    it("reuses the SAME deadlineAt across every row claimed in one sweep — not re-derived per row", async () => {
+      // startedAt=0; the budget check runs before each claim (reads 0, then
+      // 10) — both well inside a 60s budget so both rows get claimed and
+      // processed despite wall-clock time having advanced between them.
+      const times = [0, 0, 10, 10];
       let call = 0;
       vi.spyOn(Date, "now").mockImplementation(
         () => times[Math.min(call++, times.length - 1)],
       );
 
-      const supabase = fakeSupabase([claimedRow("a")]);
+      const supabase = fakeSupabase([claimedRow("a"), claimedRow("b")]);
       mocks.processClaimedCalendarMutation.mockResolvedValue({
         status: "created",
         ledgerId: "a",
         eventId: "evt-a",
       });
 
-      await runCalendarMutationSweep(supabase, { budgetMs: 1_000 });
+      await runCalendarMutationSweep(supabase, { budgetMs: 60_000 });
 
-      expect(mocks.processClaimedCalendarMutation).toHaveBeenCalledWith(
-        supabase,
-        expect.objectContaining({ ledger_id: "a" }),
-        { timeoutMs: 5_000 },
+      const deadlineArgs = mocks.processClaimedCalendarMutation.mock.calls.map(
+        (call) => (call[2] as { deadlineAt: number }).deadlineAt,
       );
+      expect(deadlineArgs).toEqual([60_000, 60_000]);
     });
   });
 });

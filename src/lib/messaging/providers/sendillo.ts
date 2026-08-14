@@ -57,6 +57,17 @@ export class SendilloMessagingProvider implements MessagingProvider {
    * method, and both are equally non-evidence of delivery, so both must be
    * classified identically (see `sendRepSmsReminder` in rep-sms.ts, which
    * reads this flag to map either case to `aborted_ambiguous`).
+   *
+   * Codex round 10 (finding 4): a signal that's ALREADY aborted when this
+   * method is called is a distinct, stronger case from a mid-flight abort
+   * above — checked BEFORE the fetch is ever issued (and rechecked
+   * immediately after the abort listener is attached, closing the race
+   * where the signal fires in the gap between the two checks). No request
+   * ever leaves this process in either case, so it's PROVABLY non-delivery
+   * — not "we stopped waiting," but "we never started." Thrown with
+   * `details.notSent = true` (alongside `isAbort`) so `sendRepSmsReminder`
+   * can route it to its own `not_sent` reason, distinct from
+   * `aborted_ambiguous` — see `RepSmsSendResult` in rep-sms.ts.
    */
   async sendSms(
     input: SmsOutboundInput,
@@ -68,11 +79,34 @@ export class SendilloMessagingProvider implements MessagingProvider {
       body: input.body,
     };
 
+    if (opts.signal?.aborted) {
+      throw new ProviderError(
+        "Sendillo send not attempted: deadline signal was already aborted",
+        "sendillo",
+        { isAbort: true, notSent: true },
+      );
+    }
+
     let response: Response;
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), DEFAULT_SEND_TIMEOUT_MS);
     const onExternalAbort = () => controller.abort();
     opts.signal?.addEventListener("abort", onExternalAbort);
+    // Recheck immediately after attaching the listener — closes the race
+    // where the signal aborted BETWEEN the check above and the listener
+    // attach (a window with no listener wired up yet, so `onExternalAbort`
+    // would never fire and the fetch below would proceed unbounded by the
+    // caller's own deadline, bounded only by this method's own internal
+    // timer instead).
+    if (opts.signal?.aborted) {
+      clearTimeout(timeout);
+      opts.signal.removeEventListener("abort", onExternalAbort);
+      throw new ProviderError(
+        "Sendillo send not attempted: deadline signal was already aborted",
+        "sendillo",
+        { isAbort: true, notSent: true },
+      );
+    }
     try {
       response = await fetch(SEND_ENDPOINT, {
         method: "POST",

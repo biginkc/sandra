@@ -186,44 +186,95 @@ const nowIso = () => new Date().toISOString();
 const RETRY_BACKOFF_UNIT_MS = 2 * 60 * 1000;
 
 /**
- * Codex round 9 (finding 3): fallback used only when a caller processes a
- * claimed row WITHOUT going through the sweep route (every direct unit-test
- * call site in create-worker.test.ts, plus any future non-route caller) —
- * the route itself always derives and passes an explicit `timeoutMs` from
- * its own remaining wall-clock budget (see calendar-mutation-sweep/route.ts's
- * `remainingCallTimeoutMs`). 30s comfortably fits inside the route's own
- * `SWEEP_BUDGET_MS`/`maxDuration` even as a fallback, so it isn't itself a
- * silent unbounded call.
+ * Fallback used only when a caller processes a claimed row WITHOUT going
+ * through the sweep route (every direct unit-test call site in
+ * create-worker.test.ts, plus any future non-route caller) — the route
+ * itself always derives and passes an explicit `deadlineAt` from its own
+ * absolute sweep deadline (see calendar-mutation-sweep/route.ts). 30s
+ * comfortably fits inside the route's own `SWEEP_BUDGET_MS`/`maxDuration`
+ * even as a fallback, so it isn't itself a silent unbounded call.
  */
-const DEFAULT_CALENDAR_CALL_TIMEOUT_MS = 30_000;
+const DEFAULT_CALENDAR_CALL_BUDGET_MS = 30_000;
+
+/**
+ * Codex round 10 (finding 1): reserved out of every remaining-time
+ * computation for the DB writes a row still has to make AFTER a Google call
+ * returns — `renewLease`, the `provider_done`/finalize `applyLedgerTransition`
+ * writes — so a call is never bounded to run right up against the sweep's
+ * own deadline with nothing left for those writes to land inside
+ * `maxDuration`.
+ */
+const DB_FINALIZE_RESERVE_MS = 3_000;
+
+/**
+ * Codex round 10 (finding 1): floor below which `nextGoogleCallOptions`
+ * gives up on a real network round trip rather than attempting one — under
+ * this, ordinary latency alone (not an actually-hung call) would fail it,
+ * burning an attempt on a row that was never actually stuck.
+ */
+const PER_CALL_TIMEOUT_FLOOR_MS = 2_000;
+
+/**
+ * Codex round 10 (finding 1): thrown by `nextGoogleCallOptions` instead of
+ * ever issuing a Google call once the sweep's remaining budget (minus
+ * `DB_FINALIZE_RESERVE_MS`) is at or below `PER_CALL_TIMEOUT_FLOOR_MS`.
+ * Deliberately NOT `isGoogleConflict`/`isGoogleNotFound`-shaped, so every
+ * call site's existing catch falls through to the same
+ * `handleProviderFailure` -> `classifyGoogleFailure` path a genuine Google
+ * timeout would (an unrecognized error shape defaults to retryable — see
+ * `classifyGoogleFailure`'s doc comment) — this row gets the exact same
+ * provider-timeout-ambiguous outcome that operation would have produced on
+ * a real timeout, just without spending the wall-clock time to prove it.
+ */
+class CalendarCallBudgetExhaustedError extends Error {
+  constructor() {
+    super("calendar mutation sweep deadline exhausted before this Google call");
+    this.name = "CalendarCallBudgetExhaustedError";
+  }
+}
 
 /**
  * Every `calendar.events.*` call in this file goes through this: bounds a
- * SINGLE attempt to `timeoutMs` (gaxios's own `timeout` option — see
- * node_modules/gaxios's `#appendTimeoutToSignal`, which wires it to an
- * `AbortSignal.timeout()` merged into the request's fetch signal) so a
- * hung/slow Google response can never hold this row's processing open past
- * the sweep's remaining budget, which would otherwise risk the WHOLE route
- * outliving the platform's `maxDuration` with no way back (unlike the
- * per-delivery deadline race in appointment-reminder-sweep, a single
- * calendar-mutation row's Google call has no cheap way to be "abandoned and
- * reconciled later" without a much larger refactor — bounding the call
- * itself is the direct fix).
+ * SINGLE attempt to the remaining time until `deadlineAt` (gaxios's own
+ * `timeout` option — see node_modules/gaxios's `#appendTimeoutToSignal`,
+ * which wires it to an `AbortSignal.timeout()` merged into the request's
+ * fetch signal) so a hung/slow Google response can never hold this row's
+ * processing open past the sweep's remaining budget, which would otherwise
+ * risk the WHOLE route outliving the platform's `maxDuration` with no way
+ * back (unlike the per-delivery deadline race in appointment-reminder-sweep,
+ * a single calendar-mutation row's Google call has no cheap way to be
+ * "abandoned and reconciled later" without a much larger refactor —
+ * bounding the call itself is the direct fix).
+ *
+ * Codex round 10 (finding 1): called immediately before EVERY Google call
+ * (not once per claimed row, per round 9) — a reassign row can make up to
+ * three (create, an optional 409-reconcile get, delete under the old
+ * account); snapshotting a single timeout once per row left every call
+ * after the first with the SAME window regardless of how much of it the
+ * earlier calls had already spent. Recomputing `deadlineAt - now() -
+ * DB_FINALIZE_RESERVE_MS` right here means a slow first call correctly
+ * shrinks the window left for the next one, and a call attempted with too
+ * little of that window left (see `PER_CALL_TIMEOUT_FLOOR_MS`) never goes
+ * out at all — see `CalendarCallBudgetExhaustedError`'s doc comment.
  *
  * `retry: false` disables googleapis-common's own DEFAULT retry
  * (`options.retry` defaults to `true` — see
  * node_modules/googleapis-common/build/src/apirequest.js — up to 3 extra
- * attempts, each re-applying `timeoutMs` fresh per gaxios's retry loop,
- * which would silently multiply this call's worst-case duration well past
- * `timeoutMs` and defeat the whole point of bounding it). A single timed-out
- * attempt surfaces as an ordinary rejection to the existing
+ * attempts, each re-applying `timeout` fresh per gaxios's retry loop, which
+ * would silently multiply this call's worst-case duration well past the
+ * computed window and defeat the whole point of bounding it). A single
+ * timed-out attempt surfaces as an ordinary rejection to the existing
  * catch/classify machinery below (`classifyGoogleFailure`,
  * `handleProviderFailure`) exactly like any other transport error — this
  * file's own ledger-level `attempts`/backoff (markRetryableFailure et al.)
  * is the durable cross-sweep retry layer, not gaxios's opaque in-call one.
  */
-function googleCallOptions(timeoutMs: number): { timeout: number; retry: boolean } {
-  return { timeout: timeoutMs, retry: false };
+function nextGoogleCallOptions(deadlineAt: number): { timeout: number; retry: boolean } {
+  const remaining = deadlineAt - Date.now() - DB_FINALIZE_RESERVE_MS;
+  if (remaining <= PER_CALL_TIMEOUT_FLOOR_MS) {
+    throw new CalendarCallBudgetExhaustedError();
+  }
+  return { timeout: remaining, retry: false };
 }
 
 /**
@@ -294,22 +345,26 @@ async function renewLease(
 export async function processClaimedCalendarMutation(
   supabase: Supabase,
   claimed: ClaimedCalendarMutationRow,
-  /** Codex round 9 (finding 3): per-call Google timeout for every provider
-   *  operation this row's handler makes, derived by the sweep route from
-   *  its remaining wall-clock budget (floored — see route.ts). Defaults to
-   *  `DEFAULT_CALENDAR_CALL_TIMEOUT_MS` for direct (non-route) callers. */
-  opts: { timeoutMs?: number } = {},
+  /** Codex round 10 (finding 1): absolute deadline (epoch ms) for every
+   *  Google call any of this row's handler's provider operations make —
+   *  the sweep route's own wall-clock deadline (see route.ts). Each
+   *  handler recomputes its remaining time against THIS value immediately
+   *  before every individual Google call (see `nextGoogleCallOptions`),
+   *  rather than snapshotting one duration for the whole row (round 9).
+   *  Defaults to `Date.now() + DEFAULT_CALENDAR_CALL_BUDGET_MS` for direct
+   *  (non-route) callers. */
+  opts: { deadlineAt?: number } = {},
 ): Promise<CalendarMutationOutcome> {
-  const timeoutMs = opts.timeoutMs ?? DEFAULT_CALENDAR_CALL_TIMEOUT_MS;
+  const deadlineAt = opts.deadlineAt ?? Date.now() + DEFAULT_CALENDAR_CALL_BUDGET_MS;
   switch (claimed.operation) {
     case "create":
-      return processClaimedCalendarCreation(supabase, claimed, timeoutMs);
+      return processClaimedCalendarCreation(supabase, claimed, deadlineAt);
     case "cancel":
-      return processClaimedCancel(supabase, claimed, timeoutMs);
+      return processClaimedCancel(supabase, claimed, deadlineAt);
     case "reschedule":
-      return processClaimedReschedule(supabase, claimed, timeoutMs);
+      return processClaimedReschedule(supabase, claimed, deadlineAt);
     case "reassign":
-      return processClaimedReassign(supabase, claimed, timeoutMs);
+      return processClaimedReassign(supabase, claimed, deadlineAt);
     default: {
       // Exhaustiveness guard — the claim RPC's operation CHECK constraint
       // and this union should always agree; if they ever drift, fail this
@@ -339,9 +394,9 @@ export async function processClaimedCalendarMutation(
 export async function processClaimedCalendarCreation(
   supabase: Supabase,
   claimed: ClaimedCalendarMutationRow,
-  /** Codex round 9 (finding 3) — see `googleCallOptions`/
+  /** Codex round 10 (finding 1) — see `nextGoogleCallOptions`/
    *  `processClaimedCalendarMutation`'s doc comments. */
-  timeoutMs: number = DEFAULT_CALENDAR_CALL_TIMEOUT_MS,
+  deadlineAt: number = Date.now() + DEFAULT_CALENDAR_CALL_BUDGET_MS,
 ): Promise<CalendarMutationOutcome> {
   const ledgerId = claimed.ledger_id;
   const claimToken = claimed.claim_token;
@@ -357,7 +412,7 @@ export async function processClaimedCalendarCreation(
     // path, so the recorded expectedPhase here is 'provider_done', not
     // 'pending' — matching the phase the token-fenced write must target.
     try {
-      return await resumeProviderDoneCreation(supabase, claimed, timeoutMs);
+      return await resumeProviderDoneCreation(supabase, claimed, deadlineAt);
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
       reportError(e, {
@@ -424,7 +479,7 @@ export async function processClaimedCalendarCreation(
           calendarId: "primary",
           requestBody: buildEvent(claimed.client_event_id, claimed.source_title, claimed.source_due_at, claimed.source_end_at),
         },
-        googleCallOptions(timeoutMs),
+        nextGoogleCallOptions(deadlineAt),
       );
       if (!response.data.id) throw new Error("Google returned no event id");
       eventId = response.data.id;
@@ -442,7 +497,7 @@ export async function processClaimedCalendarCreation(
               calendarId: "primary",
               eventId: claimed.client_event_id,
             },
-            googleCallOptions(timeoutMs),
+            nextGoogleCallOptions(deadlineAt),
           );
           if (!existing.data.id) {
             throw new Error("409-reconcile lookup returned no event id");
@@ -559,7 +614,7 @@ export async function processClaimedCalendarCreation(
 async function resumeProviderDoneCreation(
   supabase: Supabase,
   claimed: ClaimedCalendarMutationRow,
-  timeoutMs: number = DEFAULT_CALENDAR_CALL_TIMEOUT_MS,
+  deadlineAt: number = Date.now() + DEFAULT_CALENDAR_CALL_BUDGET_MS,
 ): Promise<CalendarMutationOutcome> {
   const ledgerId = claimed.ledger_id;
   const claimToken = claimed.claim_token;
@@ -628,7 +683,7 @@ async function resumeProviderDoneCreation(
           calendarId: "primary",
           eventId: claimed.client_event_id,
         },
-        googleCallOptions(timeoutMs),
+        nextGoogleCallOptions(deadlineAt),
       );
       if (!existing.data.id) {
         throw new Error("provider_done reconcile lookup returned no event id");
@@ -970,7 +1025,7 @@ async function markStaleEventRetryable(
 async function processClaimedCancel(
   supabase: Supabase,
   claimed: ClaimedCalendarMutationRow,
-  timeoutMs: number = DEFAULT_CALENDAR_CALL_TIMEOUT_MS,
+  deadlineAt: number = Date.now() + DEFAULT_CALENDAR_CALL_BUDGET_MS,
 ): Promise<CalendarMutationOutcome> {
   const ledgerId = claimed.ledger_id;
   const claimToken = claimed.claim_token;
@@ -1054,7 +1109,7 @@ async function processClaimedCancel(
     try {
       await calendar.events.delete(
         { calendarId: "primary", eventId: claimed.event_id },
-        googleCallOptions(timeoutMs),
+        nextGoogleCallOptions(deadlineAt),
       );
     } catch (e) {
       if (!isGoogleNotFound(e)) {
@@ -1202,7 +1257,7 @@ async function finalizeCancel(
 async function processClaimedReschedule(
   supabase: Supabase,
   claimed: ClaimedCalendarMutationRow,
-  timeoutMs: number = DEFAULT_CALENDAR_CALL_TIMEOUT_MS,
+  deadlineAt: number = Date.now() + DEFAULT_CALENDAR_CALL_BUDGET_MS,
 ): Promise<CalendarMutationOutcome> {
   const ledgerId = claimed.ledger_id;
   const claimToken = claimed.claim_token;
@@ -1310,7 +1365,7 @@ async function processClaimedReschedule(
             end: { dateTime: claimed.target_end_at },
           },
         },
-        googleCallOptions(timeoutMs),
+        nextGoogleCallOptions(deadlineAt),
       );
       eventId = response.data.id ?? claimed.event_id;
     } catch (e) {
@@ -1528,7 +1583,7 @@ async function finalizeReschedule(
 async function processClaimedReassign(
   supabase: Supabase,
   claimed: ClaimedCalendarMutationRow,
-  timeoutMs: number = DEFAULT_CALENDAR_CALL_TIMEOUT_MS,
+  deadlineAt: number = Date.now() + DEFAULT_CALENDAR_CALL_BUDGET_MS,
 ): Promise<CalendarMutationOutcome> {
   const ledgerId = claimed.ledger_id;
   const claimToken = claimed.claim_token;
@@ -1663,7 +1718,7 @@ async function processClaimedReassign(
               claimed.source_end_at,
             ),
           },
-          googleCallOptions(timeoutMs),
+          nextGoogleCallOptions(deadlineAt),
         );
         if (!response.data.id) throw new Error("Google returned no event id");
         eventId = response.data.id;
@@ -1675,7 +1730,7 @@ async function processClaimedReassign(
                 calendarId: "primary",
                 eventId: claimed.client_event_id,
               },
-              googleCallOptions(timeoutMs),
+              nextGoogleCallOptions(deadlineAt),
             );
             if (!existing.data.id) throw new Error("409-reconcile lookup returned no event id");
             eventId = existing.data.id;
@@ -1800,7 +1855,7 @@ async function processClaimedReassign(
         const oldCalendar = buildCalendarClient(claimed.old_assignee_id, oldToken);
         await oldCalendar.events.delete(
           { calendarId: "primary", eventId: claimed.event_id },
-          googleCallOptions(timeoutMs),
+          nextGoogleCallOptions(deadlineAt),
         );
       } catch (e) {
         if (!isGoogleNotFound(e)) {

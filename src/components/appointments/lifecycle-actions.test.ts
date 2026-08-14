@@ -302,4 +302,79 @@ describe("reassignAppointmentAction", () => {
     expect(afterCallbacks).toHaveLength(0);
     expect(revalidatePath).not.toHaveBeenCalled();
   });
+
+  // Codex round 10 (finding 3): the RPC above already committed the
+  // reassignment — a failure in ANYTHING past that point (task re-fetch,
+  // prefs, address lookup, admin client, the dispatch calls themselves)
+  // must never flip this action's result back to an error. Before this
+  // round, an uncaught task-fetch throw here fell into the action's OWN
+  // catch block and reported REASSIGN_APPOINTMENT_FAILED despite the
+  // mutation having already durably succeeded.
+  it("still returns the committed ok:true result — and reports separately — when the post-RPC task lookup throws", async () => {
+    createClient.mockResolvedValue(makeSupabaseMock({ userId: "user-1" }));
+    reassignAppointment.mockResolvedValue({
+      ok: true,
+      data: { taskId: "task-1", oldAssigneeId: "user-1", newAssigneeId: "user-2", duplicate: false },
+    });
+    const supabase = await createClient();
+    (supabase.from as ReturnType<typeof vi.fn>).mockImplementationOnce(() => {
+      throw new Error("transient read failure");
+    });
+
+    const result = await reassignAppointmentAction("task-1", "user-2");
+
+    expect(result).toEqual({
+      ok: true,
+      data: { taskId: "task-1", oldAssigneeId: "user-1", newAssigneeId: "user-2", duplicate: false },
+    });
+    // The task lookup failed, so there's no property to scope a /leads/*
+    // revalidation to, and no `after()` callback (which would need `task`)
+    // is registered — but the RPC's own committed result still comes back
+    // unchanged, and the unconditional paths still revalidate (same
+    // null-task tolerance every other lifecycle action's
+    // `revalidateAppointmentPaths` call already has).
+    expect(afterCallbacks).toHaveLength(0);
+    expect(revalidatePath).not.toHaveBeenCalledWith(expect.stringMatching(/^\/leads\//));
+    expect(revalidatePath).toHaveBeenCalledWith("/messages");
+    expect(revalidatePath).toHaveBeenCalledWith("/dashboard");
+  });
+
+  it("still returns the committed ok:true result when the after() notification prep throws — the failure is reported on its own, never touching the already-returned result", async () => {
+    createClient.mockResolvedValue(
+      makeSupabaseMock({
+        userId: "user-1",
+        taskRow: {
+          org_id: "org-1",
+          title: "Walkthrough",
+          due_at: "2026-09-01T15:00:00Z",
+          related_property_id: "prop-1",
+          contact_id: null,
+        },
+        propertyAddress: "123 Main St",
+      }),
+    );
+    reassignAppointment.mockResolvedValue({
+      ok: true,
+      data: { taskId: "task-1", oldAssigneeId: "user-1", newAssigneeId: "user-2", duplicate: false },
+    });
+    createAdminClient.mockImplementationOnce(() => {
+      throw new Error("admin client unavailable");
+    });
+
+    const result = await reassignAppointmentAction("task-1", "user-2");
+
+    // The result was already committed and returned before after() ever
+    // ran — the notification-prep throw below can't touch it.
+    expect(result).toEqual({
+      ok: true,
+      data: { taskId: "task-1", oldAssigneeId: "user-1", newAssigneeId: "user-2", duplicate: false },
+    });
+    expect(revalidatePath).toHaveBeenCalledWith("/leads/prop-1");
+    expect(afterCallbacks).toHaveLength(1);
+
+    await afterCallbacks[0]();
+
+    expect(dispatchTaskAssigned).not.toHaveBeenCalled();
+    expect(dispatchTaskAssignedSlack).not.toHaveBeenCalled();
+  });
 });

@@ -52,19 +52,31 @@ const MAX_ROWS_PER_SWEEP = 50;
 const SWEEP_BUDGET_MS = 45_000;
 
 /**
- * Codex round 9 (finding 3): floor for the per-Google-call timeout derived
- * from the sweep's remaining budget (see `remainingCallTimeoutMs` below).
- * Below this, a real (non-hung) Google round trip would start failing on
- * ordinary network latency alone, burning attempts on rows that were never
- * actually stuck — a call that's ACTUALLY hung is bounded either way (this
- * floor is what makes it bounded at all), so there's no reason to shrink
- * the per-call window to razor-thin slivers as the sweep's soft budget runs
- * low. The gap between `SWEEP_BUDGET_MS` (45s) and the route's own
- * `maxDuration` (60s) is exactly the slack this floor spends: worst case,
- * one already-in-flight row gets a bit more runway than the soft budget
- * technically had left, comfortably inside the platform's hard limit.
+ * Codex round 10 (finding 1): the sweep's own absolute wall-clock deadline,
+ * threaded through to `processClaimedCalendarMutation` as `deadlineAt`
+ * (epoch ms) instead of the round-9 per-row `timeoutMs` snapshot. Round 9
+ * derived one fixed duration per claimed row and reused it for every Google
+ * call that row's handler made — fine for `create`/`cancel`/`reschedule`
+ * (at most one Google call each) but wrong for `reassign`, which can make
+ * up to three (create, an optional 409-reconcile get, delete): a slow first
+ * call left the SAME window for the calls after it, so a row could still
+ * blow well past the sweep's real remaining budget even though each
+ * individual call was "bounded."
+ *
+ * An absolute deadline fixes this for free: create-worker.ts recomputes the
+ * remaining time immediately before EVERY Google call (see its
+ * `nextGoogleCallOptions`), so a slow first call correctly shrinks the
+ * window left for the next one. It's derived once per sweep (not
+ * re-derived per row) precisely because it's absolute — the "a claim late
+ * in a busy sweep gets a shorter leash" property round 9 needed a
+ * recompute for falls out automatically as wall-clock time passes.
+ *
+ * The gap between `SWEEP_BUDGET_MS` (45s) and the route's own `maxDuration`
+ * (60s) is the slack create-worker.ts's own reserve/floor spends: worst
+ * case, one already-in-flight row gets a bit more runway than the soft
+ * budget technically had left, comfortably inside the platform's hard
+ * limit.
  */
-const CALENDAR_CALL_TIMEOUT_FLOOR_MS = 5_000;
 
 function createServiceRoleClient() {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
@@ -156,6 +168,13 @@ export async function runCalendarMutationSweep(
   const budgetMs = opts.budgetMs ?? SWEEP_BUDGET_MS;
   const claimLimit = opts.claimLimit ?? MAX_ROWS_PER_SWEEP;
   const startedAt = Date.now();
+  // Codex round 10 (finding 1): the sweep's absolute wall-clock deadline —
+  // derived once, here, not per row/per call. Every Google call any claimed
+  // row's handler makes recomputes its own remaining time against THIS same
+  // value (see create-worker.ts's `nextGoogleCallOptions`); see the const's
+  // doc comment above for why an absolute deadline replaces round 9's
+  // per-row duration snapshot.
+  const deadlineAt = startedAt + budgetMs;
   const rpcClient = supabase as unknown as ClaimRpcClient;
 
   // Terminal exhaustion runs once per sweep, before any claiming — not
@@ -225,23 +244,6 @@ export async function runCalendarMutationSweep(
     if (!row) break;
 
     claimed += 1;
-    // Codex round 9 (finding 3): every Google call this row's handler makes
-    // is bounded to the sweep's REMAINING budget (floored — see
-    // CALENDAR_CALL_TIMEOUT_FLOOR_MS above), not a fixed constant — a claim
-    // late in a busy sweep gets a shorter leash than one claimed right at
-    // the start, so a single hung/slow provider call can never carry the
-    // whole route past its platform `maxDuration`. Snapshotted once per
-    // claimed row (not re-derived after each of a multi-Google-call row's
-    // individual calls, e.g. reassign's delete-then-create) — the DB writes
-    // between those calls are fast, and re-threading a shrinking budget
-    // through every handler would be a much larger refactor for a benefit
-    // this floor already covers: see `googleCallOptions`'s doc comment in
-    // create-worker.ts for why a bounded call is always safe to leave
-    // retryable regardless of how many of them one row makes.
-    const timeoutMs = Math.max(
-      CALENDAR_CALL_TIMEOUT_FLOOR_MS,
-      budgetMs - (Date.now() - startedAt),
-    );
     // Defense-in-depth: `processClaimedCalendarMutation` is documented to
     // never throw, but this loop must not bet the whole sweep on that
     // invariant holding forever — a claimed row already burned its
@@ -249,7 +251,7 @@ export async function runCalendarMutationSweep(
     // next claimed row (or the next sweep iteration) from being processed.
     let outcome: CalendarMutationOutcome;
     try {
-      outcome = await processClaimedCalendarMutation(supabase, row, { timeoutMs });
+      outcome = await processClaimedCalendarMutation(supabase, row, { deadlineAt });
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
       reportError(e, {

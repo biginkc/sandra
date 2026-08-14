@@ -255,6 +255,40 @@ describe("sendRepSmsReminder", () => {
     );
   });
 
+  // Codex round 10 (finding 4): sendillo.ts throws with `details.notSent =
+  // true` specifically when the caller's deadline signal was ALREADY
+  // aborted before any fetch was attempted — a strictly stronger guarantee
+  // than the mid-flight/internal-timeout aborts above (no request ever left
+  // the process). Must classify as its OWN `not_sent` reason, never folded
+  // into `aborted_ambiguous` — even though `params.signal?.aborted` is true
+  // here too, which would otherwise satisfy the generic `aborted` check.
+  it("returns not_sent (not aborted_ambiguous) when sendillo.ts reports the signal was already aborted before any fetch was attempted", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    mocks.sendSms.mockRejectedValueOnce(
+      new ProviderError("Sendillo send not attempted: deadline signal was already aborted", "sendillo", {
+        isAbort: true,
+        notSent: true,
+      }),
+    );
+
+    const result = await sendRepSmsReminder({
+      to: "+18165551234",
+      body: "Appointment in 30 min",
+      signal: controller.signal,
+    });
+
+    expect(result).toEqual({
+      ok: false,
+      reason: "not_sent",
+      message: "Sendillo send not attempted: deadline signal was already aborted",
+    });
+    expect(mocks.reportError).toHaveBeenCalledWith(
+      expect.any(Error),
+      expect.objectContaining({ tags: { surface: "rep_sms_send_not_sent" } }),
+    );
+  });
+
   it("still returns provider_error when sendSms rejects and the signal was never aborted (a genuine provider failure, unrelated to any deadline)", async () => {
     const controller = new AbortController();
     mocks.sendSms.mockRejectedValueOnce(new Error("Sendillo 500"));

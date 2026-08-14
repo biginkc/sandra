@@ -634,4 +634,56 @@ describe("runAppointmentReminderSweep", () => {
       expect((lateRejectionCall?.[0] as Error)?.message).toBe("truly unexpected");
     });
   });
+
+  // Codex round 8 (finding introduced) + round 10 (finding 2): an
+  // `aborted_ambiguous` outcome doesn't only come from the sweep's OWN
+  // deadline race (`withDeliveryDeadline`'s TIMED_OUT branch) — Sendillo's
+  // own internal send timeout can settle `deliverAppointmentReminder`
+  // FIRST, before the sweep's deadline ever fires, so the outcome comes
+  // back through the race's `result !== TIMED_OUT` branch directly. Round
+  // 10 (finding 2) moved the actual DB fencing (claimedStatus ->
+  // timeout_ambiguous) into `deliverAppointmentReminder` itself for exactly
+  // this path (see reminders.test.ts) — this route-level test asserts the
+  // CONTROL FLOW around it: the timeout-race machinery
+  // (`markReminderDeliveryTimedOut` / `after()` / `resolveTimedOutReminderDelivery`)
+  // must never fire for a row that resolved before the deadline, so nothing
+  // double-fences or double-reports it, and the row is excluded from the
+  // NEXT sweep's retry claim purely by virtue of now sitting at
+  // `timeout_ambiguous` (fn_claim_reminder_retries's candidates CTE only
+  // ever matches `status IN ('failed', 'pending')` — 20260814200000).
+  describe("Codex round 10 (finding 2): direct aborted_ambiguous, not via the timeout race", () => {
+    it("an internal-abort outcome that settles before the deadline is reported once, with no timeout-race bookkeeping — the row's fence is deliverAppointmentReminder's own responsibility", async () => {
+      const supabase = fakeSupabase([[rawRow("a", { channel: "sms" })]]);
+      mocks.deliverAppointmentReminder.mockResolvedValueOnce({
+        status: "aborted_ambiguous",
+        deliveryId: "a",
+        channel: "sms",
+        lastError: "Sendillo's own send timeout fired",
+      });
+
+      const summary = await runAppointmentReminderSweep(supabase, { budgetMs: 10_000 });
+
+      expect(summary.outcomes.aborted_ambiguous).toBe(1);
+      // Never went through the timeout race at all — settled before any
+      // deadline timer could fire.
+      expect(mocks.markReminderDeliveryTimedOut).not.toHaveBeenCalled();
+      expect(mocks.after).not.toHaveBeenCalled();
+      expect(mocks.resolveTimedOutReminderDelivery).not.toHaveBeenCalled();
+      const ambiguousCall = mocks.reportError.mock.calls.find(
+        (call) =>
+          (call[1] as { tags?: { surface?: string } })?.tags?.surface ===
+          "cron_appointment_reminder_sweep_outcome_ambiguous",
+      );
+      expect((ambiguousCall?.[0] as Error)?.message).toBe("Sendillo's own send timeout fired");
+      // Reported exactly once — no double report from a race that never
+      // happened.
+      expect(
+        mocks.reportError.mock.calls.filter(
+          (call) =>
+            (call[1] as { tags?: { surface?: string } })?.tags?.surface ===
+            "cron_appointment_reminder_sweep_outcome_ambiguous",
+        ),
+      ).toHaveLength(1);
+    });
+  });
 });

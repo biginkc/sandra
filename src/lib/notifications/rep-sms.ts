@@ -55,6 +55,20 @@ export type RepSmsSendResult =
       ok: false;
       reason: "aborted_ambiguous";
       message: string;
+    }
+  | {
+      /** Codex round 10 (finding 4): the caller-supplied deadline `signal`
+       *  was ALREADY aborted before `SendilloMessagingProvider.sendSms`
+       *  ever issued the fetch — see that method's doc comment for why this
+       *  is a strictly stronger guarantee than `aborted_ambiguous` above:
+       *  no request ever left this process, so this is PROVABLY
+       *  non-delivery, not merely "we stopped waiting." Callers should
+       *  treat this the same as a definite `provider_error` — a normal,
+       *  retryable failure, never routed through the ambiguous-outcome
+       *  handling `aborted_ambiguous` requires. */
+      ok: false;
+      reason: "not_sent";
+      message: string;
     };
 
 function repSmsEnv(): { apiKey: string; fromNumber: string } | null {
@@ -184,6 +198,25 @@ export async function sendRepSmsReminder(params: {
     // perspective, "Sendillo's own clock ran out" and "our deadline ran
     // out" are equally non-evidence of delivery — see sendillo.ts's sendSms
     // doc comment.
+    //
+    // Codex round 10 (finding 4): checked BEFORE the general `aborted`
+    // check below — `sendillo.ts` throws with `details.notSent = true`
+    // specifically when `params.signal` was ALREADY aborted before any
+    // fetch was attempted, which would otherwise also satisfy `aborted`'s
+    // third check (`params.signal?.aborted === true`) and get misclassified
+    // as merely ambiguous. This is provably not sent, not merely abandoned
+    // mid-flight — see `RepSmsSendResult`'s `not_sent` variant above.
+    if (error instanceof ProviderError && error.details?.notSent === true) {
+      reportError(error, {
+        tags: { surface: "rep_sms_send_not_sent" },
+        extra: { to: params.to },
+      });
+      return {
+        ok: false,
+        reason: "not_sent",
+        message: error instanceof Error ? error.message : String(error),
+      };
+    }
     const aborted =
       (error instanceof Error && error.name === "AbortError") ||
       (error instanceof ProviderError && error.details?.isAbort === true) ||

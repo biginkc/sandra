@@ -221,47 +221,85 @@ export async function reassignAppointmentAction(
     const result = await reassignAppointment(supabase, taskId, newAssigneeId, idempotencyKey);
     if (!result.ok) return result;
 
-    const task = await loadTaskForNotification(supabase, taskId);
+    // Codex round 10 (finding 3): everything past this point is
+    // best-effort — `reassignAppointment` above already committed the
+    // reassignment, so nothing that follows may flip this action's result
+    // back to an error. Previously the task re-fetch used for notification
+    // prep ran uncaught in this same try block: if IT threw (a transient
+    // read failure, unrelated to the already-successful mutation), the
+    // outer catch below reported REASSIGN_APPOINTMENT_FAILED even though
+    // the reassignment had durably succeeded — the caller would see a
+    // failure for a change that already happened. Caught here instead, and
+    // only used for revalidation (tolerant of a missing task, same as
+    // every other lifecycle action's `revalidateAppointmentPaths` call).
+    const task = await loadTaskForNotification(supabase, taskId).catch((e) => {
+      reportError(e, {
+        tags: { surface: "reassign_appointment_action_task_lookup" },
+        extra: { taskId },
+      });
+      return null;
+    });
+    revalidateAppointmentPaths(task);
 
     // Same single-owner-notification pattern as bookAppointment /
     // createLeadTaskAction: skip when the actor reassigned to themselves,
     // and skip on a duplicate (no-op) result — the original assignment's
     // notification already fired and a retry re-dispatching it would
-    // double-notify.
+    // double-notify. Decided synchronously (both flags, plus `task`, are
+    // already in hand — no fetch needed), so a duplicate/self reassignment
+    // registers no `after()` callback at all, same as before this round.
+    //
+    // Keyed-retry note: since this action now always returns the RPC's own
+    // committed result once it succeeds (never downgraded by a later prep
+    // or dispatch failure below), the `result.data.duplicate` skip only
+    // ever fires on a genuine retry of an idempotency key that already
+    // committed AND already notified — not on this path's own failures,
+    // which no longer exist for it to trip over.
     if (task && !result.data.duplicate && newAssigneeId !== user.id) {
-      const admin = createAdminClient();
-      const prefs = await loadIntegrationPrefs(admin, newAssigneeId);
-      const subjectLabel = task.related_property_id
-        ? await loadPropertyAddress(supabase, task.related_property_id)
-        : task.title;
-      const deepLink = buildAppointmentDeepLink(task.related_property_id, task.contact_id);
+      // ALL notification prep (admin client, prefs, address) plus the
+      // dispatch calls themselves move inside `after()`, wrapped in their
+      // own try/catch + reportError — a failure anywhere in here is
+      // reported on its own, separately, and never touches the `result`
+      // already returned below.
       after(async () => {
-        await Promise.allSettled([
-          dispatchTaskAssigned(supabase, {
-            taskId,
-            orgId: task.org_id,
-            assigneeId: newAssigneeId,
-            taskTitle: task.title,
-            taskType: "appointment",
-            dueAt: task.due_at,
-            propertyAddress: task.related_property_id ? subjectLabel : null,
-          }),
-          dispatchTaskAssignedSlack({
-            taskId,
-            assigneeId: newAssigneeId,
-            taskTitle: task.title,
-            taskType: "appointment",
-            dueAt: task.due_at,
-            propertyAddress: subjectLabel,
-            deepLink,
-            timezone: prefs.timezone,
-            slackEnabled: prefs.slackEnabled,
-          }),
-        ]);
+        try {
+          const admin = createAdminClient();
+          const prefs = await loadIntegrationPrefs(admin, newAssigneeId);
+          const subjectLabel = task.related_property_id
+            ? await loadPropertyAddress(supabase, task.related_property_id)
+            : task.title;
+          const deepLink = buildAppointmentDeepLink(task.related_property_id, task.contact_id);
+          await Promise.allSettled([
+            dispatchTaskAssigned(supabase, {
+              taskId,
+              orgId: task.org_id,
+              assigneeId: newAssigneeId,
+              taskTitle: task.title,
+              taskType: "appointment",
+              dueAt: task.due_at,
+              propertyAddress: task.related_property_id ? subjectLabel : null,
+            }),
+            dispatchTaskAssignedSlack({
+              taskId,
+              assigneeId: newAssigneeId,
+              taskTitle: task.title,
+              taskType: "appointment",
+              dueAt: task.due_at,
+              propertyAddress: subjectLabel,
+              deepLink,
+              timezone: prefs.timezone,
+              slackEnabled: prefs.slackEnabled,
+            }),
+          ]);
+        } catch (e) {
+          reportError(e, {
+            tags: { surface: "reassign_appointment_action_notify" },
+            extra: { taskId },
+          });
+        }
       });
     }
 
-    revalidateAppointmentPaths(task);
     return result;
   } catch (e) {
     reportError(e, { tags: { surface: "reassign_appointment_action" }, extra: { taskId } });

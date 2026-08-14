@@ -333,6 +333,36 @@ describe("deliverAppointmentReminder — sms", () => {
     });
   });
 
+  // Codex round 10 (finding 4): `not_sent` (the deadline signal was already
+  // aborted before Sendillo's fetch was ever attempted) is PROVABLY
+  // non-delivery, unlike `aborted_ambiguous` below — routes through the
+  // ordinary retryable `failed` write, not the ambiguous-holding-state
+  // fence.
+  it("marks failed (ordinary, retryable) — not ambiguous — when sendRepSmsReminder reports not_sent", async () => {
+    mocks.sendRepSmsReminder.mockResolvedValueOnce({
+      ok: false,
+      reason: "not_sent",
+      message: "Sendillo send not attempted: deadline signal was already aborted",
+    });
+    const supabase = fakeSupabase();
+    const row = baseRow({ channel: "sms" });
+
+    const outcome = await deliverAppointmentReminder(supabase, row);
+
+    expect(outcome).toEqual({
+      status: "failed",
+      deliveryId: "delivery-1",
+      channel: "sms",
+      error: "Sendillo send not attempted: deadline signal was already aborted",
+    });
+    expect(supabase.updates[0]).toMatchObject({
+      payload: expect.objectContaining({
+        status: "failed",
+        last_error: "Sendillo send not attempted: deadline signal was already aborted",
+      }),
+    });
+  });
+
   // Codex round 8: a deadline AbortSignal firing mid-Sendillo-call cannot
   // prove non-delivery — it must NOT be handled as an ordinary
   // provider_error (which falls through to markDelivery-failed below and,
@@ -340,7 +370,21 @@ describe("deliverAppointmentReminder — sms", () => {
   // through resolveTimedOutReminderDelivery, would transition the row
   // timeout_ambiguous -> failed and make it retry-eligible despite
   // completion being genuinely unknown).
-  it("returns an aborted_ambiguous outcome (not failed) when sendRepSmsReminder reports the deadline signal fired, and writes NOTHING to the row itself", async () => {
+  //
+  // Codex round 10 (finding 2): round 8 left this write to
+  // `resolveTimedOutReminderDelivery` on the theory that only the sweep's
+  // OWN deadline race ever produces `aborted_ambiguous`. But
+  // `sendRepSmsReminder` can also resolve this reason because SENDILLO'S
+  // OWN internal timeout won the race — settling BEFORE the sweep's
+  // deadline fires, so `withDeliveryDeadline`'s timeout branch (and
+  // `markReminderDeliveryTimedOut`) never runs at all. This is that direct
+  // (non-timeout-race) path: `deliverAppointmentReminder` is called plainly
+  // (no `signal`, mirroring a call that settles before any outer race), and
+  // the row must still end up fenced into `timeout_ambiguous` — never left
+  // sitting at its original claimed status where a retry claim could
+  // reclaim it and risk a duplicate SMS on top of a send whose outcome is
+  // genuinely unknown.
+  it("fences claimedStatus -> timeout_ambiguous when sendRepSmsReminder reports aborted_ambiguous directly (Sendillo's own timeout won the race, not the sweep's)", async () => {
     mocks.sendRepSmsReminder.mockResolvedValueOnce({
       ok: false,
       reason: "aborted_ambiguous",
@@ -357,11 +401,46 @@ describe("deliverAppointmentReminder — sms", () => {
       channel: "sms",
       lastError: "This operation was aborted",
     });
-    // No markDelivery write at all — this function doesn't know whether the
-    // row is still at its original claimedStatus or has already been
-    // fenced into timeout_ambiguous by the sweep's own deadline race;
-    // resolveTimedOutReminderDelivery is the one place that knows which.
-    expect(supabase.updates).toHaveLength(0);
+    expect(supabase.updates).toHaveLength(1);
+    expect(supabase.updates[0]).toMatchObject({
+      table: "task_reminder_deliveries",
+      payload: expect.objectContaining({
+        status: "timeout_ambiguous",
+        last_error: "This operation was aborted",
+      }),
+      eqs: expect.arrayContaining([
+        ["id", "delivery-1"],
+        ["claim_token", "initial-token"],
+        // Fenced off the row's ORIGINAL claimedStatus ("pending") — this is
+        // the direct-race path, so the sweep's own deadline race never
+        // touched the row first.
+        ["status", "pending"],
+      ]),
+    });
+  });
+
+  it("a direct aborted_ambiguous write is a benign no-op when the sweep's own deadline race already fenced the row first (0 rows matched, not an error)", async () => {
+    mocks.sendRepSmsReminder.mockResolvedValueOnce({
+      ok: false,
+      reason: "aborted_ambiguous",
+      message: "This operation was aborted",
+    });
+    // 0 rows matched: simulates the row already having moved to
+    // timeout_ambiguous via markReminderDeliveryTimedOut before this write
+    // runs — this function's own fence write is scoped to the row's STALE
+    // pre-claim `claimedStatus`, so it correctly matches nothing here.
+    const supabase = fakeSupabase({ matchedRows: 0 });
+    const row = baseRow({ channel: "sms" });
+
+    const outcome = await deliverAppointmentReminder(supabase, row);
+
+    expect(outcome).toEqual({
+      status: "aborted_ambiguous",
+      deliveryId: "delivery-1",
+      channel: "sms",
+      lastError: "This operation was aborted",
+    });
+    expect(mocks.reportError).not.toHaveBeenCalled();
   });
 });
 

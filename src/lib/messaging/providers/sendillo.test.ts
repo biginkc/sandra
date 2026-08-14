@@ -169,6 +169,88 @@ describe("SendilloMessagingProvider.sendSms", () => {
       details: undefined,
     });
   });
+
+  // Codex round 10 (finding 4): a signal that's ALREADY aborted before
+  // sendSms is even called is a stronger, PROVABLE non-delivery — no fetch
+  // should ever be issued for it, unlike a mid-flight abort (round 9 tests
+  // above), which can't rule out the request having already reached
+  // Sendillo.
+  describe("Codex round 10 (finding 4): pre-aborted signal — checked before the fetch is ever issued", () => {
+    it("throws immediately with details.notSent, and never calls fetch, when the signal is already aborted", async () => {
+      const provider = new SendilloMessagingProvider(
+        "sendillo-test-key",
+        "+18165550000",
+      );
+      const controller = new AbortController();
+      controller.abort();
+
+      await expect(
+        provider.sendSms(
+          { to: "+18165551234", body: "hello there" },
+          { signal: controller.signal },
+        ),
+      ).rejects.toMatchObject({
+        errorClass: "provider",
+        provider: "sendillo",
+        details: expect.objectContaining({ isAbort: true, notSent: true }),
+      });
+      expect(global.fetch).not.toHaveBeenCalled();
+    });
+
+    it("closes the recheck race: a signal that flips to aborted between the initial check and attaching the listener still prevents the fetch", async () => {
+      const provider = new SendilloMessagingProvider(
+        "sendillo-test-key",
+        "+18165550000",
+      );
+      let reads = 0;
+      // false on the FIRST read (the pre-fetch check), true from the SECOND
+      // read onward (the recheck right after the abort listener is
+      // attached) — simulates the signal aborting in the narrow gap
+      // between the two checks, which the recheck exists to close.
+      const signal = {
+        get aborted() {
+          reads += 1;
+          return reads > 1;
+        },
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      } as unknown as AbortSignal;
+
+      await expect(
+        provider.sendSms({ to: "+18165551234", body: "hello there" }, { signal }),
+      ).rejects.toMatchObject({
+        errorClass: "provider",
+        provider: "sendillo",
+        details: expect.objectContaining({ isAbort: true, notSent: true }),
+      });
+      expect(global.fetch).not.toHaveBeenCalled();
+      // The listener was attached (and torn back down) even though the
+      // recheck fired before any fetch — the attach/detach pairing must
+      // stay balanced.
+      expect(signal.addEventListener).toHaveBeenCalledTimes(1);
+      expect(signal.removeEventListener).toHaveBeenCalledTimes(1);
+    });
+
+    it("a signal that's still live at both checks proceeds to fetch normally", async () => {
+      mockFetch({
+        status: 200,
+        body: { data: { messageId: "snd_live", status: "sent" } },
+      });
+      const provider = new SendilloMessagingProvider(
+        "sendillo-test-key",
+        "+18165550000",
+      );
+      const controller = new AbortController();
+
+      const result = await provider.sendSms(
+        { to: "+18165551234", body: "hello there" },
+        { signal: controller.signal },
+      );
+
+      expect(result.externalId).toBe("snd_live");
+      expect(global.fetch).toHaveBeenCalledTimes(1);
+    });
+  });
 });
 
 describe("SendilloMessagingProvider inbound contract", () => {
