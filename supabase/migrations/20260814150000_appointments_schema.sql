@@ -235,17 +235,48 @@ language plpgsql
 security definer
 set search_path = public, pg_temp
 as $$
+declare
+  -- OLD is unassigned in INSERT triggers and plpgsql does not guarantee
+  -- boolean short-circuiting, so every OLD access lives inside the
+  -- explicit UPDATE branch below.
+  v_org_changed boolean := true;
+  v_contact_changed boolean := true;
+  v_property_changed boolean := true;
+  v_assignee_changed boolean := true;
 begin
-  if tg_op <> 'INSERT'
-     and new.org_id is not distinct from old.org_id
-     and new.assignee_id is not distinct from old.assignee_id
-     and new.contact_id is not distinct from old.contact_id
-     and new.related_property_id is not distinct from old.related_property_id
-  then
+  if tg_op = 'UPDATE' then
+    v_org_changed := new.org_id is distinct from old.org_id;
+    v_contact_changed := new.contact_id is distinct from old.contact_id;
+    v_property_changed := new.related_property_id is distinct from old.related_property_id;
+    v_assignee_changed := new.assignee_id is distinct from old.assignee_id;
+
+    -- Appointment time moves are lifecycle-owned: an authenticated member
+    -- updating due_at/end_at directly (or via the legacy snooze path)
+    -- would shift Sandra's window without the calendar reschedule
+    -- machinery, desyncing the external event. Lifecycle RPCs (PR 3) opt
+    -- in with a transaction-local flag; nothing else may move an
+    -- appointment's times.
+    if old.type = 'appointment'
+       and (new.due_at is distinct from old.due_at
+            or new.end_at is distinct from old.end_at)
+       and coalesce(current_setting('sandra.allow_appointment_time_move', true), '') <> 'on'
+    then
+      raise exception
+        'tasks_tenant_integrity_guard: appointment times move only through the reschedule lifecycle'
+        using errcode = 'P0001';
+    end if;
+  end if;
+
+  -- Each relation validates independently, only when it (or the org)
+  -- actually changed. Side-effect UPDATEs stay harmless: the contact FK's
+  -- ON DELETE SET NULL changes contact_id on historical tasks whose
+  -- assignee may be long-inactive — that write must not drag the assignee
+  -- re-check along with it.
+  if not (v_org_changed or v_contact_changed or v_property_changed or v_assignee_changed) then
     return new;
   end if;
 
-  if new.contact_id is not null then
+  if (v_org_changed or v_contact_changed) and new.contact_id is not null then
     if not exists (
       select 1
       from public.contacts c
@@ -258,7 +289,7 @@ begin
     end if;
   end if;
 
-  if new.related_property_id is not null then
+  if (v_org_changed or v_property_changed) and new.related_property_id is not null then
     if not exists (
       select 1
       from public.properties p
@@ -271,26 +302,27 @@ begin
     end if;
   end if;
 
-  -- FOR SHARE serializes this check against concurrent membership
-  -- lifecycle UPDATEs (suspension, expiry-stamping): under READ COMMITTED
-  -- an unlocked EXISTS could observe the still-active row while a parallel
-  -- transaction suspends it, letting both commit. The share lock makes the
-  -- suspender wait for this insert/reassign (or vice versa), so one of the
-  -- two orders wins cleanly. Membership rows are low-churn; contention is
-  -- negligible.
-  perform 1
-  from public.memberships m
-  where m.user_id = new.assignee_id
-    and m.org_id = new.org_id
-    and m.access_status = 'active'
-    and m.deletion_prepared_at is null
-    and (m.access_expires_at is null or m.access_expires_at > now())
-  for share of m;
+  if v_org_changed or v_assignee_changed then
+    -- FOR SHARE serializes this check against concurrent membership
+    -- lifecycle UPDATEs (suspension, expiry-stamping): under READ
+    -- COMMITTED an unlocked EXISTS could observe the still-active row
+    -- while a parallel transaction suspends it, letting both commit. The
+    -- share lock makes the suspender wait for this insert/reassign (or
+    -- vice versa), so one of the two orders wins cleanly.
+    perform 1
+    from public.memberships m
+    where m.user_id = new.assignee_id
+      and m.org_id = new.org_id
+      and m.access_status = 'active'
+      and m.deletion_prepared_at is null
+      and (m.access_expires_at is null or m.access_expires_at > now())
+    for share of m;
 
-  if not found then
-    raise exception
-      'tasks_tenant_integrity_guard: assignee % has no active membership in org %', new.assignee_id, new.org_id
-      using errcode = 'P0001';
+    if not found then
+      raise exception
+        'tasks_tenant_integrity_guard: assignee % has no active membership in org %', new.assignee_id, new.org_id
+        using errcode = 'P0001';
+    end if;
   end if;
 
   return new;

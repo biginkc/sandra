@@ -83,6 +83,10 @@ function makeBuilder(record: CallRecord): Record<string, unknown> {
     record.filters.push({ op: "eq", args });
     return builder;
   };
+  builder.neq = (...args: unknown[]) => {
+    record.filters.push({ op: "neq", args });
+    return builder;
+  };
   builder.single = () => thenable;
   builder.maybeSingle = () => thenable;
   builder.then = thenable.then;
@@ -262,13 +266,10 @@ describe("completeTask", () => {
 });
 
 describe("snoozeTask", () => {
-  it("bumps due_at and snoozed_until forward, leaves status unchanged, and omits end_at for a non-appointment row", async () => {
+  it("bumps due_at and snoozed_until forward, leaves status unchanged, omits end_at, and issues no pre-read for a non-appointment row", async () => {
     responseQueue = [
-      // existing-row read (type/due_at/end_at) — non-appointment, no end_at
-      {
-        data: { type: "follow_up", due_at: "2026-05-08T14:00:00Z", end_at: null },
-        error: null,
-      },
+      // The UPDATE itself carries .neq("type", "appointment") and returns
+      // the row directly — no pre-read before it.
       { data: { id: "task-1", due_at: "2026-05-09T14:00:00Z" }, error: null },
     ];
 
@@ -280,20 +281,27 @@ describe("snoozeTask", () => {
     );
 
     expect(result.ok).toBe(true);
-    const update = calls.find(
-      (c) => c.table === "tasks" && c.op === "update",
-    );
-    expect(update).toBeDefined();
-    const payload = update!.updatePayload as Record<string, unknown>;
+    // Exactly one tasks call: the UPDATE. No pre-read fired.
+    const taskCalls = calls.filter((c) => c.table === "tasks");
+    expect(taskCalls).toHaveLength(1);
+    const update = taskCalls[0];
+    expect(update.op).toBe("update");
+    const payload = update.updatePayload as Record<string, unknown>;
     expect(payload.due_at).toBe("2026-05-09T14:00:00Z");
     expect(payload.snoozed_until).toBe("2026-05-09T14:00:00Z");
     expect(payload.status).toBeUndefined();
     expect(payload.end_at).toBeUndefined();
+    expect(update.filters).toEqual([
+      { op: "eq", args: ["id", "task-1"] },
+      { op: "neq", args: ["type", "appointment"] },
+    ]);
   });
 
-  it("refuses to snooze an appointment — reschedule is the only move", async () => {
+  it("refuses to snooze an appointment — UPDATE excludes it (neq predicate), follow-up read confirms type, returns TASK_SNOOZE_UNSUPPORTED", async () => {
     responseQueue = [
-      // existing-row read — the type check that gates the refusal.
+      // UPDATE's neq predicate excludes the row: zero rows back.
+      { data: null, error: null },
+      // Follow-up type read distinguishes appointment from missing.
       { data: { type: "appointment" }, error: null },
     ];
 
@@ -308,19 +316,60 @@ describe("snoozeTask", () => {
     if (!result.ok) {
       expect(result.error.code).toBe("TASK_SNOOZE_UNSUPPORTED");
     }
-    // No update was ever issued — the guard fires before any write.
-    const update = calls.find(
-      (c) => c.table === "tasks" && c.op === "update",
+    const taskCalls = calls.filter((c) => c.table === "tasks");
+    expect(taskCalls).toHaveLength(2);
+    expect(taskCalls[0].op).toBe("update");
+    expect(taskCalls[0].filters).toEqual([
+      { op: "eq", args: ["id", "task-1"] },
+      { op: "neq", args: ["type", "appointment"] },
+    ]);
+    expect(taskCalls[1].op).toBe("select");
+  });
+
+  it("fails closed when the UPDATE errors — no follow-up read, no fall-through write", async () => {
+    responseQueue = [{ data: null, error: { message: "connection reset" } }];
+
+    const result = await snoozeTask(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      makeSupabase() as any,
+      "task-1",
+      "2026-05-10T16:00:00Z",
     );
-    expect(update).toBeUndefined();
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe("TASK_SNOOZE_FAILED");
+      expect(result.error.message).toBe("connection reset");
+    }
+    // The error short-circuits before any follow-up read.
+    const taskCalls = calls.filter((c) => c.table === "tasks");
+    expect(taskCalls).toHaveLength(1);
+    expect(taskCalls[0].op).toBe("update");
+  });
+
+  it("returns TASK_SNOOZE_FAILED when the task doesn't exist (UPDATE and follow-up read both empty)", async () => {
+    responseQueue = [
+      { data: null, error: null },
+      { data: null, error: null },
+    ];
+
+    const result = await snoozeTask(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      makeSupabase() as any,
+      "missing-task",
+      "2026-05-10T16:00:00Z",
+    );
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe("TASK_SNOOZE_FAILED");
+    }
+    const taskCalls = calls.filter((c) => c.table === "tasks");
+    expect(taskCalls).toHaveLength(2);
   });
 
   it("schedules a Google Calendar update when snooze changes due_at", async () => {
     responseQueue = [
-      {
-        data: { type: "follow_up", due_at: "2026-05-08T14:00:00Z", end_at: null },
-        error: null,
-      },
       {
         data: {
           id: "task-1",
@@ -373,10 +422,6 @@ describe("snoozeTask", () => {
   it("schedules a title-only calendar update and a thread deep link for a contact-only task (no property)", async () => {
     responseQueue = [
       {
-        data: { type: "follow_up", due_at: "2026-05-08T14:00:00Z", end_at: null },
-        error: null,
-      },
-      {
         data: {
           id: "task-1",
           assignee_id: "user-2",
@@ -420,10 +465,6 @@ describe("snoozeTask", () => {
 
   it("falls back to the base URL deep link for a fully unlinked personal block", async () => {
     responseQueue = [
-      {
-        data: { type: "follow_up", due_at: "2026-05-08T14:00:00Z", end_at: null },
-        error: null,
-      },
       {
         data: {
           id: "task-1",

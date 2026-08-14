@@ -119,25 +119,10 @@ export async function snoozeTask(
   const now = new Date().toISOString();
 
   // Appointments are never snoozed: moving one is a reschedule, which the
-  // calendar-mutation lifecycle (PR 3) owns end-to-end. The legacy snooze
-  // path would commit a shifted Sandra window and then hand the calendar
-  // updater a bare due_at, rebuilding the Google event at the hardcoded
-  // 30 minutes regardless of the booked duration. The dashboard hides the
-  // control for appointment rows; this guard covers every other caller.
-  const { data: existing } = await supabase
-    .from("tasks")
-    .select("type")
-    .eq("id", taskId)
-    .single();
-
-  if (existing?.type === "appointment") {
-    return err({
-      code: "TASK_SNOOZE_UNSUPPORTED",
-      message:
-        "Appointments can't be snoozed — reschedule them from the appointment instead.",
-    });
-  }
-
+  // calendar-mutation lifecycle (PR 3) owns end-to-end. The guard is the
+  // UPDATE's own predicate — atomic with the write, so it cannot fail open
+  // on a racing type change or a failed pre-read; the DB trigger
+  // additionally rejects direct appointment time moves from any caller.
   const { data, error } = await supabase
     .from("tasks")
     .update({
@@ -146,13 +131,35 @@ export async function snoozeTask(
       updated_at: now,
     })
     .eq("id", taskId)
+    .neq("type", "appointment")
     .select()
-    .single();
+    .maybeSingle();
 
-  if (error || !data) {
+  if (error) {
     return err({
       code: "TASK_SNOOZE_FAILED",
-      message: error?.message ?? "Failed to snooze task",
+      message: error.message,
+    });
+  }
+
+  if (!data) {
+    // Zero rows: the task is an appointment (predicate excluded it) or
+    // doesn't exist. One follow-up read picks the right error message.
+    const { data: existing } = await supabase
+      .from("tasks")
+      .select("type")
+      .eq("id", taskId)
+      .maybeSingle();
+    if (existing?.type === "appointment") {
+      return err({
+        code: "TASK_SNOOZE_UNSUPPORTED",
+        message:
+          "Appointments can't be snoozed — reschedule them from the appointment instead.",
+      });
+    }
+    return err({
+      code: "TASK_SNOOZE_FAILED",
+      message: "Failed to snooze task",
     });
   }
   await scheduleCalendarUpdateAfterSnooze(supabase, data);

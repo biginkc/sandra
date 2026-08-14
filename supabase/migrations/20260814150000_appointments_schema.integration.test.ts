@@ -1104,6 +1104,209 @@ describe("Migration 20260814150000 — appointments schema", () => {
     });
   });
 
+  // Round-7 regression: the tenant-integrity trigger used to re-validate
+  // ALL relations (including assignee) on any UPDATE, so the contact FK's
+  // ON DELETE SET NULL — which only changes contact_id — dragged the
+  // assignee re-check along with it. A historical (completed) task whose
+  // assignee's membership had since been suspended could no longer have
+  // its contact deleted: the SET NULL update would hit the assignee
+  // membership check and fail closed, blocking an otherwise-unrelated
+  // contact deletion. Scope-gating (only re-validate the relation that
+  // actually changed) fixes this — proven directly against the trigger,
+  // independent of any application code.
+  describe("historical task assignee — contact deletion after membership suspension (round-7 regression)", () => {
+    it("deleting a contact succeeds and nulls contact_id even though the task's assignee membership was since suspended", async () => {
+      const assignee = await createUserForOrg(BMH_ORG_ID);
+      const contactId = await insertContact(BMH_ORG_ID, "Historical Contact");
+      const { data, error: taskError } = await insertTask({
+        type: "appointment",
+        assignee_id: assignee.userId,
+        created_by: assignee.userId,
+        contact_id: contactId,
+        calendar_chain_id: crypto.randomUUID(),
+        status: "completed",
+      });
+      expect(taskError).toBeNull();
+      const taskId = data!.id;
+
+      await setMembershipAccessStatus(assignee.userId, BMH_ORG_ID, "suspended");
+
+      const { error: deleteError } = await db
+        .from("contacts")
+        .delete()
+        .eq("id", contactId);
+      expect(deleteError).toBeNull();
+
+      const { data: after } = await db
+        .from("tasks")
+        .select("id, contact_id, status, assignee_id, org_id")
+        .eq("id", taskId)
+        .single();
+      expect(after).toBeTruthy();
+      const row = after as {
+        id: string;
+        contact_id: string | null;
+        status: string;
+        assignee_id: string;
+        org_id: string;
+      };
+      expect(row.contact_id).toBeNull();
+      expect(row.status).toBe("completed");
+      expect(row.assignee_id).toBe(assignee.userId);
+      expect(row.org_id).toBe(BMH_ORG_ID);
+    });
+  });
+
+  // Appointment time-move guard (section 3 of this migration): moving
+  // due_at/end_at on a row whose OLD.type = 'appointment' is lifecycle-owned
+  // — only the reschedule RPCs (PR 3) may do it, via the transaction-local
+  // `sandra.allow_appointment_time_move` escape hatch. Any other caller,
+  // authenticated or service-role, is rejected.
+  describe("appointment time-move guard", () => {
+    it("rejects a direct due_at update on an appointment via service-role", async () => {
+      const appt = await insertValidAppointment();
+      const newDueAt = new Date(Date.now() + 10800_000).toISOString();
+
+      const { error } = await db
+        .from("tasks")
+        .update({ due_at: newDueAt })
+        .eq("id", appt.id);
+      expect(error).not.toBeNull();
+      expect(error?.message).toMatch(
+        /appointment times move only through the reschedule lifecycle/i,
+      );
+    });
+
+    it("rejects a direct end_at update on an appointment via an authenticated org member", async () => {
+      const owner = await createUserForOrg(BMH_ORG_ID, "owner");
+      const dueAt = new Date(Date.now() + 3600_000).toISOString();
+      const endAt = new Date(Date.now() + 7200_000).toISOString();
+      const { data, error: taskError } = await insertTask({
+        type: "appointment",
+        assignee_id: owner.userId,
+        created_by: owner.userId,
+        due_at: dueAt,
+        end_at: endAt,
+        calendar_chain_id: crypto.randomUUID(),
+      });
+      expect(taskError).toBeNull();
+      const taskId = data!.id;
+
+      const newEndAt = new Date(Date.now() + 10800_000).toISOString();
+      const { error } = await owner.client
+        .from("tasks" as never)
+        .update({ end_at: newEndAt } as never)
+        .eq("id", taskId);
+      expect(error).not.toBeNull();
+      expect(error?.message).toMatch(
+        /appointment times move only through the reschedule lifecycle/i,
+      );
+    });
+
+    it("completing an appointment (status/outcome/completed_at) succeeds without the escape-hatch flag, and leaves due_at/end_at untouched", async () => {
+      const appt = await insertValidAppointment();
+      const { data: before } = await db
+        .from("tasks")
+        .select("due_at, end_at")
+        .eq("id", appt.id)
+        .single();
+
+      const completedAt = new Date().toISOString();
+      const { data, error } = await db
+        .from("tasks")
+        .update({
+          status: "completed",
+          outcome: "held",
+          completed_at: completedAt,
+          completed_by: appt.assigneeId,
+        })
+        .eq("id", appt.id)
+        .select("id, status, outcome, due_at, end_at")
+        .single();
+
+      expect(error).toBeNull();
+      const row = data as {
+        status: string;
+        outcome: string;
+        due_at: string;
+        end_at: string;
+      };
+      expect(row.status).toBe("completed");
+      expect(row.outcome).toBe("held");
+      expect(row.due_at).toBe((before as { due_at: string }).due_at);
+      expect(row.end_at).toBe((before as { end_at: string }).end_at);
+    });
+
+    // Raw pg connection (same pattern as the membership-race describe
+    // above): the Supabase JS client auto-commits every request, so it
+    // can't hold set_config('...', true) (transaction-local) across the
+    // set_config call and the subsequent UPDATE in the same transaction.
+    describe("escape hatch — sandra.allow_appointment_time_move (raw pg, same transaction)", () => {
+      let conn: Client;
+
+      beforeEach(async () => {
+        conn = new Client({ connectionString: testDbUrl() });
+        await conn.connect();
+        await conn.query("set statement_timeout = 0");
+      });
+
+      afterEach(async () => {
+        await conn.query("rollback").catch(() => {});
+        await conn.end().catch(() => {});
+      });
+
+      it("allows a due_at move in the same transaction once the flag is set to 'on'", async () => {
+        const appt = await insertValidAppointment();
+        const newDueAt = new Date(Date.now() + 10800_000).toISOString();
+
+        await conn.query("begin");
+        await conn.query(
+          "select set_config('sandra.allow_appointment_time_move', 'on', true)",
+        );
+        const result = await conn.query<{ due_at: Date }>(
+          "update tasks set due_at = $1 where id = $2 returning due_at",
+          [newDueAt, appt.id],
+        );
+        expect(result.rows[0].due_at.toISOString()).toBe(newDueAt);
+        await conn.query("commit");
+
+        const { data: after } = await db
+          .from("tasks")
+          .select("due_at")
+          .eq("id", appt.id)
+          .single();
+        expect(
+          new Date((after as { due_at: string }).due_at).toISOString(),
+        ).toBe(newDueAt);
+      });
+
+      it("the flag is transaction-local — a second, unflagged move in a new transaction still fails", async () => {
+        const appt = await insertValidAppointment();
+        const firstMove = new Date(Date.now() + 10800_000).toISOString();
+
+        await conn.query("begin");
+        await conn.query(
+          "select set_config('sandra.allow_appointment_time_move', 'on', true)",
+        );
+        await conn.query("update tasks set due_at = $1 where id = $2", [
+          firstMove,
+          appt.id,
+        ]);
+        await conn.query("commit");
+
+        const secondMove = new Date(Date.now() + 14400_000).toISOString();
+        await expect(
+          conn.query("update tasks set due_at = $1 where id = $2", [
+            secondMove,
+            appt.id,
+          ]),
+        ).rejects.toThrow(
+          /appointment times move only through the reschedule lifecycle/i,
+        );
+      });
+    });
+  });
+
   // createTask (src/lib/tasks/index.ts) builds its insert payload straight
   // from CreateTaskInput, under RLS, as the acting authenticated user — not
   // the service client used everywhere else in this file. These two tests
