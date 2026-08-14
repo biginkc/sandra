@@ -11,7 +11,14 @@ const mocks = vi.hoisted(() => ({
 vi.mock("./dispatch", () => ({ createNotification: mocks.createNotification }));
 vi.mock("@/lib/integrations/slack/dispatch", () => ({
   dispatchAppointmentReminderSlack: mocks.dispatchAppointmentReminderSlack,
-  buildTaskDeepLink: (taskId: string) => `https://sandra-sooty.vercel.app/tasks/${taskId}`,
+  // Codex round 11 (finding 2): real linkage-routing logic (not a stub) so
+  // the "route.ts" deep-link tests below actually exercise the same
+  // property/contact/personal-block branching production uses.
+  buildAppointmentDeepLink: (propertyId?: string | null, contactId?: string | null) => {
+    if (propertyId) return `https://sandra-sooty.vercel.app/leads/${propertyId}`;
+    if (contactId) return `https://sandra-sooty.vercel.app/messages?thread=${contactId}`;
+    return "https://sandra-sooty.vercel.app/dashboard";
+  },
 }));
 vi.mock("./rep-sms", () => ({ sendRepSmsReminder: mocks.sendRepSmsReminder }));
 vi.mock("@/lib/integrations/prefs", () => ({ loadIntegrationPrefs: mocks.loadIntegrationPrefs }));
@@ -44,6 +51,10 @@ function baseRow(overrides: Partial<ClaimedReminderRow> = {}): ClaimedReminderRo
     assigneeId: "assignee-1",
     assigneeTimezone: "America/Chicago",
     assigneeReminderPhone: null,
+    // Codex round 11 (finding 2): defaults to a personal block (neither
+    // linkage) — individual tests override to exercise the other two.
+    relatedPropertyId: null,
+    contactId: null,
     // Codex round 4: only ever non-null on a retry-claimed row whose prior
     // attempt already reached Slack/Sendillo. Default null matches every
     // pre-round-4 test's assumptions (provider always gets called).
@@ -204,7 +215,9 @@ describe("deliverAppointmentReminder — slack", () => {
         taskTitle: "Walkthrough with seller",
         dueAt: row.taskDueAt,
         timezone: "America/Chicago",
-        deepLink: "https://sandra-sooty.vercel.app/tasks/task-1",
+        // Personal block (no property/contact linkage on baseRow's
+        // default) -> /dashboard, not the dead /tasks/<id> route.
+        deepLink: "https://sandra-sooty.vercel.app/dashboard",
       }),
     );
     expect(outcome).toEqual({
@@ -218,6 +231,46 @@ describe("deliverAppointmentReminder — slack", () => {
         status: "sent",
         provider_message_id: "1710000000.000100",
       }),
+    });
+  });
+
+  // Codex round 11 (finding 2): route-level coverage of the Slack CTA's
+  // linkage-aware deep link across all three linkages the claim RPC can
+  // hand back (property, contact-only, personal block/neither).
+  describe("CTA deep link (Codex round 11, finding 2)", () => {
+    it("property-linked -> /leads/<propertyId>", async () => {
+      const supabase = fakeSupabase();
+      const row = baseRow({ channel: "slack", relatedPropertyId: "prop-1", contactId: null });
+
+      await deliverAppointmentReminder(supabase, row);
+
+      expect(mocks.dispatchAppointmentReminderSlack).toHaveBeenCalledWith(
+        expect.objectContaining({ deepLink: "https://sandra-sooty.vercel.app/leads/prop-1" }),
+      );
+    });
+
+    it("contact-only -> /messages?thread=<contactId>", async () => {
+      const supabase = fakeSupabase();
+      const row = baseRow({ channel: "slack", relatedPropertyId: null, contactId: "contact-1" });
+
+      await deliverAppointmentReminder(supabase, row);
+
+      expect(mocks.dispatchAppointmentReminderSlack).toHaveBeenCalledWith(
+        expect.objectContaining({
+          deepLink: "https://sandra-sooty.vercel.app/messages?thread=contact-1",
+        }),
+      );
+    });
+
+    it("personal block (neither linkage) -> /dashboard", async () => {
+      const supabase = fakeSupabase();
+      const row = baseRow({ channel: "slack", relatedPropertyId: null, contactId: null });
+
+      await deliverAppointmentReminder(supabase, row);
+
+      expect(mocks.dispatchAppointmentReminderSlack).toHaveBeenCalledWith(
+        expect.objectContaining({ deepLink: "https://sandra-sooty.vercel.app/dashboard" }),
+      );
     });
   });
 
@@ -703,7 +756,67 @@ describe("Codex round 4 (finding 3): bounded retry on the mark-sent write", () =
     expect(context.tags.duplicate_risk).toBeUndefined();
   });
 
-  it("exhausts all 3 attempts marking 'sent' with a providerMessageId — reports the failure WITH an explicit duplicate-risk tag, since the provider send already succeeded and the row is left retryable", async () => {
+  // Codex round 11 (finding 1): replaces the pre-round-11 version of this
+  // test, which accepted `outcome.status === "sent"` with the row left at
+  // its ORIGINAL retryable status after every mark-sent write attempt
+  // failed — a real duplicate-send bug (a future retry claim would
+  // re-send on top of a provider call that already succeeded). The row
+  // must now be forced into the non-resend repair state (`timeout_ambiguous`,
+  // reused — see the migration's status-CHECK comment) instead, via a 4th
+  // write this round adds (`repairIntoNonResendState`).
+  it("exhausts all 3 mark-sent attempts, then forces the row into the non-resend repair state (timeout_ambiguous) instead of leaving it retryable — reports the original failure WITH the duplicate-risk tag", async () => {
+    vi.useFakeTimers();
+    const supabase = fakeSupabase({
+      updateResults: [
+        { error: { message: "db down" } },
+        { error: { message: "db down" } },
+        { error: { message: "db down" } },
+        // 4th write: repairIntoNonResendState's fenced repair attempt —
+        // succeeds here.
+        { error: null, matchedRows: 1 },
+      ],
+    });
+
+    const outcomePromise = deliverAppointmentReminder(supabase, baseRow({ channel: "slack" }));
+    await vi.runAllTimersAsync();
+    const outcome = await outcomePromise;
+
+    // NOT "sent" — the write that would confirm it never landed. The row
+    // is reported as the same non-resend holding state the DB row now
+    // actually carries.
+    expect(outcome).toEqual({
+      status: "timeout_ambiguous",
+      deliveryId: "delivery-1",
+      channel: "slack",
+    });
+    expect(supabase.updates).toHaveLength(4);
+    expect(supabase.updates[3]).toMatchObject({
+      payload: expect.objectContaining({ status: "timeout_ambiguous" }),
+      eqs: expect.arrayContaining([
+        ["id", "delivery-1"],
+        ["claim_token", "initial-token"],
+        ["status", "pending"],
+      ]),
+    });
+    // markDelivery's own internal reportError (duplicate-risk tag) still
+    // fires exactly once — the repair write succeeding adds no additional
+    // report (repairIntoNonResendState only escalates loudly when the
+    // REPAIR itself also fails).
+    expect(mocks.reportError).toHaveBeenCalledTimes(1);
+    expect(mocks.reportError).toHaveBeenCalledWith(
+      expect.any(Error),
+      expect.objectContaining({
+        tags: { surface: "reminder_delivery_mark", duplicate_risk: true },
+        extra: { deliveryId: "delivery-1", status: "sent" },
+      }),
+    );
+  });
+
+  // Codex round 11 (finding 1): the worst case — even the repair write
+  // can't land. The row is left retryable (nothing this worker can do
+  // about that), but this MUST be escalated loudly — it's the one
+  // scenario where a real duplicate send is genuinely possible.
+  it("reports a SECOND, more severe error when the repair write into the non-resend state ALSO fails on both fenced and unfenced attempts", async () => {
     vi.useFakeTimers();
     const supabase = fakeSupabase({ updateError: { message: "db down" } });
 
@@ -711,16 +824,20 @@ describe("Codex round 4 (finding 3): bounded retry on the mark-sent write", () =
     await vi.runAllTimersAsync();
     const outcome = await outcomePromise;
 
-    // The delivery still reports its own "sent" outcome — the provider
-    // call genuinely succeeded; only the bookkeeping write failed.
-    expect(outcome.status).toBe("sent");
-    expect(supabase.updates).toHaveLength(3);
-    expect(mocks.reportError).toHaveBeenCalledTimes(1);
-    expect(mocks.reportError).toHaveBeenCalledWith(
+    expect(outcome.status).toBe("timeout_ambiguous");
+    // 3 mark-sent attempts + fenced repair attempt + unfenced repair
+    // attempt = 5 total writes, every one erroring.
+    expect(supabase.updates).toHaveLength(5);
+    expect(mocks.reportError).toHaveBeenCalledTimes(2);
+    expect(mocks.reportError).toHaveBeenLastCalledWith(
       expect.any(Error),
       expect.objectContaining({
-        tags: { surface: "reminder_delivery_mark", duplicate_risk: true },
-        extra: { deliveryId: "delivery-1", status: "sent" },
+        tags: {
+          surface: "reminder_delivery_mark",
+          duplicate_risk: true,
+          repair_failed: true,
+        },
+        extra: { deliveryId: "delivery-1" },
       }),
     );
   });
@@ -753,6 +870,48 @@ describe("Codex round 7 (finding 1): timeout_ambiguous fencing", () => {
     // transition, off whatever the claim RPC handed the worker.
     expect(update.eqs).toContainEqual(["claim_token", "tok-1"]);
     expect(update.eqs).toContainEqual(["status", "pending"]);
+  });
+
+  // Codex round 11 (finding 1): "a failed ambiguous fence while a request
+  // is unresolved" — if THIS write can't land after retries, the row is
+  // left at its original pending/failed status while the provider call is
+  // genuinely still in flight, retry-claim eligible on top of a delivery
+  // whose outcome is truly unknown. Must force the same repair path.
+  it("markReminderDeliveryTimedOut forces the row into the repair state via an unfenced fallback when its own fence write exhausts retries", async () => {
+    vi.useFakeTimers();
+    const supabase = fakeSupabase({
+      updateResults: [
+        { error: { message: "db down" } },
+        { error: { message: "db down" } },
+        { error: { message: "db down" } },
+        // Fenced repair attempt fails too...
+        { error: { message: "db still down" } },
+        // ...unfenced fallback succeeds.
+        { error: null, matchedRows: 1 },
+      ],
+    });
+    const row = baseRow({ claimToken: "tok-1", claimedStatus: "pending" });
+
+    const p = markReminderDeliveryTimedOut(supabase, row);
+    await vi.runAllTimersAsync();
+    await p;
+
+    expect(supabase.updates).toHaveLength(5);
+    // The unfenced fallback (5th write) has no claim_token/status
+    // predicates — id only.
+    const unfenced = supabase.updates[4];
+    expect(unfenced.payload).toMatchObject({ status: "timeout_ambiguous" });
+    expect(unfenced.eqs).toEqual([["id", "delivery-1"]]);
+    expect(mocks.reportError).toHaveBeenCalledWith(
+      expect.any(Error),
+      expect.objectContaining({
+        tags: {
+          surface: "reminder_delivery_mark",
+          duplicate_risk: true,
+          repair_unfenced: true,
+        },
+      }),
+    );
   });
 
   it("resolveTimedOutReminderDelivery (late success) fences timeout_ambiguous -> sent with the real provider id, NOT off the row's original claimedStatus", async () => {

@@ -14,7 +14,9 @@ export type NotificationRow = {
   eventType:
     | "owner_message_added"
     | "property_assigned"
-    | "bulk_action_completed";
+    | "bulk_action_completed"
+    | "task_assigned"
+    | "task_appointment_reminder";
   entityType: "property" | "job" | "task" | "message";
   entityId: string;
   href: string;
@@ -108,6 +110,50 @@ export async function getRecentNotifications(
       }
     }
 
+    // Codex round 11 (finding 2): `entity_type='task'` used to hard-route
+    // EVERY task notification to `/tasks` — a route with no page.tsx, a
+    // guaranteed 404. Scoped fix for THIS round: appointment-reminder bell
+    // clicks specifically become linkage-aware (property -> /leads/<id>,
+    // contact-only -> /messages?thread=<contactId>, personal block ->
+    // /dashboard), same routing the reminder Slack CTA now uses
+    // (`buildAppointmentDeepLink`, reminders.ts). Plain task_assigned rows
+    // (follow_up/callback/custom — always property-linked per the
+    // `type <> 'appointment' and related_property_id is not null` CHECK on
+    // `tasks`) are left on `/tasks` — a separate, pre-existing gap outside
+    // this round's scope. `notifications` has no persisted payload column
+    // (only `title`/`body` strings), so linkage is looked up live off the
+    // task row itself, same shape as the message-thread lookup above.
+    const appointmentReminderIds = (data ?? [])
+      .filter(
+        (row) =>
+          row.entity_type === "task" && row.event_type === "task_appointment_reminder",
+      )
+      .map((row) => row.entity_id);
+    const appointmentHrefById = new Map<string, string>();
+    if (appointmentReminderIds.length > 0) {
+      const { data: taskRows, error: taskError } = await supabase
+        .from("tasks")
+        .select("id, related_property_id, contact_id")
+        .in("id", appointmentReminderIds);
+      if (taskError) {
+        reportError(new Error(taskError.message), {
+          tags: { surface: "get_recent_notifications_task_lookup" },
+          extra: { taskIds: appointmentReminderIds },
+        });
+      } else {
+        for (const row of taskRows ?? []) {
+          appointmentHrefById.set(
+            row.id,
+            row.related_property_id
+              ? `/leads/${row.related_property_id}`
+              : row.contact_id
+                ? `/messages?thread=${encodeURIComponent(row.contact_id)}`
+                : "/dashboard",
+          );
+        }
+      }
+    }
+
     const rows: NotificationRow[] = (data ?? []).map((r) => ({
       id: r.id,
       eventType: r.event_type as NotificationRow["eventType"],
@@ -119,7 +165,9 @@ export async function getRecentNotifications(
           : r.entity_type === "job"
             ? "/jobs"
             : r.entity_type === "task"
-              ? "/tasks"
+              ? (r.event_type === "task_appointment_reminder"
+                  ? (appointmentHrefById.get(r.entity_id) ?? "/dashboard")
+                  : "/tasks")
               : r.entity_type === "message"
                 ? (messageHrefById.get(r.entity_id) ?? "/messages")
                 : "/",

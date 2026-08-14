@@ -246,6 +246,11 @@ type ClaimedReminderRpcRow = {
    *  its own mark-sent write. `deliverAppointmentReminder` reconciles
    *  (marks sent using this id) instead of re-sending. */
   provider_message_id?: string | null;
+  /** Codex round 11 (finding 2): both claim RPCs now return these
+   *  (20260814200000) so the delivery worker can build a linkage-aware
+   *  Slack CTA deep link instead of the dead `/tasks/<id>` route. */
+  related_property_id: string | null;
+  contact_id: string | null;
 };
 
 type ReminderClaimRpcClient = {
@@ -285,6 +290,8 @@ function toClaimedRow(
     assigneeTimezone: row.assignee_timezone,
     assigneeReminderPhone: row.assignee_reminder_phone,
     providerMessageId: row.provider_message_id ?? null,
+    relatedPropertyId: row.related_property_id ?? null,
+    contactId: row.contact_id ?? null,
   };
 }
 

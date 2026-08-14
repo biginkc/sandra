@@ -94,7 +94,7 @@ alter table public.task_reminder_deliveries
   check (status in ('pending', 'sent', 'failed', 'suppressed', 'timeout_ambiguous'));
 
 comment on constraint task_reminder_deliveries_status_check on public.task_reminder_deliveries is
-  'suppressed (Codex round 1) is terminal: fn_claim_reminder_retries lands a retry candidate here when its revalidation fails (assignee suspended, channel disabled, or the appointment closed/passed its due_at since the original claim) instead of delivering a now-stale reminder. timeout_ambiguous (Codex round 7, finding 1) is a NON-RESEND holding state, not terminal: the sweep route (route.ts) transitions a row here, fenced by claim_token, when its own per-delivery deadline elapses while the provider call is still in flight (see withDeliveryDeadline) — the send may or may not have reached Slack/Sendillo, so it must never be auto-resent. The still-running call gets a continuation (route.ts, via after()) that fences timeout_ambiguous->sent (with the provider_message_id) on late success, or timeout_ambiguous->failed (now safely retryable — the provider definitively did not deliver) on late definite failure. fn_claim_reminder_retries''s candidates CTE below matches ONLY status IN (''failed'', ''pending'') — timeout_ambiguous is excluded by construction, not by an extra predicate, so it can never be picked up by a retry claim while ambiguous. A row whose continuation never resolves (process killed, provider call truly hangs) is surfaced by the sweep route''s hourly lingering-timeout_ambiguous telemetry for manual operator reconciliation (check the Slack/Sendillo dashboard, then update the row to sent or failed directly).';
+  'suppressed (Codex round 1) is terminal: fn_claim_reminder_retries lands a retry candidate here when its revalidation fails (assignee suspended, channel disabled, or the appointment closed/passed its due_at since the original claim) instead of delivering a now-stale reminder. timeout_ambiguous (Codex round 7, finding 1) is a NON-RESEND holding state, not terminal: the sweep route (route.ts) transitions a row here, fenced by claim_token, when its own per-delivery deadline elapses while the provider call is still in flight (see withDeliveryDeadline) — the send may or may not have reached Slack/Sendillo, so it must never be auto-resent. The still-running call gets a continuation (route.ts, via after()) that fences timeout_ambiguous->sent (with the provider_message_id) on late success, or timeout_ambiguous->failed (now safely retryable — the provider definitively did not deliver) on late definite failure. fn_claim_reminder_retries''s candidates CTE below matches ONLY status IN (''failed'', ''pending'') — timeout_ambiguous is excluded by construction, not by an extra predicate, so it can never be picked up by a retry claim while ambiguous. A row whose continuation never resolves (process killed, provider call truly hangs) is surfaced by the sweep route''s hourly lingering-timeout_ambiguous telemetry for manual operator reconciliation (check the Slack/Sendillo dashboard, then update the row to sent or failed directly). Codex round 11 (finding 1): timeout_ambiguous is ALSO reused (deliberately, not a new status) as the repair/non-resend target when a delivery''s own bookkeeping write for "sent" (or the initial timeout fence itself) exhausts its retries — reminders.ts''s repairIntoNonResendState — since it already carries every guarantee that repair needs (excluded from retry-claim eligibility by construction, surfaced by the same hourly telemetry) with zero new plumbing.';
 
 -- ----------------------------------------------------------------------------
 -- 1. fn_claim_appointment_reminders — primary window claim
@@ -113,7 +113,15 @@ returns table (
   task_end_at timestamptz,
   assignee_id uuid,
   assignee_timezone text,
-  assignee_reminder_phone text
+  assignee_reminder_phone text,
+  -- Codex round 11 (finding 2): threaded through so the delivery worker
+  -- can build a linkage-aware CTA deep link (property -> /leads/<id>,
+  -- contact-only -> /messages?thread=<contactId>, personal block ->
+  -- /dashboard) instead of the dead /tasks/<id> route. Exactly one of the
+  -- two (or neither) is ever set, same contract as tasks.related_property_id
+  -- / tasks.contact_id themselves.
+  related_property_id uuid,
+  contact_id uuid
 )
 language plpgsql
 security definer
@@ -160,7 +168,8 @@ begin
     set reminder_claimed_at = v_now
     from locked
     where t.id = locked.id
-    returning t.id, t.org_id, t.assignee_id, t.title, t.due_at, t.end_at
+    returning t.id, t.org_id, t.assignee_id, t.title, t.due_at, t.end_at,
+      t.related_property_id, t.contact_id
   ),
   -- One row per claimed appointment, aggregating that assignee's channel
   -- prefs. bool_or(... and uip.enabled) is false (not null) when the
@@ -170,6 +179,7 @@ begin
   prefs as (
     select
       c.id as task_id, c.org_id, c.assignee_id, c.title, c.due_at, c.end_at,
+      c.related_property_id, c.contact_id,
       coalesce(bool_or(uip.channel = 'slack' and uip.enabled), false) as slack_enabled,
       coalesce(
         bool_or(uip.channel = 'sms_reminder' and uip.enabled and uip.reminder_phone is not null),
@@ -184,20 +194,21 @@ begin
       ) as timezone
     from claimed c
     left join public.user_integration_prefs uip on uip.user_id = c.assignee_id
-    group by c.id, c.org_id, c.assignee_id, c.title, c.due_at, c.end_at
+    group by c.id, c.org_id, c.assignee_id, c.title, c.due_at, c.end_at,
+      c.related_property_id, c.contact_id
   ),
   channels as (
     select task_id, org_id, assignee_id, title, due_at, end_at, timezone, reminder_phone,
-           'bell'::text as channel
+           related_property_id, contact_id, 'bell'::text as channel
     from prefs
     union all
     select task_id, org_id, assignee_id, title, due_at, end_at, timezone, reminder_phone,
-           'slack'::text
+           related_property_id, contact_id, 'slack'::text
     from prefs
     where slack_enabled
     union all
     select task_id, org_id, assignee_id, title, due_at, end_at, timezone, reminder_phone,
-           'sms'::text
+           related_property_id, contact_id, 'sms'::text
     from prefs
     where sms_enabled
   ),
@@ -230,14 +241,16 @@ begin
     ch.end_at as task_end_at,
     ch.assignee_id,
     coalesce(ch.timezone, 'America/Chicago') as assignee_timezone,
-    ch.reminder_phone as assignee_reminder_phone
+    ch.reminder_phone as assignee_reminder_phone,
+    ch.related_property_id,
+    ch.contact_id
   from inserted i
   join channels ch on ch.task_id = i.task_id and ch.channel = i.channel;
 end;
 $$;
 
 comment on function public.fn_claim_appointment_reminders(integer) is
-  'Service-role-only reminder sweep. Derives now() internally (window [now(), now()+30m], both bounds — no late reminders for overdue appointments); FOR UPDATE SKIP LOCKED over open, unclaimed appointments whose assignee has active org membership, oldest due_at first, capped at p_limit (Codex round 3, finding 1 — callers claim one appointment at a time inside a budget loop, same pattern as fn_claim_calendar_mutations, so an appointment the sweep has no budget left to process is simply never claimed rather than claimed-but-undelivered); stamps reminder_claimed_at (via the sandra.allow_appointment_time_move flag, set_config transaction-local) and inserts one task_reminder_deliveries row per enabled channel (bell always, slack/sms per prefs) with ON CONFLICT DO NOTHING, minting a fresh claim_token and a 2-minute lease (next_attempt_at) on every inserted row (Codex round 2) — same fencing model as fn_claim_reminder_retries, from the first attempt. Returns the freshly-inserted delivery rows (claim_token + claimed_status=pending included) joined with task+assignee context.';
+  'Service-role-only reminder sweep. Derives now() internally (window [now(), now()+30m], both bounds — no late reminders for overdue appointments); FOR UPDATE SKIP LOCKED over open, unclaimed appointments whose assignee has active org membership, oldest due_at first, capped at p_limit (Codex round 3, finding 1 — callers claim one appointment at a time inside a budget loop, same pattern as fn_claim_calendar_mutations, so an appointment the sweep has no budget left to process is simply never claimed rather than claimed-but-undelivered); stamps reminder_claimed_at (via the sandra.allow_appointment_time_move flag, set_config transaction-local) and inserts one task_reminder_deliveries row per enabled channel (bell always, slack/sms per prefs) with ON CONFLICT DO NOTHING, minting a fresh claim_token and a 2-minute lease (next_attempt_at) on every inserted row (Codex round 2) — same fencing model as fn_claim_reminder_retries, from the first attempt. Returns the freshly-inserted delivery rows (claim_token + claimed_status=pending included) joined with task+assignee context, including related_property_id/contact_id (Codex round 11, finding 2) for the delivery worker''s linkage-aware CTA deep links.';
 
 revoke all on function public.fn_claim_appointment_reminders(integer) from public, anon, authenticated;
 grant execute on function public.fn_claim_appointment_reminders(integer) to service_role;
@@ -320,7 +333,12 @@ returns table (
   -- provider call never completed (a genuine failed/stuck-pending row) or
   -- for bell (which never sets it; dedupe is the notifications unique
   -- index instead).
-  provider_message_id text
+  provider_message_id text,
+  -- Codex round 11 (finding 2): same linkage columns as
+  -- fn_claim_appointment_reminders, for the same linkage-aware CTA
+  -- deep-link purpose — a retry-claimed row needs them too.
+  related_property_id uuid,
+  contact_id uuid
 )
 language sql
 security definer
@@ -348,6 +366,7 @@ as $$
     select
       c.id, c.task_id, c.org_id, c.channel, c.attempts, c.status,
       t.status as task_status, t.due_at, t.end_at, t.title, t.assignee_id,
+      t.related_property_id, t.contact_id,
       exists (
         select 1
         from public.memberships m
@@ -440,13 +459,15 @@ as $$
       d.id, d.task_id, d.org_id, d.channel, d.attempts, d.claim_token, d.status,
       d.provider_message_id,
       e.title, e.due_at, e.end_at, e.assignee_id, e.assignee_timezone, e.assignee_reminder_phone,
+      e.related_property_id, e.contact_id,
       e.still_valid
   )
   select
     c.id as delivery_id, c.task_id, c.org_id, c.channel, c.attempts, c.claim_token,
     c.status as claimed_status,
     c.title as task_title, c.due_at as task_due_at, c.end_at as task_end_at,
-    c.assignee_id, c.assignee_timezone, c.assignee_reminder_phone, c.provider_message_id
+    c.assignee_id, c.assignee_timezone, c.assignee_reminder_phone, c.provider_message_id,
+    c.related_property_id, c.contact_id
   from claimed c
   where c.still_valid;
 $$;

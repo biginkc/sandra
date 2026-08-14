@@ -45,6 +45,8 @@ type RawRow = {
   assignee_id: string;
   assignee_timezone: string;
   assignee_reminder_phone: string | null;
+  related_property_id: string | null;
+  contact_id: string | null;
 };
 
 // Codex round 2 fix: fn_claim_appointment_reminders now mints a
@@ -66,6 +68,8 @@ function rawRow(id: string, overrides: Partial<RawRow> = {}): RawRow {
     assignee_id: "assignee-1",
     assignee_timezone: "America/Chicago",
     assignee_reminder_phone: null,
+    related_property_id: null,
+    contact_id: null,
     ...overrides,
   };
 }

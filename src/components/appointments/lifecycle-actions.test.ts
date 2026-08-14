@@ -157,6 +157,62 @@ describe("completeAppointmentAction", () => {
     expect(result.ok).toBe(false);
     expect(revalidatePath).not.toHaveBeenCalled();
   });
+
+  // Codex round 11 (finding 3): the RPC above already committed — a
+  // failure in the POST-commit task lookup (used only for revalidation)
+  // must never flip this action's result back to an error. Before this
+  // round, `revalidateAppointmentPaths(await loadTaskForNotification(...))`
+  // ran uncaught, so a transient read failure here fell into the outer
+  // catch and reported COMPLETE_APPOINTMENT_FAILED despite the mutation
+  // having already durably succeeded.
+  it("still returns the committed ok:true result — and reports separately — when the post-commit task lookup throws", async () => {
+    createClient.mockResolvedValue(makeSupabaseMock({ userId: "user-1" }));
+    completeAppointment.mockResolvedValue({
+      ok: true,
+      data: { taskId: "task-1", status: "completed", outcome: "held" },
+    });
+    const supabase = await createClient();
+    (supabase.from as ReturnType<typeof vi.fn>).mockImplementationOnce(() => {
+      throw new Error("transient read failure");
+    });
+
+    const result = await completeAppointmentAction("task-1", "held");
+
+    expect(result).toEqual({
+      ok: true,
+      data: { taskId: "task-1", status: "completed", outcome: "held" },
+    });
+    // The task lookup failed, so no property to scope a /leads/* path to —
+    // but the unconditional paths still revalidate (null-task tolerance).
+    expect(revalidatePath).not.toHaveBeenCalledWith(expect.stringMatching(/^\/leads\//));
+    expect(revalidatePath).toHaveBeenCalledWith("/messages");
+    expect(revalidatePath).toHaveBeenCalledWith("/dashboard");
+  });
+
+  // Codex round 11 (finding 3): same guarantee, but the throw is in
+  // `revalidatePath` itself rather than the task lookup that feeds it.
+  it("still returns the committed ok:true result when revalidatePath throws — the failure is reported on its own", async () => {
+    createClient.mockResolvedValue(
+      makeSupabaseMock({
+        userId: "user-1",
+        taskRow: { org_id: "org-1", title: "Call", due_at: "2026-09-01T15:00:00Z", related_property_id: "prop-1", contact_id: null },
+      }),
+    );
+    completeAppointment.mockResolvedValue({
+      ok: true,
+      data: { taskId: "task-1", status: "completed", outcome: "held" },
+    });
+    revalidatePath.mockImplementationOnce(() => {
+      throw new Error("revalidate boom");
+    });
+
+    const result = await completeAppointmentAction("task-1", "held");
+
+    expect(result).toEqual({
+      ok: true,
+      data: { taskId: "task-1", status: "completed", outcome: "held" },
+    });
+  });
 });
 
 describe("cancelAppointmentAction", () => {
@@ -180,6 +236,32 @@ describe("cancelAppointmentAction", () => {
     expect(revalidatePath).toHaveBeenCalledWith("/dashboard");
     // No property linkage on this task — no /leads/* revalidation.
     expect(revalidatePath).not.toHaveBeenCalledWith(expect.stringMatching(/^\/leads\//));
+  });
+
+  // Codex round 11 (finding 3): the RPC above already committed — a
+  // `revalidatePath` throw in the best-effort post-commit step must never
+  // flip this action's result back to an error.
+  it("still returns the committed ok:true result when revalidatePath throws — the failure is reported on its own", async () => {
+    createClient.mockResolvedValue(
+      makeSupabaseMock({
+        userId: "user-1",
+        taskRow: { org_id: "org-1", title: "Call", due_at: "2026-09-01T15:00:00Z", related_property_id: null, contact_id: "contact-1" },
+      }),
+    );
+    cancelAppointment.mockResolvedValue({
+      ok: true,
+      data: { taskId: "task-1", status: "cancelled", ledgerId: "ledger-1" },
+    });
+    revalidatePath.mockImplementationOnce(() => {
+      throw new Error("revalidate boom");
+    });
+
+    const result = await cancelAppointmentAction("task-1");
+
+    expect(result).toEqual({
+      ok: true,
+      data: { taskId: "task-1", status: "cancelled", ledgerId: "ledger-1" },
+    });
   });
 });
 
@@ -217,6 +299,27 @@ describe("rescheduleAppointmentAction", () => {
       }),
     );
     expect(revalidatePath).toHaveBeenCalledWith("/messages");
+  });
+
+  // Codex round 11 (finding 3): the RPC above already committed — a
+  // `revalidatePath` throw in the best-effort post-commit step must never
+  // flip this action's result back to an error.
+  it("still returns the committed ok:true result when revalidatePath throws — the failure is reported on its own", async () => {
+    createClient.mockResolvedValue(makeSupabaseMock({ userId: "user-1" }));
+    rescheduleAppointment.mockResolvedValue({
+      ok: true,
+      data: { taskId: "succ-1", oldTaskId: "task-1", chainId: "chain-1", duplicate: false },
+    });
+    revalidatePath.mockImplementationOnce(() => {
+      throw new Error("revalidate boom");
+    });
+
+    const result = await rescheduleAppointmentAction(validInput);
+
+    expect(result).toEqual({
+      ok: true,
+      data: { taskId: "succ-1", oldTaskId: "task-1", chainId: "chain-1", duplicate: false },
+    });
   });
 });
 
@@ -376,5 +479,43 @@ describe("reassignAppointmentAction", () => {
 
     expect(dispatchTaskAssigned).not.toHaveBeenCalled();
     expect(dispatchTaskAssignedSlack).not.toHaveBeenCalled();
+  });
+
+  // Codex round 11 (finding 3): round 10 guarded the post-commit task
+  // RE-FETCH but left the `revalidateAppointmentPaths` call itself
+  // unguarded — a `revalidatePath` throw there would still fall into the
+  // outer catch and report REASSIGN_APPOINTMENT_FAILED despite the
+  // already-committed reassignment. Closed this round.
+  it("still returns the committed ok:true result when revalidatePath throws — the failure is reported on its own, never touching the already-returned result", async () => {
+    createClient.mockResolvedValue(
+      makeSupabaseMock({
+        userId: "user-1",
+        taskRow: {
+          org_id: "org-1",
+          title: "Walkthrough",
+          due_at: "2026-09-01T15:00:00Z",
+          related_property_id: "prop-1",
+          contact_id: null,
+        },
+        propertyAddress: "123 Main St",
+      }),
+    );
+    reassignAppointment.mockResolvedValue({
+      ok: true,
+      data: { taskId: "task-1", oldAssigneeId: "user-1", newAssigneeId: "user-2", duplicate: false },
+    });
+    revalidatePath.mockImplementationOnce(() => {
+      throw new Error("revalidate boom");
+    });
+
+    const result = await reassignAppointmentAction("task-1", "user-2");
+
+    expect(result).toEqual({
+      ok: true,
+      data: { taskId: "task-1", oldAssigneeId: "user-1", newAssigneeId: "user-2", duplicate: false },
+    });
+    // The notification path still runs — task was resolved fine, only
+    // revalidatePath itself threw.
+    expect(afterCallbacks).toHaveLength(1);
   });
 });

@@ -88,6 +88,52 @@ function revalidateAppointmentPaths(task: TaskLookupRow | null): void {
   revalidatePath("/dashboard");
 }
 
+/**
+ * Codex round 11 (finding 3): the reassign contract, generalized. Once the
+ * lifecycle RPC has committed, NOTHING past that point may flip the
+ * action's result back to an error — a post-commit task re-fetch or
+ * `revalidatePath` throwing is a presentation-layer hiccup, not proof the
+ * mutation failed. Before this round, `completeAppointmentAction` awaited
+ * `loadTaskForNotification` directly inside `revalidateAppointmentPaths`'s
+ * argument, uncaught — a transient read failure there fell into the
+ * action's own top-level catch and reported COMPLETE_APPOINTMENT_FAILED
+ * despite the RPC having already durably succeeded (the exact bug round
+ * 10, finding 3 fixed for reassign). `cancelAppointmentAction` and
+ * `rescheduleAppointmentAction` pre-fetch `task` BEFORE the RPC runs (cheaper
+ * on the RPC-failure path — see cancel's own comment), so their exposure was
+ * narrower (only `revalidatePath` itself, not the fetch), but the same class
+ * of bug: `revalidatePath` throwing outside a real route/render context
+ * (exactly how these actions are exercised in tests, and plausible in
+ * production edge cases) would have done the same thing.
+ *
+ * `taskOrLoader` is either an already-resolved task (cancel/reschedule,
+ * fetched pre-RPC) or a thunk that performs the post-RPC fetch (complete,
+ * which — like reassign — reads AFTER the commit). The lookup and the
+ * `revalidateAppointmentPaths` call are caught SEPARATELY (same split as
+ * reassign's own `.catch()` on the lookup) rather than under one shared
+ * try/catch — a failed lookup must still fall through to `task: null` and
+ * run the unconditional `/messages`+`/dashboard` revalidation, not skip it
+ * entirely.
+ */
+async function revalidateAppointmentPathsBestEffort(
+  taskOrLoader: TaskLookupRow | null | (() => Promise<TaskLookupRow | null>),
+  surfaceTag: string,
+  taskId: string,
+): Promise<void> {
+  const task =
+    typeof taskOrLoader === "function"
+      ? await taskOrLoader().catch((e) => {
+          reportError(e, { tags: { surface: `${surfaceTag}_task_lookup` }, extra: { taskId } });
+          return null;
+        })
+      : taskOrLoader;
+  try {
+    revalidateAppointmentPaths(task);
+  } catch (e) {
+    reportError(e, { tags: { surface: surfaceTag }, extra: { taskId } });
+  }
+}
+
 export async function completeAppointmentAction(
   taskId: string,
   outcome: AppointmentOutcome,
@@ -102,7 +148,14 @@ export async function completeAppointmentAction(
     const result = await completeAppointment(supabase, taskId, outcome);
     if (!result.ok) return result;
 
-    revalidateAppointmentPaths(await loadTaskForNotification(supabase, taskId));
+    // Codex round 11 (finding 3): the RPC already committed above — the
+    // post-commit task lookup + revalidation below is best-effort only,
+    // never allowed to flip this action's result back to an error.
+    await revalidateAppointmentPathsBestEffort(
+      () => loadTaskForNotification(supabase, taskId),
+      "complete_appointment_action_post_commit",
+      taskId,
+    );
     return result;
   } catch (e) {
     reportError(e, { tags: { surface: "complete_appointment_action" }, extra: { taskId } });
@@ -128,7 +181,15 @@ export async function cancelAppointmentAction(
     const result = await cancelAppointment(supabase, taskId);
     if (!result.ok) return result;
 
-    revalidateAppointmentPaths(task);
+    // Codex round 11 (finding 3): best-effort post-commit revalidation —
+    // `task` is already resolved (fetched pre-RPC), so only `revalidatePath`
+    // itself needs guarding here, but the same helper is used for
+    // consistency with complete/reschedule.
+    await revalidateAppointmentPathsBestEffort(
+      task,
+      "cancel_appointment_action_post_commit",
+      taskId,
+    );
     return result;
   } catch (e) {
     reportError(e, { tags: { surface: "cancel_appointment_action" }, extra: { taskId } });
@@ -195,7 +256,13 @@ export async function rescheduleAppointmentAction(
     });
     if (!result.ok) return result;
 
-    revalidateAppointmentPaths(task);
+    // Codex round 11 (finding 3): best-effort post-commit revalidation —
+    // same posture as cancel above.
+    await revalidateAppointmentPathsBestEffort(
+      task,
+      "reschedule_appointment_action_post_commit",
+      input.taskId,
+    );
     return result;
   } catch (e) {
     reportError(e, {
@@ -239,7 +306,17 @@ export async function reassignAppointmentAction(
       });
       return null;
     });
-    revalidateAppointmentPaths(task);
+    // Codex round 11 (finding 3): round 10 guarded the task RE-FETCH above
+    // but left this `revalidateAppointmentPaths` call itself unguarded —
+    // the identical class of bug (a `revalidatePath` throw here would still
+    // fall into the outer catch and report REASSIGN_APPOINTMENT_FAILED
+    // despite the already-committed reassignment). Same best-effort helper
+    // the other three lifecycle actions now use.
+    await revalidateAppointmentPathsBestEffort(
+      task,
+      "reassign_appointment_action_post_commit",
+      taskId,
+    );
 
     // Same single-owner-notification pattern as bookAppointment /
     // createLeadTaskAction: skip when the actor reassigned to themselves,
