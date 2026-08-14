@@ -118,40 +118,33 @@ export async function snoozeTask(
 ): Promise<Result<Task>> {
   const now = new Date().toISOString();
 
-  // Appointments carry an end_at window; moving due_at alone would either
-  // violate the end_at > due_at constraint (pushed past its end) or
-  // silently change the booked duration (pulled earlier). Shift both ends
-  // by the same delta so the duration is preserved. One extra read only
-  // for appointment-capable rows — cheap, and the update below still
-  // guards with .eq("id").
+  // Appointments are never snoozed: moving one is a reschedule, which the
+  // calendar-mutation lifecycle (PR 3) owns end-to-end. The legacy snooze
+  // path would commit a shifted Sandra window and then hand the calendar
+  // updater a bare due_at, rebuilding the Google event at the hardcoded
+  // 30 minutes regardless of the booked duration. The dashboard hides the
+  // control for appointment rows; this guard covers every other caller.
   const { data: existing } = await supabase
     .from("tasks")
-    .select("type, due_at, end_at")
+    .select("type")
     .eq("id", taskId)
     .single();
 
-  const update: {
-    due_at: string;
-    snoozed_until: string;
-    updated_at: string;
-    end_at?: string;
-  } = {
-    due_at: snoozedUntil,
-    snoozed_until: snoozedUntil,
-    updated_at: now,
-  };
-
-  if (existing?.type === "appointment" && existing.end_at && existing.due_at) {
-    const deltaMs =
-      new Date(snoozedUntil).getTime() - new Date(existing.due_at).getTime();
-    update.end_at = new Date(
-      new Date(existing.end_at).getTime() + deltaMs,
-    ).toISOString();
+  if (existing?.type === "appointment") {
+    return err({
+      code: "TASK_SNOOZE_UNSUPPORTED",
+      message:
+        "Appointments can't be snoozed — reschedule them from the appointment instead.",
+    });
   }
 
   const { data, error } = await supabase
     .from("tasks")
-    .update(update)
+    .update({
+      due_at: snoozedUntil,
+      snoozed_until: snoozedUntil,
+      updated_at: now,
+    })
     .eq("id", taskId)
     .select()
     .single();

@@ -152,6 +152,10 @@ describe("<TasksPanel />", () => {
     const wrapper = screen.getByTestId("task-row-t1-unlinked");
     expect(wrapper.tagName).toBe("DIV");
     expect(wrapper.querySelector("a")).toBeNull();
+
+    // Appointments are rescheduled, never snoozed — no snooze control.
+    expect(screen.queryByTestId("task-snooze-t1")).toBeNull();
+    expect(screen.getByTestId("task-done-t1")).toBeInTheDocument();
   });
 
   it("links a contact-only row (no property) to the Messages thread", () => {

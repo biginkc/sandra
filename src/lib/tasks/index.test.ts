@@ -291,22 +291,12 @@ describe("snoozeTask", () => {
     expect(payload.end_at).toBeUndefined();
   });
 
-  it("shifts end_at by the same delta as due_at for an appointment, preserving duration", async () => {
+  it("refuses to snooze an appointment — reschedule is the only move", async () => {
     responseQueue = [
-      // existing-row read — appointment with a 30-minute window.
-      {
-        data: {
-          type: "appointment",
-          due_at: "2026-05-09T14:00:00Z",
-          end_at: "2026-05-09T14:30:00Z",
-        },
-        error: null,
-      },
-      { data: { id: "task-1" }, error: null },
+      // existing-row read — the type check that gates the refusal.
+      { data: { type: "appointment" }, error: null },
     ];
 
-    // Snoozed forward by 1 day + 2 hours — the delta the end_at shift must
-    // mirror exactly.
     const result = await snoozeTask(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       makeSupabase() as any,
@@ -314,37 +304,15 @@ describe("snoozeTask", () => {
       "2026-05-10T16:00:00Z",
     );
 
-    expect(result.ok).toBe(true);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe("TASK_SNOOZE_UNSUPPORTED");
+    }
+    // No update was ever issued — the guard fires before any write.
     const update = calls.find(
       (c) => c.table === "tasks" && c.op === "update",
     );
-    const payload = update!.updatePayload as Record<string, unknown>;
-    expect(payload.due_at).toBe("2026-05-10T16:00:00Z");
-    // Duration preserved: still exactly 30 minutes after due_at.
-    expect(payload.end_at).toBe("2026-05-10T16:30:00.000Z");
-  });
-
-  it("omits end_at when an appointment row has no end_at to shift", async () => {
-    responseQueue = [
-      {
-        data: { type: "appointment", due_at: "2026-05-09T14:00:00Z", end_at: null },
-        error: null,
-      },
-      { data: { id: "task-1" }, error: null },
-    ];
-
-    await snoozeTask(
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      makeSupabase() as any,
-      "task-1",
-      "2026-05-10T16:00:00Z",
-    );
-
-    const update = calls.find(
-      (c) => c.table === "tasks" && c.op === "update",
-    );
-    const payload = update!.updatePayload as Record<string, unknown>;
-    expect(payload.end_at).toBeUndefined();
+    expect(update).toBeUndefined();
   });
 
   it("schedules a Google Calendar update when snooze changes due_at", async () => {

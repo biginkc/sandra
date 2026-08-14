@@ -156,7 +156,10 @@ function Section({
                     {rowContent}
                   </div>
                 )}
-                <TaskActionsRow taskId={t.id} />
+                <TaskActionsRow
+                  taskId={t.id}
+                  canSnooze={t.type !== "appointment"}
+                />
               </div>
             </li>
           );
