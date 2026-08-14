@@ -271,15 +271,23 @@ begin
     end if;
   end if;
 
-  if not exists (
-    select 1
-    from public.memberships m
-    where m.user_id = new.assignee_id
-      and m.org_id = new.org_id
-      and m.access_status = 'active'
-      and m.deletion_prepared_at is null
-      and (m.access_expires_at is null or m.access_expires_at > now())
-  ) then
+  -- FOR SHARE serializes this check against concurrent membership
+  -- lifecycle UPDATEs (suspension, expiry-stamping): under READ COMMITTED
+  -- an unlocked EXISTS could observe the still-active row while a parallel
+  -- transaction suspends it, letting both commit. The share lock makes the
+  -- suspender wait for this insert/reassign (or vice versa), so one of the
+  -- two orders wins cleanly. Membership rows are low-churn; contention is
+  -- negligible.
+  perform 1
+  from public.memberships m
+  where m.user_id = new.assignee_id
+    and m.org_id = new.org_id
+    and m.access_status = 'active'
+    and m.deletion_prepared_at is null
+    and (m.access_expires_at is null or m.access_expires_at > now())
+  for share of m;
+
+  if not found then
     raise exception
       'tasks_tenant_integrity_guard: assignee % has no active membership in org %', new.assignee_id, new.org_id
       using errcode = 'P0001';

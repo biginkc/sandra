@@ -1,6 +1,8 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { Client } from "pg";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import { createTestClient } from "@tests/integration/client";
+import { loadTestEnv } from "@tests/integration/env";
 import { resetTenantTables } from "@tests/integration/reset";
 import {
   BMH_ORG_ID,
@@ -9,9 +11,29 @@ import {
   createOrgUser,
   seedTwoOrgs,
 } from "@tests/integration/fixtures/multi-user";
+import type { TablesInsert } from "@/lib/supabase/types";
+
+/**
+ * Raw Postgres connection string for the two-connection membership-race
+ * test below. Mirrors `tests/integration/global-setup.ts`'s own lookup —
+ * `TEST_SUPABASE_DB_URL` is read by global setup (the vitest main process)
+ * but is NOT forwarded into worker `process.env` by
+ * `vitest.integration.config.ts` (only URL/anon/service-role are), so test
+ * files that need a raw connection must load `.env.test.local` themselves.
+ */
+function testDbUrl(): string {
+  const env = loadTestEnv();
+  const url = process.env.TEST_SUPABASE_DB_URL ?? env.TEST_SUPABASE_DB_URL;
+  if (!url) {
+    throw new Error(
+      "Missing TEST_SUPABASE_DB_URL in .env.test.local — see tests/integration/README.md.",
+    );
+  }
+  return url;
+}
 
 const serviceClient = createTestClient();
-const db = serviceClient as any;
+const db = serviceClient;
 const createdUserIds: string[] = [];
 
 function uniqueEmail(label: string): string {
@@ -59,7 +81,7 @@ async function insertContact(orgId = BMH_ORG_ID, label = "Contact"): Promise<str
     .select("id")
     .single();
   expect(error).toBeNull();
-  return data.id as string;
+  return data!.id;
 }
 
 async function insertProperty(orgId = BMH_ORG_ID, contactId?: string | null): Promise<string> {
@@ -75,10 +97,16 @@ async function insertProperty(orgId = BMH_ORG_ID, contactId?: string | null): Pr
     .select("id")
     .single();
   expect(error).toBeNull();
-  return data.id as string;
+  return data!.id;
 }
 
-type TaskOverrides = Record<string, unknown>;
+// Partial<Insert> rather than the untyped Record it used to be: excess or
+// misspelled columns on a call site now fail typecheck instead of silently
+// no-opping through the old `db = serviceClient as any` cast. assignee_id
+// and created_by stay mandatory on every call site (no safe FK default
+// exists for them), matching every existing caller in this file.
+type TaskOverrides = Partial<TablesInsert<"tasks">> &
+  Pick<TablesInsert<"tasks">, "assignee_id" | "created_by">;
 
 async function insertTask(
   overrides: TaskOverrides,
@@ -98,7 +126,9 @@ async function insertTask(
   return { data, error };
 }
 
-async function insertValidAppointment(overrides: TaskOverrides = {}): Promise<{
+async function insertValidAppointment(
+  overrides: Partial<TablesInsert<"tasks">> = {},
+): Promise<{
   id: string;
   orgId: string;
   assigneeId: string;
@@ -108,15 +138,18 @@ async function insertValidAppointment(overrides: TaskOverrides = {}): Promise<{
   const chainId = crypto.randomUUID();
   const dueAt = new Date(Date.now() + 3600_000).toISOString();
   const endAt = new Date(Date.now() + 7200_000).toISOString();
-  const { data, error } = await insertTask({
+  // Two spreads (no explicit property before a spread that might also
+  // carry it) so `overrides` can still win on any key without tripping
+  // TS2783 ("specified more than once").
+  const defaults: TaskOverrides = {
     type: "appointment",
     assignee_id: assignee.userId,
     created_by: assignee.userId,
     due_at: dueAt,
     end_at: endAt,
     calendar_chain_id: chainId,
-    ...overrides,
-  });
+  };
+  const { data, error } = await insertTask({ ...defaults, ...overrides });
   expect(error).toBeNull();
   return {
     id: data!.id,
@@ -866,6 +899,152 @@ describe("Migration 20260814150000 — appointments schema", () => {
         .select("id")
         .eq("id", (row as { id: string }).id);
       expect(after).toHaveLength(1);
+    });
+  });
+
+  // Proves the `FOR SHARE OF m` clause in tasks_tenant_integrity_guard()
+  // (section 3 of this migration) actually serializes a task
+  // insert/reassign against a concurrent membership suspension, rather
+  // than both racing through under READ COMMITTED and leaving an
+  // appointment assigned to a suspended member.
+  //
+  // The Supabase JS client can't hold a transaction open across two
+  // separate calls (every PostgREST request auto-commits), so this uses
+  // two raw `pg` connections directly against the test project — the same
+  // capability `tests/integration/global-setup.ts` already relies on for
+  // its advisory-lock session. Each test asserts the second connection is
+  // actually BLOCKED (raced against a timeout) before unblocking it, so a
+  // regression that drops the lock (silent race instead of serialization)
+  // fails loudly instead of just getting lucky on timing.
+  //
+  // What this proves: the two orderings that matter for this trigger
+  // (suspend-then-insert, insert-then-suspend) each resolve to exactly one
+  // consistent outcome, never a state where a live appointment ends up
+  // assigned to an inactive member. What it does NOT prove: throughput
+  // under real contention, behavior with more than two concurrent writers,
+  // or the UPDATE-path (reassign) trigger firing — only the INSERT path is
+  // exercised here; the trigger's scope-gate for UPDATE is unconditional
+  // on the same FOR SHARE clause, so the same lock behavior applies, but
+  // that specific interleaving isn't separately exercised.
+  describe("tasks_tenant_integrity_guard — membership-suspension race (raw pg, two connections)", () => {
+    let connA: Client;
+    let connB: Client;
+
+    beforeEach(async () => {
+      connA = new Client({ connectionString: testDbUrl() });
+      connB = new Client({ connectionString: testDbUrl() });
+      await connA.connect();
+      await connB.connect();
+      // Same reasoning as global-setup.ts: these connections deliberately
+      // hold a transaction open while blocked on a row lock, which could
+      // outlast a role-inherited statement_timeout.
+      await connA.query("set statement_timeout = 0");
+      await connB.query("set statement_timeout = 0");
+    });
+
+    afterEach(async () => {
+      await connA.query("rollback").catch(() => {});
+      await connB.query("rollback").catch(() => {});
+      await connA.end().catch(() => {});
+      await connB.end().catch(() => {});
+    });
+
+    /** Resolves "blocked" if `promise` is still pending after `ms`, else "resolved". Never throws on rejection — the caller awaits `promise` directly afterward for the real assertion. */
+    async function stillBlockedAfter(
+      promise: Promise<unknown>,
+      ms: number,
+    ): Promise<"blocked" | "resolved"> {
+      const sentinel = Symbol("timeout");
+      const raced = await Promise.race([
+        promise.catch(() => sentinel),
+        new Promise((resolve) => setTimeout(() => resolve(sentinel), ms)).then(
+          () => "timeout-won" as const,
+        ),
+      ]);
+      // If the timeout promise resolved first as itself (not via the real
+      // promise settling, success or failure), the query is still pending.
+      return raced === "timeout-won" ? "blocked" : "resolved";
+    }
+
+    it("suspend wins: a suspension committed while an insert is blocked on FOR SHARE fails the insert", async () => {
+      const assignee = await createUserForOrg(BMH_ORG_ID);
+      const chainId = crypto.randomUUID();
+      const dueAt = new Date(Date.now() + 3600_000).toISOString();
+      const endAt = new Date(Date.now() + 7200_000).toISOString();
+
+      await connA.query("begin");
+      await connA.query(
+        "update memberships set access_status = 'suspended' where user_id = $1 and org_id = $2",
+        [assignee.userId, BMH_ORG_ID],
+      );
+      // connA's UPDATE holds a ROW EXCLUSIVE lock on the membership row
+      // until commit/rollback. connB's INSERT fires the trigger, whose
+      // `FOR SHARE OF m` must block on that same row.
+      const insertPromise = connB.query(
+        `insert into tasks
+           (org_id, type, status, title, due_at, end_at, assignee_id, created_by, calendar_chain_id)
+         values ($1, 'appointment', 'open', 'Race test', $2, $3, $4, $4, $5)
+         returning id`,
+        [BMH_ORG_ID, dueAt, endAt, assignee.userId, chainId],
+      );
+
+      expect(await stillBlockedAfter(insertPromise, 1500)).toBe("blocked");
+
+      // Commit the suspension: connB's blocked FOR SHARE proceeds and now
+      // observes access_status = 'suspended' — the trigger must raise.
+      await connA.query("commit");
+
+      await expect(insertPromise).rejects.toThrow(/no active membership/i);
+    });
+
+    it("insert wins: an insert committed while a suspension is blocked on the row lock leaves the task validly assigned", async () => {
+      const assignee = await createUserForOrg(BMH_ORG_ID);
+      const chainId = crypto.randomUUID();
+      const dueAt = new Date(Date.now() + 3600_000).toISOString();
+      const endAt = new Date(Date.now() + 7200_000).toISOString();
+
+      await connA.query("begin");
+      const insertResult = await connA.query<{ id: string }>(
+        `insert into tasks
+           (org_id, type, status, title, due_at, end_at, assignee_id, created_by, calendar_chain_id)
+         values ($1, 'appointment', 'open', 'Race test', $2, $3, $4, $4, $5)
+         returning id`,
+        [BMH_ORG_ID, dueAt, endAt, assignee.userId, chainId],
+      );
+      const taskId = insertResult.rows[0].id;
+
+      // connA's still-open transaction holds the trigger's FOR SHARE lock
+      // on the membership row. connB's UPDATE needs ROW EXCLUSIVE on that
+      // same row and must block until connA commits or rolls back.
+      const suspendPromise = connB.query(
+        "update memberships set access_status = 'suspended' where user_id = $1 and org_id = $2",
+        [assignee.userId, BMH_ORG_ID],
+      );
+
+      expect(await stillBlockedAfter(suspendPromise, 1500)).toBe("blocked");
+
+      await connA.query("commit");
+      await suspendPromise; // now unblocks and succeeds
+
+      // The insert committed while the assignee was still active. It must
+      // exist, still assigned to that member — proving this ordering also
+      // resolves to one consistent outcome rather than a corrupted state
+      // where the trigger's earlier read is stale by the time it commits.
+      const { data, error } = await db
+        .from("tasks")
+        .select("id, assignee_id")
+        .eq("id", taskId)
+        .single();
+      expect(error).toBeNull();
+      expect((data as { assignee_id: string }).assignee_id).toBe(assignee.userId);
+
+      const { data: membership } = await db
+        .from("memberships")
+        .select("access_status")
+        .eq("user_id", assignee.userId)
+        .eq("org_id", BMH_ORG_ID)
+        .single();
+      expect((membership as { access_status: string }).access_status).toBe("suspended");
     });
   });
 

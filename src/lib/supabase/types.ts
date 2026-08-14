@@ -2704,6 +2704,131 @@ export type Database = {
           },
         ]
       }
+      task_calendar_mutations: {
+        Row: {
+          attempts: number
+          calendar_chain_id: string
+          client_event_id: string | null
+          created_at: string
+          event_id: string | null
+          expected_generation: number
+          id: string
+          last_error: string | null
+          new_assignee_id: string | null
+          new_event_id: string | null
+          old_assignee_id: string
+          operation: string
+          org_id: string
+          phase: string
+          result_reason: string | null
+          source_task_id: string
+          target_task_id: string | null
+          updated_at: string
+        }
+        Insert: {
+          attempts?: number
+          calendar_chain_id: string
+          client_event_id?: string | null
+          created_at?: string
+          event_id?: string | null
+          expected_generation: number
+          id?: string
+          last_error?: string | null
+          new_assignee_id?: string | null
+          new_event_id?: string | null
+          old_assignee_id: string
+          operation: string
+          org_id: string
+          phase?: string
+          result_reason?: string | null
+          source_task_id: string
+          target_task_id?: string | null
+          updated_at?: string
+        }
+        Update: {
+          attempts?: number
+          calendar_chain_id?: string
+          client_event_id?: string | null
+          created_at?: string
+          event_id?: string | null
+          expected_generation?: number
+          id?: string
+          last_error?: string | null
+          new_assignee_id?: string | null
+          new_event_id?: string | null
+          old_assignee_id?: string
+          operation?: string
+          org_id?: string
+          phase?: string
+          result_reason?: string | null
+          source_task_id?: string
+          target_task_id?: string | null
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "task_calendar_mutations_source_task_fkey"
+            columns: ["source_task_id", "org_id", "calendar_chain_id"]
+            isOneToOne: false
+            referencedRelation: "tasks"
+            referencedColumns: ["id", "org_id", "calendar_chain_id"]
+          },
+          {
+            foreignKeyName: "task_calendar_mutations_target_task_fkey"
+            columns: ["target_task_id", "org_id", "calendar_chain_id"]
+            isOneToOne: false
+            referencedRelation: "tasks"
+            referencedColumns: ["id", "org_id", "calendar_chain_id"]
+          },
+        ]
+      }
+      task_reminder_deliveries: {
+        Row: {
+          attempts: number
+          channel: string
+          created_at: string
+          id: string
+          last_error: string | null
+          org_id: string
+          provider_message_id: string | null
+          sent_at: string | null
+          status: string
+          task_id: string
+        }
+        Insert: {
+          attempts?: number
+          channel: string
+          created_at?: string
+          id?: string
+          last_error?: string | null
+          org_id: string
+          provider_message_id?: string | null
+          sent_at?: string | null
+          status?: string
+          task_id: string
+        }
+        Update: {
+          attempts?: number
+          channel?: string
+          created_at?: string
+          id?: string
+          last_error?: string | null
+          org_id?: string
+          provider_message_id?: string | null
+          sent_at?: string | null
+          status?: string
+          task_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "task_reminder_deliveries_task_org_fkey"
+            columns: ["task_id", "org_id"]
+            isOneToOne: false
+            referencedRelation: "tasks"
+            referencedColumns: ["id", "org_id"]
+          },
+        ]
+      }
       tasks: {
         Row: {
           assignee_id: string
@@ -2848,6 +2973,7 @@ export type Database = {
           channel: string
           created_at: string
           enabled: boolean
+          reminder_phone: string | null
           timezone: string
           updated_at: string
           user_id: string
@@ -2856,6 +2982,7 @@ export type Database = {
           channel: string
           created_at?: string
           enabled?: boolean
+          reminder_phone?: string | null
           timezone?: string
           updated_at?: string
           user_id: string
@@ -2864,6 +2991,7 @@ export type Database = {
           channel?: string
           created_at?: string
           enabled?: boolean
+          reminder_phone?: string | null
           timezone?: string
           updated_at?: string
           user_id?: string
