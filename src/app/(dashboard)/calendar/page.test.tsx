@@ -4,13 +4,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const {
   createClient,
   fetchCalendarAppointments,
-  fetchOrgAssigneeEmails,
+  fetchOrgRoster,
   getCallerMemberships,
   loadIntegrationPrefs,
 } = vi.hoisted(() => ({
   createClient: vi.fn(),
   fetchCalendarAppointments: vi.fn(),
-  fetchOrgAssigneeEmails: vi.fn(),
+  fetchOrgRoster: vi.fn(),
   getCallerMemberships: vi.fn(),
   loadIntegrationPrefs: vi.fn(async () => ({
     slackEnabled: true,
@@ -22,7 +22,7 @@ const {
 vi.mock("@/lib/supabase/server", () => ({ createClient }));
 vi.mock("@/lib/auth/memberships", () => ({ getCallerMemberships }));
 vi.mock("@/lib/integrations/prefs", () => ({ loadIntegrationPrefs }));
-vi.mock("./queries", () => ({ fetchCalendarAppointments, fetchOrgAssigneeEmails }));
+vi.mock("./queries", () => ({ fetchCalendarAppointments, fetchOrgRoster }));
 // The `_components` lane's real CalendarView is a "use client" component
 // that reads next/navigation hooks — irrelevant to what this page-level
 // test is verifying (the error/empty/degraded-roster branching in
@@ -63,7 +63,11 @@ describe("CalendarPage — appointments load failure", () => {
   it("renders an explicit retry state, never the empty-week UI, on a query failure", async () => {
     mockUser();
     fetchCalendarAppointments.mockResolvedValue({ ok: false });
-    fetchOrgAssigneeEmails.mockResolvedValue({ ok: true, emails: { "user-1": "owner@bmh.com" } });
+    fetchOrgRoster.mockResolvedValue({
+      ok: true,
+      labelsDegraded: false,
+      roster: [{ id: "user-1", label: "owner@bmh.com" }],
+    });
 
     const jsx = await CalendarPage({
       searchParams: Promise.resolve({ week: "2026-05-03" }),
@@ -77,7 +81,7 @@ describe("CalendarPage — appointments load failure", () => {
     // rendering an empty week for what was actually a load failure.
     expect(screen.queryByTestId("calendar-view-stub")).not.toBeInTheDocument();
     // A load failure short-circuits before the roster fetch even runs.
-    expect(fetchOrgAssigneeEmails).not.toHaveBeenCalled();
+    expect(fetchOrgRoster).not.toHaveBeenCalled();
   });
 
   it("preserves the assignee and view params on the retry link", async () => {
@@ -100,7 +104,11 @@ describe("CalendarPage — genuinely empty week", () => {
   it("renders CalendarView with zero appointments, not the error state", async () => {
     mockUser();
     fetchCalendarAppointments.mockResolvedValue({ ok: true, rows: [] });
-    fetchOrgAssigneeEmails.mockResolvedValue({ ok: true, emails: { "user-1": "owner@bmh.com" } });
+    fetchOrgRoster.mockResolvedValue({
+      ok: true,
+      labelsDegraded: false,
+      roster: [{ id: "user-1", label: "owner@bmh.com" }],
+    });
 
     const jsx = await CalendarPage({ searchParams: Promise.resolve({}) });
     render(jsx);
@@ -111,20 +119,51 @@ describe("CalendarPage — genuinely empty week", () => {
   });
 });
 
-describe("CalendarPage — roster (assignee email) load failure", () => {
-  it("degrades to a viewer-only roster and a muted note instead of failing the page", async () => {
+describe("CalendarPage — roster identity load failure", () => {
+  it("renders the same explicit retry state as an appointments failure, never a viewer-only fallback", async () => {
     mockUser("user-1", "owner@bmh.com");
     fetchCalendarAppointments.mockResolvedValue({ ok: true, rows: [] });
-    fetchOrgAssigneeEmails.mockResolvedValue({ ok: false });
+    fetchOrgRoster.mockResolvedValue({ ok: false });
+
+    const jsx = await CalendarPage({
+      searchParams: Promise.resolve({ week: "2026-05-03" }),
+    });
+    render(jsx);
+
+    // Identity unknown → the filter and ownership attribution are
+    // untrustworthy, so this is a full-page retry state, not a degraded
+    // "your own appointments only" view (Codex round 3 — that fallback is
+    // gone).
+    expect(screen.getByText(/Calendar couldn't load/i)).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /retry/i })).toHaveAttribute(
+      "href",
+      "/calendar?week=2026-05-03",
+    );
+    expect(screen.queryByTestId("calendar-view-stub")).not.toBeInTheDocument();
+    expect(screen.queryByText(/showing your own appointments only/i)).not.toBeInTheDocument();
+  });
+});
+
+describe("CalendarPage — roster labels degraded (identity known, emails unresolved)", () => {
+  it("renders the full roster with fallback labels, controls intact, and a muted names-unavailable note", async () => {
+    mockUser("user-1", "owner@bmh.com");
+    fetchCalendarAppointments.mockResolvedValue({ ok: true, rows: [] });
+    fetchOrgRoster.mockResolvedValue({
+      ok: true,
+      labelsDegraded: true,
+      roster: [
+        { id: "user-1", label: "owner@bmh.com" },
+        { id: "rep-2", label: "Teammate (rep-2)" },
+      ],
+    });
 
     const jsx = await CalendarPage({ searchParams: Promise.resolve({}) });
     render(jsx);
 
-    // The primary content (appointments) still renders — a roster failure
-    // is not treated as a whole-page failure.
+    // The primary content still renders — a labels-only degradation never
+    // fails the page, and no teammate is dropped from the roster.
     expect(screen.getByTestId("calendar-view-stub")).toBeInTheDocument();
-    expect(screen.getByText(/couldn't load the team roster/i)).toBeInTheDocument();
-    // Viewer-only fallback roster: just the caller, keyed by their own id.
-    expect(screen.getByTestId("assignee-count")).toHaveTextContent("1");
+    expect(screen.getByTestId("assignee-count")).toHaveTextContent("2");
+    expect(screen.getByText(/names are unavailable/i)).toBeInTheDocument();
   });
 });

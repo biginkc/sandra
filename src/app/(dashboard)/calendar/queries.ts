@@ -115,40 +115,50 @@ export async function fetchCalendarAppointments(
 }
 
 /**
- * Full ACTIVE-membership roster for `orgId`, mapped user_id -> email —
- * used to populate the calendar's assignee filter (and per-appointment
- * assignee labels) independently of which appointments happen to fall in
- * the displayed week (Codex round 1 — the previous roster was built only
- * from the current week's `appointments` + the caller, so a teammate with
- * zero appointments this week silently dropped out of the filter, and
- * switching filters after an empty week had nothing to switch to).
+ * One roster entry: a real ACTIVE membership `id` (identity, from the
+ * `memberships` table) paired with a display `label` that may be a real
+ * email or a safe fallback (see `labelsDegraded` below).
+ */
+export type OrgRosterEntry = { id: string; label: string };
+
+/**
+ * Full ACTIVE-membership roster for `orgId` — used to populate the
+ * calendar's assignee filter (and per-appointment assignee labels)
+ * independently of which appointments happen to fall in the displayed
+ * week (Codex round 1 — the previous roster was built only from the
+ * current week's `appointments` + the caller, so a teammate with zero
+ * appointments this week silently dropped out of the filter).
+ *
+ * Codex round 3 — identity and labels are two different failure domains,
+ * and they used to be conflated:
+ *
+ * - IDENTITY = the `memberships` query (who is actually on this org's
+ *   roster). This is load-bearing: `page.tsx` uses it for the assignee
+ *   filter's set of valid ids AND (indirectly, via the appointments query)
+ *   for ownership attribution. If this fails, `ok: false` — there is no
+ *   safe partial roster to fall back to, so the caller must treat it like
+ *   any other load failure, not silently narrow to "just me."
+ * - LABELS = the display string for each identity, resolved via
+ *   `fetchAssigneeEmails` (the `auth.users` lookup). This is cosmetic. If
+ *   `listUsers` errors, throws, paginates only partially, or simply has no
+ *   email for a given id, that id is NEVER dropped from the roster — it
+ *   keeps its real membership id with a safe fallback label
+ *   (`"Teammate (<id-prefix>)"`), and `labelsDegraded` is set so the
+ *   caller can show a muted "names unavailable" note. Ownership and
+ *   filtering stay correct even when every label falls back, because the
+ *   underlying id is still the real one.
  *
  * Reuses the exact active/non-deletion-prepared/unexpired membership
  * predicate `listBookingAssignees` uses
  * (`components/appointments/book-appointment-action.ts`) so "who can be
  * assigned an appointment" and "who shows up in the calendar filter" never
  * disagree.
- *
- * Discriminated result (Codex round 2, same rationale as
- * `fetchCalendarAppointments`): a `memberships` query failure returns
- * `{ ok: false }` rather than `{}`, so `page.tsx` can tell "roster failed
- * to load" apart from "org genuinely has one member" and degrade instead of
- * silently rendering a roster of one. Chosen degrade: roster failure never
- * fails the whole calendar page — it falls back to a viewer-only roster
- * (just the caller) plus a muted note, since the appointments themselves
- * (the primary content) may have loaded fine. A downstream failure inside
- * `fetchAssigneeEmails` (the `auth.users` lookup) is treated as `ok: true`
- * with a partial map — that's the existing "missing label, not missing
- * page" degrade this function already relied on before this change, and it
- * only affects display strings, not which teammates are selectable.
  */
-export type FetchOrgAssigneeEmailsResult =
-  | { ok: true; emails: Record<string, string> }
+export type FetchOrgRosterResult =
+  | { ok: true; roster: OrgRosterEntry[]; labelsDegraded: boolean }
   | { ok: false };
 
-export async function fetchOrgAssigneeEmails(
-  orgId: string,
-): Promise<FetchOrgAssigneeEmailsResult> {
+export async function fetchOrgRoster(orgId: string): Promise<FetchOrgRosterResult> {
   const admin = createAdminClient();
   const activeAt = new Date().toISOString();
   const { data: memberships, error } = await admin
@@ -161,7 +171,7 @@ export async function fetchOrgAssigneeEmails(
 
   if (error || !memberships) {
     if (error) {
-      console.error("[calendar] fetchOrgAssigneeEmails failed", {
+      console.error("[calendar] fetchOrgRoster failed (membership identity)", {
         message: error.message,
         code: error.code,
       });
@@ -169,8 +179,20 @@ export async function fetchOrgAssigneeEmails(
     return { ok: false };
   }
 
-  const emails = await fetchAssigneeEmails(memberships.map((m) => m.user_id as string));
-  return { ok: true, emails };
+  const ids = memberships.map((m) => m.user_id as string);
+  const emails = await fetchAssigneeEmails(ids);
+  // Any id whose email didn't come back — whatever the cause (error,
+  // throw, partial pagination, or the user simply has none) — is a
+  // labels-degraded roster, but the identity is kept with a fallback
+  // label rather than dropped.
+  const labelsDegraded = ids.some((id) => !emails[id]);
+
+  const roster: OrgRosterEntry[] = ids.map((id) => ({
+    id,
+    label: emails[id] ?? `Teammate (${id.slice(0, 8)})`,
+  }));
+
+  return { ok: true, roster, labelsDegraded };
 }
 
 /**

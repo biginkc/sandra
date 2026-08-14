@@ -72,7 +72,7 @@ vi.mock("@/lib/supabase/admin", () => ({
 import {
   fetchAssigneeEmails,
   fetchCalendarAppointments,
-  fetchOrgAssigneeEmails,
+  fetchOrgRoster,
 } from "./queries";
 
 beforeEach(() => {
@@ -305,8 +305,8 @@ describe("fetchAssigneeEmails", () => {
   });
 });
 
-describe("fetchOrgAssigneeEmails", () => {
-  it("returns emails for every active org membership, independent of any appointment rows (Codex round 1)", async () => {
+describe("fetchOrgRoster", () => {
+  it("returns the full roster with real labels for every active org membership, independent of any appointment rows (Codex round 1)", async () => {
     // A teammate with zero appointments this week still appears — this
     // query never touches `tasks`/`appointments`, only `memberships`.
     membershipRows = [{ user_id: "user-1" }, { user_id: "rep-2" }];
@@ -321,16 +321,20 @@ describe("fetchOrgAssigneeEmails", () => {
       error: null,
     });
 
-    const result = await fetchOrgAssigneeEmails("org-1");
+    const result = await fetchOrgRoster("org-1");
     expect(result).toEqual({
       ok: true,
-      emails: { "user-1": "owner@bmh.com", "rep-2": "rep2@bmh.com" },
+      labelsDegraded: false,
+      roster: [
+        { id: "user-1", label: "owner@bmh.com" },
+        { id: "rep-2", label: "rep2@bmh.com" },
+      ],
     });
   });
 
   it("scopes to the org and to active, non-deletion-prepared, unexpired memberships", async () => {
     membershipRows = [];
-    await fetchOrgAssigneeEmails("org-1");
+    await fetchOrgRoster("org-1");
 
     expect(membershipEqCalls).toContainEqual(["org_id", "org-1"]);
     expect(membershipEqCalls).toContainEqual(["access_status", "active"]);
@@ -352,16 +356,82 @@ describe("fetchOrgAssigneeEmails", () => {
     });
     expect(appointments).toEqual({ ok: true, rows: [] });
 
-    const result = await fetchOrgAssigneeEmails("org-1");
-    expect(result).toEqual({ ok: true, emails: { "rep-2": "rep2@bmh.com" } });
+    const result = await fetchOrgRoster("org-1");
+    expect(result).toEqual({
+      ok: true,
+      labelsDegraded: false,
+      roster: [{ id: "rep-2", label: "rep2@bmh.com" }],
+    });
   });
 
-  it("returns ok:false (roster failure) on a memberships query error, distinguishable from an org with no members", async () => {
+  it("returns ok:false (identity failure) on a memberships query error, distinguishable from an org with no members", async () => {
     membershipRows = null;
     membershipError = { message: "boom" };
 
-    const result = await fetchOrgAssigneeEmails("org-1");
+    const result = await fetchOrgRoster("org-1");
     expect(result).toEqual({ ok: false });
     expect(mocks.listUsers).not.toHaveBeenCalled();
+  });
+
+  it("keeps every identity with a fallback label and sets labelsDegraded when listUsers throws", async () => {
+    membershipRows = [{ user_id: "user-1" }, { user_id: "rep-2" }];
+    mocks.listUsers.mockImplementationOnce(() => {
+      throw new Error("network boom");
+    });
+
+    const result = await fetchOrgRoster("org-1");
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok:true");
+    expect(result.labelsDegraded).toBe(true);
+    expect(result.roster).toEqual([
+      { id: "user-1", label: "Teammate (user-1)" },
+      { id: "rep-2", label: "Teammate (rep-2)" },
+    ]);
+    // No identity dropped even though every label failed.
+    expect(result.roster.map((r) => r.id)).toEqual(["user-1", "rep-2"]);
+  });
+
+  it("keeps every identity with a fallback label and sets labelsDegraded on partial pagination failure", async () => {
+    membershipRows = [{ user_id: "user-1" }, { user_id: "rep-2" }];
+    mocks.listUsers
+      .mockResolvedValueOnce({
+        data: { users: [{ id: "user-1", email: "owner@bmh.com" }], nextPage: 2 },
+        error: null,
+      })
+      .mockResolvedValueOnce({ data: null, error: { message: "boom" } });
+
+    const result = await fetchOrgRoster("org-1");
+    expect(result).toEqual({
+      ok: true,
+      labelsDegraded: true,
+      roster: [
+        { id: "user-1", label: "owner@bmh.com" },
+        { id: "rep-2", label: "Teammate (rep-2)" },
+      ],
+    });
+  });
+
+  it("keeps the identity with a fallback label and sets labelsDegraded when a member has no email on auth.users", async () => {
+    membershipRows = [{ user_id: "user-1" }, { user_id: "rep-2" }];
+    mocks.listUsers.mockResolvedValueOnce({
+      data: {
+        users: [
+          { id: "user-1", email: "owner@bmh.com" },
+          { id: "rep-2", email: null },
+        ],
+        nextPage: null,
+      },
+      error: null,
+    });
+
+    const result = await fetchOrgRoster("org-1");
+    expect(result).toEqual({
+      ok: true,
+      labelsDegraded: true,
+      roster: [
+        { id: "user-1", label: "owner@bmh.com" },
+        { id: "rep-2", label: "Teammate (rep-2)" },
+      ],
+    });
   });
 });

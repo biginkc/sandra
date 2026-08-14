@@ -7,7 +7,7 @@ import { loadIntegrationPrefs } from "@/lib/integrations/prefs";
 import { createClient } from "@/lib/supabase/server";
 import { addDaysInZone, getDayBoundsInZone, wallTimeToUtc } from "@/lib/time/zoned";
 
-import { fetchCalendarAppointments, fetchOrgAssigneeEmails } from "./queries";
+import { fetchCalendarAppointments, fetchOrgRoster } from "./queries";
 import { resolveAssigneeId } from "./scoping";
 import type {
   CalendarDayBounds,
@@ -131,6 +131,35 @@ function currentCalendarHref(params: CalendarSearchParams): string {
   return qs ? `/calendar?${qs}` : "/calendar";
 }
 
+/**
+ * Shared explicit couldn't-load/Retry state (Codex round 3) — used for
+ * BOTH an appointments-fetch failure and a roster-identity failure
+ * (`fetchOrgRoster` returning `ok: false`). A roster-identity failure
+ * means the set of valid assignee ids is unknown, so the filter and any
+ * per-appointment ownership attribution are untrustworthy: it is not safe
+ * to relabel or narrow to a viewer-only view, only to say the page didn't
+ * load and offer a retry that re-requests the same view/week/assignee.
+ */
+function retryState(params: CalendarSearchParams) {
+  return (
+    <Page>
+      <PageHeader
+        breadcrumb={[{ label: "Workspace" }, { label: "Calendar" }]}
+        title="Calendar"
+      />
+      <div className="text-destructive flex items-center gap-2 text-sm">
+        <span>Calendar couldn&apos;t load.</span>
+        <Link
+          href={currentCalendarHref(params)}
+          className="font-bold underline underline-offset-4"
+        >
+          Retry
+        </Link>
+      </div>
+    </Page>
+  );
+}
+
 export default async function CalendarPage({
   searchParams,
 }: {
@@ -189,23 +218,7 @@ export default async function CalendarPage({
   // explicit retry state instead of silently showing "no appointments".
   // The link re-requests the exact same view/week/assignee, not a reset.
   if (!appointmentsResult.ok) {
-    return (
-      <Page>
-        <PageHeader
-          breadcrumb={[{ label: "Workspace" }, { label: "Calendar" }]}
-          title="Calendar"
-        />
-        <div className="text-destructive flex items-center gap-2 text-sm">
-          <span>Calendar couldn&apos;t load.</span>
-          <Link
-            href={currentCalendarHref(params)}
-            className="font-bold underline underline-offset-4"
-          >
-            Retry
-          </Link>
-        </div>
-      </Page>
-    );
+    return retryState(params);
   }
   const appointments = appointmentsResult.rows;
 
@@ -214,16 +227,26 @@ export default async function CalendarPage({
   // filter dropdown (both roles, now that members get one too) always
   // lists every active teammate, including one with zero appointments in
   // the displayed week.
-  const assigneesResult = await fetchOrgAssigneeEmails(orgId);
-  // Roster failure degrades rather than failing the whole page (Codex
-  // round 2 — the appointments themselves, the primary content, already
-  // loaded fine at this point): fall back to a viewer-only roster (just
-  // the caller) so the assignee filter still renders "Me" correctly, and
-  // surface a muted note rather than silently hiding the teammate list.
-  const assignees = assigneesResult.ok
-    ? assigneesResult.emails
-    : { [user.id]: user.email ?? "" };
-  const rosterDegraded = !assigneesResult.ok;
+  const rosterResult = await fetchOrgRoster(orgId);
+  // A roster IDENTITY failure (Codex round 3) — the set of valid assignee
+  // ids is unknown — is treated exactly like an appointments-fetch
+  // failure: the filter and ownership attribution are untrustworthy, so
+  // this renders the same explicit retry state rather than misrepresenting
+  // org rows under a viewer-only claim or leaving lifecycle controls on
+  // rows whose ownership can't be verified. (Round 2's "showing your own
+  // appointments only" fallback is gone — it silently narrowed scope
+  // instead of surfacing the failure.)
+  if (!rosterResult.ok) {
+    return retryState(params);
+  }
+  const assignees: Record<string, string> = {};
+  for (const entry of rosterResult.roster) {
+    assignees[entry.id] = entry.label;
+  }
+  // LABELS-only degradation (some/all emails unresolved) keeps the full
+  // roster, controls, and unmistakable ownership (fallback labels carry
+  // the real id prefix) — only the display note changes.
+  const labelsDegraded = rosterResult.labelsDegraded;
 
   return (
     <Page>
@@ -236,10 +259,9 @@ export default async function CalendarPage({
             : "Your appointments."
         }
       />
-      {rosterDegraded && (
+      {labelsDegraded && (
         <div className="text-muted-foreground text-xs">
-          Couldn&apos;t load the team roster — showing your own appointments
-          only.
+          Some teammate names are unavailable — showing IDs instead.
         </div>
       )}
       <CalendarView
