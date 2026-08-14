@@ -120,8 +120,9 @@ function getMemberTimezone(
   return asBookingRpcClient(client).rpc("fn_get_member_timezone", { p_user: userId });
 }
 
-// fn_claim_calendar_creations is the PR-2 pull-forward of PR 3's ledger
-// consumer — same local-cast rationale as the booking RPCs above.
+// fn_claim_calendar_creations / fn_expire_exhausted_calendar_creations are
+// the PR-2 pull-forward of PR 3's ledger consumer — same local-cast
+// rationale as the booking RPCs above.
 type ClaimCalendarCreationsRow = {
   ledger_id: string;
   org_id: string;
@@ -130,6 +131,9 @@ type ClaimCalendarCreationsRow = {
   expected_generation: number;
   client_event_id: string | null;
   attempts: number;
+  phase: "pending" | "provider_done";
+  new_event_id: string | null;
+  result_reason: string | null;
   task_due_at: string;
   task_end_at: string;
   task_title: string;
@@ -141,6 +145,7 @@ type ClaimRpcClient = {
     fn: "fn_claim_calendar_creations",
     args: { p_limit: number },
   ): Promise<RpcResult<ClaimCalendarCreationsRow[]>>;
+  rpc(fn: "fn_expire_exhausted_calendar_creations"): Promise<RpcResult<number>>;
 };
 
 function claimCalendarCreations(
@@ -150,6 +155,47 @@ function claimCalendarCreations(
   return (client as unknown as ClaimRpcClient).rpc("fn_claim_calendar_creations", {
     p_limit: limit,
   });
+}
+
+function expireExhaustedCalendarCreations(
+  client: SupabaseClient<Database>,
+): Promise<RpcResult<number>> {
+  return (client as unknown as ClaimRpcClient).rpc("fn_expire_exhausted_calendar_creations");
+}
+
+// task_calendar_mutations columns not on the generated Database type yet
+// (same local-cast rationale) — used by the lease/backoff/exhaustion tests
+// below to read/backdate next_attempt_at and phase directly.
+type LedgerLeaseRow = { attempts: number; phase: string; next_attempt_at: string | null };
+function ledgerLeaseReader(client: SupabaseClient<Database> = db) {
+  return client as unknown as {
+    from(table: "task_calendar_mutations"): {
+      select(columns: string): {
+        eq(
+          column: "id",
+          value: string,
+        ): { single(): Promise<{ data: LedgerLeaseRow | null; error: { message: string } | null }> };
+      };
+      update(values: {
+        next_attempt_at?: string | null;
+        attempts?: number;
+      }): {
+        eq(
+          column: "id",
+          value: string,
+        ): Promise<{ data: null; error: { message: string } | null }>;
+      };
+      insert(values: {
+        org_id: string;
+        calendar_chain_id: string;
+        operation: string;
+        phase: string;
+        source_task_id: string;
+        old_assignee_id: string;
+        expected_generation: number;
+      }): Promise<{ data: null; error: { message: string; code?: string } | null }>;
+    };
+  };
 }
 
 const serviceClient = createTestClient();
@@ -1258,6 +1304,9 @@ describe("Migration 20260814170000 — appointment booking RPCs", () => {
         source_task_id: booking!.task_id,
         expected_generation: 0,
         attempts: 1, // bumped from 0 by the claim
+        phase: "pending",
+        new_event_id: null,
+        result_reason: null,
         task_due_at: p_start,
         task_end_at: p_end,
         task_title: "Claim probe",
@@ -1297,6 +1346,171 @@ describe("Migration 20260814170000 — appointment booking RPCs", () => {
       const { data, error } = await claimCalendarCreations(serviceClient, 50);
       expect(error).toBeNull();
       expect(data!.some((row) => row.source_task_id === booking!.task_id)).toBe(false);
+    });
+
+    it("a retryable outcome is NOT reclaimable until its backed-off next_attempt_at passes", async () => {
+      const booker = await createUserForOrg(BMH_ORG_ID);
+      const assignee = await createUserForOrg(BMH_ORG_ID);
+      const { p_start, p_end } = windowArgs();
+
+      const { data: booking, error: bookErr } = await bookAppointment(booker.client, {
+        p_org: BMH_ORG_ID,
+        p_assignee: assignee.userId,
+        p_start,
+        p_end,
+        p_timezone: "America/Chicago",
+        p_title: "Backoff probe",
+      });
+      expect(bookErr).toBeNull();
+
+      const { data: firstClaim, error: firstErr } = await claimCalendarCreations(
+        serviceClient,
+        50,
+      );
+      expect(firstErr).toBeNull();
+      const claimed = firstClaim!.find((row) => row.source_task_id === booking!.task_id);
+      expect(claimed).toBeDefined();
+
+      // Simulate a worker's retryable-outcome write (create-worker.ts
+      // markRetryableFailure): push next_attempt_at into the future
+      // without touching phase/attempts.
+      const future = new Date(Date.now() + 5 * 60_000).toISOString();
+      const { error: leaseErr } = await ledgerLeaseReader()
+        .from("task_calendar_mutations")
+        .update({ next_attempt_at: future })
+        .eq("id", claimed!.ledger_id);
+      expect(leaseErr).toBeNull();
+
+      const { data: duringBackoff, error: duringErr } = await claimCalendarCreations(
+        serviceClient,
+        50,
+      );
+      expect(duringErr).toBeNull();
+      expect(duringBackoff!.some((row) => row.ledger_id === claimed!.ledger_id)).toBe(false);
+
+      // Backdate the lease into the past — same shape as an expired lease
+      // or a completed backoff window — and the row becomes claimable again.
+      const past = new Date(Date.now() - 1_000).toISOString();
+      const { error: expireLeaseErr } = await ledgerLeaseReader()
+        .from("task_calendar_mutations")
+        .update({ next_attempt_at: past })
+        .eq("id", claimed!.ledger_id);
+      expect(expireLeaseErr).toBeNull();
+
+      const { data: afterBackoff, error: afterErr } = await claimCalendarCreations(
+        serviceClient,
+        50,
+      );
+      expect(afterErr).toBeNull();
+      const reclaimed = afterBackoff!.find((row) => row.ledger_id === claimed!.ledger_id);
+      expect(reclaimed).toBeDefined();
+      expect(reclaimed!.attempts).toBe(2); // bumped again by the second claim
+    });
+
+    describe("fn_expire_exhausted_calendar_creations", () => {
+      it("terminalizes an exhausted row to phase='failed' and frees the chain-serialization slot", async () => {
+        const booker = await createUserForOrg(BMH_ORG_ID);
+        const assignee = await createUserForOrg(BMH_ORG_ID);
+        const { p_start, p_end } = windowArgs();
+
+        const { data: booking, error: bookErr } = await bookAppointment(booker.client, {
+          p_org: BMH_ORG_ID,
+          p_assignee: assignee.userId,
+          p_start,
+          p_end,
+          p_timezone: "America/Chicago",
+          p_title: "Exhaustion probe",
+        });
+        expect(bookErr).toBeNull();
+
+        const { data: ledgerBefore } = await db
+          .from("task_calendar_mutations")
+          .select("id")
+          .eq("source_task_id", booking!.task_id)
+          .single();
+        const ledgerId = (ledgerBefore as { id: string }).id;
+
+        // Exhausted-and-expired: attempts at the cap, lease in the past —
+        // exactly the state the worker leaves a row in after its 5th
+        // failed attempt's backoff window elapses.
+        const past = new Date(Date.now() - 1_000).toISOString();
+        const { error: bumpErr } = await ledgerLeaseReader()
+          .from("task_calendar_mutations")
+          .update({ attempts: 5, next_attempt_at: past })
+          .eq("id", ledgerId);
+        expect(bumpErr).toBeNull();
+
+        const { data: expiredCount, error: expireErr } =
+          await expireExhaustedCalendarCreations(serviceClient);
+        expect(expireErr).toBeNull();
+        expect(expiredCount).toBeGreaterThanOrEqual(1);
+
+        const { data: ledgerAfter } = await ledgerLeaseReader()
+          .from("task_calendar_mutations")
+          .select("phase, attempts, next_attempt_at")
+          .eq("id", ledgerId)
+          .single();
+        expect(ledgerAfter?.phase).toBe("failed");
+
+        // Chain slot freed: idx_task_calendar_mutations_chain_serialization
+        // only excludes 'failed', so once this row terminalizes, a fresh
+        // pending/provider_done row on the SAME chain no longer collides
+        // with it — proving the exhaustion sweep is what actually frees
+        // PR 3's lifecycle mutations, not just the attempts<5 claim filter.
+        const { error: insertErr } = await ledgerLeaseReader(db)
+          .from("task_calendar_mutations")
+          .insert({
+            org_id: BMH_ORG_ID,
+            calendar_chain_id: booking!.calendar_chain_id,
+            operation: "reschedule",
+            phase: "pending",
+            source_task_id: booking!.task_id,
+            old_assignee_id: assignee.userId,
+            expected_generation: 0,
+          });
+        expect(insertErr).toBeNull();
+      });
+
+      it("does not touch a row still within its lease window even at attempts>=5", async () => {
+        const booker = await createUserForOrg(BMH_ORG_ID);
+        const assignee = await createUserForOrg(BMH_ORG_ID);
+        const { p_start, p_end } = windowArgs();
+
+        const { data: booking, error: bookErr } = await bookAppointment(booker.client, {
+          p_org: BMH_ORG_ID,
+          p_assignee: assignee.userId,
+          p_start,
+          p_end,
+          p_timezone: "America/Chicago",
+          p_title: "In-flight exhaustion probe",
+        });
+        expect(bookErr).toBeNull();
+
+        const { data: ledgerBefore } = await db
+          .from("task_calendar_mutations")
+          .select("id")
+          .eq("source_task_id", booking!.task_id)
+          .single();
+        const ledgerId = (ledgerBefore as { id: string }).id;
+
+        const future = new Date(Date.now() + 5 * 60_000).toISOString();
+        const { error: bumpErr } = await ledgerLeaseReader()
+          .from("task_calendar_mutations")
+          .update({ attempts: 5, next_attempt_at: future })
+          .eq("id", ledgerId);
+        expect(bumpErr).toBeNull();
+
+        await expireExhaustedCalendarCreations(serviceClient);
+
+        const { data: ledgerAfter } = await ledgerLeaseReader()
+          .from("task_calendar_mutations")
+          .select("phase, attempts, next_attempt_at")
+          .eq("id", ledgerId)
+          .single();
+        // Still 'pending' — the worker holding this row's in-flight lease
+        // gets to finish before the exhaustion sweep would terminalize it.
+        expect(ledgerAfter?.phase).toBe("pending");
+      });
     });
 
     // The Supabase JS client auto-commits every PostgREST call, so proving
@@ -1366,6 +1580,19 @@ describe("Migration 20260814170000 — appointment booking RPCs", () => {
           .single();
         // Exactly one claim (connA's) landed — attempts bumped once, not twice.
         expect((ledgerRow as { attempts: number }).attempts).toBe(1);
+
+        // Now that connA has committed, the row is no longer lock-held —
+        // proving the LEASE (not just the row lock connB raced against
+        // above) is what keeps it from being reclaimed. Without
+        // next_attempt_at, this claim would succeed immediately.
+        const { data: afterCommit, error: afterCommitErr } = await claimCalendarCreations(
+          serviceClient,
+          50,
+        );
+        expect(afterCommitErr).toBeNull();
+        expect(
+          afterCommit!.some((row) => row.ledger_id === claimedByA!.ledger_id),
+        ).toBe(false);
       });
     });
   });

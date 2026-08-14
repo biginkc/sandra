@@ -272,6 +272,25 @@ end;
 $$;
 
 -- ----------------------------------------------------------------------------
+-- 0b. task_calendar_mutations — durable lease column (Codex round 6)
+--
+-- next_attempt_at backs the claim RPC's lease + backoff: the claim SETs it
+-- forward on every claim (fn_claim_calendar_creations below) so a row
+-- already being worked cannot be reclaimed by a concurrent sweep, or by
+-- the SAME sweep's next p_limit:1 loop iteration, within the lease window.
+-- A worker that crashes mid-processing is recovered once the lease
+-- expires — no row can be claimed forever. A retryable outcome pushes it
+-- further out (create-worker.ts markRetryableFailure, attempts-scaled
+-- backoff). NULL means "never claimed" — always eligible, same as an
+-- expired lease.
+-- ----------------------------------------------------------------------------
+alter table public.task_calendar_mutations
+  add column next_attempt_at timestamptz;
+
+comment on column public.task_calendar_mutations.next_attempt_at is
+  'Claim lease / retry-backoff stamp (round 6). NULL or <= now() means eligible to claim; the claim RPC sets it to now() + 2 minutes on every claim, and a retryable worker outcome pushes it further out (attempts * 2 minutes) so repeated failures back off instead of hammering the provider every sweep tick.';
+
+-- ----------------------------------------------------------------------------
 -- 1. fn_uuid_to_base32hex — deterministic Google Calendar event id
 --
 -- Pure/immutable transform, no table access: encodes a uuid's 128 bits as
@@ -706,15 +725,28 @@ grant execute on function public.fn_book_appointment(uuid, uuid, timestamptz, ti
 -- Service-role-only: the create-worker's cron sweep is the sole caller.
 -- Single data-modifying CTE — FOR UPDATE SKIP LOCKED on the candidate
 -- rows (a plain SELECT subquery), then an UPDATE...FROM that bumps
--- attempts + updated_at on exactly the locked set and returns it joined
--- with the owning task's due_at/end_at/title/assignee_id. Bumping attempts
--- AT CLAIM TIME (not only on failure) means a crash between claim and
--- provider call still shows a used attempt on the next sweep — a stuck
--- row cannot be claimed forever. Rows at attempts >= 5 are simply never
--- claimed again: terminal by exhaustion, no separate phase transition
--- needed for that path (contrast with 'failed', which is an explicit
--- worker-written terminal state for permanent provider errors).
+-- attempts + next_attempt_at + updated_at on exactly the locked set and
+-- returns it joined with the owning task's due_at/end_at/title/assignee_id.
+--
+-- Round 6 (durable lease): eligibility now also admits phase='provider_done'
+-- (a row whose Google call succeeded but whose task-CAS/ledger-finalize
+-- step crashed before completing — create-worker.ts resumes it without
+-- re-hitting Google) and gates every candidate on
+-- (next_attempt_at IS NULL OR next_attempt_at <= now()). The claim SETs
+-- next_attempt_at = now() + 2 minutes as a flat lease alongside attempts++:
+-- same-sweep reclaim is impossible (the lease pushes the row out of the
+-- eligible window before this sweep's next p_limit:1 loop iteration can
+-- see it), a concurrent sweep is excluded for the same window, and a
+-- worker that crashes mid-processing recovers once the lease expires — no
+-- row can be claimed forever. `phase`, `new_event_id`, and `result_reason`
+-- are now returned too so the worker can branch on provider_done vs.
+-- pending and preserve reconciled_409 vs. event_created across a resume.
+-- attempts >= 5 rows are simply never claimed again regardless of lease
+-- state — terminal by exhaustion; fn_expire_exhausted_calendar_creations
+-- below is what actually terminalizes their phase and frees the chain.
 -- ----------------------------------------------------------------------------
+drop function if exists public.fn_claim_calendar_creations(integer);
+
 create or replace function public.fn_claim_calendar_creations(p_limit integer)
 returns table (
   ledger_id uuid,
@@ -724,6 +756,9 @@ returns table (
   expected_generation integer,
   client_event_id text,
   attempts integer,
+  phase text,
+  new_event_id text,
+  result_reason text,
   task_due_at timestamptz,
   task_end_at timestamptz,
   task_title text,
@@ -736,13 +771,15 @@ as $$
   with claimed as (
     update public.task_calendar_mutations m
     set attempts = m.attempts + 1,
+        next_attempt_at = now() + interval '2 minutes',
         updated_at = now()
     from (
       select id
       from public.task_calendar_mutations
       where operation = 'create'
-        and phase = 'pending'
+        and phase in ('pending', 'provider_done')
         and attempts < 5
+        and (next_attempt_at is null or next_attempt_at <= now())
       order by created_at
       for update skip locked
       limit greatest(p_limit, 0)
@@ -750,20 +787,79 @@ as $$
     where m.id = locked.id
     returning
       m.id, m.org_id, m.calendar_chain_id, m.source_task_id,
-      m.expected_generation, m.client_event_id, m.attempts
+      m.expected_generation, m.client_event_id, m.attempts, m.phase,
+      m.new_event_id, m.result_reason
   )
   select
     claimed.id, claimed.org_id, claimed.calendar_chain_id, claimed.source_task_id,
-    claimed.expected_generation, claimed.client_event_id, claimed.attempts,
+    claimed.expected_generation, claimed.client_event_id, claimed.attempts, claimed.phase,
+    claimed.new_event_id, claimed.result_reason,
     t.due_at, t.end_at, t.title, t.assignee_id
   from claimed
   join public.tasks t on t.id = claimed.source_task_id;
 $$;
 
 comment on function public.fn_claim_calendar_creations(integer) is
-  'Service-role-only claim for the durable calendar-creation sweep worker (PR 2 pull-forward of PR 3''s ledger consumer, create operation only). FOR UPDATE SKIP LOCKED over task_calendar_mutations WHERE operation=create AND phase=pending AND attempts<5; bumps attempts+updated_at atomically with the claim so a crash between claim and provider call still shows a used attempt next sweep. attempts>=5 rows are never reclaimed — terminal by exhaustion.';
+  'Service-role-only claim for the durable calendar-creation sweep worker (PR 2 pull-forward of PR 3''s ledger consumer, create operation only). FOR UPDATE SKIP LOCKED over task_calendar_mutations WHERE operation=create AND phase IN (pending, provider_done) AND attempts<5 AND (next_attempt_at IS NULL OR next_attempt_at<=now()); sets next_attempt_at=now()+2min (lease) alongside attempts+updated_at atomically with the claim, so same-sweep/concurrent reclaim is impossible within the lease and a crashed worker recovers on expiry. Returns phase/new_event_id/result_reason so the worker can resume a provider_done row without re-hitting Google. attempts>=5 rows are never reclaimed regardless of lease state.';
 
 revoke all on function public.fn_claim_calendar_creations(integer) from public, anon, authenticated;
 grant execute on function public.fn_claim_calendar_creations(integer) to service_role;
+
+-- ----------------------------------------------------------------------------
+-- 5. fn_expire_exhausted_calendar_creations — terminal exhaustion sweep
+--
+-- attempts>=5 rows are excluded from fn_claim_calendar_creations forever,
+-- but on their own they never transition phase — without this they would
+-- sit at 'pending' or 'provider_done' permanently, and
+-- idx_task_calendar_mutations_chain_serialization (WHERE phase IN
+-- ('pending','provider_done'), 20260814150000) would hold their chain
+-- slot open forever, blocking any future lifecycle mutation on that
+-- appointment (PR 3's reschedule/reassign/cancel) with no way out. This
+-- terminalizes them to phase='failed' (excluded from that partial index),
+-- freeing the chain. Gated on next_attempt_at <= now() so a row is never
+-- terminal-failed while its lease from the 5th claim is still current —
+-- the worker holding it gets to finish (or itself mark it 'failed' via
+-- markPermanentFailure) before this sweep would. result_reason
+-- distinguishes a 'pending' exhaustion (Google was never successfully
+-- called) from a 'provider_done' exhaustion (the Google event exists;
+-- only the local finalize kept failing) — last_error is left untouched,
+-- so the worker's last-attempt failure detail survives the transition.
+-- Service-role-only, called once per sweep by the cron route before the
+-- claim loop starts — not folded into fn_claim_calendar_creations itself,
+-- so a p_limit:1 claim loop doesn't re-run this scan on every iteration.
+-- ----------------------------------------------------------------------------
+create or replace function public.fn_expire_exhausted_calendar_creations()
+returns integer
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+  v_count integer;
+begin
+  with expired as (
+    update public.task_calendar_mutations
+    set phase = 'failed',
+        result_reason = case
+          when phase = 'provider_done' then 'finalize_retries_exhausted'
+          else 'retries_exhausted'
+        end,
+        updated_at = now()
+    where operation = 'create'
+      and phase in ('pending', 'provider_done')
+      and attempts >= 5
+      and next_attempt_at <= now()
+    returning 1
+  )
+  select count(*) into v_count from expired;
+  return v_count;
+end;
+$$;
+
+comment on function public.fn_expire_exhausted_calendar_creations() is
+  'Service-role-only terminal-exhaustion sweep (round 6): rows at attempts>=5 whose lease has expired (phase IN (pending, provider_done) AND next_attempt_at<=now()) move to phase=failed with result_reason retries_exhausted (pending) or finalize_retries_exhausted (provider_done — the Google event exists, only local finalize kept failing); last_error is preserved. Frees idx_task_calendar_mutations_chain_serialization''s slot so a stuck creation cannot block PR 3''s lifecycle mutations on the same chain forever. Called once per sweep by the cron route, not per claim.';
+
+revoke all on function public.fn_expire_exhausted_calendar_creations() from public, anon, authenticated;
+grant execute on function public.fn_expire_exhausted_calendar_creations() to service_role;
 
 commit;

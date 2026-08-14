@@ -64,15 +64,20 @@ function createServiceRoleClient() {
   });
 }
 
-/** fn_claim_calendar_creations is not (and, per this PR's scope, must not
- *  be) in the generated Database["public"]["Functions"] map — same
- *  local-cast pattern as the booking RPC call sites. */
+/** fn_claim_calendar_creations / fn_expire_exhausted_calendar_creations are
+ *  not (and, per this PR's scope, must not be) in the generated
+ *  Database["public"]["Functions"] map — same local-cast pattern as the
+ *  booking RPC call sites. */
 type ClaimRpcClient = {
   rpc(
     fn: "fn_claim_calendar_creations",
     args: { p_limit: number },
   ): Promise<{
     data: ClaimedCalendarCreationRow[] | null;
+    error: { message: string } | null;
+  }>;
+  rpc(fn: "fn_expire_exhausted_calendar_creations"): Promise<{
+    data: number | null;
     error: { message: string } | null;
   }>;
 };
@@ -113,12 +118,28 @@ export async function runCalendarMutationSweep(
   opts: { budgetMs?: number; claimLimit?: number } = {},
 ): Promise<{
   claimed: number;
+  expired: number;
   outcomes: Record<string, number>;
   budgetExhausted: boolean;
 }> {
   const budgetMs = opts.budgetMs ?? SWEEP_BUDGET_MS;
   const claimLimit = opts.claimLimit ?? MAX_ROWS_PER_SWEEP;
   const startedAt = Date.now();
+  const rpcClient = supabase as unknown as ClaimRpcClient;
+
+  // Terminal exhaustion runs once per sweep, before any claiming — not
+  // per claim iteration, since the claim loop below calls the claim RPC
+  // with p_limit:1 up to claimLimit times. A row stuck at attempts>=5
+  // holds idx_task_calendar_mutations_chain_serialization's slot open
+  // (that partial index excludes only 'failed') until it's moved there,
+  // which would otherwise block PR 3's lifecycle mutations on the same
+  // appointment forever.
+  const { data: expiredCount, error: expireError } = await rpcClient.rpc(
+    "fn_expire_exhausted_calendar_creations",
+  );
+  if (expireError) {
+    throw new Error(`fn_expire_exhausted_calendar_creations failed: ${expireError.message}`);
+  }
 
   const outcomes: Record<string, number> = {};
   let claimed = 0;
@@ -130,9 +151,9 @@ export async function runCalendarMutationSweep(
       break;
     }
 
-    const { data: claimedRows, error } = await (
-      supabase as unknown as ClaimRpcClient
-    ).rpc("fn_claim_calendar_creations", { p_limit: 1 });
+    const { data: claimedRows, error } = await rpcClient.rpc("fn_claim_calendar_creations", {
+      p_limit: 1,
+    });
     if (error) {
       throw new Error(`fn_claim_calendar_creations failed: ${error.message}`);
     }
@@ -153,7 +174,7 @@ export async function runCalendarMutationSweep(
     }
   }
 
-  return { claimed, outcomes, budgetExhausted };
+  return { claimed, expired: expiredCount ?? 0, outcomes, budgetExhausted };
 }
 
 export async function GET(request: Request) {
