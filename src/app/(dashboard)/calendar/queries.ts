@@ -30,43 +30,32 @@ export type FetchCalendarAppointmentsResult =
  * the task with a terminal status other than 'open'/'completed', and the
  * calendar surface never shows them).
  *
- * Paginates internally with KEYSET pagination (Codex round 5 — `.range()`
- * offset pagination skips/duplicates rows when concurrent writes shift the
- * result set between page requests: a delete before the cursor position
- * shifts every later row left by one, so an offset-based next page
- * re-reads one row and silently drops another). Each page after the first
- * filters strictly beyond the last (due_at, id) tuple already seen instead
- * of trusting a numeric offset, so mutation between page requests can
- * never skip or duplicate a row. See the loop below for why a query
- * failure on ANY page — or exhausting MAX_PAGES on a still-full final
- * page — fails the whole load rather than returning a truncated result.
- */
-const APPOINTMENTS_PAGE_SIZE = 1_000;
-const MAX_PAGES = 100;
-
-/** Keyset cursor: the (due_at, id) of the last row on the previous page. */
-type AppointmentsCursor = { dueAt: string; id: string };
-
-/**
- * PostgREST `.or()` keyset filter for "strictly after (due_at, id)" —
- * same raw-grammar-with-quoted-timestamp shape as
- * `messages/queued-cursor.ts`'s `buildQueuedCursorFilter`. Unlike that
- * cursor, `dueAt`/`id` here are never client input — they come straight
- * off the previous page's own row data — so they don't need that file's
- * closed-form validation against injection; they only need correct
- * PostgREST encoding (ISO timestamp double-quoted so the colons in it
- * can't be misparsed as filter grammar).
+ * Reads the whole week in ONE statement (Codex round 6 — client-side
+ * pagination, even keyset, is fundamentally unsound here: its cursor is
+ * derived from `due_at`, which is itself mutable data. A concurrent
+ * reschedule that moves an appointment's `due_at` from beyond the cursor
+ * to before it — an ordinary lifecycle operation, not an edge case —
+ * makes a later page's keyset filter skip that row entirely, or return an
+ * already-delivered row again if it moves the other direction. Each page
+ * is a separate database round trip with its own read, so nothing ties
+ * them to one consistent view of the data; no cursor design fixes that,
+ * only removing the multi-request gap does).
  *
- * `due_at` is NOT NULL for `type='appointment'` rows (PR 1 CHECK), so
- * there's no null-tail case to handle (contrast the outbox cursor, whose
- * `scheduled_for` can be null).
+ * A single query has no such gap: Postgres gives every statement a
+ * snapshot of the database as of that statement's start (read committed's
+ * per-statement snapshot), so one `SELECT` sees one consistent instant
+ * regardless of what other transactions commit around it — there is no
+ * "between pages" for a competing write to land in. This trades unbounded
+ * result size for that guarantee, which is the right trade here: a
+ * calendar week is a naturally bounded domain (nobody has 2,000+
+ * appointments in a single week), so `APPOINTMENTS_CAP` is generous
+ * enough to never bind in real usage while keeping the query provably
+ * boundable. Fetching `CAP + 1` and failing closed if that extra row
+ * comes back means a week that's actually too large to load truthfully
+ * surfaces as the existing `ok:false` / "couldn't load, Retry" state
+ * instead of silently rendering a truncated week as complete.
  */
-function buildAppointmentsKeysetFilter(cursor: AppointmentsCursor): string {
-  return (
-    `due_at.gt."${cursor.dueAt}",` +
-    `and(due_at.eq."${cursor.dueAt}",id.gt.${cursor.id})`
-  );
-}
+const APPOINTMENTS_CAP = 2_000; // generous: far above any real org's appointments/week
 
 function buildAppointmentsQuery(
   supabase: Awaited<ReturnType<typeof createClient>>,
@@ -104,64 +93,37 @@ export async function fetchCalendarAppointments(
 ): Promise<FetchCalendarAppointmentsResult> {
   const supabase = await createClient();
 
-  const allRows: RawAppointmentRow[] = [];
+  // Single statement, single snapshot (Codex round 6 — see the doc comment
+  // above `APPOINTMENTS_CAP`). `.order()` is still needed for a
+  // deterministic row order in the response (not for cursor construction —
+  // there is no cursor); `id` breaks ties within the same `due_at`.
+  const { data, error } = await buildAppointmentsQuery(supabase, orgId, opts)
+    .order("due_at", { ascending: true })
+    .order("id", { ascending: true })
+    .limit(APPOINTMENTS_CAP + 1);
 
-  // Deterministic pagination (Codex round 4): `due_at` alone can tie
-  // (multiple appointments in the same minute), so `id` is a secondary
-  // sort key giving every page a stable, gap-free cursor — without it,
-  // Postgres is free to reorder tied rows between page requests and a row
-  // can be silently skipped or duplicated across pages. ANY page failure
-  // fails the whole load (`ok: false`) rather than returning a
-  // truncated week as if it were complete.
-  let cursor: AppointmentsCursor | null = null;
-  let complete = false;
-
-  for (let page = 0; page < MAX_PAGES; page += 1) {
-    let query = buildAppointmentsQuery(supabase, orgId, opts);
-    if (cursor) {
-      query = query.or(buildAppointmentsKeysetFilter(cursor));
+  if (error || !data) {
+    if (error) {
+      console.error("[calendar] fetchCalendarAppointments failed", {
+        message: error.message,
+        code: error.code,
+      });
     }
-
-    const { data, error } = await query
-      .order("due_at", { ascending: true })
-      .order("id", { ascending: true })
-      .limit(APPOINTMENTS_PAGE_SIZE);
-
-    if (error || !data) {
-      if (error) {
-        console.error("[calendar] fetchCalendarAppointments failed", {
-          message: error.message,
-          code: error.code,
-        });
-      }
-      return { ok: false };
-    }
-
-    allRows.push(...data);
-    if (data.length < APPOINTMENTS_PAGE_SIZE) {
-      complete = true;
-      break;
-    }
-    const last = data[data.length - 1] as unknown as {
-      due_at: string;
-      id: string;
-    };
-    cursor = { dueAt: last.due_at, id: last.id };
+    return { ok: false };
   }
 
-  // MAX_PAGES exhausted with the final page still full — there could be
-  // more rows beyond it. Never return that as a truncated success; a
-  // pathological org should surface as a load failure, not silent data
-  // loss (Codex round 5).
-  if (!complete) {
+  // The extra (CAP+1)th row came back — the week has more appointments
+  // than the cap covers. Fail closed rather than silently render a
+  // truncated week as complete.
+  if (data.length > APPOINTMENTS_CAP) {
     console.error(
-      "[calendar] fetchCalendarAppointments exhausted MAX_PAGES without a short page",
-      { orgId, maxPages: MAX_PAGES },
+      "[calendar] fetchCalendarAppointments exceeded APPOINTMENTS_CAP",
+      { orgId, cap: APPOINTMENTS_CAP },
     );
     return { ok: false };
   }
 
-  const rows = allRows.map((row) => {
+  const rows = data.map((row) => {
     const prop = row.properties as unknown as {
       address: string | null;
       city: string | null;
@@ -252,69 +214,49 @@ export type FetchOrgRosterResult =
   | { ok: true; roster: OrgRosterEntry[]; labelsDegraded: boolean }
   | { ok: false };
 
-const ROSTER_PAGE_SIZE = 1_000;
+// Single statement, single snapshot — same rationale as
+// `APPOINTMENTS_CAP` above: a membership add/remove between page requests
+// could desync a multi-page keyset load exactly like a reschedule desyncs
+// the appointments one, and a per-org roster is just as naturally bounded.
+const ROSTER_CAP = 500; // generous: far above any real org's active membership count
 
 export async function fetchOrgRoster(orgId: string): Promise<FetchOrgRosterResult> {
   const admin = createAdminClient();
   const activeAt = new Date().toISOString();
 
-  const memberships: { user_id: string }[] = [];
+  const { data, error } = await admin
+    .from("memberships")
+    .select("user_id")
+    .eq("org_id", orgId)
+    .eq("access_status", "active")
+    .is("deletion_prepared_at", null)
+    .or(`access_expires_at.is.null,access_expires_at.gt.${activeAt}`)
+    .order("user_id", { ascending: true })
+    .limit(ROSTER_CAP + 1);
 
-  // KEYSET pagination on `user_id` (Codex round 5 — same rationale as the
-  // appointments query above: `.range()` offsets skip/duplicate rows when
-  // a membership is added or removed between page requests). `user_id` is
-  // unique per row here (one active membership per user per org), so a
-  // plain `.gt("user_id", cursor)` is enough — no composite tie-break
-  // needed. Any page failure, or exhausting MAX_PAGES on a still-full
-  // final page, fails the whole roster load (Codex round 4/5: a large
-  // org's roster silently truncating would drop real teammates from BOTH
-  // the filter and ownership attribution, not just cosmetics).
-  let cursor: string | null = null;
-  let complete = false;
-
-  for (let page = 0; page < MAX_PAGES; page += 1) {
-    let query = admin
-      .from("memberships")
-      .select("user_id")
-      .eq("org_id", orgId)
-      .eq("access_status", "active")
-      .is("deletion_prepared_at", null)
-      .or(`access_expires_at.is.null,access_expires_at.gt.${activeAt}`);
-    if (cursor) {
-      query = query.gt("user_id", cursor);
+  if (error || !data) {
+    if (error) {
+      console.error("[calendar] fetchOrgRoster failed (membership identity)", {
+        message: error.message,
+        code: error.code,
+      });
     }
-
-    const { data, error } = await query
-      .order("user_id", { ascending: true })
-      .limit(ROSTER_PAGE_SIZE);
-
-    if (error || !data) {
-      if (error) {
-        console.error("[calendar] fetchOrgRoster failed (membership identity)", {
-          message: error.message,
-          code: error.code,
-        });
-      }
-      return { ok: false };
-    }
-
-    memberships.push(...data);
-    if (data.length < ROSTER_PAGE_SIZE) {
-      complete = true;
-      break;
-    }
-    cursor = data[data.length - 1].user_id as string;
-  }
-
-  if (!complete) {
-    console.error(
-      "[calendar] fetchOrgRoster exhausted MAX_PAGES without a short page",
-      { orgId, maxPages: MAX_PAGES },
-    );
     return { ok: false };
   }
 
-  const ids = memberships.map((m) => m.user_id as string);
+  // The extra (CAP+1)th row came back — the org has more active members
+  // than the cap covers. Fail closed rather than silently truncate the
+  // roster (dropping real teammates from both the filter and ownership
+  // attribution would be worse than a visible load failure).
+  if (data.length > ROSTER_CAP) {
+    console.error("[calendar] fetchOrgRoster exceeded ROSTER_CAP", {
+      orgId,
+      cap: ROSTER_CAP,
+    });
+    return { ok: false };
+  }
+
+  const ids = data.map((m) => m.user_id as string);
   const emails = await fetchAssigneeEmails(ids);
   // Any id whose email didn't come back — whatever the cause (error,
   // throw, partial pagination, or the user simply has none) — is a
