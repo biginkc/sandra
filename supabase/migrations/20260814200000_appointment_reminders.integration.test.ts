@@ -105,6 +105,9 @@ type ReminderDeliveryFencingClient = {
       sent_at?: string | null;
       created_at?: string;
       next_attempt_at?: string | null;
+      /** Codex round 12 (finding 2): also not yet in the generated
+       *  Database["public"]["Tables"] map — same local-cast rationale. */
+      dispatching_at?: string | null;
     }): FencedDeliveryUpdateBuilder;
     select(columns: "status, claim_token"): {
       eq(column: "id", value: string): {
@@ -666,6 +669,82 @@ describe("Migration 20260814200000 — appointment reminder claim RPCs", () => {
       const { data, error } = await claimReminderRetries(db);
       expect(error).toBeNull();
       expect((data ?? []).some((r) => r.delivery_id === delivery!.id)).toBe(false);
+    });
+
+    // Codex round 12 (finding 2): 'dispatching' is excluded from
+    // fn_claim_reminder_retries's eligibility the SAME way timeout_ambiguous
+    // is — never added to the candidates CTE's status IN-list — so a row a
+    // worker crashed on between the provider accepting the message and its
+    // own outcome write landing can never be reclaimed and resent.
+    it("Codex round 12 (finding 2): never selects a 'dispatching' delivery, even with attempts < 3 and a stale created_at — excluded by construction", async () => {
+      const member = await createUserForOrg(BMH_ORG_ID);
+      await setPrefs(member.userId);
+      const appt = await insertDueAppointment(member.userId, 10);
+      await claimAppointmentReminders(db);
+      const { data: delivery } = await db
+        .from("task_reminder_deliveries")
+        .select("id")
+        .eq("task_id", appt.id)
+        .eq("channel", "bell")
+        .single();
+      expect(delivery).not.toBeNull();
+
+      // The status CHECK constraint accepts 'dispatching' — the value
+      // reminders.ts's markDispatching fences a row into right before its
+      // Slack/SMS provider call.
+      await asReminderDeliveryFencingClient(db)
+        .from("task_reminder_deliveries")
+        .update({
+          status: "dispatching",
+          attempts: 0,
+          created_at: new Date(Date.now() - 11 * 60_000).toISOString(),
+        })
+        .eq("id", delivery!.id);
+
+      const { data, error } = await claimReminderRetries(db);
+      expect(error).toBeNull();
+      expect((data ?? []).some((r) => r.delivery_id === delivery!.id)).toBe(false);
+    });
+
+    // Codex round 12 (finding 2): crash-boundary simulation — a row swept
+    // into 'dispatching' (a worker legitimately owned it and was about to
+    // call the provider) whose worker then crashed. The NEXT sweep's retry
+    // claim must never resend it, regardless of how long it's been stuck —
+    // only the route's own `sweepStaleDispatchingReminders` (a separate,
+    // >10-minute reconciliation path, not this RPC) is allowed to move it
+    // out of 'dispatching'.
+    it("Codex round 12 (finding 2): crash-boundary simulation — a row left 'dispatching' past 10 minutes is still never picked up by the next retry claim", async () => {
+      const member = await createUserForOrg(BMH_ORG_ID);
+      await setPrefs(member.userId);
+      const appt = await insertDueAppointment(member.userId, 10);
+      await claimAppointmentReminders(db);
+      const { data: delivery } = await db
+        .from("task_reminder_deliveries")
+        .select("id")
+        .eq("task_id", appt.id)
+        .eq("channel", "bell")
+        .single();
+      expect(delivery).not.toBeNull();
+
+      await asReminderDeliveryFencingClient(db)
+        .from("task_reminder_deliveries")
+        .update({
+          status: "dispatching",
+          dispatching_at: new Date(Date.now() - 15 * 60_000).toISOString(),
+          created_at: new Date(Date.now() - 15 * 60_000).toISOString(),
+        })
+        .eq("id", delivery!.id);
+
+      // Simulate several sweep intervals passing — the retry claim must
+      // never resend it. (The stale-dispatching reconciliation sweep that
+      // WOULD eventually move this row to timeout_ambiguous lives in
+      // route.ts, not this RPC, and is covered by that route's own unit
+      // tests.)
+      for (let i = 0; i < 3; i += 1) {
+        const { data, error } = await claimReminderRetries(db);
+        expect(error).toBeNull();
+        expect((data ?? []).some((r) => r.delivery_id === delivery!.id)).toBe(false);
+      }
     });
   });
 

@@ -79,7 +79,15 @@ begin;
 -- ----------------------------------------------------------------------------
 alter table public.task_reminder_deliveries
   add column claim_token uuid,
-  add column next_attempt_at timestamptz;
+  add column next_attempt_at timestamptz,
+  -- Codex round 12 (finding 2): stamped only when a row is fenced INTO
+  -- 'dispatching' (reminders.ts's markDispatching, right before the
+  -- Slack/SMS provider call) — the staleness clock the sweep route's
+  -- sweepStaleDispatchingReminders reads to find rows abandoned mid-dispatch
+  -- by a crashed worker. NULL for every row that has never entered
+  -- 'dispatching' (bell, which is never fenced this way — see
+  -- markDispatching's doc comment for why bell is exempt).
+  add column dispatching_at timestamptz;
 
 comment on column public.task_reminder_deliveries.claim_token is
   'Fencing token (Codex round 1, same model as task_calendar_mutations). fn_claim_reminder_retries mints a fresh uuid on every claim of a still-valid row; the worker''s markDelivery write is scoped WHERE id=<mine> AND claim_token=<mine> AND status=<the status handed to the worker>, so a stalled worker whose lease expired and was reclaimed writes zero rows instead of clobbering the new claim. NULL for rows never claimed by the retry sweep (fresh rows from fn_claim_appointment_reminders need no lease — ON CONFLICT DO NOTHING already gives that insert exactly-once ownership).';
@@ -87,14 +95,17 @@ comment on column public.task_reminder_deliveries.claim_token is
 comment on column public.task_reminder_deliveries.next_attempt_at is
   'Claim lease / retry-backoff stamp (Codex round 1). NULL or <= now() means eligible for fn_claim_reminder_retries to claim; the claim sets it to now()+2 minutes on every still-valid claim so a concurrent/same-sweep reclaim is impossible within the lease.';
 
+comment on column public.task_reminder_deliveries.dispatching_at is
+  'Codex round 12 (finding 2). Set by reminders.ts''s markDispatching immediately before the row''s Slack/SMS provider call — the timestamp sweepStaleDispatchingReminders (route.ts) reads to find a row abandoned mid-dispatch (worker crashed between the provider accepting the message and the outcome write landing) and sweep it into timeout_ambiguous after 10 minutes. Never cleared on the way OUT of dispatching — the outcome write moves status away from dispatching, which is what matters; the stale timestamp left behind is inert once status no longer matches.';
+
 alter table public.task_reminder_deliveries
   drop constraint task_reminder_deliveries_status_check;
 alter table public.task_reminder_deliveries
   add constraint task_reminder_deliveries_status_check
-  check (status in ('pending', 'sent', 'failed', 'suppressed', 'timeout_ambiguous'));
+  check (status in ('pending', 'sent', 'failed', 'suppressed', 'timeout_ambiguous', 'dispatching'));
 
 comment on constraint task_reminder_deliveries_status_check on public.task_reminder_deliveries is
-  'suppressed (Codex round 1) is terminal: fn_claim_reminder_retries lands a retry candidate here when its revalidation fails (assignee suspended, channel disabled, or the appointment closed/passed its due_at since the original claim) instead of delivering a now-stale reminder. timeout_ambiguous (Codex round 7, finding 1) is a NON-RESEND holding state, not terminal: the sweep route (route.ts) transitions a row here, fenced by claim_token, when its own per-delivery deadline elapses while the provider call is still in flight (see withDeliveryDeadline) — the send may or may not have reached Slack/Sendillo, so it must never be auto-resent. The still-running call gets a continuation (route.ts, via after()) that fences timeout_ambiguous->sent (with the provider_message_id) on late success, or timeout_ambiguous->failed (now safely retryable — the provider definitively did not deliver) on late definite failure. fn_claim_reminder_retries''s candidates CTE below matches ONLY status IN (''failed'', ''pending'') — timeout_ambiguous is excluded by construction, not by an extra predicate, so it can never be picked up by a retry claim while ambiguous. A row whose continuation never resolves (process killed, provider call truly hangs) is surfaced by the sweep route''s hourly lingering-timeout_ambiguous telemetry for manual operator reconciliation (check the Slack/Sendillo dashboard, then update the row to sent or failed directly). Codex round 11 (finding 1): timeout_ambiguous is ALSO reused (deliberately, not a new status) as the repair/non-resend target when a delivery''s own bookkeeping write for "sent" (or the initial timeout fence itself) exhausts its retries — reminders.ts''s repairIntoNonResendState — since it already carries every guarantee that repair needs (excluded from retry-claim eligibility by construction, surfaced by the same hourly telemetry) with zero new plumbing.';
+  'suppressed (Codex round 1) is terminal: fn_claim_reminder_retries lands a retry candidate here when its revalidation fails (assignee suspended, channel disabled, or the appointment closed/passed its due_at since the original claim) instead of delivering a now-stale reminder. timeout_ambiguous (Codex round 7, finding 1) is a NON-RESEND holding state, not terminal: the sweep route (route.ts) transitions a row here, fenced by claim_token, when its own per-delivery deadline elapses while the provider call is still in flight (see withDeliveryDeadline) — the send may or may not have reached Slack/Sendillo, so it must never be auto-resent. The still-running call gets a continuation (route.ts, via after()) that fences timeout_ambiguous->sent (with the provider_message_id) on late success, or timeout_ambiguous->failed (now safely retryable — the provider definitively did not deliver) on late definite failure. fn_claim_reminder_retries''s candidates CTE below matches ONLY status IN (''failed'', ''pending'') — timeout_ambiguous is excluded by construction, not by an extra predicate, so it can never be picked up by a retry claim while ambiguous. A row whose continuation never resolves (process killed, provider call truly hangs) is surfaced by the sweep route''s hourly lingering-timeout_ambiguous telemetry for manual operator reconciliation (check the Slack/Sendillo dashboard, then update the row to sent or failed directly). Codex round 11 (finding 1): timeout_ambiguous is ALSO reused (deliberately, not a new status) as the repair/non-resend target when a delivery''s own bookkeeping write for "sent" (or the initial timeout fence itself) exhausts its retries — reminders.ts''s repairIntoNonResendState — since it already carries every guarantee that repair needs (excluded from retry-claim eligibility by construction, surfaced by the same hourly telemetry) with zero new plumbing. dispatching (Codex round 12, finding 2) is likewise a NON-RESEND holding state, not terminal: reminders.ts''s markDispatching fences a row here, by claim_token, immediately BEFORE the Slack/SMS provider call — closing the crash window between the provider accepting a message and the mark-sent write landing (the round-4 providerMessageId reconcile branch cannot actually close this window: it depends on provider_message_id already being persisted on a still-pending/failed row, but the ONLY write that ever sets it is the very write a crash in this window means never landed). Both candidates CTEs below match ONLY status IN (''failed'', ''pending'') — dispatching is excluded by construction, identically to timeout_ambiguous, so a row mid-dispatch can never be reclaimed and resent. The worker''s own outcome write transitions dispatching->sent/failed/timeout_ambiguous once the provider call settles; a row whose worker crashed before that write is surfaced by route.ts''s sweepStaleDispatchingReminders (10-minute threshold) into timeout_ambiguous for the same manual operator reconciliation timeout_ambiguous rows already get — never auto-resent.';
 
 -- ----------------------------------------------------------------------------
 -- 1. fn_claim_appointment_reminders — primary window claim
@@ -351,6 +362,10 @@ as $$
     -- predicate that could drift out of sync. Verified explicitly by the
     -- integration test "never selects a timeout_ambiguous delivery, even
     -- with attempts < 3 and a stale created_at" below this migration.
+    -- Codex round 12 (finding 2): dispatching rows are excluded the SAME
+    -- way — never added to this IN-list — so a row mid-provider-call can
+    -- never be reclaimed and resent. See the status CHECK constraint's
+    -- comment above for the full crash-window rationale.
     select d.id, d.task_id, d.org_id, d.channel, d.attempts, d.status
     from public.task_reminder_deliveries d
     where (

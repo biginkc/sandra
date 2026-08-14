@@ -134,6 +134,22 @@ export type ReminderDeliveryOutcome =
       deliveryId: string;
       channel: ReminderChannel;
       lastError: string;
+    }
+  | {
+      /** Codex round 12 (finding 3): `markSentOrRepair`'s fenced sent-write
+       *  matched zero rows because a DIFFERENT owner now holds this row's
+       *  claim_token/lease — a reclaim by a later retry sweep after this
+       *  worker's own lease expired, NOT a failure and NOT a confirmed
+       *  send from THIS worker's perspective. Purely informational for
+       *  this invocation's outcome telemetry: no further write is
+       *  attempted (a repair write here — `repairIntoNonResendState` —
+       *  would risk clobbering the new owner's own outcome via its
+       *  unfenced fallback), and the sweep never counts this as `sent`.
+       *  The new owner's own delivery attempt is authoritative for the
+       *  row. */
+      status: "lease_lost";
+      deliveryId: string;
+      channel: ReminderChannel;
     };
 
 /** Every status `markDelivery` (and its callers) can write or fence
@@ -141,8 +157,12 @@ export type ReminderDeliveryOutcome =
  *  ("pending" | "failed", the only two a FRESH claim can hand a worker) —
  *  `timeout_ambiguous` is a status the SWEEP ROUTE itself transitions a row
  *  into and back out of, mid-delivery, never something a claim RPC hands
- *  out. */
-type MarkableDeliveryStatus = "pending" | "failed" | "timeout_ambiguous";
+ *  out. `dispatching` (Codex round 12, finding 2) is likewise never handed
+ *  out by a claim — `markDispatching` below fences a row INTO it right
+ *  before the provider call, and it's the expected pre-write status every
+ *  outcome write after that point fences against instead of the row's
+ *  original claimed status. */
+type MarkableDeliveryStatus = "pending" | "failed" | "timeout_ambiguous" | "dispatching";
 
 type DeliveryUpdateBuilder = {
   eq(column: "id" | "claim_token" | "status", value: string): DeliveryUpdateBuilder;
@@ -155,11 +175,16 @@ type DeliveryUpdateBuilder = {
 type DeliveryUpdateClient = {
   from(table: "task_reminder_deliveries"): {
     update(values: {
-      status: "sent" | "failed" | "timeout_ambiguous";
+      status: "sent" | "failed" | "timeout_ambiguous" | "dispatching";
       attempts: number;
       provider_message_id?: string | null;
       last_error?: string | null;
       sent_at?: string | null;
+      /** Codex round 12 (finding 2): set only on a `status: "dispatching"`
+       *  write — the staleness clock `sweepStaleDispatchingReminders`
+       *  (route.ts) reads to find rows abandoned mid-dispatch by a crashed
+       *  worker. */
+      dispatching_at?: string | null;
     }): DeliveryUpdateBuilder;
   };
 };
@@ -232,7 +257,7 @@ async function markDelivery(
     claimToken: string;
     claimedStatus: MarkableDeliveryStatus;
   },
-  status: "sent" | "failed" | "timeout_ambiguous",
+  status: "sent" | "failed" | "timeout_ambiguous" | "dispatching",
   extra: { providerMessageId?: string | null; lastError?: string | null },
   expectedStatus: MarkableDeliveryStatus = row.claimedStatus,
 ): Promise<"applied" | "lease_lost" | "write_failed"> {
@@ -243,6 +268,12 @@ async function markDelivery(
     provider_message_id: extra.providerMessageId ?? null,
     last_error: extra.lastError ?? null,
     sent_at: status === "sent" ? new Date().toISOString() : null,
+    // Codex round 12 (finding 2): only stamped on the pre-dispatch fence
+    // itself — every OUTCOME write after that (sent/failed/timeout_ambiguous)
+    // leaves it alone (`undefined` -> field omitted from the update), so a
+    // row's dispatching_at always reflects when it MOST RECENTLY entered
+    // 'dispatching', never when it left.
+    ...(status === "dispatching" ? { dispatching_at: new Date().toISOString() } : {}),
   };
 
   let lastErrorMessage: string | null = null;
@@ -286,6 +317,85 @@ async function markDelivery(
     extra: { deliveryId: row.deliveryId, status },
   });
   return "write_failed";
+}
+
+/** A row successfully fenced into 'dispatching' — the shape every outcome
+ *  write after `markDispatching` threads through instead of the row's
+ *  original claim. `attemptsAlreadyBumped: true` because the dispatching
+ *  fence write already recorded this delivery's attempt count; the
+ *  eventual outcome write re-sends the SAME `attempts` value, not a second
+ *  bump. */
+type DispatchingRow = {
+  deliveryId: string;
+  attempts: number;
+  attemptsAlreadyBumped: true;
+  claimToken: string;
+  claimedStatus: "dispatching";
+};
+
+/**
+ * Codex round 12 (finding 2): fences a freshly-claimed row from its claimed
+ * status ('pending'/'failed') into 'dispatching' BEFORE any provider call
+ * is made — closing the exact crash window the round-4 `providerMessageId`
+ * reconcile branch (see `ClaimedReminderRow.providerMessageId`'s doc
+ * comment) claimed to handle but structurally cannot: that branch depends
+ * on `provider_message_id` already being persisted on a still-pending/
+ * failed row, but the ONLY write that ever sets it is the same mark-sent
+ * write a crash-between-accept-and-write means never landed. Sendillo has
+ * no send-side idempotency key (established round 4) and Slack's Web API
+ * has none either (dispatch.ts) — so this worker cannot tell "never sent"
+ * from "sent, crashed before we recorded it" without a durable trace of
+ * the attempt itself.
+ *
+ * 'dispatching' is that trace. It's excluded from BOTH claim RPCs'
+ * eligibility by construction — their candidates CTEs only ever match
+ * `status IN ('failed', 'pending')` (20260814200000_appointment_reminders.sql)
+ * — so nothing can reclaim and resend a row mid-dispatch. A crash after
+ * this fence lands but before the outcome write lands leaves the row in
+ * 'dispatching' indefinitely; `sweepStaleDispatchingReminders` (route.ts)
+ * sweeps any row stuck there past a 10-minute threshold into
+ * `timeout_ambiguous` — the SAME non-resend, manual-reconciliation posture
+ * as every other ambiguous outcome, never auto-resent.
+ *
+ * Returns the fenced row (re-threaded with `claimedStatus: "dispatching"`,
+ * see `DispatchingRow`) on success so the caller's subsequent provider call
+ * and outcome write fence against 'dispatching', not the row's stale
+ * pre-dispatch status. `lease_lost`/`write_failed` mean no provider call
+ * should be attempted at all — nothing has been sent yet in either case, so
+ * there's nothing to reconcile; the caller reports the corresponding
+ * outcome without a further write (a `write_failed` here already exhausted
+ * `markDelivery`'s own retries, so there is nothing left to repair into —
+ * the row simply stays at its original, still-retryable claimed status).
+ */
+async function markDispatching(
+  supabase: SupabaseClient<Database>,
+  row: {
+    deliveryId: string;
+    attempts: number;
+    attemptsAlreadyBumped: boolean;
+    claimToken: string;
+    claimedStatus: MarkableDeliveryStatus;
+  },
+): Promise<
+  | { outcome: "dispatching"; row: DispatchingRow }
+  | { outcome: "lease_lost" }
+  | { outcome: "write_failed" }
+> {
+  const result = await markDelivery(supabase, row, "dispatching", {});
+  if (result !== "applied") {
+    return { outcome: result === "lease_lost" ? "lease_lost" : "write_failed" };
+  }
+  const attempts = row.attemptsAlreadyBumped ? row.attempts : row.attempts + 1;
+  return {
+    outcome: "dispatching",
+    row: {
+      deliveryId: row.deliveryId,
+      attempts,
+      attemptsAlreadyBumped: true,
+      claimToken: row.claimToken,
+      claimedStatus: "dispatching",
+    },
+  };
 }
 
 /**
@@ -398,11 +508,22 @@ async function repairIntoNonResendState(
  * can't be confirmed applied, force the row into the non-resend repair
  * state" path used by every channel's provider-success write (bell,
  * slack x2 — reconcile and fresh-send, sms x2 — same, and the late-
- * resolved-success branch of `resolveTimedOutReminderDelivery`). Returns
- * `true` only when `markDelivery` reports `"applied"` or `"lease_lost"` —
- * the two outcomes every pre-round-11 caller already treated as "report
- * sent" — so this is a pure refactor for those two cases and a genuine
- * behavior fix only for `"write_failed"`.
+ * resolved-success branch of `resolveTimedOutReminderDelivery`).
+ *
+ * Codex round 12 (finding 3): pre-round-12 this returned `true` for BOTH
+ * `"applied"` and `"lease_lost"` — silently reporting `sent` on a fenced
+ * update that matched ZERO rows because a different owner now holds the
+ * lease. That's not a confirmed send by THIS worker, and it corrupted the
+ * sweep's outcome telemetry (a benign lease reassignment counted as a
+ * real delivery). Returns `"applied"` only when the write actually landed;
+ * `"lease_lost"` is now its own outcome (see `ReminderDeliveryOutcome`'s
+ * `lease_lost` variant) — no repair write is attempted for it, since a
+ * repair here would fence against THIS row's stale claim_token/status and
+ * fall through to `repairIntoNonResendState`'s unfenced fallback, which
+ * would ignore claim_token entirely and could clobber the new owner's own
+ * outcome. `"repaired"` (renamed from the old boolean `false`) still means
+ * `write_failed` was force-fenced into `timeout_ambiguous` for manual
+ * reconciliation, unchanged from round 11.
  */
 async function markSentOrRepair(
   supabase: SupabaseClient<Database>,
@@ -415,18 +536,17 @@ async function markSentOrRepair(
   },
   providerMessageId: string | null,
   repairContext: string,
-): Promise<boolean> {
+): Promise<"applied" | "lease_lost" | "repaired"> {
   const result = await markDelivery(supabase, row, "sent", { providerMessageId });
-  if (result === "write_failed") {
-    await repairIntoNonResendState(
-      supabase,
-      row,
-      `${repairContext}: mark-sent write failed after retries; duplicate-risk, needs manual reconciliation`,
-      providerMessageId,
-    );
-    return false;
-  }
-  return true;
+  if (result === "applied") return "applied";
+  if (result === "lease_lost") return "lease_lost";
+  await repairIntoNonResendState(
+    supabase,
+    row,
+    `${repairContext}: mark-sent write failed after retries; duplicate-risk, needs manual reconciliation`,
+    providerMessageId,
+  );
+  return "repaired";
 }
 
 /**
@@ -587,10 +707,13 @@ async function deliverBell(
   });
   if (result.inserted > 0 || result.conflict) {
     const confirmed = await markSentOrRepair(supabase, row, null, "bell notification created");
-    if (!confirmed) {
-      return { status: "timeout_ambiguous", deliveryId: row.deliveryId, channel: "bell" };
+    if (confirmed === "applied") {
+      return { status: "sent", deliveryId: row.deliveryId, channel: "bell" };
     }
-    return { status: "sent", deliveryId: row.deliveryId, channel: "bell" };
+    if (confirmed === "lease_lost") {
+      return { status: "lease_lost", deliveryId: row.deliveryId, channel: "bell" };
+    }
+    return { status: "timeout_ambiguous", deliveryId: row.deliveryId, channel: "bell" };
   }
   const errorMessage = "notification insert failed";
   await markDelivery(supabase, row, "failed", { lastError: errorMessage });
@@ -617,16 +740,38 @@ async function deliverSlack(
       row.providerMessageId,
       "slack reconcile (prior attempt already reached Slack)",
     );
-    if (!confirmed) {
-      return { status: "timeout_ambiguous", deliveryId: row.deliveryId, channel: "slack" };
+    if (confirmed === "applied") {
+      return {
+        status: "sent",
+        deliveryId: row.deliveryId,
+        channel: "slack",
+        providerMessageId: row.providerMessageId,
+      };
     }
-    return {
-      status: "sent",
-      deliveryId: row.deliveryId,
-      channel: "slack",
-      providerMessageId: row.providerMessageId,
-    };
+    if (confirmed === "lease_lost") {
+      return { status: "lease_lost", deliveryId: row.deliveryId, channel: "slack" };
+    }
+    return { status: "timeout_ambiguous", deliveryId: row.deliveryId, channel: "slack" };
   }
+
+  // Codex round 12 (finding 2): fence claimed -> 'dispatching' BEFORE the
+  // send call — see `markDispatching`'s doc comment for why this (not the
+  // `providerMessageId` reconcile branch above, which cannot actually fire
+  // for THIS crash window) is what closes the crash-between-accept-and-
+  // write hole. No provider call is ever made if the fence itself doesn't
+  // land.
+  const dispatchFence = await markDispatching(supabase, row);
+  if (dispatchFence.outcome === "lease_lost") {
+    return { status: "lease_lost", deliveryId: row.deliveryId, channel: "slack" };
+  }
+  if (dispatchFence.outcome === "write_failed") {
+    // Nothing was sent — the row is left at its original, still-retryable
+    // claimed status (markDelivery's own retries are already exhausted;
+    // there is nothing further to repair into).
+    const errorMessage = "failed to fence delivery into dispatching before send";
+    return { status: "failed", deliveryId: row.deliveryId, channel: "slack", error: errorMessage };
+  }
+  const dispatchedRow = dispatchFence.row;
 
   const result = await dispatchAppointmentReminderSlack({
     taskId: row.taskId,
@@ -640,19 +785,36 @@ async function deliverSlack(
     // (the prior deep link here) 404s: that route has no page.tsx.
     deepLink: buildAppointmentDeepLink(row.relatedPropertyId, row.contactId),
   });
-  if (result.sent) {
-    const confirmed = await markSentOrRepair(supabase, row, result.messageTs, "slack send");
-    if (!confirmed) {
-      return { status: "timeout_ambiguous", deliveryId: row.deliveryId, channel: "slack" };
+  if (result.outcome === "sent") {
+    const confirmed = await markSentOrRepair(supabase, dispatchedRow, result.messageTs, "slack send");
+    if (confirmed === "applied") {
+      return {
+        status: "sent",
+        deliveryId: row.deliveryId,
+        channel: "slack",
+        providerMessageId: result.messageTs,
+      };
     }
+    if (confirmed === "lease_lost") {
+      return { status: "lease_lost", deliveryId: row.deliveryId, channel: "slack" };
+    }
+    return { status: "timeout_ambiguous", deliveryId: row.deliveryId, channel: "slack" };
+  }
+  if (result.outcome === "ambiguous") {
+    // Codex round 12 (finding 1): transmission started with no provable
+    // receipt — never retryable. Fence dispatching -> timeout_ambiguous,
+    // same non-resend posture as a deadline abort.
+    await markDelivery(supabase, dispatchedRow, "timeout_ambiguous", { lastError: result.reason });
     return {
-      status: "sent",
+      status: "aborted_ambiguous",
       deliveryId: row.deliveryId,
       channel: "slack",
-      providerMessageId: result.messageTs,
+      lastError: result.reason,
     };
   }
-  await markDelivery(supabase, row, "failed", { lastError: result.reason });
+  // result.outcome === "failed": a definite pre-send failure — nothing was
+  // transmitted, safe to retry.
+  await markDelivery(supabase, dispatchedRow, "failed", { lastError: result.reason });
   return { status: "failed", deliveryId: row.deliveryId, channel: "slack", error: result.reason };
 }
 
@@ -692,15 +854,18 @@ async function deliverSms(
       row.providerMessageId,
       "sms reconcile (prior attempt already reached Sendillo)",
     );
-    if (!confirmed) {
-      return { status: "timeout_ambiguous", deliveryId: row.deliveryId, channel: "sms" };
+    if (confirmed === "applied") {
+      return {
+        status: "sent",
+        deliveryId: row.deliveryId,
+        channel: "sms",
+        providerMessageId: row.providerMessageId,
+      };
     }
-    return {
-      status: "sent",
-      deliveryId: row.deliveryId,
-      channel: "sms",
-      providerMessageId: row.providerMessageId,
-    };
+    if (confirmed === "lease_lost") {
+      return { status: "lease_lost", deliveryId: row.deliveryId, channel: "sms" };
+    }
+    return { status: "timeout_ambiguous", deliveryId: row.deliveryId, channel: "sms" };
   }
 
   const prefs = await loadIntegrationPrefs(supabase, row.assigneeId);
@@ -714,6 +879,21 @@ async function deliverSms(
     await markDelivery(supabase, row, "failed", { lastError: errorMessage });
     return { status: "failed", deliveryId: row.deliveryId, channel: "sms", error: errorMessage };
   }
+
+  // Codex round 12 (finding 2): fence claimed -> 'dispatching' BEFORE the
+  // send call — same rationale as deliverSlack's fence above; Sendillo has
+  // no send-side idempotency key (round 4), so this is what closes the
+  // crash-between-accept-and-write window instead of the structurally
+  // unreachable `providerMessageId` reconcile branch above.
+  const dispatchFence = await markDispatching(supabase, row);
+  if (dispatchFence.outcome === "lease_lost") {
+    return { status: "lease_lost", deliveryId: row.deliveryId, channel: "sms" };
+  }
+  if (dispatchFence.outcome === "write_failed") {
+    const errorMessage = "failed to fence delivery into dispatching before send";
+    return { status: "failed", deliveryId: row.deliveryId, channel: "sms", error: errorMessage };
+  }
+  const dispatchedRow = dispatchFence.row;
 
   const { body } = formatNotification("task_appointment_reminder", {
     taskTitle: row.taskTitle,
@@ -737,16 +917,19 @@ async function deliverSms(
   // outcome — never auto-marked "definitely not sent".
   const result = await sendRepSmsReminder({ to: prefs.reminderPhone, body, signal: opts.signal });
   if (result.ok) {
-    const confirmed = await markSentOrRepair(supabase, row, result.externalId, "sms send");
-    if (!confirmed) {
-      return { status: "timeout_ambiguous", deliveryId: row.deliveryId, channel: "sms" };
+    const confirmed = await markSentOrRepair(supabase, dispatchedRow, result.externalId, "sms send");
+    if (confirmed === "applied") {
+      return {
+        status: "sent",
+        deliveryId: row.deliveryId,
+        channel: "sms",
+        providerMessageId: result.externalId,
+      };
     }
-    return {
-      status: "sent",
-      deliveryId: row.deliveryId,
-      channel: "sms",
-      providerMessageId: result.externalId,
-    };
+    if (confirmed === "lease_lost") {
+      return { status: "lease_lost", deliveryId: row.deliveryId, channel: "sms" };
+    }
+    return { status: "timeout_ambiguous", deliveryId: row.deliveryId, channel: "sms" };
   }
   if (result.reason === "aborted_ambiguous") {
     // Codex round 8: an abort is NOT proof of non-delivery — must not be
@@ -777,7 +960,11 @@ async function deliverSms(
     // simply matches zero rows and is the same benign "lease lost" no-op
     // `markDelivery` already treats every other 0-row result as — the real
     // fence in that scenario is still `resolveTimedOutReminderDelivery`'s.
-    await markDelivery(supabase, row, "timeout_ambiguous", {
+    // Codex round 12 (finding 2): fenced against `dispatchedRow`'s
+    // 'dispatching' status, not the stale original `claimedStatus` — the
+    // row genuinely moved to 'dispatching' before this send call, so that's
+    // the real expected status a fenced write here must match.
+    await markDelivery(supabase, dispatchedRow, "timeout_ambiguous", {
       lastError: result.message,
     });
     return {
@@ -793,7 +980,7 @@ async function deliverSms(
   // PROVABLY non-delivery (see `RepSmsSendResult`'s `not_sent` variant in
   // rep-sms.ts), so the ordinary retryable `failed` write below is the
   // correct, honest outcome — no ambiguous-holding-state fencing needed.
-  await markDelivery(supabase, row, "failed", { lastError: result.message });
+  await markDelivery(supabase, dispatchedRow, "failed", { lastError: result.message });
   return { status: "failed", deliveryId: row.deliveryId, channel: "sms", error: result.message };
 }
 

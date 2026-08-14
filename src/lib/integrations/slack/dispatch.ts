@@ -144,59 +144,122 @@ export interface DispatchAppointmentReminderSlackInput {
 }
 
 /**
+ * Codex round 12 (finding 1): three-way outcome for the reminder path,
+ * distinct from `DispatchSlackResult`'s two-way sent/not-sent shape.
+ * `dispatchTaskAssignedSlack` is untouched — its caller has its own retry
+ * posture and is out of this finding's scope (dispatch.ts:185-199, the
+ * reminder-only `dispatchAppointmentReminderSlack` below).
+ *
+ * The three outcomes map directly onto what `reminders.ts`'s `deliverSlack`
+ * needs to classify a delivery honestly:
+ *   - `sent`: `chat.postMessage` returned a `ts` — a provable receipt.
+ *   - `failed`: a definite pre-send failure (disabled pref, no token, or
+ *     `conversations.open` — which never transmits a message — throwing or
+ *     returning no channel). Nothing was ever transmitted, so this is safe
+ *     to retry.
+ *   - `ambiguous`: transmission STARTED but no provable receipt came back —
+ *     `chat.postMessage` itself threw (the request may have reached Slack
+ *     before the exception, e.g. a timeout/connection drop), or it resolved
+ *     without a `ts` (accepted-without-receipt). Neither proves the message
+ *     was or wasn't sent, so this must never be treated as retryable —
+ *     `deliverSlack` fences the row into `timeout_ambiguous` instead of
+ *     `failed`.
+ */
+export type DispatchAppointmentReminderSlackResult =
+  | { outcome: "sent"; channel: string; messageTs: string }
+  | { outcome: "failed"; reason: "no_token" | "pref_disabled" | "pre_send_error" }
+  | { outcome: "ambiguous"; reason: string };
+
+/**
  * PR 3 reminder sweep — same shape as `dispatchTaskAssignedSlack` (open a
  * 1:1 DM, post blocks) but for the appointment-reminder template. Kept as
  * a separate function rather than a branch on the existing one: the two
  * templates diverge (no "Mark Done" action row here, and the reminder
  * fires from the reminder worker's already-loaded prefs/timezone, not a
  * fresh `loadIntegrationPrefs` call inside a task-assignment flow).
+ *
+ * Codex round 12 (finding 1): split into two stages with DIFFERENT failure
+ * semantics — pre-send (prefs/token/`conversations.open`, none of which
+ * transmit a message) and the send itself (`chat.postMessage`, which DOES).
+ * A pre-send exception proves nothing was sent (`failed`, retryable); a
+ * send-stage exception or a receipt-less success proves transmission
+ * STARTED with no confirmed outcome (`ambiguous`, never retryable — see
+ * `DispatchAppointmentReminderSlackResult`'s doc comment).
  */
 export async function dispatchAppointmentReminderSlack(
   input: DispatchAppointmentReminderSlackInput,
-): Promise<DispatchSlackResult> {
+): Promise<DispatchAppointmentReminderSlackResult> {
+  let channel: string;
+  let slack: WebClient;
   try {
     const admin = createAdminClient();
     const slackEnabled =
       input.slackEnabled ??
       (await loadIntegrationPrefs(admin, input.assigneeId)).slackEnabled;
-    if (!slackEnabled) return { sent: false, reason: "pref_disabled" };
+    if (!slackEnabled) return { outcome: "failed", reason: "pref_disabled" };
 
     const token = await getDecryptedToken({
       userId: input.assigneeId,
       provider: "slack",
       tokenType: "bot",
     });
-    if (!token?.externalAccountId) return { sent: false, reason: "no_token" };
+    if (!token?.externalAccountId) return { outcome: "failed", reason: "no_token" };
 
-    const slack = new WebClient(token.accessToken.reveal(), SLACK_REMINDER_CLIENT_OPTIONS);
+    slack = new WebClient(token.accessToken.reveal(), SLACK_REMINDER_CLIENT_OPTIONS);
     const opened = await slack.conversations.open({
       users: token.externalAccountId,
     });
-    const channel = opened.channel?.id;
-    if (!channel) return { sent: false, reason: "error" };
-
-    const taskTitle = truncateTaskTitle(input.taskTitle);
-    const timeLabel = formatTimeOfDay(input.dueAt, normalizeTimeZone(input.timezone));
-    const blocks = buildAppointmentReminderBlocks({
-      taskTitle,
-      timeLabel,
-      deepLink: input.deepLink,
+    const openedChannel = opened.channel?.id;
+    if (!openedChannel) return { outcome: "failed", reason: "pre_send_error" };
+    channel = openedChannel;
+  } catch (error) {
+    // Pre-send failure — no message was ever transmitted, so this is a
+    // definite, retryable failure, never ambiguous.
+    reportError(error, {
+      tags: { surface: "slack_appointment_reminder_dispatch" },
+      extra: { taskId: input.taskId, assigneeId: input.assigneeId, stage: "pre_send" },
     });
+    return { outcome: "failed", reason: "pre_send_error" };
+  }
+
+  const taskTitle = truncateTaskTitle(input.taskTitle);
+  const timeLabel = formatTimeOfDay(input.dueAt, normalizeTimeZone(input.timezone));
+  const blocks = buildAppointmentReminderBlocks({
+    taskTitle,
+    timeLabel,
+    deepLink: input.deepLink,
+  });
+
+  try {
     const posted = await slack.chat.postMessage({
       channel,
       blocks,
       text: `Appointment in 30 min: ${taskTitle} at ${timeLabel}`,
     });
     const messageTs = posted.ts;
-    if (!messageTs) return { sent: false, reason: "error" };
-
-    return { sent: true, channel, messageTs };
+    if (!messageTs) {
+      // Accepted without a receipt — Slack processed the call but returned
+      // no ts to confirm it. Not provable non-delivery; ambiguous.
+      const message = "Slack chat.postMessage resolved without a ts";
+      reportError(new Error(message), {
+        tags: { surface: "slack_appointment_reminder_dispatch" },
+        extra: { taskId: input.taskId, assigneeId: input.assigneeId, stage: "send" },
+      });
+      return { outcome: "ambiguous", reason: message };
+    }
+    return { outcome: "sent", channel, messageTs };
   } catch (error) {
+    // The send call itself threw — transmission may have reached Slack
+    // before the exception (timeout, connection drop mid-call). Not
+    // provable non-delivery; ambiguous, never retried as a fresh send.
     reportError(error, {
       tags: { surface: "slack_appointment_reminder_dispatch" },
-      extra: { taskId: input.taskId, assigneeId: input.assigneeId },
+      extra: { taskId: input.taskId, assigneeId: input.assigneeId, stage: "send" },
     });
-    return { sent: false, reason: "error" };
+    return {
+      outcome: "ambiguous",
+      reason: error instanceof Error ? error.message : String(error),
+    };
   }
 }
 

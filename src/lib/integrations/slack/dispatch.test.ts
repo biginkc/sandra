@@ -339,7 +339,7 @@ describe("slack/dispatch", () => {
     });
 
     await expect(dispatchAppointmentReminderSlack(reminderInput)).resolves.toEqual({
-      sent: false,
+      outcome: "failed",
       reason: "pref_disabled",
     });
     expect(getDecryptedToken).not.toHaveBeenCalled();
@@ -349,7 +349,7 @@ describe("slack/dispatch", () => {
     getDecryptedToken.mockResolvedValueOnce(null);
 
     await expect(dispatchAppointmentReminderSlack(reminderInput)).resolves.toEqual({
-      sent: false,
+      outcome: "failed",
       reason: "no_token",
     });
     expect(conversationsOpen).not.toHaveBeenCalled();
@@ -403,13 +403,43 @@ describe("slack/dispatch", () => {
     expect(loadIntegrationPrefs).not.toHaveBeenCalled();
   });
 
-  it("dispatchAppointmentReminderSlack on chat.postMessage rejection reportErrors and does not throw", async () => {
+  // Codex round 12 (finding 1): a postMessage exception happens AFTER
+  // transmission may have started — never provable non-delivery, so this
+  // must be `ambiguous`, not the old two-way `sent:false`.
+  it("dispatchAppointmentReminderSlack on chat.postMessage rejection reports the exception as ambiguous (transmission may have started) and does not throw", async () => {
     chatPostMessage.mockRejectedValueOnce(new Error("Slack unavailable"));
 
     await expect(dispatchAppointmentReminderSlack(reminderInput)).resolves.toEqual({
-      sent: false,
-      reason: "error",
+      outcome: "ambiguous",
+      reason: "Slack unavailable",
     });
+    expect(reportError).toHaveBeenCalledWith(
+      expect.any(Error),
+      expect.objectContaining({ tags: { surface: "slack_appointment_reminder_dispatch" } }),
+    );
+  });
+
+  // Codex round 12 (finding 1): a definite PRE-SEND failure (nothing was
+  // ever transmitted) must stay a retryable `failed`, distinct from the
+  // ambiguous send-stage case above.
+  it("dispatchAppointmentReminderSlack on conversations.open rejection reports a definite failed (pre-send, nothing transmitted)", async () => {
+    conversationsOpen.mockRejectedValueOnce(new Error("channel open blew up"));
+
+    await expect(dispatchAppointmentReminderSlack(reminderInput)).resolves.toEqual({
+      outcome: "failed",
+      reason: "pre_send_error",
+    });
+    expect(chatPostMessage).not.toHaveBeenCalled();
+  });
+
+  // Codex round 12 (finding 1): a receipt-less success (2xx-shaped, but no
+  // ts) is the SAME uncertainty class as an exception mid-call.
+  it("dispatchAppointmentReminderSlack reports ambiguous when chat.postMessage resolves without a ts", async () => {
+    chatPostMessage.mockResolvedValueOnce({ ok: true, ts: undefined });
+
+    const result = await dispatchAppointmentReminderSlack(reminderInput);
+
+    expect(result.outcome).toBe("ambiguous");
     expect(reportError).toHaveBeenCalledWith(
       expect.any(Error),
       expect.objectContaining({ tags: { surface: "slack_appointment_reminder_dispatch" } }),

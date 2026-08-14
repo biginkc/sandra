@@ -51,7 +51,15 @@ export type RepSmsSendResult =
        *  with a failure, safe to treat as a confirmed non-delivery; an
        *  abort proves nothing either way. Callers (`deliverSms` in
        *  reminders.ts) must never treat this as a confirmed non-delivery —
-       *  see `ReminderDeliveryOutcome`'s `aborted_ambiguous` variant. */
+       *  see `ReminderDeliveryOutcome`'s `aborted_ambiguous` variant.
+       *
+       *  Codex round 12 (finding 1): also returned for a non-abort
+       *  transport failure mid-flight (`fetch()` itself rejected, no HTTP
+       *  response ever received) and for a 2xx response with no
+       *  reconcilable message id — both are the same "transmission may
+       *  have started, no provable receipt" uncertainty an abort is, so
+       *  they get the identical never-retryable treatment. See
+       *  sendillo.ts's `sendSms` doc comment for the full classification. */
       ok: false;
       reason: "aborted_ambiguous";
       message: string;
@@ -217,9 +225,22 @@ export async function sendRepSmsReminder(params: {
         message: error instanceof Error ? error.message : String(error),
       };
     }
+    // Codex round 12 (finding 1): `transportFailure` (a non-abort `fetch()`
+    // rejection — connection reset, DNS blip, socket error, no HTTP
+    // response ever received) and `acceptedWithoutId` (a 2xx response with
+    // no reconcilable id) are BOTH transmission-started-outcome-unproven
+    // cases, same as an abort — see sendillo.ts's `sendSms` doc comment for
+    // why neither proves non-delivery. Folded into the same `aborted`
+    // check (and the same `aborted_ambiguous` result) rather than a new
+    // reason: every downstream consumer (`deliverSms` in reminders.ts)
+    // already treats `aborted_ambiguous` as "never retryable, fence into
+    // timeout_ambiguous" — exactly the posture these two cases need too.
     const aborted =
       (error instanceof Error && error.name === "AbortError") ||
-      (error instanceof ProviderError && error.details?.isAbort === true) ||
+      (error instanceof ProviderError &&
+        (error.details?.isAbort === true ||
+          error.details?.transportFailure === true ||
+          error.details?.acceptedWithoutId === true)) ||
       params.signal?.aborted === true;
     if (aborted) {
       // Distinct tag from the ordinary provider-error report below — this

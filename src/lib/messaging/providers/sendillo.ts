@@ -126,10 +126,23 @@ export class SendilloMessagingProvider implements MessagingProvider {
       // the one channel `ProviderError` already exposes for exactly this
       // kind of caller-facing classification (see errors/classes.ts).
       const isAbort = e instanceof Error && e.name === "AbortError";
+      // Codex round 12 (finding 1): a NON-abort rejection here means
+      // `fetch()` itself threw — a raw transport failure (connection
+      // reset, DNS blip, socket error) with no HTTP response ever
+      // received. Unlike a `!response.ok` rejection below (Sendillo DID
+      // respond, with an explicit error — provable non-delivery), a
+      // transport-level exception proves nothing about whether the
+      // request reached Sendillo before the connection dropped: it may
+      // have been received and processed, or never left this process.
+      // Flagged `transportFailure` (distinct from `isAbort`, though both
+      // ultimately mean "we don't know") so `sendRepSmsReminder` can route
+      // it to `aborted_ambiguous` alongside an actual abort, rather than
+      // the ordinary `provider_error` (which callers treat as a confirmed,
+      // safely-retryable non-delivery).
       throw new ProviderError(
         e instanceof Error ? e.message : String(e),
         "sendillo",
-        isAbort ? { isAbort: true } : undefined,
+        isAbort ? { isAbort: true } : { transportFailure: true },
       );
     } finally {
       clearTimeout(timeout);
@@ -153,10 +166,19 @@ export class SendilloMessagingProvider implements MessagingProvider {
       readString(parsed, "data", "id") ??
       readString(parsed, "id");
     if (!externalId) {
+      // Codex round 12 (finding 1): Sendillo returned a 2xx — the request
+      // definitely reached them and they accepted it — but the response
+      // carried no id we can reconcile against later. This is "accepted
+      // without a provable receipt," the SAME class of uncertainty as a
+      // transport failure mid-flight or an abort: the message plausibly
+      // went out, we just can't confirm it durably. `acceptedWithoutId`
+      // routes this to `aborted_ambiguous` in `sendRepSmsReminder`, not the
+      // confirmed-non-delivery `provider_error` a genuine `!response.ok`
+      // rejection gets.
       throw new ProviderError(
         "Sendillo send succeeded but response had no messageId",
         "sendillo",
-        { response: parsed },
+        { response: parsed, acceptedWithoutId: true },
       );
     }
 

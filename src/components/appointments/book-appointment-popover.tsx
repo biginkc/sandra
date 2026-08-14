@@ -243,6 +243,10 @@ export function BookAppointmentPopover({
         assigneeId,
         startUtc.toISOString(),
         endUtc.toISOString(),
+        // Codex round 12 (finding 5): reschedule must exclude the
+        // appointment's own not-yet-moved row from the overlap check —
+        // otherwise it always self-matches as a false conflict.
+        isReschedule ? taskId : undefined,
       ).then((result) => {
         if (result.ok) setOverlap(result.data);
       });

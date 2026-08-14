@@ -318,6 +318,10 @@ async function handle(request: Request) {
     // loop's own budget/outcome contract. Never lets a telemetry failure
     // fail the sweep's own response — see its own try/catch.
     await reportLingeringAmbiguousDeliveries(supabase);
+    // Codex round 12 (finding 2): same posture — a `.from(...)` reconciliation
+    // sweep unrelated to the claim/delivery loop's own contract, never lets
+    // a telemetry/sweep failure fail the route's own response.
+    await sweepStaleDispatchingReminders(supabase);
     return NextResponse.json({ ok: true, ...summary });
   } catch (e) {
     reportError(e, { tags: { surface: "cron_appointment_reminder_sweep" } });
@@ -374,6 +378,88 @@ export async function reportLingeringAmbiguousDeliveries(
       new Error(`${count} appointment reminder deliveries stuck in timeout_ambiguous >1h`),
       {
         tags: { surface: "cron_appointment_reminder_sweep_ambiguous_telemetry" },
+        extra: { count },
+      },
+    );
+  }
+}
+
+/** Codex round 12 (finding 2): must comfortably exceed the sweep's own
+ *  `maxDuration` (60s) plus the `after()` continuation's own worst-case
+ *  runtime — a row genuinely still mid-dispatch when this sweep passes
+ *  over it must never be swept as "stale" out from under the worker still
+ *  processing it. 10 minutes matches `fn_claim_reminder_retries`'s
+ *  existing stale-pending threshold — the same generous margin already
+ *  proven safe for an analogous "worker crashed mid-flight" detector. */
+const STALE_DISPATCHING_THRESHOLD_MS = 10 * 60 * 1000;
+
+/** `dispatching_at` (20260814200000) is not yet in the generated
+ *  `Database["public"]["Tables"]` map — same local-cast pattern as every
+ *  other not-yet-generated column referenced in this file/reminders.ts. */
+type StaleDispatchingUpdateBuilder = {
+  eq(column: "status", value: string): StaleDispatchingUpdateBuilder;
+  lt(column: "dispatching_at", value: string): StaleDispatchingUpdateBuilder;
+  select(columns: "id"): PromiseLike<{
+    data: { id: string }[] | null;
+    error: { message: string } | null;
+  }>;
+};
+type StaleDispatchingUpdateClient = {
+  from(table: "task_reminder_deliveries"): {
+    update(values: {
+      status: "timeout_ambiguous";
+      last_error: string;
+    }): StaleDispatchingUpdateBuilder;
+  };
+};
+
+/**
+ * Codex round 12 (finding 2): a row `markDispatching` (reminders.ts) fenced
+ * into 'dispatching' right before a Slack/SMS provider call is, by
+ * construction, excluded from BOTH claim RPCs' eligibility (their
+ * candidates CTEs only ever match `status IN ('failed', 'pending')`) — so a
+ * worker that crashes between the provider accepting the message and its
+ * own outcome write landing leaves the row here FOREVER unless something
+ * else moves it. This sweep is that something else: any row still
+ * 'dispatching' past `STALE_DISPATCHING_THRESHOLD_MS` is transitioned to
+ * `timeout_ambiguous` — the same non-resend, manual-reconciliation state
+ * every other ambiguous outcome in this module lands in, NEVER back to
+ * `pending`/`failed` (which would make it retry-claim eligible on top of a
+ * delivery whose outcome is genuinely unknown — exactly the duplicate-send
+ * risk `markDispatching` exists to close).
+ *
+ * Unfenced by claim_token deliberately: this is an operator-safety
+ * catch-all for a row ABANDONED by whichever worker last held it (no live
+ * owner to conflict with), not a per-worker completion write — same
+ * unconditional-by-design posture as `reportLingeringAmbiguousDeliveries`'s
+ * read-only query just above.
+ */
+export async function sweepStaleDispatchingReminders(
+  supabase: ReturnType<typeof createServiceRoleClient>,
+): Promise<void> {
+  const cutoff = new Date(Date.now() - STALE_DISPATCHING_THRESHOLD_MS).toISOString();
+  const { data, error } = await (supabase as unknown as StaleDispatchingUpdateClient)
+    .from("task_reminder_deliveries")
+    .update({
+      status: "timeout_ambiguous",
+      last_error: "stale dispatching: crash-boundary reconciliation, never auto-resent",
+    })
+    .eq("status", "dispatching")
+    .lt("dispatching_at", cutoff)
+    .select("id");
+
+  if (error) {
+    reportError(new Error(`stale dispatching sweep failed: ${error.message}`), {
+      tags: { surface: "cron_appointment_reminder_sweep_stale_dispatching" },
+    });
+    return;
+  }
+  const count = data?.length ?? 0;
+  if (count > 0) {
+    reportError(
+      new Error(`${count} appointment reminder deliveries swept from stale dispatching into timeout_ambiguous`),
+      {
+        tags: { surface: "cron_appointment_reminder_sweep_stale_dispatching" },
         extra: { count },
       },
     );

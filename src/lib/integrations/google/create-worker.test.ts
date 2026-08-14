@@ -636,6 +636,54 @@ describe("processClaimedCancel (via processClaimedCalendarMutation)", () => {
     });
     expect(vi.mocked(buildCalendarClient).mock.calls.length).toBe(buildCalendarClientCallsBefore);
   });
+
+  // Codex round 12 (finding 4): claimed.event_id is KNOWN to exist here —
+  // pre-round-12 a buildCalendarClient throw chain-released via
+  // markPermanentFailure (`failed`), silently abandoning a real,
+  // undeleted Google event. Must route through the same stale-event retry
+  // posture as the missing-token case above.
+  it("Codex round 12 (finding 4): calendar client fails to build — retryable stale-event outcome, not chain-releasing 'failed'", async () => {
+    vi.mocked(buildCalendarClient).mockImplementation(() => {
+      throw new Error("bad oauth config");
+    });
+    const supabase = fakeSupabase({
+      task_calendar_mutations: [ledgerWrite()], // markStaleEventRetryable's single write
+    });
+
+    const outcome = await processClaimedCalendarMutation(supabase, {
+      ...BASE_CLAIMED,
+      operation: "cancel",
+      event_id: "evt-old",
+    });
+
+    expect(outcome).toEqual({
+      status: "stale_event_needs_token",
+      ledgerId: "ledger-1",
+      error: "bad oauth config",
+    });
+  });
+
+  // Codex round 12 (finding 4): a "permanent" Google rejection (401) on
+  // the delete call — event_id known, still undeleted — must NOT
+  // chain-release via `failed` either.
+  it("Codex round 12 (finding 4): a permanent (401) Google rejection on delete routes through the stale-event retry path, not 'failed'", async () => {
+    const del = vi.fn().mockRejectedValue({ status: 401 });
+    vi.mocked(buildCalendarClient).mockReturnValue({
+      events: { delete: del },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any);
+    const supabase = fakeSupabase({
+      task_calendar_mutations: [ledgerWrite()], // markStaleEventRetryable's single write
+    });
+
+    const outcome = await processClaimedCalendarMutation(supabase, {
+      ...BASE_CLAIMED,
+      operation: "cancel",
+      event_id: "evt-old",
+    });
+
+    expect(outcome.status).toBe("stale_event_needs_token");
+  });
 });
 
 describe("processClaimedReschedule (via processClaimedCalendarMutation)", () => {
@@ -741,6 +789,40 @@ describe("processClaimedReschedule (via processClaimedCalendarMutation)", () => 
       error: expect.stringContaining("no token"),
     });
     expect(vi.mocked(buildCalendarClient).mock.calls.length).toBe(buildCalendarClientCallsBefore);
+  });
+
+  // Codex round 12 (finding 4): same fix as cancel's — claimed.event_id is
+  // known and still unmoved.
+  it("Codex round 12 (finding 4): calendar client fails to build — retryable stale-event outcome, not chain-releasing 'failed'", async () => {
+    vi.mocked(buildCalendarClient).mockImplementation(() => {
+      throw new Error("bad oauth config");
+    });
+    const supabase = fakeSupabase({
+      task_calendar_mutations: [ledgerWrite()], // markStaleEventRetryable's single write
+    });
+
+    const outcome = await processClaimedCalendarMutation(supabase, RESCHEDULE_CLAIMED);
+
+    expect(outcome).toEqual({
+      status: "stale_event_needs_token",
+      ledgerId: "ledger-1",
+      error: "bad oauth config",
+    });
+  });
+
+  it("Codex round 12 (finding 4): a permanent (401) Google rejection on patch routes through the stale-event retry path, not 'failed'", async () => {
+    const patch = vi.fn().mockRejectedValue({ status: 401 });
+    vi.mocked(buildCalendarClient).mockReturnValue({
+      events: { patch },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any);
+    const supabase = fakeSupabase({
+      task_calendar_mutations: [ledgerWrite()], // markStaleEventRetryable's single write
+    });
+
+    const outcome = await processClaimedCalendarMutation(supabase, RESCHEDULE_CLAIMED);
+
+    expect(outcome.status).toBe("stale_event_needs_token");
   });
 });
 
@@ -908,6 +990,52 @@ describe("processClaimedReassign (via processClaimedCalendarMutation)", () => {
       expect(outcome.status).toBe("retryable_error");
     });
 
+    // Codex round 12 (finding 4): REASSIGN_CLAIMED has event_id: "evt-old"
+    // (hadEventToMigrate: true) — a PERMANENT (401) create-call rejection
+    // must route through the stale-event retry path, not chain-release via
+    // 'failed', because the OLD event still exists and would otherwise be
+    // silently stranded.
+    it("Codex round 12 (finding 4): create fails with a PERMANENT (401) provider error, and there IS an old event to migrate — stale-event retry outcome, not 'failed'", async () => {
+      const del = vi.fn();
+      const insert = vi.fn().mockRejectedValue({ status: 401 });
+      vi.mocked(buildCalendarClient).mockReturnValue({
+        events: { delete: del, insert, get: vi.fn() },
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } as any);
+      const supabase = fakeSupabase({
+        task_calendar_mutations: [ledgerWrite()], // markStaleEventRetryable's single write
+      });
+
+      const outcome = await processClaimedCalendarMutation(supabase, REASSIGN_CLAIMED);
+
+      expect(del).not.toHaveBeenCalled();
+      expect(outcome.status).toBe("stale_event_needs_token");
+    });
+
+    // Codex round 12 (finding 4): the carve-out — with NO old event to
+    // migrate (a genuine no-artifact-anywhere case), a permanent create
+    // failure correctly stays plain 'failed'/permanent_error, same as
+    // `handleProviderFailure`'s ordinary classification.
+    it("Codex round 12 (finding 4): create fails with a PERMANENT (401) provider error, and there is NO old event to migrate — plain permanent_error (nothing to reconcile)", async () => {
+      const del = vi.fn();
+      const insert = vi.fn().mockRejectedValue({ status: 401 });
+      vi.mocked(buildCalendarClient).mockReturnValue({
+        events: { delete: del, insert, get: vi.fn() },
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } as any);
+      const supabase = fakeSupabase({
+        task_calendar_mutations: [ledgerWrite()], // markPermanentFailure's single write
+      });
+
+      const outcome = await processClaimedCalendarMutation(supabase, {
+        ...REASSIGN_CLAIMED,
+        event_id: null, // no old event to migrate
+      });
+
+      expect(del).not.toHaveBeenCalled();
+      expect(outcome.status).toBe("permanent_error");
+    });
+
     it("full happy path: validates destination, creates under the new account first, THEN deletes the old event, then finalizes", async () => {
       const del = vi.fn().mockResolvedValue({});
       const insert = vi.fn().mockResolvedValue({ data: { id: "evt-new" } });
@@ -1025,6 +1153,66 @@ describe("processClaimedReassign (via processClaimedCalendarMutation)", () => {
         { calendarId: "primary", eventId: "evt-old" },
         { timeout: expect.any(Number), retry: false },
       );
+      expect(outcome.status).toBe("retryable_error");
+    });
+
+    // Codex round 12 (finding 4): resumed at provider_done — BOTH the new
+    // event (already durably created) and the old event (not yet deleted)
+    // are known artifacts. A permanent (401) rejection on the delete call
+    // must route through the stale-event retry path, not chain-release via
+    // 'failed' over two live, unreconciled events.
+    it("Codex round 12 (finding 4): a permanent (401) Google rejection on the delete-old-event step routes through the stale-event retry path, not 'failed'", async () => {
+      const del = vi.fn().mockRejectedValue({ status: 401 });
+      const insert = vi.fn();
+      vi.mocked(buildCalendarClient).mockReturnValue({
+        events: { delete: del, insert, get: vi.fn() },
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } as any);
+      const supabase = fakeSupabase({
+        task_calendar_mutations: [ledgerWrite()], // markStaleEventRetryable's single write
+      });
+
+      const outcome = await processClaimedCalendarMutation(supabase, {
+        ...REASSIGN_CLAIMED,
+        phase: "provider_done",
+        new_event_id: "evt-new-from-earlier-attempt",
+        result_reason: "event_created",
+      });
+
+      expect(insert).not.toHaveBeenCalled();
+      expect(outcome.status).toBe("stale_event_needs_token");
+    });
+
+    // Codex round 12 (finding 4): unlike cancel/reschedule's DEDICATED
+    // buildCalendarClient catch (unconditional stale-event routing, no
+    // classification — those errors are never Google-shaped), reassign's
+    // delete-old-event step catches buildCalendarClient failures in the
+    // SAME block as the provider call, which — pre- and post-round-12 —
+    // routes through `classifyGoogleFailure`. An unrecognized error shape
+    // (a plain construction Error, no status/reason) classifies
+    // "retryable" and stays the ordinary retryable path — phase stays
+    // 'provider_done', which `fn_expire_exhausted_calendar_mutations`
+    // ALREADY routes unconditionally to needs_repair on exhaustion, so
+    // this is not a chain-release risk either way. The 401 test above is
+    // what actually proves round 12's fix (a PERMANENT classification no
+    // longer chain-releases via 'failed').
+    it("a construction failure with no recognized Google error shape classifies retryable (unchanged) at the delete-old-event step", async () => {
+      const insert = vi.fn();
+      vi.mocked(buildCalendarClient).mockImplementation(() => {
+        throw new Error("bad oauth config");
+      });
+      const supabase = fakeSupabase({
+        task_calendar_mutations: [ledgerWrite()], // handleProviderFailureWithArtifact's markRetryableFailure write
+      });
+
+      const outcome = await processClaimedCalendarMutation(supabase, {
+        ...REASSIGN_CLAIMED,
+        phase: "provider_done",
+        new_event_id: "evt-new-from-earlier-attempt",
+        result_reason: "event_created",
+      });
+
+      expect(insert).not.toHaveBeenCalled();
       expect(outcome.status).toBe("retryable_error");
     });
 

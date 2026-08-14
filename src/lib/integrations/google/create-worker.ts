@@ -857,6 +857,66 @@ async function handleProviderFailure(
   return { status: "retryable_error", ledgerId, error: message };
 }
 
+/**
+ * Codex round 12 (finding 4): same permanent/retryable classification as
+ * `handleProviderFailure`, for a call site where a Google artifact is KNOWN
+ * TO EXIST and needs reconciliation — cancel/reschedule's delete/patch call
+ * against `claimed.event_id` (known, past the `!claimed.event_id` guard),
+ * or reassign's delete-old-event step (the new event already durably
+ * created, the old one not yet deleted). `handleProviderFailure`'s
+ * `"permanent"` branch calls `markPermanentFailure`, which sets
+ * `phase = 'failed'` IMMEDIATELY — that releases the chain's serialization
+ * slot right away, appropriate when there's nothing left to reconcile
+ * (create, before any event exists) but wrong here: it would free the slot
+ * over a real, unreconciled Google event (undeleted, unmoved, or — for
+ * reassign's delete step — BOTH old and new events existing at once) while
+ * a later lifecycle mutation proceeds as if this one finished cleanly.
+ *
+ * A `"permanent"` classification here instead routes through
+ * `markStaleEventRetryable` with `"provider_permanent_error_stale_event"` —
+ * the SAME non-terminal, phase-preserving posture as a missing token/pref
+ * against a known event. `fn_expire_exhausted_calendar_mutations`
+ * (20260814210000) routes ANY `phase='provider_done'` row to `needs_repair`
+ * unconditionally, and any `phase='pending'` row whose `result_reason`
+ * matches `%_stale_event` (a naming-convention match, not an enumerated
+ * list — Codex round 6, finding 1) the same way, so this new reason is
+ * covered with no further migration change. `"retryable"` classifications
+ * are unaffected — identical to `handleProviderFailure`.
+ */
+async function handleProviderFailureWithArtifact(
+  supabase: Supabase,
+  ledgerId: string,
+  claimToken: string,
+  expectedPhase: "pending" | "provider_done",
+  error: unknown,
+  attempts: number,
+): Promise<CalendarMutationOutcome> {
+  const message = error instanceof Error ? error.message : String(error);
+  if (classifyGoogleFailure(error) === "permanent") {
+    const r = await markStaleEventRetryable(
+      supabase,
+      ledgerId,
+      claimToken,
+      "provider_permanent_error_stale_event",
+      message,
+      attempts,
+      expectedPhase,
+    );
+    if (r.lost) return { status: "lease_lost", ledgerId };
+    return { status: "stale_event_needs_token", ledgerId, error: message };
+  }
+  const r = await markRetryableFailure(
+    supabase,
+    ledgerId,
+    claimToken,
+    expectedPhase,
+    message,
+    attempts,
+  );
+  if (r.lost) return { status: "lease_lost", ledgerId };
+  return { status: "retryable_error", ledgerId, error: message };
+}
+
 function buildEvent(
   clientEventId: string | null,
   title: string,
@@ -984,7 +1044,12 @@ async function markStaleEventRetryable(
   resultReason:
     | "no_token_stale_event"
     | "pref_disabled_stale_event"
-    | "calendar_client_error_stale_event",
+    | "calendar_client_error_stale_event"
+    // Codex round 12 (finding 4): used by `handleProviderFailureWithArtifact`
+    // for a `classifyGoogleFailure() === "permanent"` Google API rejection
+    // (not a local client-construction error) against an operation with a
+    // known provider artifact — see that function's doc comment.
+    | "provider_permanent_error_stale_event",
   message: string,
   attempts: number,
   // Codex round 4 (finding 2): reassign's create-then-delete restructure
@@ -1100,10 +1165,27 @@ async function processClaimedCancel(
     try {
       calendar = buildCalendarClient(claimed.old_assignee_id, token);
     } catch (e) {
+      // Codex round 12 (finding 4): `claimed.event_id` is KNOWN to exist at
+      // this point (the `!claimed.event_id` branch above already
+      // returned) — a real Google event is still out there, undeleted.
+      // `markPermanentFailure` (the pre-round-12 behavior here) would set
+      // `phase='failed'` immediately, releasing the chain's serialization
+      // slot over that unreconciled event. Route through the same
+      // *_stale_event retry posture as the missing-token case just above
+      // instead — same pattern reassign's own buildCalendarClient catch
+      // (processClaimedReassign) already uses.
       const message = e instanceof Error ? e.message : String(e);
-      const r = await markPermanentFailure(supabase, ledgerId, claimToken, "pending", message);
+      const r = await markStaleEventRetryable(
+        supabase,
+        ledgerId,
+        claimToken,
+        "calendar_client_error_stale_event",
+        message,
+        claimed.attempts,
+        "pending",
+      );
       if (r.lost) return { status: "lease_lost", ledgerId };
-      return { status: "permanent_error", ledgerId, error: message };
+      return { status: "stale_event_needs_token", ledgerId, error: message };
     }
 
     try {
@@ -1113,7 +1195,12 @@ async function processClaimedCancel(
       );
     } catch (e) {
       if (!isGoogleNotFound(e)) {
-        return await handleProviderFailure(
+        // Codex round 12 (finding 4): claimed.event_id is known to exist
+        // and is not yet deleted — a "permanent" Google rejection here must
+        // not chain-release via `failed`; route through the stale-event
+        // retry path (see `handleProviderFailureWithArtifact`'s doc
+        // comment).
+        return await handleProviderFailureWithArtifact(
           supabase,
           ledgerId,
           claimToken,
@@ -1348,10 +1435,21 @@ async function processClaimedReschedule(
     try {
       calendar = buildCalendarClient(claimed.old_assignee_id, token);
     } catch (e) {
+      // Codex round 12 (finding 4): claimed.event_id is KNOWN to exist
+      // (same guard as cancel's analogous fix above) — route through the
+      // stale-event retry posture instead of chain-releasing via `failed`.
       const message = e instanceof Error ? e.message : String(e);
-      const r = await markPermanentFailure(supabase, ledgerId, claimToken, "pending", message);
+      const r = await markStaleEventRetryable(
+        supabase,
+        ledgerId,
+        claimToken,
+        "calendar_client_error_stale_event",
+        message,
+        claimed.attempts,
+        "pending",
+      );
       if (r.lost) return { status: "lease_lost", ledgerId };
-      return { status: "permanent_error", ledgerId, error: message };
+      return { status: "stale_event_needs_token", ledgerId, error: message };
     }
 
     let eventId: string;
@@ -1396,7 +1494,11 @@ async function processClaimedReschedule(
       // apply overwriting newer state — a timed-out patch never reaches
       // that CAS at all in this branch, so there's nothing here for it to
       // corrupt.
-      return await handleProviderFailure(
+      //
+      // Codex round 12 (finding 4): claimed.event_id is known to exist,
+      // unmoved — a "permanent" rejection must route through the
+      // stale-event retry path, not chain-release via `failed`.
+      return await handleProviderFailureWithArtifact(
         supabase,
         ledgerId,
         claimToken,
@@ -1736,24 +1838,50 @@ async function processClaimedReassign(
             eventId = existing.data.id;
             reconciled = true;
           } catch (reconcileError) {
-            return await handleProviderFailure(
-              supabase,
-              ledgerId,
-              claimToken,
-              "pending",
-              reconcileError,
-              claimed.attempts,
-            );
+            // Codex round 12 (finding 4): the NEW event doesn't exist yet
+            // in this branch (the create call is what's still failing) —
+            // only the OLD event (if hadEventToMigrate) is a known
+            // artifact needing reconciliation. Without one, this is the
+            // genuine no-artifact-anywhere case `handleProviderFailure`'s
+            // plain `failed` classification is correct for.
+            return await (hadEventToMigrate
+              ? handleProviderFailureWithArtifact(
+                  supabase,
+                  ledgerId,
+                  claimToken,
+                  "pending",
+                  reconcileError,
+                  claimed.attempts,
+                )
+              : handleProviderFailure(
+                  supabase,
+                  ledgerId,
+                  claimToken,
+                  "pending",
+                  reconcileError,
+                  claimed.attempts,
+                ));
           }
         } else {
-          return await handleProviderFailure(
-            supabase,
-            ledgerId,
-            claimToken,
-            "pending",
-            e,
-            claimed.attempts,
-          );
+          // Codex round 12 (finding 4): same hadEventToMigrate branching as
+          // the reconcile-lookup catch above.
+          return await (hadEventToMigrate
+            ? handleProviderFailureWithArtifact(
+                supabase,
+                ledgerId,
+                claimToken,
+                "pending",
+                e,
+                claimed.attempts,
+              )
+            : handleProviderFailure(
+                supabase,
+                ledgerId,
+                claimToken,
+                "pending",
+                e,
+                claimed.attempts,
+              ));
         }
       }
 
@@ -1859,7 +1987,17 @@ async function processClaimedReassign(
         );
       } catch (e) {
         if (!isGoogleNotFound(e)) {
-          return await handleProviderFailure(
+          // Codex round 12 (finding 4): BOTH artifacts are known to exist
+          // here, unconditionally — the new event was already durably
+          // created and persisted (phase='provider_done', new_event_id
+          // set) above, and the old event (claimed.event_id) hasn't been
+          // deleted yet (the `oldEventAlreadyDeleted` guard above already
+          // returned otherwise). A "permanent" rejection — including a
+          // `buildCalendarClient` construction failure, caught by this
+          // same block — must route through the stale-event retry path,
+          // never chain-release via `failed` over two live, unreconciled
+          // events.
+          return await handleProviderFailureWithArtifact(
             supabase,
             ledgerId,
             claimToken,

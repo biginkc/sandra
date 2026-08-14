@@ -29,7 +29,7 @@ vi.mock("next/server", async () => {
   };
 });
 
-import { runAppointmentReminderSweep } from "./route";
+import { runAppointmentReminderSweep, sweepStaleDispatchingReminders } from "./route";
 
 type RawRow = {
   delivery_id: string;
@@ -689,5 +689,86 @@ describe("runAppointmentReminderSweep", () => {
         ),
       ).toHaveLength(1);
     });
+  });
+});
+
+// Codex round 12 (finding 2): the operator-safety catch-all that sweeps a
+// row abandoned mid-dispatch (crashed between the provider accepting the
+// message and the outcome write landing) into timeout_ambiguous after it's
+// been 'dispatching' too long.
+describe("sweepStaleDispatchingReminders", () => {
+  /** Minimal fake for `.from("task_reminder_deliveries").update(...).eq(...).lt(...).select("id")`. */
+  function fakeUpdateSupabase(opts: { error?: { message: string } | null; ids?: string[] }) {
+    const calls: { payload: unknown; eqs: [string, unknown][]; lt: [string, unknown] | null }[] = [];
+    const from = vi.fn((table: string) => ({
+      update: vi.fn((payload: unknown) => {
+        const record = { payload, eqs: [] as [string, unknown][], lt: null as [string, unknown] | null };
+        calls.push(record);
+        const builder = {
+          eq: vi.fn((column: string, value: unknown) => {
+            record.eqs.push([column, value]);
+            return builder;
+          }),
+          lt: vi.fn((column: string, value: unknown) => {
+            record.lt = [column, value];
+            return builder;
+          }),
+          select: vi.fn(async () => ({
+            data: opts.error ? null : (opts.ids ?? []).map((id) => ({ id })),
+            error: opts.error ?? null,
+          })),
+        };
+        return builder;
+      }),
+    }));
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    return { from, calls } as any;
+  }
+
+  it("transitions stale 'dispatching' rows (past the threshold) into timeout_ambiguous, fenced by status='dispatching' and dispatching_at < cutoff", async () => {
+    const supabase = fakeUpdateSupabase({ ids: ["delivery-1", "delivery-2"] });
+
+    await sweepStaleDispatchingReminders(supabase);
+
+    expect(supabase.calls).toHaveLength(1);
+    expect(supabase.calls[0].payload).toMatchObject({
+      status: "timeout_ambiguous",
+      last_error: expect.stringContaining("stale dispatching"),
+    });
+    expect(supabase.calls[0].eqs).toContainEqual(["status", "dispatching"]);
+    expect(supabase.calls[0].lt![0]).toBe("dispatching_at");
+  });
+
+  it("reports telemetry when rows were swept", async () => {
+    const supabase = fakeUpdateSupabase({ ids: ["delivery-1"] });
+
+    await sweepStaleDispatchingReminders(supabase);
+
+    expect(mocks.reportError).toHaveBeenCalledWith(
+      expect.any(Error),
+      expect.objectContaining({
+        tags: { surface: "cron_appointment_reminder_sweep_stale_dispatching" },
+        extra: { count: 1 },
+      }),
+    );
+  });
+
+  it("reports nothing when no rows were stale", async () => {
+    const supabase = fakeUpdateSupabase({ ids: [] });
+
+    await sweepStaleDispatchingReminders(supabase);
+
+    expect(mocks.reportError).not.toHaveBeenCalled();
+  });
+
+  it("reports (but does not throw on) a query error", async () => {
+    const supabase = fakeUpdateSupabase({ error: { message: "db down" } });
+
+    await expect(sweepStaleDispatchingReminders(supabase)).resolves.toBeUndefined();
+
+    expect(mocks.reportError).toHaveBeenCalledWith(
+      expect.any(Error),
+      expect.objectContaining({ tags: { surface: "cron_appointment_reminder_sweep_stale_dispatching" } }),
+    );
   });
 });

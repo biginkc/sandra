@@ -124,7 +124,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   mocks.createNotification.mockResolvedValue({ inserted: 1, conflict: false });
   mocks.dispatchAppointmentReminderSlack.mockResolvedValue({
-    sent: true,
+    outcome: "sent",
     channel: "D123",
     messageTs: "1710000000.000100",
   });
@@ -202,7 +202,7 @@ describe("deliverAppointmentReminder — bell", () => {
 });
 
 describe("deliverAppointmentReminder — slack", () => {
-  it("dispatches via dispatchAppointmentReminderSlack and marks sent with the messageTs on success", async () => {
+  it("fences claimed -> dispatching BEFORE calling dispatchAppointmentReminderSlack, then dispatching -> sent with the messageTs on success", async () => {
     const supabase = fakeSupabase();
     const row = baseRow({ channel: "slack" });
 
@@ -226,11 +226,31 @@ describe("deliverAppointmentReminder — slack", () => {
       channel: "slack",
       providerMessageId: "1710000000.000100",
     });
+    // Codex round 12 (finding 2): the dispatching fence lands FIRST — the
+    // real closer of the crash-between-accept-and-write hole — fenced by
+    // the row's original claimed status.
+    expect(supabase.updates).toHaveLength(2);
     expect(supabase.updates[0]).toMatchObject({
+      payload: expect.objectContaining({ status: "dispatching", attempts: 1 }),
+      eqs: expect.arrayContaining([
+        ["id", "delivery-1"],
+        ["claim_token", "initial-token"],
+        ["status", "pending"],
+      ]),
+    });
+    // The outcome write fences off 'dispatching', not the row's original
+    // claimed status — that's the whole point of the fence.
+    expect(supabase.updates[1]).toMatchObject({
       payload: expect.objectContaining({
         status: "sent",
         provider_message_id: "1710000000.000100",
+        attempts: 1,
       }),
+      eqs: expect.arrayContaining([
+        ["id", "delivery-1"],
+        ["claim_token", "initial-token"],
+        ["status", "dispatching"],
+      ]),
     });
   });
 
@@ -274,9 +294,9 @@ describe("deliverAppointmentReminder — slack", () => {
     });
   });
 
-  it("marks failed with the reason when Slack dispatch doesn't send", async () => {
+  it("marks failed with the reason when Slack dispatch reports a definite pre-send failure", async () => {
     mocks.dispatchAppointmentReminderSlack.mockResolvedValueOnce({
-      sent: false,
+      outcome: "failed",
       reason: "pref_disabled",
     });
     const supabase = fakeSupabase();
@@ -289,9 +309,55 @@ describe("deliverAppointmentReminder — slack", () => {
       channel: "slack",
       error: "pref_disabled",
     });
-    expect(supabase.updates[0]).toMatchObject({
+    expect(supabase.updates).toHaveLength(2);
+    expect(supabase.updates[1]).toMatchObject({
       payload: expect.objectContaining({ status: "failed", last_error: "pref_disabled" }),
+      eqs: expect.arrayContaining([["status", "dispatching"]]),
     });
+  });
+
+  // Codex round 12 (finding 1): dispatch.ts now returns a three-way
+  // outcome — transmission-started-but-unproven must fence into
+  // timeout_ambiguous, never the ordinary retryable `failed`.
+  it("fences dispatching -> timeout_ambiguous (aborted_ambiguous outcome) when Slack dispatch reports ambiguous — a postMessage exception or accepted-without-ts", async () => {
+    mocks.dispatchAppointmentReminderSlack.mockResolvedValueOnce({
+      outcome: "ambiguous",
+      reason: "Slack chat.postMessage resolved without a ts",
+    });
+    const supabase = fakeSupabase();
+
+    const outcome = await deliverAppointmentReminder(supabase, baseRow({ channel: "slack" }));
+
+    expect(outcome).toEqual({
+      status: "aborted_ambiguous",
+      deliveryId: "delivery-1",
+      channel: "slack",
+      lastError: "Slack chat.postMessage resolved without a ts",
+    });
+    expect(supabase.updates).toHaveLength(2);
+    expect(supabase.updates[1]).toMatchObject({
+      payload: expect.objectContaining({
+        status: "timeout_ambiguous",
+        last_error: "Slack chat.postMessage resolved without a ts",
+      }),
+      eqs: expect.arrayContaining([["status", "dispatching"]]),
+    });
+  });
+
+  // Codex round 12 (finding 2): the row's lease was ALREADY lost before any
+  // provider call was ever attempted — the dispatching fence itself is a
+  // 0-row no-op. dispatchAppointmentReminderSlack must never be called in
+  // this case (no send should be attempted for a row this worker no longer
+  // owns).
+  it("reports lease_lost and never calls dispatchAppointmentReminderSlack when the pre-dispatch fence itself loses the lease", async () => {
+    const supabase = fakeSupabase({ matchedRows: 0 });
+
+    const outcome = await deliverAppointmentReminder(supabase, baseRow({ channel: "slack" }));
+
+    expect(outcome).toEqual({ status: "lease_lost", deliveryId: "delivery-1", channel: "slack" });
+    expect(mocks.dispatchAppointmentReminderSlack).not.toHaveBeenCalled();
+    expect(supabase.updates).toHaveLength(1);
+    expect(mocks.reportError).not.toHaveBeenCalled();
   });
 });
 
@@ -408,11 +474,15 @@ describe("deliverAppointmentReminder — sms", () => {
       channel: "sms",
       error: "Sendillo send not attempted: deadline signal was already aborted",
     });
-    expect(supabase.updates[0]).toMatchObject({
+    // Codex round 12 (finding 2): the dispatching fence write lands first —
+    // updates[1] is the outcome write, fenced off 'dispatching'.
+    expect(supabase.updates).toHaveLength(2);
+    expect(supabase.updates[1]).toMatchObject({
       payload: expect.objectContaining({
         status: "failed",
         last_error: "Sendillo send not attempted: deadline signal was already aborted",
       }),
+      eqs: expect.arrayContaining([["status", "dispatching"]]),
     });
   });
 
@@ -437,7 +507,7 @@ describe("deliverAppointmentReminder — sms", () => {
   // sitting at its original claimed status where a retry claim could
   // reclaim it and risk a duplicate SMS on top of a send whose outcome is
   // genuinely unknown.
-  it("fences claimedStatus -> timeout_ambiguous when sendRepSmsReminder reports aborted_ambiguous directly (Sendillo's own timeout won the race, not the sweep's)", async () => {
+  it("fences dispatching -> timeout_ambiguous when sendRepSmsReminder reports aborted_ambiguous directly (Sendillo's own timeout won the race, not the sweep's)", async () => {
     mocks.sendRepSmsReminder.mockResolvedValueOnce({
       ok: false,
       reason: "aborted_ambiguous",
@@ -454,8 +524,20 @@ describe("deliverAppointmentReminder — sms", () => {
       channel: "sms",
       lastError: "This operation was aborted",
     });
-    expect(supabase.updates).toHaveLength(1);
+    // Codex round 12 (finding 2): the dispatching fence (fenced off the
+    // row's ORIGINAL claimed status) lands first; the aborted_ambiguous
+    // fence lands second, off 'dispatching' — not the stale original
+    // status the pre-round-12 version of this test asserted.
+    expect(supabase.updates).toHaveLength(2);
     expect(supabase.updates[0]).toMatchObject({
+      payload: expect.objectContaining({ status: "dispatching" }),
+      eqs: expect.arrayContaining([
+        ["id", "delivery-1"],
+        ["claim_token", "initial-token"],
+        ["status", "pending"],
+      ]),
+    });
+    expect(supabase.updates[1]).toMatchObject({
       table: "task_reminder_deliveries",
       payload: expect.objectContaining({
         status: "timeout_ambiguous",
@@ -464,25 +546,25 @@ describe("deliverAppointmentReminder — sms", () => {
       eqs: expect.arrayContaining([
         ["id", "delivery-1"],
         ["claim_token", "initial-token"],
-        // Fenced off the row's ORIGINAL claimedStatus ("pending") — this is
-        // the direct-race path, so the sweep's own deadline race never
-        // touched the row first.
-        ["status", "pending"],
+        ["status", "dispatching"],
       ]),
     });
   });
 
-  it("a direct aborted_ambiguous write is a benign no-op when the sweep's own deadline race already fenced the row first (0 rows matched, not an error)", async () => {
+  it("a direct aborted_ambiguous write is a benign no-op when a concurrent claim already moved the row off 'dispatching' (0 rows matched, not an error)", async () => {
     mocks.sendRepSmsReminder.mockResolvedValueOnce({
       ok: false,
       reason: "aborted_ambiguous",
       message: "This operation was aborted",
     });
-    // 0 rows matched: simulates the row already having moved to
-    // timeout_ambiguous via markReminderDeliveryTimedOut before this write
-    // runs — this function's own fence write is scoped to the row's STALE
-    // pre-claim `claimedStatus`, so it correctly matches nothing here.
-    const supabase = fakeSupabase({ matchedRows: 0 });
+    // The dispatching fence itself succeeds (1st write); the SECOND write
+    // (the aborted_ambiguous fence, scoped to 'dispatching') matches 0 rows
+    // — simulating some other process having already moved the row off
+    // 'dispatching' in between (e.g. the stale-dispatching sweep, or a
+    // second continuation).
+    const supabase = fakeSupabase({
+      updateResults: [{ error: null, matchedRows: 1 }, { error: null, matchedRows: 0 }],
+    });
     const row = baseRow({ channel: "sms" });
 
     const outcome = await deliverAppointmentReminder(supabase, row);
@@ -493,21 +575,46 @@ describe("deliverAppointmentReminder — sms", () => {
       channel: "sms",
       lastError: "This operation was aborted",
     });
+    expect(supabase.updates).toHaveLength(2);
+    expect(mocks.reportError).not.toHaveBeenCalled();
+  });
+
+  // Codex round 12 (finding 2): the row's lease was ALREADY lost before any
+  // provider call was ever attempted — the pre-dispatch fence itself is a
+  // 0-row no-op, and sendRepSmsReminder must never be called for a row this
+  // worker no longer owns.
+  it("reports lease_lost and never calls sendRepSmsReminder when the pre-dispatch fence itself loses the lease", async () => {
+    const supabase = fakeSupabase({ matchedRows: 0 });
+
+    const outcome = await deliverAppointmentReminder(supabase, baseRow({ channel: "sms" }));
+
+    expect(outcome).toEqual({ status: "lease_lost", deliveryId: "delivery-1", channel: "sms" });
+    expect(mocks.sendRepSmsReminder).not.toHaveBeenCalled();
+    expect(supabase.updates).toHaveLength(1);
     expect(mocks.reportError).not.toHaveBeenCalled();
   });
 });
 
 describe("deliverAppointmentReminder — defense in depth", () => {
   it("never throws: an unexpected exception from a channel's provider call is caught, delivery marked failed", async () => {
-    mocks.dispatchAppointmentReminderSlack.mockRejectedValueOnce(new Error("transport blew up"));
+    // Codex round 12 (finding 2): bell, not slack — slack/sms now fence
+    // into 'dispatching' before their provider call, so an exception from
+    // deep inside them can land AFTER that fence, and this top-level catch
+    // (which only has the row's ORIGINAL claimed status to fence with)
+    // would then benignly no-op against the real 'dispatching' status
+    // instead of landing a "failed" write — exactly the same "lease
+    // reassigned" ambiguity this whole round exists to make safe, not a
+    // regression. Bell has no such fence, so it isolates this generic
+    // top-level-catch behavior cleanly.
+    mocks.createNotification.mockRejectedValueOnce(new Error("transport blew up"));
     const supabase = fakeSupabase();
 
-    const outcome = await deliverAppointmentReminder(supabase, baseRow({ channel: "slack" }));
+    const outcome = await deliverAppointmentReminder(supabase, baseRow({ channel: "bell" }));
 
     expect(outcome).toEqual({
       status: "failed",
       deliveryId: "delivery-1",
-      channel: "slack",
+      channel: "bell",
       error: "transport blew up",
     });
     expect(supabase.updates[0]).toMatchObject({
@@ -583,7 +690,12 @@ describe("deliverAppointmentReminder — retry-claim fencing (Codex round 1)", (
     });
   });
 
-  it("a lost lease (0 rows matched by the fenced write) is abandoned silently — no reportError call", async () => {
+  // Codex round 12 (finding 3): pre-round-12 this asserted `outcome.status
+  // === "sent"` — a fenced write matching ZERO rows was silently reported
+  // as a confirmed send. That's the bug: no row landed, so nothing was
+  // actually confirmed by THIS worker. `lease_lost` is now its own honest
+  // outcome, distinct from `sent`.
+  it("a lost lease (0 rows matched by the fenced write) is reported as lease_lost, not sent — no reportError call", async () => {
     const supabase = fakeSupabase({ matchedRows: 0 });
     const row = baseRow({
       channel: "bell",
@@ -595,22 +707,23 @@ describe("deliverAppointmentReminder — retry-claim fencing (Codex round 1)", (
 
     const outcome = await deliverAppointmentReminder(supabase, row);
 
-    // The delivery still reports its own outcome to the sweep loop's
-    // tally — only the DB write was fenced away, not the provider call
-    // (which already happened, e.g. an SMS may have gone out under the
-    // reclaimed token's own attempt). Losing the lease means SOME other
-    // claim now owns bookkeeping for this row.
-    expect(outcome.status).toBe("sent");
+    // A different owner now holds this row's lease — its own delivery
+    // attempt (or lack thereof) is authoritative, not this worker's.
+    expect(outcome).toEqual({ status: "lease_lost", deliveryId: "delivery-1", channel: "bell" });
     expect(mocks.reportError).not.toHaveBeenCalled();
   });
 
-  it("Codex round 2: a STALE-TOKEN INITIAL worker's sent/failed writes are no-ops (0 rows matched) — the retry claim already reclaimed this row out from under it", async () => {
-    // Simulates: fn_claim_appointment_reminders claims the row (token A,
-    // status pending), the initial provider call stalls past the
-    // 2-minute lease, fn_claim_reminder_retries reclaims the SAME row
-    // (fresh token B, still status pending) and starts its own delivery.
-    // The stalled initial worker's eventual sent/failed write must be a
-    // no-op, not a clobber of the retry owner's outcome.
+  // Codex round 2, extended round 12 (findings 2/3): simulates
+  // fn_claim_appointment_reminders claiming the row (token A, status
+  // pending), then fn_claim_reminder_retries reclaiming the SAME row
+  // (fresh token) before this stale worker gets anywhere. Pre-round-12,
+  // the stale worker would still call the provider and only discover the
+  // lost lease at the FINAL write; the round-12 pre-dispatch fence now
+  // catches this at the FIRST write, before any provider call — a strict
+  // improvement (no risk of a duplicate send from a worker that has
+  // already lost its lease), and correctly reports `lease_lost`, not
+  // `sent` (round 3's fix to markSentOrRepair).
+  it("Codex round 2/12: a STALE-TOKEN INITIAL worker's pre-dispatch fence is a no-op (0 rows matched) — the retry claim already reclaimed this row, and no provider call is ever attempted", async () => {
     const supabase = fakeSupabase({ matchedRows: 0 });
     const staleInitialRow = baseRow({
       channel: "sms",
@@ -620,22 +733,11 @@ describe("deliverAppointmentReminder — retry-claim fencing (Codex round 1)", (
       claimedStatus: "pending",
     });
 
-    const sentOutcome = await deliverAppointmentReminder(supabase, staleInitialRow);
-    expect(sentOutcome.status).toBe("sent");
-    expect(supabase.updates[0]).toMatchObject({
-      eqs: expect.arrayContaining([
-        ["id", "delivery-1"],
-        ["claim_token", "token-A-stale"],
-        ["status", "pending"],
-      ]),
-    });
-    expect(mocks.reportError).not.toHaveBeenCalled();
+    const outcome = await deliverAppointmentReminder(supabase, staleInitialRow);
 
-    mocks.sendRepSmsReminder.mockResolvedValueOnce({ ok: false, reason: "boom", message: "boom" });
-    const failedOutcome = await deliverAppointmentReminder(supabase, staleInitialRow);
-    expect(failedOutcome.status).toBe("failed");
-    expect(supabase.updates[1]).toMatchObject({
-      payload: expect.objectContaining({ status: "failed" }),
+    expect(outcome).toEqual({ status: "lease_lost", deliveryId: "delivery-1", channel: "sms" });
+    expect(mocks.sendRepSmsReminder).not.toHaveBeenCalled();
+    expect(supabase.updates[0]).toMatchObject({
       eqs: expect.arrayContaining([
         ["id", "delivery-1"],
         ["claim_token", "token-A-stale"],
@@ -740,16 +842,23 @@ describe("Codex round 4 (finding 3): bounded retry on the mark-sent write", () =
   it("exhausts all 3 attempts, reports the failure WITHOUT a duplicate-risk tag when marking 'failed' (no provider send occurred, so re-trying is simply correct)", async () => {
     vi.useFakeTimers();
     mocks.dispatchAppointmentReminderSlack.mockResolvedValueOnce({
-      sent: false,
+      outcome: "failed",
       reason: "pref_disabled",
     });
-    const supabase = fakeSupabase({ updateError: { message: "db down" } });
+    // Codex round 12 (finding 2): the pre-dispatch fence write (1st call)
+    // succeeds — it's the SUBSEQUENT failed-write attempts that hit the
+    // chronic DB outage.
+    const supabase = fakeSupabase({
+      updateResults: [{ error: null, matchedRows: 1 }],
+      updateError: { message: "db down" },
+    });
 
     const outcomePromise = deliverAppointmentReminder(supabase, baseRow({ channel: "slack" }));
     await vi.runAllTimersAsync();
     await outcomePromise;
 
-    expect(supabase.updates).toHaveLength(3);
+    // 1 dispatching fence + 3 failed mark-delivery attempts.
+    expect(supabase.updates).toHaveLength(4);
     expect(mocks.reportError).toHaveBeenCalledTimes(1);
     const [, context] = mocks.reportError.mock.calls[0];
     expect(context.tags).toEqual({ surface: "reminder_delivery_mark" });
@@ -768,10 +877,14 @@ describe("Codex round 4 (finding 3): bounded retry on the mark-sent write", () =
     vi.useFakeTimers();
     const supabase = fakeSupabase({
       updateResults: [
+        // Codex round 12 (finding 2): 1st write is the pre-dispatch fence
+        // (claimed -> dispatching) — succeeds, so the send is actually
+        // attempted.
+        { error: null, matchedRows: 1 },
         { error: { message: "db down" } },
         { error: { message: "db down" } },
         { error: { message: "db down" } },
-        // 4th write: repairIntoNonResendState's fenced repair attempt —
+        // 5th write: repairIntoNonResendState's fenced repair attempt —
         // succeeds here.
         { error: null, matchedRows: 1 },
       ],
@@ -789,13 +902,15 @@ describe("Codex round 4 (finding 3): bounded retry on the mark-sent write", () =
       deliveryId: "delivery-1",
       channel: "slack",
     });
-    expect(supabase.updates).toHaveLength(4);
-    expect(supabase.updates[3]).toMatchObject({
+    expect(supabase.updates).toHaveLength(5);
+    expect(supabase.updates[4]).toMatchObject({
       payload: expect.objectContaining({ status: "timeout_ambiguous" }),
       eqs: expect.arrayContaining([
         ["id", "delivery-1"],
         ["claim_token", "initial-token"],
-        ["status", "pending"],
+        // Fenced off 'dispatching' — the row's real pre-repair status,
+        // not the stale original claimedStatus.
+        ["status", "dispatching"],
       ]),
     });
     // markDelivery's own internal reportError (duplicate-risk tag) still
@@ -818,16 +933,22 @@ describe("Codex round 4 (finding 3): bounded retry on the mark-sent write", () =
   // scenario where a real duplicate send is genuinely possible.
   it("reports a SECOND, more severe error when the repair write into the non-resend state ALSO fails on both fenced and unfenced attempts", async () => {
     vi.useFakeTimers();
-    const supabase = fakeSupabase({ updateError: { message: "db down" } });
+    // Codex round 12 (finding 2): pre-dispatch fence (1st write) succeeds;
+    // everything after it hits the chronic DB outage.
+    const supabase = fakeSupabase({
+      updateResults: [{ error: null, matchedRows: 1 }],
+      updateError: { message: "db down" },
+    });
 
     const outcomePromise = deliverAppointmentReminder(supabase, baseRow({ channel: "slack" }));
     await vi.runAllTimersAsync();
     const outcome = await outcomePromise;
 
     expect(outcome.status).toBe("timeout_ambiguous");
-    // 3 mark-sent attempts + fenced repair attempt + unfenced repair
-    // attempt = 5 total writes, every one erroring.
-    expect(supabase.updates).toHaveLength(5);
+    // 1 dispatching fence + 3 mark-sent attempts + fenced repair attempt +
+    // unfenced repair attempt = 6 total writes, every one after the first
+    // erroring.
+    expect(supabase.updates).toHaveLength(6);
     expect(mocks.reportError).toHaveBeenCalledTimes(2);
     expect(mocks.reportError).toHaveBeenLastCalledWith(
       expect.any(Error),
@@ -847,7 +968,8 @@ describe("Codex round 4 (finding 3): bounded retry on the mark-sent write", () =
 
     const outcome = await deliverAppointmentReminder(supabase, baseRow({ channel: "bell" }));
 
-    expect(outcome.status).toBe("sent");
+    // Codex round 12 (finding 3): a 0-row match is `lease_lost`, not `sent`.
+    expect(outcome).toEqual({ status: "lease_lost", deliveryId: "delivery-1", channel: "bell" });
     expect(supabase.updates).toHaveLength(1);
     expect(mocks.reportError).not.toHaveBeenCalled();
   });

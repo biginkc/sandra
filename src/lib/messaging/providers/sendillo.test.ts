@@ -108,7 +108,12 @@ describe("SendilloMessagingProvider.sendSms", () => {
     });
   });
 
-  it("throws when a success response has no message id", async () => {
+  // Codex round 12 (finding 1): a 2xx with no reconcilable id is "accepted
+  // without a provable receipt" — the SAME uncertainty class as a
+  // transport failure or abort, flagged `acceptedWithoutId` so callers
+  // route it to `aborted_ambiguous`, never the confirmed-non-delivery
+  // `provider_error`.
+  it("throws with details.acceptedWithoutId when a success response has no message id", async () => {
     mockFetch({ status: 200, body: { data: { status: "queued" } } });
     const provider = new SendilloMessagingProvider(
       "sendillo-test-key",
@@ -117,7 +122,11 @@ describe("SendilloMessagingProvider.sendSms", () => {
 
     await expect(
       provider.sendSms({ to: "+18165551234", body: "hello there" }),
-    ).rejects.toBeInstanceOf(ProviderError);
+    ).rejects.toMatchObject({
+      errorClass: "provider",
+      provider: "sendillo",
+      details: expect.objectContaining({ acceptedWithoutId: true }),
+    });
   });
 
   // Codex round 9 (finding 1): the internal DEFAULT_SEND_TIMEOUT_MS timer
@@ -152,7 +161,14 @@ describe("SendilloMessagingProvider.sendSms", () => {
     vi.useRealTimers();
   });
 
-  it("does not mark details.isAbort for an ordinary (non-abort) network failure", async () => {
+  // Codex round 12 (finding 1): a non-abort `fetch()` rejection is a raw
+  // transport failure with no HTTP response ever received — it proves
+  // NOTHING about whether Sendillo received the request before the
+  // connection dropped, so it's flagged `transportFailure` (never
+  // `isAbort`) so callers (rep-sms.ts) route it to the same
+  // never-retryable `aborted_ambiguous` outcome as an actual abort,
+  // instead of the confirmed-non-delivery `provider_error`.
+  it("does not mark details.isAbort, but DOES mark details.transportFailure, for an ordinary (non-abort) network failure — connection reset mid-flight", async () => {
     (global.fetch as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
       new Error("getaddrinfo ENOTFOUND www.sendillo.com"),
     );
@@ -166,7 +182,7 @@ describe("SendilloMessagingProvider.sendSms", () => {
     ).rejects.toMatchObject({
       errorClass: "provider",
       provider: "sendillo",
-      details: undefined,
+      details: { transportFailure: true },
     });
   });
 

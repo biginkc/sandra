@@ -255,6 +255,58 @@ describe("sendRepSmsReminder", () => {
     );
   });
 
+  // Codex round 12 (finding 1): a non-abort transport failure (connection
+  // reset mid-flight, no HTTP response ever received) proves nothing about
+  // delivery — same never-retryable posture as an abort.
+  it("returns aborted_ambiguous when sendillo.ts reports a non-abort transport failure mid-flight (e.g. connection reset)", async () => {
+    mocks.sendSms.mockRejectedValueOnce(
+      new ProviderError("getaddrinfo ENOTFOUND www.sendillo.com", "sendillo", {
+        transportFailure: true,
+      }),
+    );
+
+    const result = await sendRepSmsReminder({
+      to: "+18165551234",
+      body: "Appointment in 30 min",
+    });
+
+    expect(result).toEqual({
+      ok: false,
+      reason: "aborted_ambiguous",
+      message: "getaddrinfo ENOTFOUND www.sendillo.com",
+    });
+    expect(mocks.reportError).toHaveBeenCalledWith(
+      expect.any(Error),
+      expect.objectContaining({ tags: { surface: "rep_sms_send_aborted_ambiguous" } }),
+    );
+  });
+
+  // Codex round 12 (finding 1): a 2xx with no reconcilable message id was
+  // definitely received by Sendillo, but can't be confirmed durably —
+  // same never-retryable posture as an abort or a transport failure.
+  it("returns aborted_ambiguous when sendillo.ts reports a 2xx response with no reconcilable message id", async () => {
+    mocks.sendSms.mockRejectedValueOnce(
+      new ProviderError("Sendillo send succeeded but response had no messageId", "sendillo", {
+        acceptedWithoutId: true,
+      }),
+    );
+
+    const result = await sendRepSmsReminder({
+      to: "+18165551234",
+      body: "Appointment in 30 min",
+    });
+
+    expect(result).toEqual({
+      ok: false,
+      reason: "aborted_ambiguous",
+      message: "Sendillo send succeeded but response had no messageId",
+    });
+    expect(mocks.reportError).toHaveBeenCalledWith(
+      expect.any(Error),
+      expect.objectContaining({ tags: { surface: "rep_sms_send_aborted_ambiguous" } }),
+    );
+  });
+
   // Codex round 10 (finding 4): sendillo.ts throws with `details.notSent =
   // true` specifically when the caller's deadline signal was ALREADY
   // aborted before any fetch was attempted — a strictly stronger guarantee
