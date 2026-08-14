@@ -1335,7 +1335,13 @@ export async function createLeadTaskAction(
     if (!taskResult.ok) return taskResult;
 
     if (input.assigneeId !== user.id) {
-      const prefs = await loadIntegrationPrefs(supabase, input.assigneeId);
+      // Admin client, not the cookie client: prefs RLS is self-only, so the
+      // ASSIGNING user cannot read a teammate's row — the cookie client
+      // silently returns defaults (Chicago, all channels enabled), sending
+      // the wrong timezone and dispatching to channels the assignee turned
+      // off. This single load is the authoritative result threaded into
+      // Slack (timezone + slackEnabled) below.
+      const prefs = await loadIntegrationPrefs(admin, input.assigneeId);
       const deepLink = buildLeadTaskDeepLink(property.id);
       after(async () => {
         await Promise.allSettled([

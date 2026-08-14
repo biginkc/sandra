@@ -22,7 +22,7 @@ const {
     dispatchTaskAssigned: vi.fn(),
     dispatchTaskAssignedSlack: vi.fn(),
     dispatchTaskCalendarEvent: vi.fn(),
-    loadIntegrationPrefs: vi.fn(async () => ({
+    loadIntegrationPrefs: vi.fn(async (_client?: unknown, _userId?: string) => ({
       slackEnabled: false,
       calendarEnabled: false,
       timezone: "America/Chicago",
@@ -385,6 +385,60 @@ describe("createLeadTaskAction", () => {
       deepLink: "https://app.test/leads/prop-1",
       calendarEnabled: true,
     });
+  });
+
+  it("loads teammate prefs via the admin client, not the cookie client", async () => {
+    const cookieSupabase = makeLeadTaskSupabase({
+      property: { id: "prop-1", org_id: "org-1", address: "123 Main" },
+      actorMembership: { user_id: "actor-1" },
+    });
+    createClient.mockResolvedValue(cookieSupabase);
+    const adminClient = makeLeadTaskAdmin({
+      assigneeMembership: { user_id: "assignee-1" },
+    });
+    createAdminClient.mockReturnValue(adminClient);
+    createTask.mockResolvedValue({
+      ok: true,
+      data: { id: "task-1", assignee_id: "assignee-1" },
+    });
+    loadIntegrationPrefs.mockImplementation(async (client: unknown) => {
+      if (client === adminClient) {
+        return {
+          slackEnabled: false,
+          calendarEnabled: false,
+          timezone: "America/Denver",
+        };
+      }
+      return {
+        slackEnabled: true,
+        calendarEnabled: true,
+        timezone: "America/Chicago",
+      };
+    });
+
+    const result = await createLeadTaskAction("prop-1", {
+      type: "follow_up",
+      dueAt: "2026-06-20T15:00:00.000Z",
+      assigneeId: "assignee-1",
+    });
+
+    expect(result.ok).toBe(true);
+    await flushAfterCallbacks();
+
+    expect(loadIntegrationPrefs).toHaveBeenCalledWith(
+      adminClient,
+      "assignee-1",
+    );
+    expect(loadIntegrationPrefs).not.toHaveBeenCalledWith(
+      cookieSupabase,
+      "assignee-1",
+    );
+    expect(dispatchTaskAssignedSlack).toHaveBeenCalledWith(
+      expect.objectContaining({
+        timezone: "America/Denver",
+        slackEnabled: false,
+      }),
+    );
   });
 
   it("does not schedule notification fan-out for self-assigned tasks", async () => {

@@ -2792,18 +2792,18 @@ export type Database = {
             referencedColumns: ["id"]
           },
           {
-            foreignKeyName: "tasks_related_property_id_fkey"
-            columns: ["related_property_id"]
+            foreignKeyName: "tasks_related_property_org_fkey"
+            columns: ["related_property_id", "org_id"]
             isOneToOne: false
             referencedRelation: "properties"
-            referencedColumns: ["id"]
+            referencedColumns: ["id", "org_id"]
           },
           {
-            foreignKeyName: "tasks_contact_id_fkey"
-            columns: ["contact_id"]
+            foreignKeyName: "tasks_contact_org_fkey"
+            columns: ["contact_id", "org_id"]
             isOneToOne: false
             referencedRelation: "contacts"
-            referencedColumns: ["id"]
+            referencedColumns: ["id", "org_id"]
           },
         ]
       }
