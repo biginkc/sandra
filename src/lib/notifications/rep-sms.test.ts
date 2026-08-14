@@ -225,6 +225,26 @@ describe("sendRepSmsReminder", () => {
     });
   });
 
+  it("maps a Sendillo 503 (details.ambiguousDelivery) to aborted_ambiguous — a 5xx cannot prove non-delivery (Codex round 13)", async () => {
+    mocks.sendSms.mockRejectedValueOnce(
+      new ProviderError("Sendillo 503: upstream unavailable", "sendillo", {
+        status: 503,
+        ambiguousDelivery: true,
+      }),
+    );
+
+    const result = await sendRepSmsReminder({
+      to: "+18165551234",
+      body: "Appointment in 30 min",
+    });
+
+    expect(result).toEqual({
+      ok: false,
+      reason: "aborted_ambiguous",
+      message: "Sendillo 503: upstream unavailable",
+    });
+  });
+
   // Codex round 9 (finding 1): sendillo.ts's own internal
   // DEFAULT_SEND_TIMEOUT_MS can fire and abort the underlying fetch BEFORE
   // the caller's own deadline signal does — the caller's signal is still

@@ -240,7 +240,10 @@ export async function sendRepSmsReminder(params: {
       (error instanceof ProviderError &&
         (error.details?.isAbort === true ||
           error.details?.transportFailure === true ||
-          error.details?.acceptedWithoutId === true)) ||
+          error.details?.acceptedWithoutId === true ||
+          // Round 13: a 5xx cannot prove the POST wasn't delivered — the
+          // provider may have accepted and sent before erroring.
+          error.details?.ambiguousDelivery === true)) ||
       params.signal?.aborted === true;
     if (aborted) {
       // Distinct tag from the ordinary provider-error report below — this

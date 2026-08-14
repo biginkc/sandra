@@ -153,10 +153,19 @@ export class SendilloMessagingProvider implements MessagingProvider {
     const parsed = safeParseJson(text);
     if (!response.ok) {
       const errorMessage = extractErrorMessage(parsed) || text || response.statusText;
+      // A 5xx does not prove non-delivery — the provider can accept and
+      // send before erroring — so it carries ambiguousDelivery for callers
+      // (rep-sms) that must never retry an unproven non-send. 4xx semantics
+      // are documented rejections and stay definitively retryable. The
+      // seller-facing path reads only `status` (unchanged behavior).
       throw new ProviderError(
         `Sendillo ${response.status}: ${errorMessage}`,
         "sendillo",
-        { status: response.status, response: parsed },
+        {
+          status: response.status,
+          response: parsed,
+          ...(response.status >= 500 ? { ambiguousDelivery: true } : {}),
+        },
       );
     }
 
