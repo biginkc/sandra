@@ -154,7 +154,7 @@ export async function fetchMyTasks(userId: string): Promise<{
   const prefs = await loadIntegrationPrefs(supabase, userId);
   const { dayStart, dayEnd } = getDayBoundsInZone(new Date(), prefs.timezone);
 
-  const { data, error } = await supabase
+  let { data, error } = await supabase
     .from("tasks")
     .select(
       "id, type, title, due_at, related_property_id, contact_id, properties(address, city, state, deleted_at)",
@@ -162,6 +162,24 @@ export async function fetchMyTasks(userId: string): Promise<{
     .eq("assignee_id", userId)
     .eq("status", "open")
     .order("due_at", { ascending: true });
+
+  // Post-deploy pre-migration window: contact_id doesn't exist yet and
+  // Postgres answers 42703 (undefined column). Retry with the legacy
+  // column list rather than hiding every task behind the "all caught up"
+  // empty state; contact_id maps to null (no contact-only rows can exist
+  // before the schema does).
+  if (error?.code === "42703") {
+    const legacy = await supabase
+      .from("tasks")
+      .select(
+        "id, type, title, due_at, related_property_id, properties(address, city, state, deleted_at)",
+      )
+      .eq("assignee_id", userId)
+      .eq("status", "open")
+      .order("due_at", { ascending: true });
+    error = legacy.error;
+    data = legacy.data?.map((row) => ({ ...row, contact_id: null })) ?? null;
+  }
 
   if (error || !data) {
     if (error) {

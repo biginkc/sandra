@@ -1388,6 +1388,121 @@ describe("Migration 20260814150000 — appointments schema", () => {
     });
   });
 
+  // tasks_appointment_delete_guard (round-12): a direct DELETE of an
+  // appointment (pg_trigger_depth() = 1) is rejected for every caller —
+  // cancellation is lifecycle-owned. Parent-FK cascades fire the same
+  // trigger at depth > 1 and must keep working (the property-cascade test
+  // above already proves this at the DELETE level; the dedicated case
+  // below re-proves it isolated from the outbox/ledger assertions). The
+  // `sandra.allow_appointment_time_move` escape hatch (same flag as the
+  // time-move/identity/reassignment guards) is the lifecycle RPCs' way in.
+  describe("tasks_appointment_delete_guard trigger", () => {
+    it.each([
+      ["service-role", async () => db],
+      [
+        "authenticated org member",
+        async () => (await createUserForOrg(BMH_ORG_ID, "owner")).client,
+      ],
+    ] as const)(
+      "%s: rejects a direct DELETE of an appointment",
+      async (_label, getClient) => {
+        const appt = await insertValidAppointment();
+        const client = await getClient();
+
+        const { error } = await client
+          .from("tasks" as never)
+          .delete()
+          .eq("id", appt.id);
+
+        expect(error).not.toBeNull();
+        expect((error as { message: string }).message).toMatch(
+          /appointments are cancelled through the lifecycle, not deleted/i,
+        );
+
+        const { data: after } = await db
+          .from("tasks")
+          .select("id")
+          .eq("id", appt.id);
+        expect(after).toHaveLength(1);
+      },
+    );
+
+    it("still allows a property-deletion cascade to remove its appointment (depth > 1 passes)", async () => {
+      const assignee = await createUserForOrg(BMH_ORG_ID);
+      const propertyId = await insertProperty();
+      const dueAt = new Date(Date.now() + 3600_000).toISOString();
+      const endAt = new Date(Date.now() + 7200_000).toISOString();
+      const { data: task, error: taskError } = await insertTask({
+        type: "appointment",
+        assignee_id: assignee.userId,
+        created_by: assignee.userId,
+        related_property_id: propertyId,
+        due_at: dueAt,
+        end_at: endAt,
+        calendar_chain_id: crypto.randomUUID(),
+      });
+      expect(taskError).toBeNull();
+
+      const { error: deleteError } = await db.from("properties").delete().eq("id", propertyId);
+      expect(deleteError).toBeNull();
+
+      const { data: after } = await db.from("tasks").select("id").eq("id", task!.id);
+      expect(after).toHaveLength(0);
+    });
+
+    it("does not affect a direct DELETE of a non-appointment task", async () => {
+      const assignee = await createUserForOrg(BMH_ORG_ID);
+      const propertyId = await insertProperty();
+      const { data: task, error: taskError } = await insertTask({
+        type: "follow_up",
+        assignee_id: assignee.userId,
+        created_by: assignee.userId,
+        related_property_id: propertyId,
+      });
+      expect(taskError).toBeNull();
+
+      const { error: deleteError } = await db.from("tasks").delete().eq("id", task!.id);
+      expect(deleteError).toBeNull();
+
+      const { data: after } = await db.from("tasks").select("id").eq("id", task!.id);
+      expect(after).toHaveLength(0);
+    });
+
+    // Raw pg connection (same pattern as the other guards' escape hatches):
+    // the Supabase JS client auto-commits every request, so it can't hold
+    // set_config('...', true) (transaction-local) across the set_config
+    // call and the subsequent DELETE in the same transaction.
+    describe("escape hatch — sandra.allow_appointment_time_move covers delete too (raw pg, same transaction)", () => {
+      let conn: Client;
+
+      beforeEach(async () => {
+        conn = new Client({ connectionString: testDbUrl() });
+        await conn.connect();
+        await conn.query("set statement_timeout = 0");
+      });
+
+      afterEach(async () => {
+        await conn.query("rollback").catch(() => {});
+        await conn.end().catch(() => {});
+      });
+
+      it("allows the DELETE (proving PR 3's lifecycle path) once the flag is set to 'on' in the same transaction", async () => {
+        const appt = await insertValidAppointment();
+
+        await conn.query("begin");
+        await conn.query(
+          "select set_config('sandra.allow_appointment_time_move', 'on', true)",
+        );
+        const result = await conn.query("delete from tasks where id = $1", [appt.id]);
+        expect(result.rowCount).toBe(1);
+        await conn.query("commit");
+
+        const { data: after } = await db.from("tasks").select("id").eq("id", appt.id);
+        expect(after).toHaveLength(0);
+      });
+    });
+  });
+
   // Round-7 regression: the tenant-integrity trigger used to re-validate
   // ALL relations (including assignee) on any UPDATE, so the contact FK's
   // ON DELETE SET NULL — which only changes contact_id — dragged the

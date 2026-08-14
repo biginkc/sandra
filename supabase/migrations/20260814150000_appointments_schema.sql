@@ -386,6 +386,40 @@ create trigger trg_tasks_tenant_integrity_guard
   before insert or update on public.tasks
   for each row execute function public.tasks_tenant_integrity_guard();
 
+-- Direct DELETE of an appointment bypasses the cancellation lifecycle and
+-- cascades away the reminder/ledger records needed for reconciliation —
+-- the external Google event would simply survive, orphaned. Parent
+-- cascades (the accepted property-deletion contract) MUST keep working:
+-- during a cascade, the referential-integrity machinery fires this
+-- trigger at pg_trigger_depth() > 1, which is the standard idiom for
+-- telling a cascade apart from a caller's direct DELETE.
+create or replace function public.tasks_appointment_delete_guard()
+returns trigger
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+begin
+  if old.type = 'appointment'
+     and pg_trigger_depth() = 1
+     and coalesce(current_setting('sandra.allow_appointment_time_move', true), '') <> 'on'
+  then
+    raise exception
+      'tasks_appointment_delete_guard: appointments are cancelled through the lifecycle, not deleted'
+      using errcode = 'P0001';
+  end if;
+  return old;
+end;
+$$;
+
+revoke all on function public.tasks_appointment_delete_guard()
+  from public, anon, authenticated;
+
+drop trigger if exists trg_tasks_appointment_delete_guard on public.tasks;
+create trigger trg_tasks_appointment_delete_guard
+  before delete on public.tasks
+  for each row execute function public.tasks_appointment_delete_guard();
+
 -- ----------------------------------------------------------------------------
 -- 4. properties.outreach_dispo — widen with 'booked_appointment'
 --

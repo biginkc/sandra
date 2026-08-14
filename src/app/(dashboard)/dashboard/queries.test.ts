@@ -14,13 +14,30 @@ vi.mock("@/lib/time/zoned", () => ({
 
 let queuedData: unknown[] | null = [];
 let queuedError: { message: string; code?: string } | null = null;
+// Set by the 42703-retry tests to hand back a *different* response per
+// `.from("tasks")` call (first select fails, legacy retry succeeds). null
+// (the default) preserves the single-response behavior every other test
+// relies on: every call resolves from queuedData/queuedError.
+let queuedResponses:
+  | Array<{ data: unknown[] | null; error: { message: string; code?: string } | null }>
+  | null = null;
+// Column-list string passed to each `.select(...)` call, in call order —
+// lets the retry tests assert the legacy select really dropped contact_id.
+let selectCalls: string[] = [];
 
 function makeBuilder(): Record<string, unknown> {
   const builder: Record<string, unknown> = {};
-  builder.select = () => builder;
+  builder.select = (columns: string) => {
+    selectCalls.push(columns);
+    return builder;
+  };
   builder.eq = () => builder;
-  builder.order = () =>
-    Promise.resolve({ data: queuedData, error: queuedError });
+  builder.order = () => {
+    if (queuedResponses && queuedResponses.length > 0) {
+      return Promise.resolve(queuedResponses.shift()!);
+    }
+    return Promise.resolve({ data: queuedData, error: queuedError });
+  };
   return builder;
 }
 
@@ -36,6 +53,8 @@ beforeEach(() => {
   vi.clearAllMocks();
   queuedData = [];
   queuedError = null;
+  queuedResponses = null;
+  selectCalls = [];
   mocks.loadIntegrationPrefs.mockResolvedValue({
     slackEnabled: true,
     calendarEnabled: true,
@@ -196,5 +215,61 @@ describe("fetchMyTasks", () => {
     const result = await fetchMyTasks("user-1");
 
     expect(result.timezone).toBe("America/Chicago");
+  });
+
+  it("retries with the legacy column list on 42703 (undefined column, pre-migration schema) and shows tasks instead of the false all-caught-up state", async () => {
+    queuedResponses = [
+      {
+        data: null,
+        error: { message: 'column tasks.contact_id does not exist', code: "42703" },
+      },
+      {
+        data: [
+          {
+            id: "t-legacy",
+            type: "follow_up",
+            title: "Pre-migration row",
+            due_at: "2026-05-09T15:00:00.000Z", // within [dayStart, dayEnd)
+            related_property_id: "prop-1",
+            properties: {
+              address: "1 Main St",
+              city: "KC",
+              state: "MO",
+              deleted_at: null,
+            },
+          },
+        ],
+        error: null,
+      },
+    ];
+
+    const result = await fetchMyTasks("user-1");
+
+    expect(selectCalls).toHaveLength(2);
+    expect(selectCalls[1]).not.toContain("contact_id");
+
+    expect(result.today).toHaveLength(1);
+    expect(result.today[0]).toMatchObject({
+      id: "t-legacy",
+      contact_id: null,
+      address: "1 Main St",
+      city: "KC",
+      state: "MO",
+    });
+  });
+
+  it("does not retry and returns empty buckets when the first select fails with a non-42703 error", async () => {
+    queuedData = null;
+    queuedError = { message: "connection reset", code: "57P01" };
+
+    const result = await fetchMyTasks("user-1");
+
+    expect(selectCalls).toHaveLength(1);
+    expect(result).toEqual({
+      overdue: [],
+      today: [],
+      upcoming: [],
+      timezone: "America/Chicago",
+    });
   });
 });
