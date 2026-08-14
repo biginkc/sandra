@@ -83,6 +83,16 @@ describe("checkRepSmsFromNumberReady", () => {
     await expect(checkRepSmsFromNumberReady()).resolves.toEqual({ ready: true });
   });
 
+  it("matches a catalog entry returned as bare NANP digits against the E.164 env (live Sendillo shape)", async () => {
+    // Sendillo's real /numbers/purchased payload carries "18165550000",
+    // not "+18165550000" — the first prod SMS reminder failed closed on
+    // this exact mismatch. The catalog set must normalize both sides.
+    mocks.listPurchasedNumbers.mockResolvedValueOnce([
+      { phoneE164: "18165550000", providerNumberId: "num-1", status: "active", messagingStatus: null, raw: {} },
+    ]);
+    await expect(checkRepSmsFromNumberReady()).resolves.toEqual({ ready: true });
+  });
+
   it("fails closed (not throws) when the catalog fetch itself errors", async () => {
     mocks.listPurchasedNumbers.mockRejectedValueOnce(new Error("Sendillo 500"));
 
