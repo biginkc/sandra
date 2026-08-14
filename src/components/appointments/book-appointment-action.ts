@@ -35,12 +35,23 @@ export type BookAppointmentInput = {
   durationMinutes: number;
   title: string;
   note?: string;
+  /** One UUID minted per popover open (crypto.randomUUID), reused across
+   *  every submit attempt for that same booking so a retry after a
+   *  dropped response can't create a second appointment — the RPC
+   *  recognizes the repeat key and returns the original booking with
+   *  `duplicate: true` instead of inserting again. Optional: callers that
+   *  don't supply one simply get no idempotency protection. */
+  idempotencyKey?: string;
 };
 
 export type BookAppointmentResult = {
   taskId: string;
   alreadyQualified: boolean;
   chainId: string;
+  /** True when this call resolved to an existing booking (same
+   *  idempotency key as a prior successful call) rather than creating a
+   *  new task — a same-key retry, not a fresh booking. */
+  duplicate: boolean;
 };
 
 /**
@@ -65,12 +76,14 @@ type AppointmentRpcClient = {
       p_property: string | null;
       p_title: string;
       p_description: string | null;
+      p_idempotency_key: string | null;
     },
   ): PromiseLike<{
     data: {
       task_id: string;
       already_qualified: boolean;
       calendar_chain_id: string;
+      duplicate: boolean;
     } | null;
     error: { message: string; code?: string } | null;
   }>;
@@ -222,10 +235,23 @@ export async function bookAppointment(
         await requireOrgMembershipByResource("contacts", input.contactId)
       ).orgId;
     } else {
+      // Active-only (R2-2 hardening, Codex round 1): a stale/suspended
+      // membership row must not count toward "which org do I book into" —
+      // without this filter, a caller who is active in one org and merely
+      // has HISTORY (suspended, expired, deletion-prepared) in another
+      // would see two rows and get a spurious AMBIGUOUS_ORG, or worse,
+      // could resolve into an org they no longer have access to. Same
+      // active-membership predicates as hasActiveSandraAccess /
+      // getCallerMemberships, expressed as PostgREST filters (mirrors
+      // updateMembershipRole in admin/users/actions.ts).
+      const activeAt = new Date().toISOString();
       const { data: memberships, error: membershipErr } = await supabase
         .from("memberships")
         .select("org_id")
-        .eq("user_id", user.id);
+        .eq("user_id", user.id)
+        .eq("access_status", "active")
+        .is("deletion_prepared_at", null)
+        .or(`access_expires_at.is.null,access_expires_at.gt.${activeAt}`);
       if (membershipErr) {
         return err({
           code: "MEMBERSHIP_LOOKUP_FAILED",
@@ -255,6 +281,7 @@ export async function bookAppointment(
       p_property: input.propertyId ?? null,
       p_title: input.title,
       p_description: input.note?.trim() || null,
+      p_idempotency_key: input.idempotencyKey ?? null,
     });
     if (error || !data) {
       return err({
@@ -263,13 +290,21 @@ export async function bookAppointment(
       });
     }
 
+    // A duplicate (same idempotency key as a prior successful call) is a
+    // SUCCESS, not an error — it's the RPC recognizing a retry and handing
+    // back the original booking rather than a fresh one. Treated exactly
+    // like a fresh booking below, except the assignment side effects
+    // (notification/Slack/calendar-event dispatch) are skipped: those
+    // already fired for the original call, and a retry re-dispatching them
+    // would double-notify the assignee for one appointment.
     const result: BookAppointmentResult = {
       taskId: data.task_id,
       alreadyQualified: data.already_qualified,
       chainId: data.calendar_chain_id,
+      duplicate: data.duplicate,
     };
 
-    if (input.assigneeId !== user.id) {
+    if (input.assigneeId !== user.id && !result.duplicate) {
       const admin = createAdminClient();
       const prefs = await loadIntegrationPrefs(admin, input.assigneeId);
       const subjectLabel = input.propertyId

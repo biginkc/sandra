@@ -1,5 +1,6 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { Client } from "pg";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import { createTestClient } from "@tests/integration/client";
 import { loadTestEnv } from "@tests/integration/env";
@@ -12,6 +13,24 @@ import {
   seedTwoOrgs,
 } from "@tests/integration/fixtures/multi-user";
 import type { Database } from "@/lib/supabase/types";
+
+/**
+ * Raw Postgres connection string for the two-connection concurrent-replay
+ * idempotency test below. Same lookup/rationale as
+ * 20260814150000_appointments_schema.integration.test.ts's `testDbUrl` —
+ * `TEST_SUPABASE_DB_URL` isn't forwarded into worker `process.env`, so any
+ * file needing a raw connection loads `.env.test.local` itself.
+ */
+function testDbUrl(): string {
+  const env = loadTestEnv();
+  const url = process.env.TEST_SUPABASE_DB_URL ?? env.TEST_SUPABASE_DB_URL;
+  if (!url) {
+    throw new Error(
+      "Missing TEST_SUPABASE_DB_URL in .env.test.local — see tests/integration/README.md.",
+    );
+  }
+  return url;
+}
 
 // ----------------------------------------------------------------------------
 // fn_book_appointment / fn_get_member_timezone are not (and, per this PR's
@@ -33,12 +52,14 @@ type BookAppointmentArgs = {
   p_contact?: string | null;
   p_property?: string | null;
   p_description?: string | null;
+  p_idempotency_key?: string | null;
 };
 
 type BookAppointmentRow = {
   task_id: string;
   calendar_chain_id: string;
   already_qualified: boolean;
+  duplicate: boolean;
 };
 
 type RpcResult<T> = {
@@ -66,6 +87,30 @@ function bookAppointment(
   args: BookAppointmentArgs,
 ): Promise<RpcResult<BookAppointmentRow>> {
   return asBookingRpcClient(client).rpc("fn_book_appointment", args);
+}
+
+// booking_idempotency_key is a column this migration adds; like the two
+// functions above, it isn't (and per this PR's scope, must not be) in the
+// generated Database["public"]["Tables"]["tasks"]["Row"] type yet — same
+// local-cast pattern.
+type IdempotencyTaskRow = { id: string; title: string };
+function tasksByIdempotencyKey(
+  key: string,
+): Promise<{ data: IdempotencyTaskRow[] | null; error: { message: string } | null }> {
+  const reader = db as unknown as {
+    from(table: "tasks"): {
+      select(columns: string): {
+        eq(
+          column: "booking_idempotency_key",
+          value: string,
+        ): Promise<{
+          data: IdempotencyTaskRow[] | null;
+          error: { message: string } | null;
+        }>;
+      };
+    };
+  };
+  return reader.from("tasks").select("id, title").eq("booking_idempotency_key", key);
 }
 
 function getMemberTimezone(
@@ -590,6 +635,206 @@ describe("Migration 20260814170000 — appointment booking RPCs", () => {
         .select("id, calendar_chain_id, source_task_id")
         .in("source_task_id", [firstBooking!.task_id, secondBooking!.task_id]);
       expect(ledgerRows).toHaveLength(2);
+    });
+  });
+
+  describe("fn_book_appointment — booking_idempotency_key", () => {
+    it("sequential replay with the same key returns the identical task, not a second row", async () => {
+      const booker = await createUserForOrg(BMH_ORG_ID);
+      const assignee = await createUserForOrg(BMH_ORG_ID);
+      const key = crypto.randomUUID();
+      const { p_start, p_end } = windowArgs();
+
+      const first = await bookAppointment(booker.client, {
+        p_org: BMH_ORG_ID,
+        p_assignee: assignee.userId,
+        p_start,
+        p_end,
+        p_timezone: "America/Chicago",
+        p_title: "First attempt",
+        p_idempotency_key: key,
+      });
+      expect(first.error).toBeNull();
+      expect(first.data!.duplicate).toBe(false);
+
+      // Simulates the client never seeing the first response (dropped
+      // connection) and retrying with the SAME key and a slightly
+      // different title — the retry must return the ORIGINAL booking
+      // untouched, not create a second task or update the title.
+      const retry = await bookAppointment(booker.client, {
+        p_org: BMH_ORG_ID,
+        p_assignee: assignee.userId,
+        p_start,
+        p_end,
+        p_timezone: "America/Chicago",
+        p_title: "Retry after dropped response",
+        p_idempotency_key: key,
+      });
+      expect(retry.error).toBeNull();
+      expect(retry.data!.duplicate).toBe(true);
+      expect(retry.data!.task_id).toBe(first.data!.task_id);
+      expect(retry.data!.calendar_chain_id).toBe(first.data!.calendar_chain_id);
+
+      const { data: rows, error: rowsErr } = await tasksByIdempotencyKey(key);
+      expect(rowsErr).toBeNull();
+      expect(rows).toHaveLength(1);
+      expect(rows![0].title).toBe("First attempt");
+    });
+
+    it("different keys create distinct tasks", async () => {
+      const booker = await createUserForOrg(BMH_ORG_ID);
+      const assignee = await createUserForOrg(BMH_ORG_ID);
+      const { p_start, p_end } = windowArgs();
+
+      const a = await bookAppointment(booker.client, {
+        p_org: BMH_ORG_ID,
+        p_assignee: assignee.userId,
+        p_start,
+        p_end,
+        p_timezone: "America/Chicago",
+        p_title: "Booking A",
+        p_idempotency_key: crypto.randomUUID(),
+      });
+      const b = await bookAppointment(booker.client, {
+        p_org: BMH_ORG_ID,
+        p_assignee: assignee.userId,
+        p_start,
+        p_end,
+        p_timezone: "America/Chicago",
+        p_title: "Booking B",
+        p_idempotency_key: crypto.randomUUID(),
+      });
+
+      expect(a.error).toBeNull();
+      expect(b.error).toBeNull();
+      expect(a.data!.duplicate).toBe(false);
+      expect(b.data!.duplicate).toBe(false);
+      expect(a.data!.task_id).not.toBe(b.data!.task_id);
+    });
+
+    it("omitting the key entirely (default null) never triggers the duplicate path", async () => {
+      const booker = await createUserForOrg(BMH_ORG_ID);
+      const assignee = await createUserForOrg(BMH_ORG_ID);
+      const { p_start, p_end } = windowArgs();
+
+      const a = await bookAppointment(booker.client, {
+        p_org: BMH_ORG_ID,
+        p_assignee: assignee.userId,
+        p_start,
+        p_end,
+        p_timezone: "America/Chicago",
+        p_title: "No key A",
+      });
+      const b = await bookAppointment(booker.client, {
+        p_org: BMH_ORG_ID,
+        p_assignee: assignee.userId,
+        p_start,
+        p_end,
+        p_timezone: "America/Chicago",
+        p_title: "No key B",
+      });
+
+      expect(a.data!.duplicate).toBe(false);
+      expect(b.data!.duplicate).toBe(false);
+      expect(a.data!.task_id).not.toBe(b.data!.task_id);
+    });
+
+    // The Supabase JS client auto-commits every PostgREST call, so proving
+    // the unique_violation handler (as opposed to the pre-write SELECT
+    // exercised above) needs two raw `pg` connections that can each hold
+    // an uncommitted insert open while the other collides with it — same
+    // capability/rationale as the membership-suspension race tests in
+    // 20260814150000_appointments_schema.integration.test.ts.
+    describe("concurrent replay (raw pg, two connections)", () => {
+      let connA: Client;
+      let connB: Client;
+
+      beforeEach(async () => {
+        connA = new Client({ connectionString: testDbUrl() });
+        connB = new Client({ connectionString: testDbUrl() });
+        await connA.connect();
+        await connB.connect();
+        await connA.query("set statement_timeout = 0");
+        await connB.query("set statement_timeout = 0");
+      });
+
+      afterEach(async () => {
+        await connA.query("rollback").catch(() => {});
+        await connB.query("rollback").catch(() => {});
+        await connA.end().catch(() => {});
+        await connB.end().catch(() => {});
+      });
+
+      /** Resolves "blocked" if `promise` is still pending after `ms`, else "resolved". */
+      async function stillBlockedAfter(
+        promise: Promise<unknown>,
+        ms: number,
+      ): Promise<"blocked" | "resolved"> {
+        const sentinel = Symbol("timeout");
+        const raced = await Promise.race([
+          promise.catch(() => sentinel),
+          new Promise((resolve) => setTimeout(() => resolve(sentinel), ms)).then(
+            () => "timeout-won" as const,
+          ),
+        ]);
+        return raced === "timeout-won" ? "blocked" : "resolved";
+      }
+
+      it("both callers get the same task id; only one row is ever committed", async () => {
+        const booker = await createUserForOrg(BMH_ORG_ID);
+        const assignee = await createUserForOrg(BMH_ORG_ID);
+        const key = crypto.randomUUID();
+        const { p_start, p_end } = windowArgs();
+        // Raw connections aren't PostgREST — auth.uid() reads
+        // request.jwt.claims off the session GUC, so it has to be set
+        // explicitly to simulate the authenticated booker.
+        const jwtClaims = JSON.stringify({ sub: booker.userId, role: "authenticated" });
+        const sql = `
+          select public.fn_book_appointment(
+            p_org => $1::uuid, p_assignee => $2::uuid, p_start => $3::timestamptz,
+            p_end => $4::timestamptz, p_timezone => $5::text, p_title => $6::text,
+            p_idempotency_key => $7::uuid
+          ) as result
+        `;
+        const args = [
+          BMH_ORG_ID,
+          assignee.userId,
+          p_start,
+          p_end,
+          "America/Chicago",
+          "Concurrent booking",
+          key,
+        ];
+
+        await connA.query("begin");
+        await connA.query("select set_config('request.jwt.claims', $1, true)", [jwtClaims]);
+        const resA = await connA.query<{ result: BookAppointmentRow }>(sql, args);
+        // connA's insert is committed nowhere yet — connB's colliding
+        // insert on the same (org_id, key) must block on it rather than
+        // sailing through under READ COMMITTED.
+        await connB.query("begin");
+        await connB.query("select set_config('request.jwt.claims', $1, true)", [jwtClaims]);
+        const resBPromise = connB.query<{ result: BookAppointmentRow }>(sql, args);
+
+        expect(await stillBlockedAfter(resBPromise, 1500)).toBe("blocked");
+
+        await connA.query("commit");
+        const resB = await resBPromise;
+        await connB.query("commit");
+
+        const dataA = resA.rows[0].result;
+        const dataB = resB.rows[0].result;
+        expect(dataA.task_id).toBe(dataB.task_id);
+        expect(dataA.calendar_chain_id).toBe(dataB.calendar_chain_id);
+        // Exactly one connection's call is the fresh booking (duplicate
+        // false) and the other resolved via the unique_violation handler
+        // (duplicate true) — never both fresh, never both duplicate.
+        expect([dataA.duplicate, dataB.duplicate].sort()).toEqual([false, true]);
+
+        const { data: rows, error: rowsErr } = await tasksByIdempotencyKey(key);
+        expect(rowsErr).toBeNull();
+        expect(rows).toHaveLength(1);
+      });
     });
   });
 

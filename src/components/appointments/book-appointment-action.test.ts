@@ -65,11 +65,18 @@ function makeSupabaseMock(opts: {
 }) {
   const rpc = vi.fn().mockResolvedValue(opts.rpcResult ?? { data: null, error: null });
 
+  // .from("memberships").select().eq("user_id", ...).eq("access_status", "active").is("deletion_prepared_at", null).or(activeAt filter)
   const membershipsBuilder = {
     select: vi.fn(function (this: unknown) {
       return this;
     }),
-    eq: vi.fn().mockResolvedValue({
+    eq: vi.fn(function (this: unknown) {
+      return this;
+    }),
+    is: vi.fn(function (this: unknown) {
+      return this;
+    }),
+    or: vi.fn().mockResolvedValue({
       data: opts.membershipsRows ?? [],
       error: opts.membershipsError ?? null,
     }),
@@ -285,6 +292,35 @@ describe("bookAppointment — org resolution", () => {
     expect(requireOrgMembershipByResource).not.toHaveBeenCalled();
   });
 
+  it("filters the memberships lookup to active-only (suspended/expired/deletion-prepared rows excluded server-side)", async () => {
+    const supabase = makeSupabaseMock({
+      userId: "user-1",
+      // A real query would return only the one active row; a suspended
+      // second membership in another org never reaches this code because
+      // the .eq/.is/.or filter chain excludes it at the DB.
+      membershipsRows: [{ org_id: "org-9" }],
+      rpcResult: {
+        data: { task_id: "task-9", already_qualified: false, calendar_chain_id: "chain-9" },
+        error: null,
+      },
+    });
+    createClient.mockResolvedValue(supabase);
+
+    await bookAppointment({ ...VALID_INPUT, propertyId: undefined });
+
+    const membershipsBuilder = supabase.from("memberships") as unknown as {
+      eq: ReturnType<typeof vi.fn>;
+      is: ReturnType<typeof vi.fn>;
+      or: ReturnType<typeof vi.fn>;
+    };
+    expect(membershipsBuilder.eq).toHaveBeenCalledWith("access_status", "active");
+    expect(membershipsBuilder.is).toHaveBeenCalledWith("deletion_prepared_at", null);
+    expect(membershipsBuilder.or).toHaveBeenCalledWith(
+      expect.stringMatching(/^access_expires_at\.is\.null,access_expires_at\.gt\.\d{4}-\d{2}-\d{2}T/),
+    );
+    expect(requireOrgMembership).toHaveBeenCalledWith("org-9");
+  });
+
   it("errors on an ambiguous personal block (caller belongs to more than one org)", async () => {
     createClient.mockResolvedValue(
       makeSupabaseMock({
@@ -332,7 +368,64 @@ describe("bookAppointment — RPC + side effects", () => {
       p_property: "prop-1",
       p_title: "Appointment — 123 Main St",
       p_description: "bring comps",
+      p_idempotency_key: null,
     });
+  });
+
+  it("forwards a caller-supplied idempotency key as p_idempotency_key", async () => {
+    const supabase = makeSupabaseMock({
+      userId: "user-1",
+      rpcResult: {
+        data: { task_id: "task-1", already_qualified: true, calendar_chain_id: "chain-1" },
+        error: null,
+      },
+    });
+    createClient.mockResolvedValue(supabase);
+
+    await bookAppointment({ ...VALID_INPUT, idempotencyKey: "key-abc-123" });
+
+    expect(supabase.rpc).toHaveBeenCalledWith(
+      "fn_book_appointment",
+      expect.objectContaining({ p_idempotency_key: "key-abc-123" }),
+    );
+  });
+
+  it("treats a duplicate response as success and skips re-dispatching assignment side effects", async () => {
+    createClient.mockResolvedValue(
+      makeSupabaseMock({
+        userId: "user-1",
+        propertyAddress: "123 Main St",
+        rpcResult: {
+          data: {
+            task_id: "task-1",
+            already_qualified: false,
+            calendar_chain_id: "chain-1",
+            duplicate: true,
+          },
+          error: null,
+        },
+      }),
+    );
+
+    const result = await bookAppointment({
+      ...VALID_INPUT,
+      assigneeId: "user-2",
+      idempotencyKey: "retry-key",
+    });
+
+    expect(result).toEqual({
+      ok: true,
+      data: {
+        taskId: "task-1",
+        alreadyQualified: false,
+        chainId: "chain-1",
+        duplicate: true,
+      },
+    });
+    // Booking for someone else would normally fire assignment side effects
+    // via after() — but this is a retry of an already-dispatched booking,
+    // so it must not double-notify the assignee.
+    expect(afterMock).not.toHaveBeenCalled();
   });
 
   it("surfaces an RPC error instead of a synthetic success", async () => {

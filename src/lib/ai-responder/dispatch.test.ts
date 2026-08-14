@@ -797,6 +797,32 @@ describe("dispatchAiResponse debounce", () => {
     expect(vi.mocked(sendSmsToContact)).not.toHaveBeenCalled();
   });
 
+  it("skips before generation when a human already booked the appointment", async () => {
+    const state = createMockState();
+    state.property.outreach_dispo = "booked_appointment";
+    const supabase = createMockSupabase(state);
+    installSendMock(state);
+
+    const outcome = await dispatchAiResponse(
+      supabase as never,
+      {
+        contactId: CONTACT_ID,
+        conversationId: CONVERSATION_ID,
+        inboundBody: "hello?",
+        inboundMessageId: "inbound-booked",
+        propertyId: PROPERTY_ID,
+      },
+      { anthropic: {} as never },
+    );
+
+    expect(outcome).toEqual({
+      outcome: "skipped",
+      reason: "already_terminal",
+    });
+    expect(vi.mocked(generateAiReply)).not.toHaveBeenCalled();
+    expect(vi.mocked(sendSmsToContact)).not.toHaveBeenCalled();
+  });
+
   it("low-confidence terminal model actions still close without sending", async () => {
     const state = createMockState();
     const supabase = createMockSupabase(state);
@@ -974,5 +1000,68 @@ describe("dispatchAiResponse debounce", () => {
 
     expect(outcome).toEqual({ outcome: "skipped", reason: "already_terminal" });
     expect(state.property.outreach_dispo).toBe("nurture");
+  });
+
+  it("does not clobber booked_appointment during the final write", async () => {
+    const state = createMockState();
+    const supabase = createMockSupabase(state);
+    installSendMock(state);
+    vi.mocked(generateAiReply).mockImplementationOnce(async () => {
+      // Simulates a race: a human books the appointment (setting the
+      // human-only dispo) while the AI's own generation call is still in
+      // flight — the pre-generation gate passed on the OLD dispo, so this
+      // is the only place left to catch it.
+      state.property.outreach_dispo = "booked_appointment";
+      return {
+        action: "close_not_interested",
+        confidence: 0.9,
+        sentiment: "neutral",
+      };
+    });
+
+    const outcome = await dispatchAiResponse(
+      supabase as never,
+      {
+        contactId: CONTACT_ID,
+        conversationId: CONVERSATION_ID,
+        inboundBody: "not now",
+        inboundMessageId: "inbound-booked-race",
+        propertyId: PROPERTY_ID,
+      },
+      { anthropic: {} as never },
+    );
+
+    expect(outcome).toEqual({ outcome: "skipped", reason: "already_terminal" });
+    expect(state.property.outreach_dispo).toBe("booked_appointment");
+  });
+
+  it("a consent outcome (opted_out) still overwrites booked_appointment, same precedence as over nurture/callback_requested", async () => {
+    const state = createMockState();
+    const supabase = createMockSupabase(state);
+    installSendMock(state);
+    vi.mocked(generateAiReply).mockImplementationOnce(async () => {
+      state.property.outreach_dispo = "booked_appointment";
+      return {
+        action: "opt_out",
+        confidence: 0.4,
+        sentiment: "frustrated",
+      };
+    });
+
+    const outcome = await dispatchAiResponse(
+      supabase as never,
+      {
+        contactId: CONTACT_ID,
+        conversationId: CONVERSATION_ID,
+        inboundBody: "please delete my number",
+        inboundFromPhone: "+18165550001",
+        inboundMessageId: "inbound-booked-optout-race",
+        propertyId: PROPERTY_ID,
+      },
+      { anthropic: {} as never },
+    );
+
+    expect(outcome).toEqual({ outcome: "opted_out", reason: "model:opt_out" });
+    expect(state.property.outreach_dispo).toBe("opted_out");
   });
 });

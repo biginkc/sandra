@@ -234,7 +234,12 @@ describe("<BookAppointmentPopover />", () => {
   it("submits the raw wall-clock fields (never a pre-converted Date) and closes on success", async () => {
     vi.mocked(bookAppointment).mockResolvedValue({
       ok: true,
-      data: { taskId: "task-1", alreadyQualified: false, chainId: "chain-1" },
+      data: {
+        taskId: "task-1",
+        alreadyQualified: false,
+        chainId: "chain-1",
+        duplicate: false,
+      },
     });
     const onBooked = vi.fn();
     render(
@@ -263,15 +268,49 @@ describe("<BookAppointmentPopover />", () => {
       durationMinutes: 30,
       title: "Appointment — 123 Main St",
       note: "Bring comps",
+      idempotencyKey: expect.stringMatching(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+      ),
     });
     await waitFor(() => expect(onBooked).toHaveBeenCalledWith({
       taskId: "task-1",
       alreadyQualified: false,
       chainId: "chain-1",
+      duplicate: false,
     }));
     await waitFor(() =>
       expect(screen.queryByTestId("book-appointment-calendar")).not.toBeInTheDocument(),
     );
+  });
+
+  it("mints a fresh idempotency key on each open, so a second booking after a successful one never reuses the first key", async () => {
+    vi.mocked(bookAppointment).mockResolvedValue({
+      ok: true,
+      data: {
+        taskId: "task-1",
+        alreadyQualified: false,
+        chainId: "chain-1",
+        duplicate: false,
+      },
+    });
+    render(<BookAppointmentPopover propertyId="prop-1" currentUserId="user-1" />);
+
+    let user = await openAndFillHappyPath();
+    await user.click(screen.getByTestId("book-appointment-submit"));
+    await waitFor(() => expect(bookAppointment).toHaveBeenCalledTimes(1));
+    const firstKey = vi.mocked(bookAppointment).mock.calls[0]![0].idempotencyKey;
+    expect(firstKey).toEqual(expect.any(String));
+
+    // Popover closed on success (asserted above); reopening for a second,
+    // genuinely new booking must mint a new key rather than resubmitting
+    // the first one.
+    user = await openAndFillHappyPath();
+    await user.click(screen.getByTestId("book-appointment-submit"));
+    await waitFor(() => expect(bookAppointment).toHaveBeenCalledTimes(2));
+    const secondKey = vi.mocked(bookAppointment).mock.calls[1]![0].idempotencyKey;
+
+    expect(secondKey).toEqual(expect.any(String));
+    expect(secondKey).not.toBe(firstKey);
   });
 
   it("shows a non-blocking double-book warning without disabling submit", async () => {

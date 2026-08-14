@@ -64,7 +64,16 @@ export type AiDispatchOptions = {
 };
 
 const AI_REPLY_THREAD_DEBOUNCE_MS = 45_000;
-const HUMAN_ONLY_DISPOS = new Set(["nurture", "callback_requested"]);
+// booked_appointment (appointments PR 2) joins this set for the same
+// reason nurture/callback_requested are here: a human-owned outcome that
+// the AI responder must neither dispatch against nor clobber. Both
+// isTerminalAiResponderProperty (pre-generation gate) and
+// shouldUpdateDispo's preservation check (final-write gate) key off this
+// same Set, so adding the value here covers both call sites — a
+// consent-class outcome (opted_out/dnc) still overwrites it, same as it
+// overwrites nurture/callback_requested, via shouldUpdateDispo's existing
+// `next !== "opted_out" && next !== "dnc"` carve-out.
+const HUMAN_ONLY_DISPOS = new Set(["nurture", "callback_requested", "booked_appointment"]);
 
 const DEESCALATION_TEMPLATE_WITH_NAME =
   "So sorry to bug you. Sounds like you get a lot of these. Are you {first_name}? Just want to make sure we don't bother you again.";
@@ -971,6 +980,16 @@ function shouldUpdateDispo(
   return (severity[next] ?? 0) >= (current ? (severity[current] ?? 0) : 0);
 }
 
+// Must stay in lockstep with shouldUpdateDispo's carve-out above: that
+// function decides opted_out/dnc MAY overwrite a human-only dispo
+// (nurture/callback_requested/booked_appointment) or bad_number, but the
+// actual UPDATE is a conditional write gated by this allow-list via a
+// `.or(outreach_dispo.in.(...))` filter — without HUMAN_ONLY_DISPOS/
+// bad_number in the opted_out/dnc lists, the WHERE clause would silently
+// match zero rows even though shouldUpdateDispo said the write was
+// allowed, and the caller would see a false "already_terminal". Spreading
+// HUMAN_ONLY_DISPOS here (rather than repeating its members) keeps any
+// future addition to that Set automatically covered.
 function allowedCurrentDisposFor(
   next: "wrong_number" | "not_interested" | "opted_out" | "dnc",
 ): string[] {
@@ -980,9 +999,22 @@ function allowedCurrentDisposFor(
     case "wrong_number":
       return ["not_interested", "wrong_number"];
     case "opted_out":
-      return ["not_interested", "wrong_number", "opted_out"];
+      return [
+        "not_interested",
+        "wrong_number",
+        "opted_out",
+        "bad_number",
+        ...HUMAN_ONLY_DISPOS,
+      ];
     case "dnc":
-      return ["not_interested", "wrong_number", "opted_out", "dnc"];
+      return [
+        "not_interested",
+        "wrong_number",
+        "opted_out",
+        "dnc",
+        "bad_number",
+        ...HUMAN_ONLY_DISPOS,
+      ];
   }
 }
 

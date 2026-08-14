@@ -120,6 +120,15 @@ export function BookAppointmentPopover({
   );
   const [assigneeId, setAssigneeId] = useState<string | null>(currentUserId);
   const [note, setNote] = useState("");
+  // One key per open, reused across every submit attempt for this booking
+  // (retries after a dropped response resubmit the SAME key, so the RPC
+  // recognizes the repeat and returns the original booking instead of
+  // creating a second one). Regenerated whenever the popover reopens —
+  // either after a successful booking or on a fresh open — so a later,
+  // genuinely new booking never accidentally reuses a stale key.
+  const [idempotencyKey, setIdempotencyKey] = useState<string>(() =>
+    crypto.randomUUID(),
+  );
   const [timezone, setTimezone] = useState<string | null>(null);
   const [timezoneError, setTimezoneError] = useState<string | null>(null);
   const [overlap, setOverlap] = useState<{
@@ -139,6 +148,7 @@ export function BookAppointmentPopover({
     setAssigneeId(currentUserId);
     setNote("");
     setOverlap(null);
+    setIdempotencyKey(crypto.randomUUID());
   }, [open, currentUserId]);
 
   useEffect(() => {
@@ -226,6 +236,7 @@ export function BookAppointmentPopover({
           durationMinutes,
           title,
           note: note.trim() || undefined,
+          idempotencyKey,
         }),
         {
           successMessage: "Appointment booked",
