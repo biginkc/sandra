@@ -167,4 +167,72 @@ describe("sendRepSmsReminder", () => {
       expect.objectContaining({ tags: { surface: "rep_sms_send" } }),
     );
   });
+
+  // Codex round 8: a deadline AbortSignal firing mid-call cannot prove
+  // non-delivery — the fetch was torn down, not the send. Must surface as
+  // its own "aborted_ambiguous" reason, never the ordinary "provider_error"
+  // a real Sendillo rejection carries (which downstream code treats as a
+  // safe-to-retry confirmed failure).
+  it("returns aborted_ambiguous (not provider_error) when sendSms rejects with an AbortError while the deadline signal is already aborted", async () => {
+    const controller = new AbortController();
+    mocks.sendSms.mockImplementationOnce(async () => {
+      controller.abort();
+      const abortError = new Error("This operation was aborted");
+      abortError.name = "AbortError";
+      throw abortError;
+    });
+
+    const result = await sendRepSmsReminder({
+      to: "+18165551234",
+      body: "Appointment in 30 min",
+      signal: controller.signal,
+    });
+
+    expect(result).toEqual({
+      ok: false,
+      reason: "aborted_ambiguous",
+      message: "This operation was aborted",
+    });
+    expect(mocks.reportError).toHaveBeenCalledWith(
+      expect.any(Error),
+      expect.objectContaining({ tags: { surface: "rep_sms_send_aborted_ambiguous" } }),
+    );
+  });
+
+  it("also detects the abort by signal.aborted at catch time when the rejection itself doesn't carry the AbortError name (e.g. sendillo.ts's ProviderError re-wrap)", async () => {
+    const controller = new AbortController();
+    mocks.sendSms.mockImplementationOnce(async () => {
+      controller.abort();
+      // Simulates SendilloMessagingProvider.sendSms's real behavior: it
+      // catches the raw fetch AbortError and re-throws a ProviderError,
+      // whose `name` is "ProviderError", not "AbortError" — so detection
+      // must fall back to the signal itself.
+      throw new Error("fetch failed: aborted");
+    });
+
+    const result = await sendRepSmsReminder({
+      to: "+18165551234",
+      body: "Appointment in 30 min",
+      signal: controller.signal,
+    });
+
+    expect(result).toEqual({
+      ok: false,
+      reason: "aborted_ambiguous",
+      message: "fetch failed: aborted",
+    });
+  });
+
+  it("still returns provider_error when sendSms rejects and the signal was never aborted (a genuine provider failure, unrelated to any deadline)", async () => {
+    const controller = new AbortController();
+    mocks.sendSms.mockRejectedValueOnce(new Error("Sendillo 500"));
+
+    const result = await sendRepSmsReminder({
+      to: "+18165551234",
+      body: "Appointment in 30 min",
+      signal: controller.signal,
+    });
+
+    expect(result).toEqual({ ok: false, reason: "provider_error", message: "Sendillo 500" });
+  });
 });

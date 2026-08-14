@@ -450,6 +450,17 @@ export async function runAppointmentReminderSweep(
         tags: { surface: "cron_appointment_reminder_sweep_outcome_ambiguous" },
         extra: { deliveryId: raw.delivery_id, channel: raw.channel },
       });
+    } else if (outcome.status === "aborted_ambiguous") {
+      // Codex round 8: `deliverSms` can return this directly (not only via
+      // the timeout race — e.g. Sendillo's own internal send timeout can
+      // abort before the sweep's own deadline does) without ever going
+      // through `withDeliveryDeadline`'s timeout branch, so it needs its
+      // own report here too, same lower-severity posture as
+      // `timeout_ambiguous` above.
+      reportError(new Error(outcome.lastError), {
+        tags: { surface: "cron_appointment_reminder_sweep_outcome_ambiguous" },
+        extra: { deliveryId: raw.delivery_id, channel: raw.channel },
+      });
     }
   }
 

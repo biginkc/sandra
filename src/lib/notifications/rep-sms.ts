@@ -38,6 +38,22 @@ export type RepSmsSendResult =
       ok: false;
       reason: "not_configured" | "number_not_in_catalog" | "provider_error";
       message: string;
+    }
+  | {
+      /** Codex round 8: the caller-supplied deadline `signal` (see below)
+       *  fired mid-call — the underlying fetch was torn down before we know
+       *  whether Sendillo actually received/sent the message (see
+       *  `SendilloMessagingProvider.sendSms`'s doc comment: an abort "still
+       *  throws the same `ProviderError` as any other network failure").
+       *  Deliberately its OWN reason, never folded into `provider_error`: a
+       *  real `provider_error` means Sendillo was reached and responded
+       *  with a failure, safe to treat as a confirmed non-delivery; an
+       *  abort proves nothing either way. Callers (`deliverSms` in
+       *  reminders.ts) must never treat this as a confirmed non-delivery —
+       *  see `ReminderDeliveryOutcome`'s `aborted_ambiguous` variant. */
+      ok: false;
+      reason: "aborted_ambiguous";
+      message: string;
     };
 
 function repSmsEnv(): { apiKey: string; fromNumber: string } | null {
@@ -145,6 +161,31 @@ export async function sendRepSmsReminder(params: {
     );
     return { ok: true, externalId: result.externalId };
   } catch (error) {
+    // Codex round 8: distinguish an abort (deadline fired mid-call, or a
+    // test simulating one) from a genuine provider rejection BEFORE the
+    // generic report/return below runs. Checked two ways since either can
+    // surface the abort: `err.name === "AbortError"` (what a raw aborted
+    // fetch/DOMException carries) and `params.signal?.aborted` at catch
+    // time (still true even after `sendillo.ts` re-wraps the rejection into
+    // a `ProviderError`, which loses the original error's `name`). Neither
+    // alone is reliable in every path, so both are checked.
+    const aborted =
+      (error instanceof Error && error.name === "AbortError") ||
+      params.signal?.aborted === true;
+    if (aborted) {
+      // Distinct tag from the ordinary provider-error report below — this
+      // isn't "Sendillo said no," it's "we gave up waiting," and dashboards
+      // must not conflate the two.
+      reportError(error, {
+        tags: { surface: "rep_sms_send_aborted_ambiguous" },
+        extra: { to: params.to },
+      });
+      return {
+        ok: false,
+        reason: "aborted_ambiguous",
+        message: error instanceof Error ? error.message : String(error),
+      };
+    }
     reportError(error, {
       tags: { surface: "rep_sms_send" },
       extra: { to: params.to },

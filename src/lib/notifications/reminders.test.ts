@@ -332,6 +332,37 @@ describe("deliverAppointmentReminder — sms", () => {
       error: "REP_SMS_FROM_NUMBER or SENDILLO_API_KEY is not set.",
     });
   });
+
+  // Codex round 8: a deadline AbortSignal firing mid-Sendillo-call cannot
+  // prove non-delivery — it must NOT be handled as an ordinary
+  // provider_error (which falls through to markDelivery-failed below and,
+  // via the sweep's after() continuation replaying this same outcome
+  // through resolveTimedOutReminderDelivery, would transition the row
+  // timeout_ambiguous -> failed and make it retry-eligible despite
+  // completion being genuinely unknown).
+  it("returns an aborted_ambiguous outcome (not failed) when sendRepSmsReminder reports the deadline signal fired, and writes NOTHING to the row itself", async () => {
+    mocks.sendRepSmsReminder.mockResolvedValueOnce({
+      ok: false,
+      reason: "aborted_ambiguous",
+      message: "This operation was aborted",
+    });
+    const supabase = fakeSupabase();
+    const row = baseRow({ channel: "sms" });
+
+    const outcome = await deliverAppointmentReminder(supabase, row);
+
+    expect(outcome).toEqual({
+      status: "aborted_ambiguous",
+      deliveryId: "delivery-1",
+      channel: "sms",
+      lastError: "This operation was aborted",
+    });
+    // No markDelivery write at all — this function doesn't know whether the
+    // row is still at its original claimedStatus or has already been
+    // fenced into timeout_ambiguous by the sweep's own deadline race;
+    // resolveTimedOutReminderDelivery is the one place that knows which.
+    expect(supabase.updates).toHaveLength(0);
+  });
 });
 
 describe("deliverAppointmentReminder — defense in depth", () => {
@@ -685,6 +716,53 @@ describe("Codex round 7 (finding 1): timeout_ambiguous fencing", () => {
     expect(supabase.updates).toHaveLength(1);
     const [update] = supabase.updates;
     expect(update.payload).toMatchObject({ status: "failed", last_error: "provider rejected" });
+    expect(update.eqs).toContainEqual(["status", "timeout_ambiguous"]);
+  });
+
+  it("resolveTimedOutReminderDelivery (aborted_ambiguous) LEAVES the row in timeout_ambiguous — records last_error, never transitions to failed", async () => {
+    const supabase = fakeSupabase();
+    const row = baseRow({ claimToken: "tok-1", claimedStatus: "pending" });
+
+    await resolveTimedOutReminderDelivery(supabase, row, {
+      status: "aborted_ambiguous",
+      deliveryId: row.deliveryId,
+      channel: "sms",
+      lastError: "This operation was aborted",
+    });
+
+    expect(supabase.updates).toHaveLength(1);
+    const [update] = supabase.updates;
+    // Same status in, same status out — a genuine abort proves nothing
+    // about delivery, so this is a same-status write (updated last_error
+    // only), NEVER a transition to "failed" (which would make the row
+    // retry-eligible and risk a duplicate SMS on top of a send that may
+    // have already reached Sendillo).
+    expect(update.payload).toMatchObject({
+      status: "timeout_ambiguous",
+      last_error: "aborted; delivery ambiguous",
+    });
+    expect(update.eqs).toContainEqual(["claim_token", "tok-1"]);
+    expect(update.eqs).toContainEqual(["status", "timeout_ambiguous"]);
+    expect(update.eqs).not.toContainEqual(["status", "failed"]);
+  });
+
+  it("resolveTimedOutReminderDelivery (genuine late 4xx/5xx after timeout) STILL transitions timeout_ambiguous -> failed — retryable, unlike an abort", async () => {
+    const supabase = fakeSupabase();
+    const row = baseRow({ claimToken: "tok-1", claimedStatus: "pending" });
+
+    await resolveTimedOutReminderDelivery(supabase, row, {
+      status: "failed",
+      deliveryId: row.deliveryId,
+      channel: "sms",
+      error: "Sendillo 422: invalid recipient",
+    });
+
+    expect(supabase.updates).toHaveLength(1);
+    const [update] = supabase.updates;
+    expect(update.payload).toMatchObject({
+      status: "failed",
+      last_error: "Sendillo 422: invalid recipient",
+    });
     expect(update.eqs).toContainEqual(["status", "timeout_ambiguous"]);
   });
 

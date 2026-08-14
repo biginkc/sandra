@@ -106,6 +106,25 @@ export type ReminderDeliveryOutcome =
       status: "timeout_ambiguous";
       deliveryId: string;
       channel: ReminderChannel;
+    }
+  | {
+      /** Codex round 8: distinct from `timeout_ambiguous` above —
+       *  `timeout_ambiguous` per the round-7 doc comment is only ever
+       *  produced by `withDeliveryDeadline`'s own race (never by a settled
+       *  delivery promise). This variant IS returned by a settled delivery
+       *  promise (`deliverSms`, when its deadline `signal` fired mid-call —
+       *  see `sendRepSmsReminder`'s `aborted_ambiguous` reason) and carries
+       *  the exact same "completion unknown, never retryable" guarantee.
+       *  `resolveTimedOutReminderDelivery` treats it as a same-status
+       *  no-op write (`timeout_ambiguous` -> `timeout_ambiguous`, updated
+       *  `last_error` only) rather than transitioning to `failed` — the
+       *  bug this round fixes: an abort is NOT proof of non-delivery, so
+       *  moving the row to `failed` would make it retry-eligible and risk
+       *  a duplicate SMS on top of a send that may have already gone out. */
+      status: "aborted_ambiguous";
+      deliveryId: string;
+      channel: ReminderChannel;
+      lastError: string;
     };
 
 /** Every status `markDelivery` (and its callers) can write or fence
@@ -340,6 +359,18 @@ export async function resolveTimedOutReminderDelivery(
     await markDelivery(supabase, scopedRow, "failed", { lastError: outcome.error });
     return;
   }
+  if (outcome.status === "aborted_ambiguous") {
+    // Codex round 8: the deadline abort proves nothing about delivery —
+    // leave the row exactly where the timeout race already fenced it
+    // (`timeout_ambiguous`), same status in and out, and record the abort
+    // reason for operator visibility only. Never transitions to `failed`:
+    // that would make the row retry-eligible and risk a duplicate SMS on
+    // top of a send that may have already reached Sendillo.
+    await markDelivery(supabase, scopedRow, "timeout_ambiguous", {
+      lastError: "aborted; delivery ambiguous",
+    });
+    return;
+  }
   // Unreachable per the doc comment above — defense in depth only.
   await markDelivery(supabase, scopedRow, "failed", {
     lastError: "unexpected timeout_ambiguous outcome from a settled delivery promise",
@@ -504,6 +535,27 @@ async function deliverSms(
       deliveryId: row.deliveryId,
       channel: "sms",
       providerMessageId: result.externalId,
+    };
+  }
+  if (result.reason === "aborted_ambiguous") {
+    // Codex round 8: an abort is NOT proof of non-delivery — must not be
+    // marked `failed` (that was the bug: a deadline abort mid-Sendillo-call
+    // used to fall through to the generic markDelivery-failed write below,
+    // which — via the sweep's `after()` continuation replaying this same
+    // outcome through `resolveTimedOutReminderDelivery` — transitioned the
+    // row `timeout_ambiguous -> failed` and made it retry-eligible despite
+    // completion being genuinely unknown). No markDelivery call here: this
+    // function doesn't know whether the row is still at its original
+    // `claimedStatus` or has already been fenced into `timeout_ambiguous`
+    // by the sweep's own deadline race (`withDeliveryDeadline`) — only
+    // `resolveTimedOutReminderDelivery` (the continuation that owns this
+    // outcome once the race has already resolved) knows which, and is
+    // responsible for the actual write.
+    return {
+      status: "aborted_ambiguous",
+      deliveryId: row.deliveryId,
+      channel: "sms",
+      lastError: result.message,
     };
   }
   await markDelivery(supabase, row, "failed", { lastError: result.message });
