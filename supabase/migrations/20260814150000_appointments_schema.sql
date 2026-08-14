@@ -255,6 +255,30 @@ declare
   v_property_changed boolean := true;
   v_assignee_changed boolean := true;
 begin
+  if tg_op = 'INSERT' then
+    -- Appointments are BORN open and unclaimed: an insert already marked
+    -- terminal (with forged completion metadata), reminder-claimed, or
+    -- carrying a non-zero calendar generation would satisfy every CHECK
+    -- while bypassing the lifecycle RPCs and ledger entirely — the same
+    -- trust-boundary hole as direct UPDATE/DELETE, on the creation side.
+    -- PR 3's reschedule inserts successors as open rows, so the flag
+    -- escape exists for symmetry, not need.
+    if new.type = 'appointment'
+       and (new.status <> 'open'
+            or new.outcome is not null
+            or new.reminder_claimed_at is not null
+            or new.calendar_generation <> 0
+            or new.completed_at is not null
+            or new.completed_by is not null
+            or new.snoozed_until is not null)
+       and coalesce(current_setting('sandra.allow_appointment_time_move', true), '') <> 'on'
+    then
+      raise exception
+        'tasks_tenant_integrity_guard: appointments are created open and unclaimed; lifecycle state comes later'
+        using errcode = 'P0001';
+    end if;
+  end if;
+
   if tg_op = 'UPDATE' then
     -- tasks.org_id is immutable: no lifecycle moves a task between
     -- tenants. Property/contact-linked tasks are already anchored by

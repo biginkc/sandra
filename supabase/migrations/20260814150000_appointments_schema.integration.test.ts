@@ -239,21 +239,34 @@ describe("Migration 20260814150000 — appointments schema", () => {
     });
 
     it("accepts a valid outcome on a completed appointment", async () => {
-      const assignee = await createUserForOrg(BMH_ORG_ID);
-      const dueAt = new Date(Date.now() + 3600_000).toISOString();
-      const endAt = new Date(Date.now() + 7200_000).toISOString();
-      const { data, error } = await insertTask({
-        type: "appointment",
-        assignee_id: assignee.userId,
-        created_by: assignee.userId,
-        due_at: dueAt,
-        end_at: endAt,
-        calendar_chain_id: crypto.randomUUID(),
-        status: "completed",
-        outcome: "held",
-      });
-      expect(error).toBeNull();
-      expect(data?.id).toBeTruthy();
+      // Round-14's trigger INSERT guard rejects a non-canonical creation
+      // state outright (status must be 'open' on insert), so this can no
+      // longer be a bare service-role INSERT of a completed+held row —
+      // that would prove the trigger's guard, not the CHECK constraint
+      // this test targets. Insert open (canonical), then move it to
+      // completed/held through a flagged raw-pg transaction — same
+      // escape-hatch pattern as every other appointment-owned-facet test
+      // in this file.
+      const appt = await insertValidAppointment();
+
+      const conn = new Client({ connectionString: testDbUrl() });
+      await conn.connect();
+      await conn.query("set statement_timeout = 0");
+      await conn.query("begin");
+      await conn.query(
+        "select set_config('sandra.allow_appointment_time_move', 'on', true)",
+      );
+      const result = await conn.query<{ id: string }>(
+        `update tasks
+           set status = 'completed', outcome = 'held', completed_at = now(), completed_by = $2
+         where id = $1
+         returning id`,
+        [appt.id, appt.assigneeId],
+      );
+      await conn.query("commit");
+      await conn.end().catch(() => {});
+
+      expect(result.rows[0]?.id).toBe(appt.id);
     });
 
     it("rejects reminder_claimed_at on a non-appointment task", async () => {
@@ -1551,14 +1564,33 @@ describe("Migration 20260814150000 — appointments schema", () => {
         due_at: dueAt,
         end_at: endAt,
         calendar_chain_id: crypto.randomUUID(),
-        status: "completed",
-        // round-9's rewritten tasks_outcome_check requires terminal
-        // appointments to carry an outcome (equality, not the old one-way
-        // OR) — this insert predates that and must supply one now.
-        outcome: "held",
       });
       expect(taskError).toBeNull();
       const taskId = data!.id;
+
+      // Round-14's trigger INSERT guard rejects a non-canonical creation
+      // state outright, so this historical completed+held row can no
+      // longer be a bare service-role INSERT (round-9's rewritten
+      // tasks_outcome_check already required the outcome; round-14 now
+      // also requires the row be born open). Insert open above, then move
+      // it to completed/held through a flagged raw-pg transaction — same
+      // escape-hatch pattern as every other appointment-owned-facet test
+      // in this file.
+      const conn = new Client({ connectionString: testDbUrl() });
+      await conn.connect();
+      await conn.query("set statement_timeout = 0");
+      await conn.query("begin");
+      await conn.query(
+        "select set_config('sandra.allow_appointment_time_move', 'on', true)",
+      );
+      await conn.query(
+        `update tasks
+           set status = 'completed', outcome = 'held', completed_at = now(), completed_by = $2
+         where id = $1`,
+        [taskId, assignee.userId],
+      );
+      await conn.query("commit");
+      await conn.end().catch(() => {});
 
       await setMembershipAccessStatus(assignee.userId, BMH_ORG_ID, "suspended");
 
@@ -2186,6 +2218,167 @@ describe("Migration 20260814150000 — appointments schema", () => {
         expect((after as { status: string }).status).toBe("completed");
         expect((after as { outcome: string }).outcome).toBe("held");
       });
+    });
+  });
+
+  // Round-14: the trigger's INSERT branch (section 3 of this migration)
+  // rejects an appointment INSERT that isn't born in canonical creation
+  // state — status='open', outcome/reminder_claimed_at/completed_at/
+  // completed_by/snoozed_until all NULL, calendar_generation 0 — unless
+  // the transaction carries the same sandra.allow_appointment_time_move
+  // escape hatch as every UPDATE/DELETE guard above. A forged INSERT
+  // (rather than the create-then-UPDATE path exercised elsewhere) would
+  // otherwise satisfy every CHECK while skipping the lifecycle RPCs and
+  // ledger entirely, on the creation side instead of the mutation side.
+  describe("tasks_tenant_integrity_guard — INSERT guard (round 14)", () => {
+    function forgedInsertPayload(
+      selfId: string,
+      overrides: Partial<TablesInsert<"tasks">>,
+    ) {
+      const dueAt = new Date(Date.now() + 3600_000).toISOString();
+      const endAt = new Date(Date.now() + 7200_000).toISOString();
+      return {
+        org_id: BMH_ORG_ID,
+        type: "appointment",
+        status: "open",
+        title: "Forged insert",
+        due_at: dueAt,
+        end_at: endAt,
+        assignee_id: selfId,
+        created_by: selfId,
+        calendar_chain_id: crypto.randomUUID(),
+        ...overrides,
+      };
+    }
+
+    async function serviceRoleCase(): Promise<{
+      client: typeof db;
+      selfId: string;
+    }> {
+      const assignee = await createUserForOrg(BMH_ORG_ID);
+      return { client: db, selfId: assignee.userId };
+    }
+
+    async function authenticatedMemberCase(): Promise<{
+      client: Awaited<ReturnType<typeof createUserForOrg>>["client"];
+      selfId: string;
+    }> {
+      const self = await createUserForOrg(BMH_ORG_ID, "owner");
+      return { client: self.client, selfId: self.userId };
+    }
+
+    it.each([
+      ["service-role", serviceRoleCase],
+      ["authenticated org member", authenticatedMemberCase],
+    ] as const)(
+      "%s: rejects a forged INSERT with status='completed'+outcome='held'+completed_at/by set",
+      async (_label, getCase) => {
+        const { client, selfId } = await getCase();
+        const { error } = await client
+          .from("tasks" as never)
+          .insert(
+            forgedInsertPayload(selfId, {
+              status: "completed",
+              outcome: "held",
+              completed_at: new Date().toISOString(),
+              completed_by: selfId,
+            }) as never,
+          );
+        expect(error).not.toBeNull();
+        expect((error as { message: string }).message).toMatch(
+          /appointments are created open and unclaimed/i,
+        );
+      },
+    );
+
+    it.each([
+      ["service-role", serviceRoleCase],
+      ["authenticated org member", authenticatedMemberCase],
+    ] as const)(
+      "%s: rejects a forged INSERT with reminder_claimed_at set",
+      async (_label, getCase) => {
+        const { client, selfId } = await getCase();
+        const { error } = await client
+          .from("tasks" as never)
+          .insert(
+            forgedInsertPayload(selfId, {
+              reminder_claimed_at: new Date().toISOString(),
+            }) as never,
+          );
+        expect(error).not.toBeNull();
+        expect((error as { message: string }).message).toMatch(
+          /appointments are created open and unclaimed/i,
+        );
+      },
+    );
+
+    it.each([
+      ["service-role", serviceRoleCase],
+      ["authenticated org member", authenticatedMemberCase],
+    ] as const)(
+      "%s: rejects a forged INSERT with calendar_generation=5",
+      async (_label, getCase) => {
+        const { client, selfId } = await getCase();
+        const { error } = await client
+          .from("tasks" as never)
+          .insert(forgedInsertPayload(selfId, { calendar_generation: 5 }) as never);
+        expect(error).not.toBeNull();
+        expect((error as { message: string }).message).toMatch(
+          /appointments are created open and unclaimed/i,
+        );
+      },
+    );
+
+    // Already covered end-to-end by the createTask-shape tests below, but
+    // asserted here too for locality with the forged-insert cases above.
+    it("accepts a canonical open insert", async () => {
+      const appt = await insertValidAppointment();
+      expect(appt.id).toBeTruthy();
+    });
+
+    // Raw pg connection (same pattern as every other guard's escape
+    // hatch): the Supabase JS client auto-commits every request, so it
+    // can't hold set_config('...', true) (transaction-local) across the
+    // set_config call and the subsequent INSERT in the same transaction.
+    it("escape hatch: a flagged raw-pg transaction insert of a terminal appointment succeeds", async () => {
+      const assignee = await createUserForOrg(BMH_ORG_ID);
+      const dueAt = new Date(Date.now() + 3600_000).toISOString();
+      const endAt = new Date(Date.now() + 7200_000).toISOString();
+      const chainId = crypto.randomUUID();
+
+      const conn = new Client({ connectionString: testDbUrl() });
+      await conn.connect();
+      await conn.query("set statement_timeout = 0");
+      await conn.query("begin");
+      await conn.query(
+        "select set_config('sandra.allow_appointment_time_move', 'on', true)",
+      );
+      const result = await conn.query<{
+        id: string;
+        status: string;
+        outcome: string;
+      }>(
+        `insert into tasks
+           (org_id, type, status, title, due_at, end_at, assignee_id, created_by,
+            calendar_chain_id, outcome, completed_at, completed_by)
+         values ($1, 'appointment', 'completed', 'Flagged terminal insert', $2, $3, $4, $4,
+                 $5, 'held', now(), $4)
+         returning id, status, outcome`,
+        [BMH_ORG_ID, dueAt, endAt, assignee.userId, chainId],
+      );
+      await conn.query("commit");
+      await conn.end().catch(() => {});
+
+      expect(result.rows[0].status).toBe("completed");
+      expect(result.rows[0].outcome).toBe("held");
+
+      const { data: after } = await db
+        .from("tasks")
+        .select("status, outcome")
+        .eq("id", result.rows[0].id)
+        .single();
+      expect((after as { status: string }).status).toBe("completed");
+      expect((after as { outcome: string }).outcome).toBe("held");
     });
   });
 
