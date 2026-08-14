@@ -16,7 +16,11 @@ import {
 import { isSmsPhoneSuppressed } from "./opt-out-phone";
 import { getMessagingProvider } from "./registry";
 import { selectBestSmsPhone, selectSmsPhoneByNumber } from "./sms-phone";
-import { evaluateSuppression, type SuppressionDecision } from "./suppression";
+import {
+  evaluateAutomatedSuppression,
+  evaluateSuppression,
+  type SuppressionDecision,
+} from "./suppression";
 
 /**
  * Core "send one outbound SMS" operation. Called from the lead-detail
@@ -75,6 +79,38 @@ export type SendSmsOutcome =
       consentState?: ConsentState | null;
     }
   | {
+      /**
+       * The final-dispatch automated-only re-check fired: fresh state
+       * loaded immediately before the provider call showed the property
+       * moved to a HUMAN_OWNED_DISPOS (or SUPPRESSED_DISPOS) outcome
+       * after the row was created/claimed. Only ever returned when the
+       * send's provenance is `origin: 'automated'` — manual sends never
+       * hit this path. The row is left/marked `status: 'failed'` (never
+       * retried) so the queue doesn't loop on a terminal state.
+       */
+      status: "blocked_automated_suppressed";
+      messageId: string;
+      reason: string;
+      source: Extract<SuppressionDecision, { suppressed: true }>["source"];
+      outreachDispo?: string | null;
+      consentState?: ConsentState | null;
+    }
+  | {
+      /**
+       * The final-dispatch automated-only re-check ran, but the fresh
+       * property/contact reload it depends on errored (or threw). Fail
+       * closed: with current suppression state unknown, the send is held
+       * rather than allowed through — a read failure must never let a
+       * send proceed that current state might forbid. Only ever returned
+       * when `origin: 'automated'`; manual sends don't run this re-check
+       * at all, so they're unaffected. The row is marked `status: 'failed'`
+       * (never retried) so the queue doesn't loop on an unresolved read.
+       */
+      status: "blocked_fresh_state_unavailable";
+      messageId: string;
+      error: string;
+    }
+  | {
       status: "blocked_no_consent";
       reason: string;
       consentState: ConsentState;
@@ -111,6 +147,17 @@ export type SendSmsOutcome =
   | { status: "db_error"; error: string };
 
 export type SendSmsInput = {
+  /**
+   * Send provenance — required, no default, so every caller declares
+   * itself. `'automated'` means no human is reviewing this exact message
+   * body/timing before it fires: the AI responder, sequence tick, and the
+   * bulk-campaign queue path. `'manual'` means a human is sending or
+   * queueing this specific message right now: the lead-detail composer
+   * (both immediate and "queue for later"). This drives the final-dispatch
+   * re-check immediately before the provider call — see
+   * `evaluateAutomatedSuppression` in ./suppression.
+   */
+  origin: "automated" | "manual";
   /** Contact to send to. We prefer a saved mobile across phone_1/2/3. */
   contactId: string;
   /** Linked property — required for quiet-hours zone + thread continuity. */
@@ -347,6 +394,54 @@ export async function sendSmsToContact(
     };
   }
 
+  // 5b. Final automated-boundary re-check — immediately before the
+  // provider call, on FRESH state, so a campaign SMS whose row was
+  // inserted before a booking (or an AI/sequence send that passed its
+  // early dispo gate before a booking committed) cannot still reach the
+  // provider after the property became human-owned. Manual sends
+  // (composer/inline reply) skip this — they stay consent-only per
+  // `isSuppressed`, already enforced above.
+  if (input.origin === "automated") {
+    const freshCheck = await checkFreshAutomatedSuppression(supabase, {
+      propertyId: input.propertyId,
+      contactId: input.contactId,
+    });
+    if (!freshCheck.ok) {
+      await supabase
+        .from("messages")
+        .update({
+          status: "failed",
+          failed_at: new Date().toISOString(),
+          error_message: `Held: could not confirm current suppression state before sending (${freshCheck.error}).`,
+        })
+        .eq("id", pending.id);
+      return {
+        status: "blocked_fresh_state_unavailable",
+        messageId: pending.id,
+        error: freshCheck.error,
+      };
+    }
+    const blocked = freshCheck.decision;
+    if (blocked) {
+      await supabase
+        .from("messages")
+        .update({
+          status: "failed",
+          failed_at: new Date().toISOString(),
+          error_message: blocked.reason,
+        })
+        .eq("id", pending.id);
+      return {
+        status: "blocked_automated_suppressed",
+        messageId: pending.id,
+        reason: blocked.reason,
+        source: blocked.source,
+        outreachDispo: blocked.outreachDispo ?? null,
+        consentState: blocked.consentState ?? null,
+      };
+    }
+  }
+
   // 6. Send.
   try {
     const result = await provider.sendSms({
@@ -527,6 +622,14 @@ async function queueForLater(
   }
   const queuedStatus = campaignPause.paused ? "paused" : "queued";
   const scheduledFor = input.scheduledFor?.toISOString() ?? null;
+  // Stamp send provenance onto the row itself — `releaseQueuedMessage`
+  // can't infer it later (a bulk campaign row and a manually-queued
+  // composer row look identical by then), so it must be captured here at
+  // enqueue time and read back at release.
+  const metadataWithOrigin: Json = {
+    ...(readMetadataRecord(input.metadata ?? null) ?? {}),
+    sendOrigin: input.origin,
+  } as Json;
   const { data: queued, error } = await supabase
     .from("messages")
     .insert({
@@ -544,11 +647,11 @@ async function queueForLater(
       scheduled_for: campaignPause.paused ? null : scheduledFor,
       metadata: campaignPause.paused
         ? addCampaignPauseMetadata(
-            input.metadata ?? null,
+            metadataWithOrigin,
             new Date().toISOString(),
             scheduledFor,
           )
-        : input.metadata ?? null,
+        : metadataWithOrigin,
     })
     .select("id")
     .single();
@@ -858,6 +961,63 @@ export async function releaseQueuedMessage(
       messageId: msg.id,
       reason: "Campaign sends were paused before this SMS reached the provider. It was held until the campaign is resumed.",
     };
+  }
+
+  // Final automated-boundary re-check — immediately before the provider
+  // call, on FRESH state. Provenance is read off the row itself (stamped
+  // at enqueue time in `queueForLater`), since a bulk-campaign row and a
+  // manually-queued composer row are indistinguishable by release time
+  // otherwise. Rows queued before this field existed default to
+  // 'automated' — fail safe toward suppression rather than silently
+  // skipping the check.
+  const queuedOrigin = resolveQueuedSendOrigin(msg.metadata);
+  if (queuedOrigin === "automated") {
+    const freshCheck = await checkFreshAutomatedSuppression(supabase, {
+      propertyId: msg.property_id,
+      contactId: msg.contact_id,
+    });
+    if (!freshCheck.ok) {
+      const { error: holdError } = await supabase
+        .from("messages")
+        .update({
+          status: "failed",
+          failed_at: new Date().toISOString(),
+          error_message: `Held: could not confirm current suppression state before sending (${freshCheck.error}).`,
+        })
+        .eq("id", msg.id)
+        .eq("status", "pending");
+      if (holdError) {
+        return { status: "db_error", error: holdError.message };
+      }
+      return {
+        status: "blocked_fresh_state_unavailable",
+        messageId: msg.id,
+        error: freshCheck.error,
+      };
+    }
+    const blocked = freshCheck.decision;
+    if (blocked) {
+      const { error: suppressError } = await supabase
+        .from("messages")
+        .update({
+          status: "failed",
+          failed_at: new Date().toISOString(),
+          error_message: blocked.reason,
+        })
+        .eq("id", msg.id)
+        .eq("status", "pending");
+      if (suppressError) {
+        return { status: "db_error", error: suppressError.message };
+      }
+      return {
+        status: "blocked_automated_suppressed",
+        messageId: msg.id,
+        reason: blocked.reason,
+        source: blocked.source,
+        outreachDispo: blocked.outreachDispo ?? null,
+        consentState: blocked.consentState ?? null,
+      };
+    }
   }
 
   try {
@@ -1212,6 +1372,100 @@ function blockedTerminalDispo(
     outreachDispo: decision.outreachDispo ?? null,
     consentState: decision.consentState ?? null,
   };
+}
+
+type FreshSuppressionCheck =
+  | {
+      ok: true;
+      decision: Extract<SuppressionDecision, { suppressed: true }> | null;
+    }
+  | { ok: false; error: string };
+
+/**
+ * Re-load the property's dispo and the contact's suppression fields +
+ * consent state FRESH (not reusing anything looked up earlier in this
+ * call) and run them through `evaluateAutomatedSuppression` — the single
+ * boundary function. Called immediately before every provider dispatch
+ * when `origin === 'automated'`.
+ *
+ * Fail-closed: if either reload errors (or the call throws), this returns
+ * `{ ok: false }` rather than silently treating the unread state as
+ * "not suppressed" — a transient read failure must never let a send
+ * through that current state might forbid. Only `{ ok: true, decision }`
+ * reports an actual (non-)suppression verdict; `decision` is `null` when
+ * clear to send.
+ */
+async function checkFreshAutomatedSuppression(
+  supabase: SupabaseClient<Database>,
+  args: { propertyId: string; contactId: string },
+): Promise<FreshSuppressionCheck> {
+  let propertyResult: { data: { outreach_dispo: string | null } | null; error: { message: string } | null };
+  let contactResult: {
+    data: { do_not_contact: boolean | null; sms_opted_out: boolean | null } | null;
+    error: { message: string } | null;
+  };
+  let consentState: ConsentState;
+  try {
+    [propertyResult, contactResult, consentState] = await Promise.all([
+      supabase
+        .from("properties")
+        .select("outreach_dispo")
+        .eq("id", args.propertyId)
+        .maybeSingle(),
+      supabase
+        .from("contacts")
+        .select("do_not_contact, sms_opted_out")
+        .eq("id", args.contactId)
+        .maybeSingle(),
+      getConsentState(supabase, args.contactId, "sms"),
+    ]);
+  } catch (e) {
+    return {
+      ok: false,
+      error: `fresh suppression state reload threw: ${e instanceof Error ? e.message : String(e)}`,
+    };
+  }
+  if (propertyResult.error || contactResult.error) {
+    return {
+      ok: false,
+      error:
+        propertyResult.error?.message ??
+        contactResult.error?.message ??
+        "fresh suppression state reload failed",
+    };
+  }
+  // `.maybeSingle()` returns `{ data: null, error: null }` when the row is
+  // gone (hard-deleted, or the id was bad) — not an error. Fail closed here
+  // too: a missing property/contact means we can't confirm current
+  // suppression state, so treat it the same as a reload failure rather
+  // than falling through with `?? null` defaults that would read as
+  // "nothing suppressing this send."
+  if (!propertyResult.data || !contactResult.data) {
+    return {
+      ok: false,
+      error: !propertyResult.data
+        ? "fresh suppression state reload: property row not found"
+        : "fresh suppression state reload: contact row not found",
+    };
+  }
+  const decision = evaluateAutomatedSuppression({
+    outreachDispo: propertyResult.data?.outreach_dispo ?? null,
+    consentState,
+    doNotContact: contactResult.data?.do_not_contact ?? null,
+    smsOptedOut: contactResult.data?.sms_opted_out ?? null,
+  });
+  return { ok: true, decision: decision.suppressed ? decision : null };
+}
+
+/**
+ * Read the `origin` a queued row was created with (stamped by
+ * `queueForLater` under `metadata.sendOrigin`). Rows queued before this
+ * field existed, or with a malformed value, resolve to `'automated'` —
+ * the fail-safe direction, since it's the stricter check.
+ */
+function resolveQueuedSendOrigin(metadata: Json | null): "automated" | "manual" {
+  const record = readMetadataRecord(metadata);
+  return record?.sendOrigin === "manual" ? "manual" : "automated";
 }
 
 type ResolvedProvider = NonNullable<ReturnType<typeof getMessagingProvider>>;

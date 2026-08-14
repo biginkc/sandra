@@ -119,6 +119,7 @@ describe("sendSmsToContact (integration)", () => {
       const { contactId, propertyId } = await seed({ withConsent: true });
 
       const outcome = await sendSmsToContact(supabase, {
+        origin: "manual",
         contactId,
         propertyId,
         body: "Hey — quick question about your property",
@@ -163,6 +164,7 @@ describe("sendSmsToContact (integration)", () => {
       });
 
       const outcome = await sendSmsToContact(supabase, {
+        origin: "manual",
         contactId,
         propertyId,
         body: "Reply from the same sender",
@@ -198,6 +200,7 @@ describe("sendSmsToContact (integration)", () => {
       const callsBefore = getMockMessageLog().length;
 
       const outcome = await sendSmsToContact(supabase, {
+        origin: "manual",
         contactId,
         propertyId,
         body: "Do not send this",
@@ -225,6 +228,7 @@ describe("sendSmsToContact (integration)", () => {
     const { contactId, propertyId } = await seed({ withConsent: false });
     try {
       const outcome = await sendSmsToContact(supabase, {
+        origin: "manual",
         contactId,
         propertyId,
         body: "hi",
@@ -252,6 +256,7 @@ describe("sendSmsToContact (integration)", () => {
       source: "integration-test-opt-out",
     });
     const outcome = await sendSmsToContact(supabase, {
+      origin: "manual",
       contactId,
       propertyId,
       body: "hi",
@@ -265,6 +270,7 @@ describe("sendSmsToContact (integration)", () => {
       withConsent: true,
     });
     const outcome = await sendSmsToContact(supabase, {
+      origin: "manual",
       contactId,
       propertyId,
       body: "should never insert",
@@ -312,6 +318,7 @@ describe("sendSmsToContact (integration)", () => {
       expect(contact?.sms_opted_out).toBe(false);
 
       const outcome = await sendSmsToContact(supabase, {
+        origin: "manual",
         contactId: reimported.contactId,
         propertyId: reimported.propertyId,
         body: "should never insert",
@@ -341,6 +348,7 @@ describe("sendSmsToContact (integration)", () => {
     });
 
     const outcome = await sendSmsToContact(supabase, {
+      origin: "manual",
       contactId,
       propertyId,
       body: "should never queue",
@@ -379,6 +387,7 @@ describe("sendSmsToContact (integration)", () => {
     });
 
     const outcome = await sendSmsToContact(supabase, {
+      origin: "manual",
       contactId: reimported.contactId,
       propertyId: reimported.propertyId,
       body: "should never queue",
@@ -406,6 +415,7 @@ describe("sendSmsToContact (integration)", () => {
 
     try {
       const outcome = await sendSmsToContact(supabase, {
+        origin: "manual",
         contactId,
         propertyId,
         body: "should never insert",
@@ -429,6 +439,7 @@ describe("sendSmsToContact (integration)", () => {
       .eq("id", propertyId);
 
     const outcome = await sendSmsToContact(supabase, {
+      origin: "manual",
       contactId,
       propertyId,
       body: "should never queue",
@@ -442,12 +453,63 @@ describe("sendSmsToContact (integration)", () => {
     expect(count).toBe(0);
   });
 
+  it("automated sends are blocked on a human-owned dispo the early SUPPRESSED_DISPOS check does not catch — zero provider calls", async () => {
+    await withSafeSendWindow(async () => {
+      const { contactId, propertyId } = await seed({ withConsent: true });
+      await supabase
+        .from("properties")
+        .update({ outreach_dispo: "booked_appointment" })
+        .eq("id", propertyId);
+
+      const callsBefore = getMockMessageLog().length;
+      const outcome = await sendSmsToContact(supabase, {
+        origin: "automated",
+        contactId,
+        propertyId,
+        body: "AI responder reply that must not fire",
+      });
+
+      expect(outcome.status).toBe("blocked_automated_suppressed");
+      expect(getMockMessageLog()).toHaveLength(callsBefore);
+
+      if (outcome.status === "blocked_automated_suppressed") {
+        const { data: row } = await supabase
+          .from("messages")
+          .select("status, error_message")
+          .eq("id", outcome.messageId)
+          .single();
+        expect(row?.status).toBe("failed");
+        expect(row?.error_message).toMatch(/human-owned disposition/i);
+      }
+    });
+  });
+
+  it("manual sends stay unaffected by HUMAN_OWNED_DISPOS — a human agent can still text a just-booked thread", async () => {
+    await withSafeSendWindow(async () => {
+      const { contactId, propertyId } = await seed({ withConsent: true });
+      await supabase
+        .from("properties")
+        .update({ outreach_dispo: "booked_appointment" })
+        .eq("id", propertyId);
+
+      const outcome = await sendSmsToContact(supabase, {
+        origin: "manual",
+        contactId,
+        propertyId,
+        body: "See you at 2pm tomorrow!",
+      });
+
+      expect(outcome.status).toBe("sent");
+    });
+  });
+
   it("blocks with no_phone when contact has no phone_1", async () => {
     const { contactId, propertyId } = await seed({
       phone: null,
       withConsent: true,
     });
     const outcome = await sendSmsToContact(supabase, {
+      origin: "manual",
       contactId,
       propertyId,
       body: "hi",
@@ -461,6 +523,7 @@ describe("sendSmsToContact (integration)", () => {
       withConsent: true,
     });
     const outcome = await sendSmsToContact(supabase, {
+      origin: "manual",
       contactId,
       propertyId,
       body: "hi",
@@ -477,6 +540,7 @@ describe("sendSmsToContact (integration)", () => {
     const { contactId, propertyId } = await seed({ withConsent: false });
 
     const outcome = await sendSmsToContact(supabase, {
+      origin: "manual",
       contactId,
       propertyId,
       body: "this is queued, not sent",
@@ -514,6 +578,7 @@ describe("sendSmsToContact (integration)", () => {
         .single();
 
       const outcome = await sendSmsToContact(supabase, {
+        origin: "manual",
         contactId,
         propertyId,
         body: "campaign send",
@@ -546,6 +611,7 @@ describe("sendSmsToContact (integration)", () => {
       .single();
 
     const outcome = await sendSmsToContact(supabase, {
+      origin: "manual",
       contactId,
       propertyId,
       body: "queued campaign send",
@@ -578,6 +644,7 @@ describe("sendSmsToContact (integration)", () => {
       .single();
 
     const outcome = await sendSmsToContact(supabase, {
+      origin: "manual",
       contactId,
       propertyId,
       body: "held campaign send",
@@ -616,6 +683,7 @@ describe("sendSmsToContact (integration)", () => {
       .select("id")
       .single();
     const queue = await sendSmsToContact(supabase, {
+      origin: "manual",
       contactId,
       propertyId,
       body: "queued before pause",
@@ -656,6 +724,7 @@ describe("sendSmsToContact (integration)", () => {
       const { contactId, propertyId } = await seed({ withConsent: true });
 
       const first = await sendSmsToContact(supabase, {
+        origin: "manual",
         contactId,
         propertyId,
         body: "first send",
@@ -663,6 +732,7 @@ describe("sendSmsToContact (integration)", () => {
       expect(first.status).toBe("sent");
 
       const second = await sendSmsToContact(supabase, {
+        origin: "manual",
         contactId,
         propertyId,
         body: "second send",
@@ -692,6 +762,7 @@ describe("sendSmsToContact (integration)", () => {
 
       // Queue first.
       const queue = await sendSmsToContact(supabase, {
+        origin: "manual",
         contactId,
         propertyId,
         body: "queued then released",
@@ -722,6 +793,7 @@ describe("sendSmsToContact (integration)", () => {
       .eq("id", contactId);
 
     const outcome = await sendSmsToContact(supabase, {
+      origin: "manual",
       contactId,
       propertyId,
       body: "should never send",
@@ -737,6 +809,7 @@ describe("sendSmsToContact (integration)", () => {
   it("release fails permanently when the queued destination was classified landline and promoted out of slot 1", async () => {
     const { contactId, propertyId } = await seed({ withConsent: true });
     const queue = await sendSmsToContact(supabase, {
+      origin: "manual",
       contactId,
       propertyId,
       body: "queued before classification",
@@ -775,6 +848,7 @@ describe("sendSmsToContact (integration)", () => {
   it("release permanently fails when consent was revoked between queue and release", async () => {
     const { contactId, propertyId } = await seed({ withConsent: true });
     const queue = await sendSmsToContact(supabase, {
+      origin: "manual",
       contactId,
       propertyId,
       body: "queued while consented",
@@ -803,10 +877,78 @@ describe("sendSmsToContact (integration)", () => {
     expect(row?.error_message).toMatch(/opted out/i);
   });
 
+  it("release-time automated boundary: a campaign SMS queued BEFORE a booking cannot release AFTER it — zero provider calls, terminal suppressed row", async () => {
+    const { contactId, propertyId } = await seed({ withConsent: true });
+    const queue = await sendSmsToContact(supabase, {
+      origin: "automated",
+      contactId,
+      propertyId,
+      body: "queued before the property was booked",
+      queueOnly: true,
+    });
+    expect(queue.status).toBe("queued");
+    if (queue.status !== "queued") return;
+
+    // Booking commits between queue and release.
+    await supabase
+      .from("properties")
+      .update({ outreach_dispo: "booked_appointment" })
+      .eq("id", propertyId);
+
+    const callsBefore = getMockMessageLog().length;
+    const release = await releaseQueuedMessage(supabase, queue.messageId);
+
+    expect(release.status).toBe("blocked_automated_suppressed");
+    // The core assertion: the provider was never called.
+    expect(getMockMessageLog()).toHaveLength(callsBefore);
+
+    const { data: row } = await supabase
+      .from("messages")
+      .select("status, error_message")
+      .eq("id", queue.messageId)
+      .single();
+    expect(row?.status).toBe("failed");
+    expect(row?.error_message).toMatch(/human-owned disposition/i);
+
+    // Terminal — a retry-looping auto-send tick must not pick it back up.
+    const retryRelease = await releaseQueuedMessage(supabase, queue.messageId);
+    expect(retryRelease.status).toBe("db_error");
+    expect(getMockMessageLog()).toHaveLength(callsBefore);
+  });
+
+  it("release-time automated boundary: a manually-queued reply released after a booking still sends (manual provenance is consent-only)", async () => {
+    const { contactId, propertyId } = await seed({ withConsent: true });
+    const queue = await sendSmsToContact(supabase, {
+      origin: "manual",
+      contactId,
+      propertyId,
+      body: "see you at 2pm tomorrow!",
+      queueOnly: true,
+    });
+    expect(queue.status).toBe("queued");
+    if (queue.status !== "queued") return;
+
+    await supabase
+      .from("properties")
+      .update({ outreach_dispo: "booked_appointment" })
+      .eq("id", propertyId);
+
+    const release = await releaseQueuedMessage(supabase, queue.messageId);
+    expect(release.status).toBe("sent");
+
+    const { data: row } = await supabase
+      .from("messages")
+      .select("status")
+      .eq("id", queue.messageId)
+      .single();
+    expect(row?.status).toBe("sent");
+  });
+
   it("release permanently fails when the queued phone is suppressed before release", async () => {
     const phone = "+18165551803";
     const { contactId, propertyId } = await seed({ phone, withConsent: true });
     const queue = await sendSmsToContact(supabase, {
+      origin: "manual",
       contactId,
       propertyId,
       body: "queued before phone suppression",
@@ -843,6 +985,7 @@ describe("sendSmsToContact (integration)", () => {
   it("release permanently fails when a queued property's disposition became terminal", async () => {
     const { contactId, propertyId } = await seed({ withConsent: true });
     const queue = await sendSmsToContact(supabase, {
+      origin: "manual",
       contactId,
       propertyId,
       body: "queued before wrong-number reply",
@@ -1039,6 +1182,7 @@ describe("sendSmsToContact (integration)", () => {
     await withSafeSendWindow(async () => {
       const { contactId, propertyId } = await seed({ withConsent: true });
       const queue = await sendSmsToContact(supabase, {
+        origin: "manual",
         contactId,
         propertyId,
         body: "queued metadata survives release",
@@ -1077,6 +1221,7 @@ describe("sendSmsToContact (integration)", () => {
       const { contactId, propertyId } = await seed({ withConsent: true });
 
       const outcome = await sendSmsToContact(supabase, {
+        origin: "manual",
         contactId,
         propertyId,
         body: "live reply from cockpit",
@@ -1103,6 +1248,7 @@ describe("sendSmsToContact (integration)", () => {
     const a = await seed({ phone: "+18165550101", withConsent: false });
     try {
       const noConsent = await sendSmsToContact(supabase, {
+        origin: "manual",
         contactId: a.contactId,
         propertyId: a.propertyId,
         body: "should be allowed",
@@ -1117,6 +1263,7 @@ describe("sendSmsToContact (integration)", () => {
         withConsent: true,
       });
       const quietBlocked = await sendSmsToContact(supabase, {
+        origin: "manual",
         contactId: b.contactId,
         propertyId: b.propertyId,
         body: "should be blocked",
@@ -1132,6 +1279,7 @@ describe("sendSmsToContact (integration)", () => {
     await withSafeSendWindow(async () => {
       const { contactId, propertyId } = await seed({ withConsent: true });
       const outcome = await sendSmsToContact(supabase, {
+        origin: "manual",
         contactId,
         propertyId,
         body: "FAIL: force the mock to reject",
@@ -1160,6 +1308,7 @@ describe("sendSmsToContact (integration)", () => {
     try {
       const { contactId, propertyId } = await seed({ withConsent: true });
       const queue = await sendSmsToContact(supabase, {
+        origin: "manual",
         contactId,
         propertyId,
         body: "FAIL-RATE_LIMIT: defer this queued message",
@@ -1247,6 +1396,7 @@ describe("sendSmsToContact (integration)", () => {
         .select("id")
         .single();
       const queue = await sendSmsToContact(supabase, {
+        origin: "manual",
         contactId,
         propertyId,
         body: "FAIL-RATE_LIMIT: defer this queued campaign message",
@@ -1288,6 +1438,7 @@ describe("sendSmsToContact (integration)", () => {
     try {
       const { contactId, propertyId } = await seed({ withConsent: true });
       const queue = await sendSmsToContact(supabase, {
+        origin: "manual",
         contactId,
         propertyId,
         body: "FAIL-RATE_LIMIT: cap this queued message",
@@ -1329,6 +1480,7 @@ describe("sendSmsToContact (integration)", () => {
     try {
       const { contactId, propertyId } = await seed({ withConsent: true });
       const queue = await sendSmsToContact(supabase, {
+        origin: "manual",
         contactId,
         propertyId,
         body: "FAIL-CARRIER_BLOCK: do not retry this queued message",
@@ -1383,6 +1535,7 @@ describe("sendSmsToContact (integration)", () => {
         .single();
 
       const queue = await sendSmsToContact(supabase, {
+        origin: "manual",
         contactId,
         propertyId,
         body: "queued from the campaign sender",
@@ -1453,6 +1606,7 @@ describe("sendSmsToContact (integration)", () => {
   it("release fails a queued row whose sender was soft-deactivated in the inventory", async () => {
     const { contactId, propertyId } = await seed({ withConsent: true });
     const queue = await sendSmsToContact(supabase, {
+      origin: "manual",
       contactId,
       propertyId,
       body: "queued from a deactivated sender",
@@ -1489,6 +1643,7 @@ describe("sendSmsToContact (integration)", () => {
   it("release defers the row when the mock sender inventory is empty (never synced)", async () => {
     const { contactId, propertyId } = await seed({ withConsent: true });
     const queue = await sendSmsToContact(supabase, {
+      origin: "manual",
       contactId,
       propertyId,
       body: "queued before the first catalog sync",
@@ -1542,6 +1697,7 @@ describe("sendSmsToContact (integration)", () => {
 
       // The contact has been messaged from BOTH senders.
       const primarySend = await sendSmsToContact(supabase, {
+        origin: "manual",
         contactId,
         propertyId,
         body: "hello from the primary sender",
@@ -1549,6 +1705,7 @@ describe("sendSmsToContact (integration)", () => {
       });
       expect(primarySend.status).toBe("sent");
       const secondarySend = await sendSmsToContact(supabase, {
+        origin: "manual",
         contactId,
         propertyId,
         body: "hello from the secondary sender",
@@ -1558,6 +1715,7 @@ describe("sendSmsToContact (integration)", () => {
 
       // A queued follow-up from the secondary sender is already waiting.
       const queued = await sendSmsToContact(supabase, {
+        origin: "manual",
         contactId,
         propertyId,
         body: "queued follow-up from secondary",
@@ -1584,6 +1742,7 @@ describe("sendSmsToContact (integration)", () => {
 
       // New sends from EITHER sender are blocked.
       const primaryAfterStop = await sendSmsToContact(supabase, {
+        origin: "manual",
         contactId,
         propertyId,
         body: "should never send (primary)",
@@ -1591,6 +1750,7 @@ describe("sendSmsToContact (integration)", () => {
       });
       expect(primaryAfterStop.status).toBe("blocked_terminal_dispo");
       const secondaryAfterStop = await sendSmsToContact(supabase, {
+        origin: "manual",
         contactId,
         propertyId,
         body: "should never queue (secondary)",

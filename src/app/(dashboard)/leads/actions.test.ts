@@ -381,6 +381,7 @@ describe("createLeadTaskAction", () => {
       taskTitle: "Follow up on 123 Main",
       propertyAddress: "123 Main",
       dueAt: "2026-06-20T15:00:00.000Z",
+      endAt: undefined,
       timezone: "America/Denver",
       deepLink: "https://app.test/leads/prop-1",
       calendarEnabled: true,

@@ -6,7 +6,10 @@ import { getConsentState } from "@/lib/messaging/consent";
 import { checkQuietHours } from "@/lib/messaging/quiet-hours";
 import { sendSmsToContact } from "@/lib/messaging/send";
 import { selectBestSmsPhone } from "@/lib/messaging/sms-phone";
-import { SUPPRESSED_DISPOS } from "@/lib/messaging/suppression";
+import {
+  HUMAN_OWNED_DISPOS,
+  shouldSuppressAutomatedSend,
+} from "@/lib/messaging/suppression";
 import { pausePropertyEnrollments } from "@/lib/sequences/enrollment";
 import type { Database, Json } from "@/lib/supabase/types";
 
@@ -64,7 +67,18 @@ export type AiDispatchOptions = {
 };
 
 const AI_REPLY_THREAD_DEBOUNCE_MS = 45_000;
-const HUMAN_ONLY_DISPOS = new Set(["nurture", "callback_requested"]);
+// Sourced from suppression.ts's HUMAN_OWNED_DISPOS (the single disposition
+// spine, Codex round 2) rather than a locally-duplicated literal set — a
+// human-owned outcome (nurture/callback_requested/booked_appointment) that
+// the AI responder must neither dispatch against nor clobber. Both
+// isTerminalAiResponderProperty (pre-generation gate, via
+// shouldSuppressAutomatedSend) and shouldUpdateDispo's preservation check
+// (final-write gate) key off this same Set, so adding a value in
+// suppression.ts covers both call sites — a consent-class outcome
+// (opted_out/dnc) still overwrites it, same as it overwrites
+// nurture/callback_requested, via shouldUpdateDispo's existing
+// `next !== "opted_out" && next !== "dnc"` carve-out.
+const HUMAN_ONLY_DISPOS: ReadonlySet<string> = HUMAN_OWNED_DISPOS;
 
 const DEESCALATION_TEMPLATE_WITH_NAME =
   "So sorry to bug you. Sounds like you get a lot of these. Are you {first_name}? Just want to make sure we don't bother you again.";
@@ -520,13 +534,7 @@ function isTerminalAiResponderProperty(
 ): boolean {
   return (
     property.needs_human_attention ||
-    Boolean(
-      property.outreach_dispo &&
-        (SUPPRESSED_DISPOS.has(
-          property.outreach_dispo as Parameters<typeof SUPPRESSED_DISPOS.has>[0],
-        ) ||
-          HUMAN_ONLY_DISPOS.has(property.outreach_dispo)),
-    )
+    shouldSuppressAutomatedSend({ outreachDispo: property.outreach_dispo })
   );
 }
 
@@ -657,6 +665,7 @@ async function sendResponderMessage(
     }
   }
   const sendResult = await sendSmsToContact(supabase, {
+    origin: "automated",
     contactId: args.input.contactId,
     propertyId: args.input.propertyId,
     body: args.body,
@@ -685,7 +694,10 @@ async function sendResponderMessage(
     }
   }
 
-  if (sendResult.status === "blocked_terminal_dispo") {
+  if (
+    sendResult.status === "blocked_terminal_dispo" ||
+    sendResult.status === "blocked_automated_suppressed"
+  ) {
     return { outcome: "skipped", reason: "already_terminal" };
   }
 
@@ -971,6 +983,16 @@ function shouldUpdateDispo(
   return (severity[next] ?? 0) >= (current ? (severity[current] ?? 0) : 0);
 }
 
+// Must stay in lockstep with shouldUpdateDispo's carve-out above: that
+// function decides opted_out/dnc MAY overwrite a human-only dispo
+// (nurture/callback_requested/booked_appointment) or bad_number, but the
+// actual UPDATE is a conditional write gated by this allow-list via a
+// `.or(outreach_dispo.in.(...))` filter — without HUMAN_ONLY_DISPOS/
+// bad_number in the opted_out/dnc lists, the WHERE clause would silently
+// match zero rows even though shouldUpdateDispo said the write was
+// allowed, and the caller would see a false "already_terminal". Spreading
+// HUMAN_ONLY_DISPOS here (rather than repeating its members) keeps any
+// future addition to that Set automatically covered.
 function allowedCurrentDisposFor(
   next: "wrong_number" | "not_interested" | "opted_out" | "dnc",
 ): string[] {
@@ -980,9 +1002,22 @@ function allowedCurrentDisposFor(
     case "wrong_number":
       return ["not_interested", "wrong_number"];
     case "opted_out":
-      return ["not_interested", "wrong_number", "opted_out"];
+      return [
+        "not_interested",
+        "wrong_number",
+        "opted_out",
+        "bad_number",
+        ...HUMAN_ONLY_DISPOS,
+      ];
     case "dnc":
-      return ["not_interested", "wrong_number", "opted_out", "dnc"];
+      return [
+        "not_interested",
+        "wrong_number",
+        "opted_out",
+        "dnc",
+        "bad_number",
+        ...HUMAN_ONLY_DISPOS,
+      ];
   }
 }
 

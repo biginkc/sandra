@@ -148,6 +148,7 @@ export function SmsComposer({
           break;
         case "blocked_landline":
         case "blocked_terminal_dispo":
+        case "blocked_automated_suppressed":
           toast.warning("Skipped", { description: outcome.reason });
           break;
         case "blocked_provider_off":

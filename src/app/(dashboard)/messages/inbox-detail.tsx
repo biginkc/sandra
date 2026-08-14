@@ -12,6 +12,7 @@ import { useEffect, useState, useTransition } from "react";
 
 import { toast } from "sonner";
 
+import { BookAppointmentPopover } from "@/components/appointments/book-appointment-popover";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -57,6 +58,7 @@ const DISPO_LABELS: Record<string, string> = {
   dnc: "Do not call",
   nurture: "Follow up",
   callback_requested: "Lead task requested",
+  booked_appointment: "Booked appointment",
 };
 
 const VALID_STATUSES: StatusVariant[] = ["replying", "hot", "new", "contacted", "cold", "dead"];
@@ -88,12 +90,18 @@ function outcomeButtonClass(isActive: boolean, activeClass = "bg-[#f5f5f4] borde
 
 function DispoBar({
   propertyId,
+  contactId,
+  propertyAddress,
   initialDispo,
   propertyStatus,
+  currentUserId,
 }: {
   propertyId: string;
+  contactId: string;
+  propertyAddress: string | null;
   initialDispo: string | null;
   propertyStatus: string | null;
+  currentUserId: string | null;
 }) {
   const router = useRouter();
   const [dispo, setDispo] = useState<string | null>(initialDispo);
@@ -199,6 +207,16 @@ function DispoBar({
       >
         Move to Lead
       </button>
+
+      <BookAppointmentPopover
+        propertyId={propertyId}
+        contactId={contactId}
+        subjectLabel={propertyAddress ?? undefined}
+        currentUserId={currentUserId}
+        triggerLabel="Book appt"
+        disabled={pending}
+        onBooked={() => setDispo("booked_appointment")}
+      />
 
       <DropdownMenu>
         <DropdownMenuTrigger
@@ -510,8 +528,11 @@ export function InboxDetail({
             <DispoBar
               key={`dispo-${data.propertyId}`}
               propertyId={data.propertyId}
+              contactId={data.contactId}
+              propertyAddress={data.propertyAddress}
               initialDispo={data.outreachDispo}
               propertyStatus={data.propertyStatus}
+              currentUserId={currentUserId}
             />
           </div>
           <div className="border-t border-border bg-white px-6 py-4">

@@ -8,6 +8,14 @@ import { qualifyProperty } from "@/lib/leads/qualify";
 import { pauseContactEnrollments } from "@/lib/sequences/enrollment";
 import { createClient } from "@/lib/supabase/server";
 
+// "booked_appointment" is set only by `fn_book_appointment`
+// (components/appointments/book-appointment-action.ts), never through
+// `setOutreachDispo` — same as `callback_requested` just above this type,
+// which is likewise absent from the union and from VALID_DISPOS/
+// TRIGGERS_OPT_OUT below and exists only as a display label downstream
+// (inbox-detail.tsx, inbox-thread-list.tsx). Both values are legal
+// `properties.outreach_dispo` values at the DB level without being
+// client-settable dispos.
 export type OutreachDispo =
   | "wrong_number"
   | "bad_number"

@@ -33,7 +33,7 @@ import {
   type SmsPhoneAvailability,
   type SmsPhoneContact,
 } from "@/lib/messaging/sms-phone";
-import { isSuppressed } from "@/lib/messaging/suppression";
+import { shouldSuppressAutomatedSend } from "@/lib/messaging/suppression";
 import { normalizePhone } from "@/lib/csv/normalize";
 import { loadSuppressedSmsPhoneSet } from "@/lib/messaging/opt-out-phone";
 
@@ -340,7 +340,7 @@ export async function queueSmsBatch(
     }
 
     if (
-      isSuppressed({
+      shouldSuppressAutomatedSend({
         outreachDispo: property.outreach_dispo,
         doNotContact: frozenContactDoNotContact.get(contactId) ?? null,
         smsOptedOut: frozenContactSmsOptedOut.get(contactId) ?? null,
@@ -398,7 +398,7 @@ export async function queueSmsBatch(
       "sms",
     );
     if (
-      isSuppressed({
+      shouldSuppressAutomatedSend({
         outreachDispo: property.outreach_dispo,
         consentState,
         doNotContact: frozenContactDoNotContact.get(contactId) ?? null,
@@ -471,6 +471,7 @@ export async function queueSmsBatch(
     }
     const scheduledFor = new Date(state.dayBucketStartMs + nextOffsetMs);
     const outcome = await sendSmsToContact(client, {
+      origin: "automated",
       contactId,
       propertyId,
       body,

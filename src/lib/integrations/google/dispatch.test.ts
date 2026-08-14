@@ -191,6 +191,20 @@ describe("google/dispatch", () => {
     ).toBe(1_800_000);
   });
 
+  it("dispatchTaskCalendarEvent uses endAt when provided instead of the 30-min default", async () => {
+    await dispatchTaskCalendarEvent({
+      ...input,
+      endAt: "2026-05-10T16:00:00.000Z",
+    });
+
+    const requestBody = calendarInsert.mock.calls[0][0].requestBody;
+    expect(
+      new Date(requestBody.end.dateTime).getTime() -
+        new Date(requestBody.start.dateTime).getTime(),
+    ).toBe(3_600_000);
+    expect(requestBody.end.dateTime).toBe("2026-05-10T16:00:00.000Z");
+  });
+
   it("dispatchTaskCalendarEvent updates tasks.google_calendar_event_id after success", async () => {
     const supabase = makeSupabase();
     createAdminClient.mockReturnValueOnce(supabase);

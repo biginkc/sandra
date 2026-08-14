@@ -294,6 +294,10 @@ async function scheduleCalendarUpdateAfterSnooze(
       taskTitle: task.title,
       propertyAddress,
       dueAt: task.due_at,
+      // Snooze is already blocked for appointments (see snoozeTask above),
+      // but this update path is shared by future lifecycle callers — thread
+      // end_at through faithfully whenever the row carries one.
+      endAt: task.end_at ?? undefined,
       timezone: prefs.timezone,
       deepLink,
       calendarEnabled: prefs.calendarEnabled,

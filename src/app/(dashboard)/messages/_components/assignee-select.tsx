@@ -4,7 +4,10 @@ import { useEffect, useState } from "react";
 
 import { cn } from "@/lib/utils";
 
-import { listOrgUsers, type TeamMember } from "../../leads/actions";
+import {
+  listBookingAssignees,
+  type TeamMember,
+} from "@/components/appointments/book-appointment-action";
 
 type Props = {
   /** Selected assignee id; null = unassigned. */
@@ -12,16 +15,27 @@ type Props = {
   onChange: (id: string | null) => void;
   /** auth.users.id of the viewer; used to render "Me" + as the default. */
   currentUserId: string | null;
+  /** Booking context (property or contact this appointment links to) —
+   *  scopes the picker to the SAME org `bookAppointment` will book into.
+   *  Both omitted means a personal block, scoped to the caller's own
+   *  single active org membership. */
+  propertyId?: string;
+  contactId?: string;
   /** Disabled while the parent form is in flight. */
   disabled?: boolean;
   className?: string;
 };
 
 /**
- * Inline assignee picker for the dispo popover. Loads org members lazily
- * on first mount (popover open) — matches the AssignDropdown loading
- * pattern but rendered as a native <select> so it fits the popover's
- * compact form aesthetic alongside the date input.
+ * Inline assignee picker for the booking popover. Loads org members
+ * lazily on first mount (popover open) — matches the AssignDropdown
+ * loading pattern but rendered as a native <select> so it fits the
+ * popover's compact form aesthetic alongside the date input.
+ *
+ * Scoped via `listBookingAssignees` (Codex round 2) to exactly the org
+ * this booking will resolve into, active members only — NOT the broader
+ * `listOrgUsers` (every org the caller has ever belonged to, active or
+ * not, every member active or not).
  *
  * Self-render is "Me" rather than the email — consistent with how
  * AssignDropdown shows the same property.
@@ -30,6 +44,8 @@ export function AssigneeSelect({
   value,
   onChange,
   currentUserId,
+  propertyId,
+  contactId,
   disabled,
   className,
 }: Props) {
@@ -38,7 +54,7 @@ export function AssigneeSelect({
 
   useEffect(() => {
     let cancelled = false;
-    listOrgUsers()
+    listBookingAssignees({ propertyId, contactId })
       .then((result) => {
         if (cancelled) return;
         if (result.ok) setMembers(result.data);
@@ -49,7 +65,7 @@ export function AssigneeSelect({
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [propertyId, contactId]);
 
   const others = members.filter((m) => m.id !== currentUserId);
   const showMe = currentUserId !== null;
