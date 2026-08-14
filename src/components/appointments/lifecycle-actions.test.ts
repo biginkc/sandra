@@ -143,6 +143,7 @@ describe("completeAppointmentAction", () => {
     expect(revalidatePath).toHaveBeenCalledWith("/leads/prop-1");
     expect(revalidatePath).toHaveBeenCalledWith("/messages");
     expect(revalidatePath).toHaveBeenCalledWith("/dashboard");
+    expect(revalidatePath).toHaveBeenCalledWith("/calendar");
   });
 
   it("does not revalidate when the RPC fails", async () => {
@@ -234,6 +235,7 @@ describe("cancelAppointmentAction", () => {
     expect(result.ok).toBe(true);
     expect(revalidatePath).toHaveBeenCalledWith("/messages");
     expect(revalidatePath).toHaveBeenCalledWith("/dashboard");
+    expect(revalidatePath).toHaveBeenCalledWith("/calendar");
     // No property linkage on this task — no /leads/* revalidation.
     expect(revalidatePath).not.toHaveBeenCalledWith(expect.stringMatching(/^\/leads\//));
   });
@@ -299,6 +301,7 @@ describe("rescheduleAppointmentAction", () => {
       }),
     );
     expect(revalidatePath).toHaveBeenCalledWith("/messages");
+    expect(revalidatePath).toHaveBeenCalledWith("/calendar");
   });
 
   // Codex round 11 (finding 3): the RPC above already committed — a
@@ -356,6 +359,7 @@ describe("reassignAppointmentAction", () => {
       expect.objectContaining({ taskId: "task-1", assigneeId: "user-2" }),
     );
     expect(revalidatePath).toHaveBeenCalledWith("/leads/prop-1");
+    expect(revalidatePath).toHaveBeenCalledWith("/calendar");
   });
 
   it("skips the notification when the result is a duplicate (no-op) reassignment", async () => {

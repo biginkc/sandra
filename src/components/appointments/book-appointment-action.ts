@@ -427,9 +427,25 @@ export async function bookAppointment(
       }
     }
 
-    if (linkedPropertyId) revalidatePath(`/leads/${linkedPropertyId}`);
-    revalidatePath("/messages");
-    revalidatePath("/dashboard");
+    // Commit-honesty (PR 3's lifecycle contract, applied here after the
+    // rebase surfaced the gap): the RPC has already committed — cache
+    // invalidation failures are best-effort and must never flip a
+    // committed booking into a reported failure.
+    try {
+      if (linkedPropertyId) revalidatePath(`/leads/${linkedPropertyId}`);
+      revalidatePath("/messages");
+      revalidatePath("/dashboard");
+      // Codex round 2: a fresh booking (or a duplicate-key replay of one)
+      // must show up on the calendar surface (PR 4) without a stale cache
+      // hanging around — same rationale as the lifecycle actions'
+      // identical addition.
+      revalidatePath("/calendar");
+    } catch (e) {
+      reportError(e, {
+        tags: { surface: "book_appointment_revalidate" },
+        extra: { taskId: result.taskId },
+      });
+    }
 
     return ok(result);
   } catch (e) {
