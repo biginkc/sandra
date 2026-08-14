@@ -245,4 +245,32 @@ describe("<CalendarView />", () => {
 
     expect(nav.replace).toHaveBeenCalledWith("/calendar?view=week&assignee=rep-1");
   });
+
+  it("normalizes an unknown deep-linked assignee to the role default in the selector (Codex round 10)", () => {
+    nav.search = "assignee=ghost-user-id";
+    const { unmount } = render(
+      <CalendarView
+        {...baseProps({
+          viewerRole: "owner",
+          assignees: { "rep-1": "rep@bmh.com" },
+          currentUserId: "owner-1",
+        })}
+      />,
+    );
+    expect(screen.getByTestId("calendar-assignee-filter-value").textContent).toBe("all");
+    unmount();
+
+    nav.search = "assignee=ghost-user-id";
+    render(
+      <CalendarView
+        {...baseProps({
+          viewerRole: "member",
+          assignees: { "rep-1": "rep@bmh.com" },
+          currentUserId: "rep-2",
+        })}
+      />,
+    );
+    expect(screen.getByTestId("calendar-assignee-filter-value").textContent).toBe("me");
+  });
+
 });

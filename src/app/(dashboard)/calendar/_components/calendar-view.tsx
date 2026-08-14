@@ -71,12 +71,25 @@ export function CalendarView({
 
   const todayKey = todayDateKeyInZone(timezone);
   const rawAssignee = searchParams.get("assignee");
+  // Normalize against the LIVE roster exactly like the page's query scope
+  // (scoping.ts): an unknown or removed teammate in a deep link must render
+  // the same value the query actually used — never a blank selector over
+  // differently-scoped results (Codex round 10).
+  const normalizedAssignee =
+    rawAssignee === null ||
+    rawAssignee === ALL ||
+    rawAssignee === ME ||
+    rawAssignee === currentUserId ||
+    Object.prototype.hasOwnProperty.call(assignees, rawAssignee)
+      ? rawAssignee
+      : null;
   // No param -> the role's default (owner: everyone; member: me). Once a
   // value is picked, it's always written explicitly (including "all"), so
   // "Everyone" round-trips through the URL instead of collapsing back to
   // "no param" — which would silently re-default to "me" for a member
   // (page.tsx's `resolveAssigneeId` treats absence and role differently).
-  const assigneeValue = rawAssignee ?? (viewerRole === "owner" ? ALL : ME);
+  const assigneeValue =
+    normalizedAssignee ?? (viewerRole === "owner" ? ALL : ME);
 
   const onAssigneeChange = (value: string | null) => {
     if (!value) return;
