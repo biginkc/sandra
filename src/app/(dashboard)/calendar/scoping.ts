@@ -24,14 +24,28 @@ import type { CalendarViewerRole } from "./types";
  * the calendar filter's "Everyone" selection can round-trip through the
  * URL for a member without being indistinguishable from "no param" (whose
  * meaning differs by role) — see `CalendarView`'s `onAssigneeChange`.
+ *
+ * `activeRosterIds` (Codex round 9) bounds every other explicit
+ * `?assignee=<id>` to something the selector can actually represent: the
+ * caller's own id, or an id present in the CURRENT active roster. A
+ * deep-linked id for a removed/suspended teammate (or any id that never
+ * existed) is not a valid scope — silently passing it through made the
+ * appointments query return that person's rows while the selector, built
+ * from the same active roster, rendered blank (no option matched the URL
+ * value). Anything outside that set normalizes to the same role default
+ * used when `?assignee=` is absent, so the selector's visible state and
+ * the query's actual scope never diverge.
  */
 export function resolveAssigneeId(
   viewerRole: CalendarViewerRole,
   rawAssignee: string | undefined,
   userId: string,
+  activeRosterIds: ReadonlySet<string>,
 ): string | undefined {
   if (rawAssignee === "me") return userId;
   if (rawAssignee === "all") return undefined;
-  if (rawAssignee !== undefined) return rawAssignee;
+  if (rawAssignee !== undefined && (rawAssignee === userId || activeRosterIds.has(rawAssignee))) {
+    return rawAssignee;
+  }
   return viewerRole === "member" ? userId : undefined;
 }

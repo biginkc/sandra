@@ -95,13 +95,20 @@ describe("CalendarPage — appointments load failure", () => {
     // The failure path must not mount CalendarView at all — no risk of it
     // rendering an empty week for what was actually a load failure.
     expect(screen.queryByTestId("calendar-view-stub")).not.toBeInTheDocument();
-    // A load failure short-circuits before the roster fetch even runs.
-    expect(fetchOrgRoster).not.toHaveBeenCalled();
+    // The roster now has to load BEFORE the assignee filter can be
+    // resolved (Codex round 9), so an appointments-fetch failure no
+    // longer short-circuits ahead of it the way it used to.
+    expect(fetchOrgRoster).toHaveBeenCalled();
   });
 
   it("preserves the assignee and view params on the retry link", async () => {
     mockUser();
     fetchCalendarAppointments.mockResolvedValue({ ok: false });
+    fetchOrgRoster.mockResolvedValue({
+      ok: true,
+      labelsDegraded: false,
+      roster: [{ id: "user-1", label: "owner@bmh.com" }],
+    });
 
     const jsx = await CalendarPage({
       searchParams: Promise.resolve({ week: "2026-05-03", assignee: "all", view: "agenda" }),
@@ -268,5 +275,61 @@ describe("CalendarPage — appointment owned by an inactive/former assignee (Cod
     expect(screen.getByTestId("assignee-label-rep-former")).toHaveTextContent(
       "former@bmh.com",
     );
+  });
+});
+
+describe("CalendarPage — deep-linked ?assignee= outside the active roster (Codex round 9)", () => {
+  it("normalizes an owner's deep link to a removed/suspended id to org-wide before querying", async () => {
+    mockUser("user-1", "owner@bmh.com");
+    fetchOrgRoster.mockResolvedValue({
+      ok: true,
+      labelsDegraded: false,
+      roster: [{ id: "user-1", label: "owner@bmh.com" }],
+    });
+    fetchCalendarAppointments.mockResolvedValue({ ok: true, rows: [] });
+
+    const jsx = await CalendarPage({
+      searchParams: Promise.resolve({ assignee: "rep-suspended" }),
+    });
+    render(jsx);
+
+    // The selector can only represent ids on the active roster, so the
+    // query must run with the same normalized (org-wide) scope the
+    // selector renders — never the raw, unrepresentable deep-linked id.
+    expect(fetchCalendarAppointments).toHaveBeenCalledWith(
+      "org-1",
+      expect.objectContaining({ assigneeId: undefined }),
+    );
+    expect(screen.getByTestId("calendar-view-stub")).toBeInTheDocument();
+  });
+
+  it("normalizes a member's deep link to a removed/suspended id to their own items before querying", async () => {
+    createClient.mockResolvedValue({
+      auth: {
+        getUser: vi
+          .fn()
+          .mockResolvedValue({ data: { user: { id: "user-1", email: "member@bmh.com" } } }),
+      },
+    });
+    getCallerMemberships.mockResolvedValue([
+      { user_id: "user-1", org_id: "org-1", role: "member" },
+    ]);
+    fetchOrgRoster.mockResolvedValue({
+      ok: true,
+      labelsDegraded: false,
+      roster: [{ id: "user-1", label: "member@bmh.com" }],
+    });
+    fetchCalendarAppointments.mockResolvedValue({ ok: true, rows: [] });
+
+    const jsx = await CalendarPage({
+      searchParams: Promise.resolve({ assignee: "rep-suspended" }),
+    });
+    render(jsx);
+
+    expect(fetchCalendarAppointments).toHaveBeenCalledWith(
+      "org-1",
+      expect.objectContaining({ assigneeId: "user-1" }),
+    );
+    expect(screen.getByTestId("calendar-view-stub")).toBeInTheDocument();
   });
 });

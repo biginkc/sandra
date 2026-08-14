@@ -199,7 +199,42 @@ export default async function CalendarPage({
   const orgId = activeMemberships[0].org_id;
   const viewerRole: CalendarViewerRole = activeMemberships[0].role;
 
-  const assigneeId = resolveAssigneeId(viewerRole, params.assignee, user.id);
+  // Loaded BEFORE resolving the assignee filter (Codex round 9) — the
+  // active roster is the source of truth for which `?assignee=<id>` values
+  // are representable in the selector. Resolving the filter first let a
+  // deep link for a removed/suspended teammate pass straight through to
+  // the query while the selector (built from this same roster) rendered
+  // blank for that value — query scope and visible selector state
+  // diverged. This is also independent of `appointments` (Codex round 1),
+  // not just the ids referenced in the current week's rows, so the filter
+  // dropdown (both roles, now that members get one too) always lists every
+  // active teammate, including one with zero appointments in the
+  // displayed week.
+  const rosterResult = await fetchOrgRoster(orgId);
+  // A roster IDENTITY failure (Codex round 3) — the set of valid assignee
+  // ids is unknown — is treated exactly like an appointments-fetch
+  // failure: the filter and ownership attribution are untrustworthy, so
+  // this renders the same explicit retry state rather than misrepresenting
+  // org rows under a viewer-only claim or leaving lifecycle controls on
+  // rows whose ownership can't be verified. (Round 2's "showing your own
+  // appointments only" fallback is gone — it silently narrowed scope
+  // instead of surfacing the failure.) It also has to run before the
+  // assignee filter can be resolved at all now (round 9), so it can no
+  // longer be skipped by an appointments-fetch failure the way it used to.
+  if (!rosterResult.ok) {
+    return retryState(params);
+  }
+  const assignees: Record<string, string> = {};
+  for (const entry of rosterResult.roster) {
+    assignees[entry.id] = entry.label;
+  }
+  // LABELS-only degradation (some/all emails unresolved) keeps the full
+  // roster, controls, and unmistakable ownership (fallback labels carry
+  // the real id prefix) — only the display note changes.
+  const labelsDegraded = rosterResult.labelsDegraded;
+  const rosterIds = new Set(rosterResult.roster.map((entry) => entry.id));
+
+  const assigneeId = resolveAssigneeId(viewerRole, params.assignee, user.id, rosterIds);
 
   const prefs = await loadIntegrationPrefs(supabase, user.id);
   const timezone = prefs.timezone;
@@ -222,32 +257,6 @@ export default async function CalendarPage({
   }
   const appointments = appointmentsResult.rows;
 
-  // Loaded independently of `appointments` — the org roster (Codex round
-  // 1), not just the ids referenced in the current week's rows, so the
-  // filter dropdown (both roles, now that members get one too) always
-  // lists every active teammate, including one with zero appointments in
-  // the displayed week.
-  const rosterResult = await fetchOrgRoster(orgId);
-  // A roster IDENTITY failure (Codex round 3) — the set of valid assignee
-  // ids is unknown — is treated exactly like an appointments-fetch
-  // failure: the filter and ownership attribution are untrustworthy, so
-  // this renders the same explicit retry state rather than misrepresenting
-  // org rows under a viewer-only claim or leaving lifecycle controls on
-  // rows whose ownership can't be verified. (Round 2's "showing your own
-  // appointments only" fallback is gone — it silently narrowed scope
-  // instead of surfacing the failure.)
-  if (!rosterResult.ok) {
-    return retryState(params);
-  }
-  const assignees: Record<string, string> = {};
-  for (const entry of rosterResult.roster) {
-    assignees[entry.id] = entry.label;
-  }
-  // LABELS-only degradation (some/all emails unresolved) keeps the full
-  // roster, controls, and unmistakable ownership (fallback labels carry
-  // the real id prefix) — only the display note changes.
-  const labelsDegraded = rosterResult.labelsDegraded;
-
   // Codex round 4 — the roster (`assignees`, active memberships only) is
   // NOT the full set of ids that can show up on an appointment row: a
   // teammate suspended/removed after being assigned an appointment still
@@ -257,7 +266,6 @@ export default async function CalendarPage({
   // for every OTHER assignee_id actually referenced in this week's rows —
   // and keep it entirely separate from `assignees`, which stays
   // roster-only so the filter never offers a former teammate as an option.
-  const rosterIds = new Set(rosterResult.roster.map((entry) => entry.id));
   const inactiveAssigneeIds = Array.from(
     new Set(
       appointments
