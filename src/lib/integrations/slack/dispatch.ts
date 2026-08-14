@@ -5,6 +5,7 @@ import { loadIntegrationPrefs } from "@/lib/integrations/prefs";
 import { getDecryptedToken } from "@/lib/integrations/tokens/store";
 import { humanDueDate } from "@/lib/notifications/format";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { normalizeTimeZone } from "@/lib/time/zoned";
 import { completeTask } from "@/lib/tasks";
 
 import { buildMarkedDoneBlocks, buildTaskAssignedBlocks } from "./blocks";
@@ -44,6 +45,10 @@ export async function dispatchTaskAssignedSlack(
 ): Promise<DispatchSlackResult> {
   try {
     const admin = createAdminClient();
+    // input.timezone is the authoritative zone — the caller loaded the
+    // assignee's prefs once and threads the result through. Re-loading here
+    // would silently swap in the Chicago default whenever the prefs read
+    // transiently failed, discarding a zone the caller already knew.
     const slackEnabled =
       input.slackEnabled ??
       (await loadIntegrationPrefs(admin, input.assigneeId)).slackEnabled;
@@ -67,7 +72,7 @@ export async function dispatchTaskAssignedSlack(
     const blocks = buildTaskAssignedBlocks({
       taskTitle,
       propertyAddress: input.propertyAddress,
-      dueLabel: humanDueDate(input.dueAt),
+      dueLabel: humanDueDate(input.dueAt, undefined, normalizeTimeZone(input.timezone)),
       taskTypeLabel: TASK_TYPE_LABELS[input.taskType] ?? "Task",
       taskId: input.taskId,
       deepLink: input.deepLink,
@@ -160,10 +165,11 @@ export async function refreshSlackMessage(input: {
     });
     if (!token) return { ok: false };
 
-    const propertyAddress = await loadPropertyAddress(
-      admin,
-      task.related_property_id,
-    );
+    // Property-less tasks (personal blocks, contact-only appointments)
+    // degrade to a "Personal block" label rather than skipping the lookup.
+    const propertyAddress = task.related_property_id
+      ? await loadPropertyAddress(admin, task.related_property_id)
+      : "Personal block";
     const deepLink = buildTaskDeepLink(input.taskId);
     const slack = new WebClient(token.accessToken.reveal());
     await slack.chat.update({

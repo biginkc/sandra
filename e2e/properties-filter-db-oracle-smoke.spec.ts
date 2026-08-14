@@ -147,7 +147,13 @@ async function propertyIdsWithOpenTasks(admin: SupabaseClient<Database>) {
     .eq("status", "open");
   expect(error).toBeNull();
   return Array.from(
-    new Set((data ?? []).map((row) => row.related_property_id)),
+    new Set(
+      (data ?? [])
+        .map((row) => row.related_property_id)
+        // Appointment-type tasks may have no related property (personal
+        // blocks, contact-only bookings) — exclude those from the oracle.
+        .filter((propertyId): propertyId is string => propertyId != null),
+    ),
   );
 }
 

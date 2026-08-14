@@ -103,6 +103,26 @@ describe("integration prefs", () => {
     );
   });
 
+  it("loadIntegrationPrefs normalizes a malformed persisted timezone to America/Chicago", async () => {
+    const { supabase } = createPrefsSupabaseStub({
+      selectResult: {
+        data: [
+          { channel: "slack", enabled: true, timezone: "Mars/Olympus" },
+          {
+            channel: "google_calendar",
+            enabled: true,
+            timezone: "Not/AZone",
+          },
+        ],
+        error: null,
+      },
+    });
+
+    const prefs = await loadIntegrationPrefs(supabase as never, "user-1");
+
+    expect(prefs.timezone).toBe("America/Chicago");
+  });
+
   it("loadIntegrationPrefs prefers google_calendar timezone over slack timezone", async () => {
     const { supabase } = createPrefsSupabaseStub({
       selectResult: {

@@ -1,4 +1,9 @@
+import { formatRelativeDay, normalizeTimeZone } from "@/lib/time/zoned";
+
 import type { EventType, FormatPayload } from "./types";
+
+/** Fallback zone when a caller has no assignee timezone preference to pass. */
+const DEFAULT_NOTIFICATION_TIME_ZONE = "America/Chicago";
 
 /**
  * Map raw `jobs.type` enum values to human-readable labels for
@@ -34,31 +39,39 @@ const TASK_TYPE_LABELS: Record<string, string> = {
 
 /**
  * Render an ISO due_at as "today" / "tomorrow" / "Fri May 9" relative to
- * the supplied `now` (default: real time). Pure given a fixed `now`, so
- * tests can assert exact strings without mocking Date globally.
+ * the supplied `now` (default: real time), bucketed by calendar day in
+ * `timeZone` (default: America/Chicago — callers with an assignee timezone
+ * preference should pass it). Pure given fixed `now`/`timeZone`, so tests
+ * can assert exact strings without mocking Date globally.
+ *
+ * Delegates to `formatRelativeDay` (src/lib/time/zoned.ts) — a zone-correct,
+ * DST-safe day-boundary comparison. The old implementation bucketed by the
+ * *server machine's* local calendar day (via `Date.getFullYear/Month/Date`),
+ * which silently disagreed with the assignee's actual day whenever the
+ * server's timezone differed from theirs; that was the naive bug this
+ * replaces.
  *
  * Exported for direct testing — formatNotification calls it with the default
- * `now`, so test the labels here rather than retrofitting a `now` arg into
- * formatNotification's call surface.
+ * `now`/`timeZone`, so test the labels here rather than retrofitting those
+ * args into formatNotification's call surface.
  */
-export function humanDueDate(iso: string, now: Date = new Date()): string {
+export function humanDueDate(
+  iso: string,
+  now: Date = new Date(),
+  timeZone: string = DEFAULT_NOTIFICATION_TIME_ZONE,
+): string {
   const due = new Date(iso);
   if (Number.isNaN(due.getTime())) return "soon";
 
-  const startOfDay = (d: Date) =>
-    new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
-
-  const todayStart = startOfDay(now);
-  const dueStart = startOfDay(due);
-  const diffDays = Math.round((dueStart - todayStart) / (24 * 60 * 60 * 1000));
-
-  if (diffDays === 0) return "today";
-  if (diffDays === 1) return "tomorrow";
-  return due.toLocaleDateString("en-US", {
-    weekday: "short",
-    month: "short",
-    day: "numeric",
-  });
+  // Payload/stored zones are free text — normalize so one malformed value
+  // degrades to the default instead of throwing out of a render path.
+  const label = formatRelativeDay(due, normalizeTimeZone(timeZone), now);
+  if (label === "Today") return "today";
+  if (label === "Tomorrow") return "tomorrow";
+  // "Yesterday" and the weekday/date fallback both read fine as-is; the old
+  // code had no "yesterday" bucket and just fell through to the date format
+  // for any past due date, so this is a (harmless) small improvement.
+  return label;
 }
 
 /**
@@ -125,7 +138,13 @@ export function formatNotification(
       const truncated =
         rawTitle.length > 60 ? `${rawTitle.slice(0, 57)}...` : rawTitle;
       const titleSuffix = truncated || "new task";
-      const due = payload.dueAt ? humanDueDate(payload.dueAt) : "soon";
+      const due = payload.dueAt
+        ? humanDueDate(
+            payload.dueAt,
+            undefined,
+            payload.timezone ?? undefined,
+          )
+        : "soon";
       const typeLabel = TASK_TYPE_LABELS[payload.taskType ?? ""] ?? "Task";
       return {
         title: `Task assigned: ${titleSuffix}`,

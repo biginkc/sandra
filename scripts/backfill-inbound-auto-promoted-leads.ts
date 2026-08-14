@@ -63,7 +63,9 @@ type NoteRow = {
 };
 
 type TaskRow = {
-  related_property_id: string;
+  // Appointment-type tasks may have no related property (personal blocks,
+  // contact-only bookings) — nullable since the appointments migration.
+  related_property_id: string | null;
   created_at: string;
 };
 

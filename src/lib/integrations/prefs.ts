@@ -3,6 +3,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { DatabaseError } from "@/lib/errors/classes";
 import { reportError } from "@/lib/errors/report";
 import type { Database } from "@/lib/supabase/types";
+import { normalizeTimeZone } from "@/lib/time/zoned";
 
 export interface IntegrationPrefs {
   slackEnabled: boolean;
@@ -78,8 +79,9 @@ export async function loadIntegrationPrefs(
     return {
       slackEnabled: slackRow?.enabled ?? DEFAULT_PREFS.slackEnabled,
       calendarEnabled: calendarRow?.enabled ?? DEFAULT_PREFS.calendarEnabled,
-      timezone:
+      timezone: normalizeTimeZone(
         calendarRow?.timezone ?? slackRow?.timezone ?? DEFAULT_PREFS.timezone,
+      ),
     };
   } catch (error) {
     reportError(error, {
