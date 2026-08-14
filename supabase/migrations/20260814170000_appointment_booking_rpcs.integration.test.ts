@@ -120,6 +120,38 @@ function getMemberTimezone(
   return asBookingRpcClient(client).rpc("fn_get_member_timezone", { p_user: userId });
 }
 
+// fn_claim_calendar_creations is the PR-2 pull-forward of PR 3's ledger
+// consumer — same local-cast rationale as the booking RPCs above.
+type ClaimCalendarCreationsRow = {
+  ledger_id: string;
+  org_id: string;
+  calendar_chain_id: string;
+  source_task_id: string;
+  expected_generation: number;
+  client_event_id: string | null;
+  attempts: number;
+  task_due_at: string;
+  task_end_at: string;
+  task_title: string;
+  task_assignee_id: string;
+};
+
+type ClaimRpcClient = {
+  rpc(
+    fn: "fn_claim_calendar_creations",
+    args: { p_limit: number },
+  ): Promise<RpcResult<ClaimCalendarCreationsRow[]>>;
+};
+
+function claimCalendarCreations(
+  client: SupabaseClient<Database>,
+  limit: number,
+): Promise<RpcResult<ClaimCalendarCreationsRow[]>> {
+  return (client as unknown as ClaimRpcClient).rpc("fn_claim_calendar_creations", {
+    p_limit: limit,
+  });
+}
+
 const serviceClient = createTestClient();
 const db = serviceClient;
 const createdUserIds: string[] = [];
@@ -583,6 +615,127 @@ describe("Migration 20260814170000 — appointment booking RPCs", () => {
       expect(data).toBeNull();
       expect(error).not.toBeNull();
       expect(error?.message).toMatch(/title is required/i);
+    });
+
+    // Codex round 4: a hostile direct-RPC caller bypasses every client-side
+    // form constraint, so the window bounds must be enforced in the RPC
+    // itself, not just the booking form.
+    it("rejects an infinite p_start", async () => {
+      const booker = await createUserForOrg(BMH_ORG_ID);
+      const assignee = await createUserForOrg(BMH_ORG_ID);
+      const { p_end } = windowArgs();
+
+      const { data, error } = await bookAppointment(booker.client, {
+        p_org: BMH_ORG_ID,
+        p_assignee: assignee.userId,
+        p_start: "infinity",
+        p_end,
+        p_timezone: "America/Chicago",
+        p_title: "Hostile infinite start",
+      });
+
+      expect(data).toBeNull();
+      expect(error).not.toBeNull();
+      expect(error?.message).toMatch(/finite timestamps/i);
+    });
+
+    it("rejects an infinite p_end", async () => {
+      const booker = await createUserForOrg(BMH_ORG_ID);
+      const assignee = await createUserForOrg(BMH_ORG_ID);
+      const { p_start } = windowArgs();
+
+      const { data, error } = await bookAppointment(booker.client, {
+        p_org: BMH_ORG_ID,
+        p_assignee: assignee.userId,
+        p_start,
+        p_end: "infinity",
+        p_timezone: "America/Chicago",
+        p_title: "Hostile infinite end",
+      });
+
+      expect(data).toBeNull();
+      expect(error).not.toBeNull();
+      expect(error?.message).toMatch(/finite timestamps/i);
+    });
+
+    it("rejects a 3-minute duration (below the 15-minute floor)", async () => {
+      const booker = await createUserForOrg(BMH_ORG_ID);
+      const assignee = await createUserForOrg(BMH_ORG_ID);
+      const start = new Date(Date.now() + 3600_000);
+      const end = new Date(start.getTime() + 3 * 60_000);
+
+      const { data, error } = await bookAppointment(booker.client, {
+        p_org: BMH_ORG_ID,
+        p_assignee: assignee.userId,
+        p_start: start.toISOString(),
+        p_end: end.toISOString(),
+        p_timezone: "America/Chicago",
+        p_title: "Too short",
+      });
+
+      expect(data).toBeNull();
+      expect(error).not.toBeNull();
+      expect(error?.message).toMatch(/duration must be between/i);
+    });
+
+    it("rejects a 25-hour duration (above the 24-hour ceiling)", async () => {
+      const booker = await createUserForOrg(BMH_ORG_ID);
+      const assignee = await createUserForOrg(BMH_ORG_ID);
+      const start = new Date(Date.now() + 3600_000);
+      const end = new Date(start.getTime() + 25 * 3600_000);
+
+      const { data, error } = await bookAppointment(booker.client, {
+        p_org: BMH_ORG_ID,
+        p_assignee: assignee.userId,
+        p_start: start.toISOString(),
+        p_end: end.toISOString(),
+        p_timezone: "America/Chicago",
+        p_title: "Too long",
+      });
+
+      expect(data).toBeNull();
+      expect(error).not.toBeNull();
+      expect(error?.message).toMatch(/duration must be between/i);
+    });
+
+    it("rejects a p_start 3 years out (beyond the 2-year ceiling)", async () => {
+      const booker = await createUserForOrg(BMH_ORG_ID);
+      const assignee = await createUserForOrg(BMH_ORG_ID);
+      const start = new Date(Date.now() + 3 * 365 * 24 * 3600_000);
+      const end = new Date(start.getTime() + 1800_000);
+
+      const { data, error } = await bookAppointment(booker.client, {
+        p_org: BMH_ORG_ID,
+        p_assignee: assignee.userId,
+        p_start: start.toISOString(),
+        p_end: end.toISOString(),
+        p_timezone: "America/Chicago",
+        p_title: "Too far out",
+      });
+
+      expect(data).toBeNull();
+      expect(error).not.toBeNull();
+      expect(error?.message).toMatch(/within 1 hour in the past and 2 years/i);
+    });
+
+    it("rejects a p_start of yesterday (beyond the 1-hour grace window into the past)", async () => {
+      const booker = await createUserForOrg(BMH_ORG_ID);
+      const assignee = await createUserForOrg(BMH_ORG_ID);
+      const start = new Date(Date.now() - 24 * 3600_000);
+      const end = new Date(start.getTime() + 1800_000);
+
+      const { data, error } = await bookAppointment(booker.client, {
+        p_org: BMH_ORG_ID,
+        p_assignee: assignee.userId,
+        p_start: start.toISOString(),
+        p_end: end.toISOString(),
+        p_timezone: "America/Chicago",
+        p_title: "Yesterday",
+      });
+
+      expect(data).toBeNull();
+      expect(error).not.toBeNull();
+      expect(error?.message).toMatch(/within 1 hour in the past and 2 years/i);
     });
   });
 
@@ -1062,6 +1215,158 @@ describe("Migration 20260814170000 — appointment booking RPCs", () => {
       });
 
       expect(error).not.toBeNull();
+    });
+  });
+
+  describe("fn_claim_calendar_creations", () => {
+    it("rejects an authenticated (non-service-role) caller", async () => {
+      const booker = await createUserForOrg(BMH_ORG_ID);
+      const { data, error } = await claimCalendarCreations(booker.client, 5);
+      expect(data).toBeNull();
+      expect(error).not.toBeNull();
+      expect(error?.code ?? "").toMatch(/42501/);
+    });
+
+    it("rejects an anon caller", async () => {
+      const { data, error } = await claimCalendarCreations(anonClient(), 5);
+      expect(data).toBeNull();
+      expect(error).not.toBeNull();
+      expect(error?.code ?? "").toMatch(/42501/);
+    });
+
+    it("claims a pending 'create' row and joins its task fields, bumping attempts", async () => {
+      const booker = await createUserForOrg(BMH_ORG_ID);
+      const assignee = await createUserForOrg(BMH_ORG_ID);
+      const { p_start, p_end } = windowArgs();
+
+      const { data: booking, error: bookErr } = await bookAppointment(booker.client, {
+        p_org: BMH_ORG_ID,
+        p_assignee: assignee.userId,
+        p_start,
+        p_end,
+        p_timezone: "America/Chicago",
+        p_title: "Claim probe",
+      });
+      expect(bookErr).toBeNull();
+
+      const { data, error } = await claimCalendarCreations(serviceClient, 10);
+      expect(error).toBeNull();
+      const claimed = data!.find((row) => row.source_task_id === booking!.task_id);
+      expect(claimed).toMatchObject({
+        org_id: BMH_ORG_ID,
+        calendar_chain_id: booking!.calendar_chain_id,
+        source_task_id: booking!.task_id,
+        expected_generation: 0,
+        attempts: 1, // bumped from 0 by the claim
+        task_due_at: p_start,
+        task_end_at: p_end,
+        task_title: "Claim probe",
+        task_assignee_id: assignee.userId,
+      });
+      expect(claimed!.client_event_id).toMatch(/^[a-v0-9]{5,1024}$/);
+
+      const { data: ledgerRow } = await db
+        .from("task_calendar_mutations")
+        .select("attempts")
+        .eq("id", claimed!.ledger_id)
+        .single();
+      expect((ledgerRow as { attempts: number }).attempts).toBe(1);
+    });
+
+    it("excludes rows already at the attempts cap (>= 5)", async () => {
+      const booker = await createUserForOrg(BMH_ORG_ID);
+      const assignee = await createUserForOrg(BMH_ORG_ID);
+      const { p_start, p_end } = windowArgs();
+
+      const { data: booking, error: bookErr } = await bookAppointment(booker.client, {
+        p_org: BMH_ORG_ID,
+        p_assignee: assignee.userId,
+        p_start,
+        p_end,
+        p_timezone: "America/Chicago",
+        p_title: "Exhausted probe",
+      });
+      expect(bookErr).toBeNull();
+
+      const { error: bumpErr } = await db
+        .from("task_calendar_mutations")
+        .update({ attempts: 5 })
+        .eq("source_task_id", booking!.task_id);
+      expect(bumpErr).toBeNull();
+
+      const { data, error } = await claimCalendarCreations(serviceClient, 50);
+      expect(error).toBeNull();
+      expect(data!.some((row) => row.source_task_id === booking!.task_id)).toBe(false);
+    });
+
+    // The Supabase JS client auto-commits every PostgREST call, so proving
+    // FOR UPDATE SKIP LOCKED actually prevents a double-claim (rather than
+    // just never happening to race in this environment) needs two raw `pg`
+    // connections: one holds the claimed row locked inside an open,
+    // uncommitted transaction while the other calls the same claim RPC
+    // concurrently and must come back empty instead of blocking or
+    // double-claiming.
+    describe("SKIP LOCKED — no double-claim (raw pg, two connections)", () => {
+      let connA: Client;
+      let connB: Client;
+
+      beforeEach(async () => {
+        connA = new Client({ connectionString: testDbUrl() });
+        connB = new Client({ connectionString: testDbUrl() });
+        await connA.connect();
+        await connB.connect();
+        await connA.query("set statement_timeout = 0");
+        await connB.query("set statement_timeout = 0");
+      });
+
+      afterEach(async () => {
+        await connA.query("rollback").catch(() => {});
+        await connB.query("rollback").catch(() => {});
+        await connA.end().catch(() => {});
+        await connB.end().catch(() => {});
+      });
+
+      it("connB's concurrent claim skips the row connA is still holding, returning empty rather than blocking or duplicating", async () => {
+        const booker = await createUserForOrg(BMH_ORG_ID);
+        const assignee = await createUserForOrg(BMH_ORG_ID);
+        const { p_start, p_end } = windowArgs();
+
+        const { data: booking, error: bookErr } = await bookAppointment(booker.client, {
+          p_org: BMH_ORG_ID,
+          p_assignee: assignee.userId,
+          p_start,
+          p_end,
+          p_timezone: "America/Chicago",
+          p_title: "SKIP LOCKED probe",
+        });
+        expect(bookErr).toBeNull();
+
+        await connA.query("begin");
+        const resA = await connA.query<{
+          ledger_id: string;
+          source_task_id: string;
+        }>("select * from public.fn_claim_calendar_creations($1) as t", [1]);
+        const claimedByA = resA.rows.find((r) => r.source_task_id === booking!.task_id);
+        expect(claimedByA).toBeDefined();
+
+        // connA holds the row lock open (uncommitted) — connB's SKIP LOCKED
+        // claim must skip it and return immediately, not block.
+        const resB = await connB.query<{ source_task_id: string }>(
+          "select * from public.fn_claim_calendar_creations($1) as t",
+          [50],
+        );
+        expect(resB.rows.some((r) => r.source_task_id === booking!.task_id)).toBe(false);
+
+        await connA.query("commit");
+
+        const { data: ledgerRow } = await db
+          .from("task_calendar_mutations")
+          .select("attempts")
+          .eq("id", claimedByA!.ledger_id)
+          .single();
+        // Exactly one claim (connA's) landed — attempts bumped once, not twice.
+        expect((ledgerRow as { attempts: number }).attempts).toBe(1);
+      });
     });
   });
 });

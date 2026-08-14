@@ -32,7 +32,7 @@ export interface DispatchCalendarResult {
 }
 
 type AdminClient = ReturnType<typeof createAdminClient>;
-type CalendarClient = calendar_v3.Calendar;
+export type CalendarClient = calendar_v3.Calendar;
 
 const THIRTY_MINUTES_MS = 30 * 60 * 1000;
 
@@ -125,7 +125,14 @@ export async function dispatchTaskCalendarEventUpdate(
   }
 }
 
-function buildCalendarClient(
+/**
+ * Build an authenticated Google Calendar client for `userId`, wiring up
+ * the same token-rotation handler as every other calendar dispatch path.
+ * Exported so other callers within the calendar integration (e.g. the
+ * durable calendar-mutation worker) can build a client without
+ * duplicating the OAuth2Client + rotation-listener plumbing.
+ */
+export function buildCalendarClient(
   userId: string,
   token: DecryptedOAuthToken,
 ): CalendarClient {
@@ -217,8 +224,20 @@ async function loadStoredCalendarEventId(
   return data?.google_calendar_event_id ?? null;
 }
 
-function isGoogleNotFound(error: unknown): boolean {
+/** Exported for other calendar-mutation consumers (e.g. the create-worker's
+ *  409-reconcile path) that need to distinguish "already exists"/"not
+ *  found" Google errors from real failures without re-deriving the shape. */
+export function isGoogleNotFound(error: unknown): boolean {
   if (!error || typeof error !== "object") return false;
   const candidate = error as { status?: unknown; code?: unknown };
   return candidate.status === 404 || candidate.code === 404;
+}
+
+/** 409 = the client-supplied event id already exists — the durable-ledger
+ *  event-creation retry signal (a crash between provider success and
+ *  phase-advance replays the same client_event_id and gets this back). */
+export function isGoogleConflict(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const candidate = error as { status?: unknown; code?: unknown };
+  return candidate.status === 409 || candidate.code === 409;
 }

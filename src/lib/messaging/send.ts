@@ -96,6 +96,21 @@ export type SendSmsOutcome =
       consentState?: ConsentState | null;
     }
   | {
+      /**
+       * The final-dispatch automated-only re-check ran, but the fresh
+       * property/contact reload it depends on errored (or threw). Fail
+       * closed: with current suppression state unknown, the send is held
+       * rather than allowed through — a read failure must never let a
+       * send proceed that current state might forbid. Only ever returned
+       * when `origin: 'automated'`; manual sends don't run this re-check
+       * at all, so they're unaffected. The row is marked `status: 'failed'`
+       * (never retried) so the queue doesn't loop on an unresolved read.
+       */
+      status: "blocked_fresh_state_unavailable";
+      messageId: string;
+      error: string;
+    }
+  | {
       status: "blocked_no_consent";
       reason: string;
       consentState: ConsentState;
@@ -387,10 +402,26 @@ export async function sendSmsToContact(
   // (composer/inline reply) skip this — they stay consent-only per
   // `isSuppressed`, already enforced above.
   if (input.origin === "automated") {
-    const blocked = await checkFreshAutomatedSuppression(supabase, {
+    const freshCheck = await checkFreshAutomatedSuppression(supabase, {
       propertyId: input.propertyId,
       contactId: input.contactId,
     });
+    if (!freshCheck.ok) {
+      await supabase
+        .from("messages")
+        .update({
+          status: "failed",
+          failed_at: new Date().toISOString(),
+          error_message: `Held: could not confirm current suppression state before sending (${freshCheck.error}).`,
+        })
+        .eq("id", pending.id);
+      return {
+        status: "blocked_fresh_state_unavailable",
+        messageId: pending.id,
+        error: freshCheck.error,
+      };
+    }
+    const blocked = freshCheck.decision;
     if (blocked) {
       await supabase
         .from("messages")
@@ -941,10 +972,30 @@ export async function releaseQueuedMessage(
   // skipping the check.
   const queuedOrigin = resolveQueuedSendOrigin(msg.metadata);
   if (queuedOrigin === "automated") {
-    const blocked = await checkFreshAutomatedSuppression(supabase, {
+    const freshCheck = await checkFreshAutomatedSuppression(supabase, {
       propertyId: msg.property_id,
       contactId: msg.contact_id,
     });
+    if (!freshCheck.ok) {
+      const { error: holdError } = await supabase
+        .from("messages")
+        .update({
+          status: "failed",
+          failed_at: new Date().toISOString(),
+          error_message: `Held: could not confirm current suppression state before sending (${freshCheck.error}).`,
+        })
+        .eq("id", msg.id)
+        .eq("status", "pending");
+      if (holdError) {
+        return { status: "db_error", error: holdError.message };
+      }
+      return {
+        status: "blocked_fresh_state_unavailable",
+        messageId: msg.id,
+        error: freshCheck.error,
+      };
+    }
+    const blocked = freshCheck.decision;
     if (blocked) {
       const { error: suppressError } = await supabase
         .from("messages")
@@ -1323,37 +1374,73 @@ function blockedTerminalDispo(
   };
 }
 
+type FreshSuppressionCheck =
+  | {
+      ok: true;
+      decision: Extract<SuppressionDecision, { suppressed: true }> | null;
+    }
+  | { ok: false; error: string };
+
 /**
  * Re-load the property's dispo and the contact's suppression fields +
  * consent state FRESH (not reusing anything looked up earlier in this
  * call) and run them through `evaluateAutomatedSuppression` — the single
  * boundary function. Called immediately before every provider dispatch
- * when `origin === 'automated'`. Returns `null` when clear to send.
+ * when `origin === 'automated'`.
+ *
+ * Fail-closed: if either reload errors (or the call throws), this returns
+ * `{ ok: false }` rather than silently treating the unread state as
+ * "not suppressed" — a transient read failure must never let a send
+ * through that current state might forbid. Only `{ ok: true, decision }`
+ * reports an actual (non-)suppression verdict; `decision` is `null` when
+ * clear to send.
  */
 async function checkFreshAutomatedSuppression(
   supabase: SupabaseClient<Database>,
   args: { propertyId: string; contactId: string },
-): Promise<Extract<SuppressionDecision, { suppressed: true }> | null> {
-  const [propertyResult, contactResult, consentState] = await Promise.all([
-    supabase
-      .from("properties")
-      .select("outreach_dispo")
-      .eq("id", args.propertyId)
-      .maybeSingle(),
-    supabase
-      .from("contacts")
-      .select("do_not_contact, sms_opted_out")
-      .eq("id", args.contactId)
-      .maybeSingle(),
-    getConsentState(supabase, args.contactId, "sms"),
-  ]);
+): Promise<FreshSuppressionCheck> {
+  let propertyResult: { data: { outreach_dispo: string | null } | null; error: { message: string } | null };
+  let contactResult: {
+    data: { do_not_contact: boolean | null; sms_opted_out: boolean | null } | null;
+    error: { message: string } | null;
+  };
+  let consentState: ConsentState;
+  try {
+    [propertyResult, contactResult, consentState] = await Promise.all([
+      supabase
+        .from("properties")
+        .select("outreach_dispo")
+        .eq("id", args.propertyId)
+        .maybeSingle(),
+      supabase
+        .from("contacts")
+        .select("do_not_contact, sms_opted_out")
+        .eq("id", args.contactId)
+        .maybeSingle(),
+      getConsentState(supabase, args.contactId, "sms"),
+    ]);
+  } catch (e) {
+    return {
+      ok: false,
+      error: `fresh suppression state reload threw: ${e instanceof Error ? e.message : String(e)}`,
+    };
+  }
+  if (propertyResult.error || contactResult.error) {
+    return {
+      ok: false,
+      error:
+        propertyResult.error?.message ??
+        contactResult.error?.message ??
+        "fresh suppression state reload failed",
+    };
+  }
   const decision = evaluateAutomatedSuppression({
     outreachDispo: propertyResult.data?.outreach_dispo ?? null,
     consentState,
     doNotContact: contactResult.data?.do_not_contact ?? null,
     smsOptedOut: contactResult.data?.sms_opted_out ?? null,
   });
-  return decision.suppressed ? decision : null;
+  return { ok: true, decision: decision.suppressed ? decision : null };
 }
 
 /**

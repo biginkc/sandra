@@ -545,8 +545,38 @@ begin
     raise exception 'fn_book_appointment: title is required' using errcode = 'P0001';
   end if;
 
+  -- Window validation (Codex round 4): a hostile direct-RPC caller can bypass
+  -- every client-side form constraint, so the RPC itself must reject
+  -- pathological windows rather than trusting p_start/p_end at face value.
+  -- isfinite() catches 'infinity'/'-infinity' timestamptz literals, which
+  -- would otherwise satisfy every ordering/interval comparison below (an
+  -- infinite end is always "after" any start, and interval arithmetic
+  -- against infinity is itself infinite/undefined) and could poison the
+  -- calendar ledger, the overlap index, and any downstream date math.
+  if not isfinite(p_start) or not isfinite(p_end) then
+    raise exception 'fn_book_appointment: start/end must be finite timestamps' using errcode = 'P0001';
+  end if;
+
   if p_end <= p_start then
     raise exception 'fn_book_appointment: end must be after start' using errcode = 'P0001';
+  end if;
+
+  -- Duration bound: a booking under 15 minutes is not a real meeting slot
+  -- (double-book/reminder math assumes a meaningful window) and a booking
+  -- over 24 hours is never a legitimate single appointment — both are
+  -- symptoms of a malformed or hostile call, not a real use case.
+  if p_end - p_start < interval '15 minutes' or p_end - p_start > interval '24 hours' then
+    raise exception 'fn_book_appointment: appointment duration must be between 15 minutes and 24 hours'
+      using errcode = 'P0001';
+  end if;
+
+  -- Start-time bound: a small grace window into the past (clock skew /
+  -- in-flight submit) is tolerated, but nothing further back, and nothing
+  -- absurdly far in the future — both are hostile/malformed-input signals
+  -- rather than real scheduling needs.
+  if p_start > now() + interval '2 years' or p_start < now() - interval '1 hour' then
+    raise exception 'fn_book_appointment: start must be within 1 hour in the past and 2 years in the future'
+      using errcode = 'P0001';
   end if;
 
   -- Concurrent replay: two callers both miss the SELECT above (neither
@@ -667,5 +697,73 @@ revoke all on function public.fn_book_appointment(uuid, uuid, timestamptz, times
   from public, anon;
 grant execute on function public.fn_book_appointment(uuid, uuid, timestamptz, timestamptz, text, text, uuid, uuid, text, uuid)
   to authenticated;
+
+-- ----------------------------------------------------------------------------
+-- 4. fn_claim_calendar_creations — durable calendar-creation worker claim
+--
+-- Pull-forward of PR 3's ledger-consumer machinery for the 'create' slice
+-- only (PR 3 will add the sibling claim for reschedule/reassign/cancel).
+-- Service-role-only: the create-worker's cron sweep is the sole caller.
+-- Single data-modifying CTE — FOR UPDATE SKIP LOCKED on the candidate
+-- rows (a plain SELECT subquery), then an UPDATE...FROM that bumps
+-- attempts + updated_at on exactly the locked set and returns it joined
+-- with the owning task's due_at/end_at/title/assignee_id. Bumping attempts
+-- AT CLAIM TIME (not only on failure) means a crash between claim and
+-- provider call still shows a used attempt on the next sweep — a stuck
+-- row cannot be claimed forever. Rows at attempts >= 5 are simply never
+-- claimed again: terminal by exhaustion, no separate phase transition
+-- needed for that path (contrast with 'failed', which is an explicit
+-- worker-written terminal state for permanent provider errors).
+-- ----------------------------------------------------------------------------
+create or replace function public.fn_claim_calendar_creations(p_limit integer)
+returns table (
+  ledger_id uuid,
+  org_id uuid,
+  calendar_chain_id uuid,
+  source_task_id uuid,
+  expected_generation integer,
+  client_event_id text,
+  attempts integer,
+  task_due_at timestamptz,
+  task_end_at timestamptz,
+  task_title text,
+  task_assignee_id uuid
+)
+language sql
+security definer
+set search_path = public, pg_temp
+as $$
+  with claimed as (
+    update public.task_calendar_mutations m
+    set attempts = m.attempts + 1,
+        updated_at = now()
+    from (
+      select id
+      from public.task_calendar_mutations
+      where operation = 'create'
+        and phase = 'pending'
+        and attempts < 5
+      order by created_at
+      for update skip locked
+      limit greatest(p_limit, 0)
+    ) locked
+    where m.id = locked.id
+    returning
+      m.id, m.org_id, m.calendar_chain_id, m.source_task_id,
+      m.expected_generation, m.client_event_id, m.attempts
+  )
+  select
+    claimed.id, claimed.org_id, claimed.calendar_chain_id, claimed.source_task_id,
+    claimed.expected_generation, claimed.client_event_id, claimed.attempts,
+    t.due_at, t.end_at, t.title, t.assignee_id
+  from claimed
+  join public.tasks t on t.id = claimed.source_task_id;
+$$;
+
+comment on function public.fn_claim_calendar_creations(integer) is
+  'Service-role-only claim for the durable calendar-creation sweep worker (PR 2 pull-forward of PR 3''s ledger consumer, create operation only). FOR UPDATE SKIP LOCKED over task_calendar_mutations WHERE operation=create AND phase=pending AND attempts<5; bumps attempts+updated_at atomically with the claim so a crash between claim and provider call still shows a used attempt next sweep. attempts>=5 rows are never reclaimed — terminal by exhaustion.';
+
+revoke all on function public.fn_claim_calendar_creations(integer) from public, anon, authenticated;
+grant execute on function public.fn_claim_calendar_creations(integer) to service_role;
 
 commit;
