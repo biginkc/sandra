@@ -1434,6 +1434,20 @@ async function checkFreshAutomatedSuppression(
         "fresh suppression state reload failed",
     };
   }
+  // `.maybeSingle()` returns `{ data: null, error: null }` when the row is
+  // gone (hard-deleted, or the id was bad) — not an error. Fail closed here
+  // too: a missing property/contact means we can't confirm current
+  // suppression state, so treat it the same as a reload failure rather
+  // than falling through with `?? null` defaults that would read as
+  // "nothing suppressing this send."
+  if (!propertyResult.data || !contactResult.data) {
+    return {
+      ok: false,
+      error: !propertyResult.data
+        ? "fresh suppression state reload: property row not found"
+        : "fresh suppression state reload: contact row not found",
+    };
+  }
   const decision = evaluateAutomatedSuppression({
     outreachDispo: propertyResult.data?.outreach_dispo ?? null,
     consentState,

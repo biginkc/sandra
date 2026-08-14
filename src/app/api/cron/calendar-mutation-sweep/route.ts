@@ -171,10 +171,23 @@ export async function runCalendarMutationSweep(
     if (!row) break;
 
     claimed += 1;
-    const outcome: CalendarCreationOutcome = await processClaimedCalendarCreation(
-      supabase,
-      row,
-    );
+    // Defense-in-depth: `processClaimedCalendarCreation` is documented to
+    // never throw, but this loop must not bet the whole sweep on that
+    // invariant holding forever — a claimed row already burned its
+    // attempt, and one row's unexpected rejection must never prevent the
+    // next claimed row (or the next sweep iteration) from being processed.
+    let outcome: CalendarCreationOutcome;
+    try {
+      outcome = await processClaimedCalendarCreation(supabase, row);
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      reportError(e, {
+        tags: { surface: "cron_calendar_mutation_sweep_unhandled" },
+        extra: { ledgerId: row.ledger_id },
+      });
+      outcomes.sweep_level_error = (outcomes.sweep_level_error ?? 0) + 1;
+      continue;
+    }
     outcomes[outcome.status] = (outcomes[outcome.status] ?? 0) + 1;
     if (outcome.status === "retryable_error" || outcome.status === "permanent_error") {
       reportError(new Error(outcome.error), {

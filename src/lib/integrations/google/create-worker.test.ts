@@ -26,10 +26,32 @@ import { buildCalendarClient } from "./dispatch";
 import { loadIntegrationPrefs } from "@/lib/integrations/prefs";
 import { getDecryptedToken } from "@/lib/integrations/tokens/store";
 
+type ChainResult =
+  | { data: unknown; error: { message: string } | null }
+  /** A transport-level rejection — the underlying client promise itself
+   *  rejects, distinct from a resolved `{ data: null, error }` — used to
+   *  exercise the never-throw boundary around the provider_done resume
+   *  dispatch. */
+  | { reject: unknown };
+
 /** Same thenable, infinitely-chainable fake Postgrest builder used in
  *  src/lib/messaging/send.test.ts — resolves to a fixed result regardless
- *  of which chain methods are called on the way there. */
-function chain(result: { data: unknown; error: { message: string } | null }) {
+ *  of which chain methods are called on the way there. Also supports a
+ *  `{ reject }` queue entry that makes both `.maybeSingle()` and the
+ *  builder's own `.then()` reject instead of resolve. */
+function chain(result: ChainResult) {
+  if ("reject" in result) {
+    const err = result.reject;
+    const builder: Record<string, unknown> = {
+      select: () => builder,
+      eq: () => builder,
+      update: () => builder,
+      maybeSingle: () => Promise.reject(err),
+      then: (resolve: (v: unknown) => unknown, reject?: (e: unknown) => unknown) =>
+        Promise.reject(err).then(resolve, reject),
+    };
+    return builder;
+  }
   const builder: Record<string, unknown> = {
     select: () => builder,
     eq: () => builder,
@@ -41,9 +63,7 @@ function chain(result: { data: unknown; error: { message: string } | null }) {
   return builder;
 }
 
-function fakeSupabase(
-  queues: Record<string, Array<{ data: unknown; error: { message: string } | null }>>,
-) {
+function fakeSupabase(queues: Record<string, ChainResult[]>) {
   return {
     from: (table: string) => {
       const q = queues[table];
@@ -419,6 +439,29 @@ describe("processClaimedCalendarCreation", () => {
         PROVIDER_DONE_CLAIMED,
       );
       expect(second).toEqual({ status: "created", ledgerId: "ledger-1", eventId: "evt-resumed" });
+    });
+
+    it("a rejecting supabase call in the resume path is caught, not thrown — outcome retryable_error, backoff recorded at expectedPhase 'provider_done'", async () => {
+      // PROVIDER_DONE_CLAIMED already has new_event_id set, so the resume
+      // goes straight to finalizeCreation's task CAS — make that call
+      // reject at the transport level (distinct from a resolved
+      // `{ data: null, error }`) rather than returning cleanly.
+      const supabase = fakeSupabase({
+        tasks: [{ reject: new Error("connection reset by peer") }],
+        // markRetryableFailure's backoff write, scoped to expectedPhase
+        // 'provider_done' — proves the caught rejection is recorded
+        // against the phase the resume path actually operates on, not
+        // 'pending'.
+        task_calendar_mutations: [ledgerWrite()],
+      });
+
+      const outcome = await processClaimedCalendarCreation(supabase, PROVIDER_DONE_CLAIMED);
+
+      expect(outcome).toEqual({
+        status: "retryable_error",
+        ledgerId: "ledger-1",
+        error: "connection reset by peer",
+      });
     });
 
     it("double-finalize: a concurrent worker finalizing first leaves this one with a clean lease_lost, not an error", async () => {

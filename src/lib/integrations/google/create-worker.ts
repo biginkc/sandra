@@ -188,7 +188,35 @@ export async function processClaimedCalendarCreation(
   const ledgerId = claimed.ledger_id;
   const claimToken = claimed.claim_token;
   if (claimed.phase === "provider_done") {
-    return resumeProviderDoneCreation(supabase, claimed);
+    // Same never-throw boundary as the 'pending' path below: a
+    // transport-level rejection anywhere in the resume chain (lease
+    // renewal, the task CAS, or the ledger finalize write) must not escape
+    // this function — it would otherwise abort the whole sweep loop
+    // (route.ts claims/processes one row at a time) with no error/backoff
+    // recorded on this row, and can push an otherwise-recoverable
+    // provider_done row toward the needs_repair exhaustion path instead of
+    // retrying normally. The row is 'provider_done' throughout the resume
+    // path, so the recorded expectedPhase here is 'provider_done', not
+    // 'pending' — matching the phase the token-fenced write must target.
+    try {
+      return await resumeProviderDoneCreation(supabase, claimed);
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      reportError(e, {
+        tags: { surface: "calendar_creation_worker_provider_done_resume" },
+        extra: { ledgerId, sourceTaskId: claimed.source_task_id },
+      });
+      const r = await markRetryableFailure(
+        supabase,
+        ledgerId,
+        claimToken,
+        "provider_done",
+        message,
+        claimed.attempts,
+      ).catch(() => ({ applied: false, lost: false }));
+      if (r.lost) return { status: "lease_lost", ledgerId };
+      return { status: "retryable_error", ledgerId, error: message };
+    }
   }
   try {
     const prefs = await loadIntegrationPrefs(supabase, claimed.task_assignee_id);

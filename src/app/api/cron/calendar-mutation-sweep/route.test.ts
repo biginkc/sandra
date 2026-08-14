@@ -173,6 +173,34 @@ describe("runCalendarMutationSweep", () => {
     expect(calls.filter((c: unknown[]) => c[0] === "fn_expire_exhausted_calendar_creations")).toHaveLength(1);
   });
 
+  it("a rejecting first row doesn't prevent the second row from being claimed and processed", async () => {
+    // Defense-in-depth: even though processClaimedCalendarCreation is
+    // documented to never throw, the sweep loop must not bet the whole
+    // run on that invariant — an unexpected rejection on one claimed row
+    // must not abort the loop before the next row is claimed.
+    const supabase = fakeSupabase([claimedRow("a"), claimedRow("b")]);
+    mocks.processClaimedCalendarCreation
+      .mockRejectedValueOnce(new Error("transport blew up"))
+      .mockResolvedValueOnce({ status: "created", ledgerId: "b", eventId: "evt-b" });
+
+    const summary = await runCalendarMutationSweep(supabase, {
+      budgetMs: 60_000,
+      claimLimit: 2,
+    });
+
+    expect(claimCalls(supabase)).toHaveLength(2);
+    expect(mocks.processClaimedCalendarCreation).toHaveBeenCalledTimes(2);
+    expect(summary.claimed).toBe(2);
+    expect(summary.outcomes.sweep_level_error).toBe(1);
+    expect(summary.outcomes.created).toBe(1);
+    expect(mocks.reportError).toHaveBeenCalledWith(
+      expect.any(Error),
+      expect.objectContaining({
+        tags: { surface: "cron_calendar_mutation_sweep_unhandled" },
+      }),
+    );
+  });
+
   it("throws if the exhaustion sweep RPC errors, without claiming anything", async () => {
     const supabase = fakeSupabase([claimedRow("a")]);
     supabase.rpc = vi.fn(async (fn: string) =>

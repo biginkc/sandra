@@ -146,6 +146,76 @@ describe("sendSmsToContact — fail-closed fresh-state suppression re-check", ()
     });
   });
 
+  it("automated send: fresh property reload returns no row (maybeSingle null, no error) → held, no provider call", async () => {
+    const provider = fakeProvider();
+    vi.mocked(getMessagingProvider).mockReturnValue(provider);
+
+    const supabase = fakeSupabase({
+      contacts: [
+        { data: CONTACT_ROW, error: null }, // main pipeline lookup
+        { data: { do_not_contact: false, sms_opted_out: false }, error: null }, // fresh re-check
+      ],
+      properties: [
+        { data: PROPERTY_ROW, error: null }, // main pipeline lookup
+        { data: null, error: null }, // fresh re-check — row gone, no error
+      ],
+      messages: [
+        { data: { id: "msg-3" }, error: null }, // pending insert
+        { data: null, error: null }, // held-status update
+      ],
+    });
+
+    const outcome = await sendSmsToContact(supabase, {
+      origin: "automated",
+      contactId: CONTACT_ID,
+      propertyId: PROPERTY_ID,
+      body: "hello",
+      from: "+18165551234",
+    });
+
+    expect(provider.sendSms).not.toHaveBeenCalled();
+    expect(outcome).toEqual({
+      status: "blocked_fresh_state_unavailable",
+      messageId: "msg-3",
+      error: "fresh suppression state reload: property row not found",
+    });
+  });
+
+  it("automated send: fresh contact reload returns no row (maybeSingle null, no error) → held, no provider call", async () => {
+    const provider = fakeProvider();
+    vi.mocked(getMessagingProvider).mockReturnValue(provider);
+
+    const supabase = fakeSupabase({
+      contacts: [
+        { data: CONTACT_ROW, error: null }, // main pipeline lookup
+        { data: null, error: null }, // fresh re-check — row gone, no error
+      ],
+      properties: [
+        { data: PROPERTY_ROW, error: null }, // main pipeline lookup
+        { data: PROPERTY_ROW, error: null }, // fresh re-check
+      ],
+      messages: [
+        { data: { id: "msg-4" }, error: null }, // pending insert
+        { data: null, error: null }, // held-status update
+      ],
+    });
+
+    const outcome = await sendSmsToContact(supabase, {
+      origin: "automated",
+      contactId: CONTACT_ID,
+      propertyId: PROPERTY_ID,
+      body: "hello",
+      from: "+18165551234",
+    });
+
+    expect(provider.sendSms).not.toHaveBeenCalled();
+    expect(outcome).toEqual({
+      status: "blocked_fresh_state_unavailable",
+      messageId: "msg-4",
+      error: "fresh suppression state reload: contact row not found",
+    });
+  });
+
   it("manual send: does not run the fresh re-check at all — sends normally", async () => {
     const provider = fakeProvider();
     vi.mocked(getMessagingProvider).mockReturnValue(provider);
