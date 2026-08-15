@@ -2,9 +2,10 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
+import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
-import { buttonVariants } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import {
   Card,
   CardContent,
@@ -15,6 +16,7 @@ import {
 } from "@/components/ui/card";
 import { createClient } from "@/lib/supabase/client";
 import type { Database } from "@/lib/supabase/types";
+import { retryCsvImportJob, retryImportListAssignment } from "../actions";
 
 type Job = Database["public"]["Tables"]["jobs"]["Row"];
 
@@ -22,6 +24,7 @@ const TERMINAL_STATUSES = new Set([
   "completed",
   "failed",
   "partial",
+  "partially_completed",
   "canceled",
 ]);
 
@@ -41,6 +44,7 @@ const TERMINAL_STATUSES = new Set([
 export function StepProgress({ jobId }: { jobId: string }) {
   const [job, setJob] = useState<Job | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [retrying, setRetrying] = useState(false);
 
   useEffect(() => {
     const supabase = createClient();
@@ -132,8 +136,24 @@ export function StepProgress({ jobId }: { jobId: string }) {
   // line type. result_summary is untyped Json — read defensively.
   const summary = (job?.result_summary ?? null) as {
     droppedUnlabeledPhones?: number;
+    dncRows?: number;
+    sideEffects?: Record<string, { status?: string; message?: string }>;
   } | null;
   const droppedUnlabeledPhones = summary?.droppedUnlabeledPhones ?? 0;
+  const dncRows = summary?.dncRows ?? 0;
+  const listAssignment = summary?.sideEffects?.listAssignment;
+  const incompleteSideEffects = Object.entries(summary?.sideEffects ?? {})
+    .filter(([key, effect]) => key !== "listAssignment" && ["failed", "pending"].includes(effect.status ?? ""));
+
+  const retry = async (kind: "rows" | "list") => {
+    setRetrying(true);
+    const result = kind === "rows"
+      ? await retryCsvImportJob(jobId)
+      : await retryImportListAssignment(jobId);
+    setRetrying(false);
+    if (result.ok) toast.success(kind === "rows" ? "Import resumed." : "List assignment completed.");
+    else toast.error(result.error.message);
+  };
 
   return (
     <Card>
@@ -171,12 +191,40 @@ export function StepProgress({ jobId }: { jobId: string }) {
             line type. Unlabeled numbers are never saved.
           </div>
         )}
+        {isTerminal && (
+          <div className="bg-foreground text-background rounded-md p-3 text-sm">
+            ⊘ {dncRows.toLocaleString()} Do-Not-Contact {dncRows === 1 ? "record" : "records"} imported locked and excluded from optional services.
+          </div>
+        )}
+        {isTerminal && listAssignment?.status === "failed" && (
+          <div className="border-destructive/40 bg-destructive/5 rounded-md border p-3 text-sm">
+            <strong>List assignment did not complete.</strong>{" "}
+            {listAssignment.message ?? "The imported rows are kept."}
+            <Button size="sm" variant="outline" className="ml-3" disabled={retrying} onClick={() => void retry("list")}>Retry list assignment</Button>
+          </div>
+        )}
+        {isTerminal && incompleteSideEffects.map(([key, effect]) => (
+          <div key={key} className="border-destructive/40 bg-destructive/5 rounded-md border p-3 text-sm">
+            <strong>{sideEffectLabel(key)} did not complete.</strong>{" "}
+            {effect.message ?? "Open Job details for the recorded failure and next step."}
+          </div>
+        ))}
       </CardContent>
       {isTerminal && (
         <CardFooter className="flex flex-wrap gap-2">
-          <Link href="/properties" className={buttonVariants()}>
-            View properties
+          <Link href="/properties?imported=today" className={buttonVariants()}>
+            Review imported Prospects
           </Link>
+          {(job?.failed_items ?? 0) > 0 && (
+            <Button variant="outline" disabled={retrying} onClick={() => void retry("rows")}>
+              Retry failed rows
+            </Button>
+          )}
+          {(job?.failed_items ?? 0) > 0 && (
+            <Link href={`/jobs/${jobId}`} className={buttonVariants({ variant: "outline" })}>
+              Download failed rows
+            </Link>
+          )}
           <Link
             href={`/jobs/${jobId}`}
             className={buttonVariants({ variant: "outline" })}
@@ -195,32 +243,42 @@ export function StepProgress({ jobId }: { jobId: string }) {
   );
 }
 
+function sideEffectLabel(key: string): string {
+  return ({
+    cass: "Address verification",
+    lineTypeClassification: "Line-type classification",
+    consent: "Consent recording",
+    sequenceEnrollment: "Sequence enrollment",
+    skipTrace: "Skip trace",
+  } as Record<string, string>)[key] ?? key;
+}
+
 function describeState(
   job: Job | null,
   isTerminal: boolean,
 ): { title: string; description: string } {
   if (!job || !isTerminal) {
     return {
-      title: "Importing",
+      title: job?.status === "queued" ? "Queued" : "Processing",
       description:
-        "You can close this tab and come back — the job runs on the server. Visit /jobs anytime to check in.",
+        "This runs in the background. You can leave this page — the job keeps going and this screen picks up where it left off when you return.",
     };
   }
   if (job.status === "completed") {
-    return { title: "Import complete", description: "All rows processed." };
+    return { title: "Completed", description: "Every row and every follow-up action reached a terminal state. Nothing is still pending." };
   }
-  if (job.status === "partial") {
+  if (job.status === "partial" || job.status === "partially_completed") {
     return {
-      title: "Import finished with errors",
+      title: "Partially completed",
       description:
-        "Some rows failed. Open Job details to see specifics for the failed rows.",
+        "Most rows imported. Some work failed and is reported truthfully below — this job will not be called Completed.",
     };
   }
   if (job.status === "failed") {
     return {
-      title: "Import failed",
+      title: "Failed",
       description:
-        "The job failed before completing. Open Job details to see why.",
+        "The job stopped before completing. Rows already imported are kept and listed; nothing was double-imported. Retry resumes from the failure point.",
     };
   }
   if (job.status === "canceled") {

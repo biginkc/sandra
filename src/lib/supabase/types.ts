@@ -775,6 +775,9 @@ export type Database = {
         Row: {
           county_id: string | null
           created_at: string
+          dataset_sha256: string | null
+          dataset_version: number | null
+          dnc_rows: number
           errors: Json | null
           failed_rows: number
           filename: string | null
@@ -793,6 +796,9 @@ export type Database = {
         Insert: {
           county_id?: string | null
           created_at?: string
+          dataset_sha256?: string | null
+          dataset_version?: number | null
+          dnc_rows?: number
           errors?: Json | null
           failed_rows?: number
           filename?: string | null
@@ -811,6 +817,9 @@ export type Database = {
         Update: {
           county_id?: string | null
           created_at?: string
+          dataset_sha256?: string | null
+          dataset_version?: number | null
+          dnc_rows?: number
           errors?: Json | null
           failed_rows?: number
           filename?: string | null
@@ -1048,6 +1057,7 @@ export type Database = {
       job_items: {
         Row: {
           contact_id: string | null
+          compliance_locked: boolean
           error_class: string | null
           error_message: string | null
           id: string
@@ -1058,10 +1068,12 @@ export type Database = {
           processed_at: string | null
           property_id: string | null
           retry_count: number
+          source_row_index: number | null
           status: string
         }
         Insert: {
           contact_id?: string | null
+          compliance_locked?: boolean
           error_class?: string | null
           error_message?: string | null
           id?: string
@@ -1072,10 +1084,12 @@ export type Database = {
           processed_at?: string | null
           property_id?: string | null
           retry_count?: number
+          source_row_index?: number | null
           status?: string
         }
         Update: {
           contact_id?: string | null
+          compliance_locked?: boolean
           error_class?: string | null
           error_message?: string | null
           id?: string
@@ -1086,6 +1100,7 @@ export type Database = {
           processed_at?: string | null
           property_id?: string | null
           retry_count?: number
+          source_row_index?: number | null
           status?: string
         }
         Relationships: [
@@ -1710,6 +1725,8 @@ export type Database = {
           repair_estimate: number | null
           skip_trace_disabled: boolean
           source: string | null
+          source_import_id: string | null
+          source_imported_at: string | null
           sqft: number | null
           state: string
           status: string
@@ -1770,6 +1787,8 @@ export type Database = {
           repair_estimate?: number | null
           skip_trace_disabled?: boolean
           source?: string | null
+          source_import_id?: string | null
+          source_imported_at?: string | null
           sqft?: number | null
           state: string
           status?: string
@@ -1830,6 +1849,8 @@ export type Database = {
           repair_estimate?: number | null
           skip_trace_disabled?: boolean
           source?: string | null
+          source_import_id?: string | null
+          source_imported_at?: string | null
           sqft?: number | null
           state?: string
           status?: string
@@ -1860,6 +1881,13 @@ export type Database = {
             isOneToOne: false
             referencedRelation: "contacts"
             referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "properties_source_import_org_fkey"
+            columns: ["source_import_id", "org_id"]
+            isOneToOne: false
+            referencedRelation: "csv_imports"
+            referencedColumns: ["id", "org_id"]
           },
           {
             foreignKeyName: "properties_org_id_fkey"

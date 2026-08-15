@@ -13,7 +13,6 @@ vi.mock("./fips", () => ({
   resolveFips: vi.fn().mockResolvedValue("29021"), // Buchanan County MO
 }));
 
-// eslint-disable-next-line import/first
 import { processIngestChunk } from "./ingest";
 
 type Response = { data: unknown; error: { message: string } | null };
@@ -78,6 +77,14 @@ function makeBuilder(record: CallRecord): Record<string, unknown> {
   };
   builder.is = (...args: unknown[]) => {
     record.filters.push({ op: "is", args });
+    return builder;
+  };
+  builder.gte = (...args: unknown[]) => {
+    record.filters.push({ op: "gte", args });
+    return builder;
+  };
+  builder.lt = (...args: unknown[]) => {
+    record.filters.push({ op: "lt", args });
     return builder;
   };
   builder.in = (...args: unknown[]) => {
@@ -150,6 +157,7 @@ describe("processIngestChunk → ingestRow countyId thread-through (phase 02 D-0
       {
         jobId: "job-1",
         csvImportId: "import-1",
+        orgId: "org-1",
         source: "dealmachine",
         market: "Buchanan County MO",
         countyId: "buchanan-county-id",
@@ -171,6 +179,7 @@ describe("processIngestChunk → ingestRow countyId thread-through (phase 02 D-0
     );
     expect(propertyInsert).toBeDefined();
     const payload = propertyInsert!.insertPayload as Record<string, unknown>;
+    expect(payload.org_id).toBe("org-1");
     expect(payload.market).toBe("Buchanan County MO");
     expect(payload.county_id).toBe("buchanan-county-id");
   });
@@ -197,6 +206,7 @@ describe("processIngestChunk → ingestRow countyId thread-through (phase 02 D-0
       {
         jobId: "job-1",
         csvImportId: "import-1",
+        orgId: "org-1",
         source: "dealmachine",
         market: "Johnson County KS",
         countyId: null,
@@ -224,6 +234,7 @@ describe("processIngestChunk → hard rule: unlabeled phones are never saved", (
   const baseChunkParams = {
     jobId: "job-1",
     csvImportId: "import-1",
+    orgId: "org-1",
     source: "dealmachine",
     market: "Buchanan County MO",
     countyId: "buchanan-county-id",
@@ -412,6 +423,7 @@ describe("processIngestChunk → DealMachine DNC ratchet (Codex PR #310 findings
   const baseChunkParams = {
     jobId: "job-1",
     csvImportId: "import-1",
+    orgId: "org-1",
     source: "dealmachine",
     market: "Buchanan County MO",
     countyId: "buchanan-county-id",
@@ -572,7 +584,7 @@ describe("processIngestChunk → DealMachine DNC ratchet (Codex PR #310 findings
     expect(result.failed).toBe(1);
     expect(result.errors[0]?.message).toContain("do_not_contact ratchet update failed");
     const errorItem = calls.find(
-      (c) => c.table === "job_items" && c.op === "insert",
+      (c) => c.table === "job_items" && c.op === "upsert",
     );
     expect(errorItem).toBeDefined();
     const payload = errorItem!.insertPayload as Record<string, unknown>;
@@ -668,6 +680,45 @@ describe("processIngestChunk → DealMachine DNC ratchet (Codex PR #310 findings
     expect(ratchet).toBeDefined();
     expect(ratchet!.insertPayload).toEqual({ do_not_contact: true });
     expect(ratchet!.filters).toContainEqual({ op: "eq", args: ["id", "existing-3"] });
+  });
+
+  it("locks a dedup-matched property even when it already links a different homeowner", async () => {
+    responseQueue = [
+      { data: { id: "incoming-contact" }, error: null },
+      { data: null, error: null }, // homeowner details
+      { data: { id: "existing-property" }, error: null }, // address dedup
+      {
+        data: { homeowner_contact_id: "different-contact", agent_contact_id: null },
+        error: null,
+      },
+      { data: null, error: null }, // property suppression/provenance ratchet
+      { data: null, error: null }, // job item checkpoint
+      { data: null, error: null }, // progress checkpoint
+    ];
+
+    const result = await processIngestChunk(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      makeSupabase() as any,
+      {
+        ...baseChunkParams,
+        mapping: {
+          address: "Address",
+          state: "State",
+          homeowner_do_not_contact: "DNC Flag",
+        },
+        rows: [{ Address: "55 Locked Ln", State: "MO", "DNC Flag": "true" }],
+      },
+    );
+
+    expect(result.skipped).toBe(1);
+    const propertyUpdate = calls.find(
+      (call) => call.table === "properties" && call.op === "update",
+    );
+    expect(propertyUpdate?.insertPayload).toMatchObject({
+      outreach_dispo: "dnc",
+      source_import_id: "import-1",
+    });
+    expect(propertyUpdate?.insertPayload).not.toHaveProperty("homeowner_contact_id");
   });
 
   it("PropStream-shaped row: a DNC number with no clean phone still matches + ratchets an existing contact (Codex round-2 finding B)", async () => {
@@ -848,5 +899,52 @@ describe("processIngestChunk → DealMachine DNC ratchet (Codex PR #310 findings
         "phone_1.eq.+18165559999,phone_2.eq.+18165559999,phone_3.eq.+18165559999",
       ],
     });
+  });
+});
+
+describe("processIngestChunk durable resume", () => {
+  it("skips a checkpointed success and retries only the failed source row", async () => {
+    responseQueue = [
+      { data: [
+        { source_row_index: 0, status: "success" },
+        { source_row_index: 1, status: "error" },
+      ], error: null },
+      { data: null, error: null }, // row 1 address dedup miss
+      { data: { id: "prop-row-1" }, error: null },
+      { data: null, error: null }, // row checkpoint upsert
+      { data: null, error: null }, // progress
+    ];
+
+    const result = await processIngestChunk(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      makeSupabase() as any,
+      {
+        jobId: "job-resume",
+        orgId: "org-1",
+        csvImportId: "import-resume",
+        source: "dealmachine",
+        market: "Buchanan County MO",
+        countyId: "county-1",
+        mapping: { address: "Address", state: "State" },
+        rows: [
+          { Address: "1 Already Done St", State: "MO" },
+          { Address: "2 Retry St", State: "MO" },
+        ],
+        offset: 0,
+        autoTagIds: [],
+        resumeSafe: true,
+      },
+    );
+
+    expect(result).toMatchObject({ succeeded: 2, failed: 0 });
+    const propertyWrites = calls.filter(
+      (call) => call.table === "properties" && call.op === "insert",
+    );
+    expect(propertyWrites).toHaveLength(1);
+    expect((propertyWrites[0].insertPayload as Record<string, unknown>).address).toBe("2 Retry ST");
+    const checkpoint = calls.find(
+      (call) => call.table === "job_items" && call.op === "upsert",
+    );
+    expect(checkpoint?.insertPayload).toMatchObject({ source_row_index: 1, status: "success" });
   });
 });

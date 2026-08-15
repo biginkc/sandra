@@ -16,14 +16,18 @@ import {
   createAndApplyCustomTagBulk,
   createAndApplyCustomTagBulkFromFilters,
   type BulkOutcome,
-} from "../leads/actions";
+} from "./dnc-safe-actions";
 import type { FilterBlock } from "./prospects-query";
 import type { TagOption } from "./prospects-table";
 
 type Props = {
   open: boolean;
   propertyIds: string[];
-  filterArgs?: { search?: string | null; blockStack: FilterBlock[] };
+  filterArgs?: {
+    search?: string | null;
+    blockStack: FilterBlock[];
+    imported?: "today" | null;
+  };
   tags: TagOption[];
   allMatching: boolean;
   totalCount: number;
@@ -93,6 +97,7 @@ export function BulkTagModal({
             color: null,
             search: filterArgs?.search ?? null,
             blockStack: filterArgs?.blockStack ?? [],
+            imported: filterArgs?.imported ?? null,
           })
         : createAndApplyCustomTagBulk({
             name: cleanName,

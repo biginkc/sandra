@@ -29,10 +29,12 @@ export type JobsSortableColumn = (typeof JOBS_SORTABLE_COLUMNS)[number];
 export type JobStatus =
   | "queued"
   | "running"
+  | "processing"
   | "finalizing"
   | "completed"
   | "failed"
   | "partial"
+  | "partially_completed"
   | "canceled"
   | "denied"
   | "pending_approval";
@@ -42,10 +44,12 @@ export type JobsFilters = { status: JobStatus | null };
 const JOB_STATUS_VALUES: readonly JobStatus[] = [
   "queued",
   "running",
+  "processing",
   "finalizing",
   "completed",
   "failed",
   "partial",
+  "partially_completed",
   "canceled",
   "denied",
   "pending_approval",

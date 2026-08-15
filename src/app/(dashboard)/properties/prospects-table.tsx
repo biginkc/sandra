@@ -1,6 +1,6 @@
 "use client";
 
-import { ChevronDownIcon } from "lucide-react";
+import { ChevronDownIcon, LockKeyhole } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState, useTransition } from "react";
@@ -68,7 +68,7 @@ import {
   removePropertiesFromListBulk,
   verifyPropertiesBulk,
   type BulkOutcome,
-} from "../leads/actions";
+} from "./dnc-safe-actions";
 import { getAllMatchingProspectIds } from "./actions";
 import { BatchCreateModal } from "./batch-create-modal";
 import { BulkSmsModal } from "./bulk-sms-modal";
@@ -91,6 +91,8 @@ export type ProspectRow = {
   last_message_preview: string | null;
   /** Outreach disposition, if manually set or auto-detected. */
   outreach_dispo: string | null;
+  imported_at?: string | null;
+  dnc_reason?: string | null;
 };
 
 export type ListOption = { id: string; name: string; color: string | null };
@@ -122,6 +124,7 @@ type Props = {
    *  silently dropped when they click "page 3". Null when no filters are
    *  active in the URL. */
   filtersParam: string | null;
+  importedParam?: "today" | null;
   /** Total count across all pages matching the current filters — drives the
    *  "Select all N prospects" cross-page selection banner. */
   total: number;
@@ -144,6 +147,15 @@ function summarize(outcome: BulkOutcome, noun = "prospect"): string {
   return parts.join(" · ") || "Done";
 }
 
+export function formatRelativeImportTime(iso: string, now = new Date()): string {
+  const elapsedMinutes = Math.max(0, Math.floor((now.getTime() - new Date(iso).getTime()) / 60_000));
+  if (elapsedMinutes < 1) return "just now";
+  if (elapsedMinutes < 60) return `${elapsedMinutes}m ago`;
+  const hours = Math.floor(elapsedMinutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return `${Math.floor(hours / 24)}d ago`;
+}
+
 export function ProspectsTable({
   prospects,
   lists,
@@ -157,6 +169,7 @@ export function ProspectsTable({
   dir,
   blockStack,
   filtersParam,
+  importedParam = null,
   total,
   pageSize,
   page,
@@ -164,7 +177,7 @@ export function ProspectsTable({
 }: Props) {
   const router = useRouter();
   const blockStackKey = JSON.stringify(blockStack);
-  const selectionScopeKey = `${search}\u0000${sort}\u0000${dir}\u0000${blockStackKey}`;
+  const selectionScopeKey = `${search}\u0000${sort}\u0000${dir}\u0000${blockStackKey}\u0000${importedParam ?? ""}`;
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [pending, startTransition] = useTransition();
   const [showBatchCreate, setShowBatchCreate] = useState(false);
@@ -228,6 +241,7 @@ export function ProspectsTable({
         // builds; without this re-emit, paginating from page 1→2 of a
         // filtered view would land you on an unfiltered page 2.
         if (filtersParam) sp.set("filters", filtersParam);
+        if (importedParam) sp.set("imported", importedParam);
       },
     },
   });
@@ -293,6 +307,7 @@ export function ProspectsTable({
         getAllMatchingProspectIds({
           search: search.length === 0 ? null : search,
           blockStack,
+          imported: importedParam,
         }),
         { fallbackMessage: "Could not select all matching prospects" },
       );
@@ -308,10 +323,14 @@ export function ProspectsTable({
     setSelectAllMatchingKey(null);
   };
 
+  const selectableProspects = useMemo(
+    () => prospects.filter((prospect) => !prospect.dnc_reason),
+    [prospects],
+  );
   const allSelected = useMemo(
     () =>
-      prospects.length > 0 && prospects.every((p) => selectedInScope.has(p.id)),
-    [prospects, selectedInScope],
+      selectableProspects.length > 0 && selectableProspects.every((p) => selectedInScope.has(p.id)),
+    [selectableProspects, selectedInScope],
   );
   const someSelected = selectedInScope.size > 0 && !allSelected;
 
@@ -319,7 +338,7 @@ export function ProspectsTable({
     setSelectAllMatchingKey(null);
     setSelected(() => {
       if (allSelected) return new Set();
-      return new Set(prospects.map((p) => p.id));
+      return new Set(selectableProspects.map((p) => p.id));
     });
   };
 
@@ -432,7 +451,7 @@ export function ProspectsTable({
       });
       if (result.ok) {
         toast.success(
-          `Verifying ${ids.length} address${ids.length === 1 ? "" : "es"} in the background`,
+          `Verifying ${result.data.eligibleCount} address${result.data.eligibleCount === 1 ? "" : "es"} in the background`,
           { description: "Watch progress on /jobs" },
         );
         onClearAllSelection();
@@ -673,7 +692,7 @@ export function ProspectsTable({
               </DropdownMenuContent>
           </DropdownMenu>
           <Link href="/import" className={buttonVariants()}>
-            Import CSV
+            Import prospects
           </Link>
           </>
         }
@@ -695,6 +714,14 @@ export function ProspectsTable({
           testId="prospects-search"
         />
       </TableToolbar>
+      <div className="mb-3 flex gap-2">
+        <Link
+          href={importedParam ? "/properties" : "/properties?imported=today"}
+          className={buttonVariants({ variant: importedParam ? "default" : "outline", size: "sm" })}
+        >
+          Imported today
+        </Link>
+      </div>
 
       <SelectAllBanner
         allOnPageSelected={allSelected}
@@ -720,7 +747,11 @@ export function ProspectsTable({
         propertyIds={selectAllMatching ? [] : selectedIds()}
         filterArgs={
           selectAllMatching
-            ? { search: search.length === 0 ? null : search, blockStack }
+            ? {
+                search: search.length === 0 ? null : search,
+                blockStack,
+                imported: importedParam,
+              }
             : undefined
         }
         tags={tags}
@@ -735,7 +766,11 @@ export function ProspectsTable({
         selectedIds={selectAllMatching ? undefined : selectedIds()}
         filterArgs={
           selectAllMatching
-            ? { search: search.length === 0 ? null : search, blockStack }
+            ? {
+                search: search.length === 0 ? null : search,
+                blockStack,
+                imported: importedParam,
+              }
             : undefined
         }
         totalCount={selectAllMatching ? total : selectedInScope.size}
@@ -764,6 +799,7 @@ export function ProspectsTable({
                   type="checkbox"
                   aria-label="Select all prospects on this page"
                   checked={allSelected}
+                  disabled={selectableProspects.length === 0}
                   ref={(el) => {
                     if (el) el.indeterminate = someSelected;
                   }}
@@ -851,13 +887,17 @@ export function ProspectsTable({
                       onClick={(e) => e.stopPropagation()}
                       className="cursor-default"
                     >
-                      <input
-                        type="checkbox"
-                        aria-label={`Select ${p.address}`}
-                        checked={isChecked}
-                        onChange={() => toggleOne(p.id)}
-                        className="size-4 cursor-pointer"
-                      />
+                      {p.dnc_reason ? (
+                        <LockKeyhole className="text-muted-foreground size-4" aria-label={`${p.address} is locked Do Not Contact`} />
+                      ) : (
+                        <input
+                          type="checkbox"
+                          aria-label={`Select ${p.address}`}
+                          checked={isChecked}
+                          onChange={() => toggleOne(p.id)}
+                          className="size-4 cursor-pointer"
+                        />
+                      )}
                     </TableCell>
                     <TableCell className="font-medium">
                       {formatFullAddress({
@@ -869,12 +909,25 @@ export function ProspectsTable({
                     </TableCell>
                     <TableCell>{p.market ?? "—"}</TableCell>
                     <TableCell>
-                      <StatusPills
-                        cass={p.cass_status}
-                        isVacant={p.is_vacant}
-                        engagement={p.engagement}
-                        dispo={p.outreach_dispo}
-                      />
+                      <div className="flex flex-col items-start gap-1">
+                        {p.dnc_reason ? (
+                          <span className="bg-foreground text-background rounded px-2 py-1 font-mono text-[10px] font-bold tracking-wide" title={p.dnc_reason}>
+                            ⊘ DO NOT CONTACT
+                          </span>
+                        ) : (
+                          <StatusPills
+                            cass={p.cass_status}
+                            isVacant={p.is_vacant}
+                            engagement={p.engagement}
+                            dispo={p.outreach_dispo}
+                          />
+                        )}
+                        {p.imported_at && (
+                          <span className="text-muted-foreground font-mono text-[10px]">
+                            Imported {formatRelativeImportTime(p.imported_at)}
+                          </span>
+                        )}
+                      </div>
                     </TableCell>
                     <TableCell
                       className="text-muted-foreground max-w-[280px] truncate text-sm italic"

@@ -24,8 +24,8 @@ export default async function ImportPage() {
     <Page>
       <PageHeader
         breadcrumb={[{ label: "Workspace" }, { label: "Import" }]}
-        title="Import"
-        description="Bring leads in from a CSV (DealMachine, PropStream, etc.) or update existing properties in bulk. Each upload runs as a background job — once it's started you can leave this page and watch progress on /jobs."
+        title="Import prospects"
+        description="Imported properties appear in Prospects for review before promotion to Leads."
       />
       <Wizard counties={counties ?? []} />
     </Page>

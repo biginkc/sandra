@@ -1,5 +1,6 @@
 import { ConfigurationError } from "@/lib/errors/classes";
 import type { PhoneLineType } from "@/lib/messaging/line-type";
+export { TELNYX_LOOKUP_COST_USD } from "@/lib/provider-pricing";
 
 /**
  * Telnyx Number Lookup client. Docs:
@@ -19,8 +20,6 @@ const BASE_URL = "https://api.telnyx.com/v2/number_lookup";
 
 /** Telnyx carrier-type lookup price per number. Used for the wizard's
  *  cost estimate and the job-summary cost record. */
-export const TELNYX_LOOKUP_COST_USD = 0.003;
-
 const MAX_IN_FLIGHT = 5;
 const RETRY_BACKOFF_MS = 1_000;
 

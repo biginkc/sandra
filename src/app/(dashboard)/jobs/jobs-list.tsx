@@ -376,7 +376,7 @@ export function JobsList({
                   : [];
                 const canRetryCass =
                   job.type === "cass_dsf2_ncoa" &&
-                  (job.status === "partial" || job.status === "failed") &&
+                  (["partial", "partially_completed", "failed"].includes(job.status)) &&
                   job.failed_items > 0;
                 return (
                   <TableRow key={job.id}>
@@ -455,7 +455,7 @@ function statusVariant(
 ): "default" | "secondary" | "destructive" | "outline" {
   if (status === "completed") return "default";
   if (status === "failed") return "destructive";
-  if (status === "partial") return "secondary";
+  if (status === "partial" || status === "partially_completed") return "secondary";
   if (status === "canceled" || status === "denied") return "outline";
   return "secondary";
 }

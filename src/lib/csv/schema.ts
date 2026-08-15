@@ -1,3 +1,5 @@
+import { LEAD_SOURCES } from "@/lib/leads/create";
+
 /**
  * Target-field schema for CSV mapping.
  *
@@ -35,17 +37,6 @@ export type TargetField = {
   enumValues?: readonly string[];
   helpText?: string;
 };
-
-const SOURCE_VALUES = [
-  "mls",
-  "driving_for_dollars",
-  "direct_mail",
-  "referral",
-  "skip_trace",
-  "probate",
-  "pre_foreclosure",
-  "other",
-] as const;
 
 const CONTACT_TYPE_VALUES = ["person", "entity"] as const;
 
@@ -86,7 +77,7 @@ export const PROPERTY_FIELDS: readonly TargetField[] = [
   { id: "equity_estimate", label: "Equity Estimate", section: "property", type: "number" },
   { id: "lat", label: "Latitude", section: "property", type: "number" },
   { id: "lon", label: "Longitude", section: "property", type: "number" },
-  { id: "source", label: "Source", section: "property", type: "enum", enumValues: SOURCE_VALUES, helpText: "How the lead entered the pipeline" },
+  { id: "source", label: "Source", section: "property", type: "enum", enumValues: LEAD_SOURCES, helpText: "How the prospect entered Sandra" },
 ];
 
 export const HOMEOWNER_FIELDS: readonly TargetField[] = [

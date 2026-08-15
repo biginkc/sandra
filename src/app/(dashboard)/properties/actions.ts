@@ -49,6 +49,8 @@ import {
   filterSelectFragment,
 } from "@/lib/prospects/filter-to-supabase";
 import type { FilterBlock } from "@/lib/prospects/filter-schema";
+import { evaluateSuppression } from "@/lib/messaging/suppression";
+import { getDayBoundsInZone } from "@/lib/time/zoned";
 
 export async function listSmsTemplateCategories(): Promise<
   Result<{ category: string; count: number }[]>
@@ -770,11 +772,13 @@ export async function createDialerBatchFromPropertyIds(
 export async function createDialerBatchFromFilters(args: {
   search?: string | null;
   blockStack: FilterBlock[];
+  imported?: "today" | null;
   title?: string;
 }): Promise<Result<CreateDialerBatchResult>> {
   const idsResult = await getAllMatchingProspectIds({
     search: args.search ?? null,
     blockStack: args.blockStack,
+    imported: args.imported ?? null,
   });
   if (!idsResult.ok) return idsResult;
 
@@ -808,6 +812,7 @@ export async function createDialerBatchFromFilters(args: {
 export async function getAllMatchingProspectIds(args: {
   search: string | null;
   blockStack: FilterBlock[];
+  imported?: "today" | null;
 }): Promise<Result<string[]>> {
   try {
     const supabase = await createClient();
@@ -817,7 +822,10 @@ export async function getAllMatchingProspectIds(args: {
     );
 
     const filterSelect = filterSelectFragment(args.blockStack);
-    const propertiesSelect = ["id", filterSelect].filter(Boolean).join(", ");
+    const propertiesSelect = [
+      "id, source_import_id, source_imported_at, outreach_dispo, homeowner:contacts!properties_homeowner_contact_id_fkey(phone_1, phone_2, phone_3, do_not_contact, sms_opted_out)",
+      filterSelect,
+    ].filter(Boolean).join(", ");
 
     let query = supabase
       .from("properties")
@@ -829,6 +837,13 @@ export async function getAllMatchingProspectIds(args: {
 
     if (args.search) {
       query = query.ilike("address", `%${args.search}%`);
+    }
+    if (args.imported === "today") {
+      const { dayStart, dayEnd } = getDayBoundsInZone(new Date(), "America/Chicago");
+      query = query
+        .not("source_import_id", "is", null)
+        .gte("source_imported_at", dayStart.toISOString())
+        .lt("source_imported_at", dayEnd.toISOString());
     }
 
     // Plan 04 translator — same SQL chain the page renders against. Any
@@ -848,11 +863,40 @@ export async function getAllMatchingProspectIds(args: {
           error: { code: "SELECT_ALL_FAILED", message: error.message },
         };
       }
-      const page = ((data ?? []) as unknown as Array<{ id: string }>).map(
-        (r) => r.id,
-      );
-      allIds.push(...page);
-      if (page.length < PAGE) break;
+      const rows = (data ?? []) as unknown as Array<{
+        id: string;
+        outreach_dispo: string | null;
+        homeowner: Array<{
+          phone_1: string | null;
+          phone_2: string | null;
+          phone_3: string | null;
+          do_not_contact: boolean;
+          sms_opted_out: boolean;
+        }> | null;
+      }>;
+      const phones = rows.flatMap((row) => {
+        const homeowner = Array.isArray(row.homeowner) ? row.homeowner[0] : row.homeowner;
+        return homeowner
+          ? [homeowner.phone_1, homeowner.phone_2, homeowner.phone_3].filter((phone): phone is string => !!phone)
+          : [];
+      });
+      const { data: suppressions, error: suppressionError } = phones.length
+        ? await supabase.from("sms_phone_suppressions").select("phone_e164").in("phone_e164", phones)
+        : { data: [], error: null };
+      if (suppressionError) throw suppressionError;
+      const suppressedPhones = new Set((suppressions ?? []).map((row) => row.phone_e164));
+      for (const row of rows) {
+        const homeowner = Array.isArray(row.homeowner) ? row.homeowner[0] : row.homeowner;
+        const durableSuppression = [homeowner?.phone_1, homeowner?.phone_2, homeowner?.phone_3]
+          .some((phone) => !!phone && suppressedPhones.has(phone));
+        const suppressed = durableSuppression || evaluateSuppression({
+          outreachDispo: row.outreach_dispo,
+          doNotContact: homeowner?.do_not_contact,
+          smsOptedOut: homeowner?.sms_opted_out,
+        }).suppressed;
+        if (!suppressed) allIds.push(row.id);
+      }
+      if (rows.length < PAGE) break;
     }
 
     return ok(allIds);

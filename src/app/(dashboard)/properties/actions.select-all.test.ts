@@ -5,6 +5,7 @@ type RecordedQuery = {
   selectArg: string | null;
   calls: string[];
   rangeCalls: Array<[number, number]>;
+  rows: unknown[];
 };
 
 const { createClientMock, recorded } = vi.hoisted(() => {
@@ -12,6 +13,7 @@ const { createClientMock, recorded } = vi.hoisted(() => {
     selectArg: null,
     calls: [],
     rangeCalls: [],
+    rows: [{ id: "p1" }],
   };
 
   const query = {
@@ -40,9 +42,17 @@ const { createClientMock, recorded } = vi.hoisted(() => {
       recorded.calls.push(`gte(${column},${String(value)})`);
       return this;
     },
+    lt(column: string, value: unknown) {
+      recorded.calls.push(`lt(${column},${String(value)})`);
+      return this;
+    },
+    not(column: string, operator: string, value: unknown) {
+      recorded.calls.push(`not(${column},${operator},${String(value)})`);
+      return this;
+    },
     range(from: number, to: number) {
       recorded.rangeCalls.push([from, to]);
-      return Promise.resolve({ data: [{ id: "p1" }], error: null });
+      return Promise.resolve({ data: recorded.rows, error: null });
     },
   };
 
@@ -58,7 +68,6 @@ vi.mock("@/lib/supabase/server", () => ({
   createClient: createClientMock,
 }));
 
-// eslint-disable-next-line import/first
 import { getAllMatchingProspectIds } from "./actions";
 
 beforeEach(() => {
@@ -66,6 +75,7 @@ beforeEach(() => {
   recorded.selectArg = null;
   recorded.calls.length = 0;
   recorded.rangeCalls.length = 0;
+  recorded.rows = [{ id: "p1" }];
 });
 
 describe("getAllMatchingProspectIds", () => {
@@ -91,10 +101,54 @@ describe("getAllMatchingProspectIds", () => {
 
     expect(result.ok).toBe(true);
     expect(recorded.selectArg).toBe(
-      "id, tag_filter:property_tags!inner(tag_id), stack_filter:property_stack_counts!inner(stack_count)",
+      "id, source_import_id, source_imported_at, outreach_dispo, homeowner:contacts!properties_homeowner_contact_id_fkey(phone_1, phone_2, phone_3, do_not_contact, sms_opted_out), tag_filter:property_tags!inner(tag_id), stack_filter:property_stack_counts!inner(stack_count)",
     );
     expect(recorded.calls).toContain('in(tag_filter.tag_id,["tag-1"])');
     expect(recorded.calls).toContain("gte(stack_filter.stack_count,1)");
     expect(recorded.rangeCalls).toEqual([[0, 999]]);
+  });
+
+  it("excludes an address-matched DNC contact from the server-owned ID set", async () => {
+    recorded.rows = [
+      {
+        id: "locked",
+        outreach_dispo: null,
+        homeowner: [{
+          phone_1: null,
+          phone_2: null,
+          phone_3: null,
+          do_not_contact: true,
+          sms_opted_out: false,
+        }],
+      },
+      {
+        id: "eligible",
+        outreach_dispo: null,
+        homeowner: [{
+          phone_1: null,
+          phone_2: null,
+          phone_3: null,
+          do_not_contact: false,
+          sms_opted_out: false,
+        }],
+      },
+    ];
+
+    const result = await getAllMatchingProspectIds({ search: null, blockStack: [] });
+    expect(result).toEqual({ ok: true, data: ["eligible"] });
+  });
+
+  it("keeps Imported Today scoped to the latest reviewed import timestamp", async () => {
+    const result = await getAllMatchingProspectIds({
+      search: null,
+      blockStack: [],
+      imported: "today",
+    });
+
+    expect(result.ok).toBe(true);
+    expect(recorded.calls).toContain("not(source_import_id,is,null)");
+    expect(recorded.calls.some((call) => call.startsWith("gte(source_imported_at,"))).toBe(true);
+    expect(recorded.calls.some((call) => call.startsWith("lt(source_imported_at,"))).toBe(true);
+    expect(recorded.calls.some((call) => call.startsWith("gte(created_at,"))).toBe(false);
   });
 });

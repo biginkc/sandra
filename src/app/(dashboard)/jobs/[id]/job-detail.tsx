@@ -97,7 +97,7 @@ export function JobDetail({
   ]);
   const isSkipTraceRetryable =
     job.type === "skip_trace" &&
-    (job.status === "failed" || job.status === "partial");
+    (["failed", "partial", "partially_completed"].includes(job.status));
   const erroredItems = items.filter((i) => i.status === "error");
   const hasErroredItems = erroredItems.length > 0;
   const noDataCount = erroredItems.filter(
@@ -142,7 +142,7 @@ export function JobDetail({
       (c) =>
         c.type === "skip_trace" &&
         (c.status === "queued" ||
-          c.status === "running" ||
+          c.status === "running" || c.status === "processing" ||
           c.status === "finalizing"),
     ) ?? null;
   const showRetry = isSkipTraceRetryable && retryCount > 0;
@@ -783,7 +783,7 @@ function statusVariant(
 ): "default" | "secondary" | "destructive" | "outline" {
   if (status === "completed") return "default";
   if (status === "failed") return "destructive";
-  if (status === "partial") return "secondary";
+  if (status === "partial" || status === "partially_completed") return "secondary";
   if (status === "canceled" || status === "denied") return "outline";
   return "secondary";
 }

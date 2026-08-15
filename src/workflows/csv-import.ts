@@ -25,6 +25,7 @@
  */
 
 import Papa from "papaparse";
+import { createHash } from "node:crypto";
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 
@@ -54,7 +55,15 @@ import { enrollLead } from "@/lib/sequences/enrollment";
 import { trimRowsToMapping } from "@/lib/csv/trim-rows";
 import { createAdminClient } from "@/lib/supabase/admin";
 import type { Database } from "@/lib/supabase/types";
-import type { Mapping, RowData } from "@/lib/csv/validate";
+import { validateRow, type Mapping, type RowData } from "@/lib/csv/validate";
+import { SUPPRESSED_DISPOS } from "@/lib/messaging/suppression";
+import type { ImportSideEffects } from "@/lib/csv/import-job-status";
+import {
+  REVIEWED_DATASET_VERSION,
+  reviewContractJson,
+  type ReviewContractInput,
+} from "@/lib/csv/dataset-contract";
+import { IMPORT_SERVICE_PRICING } from "@/lib/csv/import-pricing";
 import type { PhoneLineType } from "@/lib/messaging/line-type";
 
 /**
@@ -86,6 +95,8 @@ export type CsvImportWorkflowParams = {
    *  (column added by migration 043) — makes the async boundary
    *  self-healing for jobs queued before this plan shipped. */
   countyId: string | null;
+  /** Server-derived organization boundary. Never accepted from the browser. */
+  orgId: string;
   mapping: Mapping;
   listId: string | null;
   userId: string | null;
@@ -99,6 +110,16 @@ export type CsvImportWorkflowParams = {
    *  ingest chunks run. Off (or TELNYX_API_KEY unset) = unlabeled
    *  numbers are dropped by the ingest hard rule and counted. */
   classifyLineTypes?: boolean;
+  requestCass?: boolean;
+  /** Disabled until a verified provider price and workflow handoff exist. */
+  requestSkipTrace?: boolean;
+  datasetSha256: string;
+  reviewContractSha256: string;
+  datasetVersion: number;
+  expectedTotalRows: number;
+  expectedDncRows: number;
+  listName?: string | null;
+  listResolutionError?: string | null;
 };
 
 export type EnrollBatchResult = {
@@ -116,15 +137,20 @@ export async function enrollJobBatch(
   supabase: SupabaseClient<Database>,
   args: { jobId: string; sequenceId: string },
 ): Promise<EnrollBatchResult> {
-  const { data: items } = await supabase
+  const { data: items, error: itemsError } = await supabase
     .from("job_items")
-    .select("property_id")
+    .select("property_id, compliance_locked")
     .eq("job_id", args.jobId)
-    .eq("status", "success");
+    .in("status", ["success", "skipped"]);
+  if (itemsError) throw new Error(`sequence checkpoint read: ${itemsError.message}`);
 
-  const propertyIds = (items ?? [])
+  const propertyIds = await selectNonDncPropertyIds(
+    supabase,
+    (items ?? [])
+    .filter((i) => !i.compliance_locked)
     .map((i) => i.property_id)
-    .filter((id): id is string => id !== null);
+      .filter((id): id is string => id !== null),
+  );
 
   let enrolled = 0;
   let skipped = 0;
@@ -137,7 +163,13 @@ export async function enrollJobBatch(
         propertyId,
       });
       if (outcome.status === "enrolled") enrolled++;
-      else if (outcome.status === "failed") failed++;
+      else if (
+        outcome.status === "failed" ||
+        outcome.status === "sequence_not_found" ||
+        outcome.status === "sequence_inactive" ||
+        outcome.status === "property_not_found" ||
+        outcome.status === "no_steps"
+      ) failed++;
       else skipped++;
     } catch {
       failed++;
@@ -164,7 +196,12 @@ async function loadCsvFromStorage(
   mapping: Mapping,
   jobId: string,
   source: string,
-): Promise<{ rows: RowData[]; totalRows: number; autoTagIds: string[] }> {
+  expectedSha256: string,
+  expectedDncRows: number,
+  orgId: string,
+  expectedReviewContractSha256: string,
+  reviewContract: ReviewContractInput,
+): Promise<{ rows: RowData[]; totalRows: number; autoTagIds: string[]; dncRows: number }> {
   "use step";
 
   const supabase = createAdminClient();
@@ -180,9 +217,45 @@ async function loadCsvFromStorage(
   }
 
   const text = await blob.text();
+  const actualSha256 = createHash("sha256").update(text).digest("hex");
+  if (actualSha256 !== expectedSha256) {
+    const { error: checksumFailureError } = await supabase
+      .from("jobs")
+      .update({
+        status: "failed",
+        error_class: "validation",
+        error_message:
+          "Stored dataset does not match the reviewed dataset checksum. Nothing was imported.",
+        completed_at: new Date().toISOString(),
+      })
+      .eq("id", jobId);
+    if (checksumFailureError) {
+      throw new Error(`dataset checksum failure checkpoint: ${checksumFailureError.message}`);
+    }
+    throw new Error("reviewed dataset checksum mismatch");
+  }
+  const actualReviewContractSha256 = createHash("sha256")
+    .update(reviewContractJson({ ...reviewContract, datasetSha256: actualSha256 }))
+    .digest("hex");
+  if (actualReviewContractSha256 !== expectedReviewContractSha256) {
+    const { error: contractFailureError } = await supabase
+      .from("jobs")
+      .update({
+        status: "failed",
+        error_class: "validation",
+        error_message:
+          "The reviewed mapping or confirmation choices changed. Nothing was imported.",
+        completed_at: new Date().toISOString(),
+      })
+      .eq("id", jobId);
+    if (contractFailureError) {
+      throw new Error(`review contract failure checkpoint: ${contractFailureError.message}`);
+    }
+    throw new Error("review contract checksum mismatch");
+  }
   const parsed = Papa.parse<Record<string, string>>(text, {
     header: true,
-    skipEmptyLines: true,
+    skipEmptyLines: false,
   });
 
   if (parsed.errors.length > 0) {
@@ -195,17 +268,57 @@ async function loadCsvFromStorage(
   }
 
   const trimmedRows = trimRowsToMapping(parsed.data, mapping);
+  if (trimmedRows.length !== reviewContract.totalRows) {
+    const { error: rowCountFailureError } = await supabase
+      .from("jobs")
+      .update({
+        status: "failed",
+        error_class: "validation",
+        error_message: "The reviewed row count changed. Nothing was imported.",
+        completed_at: new Date().toISOString(),
+      })
+      .eq("id", jobId);
+    if (rowCountFailureError) {
+      throw new Error(`row-count failure checkpoint: ${rowCountFailureError.message}`);
+    }
+    throw new Error("reviewed dataset row-count mismatch");
+  }
+  const dncRows = trimmedRows.reduce(
+    (count, row, index) =>
+      validateRow(row, mapping, index).normalized.homeowner_do_not_contact === true
+        ? count + 1
+        : count,
+    0,
+  );
+  if (dncRows !== expectedDncRows) {
+    const { error: dncFailureError } = await supabase
+      .from("jobs")
+      .update({
+        status: "failed",
+        error_class: "validation",
+        error_message:
+          "DNC count changed between preflight and ingest. Nothing was imported.",
+        completed_at: new Date().toISOString(),
+      })
+      .eq("id", jobId);
+    if (dncFailureError) {
+      throw new Error(`DNC failure checkpoint: ${dncFailureError.message}`);
+    }
+    throw new Error("DNC conservation check failed");
+  }
 
   const { autoTagIds } = await prepareIngestion(supabase, {
     jobId,
     totalRows: trimmedRows.length,
     source,
+    orgId,
   });
 
   return {
     rows: trimmedRows,
     totalRows: trimmedRows.length,
     autoTagIds,
+    dncRows,
   };
 }
 
@@ -221,8 +334,12 @@ async function collectUnlabeledPhonesStep(args: {
 }): Promise<{ numbers: string[]; telnyxConfigured: boolean }> {
   "use step";
 
+  const eligibleRows = args.rows.filter(
+    (row, index) => validateRow(row, args.mapping, index).normalized.homeowner_do_not_contact !== true,
+  );
+
   return {
-    numbers: collectUnlabeledPhones(args.rows, args.mapping),
+    numbers: collectUnlabeledPhones(eligibleRows, args.mapping),
     telnyxConfigured: !!process.env.TELNYX_API_KEY?.trim(),
   };
 }
@@ -255,7 +372,7 @@ async function failJobStep(args: {
   "use step";
 
   const supabase = createAdminClient();
-  await supabase
+  const { error } = await supabase
     .from("jobs")
     .update({
       status: "failed",
@@ -263,6 +380,7 @@ async function failJobStep(args: {
       completed_at: new Date().toISOString(),
     })
     .eq("id", args.jobId);
+  if (error) throw new Error(`job failure checkpoint: ${error.message}`);
 }
 
 /**
@@ -320,6 +438,7 @@ async function processChunkStep(args: {
    *  worker passes this into ingestRow which sets it alongside
    *  `properties.market` at insert time. */
   countyId: string | null;
+  orgId: string;
   mapping: Mapping;
   rows: RowData[];
   offset: number;
@@ -341,6 +460,7 @@ async function processChunkStep(args: {
     source: args.source,
     market: args.market,
     countyId: args.countyId,
+    orgId: args.orgId,
     mapping: args.mapping,
     rows: args.rows,
     offset: args.offset,
@@ -349,6 +469,7 @@ async function processChunkStep(args: {
     userId: args.userId,
     priorSucceeded: args.priorSucceeded,
     priorFailed: args.priorFailed,
+    resumeSafe: true,
   });
 }
 
@@ -377,17 +498,25 @@ async function triggerCassStep(args: {
   parentJobId: string;
   relatedImportId: string;
   createdBy: string | null;
-}): Promise<void> {
+}): Promise<{
+  status: "completed" | "pending" | "failed";
+  eligible: number;
+  message?: string;
+}> {
   "use step";
 
   const supabase = createAdminClient();
 
-  const propertyIds = await selectCassEligibleProperties(
+  const propertyIds = await selectNonDncPropertyIds(
     supabase,
-    args.parentJobId,
+    await excludeComplianceLockedJobProperties(
+      supabase,
+      args.parentJobId,
+      await selectCassEligibleProperties(supabase, args.parentJobId),
+    ),
   );
 
-  if (propertyIds.length === 0) return;
+  if (propertyIds.length === 0) return { status: "completed", eligible: 0 };
 
   const cap = getAutotriggerCap();
   const autoStart = propertyIds.length <= cap;
@@ -403,8 +532,18 @@ async function triggerCassStep(args: {
   });
 
   if (autoStart) {
-    await runCassEnrichment(supabase, { jobId: childId, propertyIds });
+    const summary = await runCassEnrichment(supabase, { jobId: childId, propertyIds });
+    if (summary.failed > 0 || summary.providerOff > 0) {
+      return {
+        status: "failed",
+        eligible: propertyIds.length,
+        message:
+          `${summary.failed} address verification failures; ` +
+          `${summary.providerOff} skipped because the provider was unavailable.`,
+      };
+    }
   }
+  return { status: autoStart ? "completed" : "pending", eligible: propertyIds.length };
 }
 
 /**
@@ -423,37 +562,44 @@ async function recordConsentStep(args: {
 
   const supabase = createAdminClient();
 
-  const { data: items } = await supabase
+  const { data: items, error: itemsError } = await supabase
     .from("job_items")
-    .select("property_id")
+    .select("property_id, compliance_locked")
     .eq("job_id", args.jobId)
-    .eq("status", "success");
+    .in("status", ["success", "skipped"]);
+  if (itemsError) throw new Error(`consent checkpoint read: ${itemsError.message}`);
 
-  const propertyIds = (items ?? [])
+  const propertyIds = await selectNonDncPropertyIds(
+    supabase,
+    (items ?? [])
+    .filter((i) => !i.compliance_locked)
     .map((i) => i.property_id)
-    .filter((id): id is string => id !== null);
+      .filter((id): id is string => id !== null),
+  );
 
   if (propertyIds.length === 0) return;
 
-  const { data: properties } = await supabase
+  const { data: properties, error: propertyError } = await supabase
     .from("properties")
     .select("homeowner_contact_id")
     .in("id", propertyIds)
     .not("homeowner_contact_id", "is", null);
+  if (propertyError) throw new Error(`consent property lookup: ${propertyError.message}`);
 
-  const contactIds = (properties ?? [])
+  const contactIds = Array.from(new Set((properties ?? [])
     .map((p) => p.homeowner_contact_id)
-    .filter((id): id is string => id !== null);
+    .filter((id): id is string => id !== null)));
 
   if (contactIds.length === 0) return;
 
   // Skip contacts that have already explicitly opted out — opt-outs are
   // irrevocable and must not be overwritten by a batch attestation.
-  const { data: optedOut } = await supabase
+  const { data: optedOut, error: optedOutError } = await supabase
     .from("consent_events")
     .select("contact_id")
     .in("contact_id", contactIds)
     .in("event_type", ["opt_out", "provider_auto_opt_out"]);
+  if (optedOutError) throw new Error(`consent opt-out lookup: ${optedOutError.message}`);
 
   const optedOutIds = new Set((optedOut ?? []).map((r) => r.contact_id));
   const eligible = contactIds.filter((id) => !optedOutIds.has(id));
@@ -461,7 +607,7 @@ async function recordConsentStep(args: {
   if (eligible.length === 0) return;
 
   const now = new Date().toISOString();
-  await supabase.from("consent_events").insert(
+  const { error: consentError } = await supabase.from("consent_events").insert(
     eligible.map((contactId) => ({
       contact_id: contactId,
       channel: "sms",
@@ -470,6 +616,74 @@ async function recordConsentStep(args: {
       occurred_at: now,
     })),
   );
+  if (consentError) throw new Error(`consent recording: ${consentError.message}`);
+}
+
+async function selectNonDncPropertyIds(
+  supabase: SupabaseClient<Database>,
+  propertyIds: string[],
+): Promise<string[]> {
+  if (propertyIds.length === 0) return [];
+  const { data, error } = await supabase
+    .from("properties")
+    .select(
+      "id, outreach_dispo, homeowner:contacts!properties_homeowner_contact_id_fkey(phone_1, phone_2, phone_3, do_not_contact, sms_opted_out)",
+    )
+    .in("id", propertyIds);
+  if (error) throw new Error(`DNC eligibility check: ${error.message}`);
+
+  const phones = (data ?? []).flatMap((property) => {
+    const homeowner = Array.isArray(property.homeowner)
+      ? property.homeowner[0]
+      : property.homeowner;
+    return homeowner
+      ? [homeowner.phone_1, homeowner.phone_2, homeowner.phone_3].filter(
+          (phone): phone is string => !!phone,
+        )
+      : [];
+  });
+  const { data: suppressed, error: suppressionError } = phones.length
+    ? await supabase
+        .from("sms_phone_suppressions")
+        .select("phone_e164")
+        .in("phone_e164", phones)
+    : { data: [], error: null };
+  if (suppressionError) {
+    throw new Error(`DNC suppression check: ${suppressionError.message}`);
+  }
+  const suppressedPhones = new Set((suppressed ?? []).map((row) => row.phone_e164));
+
+  return (data ?? [])
+    .filter((property) => {
+      const homeowner = Array.isArray(property.homeowner)
+        ? property.homeowner[0]
+        : property.homeowner;
+      if (property.outreach_dispo && SUPPRESSED_DISPOS.has(property.outreach_dispo as "dnc")) {
+        return false;
+      }
+      if (homeowner?.do_not_contact || homeowner?.sms_opted_out) return false;
+      return ![homeowner?.phone_1, homeowner?.phone_2, homeowner?.phone_3].some(
+        (phone) => phone && suppressedPhones.has(phone),
+      );
+    })
+    .map((property) => property.id);
+}
+
+async function excludeComplianceLockedJobProperties(
+  supabase: SupabaseClient<Database>,
+  jobId: string,
+  propertyIds: string[],
+): Promise<string[]> {
+  if (propertyIds.length === 0) return [];
+  const { data, error } = await supabase
+    .from("job_items")
+    .select("property_id")
+    .eq("job_id", jobId)
+    .eq("compliance_locked", true)
+    .not("property_id", "is", null);
+  if (error) throw new Error(`DNC job-item eligibility check: ${error.message}`);
+  const locked = new Set((data ?? []).map((item) => item.property_id).filter(Boolean));
+  return propertyIds.filter((propertyId) => !locked.has(propertyId));
 }
 
 /**
@@ -498,12 +712,27 @@ async function finalizeStep(args: {
   skipped: number;
   droppedUnlabeledPhones: number;
   lineTypeClassification: ClassificationCounts | null;
+  dncRows: number;
+  sideEffects: ImportSideEffects;
   errors: { rowIndex: number; message: string }[];
 }): Promise<void> {
   "use step";
 
   const supabase = createAdminClient();
   await finalizeIngestion(supabase, args);
+}
+
+async function loadPriorSideEffectsStep(jobId: string): Promise<ImportSideEffects> {
+  "use step";
+  const supabase = createAdminClient();
+  const { data, error } = await supabase
+    .from("jobs")
+    .select("result_summary")
+    .eq("id", jobId)
+    .maybeSingle();
+  if (error) throw new Error(`side-effect checkpoint read: ${error.message}`);
+  const summary = (data?.result_summary ?? {}) as Record<string, unknown>;
+  return (summary.sideEffects ?? {}) as ImportSideEffects;
 }
 
 /**
@@ -523,30 +752,70 @@ export async function csvImportWorkflow(
 }> {
   "use workflow";
 
+  if (params.datasetVersion !== REVIEWED_DATASET_VERSION) {
+    await failJobStep({
+      jobId: params.jobId,
+      message: "This reviewed dataset version is no longer supported. Run preflight again.",
+    });
+    return { succeeded: 0, failed: 0, skipped: 0, totalRows: 0 };
+  }
+  const unavailableService = [
+    params.requestCass ? IMPORT_SERVICE_PRICING.cass : null,
+    params.classifyLineTypes ? IMPORT_SERVICE_PRICING.line_type : null,
+    params.requestSkipTrace ? IMPORT_SERVICE_PRICING.skip_trace : null,
+  ].find((service) => service && !service.configured);
+  if (unavailableService) {
+    await failJobStep({
+      jobId: params.jobId,
+      message:
+        unavailableService.unavailableReason ??
+        `${unavailableService.label} is unavailable during import.`,
+    });
+    return { succeeded: 0, failed: 0, skipped: 0, totalRows: 0 };
+  }
+
+  // Recover the server-owned county before verifying the review contract;
+  // the county is part of the reviewed interpretation of the dataset.
+  let countyId = params.countyId;
+  if (countyId === null) {
+    const supabase = createAdminClient();
+    const { data: row, error: countyRecoveryError } = await supabase
+      .from("csv_imports")
+      .select("county_id")
+      .eq("id", params.csvImportId)
+      .eq("org_id", params.orgId)
+      .single();
+    if (countyRecoveryError || !row?.county_id) {
+      throw new Error(
+        `import county recovery: ${countyRecoveryError?.message ?? "county is missing"}`,
+      );
+    }
+    countyId = row.county_id;
+  }
+
   const loaded = await loadCsvFromStorage(
     params.storagePath,
     params.mapping,
     params.jobId,
     params.source,
+    params.datasetSha256,
+    params.expectedDncRows,
+    params.orgId,
+    params.reviewContractSha256,
+    {
+      datasetSha256: params.datasetSha256,
+      mapping: params.mapping,
+      source: params.source,
+      countyId,
+      totalRows: params.expectedTotalRows,
+      dncRows: params.expectedDncRows,
+      smsConsent: params.smsConsent === true,
+      sequenceId: params.sequenceId ?? null,
+      classifyLineTypes: params.classifyLineTypes === true,
+      requestCass: params.requestCass === true,
+      requestSkipTrace: params.requestSkipTrace === true,
+    },
   );
-
-  // Defensive recovery (D-04): if `params.countyId` is null we are
-  // running a job that was queued before this plan shipped, OR a
-  // retry of one. The createImportJob action always persists
-  // `csv_imports.county_id` (column added by migration 043) so the
-  // worker can self-heal by reading it back from the import row. The
-  // workflow params remain the hot path for in-flight jobs queued
-  // after this ships — the DB read fires only on legacy paths.
-  let countyId = params.countyId;
-  if (countyId === null) {
-    const supabase = createAdminClient();
-    const { data: row } = await supabase
-      .from("csv_imports")
-      .select("county_id")
-      .eq("id", params.csvImportId)
-      .single();
-    countyId = row?.county_id ?? null;
-  }
 
   // Pre-ingest line-type classification (Telnyx). Only when the operator
   // opted in at the wizard's interstitial AND the API key is configured —
@@ -616,6 +885,7 @@ export async function csvImportWorkflow(
       source: params.source,
       market: params.market,
       countyId,
+      orgId: params.orgId,
       mapping,
       rows: slice,
       offset,
@@ -632,6 +902,61 @@ export async function csvImportWorkflow(
     allErrors.push(...result.errors);
   }
 
+  const priorSideEffects = await loadPriorSideEffectsStep(params.jobId);
+  const sideEffects: ImportSideEffects = {
+    listAssignment: params.listName
+      ? params.listResolutionError
+        ? { status: "failed", message: params.listResolutionError }
+        : { status: "completed" }
+      : { status: "not_requested" },
+    cass: { status: "not_requested" },
+    lineTypeClassification: params.classifyLineTypes
+      ? { status: "completed", counts: lineTypeClassification }
+      : { status: "not_requested" },
+    consent: { status: "not_requested" },
+    sequenceEnrollment: { status: "not_requested" },
+    skipTrace: { status: "not_requested" },
+    ...priorSideEffects,
+  };
+
+  if (params.requestCass && priorSideEffects.cass?.status !== "completed") {
+    try {
+      sideEffects.cass = await triggerCassStep({
+        parentJobId: params.jobId,
+        relatedImportId: params.csvImportId,
+        createdBy: params.userId,
+      });
+    } catch (error) {
+      sideEffects.cass = {
+        status: "failed",
+        message: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
+  if (params.smsConsent && priorSideEffects.consent?.status !== "completed") {
+    try {
+      await recordConsentStep({ jobId: params.jobId });
+      sideEffects.consent = { status: "completed" };
+    } catch (error) {
+      sideEffects.consent = {
+        status: "failed",
+        message: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
+  if (params.sequenceId && priorSideEffects.sequenceEnrollment?.status !== "completed") {
+    const enrollment = await enrollInSequenceStep({
+      jobId: params.jobId,
+      sequenceId: params.sequenceId,
+    });
+    sideEffects.sequenceEnrollment = {
+      status: enrollment.failed > 0 ? "failed" : "completed",
+      ...enrollment,
+    };
+  }
+
   await finalizeStep({
     jobId: params.jobId,
     csvImportId: params.csvImportId,
@@ -641,25 +966,10 @@ export async function csvImportWorkflow(
     skipped,
     droppedUnlabeledPhones,
     lineTypeClassification,
+    dncRows: loaded.dncRows,
+    sideEffects,
     errors: allErrors,
   });
-
-  await triggerCassStep({
-    parentJobId: params.jobId,
-    relatedImportId: params.csvImportId,
-    createdBy: params.userId,
-  });
-
-  if (params.smsConsent) {
-    await recordConsentStep({ jobId: params.jobId });
-  }
-
-  if (params.sequenceId) {
-    await enrollInSequenceStep({
-      jobId: params.jobId,
-      sequenceId: params.sequenceId,
-    });
-  }
 
   return {
     succeeded,

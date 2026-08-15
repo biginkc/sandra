@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 
+import { BMH_ORG_ID } from "@tests/integration/fixtures/multi-user";
 import {
   prepareIngestion,
   processIngestChunk,
@@ -101,6 +102,7 @@ describe("runIngestion (integration)", () => {
     const summary = await runIngestion(supabase, {
       jobId,
       csvImportId,
+      orgId: BMH_ORG_ID,
       source: "dealmachine",
       market: "Kansas City",
       mapping,
@@ -151,6 +153,7 @@ describe("runIngestion (integration)", () => {
     const summary = await runIngestion(supabase, {
       jobId,
       csvImportId,
+      orgId: BMH_ORG_ID,
       source: "dealmachine",
       market: "Kansas City",
       mapping,
@@ -179,6 +182,7 @@ describe("runIngestion (integration)", () => {
     const firstSummary = await runIngestion(supabase, {
       jobId: firstJobId,
       csvImportId: firstImportId,
+      orgId: BMH_ORG_ID,
       source: "dealmachine",
       market: "Kansas City",
       mapping,
@@ -208,6 +212,7 @@ describe("runIngestion (integration)", () => {
       await createImportJob("dealmachine", "Kansas City", 1);
     const secondSummary = await runIngestion(supabase, {
       jobId: secondJobId,
+      orgId: BMH_ORG_ID,
       csvImportId: secondImportId,
       source: "dealmachine",
       market: "Kansas City",
@@ -256,6 +261,7 @@ describe("runIngestion (integration)", () => {
 
     const { autoTagIds } = await prepareIngestion(supabase, {
       jobId,
+      orgId: BMH_ORG_ID,
       totalRows: 24,
       source: "dealmachine",
     });
@@ -263,6 +269,7 @@ describe("runIngestion (integration)", () => {
     const c1 = await processIngestChunk(supabase, {
       jobId,
       csvImportId,
+      orgId: BMH_ORG_ID,
       source: "dealmachine",
       market: "Kansas City",
       mapping,
@@ -288,6 +295,7 @@ describe("runIngestion (integration)", () => {
     const c2 = await processIngestChunk(supabase, {
       jobId,
       csvImportId,
+      orgId: BMH_ORG_ID,
       source: "dealmachine",
       market: "Kansas City",
       mapping,
@@ -326,6 +334,7 @@ describe("runIngestion (integration)", () => {
     await runIngestion(supabase, {
       jobId,
       csvImportId,
+      orgId: BMH_ORG_ID,
       source: "dealmachine",
       market: "Kansas City",
       mapping,
@@ -356,6 +365,7 @@ describe("runIngestion (integration)", () => {
     const summary = await runIngestion(supabase, {
       jobId: jobId2,
       csvImportId: csvImportId2,
+      orgId: BMH_ORG_ID,
       source: "dealmachine",
       market: "Kansas City",
       mapping,
@@ -396,6 +406,7 @@ describe("runIngestion (integration)", () => {
     const summary = await runIngestion(supabase, {
       jobId,
       csvImportId,
+      orgId: BMH_ORG_ID,
       source: "dealmachine",
       market: "Kansas City",
       mapping,
@@ -435,6 +446,7 @@ describe("runIngestion (integration)", () => {
     const summary = await runIngestion(supabase, {
       jobId,
       csvImportId,
+      orgId: BMH_ORG_ID,
       source: "dealmachine",
       market: "Kansas City",
       mapping,
@@ -465,6 +477,7 @@ describe("runIngestion (integration)", () => {
     const summary = await runIngestion(supabase, {
       jobId,
       csvImportId,
+      orgId: BMH_ORG_ID,
       source: "dealmachine",
       market: "Kansas City",
       mapping,
@@ -503,6 +516,7 @@ describe("runIngestion (integration)", () => {
     const summary = await runIngestion(supabase, {
       jobId,
       csvImportId,
+      orgId: BMH_ORG_ID,
       source: "dealmachine",
       market: "Kansas City",
       mapping,
@@ -524,6 +538,7 @@ describe("runIngestion (integration)", () => {
     const summary = await runIngestion(supabase, {
       jobId,
       csvImportId,
+      orgId: BMH_ORG_ID,
       source: "dealmachine",
       market: "Kansas City",
       mapping,
@@ -577,6 +592,7 @@ describe("runIngestion (integration)", () => {
     const summary = await runIngestion(supabase, {
       jobId,
       csvImportId,
+      orgId: BMH_ORG_ID,
       source: "dealmachine",
       market: "Kansas City",
       mapping: DNC_MAPPING,
@@ -602,6 +618,7 @@ describe("runIngestion (integration)", () => {
     await runIngestion(supabase, {
       jobId: a.jobId,
       csvImportId: a.csvImportId,
+      orgId: BMH_ORG_ID,
       source: "dealmachine",
       market: "Kansas City",
       mapping: DNC_MAPPING,
@@ -630,6 +647,7 @@ describe("runIngestion (integration)", () => {
     await runIngestion(supabase, {
       jobId: b.jobId,
       csvImportId: b.csvImportId,
+      orgId: BMH_ORG_ID,
       source: "dealmachine",
       market: "Kansas City",
       mapping: DNC_MAPPING,
@@ -662,6 +680,7 @@ describe("runIngestion (integration)", () => {
     await runIngestion(supabase, {
       jobId: a.jobId,
       csvImportId: a.csvImportId,
+      orgId: BMH_ORG_ID,
       source: "dealmachine",
       market: "Kansas City",
       mapping: DNC_MAPPING,
@@ -689,6 +708,7 @@ describe("runIngestion (integration)", () => {
     await runIngestion(supabase, {
       jobId: b.jobId,
       csvImportId: b.csvImportId,
+      orgId: BMH_ORG_ID,
       source: "dealmachine",
       market: "Kansas City",
       mapping: DNC_MAPPING,

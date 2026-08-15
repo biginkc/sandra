@@ -1,4 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createHash } from "node:crypto";
+
+import { reviewContractJson } from "@/lib/csv/dataset-contract";
 
 /**
  * Unit test for the workflow's defensive-recovery branch (phase 02 D-04).
@@ -41,8 +44,7 @@ vi.mock("@/lib/enrichment/cass-job", () => ({
 
 vi.mock("@/lib/sequences/enrollment", () => ({ enrollLead: vi.fn() }));
 
-// eslint-disable-next-line import/first
-import { csvImportWorkflow } from "./csv-import";
+import { csvImportWorkflow, type CsvImportWorkflowParams } from "./csv-import";
 
 type CallRecord = {
   table: string;
@@ -117,7 +119,7 @@ function makeSupabase(csvBody: string) {
           // A Blob with .text() returning a 1-line CSV (header + 0 rows).
           // Papa.parse with header:true on this returns parsed.data=[].
           data: {
-            text: () => Promise.resolve("Address\n"),
+            text: () => Promise.resolve(csvBody),
           },
           error: null,
         }),
@@ -143,27 +145,51 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
+const datasetSha256 = "a31d3d3ecb2bd1ea03234e3dceacedbcf4758b5742da29afe6146d15b8f6d2e6";
+const mapping = { address: "Address" };
+const reviewContractSha256 = createHash("sha256")
+  .update(reviewContractJson({
+    datasetSha256,
+    mapping,
+    source: "dealmachine",
+    countyId: "recovered-county-id",
+    totalRows: 1,
+    dncRows: 0,
+    smsConsent: false,
+    sequenceId: null,
+    classifyLineTypes: false,
+    requestCass: false,
+    requestSkipTrace: false,
+  }))
+  .digest("hex");
+
 const baseParams = {
   jobId: "job-recovery",
   csvImportId: "import-recovery",
+  orgId: "org-1",
   storagePath: "import.csv",
   source: "dealmachine",
   market: "Buchanan County MO",
-  mapping: { address: "Address" },
+  mapping,
   listId: null,
   userId: null,
-};
+  datasetSha256,
+  reviewContractSha256,
+  datasetVersion: 2,
+  expectedTotalRows: 1,
+  expectedDncRows: 0,
+  requestSkipTrace: false,
+} satisfies Omit<CsvImportWorkflowParams, "countyId">;
 
 describe("csvImportWorkflow — defensive recovery (params.countyId null)", () => {
   it("re-reads csv_imports.county_id when params.countyId is null", async () => {
     csvImportRow = { county_id: "recovered-county-id" };
-    createAdminClient.mockReturnValue(makeSupabase(""));
+    createAdminClient.mockReturnValue(makeSupabase("Address\n"));
 
     await csvImportWorkflow({
       ...baseParams,
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       countyId: null,
-    } as any);
+    });
 
     // The recovery branch must have queried csv_imports for county_id
     // filtered by the supplied csvImportId.
@@ -177,13 +203,29 @@ describe("csvImportWorkflow — defensive recovery (params.countyId null)", () =
   });
 
   it("does NOT read csv_imports.county_id when params.countyId is non-null", async () => {
-    createAdminClient.mockReturnValue(makeSupabase(""));
+    createAdminClient.mockReturnValue(makeSupabase("Address\n"));
+    const countyId = "fresh-county-id";
+    const countyReviewContractSha256 = createHash("sha256")
+      .update(reviewContractJson({
+        datasetSha256,
+        mapping,
+        source: "dealmachine",
+        countyId,
+        totalRows: 1,
+        dncRows: 0,
+        smsConsent: false,
+        sequenceId: null,
+        classifyLineTypes: false,
+        requestCass: false,
+        requestSkipTrace: false,
+      }))
+      .digest("hex");
 
     await csvImportWorkflow({
       ...baseParams,
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      countyId: "fresh-county-id",
-    } as any);
+      countyId,
+      reviewContractSha256: countyReviewContractSha256,
+    });
 
     // Hot-path branch — no csv_imports.select('county_id') call.
     const recoverySelects = calls.filter(

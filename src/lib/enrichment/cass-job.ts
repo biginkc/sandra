@@ -4,6 +4,7 @@ import { reportError } from "@/lib/errors/report";
 import { dispatchJobCompleted } from "@/lib/notifications/dispatch";
 import type { Database } from "@/lib/supabase/types";
 import { verifyPropertyAddress } from "./verify-property";
+export { CASS_COST_PER_LOOKUP_USD } from "@/lib/provider-pricing";
 
 export type CassJobSummary = {
   total: number;
@@ -31,8 +32,6 @@ const DEFAULT_AUTOTRIGGER_CAP = 100;
  * SmartyStreets' US Street API rate at the time of this writing. Centralized
  * here so the UI and the plan stay in sync.
  */
-export const CASS_COST_PER_LOOKUP_USD = 0.03;
-
 /**
  * Was this CASS child job deliberately parked in `queued` by the autotrigger
  * because the import exceeded the budget cap? Used by the UI to decide

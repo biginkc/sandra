@@ -33,6 +33,8 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { buildInvalidRowsCsv } from "@/lib/csv/invalid-rows-csv";
+import { serializeReviewedDataset } from "@/lib/csv/dataset";
+import { rowsForGroup, type PreflightGroup } from "@/lib/csv/preflight";
 import {
   groupRowIssues,
   type RowIssueGroup,
@@ -49,6 +51,7 @@ const TOOLTIP_PREVIEW_ROWS = 3;
 
 export function StepReview({ state }: Props) {
   const summary = state.summary;
+  const [activeGroup, setActiveGroup] = useState<PreflightGroup>("new");
 
   // Re-derive validation results across all rows for the breakdown.
   // useMemo keeps it cheap on re-renders; recomputing from state.rows
@@ -89,9 +92,77 @@ export function StepReview({ state }: Props) {
     0,
   );
 
+  const preflight = state.preflight;
+  const reviewGroups: Array<{ id: PreflightGroup; label: string }> = [
+    { id: "new", label: "New" },
+    { id: "existing", label: "Existing" },
+    { id: "blocked", label: "Blocked" },
+    { id: "warnings", label: "Warnings" },
+    { id: "dnc", label: "DNC" },
+  ];
+  const activeRows = preflight
+    ? rowsForGroup(state.rows, preflight.groups[activeGroup])
+    : [];
+  const downloadGroup = () => {
+    const csv = serializeReviewedDataset(activeRows, state.headers);
+    const url = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `${(state.filename ?? "import").replace(/\.[^.]+$/, "")}.${activeGroup}.csv`;
+    link.click();
+    URL.revokeObjectURL(url);
+  };
+
   return (
     <TooltipProvider delay={200}>
       <div className="flex flex-col gap-6">
+        <Card>
+          <CardHeader>
+            <CardTitle>Review rows</CardTitle>
+            <CardDescription>
+              This table is rendered from the same normalized dataset the import job receives — not a separate preview. What you see is what imports.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="flex flex-col gap-3">
+            <div className="flex flex-wrap gap-2" role="tablist" aria-label="Import review groups">
+              {reviewGroups.map((group) => {
+                const count = preflight?.groups[group.id].length ?? 0;
+                return (
+                  <Button
+                    key={group.id}
+                    type="button"
+                    size="sm"
+                    variant={activeGroup === group.id ? "default" : "outline"}
+                    role="tab"
+                    aria-selected={activeGroup === group.id}
+                    onClick={() => setActiveGroup(group.id)}
+                  >
+                    {group.label} <Badge variant="secondary">{count}</Badge>
+                  </Button>
+                );
+              })}
+            </div>
+            <div className="border-border overflow-hidden rounded-md border">
+              <Table>
+                <TableHeader><TableRow><TableHead>Address</TableHead><TableHead>Owner</TableHead></TableRow></TableHeader>
+                <TableBody>
+                  {activeRows.slice(0, ROWS_VISIBLE_PER_GROUP).map((row, index) => (
+                    <TableRow key={index}>
+                      <TableCell>{row[state.mapping.address ?? ""] || row[state.mapping.address_full ?? ""] || "—"}</TableCell>
+                      <TableCell>{[row[state.mapping.homeowner_first_name ?? ""], row[state.mapping.homeowner_last_name ?? ""]].filter(Boolean).join(" ") || "—"}</TableCell>
+                    </TableRow>
+                  ))}
+                  {activeRows.length === 0 && <TableRow><TableCell colSpan={2} className="text-muted-foreground py-6 text-center">No rows in this group.</TableCell></TableRow>}
+                </TableBody>
+              </Table>
+            </div>
+            {activeRows.length > 0 && (
+              <Button variant="outline" size="sm" className="self-start" onClick={downloadGroup}>
+                <Download className="size-3.5" /> Download {activeGroup} rows
+              </Button>
+            )}
+          </CardContent>
+        </Card>
         {/* Row 1 — KPI tiles */}
         <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
           <KpiTile

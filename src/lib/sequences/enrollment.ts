@@ -63,6 +63,12 @@ export async function enrollLead(
     .maybeSingle();
   if (propErr) return { status: "failed", message: propErr.message };
   if (!prop) return { status: "property_not_found" };
+  if (prop.org_id !== seq.org_id) {
+    return {
+      status: "failed",
+      message: "Sequence and property must belong to the same organization.",
+    };
+  }
 
   // PostgREST may return the joined contact as an object or a
   // one-element array — normalize before reading.

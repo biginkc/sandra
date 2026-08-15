@@ -26,7 +26,10 @@ vi.mock("@/lib/errors/report", () => ({
   reportError: vi.fn(),
 }));
 
-// eslint-disable-next-line import/first
+vi.mock("@/lib/csv/dataset", () => ({
+  buildReviewContractSha256: vi.fn().mockResolvedValue("b".repeat(64)),
+}));
+
 import { createImportJob } from "./actions";
 
 /**
@@ -148,11 +151,18 @@ const baseParams = {
   countyId: "11111111-1111-1111-1111-111111111111",
   listName: null,
   mapping: { address: "Address" },
-  storagePath: "import-2026.csv",
+  storagePath: "org-1/import-2026.csv",
   totalRows: 42,
   smsConsent: false,
   sequenceId: null,
   classifyLineTypes: false,
+  requestCass: false,
+  requestSkipTrace: false,
+  maxEstimatedChargeUsd: 0,
+  datasetSha256: "a".repeat(64),
+  reviewContractSha256: "b".repeat(64),
+  datasetVersion: 2,
+  dncRows: 0,
 };
 
 describe("createImportJob — T-02-03-01 mitigation", () => {
@@ -275,6 +285,39 @@ describe("createImportJob — T-02-03-01 mitigation", () => {
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.error.code).toBe("INVALID_COUNTY");
+  });
+
+  it("fails closed instead of choosing an arbitrary organization membership", async () => {
+    responseQueue = [{
+      data: [
+        { org_id: "org-1", role: "owner" },
+        { org_id: "org-2", role: "member" },
+      ],
+      error: null,
+    }];
+    createClient.mockResolvedValue(makeSupabase());
+
+    const result = await createImportJob(baseParams);
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe("ORG_SELECTION_REQUIRED");
+    expect(calls.find((call) => call.table === "csv_imports")).toBeUndefined();
+  });
+
+  it("rejects a storage object outside the resolved organization prefix", async () => {
+    responseQueue = [membershipResponse];
+    createClient.mockResolvedValue(makeSupabase());
+
+    const result = await createImportJob({
+      ...baseParams,
+      storagePath: "org-2/reviewed.csv",
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe("IMPORT_STORAGE_SCOPE_MISMATCH");
+    expect(calls.find((call) => call.table === "csv_imports")).toBeUndefined();
   });
 
   it("threads countyId into the workflow start payload", async () => {

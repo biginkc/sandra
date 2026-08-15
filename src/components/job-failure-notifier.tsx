@@ -12,7 +12,7 @@ type Job = Pick<
 >;
 
 const POLL_INTERVAL_MS = 5000;
-const TERMINAL_BAD_STATUSES = new Set<Job["status"]>(["failed", "partial"]);
+const TERMINAL_BAD_STATUSES = new Set<Job["status"]>(["failed", "partial", "partially_completed"]);
 
 /**
  * Mounted once in the dashboard layout.
@@ -39,7 +39,7 @@ export function JobFailureNotifier() {
         const { data, error } = await supabase
           .from("jobs")
           .select("id, status, title, type, error_message, created_at")
-          .in("status", ["failed", "partial"])
+          .in("status", ["failed", "partial", "partially_completed"])
           .gte("created_at", mountedAtRef.current)
           .order("created_at", { ascending: false })
           .limit(20);
@@ -54,7 +54,7 @@ export function JobFailureNotifier() {
           // repeat the notification.
           notifiedRef.current.add(job.id);
 
-          const verb = job.status === "partial" ? "finished with errors" : "failed";
+          const verb = job.status === "partial" || job.status === "partially_completed" ? "finished with errors" : "failed";
           const title = job.title ?? `Job ${job.id.slice(0, 8)}`;
 
           toast.error(`${title} ${verb}`, {

@@ -31,6 +31,9 @@ import { type BlockOptions } from "./_components/blocks/_block-shell";
 import { BlockOptionsProvider } from "./_components/block-options-provider";
 import { renderBlock } from "./_components/blocks/registry";
 import type { Preset } from "./_components/quick-filter-chip";
+import { evaluateSuppression } from "@/lib/messaging/suppression";
+import { getDayBoundsInZone } from "@/lib/time/zoned";
+import { LEAD_SOURCES } from "@/lib/leads/create";
 
 
 const PAGE_SIZE = 50;
@@ -46,6 +49,15 @@ type PropertyQueryRow = {
   is_vacant: boolean | null;
   created_at: string;
   outreach_dispo: string | null;
+  source_import_id: string | null;
+  source_imported_at: string | null;
+  homeowner?: Array<{
+    phone_1: string | null;
+    phone_2: string | null;
+    phone_3: string | null;
+    do_not_contact: boolean;
+    sms_opted_out: boolean;
+  }> | null;
   list_filter?: Array<{ list_id: string }>;
   list_exclusion?: Array<{ list_id: string }>;
   contact_messages?: Array<unknown>;
@@ -88,19 +100,7 @@ const CASS_STATUSES = ["verified", "unverified", "invalid", "ambiguous"];
 // properties.source — migration 053_lead_sources_for_format_helper.sql.
 // Mirror of LEAD_SOURCES in src/lib/leads/create.ts; the CHECK constraint
 // is the floor, the registry is the wall.
-const SOURCES = [
-  "dealmachine",
-  "propstream",
-  "titlepro",
-  "reisift",
-  "agent_outreach",
-  "driving_for_dollars",
-  "referral",
-  "cold_call",
-  "sms",
-  "web_form",
-  "direct_mail",
-];
+const SOURCES = [...LEAD_SOURCES];
 
 export const metadata = {
   title: "Prospects · Sandra CRM",
@@ -123,6 +123,7 @@ export default async function PropertiesPage({
     engagement?: string;
     market?: string;
     assignee?: string;
+    imported?: string;
   }>;
 }) {
   const rawSearchParams = await searchParams;
@@ -158,7 +159,7 @@ export default async function PropertiesPage({
     );
     const propertyListSelect = filterSelectFragment(blockStack);
     const propertiesSelect = [
-      "id, address, city, state, zip, market, cass_status, is_vacant, created_at, outreach_dispo",
+      "id, address, city, state, zip, market, cass_status, is_vacant, created_at, outreach_dispo, source_import_id, source_imported_at, homeowner:contacts!properties_homeowner_contact_id_fkey(phone_1, phone_2, phone_3, do_not_contact, sms_opted_out)",
       propertyListSelect,
     ]
       .filter(Boolean)
@@ -173,6 +174,13 @@ export default async function PropertiesPage({
     }
     if (search) {
       query = query.ilike("address", `%${search}%`);
+    }
+    if (rawSearchParams.imported === "today") {
+      const { dayStart, dayEnd } = getDayBoundsInZone(new Date(), "America/Chicago");
+      query = query
+        .not("source_import_id", "is", null)
+        .gte("source_imported_at", dayStart.toISOString())
+        .lt("source_imported_at", dayEnd.toISOString());
     }
     // Plan 04 translator — applies all 23 block kinds (vacancy / cass /
     // engagement / market / assignee / source / state / motivation_level /
@@ -241,6 +249,23 @@ export default async function PropertiesPage({
   // future readers can see why the select may include list_filter/list_exclusion.
   const properties = (propertyRows ?? []) as unknown as PropertyQueryRow[];
 
+  const visiblePhones = properties.flatMap((property) => {
+    const homeowner = Array.isArray(property.homeowner) ? property.homeowner[0] : property.homeowner;
+    return homeowner
+      ? [homeowner.phone_1, homeowner.phone_2, homeowner.phone_3].filter((phone): phone is string => !!phone)
+      : [];
+  });
+  const { data: durableSuppressions, error: durableSuppressionError } = visiblePhones.length
+    ? await supabase.from("sms_phone_suppressions").select("phone_e164").in("phone_e164", visiblePhones)
+    : { data: [], error: null };
+  if (durableSuppressionError) {
+    // Fail closed: rendering a DNC row with a selectable checkbox because
+    // the durable registry could not be read is worse than showing the page
+    // error boundary and asking the operator to retry.
+    throw new Error(`Could not verify Prospects DNC locks: ${durableSuppressionError.message}`);
+  }
+  const suppressedPhones = new Set((durableSuppressions ?? []).map((row) => row.phone_e164));
+
   const total = count ?? 0;
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
   const showingFrom = total === 0 ? 0 : from + 1;
@@ -275,6 +300,16 @@ export default async function PropertiesPage({
 
   const prospects: ProspectRow[] = properties.map((p) => {
     const latest = latestByPropertyId.get(p.id) ?? null;
+    const homeowner = Array.isArray(p.homeowner) ? p.homeowner[0] : p.homeowner;
+    const durablePhoneSuppression = [homeowner?.phone_1, homeowner?.phone_2, homeowner?.phone_3]
+      .some((phone) => !!phone && suppressedPhones.has(phone));
+    const suppression = durablePhoneSuppression
+      ? { suppressed: true as const, reason: "Phone is in the durable suppression registry." }
+      : evaluateSuppression({
+          outreachDispo: p.outreach_dispo,
+          doNotContact: homeowner?.do_not_contact,
+          smsOptedOut: homeowner?.sms_opted_out,
+        });
     return {
       id: p.id,
       address: p.address,
@@ -288,6 +323,8 @@ export default async function PropertiesPage({
       engagement: computeEngagement(latest),
       last_message_preview: truncateMessagePreview(latest?.body ?? null),
       outreach_dispo: p.outreach_dispo ?? null,
+      imported_at: p.source_imported_at,
+      dnc_reason: suppression.suppressed ? suppression.reason : null,
     };
   });
 
@@ -397,8 +434,8 @@ export default async function PropertiesPage({
 
   const headerCount =
     total === 0
-      ? "No prospects yet. Import a CSV to fill the data lake."
-      : `Showing ${showingFrom}–${showingTo} of ${total} prospect${total === 1 ? "" : "s"}${cassBreakdown}. Qualify a prospect to move it into the leads pipeline.`;
+      ? "Imported properties appear in Prospects for review before promotion to Leads. No prospects yet."
+      : `Imported properties appear in Prospects for review before promotion to Leads. Showing ${showingFrom}–${showingTo} of ${total} prospect${total === 1 ? "" : "s"}${cassBreakdown}.`;
 
   return (
     <Page>
@@ -448,6 +485,7 @@ export default async function PropertiesPage({
           dir={dir}
           blockStack={blockStack}
           filtersParam={rawFiltersParam}
+          importedParam={rawSearchParams.imported === "today" ? "today" : null}
           total={total}
           pageSize={PAGE_SIZE}
           page={page}

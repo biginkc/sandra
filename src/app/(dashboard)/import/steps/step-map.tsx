@@ -33,19 +33,23 @@ import {
   type TargetField,
 } from "@/lib/csv/schema";
 import { cn } from "@/lib/utils";
+import { GENERATED_DNC_HEADER } from "@/lib/csv/dataset-contract";
 
 import type { WizardAction, WizardState } from "../wizard";
 
 type Props = { state: WizardState; dispatch: React.Dispatch<WizardAction> };
 
 export function StepMap({ state, dispatch }: Props) {
-  const mappedCount = Object.values(state.mapping).filter(Boolean).length;
+  const mappedHeaders = new Set(Object.values(state.mapping).filter(Boolean));
+  const unmappedHeaders = state.headers.filter(
+    (header) => header !== GENERATED_DNC_HEADER && !mappedHeaders.has(header),
+  );
   return (
     <div className="flex flex-col gap-4">
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center justify-between">
-            <span>Detected columns</span>
+            <span>Map columns</span>
             <Button
               variant="outline"
               size="sm"
@@ -55,7 +59,7 @@ export function StepMap({ state, dispatch }: Props) {
             </Button>
           </CardTitle>
           <CardDescription>
-            {state.headers.length} columns in the CSV · {mappedCount} auto-mapped
+            Sandra field ← original column, with values from the exact reviewed dataset.
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -68,6 +72,12 @@ export function StepMap({ state, dispatch }: Props) {
           </div>
         </CardContent>
       </Card>
+
+      {unmappedHeaders.length > 0 && (
+        <div className="border-amber-300 bg-amber-50 text-amber-950 rounded-xl border p-4 text-sm dark:border-amber-500/40 dark:bg-amber-500/10 dark:text-amber-100">
+          {unmappedHeaders.length} {unmappedHeaders.length === 1 ? "column is" : "columns are"} unmapped: {unmappedHeaders.join(", ")}. Its values will not import. This is shown, not silently dropped.
+        </div>
+      )}
 
       <SectionCard
         title="Property"
@@ -173,6 +183,12 @@ function FieldRow({
   dispatch: React.Dispatch<WizardAction>;
 }) {
   const currentHeader = state.mapping[field.id] ?? null;
+  const generated = currentHeader === GENERATED_DNC_HEADER;
+  const transformed = !!currentHeader && state.presetApplied &&
+    !state.prePresetSnapshot?.headers.includes(currentHeader);
+  const samples = currentHeader
+    ? Array.from(new Set(state.rows.map((row) => row[currentHeader]).filter(Boolean))).slice(0, 3)
+    : [];
 
   // When the user has mapped a combined-address column, signal that Address /
   // City / State / ZIP will be auto-filled from it even if left "(not mapped)".
@@ -188,6 +204,9 @@ function FieldRow({
     <div className="flex flex-col gap-1.5">
       <Label htmlFor={`map-${field.id}`} className="flex items-center gap-2">
         {field.label}
+        <Badge variant={currentHeader ? "secondary" : "outline"} className="font-mono text-[10px]">
+          {generated ? "GENERATED" : transformed ? "TRANSFORMED" : currentHeader ? "AUTO-MAPPED" : "UNMAPPED"}
+        </Badge>
         {field.required && !willDerive && (
           <span className="text-destructive text-xs">required</span>
         )}
@@ -202,6 +221,7 @@ function FieldRow({
         headers={state.headers}
         value={currentHeader}
         derivedFrom={willDerive ? addressFullHeader : null}
+        disabled={generated}
         onChange={(header) =>
           dispatch({
             type: "SET_MAPPING_FIELD",
@@ -210,6 +230,11 @@ function FieldRow({
           })
         }
       />
+      {samples.length > 0 && (
+        <div className="text-muted-foreground truncate font-mono text-[10px]">
+          Sample: {samples.join(" · ")}
+        </div>
+      )}
       {field.helpText && (
         <div className="text-muted-foreground text-xs">{field.helpText}</div>
       )}
@@ -229,6 +254,7 @@ function HeaderCombobox({
   headers,
   value,
   derivedFrom,
+  disabled = false,
   onChange,
 }: {
   triggerId: string;
@@ -237,6 +263,7 @@ function HeaderCombobox({
   /** When the field will be auto-filled from the combined-address column,
    *  show that source as the placeholder instead of "(not mapped)". */
   derivedFrom: string | null;
+  disabled?: boolean;
   onChange: (header: string | null) => void;
 }) {
   const [open, setOpen] = React.useState(false);
@@ -244,7 +271,7 @@ function HeaderCombobox({
   const placeholder = derivedFrom ? `← ${derivedFrom}` : "(not mapped)";
 
   return (
-    <Popover open={open} onOpenChange={setOpen}>
+    <Popover open={open} onOpenChange={disabled ? undefined : setOpen}>
       <PopoverTrigger
         id={triggerId}
         render={
@@ -252,6 +279,7 @@ function HeaderCombobox({
             variant="outline"
             role="combobox"
             aria-expanded={open}
+            disabled={disabled}
             className="w-full justify-between font-normal"
           />
         }
@@ -290,7 +318,7 @@ function HeaderCombobox({
                 />
                 (not mapped)
               </CommandItem>
-              {headers.map((h) => (
+              {headers.filter((h) => h !== GENERATED_DNC_HEADER).map((h) => (
                 <CommandItem
                   key={h}
                   value={h}
