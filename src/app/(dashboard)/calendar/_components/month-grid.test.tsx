@@ -1,57 +1,12 @@
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
-import { addDaysInZone, getDayBoundsInZone, wallTimeToUtc } from "@/lib/time/zoned";
-
-import type { CalendarAppointmentRow, CalendarDayBounds } from "../types";
+import { resolveMonth } from "../range";
+import type { CalendarAppointmentRow } from "../types";
 
 import { MonthGrid } from "./month-grid";
 
 const CHI = "America/Chicago";
-
-function dateKeyInZone(d: Date, tz: string): string {
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone: tz,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).formatToParts(d);
-  const map: Record<string, string> = {};
-  for (const p of parts) if (p.type !== "literal") map[p.type] = p.value;
-  return `${map.year}-${map.month}-${map.day}`;
-}
-
-/** Builds the padded Sunday-to-Saturday month grid for `monthKey` in `tz`
- *  with the production zoned.ts helpers — the same construction the page's
- *  resolveMonth performs, so these tests exercise the real day-bounds
- *  shape MonthGrid receives. */
-function buildMonthGrid(monthKey: string, tz: string): CalendarDayBounds[] {
-  const first = wallTimeToUtc({ date: `${monthKey}-01`, time: "12:00", timeZone: tz });
-  if (!first.ok) throw new Error("bad month key");
-  let cursor = getDayBoundsInZone(first.utc, tz).dayStart;
-  const weekdayLabel = new Intl.DateTimeFormat("en-US", {
-    timeZone: tz,
-    weekday: "short",
-  }).format(cursor);
-  const weekdayIndex = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].indexOf(weekdayLabel);
-  if (weekdayIndex > 0) cursor = addDaysInZone(cursor, -weekdayIndex, tz);
-
-  const [y, m] = monthKey.split("-").map(Number);
-  const daysInMonth = new Date(Date.UTC(y, m, 0)).getUTCDate();
-  const cellCount = Math.ceil((weekdayIndex + daysInMonth) / 7) * 7;
-
-  const days: CalendarDayBounds[] = [];
-  for (let i = 0; i < cellCount; i++) {
-    const next = addDaysInZone(cursor, 1, tz);
-    days.push({
-      date: dateKeyInZone(cursor, tz),
-      startUtc: cursor.toISOString(),
-      endUtc: next.toISOString(),
-    });
-    cursor = next;
-  }
-  return days;
-}
 
 function makeAppt(
   overrides: Partial<CalendarAppointmentRow> & { id: string; due_at: string },
@@ -73,7 +28,9 @@ function makeAppt(
   };
 }
 
-const DAYS = buildMonthGrid("2026-08", CHI);
+// Built by the PRODUCTION resolver (Codex round 1: the earlier local
+// duplicate of the cell-count formula could never catch a resolver bug).
+const DAYS = resolveMonth("2026-08-14", CHI).days;
 const dayHref = (date: string) => `/calendar?view=week&week=${date}`;
 
 function renderGrid(appointments: CalendarAppointmentRow[] = []) {
