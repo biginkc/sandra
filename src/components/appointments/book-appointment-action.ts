@@ -3,6 +3,7 @@
 import { revalidatePath } from "next/cache";
 import { after } from "next/server";
 
+import { kickCalendarMutationSync } from "@/lib/appointments/inline-sync-kick";
 import {
   requireOrgMembership,
   requireOrgMembershipByResource,
@@ -425,6 +426,24 @@ export async function bookAppointment(
           extra: { propertyId: linkedPropertyId },
         });
       }
+    }
+
+    // Best-effort inline kick of the ledger row fn_book_appointment just
+    // opened — see kickCalendarMutationSync's doc comment. Clears the
+    // chain's "calendar sync in progress" lock in seconds instead of
+    // waiting up to 5 minutes for the next calendar-mutation-sweep cron
+    // tick. Booking has already committed; a kick failure must never flip
+    // this into a reported failure — same commit-honesty posture as the
+    // enrollment pause above. Runs BEFORE revalidation so a fresh read of
+    // this appointment reflects the cleared lock, not the stale pending
+    // one.
+    try {
+      await kickCalendarMutationSync(createAdminClient());
+    } catch (e) {
+      reportError(e, {
+        tags: { surface: "book_appointment_inline_sync_kick" },
+        extra: { taskId: result.taskId },
+      });
     }
 
     // Commit-honesty (PR 3's lifecycle contract, applied here after the

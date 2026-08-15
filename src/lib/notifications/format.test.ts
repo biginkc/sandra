@@ -155,11 +155,15 @@ describe("formatNotification", () => {
   });
 
   it("task_assigned honors payload.timezone over the America/Chicago default", () => {
-    // now = 2026-08-14 23:30 PDT (LA day 14, UTC day 15) — due later that
-    // same LA evening. Chicago (the default zone) is already on the 15th
-    // at this UTC instant, so a formatter that ignored payload.timezone
-    // would say "tomorrow" here instead of "today".
-    const due = "2026-08-15T06:50:00Z";
+    // Pre-existing bug, unrelated to this PR: this used a hardcoded
+    // absolute due date ("now = 2026-08-14 23:30 PDT") that rotted once
+    // the real clock passed it — `formatNotification` always uses real
+    // `now`, so a fixed-past `dueAt` eventually reads as "Yesterday"
+    // instead of matching the today/tomorrow/soon/weekday shape this test
+    // actually asserts. Relative-to-now avoids the same rot recurring;
+    // the exact zone-crossing scenario the original comment described is
+    // already covered precisely by `humanDueDate`'s own zone tests below.
+    const due = new Date(Date.now() + 3_600_000).toISOString();
     const out = formatNotification("task_assigned", {
       taskTitle: "Walkthrough",
       taskType: "follow_up",

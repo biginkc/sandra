@@ -7,6 +7,7 @@ const {
   createClient,
   dispatchTaskAssigned,
   dispatchTaskAssignedSlack,
+  kickCalendarMutationSync,
   loadIntegrationPrefs,
   pausePropertyEnrollments,
   requireOrgMembership,
@@ -21,6 +22,7 @@ const {
   createClient: vi.fn(),
   dispatchTaskAssigned: vi.fn(),
   dispatchTaskAssignedSlack: vi.fn(),
+  kickCalendarMutationSync: vi.fn().mockResolvedValue(undefined),
   loadIntegrationPrefs: vi.fn(async () => ({
     slackEnabled: true,
     calendarEnabled: true,
@@ -41,6 +43,7 @@ vi.mock("@/lib/integrations/prefs", () => ({ loadIntegrationPrefs }));
 vi.mock("@/lib/integrations/slack/dispatch", () => ({ dispatchTaskAssignedSlack }));
 vi.mock("@/lib/notifications/dispatch", () => ({ dispatchTaskAssigned }));
 vi.mock("@/lib/sequences/enrollment", () => ({ pausePropertyEnrollments }));
+vi.mock("@/lib/appointments/inline-sync-kick", () => ({ kickCalendarMutationSync }));
 vi.mock("@/lib/auth/require-org-membership", () => ({
   requireOrgMembership,
   requireOrgMembershipByResource,
@@ -747,6 +750,61 @@ describe("bookAppointment — RPC + side effects", () => {
       expect.objectContaining({
         tags: { surface: "book_appointment_revalidate" },
       }),
+    );
+  });
+
+  it("kicks the inline calendar-mutation sync (admin client) after a successful booking, before revalidation", async () => {
+    const callOrder: string[] = [];
+    kickCalendarMutationSync.mockImplementationOnce(async () => {
+      callOrder.push("kick");
+    });
+    revalidatePath.mockImplementationOnce(() => {
+      callOrder.push("revalidate");
+    });
+    createClient.mockResolvedValue(
+      makeSupabaseMock({
+        userId: "user-1",
+        rpcResult: {
+          data: {
+            task_id: "task-1",
+            already_qualified: false,
+            calendar_chain_id: "chain-1",
+            related_property_id: "prop-1",
+            contact_id: null,
+          },
+          error: null,
+        },
+      }),
+    );
+
+    await bookAppointment(VALID_INPUT);
+
+    expect(kickCalendarMutationSync).toHaveBeenCalledWith({ __admin: true });
+    expect(callOrder[0]).toBe("kick");
+  });
+
+  it("does not fail the booking when the inline sync kick rejects — best-effort, booking already committed", async () => {
+    const { reportError } = await import("@/lib/errors/report");
+    kickCalendarMutationSync.mockRejectedValueOnce(new Error("kick exploded"));
+    createClient.mockResolvedValue(
+      makeSupabaseMock({
+        userId: "user-1",
+        rpcResult: {
+          data: { task_id: "task-1", already_qualified: false, calendar_chain_id: "chain-1" },
+          error: null,
+        },
+      }),
+    );
+
+    const result = await bookAppointment(VALID_INPUT);
+
+    expect(result).toEqual({
+      ok: true,
+      data: { taskId: "task-1", alreadyQualified: false, chainId: "chain-1", duplicate: undefined },
+    });
+    expect(reportError).toHaveBeenCalledWith(
+      expect.any(Error),
+      expect.objectContaining({ tags: { surface: "book_appointment_inline_sync_kick" } }),
     );
   });
 

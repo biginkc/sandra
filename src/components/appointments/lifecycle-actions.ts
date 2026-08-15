@@ -3,6 +3,7 @@
 import { revalidatePath } from "next/cache";
 import { after } from "next/server";
 
+import { kickCalendarMutationSync } from "@/lib/appointments/inline-sync-kick";
 import { errFromUnknown, err, type Result } from "@/lib/errors/result";
 import { reportError } from "@/lib/errors/report";
 import {
@@ -141,6 +142,31 @@ async function revalidateAppointmentPathsBestEffort(
   }
 }
 
+/**
+ * Best-effort inline kick after a lifecycle RPC commits — see
+ * `kickCalendarMutationSync`'s doc comment
+ * (src/lib/appointments/inline-sync-kick.ts) for why this exists and why
+ * it's safe under concurrency. Same commit-honesty posture as
+ * `revalidateAppointmentPathsBestEffort` below: the RPC above has already
+ * committed, so a kick failure must never flip this action's result to an
+ * error. Called BEFORE revalidation (not after) so a fresh read reflects
+ * the cleared "calendar sync in progress" lock rather than the stale
+ * pending one.
+ */
+async function kickCalendarMutationSyncBestEffort(
+  surfaceTag: string,
+  taskId: string,
+): Promise<void> {
+  try {
+    await kickCalendarMutationSync(createAdminClient());
+  } catch (e) {
+    reportError(e, {
+      tags: { surface: `${surfaceTag}_inline_sync_kick` },
+      extra: { taskId },
+    });
+  }
+}
+
 export async function completeAppointmentAction(
   taskId: string,
   outcome: AppointmentOutcome,
@@ -154,6 +180,8 @@ export async function completeAppointmentAction(
 
     const result = await completeAppointment(supabase, taskId, outcome);
     if (!result.ok) return result;
+
+    await kickCalendarMutationSyncBestEffort("complete_appointment_action", taskId);
 
     // Codex round 11 (finding 3): the RPC already committed above — the
     // post-commit task lookup + revalidation below is best-effort only,
@@ -187,6 +215,8 @@ export async function cancelAppointmentAction(
 
     const result = await cancelAppointment(supabase, taskId);
     if (!result.ok) return result;
+
+    await kickCalendarMutationSyncBestEffort("cancel_appointment_action", taskId);
 
     // Codex round 11 (finding 3): best-effort post-commit revalidation —
     // `task` is already resolved (fetched pre-RPC), so only `revalidatePath`
@@ -263,6 +293,8 @@ export async function rescheduleAppointmentAction(
     });
     if (!result.ok) return result;
 
+    await kickCalendarMutationSyncBestEffort("reschedule_appointment_action", input.taskId);
+
     // Codex round 11 (finding 3): best-effort post-commit revalidation —
     // same posture as cancel above.
     await revalidateAppointmentPathsBestEffort(
@@ -294,6 +326,8 @@ export async function reassignAppointmentAction(
 
     const result = await reassignAppointment(supabase, taskId, newAssigneeId, idempotencyKey);
     if (!result.ok) return result;
+
+    await kickCalendarMutationSyncBestEffort("reassign_appointment_action", taskId);
 
     // Codex round 10 (finding 3): everything past this point is
     // best-effort — `reassignAppointment` above already committed the

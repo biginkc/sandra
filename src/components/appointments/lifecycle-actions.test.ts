@@ -9,6 +9,7 @@ const {
   createClient,
   dispatchTaskAssigned,
   dispatchTaskAssignedSlack,
+  kickCalendarMutationSync,
   loadIntegrationPrefs,
   reassignAppointment,
   rescheduleAppointment,
@@ -24,6 +25,7 @@ const {
   createClient: vi.fn(),
   dispatchTaskAssigned: vi.fn(),
   dispatchTaskAssignedSlack: vi.fn(),
+  kickCalendarMutationSync: vi.fn().mockResolvedValue(undefined),
   loadIntegrationPrefs: vi.fn(async () => ({
     slackEnabled: true,
     calendarEnabled: true,
@@ -42,6 +44,7 @@ vi.mock("next/server", () => ({ after: afterMock }));
 vi.mock("@/lib/integrations/prefs", () => ({ loadIntegrationPrefs }));
 vi.mock("@/lib/integrations/slack/dispatch", () => ({ dispatchTaskAssignedSlack }));
 vi.mock("@/lib/notifications/dispatch", () => ({ dispatchTaskAssigned }));
+vi.mock("@/lib/appointments/inline-sync-kick", () => ({ kickCalendarMutationSync }));
 vi.mock("@/lib/appointments/lifecycle", () => ({
   cancelAppointment,
   completeAppointment,
@@ -464,9 +467,17 @@ describe("reassignAppointmentAction", () => {
       ok: true,
       data: { taskId: "task-1", oldAssigneeId: "user-1", newAssigneeId: "user-2", duplicate: false },
     });
-    createAdminClient.mockImplementationOnce(() => {
-      throw new Error("admin client unavailable");
-    });
+    // Two createAdminClient() calls now happen for a successful reassign:
+    // the inline sync kick (synchronous, right after the RPC) and the
+    // notification-prep inside after(). Only the SECOND (notification
+    // prep) should throw here — chaining two one-shot implementations
+    // (rather than a persistent override) keeps this scoped to this test,
+    // same as every other `mockImplementationOnce` use in this file.
+    createAdminClient
+      .mockImplementationOnce(() => ({ __admin: true }))
+      .mockImplementationOnce(() => {
+        throw new Error("admin client unavailable");
+      });
 
     const result = await reassignAppointmentAction("task-1", "user-2");
 
@@ -521,5 +532,124 @@ describe("reassignAppointmentAction", () => {
     // The notification path still runs — task was resolved fine, only
     // revalidatePath itself threw.
     expect(afterCallbacks).toHaveLength(1);
+  });
+});
+
+describe("inline calendar sync kick — every lifecycle action", () => {
+  beforeEach(() => {
+    createClient.mockResolvedValue(
+      makeSupabaseMock({
+        userId: "user-1",
+        taskRow: { org_id: "org-1", title: "Call", due_at: "2026-09-01T15:00:00Z", related_property_id: null, contact_id: null },
+      }),
+    );
+  });
+
+  it("completeAppointmentAction kicks the inline sync (admin client) after a successful complete, before revalidation", async () => {
+    completeAppointment.mockResolvedValue({
+      ok: true,
+      data: { taskId: "task-1", status: "completed", outcome: "held" },
+    });
+    const callOrder: string[] = [];
+    kickCalendarMutationSync.mockImplementationOnce(async () => {
+      callOrder.push("kick");
+    });
+    revalidatePath.mockImplementationOnce(() => {
+      callOrder.push("revalidate");
+    });
+
+    await completeAppointmentAction("task-1", "held");
+
+    expect(kickCalendarMutationSync).toHaveBeenCalledWith({ __admin: true });
+    expect(callOrder[0]).toBe("kick");
+  });
+
+  it("completeAppointmentAction still returns ok:true when the kick rejects", async () => {
+    const { reportError } = await import("@/lib/errors/report");
+    completeAppointment.mockResolvedValue({
+      ok: true,
+      data: { taskId: "task-1", status: "completed", outcome: "held" },
+    });
+    kickCalendarMutationSync.mockRejectedValueOnce(new Error("kick exploded"));
+
+    const result = await completeAppointmentAction("task-1", "held");
+
+    expect(result).toEqual({
+      ok: true,
+      data: { taskId: "task-1", status: "completed", outcome: "held" },
+    });
+    expect(reportError).toHaveBeenCalledWith(
+      expect.any(Error),
+      expect.objectContaining({ tags: { surface: "complete_appointment_action_inline_sync_kick" } }),
+    );
+  });
+
+  it("cancelAppointmentAction kicks the inline sync and still returns ok:true when it rejects", async () => {
+    const { reportError } = await import("@/lib/errors/report");
+    cancelAppointment.mockResolvedValue({
+      ok: true,
+      data: { taskId: "task-1", status: "cancelled", ledgerId: "ledger-1" },
+    });
+    kickCalendarMutationSync.mockRejectedValueOnce(new Error("kick exploded"));
+
+    const result = await cancelAppointmentAction("task-1");
+
+    expect(kickCalendarMutationSync).toHaveBeenCalledWith({ __admin: true });
+    expect(result).toEqual({
+      ok: true,
+      data: { taskId: "task-1", status: "cancelled", ledgerId: "ledger-1" },
+    });
+    expect(reportError).toHaveBeenCalledWith(
+      expect.any(Error),
+      expect.objectContaining({ tags: { surface: "cancel_appointment_action_inline_sync_kick" } }),
+    );
+  });
+
+  it("rescheduleAppointmentAction kicks the inline sync and still returns ok:true when it rejects", async () => {
+    const { reportError } = await import("@/lib/errors/report");
+    rescheduleAppointment.mockResolvedValue({
+      ok: true,
+      data: { taskId: "succ-1", oldTaskId: "task-1", chainId: "chain-1", duplicate: false },
+    });
+    kickCalendarMutationSync.mockRejectedValueOnce(new Error("kick exploded"));
+
+    const result = await rescheduleAppointmentAction({
+      taskId: "task-1",
+      date: "2026-09-02",
+      time: "15:00",
+      timeZone: "America/Chicago",
+      durationMinutes: 30,
+    });
+
+    expect(kickCalendarMutationSync).toHaveBeenCalledWith({ __admin: true });
+    expect(result).toEqual({
+      ok: true,
+      data: { taskId: "succ-1", oldTaskId: "task-1", chainId: "chain-1", duplicate: false },
+    });
+    expect(reportError).toHaveBeenCalledWith(
+      expect.any(Error),
+      expect.objectContaining({ tags: { surface: "reschedule_appointment_action_inline_sync_kick" } }),
+    );
+  });
+
+  it("reassignAppointmentAction kicks the inline sync and still returns ok:true when it rejects", async () => {
+    const { reportError } = await import("@/lib/errors/report");
+    reassignAppointment.mockResolvedValue({
+      ok: true,
+      data: { taskId: "task-1", oldAssigneeId: "user-1", newAssigneeId: "user-2", duplicate: false },
+    });
+    kickCalendarMutationSync.mockRejectedValueOnce(new Error("kick exploded"));
+
+    const result = await reassignAppointmentAction("task-1", "user-2");
+
+    expect(kickCalendarMutationSync).toHaveBeenCalledWith({ __admin: true });
+    expect(result).toEqual({
+      ok: true,
+      data: { taskId: "task-1", oldAssigneeId: "user-1", newAssigneeId: "user-2", duplicate: false },
+    });
+    expect(reportError).toHaveBeenCalledWith(
+      expect.any(Error),
+      expect.objectContaining({ tags: { surface: "reassign_appointment_action_inline_sync_kick" } }),
+    );
   });
 });
