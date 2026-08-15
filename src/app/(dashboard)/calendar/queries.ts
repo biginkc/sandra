@@ -324,18 +324,55 @@ export async function fetchAssigneeEmails(
 }
 
 /**
- * Month-view retrieval (Codex month-view round 2): a 35/42-day grid must
- * NOT reuse the single-week query as one giant window — `APPOINTMENTS_CAP`
- * is a per-WEEK volume contract ("far above any real org's
- * appointments/week"), and a month at plausible per-week volumes could
- * trip a cap that every individual week clears, leaving Month in an
- * unrecoverable retry state. Instead the month is fetched as its
- * constituent ≤7-day windows — each window carries the exact same
- * week-proven cap semantics (a single WINDOW over the cap still fails
- * closed by design, same as week view) — and concatenated. Windows are
- * disjoint `[startUtc, endUtc)` ranges, so no dedup is needed and the
- * per-window due_at ordering composes into a globally ordered list.
+ * Month-view retrieval, third design (Codex month-view rounds 2+3):
+ * a 35/42-day grid must neither stretch the per-WEEK `APPOINTMENTS_CAP`
+ * over six weeks (round 2 — a month at plausible weekly volumes would
+ * fail closed while every individual week loads) nor be assembled from
+ * per-week SELECTs (round 3 — each statement reads its own snapshot, so
+ * an appointment rescheduled mid-fetch between windows can be omitted by
+ * every window or returned twice). `fn_calendar_month_appointments`
+ * (migration 20260815060000) is a single-statement SECURITY INVOKER SQL
+ * function: one snapshot for all windows, the same per-week cap enforced
+ * INSIDE that snapshot, plus a total cap kept under PostgREST's 1000-row
+ * response ceiling so the result can never be silently truncated in
+ * transit. Any breach RAISEs and the month fails closed into the same
+ * explicit retry state as week view.
  */
+type MonthRpcRow = {
+  id: string;
+  title: string;
+  description: string | null;
+  due_at: string;
+  end_at: string | null;
+  status: string;
+  outcome: string | null;
+  assignee_id: string;
+  related_property_id: string | null;
+  contact_id: string | null;
+  property_address: string | null;
+  property_city: string | null;
+  property_state: string | null;
+  property_deleted_at: string | null;
+  contact_first_name: string | null;
+  contact_last_name: string | null;
+  contact_entity_name: string | null;
+};
+
+type MonthRpcClient = {
+  rpc(
+    fn: "fn_calendar_month_appointments",
+    args: {
+      p_org: string;
+      p_assignee: string | null;
+      p_week_starts: string[];
+      p_week_ends: string[];
+    },
+  ): Promise<{
+    data: MonthRpcRow[] | null;
+    error: { message: string; code?: string } | null;
+  }>;
+};
+
 export async function fetchCalendarAppointmentsForWindows(
   orgId: string,
   opts: {
@@ -343,19 +380,60 @@ export async function fetchCalendarAppointmentsForWindows(
     windows: { startUtc: string; endUtc: string }[];
   },
 ): Promise<FetchCalendarAppointmentsResult> {
-  const results = await Promise.all(
-    opts.windows.map((w) =>
-      fetchCalendarAppointments(orgId, {
-        assigneeId: opts.assigneeId,
-        weekStartUtc: w.startUtc,
-        weekEndUtc: w.endUtc,
-      }),
-    ),
+  const supabase = await createClient();
+  const { data, error } = await (supabase as unknown as MonthRpcClient).rpc(
+    "fn_calendar_month_appointments",
+    {
+      p_org: orgId,
+      p_assignee: opts.assigneeId ?? null,
+      p_week_starts: opts.windows.map((w) => w.startUtc),
+      p_week_ends: opts.windows.map((w) => w.endUtc),
+    },
   );
-  const rows: CalendarAppointmentRow[] = [];
-  for (const result of results) {
-    if (!result.ok) return { ok: false };
-    rows.push(...result.rows);
+
+  if (error || !data) {
+    if (error) {
+      console.error("[calendar] fetchCalendarAppointmentsForWindows failed", {
+        message: error.message,
+        code: error.code,
+      });
+    }
+    return { ok: false };
   }
+
+  // Same shaping rules as the week path's PostgREST-join mapping —
+  // property linkage only counts when the property is alive and
+  // addressable; contact display name prefers entity_name.
+  const rows: CalendarAppointmentRow[] = data.map((row) => {
+    const propertyLinked = Boolean(
+      row.related_property_id &&
+        row.property_deleted_at === null &&
+        row.property_address &&
+        row.property_state,
+    );
+    const contactName =
+      row.contact_entity_name ??
+      ([row.contact_first_name, row.contact_last_name]
+        .filter(Boolean)
+        .join(" ") ||
+        null);
+    return {
+      id: row.id,
+      title: row.title,
+      description: row.description ?? null,
+      due_at: row.due_at,
+      end_at: row.end_at ?? row.due_at,
+      status: row.status,
+      outcome: row.outcome ?? null,
+      assignee_id: row.assignee_id,
+      property_id: propertyLinked ? row.related_property_id : null,
+      address: propertyLinked ? row.property_address : null,
+      city: propertyLinked ? row.property_city : null,
+      state: propertyLinked ? row.property_state : null,
+      contact_id: row.contact_id,
+      contact_name: row.contact_id ? contactName : null,
+    };
+  });
+
   return { ok: true, rows };
 }

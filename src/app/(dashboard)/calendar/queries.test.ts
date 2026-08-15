@@ -84,9 +84,12 @@ function makeMembershipsBuilder(): Record<string, unknown> {
   return builder;
 }
 
+const rpcMock = vi.hoisted(() => vi.fn());
+
 vi.mock("@/lib/supabase/server", () => ({
   createClient: vi.fn(async () => ({
     from: vi.fn(() => makeBuilder()),
+    rpc: rpcMock,
   })),
 }));
 
@@ -116,6 +119,7 @@ beforeEach(() => {
   queuedData = [];
   queuedError = null;
   queuedResponses = [];
+  rpcMock.mockReset();
   eqCalls = [];
   selectCalls = [];
   orderCalls = [];
@@ -701,39 +705,90 @@ describe("fetchCalendarAppointmentsForWindows (month view)", () => {
     { startUtc: "2026-08-09T05:00:00.000Z", endUtc: "2026-08-16T05:00:00.000Z" },
   ];
 
-  it("concatenates per-window rows in window order (disjoint ranges, no dedup needed)", async () => {
-    queuedResponses = [
-      { data: [appointmentRow({ id: "w1-a", due_at: "2026-08-03T15:00:00.000Z" })], error: null },
-      { data: [appointmentRow({ id: "w2-a", due_at: "2026-08-10T15:00:00.000Z" })], error: null },
-    ];
+  function rpcRow(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+    return {
+      id: "t-1",
+      title: "Walkthrough",
+      description: null,
+      due_at: "2026-08-03T15:00:00.000Z",
+      end_at: "2026-08-03T15:30:00.000Z",
+      status: "open",
+      outcome: null,
+      assignee_id: "user-1",
+      related_property_id: null,
+      contact_id: null,
+      property_address: null,
+      property_city: null,
+      property_state: null,
+      property_deleted_at: null,
+      contact_first_name: null,
+      contact_last_name: null,
+      contact_entity_name: null,
+      ...overrides,
+    };
+  }
+
+  it("calls the single-snapshot RPC with the window arrays and maps rows through the week path's shaping rules", async () => {
+    rpcMock.mockResolvedValueOnce({
+      data: [
+        rpcRow({ id: "a1" }),
+        rpcRow({
+          id: "a2",
+          due_at: "2026-08-10T15:00:00.000Z",
+          related_property_id: "prop-1",
+          property_address: "123 Main St",
+          property_city: "Kansas City",
+          property_state: "MO",
+        }),
+        rpcRow({
+          id: "a3",
+          due_at: "2026-08-11T15:00:00.000Z",
+          related_property_id: "prop-2",
+          property_address: "9 Gone St",
+          property_state: "MO",
+          property_deleted_at: "2026-08-01T00:00:00.000Z",
+        }),
+      ],
+      error: null,
+    });
     const result = await fetchCalendarAppointmentsForWindows("org-1", {
       windows: WINDOWS,
+    });
+    expect(rpcMock).toHaveBeenCalledWith("fn_calendar_month_appointments", {
+      p_org: "org-1",
+      p_assignee: null,
+      p_week_starts: WINDOWS.map((w) => w.startUtc),
+      p_week_ends: WINDOWS.map((w) => w.endUtc),
     });
     expect(result.ok).toBe(true);
     if (result.ok) {
-      expect(result.rows.map((r) => r.id)).toEqual(["w1-a", "w2-a"]);
+      expect(result.rows.map((r) => r.id)).toEqual(["a1", "a2", "a3"]);
+      // Live property -> linked; deleted property -> unlinked (same rule
+      // as the week path).
+      expect(result.rows[1].property_id).toBe("prop-1");
+      expect(result.rows[1].address).toBe("123 Main St");
+      expect(result.rows[2].property_id).toBeNull();
+      expect(result.rows[2].address).toBeNull();
     }
   });
 
-  it("fails closed when ANY window's query fails", async () => {
-    queuedResponses = [
-      { data: [appointmentRow({ id: "w1-a" })], error: null },
-      { data: null, error: { message: "boom", code: "XX000" } },
-    ];
-    const result = await fetchCalendarAppointmentsForWindows("org-1", {
+  it("passes the assignee filter through to the RPC", async () => {
+    rpcMock.mockResolvedValueOnce({ data: [], error: null });
+    await fetchCalendarAppointmentsForWindows("org-1", {
+      assigneeId: "user-9",
       windows: WINDOWS,
     });
-    expect(result.ok).toBe(false);
+    expect(rpcMock).toHaveBeenCalledWith(
+      "fn_calendar_month_appointments",
+      expect.objectContaining({ p_assignee: "user-9" }),
+    );
   });
 
-  it("fails closed when a single window exceeds the per-week cap (same contract as week view)", async () => {
-    const over = Array.from({ length: 901 }, (_, i) =>
-      appointmentRow({ id: `t-${i}` }),
-    );
-    queuedResponses = [
-      { data: over, error: null },
-      { data: [appointmentRow({ id: "w2-a" })], error: null },
-    ];
+  it("fails closed when the RPC errors (volume-cap RAISE included)", async () => {
+    rpcMock.mockResolvedValueOnce({
+      data: null,
+      error: { message: "calendar month volume exceeds cap", code: "P0001" },
+    });
     const result = await fetchCalendarAppointmentsForWindows("org-1", {
       windows: WINDOWS,
     });
