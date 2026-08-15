@@ -123,6 +123,68 @@ function resolveWeek(
 }
 
 /**
+ * Month-view sibling of `resolveWeek`: resolves the anchor day to its
+ * zone-local calendar MONTH, padded to full Sunday-to-Saturday grid rows
+ * (35 or 42 cells — leading cells can fall in the previous month, trailing
+ * ones in the next). Day bounds are walked with the same DST-safe
+ * `addDaysInZone` stepper as the week, never +24h math; only the CELL
+ * COUNT is computed with plain calendar arithmetic (a month's length is a
+ * calendar fact, independent of zone).
+ */
+function resolveMonth(
+  anchor: string | undefined,
+  timeZone: string,
+): { monthKey: string; weekStartDate: string; days: CalendarDayBounds[] } {
+  let anchorInstant: Date;
+  if (anchor && WEEK_DATE_RE.test(anchor)) {
+    const converted = wallTimeToUtc({ date: anchor, time: "12:00", timeZone });
+    anchorInstant = converted.ok ? converted.utc : new Date();
+  } else {
+    anchorInstant = new Date();
+  }
+
+  const { dayStart: anchorDayStart } = getDayBoundsInZone(anchorInstant, timeZone);
+  const monthKey = zonedDateLabel(anchorDayStart, timeZone).slice(0, 7);
+
+  // First zone-local day of the month, then back to its week's Sunday —
+  // same midday-wall-time trick as resolveWeek's anchor conversion.
+  const firstConverted = wallTimeToUtc({
+    date: `${monthKey}-01`,
+    time: "12:00",
+    timeZone,
+  });
+  const firstInstant = firstConverted.ok ? firstConverted.utc : anchorInstant;
+  const { dayStart: monthFirstDayStart } = getDayBoundsInZone(
+    firstInstant,
+    timeZone,
+  );
+  const firstWeekday = weekdayIndexInZone(monthFirstDayStart, timeZone);
+  const gridStart =
+    firstWeekday === 0
+      ? monthFirstDayStart
+      : addDaysInZone(monthFirstDayStart, -firstWeekday, timeZone);
+
+  const [yearNum, monthNum] = monthKey.split("-").map(Number);
+  // Day 0 of the NEXT month = last day of this month (calendar fact).
+  const daysInMonth = new Date(Date.UTC(yearNum, monthNum, 0)).getUTCDate();
+  const cellCount = Math.ceil((firstWeekday + daysInMonth) / 7) * 7;
+
+  const days: CalendarDayBounds[] = [];
+  let cursor = gridStart;
+  for (let i = 0; i < cellCount; i++) {
+    const next = addDaysInZone(cursor, 1, timeZone);
+    days.push({
+      date: zonedDateLabel(cursor, timeZone),
+      startUtc: cursor.toISOString(),
+      endUtc: next.toISOString(),
+    });
+    cursor = next;
+  }
+
+  return { monthKey, weekStartDate: days[0].date, days };
+}
+
+/**
  * Rebuilds the current `/calendar` URL from the already-parsed
  * `searchParams` (Codex round 2 retry link) — a plain re-request of the
  * same view/week/assignee, not a reset to defaults, so retrying after a
@@ -172,7 +234,12 @@ export default async function CalendarPage({
   searchParams?: Promise<CalendarSearchParams>;
 }) {
   const params = (await searchParams) ?? {};
-  const view: CalendarViewMode = params.view === "agenda" ? "agenda" : "week";
+  const view: CalendarViewMode =
+    params.view === "agenda"
+      ? "agenda"
+      : params.view === "month"
+        ? "month"
+        : "week";
 
   const supabase = await createClient();
   const {
@@ -245,9 +312,14 @@ export default async function CalendarPage({
   const prefs = await loadIntegrationPrefs(supabase, user.id);
   const timezone = prefs.timezone;
 
-  const { weekStartDate, days } = resolveWeek(params.week, timezone);
+  // Month view fetches the whole padded grid range through the same
+  // sentinel-capped query as the week (a month is ~5 weeks of rows; the
+  // APPOINTMENTS_CAP contract in queries.ts is unchanged).
+  const monthRange = view === "month" ? resolveMonth(params.week, timezone) : null;
+  const { weekStartDate, days } = monthRange ?? resolveWeek(params.week, timezone);
+  const monthKey = monthRange?.monthKey ?? null;
   const weekStartUtc = days[0].startUtc;
-  const weekEndUtc = days[6].endUtc;
+  const weekEndUtc = days[days.length - 1].endUtc;
 
   const appointmentsResult = await fetchCalendarAppointments(orgId, {
     assigneeId,
@@ -307,6 +379,7 @@ export default async function CalendarPage({
       <CalendarView
         view={view}
         week={weekStartDate}
+        month={monthKey}
         days={days}
         appointments={appointments}
         timezone={timezone}

@@ -15,7 +15,12 @@ import { cn } from "@/lib/utils";
 import type { CalendarViewProps } from "../types";
 
 import { AgendaList } from "./agenda-list";
-import { addDaysToDateKey, todayDateKeyInZone } from "./calendar-shared";
+import {
+  addDaysToDateKey,
+  monthStartDateKey,
+  todayDateKeyInZone,
+} from "./calendar-shared";
+import { MonthGrid } from "./month-grid";
 import { NewBlockButton } from "./new-block-button";
 import { WeekGrid } from "./week-grid";
 
@@ -47,6 +52,7 @@ const TAB_INACTIVE = "text-muted-foreground hover:text-foreground";
 export function CalendarView({
   view,
   week,
+  month,
   days,
   appointments,
   timezone,
@@ -125,6 +131,17 @@ export function CalendarView({
             Week
           </Link>
           <Link
+            href={buildHref({ view: "month" })}
+            data-testid="calendar-view-month"
+            aria-current={view === "month" || undefined}
+            className={cn(
+              TAB_BASE,
+              view === "month" ? TAB_ACTIVE : TAB_INACTIVE,
+            )}
+          >
+            Month
+          </Link>
+          <Link
             href={buildHref({ view: "agenda" })}
             data-testid="calendar-view-agenda"
             aria-current={view === "agenda" || undefined}
@@ -138,8 +155,16 @@ export function CalendarView({
         </div>
 
         <div className="flex items-center gap-3 text-xs font-bold">
+          {/* Month view steps the anchor by whole months (from the month
+              key, NOT the grid's first cell, which can precede the month);
+              week/agenda step by 7 days as before. */}
           <Link
-            href={buildHref({ week: addDaysToDateKey(week, -7) })}
+            href={buildHref({
+              week:
+                view === "month" && month
+                  ? monthStartDateKey(month, -1)
+                  : addDaysToDateKey(week, -7),
+            })}
             data-testid="calendar-week-prev"
             className="text-muted-foreground hover:text-foreground"
           >
@@ -153,7 +178,12 @@ export function CalendarView({
             Today
           </Link>
           <Link
-            href={buildHref({ week: addDaysToDateKey(week, 7) })}
+            href={buildHref({
+              week:
+                view === "month" && month
+                  ? monthStartDateKey(month, 1)
+                  : addDaysToDateKey(week, 7),
+            })}
             data-testid="calendar-week-next"
             className="text-muted-foreground hover:text-foreground"
           >
@@ -186,6 +216,21 @@ export function CalendarView({
           <NewBlockButton currentUserId={currentUserId} />
         </div>
       </div>
+
+      {view === "month" && month ? (
+        <div className="hidden md:block">
+          <MonthGrid
+            currentUserId={currentUserId}
+            days={days}
+            appointments={appointments}
+            timezone={timezone}
+            viewerRole={viewerRole}
+            assignees={assigneeLabels}
+            month={month}
+            dayHref={(date) => buildHref({ view: "week", week: date })}
+          />
+        </div>
+      ) : null}
 
       {view === "week" ? (
         <div className="hidden md:block">
