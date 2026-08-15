@@ -85,6 +85,36 @@ async function ledgerRowsForChain(chainId: string): Promise<LedgerRow[]> {
   return data ?? [];
 }
 
+/** Stands in for the calendar-mutation-sweep worker between real RPC
+ *  calls: every lifecycle RPC opens its own pending ledger row, and the
+ *  NEXT lifecycle call on the same chain would trip the "calendar sync in
+ *  progress" guard until the worker terminalizes it. That guard has its
+ *  own coverage in the 20260814210000 suite — this suite is about
+ *  chain-cancel visibility, so the ledger is finalized between calls the
+ *  same way the worker would after a successful (no-token no-op) sync. */
+async function finalizeChainLedger(chainId: string): Promise<void> {
+  const { error } = await (serviceClient as unknown as {
+    from(table: "task_calendar_mutations"): {
+      update(values: { phase: string }): {
+        eq(
+          column: "calendar_chain_id",
+          value: string,
+        ): {
+          in(
+            column: "phase",
+            values: string[],
+          ): Promise<{ error: { message: string } | null }>;
+        };
+      };
+    };
+  })
+    .from("task_calendar_mutations")
+    .update({ phase: "finalized" })
+    .eq("calendar_chain_id", chainId)
+    .in("phase", ["pending", "provider_done", "needs_repair"]);
+  expect(error).toBeNull();
+}
+
 /** Reproduces calendar/queries.ts's `.in("status", ["open", "completed"])`
  *  filter — a row is calendar-visible iff this returns true. */
 function isCalendarVisibleStatus(status: string): boolean {
@@ -205,6 +235,7 @@ describe("Migration 20260815120000 — cancel chain visibility", () => {
       });
 
       const { successorId } = await reschedule(actor.client, predecessorId);
+      await finalizeChainLedger(chainId);
 
       const predecessorAfterReschedule = await readTask(predecessorId);
       expect(predecessorAfterReschedule).toMatchObject({
@@ -259,7 +290,9 @@ describe("Migration 20260815120000 — cancel chain visibility", () => {
       });
 
       const { successorId: hop2Id } = await reschedule(actor.client, hop1Id);
+      await finalizeChainLedger(chainId);
       const { successorId: hop3Id } = await reschedule(actor.client, hop2Id);
+      await finalizeChainLedger(chainId);
 
       const { error: cancelError } = await cancelAppointment(actor.client, { p_task: hop3Id });
       expect(cancelError).toBeNull();
@@ -370,6 +403,7 @@ describe("Migration 20260815120000 — cancel chain visibility", () => {
       expect((chainRows ?? []).length).toBe(2); // predecessor + the one successor
 
       const successorId = first.data!.task_id;
+      await finalizeChainLedger(chainId);
       const { error: cancelError } = await cancelAppointment(actor.client, { p_task: successorId });
       expect(cancelError).toBeNull();
 
