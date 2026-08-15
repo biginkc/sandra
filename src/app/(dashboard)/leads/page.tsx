@@ -19,12 +19,8 @@ export const metadata = {
 
 type LeadsSearchParams = {
   status?: string;
-  assignee?: string;
-  unassigned?: string;
   no_active_sequence?: string;
   skip_traced?: string;
-  stale?: string;
-  sequence_ended?: string;
 };
 
 const LEAD_PAGE_SIZE = 500;
@@ -101,17 +97,6 @@ export default async function LeadsPage({
   // Dashboard click-through: hot leads (interested + offer_sent).
   if (params.status === "hot") {
     q = q.in("status", ["interested", "offer_sent"]);
-  }
-
-  // Dashboard click-through: assignee filter. "me" resolves to current user.
-  const assigneeId = params.assignee === "me" ? user?.id : params.assignee;
-  if (assigneeId) {
-    q = q.eq("assigned_user_id", assigneeId);
-  }
-
-  // Dashboard click-through: unassigned leads.
-  if (params.unassigned === "true") {
-    q = q.is("assigned_user_id", null);
   }
 
   // Dashboard click-through: leads not in a sequence right now.
@@ -279,6 +264,8 @@ export default async function LeadsPage({
           <AddLeadDialog
             markets={markets}
             sources={Array.from(LEAD_SOURCES)}
+            teamMembers={teamMembers}
+            currentUserId={user?.id ?? null}
           />
         }
       />
@@ -348,6 +335,8 @@ export default async function LeadsPage({
                 <AddLeadDialog
                   markets={markets}
                   sources={Array.from(LEAD_SOURCES)}
+                  teamMembers={teamMembers}
+                  currentUserId={user?.id ?? null}
                 />
               </div>
             </>
@@ -364,28 +353,11 @@ function describeFilter(
   if (params.status === "hot") {
     return { label: "Hot leads", note: "interested + offer sent" };
   }
-  if (params.assignee === "me") return { label: "Assigned to me" };
-  if (params.assignee) {
-    return { label: `Assigned to ${params.assignee.slice(0, 8)}…` };
-  }
-  if (params.unassigned === "true") return { label: "Unassigned" };
   if (params.no_active_sequence === "true") {
     return { label: "Not in a sequence" };
   }
   if (params.skip_traced === "false") {
     return { label: "Not skip-traced", note: "no phone numbers gathered yet" };
-  }
-  if (params.stale === "true") {
-    return {
-      label: "Stale conversations",
-      note: "filter coming soon — showing all leads",
-    };
-  }
-  if (params.sequence_ended === "true") {
-    return {
-      label: "Sequences ended without follow-up",
-      note: "filter coming soon — showing all leads",
-    };
   }
   return null;
 }

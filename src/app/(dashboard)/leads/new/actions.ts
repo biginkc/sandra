@@ -5,6 +5,7 @@ import { redirect } from "next/navigation";
 import { createLead, type LeadSource } from "@/lib/leads/create";
 import { errFromUnknown, ok, type Result } from "@/lib/errors/result";
 import { reportError } from "@/lib/errors/report";
+import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
 
 export type NewLeadFormResult = Result<{
@@ -37,6 +38,8 @@ export async function createLeadFromForm(
     last_name: string;
     phone_1: string;
     email: string;
+    assigned_user_id?: string | null;
+    motivation_level?: "hot" | "warm" | "cold" | null;
   },
 ): Promise<NewLeadFormResult> {
   try {
@@ -49,6 +52,46 @@ export async function createLeadFromForm(
         ok: false,
         error: { code: "AUTH", message: "Sign in required." },
       };
+    }
+
+    const assignedUserId =
+      input.assigned_user_id === undefined
+        ? user.id
+        : input.assigned_user_id?.trim() || null;
+    if (assignedUserId && assignedUserId !== user.id) {
+      const { data: myMemberships, error: myMembershipError } = await supabase
+        .from("memberships")
+        .select("org_id")
+        .eq("user_id", user.id);
+      if (myMembershipError) {
+        return {
+          ok: false,
+          error: {
+            code: "ASSIGNEE_VALIDATION_FAILED",
+            message: "We couldn't verify that teammate. Try again.",
+          },
+        };
+      }
+      const orgIds = (myMemberships ?? []).map((membership) => membership.org_id);
+      const admin = createAdminClient();
+      const { data: sharedMembership, error: assigneeError } = orgIds.length
+        ? await admin
+            .from("memberships")
+            .select("user_id")
+            .eq("user_id", assignedUserId)
+            .in("org_id", orgIds)
+            .limit(1)
+            .maybeSingle()
+        : { data: null, error: null };
+      if (assigneeError || !sharedMembership) {
+        return {
+          ok: false,
+          error: {
+            code: "INVALID_ASSIGNEE",
+            message: "Choose a teammate who belongs to your workspace.",
+          },
+        };
+      }
     }
 
     const result = await createLead(supabase, {
@@ -69,6 +112,8 @@ export async function createLeadFromForm(
           }
         : undefined,
       createdBy: user.id,
+      assignedUserId,
+      motivationLevel: input.motivation_level ?? null,
     });
 
     if (!result.ok) {
@@ -120,6 +165,11 @@ export async function submitNewLead(formData: FormData): Promise<void> {
     // Surface the error via a query-string param the form reads.
     redirect(
       `/leads/new?error=${encodeURIComponent(result.error.message)}${result.error.details && typeof result.error.details === "object" && "field" in result.error.details ? `&field=${encodeURIComponent(String(result.error.details.field))}` : ""}`,
+    );
+  }
+  if (result.data.wasDuplicate) {
+    redirect(
+      `/leads/new?error=${encodeURIComponent("A lead already exists at this address. Open the existing record instead.")}`,
     );
   }
   // Degraded save: the phone couldn't be classified and sits on the

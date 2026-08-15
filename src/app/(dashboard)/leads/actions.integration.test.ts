@@ -35,7 +35,7 @@ describe("updatePropertyStatus (integration)", () => {
 
   it("updates status for a valid transition", async () => {
     const id = await seedProperty("new_lead");
-    const result = await updatePropertyStatus(id, "contacted");
+    const result = await updatePropertyStatus(id, "contacted", "new_lead");
     expect(result.ok).toBe(true);
 
     const { data } = await testClient
@@ -55,7 +55,7 @@ describe("updatePropertyStatus (integration)", () => {
       .single();
     // Small delay so the updated_at timestamp can actually move.
     await new Promise((r) => setTimeout(r, 50));
-    const result = await updatePropertyStatus(id, "offer_sent");
+    const result = await updatePropertyStatus(id, "offer_sent", "new_lead");
     expect(result.ok).toBe(true);
     const { data: after } = await testClient
       .from("properties")
@@ -70,7 +70,7 @@ describe("updatePropertyStatus (integration)", () => {
   it("rejects an invalid status with INVALID_STATUS", async () => {
     const id = await seedProperty("new_lead");
     // @ts-expect-error — deliberately passing an invalid status
-    const result = await updatePropertyStatus(id, "bogus_status");
+    const result = await updatePropertyStatus(id, "bogus_status", "new_lead");
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.error.code).toBe("INVALID_STATUS");
   });
@@ -79,11 +79,33 @@ describe("updatePropertyStatus (integration)", () => {
     const result = await updatePropertyStatus(
       "00000000-0000-0000-0000-000000000000",
       "contacted",
+      "new_lead",
     );
     expect(result.ok).toBe(false);
     if (!result.ok) {
-      expect(result.error.code).toBe("STATUS_UPDATE_NOT_SAVED");
+      expect(result.error.code).toBe("STATUS_CONFLICT");
     }
+  });
+
+  it("rejects a stale move without overwriting the newer stage", async () => {
+    const id = await seedProperty("interested");
+
+    const result = await updatePropertyStatus(id, "offer_sent", "contacted");
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.code).toBe("STATUS_CONFLICT");
+    const { data } = await testClient
+      .from("properties")
+      .select("status")
+      .eq("id", id)
+      .single();
+    expect(data?.status).toBe("interested");
+  });
+
+  it("treats an already-at-target move as idempotent success", async () => {
+    const id = await seedProperty("contacted");
+    const result = await updatePropertyStatus(id, "contacted", "contacted");
+    expect(result.ok).toBe(true);
   });
 
   it("qualifyLeadsBulk collects per-id failures without aborting the batch", async () => {
@@ -137,9 +159,11 @@ describe("updatePropertyStatus (integration)", () => {
       "dead",
     ] as const;
     const id = await seedProperty("new_lead");
+    let previous = "new_lead" as (typeof statuses)[number];
     for (const s of statuses) {
-      const result = await updatePropertyStatus(id, s);
+      const result = await updatePropertyStatus(id, s, previous);
       expect(result.ok, `status=${s}`).toBe(true);
+      previous = s;
     }
   });
 });

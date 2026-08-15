@@ -1,7 +1,7 @@
 "use client";
 
 import { PlusIcon } from "lucide-react";
-import { useRef, useState, useTransition, type FormEvent } from "react";
+import { useRef, useState, type FormEvent } from "react";
 import { useRouter } from "next/navigation";
 
 import { Button } from "@/components/ui/button";
@@ -18,41 +18,52 @@ import { Label } from "@/components/ui/label";
 
 import { createLeadFromForm } from "./new/actions";
 import { SOURCE_LABELS, STATES } from "./new/form-options";
+import type { TeamMember } from "./actions";
 
 type AddLeadDialogProps = {
   markets: string[];
   sources: string[];
+  teamMembers: TeamMember[];
+  currentUserId: string | null;
   buttonClassName?: string;
 };
 
 export function AddLeadDialog({
   markets,
   sources,
+  teamMembers,
+  currentUserId,
   buttonClassName,
 }: AddLeadDialogProps) {
   const router = useRouter();
   const formRef = useRef<HTMLFormElement>(null);
   const [open, setOpen] = useState(false);
   const [dirty, setDirty] = useState(false);
-  const [isPending, startTransition] = useTransition();
+  const savingRef = useRef(false);
+  const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [duplicatePropertyId, setDuplicatePropertyId] = useState<string | null>(
+    null,
+  );
   const [showContactWarning, setShowContactWarning] = useState(false);
 
   const resetDialog = () => {
     formRef.current?.reset();
     setDirty(false);
     setError(null);
+    setDuplicatePropertyId(null);
     setShowContactWarning(false);
   };
 
   const requestClose = () => {
-    if (isPending) return;
+    if (savingRef.current) return;
     if (dirty && !window.confirm("Discard this unsaved lead?")) return;
     setOpen(false);
     resetDialog();
   };
 
   const submit = (formData: FormData, allowWithoutContact = false) => {
+    if (savingRef.current) return;
     const phone = String(formData.get("phone_1") ?? "").trim();
     const email = String(formData.get("email") ?? "").trim();
     if (!allowWithoutContact && !phone && !email) {
@@ -62,6 +73,7 @@ export function AddLeadDialog({
 
     setShowContactWarning(false);
     setError(null);
+    setDuplicatePropertyId(null);
     const input = {
       source: String(formData.get("source") ?? ""),
       address: String(formData.get("address") ?? "").trim(),
@@ -73,10 +85,17 @@ export function AddLeadDialog({
       last_name: String(formData.get("last_name") ?? "").trim(),
       phone_1: phone,
       email,
+      assigned_user_id: String(formData.get("assigned_user_id") ?? "").trim(),
+      motivation_level:
+        (String(formData.get("motivation_level") ?? "").trim() as
+          | "hot"
+          | "warm"
+          | "cold") || null,
     };
 
-    startTransition(() => {
-      void (async () => {
+    savingRef.current = true;
+    setIsSaving(true);
+    void (async () => {
         let result: Awaited<ReturnType<typeof createLeadFromForm>>;
         try {
           result = await createLeadFromForm(input);
@@ -88,6 +107,10 @@ export function AddLeadDialog({
           setError(result.error.message);
           return;
         }
+        if (result.data.wasDuplicate) {
+          setDuplicatePropertyId(result.data.propertyId);
+          return;
+        }
 
         setDirty(false);
         setOpen(false);
@@ -97,8 +120,10 @@ export function AddLeadDialog({
             )}`
           : "";
         router.push(`/leads/${result.data.propertyId}${warning}`);
-      })();
-    });
+      })().finally(() => {
+        savingRef.current = false;
+        setIsSaving(false);
+      });
   };
 
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
@@ -119,7 +144,7 @@ export function AddLeadDialog({
           else requestClose();
         }}
       >
-        <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-2xl">
+        <DialogContent className="flex max-h-[calc(100dvh-2rem)] grid-rows-none flex-col overflow-hidden sm:max-w-2xl">
           <DialogHeader>
             <DialogTitle>Add a lead</DialogTitle>
             <DialogDescription>
@@ -134,25 +159,64 @@ export function AddLeadDialog({
             onChange={() => {
               setDirty(true);
               setShowContactWarning(false);
+              setDuplicatePropertyId(null);
             }}
-            className="flex flex-col gap-4"
+            className="flex min-h-0 flex-1 flex-col"
           >
-            <fieldset className="border-border flex flex-col gap-2 rounded-lg border p-4">
+            <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto pr-1">
+            <fieldset className="border-border flex flex-col gap-3 rounded-lg border p-4">
               <legend className="px-1 text-sm font-semibold">Source</legend>
-              <Label htmlFor="add-lead-source">How did this lead come in?</Label>
-              <select
-                id="add-lead-source"
-                name="source"
-                required
-                className="border-input bg-background flex h-10 w-full rounded-md border px-3 py-2 text-sm"
-                defaultValue="cold_call"
-              >
-                {sources.map((source) => (
-                  <option key={source} value={source}>
-                    {SOURCE_LABELS[source] ?? source}
-                  </option>
-                ))}
-              </select>
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <div className="flex flex-col gap-1.5">
+                  <Label htmlFor="add-lead-source">How did this lead come in?</Label>
+                  <select
+                    id="add-lead-source"
+                    name="source"
+                    required
+                    className="border-input bg-background flex h-10 w-full rounded-md border px-3 py-2 text-sm"
+                    defaultValue="cold_call"
+                  >
+                    {sources.map((source) => (
+                      <option key={source} value={source}>
+                        {SOURCE_LABELS[source] ?? source}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div className="flex flex-col gap-1.5">
+                  <Label htmlFor="add-lead-assignee">Assigned teammate</Label>
+                  <select
+                    id="add-lead-assignee"
+                    name="assigned_user_id"
+                    className="border-input bg-background flex h-10 w-full rounded-md border px-3 py-2 text-sm"
+                    defaultValue={currentUserId ?? ""}
+                  >
+                    {currentUserId ? <option value={currentUserId}>You</option> : null}
+                    {teamMembers
+                      .filter((member) => member.id !== currentUserId)
+                      .map((member) => (
+                        <option key={member.id} value={member.id}>
+                          {member.email}
+                        </option>
+                      ))}
+                    <option value="">Unassigned</option>
+                  </select>
+                </div>
+              </div>
+              <div className="flex flex-col gap-1.5">
+                <Label htmlFor="add-lead-motivation">Motivation (optional)</Label>
+                <select
+                  id="add-lead-motivation"
+                  name="motivation_level"
+                  className="border-input bg-background flex h-10 w-full rounded-md border px-3 py-2 text-sm"
+                  defaultValue=""
+                >
+                  <option value="">Not set</option>
+                  <option value="hot">Hot</option>
+                  <option value="warm">Warm</option>
+                  <option value="cold">Cold</option>
+                </select>
+              </div>
             </fieldset>
 
             <fieldset className="border-border flex flex-col gap-3 rounded-lg border p-4">
@@ -287,6 +351,7 @@ export function AddLeadDialog({
                   variant="outline"
                   size="sm"
                   className="mt-3"
+                  disabled={isSaving}
                   onClick={() => {
                     if (formRef.current) {
                       submit(new FormData(formRef.current), true);
@@ -308,17 +373,46 @@ export function AddLeadDialog({
               </div>
             ) : null}
 
-            <DialogFooter className="mx-0 mb-0 rounded-lg">
+            {duplicatePropertyId ? (
+              <div
+                className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950"
+                role="alert"
+                aria-live="polite"
+              >
+                <p className="font-semibold">
+                  A lead already exists at this address.
+                </p>
+                <p className="mt-1 text-xs">
+                  Nothing new was created. Open the existing record to review it.
+                </p>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="mt-3"
+                  onClick={() => {
+                    setDirty(false);
+                    setOpen(false);
+                    router.push(`/leads/${duplicatePropertyId}`);
+                  }}
+                >
+                  Open existing lead
+                </Button>
+              </div>
+            ) : null}
+            </div>
+
+            <DialogFooter className="bg-background mx-0 mb-0 shrink-0 rounded-lg pt-3">
               <Button
                 type="button"
                 variant="outline"
                 onClick={requestClose}
-                disabled={isPending}
+                disabled={isSaving}
               >
                 Cancel
               </Button>
-              <Button type="submit" disabled={isPending}>
-                {isPending ? "Creating…" : "Create lead"}
+              <Button type="submit" disabled={isSaving}>
+                {isSaving ? "Creating…" : "Create lead"}
               </Button>
             </DialogFooter>
           </form>

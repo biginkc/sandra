@@ -14,14 +14,16 @@ vi.mock("@/lib/csv/normalize", async () => {
   return actual;
 });
 
-// eslint-disable-next-line import/first
 import { createLead } from "./create";
 
-type Response = { data: unknown; error: { message: string } | null };
+type Response = {
+  data: unknown;
+  error: { message: string; code?: string } | null;
+};
 
 type CallRecord = {
   table: string;
-  op: "select" | "insert" | "update";
+  op: "select" | "insert" | "update" | "delete";
   insertPayload?: unknown;
   filters: Array<{ op: string; args: unknown[] }>;
 };
@@ -58,6 +60,10 @@ function makeBuilder(record: CallRecord): Record<string, unknown> {
   builder.update = (payload: unknown) => {
     record.insertPayload = payload;
     record.op = "update";
+    return builder;
+  };
+  builder.delete = () => {
+    record.op = "delete";
     return builder;
   };
   builder.eq = (...args: unknown[]) => {
@@ -118,6 +124,8 @@ describe("createLead — phase 02 D-04 county_id pass-through", () => {
           market: "Buchanan County MO",
           county_id: "buchanan-county-id",
         },
+        assignedUserId: "teammate-id",
+        motivationLevel: "hot",
       },
     );
 
@@ -130,6 +138,8 @@ describe("createLead — phase 02 D-04 county_id pass-through", () => {
     const payload = propertyInsert!.insertPayload as Record<string, unknown>;
     expect(payload.market).toBe("Buchanan County MO");
     expect(payload.county_id).toBe("buchanan-county-id");
+    expect(payload.assigned_user_id).toBe("teammate-id");
+    expect(payload.motivation_level).toBe("hot");
   });
 
   it("sets county_id to null when not supplied (webhook payloads etc.)", async () => {
@@ -159,5 +169,72 @@ describe("createLead — phase 02 D-04 county_id pass-through", () => {
     expect(payload.county_id).toBeNull();
     // Existing market behavior unchanged: null when not supplied.
     expect(payload.market).toBeNull();
+  });
+
+  it("turns a unique-address insert race into an explicit duplicate before contact creation", async () => {
+    responseQueue = [
+      { data: null, error: null },
+      {
+        data: null,
+        error: {
+          code: "23505",
+          message: "duplicate key value violates unique constraint",
+        },
+      },
+      {
+        data: { id: "prop-race-winner", homeowner_contact_id: null },
+        error: null,
+      },
+    ];
+
+    const result = await createLead(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      makeSupabase() as any,
+      {
+        source: "referral",
+        property: { address: "10 Race Way", state: "MO" },
+        contact: { first_name: "Would", last_name: "Orphan" },
+      },
+    );
+
+    expect(result).toEqual({
+      ok: true,
+      data: {
+        propertyId: "prop-race-winner",
+        wasDuplicate: true,
+        contactId: null,
+        phoneDropped: null,
+      },
+    });
+    expect(calls.filter((call) => call.table === "contacts")).toHaveLength(0);
+  });
+
+  it("cleans up a newly created contact when the homeowner attach changes zero rows", async () => {
+    responseQueue = [
+      { data: null, error: null },
+      { data: { id: "prop-new" }, error: null },
+      { data: null, error: null },
+      { data: { id: "contact-new" }, error: null },
+      { data: null, error: null },
+      { data: null, error: null },
+    ];
+
+    const result = await createLead(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      makeSupabase() as any,
+      {
+        source: "referral",
+        property: { address: "11 Attach Race Way", state: "MO" },
+        contact: { first_name: "New", last_name: "Owner" },
+      },
+    );
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.code).toBe("INTERNAL");
+    expect(
+      calls.some(
+        (call) => call.table === "contacts" && call.op === "delete",
+      ),
+    ).toBe(true);
   });
 });

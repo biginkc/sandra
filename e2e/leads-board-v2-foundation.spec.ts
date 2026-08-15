@@ -94,15 +94,33 @@ test("Leads board v2 foundation is usable at desktop and narrow widths", async (
     ]);
   await expect(page.getByRole("button", { name: "Expand Closed" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Expand Dead" })).toBeVisible();
-  await expect(
-    page.getByRole("combobox", { name: "Show all leads or choose a teammate" }),
-  ).toHaveValue("all");
+  await expect(page.getByRole("button", { name: "All leads" })).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
+  await expect(page.getByRole("button", { name: "My leads" })).toHaveAttribute(
+    "aria-pressed",
+    "false",
+  );
+
+  await page.goto("/leads?assignee=missing-user&stale=true");
+  await expect(page.getByText("123 Foundation Ave")).toBeVisible();
+  await expect(page.getByText("Stale conversations")).toHaveCount(0);
+  await expect(page.getByText(/Assigned to missing/i)).toHaveCount(0);
+  await page.goto("/leads");
 
   await page.getByRole("button", { name: "Add lead" }).click();
   await expect(page.getByRole("dialog")).toBeVisible();
   await expect(page.getByLabel("Street address")).toBeVisible();
   await expect(page.getByLabel("State")).toBeVisible();
   await expect(page.getByLabel("Market")).toBeVisible();
+  await expect(page.getByLabel("Assigned teammate")).toBeVisible();
+  await expect(page.getByLabel("Motivation (optional)")).toBeVisible();
+  const desktopCreateBox = await page
+    .getByRole("button", { name: "Create lead" })
+    .boundingBox();
+  expect(desktopCreateBox).not.toBeNull();
+  expect(desktopCreateBox!.y + desktopCreateBox!.height).toBeLessThanOrEqual(720);
   await page.screenshot({
     path: testInfo.outputPath("leads-add-dialog-desktop.png"),
     fullPage: true,
@@ -116,10 +134,27 @@ test("Leads board v2 foundation is usable at desktop and narrow widths", async (
   });
 
   await page.getByRole("textbox", { name: "Search leads" }).fill("no-such-lead");
+  await expect(page).toHaveURL(/\/leads$/);
   await expect(page.getByText("No leads match these filters")).toBeVisible();
   await expect(page.getByRole("button", { name: /Search: no-such-lead/ })).toBeVisible();
   await page.getByRole("button", { name: "Reset all", exact: true }).click();
   await expect(page.getByText("123 Foundation Ave")).toBeVisible();
+
+  await page.setViewportSize({ width: 390, height: 600 });
+  await page.getByRole("button", { name: "Add lead" }).click();
+  await expect(page.getByRole("dialog")).toBeVisible();
+  const narrowCreateBox = await page
+    .getByRole("button", { name: "Create lead" })
+    .boundingBox();
+  expect(narrowCreateBox).not.toBeNull();
+  expect(narrowCreateBox!.y + narrowCreateBox!.height).toBeLessThanOrEqual(600);
+  await page.waitForTimeout(200);
+  await page.screenshot({
+    path: testInfo.outputPath("leads-add-dialog-narrow.png"),
+    fullPage: true,
+  });
+  await page.getByRole("button", { name: "Cancel" }).click();
+  await expect(page.getByRole("dialog")).toBeHidden();
 
   await page.setViewportSize({ width: 390, height: 844 });
   await expect(page.getByTestId("leads-board-scroll")).toBeVisible();

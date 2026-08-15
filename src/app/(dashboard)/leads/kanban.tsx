@@ -13,7 +13,7 @@ import {
   type DragStartEvent,
 } from "@dnd-kit/core";
 import { ChevronDownIcon, ChevronRightIcon, SearchIcon, XIcon } from "lucide-react";
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 
 import { Badge } from "@/components/ui/badge";
@@ -73,6 +73,8 @@ type MoveFailure = {
   attemptedStatus: PropertyStatus;
   previousStatus: PropertyStatus;
 };
+
+const COLLAPSED_STORAGE_KEY = "sandra.leads.collapsed";
 
 const MOTIVATION_DOT: Record<MotivationLevel, string> = {
   hot: "bg-red-500",
@@ -136,6 +138,28 @@ export function Kanban({
   const [retryingIds, setRetryingIds] = useState<Set<string>>(new Set());
   const inFlightMoveIds = useRef(new Set<string>());
   const renderedAtMs = new Date(renderedAt).getTime();
+
+  useEffect(() => {
+    try {
+      const raw = window.localStorage.getItem(COLLAPSED_STORAGE_KEY);
+      if (raw === null) return;
+      const parsed: unknown = JSON.parse(raw);
+      if (
+        !Array.isArray(parsed) ||
+        !parsed.every(
+          (status) =>
+            typeof status === "string" &&
+            STATUS_ORDER.includes(status as PropertyStatus),
+        )
+      ) {
+        return;
+      }
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- reconcile the SSR-safe default with a validated client preference after mount.
+      setCollapsed(new Set(parsed as PropertyStatus[]));
+    } catch {
+      // Malformed or unavailable storage keeps the safe Closed/Dead default.
+    }
+  }, []);
 
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 4 } }),
@@ -229,6 +253,14 @@ export function Kanban({
       const next = new Set(previous);
       if (next.has(status)) next.delete(status);
       else next.add(status);
+      try {
+        window.localStorage.setItem(
+          COLLAPSED_STORAGE_KEY,
+          JSON.stringify(Array.from(next)),
+        );
+      } catch {
+        // The interaction still works when storage is unavailable.
+      }
       return next;
     });
   };
@@ -261,7 +293,7 @@ export function Kanban({
     }
 
     const result = await callAction(
-      updatePropertyStatus(lead.id, attemptedStatus),
+      updatePropertyStatus(lead.id, attemptedStatus, previousStatus),
       {
         successMessage: `Moved ${lead.address} to ${STATUS_LABEL[attemptedStatus]}`,
         fallbackMessage: `Could not move ${lead.address}`,
@@ -368,11 +400,24 @@ export function Kanban({
           ) : null}
         </div>
 
-        <div
-          className="border-border flex h-8 overflow-hidden rounded-full border"
-          role="group"
-          aria-label="Lead ownership"
-        >
+        <div className="flex flex-wrap items-center gap-2">
+          <div
+            className="border-border flex h-8 overflow-hidden rounded-full border"
+            role="group"
+            aria-label="Lead ownership"
+          >
+            <button
+              type="button"
+              onClick={() => setOwnership("all")}
+              aria-pressed={ownership === "all"}
+              className={`px-4 text-xs font-bold transition-colors ${
+                ownership === "all"
+                  ? "bg-primary text-primary-foreground"
+                  : "bg-background text-foreground hover:bg-muted"
+              }`}
+            >
+              All leads
+            </button>
           <button
             type="button"
             onClick={() => setOwnership("mine")}
@@ -386,17 +431,20 @@ export function Kanban({
           >
             My leads
           </button>
+          </div>
           <select
-            value={ownership === "mine" ? "all" : ownership}
-            onChange={(event) => setOwnership(event.target.value)}
-            aria-label="Show all leads or choose a teammate"
-            className={`border-border w-44 border-l px-3 text-xs font-bold outline-none ${
-              ownership !== "mine"
+            value={ownership === "all" || ownership === "mine" ? "" : ownership}
+            onChange={(event) => {
+              if (event.target.value) setOwnership(event.target.value);
+            }}
+            aria-label="Choose a teammate"
+            className={`border-border h-8 w-40 rounded-full border px-3 text-xs font-bold outline-none ${
+              ownership !== "all" && ownership !== "mine"
                 ? "bg-primary text-primary-foreground"
                 : "bg-background text-foreground"
             }`}
           >
-            <option value="all">All leads</option>
+            <option value="">Teammate</option>
             {teamMembers
               .filter((member) => member.id !== currentUserId)
               .map((member) => (
@@ -741,6 +789,15 @@ function LeadCard({
       onClick={onClick}
       {...attributes}
       {...listeners}
+      role="link"
+      tabIndex={0}
+      aria-label={`Open lead at ${lead.address}`}
+      onKeyDown={(event) => {
+        if ((event.key === "Enter" || event.key === " ") && onClick) {
+          event.preventDefault();
+          onClick();
+        }
+      }}
     >
       {hasUnread ? (
         <span
@@ -889,6 +946,7 @@ function LeadCard({
             className="shrink-0 font-bold underline underline-offset-2 disabled:opacity-50"
             disabled={isRetrying}
             onPointerDown={(event) => event.stopPropagation()}
+            onKeyDown={(event) => event.stopPropagation()}
             onClick={(event) => {
               event.stopPropagation();
               onRetry?.();

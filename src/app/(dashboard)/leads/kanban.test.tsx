@@ -108,6 +108,7 @@ function column(status: string): HTMLElement {
 }
 
 beforeEach(() => {
+  window.localStorage.clear();
   updatePropertyStatus.mockReset();
   routerPush.mockReset();
   dndHandlers.onDragStart = null;
@@ -115,9 +116,8 @@ beforeEach(() => {
 });
 
 describe("Leads Kanban foundation", () => {
-  it("renders the approved column order and resets Closed/Dead to collapsed on remount", async () => {
-    const user = userEvent.setup();
-    const view = renderBoard([makeLead()]);
+  it("renders the approved column order and defaults Closed/Dead to collapsed without a stored preference", () => {
+    renderBoard([makeLead()]);
     expect(
       Array.from(document.querySelectorAll("[data-status]")).map((element) =>
         element.getAttribute("data-status"),
@@ -135,12 +135,25 @@ describe("Leads Kanban foundation", () => {
     expect(screen.getByRole("button", { name: "Expand Closed" })).toBeVisible();
     expect(screen.getByRole("button", { name: "Expand Dead" })).toBeVisible();
 
-    await user.click(screen.getByRole("button", { name: "Expand Closed" }));
+  });
+
+  it("restores and updates a valid collapsed-column preference", async () => {
+    const user = userEvent.setup();
+    window.localStorage.setItem(
+      "sandra.leads.collapsed",
+      JSON.stringify(["interested"]),
+    );
+    renderBoard([makeLead()]);
+
+    expect(
+      await screen.findByRole("button", { name: "Expand Interested" }),
+    ).toBeVisible();
     expect(screen.getByRole("button", { name: "Collapse Closed" })).toBeVisible();
 
-    view.unmount();
-    renderBoard([makeLead()]);
-    expect(screen.getByRole("button", { name: "Expand Closed" })).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Collapse Closed" }));
+    expect(JSON.parse(window.localStorage.getItem("sandra.leads.collapsed")!)).toEqual(
+      expect.arrayContaining(["interested", "closed"]),
+    );
   });
 
   it("defaults to All leads and keeps My leads and teammate selection exclusive", async () => {
@@ -154,23 +167,27 @@ describe("Leads Kanban foundation", () => {
       }),
     ]);
 
+    const all = screen.getByRole("button", { name: "All leads" });
     const mine = screen.getByRole("button", { name: "My leads" });
-    const ownerSelect = screen.getByRole("combobox", {
-      name: "Show all leads or choose a teammate",
+    const teammateSelect = screen.getByRole("combobox", {
+      name: "Choose a teammate",
     });
+    expect(all).toHaveAttribute("aria-pressed", "true");
     expect(mine).toHaveAttribute("aria-pressed", "false");
-    expect(ownerSelect).toHaveValue("all");
+    expect(teammateSelect).toHaveValue("");
     expect(screen.getByText("123 Main St")).toBeVisible();
     expect(screen.getByText("456 Oak Ave")).toBeVisible();
 
     await user.click(mine);
+    expect(all).toHaveAttribute("aria-pressed", "false");
     expect(mine).toHaveAttribute("aria-pressed", "true");
     expect(screen.getByText("123 Main St")).toBeVisible();
     expect(screen.queryByText("456 Oak Ave")).not.toBeInTheDocument();
 
-    await user.selectOptions(ownerSelect, "user-other");
+    await user.selectOptions(teammateSelect, "user-other");
+    expect(all).toHaveAttribute("aria-pressed", "false");
     expect(mine).toHaveAttribute("aria-pressed", "false");
-    expect(ownerSelect).toHaveValue("user-other");
+    expect(teammateSelect).toHaveValue("user-other");
     expect(screen.queryByText("123 Main St")).not.toBeInTheDocument();
     expect(screen.getByText("456 Oak Ave")).toBeVisible();
   });
@@ -248,6 +265,17 @@ describe("Leads Kanban foundation", () => {
     );
   });
 
+  it("opens a lead from the card with the keyboard", async () => {
+    const user = userEvent.setup();
+    renderBoard([makeLead()]);
+
+    const card = screen.getByRole("link", { name: "Open lead at 123 Main St" });
+    card.focus();
+    await user.keyboard("{Enter}");
+
+    expect(routerPush).toHaveBeenCalledWith("/leads/lead-a");
+  });
+
   it("reverts a failed move, keeps a Retry marker, then moves after a verified retry", async () => {
     const user = userEvent.setup();
     updatePropertyStatus
@@ -279,5 +307,17 @@ describe("Leads Kanban foundation", () => {
       screen.queryByText("Couldn't move to Contacted. Not saved."),
     ).not.toBeInTheDocument();
     expect(updatePropertyStatus).toHaveBeenCalledTimes(2);
+    expect(updatePropertyStatus).toHaveBeenNthCalledWith(
+      1,
+      "lead-a",
+      "contacted",
+      "new_lead",
+    );
+    expect(updatePropertyStatus).toHaveBeenNthCalledWith(
+      2,
+      "lead-a",
+      "contacted",
+      "new_lead",
+    );
   });
 });

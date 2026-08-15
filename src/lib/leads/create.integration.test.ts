@@ -113,7 +113,7 @@ describe("createLead (integration)", () => {
     expect(b.data.contactId).toBe(a.data.contactId);
   });
 
-  it("attaches contact to existing property only if it has none yet", async () => {
+  it("returns a duplicate before creating a contact when the existing property has no homeowner", async () => {
     // First call: no contact, just the address
     const first = await createLead(supabase, {
       source: "cold_call",
@@ -129,7 +129,8 @@ describe("createLead (integration)", () => {
       .single();
     expect(propBefore!.homeowner_contact_id).toBeNull();
 
-    // Second call: same address, with contact — should attach
+    // Second call: same address, with contact — duplicate is explicit and
+    // the submitted contact must not be created or attached.
     const second = await createLead(supabase, {
       source: "cold_call",
       property: { address: "5 Attach Ln", state: "MO" },
@@ -137,13 +138,50 @@ describe("createLead (integration)", () => {
     });
     expect(second.ok).toBe(true);
     if (!second.ok) return;
+    expect(second.data.wasDuplicate).toBe(true);
+    expect(second.data.contactId).toBeNull();
 
     const { data: propAfter } = await supabase
       .from("properties")
       .select("homeowner_contact_id")
       .eq("id", first.data.propertyId)
       .single();
-    expect(propAfter!.homeowner_contact_id).toBe(second.data.contactId);
+    expect(propAfter!.homeowner_contact_id).toBeNull();
+    const { count } = await supabase
+      .from("contacts")
+      .select("*", { count: "exact", head: true });
+    expect(count).toBe(0);
+  });
+
+  it("preserves an existing homeowner and creates no contact on duplicate address", async () => {
+    const first = await createLead(supabase, {
+      source: "cold_call",
+      property: { address: "5 Existing Owner Ln", state: "MO" },
+      contact: { phone_1: "+18165551006", first_name: "Existing" },
+    });
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+
+    const second = await createLead(supabase, {
+      source: "referral",
+      property: { address: "5 Existing Owner Ln", state: "MO" },
+      contact: { phone_1: "+18165551007", first_name: "Submitted" },
+    });
+    expect(second.ok).toBe(true);
+    if (!second.ok) return;
+    expect(second.data.wasDuplicate).toBe(true);
+    expect(second.data.contactId).toBeNull();
+
+    const { data: property } = await supabase
+      .from("properties")
+      .select("homeowner_contact_id")
+      .eq("id", first.data.propertyId)
+      .single();
+    expect(property?.homeowner_contact_id).toBe(first.data.contactId);
+    const { count } = await supabase
+      .from("contacts")
+      .select("*", { count: "exact", head: true });
+    expect(count).toBe(1);
   });
 
   it("rejects with VALIDATION when address is missing", async () => {

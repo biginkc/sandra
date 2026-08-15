@@ -40,6 +40,7 @@ export const LEAD_SOURCES = [
 ] as const;
 
 export type LeadSource = (typeof LEAD_SOURCES)[number];
+export type LeadMotivation = "hot" | "warm" | "cold";
 
 export type CreateLeadInput = {
   /** How the lead got into the pipeline. Required — drives KPI / attribution. */
@@ -67,17 +68,23 @@ export type CreateLeadInput = {
     phone_1?: string | null;
     email?: string | null;
   };
-  /** Optional caller-supplied user id to stamp on `created_by`. Webhook
+  /** Historical creator fallback used as the default assignee. Webhook
    *  callers leave this null. */
   createdBy?: string | null;
+  /** Explicit board owner. Omitted callers retain the historical behavior
+   *  of assigning the creator; null intentionally leaves the lead unassigned. */
+  assignedUserId?: string | null;
+  /** Optional seller motivation captured by the quick-entry form. */
+  motivationLevel?: LeadMotivation | null;
 };
 
 export type CreateLeadResult = {
   propertyId: string;
-  /** True if the property already existed (matched by normalized address)
-   *  and we just attached the contact + source. False = brand new row. */
+  /** True if the property already existed (matched by normalized address).
+   *  Duplicate requests do not modify the property or create a contact. */
   wasDuplicate: boolean;
-  /** Resolved homeowner contact id, if a contact was provided. */
+  /** Resolved homeowner contact id for a newly created lead. Duplicate
+   *  results return null because submitted contact data was not processed. */
   contactId: string | null;
   /** Set when the submitted phone could not be classified (Telnyx
    *  unconfigured / unreachable / unknown line type) and was therefore
@@ -104,8 +111,10 @@ export type CreateLeadError = {
  * Behaviour:
  *   - Property dedup by `address_normalized`. If a property already
  *     exists at that address, return its id with `wasDuplicate=true`
- *     and (if contact info was supplied) attach the contact as the
- *     homeowner only when the property has none yet.
+ *     before resolving or creating any submitted contact.
+ *   - A new property claims the unique address before contact work. This
+ *     makes a concurrent unique-index loser an explicit duplicate without
+ *     creating an orphan contact.
  *   - Contact dedup by phone_1 → email → (first_name + last_name).
  *     Reuses the strict matching the CSV ingest uses so a re-submitted
  *     lead never spawns a duplicate contact row.
@@ -154,6 +163,20 @@ export async function createLead(
       },
     };
   }
+  if (
+    input.motivationLevel !== undefined &&
+    input.motivationLevel !== null &&
+    !(["hot", "warm", "cold"] as const).includes(input.motivationLevel)
+  ) {
+    return {
+      ok: false,
+      error: {
+        code: "VALIDATION",
+        message: "Motivation must be hot, warm, cold, or not set.",
+        field: "motivationLevel",
+      },
+    };
+  }
 
   const cityNorm = normalizeDisplayAddress(input.property.city) || null;
   const zipNorm = normalizeZip(input.property.zip ?? null);
@@ -164,12 +187,10 @@ export async function createLead(
   const lastNorm = normalizeName(input.contact?.last_name) || null;
 
   // ---- 2. Look up existing property by normalized address ------------
-  let propertyId: string | null = null;
-  let wasDuplicate = false;
   if (addressNormalized) {
     const { data: existing, error: lookupErr } = await supabase
       .from("properties")
-      .select("id, homeowner_contact_id")
+      .select("id")
       .eq("address_normalized", addressNormalized)
       .is("deleted_at", null)
       .limit(1)
@@ -181,12 +202,76 @@ export async function createLead(
       };
     }
     if (existing) {
-      propertyId = existing.id;
-      wasDuplicate = true;
+      return {
+        ok: true,
+        data: {
+          propertyId: existing.id,
+          wasDuplicate: true,
+          contactId: null,
+          phoneDropped: null,
+        },
+      };
     }
   }
 
-  // ---- 3. Resolve / create contact (if any was supplied) -------------
+  // ---- 3. Claim the property address before creating a contact --------
+  // The unique address index is the final race arbiter. Inserting the
+  // property first ensures a concurrent loser returns the winner as a
+  // duplicate without ever creating an unattached contact.
+  const insertRow: Database["public"]["Tables"]["properties"]["Insert"] = {
+    status: "new_lead",
+    address: addressRaw,
+    city: cityNorm,
+    state: stateNorm,
+    zip: zipNorm,
+    market: input.property.market ?? null,
+    county_id: input.property.county_id ?? null,
+    address_normalized: addressNormalized,
+    source: input.source,
+    homeowner_contact_id: null,
+    assigned_user_id:
+      input.assignedUserId === undefined
+        ? (input.createdBy ?? null)
+        : input.assignedUserId,
+    motivation_level: input.motivationLevel ?? null,
+  };
+  const { data: inserted, error: insertErr } = await supabase
+    .from("properties")
+    .insert(insertRow)
+    .select("id")
+    .single();
+  if (insertErr || !inserted) {
+    if (insertErr?.code === "23505" && addressNormalized) {
+      const { data: winner, error: winnerError } = await supabase
+        .from("properties")
+        .select("id")
+        .eq("address_normalized", addressNormalized)
+        .is("deleted_at", null)
+        .limit(1)
+        .maybeSingle();
+      if (!winnerError && winner) {
+        return {
+          ok: true,
+          data: {
+            propertyId: winner.id,
+            wasDuplicate: true,
+            contactId: null,
+            phoneDropped: null,
+          },
+        };
+      }
+    }
+    return {
+      ok: false,
+      error: {
+        code: "INSERT_FAILED",
+        message: insertErr?.message ?? "Property insert failed",
+      },
+    };
+  }
+  const propertyId = inserted.id;
+
+  // ---- 4. Resolve / create contact (if any was supplied) -------------
   let contactId: string | null = null;
   let phoneDropped: string | null = null;
   const hasAnyContactField =
@@ -200,56 +285,32 @@ export async function createLead(
     });
     contactId = resolved.id;
     phoneDropped = resolved.phoneDropped;
-  }
-
-  // ---- 4. Create property if new, or attach contact to existing ------
-  if (!propertyId) {
-    const insertRow: Database["public"]["Tables"]["properties"]["Insert"] = {
-      // Post-contact entry — promote past the prospect stage.
-      status: "new_lead",
-      address: addressRaw,
-      city: cityNorm,
-      state: stateNorm,
-      zip: zipNorm,
-      market: input.property.market ?? null,
-      // Phase 02 D-04: market and county_id are set together at
-      // write time. Null when the caller doesn't supply it (webhooks,
-      // current-shape manual form) — CASS verification fills it later.
-      county_id: input.property.county_id ?? null,
-      address_normalized: addressNormalized,
-      source: input.source,
-      homeowner_contact_id: contactId,
-      assigned_user_id: input.createdBy ?? null,
-    };
-    const { data: inserted, error: insertErr } = await supabase
-      .from("properties")
-      .insert(insertRow)
-      .select("id")
-      .single();
-    if (insertErr || !inserted) {
-      return {
-        ok: false,
-        error: {
-          code: "INSERT_FAILED",
-          message: insertErr?.message ?? "Property insert failed",
-        },
-      };
-    }
-    propertyId = inserted.id;
-  } else if (contactId) {
-    // Property existed already; attach contact as homeowner only if
-    // the row has none yet. Don't clobber an existing homeowner — the
-    // operator should reconcile via the unknown-triage flow.
-    await supabase
+    const { data: attached, error: attachError } = await supabase
       .from("properties")
       .update({ homeowner_contact_id: contactId })
       .eq("id", propertyId)
-      .is("homeowner_contact_id", null);
+      .is("homeowner_contact_id", null)
+      .select("id")
+      .maybeSingle();
+    if (attachError || !attached) {
+      if (resolved.created && contactId) {
+        await supabase.from("contacts").delete().eq("id", contactId);
+      }
+      return {
+        ok: false,
+        error: {
+          code: "INTERNAL",
+          message:
+            attachError?.message ??
+            "The lead was created, but its homeowner could not be attached.",
+        },
+      };
+    }
   }
 
   return {
     ok: true,
-    data: { propertyId, wasDuplicate, contactId, phoneDropped },
+    data: { propertyId, wasDuplicate: false, contactId, phoneDropped },
   };
 }
 
@@ -277,7 +338,7 @@ async function resolveOrCreateContact(
     phone_1: string | null;
     email: string | null;
   },
-): Promise<{ id: string | null; phoneDropped: string | null }> {
+): Promise<{ id: string | null; phoneDropped: string | null; created: boolean }> {
   if (contact.phone_1) {
     const { data } = await supabase
       .from("contacts")
@@ -287,7 +348,7 @@ async function resolveOrCreateContact(
       )
       .limit(1)
       .maybeSingle();
-    if (data) return { id: data.id, phoneDropped: null };
+    if (data) return { id: data.id, phoneDropped: null, created: false };
   }
   if (contact.email) {
     const { data } = await supabase
@@ -296,7 +357,7 @@ async function resolveOrCreateContact(
       .ilike("email", contact.email)
       .limit(1)
       .maybeSingle();
-    if (data) return { id: data.id, phoneDropped: null };
+    if (data) return { id: data.id, phoneDropped: null, created: false };
   }
   if (
     !contact.phone_1 &&
@@ -314,7 +375,7 @@ async function resolveOrCreateContact(
       .is("email", null)
       .limit(1)
       .maybeSingle();
-    if (data) return { id: data.id, phoneDropped: null };
+    if (data) return { id: data.id, phoneDropped: null, created: false };
   }
   // Hard rule (migration 080): a phone can't be saved with type
   // 'unknown'. Lead phones arrive untyped, so classify at intake via
@@ -361,5 +422,5 @@ async function resolveOrCreateContact(
   if (error) {
     throw new Error(`contact insert: ${error.message}`);
   }
-  return { id: data.id, phoneDropped };
+  return { id: data.id, phoneDropped, created: true };
 }

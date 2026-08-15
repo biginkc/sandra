@@ -162,12 +162,13 @@ describe("updatePropertyStatus", () => {
   ) {
     const maybeSingle = vi.fn().mockResolvedValue(result);
     const select = vi.fn(() => ({ maybeSingle }));
-    const eq = vi.fn(() => ({ select }));
-    const update = vi.fn(() => ({ eq }));
+    const builder = { eq: vi.fn(), select };
+    builder.eq.mockReturnValue(builder);
+    const update = vi.fn(() => builder);
     createClient.mockResolvedValue({
       from: vi.fn(() => ({ update })),
     });
-    return { update, eq, select, maybeSingle };
+    return { update, eq: builder.eq, select, maybeSingle };
   }
 
   it("returns the persisted row only after the selected status is read back", async () => {
@@ -176,7 +177,11 @@ describe("updatePropertyStatus", () => {
       error: null,
     });
 
-    const result = await updatePropertyStatus("property-1", "contacted");
+    const result = await updatePropertyStatus(
+      "property-1",
+      "contacted",
+      "new_lead",
+    );
 
     expect(result).toEqual({
       ok: true,
@@ -186,13 +191,36 @@ describe("updatePropertyStatus", () => {
       expect.objectContaining({ status: "contacted" }),
     );
     expect(chain.eq).toHaveBeenCalledWith("id", "property-1");
+    expect(chain.eq).toHaveBeenCalledWith("status", "new_lead");
     expect(chain.select).toHaveBeenCalledWith("id, status");
   });
 
   it("fails when the update matched no visible row", async () => {
     mockStatusUpdate({ data: null, error: null });
 
-    const result = await updatePropertyStatus("missing", "contacted");
+    const result = await updatePropertyStatus(
+      "missing",
+      "contacted",
+      "new_lead",
+    );
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe("STATUS_CONFLICT");
+    }
+  });
+
+  it("fails when the persisted read-back does not match the requested stage", async () => {
+    mockStatusUpdate({
+      data: { id: "property-1", status: "new_lead" },
+      error: null,
+    });
+
+    const result = await updatePropertyStatus(
+      "property-1",
+      "contacted",
+      "new_lead",
+    );
 
     expect(result.ok).toBe(false);
     if (!result.ok) {
@@ -200,18 +228,22 @@ describe("updatePropertyStatus", () => {
     }
   });
 
-  it("fails when the read-back status does not match the requested stage", async () => {
+  it("keeps an already-at-target move idempotent", async () => {
     mockStatusUpdate({
-      data: { id: "property-1", status: "new_lead" },
+      data: { id: "property-1", status: "contacted" },
       error: null,
     });
 
-    const result = await updatePropertyStatus("property-1", "contacted");
+    const result = await updatePropertyStatus(
+      "property-1",
+      "contacted",
+      "contacted",
+    );
 
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(result.error.code).toBe("STATUS_UPDATE_NOT_SAVED");
-    }
+    expect(result).toEqual({
+      ok: true,
+      data: { propertyId: "property-1", status: "contacted" },
+    });
   });
 });
 

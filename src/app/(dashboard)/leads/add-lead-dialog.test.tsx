@@ -22,6 +22,11 @@ function renderDialog() {
     <AddLeadDialog
       markets={["Jackson County MO", "Johnson County KS"]}
       sources={["cold_call", "referral"]}
+      teamMembers={[
+        { id: "user-me", email: "me@example.com" },
+        { id: "user-other", email: "teammate@example.com" },
+      ]}
+      currentUserId="user-me"
     />,
   );
 }
@@ -32,7 +37,7 @@ beforeEach(() => {
 });
 
 describe("AddLeadDialog", () => {
-  it("preserves the real create form fields and omits fields the save path cannot persist", async () => {
+  it("preserves the real create form fields and includes prototype-approved persisted fields", async () => {
     const user = userEvent.setup();
     renderDialog();
 
@@ -47,8 +52,8 @@ describe("AddLeadDialog", () => {
     expect(screen.getByLabelText("Last name")).toBeVisible();
     expect(screen.getByLabelText("Phone")).toBeVisible();
     expect(screen.getByLabelText("Email")).toBeVisible();
-    expect(screen.queryByLabelText(/assignee/i)).not.toBeInTheDocument();
-    expect(screen.queryByLabelText(/motivation/i)).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Assigned teammate")).toHaveValue("user-me");
+    expect(screen.getByLabelText("Motivation (optional)")).toHaveValue("");
   });
 
   it("warns rather than blocks when no phone or email is supplied", async () => {
@@ -79,6 +84,8 @@ describe("AddLeadDialog", () => {
         state: "MO",
         phone_1: "",
         email: "",
+        assigned_user_id: "user-me",
+        motivation_level: null,
       }),
     );
     expect(routerPush).toHaveBeenCalledWith("/leads/property-1");
@@ -115,5 +122,68 @@ describe("AddLeadDialog", () => {
     ).toBeVisible();
     expect(screen.getByRole("dialog")).toBeVisible();
     expect(routerPush).not.toHaveBeenCalled();
+  });
+
+  it("locks every close/save action and submits only once while creation is pending", async () => {
+    const user = userEvent.setup();
+    let resolveSave!: (value: {
+      ok: true;
+      data: { propertyId: string; wasDuplicate: false; phoneDropped: null };
+    }) => void;
+    createLeadFromForm.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveSave = resolve;
+        }),
+    );
+    renderDialog();
+
+    await user.click(screen.getByRole("button", { name: "Add lead" }));
+    await user.type(screen.getByLabelText("Street address"), "123 Main St");
+    await user.type(screen.getByLabelText("Phone"), "8165550100");
+    const create = screen.getByRole("button", { name: "Create lead" });
+    await user.dblClick(create);
+
+    expect(createLeadFromForm).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("button", { name: "Creating…" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Cancel" })).toBeDisabled();
+
+    resolveSave({
+      ok: true,
+      data: {
+        propertyId: "property-1",
+        wasDuplicate: false,
+        phoneDropped: null,
+      },
+    });
+    expect(await screen.findByRole("button", { name: "Add lead" })).toBeVisible();
+    expect(routerPush).toHaveBeenCalledTimes(1);
+  });
+
+  it("surfaces an existing address without closing or reporting normal success", async () => {
+    const user = userEvent.setup();
+    createLeadFromForm.mockResolvedValue({
+      ok: true,
+      data: {
+        propertyId: "property-existing",
+        wasDuplicate: true,
+        phoneDropped: null,
+      },
+    });
+    renderDialog();
+
+    await user.click(screen.getByRole("button", { name: "Add lead" }));
+    await user.type(screen.getByLabelText("Street address"), "123 Main St");
+    await user.type(screen.getByLabelText("Phone"), "8165550100");
+    await user.click(screen.getByRole("button", { name: "Create lead" }));
+
+    expect(
+      await screen.findByText("A lead already exists at this address."),
+    ).toBeVisible();
+    expect(screen.getByRole("dialog")).toBeVisible();
+    expect(routerPush).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: "Open existing lead" }));
+    expect(routerPush).toHaveBeenCalledWith("/leads/property-existing");
   });
 });

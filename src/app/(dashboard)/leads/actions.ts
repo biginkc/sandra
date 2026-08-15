@@ -1161,8 +1161,12 @@ export async function verifyPropertiesBulk(
 export async function updatePropertyStatus(
   propertyId: string,
   status: PropertyStatus,
+  expectedPreviousStatus: PropertyStatus,
 ): Promise<Result<{ propertyId: string; status: PropertyStatus }>> {
-  if (!VALID_STATUSES.includes(status)) {
+  if (
+    !VALID_STATUSES.includes(status) ||
+    !VALID_STATUSES.includes(expectedPreviousStatus)
+  ) {
     return {
       ok: false,
       error: {
@@ -1178,6 +1182,7 @@ export async function updatePropertyStatus(
       .from("properties")
       .update({ status, updated_at: new Date().toISOString() })
       .eq("id", propertyId)
+      .eq("status", expectedPreviousStatus)
       .select("id, status")
       .maybeSingle();
 
@@ -1198,8 +1203,9 @@ export async function updatePropertyStatus(
       return {
         ok: false,
         error: {
-          code: "STATUS_UPDATE_NOT_SAVED",
-          message: "The lead was not updated. It may no longer be available.",
+          code: "STATUS_CONFLICT",
+          message:
+            "This lead changed before your move was saved. Refresh and try again.",
         },
       };
     }
