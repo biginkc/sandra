@@ -132,6 +132,12 @@ async function createUserForOrg(orgId: string) {
 }
 
 beforeAll(async () => {
+  // processClaimedCalendarCreation reaches getDecryptedToken, which needs
+  // OAUTH_TOKEN_ENCRYPTION_KEY set before it can even conclude "no token
+  // stored" (the no_token path this suite exercises — no oauth row exists
+  // for the seeded users, so the key's value never decrypts anything).
+  process.env.OAUTH_TOKEN_ENCRYPTION_KEY ??=
+    "integration-test-key-never-decrypts-anything";
   await seedTwoOrgs(serviceClient);
 });
 
