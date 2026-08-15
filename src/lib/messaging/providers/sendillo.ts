@@ -3,6 +3,7 @@ import { timingSafeEqual } from "node:crypto";
 import { ConfigurationError, ProviderError } from "@/lib/errors/classes";
 import { reportError } from "@/lib/errors/report";
 import type {
+  DialpadFromOption,
   MessagingProvider,
   ProviderCampaignSummary,
   ProviderSenderNumber,
@@ -199,6 +200,34 @@ export class SendilloMessagingProvider implements MessagingProvider {
         "accepted",
       raw: parsed,
     };
+  }
+
+  /**
+   * Manual composer "send from" picker. Sendillo has no numbers-list /
+   * live-status endpoint of its own (that's a Dialpad concept), so this
+   * reuses the same purchased-numbers catalog that backs campaign
+   * Delivery sync (`listPurchasedNumbers`) — the account's actual
+   * senders. Without this, `listFromNumbers` stays `undefined` on this
+   * adapter (it's optional on `MessagingProvider`), the lead-detail SMS
+   * composer's dropdown renders empty ("No numbers found — check SMS
+   * provider config"), and — combined with the manual-send
+   * `requireStickyFrom` guard in `resolveOutboundFromAddress` (send.ts),
+   * which Sendillo trips because it also implements `listPurchasedNumbers`
+   * and so counts as sender-inventory-supporting — first-touch sends with
+   * no prior inbound history had no explicit sender to fall back to and
+   * failed outright with "No sticky sending number found for this SMS."
+   */
+  async listFromNumbers(): Promise<DialpadFromOption[]> {
+    const purchased = await this.listPurchasedNumbers();
+    return purchased.map((n) => ({
+      number: n.phoneE164,
+      ownerName: "Sendillo",
+      ownerType: "sendillo",
+      // Never the literal "available" — that's Dialpad's unassigned-number
+      // status, which the composer filters out; Sendillo has no such
+      // concept, so any provider-reported status (or its absence) passes.
+      status: n.status ?? "active",
+    }));
   }
 
   /**

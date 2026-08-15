@@ -10,6 +10,7 @@ import { Button } from "@/components/ui/button";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
 import { loadIntegrationPrefs } from "@/lib/integrations/prefs";
+import { getMessagingProvider } from "@/lib/messaging/registry";
 import { selectBestSmsPhone } from "@/lib/messaging/sms-phone";
 import { zillowUrl } from "@/lib/utils/zillow-url";
 
@@ -186,6 +187,22 @@ export default async function LeadDetailPage({
   }
   const { data: latestInboundSender } =
     await latestInboundSenderQuery.maybeSingle();
+  // Leads with no prior inbound message have no "sticky" sender to reply
+  // from. Fall back to the configured provider's default number (e.g.
+  // Sendillo's single SENDILLO_FROM_NUMBER) so the composer and inline
+  // reply box have a real, sendable number instead of "—" — and so the
+  // manual send doesn't fail with "No sticky sending number found" for
+  // providers (like Sendillo) that participate in sender-inventory
+  // validation and therefore skip the server-side default fallback for
+  // manual sends without an explicit `from`. Best-effort only: a
+  // misconfigured provider must not break the lead page.
+  let providerDefaultFromNumber: string | null = null;
+  try {
+    providerDefaultFromNumber =
+      getMessagingProvider()?.getDefaultFromNumber?.() ?? null;
+  } catch {
+    providerDefaultFromNumber = null;
+  }
   const preferredFromNumber = latestInboundSender?.to_address ??
     [...initialMessages]
       .reverse()
@@ -195,7 +212,9 @@ export default async function LeadDetailPage({
           message.to_address &&
           (!lead.homeowner?.id || message.contact_id === lead.homeowner.id) &&
           message.property_id === lead.id,
-      )?.to_address ?? null;
+      )?.to_address ??
+    providerDefaultFromNumber ??
+    null;
 
   // Opening a lead acknowledges any unread inbound SMS on it. Fire-and-forget
   // so the page renders fast; the kanban card's red dot will clear on next

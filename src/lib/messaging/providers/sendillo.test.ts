@@ -680,6 +680,79 @@ describe("SendilloMessagingProvider.listPurchasedNumbers", () => {
   });
 });
 
+describe("SendilloMessagingProvider.listFromNumbers", () => {
+  it("maps the purchased-numbers catalog into DialpadFromOption shape for the composer", async () => {
+    mockFetch({
+      status: 200,
+      body: {
+        data: [
+          { id: "num_1", phoneNumber: "+18165550001", status: "active" },
+          { id: "num_2", phoneNumber: "+18165550002", status: "inactive" },
+        ],
+      },
+    });
+    const provider = new SendilloMessagingProvider(
+      "sendillo-test-key",
+      "+18165550000",
+    );
+
+    const options = await provider.listFromNumbers();
+
+    expect(options).toEqual([
+      {
+        number: "+18165550001",
+        ownerName: "Sendillo",
+        ownerType: "sendillo",
+        status: "active",
+      },
+      {
+        number: "+18165550002",
+        ownerName: "Sendillo",
+        ownerType: "sendillo",
+        status: "inactive",
+      },
+    ]);
+  });
+
+  it("falls back to a non-'available' status when the provider omits one, so the composer's Dialpad-only unassigned filter never hides a real Sendillo number", async () => {
+    mockFetch({
+      status: 200,
+      body: { data: [{ number: "+18165550003" }] },
+    });
+    const provider = new SendilloMessagingProvider(
+      "sendillo-test-key",
+      "+18165550000",
+    );
+
+    const options = await provider.listFromNumbers();
+
+    expect(options).toHaveLength(1);
+    expect(options[0].status).not.toBe("available");
+  });
+
+  it("propagates the underlying ProviderError when the catalog fetch fails", async () => {
+    mockFetch({ status: 503, body: { error: { message: "down" } } });
+    const provider = new SendilloMessagingProvider(
+      "sendillo-test-key",
+      "+18165550000",
+    );
+
+    await expect(provider.listFromNumbers()).rejects.toBeInstanceOf(
+      ProviderError,
+    );
+  });
+
+  it("returns an empty list rather than throwing when the account has no purchased numbers", async () => {
+    mockFetch({ status: 200, body: { data: [] } });
+    const provider = new SendilloMessagingProvider(
+      "sendillo-test-key",
+      "+18165550000",
+    );
+
+    await expect(provider.listFromNumbers()).resolves.toEqual([]);
+  });
+});
+
 describe("SendilloMessagingProvider.listProviderCampaigns", () => {
   it("GETs the campaigns endpoint with bearer auth", async () => {
     mockFetch({ status: 200, body: { data: [] } });
