@@ -96,7 +96,7 @@ export type CreateLeadResult = {
 };
 
 export type CreateLeadError = {
-  code: "VALIDATION" | "INSERT_FAILED" | "INTERNAL";
+  code: "VALIDATION" | "INSERT_FAILED" | "INTERNAL" | "REPAIR_REQUIRED";
   message: string;
   field?: string;
 };
@@ -277,12 +277,28 @@ export async function createLead(
   const hasAnyContactField =
     !!phoneNorm || !!emailNorm || !!firstNorm || !!lastNorm;
   if (hasAnyContactField) {
-    const resolved = await resolveOrCreateContact(supabase, {
-      first_name: firstNorm,
-      last_name: lastNorm,
-      phone_1: phoneNorm,
-      email: emailNorm,
-    });
+    let resolved: Awaited<ReturnType<typeof resolveOrCreateContact>>;
+    try {
+      resolved = await resolveOrCreateContact(supabase, {
+        first_name: firstNorm,
+        last_name: lastNorm,
+        phone_1: phoneNorm,
+        email: emailNorm,
+      });
+    } catch (error) {
+      const cleanup = await cleanupClaimedLead(supabase, propertyId, null);
+      if (!cleanup.ok) return cleanup;
+      return {
+        ok: false,
+        error: {
+          code: "INTERNAL",
+          message:
+            error instanceof Error
+              ? error.message
+              : "The homeowner contact could not be created.",
+        },
+      };
+    }
     contactId = resolved.id;
     phoneDropped = resolved.phoneDropped;
     const { data: attached, error: attachError } = await supabase
@@ -293,9 +309,12 @@ export async function createLead(
       .select("id")
       .maybeSingle();
     if (attachError || !attached) {
-      if (resolved.created && contactId) {
-        await supabase.from("contacts").delete().eq("id", contactId);
-      }
+      const cleanup = await cleanupClaimedLead(
+        supabase,
+        propertyId,
+        resolved.created ? contactId : null,
+      );
+      if (!cleanup.ok) return cleanup;
       return {
         ok: false,
         error: {
@@ -311,6 +330,74 @@ export async function createLead(
   return {
     ok: true,
     data: { propertyId, wasDuplicate: false, contactId, phoneDropped },
+  };
+}
+
+async function cleanupClaimedLead(
+  supabase: SupabaseClient<Database>,
+  propertyId: string,
+  newlyCreatedContactId: string | null,
+): Promise<{ ok: true } | { ok: false; error: CreateLeadError }> {
+  try {
+    // Delete the claimed property first. If the attach write reached the DB
+    // but its response was lost, this releases its homeowner FK before the
+    // contact cleanup. Selecting the deleted id proves this was not an
+    // RLS-hidden or stale no-op.
+    const { data: removedProperty, error: propertyCleanupError } = await supabase
+      .from("properties")
+      .delete()
+      .eq("id", propertyId)
+      .select("id")
+      .maybeSingle();
+    if (propertyCleanupError || !removedProperty) {
+      const reason =
+        propertyCleanupError?.message ?? "the claimed property was not deleted";
+      reportError(new Error(`lead create compensation failed: ${reason}`), {
+        tags: { surface: "lead_create_cleanup" },
+        extra: { propertyId, newlyCreatedContactId },
+      });
+      return repairRequired(propertyId, reason);
+    }
+
+    if (newlyCreatedContactId) {
+      const { data: removedContact, error: contactCleanupError } = await supabase
+        .from("contacts")
+        .delete()
+        .eq("id", newlyCreatedContactId)
+        .select("id")
+        .maybeSingle();
+      if (contactCleanupError || !removedContact) {
+        const reason =
+          contactCleanupError?.message ?? "the new contact was not deleted";
+        reportError(new Error(`lead create compensation failed: ${reason}`), {
+          tags: { surface: "lead_create_cleanup" },
+          extra: { propertyId, newlyCreatedContactId },
+        });
+        return repairRequired(propertyId, reason);
+      }
+    }
+
+    return { ok: true };
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    reportError(error, {
+      tags: { surface: "lead_create_cleanup" },
+      extra: { propertyId, newlyCreatedContactId },
+    });
+    return repairRequired(propertyId, reason);
+  }
+}
+
+function repairRequired(
+  propertyId: string,
+  reason: string,
+): { ok: false; error: CreateLeadError } {
+  return {
+    ok: false,
+    error: {
+      code: "REPAIR_REQUIRED",
+      message: `Lead creation could not be rolled back for property ${propertyId}. Do not retry until this record is repaired. (${reason})`,
+    },
   };
 }
 

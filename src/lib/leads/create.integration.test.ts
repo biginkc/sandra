@@ -13,6 +13,69 @@ const supabase = createTestClient();
 // else passes through to the real test DB.
 const realFetch = globalThis.fetch;
 
+function withOneInjectedFailure(
+  target: "contact_insert" | "homeowner_attach",
+) {
+  let armed = true;
+  return {
+    from(table: string) {
+      const realBuilder = supabase.from(
+        table as Parameters<typeof supabase.from>[0],
+      );
+      return new Proxy(realBuilder, {
+        get(builder, property, receiver) {
+          if (
+            armed &&
+            target === "contact_insert" &&
+            table === "contacts" &&
+            property === "insert"
+          ) {
+            return () => {
+              armed = false;
+              const failed = {
+                select: () => failed,
+                single: async () => ({
+                  data: null,
+                  error: { code: "INJECTED", message: "injected contact failure" },
+                }),
+              };
+              return failed;
+            };
+          }
+          if (
+            armed &&
+            target === "homeowner_attach" &&
+            table === "properties" &&
+            property === "update"
+          ) {
+            return (values: Record<string, unknown>) => {
+              if ("homeowner_contact_id" in values) {
+                armed = false;
+                const failed = {
+                  eq: () => failed,
+                  is: () => failed,
+                  select: () => failed,
+                  maybeSingle: async () => ({
+                    data: null,
+                    error: { code: "INJECTED", message: "injected attach failure" },
+                  }),
+                };
+                return failed;
+              }
+              const realUpdate = Reflect.get(builder, property, receiver) as (
+                values: Record<string, unknown>,
+              ) => unknown;
+              return realUpdate.call(builder, values);
+            };
+          }
+          const value = Reflect.get(builder, property, receiver);
+          return typeof value === "function" ? value.bind(builder) : value;
+        },
+      });
+    },
+  } as unknown as typeof supabase;
+}
+
 describe("createLead (integration)", () => {
   beforeEach(async () => {
     await resetTenantTables(supabase);
@@ -282,5 +345,55 @@ describe("createLead (integration)", () => {
       .single();
     expect(contact!.phone_1).toBeNull();
     expect(contact!.notes).toContain("+18165553200");
+  });
+
+  it("removes the claimed property after contact creation failure and permits a clean retry", async () => {
+    const input = {
+      source: "referral" as const,
+      property: { address: "20 Contact Failure Ln", state: "MO" },
+      contact: { first_name: "Cleanup", last_name: "Contact" },
+    };
+
+    const first = await createLead(withOneInjectedFailure("contact_insert"), input);
+    expect(first.ok).toBe(false);
+
+    const [{ count: propertyCount }, { count: contactCount }] = await Promise.all([
+      supabase
+        .from("properties")
+        .select("*", { count: "exact", head: true })
+        .eq("address", input.property.address),
+      supabase.from("contacts").select("*", { count: "exact", head: true }),
+    ]);
+    expect(propertyCount).toBe(0);
+    expect(contactCount).toBe(0);
+
+    const retry = await createLead(supabase, input);
+    expect(retry.ok).toBe(true);
+    if (retry.ok) expect(retry.data.wasDuplicate).toBe(false);
+  });
+
+  it("removes both new rows after homeowner attach failure and permits a clean retry", async () => {
+    const input = {
+      source: "referral" as const,
+      property: { address: "21 Attach Failure Ln", state: "MO" },
+      contact: { first_name: "Cleanup", last_name: "Attach" },
+    };
+
+    const first = await createLead(withOneInjectedFailure("homeowner_attach"), input);
+    expect(first.ok).toBe(false);
+
+    const [{ count: propertyCount }, { count: contactCount }] = await Promise.all([
+      supabase
+        .from("properties")
+        .select("*", { count: "exact", head: true })
+        .eq("address", input.property.address),
+      supabase.from("contacts").select("*", { count: "exact", head: true }),
+    ]);
+    expect(propertyCount).toBe(0);
+    expect(contactCount).toBe(0);
+
+    const retry = await createLead(supabase, input);
+    expect(retry.ok).toBe(true);
+    if (retry.ok) expect(retry.data.wasDuplicate).toBe(false);
   });
 });

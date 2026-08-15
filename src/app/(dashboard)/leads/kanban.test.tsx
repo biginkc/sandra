@@ -92,6 +92,7 @@ const baseProps = {
   listMemberships: {},
   customTags: {},
   lastMessageByPropertyId: {},
+  attentionLeadIds: { stale: [], sequenceEnded: [] },
   renderedAt: new Date().toISOString(),
 };
 
@@ -215,6 +216,78 @@ describe("Leads Kanban foundation", () => {
     expect(screen.queryByRole("button", { name: /Reset all \(/ })).not.toBeInTheDocument();
   });
 
+  it("initializes a validated dashboard ownership filter and Reset restores the full board", async () => {
+    const user = userEvent.setup();
+    render(
+      <Kanban
+        {...baseProps}
+        initialOwnership="mine"
+        initialLeads={[
+          makeLead(),
+          makeLead({
+            id: "lead-b",
+            address: "456 Oak Ave",
+            assigned_user_id: "user-other",
+          }),
+        ]}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "My leads" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(screen.getByText("123 Main St")).toBeVisible();
+    expect(screen.queryByText("456 Oak Ave")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Reset all (1)" }));
+    expect(screen.getByRole("button", { name: "All leads" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(screen.getByText("456 Oak Ave")).toBeVisible();
+  });
+
+  it("shows inbound unassigned and attention filters truthfully and clears them in place", async () => {
+    const user = userEvent.setup();
+    const leads = [
+      makeLead(),
+      makeLead({
+        id: "lead-unassigned",
+        address: "789 Unassigned Rd",
+        assigned_user_id: null,
+      }),
+    ];
+    const view = render(
+      <Kanban
+        {...baseProps}
+        initialOwnership="unassigned"
+        initialLeads={leads}
+      />,
+    );
+
+    expect(screen.getByText("789 Unassigned Rd")).toBeVisible();
+    expect(screen.queryByText("123 Main St")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Unassigned/ })).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Reset all (1)" }));
+    expect(screen.getByText("123 Main St")).toBeVisible();
+
+    view.unmount();
+    render(
+      <Kanban
+        {...baseProps}
+        initialAttentionFilter="stale"
+        attentionLeadIds={{ stale: ["lead-unassigned"], sequenceEnded: [] }}
+        initialLeads={leads}
+      />,
+    );
+    expect(screen.getByRole("button", { name: /Stale conversations/ })).toBeVisible();
+    expect(screen.getByText("789 Unassigned Rd")).toBeVisible();
+    expect(screen.queryByText("123 Main St")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Reset all (1)" }));
+    expect(screen.getByText("123 Main St")).toBeVisible();
+  });
+
   it("shows board-level no-results with removable chips", async () => {
     const user = userEvent.setup();
     renderBoard([makeLead()]);
@@ -276,12 +349,16 @@ describe("Leads Kanban foundation", () => {
     expect(routerPush).toHaveBeenCalledWith("/leads/lead-a");
   });
 
-  it("reverts a failed move, keeps a Retry marker, then moves after a verified retry", async () => {
+  it("reconciles a stale move to the authoritative stage and retries from there", async () => {
     const user = userEvent.setup();
     updatePropertyStatus
       .mockResolvedValueOnce({
         ok: false,
-        error: { code: "STATUS_UPDATE_NOT_SAVED", message: "not saved" },
+        error: {
+          code: "STATUS_CONFLICT",
+          message: "changed elsewhere",
+          details: { currentStatus: "interested" },
+        },
       })
       .mockResolvedValueOnce({
         ok: true,
@@ -296,7 +373,7 @@ describe("Leads Kanban foundation", () => {
       });
     });
 
-    expect(within(column("new_lead")).getByText("123 Main St")).toBeVisible();
+    expect(within(column("interested")).getByText("123 Main St")).toBeVisible();
     expect(
       screen.getByText("Couldn't move to Contacted. Not saved."),
     ).toBeVisible();
@@ -317,7 +394,7 @@ describe("Leads Kanban foundation", () => {
       2,
       "lead-a",
       "contacted",
-      "new_lead",
+      "interested",
     );
   });
 });

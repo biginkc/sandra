@@ -1196,16 +1196,40 @@ export async function updatePropertyStatus(
       };
     }
 
-    // Supabase updates can return no error when RLS or a stale id matches zero
-    // rows. Treat that as a failed move so the board never announces a save
-    // that did not actually happen.
+    // A zero-row compare-and-set can mean another client already saved this
+    // target, or moved the card somewhere else. Read the authoritative row so
+    // the caller can distinguish idempotent success from a real conflict and
+    // reconcile its local card instead of reverting to stale state.
     if (!data) {
+      const { data: current, error: currentError } = await supabase
+        .from("properties")
+        .select("id, status")
+        .eq("id", propertyId)
+        .maybeSingle();
+      if (currentError) {
+        return {
+          ok: false,
+          error: {
+            code: "STATUS_RECONCILIATION_FAILED",
+            message: "The lead changed, but its current stage could not be loaded.",
+          },
+        };
+      }
+      if (current?.status === status) {
+        return ok({
+          propertyId: current.id,
+          status: current.status as PropertyStatus,
+        });
+      }
       return {
         ok: false,
         error: {
           code: "STATUS_CONFLICT",
           message:
-            "This lead changed before your move was saved. Refresh and try again.",
+            "This lead changed before your move was saved. Its current stage has been restored.",
+          ...(current && VALID_STATUSES.includes(current.status as PropertyStatus)
+            ? { details: { currentStatus: current.status } }
+            : {}),
         },
       };
     }

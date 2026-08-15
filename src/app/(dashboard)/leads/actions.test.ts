@@ -159,16 +159,31 @@ afterEach(() => {
 describe("updatePropertyStatus", () => {
   function mockStatusUpdate(
     result: StubResult<{ id: string; status: string }>,
+    currentResult: StubResult<{ id: string; status: string }> = {
+      data: null,
+      error: null,
+    },
   ) {
     const maybeSingle = vi.fn().mockResolvedValue(result);
     const select = vi.fn(() => ({ maybeSingle }));
     const builder = { eq: vi.fn(), select };
     builder.eq.mockReturnValue(builder);
     const update = vi.fn(() => builder);
+    const currentMaybeSingle = vi.fn().mockResolvedValue(currentResult);
+    const currentBuilder = { eq: vi.fn(), maybeSingle: currentMaybeSingle };
+    currentBuilder.eq.mockReturnValue(currentBuilder);
+    const currentSelect = vi.fn(() => currentBuilder);
     createClient.mockResolvedValue({
-      from: vi.fn(() => ({ update })),
+      from: vi.fn(() => ({ update, select: currentSelect })),
     });
-    return { update, eq: builder.eq, select, maybeSingle };
+    return {
+      update,
+      eq: builder.eq,
+      select,
+      maybeSingle,
+      currentSelect,
+      currentMaybeSingle,
+    };
   }
 
   it("returns the persisted row only after the selected status is read back", async () => {
@@ -195,11 +210,14 @@ describe("updatePropertyStatus", () => {
     expect(chain.select).toHaveBeenCalledWith("id, status");
   });
 
-  it("fails when the update matched no visible row", async () => {
-    mockStatusUpdate({ data: null, error: null });
+  it("returns the authoritative current stage when a stale update matched no row", async () => {
+    mockStatusUpdate(
+      { data: null, error: null },
+      { data: { id: "property-1", status: "interested" }, error: null },
+    );
 
     const result = await updatePropertyStatus(
-      "missing",
+      "property-1",
       "contacted",
       "new_lead",
     );
@@ -207,6 +225,7 @@ describe("updatePropertyStatus", () => {
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.error.code).toBe("STATUS_CONFLICT");
+      expect(result.error.details).toEqual({ currentStatus: "interested" });
     }
   });
 
@@ -228,16 +247,16 @@ describe("updatePropertyStatus", () => {
     }
   });
 
-  it("keeps an already-at-target move idempotent", async () => {
-    mockStatusUpdate({
-      data: { id: "property-1", status: "contacted" },
-      error: null,
-    });
+  it("keeps a zero-row move idempotent when another client already saved the target", async () => {
+    mockStatusUpdate(
+      { data: null, error: null },
+      { data: { id: "property-1", status: "contacted" }, error: null },
+    );
 
     const result = await updatePropertyStatus(
       "property-1",
       "contacted",
-      "contacted",
+      "new_lead",
     );
 
     expect(result).toEqual({

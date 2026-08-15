@@ -12,7 +12,6 @@ vi.mock("@/lib/supabase/server", () => ({
   createClient: async () => testClient,
 }));
 
-// eslint-disable-next-line import/first
 import {
   qualifyLeadsBulk,
   updatePropertyStatus,
@@ -87,25 +86,37 @@ describe("updatePropertyStatus (integration)", () => {
     }
   });
 
-  it("rejects a stale move without overwriting the newer stage", async () => {
+  it("returns the newer authoritative stage, then accepts a retry from that stage", async () => {
     const id = await seedProperty("interested");
 
     const result = await updatePropertyStatus(id, "offer_sent", "contacted");
 
     expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.error.code).toBe("STATUS_CONFLICT");
+    if (!result.ok) {
+      expect(result.error.code).toBe("STATUS_CONFLICT");
+      expect(result.error.details).toEqual({ currentStatus: "interested" });
+    }
     const { data } = await testClient
       .from("properties")
       .select("status")
       .eq("id", id)
       .single();
     expect(data?.status).toBe("interested");
+
+    const retry = await updatePropertyStatus(id, "offer_sent", "interested");
+    expect(retry).toEqual({
+      ok: true,
+      data: { propertyId: id, status: "offer_sent" },
+    });
   });
 
-  it("treats an already-at-target move as idempotent success", async () => {
+  it("treats another client's already-saved target as idempotent success", async () => {
     const id = await seedProperty("contacted");
-    const result = await updatePropertyStatus(id, "contacted", "contacted");
-    expect(result.ok).toBe(true);
+    const result = await updatePropertyStatus(id, "contacted", "new_lead");
+    expect(result).toEqual({
+      ok: true,
+      data: { propertyId: id, status: "contacted" },
+    });
   });
 
   it("qualifyLeadsBulk collects per-id failures without aborting the batch", async () => {

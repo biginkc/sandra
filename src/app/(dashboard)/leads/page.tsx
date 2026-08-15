@@ -11,6 +11,10 @@ import { AddLeadDialog } from "./add-lead-dialog";
 import { listOrgUsers } from "./actions";
 import { Kanban } from "./kanban";
 import { LeadsLoadError } from "./load-error";
+import {
+  deriveAttentionLeadIds,
+  resolveInboundLeadFilters,
+} from "./inbound-filters";
 import { truncateMessagePreview } from "../properties/prospects-query";
 
 export const metadata = {
@@ -19,8 +23,12 @@ export const metadata = {
 
 type LeadsSearchParams = {
   status?: string;
+  assignee?: string;
+  unassigned?: string;
   no_active_sequence?: string;
   skip_traced?: string;
+  stale?: string;
+  sequence_ended?: string;
 };
 
 const LEAD_PAGE_SIZE = 500;
@@ -136,6 +144,10 @@ export default async function LeadsPage({
   const markets = Array.from(
     new Set((counties ?? []).map((county) => county.market).filter(Boolean)),
   );
+  const inboundFilters = resolveInboundLeadFilters(params, {
+    currentUserId: user?.id ?? null,
+    teammateIds: teamMembers.map((member) => member.id),
+  });
 
   // `has_unread` is computed by the board view, so this page does not issue an
   // unbounded messages query or send a 500-id URL to PostgREST.
@@ -154,6 +166,7 @@ export default async function LeadsPage({
           body: string | null;
           created_at: string;
         }[],
+        error: null,
       });
   const membershipsPromise = shownPropertyIds.length
     ? supabase
@@ -167,8 +180,43 @@ export default async function LeadsPage({
         .select("property_id, tag_id, tags!property_tags_tag_id_fkey(name, color, category)")
         .in("property_id", shownPropertyIds)
     : Promise.resolve({ data: [] as never[] });
-  const [{ data: lastMsgRows }, { data: memberships }, { data: pTags }] =
-    await Promise.all([lastMessagesPromise, membershipsPromise, tagsPromise]);
+  const completedEnrollmentsPromise =
+    shownPropertyIds.length && inboundFilters.attention === "sequence_ended"
+      ? supabase
+          .from("sequence_enrollments")
+          .select("property_id, completed_at")
+          .in("property_id", shownPropertyIds)
+          .eq("status", "completed")
+          .not("completed_at", "is", null)
+      : Promise.resolve({
+          data: [] as { property_id: string | null; completed_at: string | null }[],
+          error: null,
+        });
+  const [
+    { data: lastMsgRows, error: lastMessagesError },
+    { data: memberships },
+    { data: pTags },
+    { data: completedEnrollments, error: completedEnrollmentsError },
+  ] = await Promise.all([
+    lastMessagesPromise,
+    membershipsPromise,
+    tagsPromise,
+    completedEnrollmentsPromise,
+  ]);
+  const renderedAt = new Date();
+  const attentionLeadIds = deriveAttentionLeadIds({
+    leads,
+    messages: lastMsgRows ?? [],
+    completedEnrollments: completedEnrollments ?? [],
+    now: renderedAt,
+  });
+  const attentionLoadFailed =
+    inboundFilters.attention !== null &&
+    Boolean(
+      lastMessagesError ||
+        (inboundFilters.attention === "sequence_ended" &&
+          completedEnrollmentsError),
+    );
   const unreadPropertyIds = new Set<string>();
   for (const lead of leads) {
     if (lead.has_unread) unreadPropertyIds.add(lead.id);
@@ -288,7 +336,7 @@ export default async function LeadsPage({
         </div>
       )}
 
-      {error ? (
+      {error || attentionLoadFailed ? (
         <LeadsLoadError />
       ) : leads.length > 0 ? (
         <Kanban
@@ -301,7 +349,10 @@ export default async function LeadsPage({
           listMemberships={listMemberships}
           customTags={customTags}
           lastMessageByPropertyId={lastMessageByPropertyId}
-          renderedAt={new Date().toISOString()}
+          attentionLeadIds={attentionLeadIds}
+          initialOwnership={inboundFilters.ownership}
+          initialAttentionFilter={inboundFilters.attention}
+          renderedAt={renderedAt.toISOString()}
         />
       ) : (
         <div className="border-border bg-card flex min-h-80 flex-col items-center justify-center rounded-2xl border border-dashed p-8 text-center">

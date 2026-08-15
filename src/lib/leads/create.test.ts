@@ -209,14 +209,20 @@ describe("createLead — phase 02 D-04 county_id pass-through", () => {
     expect(calls.filter((call) => call.table === "contacts")).toHaveLength(0);
   });
 
-  it("cleans up a newly created contact when the homeowner attach changes zero rows", async () => {
+  it("cleans the claimed property and new contact after attach failure so retry can succeed", async () => {
     responseQueue = [
       { data: null, error: null },
       { data: { id: "prop-new" }, error: null },
       { data: null, error: null },
       { data: { id: "contact-new" }, error: null },
       { data: null, error: null },
+      { data: { id: "prop-new" }, error: null },
+      { data: { id: "contact-new" }, error: null },
       { data: null, error: null },
+      { data: { id: "prop-retry" }, error: null },
+      { data: null, error: null },
+      { data: { id: "contact-retry" }, error: null },
+      { data: { id: "prop-retry" }, error: null },
     ];
 
     const result = await createLead(
@@ -233,8 +239,102 @@ describe("createLead — phase 02 D-04 county_id pass-through", () => {
     if (!result.ok) expect(result.error.code).toBe("INTERNAL");
     expect(
       calls.some(
+        (call) => call.table === "properties" && call.op === "delete",
+      ),
+    ).toBe(true);
+    expect(
+      calls.some(
         (call) => call.table === "contacts" && call.op === "delete",
       ),
     ).toBe(true);
+
+    const retry = await createLead(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      makeSupabase() as any,
+      {
+        source: "referral",
+        property: { address: "11 Attach Race Way", state: "MO" },
+        contact: { first_name: "New", last_name: "Owner" },
+      },
+    );
+    expect(retry).toEqual({
+      ok: true,
+      data: {
+        propertyId: "prop-retry",
+        wasDuplicate: false,
+        contactId: "contact-retry",
+        phoneDropped: null,
+      },
+    });
+  });
+
+  it("cleans the claimed property after contact creation fails so retry can succeed", async () => {
+    responseQueue = [
+      { data: null, error: null },
+      { data: { id: "prop-contact-failure" }, error: null },
+      { data: null, error: null },
+      { data: null, error: { message: "contact insert failed" } },
+      { data: { id: "prop-contact-failure" }, error: null },
+      { data: null, error: null },
+      { data: { id: "prop-retry" }, error: null },
+      { data: null, error: null },
+      { data: { id: "contact-retry" }, error: null },
+      { data: { id: "prop-retry" }, error: null },
+    ];
+
+    const first = await createLead(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      makeSupabase() as any,
+      {
+        source: "referral",
+        property: { address: "12 Contact Failure Way", state: "MO" },
+        contact: { first_name: "New", last_name: "Owner" },
+      },
+    );
+    expect(first.ok).toBe(false);
+    if (!first.ok) expect(first.error.code).toBe("INTERNAL");
+    expect(
+      calls.some(
+        (call) => call.table === "properties" && call.op === "delete",
+      ),
+    ).toBe(true);
+
+    const retry = await createLead(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      makeSupabase() as any,
+      {
+        source: "referral",
+        property: { address: "12 Contact Failure Way", state: "MO" },
+        contact: { first_name: "New", last_name: "Owner" },
+      },
+    );
+    expect(retry.ok).toBe(true);
+    if (retry.ok) expect(retry.data.wasDuplicate).toBe(false);
+  });
+
+  it("returns repair-needed when compensating property cleanup cannot be verified", async () => {
+    responseQueue = [
+      { data: null, error: null },
+      { data: { id: "prop-repair" }, error: null },
+      { data: null, error: null },
+      { data: null, error: { message: "contact insert failed" } },
+      { data: null, error: { message: "property delete failed" } },
+    ];
+
+    const result = await createLead(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      makeSupabase() as any,
+      {
+        source: "referral",
+        property: { address: "13 Repair Way", state: "MO" },
+        contact: { first_name: "New", last_name: "Owner" },
+      },
+    );
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe("REPAIR_REQUIRED");
+      expect(result.error.message).toContain("prop-repair");
+    }
   });
 });

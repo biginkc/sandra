@@ -34,6 +34,10 @@ import {
   STATUS_ORDER,
 } from "./board-config";
 import { filterLeads } from "./filter";
+import type {
+  InboundAttentionFilter,
+  InboundOwnershipFilter,
+} from "./inbound-filters";
 
 type ContactSummary = Pick<
   Database["public"]["Tables"]["contacts"]["Row"],
@@ -67,7 +71,8 @@ export type LastMessage = {
 
 type MotivationLevel = "hot" | "warm" | "cold";
 type MotivationFilter = MotivationLevel | "unset" | "all";
-type OwnershipFilter = "all" | "mine" | string;
+type OwnershipFilter = InboundOwnershipFilter;
+type AttentionFilter = InboundAttentionFilter | null;
 
 type MoveFailure = {
   attemptedStatus: PropertyStatus;
@@ -75,6 +80,10 @@ type MoveFailure = {
 };
 
 const COLLAPSED_STORAGE_KEY = "sandra.leads.collapsed";
+const ALL_PROPERTY_STATUSES: readonly PropertyStatus[] = [
+  "prospect",
+  ...STATUS_ORDER,
+];
 
 const MOTIVATION_DOT: Record<MotivationLevel, string> = {
   hot: "bg-red-500",
@@ -109,6 +118,9 @@ type KanbanProps = {
   listMemberships: Record<string, ListMembership[]>;
   customTags: Record<string, CustomTag[]>;
   lastMessageByPropertyId: Record<string, LastMessage>;
+  attentionLeadIds: { stale: string[]; sequenceEnded: string[] };
+  initialOwnership?: OwnershipFilter;
+  initialAttentionFilter?: AttentionFilter;
   renderedAt: string;
 };
 
@@ -121,6 +133,9 @@ export function Kanban({
   listMemberships,
   customTags,
   lastMessageByPropertyId,
+  attentionLeadIds,
+  initialOwnership = "all",
+  initialAttentionFilter = null,
   renderedAt,
 }: KanbanProps) {
   const router = useRouter();
@@ -130,8 +145,11 @@ export function Kanban({
     () => new Set(DEFAULT_COLLAPSED_STATUSES),
   );
   const [search, setSearch] = useState("");
-  const [ownership, setOwnership] = useState<OwnershipFilter>("all");
+  const [ownership, setOwnership] = useState<OwnershipFilter>(initialOwnership);
   const [motivation, setMotivation] = useState<MotivationFilter>("all");
+  const [attention, setAttention] = useState<AttentionFilter>(
+    initialAttentionFilter,
+  );
   const [moveFailures, setMoveFailures] = useState<Record<string, MoveFailure>>(
     {},
   );
@@ -173,6 +191,13 @@ export function Kanban({
 
   const ownershipFiltered = useMemo(() => {
     if (ownership === "all") return leads;
+    if (ownership === "unassigned") {
+      return leads.filter(
+        (lead) =>
+          lead.assigned_user_id === null &&
+          !["prospect", "closed", "dead"].includes(lead.status),
+      );
+    }
     const assigneeId = ownership === "mine" ? currentUserId : ownership;
     if (!assigneeId) return leads;
     return leads.filter((lead) => lead.assigned_user_id === assigneeId);
@@ -186,15 +211,26 @@ export function Kanban({
     });
   }, [motivation, ownershipFiltered]);
 
+  const attentionFiltered = useMemo(() => {
+    if (!attention) return motivationFiltered;
+    const ids = new Set(
+      attention === "stale"
+        ? attentionLeadIds.stale
+        : attentionLeadIds.sequenceEnded,
+    );
+    return motivationFiltered.filter((lead) => ids.has(lead.id));
+  }, [attention, attentionLeadIds, motivationFiltered]);
+
   const filteredLeads = useMemo(
-    () => filterLeads(motivationFiltered, search),
-    [motivationFiltered, search],
+    () => filterLeads(attentionFiltered, search),
+    [attentionFiltered, search],
   );
 
   const activeFilterCount =
     Number(search.trim().length > 0) +
     Number(ownership !== "all") +
-    Number(motivation !== "all");
+    Number(motivation !== "all") +
+    Number(attention !== null);
 
   const totalByStatus = useMemo(() => {
     const totals: Record<PropertyStatus, number> = {
@@ -246,6 +282,7 @@ export function Kanban({
     setSearch("");
     setOwnership("all");
     setMotivation("all");
+    setAttention(null);
   };
 
   const toggleCollapsed = (status: PropertyStatus) => {
@@ -303,7 +340,7 @@ export function Kanban({
     if (result.ok) {
       setLeads((previous) =>
         previous.map((item) =>
-          item.id === lead.id ? { ...item, status: attemptedStatus } : item,
+          item.id === lead.id ? { ...item, status: result.data.status } : item,
         ),
       );
       setMoveFailures((previous) => {
@@ -312,14 +349,20 @@ export function Kanban({
         return next;
       });
     } else {
+      const reportedCurrentStatus = result.error.details?.currentStatus;
+      const reconciledStatus =
+        typeof reportedCurrentStatus === "string" &&
+        ALL_PROPERTY_STATUSES.includes(reportedCurrentStatus as PropertyStatus)
+          ? (reportedCurrentStatus as PropertyStatus)
+          : previousStatus;
       setLeads((previous) =>
         previous.map((item) =>
-          item.id === lead.id ? { ...item, status: previousStatus } : item,
+          item.id === lead.id ? { ...item, status: reconciledStatus } : item,
         ),
       );
       setMoveFailures((previous) => ({
         ...previous,
-        [lead.id]: { attemptedStatus, previousStatus },
+        [lead.id]: { attemptedStatus, previousStatus: reconciledStatus },
       }));
     }
 
@@ -371,10 +414,12 @@ export function Kanban({
       ? "My leads"
       : ownership === "all"
         ? "All leads"
-        : shortEmail(
-            teamMembers.find((member) => member.id === ownership)?.email ??
-              "Selected teammate",
-          );
+        : ownership === "unassigned"
+          ? "Unassigned"
+          : shortEmail(
+              teamMembers.find((member) => member.id === ownership)?.email ??
+                "Selected teammate",
+            );
 
   return (
     <div className="flex flex-col gap-3">
@@ -433,13 +478,21 @@ export function Kanban({
           </button>
           </div>
           <select
-            value={ownership === "all" || ownership === "mine" ? "" : ownership}
+            value={
+              ownership === "all" ||
+              ownership === "mine" ||
+              ownership === "unassigned"
+                ? ""
+                : ownership
+            }
             onChange={(event) => {
               if (event.target.value) setOwnership(event.target.value);
             }}
             aria-label="Choose a teammate"
             className={`border-border h-8 w-40 rounded-full border px-3 text-xs font-bold outline-none ${
-              ownership !== "all" && ownership !== "mine"
+              ownership !== "all" &&
+              ownership !== "mine" &&
+              ownership !== "unassigned"
                 ? "bg-primary text-primary-foreground"
                 : "bg-background text-foreground"
             }`}
@@ -453,6 +506,15 @@ export function Kanban({
                 </option>
               ))}
           </select>
+          {ownership === "unassigned" ? (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setOwnership("all")}
+            >
+              Unassigned <XIcon data-icon="inline-end" />
+            </Button>
+          ) : null}
         </div>
 
         <select
@@ -474,6 +536,15 @@ export function Kanban({
           <option value="unset">Not set</option>
         </select>
 
+        {attention ? (
+          <Button variant="outline" size="sm" onClick={() => setAttention(null)}>
+            {attention === "stale"
+              ? "Stale conversations"
+              : "Sequence ended without follow-up"}{" "}
+            <XIcon data-icon="inline-end" />
+          </Button>
+        ) : null}
+
         {activeFilterCount > 0 ? (
           <Button variant="outline" size="sm" onClick={resetFilters}>
             Reset all ({activeFilterCount})
@@ -493,9 +564,11 @@ export function Kanban({
           ownership={ownership}
           ownershipLabel={selectedOwnerLabel}
           motivation={motivation}
+          attention={attention}
           onClearSearch={() => setSearch("")}
           onClearOwnership={() => setOwnership("all")}
           onClearMotivation={() => setMotivation("all")}
+          onClearAttention={() => setAttention(null)}
           onReset={resetFilters}
         />
       ) : (
@@ -559,18 +632,22 @@ function FilteredEmptyState({
   ownership,
   ownershipLabel,
   motivation,
+  attention,
   onClearSearch,
   onClearOwnership,
   onClearMotivation,
+  onClearAttention,
   onReset,
 }: {
   search: string;
   ownership: OwnershipFilter;
   ownershipLabel: string;
   motivation: MotivationFilter;
+  attention: AttentionFilter;
   onClearSearch: () => void;
   onClearOwnership: () => void;
   onClearMotivation: () => void;
+  onClearAttention: () => void;
   onReset: () => void;
 }) {
   return (
@@ -590,6 +667,14 @@ function FilteredEmptyState({
         {motivation !== "all" ? (
           <Button variant="outline" size="sm" onClick={onClearMotivation}>
             Motivation: {motivation === "unset" ? "Not set" : MOTIVATION_LABEL[motivation]}
+            <XIcon data-icon="inline-end" />
+          </Button>
+        ) : null}
+        {attention ? (
+          <Button variant="outline" size="sm" onClick={onClearAttention}>
+            {attention === "stale"
+              ? "Stale conversations"
+              : "Sequence ended without follow-up"}{" "}
             <XIcon data-icon="inline-end" />
           </Button>
         ) : null}

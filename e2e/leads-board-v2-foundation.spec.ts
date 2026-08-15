@@ -66,6 +66,74 @@ test("Leads board v2 foundation is usable at desktop and narrow widths", async (
   });
   if (messageError) throw messageError;
 
+  const { data: attentionLeads, error: attentionLeadsError } = await admin
+    .from("properties")
+    .insert([
+      {
+        address: "456 Stale Conversation Ave",
+        city: "Kansas City",
+        state: "MO",
+        status: "contacted",
+        assigned_user_id: currentUser!.id,
+      },
+      {
+        address: "789 Unassigned Lead Rd",
+        city: "Kansas City",
+        state: "MO",
+        status: "new_lead",
+        assigned_user_id: null,
+      },
+    ])
+    .select("id, address, org_id");
+  if (attentionLeadsError || !attentionLeads) {
+    throw attentionLeadsError ?? new Error("attention lead seed failed");
+  }
+  const staleLead = attentionLeads.find((lead) =>
+    lead.address.startsWith("456 Stale"),
+  );
+  const unassignedLead = attentionLeads.find((lead) =>
+    lead.address.startsWith("789 Unassigned"),
+  );
+  if (!staleLead || !unassignedLead) {
+    throw new Error("attention lead seed missing");
+  }
+  const { error: staleMessageError } = await admin.from("messages").insert({
+    org_id: staleLead.org_id,
+    property_id: staleLead.id,
+    contact_id: contact.id,
+    channel: "sms",
+    direction: "inbound",
+    status: "received",
+    body: "Following up on the old conversation",
+    created_at: new Date(Date.now() - 8 * 24 * 60 * 60 * 1000).toISOString(),
+  });
+  if (staleMessageError) throw staleMessageError;
+
+  const { data: sequence, error: sequenceError } = await admin
+    .from("sequences")
+    .insert({
+      org_id: unassignedLead.org_id,
+      name: "Completed sequence browser proof",
+      created_by: currentUser!.id,
+    })
+    .select("id")
+    .single();
+  if (sequenceError || !sequence) {
+    throw sequenceError ?? new Error("sequence seed failed");
+  }
+  const { error: enrollmentError } = await admin
+    .from("sequence_enrollments")
+    .insert({
+      org_id: unassignedLead.org_id,
+      property_id: unassignedLead.id,
+      sequence_id: sequence.id,
+      status: "completed",
+      completed_at: new Date(
+        Date.now() - 2 * 24 * 60 * 60 * 1000,
+      ).toISOString(),
+    });
+  if (enrollmentError) throw enrollmentError;
+
   await page.goto("/leads");
   await expect(page.getByRole("heading", { name: "Leads" })).toBeVisible();
   await expect(page.getByRole("link", { name: /Import CSV/i })).toHaveCount(0);
@@ -103,9 +171,52 @@ test("Leads board v2 foundation is usable at desktop and narrow widths", async (
     "false",
   );
 
-  await page.goto("/leads?assignee=missing-user&stale=true");
+  await page.goto("/leads?assignee=me");
+  await expect(page.getByRole("button", { name: "My leads" })).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
   await expect(page.getByText("123 Foundation Ave")).toBeVisible();
-  await expect(page.getByText("Stale conversations")).toHaveCount(0);
+  await expect(page.getByText("789 Unassigned Lead Rd")).toHaveCount(0);
+  await page.getByRole("button", { name: "Reset all (1)" }).click();
+  await expect(page.getByText("789 Unassigned Lead Rd")).toBeVisible();
+  await expect(page).toHaveURL(/assignee=me/);
+
+  await page.goto("/leads?unassigned=true");
+  await expect(page.getByRole("button", { name: /Unassigned/ })).toBeVisible();
+  await expect(page.getByText("789 Unassigned Lead Rd")).toBeVisible();
+  await expect(page.getByText("123 Foundation Ave")).toHaveCount(0);
+  await page.getByRole("button", { name: "Reset all (1)" }).click();
+  await expect(page.getByText("123 Foundation Ave")).toBeVisible();
+
+  await page.goto("/leads?stale=true");
+  await expect(
+    page.getByRole("button", { name: /Stale conversations/ }),
+  ).toBeVisible();
+  await expect(page.getByText("456 Stale Conversation Ave")).toBeVisible();
+  await expect(page.getByText("123 Foundation Ave")).toHaveCount(0);
+  await page.screenshot({
+    path: testInfo.outputPath("leads-inbound-stale.png"),
+    fullPage: true,
+  });
+  await page.getByRole("button", { name: "Reset all (1)" }).click();
+  await expect(page.getByText("123 Foundation Ave")).toBeVisible();
+
+  await page.goto("/leads?sequence_ended=true");
+  await expect(
+    page.getByRole("button", { name: /Sequence ended without follow-up/ }),
+  ).toBeVisible();
+  await expect(page.getByText("789 Unassigned Lead Rd")).toBeVisible();
+  await expect(page.getByText("123 Foundation Ave")).toHaveCount(0);
+  await page.getByRole("button", { name: "Reset all (1)" }).click();
+  await expect(page.getByText("123 Foundation Ave")).toBeVisible();
+
+  await page.goto("/leads?assignee=missing-user");
+  await expect(page.getByRole("button", { name: "All leads" })).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
+  await expect(page.getByText("123 Foundation Ave")).toBeVisible();
   await expect(page.getByText(/Assigned to missing/i)).toHaveCount(0);
   await page.goto("/leads");
 
