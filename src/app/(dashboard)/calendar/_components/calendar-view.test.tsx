@@ -296,6 +296,13 @@ describe("<CalendarView /> month view", () => {
     nav.replace.mockClear();
   });
 
+  it("hides the Month tab below md (desktop-only surface)", () => {
+    render(<CalendarView {...baseProps()} />);
+    expect(screen.getByTestId("calendar-view-month").className).toContain(
+      "hidden md:inline-block",
+    );
+  });
+
   it("renders the Month tab and mounts MonthGrid when view=month", () => {
     render(
       <CalendarView

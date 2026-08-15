@@ -130,12 +130,18 @@ export function CalendarView({
           >
             Week
           </Link>
+          {/* Month is a desktop-only surface (Codex month-view round 2):
+              below md the grid can't render and agenda takes over, so
+              offering the tab there would select a view the phone cannot
+              show. Deep links to ?view=month on mobile still render the
+              agenda over the month range with range-neutral copy. */}
           <Link
             href={buildHref({ view: "month" })}
             data-testid="calendar-view-month"
             aria-current={view === "month" || undefined}
             className={cn(
               TAB_BASE,
+              "hidden md:inline-block",
               view === "month" ? TAB_ACTIVE : TAB_INACTIVE,
             )}
           >

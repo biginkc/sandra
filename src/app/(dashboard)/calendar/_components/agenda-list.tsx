@@ -60,7 +60,7 @@ export function AgendaList({
         className="text-muted-foreground px-1 py-4 text-sm"
         data-testid="calendar-agenda-empty"
       >
-        No appointments this week.
+        No appointments in this range.
       </p>
     );
   }

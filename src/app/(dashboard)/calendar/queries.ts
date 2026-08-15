@@ -322,3 +322,40 @@ export async function fetchAssigneeEmails(
 
   return emails;
 }
+
+/**
+ * Month-view retrieval (Codex month-view round 2): a 35/42-day grid must
+ * NOT reuse the single-week query as one giant window — `APPOINTMENTS_CAP`
+ * is a per-WEEK volume contract ("far above any real org's
+ * appointments/week"), and a month at plausible per-week volumes could
+ * trip a cap that every individual week clears, leaving Month in an
+ * unrecoverable retry state. Instead the month is fetched as its
+ * constituent ≤7-day windows — each window carries the exact same
+ * week-proven cap semantics (a single WINDOW over the cap still fails
+ * closed by design, same as week view) — and concatenated. Windows are
+ * disjoint `[startUtc, endUtc)` ranges, so no dedup is needed and the
+ * per-window due_at ordering composes into a globally ordered list.
+ */
+export async function fetchCalendarAppointmentsForWindows(
+  orgId: string,
+  opts: {
+    assigneeId?: string;
+    windows: { startUtc: string; endUtc: string }[];
+  },
+): Promise<FetchCalendarAppointmentsResult> {
+  const results = await Promise.all(
+    opts.windows.map((w) =>
+      fetchCalendarAppointments(orgId, {
+        assigneeId: opts.assigneeId,
+        weekStartUtc: w.startUtc,
+        weekEndUtc: w.endUtc,
+      }),
+    ),
+  );
+  const rows: CalendarAppointmentRow[] = [];
+  for (const result of results) {
+    if (!result.ok) return { ok: false };
+    rows.push(...result.rows);
+  }
+  return { ok: true, rows };
+}
