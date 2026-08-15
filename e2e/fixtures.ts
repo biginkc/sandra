@@ -133,11 +133,26 @@ export async function ensureTestUser(
   client: SupabaseClient<Database>,
   options: { repairPassword?: boolean } = {},
 ): Promise<string> {
-  const { data: list, error: listErr } = await client.auth.admin.listUsers({
-    perPage: 200,
-  });
-  if (listErr) throw listErr;
-  const existing = list?.users.find((u) => u.email === TEST_USER_EMAIL);
+  // Paginate the FULL user list (Codex month-view round 4): the shared
+  // test project accumulates users faster than a single 200-row page —
+  // when the shared account fell past page one, this helper concluded it
+  // didn't exist, tried to create the duplicate email on every run, and
+  // turned the whole E2E job red. Page size 1000 with a hard page cap;
+  // never trust data.nextPage for the loop bound (auth-js multi-digit
+  // page parsing bug — same locally-bounded pattern as
+  // fetchAssigneeEmails).
+  const MAX_USER_PAGES = 50;
+  let existing: { id: string } | undefined;
+  for (let page = 1; page <= MAX_USER_PAGES && !existing; page++) {
+    const { data: list, error: listErr } = await client.auth.admin.listUsers({
+      page,
+      perPage: 1000,
+    });
+    if (listErr) throw listErr;
+    const users = list?.users ?? [];
+    existing = users.find((u) => u.email === TEST_USER_EMAIL);
+    if (users.length < 1000) break;
+  }
 
   let userId: string;
   if (existing) {

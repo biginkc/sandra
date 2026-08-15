@@ -1,46 +1,48 @@
 -- fn_calendar_month_appointments — single-snapshot month read for the
--- Calendar page's month view (Codex month-view round 3).
+-- Calendar page's month view (Codex month-view rounds 3+4).
 --
 -- Why an RPC: the month grid spans 5-6 weeks. One PostgREST SELECT over
 -- the whole range can't distinguish "a busy month" from "a busy week"
 -- under the response ceiling, and issuing one SELECT per week runs each
 -- window in its OWN read-committed snapshot — an appointment rescheduled
 -- mid-fetch between windows can be omitted by every window or returned by
--- two of them. This function is LANGUAGE SQL with a single top-level
--- statement, so every window predicate is evaluated against ONE snapshot,
--- and the per-week volume checks happen inside that same snapshot.
+-- two of them. The read below is ONE statement (RETURN QUERY), so every
+-- window predicate and both volume checks evaluate against one snapshot.
 --
--- Volume contract (mirrors queries.ts's APPOINTMENTS_CAP=900/week):
---   * any single week window holding more than p_week_cap rows, or
---   * the whole month holding more than p_total_cap rows (kept under
---     PostgREST's 1000-row response ceiling so the result is never
---     silently truncated in transit),
--- makes the function RAISE (SQLSTATE P0001, message below) — the caller
--- renders the same explicit fail-closed retry state week view uses,
--- never a silently truncated month.
+-- Input hardening (round 4 — every authenticated user can call this):
+--   * caps are SERVER-OWNED upper bounds: p_week_cap/p_total_cap are
+--     clamped with LEAST(...) so a caller can only TIGHTEN them (lowering
+--     is semantically "return an error sooner on my own query" — harmless,
+--     and what the integration tests use); NULL falls back to the server
+--     defaults; nothing a caller sends can lift the result above
+--     PostgREST's 1000-row response ceiling.
+--   * windows are validated BEFORE any tasks read: equal-length arrays,
+--     1..6 windows, no NULL bounds, each window 0 < span <= 8 days (a
+--     zone-local week is 7 days +/- DST), strictly ordered and
+--     NON-OVERLAPPING (each start >= the previous end). Repeated or
+--     overlapping windows would multiply matched rows and shared-database
+--     work before the counts could raise; malformed arrays would
+--     previously be NULL-padded by multi-array unnest and silently
+--     dropped, letting a malformed caller read an incomplete month as
+--     success. All violations RAISE P0001 before touching tasks.
+--
+-- Volume contract (mirrors queries.ts's APPOINTMENTS_CAP=900/week): any
+-- single window over the (clamped) week cap, or a month total over the
+-- (clamped) total cap, RAISEs — the caller renders the same explicit
+-- fail-closed retry state week view uses, never a silently truncated
+-- month.
 --
 -- SECURITY INVOKER on purpose: RLS scopes rows exactly like the direct
 -- week SELECT; callers gain no visibility they don't already have.
 
 begin;
 
--- RAISE helper (defined FIRST — the SQL reader body below references it
--- at creation time under check_function_bodies): LANGUAGE SQL bodies
--- can't RAISE directly, so the volume breach routes through this.
--- VOLATILE on purpose — an IMMUTABLE zero-arg raising function would be
--- constant-folded at plan time and abort every call unconditionally.
-
-create or replace function public.fn_calendar_month_volume_exceeded()
-returns boolean
-language plpgsql
-volatile
-set search_path = public, pg_temp
-as $$
-begin
-  raise exception 'calendar month volume exceeds cap'
-    using errcode = 'P0001';
-end;
-$$;
+-- Round-4 rework note: the round-3 shape of this function shipped only to
+-- sandra-crm-test (hand-applied during development; the migration was
+-- never merged) with this same 6-parameter signature, so CREATE OR
+-- REPLACE upgrades it in place everywhere. The separate RAISE helper the
+-- LANGUAGE SQL body needed is gone — plpgsql raises directly.
+drop function if exists public.fn_calendar_month_volume_exceeded();
 
 create or replace function public.fn_calendar_month_appointments(
   p_org uuid,
@@ -69,14 +71,50 @@ returns table (
   contact_last_name text,
   contact_entity_name text
 )
-language sql
+language plpgsql
 stable
 set search_path = public, pg_temp
 as $$
+#variable_conflict use_column
+declare
+  -- Server-owned ceilings: LEAST() means caller input can only tighten.
+  v_week_cap integer := least(coalesce(p_week_cap, 900), 900);
+  v_total_cap integer := least(coalesce(p_total_cap, 999), 999);
+  v_count integer;
+  i integer;
+begin
+  if p_week_starts is null or p_week_ends is null then
+    raise exception 'calendar month windows are required' using errcode = 'P0001';
+  end if;
+  v_count := coalesce(array_length(p_week_starts, 1), 0);
+  if v_count <> coalesce(array_length(p_week_ends, 1), 0) then
+    raise exception 'calendar month window arrays must be equal length'
+      using errcode = 'P0001';
+  end if;
+  if v_count < 1 or v_count > 6 then
+    raise exception 'calendar month requires 1..6 windows' using errcode = 'P0001';
+  end if;
+  for i in 1..v_count loop
+    if p_week_starts[i] is null or p_week_ends[i] is null then
+      raise exception 'calendar month window bounds must be non-null'
+        using errcode = 'P0001';
+    end if;
+    if p_week_ends[i] <= p_week_starts[i]
+       or p_week_ends[i] - p_week_starts[i] > interval '8 days' then
+      raise exception 'calendar month window span must be within (0, 8] days'
+        using errcode = 'P0001';
+    end if;
+    if i > 1 and p_week_starts[i] < p_week_ends[i - 1] then
+      raise exception 'calendar month windows must be ordered and non-overlapping'
+        using errcode = 'P0001';
+    end if;
+  end loop;
+
+  -- Single statement = single snapshot for every window AND both counts.
+  return query
   with windows as (
-    select w_start, w_end
+    select w.w_start, w.w_end
     from unnest(p_week_starts, p_week_ends) as w(w_start, w_end)
-    where w_start is not null and w_end is not null
   ),
   matched as (
     select
@@ -106,16 +144,35 @@ as $$
   left join public.properties p on p.id = g.related_property_id
   left join public.contacts c on c.id = g.contact_id
   where case
-    when g.window_rows > p_week_cap or g.total_rows > p_total_cap
-      then public.fn_calendar_month_volume_exceeded()
+    when g.window_rows > v_week_cap or g.total_rows > v_total_cap
+      then public.fn_raise_calendar_month_volume()
     else true
   end
-  order by g.due_at asc, g.id asc
+  order by g.due_at asc, g.id asc;
+end;
+$$;
+
+-- RAISE-from-inside-the-statement helper: the volume breach must abort the
+-- single read statement itself (so a partial result can never be
+-- returned), and a set-returning plpgsql RETURN QUERY cannot raise
+-- mid-stream from its own WHERE — this VOLATILE helper does. VOLATILE
+-- deliberately: an IMMUTABLE zero-arg raising function would be
+-- constant-folded at plan time and abort every call unconditionally.
+create or replace function public.fn_raise_calendar_month_volume()
+returns boolean
+language plpgsql
+volatile
+set search_path = public, pg_temp
+as $$
+begin
+  raise exception 'calendar month volume exceeds cap'
+    using errcode = 'P0001';
+end;
 $$;
 
 revoke all on function public.fn_calendar_month_appointments(uuid, uuid, timestamptz[], timestamptz[], integer, integer) from public, anon;
 grant execute on function public.fn_calendar_month_appointments(uuid, uuid, timestamptz[], timestamptz[], integer, integer) to authenticated, service_role;
-revoke all on function public.fn_calendar_month_volume_exceeded() from public, anon;
-grant execute on function public.fn_calendar_month_volume_exceeded() to authenticated, service_role;
+revoke all on function public.fn_raise_calendar_month_volume() from public, anon;
+grant execute on function public.fn_raise_calendar_month_volume() to authenticated, service_role;
 
 commit;

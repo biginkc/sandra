@@ -33,14 +33,17 @@ function makeAppt(
 const DAYS = resolveMonth("2026-08-14", CHI).days;
 const dayHref = (date: string) => `/calendar?view=week&week=${date}`;
 
-function renderGrid(appointments: CalendarAppointmentRow[] = []) {
+function renderGrid(
+  appointments: CalendarAppointmentRow[] = [],
+  assignees: Record<string, string> = {},
+) {
   return render(
     <MonthGrid
       days={DAYS}
       appointments={appointments}
       timezone={CHI}
       viewerRole="owner"
-      assignees={{}}
+      assignees={assignees}
       currentUserId="user-1"
       month="2026-08"
       dayHref={dayHref}
@@ -105,6 +108,32 @@ describe("<MonthGrid />", () => {
     expect(screen.getByTestId("calendar-month-day-link-2026-08-05")).toHaveAttribute(
       "href",
       dayHref("2026-08-05"),
+    );
+  });
+
+  it("labels every non-self appointment with its owner in the Everyone view (former teammates get the fallback)", () => {
+    renderGrid(
+      [
+        makeAppt({ id: "mine", due_at: "2026-08-06T15:00:00.000Z" }),
+        makeAppt({
+          id: "teammate",
+          due_at: "2026-08-06T16:00:00.000Z",
+          assignee_id: "user-2",
+        }),
+        makeAppt({
+          id: "former",
+          due_at: "2026-08-06T17:00:00.000Z",
+          assignee_id: "user-gone-12345678",
+        }),
+      ],
+      { "user-2": "gretchen@bmhgroupkc.com" },
+    );
+    expect(screen.queryByTestId("calendar-month-owner-mine")).not.toBeInTheDocument();
+    expect(screen.getByTestId("calendar-month-owner-teammate")).toHaveTextContent(
+      "gretchen@bmhgroupkc.com",
+    );
+    expect(screen.getByTestId("calendar-month-owner-former")).toHaveTextContent(
+      /Former teammate \(user-gon/,
     );
   });
 });

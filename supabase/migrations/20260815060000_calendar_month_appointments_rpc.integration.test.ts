@@ -183,6 +183,48 @@ describe("Migration 20260815060000 — fn_calendar_month_appointments", () => {
     expect(error?.message).toMatch(/month volume exceeds cap/i);
   });
 
+  it("rejects malformed window sets before reading tasks (round 4 hardening)", async () => {
+    const overlapping = await callMonthRpc(member.client, {
+      p_org: BMH_ORG_ID,
+      p_week_starts: [W1.start, W1.start],
+      p_week_ends: [W1.end, W1.end],
+    });
+    expect(overlapping.error?.message).toMatch(/ordered and non-overlapping/i);
+
+    const unequal = await callMonthRpc(member.client, {
+      p_org: BMH_ORG_ID,
+      p_week_starts: [W1.start, W2.start],
+      p_week_ends: [W1.end],
+    });
+    expect(unequal.error?.message).toMatch(/equal length/i);
+
+    const tooMany = await callMonthRpc(member.client, {
+      p_org: BMH_ORG_ID,
+      p_week_starts: Array.from({ length: 7 }, () => W1.start),
+      p_week_ends: Array.from({ length: 7 }, () => W1.end),
+    });
+    expect(tooMany.error?.message).toMatch(/1\.\.6 windows/i);
+
+    const inverted = await callMonthRpc(member.client, {
+      p_org: BMH_ORG_ID,
+      p_week_starts: [W1.end],
+      p_week_ends: [W1.start],
+    });
+    expect(inverted.error?.message).toMatch(/within \(0, 8] days/i);
+  });
+
+  it("clamps caller-supplied caps to the server ceiling (raising them is a no-op, lowering works)", async () => {
+    // A huge cap must not error out or change behavior — it clamps to 900.
+    const raised = await callMonthRpc(member.client, {
+      p_org: BMH_ORG_ID,
+      p_week_starts: STARTS,
+      p_week_ends: ENDS,
+      p_week_cap: 100000,
+      p_total_cap: 100000,
+    });
+    expect(raised.error).toBeNull();
+  });
+
   it("RAISEs (fail-closed) when the month total exceeds p_total_cap", async () => {
     const { error } = await callMonthRpc(member.client, {
       p_org: BMH_ORG_ID,
