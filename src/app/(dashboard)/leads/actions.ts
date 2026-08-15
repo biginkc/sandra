@@ -1161,7 +1161,7 @@ export async function verifyPropertiesBulk(
 export async function updatePropertyStatus(
   propertyId: string,
   status: PropertyStatus,
-): Promise<Result<null>> {
+): Promise<Result<{ propertyId: string; status: PropertyStatus }>> {
   if (!VALID_STATUSES.includes(status)) {
     return {
       ok: false,
@@ -1174,10 +1174,12 @@ export async function updatePropertyStatus(
 
   try {
     const supabase = await createClient();
-    const { error } = await supabase
+    const { data, error } = await supabase
       .from("properties")
       .update({ status, updated_at: new Date().toISOString() })
-      .eq("id", propertyId);
+      .eq("id", propertyId)
+      .select("id, status")
+      .maybeSingle();
 
     if (error) {
       return {
@@ -1189,7 +1191,30 @@ export async function updatePropertyStatus(
       };
     }
 
-    return ok(null);
+    // Supabase updates can return no error when RLS or a stale id matches zero
+    // rows. Treat that as a failed move so the board never announces a save
+    // that did not actually happen.
+    if (!data) {
+      return {
+        ok: false,
+        error: {
+          code: "STATUS_UPDATE_NOT_SAVED",
+          message: "The lead was not updated. It may no longer be available.",
+        },
+      };
+    }
+
+    if (data.status !== status) {
+      return {
+        ok: false,
+        error: {
+          code: "STATUS_UPDATE_NOT_SAVED",
+          message: "The lead did not save in the selected stage.",
+        },
+      };
+    }
+
+    return ok({ propertyId: data.id, status: data.status as PropertyStatus });
   } catch (e) {
     reportError(e, {
       tags: { surface: "update_property_status" },

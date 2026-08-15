@@ -7,27 +7,15 @@ import { LEAD_SOURCES } from "@/lib/leads/create";
 import { createClient } from "@/lib/supabase/server";
 
 import { submitNewLead } from "./actions";
+import { SOURCE_LABELS, STATES } from "./form-options";
 
 export const metadata = {
   title: "Add a lead · Sandra CRM",
 };
 
-const SOURCE_LABELS: Record<string, string> = {
-  dealmachine: "DealMachine",
-  propstream: "PropStream",
-  driving_for_dollars: "Driving for dollars",
-  referral: "Referral",
-  cold_call: "Cold call",
-  sms: "SMS (inbound)",
-  web_form: "Web form",
-  direct_mail: "Direct mail",
-};
-
 // The market dropdown reads from the counties table at runtime per
 // phase 02 D-01 — adding a new market is a DB insert, not a code
 // change. The fetch happens inside the page component below.
-
-const STATES = ["MO", "KS", "OH", "IL", "AR", "OK", "NE", "IA", "TN", "KY"];
 
 export default async function NewLeadPage({
   searchParams,

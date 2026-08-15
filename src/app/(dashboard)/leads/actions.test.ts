@@ -75,7 +75,12 @@ vi.mock("@/lib/tasks", async (importOriginal) => {
   };
 });
 
-import { addPropertiesToListBulk, createLeadTaskAction, listOrgUsers } from "./actions";
+import {
+  addPropertiesToListBulk,
+  createLeadTaskAction,
+  listOrgUsers,
+  updatePropertyStatus,
+} from "./actions";
 
 type StubResult<T> = {
   data: T | null;
@@ -149,6 +154,65 @@ beforeEach(() => {
 afterEach(() => {
   vi.clearAllMocks();
   vi.unstubAllEnvs();
+});
+
+describe("updatePropertyStatus", () => {
+  function mockStatusUpdate(
+    result: StubResult<{ id: string; status: string }>,
+  ) {
+    const maybeSingle = vi.fn().mockResolvedValue(result);
+    const select = vi.fn(() => ({ maybeSingle }));
+    const eq = vi.fn(() => ({ select }));
+    const update = vi.fn(() => ({ eq }));
+    createClient.mockResolvedValue({
+      from: vi.fn(() => ({ update })),
+    });
+    return { update, eq, select, maybeSingle };
+  }
+
+  it("returns the persisted row only after the selected status is read back", async () => {
+    const chain = mockStatusUpdate({
+      data: { id: "property-1", status: "contacted" },
+      error: null,
+    });
+
+    const result = await updatePropertyStatus("property-1", "contacted");
+
+    expect(result).toEqual({
+      ok: true,
+      data: { propertyId: "property-1", status: "contacted" },
+    });
+    expect(chain.update).toHaveBeenCalledWith(
+      expect.objectContaining({ status: "contacted" }),
+    );
+    expect(chain.eq).toHaveBeenCalledWith("id", "property-1");
+    expect(chain.select).toHaveBeenCalledWith("id, status");
+  });
+
+  it("fails when the update matched no visible row", async () => {
+    mockStatusUpdate({ data: null, error: null });
+
+    const result = await updatePropertyStatus("missing", "contacted");
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe("STATUS_UPDATE_NOT_SAVED");
+    }
+  });
+
+  it("fails when the read-back status does not match the requested stage", async () => {
+    mockStatusUpdate({
+      data: { id: "property-1", status: "new_lead" },
+      error: null,
+    });
+
+    const result = await updatePropertyStatus("property-1", "contacted");
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe("STATUS_UPDATE_NOT_SAVED");
+    }
+  });
 });
 
 describe("addPropertiesToListBulk", () => {

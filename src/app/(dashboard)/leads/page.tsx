@@ -1,13 +1,16 @@
+import Image from "next/image";
 import Link from "next/link";
 
 import { Page } from "@/components/page";
 import { PageHeader } from "@/components/page-header";
-import { buttonVariants } from "@/components/ui/button";
-import { createAdminClient } from "@/lib/supabase/admin";
+import { LEAD_SOURCES } from "@/lib/leads/create";
 import { createClient } from "@/lib/supabase/server";
 import type { Database } from "@/lib/supabase/types";
 
+import { AddLeadDialog } from "./add-lead-dialog";
+import { listOrgUsers } from "./actions";
 import { Kanban } from "./kanban";
+import { LeadsLoadError } from "./load-error";
 import { truncateMessagePreview } from "../properties/prospects-query";
 
 export const metadata = {
@@ -25,7 +28,7 @@ type LeadsSearchParams = {
 };
 
 const LEAD_PAGE_SIZE = 500;
-const LEAD_SELECT = `id, address, city, state, zip, market, status, is_vacant, cass_status, absentee_flag, assigned_user_id, motivation_level, homeowner, has_unread`;
+const LEAD_SELECT = `id, address, city, state, zip, market, status, is_vacant, cass_status, absentee_flag, assigned_user_id, motivation_level, outreach_dispo, homeowner, has_unread`;
 
 type LeadRow = Pick<
   Database["public"]["Tables"]["properties"]["Row"],
@@ -41,6 +44,7 @@ type LeadRow = Pick<
   | "absentee_flag"
   | "assigned_user_id"
   | "motivation_level"
+  | "outreach_dispo"
 > & {
   homeowner: Pick<
     Database["public"]["Tables"]["contacts"]["Row"],
@@ -132,6 +136,22 @@ export default async function LeadsPage({
   const leads = (fetchedLeads ?? []).slice(0, LEAD_PAGE_SIZE) as LeadRow[];
   const activeFilter = describeFilter(params);
 
+  const [teamResult, { data: counties }] = await Promise.all([
+    listOrgUsers(),
+    supabase
+      .from("counties")
+      .select("market")
+      .order("state", { ascending: true })
+      .order("name", { ascending: true }),
+  ]);
+  const teamMembers = teamResult.ok ? teamResult.data : [];
+  const assigneeEmails = Object.fromEntries(
+    teamMembers.map((member) => [member.id, member.email]),
+  );
+  const markets = Array.from(
+    new Set((counties ?? []).map((county) => county.market).filter(Boolean)),
+  );
+
   // `has_unread` is computed by the board view, so this page does not issue an
   // unbounded messages query or send a 500-id URL to PostgREST.
   const visibleLeadIds = leads.map((l) => l.id);
@@ -139,10 +159,17 @@ export default async function LeadsPage({
   const lastMessagesPromise = shownPropertyIds.length
     ? supabase
         .from("messages")
-        .select("property_id, body, created_at")
+        .select("property_id, direction, body, created_at")
         .in("property_id", shownPropertyIds)
         .order("created_at", { ascending: false })
-    : Promise.resolve({ data: [] as { property_id: string | null; body: string | null; created_at: string }[] });
+    : Promise.resolve({
+        data: [] as {
+          property_id: string | null;
+          direction: string;
+          body: string | null;
+          created_at: string;
+        }[],
+      });
   const membershipsPromise = shownPropertyIds.length
     ? supabase
         .from("property_lists")
@@ -166,12 +193,21 @@ export default async function LeadsPage({
   // italic-quoted preview under each lead card. Same shape as the
   // prospects table's last-message column. Single batched query, then
   // walk in JS taking the first row per property_id (ordered desc).
-  const lastMessageByPropertyId: Record<string, string> = {};
+  const lastMessageByPropertyId: Record<
+    string,
+    { direction: "inbound" | "outbound"; body: string; createdAt: string }
+  > = {};
   for (const m of lastMsgRows ?? []) {
     if (!m.property_id) continue;
     if (lastMessageByPropertyId[m.property_id] !== undefined) continue;
     const preview = truncateMessagePreview(m.body ?? null);
-    if (preview) lastMessageByPropertyId[m.property_id] = preview;
+    if (preview) {
+      lastMessageByPropertyId[m.property_id] = {
+        direction: m.direction === "inbound" ? "inbound" : "outbound",
+        body: preview,
+        createdAt: m.created_at,
+      };
+    }
   }
 
   // List memberships for the shown properties. One query, then group in
@@ -222,29 +258,6 @@ export default async function LeadsPage({
   > = {};
   for (const [k, v] of customTagsByProperty) customTags[k] = v;
 
-  // Resolve assignee ids → emails (for the "assigned: bob@…" chip). Admin
-  // client batches all users in one call. Non-fatal on failure.
-  const assigneeEmails: Record<string, string> = {};
-  const assigneeIds = new Set<string>();
-  for (const l of leads ?? []) {
-    if (l.assigned_user_id) assigneeIds.add(l.assigned_user_id);
-  }
-  if (assigneeIds.size > 0) {
-    try {
-      const admin = createAdminClient();
-      const { data: usersPage } = await admin.auth.admin.listUsers({
-        perPage: 200,
-      });
-      for (const u of usersPage?.users ?? []) {
-        if (u.email && assigneeIds.has(u.id)) {
-          assigneeEmails[u.id] = u.email;
-        }
-      }
-    } catch {
-      // Ignore — ids still render, just without pretty labels.
-    }
-  }
-
   return (
     <Page>
       <PageHeader
@@ -263,9 +276,10 @@ export default async function LeadsPage({
           </>
         }
         actions={
-          <Link href="/import" className={buttonVariants()}>
-            Import CSV
-          </Link>
+          <AddLeadDialog
+            markets={markets}
+            sources={Array.from(LEAD_SOURCES)}
+          />
         }
       />
 
@@ -288,24 +302,56 @@ export default async function LeadsPage({
       )}
 
       {error ? (
-        <div className="text-destructive text-sm">
-          Failed to load leads: {error.message}
-        </div>
+        <LeadsLoadError />
       ) : leads.length > 0 ? (
         <Kanban
+          key={JSON.stringify(params)}
           initialLeads={leads}
           unreadPropertyIds={Array.from(unreadPropertyIds)}
           assigneeEmails={assigneeEmails}
+          teamMembers={teamMembers}
           currentUserId={user?.id ?? null}
           listMemberships={listMemberships}
           customTags={customTags}
           lastMessageByPropertyId={lastMessageByPropertyId}
+          renderedAt={new Date().toISOString()}
         />
       ) : (
-        <div className="text-muted-foreground border-border rounded-md border border-dashed p-8 text-center text-sm">
-          {activeFilter
-            ? `No leads match "${activeFilter.label}". Clear the filter to see all leads.`
-            : "No leads yet. Import a CSV to fill the pipeline."}
+        <div className="border-border bg-card flex min-h-80 flex-col items-center justify-center rounded-2xl border border-dashed p-8 text-center">
+          {activeFilter ? (
+            <>
+              <h2 className="text-lg font-bold">No leads match this view</h2>
+              <p className="text-muted-foreground mt-2 max-w-md text-sm">
+                Clear the dashboard filter to return to the full pipeline.
+              </p>
+              <Link
+                href="/leads"
+                className="bg-primary text-primary-foreground mt-5 inline-flex h-11 items-center justify-center rounded-full px-8 text-sm font-bold"
+              >
+                Clear filter
+              </Link>
+            </>
+          ) : (
+            <>
+              <Image
+                src="/brand/mascot.svg"
+                alt="Sandra"
+                width={150}
+                height={150}
+                className="mb-4 h-32 w-auto"
+              />
+              <h2 className="text-lg font-bold">No leads in the pipeline yet</h2>
+              <p className="text-muted-foreground mt-2 max-w-md text-sm">
+                Add a lead to start working the pipeline.
+              </p>
+              <div className="mt-5">
+                <AddLeadDialog
+                  markets={markets}
+                  sources={Array.from(LEAD_SOURCES)}
+                />
+              </div>
+            </>
+          )}
         </div>
       )}
     </Page>

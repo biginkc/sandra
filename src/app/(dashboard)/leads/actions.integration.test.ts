@@ -75,6 +75,17 @@ describe("updatePropertyStatus (integration)", () => {
     if (!result.ok) expect(result.error.code).toBe("INVALID_STATUS");
   });
 
+  it("does not report success when no property row was updated", async () => {
+    const result = await updatePropertyStatus(
+      "00000000-0000-0000-0000-000000000000",
+      "contacted",
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe("STATUS_UPDATE_NOT_SAVED");
+    }
+  });
+
   it("qualifyLeadsBulk collects per-id failures without aborting the batch", async () => {
     // Seed three prospects + one missing id. qualifyLeadsBulk should
     // qualify the real prospects, report the missing one in `failed`,
