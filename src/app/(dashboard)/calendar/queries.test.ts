@@ -10,6 +10,7 @@ let eqCalls: Array<[string, unknown]> = [];
 let selectCalls: string[] = [];
 let orderCalls: Array<[string, unknown]> = [];
 let limitCalls: number[] = [];
+let inCalls: Array<[string, unknown]> = [];
 
 function makeBuilder(): Record<string, unknown> {
   const builder: Record<string, unknown> = {};
@@ -21,7 +22,10 @@ function makeBuilder(): Record<string, unknown> {
     eqCalls.push([col, val]);
     return builder;
   };
-  builder.in = () => builder;
+  builder.in = (col: string, val: unknown) => {
+    inCalls.push([col, val]);
+    return builder;
+  };
   builder.gte = () => builder;
   builder.lt = () => builder;
   builder.order = (col: string, opts: unknown) => {
@@ -107,6 +111,7 @@ beforeEach(() => {
   selectCalls = [];
   orderCalls = [];
   limitCalls = [];
+  inCalls = [];
   membershipRows = [];
   membershipError = null;
   membershipEqCalls = [];
@@ -146,6 +151,29 @@ describe("fetchCalendarAppointments", () => {
     expect(eqCalls).toContainEqual(["type", "appointment"]);
     expect(selectCalls[0]).toContain("properties(");
     expect(selectCalls[0]).toContain("contacts(");
+  });
+
+  // Migration 20260815120000 (cancel chain visibility fix): a reschedule ->
+  // cancel chain now flips its predecessor row(s) from
+  // status=completed/outcome=rescheduled to status=cancelled/
+  // outcome=cancelled, specifically SO THAT they fall outside this status
+  // filter and stop rendering as a stale "Rescheduled" card forever. This
+  // test doesn't (and can't, given this file's mock `.in()` doesn't
+  // actually filter `queuedData`) prove server-side exclusion — the real
+  // proof is the DB-level integration suite
+  // (20260815120000_cancel_chain_visibility.integration.test.ts, which
+  // asserts the predecessor's row status/outcome directly). What this test
+  // pins is that the query still asks for EXACTLY `["open", "completed"]`
+  // and nothing wider (e.g. "cancelled") — the one invariant a chain whose
+  // predecessor is now cancelled actually depends on to stop rendering.
+  it("filters to status IN (open, completed) — the same filter a chain-cancelled reschedule predecessor now falls outside of", async () => {
+    queuedData = [];
+    await fetchCalendarAppointments("org-1", {
+      weekStartUtc: "2026-05-03T05:00:00.000Z",
+      weekEndUtc: "2026-05-10T05:00:00.000Z",
+    });
+
+    expect(inCalls).toContainEqual(["status", ["open", "completed"]]);
   });
 
   it("adds an assignee_id filter only when assigneeId is supplied", async () => {
