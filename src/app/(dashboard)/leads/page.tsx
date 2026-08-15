@@ -13,7 +13,9 @@ import { Kanban } from "./kanban";
 import { LeadsLoadError } from "./load-error";
 import {
   deriveAttentionLeadIds,
+  executeInboundScopedLeadQuery,
   resolveInboundLeadFilters,
+  type InboundScopedLeadQuery,
 } from "./inbound-filters";
 import { truncateMessagePreview } from "../properties/prospects-query";
 
@@ -67,6 +69,23 @@ export default async function LeadsPage({
   const {
     data: { user },
   } = await supabase.auth.getUser();
+
+  // Resolve validated dashboard entry filters before loading the board. The
+  // assignee queues must be narrowed in Postgres before the 500-card cap;
+  // applying them only in Kanban can silently omit older matching leads.
+  const [teamResult, { data: counties }] = await Promise.all([
+    listOrgUsers(),
+    supabase
+      .from("counties")
+      .select("market")
+      .order("state", { ascending: true })
+      .order("name", { ascending: true }),
+  ]);
+  const teamMembers = teamResult.ok ? teamResult.data : [];
+  const inboundFilters = resolveInboundLeadFilters(params, {
+    currentUserId: user?.id ?? null,
+    teammateIds: teamMembers.map((member) => member.id),
+  });
 
   // Embed the homeowner contact via the FK column so we can search on name
   // and entity. PostgREST aliases the relation as `homeowner` and returns
@@ -122,32 +141,24 @@ export default async function LeadsPage({
     }
   }
 
-  const { data: fetchedLeads, error } = await q
-    .order("created_at", { ascending: false })
-    .limit(LEAD_PAGE_SIZE + 1);
+  const { data: fetchedLeads, error } = await executeInboundScopedLeadQuery(
+    q as unknown as InboundScopedLeadQuery<LeadRow>,
+    inboundFilters.ownership,
+    user?.id ?? null,
+    LEAD_PAGE_SIZE + 1,
+  );
   const wasTruncated = (fetchedLeads?.length ?? 0) > LEAD_PAGE_SIZE;
   const leads = (fetchedLeads ?? []).slice(0, LEAD_PAGE_SIZE) as LeadRow[];
   const activeFilter = describeFilter(params);
 
-  const [teamResult, { data: counties }] = await Promise.all([
-    listOrgUsers(),
-    supabase
-      .from("counties")
-      .select("market")
-      .order("state", { ascending: true })
-      .order("name", { ascending: true }),
-  ]);
-  const teamMembers = teamResult.ok ? teamResult.data : [];
   const assigneeEmails = Object.fromEntries(
     teamMembers.map((member) => [member.id, member.email]),
   );
   const markets = Array.from(
     new Set((counties ?? []).map((county) => county.market).filter(Boolean)),
   );
-  const inboundFilters = resolveInboundLeadFilters(params, {
-    currentUserId: user?.id ?? null,
-    teammateIds: teamMembers.map((member) => member.id),
-  });
+  const hasInboundFilter =
+    inboundFilters.ownership !== "all" || inboundFilters.attention !== null;
 
   // `has_unread` is computed by the board view, so this page does not issue an
   // unbounded messages query or send a 500-id URL to PostgREST.
@@ -338,7 +349,7 @@ export default async function LeadsPage({
 
       {error || attentionLoadFailed ? (
         <LeadsLoadError />
-      ) : leads.length > 0 ? (
+      ) : leads.length > 0 || hasInboundFilter ? (
         <Kanban
           key={JSON.stringify(params)}
           initialLeads={leads}
@@ -352,6 +363,7 @@ export default async function LeadsPage({
           attentionLeadIds={attentionLeadIds}
           initialOwnership={inboundFilters.ownership}
           initialAttentionFilter={inboundFilters.attention}
+          hasInboundFilter={hasInboundFilter}
           renderedAt={renderedAt.toISOString()}
         />
       ) : (

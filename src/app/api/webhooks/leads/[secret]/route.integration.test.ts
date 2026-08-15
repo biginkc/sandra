@@ -328,4 +328,63 @@ describe("POST /api/webhooks/leads/[secret] (per-consumer auth)", () => {
     expect(secondJson.property_id).toBe(firstJson.property_id);
     expect(secondJson.was_duplicate).toBe(true);
   });
+
+  it("concurrent duplicate submissions leave one complete lead and a later webhook retry stays idempotent", async () => {
+    await seedConsumer({
+      name: "Enzo",
+      secret: ENZO_SECRET,
+      defaultSource: "cold_call",
+    });
+    const address = "101 Concurrent Webhook St";
+    const payloads = [
+      {
+        property: { address, state: "MO" },
+        contact: { first_name: "First", last_name: "Caller" },
+      },
+      {
+        property: { address, state: "MO" },
+        contact: { first_name: "Second", last_name: "Caller" },
+      },
+    ];
+
+    const concurrent = await Promise.all(
+      payloads.map((payload) =>
+        POST(makeRequest(payload, ENZO_SECRET), makeContext(ENZO_SECRET)),
+      ),
+    );
+    expect(concurrent.map((response) => response.status)).toEqual([200, 200]);
+    const bodies = await Promise.all(
+      concurrent.map(
+        (response) =>
+          response.json() as Promise<{
+            property_id: string;
+            was_duplicate: boolean;
+          }>,
+      ),
+    );
+    expect(new Set(bodies.map((body) => body.property_id)).size).toBe(1);
+    expect(bodies.filter((body) => body.was_duplicate)).toHaveLength(1);
+
+    const retry = await POST(
+      makeRequest(payloads[1], ENZO_SECRET),
+      makeContext(ENZO_SECRET),
+    );
+    expect(retry.status).toBe(200);
+    expect(await retry.json()).toEqual(
+      expect.objectContaining({
+        property_id: bodies[0].property_id,
+        was_duplicate: true,
+      }),
+    );
+
+    const [{ count: propertyCount }, { count: contactCount }] = await Promise.all([
+      testClient
+        .from("properties")
+        .select("*", { count: "exact", head: true })
+        .eq("address", address),
+      testClient.from("contacts").select("*", { count: "exact", head: true }),
+    ]);
+    expect(propertyCount).toBe(1);
+    expect(contactCount).toBe(1);
+  });
 });

@@ -121,6 +121,7 @@ type KanbanProps = {
   attentionLeadIds: { stale: string[]; sequenceEnded: string[] };
   initialOwnership?: OwnershipFilter;
   initialAttentionFilter?: AttentionFilter;
+  hasInboundFilter?: boolean;
   renderedAt: string;
 };
 
@@ -136,6 +137,7 @@ export function Kanban({
   attentionLeadIds,
   initialOwnership = "all",
   initialAttentionFilter = null,
+  hasInboundFilter = false,
   renderedAt,
 }: KanbanProps) {
   const router = useRouter();
@@ -279,10 +281,25 @@ export function Kanban({
     : null;
 
   const resetFilters = () => {
+    if (hasInboundFilter) {
+      // Dashboard entry URLs may have been scoped before the global board
+      // limit. Reload the bare board so Reset restores the complete dataset,
+      // instead of merely changing a client control over a narrowed result.
+      router.push("/leads");
+      return;
+    }
     setSearch("");
     setOwnership("all");
     setMotivation("all");
     setAttention(null);
+  };
+
+  const changeOwnership = (next: OwnershipFilter) => {
+    if (hasInboundFilter && next !== initialOwnership) {
+      router.push("/leads");
+      return;
+    }
+    setOwnership(next);
   };
 
   const toggleCollapsed = (status: PropertyStatus) => {
@@ -453,7 +470,7 @@ export function Kanban({
           >
             <button
               type="button"
-              onClick={() => setOwnership("all")}
+              onClick={() => changeOwnership("all")}
               aria-pressed={ownership === "all"}
               className={`px-4 text-xs font-bold transition-colors ${
                 ownership === "all"
@@ -465,7 +482,7 @@ export function Kanban({
             </button>
           <button
             type="button"
-            onClick={() => setOwnership("mine")}
+            onClick={() => changeOwnership("mine")}
             disabled={!currentUserId}
             aria-pressed={ownership === "mine"}
             className={`px-4 text-xs font-bold transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
@@ -486,7 +503,7 @@ export function Kanban({
                 : ownership
             }
             onChange={(event) => {
-              if (event.target.value) setOwnership(event.target.value);
+              if (event.target.value) changeOwnership(event.target.value);
             }}
             aria-label="Choose a teammate"
             className={`border-border h-8 w-40 rounded-full border px-3 text-xs font-bold outline-none ${
@@ -510,7 +527,7 @@ export function Kanban({
             <Button
               variant="outline"
               size="sm"
-              onClick={() => setOwnership("all")}
+              onClick={() => changeOwnership("all")}
             >
               Unassigned <XIcon data-icon="inline-end" />
             </Button>
@@ -566,7 +583,7 @@ export function Kanban({
           motivation={motivation}
           attention={attention}
           onClearSearch={() => setSearch("")}
-          onClearOwnership={() => setOwnership("all")}
+          onClearOwnership={() => changeOwnership("all")}
           onClearMotivation={() => setMotivation("all")}
           onClearAttention={() => setAttention(null)}
           onReset={resetFilters}

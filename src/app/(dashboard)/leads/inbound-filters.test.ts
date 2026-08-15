@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   deriveAttentionLeadIds,
+  executeInboundScopedLeadQuery,
   resolveInboundLeadFilters,
 } from "./inbound-filters";
 
@@ -37,6 +38,56 @@ describe("resolveInboundLeadFilters", () => {
     expect(
       resolveInboundLeadFilters({ sequence_ended: "true" }, context).attention,
     ).toBe("sequence_ended");
+  });
+});
+
+describe("executeInboundScopedLeadQuery", () => {
+  function recordingQuery() {
+    const operations: string[] = [];
+    const query = {
+      eq(field: string, value: unknown) {
+        operations.push(`eq:${field}:${String(value)}`);
+        return query;
+      },
+      is(field: string, value: unknown) {
+        operations.push(`is:${field}:${String(value)}`);
+        return query;
+      },
+      not(field: string, operator: string, value: unknown) {
+        operations.push(`not:${field}:${operator}:${String(value)}`);
+        return query;
+      },
+      order(field: string) {
+        operations.push(`order:${field}`);
+        return query;
+      },
+      limit(count: number) {
+        operations.push(`limit:${count}`);
+        return Promise.resolve({ data: [], error: null });
+      },
+    };
+    return { query, operations };
+  }
+
+  it("applies assignee scope before ordering and the global limit", async () => {
+    const { query, operations } = recordingQuery();
+    await executeInboundScopedLeadQuery(query, "mine", "user-me", 501);
+    expect(operations).toEqual([
+      "eq:assigned_user_id:user-me",
+      "order:created_at",
+      "limit:501",
+    ]);
+  });
+
+  it("applies the dashboard's active-unassigned definition before the limit", async () => {
+    const { query, operations } = recordingQuery();
+    await executeInboundScopedLeadQuery(query, "unassigned", "user-me", 501);
+    expect(operations).toEqual([
+      "is:assigned_user_id:null",
+      "not:status:in:(closed,dead,prospect)",
+      "order:created_at",
+      "limit:501",
+    ]);
   });
 });
 

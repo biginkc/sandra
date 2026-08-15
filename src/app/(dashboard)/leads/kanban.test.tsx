@@ -214,6 +214,7 @@ describe("Leads Kanban foundation", () => {
       "all",
     );
     expect(screen.queryByRole("button", { name: /Reset all \(/ })).not.toBeInTheDocument();
+    expect(routerPush).not.toHaveBeenCalled();
   });
 
   it("initializes a validated dashboard ownership filter and Reset restores the full board", async () => {
@@ -222,6 +223,7 @@ describe("Leads Kanban foundation", () => {
       <Kanban
         {...baseProps}
         initialOwnership="mine"
+        hasInboundFilter
         initialLeads={[
           makeLead(),
           makeLead({
@@ -241,14 +243,10 @@ describe("Leads Kanban foundation", () => {
     expect(screen.queryByText("456 Oak Ave")).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Reset all (1)" }));
-    expect(screen.getByRole("button", { name: "All leads" })).toHaveAttribute(
-      "aria-pressed",
-      "true",
-    );
-    expect(screen.getByText("456 Oak Ave")).toBeVisible();
+    expect(routerPush).toHaveBeenCalledWith("/leads");
   });
 
-  it("shows inbound unassigned and attention filters truthfully and clears them in place", async () => {
+  it("shows inbound unassigned and attention filters truthfully and resets through the bare board", async () => {
     const user = userEvent.setup();
     const leads = [
       makeLead(),
@@ -262,6 +260,7 @@ describe("Leads Kanban foundation", () => {
       <Kanban
         {...baseProps}
         initialOwnership="unassigned"
+        hasInboundFilter
         initialLeads={leads}
       />,
     );
@@ -270,13 +269,15 @@ describe("Leads Kanban foundation", () => {
     expect(screen.queryByText("123 Main St")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Unassigned/ })).toBeVisible();
     await user.click(screen.getByRole("button", { name: "Reset all (1)" }));
-    expect(screen.getByText("123 Main St")).toBeVisible();
+    expect(routerPush).toHaveBeenCalledWith("/leads");
 
     view.unmount();
+    routerPush.mockClear();
     render(
       <Kanban
         {...baseProps}
         initialAttentionFilter="stale"
+        hasInboundFilter
         attentionLeadIds={{ stale: ["lead-unassigned"], sequenceEnded: [] }}
         initialLeads={leads}
       />,
@@ -285,7 +286,7 @@ describe("Leads Kanban foundation", () => {
     expect(screen.getByText("789 Unassigned Rd")).toBeVisible();
     expect(screen.queryByText("123 Main St")).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Reset all (1)" }));
-    expect(screen.getByText("123 Main St")).toBeVisible();
+    expect(routerPush).toHaveBeenCalledWith("/leads");
   });
 
   it("shows board-level no-results with removable chips", async () => {

@@ -112,9 +112,9 @@ export type CreateLeadError = {
  *   - Property dedup by `address_normalized`. If a property already
  *     exists at that address, return its id with `wasDuplicate=true`
  *     before resolving or creating any submitted contact.
- *   - A new property claims the unique address before contact work. This
- *     makes a concurrent unique-index loser an explicit duplicate without
- *     creating an orphan contact.
+ *   - Contact resolution happens before the property insert, then the new
+ *     property is inserted once with its homeowner already attached. No
+ *     concurrent caller can observe an incomplete property row.
  *   - Contact dedup by phone_1 → email → (first_name + last_name).
  *     Reuses the strict matching the CSV ingest uses so a re-submitted
  *     lead never spawns a duplicate contact row.
@@ -214,10 +214,39 @@ export async function createLead(
     }
   }
 
-  // ---- 3. Claim the property address before creating a contact --------
-  // The unique address index is the final race arbiter. Inserting the
-  // property first ensures a concurrent loser returns the winner as a
-  // duplicate without ever creating an unattached contact.
+  // ---- 3. Resolve / create contact before exposing the property --------
+  // The property is inserted only once, already complete. If another request
+  // wins the unique-address race, only a contact created by this request is
+  // eligible for cleanup; an exposed property is never compensated away.
+  let resolvedContact: Awaited<ReturnType<typeof resolveOrCreateContact>> = {
+    id: null,
+    phoneDropped: null,
+    created: false,
+  };
+  const hasAnyContactField =
+    !!phoneNorm || !!emailNorm || !!firstNorm || !!lastNorm;
+  if (hasAnyContactField) {
+    try {
+      resolvedContact = await resolveOrCreateContact(supabase, {
+        first_name: firstNorm,
+        last_name: lastNorm,
+        phone_1: phoneNorm,
+        email: emailNorm,
+      });
+    } catch (error) {
+      return {
+        ok: false,
+        error: {
+          code: "INTERNAL",
+          message:
+            error instanceof Error
+              ? error.message
+              : "The homeowner contact could not be created.",
+        },
+      };
+    }
+  }
+
   const insertRow: Database["public"]["Tables"]["properties"]["Insert"] = {
     status: "new_lead",
     address: addressRaw,
@@ -228,7 +257,7 @@ export async function createLead(
     county_id: input.property.county_id ?? null,
     address_normalized: addressNormalized,
     source: input.source,
-    homeowner_contact_id: null,
+    homeowner_contact_id: resolvedContact.id,
     assigned_user_id:
       input.assignedUserId === undefined
         ? (input.createdBy ?? null)
@@ -241,6 +270,7 @@ export async function createLead(
     .select("id")
     .single();
   if (insertErr || !inserted) {
+    let duplicatePropertyId: string | null = null;
     if (insertErr?.code === "23505" && addressNormalized) {
       const { data: winner, error: winnerError } = await supabase
         .from("properties")
@@ -250,16 +280,28 @@ export async function createLead(
         .limit(1)
         .maybeSingle();
       if (!winnerError && winner) {
-        return {
-          ok: true,
-          data: {
-            propertyId: winner.id,
-            wasDuplicate: true,
-            contactId: null,
-            phoneDropped: null,
-          },
-        };
+        duplicatePropertyId = winner.id;
       }
+    }
+
+    if (resolvedContact.created && resolvedContact.id) {
+      const cleanup = await cleanupNewContactIfUnreferenced(
+        supabase,
+        resolvedContact.id,
+      );
+      if (!cleanup.ok) return cleanup;
+    }
+
+    if (duplicatePropertyId) {
+      return {
+        ok: true,
+        data: {
+          propertyId: duplicatePropertyId,
+          wasDuplicate: true,
+          contactId: null,
+          phoneDropped: null,
+        },
+      };
     }
     return {
       ok: false,
@@ -269,134 +311,86 @@ export async function createLead(
       },
     };
   }
-  const propertyId = inserted.id;
-
-  // ---- 4. Resolve / create contact (if any was supplied) -------------
-  let contactId: string | null = null;
-  let phoneDropped: string | null = null;
-  const hasAnyContactField =
-    !!phoneNorm || !!emailNorm || !!firstNorm || !!lastNorm;
-  if (hasAnyContactField) {
-    let resolved: Awaited<ReturnType<typeof resolveOrCreateContact>>;
-    try {
-      resolved = await resolveOrCreateContact(supabase, {
-        first_name: firstNorm,
-        last_name: lastNorm,
-        phone_1: phoneNorm,
-        email: emailNorm,
-      });
-    } catch (error) {
-      const cleanup = await cleanupClaimedLead(supabase, propertyId, null);
-      if (!cleanup.ok) return cleanup;
-      return {
-        ok: false,
-        error: {
-          code: "INTERNAL",
-          message:
-            error instanceof Error
-              ? error.message
-              : "The homeowner contact could not be created.",
-        },
-      };
-    }
-    contactId = resolved.id;
-    phoneDropped = resolved.phoneDropped;
-    const { data: attached, error: attachError } = await supabase
-      .from("properties")
-      .update({ homeowner_contact_id: contactId })
-      .eq("id", propertyId)
-      .is("homeowner_contact_id", null)
-      .select("id")
-      .maybeSingle();
-    if (attachError || !attached) {
-      const cleanup = await cleanupClaimedLead(
-        supabase,
-        propertyId,
-        resolved.created ? contactId : null,
-      );
-      if (!cleanup.ok) return cleanup;
-      return {
-        ok: false,
-        error: {
-          code: "INTERNAL",
-          message:
-            attachError?.message ??
-            "The lead was created, but its homeowner could not be attached.",
-        },
-      };
-    }
-  }
 
   return {
     ok: true,
-    data: { propertyId, wasDuplicate: false, contactId, phoneDropped },
+    data: {
+      propertyId: inserted.id,
+      wasDuplicate: false,
+      contactId: resolvedContact.id,
+      phoneDropped: resolvedContact.phoneDropped,
+    },
   };
 }
 
-async function cleanupClaimedLead(
+async function cleanupNewContactIfUnreferenced(
   supabase: SupabaseClient<Database>,
-  propertyId: string,
-  newlyCreatedContactId: string | null,
+  contactId: string,
 ): Promise<{ ok: true } | { ok: false; error: CreateLeadError }> {
   try {
-    // Delete the claimed property first. If the attach write reached the DB
-    // but its response was lost, this releases its homeowner FK before the
-    // contact cleanup. Selecting the deleted id proves this was not an
-    // RLS-hidden or stale no-op.
-    const { data: removedProperty, error: propertyCleanupError } = await supabase
+    const { data: reference, error: referenceError } = await supabase
       .from("properties")
+      .select("id")
+      .eq("homeowner_contact_id", contactId)
+      .limit(1)
+      .maybeSingle();
+    if (referenceError) {
+      return contactRepairRequired(contactId, referenceError.message);
+    }
+    if (reference) return { ok: true };
+
+    // A foreign key closes the race between the reference check and delete:
+    // if another request attaches this contact meanwhile, deletion fails and
+    // the verification below proves whether the contact is now referenced.
+    const { data: removedContact, error: contactCleanupError } = await supabase
+      .from("contacts")
       .delete()
-      .eq("id", propertyId)
+      .eq("id", contactId)
       .select("id")
       .maybeSingle();
-    if (propertyCleanupError || !removedProperty) {
-      const reason =
-        propertyCleanupError?.message ?? "the claimed property was not deleted";
-      reportError(new Error(`lead create compensation failed: ${reason}`), {
-        tags: { surface: "lead_create_cleanup" },
-        extra: { propertyId, newlyCreatedContactId },
-      });
-      return repairRequired(propertyId, reason);
-    }
+    if (!contactCleanupError && removedContact) return { ok: true };
 
-    if (newlyCreatedContactId) {
-      const { data: removedContact, error: contactCleanupError } = await supabase
-        .from("contacts")
-        .delete()
-        .eq("id", newlyCreatedContactId)
-        .select("id")
-        .maybeSingle();
-      if (contactCleanupError || !removedContact) {
-        const reason =
-          contactCleanupError?.message ?? "the new contact was not deleted";
-        reportError(new Error(`lead create compensation failed: ${reason}`), {
-          tags: { surface: "lead_create_cleanup" },
-          extra: { propertyId, newlyCreatedContactId },
-        });
-        return repairRequired(propertyId, reason);
-      }
-    }
+    const [{ data: remaining, error: remainingError }, { data: newReference }] =
+      await Promise.all([
+        supabase.from("contacts").select("id").eq("id", contactId).maybeSingle(),
+        supabase
+          .from("properties")
+          .select("id")
+          .eq("homeowner_contact_id", contactId)
+          .limit(1)
+          .maybeSingle(),
+      ]);
+    if (!remainingError && !remaining) return { ok: true };
+    if (newReference) return { ok: true };
 
-    return { ok: true };
+    const reason =
+      contactCleanupError?.message ??
+      remainingError?.message ??
+      "the new contact could not be removed or proven referenced";
+    reportError(new Error(`lead create contact cleanup failed: ${reason}`), {
+      tags: { surface: "lead_create_cleanup" },
+      extra: { contactId },
+    });
+    return contactRepairRequired(contactId, reason);
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
     reportError(error, {
       tags: { surface: "lead_create_cleanup" },
-      extra: { propertyId, newlyCreatedContactId },
+      extra: { contactId },
     });
-    return repairRequired(propertyId, reason);
+    return contactRepairRequired(contactId, reason);
   }
 }
 
-function repairRequired(
-  propertyId: string,
+function contactRepairRequired(
+  contactId: string,
   reason: string,
 ): { ok: false; error: CreateLeadError } {
   return {
     ok: false,
     error: {
       code: "REPAIR_REQUIRED",
-      message: `Lead creation could not be rolled back for property ${propertyId}. Do not retry until this record is repaired. (${reason})`,
+      message: `Lead creation left contact ${contactId} in an uncertain state. Do not retry until this record is repaired. (${reason})`,
     },
   };
 }
@@ -419,51 +413,13 @@ function repairRequired(
  */
 async function resolveOrCreateContact(
   supabase: SupabaseClient<Database>,
-  contact: {
-    first_name: string | null;
-    last_name: string | null;
-    phone_1: string | null;
-    email: string | null;
-  },
+  contact: ContactIdentity,
 ): Promise<{ id: string | null; phoneDropped: string | null; created: boolean }> {
-  if (contact.phone_1) {
-    const { data } = await supabase
-      .from("contacts")
-      .select("id")
-      .or(
-        `phone_1.eq.${contact.phone_1},phone_2.eq.${contact.phone_1},phone_3.eq.${contact.phone_1}`,
-      )
-      .limit(1)
-      .maybeSingle();
-    if (data) return { id: data.id, phoneDropped: null, created: false };
+  const existingContactId = await findExistingContact(supabase, contact);
+  if (existingContactId) {
+    return { id: existingContactId, phoneDropped: null, created: false };
   }
-  if (contact.email) {
-    const { data } = await supabase
-      .from("contacts")
-      .select("id")
-      .ilike("email", contact.email)
-      .limit(1)
-      .maybeSingle();
-    if (data) return { id: data.id, phoneDropped: null, created: false };
-  }
-  if (
-    !contact.phone_1 &&
-    !contact.email &&
-    contact.first_name &&
-    contact.last_name
-  ) {
-    const { data } = await supabase
-      .from("contacts")
-      .select("id")
-      .ilike("first_name", contact.first_name)
-      .ilike("last_name", contact.last_name)
-      .eq("contact_type", "person")
-      .is("phone_1", null)
-      .is("email", null)
-      .limit(1)
-      .maybeSingle();
-    if (data) return { id: data.id, phoneDropped: null, created: false };
-  }
+
   // Hard rule (migration 080): a phone can't be saved with type
   // 'unknown'. Lead phones arrive untyped, so classify at intake via
   // Telnyx when configured. When the lookup is unavailable or fails,
@@ -507,7 +463,71 @@ async function resolveOrCreateContact(
     .select("id")
     .single();
   if (error) {
+    // A second request can create the same dedup identity after our lookup.
+    // Re-read after a unique conflict and mark it reused; only rows created
+    // by this request may ever enter compensating cleanup.
+    if (error.code === "23505") {
+      const racedContactId = await findExistingContact(supabase, contact);
+      if (racedContactId) {
+        return { id: racedContactId, phoneDropped: null, created: false };
+      }
+    }
     throw new Error(`contact insert: ${error.message}`);
   }
   return { id: data.id, phoneDropped, created: true };
+}
+
+type ContactIdentity = {
+  first_name: string | null;
+  last_name: string | null;
+  phone_1: string | null;
+  email: string | null;
+};
+
+async function findExistingContact(
+  supabase: SupabaseClient<Database>,
+  contact: ContactIdentity,
+): Promise<string | null> {
+  if (contact.phone_1) {
+    const { data, error } = await supabase
+      .from("contacts")
+      .select("id")
+      .or(
+        `phone_1.eq.${contact.phone_1},phone_2.eq.${contact.phone_1},phone_3.eq.${contact.phone_1}`,
+      )
+      .limit(1)
+      .maybeSingle();
+    if (error) throw new Error(`contact phone lookup: ${error.message}`);
+    if (data) return data.id;
+  }
+  if (contact.email) {
+    const { data, error } = await supabase
+      .from("contacts")
+      .select("id")
+      .ilike("email", contact.email)
+      .limit(1)
+      .maybeSingle();
+    if (error) throw new Error(`contact email lookup: ${error.message}`);
+    if (data) return data.id;
+  }
+  if (
+    !contact.phone_1 &&
+    !contact.email &&
+    contact.first_name &&
+    contact.last_name
+  ) {
+    const { data, error } = await supabase
+      .from("contacts")
+      .select("id")
+      .ilike("first_name", contact.first_name)
+      .ilike("last_name", contact.last_name)
+      .eq("contact_type", "person")
+      .is("phone_1", null)
+      .is("email", null)
+      .limit(1)
+      .maybeSingle();
+    if (error) throw new Error(`contact name lookup: ${error.message}`);
+    if (data) return data.id;
+  }
+  return null;
 }

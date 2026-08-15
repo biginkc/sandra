@@ -171,9 +171,38 @@ describe("createLead — phase 02 D-04 county_id pass-through", () => {
     expect(payload.market).toBeNull();
   });
 
+  it("resolves the homeowner before inserting one complete property row", async () => {
+    responseQueue = [
+      { data: null, error: null },
+      { data: null, error: null },
+      { data: { id: "contact-complete" }, error: null },
+      { data: { id: "prop-complete" }, error: null },
+    ];
+
+    const result = await createLead(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      makeSupabase() as any,
+      {
+        source: "referral",
+        property: { address: "9 Complete Way", state: "MO" },
+        contact: { first_name: "Ready", last_name: "Owner" },
+      },
+    );
+
+    expect(result.ok).toBe(true);
+    const inserts = calls.filter((call) => call.op === "insert");
+    expect(inserts.map((call) => call.table)).toEqual(["contacts", "properties"]);
+    expect(inserts[1]?.insertPayload).toEqual(
+      expect.objectContaining({ homeowner_contact_id: "contact-complete" }),
+    );
+    expect(calls.some((call) => call.op === "update")).toBe(false);
+  });
+
   it("turns a unique-address insert race into an explicit duplicate before contact creation", async () => {
     responseQueue = [
       { data: null, error: null },
+      { data: null, error: null },
+      { data: { id: "contact-race-loser" }, error: null },
       {
         data: null,
         error: {
@@ -182,9 +211,11 @@ describe("createLead — phase 02 D-04 county_id pass-through", () => {
         },
       },
       {
-        data: { id: "prop-race-winner", homeowner_contact_id: null },
+        data: { id: "prop-race-winner" },
         error: null,
       },
+      { data: null, error: null },
+      { data: { id: "contact-race-loser" }, error: null },
     ];
 
     const result = await createLead(
@@ -206,20 +237,52 @@ describe("createLead — phase 02 D-04 county_id pass-through", () => {
         phoneDropped: null,
       },
     });
-    expect(calls.filter((call) => call.table === "contacts")).toHaveLength(0);
+    expect(
+      calls.some(
+        (call) => call.table === "contacts" && call.op === "delete",
+      ),
+    ).toBe(true);
+    expect(
+      calls.some(
+        (call) => call.table === "properties" && call.op === "delete",
+      ),
+    ).toBe(false);
   });
 
-  it("cleans the claimed property and new contact after attach failure so retry can succeed", async () => {
+  it("does not expose a property when contact creation fails", async () => {
     responseQueue = [
       { data: null, error: null },
-      { data: { id: "prop-new" }, error: null },
+      { data: null, error: null },
+      { data: null, error: { message: "contact insert failed" } },
+    ];
+
+    const result = await createLead(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      makeSupabase() as any,
+      {
+        source: "referral",
+        property: { address: "10 Contact First Way", state: "MO" },
+        contact: { first_name: "Fail", last_name: "Before property" },
+      },
+    );
+
+    expect(result.ok).toBe(false);
+    expect(
+      calls.some(
+        (call) => call.table === "properties" && call.op === "insert",
+      ),
+    ).toBe(false);
+  });
+
+  it("cleans only its new unreferenced contact after property insert failure so retry can succeed", async () => {
+    responseQueue = [
+      { data: null, error: null },
+      { data: null, error: null },
+      { data: { id: "contact-new" }, error: null },
+      { data: null, error: { message: "property insert failed" } },
       { data: null, error: null },
       { data: { id: "contact-new" }, error: null },
       { data: null, error: null },
-      { data: { id: "prop-new" }, error: null },
-      { data: { id: "contact-new" }, error: null },
-      { data: null, error: null },
-      { data: { id: "prop-retry" }, error: null },
       { data: null, error: null },
       { data: { id: "contact-retry" }, error: null },
       { data: { id: "prop-retry" }, error: null },
@@ -230,18 +293,18 @@ describe("createLead — phase 02 D-04 county_id pass-through", () => {
       makeSupabase() as any,
       {
         source: "referral",
-        property: { address: "11 Attach Race Way", state: "MO" },
+        property: { address: "11 Insert Failure Way", state: "MO" },
         contact: { first_name: "New", last_name: "Owner" },
       },
     );
 
     expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.error.code).toBe("INTERNAL");
+    if (!result.ok) expect(result.error.code).toBe("INSERT_FAILED");
     expect(
       calls.some(
         (call) => call.table === "properties" && call.op === "delete",
       ),
-    ).toBe(true);
+    ).toBe(false);
     expect(
       calls.some(
         (call) => call.table === "contacts" && call.op === "delete",
@@ -253,7 +316,7 @@ describe("createLead — phase 02 D-04 county_id pass-through", () => {
       makeSupabase() as any,
       {
         source: "referral",
-        property: { address: "11 Attach Race Way", state: "MO" },
+        property: { address: "11 Insert Failure Way", state: "MO" },
         contact: { first_name: "New", last_name: "Owner" },
       },
     );
@@ -268,57 +331,37 @@ describe("createLead — phase 02 D-04 county_id pass-through", () => {
     });
   });
 
-  it("cleans the claimed property after contact creation fails so retry can succeed", async () => {
+  it("never cleans a reused contact when the property insert fails", async () => {
     responseQueue = [
       { data: null, error: null },
-      { data: { id: "prop-contact-failure" }, error: null },
-      { data: null, error: null },
-      { data: null, error: { message: "contact insert failed" } },
-      { data: { id: "prop-contact-failure" }, error: null },
-      { data: null, error: null },
-      { data: { id: "prop-retry" }, error: null },
-      { data: null, error: null },
-      { data: { id: "contact-retry" }, error: null },
-      { data: { id: "prop-retry" }, error: null },
+      { data: { id: "contact-existing" }, error: null },
+      { data: null, error: { message: "property insert failed" } },
     ];
 
-    const first = await createLead(
+    const result = await createLead(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       makeSupabase() as any,
       {
         source: "referral",
-        property: { address: "12 Contact Failure Way", state: "MO" },
+        property: { address: "12 Reused Contact Way", state: "MO" },
         contact: { first_name: "New", last_name: "Owner" },
       },
     );
-    expect(first.ok).toBe(false);
-    if (!first.ok) expect(first.error.code).toBe("INTERNAL");
-    expect(
-      calls.some(
-        (call) => call.table === "properties" && call.op === "delete",
-      ),
-    ).toBe(true);
-
-    const retry = await createLead(
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      makeSupabase() as any,
-      {
-        source: "referral",
-        property: { address: "12 Contact Failure Way", state: "MO" },
-        contact: { first_name: "New", last_name: "Owner" },
-      },
-    );
-    expect(retry.ok).toBe(true);
-    if (retry.ok) expect(retry.data.wasDuplicate).toBe(false);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.code).toBe("INSERT_FAILED");
+    expect(calls.some((call) => call.table === "contacts" && call.op === "delete")).toBe(false);
   });
 
-  it("returns repair-needed when compensating property cleanup cannot be verified", async () => {
+  it("returns repair-needed when new-contact cleanup cannot be verified", async () => {
     responseQueue = [
       { data: null, error: null },
-      { data: { id: "prop-repair" }, error: null },
       { data: null, error: null },
-      { data: null, error: { message: "contact insert failed" } },
-      { data: null, error: { message: "property delete failed" } },
+      { data: { id: "contact-repair" }, error: null },
+      { data: null, error: { message: "property insert failed" } },
+      { data: null, error: null },
+      { data: null, error: { message: "contact delete failed" } },
+      { data: { id: "contact-repair" }, error: null },
+      { data: null, error: null },
     ];
 
     const result = await createLead(
@@ -334,7 +377,7 @@ describe("createLead — phase 02 D-04 county_id pass-through", () => {
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.error.code).toBe("REPAIR_REQUIRED");
-      expect(result.error.message).toContain("prop-repair");
+      expect(result.error.message).toContain("contact-repair");
     }
   });
 });

@@ -40,6 +40,45 @@ export function resolveInboundLeadFilters(
   return { ownership, attention };
 }
 
+export type InboundScopedLeadQuery<T> = {
+  eq(field: string, value: unknown): InboundScopedLeadQuery<T>;
+  is(field: string, value: unknown): InboundScopedLeadQuery<T>;
+  not(
+    field: string,
+    operator: string,
+    value: unknown,
+  ): InboundScopedLeadQuery<T>;
+  order(
+    field: string,
+    options?: { ascending?: boolean },
+  ): InboundScopedLeadQuery<T>;
+  limit(count: number): PromiseLike<{ data: T[] | null; error: unknown }>;
+};
+
+/**
+ * Dashboard assignee queues must be scoped in Postgres before the global board
+ * cap. Keeping the ordering + limit inside this helper makes that sequencing a
+ * directly tested contract rather than an easy-to-regress page detail.
+ */
+export function executeInboundScopedLeadQuery<T>(
+  query: InboundScopedLeadQuery<T>,
+  ownership: InboundOwnershipFilter,
+  currentUserId: string | null,
+  limit: number,
+): PromiseLike<{ data: T[] | null; error: unknown }> {
+  let scoped = query;
+  if (ownership === "mine" && currentUserId) {
+    scoped = scoped.eq("assigned_user_id", currentUserId);
+  } else if (ownership === "unassigned") {
+    scoped = scoped
+      .is("assigned_user_id", null)
+      .not("status", "in", "(closed,dead,prospect)");
+  } else if (ownership !== "all") {
+    scoped = scoped.eq("assigned_user_id", ownership);
+  }
+  return scoped.order("created_at", { ascending: false }).limit(limit);
+}
+
 type AttentionLead = { id: string; status: string };
 type AttentionMessage = {
   property_id: string | null;

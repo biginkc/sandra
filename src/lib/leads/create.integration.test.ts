@@ -14,7 +14,7 @@ const supabase = createTestClient();
 const realFetch = globalThis.fetch;
 
 function withOneInjectedFailure(
-  target: "contact_insert" | "homeowner_attach",
+  target: "contact_insert" | "property_insert",
 ) {
   let armed = true;
   return {
@@ -44,28 +44,20 @@ function withOneInjectedFailure(
           }
           if (
             armed &&
-            target === "homeowner_attach" &&
+            target === "property_insert" &&
             table === "properties" &&
-            property === "update"
+            property === "insert"
           ) {
-            return (values: Record<string, unknown>) => {
-              if ("homeowner_contact_id" in values) {
-                armed = false;
-                const failed = {
-                  eq: () => failed,
-                  is: () => failed,
-                  select: () => failed,
-                  maybeSingle: async () => ({
-                    data: null,
-                    error: { code: "INJECTED", message: "injected attach failure" },
-                  }),
-                };
-                return failed;
-              }
-              const realUpdate = Reflect.get(builder, property, receiver) as (
-                values: Record<string, unknown>,
-              ) => unknown;
-              return realUpdate.call(builder, values);
+            return () => {
+              armed = false;
+              const failed = {
+                select: () => failed,
+                single: async () => ({
+                  data: null,
+                  error: { code: "INJECTED", message: "injected property failure" },
+                }),
+              };
+              return failed;
             };
           }
           const value = Reflect.get(builder, property, receiver);
@@ -347,7 +339,7 @@ describe("createLead (integration)", () => {
     expect(contact!.notes).toContain("+18165553200");
   });
 
-  it("removes the claimed property after contact creation failure and permits a clean retry", async () => {
+  it("creates no property when contact creation fails and permits a clean retry", async () => {
     const input = {
       source: "referral" as const,
       property: { address: "20 Contact Failure Ln", state: "MO" },
@@ -372,14 +364,14 @@ describe("createLead (integration)", () => {
     if (retry.ok) expect(retry.data.wasDuplicate).toBe(false);
   });
 
-  it("removes both new rows after homeowner attach failure and permits a clean retry", async () => {
+  it("removes its new unreferenced contact after property insert failure and permits a clean retry", async () => {
     const input = {
       source: "referral" as const,
       property: { address: "21 Attach Failure Ln", state: "MO" },
       contact: { first_name: "Cleanup", last_name: "Attach" },
     };
 
-    const first = await createLead(withOneInjectedFailure("homeowner_attach"), input);
+    const first = await createLead(withOneInjectedFailure("property_insert"), input);
     expect(first.ok).toBe(false);
 
     const [{ count: propertyCount }, { count: contactCount }] = await Promise.all([
@@ -395,5 +387,32 @@ describe("createLead (integration)", () => {
     const retry = await createLead(supabase, input);
     expect(retry.ok).toBe(true);
     if (retry.ok) expect(retry.data.wasDuplicate).toBe(false);
+  });
+
+  it("reuses a contact created by a concurrent same-identity request and returns one duplicate lead", async () => {
+    const input = {
+      source: "referral" as const,
+      property: { address: "22 Concurrent Identity Ln", state: "MO" },
+      contact: { first_name: "Same", last_name: "Homeowner" },
+    };
+
+    const results = await Promise.all([
+      createLead(supabase, input),
+      createLead(supabase, input),
+    ]);
+    expect(results.every((result) => result.ok)).toBe(true);
+    const successful = results.filter((result) => result.ok);
+    expect(successful.filter((result) => result.data.wasDuplicate)).toHaveLength(1);
+    expect(new Set(successful.map((result) => result.data.propertyId)).size).toBe(1);
+
+    const [{ count: propertyCount }, { count: contactCount }] = await Promise.all([
+      supabase
+        .from("properties")
+        .select("*", { count: "exact", head: true })
+        .eq("address", input.property.address),
+      supabase.from("contacts").select("*", { count: "exact", head: true }),
+    ]);
+    expect(propertyCount).toBe(1);
+    expect(contactCount).toBe(1);
   });
 });
