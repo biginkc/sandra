@@ -6,6 +6,7 @@ const mocks = vi.hoisted(() => ({
 
 let queuedData: unknown[] | null = [];
 let queuedError: { message: string; code?: string } | null = null;
+let queuedResponses: { data: unknown; error: unknown }[] = [];
 let eqCalls: Array<[string, unknown]> = [];
 let selectCalls: string[] = [];
 let orderCalls: Array<[string, unknown]> = [];
@@ -34,6 +35,12 @@ function makeBuilder(): Record<string, unknown> {
   };
   builder.limit = (n: number) => {
     limitCalls.push(n);
+    // Per-call FIFO first (multi-window month fetches need distinct
+    // responses per query), falling back to the shared single-response
+    // queue every pre-existing test uses.
+    if (queuedResponses.length > 0) {
+      return Promise.resolve(queuedResponses.shift()!);
+    }
     return Promise.resolve({ data: queuedData, error: queuedError });
   };
   return builder;
@@ -96,6 +103,7 @@ vi.mock("@/lib/supabase/admin", () => ({
 import {
   fetchAssigneeEmails,
   fetchCalendarAppointments,
+  fetchCalendarAppointmentsForWindows,
   fetchOrgRoster,
 } from "./queries";
 
@@ -107,6 +115,7 @@ beforeEach(() => {
   mocks.listUsers.mockReset();
   queuedData = [];
   queuedError = null;
+  queuedResponses = [];
   eqCalls = [];
   selectCalls = [];
   orderCalls = [];
@@ -683,5 +692,51 @@ describe("fetchOrgRoster", () => {
       // A capped-out identity load never falls through to resolving labels.
       expect(mocks.listUsers).not.toHaveBeenCalled();
     });
+  });
+});
+
+describe("fetchCalendarAppointmentsForWindows (month view)", () => {
+  const WINDOWS = [
+    { startUtc: "2026-08-02T05:00:00.000Z", endUtc: "2026-08-09T05:00:00.000Z" },
+    { startUtc: "2026-08-09T05:00:00.000Z", endUtc: "2026-08-16T05:00:00.000Z" },
+  ];
+
+  it("concatenates per-window rows in window order (disjoint ranges, no dedup needed)", async () => {
+    queuedResponses = [
+      { data: [appointmentRow({ id: "w1-a", due_at: "2026-08-03T15:00:00.000Z" })], error: null },
+      { data: [appointmentRow({ id: "w2-a", due_at: "2026-08-10T15:00:00.000Z" })], error: null },
+    ];
+    const result = await fetchCalendarAppointmentsForWindows("org-1", {
+      windows: WINDOWS,
+    });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.rows.map((r) => r.id)).toEqual(["w1-a", "w2-a"]);
+    }
+  });
+
+  it("fails closed when ANY window's query fails", async () => {
+    queuedResponses = [
+      { data: [appointmentRow({ id: "w1-a" })], error: null },
+      { data: null, error: { message: "boom", code: "XX000" } },
+    ];
+    const result = await fetchCalendarAppointmentsForWindows("org-1", {
+      windows: WINDOWS,
+    });
+    expect(result.ok).toBe(false);
+  });
+
+  it("fails closed when a single window exceeds the per-week cap (same contract as week view)", async () => {
+    const over = Array.from({ length: 901 }, (_, i) =>
+      appointmentRow({ id: `t-${i}` }),
+    );
+    queuedResponses = [
+      { data: over, error: null },
+      { data: [appointmentRow({ id: "w2-a" })], error: null },
+    ];
+    const result = await fetchCalendarAppointmentsForWindows("org-1", {
+      windows: WINDOWS,
+    });
+    expect(result.ok).toBe(false);
   });
 });

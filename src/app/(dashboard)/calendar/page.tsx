@@ -5,7 +5,12 @@ import { PageHeader } from "@/components/page-header";
 import { getCallerMemberships } from "@/lib/auth/memberships";
 import { loadIntegrationPrefs } from "@/lib/integrations/prefs";
 import { createClient } from "@/lib/supabase/server";
-import { fetchAssigneeEmails, fetchCalendarAppointments, fetchOrgRoster } from "./queries";
+import {
+  fetchAssigneeEmails,
+  fetchCalendarAppointments,
+  fetchCalendarAppointmentsForWindows,
+  fetchOrgRoster,
+} from "./queries";
 import { resolveMonth, resolveWeek } from "./range";
 import { resolveAssigneeId } from "./scoping";
 import type {
@@ -159,11 +164,23 @@ export default async function CalendarPage({
   const weekStartUtc = days[0].startUtc;
   const weekEndUtc = days[days.length - 1].endUtc;
 
-  const appointmentsResult = await fetchCalendarAppointments(orgId, {
-    assigneeId,
-    weekStartUtc,
-    weekEndUtc,
-  });
+  // Month view fetches its grid as per-week windows (Codex month-view
+  // round 2) — each window keeps the week-proven APPOINTMENTS_CAP
+  // semantics instead of stretching one week-sized cap over six weeks.
+  const appointmentsResult =
+    view === "month"
+      ? await fetchCalendarAppointmentsForWindows(orgId, {
+          assigneeId,
+          windows: Array.from({ length: days.length / 7 }, (_, w) => ({
+            startUtc: days[w * 7].startUtc,
+            endUtc: days[w * 7 + 6].endUtc,
+          })),
+        })
+      : await fetchCalendarAppointments(orgId, {
+          assigneeId,
+          weekStartUtc,
+          weekEndUtc,
+        });
 
   // A query failure is NOT an empty week (Codex round 2) — render an
   // explicit retry state instead of silently showing "no appointments".
