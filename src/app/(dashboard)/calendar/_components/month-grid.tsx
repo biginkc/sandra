@@ -68,7 +68,6 @@ export function MonthGrid({
   dayHref,
 }: Props) {
   void viewerRole;
-  void currentUserId;
   const todayKey = todayDateKeyInZone(timezone);
 
   return (
@@ -119,6 +118,18 @@ export function MonthGrid({
               <div className="mt-1 flex min-h-16 flex-col gap-0.5">
                 {visible.map((appt) => {
                   const href = appointmentHref(appt);
+                  // Ownership must survive the compact format (Codex
+                  // round 4): in the owner's Everyone view several
+                  // teammates' rows — especially personal blocks, which
+                  // all label "Personal block" — are indistinguishable
+                  // without it. Same rule as AppointmentBlock: label any
+                  // row that isn't the viewer's own, via the superset
+                  // label map (covers former teammates too).
+                  const ownerLabel =
+                    appt.assignee_id !== currentUserId
+                      ? (assignees[appt.assignee_id] ??
+                        `Former teammate (${appt.assignee_id.slice(0, 8)})`)
+                      : null;
                   const line = (
                     <span className="block truncate text-[11px] leading-4">
                       <span className="text-muted-foreground font-bold tabular-nums">
@@ -133,6 +144,15 @@ export function MonthGrid({
                       >
                         {appointmentLabel(appt)}
                       </span>
+                      {ownerLabel ? (
+                        <span
+                          className="text-muted-foreground"
+                          data-testid={`calendar-month-owner-${appt.id}`}
+                        >
+                          {" "}
+                          · {ownerLabel}
+                        </span>
+                      ) : null}
                     </span>
                   );
                   return href ? (
