@@ -118,6 +118,7 @@ function baseProps(overrides: Partial<React.ComponentProps<typeof CalendarView>>
   return {
     view: "week" as const,
     week: WEEK,
+    month: null,
     days: DAYS,
     appointments: [],
     timezone: CHI,
@@ -288,3 +289,53 @@ describe("<CalendarView />", () => {
   });
 
 });
+
+describe("<CalendarView /> month view", () => {
+  beforeEach(() => {
+    nav.search = "";
+    nav.replace.mockClear();
+  });
+
+  it("renders the Month tab and mounts MonthGrid when view=month", () => {
+    render(
+      <CalendarView
+        {...baseProps({ view: "month", month: "2026-08" })}
+      />,
+    );
+    expect(screen.getByTestId("calendar-view-month")).toHaveAttribute(
+      "aria-current",
+    );
+    expect(screen.getByTestId("calendar-month-grid")).toBeInTheDocument();
+    expect(screen.queryByTestId("calendar-week-grid")).not.toBeInTheDocument();
+  });
+
+  it("steps prev/next by whole months from the month key, not the grid start", () => {
+    render(
+      <CalendarView
+        {...baseProps({ view: "month", month: "2026-08", week: "2026-07-26" })}
+      />,
+    );
+    expect(screen.getByTestId("calendar-week-prev")).toHaveAttribute(
+      "href",
+      expect.stringContaining("week=2026-07-01"),
+    );
+    expect(screen.getByTestId("calendar-week-next")).toHaveAttribute(
+      "href",
+      expect.stringContaining("week=2026-09-01"),
+    );
+  });
+
+  it("keeps 7-day stepping for the week view", () => {
+    render(<CalendarView {...baseProps()} />);
+    expect(screen.getByTestId("calendar-week-prev")).toHaveAttribute(
+      "href",
+      expect.stringContaining(`week=${addDaysToDateKeyForTest(WEEK, -7)}`),
+    );
+  });
+});
+
+function addDaysToDateKeyForTest(dateKey: string, days: number): string {
+  const [y, m, d] = dateKey.split("-").map(Number);
+  const dt = new Date(Date.UTC(y, (m ?? 1) - 1, (d ?? 1) + days));
+  return `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, "0")}-${String(dt.getUTCDate()).padStart(2, "0")}`;
+}

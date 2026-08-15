@@ -224,3 +224,17 @@ export function addDaysToDateKey(dateKey: string, days: number): string {
   const dd = String(dt.getUTCDate()).padStart(2, "0");
   return `${yy}-${mm}-${dd}`;
 }
+
+/**
+ * First day of the month `deltaMonths` away from the given YYYY-MM month
+ * key — pure calendar-label arithmetic (UTC-anchored like
+ * `addDaysToDateKey`), used only to build the month-nav prev/next
+ * `?week=` hrefs; the page re-derives real zone-local bounds from it.
+ */
+export function monthStartDateKey(monthKey: string, deltaMonths: number): string {
+  const [y, m] = monthKey.split("-").map(Number);
+  const dt = new Date(Date.UTC(y, (m ?? 1) - 1 + deltaMonths, 1));
+  const yy = dt.getUTCFullYear();
+  const mm = String(dt.getUTCMonth() + 1).padStart(2, "0");
+  return `${yy}-${mm}-01`;
+}
