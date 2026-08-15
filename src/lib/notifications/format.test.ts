@@ -155,11 +155,13 @@ describe("formatNotification", () => {
   });
 
   it("task_assigned honors payload.timezone over the America/Chicago default", () => {
-    // now = 2026-08-14 23:30 PDT (LA day 14, UTC day 15) — due later that
-    // same LA evening. Chicago (the default zone) is already on the 15th
-    // at this UTC instant, so a formatter that ignored payload.timezone
-    // would say "tomorrow" here instead of "today".
-    const due = "2026-08-15T06:50:00Z";
+    // Dynamic due (+2h from real now): formatNotification always formats
+    // against the real clock, so the original hardcoded 2026-08-15 instant
+    // rotted into "Due Yesterday" the moment real time passed it and the
+    // suite failed on every run after that date (pre-existing flake, fixed
+    // in the month-view PR that tripped over it). +2h is always today or
+    // tomorrow in any zone, keeping the shape assertion stable forever.
+    const due = new Date(Date.now() + 2 * 3_600_000).toISOString();
     const out = formatNotification("task_assigned", {
       taskTitle: "Walkthrough",
       taskType: "follow_up",
