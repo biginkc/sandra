@@ -8,6 +8,9 @@ vi.mock("next/navigation", () => ({
 vi.mock("../../properties/promote-leads-actions", () => ({
   retryPromoteLeadsJob: vi.fn(),
 }));
+vi.mock("../../import/actions", () => ({
+  retryCsvImportJob: vi.fn(),
+}));
 
 import { JobDetail, type JobDetailProps } from "./job-detail";
 
@@ -196,14 +199,70 @@ describe("<JobDetail /> Promote to Leads results", () => {
 
     const panel = screen.getByTestId("promote-leads-job-panel");
     expect(within(panel).getByText("Promotion results")).toBeVisible();
-    expect(within(panel).getByText("Promoted").parentElement).toHaveTextContent("2");
-    expect(within(panel).getByText("Already Leads").parentElement).toHaveTextContent("1");
-    expect(within(panel).getByText("Became permanently DNC").parentElement).toHaveTextContent("1");
-    expect(within(panel).getByText("Stale or missing").parentElement).toHaveTextContent("1");
-    expect(within(panel).getByText("Failed").parentElement).toHaveTextContent("1");
-    expect(screen.getByRole("button", { name: "Retry 7 failed" })).toBeVisible();
-    expect(screen.getByRole("tab", { name: "Items (showing 1 of 6)" })).toBeVisible();
-    expect(screen.getByText("Showing first 1 of 6; exact outcome totals are shown above.")).toBeVisible();
+    expect(within(panel).getByText("Promoted").parentElement).toHaveTextContent(
+      "2",
+    );
+    expect(
+      within(panel).getByText("Already Leads").parentElement,
+    ).toHaveTextContent("1");
+    expect(
+      within(panel).getByText("Became permanently DNC").parentElement,
+    ).toHaveTextContent("1");
+    expect(
+      within(panel).getByText("Stale or missing").parentElement,
+    ).toHaveTextContent("1");
+    expect(within(panel).getByText("Failed").parentElement).toHaveTextContent(
+      "1",
+    );
+    expect(
+      screen.getByRole("button", { name: "Retry 7 failed" }),
+    ).toBeVisible();
+    expect(
+      screen.getByRole("tab", { name: "Items (showing 1 of 6)" }),
+    ).toBeVisible();
+    expect(
+      screen.getByText(
+        "Showing first 1 of 6; exact outcome totals are shown above.",
+      ),
+    ).toBeVisible();
     expect(screen.queryByText(/open the Audit tab to query raw/i)).toBeNull();
+  });
+});
+
+describe("<JobDetail /> CSV recovery", () => {
+  it("shows retry for a zero-row workflow-start failure when immutable provenance exists", () => {
+    render(
+      <JobDetail
+        job={makeJob({
+          type: "csv_import",
+          status: "failed",
+          total_items: 20,
+          processed_items: 0,
+          succeeded_items: 0,
+          failed_items: 0,
+          related_import_id: "import-1",
+        })}
+        items={[]}
+        parent={null}
+        childJobs={[]}
+        csvImport={null}
+        csvRetryAvailable
+      />,
+    );
+    expect(screen.getByRole("button", { name: "Retry import" })).toBeVisible();
+  });
+
+  it("does not advertise retry when authoritative provenance is missing", () => {
+    render(
+      <JobDetail
+        job={makeJob({ type: "csv_import", status: "failed", failed_items: 0 })}
+        items={[]}
+        parent={null}
+        childJobs={[]}
+        csvImport={null}
+        csvRetryAvailable={false}
+      />,
+    );
+    expect(screen.queryByRole("button", { name: "Retry import" })).toBeNull();
   });
 });

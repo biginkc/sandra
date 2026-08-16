@@ -13,6 +13,7 @@ export type PreflightGroup =
   | "blocked"
   | "warnings"
   | "dnc"
+  | "smsSuppressed"
   | "duplicates"
   | "empty"
   | "malformed"
@@ -27,8 +28,10 @@ export type ImportPreflight = {
   malformed: number;
   noUsableContact: number;
   dnc: number;
+  smsSuppressed: number;
   groups: Record<PreflightGroup, number[]>;
   dncReasons: Record<number, string[]>;
+  smsSuppressionReasons: Record<number, string[]>;
 };
 
 function emptyGroups(): Record<PreflightGroup, number[]> {
@@ -38,6 +41,7 @@ function emptyGroups(): Record<PreflightGroup, number[]> {
     blocked: [],
     warnings: [],
     dnc: [],
+    smsSuppressed: [],
     duplicates: [],
     empty: [],
     malformed: [],
@@ -45,13 +49,22 @@ function emptyGroups(): Record<PreflightGroup, number[]> {
   };
 }
 
-function normalizedPhones(normalized: Readonly<Record<string, unknown>>): string[] {
+function normalizedPhones(
+  normalized: Readonly<Record<string, unknown>>,
+): string[] {
   const phones = [1, 2, 3]
     .map((slot) => normalized[`homeowner_phone_${slot}`])
-    .filter((phone): phone is string => typeof phone === "string" && phone.length > 0);
+    .filter(
+      (phone): phone is string => typeof phone === "string" && phone.length > 0,
+    );
   const identityOnly = normalized.homeowner_dnc_phones;
   if (typeof identityOnly === "string") {
-    phones.push(...identityOnly.split("|").map((phone) => phone.trim()).filter(Boolean));
+    phones.push(
+      ...identityOnly
+        .split("|")
+        .map((phone) => phone.trim())
+        .filter(Boolean),
+    );
   }
   return Array.from(new Set(phones));
 }
@@ -62,6 +75,7 @@ export function buildLocalPreflight(
 ): { preflight: ImportPreflight; probes: PreflightProbe[] } {
   const groups = emptyGroups();
   const dncReasons: Record<number, string[]> = {};
+  const smsSuppressionReasons: Record<number, string[]> = {};
   const probes: PreflightProbe[] = [];
   const seenAddresses = new Set<string>();
 
@@ -92,7 +106,10 @@ export function buildLocalPreflight(
 
     const phones = normalizedPhones(normalized);
     const email = normalized.homeowner_email;
-    if (phones.length === 0 && !(typeof email === "string" && email.length > 0)) {
+    if (
+      phones.length === 0 &&
+      !(typeof email === "string" && email.length > 0)
+    ) {
       groups.noUsableContact.push(rowIndex);
       groups.warnings.push(rowIndex);
     }
@@ -112,7 +129,12 @@ export function buildLocalPreflight(
   }
 
   return {
-    preflight: summarizePreflight(rows.length, groups, dncReasons),
+    preflight: summarizePreflight(
+      rows.length,
+      groups,
+      dncReasons,
+      smsSuppressionReasons,
+    ),
     probes,
   };
 }
@@ -121,7 +143,8 @@ export function mergeServerPreflight(
   local: ImportPreflight,
   server: {
     existingRowIndexes: readonly number[];
-    dncRows: ReadonlyArray<{ rowIndex: number; reasons: string[] }>;
+    trueDncRows: ReadonlyArray<{ rowIndex: number; reasons: string[] }>;
+    smsSuppressedRows: ReadonlyArray<{ rowIndex: number; reasons: string[] }>;
   },
 ): ImportPreflight {
   const groups = Object.fromEntries(
@@ -130,27 +153,42 @@ export function mergeServerPreflight(
   const existing = new Set([...groups.existing, ...server.existingRowIndexes]);
   const dnc = new Set(groups.dnc);
   const dncReasons = { ...local.dncReasons };
+  const smsSuppressed = new Set(groups.smsSuppressed);
+  const smsSuppressionReasons = { ...local.smsSuppressionReasons };
 
-  for (const row of server.dncRows) {
+  for (const row of server.trueDncRows) {
     dnc.add(row.rowIndex);
     dncReasons[row.rowIndex] = Array.from(
       new Set([...(dncReasons[row.rowIndex] ?? []), ...row.reasons]),
     );
   }
+  for (const row of server.smsSuppressedRows) {
+    smsSuppressed.add(row.rowIndex);
+    smsSuppressionReasons[row.rowIndex] = Array.from(
+      new Set([...(smsSuppressionReasons[row.rowIndex] ?? []), ...row.reasons]),
+    );
+  }
   groups.existing = [...existing].sort((a, b) => a - b);
   groups.dnc = [...dnc].sort((a, b) => a - b);
+  groups.smsSuppressed = [...smsSuppressed].sort((a, b) => a - b);
 
   const blocked = new Set(groups.blocked);
   groups.new = Array.from({ length: local.total }, (_, index) => index).filter(
     (index) => !blocked.has(index) && !existing.has(index) && !dnc.has(index),
   );
-  return summarizePreflight(local.total, groups, dncReasons);
+  return summarizePreflight(
+    local.total,
+    groups,
+    dncReasons,
+    smsSuppressionReasons,
+  );
 }
 
 function summarizePreflight(
   total: number,
   groups: Record<PreflightGroup, number[]>,
   dncReasons: Record<number, string[]>,
+  smsSuppressionReasons: Record<number, string[]>,
 ): ImportPreflight {
   const blocked = new Set(groups.blocked);
   return {
@@ -162,8 +200,10 @@ function summarizePreflight(
     malformed: groups.malformed.length,
     noUsableContact: groups.noUsableContact.length,
     dnc: groups.dnc.length,
+    smsSuppressed: groups.smsSuppressed.length,
     groups,
     dncReasons,
+    smsSuppressionReasons,
   };
 }
 

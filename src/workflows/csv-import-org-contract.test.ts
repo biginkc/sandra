@@ -1,7 +1,10 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
-const source = readFileSync(new URL("./csv-import.ts", import.meta.url), "utf8");
+const source = readFileSync(
+  new URL("./csv-import.ts", import.meta.url),
+  "utf8",
+);
 
 describe("CSV import service-role tenant contract", () => {
   it("threads org identity into consent lookups and writes", () => {
@@ -25,5 +28,30 @@ describe("CSV import service-role tenant contract", () => {
     expect(selector).toContain("orgId: string");
     expect(selector).toContain('.eq("org_id", orgId)');
     expect(selector).toContain('.eq("channel", "sms")');
+  });
+
+  it("keeps legacy county recovery in a durable step and validates job/import tenant identity", () => {
+    const workflow = source.slice(
+      source.indexOf("export async function csvImportWorkflow"),
+    );
+    expect(source).toContain("async function recoverCountyStep");
+    expect(
+      source.slice(
+        source.indexOf("async function recoverCountyStep"),
+        source.indexOf("async function loadCsvFromStorage"),
+      ),
+    ).toContain('"use step"');
+    expect(workflow).toContain("await recoverCountyStep");
+    expect(workflow).not.toContain("createAdminClient()");
+  });
+
+  it("durably checkpoints exhausted workflow failures from authoritative item counts", () => {
+    expect(source).toContain("async function failCsvImportWorkflowStep");
+    expect(source).toContain('rpc("fail_csv_import_workflow"');
+    const workflow = source.slice(
+      source.indexOf("export async function csvImportWorkflow"),
+    );
+    expect(workflow).toContain("catch (error)");
+    expect(workflow).toContain("await failCsvImportWorkflowStep");
   });
 });

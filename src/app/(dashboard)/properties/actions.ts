@@ -62,7 +62,10 @@ export async function listSmsTemplateCategories(): Promise<
       .select("category")
       .is("deleted_at", null);
     if (error) {
-      return { ok: false, error: { code: "LIST_CATEGORIES_FAILED", message: error.message } };
+      return {
+        ok: false,
+        error: { code: "LIST_CATEGORIES_FAILED", message: error.message },
+      };
     }
     const counts = new Map<string, number>();
     for (const row of data ?? []) {
@@ -261,7 +264,10 @@ async function validateProvidedCampaignForBulkSms(
     if (error) {
       return {
         ok: false,
-        error: { code: "CAMPAIGN_AUDIENCE_LOOKUP_FAILED", message: error.message },
+        error: {
+          code: "CAMPAIGN_AUDIENCE_LOOKUP_FAILED",
+          message: error.message,
+        },
       };
     }
     readableCount += data?.length ?? 0;
@@ -284,7 +290,8 @@ async function validateProvidedCampaignForBulkSms(
       ok: false,
       error: {
         code: "CAMPAIGN_AUDIENCE_ORG_MISMATCH",
-        message: "Campaign and selected prospects must belong to the same organization.",
+        message:
+          "Campaign and selected prospects must belong to the same organization.",
       },
     };
   }
@@ -376,7 +383,10 @@ export async function bulkQueueSms(
         campaignId: providedCampaignId,
         campaignSource: "saved_campaign",
       };
-    } else if ("campaignName" in opts && typeof opts.campaignName === "string") {
+    } else if (
+      "campaignName" in opts &&
+      typeof opts.campaignName === "string"
+    ) {
       const paceValidation = validateBulkSmsQueuePace(opts, "bulk");
       if (!paceValidation.ok) return paceValidation;
       const baseOpts = {
@@ -622,11 +632,13 @@ async function fetchDialerPropertyRows(
 async function fetchEligibleDialerPropertyRows(
   supabase: Awaited<ReturnType<typeof createClient>>,
   propertyIds: string[],
-): Promise<Result<{
-  rows: DialerPropertyRow[];
-  eligibleIds: string[];
-  dncLockedCount: number;
-}>> {
+): Promise<
+  Result<{
+    rows: DialerPropertyRow[];
+    eligibleIds: string[];
+    dncLockedCount: number;
+  }>
+> {
   const eligibility = await resolveProspectEligibility(
     supabase,
     propertyIds,
@@ -687,7 +699,10 @@ export async function createDialerBatchFromPropertyIds(
   if (propertyIds.length === 0) {
     return {
       ok: false,
-      error: { code: "NO_PROPERTIES", message: "Select at least one prospect." },
+      error: {
+        code: "NO_PROPERTIES",
+        message: "Select at least one prospect.",
+      },
     };
   }
 
@@ -721,7 +736,8 @@ export async function createDialerBatchFromPropertyIds(
         ok: false,
         error: {
           code: "NO_ELIGIBLE_PROPERTIES",
-          message: "The selected prospects are Do Not Contact or no longer available.",
+          message:
+            "The selected prospects are Do Not Contact or no longer available.",
         },
       };
     }
@@ -742,7 +758,10 @@ export async function createDialerBatchFromPropertyIds(
     if (!orgId) {
       return {
         ok: false,
-        error: { code: "BATCH_CREATE_FAILED", message: "No readable prospects." },
+        error: {
+          code: "BATCH_CREATE_FAILED",
+          message: "No readable prospects.",
+        },
       };
     }
 
@@ -766,7 +785,9 @@ export async function createDialerBatchFromPropertyIds(
         org_id: orgId,
         title: opts.title ?? null,
         source_kind: opts.sourceKind ?? "selected_ids",
-        source_meta: opts.sourceMeta ?? { property_ids: rowsResult.data.eligibleIds },
+        source_meta: opts.sourceMeta ?? {
+          property_ids: rowsResult.data.eligibleIds,
+        },
         created_by_user_id: user.id,
       })
       .select("id")
@@ -811,7 +832,9 @@ export async function createDialerBatchFromPropertyIds(
 
     return ok({ batchId: batch.id as string, counts });
   } catch (e) {
-    reportError(e, { tags: { surface: "create_dialer_batch_from_property_ids" } });
+    reportError(e, {
+      tags: { surface: "create_dialer_batch_from_property_ids" },
+    });
     return errFromUnknown(e, "BATCH_CREATE_FAILED");
   }
 }
@@ -864,12 +887,14 @@ export async function getAllMatchingProspectSelection(args: {
   search: string | null;
   blockStack: FilterBlock[];
   imported?: "today" | null;
-}): Promise<Result<{
-  eligibleIds: string[];
-  eligibleCount: number;
-  dncLockedCount: number;
-  matchedCount: number;
-}>> {
+}): Promise<
+  Result<{
+    eligibleIds: string[];
+    eligibleCount: number;
+    dncLockedCount: number;
+    matchedCount: number;
+  }>
+> {
   try {
     const supabase = await createClient();
 
@@ -881,38 +906,40 @@ export async function getAllMatchingProspectSelection(args: {
     const propertiesSelect = [
       "id, source_import_id, source_imported_at",
       filterSelect,
-    ].filter(Boolean).join(", ");
-
-    let query = supabase
-      .from("properties")
-      .select(propertiesSelect)
-      .is("deleted_at", null);
-    if (!hasPipelineStatusBlock) {
-      query = query.or("status.eq.prospect,is_dnc_locked.eq.true");
-    }
-
-    if (args.search) {
-      query = query.ilike("address", `%${args.search}%`);
-    }
-    if (args.imported === "today") {
-      const { dayStart, dayEnd } = getDayBoundsInZone(new Date(), "America/Chicago");
-      query = query
-        .not("source_import_id", "is", null)
-        .gte("source_imported_at", dayStart.toISOString())
-        .lt("source_imported_at", dayEnd.toISOString());
-    }
-
-    // Plan 04 translator — same SQL chain the page renders against. Any
-    // engagement / vacancy / cass / market / assignee / list / tag /
-    // motivation_level / equity_pct / etc. is applied here, not duplicated.
-    query = (await applyFilters(query, args.blockStack, supabase)).builder;
+    ]
+      .filter(Boolean)
+      .join(", ");
 
     // PostgREST silently caps results at 1 000 rows (db-max-rows default).
-    // Paginate with .range() until a page comes back short to collect all IDs.
+    // Use a deterministic ID keyset. Offset pagination can skip or duplicate
+    // rows when a prospect changes state while a >1K selection is loading.
     const PAGE = 1000;
     const allIds: string[] = [];
-    for (let from = 0; ; from += PAGE) {
-      const { data, error } = await query.range(from, from + PAGE - 1);
+    let cursor: string | null = null;
+    for (;;) {
+      let query = supabase
+        .from("properties")
+        .select(propertiesSelect)
+        .is("deleted_at", null);
+      if (!hasPipelineStatusBlock) {
+        query = query.or("status.eq.prospect,is_dnc_locked.eq.true");
+      }
+      if (args.search) query = query.ilike("address", `%${args.search}%`);
+      if (args.imported === "today") {
+        const { dayStart, dayEnd } = getDayBoundsInZone(
+          new Date(),
+          "America/Chicago",
+        );
+        query = query
+          .not("source_import_id", "is", null)
+          .gte("source_imported_at", dayStart.toISOString())
+          .lt("source_imported_at", dayEnd.toISOString());
+      }
+      query = (await applyFilters(query, args.blockStack, supabase)).builder;
+      if (cursor) query = query.gt("id", cursor);
+      const { data, error } = await query
+        .order("id", { ascending: true })
+        .limit(PAGE);
       if (error) {
         return {
           ok: false,
@@ -922,6 +949,17 @@ export async function getAllMatchingProspectSelection(args: {
       const rows = (data ?? []) as unknown as Array<{ id: string }>;
       allIds.push(...rows.map((row) => row.id));
       if (rows.length < PAGE) break;
+      const nextCursor = rows.at(-1)?.id ?? null;
+      if (!nextCursor || nextCursor === cursor) {
+        return {
+          ok: false,
+          error: {
+            code: "SELECT_ALL_FAILED",
+            message: "Prospect selection did not advance safely.",
+          },
+        };
+      }
+      cursor = nextCursor;
     }
 
     const resolved = await resolveProspectEligibility(

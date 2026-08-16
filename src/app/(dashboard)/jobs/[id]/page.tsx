@@ -41,54 +41,69 @@ export default async function JobDetailPage({
   // Fetch related rows in parallel — items, parent, children, csv_imports
   // metadata when applicable. Each query is small + indexed; no need to
   // chain them.
-  const [itemsRes, parentRes, childrenRes, csvImportRes, smsMetricsRes, promotionRetryableRes] =
-    await Promise.all([
-      supabase
-        .from("job_items")
-        .select("*")
-        .eq("job_id", id)
-        .order("status")
-        .limit(ITEM_PAGE_SIZE),
-      job.parent_job_id
-        ? supabase
-            .from("jobs")
-            .select("id, type, status, title")
-            .eq("id", job.parent_job_id)
-            .maybeSingle()
-        : Promise.resolve({ data: null }),
-      supabase
-        .from("jobs")
-        .select("id, type, status, title")
-        .eq("parent_job_id", id)
-        .order("created_at", { ascending: false }),
-      job.related_import_id
-        ? supabase
-            .from("csv_imports")
-            .select(
-              "id, filename, source, market, total_rows, inserted_properties, skipped_duplicates, failed_rows, storage_path",
-            )
-            .eq("id", job.related_import_id)
-            .maybeSingle()
-        : Promise.resolve({ data: null }),
-      bulkSmsCampaignId
-        ? getOutboundSmsMetrics(supabase, {
-            scope: { campaignId: bulkSmsCampaignId, orgId: job.org_id },
-          })
-            .then((data) => ({ data, error: null }))
-            .catch((error: unknown) => ({
-              data: null,
-              error: error instanceof Error ? error.message : "Unknown error",
-            }))
-        : Promise.resolve({ data: null, error: null }),
-      job.type === "promote_leads"
-        ? supabase
-            .from("job_items")
-            .select("id", { count: "exact", head: true })
-            .eq("job_id", id)
-            .eq("status", "error")
-            .contains("output_payload", { retryable: true })
-        : Promise.resolve({ count: null, error: null }),
-    ]);
+  const [
+    itemsRes,
+    parentRes,
+    childrenRes,
+    csvImportRes,
+    smsMetricsRes,
+    promotionRetryableRes,
+    csvRetryProvenanceRes,
+  ] = await Promise.all([
+    supabase
+      .from("job_items")
+      .select("*")
+      .eq("job_id", id)
+      .order("status")
+      .limit(ITEM_PAGE_SIZE),
+    job.parent_job_id
+      ? supabase
+          .from("jobs")
+          .select("id, type, status, title")
+          .eq("id", job.parent_job_id)
+          .maybeSingle()
+      : Promise.resolve({ data: null }),
+    supabase
+      .from("jobs")
+      .select("id, type, status, title")
+      .eq("parent_job_id", id)
+      .order("created_at", { ascending: false }),
+    job.related_import_id
+      ? supabase
+          .from("csv_imports")
+          .select(
+            "id, filename, source, market, total_rows, inserted_properties, skipped_duplicates, failed_rows, storage_path",
+          )
+          .eq("id", job.related_import_id)
+          .maybeSingle()
+      : Promise.resolve({ data: null }),
+    bulkSmsCampaignId
+      ? getOutboundSmsMetrics(supabase, {
+          scope: { campaignId: bulkSmsCampaignId, orgId: job.org_id },
+        })
+          .then((data) => ({ data, error: null }))
+          .catch((error: unknown) => ({
+            data: null,
+            error: error instanceof Error ? error.message : "Unknown error",
+          }))
+      : Promise.resolve({ data: null, error: null }),
+    job.type === "promote_leads"
+      ? supabase
+          .from("job_items")
+          .select("id", { count: "exact", head: true })
+          .eq("job_id", id)
+          .eq("status", "error")
+          .contains("output_payload", { retryable: true })
+      : Promise.resolve({ count: null, error: null }),
+    job.type === "csv_import"
+      ? supabase
+          .from("csv_import_job_provenance")
+          .select("job_id")
+          .eq("job_id", id)
+          .eq("org_id", job.org_id)
+          .maybeSingle()
+      : Promise.resolve({ data: null, error: null }),
+  ]);
 
   if (itemsRes.error) {
     throw new Error(`Could not load job items: ${itemsRes.error.message}`);
@@ -120,6 +135,7 @@ export default async function JobDetailPage({
         bulkSmsMetrics={toBulkSmsJobMetrics(smsMetricsRes.data)}
         bulkSmsMetricsError={smsMetricsRes.error}
         promotionRetryableCount={promotionRetryableRes.count}
+        csvRetryAvailable={Boolean(csvRetryProvenanceRes.data)}
       />
     </Page>
   );

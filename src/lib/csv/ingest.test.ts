@@ -26,6 +26,10 @@ type CallRecord = {
 
 let responseQueue: Response[] = [];
 let calls: CallRecord[] = [];
+let durableOutcomes = new Map<
+  string,
+  { property_id: string; original_outcome: "inserted" | "duplicate" }
+>();
 
 function makeBuilder(record: CallRecord): Record<string, unknown> {
   const builder: Record<string, unknown> = {};
@@ -106,12 +110,63 @@ function makeSupabase() {
       calls.push(record);
       return makeBuilder(record);
     }),
+    rpc: vi.fn(
+      async (
+        name: string,
+        args: {
+          p_property?: Record<string, unknown>;
+          p_org_id?: string;
+          p_job_id?: string;
+          p_source_row_index?: number;
+          p_existing_property_id?: string | null;
+          p_existing_patch?: Record<string, unknown>;
+        },
+      ) => {
+        if (name !== "checkpoint_csv_import_property_outcome") {
+          throw new Error(`ingest.test: unexpected RPC ${name}`);
+        }
+        const outcomeKey = `${args.p_job_id}:${args.p_source_row_index}`;
+        const priorOutcome = durableOutcomes.get(outcomeKey);
+        if (priorOutcome) return { data: [priorOutcome], error: null };
+        const isDuplicate = Boolean(args.p_existing_property_id);
+        calls.push({
+          table: "properties",
+          op: isDuplicate ? "update" : "insert",
+          insertPayload: isDuplicate
+            ? args.p_existing_patch
+            : args.p_property,
+          filters: isDuplicate
+            ? [
+                { op: "eq", args: ["id", args.p_existing_property_id] },
+                { op: "eq", args: ["org_id", args.p_org_id] },
+              ]
+            : [],
+        });
+        const response = responseQueue.shift();
+        if (!response) {
+          throw new Error(
+            "ingest.test: no mock response queued for checkpoint_csv_import_property_outcome",
+          );
+        }
+        if (response.error) return { data: null, error: response.error };
+        const legacy = response.data as { id?: string } | null;
+        const outcome = {
+          property_id: args.p_existing_property_id ?? legacy?.id ?? "prop-new",
+          original_outcome: isDuplicate
+            ? ("duplicate" as const)
+            : ("inserted" as const),
+        };
+        durableOutcomes.set(outcomeKey, outcome);
+        return { data: [outcome], error: null };
+      },
+    ),
   };
 }
 
 beforeEach(() => {
   responseQueue = [];
   calls = [];
+  durableOutcomes = new Map();
 });
 
 afterEach(() => {
@@ -1028,5 +1083,119 @@ describe("processIngestChunk dedup provenance", () => {
     });
     expect(update?.insertPayload).toHaveProperty("source_imported_at");
     expect(update?.filters).toContainEqual({ op: "eq", args: ["org_id", "org-1"] });
+  });
+});
+
+describe("processIngestChunk atomic property outcome replay", () => {
+  const params = {
+    jobId: "job-boundary",
+    csvImportId: "import-boundary",
+    orgId: "org-1",
+    source: "dealmachine",
+    market: "Buchanan County MO",
+    countyId: "county-1",
+    mapping: { address: "Address", state: "State" },
+    rows: [{ Address: "99 Boundary St", State: "MO" }],
+    offset: 0,
+    autoTagIds: [] as string[],
+    listId: null as string | null,
+    resumeSafe: true,
+  };
+
+  it.each([
+    {
+      boundary: "list",
+      options: { listId: "list-1", autoTagIds: [] as string[] },
+      beforeFailure: [{ data: { org_id: "org-1" }, error: null }] as Response[],
+      failure: { data: null, error: { message: "synthetic list failure" } },
+      replaySideEffects: [
+        { data: { org_id: "org-1" }, error: null },
+        { data: null, error: null },
+      ],
+    },
+    {
+      boundary: "tag",
+      options: { listId: null, autoTagIds: ["tag-1"] },
+      beforeFailure: [] as Response[],
+      failure: { data: null, error: { message: "synthetic tag failure" } },
+      replaySideEffects: [{ data: null, error: null }],
+    },
+    {
+      boundary: "success checkpoint",
+      options: { listId: null, autoTagIds: [] as string[] },
+      beforeFailure: [] as Response[],
+      failure: { data: null, error: { message: "synthetic checkpoint failure" } },
+      replaySideEffects: [] as Response[],
+    },
+  ])(
+    "preserves inserted (not duplicate) after a $boundary failure",
+    async ({ options, beforeFailure, failure, replaySideEffects }) => {
+      responseQueue = [
+        { data: [], error: null }, // resume checkpoint miss
+        { data: null, error: null }, // address dedup miss
+        { data: { id: "prop-boundary" }, error: null }, // atomic property outcome
+        ...beforeFailure,
+        failure, // selected side effect / success checkpoint
+        { data: null, error: null }, // error checkpoint
+        { data: null, error: null }, // progress
+      ];
+      const first = await processIngestChunk(
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        makeSupabase() as any,
+        { ...params, ...options },
+      );
+      expect(first.failed).toBe(1);
+
+      responseQueue = [
+        { data: [{ source_row_index: 0, status: "error" }], error: null },
+        { data: { id: "prop-boundary" }, error: null }, // address now exists
+        ...replaySideEffects,
+        { data: null, error: null }, // success checkpoint
+        { data: null, error: null }, // progress
+      ];
+      const replay = await processIngestChunk(
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        makeSupabase() as any,
+        { ...params, ...options },
+      );
+      expect(replay).toMatchObject({ succeeded: 1, skipped: 0, failed: 0 });
+      expect(
+        calls.filter(
+          (call) => call.table === "properties" && call.op === "insert",
+        ),
+      ).toHaveLength(1);
+    },
+  );
+
+  it("skips the durable row after progress fails following its success checkpoint", async () => {
+    responseQueue = [
+      { data: [], error: null },
+      { data: null, error: null },
+      { data: { id: "prop-boundary" }, error: null },
+      { data: null, error: null }, // success checkpoint
+      { data: null, error: { message: "synthetic progress failure" } },
+    ];
+    await expect(
+      processIngestChunk(
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        makeSupabase() as any,
+        params,
+      ),
+    ).rejects.toThrow("job progress checkpoint");
+
+    responseQueue = [
+      { data: [{ source_row_index: 0, status: "success" }], error: null },
+    ];
+    const replay = await processIngestChunk(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      makeSupabase() as any,
+      params,
+    );
+    expect(replay).toMatchObject({ succeeded: 1, skipped: 0, failed: 0 });
+    expect(
+      calls.filter(
+        (call) => call.table === "properties" && call.op === "insert",
+      ),
+    ).toHaveLength(1);
   });
 });

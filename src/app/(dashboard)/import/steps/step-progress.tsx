@@ -45,6 +45,7 @@ export function StepProgress({ jobId }: { jobId: string }) {
   const [job, setJob] = useState<Job | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [retrying, setRetrying] = useState(false);
+  const [retryAvailable, setRetryAvailable] = useState(false);
 
   useEffect(() => {
     const supabase = createClient();
@@ -64,6 +65,15 @@ export function StepProgress({ jobId }: { jobId: string }) {
         return null;
       }
       setJob(data);
+      if (data.type === "csv_import") {
+        const { data: provenance } = await supabase
+          .from("csv_import_job_provenance")
+          .select("job_id")
+          .eq("job_id", jobId)
+          .eq("org_id", data.org_id)
+          .maybeSingle();
+        if (mounted) setRetryAvailable(Boolean(provenance));
+      }
       return data;
     };
 
@@ -120,7 +130,8 @@ export function StepProgress({ jobId }: { jobId: string }) {
 
   const total = job?.total_items ?? 0;
   const processed = job?.processed_items ?? 0;
-  const pct = total > 0 ? Math.min(100, Math.round((processed / total) * 100)) : 0;
+  const pct =
+    total > 0 ? Math.min(100, Math.round((processed / total) * 100)) : 0;
 
   const isTerminal = job ? TERMINAL_STATUSES.has(job.status) : false;
   const skippedCount = Math.max(
@@ -142,16 +153,30 @@ export function StepProgress({ jobId }: { jobId: string }) {
   const droppedUnlabeledPhones = summary?.droppedUnlabeledPhones ?? 0;
   const dncRows = summary?.dncRows ?? 0;
   const listAssignment = summary?.sideEffects?.listAssignment;
-  const incompleteSideEffects = Object.entries(summary?.sideEffects ?? {})
-    .filter(([key, effect]) => key !== "listAssignment" && ["failed", "pending"].includes(effect.status ?? ""));
+  const incompleteSideEffects = Object.entries(
+    summary?.sideEffects ?? {},
+  ).filter(
+    ([key, effect]) =>
+      key !== "listAssignment" &&
+      ["failed", "pending"].includes(effect.status ?? ""),
+  );
+  const canRetryRows =
+    retryAvailable &&
+    Boolean(job) &&
+    ["failed", "partial", "partially_completed"].includes(job!.status) &&
+    !["validation", "authorization"].includes(job!.error_class ?? "");
 
   const retry = async (kind: "rows" | "list") => {
     setRetrying(true);
-    const result = kind === "rows"
-      ? await retryCsvImportJob(jobId)
-      : await retryImportListAssignment(jobId);
+    const result =
+      kind === "rows"
+        ? await retryCsvImportJob(jobId)
+        : await retryImportListAssignment(jobId);
     setRetrying(false);
-    if (result.ok) toast.success(kind === "rows" ? "Import resumed." : "List assignment completed.");
+    if (result.ok)
+      toast.success(
+        kind === "rows" ? "Import resumed." : "List assignment completed.",
+      );
     else toast.error(result.error.message);
   };
 
@@ -193,35 +218,57 @@ export function StepProgress({ jobId }: { jobId: string }) {
         )}
         {isTerminal && (
           <div className="bg-foreground text-background rounded-md p-3 text-sm">
-            ⊘ {dncRows.toLocaleString()} Do-Not-Contact {dncRows === 1 ? "record" : "records"} imported locked and excluded from optional services.
+            ⊘ {dncRows.toLocaleString()} Do-Not-Contact{" "}
+            {dncRows === 1 ? "record" : "records"} imported locked and excluded
+            from optional services.
           </div>
         )}
         {isTerminal && listAssignment?.status === "failed" && (
           <div className="border-destructive/40 bg-destructive/5 rounded-md border p-3 text-sm">
             <strong>List assignment did not complete.</strong>{" "}
             {listAssignment.message ?? "The imported rows are kept."}
-            <Button size="sm" variant="outline" className="ml-3" disabled={retrying} onClick={() => void retry("list")}>Retry list assignment</Button>
+            <Button
+              size="sm"
+              variant="outline"
+              className="ml-3"
+              disabled={retrying}
+              onClick={() => void retry("list")}
+            >
+              Retry list assignment
+            </Button>
           </div>
         )}
-        {isTerminal && incompleteSideEffects.map(([key, effect]) => (
-          <div key={key} className="border-destructive/40 bg-destructive/5 rounded-md border p-3 text-sm">
-            <strong>{sideEffectLabel(key)} did not complete.</strong>{" "}
-            {effect.message ?? "Open Job details for the recorded failure and next step."}
-          </div>
-        ))}
+        {isTerminal &&
+          incompleteSideEffects.map(([key, effect]) => (
+            <div
+              key={key}
+              className="border-destructive/40 bg-destructive/5 rounded-md border p-3 text-sm"
+            >
+              <strong>{sideEffectLabel(key)} did not complete.</strong>{" "}
+              {effect.message ??
+                "Open Job details for the recorded failure and next step."}
+            </div>
+          ))}
       </CardContent>
       {isTerminal && (
         <CardFooter className="flex flex-wrap gap-2">
           <Link href="/properties?imported=today" className={buttonVariants()}>
             Review imported Prospects
           </Link>
-          {(job?.failed_items ?? 0) > 0 && (
-            <Button variant="outline" disabled={retrying} onClick={() => void retry("rows")}>
-              Retry failed rows
+          {canRetryRows && (
+            <Button
+              variant="outline"
+              disabled={retrying}
+              onClick={() => void retry("rows")}
+            >
+              Retry import
             </Button>
           )}
           {(job?.failed_items ?? 0) > 0 && (
-            <Link href={`/jobs/${jobId}`} className={buttonVariants({ variant: "outline" })}>
+            <Link
+              href={`/jobs/${jobId}`}
+              className={buttonVariants({ variant: "outline" })}
+            >
               Download failed rows
             </Link>
           )}
@@ -231,10 +278,7 @@ export function StepProgress({ jobId }: { jobId: string }) {
           >
             Job details
           </Link>
-          <Link
-            href="/import"
-            className={buttonVariants({ variant: "ghost" })}
-          >
+          <Link href="/import" className={buttonVariants({ variant: "ghost" })}>
             New import
           </Link>
         </CardFooter>
@@ -244,13 +288,17 @@ export function StepProgress({ jobId }: { jobId: string }) {
 }
 
 function sideEffectLabel(key: string): string {
-  return ({
-    cass: "Address verification",
-    lineTypeClassification: "Line-type classification",
-    consent: "Consent recording",
-    sequenceEnrollment: "Sequence enrollment",
-    skipTrace: "Skip trace",
-  } as Record<string, string>)[key] ?? key;
+  return (
+    (
+      {
+        cass: "Address verification",
+        lineTypeClassification: "Line-type classification",
+        consent: "Consent recording",
+        sequenceEnrollment: "Sequence enrollment",
+        skipTrace: "Skip trace",
+      } as Record<string, string>
+    )[key] ?? key
+  );
 }
 
 function describeState(
@@ -265,7 +313,11 @@ function describeState(
     };
   }
   if (job.status === "completed") {
-    return { title: "Completed", description: "Every row and every follow-up action reached a terminal state. Nothing is still pending." };
+    return {
+      title: "Completed",
+      description:
+        "Every row and every follow-up action reached a terminal state. Nothing is still pending.",
+    };
   }
   if (job.status === "partial" || job.status === "partially_completed") {
     return {

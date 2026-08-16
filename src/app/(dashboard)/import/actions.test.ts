@@ -137,9 +137,30 @@ function makeSupabase() {
   };
 }
 
+function makeAdminSupabase(
+  fallback?: ReturnType<typeof makeSupabase>,
+  provenanceError: { message: string } | null = null,
+) {
+  return {
+    from: vi.fn((table: string) => {
+      if (table === "csv_import_job_provenance") {
+        return {
+          insert: vi.fn().mockResolvedValue({
+            data: provenanceError ? null : { job_id: "job-1" },
+            error: provenanceError,
+          }),
+        };
+      }
+      if (!fallback) throw new Error(`Unexpected admin table ${table}`);
+      return fallback.from(table);
+    }),
+  };
+}
+
 beforeEach(() => {
   createClient.mockReset();
   createAdminClient.mockReset();
+  createAdminClient.mockReturnValue(makeAdminSupabase());
   after.mockReset();
   start.mockReset();
   responseQueue = [];
@@ -364,7 +385,7 @@ describe("createImportJob — T-02-03-01 mitigation", () => {
     ];
     const supabase = makeSupabase();
     createClient.mockResolvedValue(supabase);
-    createAdminClient.mockReturnValue(supabase);
+    createAdminClient.mockReturnValue(makeAdminSupabase(supabase));
     start.mockRejectedValue(new Error("workflow unavailable"));
 
     const result = await createImportJob(baseParams);
@@ -395,7 +416,7 @@ describe("createImportJob — T-02-03-01 mitigation", () => {
     ];
     const supabase = makeSupabase();
     createClient.mockResolvedValue(supabase);
-    createAdminClient.mockReturnValue(supabase);
+    createAdminClient.mockReturnValue(makeAdminSupabase(supabase));
     start.mockRejectedValue(new Error("workflow unavailable"));
 
     await createImportJob(baseParams);

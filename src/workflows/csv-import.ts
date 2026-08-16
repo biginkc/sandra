@@ -128,6 +128,74 @@ export type EnrollBatchResult = {
   failed: number;
 };
 
+async function recoverCountyStep(args: {
+  jobId: string;
+  csvImportId: string;
+  orgId: string;
+  expectedCountyId: string | null;
+  storagePath: string;
+  source: string;
+  market: string;
+  datasetSha256: string;
+}): Promise<string> {
+  "use step";
+
+  const supabase = createAdminClient();
+  const { data: job, error: jobError } = await supabase
+    .from("jobs")
+    .select("id, org_id, type, related_import_id")
+    .eq("id", args.jobId)
+    .eq("org_id", args.orgId)
+    .eq("type", "csv_import")
+    .eq("related_import_id", args.csvImportId)
+    .maybeSingle();
+  if (jobError || !job) {
+    throw new Error(
+      `import job recovery: ${jobError?.message ?? "job identity mismatch"}`,
+    );
+  }
+  const { data: row, error } = await supabase
+    .from("csv_imports")
+    .select("county_id, storage_path, source, market, dataset_sha256")
+    .eq("id", args.csvImportId)
+    .eq("org_id", args.orgId)
+    .maybeSingle();
+  if (error || !row?.county_id) {
+    throw new Error(
+      `import county recovery: ${error?.message ?? "county is missing"}`,
+    );
+  }
+  if (
+    (args.expectedCountyId !== null &&
+      row.county_id !== args.expectedCountyId) ||
+    row.storage_path !== args.storagePath ||
+    row.source !== args.source ||
+    row.market !== args.market ||
+    row.dataset_sha256 !== args.datasetSha256 ||
+    !row.storage_path?.startsWith(`${args.orgId}/`)
+  ) {
+    throw new Error("import recovery: authoritative provenance mismatch");
+  }
+  return row.county_id;
+}
+
+async function failCsvImportWorkflowStep(args: {
+  jobId: string;
+  csvImportId: string;
+  orgId: string;
+  message: string;
+}): Promise<void> {
+  "use step";
+  const supabase = createAdminClient();
+  const { error } = await supabase.rpc("fail_csv_import_workflow", {
+    p_job_id: args.jobId,
+    p_csv_import_id: args.csvImportId,
+    p_org_id: args.orgId,
+    p_message: args.message,
+  });
+  if (error) throw new Error(`CSV import failure checkpoint: ${error.message}`);
+}
+
 /**
  * Enroll every succeeded job_item's property into the given sequence.
  * Outcomes: "enrolled" → enrolled, "failed" → failed, anything else → skipped.
@@ -142,13 +210,14 @@ export async function enrollJobBatch(
     .select("property_id, compliance_locked")
     .eq("job_id", args.jobId)
     .in("status", ["success", "skipped"]);
-  if (itemsError) throw new Error(`sequence checkpoint read: ${itemsError.message}`);
+  if (itemsError)
+    throw new Error(`sequence checkpoint read: ${itemsError.message}`);
 
   const propertyIds = await selectNonDncPropertyIds(
     supabase,
     (items ?? [])
-    .filter((i) => !i.compliance_locked)
-    .map((i) => i.property_id)
+      .filter((i) => !i.compliance_locked)
+      .map((i) => i.property_id)
       .filter((id): id is string => id !== null),
     args.orgId,
   );
@@ -170,7 +239,8 @@ export async function enrollJobBatch(
         outcome.status === "sequence_inactive" ||
         outcome.status === "property_not_found" ||
         outcome.status === "no_steps"
-      ) failed++;
+      )
+        failed++;
       else skipped++;
     } catch {
       failed++;
@@ -202,7 +272,12 @@ async function loadCsvFromStorage(
   orgId: string,
   expectedReviewContractSha256: string,
   reviewContract: ReviewContractInput,
-): Promise<{ rows: RowData[]; totalRows: number; autoTagIds: string[]; dncRows: number }> {
+): Promise<{
+  rows: RowData[];
+  totalRows: number;
+  autoTagIds: string[];
+  dncRows: number;
+}> {
   "use step";
 
   const supabase = createAdminClient();
@@ -231,12 +306,16 @@ async function loadCsvFromStorage(
       })
       .eq("id", jobId);
     if (checksumFailureError) {
-      throw new Error(`dataset checksum failure checkpoint: ${checksumFailureError.message}`);
+      throw new Error(
+        `dataset checksum failure checkpoint: ${checksumFailureError.message}`,
+      );
     }
     throw new Error("reviewed dataset checksum mismatch");
   }
   const actualReviewContractSha256 = createHash("sha256")
-    .update(reviewContractJson({ ...reviewContract, datasetSha256: actualSha256 }))
+    .update(
+      reviewContractJson({ ...reviewContract, datasetSha256: actualSha256 }),
+    )
     .digest("hex");
   if (actualReviewContractSha256 !== expectedReviewContractSha256) {
     const { error: contractFailureError } = await supabase
@@ -250,7 +329,9 @@ async function loadCsvFromStorage(
       })
       .eq("id", jobId);
     if (contractFailureError) {
-      throw new Error(`review contract failure checkpoint: ${contractFailureError.message}`);
+      throw new Error(
+        `review contract failure checkpoint: ${contractFailureError.message}`,
+      );
     }
     throw new Error("review contract checksum mismatch");
   }
@@ -280,13 +361,16 @@ async function loadCsvFromStorage(
       })
       .eq("id", jobId);
     if (rowCountFailureError) {
-      throw new Error(`row-count failure checkpoint: ${rowCountFailureError.message}`);
+      throw new Error(
+        `row-count failure checkpoint: ${rowCountFailureError.message}`,
+      );
     }
     throw new Error("reviewed dataset row-count mismatch");
   }
   const dncRows = trimmedRows.reduce(
     (count, row, index) =>
-      validateRow(row, mapping, index).normalized.homeowner_do_not_contact === true
+      validateRow(row, mapping, index).normalized.homeowner_do_not_contact ===
+      true
         ? count + 1
         : count,
     0,
@@ -336,7 +420,9 @@ async function collectUnlabeledPhonesStep(args: {
   "use step";
 
   const eligibleRows = args.rows.filter(
-    (row, index) => validateRow(row, args.mapping, index).normalized.homeowner_do_not_contact !== true,
+    (row, index) =>
+      validateRow(row, args.mapping, index).normalized
+        .homeowner_do_not_contact !== true,
   );
 
   return {
@@ -368,7 +454,9 @@ async function classifyPhonesChunkStep(args: {
  */
 async function failJobStep(args: {
   jobId: string;
+  orgId: string;
   message: string;
+  errorClass: "validation" | "configuration";
 }): Promise<void> {
   "use step";
 
@@ -377,10 +465,12 @@ async function failJobStep(args: {
     .from("jobs")
     .update({
       status: "failed",
+      error_class: args.errorClass,
       error_message: args.message,
       completed_at: new Date().toISOString(),
     })
-    .eq("id", args.jobId);
+    .eq("id", args.jobId)
+    .eq("org_id", args.orgId);
   if (error) throw new Error(`job failure checkpoint: ${error.message}`);
 }
 
@@ -535,7 +625,10 @@ async function triggerCassStep(args: {
   });
 
   if (autoStart) {
-    const summary = await runCassEnrichment(supabase, { jobId: childId, propertyIds });
+    const summary = await runCassEnrichment(supabase, {
+      jobId: childId,
+      propertyIds,
+    });
     if (summary.failed > 0 || summary.providerOff > 0) {
       return {
         status: "failed",
@@ -546,7 +639,10 @@ async function triggerCassStep(args: {
       };
     }
   }
-  return { status: autoStart ? "completed" : "pending", eligible: propertyIds.length };
+  return {
+    status: autoStart ? "completed" : "pending",
+    eligible: propertyIds.length,
+  };
 }
 
 /**
@@ -571,13 +667,14 @@ async function recordConsentStep(args: {
     .select("property_id, compliance_locked")
     .eq("job_id", args.jobId)
     .in("status", ["success", "skipped"]);
-  if (itemsError) throw new Error(`consent checkpoint read: ${itemsError.message}`);
+  if (itemsError)
+    throw new Error(`consent checkpoint read: ${itemsError.message}`);
 
   const propertyIds = await selectNonDncPropertyIds(
     supabase,
     (items ?? [])
-    .filter((i) => !i.compliance_locked)
-    .map((i) => i.property_id)
+      .filter((i) => !i.compliance_locked)
+      .map((i) => i.property_id)
       .filter((id): id is string => id !== null),
     args.orgId,
   );
@@ -590,11 +687,16 @@ async function recordConsentStep(args: {
     .in("id", propertyIds)
     .eq("org_id", args.orgId)
     .not("homeowner_contact_id", "is", null);
-  if (propertyError) throw new Error(`consent property lookup: ${propertyError.message}`);
+  if (propertyError)
+    throw new Error(`consent property lookup: ${propertyError.message}`);
 
-  const contactIds = Array.from(new Set((properties ?? [])
-    .map((p) => p.homeowner_contact_id)
-    .filter((id): id is string => id !== null)));
+  const contactIds = Array.from(
+    new Set(
+      (properties ?? [])
+        .map((p) => p.homeowner_contact_id)
+        .filter((id): id is string => id !== null),
+    ),
+  );
 
   if (contactIds.length === 0) return;
 
@@ -606,7 +708,8 @@ async function recordConsentStep(args: {
     .in("contact_id", contactIds)
     .eq("org_id", args.orgId)
     .in("event_type", ["opt_out", "provider_auto_opt_out"]);
-  if (optedOutError) throw new Error(`consent opt-out lookup: ${optedOutError.message}`);
+  if (optedOutError)
+    throw new Error(`consent opt-out lookup: ${optedOutError.message}`);
 
   const optedOutIds = new Set((optedOut ?? []).map((r) => r.contact_id));
   const eligible = contactIds.filter((id) => !optedOutIds.has(id));
@@ -624,7 +727,8 @@ async function recordConsentStep(args: {
       occurred_at: now,
     })),
   );
-  if (consentError) throw new Error(`consent recording: ${consentError.message}`);
+  if (consentError)
+    throw new Error(`consent recording: ${consentError.message}`);
 }
 
 async function selectNonDncPropertyIds(
@@ -663,14 +767,19 @@ async function selectNonDncPropertyIds(
   if (suppressionError) {
     throw new Error(`DNC suppression check: ${suppressionError.message}`);
   }
-  const suppressedPhones = new Set((suppressed ?? []).map((row) => row.phone_e164));
+  const suppressedPhones = new Set(
+    (suppressed ?? []).map((row) => row.phone_e164),
+  );
 
   return (data ?? [])
     .filter((property) => {
       const homeowner = Array.isArray(property.homeowner)
         ? property.homeowner[0]
         : property.homeowner;
-      if (property.outreach_dispo && SUPPRESSED_DISPOS.has(property.outreach_dispo as "dnc")) {
+      if (
+        property.outreach_dispo &&
+        SUPPRESSED_DISPOS.has(property.outreach_dispo as "dnc")
+      ) {
         return false;
       }
       if (homeowner?.do_not_contact || homeowner?.sms_opted_out) return false;
@@ -693,8 +802,11 @@ async function excludeComplianceLockedJobProperties(
     .eq("job_id", jobId)
     .eq("compliance_locked", true)
     .not("property_id", "is", null);
-  if (error) throw new Error(`DNC job-item eligibility check: ${error.message}`);
-  const locked = new Set((data ?? []).map((item) => item.property_id).filter(Boolean));
+  if (error)
+    throw new Error(`DNC job-item eligibility check: ${error.message}`);
+  const locked = new Set(
+    (data ?? []).map((item) => item.property_id).filter(Boolean),
+  );
   return propertyIds.filter((propertyId) => !locked.has(propertyId));
 }
 
@@ -719,6 +831,7 @@ async function enrollInSequenceStep(args: {
 async function finalizeStep(args: {
   jobId: string;
   csvImportId: string;
+  orgId: string;
   totalRows: number;
   succeeded: number;
   failed: number;
@@ -735,13 +848,17 @@ async function finalizeStep(args: {
   await finalizeIngestion(supabase, args);
 }
 
-async function loadPriorSideEffectsStep(jobId: string): Promise<ImportSideEffects> {
+async function loadPriorSideEffectsStep(
+  jobId: string,
+  orgId: string,
+): Promise<ImportSideEffects> {
   "use step";
   const supabase = createAdminClient();
   const { data, error } = await supabase
     .from("jobs")
     .select("result_summary")
     .eq("id", jobId)
+    .eq("org_id", orgId)
     .maybeSingle();
   if (error) throw new Error(`side-effect checkpoint read: ${error.message}`);
   const summary = (data?.result_summary ?? {}) as Record<string, unknown>;
@@ -765,231 +882,250 @@ export async function csvImportWorkflow(
 }> {
   "use workflow";
 
-  if (params.datasetVersion !== REVIEWED_DATASET_VERSION) {
-    await failJobStep({
-      jobId: params.jobId,
-      message: "This reviewed dataset version is no longer supported. Run preflight again.",
-    });
-    return { succeeded: 0, failed: 0, skipped: 0, totalRows: 0 };
-  }
-  const unavailableService = [
-    params.requestCass ? IMPORT_SERVICE_PRICING.cass : null,
-    params.classifyLineTypes ? IMPORT_SERVICE_PRICING.line_type : null,
-    params.requestSkipTrace ? IMPORT_SERVICE_PRICING.skip_trace : null,
-  ].find((service) => service && !service.configured);
-  if (unavailableService) {
-    await failJobStep({
-      jobId: params.jobId,
-      message:
-        unavailableService.unavailableReason ??
-        `${unavailableService.label} is unavailable during import.`,
-    });
-    return { succeeded: 0, failed: 0, skipped: 0, totalRows: 0 };
-  }
-
-  // Recover the server-owned county before verifying the review contract;
-  // the county is part of the reviewed interpretation of the dataset.
-  let countyId = params.countyId;
-  if (countyId === null) {
-    const supabase = createAdminClient();
-    const { data: row, error: countyRecoveryError } = await supabase
-      .from("csv_imports")
-      .select("county_id")
-      .eq("id", params.csvImportId)
-      .eq("org_id", params.orgId)
-      .single();
-    if (countyRecoveryError || !row?.county_id) {
-      throw new Error(
-        `import county recovery: ${countyRecoveryError?.message ?? "county is missing"}`,
-      );
-    }
-    countyId = row.county_id;
-  }
-
-  const loaded = await loadCsvFromStorage(
-    params.storagePath,
-    params.mapping,
-    params.jobId,
-    params.source,
-    params.datasetSha256,
-    params.expectedDncRows,
-    params.orgId,
-    params.reviewContractSha256,
-    {
-      datasetSha256: params.datasetSha256,
-      mapping: params.mapping,
-      source: params.source,
-      countyId,
-      totalRows: params.expectedTotalRows,
-      dncRows: params.expectedDncRows,
-      smsConsent: params.smsConsent === true,
-      sequenceId: params.sequenceId ?? null,
-      classifyLineTypes: params.classifyLineTypes === true,
-      requestCass: params.requestCass === true,
-      requestSkipTrace: params.requestSkipTrace === true,
-    },
-  );
-
-  // Pre-ingest line-type classification (Telnyx). Only when the operator
-  // opted in at the wizard's interstitial AND the API key is configured —
-  // otherwise unlabeled numbers fall through to the ingest hard rule,
-  // which drops and counts them. Classified types are written back into
-  // the rows/mapping that the ingest chunks below consume.
-  let rows = loaded.rows;
-  let mapping = params.mapping;
-  let lineTypeClassification: ClassificationCounts | null = null;
-  if (params.classifyLineTypes) {
-    const collected = await collectUnlabeledPhonesStep({ rows, mapping });
-    // The operator explicitly approved paid classification — silently
-    // falling through to the drop path would discard the very numbers
-    // they paid to keep. Fail the job fast with a config error instead.
-    if (!collected.telnyxConfigured && collected.numbers.length > 0) {
+  try {
+    if (params.datasetVersion !== REVIEWED_DATASET_VERSION) {
       await failJobStep({
         jobId: params.jobId,
+        orgId: params.orgId,
+        errorClass: "validation",
         message:
-          "Line-type classification was requested but TELNYX_API_KEY is not configured. " +
-          "Add the key (Vercel env) and re-run the import, or choose 'Skip — drop unlabeled numbers'.",
+          "This reviewed dataset version is no longer supported. Run preflight again.",
       });
-      return {
-        succeeded: 0,
-        failed: 0,
-        skipped: 0,
-        totalRows: loaded.totalRows,
-      };
+      return { succeeded: 0, failed: 0, skipped: 0, totalRows: 0 };
     }
-    if (collected.telnyxConfigured && collected.numbers.length > 0) {
-      // Chunked like the ingest loop so a big file's lookups never push
-      // a single invocation past the function time cap.
-      const entries: [string, PhoneLineType][] = [];
-      for (
-        let offset = 0;
-        offset < collected.numbers.length;
-        offset += LOOKUP_CHUNK_SIZE
-      ) {
-        const slice = collected.numbers.slice(
-          offset,
-          offset + LOOKUP_CHUNK_SIZE,
-        );
-        entries.push(...(await classifyPhonesChunkStep({ numbers: slice })));
-      }
-      const applied = await applyLineTypesStep({
+    const unavailableService = [
+      params.requestCass ? IMPORT_SERVICE_PRICING.cass : null,
+      params.classifyLineTypes ? IMPORT_SERVICE_PRICING.line_type : null,
+      params.requestSkipTrace ? IMPORT_SERVICE_PRICING.skip_trace : null,
+    ].find((service) => service && !service.configured);
+    if (unavailableService) {
+      await failJobStep({
         jobId: params.jobId,
-        rows,
-        mapping,
-        classified: entries,
+        orgId: params.orgId,
+        errorClass: "configuration",
+        message:
+          unavailableService.unavailableReason ??
+          `${unavailableService.label} is unavailable during import.`,
       });
-      rows = applied.rows;
-      mapping = applied.mapping;
-      lineTypeClassification = applied.counts;
+      return { succeeded: 0, failed: 0, skipped: 0, totalRows: 0 };
     }
-  }
 
-  let succeeded = 0;
-  let failed = 0;
-  let skipped = 0;
-  let droppedUnlabeledPhones = 0;
-  const allErrors: { rowIndex: number; message: string }[] = [];
-
-  for (let offset = 0; offset < loaded.totalRows; offset += CHUNK_SIZE) {
-    const slice = rows.slice(offset, offset + CHUNK_SIZE);
-    const result = await processChunkStep({
+    // This step validates the complete job/import tenant identity even for
+    // modern jobs that already carry countyId. Legacy jobs recover countyId
+    // from the same authoritative row without doing DB I/O in the workflow VM.
+    const countyId = await recoverCountyStep({
       jobId: params.jobId,
       csvImportId: params.csvImportId,
+      orgId: params.orgId,
+      expectedCountyId: params.countyId,
+      storagePath: params.storagePath,
       source: params.source,
       market: params.market,
-      countyId,
-      orgId: params.orgId,
-      mapping,
-      rows: slice,
-      offset,
-      autoTagIds: loaded.autoTagIds,
-      listId: params.listId,
-      userId: params.userId,
-      priorSucceeded: succeeded,
-      priorFailed: failed,
+      datasetSha256: params.datasetSha256,
     });
-    succeeded += result.succeeded;
-    failed += result.failed;
-    skipped += result.skipped;
-    droppedUnlabeledPhones += result.droppedUnlabeledPhones;
-    allErrors.push(...result.errors);
-  }
 
-  const priorSideEffects = await loadPriorSideEffectsStep(params.jobId);
-  const sideEffects: ImportSideEffects = {
-    listAssignment: params.listName
-      ? params.listResolutionError
-        ? { status: "failed", message: params.listResolutionError }
-        : { status: "completed" }
-      : { status: "not_requested" },
-    cass: { status: "not_requested" },
-    lineTypeClassification: params.classifyLineTypes
-      ? { status: "completed", counts: lineTypeClassification }
-      : { status: "not_requested" },
-    consent: { status: "not_requested" },
-    sequenceEnrollment: { status: "not_requested" },
-    skipTrace: { status: "not_requested" },
-    ...priorSideEffects,
-  };
+    const loaded = await loadCsvFromStorage(
+      params.storagePath,
+      params.mapping,
+      params.jobId,
+      params.source,
+      params.datasetSha256,
+      params.expectedDncRows,
+      params.orgId,
+      params.reviewContractSha256,
+      {
+        datasetSha256: params.datasetSha256,
+        mapping: params.mapping,
+        source: params.source,
+        countyId,
+        totalRows: params.expectedTotalRows,
+        dncRows: params.expectedDncRows,
+        smsConsent: params.smsConsent === true,
+        sequenceId: params.sequenceId ?? null,
+        classifyLineTypes: params.classifyLineTypes === true,
+        requestCass: params.requestCass === true,
+        requestSkipTrace: params.requestSkipTrace === true,
+      },
+    );
 
-  if (params.requestCass && priorSideEffects.cass?.status !== "completed") {
-    try {
-      sideEffects.cass = await triggerCassStep({
-        parentJobId: params.jobId,
-        relatedImportId: params.csvImportId,
-        createdBy: params.userId,
+    // Pre-ingest line-type classification (Telnyx). Only when the operator
+    // opted in at the wizard's interstitial AND the API key is configured —
+    // otherwise unlabeled numbers fall through to the ingest hard rule,
+    // which drops and counts them. Classified types are written back into
+    // the rows/mapping that the ingest chunks below consume.
+    let rows = loaded.rows;
+    let mapping = params.mapping;
+    let lineTypeClassification: ClassificationCounts | null = null;
+    if (params.classifyLineTypes) {
+      const collected = await collectUnlabeledPhonesStep({ rows, mapping });
+      // The operator explicitly approved paid classification — silently
+      // falling through to the drop path would discard the very numbers
+      // they paid to keep. Fail the job fast with a config error instead.
+      if (!collected.telnyxConfigured && collected.numbers.length > 0) {
+        await failJobStep({
+          jobId: params.jobId,
+          orgId: params.orgId,
+          errorClass: "configuration",
+          message:
+            "Line-type classification was requested but TELNYX_API_KEY is not configured. " +
+            "Add the key (Vercel env) and re-run the import, or choose 'Skip — drop unlabeled numbers'.",
+        });
+        return {
+          succeeded: 0,
+          failed: 0,
+          skipped: 0,
+          totalRows: loaded.totalRows,
+        };
+      }
+      if (collected.telnyxConfigured && collected.numbers.length > 0) {
+        // Chunked like the ingest loop so a big file's lookups never push
+        // a single invocation past the function time cap.
+        const entries: [string, PhoneLineType][] = [];
+        for (
+          let offset = 0;
+          offset < collected.numbers.length;
+          offset += LOOKUP_CHUNK_SIZE
+        ) {
+          const slice = collected.numbers.slice(
+            offset,
+            offset + LOOKUP_CHUNK_SIZE,
+          );
+          entries.push(...(await classifyPhonesChunkStep({ numbers: slice })));
+        }
+        const applied = await applyLineTypesStep({
+          jobId: params.jobId,
+          rows,
+          mapping,
+          classified: entries,
+        });
+        rows = applied.rows;
+        mapping = applied.mapping;
+        lineTypeClassification = applied.counts;
+      }
+    }
+
+    let succeeded = 0;
+    let failed = 0;
+    let skipped = 0;
+    let droppedUnlabeledPhones = 0;
+    const allErrors: { rowIndex: number; message: string }[] = [];
+
+    for (let offset = 0; offset < loaded.totalRows; offset += CHUNK_SIZE) {
+      const slice = rows.slice(offset, offset + CHUNK_SIZE);
+      const result = await processChunkStep({
+        jobId: params.jobId,
+        csvImportId: params.csvImportId,
+        source: params.source,
+        market: params.market,
+        countyId,
+        orgId: params.orgId,
+        mapping,
+        rows: slice,
+        offset,
+        autoTagIds: loaded.autoTagIds,
+        listId: params.listId,
+        userId: params.userId,
+        priorSucceeded: succeeded,
+        priorFailed: failed,
+      });
+      succeeded += result.succeeded;
+      failed += result.failed;
+      skipped += result.skipped;
+      droppedUnlabeledPhones += result.droppedUnlabeledPhones;
+      allErrors.push(...result.errors);
+    }
+
+    const priorSideEffects = await loadPriorSideEffectsStep(
+      params.jobId,
+      params.orgId,
+    );
+    const sideEffects: ImportSideEffects = {
+      listAssignment: params.listName
+        ? params.listResolutionError
+          ? { status: "failed", message: params.listResolutionError }
+          : { status: "completed" }
+        : { status: "not_requested" },
+      cass: { status: "not_requested" },
+      lineTypeClassification: params.classifyLineTypes
+        ? { status: "completed", counts: lineTypeClassification }
+        : { status: "not_requested" },
+      consent: { status: "not_requested" },
+      sequenceEnrollment: { status: "not_requested" },
+      skipTrace: { status: "not_requested" },
+      ...priorSideEffects,
+    };
+
+    if (params.requestCass && priorSideEffects.cass?.status !== "completed") {
+      try {
+        sideEffects.cass = await triggerCassStep({
+          parentJobId: params.jobId,
+          relatedImportId: params.csvImportId,
+          createdBy: params.userId,
+          orgId: params.orgId,
+        });
+      } catch (error) {
+        sideEffects.cass = {
+          status: "failed",
+          message: error instanceof Error ? error.message : String(error),
+        };
+      }
+    }
+
+    if (params.smsConsent && priorSideEffects.consent?.status !== "completed") {
+      try {
+        await recordConsentStep({ jobId: params.jobId, orgId: params.orgId });
+        sideEffects.consent = { status: "completed" };
+      } catch (error) {
+        sideEffects.consent = {
+          status: "failed",
+          message: error instanceof Error ? error.message : String(error),
+        };
+      }
+    }
+
+    if (
+      params.sequenceId &&
+      priorSideEffects.sequenceEnrollment?.status !== "completed"
+    ) {
+      const enrollment = await enrollInSequenceStep({
+        jobId: params.jobId,
+        sequenceId: params.sequenceId,
         orgId: params.orgId,
       });
-    } catch (error) {
-      sideEffects.cass = {
-        status: "failed",
-        message: error instanceof Error ? error.message : String(error),
+      sideEffects.sequenceEnrollment = {
+        status: enrollment.failed > 0 ? "failed" : "completed",
+        ...enrollment,
       };
     }
-  }
 
-  if (params.smsConsent && priorSideEffects.consent?.status !== "completed") {
-    try {
-      await recordConsentStep({ jobId: params.jobId, orgId: params.orgId });
-      sideEffects.consent = { status: "completed" };
-    } catch (error) {
-      sideEffects.consent = {
-        status: "failed",
-        message: error instanceof Error ? error.message : String(error),
-      };
-    }
-  }
-
-  if (params.sequenceId && priorSideEffects.sequenceEnrollment?.status !== "completed") {
-    const enrollment = await enrollInSequenceStep({
+    await finalizeStep({
       jobId: params.jobId,
-      sequenceId: params.sequenceId,
+      csvImportId: params.csvImportId,
       orgId: params.orgId,
+      totalRows: loaded.totalRows,
+      succeeded,
+      failed,
+      skipped,
+      droppedUnlabeledPhones,
+      lineTypeClassification,
+      dncRows: loaded.dncRows,
+      sideEffects,
+      errors: allErrors,
     });
-    sideEffects.sequenceEnrollment = {
-      status: enrollment.failed > 0 ? "failed" : "completed",
-      ...enrollment,
+
+    return {
+      succeeded,
+      failed,
+      skipped,
+      totalRows: loaded.totalRows,
     };
+  } catch (error) {
+    await failCsvImportWorkflowStep({
+      jobId: params.jobId,
+      csvImportId: params.csvImportId,
+      orgId: params.orgId,
+      message: error instanceof Error ? error.message : String(error),
+    });
+    throw error;
   }
-
-  await finalizeStep({
-    jobId: params.jobId,
-    csvImportId: params.csvImportId,
-    totalRows: loaded.totalRows,
-    succeeded,
-    failed,
-    skipped,
-    droppedUnlabeledPhones,
-    lineTypeClassification,
-    dncRows: loaded.dncRows,
-    sideEffects,
-    errors: allErrors,
-  });
-
-  return {
-    succeeded,
-    failed,
-    skipped,
-    totalRows: loaded.totalRows,
-  };
 }

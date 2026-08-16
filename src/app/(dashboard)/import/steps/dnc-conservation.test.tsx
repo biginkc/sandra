@@ -33,6 +33,7 @@ const groups: ImportPreflight["groups"] = {
   blocked: [],
   warnings: [],
   dnc: [0, 1],
+  smsSuppressed: [],
   duplicates: [],
   empty: [],
   malformed: [],
@@ -47,8 +48,10 @@ const preflight: ImportPreflight = {
   malformed: 0,
   noUsableContact: 0,
   dnc: 2,
+  smsSuppressed: 0,
   groups,
   dncReasons: { 0: ["File DNC"], 1: ["Existing opt-out"] },
+  smsSuppressionReasons: {},
 };
 const validated = rows.map((row, index) => validateRow(row, mapping, index));
 const state = {
@@ -86,7 +89,9 @@ describe("DNC count conservation across the import UI", () => {
   it("shows the same locked count in Preflight, Review, and Confirm", async () => {
     const user = userEvent.setup();
     const preflightView = render(<StepPreflight state={state} />);
-    expect(screen.getByText(/2 Do-Not-Contact records detected/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/2 Do-Not-Contact records detected/),
+    ).toBeInTheDocument();
     preflightView.unmount();
 
     const reviewView = render(<StepReview state={state} dispatch={vi.fn()} />);
@@ -96,18 +101,16 @@ describe("DNC count conservation across the import UI", () => {
     reviewView.unmount();
 
     render(
-      <StepConfirm
-        state={state}
-        dispatch={vi.fn()}
-        unlabeledPhoneCount={0}
-      />,
+      <StepConfirm state={state} dispatch={vi.fn()} unlabeledPhoneCount={0} />,
     );
     expect(screen.getByText("2 locked Prospects")).toBeInTheDocument();
   });
 
   it("renders the generated DNC mapping as non-editable", () => {
     render(<StepMap state={state} dispatch={vi.fn()} />);
-    expect(screen.getByRole("combobox", { name: /Do Not Contact/i })).toBeDisabled();
+    expect(
+      screen.getByRole("combobox", { name: /Do Not Contact/i }),
+    ).toBeDisabled();
   });
 
   it("shows the conserved count in terminal Results", async () => {
@@ -136,7 +139,9 @@ describe("DNC count conservation across the import UI", () => {
     jobQuery.select.mockReturnValue(jobQuery);
     jobQuery.eq.mockReturnValue(jobQuery);
     createClientMock.mockReturnValue({
-      auth: { getSession: vi.fn().mockResolvedValue({ data: { session: null } }) },
+      auth: {
+        getSession: vi.fn().mockResolvedValue({ data: { session: null } }),
+      },
       realtime: { setAuth: vi.fn() },
       channel: vi.fn().mockReturnValue(channel),
       removeChannel: vi.fn(),
@@ -149,5 +154,52 @@ describe("DNC count conservation across the import UI", () => {
         screen.getByText(/2 Do-Not-Contact records imported locked/),
       ).toBeInTheDocument();
     });
+  });
+
+  it("offers retry after a zero-row workflow-start failure when sealed provenance exists", async () => {
+    const channel = { on: vi.fn(), subscribe: vi.fn() };
+    channel.on.mockReturnValue(channel);
+    channel.subscribe.mockReturnValue(channel);
+    const chain = (result: unknown) => {
+      const query = {
+        select: vi.fn(),
+        eq: vi.fn(),
+        single: vi.fn().mockResolvedValue(result),
+        maybeSingle: vi.fn().mockResolvedValue(result),
+      };
+      query.select.mockReturnValue(query);
+      query.eq.mockReturnValue(query);
+      return query;
+    };
+    createClientMock.mockReturnValue({
+      auth: { getSession: vi.fn().mockResolvedValue({ data: { session: null } }) },
+      realtime: { setAuth: vi.fn() },
+      channel: vi.fn().mockReturnValue(channel),
+      removeChannel: vi.fn(),
+      from: vi.fn((table: string) =>
+        table === "jobs"
+          ? chain({
+              data: {
+                id: "job-zero",
+                org_id: "org-1",
+                type: "csv_import",
+                status: "failed",
+                error_class: "configuration",
+                total_items: 20,
+                processed_items: 0,
+                succeeded_items: 0,
+                failed_items: 0,
+                result_summary: { sideEffects: {} },
+              },
+              error: null,
+            })
+          : chain({ data: { job_id: "job-zero" }, error: null }),
+      ),
+    });
+
+    render(<StepProgress jobId="job-zero" />);
+    expect(
+      await screen.findByRole("button", { name: "Retry import" }),
+    ).toBeVisible();
   });
 });

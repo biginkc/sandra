@@ -100,6 +100,7 @@ export type CreateImportJobResult = { jobId: string };
 
 async function checkpointWorkflowStartFailure(
   jobId: string,
+  orgId: string,
   error: unknown,
   errorClass: "configuration" | "transient",
   messagePrefix: string,
@@ -116,6 +117,7 @@ async function checkpointWorkflowStartFailure(
       completed_at: new Date().toISOString(),
     })
     .eq("id", jobId)
+    .eq("org_id", orgId)
     .eq("status", "queued")
     .select("id")
     .maybeSingle();
@@ -159,7 +161,8 @@ export async function createImportJob(
         ok: false,
         error: {
           code: "INVALID_DATASET_CHECKSUM",
-          message: "The reviewed dataset checksum is invalid. Run preflight again.",
+          message:
+            "The reviewed dataset checksum is invalid. Run preflight again.",
         },
       };
     }
@@ -168,20 +171,31 @@ export async function createImportJob(
         ok: false,
         error: {
           code: "INVALID_REVIEW_CONTRACT",
-          message: "The reviewed mapping contract is invalid. Run preflight again.",
+          message:
+            "The reviewed mapping contract is invalid. Run preflight again.",
         },
       };
     }
     if (params.datasetVersion !== REVIEWED_DATASET_VERSION) {
       return {
         ok: false,
-        error: { code: "INVALID_DATASET_VERSION", message: "Run preflight again before importing." },
+        error: {
+          code: "INVALID_DATASET_VERSION",
+          message: "Run preflight again before importing.",
+        },
       };
     }
-    if (!Number.isInteger(params.dncRows) || params.dncRows < 0 || params.dncRows > params.totalRows) {
+    if (
+      !Number.isInteger(params.dncRows) ||
+      params.dncRows < 0 ||
+      params.dncRows > params.totalRows
+    ) {
       return {
         ok: false,
-        error: { code: "INVALID_DNC_COUNT", message: "The DNC count no longer matches this dataset." },
+        error: {
+          code: "INVALID_DNC_COUNT",
+          message: "The DNC count no longer matches this dataset.",
+        },
       };
     }
     const unavailableService = [
@@ -200,10 +214,16 @@ export async function createImportJob(
         },
       };
     }
-    if (!Number.isFinite(params.maxEstimatedChargeUsd) || params.maxEstimatedChargeUsd < 0) {
+    if (
+      !Number.isFinite(params.maxEstimatedChargeUsd) ||
+      params.maxEstimatedChargeUsd < 0
+    ) {
       return {
         ok: false,
-        error: { code: "INVALID_COST_ESTIMATE", message: "The maximum estimated charge is invalid." },
+        error: {
+          code: "INVALID_COST_ESTIMATE",
+          message: "The maximum estimated charge is invalid.",
+        },
       };
     }
 
@@ -215,7 +235,8 @@ export async function createImportJob(
         ok: false,
         error: {
           code: "ORG_MEMBERSHIP_REQUIRED",
-          message: membershipError?.message ?? "No organization membership found",
+          message:
+            membershipError?.message ?? "No organization membership found",
         },
       };
     }
@@ -234,7 +255,8 @@ export async function createImportJob(
         ok: false,
         error: {
           code: "IMPORT_STORAGE_SCOPE_MISMATCH",
-          message: "The uploaded dataset does not belong to the selected organization.",
+          message:
+            "The uploaded dataset does not belong to the selected organization.",
         },
       };
     }
@@ -265,7 +287,8 @@ export async function createImportJob(
         ok: false,
         error: {
           code: "SEQUENCE_REQUIRES_CONSENT",
-          message: "Sequence enrollment requires the written SMS consent attestation.",
+          message:
+            "Sequence enrollment requires the written SMS consent attestation.",
         },
       };
     }
@@ -287,7 +310,8 @@ export async function createImportJob(
         ok: false,
         error: {
           code: "REVIEW_CONTRACT_MISMATCH",
-          message: "The file, mapping, or confirmation choices changed. Run preflight again.",
+          message:
+            "The file, mapping, or confirmation choices changed. Run preflight again.",
         },
       };
     }
@@ -308,7 +332,8 @@ export async function createImportJob(
           ok: false,
           error: {
             code: "INVALID_SEQUENCE",
-            message: "Choose an active sequence from the selected organization.",
+            message:
+              "Choose an active sequence from the selected organization.",
           },
         };
       }
@@ -417,6 +442,50 @@ export async function createImportJob(
       };
     }
 
+    const admin = createAdminClient();
+    const { error: provenanceError } = await admin
+      .from("csv_import_job_provenance")
+      .insert({
+        job_id: jobRow.id,
+        org_id: orgId,
+        csv_import_id: importRow.id,
+        storage_path: params.storagePath,
+        source: params.source,
+        market: canonicalMarket,
+        county_id: canonicalCountyId,
+        mapping: params.mapping as Json,
+        list_id: listId,
+        requested_by: userId,
+        sms_consent: params.smsConsent,
+        sequence_id: params.sequenceId ?? null,
+        classify_line_types: params.classifyLineTypes,
+        request_cass: params.requestCass,
+        dataset_sha256: params.datasetSha256,
+        review_contract_sha256: params.reviewContractSha256,
+        dataset_version: params.datasetVersion,
+        expected_total_rows: params.totalRows,
+        expected_dnc_rows: params.dncRows,
+        list_name: params.listName,
+        list_resolution_error: listResolutionError,
+      });
+    if (provenanceError) {
+      await checkpointWorkflowStartFailure(
+        jobRow.id,
+        orgId,
+        provenanceError,
+        "configuration",
+        "Import provenance could not be sealed.",
+      );
+      return {
+        ok: false,
+        error: {
+          code: "IMPORT_PROVENANCE_FAILED",
+          message:
+            "The import could not be queued safely. No rows were imported.",
+        },
+      };
+    }
+
     // Kick off the workflow runner. start() returns immediately — the
     // workflow's first step picks up where we leave off here. Wrapped in
     // `after()` so the action's HTTP response goes out before the start
@@ -462,6 +531,7 @@ export async function createImportJob(
         });
         await checkpointWorkflowStartFailure(
           jobRow.id,
+          orgId,
           e,
           "configuration",
           "Workflow runner failed to start.",
@@ -478,7 +548,8 @@ export async function createImportJob(
 
 export type ImportPreflightBatchResult = {
   existingRowIndexes: number[];
-  dncRows: Array<{ rowIndex: number; reasons: string[] }>;
+  trueDncRows: Array<{ rowIndex: number; reasons: string[] }>;
+  smsSuppressedRows: Array<{ rowIndex: number; reasons: string[] }>;
 };
 
 /**
@@ -491,28 +562,51 @@ export async function runImportPreflightBatch(
   probes: PreflightProbe[],
 ): Promise<Result<ImportPreflightBatchResult>> {
   try {
-    if (probes.length === 0) return ok({ existingRowIndexes: [], dncRows: [] });
+    if (probes.length === 0) {
+      return ok({
+        existingRowIndexes: [],
+        trueDncRows: [],
+        smsSuppressedRows: [],
+      });
+    }
     if (probes.length > 250) {
       return {
         ok: false,
-        error: { code: "PREFLIGHT_BATCH_TOO_LARGE", message: "Preflight batches are limited to 250 rows." },
+        error: {
+          code: "PREFLIGHT_BATCH_TOO_LARGE",
+          message: "Preflight batches are limited to 250 rows.",
+        },
       };
     }
     const supabase = await createClient();
     const { data: auth } = await supabase.auth.getUser();
     if (!auth.user) {
-      return { ok: false, error: { code: "NOT_AUTHENTICATED", message: "Not authenticated" } };
+      return {
+        ok: false,
+        error: { code: "NOT_AUTHENTICATED", message: "Not authenticated" },
+      };
     }
 
     const addresses = Array.from(
-      new Set(probes.map((probe) => probe.addressNormalized).filter((value): value is string => !!value)),
+      new Set(
+        probes
+          .map((probe) => probe.addressNormalized)
+          .filter((value): value is string => !!value),
+      ),
     );
-    const filePhones = Array.from(new Set(probes.flatMap((probe) => probe.phones)));
-    const reasonsByRow = new Map<number, Set<string>>();
-    const addReason = (rowIndex: number, reason: string) => {
-      const reasons = reasonsByRow.get(rowIndex) ?? new Set<string>();
+    const filePhones = Array.from(
+      new Set(probes.flatMap((probe) => probe.phones)),
+    );
+    const trueDncReasonsByRow = new Map<number, Set<string>>();
+    const smsReasonsByRow = new Map<number, Set<string>>();
+    const addReason = (
+      target: Map<number, Set<string>>,
+      rowIndex: number,
+      reason: string,
+    ) => {
+      const reasons = target.get(rowIndex) ?? new Set<string>();
       reasons.add(reason);
-      reasonsByRow.set(rowIndex, reasons);
+      target.set(rowIndex, reasons);
     };
 
     const propertiesResult = addresses.length
@@ -527,86 +621,172 @@ export async function runImportPreflightBatch(
       (propertiesResult.data ?? []).map((row) => [row.address_normalized, row]),
     );
     const existingRowIndexes = probes
-      .filter((probe) => probe.addressNormalized && propertyByAddress.has(probe.addressNormalized))
+      .filter(
+        (probe) =>
+          probe.addressNormalized &&
+          propertyByAddress.has(probe.addressNormalized),
+      )
       .map((probe) => probe.rowIndex);
 
-    const existingContactIds = Array.from(new Set(
-      (propertiesResult.data ?? [])
-        .map((property) => property.homeowner_contact_id)
-        .filter((id): id is string => !!id),
-    ));
-    const phoneList = filePhones.length > 0 ? `(${filePhones.join(",")})` : null;
+    const existingContactIds = Array.from(
+      new Set(
+        (propertiesResult.data ?? [])
+          .map((property) => property.homeowner_contact_id)
+          .filter((id): id is string => !!id),
+      ),
+    );
+    const phoneList =
+      filePhones.length > 0 ? `(${filePhones.join(",")})` : null;
     const [addressContactsResult, phoneContactsResult] = await Promise.all([
       existingContactIds.length > 0
         ? supabase
             .from("contacts")
-            .select("id, phone_1, phone_2, phone_3, do_not_contact, sms_opted_out")
+            .select(
+              "id, phone_1, phone_2, phone_3, do_not_contact, sms_opted_out",
+            )
             .in("id", existingContactIds)
         : Promise.resolve({ data: [], error: null }),
       phoneList
         ? supabase
             .from("contacts")
-            .select("id, phone_1, phone_2, phone_3, do_not_contact, sms_opted_out")
-            .or(`phone_1.in.${phoneList},phone_2.in.${phoneList},phone_3.in.${phoneList}`)
+            .select(
+              "id, phone_1, phone_2, phone_3, do_not_contact, sms_opted_out",
+            )
+            .or(
+              `phone_1.in.${phoneList},phone_2.in.${phoneList},phone_3.in.${phoneList}`,
+            )
         : Promise.resolve({ data: [], error: null }),
     ]);
     if (addressContactsResult.error) throw addressContactsResult.error;
     if (phoneContactsResult.error) throw phoneContactsResult.error;
-    const contacts = Array.from(new Map(
-      [...(addressContactsResult.data ?? []), ...(phoneContactsResult.data ?? [])]
-        .map((contact) => [contact.id, contact]),
-    ).values());
-    const contactById = new Map(contacts.map((contact) => [contact.id, contact]));
+    const contacts = Array.from(
+      new Map(
+        [
+          ...(addressContactsResult.data ?? []),
+          ...(phoneContactsResult.data ?? []),
+        ].map((contact) => [contact.id, contact]),
+      ).values(),
+    );
+    const contactById = new Map(
+      contacts.map((contact) => [contact.id, contact]),
+    );
     const contactByPhone = new Map<string, (typeof contacts)[number]>();
     for (const contact of contacts) {
       for (const phone of [contact.phone_1, contact.phone_2, contact.phone_3]) {
         if (phone) contactByPhone.set(phone, contact);
       }
     }
-    const allPhones = Array.from(new Set([
-      ...filePhones,
-      ...contacts.flatMap((contact) =>
-        [contact.phone_1, contact.phone_2, contact.phone_3].filter((phone): phone is string => !!phone),
-      ),
-    ]));
-    const { data: suppressions, error: suppressionError } = allPhones.length > 0
-      ? await supabase.from("sms_phone_suppressions").select("phone_e164").in("phone_e164", allPhones)
-      : { data: [], error: null };
+    const allPhones = Array.from(
+      new Set([
+        ...filePhones,
+        ...contacts.flatMap((contact) =>
+          [contact.phone_1, contact.phone_2, contact.phone_3].filter(
+            (phone): phone is string => !!phone,
+          ),
+        ),
+      ]),
+    );
+    const { data: suppressions, error: suppressionError } =
+      allPhones.length > 0
+        ? await supabase
+            .from("sms_phone_suppressions")
+            .select("phone_e164")
+            .in("phone_e164", allPhones)
+        : { data: [], error: null };
     if (suppressionError) throw suppressionError;
-    const suppressedPhones = new Set((suppressions ?? []).map((row) => row.phone_e164));
+    const suppressedPhones = new Set(
+      (suppressions ?? []).map((row) => row.phone_e164),
+    );
 
     for (const probe of probes) {
       if (!probe.addressNormalized) continue;
       const property = propertyByAddress.get(probe.addressNormalized);
-      if (
+      if (property?.outreach_dispo === "dnc") {
+        addReason(
+          trueDncReasonsByRow,
+          probe.rowIndex,
+          "Existing record is permanently Do Not Contact",
+        );
+      } else if (
         property?.outreach_dispo &&
         SUPPRESSED_DISPOS.has(property.outreach_dispo as "dnc")
       ) {
-        addReason(probe.rowIndex, `Existing record is suppressed (${property.outreach_dispo})`);
+        addReason(
+          smsReasonsByRow,
+          probe.rowIndex,
+          `Existing record is suppressed for outreach (${property.outreach_dispo})`,
+        );
       }
       const addressContact = property?.homeowner_contact_id
         ? contactById.get(property.homeowner_contact_id)
         : null;
-      if (addressContact?.do_not_contact) addReason(probe.rowIndex, "Existing contact is Do Not Contact");
-      if (addressContact?.sms_opted_out) addReason(probe.rowIndex, "Existing contact opted out of SMS");
-      if ([addressContact?.phone_1, addressContact?.phone_2, addressContact?.phone_3]
-        .some((phone) => !!phone && suppressedPhones.has(phone))) {
-        addReason(probe.rowIndex, "Existing contact phone is in the durable suppression registry");
+      if (addressContact?.do_not_contact) {
+        addReason(
+          trueDncReasonsByRow,
+          probe.rowIndex,
+          "Existing contact is Do Not Contact",
+        );
+      }
+      if (addressContact?.sms_opted_out) {
+        addReason(
+          smsReasonsByRow,
+          probe.rowIndex,
+          "Existing contact opted out of SMS",
+        );
+      }
+      if (
+        [
+          addressContact?.phone_1,
+          addressContact?.phone_2,
+          addressContact?.phone_3,
+        ].some((phone) => !!phone && suppressedPhones.has(phone))
+      ) {
+        addReason(
+          smsReasonsByRow,
+          probe.rowIndex,
+          "Existing contact phone is in the durable SMS suppression registry",
+        );
       }
       for (const phone of probe.phones) {
         const contact = contactByPhone.get(phone);
-        if (contact?.do_not_contact) addReason(probe.rowIndex, "Existing contact is Do Not Contact");
-        if (contact?.sms_opted_out) addReason(probe.rowIndex, "Existing contact opted out of SMS");
-        if (suppressedPhones.has(phone)) addReason(probe.rowIndex, "Phone is in the durable suppression registry");
+        if (contact?.do_not_contact) {
+          addReason(
+            trueDncReasonsByRow,
+            probe.rowIndex,
+            "Existing contact is Do Not Contact",
+          );
+        }
+        if (contact?.sms_opted_out) {
+          addReason(
+            smsReasonsByRow,
+            probe.rowIndex,
+            "Existing contact opted out of SMS",
+          );
+        }
+        if (suppressedPhones.has(phone)) {
+          addReason(
+            smsReasonsByRow,
+            probe.rowIndex,
+            "Phone is in the durable SMS suppression registry",
+          );
+        }
       }
     }
 
     return ok({
       existingRowIndexes,
-      dncRows: [...reasonsByRow.entries()].map(([rowIndex, reasons]) => ({
-        rowIndex,
-        reasons: [...reasons],
-      })),
+      trueDncRows: [...trueDncReasonsByRow.entries()].map(
+        ([rowIndex, reasons]) => ({
+          rowIndex,
+          reasons: [...reasons],
+        }),
+      ),
+      smsSuppressedRows: [...smsReasonsByRow.entries()].map(
+        ([rowIndex, reasons]) => ({
+          rowIndex,
+          reasons: [...reasons],
+        }),
+      ),
     });
   } catch (error) {
     reportError(error, { tags: { surface: "import_preflight" } });
@@ -745,7 +925,8 @@ async function resolveOrCreateList(
         .from("lists")
         .update({ archived_at: null })
         .eq("id", existing.id);
-      if (restoreError) throw new Error(`list restore: ${restoreError.message}`);
+      if (restoreError)
+        throw new Error(`list restore: ${restoreError.message}`);
     }
     return existing.id;
   }
@@ -771,14 +952,28 @@ export async function retryImportListAssignment(
     const supabase = await createClient();
     const { data: auth } = await supabase.auth.getUser();
     if (!auth.user) {
-      return { ok: false, error: { code: "NOT_AUTHENTICATED", message: "Not authenticated" } };
+      return {
+        ok: false,
+        error: { code: "NOT_AUTHENTICATED", message: "Not authenticated" },
+      };
     }
     const { data: job, error: jobError } = await supabase
       .from("jobs")
-      .select("id, org_id, status, input_params, result_summary, processed_items, succeeded_items, failed_items, total_items, related_import_id")
+      .select(
+        "id, org_id, type, status, result_summary, processed_items, succeeded_items, failed_items, total_items, related_import_id",
+      )
       .eq("id", jobId)
       .single();
     if (jobError || !job) throw jobError ?? new Error("Import job not found");
+    if (job.type !== "csv_import" || !job.related_import_id) {
+      return {
+        ok: false,
+        error: {
+          code: "LIST_ASSIGNMENT_NOT_RETRYABLE",
+          message: "This is not a CSV import job.",
+        },
+      };
+    }
     if (!["partial", "partially_completed"].includes(job.status)) {
       return {
         ok: false,
@@ -789,12 +984,32 @@ export async function retryImportListAssignment(
       };
     }
 
-    const input = (job.input_params ?? {}) as Record<string, unknown>;
-    const listName = typeof input.listName === "string" ? input.listName.trim() : "";
-    if (!listName) {
-      return { ok: false, error: { code: "NO_LIST_ASSIGNMENT", message: "This import did not request a list." } };
+    const { data: provenance, error: provenanceError } = await supabase
+      .from("csv_import_job_provenance")
+      .select("list_name")
+      .eq("job_id", job.id)
+      .eq("org_id", job.org_id)
+      .eq("csv_import_id", job.related_import_id)
+      .single();
+    if (provenanceError || !provenance) {
+      throw provenanceError ?? new Error("Import retry provenance not found");
     }
-    const listId = await resolveOrCreateList(supabase, job.org_id, listName, auth.user.id);
+    const listName = provenance.list_name?.trim() ?? "";
+    if (!listName) {
+      return {
+        ok: false,
+        error: {
+          code: "NO_LIST_ASSIGNMENT",
+          message: "This import did not request a list.",
+        },
+      };
+    }
+    const listId = await resolveOrCreateList(
+      supabase,
+      job.org_id,
+      listName,
+      auth.user.id,
+    );
     const { data: items, error: itemsError } = await supabase
       .from("job_items")
       .select("property_id")
@@ -804,21 +1019,41 @@ export async function retryImportListAssignment(
     if (itemsError) throw itemsError;
 
     const propertyIds = Array.from(
-      new Set((items ?? []).map((item) => item.property_id).filter((id): id is string => !!id)),
+      new Set(
+        (items ?? [])
+          .map((item) => item.property_id)
+          .filter((id): id is string => !!id),
+      ),
     );
     if (propertyIds.length > 0) {
+      const { data: ownedProperties, error: ownershipError } = await supabase
+        .from("properties")
+        .select("id")
+        .eq("org_id", job.org_id)
+        .in("id", propertyIds);
+      if (ownershipError) throw ownershipError;
+      if (
+        new Set((ownedProperties ?? []).map((row) => row.id)).size !==
+        propertyIds.length
+      ) {
+        throw new Error(
+          "Imported property ownership could not be verified for list assignment.",
+        );
+      }
       const now = new Date().toISOString();
-      const { error: assignmentError } = await supabase.from("property_lists").upsert(
-        propertyIds.map((propertyId) => ({
-          org_id: job.org_id,
-          property_id: propertyId,
-          list_id: listId,
-          last_added_at: now,
-          last_added_by: auth.user.id,
-          last_source_import_id: job.related_import_id,
-        })),
-        { onConflict: "property_id,list_id", ignoreDuplicates: false },
-      );
+      const { error: assignmentError } = await supabase
+        .from("property_lists")
+        .upsert(
+          propertyIds.map((propertyId) => ({
+            org_id: job.org_id,
+            property_id: propertyId,
+            list_id: listId,
+            last_added_at: now,
+            last_added_by: auth.user.id,
+            last_source_import_id: job.related_import_id,
+          })),
+          { onConflict: "property_id,list_id", ignoreDuplicates: false },
+        );
       if (assignmentError) throw assignmentError;
       const { data: verifiedMemberships, error: verifyError } = await supabase
         .from("property_lists")
@@ -826,8 +1061,13 @@ export async function retryImportListAssignment(
         .eq("list_id", listId)
         .in("property_id", propertyIds);
       if (verifyError) throw verifyError;
-      if (new Set((verifiedMemberships ?? []).map((row) => row.property_id)).size !== propertyIds.length) {
-        throw new Error("List assignment verification did not include every imported property.");
+      if (
+        new Set((verifiedMemberships ?? []).map((row) => row.property_id))
+          .size !== propertyIds.length
+      ) {
+        throw new Error(
+          "List assignment verification did not include every imported property.",
+        );
       }
     }
 
@@ -847,15 +1087,12 @@ export async function retryImportListAssignment(
       .from("jobs")
       .update({
         status,
-        input_params: {
-          ...input,
-          listId,
-          listResolutionError: null,
-        } as Json,
         result_summary: { ...summary, sideEffects } as Json,
         completed_at: new Date().toISOString(),
       })
-      .eq("id", jobId);
+      .eq("id", jobId)
+      .eq("org_id", job.org_id)
+      .eq("type", "csv_import");
     if (updateError) throw updateError;
     return ok({ status });
   } catch (error) {
@@ -872,38 +1109,116 @@ export async function retryCsvImportJob(
     const supabase = await createClient();
     const { data: auth } = await supabase.auth.getUser();
     if (!auth.user) {
-      return { ok: false, error: { code: "NOT_AUTHENTICATED", message: "Not authenticated" } };
+      return {
+        ok: false,
+        error: { code: "NOT_AUTHENTICATED", message: "Not authenticated" },
+      };
     }
     const { data: job, error } = await supabase
       .from("jobs")
-      .select("id, org_id, status, input_params, related_import_id, created_by, total_items")
+      .select("id, org_id, type, status, related_import_id")
       .eq("id", jobId)
       .single();
     if (error || !job) throw error ?? new Error("Import job not found");
+    if (job.type !== "csv_import") {
+      return {
+        ok: false,
+        error: {
+          code: "JOB_NOT_CSV_IMPORT",
+          message: "Only CSV import jobs can use this retry.",
+        },
+      };
+    }
     if (!["failed", "partial", "partially_completed"].includes(job.status)) {
       return {
         ok: false,
-        error: { code: "JOB_NOT_RETRYABLE", message: `Job is ${job.status}, not failed or partially completed.` },
+        error: {
+          code: "JOB_NOT_RETRYABLE",
+          message: `Job is ${job.status}, not failed or partially completed.`,
+        },
       };
     }
     if (!job.related_import_id) throw new Error("Import provenance is missing");
-    const input = (job.input_params ?? {}) as Record<string, unknown>;
-    const source = input.source;
-    if (typeof source !== "string" || !LEAD_SOURCES.includes(source as WizardSource)) {
+
+    const { data: provenance, error: provenanceError } = await supabase
+      .from("csv_import_job_provenance")
+      .select("*")
+      .eq("job_id", jobId)
+      .eq("org_id", job.org_id)
+      .eq("csv_import_id", job.related_import_id)
+      .maybeSingle();
+    if (provenanceError || !provenance) {
+      throw (
+        provenanceError ??
+        new Error("Authoritative import provenance is missing")
+      );
+    }
+    const { data: importRow, error: importError } = await supabase
+      .from("csv_imports")
+      .select(
+        "id, org_id, storage_path, source, market, county_id, dataset_sha256, dataset_version, dnc_rows, total_rows, user_id",
+      )
+      .eq("id", job.related_import_id)
+      .eq("org_id", job.org_id)
+      .maybeSingle();
+    if (importError || !importRow) {
+      throw importError ?? new Error("Authoritative import record is missing");
+    }
+    if (
+      !importRow.storage_path?.startsWith(`${job.org_id}/`) ||
+      importRow.storage_path !== provenance.storage_path
+    ) {
+      throw new Error("Stored import object is outside the job organization");
+    }
+    if (
+      importRow.source !== provenance.source ||
+      importRow.market !== provenance.market ||
+      importRow.county_id !== provenance.county_id ||
+      importRow.dataset_sha256 !== provenance.dataset_sha256 ||
+      importRow.dataset_version !== provenance.dataset_version ||
+      importRow.dnc_rows !== provenance.expected_dnc_rows ||
+      importRow.total_rows !== provenance.expected_total_rows
+    ) {
+      throw new Error(
+        "Stored import provenance no longer matches its immutable retry record",
+      );
+    }
+    if (!LEAD_SOURCES.includes(importRow.source as WizardSource)) {
       throw new Error("Stored import source is unsupported");
     }
-    const mapping = input.mapping as Mapping | undefined;
-    if (!mapping || typeof input.storagePath !== "string") {
-      throw new Error("Stored import checkpoint is incomplete");
+    if (provenance.list_id) {
+      const { data: list, error: listError } = await supabase
+        .from("lists")
+        .select("id")
+        .eq("id", provenance.list_id)
+        .eq("org_id", job.org_id)
+        .maybeSingle();
+      if (listError || !list)
+        throw (
+          listError ?? new Error("Import list belongs to another organization")
+        );
+    }
+    if (provenance.sequence_id) {
+      const { data: sequence, error: sequenceError } = await supabase
+        .from("sequences")
+        .select("id")
+        .eq("id", provenance.sequence_id)
+        .eq("org_id", job.org_id)
+        .eq("active", true)
+        .is("archived_at", null)
+        .maybeSingle();
+      if (sequenceError || !sequence) {
+        throw (
+          sequenceError ??
+          new Error("Import sequence is no longer active in this organization")
+        );
+      }
     }
 
-    const { data: claimedJob, error: queueError } = await supabase
-      .from("jobs")
-      .update({ status: "queued", error_class: null, error_message: null, completed_at: null })
-      .eq("id", jobId)
-      .in("status", ["failed", "partial", "partially_completed"])
-      .select("id")
-      .maybeSingle();
+    const { data: claimedJob, error: queueError } = await supabase.rpc(
+      "claim_csv_import_retry",
+      { p_job_id: jobId },
+    );
     if (queueError) throw queueError;
     if (!claimedJob) {
       return {
@@ -915,33 +1230,36 @@ export async function retryCsvImportJob(
       };
     }
     try {
-      await start(csvImportWorkflow, [{
-        jobId,
-        csvImportId: job.related_import_id,
-        storagePath: input.storagePath,
-        source: source as WizardSource,
-        market: String(input.market ?? ""),
-        countyId: typeof input.countyId === "string" ? input.countyId : null,
-        orgId: job.org_id,
-        mapping,
-        listId: typeof input.listId === "string" ? input.listId : null,
-        userId: job.created_by,
-        smsConsent: input.smsConsent === true,
-        sequenceId: typeof input.sequenceId === "string" ? input.sequenceId : null,
-        classifyLineTypes: input.classifyLineTypes === true,
-        requestCass: input.requestCass === true,
-        requestSkipTrace: false,
-        datasetSha256: String(input.datasetSha256 ?? ""),
-        reviewContractSha256: String(input.reviewContractSha256 ?? ""),
-        datasetVersion: Number(input.datasetVersion ?? 0),
-        expectedTotalRows: Number(input.expectedTotalRows ?? job.total_items ?? 0),
-        expectedDncRows: Number(input.dncRows ?? 0),
-        listName: typeof input.listName === "string" ? input.listName : null,
-        listResolutionError: typeof input.listResolutionError === "string" ? input.listResolutionError : null,
-      }]);
+      await start(csvImportWorkflow, [
+        {
+          jobId,
+          csvImportId: job.related_import_id,
+          storagePath: provenance.storage_path,
+          source: provenance.source,
+          market: provenance.market,
+          countyId: provenance.county_id,
+          orgId: job.org_id,
+          mapping: provenance.mapping as Mapping,
+          listId: provenance.list_id,
+          userId: provenance.requested_by,
+          smsConsent: provenance.sms_consent,
+          sequenceId: provenance.sequence_id,
+          classifyLineTypes: provenance.classify_line_types,
+          requestCass: provenance.request_cass,
+          requestSkipTrace: false,
+          datasetSha256: provenance.dataset_sha256,
+          reviewContractSha256: provenance.review_contract_sha256,
+          datasetVersion: provenance.dataset_version,
+          expectedTotalRows: provenance.expected_total_rows,
+          expectedDncRows: provenance.expected_dnc_rows,
+          listName: provenance.list_name,
+          listResolutionError: provenance.list_resolution_error,
+        },
+      ]);
     } catch (startError) {
       await checkpointWorkflowStartFailure(
         jobId,
+        job.org_id,
         startError,
         "transient",
         "The retry could not be queued. No rows were replayed.",

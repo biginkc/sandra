@@ -20,10 +20,7 @@ import {
   IMPORT_SERVICE_DEFAULTS,
   sumEnabledImportServiceEstimates,
 } from "@/lib/csv/import-pricing";
-import type {
-  DetectionResult,
-  TransformStats,
-} from "@/lib/csv/presets/types";
+import type { DetectionResult, TransformStats } from "@/lib/csv/presets/types";
 import type { UpdatePreview } from "@/lib/csv/update-bulk";
 import { createClient as createBrowserSupabase } from "@/lib/supabase/client";
 import type { SubOperationId } from "@/lib/csv/update-operations";
@@ -89,10 +86,7 @@ export type WizardMode = "add" | "update";
  */
 async function uploadCsvToStorage(
   file: File,
-): Promise<
-  | { ok: true; storagePath: string }
-  | { ok: false; error: string }
-> {
+): Promise<{ ok: true; storagePath: string } | { ok: false; error: string }> {
   try {
     const supabase = createBrowserSupabase();
     const { data: memberships, error: membershipError } = await supabase
@@ -587,14 +581,22 @@ export function Wizard({ counties }: { counties: CountyOption[] }) {
   const canGoBack = currentIndex > 0 && currentIndex < lockBackFromIndex;
 
   // Derive per-step readiness for the Next button.
-  const sections = useMemo(() => mappedSections(state.mapping), [state.mapping]);
+  const sections = useMemo(
+    () => mappedSections(state.mapping),
+    [state.mapping],
+  );
 
   // Distinct phone numbers that would ingest with no line type — the
   // set the hard rule drops unless the operator pays to classify them.
   const unlabeledPhoneCount = useMemo(() => {
     const dncRows = new Set(state.preflight?.groups.dnc ?? []);
+    const smsSuppressedRows = new Set(
+      state.preflight?.groups.smsSuppressed ?? [],
+    );
     return collectUnlabeledPhones(
-      state.rows.filter((_, index) => !dncRows.has(index)),
+      state.rows.filter(
+        (_, index) => !dncRows.has(index) && !smsSuppressedRows.has(index),
+      ),
       state.mapping,
     ).length;
   }, [state.rows, state.mapping, state.preflight]);
@@ -692,7 +694,10 @@ export function Wizard({ counties }: { counties: CountyOption[] }) {
       try {
         await runPreflight();
       } catch (error) {
-        dispatch({ type: "SUBMIT_ERROR", message: error instanceof Error ? error.message : String(error) });
+        dispatch({
+          type: "SUBMIT_ERROR",
+          message: error instanceof Error ? error.message : String(error),
+        });
         setSubmittingGlobal(false);
         return;
       }
@@ -710,7 +715,10 @@ export function Wizard({ counties }: { counties: CountyOption[] }) {
       try {
         checked = await runPreflight();
       } catch (error) {
-        dispatch({ type: "SUBMIT_ERROR", message: error instanceof Error ? error.message : String(error) });
+        dispatch({
+          type: "SUBMIT_ERROR",
+          message: error instanceof Error ? error.message : String(error),
+        });
         setSubmittingGlobal(false);
         return;
       }
@@ -815,7 +823,10 @@ export function Wizard({ counties }: { counties: CountyOption[] }) {
                 }
               : null,
         }),
-        { successMessage: "Import started.", fallbackMessage: "Import failed to start" },
+        {
+          successMessage: "Import started.",
+          fallbackMessage: "Import failed to start",
+        },
       );
       if (!result.ok) {
         dispatch({ type: "SUBMIT_ERROR", message: result.error.message });
@@ -900,9 +911,7 @@ export function Wizard({ counties }: { counties: CountyOption[] }) {
         {state.step === "upload" && (
           <StepUpload state={state} dispatch={dispatch} counties={counties} />
         )}
-        {state.step === "preflight" && (
-          <StepPreflight state={state} />
-        )}
+        {state.step === "preflight" && <StepPreflight state={state} />}
         {state.step === "map" && <StepMap state={state} dispatch={dispatch} />}
         {state.step === "review" && (
           <StepReview state={state} dispatch={dispatch} />

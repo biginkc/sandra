@@ -7,7 +7,11 @@ import {
   importTerminalStatus,
   type ImportSideEffects,
 } from "./import-job-status";
-import { normalizeAddress, normalizeDisplayAddress, normalizeName } from "./normalize";
+import {
+  normalizeAddress,
+  normalizeDisplayAddress,
+  normalizeName,
+} from "./normalize";
 import { validateRow, type Mapping, type RowData } from "./validate";
 
 type PropertyInsert = Database["public"]["Tables"]["properties"]["Insert"];
@@ -147,6 +151,7 @@ export async function runIngestion(
   await finalizeIngestion(supabase, {
     jobId: params.jobId,
     csvImportId: params.csvImportId,
+    orgId: params.orgId,
     totalRows: params.rows.length,
     succeeded: chunk.succeeded,
     failed: chunk.failed,
@@ -182,12 +187,17 @@ export async function prepareIngestion(
       total_items: params.totalRows,
       worker_heartbeat_at: new Date().toISOString(),
     })
-    .eq("id", params.jobId);
+    .eq("id", params.jobId)
+    .eq("org_id", params.orgId);
   if (jobStartError) {
     throw new Error(`job start checkpoint: ${jobStartError.message}`);
   }
 
-  const autoTagIds = await resolveAutoTagIds(supabase, params.source, params.orgId);
+  const autoTagIds = await resolveAutoTagIds(
+    supabase,
+    params.source,
+    params.orgId,
+  );
   return { autoTagIds };
 }
 
@@ -255,17 +265,25 @@ export async function processIngestChunk(
 
     if (!validated.ok) {
       const msg = validated.errors[0]?.message ?? "Validation failed";
-      const { error: validationCheckpointError } = await supabase.from("job_items").upsert({
-        job_id: params.jobId,
-        status: "error",
-        compliance_locked: validated.normalized.homeowner_do_not_contact === true,
-        source_row_index: absoluteIndex,
-        error_message: msg,
-        error_class: "validation",
-        input_payload: rowToJson(row),
-      }, { onConflict: "job_id,source_row_index" });
+      const { error: validationCheckpointError } = await supabase
+        .from("job_items")
+        .upsert(
+          {
+            job_id: params.jobId,
+            status: "error",
+            compliance_locked:
+              validated.normalized.homeowner_do_not_contact === true,
+            source_row_index: absoluteIndex,
+            error_message: msg,
+            error_class: "validation",
+            input_payload: rowToJson(row),
+          },
+          { onConflict: "job_id,source_row_index" },
+        );
       if (validationCheckpointError) {
-        throw new Error(`validation checkpoint: ${validationCheckpointError.message}`);
+        throw new Error(
+          `validation checkpoint: ${validationCheckpointError.message}`,
+        );
       }
       failed++;
       if (errors.length < ERROR_SAMPLE_SIZE)
@@ -273,6 +291,10 @@ export async function processIngestChunk(
       continue;
     }
 
+    let durableOutcome: {
+      propertyId: string;
+      wasDuplicate: boolean;
+    } | null = null;
     try {
       const result = await ingestRow(
         supabase,
@@ -282,7 +304,10 @@ export async function processIngestChunk(
         params.countyId ?? null,
         params.csvImportId,
         params.orgId,
+        params.jobId,
+        absoluteIndex,
       );
+      durableOutcome = result;
       droppedUnlabeledPhones += result.droppedUnlabeledPhones;
 
       // Stacking: every ingested row — including dedup-matched ones —
@@ -295,6 +320,7 @@ export async function processIngestChunk(
           listId: params.listId,
           userId: params.userId ?? null,
           csvImportId: params.csvImportId,
+          orgId: params.orgId,
         });
       }
 
@@ -313,32 +339,57 @@ export async function processIngestChunk(
         if (tagError) throw new Error(`tag assignment: ${tagError.message}`);
       }
 
-      const { error: successCheckpointError } = await supabase.from("job_items").upsert({
-        job_id: params.jobId,
-        property_id: result.propertyId,
-        status: result.wasDuplicate ? "skipped" : "success",
-        compliance_locked: validated.normalized.homeowner_do_not_contact === true,
-        source_row_index: absoluteIndex,
-        error_message: null,
-        error_class: null,
-        input_payload: null,
-      }, { onConflict: "job_id,source_row_index" });
+      const { error: successCheckpointError } = await supabase
+        .from("job_items")
+        .upsert(
+          {
+            job_id: params.jobId,
+            property_id: result.propertyId,
+            status: result.wasDuplicate ? "skipped" : "success",
+            compliance_locked:
+              validated.normalized.homeowner_do_not_contact === true,
+            source_row_index: absoluteIndex,
+            error_message: null,
+            error_class: null,
+            input_payload: null,
+            output_payload: {
+              original_outcome: result.wasDuplicate ? "duplicate" : "inserted",
+            },
+          },
+          { onConflict: "job_id,source_row_index" },
+        );
       if (successCheckpointError) {
-        throw new Error(`success checkpoint: ${successCheckpointError.message}`);
+        throw new Error(
+          `success checkpoint: ${successCheckpointError.message}`,
+        );
       }
       if (result.wasDuplicate) skipped++;
       else succeeded++;
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
-      const { error: errorCheckpointError } = await supabase.from("job_items").upsert({
-        job_id: params.jobId,
-        status: "error",
-        compliance_locked: validated.normalized.homeowner_do_not_contact === true,
-        source_row_index: absoluteIndex,
-        error_message: message,
-        error_class: "database",
-        input_payload: rowToJson(row),
-      }, { onConflict: "job_id,source_row_index" });
+      const { error: errorCheckpointError } = await supabase
+        .from("job_items")
+        .upsert(
+          {
+            job_id: params.jobId,
+            status: "error",
+            property_id: durableOutcome?.propertyId ?? null,
+            compliance_locked:
+              validated.normalized.homeowner_do_not_contact === true,
+            source_row_index: absoluteIndex,
+            error_message: message,
+            error_class: "database",
+            input_payload: rowToJson(row),
+            output_payload: durableOutcome
+              ? {
+                  original_outcome: durableOutcome.wasDuplicate
+                    ? "duplicate"
+                    : "inserted",
+                }
+              : null,
+          },
+          { onConflict: "job_id,source_row_index" },
+        );
       if (errorCheckpointError) {
         throw new Error(
           `row failed and its durable checkpoint also failed: ${errorCheckpointError.message}`,
@@ -365,7 +416,8 @@ export async function processIngestChunk(
           failed_items: (params.priorFailed ?? 0) + failed,
           worker_heartbeat_at: new Date().toISOString(),
         })
-        .eq("id", params.jobId);
+        .eq("id", params.jobId)
+        .eq("org_id", params.orgId);
       if (progressError) {
         throw new Error(`job progress checkpoint: ${progressError.message}`);
       }
@@ -387,6 +439,7 @@ export async function finalizeIngestion(
   params: {
     jobId: string;
     csvImportId: string;
+    orgId: string;
     totalRows: number;
     succeeded: number;
     failed: number;
@@ -429,7 +482,8 @@ export async function finalizeIngestion(
         errors: params.errors.slice(0, ERROR_SAMPLE_SIZE),
       } as Json,
     })
-    .eq("id", params.jobId);
+    .eq("id", params.jobId)
+    .eq("org_id", params.orgId);
   if (jobFinalizeError) {
     throw new Error(`job finalization: ${jobFinalizeError.message}`);
   }
@@ -442,7 +496,8 @@ export async function finalizeIngestion(
       failed_rows: params.failed,
       total_rows: params.totalRows,
     })
-    .eq("id", params.csvImportId);
+    .eq("id", params.csvImportId)
+    .eq("org_id", params.orgId);
   if (importFinalizeError) {
     throw new Error(`import finalization: ${importFinalizeError.message}`);
   }
@@ -458,6 +513,8 @@ async function ingestRow(
   countyId: string | null,
   csvImportId: string,
   orgId: string,
+  jobId: string,
+  sourceRowIndex: number,
 ): Promise<{
   propertyId: string;
   wasDuplicate: boolean;
@@ -494,8 +551,7 @@ async function ingestRow(
     // mapping (no compliance signal at all) keeps the existing phone_1-only
     // match semantics — widening matching for every unlabeled-phone drop is
     // a bigger, unrelated behavior change this PR isn't making.
-    const isDncRow =
-      (n.homeowner_do_not_contact as boolean | null) === true;
+    const isDncRow = (n.homeowner_do_not_contact as boolean | null) === true;
     const primaryPhone = phoneSlots.contactFields.phone_1;
     // `homeowner_dnc_phones` (set by preset transforms like propstream.ts)
     // is a pipe-delimited identity-only channel for DNC numbers that don't
@@ -535,7 +591,8 @@ async function ingestRow(
         last_name: normalizeName(n.homeowner_last_name as string | null),
         entity_name: normalizeName(n.homeowner_entity_name as string | null),
         ...phoneSlots.contactFields,
-        email: (n.homeowner_email as string | null)?.trim().toLowerCase() ?? null,
+        email:
+          (n.homeowner_email as string | null)?.trim().toLowerCase() ?? null,
         do_not_contact:
           (n.homeowner_do_not_contact as boolean | null) ?? undefined,
       },
@@ -548,15 +605,21 @@ async function ingestRow(
         {
           contact_id: homeownerContactId,
           org_id: orgId,
-          mailing_address: normalizeDisplayAddress(n.homeowner_mailing_address as string | null),
-          mailing_city: normalizeDisplayAddress(n.homeowner_mailing_city as string | null),
+          mailing_address: normalizeDisplayAddress(
+            n.homeowner_mailing_address as string | null,
+          ),
+          mailing_city: normalizeDisplayAddress(
+            n.homeowner_mailing_city as string | null,
+          ),
           mailing_state: (n.homeowner_mailing_state as string | null) ?? null,
           mailing_zip: (n.homeowner_mailing_zip as string | null) ?? null,
         },
         { onConflict: "contact_id" },
       );
     if (homeownerDetailsError) {
-      throw new Error(`homeowner details upsert: ${homeownerDetailsError.message}`);
+      throw new Error(
+        `homeowner details upsert: ${homeownerDetailsError.message}`,
+      );
     }
   }
 
@@ -569,23 +632,30 @@ async function ingestRow(
     const agentPhoneType = asLineType(n.agent_phone_type as string | null);
     const keepAgentPhone = !!agentPhone && agentPhoneType !== "unknown";
     if (agentPhone && !keepAgentPhone) agentPhoneDropped = 1;
-    agentContactId = await upsertContact(supabase, {
-      contact_type: "person",
-      first_name: normalizeName(n.agent_first_name as string | null),
-      last_name: normalizeName(n.agent_last_name as string | null),
-      phone_1: keepAgentPhone ? agentPhone : null,
-      phone_1_type: keepAgentPhone ? agentPhoneType : "unknown",
-      email: (n.agent_email as string | null)?.trim().toLowerCase() ?? null,
-    }, undefined, orgId);
-    const { error: agentDetailsError } = await supabase.from("agent_details").upsert(
+    agentContactId = await upsertContact(
+      supabase,
       {
-        contact_id: agentContactId,
-        org_id: orgId,
-        brokerage: (n.agent_brokerage as string | null) ?? null,
-        license_number: (n.agent_license_number as string | null) ?? null,
+        contact_type: "person",
+        first_name: normalizeName(n.agent_first_name as string | null),
+        last_name: normalizeName(n.agent_last_name as string | null),
+        phone_1: keepAgentPhone ? agentPhone : null,
+        phone_1_type: keepAgentPhone ? agentPhoneType : "unknown",
+        email: (n.agent_email as string | null)?.trim().toLowerCase() ?? null,
       },
-      { onConflict: "contact_id" },
+      undefined,
+      orgId,
     );
+    const { error: agentDetailsError } = await supabase
+      .from("agent_details")
+      .upsert(
+        {
+          contact_id: agentContactId,
+          org_id: orgId,
+          brokerage: (n.agent_brokerage as string | null) ?? null,
+          license_number: (n.agent_license_number as string | null) ?? null,
+        },
+        { onConflict: "contact_id" },
+      );
     if (agentDetailsError) {
       throw new Error(`agent details upsert: ${agentDetailsError.message}`);
     }
@@ -635,19 +705,18 @@ async function ingestRow(
       }
       if (isDncRow) patch.outreach_dispo = "dnc";
     }
-    const { error: patchError } = await supabase
-      .from("properties")
-      .update(patch)
-      .eq("id", existingId)
-      .eq("org_id", orgId);
-    if (patchError) {
-      throw new Error(
-        `contact attach/provenance on dedup: ${patchError.message}`,
-      );
-    }
+    const outcome = await checkpointPropertyOutcome(supabase, {
+      jobId,
+      csvImportId,
+      orgId,
+      sourceRowIndex,
+      property: {},
+      existingPropertyId: existingId,
+      existingPatch: patch,
+    });
     return {
-      propertyId: existingId,
-      wasDuplicate: true,
+      propertyId: outcome.propertyId,
+      wasDuplicate: outcome.originalOutcome === "duplicate",
       droppedUnlabeledPhones: phoneSlots.dropped + agentPhoneDropped,
     };
   }
@@ -697,16 +766,54 @@ async function ingestRow(
     outreach_dispo: n.homeowner_do_not_contact === true ? "dnc" : null,
   };
 
-  const { data: inserted, error } = await supabase
-    .from("properties")
-    .insert(property)
-    .select("id")
-    .single();
-  if (error) throw new Error(`property insert: ${error.message}`);
+  const outcome = await checkpointPropertyOutcome(supabase, {
+    jobId,
+    csvImportId,
+    orgId,
+    sourceRowIndex,
+    property,
+    existingPropertyId: null,
+    existingPatch: {},
+  });
   return {
-    propertyId: inserted.id,
-    wasDuplicate: false,
+    propertyId: outcome.propertyId,
+    wasDuplicate: outcome.originalOutcome === "duplicate",
     droppedUnlabeledPhones: phoneSlots.dropped + agentPhoneDropped,
+  };
+}
+
+async function checkpointPropertyOutcome(
+  supabase: SupabaseClient<Database>,
+  args: {
+    jobId: string;
+    csvImportId: string;
+    orgId: string;
+    sourceRowIndex: number;
+    property: Partial<PropertyInsert>;
+    existingPropertyId: string | null;
+    existingPatch: Partial<PropertyInsert>;
+  },
+): Promise<{ propertyId: string; originalOutcome: "inserted" | "duplicate" }> {
+  const { data, error } = await supabase.rpc(
+    "checkpoint_csv_import_property_outcome",
+    {
+      p_job_id: args.jobId,
+      p_csv_import_id: args.csvImportId,
+      p_org_id: args.orgId,
+      p_source_row_index: args.sourceRowIndex,
+      p_property: args.property as Json,
+      p_existing_property_id: args.existingPropertyId,
+      p_existing_patch: args.existingPatch as Json,
+    },
+  );
+  if (error) throw new Error(`property outcome checkpoint: ${error.message}`);
+  const row = data?.[0];
+  if (!row || !["inserted", "duplicate"].includes(row.original_outcome)) {
+    throw new Error("property outcome checkpoint returned no durable result");
+  }
+  return {
+    propertyId: row.property_id,
+    originalOutcome: row.original_outcome as "inserted" | "duplicate",
   };
 }
 
@@ -1001,15 +1108,21 @@ async function upsertPropertyListMembership(
     listId: string;
     userId: string | null;
     csvImportId: string;
+    orgId: string;
   },
 ): Promise<void> {
   const { data: prop, error: propertyError } = await supabase
     .from("properties")
     .select("org_id")
     .eq("id", input.propertyId)
+    .eq("org_id", input.orgId)
     .maybeSingle();
-  if (propertyError) throw new Error(`list property lookup: ${propertyError.message}`);
-  if (!prop) throw new Error("list property lookup: property disappeared before assignment");
+  if (propertyError)
+    throw new Error(`list property lookup: ${propertyError.message}`);
+  if (!prop)
+    throw new Error(
+      "list property lookup: property disappeared before assignment",
+    );
 
   const now = new Date().toISOString();
   const { error: membershipError } = await supabase
@@ -1034,7 +1147,8 @@ async function upsertPropertyListMembership(
         ignoreDuplicates: false,
       },
     );
-  if (membershipError) throw new Error(`list assignment: ${membershipError.message}`);
+  if (membershipError)
+    throw new Error(`list assignment: ${membershipError.message}`);
 }
 
 async function findExistingProperty(
