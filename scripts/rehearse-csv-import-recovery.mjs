@@ -55,6 +55,8 @@ const shaA = "a".repeat(64);
 const shaB = "b".repeat(64);
 const service = "set request.jwt.claim.role='service_role';";
 const authA = `set request.jwt.claim.role='authenticated'; set request.jwt.claim.sub='${userA}';`;
+const asServiceRole = "set role service_role;";
+const asMemberA = `set role authenticated; set request.jwt.claim.sub='${userA}';`;
 
 try {
   run("initdb", ["-D", cluster, "-A", "trust", "-U", "postgres"], { stdio: "ignore", env: { ...process.env, LC_ALL: "C" } });
@@ -110,6 +112,10 @@ try {
       source text, occurred_at timestamptz not null default now(),
       foreign key(contact_id, org_id) references contacts(id, org_id)
     );
+    alter table consent_events enable row level security;
+    create policy consent_events_member_all on consent_events
+      for all to authenticated using (true) with check (true);
+    grant select, insert, update, delete on consent_events to authenticated;
     create table sms_phone_suppressions (
       org_id uuid not null, channel text not null, phone_e164 text not null
     );
@@ -140,16 +146,19 @@ try {
   run("psql", ["-h", socketDir, "-p", String(port), "-U", "postgres", "-v", "ON_ERROR_STOP=1", "-f", migration]);
 
   psql(`${service}
-    insert into csv_import_job_provenance(job_id,org_id,csv_import_id,storage_path,source,market,county_id,mapping,dataset_sha256,review_contract_sha256,dataset_version,expected_total_rows)
-    values ('${jobA}','${orgA}','${importA}','${orgA}/a.csv','dealmachine','Kansas City','${county}','{}','${shaA}','${shaB}',1,3);
+    insert into csv_import_job_provenance(job_id,org_id,csv_import_id,storage_path,source,market,county_id,mapping,dataset_sha256,review_contract_sha256,dataset_version,expected_total_rows,expected_dnc_rows)
+    values ('${jobA}','${orgA}','${importA}','${orgA}/a.csv','dealmachine','Kansas City','${county}','{}','${shaA}','${shaB}',1,3,2);
     update csv_import_job_provenance set sms_consent=true where job_id='${jobA}';
-    insert into job_items(job_id,status,source_row_index) values
-      ('${jobA}','success',0),('${jobA}','skipped',1),('${jobA}','error',2);
+    insert into job_items(job_id,status,source_row_index,property_id,compliance_locked) values
+      ('${jobA}','success',0,null,false),
+      ('${jobA}','skipped',1,null,false),
+      ('${jobA}','error',2,'${lockedProperty}',true);
   `);
   equal(psql(`${authA} select claim_csv_import_retry('${jobB}')`), "f", "cross-tenant retry denied");
   equal(psql(`${authA} select claim_csv_import_retry('${jobA}')`), "t", "owned retry claimed");
   psql(`update jobs set status='processing'; ${service} select fail_csv_import_workflow('${jobA}','${importA}','${orgA}','synthetic exhaustion');`);
   equal(psql(`select status||':'||processed_items||':'||succeeded_items||':'||failed_items from jobs where id='${jobA}'`), "partial:3:1:1", "failure checkpoint counts conserve success + blank skip + error");
+  equal(psql(`select (result_summary->>'dncRows')||':'||(result_summary->>'reviewedDncRows') from jobs where id='${jobA}'`), "1:2", "failure checkpoint reports durable locks separately from reviewed DNC rows");
 
   const call = `${service} select property_id||':'||original_outcome from checkpoint_csv_import_property_outcome('${jobA}','${importA}','${orgA}',5,'{"address":"1 Main St","state":"MO","status":"prospect","source":"dealmachine"}'::jsonb);`;
   const first = psql(call);
@@ -177,20 +186,78 @@ try {
   const lockedCall = `${service} select property_id||':'||original_outcome from checkpoint_csv_import_property_outcome('${jobA}','${importA}','${orgA}',7,'{}'::jsonb,'${lockedProperty}','{"source_imported_at":"2026-08-16T00:00:00Z","outreach_dispo":"dnc"}'::jsonb);`;
   equal(psql(lockedCall), `${lockedProperty}:duplicate`, "locked duplicate checkpoint succeeds without mutation");
   equal(psql(lockedCall), `${lockedProperty}:duplicate`, "locked duplicate replay is stable");
+  equal(psql(`${service} select compliance_locked::text from checkpoint_csv_import_property_outcome('${jobA}','${importA}','${orgA}',7,'{}'::jsonb,'${lockedProperty}','{}'::jsonb);`), "true", "locked duplicate returns authoritative lock on replay");
   equal(psql(`select count(*) from csv_import_row_outcomes where job_id='${jobA}' and source_row_index=7`), "1", "one locked duplicate outcome");
 
   psql(`${service}
     select checkpoint_csv_import_property_outcome(
       '${jobA}','${importA}','${orgA}',8,'{}'::jsonb,'${consentProperty}','{}'::jsonb
     );
-    select record_csv_import_consents('${jobA}','${orgA}');
-    select record_csv_import_consents('${jobA}','${orgA}');
   `);
-  equal(
-    psql(`select count(*) from consent_events where idempotency_key='csv-import:${jobA}:contact:${contactA}'`),
-    "1",
-    "consent audit is idempotent across retry",
+
+  async function safetyWriteWins(mutation, reset, label) {
+    const safetyWrite = psqlAsync(`begin; ${mutation}; select pg_sleep(0.4); commit;`);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const consentAttempt = psqlAsync(`${asServiceRole} select record_csv_import_consents('${jobA}','${orgA}');`);
+    await safetyWrite;
+    equal(await consentAttempt, "0", `${label} excludes concurrent consent`);
+    equal(psql(`select count(*) from csv_import_consent_outcomes where job_id='${jobA}'`), "0", `${label} leaves no consent ledger row`);
+    psql(reset);
+  }
+  await safetyWriteWins(
+    `update contacts set sms_opted_out=true where id='${contactA}'`,
+    `update contacts set sms_opted_out=false where id='${contactA}'`,
+    "STOP",
   );
+  await safetyWriteWins(
+    `update contacts set do_not_contact=true where id='${contactA}'`,
+    `update contacts set do_not_contact=false where id='${contactA}'`,
+    "contact DNC",
+  );
+  psql(`update contacts set phone_1='+18165550123' where id='${contactA}'`);
+  await safetyWriteWins(
+    `insert into sms_phone_suppressions(org_id,channel,phone_e164) values ('${orgA}','sms','+18165550123')`,
+    `delete from sms_phone_suppressions where org_id='${orgA}' and phone_e164='+18165550123'`,
+    "phone suppression",
+  );
+
+  const fakeEvent = psql(`${asMemberA}
+    insert into consent_events(org_id,contact_id,channel,event_type,source,idempotency_key)
+    values ('${orgA}','${contactA}','sms','opt_in_marketing_written','member-created','csv-import:${jobA}:contact:${contactA}')
+    returning id;
+  `);
+  let memberPreemptDenied = false;
+  try {
+    psql(`${asMemberA} insert into csv_import_consent_outcomes(job_id,contact_id,org_id,consent_event_id) values ('${jobA}','${contactA}','${orgA}','${fakeEvent}');`);
+  } catch (error) { memberPreemptDenied = /permission denied|row-level security/.test(String(error)); }
+  equal(memberPreemptDenied, true, "member cannot preempt import consent ledger");
+
+  equal(psql(`${asServiceRole} select record_csv_import_consents('${jobA}','${orgA}');`), "1", "service records consent");
+  equal(psql(`${asServiceRole} select record_csv_import_consents('${jobA}','${orgA}');`), "0", "retry records no duplicate consent");
+  equal(
+    psql(`select count(*) from csv_import_consent_outcomes where job_id='${jobA}' and contact_id='${contactA}' and org_id='${orgA}'`),
+    "1",
+    "authoritative consent ledger is idempotent across retry",
+  );
+  equal(psql(`select (consent_event_id <> '${fakeEvent}')::text from csv_import_consent_outcomes where job_id='${jobA}' and contact_id='${contactA}'`), "true", "member-created event cannot preempt authoritative event");
+  let immutableRejected = false;
+  try {
+    psql(`update csv_import_consent_outcomes set created_at=now() where job_id='${jobA}'`);
+  } catch (error) { immutableRejected = /immutable/.test(String(error)); }
+  equal(immutableRejected, true, "consent ledger rejects mutation");
+
+  const authoritativeEvent = psql(`select consent_event_id from csv_import_consent_outcomes where job_id='${jobA}' and contact_id='${contactA}'`);
+  let eventUpdateRejected = false;
+  try {
+    psql(`${asMemberA} update consent_events set event_type='opt_out', source='member-rewrite', occurred_at=now() where id='${authoritativeEvent}'`);
+  } catch (error) { eventUpdateRejected = /immutable/.test(String(error)); }
+  equal(eventUpdateRejected, true, "member cannot rewrite authoritative consent event");
+  let eventDeleteRejected = false;
+  try {
+    psql(`${asMemberA} delete from consent_events where id='${authoritativeEvent}'`);
+  } catch (error) { eventDeleteRejected = /immutable/.test(String(error)); }
+  equal(eventDeleteRejected, true, "member cannot delete authoritative consent event");
+  equal(psql(`${asServiceRole} select record_csv_import_consents('${jobA}','${orgA}');`), "0", "retry preserves one immutable authoritative event");
 
   let wrongOrgRejected = false;
   try {
@@ -204,6 +271,8 @@ try {
   console.log("- exhausted failure terminal counts");
   console.log("- atomic row outcome replay + concurrency");
   console.log("- locked duplicate DNC replay without mutation");
+  console.log("- serialized STOP/DNC/suppression precedence over consent");
+  console.log("- service-only immutable consent ledger, member preemption denied");
   console.log("- written-consent idempotency across retry");
 } finally {
   if (started) { try { run("pg_ctl", ["-D", cluster, "-m", "immediate", "stop"], { stdio: "ignore" }); } catch {} }

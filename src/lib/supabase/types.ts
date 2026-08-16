@@ -788,6 +788,52 @@ export type Database = {
         }
         Relationships: []
       }
+      csv_import_consent_outcomes: {
+        Row: {
+          consent_event_id: string
+          contact_id: string
+          created_at: string
+          job_id: string
+          org_id: string
+        }
+        Insert: {
+          consent_event_id: string
+          contact_id: string
+          created_at?: string
+          job_id: string
+          org_id: string
+        }
+        Update: {
+          consent_event_id?: string
+          contact_id?: string
+          created_at?: string
+          job_id?: string
+          org_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "csv_import_consent_outcomes_consent_event_id_fkey"
+            columns: ["consent_event_id"]
+            isOneToOne: true
+            referencedRelation: "consent_events"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "csv_import_consent_outcomes_contact_org_fkey"
+            columns: ["contact_id", "org_id"]
+            isOneToOne: false
+            referencedRelation: "contacts"
+            referencedColumns: ["id", "org_id"]
+          },
+          {
+            foreignKeyName: "csv_import_consent_outcomes_job_org_fkey"
+            columns: ["job_id", "org_id"]
+            isOneToOne: false
+            referencedRelation: "jobs"
+            referencedColumns: ["id", "org_id"]
+          },
+        ]
+      }
       csv_import_job_provenance: {
         Row: {
           classify_line_types: boolean
@@ -3584,6 +3630,7 @@ export type Database = {
           p_source_row_index: number
         }
         Returns: {
+          compliance_locked: boolean
           original_outcome: string
           property_id: string
         }[]
