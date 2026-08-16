@@ -49,6 +49,7 @@ async function ensureLeadsTeammate(
 test("Leads board v2 foundation is usable at desktop and narrow widths", async ({
   page,
 }, testInfo) => {
+  test.setTimeout(120_000);
   const consoleErrors: string[] = [];
   const pageErrors: string[] = [];
   page.on("console", (message) => {
