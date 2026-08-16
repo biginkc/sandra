@@ -139,7 +139,7 @@ describe("retryFailedSkipTraceItems (integration)", () => {
     expect(ids).toEqual([p2]);
     expect(start).toHaveBeenCalledTimes(1);
     expect(start).toHaveBeenCalledWith(expect.any(Function), [
-      { jobId: result.data.childJobId },
+      { jobId: result.data.childJobId, orgId: await getOrgId() },
     ]);
   });
 

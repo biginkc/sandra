@@ -475,7 +475,9 @@ export async function retryFailedSkipTraceItems(
     }
 
     try {
-      await start(skipTraceSubmitWorkflow, [{ jobId: childRow.id }]);
+      await start(skipTraceSubmitWorkflow, [
+        { jobId: childRow.id, orgId: parent.org_id },
+      ]);
     } catch (e) {
       reportError(e, {
         tags: { surface: "retry_skip_trace_workflow_start" },

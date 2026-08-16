@@ -47,12 +47,12 @@
  */
 
 import { createAdminClient } from "../src/lib/supabase/admin";
+import { start } from "workflow/api";
 import {
   CASS_COST_PER_LOOKUP_USD,
-  createCassChildJob,
   runCassEnrichment,
 } from "../src/lib/enrichment/cass-job";
-import { runSkipTraceEnrichment } from "../src/lib/skip-trace/skip-trace-job";
+import { skipTraceSubmitWorkflow } from "../src/workflows/skip-trace-submit";
 
 const RECOVERY_LIST_ID = "3241368b-0631-45d1-908b-0322660b387f";
 const ADMIN_EMAIL_ENV = "RECOVERY_ADMIN_EMAIL";
@@ -62,6 +62,7 @@ type Bucket = "verified" | "unverified" | "invalid" | "ambiguous" | "other";
 
 type PropertyRow = {
   id: string;
+  org_id: string;
   cass_status: string | null;
   skip_trace_disabled: boolean | null;
 };
@@ -116,7 +117,7 @@ async function loadRecoveryProperties(
 
   const { data: rows, error: propErr } = await supabase
     .from("properties")
-    .select("id, cass_status, skip_trace_disabled")
+    .select("id, org_id, cass_status, skip_trace_disabled")
     .in("id", propertyIds);
 
   if (propErr) {
@@ -148,7 +149,9 @@ function printDryRun(rows: PropertyRow[]): {
   const invalid = groups.invalid.length;
   const ambiguous = groups.ambiguous.length;
   const other = groups.other.length;
-  const skipDisabled = rows.filter((r) => r.skip_trace_disabled === true).length;
+  const skipDisabled = rows.filter(
+    (r) => r.skip_trace_disabled === true,
+  ).length;
 
   // Cost model: SmartyStreets charges per lookup attempted (not just
   // successful). Tracerfy charges per row submitted; verified-no-data
@@ -230,6 +233,7 @@ async function runPhase1(
   supabase: ReturnType<typeof createAdminClient>,
   unverifiedIds: string[],
   adminUserId: string | null,
+  orgId: string,
 ): Promise<{ jobId: string }> {
   console.log("=== PHASE 1 — CASS verify ===");
   console.log(`  property count: ${unverifiedIds.length}`);
@@ -247,6 +251,7 @@ async function runPhase1(
     .from("jobs")
     .insert({
       type: "cass_dsf2_ncoa",
+      org_id: orgId,
       status: "queued",
       provider: "smartystreets",
       created_by: adminUserId,
@@ -285,6 +290,7 @@ async function runPhase2(
   supabase: ReturnType<typeof createAdminClient>,
   preUnverifiedIds: string[],
   adminUserId: string | null,
+  orgId: string,
 ): Promise<{ jobId: string | null; eligibleCount: number }> {
   console.log("");
   console.log("=== PHASE 2 — Re-skip-trace ===");
@@ -294,6 +300,7 @@ async function runPhase2(
   const { data: rows, error } = await supabase
     .from("properties")
     .select("id, cass_status, skip_trace_disabled")
+    .eq("org_id", orgId)
     .in("id", preUnverifiedIds);
 
   if (error) {
@@ -317,6 +324,7 @@ async function runPhase2(
     .from("jobs")
     .insert({
       type: "skip_trace",
+      org_id: orgId,
       provider: "tracerfy",
       status: "queued",
       created_by: adminUserId,
@@ -336,26 +344,9 @@ async function runPhase2(
   }
   console.log(`  created skip-trace job: ${job.id}`);
 
-  // Don't await this in a finalize-poll — the runner's batch path
-  // returns `pending` and the Tracerfy webhook (or cron sweep) wraps
-  // it up. Awaiting just lets the runner's setup writes complete.
-  const result = await runSkipTraceEnrichment(supabase, {
-    jobId: job.id,
-    propertyIds: eligibleIds,
-  });
-
-  if ("pending" in result) {
-    console.log(`  batch submitted; queueId=${result.queueId}`);
-    console.log("  Tracerfy webhook will finalize. Watch /jobs/<id>.");
-  } else {
-    console.log(`  inline-completed:`);
-    console.log(`    matched:      ${result.matched}`);
-    console.log(`    no_match:     ${result.no_match}`);
-    console.log(`    failed:       ${result.failed}`);
-    console.log(`    cached_hits:  ${result.cached_hits}`);
-    console.log(`    api_hits:     ${result.api_hits}`);
-    console.log(`    credits used: ${result.total_credits}`);
-  }
+  const run = await start(skipTraceSubmitWorkflow, [{ jobId: job.id, orgId }]);
+  console.log(`  durable skip-trace workflow run: ${run.runId}`);
+  console.log("  Watch /jobs/<id> for provider/finalization progress.");
 
   return { jobId: job.id, eligibleCount: eligibleIds.length };
 }
@@ -376,6 +367,13 @@ async function main() {
   // Phase 0 — dry run report (always)
   const rows = await loadRecoveryProperties(supabase);
   const { unverifiedIds } = printDryRun(rows);
+  const orgIds = [...new Set(rows.map((row) => row.org_id))];
+  if (orgIds.length !== 1) {
+    throw new Error(
+      `Recovery list must belong to exactly one organization; found ${orgIds.length}.`,
+    );
+  }
+  const orgId = orgIds[0];
 
   if (!execute) {
     console.log("Dry-run only. Re-run with --execute to perform Phases 1 + 2.");
@@ -399,9 +397,7 @@ async function main() {
   ];
   const missing = need.filter((k) => !process.env[k]);
   if (missing.length > 0) {
-    throw new Error(
-      `Missing env vars for execute mode: ${missing.join(", ")}`,
-    );
+    throw new Error(`Missing env vars for execute mode: ${missing.join(", ")}`);
   }
 
   const adminUserId = await lookupAdminUserId(supabase);
@@ -412,8 +408,8 @@ async function main() {
   }
   console.log(`Admin user_id for created_by: ${adminUserId}`);
 
-  await runPhase1(supabase, unverifiedIds, adminUserId);
-  await runPhase2(supabase, unverifiedIds, adminUserId);
+  await runPhase1(supabase, unverifiedIds, adminUserId, orgId);
+  await runPhase2(supabase, unverifiedIds, adminUserId, orgId);
   console.log("");
   console.log("Recovery driver done.");
 }

@@ -189,12 +189,18 @@ export function SkipTracePreflightDialog({
 
       if (mode === "approve" && approveJobId) {
         const result = await callAction(approveSkipTraceJob(approveJobId), {
-          successMessage: "Skip-trace approved - running.",
           fallbackMessage: "Could not approve skip trace",
         });
         if (!result.ok) {
           loadPreflight();
           return;
+        }
+        if (result.data.status === "canceled") {
+          toast.info("Skip-trace canceled - nothing eligible remains.", {
+            description: `${result.data.excluded} propert${result.data.excluded === 1 ? "y was" : "ies were"} excluded before provider submission.`,
+          });
+        } else {
+          toast.success("Skip-trace approved - running.");
         }
       } else {
         const result = await callAction(requestSkipTrace(propertyIds), {

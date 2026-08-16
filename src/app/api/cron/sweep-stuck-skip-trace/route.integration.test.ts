@@ -181,7 +181,7 @@ describe("runSweep — sweep-stuck-skip-trace cron", () => {
     expect(result.unsubmitted_reclaimed).toBe(1);
     expect(start).toHaveBeenCalledTimes(1);
     expect(start).toHaveBeenCalledWith(expect.any(Function), [
-      { jobId: job!.id },
+      { jobId: job!.id, orgId },
     ]);
 
     const { data: after } = await supabase
@@ -215,7 +215,7 @@ describe("runSweep — sweep-stuck-skip-trace cron", () => {
     expect(result.unsubmitted_reclaimed).toBe(1);
     expect(start).toHaveBeenCalledTimes(1);
     expect(start).toHaveBeenCalledWith(expect.any(Function), [
-      { jobId: job!.id },
+      { jobId: job!.id, orgId },
     ]);
 
     const { data: after } = await supabase

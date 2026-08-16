@@ -2,6 +2,7 @@ import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ComponentProps } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { toast } from "sonner";
 
 import { SkipTracePreflightDialog } from "./skip-trace-preflight-dialog";
 import type { SkipTracePreflight } from "@/lib/skip-trace/actions";
@@ -95,6 +96,8 @@ describe("<SkipTracePreflightDialog />", () => {
     preflightSkipTrace.mockReset();
     requestSkipTrace.mockReset();
     verifyPropertiesBulk.mockReset();
+    vi.mocked(toast.success).mockClear();
+    vi.mocked(toast.info).mockClear();
   });
 
   it("shows CASS counts, Tracefy credits, and CASS estimate", async () => {
@@ -114,6 +117,66 @@ describe("<SkipTracePreflightDialog />", () => {
     expectMetric("Not eligible", "2");
     expectMetric("Skip-trace disabled", "0");
     expect(screen.getByText(/\$0\.06/)).toBeInTheDocument();
+  });
+
+  it("does not claim a canceled approval is running", async () => {
+    approveSkipTraceJob.mockResolvedValue({
+      ok: true,
+      data: { jobId: "job-1", status: "canceled", excluded: 3 },
+    });
+    renderDialog(
+      makePreflight({
+        requested: 3,
+        eligible: 3,
+        cassVerified: 3,
+        cassUnverified: 0,
+        notEligible: 0,
+        cassVerificationPropertyIds: [],
+      }),
+      { approveJobId: "job-1" },
+    );
+
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Approve skip-trace" }),
+    );
+
+    await waitFor(() => {
+      expect(toast.info).toHaveBeenCalledWith(
+        "Skip-trace canceled - nothing eligible remains.",
+        expect.objectContaining({ description: expect.stringContaining("3 properties") }),
+      );
+    });
+    expect(toast.success).not.toHaveBeenCalledWith(
+      "Skip-trace approved - running.",
+    );
+  });
+
+  it("reports a queued approval as running", async () => {
+    approveSkipTraceJob.mockResolvedValue({
+      ok: true,
+      data: { jobId: "job-1", status: "queued", excluded: 1 },
+    });
+    renderDialog(
+      makePreflight({
+        requested: 2,
+        eligible: 2,
+        cassVerified: 2,
+        cassUnverified: 0,
+        notEligible: 0,
+        cassVerificationPropertyIds: [],
+      }),
+      { approveJobId: "job-1" },
+    );
+
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Approve skip-trace" }),
+    );
+
+    await waitFor(() => {
+      expect(toast.success).toHaveBeenCalledWith(
+        "Skip-trace approved - running.",
+      );
+    });
   });
 
   it("highlights CASS verification as the primary action for mixed selections", async () => {

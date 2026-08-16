@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createTestClient } from "@tests/integration/client";
 import { resetTenantTables } from "@tests/integration/reset";
@@ -17,7 +17,7 @@ async function getOrgId(): Promise<string> {
   const { data } = await supabase
     .from("organizations")
     .select("id")
-    .limit(1)
+    .eq("name", "BMH Group")
     .single();
   return data!.id;
 }
@@ -46,6 +46,7 @@ async function seedProperty(opts: {
   const { data: property } = await supabase
     .from("properties")
     .insert({
+      org_id: orgId,
       address: opts.address,
       city: opts.city ?? "Kansas City",
       state: opts.state ?? "MO",
@@ -65,7 +66,7 @@ async function createPendingJob(propertyIds: string[]): Promise<string> {
     .insert({
       type: "skip_trace",
       provider: "tracerfy",
-      status: "pending_approval",
+      status: "queued",
       org_id: orgId,
       total_items: propertyIds.length,
       title: "Test skip-trace job",
@@ -80,6 +81,303 @@ describe("runSkipTraceEnrichment (integration, mock provider)", () => {
   beforeEach(async () => {
     await resetTenantTables(supabase);
     MockSkipTraceProvider.reset();
+    vi.restoreAllMocks();
+  });
+
+  it("rechecks a claimed job after a homeowner opts out and makes no provider call", async () => {
+    const { propertyId, contactId } = await seedProperty({
+      address: "1 Provider Boundary Opt Out Ln",
+      withContact: true,
+    });
+    const jobId = await createPendingJob([propertyId]);
+    const organizationId = await getOrgId();
+    const lookup = vi.spyOn(MockSkipTraceProvider.prototype, "lookupSingle");
+    const submit = vi.spyOn(MockSkipTraceProvider.prototype, "submitBatch");
+
+    await runSkipTraceEnrichment(supabase, {
+      jobId,
+      orgId: organizationId,
+      propertyIds: [propertyId],
+      beforeProviderEligibilityCheck: async () => {
+        const { error } = await supabase
+          .from("contacts")
+          .update({ sms_opted_out: true })
+          .eq("id", contactId!);
+        if (error) throw error;
+      },
+    });
+
+    expect(lookup).not.toHaveBeenCalled();
+    expect(submit).not.toHaveBeenCalled();
+    const { data: job } = await supabase
+      .from("jobs")
+      .select("status, total_items, input_params, result_summary")
+      .eq("id", jobId)
+      .single();
+    expect(job?.status).toBe("canceled");
+    expect(job?.total_items).toBe(0);
+    expect(
+      (job?.input_params as { property_ids: string[] }).property_ids,
+    ).toEqual([]);
+    expect(job?.result_summary).toMatchObject({
+      eligibility_exclusions: { total: 1, by_reason: { dnc: 1 } },
+      submit_phase: "canceled_before_provider",
+    });
+  });
+
+  it("refuses a runner job and property from another organization", async () => {
+    const { propertyId } = await seedProperty({
+      address: "1 Wrong Org Runner Ln",
+    });
+    const jobId = await createPendingJob([propertyId]);
+    const lookup = vi.spyOn(MockSkipTraceProvider.prototype, "lookupSingle");
+    const submit = vi.spyOn(MockSkipTraceProvider.prototype, "submitBatch");
+
+    await runSkipTraceEnrichment(supabase, {
+      jobId,
+      orgId: crypto.randomUUID(),
+      propertyIds: [propertyId],
+    });
+
+    expect(lookup).not.toHaveBeenCalled();
+    expect(submit).not.toHaveBeenCalled();
+    const { data: job } = await supabase
+      .from("jobs")
+      .select("status, provider_run_id")
+      .eq("id", jobId)
+      .single();
+    expect(job?.status).toBe("queued");
+    expect(job?.provider_run_id).toBeNull();
+  });
+
+  it("fails closed for an org-A job cross-wired to a valid org-B property", async () => {
+    const { data: orgB, error: orgError } = await supabase
+      .from("organizations")
+      .insert({ name: `Runner Tenant B ${crypto.randomUUID()}` })
+      .select("id")
+      .single();
+    if (orgError || !orgB) throw orgError ?? new Error("org B missing");
+    const { data: property, error: propertyError } = await supabase
+      .from("properties")
+      .insert({
+        org_id: orgB.id,
+        address: "1 Cross Wired Tenant Ln",
+        state: "MO",
+        status: "prospect",
+        cass_status: "verified",
+        skip_trace_disabled: false,
+      })
+      .select("id")
+      .single();
+    if (propertyError || !property) {
+      throw propertyError ?? new Error("org B property missing");
+    }
+    const defaultProperty = await seedProperty({ address: "1 Org A Job Ln" });
+    const jobId = await createPendingJob([defaultProperty.propertyId]);
+    const lookup = vi.spyOn(MockSkipTraceProvider.prototype, "lookupSingle");
+    const submit = vi.spyOn(MockSkipTraceProvider.prototype, "submitBatch");
+
+    const result = await runSkipTraceEnrichment(supabase, {
+      jobId,
+      orgId: orgB.id,
+      propertyIds: [property.id],
+    });
+
+    expect(result).toEqual({ claimed: false });
+    expect(lookup).not.toHaveBeenCalled();
+    expect(submit).not.toHaveBeenCalled();
+    await supabase.from("organizations").delete().eq("id", orgB.id);
+  });
+
+  it("allows only one concurrent direct sync runner to reach the provider", async () => {
+    const { propertyId } = await seedProperty({
+      address: "1 Sync Claim Race Ln",
+    });
+    const jobId = await createPendingJob([propertyId]);
+    const lookup = vi.spyOn(MockSkipTraceProvider.prototype, "lookupSingle");
+    const params = {
+      jobId,
+      orgId: await getOrgId(),
+      propertyIds: [propertyId],
+    };
+
+    const outcomes = await Promise.all([
+      runSkipTraceEnrichment(supabase, params),
+      runSkipTraceEnrichment(supabase, params),
+    ]);
+
+    expect(lookup).toHaveBeenCalledTimes(1);
+    expect(outcomes.filter((outcome) => "claimed" in outcome)).toHaveLength(1);
+  });
+
+  it("canonicalizes duplicate direct-runner ids before claim and processing", async () => {
+    const { propertyId } = await seedProperty({
+      address: "1 Duplicate Runner Ln",
+    });
+    const jobId = await createPendingJob([propertyId]);
+    const lookup = vi.spyOn(MockSkipTraceProvider.prototype, "lookupSingle");
+
+    await runSkipTraceEnrichment(supabase, {
+      jobId,
+      orgId: await getOrgId(),
+      propertyIds: [propertyId, propertyId],
+    });
+
+    expect(lookup).toHaveBeenCalledTimes(1);
+    const { data: job } = await supabase
+      .from("jobs")
+      .select("status, total_items, processed_items, succeeded_items")
+      .eq("id", jobId)
+      .single();
+    expect(job).toMatchObject({
+      status: "completed",
+      total_items: 1,
+      processed_items: 1,
+      succeeded_items: 1,
+    });
+    const { count } = await supabase
+      .from("job_items")
+      .select("id", { count: "exact", head: true })
+      .eq("job_id", jobId)
+      .eq("property_id", propertyId);
+    expect(count).toBe(1);
+  });
+
+  it("allows only one concurrent direct batch runner to reach the provider", async () => {
+    const first = await seedProperty({ address: "1 Batch Claim Race Ln" });
+    const second = await seedProperty({ address: "2 Batch Claim Race Ln" });
+    const propertyIds = [first.propertyId, second.propertyId];
+    const jobId = await createPendingJob(propertyIds);
+    const submit = vi.spyOn(MockSkipTraceProvider.prototype, "submitBatch");
+    const params = { jobId, orgId: await getOrgId(), propertyIds };
+
+    const outcomes = await Promise.all([
+      runSkipTraceEnrichment(supabase, params),
+      runSkipTraceEnrichment(supabase, params),
+    ]);
+
+    expect(submit).toHaveBeenCalledTimes(1);
+    expect(outcomes.filter((outcome) => "claimed" in outcome)).toHaveLength(1);
+  });
+
+  it("audits kill-switch, CASS, and deletion changes made during preparation", async () => {
+    const disabled = await seedProperty({ address: "1 Prep Disabled Ln" });
+    const unverified = await seedProperty({ address: "2 Prep CASS Ln" });
+    const deleted = await seedProperty({ address: "3 Prep Deleted Ln" });
+    const propertyIds = [
+      disabled.propertyId,
+      unverified.propertyId,
+      deleted.propertyId,
+    ];
+    const jobId = await createPendingJob(propertyIds);
+    const lookup = vi.spyOn(MockSkipTraceProvider.prototype, "lookupSingle");
+    const submit = vi.spyOn(MockSkipTraceProvider.prototype, "submitBatch");
+
+    await runSkipTraceEnrichment(supabase, {
+      jobId,
+      orgId: await getOrgId(),
+      propertyIds,
+      beforeProviderEligibilityCheck: async () => {
+        await supabase
+          .from("properties")
+          .update({ skip_trace_disabled: true })
+          .eq("id", disabled.propertyId);
+        await supabase
+          .from("properties")
+          .update({ cass_status: "unverified" })
+          .eq("id", unverified.propertyId);
+        await supabase
+          .from("properties")
+          .update({ deleted_at: new Date().toISOString() })
+          .eq("id", deleted.propertyId);
+      },
+    });
+
+    expect(lookup).not.toHaveBeenCalled();
+    expect(submit).not.toHaveBeenCalled();
+    const { data: job } = await supabase
+      .from("jobs")
+      .select("status, result_summary")
+      .eq("id", jobId)
+      .single();
+    expect(job?.status).toBe("canceled");
+    expect(job?.result_summary).toMatchObject({
+      eligibility_exclusions: {
+        requested: 3,
+        eligible: 0,
+        total: 3,
+        by_reason: {
+          skip_trace_disabled: 1,
+          cass_unverified: 1,
+          not_found_or_wrong_org: 1,
+        },
+      },
+    });
+  });
+
+  it("rechecks a partial batch after its summary checkpoint", async () => {
+    const keepA = await seedProperty({ address: "1 Batch Boundary Keep Ln" });
+    const keepB = await seedProperty({ address: "2 Batch Boundary Keep Ln" });
+    const suppress = await seedProperty({ address: "3 Batch Boundary DNC Ln" });
+    const propertyIds = [
+      keepA.propertyId,
+      keepB.propertyId,
+      suppress.propertyId,
+    ];
+    const jobId = await createPendingJob(propertyIds);
+    const submit = vi.spyOn(MockSkipTraceProvider.prototype, "submitBatch");
+
+    await runSkipTraceEnrichment(supabase, {
+      jobId,
+      orgId: await getOrgId(),
+      propertyIds,
+      beforeBatchProviderEligibilityCheck: async () => {
+        await supabase
+          .from("properties")
+          .update({ outreach_dispo: "dnc" })
+          .eq("id", suppress.propertyId);
+      },
+    });
+
+    expect(submit).toHaveBeenCalledTimes(1);
+    expect(
+      submit.mock.calls[0]?.[0].map((input) => input.propertyId).sort(),
+    ).toEqual([keepA.propertyId, keepB.propertyId].sort());
+  });
+
+  it("makes no batch provider call when all rows suppress after the summary checkpoint", async () => {
+    const first = await seedProperty({
+      address: "1 Batch Boundary All DNC Ln",
+    });
+    const second = await seedProperty({
+      address: "2 Batch Boundary All DNC Ln",
+    });
+    const propertyIds = [first.propertyId, second.propertyId];
+    const jobId = await createPendingJob(propertyIds);
+    const submit = vi.spyOn(MockSkipTraceProvider.prototype, "submitBatch");
+
+    await runSkipTraceEnrichment(supabase, {
+      jobId,
+      orgId: await getOrgId(),
+      propertyIds,
+      beforeBatchProviderEligibilityCheck: async () => {
+        await supabase
+          .from("properties")
+          .update({ outreach_dispo: "dnc" })
+          .in("id", propertyIds);
+      },
+    });
+
+    expect(submit).not.toHaveBeenCalled();
+    const { data: job } = await supabase
+      .from("jobs")
+      .select("status, result_summary")
+      .eq("id", jobId)
+      .single();
+    expect(job?.status).toBe("canceled");
+    expect(job?.result_summary).toMatchObject({
+      eligibility_exclusions: { eligible: 0, total: 2, by_reason: { dnc: 2 } },
+    });
   });
 
   it("sync path: 1 property, hit → contact created + populated, job completes", async () => {
@@ -88,6 +386,7 @@ describe("runSkipTraceEnrichment (integration, mock provider)", () => {
 
     const result = await runSkipTraceEnrichment(supabase, {
       jobId,
+      orgId: await getOrgId(),
       propertyIds: [propertyId],
     });
     expect("pending" in result).toBe(false);
@@ -125,6 +424,7 @@ describe("runSkipTraceEnrichment (integration, mock provider)", () => {
 
     await runSkipTraceEnrichment(supabase, {
       jobId,
+      orgId: await getOrgId(),
       propertyIds: [propertyId],
     });
 
@@ -155,6 +455,7 @@ describe("runSkipTraceEnrichment (integration, mock provider)", () => {
 
     await runSkipTraceEnrichment(supabase, {
       jobId,
+      orgId: await getOrgId(),
       propertyIds: [propertyId],
     });
 
@@ -326,6 +627,7 @@ describe("runSkipTraceEnrichment (integration, mock provider)", () => {
 
     const out = await runSkipTraceEnrichment(supabase, {
       jobId,
+      orgId: await getOrgId(),
       propertyIds: ids,
     });
     expect("pending" in out).toBe(true);
@@ -356,6 +658,7 @@ describe("runSkipTraceEnrichment (integration, mock provider)", () => {
 
     const out = await runSkipTraceEnrichment(supabase, {
       jobId,
+      orgId: await getOrgId(),
       propertyIds: ids,
     });
     expect("pending" in out).toBe(false);
@@ -392,6 +695,7 @@ describe("runSkipTraceEnrichment (integration, mock provider)", () => {
     try {
       const out = await runSkipTraceEnrichment(supabase, {
         jobId,
+        orgId: await getOrgId(),
         propertyIds: ids,
       });
       expect("pending" in out).toBe(false);
@@ -418,7 +722,11 @@ describe("runSkipTraceEnrichment (integration, mock provider)", () => {
     const jobId = await createPendingJob(ids);
 
     // Kick off the async path.
-    await runSkipTraceEnrichment(supabase, { jobId, propertyIds: ids });
+    await runSkipTraceEnrichment(supabase, {
+      jobId,
+      orgId: await getOrgId(),
+      propertyIds: ids,
+    });
 
     // Simulate the provider returning results.
     const fakeResults: SkipTraceResult[] = ids.map((id) => ({
@@ -482,6 +790,7 @@ describe("runSkipTraceEnrichment (integration, mock provider)", () => {
     const jobId = await createPendingJob([propertyId]);
     await runSkipTraceEnrichment(supabase, {
       jobId,
+      orgId: await getOrgId(),
       propertyIds: [propertyId],
     });
     // The 1-miss path runs sync; force the job back to running with a
@@ -540,7 +849,11 @@ describe("runSkipTraceEnrichment (integration, mock provider)", () => {
     ]);
     const ids = props.map((p) => p.propertyId);
     const jobId = await createPendingJob(ids);
-    await runSkipTraceEnrichment(supabase, { jobId, propertyIds: ids });
+    await runSkipTraceEnrichment(supabase, {
+      jobId,
+      orgId: await getOrgId(),
+      propertyIds: ids,
+    });
 
     // Simulate the dead pass: one property already has a success item
     // (must be skipped), one has a TRANSIENT error item (must be retried
@@ -712,6 +1025,7 @@ describe("runSkipTraceEnrichment (integration, mock provider)", () => {
     const job1 = await createPendingJob([propertyId]);
     await runSkipTraceEnrichment(supabase, {
       jobId: job1,
+      orgId: await getOrgId(),
       propertyIds: [propertyId],
     });
 
@@ -719,6 +1033,7 @@ describe("runSkipTraceEnrichment (integration, mock provider)", () => {
     const job2 = await createPendingJob([propertyId]);
     await runSkipTraceEnrichment(supabase, {
       jobId: job2,
+      orgId: await getOrgId(),
       propertyIds: [propertyId],
     });
 
@@ -743,6 +1058,7 @@ describe("runSkipTraceEnrichment (integration, mock provider)", () => {
 
     await runSkipTraceEnrichment(supabase, {
       jobId,
+      orgId: await getOrgId(),
       propertyIds: [propertyId],
     });
 
@@ -773,6 +1089,7 @@ describe("runSkipTraceEnrichment (integration, mock provider)", () => {
     const jobId = await createPendingJob([propertyId]);
     await runSkipTraceEnrichment(supabase, {
       jobId,
+      orgId: await getOrgId(),
       propertyIds: [propertyId],
     });
 
@@ -803,6 +1120,7 @@ describe("runSkipTraceEnrichment (integration, mock provider)", () => {
     const jobId = await createPendingJob([propertyId]);
     await runSkipTraceEnrichment(supabase, {
       jobId,
+      orgId: await getOrgId(),
       propertyIds: [propertyId],
     });
 
@@ -829,6 +1147,7 @@ describe("runSkipTraceEnrichment (integration, mock provider)", () => {
     const jobId = await createPendingJob([propertyId]);
     await runSkipTraceEnrichment(supabase, {
       jobId,
+      orgId: await getOrgId(),
       propertyIds: [propertyId],
     });
 
@@ -871,6 +1190,7 @@ describe("runSkipTraceEnrichment (integration, mock provider)", () => {
       // Async path → submitBatch → map stored on the job.
       const out = await runSkipTraceEnrichment(supabase, {
         jobId,
+        orgId: await getOrgId(),
         propertyIds: ids,
       });
       expect("pending" in out).toBe(true);
@@ -886,7 +1206,9 @@ describe("runSkipTraceEnrichment (integration, mock provider)", () => {
         address_to_property_ids?: Record<string, string[]>;
       } | null;
       expect(submitSummary?.unique_addresses_submitted).toBe(1);
-      const buckets = Object.values(submitSummary?.address_to_property_ids ?? {});
+      const buckets = Object.values(
+        submitSummary?.address_to_property_ids ?? {},
+      );
       expect(buckets).toHaveLength(1);
       expect(buckets[0]).toEqual(expect.arrayContaining(ids));
 
@@ -895,7 +1217,9 @@ describe("runSkipTraceEnrichment (integration, mock provider)", () => {
       // The mock echoes the input address as `matchedAddress`, so
       // finalize fans the row out to BOTH properties.
       const provider = new MockSkipTraceProvider();
-      const results = await provider.pollBatch(jobAfterSubmit!.provider_run_id!);
+      const results = await provider.pollBatch(
+        jobAfterSubmit!.provider_run_id!,
+      );
       expect(results).not.toBeNull();
       expect(results).toHaveLength(1);
 
@@ -941,6 +1265,7 @@ describe("runSkipTraceEnrichment (integration, mock provider)", () => {
 
       await runSkipTraceEnrichment(supabase, {
         jobId,
+        orgId: await getOrgId(),
         propertyIds: ids,
       });
 
@@ -964,7 +1289,12 @@ describe("runSkipTraceEnrichment (integration, mock provider)", () => {
                 firstName: "Returned",
                 lastName: "Owner",
                 phones: [
-                  { number: "+18165550141", type: "Mobile", dnc: false, rank: 1 },
+                  {
+                    number: "+18165550141",
+                    type: "Mobile",
+                    dnc: false,
+                    rank: 1,
+                  },
                 ],
                 emails: [],
                 isOwner: true,
@@ -1019,6 +1349,7 @@ describe("runSkipTraceEnrichment (integration, mock provider)", () => {
 
       await runSkipTraceEnrichment(supabase, {
         jobId: jobIdMulti,
+        orgId: await getOrgId(),
         propertyIds: ids,
       });
 
@@ -1039,7 +1370,12 @@ describe("runSkipTraceEnrichment (integration, mock provider)", () => {
                 firstName: "Real",
                 lastName: "Owner",
                 phones: [
-                  { number: "+18165550161", type: "Mobile", dnc: false, rank: 1 },
+                  {
+                    number: "+18165550161",
+                    type: "Mobile",
+                    dnc: false,
+                    rank: 1,
+                  },
                 ],
                 emails: [],
                 isOwner: true,
@@ -1107,7 +1443,11 @@ describe("runSkipTraceEnrichment (integration, mock provider)", () => {
       const ids = [a.propertyId, b.propertyId];
       const jobId = await createPendingJob(ids);
 
-      await runSkipTraceEnrichment(supabase, { jobId, propertyIds: ids });
+      await runSkipTraceEnrichment(supabase, {
+        jobId,
+        orgId: await getOrgId(),
+        propertyIds: ids,
+      });
 
       // Finalize with only the FIRST row; the verified b is silently absent.
       await finalizeSkipTraceFromBatch(supabase, {
@@ -1126,7 +1466,12 @@ describe("runSkipTraceEnrichment (integration, mock provider)", () => {
                 firstName: "Returned",
                 lastName: "Owner",
                 phones: [
-                  { number: "+18165550181", type: "Mobile", dnc: false, rank: 1 },
+                  {
+                    number: "+18165550181",
+                    type: "Mobile",
+                    dnc: false,
+                    rank: 1,
+                  },
                 ],
                 emails: [],
                 isOwner: true,
@@ -1171,7 +1516,11 @@ describe("runSkipTraceEnrichment (integration, mock provider)", () => {
       const ids = [a.propertyId, b.propertyId];
       const jobId = await createPendingJob(ids);
 
-      await runSkipTraceEnrichment(supabase, { jobId, propertyIds: ids });
+      await runSkipTraceEnrichment(supabase, {
+        jobId,
+        orgId: await getOrgId(),
+        propertyIds: ids,
+      });
 
       await finalizeSkipTraceFromBatch(supabase, {
         jobId,
@@ -1189,7 +1538,12 @@ describe("runSkipTraceEnrichment (integration, mock provider)", () => {
                 firstName: "Real",
                 lastName: "Owner",
                 phones: [
-                  { number: "+18165550182", type: "Mobile", dnc: false, rank: 1 },
+                  {
+                    number: "+18165550182",
+                    type: "Mobile",
+                    dnc: false,
+                    rank: 1,
+                  },
                 ],
                 emails: [],
                 isOwner: true,
@@ -1219,9 +1573,9 @@ describe("runSkipTraceEnrichment (integration, mock provider)", () => {
         .select("address_normalized")
         .eq("provider", "mock");
       const cacheAddrs = (cacheRows ?? []).map((r) => r.address_normalized);
-      expect(
-        cacheAddrs.some((a) => a.includes("20 no-data unverified")),
-      ).toBe(false);
+      expect(cacheAddrs.some((a) => a.includes("20 no-data unverified"))).toBe(
+        false,
+      );
     });
 
     it("regression: successful match still writes status=success and no error_class", async () => {
@@ -1230,6 +1584,7 @@ describe("runSkipTraceEnrichment (integration, mock provider)", () => {
 
       await runSkipTraceEnrichment(supabase, {
         jobId,
+        orgId: await getOrgId(),
         propertyIds: [propertyId],
       });
 
