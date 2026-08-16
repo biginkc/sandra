@@ -4,6 +4,7 @@ import { after } from "next/server";
 import { start } from "workflow/api";
 
 import { createClient } from "@/lib/supabase/server";
+import { createAdminClient } from "@/lib/supabase/admin";
 import { errFromUnknown, ok, type Result } from "@/lib/errors/result";
 import { reportError } from "@/lib/errors/report";
 import {
@@ -96,6 +97,39 @@ export type CreateImportJobParams = {
 };
 
 export type CreateImportJobResult = { jobId: string };
+
+async function checkpointWorkflowStartFailure(
+  jobId: string,
+  error: unknown,
+  errorClass: "configuration" | "transient",
+  messagePrefix: string,
+): Promise<void> {
+  const supabase = createAdminClient();
+  const { data: checkpoint, error: checkpointError } = await supabase
+    .from("jobs")
+    .update({
+      status: "failed",
+      error_class: errorClass,
+      error_message:
+        `${messagePrefix} ` +
+        (error instanceof Error ? error.message : String(error)),
+      completed_at: new Date().toISOString(),
+    })
+    .eq("id", jobId)
+    .eq("status", "queued")
+    .select("id")
+    .maybeSingle();
+  if (checkpointError) {
+    throw new Error(
+      `workflow-start failure checkpoint: ${checkpointError.message}`,
+    );
+  }
+  if (!checkpoint) {
+    throw new Error(
+      "workflow-start failure checkpoint: queued job was not updated",
+    );
+  }
+}
 
 export async function createImportJob(
   params: CreateImportJobParams,
@@ -426,17 +460,12 @@ export async function createImportJob(
           tags: { surface: "create_import_job_workflow_start" },
           extra: { jobId: jobRow.id },
         });
-        await supabase
-          .from("jobs")
-          .update({
-            status: "failed",
-            error_class: "configuration",
-            error_message:
-              "Workflow runner failed to start. " +
-              (e instanceof Error ? e.message : String(e)),
-            completed_at: new Date().toISOString(),
-          })
-          .eq("id", jobRow.id);
+        await checkpointWorkflowStartFailure(
+          jobRow.id,
+          e,
+          "configuration",
+          "Workflow runner failed to start.",
+        );
       }
     });
 
@@ -911,15 +940,12 @@ export async function retryCsvImportJob(
         listResolutionError: typeof input.listResolutionError === "string" ? input.listResolutionError : null,
       }]);
     } catch (startError) {
-      await supabase
-        .from("jobs")
-        .update({
-          status: "failed",
-          error_class: "transient",
-          error_message: "The retry could not be queued. No rows were replayed.",
-          completed_at: new Date().toISOString(),
-        })
-        .eq("id", jobId);
+      await checkpointWorkflowStartFailure(
+        jobId,
+        startError,
+        "transient",
+        "The retry could not be queued. No rows were replayed.",
+      );
       throw startError;
     }
     return ok({ jobId });

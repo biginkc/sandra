@@ -547,6 +547,7 @@ async function ingestRow(
       .upsert(
         {
           contact_id: homeownerContactId,
+          org_id: orgId,
           mailing_address: normalizeDisplayAddress(n.homeowner_mailing_address as string | null),
           mailing_city: normalizeDisplayAddress(n.homeowner_mailing_city as string | null),
           mailing_state: (n.homeowner_mailing_state as string | null) ?? null,
@@ -579,6 +580,7 @@ async function ingestRow(
     const { error: agentDetailsError } = await supabase.from("agent_details").upsert(
       {
         contact_id: agentContactId,
+        org_id: orgId,
         brokerage: (n.agent_brokerage as string | null) ?? null,
         license_number: (n.agent_license_number as string | null) ?? null,
       },
@@ -611,16 +613,20 @@ async function ingestRow(
     // imported earlier. NULL-only fill: a property that already has a
     // linked contact is never rewired by an import.
     const isDncRow = n.homeowner_do_not_contact === true;
+    const patch: Partial<PropertyInsert> = {
+      source_import_id: csvImportId,
+      source_imported_at: new Date().toISOString(),
+    };
     if (homeownerContactId || agentContactId || isDncRow) {
       const { data: existing, error: existingError } = await supabase
         .from("properties")
         .select("homeowner_contact_id, agent_contact_id")
         .eq("id", existingId)
+        .eq("org_id", orgId)
         .single();
       if (existingError) {
         throw new Error(`dedup property lookup: ${existingError.message}`);
       }
-      const patch: Partial<PropertyInsert> = {};
       if (homeownerContactId && !existing?.homeowner_contact_id) {
         patch.homeowner_contact_id = homeownerContactId;
       }
@@ -628,19 +634,16 @@ async function ingestRow(
         patch.agent_contact_id = agentContactId;
       }
       if (isDncRow) patch.outreach_dispo = "dnc";
-      patch.source_import_id = csvImportId;
-      patch.source_imported_at = new Date().toISOString();
-      if (Object.keys(patch).length > 0) {
-        const { error: patchError } = await supabase
-          .from("properties")
-          .update(patch)
-          .eq("id", existingId);
-        if (patchError) {
-          throw new Error(
-            `contact attach on dedup: ${patchError.message}`,
-          );
-        }
-      }
+    }
+    const { error: patchError } = await supabase
+      .from("properties")
+      .update(patch)
+      .eq("id", existingId)
+      .eq("org_id", orgId);
+    if (patchError) {
+      throw new Error(
+        `contact attach/provenance on dedup: ${patchError.message}`,
+      );
     }
     return {
       propertyId: existingId,

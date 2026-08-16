@@ -21,6 +21,7 @@
     "verify:hugo-rollback": "SANDRA_HUGO_VERIFY_LANE=rollback-roundtrip node scripts/verify-hugo-access-migrations.mjs",
     "verify:migration-safety-unit": "node --test scripts/check-migration-safety.test.mjs",
     "verify:migration-safety-rehearsal": "LC_ALL=C node scripts/check-migration-safety.rehearsal.mjs",
+    "verify:csv-import-migration": "LC_ALL=C node scripts/rehearse-csv-import-truthfulness.mjs",
     "verify:migrate-prod-ref-guard": "bash scripts/assert-ref-is-main-or-ancestor.test.sh",
     "typecheck": "tsc --noEmit",
     "verify": "npm run typecheck && npm run test && npm run test:rtl",

@@ -41,6 +41,13 @@ export type Database = {
         }
         Relationships: [
           {
+            foreignKeyName: "agent_details_contact_org_fkey"
+            columns: ["contact_id", "org_id"]
+            isOneToOne: true
+            referencedRelation: "contacts"
+            referencedColumns: ["id", "org_id"]
+          },
+          {
             foreignKeyName: "agent_details_contact_id_fkey"
             columns: ["contact_id"]
             isOneToOne: true
@@ -652,6 +659,13 @@ export type Database = {
         }
         Relationships: [
           {
+            foreignKeyName: "consent_events_contact_org_fkey"
+            columns: ["contact_id", "org_id"]
+            isOneToOne: false
+            referencedRelation: "contacts"
+            referencedColumns: ["id", "org_id"]
+          },
+          {
             foreignKeyName: "consent_events_contact_id_fkey"
             columns: ["contact_id"]
             isOneToOne: false
@@ -1038,6 +1052,13 @@ export type Database = {
           removed_at?: string | null
         }
         Relationships: [
+          {
+            foreignKeyName: "homeowner_details_contact_org_fkey"
+            columns: ["contact_id", "org_id"]
+            isOneToOne: true
+            referencedRelation: "contacts"
+            referencedColumns: ["id", "org_id"]
+          },
           {
             foreignKeyName: "homeowner_details_contact_id_fkey"
             columns: ["contact_id"]

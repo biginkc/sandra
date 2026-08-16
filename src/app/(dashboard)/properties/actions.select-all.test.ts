@@ -8,7 +8,7 @@ type RecordedQuery = {
   rows: unknown[];
 };
 
-const { createClientMock, recorded } = vi.hoisted(() => {
+const { createClientMock, recorded, resolveProspectEligibilityMock } = vi.hoisted(() => {
   const recorded: RecordedQuery = {
     selectArg: null,
     calls: [],
@@ -58,6 +58,18 @@ const { createClientMock, recorded } = vi.hoisted(() => {
 
   return {
     recorded,
+    resolveProspectEligibilityMock: vi.fn(async (_client, _ids: string[]) => {
+      const eligibleIds = (recorded.rows as Array<{
+        id: string;
+        homeowner?: Array<{ do_not_contact: boolean }>;
+      }>).filter((row) => !row.homeowner?.[0]?.do_not_contact).map((row) => row.id);
+      return {
+        eligibleIds,
+        exclusions: [],
+        dncLockedCount: recorded.rows.length - eligibleIds.length,
+        skipTraceDisabledCount: 0,
+      };
+    }),
     createClientMock: vi.fn(async () => ({
       from: vi.fn(() => query),
     })),
@@ -66,6 +78,9 @@ const { createClientMock, recorded } = vi.hoisted(() => {
 
 vi.mock("@/lib/supabase/server", () => ({
   createClient: createClientMock,
+}));
+vi.mock("@/lib/prospects/eligibility", () => ({
+  resolveProspectEligibility: resolveProspectEligibilityMock,
 }));
 
 import { getAllMatchingProspectIds } from "./actions";
@@ -101,7 +116,7 @@ describe("getAllMatchingProspectIds", () => {
 
     expect(result.ok).toBe(true);
     expect(recorded.selectArg).toBe(
-      "id, source_import_id, source_imported_at, outreach_dispo, homeowner:contacts!properties_homeowner_contact_id_fkey(phone_1, phone_2, phone_3, do_not_contact, sms_opted_out), tag_filter:property_tags!inner(tag_id), stack_filter:property_stack_counts!inner(stack_count)",
+      "id, source_import_id, source_imported_at, tag_filter:property_tags!inner(tag_id), stack_filter:property_stack_counts!inner(stack_count)",
     );
     expect(recorded.calls).toContain('in(tag_filter.tag_id,["tag-1"])');
     expect(recorded.calls).toContain("gte(stack_filter.stack_count,1)");

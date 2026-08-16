@@ -135,7 +135,7 @@ export type EnrollBatchResult = {
  */
 export async function enrollJobBatch(
   supabase: SupabaseClient<Database>,
-  args: { jobId: string; sequenceId: string },
+  args: { jobId: string; sequenceId: string; orgId: string },
 ): Promise<EnrollBatchResult> {
   const { data: items, error: itemsError } = await supabase
     .from("job_items")
@@ -150,6 +150,7 @@ export async function enrollJobBatch(
     .filter((i) => !i.compliance_locked)
     .map((i) => i.property_id)
       .filter((id): id is string => id !== null),
+    args.orgId,
   );
 
   let enrolled = 0;
@@ -498,6 +499,7 @@ async function triggerCassStep(args: {
   parentJobId: string;
   relatedImportId: string;
   createdBy: string | null;
+  orgId: string;
 }): Promise<{
   status: "completed" | "pending" | "failed";
   eligible: number;
@@ -514,6 +516,7 @@ async function triggerCassStep(args: {
       args.parentJobId,
       await selectCassEligibleProperties(supabase, args.parentJobId),
     ),
+    args.orgId,
   );
 
   if (propertyIds.length === 0) return { status: "completed", eligible: 0 };
@@ -557,6 +560,7 @@ async function triggerCassStep(args: {
  */
 async function recordConsentStep(args: {
   jobId: string;
+  orgId: string;
 }): Promise<void> {
   "use step";
 
@@ -575,6 +579,7 @@ async function recordConsentStep(args: {
     .filter((i) => !i.compliance_locked)
     .map((i) => i.property_id)
       .filter((id): id is string => id !== null),
+    args.orgId,
   );
 
   if (propertyIds.length === 0) return;
@@ -583,6 +588,7 @@ async function recordConsentStep(args: {
     .from("properties")
     .select("homeowner_contact_id")
     .in("id", propertyIds)
+    .eq("org_id", args.orgId)
     .not("homeowner_contact_id", "is", null);
   if (propertyError) throw new Error(`consent property lookup: ${propertyError.message}`);
 
@@ -598,6 +604,7 @@ async function recordConsentStep(args: {
     .from("consent_events")
     .select("contact_id")
     .in("contact_id", contactIds)
+    .eq("org_id", args.orgId)
     .in("event_type", ["opt_out", "provider_auto_opt_out"]);
   if (optedOutError) throw new Error(`consent opt-out lookup: ${optedOutError.message}`);
 
@@ -610,6 +617,7 @@ async function recordConsentStep(args: {
   const { error: consentError } = await supabase.from("consent_events").insert(
     eligible.map((contactId) => ({
       contact_id: contactId,
+      org_id: args.orgId,
       channel: "sms",
       event_type: "opt_in_marketing_written",
       source: `import_attestation:job:${args.jobId}`,
@@ -622,6 +630,7 @@ async function recordConsentStep(args: {
 async function selectNonDncPropertyIds(
   supabase: SupabaseClient<Database>,
   propertyIds: string[],
+  orgId: string,
 ): Promise<string[]> {
   if (propertyIds.length === 0) return [];
   const { data, error } = await supabase
@@ -629,7 +638,8 @@ async function selectNonDncPropertyIds(
     .select(
       "id, outreach_dispo, homeowner:contacts!properties_homeowner_contact_id_fkey(phone_1, phone_2, phone_3, do_not_contact, sms_opted_out)",
     )
-    .in("id", propertyIds);
+    .in("id", propertyIds)
+    .eq("org_id", orgId);
   if (error) throw new Error(`DNC eligibility check: ${error.message}`);
 
   const phones = (data ?? []).flatMap((property) => {
@@ -646,6 +656,8 @@ async function selectNonDncPropertyIds(
     ? await supabase
         .from("sms_phone_suppressions")
         .select("phone_e164")
+        .eq("org_id", orgId)
+        .eq("channel", "sms")
         .in("phone_e164", phones)
     : { data: [], error: null };
   if (suppressionError) {
@@ -693,6 +705,7 @@ async function excludeComplianceLockedJobProperties(
 async function enrollInSequenceStep(args: {
   jobId: string;
   sequenceId: string;
+  orgId: string;
 }): Promise<EnrollBatchResult> {
   "use step";
 
@@ -925,6 +938,7 @@ export async function csvImportWorkflow(
         parentJobId: params.jobId,
         relatedImportId: params.csvImportId,
         createdBy: params.userId,
+        orgId: params.orgId,
       });
     } catch (error) {
       sideEffects.cass = {
@@ -936,7 +950,7 @@ export async function csvImportWorkflow(
 
   if (params.smsConsent && priorSideEffects.consent?.status !== "completed") {
     try {
-      await recordConsentStep({ jobId: params.jobId });
+      await recordConsentStep({ jobId: params.jobId, orgId: params.orgId });
       sideEffects.consent = { status: "completed" };
     } catch (error) {
       sideEffects.consent = {
@@ -950,6 +964,7 @@ export async function csvImportWorkflow(
     const enrollment = await enrollInSequenceStep({
       jobId: params.jobId,
       sequenceId: params.sequenceId,
+      orgId: params.orgId,
     });
     sideEffects.sequenceEnrollment = {
       status: enrollment.failed > 0 ? "failed" : "completed",

@@ -40,6 +40,7 @@ const PAGE_SIZE = 50;
 
 type PropertyQueryRow = {
   id: string;
+  org_id: string;
   address: string;
   city: string | null;
   state: string;
@@ -159,7 +160,7 @@ export default async function PropertiesPage({
     );
     const propertyListSelect = filterSelectFragment(blockStack);
     const propertiesSelect = [
-      "id, address, city, state, zip, market, cass_status, is_vacant, created_at, outreach_dispo, source_import_id, source_imported_at, homeowner:contacts!properties_homeowner_contact_id_fkey(phone_1, phone_2, phone_3, do_not_contact, sms_opted_out)",
+      "id, org_id, address, city, state, zip, market, cass_status, is_vacant, created_at, outreach_dispo, source_import_id, source_imported_at, homeowner:contacts!properties_homeowner_contact_id_fkey(phone_1, phone_2, phone_3, do_not_contact, sms_opted_out)",
       propertyListSelect,
     ]
       .filter(Boolean)
@@ -256,7 +257,11 @@ export default async function PropertiesPage({
       : [];
   });
   const { data: durableSuppressions, error: durableSuppressionError } = visiblePhones.length
-    ? await supabase.from("sms_phone_suppressions").select("phone_e164").in("phone_e164", visiblePhones)
+    ? await supabase
+        .from("sms_phone_suppressions")
+        .select("org_id, phone_e164")
+        .eq("channel", "sms")
+        .in("phone_e164", visiblePhones)
     : { data: [], error: null };
   if (durableSuppressionError) {
     // Fail closed: rendering a DNC row with a selectable checkbox because
@@ -264,7 +269,9 @@ export default async function PropertiesPage({
     // error boundary and asking the operator to retry.
     throw new Error(`Could not verify Prospects DNC locks: ${durableSuppressionError.message}`);
   }
-  const suppressedPhones = new Set((durableSuppressions ?? []).map((row) => row.phone_e164));
+  const suppressedPhones = new Set(
+    (durableSuppressions ?? []).map((row) => `${row.org_id}:${row.phone_e164}`),
+  );
 
   const total = count ?? 0;
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
@@ -302,7 +309,7 @@ export default async function PropertiesPage({
     const latest = latestByPropertyId.get(p.id) ?? null;
     const homeowner = Array.isArray(p.homeowner) ? p.homeowner[0] : p.homeowner;
     const durablePhoneSuppression = [homeowner?.phone_1, homeowner?.phone_2, homeowner?.phone_3]
-      .some((phone) => !!phone && suppressedPhones.has(phone));
+      .some((phone) => !!phone && suppressedPhones.has(`${p.org_id}:${phone}`));
     const suppression = durablePhoneSuppression
       ? { suppressed: true as const, reason: "Phone is in the durable suppression registry." }
       : evaluateSuppression({

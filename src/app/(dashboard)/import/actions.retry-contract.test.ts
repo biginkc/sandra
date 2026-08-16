@@ -22,4 +22,14 @@ describe("CSV import durable retry contract", () => {
     expect(listRetry).toContain("listResolutionError: null");
     expect(listRetry).toContain("input_params:");
   });
+
+  it("checkpoints start failures only while a job is still queued", () => {
+    const checkpoint = source.slice(
+      source.indexOf("async function checkpointWorkflowStartFailure"),
+      source.indexOf("export async function createImportJob"),
+    );
+    expect(checkpoint).toContain('.eq("status", "queued")');
+    expect(checkpoint).toContain('.select("id")');
+    expect(checkpoint).toContain("queued job was not updated");
+  });
 });

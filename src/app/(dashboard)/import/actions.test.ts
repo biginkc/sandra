@@ -3,11 +3,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // Mocks must be hoisted so the module under test sees the mocks at
 // import time (not after vi.mock has been registered).
 const { createClient } = vi.hoisted(() => ({ createClient: vi.fn() }));
+const { createAdminClient } = vi.hoisted(() => ({ createAdminClient: vi.fn() }));
 const { after } = vi.hoisted(() => ({ after: vi.fn() }));
 const { start } = vi.hoisted(() => ({ start: vi.fn() }));
 
 vi.mock("@/lib/supabase/server", () => ({
   createClient,
+}));
+
+vi.mock("@/lib/supabase/admin", () => ({
+  createAdminClient,
 }));
 
 vi.mock("next/server", () => ({
@@ -85,7 +90,7 @@ function makeBuilder(record: CallRecord): Record<string, unknown> {
 
   builder.select = (...args: unknown[]) => {
     record.selectArgs = args;
-    record.op = record.op === "insert" ? "insert" : "select";
+    record.op = record.op === "insert" || record.op === "update" ? record.op : "select";
     return builder;
   };
   builder.insert = (payload: unknown) => {
@@ -134,6 +139,7 @@ function makeSupabase() {
 
 beforeEach(() => {
   createClient.mockReset();
+  createAdminClient.mockReset();
   after.mockReset();
   start.mockReset();
   responseQueue = [];
@@ -346,5 +352,56 @@ describe("createImportJob — T-02-03-01 mitigation", () => {
     const wfPayload = startArgs[0];
     expect(wfPayload.market).toBe("Buchanan County MO");
     expect(wfPayload.countyId).toBe(baseParams.countyId);
+  });
+
+  it("persists an explicit failed checkpoint when workflow startup fails", async () => {
+    responseQueue = [
+      membershipResponse,
+      { data: { id: baseParams.countyId, market: "Buchanan County MO" }, error: null },
+      { data: { id: "import-1", org_id: "org-1" }, error: null },
+      { data: { id: "job-1" }, error: null },
+      { data: { id: "job-1" }, error: null }, // failed job checkpoint
+    ];
+    const supabase = makeSupabase();
+    createClient.mockResolvedValue(supabase);
+    createAdminClient.mockReturnValue(supabase);
+    start.mockRejectedValue(new Error("workflow unavailable"));
+
+    const result = await createImportJob(baseParams);
+    expect(result.ok).toBe(true);
+    const callback = after.mock.calls[0][0] as () => Promise<void>;
+    await expect(callback()).resolves.toBeUndefined();
+
+    const checkpoint = calls.find(
+      (call) => call.table === "jobs" && call.op === "update",
+    );
+    expect(checkpoint?.insertPayload).toMatchObject({
+      status: "failed",
+      error_class: "configuration",
+    });
+    expect(checkpoint?.filters).toContainEqual({
+      op: "eq",
+      args: ["status", "queued"],
+    });
+  });
+
+  it("surfaces a checkpoint-write failure instead of leaving startup failure silent", async () => {
+    responseQueue = [
+      membershipResponse,
+      { data: { id: baseParams.countyId, market: "Buchanan County MO" }, error: null },
+      { data: { id: "import-1", org_id: "org-1" }, error: null },
+      { data: { id: "job-1" }, error: null },
+      { data: null, error: { message: "checkpoint unavailable" } },
+    ];
+    const supabase = makeSupabase();
+    createClient.mockResolvedValue(supabase);
+    createAdminClient.mockReturnValue(supabase);
+    start.mockRejectedValue(new Error("workflow unavailable"));
+
+    await createImportJob(baseParams);
+    const callback = after.mock.calls[0][0] as () => Promise<void>;
+    await expect(callback()).rejects.toThrow(
+      "workflow-start failure checkpoint: checkpoint unavailable",
+    );
   });
 });

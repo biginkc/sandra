@@ -38,4 +38,15 @@ describe("CSV import terminal truthfulness", () => {
       sideEffects: { listAssignment: { status: "completed" } },
     })).toBe("partially_completed");
   });
+
+  it("reports partial, not failed, when accepted existing rows finish but a side effect fails", () => {
+    expect(importTerminalStatus({
+      totalRows: 3,
+      processedRows: 3,
+      succeeded: 0,
+      skipped: 3,
+      failed: 0,
+      sideEffects: { listAssignment: { status: "failed" } },
+    })).toBe("partially_completed");
+  });
 });

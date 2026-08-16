@@ -12,8 +12,14 @@ import {
   type BulkOutcome,
 } from "../leads/actions";
 import { ok, type Result } from "@/lib/errors/result";
-import { evaluateSuppression } from "@/lib/messaging/suppression";
 import type { FilterBlock } from "@/lib/prospects/filter-schema";
+import { resolveProspectEligibility } from "@/lib/prospects/eligibility";
+import {
+  preflightSkipTrace as preflightSkipTraceUnsafe,
+  requestSkipTrace as requestSkipTraceUnsafe,
+  type SkipTraceOutcome,
+  type SkipTracePreflight,
+} from "@/lib/skip-trace/actions";
 import { createClient } from "@/lib/supabase/server";
 
 import { getAllMatchingProspectIds } from "./actions";
@@ -22,8 +28,6 @@ export type { BulkOutcome } from "../leads/actions";
 
 const DNC_LOCK_MESSAGE =
   "Prospect is locked Do Not Contact and cannot be changed in bulk.";
-const LOOKUP_CHUNK = 500;
-
 /**
  * Re-resolve suppression on the server immediately before a Prospects bulk
  * mutation. The missing checkbox is only the visual affordance; this is the
@@ -33,73 +37,18 @@ async function partitionDncLockedPropertyIds(propertyIds: string[]): Promise<{
   eligible: string[];
   locked: string[];
 }> {
-  const uniqueIds = [...new Set(propertyIds)];
-  if (uniqueIds.length === 0) return { eligible: [], locked: [] };
-
   const supabase = await createClient();
-  const rows: Array<{
-    id: string;
-    outreach_dispo: string | null;
-    homeowner: Array<{
-      phone_1: string | null;
-      phone_2: string | null;
-      phone_3: string | null;
-      do_not_contact: boolean;
-      sms_opted_out: boolean;
-    }> | null;
-  }> = [];
-
-  for (let offset = 0; offset < uniqueIds.length; offset += LOOKUP_CHUNK) {
-    const { data, error } = await supabase
-      .from("properties")
-      .select(
-        "id, outreach_dispo, homeowner:contacts!properties_homeowner_contact_id_fkey(phone_1, phone_2, phone_3, do_not_contact, sms_opted_out)",
-      )
-      .in("id", uniqueIds.slice(offset, offset + LOOKUP_CHUNK));
-    if (error) throw new Error(`DNC eligibility check failed: ${error.message}`);
-    rows.push(...((data ?? []) as unknown as typeof rows));
-  }
-
-  const phones = rows.flatMap((row) => {
-    const homeowner = Array.isArray(row.homeowner) ? row.homeowner[0] : row.homeowner;
-    return homeowner
-      ? [homeowner.phone_1, homeowner.phone_2, homeowner.phone_3].filter(
-          (phone): phone is string => !!phone,
-        )
-      : [];
-  });
-  const suppressedPhones = new Set<string>();
-  for (let offset = 0; offset < phones.length; offset += LOOKUP_CHUNK) {
-    const { data, error } = await supabase
-      .from("sms_phone_suppressions")
-      .select("phone_e164")
-      .in("phone_e164", phones.slice(offset, offset + LOOKUP_CHUNK));
-    if (error) throw new Error(`DNC suppression check failed: ${error.message}`);
-    for (const row of data ?? []) suppressedPhones.add(row.phone_e164);
-  }
-
-  const rowById = new Map(rows.map((row) => [row.id, row]));
-  const eligible: string[] = [];
-  const locked: string[] = [];
-  for (const id of uniqueIds) {
-    const row = rowById.get(id);
-    if (!row) continue; // RLS-invisible/not-found IDs never reach the mutation.
-    const homeowner = Array.isArray(row.homeowner) ? row.homeowner[0] : row.homeowner;
-    const durableSuppression = [
-      homeowner?.phone_1,
-      homeowner?.phone_2,
-      homeowner?.phone_3,
-    ].some((phone) => !!phone && suppressedPhones.has(phone));
-    const suppressed =
-      durableSuppression ||
-      evaluateSuppression({
-        outreachDispo: row.outreach_dispo,
-        doNotContact: homeowner?.do_not_contact,
-        smsOptedOut: homeowner?.sms_opted_out,
-      }).suppressed;
-    (suppressed ? locked : eligible).push(id);
-  }
-  return { eligible, locked };
+  const resolved = await resolveProspectEligibility(
+    supabase,
+    propertyIds,
+    "selection",
+  );
+  return {
+    eligible: resolved.eligibleIds,
+    locked: resolved.exclusions
+      .filter((item) => item.reason === "dnc")
+      .map((item) => item.propertyId),
+  };
 }
 
 function addLockedFailures(outcome: BulkOutcome, locked: string[]): BulkOutcome {
@@ -180,6 +129,83 @@ export async function verifyPropertiesBulk(propertyIds: string[]) {
   return result.ok
     ? ok({ ...result.data, eligibleCount: eligible.length, lockedCount: locked.length })
     : result;
+}
+
+export type ProspectSkipTracePreflight = SkipTracePreflight & {
+  dncLockedSkipped: number;
+};
+
+export async function preflightProspectSkipTrace(
+  propertyIds: string[],
+): Promise<Result<ProspectSkipTracePreflight>> {
+  const supabase = await createClient();
+  const resolved = await resolveProspectEligibility(
+    supabase,
+    propertyIds,
+    "skip_trace",
+  );
+  if (resolved.eligibleIds.length === 0) {
+    return ok({
+      requested: new Set(propertyIds).size,
+      eligible: 0,
+      cassVerified: 0,
+      cassUnverified: 0,
+      notEligible: new Set(propertyIds).size,
+      killSwitchSkipped: resolved.skipTraceDisabledCount,
+      dncLockedSkipped: resolved.dncLockedCount,
+      tracefyCreditsRequired: 0,
+      tracefyCreditsAvailable: null,
+      tracefyCreditStatus: "sufficient",
+      canLaunchSkipTrace: false,
+      estimatedCassVerificationCostUsd: 0,
+      cassVerificationPropertyIds: [],
+    });
+  }
+  const result = await preflightSkipTraceUnsafe(resolved.eligibleIds);
+  if (!result.ok) return result;
+  return ok({
+    ...result.data,
+    requested: new Set(propertyIds).size,
+    notEligible: result.data.notEligible + resolved.exclusions.length,
+    killSwitchSkipped:
+      result.data.killSwitchSkipped + resolved.skipTraceDisabledCount,
+    dncLockedSkipped: resolved.dncLockedCount,
+  });
+}
+
+export type ProspectSkipTraceOutcome = SkipTraceOutcome & {
+  dncLockedSkipped: number;
+};
+
+export async function requestProspectSkipTrace(
+  propertyIds: string[],
+): Promise<Result<ProspectSkipTraceOutcome>> {
+  const supabase = await createClient();
+  const resolved = await resolveProspectEligibility(
+    supabase,
+    propertyIds,
+    "skip_trace",
+  );
+  if (resolved.eligibleIds.length === 0) {
+    return ok({
+      jobId: null,
+      status: "none_eligible",
+      requested: new Set(propertyIds).size,
+      eligible: 0,
+      cassSkipped: 0,
+      killSwitchSkipped: resolved.skipTraceDisabledCount,
+      dncLockedSkipped: resolved.dncLockedCount,
+    });
+  }
+  const result = await requestSkipTraceUnsafe(resolved.eligibleIds);
+  if (!result.ok) return result;
+  return ok({
+    ...result.data,
+    requested: new Set(propertyIds).size,
+    killSwitchSkipped:
+      result.data.killSwitchSkipped + resolved.skipTraceDisabledCount,
+    dncLockedSkipped: resolved.dncLockedCount,
+  });
 }
 
 export async function createAndApplyCustomTagBulk(params: {

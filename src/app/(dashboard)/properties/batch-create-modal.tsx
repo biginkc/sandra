@@ -36,6 +36,7 @@ export type BatchCreateModalProps = {
     imported?: "today" | null;
   };
   totalCount: number;
+  lockedExcludedCount?: number;
 };
 
 const EMPTY_BLOCK_STACK: FilterBlock[] = [];
@@ -60,6 +61,7 @@ export function BatchCreateModal({
   selectedIds,
   filterArgs,
   totalCount,
+  lockedExcludedCount = 0,
 }: BatchCreateModalProps) {
   const [title, setTitle] = useState("");
   const [counts, setCounts] = useState<Counts | null>(null);
@@ -181,9 +183,14 @@ export function BatchCreateModal({
                 </p>
                 <p className="text-muted-foreground text-xs">
                   {mode === "filters"
-                    ? `${totalCount.toLocaleString()} matching current filters`
+                    ? `${totalCount.toLocaleString()} eligible from current filters`
                     : `${(selectedIds?.length ?? 0).toLocaleString()} selected`}
                 </p>
+                {lockedExcludedCount > 0 && (
+                  <p className="text-muted-foreground text-xs">
+                    {lockedExcludedCount.toLocaleString()} DNC locked and excluded
+                  </p>
+                )}
               </div>
               <span className="rounded-md border bg-background px-2 py-1 font-mono text-xs">
                 {mode === "filters" ? "Filters" : mode === "ids" ? "IDs" : "No selection"}

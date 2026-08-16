@@ -48,6 +48,25 @@ vi.mock("./dnc-safe-actions", () => ({
   removePropertiesFromListBulk: vi.fn(),
   setMotivationBulk: vi.fn(),
   verifyPropertiesBulk: vi.fn(),
+  preflightProspectSkipTrace: vi.fn(async () => ({
+    ok: true,
+    data: {
+      requested: 1,
+      eligible: 1,
+      cassVerified: 1,
+      cassUnverified: 0,
+      notEligible: 0,
+      killSwitchSkipped: 0,
+      tracefyCreditsRequired: 5,
+      tracefyCreditsAvailable: 100,
+      tracefyCreditStatus: "sufficient",
+      canLaunchSkipTrace: true,
+      estimatedCassVerificationCostUsd: 0,
+      cassVerificationPropertyIds: [],
+      dncLockedSkipped: 0,
+    },
+  })),
+  requestProspectSkipTrace: vi.fn(),
 }));
 
 vi.mock("@/lib/skip-trace/actions", () => ({
@@ -76,11 +95,13 @@ const {
   createDialerBatchFromFilters,
   createDialerBatchFromPropertyIds,
   getAllMatchingProspectIds,
+  getAllMatchingProspectSelection,
   previewBatchEligibilityAction,
 } = vi.hoisted(() => ({
   createDialerBatchFromFilters: vi.fn(),
   createDialerBatchFromPropertyIds: vi.fn(),
   getAllMatchingProspectIds: vi.fn(),
+  getAllMatchingProspectSelection: vi.fn(),
   previewBatchEligibilityAction: vi.fn(),
 }));
 
@@ -88,6 +109,7 @@ vi.mock("./actions", () => ({
   createDialerBatchFromFilters,
   createDialerBatchFromPropertyIds,
   getAllMatchingProspectIds,
+  getAllMatchingProspectSelection,
   previewBatchEligibilityAction,
 }));
 
@@ -150,9 +172,14 @@ beforeEach(() => {
   createDialerBatchFromFilters.mockReset();
   createDialerBatchFromPropertyIds.mockReset();
   getAllMatchingProspectIds.mockReset();
+  getAllMatchingProspectSelection.mockReset();
   previewBatchEligibilityAction.mockReset();
 
   getAllMatchingProspectIds.mockResolvedValue({ ok: true, data: ["p1", "p2"] });
+  getAllMatchingProspectSelection.mockResolvedValue({
+    ok: true,
+    data: { eligibleIds: ["p1", "p2"], eligibleCount: 2, dncLockedCount: 0, matchedCount: 2 },
+  });
   previewBatchEligibilityAction.mockResolvedValue({
     ok: true,
     data: { callable: 1, blocked: {}, missing: 0 },
@@ -202,7 +229,9 @@ describe("<ProspectsTable />", () => {
     expect(screen.getByText("⊘ DO NOT CONTACT")).toBeInTheDocument();
     await user.click(screen.getByRole("checkbox", { name: "Select all prospects on this page" }));
     expect(screen.getByRole("checkbox", { name: "Select eligible Main St" })).toBeChecked();
-    expect(screen.getByRole("button", { name: /Actions for 1 selected/ })).toBeEnabled();
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /Actions for 1 selected/ })).toBeEnabled();
+    });
   });
 
   it("renders outreach disposition pills with operator-facing labels", () => {
@@ -542,8 +571,8 @@ describe("<ProspectsTable />", () => {
 
   it("opens skip-trace preflight from the bulk Enrich action", async () => {
     const user = userEvent.setup({ pointerEventsCheck: 0 });
-    const { preflightSkipTrace, requestSkipTrace } = await import(
-      "@/lib/skip-trace/actions"
+    const { preflightProspectSkipTrace, requestProspectSkipTrace } = await import(
+      "./dnc-safe-actions"
     );
     const rows = [makeRow({ id: "p1", address: "1 Tracefy Ave" })];
     renderTable(rows);
@@ -562,9 +591,9 @@ describe("<ProspectsTable />", () => {
       }),
     ).toBeInTheDocument();
     await waitFor(() => {
-      expect(preflightSkipTrace).toHaveBeenCalledWith(["p1"]);
+      expect(preflightProspectSkipTrace).toHaveBeenCalledWith(["p1"]);
     });
-    expect(requestSkipTrace).not.toHaveBeenCalled();
+    expect(requestProspectSkipTrace).not.toHaveBeenCalled();
   });
 
   it("shows table skeleton rows during FilterDrawer URL navigation", async () => {
@@ -847,6 +876,7 @@ describe("<ProspectsTable /> select-all-across-pages banner", () => {
   beforeEach(() => {
     routerReplace.mockReset();
     getAllMatchingProspectIds.mockReset();
+    getAllMatchingProspectSelection.mockReset();
   });
 
   it("does not render the banner when nothing is selected", () => {
@@ -909,16 +939,17 @@ describe("<ProspectsTable /> select-all-across-pages banner", () => {
 
     const banner = await screen.findByTestId("select-all-banner");
     expect(banner.dataset.mode).toBe("per-page");
-    expect(banner.textContent).toMatch(/All 2 on this page selected/);
+    expect(banner.textContent).toMatch(/All 2 eligible prospects on this page selected/);
     const link = screen.getByTestId("select-all-across-pages");
-    expect(link.textContent).toMatch(/Select all 1,382 prospects/);
+    expect(link.textContent).toMatch(/Select all eligible matching prospects/);
   });
 
   it("clicking 'Select all N' calls the action with search + an empty blockStack and switches the banner to all-matching mode", async () => {
     const user = userEvent.setup({ pointerEventsCheck: 0 });
-    getAllMatchingProspectIds.mockResolvedValue({
+    const eligibleIds = Array.from({ length: 1382 }, (_, i) => `prop-${i}`);
+    getAllMatchingProspectSelection.mockResolvedValue({
       ok: true,
-      data: Array.from({ length: 1382 }, (_, i) => `prop-${i}`),
+      data: { eligibleIds, eligibleCount: 1382, dncLockedCount: 0, matchedCount: 1382 },
     });
     render(
       <ProspectsTable
@@ -943,14 +974,38 @@ describe("<ProspectsTable /> select-all-across-pages banner", () => {
     await user.click(screen.getByRole("checkbox", { name: "Select p1 Main St" }));
     await user.click(screen.getByTestId("select-all-across-pages"));
 
-    expect(getAllMatchingProspectIds).toHaveBeenCalledWith({
+    expect(getAllMatchingProspectSelection).toHaveBeenCalledWith({
       search: "oak",
       blockStack: EMPTY_BLOCK_STACK,
       imported: null,
     });
     const banner = await screen.findByTestId("select-all-banner");
     expect(banner.dataset.mode).toBe("all-matching");
-    expect(banner.textContent).toMatch(/All 1,382 prospects selected/);
+    expect(banner.textContent).toMatch(/All 1,382 eligible prospects selected/);
+  });
+
+  it("uses the server eligible count and reports DNC-locked exclusions separately", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    getAllMatchingProspectSelection.mockResolvedValue({
+      ok: true,
+      data: {
+        eligibleIds: ["p1"],
+        eligibleCount: 1,
+        dncLockedCount: 1,
+        matchedCount: 2,
+      },
+    });
+    renderTable([makeRow({ id: "p1" })], [], { total: 2, pageSize: 1 });
+
+    await user.click(screen.getByRole("checkbox", { name: "Select p1 Main St" }));
+    await user.click(screen.getByTestId("select-all-across-pages"));
+
+    const banner = await screen.findByTestId("select-all-banner");
+    expect(banner).toHaveTextContent("All 1 eligible prospects selected");
+    expect(banner).toHaveTextContent("1 DNC locked and excluded");
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /Actions for 1 selected/ })).toBeEnabled();
+    });
   });
 
   it("create/apply tag after select-all-matching sends filters instead of every id", async () => {
@@ -958,9 +1013,9 @@ describe("<ProspectsTable /> select-all-across-pages banner", () => {
     const { createAndApplyCustomTagBulk, createAndApplyCustomTagBulkFromFilters } =
       await import("./dnc-safe-actions");
     const allIds = Array.from({ length: 1382 }, (_, i) => `prop-${i}`);
-    getAllMatchingProspectIds.mockResolvedValue({
+    getAllMatchingProspectSelection.mockResolvedValue({
       ok: true,
-      data: allIds,
+      data: { eligibleIds: allIds, eligibleCount: 1382, dncLockedCount: 0, matchedCount: 1382 },
     });
     vi.mocked(createAndApplyCustomTagBulkFromFilters).mockResolvedValue({
       ok: true,
@@ -1001,7 +1056,7 @@ describe("<ProspectsTable /> select-all-across-pages banner", () => {
     await user.click(screen.getByTestId("select-all-across-pages"));
     await waitFor(() => {
       expect(screen.getByTestId("select-all-banner").textContent).toMatch(
-        /All 1,382 prospects selected/,
+        /All 1,382 eligible prospects selected/,
       );
     });
     await user.click(
@@ -1036,9 +1091,9 @@ describe("<ProspectsTable /> select-all-across-pages banner", () => {
       "p1",
       ...Array.from({ length: 1381 }, (_, i) => `prop-${i}`),
     ];
-    getAllMatchingProspectIds.mockResolvedValue({
+    getAllMatchingProspectSelection.mockResolvedValue({
       ok: true,
-      data: allIds,
+      data: { eligibleIds: allIds, eligibleCount: 1382, dncLockedCount: 0, matchedCount: 1382 },
     });
 
     render(
@@ -1066,7 +1121,7 @@ describe("<ProspectsTable /> select-all-across-pages banner", () => {
     await user.click(screen.getByTestId("select-all-across-pages"));
     await waitFor(() => {
       expect(screen.getByTestId("select-all-banner").textContent).toMatch(
-        /All 1,382 prospects selected/,
+        /All 1,382 eligible prospects selected/,
       );
     });
 
@@ -1085,9 +1140,9 @@ describe("<ProspectsTable /> select-all-across-pages banner", () => {
       "p1",
       ...Array.from({ length: 1381 }, (_, i) => `prop-${i}`),
     ];
-    getAllMatchingProspectIds.mockResolvedValue({
+    getAllMatchingProspectSelection.mockResolvedValue({
       ok: true,
-      data: allIds,
+      data: { eligibleIds: allIds, eligibleCount: 1382, dncLockedCount: 0, matchedCount: 1382 },
     });
     vi.mocked(createAndApplyCustomTagBulkFromFilters).mockResolvedValue({
       ok: true,
@@ -1132,7 +1187,7 @@ describe("<ProspectsTable /> select-all-across-pages banner", () => {
     await user.click(screen.getByTestId("select-all-across-pages"));
     await waitFor(() => {
       expect(screen.getByTestId("select-all-banner").textContent).toMatch(
-        /All 1,382 prospects selected/,
+        /All 1,382 eligible prospects selected/,
       );
     });
     await user.click(
@@ -1159,9 +1214,10 @@ describe("<ProspectsTable /> select-all-across-pages banner", () => {
 
   it("clears a stale all-matching selection when search scope changes", async () => {
     const user = userEvent.setup({ pointerEventsCheck: 0 });
-    getAllMatchingProspectIds.mockResolvedValue({
+    const eligibleIds = Array.from({ length: 1382 }, (_, i) => `prop-${i}`);
+    getAllMatchingProspectSelection.mockResolvedValue({
       ok: true,
-      data: Array.from({ length: 1382 }, (_, i) => `prop-${i}`),
+      data: { eligibleIds, eligibleCount: 1382, dncLockedCount: 0, matchedCount: 1382 },
     });
     const { rerender } = render(
       <ProspectsTable
@@ -1188,7 +1244,7 @@ describe("<ProspectsTable /> select-all-across-pages banner", () => {
     await user.click(screen.getByTestId("select-all-across-pages"));
     await waitFor(() => {
       expect(screen.getByTestId("select-all-banner").textContent).toMatch(
-        /All 1,382 prospects selected/,
+        /All 1,382 eligible prospects selected/,
       );
     });
 
@@ -1223,9 +1279,9 @@ describe("<ProspectsTable /> select-all-across-pages banner", () => {
 
   it("Clear button empties the selection and hides the banner", async () => {
     const user = userEvent.setup({ pointerEventsCheck: 0 });
-    getAllMatchingProspectIds.mockResolvedValue({
+    getAllMatchingProspectSelection.mockResolvedValue({
       ok: true,
-      data: ["a", "b", "c"],
+      data: { eligibleIds: ["a", "b", "c"], eligibleCount: 3, dncLockedCount: 0, matchedCount: 3 },
     });
     render(
       <ProspectsTable
@@ -1256,17 +1312,18 @@ describe("<ProspectsTable /> select-all-across-pages banner", () => {
 
   // -------------------------------------------------------------------------
   // R9 regression — select-all-across-pages must hand the active block stack
-  // to getAllMatchingProspectIds so the resulting set covers the SAME rows
+  // to getAllMatchingProspectSelection so the resulting set covers the SAME rows
   // the page is rendering. Plan 09 swapped the legacy `filters` arg for
   // `blockStack`; this test pins the new contract so a future rewrite that
   // forgets to thread blockStack through (or accidentally re-introduces the
   // old chip-shape) fails fast.
   // -------------------------------------------------------------------------
-  it("select-all-matching with an active block stack passes the stack to getAllMatchingProspectIds (R9)", async () => {
+  it("select-all-matching with an active block stack passes the stack to getAllMatchingProspectSelection (R9)", async () => {
     const user = userEvent.setup({ pointerEventsCheck: 0 });
-    getAllMatchingProspectIds.mockResolvedValue({
+    const eligibleIds = Array.from({ length: 1382 }, (_, i) => `prop-${i}`);
+    getAllMatchingProspectSelection.mockResolvedValue({
       ok: true,
-      data: Array.from({ length: 1382 }, (_, i) => `prop-${i}`),
+      data: { eligibleIds, eligibleCount: 1382, dncLockedCount: 0, matchedCount: 1382 },
     });
     const stack: FilterBlock[] = [
       { id: "blk-vac", kind: "vacancy", tri: "yes" } as FilterBlock,
@@ -1300,7 +1357,7 @@ describe("<ProspectsTable /> select-all-across-pages banner", () => {
     await user.click(screen.getByRole("checkbox", { name: "Select p1 Main St" }));
     await user.click(screen.getByTestId("select-all-across-pages"));
 
-    expect(getAllMatchingProspectIds).toHaveBeenCalledWith({
+    expect(getAllMatchingProspectSelection).toHaveBeenCalledWith({
       search: null,
       imported: null,
       blockStack: expect.arrayContaining([

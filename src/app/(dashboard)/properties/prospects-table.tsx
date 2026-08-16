@@ -66,10 +66,12 @@ import {
   deletePropertiesBulk,
   qualifyLeadsBulk,
   removePropertiesFromListBulk,
+  preflightProspectSkipTrace,
+  requestProspectSkipTrace,
   verifyPropertiesBulk,
   type BulkOutcome,
 } from "./dnc-safe-actions";
-import { getAllMatchingProspectIds } from "./actions";
+import { getAllMatchingProspectSelection } from "./actions";
 import { BatchCreateModal } from "./batch-create-modal";
 import { BulkSmsModal } from "./bulk-sms-modal";
 import { BulkTagModal } from "./bulk-tag-modal";
@@ -200,6 +202,7 @@ export function ProspectsTable({
   const [selectAllMatchingKey, setSelectAllMatchingKey] = useState<string | null>(
     null,
   );
+  const [selectAllDncLockedCount, setSelectAllDncLockedCount] = useState(0);
   const selectAllMatching = selectAllMatchingKey === selectionScopeKey;
   const selectionScopeStale =
     selectAllMatchingKey !== null && selectAllMatchingKey !== selectionScopeKey;
@@ -304,7 +307,7 @@ export function ProspectsTable({
   const onSelectAllAcrossPages = () => {
     startTransition(async () => {
       const result = await callAction(
-        getAllMatchingProspectIds({
+        getAllMatchingProspectSelection({
           search: search.length === 0 ? null : search,
           blockStack,
           imported: importedParam,
@@ -312,7 +315,8 @@ export function ProspectsTable({
         { fallbackMessage: "Could not select all matching prospects" },
       );
       if (result.ok) {
-        setSelected(new Set(result.data));
+        setSelected(new Set(result.data.eligibleIds));
+        setSelectAllDncLockedCount(result.data.dncLockedCount);
         setSelectAllMatchingKey(selectionScopeKey);
       }
     });
@@ -320,6 +324,7 @@ export function ProspectsTable({
 
   const onClearAllSelection = () => {
     setSelected(new Set());
+    setSelectAllDncLockedCount(0);
     setSelectAllMatchingKey(null);
   };
 
@@ -336,6 +341,7 @@ export function ProspectsTable({
 
   const toggleAll = () => {
     setSelectAllMatchingKey(null);
+    setSelectAllDncLockedCount(0);
     setSelected(() => {
       if (allSelected) return new Set();
       return new Set(selectableProspects.map((p) => p.id));
@@ -344,6 +350,7 @@ export function ProspectsTable({
 
   const toggleOne = (id: string) => {
     setSelectAllMatchingKey(null);
+    setSelectAllDncLockedCount(0);
     setSelected((prev) => {
       const next = selectionScopeStale ? new Set<string>() : new Set(prev);
       if (next.has(id)) next.delete(id);
@@ -727,8 +734,10 @@ export function ProspectsTable({
         allOnPageSelected={allSelected}
         selectAllMatching={selectAllMatching}
         pageSize={prospects.length}
+        pageEligibleCount={selectableProspects.length}
         total={total}
         selectedCount={selectedInScope.size}
+        dncLockedCount={selectAllMatching ? selectAllDncLockedCount : prospects.length - selectableProspects.length}
         onSelectAllAcrossPages={onSelectAllAcrossPages}
         onClear={onClearAllSelection}
       />
@@ -756,7 +765,7 @@ export function ProspectsTable({
         }
         tags={tags}
         allMatching={selectAllMatching}
-        totalCount={selectAllMatching ? total : selectedInScope.size}
+        totalCount={selectedInScope.size}
         onClose={() => setShowBulkTag(false)}
         onApplied={(outcome) => finishBulk("Tagged", outcome)}
       />
@@ -773,7 +782,8 @@ export function ProspectsTable({
               }
             : undefined
         }
-        totalCount={selectAllMatching ? total : selectedInScope.size}
+        totalCount={selectedInScope.size}
+        lockedExcludedCount={selectAllMatching ? selectAllDncLockedCount : 0}
       />
       <SkipTracePreflightDialog
         open={skipTracePreflightIds.length > 0}
@@ -781,6 +791,9 @@ export function ProspectsTable({
           if (!open) setSkipTracePreflightIds([]);
         }}
         propertyIds={skipTracePreflightIds}
+        onPreflight={preflightProspectSkipTrace}
+        onLaunchSkipTrace={() => requestProspectSkipTrace(skipTracePreflightIds)}
+        onStartCassVerification={verifyPropertiesBulk}
         onFinished={() => {
           onClearAllSelection();
           router.refresh();
@@ -1137,16 +1150,20 @@ function SelectAllBanner({
   allOnPageSelected,
   selectAllMatching,
   pageSize,
+  pageEligibleCount,
   total,
   selectedCount,
+  dncLockedCount,
   onSelectAllAcrossPages,
   onClear,
 }: {
   allOnPageSelected: boolean;
   selectAllMatching: boolean;
   pageSize: number;
+  pageEligibleCount: number;
   total: number;
   selectedCount: number;
+  dncLockedCount: number;
   onSelectAllAcrossPages: () => void;
   onClear: () => void;
 }) {
@@ -1165,8 +1182,11 @@ function SelectAllBanner({
         className="bg-muted/40 flex items-center justify-between gap-3 rounded-md border px-4 py-2 text-sm"
       >
         <span>
-          All <strong>{fmt(selectedCount)}</strong> prospects selected across
-          all pages.
+          All <strong>{fmt(selectedCount)}</strong> eligible prospects selected
+          across all pages.
+          {dncLockedCount > 0 && (
+            <> <strong>{fmt(dncLockedCount)}</strong> DNC locked and excluded.</>
+          )}
         </span>
         <button
           type="button"
@@ -1187,7 +1207,11 @@ function SelectAllBanner({
       className="bg-muted/40 flex items-center justify-between gap-3 rounded-md border px-4 py-2 text-sm"
     >
       <span>
-        All <strong>{fmt(pageSize)}</strong> on this page selected.
+        All <strong>{fmt(pageEligibleCount)}</strong> eligible prospects on this
+        page selected.
+        {dncLockedCount > 0 && (
+          <> <strong>{fmt(dncLockedCount)}</strong> DNC locked and excluded.</>
+        )}
       </span>
       <button
         type="button"
@@ -1195,7 +1219,7 @@ function SelectAllBanner({
         data-testid="select-all-across-pages"
         className="text-foreground font-medium underline-offset-2 hover:underline"
       >
-        Select all {fmt(total)} prospects →
+        Select all eligible matching prospects →
       </button>
     </div>
   );

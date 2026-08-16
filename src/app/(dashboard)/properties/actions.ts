@@ -49,7 +49,7 @@ import {
   filterSelectFragment,
 } from "@/lib/prospects/filter-to-supabase";
 import type { FilterBlock } from "@/lib/prospects/filter-schema";
-import { evaluateSuppression } from "@/lib/messaging/suppression";
+import { resolveProspectEligibility } from "@/lib/prospects/eligibility";
 import { getDayBoundsInZone } from "@/lib/time/zoned";
 
 export async function listSmsTemplateCategories(): Promise<
@@ -619,6 +619,31 @@ async function fetchDialerPropertyRows(
   return ok(properties);
 }
 
+async function fetchEligibleDialerPropertyRows(
+  supabase: Awaited<ReturnType<typeof createClient>>,
+  propertyIds: string[],
+): Promise<Result<{
+  rows: DialerPropertyRow[];
+  eligibleIds: string[];
+  dncLockedCount: number;
+}>> {
+  const eligibility = await resolveProspectEligibility(
+    supabase,
+    propertyIds,
+    "dialer",
+  );
+  const rowsResult = await fetchDialerPropertyRows(
+    supabase,
+    eligibility.eligibleIds,
+  );
+  if (!rowsResult.ok) return rowsResult;
+  return ok({
+    rows: rowsResult.data,
+    eligibleIds: eligibility.eligibleIds,
+    dncLockedCount: eligibility.dncLockedCount,
+  });
+}
+
 export async function previewBatchEligibilityAction(
   propertyIds: string[],
 ): Promise<Result<BatchEligibilityCounts>> {
@@ -638,10 +663,17 @@ export async function previewBatchEligibilityAction(
       };
     }
 
-    const rowsResult = await fetchDialerPropertyRows(supabase, propertyIds);
+    const rowsResult = await fetchEligibleDialerPropertyRows(
+      supabase,
+      propertyIds,
+    );
     if (!rowsResult.ok) return rowsResult;
 
-    return ok(classifyForPreview(toClassifyInputs(rowsResult.data)));
+    const counts = classifyForPreview(toClassifyInputs(rowsResult.data.rows));
+    if (rowsResult.data.dncLockedCount > 0) {
+      counts.blocked.dnc_locked = rowsResult.data.dncLockedCount;
+    }
+    return ok(counts);
   } catch (e) {
     reportError(e, { tags: { surface: "preview_batch_eligibility_action" } });
     return errFromUnknown(e, "PREVIEW_FAILED");
@@ -671,7 +703,10 @@ export async function createDialerBatchFromPropertyIds(
       };
     }
 
-    const rowsResult = await fetchDialerPropertyRows(supabase, propertyIds);
+    const rowsResult = await fetchEligibleDialerPropertyRows(
+      supabase,
+      propertyIds,
+    );
     if (!rowsResult.ok) {
       return {
         ok: false,
@@ -681,8 +716,17 @@ export async function createDialerBatchFromPropertyIds(
         },
       };
     }
+    if (rowsResult.data.eligibleIds.length === 0) {
+      return {
+        ok: false,
+        error: {
+          code: "NO_ELIGIBLE_PROPERTIES",
+          message: "The selected prospects are Do Not Contact or no longer available.",
+        },
+      };
+    }
 
-    const rows = rowsResult.data;
+    const rows = rowsResult.data.rows;
     const orgIds = new Set(rows.map((row) => row.org_id));
     if (orgIds.size !== 1) {
       return {
@@ -703,6 +747,9 @@ export async function createDialerBatchFromPropertyIds(
     }
 
     const counts = classifyForPreview(toClassifyInputs(rows));
+    if (rowsResult.data.dncLockedCount > 0) {
+      counts.blocked.dnc_locked = rowsResult.data.dncLockedCount;
+    }
     const snapshots = rows.flatMap((row) =>
       row.homeowner
         ? buildSnapshotsForProperty(
@@ -719,7 +766,7 @@ export async function createDialerBatchFromPropertyIds(
         org_id: orgId,
         title: opts.title ?? null,
         source_kind: opts.sourceKind ?? "selected_ids",
-        source_meta: opts.sourceMeta ?? { property_ids: propertyIds },
+        source_meta: opts.sourceMeta ?? { property_ids: rowsResult.data.eligibleIds },
         created_by_user_id: user.id,
       })
       .select("id")
@@ -785,7 +832,11 @@ export async function createDialerBatchFromFilters(args: {
   return createDialerBatchFromPropertyIds(idsResult.data, {
     title: args.title,
     sourceKind: "filters",
-    sourceMeta: { search: args.search ?? null, blockStack: args.blockStack },
+    sourceMeta: {
+      search: args.search ?? null,
+      blockStack: args.blockStack,
+      imported: args.imported ?? null,
+    },
   });
 }
 
@@ -809,11 +860,16 @@ export async function createDialerBatchFromFilters(args: {
  * guards (skip-trace: MAX_PROPERTIES_PER_JOB server-side + CASS-unverified
  * filtering), so select-all itself is unbounded.
  */
-export async function getAllMatchingProspectIds(args: {
+export async function getAllMatchingProspectSelection(args: {
   search: string | null;
   blockStack: FilterBlock[];
   imported?: "today" | null;
-}): Promise<Result<string[]>> {
+}): Promise<Result<{
+  eligibleIds: string[];
+  eligibleCount: number;
+  dncLockedCount: number;
+  matchedCount: number;
+}>> {
   try {
     const supabase = await createClient();
 
@@ -823,7 +879,7 @@ export async function getAllMatchingProspectIds(args: {
 
     const filterSelect = filterSelectFragment(args.blockStack);
     const propertiesSelect = [
-      "id, source_import_id, source_imported_at, outreach_dispo, homeowner:contacts!properties_homeowner_contact_id_fkey(phone_1, phone_2, phone_3, do_not_contact, sms_opted_out)",
+      "id, source_import_id, source_imported_at",
       filterSelect,
     ].filter(Boolean).join(", ");
 
@@ -863,47 +919,35 @@ export async function getAllMatchingProspectIds(args: {
           error: { code: "SELECT_ALL_FAILED", message: error.message },
         };
       }
-      const rows = (data ?? []) as unknown as Array<{
-        id: string;
-        outreach_dispo: string | null;
-        homeowner: Array<{
-          phone_1: string | null;
-          phone_2: string | null;
-          phone_3: string | null;
-          do_not_contact: boolean;
-          sms_opted_out: boolean;
-        }> | null;
-      }>;
-      const phones = rows.flatMap((row) => {
-        const homeowner = Array.isArray(row.homeowner) ? row.homeowner[0] : row.homeowner;
-        return homeowner
-          ? [homeowner.phone_1, homeowner.phone_2, homeowner.phone_3].filter((phone): phone is string => !!phone)
-          : [];
-      });
-      const { data: suppressions, error: suppressionError } = phones.length
-        ? await supabase.from("sms_phone_suppressions").select("phone_e164").in("phone_e164", phones)
-        : { data: [], error: null };
-      if (suppressionError) throw suppressionError;
-      const suppressedPhones = new Set((suppressions ?? []).map((row) => row.phone_e164));
-      for (const row of rows) {
-        const homeowner = Array.isArray(row.homeowner) ? row.homeowner[0] : row.homeowner;
-        const durableSuppression = [homeowner?.phone_1, homeowner?.phone_2, homeowner?.phone_3]
-          .some((phone) => !!phone && suppressedPhones.has(phone));
-        const suppressed = durableSuppression || evaluateSuppression({
-          outreachDispo: row.outreach_dispo,
-          doNotContact: homeowner?.do_not_contact,
-          smsOptedOut: homeowner?.sms_opted_out,
-        }).suppressed;
-        if (!suppressed) allIds.push(row.id);
-      }
+      const rows = (data ?? []) as unknown as Array<{ id: string }>;
+      allIds.push(...rows.map((row) => row.id));
       if (rows.length < PAGE) break;
     }
 
-    return ok(allIds);
+    const resolved = await resolveProspectEligibility(
+      supabase,
+      allIds,
+      "selection",
+    );
+    return ok({
+      eligibleIds: resolved.eligibleIds,
+      eligibleCount: resolved.eligibleIds.length,
+      dncLockedCount: resolved.dncLockedCount,
+      matchedCount: allIds.length,
+    });
   } catch (e) {
     reportError(e, { tags: { surface: "get_all_matching_prospect_ids" } });
     return errFromUnknown(e, "SELECT_ALL_FAILED");
   }
+}
+
+export async function getAllMatchingProspectIds(args: {
+  search: string | null;
+  blockStack: FilterBlock[];
+  imported?: "today" | null;
+}): Promise<Result<string[]>> {
+  const result = await getAllMatchingProspectSelection(args);
+  return result.ok ? ok(result.data.eligibleIds) : result;
 }
 
 /**

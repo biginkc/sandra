@@ -35,6 +35,8 @@ type Props = {
   launchFallbackMessage?: string;
   onLaunchSkipTrace?: () => Promise<Result<unknown>>;
   onLaunchSuccess?: (data: unknown) => void;
+  onPreflight?: (propertyIds: string[]) => Promise<Result<SkipTracePreflight>>;
+  onStartCassVerification?: (propertyIds: string[]) => Promise<Result<unknown>>;
 };
 
 function plural(n: number, singular: string, pluralLabel = `${singular}s`) {
@@ -67,6 +69,8 @@ export function SkipTracePreflightDialog({
   launchFallbackMessage,
   onLaunchSkipTrace,
   onLaunchSuccess,
+  onPreflight,
+  onStartCassVerification,
 }: Props) {
   const [preflight, setPreflight] = useState<SkipTracePreflight | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -101,7 +105,7 @@ export function SkipTracePreflightDialog({
     void (async () => {
       let result: Awaited<ReturnType<typeof preflightSkipTrace>>;
       try {
-        result = await preflightSkipTrace(requestedIds);
+        result = await (onPreflight ?? preflightSkipTrace)(requestedIds);
       } catch (e) {
         if (
           requestSeqRef.current !== requestSeq ||
@@ -243,7 +247,9 @@ export function SkipTracePreflightDialog({
 
     startTransition(async () => {
       const result = await callAction(
-        verifyPropertiesBulk(preflight.cassVerificationPropertyIds),
+        onStartCassVerification
+          ? onStartCassVerification(preflight.cassVerificationPropertyIds)
+          : verifyPropertiesBulk(preflight.cassVerificationPropertyIds),
         { fallbackMessage: "Could not start CASS verification" },
       );
       if (!result.ok) return;

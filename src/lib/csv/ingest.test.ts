@@ -303,6 +303,10 @@ describe("processIngestChunk → hard rule: unlabeled phones are never saved", (
     expect(payload.phone_2).toBeNull();
     expect(payload.phone_3).toBeNull();
     expect(result.droppedUnlabeledPhones).toBe(1);
+    const homeownerDetails = calls.find(
+      (call) => call.table === "homeowner_details" && call.op === "upsert",
+    );
+    expect(homeownerDetails?.insertPayload).toMatchObject({ org_id: "org-1" });
   });
 
   it("keeps labeled phones in their slots with their types", async () => {
@@ -353,6 +357,45 @@ describe("processIngestChunk → hard rule: unlabeled phones are never saved", (
     expect(payload.phone_2).toBe("+18165550002");
     expect(payload.phone_2_type).toBe("landline");
     expect(result.droppedUnlabeledPhones).toBe(0);
+  });
+
+  it("writes org_id on agent sidecar rows", async () => {
+    responseQueue = [
+      { data: null, error: null }, // agent phone miss
+      { data: { id: "agent-contact" }, error: null },
+      { data: null, error: null }, // agent_details upsert
+      { data: null, error: null }, // address dedup miss
+      { data: { id: "prop-agent" }, error: null },
+      { data: null, error: null }, // job item
+      { data: null, error: null }, // progress
+    ];
+
+    await processIngestChunk(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      makeSupabase() as any,
+      {
+        ...baseChunkParams,
+        mapping: {
+          address: "Address",
+          state: "State",
+          agent_first_name: "Agent First",
+          agent_phone: "Agent Phone",
+          agent_phone_type: "Agent Phone Type",
+        },
+        rows: [{
+          Address: "9 Agent Ave",
+          State: "MO",
+          "Agent First": "Alex",
+          "Agent Phone": "8165552020",
+          "Agent Phone Type": "mobile",
+        }],
+      },
+    );
+
+    const agentDetails = calls.find(
+      (call) => call.table === "agent_details" && call.op === "upsert",
+    );
+    expect(agentDetails?.insertPayload).toMatchObject({ org_id: "org-1" });
   });
 
   it("still creates the contact (name/email kept) when EVERY phone is unlabeled", async () => {
@@ -946,5 +989,44 @@ describe("processIngestChunk durable resume", () => {
       (call) => call.table === "job_items" && call.op === "upsert",
     );
     expect(checkpoint?.insertPayload).toMatchObject({ source_row_index: 1, status: "success" });
+  });
+});
+
+describe("processIngestChunk dedup provenance", () => {
+  it("refreshes latest-import provenance for an address-only dedup match", async () => {
+    responseQueue = [
+      { data: { id: "existing-address-only" }, error: null },
+      { data: null, error: null }, // provenance update
+      { data: null, error: null }, // job item
+      { data: null, error: null }, // progress
+    ];
+
+    const result = await processIngestChunk(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      makeSupabase() as any,
+      {
+        jobId: "job-provenance",
+        csvImportId: "import-latest",
+        orgId: "org-1",
+        source: "dealmachine",
+        market: "Buchanan County MO",
+        countyId: "county-1",
+        mapping: { address: "Address", state: "State" },
+        rows: [{ Address: "10 Existing St", State: "MO" }],
+        offset: 0,
+        autoTagIds: [],
+        listId: null,
+      },
+    );
+
+    expect(result.skipped).toBe(1);
+    const update = calls.find(
+      (call) => call.table === "properties" && call.op === "update",
+    );
+    expect(update?.insertPayload).toMatchObject({
+      source_import_id: "import-latest",
+    });
+    expect(update?.insertPayload).toHaveProperty("source_imported_at");
+    expect(update?.filters).toContainEqual({ op: "eq", args: ["org_id", "org-1"] });
   });
 });

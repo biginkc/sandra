@@ -20,6 +20,7 @@ export function importTerminalStatus(args: {
   totalRows: number;
   processedRows: number;
   succeeded: number;
+  skipped?: number;
   failed: number;
   sideEffects?: ImportSideEffects;
 }): "completed" | "partially_completed" | "failed" {
@@ -37,6 +38,6 @@ export function importTerminalStatus(args: {
     return "completed";
   }
 
-  if (args.succeeded > 0) return "partially_completed";
+  if (args.succeeded + (args.skipped ?? 0) > 0) return "partially_completed";
   return "failed";
 }
