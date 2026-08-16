@@ -79,39 +79,32 @@ describe("recordConsentEvent", () => {
     const insert = vi.fn().mockResolvedValue({ error: null });
     const supabase = {
       from: vi.fn((table: string) => {
+        if (table === "contacts") {
+          return {
+            select: vi.fn(() => ({
+              eq: vi.fn(() => ({
+                maybeSingle: vi.fn().mockResolvedValue({
+                  data: { org_id: "org-non-default" },
+                  error: null,
+                }),
+              })),
+            })),
+          };
+        }
         expect(table).toBe("consent_events");
+        const lookup = {
+          eq: vi.fn((column: string, value: unknown) => {
+            filters.push([column, value]);
+            return lookup;
+          }),
+          contains: vi.fn((_column: string, value: unknown) => {
+            filters.push(["source_detail", value]);
+            return lookup;
+          }),
+          limit: vi.fn().mockResolvedValue({ data: [], error: null }),
+        };
         return {
-          select: vi.fn(() => ({
-            eq: (column: string, value: unknown) => {
-              filters.push([column, value]);
-              return {
-                eq: (column2: string, value2: unknown) => {
-                  filters.push([column2, value2]);
-                  return {
-                    eq: (column3: string, value3: unknown) => {
-                      filters.push([column3, value3]);
-                      return {
-                        eq: (column4: string, value4: unknown) => {
-                          filters.push([column4, value4]);
-                          return {
-                            contains: (_column5: string, value5: unknown) => {
-                              filters.push(["source_detail", value5]);
-                              return {
-                                limit: vi.fn().mockResolvedValue({
-                                  data: [],
-                                  error: null,
-                                }),
-                              };
-                            },
-                          };
-                        },
-                      };
-                    },
-                  };
-                },
-              };
-            },
-          })),
+          select: vi.fn(() => lookup),
           insert,
         };
       }),
@@ -129,6 +122,39 @@ describe("recordConsentEvent", () => {
     ).resolves.toBeUndefined();
 
     expect(filters).toContainEqual(["source", "sendillo_inbound_webhook"]);
-    expect(insert).toHaveBeenCalledTimes(1);
+    expect(insert).toHaveBeenCalledWith(
+      expect.objectContaining({ org_id: "org-non-default" }),
+    );
+  });
+
+  it("fails closed when the contact organization cannot be resolved", async () => {
+    const insert = vi.fn();
+    const supabase = {
+      from: vi.fn((table: string) => {
+        if (table === "contacts") {
+          return {
+            select: vi.fn(() => ({
+              eq: vi.fn(() => ({
+                maybeSingle: vi.fn().mockResolvedValue({
+                  data: null,
+                  error: { message: "contact lookup failed" },
+                }),
+              })),
+            })),
+          };
+        }
+        return { insert };
+      }),
+    };
+
+    await expect(
+      recordConsentEvent(supabase as never, {
+        contactId: "contact-1",
+        channel: "sms",
+        eventType: "opt_out",
+        source: "sendillo_inbound_webhook",
+      }),
+    ).rejects.toThrow("recordConsentEvent contact lookup");
+    expect(insert).not.toHaveBeenCalled();
   });
 });

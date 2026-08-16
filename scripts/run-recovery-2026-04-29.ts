@@ -65,6 +65,7 @@ type PropertyRow = {
   org_id: string;
   cass_status: string | null;
   skip_trace_disabled: boolean | null;
+  is_dnc_locked: boolean;
 };
 
 function classify(status: string | null): Bucket {
@@ -117,13 +118,15 @@ async function loadRecoveryProperties(
 
   const { data: rows, error: propErr } = await supabase
     .from("properties")
-    .select("id, org_id, cass_status, skip_trace_disabled")
+    .select("id, org_id, cass_status, skip_trace_disabled, is_dnc_locked")
     .in("id", propertyIds);
 
   if (propErr) {
     throw new Error(`properties query failed: ${propErr.message}`);
   }
-  return (rows ?? []) as PropertyRow[];
+  return ((rows ?? []) as PropertyRow[]).filter(
+    (row) => row.is_dnc_locked !== true,
+  );
 }
 
 function summarize(rows: PropertyRow[]): Record<Bucket, PropertyRow[]> {
@@ -299,7 +302,7 @@ async function runPhase2(
   // 'verified' are eligible.
   const { data: rows, error } = await supabase
     .from("properties")
-    .select("id, cass_status, skip_trace_disabled")
+    .select("id, cass_status, skip_trace_disabled, is_dnc_locked")
     .eq("org_id", orgId)
     .in("id", preUnverifiedIds);
 
@@ -308,7 +311,10 @@ async function runPhase2(
   }
 
   const eligible = (rows ?? []).filter(
-    (r) => r.cass_status === "verified" && r.skip_trace_disabled !== true,
+    (r) =>
+      r.cass_status === "verified" &&
+      r.skip_trace_disabled !== true &&
+      r.is_dnc_locked !== true,
   );
   const eligibleIds = eligible.map((r) => r.id);
   console.log(

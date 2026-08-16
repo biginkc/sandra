@@ -56,6 +56,7 @@ export type SkipTraceJobSummary = {
   cached_hits: number;
   api_hits: number;
   total_credits: number;
+  dnc_skipped?: number;
   eligibility_exclusions?: Json;
 };
 
@@ -673,22 +674,36 @@ export async function runSkipTraceEnrichment(
           summary,
           /*fromCache*/ false,
         );
-        await writeCache(
-          supabase,
-          provider.providerId,
-          normalizeAddress({
-            address: misses[0].address,
-            city: misses[0].city,
-            state: misses[0].state,
-            zip: misses[0].zip,
-          }),
-          result,
-        );
+        try {
+          await writeCache(
+            supabase,
+            provider.providerId,
+            normalizeAddress({
+              address: misses[0].address,
+              city: misses[0].city,
+              state: misses[0].state,
+              zip: misses[0].zip,
+            }),
+            result,
+          );
+        } catch (cacheError) {
+          // The paid response already exists and persistAndRecord made the
+          // durable per-property outcome terminal. A cache miss on the next
+          // run must never turn this into another paid lookup automatically.
+          reportError(cacheError, {
+            tags: { surface: "skip_trace_lookup_single_cache" },
+            extra: { propertyId: misses[0].propertyId, jobId: params.jobId },
+          });
+        }
       } catch (e) {
         summary.failed++;
         const msg = e instanceof Error ? e.message : String(e);
-        const klass: "provider_transient" | "provider_unknown" | "database" =
-          e instanceof ProviderError ? classifyProviderError(e) : "database";
+        const klass:
+          | "provider_transient"
+          | "submission_unknown"
+          | "database" = e instanceof ProviderError
+          ? classifyProviderError(e)
+          : "submission_unknown";
         reportError(e, {
           tags: { surface: "skip_trace_lookup_single" },
           extra: { propertyId: misses[0].propertyId, jobId: params.jobId },
@@ -754,6 +769,7 @@ export async function runSkipTraceEnrichment(
       unique_addresses_submitted: uniqueByAddress.length,
     } as unknown as Json;
 
+    let providerCallStarted = false;
     try {
       const { data: summaryClaim, error: summaryErr } = await supabase
         .from("jobs")
@@ -802,6 +818,7 @@ export async function runSkipTraceEnrichment(
         return summary;
       }
 
+      providerCallStarted = true;
       const ticket = await provider.submitBatch(uniqueByAddress);
       const { data: ticketClaim, error: ticketErr } = await supabase
         .from("jobs")
@@ -828,10 +845,20 @@ export async function runSkipTraceEnrichment(
             count: uniqueByAddress.length,
           },
         });
-        // Do not mark the job failed here. The provider boundary has already
-        // been crossed, so a normal retry can double-bill. The pre-submit
-        // summary still has submit_phase='submitting', which makes the cron
-        // skip automatic resubmission and leaves this for manual reconciliation.
+        // The provider boundary has already been crossed. Persist an explicit
+        // non-retryable state rather than leaving a stale `submitting` row that
+        // operators could mistake for an ordinary failed job.
+        await safelyMarkSubmissionUnknown(
+          supabase,
+          params.jobId,
+          `Provider accepted batch ${ticket.queueId}, but Sandra could not persist the ticket; manual reconciliation is required: ${msg}`,
+          params.orgId,
+          attemptToken,
+          {
+            ...(pendingSummary as Record<string, unknown>),
+            provider_queue_id_for_reconciliation: ticket.queueId,
+          } as unknown as Json,
+        );
         return summary;
       }
 
@@ -866,13 +893,24 @@ export async function runSkipTraceEnrichment(
       return { pending: true, queueId: ticket.queueId };
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      await markJobFailed(
-        supabase,
-        params.jobId,
-        `submitBatch failed: ${msg}`,
-        params.orgId,
-        attemptToken,
-      );
+      if (providerCallStarted && isSubmissionUnknownError(e)) {
+        await safelyMarkSubmissionUnknown(
+          supabase,
+          params.jobId,
+          `Batch submission outcome is unknown; manual provider reconciliation is required: ${msg}`,
+          params.orgId,
+          attemptToken,
+          pendingSummary,
+        );
+      } else {
+        await markJobFailed(
+          supabase,
+          params.jobId,
+          `submitBatch rejected before acceptance: ${msg}`,
+          params.orgId,
+          attemptToken,
+        );
+      }
       reportError(e, {
         tags: { surface: "skip_trace_submit_batch" },
         extra: { jobId: params.jobId, count: uniqueByAddress.length },
@@ -972,6 +1010,9 @@ type LedgerEntry = {
 const TERMINAL_ERROR_CLASSES = new Set([
   "provider_no_data",
   "address_unverified",
+  "dnc_locked",
+  "submission_unknown",
+  "provider_persist_failed",
 ]);
 
 /** Explicit precedence for duplicate rows per property (pre-resumability
@@ -1484,7 +1525,7 @@ async function persistAndRecord(
     });
     await tryInsert({
       status: "error",
-      error_class: "database",
+      error_class: fromCache ? "database" : "provider_persist_failed",
       error_message: msg,
     });
     return;
@@ -1514,6 +1555,15 @@ async function persistAndRecord(
         no_match: true,
       },
     });
+  } else if (outcome.status === "dnc_skipped") {
+    summary.failed++;
+    summary.dnc_skipped = (summary.dnc_skipped ?? 0) + 1;
+    await tryInsert({
+      status: "error",
+      error_class: "dnc_locked",
+      error_message:
+        "Property became permanently DNC before the provider result could be persisted.",
+    });
   } else {
     summary.failed++;
     await tryInsert({
@@ -1525,20 +1575,23 @@ async function persistAndRecord(
 }
 
 /**
- * Classify a ProviderError into a retryability bucket. HTTP 429 + 5xx
- * are transient (retry will likely succeed once the vendor recovers);
- * everything else lands in `provider_unknown` (still retryable but
- * worth a second look).
+ * A concrete HTTP rejection proves the provider returned a response before
+ * accepting useful work, so a retry is permitted. Transport/read/parse
+ * failures have an ambiguous charge boundary and require reconciliation.
  */
 function classifyProviderError(
   err: ProviderError,
-): "provider_transient" | "provider_unknown" {
+): "provider_transient" | "submission_unknown" {
   const status =
     typeof err.details?.status === "number" ? err.details.status : null;
-  if (status === 429) return "provider_transient";
-  if (status !== null && status >= 500 && status < 600)
-    return "provider_transient";
-  return "provider_unknown";
+  return status === null ? "submission_unknown" : "provider_transient";
+}
+
+function isSubmissionUnknownError(error: unknown): boolean {
+  return (
+    !(error instanceof ProviderError) ||
+    typeof error.details?.status !== "number"
+  );
 }
 
 /**
@@ -1580,6 +1633,10 @@ async function insertJobItem(
       | "address_unverified"
       | "provider_transient"
       | "provider_unknown"
+      | "provider_rejected"
+      | "submission_unknown"
+      | "provider_persist_failed"
+      | "dnc_locked"
       | "configuration"
       | "validation"
       | "transient"
@@ -1715,4 +1772,67 @@ async function markJobFailed(
   }
   const { error } = await query;
   if (error) throw new Error(`mark job failed failed: ${error.message}`);
+}
+
+async function markSubmissionUnknown(
+  supabase: SupabaseClient<Database>,
+  jobId: string,
+  reason: string,
+  orgId: string,
+  attemptToken: string,
+  priorSummary: Json,
+): Promise<void> {
+  const summary = {
+    ...(priorSummary as Record<string, unknown>),
+    submit_phase: "submission_unknown",
+    manual_reconciliation_required: true,
+  } as unknown as Json;
+  const { data, error } = await supabase
+    .from("jobs")
+    .update({
+      status: "canceled",
+      error_class: "submission_unknown",
+      error_message: reason,
+      result_summary: summary,
+      completed_at: new Date().toISOString(),
+      worker_heartbeat_at: new Date().toISOString(),
+    })
+    .eq("id", jobId)
+    .eq("org_id", orgId)
+    .eq("type", "skip_trace")
+    .contains("input_params", { submission_attempt_token: attemptToken })
+    .select("id");
+  if (error || !data || data.length !== 1) {
+    throw new Error(
+      `mark submission unknown failed: ${error?.message ?? "claim lost"}`,
+    );
+  }
+}
+
+async function safelyMarkSubmissionUnknown(
+  supabase: SupabaseClient<Database>,
+  jobId: string,
+  reason: string,
+  orgId: string,
+  attemptToken: string,
+  priorSummary: Json,
+): Promise<void> {
+  try {
+    await markSubmissionUnknown(
+      supabase,
+      jobId,
+      reason,
+      orgId,
+      attemptToken,
+      priorSummary,
+    );
+  } catch (error) {
+    // The pre-submit claim already left submit_phase='submitting'. If the
+    // reconciliation marker cannot be persisted, that state still blocks the
+    // automatic retry path and therefore avoids a second provider charge.
+    reportError(error, {
+      tags: { surface: "skip_trace_mark_submission_unknown" },
+      extra: { jobId, reason },
+    });
+  }
 }

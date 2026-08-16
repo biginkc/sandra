@@ -675,7 +675,7 @@ describe("runSkipTraceEnrichment (integration, mock provider)", () => {
     expect(job!.result_summary).toBeNull();
   });
 
-  it("async path: does not mark failed when queue-id persistence loses to another submitter", async () => {
+  it("async path: queue-id persistence race requires manual reconciliation", async () => {
     const props = await Promise.all([
       seedProperty({ address: "33 Queue Race Ln" }),
       seedProperty({ address: "44 Queue Race Ln" }),
@@ -705,12 +705,17 @@ describe("runSkipTraceEnrichment (integration, mock provider)", () => {
 
     const { data: job } = await supabase
       .from("jobs")
-      .select("status, provider_run_id, error_message")
+      .select("status, provider_run_id, error_class, result_summary")
       .eq("id", jobId)
       .single();
-    expect(job!.status).toBe("running");
+    expect(job!.status).toBe("canceled");
     expect(job!.provider_run_id).toBe("winner-q");
-    expect(job!.error_message).toBeNull();
+    expect(job!.error_class).toBe("submission_unknown");
+    expect(job!.result_summary).toMatchObject({
+      submit_phase: "submission_unknown",
+      manual_reconciliation_required: true,
+      provider_queue_id_for_reconciliation: "mock-queue-1",
+    });
   });
 
   it("finalizeSkipTraceFromBatch persists results + completes the job", async () => {
@@ -1421,7 +1426,8 @@ describe("runSkipTraceEnrichment (integration, mock provider)", () => {
   // Error classification: every error item gets a categorized
   // error_class so the UI + retry logic can distinguish terminal
   // (provider_no_data, address_unverified) from retryable
-  // (provider_transient, provider_unknown). Caching also branches
+  // (provider_transient). Ambiguous provider outcomes are terminal
+  // submission_unknown rows requiring manual reconciliation. Caching branches
   // on this — verified-no-data caches a negative; unverified does not.
   // ---------------------------------------------------------------
   describe("error_class categorization on missing-from-batch rows", () => {

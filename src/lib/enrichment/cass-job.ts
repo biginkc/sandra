@@ -14,6 +14,7 @@ export type CassJobSummary = {
   cacheHits: number;
   failed: number;
   providerOff: number;
+  dncSkipped?: number;
 };
 
 const PROGRESS_UPDATE_INTERVAL = 10;
@@ -89,7 +90,8 @@ export async function selectCassEligibleProperties(
     .from("properties")
     .select("id")
     .in("id", candidateIds)
-    .eq("cass_status", "unverified");
+    .eq("cass_status", "unverified")
+    .eq("is_dnc_locked", false);
 
   return (rows ?? [])
     .map((r) => r.id)
@@ -203,16 +205,45 @@ export async function runCassChunk(
         break;
       case "no_result":
       case "failed":
+      case "provider_rejected":
         summary.failed++;
         await supabase.from("job_items").insert({
           job_id: params.jobId,
           property_id: propertyId,
           status: "error",
-          error_class: outcome.status === "no_result" ? "provider" : "database",
+          error_class:
+            outcome.status === "no_result"
+              ? "provider"
+              : outcome.status === "provider_rejected"
+                ? "provider_rejected"
+                : "database",
           error_message:
-            outcome.status === "failed"
+            outcome.status === "failed" || outcome.status === "provider_rejected"
               ? outcome.error
               : "Provider returned no result",
+        });
+        break;
+      case "submission_unknown":
+      case "provider_persist_failed":
+        summary.failed++;
+        await supabase.from("job_items").insert({
+          job_id: params.jobId,
+          property_id: propertyId,
+          // Deliberately not `error`: the generic retry action selects only
+          // error rows. These require manual provider reconciliation first.
+          status: "skipped",
+          error_class: outcome.status,
+          error_message: outcome.error,
+        });
+        break;
+      case "dnc_skipped":
+        summary.dncSkipped = (summary.dncSkipped ?? 0) + 1;
+        await supabase.from("job_items").insert({
+          job_id: params.jobId,
+          property_id: propertyId,
+          status: "skipped",
+          error_class: "dnc_locked",
+          error_message: "Skipped at the paid boundary because the property is permanently DNC.",
         });
         break;
       case "provider_off":
@@ -269,7 +300,8 @@ export async function finalizeCassJob(
   // "failed" status only if every single verification bombed AND at least
   // one real attempt was made. If the provider is off across the board,
   // mark the job "canceled" — it didn't fail, we just can't run it.
-  const anyAttempted = summary.total - summary.providerOff > 0;
+  const anyAttempted =
+    summary.total - summary.providerOff - (summary.dncSkipped ?? 0) > 0;
   const status: Database["public"]["Tables"]["jobs"]["Update"]["status"] =
     !anyAttempted
       ? "canceled"
@@ -336,6 +368,7 @@ export async function runCassEnrichment(
     cacheHits: 0,
     failed: 0,
     providerOff: 0,
+    dncSkipped: 0,
   };
 
   await beginCassJob(supabase, {

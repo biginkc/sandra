@@ -37,7 +37,7 @@ export async function matchUnknownSender(
   try {
     const { data: contact, error: fetchErr } = await supabase
       .from("contacts")
-      .select("phone_1, phone_2, phone_3")
+      .select("org_id, phone_1, phone_2, phone_3")
       .eq("id", contactId)
       .maybeSingle();
     if (fetchErr) {
@@ -79,7 +79,8 @@ export async function matchUnknownSender(
       const { error: updateErr } = await supabase
         .from("contacts")
         .update(updates)
-        .eq("id", contactId);
+        .eq("id", contactId)
+        .eq("org_id", contact.org_id);
       if (updateErr) {
         return err({
           code: "CONTACT_UPDATE_FAILED",
@@ -92,6 +93,7 @@ export async function matchUnknownSender(
     const { data: updated, error: msgErr } = await supabase
       .from("messages")
       .update({ contact_id: contactId })
+      .eq("org_id", contact.org_id)
       .eq("from_address", fromAddress)
       .is("contact_id", null)
       .select("id");
@@ -135,9 +137,14 @@ export async function createContactFromUnknown(
 ): Promise<Result<{ contactId: string; propertyId: string }>> {
   const { supabase, fromAddress, role, contact, property } = input;
   try {
+    const orgResult = await resolveUnknownSenderOrg(supabase, fromAddress);
+    if (!orgResult.ok) return orgResult;
+    const orgId = orgResult.data.orgId;
+
     const { data: c, error: cErr } = await supabase
       .from("contacts")
       .insert({
+        org_id: orgId,
         first_name: contact.firstName ?? null,
         last_name: contact.lastName ?? null,
         entity_name: contact.entityName ?? null,
@@ -155,15 +162,16 @@ export async function createContactFromUnknown(
     }
 
     // Detail row matching the role.
-    const detailErr = await insertRoleDetail(supabase, c.id, role);
+    const detailErr = await insertRoleDetail(supabase, c.id, orgId, role);
     if (detailErr) {
-      await supabase.from("contacts").delete().eq("id", c.id);
+      await supabase.from("contacts").delete().eq("id", c.id).eq("org_id", orgId);
       return err(detailErr);
     }
 
     const { data: p, error: pErr } = await supabase
       .from("properties")
       .insert({
+        org_id: orgId,
         address: property.address,
         city: property.city ?? null,
         state: property.state,
@@ -177,8 +185,8 @@ export async function createContactFromUnknown(
     if (pErr || !p) {
       // Clean up the orphaned contact + detail row so a retry isn't
       // blocked by the unique phone_1 partial index.
-      await deleteRoleDetail(supabase, c.id, role);
-      await supabase.from("contacts").delete().eq("id", c.id);
+      await deleteRoleDetail(supabase, c.id, orgId, role);
+      await supabase.from("contacts").delete().eq("id", c.id).eq("org_id", orgId);
       return err({
         code: "PROPERTY_INSERT_FAILED",
         message: pErr?.message ?? "no property id returned",
@@ -188,6 +196,7 @@ export async function createContactFromUnknown(
     const { error: msgErr } = await supabase
       .from("messages")
       .update({ contact_id: c.id, property_id: p.id })
+      .eq("org_id", orgId)
       .eq("from_address", fromAddress)
       .is("contact_id", null);
     if (msgErr) {
@@ -232,7 +241,7 @@ export async function mergeUnknownSenderToProperty(
   try {
     const { data: prop, error: propErr } = await supabase
       .from("properties")
-      .select("id, homeowner_contact_id, agent_contact_id")
+      .select("id, org_id, homeowner_contact_id, agent_contact_id")
       .eq("id", propertyId)
       .maybeSingle();
     if (propErr) {
@@ -259,6 +268,7 @@ export async function mergeUnknownSenderToProperty(
     const { data: c, error: cErr } = await supabase
       .from("contacts")
       .insert({
+        org_id: prop.org_id,
         first_name: contact.firstName ?? null,
         last_name: contact.lastName ?? null,
         entity_name: contact.entityName ?? null,
@@ -275,9 +285,13 @@ export async function mergeUnknownSenderToProperty(
       });
     }
 
-    const detailErr = await insertRoleDetail(supabase, c.id, role);
+    const detailErr = await insertRoleDetail(supabase, c.id, prop.org_id, role);
     if (detailErr) {
-      await supabase.from("contacts").delete().eq("id", c.id);
+      await supabase
+        .from("contacts")
+        .delete()
+        .eq("id", c.id)
+        .eq("org_id", prop.org_id);
       return err(detailErr);
     }
 
@@ -288,10 +302,15 @@ export async function mergeUnknownSenderToProperty(
           ? { homeowner_contact_id: c.id }
           : { agent_contact_id: c.id },
       )
-      .eq("id", propertyId);
+      .eq("id", propertyId)
+      .eq("org_id", prop.org_id);
     if (linkErr) {
-      await deleteRoleDetail(supabase, c.id, role);
-      await supabase.from("contacts").delete().eq("id", c.id);
+      await deleteRoleDetail(supabase, c.id, prop.org_id, role);
+      await supabase
+        .from("contacts")
+        .delete()
+        .eq("id", c.id)
+        .eq("org_id", prop.org_id);
       return err({
         code: "PROPERTY_LINK_FAILED",
         message: linkErr.message,
@@ -301,6 +320,7 @@ export async function mergeUnknownSenderToProperty(
     const { error: msgErr } = await supabase
       .from("messages")
       .update({ contact_id: c.id, property_id: propertyId })
+      .eq("org_id", prop.org_id)
       .eq("from_address", fromAddress)
       .is("contact_id", null);
     if (msgErr) {
@@ -323,12 +343,17 @@ export async function mergeUnknownSenderToProperty(
 async function insertRoleDetail(
   supabase: SupabaseClient<Database>,
   contactId: string,
+  orgId: string,
   role: ContactRole,
 ): Promise<AppErrorShape | null> {
   const { error } =
     role === "homeowner"
-      ? await supabase.from("homeowner_details").insert({ contact_id: contactId })
-      : await supabase.from("agent_details").insert({ contact_id: contactId });
+      ? await supabase
+          .from("homeowner_details")
+          .insert({ contact_id: contactId, org_id: orgId })
+      : await supabase
+          .from("agent_details")
+          .insert({ contact_id: contactId, org_id: orgId });
   if (error) {
     return {
       code: role === "homeowner" ? "HOMEOWNER_DETAIL_FAILED" : "AGENT_DETAIL_FAILED",
@@ -341,16 +366,51 @@ async function insertRoleDetail(
 async function deleteRoleDetail(
   supabase: SupabaseClient<Database>,
   contactId: string,
+  orgId: string,
   role: ContactRole,
 ): Promise<void> {
   if (role === "homeowner") {
     await supabase
       .from("homeowner_details")
       .delete()
-      .eq("contact_id", contactId);
+      .eq("contact_id", contactId)
+      .eq("org_id", orgId);
   } else {
-    await supabase.from("agent_details").delete().eq("contact_id", contactId);
+    await supabase
+      .from("agent_details")
+      .delete()
+      .eq("contact_id", contactId)
+      .eq("org_id", orgId);
   }
+}
+
+async function resolveUnknownSenderOrg(
+  supabase: SupabaseClient<Database>,
+  fromAddress: string,
+): Promise<Result<{ orgId: string }>> {
+  const { data, error } = await supabase
+    .from("messages")
+    .select("org_id")
+    .eq("from_address", fromAddress)
+    .is("contact_id", null)
+    .limit(100);
+  if (error) {
+    return err({ code: "MESSAGE_ORG_LOOKUP_FAILED", message: error.message });
+  }
+  const orgIds = [...new Set((data ?? []).map((row) => row.org_id))];
+  if (orgIds.length === 0) {
+    return err({
+      code: "UNKNOWN_SENDER_NOT_FOUND",
+      message: "No unmatched messages exist for this sender.",
+    });
+  }
+  if (orgIds.length !== 1) {
+    return err({
+      code: "AMBIGUOUS_SENDER_ORG",
+      message: "This sender exists in more than one organization.",
+    });
+  }
+  return ok({ orgId: orgIds[0] });
 }
 
 export type DismissUnknownSenderInput = {

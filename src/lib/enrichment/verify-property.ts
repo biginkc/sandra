@@ -1,6 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
-import { ConfigurationError } from "@/lib/errors/classes";
+import { ConfigurationError, ProviderError } from "@/lib/errors/classes";
 import type { Database, Json } from "@/lib/supabase/types";
 import { lookupCassCache, writeCassCache } from "./cass-cache";
 import { getAddressVerifier } from "./registry";
@@ -15,6 +15,10 @@ export type VerifyPropertyOutcome =
     }
   | { status: "not_found"; propertyId: string }
   | { status: "provider_off"; propertyId: string }
+  | { status: "dnc_skipped"; propertyId: string }
+  | { status: "submission_unknown"; propertyId: string; error: string }
+  | { status: "provider_rejected"; propertyId: string; error: string }
+  | { status: "provider_persist_failed"; propertyId: string; error: string }
   | { status: "no_result"; propertyId: string }
   | { status: "failed"; propertyId: string; error: string };
 
@@ -36,20 +40,9 @@ export async function verifyPropertyAddress(
   supabase: SupabaseClient<Database>,
   propertyId: string,
 ): Promise<VerifyPropertyOutcome> {
-  let verifier;
-  try {
-    verifier = getAddressVerifier();
-  } catch (e) {
-    if (e instanceof ConfigurationError) {
-      return { status: "provider_off", propertyId };
-    }
-    throw e;
-  }
-  if (!verifier) return { status: "provider_off", propertyId };
-
   const { data: property, error: fetchError } = await supabase
     .from("properties")
-    .select("id, address, city, state, zip")
+    .select("id, org_id, address, city, state, zip, is_dnc_locked")
     .eq("id", propertyId)
     .maybeSingle();
 
@@ -57,6 +50,7 @@ export async function verifyPropertyAddress(
     return { status: "failed", propertyId, error: fetchError.message };
   }
   if (!property) return { status: "not_found", propertyId };
+  if (property.is_dnc_locked) return { status: "dnc_skipped", propertyId };
 
   const input: AddressInput = {
     address: property.address,
@@ -67,19 +61,63 @@ export async function verifyPropertyAddress(
 
   let verified: VerifiedAddress | null = null;
   let cacheHit = false;
+  let providerCallStarted = false;
   try {
     verified = await lookupCassCache(supabase, input);
     if (verified) {
       cacheHit = true;
     } else {
-      verified = await verifier.verify(input);
-      if (verified) {
-        // Write-through. Don't block the caller on cache insert failures —
-        // a failed write just means the next lookup pays the API cost.
-        await writeCassCache(supabase, input, verified);
+      let verifier;
+      try {
+        verifier = getAddressVerifier();
+      } catch (e) {
+        if (e instanceof ConfigurationError) {
+          return { status: "provider_off", propertyId };
+        }
+        throw e;
       }
+      if (!verifier) return { status: "provider_off", propertyId };
+
+      const { data: paidClaim, error: paidClaimError } = await (
+        supabase as unknown as {
+          rpc(
+            fn: "claim_paid_property_enrichment",
+            args: { p_property_id: string; p_org_id: string },
+          ): Promise<{ data: boolean | null; error: { message: string } | null }>;
+        }
+      ).rpc("claim_paid_property_enrichment", {
+        p_property_id: property.id,
+        p_org_id: property.org_id,
+      });
+      if (paidClaimError) {
+        return {
+          status: "failed",
+          propertyId,
+          error: `paid-boundary DNC claim failed: ${paidClaimError.message}`,
+        };
+      }
+      if (paidClaim !== true) {
+        return { status: "dnc_skipped", propertyId };
+      }
+
+      providerCallStarted = true;
+      verified = await verifier.verify(input);
     }
   } catch (e) {
+    if (
+      providerCallStarted &&
+      e instanceof ProviderError &&
+      typeof e.details?.status === "number"
+    ) {
+      return { status: "provider_rejected", propertyId, error: e.message };
+    }
+    if (providerCallStarted) {
+      return {
+        status: "submission_unknown",
+        propertyId,
+        error: e instanceof Error ? e.message : String(e),
+      };
+    }
     return {
       status: "failed",
       propertyId,
@@ -105,13 +143,35 @@ export async function verifyPropertyAddress(
     updates.is_residential = verified.isResidential;
   if (verified.fipsCode) updates.fips_code = verified.fipsCode;
 
-  const { error: updateError } = await supabase
+  const { data: updated, error: updateError } = await supabase
     .from("properties")
     .update(updates)
-    .eq("id", propertyId);
+    .eq("id", propertyId)
+    .eq("org_id", property.org_id)
+    .eq("is_dnc_locked", false)
+    .select("id");
 
   if (updateError) {
-    return { status: "failed", propertyId, error: updateError.message };
+    if (updateError.message.includes("DNC_LOCKED")) {
+      return { status: "dnc_skipped", propertyId };
+    }
+    return {
+      status: cacheHit ? "failed" : "provider_persist_failed",
+      propertyId,
+      error: updateError.message,
+    };
+  }
+  if (!updated || updated.length !== 1) {
+    return { status: "dnc_skipped", propertyId };
+  }
+
+  if (!cacheHit) {
+    try {
+      await writeCassCache(supabase, input, verified);
+    } catch {
+      // The property result is already durable. Cache failure cannot make a
+      // paid response retryable or turn a successful verification into loss.
+    }
   }
 
   return {

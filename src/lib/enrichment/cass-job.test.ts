@@ -70,12 +70,13 @@ describe("isAwaitingManualStart", () => {
 
 describe("selectCassEligibleProperties", () => {
   type JobItemRow = { property_id: string | null; status: string };
-  type PropertyRow = { id: string; cass_status: string };
+  type PropertyRow = { id: string; cass_status: string; is_dnc_locked?: boolean };
 
   type Capture = {
     jobItemsStatusFilter: string[] | null;
     propertiesIdFilter: string[] | null;
     propertiesCassStatusFilter: string | null;
+    propertiesDncFilter: boolean | null;
   };
 
   function makeSupabase(
@@ -103,12 +104,17 @@ describe("selectCassEligibleProperties", () => {
             capture.propertiesIdFilter = values;
             return builder;
           }),
-          eq: vi.fn((_col: string, value: string) => {
-            capture.propertiesCassStatusFilter = value;
+          eq: vi.fn((col: string, value: string | boolean) => {
+            if (col === "cass_status") {
+              capture.propertiesCassStatusFilter = value as string;
+              return builder;
+            }
+            capture.propertiesDncFilter = value as boolean;
             const matched = properties.filter(
               (p) =>
                 (capture.propertiesIdFilter ?? []).includes(p.id) &&
-                p.cass_status === value,
+                p.cass_status === capture.propertiesCassStatusFilter &&
+                (p.is_dnc_locked ?? false) === value,
             );
             return Promise.resolve({
               data: matched.map((p) => ({ id: p.id })),
@@ -128,6 +134,7 @@ describe("selectCassEligibleProperties", () => {
       jobItemsStatusFilter: null,
       propertiesIdFilter: null,
       propertiesCassStatusFilter: null,
+      propertiesDncFilter: null,
     };
   }
 
@@ -196,6 +203,25 @@ describe("selectCassEligibleProperties", () => {
     const ids = await selectCassEligibleProperties(supabase, "job-1");
     expect(ids.sort()).toEqual(["dup-unv", "new1"]);
     expect(capture.propertiesCassStatusFilter).toBe("unverified");
+    expect(capture.propertiesDncFilter).toBe(false);
+  });
+
+  it("excludes permanent DNC before constructing a paid CASS job", async () => {
+    const capture = emptyCapture();
+    const supabase = makeSupabase(
+      [
+        { property_id: "safe", status: "success" },
+        { property_id: "locked", status: "success" },
+      ],
+      [
+        { id: "safe", cass_status: "unverified", is_dnc_locked: false },
+        { id: "locked", cass_status: "unverified", is_dnc_locked: true },
+      ],
+      capture,
+    );
+    await expect(selectCassEligibleProperties(supabase, "job-1")).resolves.toEqual([
+      "safe",
+    ]);
   });
 
   it("returns [] when there are no eligible job_items (skips the properties query)", async () => {
