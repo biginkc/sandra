@@ -785,6 +785,162 @@ export type Database = {
         }
         Relationships: []
       }
+      csv_import_job_provenance: {
+        Row: {
+          classify_line_types: boolean
+          county_id: string
+          created_at: string
+          csv_import_id: string
+          dataset_sha256: string
+          dataset_version: number
+          expected_dnc_rows: number
+          expected_total_rows: number
+          job_id: string
+          list_id: string | null
+          list_name: string | null
+          list_resolution_error: string | null
+          mapping: Json
+          market: string
+          org_id: string
+          request_cass: boolean
+          requested_by: string | null
+          review_contract_sha256: string
+          sequence_id: string | null
+          sms_consent: boolean
+          source: string
+          storage_path: string
+        }
+        Insert: {
+          classify_line_types?: boolean
+          county_id: string
+          created_at?: string
+          csv_import_id: string
+          dataset_sha256: string
+          dataset_version: number
+          expected_dnc_rows?: number
+          expected_total_rows: number
+          job_id: string
+          list_id?: string | null
+          list_name?: string | null
+          list_resolution_error?: string | null
+          mapping: Json
+          market: string
+          org_id: string
+          request_cass?: boolean
+          requested_by?: string | null
+          review_contract_sha256: string
+          sequence_id?: string | null
+          sms_consent?: boolean
+          source: string
+          storage_path: string
+        }
+        Update: {
+          classify_line_types?: boolean
+          county_id?: string
+          created_at?: string
+          csv_import_id?: string
+          dataset_sha256?: string
+          dataset_version?: number
+          expected_dnc_rows?: number
+          expected_total_rows?: number
+          job_id?: string
+          list_id?: string | null
+          list_name?: string | null
+          list_resolution_error?: string | null
+          mapping?: Json
+          market?: string
+          org_id?: string
+          request_cass?: boolean
+          requested_by?: string | null
+          review_contract_sha256?: string
+          sequence_id?: string | null
+          sms_consent?: boolean
+          source?: string
+          storage_path?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "csv_import_job_provenance_import_org_fkey"
+            columns: ["csv_import_id", "org_id"]
+            isOneToOne: false
+            referencedRelation: "csv_imports"
+            referencedColumns: ["id", "org_id"]
+          },
+          {
+            foreignKeyName: "csv_import_job_provenance_job_org_fkey"
+            columns: ["job_id", "org_id"]
+            isOneToOne: true
+            referencedRelation: "jobs"
+            referencedColumns: ["id", "org_id"]
+          },
+          {
+            foreignKeyName: "csv_import_job_provenance_list_fkey"
+            columns: ["list_id"]
+            isOneToOne: false
+            referencedRelation: "lists"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "csv_import_job_provenance_sequence_fkey"
+            columns: ["sequence_id"]
+            isOneToOne: false
+            referencedRelation: "sequences"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      csv_import_row_outcomes: {
+        Row: {
+          created_at: string
+          csv_import_id: string
+          job_id: string
+          org_id: string
+          original_outcome: string
+          property_id: string
+          source_row_index: number
+        }
+        Insert: {
+          created_at?: string
+          csv_import_id: string
+          job_id: string
+          org_id: string
+          original_outcome: string
+          property_id: string
+          source_row_index: number
+        }
+        Update: {
+          created_at?: string
+          csv_import_id?: string
+          job_id?: string
+          org_id?: string
+          original_outcome?: string
+          property_id?: string
+          source_row_index?: number
+        }
+        Relationships: [
+          {
+            foreignKeyName: "csv_import_row_outcomes_import_org_fkey"
+            columns: ["csv_import_id", "org_id"]
+            isOneToOne: false
+            referencedRelation: "csv_imports"
+            referencedColumns: ["id", "org_id"]
+          },
+          {
+            foreignKeyName: "csv_import_row_outcomes_job_org_fkey"
+            columns: ["job_id", "org_id"]
+            isOneToOne: false
+            referencedRelation: "jobs"
+            referencedColumns: ["id", "org_id"]
+          },
+          {
+            foreignKeyName: "csv_import_row_outcomes_property_id_fkey"
+            columns: ["property_id"]
+            isOneToOne: false
+            referencedRelation: "properties"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       csv_imports: {
         Row: {
           county_id: string | null
@@ -3406,6 +3562,29 @@ export type Database = {
         Args: { p_property_id: string }
         Returns: undefined
       }
+      claim_paid_property_enrichment: {
+        Args: { p_org_id: string; p_property_id: string }
+        Returns: boolean
+      }
+      claim_csv_import_retry: {
+        Args: { p_job_id: string }
+        Returns: boolean
+      }
+      checkpoint_csv_import_property_outcome: {
+        Args: {
+          p_csv_import_id: string
+          p_existing_patch?: Json
+          p_existing_property_id?: string | null
+          p_job_id: string
+          p_org_id: string
+          p_property: Json
+          p_source_row_index: number
+        }
+        Returns: {
+          original_outcome: string
+          property_id: string
+        }[]
+      }
       capture_sendillo_sms_health_snapshot: {
         Args: { p_captured_at?: string }
         Returns: {
@@ -3441,6 +3620,15 @@ export type Database = {
         }[]
       }
       dashboard_summary: { Args: never; Returns: Json }
+      fail_csv_import_workflow: {
+        Args: {
+          p_csv_import_id: string
+          p_job_id: string
+          p_message: string
+          p_org_id: string
+        }
+        Returns: Json
+      }
       get_leads_board_page: {
         Args: {
           p_assignee_id: string | null
@@ -3461,6 +3649,7 @@ export type Database = {
         }
         Returns: {
           rows: Json
+          snapshot_generation: string
           total_count: number
         }[]
       }
