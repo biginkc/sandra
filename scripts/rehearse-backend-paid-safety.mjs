@@ -105,6 +105,19 @@ try {
 
   psql(`
     create role anon; create role authenticated; create role service_role;
+    create table public.jobs(
+      id uuid primary key,
+      error_class text check (error_class in (
+        'validation','transient','provider','database','authorization','configuration'
+      ))
+    );
+    create table public.job_items(
+      id uuid primary key,
+      error_class text check (error_class in (
+        'validation','transient','provider','database','authorization','configuration',
+        'internal','provider_no_data','address_unverified','provider_transient','provider_unknown'
+      ))
+    );
     create table public.organizations(id uuid primary key);
     create table public.contacts(
       id uuid primary key, org_id uuid not null, do_not_contact boolean not null default false,
@@ -160,6 +173,15 @@ try {
     ["-h", socketDir, "-p", String(port), "-U", "postgres", "-v", "ON_ERROR_STOP=1", "-f", migration],
     { stdio: "ignore" },
   );
+
+  psql(`
+    insert into jobs(id, error_class)
+    values ('66666666-6666-6666-6666-666666666666', 'submission_unknown');
+    insert into job_items(id, error_class) values
+      ('77777777-7777-7777-7777-777777777771', 'dnc_locked'),
+      ('77777777-7777-7777-7777-777777777772', 'submission_unknown'),
+      ('77777777-7777-7777-7777-777777777773', 'provider_persist_failed');
+  `);
 
   psql(`insert into consent_events(contact_id, org_id, event_type) values ('${contact}', '${orgA}', 'opt_out')`);
   equal(

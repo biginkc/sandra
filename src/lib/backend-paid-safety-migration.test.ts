@@ -11,6 +11,15 @@ const migration = readFileSync(
 );
 
 describe("backend paid safety migration", () => {
+  it("allows terminal/manual paid-provider outcomes in durable job ledgers", () => {
+    expect(migration).toMatch(
+      /jobs_error_class_check[\s\S]+submission_unknown/,
+    );
+    expect(migration).toMatch(
+      /job_items_error_class_check[\s\S]+dnc_locked[\s\S]+submission_unknown[\s\S]+provider_persist_failed/,
+    );
+  });
+
   it("derives contact-owned tenant identity and exposes only a service-role paid claim", () => {
     expect(migration).toContain("new.org_id := authoritative_org_id");
     expect(migration).toMatch(

@@ -1,6 +1,32 @@
 -- Final backend safety hardening for tenant-owned compliance rows, paid
 -- enrichment boundaries, and permanent-DNC sequence history.
 
+-- Ambiguous provider outcomes must be persisted as terminal/manual states.
+-- Keep the database taxonomy aligned with the runner so the safety write
+-- cannot itself be rejected after a provider may already have accepted work.
+alter table public.jobs
+  drop constraint if exists jobs_error_class_check;
+alter table public.jobs
+  add constraint jobs_error_class_check check (
+    error_class is null or error_class = any (array[
+      'validation', 'transient', 'provider', 'database',
+      'authorization', 'configuration', 'submission_unknown'
+    ])
+  );
+
+alter table public.job_items
+  drop constraint if exists job_items_error_class_check;
+alter table public.job_items
+  add constraint job_items_error_class_check check (
+    error_class is null or error_class = any (array[
+      'validation', 'transient', 'provider', 'database',
+      'authorization', 'configuration', 'internal',
+      'provider_no_data', 'address_unverified', 'provider_transient',
+      'provider_unknown', 'dnc_locked', 'submission_unknown',
+      'provider_persist_failed'
+    ])
+  );
+
 -- Contact-owned rows must always carry the contact's real organization.
 -- This protects service-role/webhook writers as well as older application
 -- code that still relies on the historical default org_id.
