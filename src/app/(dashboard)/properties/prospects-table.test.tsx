@@ -135,6 +135,7 @@ function makeRow(overrides: Partial<ProspectRow> & { id: string }): ProspectRow 
     outreach_dispo: overrides.outreach_dispo ?? null,
     imported_at: overrides.imported_at ?? null,
     dnc_reason: overrides.dnc_reason ?? null,
+    channel_restriction: overrides.channel_restriction ?? null,
   };
 }
 
@@ -226,12 +227,26 @@ describe("<ProspectsTable />", () => {
 
     expect(screen.queryByRole("checkbox", { name: "Select locked Main St" })).not.toBeInTheDocument();
     expect(screen.getByLabelText("locked Main St is locked Do Not Contact")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /locked Main St/ })).toHaveAttribute(
+      "href",
+      "/leads/locked",
+    );
     expect(screen.getByText("⊘ DO NOT CONTACT")).toBeInTheDocument();
     await user.click(screen.getByRole("checkbox", { name: "Select all prospects on this page" }));
     expect(screen.getByRole("checkbox", { name: "Select eligible Main St" })).toBeChecked();
     await waitFor(() => {
       expect(screen.getByRole("button", { name: /Actions for 1 selected/ })).toBeEnabled();
     });
+  });
+
+  it("keeps SMS opt-out as a channel label without locking selection", () => {
+    renderTable([
+      makeRow({ id: "sms-only", channel_restriction: "SMS opted out" }),
+    ]);
+
+    expect(screen.getByText("SMS opted out")).toBeInTheDocument();
+    expect(screen.getByRole("checkbox", { name: "Select sms-only Main St" })).toBeInTheDocument();
+    expect(screen.queryByText("⊘ DO NOT CONTACT")).not.toBeInTheDocument();
   });
 
   it("renders outreach disposition pills with operator-facing labels", () => {

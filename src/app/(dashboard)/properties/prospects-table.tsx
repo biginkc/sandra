@@ -95,6 +95,7 @@ export type ProspectRow = {
   outreach_dispo: string | null;
   imported_at?: string | null;
   dnc_reason?: string | null;
+  channel_restriction?: string | null;
 };
 
 export type ListOption = { id: string; name: string; color: string | null };
@@ -913,12 +914,18 @@ export function ProspectsTable({
                       )}
                     </TableCell>
                     <TableCell className="font-medium">
-                      {formatFullAddress({
-                        address: p.address,
-                        city: p.city,
-                        state: p.state,
-                        zip: p.zip,
-                      })}
+                      <Link
+                        href={`/leads/${p.id}`}
+                        onClick={(event) => event.stopPropagation()}
+                        className="rounded-sm underline-offset-4 hover:underline focus-visible:outline-2 focus-visible:outline-offset-2"
+                      >
+                        {formatFullAddress({
+                          address: p.address,
+                          city: p.city,
+                          state: p.state,
+                          zip: p.zip,
+                        })}
+                      </Link>
                     </TableCell>
                     <TableCell>{p.market ?? "—"}</TableCell>
                     <TableCell>
@@ -933,6 +940,7 @@ export function ProspectsTable({
                             isVacant={p.is_vacant}
                             engagement={p.engagement}
                             dispo={p.outreach_dispo}
+                            channelRestriction={p.channel_restriction ?? null}
                           />
                         )}
                         {p.imported_at && (
@@ -1008,11 +1016,13 @@ function StatusPills({
   isVacant,
   engagement,
   dispo,
+  channelRestriction,
 }: {
   cass: string;
   isVacant: boolean | null;
   engagement: EngagementState;
   dispo: string | null;
+  channelRestriction: string | null;
 }) {
   return (
     <div className="flex flex-wrap gap-1">
@@ -1020,6 +1030,11 @@ function StatusPills({
       {isVacant === true ? <VacantPill /> : null}
       {engagement !== "none" ? <EngagementPill state={engagement} /> : null}
       {dispo ? <DispoPill dispo={dispo} /> : null}
+      {channelRestriction ? (
+        <Badge className="bg-amber-100 text-[10px] font-medium text-amber-900 hover:bg-amber-100">
+          {channelRestriction}
+        </Badge>
+      ) : null}
     </div>
   );
 }

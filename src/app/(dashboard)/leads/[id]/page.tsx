@@ -123,6 +123,16 @@ export default async function LeadDetailPage({
   }
 
   const lead = data as DetailedLead;
+  if (lead.is_dnc_locked) {
+    const { prevId, nextId } = await getPropertyNeighbors(id, "prospect");
+    return (
+      <LockedDncPropertyDetail
+        lead={lead}
+        prevId={prevId}
+        nextId={nextId}
+      />
+    );
+  }
   const homeownerSmsPhone = selectBestSmsPhone(lead.homeowner)?.phone ?? null;
 
   // Started early, consumed just before render (same parallel-fetch shape
@@ -688,6 +698,133 @@ export default async function LeadDetailPage({
           <Row label="Regrid" value={lead.regrid_id} mono />
           <Row label="ATTOM" value={lead.attom_id} mono />
         </div>
+      </div>
+    </Page>
+  );
+}
+
+function LockedDncPropertyDetail({
+  lead,
+  prevId,
+  nextId,
+}: {
+  lead: DetailedLead;
+  prevId: string | null;
+  nextId: string | null;
+}) {
+  const zillowHref = zillowUrl({
+    address: lead.address,
+    city: lead.city,
+    state: lead.state,
+    zip: lead.zip,
+  });
+  return (
+    <Page>
+      <PageHeader
+        breadcrumb={[
+          { label: "Workspace" },
+          { label: "Prospects", href: "/properties" },
+          { label: lead.address },
+        ]}
+        title={lead.address}
+        description={
+          [lead.city, lead.state, lead.zip].filter(Boolean).join(", ") || "—"
+        }
+        actions={
+          <div className="flex items-center gap-1">
+            <Link href="/properties">
+              <Button variant="outline" size="sm" aria-label="Back to prospects">
+                <ChevronLeft className="mr-1 h-4 w-4" />
+                Back to prospects
+              </Button>
+            </Link>
+            {zillowHref ? (
+              <a href={zillowHref} target="_blank" rel="noopener noreferrer">
+                <Button variant="outline" size="sm">
+                  <ExternalLink className="mr-1 h-4 w-4" />
+                  Zillow
+                </Button>
+              </a>
+            ) : null}
+            {prevId ? (
+              <Link href={`/leads/${prevId}`}>
+                <Button variant="ghost" size="icon" aria-label="Previous prospect">
+                  <ChevronLeft className="h-4 w-4" />
+                </Button>
+              </Link>
+            ) : null}
+            {nextId ? (
+              <Link href={`/leads/${nextId}`}>
+                <Button variant="ghost" size="icon" aria-label="Next prospect">
+                  <ChevronRight className="h-4 w-4" />
+                </Button>
+              </Link>
+            ) : null}
+          </div>
+        }
+      />
+
+      <div
+        className="border-foreground bg-muted rounded-md border-2 p-4"
+        role="status"
+        data-testid="permanent-dnc-lock"
+      >
+        <div className="font-mono text-sm font-bold tracking-wide">
+          ⊘ PERMANENT DO NOT CONTACT
+        </div>
+        <p className="text-muted-foreground mt-1 text-sm">
+          This record is permanently locked and read-only. Its historical pipeline stage is preserved for audit history.
+        </p>
+      </div>
+
+      <div className="flex flex-wrap gap-2">
+        <Badge variant="outline">Historical stage: {lead.status.replaceAll("_", " ")}</Badge>
+        {lead.market ? <Badge variant="secondary">{lead.market}</Badge> : null}
+        {lead.outreach_dispo ? (
+          <Badge variant="outline">Disposition: {lead.outreach_dispo.replaceAll("_", " ")}</Badge>
+        ) : null}
+      </div>
+
+      <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
+        <Section title="Property">
+          <Row label="Beds" value={lead.beds} />
+          <Row label="Baths" value={lead.baths} />
+          <Row label="Square feet" value={lead.sqft} />
+          <Row label="Year built" value={lead.year_built} />
+          <Row label="Source" value={lead.source} />
+          <Row label="Created" value={formatDate(lead.created_at)} />
+        </Section>
+
+        <Section title="Homeowner">
+          {lead.homeowner ? (
+            <>
+              <Row
+                label="Name"
+                value={
+                  lead.homeowner.contact_type === "entity"
+                    ? lead.homeowner.entity_name
+                    : [lead.homeowner.first_name, lead.homeowner.last_name]
+                        .filter(Boolean)
+                        .join(" ")
+                }
+              />
+              <Row label="Phone 1" value={lead.homeowner.phone_1} mono />
+              <Row label="Phone 2" value={lead.homeowner.phone_2} mono />
+              <Row label="Phone 3" value={lead.homeowner.phone_3} mono />
+              <Row label="Email" value={lead.homeowner.email} />
+              <Row label="Do not contact" value="Yes — permanent" />
+            </>
+          ) : (
+            <EmptyRow text="No homeowner linked" />
+          )}
+        </Section>
+
+        <Section title="Identifiers">
+          <Row label="APN" value={lead.apn} mono />
+          <Row label="ZPID" value={lead.zpid} mono />
+          <Row label="MLS #" value={lead.mls_number} mono />
+          <Row label="FIPS" value={lead.fips_code} mono />
+        </Section>
       </div>
     </Page>
   );

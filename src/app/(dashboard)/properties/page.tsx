@@ -31,7 +31,6 @@ import { type BlockOptions } from "./_components/blocks/_block-shell";
 import { BlockOptionsProvider } from "./_components/block-options-provider";
 import { renderBlock } from "./_components/blocks/registry";
 import type { Preset } from "./_components/quick-filter-chip";
-import { evaluateSuppression } from "@/lib/messaging/suppression";
 import { getDayBoundsInZone } from "@/lib/time/zoned";
 import { LEAD_SOURCES } from "@/lib/leads/create";
 
@@ -49,6 +48,8 @@ type PropertyQueryRow = {
   cass_status: string;
   is_vacant: boolean | null;
   created_at: string;
+  status: string;
+  is_dnc_locked: boolean;
   outreach_dispo: string | null;
   source_import_id: string | null;
   source_imported_at: string | null;
@@ -160,7 +161,7 @@ export default async function PropertiesPage({
     );
     const propertyListSelect = filterSelectFragment(blockStack);
     const propertiesSelect = [
-      "id, org_id, address, city, state, zip, market, cass_status, is_vacant, created_at, outreach_dispo, source_import_id, source_imported_at, homeowner:contacts!properties_homeowner_contact_id_fkey(phone_1, phone_2, phone_3, do_not_contact, sms_opted_out)",
+      "id, org_id, address, city, state, zip, market, cass_status, is_vacant, created_at, status, is_dnc_locked, outreach_dispo, source_import_id, source_imported_at, homeowner:contacts!properties_homeowner_contact_id_fkey(phone_1, phone_2, phone_3, do_not_contact, sms_opted_out)",
       propertyListSelect,
     ]
       .filter(Boolean)
@@ -171,7 +172,7 @@ export default async function PropertiesPage({
       .select(propertiesSelect, { count: "exact" })
       .is("deleted_at", null);
     if (!hasPipelineStatusBlock) {
-      query = query.eq("status", "prospect");
+      query = query.or("status.eq.prospect,is_dnc_locked.eq.true");
     }
     if (search) {
       query = query.ilike("address", `%${search}%`);
@@ -250,29 +251,6 @@ export default async function PropertiesPage({
   // future readers can see why the select may include list_filter/list_exclusion.
   const properties = (propertyRows ?? []) as unknown as PropertyQueryRow[];
 
-  const visiblePhones = properties.flatMap((property) => {
-    const homeowner = Array.isArray(property.homeowner) ? property.homeowner[0] : property.homeowner;
-    return homeowner
-      ? [homeowner.phone_1, homeowner.phone_2, homeowner.phone_3].filter((phone): phone is string => !!phone)
-      : [];
-  });
-  const { data: durableSuppressions, error: durableSuppressionError } = visiblePhones.length
-    ? await supabase
-        .from("sms_phone_suppressions")
-        .select("org_id, phone_e164")
-        .eq("channel", "sms")
-        .in("phone_e164", visiblePhones)
-    : { data: [], error: null };
-  if (durableSuppressionError) {
-    // Fail closed: rendering a DNC row with a selectable checkbox because
-    // the durable registry could not be read is worse than showing the page
-    // error boundary and asking the operator to retry.
-    throw new Error(`Could not verify Prospects DNC locks: ${durableSuppressionError.message}`);
-  }
-  const suppressedPhones = new Set(
-    (durableSuppressions ?? []).map((row) => `${row.org_id}:${row.phone_e164}`),
-  );
-
   const total = count ?? 0;
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
   const showingFrom = total === 0 ? 0 : from + 1;
@@ -308,15 +286,6 @@ export default async function PropertiesPage({
   const prospects: ProspectRow[] = properties.map((p) => {
     const latest = latestByPropertyId.get(p.id) ?? null;
     const homeowner = Array.isArray(p.homeowner) ? p.homeowner[0] : p.homeowner;
-    const durablePhoneSuppression = [homeowner?.phone_1, homeowner?.phone_2, homeowner?.phone_3]
-      .some((phone) => !!phone && suppressedPhones.has(`${p.org_id}:${phone}`));
-    const suppression = durablePhoneSuppression
-      ? { suppressed: true as const, reason: "Phone is in the durable suppression registry." }
-      : evaluateSuppression({
-          outreachDispo: p.outreach_dispo,
-          doNotContact: homeowner?.do_not_contact,
-          smsOptedOut: homeowner?.sms_opted_out,
-        });
     return {
       id: p.id,
       address: p.address,
@@ -331,7 +300,12 @@ export default async function PropertiesPage({
       last_message_preview: truncateMessagePreview(latest?.body ?? null),
       outreach_dispo: p.outreach_dispo ?? null,
       imported_at: p.source_imported_at,
-      dnc_reason: suppression.suppressed ? suppression.reason : null,
+      dnc_reason: p.is_dnc_locked
+        ? "Permanent Do Not Contact lock. This record is read-only."
+        : null,
+      channel_restriction: !p.is_dnc_locked && homeowner?.sms_opted_out
+        ? "SMS opted out"
+        : null,
     };
   });
 
@@ -420,12 +394,40 @@ export default async function PropertiesPage({
     if (total === 0) return null;
     const counts = await Promise.all(
       ["verified", "unverified", "invalid", "ambiguous"].map(async (s) => {
-        const { count: c } = await supabase
+        const hasPipelineStatusBlock = blockStack.some(
+          (block) => block.kind === "pipeline_status",
+        );
+        const propertyListSelect = filterSelectFragment(blockStack);
+        const countSelect = ["id", propertyListSelect]
+          .filter(Boolean)
+          .join(", ");
+        let countQuery = supabase
           .from("properties")
-          .select("id", { count: "exact", head: true })
-          .eq("status", "prospect")
+          .select(countSelect, { count: "exact", head: true })
           .is("deleted_at", null)
           .eq("cass_status", s);
+        if (!hasPipelineStatusBlock) {
+          countQuery = countQuery.or(
+            "status.eq.prospect,is_dnc_locked.eq.true",
+          );
+        }
+        if (search) {
+          countQuery = countQuery.ilike("address", `%${search}%`);
+        }
+        if (rawSearchParams.imported === "today") {
+          const { dayStart, dayEnd } = getDayBoundsInZone(
+            new Date(),
+            "America/Chicago",
+          );
+          countQuery = countQuery
+            .not("source_import_id", "is", null)
+            .gte("source_imported_at", dayStart.toISOString())
+            .lt("source_imported_at", dayEnd.toISOString());
+        }
+        countQuery = (
+          await applyFilters(countQuery, blockStack, supabase)
+        ).builder;
+        const { count: c } = await countQuery;
         return [s, c ?? 0] as const;
       }),
     );

@@ -92,11 +92,27 @@ export async function processEnrollmentTick(
   // 2. Re-check property status against pause rules.
   const { data: property, error: propErr } = await client
     .from("properties")
-    .select("status, state, address, outreach_dispo")
+    .select("status, state, address, outreach_dispo, is_dnc_locked")
     .eq("id", enrollment.property_id)
     .maybeSingle();
   if (propErr || !property) {
     return { status: "failed", enrollmentId: enrollment.id, message: propErr?.message ?? "property missing" };
+  }
+
+  if (property.is_dnc_locked) {
+    await client
+      .from("sequence_enrollments")
+      .update({
+        status: "opted_out",
+        pause_reason: "dnc",
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", enrollment.id);
+    return {
+      status: "paused",
+      enrollmentId: enrollment.id,
+      reason: "dnc",
+    };
   }
 
   // Disqualifying outreach dispos pause sequences — either permanently
@@ -368,13 +384,53 @@ export async function processEnrollmentTick(
   }
 
   if (step.action_type === "change_status" && step.target_status) {
-    await client
+    const { data: changedProperty, error: changeError } = await client
       .from("properties")
       .update({
         status: step.target_status,
         updated_at: new Date().toISOString(),
       })
-      .eq("id", enrollment.property_id);
+      .eq("id", enrollment.property_id)
+      .eq("is_dnc_locked", false)
+      .select("id")
+      .maybeSingle();
+    if (changeError) {
+      await markRunSkipped(client, claim.id, "provider_failed");
+      return {
+        status: "failed",
+        enrollmentId: enrollment.id,
+        message: changeError.message,
+      };
+    }
+    if (!changedProperty) {
+      const { data: currentProperty, error: reconcileError } = await client
+        .from("properties")
+        .select("is_dnc_locked")
+        .eq("id", enrollment.property_id)
+        .maybeSingle();
+      await markRunSkipped(client, claim.id, "paused");
+      if (reconcileError || !currentProperty?.is_dnc_locked) {
+        return {
+          status: "failed",
+          enrollmentId: enrollment.id,
+          message: reconcileError?.message ?? "Property changed before sequence status update.",
+        };
+      }
+      const pauseError = await pauseEnrollment(
+        client,
+        enrollment.id,
+        "dnc",
+        true,
+      );
+      if (pauseError) {
+        return {
+          status: "failed",
+          enrollmentId: enrollment.id,
+          message: pauseError,
+        };
+      }
+      return { status: "paused", enrollmentId: enrollment.id, reason: "dnc" };
+    }
     await client
       .from("sequence_step_runs")
       .update({ run_at: new Date().toISOString() })
@@ -457,8 +513,8 @@ async function pauseEnrollment(
   enrollmentId: string,
   reason: string,
   permanent: boolean,
-): Promise<void> {
-  await client
+): Promise<string | null> {
+  const { error } = await client
     .from("sequence_enrollments")
     .update({
       status: permanent ? "opted_out" : "paused",
@@ -466,4 +522,5 @@ async function pauseEnrollment(
       updated_at: new Date().toISOString(),
     })
     .eq("id", enrollmentId);
+  return error?.message ?? null;
 }

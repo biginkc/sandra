@@ -850,7 +850,7 @@ export async function createDialerBatchFromFilters(args: {
  * Plan 09: signature migrated to accept the v1 block stack instead of the
  * legacy 5-chip ParsedProspectsFilters. Filter chain mirrors page.tsx:
  *   - .is("deleted_at", null)                            (always)
- *   - .eq("status", "prospect") UNLESS the stack contains a
+ *   - .or("status.eq.prospect,is_dnc_locked.eq.true") UNLESS the stack contains a
  *     pipeline_status block (in which case that block's values fully
  *     define the active status set — same rule as page.tsx)
  *   - search → ILIKE on address
@@ -888,7 +888,7 @@ export async function getAllMatchingProspectSelection(args: {
       .select(propertiesSelect)
       .is("deleted_at", null);
     if (!hasPipelineStatusBlock) {
-      query = query.eq("status", "prospect");
+      query = query.or("status.eq.prospect,is_dnc_locked.eq.true");
     }
 
     if (args.search) {

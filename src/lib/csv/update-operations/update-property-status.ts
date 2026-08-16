@@ -43,6 +43,15 @@ export const updatePropertyStatusOp: SubOperationModule = {
     if (!raw) {
       return { kind: "unchanged", rowIndex, address, reason: "blank" };
     }
+    if (property.is_dnc_locked) {
+      return {
+        kind: "rejected",
+        rowIndex,
+        address,
+        reason: "dnc-locked",
+        detail: "Permanent Do Not Contact records are read-only.",
+      };
+    }
     const normalized = normalizeStatus(raw);
     if (!normalized) {
       return {
@@ -57,10 +66,13 @@ export const updatePropertyStatusOp: SubOperationModule = {
       return { kind: "unchanged", rowIndex, address, reason: "no-change" };
     }
     if (!options.dryRun) {
-      const { error } = await ctx.supabase
+      const { data, error } = await ctx.supabase
         .from("properties")
         .update({ status: normalized })
-        .eq("id", property.id);
+        .eq("id", property.id)
+        .eq("is_dnc_locked", false)
+        .select("id")
+        .maybeSingle();
       if (error) {
         return {
           kind: "rejected",
@@ -68,6 +80,15 @@ export const updatePropertyStatusOp: SubOperationModule = {
           address,
           reason: "db-error",
           detail: error.message,
+        };
+      }
+      if (!data) {
+        return {
+          kind: "rejected",
+          rowIndex,
+          address,
+          reason: "dnc-locked",
+          detail: "The property became permanently Do Not Contact before the update saved.",
         };
       }
     }

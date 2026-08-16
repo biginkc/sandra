@@ -46,12 +46,14 @@ function queryResult(data: unknown) {
     select: vi.fn(),
     in: vi.fn(),
     eq: vi.fn(),
+    or: vi.fn(),
     is: vi.fn(),
     then: promise.then.bind(promise),
   };
   builder.select.mockReturnValue(builder);
   builder.in.mockReturnValue(builder);
   builder.eq.mockReturnValue(builder);
+  builder.or.mockReturnValue(builder);
   builder.is.mockReturnValue(builder);
   return builder;
 }
@@ -98,27 +100,15 @@ describe("Prospects DNC-safe bulk actions", () => {
           ? queryResult([
               {
                 id: "locked",
-                outreach_dispo: null,
+                status: "closed",
+                is_dnc_locked: true,
                 skip_trace_disabled: false,
-                homeowner: [{
-                  phone_1: null,
-                  phone_2: null,
-                  phone_3: null,
-                  do_not_contact: true,
-                  sms_opted_out: false,
-                }],
               },
               {
                 id: "eligible",
-                outreach_dispo: null,
+                status: "prospect",
+                is_dnc_locked: false,
                 skip_trace_disabled: false,
-                homeowner: [{
-                  phone_1: null,
-                  phone_2: null,
-                  phone_3: null,
-                  do_not_contact: false,
-                  sms_opted_out: false,
-                }],
               },
             ])
           : queryResult([]),

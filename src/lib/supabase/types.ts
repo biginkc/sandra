@@ -1722,6 +1722,7 @@ export type Database = {
           follow_up_at: string | null
           homeowner_contact_id: string | null
           id: string
+          is_dnc_locked: boolean
           is_residential: boolean | null
           is_seasonal: boolean | null
           is_vacant: boolean | null
@@ -1784,6 +1785,7 @@ export type Database = {
           follow_up_at?: string | null
           homeowner_contact_id?: string | null
           id?: string
+          is_dnc_locked?: boolean
           is_residential?: boolean | null
           is_seasonal?: boolean | null
           is_vacant?: boolean | null
@@ -1846,6 +1848,7 @@ export type Database = {
           follow_up_at?: string | null
           homeowner_contact_id?: string | null
           id?: string
+          is_dnc_locked?: boolean
           is_residential?: boolean | null
           is_seasonal?: boolean | null
           is_vacant?: boolean | null
@@ -3305,6 +3308,7 @@ export type Database = {
           has_unread: boolean
           homeowner: Json | null
           id: string
+          is_dnc_locked: boolean
           is_vacant: boolean | null
           market: string | null
           motivation_level: string | null
@@ -3327,6 +3331,7 @@ export type Database = {
           has_unread: boolean
           homeowner: Json | null
           id: string
+          is_dnc_locked: boolean
           is_vacant: boolean | null
           market: string | null
           motivation_level: string | null
@@ -3355,6 +3360,18 @@ export type Database = {
       }
     }
     Functions: {
+      assert_appointment_task_dnc_unlocked: {
+        Args: { p_task_id: string }
+        Returns: undefined
+      }
+      assert_contact_dnc_unlocked: {
+        Args: { p_contact_id: string }
+        Returns: undefined
+      }
+      assert_property_dnc_unlocked: {
+        Args: { p_property_id: string }
+        Returns: undefined
+      }
       capture_sendillo_sms_health_snapshot: {
         Args: { p_captured_at?: string }
         Returns: {

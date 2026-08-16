@@ -60,6 +60,7 @@ function makeClient(propertyRow: {
   state: string;
   address: string;
   outreach_dispo: string | null;
+  is_dnc_locked?: boolean;
 }) {
   const from = vi.fn((table: string) => {
     if (table === "sequence_steps") return makeQueryResult(STEP_ROW);
@@ -77,6 +78,25 @@ function makeClient(propertyRow: {
 }
 
 describe("processEnrollmentTick — outbound suppression boundary", () => {
+  it("pauses before claiming or sending when the property is permanently locked", async () => {
+    const client = makeClient({
+      status: "interested",
+      state: "MO",
+      address: "123 Main St",
+      outreach_dispo: null,
+      is_dnc_locked: true,
+    });
+
+    const outcome = await processEnrollmentTick(client, BASE_ENROLLMENT);
+
+    expect(outcome).toEqual({
+      status: "paused",
+      enrollmentId: "enrollment-1",
+      reason: "dnc",
+    });
+    expect(sendSmsToContact).not.toHaveBeenCalled();
+  });
+
   it("pauses (resumably) an enrollment when the property was just booked", async () => {
     const client = makeClient({
       status: "lead",
@@ -230,5 +250,106 @@ describe("processEnrollmentTick — send_sms race: booking lands after the early
       client,
       expect.objectContaining({ origin: "automated" }),
     );
+  });
+});
+
+describe("processEnrollmentTick — change_status DNC race", () => {
+  it("does not report a status change when a concurrent DNC lock wins", async () => {
+    let propertyCall = 0;
+    let runCall = 0;
+    let enrollmentUpdate: unknown;
+    const changeStep = {
+      ...STEP_ROW,
+      action_type: "change_status",
+      target_status: "contacted",
+    };
+    const from = vi.fn((table: string) => {
+      if (table === "sequence_steps") return makeQueryResult(changeStep);
+      if (table === "properties") {
+        propertyCall += 1;
+        if (propertyCall === 1) {
+          return makeQueryResult({
+            status: "new_lead",
+            state: "MO",
+            address: "123 Main St",
+            outreach_dispo: null,
+            is_dnc_locked: false,
+          });
+        }
+        if (propertyCall === 2) return makeQueryResult(null);
+        return makeQueryResult({ is_dnc_locked: true });
+      }
+      if (table === "sequence_step_runs") {
+        runCall += 1;
+        return makeQueryResult(runCall === 1 ? { id: "run-1" } : null);
+      }
+      if (table === "sequence_enrollments") {
+        const builder = makeQueryResult(null) as Record<string, unknown>;
+        builder.update = (payload: unknown) => {
+          enrollmentUpdate = payload;
+          return builder;
+        };
+        return builder;
+      }
+      throw new Error(`Unexpected table: ${table}`);
+    });
+
+    const outcome = await processEnrollmentTick(
+      { from } as never,
+      BASE_ENROLLMENT,
+    );
+
+    expect(outcome).toEqual({
+      status: "paused",
+      enrollmentId: "enrollment-1",
+      reason: "dnc",
+    });
+    expect(enrollmentUpdate).toMatchObject({
+      status: "opted_out",
+      pause_reason: "dnc",
+    });
+  });
+
+  it("reports failure when stopping the enrollment after the race fails", async () => {
+    let propertyCall = 0;
+    let runCall = 0;
+    const changeStep = {
+      ...STEP_ROW,
+      action_type: "change_status",
+      target_status: "contacted",
+    };
+    const from = vi.fn((table: string) => {
+      if (table === "sequence_steps") return makeQueryResult(changeStep);
+      if (table === "properties") {
+        propertyCall += 1;
+        if (propertyCall === 1) {
+          return makeQueryResult({
+            status: "new_lead",
+            state: "MO",
+            address: "123 Main St",
+            outreach_dispo: null,
+            is_dnc_locked: false,
+          });
+        }
+        if (propertyCall === 2) return makeQueryResult(null);
+        return makeQueryResult({ is_dnc_locked: true });
+      }
+      if (table === "sequence_step_runs") {
+        runCall += 1;
+        return makeQueryResult(runCall === 1 ? { id: "run-1" } : null);
+      }
+      if (table === "sequence_enrollments") {
+        return makeQueryResult(null, { message: "enrollment write failed" });
+      }
+      throw new Error(`Unexpected table: ${table}`);
+    });
+
+    await expect(
+      processEnrollmentTick({ from } as never, BASE_ENROLLMENT),
+    ).resolves.toEqual({
+      status: "failed",
+      enrollmentId: "enrollment-1",
+      message: "enrollment write failed",
+    });
   });
 });

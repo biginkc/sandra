@@ -25,15 +25,18 @@ export async function qualifyProperty(
 ): Promise<QualifyOutcome> {
   const { data: current, error: lookupErr } = await supabase
     .from("properties")
-    .select("status")
+    .select("status, is_dnc_locked")
     .eq("id", propertyId)
     .maybeSingle();
   if (lookupErr) return { status: "failed", message: lookupErr.message };
   if (!current) return { status: "not_found" };
+  if (current.is_dnc_locked) {
+    return { status: "failed", message: "DNC_LOCKED: property is permanently read-only" };
+  }
   if (current.status !== "prospect") return { status: "already_qualified" };
 
   const nowIso = new Date().toISOString();
-  const { error } = await supabase
+  const { data, error } = await supabase
     .from("properties")
     .update({
       status: "new_lead",
@@ -42,8 +45,25 @@ export async function qualifyProperty(
       updated_at: nowIso,
     })
     .eq("id", propertyId)
-    .eq("status", "prospect");
+    .eq("status", "prospect")
+    .eq("is_dnc_locked", false)
+    .select("id")
+    .maybeSingle();
 
   if (error) return { status: "failed", message: error.message };
+  if (!data) {
+    const { data: currentAfterRace, error: currentError } = await supabase
+      .from("properties")
+      .select("status, is_dnc_locked")
+      .eq("id", propertyId)
+      .maybeSingle();
+    if (currentError) return { status: "failed", message: currentError.message };
+    if (currentAfterRace?.is_dnc_locked) {
+      return { status: "failed", message: "DNC_LOCKED: property became permanently read-only" };
+    }
+    return currentAfterRace?.status === "prospect"
+      ? { status: "failed", message: "Qualification did not save" }
+      : { status: "already_qualified" };
+  }
   return { status: "qualified" };
 }

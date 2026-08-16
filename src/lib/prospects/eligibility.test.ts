@@ -8,41 +8,29 @@ function builder(data: unknown) {
     select: vi.fn(),
     in: vi.fn(),
     eq: vi.fn(),
+    or: vi.fn(),
     is: vi.fn(),
     then: result.then.bind(result),
   };
   query.select.mockReturnValue(query);
   query.in.mockReturnValue(query);
   query.eq.mockReturnValue(query);
+  query.or.mockReturnValue(query);
   query.is.mockReturnValue(query);
   return query;
 }
 
-const homeowner = (overrides: Record<string, unknown> = {}) => [{
-  phone_1: null,
-  phone_2: null,
-  phone_3: null,
-  do_not_contact: false,
-  sms_opted_out: false,
-  ...overrides,
-}];
-
 describe("Prospects server-owned eligibility", () => {
-  it("excludes every suppression source and keeps an ordinary prospect", async () => {
+  it("excludes only the permanent property lock and keeps channel restrictions eligible", async () => {
     const properties = [
-      { id: "contact-dnc", org_id: "org-a", outreach_dispo: null, skip_trace_disabled: false, homeowner: homeowner({ do_not_contact: true }) },
-      { id: "opted-out", org_id: "org-a", outreach_dispo: null, skip_trace_disabled: false, homeowner: homeowner({ sms_opted_out: true }) },
-      { id: "disposition", org_id: "org-a", outreach_dispo: "wrong_number", skip_trace_disabled: false, homeowner: homeowner() },
-      { id: "durable", org_id: "org-a", outreach_dispo: null, skip_trace_disabled: false, homeowner: homeowner({ phone_1: "+18165550100" }) },
-      { id: "eligible", org_id: "org-a", outreach_dispo: null, skip_trace_disabled: false, homeowner: homeowner() },
+      { id: "contact-dnc", status: "prospect", is_dnc_locked: true, skip_trace_disabled: false },
+      { id: "disposition-dnc", status: "interested", is_dnc_locked: true, skip_trace_disabled: false },
+      { id: "sms-opted-out", status: "prospect", is_dnc_locked: false, skip_trace_disabled: false },
+      { id: "wrong-number", status: "prospect", is_dnc_locked: false, skip_trace_disabled: false },
+      { id: "bad-number", status: "prospect", is_dnc_locked: false, skip_trace_disabled: false },
+      { id: "eligible", status: "prospect", is_dnc_locked: false, skip_trace_disabled: false },
     ];
-    const supabase = {
-      from: vi.fn((table: string) =>
-        table === "properties"
-          ? builder(properties)
-          : builder([{ org_id: "org-a", phone_e164: "+18165550100" }]),
-      ),
-    };
+    const supabase = { from: vi.fn(() => builder(properties)) };
 
     const result = await resolveProspectEligibility(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -51,17 +39,26 @@ describe("Prospects server-owned eligibility", () => {
       "selection",
     );
 
-    expect(result.eligibleIds).toEqual(["eligible"]);
-    expect(result.dncLockedCount).toBe(4);
+    expect(result.eligibleIds).toEqual([
+      "sms-opted-out",
+      "wrong-number",
+      "bad-number",
+      "eligible",
+    ]);
+    expect(result.dncLockedCount).toBe(2);
+    expect(result.exclusions).toEqual([
+      { propertyId: "contact-dnc", reason: "dnc" },
+      { propertyId: "disposition-dnc", reason: "dnc" },
+    ]);
+    expect(supabase.from).toHaveBeenCalledTimes(1);
   });
 
   it("applies skip_trace_disabled only to skip-trace purpose", async () => {
     const properties = [{
       id: "kill-switch",
-      org_id: "org-a",
-      outreach_dispo: null,
+      status: "prospect",
+      is_dnc_locked: false,
       skip_trace_disabled: true,
-      homeowner: homeowner(),
     }];
     const supabase = { from: vi.fn(() => builder(properties)) };
 
@@ -82,27 +79,25 @@ describe("Prospects server-owned eligibility", () => {
     });
   });
 
-  it("does not leak a durable phone suppression across organizations", async () => {
-    const properties = [
-      { id: "org-a-row", org_id: "org-a", outreach_dispo: null, skip_trace_disabled: false, homeowner: homeowner({ phone_1: "+18165550101" }) },
-      { id: "org-b-row", org_id: "org-b", outreach_dispo: null, skip_trace_disabled: false, homeowner: homeowner({ phone_1: "+18165550101" }) },
-    ];
-    const supabase = {
-      from: vi.fn((table: string) =>
-        table === "properties"
-          ? builder(properties)
-          : builder([{ org_id: "org-a", phone_e164: "+18165550101" }]),
-      ),
-    };
+  it("does not require prospect status when an advanced property is locked", async () => {
+    const properties = [{
+      id: "advanced-locked",
+      status: "under_contract",
+      is_dnc_locked: true,
+      skip_trace_disabled: false,
+    }];
+    const supabase = { from: vi.fn(() => builder(properties)) };
 
     const result = await resolveProspectEligibility(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       supabase as any,
-      ["org-a-row", "org-b-row"],
+      ["advanced-locked"],
       "selection",
     );
 
-    expect(result.eligibleIds).toEqual(["org-b-row"]);
-    expect(result.exclusions).toContainEqual({ propertyId: "org-a-row", reason: "dnc" });
+    expect(result.eligibleIds).toEqual([]);
+    expect(result.exclusions).toEqual([
+      { propertyId: "advanced-locked", reason: "dnc" },
+    ]);
   });
 });

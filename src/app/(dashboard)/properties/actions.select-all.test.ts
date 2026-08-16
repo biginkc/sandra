@@ -30,6 +30,10 @@ const { createClientMock, recorded, resolveProspectEligibilityMock } = vi.hoiste
       recorded.calls.push(`eq(${column},${String(value)})`);
       return this;
     },
+    or(value: string) {
+      recorded.calls.push(`or(${value})`);
+      return this;
+    },
     ilike(column: string, value: string) {
       recorded.calls.push(`ilike(${column},${value})`);
       return this;
@@ -61,8 +65,8 @@ const { createClientMock, recorded, resolveProspectEligibilityMock } = vi.hoiste
     resolveProspectEligibilityMock: vi.fn(async (_client, _ids: string[]) => {
       const eligibleIds = (recorded.rows as Array<{
         id: string;
-        homeowner?: Array<{ do_not_contact: boolean }>;
-      }>).filter((row) => !row.homeowner?.[0]?.do_not_contact).map((row) => row.id);
+        is_dnc_locked?: boolean;
+      }>).filter((row) => !row.is_dnc_locked).map((row) => row.id);
       return {
         eligibleIds,
         exclusions: [],
@@ -123,34 +127,23 @@ describe("getAllMatchingProspectIds", () => {
     expect(recorded.rangeCalls).toEqual([[0, 999]]);
   });
 
-  it("excludes an address-matched DNC contact from the server-owned ID set", async () => {
+  it("excludes an advanced permanent-DNC row from the server-owned ID set", async () => {
     recorded.rows = [
       {
         id: "locked",
-        outreach_dispo: null,
-        homeowner: [{
-          phone_1: null,
-          phone_2: null,
-          phone_3: null,
-          do_not_contact: true,
-          sms_opted_out: false,
-        }],
+        status: "closed",
+        is_dnc_locked: true,
       },
       {
         id: "eligible",
-        outreach_dispo: null,
-        homeowner: [{
-          phone_1: null,
-          phone_2: null,
-          phone_3: null,
-          do_not_contact: false,
-          sms_opted_out: false,
-        }],
+        status: "prospect",
+        is_dnc_locked: false,
       },
     ];
 
     const result = await getAllMatchingProspectIds({ search: null, blockStack: [] });
     expect(result).toEqual({ ok: true, data: ["eligible"] });
+    expect(recorded.calls).toContain("or(status.eq.prospect,is_dnc_locked.eq.true)");
   });
 
   it("keeps Imported Today scoped to the latest reviewed import timestamp", async () => {

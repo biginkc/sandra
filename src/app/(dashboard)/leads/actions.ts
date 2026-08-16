@@ -10,6 +10,11 @@ import { parseThreadId } from "@/lib/messages/threading";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
 import { errFromUnknown, ok, type Result } from "@/lib/errors/result";
+import {
+  assertPropertyDncUnlocked,
+  DNC_LOCKED_MESSAGE,
+  partitionPropertyDncLocks,
+} from "@/lib/dnc/property-lock";
 import { reportError } from "@/lib/errors/report";
 import { verifyPropertyAddress } from "@/lib/enrichment/verify-property";
 import type { CassStatus } from "@/lib/enrichment/types";
@@ -126,6 +131,8 @@ export async function verifyLeadAddress(
 ): Promise<Result<VerifyResult>> {
   try {
     const supabase = await createClient();
+    const unlocked = await assertPropertyDncUnlocked(supabase, propertyId);
+    if (!unlocked.ok) return unlocked;
     const outcome = await verifyPropertyAddress(supabase, propertyId);
 
     switch (outcome.status) {
@@ -206,6 +213,8 @@ export async function updateLeadMotivation(
 
   try {
     const supabase = await createClient();
+    const unlocked = await assertPropertyDncUnlocked(supabase, propertyId);
+    if (!unlocked.ok) return unlocked;
     const { error } = await supabase
       .from("properties")
       .update({
@@ -246,6 +255,8 @@ async function qualifyLead(
 ): Promise<Result<{ alreadyQualified: boolean }>> {
   try {
     const supabase = await createClient();
+    const unlocked = await assertPropertyDncUnlocked(supabase, propertyId);
+    if (!unlocked.ok) return unlocked;
 
     // Resolve the qualifier — explicit arg wins, else use the session user.
     let qualifiedBy = qualifier;
@@ -341,6 +352,8 @@ export async function revertToProspect(
 ): Promise<Result<null>> {
   try {
     const supabase = await createClient();
+    const unlocked = await assertPropertyDncUnlocked(supabase, propertyId);
+    if (!unlocked.ok) return unlocked;
     const { data: current, error: lookupErr } = await supabase
       .from("properties")
       .select("status")
@@ -681,6 +694,15 @@ export async function assignLeadsBulk(
   }
   try {
     const supabase = await createClient();
+    const partition = await partitionPropertyDncLocks(supabase, propertyIds);
+    if (!partition.ok) return partition;
+    if (partition.data.unlocked.length === 0) {
+      return {
+        ok: false,
+        error: { code: "DNC_LOCKED", message: DNC_LOCKED_MESSAGE },
+      };
+    }
+    const assignIds = partition.data.unlocked;
     const {
       data: { user },
     } = await supabase.auth.getUser();
@@ -690,7 +712,7 @@ export async function assignLeadsBulk(
         assigned_user_id: userId,
         updated_at: new Date().toISOString(),
       })
-      .in("id", propertyIds);
+      .in("id", assignIds);
     if (error) {
       return {
         ok: false,
@@ -703,7 +725,7 @@ export async function assignLeadsBulk(
     // bubbles so a notification hiccup never fails the assignment.
     try {
       await dispatchPropertyAssigned(supabase, {
-        propertyIds,
+        propertyIds: assignIds,
         newAssigneeId: userId,
         actorId: user?.id ?? null,
         assignerName: user?.email?.split("@")[0] ?? null,
@@ -711,11 +733,24 @@ export async function assignLeadsBulk(
     } catch (e) {
       reportError(e, {
         tags: { surface: "assign_leads_bulk_notification_dispatch" },
-        extra: { count: propertyIds.length },
+        extra: { count: assignIds.length },
       });
     }
 
-    return ok({ succeeded: propertyIds.length, skipped: 0, failed: [] });
+    return ok({
+      succeeded: assignIds.length,
+      skipped: 0,
+      failed: [
+        ...partition.data.locked.map((propertyId) => ({
+          propertyId,
+          message: DNC_LOCKED_MESSAGE,
+        })),
+        ...partition.data.missing.map((propertyId) => ({
+          propertyId,
+          message: "Property not found",
+        })),
+      ],
+    });
   } catch (e) {
     reportError(e, {
       tags: { surface: "assign_leads_bulk" },
@@ -1047,6 +1082,15 @@ export async function deletePropertiesBulk(
   }
   try {
     const supabase = await createClient();
+    const partition = await partitionPropertyDncLocks(supabase, propertyIds);
+    if (!partition.ok) return partition;
+    if (partition.data.unlocked.length === 0) {
+      return {
+        ok: false,
+        error: { code: "DNC_LOCKED", message: DNC_LOCKED_MESSAGE },
+      };
+    }
+    const deleteIds = partition.data.unlocked;
     const {
       data: { user },
     } = await supabase.auth.getUser();
@@ -1065,7 +1109,7 @@ export async function deletePropertiesBulk(
         deleted_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
       })
-      .in("id", propertyIds)
+      .in("id", deleteIds)
       .is("deleted_at", null);
     if (error) {
       return {
@@ -1073,7 +1117,14 @@ export async function deletePropertiesBulk(
         error: { code: "DELETE_FAILED", message: error.message },
       };
     }
-    return ok({ succeeded: propertyIds.length, skipped: 0, failed: [] });
+    return ok({
+      succeeded: deleteIds.length,
+      skipped: 0,
+      failed: partition.data.locked.map((propertyId) => ({
+        propertyId,
+        message: DNC_LOCKED_MESSAGE,
+      })),
+    });
   } catch (e) {
     reportError(e, {
       tags: { surface: "delete_properties_bulk" },
@@ -1104,6 +1155,15 @@ export async function verifyPropertiesBulk(
   }
   try {
     const supabase = await createClient();
+    const partition = await partitionPropertyDncLocks(supabase, propertyIds);
+    if (!partition.ok) return partition;
+    if (partition.data.unlocked.length === 0) {
+      return {
+        ok: false,
+        error: { code: "DNC_LOCKED", message: DNC_LOCKED_MESSAGE },
+      };
+    }
+    const verifyIds = partition.data.unlocked;
     const {
       data: { user },
     } = await supabase.auth.getUser();
@@ -1114,11 +1174,11 @@ export async function verifyPropertiesBulk(
         type: "cass_dsf2_ncoa",
         status: "queued",
         created_by: user?.id ?? null,
-        total_items: propertyIds.length,
-        title: `CASS verify ${propertyIds.length} propert${propertyIds.length === 1 ? "y" : "ies"}`,
+        total_items: verifyIds.length,
+        title: `CASS verify ${verifyIds.length} propert${verifyIds.length === 1 ? "y" : "ies"}`,
         description: "Bulk verify from /properties",
         provider: "smartystreets",
-        input_params: { property_ids: propertyIds },
+        input_params: { property_ids: verifyIds },
       })
       .select("id")
       .single();
@@ -1143,7 +1203,7 @@ export async function verifyPropertiesBulk(
       } catch (e) {
         reportError(e, {
           tags: { surface: "verify_properties_bulk_workflow_start" },
-          extra: { jobId: job.id, count: propertyIds.length },
+          extra: { jobId: job.id, count: verifyIds.length },
         });
       }
     });
@@ -1178,6 +1238,8 @@ export async function updatePropertyStatus(
 
   try {
     const supabase = await createClient();
+    const unlocked = await assertPropertyDncUnlocked(supabase, propertyId);
+    if (!unlocked.ok) return unlocked;
     const { data, error } = await supabase
       .from("properties")
       .update({ status, updated_at: new Date().toISOString() })
@@ -1294,6 +1356,8 @@ export async function createLeadTaskAction(
 
   try {
     const supabase = await createClient();
+    const unlocked = await assertPropertyDncUnlocked(supabase, propertyId);
+    if (!unlocked.ok) return unlocked;
     const {
       data: { user },
     } = await supabase.auth.getUser();
@@ -1516,6 +1580,8 @@ export async function sendSmsFromLead(
 
   try {
     const supabase = await createClient();
+    const unlocked = await assertPropertyDncUnlocked(supabase, propertyId);
+    if (!unlocked.ok) return unlocked;
 
     const { data: property, error } = await supabase
       .from("properties")
@@ -1711,6 +1777,8 @@ export async function updateLeadAssignee(
 ): Promise<Result<null>> {
   try {
     const supabase = await createClient();
+    const unlocked = await assertPropertyDncUnlocked(supabase, propertyId);
+    if (!unlocked.ok) return unlocked;
     const { error } = await supabase
       .from("properties")
       .update({
@@ -1745,6 +1813,8 @@ export async function markMessagesReadForProperty(
 ): Promise<Result<null>> {
   try {
     const supabase = await createClient();
+    const unlocked = await assertPropertyDncUnlocked(supabase, propertyId);
+    if (!unlocked.ok) return unlocked;
     const { error } = await supabase
       .from("messages")
       .update({ read_at: new Date().toISOString() })
@@ -1786,6 +1856,29 @@ export async function markMessagesReadForThread(
     }
 
     const supabase = await createClient();
+    const { data: threadProperties, error: threadLookupError } = await supabase
+      .from("messages")
+      .select("property_id")
+      .eq("channel", "sms")
+      .eq("conversation_id", parsed.conversationId)
+      .not("property_id", "is", null);
+    if (threadLookupError) {
+      return {
+        ok: false,
+        error: { code: "MARK_READ_FAILED", message: threadLookupError.message },
+      };
+    }
+    const propertyIds = [
+      ...new Set(
+        (threadProperties ?? [])
+          .map((message) => message.property_id)
+          .filter((propertyId): propertyId is string => Boolean(propertyId)),
+      ),
+    ];
+    for (const propertyId of propertyIds) {
+      const unlocked = await assertPropertyDncUnlocked(supabase, propertyId);
+      if (!unlocked.ok) return unlocked;
+    }
     const { error } = await supabase
       .from("messages")
       .update({ read_at: new Date().toISOString() })
@@ -1837,6 +1930,8 @@ export async function createLeadNote(
 
   try {
     const supabase = await createClient();
+    const unlocked = await assertPropertyDncUnlocked(supabase, propertyId);
+    if (!unlocked.ok) return unlocked;
     const {
       data: { user },
     } = await supabase.auth.getUser();
@@ -1965,22 +2060,30 @@ export async function getPropertyNeighbors(
 
   if (!current) return { prevId: null, nextId: null };
 
-  const [{ data: prevData }, { data: nextData }] = await Promise.all([
-    supabase
+  let previousQuery = supabase
       .from("properties")
       .select("id")
       .is("deleted_at", null)
-      [mode === "prospect" ? "eq" : "neq"]("status", "prospect")
-      .gt("created_at", current.created_at)
+      .gt("created_at", current.created_at);
+  let nextQuery = supabase
+      .from("properties")
+      .select("id")
+      .is("deleted_at", null)
+      .lt("created_at", current.created_at);
+  if (mode === "prospect") {
+    previousQuery = previousQuery.or("status.eq.prospect,is_dnc_locked.eq.true");
+    nextQuery = nextQuery.or("status.eq.prospect,is_dnc_locked.eq.true");
+  } else {
+    previousQuery = previousQuery.neq("status", "prospect").eq("is_dnc_locked", false);
+    nextQuery = nextQuery.neq("status", "prospect").eq("is_dnc_locked", false);
+  }
+
+  const [{ data: prevData }, { data: nextData }] = await Promise.all([
+    previousQuery
       .order("created_at", { ascending: true })
       .limit(1)
       .maybeSingle(),
-    supabase
-      .from("properties")
-      .select("id")
-      .is("deleted_at", null)
-      [mode === "prospect" ? "eq" : "neq"]("status", "prospect")
-      .lt("created_at", current.created_at)
+    nextQuery
       .order("created_at", { ascending: false })
       .limit(1)
       .maybeSingle(),

@@ -1,6 +1,5 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
-import { evaluateSuppression } from "@/lib/messaging/suppression";
 import type { Database } from "@/lib/supabase/types";
 
 export type ProspectEligibilityPurpose =
@@ -23,29 +22,12 @@ export type ProspectEligibilityResult = {
 
 type EligibilityRow = {
   id: string;
-  org_id: string;
-  outreach_dispo: string | null;
+  status: string;
+  is_dnc_locked: boolean;
   skip_trace_disabled: boolean;
-  homeowner: Array<{
-    phone_1: string | null;
-    phone_2: string | null;
-    phone_3: string | null;
-    do_not_contact: boolean;
-    sms_opted_out: boolean;
-  }> | {
-    phone_1: string | null;
-    phone_2: string | null;
-    phone_3: string | null;
-    do_not_contact: boolean;
-    sms_opted_out: boolean;
-  } | null;
 };
 
 const LOOKUP_CHUNK = 500;
-
-function homeownerFor(row: EligibilityRow) {
-  return Array.isArray(row.homeowner) ? row.homeowner[0] ?? null : row.homeowner;
-}
 
 /**
  * One server-owned compliance resolver for every action launched from
@@ -71,35 +53,12 @@ export async function resolveProspectEligibility(
   for (let offset = 0; offset < uniqueIds.length; offset += LOOKUP_CHUNK) {
     const { data, error } = await supabase
       .from("properties")
-      .select(
-        "id, org_id, outreach_dispo, skip_trace_disabled, homeowner:contacts!properties_homeowner_contact_id_fkey(phone_1, phone_2, phone_3, do_not_contact, sms_opted_out)",
-      )
+      .select("id, status, is_dnc_locked, skip_trace_disabled")
       .in("id", uniqueIds.slice(offset, offset + LOOKUP_CHUNK))
-      .eq("status", "prospect")
+      .or("status.eq.prospect,is_dnc_locked.eq.true")
       .is("deleted_at", null);
     if (error) throw new Error(`Prospect eligibility check failed: ${error.message}`);
     rows.push(...((data ?? []) as unknown as EligibilityRow[]));
-  }
-
-  const phones = Array.from(new Set(rows.flatMap((row) => {
-    const homeowner = homeownerFor(row);
-    return homeowner
-      ? [homeowner.phone_1, homeowner.phone_2, homeowner.phone_3].filter(
-          (phone): phone is string => !!phone,
-        )
-      : [];
-  })));
-  const suppressedPhones = new Set<string>();
-  for (let offset = 0; offset < phones.length; offset += LOOKUP_CHUNK) {
-    const { data, error } = await supabase
-      .from("sms_phone_suppressions")
-      .select("org_id, phone_e164")
-      .eq("channel", "sms")
-      .in("phone_e164", phones.slice(offset, offset + LOOKUP_CHUNK));
-    if (error) throw new Error(`Prospect suppression check failed: ${error.message}`);
-    for (const row of data ?? []) {
-      suppressedPhones.add(`${row.org_id}:${row.phone_e164}`);
-    }
   }
 
   const rowById = new Map(rows.map((row) => [row.id, row]));
@@ -114,22 +73,7 @@ export async function resolveProspectEligibility(
       exclusions.push({ propertyId, reason: "not_found_or_not_prospect" });
       continue;
     }
-    const homeowner = homeownerFor(row);
-    const durableSuppression = [
-      homeowner?.phone_1,
-      homeowner?.phone_2,
-      homeowner?.phone_3,
-    ].some(
-      (phone) => !!phone && suppressedPhones.has(`${row.org_id}:${phone}`),
-    );
-    const dncLocked =
-      durableSuppression ||
-      evaluateSuppression({
-        outreachDispo: row.outreach_dispo,
-        doNotContact: homeowner?.do_not_contact,
-        smsOptedOut: homeowner?.sms_opted_out,
-      }).suppressed;
-    if (dncLocked) {
+    if (row.is_dnc_locked) {
       dncLockedCount += 1;
       exclusions.push({ propertyId, reason: "dnc" });
       continue;

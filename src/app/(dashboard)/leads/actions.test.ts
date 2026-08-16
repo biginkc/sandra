@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const {
   afterCallbacks,
   afterMock,
+  assertPropertyDncUnlocked,
   createAdminClient,
   createClient,
   createTask,
@@ -16,6 +17,7 @@ const {
     afterMock: vi.fn((callback: () => Promise<void> | void) => {
       afterCallbacks.push(callback);
     }),
+    assertPropertyDncUnlocked: vi.fn(),
     createAdminClient: vi.fn(),
     createClient: vi.fn(),
     createTask: vi.fn(),
@@ -32,6 +34,15 @@ const {
 
 vi.mock("@/lib/supabase/server", () => ({
   createClient,
+}));
+
+vi.mock("@/lib/dnc/property-lock", () => ({
+  assertPropertyDncUnlocked,
+  DNC_LOCKED_MESSAGE: "This property is permanently locked Do Not Contact and is read-only.",
+  partitionPropertyDncLocks: vi.fn(async (_client, ids: string[]) => ({
+    ok: true,
+    data: { unlocked: ids, locked: [], missing: [] },
+  })),
 }));
 
 vi.mock("@/lib/supabase/admin", () => ({
@@ -79,6 +90,7 @@ import {
   addPropertiesToListBulk,
   createLeadTaskAction,
   listOrgUsers,
+  markMessagesReadForThread,
   updatePropertyStatus,
 } from "./actions";
 
@@ -135,6 +147,8 @@ function makeSupabase(opts: {
 
 beforeEach(() => {
   afterCallbacks.length = 0;
+  assertPropertyDncUnlocked.mockReset();
+  assertPropertyDncUnlocked.mockResolvedValue({ ok: true, data: null });
   createClient.mockReset();
   createAdminClient.mockReset();
   createTask.mockReset();
@@ -154,6 +168,75 @@ beforeEach(() => {
 afterEach(() => {
   vi.clearAllMocks();
   vi.unstubAllEnvs();
+});
+
+describe("markMessagesReadForThread — permanent DNC", () => {
+  const conversationId = "11111111-1111-4111-8111-111111111111";
+
+  function readThreadClient(propertyIds: Array<string | null>) {
+    let call = 0;
+    const from = vi.fn(() => {
+      call += 1;
+      const result = Promise.resolve({
+        data:
+          call === 1
+            ? propertyIds.map((property_id) => ({ property_id }))
+            : null,
+        error: null,
+      });
+      const builder: Record<string, unknown> = {};
+      const chain = () => builder;
+      for (const method of ["select", "eq", "not", "update", "is"]) {
+        builder[method] = chain;
+      }
+      builder.then = result.then.bind(result);
+      return builder;
+    });
+    return { from };
+  }
+
+  it("rejects a locked conversation before changing read state", async () => {
+    const supabase = readThreadClient(["locked-property"]);
+    createClient.mockResolvedValue(supabase);
+    assertPropertyDncUnlocked.mockResolvedValueOnce({
+      ok: false,
+      error: { code: "DNC_LOCKED", message: "Permanently locked" },
+    });
+
+    const result = await markMessagesReadForThread(conversationId);
+
+    expect(result).toMatchObject({ ok: false, error: { code: "DNC_LOCKED" } });
+    expect(supabase.from).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects a mixed conversation when any linked property is locked", async () => {
+    const supabase = readThreadClient(["open-property", "locked-property"]);
+    createClient.mockResolvedValue(supabase);
+    assertPropertyDncUnlocked
+      .mockResolvedValueOnce({ ok: true, data: null })
+      .mockResolvedValueOnce({
+        ok: false,
+        error: { code: "DNC_LOCKED", message: "Permanently locked" },
+      });
+
+    const result = await markMessagesReadForThread(conversationId);
+
+    expect(result).toMatchObject({ ok: false, error: { code: "DNC_LOCKED" } });
+    expect(assertPropertyDncUnlocked).toHaveBeenCalledTimes(2);
+    expect(supabase.from).toHaveBeenCalledTimes(1);
+  });
+
+  it("still marks an unlinked conversation read", async () => {
+    const supabase = readThreadClient([null]);
+    createClient.mockResolvedValue(supabase);
+
+    await expect(markMessagesReadForThread(conversationId)).resolves.toEqual({
+      ok: true,
+      data: null,
+    });
+    expect(assertPropertyDncUnlocked).not.toHaveBeenCalled();
+    expect(supabase.from).toHaveBeenCalledTimes(2);
+  });
 });
 
 describe("updatePropertyStatus", () => {
@@ -185,6 +268,26 @@ describe("updatePropertyStatus", () => {
       currentMaybeSingle,
     };
   }
+
+  it("rejects a forged stage move when the property became permanently DNC", async () => {
+    const chain = mockStatusUpdate({ data: null, error: null });
+    assertPropertyDncUnlocked.mockResolvedValueOnce({
+      ok: false,
+      error: {
+        code: "DNC_LOCKED",
+        message: "This property is permanently locked Do Not Contact and is read-only.",
+      },
+    });
+
+    const result = await updatePropertyStatus(
+      "property-1",
+      "contacted",
+      "new_lead",
+    );
+
+    expect(result).toMatchObject({ ok: false, error: { code: "DNC_LOCKED" } });
+    expect(chain.update).not.toHaveBeenCalled();
+  });
 
   it("returns the persisted row only after the selected status is read back", async () => {
     const chain = mockStatusUpdate({
