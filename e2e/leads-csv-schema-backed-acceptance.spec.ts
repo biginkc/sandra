@@ -118,6 +118,10 @@ test("schema-backed Prospects safety and CSV review work at desktop and narrow w
   await page.screenshot({
     path: testInfo.outputPath("schema-backed-leads-dnc-sms-desktop.png"),
     fullPage: true,
+    // The default screenshot mode temporarily injects caret-color while
+    // React may still be hydrating this input, which creates a false
+    // hydration warning in CI. Preserve the real caret instead.
+    caret: "initial",
   });
 
   await page.goto("/properties");
