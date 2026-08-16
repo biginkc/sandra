@@ -64,7 +64,6 @@ import {
   applyTagBulk,
   assignLeadsBulk,
   deletePropertiesBulk,
-  qualifyLeadsBulk,
   removePropertiesFromListBulk,
   preflightProspectSkipTrace,
   requestProspectSkipTrace,
@@ -75,6 +74,7 @@ import { getAllMatchingProspectSelection } from "./actions";
 import { BatchCreateModal } from "./batch-create-modal";
 import { BulkSmsModal } from "./bulk-sms-modal";
 import { BulkTagModal } from "./bulk-tag-modal";
+import { PromoteLeadsDialog } from "./promote-leads-dialog";
 
 export type ProspectRow = {
   id: string;
@@ -103,6 +103,7 @@ export type TagOption = { id: string; name: string; color: string | null };
 export type TeamMemberOption = { id: string; email: string };
 
 type Props = {
+  orgId?: string;
   prospects: ProspectRow[];
   lists: ListOption[];
   tags: TagOption[];
@@ -160,6 +161,7 @@ export function formatRelativeImportTime(iso: string, now = new Date()): string 
 }
 
 export function ProspectsTable({
+  orgId = "",
   prospects,
   lists,
   tags,
@@ -186,6 +188,7 @@ export function ProspectsTable({
   const [showBatchCreate, setShowBatchCreate] = useState(false);
   const [showBulkSms, setShowBulkSms] = useState(false);
   const [showBulkTag, setShowBulkTag] = useState(false);
+  const [promotionIds, setPromotionIds] = useState<string[]>([]);
   const [skipTracePreflightIds, setSkipTracePreflightIds] = useState<string[]>(
     [],
   );
@@ -386,21 +389,7 @@ export function ProspectsTable({
   const handleQualify = () => {
     const ids = selectedIds();
     if (ids.length === 0) return;
-    startTransition(async () => {
-      const result = await callAction(qualifyLeadsBulk(ids), {
-        fallbackMessage: "Could not qualify selected prospects",
-      });
-      if (result.ok) {
-        const { qualified, alreadyQualified, failed } = result.data;
-        // qualifyLeadsBulk has a bespoke shape (qualified/alreadyQualified
-        // counters). Map to BulkOutcome semantics for the shared helper.
-        finishBulk("Qualified", {
-          succeeded: qualified,
-          skipped: alreadyQualified,
-          failed,
-        });
-      }
-    });
+    setPromotionIds(ids);
   };
 
   const handleAssign = (userId: string | null) => {
@@ -752,6 +741,20 @@ export function ProspectsTable({
           router.refresh();
         }}
       />
+      {promotionIds.length > 0 ? (
+        <PromoteLeadsDialog
+          open
+          onOpenChange={(nextOpen) => {
+            if (!nextOpen) setPromotionIds([]);
+          }}
+          orgId={orgId}
+          propertyIds={promotionIds}
+          onStarted={() => {
+            onClearAllSelection();
+            router.refresh();
+          }}
+        />
+      ) : null}
       <BulkTagModal
         open={showBulkTag}
         propertyIds={selectAllMatching ? [] : selectedIds()}

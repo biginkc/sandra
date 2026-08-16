@@ -41,7 +41,7 @@ export default async function JobDetailPage({
   // Fetch related rows in parallel — items, parent, children, csv_imports
   // metadata when applicable. Each query is small + indexed; no need to
   // chain them.
-  const [itemsRes, parentRes, childrenRes, csvImportRes, smsMetricsRes] =
+  const [itemsRes, parentRes, childrenRes, csvImportRes, smsMetricsRes, promotionRetryableRes] =
     await Promise.all([
       supabase
         .from("job_items")
@@ -80,7 +80,24 @@ export default async function JobDetailPage({
               error: error instanceof Error ? error.message : "Unknown error",
             }))
         : Promise.resolve({ data: null, error: null }),
+      job.type === "promote_leads"
+        ? supabase
+            .from("job_items")
+            .select("id", { count: "exact", head: true })
+            .eq("job_id", id)
+            .eq("status", "error")
+            .contains("output_payload", { retryable: true })
+        : Promise.resolve({ count: null, error: null }),
     ]);
+
+  if (itemsRes.error) {
+    throw new Error(`Could not load job items: ${itemsRes.error.message}`);
+  }
+  if (job.type === "promote_leads" && promotionRetryableRes.error) {
+    throw new Error(
+      `Could not load exact promotion retry count: ${promotionRetryableRes.error.message}`,
+    );
+  }
 
   return (
     <Page>
@@ -102,6 +119,7 @@ export default async function JobDetailPage({
         csvImport={csvImportRes.data ?? null}
         bulkSmsMetrics={toBulkSmsJobMetrics(smsMetricsRes.data)}
         bulkSmsMetricsError={smsMetricsRes.error}
+        promotionRetryableCount={promotionRetryableRes.count}
       />
     </Page>
   );

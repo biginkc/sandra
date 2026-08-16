@@ -1,7 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
+import { useEffect, useMemo, useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
 import {
@@ -29,6 +30,7 @@ import { cn } from "@/lib/utils";
 import type { Database } from "@/lib/supabase/types";
 
 import { RetrySkipTraceButton } from "../retry-skip-trace-button";
+import { RetryPromoteLeadsButton } from "../retry-promote-leads-button";
 
 type Job = Database["public"]["Tables"]["jobs"]["Row"];
 type JobItem = Database["public"]["Tables"]["job_items"]["Row"];
@@ -66,6 +68,7 @@ export type JobDetailProps = {
   csvImport: CsvImport | null;
   bulkSmsMetrics?: BulkSmsJobMetrics | null;
   bulkSmsMetricsError?: string | null;
+  promotionRetryableCount?: number | null;
 };
 
 export function JobDetail({
@@ -76,7 +79,18 @@ export function JobDetail({
   csvImport,
   bulkSmsMetrics = null,
   bulkSmsMetricsError = null,
+  promotionRetryableCount: exactPromotionRetryableCount = null,
 }: JobDetailProps) {
+  const router = useRouter();
+  const promotionRunning =
+    job.type === "promote_leads" &&
+    ["queued", "running", "processing", "finalizing"].includes(job.status);
+  useEffect(() => {
+    if (!promotionRunning) return;
+    const interval = window.setInterval(() => router.refresh(), 3_000);
+    return () => window.clearInterval(interval);
+  }, [promotionRunning, router]);
+
   const skippedFromCount = Math.max(
     0,
     (job.processed_items ?? 0) -
@@ -146,6 +160,24 @@ export function JobDetail({
           c.status === "finalizing"),
     ) ?? null;
   const showRetry = isSkipTraceRetryable && retryCount > 0;
+  const promotionRetryableCount =
+    exactPromotionRetryableCount ??
+    items.filter(
+      (item) =>
+        item.status === "error" &&
+        isRecord(item.output_payload) &&
+        item.output_payload.retryable === true,
+    ).length;
+  const isPromotionRetryable =
+    job.type === "promote_leads" &&
+    ["failed", "partial", "partially_completed"].includes(job.status) &&
+    promotionRetryableCount > 0;
+  const inFlightPromotionChild =
+    childJobs.find(
+      (child) =>
+        child.type === "promote_leads" &&
+        ["queued", "running", "processing", "finalizing"].includes(child.status),
+    ) ?? null;
 
   return (
     <div className="flex flex-col gap-6">
@@ -164,6 +196,12 @@ export function JobDetail({
             noDataCount={noDataCount}
             cassUnverifiedCount={cassUnverifiedCount}
             inFlightChildId={inFlightChild?.id ?? null}
+          />
+        ) : isPromotionRetryable ? (
+          <RetryPromoteLeadsButton
+            jobId={job.id}
+            retryableCount={promotionRetryableCount}
+            inFlightChildId={inFlightPromotionChild?.id ?? null}
           />
         ) : null}
       </div>
@@ -217,12 +255,14 @@ export function JobDetail({
       <Tabs defaultValue="items">
         <TabsList>
           <TabsTrigger value="items">
-            Items ({items.length.toLocaleString()})
+            Items ({items.length < job.total_items
+              ? `showing ${items.length.toLocaleString()} of ${job.total_items.toLocaleString()}`
+              : items.length.toLocaleString()})
           </TabsTrigger>
           <TabsTrigger value="audit">Audit / raw</TabsTrigger>
         </TabsList>
         <TabsContent value="items" className="mt-4">
-          <ItemsTable items={items} />
+          <ItemsTable items={items} totalItems={job.total_items} />
         </TabsContent>
         <TabsContent value="audit" className="mt-4">
           <AuditPanel job={job} />
@@ -303,9 +343,51 @@ function TypePanel({
           metricsError={bulkSmsMetricsError}
         />
       );
+    case "promote_leads":
+      return <PromoteLeadsPanel job={job} />;
     default:
       return <DefaultPanel job={job} />;
   }
+}
+
+function PromoteLeadsPanel({ job }: { job: Job }) {
+  const counts = promotionCounts(job.result_summary);
+  return (
+    <Card data-testid="promote-leads-job-panel">
+      <CardHeader className="pb-3">
+        <CardTitle className="text-sm">Promotion results</CardTitle>
+        <CardDescription>
+          Permanently DNC-locked records stay in Prospects and count as safe skips, not failures.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="grid grid-cols-2 gap-3 pt-0 md:grid-cols-5">
+        <DetailRow label="Promoted" value={counts.promoted.toLocaleString()} />
+        <DetailRow label="Already Leads" value={counts.alreadyLead.toLocaleString()} />
+        <DetailRow label="Became permanently DNC" value={counts.dncLocked.toLocaleString()} />
+        <DetailRow label="Stale or missing" value={counts.missing.toLocaleString()} />
+        <DetailRow label="Failed" value={counts.failed.toLocaleString()} />
+      </CardContent>
+    </Card>
+  );
+}
+
+function promotionCounts(summary: Job["result_summary"]): {
+  promoted: number;
+  alreadyLead: number;
+  dncLocked: number;
+  missing: number;
+  failed: number;
+} {
+  const value = isRecord(summary) ? summary : {};
+  const count = (key: string) =>
+    typeof value[key] === "number" ? (value[key] as number) : 0;
+  return {
+    promoted: count("promoted"),
+    alreadyLead: count("already_lead"),
+    dncLocked: count("dnc_locked"),
+    missing: count("missing"),
+    failed: count("failed"),
+  };
 }
 
 function CsvImportPanel({
@@ -556,7 +638,7 @@ function DetailRow({
 
 // ---------- Items table ------------------------------------------------------
 
-function ItemsTable({ items }: { items: JobItem[] }) {
+function ItemsTable({ items, totalItems }: { items: JobItem[]; totalItems: number }) {
   const [filter, setFilter] = useState<"all" | "error" | "skipped" | "success">(
     "all",
   );
@@ -609,8 +691,10 @@ function ItemsTable({ items }: { items: JobItem[] }) {
           </div>
         </div>
         <CardDescription>
-          {items.length === 200
-            ? "Showing first 200 — open the Audit tab to query raw."
+          {items.length < totalItems
+            ? items.length === 0
+              ? `No item-level rows are available; exact totals for all ${totalItems.toLocaleString()} items are shown above.`
+              : `Showing first ${items.length.toLocaleString()} of ${totalItems.toLocaleString()}; exact outcome totals are shown above.`
             : `${filtered.length.toLocaleString()} item${filtered.length === 1 ? "" : "s"}`}
         </CardDescription>
       </CardHeader>

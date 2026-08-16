@@ -1083,6 +1083,7 @@ export type Database = {
           error_message: string | null
           id: string
           input_payload: Json | null
+          item_key: string | null
           job_id: string
           message_id: string | null
           output_payload: Json | null
@@ -1099,6 +1100,7 @@ export type Database = {
           error_message?: string | null
           id?: string
           input_payload?: Json | null
+          item_key?: string | null
           job_id: string
           message_id?: string | null
           output_payload?: Json | null
@@ -1115,6 +1117,7 @@ export type Database = {
           error_message?: string | null
           id?: string
           input_payload?: Json | null
+          item_key?: string | null
           job_id?: string
           message_id?: string | null
           output_payload?: Json | null
@@ -1165,6 +1168,7 @@ export type Database = {
           error_message: string | null
           failed_items: number
           id: string
+          idempotency_key: string | null
           input_params: Json | null
           max_retries: number
           org_id: string
@@ -1183,6 +1187,7 @@ export type Database = {
           total_items: number
           type: string
           worker_heartbeat_at: string | null
+          workflow_claim_token: string | null
         }
         Insert: {
           completed_at?: string | null
@@ -1193,6 +1198,7 @@ export type Database = {
           error_message?: string | null
           failed_items?: number
           id?: string
+          idempotency_key?: string | null
           input_params?: Json | null
           max_retries?: number
           org_id?: string
@@ -1211,6 +1217,7 @@ export type Database = {
           total_items?: number
           type: string
           worker_heartbeat_at?: string | null
+          workflow_claim_token?: string | null
         }
         Update: {
           completed_at?: string | null
@@ -1221,6 +1228,7 @@ export type Database = {
           error_message?: string | null
           failed_items?: number
           id?: string
+          idempotency_key?: string | null
           input_params?: Json | null
           max_retries?: number
           org_id?: string
@@ -1239,6 +1247,7 @@ export type Database = {
           total_items?: number
           type?: string
           worker_heartbeat_at?: string | null
+          workflow_claim_token?: string | null
         }
         Relationships: [
           {
@@ -3435,6 +3444,38 @@ export type Database = {
       delete_contact: {
         Args: { p_contact_id: string; p_reason: string }
         Returns: undefined
+      }
+      create_promote_leads_job: {
+        Args: {
+          p_idempotency_key: string
+          p_org: string
+          p_property_ids: string[]
+        }
+        Returns: Json
+      }
+      fail_promote_leads_item: {
+        Args: { p_error: string; p_item_key: string; p_job: string }
+        Returns: Json
+      }
+      fail_promote_leads_workflow_start: {
+        Args: { p_error: string; p_job: string }
+        Returns: Json
+      }
+      fail_promote_leads_workflow: {
+        Args: { p_claim_token: string; p_error: string; p_job: string }
+        Returns: Json
+      }
+      process_promote_leads_item: {
+        Args: { p_item_key: string; p_job: string }
+        Returns: Json
+      }
+      promote_leads_recompute_job: {
+        Args: { p_job: string }
+        Returns: Json
+      }
+      retry_promote_leads_job: {
+        Args: { p_idempotency_key: string; p_parent_job: string }
+        Returns: Json
       }
       delete_oauth_tokens: {
         Args: { p_provider: string; p_user_id: string }

@@ -482,6 +482,7 @@ export default async function PropertiesPage({
         <ActiveFiltersChips orgId={orgId} currentBlocks={blockStack} />
 
         <ProspectsTable
+          orgId={orgId}
           prospects={prospects}
           lists={lists}
           tags={tags}

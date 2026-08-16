@@ -113,6 +113,16 @@ vi.mock("./actions", () => ({
   previewBatchEligibilityAction,
 }));
 
+const { preflightPromoteLeads, createPromoteLeadsJob } = vi.hoisted(() => ({
+  preflightPromoteLeads: vi.fn(),
+  createPromoteLeadsJob: vi.fn(),
+}));
+
+vi.mock("./promote-leads-actions", () => ({
+  preflightPromoteLeads,
+  createPromoteLeadsJob,
+}));
+
 // Sonner's toast is fine in jsdom but the table's handlers don't fire
 // in these tests; stub anyway to keep the surface noise-free.
 vi.mock("sonner", () => ({
@@ -175,6 +185,8 @@ beforeEach(() => {
   getAllMatchingProspectIds.mockReset();
   getAllMatchingProspectSelection.mockReset();
   previewBatchEligibilityAction.mockReset();
+  preflightPromoteLeads.mockReset();
+  createPromoteLeadsJob.mockReset();
 
   getAllMatchingProspectIds.mockResolvedValue({ ok: true, data: ["p1", "p2"] });
   getAllMatchingProspectSelection.mockResolvedValue({
@@ -192,6 +204,10 @@ beforeEach(() => {
   createDialerBatchFromFilters.mockResolvedValue({
     ok: true,
     data: { batchId: "batch-table", counts: { callable: 1, blocked: {}, missing: 0 } },
+  });
+  preflightPromoteLeads.mockResolvedValue({
+    ok: true,
+    data: { selected: 1, eligible: 1, dncLocked: 0, staleOrNotProspect: 0 },
   });
 });
 
@@ -554,6 +570,26 @@ describe("<ProspectsTable />", () => {
     expect(
       screen.queryByRole("menuitem", { name: /Set motivation/ }),
     ).toBeNull();
+  });
+
+  it("opens the promotion confirmation before creating a background job", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    renderTable([makeRow({ id: "p1" })], [], { orgId: "org-1" });
+
+    await user.click(screen.getByRole("checkbox", { name: "Select p1 Main St" }));
+    await user.click(screen.getByRole("button", { name: /Actions for 1 selected/ }));
+    await user.click(await screen.findByRole("menuitem", { name: /Promote to Lead/ }));
+
+    expect(
+      await screen.findByRole("heading", { name: "Promote selected Prospects to Leads?" }),
+    ).toBeInTheDocument();
+    await waitFor(() => {
+      expect(preflightPromoteLeads).toHaveBeenCalledWith({
+        orgId: "org-1",
+        propertyIds: ["p1"],
+      });
+    });
+    expect(createPromoteLeadsJob).not.toHaveBeenCalled();
   });
 
   it("opens Create dialer batch from the Actions menu", async () => {
