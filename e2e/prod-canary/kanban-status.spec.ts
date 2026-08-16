@@ -68,13 +68,10 @@ test("production canary moves a canary lead between Kanban statuses", async ({
     });
 
     await page.getByRole("textbox", { name: /search leads/i }).fill(token);
-    const card = page.getByText(address).first();
+    const card = page.getByRole("group", { name: `Lead at ${address}` });
     await expect(card).toBeVisible({ timeout: 20_000 });
 
-    const contactedColumn = page
-      .locator("div")
-      .filter({ hasText: /^Contacted/ })
-      .first();
+    const contactedColumn = page.locator('[data-status="contacted"]');
     await expect(contactedColumn).toBeVisible();
 
     await dragLeadToColumn(page, card, contactedColumn);
@@ -95,16 +92,9 @@ test("production canary moves a canary lead between Kanban statuses", async ({
 
     await page.reload();
     await page.getByRole("textbox", { name: /search leads/i }).fill(token);
-    await expect(page.getByText(address).first()).toBeVisible({
-      timeout: 20_000,
-    });
     await expect(
-      page
-        .locator("div")
-        .filter({ has: page.getByText("Contacted", { exact: true }) })
-        .filter({ has: page.getByText(address) })
-        .first(),
-    ).toBeVisible();
+      contactedColumn.getByRole("group", { name: `Lead at ${address}` }),
+    ).toBeVisible({ timeout: 20_000 });
   } finally {
     await deleteCanaryPropertiesByAddress(supabase, address);
   }

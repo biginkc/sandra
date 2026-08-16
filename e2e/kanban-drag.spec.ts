@@ -74,8 +74,9 @@ test("dragging a card from New Lead to Contacted persists status change", async 
   // And it survives a refresh — proving the persisted status drives the
   // column rendering on the next render.
   await page.reload();
-  // After reload the card should still be addressable; its column is
-  // now Contacted. We can't cheaply assert "inside Contacted column" in
-  // pure DOM, but we CAN assert it's still visible (soft-delete-safe).
-  await expect(page.locator(`text=${prop.address}`).first()).toBeVisible();
+  await expect(
+    contactedColumn.getByRole("group", {
+      name: `Lead at ${prop.address}`,
+    }),
+  ).toBeVisible();
 });
