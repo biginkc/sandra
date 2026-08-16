@@ -25,6 +25,18 @@ psql -v ON_ERROR_STOP=1 -h "$DNC_LOCK_SOCKET" -p "$DNC_LOCK_PORT" -U postgres -d
 create role anon;
 create role authenticated;
 create role service_role;
+create schema auth;
+create function auth.uid() returns uuid language sql stable as $$
+  select nullif(current_setting('request.jwt.claim.sub', true), '')::uuid
+$$;
+
+create table public.memberships (
+  user_id uuid not null,
+  org_id uuid not null,
+  access_status text not null default 'active',
+  access_expires_at timestamptz,
+  primary key (user_id, org_id)
+);
 
 create table public.contacts (
   id uuid primary key,
@@ -63,10 +75,21 @@ create table public.messages (
 );
 
 create table public.skip_trace_cache (
-  id uuid primary key,
-  org_id uuid not null,
-  address_normalized text not null
+  id uuid primary key default gen_random_uuid(),
+  provider text not null,
+  address_normalized text not null,
+  result jsonb not null,
+  match_count integer not null default 0,
+  cost_credits integer not null default 0,
+  created_at timestamptz not null default now()
 );
+create unique index idx_skip_trace_cache_unique
+  on public.skip_trace_cache (provider, address_normalized);
+alter table public.skip_trace_cache enable row level security;
+create policy skip_trace_cache_authenticated_select on public.skip_trace_cache
+  for select to authenticated using (true);
+create policy skip_trace_cache_service_write on public.skip_trace_cache
+  for all to service_role using (true) with check (true);
 
 create table public.tasks (
   id uuid primary key,
@@ -97,6 +120,33 @@ values
   ('20000000-0000-0000-0000-000000000005', 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', '5 Other Org St', 'Kansas City', 'MO', 'new_lead', null, '10000000-0000-0000-0000-000000000001'),
   ('20000000-0000-0000-0000-000000000006', 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', '6 Later St', 'Kansas City', 'MO', 'offer_sent', null, '10000000-0000-0000-0000-000000000002'),
   ('20000000-0000-0000-0000-000000000008', 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', '8 Linked Lock St', 'Kansas City', 'MO', 'closed', 'dnc', '10000000-0000-0000-0000-000000000003');
+
+-- Two tenants can track the same address. A historical global cache result is
+-- attributable only to the exact property id carried by the provider result;
+-- the migration must never clone that PII into the other tenant.
+insert into public.properties
+  (id, org_id, address, city, state, zip, status)
+values
+  ('20000000-0000-0000-0000-000000000011', 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', '11 Shared Cache St', 'Kansas City', 'MO', '64111', 'prospect'),
+  ('20000000-0000-0000-0000-000000000012', 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', '11 Shared Cache St', 'Kansas City', 'MO', '64111', 'prospect');
+
+insert into public.skip_trace_cache
+  (provider, address_normalized, result, match_count, cost_credits)
+values
+  (
+    'legacy-provider',
+    '11 shared cache st|kansas city|mo|64111',
+    '{"propertyId":"20000000-0000-0000-0000-000000000011","persons":[{"phones":[{"number":"+18165550111"}]}]}'::jsonb,
+    1,
+    1
+  ),
+  (
+    'unproven-provider',
+    '99 unproven cache st|kansas city|mo|64111',
+    '{"persons":[{"phones":[{"number":"+18165550999"}]}]}'::jsonb,
+    1,
+    1
+  );
 
 -- Historical children may already exist when migration backfills the lock.
 -- They remain readable but cannot be detached/mutated afterward.
@@ -154,6 +204,26 @@ begin
 
   if (select count(*) from public.properties where id::text like '40000000-%' and is_dnc_locked) <> 8
   then raise exception 'not every Leads stage ratcheted out of the board'; end if;
+
+  if (select count(*) from public.skip_trace_cache where provider = 'legacy-provider') <> 1
+  then raise exception 'proven legacy cache row was lost or duplicated'; end if;
+
+  if not exists (
+    select 1 from public.skip_trace_cache
+    where provider = 'legacy-provider'
+      and org_id = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
+      and result ->> 'propertyId' = '20000000-0000-0000-0000-000000000011'
+  ) then raise exception 'legacy cache row was not assigned to its exact property tenant'; end if;
+
+  if exists (
+    select 1 from public.skip_trace_cache
+    where provider = 'legacy-provider'
+      and org_id = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb'
+  ) then raise exception 'legacy cache PII crossed tenant boundary'; end if;
+
+  if exists (
+    select 1 from public.skip_trace_cache where provider = 'unproven-provider'
+  ) then raise exception 'unproven legacy cache row was retained'; end if;
 end $$;
 
 update public.contacts

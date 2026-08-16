@@ -478,6 +478,89 @@ begin
 end;
 $$;
 
+-- The historical cache was global by provider/address. Leads now uses it in a
+-- tenant-scoped read model, so preserve every cache row for each organization
+-- that owns a matching property and discard only rows that cannot be assigned
+-- safely. New reads and writes are required to carry org_id.
+alter table public.skip_trace_cache
+  add column if not exists org_id uuid;
+
+drop index if exists public.idx_skip_trace_cache_unique;
+
+insert into public.skip_trace_cache (
+  id,
+  org_id,
+  provider,
+  address_normalized,
+  result,
+  match_count,
+  cost_credits,
+  created_at
+)
+select
+  gen_random_uuid(),
+  matches.org_id,
+  cache.provider,
+  cache.address_normalized,
+  cache.result,
+  cache.match_count,
+  cache.cost_credits,
+  cache.created_at
+from public.skip_trace_cache cache
+join public.properties matches
+  on cache.result ->> 'propertyId' = matches.id::text
+  and matches.deleted_at is null
+  and array_to_string(
+    array(
+      select lower(trim(component))
+      from unnest(array[matches.address, matches.city, matches.state, matches.zip])
+        as address_parts(component)
+      where component is not null
+        and component <> ''
+    ),
+    '|'
+  ) = cache.address_normalized
+where cache.org_id is null;
+
+delete from public.skip_trace_cache
+where org_id is null;
+
+alter table public.skip_trace_cache
+  alter column org_id set not null;
+
+create unique index if not exists idx_skip_trace_cache_org_provider_address
+  on public.skip_trace_cache (org_id, provider, address_normalized);
+
+drop policy if exists skip_trace_cache_authenticated_select
+  on public.skip_trace_cache;
+drop policy if exists skip_trace_cache_service_write
+  on public.skip_trace_cache;
+
+create policy skip_trace_cache_authenticated_select
+  on public.skip_trace_cache
+  for select
+  to authenticated
+  using (
+    exists (
+      select 1
+      from public.memberships membership
+      where membership.org_id = skip_trace_cache.org_id
+        and membership.user_id = auth.uid()
+        and membership.access_status = 'active'
+        and (
+          membership.access_expires_at is null
+          or membership.access_expires_at > now()
+        )
+    )
+  );
+
+create policy skip_trace_cache_service_write
+  on public.skip_trace_cache
+  for all
+  to service_role
+  using (true)
+  with check (true);
+
 -- Recreate the two board views so locked rows are never observable through a
 -- stale Leads query, regardless of their preserved pipeline status.
 drop view if exists public.leads_unskip_traced;

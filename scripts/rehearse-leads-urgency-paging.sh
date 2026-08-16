@@ -62,7 +62,13 @@ create table public.sequence_enrollments (
   id uuid primary key default gen_random_uuid(), property_id uuid, status text,
   completed_at timestamptz
 );
-create table public.skip_trace_cache (id uuid primary key default gen_random_uuid(), org_id uuid, address_normalized text);
+create table public.skip_trace_cache (
+  id uuid primary key default gen_random_uuid(), provider text not null,
+  address_normalized text not null, result jsonb not null,
+  match_count integer not null default 0, cost_credits integer not null default 0,
+  created_at timestamptz not null default now()
+);
+create unique index idx_skip_trace_cache_unique on public.skip_trace_cache(provider, address_normalized);
 create table public.tasks (
   id uuid primary key default gen_random_uuid(), org_id uuid not null,
   assignee_id uuid not null, related_property_id uuid, contact_id uuid,
@@ -86,7 +92,8 @@ create policy member_contacts on contacts to authenticated using (exists (select
 create policy member_properties on properties to authenticated using (exists (select 1 from memberships m where m.org_id=properties.org_id and m.user_id=auth.uid()));
 create policy member_messages on messages to authenticated using (exists (select 1 from properties p where p.id=messages.property_id));
 create policy member_sequences on sequence_enrollments to authenticated using (exists (select 1 from properties p where p.id=sequence_enrollments.property_id));
-create policy member_skip on skip_trace_cache to authenticated using (exists (select 1 from memberships m where m.org_id=skip_trace_cache.org_id and m.user_id=auth.uid()));
+create policy skip_trace_cache_authenticated_select on skip_trace_cache to authenticated using (true);
+create policy skip_trace_cache_service_write on skip_trace_cache for all to service_role using (true) with check (true);
 create policy member_tasks on tasks to authenticated using (exists (select 1 from memberships m where m.org_id=tasks.org_id and m.user_id=auth.uid())) with check (exists (select 1 from memberships m where m.org_id=tasks.org_id and m.user_id=auth.uid()));
 
 grant select on all tables in schema public to authenticated;

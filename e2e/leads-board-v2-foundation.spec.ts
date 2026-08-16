@@ -241,7 +241,7 @@ test("Leads board v2 foundation is usable at desktop and narrow widths", async (
   await expect(page).toHaveURL(/\/leads$/);
 
   await page.goto("/leads?unassigned=true");
-  await expect(page.getByRole("button", { name: /Unassigned/ })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Unassigned", exact: true })).toBeVisible();
   await expect(page.getByText("789 Unassigned Lead Rd")).toBeVisible();
   await expect(page.getByText("123 Foundation Ave")).toHaveCount(0);
   await page.getByRole("button", { name: "My leads" }).click();

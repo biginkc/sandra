@@ -53,6 +53,7 @@ export type CachedSkipTrace = {
 
 export async function readCache(
   supabase: SupabaseClient<Database>,
+  orgId: string,
   provider: string,
   addressNormalized: string,
 ): Promise<CachedSkipTrace | null> {
@@ -60,15 +61,20 @@ export async function readCache(
     Date.now() - TTL_DAYS * 24 * 60 * 60 * 1000,
   ).toISOString();
 
-  const { data } = await supabase
+  const { data, error } = await supabase
     .from("skip_trace_cache")
     .select("result, created_at")
+    .eq("org_id", orgId)
     .eq("provider", provider)
     .eq("address_normalized", addressNormalized)
     .gte("created_at", cutoff)
     .order("created_at", { ascending: false })
     .limit(1)
     .maybeSingle();
+
+  if (error) {
+    throw new Error(`skip-trace cache read failed: ${error.message}`);
+  }
 
   if (!data) return null;
   return {
@@ -86,6 +92,7 @@ export async function readCache(
  */
 export async function readCacheMany(
   supabase: SupabaseClient<Database>,
+  orgId: string,
   provider: string,
   addressesNormalized: string[],
 ): Promise<Map<string, CachedSkipTrace>> {
@@ -102,13 +109,18 @@ export async function readCacheMany(
   const unique = Array.from(new Set(addressesNormalized));
   for (let i = 0; i < unique.length; i += CHUNK) {
     const slice = unique.slice(i, i + CHUNK);
-    const { data } = await supabase
+    const { data, error } = await supabase
       .from("skip_trace_cache")
       .select("address_normalized, result, created_at")
+      .eq("org_id", orgId)
       .eq("provider", provider)
       .in("address_normalized", slice)
       .gte("created_at", cutoff)
       .order("created_at", { ascending: false });
+
+    if (error) {
+      throw new Error(`skip-trace cache bulk read failed: ${error.message}`);
+    }
 
     for (const row of data ?? []) {
       // Rows arrive newest-first; first write per address wins.
@@ -125,6 +137,7 @@ export async function readCacheMany(
 
 export async function writeCache(
   supabase: SupabaseClient<Database>,
+  orgId: string,
   provider: string,
   addressNormalized: string,
   result: SkipTraceResult,
@@ -134,15 +147,20 @@ export async function writeCache(
     0,
   );
 
-  // upsert by (provider, address_normalized) — unique index on those.
-  await supabase.from("skip_trace_cache").upsert(
+  // Cache identity is tenant + provider + address. Never reuse a paid result
+  // across organizations that happen to track the same property address.
+  const { error } = await supabase.from("skip_trace_cache").upsert(
     {
+      org_id: orgId,
       provider,
       address_normalized: addressNormalized,
       result: result as unknown as Json,
       match_count: matchCount,
       cost_credits: result.creditsDeducted,
     },
-    { onConflict: "provider,address_normalized" },
+    { onConflict: "org_id,provider,address_normalized" },
   );
+  if (error) {
+    throw new Error(`skip-trace cache write failed: ${error.message}`);
+  }
 }

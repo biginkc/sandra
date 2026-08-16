@@ -58,30 +58,52 @@ describe("persistSkipTraceResult DNC finalization", () => {
       return builder;
     });
 
-    const outcome = await persistSkipTraceResult(
-      { from } as never,
-      {
-        propertyId: "property-1",
-        hit: true,
-        persons: [
-          {
-            firstName: "Late",
-            lastName: "DNC",
-            isOwner: true,
-            phones: [{ number: "8165550100", type: "Mobile", dnc: false, rank: 1 }],
-            emails: [],
-          },
-        ],
-        creditsDeducted: 1,
-        raw: {},
-      },
-    );
+    const outcome = await persistSkipTraceResult({ from } as never, "org-1", {
+      propertyId: "property-1",
+      hit: true,
+      persons: [
+        {
+          firstName: "Late",
+          lastName: "DNC",
+          isOwner: true,
+          phones: [
+            { number: "8165550100", type: "Mobile", dnc: false, rank: 1 },
+          ],
+          emails: [],
+        },
+      ],
+      creditsDeducted: 1,
+      raw: {},
+    });
 
     expect(outcome).toEqual({
       status: "dnc_skipped",
       phonesAdded: 0,
       emailsAdded: 0,
     });
+    expect(from).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not resolve a property outside the job organization", async () => {
+    const maybeSingle = vi.fn().mockResolvedValue({ data: null, error: null });
+    const builder = {
+      select: vi.fn(() => builder),
+      eq: vi.fn(() => builder),
+      maybeSingle,
+    };
+    const from = vi.fn(() => builder);
+
+    const outcome = await persistSkipTraceResult({ from } as never, "org-a", {
+      propertyId: "org-b-property",
+      hit: true,
+      persons: [],
+      creditsDeducted: 1,
+      raw: {},
+    });
+
+    expect(outcome.status).toBe("property_not_found");
+    expect(builder.eq).toHaveBeenCalledWith("id", "org-b-property");
+    expect(builder.eq).toHaveBeenCalledWith("org_id", "org-a");
     expect(from).toHaveBeenCalledTimes(1);
   });
 });

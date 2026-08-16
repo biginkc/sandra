@@ -35,12 +35,14 @@ export type PersistOutcome = {
  */
 export async function persistSkipTraceResult(
   supabase: SupabaseClient<Database>,
+  orgId: string,
   result: SkipTraceResult,
 ): Promise<PersistOutcome> {
   const { data: property } = await supabase
     .from("properties")
     .select("id, org_id, homeowner_contact_id, is_dnc_locked")
     .eq("id", result.propertyId)
+    .eq("org_id", orgId)
     .maybeSingle();
 
   if (!property) {
@@ -60,9 +62,7 @@ export async function persistSkipTraceResult(
   }
 
   // Pick the best person — owner first, then highest-rank phone holder.
-  const owner =
-    result.persons.find((p) => p.isOwner) ??
-    result.persons[0];
+  const owner = result.persons.find((p) => p.isOwner) ?? result.persons[0];
 
   // Resolve / create the contact. Two-phase lookup for the no-existing-
   // contact case: there's a global unique index on contacts.phone_1, so
@@ -121,7 +121,8 @@ export async function persistSkipTraceResult(
       .eq("is_dnc_locked", false)
       .select("id");
     if (linkError || !linked || linked.length !== 1) {
-      const linkFailureMessage = (linkError as { message: string } | null)?.message;
+      const linkFailureMessage = (linkError as { message: string } | null)
+        ?.message;
       if (createdContactId) {
         await supabase
           .from("contacts")
@@ -333,7 +334,12 @@ export async function persistSkipTraceResult(
     }
     lastUpdateError = updErr.message;
     if (isDncLockedError(updErr.message)) {
-      return { status: "dnc_skipped", contactId, phonesAdded: 0, emailsAdded: 0 };
+      return {
+        status: "dnc_skipped",
+        contactId,
+        phonesAdded: 0,
+        emailsAdded: 0,
+      };
     }
     if (!isUniqueViolation(updErr.message)) {
       throw new Error(`contact update failed: ${updErr.message}`);
@@ -346,8 +352,7 @@ export async function persistSkipTraceResult(
       const repacked = packSlots();
       packedSlots = repacked.packed;
       phonesAdded = repacked.added;
-      ({ numbers: slotNumbers, types: slotTypes } =
-        finalizeSlots(packedSlots));
+      ({ numbers: slotNumbers, types: slotTypes } = finalizeSlots(packedSlots));
       updates.phone_1 = slotNumbers[0];
       updates.phone_1_type = slotTypes[0];
       updates.phone_2 = slotNumbers[1];
@@ -384,8 +389,15 @@ export async function persistSkipTraceResult(
       mailing: ownerMailing,
     });
   } catch (error) {
-    if (isDncLockedError(error instanceof Error ? error.message : String(error))) {
-      return { status: "dnc_skipped", contactId, phonesAdded: 0, emailsAdded: 0 };
+    if (
+      isDncLockedError(error instanceof Error ? error.message : String(error))
+    ) {
+      return {
+        status: "dnc_skipped",
+        contactId,
+        phonesAdded: 0,
+        emailsAdded: 0,
+      };
     }
     throw error;
   }
@@ -515,7 +527,9 @@ async function upsertOwnerMailing(
 
   const { data: existing, error: readError } = await supabase
     .from("homeowner_details")
-    .select("contact_id, mailing_address, mailing_city, mailing_state, mailing_zip")
+    .select(
+      "contact_id, mailing_address, mailing_city, mailing_state, mailing_zip",
+    )
     .eq("contact_id", args.contactId)
     .eq("org_id", args.orgId)
     .maybeSingle();

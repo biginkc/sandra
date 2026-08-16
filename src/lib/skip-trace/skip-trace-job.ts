@@ -428,6 +428,7 @@ export async function runSkipTraceEnrichment(
   }
   const cacheByAddress = await readCacheMany(
     supabase,
+    params.orgId,
     provider.providerId,
     Array.from(normalizedById.values()),
   );
@@ -544,6 +545,7 @@ export async function runSkipTraceEnrichment(
   for (const result of cachedResults) {
     await persistAndRecord(
       supabase,
+      params.orgId,
       params.jobId,
       result,
       summary,
@@ -669,6 +671,7 @@ export async function runSkipTraceEnrichment(
         const result = await provider.lookupSingle(misses[0]);
         await persistAndRecord(
           supabase,
+          params.orgId,
           params.jobId,
           result,
           summary,
@@ -677,6 +680,7 @@ export async function runSkipTraceEnrichment(
         try {
           await writeCache(
             supabase,
+            params.orgId,
             provider.providerId,
             normalizeAddress({
               address: misses[0].address,
@@ -698,12 +702,10 @@ export async function runSkipTraceEnrichment(
       } catch (e) {
         summary.failed++;
         const msg = e instanceof Error ? e.message : String(e);
-        const klass:
-          | "provider_transient"
-          | "submission_unknown"
-          | "database" = e instanceof ProviderError
-          ? classifyProviderError(e)
-          : "submission_unknown";
+        const klass: "provider_transient" | "submission_unknown" | "database" =
+          e instanceof ProviderError
+            ? classifyProviderError(e)
+            : "submission_unknown";
         reportError(e, {
           tags: { surface: "skip_trace_lookup_single" },
           extra: { propertyId: misses[0].propertyId, jobId: params.jobId },
@@ -959,7 +961,7 @@ export async function finalizeSkipTraceFromBatch(
     })
     .eq("id", params.jobId)
     .eq("status", "running")
-    .select("result_summary");
+    .select("result_summary, org_id");
   if (claimErr) {
     throw new Error(`finalize claim failed: ${claimErr.message}`);
   }
@@ -970,7 +972,11 @@ export async function finalizeSkipTraceFromBatch(
   const jobRow = claimed[0];
 
   try {
-    return await finalizeClaimed(supabase, params, jobRow.result_summary);
+    return await finalizeClaimed(
+      supabase,
+      { ...params, orgId: jobRow.org_id },
+      jobRow.result_summary,
+    );
   } catch (e) {
     // Give the job back so the next sweep tick can re-claim and retry —
     // a crashed finalizer must not strand the job in 'finalizing'.
@@ -1092,7 +1098,7 @@ async function readItemLedger(
 
 async function finalizeClaimed(
   supabase: SupabaseClient<Database>,
-  params: { jobId: string; results: SkipTraceResult[] },
+  params: { jobId: string; orgId: string; results: SkipTraceResult[] },
   priorSummary: unknown,
 ): Promise<SkipTraceJobSummary> {
   const prior = (priorSummary ?? {}) as Partial<SkipTraceJobSummary> & {
@@ -1302,6 +1308,7 @@ async function finalizeClaimed(
     const { data, error } = await supabase
       .from("properties")
       .select("id, address, city, state, zip, cass_status")
+      .eq("org_id", params.orgId)
       .in("id", ids);
     if (error) {
       reportError(error, {
@@ -1319,6 +1326,17 @@ async function finalizeClaimed(
   }
   const propsById = new Map(props.map((p) => [p.id, p]));
 
+  // Validate the entire submitted audience before writing either successful
+  // or missing-result ledger rows. Checking only fanOut would leave forged
+  // foreign IDs with no provider result able to reach the missing-item path.
+  for (const propertyId of allRelatedPropertyIds) {
+    if (!propsById.has(propertyId)) {
+      throw new Error(
+        `skip-trace result property is outside job organization: ${propertyId}`,
+      );
+    }
+  }
+
   // ------------------------------------------------------------------
   // Apply results. Wrap each persist in try/catch so one bad row can't
   // break the rest of the batch.
@@ -1326,9 +1344,19 @@ async function finalizeClaimed(
   for (const { propertyId, result } of fanOut) {
     if (alreadyProcessed.has(propertyId)) continue;
     await bumpHeartbeat();
+    const p = propsById.get(propertyId);
+    if (!p) {
+      // The job-owned org lookup above is authoritative. A forged/legacy
+      // provider map must never let this service-role finalizer mutate a
+      // property from another tenant.
+      throw new Error(
+        `skip-trace result property is outside job organization: ${propertyId}`,
+      );
+    }
     try {
       await persistAndRecord(
         supabase,
+        params.orgId,
         params.jobId,
         result,
         summary,
@@ -1344,27 +1372,26 @@ async function finalizeClaimed(
       });
     }
 
-    const p = propsById.get(propertyId);
-    if (p) {
-      try {
-        await writeCache(
-          supabase,
-          providerId,
-          normalizeAddress({
-            address: p.address,
-            city: p.city,
-            state: p.state,
-            zip: p.zip,
-          }),
-          result,
-        );
-      } catch (e) {
-        // Cache failure is non-fatal — log and continue.
-        reportError(e, {
-          tags: { surface: "skip_trace_finalize_cache_write" },
-          extra: { jobId: params.jobId, propertyId },
-        });
-      }
+    try {
+      await writeCache(
+        supabase,
+        params.orgId,
+        providerId,
+        normalizeAddress({
+          address: p.address,
+          city: p.city,
+          state: p.state,
+          zip: p.zip,
+        }),
+        result,
+      );
+    } catch (e) {
+      // Cache failure is non-fatal after the terminal per-property ledger
+      // outcome exists; retries will not pay the provider again.
+      reportError(e, {
+        tags: { surface: "skip_trace_finalize_cache_write" },
+        extra: { jobId: params.jobId, propertyId },
+      });
     }
   }
 
@@ -1417,6 +1444,7 @@ async function finalizeClaimed(
         try {
           await writeCache(
             supabase,
+            params.orgId,
             providerId,
             normalizeAddress({
               address: p.address,
@@ -1491,6 +1519,7 @@ async function finalizeClaimed(
 
 async function persistAndRecord(
   supabase: SupabaseClient<Database>,
+  orgId: string,
   jobId: string,
   result: SkipTraceResult,
   summary: SkipTraceJobSummary,
@@ -1515,7 +1544,7 @@ async function persistAndRecord(
 
   let outcome: PersistOutcome;
   try {
-    outcome = await persistSkipTraceResult(supabase, result);
+    outcome = await persistSkipTraceResult(supabase, orgId, result);
   } catch (e) {
     summary.failed++;
     const msg = e instanceof Error ? e.message : String(e);

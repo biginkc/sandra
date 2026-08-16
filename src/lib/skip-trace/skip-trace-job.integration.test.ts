@@ -495,7 +495,7 @@ describe("runSkipTraceEnrichment (integration, mock provider)", () => {
       raw: {},
     };
 
-    await persistSkipTraceResult(supabase, result);
+    await persistSkipTraceResult(supabase, await getOrgId(), result);
 
     const { data: contact } = await supabase
       .from("contacts")
@@ -554,7 +554,7 @@ describe("runSkipTraceEnrichment (integration, mock provider)", () => {
       raw: {},
     };
 
-    await persistSkipTraceResult(supabase, result);
+    await persistSkipTraceResult(supabase, orgId, result);
 
     // Reused the EXISTING contact — no duplicate created — and ratcheted it.
     const { count: contactCount } = await supabase
@@ -606,7 +606,7 @@ describe("runSkipTraceEnrichment (integration, mock provider)", () => {
       raw: {},
     };
 
-    await persistSkipTraceResult(supabase, result);
+    await persistSkipTraceResult(supabase, await getOrgId(), result);
 
     const { data: contact } = await supabase
       .from("contacts")
@@ -939,6 +939,7 @@ describe("runSkipTraceEnrichment (integration, mock provider)", () => {
     // die on the insert (624 rows on 2026-06-12).
     const a = await seedProperty({ address: "71 Sameowner St" });
     const b = await seedProperty({ address: "72 Sameowner St" });
+    const orgId = await getOrgId();
 
     const nameOnlyResult = (propertyId: string): SkipTraceResult => ({
       propertyId,
@@ -958,12 +959,14 @@ describe("runSkipTraceEnrichment (integration, mock provider)", () => {
 
     const first = await persistSkipTraceResult(
       supabase,
+      orgId,
       nameOnlyResult(a.propertyId),
     );
     expect(first.status).toBe("matched");
 
     const second = await persistSkipTraceResult(
       supabase,
+      orgId,
       nameOnlyResult(b.propertyId),
     );
     expect(second.status).toBe("matched");
@@ -985,6 +988,7 @@ describe("runSkipTraceEnrichment (integration, mock provider)", () => {
       address: "82 Phoneclash Ave",
       withContact: true,
     });
+    const orgId = await getOrgId();
 
     const sharedPhone = "+18165550777";
     const withPhone = (propertyId: string, name: string): SkipTraceResult => ({
@@ -1008,6 +1012,7 @@ describe("runSkipTraceEnrichment (integration, mock provider)", () => {
     // First persist claims the phone on property A's new contact.
     const first = await persistSkipTraceResult(
       supabase,
+      orgId,
       withPhone(a.propertyId, "Alpha"),
     );
     expect(first.phonesAdded).toBe(1);
@@ -1017,6 +1022,7 @@ describe("runSkipTraceEnrichment (integration, mock provider)", () => {
     // unique index. It must degrade (skip the phone), not throw.
     const second = await persistSkipTraceResult(
       supabase,
+      orgId,
       withPhone(b.propertyId, "Beta"),
     );
     expect(second.status).toBe("matched");
@@ -1419,6 +1425,228 @@ describe("runSkipTraceEnrichment (integration, mock provider)", () => {
         .eq("job_id", jobIdMulti)
         .eq("property_id", a.propertyId);
       expect(itemsA![0].status).toBe("success");
+    });
+
+    it("rejects a forged org-A result map that points at an org-B property", async () => {
+      const orgAId = await getOrgId();
+      const { data: orgB, error: orgError } = await supabase
+        .from("organizations")
+        .insert({ name: `Finalize Tenant B ${crypto.randomUUID()}` })
+        .select("id")
+        .single();
+      if (orgError || !orgB) throw orgError ?? new Error("org B missing");
+
+      const { data: foreignProperty, error: propertyError } = await supabase
+        .from("properties")
+        .insert({
+          org_id: orgB.id,
+          address: "99 Forged Tenant Ave",
+          city: "Kansas City",
+          state: "MO",
+          status: "new_lead",
+          cass_status: "verified",
+        })
+        .select("id")
+        .single();
+      if (propertyError || !foreignProperty) {
+        throw propertyError ?? new Error("org B property missing");
+      }
+
+      const a = await seedProperty({ address: "97 Org A Submit Ave" });
+      const b = await seedProperty({ address: "98 Org A Submit Ave" });
+      const jobId = await createPendingJob([a.propertyId, b.propertyId]);
+      await runSkipTraceEnrichment(supabase, {
+        jobId,
+        orgId: orgAId,
+        propertyIds: [a.propertyId, b.propertyId],
+      });
+
+      const { data: job, error: jobError } = await supabase
+        .from("jobs")
+        .select("result_summary")
+        .eq("id", jobId)
+        .single();
+      if (jobError || !job) throw jobError ?? new Error("job missing");
+      const prior = (job.result_summary ?? {}) as Record<string, unknown>;
+      const { error: forgeError } = await supabase
+        .from("jobs")
+        .update({
+          result_summary: {
+            ...prior,
+            address_to_property_ids: {
+              "99 forged tenant ave|kansas city|mo": [foreignProperty.id],
+            },
+          },
+        })
+        .eq("id", jobId);
+      if (forgeError) throw forgeError;
+
+      const { error: directCrossTenantError } = await supabase
+        .from("job_items")
+        .insert({
+          job_id: jobId,
+          property_id: foreignProperty.id,
+          status: "pending",
+        });
+      expect(directCrossTenantError?.message).toMatch(
+        /JOB_ITEM_PROPERTY_ORG_MISMATCH/i,
+      );
+
+      await expect(
+        finalizeSkipTraceFromBatch(supabase, {
+          jobId,
+          results: [
+            {
+              propertyId: foreignProperty.id,
+              matchedAddress: {
+                address: "99 Forged Tenant Ave",
+                city: "Kansas City",
+                state: "MO",
+              },
+              hit: true,
+              persons: [
+                {
+                  firstName: "Foreign",
+                  lastName: "Owner",
+                  phones: [
+                    {
+                      number: "+18165550990",
+                      type: "Mobile",
+                      dnc: false,
+                      rank: 1,
+                    },
+                  ],
+                  emails: [],
+                  isOwner: true,
+                },
+              ],
+              creditsDeducted: 1,
+              raw: {},
+            },
+          ],
+        }),
+      ).rejects.toThrow(/outside job organization/i);
+
+      const { data: unchanged } = await supabase
+        .from("properties")
+        .select("homeowner_contact_id")
+        .eq("id", foreignProperty.id)
+        .single();
+      expect(unchanged?.homeowner_contact_id).toBeNull();
+      const { count: foreignContacts } = await supabase
+        .from("contacts")
+        .select("id", { count: "exact", head: true })
+        .eq("org_id", orgB.id);
+      expect(foreignContacts).toBe(0);
+      const { count: leakedCacheRows } = await supabase
+        .from("skip_trace_cache")
+        .select("id", { count: "exact", head: true })
+        .eq("org_id", orgAId)
+        .eq("address_normalized", "99 forged tenant ave|kansas city|mo");
+      expect(leakedCacheRows).toBe(0);
+      const { data: returnedJob } = await supabase
+        .from("jobs")
+        .select("status")
+        .eq("id", jobId)
+        .single();
+      expect(returnedJob?.status).toBe("running");
+    });
+
+    it("rejects a forged foreign property even when the provider returns no result", async () => {
+      const orgAId = await getOrgId();
+      const { data: orgB, error: orgError } = await supabase
+        .from("organizations")
+        .insert({ name: `Missing Result Tenant B ${crypto.randomUUID()}` })
+        .select("id")
+        .single();
+      if (orgError || !orgB) throw orgError ?? new Error("org B missing");
+
+      const { data: foreignProperty, error: propertyError } = await supabase
+        .from("properties")
+        .insert({
+          org_id: orgB.id,
+          address: "100 Missing Foreign Result Ave",
+          city: "Kansas City",
+          state: "MO",
+          status: "new_lead",
+          cass_status: "verified",
+        })
+        .select("id")
+        .single();
+      if (propertyError || !foreignProperty) {
+        throw propertyError ?? new Error("org B property missing");
+      }
+
+      const a = await seedProperty({ address: "101 Org A Missing Submit Ave" });
+      const b = await seedProperty({ address: "102 Org A Missing Submit Ave" });
+      const jobId = await createPendingJob([a.propertyId, b.propertyId]);
+      await runSkipTraceEnrichment(supabase, {
+        jobId,
+        orgId: orgAId,
+        propertyIds: [a.propertyId, b.propertyId],
+      });
+
+      const { data: job, error: jobError } = await supabase
+        .from("jobs")
+        .select("result_summary")
+        .eq("id", jobId)
+        .single();
+      if (jobError || !job) throw jobError ?? new Error("job missing");
+      const prior = (job.result_summary ?? {}) as Record<string, unknown>;
+      const { error: forgeError } = await supabase
+        .from("jobs")
+        .update({
+          result_summary: {
+            ...prior,
+            address_to_property_ids: {
+              "100 missing foreign result ave|kansas city|mo": [
+                foreignProperty.id,
+              ],
+            },
+          },
+        })
+        .eq("id", jobId);
+      if (forgeError) throw forgeError;
+
+      await expect(
+        finalizeSkipTraceFromBatch(supabase, {
+          jobId,
+          results: [],
+        }),
+      ).rejects.toThrow(/outside job organization/i);
+
+      const { count: foreignItems } = await supabase
+        .from("job_items")
+        .select("id", { count: "exact", head: true })
+        .eq("job_id", jobId)
+        .eq("property_id", foreignProperty.id);
+      expect(foreignItems).toBe(0);
+      const { data: unchanged } = await supabase
+        .from("properties")
+        .select("homeowner_contact_id")
+        .eq("id", foreignProperty.id)
+        .single();
+      expect(unchanged?.homeowner_contact_id).toBeNull();
+      const { count: foreignContacts } = await supabase
+        .from("contacts")
+        .select("id", { count: "exact", head: true })
+        .eq("org_id", orgB.id);
+      expect(foreignContacts).toBe(0);
+      const { count: leakedCacheRows } = await supabase
+        .from("skip_trace_cache")
+        .select("id", { count: "exact", head: true })
+        .eq("org_id", orgAId)
+        .eq(
+          "address_normalized",
+          "100 missing foreign result ave|kansas city|mo",
+        );
+      expect(leakedCacheRows).toBe(0);
+      const { data: returnedJob } = await supabase
+        .from("jobs")
+        .select("status")
+        .eq("id", jobId)
+        .single();
+      expect(returnedJob?.status).toBe("running");
     });
   });
 

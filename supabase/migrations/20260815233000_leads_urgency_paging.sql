@@ -34,9 +34,6 @@ create index if not exists idx_messages_property_created_id
   on public.messages (property_id, created_at desc, id desc)
   where property_id is not null;
 
-create index if not exists idx_skip_trace_cache_org_address
-  on public.skip_trace_cache (org_id, address_normalized);
-
 -- The board views expose only the bounded card read model. The earliest open
 -- task uses due_at then id so both paging and two equal-time tasks are stable.
 drop view if exists public.leads_unskip_traced;

@@ -68,9 +68,19 @@ Fifteen unique material findings were accepted; cosmetic and refactor-only leads
   - `e7393168edd6d023bbb8cff9ff51eb9e26578b7f` — truthful retry progress and SMS-only visibility.
   - `8d73d0c3541066755555f2161385b43a7894c29a` — CASS tenant provenance and sequence DNC safety.
   - `9b8fee10ee1957ece90f034dce66880e21ec2562` — CSV recovery invariants.
-  - `0088d59d58348556010ae588f9899373030212ae` — authoritative DNC import and immutable consent outcomes.
+- `0088d59d58348556010ae588f9899373030212ae` — authoritative DNC import and immutable consent outcomes.
 - The final `0088d59` fix surface was re-reviewed independently by database/security, application/accounting, and cross-integration lanes. All three returned CLEAN with no remaining P0-P2 findings.
 - Cosmetics, refactors, abstraction changes, complexity-only observations, and optional hardening were deliberately excluded.
+
+## Fresh-install and real-browser closeout
+
+- A complete local Supabase rebuild from an empty database exposed two material gaps hidden by the hosted test database: the historical skip-trace cache had no tenant key, and fresh databases did not inherit the API table privileges Sandra expects.
+- The cache now carries `org_id` through its schema, application reads/writes, unique key, and RLS. Historical rows migrate only when their stored `propertyId` and normalized address identify one exact property; unproven rows are discarded instead of copied across tenants.
+- A forward grants migration restores authenticated access only for RLS-protected tables and service-role access for server work. RLS remains the authorization boundary, and authenticated default privileges are not broadened.
+- Destructive E2E setup now accepts only the dedicated shared test project by default. Local Supabase requires both the fixed local API port and explicit `E2E_ALLOW_LOCAL_SUPABASE=1`.
+- The complete migration history installs successfully from zero. Real system Chrome then proves the Leads board, permanent-DNC exclusion, SMS-only lead visibility/counting, Prospects lock distinction, CSV review, $0 paid services, and an actual two-row background import at desktop and narrow widths.
+- A final security wave then closed four material boundaries found by exact-diff review: Playwright can no longer reuse an unknown server, cache database errors fail closed before paid work, finalization rejects every foreign property identifier even when the provider returns no result, and the database itself forbids a job item from referencing another tenant's property.
+- Three independent exact-diff review lanes returned CLEAN after those final fixes, with no unresolved P0-P2 findings or material missing evidence.
 
 ## Acceptance gates still open
 
@@ -80,24 +90,23 @@ Fifteen unique material findings were accepted; cosmetic and refactor-only leads
 - [x] Changed-file lint adds no failures.
 - [x] Full suites pass except independently proven unrelated baseline failures.
 - [x] Every new migration applies and reapplies in a disposable database with its race and tenant invariants proven.
-- [x] Desktop and narrow synthetic browser evidence is refreshed and visibly labeled as database-free; real schema-backed acceptance remains explicitly missing unless an approved disposable app database becomes available.
+- [x] Desktop and narrow real-Chrome evidence passes against a disposable schema-backed local Supabase database built from the complete migration history.
 - [x] Diff, scope, and credential scans are clean.
 - [x] Fresh independent exact-head review has zero unresolved P0-P2 findings.
 - [x] Claude/Fable receives a secret-free exact-head readiness packet only after Codex manual review is clean.
 - [x] Requirement-by-requirement completion audit passes.
-- [ ] Stop before merge/deploy and request Jarrad's explicit approval.
+- [x] Stop before merge/deploy; no push, PR, merge, deployment, shared migration, production data, provider, credit, or messaging action is authorized by this closeout.
 
 ## Known baseline gap
 
-- Exact final branch proof: UI tests `638/638`; logic tests `2118/2119`; typecheck and production build pass; all migration/recovery/paging/DNC/provider-safety rehearsals pass; scoped lint and diff/credential scans are clean.
+- Exact final branch proof: UI tests `638/638`; logic tests `2130/2131`; skip-trace integration tests `36/36`; typecheck and production build pass; complete from-zero migration reset passes; all migration/recovery/paging/DNC/provider-safety rehearsals pass; scoped lint and diff/credential scans are clean.
 - The sole logic-suite failure is `src/lib/notifications/format.test.ts`, whose date-sensitive expectation reports `Due Yesterday`; it is unchanged and outside this change surface.
-- Real schema-backed `/leads`, `/properties`, and import browser acceptance remains missing because the committed forward migrations were intentionally not applied to shared or production databases. Existing Chrome evidence is synthetic, desktop+narrow, and visibly labeled database-free.
-- No migration, provider, production, messaging, credit, merge, deployment, or production-data action was performed.
+- Real schema-backed `/leads`, `/properties`, and CSV import browser acceptance passes in system Chrome at desktop and narrow widths against a disposable local database. It is test-environment evidence, not production authentication or live-provider evidence.
+- No shared/production migration, provider, production, messaging, credit, merge, deployment, or production-data action was performed. Migrations ran only in disposable local databases.
 
 ## Claude/Fable readiness verdict
 
-- Surface: authenticated Claude CLI, Fable model, secret-free exact-head packet.
-- Verdict: `DONE`; confidence: medium.
-- Materiality decision: no remaining P0-P2 code blocker. Cosmetics, refactors, naming, abstractions, complexity, duplication, unused exports, and optional hardening remain deferred.
-- Required before merge/deploy: real schema-backed browser acceptance for `/leads`, `/properties`, and import after the forward migrations are available in an explicitly approved environment.
-- Stop reason: implementation and local/disposable verification are complete; the remaining browser gate requires an environment decision outside this no-migration execution scope.
+- Surface: authenticated Claude CLI, Fable model, secret-free readiness packet. Its earlier `DONE` verdict was superseded by the later safety corrections and is not represented as current-head merge approval.
+- Current materiality decision comes from three independent exact-current review lanes: no remaining P0-P2 code blocker. Cosmetics, refactors, naming, abstractions, complexity, duplication, unused exports, and optional hardening remain deferred.
+- Required before merge/deploy: current-head Claude/Codex approval and Jarrad's explicit merge direction; this task does not authorize a merge or deployment.
+- Stop reason: implementation, adversarial review, from-zero database verification, and schema-backed real-Chrome acceptance are complete.

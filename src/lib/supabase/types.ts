@@ -2697,6 +2697,7 @@ export type Database = {
           created_at: string
           id: string
           match_count: number
+          org_id: string
           provider: string
           result: Json
         }
@@ -2706,6 +2707,7 @@ export type Database = {
           created_at?: string
           id?: string
           match_count?: number
+          org_id: string
           provider: string
           result: Json
         }
@@ -2715,6 +2717,7 @@ export type Database = {
           created_at?: string
           id?: string
           match_count?: number
+          org_id?: string
           provider?: string
           result?: Json
         }
