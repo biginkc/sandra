@@ -61,21 +61,43 @@ Fifteen unique material findings were accepted; cosmetic and refactor-only leads
 - Leads tenant/paging lane: findings 13-15 fixed at `ae93cd521b11c515a827c372babb7382bc97ffaa`.
 - Shared-worktree rule: each lane stages only explicitly owned paths and must inspect the staged path list before committing.
 
+## Exact-head correction closeout
+
+- Final review wave accepted and fixed nine additional material cross-lane findings covering CASS tenant provenance, DNC/sequence behavior, CSV retry truth, consent durability, and result accounting.
+- Final correction commits:
+  - `e7393168edd6d023bbb8cff9ff51eb9e26578b7f` — truthful retry progress and SMS-only visibility.
+  - `8d73d0c3541066755555f2161385b43a7894c29a` — CASS tenant provenance and sequence DNC safety.
+  - `9b8fee10ee1957ece90f034dce66880e21ec2562` — CSV recovery invariants.
+  - `0088d59d58348556010ae588f9899373030212ae` — authoritative DNC import and immutable consent outcomes.
+- The final `0088d59` fix surface was re-reviewed independently by database/security, application/accounting, and cross-integration lanes. All three returned CLEAN with no remaining P0-P2 findings.
+- Cosmetics, refactors, abstraction changes, complexity-only observations, and optional hardening were deliberately excluded.
+
 ## Acceptance gates still open
 
 - [x] All fifteen material findings fixed and committed without cross-lane scope contamination.
-- [ ] Focused unit, UI, database, migration, retry, tenant, duplicate, and concurrency suites pass.
-- [ ] Type checking and production build pass.
-- [ ] Changed-file lint adds no failures.
-- [ ] Full suites pass except independently proven unrelated baseline failures.
-- [ ] Every new migration applies and reapplies in a disposable database with its race and tenant invariants proven.
-- [ ] Desktop and narrow synthetic browser evidence is refreshed and visibly labeled as database-free; real schema-backed acceptance remains explicitly missing unless an approved disposable app database becomes available.
-- [ ] Diff, scope, and credential scans are clean.
-- [ ] Fresh independent exact-head review has zero unresolved P0-P2 findings.
-- [ ] Claude/Fable receives a secret-free exact-head readiness packet only after Codex manual review is clean.
-- [ ] Requirement-by-requirement completion audit passes.
+- [x] Focused unit, UI, database, migration, retry, tenant, duplicate, and concurrency suites pass.
+- [x] Type checking and production build pass.
+- [x] Changed-file lint adds no failures.
+- [x] Full suites pass except independently proven unrelated baseline failures.
+- [x] Every new migration applies and reapplies in a disposable database with its race and tenant invariants proven.
+- [x] Desktop and narrow synthetic browser evidence is refreshed and visibly labeled as database-free; real schema-backed acceptance remains explicitly missing unless an approved disposable app database becomes available.
+- [x] Diff, scope, and credential scans are clean.
+- [x] Fresh independent exact-head review has zero unresolved P0-P2 findings.
+- [x] Claude/Fable receives a secret-free exact-head readiness packet only after Codex manual review is clean.
+- [x] Requirement-by-requirement completion audit passes.
 - [ ] Stop before merge/deploy and request Jarrad's explicit approval.
 
 ## Known baseline gap
 
-- `src/lib/notifications/format.test.ts` has a date-sensitive expectation that reports `Due Yesterday`; it is outside this change surface and must remain classified separately unless exact-head evidence shows overlap.
+- Exact final branch proof: UI tests `638/638`; logic tests `2118/2119`; typecheck and production build pass; all migration/recovery/paging/DNC/provider-safety rehearsals pass; scoped lint and diff/credential scans are clean.
+- The sole logic-suite failure is `src/lib/notifications/format.test.ts`, whose date-sensitive expectation reports `Due Yesterday`; it is unchanged and outside this change surface.
+- Real schema-backed `/leads`, `/properties`, and import browser acceptance remains missing because the committed forward migrations were intentionally not applied to shared or production databases. Existing Chrome evidence is synthetic, desktop+narrow, and visibly labeled database-free.
+- No migration, provider, production, messaging, credit, merge, deployment, or production-data action was performed.
+
+## Claude/Fable readiness verdict
+
+- Surface: authenticated Claude CLI, Fable model, secret-free exact-head packet.
+- Verdict: `DONE`; confidence: medium.
+- Materiality decision: no remaining P0-P2 code blocker. Cosmetics, refactors, naming, abstractions, complexity, duplication, unused exports, and optional hardening remain deferred.
+- Required before merge/deploy: real schema-backed browser acceptance for `/leads`, `/properties`, and import after the forward migrations are available in an explicitly approved environment.
+- Stop reason: implementation and local/disposable verification are complete; the remaining browser gate requires an environment decision outside this no-migration execution scope.
