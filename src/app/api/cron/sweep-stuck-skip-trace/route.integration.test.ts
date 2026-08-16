@@ -181,7 +181,7 @@ describe("runSweep — sweep-stuck-skip-trace cron", () => {
     expect(result.unsubmitted_reclaimed).toBe(1);
     expect(start).toHaveBeenCalledTimes(1);
     expect(start).toHaveBeenCalledWith(expect.any(Function), [
-      { jobId: job!.id },
+      { jobId: job!.id, orgId },
     ]);
 
     const { data: after } = await supabase
@@ -190,6 +190,54 @@ describe("runSweep — sweep-stuck-skip-trace cron", () => {
       .eq("id", job!.id)
       .single();
     expect(after!.status).toBe("running");
+  });
+
+  it("reclaims a stale job that crashed in the recoverable pre-provider phase", async () => {
+    const orgId = await getOrgId();
+    const startedAt = new Date(Date.now() - 15 * 60 * 1000).toISOString();
+    const { data: job } = await supabase
+      .from("jobs")
+      .insert({
+        org_id: orgId,
+        type: "skip_trace",
+        status: "running",
+        total_items: 1,
+        provider_run_id: null,
+        started_at: startedAt,
+        worker_heartbeat_at: startedAt,
+        input_params: { property_ids: ["placeholder"] },
+        result_summary: { submit_phase: "prepared" },
+      })
+      .select("id")
+      .single();
+
+    const result = await runSweep(supabase);
+
+    expect(result.unsubmitted_reclaimed).toBe(1);
+    expect(start).toHaveBeenCalledWith(expect.any(Function), [
+      { jobId: job!.id, orgId },
+    ]);
+  });
+
+  it("does not reclaim a stale job at the ambiguous paid-call boundary", async () => {
+    const orgId = await getOrgId();
+    const startedAt = new Date(Date.now() - 15 * 60 * 1000).toISOString();
+    await supabase.from("jobs").insert({
+      org_id: orgId,
+      type: "skip_trace",
+      status: "running",
+      total_items: 1,
+      provider_run_id: null,
+      started_at: startedAt,
+      worker_heartbeat_at: startedAt,
+      input_params: { property_ids: ["placeholder"] },
+      result_summary: { submit_phase: "submitting" },
+    });
+
+    const result = await runSweep(supabase);
+
+    expect(result.unsubmitted_reclaimed).toBe(0);
+    expect(start).not.toHaveBeenCalled();
   });
 
   it("reclaims stale queued never-submitted skip_trace jobs with null heartbeat", async () => {
@@ -215,7 +263,7 @@ describe("runSweep — sweep-stuck-skip-trace cron", () => {
     expect(result.unsubmitted_reclaimed).toBe(1);
     expect(start).toHaveBeenCalledTimes(1);
     expect(start).toHaveBeenCalledWith(expect.any(Function), [
-      { jobId: job!.id },
+      { jobId: job!.id, orgId },
     ]);
 
     const { data: after } = await supabase

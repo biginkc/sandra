@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { formatNotification, formatTimeOfDay, humanDueDate } from "./format";
 
@@ -159,18 +159,19 @@ describe("formatNotification", () => {
     // same LA evening. Chicago (the default zone) is already on the 15th
     // at this UTC instant, so a formatter that ignored payload.timezone
     // would say "tomorrow" here instead of "today".
-    const due = "2026-08-15T06:50:00Z";
-    const out = formatNotification("task_assigned", {
-      taskTitle: "Walkthrough",
-      taskType: "follow_up",
-      dueAt: due,
-      timezone: "America/Los_Angeles",
-    });
-    // formatNotification always uses real `now`, so this only asserts
-    // shape/behavior indirectly via humanDueDate's own zone tests above;
-    // here we just confirm the call doesn't ignore the field and produces
-    // a normal due-labeled body.
-    expect(out.body).toMatch(/^Due (today|tomorrow|soon|[A-Za-z]{3} [A-Za-z]{3} \d+)/);
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-15T06:30:00Z"));
+    try {
+      const out = formatNotification("task_assigned", {
+        taskTitle: "Walkthrough",
+        taskType: "follow_up",
+        dueAt: "2026-08-15T06:50:00Z",
+        timezone: "America/Los_Angeles",
+      });
+      expect(out.body).toBe("Due today · Follow-up");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("task_assigned tolerates missing fields", () => {

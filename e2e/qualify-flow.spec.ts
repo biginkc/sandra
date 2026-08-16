@@ -26,8 +26,23 @@ test.describe("qualify → revert round-trip", () => {
       .getByRole("menuitem", { name: "Promote to Lead" })
       .click();
 
-    // Row disappears from /properties.
-    await expect(page.locator(`text=${prospect.address}`)).toHaveCount(0);
+    const dialog = page.getByRole("dialog");
+    await expect(dialog.getByText("1 eligible", { exact: true })).toBeVisible();
+    await dialog.getByRole("button", { name: "Promote 1 to Leads" }).click();
+    await expect(dialog.getByRole("link", { name: "View progress" })).toBeVisible();
+
+    // Promotion runs in the background. Prove the saved result before
+    // checking either page; the originating row may remain while the job runs.
+    await expect(async () => {
+      const { data, error } = await admin
+        .from("properties")
+        .select("status, qualified_at")
+        .eq("id", prospect.id)
+        .single();
+      expect(error).toBeNull();
+      expect(data?.status).toBe("new_lead");
+      expect(data?.qualified_at).toBeTruthy();
+    }).toPass({ timeout: 20_000 });
 
     // Show up on /leads kanban under New Lead.
     await page.goto("/leads");

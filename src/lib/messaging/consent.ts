@@ -102,7 +102,22 @@ export async function recordConsentEvent(
     idempotencyKey?: string;
   },
 ): Promise<void> {
+  // `consent_events` is protected by a composite (contact_id, org_id) FK.
+  // Never rely on the table's legacy default org: webhook/service-role callers
+  // can write for any tenant, so the contact row is the authoritative source.
+  const { data: contact, error: contactError } = await supabase
+    .from("contacts")
+    .select("org_id")
+    .eq("id", params.contactId)
+    .maybeSingle();
+  if (contactError || !contact?.org_id) {
+    throw new Error(
+      `recordConsentEvent contact lookup: ${contactError?.message ?? "contact not found"}`,
+    );
+  }
+
   const row = {
+    org_id: contact.org_id,
     contact_id: params.contactId,
     channel: params.channel,
     event_type: params.eventType,
@@ -117,6 +132,7 @@ export async function recordConsentEvent(
     const { data: existing, error: lookupError } = await supabase
       .from("consent_events")
       .select("id")
+      .eq("org_id", contact.org_id)
       .eq("contact_id", params.contactId)
       .eq("channel", params.channel)
       .eq("event_type", params.eventType)

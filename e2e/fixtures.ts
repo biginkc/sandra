@@ -1,6 +1,7 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
 import type { Database } from "../src/lib/supabase/types";
+import { assertSafeE2ESupabaseTarget } from "../src/lib/supabase/e2e-target-safety";
 import {
   MOCK_PROVIDER_CAMPAIGN_ID,
   MOCK_SENDER_PRIMARY,
@@ -32,11 +33,9 @@ export function adminClient(): SupabaseClient<Database> {
       "E2E fixtures need TEST_SUPABASE_URL + TEST_SUPABASE_SERVICE_ROLE_KEY in the environment.",
     );
   }
-  if (url.includes("copflsklaefwzipsrjqz")) {
-    throw new Error(
-      "E2E fixtures refusing to run against the dev project — would trash data.",
-    );
-  }
+  assertSafeE2ESupabaseTarget(url, {
+    allowLocal: process.env.E2E_ALLOW_LOCAL_SUPABASE === "1",
+  });
   return createClient<Database>(url, key, {
     auth: { persistSession: false, autoRefreshToken: false },
   });
@@ -71,7 +70,9 @@ async function deleteAllRows(
 ): Promise<void> {
   const { error } = await client.from(table).delete().not("id", "is", null);
   if (error) {
-    throw new Error(`reset_tenant_tables() failed to clear ${table}: ${error.message}`);
+    throw new Error(
+      `reset_tenant_tables() failed to clear ${table}: ${error.message}`,
+    );
   }
 }
 
@@ -115,7 +116,7 @@ async function seedMockDeliveryCatalog(
  * Stage 1 introduced membership-scoped RLS — without a membership row in
  * this org, the test user can't read or write tenant data.
  */
-const DEFAULT_ORG_ID = "00000000-0000-0000-0000-000000000bbb";
+export const DEFAULT_ORG_ID = "00000000-0000-0000-0000-000000000bbb";
 
 /**
  * Ensure the shared E2E user exists in auth.users, can sign in with the shared
@@ -142,10 +143,13 @@ export async function ensureTestUser(
   if (existing) {
     userId = existing.id;
     if (options.repairPassword) {
-      const { error: updateErr } = await client.auth.admin.updateUserById(userId, {
-        password: TEST_USER_PASSWORD,
-        email_confirm: true,
-      });
+      const { error: updateErr } = await client.auth.admin.updateUserById(
+        userId,
+        {
+          password: TEST_USER_PASSWORD,
+          email_confirm: true,
+        },
+      );
       if (updateErr) throw updateErr;
     }
   } else {
@@ -177,9 +181,7 @@ export async function ensureTestUser(
       ): Promise<{ error: { message: string } | null }>;
     };
   };
-  const { error: membershipErr } = await (
-    client as unknown as MembershipWriter
-  )
+  const { error: membershipErr } = await (client as unknown as MembershipWriter)
     .from("memberships")
     .upsert(
       { user_id: userId, org_id: DEFAULT_ORG_ID, role: "owner" },

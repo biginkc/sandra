@@ -2,8 +2,9 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { reportError } from "@/lib/errors/report";
 import { dispatchJobCompleted } from "@/lib/notifications/dispatch";
-import type { Database } from "@/lib/supabase/types";
+import type { Database, Json } from "@/lib/supabase/types";
 import { verifyPropertyAddress } from "./verify-property";
+export { CASS_COST_PER_LOOKUP_USD } from "@/lib/provider-pricing";
 
 export type CassJobSummary = {
   total: number;
@@ -13,10 +14,77 @@ export type CassJobSummary = {
   cacheHits: number;
   failed: number;
   providerOff: number;
+  dncSkipped?: number;
+  retryableFailures?: number;
+  savedResultFailures?: number;
+  manualReconciliation?: number;
 };
+
+export type AuthorizedCassJob = {
+  jobId: string;
+  claimToken: string | null;
+  created: boolean;
+  status: string;
+};
+
+type CassRpcError = { message: string } | null;
+
+type CassRpcClient = {
+  rpc(
+    fn: "create_authorized_cass_job",
+    args: {
+      p_org_id: string;
+      p_property_ids: string[];
+      p_purpose: "standalone" | "import" | "retry";
+      p_parent_job_id: string | null;
+      p_related_import_id: string | null;
+      p_source_job_id: string | null;
+      p_created_by: string | null;
+      p_auto_start: boolean;
+      p_blocked_reason: string | null;
+      p_request_key: string;
+    },
+  ): Promise<{
+    data:
+      | Array<{
+          job_id: string;
+          claim_token: string | null;
+          created: boolean;
+          job_status: string;
+        }>
+      | null;
+    error: CassRpcError;
+  }>;
+  rpc(
+    fn: "claim_authorized_cass_job_start",
+    args: { p_job_id: string; p_org_id: string; p_claim_token: string | null },
+  ): Promise<{ data: string | null; error: CassRpcError }>;
+  rpc(
+    fn: "fail_authorized_cass_job_start",
+    args: {
+      p_job_id: string;
+      p_org_id: string;
+      p_claim_token: string;
+      p_message: string;
+    },
+  ): Promise<{ data: boolean | null; error: CassRpcError }>;
+};
+
+function cassRpcClient(supabase: SupabaseClient<Database>): CassRpcClient {
+  return supabase as unknown as CassRpcClient;
+}
 
 const PROGRESS_UPDATE_INTERVAL = 10;
 const DEFAULT_AUTOTRIGGER_CAP = 100;
+const RECOVERY_PAGE_SIZE = 500;
+
+function chunksOf<T>(values: T[], size = RECOVERY_PAGE_SIZE): T[][] {
+  const chunks: T[][] = [];
+  for (let offset = 0; offset < values.length; offset += size) {
+    chunks.push(values.slice(offset, offset + size));
+  }
+  return chunks;
+}
 
 /**
  * Parse the autotrigger item cap from env. Controls when a CASS child job
@@ -31,8 +99,6 @@ const DEFAULT_AUTOTRIGGER_CAP = 100;
  * SmartyStreets' US Street API rate at the time of this writing. Centralized
  * here so the UI and the plan stay in sync.
  */
-export const CASS_COST_PER_LOOKUP_USD = 0.03;
-
 /**
  * Was this CASS child job deliberately parked in `queued` by the autotrigger
  * because the import exceeded the budget cap? Used by the UI to decide
@@ -73,28 +139,112 @@ export function getAutotriggerCap(): number {
 export async function selectCassEligibleProperties(
   supabase: SupabaseClient<Database>,
   parentJobId: string,
+  expectedOrgId: string,
 ): Promise<string[]> {
-  const { data: items } = await supabase
-    .from("job_items")
-    .select("property_id")
-    .eq("job_id", parentJobId)
-    .in("status", ["success", "skipped"])
-    .not("property_id", "is", null);
-
-  const candidateIds = (items ?? [])
-    .map((r) => r.property_id)
-    .filter((id): id is string => typeof id === "string");
+  const candidateIdSet = new Set<string>();
+  let lastItemId: string | null = null;
+  for (;;) {
+    let query = supabase
+      .from("job_items")
+      .select("id, property_id")
+      .eq("job_id", parentJobId)
+      .in("status", ["success", "skipped"])
+      .not("property_id", "is", null)
+      .order("id", { ascending: true })
+      .limit(RECOVERY_PAGE_SIZE);
+    if (lastItemId) query = query.gt("id", lastItemId);
+    const { data: items, error: itemsError } = await query;
+    if (itemsError) {
+      throw new Error(`failed to read import property ledger: ${itemsError.message}`);
+    }
+    for (const item of items ?? []) {
+      if (item.property_id) candidateIdSet.add(item.property_id);
+    }
+    if (!items || items.length < RECOVERY_PAGE_SIZE) break;
+    lastItemId = items.at(-1)?.id ?? null;
+    if (!lastItemId) throw new Error("import property ledger page had no cursor");
+  }
+  const candidateIds = [...candidateIdSet];
   if (candidateIds.length === 0) return [];
 
-  const { data: rows } = await supabase
-    .from("properties")
-    .select("id")
-    .in("id", candidateIds)
-    .eq("cass_status", "unverified");
+  const eligibleIds: string[] = [];
+  for (const candidateChunk of chunksOf(candidateIds)) {
+    const { data: rows, error: propertiesError } = await supabase
+      .from("properties")
+      .select("id")
+      .in("id", candidateChunk)
+      .eq("org_id", expectedOrgId)
+      .eq("cass_status", "unverified")
+      .eq("is_dnc_locked", false);
+    if (propertiesError) {
+      throw new Error(`failed to read CASS candidates: ${propertiesError.message}`);
+    }
+    eligibleIds.push(...(rows ?? []).map((row) => row.id));
+  }
+  if (eligibleIds.length === 0) return [];
 
-  return (rows ?? [])
-    .map((r) => r.id)
-    .filter((id): id is string => typeof id === "string");
+  // A provider may have accepted a lookup even when its property write failed
+  // or the response was lost. Those terminal/manual child rows must never be
+  // regenerated by retrying the parent import.
+  const childJobIds: string[] = [];
+  let lastChildId: string | null = null;
+  for (;;) {
+    let query = supabase
+      .from("jobs")
+      .select("id")
+      .eq("parent_job_id", parentJobId)
+      .eq("org_id", expectedOrgId)
+      .eq("type", "cass_dsf2_ncoa")
+      .order("id", { ascending: true })
+      .limit(RECOVERY_PAGE_SIZE);
+    if (lastChildId) query = query.gt("id", lastChildId);
+    const { data: childJobs, error: childJobsError } = await query;
+    if (childJobsError) {
+      throw new Error(`failed to read CASS child ledger: ${childJobsError.message}`);
+    }
+    childJobIds.push(...(childJobs ?? []).map((row) => row.id));
+    if (!childJobs || childJobs.length < RECOVERY_PAGE_SIZE) break;
+    lastChildId = childJobs.at(-1)?.id ?? null;
+    if (!lastChildId) throw new Error("CASS child ledger page had no cursor");
+  }
+  if (childJobIds.length === 0) return eligibleIds;
+
+  const ambiguousIds = new Set<string>();
+  for (const childChunk of chunksOf(childJobIds)) {
+    for (const propertyChunk of chunksOf(eligibleIds)) {
+      let lastAmbiguousItemId: string | null = null;
+      for (;;) {
+        let query = supabase
+          .from("job_items")
+          .select("id, property_id")
+          .in("job_id", childChunk)
+          .in("property_id", propertyChunk)
+          .eq("status", "skipped")
+          .in("error_class", ["submission_unknown"])
+          .order("id", { ascending: true })
+          .limit(RECOVERY_PAGE_SIZE);
+        if (lastAmbiguousItemId) {
+          query = query.gt("id", lastAmbiguousItemId);
+        }
+        const { data: ambiguousItems, error: ambiguousError } = await query;
+        if (ambiguousError) {
+          throw new Error(
+            `failed to read ambiguous CASS ledger: ${ambiguousError.message}`,
+          );
+        }
+        for (const item of ambiguousItems ?? []) {
+          if (item.property_id) ambiguousIds.add(item.property_id);
+        }
+        if (!ambiguousItems || ambiguousItems.length < RECOVERY_PAGE_SIZE) break;
+        lastAmbiguousItemId = ambiguousItems.at(-1)?.id ?? null;
+        if (!lastAmbiguousItemId) {
+          throw new Error("ambiguous CASS ledger page had no cursor");
+        }
+      }
+    }
+  }
+
+  return eligibleIds.filter((id) => !ambiguousIds.has(id));
 }
 
 /**
@@ -109,58 +259,111 @@ export async function createCassChildJob(
     parentJobId: string;
     relatedImportId: string | null;
     createdBy: string | null;
+    orgId: string;
     propertyIds: string[];
     autoStart: boolean;
     blockedReason?: string;
+    sourceJobId?: string;
+    requestKey: string;
   },
-): Promise<string> {
-  const resultSummary = params.autoStart
-    ? null
-    : { awaiting_manual_start: true, reason: params.blockedReason ?? null };
+): Promise<AuthorizedCassJob> {
+  const { data, error } = await cassRpcClient(supabase).rpc(
+    "create_authorized_cass_job",
+    {
+      p_org_id: params.orgId,
+      p_property_ids: params.propertyIds,
+      p_purpose: params.sourceJobId ? "retry" : "import",
+      p_parent_job_id: params.parentJobId,
+      p_related_import_id: params.relatedImportId,
+      p_source_job_id: params.sourceJobId ?? null,
+      p_created_by: params.createdBy,
+      p_auto_start: params.autoStart,
+      p_blocked_reason: params.blockedReason ?? null,
+      p_request_key: params.requestKey,
+    },
+  );
 
-  const { data, error } = await supabase
-    .from("jobs")
-    .insert({
-      type: "cass_dsf2_ncoa",
-      status: "queued",
-      parent_job_id: params.parentJobId,
-      related_import_id: params.relatedImportId,
-      created_by: params.createdBy,
-      total_items: params.propertyIds.length,
-      title: `CASS verify ${params.propertyIds.length} propert${params.propertyIds.length === 1 ? "y" : "ies"}`,
-      description: params.autoStart
-        ? "Auto-triggered after CSV import"
-        : `Awaiting manual start (${params.blockedReason ?? "budget cap"})`,
-      provider: "smartystreets",
-      input_params: { property_ids: params.propertyIds },
-      result_summary: resultSummary,
-    })
-    .select("id")
-    .single();
-
-  if (error) {
-    throw new Error(`failed to create cass child job: ${error.message}`);
+  const row = data?.[0];
+  if (error || !row) {
+    throw new Error(`failed to create cass child job: ${error?.message ?? "no job id"}`);
   }
-  return data.id;
+  return {
+    jobId: row.job_id,
+    claimToken: row.claim_token,
+    created: row.created,
+    status: row.job_status,
+  };
 }
 
-/**
- * Flip a CASS job to `running` and stamp the heartbeat. Step 0 of the
- * chunked enrichment path; also the head of the single-shot wrapper.
- */
-export async function beginCassJob(
+export async function createStandaloneCassJob(
   supabase: SupabaseClient<Database>,
-  params: { jobId: string; totalItems: number },
+  params: {
+    orgId: string;
+    propertyIds: string[];
+    createdBy: string;
+    requestKey: string;
+  },
+): Promise<AuthorizedCassJob> {
+  const { data, error } = await cassRpcClient(supabase).rpc(
+    "create_authorized_cass_job",
+    {
+      p_org_id: params.orgId,
+      p_property_ids: params.propertyIds,
+      p_purpose: "standalone",
+      p_parent_job_id: null,
+      p_related_import_id: null,
+      p_source_job_id: null,
+      p_created_by: params.createdBy,
+      p_auto_start: true,
+      p_blocked_reason: null,
+      p_request_key: params.requestKey,
+    },
+  );
+  const row = data?.[0];
+  if (error || !row) {
+    throw new Error(`failed to create standalone CASS job: ${error?.message ?? "no job id"}`);
+  }
+  return {
+    jobId: row.job_id,
+    claimToken: row.claim_token,
+    created: row.created,
+    status: row.job_status,
+  };
+}
+
+export async function claimAuthorizedCassJobStart(
+  supabase: SupabaseClient<Database>,
+  params: { jobId: string; orgId: string; claimToken?: string | null },
+): Promise<string> {
+  const { data, error } = await cassRpcClient(supabase).rpc(
+    "claim_authorized_cass_job_start",
+    {
+      p_job_id: params.jobId,
+      p_org_id: params.orgId,
+      p_claim_token: params.claimToken ?? null,
+    },
+  );
+  if (error || !data) {
+    throw new Error(`failed to claim CASS job start: ${error?.message ?? "no claim token"}`);
+  }
+  return data;
+}
+
+export async function failAuthorizedCassJobStart(
+  supabase: SupabaseClient<Database>,
+  params: { jobId: string; orgId: string; claimToken: string; error: unknown },
 ): Promise<void> {
-  await supabase
-    .from("jobs")
-    .update({
-      status: "running",
-      started_at: new Date().toISOString(),
-      total_items: params.totalItems,
-      worker_heartbeat_at: new Date().toISOString(),
-    })
-    .eq("id", params.jobId);
+  const message = params.error instanceof Error ? params.error.message : String(params.error);
+  const { error } = await cassRpcClient(supabase).rpc(
+    "fail_authorized_cass_job_start",
+    {
+      p_job_id: params.jobId,
+      p_org_id: params.orgId,
+      p_claim_token: params.claimToken,
+      p_message: message,
+    },
+  );
+  if (error) throw new Error(`failed to mark CASS start failed: ${error.message}`);
 }
 
 /**
@@ -181,13 +384,38 @@ export async function runCassChunk(
     processedBefore: number;
     /** Running totals from prior chunks; mutated and returned. */
     summary: CassJobSummary;
+    expectedOrgId: string;
   },
 ): Promise<CassJobSummary> {
   const { summary } = params;
 
   for (let i = 0; i < params.propertyIds.length; i++) {
     const propertyId = params.propertyIds[i];
-    const outcome = await verifyPropertyAddress(supabase, propertyId);
+    const outcome = await verifyPropertyAddress(
+      supabase,
+      propertyId,
+      params.expectedOrgId,
+      { jobId: params.jobId },
+    );
+
+    const persistItem = async (row: {
+      status: "success" | "error" | "skipped";
+      error_class?: string | null;
+      error_message?: string | null;
+      output_payload?: Json | null;
+    }) => {
+      const { error } = await supabase.from("job_items").upsert(
+        {
+          job_id: params.jobId,
+          property_id: propertyId,
+          item_key: propertyId,
+          ...row,
+          processed_at: new Date().toISOString(),
+        },
+        { onConflict: "job_id,item_key" },
+      );
+      if (error) throw new Error(`failed to persist CASS job item: ${error.message}`);
+    };
 
     switch (outcome.status) {
       case "verified":
@@ -196,31 +424,66 @@ export async function runCassChunk(
         else if (outcome.verified.cassStatus === "invalid") summary.invalid++;
         else if (outcome.verified.cassStatus === "ambiguous") summary.ambiguous++;
         if (outcome.cacheHit) summary.cacheHits++;
-        await supabase.from("job_items").insert({
-          job_id: params.jobId,
-          property_id: propertyId,
+        await persistItem({
           status: "success",
         });
         break;
-      case "no_result":
       case "failed":
+      case "provider_rejected":
         summary.failed++;
-        await supabase.from("job_items").insert({
-          job_id: params.jobId,
-          property_id: propertyId,
+        summary.retryableFailures = (summary.retryableFailures ?? 0) + 1;
+        await persistItem({
           status: "error",
-          error_class: outcome.status === "no_result" ? "provider" : "database",
-          error_message:
-            outcome.status === "failed"
-              ? outcome.error
-              : "Provider returned no result",
+          error_class:
+            outcome.status === "provider_rejected"
+              ? "provider_rejected"
+              : "database",
+          error_message: outcome.error,
+        });
+        break;
+      case "no_result":
+        summary.failed++;
+        await persistItem({
+          status: "skipped",
+          error_class: "provider_no_result",
+          error_message: "Provider returned no result",
+        });
+        break;
+      case "submission_unknown":
+        summary.failed++;
+        summary.manualReconciliation = (summary.manualReconciliation ?? 0) + 1;
+        await persistItem({
+          status: "skipped",
+          error_class: "submission_unknown",
+          error_message: outcome.error,
+        });
+        break;
+      case "provider_persist_failed":
+        summary.failed++;
+        summary.retryableFailures = (summary.retryableFailures ?? 0) + 1;
+        summary.savedResultFailures = (summary.savedResultFailures ?? 0) + 1;
+        await persistItem({
+          status: "error",
+          error_class: "provider_persist_failed",
+          error_message: outcome.error,
+          output_payload: {
+            cass_status: outcome.verified.cassStatus,
+            standardized: outcome.verified.standardized ?? null,
+            raw: outcome.verified.raw as Json,
+          },
+        });
+        break;
+      case "dnc_skipped":
+        summary.dncSkipped = (summary.dncSkipped ?? 0) + 1;
+        await persistItem({
+          status: "skipped",
+          error_class: "dnc_locked",
+          error_message: "Skipped at the paid boundary because the property is permanently DNC.",
         });
         break;
       case "provider_off":
         summary.providerOff++;
-        await supabase.from("job_items").insert({
-          job_id: params.jobId,
-          property_id: propertyId,
+        await persistItem({
           status: "skipped",
           error_class: "configuration",
           error_message: "Address verifier disabled",
@@ -228,9 +491,7 @@ export async function runCassChunk(
         break;
       case "not_found":
         summary.failed++;
-        await supabase.from("job_items").insert({
-          job_id: params.jobId,
-          property_id: propertyId,
+        await persistItem({
           status: "error",
           error_class: "database",
           error_message: "Property not found",
@@ -270,7 +531,8 @@ export async function finalizeCassJob(
   // "failed" status only if every single verification bombed AND at least
   // one real attempt was made. If the provider is off across the board,
   // mark the job "canceled" — it didn't fail, we just can't run it.
-  const anyAttempted = summary.total - summary.providerOff > 0;
+  const anyAttempted =
+    summary.total - summary.providerOff - (summary.dncSkipped ?? 0) > 0;
   const status: Database["public"]["Tables"]["jobs"]["Update"]["status"] =
     !anyAttempted
       ? "canceled"
@@ -319,14 +581,17 @@ export async function finalizeCassJob(
  * platform's 5-minute ceiling (~1.8K rows), which is exactly how the
  * 2026-06-11 11,134-row bulk verify stalled.
  *
- * Never throws — job failures are absorbed and reflected in
- * `result_summary` / `error_message` so the /jobs page stays truthful.
+ * Provider/row outcomes are absorbed into the job summary. Authorization
+ * claim failures throw before any paid work so a fabricated or replayed job
+ * cannot reach the provider.
  */
 export async function runCassEnrichment(
   supabase: SupabaseClient<Database>,
   params: {
     jobId: string;
     propertyIds: string[];
+    expectedOrgId: string;
+    claimToken?: string | null;
   },
 ): Promise<CassJobSummary> {
   const summary: CassJobSummary = {
@@ -337,11 +602,16 @@ export async function runCassEnrichment(
     cacheHits: 0,
     failed: 0,
     providerOff: 0,
+    dncSkipped: 0,
+    retryableFailures: 0,
+    savedResultFailures: 0,
+    manualReconciliation: 0,
   };
 
-  await beginCassJob(supabase, {
+  await claimAuthorizedCassJobStart(supabase, {
     jobId: params.jobId,
-    totalItems: params.propertyIds.length,
+    orgId: params.expectedOrgId,
+    claimToken: params.claimToken,
   });
 
   await runCassChunk(supabase, {
@@ -349,6 +619,7 @@ export async function runCassEnrichment(
     propertyIds: params.propertyIds,
     processedBefore: 0,
     summary,
+    expectedOrgId: params.expectedOrgId,
   });
 
   await finalizeCassJob(supabase, { jobId: params.jobId, summary });

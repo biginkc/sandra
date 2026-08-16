@@ -30,8 +30,13 @@ export type BatchCreateModalProps = {
   open: boolean;
   onClose: () => void;
   selectedIds?: string[];
-  filterArgs?: { search?: string | null; blockStack: FilterBlock[] };
+  filterArgs?: {
+    search?: string | null;
+    blockStack: FilterBlock[];
+    imported?: "today" | null;
+  };
   totalCount: number;
+  lockedExcludedCount?: number;
 };
 
 const EMPTY_BLOCK_STACK: FilterBlock[] = [];
@@ -56,6 +61,7 @@ export function BatchCreateModal({
   selectedIds,
   filterArgs,
   totalCount,
+  lockedExcludedCount = 0,
 }: BatchCreateModalProps) {
   const [title, setTitle] = useState("");
   const [counts, setCounts] = useState<Counts | null>(null);
@@ -77,6 +83,7 @@ export function BatchCreateModal({
 
   const filterSearch = filterArgs?.search ?? null;
   const filterBlockStack = filterArgs?.blockStack ?? EMPTY_BLOCK_STACK;
+  const filterImported = filterArgs?.imported ?? null;
   const blockedTotal = totalBlocked(counts);
   const createDisabled =
     mode === "error" ||
@@ -105,6 +112,7 @@ export function BatchCreateModal({
           : await getAllMatchingProspectIds({
               search: filterSearch,
               blockStack: filterBlockStack,
+              imported: filterImported,
             });
 
       if (cancelled) return;
@@ -129,7 +137,7 @@ export function BatchCreateModal({
     return () => {
       cancelled = true;
     };
-  }, [filterBlockStack, filterSearch, mode, open, selectedIds, selectedIdsKey]);
+  }, [filterBlockStack, filterImported, filterSearch, mode, open, selectedIds, selectedIdsKey]);
 
   const handleCreate = () => {
     if (createDisabled) return;
@@ -146,6 +154,7 @@ export function BatchCreateModal({
           : await createDialerBatchFromFilters({
               search: filterSearch,
               blockStack: filterBlockStack,
+              imported: filterImported,
               title: cleanTitle,
             });
 
@@ -174,9 +183,14 @@ export function BatchCreateModal({
                 </p>
                 <p className="text-muted-foreground text-xs">
                   {mode === "filters"
-                    ? `${totalCount.toLocaleString()} matching current filters`
+                    ? `${totalCount.toLocaleString()} eligible from current filters`
                     : `${(selectedIds?.length ?? 0).toLocaleString()} selected`}
                 </p>
+                {lockedExcludedCount > 0 && (
+                  <p className="text-muted-foreground text-xs">
+                    {lockedExcludedCount.toLocaleString()} DNC locked and excluded
+                  </p>
+                )}
               </div>
               <span className="rounded-md border bg-background px-2 py-1 font-mono text-xs">
                 {mode === "filters" ? "Filters" : mode === "ids" ? "IDs" : "No selection"}

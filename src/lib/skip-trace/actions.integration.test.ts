@@ -19,15 +19,16 @@ process.env.ADMIN_EMAILS = "jarrad@bmhgroupkc.com";
 
 let currentEmail: string | null = "jarrad@bmhgroupkc.com";
 let currentUserId: string | null = null;
-vi.spyOn(testClient.auth, "getUser").mockImplementation(async () =>
-  ({
-    data: {
-      user: currentEmail
-        ? ({ id: currentUserId, email: currentEmail } as never)
-        : null,
-    },
-    error: null,
-  }) as never,
+vi.spyOn(testClient.auth, "getUser").mockImplementation(
+  async () =>
+    ({
+      data: {
+        user: currentEmail
+          ? ({ id: currentUserId, email: currentEmail } as never)
+          : null,
+      },
+      error: null,
+    }) as never,
 );
 
 import {
@@ -57,6 +58,40 @@ async function seedProperty(opts: {
   return data.id;
 }
 
+async function attachHomeowner(
+  propertyId: string,
+  suffix: string,
+): Promise<string> {
+  const { data: property, error: propertyError } = await testClient
+    .from("properties")
+    .select("org_id")
+    .eq("id", propertyId)
+    .single();
+  if (propertyError || !property) {
+    throw propertyError ?? new Error("property lookup failed");
+  }
+  const { data: contact, error: contactError } = await testClient
+    .from("contacts")
+    .insert({
+      org_id: property.org_id,
+      first_name: `Approval ${suffix}`,
+      last_name: "Owner",
+      phone_1: `+1816555${suffix.padStart(4, "0")}`,
+      phone_1_type: "mobile",
+    })
+    .select("id")
+    .single();
+  if (contactError || !contact) {
+    throw contactError ?? new Error("contact insert failed");
+  }
+  const { error: linkError } = await testClient
+    .from("properties")
+    .update({ homeowner_contact_id: contact.id })
+    .eq("id", propertyId);
+  if (linkError) throw linkError;
+  return contact.id;
+}
+
 describe("requestSkipTrace pre-flight gates (integration)", () => {
   beforeEach(async () => {
     await resetTenantTables(testClient);
@@ -84,16 +119,17 @@ describe("requestSkipTrace pre-flight gates (integration)", () => {
 
     const { data: job } = await testClient
       .from("jobs")
-      .select("input_params, title")
+      .select("org_id, input_params, title")
       .eq("id", result.data.jobId!)
       .single();
-    const input = (job!.input_params as { property_ids: string[] }).property_ids;
+    const input = (job!.input_params as { property_ids: string[] })
+      .property_ids;
     expect(new Set(input)).toEqual(new Set(ids));
     // No skipped suffix on the happy path.
     expect(job!.title).not.toMatch(/skipped/i);
     expect(start).toHaveBeenCalledTimes(1);
     expect(start).toHaveBeenCalledWith(expect.any(Function), [
-      { jobId: result.data.jobId },
+      { jobId: result.data.jobId, orgId: job!.org_id },
     ]);
   });
 
@@ -237,7 +273,8 @@ describe("requestSkipTrace pre-flight gates (integration)", () => {
       .select("input_params, title")
       .eq("id", result.data.jobId!)
       .single();
-    const input = (job!.input_params as { property_ids: string[] }).property_ids;
+    const input = (job!.input_params as { property_ids: string[] })
+      .property_ids;
     expect(input).toEqual([verified]);
     expect(job!.title).toMatch(/2 need.* CASS/i);
   });
@@ -396,7 +433,8 @@ describe("requestSkipTrace pre-flight gates (integration)", () => {
       .single();
     expect(job!.title).toMatch(/1 kill-switched/);
     expect(job!.title).toMatch(/1 need.* CASS/i);
-    const input = (job!.input_params as { property_ids: string[] }).property_ids;
+    const input = (job!.input_params as { property_ids: string[] })
+      .property_ids;
     expect(input).toEqual([verified]);
   });
 
@@ -430,6 +468,45 @@ describe("requestSkipTrace pre-flight gates (integration)", () => {
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.error.code).toBe("INSUFFICIENT_CREDITS");
+  });
+
+  it("refuses a pending job of another type without changing or starting it", async () => {
+    const verified = await seedProperty({
+      address: "1 Wrong Job Type Ln",
+      cassStatus: "verified",
+    });
+    const { data: prop } = await testClient
+      .from("properties")
+      .select("org_id")
+      .eq("id", verified)
+      .single();
+    const { data: job, error } = await testClient
+      .from("jobs")
+      .insert({
+        type: "cass_refresh",
+        provider: "internal",
+        status: "pending_approval",
+        org_id: prop!.org_id,
+        total_items: 1,
+        title: "Not a skip-trace job",
+        input_params: { property_ids: [verified] },
+      })
+      .select("id")
+      .single();
+    if (error || !job) throw error ?? new Error("seed job failed");
+
+    const result = await approveSkipTraceJob(job.id);
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe("NOT_FOUND");
+    const { data: after } = await testClient
+      .from("jobs")
+      .select("status")
+      .eq("id", job.id)
+      .single();
+    expect(after?.status).toBe("pending_approval");
+    expect(start).not.toHaveBeenCalled();
   });
 
   it("claims a pending skip-trace approval once when two approvals race", async () => {
@@ -470,8 +547,146 @@ describe("requestSkipTrace pre-flight gates (integration)", () => {
     }
     expect(start).toHaveBeenCalledTimes(1);
     expect(start).toHaveBeenCalledWith(expect.any(Function), [
-      { jobId: job.id },
+      { jobId: job.id, orgId: prop!.org_id },
     ]);
+  });
+
+  it("removes a newly DNC property before approval and records the exclusion", async () => {
+    currentEmail = "va@example.com";
+    const keep = await seedProperty({
+      address: "1 Approval Keep Ln",
+      cassStatus: "verified",
+    });
+    const suppress = await seedProperty({
+      address: "2 Approval Suppress Ln",
+      cassStatus: "verified",
+    });
+    const suppressContact = await attachHomeowner(suppress, "0211");
+    const requested = await requestSkipTrace([keep, suppress]);
+    expect(requested.ok).toBe(true);
+    if (!requested.ok || !requested.data.jobId) return;
+
+    const { error: dncError } = await testClient
+      .from("contacts")
+      .update({ do_not_contact: true })
+      .eq("id", suppressContact);
+    if (dncError) throw dncError;
+
+    currentEmail = "jarrad@bmhgroupkc.com";
+    const approved = await approveSkipTraceJob(requested.data.jobId);
+    expect(approved.ok).toBe(true);
+    if (approved.ok) {
+      expect(approved.data).toMatchObject({ status: "queued", excluded: 1 });
+    }
+
+    const { data: job } = await testClient
+      .from("jobs")
+      .select("status, total_items, title, input_params, result_summary")
+      .eq("id", requested.data.jobId)
+      .single();
+    expect(job?.status).toBe("queued");
+    expect(job?.total_items).toBe(1);
+    expect(job?.title).toBe(
+      "Skip trace 1 property · 1 excluded before provider submission",
+    );
+    expect(
+      (job?.input_params as { property_ids: string[] }).property_ids,
+    ).toEqual([keep]);
+    expect(job?.result_summary).toMatchObject({
+      eligibility_exclusions: { total: 1, by_reason: { dnc: 1 } },
+    });
+    expect(start).toHaveBeenCalledTimes(1);
+  });
+
+  it("cancels an all-suppressed pending job without balance lookup or workflow start", async () => {
+    currentEmail = "va@example.com";
+    const suppress = await seedProperty({
+      address: "1 Approval All Suppressed Ln",
+      cassStatus: "verified",
+    });
+    const suppressContact = await attachHomeowner(suppress, "0212");
+    const requested = await requestSkipTrace([suppress]);
+    expect(requested.ok).toBe(true);
+    if (!requested.ok || !requested.data.jobId) return;
+
+    const balanceSpy = vi.spyOn(MockSkipTraceProvider.prototype, "getBalance");
+    const { error: dncError } = await testClient
+      .from("contacts")
+      .update({ sms_opted_out: true })
+      .eq("id", suppressContact);
+    if (dncError) throw dncError;
+
+    currentEmail = "jarrad@bmhgroupkc.com";
+    const approved = await approveSkipTraceJob(requested.data.jobId);
+    expect(approved.ok).toBe(true);
+    if (approved.ok) {
+      expect(approved.data).toMatchObject({ status: "canceled", excluded: 1 });
+    }
+
+    const { data: job } = await testClient
+      .from("jobs")
+      .select("status, total_items, title, input_params, result_summary")
+      .eq("id", requested.data.jobId)
+      .single();
+    expect(job?.status).toBe("canceled");
+    expect(job?.total_items).toBe(0);
+    expect(job?.title).toBe(
+      "Skip trace 0 properties · 1 excluded before provider submission",
+    );
+    expect(
+      (job?.input_params as { property_ids: string[] }).property_ids,
+    ).toEqual([]);
+    expect(job?.result_summary).toMatchObject({
+      eligibility_exclusions: { total: 1, by_reason: { dnc: 1 } },
+    });
+    expect(balanceSpy).not.toHaveBeenCalled();
+    expect(start).not.toHaveBeenCalled();
+    balanceSpy.mockRestore();
+  });
+
+  it("deduplicates forged duplicate ids before approval audit and launch", async () => {
+    const propertyId = await seedProperty({
+      address: "1 Duplicate Approval Ln",
+      cassStatus: "verified",
+    });
+    const { data: property } = await testClient
+      .from("properties")
+      .select("org_id")
+      .eq("id", propertyId)
+      .single();
+    const { data: job, error } = await testClient
+      .from("jobs")
+      .insert({
+        type: "skip_trace",
+        provider: "tracerfy",
+        status: "pending_approval",
+        org_id: property!.org_id,
+        total_items: 2,
+        title: "Forged duplicate ids",
+        input_params: { property_ids: [propertyId, propertyId] },
+      })
+      .select("id")
+      .single();
+    if (error || !job) throw error ?? new Error("job seed failed");
+
+    const approved = await approveSkipTraceJob(job.id);
+
+    expect(approved).toMatchObject({
+      ok: true,
+      data: { status: "queued", excluded: 0 },
+    });
+    const { data: after } = await testClient
+      .from("jobs")
+      .select("total_items, input_params, result_summary")
+      .eq("id", job.id)
+      .single();
+    expect(after?.total_items).toBe(1);
+    expect(
+      (after?.input_params as { property_ids: string[] }).property_ids,
+    ).toEqual([propertyId]);
+    expect(after?.result_summary).toMatchObject({
+      eligibility_exclusions: { requested: 1, eligible: 1, total: 0 },
+    });
   });
 
   it("keeps approval successful when workflow enqueue fails after claim", async () => {

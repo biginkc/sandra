@@ -13,10 +13,13 @@ vi.mock("./fips", () => ({
   resolveFips: vi.fn().mockResolvedValue("29021"), // Buchanan County MO
 }));
 
-// eslint-disable-next-line import/first
-import { processIngestChunk } from "./ingest";
+import { finalizeIngestion, processIngestChunk } from "./ingest";
 
-type Response = { data: unknown; error: { message: string } | null };
+type Response = {
+  data: unknown;
+  error: { message: string } | null;
+  count?: number | null;
+};
 
 type CallRecord = {
   table: string;
@@ -27,6 +30,14 @@ type CallRecord = {
 
 let responseQueue: Response[] = [];
 let calls: CallRecord[] = [];
+let durableOutcomes = new Map<
+  string,
+  {
+    property_id: string;
+    original_outcome: "inserted" | "duplicate";
+    compliance_locked: boolean;
+  }
+>();
 
 function makeBuilder(record: CallRecord): Record<string, unknown> {
   const builder: Record<string, unknown> = {};
@@ -80,8 +91,20 @@ function makeBuilder(record: CallRecord): Record<string, unknown> {
     record.filters.push({ op: "is", args });
     return builder;
   };
+  builder.gte = (...args: unknown[]) => {
+    record.filters.push({ op: "gte", args });
+    return builder;
+  };
+  builder.lt = (...args: unknown[]) => {
+    record.filters.push({ op: "lt", args });
+    return builder;
+  };
   builder.in = (...args: unknown[]) => {
     record.filters.push({ op: "in", args });
+    return builder;
+  };
+  builder.not = (...args: unknown[]) => {
+    record.filters.push({ op: "not", args });
     return builder;
   };
   builder.limit = () => builder;
@@ -99,16 +122,120 @@ function makeSupabase() {
       calls.push(record);
       return makeBuilder(record);
     }),
+    rpc: vi.fn(
+      async (
+        name: string,
+        args: {
+          p_property?: Record<string, unknown>;
+          p_org_id?: string;
+          p_job_id?: string;
+          p_source_row_index?: number;
+          p_existing_property_id?: string | null;
+          p_existing_patch?: Record<string, unknown>;
+        },
+      ) => {
+        if (name !== "checkpoint_csv_import_property_outcome") {
+          throw new Error(`ingest.test: unexpected RPC ${name}`);
+        }
+        const outcomeKey = `${args.p_job_id}:${args.p_source_row_index}`;
+        const priorOutcome = durableOutcomes.get(outcomeKey);
+        if (priorOutcome) return { data: [priorOutcome], error: null };
+        const isDuplicate = Boolean(args.p_existing_property_id);
+        calls.push({
+          table: "properties",
+          op: isDuplicate ? "update" : "insert",
+          insertPayload: isDuplicate
+            ? args.p_existing_patch
+            : args.p_property,
+          filters: isDuplicate
+            ? [
+                { op: "eq", args: ["id", args.p_existing_property_id] },
+                { op: "eq", args: ["org_id", args.p_org_id] },
+              ]
+            : [],
+        });
+        const response = responseQueue.shift();
+        if (!response) {
+          throw new Error(
+            "ingest.test: no mock response queued for checkpoint_csv_import_property_outcome",
+          );
+        }
+        if (response.error) return { data: null, error: response.error };
+        const legacy = response.data as {
+          id?: string;
+          compliance_locked?: boolean;
+        } | null;
+        const outcome = {
+          property_id: args.p_existing_property_id ?? legacy?.id ?? "prop-new",
+          original_outcome: isDuplicate
+            ? ("duplicate" as const)
+            : ("inserted" as const),
+          compliance_locked:
+            legacy?.compliance_locked === true ||
+            args.p_property?.outreach_dispo === "dnc" ||
+            args.p_existing_patch?.outreach_dispo === "dnc",
+        };
+        durableOutcomes.set(outcomeKey, outcome);
+        return { data: [outcome], error: null };
+      },
+    ),
   };
 }
 
 beforeEach(() => {
   responseQueue = [];
   calls = [];
+  durableOutcomes = new Map();
 });
 
 afterEach(() => {
   vi.clearAllMocks();
+});
+
+describe("finalizeIngestion DNC result truth", () => {
+  it("reports every durably locked property separately from the reviewed DNC count", async () => {
+    responseQueue = [
+      { data: null, count: 1, error: null }, // terminal locked item count
+      { data: null, error: null }, // job finalization
+      { data: null, error: null }, // import finalization
+    ];
+
+    await finalizeIngestion(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      makeSupabase() as any,
+      {
+        jobId: "job-final",
+        csvImportId: "import-final",
+        orgId: "org-1",
+        totalRows: 3,
+        succeeded: 1,
+        failed: 1,
+        skipped: 1,
+        dncRows: 2,
+        errors: [{ rowIndex: 2, message: "malformed DNC row" }],
+      },
+    );
+
+    const lockedCount = calls.find(
+      (call) => call.table === "job_items" && call.op === "select",
+    );
+    expect(lockedCount?.filters).toEqual(
+      expect.arrayContaining([
+        { op: "eq", args: ["job_id", "job-final"] },
+        { op: "eq", args: ["compliance_locked", true] },
+        { op: "not", args: ["property_id", "is", null] },
+      ]),
+    );
+    const jobUpdate = calls.find(
+      (call) => call.table === "jobs" && call.op === "update",
+    );
+    expect(jobUpdate?.insertPayload).toMatchObject({
+      result_summary: {
+        dncRows: 1,
+        reviewedDncRows: 2,
+      },
+    });
+  });
 });
 
 describe("processIngestChunk → ingestRow countyId thread-through (phase 02 D-04)", () => {
@@ -150,6 +277,7 @@ describe("processIngestChunk → ingestRow countyId thread-through (phase 02 D-0
       {
         jobId: "job-1",
         csvImportId: "import-1",
+        orgId: "org-1",
         source: "dealmachine",
         market: "Buchanan County MO",
         countyId: "buchanan-county-id",
@@ -171,6 +299,7 @@ describe("processIngestChunk → ingestRow countyId thread-through (phase 02 D-0
     );
     expect(propertyInsert).toBeDefined();
     const payload = propertyInsert!.insertPayload as Record<string, unknown>;
+    expect(payload.org_id).toBe("org-1");
     expect(payload.market).toBe("Buchanan County MO");
     expect(payload.county_id).toBe("buchanan-county-id");
   });
@@ -197,6 +326,7 @@ describe("processIngestChunk → ingestRow countyId thread-through (phase 02 D-0
       {
         jobId: "job-1",
         csvImportId: "import-1",
+        orgId: "org-1",
         source: "dealmachine",
         market: "Johnson County KS",
         countyId: null,
@@ -224,6 +354,7 @@ describe("processIngestChunk → hard rule: unlabeled phones are never saved", (
   const baseChunkParams = {
     jobId: "job-1",
     csvImportId: "import-1",
+    orgId: "org-1",
     source: "dealmachine",
     market: "Buchanan County MO",
     countyId: "buchanan-county-id",
@@ -292,6 +423,10 @@ describe("processIngestChunk → hard rule: unlabeled phones are never saved", (
     expect(payload.phone_2).toBeNull();
     expect(payload.phone_3).toBeNull();
     expect(result.droppedUnlabeledPhones).toBe(1);
+    const homeownerDetails = calls.find(
+      (call) => call.table === "homeowner_details" && call.op === "upsert",
+    );
+    expect(homeownerDetails?.insertPayload).toMatchObject({ org_id: "org-1" });
   });
 
   it("keeps labeled phones in their slots with their types", async () => {
@@ -342,6 +477,45 @@ describe("processIngestChunk → hard rule: unlabeled phones are never saved", (
     expect(payload.phone_2).toBe("+18165550002");
     expect(payload.phone_2_type).toBe("landline");
     expect(result.droppedUnlabeledPhones).toBe(0);
+  });
+
+  it("writes org_id on agent sidecar rows", async () => {
+    responseQueue = [
+      { data: null, error: null }, // agent phone miss
+      { data: { id: "agent-contact" }, error: null },
+      { data: null, error: null }, // agent_details upsert
+      { data: null, error: null }, // address dedup miss
+      { data: { id: "prop-agent" }, error: null },
+      { data: null, error: null }, // job item
+      { data: null, error: null }, // progress
+    ];
+
+    await processIngestChunk(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      makeSupabase() as any,
+      {
+        ...baseChunkParams,
+        mapping: {
+          address: "Address",
+          state: "State",
+          agent_first_name: "Agent First",
+          agent_phone: "Agent Phone",
+          agent_phone_type: "Agent Phone Type",
+        },
+        rows: [{
+          Address: "9 Agent Ave",
+          State: "MO",
+          "Agent First": "Alex",
+          "Agent Phone": "8165552020",
+          "Agent Phone Type": "mobile",
+        }],
+      },
+    );
+
+    const agentDetails = calls.find(
+      (call) => call.table === "agent_details" && call.op === "upsert",
+    );
+    expect(agentDetails?.insertPayload).toMatchObject({ org_id: "org-1" });
   });
 
   it("still creates the contact (name/email kept) when EVERY phone is unlabeled", async () => {
@@ -412,6 +586,7 @@ describe("processIngestChunk → DealMachine DNC ratchet (Codex PR #310 findings
   const baseChunkParams = {
     jobId: "job-1",
     csvImportId: "import-1",
+    orgId: "org-1",
     source: "dealmachine",
     market: "Buchanan County MO",
     countyId: "buchanan-county-id",
@@ -436,11 +611,10 @@ describe("processIngestChunk → DealMachine DNC ratchet (Codex PR #310 findings
     responseQueue = [
       { data: { id: "existing-1" }, error: null }, // 1. phone match hit
       { data: null, error: null }, // 2. do_not_contact ratchet update
-      { data: null, error: null }, // 3. homeowner_details upsert
-      { data: null, error: null }, // 4. address dedup miss
-      { data: { id: "prop-1" }, error: null }, // 5. property insert
-      { data: null, error: null }, // 6. job_items insert
-      { data: null, error: null }, // 7. jobs progress update
+      { data: null, error: null }, // 3. address dedup miss
+      { data: { id: "prop-1" }, error: null }, // 4. property insert
+      { data: null, error: null }, // 5. job_items insert
+      { data: null, error: null }, // 6. jobs progress update
     ];
 
     const result = await processIngestChunk(
@@ -485,11 +659,10 @@ describe("processIngestChunk → DealMachine DNC ratchet (Codex PR #310 findings
       { data: null, error: null }, // 1. phone_1 (clean, survives) → no match
       { data: { id: "existing-2" }, error: null }, // 2. dropped Phone 2 (DNC) → match
       { data: null, error: null }, // 3. do_not_contact ratchet update
-      { data: null, error: null }, // 4. homeowner_details upsert
-      { data: null, error: null }, // 5. address dedup miss
-      { data: { id: "prop-2" }, error: null }, // 6. property insert
-      { data: null, error: null }, // 7. job_items insert
-      { data: null, error: null }, // 8. jobs progress update
+      { data: null, error: null }, // 4. address dedup miss
+      { data: { id: "prop-2" }, error: null }, // 5. property insert
+      { data: null, error: null }, // 6. job_items insert
+      { data: null, error: null }, // 7. jobs progress update
     ];
 
     const result = await processIngestChunk(
@@ -572,7 +745,7 @@ describe("processIngestChunk → DealMachine DNC ratchet (Codex PR #310 findings
     expect(result.failed).toBe(1);
     expect(result.errors[0]?.message).toContain("do_not_contact ratchet update failed");
     const errorItem = calls.find(
-      (c) => c.table === "job_items" && c.op === "insert",
+      (c) => c.table === "job_items" && c.op === "upsert",
     );
     expect(errorItem).toBeDefined();
     const payload = errorItem!.insertPayload as Record<string, unknown>;
@@ -593,11 +766,10 @@ describe("processIngestChunk → DealMachine DNC ratchet (Codex PR #310 findings
 
     responseQueue = [
       { data: { id: "contact-new" }, error: null }, // 1. contacts insert (no match possible)
-      { data: null, error: null }, // 2. homeowner_details upsert
-      { data: null, error: null }, // 3. address dedup miss
-      { data: { id: "prop-4" }, error: null }, // 4. property insert
-      { data: null, error: null }, // 5. job_items insert
-      { data: null, error: null }, // 6. jobs progress update
+      { data: null, error: null }, // 2. address dedup miss
+      { data: { id: "prop-4" }, error: null }, // 3. property insert
+      { data: null, error: null }, // 4. job_items insert
+      { data: null, error: null }, // 5. jobs progress update
     ];
 
     const result = await processIngestChunk(
@@ -635,11 +807,10 @@ describe("processIngestChunk → DealMachine DNC ratchet (Codex PR #310 findings
     responseQueue = [
       { data: { id: "existing-3" }, error: null }, // 1. phone match hit
       { data: null, error: null }, // 2. do_not_contact ratchet update
-      { data: null, error: null }, // 3. homeowner_details upsert
-      { data: null, error: null }, // 4. address dedup miss
-      { data: { id: "prop-5" }, error: null }, // 5. property insert
-      { data: null, error: null }, // 6. job_items insert
-      { data: null, error: null }, // 7. jobs progress update
+      { data: null, error: null }, // 3. address dedup miss
+      { data: { id: "prop-5" }, error: null }, // 4. property insert
+      { data: null, error: null }, // 5. job_items insert
+      { data: null, error: null }, // 6. jobs progress update
     ];
 
     const result = await processIngestChunk(
@@ -670,6 +841,44 @@ describe("processIngestChunk → DealMachine DNC ratchet (Codex PR #310 findings
     expect(ratchet!.filters).toContainEqual({ op: "eq", args: ["id", "existing-3"] });
   });
 
+  it("locks a dedup-matched property even when it already links a different homeowner", async () => {
+    responseQueue = [
+      { data: { id: "incoming-contact" }, error: null },
+      { data: { id: "existing-property" }, error: null }, // address dedup
+      {
+        data: { homeowner_contact_id: "different-contact", agent_contact_id: null },
+        error: null,
+      },
+      { data: null, error: null }, // property suppression/provenance ratchet
+      { data: null, error: null }, // job item checkpoint
+      { data: null, error: null }, // progress checkpoint
+    ];
+
+    const result = await processIngestChunk(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      makeSupabase() as any,
+      {
+        ...baseChunkParams,
+        mapping: {
+          address: "Address",
+          state: "State",
+          homeowner_do_not_contact: "DNC Flag",
+        },
+        rows: [{ Address: "55 Locked Ln", State: "MO", "DNC Flag": "true" }],
+      },
+    );
+
+    expect(result.skipped).toBe(1);
+    const propertyUpdate = calls.find(
+      (call) => call.table === "properties" && call.op === "update",
+    );
+    expect(propertyUpdate?.insertPayload).toMatchObject({
+      outreach_dispo: "dnc",
+      source_import_id: "import-1",
+    });
+    expect(propertyUpdate?.insertPayload).not.toHaveProperty("homeowner_contact_id");
+  });
+
   it("PropStream-shaped row: a DNC number with no clean phone still matches + ratchets an existing contact (Codex round-2 finding B)", async () => {
     // Mirrors what propstreamPreset.transform() now produces when a DNC
     // number is the ONLY phone on the row: the number itself lands in
@@ -687,11 +896,10 @@ describe("processIngestChunk → DealMachine DNC ratchet (Codex PR #310 findings
     responseQueue = [
       { data: { id: "existing-4" }, error: null }, // 1. dropped DNC phone matches
       { data: null, error: null }, // 2. do_not_contact ratchet update
-      { data: null, error: null }, // 3. homeowner_details upsert
-      { data: null, error: null }, // 4. address dedup miss
-      { data: { id: "prop-6" }, error: null }, // 5. property insert
-      { data: null, error: null }, // 6. job_items insert
-      { data: null, error: null }, // 7. jobs progress update
+      { data: null, error: null }, // 3. address dedup miss
+      { data: { id: "prop-6" }, error: null }, // 4. property insert
+      { data: null, error: null }, // 5. job_items insert
+      { data: null, error: null }, // 6. jobs progress update
     ];
 
     const result = await processIngestChunk(
@@ -735,11 +943,10 @@ describe("processIngestChunk → DealMachine DNC ratchet (Codex PR #310 findings
     responseQueue = [
       { data: { id: "existing-5" }, error: null }, // 1. match (any slot)
       { data: null, error: null }, // 2. do_not_contact ratchet update
-      { data: null, error: null }, // 3. homeowner_details upsert
-      { data: null, error: null }, // 4. address dedup miss
-      { data: { id: "prop-7" }, error: null }, // 5. property insert
-      { data: null, error: null }, // 6. job_items insert
-      { data: null, error: null }, // 7. jobs progress update
+      { data: null, error: null }, // 3. address dedup miss
+      { data: { id: "prop-7" }, error: null }, // 4. property insert
+      { data: null, error: null }, // 5. job_items insert
+      { data: null, error: null }, // 6. jobs progress update
     ];
 
     await processIngestChunk(
@@ -801,11 +1008,10 @@ describe("processIngestChunk → DealMachine DNC ratchet (Codex PR #310 findings
       { data: null, error: null }, // 1. incoming phone_1 → miss
       { data: { id: "existing-6" }, error: null }, // 2. DNC identity phone → match
       { data: null, error: null }, // 3. do_not_contact ratchet update
-      { data: null, error: null }, // 4. homeowner_details upsert
-      { data: null, error: null }, // 5. address dedup miss
-      { data: { id: "prop-8" }, error: null }, // 6. property insert
-      { data: null, error: null }, // 7. job_items insert
-      { data: null, error: null }, // 8. jobs progress update
+      { data: null, error: null }, // 4. address dedup miss
+      { data: { id: "prop-8" }, error: null }, // 5. property insert
+      { data: null, error: null }, // 6. job_items insert
+      { data: null, error: null }, // 7. jobs progress update
     ];
 
     const result = await processIngestChunk(
@@ -848,5 +1054,458 @@ describe("processIngestChunk → DealMachine DNC ratchet (Codex PR #310 findings
         "phone_1.eq.+18165559999,phone_2.eq.+18165559999,phone_3.eq.+18165559999",
       ],
     });
+  });
+});
+
+describe("processIngestChunk durable resume", () => {
+  it("persists a skipped checkpoint for every processed blank row", async () => {
+    responseQueue = [
+      { data: null, error: null }, // blank-row checkpoint
+      { data: null, error: null }, // progress checkpoint
+    ];
+
+    const result = await processIngestChunk(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      makeSupabase() as any,
+      {
+        jobId: "job-blank",
+        orgId: "org-1",
+        csvImportId: "import-blank",
+        source: "dealmachine",
+        market: "Buchanan County MO",
+        countyId: "county-1",
+        mapping: { address: "Address", state: "State" },
+        rows: [{ Address: "", State: "" }],
+        offset: 7,
+        autoTagIds: [],
+        resumeSafe: true,
+      },
+    );
+
+    expect(result).toMatchObject({ succeeded: 0, failed: 0, skipped: 1 });
+    const checkpoint = calls.find(
+      (call) => call.table === "job_items" && call.op === "upsert",
+    );
+    expect(checkpoint?.insertPayload).toMatchObject({
+      job_id: "job-blank",
+      source_row_index: 7,
+      status: "skipped",
+      error_class: "validation",
+      error_message: "Blank row",
+    });
+  });
+
+  it("skips a checkpointed success and retries only the failed source row", async () => {
+    responseQueue = [
+      { data: [
+        { source_row_index: 0, status: "success" },
+        { source_row_index: 1, status: "error" },
+      ], error: null },
+      { data: null, error: null }, // row 1 address dedup miss
+      { data: { id: "prop-row-1" }, error: null },
+      { data: null, error: null }, // row checkpoint upsert
+      { data: null, error: null }, // progress
+    ];
+
+    const result = await processIngestChunk(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      makeSupabase() as any,
+      {
+        jobId: "job-resume",
+        orgId: "org-1",
+        csvImportId: "import-resume",
+        source: "dealmachine",
+        market: "Buchanan County MO",
+        countyId: "county-1",
+        mapping: { address: "Address", state: "State" },
+        rows: [
+          { Address: "1 Already Done St", State: "MO" },
+          { Address: "2 Retry St", State: "MO" },
+        ],
+        offset: 0,
+        autoTagIds: [],
+        resumeSafe: true,
+      },
+    );
+
+    expect(result).toMatchObject({ succeeded: 2, failed: 0 });
+    const propertyWrites = calls.filter(
+      (call) => call.table === "properties" && call.op === "insert",
+    );
+    expect(propertyWrites).toHaveLength(1);
+    expect((propertyWrites[0].insertPayload as Record<string, unknown>).address).toBe("2 Retry ST");
+    const checkpoint = calls.find(
+      (call) => call.table === "job_items" && call.op === "upsert",
+    );
+    expect(checkpoint?.insertPayload).toMatchObject({ source_row_index: 1, status: "success" });
+  });
+});
+
+describe("processIngestChunk authoritative DNC terminal rows", () => {
+  const dncParams = {
+    jobId: "job-dnc-terminal",
+    csvImportId: "import-dnc-terminal",
+    orgId: "org-1",
+    source: "dealmachine",
+    market: "Buchanan County MO",
+    countyId: "county-1",
+    mapping: {
+      address: "Address",
+      state: "State",
+      homeowner_phone_1: "Phone",
+      homeowner_phone_1_type: "Phone Type",
+      homeowner_do_not_contact: "DNC Flag",
+    },
+    rows: [
+      {
+        Address: "88 Locked Ln",
+        State: "MO",
+        Phone: "8165558888",
+        "Phone Type": "DO NOT CALL",
+        "DNC Flag": "true",
+      },
+    ],
+    offset: 0,
+    autoTagIds: ["source-tag", "uploaded-tag"],
+    listId: "list-1",
+    userId: "user-1",
+    resumeSafe: true,
+  };
+
+  it("checkpoints a new DNC property without homeowner details, list, or tag enrichment", async () => {
+    responseQueue = [
+      { data: [], error: null }, // resume checkpoint miss
+      { data: null, error: null }, // DNC phone contact miss
+      { data: { id: "contact-new-dnc" }, error: null }, // contact insert
+      { data: null, error: null }, // address dedup miss
+      { data: { id: "property-new-dnc" }, error: null }, // property checkpoint
+      { data: null, error: null }, // terminal job item
+      { data: null, error: null }, // progress
+    ];
+
+    const result = await processIngestChunk(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      makeSupabase() as any,
+      dncParams,
+    );
+
+    expect(result).toMatchObject({ succeeded: 1, failed: 0, skipped: 0 });
+    expect(calls.some((call) => call.table === "homeowner_details")).toBe(
+      false,
+    );
+    expect(calls.some((call) => call.table === "property_lists")).toBe(false);
+    expect(calls.some((call) => call.table === "property_tags")).toBe(false);
+    expect(
+      calls.find((call) => call.table === "job_items" && call.op === "upsert")
+        ?.insertPayload,
+    ).toMatchObject({
+      status: "success",
+      compliance_locked: true,
+    });
+  });
+
+  it("checkpoints a newly ratcheted DNC duplicate without enrichment and replays no writes", async () => {
+    responseQueue = [
+      { data: [], error: null }, // resume checkpoint miss
+      { data: { id: "contact-existing" }, error: null }, // DNC phone match
+      { data: null, error: null }, // contact DNC ratchet
+      { data: { id: "property-existing" }, error: null }, // address dedup hit
+      {
+        data: {
+          homeowner_contact_id: "contact-existing",
+          agent_contact_id: null,
+        },
+        error: null,
+      }, // property patch lookup
+      { data: null, error: null }, // property outcome checkpoint
+      { data: null, error: null }, // terminal job item
+      { data: null, error: null }, // progress
+    ];
+
+    const first = await processIngestChunk(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      makeSupabase() as any,
+      dncParams,
+    );
+    expect(first).toMatchObject({ succeeded: 0, failed: 0, skipped: 1 });
+    expect(calls.some((call) => call.table === "homeowner_details")).toBe(
+      false,
+    );
+    expect(calls.some((call) => call.table === "property_lists")).toBe(false);
+    expect(calls.some((call) => call.table === "property_tags")).toBe(false);
+
+    calls = [];
+    responseQueue = [
+      { data: [{ source_row_index: 0, status: "skipped" }], error: null },
+    ];
+    const replay = await processIngestChunk(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      makeSupabase() as any,
+      dncParams,
+    );
+    expect(replay).toMatchObject({ succeeded: 0, failed: 0, skipped: 1 });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({ table: "job_items", op: "select" });
+  });
+
+  it("retries a DNC row after its success checkpoint failed without re-ratcheting an already locked contact", async () => {
+    responseQueue = [
+      { data: [], error: null }, // resume checkpoint miss
+      { data: { id: "contact-existing" }, error: null }, // DNC phone match
+      { data: null, error: null }, // false -> true contact ratchet
+      { data: { id: "property-existing" }, error: null }, // address dedup hit
+      {
+        data: {
+          homeowner_contact_id: "contact-existing",
+          agent_contact_id: null,
+        },
+        error: null,
+      }, // property patch lookup
+      { data: { compliance_locked: true }, error: null }, // durable outcome
+      { data: null, error: { message: "synthetic checkpoint failure" } },
+      { data: null, error: null }, // error checkpoint
+      { data: null, error: null }, // progress
+    ];
+
+    const first = await processIngestChunk(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      makeSupabase() as any,
+      dncParams,
+    );
+    expect(first).toMatchObject({ succeeded: 0, failed: 1, skipped: 0 });
+
+    calls = [];
+    responseQueue = [
+      { data: [{ source_row_index: 0, status: "error" }], error: null },
+      { data: { id: "contact-existing" }, error: null }, // contact is already DNC
+      { data: null, error: null }, // guarded no-op ratchet
+      { data: { id: "property-existing" }, error: null },
+      {
+        data: {
+          homeowner_contact_id: "contact-existing",
+          agent_contact_id: null,
+        },
+        error: null,
+      },
+      { data: null, error: null }, // success checkpoint
+      { data: null, error: null }, // progress
+    ];
+
+    const replay = await processIngestChunk(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      makeSupabase() as any,
+      dncParams,
+    );
+    expect(replay).toMatchObject({ succeeded: 0, failed: 0, skipped: 1 });
+    const ratchet = calls.find(
+      (call) => call.table === "contacts" && call.op === "update",
+    );
+    expect(ratchet?.filters).toContainEqual({
+      op: "eq",
+      args: ["do_not_contact", false],
+    });
+    expect(calls.some((call) => call.table === "homeowner_details")).toBe(false);
+    expect(calls.some((call) => call.table === "property_lists")).toBe(false);
+    expect(calls.some((call) => call.table === "property_tags")).toBe(false);
+  });
+
+  it("uses the stored lock to skip enrichment when a later duplicate row omits DNC", async () => {
+    responseQueue = [
+      { data: [], error: null }, // resume checkpoint miss
+      { data: { id: "contact-locked" }, error: null }, // homeowner name match
+      { data: { id: "property-locked" }, error: null }, // address dedup hit
+      {
+        data: { homeowner_contact_id: "contact-locked", agent_contact_id: null },
+        error: null,
+      }, // property patch lookup
+      { data: { compliance_locked: true }, error: null }, // authoritative outcome
+      { data: null, error: null }, // terminal job item
+      { data: null, error: null }, // progress
+    ];
+
+    const result = await processIngestChunk(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      makeSupabase() as any,
+      {
+        ...dncParams,
+        mapping: {
+          address: "Address",
+          state: "State",
+          homeowner_first_name: "First Name",
+          homeowner_last_name: "Last Name",
+        },
+        rows: [
+          {
+            Address: "88 Locked Ln",
+            State: "MO",
+            "First Name": "Already",
+            "Last Name": "Locked",
+          },
+        ],
+      },
+    );
+
+    expect(result).toMatchObject({ succeeded: 0, failed: 0, skipped: 1 });
+    expect(calls.some((call) => call.table === "homeowner_details")).toBe(false);
+    expect(calls.some((call) => call.table === "property_lists")).toBe(false);
+    expect(calls.some((call) => call.table === "property_tags")).toBe(false);
+    expect(
+      calls.find(
+        (call) => call.table === "job_items" && call.op === "upsert",
+      )?.insertPayload,
+    ).toMatchObject({ status: "skipped", compliance_locked: true });
+  });
+});
+
+describe("processIngestChunk dedup provenance", () => {
+  it("refreshes latest-import provenance for an address-only dedup match", async () => {
+    responseQueue = [
+      { data: { id: "existing-address-only" }, error: null },
+      { data: null, error: null }, // provenance update
+      { data: null, error: null }, // job item
+      { data: null, error: null }, // progress
+    ];
+
+    const result = await processIngestChunk(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      makeSupabase() as any,
+      {
+        jobId: "job-provenance",
+        csvImportId: "import-latest",
+        orgId: "org-1",
+        source: "dealmachine",
+        market: "Buchanan County MO",
+        countyId: "county-1",
+        mapping: { address: "Address", state: "State" },
+        rows: [{ Address: "10 Existing St", State: "MO" }],
+        offset: 0,
+        autoTagIds: [],
+        listId: null,
+      },
+    );
+
+    expect(result.skipped).toBe(1);
+    const update = calls.find(
+      (call) => call.table === "properties" && call.op === "update",
+    );
+    expect(update?.insertPayload).toMatchObject({
+      source_import_id: "import-latest",
+    });
+    expect(update?.insertPayload).toHaveProperty("source_imported_at");
+    expect(update?.filters).toContainEqual({ op: "eq", args: ["org_id", "org-1"] });
+  });
+});
+
+describe("processIngestChunk atomic property outcome replay", () => {
+  const params = {
+    jobId: "job-boundary",
+    csvImportId: "import-boundary",
+    orgId: "org-1",
+    source: "dealmachine",
+    market: "Buchanan County MO",
+    countyId: "county-1",
+    mapping: { address: "Address", state: "State" },
+    rows: [{ Address: "99 Boundary St", State: "MO" }],
+    offset: 0,
+    autoTagIds: [] as string[],
+    listId: null as string | null,
+    resumeSafe: true,
+  };
+
+  it.each([
+    {
+      boundary: "list",
+      options: { listId: "list-1", autoTagIds: [] as string[] },
+      beforeFailure: [{ data: { org_id: "org-1" }, error: null }] as Response[],
+      failure: { data: null, error: { message: "synthetic list failure" } },
+      replaySideEffects: [
+        { data: { org_id: "org-1" }, error: null },
+        { data: null, error: null },
+      ],
+    },
+    {
+      boundary: "tag",
+      options: { listId: null, autoTagIds: ["tag-1"] },
+      beforeFailure: [] as Response[],
+      failure: { data: null, error: { message: "synthetic tag failure" } },
+      replaySideEffects: [{ data: null, error: null }],
+    },
+    {
+      boundary: "success checkpoint",
+      options: { listId: null, autoTagIds: [] as string[] },
+      beforeFailure: [] as Response[],
+      failure: { data: null, error: { message: "synthetic checkpoint failure" } },
+      replaySideEffects: [] as Response[],
+    },
+  ])(
+    "preserves inserted (not duplicate) after a $boundary failure",
+    async ({ options, beforeFailure, failure, replaySideEffects }) => {
+      responseQueue = [
+        { data: [], error: null }, // resume checkpoint miss
+        { data: null, error: null }, // address dedup miss
+        { data: { id: "prop-boundary" }, error: null }, // atomic property outcome
+        ...beforeFailure,
+        failure, // selected side effect / success checkpoint
+        { data: null, error: null }, // error checkpoint
+        { data: null, error: null }, // progress
+      ];
+      const first = await processIngestChunk(
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        makeSupabase() as any,
+        { ...params, ...options },
+      );
+      expect(first.failed).toBe(1);
+
+      responseQueue = [
+        { data: [{ source_row_index: 0, status: "error" }], error: null },
+        { data: { id: "prop-boundary" }, error: null }, // address now exists
+        ...replaySideEffects,
+        { data: null, error: null }, // success checkpoint
+        { data: null, error: null }, // progress
+      ];
+      const replay = await processIngestChunk(
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        makeSupabase() as any,
+        { ...params, ...options },
+      );
+      expect(replay).toMatchObject({ succeeded: 1, skipped: 0, failed: 0 });
+      expect(
+        calls.filter(
+          (call) => call.table === "properties" && call.op === "insert",
+        ),
+      ).toHaveLength(1);
+    },
+  );
+
+  it("skips the durable row after progress fails following its success checkpoint", async () => {
+    responseQueue = [
+      { data: [], error: null },
+      { data: null, error: null },
+      { data: { id: "prop-boundary" }, error: null },
+      { data: null, error: null }, // success checkpoint
+      { data: null, error: { message: "synthetic progress failure" } },
+    ];
+    await expect(
+      processIngestChunk(
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        makeSupabase() as any,
+        params,
+      ),
+    ).rejects.toThrow("job progress checkpoint");
+
+    responseQueue = [
+      { data: [{ source_row_index: 0, status: "success" }], error: null },
+    ];
+    const replay = await processIngestChunk(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      makeSupabase() as any,
+      params,
+    );
+    expect(replay).toMatchObject({ succeeded: 1, skipped: 0, failed: 0 });
+    expect(
+      calls.filter(
+        (call) => call.table === "properties" && call.op === "insert",
+      ),
+    ).toHaveLength(1);
   });
 });

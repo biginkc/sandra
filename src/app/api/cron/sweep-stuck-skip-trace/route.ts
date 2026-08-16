@@ -133,7 +133,7 @@ async function reclaimUnsubmittedSkipTraceJobs(
   const cutoffMs = Date.parse(cutoff);
   const { data: unsubmitted, error } = await supabase
     .from("jobs")
-    .select("id, status, worker_heartbeat_at, created_at, result_summary")
+    .select("id, org_id, status, worker_heartbeat_at, created_at, result_summary")
     .eq("type", "skip_trace")
     .in("status", ["queued", "running"])
     .is("provider_run_id", null)
@@ -163,7 +163,9 @@ async function reclaimUnsubmittedSkipTraceJobs(
 
   for (const job of candidates) {
     try {
-      await start(skipTraceSubmitWorkflow, [{ jobId: job.id }]);
+      await start(skipTraceSubmitWorkflow, [
+        { jobId: job.id, orgId: job.org_id },
+      ]);
       reclaimed++;
     } catch (e) {
       reportError(e, {

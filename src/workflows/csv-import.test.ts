@@ -1,4 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createHash } from "node:crypto";
+
+import { reviewContractJson } from "@/lib/csv/dataset-contract";
 
 /**
  * Unit test for the workflow's defensive-recovery branch (phase 02 D-04).
@@ -22,13 +25,16 @@ const { createAdminClient } = vi.hoisted(() => ({
 }));
 vi.mock("@/lib/supabase/admin", () => ({ createAdminClient }));
 
-const { processIngestChunkMock } = vi.hoisted(() => ({
-  processIngestChunkMock: vi.fn(),
-}));
+const { processIngestChunkMock, finalizeIngestionMock, prepareIngestionMock } =
+  vi.hoisted(() => ({
+    processIngestChunkMock: vi.fn(),
+    finalizeIngestionMock: vi.fn(),
+    prepareIngestionMock: vi.fn(),
+  }));
 
 vi.mock("@/lib/csv/ingest", () => ({
-  finalizeIngestion: vi.fn().mockResolvedValue(undefined),
-  prepareIngestion: vi.fn().mockResolvedValue({ autoTagIds: [] }),
+  finalizeIngestion: finalizeIngestionMock,
+  prepareIngestion: prepareIngestionMock,
   processIngestChunk: processIngestChunkMock,
 }));
 
@@ -41,8 +47,7 @@ vi.mock("@/lib/enrichment/cass-job", () => ({
 
 vi.mock("@/lib/sequences/enrollment", () => ({ enrollLead: vi.fn() }));
 
-// eslint-disable-next-line import/first
-import { csvImportWorkflow } from "./csv-import";
+import { csvImportWorkflow, type CsvImportWorkflowParams } from "./csv-import";
 
 type CallRecord = {
   table: string;
@@ -52,6 +57,7 @@ type CallRecord = {
 
 let calls: CallRecord[] = [];
 let csvImportRow: { county_id: string | null } = { county_id: null };
+let rpcCalls: Array<{ name: string; args: unknown }> = [];
 
 function makeBuilder(record: CallRecord) {
   const thenable = {
@@ -60,10 +66,30 @@ function makeBuilder(record: CallRecord) {
       onRejected?: (r: unknown) => unknown,
     ) {
       if (record.table === "csv_imports") {
-        return Promise.resolve({ data: csvImportRow, error: null }).then(
-          onFulfilled,
-          onRejected,
-        );
+        return Promise.resolve({
+          data: {
+            ...csvImportRow,
+            storage_path: baseParams.storagePath,
+            source: baseParams.source,
+            market: baseParams.market,
+            dataset_sha256: baseParams.datasetSha256,
+          },
+          error: null,
+        }).then(onFulfilled, onRejected);
+      }
+      if (
+        record.table === "jobs" &&
+        record.selectArgs?.[0]?.toString().includes("related_import_id")
+      ) {
+        return Promise.resolve({
+          data: {
+            id: baseParams.jobId,
+            org_id: baseParams.orgId,
+            type: "csv_import",
+            related_import_id: baseParams.csvImportId,
+          },
+          error: null,
+        }).then(onFulfilled, onRejected);
       }
       // jobs.update / others: just resolve null
       return Promise.resolve({ data: null, error: null }).then(
@@ -117,18 +143,26 @@ function makeSupabase(csvBody: string) {
           // A Blob with .text() returning a 1-line CSV (header + 0 rows).
           // Papa.parse with header:true on this returns parsed.data=[].
           data: {
-            text: () => Promise.resolve("Address\n"),
+            text: () => Promise.resolve(csvBody),
           },
           error: null,
         }),
       }),
     },
+    rpc: vi.fn((name: string, args: unknown) => {
+      rpcCalls.push({ name, args });
+      return Promise.resolve({ data: {}, error: null });
+    }),
   };
 }
 
 beforeEach(() => {
   createAdminClient.mockReset();
   processIngestChunkMock.mockReset();
+  prepareIngestionMock.mockReset();
+  prepareIngestionMock.mockResolvedValue({ autoTagIds: [] });
+  finalizeIngestionMock.mockReset();
+  finalizeIngestionMock.mockResolvedValue(undefined);
   processIngestChunkMock.mockResolvedValue({
     succeeded: 0,
     failed: 0,
@@ -136,6 +170,7 @@ beforeEach(() => {
     errors: [],
   });
   calls = [];
+  rpcCalls = [];
   csvImportRow = { county_id: null };
 });
 
@@ -143,52 +178,180 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
+const datasetSha256 =
+  "a31d3d3ecb2bd1ea03234e3dceacedbcf4758b5742da29afe6146d15b8f6d2e6";
+const mapping = { address: "Address" };
+const reviewContractSha256 = createHash("sha256")
+  .update(
+    reviewContractJson({
+      datasetSha256,
+      mapping,
+      source: "dealmachine",
+      countyId: "recovered-county-id",
+      totalRows: 1,
+      dncRows: 0,
+      smsConsent: false,
+      sequenceId: null,
+      classifyLineTypes: false,
+      requestCass: false,
+      requestSkipTrace: false,
+    }),
+  )
+  .digest("hex");
+
 const baseParams = {
   jobId: "job-recovery",
   csvImportId: "import-recovery",
-  storagePath: "import.csv",
+  orgId: "org-1",
+  storagePath: "org-1/import.csv",
   source: "dealmachine",
   market: "Buchanan County MO",
-  mapping: { address: "Address" },
+  mapping,
   listId: null,
   userId: null,
-};
+  datasetSha256,
+  reviewContractSha256,
+  datasetVersion: 2,
+  expectedTotalRows: 1,
+  expectedDncRows: 0,
+  requestSkipTrace: false,
+} satisfies Omit<CsvImportWorkflowParams, "countyId">;
 
 describe("csvImportWorkflow — defensive recovery (params.countyId null)", () => {
   it("re-reads csv_imports.county_id when params.countyId is null", async () => {
     csvImportRow = { county_id: "recovered-county-id" };
-    createAdminClient.mockReturnValue(makeSupabase(""));
+    createAdminClient.mockReturnValue(makeSupabase("Address\n"));
 
     await csvImportWorkflow({
       ...baseParams,
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       countyId: null,
-    } as any);
+    });
 
     // The recovery branch must have queried csv_imports for county_id
     // filtered by the supplied csvImportId.
     const recoveryCall = calls.find((c) => c.table === "csv_imports");
     expect(recoveryCall).toBeDefined();
-    expect(recoveryCall!.selectArgs?.[0]).toBe("county_id");
+    expect(recoveryCall!.selectArgs?.[0]?.toString()).toContain("county_id");
     expect(recoveryCall!.filters).toContainEqual({
       op: "eq",
       args: ["id", baseParams.csvImportId],
     });
   });
 
-  it("does NOT read csv_imports.county_id when params.countyId is non-null", async () => {
-    createAdminClient.mockReturnValue(makeSupabase(""));
+  it("still validates authoritative import identity when params.countyId is non-null", async () => {
+    createAdminClient.mockReturnValue(makeSupabase("Address\n"));
+    const countyId = "fresh-county-id";
+    csvImportRow = { county_id: countyId };
+    const countyReviewContractSha256 = createHash("sha256")
+      .update(
+        reviewContractJson({
+          datasetSha256,
+          mapping,
+          source: "dealmachine",
+          countyId,
+          totalRows: 1,
+          dncRows: 0,
+          smsConsent: false,
+          sequenceId: null,
+          classifyLineTypes: false,
+          requestCass: false,
+          requestSkipTrace: false,
+        }),
+      )
+      .digest("hex");
 
     await csvImportWorkflow({
       ...baseParams,
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      countyId: "fresh-county-id",
-    } as any);
+      countyId,
+      reviewContractSha256: countyReviewContractSha256,
+    });
 
-    // Hot-path branch — no csv_imports.select('county_id') call.
+    // The read is deliberate: it prevents a forged workflow payload from
+    // crossing jobs/imports/organizations even when countyId is present.
     const recoverySelects = calls.filter(
-      (c) => c.table === "csv_imports" && c.selectArgs?.[0] === "county_id",
+      (c) =>
+        c.table === "csv_imports" &&
+        c.selectArgs?.[0]?.toString().includes("county_id"),
     );
-    expect(recoverySelects).toHaveLength(0);
+    expect(recoverySelects).toHaveLength(1);
+  });
+
+  it("checkpoints an exhausted failure before prepare", async () => {
+    const supabase = makeSupabase("Address\n");
+    supabase.storage.from = () => ({
+      download: vi
+        .fn()
+        .mockResolvedValue({ data: null, error: { message: "storage down" } }),
+    });
+    csvImportRow = { county_id: "recovered-county-id" };
+    createAdminClient.mockReturnValue(supabase);
+
+    await expect(
+      csvImportWorkflow({ ...baseParams, countyId: null }),
+    ).rejects.toThrow("storage down");
+    expect(
+      rpcCalls.some((call) => call.name === "fail_csv_import_workflow"),
+    ).toBe(true);
+  });
+
+  it("checkpoints an exhausted failure in a row chunk", async () => {
+    csvImportRow = { county_id: "recovered-county-id" };
+    createAdminClient.mockReturnValue(makeSupabase("Address\n"));
+    processIngestChunkMock.mockRejectedValue(new Error("chunk database down"));
+
+    await expect(
+      csvImportWorkflow({ ...baseParams, countyId: null }),
+    ).rejects.toThrow("chunk database down");
+    expect(
+      rpcCalls.some((call) => call.name === "fail_csv_import_workflow"),
+    ).toBe(true);
+  });
+
+  it("checkpoints an exhausted failure during finalization", async () => {
+    csvImportRow = { county_id: "recovered-county-id" };
+    createAdminClient.mockReturnValue(makeSupabase("Address\n"));
+    finalizeIngestionMock.mockRejectedValue(new Error("final checkpoint down"));
+
+    await expect(
+      csvImportWorkflow({ ...baseParams, countyId: null }),
+    ).rejects.toThrow("final checkpoint down");
+    expect(
+      rpcCalls.some((call) => call.name === "fail_csv_import_workflow"),
+    ).toBe(true);
+  });
+
+  it("records written consent through the job-scoped idempotent RPC", async () => {
+    csvImportRow = { county_id: "recovered-county-id" };
+    createAdminClient.mockReturnValue(makeSupabase("Address\n"));
+    const consentReviewContractSha256 = createHash("sha256")
+      .update(
+        reviewContractJson({
+          datasetSha256,
+          mapping,
+          source: "dealmachine",
+          countyId: "recovered-county-id",
+          totalRows: 1,
+          dncRows: 0,
+          smsConsent: true,
+          sequenceId: null,
+          classifyLineTypes: false,
+          requestCass: false,
+          requestSkipTrace: false,
+        }),
+      )
+      .digest("hex");
+
+    await csvImportWorkflow({
+      ...baseParams,
+      countyId: null,
+      smsConsent: true,
+      reviewContractSha256: consentReviewContractSha256,
+    });
+
+    expect(rpcCalls).toContainEqual({
+      name: "record_csv_import_consents",
+      args: { p_job_id: baseParams.jobId, p_org_id: baseParams.orgId },
+    });
+    expect(calls.filter((call) => call.table === "consent_events")).toHaveLength(0);
   });
 });

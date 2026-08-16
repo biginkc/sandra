@@ -35,7 +35,7 @@ export function FormatHelperBanner({
     return (
       <div className="bg-muted/40 text-muted-foreground flex items-start gap-3 rounded-md border p-4">
         <Info className="size-5 shrink-0 text-amber-600 dark:text-amber-400" />
-        <div className="flex-1 text-sm">
+        <div className="min-w-0 flex-1 break-words text-sm">
           <div className="text-foreground font-medium">
             Detected: {vendorLabel}
           </div>
@@ -74,9 +74,9 @@ export function FormatHelperBanner({
       )}
     >
       <CheckCircle2 className="size-5 shrink-0 text-emerald-600 dark:text-emerald-400" />
-      <div className="flex-1 text-sm">
+      <div className="min-w-0 flex-1 break-words text-sm">
         <div className="text-foreground font-medium">
-          Recognized as {vendorLabel}
+          Recognized: {vendorLabel} export — cleaned before preview.
         </div>
         <p className="text-muted-foreground mt-1 text-xs">
           Source set automatically · {stats.rowsIn.toLocaleString()} →{" "}
@@ -91,13 +91,18 @@ export function FormatHelperBanner({
             ))}
           </ul>
         )}
-        <div className="mt-3 flex gap-2">
+        <p className="text-muted-foreground mt-2 text-xs">
+          The cleaned rows are the dataset — what you review in every later
+          step is byte-for-byte what Sandra imports. Undo reverts to the
+          original file for both preview and import.
+        </p>
+        <div className="mt-3 flex flex-wrap gap-2">
           <Button variant="ghost" size="sm" onClick={onOpenHelp}>
             See what we did
           </Button>
           <Button variant="outline" size="sm" onClick={onUndo}>
             <Undo2 className="mr-1 size-3.5" />
-            Undo
+            Undo — keep original
           </Button>
         </div>
       </div>

@@ -5,10 +5,22 @@ import { useMemo, useReducer, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { autodetectMapping } from "@/lib/csv/aliases";
 import { collectUnlabeledPhones } from "@/lib/csv/line-type-classify";
-import type {
-  DetectionResult,
-  TransformStats,
-} from "@/lib/csv/presets/types";
+import {
+  buildReviewedDatasetFile,
+  buildReviewContractSha256,
+  GENERATED_DNC_HEADER,
+  withGeneratedDncLocks,
+} from "@/lib/csv/dataset";
+import {
+  buildLocalPreflight,
+  mergeServerPreflight,
+  type ImportPreflight,
+} from "@/lib/csv/preflight";
+import {
+  IMPORT_SERVICE_DEFAULTS,
+  sumEnabledImportServiceEstimates,
+} from "@/lib/csv/import-pricing";
+import type { DetectionResult, TransformStats } from "@/lib/csv/presets/types";
 import type { UpdatePreview } from "@/lib/csv/update-bulk";
 import { createClient as createBrowserSupabase } from "@/lib/supabase/client";
 import type { SubOperationId } from "@/lib/csv/update-operations";
@@ -22,13 +34,19 @@ import {
 import { callAction } from "@/lib/errors/call-action";
 import { cn } from "@/lib/utils";
 
-import { createImportJob, runBulkUpdateJob } from "./actions";
+import {
+  createImportJob,
+  runBulkUpdateJob,
+  runImportPreflightBatch,
+} from "./actions";
 import { StepConfirm } from "./steps/step-confirm";
 import { StepMap } from "./steps/step-map";
 import { StepMode } from "./steps/step-mode";
 import { StepPreviewUpdate } from "./steps/step-preview-update";
 import { StepProgress } from "./steps/step-progress";
+import { StepPreflight } from "./steps/step-preflight";
 import { StepReview } from "./steps/step-review";
+import { StepServices } from "./steps/step-services";
 import { StepSubOperation } from "./steps/step-suboperation";
 import { StepUpdateUpload } from "./steps/step-update-upload";
 import { StepUpload } from "./steps/step-upload";
@@ -38,8 +56,10 @@ export type WizardStep =
   | "mode"
   // Add-mode steps (untouched from V1):
   | "upload"
+  | "preflight"
   | "map"
   | "review"
+  | "services"
   | "confirm"
   // Update-mode steps:
   | "suboperation"
@@ -66,10 +86,7 @@ export type WizardMode = "add" | "update";
  */
 async function uploadCsvToStorage(
   file: File,
-): Promise<
-  | { ok: true; storagePath: string }
-  | { ok: false; error: string }
-> {
+): Promise<{ ok: true; storagePath: string } | { ok: false; error: string }> {
   try {
     const supabase = createBrowserSupabase();
     const { data: memberships, error: membershipError } = await supabase
@@ -135,8 +152,10 @@ export type CountyOption = {
 const ADD_STEP_ORDER: readonly WizardStep[] = [
   "mode",
   "upload",
+  "preflight",
   "map",
   "review",
+  "services",
   "confirm",
   "progress",
 ];
@@ -152,8 +171,10 @@ const UPDATE_STEP_ORDER: readonly WizardStep[] = [
 const STEP_LABELS: Record<WizardStep, string> = {
   mode: "Mode",
   upload: "Upload",
+  preflight: "Preflight",
   map: "Map",
   review: "Review",
+  services: "Services",
   confirm: "Confirm",
   suboperation: "What to update",
   "update-upload": "Upload",
@@ -226,6 +247,7 @@ export type WizardState = {
    *  imported properties. Default off. Only honored if total rows ≤ 500
    *  (per the per-job cost cap). */
   requestSkipTrace: boolean;
+  requestCass: boolean;
   /** Operator attestation: all contacts in this import have given written
    *  SMS consent. When true the workflow bulk-records opt_in_marketing_written
    *  for every homeowner contact after ingest. */
@@ -238,7 +260,8 @@ export type WizardState = {
    *  either pays to classify them via Telnyx (true) or drops them
    *  (false). Null = not chosen yet; blocks Start import while the
    *  file has unlabeled numbers. */
-  classifyLineTypes: boolean | null;
+  classifyLineTypes: boolean;
+  preflight: ImportPreflight | null;
   headers: string[];
   rows: Record<string, string>[];
   mapping: Record<string, string | null>;
@@ -264,10 +287,12 @@ const initialState: WizardState = {
   market: null,
   countyId: null,
   listName: null,
-  requestSkipTrace: false,
+  requestSkipTrace: IMPORT_SERVICE_DEFAULTS.requestSkipTrace,
+  requestCass: IMPORT_SERVICE_DEFAULTS.requestCass,
   smsConsent: false,
   sequenceId: null,
-  classifyLineTypes: null,
+  classifyLineTypes: IMPORT_SERVICE_DEFAULTS.classifyLineTypes,
+  preflight: null,
   headers: [],
   rows: [],
   mapping: {},
@@ -300,9 +325,17 @@ export type WizardAction =
   | { type: "SET_MARKET"; market: string; countyId: string }
   | { type: "SET_LIST_NAME"; listName: string | null }
   | { type: "SET_REQUEST_SKIP_TRACE"; requestSkipTrace: boolean }
+  | { type: "SET_REQUEST_CASS"; requestCass: boolean }
   | { type: "SET_SMS_CONSENT"; smsConsent: boolean }
   | { type: "SET_SEQUENCE_ID"; sequenceId: string | null }
   | { type: "SET_CLASSIFY_LINE_TYPES"; classifyLineTypes: boolean }
+  | {
+      type: "SET_PREFLIGHT";
+      preflight: ImportPreflight;
+      rows: Record<string, string>[];
+      headers: string[];
+      mapping: Record<string, string | null>;
+    }
   | { type: "SET_MAPPING_FIELD"; fieldId: string; header: string | null }
   | { type: "AUTODETECT_MAPPING" }
   | {
@@ -371,7 +404,10 @@ function reducer(state: WizardState, action: WizardAction): WizardState {
         mapping,
         // New file invalidates the prior interstitial choice — the new
         // file's unlabeled-phone count may differ.
-        classifyLineTypes: null,
+        classifyLineTypes: false,
+        requestCass: false,
+        requestSkipTrace: false,
+        preflight: null,
         // New file invalidates any prior format-helper detection /
         // transform — the next dispatch will be either a fresh
         // DETECT_AND_APPLY_PRESET, a RECORD_NON_IMPORTABLE_DETECTION,
@@ -405,6 +441,8 @@ function reducer(state: WizardState, action: WizardAction): WizardState {
       return { ...state, listName: action.listName };
     case "SET_REQUEST_SKIP_TRACE":
       return { ...state, requestSkipTrace: action.requestSkipTrace };
+    case "SET_REQUEST_CASS":
+      return { ...state, requestCass: action.requestCass };
     case "SET_SMS_CONSENT":
       return {
         ...state,
@@ -416,13 +454,41 @@ function reducer(state: WizardState, action: WizardAction): WizardState {
       return { ...state, sequenceId: action.sequenceId };
     case "SET_CLASSIFY_LINE_TYPES":
       return { ...state, classifyLineTypes: action.classifyLineTypes };
+    case "SET_PREFLIGHT":
+      return {
+        ...state,
+        preflight: action.preflight,
+        rows: action.rows,
+        headers: action.headers,
+        mapping: action.mapping,
+      };
     case "SET_MAPPING_FIELD":
+      // The generated DNC lock is a compliance invariant, not a normal
+      // mapping choice. Once preflight creates it, neither the combobox nor
+      // a forged reducer dispatch may remove it or reuse it for another
+      // field.
+      if (
+        (action.fieldId === "homeowner_do_not_contact" &&
+          state.mapping.homeowner_do_not_contact === GENERATED_DNC_HEADER) ||
+        (action.header === GENERATED_DNC_HEADER &&
+          action.fieldId !== "homeowner_do_not_contact")
+      ) {
+        return state;
+      }
       return {
         ...state,
         mapping: { ...state.mapping, [action.fieldId]: action.header },
       };
     case "AUTODETECT_MAPPING":
-      return { ...state, mapping: autodetectMapping(state.headers) };
+      return {
+        ...state,
+        mapping: {
+          ...autodetectMapping(state.headers),
+          ...(state.mapping.homeowner_do_not_contact === GENERATED_DNC_HEADER
+            ? { homeowner_do_not_contact: GENERATED_DNC_HEADER }
+            : {}),
+        },
+      };
     case "SET_VALIDATION":
       return {
         ...state,
@@ -511,20 +577,29 @@ export function Wizard({ counties }: { counties: CountyOption[] }) {
   const displayOrder = indicatorOrder(state.step, state.mode);
   // Lock back-nav once we're at progress or beyond — both flows have
   // their submit step right before progress, so freeze after submit.
-  const lockBackFromIndex = state.mode === "update" ? 4 : 5;
+  const lockBackFromIndex = state.mode === "update" ? 4 : 7;
   const canGoBack = currentIndex > 0 && currentIndex < lockBackFromIndex;
 
   // Derive per-step readiness for the Next button.
-  const sections = useMemo(() => mappedSections(state.mapping), [state.mapping]);
+  const sections = useMemo(
+    () => mappedSections(state.mapping),
+    [state.mapping],
+  );
 
   // Distinct phone numbers that would ingest with no line type — the
   // set the hard rule drops unless the operator pays to classify them.
-  // Only computed on Confirm (full-file validation pass, same cost as
-  // the Review step's breakdown).
   const unlabeledPhoneCount = useMemo(() => {
-    if (state.step !== "confirm") return 0;
-    return collectUnlabeledPhones(state.rows, state.mapping).length;
-  }, [state.step, state.rows, state.mapping]);
+    const dncRows = new Set(state.preflight?.groups.dnc ?? []);
+    const smsSuppressedRows = new Set(
+      state.preflight?.groups.smsSuppressed ?? [],
+    );
+    return collectUnlabeledPhones(
+      state.rows.filter(
+        (_, index) => !dncRows.has(index) && !smsSuppressedRows.has(index),
+      ),
+      state.mapping,
+    ).length;
+  }, [state.rows, state.mapping, state.preflight]);
 
   const uploadReady =
     !!state.file &&
@@ -544,6 +619,32 @@ export function Wizard({ counties }: { counties: CountyOption[] }) {
     !!state.file && !!state.subOperation && state.rows.length > 0;
   const previewReady =
     !!state.updatePreview && state.updatePreview.matched.length > 0;
+
+  const runPreflight = async () => {
+    const local = buildLocalPreflight(state.rows, state.mapping);
+    let preflight = local.preflight;
+    for (let offset = 0; offset < local.probes.length; offset += 250) {
+      const result = await runImportPreflightBatch(
+        local.probes.slice(offset, offset + 250),
+      );
+      if (!result.ok) throw new Error(result.error.message);
+      preflight = mergeServerPreflight(preflight, result.data);
+    }
+    const locked = withGeneratedDncLocks({
+      rows: state.rows,
+      headers: state.headers,
+      mapping: state.mapping,
+      dncRowIndexes: preflight.groups.dnc,
+    });
+    dispatch({
+      type: "SET_PREFLIGHT",
+      preflight,
+      rows: locked.rows,
+      headers: locked.headers,
+      mapping: locked.mapping,
+    });
+    return { preflight, ...locked };
+  };
 
   const handleNext = async () => {
     // ---- Mode router (both flows) -----------------------------------------
@@ -589,39 +690,88 @@ export function Wizard({ counties }: { counties: CountyOption[] }) {
 
     // ---- Add flow (existing) ---------------------------------------------
     if (state.step === "upload") {
+      setSubmittingGlobal(true);
+      try {
+        await runPreflight();
+      } catch (error) {
+        dispatch({
+          type: "SUBMIT_ERROR",
+          message: error instanceof Error ? error.message : String(error),
+        });
+        setSubmittingGlobal(false);
+        return;
+      }
+      dispatch({ type: "GOTO", step: "preflight" });
+      setSubmittingGlobal(false);
+      return;
+    }
+    if (state.step === "preflight") {
       dispatch({ type: "GOTO", step: "map" });
       return;
     }
     if (state.step === "map") {
-      const previewRows = state.rows
+      setSubmittingGlobal(true);
+      let checked: Awaited<ReturnType<typeof runPreflight>>;
+      try {
+        checked = await runPreflight();
+      } catch (error) {
+        dispatch({
+          type: "SUBMIT_ERROR",
+          message: error instanceof Error ? error.message : String(error),
+        });
+        setSubmittingGlobal(false);
+        return;
+      }
+      const previewRows = checked.rows
         .slice(0, 10)
-        .map((row, idx) => validateRow(row, state.mapping, idx));
-      const allValidated = state.rows.map((row, idx) =>
-        validateRow(row, state.mapping, idx),
+        .map((row, idx) => validateRow(row, checked.mapping, idx));
+      const allValidated = checked.rows.map((row, idx) =>
+        validateRow(row, checked.mapping, idx),
       );
       const summary = summarize(allValidated);
       dispatch({ type: "SET_VALIDATION", summary, previewRows });
       dispatch({ type: "GOTO", step: "review" });
+      setSubmittingGlobal(false);
       return;
     }
     if (state.step === "review") {
+      dispatch({ type: "GOTO", step: "services" });
+      return;
+    }
+    if (state.step === "services") {
       dispatch({ type: "GOTO", step: "confirm" });
       return;
     }
     if (state.step === "confirm") {
       setSubmittingGlobal(true);
       dispatch({ type: "SUBMIT_START" });
-      // Upload the original file to Supabase Storage so the workflow
-      // runner can download + parse it server-side. We send the storage
-      // path (and not the rows) to the action — bypasses the Server
-      // Action body-size limit entirely. trimRowsToMapping is no longer
-      // needed; the workflow does its own trim after download.
-      const uploadResult = await uploadCsvToStorage(state.file!);
+      // Serialize and upload the exact in-memory rows reviewed above. This
+      // deliberately never uploads state.file: vendor transforms and the
+      // generated DNC locks are part of the reviewed dataset contract.
+      const reviewedDataset = await buildReviewedDatasetFile({
+        rows: state.rows,
+        headers: state.headers,
+        filename: state.filename!,
+      });
+      const uploadResult = await uploadCsvToStorage(reviewedDataset.file);
       if (!uploadResult.ok) {
         dispatch({ type: "SUBMIT_ERROR", message: uploadResult.error });
         setSubmittingGlobal(false);
         return;
       }
+      const reviewContractSha256 = await buildReviewContractSha256({
+        datasetSha256: reviewedDataset.sha256,
+        mapping: state.mapping,
+        source: state.source!,
+        countyId: state.countyId!,
+        totalRows: state.rows.length,
+        dncRows: state.preflight?.dnc ?? 0,
+        smsConsent: state.smsConsent,
+        sequenceId: state.sequenceId ?? null,
+        classifyLineTypes: state.classifyLineTypes,
+        requestCass: state.requestCass,
+        requestSkipTrace: false,
+      });
       const result = await callAction(
         createImportJob({
           filename: state.filename!,
@@ -637,11 +787,28 @@ export function Wizard({ counties }: { counties: CountyOption[] }) {
           mapping: state.mapping,
           storagePath: uploadResult.storagePath,
           totalRows: state.rows.length,
+          datasetSha256: reviewedDataset.sha256,
+          reviewContractSha256,
+          datasetVersion: reviewedDataset.version,
+          dncRows: state.preflight?.dnc ?? 0,
           smsConsent: state.smsConsent,
           sequenceId: state.sequenceId,
           // Interstitial choice. No unlabeled numbers → nothing to
           // classify, so an unmade choice (null) submits as false.
-          classifyLineTypes: state.classifyLineTypes === true,
+          classifyLineTypes: state.classifyLineTypes,
+          requestCass: state.requestCass,
+          requestSkipTrace: false,
+          maxEstimatedChargeUsd: sumEnabledImportServiceEstimates({
+            requestCass: state.requestCass,
+            classifyLineTypes: state.classifyLineTypes,
+            requestSkipTrace: false,
+            cassEligible: Math.max(
+              0,
+              (state.summary?.validRows ?? 0) - (state.preflight?.dnc ?? 0),
+            ),
+            lineTypeEligible: unlabeledPhoneCount,
+            skipTraceEligible: 0,
+          }),
           preset:
             state.presetApplied && state.detectedPreset && state.presetStats
               ? {
@@ -656,7 +823,10 @@ export function Wizard({ counties }: { counties: CountyOption[] }) {
                 }
               : null,
         }),
-        { successMessage: "Import started.", fallbackMessage: "Import failed to start" },
+        {
+          successMessage: "Import started.",
+          fallbackMessage: "Import failed to start",
+        },
       );
       if (!result.ok) {
         dispatch({ type: "SUBMIT_ERROR", message: result.error.message });
@@ -688,21 +858,21 @@ export function Wizard({ counties }: { counties: CountyOption[] }) {
     (state.step === "update-upload" && !updateUploadReady) ||
     (state.step === "preview-update" && !previewReady) ||
     (state.step === "upload" && !uploadReady) ||
+    (state.step === "preflight" && !state.preflight) ||
     (state.step === "map" && !mapReady) ||
-    (state.step === "review" && !reviewReady) ||
-    // The interstitial is a forced choice: with unlabeled phone numbers
-    // in the file, Start import stays locked until the operator picks
-    // Classify or Skip.
-    (state.step === "confirm" &&
-      unlabeledPhoneCount > 0 &&
-      state.classifyLineTypes === null);
+    (state.step === "review" && !reviewReady);
 
   const nextLabel = (() => {
     if (state.step === "preview-update") {
       return state.submitting ? "Starting…" : "Confirm & apply";
     }
+    if (state.step === "upload") return "Run preflight check";
+    if (state.step === "preflight") return "Map columns";
+    if (state.step === "map") return "Review rows";
+    if (state.step === "review") return "Optional services";
+    if (state.step === "services") return "Final confirmation";
     if (state.step === "confirm") {
-      return state.submitting ? "Starting…" : "Start import";
+      return state.submitting ? "Starting…" : "Import prospects";
     }
     return "Next";
   })();
@@ -717,6 +887,12 @@ export function Wizard({ counties }: { counties: CountyOption[] }) {
     <div className="flex flex-col gap-6">
       {displayOrder.length > 0 && (
         <StepIndicator step={state.step} order={displayOrder} />
+      )}
+
+      {state.mode === "update" && state.step !== "mode" && (
+        <div className="bg-foreground text-background rounded-md px-4 py-2 text-center font-mono text-xs font-bold tracking-widest">
+          UPDATE MODE — NO NEW RECORDS
+        </div>
       )}
 
       <div className="flex flex-1 flex-col">
@@ -735,9 +911,17 @@ export function Wizard({ counties }: { counties: CountyOption[] }) {
         {state.step === "upload" && (
           <StepUpload state={state} dispatch={dispatch} counties={counties} />
         )}
+        {state.step === "preflight" && <StepPreflight state={state} />}
         {state.step === "map" && <StepMap state={state} dispatch={dispatch} />}
         {state.step === "review" && (
           <StepReview state={state} dispatch={dispatch} />
+        )}
+        {state.step === "services" && (
+          <StepServices
+            state={state}
+            dispatch={dispatch}
+            unlabeledPhoneCount={unlabeledPhoneCount}
+          />
         )}
         {state.step === "confirm" && (
           <StepConfirm

@@ -15,6 +15,10 @@ import { dispatchTaskAssigned } from "@/lib/notifications/dispatch";
 import { pausePropertyEnrollments } from "@/lib/sequences/enrollment";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
+import {
+  assertContactDncUnlocked,
+  assertPropertyDncUnlocked,
+} from "@/lib/dnc/property-lock";
 import { wallTimeToUtc } from "@/lib/time/zoned";
 
 export type BookAppointmentInput = {
@@ -301,6 +305,15 @@ export async function bookAppointment(
     } = await supabase.auth.getUser();
     if (!user) {
       return err({ code: "UNAUTHENTICATED", message: "Not signed in" });
+    }
+
+    if (input.propertyId) {
+      const unlocked = await assertPropertyDncUnlocked(supabase, input.propertyId);
+      if (!unlocked.ok) return unlocked;
+    }
+    if (input.contactId) {
+      const unlocked = await assertContactDncUnlocked(supabase, input.contactId);
+      if (!unlocked.ok) return unlocked;
     }
 
     const orgResult = await resolveBookingOrgId(supabase, user, {

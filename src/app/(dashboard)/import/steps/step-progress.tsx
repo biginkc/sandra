@@ -2,9 +2,10 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
+import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
-import { buttonVariants } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import {
   Card,
   CardContent,
@@ -15,6 +16,13 @@ import {
 } from "@/components/ui/card";
 import { createClient } from "@/lib/supabase/client";
 import type { Database } from "@/lib/supabase/types";
+import { callAction } from "@/lib/errors/call-action";
+import {
+  getCsvImportRetryAvailability,
+  retryCsvImportJob,
+  retryImportListAssignment,
+  type CsvImportRetryAvailability,
+} from "../actions";
 
 type Job = Database["public"]["Tables"]["jobs"]["Row"];
 
@@ -22,6 +30,7 @@ const TERMINAL_STATUSES = new Set([
   "completed",
   "failed",
   "partial",
+  "partially_completed",
   "canceled",
 ]);
 
@@ -41,6 +50,10 @@ const TERMINAL_STATUSES = new Set([
 export function StepProgress({ jobId }: { jobId: string }) {
   const [job, setJob] = useState<Job | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [retrying, setRetrying] = useState(false);
+  const [retryAvailability, setRetryAvailability] =
+    useState<CsvImportRetryAvailability | null>(null);
+  const [refreshVersion, setRefreshVersion] = useState(0);
 
   useEffect(() => {
     const supabase = createClient();
@@ -60,6 +73,39 @@ export function StepProgress({ jobId }: { jobId: string }) {
         return null;
       }
       setJob(data);
+      if (data.type === "csv_import" && TERMINAL_STATUSES.has(data.status)) {
+        const { data: provenance } = await supabase
+          .from("csv_import_job_provenance")
+          .select("job_id")
+          .eq("job_id", jobId)
+          .eq("org_id", data.org_id)
+          .maybeSingle();
+        if (mounted && provenance) {
+          const availability = await callAction(
+            getCsvImportRetryAvailability(jobId),
+            { fallbackMessage: "Could not check import retry status" },
+          );
+          if (!mounted) return data;
+          setRetryAvailability(
+            availability.ok
+              ? availability.data
+              : {
+                  state: "not_retryable",
+                  message: availability.error.message,
+                },
+          );
+        } else if (mounted) {
+          setRetryAvailability({
+            state: "not_retryable",
+            message: "This import has no sealed retry record.",
+          });
+        }
+      } else if (mounted && data.type === "csv_import") {
+        setRetryAvailability({
+          state: "in_flight",
+          message: "This import is already being processed.",
+        });
+      }
       return data;
     };
 
@@ -85,7 +131,13 @@ export function StepProgress({ jobId }: { jobId: string }) {
             filter: `id=eq.${jobId}`,
           },
           (payload) => {
-            setJob(payload.new as Job);
+            const nextJob = payload.new as Job;
+            setJob(nextJob);
+            if (TERMINAL_STATUSES.has(nextJob.status)) {
+              // Re-read the service-role-only provider ledger immediately;
+              // the Realtime payload cannot carry retry eligibility.
+              setRefreshVersion((version) => version + 1);
+            }
           },
         )
         .subscribe();
@@ -112,19 +164,19 @@ export function StepProgress({ jobId }: { jobId: string }) {
       if (pollId) clearInterval(pollId);
       if (channel) supabase.removeChannel(channel);
     };
-  }, [jobId]);
+  }, [jobId, refreshVersion]);
 
   const total = job?.total_items ?? 0;
   const processed = job?.processed_items ?? 0;
-  const pct = total > 0 ? Math.min(100, Math.round((processed / total) * 100)) : 0;
+  const pct =
+    total > 0 ? Math.min(100, Math.round((processed / total) * 100)) : 0;
 
   const isTerminal = job ? TERMINAL_STATUSES.has(job.status) : false;
   const skippedCount = Math.max(
     0,
-    (isTerminal ? total : processed) -
-      (job?.succeeded_items ?? 0) -
-      (job?.failed_items ?? 0),
+    processed - (job?.succeeded_items ?? 0) - (job?.failed_items ?? 0),
   );
+  const unprocessedCount = Math.max(0, total - processed);
 
   const { title, description } = describeState(job, isTerminal);
 
@@ -132,17 +184,68 @@ export function StepProgress({ jobId }: { jobId: string }) {
   // line type. result_summary is untyped Json — read defensively.
   const summary = (job?.result_summary ?? null) as {
     droppedUnlabeledPhones?: number;
+    dncRows?: number;
+    sideEffects?: Record<string, { status?: string; message?: string }>;
   } | null;
   const droppedUnlabeledPhones = summary?.droppedUnlabeledPhones ?? 0;
+  const dncRows = summary?.dncRows ?? 0;
+  const listAssignment = summary?.sideEffects?.listAssignment;
+  const incompleteSideEffects = Object.entries(
+    summary?.sideEffects ?? {},
+  ).filter(
+    ([key, effect]) =>
+      key !== "listAssignment" &&
+      ["failed", "pending"].includes(effect.status ?? ""),
+  );
+  const canRetryRows =
+    retryAvailability?.state === "retryable" &&
+    Boolean(job) &&
+    ["failed", "partial", "partially_completed"].includes(job!.status) &&
+    !["validation", "authorization"].includes(job!.error_class ?? "");
+
+  const retry = async (kind: "rows" | "list") => {
+    setRetrying(true);
+    setError(null);
+    try {
+      const result =
+        kind === "rows"
+          ? await callAction(retryCsvImportJob(jobId), {
+              fallbackMessage: "Could not retry this import",
+            })
+          : await callAction(retryImportListAssignment(jobId), {
+              fallbackMessage: "Could not retry list assignment",
+            });
+      if (result.ok) {
+        toast.success(
+          kind === "rows" ? "Import resumed." : "List assignment completed.",
+        );
+        // A retry changes a terminal job back to a runnable state. Refetch now
+        // and recreate the polling safety net; Realtime may be unavailable.
+        setRefreshVersion((version) => version + 1);
+      } else {
+        const blockedState = retryStateFromErrorCode(result.error.code);
+        if (blockedState) {
+          setRetryAvailability({
+            state: blockedState,
+            message: result.error.message,
+          });
+        } else {
+          setError(result.error.message);
+        }
+      }
+    } finally {
+      setRetrying(false);
+    }
+  };
 
   return (
     <Card>
-      <CardHeader>
+      <CardHeader aria-live="polite" aria-atomic="true">
         <CardTitle>{title}</CardTitle>
         <CardDescription>{description}</CardDescription>
       </CardHeader>
       <CardContent className="flex flex-col gap-4">
-        {error && <div className="text-destructive text-sm">{error}</div>}
+        {error && <div role="alert" className="text-destructive text-sm">{error}</div>}
         <div className="flex items-center justify-between text-sm">
           <div>
             <Badge variant="outline">{job?.status ?? "…"}</Badge>
@@ -152,17 +255,25 @@ export function StepProgress({ jobId }: { jobId: string }) {
           </div>
         </div>
         {!isTerminal && (
-          <div className="bg-muted h-3 overflow-hidden rounded-full">
+          <div
+            className="bg-muted h-3 overflow-hidden rounded-full"
+            role="progressbar"
+            aria-label="Import progress"
+            aria-valuemin={0}
+            aria-valuemax={total}
+            aria-valuenow={processed}
+          >
             <div
               className="bg-primary h-full transition-all"
               style={{ width: `${pct}%` }}
             />
           </div>
         )}
-        <div className="grid grid-cols-3 gap-3 text-center text-sm">
+        <div className="grid grid-cols-2 gap-3 text-center text-sm sm:grid-cols-4">
           <Stat label="Succeeded" value={job?.succeeded_items ?? 0} />
           <Stat label="Failed" value={job?.failed_items ?? 0} />
           <Stat label="Skipped" value={skippedCount} />
+          <Stat label="Unprocessed" value={unprocessedCount} />
         </div>
         {isTerminal && droppedUnlabeledPhones > 0 && (
           <div className="text-muted-foreground text-sm">
@@ -171,27 +282,99 @@ export function StepProgress({ jobId }: { jobId: string }) {
             line type. Unlabeled numbers are never saved.
           </div>
         )}
+        {isTerminal && (
+          <div className="bg-foreground text-background rounded-md p-3 text-sm">
+            ⊘ {dncRows.toLocaleString()} Do-Not-Contact{" "}
+            {dncRows === 1 ? "record" : "records"} imported locked and excluded
+            from optional services.
+          </div>
+        )}
+        {isTerminal && listAssignment?.status === "failed" && (
+          <div className="border-destructive/40 bg-destructive/5 rounded-md border p-3 text-sm">
+            <strong>List assignment did not complete.</strong>{" "}
+            {listAssignment.message ?? "The imported rows are kept."}
+            <Button
+              size="sm"
+              variant="outline"
+              className="ml-3"
+              disabled={retrying}
+              onClick={() => void retry("list")}
+            >
+              Retry list assignment
+            </Button>
+          </div>
+        )}
+        {isTerminal &&
+          retryAvailability &&
+          retryAvailability.state !== "retryable" &&
+          retryAvailability.message && (
+            <div role="status" className="text-muted-foreground text-sm">
+              {retryAvailability.message}
+            </div>
+          )}
+        {isTerminal &&
+          incompleteSideEffects.map(([key, effect]) => (
+            <div
+              key={key}
+              className="border-destructive/40 bg-destructive/5 rounded-md border p-3 text-sm"
+            >
+              <strong>{sideEffectLabel(key)} did not complete.</strong>{" "}
+              {effect.message ??
+                "Open Job details for the recorded failure and next step."}
+            </div>
+          ))}
       </CardContent>
       {isTerminal && (
         <CardFooter className="flex flex-wrap gap-2">
-          <Link href="/properties" className={buttonVariants()}>
-            View properties
+          <Link href="/properties?imported=today" className={buttonVariants()}>
+            Review imported Prospects
           </Link>
+          {canRetryRows && (
+            <Button
+              variant="outline"
+              disabled={retrying}
+              onClick={() => void retry("rows")}
+            >
+              Retry import
+            </Button>
+          )}
           <Link
             href={`/jobs/${jobId}`}
             className={buttonVariants({ variant: "outline" })}
           >
             Job details
           </Link>
-          <Link
-            href="/import"
-            className={buttonVariants({ variant: "ghost" })}
-          >
+          <Link href="/import" className={buttonVariants({ variant: "ghost" })}>
             New import
           </Link>
         </CardFooter>
       )}
     </Card>
+  );
+}
+
+function retryStateFromErrorCode(
+  code: string,
+): CsvImportRetryAvailability["state"] | null {
+  if (code === "CSV_IMPORT_RETRY_IN_FLIGHT") return "in_flight";
+  if (code === "CSV_IMPORT_RETRY_EXHAUSTED") return "exhausted";
+  if (code === "CSV_IMPORT_RETRY_MANUAL_RECONCILIATION") {
+    return "manual_reconciliation";
+  }
+  return null;
+}
+
+function sideEffectLabel(key: string): string {
+  return (
+    (
+      {
+        cass: "Address verification",
+        lineTypeClassification: "Line-type classification",
+        consent: "Consent recording",
+        sequenceEnrollment: "Sequence enrollment",
+        skipTrace: "Skip trace",
+      } as Record<string, string>
+    )[key] ?? key
   );
 }
 
@@ -201,26 +384,30 @@ function describeState(
 ): { title: string; description: string } {
   if (!job || !isTerminal) {
     return {
-      title: "Importing",
+      title: job?.status === "queued" ? "Queued" : "Processing",
       description:
-        "You can close this tab and come back — the job runs on the server. Visit /jobs anytime to check in.",
+        "This runs in the background. You can leave this page — the job keeps going and this screen picks up where it left off when you return.",
     };
   }
   if (job.status === "completed") {
-    return { title: "Import complete", description: "All rows processed." };
-  }
-  if (job.status === "partial") {
     return {
-      title: "Import finished with errors",
+      title: "Completed",
       description:
-        "Some rows failed. Open Job details to see specifics for the failed rows.",
+        "Every row and every follow-up action reached a terminal state. Nothing is still pending.",
+    };
+  }
+  if (job.status === "partial" || job.status === "partially_completed") {
+    return {
+      title: "Partially completed",
+      description:
+        "Most rows imported. Some work failed and is reported truthfully below — this job will not be called Completed.",
     };
   }
   if (job.status === "failed") {
     return {
-      title: "Import failed",
+      title: "Failed",
       description:
-        "The job failed before completing. Open Job details to see why.",
+        "The job stopped before completing. Rows already imported are kept and listed; nothing was double-imported. Retry resumes from the failure point.",
     };
   }
   if (job.status === "canceled") {

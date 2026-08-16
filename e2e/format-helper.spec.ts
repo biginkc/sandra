@@ -35,7 +35,7 @@ async function gotoUploadStep(
   await page.getByTestId("mode-add").click();
   await page.getByRole("button", { name: "Next", exact: true }).click();
   // The upload card is now visible.
-  await expect(page.getByText("Upload CSV", { exact: true })).toBeVisible();
+  await expect(page.getByText("Upload file", { exact: true })).toBeVisible();
 }
 
 test.describe("Format helper — auto-detect + auto-apply", () => {
@@ -52,7 +52,7 @@ test.describe("Format helper — auto-detect + auto-apply", () => {
 
     // Banner appears — match by the success copy.
     await expect(
-      page.getByText(/Recognized as BMH Agent Outreach Sheets/i),
+      page.getByText(/Recognized: BMH Agent Outreach Sheets/i),
     ).toBeVisible({ timeout: 10_000 });
 
     // Source dropdown auto-filled — placeholder is gone (Radix
@@ -65,7 +65,7 @@ test.describe("Format helper — auto-detect + auto-apply", () => {
     // Undo button restores the pre-transform state.
     await page.getByRole("button", { name: /Undo/ }).click();
     await expect(
-      page.getByText(/Recognized as BMH Agent Outreach Sheets/i),
+      page.getByText(/Recognized: BMH Agent Outreach Sheets/i),
     ).toHaveCount(0);
   });
 
@@ -80,7 +80,7 @@ test.describe("Format helper — auto-detect + auto-apply", () => {
     });
 
     await expect(
-      page.getByText(/Recognized as PropStream Property Export/i),
+      page.getByText(/Recognized: PropStream Property Export/i),
     ).toBeVisible({ timeout: 10_000 });
 
     // Phone-fold note should appear in the banner's bullet list.

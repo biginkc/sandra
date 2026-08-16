@@ -25,7 +25,7 @@ export type CountResult = { count: number };
  *
  * Base predicates:
  *   - `deleted_at IS NULL` (soft-delete; matches `idx_properties_active`)
- *   - `status = 'prospect'` (the page is a single-status view by default)
+ *   - `status = 'prospect' OR is_dnc_locked = true` (locked history stays visible)
  *
  * The `pipeline_status` block (D-12 in 05-CONTEXT) is the only block that
  * can broaden status beyond `prospect`. When a `pipeline_status` block is
@@ -59,7 +59,7 @@ export async function countProspectsForFilter(input: {
       .from("properties")
       .select(select, { count: "exact", head: true })
       .is("deleted_at", null);
-    if (!hasPipelineBlock) q = q.eq("status", "prospect");
+    if (!hasPipelineBlock) q = q.or("status.eq.prospect,is_dnc_locked.eq.true");
 
     q = (await applyFilters(q, input.blocks, sb)).builder;
 

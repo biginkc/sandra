@@ -10,7 +10,7 @@ import type { Database } from "@/lib/supabase/types";
 import type { SkipTraceResult } from "./types";
 
 export type PersistOutcome = {
-  status: "matched" | "no_match" | "property_not_found";
+  status: "matched" | "no_match" | "property_not_found" | "dnc_skipped";
   contactId?: string;
   phonesAdded: number;
   emailsAdded: number;
@@ -35,16 +35,21 @@ export type PersistOutcome = {
  */
 export async function persistSkipTraceResult(
   supabase: SupabaseClient<Database>,
+  orgId: string,
   result: SkipTraceResult,
 ): Promise<PersistOutcome> {
   const { data: property } = await supabase
     .from("properties")
-    .select("id, org_id, homeowner_contact_id")
+    .select("id, org_id, homeowner_contact_id, is_dnc_locked")
     .eq("id", result.propertyId)
+    .eq("org_id", orgId)
     .maybeSingle();
 
   if (!property) {
     return { status: "property_not_found", phonesAdded: 0, emailsAdded: 0 };
+  }
+  if (property.is_dnc_locked) {
+    return { status: "dnc_skipped", phonesAdded: 0, emailsAdded: 0 };
   }
 
   if (!result.hit || result.persons.length === 0) {
@@ -57,9 +62,7 @@ export async function persistSkipTraceResult(
   }
 
   // Pick the best person — owner first, then highest-rank phone holder.
-  const owner =
-    result.persons.find((p) => p.isOwner) ??
-    result.persons[0];
+  const owner = result.persons.find((p) => p.isOwner) ?? result.persons[0];
 
   // Resolve / create the contact. Two-phase lookup for the no-existing-
   // contact case: there's a global unique index on contacts.phone_1, so
@@ -69,6 +72,7 @@ export async function persistSkipTraceResult(
   // trying to insert a duplicate. Otherwise we hit
   // `contacts_phone_1_key` and lose the row.
   let contactId = property.homeowner_contact_id;
+  let createdContactId: string | null = null;
   if (!contactId) {
     contactId =
       (await resolveContactByPhone(supabase, property.org_id, owner)) ??
@@ -91,6 +95,7 @@ export async function persistSkipTraceResult(
         .single();
       if (newContact) {
         contactId = newContact.id;
+        createdContactId = newContact.id;
       } else if (isUniqueViolation(contactErr?.message)) {
         // Raced another writer between lookup and insert — re-resolve
         // and reuse whoever won.
@@ -108,28 +113,50 @@ export async function persistSkipTraceResult(
         );
       }
     }
-    await supabase
+    const { data: linked, error: linkError } = await supabase
       .from("properties")
       .update({ homeowner_contact_id: contactId })
-      .eq("id", property.id);
+      .eq("id", property.id)
+      .eq("org_id", property.org_id)
+      .eq("is_dnc_locked", false)
+      .select("id");
+    if (linkError || !linked || linked.length !== 1) {
+      const linkFailureMessage = (linkError as { message: string } | null)
+        ?.message;
+      if (createdContactId) {
+        await supabase
+          .from("contacts")
+          .delete()
+          .eq("id", createdContactId)
+          .eq("org_id", property.org_id);
+      }
+      if (isDncLockedError(linkFailureMessage) || !linked?.length) {
+        return { status: "dnc_skipped", phonesAdded: 0, emailsAdded: 0 };
+      }
+      throw new Error(
+        `failed to link homeowner contact: ${linkFailureMessage ?? "property link not confirmed"}`,
+      );
+    }
   }
 
   // Load current contact phones/emails for dedupe + slot picking.
-  const { data: currentContact } = await supabase
+  const { data: currentContact, error: currentContactError } = await supabase
     .from("contacts")
     .select(
-      "phone_1, phone_1_type, phone_2, phone_2_type, phone_3, phone_3_type, email, first_name, last_name",
+      "phone_1, phone_1_type, phone_2, phone_2_type, phone_3, phone_3_type, email, first_name, last_name, do_not_contact",
     )
     .eq("id", contactId)
+    .eq("org_id", property.org_id)
     .maybeSingle();
 
+  if (currentContactError) {
+    throw new Error(`contact lookup failed: ${currentContactError.message}`);
+  }
   if (!currentContact) {
-    return {
-      status: "no_match",
-      contactId,
-      phonesAdded: 0,
-      emailsAdded: 0,
-    };
+    throw new Error("contact lookup failed: linked contact not found");
+  }
+  if (currentContact.do_not_contact) {
+    return { status: "dnc_skipped", contactId, phonesAdded: 0, emailsAdded: 0 };
   }
 
   // Build new phone slots.
@@ -292,15 +319,28 @@ export async function persistSkipTraceResult(
   let updateConfirmed = false;
   let lastUpdateError = "";
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    const { error: updErr } = await supabase
+    const { data: updatedContacts, error: updErr } = await supabase
       .from("contacts")
       .update(updates)
-      .eq("id", contactId);
-    if (!updErr) {
+      .eq("id", contactId)
+      .eq("org_id", property.org_id)
+      .select("id");
+    if (!updErr && updatedContacts?.length === 1) {
       updateConfirmed = true;
       break;
     }
+    if (!updErr) {
+      throw new Error("contact update failed: write was not confirmed");
+    }
     lastUpdateError = updErr.message;
+    if (isDncLockedError(updErr.message)) {
+      return {
+        status: "dnc_skipped",
+        contactId,
+        phonesAdded: 0,
+        emailsAdded: 0,
+      };
+    }
     if (!isUniqueViolation(updErr.message)) {
       throw new Error(`contact update failed: ${updErr.message}`);
     }
@@ -312,8 +352,7 @@ export async function persistSkipTraceResult(
       const repacked = packSlots();
       packedSlots = repacked.packed;
       phonesAdded = repacked.added;
-      ({ numbers: slotNumbers, types: slotTypes } =
-        finalizeSlots(packedSlots));
+      ({ numbers: slotNumbers, types: slotTypes } = finalizeSlots(packedSlots));
       updates.phone_1 = slotNumbers[0];
       updates.phone_1_type = slotTypes[0];
       updates.phone_2 = slotNumbers[1];
@@ -342,10 +381,26 @@ export async function persistSkipTraceResult(
   // the original CSV import already carried, which we treat as the
   // source of truth.
   const ownerMailing = owner.mailingAddress ?? result.mailingAddress ?? null;
-  const mailingAdded = await upsertOwnerMailing(supabase, {
-    contactId,
-    mailing: ownerMailing,
-  });
+  let mailingAdded = false;
+  try {
+    mailingAdded = await upsertOwnerMailing(supabase, {
+      contactId,
+      orgId: property.org_id,
+      mailing: ownerMailing,
+    });
+  } catch (error) {
+    if (
+      isDncLockedError(error instanceof Error ? error.message : String(error))
+    ) {
+      return {
+        status: "dnc_skipped",
+        contactId,
+        phonesAdded: 0,
+        emailsAdded: 0,
+      };
+    }
+    throw error;
+  }
 
   return {
     status: "matched",
@@ -358,6 +413,10 @@ export async function persistSkipTraceResult(
 
 function isUniqueViolation(message: string | null | undefined): boolean {
   return !!message && message.includes("duplicate key value violates");
+}
+
+function isDncLockedError(message: string | null | undefined): boolean {
+  return !!message && message.includes("DNC_LOCKED");
 }
 
 type OwnerPerson = {
@@ -440,6 +499,7 @@ async function upsertOwnerMailing(
   supabase: SupabaseClient<Database>,
   args: {
     contactId: string;
+    orgId: string;
     mailing: {
       street?: string | null;
       city?: string | null;
@@ -465,11 +525,17 @@ async function upsertOwnerMailing(
     return false;
   }
 
-  const { data: existing } = await supabase
+  const { data: existing, error: readError } = await supabase
     .from("homeowner_details")
-    .select("contact_id, mailing_address, mailing_city, mailing_state, mailing_zip")
+    .select(
+      "contact_id, mailing_address, mailing_city, mailing_state, mailing_zip",
+    )
     .eq("contact_id", args.contactId)
+    .eq("org_id", args.orgId)
     .maybeSingle();
+  if (readError) {
+    throw new Error(`homeowner mailing lookup failed: ${readError.message}`);
+  }
 
   // Compute the merged values: keep whatever's already there, fill blanks.
   const merged = {
@@ -488,12 +554,18 @@ async function upsertOwnerMailing(
 
   if (!wroteSomething && existing) return false;
 
-  await supabase
+  const { error: writeError } = await supabase
     .from("homeowner_details")
     .upsert(
-      { contact_id: args.contactId, ...merged },
+      { contact_id: args.contactId, org_id: args.orgId, ...merged },
       { onConflict: "contact_id" },
     );
+  if (writeError) {
+    if (isDncLockedError(writeError.message)) {
+      throw new Error(`DNC_LOCKED: homeowner mailing write rejected`);
+    }
+    throw new Error(`homeowner mailing write failed: ${writeError.message}`);
+  }
 
   return !!wroteSomething;
 }

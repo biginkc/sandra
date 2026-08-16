@@ -3,11 +3,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // Mocks must be hoisted so the module under test sees the mocks at
 // import time (not after vi.mock has been registered).
 const { createClient } = vi.hoisted(() => ({ createClient: vi.fn() }));
+const { createAdminClient } = vi.hoisted(() => ({ createAdminClient: vi.fn() }));
 const { after } = vi.hoisted(() => ({ after: vi.fn() }));
 const { start } = vi.hoisted(() => ({ start: vi.fn() }));
 
 vi.mock("@/lib/supabase/server", () => ({
   createClient,
+}));
+
+vi.mock("@/lib/supabase/admin", () => ({
+  createAdminClient,
 }));
 
 vi.mock("next/server", () => ({
@@ -26,7 +31,10 @@ vi.mock("@/lib/errors/report", () => ({
   reportError: vi.fn(),
 }));
 
-// eslint-disable-next-line import/first
+vi.mock("@/lib/csv/dataset", () => ({
+  buildReviewContractSha256: vi.fn().mockResolvedValue("b".repeat(64)),
+}));
+
 import { createImportJob } from "./actions";
 
 /**
@@ -82,7 +90,7 @@ function makeBuilder(record: CallRecord): Record<string, unknown> {
 
   builder.select = (...args: unknown[]) => {
     record.selectArgs = args;
-    record.op = record.op === "insert" ? "insert" : "select";
+    record.op = record.op === "insert" || record.op === "update" ? record.op : "select";
     return builder;
   };
   builder.insert = (payload: unknown) => {
@@ -129,8 +137,30 @@ function makeSupabase() {
   };
 }
 
+function makeAdminSupabase(
+  fallback?: ReturnType<typeof makeSupabase>,
+  provenanceError: { message: string } | null = null,
+) {
+  return {
+    from: vi.fn((table: string) => {
+      if (table === "csv_import_job_provenance") {
+        return {
+          insert: vi.fn().mockResolvedValue({
+            data: provenanceError ? null : { job_id: "job-1" },
+            error: provenanceError,
+          }),
+        };
+      }
+      if (!fallback) throw new Error(`Unexpected admin table ${table}`);
+      return fallback.from(table);
+    }),
+  };
+}
+
 beforeEach(() => {
   createClient.mockReset();
+  createAdminClient.mockReset();
+  createAdminClient.mockReturnValue(makeAdminSupabase());
   after.mockReset();
   start.mockReset();
   responseQueue = [];
@@ -148,11 +178,18 @@ const baseParams = {
   countyId: "11111111-1111-1111-1111-111111111111",
   listName: null,
   mapping: { address: "Address" },
-  storagePath: "import-2026.csv",
+  storagePath: "org-1/import-2026.csv",
   totalRows: 42,
   smsConsent: false,
   sequenceId: null,
   classifyLineTypes: false,
+  requestCass: false,
+  requestSkipTrace: false,
+  maxEstimatedChargeUsd: 0,
+  datasetSha256: "a".repeat(64),
+  reviewContractSha256: "b".repeat(64),
+  datasetVersion: 2,
+  dncRows: 0,
 };
 
 describe("createImportJob — T-02-03-01 mitigation", () => {
@@ -277,6 +314,39 @@ describe("createImportJob — T-02-03-01 mitigation", () => {
     expect(result.error.code).toBe("INVALID_COUNTY");
   });
 
+  it("fails closed instead of choosing an arbitrary organization membership", async () => {
+    responseQueue = [{
+      data: [
+        { org_id: "org-1", role: "owner" },
+        { org_id: "org-2", role: "member" },
+      ],
+      error: null,
+    }];
+    createClient.mockResolvedValue(makeSupabase());
+
+    const result = await createImportJob(baseParams);
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe("ORG_SELECTION_REQUIRED");
+    expect(calls.find((call) => call.table === "csv_imports")).toBeUndefined();
+  });
+
+  it("rejects a storage object outside the resolved organization prefix", async () => {
+    responseQueue = [membershipResponse];
+    createClient.mockResolvedValue(makeSupabase());
+
+    const result = await createImportJob({
+      ...baseParams,
+      storagePath: "org-2/reviewed.csv",
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe("IMPORT_STORAGE_SCOPE_MISMATCH");
+    expect(calls.find((call) => call.table === "csv_imports")).toBeUndefined();
+  });
+
   it("threads countyId into the workflow start payload", async () => {
     responseQueue = [
       membershipResponse,
@@ -303,5 +373,56 @@ describe("createImportJob — T-02-03-01 mitigation", () => {
     const wfPayload = startArgs[0];
     expect(wfPayload.market).toBe("Buchanan County MO");
     expect(wfPayload.countyId).toBe(baseParams.countyId);
+  });
+
+  it("persists an explicit failed checkpoint when workflow startup fails", async () => {
+    responseQueue = [
+      membershipResponse,
+      { data: { id: baseParams.countyId, market: "Buchanan County MO" }, error: null },
+      { data: { id: "import-1", org_id: "org-1" }, error: null },
+      { data: { id: "job-1" }, error: null },
+      { data: { id: "job-1" }, error: null }, // failed job checkpoint
+    ];
+    const supabase = makeSupabase();
+    createClient.mockResolvedValue(supabase);
+    createAdminClient.mockReturnValue(makeAdminSupabase(supabase));
+    start.mockRejectedValue(new Error("workflow unavailable"));
+
+    const result = await createImportJob(baseParams);
+    expect(result.ok).toBe(true);
+    const callback = after.mock.calls[0][0] as () => Promise<void>;
+    await expect(callback()).resolves.toBeUndefined();
+
+    const checkpoint = calls.find(
+      (call) => call.table === "jobs" && call.op === "update",
+    );
+    expect(checkpoint?.insertPayload).toMatchObject({
+      status: "failed",
+      error_class: "configuration",
+    });
+    expect(checkpoint?.filters).toContainEqual({
+      op: "eq",
+      args: ["status", "queued"],
+    });
+  });
+
+  it("surfaces a checkpoint-write failure instead of leaving startup failure silent", async () => {
+    responseQueue = [
+      membershipResponse,
+      { data: { id: baseParams.countyId, market: "Buchanan County MO" }, error: null },
+      { data: { id: "import-1", org_id: "org-1" }, error: null },
+      { data: { id: "job-1" }, error: null },
+      { data: null, error: { message: "checkpoint unavailable" } },
+    ];
+    const supabase = makeSupabase();
+    createClient.mockResolvedValue(supabase);
+    createAdminClient.mockReturnValue(makeAdminSupabase(supabase));
+    start.mockRejectedValue(new Error("workflow unavailable"));
+
+    await createImportJob(baseParams);
+    const callback = after.mock.calls[0][0] as () => Promise<void>;
+    await expect(callback()).rejects.toThrow(
+      "workflow-start failure checkpoint: checkpoint unavailable",
+    );
   });
 });

@@ -1,8 +1,16 @@
-import { describe, expect, it } from "vitest";
+import type { SupabaseClient } from "@supabase/supabase-js";
+import { describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 
-import { normalizeAddress } from "./cache";
+import type { Database } from "@/lib/supabase/types";
+
+import {
+  normalizeAddress,
+  readCache,
+  readCacheMany,
+  writeCache,
+} from "./cache";
 
 const unskipTracedMigration = readFileSync(
   path.resolve(
@@ -11,8 +19,19 @@ const unskipTracedMigration = readFileSync(
   ),
   "utf8",
 );
+const cacheSource = readFileSync(
+  path.resolve(process.cwd(), "src/lib/skip-trace/cache.ts"),
+  "utf8",
+);
 
 describe("normalizeAddress", () => {
+  it("scopes every cache read and write to the authoritative organization", () => {
+    expect(cacheSource.match(/\.eq\("org_id", orgId\)/g)).toHaveLength(2);
+    expect(cacheSource).toContain("org_id: orgId");
+    expect(cacheSource).toContain(
+      'onConflict: "org_id,provider,address_normalized"',
+    );
+  });
   it("lowercases and joins with pipe", () => {
     expect(
       normalizeAddress({
@@ -65,7 +84,9 @@ describe("normalizeAddress", () => {
       expect(tsKey, label).toBe(sqlEquivalent(value));
     }
 
-    expect(unskipTracedMigration).toContain("from unnest(array[b.address, b.city, b.state, b.zip])");
+    expect(unskipTracedMigration).toContain(
+      "from unnest(array[b.address, b.city, b.state, b.zip])",
+    );
     expect(unskipTracedMigration).toContain("component <> ''");
     expect(unskipTracedMigration).not.toContain("concat_ws(");
   });
@@ -94,5 +115,60 @@ describe("normalizeAddress", () => {
       zip: "64086",
     });
     expect(a).toBe(b);
+  });
+
+  it("fails closed when a single cache read returns a database error", async () => {
+    const builder: Record<string, ReturnType<typeof vi.fn>> = {};
+    for (const method of ["select", "eq", "gte", "order", "limit"]) {
+      builder[method] = vi.fn(() => builder);
+    }
+    builder.maybeSingle = vi.fn().mockResolvedValue({
+      data: null,
+      error: { message: "column org_id does not exist" },
+    });
+    const client = {
+      from: vi.fn(() => builder),
+    } as unknown as SupabaseClient<Database>;
+
+    await expect(
+      readCache(client, "org-1", "mock", "1 main st|kansas city|mo"),
+    ).rejects.toThrow(/cache read failed/i);
+  });
+
+  it("fails closed when a bulk cache read returns a database error", async () => {
+    const builder: Record<string, ReturnType<typeof vi.fn>> = {};
+    for (const method of ["select", "eq", "in", "gte"]) {
+      builder[method] = vi.fn(() => builder);
+    }
+    builder.order = vi.fn().mockResolvedValue({
+      data: null,
+      error: { message: "cache unavailable" },
+    });
+    const client = {
+      from: vi.fn(() => builder),
+    } as unknown as SupabaseClient<Database>;
+
+    await expect(
+      readCacheMany(client, "org-1", "mock", ["1 main st|kansas city|mo"]),
+    ).rejects.toThrow(/bulk read failed/i);
+  });
+
+  it("surfaces a failed cache upsert", async () => {
+    const upsert = vi.fn().mockResolvedValue({
+      error: { message: "write denied" },
+    });
+    const client = {
+      from: vi.fn(() => ({ upsert })),
+    } as unknown as SupabaseClient<Database>;
+
+    await expect(
+      writeCache(client, "org-1", "mock", "1 main st|kansas city|mo", {
+        propertyId: "property-1",
+        hit: false,
+        persons: [],
+        creditsDeducted: 0,
+        raw: {},
+      }),
+    ).rejects.toThrow(/cache write failed/i);
   });
 });

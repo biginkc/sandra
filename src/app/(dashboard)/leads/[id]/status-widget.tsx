@@ -68,7 +68,7 @@ export function LeadStatusWidget({
 
     startTransition(async () => {
       const result = await callAction(
-        updatePropertyStatus(propertyId, next),
+        updatePropertyStatus(propertyId, next, previous),
         {
           successMessage: `Moved ${address} to ${STATUS_LABEL[next]}`,
           fallbackMessage: `Could not move ${address}`,

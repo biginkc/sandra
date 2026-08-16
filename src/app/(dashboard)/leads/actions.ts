@@ -10,7 +10,16 @@ import { parseThreadId } from "@/lib/messages/threading";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
 import { errFromUnknown, ok, type Result } from "@/lib/errors/result";
+import {
+  assertPropertyDncUnlocked,
+  DNC_LOCKED_MESSAGE,
+  partitionPropertyDncLocks,
+} from "@/lib/dnc/property-lock";
 import { reportError } from "@/lib/errors/report";
+import {
+  createStandaloneCassJob,
+  failAuthorizedCassJobStart,
+} from "@/lib/enrichment/cass-job";
 import { verifyPropertyAddress } from "@/lib/enrichment/verify-property";
 import type { CassStatus } from "@/lib/enrichment/types";
 import { qualifyProperty } from "@/lib/leads/qualify";
@@ -42,6 +51,7 @@ import type { Database } from "@/lib/supabase/types";
 import { loadTemplateVars } from "@/lib/sequences/template-vars";
 import type { TemplateVars } from "@/lib/templates/render";
 import { createTask, type Task, type TaskType } from "@/lib/tasks";
+import { validateActiveAssigneeForProperties } from "./assignment-safety";
 
 export type PropertyStatus =
   | "prospect"
@@ -88,11 +98,11 @@ async function getLeadDetail(
         `*,
          homeowner:contacts!properties_homeowner_contact_id_fkey(
            *,
-           homeowner_details(*)
+           homeowner_details!homeowner_details_contact_org_fkey(*)
          ),
          agent:contacts!properties_agent_contact_id_fkey(
            *,
-           agent_details(*)
+           agent_details!agent_details_contact_org_fkey(*)
          )`,
       )
       .eq("id", propertyId)
@@ -126,7 +136,24 @@ export async function verifyLeadAddress(
 ): Promise<Result<VerifyResult>> {
   try {
     const supabase = await createClient();
-    const outcome = await verifyPropertyAddress(supabase, propertyId);
+    const unlocked = await assertPropertyDncUnlocked(supabase, propertyId);
+    if (!unlocked.ok) return unlocked;
+    const { data: property } = await supabase
+      .from("properties")
+      .select("org_id")
+      .eq("id", propertyId)
+      .maybeSingle();
+    if (!property) {
+      return {
+        ok: false,
+        error: { code: "LEAD_NOT_FOUND", message: "Lead not found." },
+      };
+    }
+    const outcome = await verifyPropertyAddress(
+      supabase,
+      propertyId,
+      property.org_id,
+    );
 
     switch (outcome.status) {
       case "verified":
@@ -159,6 +186,14 @@ export async function verifyLeadAddress(
             message: "Provider returned no result.",
           },
         };
+      case "dnc_skipped":
+        return {
+          ok: false,
+          error: { code: "DNC_LOCKED", message: DNC_LOCKED_MESSAGE },
+        };
+      case "submission_unknown":
+      case "provider_rejected":
+      case "provider_persist_failed":
       case "failed":
         return {
           ok: false,
@@ -206,6 +241,8 @@ export async function updateLeadMotivation(
 
   try {
     const supabase = await createClient();
+    const unlocked = await assertPropertyDncUnlocked(supabase, propertyId);
+    if (!unlocked.ok) return unlocked;
     const { error } = await supabase
       .from("properties")
       .update({
@@ -246,6 +283,8 @@ async function qualifyLead(
 ): Promise<Result<{ alreadyQualified: boolean }>> {
   try {
     const supabase = await createClient();
+    const unlocked = await assertPropertyDncUnlocked(supabase, propertyId);
+    if (!unlocked.ok) return unlocked;
 
     // Resolve the qualifier — explicit arg wins, else use the session user.
     let qualifiedBy = qualifier;
@@ -341,6 +380,8 @@ export async function revertToProspect(
 ): Promise<Result<null>> {
   try {
     const supabase = await createClient();
+    const unlocked = await assertPropertyDncUnlocked(supabase, propertyId);
+    if (!unlocked.ok) return unlocked;
     const { data: current, error: lookupErr } = await supabase
       .from("properties")
       .select("status")
@@ -681,6 +722,29 @@ export async function assignLeadsBulk(
   }
   try {
     const supabase = await createClient();
+    const partition = await partitionPropertyDncLocks(supabase, propertyIds);
+    if (!partition.ok) return partition;
+    if (partition.data.unlocked.length === 0) {
+      return {
+        ok: false,
+        error: { code: "DNC_LOCKED", message: DNC_LOCKED_MESSAGE },
+      };
+    }
+    const assignIds = partition.data.unlocked;
+    const assigneeValidation = await validateActiveAssigneeForProperties(
+      supabase,
+      assignIds,
+      userId,
+    );
+    if (!assigneeValidation.ok) {
+      return {
+        ok: false,
+        error: {
+          code: assigneeValidation.code,
+          message: assigneeValidation.message,
+        },
+      };
+    }
     const {
       data: { user },
     } = await supabase.auth.getUser();
@@ -690,7 +754,7 @@ export async function assignLeadsBulk(
         assigned_user_id: userId,
         updated_at: new Date().toISOString(),
       })
-      .in("id", propertyIds);
+      .in("id", assignIds);
     if (error) {
       return {
         ok: false,
@@ -703,7 +767,7 @@ export async function assignLeadsBulk(
     // bubbles so a notification hiccup never fails the assignment.
     try {
       await dispatchPropertyAssigned(supabase, {
-        propertyIds,
+        propertyIds: assignIds,
         newAssigneeId: userId,
         actorId: user?.id ?? null,
         assignerName: user?.email?.split("@")[0] ?? null,
@@ -711,11 +775,24 @@ export async function assignLeadsBulk(
     } catch (e) {
       reportError(e, {
         tags: { surface: "assign_leads_bulk_notification_dispatch" },
-        extra: { count: propertyIds.length },
+        extra: { count: assignIds.length },
       });
     }
 
-    return ok({ succeeded: propertyIds.length, skipped: 0, failed: [] });
+    return ok({
+      succeeded: assignIds.length,
+      skipped: 0,
+      failed: [
+        ...partition.data.locked.map((propertyId) => ({
+          propertyId,
+          message: DNC_LOCKED_MESSAGE,
+        })),
+        ...partition.data.missing.map((propertyId) => ({
+          propertyId,
+          message: "Property not found",
+        })),
+      ],
+    });
   } catch (e) {
     reportError(e, {
       tags: { surface: "assign_leads_bulk" },
@@ -1047,6 +1124,15 @@ export async function deletePropertiesBulk(
   }
   try {
     const supabase = await createClient();
+    const partition = await partitionPropertyDncLocks(supabase, propertyIds);
+    if (!partition.ok) return partition;
+    if (partition.data.unlocked.length === 0) {
+      return {
+        ok: false,
+        error: { code: "DNC_LOCKED", message: DNC_LOCKED_MESSAGE },
+      };
+    }
+    const deleteIds = partition.data.unlocked;
     const {
       data: { user },
     } = await supabase.auth.getUser();
@@ -1065,7 +1151,7 @@ export async function deletePropertiesBulk(
         deleted_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
       })
-      .in("id", propertyIds)
+      .in("id", deleteIds)
       .is("deleted_at", null);
     if (error) {
       return {
@@ -1073,7 +1159,14 @@ export async function deletePropertiesBulk(
         error: { code: "DELETE_FAILED", message: error.message },
       };
     }
-    return ok({ succeeded: propertyIds.length, skipped: 0, failed: [] });
+    return ok({
+      succeeded: deleteIds.length,
+      skipped: 0,
+      failed: partition.data.locked.map((propertyId) => ({
+        propertyId,
+        message: DNC_LOCKED_MESSAGE,
+      })),
+    });
   } catch (e) {
     reportError(e, {
       tags: { surface: "delete_properties_bulk" },
@@ -1092,6 +1185,7 @@ export async function deletePropertiesBulk(
  */
 export async function verifyPropertiesBulk(
   propertyIds: string[],
+  requestKey: string,
 ): Promise<Result<{ jobId: string }>> {
   if (propertyIds.length === 0) {
     return {
@@ -1104,30 +1198,73 @@ export async function verifyPropertiesBulk(
   }
   try {
     const supabase = await createClient();
+    const partition = await partitionPropertyDncLocks(supabase, propertyIds);
+    if (!partition.ok) return partition;
+    if (partition.data.unlocked.length === 0) {
+      return {
+        ok: false,
+        error: { code: "DNC_LOCKED", message: DNC_LOCKED_MESSAGE },
+      };
+    }
+    const verifyIds = partition.data.unlocked;
     const {
       data: { user },
     } = await supabase.auth.getUser();
+    if (!user) {
+      return {
+        ok: false,
+        error: {
+          code: "AUTH_REQUIRED",
+          message: "Sign in to verify properties.",
+        },
+      };
+    }
 
-    const { data: job, error } = await supabase
-      .from("jobs")
-      .insert({
-        type: "cass_dsf2_ncoa",
-        status: "queued",
-        created_by: user?.id ?? null,
-        total_items: propertyIds.length,
-        title: `CASS verify ${propertyIds.length} propert${propertyIds.length === 1 ? "y" : "ies"}`,
-        description: "Bulk verify from /properties",
-        provider: "smartystreets",
-        input_params: { property_ids: propertyIds },
-      })
-      .select("id")
-      .single();
-    if (error || !job) {
+    const { data: ownedRows, error: ownershipError } = await supabase
+      .from("properties")
+      .select("id, org_id")
+      .in("id", verifyIds);
+    if (ownershipError) {
+      return {
+        ok: false,
+        error: { code: "VERIFY_SCOPE_FAILED", message: ownershipError.message },
+      };
+    }
+    const orgIds = new Set((ownedRows ?? []).map((row) => row.org_id));
+    if ((ownedRows ?? []).length !== new Set(verifyIds).size || orgIds.size !== 1) {
+      return {
+        ok: false,
+        error: {
+          code: "VERIFY_SCOPE_FAILED",
+          message: "Every selected property must belong to the same organization.",
+        },
+      };
+    }
+    const orgId = Array.from(orgIds)[0];
+
+    let jobId: string;
+    let claimToken: string;
+    try {
+      const child = await createStandaloneCassJob(supabase, {
+        orgId,
+        propertyIds: verifyIds,
+        createdBy: user.id,
+        requestKey,
+      });
+      jobId = child.jobId;
+      if (!child.claimToken) {
+        throw new Error("CASS job did not return a start receipt");
+      }
+      claimToken = child.claimToken;
+    } catch (createError) {
       return {
         ok: false,
         error: {
           code: "VERIFY_JOB_CREATE_FAILED",
-          message: error?.message ?? "Job creation failed",
+          message:
+            createError instanceof Error
+              ? createError.message
+              : "Job creation failed",
         },
       };
     }
@@ -1139,16 +1276,22 @@ export async function verifyPropertiesBulk(
     // them in capped chunks, one invocation each.
     after(async () => {
       try {
-        await start(cassBulkWorkflow, [{ jobId: job.id }]);
+        await start(cassBulkWorkflow, [{ jobId, claimToken }]);
       } catch (e) {
         reportError(e, {
           tags: { surface: "verify_properties_bulk_workflow_start" },
-          extra: { jobId: job.id, count: propertyIds.length },
+          extra: { jobId, count: verifyIds.length },
+        });
+        await failAuthorizedCassJobStart(supabase, {
+          jobId,
+          orgId,
+          claimToken,
+          error: e,
         });
       }
     });
 
-    return ok({ jobId: job.id });
+    return ok({ jobId });
   } catch (e) {
     reportError(e, {
       tags: { surface: "verify_properties_bulk" },
@@ -1161,8 +1304,12 @@ export async function verifyPropertiesBulk(
 export async function updatePropertyStatus(
   propertyId: string,
   status: PropertyStatus,
-): Promise<Result<null>> {
-  if (!VALID_STATUSES.includes(status)) {
+  expectedPreviousStatus: PropertyStatus,
+): Promise<Result<{ propertyId: string; status: PropertyStatus }>> {
+  if (
+    !VALID_STATUSES.includes(status) ||
+    !VALID_STATUSES.includes(expectedPreviousStatus)
+  ) {
     return {
       ok: false,
       error: {
@@ -1174,10 +1321,15 @@ export async function updatePropertyStatus(
 
   try {
     const supabase = await createClient();
-    const { error } = await supabase
+    const unlocked = await assertPropertyDncUnlocked(supabase, propertyId);
+    if (!unlocked.ok) return unlocked;
+    const { data, error } = await supabase
       .from("properties")
       .update({ status, updated_at: new Date().toISOString() })
-      .eq("id", propertyId);
+      .eq("id", propertyId)
+      .eq("status", expectedPreviousStatus)
+      .select("id, status")
+      .maybeSingle();
 
     if (error) {
       return {
@@ -1189,7 +1341,55 @@ export async function updatePropertyStatus(
       };
     }
 
-    return ok(null);
+    // A zero-row compare-and-set can mean another client already saved this
+    // target, or moved the card somewhere else. Read the authoritative row so
+    // the caller can distinguish idempotent success from a real conflict and
+    // reconcile its local card instead of reverting to stale state.
+    if (!data) {
+      const { data: current, error: currentError } = await supabase
+        .from("properties")
+        .select("id, status")
+        .eq("id", propertyId)
+        .maybeSingle();
+      if (currentError) {
+        return {
+          ok: false,
+          error: {
+            code: "STATUS_RECONCILIATION_FAILED",
+            message: "The lead changed, but its current stage could not be loaded.",
+          },
+        };
+      }
+      if (current?.status === status) {
+        return ok({
+          propertyId: current.id,
+          status: current.status as PropertyStatus,
+        });
+      }
+      return {
+        ok: false,
+        error: {
+          code: "STATUS_CONFLICT",
+          message:
+            "This lead changed before your move was saved. Its current stage has been restored.",
+          ...(current && VALID_STATUSES.includes(current.status as PropertyStatus)
+            ? { details: { currentStatus: current.status } }
+            : {}),
+        },
+      };
+    }
+
+    if (data.status !== status) {
+      return {
+        ok: false,
+        error: {
+          code: "STATUS_UPDATE_NOT_SAVED",
+          message: "The lead did not save in the selected stage.",
+        },
+      };
+    }
+
+    return ok({ propertyId: data.id, status: data.status as PropertyStatus });
   } catch (e) {
     reportError(e, {
       tags: { surface: "update_property_status" },
@@ -1239,6 +1439,8 @@ export async function createLeadTaskAction(
 
   try {
     const supabase = await createClient();
+    const unlocked = await assertPropertyDncUnlocked(supabase, propertyId);
+    if (!unlocked.ok) return unlocked;
     const {
       data: { user },
     } = await supabase.auth.getUser();
@@ -1461,6 +1663,8 @@ export async function sendSmsFromLead(
 
   try {
     const supabase = await createClient();
+    const unlocked = await assertPropertyDncUnlocked(supabase, propertyId);
+    if (!unlocked.ok) return unlocked;
 
     const { data: property, error } = await supabase
       .from("properties")
@@ -1656,6 +1860,22 @@ export async function updateLeadAssignee(
 ): Promise<Result<null>> {
   try {
     const supabase = await createClient();
+    const unlocked = await assertPropertyDncUnlocked(supabase, propertyId);
+    if (!unlocked.ok) return unlocked;
+    const assigneeValidation = await validateActiveAssigneeForProperties(
+      supabase,
+      [propertyId],
+      userId,
+    );
+    if (!assigneeValidation.ok) {
+      return {
+        ok: false,
+        error: {
+          code: assigneeValidation.code,
+          message: assigneeValidation.message,
+        },
+      };
+    }
     const { error } = await supabase
       .from("properties")
       .update({
@@ -1690,6 +1910,8 @@ export async function markMessagesReadForProperty(
 ): Promise<Result<null>> {
   try {
     const supabase = await createClient();
+    const unlocked = await assertPropertyDncUnlocked(supabase, propertyId);
+    if (!unlocked.ok) return unlocked;
     const { error } = await supabase
       .from("messages")
       .update({ read_at: new Date().toISOString() })
@@ -1731,6 +1953,29 @@ export async function markMessagesReadForThread(
     }
 
     const supabase = await createClient();
+    const { data: threadProperties, error: threadLookupError } = await supabase
+      .from("messages")
+      .select("property_id")
+      .eq("channel", "sms")
+      .eq("conversation_id", parsed.conversationId)
+      .not("property_id", "is", null);
+    if (threadLookupError) {
+      return {
+        ok: false,
+        error: { code: "MARK_READ_FAILED", message: threadLookupError.message },
+      };
+    }
+    const propertyIds = [
+      ...new Set(
+        (threadProperties ?? [])
+          .map((message) => message.property_id)
+          .filter((propertyId): propertyId is string => Boolean(propertyId)),
+      ),
+    ];
+    for (const propertyId of propertyIds) {
+      const unlocked = await assertPropertyDncUnlocked(supabase, propertyId);
+      if (!unlocked.ok) return unlocked;
+    }
     const { error } = await supabase
       .from("messages")
       .update({ read_at: new Date().toISOString() })
@@ -1782,6 +2027,8 @@ export async function createLeadNote(
 
   try {
     const supabase = await createClient();
+    const unlocked = await assertPropertyDncUnlocked(supabase, propertyId);
+    if (!unlocked.ok) return unlocked;
     const {
       data: { user },
     } = await supabase.auth.getUser();
@@ -1910,22 +2157,30 @@ export async function getPropertyNeighbors(
 
   if (!current) return { prevId: null, nextId: null };
 
-  const [{ data: prevData }, { data: nextData }] = await Promise.all([
-    supabase
+  let previousQuery = supabase
       .from("properties")
       .select("id")
       .is("deleted_at", null)
-      [mode === "prospect" ? "eq" : "neq"]("status", "prospect")
-      .gt("created_at", current.created_at)
+      .gt("created_at", current.created_at);
+  let nextQuery = supabase
+      .from("properties")
+      .select("id")
+      .is("deleted_at", null)
+      .lt("created_at", current.created_at);
+  if (mode === "prospect") {
+    previousQuery = previousQuery.or("status.eq.prospect,is_dnc_locked.eq.true");
+    nextQuery = nextQuery.or("status.eq.prospect,is_dnc_locked.eq.true");
+  } else {
+    previousQuery = previousQuery.neq("status", "prospect").eq("is_dnc_locked", false);
+    nextQuery = nextQuery.neq("status", "prospect").eq("is_dnc_locked", false);
+  }
+
+  const [{ data: prevData }, { data: nextData }] = await Promise.all([
+    previousQuery
       .order("created_at", { ascending: true })
       .limit(1)
       .maybeSingle(),
-    supabase
-      .from("properties")
-      .select("id")
-      .is("deleted_at", null)
-      [mode === "prospect" ? "eq" : "neq"]("status", "prospect")
-      .lt("created_at", current.created_at)
+    nextQuery
       .order("created_at", { ascending: false })
       .limit(1)
       .maybeSingle(),

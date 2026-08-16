@@ -19,6 +19,8 @@ const testClient = createTestClient();
 
 const ENZO_SECRET = "enzo-test-secret-1234567890abcdef";
 const PPC_SECRET = "ppc-test-secret-abcdef1234567890";
+const ORG_ID = "00000000-0000-0000-0000-000000000bbb";
+const OTHER_ORG_ID = "00000000-0000-0000-0000-000000000ccc";
 
 function hashSecret(plaintext: string): string {
   return createHash("sha256").update(plaintext).digest("hex");
@@ -31,6 +33,7 @@ async function seedConsumer(opts: {
   consumerType?: "lead" | "provider";
   enabled?: boolean;
   revoked?: boolean;
+  orgId?: string;
 }): Promise<string> {
   const { data, error } = await testClient
     .from("webhook_consumers")
@@ -41,6 +44,7 @@ async function seedConsumer(opts: {
       consumer_type: opts.consumerType ?? "lead",
       enabled: opts.enabled ?? true,
       revoked_at: opts.revoked ? new Date().toISOString() : null,
+      org_id: opts.orgId ?? ORG_ID,
     })
     .select("id")
     .single();
@@ -241,6 +245,46 @@ describe("POST /api/webhooks/leads/[secret] (per-consumer auth)", () => {
     expect(ppcProp!.source).toBe("web_form");
   });
 
+  it("uses the matched consumer organization when two tenants submit the same address", async () => {
+    await testClient.from("organizations").upsert({ id: OTHER_ORG_ID, name: "Other org" });
+    await seedConsumer({
+      name: "Tenant A",
+      secret: ENZO_SECRET,
+      defaultSource: "cold_call",
+      orgId: ORG_ID,
+    });
+    await seedConsumer({
+      name: "Tenant B",
+      secret: PPC_SECRET,
+      defaultSource: "web_form",
+      orgId: OTHER_ORG_ID,
+    });
+
+    const payload = { property: { address: "25 Shared Webhook Way", state: "MO" } };
+    const [responseA, responseB] = await Promise.all([
+      POST(makeRequest(payload, ENZO_SECRET), makeContext(ENZO_SECRET)),
+      POST(makeRequest(payload, PPC_SECRET), makeContext(PPC_SECRET)),
+    ]);
+    expect(responseA.status).toBe(200);
+    expect(responseB.status).toBe(200);
+    const [bodyA, bodyB] = await Promise.all([
+      responseA.json() as Promise<{ property_id: string; was_duplicate: boolean }>,
+      responseB.json() as Promise<{ property_id: string; was_duplicate: boolean }>,
+    ]);
+    expect(bodyA.property_id).not.toBe(bodyB.property_id);
+    expect(bodyA.was_duplicate).toBe(false);
+    expect(bodyB.was_duplicate).toBe(false);
+
+    const { data: rows } = await testClient
+      .from("properties")
+      .select("id, org_id")
+      .in("id", [bodyA.property_id, bodyB.property_id]);
+    expect(rows).toEqual(expect.arrayContaining([
+      { id: bodyA.property_id, org_id: ORG_ID },
+      { id: bodyB.property_id, org_id: OTHER_ORG_ID },
+    ]));
+  });
+
   it("stamps last_used_at on the consumer row after a successful call", async () => {
     const consumerId = await seedConsumer({
       name: "Enzo",
@@ -327,5 +371,64 @@ describe("POST /api/webhooks/leads/[secret] (per-consumer auth)", () => {
     };
     expect(secondJson.property_id).toBe(firstJson.property_id);
     expect(secondJson.was_duplicate).toBe(true);
+  });
+
+  it("concurrent duplicate submissions leave one complete lead and a later webhook retry stays idempotent", async () => {
+    await seedConsumer({
+      name: "Enzo",
+      secret: ENZO_SECRET,
+      defaultSource: "cold_call",
+    });
+    const address = "101 Concurrent Webhook St";
+    const payloads = [
+      {
+        property: { address, state: "MO" },
+        contact: { first_name: "First", last_name: "Caller" },
+      },
+      {
+        property: { address, state: "MO" },
+        contact: { first_name: "Second", last_name: "Caller" },
+      },
+    ];
+
+    const concurrent = await Promise.all(
+      payloads.map((payload) =>
+        POST(makeRequest(payload, ENZO_SECRET), makeContext(ENZO_SECRET)),
+      ),
+    );
+    expect(concurrent.map((response) => response.status)).toEqual([200, 200]);
+    const bodies = await Promise.all(
+      concurrent.map(
+        (response) =>
+          response.json() as Promise<{
+            property_id: string;
+            was_duplicate: boolean;
+          }>,
+      ),
+    );
+    expect(new Set(bodies.map((body) => body.property_id)).size).toBe(1);
+    expect(bodies.filter((body) => body.was_duplicate)).toHaveLength(1);
+
+    const retry = await POST(
+      makeRequest(payloads[1], ENZO_SECRET),
+      makeContext(ENZO_SECRET),
+    );
+    expect(retry.status).toBe(200);
+    expect(await retry.json()).toEqual(
+      expect.objectContaining({
+        property_id: bodies[0].property_id,
+        was_duplicate: true,
+      }),
+    );
+
+    const [{ count: propertyCount }, { count: contactCount }] = await Promise.all([
+      testClient
+        .from("properties")
+        .select("*", { count: "exact", head: true })
+        .eq("address", address),
+      testClient.from("contacts").select("*", { count: "exact", head: true }),
+    ]);
+    expect(propertyCount).toBe(1);
+    expect(contactCount).toBe(1);
   });
 });

@@ -24,17 +24,17 @@ const MODES: Array<{
 }> = [
   {
     id: "add",
-    title: "Add Data",
+    title: "Add new Prospects",
     description:
-      "Import a fresh CSV of new leads. Creates new properties and contacts. (The original wizard.)",
+      "Bring a new file of properties into Sandra. New addresses become Prospects; addresses Sandra already has are matched, not duplicated. Nothing already in Sandra is changed.",
     icon: DatabaseIcon,
     testId: "mode-add",
   },
   {
     id: "update",
-    title: "Update Data",
+    title: "Update existing records",
     description:
-      "Push changes from a spreadsheet onto existing properties — status, tags, motivation, phones, emails. Matched by property address.",
+      "Change records Sandra already has. Creates nothing new. Rows that don't match an existing record are skipped and reported.",
     icon: PencilIcon,
     testId: "mode-update",
   },
@@ -44,7 +44,7 @@ export function StepMode({ state, dispatch }: Props) {
   return (
     <Card>
       <CardHeader>
-        <CardTitle>What are you importing?</CardTitle>
+        <CardTitle>Choose an operation</CardTitle>
         <CardDescription>
           Pick a mode. You can change it by clicking Back.
         </CardDescription>

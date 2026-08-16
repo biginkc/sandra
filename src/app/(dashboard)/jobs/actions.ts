@@ -4,12 +4,49 @@ import { after } from "next/server";
 import { start } from "workflow/api";
 
 import { isAdminEmail } from "@/lib/auth/allowlist";
-import { createCassChildJob } from "@/lib/enrichment/cass-job";
+import {
+  claimAuthorizedCassJobStart,
+  createCassChildJob,
+  failAuthorizedCassJobStart,
+} from "@/lib/enrichment/cass-job";
 import { cassBulkWorkflow } from "@/workflows/cass-bulk";
 import { errFromUnknown, ok, type Result } from "@/lib/errors/result";
 import { reportError } from "@/lib/errors/report";
+import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
 import { skipTraceSubmitWorkflow } from "@/workflows/skip-trace-submit";
+
+const JOB_ITEM_PAGE_SIZE = 500;
+
+async function readFailedJobItems(
+  supabase: Awaited<ReturnType<typeof createClient>>,
+  jobId: string,
+): Promise<Array<{ id: string; property_id: string | null; error_class: string | null }>> {
+  const rows: Array<{
+    id: string;
+    property_id: string | null;
+    error_class: string | null;
+  }> = [];
+  let lastId: string | null = null;
+  for (;;) {
+    let query = supabase
+      .from("job_items")
+      .select("id, property_id, error_class")
+      .eq("job_id", jobId)
+      .eq("status", "error")
+      .not("property_id", "is", null)
+      .order("id", { ascending: true })
+      .limit(JOB_ITEM_PAGE_SIZE);
+    if (lastId) query = query.gt("id", lastId);
+    const { data, error } = await query;
+    if (error) throw new Error(`job item recovery read failed: ${error.message}`);
+    rows.push(...(data ?? []));
+    if (!data || data.length < JOB_ITEM_PAGE_SIZE) break;
+    lastId = data.at(-1)?.id ?? null;
+    if (!lastId) throw new Error("job item recovery page had no cursor");
+  }
+  return rows;
+}
 
 /**
  * Start a CASS child job that the import autotrigger deliberately parked in
@@ -29,7 +66,7 @@ export async function startQueuedCassJob(
 
     const { data: job, error: fetchError } = await supabase
       .from("jobs")
-      .select("id, type, status, input_params, total_items")
+      .select("id, org_id, type, status, input_params, total_items")
       .eq("id", jobId)
       .maybeSingle();
 
@@ -83,27 +120,19 @@ export async function startQueuedCassJob(
       };
     }
 
-    // Flip to running BEFORE scheduling the worker so the UI's Realtime
-    // subscription shows the transition immediately — avoids a stale
-    // "queued" flash while after() spins up.
-    const { error: flipError } = await supabase
-      .from("jobs")
-      .update({
-        status: "running",
-        started_at: new Date().toISOString(),
-        worker_heartbeat_at: new Date().toISOString(),
-        // Clear the awaiting_manual_start flag so the UI stops offering a
-        // Start button — matches the semantic "it's running now".
-        result_summary: null,
-      })
-      .eq("id", jobId)
-      .eq("status", "queued");
-    if (flipError) {
+    let claimToken: string;
+    try {
+      claimToken = await claimAuthorizedCassJobStart(supabase, {
+        jobId,
+        orgId: job.org_id,
+      });
+    } catch (claimError) {
       return {
         ok: false,
         error: {
           code: "JOB_STATUS_FLIP_FAILED",
-          message: flipError.message,
+          message:
+            claimError instanceof Error ? claimError.message : String(claimError),
         },
       };
     }
@@ -113,21 +142,18 @@ export async function startQueuedCassJob(
     // exactly the size class that dies at the 5-minute function ceiling.
     after(async () => {
       try {
-        await start(cassBulkWorkflow, [{ jobId }]);
+        await start(cassBulkWorkflow, [{ jobId, claimToken }]);
       } catch (e) {
         reportError(e, {
           tags: { surface: "start_queued_cass_workflow_start" },
           extra: { jobId },
         });
-        await supabase
-          .from("jobs")
-          .update({
-            status: "failed",
-            error_class: "database",
-            error_message: e instanceof Error ? e.message : String(e),
-            completed_at: new Date().toISOString(),
-          })
-          .eq("id", jobId);
+        await failAuthorizedCassJobStart(supabase, {
+          jobId,
+          orgId: job.org_id,
+          claimToken,
+          error: e,
+        });
       }
     });
 
@@ -165,7 +191,7 @@ export async function retryFailedCassItems(
 
     const { data: parent, error: parentErr } = await supabase
       .from("jobs")
-      .select("id, type, parent_job_id, related_import_id, created_by")
+      .select("id, org_id, type, parent_job_id, related_import_id, created_by")
       .eq("id", failedJobId)
       .maybeSingle();
 
@@ -191,23 +217,12 @@ export async function retryFailedCassItems(
       };
     }
 
-    const { data: failedItems, error: itemsErr } = await supabase
-      .from("job_items")
-      .select("property_id")
-      .eq("job_id", failedJobId)
-      .eq("status", "error")
-      .not("property_id", "is", null);
-
-    if (itemsErr) {
-      return {
-        ok: false,
-        error: { code: "JOB_ITEMS_FETCH_FAILED", message: itemsErr.message },
-      };
-    }
+    const failedItems = await readFailedJobItems(supabase, failedJobId);
 
     const propertyIds = Array.from(
       new Set(
-        (failedItems ?? [])
+        failedItems
+          .filter((row) => row.error_class !== "submission_unknown")
           .map((r) => r.property_id)
           .filter((id): id is string => typeof id === "string"),
       ),
@@ -223,35 +238,40 @@ export async function retryFailedCassItems(
       };
     }
 
-    const childId = await createCassChildJob(supabase, {
+    const child = await createCassChildJob(supabase, {
       // Chain the retry off whichever parent the failed job had — that
       // keeps the import thread visible end-to-end on /jobs.
       parentJobId: parent.parent_job_id ?? failedJobId,
       relatedImportId: parent.related_import_id,
       createdBy: parent.created_by,
+      orgId: parent.org_id,
       propertyIds,
       autoStart: true,
+      sourceJobId: failedJobId,
+      requestKey: failedJobId,
     });
+    const childId = child.jobId;
+    const claimToken = child.claimToken;
+    if (!claimToken || child.status !== "running") {
+      return ok({ total: propertyIds.length, childJobId: childId });
+    }
 
     // Chunked workflow — retry sets after a mass failure can be as large
     // as the original job, so the inline path's 5-minute ceiling applies.
     after(async () => {
       try {
-        await start(cassBulkWorkflow, [{ jobId: childId }]);
+        await start(cassBulkWorkflow, [{ jobId: childId, claimToken }]);
       } catch (e) {
         reportError(e, {
           tags: { surface: "retry_failed_cass_workflow_start" },
           extra: { childId, propertyCount: propertyIds.length },
         });
-        await supabase
-          .from("jobs")
-          .update({
-            status: "failed",
-            error_class: "database",
-            error_message: e instanceof Error ? e.message : String(e),
-            completed_at: new Date().toISOString(),
-          })
-          .eq("id", childId);
+        await failAuthorizedCassJobStart(supabase, {
+          jobId: childId,
+          orgId: parent.org_id,
+          claimToken,
+          error: e,
+        });
       }
     });
 
@@ -301,7 +321,9 @@ export async function retryFailedSkipTraceItems(
 
     const { data: parent, error: parentErr } = await supabase
       .from("jobs")
-      .select("id, type, status, org_id, created_by, input_params")
+      .select(
+        "id, type, status, org_id, created_by, input_params, result_summary, provider_run_id, error_class",
+      )
       .eq("id", failedJobId)
       .maybeSingle();
     if (parentErr) {
@@ -335,35 +357,6 @@ export async function retryFailedSkipTraceItems(
       };
     }
 
-    // Concurrency guard — refuse if a child of this job is already
-    // queued or running. Prevents accidental double-charges from
-    // multi-tab clicks or stale dialogs.
-    const { data: inFlight, error: inFlightErr } = await supabase
-      .from("jobs")
-      .select("id")
-      .eq("parent_job_id", failedJobId)
-      .in("status", ["queued", "running"])
-      .limit(1)
-      .maybeSingle();
-    if (inFlightErr) {
-      return {
-        ok: false,
-        error: {
-          code: "JOB_FETCH_FAILED",
-          message: inFlightErr.message,
-        },
-      };
-    }
-    if (inFlight) {
-      return {
-        ok: false,
-        error: {
-          code: "RETRY_IN_FLIGHT",
-          message: "A retry is already running for this job.",
-        },
-      };
-    }
-
     // Resolution: retryable errored job_items first, then input_params
     // fallback. "Retryable" = error_class that could plausibly succeed
     // on a fresh provider call. `provider_no_data` is terminal (verified
@@ -381,26 +374,15 @@ export async function retryFailedSkipTraceItems(
       "internal",
       "transient",
     ];
-    const { data: erroredItems, error: itemsErr } = await supabase
-      .from("job_items")
-      .select("property_id, error_class")
-      .eq("job_id", failedJobId)
-      .eq("status", "error")
-      .not("property_id", "is", null);
-    if (itemsErr) {
-      return {
-        ok: false,
-        error: { code: "JOB_ITEMS_FETCH_FAILED", message: itemsErr.message },
-      };
-    }
+    const erroredItems = await readFailedJobItems(supabase, failedJobId);
 
     const allErroredIds = new Set(
-      (erroredItems ?? [])
+      erroredItems
         .map((r) => r.property_id)
         .filter((id): id is string => typeof id === "string"),
     );
     const retryableIds = new Set(
-      (erroredItems ?? [])
+      erroredItems
         .filter((r) =>
           r.error_class === null ||
           RETRYABLE_ERROR_CLASSES.includes(r.error_class as string),
@@ -425,6 +407,25 @@ export async function retryFailedSkipTraceItems(
       }
     } else {
       // No items at all — pre-#59 fallback. Use input_params.
+      const inputParams =
+        (parent.input_params as Record<string, unknown> | null) ?? {};
+      const resultSummary =
+        (parent.result_summary as Record<string, unknown> | null) ?? {};
+      const hasModernSubmissionProvenance =
+        typeof inputParams.submission_attempt_token === "string" ||
+        typeof resultSummary.submit_phase === "string" ||
+        typeof parent.provider_run_id === "string" ||
+        parent.error_class === "submission_unknown";
+      if (hasModernSubmissionProvenance) {
+        return {
+          ok: false,
+          error: {
+            code: "MANUAL_RECONCILIATION_REQUIRED",
+            message:
+              "This provider submission has modern recovery markers but no item ledger. Review the provider outcome manually; retry was not started.",
+          },
+        };
+      }
       const fallback = (parent.input_params as { property_ids?: unknown } | null)
         ?.property_ids;
       propertyIds = Array.isArray(fallback)
@@ -448,22 +449,11 @@ export async function retryFailedSkipTraceItems(
       }
     }
 
-    const { data: childRow, error: insertErr } = await supabase
-      .from("jobs")
-      .insert({
-        type: "skip_trace",
-        provider: "tracerfy",
-        status: "queued",
-        org_id: parent.org_id,
-        parent_job_id: failedJobId,
-        created_by: user?.id ?? parent.created_by,
-        total_items: propertyIds.length,
-        title: `Retry skip-trace ${propertyIds.length} propert${propertyIds.length === 1 ? "y" : "ies"}`,
-        description: `Retry of ${failedJobId.slice(0, 8)} by ${user?.email ?? "admin"}`,
-        input_params: { property_ids: propertyIds },
-      })
-      .select("id")
-      .single();
+    const { data: childRows, error: insertErr } = await createAdminClient().rpc(
+      "create_skip_trace_retry_job",
+      { p_parent_job_id: failedJobId, p_property_ids: propertyIds },
+    );
+    const childRow = childRows?.[0];
     if (insertErr || !childRow) {
       return {
         ok: false,
@@ -474,16 +464,20 @@ export async function retryFailedSkipTraceItems(
       };
     }
 
-    try {
-      await start(skipTraceSubmitWorkflow, [{ jobId: childRow.id }]);
-    } catch (e) {
-      reportError(e, {
-        tags: { surface: "retry_skip_trace_workflow_start" },
-        extra: { childId: childRow.id, propertyCount: propertyIds.length },
-      });
+    if (childRow.created) {
+      try {
+        await start(skipTraceSubmitWorkflow, [
+          { jobId: childRow.job_id, orgId: parent.org_id },
+        ]);
+      } catch (e) {
+        reportError(e, {
+          tags: { surface: "retry_skip_trace_workflow_start" },
+          extra: { childId: childRow.job_id, propertyCount: propertyIds.length },
+        });
+      }
     }
 
-    return ok({ total: propertyIds.length, childJobId: childRow.id });
+    return ok({ total: propertyIds.length, childJobId: childRow.job_id });
   } catch (e) {
     reportError(e, {
       tags: { surface: "retry_skip_trace" },

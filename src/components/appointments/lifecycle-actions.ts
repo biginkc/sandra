@@ -4,6 +4,7 @@ import { revalidatePath } from "next/cache";
 import { after } from "next/server";
 
 import { errFromUnknown, err, type Result } from "@/lib/errors/result";
+import { assertAppointmentTaskPropertyDncUnlocked } from "@/lib/dnc/property-lock";
 import { reportError } from "@/lib/errors/report";
 import {
   cancelAppointment,
@@ -151,6 +152,8 @@ export async function completeAppointmentAction(
       data: { user },
     } = await supabase.auth.getUser();
     if (!user) return err({ code: "UNAUTHENTICATED", message: "Not signed in" });
+    const unlocked = await assertAppointmentTaskPropertyDncUnlocked(supabase, taskId);
+    if (!unlocked.ok) return unlocked;
 
     const result = await completeAppointment(supabase, taskId, outcome);
     if (!result.ok) return result;
@@ -183,6 +186,8 @@ export async function cancelAppointmentAction(
     // Read before the RPC closes the row — cancel doesn't change linkage,
     // but reading after would work identically; before is cheaper (one
     // fewer round trip when the RPC itself fails).
+    const unlocked = await assertAppointmentTaskPropertyDncUnlocked(supabase, taskId);
+    if (!unlocked.ok) return unlocked;
     const task = await loadTaskForNotification(supabase, taskId);
 
     const result = await cancelAppointment(supabase, taskId);
@@ -252,6 +257,8 @@ export async function rescheduleAppointmentAction(
     } = await supabase.auth.getUser();
     if (!user) return err({ code: "UNAUTHENTICATED", message: "Not signed in" });
 
+    const unlocked = await assertAppointmentTaskPropertyDncUnlocked(supabase, input.taskId);
+    if (!unlocked.ok) return unlocked;
     const task = await loadTaskForNotification(supabase, input.taskId);
 
     const result = await rescheduleAppointment(supabase, {
@@ -291,6 +298,8 @@ export async function reassignAppointmentAction(
       data: { user },
     } = await supabase.auth.getUser();
     if (!user) return err({ code: "UNAUTHENTICATED", message: "Not signed in" });
+    const unlocked = await assertAppointmentTaskPropertyDncUnlocked(supabase, taskId);
+    if (!unlocked.ok) return unlocked;
 
     const result = await reassignAppointment(supabase, taskId, newAssigneeId, idempotencyKey);
     if (!result.ok) return result;

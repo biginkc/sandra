@@ -3,6 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const {
   afterCallbacks,
   afterMock,
+  assertContactDncUnlocked,
+  assertPropertyDncUnlocked,
   createAdminClient,
   createClient,
   dispatchTaskAssigned,
@@ -17,6 +19,8 @@ const {
   afterMock: vi.fn((callback: () => Promise<void> | void) => {
     afterCallbacks.push(callback);
   }),
+  assertContactDncUnlocked: vi.fn(),
+  assertPropertyDncUnlocked: vi.fn(),
   createAdminClient: vi.fn(() => ({ __admin: true })),
   createClient: vi.fn(),
   dispatchTaskAssigned: vi.fn(),
@@ -33,6 +37,10 @@ const {
 }));
 
 vi.mock("@/lib/supabase/server", () => ({ createClient }));
+vi.mock("@/lib/dnc/property-lock", () => ({
+  assertContactDncUnlocked,
+  assertPropertyDncUnlocked,
+}));
 vi.mock("@/lib/supabase/admin", () => ({ createAdminClient }));
 vi.mock("@/lib/errors/report", () => ({ reportError: vi.fn() }));
 vi.mock("next/cache", () => ({ revalidatePath }));
@@ -138,6 +146,8 @@ const VALID_INPUT = {
 };
 
 beforeEach(() => {
+  assertContactDncUnlocked.mockResolvedValue({ ok: true, data: null });
+  assertPropertyDncUnlocked.mockResolvedValue({ ok: true, data: null });
   requireOrgMembershipByResource.mockResolvedValue({
     userId: "user-1",
     orgId: "org-1",
@@ -148,6 +158,47 @@ beforeEach(() => {
     userId: "user-1",
     orgId: "org-1",
     role: "member",
+  });
+});
+
+describe("bookAppointment — permanent DNC", () => {
+  it("rejects a stale forged booking before the appointment RPC", async () => {
+    const supabase = makeSupabaseMock({ userId: "user-1" });
+    createClient.mockResolvedValue(supabase);
+    assertPropertyDncUnlocked.mockResolvedValueOnce({
+      ok: false,
+      error: { code: "DNC_LOCKED", message: "Permanently locked" },
+    });
+
+    const result = await bookAppointment(VALID_INPUT);
+
+    expect(result).toMatchObject({ ok: false, error: { code: "DNC_LOCKED" } });
+    expect(supabase.rpc).not.toHaveBeenCalledWith(
+      "fn_book_appointment",
+      expect.anything(),
+    );
+  });
+
+  it("rejects a contact-only booking when the contact or a linked property is locked", async () => {
+    const supabase = makeSupabaseMock({ userId: "user-1" });
+    createClient.mockResolvedValue(supabase);
+    assertContactDncUnlocked.mockResolvedValueOnce({
+      ok: false,
+      error: { code: "DNC_LOCKED", message: "Permanently locked" },
+    });
+
+    const result = await bookAppointment({
+      ...VALID_INPUT,
+      propertyId: undefined,
+      contactId: "contact-1",
+    });
+
+    expect(result).toMatchObject({ ok: false, error: { code: "DNC_LOCKED" } });
+    expect(assertContactDncUnlocked).toHaveBeenCalledWith(supabase, "contact-1");
+    expect(supabase.rpc).not.toHaveBeenCalledWith(
+      "fn_book_appointment",
+      expect.anything(),
+    );
   });
 });
 

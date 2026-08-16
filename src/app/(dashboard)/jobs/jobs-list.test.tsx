@@ -339,4 +339,26 @@ describe("<JobsList />", () => {
     });
     expect(approveSkipTraceJob).not.toHaveBeenCalled();
   });
+
+  it("offers CASS retry only for retryable rows and labels manual review separately", async () => {
+    await renderJobs({
+      jobs: [
+        makeJob({
+          id: "cass-recovery",
+          type: "cass_dsf2_ncoa",
+          status: "partial",
+          failed_items: 5,
+          result_summary: {
+            retryableFailures: 2,
+            manualReconciliation: 3,
+            savedResultFailures: 1,
+          },
+        }),
+      ],
+    });
+
+    expect(screen.getByText(/2 retryable/)).toBeInTheDocument();
+    expect(screen.getByText(/3 needs review/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Retry 2 failed" })).toBeVisible();
+  });
 });

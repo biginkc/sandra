@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const {
   afterCallbacks,
   afterMock,
+  assertPropertyDncUnlocked,
   createAdminClient,
   createClient,
   createTask,
@@ -11,11 +12,13 @@ const {
   dispatchTaskCalendarEvent,
   loadIntegrationPrefs,
   revalidatePath,
+  validateActiveAssigneeForProperties,
 } = vi.hoisted(() => ({
     afterCallbacks: [] as Array<() => Promise<void> | void>,
     afterMock: vi.fn((callback: () => Promise<void> | void) => {
       afterCallbacks.push(callback);
     }),
+    assertPropertyDncUnlocked: vi.fn(),
     createAdminClient: vi.fn(),
     createClient: vi.fn(),
     createTask: vi.fn(),
@@ -28,10 +31,20 @@ const {
       timezone: "America/Chicago",
     })),
     revalidatePath: vi.fn(),
+    validateActiveAssigneeForProperties: vi.fn(),
   }));
 
 vi.mock("@/lib/supabase/server", () => ({
   createClient,
+}));
+
+vi.mock("@/lib/dnc/property-lock", () => ({
+  assertPropertyDncUnlocked,
+  DNC_LOCKED_MESSAGE: "This property is permanently locked Do Not Contact and is read-only.",
+  partitionPropertyDncLocks: vi.fn(async (_client, ids: string[]) => ({
+    ok: true,
+    data: { unlocked: ids, locked: [], missing: [] },
+  })),
 }));
 
 vi.mock("@/lib/supabase/admin", () => ({
@@ -75,7 +88,17 @@ vi.mock("@/lib/tasks", async (importOriginal) => {
   };
 });
 
-import { addPropertiesToListBulk, createLeadTaskAction, listOrgUsers } from "./actions";
+vi.mock("./assignment-safety", () => ({ validateActiveAssigneeForProperties }));
+
+import {
+  addPropertiesToListBulk,
+  assignLeadsBulk,
+  createLeadTaskAction,
+  listOrgUsers,
+  markMessagesReadForThread,
+  updatePropertyStatus,
+  updateLeadAssignee,
+} from "./actions";
 
 type StubResult<T> = {
   data: T | null;
@@ -130,6 +153,8 @@ function makeSupabase(opts: {
 
 beforeEach(() => {
   afterCallbacks.length = 0;
+  assertPropertyDncUnlocked.mockReset();
+  assertPropertyDncUnlocked.mockResolvedValue({ ok: true, data: null });
   createClient.mockReset();
   createAdminClient.mockReset();
   createTask.mockReset();
@@ -143,12 +168,249 @@ beforeEach(() => {
     timezone: "America/Chicago",
   });
   revalidatePath.mockReset();
+  validateActiveAssigneeForProperties.mockReset();
+  validateActiveAssigneeForProperties.mockResolvedValue({
+    ok: true,
+    propertyOrgIds: new Map([["property-1", "org-1"]]),
+  });
   vi.stubEnv("NEXT_PUBLIC_APP_URL", "https://app.test");
 });
 
 afterEach(() => {
   vi.clearAllMocks();
   vi.unstubAllEnvs();
+});
+
+describe("lead assignment membership gate", () => {
+  it("rejects a forged single-lead assignee before writing", async () => {
+    const supabase = { from: vi.fn() };
+    createClient.mockResolvedValue(supabase);
+    validateActiveAssigneeForProperties.mockResolvedValueOnce({
+      ok: false,
+      code: "INVALID_ASSIGNEE",
+      message: "Choose an active teammate.",
+    });
+
+    const result = await updateLeadAssignee("property-1", "forged-user");
+
+    expect(result).toMatchObject({ ok: false, error: { code: "INVALID_ASSIGNEE" } });
+    expect(supabase.from).not.toHaveBeenCalled();
+  });
+
+  it("rejects a mixed-org bulk assignee before any update or notification", async () => {
+    const supabase = { from: vi.fn(), auth: { getUser: vi.fn() } };
+    createClient.mockResolvedValue(supabase);
+    validateActiveAssigneeForProperties.mockResolvedValueOnce({
+      ok: false,
+      code: "INVALID_ASSIGNEE",
+      message: "Target is not active in every workspace.",
+    });
+
+    const result = await assignLeadsBulk(["property-a", "property-b"], "stale-user");
+
+    expect(result).toMatchObject({ ok: false, error: { code: "INVALID_ASSIGNEE" } });
+    expect(supabase.from).not.toHaveBeenCalled();
+    expect(supabase.auth.getUser).not.toHaveBeenCalled();
+  });
+});
+
+describe("markMessagesReadForThread — permanent DNC", () => {
+  const conversationId = "11111111-1111-4111-8111-111111111111";
+
+  function readThreadClient(propertyIds: Array<string | null>) {
+    let call = 0;
+    const from = vi.fn(() => {
+      call += 1;
+      const result = Promise.resolve({
+        data:
+          call === 1
+            ? propertyIds.map((property_id) => ({ property_id }))
+            : null,
+        error: null,
+      });
+      const builder: Record<string, unknown> = {};
+      const chain = () => builder;
+      for (const method of ["select", "eq", "not", "update", "is"]) {
+        builder[method] = chain;
+      }
+      builder.then = result.then.bind(result);
+      return builder;
+    });
+    return { from };
+  }
+
+  it("rejects a locked conversation before changing read state", async () => {
+    const supabase = readThreadClient(["locked-property"]);
+    createClient.mockResolvedValue(supabase);
+    assertPropertyDncUnlocked.mockResolvedValueOnce({
+      ok: false,
+      error: { code: "DNC_LOCKED", message: "Permanently locked" },
+    });
+
+    const result = await markMessagesReadForThread(conversationId);
+
+    expect(result).toMatchObject({ ok: false, error: { code: "DNC_LOCKED" } });
+    expect(supabase.from).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects a mixed conversation when any linked property is locked", async () => {
+    const supabase = readThreadClient(["open-property", "locked-property"]);
+    createClient.mockResolvedValue(supabase);
+    assertPropertyDncUnlocked
+      .mockResolvedValueOnce({ ok: true, data: null })
+      .mockResolvedValueOnce({
+        ok: false,
+        error: { code: "DNC_LOCKED", message: "Permanently locked" },
+      });
+
+    const result = await markMessagesReadForThread(conversationId);
+
+    expect(result).toMatchObject({ ok: false, error: { code: "DNC_LOCKED" } });
+    expect(assertPropertyDncUnlocked).toHaveBeenCalledTimes(2);
+    expect(supabase.from).toHaveBeenCalledTimes(1);
+  });
+
+  it("still marks an unlinked conversation read", async () => {
+    const supabase = readThreadClient([null]);
+    createClient.mockResolvedValue(supabase);
+
+    await expect(markMessagesReadForThread(conversationId)).resolves.toEqual({
+      ok: true,
+      data: null,
+    });
+    expect(assertPropertyDncUnlocked).not.toHaveBeenCalled();
+    expect(supabase.from).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("updatePropertyStatus", () => {
+  function mockStatusUpdate(
+    result: StubResult<{ id: string; status: string }>,
+    currentResult: StubResult<{ id: string; status: string }> = {
+      data: null,
+      error: null,
+    },
+  ) {
+    const maybeSingle = vi.fn().mockResolvedValue(result);
+    const select = vi.fn(() => ({ maybeSingle }));
+    const builder = { eq: vi.fn(), select };
+    builder.eq.mockReturnValue(builder);
+    const update = vi.fn(() => builder);
+    const currentMaybeSingle = vi.fn().mockResolvedValue(currentResult);
+    const currentBuilder = { eq: vi.fn(), maybeSingle: currentMaybeSingle };
+    currentBuilder.eq.mockReturnValue(currentBuilder);
+    const currentSelect = vi.fn(() => currentBuilder);
+    createClient.mockResolvedValue({
+      from: vi.fn(() => ({ update, select: currentSelect })),
+    });
+    return {
+      update,
+      eq: builder.eq,
+      select,
+      maybeSingle,
+      currentSelect,
+      currentMaybeSingle,
+    };
+  }
+
+  it("rejects a forged stage move when the property became permanently DNC", async () => {
+    const chain = mockStatusUpdate({ data: null, error: null });
+    assertPropertyDncUnlocked.mockResolvedValueOnce({
+      ok: false,
+      error: {
+        code: "DNC_LOCKED",
+        message: "This property is permanently locked Do Not Contact and is read-only.",
+      },
+    });
+
+    const result = await updatePropertyStatus(
+      "property-1",
+      "contacted",
+      "new_lead",
+    );
+
+    expect(result).toMatchObject({ ok: false, error: { code: "DNC_LOCKED" } });
+    expect(chain.update).not.toHaveBeenCalled();
+  });
+
+  it("returns the persisted row only after the selected status is read back", async () => {
+    const chain = mockStatusUpdate({
+      data: { id: "property-1", status: "contacted" },
+      error: null,
+    });
+
+    const result = await updatePropertyStatus(
+      "property-1",
+      "contacted",
+      "new_lead",
+    );
+
+    expect(result).toEqual({
+      ok: true,
+      data: { propertyId: "property-1", status: "contacted" },
+    });
+    expect(chain.update).toHaveBeenCalledWith(
+      expect.objectContaining({ status: "contacted" }),
+    );
+    expect(chain.eq).toHaveBeenCalledWith("id", "property-1");
+    expect(chain.eq).toHaveBeenCalledWith("status", "new_lead");
+    expect(chain.select).toHaveBeenCalledWith("id, status");
+  });
+
+  it("returns the authoritative current stage when a stale update matched no row", async () => {
+    mockStatusUpdate(
+      { data: null, error: null },
+      { data: { id: "property-1", status: "interested" }, error: null },
+    );
+
+    const result = await updatePropertyStatus(
+      "property-1",
+      "contacted",
+      "new_lead",
+    );
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe("STATUS_CONFLICT");
+      expect(result.error.details).toEqual({ currentStatus: "interested" });
+    }
+  });
+
+  it("fails when the persisted read-back does not match the requested stage", async () => {
+    mockStatusUpdate({
+      data: { id: "property-1", status: "new_lead" },
+      error: null,
+    });
+
+    const result = await updatePropertyStatus(
+      "property-1",
+      "contacted",
+      "new_lead",
+    );
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe("STATUS_UPDATE_NOT_SAVED");
+    }
+  });
+
+  it("keeps a zero-row move idempotent when another client already saved the target", async () => {
+    mockStatusUpdate(
+      { data: null, error: null },
+      { data: { id: "property-1", status: "contacted" }, error: null },
+    );
+
+    const result = await updatePropertyStatus(
+      "property-1",
+      "contacted",
+      "new_lead",
+    );
+
+    expect(result).toEqual({
+      ok: true,
+      data: { propertyId: "property-1", status: "contacted" },
+    });
+  });
 });
 
 describe("addPropertiesToListBulk", () => {

@@ -12,8 +12,15 @@ import {
   dispatchSkipTraceRequested,
 } from "@/lib/notifications/dispatch";
 import { createClient } from "@/lib/supabase/server";
+import type { Json } from "@/lib/supabase/types";
 import { skipTraceSubmitWorkflow } from "@/workflows/skip-trace-submit";
 
+import {
+  buildSkipTraceEligibilityAudit,
+  resolveSkipTraceEligibility,
+  skipTraceAudienceDescription,
+  skipTraceAudienceTitle,
+} from "./eligibility";
 import { getSkipTraceProvider } from "./registry";
 
 /** Max rows per single Tracefy POST. Their server rejects request
@@ -29,9 +36,7 @@ const PROVIDER_BATCH_MAX = 4_000;
 type SupabaseServerClient = Awaited<ReturnType<typeof createClient>>;
 
 export type SkipTraceCreditStatus =
-  | "sufficient"
-  | "insufficient"
-  | "unavailable";
+  "sufficient" | "insufficient" | "unavailable";
 
 export type SkipTracePreflight = {
   requested: number;
@@ -129,7 +134,8 @@ async function buildSkipTracePreflight(
     tracefyCreditsRequired: required,
     tracefyCreditsAvailable: creditState.available,
     tracefyCreditStatus: creditState.status,
-    canLaunchSkipTrace: allowed.length > 0 && creditState.status === "sufficient",
+    canLaunchSkipTrace:
+      allowed.length > 0 && creditState.status === "sufficient",
     estimatedCassVerificationCostUsd:
       cassVerificationCandidates.length * CASS_COST_PER_LOOKUP_USD,
     cassVerificationPropertyIds: cassVerificationCandidates.map((p) => p.id),
@@ -186,10 +192,11 @@ async function requireTracefyCredits(
 
 async function startSkipTraceSubmitWorkflow(
   jobId: string,
+  orgId: string,
   surface: string,
 ): Promise<boolean> {
   try {
-    await start(skipTraceSubmitWorkflow, [{ jobId }]);
+    await start(skipTraceSubmitWorkflow, [{ jobId, orgId }]);
     return true;
   } catch (e) {
     reportError(e, {
@@ -238,6 +245,23 @@ export type SkipTraceOutcome = {
   killSwitchSkipped: number;
 };
 
+export type SkipTraceApprovalOutcome = {
+  jobId: string;
+  status: "queued" | "canceled";
+  excluded: number;
+};
+
+function uniquePropertyIds(propertyIds: readonly string[]): string[] {
+  return [
+    ...new Set(
+      propertyIds.filter(
+        (propertyId): propertyId is string =>
+          typeof propertyId === "string" && propertyId.length > 0,
+      ),
+    ),
+  ];
+}
+
 export async function preflightSkipTrace(
   propertyIds: string[],
 ): Promise<Result<SkipTracePreflight>> {
@@ -260,7 +284,11 @@ export async function preflightSkipTrace(
       };
     }
 
-    return ok(publicPreflight(await buildSkipTracePreflight(supabase, propertyIds)));
+    return ok(
+      publicPreflight(
+        await buildSkipTracePreflight(supabase, uniquePropertyIds(propertyIds)),
+      ),
+    );
   } catch (e) {
     reportError(e, { tags: { surface: "preflight_skip_trace" } });
     return errFromUnknown(e, "PREFLIGHT_SKIP_TRACE_FAILED");
@@ -289,7 +317,8 @@ export async function requestSkipTrace(
       };
     }
 
-    const preflight = await buildSkipTracePreflight(supabase, propertyIds);
+    const requestedIds = uniquePropertyIds(propertyIds);
+    const preflight = await buildSkipTracePreflight(supabase, requestedIds);
     const killSwitchSkipped = preflight.killSwitchSkipped;
     const cassSkipped = preflight.cassVerificationPropertyIds.length;
     if (preflight.eligible === 0) {
@@ -302,7 +331,7 @@ export async function requestSkipTrace(
       return ok({
         jobId: null,
         status: "none_eligible",
-        requested: propertyIds.length,
+        requested: requestedIds.length,
         eligible: 0,
         cassSkipped,
         killSwitchSkipped,
@@ -336,9 +365,7 @@ export async function requestSkipTrace(
     // actually went to the vendor.
     const skipReasons: string[] = [];
     if (killSwitchSkipped > 0) {
-      skipReasons.push(
-        `${killSwitchSkipped} kill-switched`,
-      );
+      skipReasons.push(`${killSwitchSkipped} kill-switched`);
     }
     if (cassSkipped > 0) {
       skipReasons.push(
@@ -398,13 +425,14 @@ export async function requestSkipTrace(
       for (const jobId of jobIds) {
         await startSkipTraceSubmitWorkflow(
           jobId,
+          preflight.orgId,
           "skip_trace_request_workflow_start",
         );
       }
       return ok({
         jobId: jobIds[0],
         status: "queued",
-        requested: propertyIds.length,
+        requested: requestedIds.length,
         eligible: eligibleIds.length,
         cassSkipped,
         killSwitchSkipped,
@@ -431,7 +459,7 @@ export async function requestSkipTrace(
     return ok({
       jobId: jobIds[0],
       status: "pending_approval",
-      requested: propertyIds.length,
+      requested: requestedIds.length,
       eligible: eligibleIds.length,
       cassSkipped,
       killSwitchSkipped,
@@ -448,7 +476,7 @@ export async function requestSkipTrace(
  */
 export async function approveSkipTraceJob(
   jobId: string,
-): Promise<Result<{ jobId: string }>> {
+): Promise<Result<SkipTraceApprovalOutcome>> {
   try {
     const supabase = await createClient();
     const {
@@ -464,13 +492,25 @@ export async function approveSkipTraceJob(
       };
     }
 
-    const { data: job } = await supabase
+    const { data: job, error: jobError } = await supabase
       .from("jobs")
-      .select("id, status, total_items, input_params")
+      .select(
+        "id, org_id, status, total_items, title, description, input_params, result_summary",
+      )
       .eq("id", jobId)
+      .eq("type", "skip_trace")
       .maybeSingle();
+    if (jobError) {
+      return {
+        ok: false,
+        error: { code: "QUERY_FAILED", message: jobError.message },
+      };
+    }
     if (!job) {
-      return { ok: false, error: { code: "NOT_FOUND", message: "Job not found." } };
+      return {
+        ok: false,
+        error: { code: "NOT_FOUND", message: "Job not found." },
+      };
     }
     if (job.status !== "pending_approval") {
       return {
@@ -482,26 +522,94 @@ export async function approveSkipTraceJob(
       };
     }
 
-    const propertyIds = (job.input_params as { property_ids?: string[] } | null)
-      ?.property_ids;
-    if (!Array.isArray(propertyIds) || propertyIds.length === 0) {
+    const rawPropertyIds = (
+      job.input_params as { property_ids?: string[] } | null
+    )?.property_ids;
+    if (!Array.isArray(rawPropertyIds) || rawPropertyIds.length === 0) {
       return {
         ok: false,
         error: { code: "VALIDATION", message: "Job has no property ids." },
       };
     }
+    const propertyIds = uniquePropertyIds(rawPropertyIds);
 
-    const preflight = await buildSkipTracePreflight(supabase, propertyIds);
-    if (preflight.eligible !== propertyIds.length) {
-      return {
-        ok: false,
-        error: {
-          code: "SKIP_TRACE_PREFLIGHT_CHANGED",
-          message:
-            "This job no longer matches the current CASS/skip-trace eligibility. Re-run preflight before approving.",
-        },
-      };
+    const eligibility = await resolveSkipTraceEligibility(supabase, {
+      orgId: job.org_id,
+      propertyIds,
+    });
+    const audit = buildSkipTraceEligibilityAudit(
+      eligibility,
+      propertyIds.length,
+    );
+    const inputParams =
+      job.input_params &&
+      typeof job.input_params === "object" &&
+      !Array.isArray(job.input_params)
+        ? (job.input_params as Record<string, Json | undefined>)
+        : {};
+    const resultSummary =
+      job.result_summary &&
+      typeof job.result_summary === "object" &&
+      !Array.isArray(job.result_summary)
+        ? (job.result_summary as Record<string, Json | undefined>)
+        : {};
+    const nextInputParams = {
+      ...inputParams,
+      property_ids: eligibility.eligibleIds,
+      eligibility_exclusions: audit,
+    } as unknown as Json;
+    const nextResultSummary = {
+      ...resultSummary,
+      eligibility_exclusions: audit,
+    } as unknown as Json;
+
+    if (eligibility.eligibleIds.length === 0) {
+      const { data: canceledJob, error: cancelError } = await supabase
+        .from("jobs")
+        .update({
+          status: "canceled",
+          total_items: 0,
+          title: skipTraceAudienceTitle(job.title, 0, audit.total),
+          input_params: nextInputParams,
+          result_summary: nextResultSummary,
+          completed_at: new Date().toISOString(),
+          description: skipTraceAudienceDescription(
+            job.description,
+            0,
+            audit.total,
+          ),
+        })
+        .eq("id", jobId)
+        .eq("status", "pending_approval")
+        .is("provider_run_id", null)
+        .select("id")
+        .maybeSingle();
+      if (cancelError) {
+        return {
+          ok: false,
+          error: {
+            code: "APPROVE_SKIP_TRACE_FAILED",
+            message: cancelError.message,
+          },
+        };
+      }
+      if (!canceledJob) {
+        return {
+          ok: false,
+          error: {
+            code: "APPROVAL_ALREADY_CLAIMED",
+            message:
+              "This skip-trace job was already approved or is no longer pending.",
+          },
+        };
+      }
+      return ok({ jobId, status: "canceled", excluded: audit.total });
     }
+
+    const preflight = await buildSkipTracePreflight(
+      supabase,
+      eligibility.eligibleIds,
+    );
     const creditGate = await requireTracefyCredits(preflight);
     if (!creditGate.ok) return creditGate;
 
@@ -509,10 +617,23 @@ export async function approveSkipTraceJob(
       .from("jobs")
       .update({
         status: "queued",
-        description: `Approved by ${user?.email ?? "admin"}`,
+        total_items: eligibility.eligibleIds.length,
+        title: skipTraceAudienceTitle(
+          job.title,
+          eligibility.eligibleIds.length,
+          audit.total,
+        ),
+        input_params: nextInputParams,
+        result_summary: nextResultSummary,
+        description: skipTraceAudienceDescription(
+          `Approved by ${user?.email ?? "admin"}. ${job.description ?? ""}`.trim(),
+          eligibility.eligibleIds.length,
+          audit.total,
+        ),
       })
       .eq("id", jobId)
       .eq("status", "pending_approval")
+      .is("provider_run_id", null)
       .select("id")
       .maybeSingle();
     if (claimErr) {
@@ -529,17 +650,19 @@ export async function approveSkipTraceJob(
         ok: false,
         error: {
           code: "APPROVAL_ALREADY_CLAIMED",
-          message: "This skip-trace job was already approved or is no longer pending.",
+          message:
+            "This skip-trace job was already approved or is no longer pending.",
         },
       };
     }
 
     await startSkipTraceSubmitWorkflow(
       jobId,
+      job.org_id,
       "approve_skip_trace_workflow_start",
     );
 
-    return ok({ jobId });
+    return ok({ jobId, status: "queued", excluded: audit.total });
   } catch (e) {
     reportError(e, { tags: { surface: "approve_skip_trace_job" } });
     return errFromUnknown(e, "APPROVE_SKIP_TRACE_FAILED");
@@ -576,7 +699,10 @@ export async function denySkipTraceJob(
       .eq("id", jobId)
       .maybeSingle();
     if (!job) {
-      return { ok: false, error: { code: "NOT_FOUND", message: "Job not found." } };
+      return {
+        ok: false,
+        error: { code: "NOT_FOUND", message: "Job not found." },
+      };
     }
     if (job.status !== "pending_approval") {
       return {

@@ -24,6 +24,7 @@ import { detectVendor, getPresetById } from "@/lib/csv/presets";
 import type { VendorPresetId } from "@/lib/csv/presets/types";
 import { xlsxBufferToCsvFile } from "@/lib/csv/xlsx-to-csv-file";
 import { cn } from "@/lib/utils";
+import { LEAD_SOURCES } from "@/lib/leads/create";
 import {
   Select,
   SelectContent,
@@ -42,19 +43,23 @@ import type {
   WizardState,
 } from "../wizard";
 
-const SOURCES: { value: WizardSource; label: string }[] = [
-  { value: "dealmachine", label: "DealMachine" },
-  { value: "propstream", label: "PropStream" },
-  { value: "titlepro", label: "TitlePro / DataTree" },
-  { value: "reisift", label: "REISift / DealMachine Skipped" },
-  { value: "agent_outreach", label: "BMH Agent Outreach" },
-  { value: "driving_for_dollars", label: "Driving for dollars" },
-  { value: "referral", label: "Referral" },
-  { value: "cold_call", label: "Cold call" },
-  { value: "sms", label: "SMS (inbound)" },
-  { value: "web_form", label: "Web form" },
-  { value: "direct_mail", label: "Direct mail" },
-];
+const SOURCE_LABELS: Record<WizardSource, string> = {
+  dealmachine: "DealMachine",
+  propstream: "PropStream",
+  titlepro: "TitlePro / DataTree",
+  reisift: "REISift / DealMachine Skipped",
+  agent_outreach: "BMH Agent Outreach",
+  driving_for_dollars: "Driving for dollars",
+  referral: "Referral",
+  cold_call: "Cold call",
+  sms: "SMS (inbound)",
+  web_form: "Web form",
+  direct_mail: "Direct mail",
+};
+const SOURCES: { value: WizardSource; label: string }[] = LEAD_SOURCES.map((value) => ({
+  value,
+  label: SOURCE_LABELS[value],
+}));
 
 // The market dropdown was previously driven by a hardcoded MARKETS
 // array. Per phase 02 D-01, the counties table is the source of truth
@@ -95,7 +100,7 @@ export function StepUpload({ state, dispatch, counties }: Props) {
   const parseCsvString = (csvString: string, file: File) => {
     Papa.parse<Record<string, string>>(csvString, {
       header: true,
-      skipEmptyLines: "greedy",
+      skipEmptyLines: false,
       dynamicTyping: false,
       transformHeader: (h) => h.trim(),
       complete: (results) => {
@@ -104,11 +109,18 @@ export function StepUpload({ state, dispatch, counties }: Props) {
           toast.error("File has no headers — check the file and try again.");
           return;
         }
-        const rows = results.data.filter(
-          (r) =>
-            r && typeof r === "object" &&
-            Object.values(r).some((v) => v != null && String(v).trim() !== ""),
-        );
+        const rows = [...results.data];
+        // Papa emits one parser-sentinel row for a final newline. Remove
+        // only that sentinel; intentional empty records remain visible in
+        // Preflight and are conserved through the reviewed dataset.
+        const last = rows.at(-1);
+        if (
+          /\r?\n$/.test(csvString) &&
+          last &&
+          Object.values(last).every((value) => String(value ?? "").trim() === "")
+        ) {
+          rows.pop();
+        }
         dispatch({
           type: "FILE_PARSED",
           file,
@@ -155,9 +167,8 @@ export function StepUpload({ state, dispatch, counties }: Props) {
 
     if (file.size > HARD_BLOCK_BYTES) {
       toast.error(
-        `File too large (${(file.size / 1024 / 1024).toFixed(1)} MB). ` +
-          `Max ${HARD_BLOCK_BYTES / 1024 / 1024} MB in-browser — split into batches ` +
-          "or wait for the bulk-upload pipeline.",
+        `File too large (${Math.round(file.size / 1024 / 1024)} MB). ` +
+          `Max ${HARD_BLOCK_BYTES / 1024 / 1024} MB — split the export into batches. Nothing was uploaded.`,
       );
       return;
     }
@@ -199,9 +210,9 @@ export function StepUpload({ state, dispatch, counties }: Props) {
     <>
     <Card>
       <CardHeader>
-        <CardTitle>Upload CSV</CardTitle>
+        <CardTitle>Upload file</CardTitle>
         <CardDescription>
-          Pick your export. We&apos;ll auto-detect the source and clean it.{" "}
+          .csv or .xlsx, up to 50 MB. Files over 15 MB may take a moment to read.{" "}
           <button
             type="button"
             onClick={openHelpGeneric}
@@ -323,8 +334,6 @@ export function StepUpload({ state, dispatch, counties }: Props) {
           />
         )}
 
-        <PrecheckPanel state={state} dispatch={dispatch} />
-
         <div className="flex flex-col gap-2">
           <Label>Source</Label>
           <Select
@@ -344,6 +353,9 @@ export function StepUpload({ state, dispatch, counties }: Props) {
               ))}
             </SelectContent>
           </Select>
+          <p className="text-muted-foreground text-xs">
+            One approved list — unsupported values are flagged here, never at the end.
+          </p>
         </div>
 
         <div className="flex flex-col gap-2">
@@ -391,12 +403,8 @@ export function StepUpload({ state, dispatch, counties }: Props) {
             }
           />
           <p className="text-muted-foreground text-xs">
-            Every imported row — including duplicates we dedupe against
-            existing properties — gets added to this list. Re-importing the
-            same address into a different list is how you <em>stack</em>: a
-            property on Absentee + Pre-Foreclosure + Tired Landlord is a
-            stronger motivation signal than any one list. Search to pick an
-            existing list or type a new name to create one.
+            If a list is chosen, assignment is verified — a failure blocks
+            &apos;Completed&apos;, never fails silently.
           </p>
         </div>
       </CardContent>
@@ -429,6 +437,9 @@ export function StepUpload({ state, dispatch, counties }: Props) {
  * against the matched property. They're shown for awareness only and
  * surface again on the Review screen.
  */
+// Retained for Update-mode compatibility while Add mode uses the generalized
+// full Preflight step. It is intentionally not rendered in the Add flow.
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 function PrecheckPanel({
   state,
   dispatch,

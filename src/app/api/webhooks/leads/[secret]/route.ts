@@ -114,7 +114,7 @@ export async function POST(
   // revoked_at checks.
   const { data: consumer, error: lookupErr } = await supabase
     .from("webhook_consumers")
-    .select("id, name, default_source, enabled, revoked_at")
+    .select("id, org_id, name, default_source, enabled, revoked_at")
     .eq("secret_hash", secretHash)
     .eq("consumer_type", "lead")
     .maybeSingle();
@@ -180,6 +180,7 @@ export async function POST(
   }
 
   const result = await createLead(supabase, {
+    orgId: consumer.org_id,
     source: effectiveSource,
     property: {
       address: body.property.address ?? "",

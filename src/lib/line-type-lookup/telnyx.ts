@@ -1,5 +1,6 @@
 import { ConfigurationError } from "@/lib/errors/classes";
 import type { PhoneLineType } from "@/lib/messaging/line-type";
+export { TELNYX_LOOKUP_COST_USD } from "@/lib/provider-pricing";
 
 /**
  * Telnyx Number Lookup client. Docs:
@@ -19,10 +20,9 @@ const BASE_URL = "https://api.telnyx.com/v2/number_lookup";
 
 /** Telnyx carrier-type lookup price per number. Used for the wizard's
  *  cost estimate and the job-summary cost record. */
-export const TELNYX_LOOKUP_COST_USD = 0.003;
-
 const MAX_IN_FLIGHT = 5;
 const RETRY_BACKOFF_MS = 1_000;
+const NONTERMINAL_REJECTION_STATUSES = new Set([401, 402, 403, 408, 409]);
 
 type TelnyxLookupResponse = {
   data?: {
@@ -30,6 +30,26 @@ type TelnyxLookupResponse = {
     portability?: { line_type?: string | null } | null;
   };
 };
+
+export type TelnyxLookupOutcome =
+  | {
+      status: "completed";
+      lineType: PhoneLineType;
+      reason: "classified" | "definitive_unknown";
+      httpStatus: number;
+    }
+  | {
+      status: "retryable";
+      lineType: "unknown";
+      reason: "provider_rejected";
+      httpStatus: number;
+    }
+  | {
+      status: "ambiguous";
+      lineType: "unknown";
+      reason: "transport_unknown";
+      httpStatus: null;
+    };
 
 /**
  * Telnyx label → our vocabulary. VoIP maps to mobile deliberately:
@@ -67,7 +87,7 @@ export class TelnyxLineTypeLookup {
     const worker = async (): Promise<void> => {
       while (cursor < phoneNumbers.length) {
         const number = phoneNumbers[cursor++];
-        result.set(number, await this.classifyOne(number));
+        result.set(number, (await this.classifyOne(number)).lineType);
       }
     };
 
@@ -81,8 +101,13 @@ export class TelnyxLineTypeLookup {
     return result;
   }
 
-  /** One lookup, with a single retry on 429/5xx. Never throws. */
-  private async classifyOne(number: string): Promise<PhoneLineType> {
+  /**
+   * One typed lookup. Explicit 429/5xx responses are safe to retry once
+   * because the provider rejected the request. A transport failure is not:
+   * the request may have reached the paid boundary, so return `ambiguous`
+   * immediately and let the durable caller quarantine it.
+   */
+  async classifyOne(number: string): Promise<TelnyxLookupOutcome> {
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
         const response = await fetch(
@@ -100,23 +125,63 @@ export class TelnyxLineTypeLookup {
             await sleep(RETRY_BACKOFF_MS);
             continue;
           }
-          return "unknown";
+          return {
+            status: "retryable",
+            lineType: "unknown",
+            reason: "provider_rejected",
+            httpStatus: response.status,
+          };
         }
-        if (!response.ok) return "unknown"; // 4xx — invalid number etc.
+        // These provider/account/request-state failures say nothing definitive
+        // about the phone. Treating one as an invalid number would durably drop
+        // it. Do not retry inside this paid step; the job-level retry ledger is
+        // the explicit recovery gate.
+        if (NONTERMINAL_REJECTION_STATUSES.has(response.status)) {
+          return {
+            status: "retryable",
+            lineType: "unknown",
+            reason: "provider_rejected",
+            httpStatus: response.status,
+          };
+        }
+        if (!response.ok) {
+          return {
+            status: "completed",
+            lineType: "unknown",
+            reason: "definitive_unknown",
+            httpStatus: response.status,
+          };
+        }
 
         const body = (await response.json()) as TelnyxLookupResponse;
         const carrierType = lineTypeFromTelnyxLabel(body.data?.carrier?.type);
-        if (carrierType !== "unknown") return carrierType;
-        return lineTypeFromTelnyxLabel(body.data?.portability?.line_type);
+        const lineType =
+          carrierType !== "unknown"
+            ? carrierType
+            : lineTypeFromTelnyxLabel(body.data?.portability?.line_type);
+        return {
+          status: "completed",
+          lineType,
+          reason:
+            lineType === "unknown" ? "definitive_unknown" : "classified",
+          httpStatus: response.status,
+        };
       } catch {
-        if (attempt === 0) {
-          await sleep(RETRY_BACKOFF_MS);
-          continue;
-        }
-        return "unknown";
+        return {
+          status: "ambiguous",
+          lineType: "unknown",
+          reason: "transport_unknown",
+          httpStatus: null,
+        };
       }
     }
-    return "unknown";
+    // The loop always returns, but keep the fallback explicit for exhaustivity.
+    return {
+      status: "retryable",
+      lineType: "unknown",
+      reason: "provider_rejected",
+      httpStatus: 503,
+    };
   }
 }
 

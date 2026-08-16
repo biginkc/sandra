@@ -34,7 +34,7 @@ vi.mock("next/navigation", () => ({
 // server client at module load. Replace them with stubs — most tests
 // don't fire actions, but the bulk-add-to-list flow asserts the right
 // action is called with the right args.
-vi.mock("../leads/actions", () => ({
+vi.mock("./dnc-safe-actions", () => ({
   addPropertiesToListBulk: vi.fn(async () => ({
     ok: true,
     data: { succeeded: 0, skipped: 0, failed: [] },
@@ -48,6 +48,25 @@ vi.mock("../leads/actions", () => ({
   removePropertiesFromListBulk: vi.fn(),
   setMotivationBulk: vi.fn(),
   verifyPropertiesBulk: vi.fn(),
+  preflightProspectSkipTrace: vi.fn(async () => ({
+    ok: true,
+    data: {
+      requested: 1,
+      eligible: 1,
+      cassVerified: 1,
+      cassUnverified: 0,
+      notEligible: 0,
+      killSwitchSkipped: 0,
+      tracefyCreditsRequired: 5,
+      tracefyCreditsAvailable: 100,
+      tracefyCreditStatus: "sufficient",
+      canLaunchSkipTrace: true,
+      estimatedCassVerificationCostUsd: 0,
+      cassVerificationPropertyIds: [],
+      dncLockedSkipped: 0,
+    },
+  })),
+  requestProspectSkipTrace: vi.fn(),
 }));
 
 vi.mock("@/lib/skip-trace/actions", () => ({
@@ -76,11 +95,13 @@ const {
   createDialerBatchFromFilters,
   createDialerBatchFromPropertyIds,
   getAllMatchingProspectIds,
+  getAllMatchingProspectSelection,
   previewBatchEligibilityAction,
 } = vi.hoisted(() => ({
   createDialerBatchFromFilters: vi.fn(),
   createDialerBatchFromPropertyIds: vi.fn(),
   getAllMatchingProspectIds: vi.fn(),
+  getAllMatchingProspectSelection: vi.fn(),
   previewBatchEligibilityAction: vi.fn(),
 }));
 
@@ -88,7 +109,18 @@ vi.mock("./actions", () => ({
   createDialerBatchFromFilters,
   createDialerBatchFromPropertyIds,
   getAllMatchingProspectIds,
+  getAllMatchingProspectSelection,
   previewBatchEligibilityAction,
+}));
+
+const { preflightPromoteLeads, createPromoteLeadsJob } = vi.hoisted(() => ({
+  preflightPromoteLeads: vi.fn(),
+  createPromoteLeadsJob: vi.fn(),
+}));
+
+vi.mock("./promote-leads-actions", () => ({
+  preflightPromoteLeads,
+  createPromoteLeadsJob,
 }));
 
 // Sonner's toast is fine in jsdom but the table's handlers don't fire
@@ -111,6 +143,9 @@ function makeRow(overrides: Partial<ProspectRow> & { id: string }): ProspectRow 
     engagement: overrides.engagement ?? "none",
     last_message_preview: overrides.last_message_preview ?? null,
     outreach_dispo: overrides.outreach_dispo ?? null,
+    imported_at: overrides.imported_at ?? null,
+    dnc_reason: overrides.dnc_reason ?? null,
+    channel_restriction: overrides.channel_restriction ?? null,
   };
 }
 
@@ -148,9 +183,16 @@ beforeEach(() => {
   createDialerBatchFromFilters.mockReset();
   createDialerBatchFromPropertyIds.mockReset();
   getAllMatchingProspectIds.mockReset();
+  getAllMatchingProspectSelection.mockReset();
   previewBatchEligibilityAction.mockReset();
+  preflightPromoteLeads.mockReset();
+  createPromoteLeadsJob.mockReset();
 
   getAllMatchingProspectIds.mockResolvedValue({ ok: true, data: ["p1", "p2"] });
+  getAllMatchingProspectSelection.mockResolvedValue({
+    ok: true,
+    data: { eligibleIds: ["p1", "p2"], eligibleCount: 2, dncLockedCount: 0, matchedCount: 2 },
+  });
   previewBatchEligibilityAction.mockResolvedValue({
     ok: true,
     data: { callable: 1, blocked: {}, missing: 0 },
@@ -162,6 +204,10 @@ beforeEach(() => {
   createDialerBatchFromFilters.mockResolvedValue({
     ok: true,
     data: { batchId: "batch-table", counts: { callable: 1, blocked: {}, missing: 0 } },
+  });
+  preflightPromoteLeads.mockResolvedValue({
+    ok: true,
+    data: { selected: 1, eligible: 1, dncLocked: 0, staleOrNotProspect: 0 },
   });
 });
 
@@ -185,8 +231,38 @@ describe("<ProspectsTable />", () => {
     expect(actions).toBeDisabled();
     expect(actions).toHaveTextContent(/^Actions$/);
 
-    // Import CSV link sits next to it.
-    expect(screen.getByRole("link", { name: "Import CSV" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Import prospects" })).toHaveAttribute("href", "/import");
+  });
+
+  it("renders DNC prospects locked and excludes them from select-all", async () => {
+    const user = userEvent.setup();
+    renderTable([
+      makeRow({ id: "locked", dnc_reason: "Contact is marked do-not-contact." }),
+      makeRow({ id: "eligible" }),
+    ]);
+
+    expect(screen.queryByRole("checkbox", { name: "Select locked Main St" })).not.toBeInTheDocument();
+    expect(screen.getByLabelText("locked Main St is locked Do Not Contact")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /locked Main St/ })).toHaveAttribute(
+      "href",
+      "/leads/locked",
+    );
+    expect(screen.getByText("⊘ DO NOT CONTACT")).toBeInTheDocument();
+    await user.click(screen.getByRole("checkbox", { name: "Select all prospects on this page" }));
+    expect(screen.getByRole("checkbox", { name: "Select eligible Main St" })).toBeChecked();
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /Actions for 1 selected/ })).toBeEnabled();
+    });
+  });
+
+  it("keeps SMS opt-out as a channel label without locking selection", () => {
+    renderTable([
+      makeRow({ id: "sms-only", channel_restriction: "SMS opted out" }),
+    ]);
+
+    expect(screen.getByText("SMS opted out")).toBeInTheDocument();
+    expect(screen.getByRole("checkbox", { name: "Select sms-only Main St" })).toBeInTheDocument();
+    expect(screen.queryByText("⊘ DO NOT CONTACT")).not.toBeInTheDocument();
   });
 
   it("renders outreach disposition pills with operator-facing labels", () => {
@@ -229,7 +305,7 @@ describe("<ProspectsTable />", () => {
       // to click through. Same shape Playwright defaults to anyway.
       pointerEventsCheck: 0,
     });
-    const { addPropertiesToListBulk } = await import("../leads/actions");
+    const { addPropertiesToListBulk } = await import("./dnc-safe-actions");
     const rows = [
       makeRow({ id: "p1", address: "1 Bulk Ave" }),
       makeRow({ id: "p2", address: "2 Bulk Ave" }),
@@ -272,7 +348,7 @@ describe("<ProspectsTable />", () => {
 
   it("bulk apply existing tag calls the action with selected ids and the chosen tag", async () => {
     const user = userEvent.setup({ pointerEventsCheck: 0 });
-    const { applyTagBulk } = await import("../leads/actions");
+    const { applyTagBulk } = await import("./dnc-safe-actions");
     vi.mocked(applyTagBulk).mockResolvedValue({
       ok: true,
       data: { succeeded: 2, skipped: 0, failed: [] },
@@ -311,7 +387,7 @@ describe("<ProspectsTable />", () => {
 
   it("creates a new tag from the prospects page and applies it to selected ids", async () => {
     const user = userEvent.setup({ pointerEventsCheck: 0 });
-    const { createAndApplyCustomTagBulk } = await import("../leads/actions");
+    const { createAndApplyCustomTagBulk } = await import("./dnc-safe-actions");
     vi.mocked(createAndApplyCustomTagBulk).mockResolvedValue({
       ok: true,
       data: {
@@ -366,7 +442,7 @@ describe("<ProspectsTable />", () => {
 
   it("keeps failed rows selected after create/apply tag partial failures", async () => {
     const user = userEvent.setup({ pointerEventsCheck: 0 });
-    const { createAndApplyCustomTagBulk } = await import("../leads/actions");
+    const { createAndApplyCustomTagBulk } = await import("./dnc-safe-actions");
     vi.mocked(createAndApplyCustomTagBulk).mockResolvedValue({
       ok: true,
       data: {
@@ -421,7 +497,7 @@ describe("<ProspectsTable />", () => {
 
   it("does not submit an empty tag name or clear the current selection", async () => {
     const user = userEvent.setup({ pointerEventsCheck: 0 });
-    const { createAndApplyCustomTagBulk } = await import("../leads/actions");
+    const { createAndApplyCustomTagBulk } = await import("./dnc-safe-actions");
     const rows = [makeRow({ id: "p1", address: "1 Empty Ave" })];
 
     renderTable(rows);
@@ -496,6 +572,26 @@ describe("<ProspectsTable />", () => {
     ).toBeNull();
   });
 
+  it("opens the promotion confirmation before creating a background job", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    renderTable([makeRow({ id: "p1" })], [], { orgId: "org-1" });
+
+    await user.click(screen.getByRole("checkbox", { name: "Select p1 Main St" }));
+    await user.click(screen.getByRole("button", { name: /Actions for 1 selected/ }));
+    await user.click(await screen.findByRole("menuitem", { name: /Promote to Lead/ }));
+
+    expect(
+      await screen.findByRole("heading", { name: "Promote selected Prospects to Leads?" }),
+    ).toBeInTheDocument();
+    await waitFor(() => {
+      expect(preflightPromoteLeads).toHaveBeenCalledWith({
+        orgId: "org-1",
+        propertyIds: ["p1"],
+      });
+    });
+    expect(createPromoteLeadsJob).not.toHaveBeenCalled();
+  });
+
   it("opens Create dialer batch from the Actions menu", async () => {
     const user = userEvent.setup({ pointerEventsCheck: 0 });
     const rows = [makeRow({ id: "p1" }), makeRow({ id: "p2" })];
@@ -526,8 +622,8 @@ describe("<ProspectsTable />", () => {
 
   it("opens skip-trace preflight from the bulk Enrich action", async () => {
     const user = userEvent.setup({ pointerEventsCheck: 0 });
-    const { preflightSkipTrace, requestSkipTrace } = await import(
-      "@/lib/skip-trace/actions"
+    const { preflightProspectSkipTrace, requestProspectSkipTrace } = await import(
+      "./dnc-safe-actions"
     );
     const rows = [makeRow({ id: "p1", address: "1 Tracefy Ave" })];
     renderTable(rows);
@@ -546,9 +642,9 @@ describe("<ProspectsTable />", () => {
       }),
     ).toBeInTheDocument();
     await waitFor(() => {
-      expect(preflightSkipTrace).toHaveBeenCalledWith(["p1"]);
+      expect(preflightProspectSkipTrace).toHaveBeenCalledWith(["p1"]);
     });
-    expect(requestSkipTrace).not.toHaveBeenCalled();
+    expect(requestProspectSkipTrace).not.toHaveBeenCalled();
   });
 
   it("shows table skeleton rows during FilterDrawer URL navigation", async () => {
@@ -831,6 +927,7 @@ describe("<ProspectsTable /> select-all-across-pages banner", () => {
   beforeEach(() => {
     routerReplace.mockReset();
     getAllMatchingProspectIds.mockReset();
+    getAllMatchingProspectSelection.mockReset();
   });
 
   it("does not render the banner when nothing is selected", () => {
@@ -893,16 +990,17 @@ describe("<ProspectsTable /> select-all-across-pages banner", () => {
 
     const banner = await screen.findByTestId("select-all-banner");
     expect(banner.dataset.mode).toBe("per-page");
-    expect(banner.textContent).toMatch(/All 2 on this page selected/);
+    expect(banner.textContent).toMatch(/All 2 eligible prospects on this page selected/);
     const link = screen.getByTestId("select-all-across-pages");
-    expect(link.textContent).toMatch(/Select all 1,382 prospects/);
+    expect(link.textContent).toMatch(/Select all eligible matching prospects/);
   });
 
   it("clicking 'Select all N' calls the action with search + an empty blockStack and switches the banner to all-matching mode", async () => {
     const user = userEvent.setup({ pointerEventsCheck: 0 });
-    getAllMatchingProspectIds.mockResolvedValue({
+    const eligibleIds = Array.from({ length: 1382 }, (_, i) => `prop-${i}`);
+    getAllMatchingProspectSelection.mockResolvedValue({
       ok: true,
-      data: Array.from({ length: 1382 }, (_, i) => `prop-${i}`),
+      data: { eligibleIds, eligibleCount: 1382, dncLockedCount: 0, matchedCount: 1382 },
     });
     render(
       <ProspectsTable
@@ -927,23 +1025,48 @@ describe("<ProspectsTable /> select-all-across-pages banner", () => {
     await user.click(screen.getByRole("checkbox", { name: "Select p1 Main St" }));
     await user.click(screen.getByTestId("select-all-across-pages"));
 
-    expect(getAllMatchingProspectIds).toHaveBeenCalledWith({
+    expect(getAllMatchingProspectSelection).toHaveBeenCalledWith({
       search: "oak",
       blockStack: EMPTY_BLOCK_STACK,
+      imported: null,
     });
     const banner = await screen.findByTestId("select-all-banner");
     expect(banner.dataset.mode).toBe("all-matching");
-    expect(banner.textContent).toMatch(/All 1,382 prospects selected/);
+    expect(banner.textContent).toMatch(/All 1,382 eligible prospects selected/);
+  });
+
+  it("uses the server eligible count and reports DNC-locked exclusions separately", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    getAllMatchingProspectSelection.mockResolvedValue({
+      ok: true,
+      data: {
+        eligibleIds: ["p1"],
+        eligibleCount: 1,
+        dncLockedCount: 1,
+        matchedCount: 2,
+      },
+    });
+    renderTable([makeRow({ id: "p1" })], [], { total: 2, pageSize: 1 });
+
+    await user.click(screen.getByRole("checkbox", { name: "Select p1 Main St" }));
+    await user.click(screen.getByTestId("select-all-across-pages"));
+
+    const banner = await screen.findByTestId("select-all-banner");
+    expect(banner).toHaveTextContent("All 1 eligible prospects selected");
+    expect(banner).toHaveTextContent("1 DNC locked and excluded");
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /Actions for 1 selected/ })).toBeEnabled();
+    });
   });
 
   it("create/apply tag after select-all-matching sends filters instead of every id", async () => {
     const user = userEvent.setup({ pointerEventsCheck: 0 });
     const { createAndApplyCustomTagBulk, createAndApplyCustomTagBulkFromFilters } =
-      await import("../leads/actions");
+      await import("./dnc-safe-actions");
     const allIds = Array.from({ length: 1382 }, (_, i) => `prop-${i}`);
-    getAllMatchingProspectIds.mockResolvedValue({
+    getAllMatchingProspectSelection.mockResolvedValue({
       ok: true,
-      data: allIds,
+      data: { eligibleIds: allIds, eligibleCount: 1382, dncLockedCount: 0, matchedCount: 1382 },
     });
     vi.mocked(createAndApplyCustomTagBulkFromFilters).mockResolvedValue({
       ok: true,
@@ -984,7 +1107,7 @@ describe("<ProspectsTable /> select-all-across-pages banner", () => {
     await user.click(screen.getByTestId("select-all-across-pages"));
     await waitFor(() => {
       expect(screen.getByTestId("select-all-banner").textContent).toMatch(
-        /All 1,382 prospects selected/,
+        /All 1,382 eligible prospects selected/,
       );
     });
     await user.click(
@@ -1007,6 +1130,7 @@ describe("<ProspectsTable /> select-all-across-pages banner", () => {
         color: null,
         search: "oak",
         blockStack: EMPTY_BLOCK_STACK,
+        imported: null,
       });
     });
     expect(createAndApplyCustomTagBulk).not.toHaveBeenCalled();
@@ -1018,9 +1142,9 @@ describe("<ProspectsTable /> select-all-across-pages banner", () => {
       "p1",
       ...Array.from({ length: 1381 }, (_, i) => `prop-${i}`),
     ];
-    getAllMatchingProspectIds.mockResolvedValue({
+    getAllMatchingProspectSelection.mockResolvedValue({
       ok: true,
-      data: allIds,
+      data: { eligibleIds: allIds, eligibleCount: 1382, dncLockedCount: 0, matchedCount: 1382 },
     });
 
     render(
@@ -1048,7 +1172,7 @@ describe("<ProspectsTable /> select-all-across-pages banner", () => {
     await user.click(screen.getByTestId("select-all-across-pages"));
     await waitFor(() => {
       expect(screen.getByTestId("select-all-banner").textContent).toMatch(
-        /All 1,382 prospects selected/,
+        /All 1,382 eligible prospects selected/,
       );
     });
 
@@ -1062,14 +1186,14 @@ describe("<ProspectsTable /> select-all-across-pages banner", () => {
 
   it("create/apply tag partial failure after select-all-matching clears all-matching mode", async () => {
     const user = userEvent.setup({ pointerEventsCheck: 0 });
-    const { createAndApplyCustomTagBulkFromFilters } = await import("../leads/actions");
+    const { createAndApplyCustomTagBulkFromFilters } = await import("./dnc-safe-actions");
     const allIds = [
       "p1",
       ...Array.from({ length: 1381 }, (_, i) => `prop-${i}`),
     ];
-    getAllMatchingProspectIds.mockResolvedValue({
+    getAllMatchingProspectSelection.mockResolvedValue({
       ok: true,
-      data: allIds,
+      data: { eligibleIds: allIds, eligibleCount: 1382, dncLockedCount: 0, matchedCount: 1382 },
     });
     vi.mocked(createAndApplyCustomTagBulkFromFilters).mockResolvedValue({
       ok: true,
@@ -1114,7 +1238,7 @@ describe("<ProspectsTable /> select-all-across-pages banner", () => {
     await user.click(screen.getByTestId("select-all-across-pages"));
     await waitFor(() => {
       expect(screen.getByTestId("select-all-banner").textContent).toMatch(
-        /All 1,382 prospects selected/,
+        /All 1,382 eligible prospects selected/,
       );
     });
     await user.click(
@@ -1141,9 +1265,10 @@ describe("<ProspectsTable /> select-all-across-pages banner", () => {
 
   it("clears a stale all-matching selection when search scope changes", async () => {
     const user = userEvent.setup({ pointerEventsCheck: 0 });
-    getAllMatchingProspectIds.mockResolvedValue({
+    const eligibleIds = Array.from({ length: 1382 }, (_, i) => `prop-${i}`);
+    getAllMatchingProspectSelection.mockResolvedValue({
       ok: true,
-      data: Array.from({ length: 1382 }, (_, i) => `prop-${i}`),
+      data: { eligibleIds, eligibleCount: 1382, dncLockedCount: 0, matchedCount: 1382 },
     });
     const { rerender } = render(
       <ProspectsTable
@@ -1170,7 +1295,7 @@ describe("<ProspectsTable /> select-all-across-pages banner", () => {
     await user.click(screen.getByTestId("select-all-across-pages"));
     await waitFor(() => {
       expect(screen.getByTestId("select-all-banner").textContent).toMatch(
-        /All 1,382 prospects selected/,
+        /All 1,382 eligible prospects selected/,
       );
     });
 
@@ -1205,9 +1330,9 @@ describe("<ProspectsTable /> select-all-across-pages banner", () => {
 
   it("Clear button empties the selection and hides the banner", async () => {
     const user = userEvent.setup({ pointerEventsCheck: 0 });
-    getAllMatchingProspectIds.mockResolvedValue({
+    getAllMatchingProspectSelection.mockResolvedValue({
       ok: true,
-      data: ["a", "b", "c"],
+      data: { eligibleIds: ["a", "b", "c"], eligibleCount: 3, dncLockedCount: 0, matchedCount: 3 },
     });
     render(
       <ProspectsTable
@@ -1238,17 +1363,18 @@ describe("<ProspectsTable /> select-all-across-pages banner", () => {
 
   // -------------------------------------------------------------------------
   // R9 regression — select-all-across-pages must hand the active block stack
-  // to getAllMatchingProspectIds so the resulting set covers the SAME rows
+  // to getAllMatchingProspectSelection so the resulting set covers the SAME rows
   // the page is rendering. Plan 09 swapped the legacy `filters` arg for
   // `blockStack`; this test pins the new contract so a future rewrite that
   // forgets to thread blockStack through (or accidentally re-introduces the
   // old chip-shape) fails fast.
   // -------------------------------------------------------------------------
-  it("select-all-matching with an active block stack passes the stack to getAllMatchingProspectIds (R9)", async () => {
+  it("select-all-matching with an active block stack passes the stack to getAllMatchingProspectSelection (R9)", async () => {
     const user = userEvent.setup({ pointerEventsCheck: 0 });
-    getAllMatchingProspectIds.mockResolvedValue({
+    const eligibleIds = Array.from({ length: 1382 }, (_, i) => `prop-${i}`);
+    getAllMatchingProspectSelection.mockResolvedValue({
       ok: true,
-      data: Array.from({ length: 1382 }, (_, i) => `prop-${i}`),
+      data: { eligibleIds, eligibleCount: 1382, dncLockedCount: 0, matchedCount: 1382 },
     });
     const stack: FilterBlock[] = [
       { id: "blk-vac", kind: "vacancy", tri: "yes" } as FilterBlock,
@@ -1282,8 +1408,9 @@ describe("<ProspectsTable /> select-all-across-pages banner", () => {
     await user.click(screen.getByRole("checkbox", { name: "Select p1 Main St" }));
     await user.click(screen.getByTestId("select-all-across-pages"));
 
-    expect(getAllMatchingProspectIds).toHaveBeenCalledWith({
+    expect(getAllMatchingProspectSelection).toHaveBeenCalledWith({
       search: null,
+      imported: null,
       blockStack: expect.arrayContaining([
         expect.objectContaining({ kind: "vacancy", tri: "yes" }),
         expect.objectContaining({

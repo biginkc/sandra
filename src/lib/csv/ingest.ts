@@ -3,11 +3,21 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { asLineType, type PhoneLineType } from "@/lib/messaging/line-type";
 import type { Database, Json } from "@/lib/supabase/types";
 import { resolveFips } from "./fips";
-import { normalizeAddress, normalizeDisplayAddress, normalizeName } from "./normalize";
+import {
+  importTerminalStatus,
+  type ImportSideEffects,
+} from "./import-job-status";
+import {
+  normalizeAddress,
+  normalizeDisplayAddress,
+  normalizeName,
+} from "./normalize";
 import { validateRow, type Mapping, type RowData } from "./validate";
 
 type PropertyInsert = Database["public"]["Tables"]["properties"]["Insert"];
 type ContactInsert = Database["public"]["Tables"]["contacts"]["Insert"];
+type HomeownerDetailsInsert =
+  Database["public"]["Tables"]["homeowner_details"]["Insert"];
 
 function rowToJson(row: RowData): Json {
   const out: Record<string, string | null> = {};
@@ -20,6 +30,7 @@ function rowToJson(row: RowData): Json {
 export type IngestParams = {
   jobId: string;
   csvImportId: string;
+  orgId: string;
   source: string;
   market: string;
   /** county_id (FK to counties.id) chosen on the wizard's market dropdown
@@ -55,6 +66,7 @@ export type IngestSummary = {
 export type ProcessChunkParams = {
   jobId: string;
   csvImportId: string;
+  orgId: string;
   source: string;
   market: string;
   /** county_id from the workflow boundary (D-04). Threaded into ingestRow
@@ -78,6 +90,8 @@ export type ProcessChunkParams = {
    */
   priorSucceeded?: number;
   priorFailed?: number;
+  /** Enable source-row checkpoint reads for durable workflow retries. */
+  resumeSafe?: boolean;
 };
 
 export type ChunkResult = {
@@ -118,11 +132,13 @@ export async function runIngestion(
     jobId: params.jobId,
     totalRows: params.rows.length,
     source: params.source,
+    orgId: params.orgId,
   });
 
   const chunk = await processIngestChunk(supabase, {
     jobId: params.jobId,
     csvImportId: params.csvImportId,
+    orgId: params.orgId,
     source: params.source,
     market: params.market,
     countyId: params.countyId ?? null,
@@ -137,6 +153,7 @@ export async function runIngestion(
   await finalizeIngestion(supabase, {
     jobId: params.jobId,
     csvImportId: params.csvImportId,
+    orgId: params.orgId,
     totalRows: params.rows.length,
     succeeded: chunk.succeeded,
     failed: chunk.failed,
@@ -162,19 +179,27 @@ export async function runIngestion(
  */
 export async function prepareIngestion(
   supabase: SupabaseClient<Database>,
-  params: { jobId: string; totalRows: number; source: string },
+  params: { jobId: string; totalRows: number; source: string; orgId: string },
 ): Promise<{ autoTagIds: string[] }> {
-  await supabase
+  const { error: jobStartError } = await supabase
     .from("jobs")
     .update({
-      status: "running",
+      status: "processing",
       started_at: new Date().toISOString(),
       total_items: params.totalRows,
       worker_heartbeat_at: new Date().toISOString(),
     })
-    .eq("id", params.jobId);
+    .eq("id", params.jobId)
+    .eq("org_id", params.orgId);
+  if (jobStartError) {
+    throw new Error(`job start checkpoint: ${jobStartError.message}`);
+  }
 
-  const autoTagIds = await resolveAutoTagIds(supabase, params.source);
+  const autoTagIds = await resolveAutoTagIds(
+    supabase,
+    params.source,
+    params.orgId,
+  );
   return { autoTagIds };
 }
 
@@ -206,32 +231,93 @@ export async function processIngestChunk(
   let droppedUnlabeledPhones = 0;
   const errors: { rowIndex: number; message: string }[] = [];
 
+  const completedByRow = new Map<number, string>();
+  if (params.resumeSafe && params.rows.length > 0) {
+    const { data: completed, error } = await supabase
+      .from("job_items")
+      .select("source_row_index, status")
+      .eq("job_id", params.jobId)
+      .gte("source_row_index", params.offset)
+      .lt("source_row_index", params.offset + params.rows.length);
+    if (error) throw new Error(`resume checkpoint read: ${error.message}`);
+    for (const item of completed ?? []) {
+      if (item.source_row_index != null) {
+        completedByRow.set(item.source_row_index, item.status);
+      }
+    }
+  }
+
   for (let localIndex = 0; localIndex < params.rows.length; localIndex++) {
     const absoluteIndex = params.offset + localIndex;
     const row = params.rows[localIndex];
+    const priorStatus = completedByRow.get(absoluteIndex);
+    if (priorStatus && priorStatus !== "error") {
+      if (priorStatus === "success") succeeded++;
+      else if (priorStatus === "error") failed++;
+      else skipped++;
+      continue;
+    }
     const validated = validateRow(row, params.mapping, absoluteIndex);
 
-    // Empty row — skip silently
+    // Empty rows are still processed rows. Persist a durable skipped
+    // checkpoint so failure recovery can conserve processed + unprocessed =
+    // total instead of silently classifying an untouched tail as skipped.
     if (Object.keys(validated.normalized).length === 0) {
+      const { error: blankCheckpointError } = await supabase
+        .from("job_items")
+        .upsert(
+          {
+            job_id: params.jobId,
+            status: "skipped",
+            source_row_index: absoluteIndex,
+            error_message: "Blank row",
+            error_class: "validation",
+            input_payload: rowToJson(row),
+          },
+          { onConflict: "job_id,source_row_index" },
+        );
+      if (blankCheckpointError) {
+        throw new Error(
+          `blank-row checkpoint: ${blankCheckpointError.message}`,
+        );
+      }
       skipped++;
       continue;
     }
 
     if (!validated.ok) {
       const msg = validated.errors[0]?.message ?? "Validation failed";
-      await supabase.from("job_items").insert({
-        job_id: params.jobId,
-        status: "error",
-        error_message: msg,
-        error_class: "validation",
-        input_payload: rowToJson(row),
-      });
+      const { error: validationCheckpointError } = await supabase
+        .from("job_items")
+        .upsert(
+          {
+            job_id: params.jobId,
+            status: "error",
+            compliance_locked:
+              validated.normalized.homeowner_do_not_contact === true,
+            source_row_index: absoluteIndex,
+            error_message: msg,
+            error_class: "validation",
+            input_payload: rowToJson(row),
+          },
+          { onConflict: "job_id,source_row_index" },
+        );
+      if (validationCheckpointError) {
+        throw new Error(
+          `validation checkpoint: ${validationCheckpointError.message}`,
+        );
+      }
       failed++;
       if (errors.length < ERROR_SAMPLE_SIZE)
         errors.push({ rowIndex: absoluteIndex, message: msg });
       continue;
     }
 
+    let durableOutcome: {
+      propertyId: string;
+      wasDuplicate: boolean;
+      complianceLocked: boolean;
+    } | null = null;
     try {
       const result = await ingestRow(
         supabase,
@@ -239,27 +325,33 @@ export async function processIngestChunk(
         params.source,
         params.market,
         params.countyId ?? null,
+        params.csvImportId,
+        params.orgId,
+        params.jobId,
+        absoluteIndex,
       );
+      durableOutcome = result;
       droppedUnlabeledPhones += result.droppedUnlabeledPhones;
 
       // Stacking: every ingested row — including dedup-matched ones —
       // gets added to the import's list (if one was selected). Re-importing
       // the same address into a different list is exactly how stacking
       // accumulates signal on a high-motivation lead.
-      if (params.listId) {
+      if (params.listId && !result.complianceLocked) {
         await upsertPropertyListMembership(supabase, {
           propertyId: result.propertyId,
           listId: params.listId,
           userId: params.userId ?? null,
           csvImportId: params.csvImportId,
+          orgId: params.orgId,
         });
       }
 
       // Auto-apply source + uploaded tags (resolved once in prepareIngestion).
       // Same dedup semantics as list stacking: re-importing a duplicate
       // refreshes the last-touched timestamp via ON CONFLICT DO NOTHING.
-      for (const tagId of params.autoTagIds) {
-        await supabase.from("property_tags").upsert(
+      for (const tagId of result.complianceLocked ? [] : params.autoTagIds) {
+        const { error: tagError } = await supabase.from("property_tags").upsert(
           {
             property_id: result.propertyId,
             tag_id: tagId,
@@ -267,24 +359,65 @@ export async function processIngestChunk(
           },
           { onConflict: "property_id,tag_id", ignoreDuplicates: true },
         );
+        if (tagError) throw new Error(`tag assignment: ${tagError.message}`);
       }
 
-      await supabase.from("job_items").insert({
-        job_id: params.jobId,
-        property_id: result.propertyId,
-        status: result.wasDuplicate ? "skipped" : "success",
-      });
+      const { error: successCheckpointError } = await supabase
+        .from("job_items")
+        .upsert(
+          {
+            job_id: params.jobId,
+            property_id: result.propertyId,
+            status: result.wasDuplicate ? "skipped" : "success",
+            compliance_locked: result.complianceLocked,
+            source_row_index: absoluteIndex,
+            error_message: null,
+            error_class: null,
+            input_payload: null,
+            output_payload: {
+              original_outcome: result.wasDuplicate ? "duplicate" : "inserted",
+            },
+          },
+          { onConflict: "job_id,source_row_index" },
+        );
+      if (successCheckpointError) {
+        throw new Error(
+          `success checkpoint: ${successCheckpointError.message}`,
+        );
+      }
       if (result.wasDuplicate) skipped++;
       else succeeded++;
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
-      await supabase.from("job_items").insert({
-        job_id: params.jobId,
-        status: "error",
-        error_message: message,
-        error_class: "database",
-        input_payload: rowToJson(row),
-      });
+      const { error: errorCheckpointError } = await supabase
+        .from("job_items")
+        .upsert(
+          {
+            job_id: params.jobId,
+            status: "error",
+            property_id: durableOutcome?.propertyId ?? null,
+            compliance_locked:
+              durableOutcome?.complianceLocked ??
+              validated.normalized.homeowner_do_not_contact === true,
+            source_row_index: absoluteIndex,
+            error_message: message,
+            error_class: "database",
+            input_payload: rowToJson(row),
+            output_payload: durableOutcome
+              ? {
+                  original_outcome: durableOutcome.wasDuplicate
+                    ? "duplicate"
+                    : "inserted",
+                }
+              : null,
+          },
+          { onConflict: "job_id,source_row_index" },
+        );
+      if (errorCheckpointError) {
+        throw new Error(
+          `row failed and its durable checkpoint also failed: ${errorCheckpointError.message}`,
+        );
+      }
       failed++;
       if (errors.length < ERROR_SAMPLE_SIZE)
         errors.push({ rowIndex: absoluteIndex, message });
@@ -298,7 +431,7 @@ export async function processIngestChunk(
     // until finalize wrote the final numbers.
     const isLastInChunk = localIndex === params.rows.length - 1;
     if ((absoluteIndex + 1) % PROGRESS_UPDATE_INTERVAL === 0 || isLastInChunk) {
-      await supabase
+      const { error: progressError } = await supabase
         .from("jobs")
         .update({
           processed_items: absoluteIndex + 1,
@@ -306,7 +439,11 @@ export async function processIngestChunk(
           failed_items: (params.priorFailed ?? 0) + failed,
           worker_heartbeat_at: new Date().toISOString(),
         })
-        .eq("id", params.jobId);
+        .eq("id", params.jobId)
+        .eq("org_id", params.orgId);
+      if (progressError) {
+        throw new Error(`job progress checkpoint: ${progressError.message}`);
+      }
     }
   }
 
@@ -325,6 +462,7 @@ export async function finalizeIngestion(
   params: {
     jobId: string;
     csvImportId: string;
+    orgId: string;
     totalRows: number;
     succeeded: number;
     failed: number;
@@ -340,17 +478,25 @@ export async function finalizeIngestion(
       stillUnknown: number;
       estimatedCostUsd: number;
     } | null;
+    dncRows?: number;
+    sideEffects?: ImportSideEffects;
     errors: { rowIndex: number; message: string }[];
   },
 ): Promise<void> {
   const status: Database["public"]["Tables"]["jobs"]["Update"]["status"] =
-    params.failed === 0 && params.totalRows > 0
-      ? "completed"
-      : params.succeeded > 0
-        ? "partial"
-        : "failed";
+    importTerminalStatus({ ...params, processedRows: params.totalRows });
 
-  await supabase
+  const { count: importedLockedRows, error: lockedCountError } = await supabase
+    .from("job_items")
+    .select("property_id", { count: "exact", head: true })
+    .eq("job_id", params.jobId)
+    .eq("compliance_locked", true)
+    .not("property_id", "is", null);
+  if (lockedCountError) {
+    throw new Error(`DNC result count: ${lockedCountError.message}`);
+  }
+
+  const { error: jobFinalizeError } = await supabase
     .from("jobs")
     .update({
       status,
@@ -364,12 +510,19 @@ export async function finalizeIngestion(
         skipped: params.skipped,
         droppedUnlabeledPhones: params.droppedUnlabeledPhones ?? 0,
         lineTypeClassification: params.lineTypeClassification ?? null,
+        dncRows: importedLockedRows ?? 0,
+        reviewedDncRows: params.dncRows ?? 0,
+        sideEffects: params.sideEffects ?? {},
         errors: params.errors.slice(0, ERROR_SAMPLE_SIZE),
-      },
+      } as Json,
     })
-    .eq("id", params.jobId);
+    .eq("id", params.jobId)
+    .eq("org_id", params.orgId);
+  if (jobFinalizeError) {
+    throw new Error(`job finalization: ${jobFinalizeError.message}`);
+  }
 
-  await supabase
+  const { error: importFinalizeError } = await supabase
     .from("csv_imports")
     .update({
       inserted_properties: params.succeeded,
@@ -377,7 +530,11 @@ export async function finalizeIngestion(
       failed_rows: params.failed,
       total_rows: params.totalRows,
     })
-    .eq("id", params.csvImportId);
+    .eq("id", params.csvImportId)
+    .eq("org_id", params.orgId);
+  if (importFinalizeError) {
+    throw new Error(`import finalization: ${importFinalizeError.message}`);
+  }
 }
 
 // ---------- per-row ingestion ----------
@@ -388,9 +545,14 @@ async function ingestRow(
   defaultSource: string,
   market: string,
   countyId: string | null,
+  csvImportId: string,
+  orgId: string,
+  jobId: string,
+  sourceRowIndex: number,
 ): Promise<{
   propertyId: string;
   wasDuplicate: boolean;
+  complianceLocked: boolean;
   droppedUnlabeledPhones: number;
 }> {
   const addressRaw = n.address as string | null;
@@ -412,8 +574,10 @@ async function ingestRow(
   // phone was dropped.
   const phoneSlots = compactTypedPhones(n);
 
-  // Upsert homeowner contact + sidecar when any homeowner fields are present.
+  // Defer mutable homeowner details until the property RPC returns the
+  // authoritative stored DNC lock. A re-import need not repeat the DNC flag.
   let homeownerContactId: string | null = null;
+  let homeownerDetails: HomeownerDetailsInsert | null = null;
   if (hasHomeownerFields(n)) {
     // A DNC-flagged row must be able to match an existing contact via a
     // phone that compactTypedPhones() just dropped (a DNC label normalizes
@@ -424,8 +588,7 @@ async function ingestRow(
     // mapping (no compliance signal at all) keeps the existing phone_1-only
     // match semantics — widening matching for every unlabeled-phone drop is
     // a bigger, unrelated behavior change this PR isn't making.
-    const isDncRow =
-      (n.homeowner_do_not_contact as boolean | null) === true;
+    const isDncRow = (n.homeowner_do_not_contact as boolean | null) === true;
     const primaryPhone = phoneSlots.contactFields.phone_1;
     // `homeowner_dnc_phones` (set by preset transforms like propstream.ts)
     // is a pipe-delimited identity-only channel for DNC numbers that don't
@@ -465,24 +628,26 @@ async function ingestRow(
         last_name: normalizeName(n.homeowner_last_name as string | null),
         entity_name: normalizeName(n.homeowner_entity_name as string | null),
         ...phoneSlots.contactFields,
-        email: (n.homeowner_email as string | null)?.trim().toLowerCase() ?? null,
+        email:
+          (n.homeowner_email as string | null)?.trim().toLowerCase() ?? null,
         do_not_contact:
           (n.homeowner_do_not_contact as boolean | null) ?? undefined,
       },
       matchPhones,
+      orgId,
     );
-    await supabase
-      .from("homeowner_details")
-      .upsert(
-        {
-          contact_id: homeownerContactId,
-          mailing_address: normalizeDisplayAddress(n.homeowner_mailing_address as string | null),
-          mailing_city: normalizeDisplayAddress(n.homeowner_mailing_city as string | null),
-          mailing_state: (n.homeowner_mailing_state as string | null) ?? null,
-          mailing_zip: (n.homeowner_mailing_zip as string | null) ?? null,
-        },
-        { onConflict: "contact_id" },
-      );
+    homeownerDetails = {
+      contact_id: homeownerContactId,
+      org_id: orgId,
+      mailing_address: normalizeDisplayAddress(
+        n.homeowner_mailing_address as string | null,
+      ),
+      mailing_city: normalizeDisplayAddress(
+        n.homeowner_mailing_city as string | null,
+      ),
+      mailing_state: (n.homeowner_mailing_state as string | null) ?? null,
+      mailing_zip: (n.homeowner_mailing_zip as string | null) ?? null,
+    };
   }
 
   // Upsert agent contact + sidecar when any agent fields are present.
@@ -494,22 +659,33 @@ async function ingestRow(
     const agentPhoneType = asLineType(n.agent_phone_type as string | null);
     const keepAgentPhone = !!agentPhone && agentPhoneType !== "unknown";
     if (agentPhone && !keepAgentPhone) agentPhoneDropped = 1;
-    agentContactId = await upsertContact(supabase, {
-      contact_type: "person",
-      first_name: normalizeName(n.agent_first_name as string | null),
-      last_name: normalizeName(n.agent_last_name as string | null),
-      phone_1: keepAgentPhone ? agentPhone : null,
-      phone_1_type: keepAgentPhone ? agentPhoneType : "unknown",
-      email: (n.agent_email as string | null)?.trim().toLowerCase() ?? null,
-    });
-    await supabase.from("agent_details").upsert(
+    agentContactId = await upsertContact(
+      supabase,
       {
-        contact_id: agentContactId,
-        brokerage: (n.agent_brokerage as string | null) ?? null,
-        license_number: (n.agent_license_number as string | null) ?? null,
+        contact_type: "person",
+        first_name: normalizeName(n.agent_first_name as string | null),
+        last_name: normalizeName(n.agent_last_name as string | null),
+        phone_1: keepAgentPhone ? agentPhone : null,
+        phone_1_type: keepAgentPhone ? agentPhoneType : "unknown",
+        email: (n.agent_email as string | null)?.trim().toLowerCase() ?? null,
       },
-      { onConflict: "contact_id" },
+      undefined,
+      orgId,
     );
+    const { error: agentDetailsError } = await supabase
+      .from("agent_details")
+      .upsert(
+        {
+          contact_id: agentContactId,
+          org_id: orgId,
+          brokerage: (n.agent_brokerage as string | null) ?? null,
+          license_number: (n.agent_license_number as string | null) ?? null,
+        },
+        { onConflict: "contact_id" },
+      );
+    if (agentDetailsError) {
+      throw new Error(`agent details upsert: ${agentDetailsError.message}`);
+    }
   }
 
   // Layered dedup — try each ID in priority order.
@@ -518,6 +694,7 @@ async function ingestRow(
   const apnNormalized = (n.apn as string | null) ?? null;
 
   const existingId = await findExistingProperty(supabase, {
+    orgId,
     fipsCode,
     apnNormalized,
     zpid,
@@ -532,34 +709,45 @@ async function ingestRow(
     // contacts" re-export backfills owner data onto address-only rows
     // imported earlier. NULL-only fill: a property that already has a
     // linked contact is never rewired by an import.
-    if (homeownerContactId || agentContactId) {
-      const { data: existing } = await supabase
+    const isDncRow = n.homeowner_do_not_contact === true;
+    const patch: Partial<PropertyInsert> = {
+      source_import_id: csvImportId,
+      source_imported_at: new Date().toISOString(),
+    };
+    if (homeownerContactId || agentContactId || isDncRow) {
+      const { data: existing, error: existingError } = await supabase
         .from("properties")
         .select("homeowner_contact_id, agent_contact_id")
         .eq("id", existingId)
+        .eq("org_id", orgId)
         .single();
-      const patch: Partial<PropertyInsert> = {};
+      if (existingError) {
+        throw new Error(`dedup property lookup: ${existingError.message}`);
+      }
       if (homeownerContactId && !existing?.homeowner_contact_id) {
         patch.homeowner_contact_id = homeownerContactId;
       }
       if (agentContactId && !existing?.agent_contact_id) {
         patch.agent_contact_id = agentContactId;
       }
-      if (Object.keys(patch).length > 0) {
-        const { error: patchError } = await supabase
-          .from("properties")
-          .update(patch)
-          .eq("id", existingId);
-        if (patchError) {
-          throw new Error(
-            `contact attach on dedup: ${patchError.message}`,
-          );
-        }
-      }
+      if (isDncRow) patch.outreach_dispo = "dnc";
+    }
+    const outcome = await checkpointPropertyOutcome(supabase, {
+      jobId,
+      csvImportId,
+      orgId,
+      sourceRowIndex,
+      property: {},
+      existingPropertyId: existingId,
+      existingPatch: patch,
+    });
+    if (!outcome.complianceLocked && homeownerDetails) {
+      await upsertHomeownerDetails(supabase, homeownerDetails);
     }
     return {
-      propertyId: existingId,
-      wasDuplicate: true,
+      propertyId: outcome.propertyId,
+      wasDuplicate: outcome.originalOutcome === "duplicate",
+      complianceLocked: outcome.complianceLocked,
       droppedUnlabeledPhones: phoneSlots.dropped + agentPhoneDropped,
     };
   }
@@ -570,6 +758,7 @@ async function ingestRow(
   const mappedSource = (n.source as string | null) ?? null;
 
   const property: PropertyInsert = {
+    org_id: orgId,
     // New imports land as 'prospect' by default. The /leads kanban filters
     // these out, keeping them on the /properties data-lake surface until
     // someone qualifies (manual action or auto on first inbound reply).
@@ -601,21 +790,81 @@ async function ingestRow(
     lat: (n.lat as number | null) ?? null,
     lon: (n.lon as number | null) ?? null,
     source: (mappedSource ?? defaultSource) as PropertyInsert["source"],
+    source_import_id: csvImportId,
+    source_imported_at: new Date().toISOString(),
     homeowner_contact_id: homeownerContactId,
     agent_contact_id: agentContactId,
+    outreach_dispo: n.homeowner_do_not_contact === true ? "dnc" : null,
   };
 
-  const { data: inserted, error } = await supabase
-    .from("properties")
-    .insert(property)
-    .select("id")
-    .single();
-  if (error) throw new Error(`property insert: ${error.message}`);
+  const outcome = await checkpointPropertyOutcome(supabase, {
+    jobId,
+    csvImportId,
+    orgId,
+    sourceRowIndex,
+    property,
+    existingPropertyId: null,
+    existingPatch: {},
+  });
+  if (!outcome.complianceLocked && homeownerDetails) {
+    await upsertHomeownerDetails(supabase, homeownerDetails);
+  }
   return {
-    propertyId: inserted.id,
-    wasDuplicate: false,
+    propertyId: outcome.propertyId,
+    wasDuplicate: outcome.originalOutcome === "duplicate",
+    complianceLocked: outcome.complianceLocked,
     droppedUnlabeledPhones: phoneSlots.dropped + agentPhoneDropped,
   };
+}
+
+async function checkpointPropertyOutcome(
+  supabase: SupabaseClient<Database>,
+  args: {
+    jobId: string;
+    csvImportId: string;
+    orgId: string;
+    sourceRowIndex: number;
+    property: Partial<PropertyInsert>;
+    existingPropertyId: string | null;
+    existingPatch: Partial<PropertyInsert>;
+  },
+): Promise<{
+  propertyId: string;
+  originalOutcome: "inserted" | "duplicate";
+  complianceLocked: boolean;
+}> {
+  const { data, error } = await supabase.rpc(
+    "checkpoint_csv_import_property_outcome",
+    {
+      p_job_id: args.jobId,
+      p_csv_import_id: args.csvImportId,
+      p_org_id: args.orgId,
+      p_source_row_index: args.sourceRowIndex,
+      p_property: args.property as Json,
+      p_existing_property_id: args.existingPropertyId,
+      p_existing_patch: args.existingPatch as Json,
+    },
+  );
+  if (error) throw new Error(`property outcome checkpoint: ${error.message}`);
+  const row = data?.[0];
+  if (!row || !["inserted", "duplicate"].includes(row.original_outcome)) {
+    throw new Error("property outcome checkpoint returned no durable result");
+  }
+  return {
+    propertyId: row.property_id,
+    originalOutcome: row.original_outcome as "inserted" | "duplicate",
+    complianceLocked: row.compliance_locked,
+  };
+}
+
+async function upsertHomeownerDetails(
+  supabase: SupabaseClient<Database>,
+  details: HomeownerDetailsInsert,
+): Promise<void> {
+  const { error } = await supabase
+    .from("homeowner_details")
+    .upsert(details, { onConflict: "contact_id" });
+  if (error) throw new Error(`homeowner details upsert: ${error.message}`);
 }
 
 // ---------- helpers ----------
@@ -740,6 +989,7 @@ async function upsertContact(
    *  contact that owns the flagged number. Defaults to just `phone_1` for
    *  callers (agent contacts) that don't pass it explicitly. */
   matchPhones: string[] = contact.phone_1 ? [contact.phone_1] : [],
+  orgId: string,
 ): Promise<string> {
   // A matched (existing) contact only reaches an early return — the
   // trailing INSERT never runs — so compliance flags carried by the
@@ -757,7 +1007,9 @@ async function upsertContact(
       const { error } = await supabase
         .from("contacts")
         .update({ do_not_contact: true })
-        .eq("id", id);
+        .eq("id", id)
+        .eq("org_id", orgId)
+        .eq("do_not_contact", false);
       if (error) {
         throw new Error(
           `do_not_contact ratchet update failed for contact ${id}: ${error.message}`,
@@ -776,22 +1028,26 @@ async function upsertContact(
   // identifier must still be able to match an existing contact so the
   // ratchet above can suppress it.
   for (const phone of matchPhones) {
-    const { data } = await supabase
+    const { data, error } = await supabase
       .from("contacts")
       .select("id")
       .or(`phone_1.eq.${phone},phone_2.eq.${phone},phone_3.eq.${phone}`)
+      .eq("org_id", orgId)
       .limit(1)
       .maybeSingle();
+    if (error) throw new Error(`contact phone lookup: ${error.message}`);
     if (data) return onMatch(data.id);
   }
   // Email match
   if (contact.email) {
-    const { data } = await supabase
+    const { data, error } = await supabase
       .from("contacts")
       .select("id")
       .ilike("email", contact.email)
+      .eq("org_id", orgId)
       .limit(1)
       .maybeSingle();
+    if (error) throw new Error(`contact email lookup: ${error.message}`);
     if (data) return onMatch(data.id);
   }
   // Name match — only for person-type contacts with no phone and no email.
@@ -808,22 +1064,24 @@ async function upsertContact(
     contact.first_name &&
     contact.last_name
   ) {
-    const { data } = await supabase
+    const { data, error } = await supabase
       .from("contacts")
       .select("id")
       .ilike("first_name", contact.first_name)
       .ilike("last_name", contact.last_name)
       .eq("contact_type", "person")
+      .eq("org_id", orgId)
       .is("phone_1", null)
       .is("email", null)
       .limit(1)
       .maybeSingle();
+    if (error) throw new Error(`contact name lookup: ${error.message}`);
     if (data) return onMatch(data.id);
   }
   // Insert new
   const { data, error } = await supabase
     .from("contacts")
-    .insert(contact)
+    .insert({ ...contact, org_id: orgId })
     .select("id")
     .single();
   if (error) throw new Error(`contact insert: ${error.message}`);
@@ -840,6 +1098,7 @@ async function upsertContact(
 async function resolveAutoTagIds(
   supabase: SupabaseClient<Database>,
   vendor: string,
+  orgId: string,
 ): Promise<string[]> {
   const now = new Date();
   const month = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
@@ -855,11 +1114,13 @@ async function resolveAutoTagIds(
   for (const w of want) {
     // Look for an existing row first (case-sensitive since names are
     // lowercase/ASCII-only by construction).
-    const { data: existing } = await supabase
+    const { data: existing, error: lookupError } = await supabase
       .from("tags")
       .select("id")
       .eq("name", w.name)
+      .eq("org_id", orgId)
       .maybeSingle();
+    if (lookupError) throw new Error(`auto-tag lookup: ${lookupError.message}`);
     if (existing) {
       ids.push(existing.id);
       continue;
@@ -868,16 +1129,13 @@ async function resolveAutoTagIds(
       .from("tags")
       .insert({
         name: w.name,
+        org_id: orgId,
         category: w.category,
         system_managed: true,
       })
       .select("id")
       .single();
-    if (error) {
-      // Non-fatal: don't block a 10K-row import because one tag row failed.
-      // The per-row loop just skips this tag for this import.
-      continue;
-    }
+    if (error) throw new Error(`auto-tag insert: ${error.message}`);
     ids.push(inserted.id);
   }
   return ids;
@@ -901,17 +1159,24 @@ async function upsertPropertyListMembership(
     listId: string;
     userId: string | null;
     csvImportId: string;
+    orgId: string;
   },
 ): Promise<void> {
-  const { data: prop } = await supabase
+  const { data: prop, error: propertyError } = await supabase
     .from("properties")
     .select("org_id")
     .eq("id", input.propertyId)
+    .eq("org_id", input.orgId)
     .maybeSingle();
-  if (!prop) return; // property vanished between insert and upsert — rare
+  if (propertyError)
+    throw new Error(`list property lookup: ${propertyError.message}`);
+  if (!prop)
+    throw new Error(
+      "list property lookup: property disappeared before assignment",
+    );
 
   const now = new Date().toISOString();
-  await supabase
+  const { error: membershipError } = await supabase
     .from("property_lists")
     .upsert(
       {
@@ -933,12 +1198,15 @@ async function upsertPropertyListMembership(
         ignoreDuplicates: false,
       },
     );
+  if (membershipError)
+    throw new Error(`list assignment: ${membershipError.message}`);
 }
 
 async function findExistingProperty(
   supabase: SupabaseClient<Database>,
   keys: {
     fipsCode: string | null;
+    orgId: string;
     apnNormalized: string | null;
     zpid: string | null;
     mlsNumber: string | null;
@@ -953,44 +1221,52 @@ async function findExistingProperty(
   // resurrect rather than create fresh on re-import, that's a separate
   // explicit flow (not implemented today).
   if (keys.fipsCode && keys.apnNormalized) {
-    const { data } = await supabase
+    const { data, error } = await supabase
       .from("properties")
       .select("id")
       .eq("fips_code", keys.fipsCode)
+      .eq("org_id", keys.orgId)
       .eq("apn_normalized", keys.apnNormalized)
       .is("deleted_at", null)
       .limit(1)
       .maybeSingle();
+    if (error) throw new Error(`property APN lookup: ${error.message}`);
     if (data) return data.id;
   }
   if (keys.zpid) {
-    const { data } = await supabase
+    const { data, error } = await supabase
       .from("properties")
       .select("id")
       .eq("zpid", keys.zpid)
+      .eq("org_id", keys.orgId)
       .is("deleted_at", null)
       .limit(1)
       .maybeSingle();
+    if (error) throw new Error(`property Zillow lookup: ${error.message}`);
     if (data) return data.id;
   }
   if (keys.mlsNumber) {
-    const { data } = await supabase
+    const { data, error } = await supabase
       .from("properties")
       .select("id")
       .eq("mls_number", keys.mlsNumber)
+      .eq("org_id", keys.orgId)
       .is("deleted_at", null)
       .limit(1)
       .maybeSingle();
+    if (error) throw new Error(`property MLS lookup: ${error.message}`);
     if (data) return data.id;
   }
   if (keys.addressNormalized) {
-    const { data } = await supabase
+    const { data, error } = await supabase
       .from("properties")
       .select("id")
       .eq("address_normalized", keys.addressNormalized)
+      .eq("org_id", keys.orgId)
       .is("deleted_at", null)
       .limit(1)
       .maybeSingle();
+    if (error) throw new Error(`property address lookup: ${error.message}`);
     if (data) return data.id;
   }
   return null;

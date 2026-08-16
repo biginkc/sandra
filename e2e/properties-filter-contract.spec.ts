@@ -4,6 +4,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import {
   adminClient,
   ensureTestUser,
+  resetTenantTables,
   seedList,
   seedProspects,
   type SeededProspect,
@@ -383,25 +384,6 @@ test.describe.serial("Properties filter contract — seeded DB oracle", () => {
   let testUserId: string;
   let seeded: SeededProspect[];
 
-  async function cleanupSeededRows() {
-    if (!admin || !prefix) return;
-    const ids = seeded?.map((property) => property.id) ?? [];
-    if (ids.length > 0) {
-      await admin.from("messages").delete().in("property_id", ids);
-      await admin.from("tasks").delete().in("related_property_id", ids);
-      await admin.from("property_tags").delete().in("property_id", ids);
-    }
-    if (tagA || tagB) {
-      await admin.from("property_tags").delete().in("tag_id", [tagA, tagB]);
-      await admin.from("tags").delete().in("id", [tagA, tagB]);
-    }
-    if (listA || listB) {
-      await admin.from("property_lists").delete().in("list_id", [listA, listB]);
-      await admin.from("lists").delete().in("id", [listA, listB]);
-    }
-    await admin.from("properties").delete().like("address", `${prefix}%`);
-  }
-
   async function cleanupLeakedRowsForPrefix() {
     if (!admin || !prefix) return;
     const { data: properties } = await admin
@@ -582,7 +564,10 @@ test.describe.serial("Properties filter contract — seeded DB oracle", () => {
           state: row.state,
           market: row.market,
           source: row.source,
-          outreach_dispo: row.outreach_dispo,
+          // Install list/tag sidecars before ratcheting true DNC. The database
+          // correctly rejects new outreach artifacts once the lock exists.
+          outreach_dispo:
+            row.outreach_dispo === "dnc" ? null : row.outreach_dispo,
           absentee_flag: row.absentee_flag,
           beds: row.beds,
           baths: row.baths,
@@ -654,6 +639,12 @@ test.describe.serial("Properties filter contract — seeded DB oracle", () => {
     ]);
     expect(tagsError).toBeNull();
 
+    const { error: dncError } = await admin
+      .from("properties")
+      .update({ outreach_dispo: "dnc" })
+      .eq("id", seeded[3].id);
+    expect(dncError).toBeNull();
+
     const { error: messagesError } = await admin.from("messages").insert([
       {
         property_id: seeded[0].id,
@@ -706,7 +697,10 @@ test.describe.serial("Properties filter contract — seeded DB oracle", () => {
   });
 
   test.afterAll(async () => {
-    await cleanupSeededRows();
+    // A true-DNC property is deliberately immutable, including against
+    // row-by-row sidecar deletion. Use the guarded test-tenant reset so the
+    // shared project cannot retain a locked fixture after this serial suite.
+    await resetTenantTables(admin);
   });
 
   test("List any matches the database count for that list", async ({

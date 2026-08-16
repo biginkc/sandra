@@ -35,6 +35,11 @@ type Props = {
   launchFallbackMessage?: string;
   onLaunchSkipTrace?: () => Promise<Result<unknown>>;
   onLaunchSuccess?: (data: unknown) => void;
+  onPreflight?: (propertyIds: string[]) => Promise<Result<SkipTracePreflight>>;
+  onStartCassVerification?: (
+    propertyIds: string[],
+    requestKey: string,
+  ) => Promise<Result<unknown>>;
 };
 
 function plural(n: number, singular: string, pluralLabel = `${singular}s`) {
@@ -67,6 +72,8 @@ export function SkipTracePreflightDialog({
   launchFallbackMessage,
   onLaunchSkipTrace,
   onLaunchSuccess,
+  onPreflight,
+  onStartCassVerification,
 }: Props) {
   const [preflight, setPreflight] = useState<SkipTracePreflight | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -80,6 +87,7 @@ export function SkipTracePreflightDialog({
   const idsKeyRef = useRef(idsKey);
   const openRef = useRef(open);
   const requestSeqRef = useRef(0);
+  const cassRequestKeyRef = useRef<string | null>(null);
   const mode = approveJobId ? "approve" : "request";
 
   useEffect(() => {
@@ -101,7 +109,7 @@ export function SkipTracePreflightDialog({
     void (async () => {
       let result: Awaited<ReturnType<typeof preflightSkipTrace>>;
       try {
-        result = await preflightSkipTrace(requestedIds);
+        result = await (onPreflight ?? preflightSkipTrace)(requestedIds);
       } catch (e) {
         if (
           requestSeqRef.current !== requestSeq ||
@@ -154,6 +162,7 @@ export function SkipTracePreflightDialog({
     setCassStarted(false);
     setLoadedIdsKey(null);
     setLoading(false);
+    cassRequestKeyRef.current = null;
   };
 
   const handleOpenChange = (nextOpen: boolean) => {
@@ -185,12 +194,18 @@ export function SkipTracePreflightDialog({
 
       if (mode === "approve" && approveJobId) {
         const result = await callAction(approveSkipTraceJob(approveJobId), {
-          successMessage: "Skip-trace approved - running.",
           fallbackMessage: "Could not approve skip trace",
         });
         if (!result.ok) {
           loadPreflight();
           return;
+        }
+        if (result.data.status === "canceled") {
+          toast.info("Skip-trace canceled - nothing eligible remains.", {
+            description: `${result.data.excluded} propert${result.data.excluded === 1 ? "y was" : "ies were"} excluded before provider submission.`,
+          });
+        } else {
+          toast.success("Skip-trace approved - running.");
         }
       } else {
         const result = await callAction(requestSkipTrace(propertyIds), {
@@ -243,10 +258,19 @@ export function SkipTracePreflightDialog({
 
     startTransition(async () => {
       const result = await callAction(
-        verifyPropertiesBulk(preflight.cassVerificationPropertyIds),
+        onStartCassVerification
+          ? onStartCassVerification(
+              preflight.cassVerificationPropertyIds,
+              (cassRequestKeyRef.current ??= crypto.randomUUID()),
+            )
+          : verifyPropertiesBulk(
+              preflight.cassVerificationPropertyIds,
+              (cassRequestKeyRef.current ??= crypto.randomUUID()),
+            ),
         { fallbackMessage: "Could not start CASS verification" },
       );
       if (!result.ok) return;
+      cassRequestKeyRef.current = null;
       const verificationCount = preflight.cassVerificationPropertyIds.length;
       toast.success(
         `CASS verification started for ${plural(verificationCount, "address", "addresses")}`,

@@ -3,6 +3,8 @@ import path from "node:path";
 
 import { defineConfig, devices } from "@playwright/test";
 
+import { assertSafeE2ESupabaseTarget } from "./src/lib/supabase/e2e-target-safety";
+
 /**
  * Playwright config for the Sandra CRM E2E safety net (Feature 9).
  *
@@ -42,13 +44,20 @@ function loadTestEnv(): Record<string, string> {
 const env = loadTestEnv();
 
 // Fall back to process.env so CI can inject TEST_SUPABASE_* via secrets.
-const supabaseUrl = env.TEST_SUPABASE_URL ?? process.env.TEST_SUPABASE_URL ?? "";
+const supabaseUrl =
+  process.env.TEST_SUPABASE_URL ?? env.TEST_SUPABASE_URL ?? "";
 const supabaseAnonKey =
-  env.TEST_SUPABASE_ANON_KEY ?? process.env.TEST_SUPABASE_ANON_KEY ?? "";
+  process.env.TEST_SUPABASE_ANON_KEY ?? env.TEST_SUPABASE_ANON_KEY ?? "";
 const supabaseServiceRoleKey =
-  env.TEST_SUPABASE_SERVICE_ROLE_KEY ??
   process.env.TEST_SUPABASE_SERVICE_ROLE_KEY ??
+  env.TEST_SUPABASE_SERVICE_ROLE_KEY ??
   "";
+
+if (supabaseUrl) {
+  assertSafeE2ESupabaseTarget(supabaseUrl, {
+    allowLocal: process.env.E2E_ALLOW_LOCAL_SUPABASE === "1",
+  });
+}
 
 // Publish the values to process.env so the test workers + fixtures can
 // read them. `webServer.env` already gets its own copy below.
@@ -100,6 +109,7 @@ export default defineConfig({
   testIgnore: [
     "**/phase-1-5-uat.spec.ts",
     "**/prod-canary/**",
+    "**/synthetic/**",
     "**/properties-filter-characterization.*.ts",
   ],
   // Don't run in parallel — the suite resets shared DB tables. Parallel
@@ -138,7 +148,10 @@ export default defineConfig({
     // Dedicated port so e2e runs don't collide with a human-run `npm run dev`.
     command: "npx next dev -p 3456",
     url: "http://localhost:3456/login",
-    reuseExistingServer: !process.env.CI,
+    // This suite resets tenant tables and exercises background work. Never
+    // attach to an arbitrary process already listening on the port: it may
+    // have dev/production credentials or real provider configuration.
+    reuseExistingServer: false,
     timeout: 120_000,
     env: webServerEnv,
   },

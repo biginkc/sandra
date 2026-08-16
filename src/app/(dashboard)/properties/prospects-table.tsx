@@ -1,6 +1,6 @@
 "use client";
 
-import { ChevronDownIcon } from "lucide-react";
+import { ChevronDownIcon, LockKeyhole } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState, useTransition } from "react";
@@ -64,15 +64,17 @@ import {
   applyTagBulk,
   assignLeadsBulk,
   deletePropertiesBulk,
-  qualifyLeadsBulk,
   removePropertiesFromListBulk,
+  preflightProspectSkipTrace,
+  requestProspectSkipTrace,
   verifyPropertiesBulk,
   type BulkOutcome,
-} from "../leads/actions";
-import { getAllMatchingProspectIds } from "./actions";
+} from "./dnc-safe-actions";
+import { getAllMatchingProspectSelection } from "./actions";
 import { BatchCreateModal } from "./batch-create-modal";
 import { BulkSmsModal } from "./bulk-sms-modal";
 import { BulkTagModal } from "./bulk-tag-modal";
+import { PromoteLeadsDialog } from "./promote-leads-dialog";
 
 export type ProspectRow = {
   id: string;
@@ -91,6 +93,9 @@ export type ProspectRow = {
   last_message_preview: string | null;
   /** Outreach disposition, if manually set or auto-detected. */
   outreach_dispo: string | null;
+  imported_at?: string | null;
+  dnc_reason?: string | null;
+  channel_restriction?: string | null;
 };
 
 export type ListOption = { id: string; name: string; color: string | null };
@@ -98,6 +103,7 @@ export type TagOption = { id: string; name: string; color: string | null };
 export type TeamMemberOption = { id: string; email: string };
 
 type Props = {
+  orgId?: string;
   prospects: ProspectRow[];
   lists: ListOption[];
   tags: TagOption[];
@@ -122,6 +128,7 @@ type Props = {
    *  silently dropped when they click "page 3". Null when no filters are
    *  active in the URL. */
   filtersParam: string | null;
+  importedParam?: "today" | null;
   /** Total count across all pages matching the current filters — drives the
    *  "Select all N prospects" cross-page selection banner. */
   total: number;
@@ -144,7 +151,17 @@ function summarize(outcome: BulkOutcome, noun = "prospect"): string {
   return parts.join(" · ") || "Done";
 }
 
+export function formatRelativeImportTime(iso: string, now = new Date()): string {
+  const elapsedMinutes = Math.max(0, Math.floor((now.getTime() - new Date(iso).getTime()) / 60_000));
+  if (elapsedMinutes < 1) return "just now";
+  if (elapsedMinutes < 60) return `${elapsedMinutes}m ago`;
+  const hours = Math.floor(elapsedMinutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return `${Math.floor(hours / 24)}d ago`;
+}
+
 export function ProspectsTable({
+  orgId = "",
   prospects,
   lists,
   tags,
@@ -157,19 +174,22 @@ export function ProspectsTable({
   dir,
   blockStack,
   filtersParam,
+  importedParam = null,
   total,
   pageSize,
   page,
   totalPages,
 }: Props) {
   const router = useRouter();
+  const cassRequestKeyRef = useRef<string | null>(null);
   const blockStackKey = JSON.stringify(blockStack);
-  const selectionScopeKey = `${search}\u0000${sort}\u0000${dir}\u0000${blockStackKey}`;
+  const selectionScopeKey = `${search}\u0000${sort}\u0000${dir}\u0000${blockStackKey}\u0000${importedParam ?? ""}`;
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [pending, startTransition] = useTransition();
   const [showBatchCreate, setShowBatchCreate] = useState(false);
   const [showBulkSms, setShowBulkSms] = useState(false);
   const [showBulkTag, setShowBulkTag] = useState(false);
+  const [promotionIds, setPromotionIds] = useState<string[]>([]);
   const [skipTracePreflightIds, setSkipTracePreflightIds] = useState<string[]>(
     [],
   );
@@ -187,6 +207,7 @@ export function ProspectsTable({
   const [selectAllMatchingKey, setSelectAllMatchingKey] = useState<string | null>(
     null,
   );
+  const [selectAllDncLockedCount, setSelectAllDncLockedCount] = useState(0);
   const selectAllMatching = selectAllMatchingKey === selectionScopeKey;
   const selectionScopeStale =
     selectAllMatchingKey !== null && selectAllMatchingKey !== selectionScopeKey;
@@ -228,6 +249,7 @@ export function ProspectsTable({
         // builds; without this re-emit, paginating from page 1→2 of a
         // filtered view would land you on an unfiltered page 2.
         if (filtersParam) sp.set("filters", filtersParam);
+        if (importedParam) sp.set("imported", importedParam);
       },
     },
   });
@@ -290,14 +312,16 @@ export function ProspectsTable({
   const onSelectAllAcrossPages = () => {
     startTransition(async () => {
       const result = await callAction(
-        getAllMatchingProspectIds({
+        getAllMatchingProspectSelection({
           search: search.length === 0 ? null : search,
           blockStack,
+          imported: importedParam,
         }),
         { fallbackMessage: "Could not select all matching prospects" },
       );
       if (result.ok) {
-        setSelected(new Set(result.data));
+        setSelected(new Set(result.data.eligibleIds));
+        setSelectAllDncLockedCount(result.data.dncLockedCount);
         setSelectAllMatchingKey(selectionScopeKey);
       }
     });
@@ -305,26 +329,33 @@ export function ProspectsTable({
 
   const onClearAllSelection = () => {
     setSelected(new Set());
+    setSelectAllDncLockedCount(0);
     setSelectAllMatchingKey(null);
   };
 
+  const selectableProspects = useMemo(
+    () => prospects.filter((prospect) => !prospect.dnc_reason),
+    [prospects],
+  );
   const allSelected = useMemo(
     () =>
-      prospects.length > 0 && prospects.every((p) => selectedInScope.has(p.id)),
-    [prospects, selectedInScope],
+      selectableProspects.length > 0 && selectableProspects.every((p) => selectedInScope.has(p.id)),
+    [selectableProspects, selectedInScope],
   );
   const someSelected = selectedInScope.size > 0 && !allSelected;
 
   const toggleAll = () => {
     setSelectAllMatchingKey(null);
+    setSelectAllDncLockedCount(0);
     setSelected(() => {
       if (allSelected) return new Set();
-      return new Set(prospects.map((p) => p.id));
+      return new Set(selectableProspects.map((p) => p.id));
     });
   };
 
   const toggleOne = (id: string) => {
     setSelectAllMatchingKey(null);
+    setSelectAllDncLockedCount(0);
     setSelected((prev) => {
       const next = selectionScopeStale ? new Set<string>() : new Set(prev);
       if (next.has(id)) next.delete(id);
@@ -359,21 +390,7 @@ export function ProspectsTable({
   const handleQualify = () => {
     const ids = selectedIds();
     if (ids.length === 0) return;
-    startTransition(async () => {
-      const result = await callAction(qualifyLeadsBulk(ids), {
-        fallbackMessage: "Could not qualify selected prospects",
-      });
-      if (result.ok) {
-        const { qualified, alreadyQualified, failed } = result.data;
-        // qualifyLeadsBulk has a bespoke shape (qualified/alreadyQualified
-        // counters). Map to BulkOutcome semantics for the shared helper.
-        finishBulk("Qualified", {
-          succeeded: qualified,
-          skipped: alreadyQualified,
-          failed,
-        });
-      }
-    });
+    setPromotionIds(ids);
   };
 
   const handleAssign = (userId: string | null) => {
@@ -427,12 +444,19 @@ export function ProspectsTable({
     const ids = selectedIds();
     if (ids.length === 0) return;
     startTransition(async () => {
-      const result = await callAction(verifyPropertiesBulk(ids), {
+      const result = await callAction(
+        verifyPropertiesBulk(
+          ids,
+          (cassRequestKeyRef.current ??= crypto.randomUUID()),
+        ),
+        {
         fallbackMessage: "Could not start verify job",
-      });
+        },
+      );
       if (result.ok) {
+        cassRequestKeyRef.current = null;
         toast.success(
-          `Verifying ${ids.length} address${ids.length === 1 ? "" : "es"} in the background`,
+          `Verifying ${result.data.eligibleCount} address${result.data.eligibleCount === 1 ? "" : "es"} in the background`,
           { description: "Watch progress on /jobs" },
         );
         onClearAllSelection();
@@ -673,7 +697,7 @@ export function ProspectsTable({
               </DropdownMenuContent>
           </DropdownMenu>
           <Link href="/import" className={buttonVariants()}>
-            Import CSV
+            Import prospects
           </Link>
           </>
         }
@@ -695,13 +719,23 @@ export function ProspectsTable({
           testId="prospects-search"
         />
       </TableToolbar>
+      <div className="mb-3 flex gap-2">
+        <Link
+          href={importedParam ? "/properties" : "/properties?imported=today"}
+          className={buttonVariants({ variant: importedParam ? "default" : "outline", size: "sm" })}
+        >
+          Imported today
+        </Link>
+      </div>
 
       <SelectAllBanner
         allOnPageSelected={allSelected}
         selectAllMatching={selectAllMatching}
         pageSize={prospects.length}
+        pageEligibleCount={selectableProspects.length}
         total={total}
         selectedCount={selectedInScope.size}
+        dncLockedCount={selectAllMatching ? selectAllDncLockedCount : prospects.length - selectableProspects.length}
         onSelectAllAcrossPages={onSelectAllAcrossPages}
         onClear={onClearAllSelection}
       />
@@ -715,17 +749,35 @@ export function ProspectsTable({
           router.refresh();
         }}
       />
+      {promotionIds.length > 0 ? (
+        <PromoteLeadsDialog
+          open
+          onOpenChange={(nextOpen) => {
+            if (!nextOpen) setPromotionIds([]);
+          }}
+          orgId={orgId}
+          propertyIds={promotionIds}
+          onStarted={() => {
+            onClearAllSelection();
+            router.refresh();
+          }}
+        />
+      ) : null}
       <BulkTagModal
         open={showBulkTag}
         propertyIds={selectAllMatching ? [] : selectedIds()}
         filterArgs={
           selectAllMatching
-            ? { search: search.length === 0 ? null : search, blockStack }
+            ? {
+                search: search.length === 0 ? null : search,
+                blockStack,
+                imported: importedParam,
+              }
             : undefined
         }
         tags={tags}
         allMatching={selectAllMatching}
-        totalCount={selectAllMatching ? total : selectedInScope.size}
+        totalCount={selectedInScope.size}
         onClose={() => setShowBulkTag(false)}
         onApplied={(outcome) => finishBulk("Tagged", outcome)}
       />
@@ -735,10 +787,15 @@ export function ProspectsTable({
         selectedIds={selectAllMatching ? undefined : selectedIds()}
         filterArgs={
           selectAllMatching
-            ? { search: search.length === 0 ? null : search, blockStack }
+            ? {
+                search: search.length === 0 ? null : search,
+                blockStack,
+                imported: importedParam,
+              }
             : undefined
         }
-        totalCount={selectAllMatching ? total : selectedInScope.size}
+        totalCount={selectedInScope.size}
+        lockedExcludedCount={selectAllMatching ? selectAllDncLockedCount : 0}
       />
       <SkipTracePreflightDialog
         open={skipTracePreflightIds.length > 0}
@@ -746,6 +803,9 @@ export function ProspectsTable({
           if (!open) setSkipTracePreflightIds([]);
         }}
         propertyIds={skipTracePreflightIds}
+        onPreflight={preflightProspectSkipTrace}
+        onLaunchSkipTrace={() => requestProspectSkipTrace(skipTracePreflightIds)}
+        onStartCassVerification={verifyPropertiesBulk}
         onFinished={() => {
           onClearAllSelection();
           router.refresh();
@@ -764,6 +824,7 @@ export function ProspectsTable({
                   type="checkbox"
                   aria-label="Select all prospects on this page"
                   checked={allSelected}
+                  disabled={selectableProspects.length === 0}
                   ref={(el) => {
                     if (el) el.indeterminate = someSelected;
                   }}
@@ -851,30 +912,54 @@ export function ProspectsTable({
                       onClick={(e) => e.stopPropagation()}
                       className="cursor-default"
                     >
-                      <input
-                        type="checkbox"
-                        aria-label={`Select ${p.address}`}
-                        checked={isChecked}
-                        onChange={() => toggleOne(p.id)}
-                        className="size-4 cursor-pointer"
-                      />
+                      {p.dnc_reason ? (
+                        <LockKeyhole className="text-muted-foreground size-4" aria-label={`${p.address} is locked Do Not Contact`} />
+                      ) : (
+                        <input
+                          type="checkbox"
+                          aria-label={`Select ${p.address}`}
+                          checked={isChecked}
+                          onChange={() => toggleOne(p.id)}
+                          className="size-4 cursor-pointer"
+                        />
+                      )}
                     </TableCell>
                     <TableCell className="font-medium">
-                      {formatFullAddress({
-                        address: p.address,
-                        city: p.city,
-                        state: p.state,
-                        zip: p.zip,
-                      })}
+                      <Link
+                        href={`/leads/${p.id}`}
+                        onClick={(event) => event.stopPropagation()}
+                        className="rounded-sm underline-offset-4 hover:underline focus-visible:outline-2 focus-visible:outline-offset-2"
+                      >
+                        {formatFullAddress({
+                          address: p.address,
+                          city: p.city,
+                          state: p.state,
+                          zip: p.zip,
+                        })}
+                      </Link>
                     </TableCell>
                     <TableCell>{p.market ?? "—"}</TableCell>
                     <TableCell>
-                      <StatusPills
-                        cass={p.cass_status}
-                        isVacant={p.is_vacant}
-                        engagement={p.engagement}
-                        dispo={p.outreach_dispo}
-                      />
+                      <div className="flex flex-col items-start gap-1">
+                        {p.dnc_reason ? (
+                          <span className="bg-foreground text-background rounded px-2 py-1 font-mono text-[10px] font-bold tracking-wide" title={p.dnc_reason}>
+                            ⊘ DO NOT CONTACT
+                          </span>
+                        ) : (
+                          <StatusPills
+                            cass={p.cass_status}
+                            isVacant={p.is_vacant}
+                            engagement={p.engagement}
+                            dispo={p.outreach_dispo}
+                            channelRestriction={p.channel_restriction ?? null}
+                          />
+                        )}
+                        {p.imported_at && (
+                          <span className="text-muted-foreground font-mono text-[10px]">
+                            Imported {formatRelativeImportTime(p.imported_at)}
+                          </span>
+                        )}
+                      </div>
                     </TableCell>
                     <TableCell
                       className="text-muted-foreground max-w-[280px] truncate text-sm italic"
@@ -942,11 +1027,13 @@ function StatusPills({
   isVacant,
   engagement,
   dispo,
+  channelRestriction,
 }: {
   cass: string;
   isVacant: boolean | null;
   engagement: EngagementState;
   dispo: string | null;
+  channelRestriction: string | null;
 }) {
   return (
     <div className="flex flex-wrap gap-1">
@@ -954,6 +1041,11 @@ function StatusPills({
       {isVacant === true ? <VacantPill /> : null}
       {engagement !== "none" ? <EngagementPill state={engagement} /> : null}
       {dispo ? <DispoPill dispo={dispo} /> : null}
+      {channelRestriction ? (
+        <Badge className="bg-amber-100 text-[10px] font-medium text-amber-900 hover:bg-amber-100">
+          {channelRestriction}
+        </Badge>
+      ) : null}
     </div>
   );
 }
@@ -1084,16 +1176,20 @@ function SelectAllBanner({
   allOnPageSelected,
   selectAllMatching,
   pageSize,
+  pageEligibleCount,
   total,
   selectedCount,
+  dncLockedCount,
   onSelectAllAcrossPages,
   onClear,
 }: {
   allOnPageSelected: boolean;
   selectAllMatching: boolean;
   pageSize: number;
+  pageEligibleCount: number;
   total: number;
   selectedCount: number;
+  dncLockedCount: number;
   onSelectAllAcrossPages: () => void;
   onClear: () => void;
 }) {
@@ -1112,8 +1208,11 @@ function SelectAllBanner({
         className="bg-muted/40 flex items-center justify-between gap-3 rounded-md border px-4 py-2 text-sm"
       >
         <span>
-          All <strong>{fmt(selectedCount)}</strong> prospects selected across
-          all pages.
+          All <strong>{fmt(selectedCount)}</strong> eligible prospects selected
+          across all pages.
+          {dncLockedCount > 0 && (
+            <> <strong>{fmt(dncLockedCount)}</strong> DNC locked and excluded.</>
+          )}
         </span>
         <button
           type="button"
@@ -1134,7 +1233,11 @@ function SelectAllBanner({
       className="bg-muted/40 flex items-center justify-between gap-3 rounded-md border px-4 py-2 text-sm"
     >
       <span>
-        All <strong>{fmt(pageSize)}</strong> on this page selected.
+        All <strong>{fmt(pageEligibleCount)}</strong> eligible prospects on this
+        page selected.
+        {dncLockedCount > 0 && (
+          <> <strong>{fmt(dncLockedCount)}</strong> DNC locked and excluded.</>
+        )}
       </span>
       <button
         type="button"
@@ -1142,7 +1245,7 @@ function SelectAllBanner({
         data-testid="select-all-across-pages"
         className="text-foreground font-medium underline-offset-2 hover:underline"
       >
-        Select all {fmt(total)} prospects →
+        Select all eligible matching prospects →
       </button>
     </div>
   );

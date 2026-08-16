@@ -181,6 +181,7 @@ describe("<BatchCreateModal />", () => {
       expect(createDialerBatchFromFilters).toHaveBeenCalledWith({
         search: "foo",
         blockStack: defaultBlockStack,
+        imported: null,
         title: undefined,
       }),
     );

@@ -111,7 +111,7 @@ describe("enrollJobBatch (integration)", () => {
     await seedJobItem({ jobId, propertyId, status: "pending" });
     await seedJobItem({ jobId, propertyId: null, status: "failed" });
 
-    const result = await enrollJobBatch(supabase, { jobId, sequenceId: seqId });
+    const result = await enrollJobBatch(supabase, { jobId, sequenceId: seqId, orgId: await getOrgId() });
     expect(result).toEqual({ enrolled: 0, skipped: 0, failed: 0 });
   });
 
@@ -124,7 +124,7 @@ describe("enrollJobBatch (integration)", () => {
     await seedJobItem({ jobId, propertyId: p1, status: "success" });
     await seedJobItem({ jobId, propertyId: p2, status: "success" });
 
-    const result = await enrollJobBatch(supabase, { jobId, sequenceId: seqId });
+    const result = await enrollJobBatch(supabase, { jobId, sequenceId: seqId, orgId: await getOrgId() });
     expect(result).toEqual({ enrolled: 2, skipped: 0, failed: 0 });
 
     const { count } = await supabase
@@ -145,7 +145,7 @@ describe("enrollJobBatch (integration)", () => {
     await seedJobItem({ jobId, propertyId: bad1, status: "pending" });
     await seedJobItem({ jobId, propertyId: bad2, status: "failed" });
 
-    const result = await enrollJobBatch(supabase, { jobId, sequenceId: seqId });
+    const result = await enrollJobBatch(supabase, { jobId, sequenceId: seqId, orgId: await getOrgId() });
     expect(result.enrolled).toBe(1);
 
     const { count } = await supabase
@@ -169,7 +169,7 @@ describe("enrollJobBatch (integration)", () => {
     // Second item for same property → duplicate_active on second call
     await seedJobItem({ jobId, propertyId: withPhone, status: "success" });
 
-    const result = await enrollJobBatch(supabase, { jobId, sequenceId: seqId });
+    const result = await enrollJobBatch(supabase, { jobId, sequenceId: seqId, orgId: await getOrgId() });
     expect(result.enrolled).toBe(1);
     expect(result.skipped).toBe(2); // no_phone + duplicate_active
     expect(result.failed).toBe(0);
@@ -202,7 +202,7 @@ describe("enrollJobBatch (integration)", () => {
       });
     }
 
-    const result = await enrollJobBatch(supabase, { jobId, sequenceId: realSeq });
+    const result = await enrollJobBatch(supabase, { jobId, sequenceId: realSeq, orgId: await getOrgId() });
     expect(result.enrolled).toBe(1); // p1 succeeds
     expect(result.skipped).toBe(1);  // p2 opted out → no_consent → skipped
     expect(result.failed).toBe(0);

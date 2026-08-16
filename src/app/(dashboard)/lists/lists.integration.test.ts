@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createTestClient } from "@tests/integration/client";
+import { BMH_ORG_ID } from "@tests/integration/fixtures/multi-user";
 import { resetTenantTables } from "@tests/integration/reset";
 
 const testClient = createTestClient();
@@ -282,6 +283,7 @@ describe("Lists + property_lists stacking (integration)", () => {
       await runIngestion(testClient, {
         jobId,
         csvImportId: importId,
+        orgId: BMH_ORG_ID,
         source: "dealmachine",
         market: "Kansas City",
         mapping: baseMapping,
@@ -307,6 +309,7 @@ describe("Lists + property_lists stacking (integration)", () => {
       await runIngestion(testClient, {
         jobId: a.jobId,
         csvImportId: a.importId,
+        orgId: BMH_ORG_ID,
         source: "dealmachine",
         market: "Kansas City",
         mapping: baseMapping,
@@ -319,6 +322,7 @@ describe("Lists + property_lists stacking (integration)", () => {
       await runIngestion(testClient, {
         jobId: b.jobId,
         csvImportId: b.importId,
+        orgId: BMH_ORG_ID,
         source: "dealmachine",
         market: "Kansas City",
         mapping: baseMapping,
@@ -348,6 +352,7 @@ describe("Lists + property_lists stacking (integration)", () => {
       await runIngestion(testClient, {
         jobId: a.jobId,
         csvImportId: a.importId,
+        orgId: BMH_ORG_ID,
         source: "dealmachine",
         market: "Kansas City",
         mapping: baseMapping,
@@ -368,6 +373,7 @@ describe("Lists + property_lists stacking (integration)", () => {
       await runIngestion(testClient, {
         jobId: b.jobId,
         csvImportId: b.importId,
+        orgId: BMH_ORG_ID,
         source: "dealmachine",
         market: "Kansas City",
         mapping: baseMapping,
@@ -393,6 +399,7 @@ describe("Lists + property_lists stacking (integration)", () => {
       await runIngestion(testClient, {
         jobId,
         csvImportId: importId,
+        orgId: BMH_ORG_ID,
         source: "dealmachine",
         market: "Kansas City",
         mapping: baseMapping,

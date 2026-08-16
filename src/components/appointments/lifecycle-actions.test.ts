@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const {
   afterCallbacks,
   afterMock,
+  assertAppointmentTaskPropertyDncUnlocked,
   cancelAppointment,
   completeAppointment,
   createAdminClient,
@@ -18,6 +19,7 @@ const {
   afterMock: vi.fn((callback: () => Promise<void> | void) => {
     afterCallbacks.push(callback);
   }),
+  assertAppointmentTaskPropertyDncUnlocked: vi.fn(),
   cancelAppointment: vi.fn(),
   completeAppointment: vi.fn(),
   createAdminClient: vi.fn(() => ({ __admin: true })),
@@ -35,6 +37,7 @@ const {
 }));
 
 vi.mock("@/lib/supabase/server", () => ({ createClient }));
+vi.mock("@/lib/dnc/property-lock", () => ({ assertAppointmentTaskPropertyDncUnlocked }));
 vi.mock("@/lib/supabase/admin", () => ({ createAdminClient }));
 vi.mock("@/lib/errors/report", () => ({ reportError: vi.fn() }));
 vi.mock("next/cache", () => ({ revalidatePath }));
@@ -108,6 +111,7 @@ function makeSupabaseMock(opts: {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  assertAppointmentTaskPropertyDncUnlocked.mockResolvedValue({ ok: true, data: null });
 });
 
 afterEach(() => {
@@ -115,6 +119,24 @@ afterEach(() => {
 });
 
 describe("completeAppointmentAction", () => {
+  it("rejects a locked property's stale appointment control", async () => {
+    createClient.mockResolvedValue(
+      makeSupabaseMock({
+        userId: "user-1",
+        taskRow: { org_id: "org-1", title: "Call", due_at: "2026-09-01T15:00:00Z", related_property_id: "prop-1", contact_id: null },
+      }),
+    );
+    assertAppointmentTaskPropertyDncUnlocked.mockResolvedValueOnce({
+      ok: false,
+      error: { code: "DNC_LOCKED", message: "Permanently locked" },
+    });
+
+    const result = await completeAppointmentAction("task-1", "held");
+
+    expect(result).toMatchObject({ ok: false, error: { code: "DNC_LOCKED" } });
+    expect(completeAppointment).not.toHaveBeenCalled();
+  });
+
   it("rejects when unauthenticated, never calling the lib function", async () => {
     createClient.mockResolvedValue(makeSupabaseMock({ userId: null }));
 

@@ -31,12 +31,15 @@ import { type BlockOptions } from "./_components/blocks/_block-shell";
 import { BlockOptionsProvider } from "./_components/block-options-provider";
 import { renderBlock } from "./_components/blocks/registry";
 import type { Preset } from "./_components/quick-filter-chip";
+import { getDayBoundsInZone } from "@/lib/time/zoned";
+import { LEAD_SOURCES } from "@/lib/leads/create";
 
 
 const PAGE_SIZE = 50;
 
 type PropertyQueryRow = {
   id: string;
+  org_id: string;
   address: string;
   city: string | null;
   state: string;
@@ -45,7 +48,18 @@ type PropertyQueryRow = {
   cass_status: string;
   is_vacant: boolean | null;
   created_at: string;
+  status: string;
+  is_dnc_locked: boolean;
   outreach_dispo: string | null;
+  source_import_id: string | null;
+  source_imported_at: string | null;
+  homeowner?: Array<{
+    phone_1: string | null;
+    phone_2: string | null;
+    phone_3: string | null;
+    do_not_contact: boolean;
+    sms_opted_out: boolean;
+  }> | null;
   list_filter?: Array<{ list_id: string }>;
   list_exclusion?: Array<{ list_id: string }>;
   contact_messages?: Array<unknown>;
@@ -88,19 +102,7 @@ const CASS_STATUSES = ["verified", "unverified", "invalid", "ambiguous"];
 // properties.source — migration 053_lead_sources_for_format_helper.sql.
 // Mirror of LEAD_SOURCES in src/lib/leads/create.ts; the CHECK constraint
 // is the floor, the registry is the wall.
-const SOURCES = [
-  "dealmachine",
-  "propstream",
-  "titlepro",
-  "reisift",
-  "agent_outreach",
-  "driving_for_dollars",
-  "referral",
-  "cold_call",
-  "sms",
-  "web_form",
-  "direct_mail",
-];
+const SOURCES = [...LEAD_SOURCES];
 
 export const metadata = {
   title: "Prospects · Sandra CRM",
@@ -123,6 +125,7 @@ export default async function PropertiesPage({
     engagement?: string;
     market?: string;
     assignee?: string;
+    imported?: string;
   }>;
 }) {
   const rawSearchParams = await searchParams;
@@ -158,7 +161,7 @@ export default async function PropertiesPage({
     );
     const propertyListSelect = filterSelectFragment(blockStack);
     const propertiesSelect = [
-      "id, address, city, state, zip, market, cass_status, is_vacant, created_at, outreach_dispo",
+      "id, org_id, address, city, state, zip, market, cass_status, is_vacant, created_at, status, is_dnc_locked, outreach_dispo, source_import_id, source_imported_at, homeowner:contacts!properties_homeowner_contact_id_fkey(phone_1, phone_2, phone_3, do_not_contact, sms_opted_out)",
       propertyListSelect,
     ]
       .filter(Boolean)
@@ -169,10 +172,17 @@ export default async function PropertiesPage({
       .select(propertiesSelect, { count: "exact" })
       .is("deleted_at", null);
     if (!hasPipelineStatusBlock) {
-      query = query.eq("status", "prospect");
+      query = query.or("status.eq.prospect,is_dnc_locked.eq.true");
     }
     if (search) {
       query = query.ilike("address", `%${search}%`);
+    }
+    if (rawSearchParams.imported === "today") {
+      const { dayStart, dayEnd } = getDayBoundsInZone(new Date(), "America/Chicago");
+      query = query
+        .not("source_import_id", "is", null)
+        .gte("source_imported_at", dayStart.toISOString())
+        .lt("source_imported_at", dayEnd.toISOString());
     }
     // Plan 04 translator — applies all 23 block kinds (vacancy / cass /
     // engagement / market / assignee / source / state / motivation_level /
@@ -275,6 +285,7 @@ export default async function PropertiesPage({
 
   const prospects: ProspectRow[] = properties.map((p) => {
     const latest = latestByPropertyId.get(p.id) ?? null;
+    const homeowner = Array.isArray(p.homeowner) ? p.homeowner[0] : p.homeowner;
     return {
       id: p.id,
       address: p.address,
@@ -288,6 +299,13 @@ export default async function PropertiesPage({
       engagement: computeEngagement(latest),
       last_message_preview: truncateMessagePreview(latest?.body ?? null),
       outreach_dispo: p.outreach_dispo ?? null,
+      imported_at: p.source_imported_at,
+      dnc_reason: p.is_dnc_locked
+        ? "Permanent Do Not Contact lock. This record is read-only."
+        : null,
+      channel_restriction: !p.is_dnc_locked && homeowner?.sms_opted_out
+        ? "SMS opted out"
+        : null,
     };
   });
 
@@ -376,12 +394,40 @@ export default async function PropertiesPage({
     if (total === 0) return null;
     const counts = await Promise.all(
       ["verified", "unverified", "invalid", "ambiguous"].map(async (s) => {
-        const { count: c } = await supabase
+        const hasPipelineStatusBlock = blockStack.some(
+          (block) => block.kind === "pipeline_status",
+        );
+        const propertyListSelect = filterSelectFragment(blockStack);
+        const countSelect = ["id", propertyListSelect]
+          .filter(Boolean)
+          .join(", ");
+        let countQuery = supabase
           .from("properties")
-          .select("id", { count: "exact", head: true })
-          .eq("status", "prospect")
+          .select(countSelect, { count: "exact", head: true })
           .is("deleted_at", null)
           .eq("cass_status", s);
+        if (!hasPipelineStatusBlock) {
+          countQuery = countQuery.or(
+            "status.eq.prospect,is_dnc_locked.eq.true",
+          );
+        }
+        if (search) {
+          countQuery = countQuery.ilike("address", `%${search}%`);
+        }
+        if (rawSearchParams.imported === "today") {
+          const { dayStart, dayEnd } = getDayBoundsInZone(
+            new Date(),
+            "America/Chicago",
+          );
+          countQuery = countQuery
+            .not("source_import_id", "is", null)
+            .gte("source_imported_at", dayStart.toISOString())
+            .lt("source_imported_at", dayEnd.toISOString());
+        }
+        countQuery = (
+          await applyFilters(countQuery, blockStack, supabase)
+        ).builder;
+        const { count: c } = await countQuery;
         return [s, c ?? 0] as const;
       }),
     );
@@ -397,8 +443,8 @@ export default async function PropertiesPage({
 
   const headerCount =
     total === 0
-      ? "No prospects yet. Import a CSV to fill the data lake."
-      : `Showing ${showingFrom}–${showingTo} of ${total} prospect${total === 1 ? "" : "s"}${cassBreakdown}. Qualify a prospect to move it into the leads pipeline.`;
+      ? "Imported properties appear in Prospects for review before promotion to Leads. No prospects yet."
+      : `Imported properties appear in Prospects for review before promotion to Leads. Showing ${showingFrom}–${showingTo} of ${total} prospect${total === 1 ? "" : "s"}${cassBreakdown}.`;
 
   return (
     <Page>
@@ -436,6 +482,7 @@ export default async function PropertiesPage({
         <ActiveFiltersChips orgId={orgId} currentBlocks={blockStack} />
 
         <ProspectsTable
+          orgId={orgId}
           prospects={prospects}
           lists={lists}
           tags={tags}
@@ -448,6 +495,7 @@ export default async function PropertiesPage({
           dir={dir}
           blockStack={blockStack}
           filtersParam={rawFiltersParam}
+          importedParam={rawSearchParams.imported === "today" ? "today" : null}
           total={total}
           pageSize={PAGE_SIZE}
           page={page}

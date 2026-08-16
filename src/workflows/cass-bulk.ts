@@ -9,8 +9,7 @@
  * the job row stayed "running" forever.
  *
  * Same shape as csv-import.ts:
- *   1. loadCassJobIds — read property_ids from jobs.input_params, flip
- *      the job to running (beginCassJob)
+ *   1. loadCassJobIds — validate property_ids and claim the paid-start receipt
  *   2. cassChunkStep  — verify one fixed-size slice; cumulative progress
  *   3. finalizeCassStep — terminal status + result_summary + notification
  *
@@ -24,7 +23,7 @@
  */
 
 import {
-  beginCassJob,
+  claimAuthorizedCassJobStart,
   finalizeCassJob,
   runCassChunk,
   type CassJobSummary,
@@ -44,6 +43,8 @@ export type CassBulkWorkflowParams = {
    *  the verification targets. Both producers write this shape:
    *  verifyPropertiesBulk and createCassChildJob. */
   jobId: string;
+  /** Receipt returned by the authenticated start action. */
+  claimToken?: string;
 };
 
 /**
@@ -51,14 +52,17 @@ export type CassBulkWorkflowParams = {
  * running. Throwing here (missing job / empty ids) fails the workflow
  * before any verification spend.
  */
-async function loadCassJobIds(jobId: string): Promise<string[]> {
+export async function loadCassJobIds(
+  jobId: string,
+  claimToken?: string,
+): Promise<{ orgId: string; propertyIds: string[] }> {
   "use step";
 
   const supabase = createAdminClient();
 
   const { data: job, error } = await supabase
     .from("jobs")
-    .select("input_params")
+    .select("id, org_id, type, status, input_params")
     .eq("id", jobId)
     .single();
 
@@ -66,6 +70,12 @@ async function loadCassJobIds(jobId: string): Promise<string[]> {
     throw new Error(
       `CASS bulk workflow: job ${jobId} not found: ${error?.message ?? "no row"}`,
     );
+  }
+  if (job.type !== "cass_dsf2_ncoa") {
+    throw new Error(`CASS bulk workflow: job ${jobId} has type ${job.type}`);
+  }
+  if (job.status !== "queued" && job.status !== "running") {
+    throw new Error(`CASS bulk workflow: job ${jobId} is ${job.status}`);
   }
 
   const raw =
@@ -81,9 +91,17 @@ async function loadCassJobIds(jobId: string): Promise<string[]> {
     );
   }
 
-  await beginCassJob(supabase, { jobId, totalItems: propertyIds.length });
+  const uniquePropertyIds = Array.from(new Set(propertyIds));
+  // The receipt RPC validates the exact target array and every property's
+  // organization inside PostgreSQL. Do not repeat that check through one
+  // PostgREST `.in()` request: large paid jobs exceed both URL and row caps.
+  await claimAuthorizedCassJobStart(supabase, {
+    jobId,
+    orgId: job.org_id,
+    claimToken,
+  });
 
-  return propertyIds;
+  return { orgId: job.org_id, propertyIds: uniquePropertyIds };
 }
 
 /**
@@ -102,6 +120,7 @@ async function cassChunkStep(args: {
   propertyIds: string[];
   processedBefore: number;
   summary: CassJobSummary;
+  expectedOrgId: string;
 }): Promise<CassJobSummary> {
   "use step";
 
@@ -129,7 +148,10 @@ export async function cassBulkWorkflow(
 ): Promise<CassJobSummary> {
   "use workflow";
 
-  const propertyIds = await loadCassJobIds(params.jobId);
+  const { orgId, propertyIds } = await loadCassJobIds(
+    params.jobId,
+    params.claimToken,
+  );
 
   let summary: CassJobSummary = {
     total: propertyIds.length,
@@ -139,6 +161,10 @@ export async function cassBulkWorkflow(
     cacheHits: 0,
     failed: 0,
     providerOff: 0,
+    dncSkipped: 0,
+    retryableFailures: 0,
+    savedResultFailures: 0,
+    manualReconciliation: 0,
   };
 
   for (let offset = 0; offset < propertyIds.length; offset += CHUNK_SIZE) {
@@ -147,6 +173,7 @@ export async function cassBulkWorkflow(
       propertyIds: propertyIds.slice(offset, offset + CHUNK_SIZE),
       processedBefore: offset,
       summary,
+      expectedOrgId: orgId,
     });
   }
 

@@ -1,7 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
+import { useEffect, useMemo, useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
 import {
@@ -11,12 +12,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import {
-  Tabs,
-  TabsContent,
-  TabsList,
-  TabsTrigger,
-} from "@/components/ui/tabs";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   Table,
   TableBody,
@@ -29,6 +25,8 @@ import { cn } from "@/lib/utils";
 import type { Database } from "@/lib/supabase/types";
 
 import { RetrySkipTraceButton } from "../retry-skip-trace-button";
+import { RetryPromoteLeadsButton } from "../retry-promote-leads-button";
+import { RetryCsvImportButton } from "../retry-csv-import-button";
 
 type Job = Database["public"]["Tables"]["jobs"]["Row"];
 type JobItem = Database["public"]["Tables"]["job_items"]["Row"];
@@ -60,12 +58,24 @@ export type BulkSmsJobMetrics = {
 export type JobDetailProps = {
   job: Job;
   items: JobItem[];
-  parent: { id: string; type: string; status: string; title: string | null } | null;
+  parent: {
+    id: string;
+    type: string;
+    status: string;
+    title: string | null;
+  } | null;
   /** Renamed from `children` to avoid shadowing React's reserved prop name. */
-  childJobs: { id: string; type: string; status: string; title: string | null }[];
+  childJobs: {
+    id: string;
+    type: string;
+    status: string;
+    title: string | null;
+  }[];
   csvImport: CsvImport | null;
   bulkSmsMetrics?: BulkSmsJobMetrics | null;
   bulkSmsMetricsError?: string | null;
+  promotionRetryableCount?: number | null;
+  csvRetryAvailable?: boolean;
 };
 
 export function JobDetail({
@@ -76,7 +86,19 @@ export function JobDetail({
   csvImport,
   bulkSmsMetrics = null,
   bulkSmsMetricsError = null,
+  promotionRetryableCount: exactPromotionRetryableCount = null,
+  csvRetryAvailable = false,
 }: JobDetailProps) {
+  const router = useRouter();
+  const promotionRunning =
+    job.type === "promote_leads" &&
+    ["queued", "running", "processing", "finalizing"].includes(job.status);
+  useEffect(() => {
+    if (!promotionRunning) return;
+    const interval = window.setInterval(() => router.refresh(), 3_000);
+    return () => window.clearInterval(interval);
+  }, [promotionRunning, router]);
+
   const skippedFromCount = Math.max(
     0,
     (job.processed_items ?? 0) -
@@ -97,7 +119,7 @@ export function JobDetail({
   ]);
   const isSkipTraceRetryable =
     job.type === "skip_trace" &&
-    (job.status === "failed" || job.status === "partial");
+    ["failed", "partial", "partially_completed"].includes(job.status);
   const erroredItems = items.filter((i) => i.status === "error");
   const hasErroredItems = erroredItems.length > 0;
   const noDataCount = erroredItems.filter(
@@ -108,8 +130,7 @@ export function JobDetail({
   ).length;
   const itemRetryableCount = erroredItems.filter(
     (i) =>
-      i.error_class === null ||
-      RETRYABLE_CLASSES.has(i.error_class as string),
+      i.error_class === null || RETRYABLE_CLASSES.has(i.error_class as string),
   ).length;
   const itemRetryablePropertyIds = erroredItems
     .filter(
@@ -143,9 +164,35 @@ export function JobDetail({
         c.type === "skip_trace" &&
         (c.status === "queued" ||
           c.status === "running" ||
+          c.status === "processing" ||
           c.status === "finalizing"),
     ) ?? null;
   const showRetry = isSkipTraceRetryable && retryCount > 0;
+  const promotionRetryableCount =
+    exactPromotionRetryableCount ??
+    items.filter(
+      (item) =>
+        item.status === "error" &&
+        isRecord(item.output_payload) &&
+        item.output_payload.retryable === true,
+    ).length;
+  const isPromotionRetryable =
+    job.type === "promote_leads" &&
+    ["failed", "partial", "partially_completed"].includes(job.status) &&
+    promotionRetryableCount > 0;
+  const inFlightPromotionChild =
+    childJobs.find(
+      (child) =>
+        child.type === "promote_leads" &&
+        ["queued", "running", "processing", "finalizing"].includes(
+          child.status,
+        ),
+    ) ?? null;
+  const isCsvRetryable =
+    csvRetryAvailable &&
+    job.type === "csv_import" &&
+    ["failed", "partial", "partially_completed"].includes(job.status) &&
+    !["validation", "authorization"].includes(job.error_class ?? "");
 
   return (
     <div className="flex flex-col gap-6">
@@ -165,15 +212,38 @@ export function JobDetail({
             cassUnverifiedCount={cassUnverifiedCount}
             inFlightChildId={inFlightChild?.id ?? null}
           />
+        ) : isPromotionRetryable ? (
+          <RetryPromoteLeadsButton
+            jobId={job.id}
+            retryableCount={promotionRetryableCount}
+            inFlightChildId={inFlightPromotionChild?.id ?? null}
+          />
+        ) : isCsvRetryable ? (
+          <RetryCsvImportButton jobId={job.id} />
         ) : null}
       </div>
 
       {/* KPI tiles — universal */}
       <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
-        <Tile label="Processed" value={`${job.processed_items}/${job.total_items}`} />
-        <Tile label="Succeeded" value={(job.succeeded_items ?? 0).toLocaleString()} tone="positive" />
-        <Tile label="Failed" value={(job.failed_items ?? 0).toLocaleString()} tone={job.failed_items > 0 ? "destructive" : "neutral"} />
-        <Tile label="Skipped" value={skippedFromCount.toLocaleString()} tone="neutral" />
+        <Tile
+          label="Processed"
+          value={`${job.processed_items}/${job.total_items}`}
+        />
+        <Tile
+          label="Succeeded"
+          value={(job.succeeded_items ?? 0).toLocaleString()}
+          tone="positive"
+        />
+        <Tile
+          label="Failed"
+          value={(job.failed_items ?? 0).toLocaleString()}
+          tone={job.failed_items > 0 ? "destructive" : "neutral"}
+        />
+        <Tile
+          label="Skipped"
+          value={skippedFromCount.toLocaleString()}
+          tone="neutral"
+        />
       </div>
 
       {/* Type-specific panel */}
@@ -217,12 +287,16 @@ export function JobDetail({
       <Tabs defaultValue="items">
         <TabsList>
           <TabsTrigger value="items">
-            Items ({items.length.toLocaleString()})
+            Items (
+            {items.length < job.total_items
+              ? `showing ${items.length.toLocaleString()} of ${job.total_items.toLocaleString()}`
+              : items.length.toLocaleString()}
+            )
           </TabsTrigger>
           <TabsTrigger value="audit">Audit / raw</TabsTrigger>
         </TabsList>
         <TabsContent value="items" className="mt-4">
-          <ItemsTable items={items} />
+          <ItemsTable items={items} totalItems={job.total_items} />
         </TabsContent>
         <TabsContent value="audit" className="mt-4">
           <AuditPanel job={job} />
@@ -303,9 +377,61 @@ function TypePanel({
           metricsError={bulkSmsMetricsError}
         />
       );
+    case "promote_leads":
+      return <PromoteLeadsPanel job={job} />;
     default:
       return <DefaultPanel job={job} />;
   }
+}
+
+function PromoteLeadsPanel({ job }: { job: Job }) {
+  const counts = promotionCounts(job.result_summary);
+  return (
+    <Card data-testid="promote-leads-job-panel">
+      <CardHeader className="pb-3">
+        <CardTitle className="text-sm">Promotion results</CardTitle>
+        <CardDescription>
+          Permanently DNC-locked records stay in Prospects and count as safe
+          skips, not failures.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="grid grid-cols-2 gap-3 pt-0 md:grid-cols-5">
+        <DetailRow label="Promoted" value={counts.promoted.toLocaleString()} />
+        <DetailRow
+          label="Already Leads"
+          value={counts.alreadyLead.toLocaleString()}
+        />
+        <DetailRow
+          label="Became permanently DNC"
+          value={counts.dncLocked.toLocaleString()}
+        />
+        <DetailRow
+          label="Stale or missing"
+          value={counts.missing.toLocaleString()}
+        />
+        <DetailRow label="Failed" value={counts.failed.toLocaleString()} />
+      </CardContent>
+    </Card>
+  );
+}
+
+function promotionCounts(summary: Job["result_summary"]): {
+  promoted: number;
+  alreadyLead: number;
+  dncLocked: number;
+  missing: number;
+  failed: number;
+} {
+  const value = isRecord(summary) ? summary : {};
+  const count = (key: string) =>
+    typeof value[key] === "number" ? (value[key] as number) : 0;
+  return {
+    promoted: count("promoted"),
+    alreadyLead: count("already_lead"),
+    dncLocked: count("dnc_locked"),
+    missing: count("missing"),
+    failed: count("failed"),
+  };
 }
 
 function CsvImportPanel({
@@ -324,7 +450,9 @@ function CsvImportPanel({
       <CardHeader className="pb-3">
         <CardTitle className="text-sm">Import details</CardTitle>
         <CardDescription>
-          {csvImport?.filename ?? (params.filename as string | undefined) ?? "—"}
+          {csvImport?.filename ??
+            (params.filename as string | undefined) ??
+            "—"}
         </CardDescription>
       </CardHeader>
       <CardContent className="grid grid-cols-1 gap-3 pt-0 sm:grid-cols-2">
@@ -339,7 +467,7 @@ function CsvImportPanel({
           value={
             csvImport?.storage_path
               ? `csv-imports/${csvImport.storage_path}`
-              : (params.storagePath as string) ?? "—"
+              : ((params.storagePath as string) ?? "—")
           }
           mono
         />
@@ -366,9 +494,7 @@ function CsvUpdatePanel({ job }: { job: Job }) {
     <Card>
       <CardHeader className="pb-3">
         <CardTitle className="text-sm">Update details</CardTitle>
-        <CardDescription>
-          {(params.filename as string) ?? "—"}
-        </CardDescription>
+        <CardDescription>{(params.filename as string) ?? "—"}</CardDescription>
       </CardHeader>
       <CardContent className="grid grid-cols-1 gap-3 pt-0 sm:grid-cols-2">
         <DetailRow
@@ -400,14 +526,16 @@ function CassPanel({ job }: { job: Job }) {
         <DetailRow label="Invalid" value={`${summary.invalid ?? 0}`} />
         <DetailRow label="Ambiguous" value={`${summary.ambiguous ?? 0}`} />
         <DetailRow label="Cache hits" value={`${summary.cacheHits ?? 0}`} />
+        <DetailRow label="Retryable" value={`${summary.retryableFailures ?? 0}`} />
+        <DetailRow label="Saved outputs" value={`${summary.savedResultFailures ?? 0}`} />
+        <DetailRow label="Needs review" value={`${summary.manualReconciliation ?? 0}`} />
       </CardContent>
     </Card>
   );
 }
 
 function SkipTracePanel({ job }: { job: Job }) {
-  const summary =
-    (job.result_summary as Record<string, unknown> | null) ?? {};
+  const summary = (job.result_summary as Record<string, unknown> | null) ?? {};
   const params = (job.input_params as Record<string, unknown> | null) ?? {};
   return (
     <Card>
@@ -440,10 +568,7 @@ function SkipTracePanel({ job }: { job: Job }) {
           value={(params.trace_type as string) ?? "normal"}
         />
         {(summary.cached_hits as number | undefined) !== undefined && (
-          <DetailRow
-            label="Cache hits"
-            value={`${summary.cached_hits ?? 0}`}
-          />
+          <DetailRow label="Cache hits" value={`${summary.cached_hits ?? 0}`} />
         )}
       </CardContent>
     </Card>
@@ -490,8 +615,14 @@ function BulkSmsPanel({
           </div>
         ) : metrics ? (
           <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-            <DetailRow label="Queued to send" value={metrics.queued.toLocaleString()} />
-            <DetailRow label="Due now" value={metrics.dueQueued.toLocaleString()} />
+            <DetailRow
+              label="Queued to send"
+              value={metrics.queued.toLocaleString()}
+            />
+            <DetailRow
+              label="Due now"
+              value={metrics.dueQueued.toLocaleString()}
+            />
             <DetailRow
               label="Pending provider result"
               value={metrics.pending.toLocaleString()}
@@ -500,11 +631,23 @@ function BulkSmsPanel({
               label="Handed to provider"
               value={metrics.handedOff.toLocaleString()}
             />
-            <DetailRow label="Sent, not delivered" value={metrics.sent.toLocaleString()} />
-            <DetailRow label="Delivered" value={metrics.delivered.toLocaleString()} />
+            <DetailRow
+              label="Sent, not delivered"
+              value={metrics.sent.toLocaleString()}
+            />
+            <DetailRow
+              label="Delivered"
+              value={metrics.delivered.toLocaleString()}
+            />
             <DetailRow label="Failed" value={metrics.failed.toLocaleString()} />
-            <DetailRow label="Next send" value={formatNextRelease(metrics.nextScheduledFor)} />
-            <DetailRow label="Drain ETA" value={formatDrainEta(metrics.lastScheduledFor)} />
+            <DetailRow
+              label="Next send"
+              value={formatNextRelease(metrics.nextScheduledFor)}
+            />
+            <DetailRow
+              label="Drain ETA"
+              value={formatDrainEta(metrics.lastScheduledFor)}
+            />
           </div>
         ) : (
           <div className="text-muted-foreground text-sm">
@@ -522,8 +665,8 @@ function DefaultPanel({ job }: { job: Job }) {
       <CardHeader className="pb-3">
         <CardTitle className="text-sm">{job.type}</CardTitle>
         <CardDescription>
-          No type-specific view registered yet — see Audit tab below for the
-          raw input/result.
+          No type-specific view registered yet — see Audit tab below for the raw
+          input/result.
         </CardDescription>
       </CardHeader>
     </Card>
@@ -556,7 +699,13 @@ function DetailRow({
 
 // ---------- Items table ------------------------------------------------------
 
-function ItemsTable({ items }: { items: JobItem[] }) {
+function ItemsTable({
+  items,
+  totalItems,
+}: {
+  items: JobItem[];
+  totalItems: number;
+}) {
   const [filter, setFilter] = useState<"all" | "error" | "skipped" | "success">(
     "all",
   );
@@ -609,8 +758,10 @@ function ItemsTable({ items }: { items: JobItem[] }) {
           </div>
         </div>
         <CardDescription>
-          {items.length === 200
-            ? "Showing first 200 — open the Audit tab to query raw."
+          {items.length < totalItems
+            ? items.length === 0
+              ? `No item-level rows are available; exact totals for all ${totalItems.toLocaleString()} items are shown above.`
+              : `Showing first ${items.length.toLocaleString()} of ${totalItems.toLocaleString()}; exact outcome totals are shown above.`
             : `${filtered.length.toLocaleString()} item${filtered.length === 1 ? "" : "s"}`}
         </CardDescription>
       </CardHeader>
@@ -658,7 +809,9 @@ function ItemsTable({ items }: { items: JobItem[] }) {
                           {errorClassLabel(item.error_class)}
                         </Badge>
                       ) : null}
-                      {item.error_message ? <span>{item.error_message}</span> : null}
+                      {item.error_message ? (
+                        <span>{item.error_message}</span>
+                      ) : null}
                     </div>
                   </TableCell>
                 </TableRow>
@@ -702,7 +855,9 @@ function FilterChip({
           ? "border-foreground bg-foreground text-background"
           : "border-border text-muted-foreground hover:bg-muted",
         !active && tone === "destructive" && "text-destructive",
-        !active && tone === "positive" && "text-emerald-700 dark:text-emerald-400",
+        !active &&
+          tone === "positive" &&
+          "text-emerald-700 dark:text-emerald-400",
       )}
     >
       {label}
@@ -783,7 +938,8 @@ function statusVariant(
 ): "default" | "secondary" | "destructive" | "outline" {
   if (status === "completed") return "default";
   if (status === "failed") return "destructive";
-  if (status === "partial") return "secondary";
+  if (status === "partial" || status === "partially_completed")
+    return "secondary";
   if (status === "canceled" || status === "denied") return "outline";
   return "secondary";
 }
@@ -846,7 +1002,8 @@ function durationLabel(job: Job): string {
   if (!job.started_at) return "not started";
   const end = job.completed_at ?? new Date().toISOString();
   const ms =
-    new Date(end as string).getTime() - new Date(job.started_at as string).getTime();
+    new Date(end as string).getTime() -
+    new Date(job.started_at as string).getTime();
   const sec = Math.max(0, Math.floor(ms / 1000));
   if (sec < 60) return `ran ${sec}s`;
   const min = Math.floor(sec / 60);
@@ -860,7 +1017,9 @@ function fmt(iso: string | null | undefined): string {
   return new Date(iso).toISOString().replace("T", " ").slice(0, 19) + " UTC";
 }
 
-function extractBulkSmsCampaignId(inputParams: Job["input_params"]): string | null {
+function extractBulkSmsCampaignId(
+  inputParams: Job["input_params"],
+): string | null {
   if (!isRecord(inputParams)) return null;
   const opts = inputParams.opts;
   if (!isRecord(opts)) return null;

@@ -589,6 +589,7 @@ describe("Migration 054 — memberships foundation + RLS rewrite", () => {
 
     const seedAddress = `addr-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const seed = await serviceClient.from("skip_trace_cache").insert({
+      org_id: TEST_ORG_B_ID,
       provider: "stage1-fix-test",
       address_normalized: seedAddress,
       result: { phones: [] },
@@ -606,6 +607,7 @@ describe("Migration 054 — memberships foundation + RLS rewrite", () => {
     expect((memberRead.data ?? []).length).toBeGreaterThanOrEqual(1);
 
     const memberWrite = await member.client.from("skip_trace_cache").insert({
+      org_id: TEST_ORG_B_ID,
       provider: "stage1-poison",
       address_normalized: `addr-poison-${Date.now()}`,
       result: { phones: [] },

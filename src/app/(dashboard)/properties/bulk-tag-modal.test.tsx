@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { BulkTagModal } from "./bulk-tag-modal";
 
-vi.mock("../leads/actions", () => ({
+vi.mock("./dnc-safe-actions", () => ({
   createAndApplyCustomTagBulk: vi.fn(),
   createAndApplyCustomTagBulkFromFilters: vi.fn(),
 }));

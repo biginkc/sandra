@@ -5,6 +5,7 @@ import { redirect } from "next/navigation";
 import { createLead, type LeadSource } from "@/lib/leads/create";
 import { errFromUnknown, ok, type Result } from "@/lib/errors/result";
 import { reportError } from "@/lib/errors/report";
+import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
 
 export type NewLeadFormResult = Result<{
@@ -37,6 +38,8 @@ export async function createLeadFromForm(
     last_name: string;
     phone_1: string;
     email: string;
+    assigned_user_id?: string | null;
+    motivation_level?: "hot" | "warm" | "cold" | null;
   },
 ): Promise<NewLeadFormResult> {
   try {
@@ -51,7 +54,64 @@ export async function createLeadFromForm(
       };
     }
 
+    const nowIso = new Date().toISOString();
+    const admin = createAdminClient();
+    const { data: activeMemberships, error: activeMembershipError } = await admin
+      .from("memberships")
+      .select("org_id, created_at")
+      .eq("user_id", user.id)
+      .eq("access_status", "active")
+      .or(`access_expires_at.is.null,access_expires_at.gt.${nowIso}`)
+      .order("created_at", { ascending: true })
+      .order("org_id", { ascending: true })
+      .limit(1);
+    if (activeMembershipError) {
+      return {
+        ok: false,
+        error: {
+          code: "WORKSPACE_VALIDATION_FAILED",
+          message: "We couldn't verify your workspace. Try again.",
+        },
+      };
+    }
+    const orgId = activeMemberships?.[0]?.org_id;
+    if (!orgId) {
+      return {
+        ok: false,
+        error: {
+          code: "NO_ACTIVE_WORKSPACE",
+          message: "You need an active workspace before creating a lead.",
+        },
+      };
+    }
+
+    const assignedUserId =
+      input.assigned_user_id === undefined
+        ? user.id
+        : input.assigned_user_id?.trim() || null;
+    if (assignedUserId) {
+      const { data: sharedMembership, error: assigneeError } = await admin
+        .from("memberships")
+        .select("user_id")
+        .eq("user_id", assignedUserId)
+        .eq("org_id", orgId)
+        .eq("access_status", "active")
+        .or(`access_expires_at.is.null,access_expires_at.gt.${nowIso}`)
+        .limit(1)
+        .maybeSingle();
+      if (assigneeError || !sharedMembership) {
+        return {
+          ok: false,
+          error: {
+            code: "INVALID_ASSIGNEE",
+            message: "Choose a teammate who belongs to your workspace.",
+          },
+        };
+      }
+    }
+
     const result = await createLead(supabase, {
+      orgId,
       source: input.source as LeadSource,
       property: {
         address: input.address,
@@ -69,6 +129,8 @@ export async function createLeadFromForm(
           }
         : undefined,
       createdBy: user.id,
+      assignedUserId,
+      motivationLevel: input.motivation_level ?? null,
     });
 
     if (!result.ok) {
@@ -120,6 +182,11 @@ export async function submitNewLead(formData: FormData): Promise<void> {
     // Surface the error via a query-string param the form reads.
     redirect(
       `/leads/new?error=${encodeURIComponent(result.error.message)}${result.error.details && typeof result.error.details === "object" && "field" in result.error.details ? `&field=${encodeURIComponent(String(result.error.details.field))}` : ""}`,
+    );
+  }
+  if (result.data.wasDuplicate) {
+    redirect(
+      `/leads/new?error=${encodeURIComponent("A lead already exists at this address. Open the existing record instead.")}`,
     );
   }
   // Degraded save: the phone couldn't be classified and sits on the
