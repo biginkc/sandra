@@ -51,6 +51,7 @@ export type LeadBoardData = {
   urgencyCounts: Record<UrgencyFilter, number> | null;
   nextCursors: Partial<Record<PropertyStatus, LeadBoardCursor>>;
   hasMore: Partial<Record<PropertyStatus, boolean>>;
+  snapshotGenerations: Partial<Record<PropertyStatus, string>>;
   unreadPropertyIds: string[];
   listMemberships: Record<string, ListMembership[]>;
   customTags: Record<string, CustomTag[]>;
@@ -91,12 +92,13 @@ async function fetchStage(
   total: number;
   nextCursor: LeadBoardCursor | null;
   hasMore: boolean;
+  snapshotGeneration: string | null;
 }> {
   if (filters.hotOnly && stage !== "interested" && stage !== "offer_sent") {
-    return { rows: [], total: 0, nextCursor: null, hasMore: false };
+    return { rows: [], total: 0, nextCursor: null, hasMore: false, snapshotGeneration: null };
   }
   if (context.unassigned && (stage === "closed" || stage === "dead")) {
-    return { rows: [], total: 0, nextCursor: null, hasMore: false };
+    return { rows: [], total: 0, nextCursor: null, hasMore: false, snapshotGeneration: null };
   }
   const { data, error } = await supabase.rpc("get_leads_board_page", {
     ...rpcFilters(filters, context),
@@ -107,7 +109,9 @@ async function fetchStage(
     p_limit: LEADS_COLUMN_PAGE_SIZE + 1,
   });
   if (error) throw new Error(`Lead page failed for ${stage}: ${error.message}`);
-  const result = data?.[0];
+  const result = data?.[0] as (typeof data extends Array<infer Row> ? Row : never) & {
+    snapshot_generation?: string | null;
+  } | undefined;
   const rawRows = Array.isArray(result?.rows) ? result.rows : [];
   const fetched = rawRows as unknown as Array<LeadBoardLead & {
     last_message_direction: string | null;
@@ -121,6 +125,7 @@ async function fetchStage(
     rows: kept,
     total: Number(result?.total_count ?? 0),
     hasMore,
+    snapshotGeneration: result?.snapshot_generation ?? null,
     nextCursor: hasMore && last ? { dueAt: last.next_task_due_at, id: last.id } : null,
   };
 }
@@ -249,9 +254,11 @@ export async function fetchLeadBoardData(
   const totals = Object.fromEntries(STATUS_ORDER.map((status) => [status, 0])) as Record<PropertyStatus, number>;
   const nextCursors: Partial<Record<PropertyStatus, LeadBoardCursor>> = {};
   const hasMore: Partial<Record<PropertyStatus, boolean>> = {};
+  const snapshotGenerations: Partial<Record<PropertyStatus, string>> = {};
   for (const { status, page } of pages) {
     totals[status] = page.total;
     hasMore[status] = page.hasMore;
+    if (page.snapshotGeneration) snapshotGenerations[status] = page.snapshotGeneration;
     if (page.nextCursor) nextCursors[status] = page.nextCursor;
   }
   const includeFacets = statuses.length === STATUS_ORDER.length;
@@ -267,6 +274,7 @@ export async function fetchLeadBoardData(
     urgencyCounts,
     nextCursors,
     hasMore,
+    snapshotGenerations,
     unreadPropertyIds: leads.filter((lead) => lead.has_unread).map((lead) => lead.id),
     ...decorations,
   };

@@ -54,35 +54,51 @@ export async function createLeadFromForm(
       };
     }
 
+    const nowIso = new Date().toISOString();
+    const admin = createAdminClient();
+    const { data: activeMemberships, error: activeMembershipError } = await admin
+      .from("memberships")
+      .select("org_id, created_at")
+      .eq("user_id", user.id)
+      .eq("access_status", "active")
+      .or(`access_expires_at.is.null,access_expires_at.gt.${nowIso}`)
+      .order("created_at", { ascending: true })
+      .order("org_id", { ascending: true })
+      .limit(1);
+    if (activeMembershipError) {
+      return {
+        ok: false,
+        error: {
+          code: "WORKSPACE_VALIDATION_FAILED",
+          message: "We couldn't verify your workspace. Try again.",
+        },
+      };
+    }
+    const orgId = activeMemberships?.[0]?.org_id;
+    if (!orgId) {
+      return {
+        ok: false,
+        error: {
+          code: "NO_ACTIVE_WORKSPACE",
+          message: "You need an active workspace before creating a lead.",
+        },
+      };
+    }
+
     const assignedUserId =
       input.assigned_user_id === undefined
         ? user.id
         : input.assigned_user_id?.trim() || null;
-    if (assignedUserId && assignedUserId !== user.id) {
-      const { data: myMemberships, error: myMembershipError } = await supabase
+    if (assignedUserId) {
+      const { data: sharedMembership, error: assigneeError } = await admin
         .from("memberships")
-        .select("org_id")
-        .eq("user_id", user.id);
-      if (myMembershipError) {
-        return {
-          ok: false,
-          error: {
-            code: "ASSIGNEE_VALIDATION_FAILED",
-            message: "We couldn't verify that teammate. Try again.",
-          },
-        };
-      }
-      const orgIds = (myMemberships ?? []).map((membership) => membership.org_id);
-      const admin = createAdminClient();
-      const { data: sharedMembership, error: assigneeError } = orgIds.length
-        ? await admin
-            .from("memberships")
-            .select("user_id")
-            .eq("user_id", assignedUserId)
-            .in("org_id", orgIds)
-            .limit(1)
-            .maybeSingle()
-        : { data: null, error: null };
+        .select("user_id")
+        .eq("user_id", assignedUserId)
+        .eq("org_id", orgId)
+        .eq("access_status", "active")
+        .or(`access_expires_at.is.null,access_expires_at.gt.${nowIso}`)
+        .limit(1)
+        .maybeSingle();
       if (assigneeError || !sharedMembership) {
         return {
           ok: false,
@@ -95,6 +111,7 @@ export async function createLeadFromForm(
     }
 
     const result = await createLead(supabase, {
+      orgId,
       source: input.source as LeadSource,
       property: {
         address: input.address,

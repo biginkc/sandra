@@ -47,6 +47,7 @@ import type { Database } from "@/lib/supabase/types";
 import { loadTemplateVars } from "@/lib/sequences/template-vars";
 import type { TemplateVars } from "@/lib/templates/render";
 import { createTask, type Task, type TaskType } from "@/lib/tasks";
+import { validateActiveAssigneeForProperties } from "./assignment-safety";
 
 export type PropertyStatus =
   | "prospect"
@@ -166,6 +167,14 @@ export async function verifyLeadAddress(
             message: "Provider returned no result.",
           },
         };
+      case "dnc_skipped":
+        return {
+          ok: false,
+          error: { code: "DNC_LOCKED", message: DNC_LOCKED_MESSAGE },
+        };
+      case "submission_unknown":
+      case "provider_rejected":
+      case "provider_persist_failed":
       case "failed":
         return {
           ok: false,
@@ -703,6 +712,20 @@ export async function assignLeadsBulk(
       };
     }
     const assignIds = partition.data.unlocked;
+    const assigneeValidation = await validateActiveAssigneeForProperties(
+      supabase,
+      assignIds,
+      userId,
+    );
+    if (!assigneeValidation.ok) {
+      return {
+        ok: false,
+        error: {
+          code: assigneeValidation.code,
+          message: assigneeValidation.message,
+        },
+      };
+    }
     const {
       data: { user },
     } = await supabase.auth.getUser();
@@ -1779,6 +1802,20 @@ export async function updateLeadAssignee(
     const supabase = await createClient();
     const unlocked = await assertPropertyDncUnlocked(supabase, propertyId);
     if (!unlocked.ok) return unlocked;
+    const assigneeValidation = await validateActiveAssigneeForProperties(
+      supabase,
+      [propertyId],
+      userId,
+    );
+    if (!assigneeValidation.ok) {
+      return {
+        ok: false,
+        error: {
+          code: assigneeValidation.code,
+          message: assigneeValidation.message,
+        },
+      };
+    }
     const { error } = await supabase
       .from("properties")
       .update({

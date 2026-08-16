@@ -43,6 +43,8 @@ export type LeadSource = (typeof LEAD_SOURCES)[number];
 export type LeadMotivation = "hot" | "warm" | "cold";
 
 export type CreateLeadInput = {
+  /** Tenant boundary for every lookup and write. Required even for service-role callers. */
+  orgId: string;
   /** How the lead got into the pipeline. Required — drives KPI / attribution. */
   source: LeadSource;
   /** Property fields. Address + state are required; rest optional. */
@@ -131,6 +133,17 @@ export async function createLead(
   input: CreateLeadInput,
 ): Promise<{ ok: true; data: CreateLeadResult } | { ok: false; error: CreateLeadError }> {
   // ---- 1. Validate + normalize ---------------------------------------
+  const orgId = input.orgId?.trim() ?? "";
+  if (!orgId) {
+    return {
+      ok: false,
+      error: {
+        code: "VALIDATION",
+        message: "Organization is required.",
+        field: "orgId",
+      },
+    };
+  }
   const addressRaw = input.property.address?.trim() ?? "";
   if (!addressRaw) {
     return {
@@ -191,6 +204,7 @@ export async function createLead(
     const { data: existing, error: lookupErr } = await supabase
       .from("properties")
       .select("id")
+      .eq("org_id", orgId)
       .eq("address_normalized", addressNormalized)
       .is("deleted_at", null)
       .limit(1)
@@ -227,7 +241,7 @@ export async function createLead(
     !!phoneNorm || !!emailNorm || !!firstNorm || !!lastNorm;
   if (hasAnyContactField) {
     try {
-      resolvedContact = await resolveOrCreateContact(supabase, {
+      resolvedContact = await resolveOrCreateContact(supabase, orgId, {
         first_name: firstNorm,
         last_name: lastNorm,
         phone_1: phoneNorm,
@@ -248,6 +262,7 @@ export async function createLead(
   }
 
   const insertRow: Database["public"]["Tables"]["properties"]["Insert"] = {
+    org_id: orgId,
     status: "new_lead",
     address: addressRaw,
     city: cityNorm,
@@ -275,6 +290,7 @@ export async function createLead(
       const { data: winner, error: winnerError } = await supabase
         .from("properties")
         .select("id")
+        .eq("org_id", orgId)
         .eq("address_normalized", addressNormalized)
         .is("deleted_at", null)
         .limit(1)
@@ -287,6 +303,7 @@ export async function createLead(
     if (resolvedContact.created && resolvedContact.id) {
       const cleanup = await cleanupNewContactIfUnreferenced(
         supabase,
+        orgId,
         resolvedContact.id,
       );
       if (!cleanup.ok) return cleanup;
@@ -325,12 +342,14 @@ export async function createLead(
 
 async function cleanupNewContactIfUnreferenced(
   supabase: SupabaseClient<Database>,
+  orgId: string,
   contactId: string,
 ): Promise<{ ok: true } | { ok: false; error: CreateLeadError }> {
   try {
     const { data: reference, error: referenceError } = await supabase
       .from("properties")
       .select("id")
+      .eq("org_id", orgId)
       .eq("homeowner_contact_id", contactId)
       .limit(1)
       .maybeSingle();
@@ -345,6 +364,7 @@ async function cleanupNewContactIfUnreferenced(
     const { data: removedContact, error: contactCleanupError } = await supabase
       .from("contacts")
       .delete()
+      .eq("org_id", orgId)
       .eq("id", contactId)
       .select("id")
       .maybeSingle();
@@ -352,10 +372,16 @@ async function cleanupNewContactIfUnreferenced(
 
     const [{ data: remaining, error: remainingError }, { data: newReference }] =
       await Promise.all([
-        supabase.from("contacts").select("id").eq("id", contactId).maybeSingle(),
+        supabase
+          .from("contacts")
+          .select("id")
+          .eq("org_id", orgId)
+          .eq("id", contactId)
+          .maybeSingle(),
         supabase
           .from("properties")
           .select("id")
+          .eq("org_id", orgId)
           .eq("homeowner_contact_id", contactId)
           .limit(1)
           .maybeSingle(),
@@ -413,9 +439,10 @@ function contactRepairRequired(
  */
 async function resolveOrCreateContact(
   supabase: SupabaseClient<Database>,
+  orgId: string,
   contact: ContactIdentity,
 ): Promise<{ id: string | null; phoneDropped: string | null; created: boolean }> {
-  const existingContactId = await findExistingContact(supabase, contact);
+  const existingContactId = await findExistingContact(supabase, orgId, contact);
   if (existingContactId) {
     return { id: existingContactId, phoneDropped: null, created: false };
   }
@@ -450,6 +477,7 @@ async function resolveOrCreateContact(
   const { data, error } = await supabase
     .from("contacts")
     .insert({
+      org_id: orgId,
       contact_type: "person",
       first_name: contact.first_name,
       last_name: contact.last_name,
@@ -467,7 +495,7 @@ async function resolveOrCreateContact(
     // Re-read after a unique conflict and mark it reused; only rows created
     // by this request may ever enter compensating cleanup.
     if (error.code === "23505") {
-      const racedContactId = await findExistingContact(supabase, contact);
+      const racedContactId = await findExistingContact(supabase, orgId, contact);
       if (racedContactId) {
         return { id: racedContactId, phoneDropped: null, created: false };
       }
@@ -486,12 +514,14 @@ type ContactIdentity = {
 
 async function findExistingContact(
   supabase: SupabaseClient<Database>,
+  orgId: string,
   contact: ContactIdentity,
 ): Promise<string | null> {
   if (contact.phone_1) {
     const { data, error } = await supabase
       .from("contacts")
       .select("id")
+      .eq("org_id", orgId)
       .or(
         `phone_1.eq.${contact.phone_1},phone_2.eq.${contact.phone_1},phone_3.eq.${contact.phone_1}`,
       )
@@ -504,6 +534,7 @@ async function findExistingContact(
     const { data, error } = await supabase
       .from("contacts")
       .select("id")
+      .eq("org_id", orgId)
       .ilike("email", contact.email)
       .limit(1)
       .maybeSingle();
@@ -519,6 +550,7 @@ async function findExistingContact(
     const { data, error } = await supabase
       .from("contacts")
       .select("id")
+      .eq("org_id", orgId)
       .ilike("first_name", contact.first_name)
       .ilike("last_name", contact.last_name)
       .eq("contact_type", "person")

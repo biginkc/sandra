@@ -6,6 +6,7 @@ LEADS_PORT="$((37432 + RANDOM % 1000))"
 LEADS_SOCKET="$LEADS_TMP/socket"
 LEADS_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 LEADS_MIGRATION="$LEADS_ROOT/supabase/migrations/20260815233000_leads_urgency_paging.sql"
+LEADS_SAFETY_MIGRATION="$LEADS_ROOT/supabase/migrations/20260816030000_leads_tenant_paging_safety.sql"
 LEADS_DNC_MIGRATION="$LEADS_ROOT/supabase/migrations/20260815190000_true_dnc_property_lock.sql"
 mkdir -p "$LEADS_SOCKET"
 
@@ -35,7 +36,11 @@ $$;
 grant usage on schema auth to authenticated, service_role;
 grant execute on function auth.uid() to authenticated, service_role;
 
-create table public.memberships (user_id uuid not null, org_id uuid not null, primary key(user_id, org_id));
+create table public.memberships (
+  user_id uuid not null, org_id uuid not null,
+  access_status text not null default 'active', access_expires_at timestamptz,
+  primary key(user_id, org_id)
+);
 create table public.contacts (
   id uuid primary key, org_id uuid not null, first_name text, last_name text,
   entity_name text, do_not_contact boolean not null default false
@@ -115,6 +120,8 @@ SQL
 psql -v ON_ERROR_STOP=1 -h "$LEADS_SOCKET" -p "$LEADS_PORT" -U postgres -d sandra_leads_rehearsal -f "$LEADS_DNC_MIGRATION" >/dev/null
 psql -v ON_ERROR_STOP=1 -h "$LEADS_SOCKET" -p "$LEADS_PORT" -U postgres -d sandra_leads_rehearsal -f "$LEADS_MIGRATION" >/dev/null
 psql -v ON_ERROR_STOP=1 -h "$LEADS_SOCKET" -p "$LEADS_PORT" -U postgres -d sandra_leads_rehearsal -f "$LEADS_MIGRATION" >/dev/null
+psql -v ON_ERROR_STOP=1 -h "$LEADS_SOCKET" -p "$LEADS_PORT" -U postgres -d sandra_leads_rehearsal -f "$LEADS_SAFETY_MIGRATION" >/dev/null
+psql -v ON_ERROR_STOP=1 -h "$LEADS_SOCKET" -p "$LEADS_PORT" -U postgres -d sandra_leads_rehearsal -f "$LEADS_SAFETY_MIGRATION" >/dev/null
 
 psql -v ON_ERROR_STOP=1 -h "$LEADS_SOCKET" -p "$LEADS_PORT" -U postgres -d sandra_leads_rehearsal <<'SQL'
 set role authenticated;
@@ -134,6 +141,87 @@ do $$ begin
   then raise exception 'active-sequence semantic was not projected'; end if;
 end $$;
 reset role;
+SQL
+
+# Equal-count swap: one card leaves before the cursor while another enters in
+# its place. Count-only detection misses this; the whole-filter fingerprint
+# must change so the client replaces the board rather than appending stale data.
+psql -v ON_ERROR_STOP=1 -h "$LEADS_SOCKET" -p "$LEADS_PORT" -U postgres -d sandra_leads_rehearsal <<'SQL'
+insert into properties (id,org_id,address,city,state,status,created_at) values
+ ('aaaaaaaa-1000-4000-8000-000000000021','aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa','21 Swap Out','Kansas City','MO','offer_sent','2026-01-21'),
+ ('aaaaaaaa-1000-4000-8000-000000000022','aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa','22 Stable Tail','Kansas City','MO','offer_sent','2026-01-22'),
+ ('aaaaaaaa-1000-4000-8000-000000000023','aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa','23 Swap In','Kansas City','MO','contacted','2026-01-23');
+insert into tasks (id,org_id,assignee_id,related_property_id,type,status,title,due_at,created_by) values
+ ('aaaaaaaa-2000-4000-8000-000000000021','aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa','11111111-1111-4111-8111-111111111111','aaaaaaaa-1000-4000-8000-000000000021','follow_up','open','Swap out','2026-08-10 12:00Z','11111111-1111-4111-8111-111111111111'),
+ ('aaaaaaaa-2000-4000-8000-000000000022','aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa','11111111-1111-4111-8111-111111111111','aaaaaaaa-1000-4000-8000-000000000022','follow_up','open','Stable tail','2026-08-11 12:00Z','11111111-1111-4111-8111-111111111111'),
+ ('aaaaaaaa-2000-4000-8000-000000000023','aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa','11111111-1111-4111-8111-111111111111','aaaaaaaa-1000-4000-8000-000000000023','follow_up','open','Swap in','2026-08-09 12:00Z','11111111-1111-4111-8111-111111111111');
+set role authenticated;
+set request.jwt.claim.sub='11111111-1111-4111-8111-111111111111';
+create temp table swap_first as
+  select rows, total_count, snapshot_generation
+  from get_leads_board_page(
+    'offer_sent', null, false, array[]::text[], 'all', 'all', null,
+    false, false, null, '2026-08-15 05:00Z', '2026-08-16 05:00Z',
+    null, null, 1
+  );
+reset role;
+update properties set status='contacted' where id='aaaaaaaa-1000-4000-8000-000000000021';
+update properties set status='offer_sent' where id='aaaaaaaa-1000-4000-8000-000000000023';
+set role authenticated;
+set request.jwt.claim.sub='11111111-1111-4111-8111-111111111111';
+create temp table swap_second as
+  select page.rows, page.total_count, page.snapshot_generation
+  from swap_first first,
+  lateral get_leads_board_page(
+    'offer_sent', null, false, array[]::text[], 'all', 'all', null,
+    false, false, null, '2026-08-15 05:00Z', '2026-08-16 05:00Z',
+    (first.rows -> -1 ->> 'next_task_due_at')::timestamptz,
+    (first.rows -> -1 ->> 'id')::uuid,
+    2
+  ) page;
+do $$ begin
+  if (select total_count from swap_first) <> (select total_count from swap_second)
+  then raise exception 'equal-count swap did not preserve count'; end if;
+  if (select snapshot_generation from swap_first) = (select snapshot_generation from swap_second)
+  then raise exception 'equal-count swap did not change snapshot fingerprint'; end if;
+end $$;
+reset role;
+SQL
+
+# The application pre-check gives a friendly error; this database trigger is
+# the race-closing authority immediately when assigned_user_id is written.
+psql -v ON_ERROR_STOP=1 -h "$LEADS_SOCKET" -p "$LEADS_PORT" -U postgres -d sandra_leads_rehearsal <<'SQL'
+insert into memberships (user_id,org_id,access_status,access_expires_at) values
+ ('11111111-1111-4111-8111-111111111112','aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa','active',null),
+ ('11111111-1111-4111-8111-111111111113','aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa','suspended',null),
+ ('11111111-1111-4111-8111-111111111114','aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa','active',now()-interval '1 minute');
+update properties set assigned_user_id='11111111-1111-4111-8111-111111111112'
+where id='aaaaaaaa-1000-4000-8000-000000000002';
+do $$ begin
+  begin
+    update properties set assigned_user_id='11111111-1111-4111-8111-111111111113'
+    where id='aaaaaaaa-1000-4000-8000-000000000002';
+    raise exception 'suspended assignee unexpectedly accepted';
+  exception when check_violation then
+    if sqlerrm not like 'INVALID_ASSIGNEE:%' then raise; end if;
+  end;
+  begin
+    update properties set assigned_user_id='11111111-1111-4111-8111-111111111114'
+    where id='aaaaaaaa-1000-4000-8000-000000000002';
+    raise exception 'expired assignee unexpectedly accepted';
+  exception when check_violation then
+    if sqlerrm not like 'INVALID_ASSIGNEE:%' then raise; end if;
+  end;
+  begin
+    update properties set assigned_user_id='22222222-2222-4222-8222-222222222222'
+    where id='aaaaaaaa-1000-4000-8000-000000000002';
+    raise exception 'other-org assignee unexpectedly accepted';
+  exception when check_violation then
+    if sqlerrm not like 'INVALID_ASSIGNEE:%' then raise; end if;
+  end;
+end $$;
+update properties set assigned_user_id=null
+where id='aaaaaaaa-1000-4000-8000-000000000002';
 SQL
 
 # Two concurrent inline Set calls use different request keys but one property
@@ -337,4 +425,4 @@ end $$;
 reset role;
 SQL
 
-echo "Leads urgency/paging migration rehearsal passed (real DNC triggers, apply/replay, multi-org, projection, concurrency, exact page/count, keyset refresh signal)."
+echo "Leads urgency/paging migration rehearsal passed (real DNC triggers, apply/replay, multi-org, assignment membership, projection, concurrency, exact page/count, and equal-count fingerprint refresh signal)."

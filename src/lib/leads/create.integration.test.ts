@@ -6,6 +6,8 @@ import { resetTenantTables } from "@tests/integration/reset";
 import { createLead } from "./create";
 
 const supabase = createTestClient();
+const ORG_ID = "00000000-0000-0000-0000-000000000bbb";
+const OTHER_ORG_ID = "00000000-0000-0000-0000-000000000ccc";
 
 // createLead classifies the lead's phone via Telnyx at intake (hard
 // rule: untyped phones are never saved). Stub the Telnyx endpoint so
@@ -93,6 +95,7 @@ describe("createLead (integration)", () => {
 
   it("creates property + homeowner contact with status='new_lead' and source set", async () => {
     const result = await createLead(supabase, {
+      orgId: ORG_ID,
       source: "cold_call",
       property: {
         address: "1 Cold Call Ln",
@@ -132,6 +135,7 @@ describe("createLead (integration)", () => {
 
   it("dedups property by normalized address — second call returns existing id with wasDuplicate=true", async () => {
     const first = await createLead(supabase, {
+      orgId: ORG_ID,
       source: "cold_call",
       property: { address: "2 Dedup St", state: "MO" },
     });
@@ -139,6 +143,7 @@ describe("createLead (integration)", () => {
     if (!first.ok) return;
 
     const second = await createLead(supabase, {
+      orgId: ORG_ID,
       source: "web_form",
       property: { address: "2 Dedup St", state: "MO" },
     });
@@ -150,6 +155,7 @@ describe("createLead (integration)", () => {
 
   it("dedups contact by phone_1", async () => {
     const a = await createLead(supabase, {
+      orgId: ORG_ID,
       source: "cold_call",
       property: { address: "3 Phone Dedup A Ln", state: "MO" },
       contact: { phone_1: "+18165551002" },
@@ -158,6 +164,7 @@ describe("createLead (integration)", () => {
     if (!a.ok) return;
 
     const b = await createLead(supabase, {
+      orgId: ORG_ID,
       source: "cold_call",
       property: { address: "4 Phone Dedup B Ln", state: "MO" },
       contact: { phone_1: "+18165551002" },
@@ -168,9 +175,68 @@ describe("createLead (integration)", () => {
     expect(b.data.contactId).toBe(a.data.contactId);
   });
 
+  it("keeps identical address, phone, email, and another org's DNC contact tenant-isolated", async () => {
+    await supabase.from("organizations").upsert({ id: OTHER_ORG_ID, name: "Other org" });
+    const { data: otherContact, error: otherContactError } = await supabase
+      .from("contacts")
+      .insert({
+        org_id: OTHER_ORG_ID,
+        first_name: "Other",
+        last_name: "Owner",
+        phone_1: "+18165551003",
+        phone_1_type: "mobile",
+        email: "shared@example.test",
+        do_not_contact: true,
+      })
+      .select("id")
+      .single();
+    expect(otherContactError).toBeNull();
+    const { error: otherPropertyError } = await supabase.from("properties").insert({
+      org_id: OTHER_ORG_ID,
+      address: "23 Shared Tenant Way",
+      address_normalized: "23 shared tenant way",
+      state: "MO",
+      status: "new_lead",
+      homeowner_contact_id: otherContact!.id,
+    });
+    expect(otherPropertyError).toBeNull();
+
+    const result = await createLead(supabase, {
+      orgId: ORG_ID,
+      source: "cold_call",
+      property: { address: "23 Shared Tenant Way", state: "MO" },
+      contact: {
+        first_name: "Current",
+        last_name: "Owner",
+        phone_1: "+18165551003",
+        email: "shared@example.test",
+      },
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.data.wasDuplicate).toBe(false);
+    expect(result.data.contactId).not.toBe(otherContact!.id);
+
+    const [{ data: property }, { data: contact }] = await Promise.all([
+      supabase
+        .from("properties")
+        .select("org_id, is_dnc_locked")
+        .eq("id", result.data.propertyId)
+        .single(),
+      supabase
+        .from("contacts")
+        .select("org_id, do_not_contact")
+        .eq("id", result.data.contactId!)
+        .single(),
+    ]);
+    expect(property).toMatchObject({ org_id: ORG_ID, is_dnc_locked: false });
+    expect(contact).toMatchObject({ org_id: ORG_ID, do_not_contact: false });
+  });
+
   it("returns a duplicate before creating a contact when the existing property has no homeowner", async () => {
     // First call: no contact, just the address
     const first = await createLead(supabase, {
+      orgId: ORG_ID,
       source: "cold_call",
       property: { address: "5 Attach Ln", state: "MO" },
     });
@@ -187,6 +253,7 @@ describe("createLead (integration)", () => {
     // Second call: same address, with contact — duplicate is explicit and
     // the submitted contact must not be created or attached.
     const second = await createLead(supabase, {
+      orgId: ORG_ID,
       source: "cold_call",
       property: { address: "5 Attach Ln", state: "MO" },
       contact: { phone_1: "+18165551005", first_name: "Hi", last_name: "There" },
@@ -210,6 +277,7 @@ describe("createLead (integration)", () => {
 
   it("preserves an existing homeowner and creates no contact on duplicate address", async () => {
     const first = await createLead(supabase, {
+      orgId: ORG_ID,
       source: "cold_call",
       property: { address: "5 Existing Owner Ln", state: "MO" },
       contact: { phone_1: "+18165551006", first_name: "Existing" },
@@ -218,6 +286,7 @@ describe("createLead (integration)", () => {
     if (!first.ok) return;
 
     const second = await createLead(supabase, {
+      orgId: ORG_ID,
       source: "referral",
       property: { address: "5 Existing Owner Ln", state: "MO" },
       contact: { phone_1: "+18165551007", first_name: "Submitted" },
@@ -241,6 +310,7 @@ describe("createLead (integration)", () => {
 
   it("rejects with VALIDATION when address is missing", async () => {
     const result = await createLead(supabase, {
+      orgId: ORG_ID,
       source: "cold_call",
       property: { address: "", state: "MO" },
     });
@@ -252,6 +322,7 @@ describe("createLead (integration)", () => {
 
   it("rejects with VALIDATION when source is not in the canonical list", async () => {
     const result = await createLead(supabase, {
+      orgId: ORG_ID,
       // @ts-expect-error — deliberately invalid source
       source: "manual_entry",
       property: { address: "6 Bad Source Ln", state: "MO" },
@@ -264,6 +335,7 @@ describe("createLead (integration)", () => {
 
   it("accepts a property with no contact info — homeowner_contact_id stays null", async () => {
     const result = await createLead(supabase, {
+      orgId: ORG_ID,
       source: "driving_for_dollars",
       property: { address: "7 No Contact Ln", state: "MO" },
     });
@@ -294,6 +366,7 @@ describe("createLead (integration)", () => {
       .single();
 
     const result = await createLead(supabase, {
+      orgId: ORG_ID,
       source: "cold_call",
       property: { address: "8 Secondary Slot Ln", state: "MO" },
       contact: { phone_1: "+18165553101" },
@@ -321,6 +394,7 @@ describe("createLead (integration)", () => {
     }) as typeof fetch;
 
     const result = await createLead(supabase, {
+      orgId: ORG_ID,
       source: "cold_call",
       property: { address: "9 Outage Ln", state: "MO" },
       contact: { first_name: "Out", last_name: "Age", phone_1: "+18165553200" },
@@ -341,6 +415,7 @@ describe("createLead (integration)", () => {
 
   it("creates no property when contact creation fails and permits a clean retry", async () => {
     const input = {
+      orgId: ORG_ID,
       source: "referral" as const,
       property: { address: "20 Contact Failure Ln", state: "MO" },
       contact: { first_name: "Cleanup", last_name: "Contact" },
@@ -366,6 +441,7 @@ describe("createLead (integration)", () => {
 
   it("removes its new unreferenced contact after property insert failure and permits a clean retry", async () => {
     const input = {
+      orgId: ORG_ID,
       source: "referral" as const,
       property: { address: "21 Attach Failure Ln", state: "MO" },
       contact: { first_name: "Cleanup", last_name: "Attach" },
@@ -391,6 +467,7 @@ describe("createLead (integration)", () => {
 
   it("reuses a contact created by a concurrent same-identity request and returns one duplicate lead", async () => {
     const input = {
+      orgId: ORG_ID,
       source: "referral" as const,
       property: { address: "22 Concurrent Identity Ln", state: "MO" },
       contact: { first_name: "Same", last_name: "Homeowner" },

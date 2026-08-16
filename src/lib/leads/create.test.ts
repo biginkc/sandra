@@ -16,6 +16,8 @@ vi.mock("@/lib/csv/normalize", async () => {
 
 import { createLead } from "./create";
 
+const ORG_ID = "00000000-0000-0000-0000-000000000bbb";
+
 type Response = {
   data: unknown;
   error: { message: string; code?: string } | null;
@@ -117,6 +119,7 @@ describe("createLead — phase 02 D-04 county_id pass-through", () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       makeSupabase() as any,
       {
+        orgId: ORG_ID,
         source: "referral",
         property: {
           address: "999 Lake Drive",
@@ -152,6 +155,7 @@ describe("createLead — phase 02 D-04 county_id pass-through", () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       makeSupabase() as any,
       {
+        orgId: ORG_ID,
         source: "web_form",
         property: {
           address: "1 Webhook Way",
@@ -183,6 +187,7 @@ describe("createLead — phase 02 D-04 county_id pass-through", () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       makeSupabase() as any,
       {
+        orgId: ORG_ID,
         source: "referral",
         property: { address: "9 Complete Way", state: "MO" },
         contact: { first_name: "Ready", last_name: "Owner" },
@@ -222,6 +227,7 @@ describe("createLead — phase 02 D-04 county_id pass-through", () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       makeSupabase() as any,
       {
+        orgId: ORG_ID,
         source: "referral",
         property: { address: "10 Race Way", state: "MO" },
         contact: { first_name: "Would", last_name: "Orphan" },
@@ -260,6 +266,7 @@ describe("createLead — phase 02 D-04 county_id pass-through", () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       makeSupabase() as any,
       {
+        orgId: ORG_ID,
         source: "referral",
         property: { address: "10 Contact First Way", state: "MO" },
         contact: { first_name: "Fail", last_name: "Before property" },
@@ -292,6 +299,7 @@ describe("createLead — phase 02 D-04 county_id pass-through", () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       makeSupabase() as any,
       {
+        orgId: ORG_ID,
         source: "referral",
         property: { address: "11 Insert Failure Way", state: "MO" },
         contact: { first_name: "New", last_name: "Owner" },
@@ -315,6 +323,7 @@ describe("createLead — phase 02 D-04 county_id pass-through", () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       makeSupabase() as any,
       {
+        orgId: ORG_ID,
         source: "referral",
         property: { address: "11 Insert Failure Way", state: "MO" },
         contact: { first_name: "New", last_name: "Owner" },
@@ -342,6 +351,7 @@ describe("createLead — phase 02 D-04 county_id pass-through", () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       makeSupabase() as any,
       {
+        orgId: ORG_ID,
         source: "referral",
         property: { address: "12 Reused Contact Way", state: "MO" },
         contact: { first_name: "New", last_name: "Owner" },
@@ -368,6 +378,7 @@ describe("createLead — phase 02 D-04 county_id pass-through", () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       makeSupabase() as any,
       {
+        orgId: ORG_ID,
         source: "referral",
         property: { address: "13 Repair Way", state: "MO" },
         contact: { first_name: "New", last_name: "Owner" },
@@ -378,6 +389,35 @@ describe("createLead — phase 02 D-04 county_id pass-through", () => {
     if (!result.ok) {
       expect(result.error.code).toBe("REPAIR_REQUIRED");
       expect(result.error.message).toContain("contact-repair");
+    }
+  });
+
+  it("scopes every property and contact read/write to the requested organization", async () => {
+    responseQueue = [
+      { data: null, error: null },
+      { data: { id: "contact-org" }, error: null },
+      { data: { id: "prop-org" }, error: null },
+    ];
+
+    const result = await createLead(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      makeSupabase() as any,
+      {
+        orgId: ORG_ID,
+        source: "referral",
+        property: { address: "14 Tenant Safe Way", state: "MO" },
+        contact: { email: "same@example.test" },
+      } as Parameters<typeof createLead>[1],
+    );
+
+    expect(result.ok).toBe(true);
+    for (const call of calls) {
+      if (call.table !== "properties" && call.table !== "contacts") continue;
+      if (call.op === "insert") {
+        expect(call.insertPayload).toEqual(expect.objectContaining({ org_id: ORG_ID }));
+      } else {
+        expect(call.filters).toContainEqual({ op: "eq", args: ["org_id", ORG_ID] });
+      }
     }
   });
 });

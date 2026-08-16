@@ -17,7 +17,7 @@ function clientHarness() {
       if (name === "get_leads_board_stage_counts") {
         return { data: [{ status: "new_lead", total_count: 48 }], error: null };
       }
-      return { data: [{ rows: [], total_count: 37 }], error: null };
+      return { data: [{ rows: [], total_count: 37, snapshot_generation: "generation-a" }], error: null };
     },
   };
   return { client: client as unknown as SupabaseClient<Database>, calls };
@@ -46,6 +46,7 @@ describe("fetchLeadBoardData", () => {
     }, {}, ["new_lead"]);
 
     expect(data.totals.new_lead).toBe(37);
+    expect(data.snapshotGenerations.new_lead).toBe("generation-a");
     expect(calls).toHaveLength(1);
     expect(calls[0]).toEqual({
       name: "get_leads_board_page",

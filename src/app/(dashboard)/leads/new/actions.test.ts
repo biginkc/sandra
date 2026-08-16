@@ -25,46 +25,46 @@ const baseInput = {
   email: "taylor@example.com",
 };
 
-function cookieClient(orgIds: string[] = ["org-1"]) {
-  const memberships = {
-    select: vi.fn(() => memberships),
-    eq: vi.fn().mockResolvedValue({
-      data: orgIds.map((org_id) => ({ org_id })),
-      error: null,
-    }),
-  };
+function cookieClient() {
   return {
     auth: {
       getUser: vi.fn().mockResolvedValue({
         data: { user: { id: "user-me" } },
       }),
     },
-    from: vi.fn(() => memberships),
+    from: vi.fn(),
   };
 }
 
-function adminMembershipResult(member: boolean) {
-  const builder = {
-    select: vi.fn(),
-    eq: vi.fn(),
-    in: vi.fn(),
-    limit: vi.fn(),
-    maybeSingle: vi.fn().mockResolvedValue({
-      data: member ? { user_id: "user-other" } : null,
-      error: null,
+function adminMembershipResult({
+  actorMemberships = [{ org_id: "org-1", created_at: "2026-01-01T00:00:00.000Z" }],
+  assigneeMember = true,
+}: {
+  actorMemberships?: Array<{ org_id: string; created_at: string }>;
+  assigneeMember?: boolean;
+} = {}) {
+  let queryNumber = 0;
+  return {
+    from: vi.fn(() => {
+      const response = queryNumber++ === 0
+        ? { data: actorMemberships, error: null }
+        : { data: assigneeMember ? { user_id: "user-other" } : null, error: null };
+      const builder: Record<string, unknown> = {};
+      for (const method of ["select", "eq", "or", "order", "limit"]) {
+        builder[method] = vi.fn(() => builder);
+      }
+      builder.maybeSingle = vi.fn().mockResolvedValue(response);
+      builder.then = (resolve: (value: typeof response) => unknown) =>
+        Promise.resolve(response).then(resolve);
+      return builder;
     }),
   };
-  builder.select.mockReturnValue(builder);
-  builder.eq.mockReturnValue(builder);
-  builder.in.mockReturnValue(builder);
-  builder.limit.mockReturnValue(builder);
-  return { from: vi.fn(() => builder) };
 }
 
 beforeEach(() => {
   vi.clearAllMocks();
   createClient.mockResolvedValue(cookieClient());
-  createAdminClient.mockReturnValue(adminMembershipResult(true));
+  createAdminClient.mockReturnValue(adminMembershipResult());
   createLead.mockResolvedValue({
     ok: true,
     data: {
@@ -88,11 +88,12 @@ describe("createLeadFromForm quick-entry fields", () => {
     expect(createLead).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({
+        orgId: "org-1",
         assignedUserId: "user-me",
         motivationLevel: "hot",
       }),
     );
-    expect(createAdminClient).not.toHaveBeenCalled();
+    expect(createAdminClient).toHaveBeenCalledTimes(1);
   });
 
   it("persists a teammate only after shared-workspace membership is verified", async () => {
@@ -106,6 +107,7 @@ describe("createLeadFromForm quick-entry fields", () => {
     expect(createLead).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({
+        orgId: "org-1",
         assignedUserId: "user-other",
         motivationLevel: "warm",
       }),
@@ -113,7 +115,7 @@ describe("createLeadFromForm quick-entry fields", () => {
   });
 
   it("rejects an assignee outside the current user's workspaces", async () => {
-    createAdminClient.mockReturnValue(adminMembershipResult(false));
+    createAdminClient.mockReturnValue(adminMembershipResult({ assigneeMember: false }));
 
     const result = await createLeadFromForm({
       ...baseInput,
@@ -123,6 +125,36 @@ describe("createLeadFromForm quick-entry fields", () => {
 
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.error.code).toBe("INVALID_ASSIGNEE");
+    expect(createLead).not.toHaveBeenCalled();
+  });
+
+  it("rejects creation when the creator has no active workspace", async () => {
+    createAdminClient.mockReturnValue(adminMembershipResult({ actorMemberships: [] }));
+
+    const result = await createLeadFromForm({
+      ...baseInput,
+      assigned_user_id: "user-me",
+    });
+
+    expect(result).toMatchObject({ ok: false, error: { code: "NO_ACTIVE_WORKSPACE" } });
+    expect(createLead).not.toHaveBeenCalled();
+  });
+
+  it("uses the deterministic earliest active workspace and rejects an assignee outside it", async () => {
+    createAdminClient.mockReturnValue(adminMembershipResult({
+      actorMemberships: [
+        { org_id: "org-earliest", created_at: "2025-01-01T00:00:00.000Z" },
+        { org_id: "org-later", created_at: "2026-01-01T00:00:00.000Z" },
+      ],
+      assigneeMember: false,
+    }));
+
+    const result = await createLeadFromForm({
+      ...baseInput,
+      assigned_user_id: "user-other",
+    });
+
+    expect(result).toMatchObject({ ok: false, error: { code: "INVALID_ASSIGNEE" } });
     expect(createLead).not.toHaveBeenCalled();
   });
 });

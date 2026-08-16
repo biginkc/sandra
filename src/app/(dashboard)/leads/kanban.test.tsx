@@ -116,6 +116,7 @@ const baseProps = {
   initialUrgencyCounts: { all: 1, overdue: 0, today: 0, scheduled: 0, none: 1 },
   initialNextCursors: {},
   initialHasMore: {},
+  initialSnapshotGenerations: {},
   initialFilters: {
     search: "",
     ownership: "all" as const,
@@ -155,6 +156,7 @@ function emptyBoardData() {
     urgencyCounts: { all: 0, overdue: 0, today: 0, scheduled: 0, none: 0 },
     nextCursors: {},
     hasMore: {},
+    snapshotGenerations: {},
     unreadPropertyIds: [],
     listMemberships: {},
     customTags: {},
@@ -488,6 +490,60 @@ describe("Leads Kanban foundation", () => {
 
     await user.click(screen.getByRole("button", { name: "Load more New Lead" }));
     await waitFor(() => expect(loadLeadBoardAction).toHaveBeenCalledTimes(2));
+    expect(loadLeadBoardAction).toHaveBeenLastCalledWith({ filters: baseProps.initialFilters });
+  });
+
+  it("replaces the board when an equal-count concurrent swap changes the server snapshot", async () => {
+    const user = userEvent.setup();
+    const replacement = makeLead({
+      id: "44444444-4444-4444-8444-444444444444",
+      address: "Replacement Before Cursor",
+    });
+    loadLeadBoardAction
+      .mockResolvedValueOnce({
+        ok: true,
+        data: {
+          leads: [makeLead({
+            id: "33333333-3333-4333-8333-333333333333",
+            address: "Incoming After Cursor",
+          })],
+          totals: { ...baseProps.initialTotals, new_lead: 2 },
+          nextCursors: {}, hasMore: { new_lead: false },
+          snapshotGenerations: { new_lead: "generation-b" },
+          unreadPropertyIds: [], urgencyCounts: null, baselineTotals: null,
+          listMemberships: {}, customTags: {}, lastMessageByPropertyId: {},
+        },
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        data: {
+          leads: [replacement],
+          totals: { ...baseProps.initialTotals, new_lead: 1 },
+          nextCursors: {}, hasMore: { new_lead: false },
+          snapshotGenerations: { new_lead: "generation-b" },
+          unreadPropertyIds: [],
+          urgencyCounts: { all: 1, overdue: 0, today: 0, scheduled: 0, none: 1 },
+          baselineTotals: { ...baseProps.initialTotals, new_lead: 1 },
+          listMemberships: {}, customTags: {}, lastMessageByPropertyId: {},
+        },
+      });
+    render(
+      <Kanban
+        {...baseProps}
+        initialLeads={[makeLead({ id: "11111111-1111-4111-8111-111111111111" })]}
+        initialTotals={{ ...baseProps.initialTotals, new_lead: 2 }}
+        initialHasMore={{ new_lead: true }}
+        initialSnapshotGenerations={{ new_lead: "generation-a" }}
+        initialNextCursors={{
+          new_lead: { dueAt: null, id: "11111111-1111-4111-8111-111111111111" },
+        }}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Load more New Lead" }));
+    await waitFor(() => expect(loadLeadBoardAction).toHaveBeenCalledTimes(2));
+    expect(screen.queryByText("Incoming After Cursor")).not.toBeInTheDocument();
+    expect(await screen.findByText("Replacement Before Cursor")).toBeVisible();
     expect(loadLeadBoardAction).toHaveBeenLastCalledWith({ filters: baseProps.initialFilters });
   });
 

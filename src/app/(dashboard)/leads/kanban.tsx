@@ -105,6 +105,7 @@ type KanbanProps = {
   initialUrgencyCounts: Record<UrgencyFilter, number>;
   initialNextCursors: Partial<Record<PropertyStatus, LeadBoardCursor>>;
   initialHasMore: Partial<Record<PropertyStatus, boolean>>;
+  initialSnapshotGenerations: Partial<Record<PropertyStatus, string>>;
   initialFilters: LeadBoardFilters;
   dayStart: string;
   dayEnd: string;
@@ -129,6 +130,7 @@ export function Kanban({
   initialUrgencyCounts,
   initialNextCursors,
   initialHasMore,
+  initialSnapshotGenerations,
   initialFilters,
   dayStart,
   dayEnd,
@@ -152,6 +154,7 @@ export function Kanban({
   const [urgencyCounts, setUrgencyCounts] = useState(initialUrgencyCounts);
   const [nextCursors, setNextCursors] = useState(initialNextCursors);
   const [hasMore, setHasMore] = useState(initialHasMore);
+  const [snapshotGenerations, setSnapshotGenerations] = useState(initialSnapshotGenerations);
   const [unreadIds, setUnreadIds] = useState(unreadPropertyIds);
   const [listsByLead, setListsByLead] = useState(listMemberships);
   const [tagsByLead, setTagsByLead] = useState(customTags);
@@ -307,6 +310,7 @@ export function Kanban({
     if (data.urgencyCounts) setUrgencyCounts(data.urgencyCounts);
     setNextCursors(data.nextCursors);
     setHasMore(data.hasMore);
+    setSnapshotGenerations(data.snapshotGenerations);
     setUnreadIds(data.unreadPropertyIds);
     setListsByLead(data.listMemberships);
     setTagsByLead(data.customTags);
@@ -386,12 +390,19 @@ export function Kanban({
       return;
     }
     const data = result.data;
+    const expectedGeneration = snapshotGenerations[status];
+    const receivedGeneration = data.snapshotGenerations?.[status];
+    if (!expectedGeneration || !receivedGeneration || expectedGeneration !== receivedGeneration) {
+      void refreshBoard();
+      return;
+    }
     setLeads((previous) => {
       const known = new Set(previous.map((lead) => lead.id));
       return [...previous, ...(data.leads as Lead[]).filter((lead) => !known.has(lead.id))];
     });
     setNextCursors((previous) => ({ ...previous, [status]: data.nextCursors[status] }));
     setHasMore((previous) => ({ ...previous, [status]: data.hasMore[status] }));
+    setSnapshotGenerations((previous) => ({ ...previous, [status]: receivedGeneration }));
     setUnreadIds((previous) => Array.from(new Set([...previous, ...data.unreadPropertyIds])));
     setListsByLead((previous) => ({ ...previous, ...data.listMemberships }));
     setTagsByLead((previous) => ({ ...previous, ...data.customTags }));

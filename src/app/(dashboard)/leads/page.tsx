@@ -125,6 +125,7 @@ export default async function LeadsPage({
           }}
           initialNextCursors={board.nextCursors}
           initialHasMore={board.hasMore}
+          initialSnapshotGenerations={board.snapshotGenerations}
           initialFilters={filters}
           dayStart={dayStart.toISOString()}
           dayEnd={dayEnd.toISOString()}

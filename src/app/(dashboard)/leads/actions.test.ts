@@ -12,6 +12,7 @@ const {
   dispatchTaskCalendarEvent,
   loadIntegrationPrefs,
   revalidatePath,
+  validateActiveAssigneeForProperties,
 } = vi.hoisted(() => ({
     afterCallbacks: [] as Array<() => Promise<void> | void>,
     afterMock: vi.fn((callback: () => Promise<void> | void) => {
@@ -30,6 +31,7 @@ const {
       timezone: "America/Chicago",
     })),
     revalidatePath: vi.fn(),
+    validateActiveAssigneeForProperties: vi.fn(),
   }));
 
 vi.mock("@/lib/supabase/server", () => ({
@@ -86,12 +88,16 @@ vi.mock("@/lib/tasks", async (importOriginal) => {
   };
 });
 
+vi.mock("./assignment-safety", () => ({ validateActiveAssigneeForProperties }));
+
 import {
   addPropertiesToListBulk,
+  assignLeadsBulk,
   createLeadTaskAction,
   listOrgUsers,
   markMessagesReadForThread,
   updatePropertyStatus,
+  updateLeadAssignee,
 } from "./actions";
 
 type StubResult<T> = {
@@ -162,12 +168,50 @@ beforeEach(() => {
     timezone: "America/Chicago",
   });
   revalidatePath.mockReset();
+  validateActiveAssigneeForProperties.mockReset();
+  validateActiveAssigneeForProperties.mockResolvedValue({
+    ok: true,
+    propertyOrgIds: new Map([["property-1", "org-1"]]),
+  });
   vi.stubEnv("NEXT_PUBLIC_APP_URL", "https://app.test");
 });
 
 afterEach(() => {
   vi.clearAllMocks();
   vi.unstubAllEnvs();
+});
+
+describe("lead assignment membership gate", () => {
+  it("rejects a forged single-lead assignee before writing", async () => {
+    const supabase = { from: vi.fn() };
+    createClient.mockResolvedValue(supabase);
+    validateActiveAssigneeForProperties.mockResolvedValueOnce({
+      ok: false,
+      code: "INVALID_ASSIGNEE",
+      message: "Choose an active teammate.",
+    });
+
+    const result = await updateLeadAssignee("property-1", "forged-user");
+
+    expect(result).toMatchObject({ ok: false, error: { code: "INVALID_ASSIGNEE" } });
+    expect(supabase.from).not.toHaveBeenCalled();
+  });
+
+  it("rejects a mixed-org bulk assignee before any update or notification", async () => {
+    const supabase = { from: vi.fn(), auth: { getUser: vi.fn() } };
+    createClient.mockResolvedValue(supabase);
+    validateActiveAssigneeForProperties.mockResolvedValueOnce({
+      ok: false,
+      code: "INVALID_ASSIGNEE",
+      message: "Target is not active in every workspace.",
+    });
+
+    const result = await assignLeadsBulk(["property-a", "property-b"], "stale-user");
+
+    expect(result).toMatchObject({ ok: false, error: { code: "INVALID_ASSIGNEE" } });
+    expect(supabase.from).not.toHaveBeenCalled();
+    expect(supabase.auth.getUser).not.toHaveBeenCalled();
+  });
 });
 
 describe("markMessagesReadForThread — permanent DNC", () => {
