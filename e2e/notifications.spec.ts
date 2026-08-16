@@ -2,6 +2,7 @@ import { expect, test } from "@playwright/test";
 
 import {
   adminClient,
+  DEFAULT_ORG_ID,
   ensureTestUser,
   resetTenantTables,
   seedProspects,
@@ -233,14 +234,6 @@ test("seed 3 unread → 'Mark all as read' clears the badge (test 31)", async ({
   await resetTenantTables(admin);
   const claudeId = await ensureTestUser(admin);
 
-  // Resolve an org id to satisfy the NOT NULL constraint on notifications.
-  const { data: org } = await admin
-    .from("organizations")
-    .select("id")
-    .limit(1)
-    .single();
-  if (!org) throw new Error("no organization in test project");
-
   // Seed 3 unread notifications for claude directly — no webhook needed.
   const entityIds = [
     "00000000-0000-0000-0000-0000000031a1",
@@ -249,7 +242,7 @@ test("seed 3 unread → 'Mark all as read' clears the badge (test 31)", async ({
   ];
   await admin.from("notifications").insert(
     entityIds.map((eid, i) => ({
-      org_id: org.id,
+      org_id: DEFAULT_ORG_ID,
       user_id: claudeId,
       event_type: "owner_message_added",
       entity_type: "property",

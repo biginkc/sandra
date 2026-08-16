@@ -22,16 +22,16 @@ test("dragging a card from New Lead to Contacted persists status change", async 
     .eq("id", prop.id);
 
   await page.goto("/leads");
-  const card = page.locator(`text=${prop.address}`).first();
+  // The address itself is an inner button that intentionally stops pointer
+  // propagation so clicking it opens detail without starting a drag. Target
+  // the draggable card group instead.
+  const card = page.getByRole("group", { name: `Lead at ${prop.address}` });
   await expect(card).toBeVisible();
 
   // Find the Contacted column (droppable). dnd-kit's useDroppable receives
   // the status string as its id, and the column is the outer container
   // around the header text.
-  const contactedColumn = page
-    .locator("div")
-    .filter({ hasText: /^Contacted/ })
-    .first();
+  const contactedColumn = page.locator('[data-status="contacted"]');
   await expect(contactedColumn).toBeVisible();
 
   const cardBox = await card.boundingBox();

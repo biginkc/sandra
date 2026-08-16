@@ -2,7 +2,12 @@ import { expect, test } from "@playwright/test";
 
 import { seedStarterLibrary } from "../src/lib/sequences/starter-library";
 
-import { adminClient, ensureTestUser, resetTenantTables } from "./fixtures";
+import {
+  adminClient,
+  DEFAULT_ORG_ID,
+  ensureTestUser,
+  resetTenantTables,
+} from "./fixtures";
 
 /**
  * Feature 5a — Sequences V1 smoke. Exercises the full stack:
@@ -28,12 +33,7 @@ test("/sequences index renders the starter library after org-level re-seed", asy
   await ensureTestUser(admin);
 
   // Re-seed the starter library for the org (reset truncated sequences).
-  const { data: org } = await admin
-    .from("organizations")
-    .select("id")
-    .limit(1)
-    .single();
-  await seedStarterLibrary(admin, org!.id);
+  await seedStarterLibrary(admin, DEFAULT_ORG_ID);
 
   await page.goto("/sequences");
   await expect(page.getByRole("heading", { name: "Sequences" })).toBeVisible();

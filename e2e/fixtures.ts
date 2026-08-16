@@ -116,7 +116,7 @@ async function seedMockDeliveryCatalog(
  * Stage 1 introduced membership-scoped RLS — without a membership row in
  * this org, the test user can't read or write tenant data.
  */
-const DEFAULT_ORG_ID = "00000000-0000-0000-0000-000000000bbb";
+export const DEFAULT_ORG_ID = "00000000-0000-0000-0000-000000000bbb";
 
 /**
  * Ensure the shared E2E user exists in auth.users, can sign in with the shared

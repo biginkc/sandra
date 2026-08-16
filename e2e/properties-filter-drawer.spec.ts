@@ -44,9 +44,7 @@ async function expectProspectTotal(
 ) {
   if (expected === 0) {
     await expect(
-      page.getByText(
-        /No prospects yet\. Import a CSV to fill the data lake\./i,
-      ),
+      page.getByText(/No prospects\. Import a CSV to fill the data lake\./i),
     ).toBeVisible();
     return;
   }

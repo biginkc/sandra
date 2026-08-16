@@ -582,7 +582,10 @@ test.describe.serial("Properties filter contract — seeded DB oracle", () => {
           state: row.state,
           market: row.market,
           source: row.source,
-          outreach_dispo: row.outreach_dispo,
+          // Install list/tag sidecars before ratcheting true DNC. The database
+          // correctly rejects new outreach artifacts once the lock exists.
+          outreach_dispo:
+            row.outreach_dispo === "dnc" ? null : row.outreach_dispo,
           absentee_flag: row.absentee_flag,
           beds: row.beds,
           baths: row.baths,
@@ -653,6 +656,12 @@ test.describe.serial("Properties filter contract — seeded DB oracle", () => {
       },
     ]);
     expect(tagsError).toBeNull();
+
+    const { error: dncError } = await admin
+      .from("properties")
+      .update({ outreach_dispo: "dnc" })
+      .eq("id", seeded[3].id);
+    expect(dncError).toBeNull();
 
     const { error: messagesError } = await admin.from("messages").insert([
       {

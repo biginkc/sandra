@@ -4,6 +4,7 @@ import { seedStarterLibrary } from "../src/lib/sequences/starter-library";
 
 import {
   adminClient,
+  DEFAULT_ORG_ID,
   ensureTestUser,
   resetTenantTables,
   seedProspects,
@@ -32,13 +33,8 @@ import {
 
 // Helpers ---------------------------------------------------------------------
 
-async function seedOrgId(admin: ReturnType<typeof adminClient>): Promise<string> {
-  const { data } = await admin
-    .from("organizations")
-    .select("id")
-    .limit(1)
-    .single();
-  return data!.id;
+async function seedOrgId(): Promise<string> {
+  return DEFAULT_ORG_ID;
 }
 
 async function seedSequenceWithOneStep(
@@ -51,7 +47,7 @@ async function seedSequenceWithOneStep(
     delayMinutes?: number;
   },
 ): Promise<{ sequenceId: string; stepId: string }> {
-  const orgId = await seedOrgId(admin);
+  const orgId = await seedOrgId();
   const { data: seq } = await admin
     .from("sequences")
     .insert({ org_id: orgId, name: opts.name })
@@ -80,6 +76,7 @@ async function seedLeadWithConsent(
   const { data: contact } = await admin
     .from("contacts")
     .insert({
+      org_id: DEFAULT_ORG_ID,
       first_name: "Browser",
       last_name: "Test",
       phone_1: opts.phone,
@@ -88,6 +85,7 @@ async function seedLeadWithConsent(
     .select("id")
     .single();
   await admin.from("consent_events").insert({
+    org_id: DEFAULT_ORG_ID,
     contact_id: contact!.id,
     channel: "sms",
     event_type: "opt_in_marketing_written",
@@ -230,7 +228,7 @@ test.describe("Sequences V1 — UI flows (browser)", () => {
 
   test("6. cancel an enrollment flips status to completed", async ({ page }) => {
     const admin = adminClient();
-    const orgId = await seedOrgId(admin);
+    const orgId = await seedOrgId();
     const { sequenceId } = await seedSequenceWithOneStep(admin, {
       name: `Flow-6 ${Date.now()}`,
       actionType: "change_status",
@@ -280,7 +278,7 @@ test.describe("Sequences V1 — UI flows (browser)", () => {
     page,
   }) => {
     const admin = adminClient();
-    const orgId = await seedOrgId(admin);
+    const orgId = await seedOrgId();
     const { sequenceId } = await seedSequenceWithOneStep(admin, {
       name: `Flow-7 ${Date.now()}`,
       body: "Hi {{first_name}}",
@@ -335,7 +333,7 @@ test.describe("Sequences V1 — UI flows (browser)", () => {
 
   test("8. sidebar nav links all route correctly", async ({ page }) => {
     const admin = adminClient();
-    await seedStarterLibrary(admin, await seedOrgId(admin));
+    await seedStarterLibrary(admin, await seedOrgId());
 
     await page.goto("/sequences");
     // Click through each visible primary nav item and assert the URL changes

@@ -235,7 +235,7 @@ test("37. Switch to Add Data → existing flow renders unchanged (regression gua
 
   // The Add path's first step is the original Upload card with Source +
   // Market selects — confirms the existing wizard still wires up.
-  await expect(page.getByText(/upload csv/i).first()).toBeVisible();
+  await expect(page.getByText("Upload file", { exact: true })).toBeVisible();
   await expect(page.getByText(/Source/i).first()).toBeVisible();
   await expect(page.getByText(/Market/i).first()).toBeVisible();
 });
