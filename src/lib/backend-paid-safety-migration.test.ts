@@ -9,6 +9,13 @@ const migration = readFileSync(
   ),
   "utf8",
 );
+const cassProvenanceMigration = readFileSync(
+  join(
+    process.cwd(),
+    "supabase/migrations/20260816040000_cass_job_tenant_provenance.sql",
+  ),
+  "utf8",
+);
 
 describe("backend paid safety migration", () => {
   it("allows terminal/manual paid-provider outcomes in durable job ledgers", () => {
@@ -44,5 +51,18 @@ describe("backend paid safety migration", () => {
     expect(migration).toContain("case when tg_op <> 'DELETE' then new.property_id");
     expect(migration).toContain("before update or delete on public.sequence_step_runs");
     expect(migration).toContain("new.status = 'opted_out'");
+  });
+
+  it("freezes the tenant and paid inputs of an existing CASS job", () => {
+    expect(cassProvenanceMigration).toContain("old.type = 'cass_dsf2_ncoa'");
+    expect(cassProvenanceMigration).toContain(
+      "new.org_id is distinct from old.org_id",
+    );
+    expect(cassProvenanceMigration).toContain(
+      "new.input_params is distinct from old.input_params",
+    );
+    expect(cassProvenanceMigration).toContain(
+      "CASS_JOB_PROVENANCE_IMMUTABLE",
+    );
   });
 });

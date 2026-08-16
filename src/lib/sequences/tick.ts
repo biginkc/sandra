@@ -100,14 +100,14 @@ export async function processEnrollmentTick(
   }
 
   if (property.is_dnc_locked) {
-    await client
-      .from("sequence_enrollments")
-      .update({
-        status: "opted_out",
-        pause_reason: "dnc",
-        updated_at: new Date().toISOString(),
-      })
-      .eq("id", enrollment.id);
+    const pauseError = await pauseEnrollment(client, enrollment.id, "dnc", true);
+    if (pauseError) {
+      return {
+        status: "failed",
+        enrollmentId: enrollment.id,
+        message: pauseError,
+      };
+    }
     return {
       status: "paused",
       enrollmentId: enrollment.id,
@@ -128,14 +128,19 @@ export async function processEnrollmentTick(
     shouldSuppressAutomatedSend({ outreachDispo: property.outreach_dispo })
   ) {
     const permanent = property.outreach_dispo === "dnc" || property.outreach_dispo === "opted_out";
-    await client
-      .from("sequence_enrollments")
-      .update({
-        status: permanent ? "opted_out" : "paused",
-        pause_reason: property.outreach_dispo,
-        updated_at: new Date().toISOString(),
-      })
-      .eq("id", enrollment.id);
+    const pauseError = await pauseEnrollment(
+      client,
+      enrollment.id,
+      property.outreach_dispo,
+      permanent,
+    );
+    if (pauseError) {
+      return {
+        status: "failed",
+        enrollmentId: enrollment.id,
+        message: pauseError,
+      };
+    }
     return {
       status: "paused",
       enrollmentId: enrollment.id,
@@ -148,14 +153,19 @@ export async function processEnrollmentTick(
     newStatus: property.status,
   });
   if (pauseDecision.shouldPause) {
-    await client
-      .from("sequence_enrollments")
-      .update({
-        status: pauseDecision.permanent ? "opted_out" : "paused",
-        pause_reason: pauseDecision.reason,
-        updated_at: new Date().toISOString(),
-      })
-      .eq("id", enrollment.id);
+    const pauseError = await pauseEnrollment(
+      client,
+      enrollment.id,
+      pauseDecision.reason ?? "status_change",
+      pauseDecision.permanent,
+    );
+    if (pauseError) {
+      return {
+        status: "failed",
+        enrollmentId: enrollment.id,
+        message: pauseError,
+      };
+    }
     return {
       status: "paused",
       enrollmentId: enrollment.id,
@@ -184,7 +194,15 @@ export async function processEnrollmentTick(
   if (step.action_type === "send_sms") {
     if (!enrollment.contact_id) {
       await markRunSkipped(client, claim.id, "no_phone");
-      await pauseEnrollment(client, enrollment.id, "inbound_reply", false);
+      const pauseError = await pauseEnrollment(
+        client,
+        enrollment.id,
+        "inbound_reply",
+        false,
+      );
+      if (pauseError) {
+        return { status: "failed", enrollmentId: enrollment.id, message: pauseError };
+      }
       return { status: "paused", enrollmentId: enrollment.id, reason: "no_phone" };
     }
     const vars = await loadTemplateVars(client, {
@@ -223,7 +241,15 @@ export async function processEnrollmentTick(
       }
       if (!tmpl) {
         await markRunSkipped(client, claim.id, "provider_failed");
-        await pauseEnrollment(client, enrollment.id, "template_missing", false);
+        const pauseError = await pauseEnrollment(
+          client,
+          enrollment.id,
+          "template_missing",
+          false,
+        );
+        if (pauseError) {
+          return { status: "failed", enrollmentId: enrollment.id, message: pauseError };
+        }
         return {
           status: "paused",
           enrollmentId: enrollment.id,
@@ -240,7 +266,15 @@ export async function processEnrollmentTick(
       );
       if (!poolTemplate) {
         await markRunSkipped(client, claim.id, "provider_failed");
-        await pauseEnrollment(client, enrollment.id, "step_misconfigured", false);
+        const pauseError = await pauseEnrollment(
+          client,
+          enrollment.id,
+          "step_misconfigured",
+          false,
+        );
+        if (pauseError) {
+          return { status: "failed", enrollmentId: enrollment.id, message: pauseError };
+        }
         return {
           status: "paused",
           enrollmentId: enrollment.id,
@@ -261,7 +295,15 @@ export async function processEnrollmentTick(
     // it instead of sending an empty SMS the provider would silently bill.
     if (!bodySource.trim()) {
       await markRunSkipped(client, claim.id, "provider_failed");
-      await pauseEnrollment(client, enrollment.id, "step_misconfigured", false);
+      const pauseError = await pauseEnrollment(
+        client,
+        enrollment.id,
+        "step_misconfigured",
+        false,
+      );
+      if (pauseError) {
+        return { status: "failed", enrollmentId: enrollment.id, message: pauseError };
+      }
       return {
         status: "paused",
         enrollmentId: enrollment.id,
@@ -327,7 +369,15 @@ export async function processEnrollmentTick(
       }
       case "blocked_no_consent": {
         await markRunSkipped(client, claim.id, "consent_revoked");
-        await pauseEnrollment(client, enrollment.id, "consent_revoked", true);
+        const pauseError = await pauseEnrollment(
+          client,
+          enrollment.id,
+          "consent_revoked",
+          true,
+        );
+        if (pauseError) {
+          return { status: "failed", enrollmentId: enrollment.id, message: pauseError };
+        }
         return { status: "paused", enrollmentId: enrollment.id, reason: "consent_revoked" };
       }
       case "blocked_terminal_dispo":
@@ -340,28 +390,42 @@ export async function processEnrollmentTick(
           outcome.source === "phone_suppression" ||
           outcome.outreachDispo === "dnc" ||
           outcome.outreachDispo === "opted_out";
-        await pauseEnrollment(
+        const pauseError = await pauseEnrollment(
           client,
           enrollment.id,
           permanent ? "consent_revoked" : "terminal_dispo",
           permanent,
         );
+        if (pauseError) {
+          return { status: "failed", enrollmentId: enrollment.id, message: pauseError };
+        }
         return { status: "paused", enrollmentId: enrollment.id, reason: "terminal_dispo" };
       }
       case "blocked_no_phone":
       case "contact_not_found": {
         await markRunSkipped(client, claim.id, "no_phone");
-        await pauseEnrollment(client, enrollment.id, "inbound_reply", false);
+        const pauseError = await pauseEnrollment(
+          client,
+          enrollment.id,
+          "inbound_reply",
+          false,
+        );
+        if (pauseError) {
+          return { status: "failed", enrollmentId: enrollment.id, message: pauseError };
+        }
         return { status: "paused", enrollmentId: enrollment.id, reason: "no_phone" };
       }
       case "blocked_no_approved_sender": {
         await markRunSkipped(client, claim.id, "provider_failed");
-        await pauseEnrollment(
+        const pauseError = await pauseEnrollment(
           client,
           enrollment.id,
           FIRST_TOUCH_SENDER_PAUSE_REASON,
           false,
         );
+        if (pauseError) {
+          return { status: "failed", enrollmentId: enrollment.id, message: pauseError };
+        }
         return {
           status: "paused",
           enrollmentId: enrollment.id,
@@ -519,6 +583,7 @@ async function pauseEnrollment(
     .update({
       status: permanent ? "opted_out" : "paused",
       pause_reason: reason,
+      ...(permanent ? { next_run_at: null } : {}),
       updated_at: new Date().toISOString(),
     })
     .eq("id", enrollmentId);

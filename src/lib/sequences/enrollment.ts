@@ -171,13 +171,16 @@ export async function pausePropertyEnrollments(
       {
         status: newStatus,
         pause_reason: params.reason,
+        ...(params.permanent ? { next_run_at: null } : {}),
         updated_at: new Date().toISOString(),
       },
       { count: "exact" },
     )
     .eq("property_id", params.propertyId)
     .eq("status", "active");
-  if (error) return { paused: 0 };
+  if (error) {
+    throw new Error(`pausePropertyEnrollments: ${error.message}`);
+  }
   return { paused: count ?? 0 };
 }
 
@@ -195,10 +198,13 @@ export async function pauseContactEnrollments(
     permanent?: boolean;
   },
 ): Promise<{ paused: number }> {
-  const { data: properties } = await client
+  const { data: properties, error: propertyError } = await client
     .from("properties")
     .select("id")
     .eq("homeowner_contact_id", params.contactId);
+  if (propertyError) {
+    throw new Error(`pauseContactEnrollments properties: ${propertyError.message}`);
+  }
   const propertyIds = (properties ?? []).map((p) => p.id);
   if (propertyIds.length === 0) return { paused: 0 };
 
@@ -209,13 +215,16 @@ export async function pauseContactEnrollments(
       {
         status: newStatus,
         pause_reason: params.reason,
+        ...(params.permanent ? { next_run_at: null } : {}),
         updated_at: new Date().toISOString(),
       },
       { count: "exact" },
     )
     .in("property_id", propertyIds)
     .eq("status", "active");
-  if (error) return { paused: 0 };
+  if (error) {
+    throw new Error(`pauseContactEnrollments: ${error.message}`);
+  }
   return { paused: count ?? 0 };
 }
 

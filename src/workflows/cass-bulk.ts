@@ -51,14 +51,16 @@ export type CassBulkWorkflowParams = {
  * running. Throwing here (missing job / empty ids) fails the workflow
  * before any verification spend.
  */
-async function loadCassJobIds(jobId: string): Promise<string[]> {
+export async function loadCassJobIds(
+  jobId: string,
+): Promise<{ orgId: string; propertyIds: string[] }> {
   "use step";
 
   const supabase = createAdminClient();
 
   const { data: job, error } = await supabase
     .from("jobs")
-    .select("input_params")
+    .select("id, org_id, type, status, input_params")
     .eq("id", jobId)
     .single();
 
@@ -66,6 +68,12 @@ async function loadCassJobIds(jobId: string): Promise<string[]> {
     throw new Error(
       `CASS bulk workflow: job ${jobId} not found: ${error?.message ?? "no row"}`,
     );
+  }
+  if (job.type !== "cass_dsf2_ncoa") {
+    throw new Error(`CASS bulk workflow: job ${jobId} has type ${job.type}`);
+  }
+  if (job.status !== "queued" && job.status !== "running") {
+    throw new Error(`CASS bulk workflow: job ${jobId} is ${job.status}`);
   }
 
   const raw =
@@ -81,9 +89,28 @@ async function loadCassJobIds(jobId: string): Promise<string[]> {
     );
   }
 
-  await beginCassJob(supabase, { jobId, totalItems: propertyIds.length });
+  const uniquePropertyIds = Array.from(new Set(propertyIds));
+  const { data: ownedProperties, error: propertyError } = await supabase
+    .from("properties")
+    .select("id")
+    .eq("org_id", job.org_id)
+    .in("id", uniquePropertyIds);
+  if (propertyError) {
+    throw new Error(
+      `CASS bulk workflow: property ownership check failed: ${propertyError.message}`,
+    );
+  }
+  const ownedIds = new Set((ownedProperties ?? []).map((row) => row.id));
+  const foreignOrMissing = uniquePropertyIds.filter((id) => !ownedIds.has(id));
+  if (foreignOrMissing.length > 0) {
+    throw new Error(
+      `CASS bulk workflow: ${foreignOrMissing.length} property ID(s) do not belong to job organization`,
+    );
+  }
 
-  return propertyIds;
+  await beginCassJob(supabase, { jobId, totalItems: uniquePropertyIds.length });
+
+  return { orgId: job.org_id, propertyIds: uniquePropertyIds };
 }
 
 /**
@@ -102,6 +129,7 @@ async function cassChunkStep(args: {
   propertyIds: string[];
   processedBefore: number;
   summary: CassJobSummary;
+  expectedOrgId: string;
 }): Promise<CassJobSummary> {
   "use step";
 
@@ -129,7 +157,7 @@ export async function cassBulkWorkflow(
 ): Promise<CassJobSummary> {
   "use workflow";
 
-  const propertyIds = await loadCassJobIds(params.jobId);
+  const { orgId, propertyIds } = await loadCassJobIds(params.jobId);
 
   let summary: CassJobSummary = {
     total: propertyIds.length,
@@ -147,6 +175,7 @@ export async function cassBulkWorkflow(
       propertyIds: propertyIds.slice(offset, offset + CHUNK_SIZE),
       processedBefore: offset,
       summary,
+      expectedOrgId: orgId,
     });
   }
 

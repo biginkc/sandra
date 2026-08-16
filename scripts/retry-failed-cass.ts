@@ -38,7 +38,7 @@ async function main() {
   // Pull the parent's metadata so the new job is linked correctly.
   const { data: parentJob, error: parentErr } = await supabase
     .from("jobs")
-    .select("parent_job_id, related_import_id, created_by")
+    .select("org_id, parent_job_id, related_import_id, created_by")
     .eq("id", failedJobId)
     .single();
 
@@ -80,6 +80,7 @@ async function main() {
     parentJobId: parentJob.parent_job_id ?? failedJobId,
     relatedImportId: parentJob.related_import_id,
     createdBy: parentJob.created_by,
+    orgId: parentJob.org_id,
     propertyIds,
     autoStart: true,
   });
@@ -88,6 +89,7 @@ async function main() {
   const summary = await runCassEnrichment(supabase, {
     jobId: childId,
     propertyIds,
+    expectedOrgId: parentJob.org_id,
   });
 
   console.log(`\nFinal counts:`);

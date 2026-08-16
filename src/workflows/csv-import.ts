@@ -604,7 +604,7 @@ async function triggerCassStep(args: {
     await excludeComplianceLockedJobProperties(
       supabase,
       args.parentJobId,
-      await selectCassEligibleProperties(supabase, args.parentJobId),
+      await selectCassEligibleProperties(supabase, args.parentJobId, args.orgId),
     ),
     args.orgId,
   );
@@ -617,6 +617,7 @@ async function triggerCassStep(args: {
     parentJobId: args.parentJobId,
     relatedImportId: args.relatedImportId,
     createdBy: args.createdBy,
+    orgId: args.orgId,
     propertyIds,
     autoStart,
     blockedReason: autoStart
@@ -628,6 +629,7 @@ async function triggerCassStep(args: {
     const summary = await runCassEnrichment(supabase, {
       jobId: childId,
       propertyIds,
+      expectedOrgId: args.orgId,
     });
     if (summary.failed > 0 || summary.providerOff > 0) {
       return {

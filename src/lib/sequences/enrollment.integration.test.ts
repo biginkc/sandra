@@ -295,11 +295,12 @@ describe("pausePropertyEnrollments (integration)", () => {
 
     const { data } = await supabase
       .from("sequence_enrollments")
-      .select("status, pause_reason")
+      .select("status, pause_reason, next_run_at")
       .eq("property_id", propertyId)
       .single();
     expect(data!.status).toBe("opted_out");
     expect(data!.pause_reason).toBe("consent_revoked");
+    expect(data!.next_run_at).toBeNull();
   });
 });
 

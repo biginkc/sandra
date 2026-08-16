@@ -29,7 +29,7 @@ export async function startQueuedCassJob(
 
     const { data: job, error: fetchError } = await supabase
       .from("jobs")
-      .select("id, type, status, input_params, total_items")
+      .select("id, org_id, type, status, input_params, total_items")
       .eq("id", jobId)
       .maybeSingle();
 
@@ -165,7 +165,7 @@ export async function retryFailedCassItems(
 
     const { data: parent, error: parentErr } = await supabase
       .from("jobs")
-      .select("id, type, parent_job_id, related_import_id, created_by")
+      .select("id, org_id, type, parent_job_id, related_import_id, created_by")
       .eq("id", failedJobId)
       .maybeSingle();
 
@@ -229,6 +229,7 @@ export async function retryFailedCassItems(
       parentJobId: parent.parent_job_id ?? failedJobId,
       relatedImportId: parent.related_import_id,
       createdBy: parent.created_by,
+      orgId: parent.org_id,
       propertyIds,
       autoStart: true,
     });

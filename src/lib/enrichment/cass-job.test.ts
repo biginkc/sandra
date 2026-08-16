@@ -70,11 +70,17 @@ describe("isAwaitingManualStart", () => {
 
 describe("selectCassEligibleProperties", () => {
   type JobItemRow = { property_id: string | null; status: string };
-  type PropertyRow = { id: string; cass_status: string; is_dnc_locked?: boolean };
+  type PropertyRow = {
+    id: string;
+    org_id?: string;
+    cass_status: string;
+    is_dnc_locked?: boolean;
+  };
 
   type Capture = {
     jobItemsStatusFilter: string[] | null;
     propertiesIdFilter: string[] | null;
+    propertiesOrgFilter: string | null;
     propertiesCassStatusFilter: string | null;
     propertiesDncFilter: boolean | null;
   };
@@ -105,6 +111,10 @@ describe("selectCassEligibleProperties", () => {
             return builder;
           }),
           eq: vi.fn((col: string, value: string | boolean) => {
+            if (col === "org_id") {
+              capture.propertiesOrgFilter = value as string;
+              return builder;
+            }
             if (col === "cass_status") {
               capture.propertiesCassStatusFilter = value as string;
               return builder;
@@ -113,6 +123,7 @@ describe("selectCassEligibleProperties", () => {
             const matched = properties.filter(
               (p) =>
                 (capture.propertiesIdFilter ?? []).includes(p.id) &&
+                (p.org_id ?? "org-1") === capture.propertiesOrgFilter &&
                 p.cass_status === capture.propertiesCassStatusFilter &&
                 (p.is_dnc_locked ?? false) === value,
             );
@@ -133,6 +144,7 @@ describe("selectCassEligibleProperties", () => {
     return {
       jobItemsStatusFilter: null,
       propertiesIdFilter: null,
+      propertiesOrgFilter: null,
       propertiesCassStatusFilter: null,
       propertiesDncFilter: null,
     };
@@ -151,7 +163,7 @@ describe("selectCassEligibleProperties", () => {
       ],
       capture,
     );
-    const ids = await selectCassEligibleProperties(supabase, "job-1");
+    const ids = await selectCassEligibleProperties(supabase, "job-1", "org-1");
     expect(ids.sort()).toEqual(["a", "b"]);
   });
 
@@ -168,14 +180,14 @@ describe("selectCassEligibleProperties", () => {
       ],
       capture,
     );
-    const ids = await selectCassEligibleProperties(supabase, "job-1");
+    const ids = await selectCassEligibleProperties(supabase, "job-1", "org-1");
     expect(ids.sort()).toEqual(["x", "y"]);
   });
 
   it("queries job_items with status IN ('success', 'skipped')", async () => {
     const capture = emptyCapture();
     const supabase = makeSupabase([], [], capture);
-    await selectCassEligibleProperties(supabase, "job-1");
+    await selectCassEligibleProperties(supabase, "job-1", "org-1");
     expect(capture.jobItemsStatusFilter).toEqual(["success", "skipped"]);
   });
 
@@ -200,7 +212,7 @@ describe("selectCassEligibleProperties", () => {
       ],
       capture,
     );
-    const ids = await selectCassEligibleProperties(supabase, "job-1");
+    const ids = await selectCassEligibleProperties(supabase, "job-1", "org-1");
     expect(ids.sort()).toEqual(["dup-unv", "new1"]);
     expect(capture.propertiesCassStatusFilter).toBe("unverified");
     expect(capture.propertiesDncFilter).toBe(false);
@@ -219,15 +231,35 @@ describe("selectCassEligibleProperties", () => {
       ],
       capture,
     );
-    await expect(selectCassEligibleProperties(supabase, "job-1")).resolves.toEqual([
+    await expect(selectCassEligibleProperties(supabase, "job-1", "org-1")).resolves.toEqual([
       "safe",
     ]);
+  });
+
+  it("excludes a job item whose property belongs to another organization", async () => {
+    const capture = emptyCapture();
+    const supabase = makeSupabase(
+      [
+        { property_id: "owned", status: "success" },
+        { property_id: "foreign", status: "success" },
+      ],
+      [
+        { id: "owned", org_id: "org-1", cass_status: "unverified" },
+        { id: "foreign", org_id: "org-2", cass_status: "unverified" },
+      ],
+      capture,
+    );
+
+    await expect(
+      selectCassEligibleProperties(supabase, "job-1", "org-1"),
+    ).resolves.toEqual(["owned"]);
+    expect(capture.propertiesOrgFilter).toBe("org-1");
   });
 
   it("returns [] when there are no eligible job_items (skips the properties query)", async () => {
     const capture = emptyCapture();
     const supabase = makeSupabase([], [], capture);
-    const ids = await selectCassEligibleProperties(supabase, "job-1");
+    const ids = await selectCassEligibleProperties(supabase, "job-1", "org-1");
     expect(ids).toEqual([]);
     expect(capture.propertiesIdFilter).toBeNull();
   });
@@ -242,7 +274,7 @@ describe("selectCassEligibleProperties", () => {
       [{ id: "real", cass_status: "unverified" }],
       capture,
     );
-    const ids = await selectCassEligibleProperties(supabase, "job-1");
+    const ids = await selectCassEligibleProperties(supabase, "job-1", "org-1");
     expect(ids).toEqual(["real"]);
     expect(capture.propertiesIdFilter).toEqual(["real"]);
   });
@@ -260,7 +292,7 @@ describe("selectCassEligibleProperties", () => {
       ],
       capture,
     );
-    const ids = await selectCassEligibleProperties(supabase, "job-1");
+    const ids = await selectCassEligibleProperties(supabase, "job-1", "org-1");
     expect(ids).toEqual([]);
   });
 });

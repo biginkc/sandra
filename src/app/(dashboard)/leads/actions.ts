@@ -134,7 +134,22 @@ export async function verifyLeadAddress(
     const supabase = await createClient();
     const unlocked = await assertPropertyDncUnlocked(supabase, propertyId);
     if (!unlocked.ok) return unlocked;
-    const outcome = await verifyPropertyAddress(supabase, propertyId);
+    const { data: property } = await supabase
+      .from("properties")
+      .select("org_id")
+      .eq("id", propertyId)
+      .maybeSingle();
+    if (!property) {
+      return {
+        ok: false,
+        error: { code: "LEAD_NOT_FOUND", message: "Lead not found." },
+      };
+    }
+    const outcome = await verifyPropertyAddress(
+      supabase,
+      propertyId,
+      property.org_id,
+    );
 
     switch (outcome.status) {
       case "verified":
@@ -1191,10 +1206,33 @@ export async function verifyPropertiesBulk(
       data: { user },
     } = await supabase.auth.getUser();
 
+    const { data: ownedRows, error: ownershipError } = await supabase
+      .from("properties")
+      .select("id, org_id")
+      .in("id", verifyIds);
+    if (ownershipError) {
+      return {
+        ok: false,
+        error: { code: "VERIFY_SCOPE_FAILED", message: ownershipError.message },
+      };
+    }
+    const orgIds = new Set((ownedRows ?? []).map((row) => row.org_id));
+    if ((ownedRows ?? []).length !== new Set(verifyIds).size || orgIds.size !== 1) {
+      return {
+        ok: false,
+        error: {
+          code: "VERIFY_SCOPE_FAILED",
+          message: "Every selected property must belong to the same organization.",
+        },
+      };
+    }
+    const orgId = Array.from(orgIds)[0];
+
     const { data: job, error } = await supabase
       .from("jobs")
       .insert({
         type: "cass_dsf2_ncoa",
+        org_id: orgId,
         status: "queued",
         created_by: user?.id ?? null,
         total_items: verifyIds.length,

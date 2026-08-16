@@ -39,17 +39,21 @@ type PropertyCassUpdate = Database["public"]["Tables"]["properties"]["Update"];
 export async function verifyPropertyAddress(
   supabase: SupabaseClient<Database>,
   propertyId: string,
+  expectedOrgId: string,
 ): Promise<VerifyPropertyOutcome> {
   const { data: property, error: fetchError } = await supabase
     .from("properties")
     .select("id, org_id, address, city, state, zip, is_dnc_locked")
     .eq("id", propertyId)
+    .eq("org_id", expectedOrgId)
     .maybeSingle();
 
   if (fetchError) {
     return { status: "failed", propertyId, error: fetchError.message };
   }
-  if (!property) return { status: "not_found", propertyId };
+  if (!property || property.org_id !== expectedOrgId) {
+    return { status: "not_found", propertyId };
+  }
   if (property.is_dnc_locked) return { status: "dnc_skipped", propertyId };
 
   const input: AddressInput = {

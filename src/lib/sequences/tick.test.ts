@@ -79,13 +79,31 @@ function makeClient(propertyRow: {
 
 describe("processEnrollmentTick — outbound suppression boundary", () => {
   it("pauses before claiming or sending when the property is permanently locked", async () => {
-    const client = makeClient({
-      status: "interested",
-      state: "MO",
-      address: "123 Main St",
-      outreach_dispo: null,
-      is_dnc_locked: true,
+    let capturedUpdate: unknown;
+    const from = vi.fn((table: string) => {
+      if (table === "sequence_steps") return makeQueryResult(STEP_ROW);
+      if (table === "properties")
+        return makeQueryResult({
+          status: "interested",
+          state: "MO",
+          address: "123 Main St",
+          outreach_dispo: null,
+          is_dnc_locked: true,
+        });
+      if (table === "sequence_enrollments") {
+        const builder: Record<string, unknown> = {};
+        builder.update = (payload: unknown) => {
+          capturedUpdate = payload;
+          return builder;
+        };
+        builder.eq = () => builder;
+        builder.then = (resolve: (v: { data: unknown; error: unknown }) => unknown) =>
+          resolve({ data: null, error: null });
+        return builder;
+      }
+      throw new Error(`Unexpected table: ${table}`);
     });
+    const client = { from } as never;
 
     const outcome = await processEnrollmentTick(client, BASE_ENROLLMENT);
 
@@ -93,6 +111,37 @@ describe("processEnrollmentTick — outbound suppression boundary", () => {
       status: "paused",
       enrollmentId: "enrollment-1",
       reason: "dnc",
+    });
+    expect(capturedUpdate).toMatchObject({
+      status: "opted_out",
+      pause_reason: "dnc",
+      next_run_at: null,
+    });
+    expect(sendSmsToContact).not.toHaveBeenCalled();
+  });
+
+  it("reports a failed permanent opt-out instead of claiming the lead was paused", async () => {
+    const from = vi.fn((table: string) => {
+      if (table === "sequence_steps") return makeQueryResult(STEP_ROW);
+      if (table === "properties")
+        return makeQueryResult({
+          status: "interested",
+          state: "MO",
+          address: "123 Main St",
+          outreach_dispo: null,
+          is_dnc_locked: true,
+        });
+      if (table === "sequence_enrollments")
+        return makeQueryResult(null, { message: "write rejected" });
+      throw new Error(`Unexpected table: ${table}`);
+    });
+
+    await expect(
+      processEnrollmentTick({ from } as never, BASE_ENROLLMENT),
+    ).resolves.toEqual({
+      status: "failed",
+      enrollmentId: "enrollment-1",
+      message: "write rejected",
     });
     expect(sendSmsToContact).not.toHaveBeenCalled();
   });
@@ -173,7 +222,11 @@ describe("processEnrollmentTick — outbound suppression boundary", () => {
       enrollmentId: "enrollment-1",
       reason: "dnc",
     });
-    expect(capturedUpdate).toMatchObject({ status: "opted_out", pause_reason: "dnc" });
+    expect(capturedUpdate).toMatchObject({
+      status: "opted_out",
+      pause_reason: "dnc",
+      next_run_at: null,
+    });
   });
 
   it("does not pause on a non-suppressing dispo", async () => {

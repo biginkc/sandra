@@ -277,6 +277,7 @@ async function runPhase1(
   const summary = await runCassEnrichment(supabase, {
     jobId: created.id,
     propertyIds: unverifiedIds,
+    expectedOrgId: orgId,
   });
 
   console.log(`  CASS outcomes:`);

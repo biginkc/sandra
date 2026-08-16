@@ -18,6 +18,12 @@ const migration = fileURLToPath(
     import.meta.url,
   ),
 );
+const cassProvenanceMigration = fileURLToPath(
+  new URL(
+    "../supabase/migrations/20260816040000_cass_job_tenant_provenance.sql",
+    import.meta.url,
+  ),
+);
 let started = false;
 
 function run(name, args, options = {}) {
@@ -107,6 +113,8 @@ try {
     create role anon; create role authenticated; create role service_role;
     create table public.jobs(
       id uuid primary key,
+      org_id uuid, type text, input_params jsonb,
+      parent_job_id uuid, related_import_id uuid,
       error_class text check (error_class in (
         'validation','transient','provider','database','authorization','configuration'
       ))
@@ -159,13 +167,24 @@ try {
       ('${contact}', '${orgB}'), ('${replacementContact}', '${orgB}');
     insert into properties(id, org_id, homeowner_contact_id) values ('${property}', '${orgB}', '${contact}');
     insert into sequences values ('${sequence}');
-    insert into sequence_enrollments(id, sequence_id, property_id) values ('${enrollment}', '${sequence}', '${property}');
+    insert into sequence_enrollments(id, sequence_id, property_id, next_run_at)
+    values ('${enrollment}', '${sequence}', '${property}', now() - interval '1 minute');
     insert into sequence_step_runs(id, enrollment_id) values ('${runId}', '${enrollment}');
   `);
 
   run(
     "psql",
     ["-h", socketDir, "-p", String(port), "-U", "postgres", "-v", "ON_ERROR_STOP=1", "-f", migration],
+    { stdio: "ignore" },
+  );
+  run(
+    "psql",
+    ["-h", socketDir, "-p", String(port), "-U", "postgres", "-v", "ON_ERROR_STOP=1", "-f", cassProvenanceMigration],
+    { stdio: "ignore" },
+  );
+  run(
+    "psql",
+    ["-h", socketDir, "-p", String(port), "-U", "postgres", "-v", "ON_ERROR_STOP=1", "-f", cassProvenanceMigration],
     { stdio: "ignore" },
   );
   run(
@@ -182,6 +201,16 @@ try {
       ('77777777-7777-7777-7777-777777777772', 'submission_unknown'),
       ('77777777-7777-7777-7777-777777777773', 'provider_persist_failed');
   `);
+
+  psql(`insert into jobs(id, org_id, type, input_params)
+    values ('66666666-6666-6666-6666-666666666667', '${orgA}', 'cass_dsf2_ncoa', '{"property_ids":["${property}"]}')`);
+  let cassTenantSwapRejected = false;
+  try {
+    psql(`update jobs set org_id='${orgB}', input_params='{"property_ids":[]}' where id='66666666-6666-6666-6666-666666666667'`);
+  } catch (error) {
+    cassTenantSwapRejected = /CASS_JOB_PROVENANCE_IMMUTABLE/.test(String(error));
+  }
+  equal(String(cassTenantSwapRejected), "true", "CASS job tenant and paid inputs are immutable");
 
   psql(`insert into consent_events(contact_id, org_id, event_type) values ('${contact}', '${orgA}', 'opt_out')`);
   equal(
@@ -223,8 +252,8 @@ try {
   catch (error) { sidecarMoveRejected = /DNC_LOCKED/.test(String(error)); }
   equal(String(sidecarMoveRejected), "true", "locked contact sidecar cannot move away from its old property");
 
-  psql(`update sequence_enrollments set status='opted_out', pause_reason='dnc' where id='${enrollment}'`);
-  equal(psql(`select status||':'||pause_reason from sequence_enrollments where id='${enrollment}'`), "opted_out:dnc", "narrow compliance stop allowed");
+  psql(`update sequence_enrollments set status='opted_out', pause_reason='dnc', next_run_at=null where id='${enrollment}'`);
+  equal(psql(`select status||':'||pause_reason||':'||(next_run_at is null)::text from sequence_enrollments where id='${enrollment}'`), "opted_out:dnc:true", "due locked enrollment permanently stopped and no longer due");
 
   let enrollmentDeleteRejected = false;
   try { psql(`delete from sequence_enrollments where id='${enrollment}'`); }

@@ -73,6 +73,7 @@ export function getAutotriggerCap(): number {
 export async function selectCassEligibleProperties(
   supabase: SupabaseClient<Database>,
   parentJobId: string,
+  expectedOrgId: string,
 ): Promise<string[]> {
   const { data: items } = await supabase
     .from("job_items")
@@ -90,6 +91,7 @@ export async function selectCassEligibleProperties(
     .from("properties")
     .select("id")
     .in("id", candidateIds)
+    .eq("org_id", expectedOrgId)
     .eq("cass_status", "unverified")
     .eq("is_dnc_locked", false);
 
@@ -110,6 +112,7 @@ export async function createCassChildJob(
     parentJobId: string;
     relatedImportId: string | null;
     createdBy: string | null;
+    orgId: string;
     propertyIds: string[];
     autoStart: boolean;
     blockedReason?: string;
@@ -123,6 +126,7 @@ export async function createCassChildJob(
     .from("jobs")
     .insert({
       type: "cass_dsf2_ncoa",
+      org_id: params.orgId,
       status: "queued",
       parent_job_id: params.parentJobId,
       related_import_id: params.relatedImportId,
@@ -182,13 +186,18 @@ export async function runCassChunk(
     processedBefore: number;
     /** Running totals from prior chunks; mutated and returned. */
     summary: CassJobSummary;
+    expectedOrgId: string;
   },
 ): Promise<CassJobSummary> {
   const { summary } = params;
 
   for (let i = 0; i < params.propertyIds.length; i++) {
     const propertyId = params.propertyIds[i];
-    const outcome = await verifyPropertyAddress(supabase, propertyId);
+    const outcome = await verifyPropertyAddress(
+      supabase,
+      propertyId,
+      params.expectedOrgId,
+    );
 
     switch (outcome.status) {
       case "verified":
@@ -358,6 +367,7 @@ export async function runCassEnrichment(
   params: {
     jobId: string;
     propertyIds: string[];
+    expectedOrgId: string;
   },
 ): Promise<CassJobSummary> {
   const summary: CassJobSummary = {
@@ -381,6 +391,7 @@ export async function runCassEnrichment(
     propertyIds: params.propertyIds,
     processedBefore: 0,
     summary,
+    expectedOrgId: params.expectedOrgId,
   });
 
   await finalizeCassJob(supabase, { jobId: params.jobId, summary });

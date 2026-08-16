@@ -22,10 +22,11 @@ function makeClient(options?: {
   locked?: boolean;
   claim?: boolean;
   updateError?: string;
+  orgId?: string;
 }) {
   const property = {
     id: "property-1",
-    org_id: "org-other",
+    org_id: options?.orgId ?? "org-1",
     address: "1 Main St",
     city: "Kansas City",
     state: "MO",
@@ -76,7 +77,7 @@ describe("verifyPropertyAddress paid boundary", () => {
   it("never calls the paid provider when the property is already DNC", async () => {
     const client = makeClient({ locked: true });
     await expect(
-      verifyPropertyAddress(client as never, "property-1"),
+      verifyPropertyAddress(client as never, "property-1", "org-1"),
     ).resolves.toEqual({ status: "dnc_skipped", propertyId: "property-1" });
     expect(client.rpc).not.toHaveBeenCalled();
     expect(mocks.verify).not.toHaveBeenCalled();
@@ -85,7 +86,7 @@ describe("verifyPropertyAddress paid boundary", () => {
   it("never calls the paid provider when DNC wins the atomic boundary claim", async () => {
     const client = makeClient({ claim: false });
     await expect(
-      verifyPropertyAddress(client as never, "property-1"),
+      verifyPropertyAddress(client as never, "property-1", "org-1"),
     ).resolves.toEqual({ status: "dnc_skipped", propertyId: "property-1" });
     expect(mocks.verify).not.toHaveBeenCalled();
   });
@@ -97,6 +98,7 @@ describe("verifyPropertyAddress paid boundary", () => {
     const outcome = await verifyPropertyAddress(
       makeClient() as never,
       "property-1",
+      "org-1",
     );
     expect(outcome).toMatchObject({ status: "submission_unknown" });
   });
@@ -106,6 +108,7 @@ describe("verifyPropertyAddress paid boundary", () => {
     const outcome = await verifyPropertyAddress(
       makeClient() as never,
       "property-1",
+      "org-1",
     );
     expect(outcome).toMatchObject({ status: "failed" });
     expect(mocks.verify).not.toHaveBeenCalled();
@@ -115,8 +118,21 @@ describe("verifyPropertyAddress paid boundary", () => {
     const outcome = await verifyPropertyAddress(
       makeClient({ updateError: "database unavailable" }) as never,
       "property-1",
+      "org-1",
     );
     expect(outcome).toMatchObject({ status: "provider_persist_failed" });
     expect(mocks.verify).toHaveBeenCalledTimes(1);
+  });
+
+  it("never calls the paid provider for a property outside the expected organization", async () => {
+    const client = makeClient({ orgId: "org-b" });
+
+    await expect(
+      verifyPropertyAddress(client as never, "property-1", "org-a"),
+    ).resolves.toEqual({ status: "not_found", propertyId: "property-1" });
+
+    expect(client.rpc).not.toHaveBeenCalled();
+    expect(mocks.lookupCassCache).not.toHaveBeenCalled();
+    expect(mocks.verify).not.toHaveBeenCalled();
   });
 });
