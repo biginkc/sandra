@@ -16,6 +16,10 @@ import {
   partitionPropertyDncLocks,
 } from "@/lib/dnc/property-lock";
 import { reportError } from "@/lib/errors/report";
+import {
+  createStandaloneCassJob,
+  failAuthorizedCassJobStart,
+} from "@/lib/enrichment/cass-job";
 import { verifyPropertyAddress } from "@/lib/enrichment/verify-property";
 import type { CassStatus } from "@/lib/enrichment/types";
 import { qualifyProperty } from "@/lib/leads/qualify";
@@ -1181,6 +1185,7 @@ export async function deletePropertiesBulk(
  */
 export async function verifyPropertiesBulk(
   propertyIds: string[],
+  requestKey: string,
 ): Promise<Result<{ jobId: string }>> {
   if (propertyIds.length === 0) {
     return {
@@ -1205,6 +1210,15 @@ export async function verifyPropertiesBulk(
     const {
       data: { user },
     } = await supabase.auth.getUser();
+    if (!user) {
+      return {
+        ok: false,
+        error: {
+          code: "AUTH_REQUIRED",
+          message: "Sign in to verify properties.",
+        },
+      };
+    }
 
     const { data: ownedRows, error: ownershipError } = await supabase
       .from("properties")
@@ -1228,27 +1242,29 @@ export async function verifyPropertiesBulk(
     }
     const orgId = Array.from(orgIds)[0];
 
-    const { data: job, error } = await supabase
-      .from("jobs")
-      .insert({
-        type: "cass_dsf2_ncoa",
-        org_id: orgId,
-        status: "queued",
-        created_by: user?.id ?? null,
-        total_items: verifyIds.length,
-        title: `CASS verify ${verifyIds.length} propert${verifyIds.length === 1 ? "y" : "ies"}`,
-        description: "Bulk verify from /properties",
-        provider: "smartystreets",
-        input_params: { property_ids: verifyIds },
-      })
-      .select("id")
-      .single();
-    if (error || !job) {
+    let jobId: string;
+    let claimToken: string;
+    try {
+      const child = await createStandaloneCassJob(supabase, {
+        orgId,
+        propertyIds: verifyIds,
+        createdBy: user.id,
+        requestKey,
+      });
+      jobId = child.jobId;
+      if (!child.claimToken) {
+        throw new Error("CASS job did not return a start receipt");
+      }
+      claimToken = child.claimToken;
+    } catch (createError) {
       return {
         ok: false,
         error: {
           code: "VERIFY_JOB_CREATE_FAILED",
-          message: error?.message ?? "Job creation failed",
+          message:
+            createError instanceof Error
+              ? createError.message
+              : "Job creation failed",
         },
       };
     }
@@ -1260,16 +1276,22 @@ export async function verifyPropertiesBulk(
     // them in capped chunks, one invocation each.
     after(async () => {
       try {
-        await start(cassBulkWorkflow, [{ jobId: job.id }]);
+        await start(cassBulkWorkflow, [{ jobId, claimToken }]);
       } catch (e) {
         reportError(e, {
           tags: { surface: "verify_properties_bulk_workflow_start" },
-          extra: { jobId: job.id, count: verifyIds.length },
+          extra: { jobId, count: verifyIds.length },
+        });
+        await failAuthorizedCassJobStart(supabase, {
+          jobId,
+          orgId,
+          claimToken,
+          error: e,
         });
       }
     });
 
-    return ok({ jobId: job.id });
+    return ok({ jobId });
   } catch (e) {
     reportError(e, {
       tags: { surface: "verify_properties_bulk" },

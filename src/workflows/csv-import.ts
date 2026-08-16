@@ -50,6 +50,7 @@ import {
 import {
   telnyxLookupFromEnv,
   TELNYX_LOOKUP_COST_USD,
+  type TelnyxLineTypeLookup,
 } from "@/lib/line-type-lookup/telnyx";
 import { enrollLead } from "@/lib/sequences/enrollment";
 import { trimRowsToMapping } from "@/lib/csv/trim-rows";
@@ -80,6 +81,166 @@ const CHUNK_SIZE = 250;
  * with the one-retry backoff on every number.
  */
 const LOOKUP_CHUNK_SIZE = 200;
+const SEQUENCE_ITEM_PAGE_SIZE = 500;
+const POSTGREST_IN_CHUNK_SIZE = 500;
+const LINE_TYPE_LEDGER_WORKERS = 5;
+
+type LineTypeClaim = {
+  action: "claimed" | "reused" | "ambiguous" | "retry_blocked";
+  line_type: PhoneLineType | null;
+  outcome: string | null;
+};
+
+type UntypedRpcClient = {
+  rpc: (
+    name: string,
+    args: Record<string, unknown>,
+  ) => Promise<{
+    data: unknown;
+    error: { message: string } | null;
+  }>;
+};
+
+async function claimLineTypeLookup(
+  supabase: SupabaseClient<Database>,
+  args: { jobId: string; orgId: string; phone: string },
+): Promise<LineTypeClaim> {
+  const { data, error } = await (supabase as unknown as UntypedRpcClient).rpc(
+    "claim_csv_import_line_type_lookup",
+    {
+      p_job_id: args.jobId,
+      p_org_id: args.orgId,
+      p_phone_e164: args.phone,
+    },
+  );
+  if (error) throw new Error(`line-type lookup claim: ${error.message}`);
+  const row = Array.isArray(data) ? data[0] : data;
+  if (
+    !row ||
+    typeof row !== "object" ||
+    !["claimed", "reused", "ambiguous", "retry_blocked"].includes(
+      String((row as Record<string, unknown>).action),
+    )
+  ) {
+    throw new Error("line-type lookup claim returned an invalid outcome");
+  }
+  return row as LineTypeClaim;
+}
+
+async function completeLineTypeLookup(
+  supabase: SupabaseClient<Database>,
+  args: {
+    jobId: string;
+    orgId: string;
+    phone: string;
+    state: "completed" | "retryable" | "ambiguous";
+    lineType: PhoneLineType;
+    outcome: string;
+    httpStatus: number | null;
+    lastError: string | null;
+  },
+): Promise<void> {
+  const { error } = await (supabase as unknown as UntypedRpcClient).rpc(
+    "complete_csv_import_line_type_lookup",
+    {
+      p_job_id: args.jobId,
+      p_org_id: args.orgId,
+      p_phone_e164: args.phone,
+      p_state: args.state,
+      p_line_type: args.lineType,
+      p_outcome: args.outcome,
+      p_provider_http_status: args.httpStatus,
+      p_last_error: args.lastError,
+    },
+  );
+  if (error) throw new Error(`line-type lookup checkpoint: ${error.message}`);
+}
+
+export async function classifyPhonesWithDurableLedger(
+  supabase: SupabaseClient<Database>,
+  lookup: Pick<TelnyxLineTypeLookup, "classifyOne">,
+  args: { jobId: string; orgId: string; numbers: string[] },
+): Promise<[string, PhoneLineType][]> {
+  const entries: Array<[string, PhoneLineType] | undefined> = new Array(
+    args.numbers.length,
+  );
+  const failures: string[] = [];
+  let cursor = 0;
+
+  const worker = async (): Promise<void> => {
+    for (;;) {
+      const index = cursor++;
+      if (index >= args.numbers.length) return;
+      const phone = args.numbers[index];
+      try {
+        const claim = await claimLineTypeLookup(supabase, {
+          jobId: args.jobId,
+          orgId: args.orgId,
+          phone,
+        });
+        if (claim.action === "reused") {
+          if (
+            claim.line_type !== "mobile" &&
+            claim.line_type !== "landline" &&
+            claim.line_type !== "unknown"
+          ) {
+            throw new Error(
+              "line-type reuse returned an invalid classification",
+            );
+          }
+          entries[index] = [phone, claim.line_type];
+          continue;
+        }
+        if (claim.action !== "claimed") {
+          failures.push(claim.action);
+          continue;
+        }
+
+        const outcome = await lookup.classifyOne(phone);
+        await completeLineTypeLookup(supabase, {
+          jobId: args.jobId,
+          orgId: args.orgId,
+          phone,
+          state: outcome.status,
+          lineType: outcome.lineType,
+          outcome: outcome.reason,
+          httpStatus: outcome.httpStatus,
+          lastError:
+            outcome.status === "retryable"
+              ? "Telnyx explicitly rejected the lookup after its bounded retry."
+              : outcome.status === "ambiguous"
+                ? "Telnyx transport outcome is unknown; automatic replay is blocked."
+                : null,
+        });
+        if (outcome.status === "completed") {
+          entries[index] = [phone, outcome.lineType];
+        } else {
+          failures.push(outcome.status);
+        }
+      } catch {
+        // Await every worker before rejecting the step. Returning early from
+        // Promise.all would leave paid calls running without waiting for their
+        // durable checkpoints.
+        failures.push("checkpoint_error");
+      }
+    }
+  };
+
+  await Promise.all(
+    Array.from(
+      { length: Math.min(LINE_TYPE_LEDGER_WORKERS, args.numbers.length) },
+      () => worker(),
+    ),
+  );
+  if (failures.length > 0) {
+    throw new Error(
+      `Line-type classification stopped with ${failures.length} safely checkpointed provider outcome(s).`,
+    );
+  }
+  return entries.filter(
+    (entry): entry is [string, PhoneLineType] => entry !== undefined,
+  );
+}
 
 export type CsvImportWorkflowParams = {
   jobId: string;
@@ -205,20 +366,33 @@ export async function enrollJobBatch(
   supabase: SupabaseClient<Database>,
   args: { jobId: string; sequenceId: string; orgId: string },
 ): Promise<EnrollBatchResult> {
-  const { data: items, error: itemsError } = await supabase
-    .from("job_items")
-    .select("property_id, compliance_locked")
-    .eq("job_id", args.jobId)
-    .in("status", ["success", "skipped"]);
-  if (itemsError)
-    throw new Error(`sequence checkpoint read: ${itemsError.message}`);
+  const eligibleItemPropertyIds = new Set<string>();
+  let lastItemId: string | null = null;
+  for (;;) {
+    let query = supabase
+      .from("job_items")
+      .select("id, property_id, compliance_locked")
+      .eq("job_id", args.jobId)
+      .in("status", ["success", "skipped"])
+      .order("id", { ascending: true })
+      .limit(SEQUENCE_ITEM_PAGE_SIZE);
+    if (lastItemId) query = query.gt("id", lastItemId);
+    const { data: items, error: itemsError } = await query;
+    if (itemsError) {
+      throw new Error(`sequence checkpoint read: ${itemsError.message}`);
+    }
+    for (const item of items ?? []) {
+      lastItemId = item.id;
+      if (!item.compliance_locked && item.property_id) {
+        eligibleItemPropertyIds.add(item.property_id);
+      }
+    }
+    if (!items || items.length < SEQUENCE_ITEM_PAGE_SIZE) break;
+  }
 
   const propertyIds = await selectNonDncPropertyIds(
     supabase,
-    (items ?? [])
-      .filter((i) => !i.compliance_locked)
-      .map((i) => i.property_id)
-      .filter((id): id is string => id !== null),
+    [...eligibleItemPropertyIds],
     args.orgId,
   );
 
@@ -245,6 +419,10 @@ export async function enrollJobBatch(
     } catch {
       failed++;
     }
+  }
+
+  if (enrolled + skipped + failed !== propertyIds.length) {
+    throw new Error("sequence enrollment count conservation failed");
   }
 
   return { enrolled, skipped, failed };
@@ -433,19 +611,24 @@ async function collectUnlabeledPhonesStep(args: {
 
 /**
  * STEP 1c — Classify one slice of phone numbers via Telnyx. Returns
- * entries (not a Map — step results must serialize). The provider never
- * throws on a single number's failure; a thrown error here means Telnyx
- * is unreachable outright, which WDK retries with backoff.
+ * entries (not a Map — step results must serialize). Per-number claims and
+ * results are durable across whole-workflow retries. This paid step disables
+ * WDK's automatic retry; only the job's persisted retry policy can authorize
+ * another explicitly rejected lookup.
  */
 async function classifyPhonesChunkStep(args: {
+  jobId: string;
+  orgId: string;
   numbers: string[];
 }): Promise<[string, PhoneLineType][]> {
   "use step";
 
+  const supabase = createAdminClient();
   const lookup = telnyxLookupFromEnv();
-  const classified = await lookup.classify(args.numbers);
-  return [...classified.entries()];
+  return classifyPhonesWithDurableLedger(supabase, lookup, args);
 }
+
+Object.assign(classifyPhonesChunkStep, { maxRetries: 0 });
 
 /**
  * Mark the job failed with an operator-readable error. Used when the
@@ -613,7 +796,7 @@ async function triggerCassStep(args: {
 
   const cap = getAutotriggerCap();
   const autoStart = propertyIds.length <= cap;
-  const childId = await createCassChildJob(supabase, {
+  const child = await createCassChildJob(supabase, {
     parentJobId: args.parentJobId,
     relatedImportId: args.relatedImportId,
     createdBy: args.createdBy,
@@ -623,13 +806,25 @@ async function triggerCassStep(args: {
     blockedReason: autoStart
       ? undefined
       : `${propertyIds.length} items exceeds CASS_AUTOTRIGGER_MAX_ITEMS=${cap}`,
+    requestKey: args.parentJobId,
   });
 
   if (autoStart) {
+    if (child.status !== "running") {
+      return {
+        status: child.status === "completed" ? "completed" : "failed",
+        eligible: propertyIds.length,
+        message:
+          child.status === "completed"
+            ? undefined
+            : `Existing CASS job is ${child.status}; use its explicit retry or review path.`,
+      };
+    }
     const summary = await runCassEnrichment(supabase, {
-      jobId: childId,
+      jobId: child.jobId,
       propertyIds,
       expectedOrgId: args.orgId,
+      claimToken: child.claimToken,
     });
     if (summary.failed > 0 || summary.providerOff > 0) {
       return {
@@ -676,14 +871,42 @@ async function selectNonDncPropertyIds(
   orgId: string,
 ): Promise<string[]> {
   if (propertyIds.length === 0) return [];
-  const { data, error } = await supabase
-    .from("properties")
-    .select(
-      "id, outreach_dispo, homeowner:contacts!properties_homeowner_contact_id_fkey(phone_1, phone_2, phone_3, do_not_contact, sms_opted_out)",
-    )
-    .in("id", propertyIds)
-    .eq("org_id", orgId);
-  if (error) throw new Error(`DNC eligibility check: ${error.message}`);
+  const data: Array<{
+    id: string;
+    outreach_dispo: string | null;
+    homeowner:
+      | {
+          phone_1: string | null;
+          phone_2: string | null;
+          phone_3: string | null;
+          do_not_contact: boolean;
+          sms_opted_out: boolean;
+        }
+      | {
+          phone_1: string | null;
+          phone_2: string | null;
+          phone_3: string | null;
+          do_not_contact: boolean;
+          sms_opted_out: boolean;
+        }[]
+      | null;
+  }> = [];
+  for (
+    let offset = 0;
+    offset < propertyIds.length;
+    offset += POSTGREST_IN_CHUNK_SIZE
+  ) {
+    const ids = propertyIds.slice(offset, offset + POSTGREST_IN_CHUNK_SIZE);
+    const { data: page, error } = await supabase
+      .from("properties")
+      .select(
+        "id, outreach_dispo, homeowner:contacts!properties_homeowner_contact_id_fkey(phone_1, phone_2, phone_3, do_not_contact, sms_opted_out)",
+      )
+      .in("id", ids)
+      .eq("org_id", orgId);
+    if (error) throw new Error(`DNC eligibility check: ${error.message}`);
+    if (page) data.push(...page);
+  }
 
   const phones = (data ?? []).flatMap((property) => {
     const homeowner = Array.isArray(property.homeowner)
@@ -695,22 +918,33 @@ async function selectNonDncPropertyIds(
         )
       : [];
   });
-  const { data: suppressed, error: suppressionError } = phones.length
-    ? await supabase
-        .from("sms_phone_suppressions")
-        .select("phone_e164")
-        .eq("org_id", orgId)
-        .eq("channel", "sms")
-        .in("phone_e164", phones)
-    : { data: [], error: null };
-  if (suppressionError) {
-    throw new Error(`DNC suppression check: ${suppressionError.message}`);
+  const suppressed: Array<{ phone_e164: string }> = [];
+  const distinctPhones = [...new Set(phones)];
+  for (
+    let offset = 0;
+    offset < distinctPhones.length;
+    offset += POSTGREST_IN_CHUNK_SIZE
+  ) {
+    const phonePage = distinctPhones.slice(
+      offset,
+      offset + POSTGREST_IN_CHUNK_SIZE,
+    );
+    const { data: suppressionPage, error: suppressionError } = await supabase
+      .from("sms_phone_suppressions")
+      .select("phone_e164")
+      .eq("org_id", orgId)
+      .eq("channel", "sms")
+      .in("phone_e164", phonePage);
+    if (suppressionError) {
+      throw new Error(`DNC suppression check: ${suppressionError.message}`);
+    }
+    if (suppressionPage) suppressed.push(...suppressionPage);
   }
   const suppressedPhones = new Set(
-    (suppressed ?? []).map((row) => row.phone_e164),
+    suppressed.map((row) => row.phone_e164),
   );
 
-  return (data ?? [])
+  return data
     .filter((property) => {
       const homeowner = Array.isArray(property.homeowner)
         ? property.homeowner[0]
@@ -735,17 +969,28 @@ async function excludeComplianceLockedJobProperties(
   propertyIds: string[],
 ): Promise<string[]> {
   if (propertyIds.length === 0) return [];
-  const { data, error } = await supabase
-    .from("job_items")
-    .select("property_id")
-    .eq("job_id", jobId)
-    .eq("compliance_locked", true)
-    .not("property_id", "is", null);
-  if (error)
-    throw new Error(`DNC job-item eligibility check: ${error.message}`);
-  const locked = new Set(
-    (data ?? []).map((item) => item.property_id).filter(Boolean),
-  );
+  const locked = new Set<string>();
+  let lastItemId: string | null = null;
+  for (;;) {
+    let query = supabase
+      .from("job_items")
+      .select("id, property_id")
+      .eq("job_id", jobId)
+      .eq("compliance_locked", true)
+      .not("property_id", "is", null)
+      .order("id", { ascending: true })
+      .limit(SEQUENCE_ITEM_PAGE_SIZE);
+    if (lastItemId) query = query.gt("id", lastItemId);
+    const { data, error } = await query;
+    if (error)
+      throw new Error(`DNC job-item eligibility check: ${error.message}`);
+    for (const item of data ?? []) {
+      if (item.property_id) locked.add(item.property_id);
+    }
+    if (!data || data.length < SEQUENCE_ITEM_PAGE_SIZE) break;
+    lastItemId = data.at(-1)?.id ?? null;
+    if (!lastItemId) throw new Error("DNC job-item page had no cursor");
+  }
   return propertyIds.filter((propertyId) => !locked.has(propertyId));
 }
 
@@ -929,7 +1174,13 @@ export async function csvImportWorkflow(
             offset,
             offset + LOOKUP_CHUNK_SIZE,
           );
-          entries.push(...(await classifyPhonesChunkStep({ numbers: slice })));
+          entries.push(
+            ...(await classifyPhonesChunkStep({
+              jobId: params.jobId,
+              orgId: params.orgId,
+              numbers: slice,
+            })),
+          );
         }
         const applied = await applyLineTypesStep({
           jobId: params.jobId,

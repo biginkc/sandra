@@ -3,15 +3,21 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { StepProgress } from "./step-progress";
 
-const { createClientMock, retryCsvImportJobMock } = vi.hoisted(() => ({
+const {
+  createClientMock,
+  retryCsvImportJobMock,
+  getCsvImportRetryAvailabilityMock,
+} = vi.hoisted(() => ({
   createClientMock: vi.fn(),
   retryCsvImportJobMock: vi.fn(),
+  getCsvImportRetryAvailabilityMock: vi.fn(),
 }));
 
 vi.mock("@/lib/supabase/client", () => ({ createClient: createClientMock }));
 vi.mock("../actions", () => ({
   retryCsvImportJob: retryCsvImportJobMock,
   retryImportListAssignment: vi.fn(),
+  getCsvImportRetryAvailability: getCsvImportRetryAvailabilityMock,
 }));
 
 function job(status: string) {
@@ -63,6 +69,10 @@ function mockClient(jobResults: Array<ReturnType<typeof job>>) {
 describe("<StepProgress /> retry truthfulness", () => {
   beforeEach(() => {
     retryCsvImportJobMock.mockResolvedValue({ ok: true, data: { jobId: "job-1" } });
+    getCsvImportRetryAvailabilityMock.mockResolvedValue({
+      ok: true,
+      data: { state: "retryable", message: null },
+    });
   });
 
   afterEach(() => {
@@ -97,5 +107,59 @@ describe("<StepProgress /> retry truthfulness", () => {
     expect(screen.getByText("Unprocessed").nextElementSibling).toHaveTextContent(
       "8",
     );
+  });
+
+  it("re-enables retry and reports a rejected network request", async () => {
+    mockClient([job("failed")]);
+    retryCsvImportJobMock.mockRejectedValueOnce(new Error("Connection lost"));
+
+    render(<StepProgress jobId="job-1" />);
+    fireEvent.click(await screen.findByRole("button", { name: "Retry import" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Connection lost");
+    expect(screen.getByRole("button", { name: "Retry import" })).toBeEnabled();
+  });
+
+  it.each([
+    [
+      "manual_reconciliation",
+      "Automatic retry is blocked to prevent a duplicate provider charge.",
+    ],
+    ["exhausted", "This import has used all of its retry attempts."],
+    ["in_flight", "This import is already being processed."],
+  ])("replaces Retry with the truthful %s state", async (state, message) => {
+    mockClient([job("failed")]);
+    getCsvImportRetryAvailabilityMock.mockResolvedValueOnce({
+      ok: true,
+      data: { state, message },
+    });
+
+    render(<StepProgress jobId="job-1" />);
+
+    expect(await screen.findByText(message)).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Retry import" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("stops offering Retry when the claim discovers an exhausted budget", async () => {
+    mockClient([job("failed")]);
+    retryCsvImportJobMock.mockResolvedValueOnce({
+      ok: false,
+      error: {
+        code: "CSV_IMPORT_RETRY_EXHAUSTED",
+        message: "This import has used all of its retry attempts.",
+      },
+    });
+
+    render(<StepProgress jobId="job-1" />);
+    fireEvent.click(await screen.findByRole("button", { name: "Retry import" }));
+
+    expect(
+      await screen.findByText("This import has used all of its retry attempts."),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Retry import" }),
+    ).not.toBeInTheDocument();
   });
 });

@@ -34,6 +34,8 @@ export type LeadBoardLead = Pick<
     last_name: string | null;
     entity_name: string | null;
   } | null;
+  homeowner_sms_opted_out: boolean | null;
+  homeowner_sms_opted_out_at: string | null;
 };
 
 export type ListMembership = { listId: string; name: string; color: string | null };

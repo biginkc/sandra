@@ -111,4 +111,47 @@ describe("PromoteLeadsDialog", () => {
     expect(await screen.findByText("Promotion finished. No background work was needed.")).toBeVisible();
     expect(screen.queryByText("Promotion started in the background.")).toBeNull();
   });
+
+  it("recovers from a rejected eligibility check", async () => {
+    preflightPromoteLeads
+      .mockRejectedValueOnce(new Error("Connection lost"))
+      .mockResolvedValueOnce({
+        ok: true,
+        data: { selected: 2, eligible: 2, dncLocked: 0, staleOrNotProspect: 0 },
+      });
+    const user = userEvent.setup();
+    render(
+      <PromoteLeadsDialog
+        open
+        onOpenChange={vi.fn()}
+        orgId="org-1"
+        propertyIds={["a", "b"]}
+        onStarted={vi.fn()}
+      />,
+    );
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Connection lost");
+    await user.click(screen.getByRole("button", { name: "Try again" }));
+    expect(await screen.findByRole("button", { name: "Promote 2 to Leads" })).toBeEnabled();
+    expect(preflightPromoteLeads).toHaveBeenCalledTimes(2);
+  });
+
+  it("restores confirmation after a rejected job creation", async () => {
+    createPromoteLeadsJob.mockRejectedValueOnce(new Error("Network unavailable"));
+    const user = userEvent.setup();
+    render(
+      <PromoteLeadsDialog
+        open
+        onOpenChange={vi.fn()}
+        orgId="org-1"
+        propertyIds={["a", "b", "c"]}
+        onStarted={vi.fn()}
+      />,
+    );
+
+    const confirm = await screen.findByRole("button", { name: "Promote 3 to Leads" });
+    await user.click(confirm);
+    expect(await screen.findByRole("alert")).toHaveTextContent("Network unavailable");
+    expect(confirm).toBeEnabled();
+  });
 });

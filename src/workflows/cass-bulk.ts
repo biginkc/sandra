@@ -9,8 +9,7 @@
  * the job row stayed "running" forever.
  *
  * Same shape as csv-import.ts:
- *   1. loadCassJobIds — read property_ids from jobs.input_params, flip
- *      the job to running (beginCassJob)
+ *   1. loadCassJobIds — validate property_ids and claim the paid-start receipt
  *   2. cassChunkStep  — verify one fixed-size slice; cumulative progress
  *   3. finalizeCassStep — terminal status + result_summary + notification
  *
@@ -24,7 +23,7 @@
  */
 
 import {
-  beginCassJob,
+  claimAuthorizedCassJobStart,
   finalizeCassJob,
   runCassChunk,
   type CassJobSummary,
@@ -44,6 +43,8 @@ export type CassBulkWorkflowParams = {
    *  the verification targets. Both producers write this shape:
    *  verifyPropertiesBulk and createCassChildJob. */
   jobId: string;
+  /** Receipt returned by the authenticated start action. */
+  claimToken?: string;
 };
 
 /**
@@ -53,6 +54,7 @@ export type CassBulkWorkflowParams = {
  */
 export async function loadCassJobIds(
   jobId: string,
+  claimToken?: string,
 ): Promise<{ orgId: string; propertyIds: string[] }> {
   "use step";
 
@@ -90,25 +92,14 @@ export async function loadCassJobIds(
   }
 
   const uniquePropertyIds = Array.from(new Set(propertyIds));
-  const { data: ownedProperties, error: propertyError } = await supabase
-    .from("properties")
-    .select("id")
-    .eq("org_id", job.org_id)
-    .in("id", uniquePropertyIds);
-  if (propertyError) {
-    throw new Error(
-      `CASS bulk workflow: property ownership check failed: ${propertyError.message}`,
-    );
-  }
-  const ownedIds = new Set((ownedProperties ?? []).map((row) => row.id));
-  const foreignOrMissing = uniquePropertyIds.filter((id) => !ownedIds.has(id));
-  if (foreignOrMissing.length > 0) {
-    throw new Error(
-      `CASS bulk workflow: ${foreignOrMissing.length} property ID(s) do not belong to job organization`,
-    );
-  }
-
-  await beginCassJob(supabase, { jobId, totalItems: uniquePropertyIds.length });
+  // The receipt RPC validates the exact target array and every property's
+  // organization inside PostgreSQL. Do not repeat that check through one
+  // PostgREST `.in()` request: large paid jobs exceed both URL and row caps.
+  await claimAuthorizedCassJobStart(supabase, {
+    jobId,
+    orgId: job.org_id,
+    claimToken,
+  });
 
   return { orgId: job.org_id, propertyIds: uniquePropertyIds };
 }
@@ -157,7 +148,10 @@ export async function cassBulkWorkflow(
 ): Promise<CassJobSummary> {
   "use workflow";
 
-  const { orgId, propertyIds } = await loadCassJobIds(params.jobId);
+  const { orgId, propertyIds } = await loadCassJobIds(
+    params.jobId,
+    params.claimToken,
+  );
 
   let summary: CassJobSummary = {
     total: propertyIds.length,
@@ -167,6 +161,10 @@ export async function cassBulkWorkflow(
     cacheHits: 0,
     failed: 0,
     providerOff: 0,
+    dncSkipped: 0,
+    retryableFailures: 0,
+    savedResultFailures: 0,
+    manualReconciliation: 0,
   };
 
   for (let offset = 0; offset < propertyIds.length; offset += CHUNK_SIZE) {

@@ -11,9 +11,22 @@ import { StepPreflight } from "./step-preflight";
 import { StepProgress } from "./step-progress";
 import { StepReview } from "./step-review";
 
-const { createClientMock } = vi.hoisted(() => ({ createClientMock: vi.fn() }));
+const { createClientMock, getCsvImportRetryAvailabilityMock } = vi.hoisted(
+  () => ({
+    createClientMock: vi.fn(),
+    getCsvImportRetryAvailabilityMock: vi.fn().mockResolvedValue({
+      ok: true,
+      data: { state: "retryable", message: null },
+    }),
+  }),
+);
 
 vi.mock("@/lib/supabase/client", () => ({ createClient: createClientMock }));
+vi.mock("../actions", () => ({
+  retryCsvImportJob: vi.fn(),
+  retryImportListAssignment: vi.fn(),
+  getCsvImportRetryAvailability: getCsvImportRetryAvailabilityMock,
+}));
 vi.mock("@/app/(dashboard)/sequences/actions", () => ({
   listSequences: vi.fn().mockResolvedValue({ ok: true, data: [] }),
 }));

@@ -76,20 +76,23 @@ async function main() {
     `→ Retrying ${propertyIds.length} properties from failed job ${failedJobId}`,
   );
 
-  const childId = await createCassChildJob(supabase, {
+  const child = await createCassChildJob(supabase, {
     parentJobId: parentJob.parent_job_id ?? failedJobId,
     relatedImportId: parentJob.related_import_id,
     createdBy: parentJob.created_by,
     orgId: parentJob.org_id,
     propertyIds,
     autoStart: true,
+    sourceJobId: failedJobId,
+    requestKey: failedJobId,
   });
-  console.log(`  created retry job: ${childId}`);
+  console.log(`  retry job: ${child.jobId}`);
 
   const summary = await runCassEnrichment(supabase, {
-    jobId: childId,
+    jobId: child.jobId,
     propertyIds,
     expectedOrgId: parentJob.org_id,
+    claimToken: child.claimToken,
   });
 
   console.log(`\nFinal counts:`);

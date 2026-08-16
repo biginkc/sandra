@@ -1,12 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
-  beginCassJob: vi.fn(),
+  claimAuthorizedCassJobStart: vi.fn(),
   createAdminClient: vi.fn(),
 }));
 
 vi.mock("@/lib/enrichment/cass-job", () => ({
-  beginCassJob: mocks.beginCassJob,
+  claimAuthorizedCassJobStart: mocks.claimAuthorizedCassJobStart,
   finalizeCassJob: vi.fn(),
   runCassChunk: vi.fn(),
 }));
@@ -16,7 +16,7 @@ vi.mock("@/lib/supabase/admin", () => ({
 
 import { loadCassJobIds } from "./cass-bulk";
 
-function makeClient(ownedPropertyIds: string[]) {
+function makeClient(propertyIds = ["property-a", "property-b"]) {
   return {
     from: vi.fn((table: string) => {
       if (table === "jobs") {
@@ -30,19 +30,8 @@ function makeClient(ownedPropertyIds: string[]) {
               org_id: "org-a",
               type: "cass_dsf2_ncoa",
               status: "queued",
-              input_params: { property_ids: ["property-a", "property-b"] },
+              input_params: { property_ids: propertyIds },
             },
-            error: null,
-          });
-        return builder;
-      }
-      if (table === "properties") {
-        const builder: Record<string, unknown> = {};
-        builder.select = () => builder;
-        builder.eq = () => builder;
-        builder.in = () =>
-          Promise.resolve({
-            data: ownedPropertyIds.map((id) => ({ id })),
             error: null,
           });
         return builder;
@@ -54,31 +43,66 @@ function makeClient(ownedPropertyIds: string[]) {
 
 describe("CASS workflow tenant provenance", () => {
   beforeEach(() => {
-    mocks.beginCassJob.mockReset();
+    mocks.claimAuthorizedCassJobStart.mockReset();
+    mocks.claimAuthorizedCassJobStart.mockResolvedValue("claim-a");
     mocks.createAdminClient.mockReset();
   });
 
-  it("rejects a mixed-tenant property list before starting any paid work", async () => {
-    mocks.createAdminClient.mockReturnValue(makeClient(["property-a"]));
+  it("lets the atomic receipt claim reject a mixed-tenant target list", async () => {
+    mocks.createAdminClient.mockReturnValue(makeClient());
+    mocks.claimAuthorizedCassJobStart.mockRejectedValueOnce(
+      new Error("CASS_JOB_TARGETS_INVALID"),
+    );
 
     await expect(loadCassJobIds("job-a")).rejects.toThrow(
-      "1 property ID(s) do not belong to job organization",
+      "CASS_JOB_TARGETS_INVALID",
     );
-    expect(mocks.beginCassJob).not.toHaveBeenCalled();
   });
 
   it("returns immutable tenant provenance for an entirely owned job", async () => {
     mocks.createAdminClient.mockReturnValue(
-      makeClient(["property-a", "property-b"]),
+      makeClient(),
     );
 
     await expect(loadCassJobIds("job-a")).resolves.toEqual({
       orgId: "org-a",
       propertyIds: ["property-a", "property-b"],
     });
-    expect(mocks.beginCassJob).toHaveBeenCalledWith(expect.anything(), {
+    expect(mocks.claimAuthorizedCassJobStart).toHaveBeenCalledWith(expect.anything(), {
       jobId: "job-a",
-      totalItems: 2,
+      orgId: "org-a",
+      claimToken: undefined,
     });
+  });
+
+  it("passes the user action's start receipt through to the service workflow", async () => {
+    mocks.createAdminClient.mockReturnValue(
+      makeClient(),
+    );
+
+    await loadCassJobIds("job-a", "claim-from-action");
+
+    expect(mocks.claimAuthorizedCassJobStart).toHaveBeenCalledWith(
+      expect.anything(),
+      {
+        jobId: "job-a",
+        orgId: "org-a",
+        claimToken: "claim-from-action",
+      },
+    );
+  });
+
+  it("loads all 11,134 receipt-backed targets without a capped REST ownership read", async () => {
+    const propertyIds = Array.from({ length: 11_134 }, (_, index) =>
+      `property-${index}`,
+    );
+    const client = makeClient(propertyIds);
+    mocks.createAdminClient.mockReturnValue(client);
+
+    const loaded = await loadCassJobIds("job-a", "claim-from-action");
+
+    expect(loaded.propertyIds).toHaveLength(11_134);
+    expect(loaded.propertyIds.at(-1)).toBe("property-11133");
+    expect(client.from).toHaveBeenCalledTimes(1);
   });
 });

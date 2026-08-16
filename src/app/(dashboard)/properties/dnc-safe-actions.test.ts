@@ -134,7 +134,7 @@ describe("Prospects DNC-safe bulk actions", () => {
   });
 
   it("does not start CASS when a forged stale ID is now DNC", async () => {
-    const result = await verifyPropertiesBulk(["locked"]);
+    const result = await verifyPropertiesBulk(["locked"], "request-key");
 
     expect(verifyUnsafe).not.toHaveBeenCalled();
     expect(result).toEqual({

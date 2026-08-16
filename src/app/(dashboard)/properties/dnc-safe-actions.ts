@@ -117,7 +117,7 @@ export async function qualifyLeadsBulk(propertyIds: string[]) {
   });
 }
 
-export async function verifyPropertiesBulk(propertyIds: string[]) {
+export async function verifyPropertiesBulk(propertyIds: string[], requestKey: string) {
   const { eligible, locked } = await partitionDncLockedPropertyIds(propertyIds);
   if (eligible.length === 0) {
     return {
@@ -125,7 +125,7 @@ export async function verifyPropertiesBulk(propertyIds: string[]) {
       error: { code: "DNC_LOCKED", message: DNC_LOCK_MESSAGE },
     };
   }
-  const result = await verifyPropertiesBulkUnsafe(eligible);
+  const result = await verifyPropertiesBulkUnsafe(eligible, requestKey);
   return result.ok
     ? ok({ ...result.data, eligibleCount: eligible.length, lockedCount: locked.length })
     : result;

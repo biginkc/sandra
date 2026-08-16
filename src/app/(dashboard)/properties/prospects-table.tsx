@@ -181,6 +181,7 @@ export function ProspectsTable({
   totalPages,
 }: Props) {
   const router = useRouter();
+  const cassRequestKeyRef = useRef<string | null>(null);
   const blockStackKey = JSON.stringify(blockStack);
   const selectionScopeKey = `${search}\u0000${sort}\u0000${dir}\u0000${blockStackKey}\u0000${importedParam ?? ""}`;
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -443,10 +444,17 @@ export function ProspectsTable({
     const ids = selectedIds();
     if (ids.length === 0) return;
     startTransition(async () => {
-      const result = await callAction(verifyPropertiesBulk(ids), {
+      const result = await callAction(
+        verifyPropertiesBulk(
+          ids,
+          (cassRequestKeyRef.current ??= crypto.randomUUID()),
+        ),
+        {
         fallbackMessage: "Could not start verify job",
-      });
+        },
+      );
       if (result.ok) {
+        cassRequestKeyRef.current = null;
         toast.success(
           `Verifying ${result.data.eligibleCount} address${result.data.eligibleCount === 1 ? "" : "es"} in the background`,
           { description: "Watch progress on /jobs" },

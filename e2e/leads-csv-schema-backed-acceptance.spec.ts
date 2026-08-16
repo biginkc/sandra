@@ -99,7 +99,7 @@ test("schema-backed Prospects safety and CSV review work at desktop and narrow w
       zip: "64111",
       status: "new_lead",
       homeowner_contact_id: smsLeadContact.id,
-      outreach_dispo: "opted_out",
+      outreach_dispo: null,
       is_dnc_locked: false,
     },
   ]);
@@ -110,6 +110,7 @@ test("schema-backed Prospects safety and CSV review work at desktop and narrow w
   await expect(page.getByRole("heading", { name: "Leads" })).toBeVisible();
   await expect(page.getByText("101 Permanent DNC Way")).toHaveCount(0);
   await expect(page.getByText("303 SMS Only Lead Blvd")).toBeVisible();
+  await expect(page.getByText("SMS opted out", { exact: true })).toBeVisible();
   await expect(page.getByLabel("1 matching, 1 total")).toBeVisible();
   await expect(
     page.getByRole("button", { name: "No next action 1" }),

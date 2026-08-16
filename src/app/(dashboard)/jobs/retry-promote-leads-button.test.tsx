@@ -37,4 +37,14 @@ describe("RetryPromoteLeadsButton", () => {
     expect(screen.getByRole("link", { name: "Retry running…" })).toHaveAttribute("href", "/jobs/child-running");
     expect(screen.queryByRole("button", { name: /Retry 2/ })).toBeNull();
   });
+
+  it("restores retry and reports a rejected request", async () => {
+    retryPromoteLeadsJob.mockRejectedValueOnce(new Error("Connection lost"));
+    const user = userEvent.setup();
+    render(<RetryPromoteLeadsButton jobId="parent-1" retryableCount={2} inFlightChildId={null} />);
+
+    await user.click(screen.getByRole("button", { name: "Retry 2 failed" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Connection lost");
+    expect(screen.getByRole("button", { name: "Retry 2 failed" })).toBeEnabled();
+  });
 });

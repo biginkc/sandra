@@ -623,6 +623,120 @@ export type Database = {
           },
         ]
       }
+      cass_job_authorizations: {
+        Row: {
+          authorized_at: string
+          job_id: string
+          org_id: string
+          property_ids: string[]
+          purpose: string
+          request_key: string
+          requested_by: string | null
+          source_job_id: string | null
+          start_claim_token: string | null
+          start_claimed_at: string | null
+        }
+        Insert: {
+          authorized_at?: string
+          job_id: string
+          org_id: string
+          property_ids: string[]
+          purpose: string
+          request_key: string
+          requested_by?: string | null
+          source_job_id?: string | null
+          start_claim_token?: string | null
+          start_claimed_at?: string | null
+        }
+        Update: {
+          authorized_at?: string
+          job_id?: string
+          org_id?: string
+          property_ids?: string[]
+          purpose?: string
+          request_key?: string
+          requested_by?: string | null
+          source_job_id?: string | null
+          start_claim_token?: string | null
+          start_claimed_at?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "cass_job_authorizations_job_org_fkey"
+            columns: ["job_id", "org_id"]
+            isOneToOne: true
+            referencedRelation: "jobs"
+            referencedColumns: ["id", "org_id"]
+          },
+          {
+            foreignKeyName: "cass_job_authorizations_source_org_fkey"
+            columns: ["source_job_id", "org_id"]
+            isOneToOne: false
+            referencedRelation: "jobs"
+            referencedColumns: ["id", "org_id"]
+          },
+        ]
+      }
+      cass_property_lookup_outcomes: {
+        Row: {
+          attempt_count: number
+          completed_at: string | null
+          created_at: string
+          error_message: string | null
+          job_id: string
+          org_id: string
+          outcome: string | null
+          property_id: string | null
+          property_key: string
+          provider_id: string
+          result_payload: Json | null
+          state: string
+        }
+        Insert: {
+          attempt_count?: number
+          completed_at?: string | null
+          created_at?: string
+          error_message?: string | null
+          job_id: string
+          org_id: string
+          outcome?: string | null
+          property_id?: string | null
+          property_key: string
+          provider_id: string
+          result_payload?: Json | null
+          state: string
+        }
+        Update: {
+          attempt_count?: number
+          completed_at?: string | null
+          created_at?: string
+          error_message?: string | null
+          job_id?: string
+          org_id?: string
+          outcome?: string | null
+          property_id?: string | null
+          property_key?: string
+          provider_id?: string
+          result_payload?: Json | null
+          state?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "cass_property_lookup_outcomes_job_org_fkey"
+            columns: ["job_id", "org_id"]
+            isOneToOne: false
+            referencedRelation: "jobs"
+            referencedColumns: ["id", "org_id"]
+          },
+          {
+            foreignKeyName: "cass_property_lookup_outcomes_property_org_fkey"
+            columns: ["property_id", "org_id"]
+            isOneToOne: false
+            referencedRelation: "properties"
+            referencedColumns: ["id", "org_id"]
+          },
+        ]
+      }
       consent_events: {
         Row: {
           channel: string
@@ -935,6 +1049,62 @@ export type Database = {
             isOneToOne: false
             referencedRelation: "sequences"
             referencedColumns: ["id"]
+          },
+        ]
+      }
+      csv_import_line_type_outcomes: {
+        Row: {
+          claimed_at: string
+          completed_at: string | null
+          created_at: string
+          job_id: string
+          job_retry_count: number
+          last_error: string | null
+          line_type: string | null
+          lookup_attempts: number
+          org_id: string
+          outcome: string | null
+          phone_e164: string
+          provider_http_status: number | null
+          state: string
+        }
+        Insert: {
+          claimed_at?: string
+          completed_at?: string | null
+          created_at?: string
+          job_id: string
+          job_retry_count: number
+          last_error?: string | null
+          line_type?: string | null
+          lookup_attempts?: number
+          org_id: string
+          outcome?: string | null
+          phone_e164: string
+          provider_http_status?: number | null
+          state: string
+        }
+        Update: {
+          claimed_at?: string
+          completed_at?: string | null
+          created_at?: string
+          job_id?: string
+          job_retry_count?: number
+          last_error?: string | null
+          line_type?: string | null
+          lookup_attempts?: number
+          org_id?: string
+          outcome?: string | null
+          phone_e164?: string
+          provider_http_status?: number | null
+          state?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "csv_import_line_type_outcomes_job_org_fkey"
+            columns: ["job_id", "org_id"]
+            isOneToOne: false
+            referencedRelation: "jobs"
+            referencedColumns: ["id", "org_id"]
           },
         ]
       }
@@ -1291,6 +1461,7 @@ export type Database = {
           item_key: string | null
           job_id: string
           message_id: string | null
+          org_id: string
           output_payload: Json | null
           processed_at: string | null
           property_id: string | null
@@ -1308,6 +1479,7 @@ export type Database = {
           item_key?: string | null
           job_id: string
           message_id?: string | null
+          org_id?: string
           output_payload?: Json | null
           processed_at?: string | null
           property_id?: string | null
@@ -1325,6 +1497,7 @@ export type Database = {
           item_key?: string | null
           job_id?: string
           message_id?: string | null
+          org_id?: string
           output_payload?: Json | null
           processed_at?: string | null
           property_id?: string | null
@@ -1341,11 +1514,11 @@ export type Database = {
             referencedColumns: ["id"]
           },
           {
-            foreignKeyName: "job_items_job_id_fkey"
-            columns: ["job_id"]
+            foreignKeyName: "job_items_job_org_fkey"
+            columns: ["job_id", "org_id"]
             isOneToOne: false
             referencedRelation: "jobs"
-            referencedColumns: ["id"]
+            referencedColumns: ["id", "org_id"]
           },
           {
             foreignKeyName: "job_items_message_id_fkey"
@@ -1355,11 +1528,11 @@ export type Database = {
             referencedColumns: ["id"]
           },
           {
-            foreignKeyName: "job_items_property_id_fkey"
-            columns: ["property_id"]
+            foreignKeyName: "job_items_property_org_fkey"
+            columns: ["property_id", "org_id"]
             isOneToOne: false
             referencedRelation: "properties"
-            referencedColumns: ["id"]
+            referencedColumns: ["id", "org_id"]
           },
         ]
       }
@@ -3527,6 +3700,8 @@ export type Database = {
           deleted_at: string | null
           has_unread: boolean
           homeowner: Json | null
+          homeowner_sms_opted_out: boolean | null
+          homeowner_sms_opted_out_at: string | null
           id: string
           has_active_sequence: boolean
           is_dnc_locked: boolean
@@ -3618,8 +3793,103 @@ export type Database = {
         Args: { p_org_id: string; p_property_id: string }
         Returns: boolean
       }
+      claim_authorized_cass_job_start: {
+        Args: {
+          p_claim_token: string | null
+          p_job_id: string
+          p_org_id: string
+        }
+        Returns: string
+      }
+      claim_cass_property_lookup: {
+        Args: {
+          p_job_id: string
+          p_org_id: string
+          p_property_id: string
+          p_provider_id: string
+        }
+        Returns: {
+          action: string
+          error_message: string
+          outcome: string
+          result_payload: Json
+        }[]
+      }
       claim_csv_import_retry: {
         Args: { p_job_id: string }
+        Returns: boolean
+      }
+      claim_csv_import_line_type_lookup: {
+        Args: {
+          p_job_id: string
+          p_org_id: string
+          p_phone_e164: string
+        }
+        Returns: {
+          action: string
+          line_type: string
+          outcome: string
+        }[]
+      }
+      complete_csv_import_line_type_lookup: {
+        Args: {
+          p_job_id: string
+          p_last_error?: string | null
+          p_line_type: string
+          p_org_id: string
+          p_outcome: string
+          p_phone_e164: string
+          p_provider_http_status?: number | null
+          p_state: string
+        }
+        Returns: undefined
+      }
+      create_authorized_cass_job: {
+        Args: {
+          p_auto_start: boolean
+          p_blocked_reason: string | null
+          p_created_by: string | null
+          p_org_id: string
+          p_parent_job_id: string | null
+          p_property_ids: string[]
+          p_purpose: string
+          p_related_import_id: string | null
+          p_request_key: string
+          p_source_job_id: string | null
+        }
+        Returns: {
+          claim_token: string
+          created: boolean
+          job_id: string
+          job_status: string
+        }[]
+      }
+      create_skip_trace_retry_job: {
+        Args: { p_parent_job_id: string; p_property_ids: string[] }
+        Returns: {
+          created: boolean
+          job_id: string
+        }[]
+      }
+      complete_cass_property_lookup: {
+        Args: {
+          p_error_message: string | null
+          p_job_id: string
+          p_org_id: string
+          p_outcome: string | null
+          p_property_id: string
+          p_result_payload: Json | null
+          p_state: string
+        }
+        Returns: boolean
+      }
+      fail_authorized_cass_job_start: {
+        Args: {
+          p_claim_token: string
+          p_job_id: string
+          p_message: string
+          p_org_id: string
+        }
         Returns: boolean
       }
       checkpoint_csv_import_property_outcome: {

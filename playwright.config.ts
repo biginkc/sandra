@@ -109,6 +109,7 @@ export default defineConfig({
   testIgnore: [
     "**/phase-1-5-uat.spec.ts",
     "**/prod-canary/**",
+    "**/synthetic/**",
     "**/properties-filter-characterization.*.ts",
   ],
   // Don't run in parallel — the suite resets shared DB tables. Parallel

@@ -132,7 +132,8 @@ async function refreshSkipTraceAudience(
     ...params.summary,
     total: audienceIds.length,
     eligibility_exclusions: audit as unknown as Json,
-    submit_phase: "submitting",
+    submit_phase: "prepared",
+    submit_phase_prepared_at: new Date().toISOString(),
   } as unknown as Json;
   const nextInputParams = {
     ...jsonRecord(params.inputParams),
@@ -177,6 +178,35 @@ async function refreshSkipTraceAudience(
     audienceIds,
     audit,
   };
+}
+
+async function checkpointProviderSubmission(
+  supabase: SupabaseClient<Database>,
+  params: {
+    jobId: string;
+    orgId: string;
+    attemptToken: string;
+    summary: Json;
+  },
+): Promise<void> {
+  const { data, error } = await supabase
+    .from("jobs")
+    .update({
+      result_summary: params.summary,
+      worker_heartbeat_at: new Date().toISOString(),
+    })
+    .eq("id", params.jobId)
+    .eq("org_id", params.orgId)
+    .eq("type", "skip_trace")
+    .eq("status", "running")
+    .contains("input_params", { submission_attempt_token: params.attemptToken })
+    .is("provider_run_id", null)
+    .select("id");
+  if (error || !data || data.length === 0) {
+    throw new Error(
+      `skip-trace provider-boundary checkpoint failed for ${params.jobId}: ${error?.message ?? "claim lost"}`,
+    );
+  }
 }
 
 async function cancelEmptyAudience(
@@ -252,6 +282,9 @@ export async function runSkipTraceEnrichment(
     beforeProviderEligibilityCheck?: () => Promise<void>;
     /** Deterministic batch test seam; the final provider eligibility read follows it. */
     beforeBatchProviderEligibilityCheck?: () => Promise<void>;
+    /** Failure-injection seams for the paid single-result durability boundary. */
+    beforeSingleLedgerWrite?: (propertyId: string) => Promise<void>;
+    beforeSingleCacheWrite?: () => Promise<void>;
   },
 ): Promise<
   SkipTraceJobSummary | { pending: true; queueId: string } | { claimed: false }
@@ -667,7 +700,20 @@ export async function runSkipTraceEnrichment(
       ) {
         return summary;
       }
+      const submissionSummary = {
+        ...summary,
+        submit_phase: "submitting",
+        submit_phase_started_at: new Date().toISOString(),
+      } as unknown as Json;
+      await checkpointProviderSubmission(supabase, {
+        jobId: params.jobId,
+        orgId: params.orgId,
+        attemptToken,
+        summary: submissionSummary,
+      });
+      let providerCallStarted = false;
       try {
+        providerCallStarted = true;
         const result = await provider.lookupSingle(misses[0]);
         await persistAndRecord(
           supabase,
@@ -676,36 +722,39 @@ export async function runSkipTraceEnrichment(
           result,
           summary,
           /*fromCache*/ false,
+          {
+            requireLedgerWrite: true,
+            beforeLedgerWrite: params.beforeSingleLedgerWrite,
+          },
         );
-        try {
-          await writeCache(
-            supabase,
-            params.orgId,
-            provider.providerId,
-            normalizeAddress({
-              address: misses[0].address,
-              city: misses[0].city,
-              state: misses[0].state,
-              zip: misses[0].zip,
-            }),
-            result,
-          );
-        } catch (cacheError) {
-          // The paid response already exists and persistAndRecord made the
-          // durable per-property outcome terminal. A cache miss on the next
-          // run must never turn this into another paid lookup automatically.
-          reportError(cacheError, {
-            tags: { surface: "skip_trace_lookup_single_cache" },
-            extra: { propertyId: misses[0].propertyId, jobId: params.jobId },
-          });
-        }
+        await params.beforeSingleCacheWrite?.();
+        await writeCache(
+          supabase,
+          params.orgId,
+          provider.providerId,
+          normalizeAddress({
+            address: misses[0].address,
+            city: misses[0].city,
+            state: misses[0].state,
+            zip: misses[0].zip,
+          }),
+          result,
+        );
       } catch (e) {
-        summary.failed++;
         const msg = e instanceof Error ? e.message : String(e);
-        const klass: "provider_transient" | "submission_unknown" | "database" =
-          e instanceof ProviderError
-            ? classifyProviderError(e)
-            : "submission_unknown";
+        if (providerCallStarted && isSubmissionUnknownError(e)) {
+          await safelyMarkSubmissionUnknown(
+            supabase,
+            params.jobId,
+            `Single lookup outcome requires manual reconciliation: ${msg}`,
+            params.orgId,
+            attemptToken,
+            submissionSummary,
+          );
+          return summary;
+        }
+
+        summary.failed++;
         reportError(e, {
           tags: { surface: "skip_trace_lookup_single" },
           extra: { propertyId: misses[0].propertyId, jobId: params.jobId },
@@ -713,7 +762,7 @@ export async function runSkipTraceEnrichment(
         try {
           await insertJobItem(supabase, params.jobId, misses[0].propertyId, {
             status: "error",
-            error_class: klass,
+            error_class: "provider_transient",
             error_message: msg,
           });
         } catch (insertErr) {
@@ -721,6 +770,15 @@ export async function runSkipTraceEnrichment(
             tags: { surface: "skip_trace_lookup_single_item" },
             extra: { jobId: params.jobId, propertyId: misses[0].propertyId },
           });
+          await safelyMarkSubmissionUnknown(
+            supabase,
+            params.jobId,
+            `Single lookup rejection could not be durably recorded; manual reconciliation is required: ${insertErr instanceof Error ? insertErr.message : String(insertErr)}`,
+            params.orgId,
+            attemptToken,
+            submissionSummary,
+          );
+          return summary;
         }
       }
       await finalizeJob(supabase, params.jobId, summary, {
@@ -773,30 +831,6 @@ export async function runSkipTraceEnrichment(
 
     let providerCallStarted = false;
     try {
-      const { data: summaryClaim, error: summaryErr } = await supabase
-        .from("jobs")
-        .update({
-          result_summary: pendingSummary,
-          worker_heartbeat_at: new Date().toISOString(),
-        })
-        .eq("id", params.jobId)
-        .eq("org_id", params.orgId)
-        .eq("type", "skip_trace")
-        .eq("status", "running")
-        .contains("input_params", { submission_attempt_token: attemptToken })
-        .is("provider_run_id", null)
-        .select("id");
-      if (summaryErr || !summaryClaim || summaryClaim.length === 0) {
-        const msg =
-          summaryErr?.message ??
-          "provider_run_id was already set or the job disappeared before submit";
-        reportError(new Error(msg), {
-          tags: { surface: "skip_trace_prepare_batch_summary" },
-          extra: { jobId: params.jobId, count: uniqueByAddress.length },
-        });
-        return summary;
-      }
-
       if (!batchHookCompleted) {
         await params.beforeBatchProviderEligibilityCheck?.();
         batchHookCompleted = true;
@@ -819,6 +853,13 @@ export async function runSkipTraceEnrichment(
       ) {
         return summary;
       }
+
+      await checkpointProviderSubmission(supabase, {
+        jobId: params.jobId,
+        orgId: params.orgId,
+        attemptToken,
+        summary: pendingSummary,
+      });
 
       providerCallStarted = true;
       const ticket = await provider.submitBatch(uniqueByAddress);
@@ -943,7 +984,13 @@ export async function runSkipTraceEnrichment(
  */
 export async function finalizeSkipTraceFromBatch(
   supabase: SupabaseClient<Database>,
-  params: { jobId: string; results: SkipTraceResult[] },
+  params: {
+    jobId: string;
+    results: SkipTraceResult[];
+    /** Failure-injection seam used to prove that a result persisted before a
+     * ledger outage is safely resumed without another provider submission. */
+    beforeLedgerWrite?: (propertyId: string) => Promise<void>;
+  },
 ): Promise<SkipTraceJobSummary | null> {
   // ------------------------------------------------------------------
   // Atomic claim. Finalize at 4K rows takes minutes while the sweep
@@ -1098,7 +1145,12 @@ async function readItemLedger(
 
 async function finalizeClaimed(
   supabase: SupabaseClient<Database>,
-  params: { jobId: string; orgId: string; results: SkipTraceResult[] },
+  params: {
+    jobId: string;
+    orgId: string;
+    results: SkipTraceResult[];
+    beforeLedgerWrite?: (propertyId: string) => Promise<void>;
+  },
   priorSummary: unknown,
 ): Promise<SkipTraceJobSummary> {
   const prior = (priorSummary ?? {}) as Partial<SkipTraceJobSummary> & {
@@ -1353,24 +1405,18 @@ async function finalizeClaimed(
         `skip-trace result property is outside job organization: ${propertyId}`,
       );
     }
-    try {
-      await persistAndRecord(
-        supabase,
-        params.orgId,
-        params.jobId,
-        result,
-        summary,
-        /*fromCache*/ false,
-      );
-    } catch (e) {
-      // persistAndRecord already swallows persist-time errors into
-      // job_items + summary. This catches anything insertJobItem itself
-      // throws (e.g. transient DB error). Log + keep going.
-      reportError(e, {
-        tags: { surface: "skip_trace_finalize_per_row" },
-        extra: { jobId: params.jobId, propertyId },
-      });
-    }
+    await persistAndRecord(
+      supabase,
+      params.orgId,
+      params.jobId,
+      result,
+      summary,
+      /*fromCache*/ false,
+      {
+        requireLedgerWrite: true,
+        beforeLedgerWrite: params.beforeLedgerWrite,
+      },
+    );
 
     try {
       await writeCache(
@@ -1423,18 +1469,12 @@ async function finalizeClaimed(
         ? "Provider has no owner data for this address."
         : "Address not USPS-verified (CASS); cannot reliably look up. Verify the address first.";
 
-      try {
-        await insertJobItem(supabase, params.jobId, propertyId, {
-          status: "error",
-          error_class: klass,
-          error_message: errorMessage,
-        });
-      } catch (e) {
-        reportError(e, {
-          tags: { surface: "skip_trace_finalize_missing_item" },
-          extra: { jobId: params.jobId, propertyId },
-        });
-      }
+      await params.beforeLedgerWrite?.(propertyId);
+      await insertJobItem(supabase, params.jobId, propertyId, {
+        status: "error",
+        error_class: klass,
+        error_message: errorMessage,
+      });
 
       // Cache the "no data" verdict for verified addresses so future
       // runs hit cache instead of re-paying the vendor. Skip
@@ -1508,6 +1548,11 @@ async function finalizeClaimed(
   summary.matched = matchedTotal;
   summary.no_match = noMatchTotal;
   summary.failed = failedTotal;
+  if (endLedger.size !== summary.total) {
+    throw new Error(
+      `finalize ledger count mismatch: expected ${summary.total}, found ${endLedger.size}`,
+    );
+  }
 
   await finalizeJob(supabase, params.jobId, summary, {
     requireFinalizing: true,
@@ -1524,21 +1569,26 @@ async function persistAndRecord(
   result: SkipTraceResult,
   summary: SkipTraceJobSummary,
   fromCache: boolean,
+  ledger?: {
+    requireLedgerWrite?: boolean;
+    beforeLedgerWrite?: (propertyId: string) => Promise<void>;
+  },
 ): Promise<void> {
-  // Local helper so a transient DB hiccup writing one job_item row
-  // doesn't kill the whole loop. We still update `summary` first so
-  // counts stay consistent with what the user expects to see — the
-  // missing audit row is a known degradation we accept and log.
-  const tryInsert = async (
+  // A provider result is not terminal until its per-property ledger row is
+  // durable. Paid callers opt into propagation so they can preserve a
+  // reconciliation-safe state instead of finalizing away the uncertainty.
+  const writeItem = async (
     fields: Parameters<typeof insertJobItem>[3],
   ): Promise<void> => {
     try {
+      await ledger?.beforeLedgerWrite?.(result.propertyId);
       await insertJobItem(supabase, jobId, result.propertyId, fields);
-    } catch (e) {
-      reportError(e, {
+    } catch (error) {
+      reportError(error, {
         tags: { surface: "skip_trace_persist_record_insert" },
         extra: { jobId, propertyId: result.propertyId, status: fields.status },
       });
+      if (ledger?.requireLedgerWrite) throw error;
     }
   };
 
@@ -1552,7 +1602,7 @@ async function persistAndRecord(
       tags: { surface: "skip_trace_persist" },
       extra: { jobId, propertyId: result.propertyId },
     });
-    await tryInsert({
+    await writeItem({
       status: "error",
       error_class: fromCache ? "database" : "provider_persist_failed",
       error_message: msg,
@@ -1565,7 +1615,7 @@ async function persistAndRecord(
 
   if (outcome.status === "matched") {
     summary.matched++;
-    await tryInsert({
+    await writeItem({
       status: "success",
       result: {
         from_cache: fromCache,
@@ -1576,7 +1626,7 @@ async function persistAndRecord(
     });
   } else if (outcome.status === "no_match") {
     summary.no_match++;
-    await tryInsert({
+    await writeItem({
       status: "success",
       result: {
         from_cache: fromCache,
@@ -1587,7 +1637,7 @@ async function persistAndRecord(
   } else if (outcome.status === "dnc_skipped") {
     summary.failed++;
     summary.dnc_skipped = (summary.dnc_skipped ?? 0) + 1;
-    await tryInsert({
+    await writeItem({
       status: "error",
       error_class: "dnc_locked",
       error_message:
@@ -1595,25 +1645,12 @@ async function persistAndRecord(
     });
   } else {
     summary.failed++;
-    await tryInsert({
+    await writeItem({
       status: "error",
       error_class: "database",
       error_message: "Property not found at persist time",
     });
   }
-}
-
-/**
- * A concrete HTTP rejection proves the provider returned a response before
- * accepting useful work, so a retry is permitted. Transport/read/parse
- * failures have an ambiguous charge boundary and require reconciliation.
- */
-function classifyProviderError(
-  err: ProviderError,
-): "provider_transient" | "submission_unknown" {
-  const status =
-    typeof err.details?.status === "number" ? err.details.status : null;
-  return status === null ? "submission_unknown" : "provider_transient";
 }
 
 function isSubmissionUnknownError(error: unknown): boolean {

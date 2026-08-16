@@ -23,6 +23,8 @@ function makeClient(options?: {
   claim?: boolean;
   updateError?: string;
   orgId?: string;
+  lookupClaims?: Array<Record<string, unknown>>;
+  completeError?: string;
 }) {
   const property = {
     id: "property-1",
@@ -34,9 +36,27 @@ function makeClient(options?: {
     is_dnc_locked: options?.locked ?? false,
   };
   return {
-    rpc: vi.fn().mockResolvedValue({
-      data: options?.claim ?? true,
-      error: null,
+    rpc: vi.fn((fn: string) => {
+      if (fn === "claim_cass_property_lookup") {
+        return Promise.resolve({
+          data: [
+            options?.lookupClaims?.shift() ?? {
+              action: "claimed",
+              outcome: null,
+              result_payload: null,
+              error_message: null,
+            },
+          ],
+          error: null,
+        });
+      }
+      if (fn === "complete_cass_property_lookup") {
+        return Promise.resolve({
+          data: options?.completeError ? null : true,
+          error: options?.completeError ? { message: options.completeError } : null,
+        });
+      }
+      return Promise.resolve({ data: options?.claim ?? true, error: null });
     }),
     from: vi.fn((table: string) => {
       expect(table).toBe("properties");
@@ -120,7 +140,116 @@ describe("verifyPropertyAddress paid boundary", () => {
       "property-1",
       "org-1",
     );
-    expect(outcome).toMatchObject({ status: "provider_persist_failed" });
+    expect(outcome).toMatchObject({
+      status: "provider_persist_failed",
+      verified: {
+        standardized: "1 Main St, Kansas City, MO 64101",
+        cassStatus: "verified",
+      },
+    });
+    expect(mocks.verify).toHaveBeenCalledTimes(1);
+  });
+
+  it("checkpoints provider output before the property write and reuses it after workflow replay", async () => {
+    const saved = {
+      standardized: "1 Main St, Kansas City, MO 64101",
+      cassStatus: "verified",
+      components: {},
+      raw: {},
+    };
+    const claims = [
+      { action: "claimed", outcome: null, result_payload: null, error_message: null },
+      { action: "reused", outcome: "result", result_payload: saved, error_message: null },
+    ];
+    const client = makeClient({ lookupClaims: claims });
+
+    await expect(
+      verifyPropertyAddress(client as never, "property-1", "org-1", {
+        jobId: "job-1",
+        afterProviderCheckpoint: () => {
+          throw new Error("process lost after provider checkpoint");
+        },
+      }),
+    ).resolves.toMatchObject({ status: "submission_unknown" });
+
+    await expect(
+      verifyPropertyAddress(client as never, "property-1", "org-1", {
+        jobId: "job-1",
+      }),
+    ).resolves.toMatchObject({ status: "verified" });
+    expect(mocks.verify).toHaveBeenCalledTimes(1);
+    expect(client.rpc).toHaveBeenCalledWith(
+      "complete_cass_property_lookup",
+      expect.objectContaining({ p_state: "completed", p_outcome: "result" }),
+    );
+  });
+
+  it("does not retry a transport-ambiguous provider submission inside the same job", async () => {
+    const client = makeClient({
+      lookupClaims: [
+        { action: "claimed", outcome: null, result_payload: null, error_message: null },
+        {
+          action: "ambiguous",
+          outcome: "transport_unknown",
+          result_payload: null,
+          error_message: "connection closed",
+        },
+      ],
+    });
+    mocks.verify.mockRejectedValueOnce(
+      new ProviderError("connection closed", "test"),
+    );
+
+    await verifyPropertyAddress(client as never, "property-1", "org-1", {
+      jobId: "job-1",
+    });
+    await expect(
+      verifyPropertyAddress(client as never, "property-1", "org-1", {
+        jobId: "job-1",
+      }),
+    ).resolves.toMatchObject({ status: "submission_unknown" });
+    expect(mocks.verify).toHaveBeenCalledTimes(1);
+  });
+
+  it("allows only one provider call when two workflow attempts race for the same property", async () => {
+    const client = makeClient({
+      lookupClaims: [
+        { action: "claimed", outcome: null, result_payload: null, error_message: null },
+        {
+          action: "ambiguous",
+          outcome: null,
+          result_payload: null,
+          error_message: "lookup already submitting",
+        },
+      ],
+    });
+    let releaseProvider!: () => void;
+    mocks.verify.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          releaseProvider = () =>
+            resolve({
+              standardized: "1 Main St, Kansas City, MO 64101",
+              cassStatus: "verified",
+              components: {},
+              raw: {},
+            });
+        }),
+    );
+
+    const first = verifyPropertyAddress(client as never, "property-1", "org-1", {
+      jobId: "job-1",
+    });
+    const second = verifyPropertyAddress(client as never, "property-1", "org-1", {
+      jobId: "job-1",
+    });
+    await vi.waitFor(() => expect(mocks.verify).toHaveBeenCalledTimes(1));
+    releaseProvider();
+
+    const outcomes = await Promise.all([first, second]);
+    expect(outcomes.some((outcome) => outcome.status === "submission_unknown")).toBe(
+      true,
+    );
     expect(mocks.verify).toHaveBeenCalledTimes(1);
   });
 

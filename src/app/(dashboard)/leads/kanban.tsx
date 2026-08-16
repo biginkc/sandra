@@ -1266,6 +1266,19 @@ function LeadCard({
             {formatDisposition(lead.outreach_dispo)}
           </Badge>
         ) : null}
+        {lead.homeowner_sms_opted_out ? (
+          <Badge
+            variant="outline"
+            className="border-amber-600/60 bg-amber-50 font-mono text-[9px] uppercase text-amber-900 dark:bg-amber-950/30 dark:text-amber-200"
+            title={
+              lead.homeowner_sms_opted_out_at
+                ? `SMS opted out ${new Date(lead.homeowner_sms_opted_out_at).toLocaleDateString()}`
+                : "SMS opted out"
+            }
+          >
+            SMS opted out
+          </Badge>
+        ) : null}
         {lead.assigned_user_id ? (
           <Badge
             variant={assignedToMe ? "default" : "outline"}

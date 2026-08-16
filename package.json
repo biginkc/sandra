@@ -15,6 +15,7 @@
     "test:integration": "vitest run --config vitest.integration.config.ts",
     "test:rtl": "vitest run --config vitest.rtl.config.ts",
     "test:e2e": "playwright test",
+    "test:e2e:synthetic": "playwright test --config playwright.synthetic.config.ts",
     "test:e2e:prod-canary": "playwright test --config playwright.canary.config.ts",
     "test:e2e:properties-filter": "playwright test --config playwright.properties-filter.config.ts",
     "verify:hugo-sql": "node scripts/verify-hugo-access-migrations.mjs",

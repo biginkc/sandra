@@ -94,17 +94,42 @@ describe("TelnyxLineTypeLookup.classify", () => {
   });
 
   it("returns unknown (never throws) when a number fails twice", async () => {
-    vi.useFakeTimers();
     const fetchMock = vi.fn().mockRejectedValue(new Error("ECONNRESET"));
     vi.stubGlobal("fetch", fetchMock);
 
     const lookup = new TelnyxLineTypeLookup("key-123");
-    const pending = lookup.classify(["+18165550001"]);
-    await vi.advanceTimersByTimeAsync(1_000);
-    const result = await pending;
+    const result = await lookup.classify(["+18165550001"]);
 
     expect(result.get("+18165550001")).toBe("unknown");
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    // A transport failure is ambiguous: the provider may have accepted and
+    // charged the request, so the client must not automatically repeat it.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns typed outcomes so durable workflows distinguish rejection from ambiguity", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({}, 503))
+      .mockResolvedValueOnce(jsonResponse({}, 503))
+      .mockRejectedValueOnce(new Error("socket reset"));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const lookup = new TelnyxLineTypeLookup("key-123");
+    const rejectedPending = lookup.classifyOne("+18165550001");
+    await vi.advanceTimersByTimeAsync(1_000);
+    await expect(rejectedPending).resolves.toEqual({
+      status: "retryable",
+      lineType: "unknown",
+      reason: "provider_rejected",
+      httpStatus: 503,
+    });
+    await expect(lookup.classifyOne("+18165550002")).resolves.toEqual({
+      status: "ambiguous",
+      lineType: "unknown",
+      reason: "transport_unknown",
+      httpStatus: null,
+    });
   });
 
   it("treats a 4xx (invalid number) as unknown without retrying", async () => {
@@ -117,6 +142,37 @@ describe("TelnyxLineTypeLookup.classify", () => {
     expect(result.get("+10000000000")).toBe("unknown");
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
+
+  it("does not durably misclassify authentication failures as an invalid phone", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({}, 401));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const lookup = new TelnyxLineTypeLookup("bad-key");
+    await expect(lookup.classifyOne("+18165550001")).resolves.toEqual({
+      status: "retryable",
+      lineType: "unknown",
+      reason: "provider_rejected",
+      httpStatus: 401,
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([402, 408, 409])(
+    "keeps HTTP %i nonterminal so a job retry can recover without deleting the phone",
+    async (httpStatus) => {
+      const fetchMock = vi.fn().mockResolvedValue(jsonResponse({}, httpStatus));
+      vi.stubGlobal("fetch", fetchMock);
+
+      const lookup = new TelnyxLineTypeLookup("key-123");
+      await expect(lookup.classifyOne("+18165550001")).resolves.toEqual({
+        status: "retryable",
+        lineType: "unknown",
+        reason: "provider_rejected",
+        httpStatus,
+      });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    },
+  );
 });
 
 describe("telnyxLookupFromEnv", () => {

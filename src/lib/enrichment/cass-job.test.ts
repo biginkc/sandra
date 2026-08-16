@@ -4,10 +4,100 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/lib/supabase/types";
 
 import {
+  createCassChildJob,
+  createStandaloneCassJob,
   getAutotriggerCap,
   isAwaitingManualStart,
   selectCassEligibleProperties,
 } from "./cass-job";
+
+describe("CASS authorization RPC adapters", () => {
+  it("marks a child retry with its source job instead of fabricating a row", async () => {
+    const rpc = vi.fn().mockResolvedValue({
+      data: [
+        {
+          job_id: "child-job",
+          claim_token: "child-claim",
+          created: true,
+          job_status: "running",
+        },
+      ],
+      error: null,
+    });
+    const supabase = { rpc } as unknown as SupabaseClient<Database>;
+
+    await expect(
+      createCassChildJob(supabase, {
+        parentJobId: "import-job",
+        relatedImportId: "import-id",
+        createdBy: "user-id",
+        orgId: "org-id",
+        propertyIds: ["property-id"],
+        autoStart: true,
+        sourceJobId: "failed-cass-job",
+        requestKey: "failed-cass-job",
+      }),
+    ).resolves.toEqual({
+      jobId: "child-job",
+      claimToken: "child-claim",
+      created: true,
+      status: "running",
+    });
+
+    expect(rpc).toHaveBeenCalledWith("create_authorized_cass_job", {
+      p_org_id: "org-id",
+      p_property_ids: ["property-id"],
+      p_purpose: "retry",
+      p_parent_job_id: "import-job",
+      p_related_import_id: "import-id",
+      p_source_job_id: "failed-cass-job",
+      p_created_by: "user-id",
+      p_auto_start: true,
+      p_blocked_reason: null,
+      p_request_key: "failed-cass-job",
+    });
+  });
+
+  it("atomically creates and claims standalone work with a stable request key", async () => {
+    const rpc = vi.fn().mockResolvedValue({
+      data: [
+        {
+          job_id: "standalone-job",
+          claim_token: "claim-token",
+          created: true,
+          job_status: "running",
+        },
+      ],
+      error: null,
+    });
+    const supabase = { rpc } as unknown as SupabaseClient<Database>;
+
+    const result = await createStandaloneCassJob(supabase, {
+      orgId: "org-id",
+      propertyIds: ["property-id"],
+      createdBy: "user-id",
+      requestKey: "request-id",
+    });
+    expect(result).toEqual({
+      jobId: "standalone-job",
+      claimToken: "claim-token",
+      created: true,
+      status: "running",
+    });
+    expect(rpc).toHaveBeenCalledWith("create_authorized_cass_job", {
+      p_org_id: "org-id",
+      p_property_ids: ["property-id"],
+      p_purpose: "standalone",
+      p_parent_job_id: null,
+      p_related_import_id: null,
+      p_source_job_id: null,
+      p_created_by: "user-id",
+      p_auto_start: true,
+      p_blocked_reason: null,
+      p_request_key: "request-id",
+    });
+  });
+});
 
 describe("getAutotriggerCap", () => {
   const original = process.env.CASS_AUTOTRIGGER_MAX_ITEMS;
@@ -69,7 +159,7 @@ describe("isAwaitingManualStart", () => {
 });
 
 describe("selectCassEligibleProperties", () => {
-  type JobItemRow = { property_id: string | null; status: string };
+  type JobItemRow = { id?: string; property_id: string | null; status: string };
   type PropertyRow = {
     id: string;
     org_id?: string;
@@ -89,9 +179,32 @@ describe("selectCassEligibleProperties", () => {
     jobItems: JobItemRow[],
     properties: PropertyRow[],
     capture: Capture,
+    childJobs: { id: string }[] = [],
+    ambiguousItems: { property_id: string | null }[] = [],
   ): SupabaseClient<Database> {
+    let jobItemsQuery = 0;
     const fromMock = vi.fn((table: string) => {
       if (table === "job_items") {
+        jobItemsQuery++;
+        if (jobItemsQuery > 1) {
+          const builder = {
+            select: vi.fn(() => builder),
+            in: vi.fn(() => builder),
+            eq: vi.fn(() => builder),
+            order: vi.fn(() => builder),
+            gt: vi.fn(() => builder),
+            limit: vi.fn(() =>
+              Promise.resolve({
+                data: ambiguousItems.map((item, index) => ({
+                  id: `ambiguous-${index}`,
+                  ...item,
+                })),
+                error: null,
+              }),
+            ),
+          };
+          return builder;
+        }
         const builder = {
           select: vi.fn(() => builder),
           eq: vi.fn(() => builder),
@@ -99,7 +212,28 @@ describe("selectCassEligibleProperties", () => {
             capture.jobItemsStatusFilter = values;
             return builder;
           }),
-          not: vi.fn(() => Promise.resolve({ data: jobItems, error: null })),
+          not: vi.fn(() => builder),
+          order: vi.fn(() => builder),
+          gt: vi.fn(() => builder),
+          limit: vi.fn(() =>
+            Promise.resolve({
+              data: jobItems.map((item, index) => ({
+                id: item.id ?? `item-${index}`,
+                ...item,
+              })),
+              error: null,
+            }),
+          ),
+        };
+        return builder;
+      }
+      if (table === "jobs") {
+        const builder = {
+          select: vi.fn(() => builder),
+          eq: vi.fn(() => builder),
+          order: vi.fn(() => builder),
+          gt: vi.fn(() => builder),
+          limit: vi.fn(() => Promise.resolve({ data: childJobs, error: null })),
         };
         return builder;
       }
@@ -294,5 +428,94 @@ describe("selectCassEligibleProperties", () => {
     );
     const ids = await selectCassEligibleProperties(supabase, "job-1", "org-1");
     expect(ids).toEqual([]);
+  });
+
+  it("does not re-spend an import retry on a terminal ambiguous child result", async () => {
+    const capture = emptyCapture();
+    const supabase = makeSupabase(
+      [{ property_id: "ambiguous-paid", status: "success" }],
+      [{ id: "ambiguous-paid", cass_status: "unverified" }],
+      capture,
+      [{ id: "cass-child" }],
+      [{ property_id: "ambiguous-paid" }],
+    );
+
+    await expect(
+      selectCassEligibleProperties(supabase, "job-1", "org-1"),
+    ).resolves.toEqual([]);
+  });
+
+  it("conserves 1,001 candidate rows across keyset pages and bounded property chunks", async () => {
+    const items = Array.from({ length: 1_001 }, (_, index) => ({
+      id: `item-${String(index).padStart(4, "0")}`,
+      property_id: `property-${index}`,
+    }));
+    const propertyChunkSizes: number[] = [];
+    const from = vi.fn((table: string) => {
+      if (table === "job_items") {
+        let cursor: string | null = null;
+        const builder: Record<string, unknown> = {};
+        for (const method of ["select", "eq", "in", "not", "order", "limit"]) {
+          builder[method] = vi.fn(() => builder);
+        }
+        builder.gt = vi.fn((_column: string, value: string) => {
+          cursor = value;
+          return builder;
+        });
+        builder.then = (
+          resolve: (value: { data: typeof items; error: null }) => unknown,
+        ) => {
+          const page = items
+            .filter((item) => cursor === null || item.id > cursor)
+            .slice(0, 500);
+          return Promise.resolve(resolve({ data: page, error: null }));
+        };
+        return builder;
+      }
+      if (table === "properties") {
+        let ids: string[] = [];
+        const builder: Record<string, unknown> = {};
+        builder.select = () => builder;
+        builder.in = (_column: string, values: string[]) => {
+          ids = values;
+          propertyChunkSizes.push(values.length);
+          return builder;
+        };
+        let eqCalls = 0;
+        builder.eq = () => {
+          eqCalls++;
+          return eqCalls === 3
+            ? Promise.resolve({
+                data: ids.map((id) => ({ id })),
+                error: null,
+              })
+            : builder;
+        };
+        return builder;
+      }
+      if (table === "jobs") {
+        const builder: Record<string, unknown> = {};
+        for (const method of ["select", "eq", "order", "limit", "gt"]) {
+          builder[method] = vi.fn(() => builder);
+        }
+        builder.then = (
+          resolve: (value: { data: never[]; error: null }) => unknown,
+        ) => Promise.resolve(resolve({ data: [], error: null }));
+        return builder;
+      }
+      throw new Error(`unexpected table ${table}`);
+    });
+
+    const ids = await selectCassEligibleProperties(
+      { from } as unknown as SupabaseClient<Database>,
+      "job-scale",
+      "org-1",
+    );
+
+    expect(ids).toHaveLength(1_001);
+    expect(new Set(ids)).toEqual(
+      new Set(items.map((item) => item.property_id)),
+    );
+    expect(propertyChunkSizes).toEqual([500, 500, 1]);
   });
 });

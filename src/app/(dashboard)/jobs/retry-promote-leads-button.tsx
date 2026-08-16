@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { useRef, useState, useTransition } from "react";
 
 import { Button, buttonVariants } from "@/components/ui/button";
+import { callAction } from "@/lib/errors/call-action";
 
 import { retryPromoteLeadsJob } from "../properties/promote-leads-actions";
 
@@ -39,10 +40,13 @@ export function RetryPromoteLeadsButton({
         onClick={() => {
           setError(null);
           startTransition(async () => {
-            const result = await retryPromoteLeadsJob({
-              parentJobId: jobId,
-              idempotencyKey: requestKey.current,
-            });
+            const result = await callAction(
+              retryPromoteLeadsJob({
+                parentJobId: jobId,
+                idempotencyKey: requestKey.current,
+              }),
+              { fallbackMessage: "Could not retry promotion" },
+            );
             if (!result.ok) {
               setError(result.error.message);
               return;

@@ -36,7 +36,10 @@ type Props = {
   onLaunchSkipTrace?: () => Promise<Result<unknown>>;
   onLaunchSuccess?: (data: unknown) => void;
   onPreflight?: (propertyIds: string[]) => Promise<Result<SkipTracePreflight>>;
-  onStartCassVerification?: (propertyIds: string[]) => Promise<Result<unknown>>;
+  onStartCassVerification?: (
+    propertyIds: string[],
+    requestKey: string,
+  ) => Promise<Result<unknown>>;
 };
 
 function plural(n: number, singular: string, pluralLabel = `${singular}s`) {
@@ -84,6 +87,7 @@ export function SkipTracePreflightDialog({
   const idsKeyRef = useRef(idsKey);
   const openRef = useRef(open);
   const requestSeqRef = useRef(0);
+  const cassRequestKeyRef = useRef<string | null>(null);
   const mode = approveJobId ? "approve" : "request";
 
   useEffect(() => {
@@ -158,6 +162,7 @@ export function SkipTracePreflightDialog({
     setCassStarted(false);
     setLoadedIdsKey(null);
     setLoading(false);
+    cassRequestKeyRef.current = null;
   };
 
   const handleOpenChange = (nextOpen: boolean) => {
@@ -254,11 +259,18 @@ export function SkipTracePreflightDialog({
     startTransition(async () => {
       const result = await callAction(
         onStartCassVerification
-          ? onStartCassVerification(preflight.cassVerificationPropertyIds)
-          : verifyPropertiesBulk(preflight.cassVerificationPropertyIds),
+          ? onStartCassVerification(
+              preflight.cassVerificationPropertyIds,
+              (cassRequestKeyRef.current ??= crypto.randomUUID()),
+            )
+          : verifyPropertiesBulk(
+              preflight.cassVerificationPropertyIds,
+              (cassRequestKeyRef.current ??= crypto.randomUUID()),
+            ),
         { fallbackMessage: "Could not start CASS verification" },
       );
       if (!result.ok) return;
+      cassRequestKeyRef.current = null;
       const verificationCount = preflight.cassVerificationPropertyIds.length;
       toast.success(
         `CASS verification started for ${plural(verificationCount, "address", "addresses")}`,

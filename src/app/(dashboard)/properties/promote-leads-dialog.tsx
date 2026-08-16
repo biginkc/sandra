@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useEffect, useMemo, useState, useTransition } from "react";
 
 import { Button, buttonVariants } from "@/components/ui/button";
+import { callAction } from "@/lib/errors/call-action";
 import {
   Dialog,
   DialogContent,
@@ -38,13 +39,16 @@ export function PromoteLeadsDialog({
   const [error, setError] = useState<string | null>(null);
   const [jobId, setJobId] = useState<string | null>(null);
   const [startStatus, setStartStatus] = useState<string | null>(null);
+  const [preflightAttempt, setPreflightAttempt] = useState(0);
   const [requestKey] = useState(() => crypto.randomUUID());
   const [pending, startTransition] = useTransition();
 
   useEffect(() => {
     if (!open) return;
     let canceled = false;
-    preflightPromoteLeads({ orgId, propertyIds }).then((result) => {
+    void callAction(preflightPromoteLeads({ orgId, propertyIds }), {
+      fallbackMessage: "Could not check these prospects",
+    }).then((result) => {
       if (canceled) return;
       if (result.ok) setPreflight(result.data);
       else setError(result.error.message);
@@ -53,17 +57,20 @@ export function PromoteLeadsDialog({
     return () => {
       canceled = true;
     };
-  }, [open, orgId, propertyIds, propertyIdsKey]);
+  }, [open, orgId, propertyIds, propertyIdsKey, preflightAttempt]);
 
   const confirm = () => {
     if (!preflight || preflight.eligible === 0 || !requestKey || pending) return;
     setError(null);
     startTransition(async () => {
-      const result = await createPromoteLeadsJob({
-        orgId,
-        propertyIds,
-        idempotencyKey: requestKey,
-      });
+      const result = await callAction(
+        createPromoteLeadsJob({
+          orgId,
+          propertyIds,
+          idempotencyKey: requestKey,
+        }),
+        { fallbackMessage: "Could not start promotion" },
+      );
       if (!result.ok) {
         setError(result.error.message);
         return;
@@ -85,7 +92,7 @@ export function PromoteLeadsDialog({
         </DialogHeader>
 
         {loading ? (
-          <div className="text-muted-foreground rounded-lg border p-4 text-sm">Checking the current selection…</div>
+          <div role="status" aria-live="polite" className="text-muted-foreground rounded-lg border p-4 text-sm">Checking the current selection…</div>
         ) : preflight ? (
           <div className="grid grid-cols-2 gap-3" aria-label="Promotion eligibility">
             <Count label="selected" value={preflight.selected} />
@@ -106,7 +113,7 @@ export function PromoteLeadsDialog({
         ) : null}
 
         {jobId ? (
-          <div className="rounded-lg border bg-muted/30 p-4 text-sm">
+          <div role="status" aria-live="polite" className="rounded-lg border bg-muted/30 p-4 text-sm">
             <p className="font-medium">
               {startStatus === "failed_to_start"
                 ? "The job was saved, but the background run could not start."
@@ -122,6 +129,15 @@ export function PromoteLeadsDialog({
 
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
+          {!loading && !preflight && !jobId ? (
+            <Button variant="outline" onClick={() => {
+              setLoading(true);
+              setError(null);
+              setPreflightAttempt((attempt) => attempt + 1);
+            }}>
+              Try again
+            </Button>
+          ) : null}
           {!jobId ? (
             <Button
               onClick={confirm}

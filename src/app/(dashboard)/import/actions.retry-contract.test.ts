@@ -8,13 +8,31 @@ describe("CSV import durable retry contract", () => {
     const retry = source.slice(
       source.indexOf("export async function retryCsvImportJob"),
     );
-    expect(retry).toContain(
-      '["failed", "partial", "partially_completed"].includes(job.status)',
+    expect(retry).toContain("availabilityForCsvImportRetry(job)");
+    const claimIndex = retry.indexOf('rpc(\n      "claim_csv_import_retry"');
+    const startIndex = retry.indexOf("await start(csvImportWorkflow");
+    expect(claimIndex).toBeGreaterThan(-1);
+    expect(startIndex).toBeGreaterThan(-1);
+    expect(claimIndex).toBeLessThan(startIndex);
+    expect(source).toContain('"CSV_IMPORT_RETRY_IN_FLIGHT"');
+  });
+
+  it("distinguishes permanent reconciliation, exhausted budget, and in-flight work", () => {
+    const retryState = source.slice(
+      source.indexOf("async function availabilityForCsvImportRetry"),
+      source.indexOf("export async function getCsvImportRetryAvailability"),
     );
-    expect(retry.indexOf('rpc(\n      "claim_csv_import_retry"')).toBeLessThan(
-      retry.indexOf("await start(csvImportWorkflow"),
+    expect(retryState).toContain('state: "manual_reconciliation"');
+    expect(retryState).toContain('state: "exhausted"');
+    expect(retryState).toContain('state: "in_flight"');
+    expect(retryState).toContain('from("csv_import_line_type_outcomes")');
+    expect(retryState).toContain('in("state", ["submitting", "ambiguous"])');
+
+    expect(source).toContain('"CSV_IMPORT_RETRY_EXHAUSTED"');
+    expect(source).toContain(
+      '"CSV_IMPORT_RETRY_MANUAL_RECONCILIATION"',
     );
-    expect(retry).toContain('code: "JOB_ALREADY_CLAIMED"');
+    expect(source).not.toContain("already started in another tab");
   });
 
   it("does not rebuild a retry from member-editable job metadata", () => {

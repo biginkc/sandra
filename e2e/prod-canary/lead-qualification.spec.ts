@@ -50,6 +50,15 @@ test("production canary promotes a canary prospect into the leads pipeline", asy
       .click();
     await page.getByRole("menuitem", { name: "Promote to Lead" }).click();
 
+    const dialog = page.getByRole("dialog");
+    await expect(dialog.getByText("1 eligible", { exact: true })).toBeVisible({
+      timeout: 20_000,
+    });
+    await dialog.getByRole("button", { name: "Promote 1 to Leads" }).click();
+    await expect(dialog.getByRole("link", { name: "View progress" })).toBeVisible({
+      timeout: 20_000,
+    });
+
     const promoted = await pollUntil(
       async () => {
         const { data, error } = await supabase
@@ -65,8 +74,6 @@ test("production canary promotes a canary prospect into the leads pipeline", asy
     );
     expect(promoted.address).toBe(address);
     expect(promoted.qualified_by).toBeTruthy();
-
-    await expect(page.getByText(address)).not.toBeVisible({ timeout: 20_000 });
 
     await page.goto("/leads");
     await expect(page.getByText(address)).toBeVisible({ timeout: 20_000 });

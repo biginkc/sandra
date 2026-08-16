@@ -1083,7 +1083,7 @@ export async function retryImportListAssignment(
       failed: job.failed_items,
       sideEffects,
     });
-    const { error: updateError } = await supabase
+    const { error: updateError } = await createAdminClient()
       .from("jobs")
       .update({
         status,
@@ -1098,6 +1098,127 @@ export async function retryImportListAssignment(
   } catch (error) {
     reportError(error, { tags: { surface: "retry_import_list_assignment" } });
     return errFromUnknown(error, "LIST_ASSIGNMENT_RETRY_FAILED");
+  }
+}
+
+export type CsvImportRetryAvailability = {
+  state:
+    | "retryable"
+    | "in_flight"
+    | "exhausted"
+    | "manual_reconciliation"
+    | "not_retryable";
+  message: string | null;
+};
+
+type CsvImportRetryJob = {
+  id: string;
+  org_id: string;
+  type: string;
+  status: string;
+  error_class: string | null;
+  retry_count: number;
+  max_retries: number;
+};
+
+async function availabilityForCsvImportRetry(
+  job: CsvImportRetryJob,
+): Promise<CsvImportRetryAvailability> {
+  if (job.type !== "csv_import") {
+    return {
+      state: "not_retryable",
+      message: "Only CSV import jobs can use this retry.",
+    };
+  }
+  if (["queued", "running"].includes(job.status)) {
+    return {
+      state: "in_flight",
+      message: "This import is already being processed.",
+    };
+  }
+  if (
+    !["failed", "partial", "partially_completed"].includes(job.status) ||
+    ["validation", "authorization"].includes(job.error_class ?? "")
+  ) {
+    return {
+      state: "not_retryable",
+      message: "This import cannot be retried from its current state.",
+    };
+  }
+
+  // The authenticated jobs read establishes tenant membership. The admin
+  // client is used only for the service-role ledger, with both tenant keys.
+  const admin = createAdminClient();
+  const { data: unresolved, error: unresolvedError } = await admin
+    .from("csv_import_line_type_outcomes")
+    .select("phone_e164")
+    .eq("job_id", job.id)
+    .eq("org_id", job.org_id)
+    .in("state", ["submitting", "ambiguous"])
+    .limit(1);
+  if (unresolvedError) throw unresolvedError;
+  if (unresolved && unresolved.length > 0) {
+    return {
+      state: "manual_reconciliation",
+      message:
+        "Automatic retry is blocked to prevent a duplicate provider charge. An administrator must reconcile the unknown line-type lookup first.",
+    };
+  }
+  if (job.retry_count >= job.max_retries) {
+    return {
+      state: "exhausted",
+      message:
+        "This import has used all of its retry attempts. Review Job details before starting a replacement import.",
+    };
+  }
+  return { state: "retryable", message: null };
+}
+
+function unavailableRetryResult(
+  availability: CsvImportRetryAvailability,
+): Result<never> {
+  const code =
+    availability.state === "in_flight"
+      ? "CSV_IMPORT_RETRY_IN_FLIGHT"
+      : availability.state === "exhausted"
+        ? "CSV_IMPORT_RETRY_EXHAUSTED"
+        : availability.state === "manual_reconciliation"
+          ? "CSV_IMPORT_RETRY_MANUAL_RECONCILIATION"
+          : "JOB_NOT_RETRYABLE";
+  return {
+    ok: false,
+    error: {
+      code,
+      message: availability.message ?? "This import cannot be retried.",
+    },
+  };
+}
+
+/** Return the durable retry state used by every CSV retry surface. */
+export async function getCsvImportRetryAvailability(
+  jobId: string,
+): Promise<Result<CsvImportRetryAvailability>> {
+  try {
+    const supabase = await createClient();
+    const { data: auth } = await supabase.auth.getUser();
+    if (!auth.user) {
+      return {
+        ok: false,
+        error: { code: "NOT_AUTHENTICATED", message: "Not authenticated" },
+      };
+    }
+    const { data: job, error } = await supabase
+      .from("jobs")
+      .select(
+        "id, org_id, type, status, error_class, retry_count, max_retries",
+      )
+      .eq("id", jobId)
+      .single();
+    if (error || !job) throw error ?? new Error("Import job not found");
+    return ok(await availabilityForCsvImportRetry(job));
+  } catch (error) {
+    reportError(error, { tags: { surface: "csv_import_retry_availability" } });
+    return errFromUnknown(error, "CSV_IMPORT_RETRY_AVAILABILITY_FAILED");
   }
 }
 
@@ -1116,7 +1237,9 @@ export async function retryCsvImportJob(
     }
     const { data: job, error } = await supabase
       .from("jobs")
-      .select("id, org_id, type, status, related_import_id")
+      .select(
+        "id, org_id, type, status, related_import_id, error_class, retry_count, max_retries",
+      )
       .eq("id", jobId)
       .single();
     if (error || !job) throw error ?? new Error("Import job not found");
@@ -1129,14 +1252,9 @@ export async function retryCsvImportJob(
         },
       };
     }
-    if (!["failed", "partial", "partially_completed"].includes(job.status)) {
-      return {
-        ok: false,
-        error: {
-          code: "JOB_NOT_RETRYABLE",
-          message: `Job is ${job.status}, not failed or partially completed.`,
-        },
-      };
+    const availability = await availabilityForCsvImportRetry(job);
+    if (availability.state !== "retryable") {
+      return unavailableRetryResult(availability);
     }
     if (!job.related_import_id) throw new Error("Import provenance is missing");
 
@@ -1221,13 +1339,23 @@ export async function retryCsvImportJob(
     );
     if (queueError) throw queueError;
     if (!claimedJob) {
-      return {
-        ok: false,
-        error: {
-          code: "JOB_ALREADY_CLAIMED",
-          message: "This import retry was already started in another tab.",
-        },
-      };
+      const { data: latestJob, error: latestJobError } = await supabase
+        .from("jobs")
+        .select(
+          "id, org_id, type, status, error_class, retry_count, max_retries",
+        )
+        .eq("id", jobId)
+        .single();
+      if (latestJobError || !latestJob) {
+        throw latestJobError ?? new Error("Import job not found after retry");
+      }
+      const latestAvailability = await availabilityForCsvImportRetry(latestJob);
+      return latestAvailability.state === "retryable"
+        ? unavailableRetryResult({
+            state: "not_retryable",
+            message: "This import could not be claimed for retry.",
+          })
+        : unavailableRetryResult(latestAvailability);
     }
     try {
       await start(csvImportWorkflow, [

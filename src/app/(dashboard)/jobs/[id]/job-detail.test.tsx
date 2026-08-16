@@ -10,6 +10,10 @@ vi.mock("../../properties/promote-leads-actions", () => ({
 }));
 vi.mock("../../import/actions", () => ({
   retryCsvImportJob: vi.fn(),
+  getCsvImportRetryAvailability: vi.fn().mockResolvedValue({
+    ok: true,
+    data: { state: "retryable", message: null },
+  }),
 }));
 
 import { JobDetail, type JobDetailProps } from "./job-detail";
@@ -175,6 +179,7 @@ describe("<JobDetail /> Promote to Leads results", () => {
           {
             id: "item-1",
             job_id: "job-1",
+            org_id: "org-1",
             property_id: "property-1",
             contact_id: null,
             message_id: null,
@@ -229,8 +234,39 @@ describe("<JobDetail /> Promote to Leads results", () => {
   });
 });
 
+describe("<JobDetail /> CASS recovery", () => {
+  it("separates retryable saved-output failures from outcomes needing review", () => {
+    render(
+      <JobDetail
+        job={makeJob({
+          type: "cass_dsf2_ncoa",
+          provider: "smartystreets",
+          status: "partial",
+          result_summary: {
+            verified: 10,
+            invalid: 1,
+            ambiguous: 1,
+            cacheHits: 4,
+            retryableFailures: 2,
+            savedResultFailures: 1,
+            manualReconciliation: 3,
+          },
+        })}
+        items={[]}
+        parent={null}
+        childJobs={[]}
+        csvImport={null}
+      />,
+    );
+
+    expect(screen.getByText("Retryable").parentElement).toHaveTextContent("2");
+    expect(screen.getByText("Saved outputs").parentElement).toHaveTextContent("1");
+    expect(screen.getByText("Needs review").parentElement).toHaveTextContent("3");
+  });
+});
+
 describe("<JobDetail /> CSV recovery", () => {
-  it("shows retry for a zero-row workflow-start failure when immutable provenance exists", () => {
+  it("shows retry for a zero-row workflow-start failure when immutable provenance exists", async () => {
     render(
       <JobDetail
         job={makeJob({
@@ -249,7 +285,9 @@ describe("<JobDetail /> CSV recovery", () => {
         csvRetryAvailable
       />,
     );
-    expect(screen.getByRole("button", { name: "Retry import" })).toBeVisible();
+    expect(
+      await screen.findByRole("button", { name: "Retry import" }),
+    ).toBeVisible();
   });
 
   it("does not advertise retry when authoritative provenance is missing", () => {

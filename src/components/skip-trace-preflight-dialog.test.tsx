@@ -212,7 +212,10 @@ describe("<SkipTracePreflightDialog />", () => {
     );
 
     await waitFor(() => {
-      expect(verifyPropertiesBulk).toHaveBeenCalledWith(["u1", "u2"]);
+      expect(verifyPropertiesBulk).toHaveBeenCalledWith(
+        ["u1", "u2"],
+        expect.any(String),
+      );
     });
     expect(requestSkipTrace).not.toHaveBeenCalled();
   });

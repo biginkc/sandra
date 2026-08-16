@@ -358,6 +358,16 @@ export function JobsList({
               </TableRow>
             ) : (
               visibleJobs.map((job) => {
+                const cassSummary =
+                  (job.result_summary as Record<string, unknown> | null) ?? {};
+                const cassRetryable =
+                  typeof cassSummary.retryableFailures === "number"
+                    ? cassSummary.retryableFailures
+                    : job.failed_items;
+                const cassManual =
+                  typeof cassSummary.manualReconciliation === "number"
+                    ? cassSummary.manualReconciliation
+                    : 0;
                 const canStartCass =
                   job.type === "cass_dsf2_ncoa" &&
                   job.status === "queued" &&
@@ -377,7 +387,7 @@ export function JobsList({
                 const canRetryCass =
                   job.type === "cass_dsf2_ncoa" &&
                   (["partial", "partially_completed", "failed"].includes(job.status)) &&
-                  job.failed_items > 0;
+                  cassRetryable > 0;
                 return (
                   <TableRow key={job.id}>
                     <TableCell className="font-medium">
@@ -399,6 +409,12 @@ export function JobsList({
                           · {job.failed_items} failed
                         </span>
                       )}
+                      {job.type === "cass_dsf2_ncoa" && cassRetryable > 0 ? (
+                        <span> · {cassRetryable} retryable</span>
+                      ) : null}
+                      {job.type === "cass_dsf2_ncoa" && cassManual > 0 ? (
+                        <span> · {cassManual} needs review</span>
+                      ) : null}
                     </TableCell>
                     <TableCell className="text-muted-foreground text-sm">
                       {formatDistanceToNow(new Date(job.created_at), {
@@ -415,7 +431,7 @@ export function JobsList({
                       {canRetryCass ? (
                         <RetryCassButton
                           jobId={job.id}
-                          failedItems={job.failed_items}
+                          failedItems={cassRetryable}
                         />
                       ) : null}
                       {canApproveSkipTrace ? (
@@ -600,8 +616,8 @@ function RetryCassButton({
           <DialogDescription>
             Creates a fresh CASS job for the {failedItems.toLocaleString()}{" "}
             {failedItems === 1 ? "property" : "properties"} that previously
-            failed. Already-verified addresses come from the cache (no new
-            API calls); anything not in the cache costs $
+            failed. Saved provider responses and cached addresses replay with
+            no new charge; only addresses without saved output cost $
             {CASS_COST_PER_LOOKUP_USD.toFixed(2)}/lookup.
           </DialogDescription>
         </DialogHeader>

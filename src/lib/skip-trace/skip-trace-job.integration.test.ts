@@ -84,6 +84,33 @@ describe("runSkipTraceEnrichment (integration, mock provider)", () => {
     vi.restoreAllMocks();
   });
 
+  it("keeps preparation recoverable until the final paid-call checkpoint", async () => {
+    const { propertyId } = await seedProperty({
+      address: "1 Prepared Recovery Ln",
+    });
+    const jobId = await createPendingJob([propertyId]);
+    let observedPhase: string | null = null;
+
+    await runSkipTraceEnrichment(supabase, {
+      jobId,
+      orgId: await getOrgId(),
+      propertyIds: [propertyId],
+      beforeProviderEligibilityCheck: async () => {
+        const { data: job } = await supabase
+          .from("jobs")
+          .select("result_summary")
+          .eq("id", jobId)
+          .single();
+        observedPhase =
+          ((job?.result_summary as { submit_phase?: string } | null)
+            ?.submit_phase ?? null);
+        throw new Error("stop before provider");
+      },
+    });
+
+    expect(observedPhase).toBe("prepared");
+  });
+
   it("rechecks a claimed job after a homeowner opts out and makes no provider call", async () => {
     const { propertyId, contactId } = await seedProperty({
       address: "1 Provider Boundary Opt Out Ln",
@@ -208,6 +235,114 @@ describe("runSkipTraceEnrichment (integration, mock provider)", () => {
 
     expect(lookup).toHaveBeenCalledTimes(1);
     expect(outcomes.filter((outcome) => "claimed" in outcome)).toHaveLength(1);
+  });
+
+  it("quarantines a paid single lookup when no terminal result can be persisted", async () => {
+    const { propertyId } = await seedProperty({
+      address: "1 Single Paid Boundary Outage Ln",
+    });
+    const jobId = await createPendingJob([propertyId]);
+    const orgId = await getOrgId();
+    const lookup = vi.spyOn(MockSkipTraceProvider.prototype, "lookupSingle");
+
+    await runSkipTraceEnrichment(supabase, {
+      jobId,
+      orgId,
+      propertyIds: [propertyId],
+      beforeSingleLedgerWrite: async () => {
+        throw new Error("injected terminal-ledger outage");
+      },
+    });
+
+    expect(lookup).toHaveBeenCalledTimes(1);
+    const { data: quarantined } = await supabase
+      .from("jobs")
+      .select("status, error_class, result_summary")
+      .eq("id", jobId)
+      .single();
+    expect(quarantined).toMatchObject({
+      status: "canceled",
+      error_class: "submission_unknown",
+      result_summary: {
+        submit_phase: "submission_unknown",
+        manual_reconciliation_required: true,
+      },
+    });
+
+    const { count: itemCount } = await supabase
+      .from("job_items")
+      .select("id", { count: "exact", head: true })
+      .eq("job_id", jobId);
+    expect(itemCount).toBe(0);
+    const { count: cacheCount } = await supabase
+      .from("skip_trace_cache")
+      .select("id", { count: "exact", head: true })
+      .eq("org_id", orgId)
+      .eq("provider", "mock");
+    expect(cacheCount).toBe(0);
+
+    await expect(
+      runSkipTraceEnrichment(supabase, {
+        jobId,
+        orgId,
+        propertyIds: [propertyId],
+      }),
+    ).resolves.toEqual({ claimed: false });
+    expect(lookup).toHaveBeenCalledTimes(1);
+  });
+
+  it("quarantines a paid single lookup when its cache write is uncertain", async () => {
+    const { propertyId } = await seedProperty({
+      address: "2 Single Paid Boundary Cache Ln",
+    });
+    const jobId = await createPendingJob([propertyId]);
+    const orgId = await getOrgId();
+    const lookup = vi.spyOn(MockSkipTraceProvider.prototype, "lookupSingle");
+
+    await runSkipTraceEnrichment(supabase, {
+      jobId,
+      orgId,
+      propertyIds: [propertyId],
+      beforeSingleCacheWrite: async () => {
+        throw new Error("injected terminal-cache outage");
+      },
+    });
+
+    expect(lookup).toHaveBeenCalledTimes(1);
+    const { data: quarantined } = await supabase
+      .from("jobs")
+      .select("status, error_class, result_summary")
+      .eq("id", jobId)
+      .single();
+    expect(quarantined).toMatchObject({
+      status: "canceled",
+      error_class: "submission_unknown",
+      result_summary: {
+        submit_phase: "submission_unknown",
+        manual_reconciliation_required: true,
+      },
+    });
+
+    const { count: itemCount } = await supabase
+      .from("job_items")
+      .select("id", { count: "exact", head: true })
+      .eq("job_id", jobId);
+    expect(itemCount).toBe(1);
+    const { count: cacheCount } = await supabase
+      .from("skip_trace_cache")
+      .select("id", { count: "exact", head: true })
+      .eq("org_id", orgId)
+      .eq("provider", "mock");
+    expect(cacheCount).toBe(0);
+
+    await expect(
+      runSkipTraceEnrichment(supabase, {
+        jobId,
+        orgId,
+        propertyIds: [propertyId],
+      }),
+    ).resolves.toEqual({ claimed: false });
+    expect(lookup).toHaveBeenCalledTimes(1);
   });
 
   it("canonicalizes duplicate direct-runner ids before claim and processing", async () => {
@@ -785,6 +920,86 @@ describe("runSkipTraceEnrichment (integration, mock provider)", () => {
       contactIds.add(prop!.homeowner_contact_id!);
     }
     expect(contactIds.size).toBe(1);
+  });
+
+  it("releases the finalize claim when a ledger write fails after persistence, then resumes without provider spend", async () => {
+    const props = await Promise.all([
+      seedProperty({ address: "201 Ledger Retry Ln" }),
+      seedProperty({ address: "202 Ledger Retry Ln" }),
+    ]);
+    const ids = props.map((property) => property.propertyId);
+    const jobId = await createPendingJob(ids);
+    const submit = vi.spyOn(MockSkipTraceProvider.prototype, "submitBatch");
+    await runSkipTraceEnrichment(supabase, {
+      jobId,
+      orgId: await getOrgId(),
+      propertyIds: ids,
+    });
+    expect(submit).toHaveBeenCalledTimes(1);
+
+    const results: SkipTraceResult[] = ids.map((propertyId, index) => ({
+      propertyId,
+      hit: true,
+      persons: [
+        {
+          firstName: "Ledger",
+          lastName: `Owner${index}`,
+          phones: [
+            {
+              number: `+1816555020${index}`,
+              type: "Mobile",
+              dnc: false,
+              rank: 1,
+            },
+          ],
+          emails: [],
+          isOwner: true,
+        },
+      ],
+      creditsDeducted: 1,
+      raw: {},
+    }));
+
+    await expect(
+      finalizeSkipTraceFromBatch(supabase, {
+        jobId,
+        results,
+        beforeLedgerWrite: async () => {
+          throw new Error("injected ledger outage");
+        },
+      }),
+    ).rejects.toThrow("injected ledger outage");
+
+    const { data: retryableJob } = await supabase
+      .from("jobs")
+      .select("status")
+      .eq("id", jobId)
+      .single();
+    expect(retryableJob?.status).toBe("running");
+
+    const resumed = await finalizeSkipTraceFromBatch(supabase, {
+      jobId,
+      results,
+    });
+    expect(resumed).not.toBeNull();
+    expect(submit).toHaveBeenCalledTimes(1);
+
+    const { data: terminalJob } = await supabase
+      .from("jobs")
+      .select("status, processed_items, succeeded_items, failed_items")
+      .eq("id", jobId)
+      .single();
+    expect(terminalJob?.status).toBe("completed");
+    expect(terminalJob?.processed_items).toBe(2);
+    expect(terminalJob?.succeeded_items).toBe(2);
+    expect(terminalJob?.failed_items).toBe(0);
+
+    const { data: items } = await supabase
+      .from("job_items")
+      .select("property_id")
+      .eq("job_id", jobId);
+    expect(items).toHaveLength(2);
+    expect(new Set(items?.map((item) => item.property_id)).size).toBe(2);
   });
 
   it("second finalize loses the claim: returns null, writes no duplicate items", async () => {

@@ -77,6 +77,8 @@ function makeLead(overrides: Partial<Lead> = {}): Lead {
     assigned_user_id: "user-me",
     motivation_level: "hot",
     outreach_dispo: "callback_requested",
+    homeowner_sms_opted_out: false,
+    homeowner_sms_opted_out_at: null,
     homeowner: {
       first_name: "Taylor",
       last_name: "Seller",
@@ -199,6 +201,19 @@ describe("Leads Kanban foundation", () => {
     expect(within(strip).getByRole("button", { name: "Scheduled later 0" })).toBeVisible();
     expect(within(strip).getByRole("button", { name: "No next action 1" })).toBeVisible();
     expect(within(strip).queryByText(/suppressed/i)).not.toBeInTheDocument();
+  });
+
+  it("shows SMS-only suppression as a channel restriction, not permanent DNC", () => {
+    renderBoard([
+      makeLead({
+        outreach_dispo: null,
+        homeowner_sms_opted_out: true,
+        homeowner_sms_opted_out_at: "2026-08-15T14:00:00.000Z",
+      }),
+    ]);
+
+    expect(screen.getByText("SMS opted out")).toBeVisible();
+    expect(screen.queryByText(/DO NOT CONTACT/i)).not.toBeInTheDocument();
   });
 
   it("renders overdue, today, scheduled, and no-action rows in urgency order", () => {

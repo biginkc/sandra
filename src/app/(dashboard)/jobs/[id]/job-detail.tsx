@@ -526,6 +526,9 @@ function CassPanel({ job }: { job: Job }) {
         <DetailRow label="Invalid" value={`${summary.invalid ?? 0}`} />
         <DetailRow label="Ambiguous" value={`${summary.ambiguous ?? 0}`} />
         <DetailRow label="Cache hits" value={`${summary.cacheHits ?? 0}`} />
+        <DetailRow label="Retryable" value={`${summary.retryableFailures ?? 0}`} />
+        <DetailRow label="Saved outputs" value={`${summary.savedResultFailures ?? 0}`} />
+        <DetailRow label="Needs review" value={`${summary.manualReconciliation ?? 0}`} />
       </CardContent>
     </Card>
   );
