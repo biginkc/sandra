@@ -43,7 +43,8 @@ create table public.memberships (
 );
 create table public.contacts (
   id uuid primary key, org_id uuid not null, first_name text, last_name text,
-  entity_name text, do_not_contact boolean not null default false
+  entity_name text, do_not_contact boolean not null default false,
+  sms_opted_out boolean not null default false
 );
 create table public.properties (
   id uuid primary key, org_id uuid not null, address text not null, city text,
@@ -97,15 +98,18 @@ insert into memberships values
  ('11111111-1111-4111-8111-111111111111','aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'),
  ('22222222-2222-4222-8222-222222222222','bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb');
 insert into contacts values
- ('aaaaaaaa-0000-4000-8000-000000000001','aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa','A','Owner',null,false),
- ('bbbbbbbb-0000-4000-8000-000000000001','bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb','B','Owner',null,false);
+ ('aaaaaaaa-0000-4000-8000-000000000001','aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa','A','Owner',null,false,false),
+ ('aaaaaaaa-0000-4000-8000-000000000002','aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa','SMS','Only',null,false,true),
+ ('bbbbbbbb-0000-4000-8000-000000000001','bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb','B','Owner',null,false,false);
 insert into properties (id,org_id,address,city,state,status,homeowner_contact_id,created_at) values
  ('aaaaaaaa-1000-4000-8000-000000000001','aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa','1 Overdue St','Kansas City','MO','new_lead','aaaaaaaa-0000-4000-8000-000000000001','2026-01-01'),
  ('aaaaaaaa-1000-4000-8000-000000000002','aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa','2 Today St','Kansas City','MO','new_lead','aaaaaaaa-0000-4000-8000-000000000001','2026-01-02'),
  ('aaaaaaaa-1000-4000-8000-000000000003','aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa','3 No Task St','Kansas City','MO','new_lead','aaaaaaaa-0000-4000-8000-000000000001','2026-01-03'),
  ('aaaaaaaa-1000-4000-8000-000000000004','aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa','4 Locked St','Kansas City','MO','interested','aaaaaaaa-0000-4000-8000-000000000001','2026-01-04'),
+ ('aaaaaaaa-1000-4000-8000-000000000005','aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa','5 SMS Only St','Kansas City','MO','prospect','aaaaaaaa-0000-4000-8000-000000000002','2026-01-05'),
  ('bbbbbbbb-1000-4000-8000-000000000001','bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb','Other Org St','Kansas City','MO','new_lead','bbbbbbbb-0000-4000-8000-000000000001','2026-01-01');
 update properties set outreach_dispo='dnc' where id='aaaaaaaa-1000-4000-8000-000000000004';
+update properties set outreach_dispo='opted_out' where id='aaaaaaaa-1000-4000-8000-000000000005';
 insert into tasks (id,org_id,assignee_id,related_property_id,type,status,title,due_at,created_by) values
  ('aaaaaaaa-2000-4000-8000-000000000001','aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa','11111111-1111-4111-8111-111111111111','aaaaaaaa-1000-4000-8000-000000000001','follow_up','open','Later duplicate','2026-08-14 12:00Z','11111111-1111-4111-8111-111111111111'),
  ('aaaaaaaa-2000-4000-8000-000000000002','aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa','11111111-1111-4111-8111-111111111111','aaaaaaaa-1000-4000-8000-000000000001','follow_up','open','Earliest','2026-08-13 12:00Z','11111111-1111-4111-8111-111111111111'),
@@ -126,6 +130,10 @@ psql -v ON_ERROR_STOP=1 -h "$LEADS_SOCKET" -p "$LEADS_PORT" -U postgres -d sandr
 psql -v ON_ERROR_STOP=1 -h "$LEADS_SOCKET" -p "$LEADS_PORT" -U postgres -d sandra_leads_rehearsal <<'SQL'
 set role authenticated;
 set request.jwt.claim.sub='11111111-1111-4111-8111-111111111111';
+-- Promotion changes only the pipeline stage. An SMS-only restriction remains
+-- on the record, but it must not make the new lead disappear from the board.
+update properties set status='new_lead'
+where id='aaaaaaaa-1000-4000-8000-000000000005';
 do $$ begin
   if (select next_task_title from leads_board where id='aaaaaaaa-1000-4000-8000-000000000001') <> 'Earliest'
   then raise exception 'earliest open task projection is not deterministic'; end if;
@@ -139,6 +147,25 @@ do $$ begin
   then raise exception 'sequence-ended semantic was not projected'; end if;
   if not (select has_active_sequence from leads_board where id='aaaaaaaa-1000-4000-8000-000000000003')
   then raise exception 'active-sequence semantic was not projected'; end if;
+  if not exists (
+    select 1
+    from get_leads_board_page(
+      'new_lead', null, false, array[]::text[], 'all', 'all', null,
+      false, false, null, '2026-08-15 05:00Z', '2026-08-16 05:00Z',
+      null, null, 100
+    ) page
+    where page.rows @> '[{"id":"aaaaaaaa-1000-4000-8000-000000000005"}]'::jsonb
+  ) then raise exception 'SMS-only opted-out promotion disappeared from page query'; end if;
+  if not exists (
+    select 1 from get_leads_board_stage_counts()
+    where status='new_lead' and total_count=4
+  ) then raise exception 'SMS-only opted-out promotion missing from stage count'; end if;
+  if not exists (
+    select 1 from get_leads_board_urgency_counts(
+      null, false, array[]::text[], 'all', null, false, false, null,
+      '2026-08-15 05:00Z', '2026-08-16 05:00Z'
+    ) where all_count=4
+  ) then raise exception 'SMS-only opted-out promotion missing from urgency count'; end if;
 end $$;
 reset role;
 SQL
@@ -273,10 +300,10 @@ create temp table stable_second as
 do $$ declare first_total bigint; first_rows integer; second_total bigint; second_rows integer; begin
   select total_count, jsonb_array_length(rows) into first_total, first_rows from stable_first;
   select total_count, jsonb_array_length(rows) into second_total, second_rows from stable_second;
-  if (select total_count from stable_first) <> 3
+  if (select total_count from stable_first) <> 4
     or jsonb_array_length((select rows from stable_first)) <> 2
-    or jsonb_array_length((select rows from stable_second)) <> 1
-    or (select total_count from stable_second) <> 3
+    or jsonb_array_length((select rows from stable_second)) <> 2
+    or (select total_count from stable_second) <> 4
   then raise exception 'stable keyset traversal did not converge: total/rows %/%, %/%, first=% second=%', first_total, first_rows, second_total, second_rows, (select rows from stable_first), (select rows from stable_second); end if;
 end $$;
 

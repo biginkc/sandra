@@ -198,7 +198,7 @@ as $$
       and b.deleted_at is null
       and (
         b.outreach_dispo is null
-        or b.outreach_dispo::text not in ('wrong_number', 'bad_number', 'not_interested', 'opted_out', 'dnc')
+        or b.outreach_dispo::text not in ('wrong_number', 'bad_number', 'not_interested', 'dnc')
         or b.status::text not in ('new_lead', 'contacted')
       )
       and (p_assignee_id is null or b.assigned_user_id = p_assignee_id)
@@ -291,7 +291,7 @@ as $$
     and b.deleted_at is null
     and (
       b.outreach_dispo is null
-      or b.outreach_dispo::text not in ('wrong_number', 'bad_number', 'not_interested', 'opted_out', 'dnc')
+      or b.outreach_dispo::text not in ('wrong_number', 'bad_number', 'not_interested', 'dnc')
       or b.status::text not in ('new_lead', 'contacted')
     )
     and (p_assignee_id is null or b.assigned_user_id = p_assignee_id)
@@ -329,7 +329,7 @@ as $$
     and b.deleted_at is null
     and (
       b.outreach_dispo is null
-      or b.outreach_dispo::text not in ('wrong_number', 'bad_number', 'not_interested', 'opted_out', 'dnc')
+      or b.outreach_dispo::text not in ('wrong_number', 'bad_number', 'not_interested', 'dnc')
       or b.status::text not in ('new_lead', 'contacted')
     )
   group by b.status;

@@ -40,4 +40,10 @@ describe("Leads urgency migration contract", () => {
   it("keeps true DNC out of both board views", () => {
     expect(migration.match(/is_dnc_locked\s*=\s*false/gi)?.length ?? 0).toBeGreaterThanOrEqual(2);
   });
+
+  it("keeps SMS-only opt-outs visible in every board page and count query", () => {
+    expect(migration).not.toMatch(
+      /outreach_dispo::text not in \([^)]*'opted_out'[^)]*\)/i,
+    );
+  });
 });

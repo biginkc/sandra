@@ -36,7 +36,7 @@ revoke all on function public.enforce_active_property_assignee_membership() from
 
 drop trigger if exists trg_properties_active_assignee on public.properties;
 create trigger trg_properties_active_assignee
-before insert or update of assigned_user_id on public.properties
+before insert or update of assigned_user_id, org_id on public.properties
 for each row execute function public.enforce_active_property_assignee_membership();
 
 drop function if exists public.get_leads_board_page(
@@ -74,7 +74,7 @@ as $$
       and b.deleted_at is null
       and (
         b.outreach_dispo is null
-        or b.outreach_dispo::text not in ('wrong_number', 'bad_number', 'not_interested', 'opted_out', 'dnc')
+        or b.outreach_dispo::text not in ('wrong_number', 'bad_number', 'not_interested', 'dnc')
         or b.status::text not in ('new_lead', 'contacted')
       )
       and (p_assignee_id is null or b.assigned_user_id = p_assignee_id)

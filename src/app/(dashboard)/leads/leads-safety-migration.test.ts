@@ -21,6 +21,14 @@ describe("Leads tenant, assignment, and paging safety migration", () => {
     expect(migration).toMatch(/membership\.user_id = new\.assigned_user_id/i);
     expect(migration).toMatch(/membership\.access_status = 'active'/i);
     expect(migration).toMatch(/membership\.access_expires_at is null[\s\S]*membership\.access_expires_at > statement_timestamp\(\)/i);
-    expect(migration).toMatch(/before insert or update of assigned_user_id/i);
+    expect(migration).toMatch(
+      /before insert or update of assigned_user_id, org_id/i,
+    );
+  });
+
+  it("does not remove an SMS-only opted-out record from the effective page query", () => {
+    expect(migration).not.toMatch(
+      /outreach_dispo::text not in \([^)]*'opted_out'[^)]*\)/i,
+    );
   });
 });

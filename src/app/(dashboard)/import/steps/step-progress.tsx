@@ -46,6 +46,7 @@ export function StepProgress({ jobId }: { jobId: string }) {
   const [error, setError] = useState<string | null>(null);
   const [retrying, setRetrying] = useState(false);
   const [retryAvailable, setRetryAvailable] = useState(false);
+  const [refreshVersion, setRefreshVersion] = useState(0);
 
   useEffect(() => {
     const supabase = createClient();
@@ -126,7 +127,7 @@ export function StepProgress({ jobId }: { jobId: string }) {
       if (pollId) clearInterval(pollId);
       if (channel) supabase.removeChannel(channel);
     };
-  }, [jobId]);
+  }, [jobId, refreshVersion]);
 
   const total = job?.total_items ?? 0;
   const processed = job?.processed_items ?? 0;
@@ -136,10 +137,9 @@ export function StepProgress({ jobId }: { jobId: string }) {
   const isTerminal = job ? TERMINAL_STATUSES.has(job.status) : false;
   const skippedCount = Math.max(
     0,
-    (isTerminal ? total : processed) -
-      (job?.succeeded_items ?? 0) -
-      (job?.failed_items ?? 0),
+    processed - (job?.succeeded_items ?? 0) - (job?.failed_items ?? 0),
   );
+  const unprocessedCount = Math.max(0, total - processed);
 
   const { title, description } = describeState(job, isTerminal);
 
@@ -173,11 +173,14 @@ export function StepProgress({ jobId }: { jobId: string }) {
         ? await retryCsvImportJob(jobId)
         : await retryImportListAssignment(jobId);
     setRetrying(false);
-    if (result.ok)
+    if (result.ok) {
       toast.success(
         kind === "rows" ? "Import resumed." : "List assignment completed.",
       );
-    else toast.error(result.error.message);
+      // A retry changes a terminal job back to a runnable state. Refetch now
+      // and recreate the polling safety net; Realtime may be unavailable.
+      setRefreshVersion((version) => version + 1);
+    } else toast.error(result.error.message);
   };
 
   return (
@@ -204,10 +207,11 @@ export function StepProgress({ jobId }: { jobId: string }) {
             />
           </div>
         )}
-        <div className="grid grid-cols-3 gap-3 text-center text-sm">
+        <div className="grid grid-cols-2 gap-3 text-center text-sm sm:grid-cols-4">
           <Stat label="Succeeded" value={job?.succeeded_items ?? 0} />
           <Stat label="Failed" value={job?.failed_items ?? 0} />
           <Stat label="Skipped" value={skippedCount} />
+          <Stat label="Unprocessed" value={unprocessedCount} />
         </div>
         {isTerminal && droppedUnlabeledPhones > 0 && (
           <div className="text-muted-foreground text-sm">
@@ -263,14 +267,6 @@ export function StepProgress({ jobId }: { jobId: string }) {
             >
               Retry import
             </Button>
-          )}
-          {(job?.failed_items ?? 0) > 0 && (
-            <Link
-              href={`/jobs/${jobId}`}
-              className={buttonVariants({ variant: "outline" })}
-            >
-              Download failed rows
-            </Link>
           )}
           <Link
             href={`/jobs/${jobId}`}
