@@ -296,7 +296,7 @@ export function Kanban({
 
   const changeOwnership = (next: OwnershipFilter) => {
     if (hasInboundFilter && next !== initialOwnership) {
-      router.push("/leads");
+      router.push(inboundOwnershipHref(next));
       return;
     }
     setOwnership(next);
@@ -515,6 +515,7 @@ export function Kanban({
             }`}
           >
             <option value="">Teammate</option>
+            <option value="unassigned">Unassigned</option>
             {teamMembers
               .filter((member) => member.id !== currentUserId)
               .map((member) => (
@@ -642,6 +643,13 @@ export function Kanban({
       )}
     </div>
   );
+}
+
+function inboundOwnershipHref(ownership: OwnershipFilter): string {
+  if (ownership === "all") return "/leads";
+  if (ownership === "mine") return "/leads?assignee=me";
+  if (ownership === "unassigned") return "/leads?unassigned=true";
+  return `/leads?assignee=${encodeURIComponent(ownership)}`;
 }
 
 function FilteredEmptyState({

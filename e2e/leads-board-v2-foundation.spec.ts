@@ -6,6 +6,46 @@ import {
   resetTenantTables,
 } from "./fixtures";
 
+const LEADS_TEAMMATE_EMAIL = "e2e-leads-teammate@bmhgroupkc.com";
+const DEFAULT_ORG_ID = "00000000-0000-0000-0000-000000000bbb";
+
+async function ensureLeadsTeammate(
+  admin: ReturnType<typeof adminClient>,
+): Promise<{ id: string; email: string }> {
+  const { data: users, error: usersError } = await admin.auth.admin.listUsers({
+    perPage: 200,
+  });
+  if (usersError) throw usersError;
+  let teammate = users.users.find((user) => user.email === LEADS_TEAMMATE_EMAIL);
+  if (!teammate) {
+    const { data, error } = await admin.auth.admin.createUser({
+      email: LEADS_TEAMMATE_EMAIL,
+      email_confirm: true,
+    });
+    if (error || !data.user) throw error ?? new Error("teammate create failed");
+    teammate = data.user;
+  }
+
+  type MembershipWriter = {
+    from(table: "memberships"): {
+      upsert(
+        values: { user_id: string; org_id: string; role: "member" },
+        options: { onConflict: string },
+      ): Promise<{ error: { message: string } | null }>;
+    };
+  };
+  const { error: membershipError } = await (
+    admin as unknown as MembershipWriter
+  )
+    .from("memberships")
+    .upsert(
+      { user_id: teammate.id, org_id: DEFAULT_ORG_ID, role: "member" },
+      { onConflict: "user_id,org_id" },
+    );
+  if (membershipError) throw new Error(membershipError.message);
+  return { id: teammate.id, email: LEADS_TEAMMATE_EMAIL };
+}
+
 test("Leads board v2 foundation is usable at desktop and narrow widths", async ({
   page,
 }, testInfo) => {
@@ -22,6 +62,7 @@ test("Leads board v2 foundation is usable at desktop and narrow widths", async (
   const { data: users } = await admin.auth.admin.listUsers({ perPage: 200 });
   const currentUser = users.users.find((user) => user.email === TEST_USER_EMAIL);
   expect(currentUser).toBeTruthy();
+  const teammate = await ensureLeadsTeammate(admin);
 
   const { data: contact, error: contactError } = await admin
     .from("contacts")
@@ -82,6 +123,13 @@ test("Leads board v2 foundation is usable at desktop and narrow widths", async (
         state: "MO",
         status: "new_lead",
         assigned_user_id: null,
+      },
+      {
+        address: "654 Teammate Queue Blvd",
+        city: "Kansas City",
+        state: "MO",
+        status: "new_lead",
+        assigned_user_id: teammate.id,
       },
     ])
     .select("id, address, org_id");
@@ -178,6 +226,16 @@ test("Leads board v2 foundation is usable at desktop and narrow widths", async (
   );
   await expect(page.getByText("123 Foundation Ave")).toBeVisible();
   await expect(page.getByText("789 Unassigned Lead Rd")).toHaveCount(0);
+  await page
+    .getByRole("combobox", { name: "Choose a teammate" })
+    .selectOption(teammate.id);
+  await expect(page).toHaveURL(
+    new RegExp(`/leads\\?assignee=${teammate.id}$`),
+  );
+  await expect(page.getByText("654 Teammate Queue Blvd")).toBeVisible();
+  await expect(page.getByText("123 Foundation Ave")).toHaveCount(0);
+
+  await page.goto("/leads?assignee=me");
   await page.getByRole("button", { name: "Reset all (1)" }).click();
   await expect(page.getByText("789 Unassigned Lead Rd")).toBeVisible();
   await expect(page).toHaveURL(/\/leads$/);
@@ -186,6 +244,12 @@ test("Leads board v2 foundation is usable at desktop and narrow widths", async (
   await expect(page.getByRole("button", { name: /Unassigned/ })).toBeVisible();
   await expect(page.getByText("789 Unassigned Lead Rd")).toBeVisible();
   await expect(page.getByText("123 Foundation Ave")).toHaveCount(0);
+  await page.getByRole("button", { name: "My leads" }).click();
+  await expect(page).toHaveURL(/\/leads\?assignee=me$/);
+  await expect(page.getByText("123 Foundation Ave")).toBeVisible();
+  await expect(page.getByText("789 Unassigned Lead Rd")).toHaveCount(0);
+
+  await page.goto("/leads?unassigned=true");
   await page.getByRole("button", { name: "Reset all (1)" }).click();
   await expect(page).toHaveURL(/\/leads$/);
   await expect(page.getByText("123 Foundation Ave")).toBeVisible();

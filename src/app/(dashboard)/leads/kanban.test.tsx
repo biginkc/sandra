@@ -246,6 +246,59 @@ describe("Leads Kanban foundation", () => {
     expect(routerPush).toHaveBeenCalledWith("/leads");
   });
 
+  it("routes an inbound unassigned queue to the validated My leads queue", async () => {
+    const user = userEvent.setup();
+    render(
+      <Kanban
+        {...baseProps}
+        initialOwnership="unassigned"
+        hasInboundFilter
+        initialLeads={[
+          makeLead({ assigned_user_id: null }),
+        ]}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "My leads" }));
+    expect(routerPush).toHaveBeenCalledWith("/leads?assignee=me");
+  });
+
+  it("routes an inbound My leads queue to a validated teammate queue", async () => {
+    const user = userEvent.setup();
+    render(
+      <Kanban
+        {...baseProps}
+        initialOwnership="mine"
+        hasInboundFilter
+        initialLeads={[makeLead()]}
+      />,
+    );
+
+    await user.selectOptions(
+      screen.getByRole("combobox", { name: "Choose a teammate" }),
+      "user-other",
+    );
+    expect(routerPush).toHaveBeenCalledWith("/leads?assignee=user-other");
+  });
+
+  it("routes an inbound ownership queue to the active unassigned queue", async () => {
+    const user = userEvent.setup();
+    render(
+      <Kanban
+        {...baseProps}
+        initialOwnership="mine"
+        hasInboundFilter
+        initialLeads={[makeLead()]}
+      />,
+    );
+
+    await user.selectOptions(
+      screen.getByRole("combobox", { name: "Choose a teammate" }),
+      "unassigned",
+    );
+    expect(routerPush).toHaveBeenCalledWith("/leads?unassigned=true");
+  });
+
   it("shows inbound unassigned and attention filters truthfully and resets through the bare board", async () => {
     const user = userEvent.setup();
     const leads = [
