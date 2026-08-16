@@ -98,11 +98,11 @@ async function getLeadDetail(
         `*,
          homeowner:contacts!properties_homeowner_contact_id_fkey(
            *,
-           homeowner_details(*)
+           homeowner_details!homeowner_details_contact_org_fkey(*)
          ),
          agent:contacts!properties_agent_contact_id_fkey(
            *,
-           agent_details(*)
+           agent_details!agent_details_contact_org_fkey(*)
          )`,
       )
       .eq("id", propertyId)
