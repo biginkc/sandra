@@ -7,14 +7,14 @@ const source = readFileSync(
 );
 
 describe("CSV import service-role tenant contract", () => {
-  it("threads org identity into consent lookups and writes", () => {
+  it("records consent through the tenant-scoped idempotent database boundary", () => {
     const consent = source.slice(
       source.indexOf("async function recordConsentStep"),
       source.indexOf("async function selectNonDncPropertyIds"),
     );
     expect(consent).toContain("orgId: string");
-    expect(consent).toContain('.eq("org_id", args.orgId)');
-    expect(consent).toContain("org_id: args.orgId");
+    expect(consent).toMatch(/\.rpc\(\s*"record_csv_import_consents"/);
+    expect(consent).toContain("p_org_id: args.orgId");
     expect(source).toContain(
       "recordConsentStep({ jobId: params.jobId, orgId: params.orgId })",
     );

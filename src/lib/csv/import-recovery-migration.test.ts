@@ -27,6 +27,23 @@ describe("CSV recovery safety migration", () => {
     expect(migration).toContain("insert into public.properties");
     expect(migration).toContain("insert into public.csv_import_row_outcomes");
     expect(migration).toContain("primary key (job_id, source_row_index)");
+    expect(migration).toMatch(
+      /select p\.is_dnc_locked[\s\S]+for no key update[\s\S]+if v_property_is_locked then[\s\S]+v_property_id := p_existing_property_id/i,
+    );
+  });
+
+  it("records CSV consent at most once per job and contact", () => {
+    expect(migration).toContain(
+      "add column if not exists idempotency_key text",
+    );
+    expect(migration).toContain(
+      "create unique index if not exists idx_consent_events_idempotency_key",
+    );
+    expect(migration).toContain(
+      "create or replace function public.record_csv_import_consents",
+    );
+    expect(migration).toContain("from public.csv_import_row_outcomes outcome");
+    expect(migration).toContain("on conflict (idempotency_key) do nothing");
   });
 
   it("derives terminal failure counts in the database", () => {

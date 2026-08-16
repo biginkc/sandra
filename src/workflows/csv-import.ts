@@ -652,9 +652,8 @@ async function triggerCassStep(args: {
  * linked to a succeeded row in this import. Fires only when the operator
  * checked the SMS consent attestation box on the confirm screen.
  *
- * Queries job_items for succeeded property IDs, then joins to properties to
- * get homeowner_contact_id, then bulk-inserts consent_events. Skips contacts
- * that already have an opted_out event (opt-outs are irrevocable).
+ * The database RPC validates immutable job provenance, rechecks compliance,
+ * and inserts each job/contact attestation once across workflow retries.
  */
 async function recordConsentStep(args: {
   jobId: string;
@@ -663,71 +662,9 @@ async function recordConsentStep(args: {
   "use step";
 
   const supabase = createAdminClient();
-
-  const { data: items, error: itemsError } = await supabase
-    .from("job_items")
-    .select("property_id, compliance_locked")
-    .eq("job_id", args.jobId)
-    .in("status", ["success", "skipped"]);
-  if (itemsError)
-    throw new Error(`consent checkpoint read: ${itemsError.message}`);
-
-  const propertyIds = await selectNonDncPropertyIds(
-    supabase,
-    (items ?? [])
-      .filter((i) => !i.compliance_locked)
-      .map((i) => i.property_id)
-      .filter((id): id is string => id !== null),
-    args.orgId,
-  );
-
-  if (propertyIds.length === 0) return;
-
-  const { data: properties, error: propertyError } = await supabase
-    .from("properties")
-    .select("homeowner_contact_id")
-    .in("id", propertyIds)
-    .eq("org_id", args.orgId)
-    .not("homeowner_contact_id", "is", null);
-  if (propertyError)
-    throw new Error(`consent property lookup: ${propertyError.message}`);
-
-  const contactIds = Array.from(
-    new Set(
-      (properties ?? [])
-        .map((p) => p.homeowner_contact_id)
-        .filter((id): id is string => id !== null),
-    ),
-  );
-
-  if (contactIds.length === 0) return;
-
-  // Skip contacts that have already explicitly opted out — opt-outs are
-  // irrevocable and must not be overwritten by a batch attestation.
-  const { data: optedOut, error: optedOutError } = await supabase
-    .from("consent_events")
-    .select("contact_id")
-    .in("contact_id", contactIds)
-    .eq("org_id", args.orgId)
-    .in("event_type", ["opt_out", "provider_auto_opt_out"]);
-  if (optedOutError)
-    throw new Error(`consent opt-out lookup: ${optedOutError.message}`);
-
-  const optedOutIds = new Set((optedOut ?? []).map((r) => r.contact_id));
-  const eligible = contactIds.filter((id) => !optedOutIds.has(id));
-
-  if (eligible.length === 0) return;
-
-  const now = new Date().toISOString();
-  const { error: consentError } = await supabase.from("consent_events").insert(
-    eligible.map((contactId) => ({
-      contact_id: contactId,
-      org_id: args.orgId,
-      channel: "sms",
-      event_type: "opt_in_marketing_written",
-      source: `import_attestation:job:${args.jobId}`,
-      occurred_at: now,
-    })),
+  const { error: consentError } = await supabase.rpc(
+    "record_csv_import_consents",
+    { p_job_id: args.jobId, p_org_id: args.orgId },
   );
   if (consentError)
     throw new Error(`consent recording: ${consentError.message}`);

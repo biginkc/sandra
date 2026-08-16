@@ -319,4 +319,39 @@ describe("csvImportWorkflow — defensive recovery (params.countyId null)", () =
       rpcCalls.some((call) => call.name === "fail_csv_import_workflow"),
     ).toBe(true);
   });
+
+  it("records written consent through the job-scoped idempotent RPC", async () => {
+    csvImportRow = { county_id: "recovered-county-id" };
+    createAdminClient.mockReturnValue(makeSupabase("Address\n"));
+    const consentReviewContractSha256 = createHash("sha256")
+      .update(
+        reviewContractJson({
+          datasetSha256,
+          mapping,
+          source: "dealmachine",
+          countyId: "recovered-county-id",
+          totalRows: 1,
+          dncRows: 0,
+          smsConsent: true,
+          sequenceId: null,
+          classifyLineTypes: false,
+          requestCass: false,
+          requestSkipTrace: false,
+        }),
+      )
+      .digest("hex");
+
+    await csvImportWorkflow({
+      ...baseParams,
+      countyId: null,
+      smsConsent: true,
+      reviewContractSha256: consentReviewContractSha256,
+    });
+
+    expect(rpcCalls).toContainEqual({
+      name: "record_csv_import_consents",
+      args: { p_job_id: baseParams.jobId, p_org_id: baseParams.orgId },
+    });
+    expect(calls.filter((call) => call.table === "consent_events")).toHaveLength(0);
+  });
 });

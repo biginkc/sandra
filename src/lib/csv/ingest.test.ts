@@ -1001,6 +1001,43 @@ describe("processIngestChunk → DealMachine DNC ratchet (Codex PR #310 findings
 });
 
 describe("processIngestChunk durable resume", () => {
+  it("persists a skipped checkpoint for every processed blank row", async () => {
+    responseQueue = [
+      { data: null, error: null }, // blank-row checkpoint
+      { data: null, error: null }, // progress checkpoint
+    ];
+
+    const result = await processIngestChunk(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      makeSupabase() as any,
+      {
+        jobId: "job-blank",
+        orgId: "org-1",
+        csvImportId: "import-blank",
+        source: "dealmachine",
+        market: "Buchanan County MO",
+        countyId: "county-1",
+        mapping: { address: "Address", state: "State" },
+        rows: [{ Address: "", State: "" }],
+        offset: 7,
+        autoTagIds: [],
+        resumeSafe: true,
+      },
+    );
+
+    expect(result).toMatchObject({ succeeded: 0, failed: 0, skipped: 1 });
+    const checkpoint = calls.find(
+      (call) => call.table === "job_items" && call.op === "upsert",
+    );
+    expect(checkpoint?.insertPayload).toMatchObject({
+      job_id: "job-blank",
+      source_row_index: 7,
+      status: "skipped",
+      error_class: "validation",
+      error_message: "Blank row",
+    });
+  });
+
   it("skips a checkpointed success and retries only the failed source row", async () => {
     responseQueue = [
       { data: [

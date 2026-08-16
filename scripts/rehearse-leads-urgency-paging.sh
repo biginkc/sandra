@@ -221,7 +221,10 @@ psql -v ON_ERROR_STOP=1 -h "$LEADS_SOCKET" -p "$LEADS_PORT" -U postgres -d sandr
 insert into memberships (user_id,org_id,access_status,access_expires_at) values
  ('11111111-1111-4111-8111-111111111112','aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa','active',null),
  ('11111111-1111-4111-8111-111111111113','aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa','suspended',null),
- ('11111111-1111-4111-8111-111111111114','aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa','active',now()-interval '1 minute');
+ ('11111111-1111-4111-8111-111111111114','aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa','active',now()-interval '1 minute'),
+ ('11111111-1111-4111-8111-111111111115','aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa','active',null),
+ ('11111111-1111-4111-8111-111111111116','aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa','active',null),
+ ('11111111-1111-4111-8111-111111111116','bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb','active',null);
 update properties set assigned_user_id='11111111-1111-4111-8111-111111111112'
 where id='aaaaaaaa-1000-4000-8000-000000000002';
 do $$ begin
@@ -243,6 +246,15 @@ do $$ begin
     update properties set assigned_user_id='22222222-2222-4222-8222-222222222222'
     where id='aaaaaaaa-1000-4000-8000-000000000002';
     raise exception 'other-org assignee unexpectedly accepted';
+  exception when check_violation then
+    if sqlerrm not like 'INVALID_ASSIGNEE:%' then raise; end if;
+  end;
+  update properties set assigned_user_id='11111111-1111-4111-8111-111111111115'
+  where id='aaaaaaaa-1000-4000-8000-000000000002';
+  begin
+    update properties set org_id='bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
+    where id='aaaaaaaa-1000-4000-8000-000000000002';
+    raise exception 'org transfer unexpectedly preserved an invalid assignee';
   exception when check_violation then
     if sqlerrm not like 'INVALID_ASSIGNEE:%' then raise; end if;
   end;

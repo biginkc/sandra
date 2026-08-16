@@ -630,6 +630,7 @@ export type Database = {
           created_at: string
           event_type: string
           id: string
+          idempotency_key: string | null
           occurred_at: string
           org_id: string
           source: string | null
@@ -641,6 +642,7 @@ export type Database = {
           created_at?: string
           event_type: string
           id?: string
+          idempotency_key?: string | null
           occurred_at?: string
           org_id?: string
           source?: string | null
@@ -652,6 +654,7 @@ export type Database = {
           created_at?: string
           event_type?: string
           id?: string
+          idempotency_key?: string | null
           occurred_at?: string
           org_id?: string
           source?: string | null
@@ -3628,6 +3631,10 @@ export type Database = {
           p_org_id: string
         }
         Returns: Json
+      }
+      record_csv_import_consents: {
+        Args: { p_job_id: string; p_org_id: string }
+        Returns: number
       }
       get_leads_board_page: {
         Args: {

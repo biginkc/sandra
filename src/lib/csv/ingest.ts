@@ -257,8 +257,26 @@ export async function processIngestChunk(
     }
     const validated = validateRow(row, params.mapping, absoluteIndex);
 
-    // Empty row — skip silently
+    // Empty rows are still processed rows. Persist a durable skipped
+    // checkpoint so failure recovery can conserve processed + unprocessed =
+    // total instead of silently classifying an untouched tail as skipped.
     if (Object.keys(validated.normalized).length === 0) {
+      const { error: blankCheckpointError } = await supabase
+        .from("job_items")
+        .upsert(
+          {
+            job_id: params.jobId,
+            status: "skipped",
+            source_row_index: absoluteIndex,
+            error_message: "Blank row",
+            error_class: "validation",
+            input_payload: rowToJson(row),
+          },
+          { onConflict: "job_id,source_row_index" },
+        );
+      if (blankCheckpointError) {
+        throw new Error(`blank-row checkpoint: ${blankCheckpointError.message}`);
+      }
       skipped++;
       continue;
     }

@@ -77,6 +77,99 @@ revoke insert, update, delete on public.csv_import_job_provenance from anon, aut
 grant select on public.csv_import_job_provenance to authenticated;
 grant all on public.csv_import_job_provenance to service_role;
 
+-- One immutable key per import job/contact makes the written-consent audit
+-- append exactly once even when a workflow exhausts after the consent step
+-- and an operator explicitly retries the same job.
+alter table public.consent_events
+  add column if not exists idempotency_key text;
+create unique index if not exists idx_consent_events_idempotency_key
+  on public.consent_events (idempotency_key);
+
+create or replace function public.record_csv_import_consents(
+  p_job_id uuid,
+  p_org_id uuid
+)
+returns integer
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+  v_inserted integer := 0;
+begin
+  if not exists (
+    select 1
+    from public.jobs j
+    join public.csv_import_job_provenance provenance
+      on provenance.job_id = j.id
+      and provenance.org_id = j.org_id
+      and provenance.csv_import_id = j.related_import_id
+    where j.id = p_job_id
+      and j.org_id = p_org_id
+      and j.type = 'csv_import'
+      and provenance.sms_consent
+  ) then
+    raise exception 'CSV consent job identity mismatch';
+  end if;
+
+  with eligible as materialized (
+    select distinct c.id as contact_id
+    from public.csv_import_row_outcomes outcome
+    join public.properties p
+      on p.id = outcome.property_id and p.org_id = outcome.org_id
+    join public.contacts c
+      on c.id = p.homeowner_contact_id and c.org_id = p.org_id
+    where outcome.job_id = p_job_id
+      and outcome.org_id = p_org_id
+      and not p.is_dnc_locked
+      and (
+        p.outreach_dispo is null
+        or p.outreach_dispo not in ('wrong_number', 'bad_number', 'dnc', 'opted_out')
+      )
+      and not c.do_not_contact
+      and not c.sms_opted_out
+      and not exists (
+        select 1
+        from public.consent_events prior
+        where prior.contact_id = c.id
+          and prior.org_id = p_org_id
+          and prior.event_type in ('opt_out', 'provider_auto_opt_out')
+      )
+      and not exists (
+        select 1
+        from public.sms_phone_suppressions suppression
+        where suppression.org_id = p_org_id
+          and suppression.channel = 'sms'
+          and suppression.phone_e164 in (c.phone_1, c.phone_2, c.phone_3)
+      )
+  ), inserted as (
+    insert into public.consent_events (
+      contact_id, org_id, channel, event_type, source, idempotency_key,
+      occurred_at
+    )
+    select
+      eligible.contact_id,
+      p_org_id,
+      'sms',
+      'opt_in_marketing_written',
+      'import_attestation:job:' || p_job_id::text,
+      'csv-import:' || p_job_id::text || ':contact:' || eligible.contact_id::text,
+      now()
+    from eligible
+    on conflict (idempotency_key) do nothing
+    returning 1
+  )
+  select count(*)::integer into v_inserted from inserted;
+
+  return v_inserted;
+end;
+$$;
+
+revoke all on function public.record_csv_import_consents(uuid, uuid)
+  from public, anon, authenticated;
+grant execute on function public.record_csv_import_consents(uuid, uuid)
+  to service_role;
+
 create table if not exists public.csv_import_row_outcomes (
   job_id uuid not null,
   source_row_index integer not null,
@@ -248,6 +341,7 @@ declare
   v_existing public.csv_import_row_outcomes%rowtype;
   v_property_id uuid;
   v_outcome text;
+  v_property_is_locked boolean;
 begin
   if p_source_row_index < 0 then
     raise exception 'CSV source row index must be non-negative';
@@ -318,28 +412,44 @@ begin
     ) returning id into v_property_id;
     v_outcome := 'inserted';
   else
-    update public.properties p
-    set source_import_id = p_csv_import_id,
-        source_imported_at = coalesce(
-          nullif(p_existing_patch->>'source_imported_at', '')::timestamptz,
-          now()
-        ),
-        homeowner_contact_id = coalesce(
-          p.homeowner_contact_id,
-          nullif(p_existing_patch->>'homeowner_contact_id', '')::uuid
-        ),
-        agent_contact_id = coalesce(
-          p.agent_contact_id,
-          nullif(p_existing_patch->>'agent_contact_id', '')::uuid
-        ),
-        outreach_dispo = case
-          when p_existing_patch->>'outreach_dispo' = 'dnc' then 'dnc'
-          else p.outreach_dispo
-        end
+    select p.is_dnc_locked into v_property_is_locked
+    from public.properties p
     where p.id = p_existing_property_id and p.org_id = p_org_id
-    returning p.id into v_property_id;
-    if v_property_id is null then
+    for no key update;
+    if not found then
       raise exception 'Existing CSV property does not belong to the import organization';
+    end if;
+
+    if v_property_is_locked then
+      -- Contact-DNC propagation may have locked this exact duplicate before
+      -- the checkpoint RPC began. The compliance result is already durable;
+      -- do not mutate the immutable property, but do preserve the truthful
+      -- duplicate outcome so retry is a replay instead of a permanent error.
+      v_property_id := p_existing_property_id;
+    else
+      update public.properties p
+      set source_import_id = p_csv_import_id,
+          source_imported_at = coalesce(
+            nullif(p_existing_patch->>'source_imported_at', '')::timestamptz,
+            now()
+          ),
+          homeowner_contact_id = coalesce(
+            p.homeowner_contact_id,
+            nullif(p_existing_patch->>'homeowner_contact_id', '')::uuid
+          ),
+          agent_contact_id = coalesce(
+            p.agent_contact_id,
+            nullif(p_existing_patch->>'agent_contact_id', '')::uuid
+          ),
+          outreach_dispo = case
+            when p_existing_patch->>'outreach_dispo' = 'dnc' then 'dnc'
+            else p.outreach_dispo
+          end
+      where p.id = p_existing_property_id and p.org_id = p_org_id
+      returning p.id into v_property_id;
+      if v_property_id is null then
+        raise exception 'Existing CSV property changed before its outcome checkpoint';
+      end if;
     end if;
     v_outcome := 'duplicate';
   end if;
