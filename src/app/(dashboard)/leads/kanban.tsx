@@ -12,7 +12,7 @@ import {
   type DragEndEvent,
   type DragStartEvent,
 } from "@dnd-kit/core";
-import { ChevronDownIcon, ChevronRightIcon, SearchIcon, XIcon } from "lucide-react";
+import { CalendarClockIcon, ChevronDownIcon, ChevronRightIcon, SearchIcon, XIcon } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 
@@ -38,30 +38,31 @@ import type {
   InboundAttentionFilter,
   InboundOwnershipFilter,
 } from "./inbound-filters";
+import {
+  loadLeadBoardAction,
+  setLeadNextActionAction,
+} from "./board-actions";
+import type {
+  CustomTag,
+  LeadBoardCursor,
+  LeadBoardData,
+  LeadBoardFilters,
+  LeadBoardLead,
+  ListMembership,
+} from "./board-query";
+import {
+  compareLeadUrgency,
+  formatNextAction,
+  matchesUrgencyFilter,
+  type UrgencyFilter,
+} from "./urgency";
 
 type ContactSummary = Pick<
   Database["public"]["Tables"]["contacts"]["Row"],
   "first_name" | "last_name" | "entity_name"
 >;
 
-export type Lead = Pick<
-  Database["public"]["Tables"]["properties"]["Row"],
-  | "id"
-  | "address"
-  | "city"
-  | "state"
-  | "zip"
-  | "market"
-  | "status"
-  | "is_vacant"
-  | "cass_status"
-  | "absentee_flag"
-  | "assigned_user_id"
-  | "motivation_level"
-  | "outreach_dispo"
-> & {
-  homeowner: ContactSummary | null;
-};
+export type Lead = LeadBoardLead;
 
 export type LastMessage = {
   direction: "inbound" | "outbound";
@@ -97,20 +98,16 @@ const MOTIVATION_LABEL: Record<MotivationLevel, string> = {
   cold: "Cold",
 };
 
-type ListMembership = {
-  listId: string;
-  name: string;
-  color: string | null;
-};
-
-type CustomTag = {
-  tagId: string;
-  name: string;
-  color: string | null;
-};
-
 type KanbanProps = {
   initialLeads: Lead[];
+  initialTotals: Record<PropertyStatus, number>;
+  initialBaselineTotals: Record<PropertyStatus, number>;
+  initialUrgencyCounts: Record<UrgencyFilter, number>;
+  initialNextCursors: Partial<Record<PropertyStatus, LeadBoardCursor>>;
+  initialHasMore: Partial<Record<PropertyStatus, boolean>>;
+  initialFilters: LeadBoardFilters;
+  dayStart: string;
+  dayEnd: string;
   unreadPropertyIds: string[];
   assigneeEmails: Record<string, string>;
   teamMembers: TeamMember[];
@@ -118,15 +115,23 @@ type KanbanProps = {
   listMemberships: Record<string, ListMembership[]>;
   customTags: Record<string, CustomTag[]>;
   lastMessageByPropertyId: Record<string, LastMessage>;
-  attentionLeadIds: { stale: string[]; sequenceEnded: string[] };
   initialOwnership?: OwnershipFilter;
   initialAttentionFilter?: AttentionFilter;
   hasInboundFilter?: boolean;
+  inboundScopeLabel?: string | null;
   renderedAt: string;
 };
 
 export function Kanban({
   initialLeads,
+  initialTotals,
+  initialBaselineTotals,
+  initialUrgencyCounts,
+  initialNextCursors,
+  initialHasMore,
+  initialFilters,
+  dayStart,
+  dayEnd,
   unreadPropertyIds,
   assigneeEmails,
   teamMembers,
@@ -134,21 +139,31 @@ export function Kanban({
   listMemberships,
   customTags,
   lastMessageByPropertyId,
-  attentionLeadIds,
   initialOwnership = "all",
   initialAttentionFilter = null,
   hasInboundFilter = false,
+  inboundScopeLabel = null,
   renderedAt,
 }: KanbanProps) {
   const router = useRouter();
   const [leads, setLeads] = useState<Lead[]>(initialLeads);
+  const [totals, setTotals] = useState(initialTotals);
+  const [baselineTotals, setBaselineTotals] = useState(initialBaselineTotals);
+  const [urgencyCounts, setUrgencyCounts] = useState(initialUrgencyCounts);
+  const [nextCursors, setNextCursors] = useState(initialNextCursors);
+  const [hasMore, setHasMore] = useState(initialHasMore);
+  const [unreadIds, setUnreadIds] = useState(unreadPropertyIds);
+  const [listsByLead, setListsByLead] = useState(listMemberships);
+  const [tagsByLead, setTagsByLead] = useState(customTags);
+  const [messagesByLead, setMessagesByLead] = useState(lastMessageByPropertyId);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [collapsed, setCollapsed] = useState<Set<PropertyStatus>>(
     () => new Set(DEFAULT_COLLAPSED_STATUSES),
   );
-  const [search, setSearch] = useState("");
+  const [search, setSearch] = useState(initialFilters.search);
   const [ownership, setOwnership] = useState<OwnershipFilter>(initialOwnership);
-  const [motivation, setMotivation] = useState<MotivationFilter>("all");
+  const [motivation, setMotivation] = useState<MotivationFilter>(initialFilters.motivation);
+  const [urgency, setUrgency] = useState<UrgencyFilter>(initialFilters.urgency);
   const [attention, setAttention] = useState<AttentionFilter>(
     initialAttentionFilter,
   );
@@ -156,8 +171,12 @@ export function Kanban({
     {},
   );
   const [retryingIds, setRetryingIds] = useState<Set<string>>(new Set());
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [loadingMore, setLoadingMore] = useState<Set<PropertyStatus>>(new Set());
   const inFlightMoveIds = useRef(new Set<string>());
   const renderedAtMs = new Date(renderedAt).getTime();
+  const initialRender = useRef(true);
 
   useEffect(() => {
     try {
@@ -187,8 +206,8 @@ export function Kanban({
   );
 
   const unreadSet = useMemo(
-    () => new Set(unreadPropertyIds),
-    [unreadPropertyIds],
+    () => new Set(unreadIds),
+    [unreadIds],
   );
 
   const ownershipFiltered = useMemo(() => {
@@ -213,47 +232,20 @@ export function Kanban({
     });
   }, [motivation, ownershipFiltered]);
 
-  const attentionFiltered = useMemo(() => {
-    if (!attention) return motivationFiltered;
-    const ids = new Set(
-      attention === "stale"
-        ? attentionLeadIds.stale
-        : attentionLeadIds.sequenceEnded,
-    );
-    return motivationFiltered.filter((lead) => ids.has(lead.id));
-  }, [attention, attentionLeadIds, motivationFiltered]);
-
   const filteredLeads = useMemo(
-    () => filterLeads(attentionFiltered, search),
-    [attentionFiltered, search],
+    () => filterLeads(motivationFiltered, search).filter((lead) =>
+      matchesUrgencyFilter(lead, urgency, dayStart, dayEnd),
+    ),
+    [dayEnd, dayStart, motivationFiltered, search, urgency],
   );
 
   const activeFilterCount =
     Number(search.trim().length > 0) +
     Number(ownership !== "all") +
     Number(motivation !== "all") +
-    Number(attention !== null);
-
-  const totalByStatus = useMemo(() => {
-    const totals: Record<PropertyStatus, number> = {
-      prospect: 0,
-      new_lead: 0,
-      contacted: 0,
-      interested: 0,
-      offer_sent: 0,
-      offer_declined: 0,
-      under_contract: 0,
-      closed: 0,
-      dead: 0,
-    };
-    for (const lead of leads) {
-      const key = STATUS_ORDER.includes(lead.status as PropertyStatus)
-        ? (lead.status as PropertyStatus)
-        : "new_lead";
-      totals[key] += 1;
-    }
-    return totals;
-  }, [leads]);
+    Number(attention !== null) +
+    Number(urgency !== "all") +
+    Number(Boolean(inboundScopeLabel));
 
   const leadsByStatus = useMemo(() => {
     const grouped: Record<PropertyStatus, Lead[]> = {
@@ -273,12 +265,147 @@ export function Kanban({
         : "new_lead";
       grouped[key].push(lead);
     }
+    for (const status of STATUS_ORDER) {
+      grouped[status].sort((a, b) => compareLeadUrgency(a, b, dayStart, dayEnd));
+    }
     return grouped;
-  }, [filteredLeads]);
+  }, [dayEnd, dayStart, filteredLeads]);
 
   const activeLead = activeId
     ? leads.find((lead) => lead.id === activeId) ?? null
     : null;
+
+  const boardFilters = useMemo<LeadBoardFilters>(() => ({
+    ...initialFilters,
+    search,
+    ownership,
+    motivation,
+    urgency,
+    attention,
+  }), [attention, initialFilters, motivation, ownership, search, urgency]);
+  const boardFilterKey = JSON.stringify(boardFilters);
+  const boardFilterKeyRef = useRef(boardFilterKey);
+  const boardFiltersRef = useRef(boardFilters);
+  const cursorFilterKeyRef = useRef(boardFilterKey);
+  const [cursorFilterKey, setCursorFilterKey] = useState(boardFilterKey);
+  const requestSequence = useRef(0);
+
+  useEffect(() => {
+    boardFiltersRef.current = boardFilters;
+    if (boardFilterKeyRef.current !== boardFilterKey) {
+      boardFilterKeyRef.current = boardFilterKey;
+      requestSequence.current += 1;
+    }
+  }, [boardFilterKey, boardFilters]);
+
+  const applyReplacement = (data: LeadBoardData, sourceFilterKey: string) => {
+    cursorFilterKeyRef.current = sourceFilterKey;
+    setCursorFilterKey(sourceFilterKey);
+    setLeads(data.leads as Lead[]);
+    setTotals(data.totals);
+    if (data.baselineTotals) setBaselineTotals(data.baselineTotals);
+    if (data.urgencyCounts) setUrgencyCounts(data.urgencyCounts);
+    setNextCursors(data.nextCursors);
+    setHasMore(data.hasMore);
+    setUnreadIds(data.unreadPropertyIds);
+    setListsByLead(data.listMemberships);
+    setTagsByLead(data.customTags);
+    setMessagesByLead(data.lastMessageByPropertyId);
+  };
+
+  const refreshBoard = async () => {
+    const filters = boardFiltersRef.current;
+    const filterKey = boardFilterKeyRef.current;
+    const request = ++requestSequence.current;
+    setIsRefreshing(true);
+    setLoadError(null);
+    let result: Awaited<ReturnType<typeof loadLeadBoardAction>>;
+    try {
+      result = await loadLeadBoardAction({ filters });
+    } catch {
+      if (request !== requestSequence.current || filterKey !== boardFilterKeyRef.current) return;
+      setIsRefreshing(false);
+      setLoadError("We couldn't refresh your leads.");
+      return;
+    }
+    if (request !== requestSequence.current || filterKey !== boardFilterKeyRef.current) return;
+    setIsRefreshing(false);
+    if (!result.ok) {
+      setLoadError(result.error.message || "We couldn't refresh your leads.");
+      return;
+    }
+    applyReplacement(result.data, filterKey);
+  };
+
+  useEffect(() => {
+    if (initialRender.current) {
+      initialRender.current = false;
+      return;
+    }
+    const timeout = window.setTimeout(() => void refreshBoard(), search ? 250 : 0);
+    return () => window.clearTimeout(timeout);
+    // Each control intentionally re-queries the full server-backed queue. The
+    // memoized object itself would retrigger on every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [attention, motivation, ownership, search, urgency]);
+
+  const loadMoreInStatus = async (status: PropertyStatus) => {
+    if (cursorFilterKeyRef.current !== boardFilterKeyRef.current) return;
+    const cursor = nextCursors[status];
+    if (!cursor || loadingMore.has(status)) return;
+    const filterKey = boardFilterKeyRef.current;
+    const generation = requestSequence.current;
+    setLoadingMore((previous) => new Set(previous).add(status));
+    let result: Awaited<ReturnType<typeof loadLeadBoardAction>>;
+    try {
+      result = await loadLeadBoardAction({ filters: boardFiltersRef.current, status, cursor });
+    } catch {
+      setLoadingMore((previous) => {
+        const next = new Set(previous);
+        next.delete(status);
+        return next;
+      });
+      if (filterKey === boardFilterKeyRef.current && generation === requestSequence.current) {
+        setLoadError(`We couldn't load more ${STATUS_LABEL[status]} leads.`);
+      }
+      return;
+    }
+    setLoadingMore((previous) => {
+      const next = new Set(previous);
+      next.delete(status);
+      return next;
+    });
+    if (
+      filterKey !== boardFilterKeyRef.current ||
+      generation !== requestSequence.current
+    ) {
+      return;
+    }
+    if (!result.ok) {
+      setLoadError(result.error.message || `We couldn't load more ${STATUS_LABEL[status]} leads.`);
+      return;
+    }
+    const data = result.data;
+    setLeads((previous) => {
+      const known = new Set(previous.map((lead) => lead.id));
+      return [...previous, ...(data.leads as Lead[]).filter((lead) => !known.has(lead.id))];
+    });
+    setNextCursors((previous) => ({ ...previous, [status]: data.nextCursors[status] }));
+    setHasMore((previous) => ({ ...previous, [status]: data.hasMore[status] }));
+    setUnreadIds((previous) => Array.from(new Set([...previous, ...data.unreadPropertyIds])));
+    setListsByLead((previous) => ({ ...previous, ...data.listMemberships }));
+    setTagsByLead((previous) => ({ ...previous, ...data.customTags }));
+    setMessagesByLead((previous) => ({ ...previous, ...data.lastMessageByPropertyId }));
+    const existingIds = new Set(leads.map((lead) => lead.id));
+    const newlyLoaded = (data.leads as Lead[]).filter((lead) => !existingIds.has(lead.id));
+    const loadedInStatus = leads.filter((lead) => lead.status === status).length + newlyLoaded.length;
+    if (
+      !data.hasMore[status] &&
+      (data.totals[status] !== totals[status] || loadedInStatus !== totals[status])
+    ) {
+      void refreshBoard();
+    }
+  };
 
   const resetFilters = () => {
     if (hasInboundFilter) {
@@ -292,6 +419,7 @@ export function Kanban({
     setOwnership("all");
     setMotivation("all");
     setAttention(null);
+    setUrgency("all");
   };
 
   const changeOwnership = (next: OwnershipFilter) => {
@@ -365,7 +493,25 @@ export function Kanban({
         delete next[lead.id];
         return next;
       });
+      void refreshBoard();
     } else {
+      if (result.error.code === "DNC_LOCKED") {
+        setLeads((previous) => previous.filter((item) => item.id !== lead.id));
+        setMoveFailures((previous) => {
+          const next = { ...previous };
+          delete next[lead.id];
+          return next;
+        });
+        void refreshBoard();
+        router.refresh();
+        setRetryingIds((previous) => {
+          const next = new Set(previous);
+          next.delete(lead.id);
+          return next;
+        });
+        inFlightMoveIds.current.delete(lead.id);
+        return;
+      }
       const reportedCurrentStatus = result.error.details?.currentStatus;
       const reconciledStatus =
         typeof reportedCurrentStatus === "string" &&
@@ -571,22 +717,58 @@ export function Kanban({
 
         {activeFilterCount > 0 ? (
           <span className="text-muted-foreground text-xs" aria-live="polite">
-            {filteredLeads.length} of {leads.length} leads
+            {filteredLeads.length} loaded · {Object.values(totals).reduce((sum, count) => sum + count, 0)} total
           </span>
         ) : null}
+        {isRefreshing ? <span className="text-muted-foreground text-xs" role="status">Refreshing…</span> : null}
       </div>
 
-      {filteredLeads.length === 0 && activeFilterCount > 0 ? (
+      <div className="border-border bg-card flex flex-wrap items-center gap-2 rounded-2xl border px-3 py-2" aria-label="Lead urgency">
+        <span className="text-muted-foreground mr-1 text-[10px] font-bold tracking-widest uppercase">Today&apos;s order</span>
+        {([
+          ["all", "All"],
+          ["overdue", "Overdue"],
+          ["today", "Due today"],
+          ["scheduled", "Scheduled later"],
+          ["none", "No next action"],
+        ] as const).map(([value, label]) => (
+          <button
+            key={value}
+            type="button"
+            aria-pressed={urgency === value}
+            onClick={() => setUrgency(value)}
+            className={`rounded-full border px-3 py-1.5 text-xs font-bold ${
+              urgency === value
+                ? "border-primary bg-primary text-primary-foreground"
+                : "border-border bg-background text-foreground hover:bg-muted"
+            }`}
+          >
+            {label} {urgencyCounts[value]}
+          </button>
+        ))}
+      </div>
+
+      {loadError ? (
+        <div className="border-destructive/30 bg-destructive/5 text-destructive flex items-center justify-between gap-3 rounded-xl border px-4 py-3 text-sm" role="alert">
+          <span>{loadError} Your previous cards are still shown.</span>
+          <Button variant="outline" size="sm" onClick={() => void refreshBoard()}>Try again</Button>
+        </div>
+      ) : null}
+
+      {!isRefreshing && filteredLeads.length === 0 && activeFilterCount > 0 ? (
         <FilteredEmptyState
           search={search}
           ownership={ownership}
           ownershipLabel={selectedOwnerLabel}
           motivation={motivation}
           attention={attention}
+          urgency={urgency}
+          inboundScopeLabel={inboundScopeLabel}
           onClearSearch={() => setSearch("")}
           onClearOwnership={() => changeOwnership("all")}
           onClearMotivation={() => setMotivation("all")}
           onClearAttention={() => setAttention(null)}
+          onClearUrgency={() => setUrgency("all")}
           onReset={resetFilters}
         />
       ) : (
@@ -605,8 +787,8 @@ export function Kanban({
                 key={status}
                 status={status}
                 leads={leadsByStatus[status]}
-                totalInStatus={totalByStatus[status]}
-                filtersActive={activeFilterCount > 0}
+                totalInStatus={totals[status]}
+                baselineTotalInStatus={baselineTotals[status]}
                 isActiveDropTarget={activeId != null}
                 isCollapsed={collapsed.has(status)}
                 onToggleCollapsed={() => toggleCollapsed(status)}
@@ -614,13 +796,32 @@ export function Kanban({
                 unreadSet={unreadSet}
                 assigneeEmails={assigneeEmails}
                 currentUserId={currentUserId}
-                listMemberships={listMemberships}
-                customTags={customTags}
-                lastMessageByPropertyId={lastMessageByPropertyId}
+                listMemberships={listsByLead}
+                customTags={tagsByLead}
+                lastMessageByPropertyId={messagesByLead}
                 renderedAtMs={renderedAtMs}
+                dayStart={dayStart}
+                dayEnd={dayEnd}
                 moveFailures={moveFailures}
                 retryingIds={retryingIds}
                 onRetryMove={(lead) => void retryMove(lead)}
+                hasMore={cursorFilterKey === boardFilterKey && Boolean(hasMore[status])}
+                loadingMore={loadingMore.has(status)}
+                onLoadMore={() => void loadMoreInStatus(status)}
+                onNextActionSaved={(leadId, task) => {
+                  setLeads((previous) => previous.map((lead) => lead.id === leadId ? {
+                    ...lead,
+                    next_task_id: task.id,
+                    next_task_title: task.title,
+                    next_task_due_at: task.dueAt,
+                  } : lead));
+                  void refreshBoard();
+                }}
+                onLeadPermanentlyLocked={(leadId) => {
+                  setLeads((previous) => previous.filter((lead) => lead.id !== leadId));
+                  void refreshBoard();
+                  router.refresh();
+                }}
               />
             ))}
           </div>
@@ -632,10 +833,12 @@ export function Kanban({
                 hasUnread={unreadSet.has(activeLead.id)}
                 assigneeEmails={assigneeEmails}
                 currentUserId={currentUserId}
-                lists={listMemberships[activeLead.id] ?? []}
-                customTags={customTags[activeLead.id] ?? []}
-                lastMessage={lastMessageByPropertyId[activeLead.id] ?? null}
+                lists={listsByLead[activeLead.id] ?? []}
+                customTags={tagsByLead[activeLead.id] ?? []}
+                lastMessage={messagesByLead[activeLead.id] ?? null}
                 renderedAtMs={renderedAtMs}
+                dayStart={dayStart}
+                dayEnd={dayEnd}
               />
             ) : null}
           </DragOverlay>
@@ -658,10 +861,13 @@ function FilteredEmptyState({
   ownershipLabel,
   motivation,
   attention,
+  urgency,
+  inboundScopeLabel,
   onClearSearch,
   onClearOwnership,
   onClearMotivation,
   onClearAttention,
+  onClearUrgency,
   onReset,
 }: {
   search: string;
@@ -669,10 +875,13 @@ function FilteredEmptyState({
   ownershipLabel: string;
   motivation: MotivationFilter;
   attention: AttentionFilter;
+  urgency: UrgencyFilter;
+  inboundScopeLabel: string | null;
   onClearSearch: () => void;
   onClearOwnership: () => void;
   onClearMotivation: () => void;
   onClearAttention: () => void;
+  onClearUrgency: () => void;
   onReset: () => void;
 }) {
   return (
@@ -703,6 +912,23 @@ function FilteredEmptyState({
             <XIcon data-icon="inline-end" />
           </Button>
         ) : null}
+        {urgency !== "all" ? (
+          <Button variant="outline" size="sm" onClick={onClearUrgency}>
+            {urgency === "overdue"
+              ? "Overdue"
+              : urgency === "today"
+                ? "Due today"
+                : urgency === "scheduled"
+                  ? "Scheduled later"
+                  : "No next action"}{" "}
+            <XIcon data-icon="inline-end" />
+          </Button>
+        ) : null}
+        {inboundScopeLabel ? (
+          <Button variant="outline" size="sm" onClick={onReset}>
+            {inboundScopeLabel} <XIcon data-icon="inline-end" />
+          </Button>
+        ) : null}
       </div>
       <Button className="mt-5" onClick={onReset}>
         Reset all
@@ -715,7 +941,7 @@ function Column({
   status,
   leads,
   totalInStatus,
-  filtersActive,
+  baselineTotalInStatus,
   isActiveDropTarget,
   isCollapsed,
   onToggleCollapsed,
@@ -727,14 +953,21 @@ function Column({
   customTags,
   lastMessageByPropertyId,
   renderedAtMs,
+  dayStart,
+  dayEnd,
   moveFailures,
   retryingIds,
   onRetryMove,
+  hasMore,
+  loadingMore,
+  onLoadMore,
+  onNextActionSaved,
+  onLeadPermanentlyLocked,
 }: {
   status: PropertyStatus;
   leads: Lead[];
   totalInStatus: number;
-  filtersActive: boolean;
+  baselineTotalInStatus: number;
   isActiveDropTarget: boolean;
   isCollapsed: boolean;
   onToggleCollapsed: () => void;
@@ -746,16 +979,27 @@ function Column({
   customTags: Record<string, CustomTag[]>;
   lastMessageByPropertyId: Record<string, LastMessage>;
   renderedAtMs: number;
+  dayStart: string;
+  dayEnd: string;
   moveFailures: Record<string, MoveFailure>;
   retryingIds: Set<string>;
   onRetryMove: (lead: Lead) => void;
+  hasMore: boolean;
+  loadingMore: boolean;
+  onLoadMore: () => void;
+  onNextActionSaved: (leadId: string, task: { id: string; title: string; dueAt: string }) => void;
+  onLeadPermanentlyLocked: (leadId: string) => void;
 }) {
   const { isOver, setNodeRef } = useDroppable({ id: status });
   const hover = isOver && isActiveDropTarget;
-  const countLabel =
-    filtersActive && totalInStatus !== leads.length
-      ? `${leads.length}/${totalInStatus}`
-      : `${leads.length}`;
+  const countLabel = leads.length < totalInStatus
+    ? `${leads.length}/${totalInStatus}`
+    : totalInStatus !== baselineTotalInStatus
+      ? `${totalInStatus}/${baselineTotalInStatus}`
+      : `${totalInStatus}`;
+  const countDescription = leads.length < totalInStatus
+    ? `${leads.length} loaded, ${totalInStatus} matching, ${baselineTotalInStatus} total`
+    : `${totalInStatus} matching, ${baselineTotalInStatus} total`;
 
   if (isCollapsed) {
     return (
@@ -784,7 +1028,7 @@ function Column({
         >
           {STATUS_LABEL[status]}
         </div>
-        <Badge variant="secondary" className="mt-3 font-mono">
+        <Badge variant="secondary" className="mt-3 font-mono" aria-label={countDescription} title={countDescription}>
           {countLabel}
         </Badge>
       </div>
@@ -800,7 +1044,7 @@ function Column({
       <div className="flex items-center justify-between gap-2 px-3 py-2">
         <div className="text-sm font-semibold">{STATUS_LABEL[status]}</div>
         <div className="flex items-center gap-1.5">
-          <Badge variant="secondary" className="font-mono">
+          <Badge variant="secondary" className="font-mono" aria-label={countDescription} title={countDescription}>
             {countLabel}
           </Badge>
           <Button
@@ -836,12 +1080,21 @@ function Column({
               customTags={customTags[lead.id] ?? []}
               lastMessage={lastMessageByPropertyId[lead.id] ?? null}
               renderedAtMs={renderedAtMs}
+              dayStart={dayStart}
+              dayEnd={dayEnd}
               moveFailure={moveFailures[lead.id] ?? null}
               isRetrying={retryingIds.has(lead.id)}
               onRetry={() => onRetryMove(lead)}
+              onNextActionSaved={(task) => onNextActionSaved(lead.id, task)}
+              onPermanentlyLocked={() => onLeadPermanentlyLocked(lead.id)}
             />
           ))
         )}
+        {hasMore ? (
+          <Button variant="outline" size="sm" disabled={loadingMore} onClick={onLoadMore}>
+            {loadingMore ? "Loading…" : `Load more ${STATUS_LABEL[status]}`}
+          </Button>
+        ) : null}
       </div>
     </div>
   );
@@ -858,9 +1111,13 @@ function LeadCard({
   customTags = [],
   lastMessage = null,
   renderedAtMs,
+  dayStart,
+  dayEnd,
   moveFailure = null,
   isRetrying = false,
   onRetry,
+  onNextActionSaved,
+  onPermanentlyLocked,
 }: {
   lead: Lead;
   overlay?: boolean;
@@ -872,9 +1129,13 @@ function LeadCard({
   customTags?: CustomTag[];
   lastMessage?: LastMessage | null;
   renderedAtMs: number;
+  dayStart: string;
+  dayEnd: string;
   moveFailure?: MoveFailure | null;
   isRetrying?: boolean;
   onRetry?: () => void;
+  onNextActionSaved?: (task: { id: string; title: string; dueAt: string }) => void;
+  onPermanentlyLocked?: () => void;
 }) {
   const { attributes, listeners, setNodeRef, transform, isDragging } =
     useDraggable({ id: lead.id });
@@ -888,6 +1149,54 @@ function LeadCard({
     lead.assigned_user_id && lead.assigned_user_id === currentUserId;
   const owner = homeownerName(lead.homeowner);
   const location = [lead.city, lead.state].filter(Boolean).join(", ");
+  const [settingAction, setSettingAction] = useState(false);
+  const [dueInput, setDueInput] = useState("");
+  const [nextActionError, setNextActionError] = useState<string | null>(null);
+  const [savingAction, setSavingAction] = useState(false);
+  const idempotencyKey = useRef<string | null>(null);
+  const nextAction = formatNextAction(lead.next_task_due_at, dayStart, dayEnd);
+
+  const saveNextAction = async () => {
+    if (savingAction) return;
+    const parsed = new Date(dueInput);
+    if (!dueInput || Number.isNaN(parsed.getTime())) {
+      setNextActionError("Choose a valid date and time.");
+      return;
+    }
+    idempotencyKey.current ??= crypto.randomUUID();
+    setSavingAction(true);
+    setNextActionError(null);
+    let result: Awaited<ReturnType<typeof setLeadNextActionAction>>;
+    try {
+      result = await setLeadNextActionAction({
+        propertyId: lead.id,
+        dueAt: parsed.toISOString(),
+        idempotencyKey: idempotencyKey.current,
+      });
+    } catch {
+      setSavingAction(false);
+      setNextActionError("Couldn't save the next action.");
+      return;
+    }
+    setSavingAction(false);
+    if (!result.ok) {
+      if (result.error.code === "DNC_LOCKED") {
+        setSettingAction(false);
+        setNextActionError(null);
+        setDueInput("");
+        idempotencyKey.current = null;
+        onPermanentlyLocked?.();
+        return;
+      }
+      setNextActionError(result.error.message || "Couldn't save the next action.");
+      return;
+    }
+    setSettingAction(false);
+    setNextActionError(null);
+    setDueInput("");
+    idempotencyKey.current = null;
+    onNextActionSaved?.({ id: result.data.id, title: result.data.title, dueAt: result.data.dueAt });
+  };
 
   return (
     <div
@@ -899,15 +1208,9 @@ function LeadCard({
       onClick={onClick}
       {...attributes}
       {...listeners}
-      role="link"
-      tabIndex={0}
-      aria-label={`Open lead at ${lead.address}`}
-      onKeyDown={(event) => {
-        if ((event.key === "Enter" || event.key === " ") && onClick) {
-          event.preventDefault();
-          onClick();
-        }
-      }}
+      role="group"
+      tabIndex={-1}
+      aria-label={`Lead at ${lead.address}`}
     >
       {hasUnread ? (
         <span
@@ -917,9 +1220,19 @@ function LeadCard({
         />
       ) : null}
 
-      <div className={`truncate font-semibold ${hasUnread ? "pr-4" : ""}`}>
-        {lead.address}
-      </div>
+      {overlay || !onClick ? (
+        <div className={`truncate font-semibold ${hasUnread ? "pr-4" : ""}`}>{lead.address}</div>
+      ) : (
+        <button
+          type="button"
+          aria-label={`Open lead at ${lead.address}`}
+          className={`block w-full truncate text-left font-semibold ${hasUnread ? "pr-4" : ""}`}
+          onPointerDown={(event) => event.stopPropagation()}
+          onClick={(event) => { event.stopPropagation(); onClick(); }}
+        >
+          {lead.address}
+        </button>
+      )}
       <div className="text-muted-foreground mt-0.5 truncate">
         {owner}
         {location ? ` · ${location}` : ""}
@@ -1041,6 +1354,57 @@ function LeadCard({
           ) : null}
         </div>
       ) : null}
+
+      <div
+        className={`mt-2 rounded-md px-2 py-1.5 ${
+          nextAction.tone === "overdue"
+            ? "border-l-2 border-red-500 bg-red-500/5 text-red-700"
+            : nextAction.tone === "today"
+              ? "border-l-2 border-amber-500 bg-amber-500/5 text-amber-800"
+              : nextAction.tone === "none"
+                ? "border border-dashed border-amber-500/60 text-amber-800"
+                : "border-l-2 border-border bg-muted/40 text-foreground"
+        }`}
+        data-testid={`leadcard-next-action-${lead.id}`}
+        onPointerDown={(event) => event.stopPropagation()}
+        onClick={(event) => event.stopPropagation()}
+        onKeyDown={(event) => event.stopPropagation()}
+      >
+        <div className="flex items-center justify-between gap-2">
+          <span className="flex min-w-0 items-center gap-1.5 font-mono text-[10px] font-bold uppercase">
+            <CalendarClockIcon className="size-3 shrink-0" />
+            <span className="truncate">{nextAction.label}</span>
+          </span>
+          {nextAction.tone === "none" && !overlay && !settingAction ? (
+            <button type="button" className="font-bold underline underline-offset-2" onClick={() => setSettingAction(true)}>
+              Set
+            </button>
+          ) : null}
+        </div>
+        {lead.next_task_title ? <div className="mt-0.5 truncate text-[10px] opacity-75">{lead.next_task_title}</div> : null}
+        {settingAction ? (
+          <div className="mt-2 flex flex-col gap-1.5">
+            <label className="font-semibold" htmlFor={`next-action-${lead.id}`}>Due date and time</label>
+            <input
+              id={`next-action-${lead.id}`}
+              type="datetime-local"
+              value={dueInput}
+              disabled={savingAction}
+              onChange={(event) => setDueInput(event.target.value)}
+              className="border-border bg-background h-8 rounded-md border px-2 text-[11px]"
+            />
+            <div className="flex gap-2">
+              <button type="button" disabled={savingAction} className="font-bold underline underline-offset-2 disabled:opacity-50" onClick={() => void saveNextAction()}>
+                {savingAction ? "Saving…" : nextActionError ? "Retry" : "Save"}
+              </button>
+              <button type="button" disabled={savingAction} className="text-muted-foreground underline underline-offset-2 disabled:opacity-50" onClick={() => { setSettingAction(false); setNextActionError(null); idempotencyKey.current = null; }}>
+                Cancel
+              </button>
+            </div>
+            {nextActionError ? <div className="text-destructive" role="alert">{nextActionError} Not saved.</div> : null}
+          </div>
+        ) : null}
+      </div>
 
       {moveFailure ? (
         <div

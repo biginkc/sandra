@@ -2905,6 +2905,7 @@ export type Database = {
           end_at: string | null
           google_calendar_event_id: string | null
           id: string
+          lead_next_action_idempotency_key: string | null
           org_id: string
           outcome: string | null
           related_property_id: string | null
@@ -2931,6 +2932,7 @@ export type Database = {
           end_at?: string | null
           google_calendar_event_id?: string | null
           id?: string
+          lead_next_action_idempotency_key?: string | null
           org_id: string
           outcome?: string | null
           related_property_id?: string | null
@@ -2957,6 +2959,7 @@ export type Database = {
           end_at?: string | null
           google_calendar_event_id?: string | null
           id?: string
+          lead_next_action_idempotency_key?: string | null
           org_id?: string
           outcome?: string | null
           related_property_id?: string | null
@@ -3317,11 +3320,22 @@ export type Database = {
           has_unread: boolean
           homeowner: Json | null
           id: string
+          has_active_sequence: boolean
           is_dnc_locked: boolean
+          is_skip_traced: boolean
+          is_stale: boolean
           is_vacant: boolean | null
+          last_message_body: string | null
+          last_message_created_at: string | null
+          last_message_direction: string | null
           market: string | null
           motivation_level: string | null
+          next_task_due_at: string | null
+          next_task_id: string | null
+          next_task_title: string | null
           outreach_dispo: string | null
+          search_text: string
+          sequence_ended_without_follow_up: boolean
           state: string
           status: string
           zip: string | null
@@ -3340,11 +3354,22 @@ export type Database = {
           has_unread: boolean
           homeowner: Json | null
           id: string
+          has_active_sequence: boolean
           is_dnc_locked: boolean
+          is_skip_traced: boolean
+          is_stale: boolean
           is_vacant: boolean | null
+          last_message_body: string | null
+          last_message_created_at: string | null
+          last_message_direction: string | null
           market: string | null
           motivation_level: string | null
+          next_task_due_at: string | null
+          next_task_id: string | null
+          next_task_title: string | null
           outreach_dispo: string | null
+          search_text: string
+          sequence_ended_without_follow_up: boolean
           state: string
           status: string
           zip: string | null
@@ -3416,6 +3441,77 @@ export type Database = {
         }[]
       }
       dashboard_summary: { Args: never; Returns: Json }
+      get_leads_board_page: {
+        Args: {
+          p_assignee_id: string | null
+          p_attention: string | null
+          p_cursor_due_at: string | null
+          p_cursor_id: string | null
+          p_day_end: string
+          p_day_start: string
+          p_hot_only: boolean
+          p_limit: number
+          p_motivation: string
+          p_no_active_sequence: boolean
+          p_search_tokens: string[]
+          p_skip_traced: boolean | null
+          p_status: string
+          p_unassigned: boolean
+          p_urgency: string
+        }
+        Returns: {
+          rows: Json
+          total_count: number
+        }[]
+      }
+      get_leads_board_urgency_counts: {
+        Args: {
+          p_assignee_id: string | null
+          p_attention: string | null
+          p_day_end: string
+          p_day_start: string
+          p_hot_only: boolean
+          p_motivation: string
+          p_no_active_sequence: boolean
+          p_search_tokens: string[]
+          p_skip_traced: boolean | null
+          p_unassigned: boolean
+        }
+        Returns: {
+          all_count: number
+          no_action_count: number
+          overdue_count: number
+          scheduled_count: number
+          today_count: number
+        }[]
+      }
+      get_leads_board_stage_counts: {
+        Args: never
+        Returns: {
+          status: string
+          total_count: number
+        }[]
+      }
+      set_lead_next_action: {
+        Args: {
+          p_due_at: string
+          p_idempotency_key: string
+          p_property_id: string
+        }
+        Returns: {
+          assignee_id: string
+          created_at: string
+          created_by: string
+          due_at: string
+          id: string
+          org_id: string
+          related_property_id: string
+          status: string
+          title: string
+          type: string
+          was_created: boolean
+        }[]
+      }
       outbound_sms_metrics: {
         Args: {
           p_campaign_id?: string | null

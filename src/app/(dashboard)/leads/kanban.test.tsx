@@ -1,22 +1,30 @@
-import { act, render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { dndHandlers, routerPush, updatePropertyStatus } = vi.hoisted(() => ({
+const { dndHandlers, routerPush, routerRefresh, updatePropertyStatus, loadLeadBoardAction, setLeadNextActionAction } = vi.hoisted(() => ({
   dndHandlers: {
     onDragStart: null as null | ((event: unknown) => void),
     onDragEnd: null as null | ((event: unknown) => Promise<void>),
   },
   routerPush: vi.fn(),
+  routerRefresh: vi.fn(),
   updatePropertyStatus: vi.fn(),
+  loadLeadBoardAction: vi.fn((_input: unknown) => new Promise(() => {})),
+  setLeadNextActionAction: vi.fn(),
 }));
 
 vi.mock("next/navigation", () => ({
-  useRouter: () => ({ push: routerPush }),
+  useRouter: () => ({ push: routerPush, refresh: routerRefresh }),
 }));
 
 vi.mock("./actions", () => ({
   updatePropertyStatus,
+}));
+
+vi.mock("./board-actions", () => ({
+  loadLeadBoardAction,
+  setLeadNextActionAction,
 }));
 
 vi.mock("@/lib/errors/call-action", () => ({
@@ -74,11 +82,52 @@ function makeLead(overrides: Partial<Lead> = {}): Lead {
       last_name: "Seller",
       entity_name: null,
     },
+    has_unread: false,
+    next_task_id: null,
+    next_task_title: null,
+    next_task_due_at: null,
     ...overrides,
   };
 }
 
 const baseProps = {
+  initialTotals: {
+    prospect: 0,
+    new_lead: 1,
+    contacted: 0,
+    interested: 0,
+    offer_sent: 0,
+    offer_declined: 0,
+    under_contract: 0,
+    closed: 0,
+    dead: 0,
+  },
+  initialBaselineTotals: {
+    prospect: 0,
+    new_lead: 1,
+    contacted: 0,
+    interested: 0,
+    offer_sent: 0,
+    offer_declined: 0,
+    under_contract: 0,
+    closed: 0,
+    dead: 0,
+  },
+  initialUrgencyCounts: { all: 1, overdue: 0, today: 0, scheduled: 0, none: 1 },
+  initialNextCursors: {},
+  initialHasMore: {},
+  initialFilters: {
+    search: "",
+    ownership: "all" as const,
+    motivation: "all" as const,
+    urgency: "all" as const,
+    attention: null,
+    hotOnly: false,
+    noActiveSequence: false,
+    skipTraced: null,
+  },
+  dayStart: "2026-08-15T05:00:00.000Z",
+  dayEnd: "2026-08-16T05:00:00.000Z",
   unreadPropertyIds: [] as string[],
   assigneeEmails: {
     "user-me": "me@example.com",
@@ -92,9 +141,26 @@ const baseProps = {
   listMemberships: {},
   customTags: {},
   lastMessageByPropertyId: {},
-  attentionLeadIds: { stale: [], sequenceEnded: [] },
   renderedAt: new Date().toISOString(),
 };
+
+function emptyBoardData() {
+  const totals = Object.fromEntries(
+    Object.keys(baseProps.initialTotals).map((status) => [status, 0]),
+  ) as typeof baseProps.initialTotals;
+  return {
+    leads: [],
+    totals,
+    baselineTotals: totals,
+    urgencyCounts: { all: 0, overdue: 0, today: 0, scheduled: 0, none: 0 },
+    nextCursors: {},
+    hasMore: {},
+    unreadPropertyIds: [],
+    listMemberships: {},
+    customTags: {},
+    lastMessageByPropertyId: {},
+  };
+}
 
 function renderBoard(leads: Lead[]) {
   return render(<Kanban {...baseProps} initialLeads={leads} />);
@@ -109,14 +175,370 @@ function column(status: string): HTMLElement {
 }
 
 beforeEach(() => {
+  vi.restoreAllMocks();
   window.localStorage.clear();
   updatePropertyStatus.mockReset();
+  loadLeadBoardAction.mockReset();
+  loadLeadBoardAction.mockImplementation(() => new Promise(() => {}));
+  setLeadNextActionAction.mockReset();
   routerPush.mockReset();
+  routerRefresh.mockReset();
   dndHandlers.onDragStart = null;
   dndHandlers.onDragEnd = null;
 });
 
 describe("Leads Kanban foundation", () => {
+  it("shows the approved urgency strip without a suppressed bucket", () => {
+    renderBoard([makeLead()]);
+    const strip = screen.getByLabelText("Lead urgency");
+    expect(within(strip).getByRole("button", { name: "All 1" })).toHaveAttribute("aria-pressed", "true");
+    expect(within(strip).getByRole("button", { name: "Overdue 0" })).toBeVisible();
+    expect(within(strip).getByRole("button", { name: "Due today 0" })).toBeVisible();
+    expect(within(strip).getByRole("button", { name: "Scheduled later 0" })).toBeVisible();
+    expect(within(strip).getByRole("button", { name: "No next action 1" })).toBeVisible();
+    expect(within(strip).queryByText(/suppressed/i)).not.toBeInTheDocument();
+  });
+
+  it("renders overdue, today, scheduled, and no-action rows in urgency order", () => {
+    renderBoard([
+      makeLead({ id: "none", address: "None St" }),
+      makeLead({ id: "later", address: "Later St", next_task_id: "task-l", next_task_title: "Follow up on Later St", next_task_due_at: "2026-08-18T15:00:00.000Z" }),
+      makeLead({ id: "today", address: "Today St", next_task_id: "task-t", next_task_title: "Follow up on Today St", next_task_due_at: "2026-08-15T15:30:00.000Z" }),
+      makeLead({ id: "overdue", address: "Overdue St", next_task_id: "task-o", next_task_title: "Follow up on Overdue St", next_task_due_at: "2026-08-13T15:00:00.000Z" }),
+    ]);
+
+    const cards = within(column("new_lead")).getAllByRole("button", { name: /Open lead at/ }).map((card) => card.getAttribute("aria-label"));
+    expect(cards).toEqual([
+      "Open lead at Overdue St",
+      "Open lead at Today St",
+      "Open lead at Later St",
+      "Open lead at None St",
+    ]);
+    expect(screen.getByTestId("leadcard-next-action-overdue")).toHaveTextContent("Overdue 2d");
+    expect(screen.getByTestId("leadcard-next-action-today")).toHaveTextContent("Today 10:30 AM");
+    expect(screen.getByTestId("leadcard-next-action-later")).toHaveTextContent("Tue, Aug 18");
+    expect(screen.getByTestId("leadcard-next-action-none")).toHaveTextContent("No next action");
+  });
+
+  it("retries an inline next action with one idempotency key and only updates after proven save", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(crypto, "randomUUID").mockReturnValue("22222222-2222-4222-8222-222222222222");
+    setLeadNextActionAction
+      .mockResolvedValueOnce({ ok: false, error: { code: "NEXT_ACTION_FAILED", message: "Temporary failure" } })
+      .mockResolvedValueOnce({ ok: true, data: { id: "task-1", title: "Follow up on 123 Main St", dueAt: "2026-08-16T14:00:00.000Z", created: true } });
+    renderBoard([makeLead({ id: "11111111-1111-4111-8111-111111111111" })]);
+
+    await user.click(screen.getByRole("button", { name: "Set" }));
+    await user.type(screen.getByLabelText("Due date and time"), "2026-08-16T09:00");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(/Temporary failure\s+Not saved\./);
+    expect(screen.getByTestId("leadcard-next-action-11111111-1111-4111-8111-111111111111")).toHaveTextContent("No next action");
+
+    await user.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(setLeadNextActionAction).toHaveBeenCalledTimes(2));
+    expect(setLeadNextActionAction.mock.calls[0][0].idempotencyKey).toBe("22222222-2222-4222-8222-222222222222");
+    expect(setLeadNextActionAction.mock.calls[1][0].idempotencyKey).toBe("22222222-2222-4222-8222-222222222222");
+    expect(screen.getByTestId("leadcard-next-action-11111111-1111-4111-8111-111111111111")).toHaveTextContent("Sun, Aug 16");
+  });
+
+  it("uses a fresh idempotency key for a later Set cycle on the same mounted card", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(crypto, "randomUUID")
+      .mockReturnValueOnce("22222222-2222-4222-8222-222222222222")
+      .mockReturnValueOnce("33333333-3333-4333-8333-333333333333");
+    setLeadNextActionAction
+      .mockResolvedValueOnce({ ok: true, data: { id: "task-1", title: "First follow up", dueAt: "2026-08-16T14:00:00.000Z", created: true } })
+      .mockResolvedValueOnce({ ok: true, data: { id: "task-2", title: "Second follow up", dueAt: "2026-08-17T14:00:00.000Z", created: true } });
+    loadLeadBoardAction
+      .mockResolvedValueOnce({
+        ok: true,
+        data: {
+          leads: [makeLead({ id: "11111111-1111-4111-8111-111111111111" })],
+          totals: baseProps.initialTotals,
+          urgencyCounts: baseProps.initialUrgencyCounts,
+          nextCursors: {}, hasMore: {}, unreadPropertyIds: [],
+          listMemberships: {}, customTags: {}, lastMessageByPropertyId: {},
+        },
+      })
+      .mockImplementation(() => new Promise(() => {}));
+    renderBoard([makeLead({ id: "11111111-1111-4111-8111-111111111111" })]);
+
+    await user.click(screen.getByRole("button", { name: "Set" }));
+    await user.type(screen.getByLabelText("Due date and time"), "2026-08-16T09:00");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    expect(await screen.findByRole("button", { name: "Set" })).toBeVisible();
+
+    await user.click(screen.getByRole("button", { name: "Set" }));
+    await user.type(screen.getByLabelText("Due date and time"), "2026-08-17T09:00");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(setLeadNextActionAction).toHaveBeenCalledTimes(2));
+    expect(setLeadNextActionAction.mock.calls.map(([request]) => request.idempotencyKey)).toEqual([
+      "22222222-2222-4222-8222-222222222222",
+      "33333333-3333-4333-8333-333333333333",
+    ]);
+  });
+
+  it("recovers inline Set from a rejected transport promise", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(crypto, "randomUUID").mockReturnValue("22222222-2222-4222-8222-222222222222");
+    setLeadNextActionAction.mockRejectedValueOnce(new Error("network disconnected"));
+    renderBoard([makeLead()]);
+
+    await user.click(screen.getByRole("button", { name: "Set" }));
+    await user.type(screen.getByLabelText("Due date and time"), "2026-08-16T09:00");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Couldn't save the next action. Not saved.");
+    expect(screen.getByRole("button", { name: "Retry" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Cancel" })).toBeEnabled();
+  });
+
+  it("removes a stale card when inline Set discovers permanent DNC", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(crypto, "randomUUID").mockReturnValue("22222222-2222-4222-8222-222222222222");
+    setLeadNextActionAction.mockResolvedValue({
+      ok: false,
+      error: { code: "DNC_LOCKED", message: "This lead is permanently read-only." },
+    });
+    loadLeadBoardAction.mockResolvedValue({ ok: true, data: emptyBoardData() });
+    renderBoard([makeLead({ id: "11111111-1111-4111-8111-111111111111" })]);
+
+    await user.click(screen.getByRole("button", { name: "Set" }));
+    await user.type(screen.getByLabelText("Due date and time"), "2026-08-16T09:00");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(screen.queryByText("123 Main St")).not.toBeInTheDocument());
+    expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
+    expect(routerRefresh).toHaveBeenCalled();
+    expect(await screen.findByRole("button", { name: "All 0" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "No next action 0" })).toBeVisible();
+    expect(within(column("new_lead")).getByLabelText("0 matching, 0 total")).toHaveTextContent("0");
+  });
+
+  it("reconciles a delayed Set with the current filter generation", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(crypto, "randomUUID").mockReturnValue("22222222-2222-4222-8222-222222222222");
+    let resolveSet!: (value: unknown) => void;
+    setLeadNextActionAction.mockImplementationOnce(() => new Promise((resolve) => { resolveSet = resolve; }));
+    loadLeadBoardAction.mockResolvedValue({
+      ok: true,
+      data: {
+        leads: [makeLead()], totals: baseProps.initialTotals,
+        urgencyCounts: baseProps.initialUrgencyCounts,
+        nextCursors: {}, hasMore: {}, unreadPropertyIds: [],
+        listMemberships: {}, customTags: {}, lastMessageByPropertyId: {},
+      },
+    });
+    renderBoard([makeLead()]);
+
+    await user.click(screen.getByRole("button", { name: "Set" }));
+    await user.type(screen.getByLabelText("Due date and time"), "2026-08-16T09:00");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await user.click(screen.getByRole("button", { name: "My leads" }));
+    await waitFor(() => expect(loadLeadBoardAction).toHaveBeenCalledTimes(1));
+
+    resolveSet({ ok: true, data: { id: "task-1", title: "Follow up", dueAt: "2026-08-16T14:00:00.000Z", created: true } });
+    await waitFor(() => expect(loadLeadBoardAction).toHaveBeenCalledTimes(2));
+    expect(loadLeadBoardAction.mock.calls.every(([request]) =>
+      (request as { filters: { ownership: string } }).filters.ownership === "mine",
+    )).toBe(true);
+  });
+
+  it("re-queries visit-only urgency on the server and keeps the URL unchanged", async () => {
+    const user = userEvent.setup();
+    loadLeadBoardAction.mockResolvedValueOnce({
+      ok: true,
+      data: {
+        leads: [], totals: { ...baseProps.initialTotals, new_lead: 0 },
+        nextCursors: {}, hasMore: {}, unreadPropertyIds: [],
+        urgencyCounts: { all: 5, overdue: 2, today: 1, scheduled: 1, none: 1 },
+        listMemberships: {}, customTags: {}, lastMessageByPropertyId: {},
+      },
+    });
+    renderBoard([makeLead()]);
+    await user.click(screen.getByRole("button", { name: "Overdue 0" }));
+    await waitFor(() => expect(loadLeadBoardAction).toHaveBeenCalled(), { timeout: 1000 });
+    const request = loadLeadBoardAction.mock.calls.at(-1)?.[0] as { filters: { urgency: string } };
+    expect(request.filters.urgency).toBe("overdue");
+    expect(routerPush).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "All 5" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Overdue 2" })).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("recovers a full refresh from a rejected transport promise", async () => {
+    const user = userEvent.setup();
+    loadLeadBoardAction.mockRejectedValueOnce(new Error("network disconnected"));
+    renderBoard([makeLead()]);
+
+    await user.click(screen.getByRole("button", { name: "Overdue 0" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("We couldn't refresh your leads.");
+    expect(screen.queryByText("Refreshing…")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Try again" })).toBeEnabled();
+  });
+
+  it("discards an in-flight column page when the active filter changes", async () => {
+    const user = userEvent.setup();
+    let resolvePage!: (value: unknown) => void;
+    loadLeadBoardAction.mockImplementationOnce(
+      () => new Promise((resolve) => { resolvePage = resolve; }),
+    );
+    render(
+      <Kanban
+        {...baseProps}
+        initialLeads={[makeLead()]}
+        initialHasMore={{ new_lead: true }}
+        initialNextCursors={{
+          new_lead: { dueAt: null, id: "11111111-1111-4111-8111-111111111111" },
+        }}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Load more New Lead" }));
+    await user.click(screen.getByRole("button", { name: "Overdue 0" }));
+    await act(async () => {
+      resolvePage({
+        ok: true,
+        data: {
+          leads: [makeLead({
+            id: "33333333-3333-4333-8333-333333333333",
+            address: "Stale Page Card",
+            next_task_id: "task-stale",
+            next_task_title: "Follow up on Stale Page Card",
+            next_task_due_at: "2026-08-13T15:00:00.000Z",
+          })],
+          totals: { ...baseProps.initialTotals, new_lead: 99 },
+          nextCursors: {}, hasMore: { new_lead: false }, unreadPropertyIds: [],
+          urgencyCounts: null,
+          listMemberships: {}, customTags: {}, lastMessageByPropertyId: {},
+        },
+      });
+      await Promise.resolve();
+    });
+
+    expect(screen.queryByText("Stale Page Card")).not.toBeInTheDocument();
+  });
+
+  it("cannot use an old-filter cursor while the new filter refresh is pending", async () => {
+    const user = userEvent.setup();
+    let resolveRefresh!: (value: unknown) => void;
+    loadLeadBoardAction.mockImplementationOnce(
+      () => new Promise((resolve) => { resolveRefresh = resolve; }),
+    );
+    render(
+      <Kanban
+        {...baseProps}
+        initialLeads={[makeLead()]}
+        initialHasMore={{ new_lead: true }}
+        initialNextCursors={{
+          new_lead: { dueAt: null, id: "11111111-1111-4111-8111-111111111111" },
+        }}
+      />,
+    );
+    const oldLoadMore = screen.getByRole("button", { name: "Load more New Lead" });
+
+    await user.click(screen.getByRole("button", { name: "Overdue 0" }));
+    await waitFor(() => expect(loadLeadBoardAction).toHaveBeenCalledTimes(1));
+    expect(screen.queryByRole("button", { name: "Load more New Lead" })).not.toBeInTheDocument();
+    fireEvent.click(oldLoadMore);
+    expect(loadLeadBoardAction).toHaveBeenCalledTimes(1);
+
+    resolveRefresh({
+      ok: true,
+      data: {
+        leads: [], totals: { ...baseProps.initialTotals, new_lead: 0 },
+        urgencyCounts: { all: 1, overdue: 0, today: 0, scheduled: 0, none: 1 },
+        nextCursors: {}, hasMore: {}, unreadPropertyIds: [],
+        listMemberships: {}, customTags: {}, lastMessageByPropertyId: {},
+      },
+    });
+    await waitFor(() => expect(screen.queryByText("Refreshing…")).not.toBeInTheDocument());
+  });
+
+  it("refreshes the full board when a later page reports a changed snapshot count", async () => {
+    const user = userEvent.setup();
+    loadLeadBoardAction
+      .mockResolvedValueOnce({
+        ok: true,
+        data: {
+          leads: [], totals: { ...baseProps.initialTotals, new_lead: 2 },
+          nextCursors: {}, hasMore: { new_lead: false }, unreadPropertyIds: [],
+          urgencyCounts: null,
+          listMemberships: {}, customTags: {}, lastMessageByPropertyId: {},
+        },
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        data: {
+          leads: [makeLead()], totals: baseProps.initialTotals,
+          nextCursors: {}, hasMore: {}, unreadPropertyIds: [],
+          urgencyCounts: baseProps.initialUrgencyCounts,
+          listMemberships: {}, customTags: {}, lastMessageByPropertyId: {},
+        },
+      });
+    render(
+      <Kanban
+        {...baseProps}
+        initialLeads={[makeLead()]}
+        initialHasMore={{ new_lead: true }}
+        initialNextCursors={{
+          new_lead: { dueAt: null, id: "11111111-1111-4111-8111-111111111111" },
+        }}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Load more New Lead" }));
+    await waitFor(() => expect(loadLeadBoardAction).toHaveBeenCalledTimes(2));
+    expect(loadLeadBoardAction).toHaveBeenLastCalledWith({ filters: baseProps.initialFilters });
+  });
+
+  it("recovers Load more from a rejected transport promise", async () => {
+    const user = userEvent.setup();
+    loadLeadBoardAction.mockRejectedValueOnce(new Error("network disconnected"));
+    render(
+      <Kanban
+        {...baseProps}
+        initialLeads={[makeLead()]}
+        initialHasMore={{ new_lead: true }}
+        initialNextCursors={{
+          new_lead: { dueAt: null, id: "11111111-1111-4111-8111-111111111111" },
+        }}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Load more New Lead" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("We couldn't load more New Lead leads.");
+    expect(screen.getByRole("button", { name: "Load more New Lead" })).toBeEnabled();
+  });
+
+  it("reconciles a delayed drag with the current filter generation", async () => {
+    const user = userEvent.setup();
+    let resolveMove!: (value: unknown) => void;
+    updatePropertyStatus.mockImplementationOnce(() => new Promise((resolve) => { resolveMove = resolve; }));
+    loadLeadBoardAction.mockResolvedValue({
+      ok: true,
+      data: {
+        leads: [], totals: { ...baseProps.initialTotals, new_lead: 0 },
+        urgencyCounts: { all: 1, overdue: 0, today: 0, scheduled: 0, none: 1 },
+        nextCursors: {}, hasMore: {}, unreadPropertyIds: [],
+        listMemberships: {}, customTags: {}, lastMessageByPropertyId: {},
+      },
+    });
+    renderBoard([makeLead()]);
+    let movePromise: Promise<void> | undefined;
+    act(() => {
+      movePromise = dndHandlers.onDragEnd?.({ active: { id: "lead-a" }, over: { id: "contacted" } });
+    });
+    await user.click(screen.getByRole("button", { name: "Overdue 0" }));
+    await waitFor(() => expect(loadLeadBoardAction).toHaveBeenCalledTimes(1));
+
+    resolveMove({ ok: true, data: { status: "contacted" } });
+    await act(async () => { await movePromise; });
+    await waitFor(() => expect(loadLeadBoardAction).toHaveBeenCalledTimes(2));
+    expect(loadLeadBoardAction.mock.calls.every(([request]) =>
+      (request as { filters: { urgency: string } }).filters.urgency === "overdue",
+    )).toBe(true);
+  });
+
   it("renders the approved column order and defaults Closed/Dead to collapsed without a stored preference", () => {
     renderBoard([makeLead()]);
     expect(
@@ -136,6 +558,40 @@ describe("Leads Kanban foundation", () => {
     expect(screen.getByRole("button", { name: "Expand Closed" })).toBeVisible();
     expect(screen.getByRole("button", { name: "Expand Dead" })).toBeVisible();
 
+  });
+
+  it("keeps matching/total badges compact while exposing loaded detail", () => {
+    render(
+      <Kanban
+        {...baseProps}
+        initialLeads={[makeLead()]}
+        initialTotals={{ ...baseProps.initialTotals, new_lead: 37, closed: 4 }}
+        initialBaselineTotals={{ ...baseProps.initialBaselineTotals, new_lead: 48, closed: 10 }}
+        initialHasMore={{ new_lead: true }}
+      />,
+    );
+
+    const newLeadBadge = within(column("new_lead")).getByLabelText("1 loaded, 37 matching, 48 total");
+    expect(newLeadBadge).toHaveTextContent("1/37");
+    expect(newLeadBadge.textContent?.length).toBeLessThanOrEqual(5);
+    const collapsedBadge = within(column("closed")).getByLabelText("0 loaded, 4 matching, 10 total");
+    expect(collapsedBadge).toHaveTextContent("0/4");
+  });
+
+  it("shows matching/total once every filtered match is loaded", () => {
+    render(
+      <Kanban
+        {...baseProps}
+        initialLeads={[
+          makeLead({ id: "lead-1" }),
+          makeLead({ id: "lead-2", address: "2 Main St" }),
+          makeLead({ id: "lead-3", address: "3 Main St" }),
+        ]}
+        initialTotals={{ ...baseProps.initialTotals, new_lead: 3 }}
+        initialBaselineTotals={{ ...baseProps.initialBaselineTotals, new_lead: 48 }}
+      />,
+    );
+    expect(within(column("new_lead")).getByLabelText("3 matching, 48 total")).toHaveTextContent("3/48");
   });
 
   it("restores and updates a valid collapsed-column preference", async () => {
@@ -320,7 +776,7 @@ describe("Leads Kanban foundation", () => {
 
     expect(screen.getByText("789 Unassigned Rd")).toBeVisible();
     expect(screen.queryByText("123 Main St")).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /Unassigned/ })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Unassigned" })).toBeVisible();
     await user.click(screen.getByRole("button", { name: "Reset all (1)" }));
     expect(routerPush).toHaveBeenCalledWith("/leads");
 
@@ -331,8 +787,8 @@ describe("Leads Kanban foundation", () => {
         {...baseProps}
         initialAttentionFilter="stale"
         hasInboundFilter
-        attentionLeadIds={{ stale: ["lead-unassigned"], sequenceEnded: [] }}
-        initialLeads={leads}
+        initialFilters={{ ...baseProps.initialFilters, attention: "stale" }}
+        initialLeads={[leads[1]]}
       />,
     );
     expect(screen.getByRole("button", { name: /Stale conversations/ })).toBeVisible();
@@ -396,7 +852,7 @@ describe("Leads Kanban foundation", () => {
     const user = userEvent.setup();
     renderBoard([makeLead()]);
 
-    const card = screen.getByRole("link", { name: "Open lead at 123 Main St" });
+    const card = screen.getByRole("button", { name: "Open lead at 123 Main St" });
     card.focus();
     await user.keyboard("{Enter}");
 
@@ -450,5 +906,24 @@ describe("Leads Kanban foundation", () => {
       "contacted",
       "interested",
     );
+  });
+
+  it("removes a card when a stale move discovers the permanent DNC lock", async () => {
+    updatePropertyStatus.mockResolvedValue({
+      ok: false,
+      error: { code: "DNC_LOCKED", message: "This lead is permanently read-only." },
+    });
+    loadLeadBoardAction.mockResolvedValue({ ok: true, data: emptyBoardData() });
+    renderBoard([makeLead()]);
+
+    await act(async () => {
+      await dndHandlers.onDragEnd?.({ active: { id: "lead-a" }, over: { id: "contacted" } });
+    });
+
+    expect(screen.queryByText("123 Main St")).not.toBeInTheDocument();
+    expect(routerRefresh).toHaveBeenCalled();
+    expect(await screen.findByRole("button", { name: "All 0" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "No next action 0" })).toBeVisible();
+    expect(within(column("new_lead")).getByLabelText("0 matching, 0 total")).toHaveTextContent("0");
   });
 });
