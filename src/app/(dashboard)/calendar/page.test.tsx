@@ -1,5 +1,5 @@
 import { render, screen } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const {
   createClient,
@@ -45,6 +45,8 @@ vi.mock("./_components/calendar-view", () => ({
     view: string;
     month: string | null;
     days: unknown[];
+    nowMs: number;
+    todayKey: string;
   }) => (
     <div data-testid="calendar-view-stub">
       <span data-testid="appointment-count">{props.appointments.length}</span>
@@ -54,6 +56,8 @@ vi.mock("./_components/calendar-view", () => ({
       <span data-testid="calendar-view-mode">{props.view}</span>
       <span data-testid="calendar-month-key">{props.month ?? "none"}</span>
       <span data-testid="calendar-day-count">{props.days.length}</span>
+      <span data-testid="calendar-now-ms">{props.nowMs}</span>
+      <span data-testid="calendar-today-key">{props.todayKey}</span>
       {Object.entries(props.assigneeLabels).map(([id, label]) => (
         <span key={id} data-testid={`assignee-label-${id}`}>
           {label}
@@ -85,6 +89,10 @@ beforeEach(() => {
     calendarEnabled: true,
     timezone: "America/Chicago",
   });
+});
+
+afterEach(() => {
+  vi.useRealTimers();
 });
 
 describe("CalendarPage — appointments load failure", () => {
@@ -157,6 +165,33 @@ describe("CalendarPage — genuinely empty week", () => {
     ).not.toBeInTheDocument();
     expect(screen.getByTestId("calendar-view-stub")).toBeInTheDocument();
     expect(screen.getByTestId("appointment-count")).toHaveTextContent("0");
+  });
+
+  it("derives the range and every client today marker from one request instant in the viewer timezone", async () => {
+    vi.useFakeTimers();
+    const requestNow = new Date("2026-08-17T04:30:00.000Z");
+    vi.setSystemTime(requestNow);
+    mockUser();
+    loadIntegrationPrefs.mockResolvedValue({
+      slackEnabled: true,
+      calendarEnabled: true,
+      timezone: "America/Los_Angeles",
+    });
+    fetchCalendarAppointments.mockResolvedValue({ ok: true, rows: [] });
+    fetchOrgRoster.mockResolvedValue({
+      ok: true,
+      labelsDegraded: false,
+      roster: [{ id: "user-1", label: "owner@bmh.com" }],
+    });
+
+    render(await CalendarPage({ searchParams: Promise.resolve({}) }));
+
+    expect(screen.getByTestId("calendar-now-ms")).toHaveTextContent(
+      String(requestNow.getTime()),
+    );
+    expect(screen.getByTestId("calendar-today-key")).toHaveTextContent(
+      "2026-08-16",
+    );
   });
 });
 

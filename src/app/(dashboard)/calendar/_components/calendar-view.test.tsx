@@ -131,8 +131,8 @@ const WEEK = DAYS[0].date;
 
 function baseProps(
   overrides: Partial<React.ComponentProps<typeof CalendarView>> = {},
-) {
-  return {
+): React.ComponentProps<typeof CalendarView> {
+  const defaults: React.ComponentProps<typeof CalendarView> = {
     view: "week" as const,
     week: WEEK,
     month: null,
@@ -143,8 +143,12 @@ function baseProps(
     assignees: {},
     assigneeLabels: {},
     currentUserId: "user-1",
-    ...overrides,
+    nowMs: new Date("2026-08-19T12:00:00Z").getTime(),
+    todayKey: dateKeyInZone(new Date("2026-08-19T12:00:00Z"), CHI),
   };
+  return { ...defaults, ...overrides } as React.ComponentProps<
+    typeof CalendarView
+  >;
 }
 
 describe("<CalendarView />", () => {
@@ -289,6 +293,7 @@ describe("<CalendarView />", () => {
     ]) {
       expect(screen.getByTestId(testId)).toHaveClass("min-h-11");
     }
+    expect(screen.getByTestId("calendar-week-today")).toHaveClass("min-w-11");
     expect(screen.getByTestId("calendar-timezone-caption")).toHaveTextContent(
       "All times shown in America/Chicago.",
     );

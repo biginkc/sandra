@@ -8,6 +8,20 @@ import { MonthGrid } from "./month-grid";
 
 const CHI = "America/Chicago";
 
+function dateKeyInZone(d: Date, tz: string): string {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: tz,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(d);
+  const map: Record<string, string> = {};
+  for (const part of parts) {
+    if (part.type !== "literal") map[part.type] = part.value;
+  }
+  return `${map.year}-${map.month}-${map.day}`;
+}
+
 function makeAppt(
   overrides: Partial<CalendarAppointmentRow> & { id: string; due_at: string },
 ): CalendarAppointmentRow {
@@ -26,6 +40,7 @@ function makeAppt(
     state: null,
     contact_id: null,
     contact_name: null,
+    is_dnc_locked: false,
     ...overrides,
   };
 }
@@ -48,6 +63,8 @@ function renderGrid(
       assignees={assignees}
       currentUserId="user-1"
       month="2026-08"
+      nowMs={Date.now()}
+      todayKey={dateKeyInZone(new Date(), CHI)}
       dayHref={dayHref}
     />,
   );

@@ -15,11 +15,7 @@ import { cn } from "@/lib/utils";
 import type { CalendarViewProps } from "../types";
 
 import { AgendaList } from "./agenda-list";
-import {
-  addDaysToDateKey,
-  monthStartDateKey,
-  todayDateKeyInZone,
-} from "./calendar-shared";
+import { addDaysToDateKey, monthStartDateKey } from "./calendar-shared";
 import { MonthGrid } from "./month-grid";
 import { NewBlockButton } from "./new-block-button";
 import { WeekGrid } from "./week-grid";
@@ -60,6 +56,8 @@ export function CalendarView({
   assignees,
   assigneeLabels,
   currentUserId,
+  nowMs,
+  todayKey,
 }: CalendarViewProps) {
   const pathname = usePathname();
   const router = useRouter();
@@ -75,7 +73,6 @@ export function CalendarView({
     return qs ? `${pathname}?${qs}` : pathname;
   };
 
-  const todayKey = todayDateKeyInZone(timezone);
   const rawAssignee = searchParams.get("assignee");
   // Normalize against the LIVE roster exactly like the page's query scope
   // (scoping.ts): an unknown or removed teammate in a deep link must render
@@ -185,7 +182,7 @@ export function CalendarView({
           <Link
             href={buildHref({ week: todayKey })}
             data-testid="calendar-week-today"
-            className="text-muted-foreground hover:text-foreground inline-flex min-h-11 items-center"
+            className="text-muted-foreground hover:text-foreground inline-flex min-h-11 min-w-11 items-center justify-center"
           >
             Today
           </Link>
@@ -262,6 +259,8 @@ export function CalendarView({
             viewerRole={viewerRole}
             assignees={assigneeLabels}
             month={month}
+            nowMs={nowMs}
+            todayKey={todayKey}
             dayHref={(date) => buildHref({ view: "week", week: date })}
           />
         </div>
@@ -276,6 +275,8 @@ export function CalendarView({
             timezone={timezone}
             viewerRole={viewerRole}
             assignees={assigneeLabels}
+            nowMs={nowMs}
+            todayKey={todayKey}
           />
         </div>
       ) : null}
@@ -285,12 +286,14 @@ export function CalendarView({
         data-testid="calendar-agenda-wrapper"
       >
         <AgendaList
+          key={`${days[0]?.date ?? "empty"}:${days.at(-1)?.date ?? "empty"}`}
           currentUserId={currentUserId}
           days={days}
           appointments={appointments}
           timezone={timezone}
           viewerRole={viewerRole}
           assignees={assigneeLabels}
+          nowMs={nowMs}
         />
       </div>
     </div>

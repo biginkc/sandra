@@ -45,6 +45,7 @@ export function AppointmentBlock({
   currentUserId,
   nowMs,
 }: Props) {
+  void viewerRole;
   const href = appointmentHref(appt);
   const label = appointmentLabel(appt);
   // Label whose appointment this is whenever it isn't the viewer's own —
@@ -79,6 +80,14 @@ export function AppointmentBlock({
           data-testid={`calendar-outcome-chip-${appt.id}`}
         />
       ) : null}
+      {appt.is_dnc_locked ? (
+        <div
+          className="text-muted-foreground mt-1 text-[10px] font-bold tracking-wide uppercase"
+          data-testid={`calendar-dnc-read-only-${appt.id}`}
+        >
+          Read-only · Do not contact
+        </div>
+      ) : null}
     </>
   );
 
@@ -104,7 +113,7 @@ export function AppointmentBlock({
           {body}
         </div>
       )}
-      {isPastDueOpen(appt, nowMs) ? (
+      {!appt.is_dnc_locked && isPastDueOpen(appt, nowMs) ? (
         <div className="mt-1.5">
           <div className="mb-1 text-[10px] font-bold tracking-wide text-amber-800 uppercase">
             Needs outcome

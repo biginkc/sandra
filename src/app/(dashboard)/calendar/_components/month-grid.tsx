@@ -14,7 +14,6 @@ import {
   appointmentToneClass,
   appointmentVisualTone,
   dayIndexForAppointment,
-  todayDateKeyInZone,
 } from "./calendar-shared";
 
 /** Compact start-time label for a month cell ("4:45 PM") — the full
@@ -49,6 +48,8 @@ type Props = {
    *  preserving the current assignee filter (CalendarView owns the URL
    *  state, so it supplies the builder). */
   dayHref: (date: string) => string;
+  nowMs: number;
+  todayKey: string;
 };
 
 /**
@@ -70,14 +71,10 @@ export function MonthGrid({
   currentUserId,
   month,
   dayHref,
+  nowMs,
+  todayKey,
 }: Props) {
   void viewerRole;
-  const todayKey = todayDateKeyInZone(timezone);
-  // Stable for this render; drives the same lifecycle-first visual resolver
-  // used by Week and Agenda.
-  // eslint-disable-next-line react-hooks/purity
-  const nowMs = Date.now();
-
   return (
     <div data-testid="calendar-month-grid">
       <div className="grid grid-cols-7">
@@ -166,6 +163,12 @@ export function MonthGrid({
                         >
                           {" "}
                           · {ownerLabel}
+                        </span>
+                      ) : null}
+                      {appt.is_dnc_locked ? (
+                        <span className="text-muted-foreground">
+                          {" "}
+                          · Read-only
                         </span>
                       ) : null}
                     </span>

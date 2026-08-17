@@ -54,6 +54,8 @@ export type CalendarAppointmentRow = {
   city: string | null;
   state: string | null;
   contact_id: string | null;
+  /** True when the linked property is under the permanent DNC ratchet. */
+  is_dnc_locked: boolean;
   /** Display label derived from contacts.entity_name, or
    *  "first_name last_name", or null when neither is set. */
   contact_name: string | null;
@@ -101,6 +103,10 @@ export type CalendarViewProps = {
    *  labeled without becoming a selectable filter value. */
   assigneeLabels: Record<string, string>;
   currentUserId: string;
+  /** One request-captured instant shared by every calendar surface. */
+  nowMs: number;
+  /** Zone-local date key derived from the same request-captured instant. */
+  todayKey: string;
 };
 
 /** `?week=&assignee=&view=` — parsed by page.tsx from the awaited

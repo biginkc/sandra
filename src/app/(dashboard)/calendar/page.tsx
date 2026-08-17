@@ -13,6 +13,7 @@ import {
 } from "./queries";
 import { resolveMonth, resolveWeek } from "./range";
 import { resolveAssigneeId } from "./scoping";
+import { todayDateKeyInZone } from "./_components/calendar-shared";
 import type {
   CalendarSearchParams,
   CalendarViewMode,
@@ -164,14 +165,17 @@ export default async function CalendarPage({
 
   const prefs = await loadIntegrationPrefs(supabase, user.id);
   const timezone = prefs.timezone;
+  const requestNow = new Date();
+  const nowMs = requestNow.getTime();
+  const todayKey = todayDateKeyInZone(timezone, requestNow);
 
   // Month view always resolves a fixed six-week grid. Its single-snapshot
   // RPC enforces the existing cap independently for every week rather than
   // stretching a week-sized limit over the whole 42-day range.
   const monthRange =
-    view === "month" ? resolveMonth(params.week, timezone) : null;
+    view === "month" ? resolveMonth(params.week, timezone, requestNow) : null;
   const { weekStartDate, days } =
-    monthRange ?? resolveWeek(params.week, timezone);
+    monthRange ?? resolveWeek(params.week, timezone, requestNow);
   const monthKey = monthRange?.monthKey ?? null;
   const weekStartUtc = days[0].startUtc;
   const weekEndUtc = days[days.length - 1].endUtc;
@@ -250,6 +254,8 @@ export default async function CalendarPage({
         assignees={assignees}
         assigneeLabels={assigneeLabels}
         currentUserId={user.id}
+        nowMs={nowMs}
+        todayKey={todayKey}
       />
     </Page>
   );

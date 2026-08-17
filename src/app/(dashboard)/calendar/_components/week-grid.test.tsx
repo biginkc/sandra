@@ -70,6 +70,7 @@ function makeAppt(
     state: null,
     contact_id: null,
     contact_name: null,
+    is_dnc_locked: false,
     ...overrides,
   };
 }
@@ -89,6 +90,8 @@ describe("<WeekGrid />", () => {
         viewerRole="owner"
         assignees={{}}
         currentUserId="viewer-1"
+        nowMs={Date.now()}
+        todayKey={dateKeyInZone(new Date(), LA)}
       />,
     );
 
@@ -134,6 +137,8 @@ describe("<WeekGrid />", () => {
         viewerRole="owner"
         assignees={{}}
         currentUserId="viewer-1"
+        nowMs={Date.now()}
+        todayKey={dateKeyInZone(new Date(), LA)}
       />,
     );
 
@@ -157,6 +162,8 @@ describe("<WeekGrid />", () => {
         viewerRole="owner"
         assignees={{}}
         currentUserId="viewer-1"
+        nowMs={Date.now()}
+        todayKey={dateKeyInZone(new Date(), "America/New_York")}
       />,
     );
     expect(
@@ -180,6 +187,8 @@ describe("<WeekGrid />", () => {
         viewerRole="owner"
         assignees={{}}
         currentUserId="viewer-1"
+        nowMs={Date.now()}
+        todayKey={dateKeyInZone(new Date(), LA)}
       />,
     );
 
@@ -214,6 +223,8 @@ describe("<WeekGrid />", () => {
         viewerRole="member"
         assignees={assignees}
         currentUserId="viewer-1"
+        nowMs={Date.now()}
+        todayKey={dateKeyInZone(new Date(), LA)}
       />,
     );
     expect(screen.getByText("rep@bmh.com")).toBeInTheDocument();
@@ -226,6 +237,8 @@ describe("<WeekGrid />", () => {
         viewerRole="member"
         assignees={assignees}
         currentUserId="rep-1"
+        nowMs={Date.now()}
+        todayKey={dateKeyInZone(new Date(), LA)}
       />,
     );
     expect(screen.queryByText("rep@bmh.com")).not.toBeInTheDocument();
@@ -263,6 +276,8 @@ describe("<WeekGrid />", () => {
         viewerRole="owner"
         assignees={{}}
         currentUserId="viewer-1"
+        nowMs={Date.now()}
+        todayKey={dateKeyInZone(new Date(), LA)}
       />,
     );
 
@@ -310,6 +325,8 @@ describe("<WeekGrid />", () => {
         viewerRole="owner"
         assignees={{}}
         currentUserId="viewer-1"
+        nowMs={Date.now()}
+        todayKey={dateKeyInZone(new Date(), LA)}
       />,
     );
 
@@ -344,5 +361,40 @@ describe("<WeekGrid />", () => {
     expect(
       screen.getByTestId("calendar-appointment-completed"),
     ).toHaveAttribute("data-appointment-tone", "completed");
+  });
+
+  it("keeps a DNC-locked appointment as read-only history without lifecycle controls", () => {
+    const days = buildWeek(new Date("2026-08-19T12:00:00Z"), LA);
+    const dayStart = new Date(days[0].startUtc).getTime();
+    const nowMs = dayStart + 6 * 60 * 60 * 1000;
+    const locked = makeAppt({
+      id: "locked-history",
+      due_at: new Date(dayStart + 60 * 60 * 1000).toISOString(),
+      end_at: new Date(dayStart + 90 * 60 * 1000).toISOString(),
+      is_dnc_locked: true,
+    });
+
+    render(
+      <WeekGrid
+        days={days}
+        appointments={[locked]}
+        timezone={LA}
+        viewerRole="owner"
+        assignees={{}}
+        currentUserId="viewer-1"
+        nowMs={nowMs}
+        todayKey={days[0].date}
+      />,
+    );
+
+    expect(
+      screen.getByTestId("calendar-dnc-read-only-locked-history"),
+    ).toHaveTextContent("Read-only · Do not contact");
+    expect(
+      screen.getByTestId("calendar-appointment-locked-history"),
+    ).toHaveAttribute("data-appointment-tone", "dnc_locked");
+    expect(
+      screen.queryByTestId("stub-outcome-row-locked-history"),
+    ).not.toBeInTheDocument();
   });
 });

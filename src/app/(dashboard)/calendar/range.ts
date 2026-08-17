@@ -83,13 +83,14 @@ function zonedDateLabel(instant: Date, timeZone: string): string {
 export function resolveWeek(
   anchor: string | undefined,
   timeZone: string,
+  now: Date = new Date(),
 ): { weekStartDate: string; days: CalendarDayBounds[] } {
   let anchorInstant: Date;
   if (anchor && WEEK_DATE_RE.test(anchor)) {
     const converted = wallTimeToUtc({ date: anchor, time: "12:00", timeZone });
-    anchorInstant = converted.ok ? converted.utc : new Date();
+    anchorInstant = converted.ok ? converted.utc : now;
   } else {
-    anchorInstant = new Date();
+    anchorInstant = now;
   }
 
   const { dayStart: anchorDayStart } = getDayBoundsInZone(
@@ -129,13 +130,14 @@ export function resolveWeek(
 export function resolveMonth(
   anchor: string | undefined,
   timeZone: string,
+  now: Date = new Date(),
 ): { monthKey: string; weekStartDate: string; days: CalendarDayBounds[] } {
   let anchorInstant: Date;
   if (anchor && WEEK_DATE_RE.test(anchor)) {
     const converted = wallTimeToUtc({ date: anchor, time: "12:00", timeZone });
-    anchorInstant = converted.ok ? converted.utc : new Date();
+    anchorInstant = converted.ok ? converted.utc : now;
   } else {
-    anchorInstant = new Date();
+    anchorInstant = now;
   }
 
   const { dayStart: anchorDayStart } = getDayBoundsInZone(

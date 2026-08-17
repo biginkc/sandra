@@ -18,7 +18,21 @@ describe("Lead Detail redesign integration contract", () => {
     expect(source.match(/<SmsEntryPointGate/g)).toHaveLength(2);
     expect(source).toContain('placement="header"');
     expect(source).toContain('placement="inline"');
-    expect(source.match(/restricted=\{smsPresentation\.smsRestricted\}/g)).toHaveLength(2);
+    expect(
+      source.match(/restricted=\{smsPresentation\.smsRestricted\}/g),
+    ).toHaveLength(2);
+  });
+
+  it("loads the newest 200 messages, then restores chronological rendering", () => {
+    const queryStart = source.indexOf("const { data: threadRaw");
+    const queryEnd = source.indexOf("let latestInboundSenderQuery", queryStart);
+    const query = source.slice(queryStart, queryEnd);
+    expect(query).toContain('.order("created_at", { ascending: false })');
+    expect(query).toContain(".limit(200)");
+    expect(query).toContain("].reverse()");
+    expect(query.indexOf("ascending: false")).toBeLessThan(
+      query.indexOf(".limit(200)"),
+    );
   });
 
   it("keeps permanent DNC on its earlier, separate read-only return path", () => {

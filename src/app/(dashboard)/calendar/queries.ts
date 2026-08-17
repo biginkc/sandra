@@ -229,6 +229,7 @@ type MonthRpcRow = {
   property_city: string | null;
   property_state: string | null;
   property_deleted_at: string | null;
+  property_is_dnc_locked: boolean | null;
   contact_first_name: string | null;
   contact_last_name: string | null;
   contact_entity_name: string | null;
@@ -308,6 +309,7 @@ export async function fetchCalendarAppointmentsForWindows(
       state: propertyLinked ? row.property_state : null,
       contact_id: row.contact_id,
       contact_name: row.contact_id ? contactName : null,
+      is_dnc_locked: row.property_is_dnc_locked === true,
     };
   });
 

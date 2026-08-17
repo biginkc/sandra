@@ -24,6 +24,7 @@ function appt(
     state: null,
     contact_id: null,
     contact_name: null,
+    is_dnc_locked: false,
     ...overrides,
   };
 }
@@ -102,6 +103,16 @@ describe("formatTimeRange", () => {
         CHI,
       ),
     ).toBe("1:45 AM CDT–1:15 AM CST");
+  });
+
+  it("labels a fall-back offset transition even when the end wall-clock is later", () => {
+    expect(
+      formatTimeRange(
+        "2026-11-01T06:30:00.000Z",
+        "2026-11-01T08:00:00.000Z",
+        "America/Chicago",
+      ),
+    ).toBe("1:30 AM CDT–2:00 AM CST");
   });
 
   it("leaves a zero-length range (defensive end_at === due_at fallback) unmarked", () => {

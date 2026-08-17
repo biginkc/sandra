@@ -164,10 +164,13 @@ export async function fetchDashboardSendilloSmsHealth(): Promise<SendilloSmsHeal
  * empty queue: the dashboard must render a retry state rather than claim
  * the viewer is all caught up.
  */
-export async function fetchMyTasks(userId: string): Promise<MyTasksResult> {
+export async function fetchMyTasks(
+  userId: string,
+  now: Date = new Date(),
+): Promise<MyTasksResult> {
   const supabase = await createClient();
   const prefs = await loadIntegrationPrefs(supabase, userId);
-  const { dayStart, dayEnd } = getDayBoundsInZone(new Date(), prefs.timezone);
+  const { dayStart, dayEnd } = getDayBoundsInZone(now, prefs.timezone);
 
   let { data, error } = await supabase
     .from("tasks")

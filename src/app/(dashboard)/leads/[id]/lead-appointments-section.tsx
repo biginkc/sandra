@@ -4,6 +4,7 @@ import {
   AppointmentOutcomeRow,
   AppointmentUpcomingActions,
 } from "@/components/appointments/appointment-outcome-row";
+import { formatTimeRange } from "@/lib/time/format-time-range";
 
 export type LeadAppointmentRow = {
   id: string;
@@ -16,6 +17,8 @@ export type LeadAppointmentRow = {
 
 type Props = {
   appointments: LeadAppointmentRow[];
+  /** Request-captured instant from the lead page; stable across hydration. */
+  nowMs: number;
   /** Zone to render due/end times in — the viewer's own saved timezone
    *  (same `user_integration_prefs.timezone` source TasksPanel's
    *  `fetchMyTasks` reads, loaded via `loadIntegrationPrefs` and passed
@@ -27,20 +30,18 @@ type Props = {
   timezone: string;
 };
 
-function formatTimeRange(dueAt: string, endAt: string | null, timeZone: string): string {
-  const fmt = new Intl.DateTimeFormat("en-US", {
-    timeZone,
-    hour: "numeric",
-    minute: "2-digit",
-  });
+function formatDatedTimeRange(
+  dueAt: string,
+  endAt: string | null,
+  timeZone: string,
+): string {
   const dateFmt = new Intl.DateTimeFormat("en-US", {
     timeZone,
     month: "short",
     day: "numeric",
   });
   const start = new Date(dueAt);
-  const range = endAt ? `${fmt.format(start)}–${fmt.format(new Date(endAt))}` : fmt.format(start);
-  return `${dateFmt.format(start)}, ${range}`;
+  return `${dateFmt.format(start)}, ${formatTimeRange(dueAt, endAt, timeZone)}`;
 }
 
 /**
@@ -52,7 +53,11 @@ function formatTimeRange(dueAt: string, endAt: string | null, timeZone: string):
  * appointments aren't necessarily all owned by the viewer), so the
  * assignee id comes from the row, not the session user.
  */
-export function LeadAppointmentsSection({ appointments, timezone }: Props) {
+export function LeadAppointmentsSection({
+  appointments,
+  timezone,
+  nowMs,
+}: Props) {
   if (appointments.length === 0) {
     return (
       <div
@@ -64,10 +69,11 @@ export function LeadAppointmentsSection({ appointments, timezone }: Props) {
     );
   }
 
-  const nowMs = Date.now();
-
   return (
-    <ul className="divide-border divide-y" data-testid="lead-appointments-section">
+    <ul
+      className="divide-border divide-y"
+      data-testid="lead-appointments-section"
+    >
       {appointments.map((appt) => {
         const isPastDue = new Date(appt.due_at).getTime() < nowMs;
         return (
@@ -81,7 +87,7 @@ export function LeadAppointmentsSection({ appointments, timezone }: Props) {
                 {appt.title}
               </div>
               <div className="text-muted-foreground truncate text-xs font-medium">
-                {formatTimeRange(appt.due_at, appt.end_at, timezone)}
+                {formatDatedTimeRange(appt.due_at, appt.end_at, timezone)}
               </div>
             </div>
             {isPastDue ? (

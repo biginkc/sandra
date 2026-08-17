@@ -38,7 +38,12 @@ export function isPastDueOpen(
 }
 
 export type AppointmentVisualTone =
-  "property" | "contact" | "personal" | "needs_outcome" | "completed";
+  | "property"
+  | "contact"
+  | "personal"
+  | "needs_outcome"
+  | "completed"
+  | "dnc_locked";
 
 const APPOINTMENT_TONE_CLASSES: Record<AppointmentVisualTone, string> = {
   property: "border-indigo-200 bg-indigo-50",
@@ -46,6 +51,7 @@ const APPOINTMENT_TONE_CLASSES: Record<AppointmentVisualTone, string> = {
   personal: "border-stone-300 bg-stone-50 border-dashed",
   needs_outcome: "border-amber-300 bg-amber-50",
   completed: "border-stone-200 bg-stone-100 opacity-70",
+  dnc_locked: "border-stone-300 bg-stone-100 border-dashed opacity-80",
 };
 
 /**
@@ -57,6 +63,7 @@ export function appointmentVisualTone(
   appt: CalendarAppointmentRow,
   nowMs: number,
 ): AppointmentVisualTone {
+  if (appt.is_dnc_locked) return "dnc_locked";
   if (appt.status === "completed") return "completed";
   if (isPastDueOpen(appt, nowMs)) return "needs_outcome";
   if (appt.property_id) return "property";
@@ -123,17 +130,14 @@ export function formatColumnHeader(
 export function formatAgendaDayHeader(
   day: CalendarDayBounds,
   timeZone: string,
-  now: Date = new Date(),
+  now: Date,
 ): string {
   return formatRelativeDay(new Date(day.startUtc), timeZone, now);
 }
 
 /** Today's YYYY-MM-DD in `timeZone` — drives the week grid's accent column
  *  and the nav bar's "Today" link target. */
-export function todayDateKeyInZone(
-  timeZone: string,
-  now: Date = new Date(),
-): string {
+export function todayDateKeyInZone(timeZone: string, now: Date): string {
   const parts = new Intl.DateTimeFormat("en-US", {
     timeZone,
     year: "numeric",

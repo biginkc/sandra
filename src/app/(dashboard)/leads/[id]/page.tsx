@@ -138,6 +138,10 @@ export default async function LeadDetailPage({
   }
 
   const lead = data as DetailedLead;
+  // One request-captured instant keeps every appointment action boundary
+  // stable between server render and client hydration.
+  // eslint-disable-next-line react-hooks/purity -- this async Server Component intentionally serializes one request instant to the client
+  const requestNowMs = Date.now();
   if (lead.is_dnc_locked) {
     const { prevId, nextId } = await getPropertyNeighbors(id, "prospect");
     return (
@@ -205,9 +209,12 @@ export default async function LeadDetailPage({
     .from("messages")
     .select("*")
     .or(orFilter)
-    .order("created_at", { ascending: true })
+    // Fetch the newest bounded window first. Ordering oldest-first before
+    // LIMIT silently returns the first 200 messages ever sent and hides the
+    // live end of long-running conversations.
+    .order("created_at", { ascending: false })
     .limit(200);
-  const initialMessages = (threadRaw ?? []) as MessageRow[];
+  const initialMessages = [...((threadRaw ?? []) as MessageRow[])].reverse();
   let latestInboundSenderQuery = supabase
     .from("messages")
     .select("to_address")
@@ -663,6 +670,7 @@ export default async function LeadDetailPage({
                   <LeadAppointmentsSection
                     appointments={initialAppointments}
                     timezone={viewerTimezone}
+                    nowMs={requestNowMs}
                   />
                 )}
               </Section>

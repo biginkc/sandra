@@ -1,5 +1,5 @@
 import { render, screen } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   createClient: vi.fn(),
@@ -8,6 +8,7 @@ const mocks = vi.hoisted(() => ({
   fetchDashboardSummary: vi.fn(),
   fetchMyTasks: vi.fn(),
   getStoredSkipTraceBalance: vi.fn(),
+  getCallerMemberships: vi.fn(),
 }));
 
 vi.mock("@/lib/supabase/server", () => ({
@@ -22,6 +23,9 @@ vi.mock("@/lib/skip-trace/balance", () => ({
 vi.mock("@/lib/auth/allowlist", () => ({
   isAdminEmail: vi.fn(() => true),
 }));
+vi.mock("@/lib/auth/memberships", () => ({
+  getCallerMemberships: mocks.getCallerMemberships,
+}));
 vi.mock("./queries", () => ({
   fetchDashboardSendilloSmsHealth: mocks.fetchDashboardSendilloSmsHealth,
   fetchDashboardSummary: mocks.fetchDashboardSummary,
@@ -34,7 +38,19 @@ vi.mock("@/components/page", () => ({
   ),
 }));
 vi.mock("@/components/page-header", () => ({
-  PageHeader: () => <header data-testid="page-header" />,
+  PageHeader: ({
+    title,
+    description,
+  }: {
+    title: string;
+    description?: string;
+  }) => (
+    <header
+      data-testid="page-header"
+      data-title={title}
+      data-description={description}
+    />
+  ),
 }));
 
 function marker(name: string) {
@@ -88,6 +104,9 @@ beforeEach(() => {
     },
   });
   mocks.getStoredSkipTraceBalance.mockResolvedValue({ available: false });
+  mocks.getCallerMemberships.mockResolvedValue([
+    { user_id: "user-1", org_id: "org-1", role: "owner" },
+  ]);
   mocks.fetchDashboardSendilloSmsHealth.mockResolvedValue({
     status: "unavailable",
   });
@@ -114,6 +133,10 @@ beforeEach(() => {
     threads_needing_attention: [],
     recent_activity: [],
   });
+});
+
+afterEach(() => {
+  vi.useRealTimers();
 });
 
 describe("DashboardPage ordering", () => {
@@ -146,6 +169,61 @@ describe("DashboardPage ordering", () => {
     expect(screen.getByRole("link", { name: "Retry" })).toHaveAttribute(
       "href",
       "/dashboard",
+    );
+  });
+
+  it("hides organization KPIs, credits, and provider health from a member without fetching provider data", async () => {
+    mocks.getCallerMemberships.mockResolvedValue([
+      { user_id: "user-1", org_id: "org-1", role: "member" },
+    ]);
+
+    const { container } = render(await DashboardPage());
+
+    expect(
+      container.querySelector("[data-overview-marker='kpi-row-one']"),
+    ).toBeNull();
+    expect(
+      container.querySelector("[data-overview-marker='kpi-row-two']"),
+    ).toBeNull();
+    expect(
+      container.querySelector("[data-overview-marker='skip-trace-credits']"),
+    ).toBeNull();
+    expect(
+      container.querySelector("[data-overview-marker='sendillo-health']"),
+    ).toBeNull();
+    expect(
+      screen.queryByTestId("overview-business-health"),
+    ).not.toBeInTheDocument();
+    expect(mocks.getStoredSkipTraceBalance).not.toHaveBeenCalled();
+    expect(mocks.fetchDashboardSendilloSmsHealth).not.toHaveBeenCalled();
+    expect(mocks.createAdminClient).not.toHaveBeenCalled();
+    expect(screen.getByText("quick-actions")).toBeInTheDocument();
+  });
+
+  it("formats both greeting period and date from one instant in the viewer's task timezone", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-17T04:30:00.000Z"));
+    mocks.fetchMyTasks.mockResolvedValue({
+      status: "success",
+      overdue: [],
+      today: [],
+      upcoming: [],
+      timezone: "America/Los_Angeles",
+    });
+
+    render(await DashboardPage());
+
+    expect(screen.getByTestId("page-header")).toHaveAttribute(
+      "data-title",
+      "Good evening, Owner",
+    );
+    expect(screen.getByTestId("page-header")).toHaveAttribute(
+      "data-description",
+      "Sunday, August 16",
+    );
+    expect(mocks.fetchMyTasks).toHaveBeenCalledWith(
+      "user-1",
+      new Date("2026-08-17T04:30:00.000Z"),
     );
   });
 });

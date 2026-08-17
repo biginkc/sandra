@@ -132,6 +132,7 @@ beforeEach(() => {
           property_city: property?.city ?? null,
           property_state: property?.state ?? null,
           property_deleted_at: property?.deleted_at ?? null,
+          property_is_dnc_locked: property?.is_dnc_locked ?? null,
           contact_first_name: contact?.first_name ?? null,
           contact_last_name: contact?.last_name ?? null,
           contact_entity_name: contact?.entity_name ?? null,
@@ -231,6 +232,7 @@ describe("fetchCalendarAppointments", () => {
           city: "KC",
           state: "MO",
           deleted_at: null,
+          is_dnc_locked: true,
         },
         contacts: {
           first_name: "Jane",
@@ -253,6 +255,7 @@ describe("fetchCalendarAppointments", () => {
       property_id: "prop-1",
       address: "1 Main St",
       contact_name: "Acme LLC",
+      is_dnc_locked: true,
     });
   });
 

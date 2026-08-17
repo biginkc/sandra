@@ -55,7 +55,12 @@ function makeRow(overrides: Partial<TaskRow> & { id: string }): TaskRow {
 describe("<TasksPanel />", () => {
   it("renders a truthful Retry state on failure, never the all-caught-up copy", () => {
     render(
-      <TasksPanel status="failure" timezone={TZ} currentUserId={VIEWER_ID} />,
+      <TasksPanel
+        status="failure"
+        timezone={TZ}
+        currentUserId={VIEWER_ID}
+        nowMs={Date.now()}
+      />,
     );
 
     expect(
@@ -77,6 +82,7 @@ describe("<TasksPanel />", () => {
         upcoming={[]}
         timezone={TZ}
         currentUserId={VIEWER_ID}
+        nowMs={Date.now()}
       />,
     );
     expect(screen.getByText("My Tasks")).toBeInTheDocument();
@@ -97,6 +103,7 @@ describe("<TasksPanel />", () => {
         upcoming={[]}
         timezone={TZ}
         currentUserId={VIEWER_ID}
+        nowMs={Date.now()}
       />,
     );
 
@@ -141,6 +148,7 @@ describe("<TasksPanel />", () => {
         ]}
         timezone={TZ}
         currentUserId={VIEWER_ID}
+        nowMs={Date.now()}
       />,
     );
 
@@ -167,6 +175,7 @@ describe("<TasksPanel />", () => {
         upcoming={[]}
         timezone={TZ}
         currentUserId={VIEWER_ID}
+        nowMs={Date.now()}
       />,
     );
 
@@ -186,6 +195,7 @@ describe("<TasksPanel />", () => {
         upcoming={[]}
         timezone={TZ}
         currentUserId={VIEWER_ID}
+        nowMs={Date.now()}
       />,
     );
 
@@ -219,6 +229,7 @@ describe("<TasksPanel />", () => {
         upcoming={[]}
         timezone={TZ}
         currentUserId={VIEWER_ID}
+        nowMs={Date.now()}
       />,
     );
 
@@ -254,6 +265,7 @@ describe("<TasksPanel />", () => {
         upcoming={[]}
         timezone={TZ}
         currentUserId={VIEWER_ID}
+        nowMs={Date.now()}
       />,
     );
 
@@ -274,6 +286,7 @@ describe("<TasksPanel />", () => {
         upcoming={[]}
         timezone={TZ}
         currentUserId={VIEWER_ID}
+        nowMs={Date.now()}
       />,
     );
 
@@ -302,6 +315,7 @@ describe("<TasksPanel />", () => {
         upcoming={[]}
         timezone={TZ}
         currentUserId={VIEWER_ID}
+        nowMs={Date.now()}
       />,
     );
 
@@ -335,6 +349,7 @@ describe("<TasksPanel />", () => {
         upcoming={upcoming}
         timezone={TZ}
         currentUserId={VIEWER_ID}
+        nowMs={Date.now()}
       />,
     );
 
@@ -363,6 +378,7 @@ describe("<TasksPanel />", () => {
         ]}
         timezone={TZ}
         currentUserId={VIEWER_ID}
+        nowMs={Date.now()}
       />,
     );
 
@@ -385,6 +401,7 @@ describe("<TasksPanel />", () => {
         ]}
         timezone={TZ}
         currentUserId={VIEWER_ID}
+        nowMs={Date.now()}
       />,
     );
 
@@ -417,6 +434,7 @@ describe("<TasksPanel />", () => {
           upcoming={upcoming}
           timezone="America/Los_Angeles"
           currentUserId={VIEWER_ID}
+          nowMs={Date.now()}
         />,
       );
 

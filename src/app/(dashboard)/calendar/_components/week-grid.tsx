@@ -5,11 +5,7 @@ import type {
 } from "../types";
 
 import { AppointmentBlock } from "./appointment-block";
-import {
-  dayIndexForAppointment,
-  formatColumnHeader,
-  todayDateKeyInZone,
-} from "./calendar-shared";
+import { dayIndexForAppointment, formatColumnHeader } from "./calendar-shared";
 
 type Props = {
   days: CalendarDayBounds[];
@@ -22,6 +18,8 @@ type Props = {
    *  "whose appointment" label, never a selectable option list. */
   assignees: Record<string, string>;
   currentUserId: string;
+  nowMs: number;
+  todayKey: string;
 };
 
 /**
@@ -39,13 +37,9 @@ export function WeekGrid({
   viewerRole,
   assignees,
   currentUserId,
+  nowMs,
+  todayKey,
 }: Props) {
-  const todayKey = todayDateKeyInZone(timezone);
-  // Server-rendered-once-per-request pattern (matches TasksPanel's own
-  // `nowMs` capture) — stable for the life of this render.
-  // eslint-disable-next-line react-hooks/purity
-  const nowMs = Date.now();
-
   return (
     <div className="grid grid-cols-7 gap-2" data-testid="calendar-week-grid">
       {days.map((day, i) => {

@@ -16,6 +16,8 @@ type Props = MyTasksResult & {
    *  `assignee_id = viewer`) — appointment rows need this to drive the
    *  reschedule popover's timezone lookup. */
   currentUserId: string;
+  /** Request-captured instant shared with the Overview greeting/date. */
+  nowMs: number;
 };
 
 const TYPE_LABELS: Record<string, string> = {
@@ -80,11 +82,7 @@ export function TasksPanel(props: Props) {
     );
   }
 
-  // Server components render once per request; capturing request time
-  // here is intentional and stable for the duration of the response —
-  // same convention as dashboard/page.tsx's own `nowMs`.
-  // eslint-disable-next-line react-hooks/purity
-  const nowMs = Date.now();
+  const { nowMs } = props;
 
   return (
     <div

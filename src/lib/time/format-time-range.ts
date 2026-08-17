@@ -73,11 +73,14 @@ export function formatTimeRange(
     return `${startLabel}–${endLabel} → ${weekday}`;
   }
 
+  const startZone = zoneAbbreviation(start, timeZone);
+  const endZone = zoneAbbreviation(end, timeZone);
   if (
     end.getTime() > start.getTime() &&
-    zonedMinutesOfDay(end, timeZone) <= zonedMinutesOfDay(start, timeZone)
+    (zonedMinutesOfDay(end, timeZone) <= zonedMinutesOfDay(start, timeZone) ||
+      startZone !== endZone)
   ) {
-    return `${startLabel} ${zoneAbbreviation(start, timeZone)}–${endLabel} ${zoneAbbreviation(end, timeZone)}`;
+    return `${startLabel} ${startZone}–${endLabel} ${endZone}`;
   }
 
   return `${startLabel}–${endLabel}`;
