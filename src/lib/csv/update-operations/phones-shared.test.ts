@@ -15,6 +15,37 @@ const property = {
 };
 
 describe("phone update DNC write proof", () => {
+  it("rejects a clean-phone update that affects zero rows", async () => {
+    const contactCalls = [
+      readResult({ do_not_contact: false }),
+      updateResult([]),
+    ];
+    const op = buildPhonesOp("homeowner");
+
+    const result = await op.apply(
+      {
+        supabase: { from: vi.fn(() => contactCalls.shift()) } as never,
+        userId: null,
+      },
+      {
+        rowIndex: 3,
+        parsedRow: {
+          Address: "1 Main St",
+          "Phone 1": "8165550100",
+          "Phone 1 Type": "Mobile",
+        },
+        property,
+      },
+      { dryRun: false },
+    );
+
+    expect(result).toMatchObject({
+      kind: "rejected",
+      reason: "db-error",
+      detail: "Phone update affected 0 contacts; expected exactly one.",
+    });
+  });
+
   it("rejects a zero-row ratchet when the contact was concurrently deleted", async () => {
     const contactCalls = [
       readResult({ do_not_contact: false }),

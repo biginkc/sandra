@@ -83,6 +83,24 @@ describe("update-agent-emails sub-op (integration)", () => {
     expect(await readEmail(contactId)).toBe("agent@brokerage.com");
   });
 
+  it("leaves a permanently DNC agent contact read-only", async () => {
+    const contactId = await seedContact();
+    await seedPropertyWithAgent("150 DNC Agent Mail St", contactId);
+    const { error } = await supabase
+      .from("contacts")
+      .update({ do_not_contact: true })
+      .eq("id", contactId);
+    if (error) throw error;
+
+    const result = await applyRow({
+      Address: "150 DNC Agent Mail St",
+      Email: "changed@example.com",
+    });
+
+    expect(result).toMatchObject({ kind: "rejected", reason: "dnc-locked" });
+    expect(await readEmail(contactId)).toBeNull();
+  });
+
   it("property without agent_contact_id → rejected with reason no-agent", async () => {
     await seedPropertyWithAgent("200 NoAgent St", null);
     const match = await matchPropertyByAddress(supabase, {

@@ -83,6 +83,24 @@ describe("update-homeowner-emails sub-op (integration)", () => {
     expect(await readEmail(contactId)).toBe("owner@example.com");
   });
 
+  it("leaves a permanently DNC homeowner contact read-only", async () => {
+    const contactId = await seedContact();
+    await seedPropertyWithHomeowner("150 DNC Owner Mail St", contactId);
+    const { error } = await supabase
+      .from("contacts")
+      .update({ do_not_contact: true })
+      .eq("id", contactId);
+    if (error) throw error;
+
+    const result = await applyRow({
+      Address: "150 DNC Owner Mail St",
+      Email: "changed@example.com",
+    });
+
+    expect(result).toMatchObject({ kind: "rejected", reason: "dnc-locked" });
+    expect(await readEmail(contactId)).toBeNull();
+  });
+
   it("lowercase + trim normalization (Jane@Example.COM → jane@example.com)", async () => {
     const contactId = await seedContact();
     await seedPropertyWithHomeowner("200 Norm St", contactId);

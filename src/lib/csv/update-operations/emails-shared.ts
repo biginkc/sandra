@@ -54,6 +54,15 @@ export function buildEmailsOp(role: Role): SubOperationModule {
         };
       }
 
+      const dncLockedResult = {
+        kind: "rejected" as const,
+        rowIndex,
+        address,
+        reason: "dnc-locked",
+        detail: "Permanent Do Not Contact records are read-only.",
+      };
+      if (property.is_dnc_locked) return dncLockedResult;
+
       // A legacy property row may point at a contact from another tenant.
       // Never trust the globally unique contact id by itself: both preview
       // and execution must prove that the contact belongs to the property's
@@ -61,7 +70,7 @@ export function buildEmailsOp(role: Role): SubOperationModule {
       const { data: currentContact, error: contactReadError } =
         await ctx.supabase
           .from("contacts")
-          .select("id")
+          .select("id, do_not_contact")
           .eq("id", contactId)
           .eq("org_id", property.org_id)
           .maybeSingle();
@@ -83,6 +92,7 @@ export function buildEmailsOp(role: Role): SubOperationModule {
           detail: `Property has no ${role} contact attached in its organization.`,
         };
       }
+      if (currentContact.do_not_contact) return dncLockedResult;
 
       if (!options.dryRun) {
         const { data: updatedContacts, error } = await ctx.supabase

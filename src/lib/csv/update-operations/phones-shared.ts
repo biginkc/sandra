@@ -257,11 +257,12 @@ export function buildPhonesOp(role: Role): SubOperationModule {
           }
         }
       } else if (!options.dryRun) {
-        const { error } = await ctx.supabase
+        const { data: updatedContacts, error } = await ctx.supabase
           .from("contacts")
           .update(writeUpdate)
           .eq("id", contactId)
-          .eq("org_id", property.org_id);
+          .eq("org_id", property.org_id)
+          .select("id");
         if (error) {
           if (error.message.includes("DNC_LOCKED")) return dncLockedResult;
           return {
@@ -270,6 +271,15 @@ export function buildPhonesOp(role: Role): SubOperationModule {
             address,
             reason: "db-error",
             detail: error.message,
+          };
+        }
+        if (updatedContacts?.length !== 1) {
+          return {
+            kind: "rejected",
+            rowIndex,
+            address,
+            reason: "db-error",
+            detail: `Phone update affected ${updatedContacts?.length ?? 0} contacts; expected exactly one.`,
           };
         }
       }
