@@ -7,7 +7,6 @@ import {
   resetTenantTables,
   seedProspects,
 } from "./fixtures";
-import { checkQuietHours, STATE_TO_TZ } from "../src/lib/messaging/quiet-hours";
 import { ensureConversationIdForThread } from "../src/lib/messages/threading";
 
 /**
@@ -95,35 +94,22 @@ async function seedConsentedLead(
   };
 }
 
-function callableStateForNow(): string | null {
-  for (const state of Object.keys(STATE_TO_TZ).sort()) {
-    if (checkQuietHours(state).ok) return state;
-  }
-  return null;
-}
-
 test("reply from cockpit shows up on the lead detail page (test 29)", async ({
   page,
 }) => {
   const admin = adminClient();
   await resetTenantTables(admin);
   await ensureTestUser(admin);
-  const callableState = callableStateForNow();
-  if (callableState === null) {
-    test.skip(true, "outside legal send windows in every configured US state");
-    return;
-  }
-
   const { propertyId, threadId } = await seedConsentedLead(admin, {
     phone: uniquePhone(),
     addressTag: "PARITY-29",
-    state: callableState,
+    state: "MO",
   });
 
   await page.goto(`/messages?thread=${encodeURIComponent(threadId)}`);
   const reply = `parity from cockpit ${Date.now()}`;
   await page.getByPlaceholder(/Type.*reply/i).fill(reply);
-  await page.getByRole("button", { name: /Send reply/i }).click();
+  await page.getByTestId("inline-reply-send").click();
 
   // Wait for DB row.
   await expect(async () => {
@@ -132,7 +118,7 @@ test("reply from cockpit shows up on the lead detail page (test 29)", async ({
       .select("status")
       .eq("property_id", propertyId)
       .eq("body", reply);
-    expect(data).toHaveLength(1);
+    expect(data).toEqual([{ status: "queued" }]);
   }).toPass({ timeout: 10_000 });
 
   // Switch to lead detail.
@@ -146,23 +132,17 @@ test("reply from lead detail shows up on the cockpit (test 30)", async ({
   const admin = adminClient();
   await resetTenantTables(admin);
   await ensureTestUser(admin);
-  const callableState = callableStateForNow();
-  if (callableState === null) {
-    test.skip(true, "outside legal send windows in every configured US state");
-    return;
-  }
-
   const { propertyId, threadId } = await seedConsentedLead(admin, {
     phone: uniquePhone(),
     addressTag: "PARITY-30",
-    state: callableState,
+    state: "MO",
   });
 
   await page.goto(`/leads/${propertyId}`);
   const reply = `parity from lead detail ${Date.now()}`;
   // Lead detail uses the same InlineReply component, same placeholder text.
   await page.getByPlaceholder(/Type.*reply/i).fill(reply);
-  await page.getByRole("button", { name: /Send reply/i }).click();
+  await page.getByTestId("inline-reply-send").click();
 
   await expect(async () => {
     const { data } = await admin
@@ -170,7 +150,7 @@ test("reply from lead detail shows up on the cockpit (test 30)", async ({
       .select("status")
       .eq("property_id", propertyId)
       .eq("body", reply);
-    expect(data).toHaveLength(1);
+    expect(data).toEqual([{ status: "queued" }]);
   }).toPass({ timeout: 10_000 });
 
   await page.goto(`/messages?thread=${encodeURIComponent(threadId)}`);
@@ -191,7 +171,7 @@ test("Realtime cross-surface: both surfaces update from the other (test 31)", as
   const { contactId, propertyId, threadId } = await seedConsentedLead(admin, {
     phone,
     addressTag: "PARITY-31",
-    state: callableStateForNow() ?? "MO",
+    state: "MO",
   });
 
   const leadContext = await browser.newContext({

@@ -81,6 +81,21 @@ Implement the Claude-approved Overview, Messages, Calendar, and Lead Detail rede
 - Authenticated Claude Code CLI fallback is installed and reachable. The convergence review uses deterministic headless output with explicit `--model fable`; Opus is not used.
 - Real Chrome and the orange-border control protocol are available for the later preview and production acceptance gates.
 
+## Claude Fable convergence
+
+- Iteration 1 reviewed candidate `1d904896fad1ee8639c87509cd450e115470a6a0` through the authenticated Claude Code CLI with explicit `--model fable`.
+- Verdict: `NEXT_STEP`; confidence: high. Fable independently verified the worktree, merge base, code-review coverage, additive migration packaging, prototype exclusion, and Jitter exclusion and found no remaining Sandra code/package blocker.
+- Fable corrected the branch count from 31 to 33 commits ahead; the candidate remained zero behind and SHA identity was unchanged.
+- Codex adversarial evaluation accepted the proposed action because it was limited to publishing the exact reviewed head and running CI/preview, with migrations, merge/deploy, and Chrome gates still closed.
+- PR #372 was opened against `main` at the exact Fable-reviewed head with `Depends on: none`, nine migrations enumerated, and explicit #368/#369/#370 supersession sequencing.
+
+## First published CI correction
+
+- Published head `1d904896fad1ee8639c87509cd450e115470a6a0` passed Hugo lifecycle migrations on PostgreSQL 17, typecheck/unit/RTL, Vercel preview, and Vercel preview comments.
+- Playwright golden paths failed with 104 passes, one retry-pass, seven skips, and ten failures. Artifact inspection proved all ten failures were test-contract drift rather than a new product regression: eight still expected the removed immediate-send/compose-time quiet-hours/one-click permanent-DNC workflow, while one design check still named `Send SMS` and one Leads fixture assumed the authenticated user appeared in the first 200 auth rows.
+- The four affected Sandra specs now assert the approved boundary: queue-only replies create durable `queued` rows with no provider external id, exact `Queued · in Outbox` receipts remain visible across Messages and Lead Detail, opted-out threads render no composer, unknown-state work queues for release-time safety recheck, permanent DNC remains truthfully unavailable in Messages, and auth-user discovery is paginated.
+- Focused proof after the correction: changed-spec ESLint clean, full typecheck clean, `git diff --check` clean, and Playwright 12/12 pass across design fidelity, cockpit/Lead parity, queue-only reply behavior, and Leads board desktop/narrow coverage.
+
 ## Active execution lane
 
 - Root integration: exhaustive exact-head review, Claude convergence, final build/database/browser evidence, PR/CI, migration, merge, deployment, and production acceptance.
@@ -99,4 +114,4 @@ Implement the Claude-approved Overview, Messages, Calendar, and Lead Detail rede
 
 ## Current state
 
-Both prior whole-change candidates were correctly rejected. Their correction families are committed through `269bb6e`; all static/unit/RTL/build and exact-head Sandra-only integration gates are clean, and the final database and UI correction reviewers report zero blockers at the exact code head. Claude Fable convergence is next, followed by publication, CI/preview, final migration rehearsal, merge/deploy, and real Chrome acceptance. No production migration, merge, deployment, provider send, or production browser mutation has occurred in this execution block yet.
+Both prior whole-change candidates were correctly rejected. Their correction families are committed through `269bb6e`; all static/unit/RTL/build and exact-head Sandra-only integration gates are clean, and the final database and UI correction reviewers report zero blockers at the exact code head. Fable iteration 1 found no Sandra code/package blocker, PR #372 is published, and every first-run CI gate except the stale Playwright expectations passed. Those ten expectations are corrected with 12/12 focused local browser proof; the next step is commit/push, exact-head correction review, Fable convergence, and rerun CI/preview before migration, merge/deploy, and real Chrome acceptance. No production migration, merge, deployment, provider send, or production browser mutation has occurred in this execution block yet.
