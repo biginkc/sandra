@@ -3,6 +3,7 @@ import { createHmac } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createTestClient } from "@tests/integration/client";
+import { getCanonicalTestOrgId } from "@tests/integration/fixtures/multi-user";
 import { resetTenantTables } from "@tests/integration/reset";
 
 const testClient = createTestClient();
@@ -44,25 +45,32 @@ import { POST } from "./route";
 const signingSecret = "integration-slack-signing-secret";
 
 async function createAuthUser(email: string): Promise<string> {
+  const uniqueEmail = email.replace("@", `-${crypto.randomUUID()}@`);
   const { data, error } = await testClient.auth.admin.createUser({
-    email,
+    email: uniqueEmail,
     password: `test-pw-${Math.random().toString(36).slice(2)}`,
     email_confirm: true,
   });
   if (error || !data.user) {
-    throw new Error(`createAuthUser(${email}) failed: ${error?.message}`);
+    throw new Error(`createAuthUser(${uniqueEmail}) failed: ${error?.message}`);
   }
   createdAuthUsers.push(data.user.id);
+  const { error: membershipError } = await testClient.from("memberships").insert({
+    org_id: await getOrgId(),
+    user_id: data.user.id,
+    role: "member",
+    access_status: "active",
+  });
+  if (membershipError) {
+    throw new Error(
+      `createAuthUser(${uniqueEmail}) membership failed: ${membershipError.message}`,
+    );
+  }
   return data.user.id;
 }
 
 async function getOrgId(): Promise<string> {
-  const { data } = await testClient
-    .from("organizations")
-    .select("id")
-    .limit(1)
-    .single();
-  return data!.id;
+  return getCanonicalTestOrgId(testClient);
 }
 
 async function seedProperty(): Promise<string> {

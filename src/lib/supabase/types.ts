@@ -3789,6 +3789,14 @@ export type Database = {
         Args: { p_property_id: string }
         Returns: undefined
       }
+      sms_inbox_thread_snapshot: {
+        Args: { p_cutoff: string }
+        Returns: Json
+      }
+      resolve_sms_conversation_org: {
+        Args: { p_conversation_id: string }
+        Returns: string
+      }
       claim_paid_property_enrichment: {
         Args: { p_org_id: string; p_property_id: string }
         Returns: boolean

@@ -1,12 +1,14 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { matchPropertyByAddress } from "@/lib/csv/match-by-address";
 import { normalizeAddress } from "@/lib/csv/normalize";
 import { updateHomeownerEmailsOp } from "@/lib/csv/update-operations/update-homeowner-emails";
 import { createTestClient } from "@tests/integration/client";
+import { createTemporaryOrganizationTracker } from "@tests/integration/fixtures/temporary-organizations";
 import { resetTenantTables } from "@tests/integration/reset";
 
 const supabase = createTestClient();
+const temporaryOrganizations = createTemporaryOrganizationTracker(supabase);
 
 async function seedContact(): Promise<string> {
   const { data, error } = await supabase
@@ -66,6 +68,10 @@ describe("update-homeowner-emails sub-op (integration)", () => {
     await resetTenantTables(supabase);
   });
 
+  afterEach(async () => {
+    await temporaryOrganizations.cleanup();
+  });
+
   it("email written to the homeowner contact", async () => {
     const contactId = await seedContact();
     await seedPropertyWithHomeowner("100 Mail St", contactId);
@@ -75,6 +81,24 @@ describe("update-homeowner-emails sub-op (integration)", () => {
     });
     expect(result.kind).toBe("updated");
     expect(await readEmail(contactId)).toBe("owner@example.com");
+  });
+
+  it("leaves a permanently DNC homeowner contact read-only", async () => {
+    const contactId = await seedContact();
+    await seedPropertyWithHomeowner("150 DNC Owner Mail St", contactId);
+    const { error } = await supabase
+      .from("contacts")
+      .update({ do_not_contact: true })
+      .eq("id", contactId);
+    if (error) throw error;
+
+    const result = await applyRow({
+      Address: "150 DNC Owner Mail St",
+      Email: "changed@example.com",
+    });
+
+    expect(result).toMatchObject({ kind: "rejected", reason: "dnc-locked" });
+    expect(await readEmail(contactId)).toBeNull();
   });
 
   it("lowercase + trim normalization (Jane@Example.COM → jane@example.com)", async () => {
@@ -105,5 +129,54 @@ describe("update-homeowner-emails sub-op (integration)", () => {
     );
     expect(result.kind).toBe("rejected");
     if (result.kind === "rejected") expect(result.reason).toBe("no-homeowner");
+  });
+
+  it("fails closed on a legacy cross-tenant homeowner link and leaves the foreign email unchanged", async () => {
+    const foreignOrg = await temporaryOrganizations.create(
+      "Homeowner email foreign tenant",
+    );
+    const { data: foreignContact, error: contactError } = await supabase
+      .from("contacts")
+      .insert({
+        org_id: foreignOrg.id,
+        first_name: "Foreign",
+        last_name: "Homeowner",
+        email: "foreign-owner@example.com",
+      })
+      .select("id")
+      .single();
+    if (contactError || !foreignContact) {
+      throw contactError ?? new Error("foreign contact seed failed");
+    }
+
+    await seedPropertyWithHomeowner("325 Cross Tenant Owner St", null);
+    const match = await matchPropertyByAddress(supabase, {
+      address: "325 Cross Tenant Owner St",
+    });
+    if (match.kind !== "matched") throw new Error("expected matched");
+
+    // The schema now rejects new cross-tenant links. Override the matched
+    // application boundary to reproduce a historical row that predates the
+    // forward constraint, while keeping the contact itself in the real DB.
+    const result = await updateHomeownerEmailsOp.apply(
+      { supabase, userId: null },
+      {
+        rowIndex: 0,
+        parsedRow: {
+          Address: "325 Cross Tenant Owner St",
+          Email: "stolen@example.com",
+        },
+        property: {
+          ...match.property,
+          homeowner_contact_id: foreignContact.id,
+        },
+      },
+      { dryRun: false },
+    );
+
+    expect(result).toMatchObject({ kind: "rejected", reason: "no-homeowner" });
+    expect(await readEmail(foreignContact.id)).toBe(
+      "foreign-owner@example.com",
+    );
   });
 });

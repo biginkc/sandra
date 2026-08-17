@@ -7,14 +7,12 @@ import {
   resetTenantTables,
   seedProspects,
 } from "./fixtures";
-import { checkQuietHours, STATE_TO_TZ } from "../src/lib/messaging/quiet-hours";
 import { ensureConversationIdForThread } from "../src/lib/messages/threading";
 
 /**
- * Feature 8 Phase 1 — send-now reply flow from the cockpit side panel.
- * The reply goes through the existing InlineReply → sendSmsFromLead →
- * sendSmsToContact path with queueOnly=false. Mock messaging provider
- * stamps an external_id starting with `mock_`.
+ * Feature 8 Phase 1 — queue-only reply flow from the cockpit side panel.
+ * Inline replies create a durable Outbox row. Delivery, consent, suppression,
+ * and release timing stay under Outbox control.
  */
 
 async function seedConsentedThread(
@@ -90,30 +88,17 @@ async function seedConsentedThread(
   };
 }
 
-function callableStateForNow(): string | null {
-  for (const state of Object.keys(STATE_TO_TZ).sort()) {
-    if (checkQuietHours(state).ok) return state;
-  }
-  return null;
-}
-
-test("type body, hit Send → bubble appears + DB row is status='sent' (tests 20 + 21)", async ({
+test("type body, queue reply → Outbox receipt appears + DB row is queued (tests 20 + 21)", async ({
   page,
 }) => {
   const admin = adminClient();
   await resetTenantTables(admin);
   await ensureTestUser(admin);
-  const callableState = callableStateForNow();
-  if (callableState === null) {
-    test.skip(true, "outside legal send windows in every configured US state");
-    return;
-  }
-
   const { propertyId, threadId } = await seedConsentedThread(admin, {
     phone: "+18165557201",
     addressTag: "REPLY-OK",
     opted: "in",
-    state: callableState,
+    state: "MO",
   });
 
   await page.goto(`/messages?thread=${encodeURIComponent(threadId)}`);
@@ -122,9 +107,9 @@ test("type body, hit Send → bubble appears + DB row is status='sent' (tests 20
   const reply = `cockpit reply ${Date.now()}`;
   const textarea = page.getByPlaceholder(/Type.*reply/i);
   await textarea.fill(reply);
-  await page.getByRole("button", { name: /Send reply/i }).click();
+  await page.getByTestId("inline-reply-send").click();
 
-  // DB shows the new outbound row at status='sent' with mock external_id.
+  // Queueing never calls the provider. The durable row remains in Outbox.
   await expect(async () => {
     const { data } = await admin
       .from("messages")
@@ -132,16 +117,19 @@ test("type body, hit Send → bubble appears + DB row is status='sent' (tests 20
       .eq("property_id", propertyId)
       .eq("body", reply);
     expect(data).toHaveLength(1);
-    expect(data![0].status).toBe("sent");
+    expect(data![0].status).toBe("queued");
     expect(data![0].direction).toBe("outbound");
-    expect(data![0].external_id).toMatch(/^mock_/);
+    expect(data![0].external_id).toBeNull();
   }).toPass({ timeout: 10_000 });
 
-  // Bubble appears in the panel.
+  // The operator gets an exact, truthful Outbox receipt.
   await expect(page.getByTestId("inbox-detail-panel")).toContainText(reply);
+  await expect(page.getByTestId("inbox-detail-panel")).toContainText(
+    "Queued · in Outbox",
+  );
 });
 
-test("Send button is disabled when the body is empty (test 22)", async ({
+test("Queue button is disabled when the body is empty (test 22)", async ({
   page,
 }) => {
   const admin = adminClient();
@@ -155,43 +143,34 @@ test("Send button is disabled when the body is empty (test 22)", async ({
   });
 
   await page.goto(`/messages?thread=${encodeURIComponent(threadId)}`);
-  const sendBtn = page.getByRole("button", { name: /Send reply/i });
+  const sendBtn = page.getByTestId("inline-reply-send");
   await expect(sendBtn).toBeDisabled();
 
   await page.getByPlaceholder(/Type.*reply/i).fill("now I have content");
   await expect(sendBtn).toBeEnabled();
 });
 
-test("reply to opted-out contact surfaces consent block (test 23)", async ({
+test("opted-out contact renders a restriction instead of a composer (test 23)", async ({
   page,
 }) => {
   const admin = adminClient();
   await resetTenantTables(admin);
   await ensureTestUser(admin);
-  const callableState = callableStateForNow();
-  if (callableState === null) {
-    test.skip(true, "outside legal send windows in every configured US state");
-    return;
-  }
-
   const { propertyId, threadId } = await seedConsentedThread(admin, {
     phone: "+18165557203",
     addressTag: "REPLY-NOCONSENT",
     opted: "out",
-    state: callableState,
+    state: "MO",
   });
 
   await page.goto(`/messages?thread=${encodeURIComponent(threadId)}`);
   const reply = `should be blocked ${Date.now()}`;
-  await page.getByPlaceholder(/Type.*reply/i).fill(reply);
-  await page.getByRole("button", { name: /Send reply/i }).click();
-
-  // Toast surfaces.
   await expect(
-    page.getByText(/Blocked.*consent|opted out/i).first(),
-  ).toBeVisible({ timeout: 10_000 });
+    page.getByText(/SMS disabled.*consent.*suppression/i).first(),
+  ).toBeVisible();
+  await expect(page.getByPlaceholder(/Type.*reply/i)).toHaveCount(0);
+  await expect(page.getByTestId("inline-reply-send")).toHaveCount(0);
 
-  // No outbound row was created with that body.
   const { data } = await admin
     .from("messages")
     .select("id")
@@ -200,7 +179,7 @@ test("reply to opted-out contact surfaces consent block (test 23)", async ({
   expect(data).toHaveLength(0);
 });
 
-test("reply during quiet hours surfaces quiet-hours block (test 24)", async ({
+test("unknown-state reply queues for release-time safety recheck (test 24)", async ({
   page,
 }) => {
   // Force quiet hours by setting the property to an unknown state so
@@ -221,46 +200,33 @@ test("reply during quiet hours surfaces quiet-hours block (test 24)", async ({
     .eq("id", propertyId);
 
   await page.goto(`/messages?thread=${encodeURIComponent(threadId)}`);
-  const reply = `should be quiet-blocked ${Date.now()}`;
+  const reply = `release-time safety ${Date.now()}`;
   await page.getByPlaceholder(/Type.*reply/i).fill(reply);
-  await page.getByRole("button", { name: /Send reply/i }).click();
+  await page.getByTestId("inline-reply-send").click();
 
-  await expect(page.getByText(/Blocked: quiet hours/i).first()).toBeVisible({
-    timeout: 10_000,
-  });
-  await expect(
-    page
-      .getByText(/Property has no US state .* Add state and retry\./i)
-      .first(),
-  ).toBeVisible({ timeout: 10_000 });
-
-  const { data } = await admin
-    .from("messages")
-    .select("id")
-    .eq("property_id", propertyId)
-    .eq("body", reply);
-  expect(data).toHaveLength(0);
+  await expect(async () => {
+    const { data } = await admin
+      .from("messages")
+      .select("status, external_id")
+      .eq("property_id", propertyId)
+      .eq("body", reply);
+    expect(data).toEqual([{ status: "queued", external_id: null }]);
+  }).toPass({ timeout: 10_000 });
+  await expect(page.getByText("Queued · in Outbox").first()).toBeVisible();
 });
 
-test("after a successful send, the thread jumps to the top of the inbox (test 25)", async ({
+test("after queueing, the selected thread stays stable and shows its Outbox receipt (test 25)", async ({
   page,
 }) => {
   const admin = adminClient();
   await resetTenantTables(admin);
   await ensureTestUser(admin);
-  const callableState = callableStateForNow();
-  if (callableState === null) {
-    test.skip(true, "outside legal send windows in every configured US state");
-    return;
-  }
-
-  // Two threads: A is older, B is the one we'll reply to. After the
-  // reply, B should jump to the top.
+  // Two threads: queueing on B must not navigate away or claim delivery.
   const a = await seedConsentedThread(admin, {
     phone: "+18165557205",
     addressTag: "REPLY-A",
     opted: "in",
-    state: callableState,
+    state: "MO",
   });
   await admin
     .from("messages")
@@ -271,7 +237,7 @@ test("after a successful send, the thread jumps to the top of the inbox (test 25
     phone: "+18165557206",
     addressTag: "REPLY-B",
     opted: "in",
-    state: callableState,
+    state: "MO",
   });
   await admin
     .from("messages")
@@ -279,14 +245,13 @@ test("after a successful send, the thread jumps to the top of the inbox (test 25
     .eq("contact_id", b.contactId);
 
   await page.goto(`/messages?thread=${encodeURIComponent(b.threadId)}`);
-  await page.getByPlaceholder(/Type.*reply/i).fill(`bump ${Date.now()}`);
-  await page.getByRole("button", { name: /Send reply/i }).click();
+  const reply = `stay selected ${Date.now()}`;
+  await page.getByPlaceholder(/Type.*reply/i).fill(reply);
+  await page.getByTestId("inline-reply-send").click();
 
-  // Wait for the send to round-trip and the list to refresh.
-  await expect(async () => {
-    const list = page.getByTestId("inbox-thread-list");
-    const buttons = list.locator("button");
-    const firstId = await buttons.first().getAttribute("data-testid");
-    expect(firstId).toBe(`inbox-thread-${b.threadId}`);
-  }).toPass({ timeout: 10_000 });
+  await expect(page).toHaveURL(
+    new RegExp(`[?&]thread=${encodeURIComponent(b.threadId)}`),
+  );
+  await expect(page.getByTestId("inbox-detail-panel")).toContainText(reply);
+  await expect(page.getByText("Queued · in Outbox").first()).toBeVisible();
 });

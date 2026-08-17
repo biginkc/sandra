@@ -10,6 +10,11 @@ import { Button } from "@/components/ui/button";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
 import { loadIntegrationPrefs } from "@/lib/integrations/prefs";
+import {
+  computeConsentState,
+  type ConsentState,
+} from "@/lib/messaging/consent";
+import { isSmsPhoneSuppressed } from "@/lib/messaging/opt-out-phone";
 import { getMessagingProvider } from "@/lib/messaging/registry";
 import { selectBestSmsPhone } from "@/lib/messaging/sms-phone";
 import { zillowUrl } from "@/lib/utils/zillow-url";
@@ -42,7 +47,12 @@ import {
   type CallActivityRollupRow,
 } from "./lead-call-summary";
 import { LeadAppointmentsSection } from "./lead-appointments-section";
+import { deriveLeadSmsPresentation } from "./lead-detail-state";
+import { LeadIdentityActions } from "./lead-identity-actions";
+import { LeadLoadFailure } from "./lead-load-failure";
 import { LeadTaskWidget } from "./lead-task-widget";
+import { NextActionCard, type LeadNextTask } from "./next-action-card";
+import { SmsEntryPointGate } from "./sms-channel-restriction";
 import { SmsComposer } from "./sms-composer";
 import { TagsSection } from "./tags-section";
 import type { MotivationLevel } from "../actions";
@@ -101,6 +111,10 @@ export default async function LeadDetailPage({
     .maybeSingle();
 
   if (error) {
+    console.error("[leads] detail fetch failed", {
+      message: error.message,
+      code: error.code,
+    });
     return (
       <Page>
         <PageHeader
@@ -111,9 +125,10 @@ export default async function LeadDetailPage({
           ]}
           title="Lead"
         />
-        <div className="text-destructive text-sm">
-          Failed to load lead: {error.message}
-        </div>
+        <LeadLoadFailure
+          title="Lead details did not load"
+          detail="Sandra could not retrieve this record. This is a load failure, not an empty lead."
+        />
       </Page>
     );
   }
@@ -123,26 +138,50 @@ export default async function LeadDetailPage({
   }
 
   const lead = data as DetailedLead;
+  // One request-captured instant keeps every appointment action boundary
+  // stable between server render and client hydration.
+  // eslint-disable-next-line react-hooks/purity -- this async Server Component intentionally serializes one request instant to the client
+  const requestNowMs = Date.now();
   if (lead.is_dnc_locked) {
-    const { prevId, nextId } = await getPropertyNeighbors(id, "prospect");
+    const lockedMode = lead.status === "prospect" ? "prospect" : "lead";
+    const { prevId, nextId } = await getPropertyNeighbors(id, lockedMode);
     return (
       <LockedDncPropertyDetail
         lead={lead}
         prevId={prevId}
         nextId={nextId}
+        mode={lockedMode}
       />
     );
   }
-  const homeownerSmsPhone = selectBestSmsPhone(lead.homeowner)?.phone ?? null;
+  const homeownerSmsChoice = selectBestSmsPhone(lead.homeowner);
+  const homeownerSmsPhone = homeownerSmsChoice?.phone ?? null;
+  const homeownerContactId = lead.homeowner?.id ?? null;
 
-  // Started early, consumed just before render (same parallel-fetch shape
-  // as `usersPromise` below) — this lead's own open appointments, each
-  // with its own outcome/reschedule/cancel controls (Appointments
-  // section).
-  const appointmentsPromise = supabase
+  // Consent and phone-level suppression are separate existing read models.
+  // Load both so the page does not infer "OK to text" from the mere presence
+  // of a phone number or conflate a channel opt-out with permanent DNC.
+  const smsConsentEventsPromise = homeownerContactId
+    ? supabase
+        .from("consent_events")
+        .select("event_type, occurred_at")
+        .eq("contact_id", homeownerContactId)
+        .eq("channel", "sms")
+        .order("occurred_at", { ascending: false })
+        .limit(20)
+    : null;
+  const smsPhoneSuppressionPromise = homeownerSmsPhone
+    ? isSmsPhoneSuppressed(supabase, homeownerSmsPhone, lead.org_id)
+        .then((value) => ({ ok: true as const, value }))
+        .catch(() => ({ ok: false as const, value: null }))
+    : Promise.resolve({ ok: true as const, value: false });
+
+  // One source for both the nearest dated commitment and the Appointments
+  // section. Querying only appointments made a lead with an existing callback
+  // look as though it had no next action.
+  const openWorkPromise = supabase
     .from("tasks")
-    .select("id, title, due_at, end_at, assignee_id")
-    .eq("type", "appointment")
+    .select("id, title, due_at, end_at, assignee_id, type")
     .eq("related_property_id", lead.id)
     .eq("status", "open")
     .order("due_at", { ascending: true });
@@ -169,17 +208,19 @@ export default async function LeadDetailPage({
 
   // Fetch existing SMS thread — messages linked either to the property
   // directly or to the homeowner (catches inbound that lands pre-linkage).
-  const homeownerContactId = lead.homeowner?.id ?? null;
   const orFilter = homeownerContactId
     ? `property_id.eq.${lead.id},contact_id.eq.${homeownerContactId}`
     : `property_id.eq.${lead.id}`;
-  const { data: threadRaw } = await supabase
+  const { data: threadRaw, error: threadError } = await supabase
     .from("messages")
     .select("*")
     .or(orFilter)
-    .order("created_at", { ascending: true })
+    // Fetch the newest bounded window first. Ordering oldest-first before
+    // LIMIT silently returns the first 200 messages ever sent and hides the
+    // live end of long-running conversations.
+    .order("created_at", { ascending: false })
     .limit(200);
-  const initialMessages = (threadRaw ?? []) as MessageRow[];
+  const initialMessages = [...((threadRaw ?? []) as MessageRow[])].reverse();
   let latestInboundSenderQuery = supabase
     .from("messages")
     .select("to_address")
@@ -213,7 +254,8 @@ export default async function LeadDetailPage({
   } catch {
     providerDefaultFromNumber = null;
   }
-  const preferredFromNumber = latestInboundSender?.to_address ??
+  const preferredFromNumber =
+    latestInboundSender?.to_address ??
     [...initialMessages]
       .reverse()
       .find(
@@ -232,7 +274,7 @@ export default async function LeadDetailPage({
   void markMessagesReadForProperty(lead.id);
 
   // Notes — newest first for the feed component.
-  const { data: notesRaw } = await supabase
+  const { data: notesRaw, error: notesError } = await supabase
     .from("lead_notes")
     .select("*")
     .eq("property_id", lead.id)
@@ -258,7 +300,7 @@ export default async function LeadDetailPage({
     }
   })();
 
-  const { data: callRollupRaw } = await supabase
+  const { data: callRollupRaw, error: callRollupError } = await supabase
     .from("call_activities")
     .select(
       "id, started_at, outcome, disposition, recording_status, transcript_status",
@@ -266,32 +308,60 @@ export default async function LeadDetailPage({
     .eq("property_id", lead.id)
     .order("started_at", { ascending: false, nullsFirst: false })
     .limit(20);
-  const initialCallRows =
-    (callRollupRaw ?? []) as unknown as CallActivityRollupRow[];
+  const initialCallRows = (callRollupRaw ??
+    []) as unknown as CallActivityRollupRow[];
 
-  const { data: appointmentsRaw, error: appointmentsError } =
-    await appointmentsPromise;
-  if (appointmentsError && appointmentsError.code !== "42703") {
-    // 42703 = post-deploy pre-migration window (end_at/type='appointment'
-    // don't exist yet) — degrade to an empty section rather than failing
-    // the whole page; any other error still just logs.
-    console.error("[leads] appointments fetch failed", {
-      message: appointmentsError.message,
-      code: appointmentsError.code,
+  const { data: openWorkRaw, error: openWorkError } = await openWorkPromise;
+  if (openWorkError) {
+    console.error("[leads] open work fetch failed", {
+      message: openWorkError.message,
+      code: openWorkError.code,
     });
   }
-  const initialAppointments = (appointmentsRaw ?? []) as Array<{
+  const openWork = (openWorkRaw ?? []) as Array<{
     id: string;
     title: string;
     due_at: string;
     end_at: string | null;
     assignee_id: string;
+    type: string;
   }>;
+  const initialAppointments = openWork.filter(
+    (task) => task.type === "appointment",
+  );
+  // The database result is already due-date ordered. Appointments and plain
+  // tasks compete in one timeline; filtering first could show a 3 PM callback
+  // while hiding the real 9 AM appointment.
+  const nextTask = (openWork[0] ?? null) as LeadNextTask | null;
+
+  const smsConsentEventsResult = smsConsentEventsPromise
+    ? await smsConsentEventsPromise
+    : { data: [], error: null };
+  const phoneSuppressionResult = await smsPhoneSuppressionPromise;
+  const consentState: ConsentState | null = smsConsentEventsResult.error
+    ? null
+    : computeConsentState(smsConsentEventsResult.data ?? []);
+  const smsPresentation = deriveLeadSmsPresentation({
+    hasContact: Boolean(lead.homeowner),
+    hasUsablePhone: Boolean(
+      homeownerSmsChoice && homeownerSmsChoice.lineType !== "landline",
+    ),
+    consentState,
+    contactSmsOptedOut: lead.homeowner?.sms_opted_out ?? false,
+    propertySmsOptedOut: lead.outreach_dispo === "opted_out",
+    phoneSuppressed: phoneSuppressionResult.ok
+      ? phoneSuppressionResult.value
+      : null,
+    outreachDispo: lead.outreach_dispo,
+    phoneLineType: homeownerSmsChoice?.lineType ?? null,
+  });
 
   // Tags attached to this property, with the tag row joined inline.
-  const { data: tagRowsRaw } = await supabase
+  const { data: tagRowsRaw, error: tagRowsError } = await supabase
     .from("property_tags")
-    .select("tags!property_tags_tag_id_fkey(id, name, color, category, system_managed)")
+    .select(
+      "tags!property_tags_tag_id_fkey(id, name, color, category, system_managed)",
+    )
     .eq("property_id", lead.id);
   const initialTags: TagRow[] = [];
   for (const r of tagRowsRaw ?? []) {
@@ -304,13 +374,10 @@ export default async function LeadDetailPage({
   const templatesResult = await listTemplates();
   let templateOptions: Array<{ id: string; name: string; body: string }> = [];
   if (templatesResult.ok && templatesResult.data.length > 0) {
-    const vars = await loadTemplateVars(
-      supabase,
-      {
-        propertyId: lead.id,
-        contactId: homeownerContactId,
-      },
-    );
+    const vars = await loadTemplateVars(supabase, {
+      propertyId: lead.id,
+      contactId: homeownerContactId,
+    });
     templateOptions = templatesResult.data.map((t) => ({
       id: t.id,
       name: t.name,
@@ -352,7 +419,7 @@ export default async function LeadDetailPage({
           [lead.city, lead.state, lead.zip].filter(Boolean).join(", ") || "—"
         }
         actions={
-          <div className="flex items-center gap-1">
+          <div className="grid w-full grid-cols-2 gap-2 [&_button]:min-h-11 sm:flex sm:w-auto sm:items-center sm:[&_button]:min-h-8">
             <Link href="/leads">
               <Button variant="outline" size="sm" aria-label="Back to leads">
                 <ChevronLeft className="mr-1 h-4 w-4" />
@@ -380,7 +447,12 @@ export default async function LeadDetailPage({
                 </Button>
               </Link>
             ) : (
-              <Button variant="ghost" size="icon" disabled aria-label="No previous">
+              <Button
+                variant="ghost"
+                size="icon"
+                disabled
+                aria-label="No previous"
+              >
                 <ChevronLeft className="h-4 w-4" />
               </Button>
             )}
@@ -395,7 +467,6 @@ export default async function LeadDetailPage({
                 <ChevronRight className="h-4 w-4" />
               </Button>
             )}
-            <DeleteLeadButton propertyId={lead.id} address={lead.address} />
           </div>
         }
       />
@@ -415,79 +486,209 @@ export default async function LeadDetailPage({
         initialVisible={lead.needs_human_attention}
         reason={lead.last_ai_escalation_reason}
         escalatedAt={lead.last_ai_escalation_at}
+        nowMs={requestNowMs}
       />
 
-      <div className="border-border flex flex-col gap-2 border-b pb-4">
-        <div className="flex flex-wrap items-center gap-1.5">
-          <LeadStatusWidget
-            propertyId={lead.id}
-            initialStatus={lead.status as PropertyStatus}
-            address={lead.address}
-          />
-          <LeadAssigneeWidget
-            propertyId={lead.id}
-            address={lead.address}
-            initialAssigneeId={lead.assigned_user_id}
-            initialAssigneeEmail={assigneeEmail}
-            currentUserId={sessionUser?.id ?? null}
-          />
-          <LeadMotivationWidget
-            propertyId={lead.id}
-            address={lead.address}
-            initial={lead.motivation_level as MotivationLevel | null}
-          />
-          <EnrollInSequenceWidget propertyId={lead.id} />
-          <BookAppointmentPopover
-            propertyId={lead.id}
-            contactId={lead.homeowner?.id ?? undefined}
-            subjectLabel={lead.address}
-            currentUserId={sessionUser?.id ?? null}
-            triggerLabel="Book appt"
-          />
-          <AiResponderToggle
-            propertyId={lead.id}
-            initialDisabled={lead.ai_responder_disabled}
-          />
-          <SkipTraceToggle
-            propertyId={lead.id}
-            initialDisabled={lead.skip_trace_disabled}
-          />
-          {!lead.homeowner?.phone_1 ? (
-            <SkipTraceButton propertyId={lead.id} />
-          ) : null}
-          {lead.market ? (
-            <Badge variant="secondary">{lead.market}</Badge>
-          ) : null}
-          {lead.is_vacant ? (
-            <Badge variant="destructive">Vacant</Badge>
-          ) : null}
-          {lead.absentee_flag ? (
-            <Badge variant="secondary">Absentee</Badge>
-          ) : null}
-          <Badge
-            variant={lead.cass_status === "verified" ? "default" : "outline"}
+      <LeadIdentityActions
+        workingState={
+          <>
+            <LeadStatusWidget
+              propertyId={lead.id}
+              initialStatus={lead.status as PropertyStatus}
+              address={lead.address}
+            />
+            <LeadAssigneeWidget
+              propertyId={lead.id}
+              address={lead.address}
+              initialAssigneeId={lead.assigned_user_id}
+              initialAssigneeEmail={assigneeEmail}
+              currentUserId={sessionUser?.id ?? null}
+            />
+            <LeadMotivationWidget
+              propertyId={lead.id}
+              address={lead.address}
+              initial={lead.motivation_level as MotivationLevel | null}
+            />
+          </>
+        }
+        primaryActions={
+          <>
+            <BookAppointmentPopover
+              propertyId={lead.id}
+              contactId={lead.homeowner?.id ?? undefined}
+              subjectLabel={lead.address}
+              currentUserId={sessionUser?.id ?? null}
+              triggerLabel="Book appt"
+            />
+            <SmsEntryPointGate
+              restricted={smsPresentation.smsRestricted}
+              placement="header"
+              restrictionLabel={smsPresentation.consentLabel}
+              restrictionDetail={smsPresentation.consentDetail}
+            >
+              <SmsComposer
+                propertyId={lead.id}
+                homeownerContactId={lead.homeowner?.id ?? null}
+                homeownerPhone={homeownerSmsPhone}
+                homeownerName={
+                  lead.homeowner?.contact_type === "entity"
+                    ? lead.homeowner.entity_name
+                    : lead.homeowner
+                      ? [lead.homeowner.first_name, lead.homeowner.last_name]
+                          .filter(Boolean)
+                          .join(" ") || null
+                      : null
+                }
+                preferredFromNumber={preferredFromNumber}
+                templates={templateOptions}
+              />
+            </SmsEntryPointGate>
+          </>
+        }
+        recordSignals={
+          <>
+            {lead.market ? (
+              <Badge variant="secondary">{lead.market}</Badge>
+            ) : null}
+            {lead.is_vacant ? (
+              <Badge variant="destructive">Vacant</Badge>
+            ) : null}
+            {lead.absentee_flag ? (
+              <Badge variant="secondary">Absentee</Badge>
+            ) : null}
+            <Badge
+              variant={lead.cass_status === "verified" ? "default" : "outline"}
+            >
+              CASS {lead.cass_status}
+            </Badge>
+            <Badge
+              variant={smsPresentation.smsRestricted ? "outline" : "secondary"}
+              data-testid="lead-sms-consent-chip"
+            >
+              SMS: {smsPresentation.consentLabel}
+            </Badge>
+          </>
+        }
+        automationActions={
+          <>
+            <EnrollInSequenceWidget propertyId={lead.id} />
+            <AiResponderToggle
+              propertyId={lead.id}
+              initialDisabled={lead.ai_responder_disabled}
+            />
+            <SkipTraceToggle
+              propertyId={lead.id}
+              initialDisabled={lead.skip_trace_disabled}
+            />
+            {!lead.homeowner?.phone_1 ? (
+              <SkipTraceButton propertyId={lead.id} />
+            ) : null}
+            <CassWidget propertyId={lead.id} cassStatus={lead.cass_status} />
+          </>
+        }
+      />
+
+      <section
+        aria-labelledby="lead-workspace-heading"
+        data-testid="lead-workspace-primary"
+        className="[&_button]:min-h-11 sm:[&_button]:min-h-8"
+      >
+        <div className="mb-3">
+          <h2
+            id="lead-workspace-heading"
+            className="text-lg font-bold tracking-tight"
           >
-            CASS {lead.cass_status}
-          </Badge>
-          <CassWidget propertyId={lead.id} cassStatus={lead.cass_status} />
-          <SmsComposer
-            propertyId={lead.id}
-            homeownerContactId={lead.homeowner?.id ?? null}
-            homeownerPhone={homeownerSmsPhone}
-            homeownerName={
-              lead.homeowner?.contact_type === "entity"
-                ? lead.homeowner.entity_name
-                : lead.homeowner
-                  ? [lead.homeowner.first_name, lead.homeowner.last_name]
-                      .filter(Boolean)
-                      .join(" ") || null
-                  : null
-            }
-            preferredFromNumber={preferredFromNumber}
-            templates={templateOptions}
-          />
+            Work this lead
+          </h2>
+          <p className="text-muted-foreground text-sm">
+            Start with the next dated commitment, then review the conversation
+            and appointment state.
+          </p>
         </div>
-      </div>
+        <div className="grid gap-5 xl:grid-cols-[minmax(0,7fr)_minmax(320px,5fr)]">
+          <div className="flex min-w-0 flex-col gap-5">
+            {openWorkError ? (
+              <LeadLoadFailure
+                title="Next action did not load"
+                detail="Task data is unavailable. This is not the same as having no next action."
+                testId="lead-next-action-load-failure"
+              />
+            ) : (
+              <NextActionCard task={nextTask} timezone={viewerTimezone} />
+            )}
+
+            <div className="flex min-w-0 flex-col gap-2">
+              <div className="text-muted-foreground text-xs font-semibold tracking-wide uppercase">
+                Conversation
+              </div>
+              <div className="border-border bg-card flex min-w-0 flex-col rounded-lg border p-3">
+                {threadError ? (
+                  <LeadLoadFailure
+                    title="Conversation did not load"
+                    detail="Message history is unavailable. This is a load failure, not an empty thread."
+                    testId="lead-conversation-load-failure"
+                  />
+                ) : (
+                  <MessagesThread
+                    initial={initialMessages}
+                    contactId={lead.homeowner?.id ?? null}
+                    propertyId={lead.id}
+                    nowMs={requestNowMs}
+                  />
+                )}
+                <SmsEntryPointGate
+                  restricted={smsPresentation.smsRestricted}
+                  placement="inline"
+                  restrictionLabel={smsPresentation.consentLabel}
+                  restrictionDetail={smsPresentation.consentDetail}
+                >
+                  <InlineReply
+                    propertyId={lead.id}
+                    homeownerContactId={lead.homeowner?.id ?? null}
+                    homeownerPhone={homeownerSmsPhone}
+                    replyToPhone={homeownerSmsPhone}
+                    preferredFromNumber={preferredFromNumber}
+                    persistedMessageIds={initialMessages.map(
+                      (message) => message.id,
+                    )}
+                  />
+                </SmsEntryPointGate>
+              </div>
+            </div>
+          </div>
+
+          <div className="flex min-w-0 flex-col gap-5">
+            <Section title="Set or change dated task" id="set-next-action">
+              <LeadTaskWidget
+                propertyId={lead.id}
+                address={lead.address}
+                currentUserId={sessionUser?.id ?? null}
+                initialAssigneeId={lead.assigned_user_id}
+              />
+            </Section>
+
+            <div id="lead-appointments">
+              <Section title="Appointments">
+                {openWorkError ? (
+                  <div className="p-3">
+                    <LeadLoadFailure
+                      title="Appointments did not load"
+                      detail="Appointment data is unavailable. Retry instead of treating this as an empty schedule."
+                      testId="lead-appointments-load-failure"
+                    />
+                  </div>
+                ) : (
+                  <LeadAppointmentsSection
+                    appointments={initialAppointments}
+                    timezone={viewerTimezone}
+                    nowMs={requestNowMs}
+                  />
+                )}
+              </Section>
+            </div>
+          </div>
+        </div>
+      </section>
 
       <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
         <Section title="Property">
@@ -500,7 +701,10 @@ export default async function LeadDetailPage({
               className="border-border flex items-center justify-between gap-2 border-b px-4 py-2 text-xs font-medium text-[#1c1917] transition-colors hover:bg-[#f5f5f4]"
             >
               <span>View on Zillow</span>
-              <ExternalLink className="h-3.5 w-3.5 text-[#78716c]" aria-hidden />
+              <ExternalLink
+                className="h-3.5 w-3.5 text-[#78716c]"
+                aria-hidden
+              />
             </a>
           ) : null}
           <Row label="Beds" value={lead.beds} />
@@ -531,45 +735,12 @@ export default async function LeadDetailPage({
           <Row label="Source" value={lead.source} />
         </Section>
 
-        <div className="flex flex-col gap-2">
-          <div className="text-muted-foreground text-xs font-semibold tracking-wide uppercase">
-            SMS thread
-          </div>
-          <div className="border-border flex flex-col rounded-md border p-3">
-            <MessagesThread
-              initial={initialMessages}
-              contactId={lead.homeowner?.id ?? null}
-              propertyId={lead.id}
-            />
-            <InlineReply
-              propertyId={lead.id}
-              homeownerContactId={lead.homeowner?.id ?? null}
-              homeownerPhone={homeownerSmsPhone}
-              replyToPhone={homeownerSmsPhone}
-              preferredFromNumber={preferredFromNumber}
-            />
-          </div>
-        </div>
-
-        <Section title="Tasks">
-          <LeadTaskWidget
-            propertyId={lead.id}
-            address={lead.address}
-            currentUserId={sessionUser?.id ?? null}
-            initialAssigneeId={lead.assigned_user_id}
-          />
-        </Section>
-
-        <Section title="Appointments">
-          <LeadAppointmentsSection
-            appointments={initialAppointments}
-            timezone={viewerTimezone}
-          />
-        </Section>
-
         <Section title="Address quality (USPS)">
           <Row label="CASS status" value={lead.cass_status} />
-          <Row label="Last verified" value={formatDate(lead.cass_verified_at)} />
+          <Row
+            label="Last verified"
+            value={formatDate(lead.cass_verified_at)}
+          />
           <Row label="Vacant" value={formatBool(lead.is_vacant)} />
           <Row label="Vacant since" value={formatDate(lead.vacant_since)} />
           <Row label="Seasonal" value={formatBool(lead.is_seasonal)} />
@@ -606,14 +777,45 @@ export default async function LeadDetailPage({
                   // If mailing_address already contains commas it's a full
                   // combined string (e.g. DealMachine "Primary Mailing Address").
                   // Show it alone to avoid duplicating city/state/zip.
-                  if (d.mailing_address?.includes(",")) return d.mailing_address;
-                  return [d.mailing_address, d.mailing_city, d.mailing_state, d.mailing_zip]
-                    .filter(Boolean)
-                    .join(", ") || null;
+                  if (d.mailing_address?.includes(","))
+                    return d.mailing_address;
+                  return (
+                    [
+                      d.mailing_address,
+                      d.mailing_city,
+                      d.mailing_state,
+                      d.mailing_zip,
+                    ]
+                      .filter(Boolean)
+                      .join(", ") || null
+                  );
                 })()}
               />
               <Row
-                label="Do not contact"
+                label="SMS consent"
+                value={`${smsPresentation.consentLabel} — ${smsPresentation.consentDetail}`}
+                testId="lead-sms-consent-row"
+              />
+              <Row
+                label="SMS restriction"
+                value={
+                  smsPresentation.smsRestricted
+                    ? `SMS disabled — ${smsPresentation.consentLabel}`
+                    : "No SMS opt-out recorded"
+                }
+                testId="lead-sms-restriction-row"
+              />
+              {smsPresentation.readFailed ? (
+                <div className="p-3">
+                  <LeadLoadFailure
+                    title="SMS consent status is incomplete"
+                    detail="One or more consent sources failed to load. Retry before relying on this status."
+                    testId="lead-sms-consent-load-failure"
+                  />
+                </div>
+              ) : null}
+              <Row
+                label="Contact do-not-contact flag"
                 value={formatBool(lead.homeowner.do_not_contact)}
               />
             </>
@@ -660,7 +862,17 @@ export default async function LeadDetailPage({
           Tags
         </div>
         <div className="border-border rounded-md border">
-          <TagsSection propertyId={lead.id} initial={initialTags} />
+          {tagRowsError ? (
+            <div className="p-3">
+              <LeadLoadFailure
+                title="Tags did not load"
+                detail="Tag data is unavailable. Retry instead of treating this as an untagged lead."
+                testId="lead-tags-load-failure"
+              />
+            </div>
+          ) : (
+            <TagsSection propertyId={lead.id} initial={initialTags} />
+          )}
         </div>
       </div>
 
@@ -670,19 +882,35 @@ export default async function LeadDetailPage({
         </div>
         <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_320px]">
           <div className="border-border rounded-md border p-3">
-            <NotesFeed
-              propertyId={lead.id}
-              initial={initialNotes}
-              authorEmails={authorEmails}
-              currentUserId={sessionUser?.id ?? null}
-              currentUserEmail={sessionUser?.email ?? null}
-            />
+            {notesError ? (
+              <LeadLoadFailure
+                title="Notes did not load"
+                detail="Note history is unavailable. This is not an empty notes feed."
+                testId="lead-notes-load-failure"
+              />
+            ) : (
+              <NotesFeed
+                propertyId={lead.id}
+                initial={initialNotes}
+                authorEmails={authorEmails}
+                currentUserId={sessionUser?.id ?? null}
+                currentUserEmail={sessionUser?.email ?? null}
+              />
+            )}
           </div>
-          <LeadCallSummary
-            propertyId={lead.id}
-            initialRows={initialCallRows}
-            jitterHost={process.env.NEXT_PUBLIC_JITTER_HOST ?? ""}
-          />
+          {callRollupError ? (
+            <LeadLoadFailure
+              title="Call history did not load"
+              detail="Call activity is unavailable. Retry instead of treating this as no call history."
+              testId="lead-calls-load-failure"
+            />
+          ) : (
+            <LeadCallSummary
+              propertyId={lead.id}
+              initialRows={initialCallRows}
+              jitterHost={process.env.NEXT_PUBLIC_JITTER_HOST ?? ""}
+            />
+          )}
         </div>
       </div>
 
@@ -699,6 +927,18 @@ export default async function LeadDetailPage({
           <Row label="ATTOM" value={lead.attom_id} mono />
         </div>
       </div>
+
+      <div>
+        <div className="text-muted-foreground mb-2 text-xs font-semibold tracking-wide uppercase">
+          Record administration
+        </div>
+        <div className="border-border bg-card flex flex-col gap-3 rounded-md border p-3 sm:flex-row sm:items-center sm:justify-between">
+          <p className="text-muted-foreground text-sm">
+            Destructive record actions are kept separate from daily lead work.
+          </p>
+          <DeleteLeadButton propertyId={lead.id} address={lead.address} />
+        </div>
+      </div>
     </Page>
   );
 }
@@ -707,11 +947,16 @@ function LockedDncPropertyDetail({
   lead,
   prevId,
   nextId,
+  mode,
 }: {
   lead: DetailedLead;
   prevId: string | null;
   nextId: string | null;
+  mode: "prospect" | "lead";
 }) {
+  const collectionHref = mode === "prospect" ? "/properties" : "/leads";
+  const collectionLabel = mode === "prospect" ? "Prospects" : "Leads";
+  const recordLabel = mode === "prospect" ? "prospect" : "lead";
   const zillowHref = zillowUrl({
     address: lead.address,
     city: lead.city,
@@ -723,7 +968,7 @@ function LockedDncPropertyDetail({
       <PageHeader
         breadcrumb={[
           { label: "Workspace" },
-          { label: "Prospects", href: "/properties" },
+          { label: collectionLabel, href: collectionHref },
           { label: lead.address },
         ]}
         title={lead.address}
@@ -731,15 +976,24 @@ function LockedDncPropertyDetail({
           [lead.city, lead.state, lead.zip].filter(Boolean).join(", ") || "—"
         }
         actions={
-          <div className="flex items-center gap-1">
-            <Link href="/properties">
-              <Button variant="outline" size="sm" aria-label="Back to prospects">
+          <div className="grid w-full grid-cols-2 gap-2 [&_button]:min-h-11 sm:flex sm:w-auto sm:items-center">
+            <Link href={collectionHref}>
+              <Button
+                variant="outline"
+                size="sm"
+                aria-label={`Back to ${collectionLabel.toLowerCase()}`}
+              >
                 <ChevronLeft className="mr-1 h-4 w-4" />
-                Back to prospects
+                Back to {collectionLabel.toLowerCase()}
               </Button>
             </Link>
             {zillowHref ? (
-              <a href={zillowHref} target="_blank" rel="noopener noreferrer">
+              <a
+                href={zillowHref}
+                target="_blank"
+                rel="noopener noreferrer"
+                aria-label="View on Zillow"
+              >
                 <Button variant="outline" size="sm">
                   <ExternalLink className="mr-1 h-4 w-4" />
                   Zillow
@@ -748,14 +1002,24 @@ function LockedDncPropertyDetail({
             ) : null}
             {prevId ? (
               <Link href={`/leads/${prevId}`}>
-                <Button variant="ghost" size="icon" aria-label="Previous prospect">
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  aria-label={`Previous ${recordLabel}`}
+                  className="min-w-11"
+                >
                   <ChevronLeft className="h-4 w-4" />
                 </Button>
               </Link>
             ) : null}
             {nextId ? (
               <Link href={`/leads/${nextId}`}>
-                <Button variant="ghost" size="icon" aria-label="Next prospect">
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  aria-label={`Next ${recordLabel}`}
+                  className="min-w-11"
+                >
                   <ChevronRight className="h-4 w-4" />
                 </Button>
               </Link>
@@ -773,15 +1037,20 @@ function LockedDncPropertyDetail({
           ⊘ PERMANENT DO NOT CONTACT
         </div>
         <p className="text-muted-foreground mt-1 text-sm">
-          This record is permanently locked and read-only. Its historical pipeline stage is preserved for audit history.
+          This record is permanently locked and read-only. Its historical
+          pipeline stage is preserved for audit history.
         </p>
       </div>
 
       <div className="flex flex-wrap gap-2">
-        <Badge variant="outline">Historical stage: {lead.status.replaceAll("_", " ")}</Badge>
+        <Badge variant="outline">
+          Historical stage: {lead.status.replaceAll("_", " ")}
+        </Badge>
         {lead.market ? <Badge variant="secondary">{lead.market}</Badge> : null}
         {lead.outreach_dispo ? (
-          <Badge variant="outline">Disposition: {lead.outreach_dispo.replaceAll("_", " ")}</Badge>
+          <Badge variant="outline">
+            Disposition: {lead.outreach_dispo.replaceAll("_", " ")}
+          </Badge>
         ) : null}
       </div>
 
@@ -833,12 +1102,14 @@ function LockedDncPropertyDetail({
 function Section({
   title,
   children,
+  id,
 }: {
   title: string;
   children: React.ReactNode;
+  id?: string;
 }) {
   return (
-    <div className="flex flex-col gap-2">
+    <div className="flex flex-col gap-2" id={id}>
       <div className="text-muted-foreground text-xs font-semibold tracking-wide uppercase">
         {title}
       </div>
@@ -854,11 +1125,13 @@ function Row({
   value,
   format,
   mono,
+  testId,
 }: {
   label: string;
   value: string | number | null | undefined;
   format?: "currency";
   mono?: boolean;
+  testId?: string;
 }) {
   const display =
     value == null || value === ""
@@ -867,9 +1140,15 @@ function Row({
         ? `$${value.toLocaleString()}`
         : String(value);
   return (
-    <div className="border-border/60 flex justify-between gap-3 border-b px-3 py-2 text-sm last:border-b-0">
+    <div
+      className="border-border/60 flex flex-col gap-1 border-b px-3 py-2 text-sm last:border-b-0 sm:flex-row sm:justify-between sm:gap-3"
+      data-testid={testId}
+    >
       <span className="text-muted-foreground">{label}</span>
-      <span className={mono ? "font-mono" : undefined} title={display}>
+      <span
+        className={mono ? "break-all font-mono sm:text-right" : "sm:text-right"}
+        title={display}
+      >
         {display}
       </span>
     </div>
@@ -877,9 +1156,7 @@ function Row({
 }
 
 function EmptyRow({ text }: { text: string }) {
-  return (
-    <div className="text-muted-foreground px-3 py-2 text-sm">{text}</div>
-  );
+  return <div className="text-muted-foreground px-3 py-2 text-sm">{text}</div>;
 }
 
 function formatDate(iso: string | null | undefined): string | null {

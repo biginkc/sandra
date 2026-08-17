@@ -70,6 +70,8 @@ export const updatePropertyStatusOp: SubOperationModule = {
         .from("properties")
         .update({ status: normalized })
         .eq("id", property.id)
+        .eq("org_id", property.org_id)
+        .is("deleted_at", null)
         .eq("is_dnc_locked", false)
         .select("id")
         .maybeSingle();
@@ -83,12 +85,38 @@ export const updatePropertyStatusOp: SubOperationModule = {
         };
       }
       if (!data) {
+        const { data: current, error: proofError } = await ctx.supabase
+          .from("properties")
+          .select("is_dnc_locked, deleted_at")
+          .eq("id", property.id)
+          .eq("org_id", property.org_id)
+          .maybeSingle();
+        if (proofError) {
+          return {
+            kind: "rejected",
+            rowIndex,
+            address,
+            reason: "db-error",
+            detail: `Property update proof failed: ${proofError.message}`,
+          };
+        }
+        if (!current || current.deleted_at) {
+          return {
+            kind: "rejected",
+            rowIndex,
+            address,
+            reason: "stale-property",
+            detail:
+              "The matched property was deleted or no longer belongs to this organization before the update saved.",
+          };
+        }
         return {
           kind: "rejected",
           rowIndex,
           address,
           reason: "dnc-locked",
-          detail: "The property became permanently Do Not Contact before the update saved.",
+          detail:
+            "The property became permanently Do Not Contact before the update saved.",
         };
       }
     }

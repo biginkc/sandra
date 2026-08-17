@@ -1,5 +1,6 @@
 import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { toast } from "sonner";
 import { beforeEach, describe, it, expect, vi } from "vitest";
 
 import { InboxDetail } from "./inbox-detail";
@@ -104,19 +105,30 @@ vi.mock("sonner", () => ({
   },
 }));
 
-function makeMessage(overrides: Partial<MessageRow> & { id: string; body: string; direction: "inbound" | "outbound" }): MessageRow {
+function makeMessage(
+  overrides: Partial<MessageRow> & {
+    id: string;
+    body: string;
+    direction: "inbound" | "outbound";
+  },
+): MessageRow {
   return {
     id: overrides.id,
     body: overrides.body,
     direction: overrides.direction,
-    status: overrides.direction === "inbound" ? "received" : "sent",
+    status:
+      overrides.status ??
+      (overrides.direction === "inbound" ? "received" : "sent"),
     channel: "sms",
     contact_id: overrides.contact_id ?? "contact-1",
     property_id: overrides.property_id ?? "prop-1",
     conversation_id:
-      overrides.conversation_id ?? `conv-${overrides.contact_id ?? "contact-1"}`,
-    from_address: overrides.direction === "inbound" ? "+15551234567" : "+18162804181",
-    to_address: overrides.direction === "inbound" ? "+18162804181" : "+15551234567",
+      overrides.conversation_id ??
+      `conv-${overrides.contact_id ?? "contact-1"}`,
+    from_address:
+      overrides.direction === "inbound" ? "+15551234567" : "+18162804181",
+    to_address:
+      overrides.direction === "inbound" ? "+18162804181" : "+15551234567",
     created_at: overrides.created_at ?? "2026-04-29T12:00:00Z",
     read_at: overrides.read_at ?? null,
     metadata: overrides.metadata ?? null,
@@ -126,7 +138,9 @@ function makeMessage(overrides: Partial<MessageRow> & { id: string; body: string
   } as MessageRow;
 }
 
-function makeData(overrides: Partial<InboxDetailData> & { contactId: string }): InboxDetailData {
+function makeData(
+  overrides: Partial<InboxDetailData> & { contactId: string },
+): InboxDetailData {
   const contactId = overrides.contactId;
   const propertyId = Object.hasOwn(overrides, "propertyId")
     ? overrides.propertyId!
@@ -153,6 +167,16 @@ function makeData(overrides: Partial<InboxDetailData> & { contactId: string }): 
     assigneeId: overrides.assigneeId ?? null,
     propertyStatus: overrides.propertyStatus ?? "prospect",
     outreachDispo: overrides.outreachDispo ?? null,
+    contactDoNotContact: overrides.contactDoNotContact ?? false,
+    contactSmsOptedOut: overrides.contactSmsOptedOut ?? false,
+    smsConsentState: Object.hasOwn(overrides, "smsConsentState")
+      ? overrides.smsConsentState!
+      : "can_send_marketing",
+    phoneSuppressed: Object.hasOwn(overrides, "phoneSuppressed")
+      ? overrides.phoneSuppressed!
+      : false,
+    smsSafetyReadFailed: overrides.smsSafetyReadFailed ?? false,
+    isDncLocked: overrides.isDncLocked ?? false,
     initialMessages: overrides.initialMessages ?? [],
   };
 }
@@ -167,7 +191,10 @@ function expectSharedOutcomeControls({
   );
   expect(screen.getByTestId("dispo-not-interested")).toBeInTheDocument();
   expect(screen.getByTestId("dispo-follow-up")).toHaveTextContent("Follow up");
-  expect(screen.getByTestId("dispo-dnc")).toHaveTextContent("Do not call");
+  expect(screen.getByTestId("dispo-dnc-deferred")).toHaveTextContent(
+    "Permanent DNC unavailable here",
+  );
+  expect(screen.getByTestId("dispo-dnc-deferred")).toBeDisabled();
   expect(screen.getByTestId("dispo-needs-sequence")).toHaveTextContent(
     "Needs sequence",
   );
@@ -201,7 +228,7 @@ describe("<InboxDetail />", () => {
     vi.mocked(sendSmsFromLead).mockReset();
     vi.mocked(sendSmsFromLead).mockResolvedValue({
       ok: true,
-      data: { outcome: { status: "sent" } },
+      data: { outcome: { status: "queued", messageId: "queued-reply-1" } },
     } as Awaited<ReturnType<typeof sendSmsFromLead>>);
     Object.defineProperty(navigator, "clipboard", {
       configurable: true,
@@ -213,11 +240,7 @@ describe("<InboxDetail />", () => {
 
   it("renders the empty placeholder when no thread is selected (test 14 baseline)", () => {
     render(
-      <InboxDetail
-        data={null}
-        assigneeEmails={{}}
-        currentUserId="user-1"
-      />,
+      <InboxDetail data={null} assigneeEmails={{}} currentUserId="user-1" />,
     );
     expect(screen.getByTestId("inbox-detail-empty")).toBeInTheDocument();
     expect(screen.queryByTestId("inbox-detail-panel")).not.toBeInTheDocument();
@@ -243,11 +266,7 @@ describe("<InboxDetail />", () => {
     });
 
     const { container } = render(
-      <InboxDetail
-        data={data}
-        assigneeEmails={{}}
-        currentUserId="user-1"
-      />,
+      <InboxDetail data={data} assigneeEmails={{}} currentUserId="user-1" />,
     );
 
     const panel = screen.getByTestId("inbox-detail-panel");
@@ -277,11 +296,7 @@ describe("<InboxDetail />", () => {
     });
 
     render(
-      <InboxDetail
-        data={data}
-        assigneeEmails={{}}
-        currentUserId="user-1"
-      />,
+      <InboxDetail data={data} assigneeEmails={{}} currentUserId="user-1" />,
     );
 
     expect(screen.getByTestId("inbox-detail-panel")).toBeInTheDocument();
@@ -322,11 +337,7 @@ describe("<InboxDetail />", () => {
     });
 
     const { rerender } = render(
-      <InboxDetail
-        data={aData}
-        assigneeEmails={{}}
-        currentUserId="user-1"
-      />,
+      <InboxDetail data={aData} assigneeEmails={{}} currentUserId="user-1" />,
     );
 
     expect(screen.getByTestId("inbox-detail-panel")).toHaveTextContent(
@@ -334,11 +345,7 @@ describe("<InboxDetail />", () => {
     );
 
     rerender(
-      <InboxDetail
-        data={bData}
-        assigneeEmails={{}}
-        currentUserId="user-1"
-      />,
+      <InboxDetail data={bData} assigneeEmails={{}} currentUserId="user-1" />,
     );
 
     const panel = screen.getByTestId("inbox-detail-panel");
@@ -380,11 +387,7 @@ describe("<InboxDetail />", () => {
     });
 
     const { rerender } = render(
-      <InboxDetail
-        data={aData}
-        assigneeEmails={{}}
-        currentUserId="user-1"
-      />,
+      <InboxDetail data={aData} assigneeEmails={{}} currentUserId="user-1" />,
     );
 
     const textarea = screen.getByLabelText("Reply to this lead");
@@ -392,17 +395,13 @@ describe("<InboxDetail />", () => {
     expect(textarea).toHaveValue("draft for property A");
 
     rerender(
-      <InboxDetail
-        data={bData}
-        assigneeEmails={{}}
-        currentUserId="user-1"
-      />,
+      <InboxDetail data={bData} assigneeEmails={{}} currentUserId="user-1" />,
     );
 
     expect(screen.getByLabelText("Reply to this lead")).toHaveValue("");
   });
 
-  it("sends inline replies to the same saved thread phone shown in Messages", async () => {
+  it("queues inline replies to the same saved thread phone shown in Messages", async () => {
     const user = userEvent.setup();
     const data = makeData({
       contactId: "contact-reply-phone",
@@ -413,12 +412,8 @@ describe("<InboxDetail />", () => {
       initialMessages: [],
     });
 
-    render(
-      <InboxDetail
-        data={data}
-        assigneeEmails={{}}
-        currentUserId="user-1"
-      />,
+    const view = render(
+      <InboxDetail data={data} assigneeEmails={{}} currentUserId="user-1" />,
     );
 
     expect(screen.getByTestId("inline-reply")).toHaveTextContent(
@@ -433,10 +428,130 @@ describe("<InboxDetail />", () => {
         "prop-reply-phone",
         "Thanks",
         null,
-        false,
+        true,
         "+15550000002",
       );
     });
+    expect(screen.getByLabelText("Reply to this lead")).toHaveValue("");
+    expect(screen.getByTestId("inline-reply-queued-receipt")).toHaveTextContent(
+      "Queued · in Outbox",
+    );
+    expect(screen.getByTestId("inline-reply-queued-receipt")).toHaveTextContent(
+      "Thanks",
+    );
+    expect(screen.getByTestId("inline-reply-queued-receipt")).toHaveTextContent(
+      "Outbox controls delivery",
+    );
+    expect(screen.getByRole("button", { name: "Insert template" })).toHaveClass(
+      "min-h-11",
+    );
+
+    view.rerender(
+      <InboxDetail
+        data={{
+          ...data,
+          initialMessages: [
+            makeMessage({
+              id: "queued-reply-1",
+              body: "Thanks",
+              direction: "outbound",
+              status: "queued",
+              contact_id: "contact-reply-phone",
+              property_id: "prop-reply-phone",
+              conversation_id: data.conversationId,
+            }),
+          ],
+        }}
+        assigneeEmails={{}}
+        currentUserId="user-1"
+      />,
+    );
+    expect(screen.queryByTestId("inline-reply-queued-receipt")).toBeNull();
+    expect(screen.getAllByText("Thanks")).toHaveLength(1);
+    expect(screen.getByTestId("messages-thread-delivery-status")).toHaveTextContent(
+      "Queued · in Outbox",
+    );
+  });
+
+  it("does not claim success or clear the draft if queueOnly returns an impossible immediate send", async () => {
+    const user = userEvent.setup();
+    vi.mocked(sendSmsFromLead).mockResolvedValueOnce({
+      ok: true,
+      data: { outcome: { status: "sent" } },
+    } as Awaited<ReturnType<typeof sendSmsFromLead>>);
+    render(
+      <InboxDetail
+        data={makeData({ contactId: "contact-invalid-immediate-send" })}
+        assigneeEmails={{}}
+        currentUserId="user-1"
+      />,
+    );
+
+    const composer = screen.getByLabelText("Reply to this lead");
+    await user.type(composer, "keep this draft");
+    await user.click(screen.getByTestId("inline-reply-send"));
+
+    await waitFor(() => expect(sendSmsFromLead).toHaveBeenCalledOnce());
+    expect(composer).toHaveValue("keep this draft");
+  });
+
+  it("explains a missing approved sender and preserves the reply draft", async () => {
+    const user = userEvent.setup();
+    vi.mocked(sendSmsFromLead).mockResolvedValueOnce({
+      ok: true,
+      data: {
+        outcome: {
+          status: "blocked_no_approved_sender",
+          reason: "No approved sender is available for this conversation.",
+        },
+      },
+    });
+    render(
+      <InboxDetail
+        data={makeData({ contactId: "contact-no-approved-sender" })}
+        assigneeEmails={{}}
+        currentUserId="user-1"
+      />,
+    );
+
+    const composer = screen.getByLabelText("Reply to this lead");
+    await user.type(composer, "keep this draft too");
+    await user.click(screen.getByTestId("inline-reply-send"));
+
+    await waitFor(() => expect(sendSmsFromLead).toHaveBeenCalledOnce());
+    expect(toast.error).toHaveBeenCalledWith("No approved sender", {
+      description: "No approved sender is available for this conversation.",
+    });
+    expect(composer).toHaveValue("keep this draft too");
+  });
+
+  it("renders a persisted queued reply after reload instead of dropping it from the thread", () => {
+    render(
+      <InboxDetail
+        data={makeData({
+          contactId: "contact-persisted-queued",
+          propertyId: "prop-persisted-queued",
+          initialMessages: [
+            makeMessage({
+              id: "queued-after-reload",
+              contact_id: "contact-persisted-queued",
+              property_id: "prop-persisted-queued",
+              conversation_id: "conv-contact-persisted-queued",
+              direction: "outbound",
+              status: "queued",
+              body: "durable queued body",
+            }),
+          ],
+        })}
+        assigneeEmails={{}}
+        currentUserId="user-1"
+      />,
+    );
+
+    expect(screen.getByText("durable queued body")).toBeInTheDocument();
+    expect(screen.getByTestId("messages-thread-delivery-status")).toHaveTextContent(
+      "Queued · in Outbox",
+    );
   });
 
   it("pauses Messages replies after a live same-thread insert until server detail refreshes", async () => {
@@ -462,11 +577,7 @@ describe("<InboxDetail />", () => {
     });
 
     render(
-      <InboxDetail
-        data={data}
-        assigneeEmails={{}}
-        currentUserId="user-1"
-      />,
+      <InboxDetail data={data} assigneeEmails={{}} currentUserId="user-1" />,
     );
 
     await waitFor(() => {
@@ -510,11 +621,7 @@ describe("<InboxDetail />", () => {
     });
 
     render(
-      <InboxDetail
-        data={data}
-        assigneeEmails={{}}
-        currentUserId="user-1"
-      />,
+      <InboxDetail data={data} assigneeEmails={{}} currentUserId="user-1" />,
     );
 
     expect(screen.queryByTestId("inline-reply")).not.toBeInTheDocument();
@@ -531,11 +638,7 @@ describe("<InboxDetail />", () => {
     });
 
     render(
-      <InboxDetail
-        data={data}
-        assigneeEmails={{}}
-        currentUserId="user-1"
-      />,
+      <InboxDetail data={data} assigneeEmails={{}} currentUserId="user-1" />,
     );
 
     expectSharedOutcomeControls({ moveToLeadDisabled: false });
@@ -552,11 +655,7 @@ describe("<InboxDetail />", () => {
     });
 
     render(
-      <InboxDetail
-        data={data}
-        assigneeEmails={{}}
-        currentUserId="user-1"
-      />,
+      <InboxDetail data={data} assigneeEmails={{}} currentUserId="user-1" />,
     );
 
     await user.click(screen.getByTestId("dispo-needs-sequence"));
@@ -578,11 +677,7 @@ describe("<InboxDetail />", () => {
     });
 
     render(
-      <InboxDetail
-        data={data}
-        assigneeEmails={{}}
-        currentUserId="user-1"
-      />,
+      <InboxDetail data={data} assigneeEmails={{}} currentUserId="user-1" />,
     );
 
     await user.click(screen.getByTestId("dispo-follow-up"));
@@ -598,11 +693,7 @@ describe("<InboxDetail />", () => {
     });
 
     render(
-      <InboxDetail
-        data={data}
-        assigneeEmails={{}}
-        currentUserId="user-1"
-      />,
+      <InboxDetail data={data} assigneeEmails={{}} currentUserId="user-1" />,
     );
 
     // "Follow up" now appears twice when nurture is the active dispo: the
@@ -620,18 +711,16 @@ describe("<InboxDetail />", () => {
     });
 
     render(
-      <InboxDetail
-        data={data}
-        assigneeEmails={{}}
-        currentUserId="user-1"
-      />,
+      <InboxDetail data={data} assigneeEmails={{}} currentUserId="user-1" />,
     );
 
     await user.click(screen.getByTestId("dispo-more"));
 
     expect(await screen.findByTestId("dispo-bad-number")).toBeInTheDocument();
     expect(screen.getByTestId("dispo-opted-out")).toBeInTheDocument();
-    expect(screen.queryByTestId("dispo-open-lead-task")).not.toBeInTheDocument();
+    expect(
+      screen.queryByTestId("dispo-open-lead-task"),
+    ).not.toBeInTheDocument();
   });
 
   it("message outcomes call setOutreachDispo without task scheduling fields", async () => {
@@ -642,11 +731,7 @@ describe("<InboxDetail />", () => {
     });
 
     render(
-      <InboxDetail
-        data={data}
-        assigneeEmails={{}}
-        currentUserId="user-1"
-      />,
+      <InboxDetail data={data} assigneeEmails={{}} currentUserId="user-1" />,
     );
 
     await user.click(screen.getByTestId("dispo-not-interested"));
@@ -655,6 +740,35 @@ describe("<InboxDetail />", () => {
       "prop-1",
       "not_interested",
     );
+  });
+
+  it("defers permanent DNC to the confirmed compliance workflow instead of exposing a one-click Messages action", () => {
+    const data = makeData({
+      contactId: "contact-permanent-dnc",
+      propertyId: "prop-permanent-dnc",
+      propertyStatus: "new_lead",
+      isDncLocked: false,
+      contactDoNotContact: false,
+      contactSmsOptedOut: false,
+      outreachDispo: null,
+    });
+
+    render(
+      <InboxDetail data={data} assigneeEmails={{}} currentUserId="user-1" />,
+    );
+
+    expect(screen.getByTestId("assign-dropdown-trigger")).toBeInTheDocument();
+    expect(screen.getByTestId("inline-reply")).toBeInTheDocument();
+    const deferred = screen.getByTestId("dispo-dnc-deferred");
+    expect(deferred).toBeDisabled();
+    expect(deferred).toHaveAttribute(
+      "title",
+      "Permanent DNC requires the deferred confirmed compliance workflow.",
+    );
+    expect(screen.queryByTestId("dispo-dnc")).toBeNull();
+    expect(setOutreachDispoMock).not.toHaveBeenCalled();
+    expect(screen.getByTestId("assign-dropdown-trigger")).toBeInTheDocument();
+    expect(screen.getByTestId("inline-reply")).toBeInTheDocument();
   });
 
   it("Move to Lead promotes then opens the lead page", async () => {
@@ -667,11 +781,7 @@ describe("<InboxDetail />", () => {
     });
 
     render(
-      <InboxDetail
-        data={data}
-        assigneeEmails={{}}
-        currentUserId="user-1"
-      />,
+      <InboxDetail data={data} assigneeEmails={{}} currentUserId="user-1" />,
     );
 
     await user.click(screen.getByTestId("message-move-to-lead"));
@@ -690,11 +800,7 @@ describe("<InboxDetail />", () => {
     });
 
     render(
-      <InboxDetail
-        data={data}
-        assigneeEmails={{}}
-        currentUserId="user-1"
-      />,
+      <InboxDetail data={data} assigneeEmails={{}} currentUserId="user-1" />,
     );
 
     await user.click(screen.getByTestId("inbox-detail-open-lead"));
@@ -716,11 +822,7 @@ describe("<InboxDetail />", () => {
     });
 
     render(
-      <InboxDetail
-        data={data}
-        assigneeEmails={{}}
-        currentUserId="user-1"
-      />,
+      <InboxDetail data={data} assigneeEmails={{}} currentUserId="user-1" />,
     );
 
     const moveToLead = screen.getByTestId("message-move-to-lead");
@@ -789,11 +891,7 @@ describe("<InboxDetail />", () => {
     });
 
     render(
-      <InboxDetail
-        data={data}
-        assigneeEmails={{}}
-        currentUserId="user-1"
-      />,
+      <InboxDetail data={data} assigneeEmails={{}} currentUserId="user-1" />,
     );
 
     await user.click(screen.getByTestId("inbox-detail-more"));
@@ -832,20 +930,20 @@ describe("<InboxDetail />", () => {
     });
 
     render(
-      <InboxDetail
-        data={data}
-        assigneeEmails={{}}
-        currentUserId="user-1"
-      />,
+      <InboxDetail data={data} assigneeEmails={{}} currentUserId="user-1" />,
     );
 
-    expect(screen.queryByTestId("inbox-detail-open-lead")).not.toBeInTheDocument();
+    expect(
+      screen.queryByTestId("inbox-detail-open-lead"),
+    ).not.toBeInTheDocument();
     expect(screen.getByTestId("resolve-to-property-open")).toBeInTheDocument();
 
     await user.click(screen.getByTestId("inbox-detail-more"));
 
     expect(screen.queryByTestId("copy-record-link")).not.toBeInTheDocument();
-    expect(await screen.findByTestId("copy-conversation-link")).toBeInTheDocument();
+    expect(
+      await screen.findByTestId("copy-conversation-link"),
+    ).toBeInTheDocument();
     expect(screen.getByTestId("copy-phone-number")).toBeInTheDocument();
   });
 
@@ -861,16 +959,156 @@ describe("<InboxDetail />", () => {
     });
 
     render(
-      <InboxDetail
-        data={data}
-        assigneeEmails={{}}
-        currentUserId="user-1"
-      />,
+      <InboxDetail data={data} assigneeEmails={{}} currentUserId="user-1" />,
     );
 
     expect(screen.queryByTestId("inline-reply")).not.toBeInTheDocument();
     expect(
-      screen.getByText(/This thread number is not saved on the homeowner contact/i),
+      screen.getByText(
+        /This thread number is not saved on the homeowner contact/i,
+      ),
     ).toBeInTheDocument();
+  });
+
+  it("renders a permanent-DNC thread as read-only history with unsafe controls removed", async () => {
+    const user = userEvent.setup();
+    const data = makeData({
+      contactId: "contact-locked",
+      propertyId: "prop-locked",
+      propertyStatus: "new_lead",
+      isDncLocked: true,
+      contactDoNotContact: true,
+      contactSmsOptedOut: true,
+      initialMessages: [
+        makeMessage({
+          id: "locked-history",
+          body: "historical reply",
+          direction: "inbound",
+          contact_id: "contact-locked",
+          property_id: "prop-locked",
+          conversation_id: "conv-contact-locked",
+        }),
+      ],
+    });
+
+    render(
+      <InboxDetail data={data} assigneeEmails={{}} currentUserId="user-1" />,
+    );
+
+    expect(screen.getByTestId("messages-permanent-dnc-lock")).toHaveTextContent(
+      "PERMANENT DO NOT CONTACT",
+    );
+    expect(screen.getByTestId("message-stage-chip")).toHaveTextContent(
+      "Historical · New Lead",
+    );
+    expect(screen.getByText("historical reply")).toBeInTheDocument();
+    expect(
+      screen.queryByTestId("assign-dropdown-trigger"),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByTestId("dispo-wrong-number")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("inline-reply")).not.toBeInTheDocument();
+    expect(
+      screen.queryByTestId("inline-reply-restricted"),
+    ).not.toBeInTheDocument();
+
+    await user.click(screen.getByTestId("inbox-detail-more"));
+    expect(screen.queryByTestId("inbox-detail-phone")).not.toBeInTheDocument();
+    expect(
+      await screen.findByTestId("copy-conversation-link"),
+    ).toBeInTheDocument();
+  });
+
+  it("shows SMS opt-out as channel-specific and keeps non-SMS outcomes available", async () => {
+    const user = userEvent.setup();
+    const data = makeData({
+      contactId: "contact-sms-optout",
+      contactSmsOptedOut: true,
+      outreachDispo: "opted_out",
+    });
+
+    render(
+      <InboxDetail data={data} assigneeEmails={{}} currentUserId="user-1" />,
+    );
+
+    expect(
+      screen.getByTestId("messages-contact-restriction"),
+    ).toHaveTextContent("SMS disabled");
+    expect(
+      screen.getByTestId("messages-contact-restriction"),
+    ).toHaveTextContent("not the permanent organization-wide DNC lock");
+    expect(screen.getByTestId("inline-reply-restricted")).toBeInTheDocument();
+    expect(screen.getByTestId("dispo-follow-up")).toBeInTheDocument();
+    expect(screen.getByTestId("dispo-dnc-deferred")).not.toHaveClass(
+      "bg-red-50",
+    );
+    expect(
+      screen.queryByTestId("messages-permanent-dnc-lock"),
+    ).not.toBeInTheDocument();
+
+    await user.click(screen.getByTestId("inbox-detail-more"));
+    expect(await screen.findByTestId("inbox-detail-phone")).toBeInTheDocument();
+  });
+
+  it("uses canonical consent and phone suppression for SMS without inventing a voice DNC", async () => {
+    const user = userEvent.setup();
+    const data = makeData({
+      contactId: "contact-canonical-optout",
+      smsConsentState: "opted_out",
+      phoneSuppressed: true,
+    });
+
+    render(
+      <InboxDetail data={data} assigneeEmails={{}} currentUserId="user-1" />,
+    );
+
+    expect(screen.queryByTestId("inline-reply")).not.toBeInTheDocument();
+    expect(
+      screen.getByTestId("messages-contact-restriction"),
+    ).toHaveTextContent("canonical consent or phone suppression");
+    await user.click(screen.getByTestId("inbox-detail-more"));
+    expect(await screen.findByTestId("inbox-detail-phone")).toBeInTheDocument();
+  });
+
+  it("fails closed when authoritative SMS safety reads fail", async () => {
+    const user = userEvent.setup();
+    const data = makeData({
+      contactId: "contact-safety-read-failed",
+      smsConsentState: null,
+      phoneSuppressed: null,
+      smsSafetyReadFailed: true,
+    });
+
+    render(
+      <InboxDetail data={data} assigneeEmails={{}} currentUserId="user-1" />,
+    );
+
+    expect(screen.queryByTestId("inline-reply")).not.toBeInTheDocument();
+    expect(
+      screen.getByTestId("messages-contact-restriction"),
+    ).toHaveTextContent("could not be verified");
+    await user.click(screen.getByTestId("inbox-detail-more"));
+    expect(screen.queryByTestId("inbox-detail-phone")).not.toBeInTheDocument();
+  });
+
+  it("removes outreach outcomes and channel controls for a suppressed contact", async () => {
+    const user = userEvent.setup();
+    const data = makeData({
+      contactId: "contact-suppressed",
+      contactDoNotContact: true,
+    });
+
+    render(
+      <InboxDetail data={data} assigneeEmails={{}} currentUserId="user-1" />,
+    );
+
+    expect(
+      screen.getByTestId("messages-contact-restriction"),
+    ).toHaveTextContent("outreach is blocked for this contact");
+    expect(screen.queryByTestId("dispo-follow-up")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("inline-reply")).not.toBeInTheDocument();
+    expect(screen.getByTestId("inline-reply-restricted")).toBeInTheDocument();
+
+    await user.click(screen.getByTestId("inbox-detail-more"));
+    expect(screen.queryByTestId("inbox-detail-phone")).not.toBeInTheDocument();
   });
 });

@@ -90,4 +90,76 @@ describe("update-motivation-level sub-op (integration)", () => {
     if (result.kind === "rejected") expect(result.reason).toBe("invalid-motivation");
     expect(await readMotivation(id)).toBe("hot");
   });
+
+  it("fails closed when the matched property is hard-deleted before save", async () => {
+    const id = await seedProperty("400 Deleted Motivation St", "cold");
+    const match = await matchPropertyByAddress(supabase, {
+      address: "400 Deleted Motivation St",
+    });
+    if (match.kind !== "matched") throw new Error("expected matched");
+    const { error: deleteError } = await supabase
+      .from("properties")
+      .delete()
+      .eq("id", id);
+    if (deleteError) throw deleteError;
+
+    const result = await updateMotivationLevelOp.apply(
+      { supabase, userId: null },
+      {
+        rowIndex: 0,
+        parsedRow: {
+          Address: "400 Deleted Motivation St",
+          Motivation: "hot",
+        },
+        property: match.property,
+      },
+      { dryRun: false },
+    );
+
+    expect(result).toMatchObject({
+      kind: "rejected",
+      reason: "stale-property",
+    });
+  });
+
+  it("fails closed when the matched property is soft-deleted before save", async () => {
+    const id = await seedProperty("500 Soft Deleted Motivation St", "cold");
+    const match = await matchPropertyByAddress(supabase, {
+      address: "500 Soft Deleted Motivation St",
+    });
+    if (match.kind !== "matched") throw new Error("expected matched");
+    const deletedAt = new Date().toISOString();
+    const { error: deleteError } = await supabase
+      .from("properties")
+      .update({ deleted_at: deletedAt })
+      .eq("id", id);
+    if (deleteError) throw deleteError;
+
+    const result = await updateMotivationLevelOp.apply(
+      { supabase, userId: null },
+      {
+        rowIndex: 0,
+        parsedRow: {
+          Address: "500 Soft Deleted Motivation St",
+          Motivation: "hot",
+        },
+        property: match.property,
+      },
+      { dryRun: false },
+    );
+
+    expect(result).toMatchObject({
+      kind: "rejected",
+      reason: "stale-property",
+    });
+    const { data: proof } = await supabase
+      .from("properties")
+      .select("motivation_level, deleted_at")
+      .eq("id", id)
+      .single();
+    expect(proof?.motivation_level).toBe("cold");
+    expect(new Date(proof!.deleted_at!).getTime()).toBe(
+      new Date(deletedAt).getTime(),
+    );
+  });
 });

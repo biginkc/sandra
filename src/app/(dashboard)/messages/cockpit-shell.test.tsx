@@ -113,6 +113,7 @@ const baseProps = {
   },
   hideDnc: true,
   hiddenDncCount: 0,
+  nowMs: Date.parse("2026-08-17T12:00:00.000Z"),
 };
 
 describe("<CockpitView /> shell — tabs + cadence", () => {

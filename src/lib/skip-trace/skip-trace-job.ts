@@ -57,6 +57,7 @@ export type SkipTraceJobSummary = {
   api_hits: number;
   total_credits: number;
   dnc_skipped?: number;
+  dnc_contact_ambiguous?: number;
   eligibility_exclusions?: Json;
 };
 
@@ -1632,6 +1633,22 @@ async function persistAndRecord(
         from_cache: fromCache,
         credits_deducted: result.creditsDeducted,
         no_match: true,
+      },
+    });
+  } else if (outcome.status === "dnc_contact_ambiguous") {
+    summary.failed++;
+    summary.dnc_contact_ambiguous = (summary.dnc_contact_ambiguous ?? 0) + 1;
+    await writeItem({
+      status: "error",
+      // Existing terminal taxonomy: persistence completed fail-closed, but
+      // identity ambiguity requires a human decision before any retry.
+      error_class: "provider_persist_failed",
+      error_message:
+        "Manual review required: provider phone candidates map to multiple contacts. The property was not linked or marked permanently DNC.",
+      result: {
+        manual_review: true,
+        reason: "dnc_contact_ambiguous",
+        ambiguous_contact_ids: outcome.ambiguousContactIds ?? [],
       },
     });
   } else if (outcome.status === "dnc_skipped") {

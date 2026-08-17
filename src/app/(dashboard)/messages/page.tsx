@@ -36,9 +36,8 @@ export const metadata = {
  * Cockpit page — two tabs:
  *
  *   1. Inbox  (default) — Slack/iPhone-style conversation list with a
- *      side-panel detail view. Click a thread, reply inline, sends
- *      immediately via the existing send-now path. Replaces the Dialpad
- *      app for live conversation work.
+ *      side-panel detail view. Inline replies enter Outbox and wait for the
+ *      existing queue release path to re-check safety before delivery.
  *
  *      Filters: All (default), Unread, Needs Outcome, Mine, Escalated,
  *      Dispo, Unassigned, Unknown, Dismissed.
@@ -54,6 +53,8 @@ export default async function MessagesPage({
 }: {
   searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
+  // eslint-disable-next-line react-hooks/purity -- Server Component request timestamp is intentionally captured once and serialized to every client relative-time formatter.
+  const requestNowMs = Date.now();
   const sp = await searchParams;
   const rawFilter = firstSearchParam(sp.filter);
   if (rawFilter === "handled") {
@@ -88,21 +89,16 @@ export default async function MessagesPage({
   // Fetch everything in parallel. The thread list + unknown active count
   // are needed regardless of which filter is active (badge counts on the
   // tab + filter chips). Other queries are conditional on the filter.
-  const [
-    allThreads,
-    queuedResult,
-    threadDetail,
-    unknownAll,
-    queueStatsResult,
-  ] = await Promise.all([
-    listThreads(supabase, {}),
-    listQueuedPage(null),
-    canonicalThreadId
-      ? fetchInboxDetail(supabase, canonicalThreadId)
-      : Promise.resolve(null),
-    listUnknownSenders(supabase, { includeDismissed: true }),
-    getQueueStats(),
-  ]);
+  const [allThreads, queuedResult, threadDetail, unknownAll, queueStatsResult] =
+    await Promise.all([
+      listThreads(supabase, {}),
+      listQueuedPage(null),
+      canonicalThreadId
+        ? fetchInboxDetail(supabase, canonicalThreadId)
+        : Promise.resolve(null),
+      listUnknownSenders(supabase, { includeDismissed: true }),
+      getQueueStats(),
+    ]);
 
   const {
     threads: visibleThreads,
@@ -177,6 +173,9 @@ export default async function MessagesPage({
       queueStats={queueStats}
       hideDnc={hideDnc}
       hiddenDncCount={hiddenDncCount}
+      queueLoadFailed={!queuedResult.ok}
+      queueStatsFailed={!queueStatsResult.ok}
+      nowMs={requestNowMs}
     />
   );
 }

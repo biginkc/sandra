@@ -6,9 +6,9 @@
  * without checking the other lane isn't mid-build against the old shape.
  */
 
-/** Desktop = week grid; mobile is the same data, day-agenda layout via
- *  CSS-only `md:` dual render (no separate fetch/route). */
-export type CalendarViewMode = "week" | "agenda";
+/** Desktop = week or month grid; mobile is the same data, day-agenda
+ *  layout via CSS-only `md:` dual render (no separate fetch/route). */
+export type CalendarViewMode = "week" | "agenda" | "month";
 
 export type CalendarViewerRole = "owner" | "member";
 
@@ -54,6 +54,8 @@ export type CalendarAppointmentRow = {
   city: string | null;
   state: string | null;
   contact_id: string | null;
+  /** True when the linked property is under the permanent DNC ratchet. */
+  is_dnc_locked: boolean;
   /** Display label derived from contacts.entity_name, or
    *  "first_name last_name", or null when neither is set. */
   contact_name: string | null;
@@ -68,10 +70,17 @@ export type CalendarAppointmentRow = {
  */
 export type CalendarViewProps = {
   view: CalendarViewMode;
-  /** YYYY-MM-DD, zone-local — the displayed week's first day. */
+  /** YYYY-MM-DD, zone-local — the displayed range's first day (week view:
+   *  the week's Sunday; month view: the GRID's first cell, which can fall
+   *  in the previous month). */
   week: string;
-  /** Exactly 7 entries, `days[0].date === week`, consecutive zone-local
-   *  days in order. */
+  /** YYYY-MM zone-local month key of the displayed month when
+   *  `view === "month"`, else null. Drives the month grid's
+   *  outside-month muting and the month-step prev/next nav. */
+  month: string | null;
+  /** Week view: exactly 7 entries. Month view: exactly 42 entries (the
+   *  fixed six-row Sunday-to-Saturday grid). Always
+   *  `days[0].date === week`, consecutive zone-local days in order. */
   days: CalendarDayBounds[];
   appointments: CalendarAppointmentRow[];
   /** IANA zone every date/time above was computed in — the viewer's own
@@ -94,14 +103,19 @@ export type CalendarViewProps = {
    *  labeled without becoming a selectable filter value. */
   assigneeLabels: Record<string, string>;
   currentUserId: string;
+  /** One request-captured instant shared by every calendar surface. */
+  nowMs: number;
+  /** Zone-local date key derived from the same request-captured instant. */
+  todayKey: string;
 };
 
 /** `?week=&assignee=&view=` — parsed by page.tsx from the awaited
  *  `searchParams` promise (Next.js 15 async searchParams contract). */
 export type CalendarSearchParams = {
-  /** YYYY-MM-DD, zone-local anchor of the desired week; any day within
-   *  the week works (page derives that day's own week start). Defaults to
-   *  "today" in the viewer's zone when absent/unparseable. */
+  /** YYYY-MM-DD, zone-local anchor of the desired range; any day within
+   *  the week (or month, for view=month) works — the page derives the
+   *  range containing it. Defaults to "today" in the viewer's zone when
+   *  absent/unparseable. */
   week?: string;
   /** A specific assignee's user id, or the sentinel `"me"`/`"all"` — see
    *  `resolveAssigneeId` in page.tsx. Owner default (param absent):

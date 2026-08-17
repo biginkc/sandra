@@ -1,12 +1,6 @@
-import {
-  type ListThreadsOpts,
-  type Thread,
-} from "@/lib/messages/list-threads";
+import { type ListThreadsOpts, type Thread } from "@/lib/messages/list-threads";
 
-import {
-  type InboxFilter,
-  type InboxFilterCounts,
-} from "./inbox-filters";
+import { type InboxFilter, type InboxFilterCounts } from "./inbox-filters";
 
 /**
  * Pure resolvers for the Messages inbox filter, extracted from the page
@@ -95,7 +89,7 @@ export type VisibleThreadState = {
 };
 
 function isInboxNoise(thread: Thread): boolean {
-  return thread.isOptedOut || thread.isTestTraffic;
+  return thread.isDncLocked || thread.isOptedOut || thread.isTestTraffic;
 }
 
 export function applyInboxThreadFilter(
@@ -106,7 +100,9 @@ export function applyInboxThreadFilter(
   switch (filter) {
     case "mine":
       if (!ctx.currentUserId) return threads;
-      return threads.filter((thread) => thread.assigneeId === ctx.currentUserId);
+      return threads.filter(
+        (thread) => thread.assigneeId === ctx.currentUserId,
+      );
     case "unassigned":
       return threads.filter((thread) => !thread.assigneeId);
     case "unread":
@@ -115,7 +111,9 @@ export function applyInboxThreadFilter(
           thread.unreadCount > 0 || thread.threadId === ctx.canonicalThreadId,
       );
     case "escalated":
-      return threads.filter((thread) => thread.aiResponderStatus === "escalated");
+      return threads.filter(
+        (thread) => thread.aiResponderStatus === "escalated",
+      );
     case "dispo":
       return threads.filter((thread) => thread.outreachDispo !== null);
     case "needs_outcome":
@@ -150,13 +148,11 @@ export function resolveVisibleThreadState(
 
   return {
     threads,
-    filterCounts: buildThreadFilterCounts(
-      visibleAllThreads,
-      ctx.currentUserId,
-    ),
-    hiddenDncCount: ctx.hideDnc && isThreadFilter(filter)
-      ? filteredThreads.filter((thread) => isInboxNoise(thread)).length
-      : 0,
+    filterCounts: buildThreadFilterCounts(visibleAllThreads, ctx.currentUserId),
+    hiddenDncCount:
+      ctx.hideDnc && isThreadFilter(filter)
+        ? filteredThreads.filter((thread) => isInboxNoise(thread)).length
+        : 0,
   };
 }
 

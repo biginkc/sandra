@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { createTestClient } from "@tests/integration/client";
+import { getCanonicalTestOrgId } from "@tests/integration/fixtures/multi-user";
 import { resetTenantTables } from "@tests/integration/reset";
 
 import {
@@ -16,13 +17,7 @@ const supabase = createTestClient();
 let _orgId: string | null = null;
 async function getOrgId(): Promise<string> {
   if (_orgId) return _orgId;
-  const { data } = await supabase
-    .from("organizations")
-    .select("id")
-    .limit(1)
-    .maybeSingle();
-  if (!data?.id) throw new Error("no organization seeded in test project");
-  _orgId = data.id;
+  _orgId = await getCanonicalTestOrgId(supabase);
   return _orgId;
 }
 
@@ -31,16 +26,29 @@ async function getOrgId(): Promise<string> {
 const createdAuthUsers: string[] = [];
 
 async function createAuthUser(email: string): Promise<string> {
+  const uniqueEmail = email.replace("@", `-${crypto.randomUUID()}@`);
   const { data, error } = await supabase.auth.admin.createUser({
-    email,
+    email: uniqueEmail,
     password: `test-pw-${Math.random().toString(36).slice(2)}`,
     email_confirm: true,
   });
   if (error || !data.user) {
-    throw new Error(`createAuthUser(${email}) failed: ${error?.message}`);
+    throw new Error(`createAuthUser(${uniqueEmail}) failed: ${error?.message}`);
   }
   createdAuthUsers.push(data.user.id);
   return data.user.id;
+}
+
+async function grantActiveMembership(userId: string): Promise<void> {
+  const { error } = await supabase.from("memberships").insert({
+    org_id: await getOrgId(),
+    user_id: userId,
+    role: "member",
+    access_status: "active",
+  });
+  if (error) {
+    throw new Error(`grantActiveMembership failed: ${error.message}`);
+  }
 }
 
 async function seedProperty(
@@ -188,6 +196,7 @@ describe("notifications/dispatch (integration)", () => {
       const assignee = await createAuthUser(
         `owner-assigned-${Date.now()}@test.invalid`,
       );
+      await grantActiveMembership(assignee);
       const admin = await createAuthUser(
         `owner-admin-${Date.now()}@test.invalid`,
       );

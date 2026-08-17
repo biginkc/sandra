@@ -21,6 +21,9 @@ export type Thread = {
   propertyAddress: string | null;
   propertyStatus: string | null;
   outreachDispo: string | null;
+  /** Permanent property-level DNC lock. This is independent of which
+   * contact (homeowner or agent) owns the visible conversation. */
+  isDncLocked: boolean;
   /** auth.users.id of whoever is assigned to the property, or null. */
   assigneeId: string | null;
   lastMessageBody: string;
@@ -123,6 +126,33 @@ export type NeedsOutcomeCountOpts = {
   hideTestTraffic?: boolean;
 };
 
+type ThreadSnapshotRow = {
+  thread_id: string;
+  contact_id: string;
+  contact_name: string | null;
+  thread_customer_phone: string | null;
+  thread_business_phone: string | null;
+  property_id: string | null;
+  property_address: string | null;
+  property_status: string | null;
+  outreach_dispo: string | null;
+  is_dnc_locked: boolean;
+  assignee_id: string | null;
+  last_message_body: string;
+  last_message_direction: "inbound" | "outbound";
+  last_message_at: string;
+  unread_count: number;
+  has_inbound: boolean;
+  needs_human_attention: boolean;
+  escalation_reason: string | null;
+  is_opted_out: boolean;
+  ai_responder_status: string | null;
+  ai_responder_reason: string | null;
+  ai_responder_status_at: string | null;
+  ai_last_delivery_status: string | null;
+  ai_last_delivery_error: string | null;
+};
+
 /**
  * Build the inbox thread list — one row per conversation. Every
  * contact-bearing SMS row carries a conversation_id (backfilled and
@@ -141,7 +171,12 @@ export async function listThreads(
   opts: ListThreadsOpts,
 ): Promise<Thread[]> {
   const sinceDays = opts.sinceDays ?? 90;
-  const cutoff = new Date(Date.now() - sinceDays * 24 * 60 * 60 * 1000).toISOString();
+  const cutoff = new Date(
+    Date.now() - sinceDays * 24 * 60 * 60 * 1000,
+  ).toISOString();
+
+  const snapshot = await fetchThreadSnapshot(supabase, cutoff);
+  if (snapshot) return mapThreadSnapshot(snapshot, opts);
 
   const { data: msgs, error } = await supabase
     .from("messages")
@@ -158,7 +193,7 @@ export async function listThreads(
   if (!msgs || msgs.length === 0) return [];
 
   type Bucket = {
-    latest: typeof msgs[number];
+    latest: (typeof msgs)[number];
     propertyId: string | null;
     unreadCount: number;
     hasInbound: boolean;
@@ -220,7 +255,7 @@ export async function listThreads(
       supabase
         .from("properties")
         .select(
-          "id, address, city, state, status, outreach_dispo, assigned_user_id, needs_human_attention, last_ai_escalation_reason",
+          "id, address, city, state, status, outreach_dispo, is_dnc_locked, assigned_user_id, needs_human_attention, last_ai_escalation_reason",
         )
         .in("id", chunk),
     ),
@@ -315,6 +350,7 @@ export async function listThreads(
         : null,
       propertyStatus: p?.status ?? null,
       outreachDispo: p?.outreach_dispo ?? null,
+      isDncLocked: p?.is_dnc_locked ?? false,
       assigneeId: p?.assigned_user_id ?? null,
       lastMessageBody: bucket.latest.body,
       lastMessageDirection: bucket.latest.direction as "inbound" | "outbound",
@@ -328,7 +364,7 @@ export async function listThreads(
       isTestTraffic: looksLikeTestTraffic(
         c
           ? (c.entity_name ??
-            ([c.first_name, c.last_name].filter(Boolean).join(" ") || null))
+              ([c.first_name, c.last_name].filter(Boolean).join(" ") || null))
           : null,
         p ? [p.address, p.city, p.state].filter(Boolean).join(", ") : null,
       ),
@@ -360,7 +396,17 @@ export async function countNeedsOutcomeThreads(
   opts: NeedsOutcomeCountOpts = {},
 ): Promise<number> {
   const sinceDays = opts.sinceDays ?? 90;
-  const cutoff = new Date(Date.now() - sinceDays * 24 * 60 * 60 * 1000).toISOString();
+  const cutoff = new Date(
+    Date.now() - sinceDays * 24 * 60 * 60 * 1000,
+  ).toISOString();
+
+  const snapshot = await fetchThreadSnapshot(supabase, cutoff);
+  if (snapshot) {
+    return mapThreadSnapshot(snapshot, {})
+      .filter((thread) => thread.needsOutcome)
+      .filter((thread) => !opts.hideTestTraffic || !thread.isTestTraffic)
+      .length;
+  }
 
   const { data: msgs, error } = await supabase
     .from("messages")
@@ -432,12 +478,16 @@ export async function countNeedsOutcomeThreads(
     fetchInChunks(contactIds, CHUNK, (chunk) =>
       supabase
         .from("contacts")
-        .select("id, first_name, last_name, entity_name, do_not_contact, sms_opted_out")
+        .select(
+          "id, first_name, last_name, entity_name, do_not_contact, sms_opted_out",
+        )
         .in("id", chunk),
     ),
   ]);
   const propertyById = new Map(propsRows.map((p) => [p.id, p]));
-  const contactById = new Map(contactsRows.map((contact) => [contact.id, contact]));
+  const contactById = new Map(
+    contactsRows.map((contact) => [contact.id, contact]),
+  );
 
   const consentRows = await fetchInChunks(contactIds, CHUNK, (chunk) =>
     supabase
@@ -465,8 +515,9 @@ export async function countNeedsOutcomeThreads(
     const isOptedOut =
       contact?.do_not_contact === true ||
       contact?.sms_opted_out === true ||
-      computeConsentState(consentEventsByContact.get(candidate.contactId) ?? []) ===
-        "opted_out";
+      computeConsentState(
+        consentEventsByContact.get(candidate.contactId) ?? [],
+      ) === "opted_out";
     return isNeedsOutcomeThread({
       propertyId: candidate.propertyId,
       hasInbound: candidate.hasInbound,
@@ -489,7 +540,9 @@ export async function countNeedsOutcomeThreads(
             null))
         : null;
       const propertyAddress = property
-        ? [property.address, property.city, property.state].filter(Boolean).join(", ")
+        ? [property.address, property.city, property.state]
+            .filter(Boolean)
+            .join(", ")
         : null;
 
       return !looksLikeTestTraffic(contactName, propertyAddress);
@@ -497,6 +550,100 @@ export async function countNeedsOutcomeThreads(
   }
 
   return needsOutcome.length;
+}
+
+async function fetchThreadSnapshot(
+  supabase: SupabaseClient<Database>,
+  cutoff: string,
+): Promise<ThreadSnapshotRow[] | null> {
+  // Older unit stubs exercise the pre-migration fallback below. Real
+  // Supabase clients always expose rpc(), so production never returns to the
+  // PostgREST row-capped path once migration 20260816120000 is installed.
+  const rpc = (supabase as unknown as { rpc?: SupabaseClient<Database>["rpc"] })
+    .rpc;
+  if (typeof rpc !== "function") return null;
+  const { data, error } = await supabase.rpc("sms_inbox_thread_snapshot", {
+    p_cutoff: cutoff,
+  });
+  if (error) throw new Error(`sms_inbox_thread_snapshot: ${error.message}`);
+  if (
+    data &&
+    typeof data === "object" &&
+    !Array.isArray(data) &&
+    "__error" in data
+  ) {
+    throw new Error(
+      `sms_inbox_thread_snapshot: ${String(data.__error)}; narrow the inbox window`,
+    );
+  }
+  if (!Array.isArray(data)) {
+    throw new Error("sms_inbox_thread_snapshot: invalid response");
+  }
+  return data as unknown as ThreadSnapshotRow[];
+}
+
+function mapThreadSnapshot(
+  rows: ThreadSnapshotRow[],
+  opts: ListThreadsOpts,
+): Thread[] {
+  const threads: Thread[] = [];
+  for (const row of rows) {
+    const aiResponderStatus = parseAiResponderStatus(row.ai_responder_status);
+    if (opts.assigneeId && row.assignee_id !== opts.assigneeId) continue;
+    if (opts.unassignedOnly && row.assignee_id) continue;
+    if (
+      opts.unreadOnly &&
+      row.unread_count === 0 &&
+      row.thread_id !== opts.includeThreadId
+    )
+      continue;
+    if (opts.escalatedOnly && aiResponderStatus !== "escalated") continue;
+    if (opts.handledOnly && aiResponderStatus !== "handled") continue;
+    if (opts.dispoOnly && row.outreach_dispo == null) continue;
+
+    const needsOutcome = isNeedsOutcomeThread({
+      propertyId: row.property_id,
+      hasInbound: row.has_inbound,
+      propertyStatus: row.property_status,
+      outreachDispo: row.outreach_dispo,
+      isOptedOut: row.is_opted_out,
+    });
+    if (opts.needsOutcomeOnly && !needsOutcome) continue;
+
+    threads.push({
+      threadId: row.thread_id,
+      contactId: row.contact_id,
+      contactName: row.contact_name,
+      threadCustomerPhone: row.thread_customer_phone,
+      threadBusinessPhone: row.thread_business_phone,
+      contactPhone: row.thread_customer_phone,
+      propertyId: row.property_id,
+      propertyAddress: row.property_address,
+      propertyStatus: row.property_status,
+      outreachDispo: row.outreach_dispo,
+      isDncLocked: row.is_dnc_locked,
+      assigneeId: row.assignee_id,
+      lastMessageBody: row.last_message_body,
+      lastMessageDirection: row.last_message_direction,
+      lastMessageAt: row.last_message_at,
+      unreadCount: row.unread_count,
+      needsHumanAttention: row.needs_human_attention,
+      escalationReason: row.escalation_reason,
+      isOptedOut: row.is_opted_out,
+      isTestTraffic: looksLikeTestTraffic(
+        row.contact_name,
+        row.property_address,
+      ),
+      needsOutcome,
+      aiResponderStatus,
+      aiResponderReason: row.ai_responder_reason,
+      aiResponderStatusAt: row.ai_responder_status_at,
+      aiLastDeliveryStatus: row.ai_last_delivery_status,
+      aiLastDeliveryError: row.ai_last_delivery_error,
+    });
+  }
+  threads.sort((a, b) => b.lastMessageAt.localeCompare(a.lastMessageAt));
+  return threads;
 }
 
 /**
@@ -507,7 +654,9 @@ export async function countNeedsOutcomeThreads(
 async function fetchInChunks<T>(
   ids: string[],
   chunkSize: number,
-  query: (chunk: string[]) => PromiseLike<{ data: T[] | null; error: { message: string } | null }>,
+  query: (
+    chunk: string[],
+  ) => PromiseLike<{ data: T[] | null; error: { message: string } | null }>,
 ): Promise<T[]> {
   if (ids.length === 0) return [];
   const chunks: string[][] = [];

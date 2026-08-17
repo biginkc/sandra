@@ -70,6 +70,10 @@ type Props = {
    *  `ref.current?.click()` instead of the user clicking the trigger
    *  directly. */
   triggerRef?: Ref<HTMLButtonElement>;
+  /** Removes a programmatic trigger from sequential keyboard navigation. */
+  triggerTabIndex?: number;
+  /** Lets an external visible control reclaim focus after this popover closes. */
+  onOpenChange?: (open: boolean) => void;
 };
 
 const DURATION_OPTIONS = [15, 30, 45, 60, 90] as const;
@@ -142,6 +146,8 @@ export function BookAppointmentPopover({
   assigneeId: fixedAssigneeId,
   onRescheduled,
   triggerRef,
+  triggerTabIndex,
+  onOpenChange,
 }: Props) {
   const isReschedule = mode === "reschedule";
   const [open, setOpen] = useState(false);
@@ -321,11 +327,18 @@ export function BookAppointmentPopover({
       : null;
 
   return (
-    <Popover open={open} onOpenChange={setOpen}>
+    <Popover
+      open={open}
+      onOpenChange={(nextOpen) => {
+        setOpen(nextOpen);
+        onOpenChange?.(nextOpen);
+      }}
+    >
       <PopoverTrigger
         render={
           <Button
             ref={triggerRef}
+            tabIndex={triggerTabIndex}
             type="button"
             variant={triggerVariant}
             size={triggerSize}

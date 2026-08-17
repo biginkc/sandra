@@ -1,13 +1,19 @@
 import Link from "next/link";
 
-import { AppointmentOutcomeRow } from "@/components/appointments/appointment-outcome-row";
+import {
+  AppointmentOutcomeRow,
+  AppointmentUpcomingActions,
+} from "@/components/appointments/appointment-outcome-row";
 import { StatusChip } from "@/components/ui/status-chip";
+import { cn } from "@/lib/utils";
 
 import type { CalendarAppointmentRow, CalendarViewerRole } from "../types";
 
 import {
   appointmentHref,
   appointmentLabel,
+  appointmentToneClass,
+  appointmentVisualTone,
   formatTimeRange,
   isPastDueOpen,
   outcomeChip,
@@ -42,26 +48,28 @@ export function AppointmentBlock({
   currentUserId,
   nowMs,
 }: Props) {
+  void viewerRole;
   const href = appointmentHref(appt);
   const label = appointmentLabel(appt);
   // Label whose appointment this is whenever it isn't the viewer's own —
   // members can view teammates (scoping.ts honors ?assignee=), so the
   // label follows the row's owner, not the viewer's role.
   const assigneeEmail =
-    appt.assignee_id !== currentUserId ? assignees[appt.assignee_id] : undefined;
+    appt.assignee_id !== currentUserId
+      ? assignees[appt.assignee_id]
+      : undefined;
   const chip =
     appt.status === "completed" && appt.outcome
       ? outcomeChip(appt.outcome)
       : null;
+  const tone = appointmentVisualTone(appt, nowMs);
 
   const body = (
     <>
       <div className="text-foreground truncate text-xs font-bold tabular-nums">
         {formatTimeRange(appt.due_at, appt.end_at, timezone)}
       </div>
-      <div className="text-foreground truncate text-sm font-bold">
-        {label}
-      </div>
+      <div className="text-foreground truncate text-sm font-bold">{label}</div>
       {assigneeEmail ? (
         <div className="text-muted-foreground truncate text-xs font-medium">
           {assigneeEmail}
@@ -75,18 +83,30 @@ export function AppointmentBlock({
           data-testid={`calendar-outcome-chip-${appt.id}`}
         />
       ) : null}
+      {appt.is_dnc_locked ? (
+        <div
+          className="text-muted-foreground mt-1 text-[10px] font-bold tracking-wide uppercase"
+          data-testid={`calendar-dnc-read-only-${appt.id}`}
+        >
+          Read-only · Do not contact
+        </div>
+      ) : null}
     </>
   );
 
   return (
     <div
-      className="border-border bg-card rounded-lg border px-2 py-1.5"
+      className={cn(
+        "rounded-lg border px-2 py-1.5",
+        appointmentToneClass(tone),
+      )}
       data-testid={`calendar-appointment-${appt.id}`}
+      data-appointment-tone={tone}
     >
       {href ? (
         <Link
           href={href}
-          className="block hover:underline"
+          className="flex min-h-11 flex-col justify-center hover:underline"
           data-testid={`calendar-appointment-link-${appt.id}`}
         >
           {body}
@@ -96,9 +116,19 @@ export function AppointmentBlock({
           {body}
         </div>
       )}
-      {isPastDueOpen(appt, nowMs) ? (
+      {!appt.is_dnc_locked && isPastDueOpen(appt, nowMs) ? (
         <div className="mt-1.5">
+          <div className="mb-1 text-[10px] font-bold tracking-wide text-amber-800 uppercase">
+            Needs outcome
+          </div>
           <AppointmentOutcomeRow
+            taskId={appt.id}
+            assigneeId={appt.assignee_id}
+          />
+        </div>
+      ) : !appt.is_dnc_locked && appt.status === "open" ? (
+        <div className="mt-1.5">
+          <AppointmentUpcomingActions
             taskId={appt.id}
             assigneeId={appt.assignee_id}
           />

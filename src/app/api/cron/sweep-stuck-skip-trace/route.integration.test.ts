@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createTestClient } from "@tests/integration/client";
+import { getCanonicalTestOrgId } from "@tests/integration/fixtures/multi-user";
 import { resetTenantTables } from "@tests/integration/reset";
 import { MockSkipTraceProvider } from "@/lib/skip-trace/providers/mock";
 
@@ -33,13 +34,7 @@ afterEach(() => {
 });
 
 async function getOrgId(): Promise<string> {
-  const { data } = await supabase
-    .from("organizations")
-    .select("id")
-    .limit(1)
-    .maybeSingle();
-  if (!data?.id) throw new Error("no org");
-  return data.id;
+  return getCanonicalTestOrgId(supabase);
 }
 
 async function seedRunningSkipTraceJob(opts: {

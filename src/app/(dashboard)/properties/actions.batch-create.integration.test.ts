@@ -25,7 +25,6 @@ vi.spyOn(testClient.auth, "getUser").mockImplementation(async () =>
   }) as never,
 );
 
-// eslint-disable-next-line import/first
 import {
   createDialerBatchFromFilters,
   createDialerBatchFromPropertyIds,
@@ -91,6 +90,10 @@ async function seedLead(opts: {
 
 describe("Create dialer batch server actions", () => {
   beforeEach(async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    // 11:00 AM America/Chicago / noon America/New_York: deterministically
+    // inside the 08:00–21:00 voice calling window for every fixture state.
+    vi.setSystemTime(new Date("2026-08-17T16:00:00.000Z"));
     await seedTwoOrgs(testClient);
     await resetTenantTables(testClient);
     await seedTwoOrgs(testClient);
@@ -109,6 +112,7 @@ describe("Create dialer batch server actions", () => {
       await testClient.auth.admin.deleteUser(userId);
     }
     await resetTenantTables(testClient);
+    vi.useRealTimers();
   });
 
   it("createDialerBatchFromPropertyIds inserts batch + items per (prospect, phone) [SANDRA-01, D-01]", async () => {
@@ -124,14 +128,14 @@ describe("Create dialer batch server actions", () => {
     if (!result.ok) return;
     expect(result.data.counts.callable).toBe(4);
 
-    const { data: batch } = await (testClient as any)
+    const { data: batch } = await testClient
       .from("dialer_batches")
       .select("id, source_kind")
       .eq("id", result.data.batchId)
       .single();
     expect(batch?.source_kind).toBe("selected_ids");
 
-    const { data: items } = await (testClient as any)
+    const { data: items } = await testClient
       .from("dialer_batch_items")
       .select("id, property_id, phone_e164")
       .eq("batch_id", result.data.batchId);
@@ -178,7 +182,7 @@ describe("Create dialer batch server actions", () => {
     if (!result.ok) return;
     expect(result.data).toEqual({
       callable: 1,
-      blocked: { do_not_contact: 1 },
+      blocked: { dnc_locked: 1 },
       missing: 1,
     });
   });
@@ -230,7 +234,7 @@ describe("Create dialer batch server actions", () => {
 
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    const { data: items } = await (testClient as any)
+    const { data: items } = await testClient
       .from("dialer_batch_items")
       .select("state, timezone")
       .eq("batch_id", result.data.batchId);
@@ -243,7 +247,7 @@ describe("Create dialer batch server actions", () => {
   });
 
   it("does NOT write eligibility flags to dialer_batch_items [D-15 Hybrid]", async () => {
-    const { error } = await (testClient as any)
+    const { error } = await testClient
       .from("dialer_batch_items")
       .select("eligible, do_not_contact, sms_opted_out, suppression_snapshot")
       .limit(0);

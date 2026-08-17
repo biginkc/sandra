@@ -10,6 +10,7 @@ export type AddressMatchInput = {
 
 export type PropertyForMatch = {
   id: string;
+  org_id: string;
   homeowner_contact_id: string | null;
   agent_contact_id: string | null;
   status: string;
@@ -24,7 +25,7 @@ export type AddressMatchResult =
   | { kind: "unmatched"; reason: "no-address-match" | "blank-address" };
 
 const SELECT_COLS =
-  "id, homeowner_contact_id, agent_contact_id, status, is_dnc_locked, motivation_level, address, address_normalized";
+  "id, org_id, homeowner_contact_id, agent_contact_id, status, is_dnc_locked, motivation_level, address, address_normalized";
 
 export async function matchPropertyByAddress(
   supabase: SupabaseClient<Database>,

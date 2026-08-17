@@ -193,20 +193,23 @@ test.describe("Messages cockpit — design fidelity", () => {
     await expect(page.getByTestId("dispo-not-interested")).toContainText(
       "Not interested",
     );
-    await expect(page.getByTestId("dispo-dnc")).toContainText("Do not call");
+    const deferredDnc = page.getByTestId("dispo-dnc-deferred");
+    await expect(deferredDnc).toContainText("Permanent DNC unavailable here");
+    await expect(deferredDnc).toBeDisabled();
+    await expect(page.getByTestId("dispo-dnc")).toHaveCount(0);
     const moveToLead = page.getByTestId("message-move-to-lead");
     await expect(moveToLead).toContainText("Move to Lead");
     await expect(moveToLead).toBeDisabled();
     await expect(page.getByTestId("dispo-more")).toBeVisible();
     await expect(page.getByTestId("message-open-lead")).toHaveCount(0);
 
-    // Composer card with From: + Send SMS button + disclaimer
+    // Composer card with From: + queue-only button + Outbox disclaimer
     const reply = page.getByTestId("inline-reply");
     await expect(reply).toContainText("From:");
     await expect(reply.getByTestId("inline-reply-send")).toContainText(
-      "Send SMS",
+      "Queue SMS",
     );
-    await expect(reply).toContainText(/By sending, you confirm/);
+    await expect(reply).toContainText(/adds the message to Outbox/i);
 
     // Day separator pill in the thread
     await expect(page.getByTestId("messages-thread-day-sep").first()).toBeVisible();
@@ -239,12 +242,13 @@ test.describe("Messages cockpit — design fidelity", () => {
     await expect(page.getByTestId("messages-thread")).toBeVisible();
     await expect(page.getByTestId("messages-thread-day-sep").first()).toBeVisible();
 
-    // Same InlineReply → From: line + Send SMS button + disclaimer
+    // Same InlineReply → From: line + queue-only button + disclaimer
     const reply = page.getByTestId("inline-reply");
     await expect(reply).toBeVisible();
     await expect(reply).toContainText("From:");
     await expect(reply.getByTestId("inline-reply-send")).toContainText(
-      "Send SMS",
+      "Queue SMS",
     );
+    await expect(reply).toContainText(/adds the message to Outbox/i);
   });
 });

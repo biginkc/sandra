@@ -48,19 +48,42 @@ function makeRow(overrides: Partial<TaskRow> & { id: string }): TaskRow {
     address: "123 Main St",
     city: "Kansas City",
     state: "MO",
+    is_dnc_locked: false,
     ...overrides,
   };
 }
 
 describe("<TasksPanel />", () => {
+  it("renders a truthful Retry state on failure, never the all-caught-up copy", () => {
+    render(
+      <TasksPanel
+        status="failure"
+        timezone={TZ}
+        currentUserId={VIEWER_ID}
+        nowMs={Date.now()}
+      />,
+    );
+
+    expect(
+      screen.getByText(/load failure, not an empty queue/i),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Retry" })).toHaveAttribute(
+      "href",
+      "/dashboard",
+    );
+    expect(screen.queryByText(/all caught up/i)).not.toBeInTheDocument();
+  });
+
   it("renders the all-clear empty state when all buckets are empty", () => {
     render(
       <TasksPanel
+        status="success"
         overdue={[]}
         today={[]}
         upcoming={[]}
         timezone={TZ}
         currentUserId={VIEWER_ID}
+        nowMs={Date.now()}
       />,
     );
     expect(screen.getByText("My Tasks")).toBeInTheDocument();
@@ -75,11 +98,13 @@ describe("<TasksPanel />", () => {
     ];
     render(
       <TasksPanel
+        status="success"
         overdue={[]}
         today={today}
         upcoming={[]}
         timezone={TZ}
         currentUserId={VIEWER_ID}
+        nowMs={Date.now()}
       />,
     );
 
@@ -96,6 +121,13 @@ describe("<TasksPanel />", () => {
     // count badge = 2
     const badge = screen.getByText("2", { selector: "span" });
     expect(badge).toBeInTheDocument();
+    expect(screen.getByTestId("tasks-timezone-caption")).toHaveTextContent(
+      "Appointment times shown in America/Chicago.",
+    );
+    expect(screen.getByTestId("task-row-t1").firstElementChild).toHaveClass(
+      "flex-col",
+      "sm:flex-row",
+    );
   });
 
   it("renders all three buckets with separate section headers", () => {
@@ -103,6 +135,7 @@ describe("<TasksPanel />", () => {
     const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
     render(
       <TasksPanel
+        status="success"
         overdue={[
           makeRow({ id: "t0", address: "000 Yesterday Rd", due_at: yesterday }),
         ]}
@@ -116,6 +149,7 @@ describe("<TasksPanel />", () => {
         ]}
         timezone={TZ}
         currentUserId={VIEWER_ID}
+        nowMs={Date.now()}
       />,
     );
 
@@ -134,6 +168,7 @@ describe("<TasksPanel />", () => {
     const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
     render(
       <TasksPanel
+        status="success"
         overdue={[
           makeRow({ id: "t0", address: "000 Yesterday Rd", due_at: yesterday }),
         ]}
@@ -141,6 +176,7 @@ describe("<TasksPanel />", () => {
         upcoming={[]}
         timezone={TZ}
         currentUserId={VIEWER_ID}
+        nowMs={Date.now()}
       />,
     );
 
@@ -150,21 +186,21 @@ describe("<TasksPanel />", () => {
     expect(screen.getByText(/Follow-up · overdue/)).toBeInTheDocument();
   });
 
-  it("each row links to the property's messages thread", () => {
+  it("each property-linked row opens the actual lead record", () => {
     const today = [makeRow({ id: "t1", property_id: "prop-abc" })];
     const { container } = render(
       <TasksPanel
+        status="success"
         overdue={[]}
         today={today}
         upcoming={[]}
         timezone={TZ}
         currentUserId={VIEWER_ID}
+        nowMs={Date.now()}
       />,
     );
 
-    const link = container.querySelector(
-      "a[href='/messages?property_id=prop-abc']",
-    );
+    const link = container.querySelector("a[href='/leads/prop-abc']");
     expect(link).not.toBeNull();
   });
 
@@ -186,11 +222,13 @@ describe("<TasksPanel />", () => {
     ];
     render(
       <TasksPanel
+        status="success"
         overdue={[]}
         today={today}
         upcoming={[]}
         timezone={TZ}
         currentUserId={VIEWER_ID}
+        nowMs={Date.now()}
       />,
     );
 
@@ -220,11 +258,13 @@ describe("<TasksPanel />", () => {
     ];
     const { container } = render(
       <TasksPanel
+        status="success"
         overdue={[]}
         today={today}
         upcoming={[]}
         timezone={TZ}
         currentUserId={VIEWER_ID}
+        nowMs={Date.now()}
       />,
     );
 
@@ -235,15 +275,53 @@ describe("<TasksPanel />", () => {
     expect(link).not.toBeNull();
   });
 
+  it("keeps exact-contact DNC work visible on its truthful Messages route but exposes no mutation controls", () => {
+    const { container } = render(
+      <TasksPanel
+        status="success"
+        overdue={[]}
+        today={[
+          makeRow({
+            id: "locked-1",
+            type: "appointment",
+            property_id: null,
+            contact_id: "contact-locked",
+            address: null,
+            city: null,
+            state: null,
+            is_dnc_locked: true,
+          }),
+        ]}
+        upcoming={[]}
+        timezone={TZ}
+        currentUserId={VIEWER_ID}
+        nowMs={Date.now() + 60_000}
+      />,
+    );
+
+    expect(screen.getByTestId("task-dnc-read-only-locked-1")).toHaveTextContent(
+      "Read-only · Do not contact",
+    );
+    expect(screen.queryByTestId("stub-outcome-row-locked-1")).toBeNull();
+    expect(screen.queryByTestId("stub-upcoming-actions-locked-1")).toBeNull();
+    expect(screen.queryByTestId("task-done-locked-1")).toBeNull();
+    expect(screen.queryByTestId("task-snooze-locked-1")).toBeNull();
+    expect(
+      container.querySelector("a[href='/messages?thread=contact-locked']"),
+    ).not.toBeNull();
+  });
+
   it("each row exposes Done and Snooze action buttons", () => {
     const today = [makeRow({ id: "t1" })];
     render(
       <TasksPanel
+        status="success"
         overdue={[]}
         today={today}
         upcoming={[]}
         timezone={TZ}
         currentUserId={VIEWER_ID}
+        nowMs={Date.now()}
       />,
     );
 
@@ -266,11 +344,13 @@ describe("<TasksPanel />", () => {
     ];
     render(
       <TasksPanel
+        status="success"
         overdue={overdue}
         today={[]}
         upcoming={[]}
         timezone={TZ}
         currentUserId={VIEWER_ID}
+        nowMs={Date.now()}
       />,
     );
 
@@ -298,11 +378,13 @@ describe("<TasksPanel />", () => {
     ];
     render(
       <TasksPanel
+        status="success"
         overdue={[]}
         today={[]}
         upcoming={upcoming}
         timezone={TZ}
         currentUserId={VIEWER_ID}
+        nowMs={Date.now()}
       />,
     );
 
@@ -313,6 +395,52 @@ describe("<TasksPanel />", () => {
       screen.queryByTestId("stub-outcome-row-appt-2"),
     ).not.toBeInTheDocument();
     expect(screen.getByText(/2:00.*2:30 PM/)).toBeInTheDocument();
+  });
+
+  it("marks an overnight appointment as ending on the next local day", () => {
+    render(
+      <TasksPanel
+        status="success"
+        overdue={[]}
+        today={[]}
+        upcoming={[
+          makeRow({
+            id: "overnight",
+            type: "appointment",
+            due_at: "2026-05-06T04:30:00.000Z",
+            end_at: "2026-05-06T05:15:00.000Z",
+          }),
+        ]}
+        timezone={TZ}
+        currentUserId={VIEWER_ID}
+        nowMs={Date.now()}
+      />,
+    );
+
+    expect(screen.getByText(/11:30 PM–12:15 AM → Wed/)).toBeInTheDocument();
+  });
+
+  it("disambiguates the repeated fall-back hour in Overview exactly like Calendar", () => {
+    render(
+      <TasksPanel
+        status="success"
+        overdue={[]}
+        today={[]}
+        upcoming={[
+          makeRow({
+            id: "fall-back",
+            type: "appointment",
+            due_at: "2026-11-01T06:30:00.000Z",
+            end_at: "2026-11-01T07:30:00.000Z",
+          }),
+        ]}
+        timezone={TZ}
+        currentUserId={VIEWER_ID}
+        nowMs={Date.now()}
+      />,
+    );
+
+    expect(screen.getByText(/1:30 AM CDT–1:30 AM CST/)).toBeInTheDocument();
   });
 
   describe("near-midnight due labeling (upcoming bucket)", () => {
@@ -335,16 +463,20 @@ describe("<TasksPanel />", () => {
       ];
       render(
         <TasksPanel
+          status="success"
           overdue={[]}
           today={[]}
           upcoming={upcoming}
           timezone="America/Los_Angeles"
           currentUserId={VIEWER_ID}
+          nowMs={Date.now()}
         />,
       );
 
       expect(screen.getByText(/Follow-up · today/)).toBeInTheDocument();
-      expect(screen.queryByText(/Follow-up · tomorrow/)).not.toBeInTheDocument();
+      expect(
+        screen.queryByText(/Follow-up · tomorrow/),
+      ).not.toBeInTheDocument();
     });
   });
 });

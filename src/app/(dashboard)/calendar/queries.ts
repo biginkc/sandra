@@ -11,15 +11,13 @@ import type { CalendarAppointmentRow } from "./types";
  * `{ ok: false }` and only shows the empty-week UI for `{ ok: true, rows: [] }`.
  */
 export type FetchCalendarAppointmentsResult =
-  | { ok: true; rows: CalendarAppointmentRow[] }
-  | { ok: false };
+  { ok: true; rows: CalendarAppointmentRow[] } | { ok: false };
 
 /**
  * Loads open + completed appointment-type tasks whose `due_at` falls in
- * `[weekStartUtc, weekEndUtc)`, left-joined to `properties` (personal
- * blocks / contact-only appointments legitimately have none — same
- * degrade-not-drop pattern as `dashboard/queries.ts:fetchMyTasks`) and
- * `contacts` (for the display name on contact-only rows).
+ * `[weekStartUtc, weekEndUtc)` through the same single-snapshot RPC the month
+ * view uses. One implementation now owns status/chain visibility, joins,
+ * ordering, and fail-closed volume caps for both Calendar views.
  *
  * `orgId` is an explicit filter, not just RLS: this query is called from
  * the org-wide owner view where `assigneeId` is unset, so RLS's
@@ -30,64 +28,10 @@ export type FetchCalendarAppointmentsResult =
  * the task with a terminal status other than 'open'/'completed', and the
  * calendar surface never shows them).
  *
- * Reads the whole week in ONE statement (Codex round 6 — client-side
- * pagination, even keyset, is fundamentally unsound here: its cursor is
- * derived from `due_at`, which is itself mutable data. A concurrent
- * reschedule that moves an appointment's `due_at` from beyond the cursor
- * to before it — an ordinary lifecycle operation, not an edge case —
- * makes a later page's keyset filter skip that row entirely, or return an
- * already-delivered row again if it moves the other direction. Each page
- * is a separate database round trip with its own read, so nothing ties
- * them to one consistent view of the data; no cursor design fixes that,
- * only removing the multi-request gap does).
- *
- * A single query has no such gap: Postgres gives every statement a
- * snapshot of the database as of that statement's start (read committed's
- * per-statement snapshot), so one `SELECT` sees one consistent instant
- * regardless of what other transactions commit around it — there is no
- * "between pages" for a competing write to land in. This trades unbounded
- * result size for that guarantee, which is the right trade here: a
- * calendar week is a naturally bounded domain (nobody has 2,000+
- * appointments in a single week), so `APPOINTMENTS_CAP` is generous
- * enough to never bind in real usage while keeping the query provably
- * boundable. Fetching `CAP + 1` and failing closed if that extra row
- * comes back means a week that's actually too large to load truthfully
- * surfaces as the existing `ok:false` / "couldn't load, Retry" state
- * instead of silently rendering a truncated week as complete.
+ * The RPC evaluates the one week window and its cap inside one Postgres
+ * statement. It also suppresses completed/rescheduled predecessors only when
+ * a cancelled row exists in the same org+chain, without rewriting audit rows.
  */
-// MUST stay strictly below PostgREST's silent 1,000-row response ceiling
-// (documented at properties/actions.ts PAGE=1000): the overflow sentinel is
-// CAP+1, and a sentinel the transport can never deliver would turn the
-// fail-closed cap into silent truncation. 900+1 <= 1000, so the extra row
-// always arrives when the week genuinely overflows.
-const APPOINTMENTS_CAP = 900; // far above any real org's appointments/week, sentinel-safe under PostgREST's 1000-row ceiling
-
-function buildAppointmentsQuery(
-  supabase: Awaited<ReturnType<typeof createClient>>,
-  orgId: string,
-  opts: { assigneeId?: string; weekStartUtc: string; weekEndUtc: string },
-) {
-  let query = supabase
-    .from("tasks")
-    .select(
-      "id, title, description, due_at, end_at, status, outcome, assignee_id, related_property_id, contact_id, properties(address, city, state, deleted_at), contacts(first_name, last_name, entity_name)",
-    )
-    .eq("org_id", orgId)
-    .eq("type", "appointment")
-    .in("status", ["open", "completed"])
-    .gte("due_at", opts.weekStartUtc)
-    .lt("due_at", opts.weekEndUtc);
-
-  if (opts.assigneeId) {
-    query = query.eq("assignee_id", opts.assigneeId);
-  }
-
-  return query;
-}
-
-type AppointmentQueryResult = Awaited<ReturnType<typeof buildAppointmentsQuery>>;
-type RawAppointmentRow = NonNullable<AppointmentQueryResult["data"]>[number];
-
 export async function fetchCalendarAppointments(
   orgId: string,
   opts: {
@@ -96,83 +40,10 @@ export async function fetchCalendarAppointments(
     weekEndUtc: string;
   },
 ): Promise<FetchCalendarAppointmentsResult> {
-  const supabase = await createClient();
-
-  // Single statement, single snapshot (Codex round 6 — see the doc comment
-  // above `APPOINTMENTS_CAP`). `.order()` is still needed for a
-  // deterministic row order in the response (not for cursor construction —
-  // there is no cursor); `id` breaks ties within the same `due_at`.
-  const { data, error } = await buildAppointmentsQuery(supabase, orgId, opts)
-    .order("due_at", { ascending: true })
-    .order("id", { ascending: true })
-    .limit(APPOINTMENTS_CAP + 1);
-
-  if (error || !data) {
-    if (error) {
-      console.error("[calendar] fetchCalendarAppointments failed", {
-        message: error.message,
-        code: error.code,
-      });
-    }
-    return { ok: false };
-  }
-
-  // The extra (CAP+1)th row came back — the week has more appointments
-  // than the cap covers. Fail closed rather than silently render a
-  // truncated week as complete.
-  if (data.length > APPOINTMENTS_CAP) {
-    console.error(
-      "[calendar] fetchCalendarAppointments exceeded APPOINTMENTS_CAP",
-      { orgId, cap: APPOINTMENTS_CAP },
-    );
-    return { ok: false };
-  }
-
-  const rows = data.map((row) => {
-    const prop = row.properties as unknown as {
-      address: string | null;
-      city: string | null;
-      state: string | null;
-      deleted_at: string | null;
-    } | null;
-    const propertyLinked = Boolean(
-      prop && prop.deleted_at === null && prop.address && prop.state,
-    );
-
-    const contact = row.contacts as unknown as {
-      first_name: string | null;
-      last_name: string | null;
-      entity_name: string | null;
-    } | null;
-    const contactName = contact
-      ? (contact.entity_name ??
-        ([contact.first_name, contact.last_name].filter(Boolean).join(" ") ||
-          null))
-      : null;
-
-    const appt: CalendarAppointmentRow = {
-      id: row.id,
-      title: row.title,
-      description: row.description ?? null,
-      due_at: row.due_at,
-      // end_at is always populated for type='appointment' rows (PR 1
-      // CHECK) — the `?? row.due_at` is a defensive fallback only, never
-      // expected to fire, so the UI can treat this field as non-optional.
-      end_at: row.end_at ?? row.due_at,
-      status: row.status,
-      outcome: row.outcome ?? null,
-      assignee_id: row.assignee_id,
-      property_id: propertyLinked ? row.related_property_id : null,
-      address: propertyLinked ? (prop!.address ?? null) : null,
-      city: propertyLinked ? (prop!.city ?? null) : null,
-      state: propertyLinked ? (prop!.state ?? null) : null,
-      contact_id: row.contact_id,
-      contact_name: contactName,
-    };
-    return appt;
+  return fetchCalendarAppointmentsForWindows(orgId, {
+    assigneeId: opts.assigneeId,
+    windows: [{ startUtc: opts.weekStartUtc, endUtc: opts.weekEndUtc }],
   });
-
-  return { ok: true, rows };
 }
 
 /**
@@ -225,7 +96,9 @@ export type FetchOrgRosterResult =
 // the appointments one, and a per-org roster is just as naturally bounded.
 const ROSTER_CAP = 400; // sentinel-safe under the same 1000-row transport ceiling
 
-export async function fetchOrgRoster(orgId: string): Promise<FetchOrgRosterResult> {
+export async function fetchOrgRoster(
+  orgId: string,
+): Promise<FetchOrgRosterResult> {
   const admin = createAdminClient();
   const activeAt = new Date().toISOString();
 
@@ -302,7 +175,10 @@ export async function fetchAssigneeEmails(
     // short page, every needed identity resolved, or the hard page bound.
     const MAX_AUTH_PAGES = 25; // 25 * 200 = 5,000 users — far beyond this app
     for (let page = 1; page <= MAX_AUTH_PAGES; page++) {
-      const { data, error } = await admin.auth.admin.listUsers({ page, perPage });
+      const { data, error } = await admin.auth.admin.listUsers({
+        page,
+        perPage,
+      });
       if (error) {
         console.error("[calendar] fetchAssigneeEmails failed", {
           message: error.message,
@@ -321,4 +197,121 @@ export async function fetchAssigneeEmails(
   }
 
   return emails;
+}
+
+/**
+ * Month-view retrieval, third design (Codex month-view rounds 2+3):
+ * a 42-day grid must neither stretch the per-WEEK `APPOINTMENTS_CAP`
+ * over six weeks (round 2 — a month at plausible weekly volumes would
+ * fail closed while every individual week loads) nor be assembled from
+ * per-week SELECTs (round 3 — each statement reads its own snapshot, so
+ * an appointment rescheduled mid-fetch between windows can be omitted by
+ * every window or returned twice). `fn_calendar_month_appointments`
+ * (migration 20260816100000) is a single-statement SECURITY INVOKER SQL
+ * function: one snapshot for all windows, the same per-week cap enforced
+ * INSIDE that snapshot, plus a total cap kept under PostgREST's 1000-row
+ * response ceiling so the result can never be silently truncated in
+ * transit. Any breach RAISEs and the month fails closed into the same
+ * explicit retry state as week view.
+ */
+type MonthRpcRow = {
+  id: string;
+  title: string;
+  description: string | null;
+  due_at: string;
+  end_at: string | null;
+  status: string;
+  outcome: string | null;
+  assignee_id: string;
+  related_property_id: string | null;
+  contact_id: string | null;
+  property_address: string | null;
+  property_city: string | null;
+  property_state: string | null;
+  property_deleted_at: string | null;
+  property_is_dnc_locked: boolean | null;
+  contact_first_name: string | null;
+  contact_last_name: string | null;
+  contact_entity_name: string | null;
+};
+
+type MonthRpcClient = {
+  rpc(
+    fn: "fn_calendar_month_appointments",
+    args: {
+      p_org: string;
+      p_assignee: string | null;
+      p_week_starts: string[];
+      p_week_ends: string[];
+    },
+  ): Promise<{
+    data: MonthRpcRow[] | null;
+    error: { message: string; code?: string } | null;
+  }>;
+};
+
+export async function fetchCalendarAppointmentsForWindows(
+  orgId: string,
+  opts: {
+    assigneeId?: string;
+    windows: { startUtc: string; endUtc: string }[];
+  },
+): Promise<FetchCalendarAppointmentsResult> {
+  const supabase = await createClient();
+  const { data, error } = await (supabase as unknown as MonthRpcClient).rpc(
+    "fn_calendar_month_appointments",
+    {
+      p_org: orgId,
+      p_assignee: opts.assigneeId ?? null,
+      p_week_starts: opts.windows.map((w) => w.startUtc),
+      p_week_ends: opts.windows.map((w) => w.endUtc),
+    },
+  );
+
+  if (error || !data) {
+    if (error) {
+      console.error("[calendar] fetchCalendarAppointmentsForWindows failed", {
+        message: error.message,
+        code: error.code,
+      });
+    }
+    return { ok: false };
+  }
+
+  // Same shaping rules as the week path's PostgREST-join mapping —
+  // property linkage only counts when the property is alive and
+  // addressable; contact display name prefers entity_name.
+  const rows: CalendarAppointmentRow[] = data.map((row) => {
+    const propertyLinked = Boolean(
+      row.related_property_id &&
+      row.property_deleted_at === null &&
+      row.property_address &&
+      row.property_state,
+    );
+    const contactName =
+      row.contact_entity_name ??
+      ([row.contact_first_name, row.contact_last_name]
+        .filter(Boolean)
+        .join(" ") ||
+        null);
+    return {
+      id: row.id,
+      title: row.title,
+      description: row.description ?? null,
+      due_at: row.due_at,
+      end_at: row.end_at ?? row.due_at,
+      status: row.status,
+      outcome: row.outcome ?? null,
+      assignee_id: row.assignee_id,
+      property_id: propertyLinked ? row.related_property_id : null,
+      address: propertyLinked ? row.property_address : null,
+      city: propertyLinked ? row.property_city : null,
+      state: propertyLinked ? row.property_state : null,
+      contact_id: row.contact_id,
+      contact_name: row.contact_id ? contactName : null,
+      is_dnc_locked: row.property_is_dnc_locked === true,
+    };
+  });
+
+  return { ok: true, rows };
 }

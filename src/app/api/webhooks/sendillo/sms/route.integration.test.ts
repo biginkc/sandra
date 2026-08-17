@@ -26,6 +26,7 @@ vi.mock("workflow/api", () => ({
 }));
 
 import { createTestClient } from "@tests/integration/client";
+import { getCanonicalTestOrgId } from "@tests/integration/fixtures/multi-user";
 import { resetTenantTables } from "@tests/integration/reset";
 
 import { claimInboundSmsIntent } from "@/lib/messaging/inbound-intents";
@@ -60,13 +61,7 @@ async function seedContact(phone: string) {
 }
 
 async function getOrgId(): Promise<string> {
-  const { data, error } = await supabase
-    .from("organizations")
-    .select("id")
-    .limit(1)
-    .single();
-  if (error || !data) throw new Error(`getOrgId failed: ${error?.message}`);
-  return data.id;
+  return getCanonicalTestOrgId(supabase);
 }
 
 async function seedAiResponderConfig(input: {

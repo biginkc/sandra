@@ -53,18 +53,99 @@ export function buildEmailsOp(role: Role): SubOperationModule {
           detail: `"${raw}" doesn't look like an email.`,
         };
       }
+
+      const dncLockedResult = {
+        kind: "rejected" as const,
+        rowIndex,
+        address,
+        reason: "dnc-locked",
+        detail: "Permanent Do Not Contact records are read-only.",
+      };
+      if (property.is_dnc_locked) return dncLockedResult;
+
+      // A legacy property row may point at a contact from another tenant.
+      // Never trust the globally unique contact id by itself: both preview
+      // and execution must prove that the contact belongs to the property's
+      // organization before claiming this row can be updated.
+      const { data: currentContact, error: contactReadError } =
+        await ctx.supabase
+          .from("contacts")
+          .select("id, do_not_contact")
+          .eq("id", contactId)
+          .eq("org_id", property.org_id)
+          .maybeSingle();
+      if (contactReadError) {
+        return {
+          kind: "rejected",
+          rowIndex,
+          address,
+          reason: "db-error",
+          detail: contactReadError.message,
+        };
+      }
+      if (!currentContact) {
+        return {
+          kind: "rejected",
+          rowIndex,
+          address,
+          reason: noContactReason,
+          detail: `Property has no ${role} contact attached in its organization.`,
+        };
+      }
+      if (currentContact.do_not_contact) return dncLockedResult;
+
       if (!options.dryRun) {
-        const { error } = await ctx.supabase
+        const { data: updatedContacts, error } = await ctx.supabase
           .from("contacts")
           .update({ email: lowered })
-          .eq("id", contactId);
+          .eq("id", contactId)
+          .eq("org_id", property.org_id)
+          .eq("do_not_contact", false)
+          .select("id");
         if (error) {
+          if (error.message.includes("DNC_LOCKED")) return dncLockedResult;
           return {
             kind: "rejected",
             rowIndex,
             address,
             reason: "db-error",
             detail: error.message,
+          };
+        }
+        if (updatedContacts?.length === 0) {
+          const { data: proof, error: proofError } = await ctx.supabase
+            .from("contacts")
+            .select("do_not_contact")
+            .eq("id", contactId)
+            .eq("org_id", property.org_id)
+            .maybeSingle();
+          if (proofError) {
+            return {
+              kind: "rejected",
+              rowIndex,
+              address,
+              reason: "db-error",
+              detail: `Email update proof failed: ${proofError.message}`,
+            };
+          }
+          if (proof?.do_not_contact) return dncLockedResult;
+          return {
+            kind: "rejected",
+            rowIndex,
+            address,
+            reason: "db-error",
+            detail: proof
+              ? "Email update affected zero rows while the contact remained mutable."
+              : "Email update was not confirmed because the contact no longer exists.",
+          };
+        }
+        if (updatedContacts?.length !== 1) {
+          return {
+            kind: "rejected",
+            rowIndex,
+            address,
+            reason: "db-error",
+            detail: `Email update affected ${updatedContacts?.length ?? 0} contacts; expected exactly one.`,
           };
         }
       }

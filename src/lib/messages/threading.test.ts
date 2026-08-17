@@ -255,6 +255,7 @@ describe("ensureConversationIdForThread — fallback (RPC / registry migration a
  */
 function makeCanonicalizeSupabase(
   rows: Array<{
+    org_id: string;
     channel: string;
     conversation_id: string | null;
     contact_id: string | null;
@@ -298,6 +299,27 @@ function makeCanonicalizeSupabase(
     return b;
   }
   return {
+    rpc: (_name: string, args: { p_conversation_id: string }) => {
+      const orgIds = [
+        ...new Set(
+          rows
+            .filter(
+              (row) =>
+                row.channel === "sms" &&
+                row.conversation_id === args.p_conversation_id,
+            )
+            .map((row) => row.org_id),
+        ),
+      ];
+      return Promise.resolve(
+        orgIds.length > 1
+          ? {
+              data: null,
+              error: { message: "SMS_CONVERSATION_ORG_AMBIGUOUS" },
+            }
+          : { data: orgIds[0] ?? null, error: null },
+      );
+    },
     from: (table: string) => {
       if (table === "messages") return builder();
       throw new Error(`unexpected table ${table}`);
@@ -311,6 +333,7 @@ describe("canonicalizeThreadId — the URL-compat doormat", () => {
   const supabase = makeCanonicalizeSupabase([
     // Conversation CONV: CONTACT_UUID at property p-a (newest activity).
     {
+      org_id: "org-1",
       channel: "sms",
       conversation_id: CONV,
       contact_id: CONTACT_UUID,
@@ -319,6 +342,7 @@ describe("canonicalizeThreadId — the URL-compat doormat", () => {
     },
     // Same contact, older thread at p-b under a different conversation.
     {
+      org_id: "org-1",
       channel: "sms",
       conversation_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
       contact_id: CONTACT_UUID,
@@ -327,6 +351,7 @@ describe("canonicalizeThreadId — the URL-compat doormat", () => {
     },
     // Property-less thread for another contact.
     {
+      org_id: "org-1",
       channel: "sms",
       conversation_id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
       contact_id: "c-nondashed",
@@ -368,5 +393,30 @@ describe("canonicalizeThreadId — the URL-compat doormat", () => {
     expect(
       await canonicalizeThreadId(supabase, "99999999-9999-4999-8999-999999999999"),
     ).toBeNull();
+  });
+
+  it("fails closed when the same conversation UUID spans organizations", async () => {
+    const collision = makeCanonicalizeSupabase([
+      {
+        org_id: "org-1",
+        channel: "sms",
+        conversation_id: CONV,
+        contact_id: CONTACT_UUID,
+        property_id: "p-a",
+        created_at: "2026-06-12T12:00:00Z",
+      },
+      {
+        org_id: "org-2",
+        channel: "sms",
+        conversation_id: CONV,
+        contact_id: null,
+        property_id: null,
+        created_at: "2025-01-01T00:00:00Z",
+      },
+    ]);
+
+    await expect(canonicalizeThreadId(collision, CONV)).rejects.toThrow(
+      "SMS_CONVERSATION_ORG_AMBIGUOUS",
+    );
   });
 });

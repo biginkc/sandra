@@ -1,10 +1,11 @@
 import { render, screen } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const {
   createClient,
   fetchAssigneeEmails,
   fetchCalendarAppointments,
+  fetchCalendarAppointmentsForWindows,
   fetchOrgRoster,
   getCallerMemberships,
   loadIntegrationPrefs,
@@ -12,6 +13,7 @@ const {
   createClient: vi.fn(),
   fetchAssigneeEmails: vi.fn(async () => ({})),
   fetchCalendarAppointments: vi.fn(),
+  fetchCalendarAppointmentsForWindows: vi.fn(),
   fetchOrgRoster: vi.fn(),
   getCallerMemberships: vi.fn(),
   loadIntegrationPrefs: vi.fn(async () => ({
@@ -27,6 +29,7 @@ vi.mock("@/lib/integrations/prefs", () => ({ loadIntegrationPrefs }));
 vi.mock("./queries", () => ({
   fetchAssigneeEmails,
   fetchCalendarAppointments,
+  fetchCalendarAppointmentsForWindows,
   fetchOrgRoster,
 }));
 // The `_components` lane's real CalendarView is a "use client" component
@@ -39,10 +42,22 @@ vi.mock("./_components/calendar-view", () => ({
     appointments: unknown[];
     assignees: Record<string, string>;
     assigneeLabels: Record<string, string>;
+    view: string;
+    month: string | null;
+    days: unknown[];
+    nowMs: number;
+    todayKey: string;
   }) => (
     <div data-testid="calendar-view-stub">
       <span data-testid="appointment-count">{props.appointments.length}</span>
-      <span data-testid="assignee-count">{Object.keys(props.assignees).length}</span>
+      <span data-testid="assignee-count">
+        {Object.keys(props.assignees).length}
+      </span>
+      <span data-testid="calendar-view-mode">{props.view}</span>
+      <span data-testid="calendar-month-key">{props.month ?? "none"}</span>
+      <span data-testid="calendar-day-count">{props.days.length}</span>
+      <span data-testid="calendar-now-ms">{props.nowMs}</span>
+      <span data-testid="calendar-today-key">{props.todayKey}</span>
       {Object.entries(props.assigneeLabels).map(([id, label]) => (
         <span key={id} data-testid={`assignee-label-${id}`}>
           {label}
@@ -57,7 +72,9 @@ import CalendarPage from "./page";
 function mockUser(userId = "user-1", email = "owner@bmh.com") {
   createClient.mockResolvedValue({
     auth: {
-      getUser: vi.fn().mockResolvedValue({ data: { user: { id: userId, email } } }),
+      getUser: vi
+        .fn()
+        .mockResolvedValue({ data: { user: { id: userId, email } } }),
     },
   });
   getCallerMemberships.mockResolvedValue([
@@ -72,6 +89,10 @@ beforeEach(() => {
     calendarEnabled: true,
     timezone: "America/Chicago",
   });
+});
+
+afterEach(() => {
+  vi.useRealTimers();
 });
 
 describe("CalendarPage — appointments load failure", () => {
@@ -111,7 +132,11 @@ describe("CalendarPage — appointments load failure", () => {
     });
 
     const jsx = await CalendarPage({
-      searchParams: Promise.resolve({ week: "2026-05-03", assignee: "all", view: "agenda" }),
+      searchParams: Promise.resolve({
+        week: "2026-05-03",
+        assignee: "all",
+        view: "agenda",
+      }),
     });
     render(jsx);
 
@@ -135,9 +160,169 @@ describe("CalendarPage — genuinely empty week", () => {
     const jsx = await CalendarPage({ searchParams: Promise.resolve({}) });
     render(jsx);
 
-    expect(screen.queryByText(/Calendar couldn't load/i)).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(/Calendar couldn't load/i),
+    ).not.toBeInTheDocument();
     expect(screen.getByTestId("calendar-view-stub")).toBeInTheDocument();
     expect(screen.getByTestId("appointment-count")).toHaveTextContent("0");
+  });
+
+  it("derives the range and every client today marker from one request instant in the viewer timezone", async () => {
+    vi.useFakeTimers();
+    const requestNow = new Date("2026-08-17T04:30:00.000Z");
+    vi.setSystemTime(requestNow);
+    mockUser();
+    loadIntegrationPrefs.mockResolvedValue({
+      slackEnabled: true,
+      calendarEnabled: true,
+      timezone: "America/Los_Angeles",
+    });
+    fetchCalendarAppointments.mockResolvedValue({ ok: true, rows: [] });
+    fetchOrgRoster.mockResolvedValue({
+      ok: true,
+      labelsDegraded: false,
+      roster: [{ id: "user-1", label: "owner@bmh.com" }],
+    });
+
+    render(await CalendarPage({ searchParams: Promise.resolve({}) }));
+
+    expect(screen.getByTestId("calendar-now-ms")).toHaveTextContent(
+      String(requestNow.getTime()),
+    );
+    expect(screen.getByTestId("calendar-today-key")).toHaveTextContent(
+      "2026-08-16",
+    );
+  });
+});
+
+describe("CalendarPage — resolved scope description", () => {
+  it("describes a member's explicit org-wide scope instead of claiming the results are only theirs", async () => {
+    createClient.mockResolvedValue({
+      auth: {
+        getUser: vi.fn().mockResolvedValue({
+          data: { user: { id: "user-1", email: "member@bmh.com" } },
+        }),
+      },
+    });
+    getCallerMemberships.mockResolvedValue([
+      { user_id: "user-1", org_id: "org-1", role: "member" },
+    ]);
+    fetchOrgRoster.mockResolvedValue({
+      ok: true,
+      labelsDegraded: false,
+      roster: [
+        { id: "user-1", label: "member@bmh.com" },
+        { id: "rep-2", label: "rep2@bmh.com" },
+      ],
+    });
+    fetchCalendarAppointments.mockResolvedValue({ ok: true, rows: [] });
+
+    const jsx = await CalendarPage({
+      searchParams: Promise.resolve({ assignee: "all" }),
+    });
+    render(jsx);
+
+    expect(screen.getByText("All team appointments.")).toBeInTheDocument();
+    expect(screen.queryByText("Your appointments.")).not.toBeInTheDocument();
+  });
+
+  it("names the teammate selected by a member", async () => {
+    createClient.mockResolvedValue({
+      auth: {
+        getUser: vi.fn().mockResolvedValue({
+          data: { user: { id: "user-1", email: "member@bmh.com" } },
+        }),
+      },
+    });
+    getCallerMemberships.mockResolvedValue([
+      { user_id: "user-1", org_id: "org-1", role: "member" },
+    ]);
+    fetchOrgRoster.mockResolvedValue({
+      ok: true,
+      labelsDegraded: false,
+      roster: [
+        { id: "user-1", label: "member@bmh.com" },
+        { id: "rep-2", label: "rep2@bmh.com" },
+      ],
+    });
+    fetchCalendarAppointments.mockResolvedValue({ ok: true, rows: [] });
+
+    const jsx = await CalendarPage({
+      searchParams: Promise.resolve({ assignee: "rep-2" }),
+    });
+    render(jsx);
+
+    expect(
+      screen.getByText("Appointments assigned to rep2@bmh.com."),
+    ).toBeInTheDocument();
+  });
+});
+
+describe("CalendarPage — fixed six-week month", () => {
+  it("passes all six adjacent windows to the single-snapshot RPC and renders 42 days", async () => {
+    mockUser();
+    fetchCalendarAppointmentsForWindows.mockResolvedValue({
+      ok: true,
+      rows: [],
+    });
+    fetchOrgRoster.mockResolvedValue({
+      ok: true,
+      labelsDegraded: false,
+      roster: [{ id: "user-1", label: "owner@bmh.com" }],
+    });
+
+    const jsx = await CalendarPage({
+      searchParams: Promise.resolve({ view: "month", week: "2026-02-10" }),
+    });
+    render(jsx);
+
+    expect(fetchCalendarAppointments).not.toHaveBeenCalled();
+    expect(fetchCalendarAppointmentsForWindows).toHaveBeenCalledWith(
+      "org-1",
+      expect.objectContaining({
+        assigneeId: undefined,
+        windows: expect.arrayContaining([
+          expect.objectContaining({
+            startUtc: expect.any(String),
+            endUtc: expect.any(String),
+          }),
+        ]),
+      }),
+    );
+    const call = fetchCalendarAppointmentsForWindows.mock.calls[0][1] as {
+      windows: Array<{ startUtc: string; endUtc: string }>;
+    };
+    expect(call.windows).toHaveLength(6);
+    for (let i = 1; i < call.windows.length; i++) {
+      expect(call.windows[i].startUtc).toBe(call.windows[i - 1].endUtc);
+    }
+    expect(screen.getByTestId("calendar-view-mode")).toHaveTextContent("month");
+    expect(screen.getByTestId("calendar-month-key")).toHaveTextContent(
+      "2026-02",
+    );
+    expect(screen.getByTestId("calendar-day-count")).toHaveTextContent("42");
+  });
+
+  it("renders Retry instead of an empty month when the month RPC fails", async () => {
+    mockUser();
+    fetchCalendarAppointmentsForWindows.mockResolvedValue({ ok: false });
+    fetchOrgRoster.mockResolvedValue({
+      ok: true,
+      labelsDegraded: false,
+      roster: [{ id: "user-1", label: "owner@bmh.com" }],
+    });
+
+    const jsx = await CalendarPage({
+      searchParams: Promise.resolve({ view: "month", week: "2026-02-10" }),
+    });
+    render(jsx);
+
+    expect(screen.getByText(/Calendar couldn't load/i)).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /retry/i })).toHaveAttribute(
+      "href",
+      "/calendar?week=2026-02-10&view=month",
+    );
+    expect(screen.queryByTestId("calendar-view-stub")).not.toBeInTheDocument();
   });
 });
 
@@ -162,7 +347,9 @@ describe("CalendarPage — roster identity load failure", () => {
       "/calendar?week=2026-05-03",
     );
     expect(screen.queryByTestId("calendar-view-stub")).not.toBeInTheDocument();
-    expect(screen.queryByText(/showing your own appointments only/i)).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(/showing your own appointments only/i),
+    ).not.toBeInTheDocument();
   });
 });
 
@@ -232,9 +419,9 @@ describe("CalendarPage — appointment owned by an inactive/former assignee (Cod
     // But the label map used for per-row attribution covers the inactive
     // assignee too, with a "Former teammate" fallback carrying the id
     // prefix — never silently dropped.
-    expect(screen.getByTestId("assignee-label-rep-suspended")).toHaveTextContent(
-      "Former teammate (rep-susp)",
-    );
+    expect(
+      screen.getByTestId("assignee-label-rep-suspended"),
+    ).toHaveTextContent("Former teammate (rep-susp)");
     expect(fetchAssigneeEmails).toHaveBeenCalledWith(["rep-suspended"]);
   });
 
@@ -306,9 +493,9 @@ describe("CalendarPage — deep-linked ?assignee= outside the active roster (Cod
   it("normalizes a member's deep link to a removed/suspended id to their own items before querying", async () => {
     createClient.mockResolvedValue({
       auth: {
-        getUser: vi
-          .fn()
-          .mockResolvedValue({ data: { user: { id: "user-1", email: "member@bmh.com" } } }),
+        getUser: vi.fn().mockResolvedValue({
+          data: { user: { id: "user-1", email: "member@bmh.com" } },
+        }),
       },
     });
     getCallerMemberships.mockResolvedValue([

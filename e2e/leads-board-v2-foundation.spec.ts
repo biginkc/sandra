@@ -1,22 +1,34 @@
 import { expect, test } from "@playwright/test";
 
 import {
-  TEST_USER_EMAIL,
   adminClient,
+  ensureTestUser,
   resetTenantTables,
 } from "./fixtures";
 
 const LEADS_TEAMMATE_EMAIL = "e2e-leads-teammate@bmhgroupkc.com";
 const DEFAULT_ORG_ID = "00000000-0000-0000-0000-000000000bbb";
 
+async function findAuthUserByEmail(
+  admin: ReturnType<typeof adminClient>,
+  email: string,
+) {
+  let page = 1;
+  const perPage = 200;
+  while (true) {
+    const { data, error } = await admin.auth.admin.listUsers({ page, perPage });
+    if (error) throw error;
+    const match = data.users.find((user) => user.email === email);
+    if (match) return match;
+    if (!data.nextPage || data.users.length === 0) return null;
+    page = data.nextPage;
+  }
+}
+
 async function ensureLeadsTeammate(
   admin: ReturnType<typeof adminClient>,
 ): Promise<{ id: string; email: string }> {
-  const { data: users, error: usersError } = await admin.auth.admin.listUsers({
-    perPage: 200,
-  });
-  if (usersError) throw usersError;
-  let teammate = users.users.find((user) => user.email === LEADS_TEAMMATE_EMAIL);
+  let teammate = await findAuthUserByEmail(admin, LEADS_TEAMMATE_EMAIL);
   if (!teammate) {
     const { data, error } = await admin.auth.admin.createUser({
       email: LEADS_TEAMMATE_EMAIL,
@@ -60,9 +72,7 @@ test("Leads board v2 foundation is usable at desktop and narrow widths", async (
   const admin = adminClient();
   await resetTenantTables(admin);
 
-  const { data: users } = await admin.auth.admin.listUsers({ perPage: 200 });
-  const currentUser = users.users.find((user) => user.email === TEST_USER_EMAIL);
-  expect(currentUser).toBeTruthy();
+  const currentUserId = await ensureTestUser(admin);
   const teammate = await ensureLeadsTeammate(admin);
 
   const { data: contact, error: contactError } = await admin
@@ -88,7 +98,7 @@ test("Leads board v2 foundation is usable at desktop and narrow widths", async (
       status: "new_lead",
       motivation_level: "hot",
       homeowner_contact_id: contact.id,
-      assigned_user_id: currentUser!.id,
+      assigned_user_id: currentUserId,
     })
     .select("id, org_id")
     .single();
@@ -116,7 +126,7 @@ test("Leads board v2 foundation is usable at desktop and narrow widths", async (
         city: "Kansas City",
         state: "MO",
         status: "contacted",
-        assigned_user_id: currentUser!.id,
+        assigned_user_id: currentUserId,
       },
       {
         address: "789 Unassigned Lead Rd",
@@ -163,7 +173,7 @@ test("Leads board v2 foundation is usable at desktop and narrow widths", async (
     .insert({
       org_id: unassignedLead.org_id,
       name: "Completed sequence browser proof",
-      created_by: currentUser!.id,
+      created_by: currentUserId,
     })
     .select("id")
     .single();

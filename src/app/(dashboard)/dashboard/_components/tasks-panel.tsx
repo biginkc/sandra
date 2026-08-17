@@ -1,27 +1,23 @@
 import Link from "next/link";
 
 import { humanDueDate } from "@/lib/notifications/format";
+import { formatTimeRange } from "@/lib/time/format-time-range";
 import {
   AppointmentOutcomeRow,
   AppointmentUpcomingActions,
 } from "@/components/appointments/appointment-outcome-row";
 
-import type { TaskRow } from "../queries";
+import type { MyTasksResult, TaskRow } from "../queries";
 
 import { TaskActionsRow } from "./task-actions-row";
 
-type Props = {
-  overdue: TaskRow[];
-  today: TaskRow[];
-  upcoming: TaskRow[];
-  /** Zone the buckets were computed in (fetchMyTasks.timezone) — due
-   *  labels must be formatted in the same zone or a row can sit under
-   *  Upcoming while its label reads "today". */
-  timezone: string;
+type Props = MyTasksResult & {
   /** The viewer these tasks belong to (fetchMyTasks always scopes to
    *  `assignee_id = viewer`) — appointment rows need this to drive the
    *  reschedule popover's timezone lookup. */
   currentUserId: string;
+  /** Request-captured instant shared with the Overview greeting/date. */
+  nowMs: number;
 };
 
 const TYPE_LABELS: Record<string, string> = {
@@ -32,14 +28,14 @@ const TYPE_LABELS: Record<string, string> = {
 };
 
 /**
- * Right-rail dashboard panel surfacing the current viewer's open tasks
+ * Dashboard daily-work panel surfacing the current viewer's open tasks
  * split into Overdue / Today / Upcoming. Empty-state collapses to a
  * single "all caught up" line, matching the NeedsAttentionStrip "all
  * clear" visual rest state.
  *
  * Row linking depends on what the task is attached to (property is now
  * optional — appointment-type tasks may have neither):
- *   - property-linked → /messages?property_id=<id> (unchanged)
+ *   - property-linked → /leads/<id>, the actual lead record
  *   - contact-only (no property) → /messages?thread=<contactId>, same
  *     canonical thread param the cockpit itself reads/writes
  *     (canonicalizeThreadId resolves a raw contact id to its conversation)
@@ -50,13 +46,29 @@ const TYPE_LABELS: Record<string, string> = {
  * row (held / no-show / reschedule / cancel); before that, a compact
  * "..." overflow with just Reschedule/Cancel.
  */
-export function TasksPanel({
-  overdue,
-  today,
-  upcoming,
-  timezone,
-  currentUserId,
-}: Props) {
+export function TasksPanel(props: Props) {
+  if (props.status === "failure") {
+    return (
+      <div
+        className="border-alert-critical/30 bg-card rounded-2xl border px-5 py-5"
+        data-testid="tasks-panel"
+      >
+        <h2 className="text-foreground text-base font-bold">My Tasks</h2>
+        <p className="text-muted-foreground mt-3 text-sm">
+          Tasks couldn&apos;t load. This is a load failure, not an empty queue —
+          your tasks may still exist.
+        </p>
+        <a
+          href="/dashboard"
+          className="border-border text-foreground mt-4 inline-flex min-h-11 items-center rounded-full border-2 px-5 text-sm font-bold hover:bg-stone-50"
+        >
+          Retry
+        </a>
+      </div>
+    );
+  }
+
+  const { overdue, today, upcoming, timezone, currentUserId } = props;
   const total = overdue.length + today.length + upcoming.length;
 
   if (total === 0) {
@@ -70,11 +82,7 @@ export function TasksPanel({
     );
   }
 
-  // Server components render once per request; capturing request time
-  // here is intentional and stable for the duration of the response —
-  // same convention as dashboard/page.tsx's own `nowMs`.
-  // eslint-disable-next-line react-hooks/purity
-  const nowMs = Date.now();
+  const { nowMs } = props;
 
   return (
     <div
@@ -82,7 +90,15 @@ export function TasksPanel({
       data-testid="tasks-panel"
     >
       <div className="mb-4 flex items-center justify-between">
-        <h2 className="text-foreground text-base font-bold">My Tasks</h2>
+        <div>
+          <h2 className="text-foreground text-base font-bold">My Tasks</h2>
+          <p
+            className="text-muted-foreground mt-0.5 text-xs"
+            data-testid="tasks-timezone-caption"
+          >
+            Appointment times shown in {timezone}.
+          </p>
+        </div>
         <span className="text-muted-foreground rounded-full bg-stone-100 px-2.5 py-1 text-xs font-bold tabular-nums">
           {total}
         </span>
@@ -125,7 +141,7 @@ export function TasksPanel({
 /** href for a task row, or null when there's nothing to link to (a fully
  *  unlinked personal block). */
 function taskHref(t: TaskRow): string | null {
-  if (t.property_id) return `/messages?property_id=${t.property_id}`;
+  if (t.property_id) return `/leads/${t.property_id}`;
   if (t.contact_id) return `/messages?thread=${t.contact_id}`;
   return null;
 }
@@ -138,24 +154,6 @@ function taskPrimaryLabel(t: TaskRow): string {
   if (t.address) return t.address;
   if (t.type === "appointment" && !t.contact_id) return "Personal block";
   return t.title;
-}
-
-/** "2:00–2:30 PM" in the panel's timezone; just the start time when
- *  `end_at` is missing (shouldn't happen for a real appointment, but a
- *  malformed row degrades gracefully rather than throwing). */
-function formatTimeRange(
-  dueAt: string,
-  endAt: string | null,
-  timeZone: string,
-): string {
-  const fmt = new Intl.DateTimeFormat("en-US", {
-    timeZone,
-    hour: "numeric",
-    minute: "2-digit",
-  });
-  const start = fmt.format(new Date(dueAt));
-  if (!endAt) return start;
-  return `${start}–${fmt.format(new Date(endAt))}`;
 }
 
 /** Subtitle for an appointment row: the usual day label (today / overdue
@@ -195,7 +193,9 @@ function Section({
     <div className="mb-4 last:mb-0">
       <div
         className={`mb-2 text-[10px] font-bold tracking-widest uppercase ${
-          variant === "overdue" ? "text-alert-critical" : "text-muted-foreground"
+          variant === "overdue"
+            ? "text-alert-critical"
+            : "text-muted-foreground"
         }`}
       >
         {label}
@@ -205,13 +205,14 @@ function Section({
           const href = taskHref(t);
           const primary = taskPrimaryLabel(t);
           const isAppointment = t.type === "appointment";
+          const isDncLocked = t.is_dnc_locked;
           const rowContent = (
             <>
               <div className="text-foreground truncate text-sm font-bold">
                 {primary}
               </div>
               <div className="text-muted-foreground truncate text-xs font-medium">
-                {(TYPE_LABELS[t.type] ?? "Task")} ·{" "}
+                {TYPE_LABELS[t.type] ?? "Task"} ·{" "}
                 {isAppointment
                   ? appointmentSubtitle(t, variant, timezone)
                   : variant === "today"
@@ -224,7 +225,16 @@ function Section({
           );
 
           let actions: React.ReactNode;
-          if (!isAppointment) {
+          if (isDncLocked) {
+            actions = (
+              <span
+                className="text-muted-foreground inline-flex min-h-11 items-center text-xs font-bold tracking-wide uppercase"
+                data-testid={`task-dnc-read-only-${t.id}`}
+              >
+                Read-only · Do not contact
+              </span>
+            );
+          } else if (!isAppointment) {
             actions = <TaskActionsRow taskId={t.id} />;
           } else if (new Date(t.due_at).getTime() < nowMs) {
             actions = (
@@ -242,20 +252,22 @@ function Section({
           return (
             <li
               key={t.id}
-              className="py-2.5 first:pt-0 last:pb-0"
+              className={`py-2.5 first:pt-0 last:pb-0 ${
+                isDncLocked ? "text-muted-foreground opacity-70" : ""
+              }`}
               data-testid={`task-row-${t.id}`}
             >
-              <div className="flex items-center justify-between gap-3">
+              <div className="flex flex-col items-stretch gap-3 sm:flex-row sm:items-center sm:justify-between">
                 {href ? (
                   <Link
                     href={href}
-                    className="min-w-0 flex-1 hover:underline"
+                    className="inline-flex min-h-11 min-w-0 flex-1 flex-col justify-center hover:underline"
                   >
                     {rowContent}
                   </Link>
                 ) : (
                   <div
-                    className="min-w-0 flex-1"
+                    className="flex min-h-11 min-w-0 flex-1 flex-col justify-center"
                     data-testid={`task-row-${t.id}-unlinked`}
                   >
                     {rowContent}

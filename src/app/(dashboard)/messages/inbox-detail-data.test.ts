@@ -1,8 +1,13 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import type { Database } from "@/lib/supabase/types";
+import { isSmsPhoneSuppressed } from "@/lib/messaging/opt-out-phone";
 
 import { fetchInboxDetail } from "./inbox-detail-data";
+
+vi.mock("@/lib/messaging/opt-out-phone", () => ({
+  isSmsPhoneSuppressed: vi.fn(async () => false),
+}));
 
 type MessageRow = Database["public"]["Tables"]["messages"]["Row"];
 type ContactRow = Database["public"]["Tables"]["contacts"]["Row"];
@@ -32,6 +37,7 @@ function makeMessage(
     from_address: overrides.from_address ?? "+15551234567",
     to_address: overrides.to_address ?? "+18165550000",
     created_at: overrides.created_at ?? "2026-06-09T12:00:00.000Z",
+    org_id: overrides.org_id ?? "org-1",
     read_at: overrides.read_at ?? null,
     metadata: overrides.metadata ?? null,
   } as MessageRow;
@@ -100,6 +106,7 @@ function makeProperty(
     is_residential: overrides.is_residential ?? null,
     is_seasonal: overrides.is_seasonal ?? null,
     is_vacant: overrides.is_vacant ?? null,
+    is_dnc_locked: overrides.is_dnc_locked ?? false,
     last_ai_escalation_at: overrides.last_ai_escalation_at ?? null,
     last_ai_escalation_reason: overrides.last_ai_escalation_reason ?? null,
     lat: overrides.lat ?? null,
@@ -129,11 +136,18 @@ type SeedData = {
   messages: MessageRow[];
   contacts: ContactRow[];
   properties: PropertyRow[];
+  consent_events?: Array<{
+    contact_id: string;
+    channel: string;
+    event_type: string;
+    occurred_at: string;
+  }>;
 };
 
 function makeSupabaseStub(seed: SeedData) {
   function makeBuilder(table: keyof SeedData) {
-    const filters: Array<{ kind: "eq" | "is"; key: string; value: unknown }> = [];
+    const filters: Array<{ kind: "eq" | "is"; key: string; value: unknown }> =
+      [];
     const negativeFilters: Array<{ key: string; value: unknown }> = [];
     let orderBy: { key: string; ascending: boolean } | null = null;
     let maxRows: number | null = null;
@@ -157,7 +171,9 @@ function makeSupabaseStub(seed: SeedData) {
       },
       not(key: string, operator: "in", value: string) {
         if (operator !== "in") {
-          throw new Error("inbox detail test mock only supports not(..., 'in', value)");
+          throw new Error(
+            "inbox detail test mock only supports not(..., 'in', value)",
+          );
         }
         const values = value
           .replace(/^\(|\)$/g, "")
@@ -182,18 +198,20 @@ function makeSupabaseStub(seed: SeedData) {
       },
       then<TResult1 = { data: unknown; error: null }, TResult2 = never>(
         onfulfilled?:
-          | ((value: { data: unknown; error: null }) => TResult1 | PromiseLike<TResult1>)
+          | ((value: {
+              data: unknown;
+              error: null;
+            }) => TResult1 | PromiseLike<TResult1>)
           | null,
         onrejected?:
-          | ((reason: unknown) => TResult2 | PromiseLike<TResult2>)
-          | null,
+          ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null,
       ) {
         return Promise.resolve(execute()).then(onfulfilled, onrejected);
       },
     };
 
     function execute() {
-      let rows = [...seed[table]];
+      let rows = [...(seed[table] ?? [])];
       for (const filter of filters) {
         rows = rows.filter((row) => {
           const value = row[filter.key as keyof typeof row];
@@ -212,7 +230,9 @@ function makeSupabaseStub(seed: SeedData) {
         rows.sort((left, right) => {
           const leftValue = left[orderBy!.key as keyof typeof left];
           const rightValue = right[orderBy!.key as keyof typeof right];
-          const comparison = String(leftValue).localeCompare(String(rightValue));
+          const comparison = String(leftValue).localeCompare(
+            String(rightValue),
+          );
           return orderBy!.ascending ? comparison : -comparison;
         });
       }
@@ -222,7 +242,7 @@ function makeSupabaseStub(seed: SeedData) {
       }
 
       return {
-        data: wantSingle ? rows[0] ?? null : rows,
+        data: wantSingle ? (rows[0] ?? null) : rows,
         error: null,
       };
     }
@@ -231,6 +251,27 @@ function makeSupabaseStub(seed: SeedData) {
   }
 
   return {
+    rpc(_name: string, args: { p_conversation_id: string }) {
+      const orgIds = [
+        ...new Set(
+          seed.messages
+            .filter(
+              (message) =>
+                message.channel === "sms" &&
+                message.conversation_id === args.p_conversation_id,
+            )
+            .map((message) => message.org_id),
+        ),
+      ];
+      return Promise.resolve(
+        orgIds.length > 1
+          ? {
+              data: null,
+              error: { message: "SMS_CONVERSATION_ORG_AMBIGUOUS" },
+            }
+          : { data: orgIds[0] ?? null, error: null },
+      );
+    },
     from(table: keyof SeedData) {
       return makeBuilder(table);
     },
@@ -241,6 +282,72 @@ describe("fetchInboxDetail", () => {
   // Stale URL formats (legacy keys, bare contact ids) are translated by
   // canonicalizeThreadId at the page boundary — see threading.test.ts.
   // fetchInboxDetail's contract is conversation-UUID-only.
+
+  it.each(["received", "queued", "paused"] as const)(
+    "fails closed when an older %s row for the conversation belongs to another organization",
+    async (status) => {
+      const supabase = makeSupabaseStub({
+        messages: [
+          makeMessage({
+            id: "current-org-latest",
+            contact_id: CONTACT_ID,
+            property_id: RECENT_PROPERTY_ID,
+            conversation_id: CONVERSATION_ID,
+            org_id: "org-1",
+            created_at: "2026-06-09T12:00:00.000Z",
+          }),
+          makeMessage({
+            id: `other-org-old-${status}`,
+            contact_id: CONTACT_ID,
+            property_id: RECENT_PROPERTY_ID,
+            conversation_id: CONVERSATION_ID,
+            org_id: "org-2",
+            status,
+            created_at: "2026-06-08T12:00:00.000Z",
+          }),
+        ],
+        contacts: [],
+        properties: [],
+      });
+
+      await expect(
+        fetchInboxDetail(supabase as never, CONVERSATION_ID),
+      ).rejects.toThrow("SMS_CONVERSATION_ORG_AMBIGUOUS");
+    },
+  );
+
+  it("detects an old cross-org row beyond the 100-message detail window", async () => {
+    const recent = Array.from({ length: 100 }, (_, index) =>
+      makeMessage({
+        id: `recent-${index}`,
+        contact_id: CONTACT_ID,
+        property_id: RECENT_PROPERTY_ID,
+        conversation_id: CONVERSATION_ID,
+        org_id: "org-1",
+        created_at: `2026-06-09T12:${String(index % 60).padStart(2, "0")}:00.000Z`,
+      }),
+    );
+    const supabase = makeSupabaseStub({
+      messages: [
+        ...recent,
+        makeMessage({
+          id: "old-contactless-paused-other-org",
+          contact_id: CONTACT_ID,
+          property_id: null,
+          conversation_id: CONVERSATION_ID,
+          org_id: "org-2",
+          status: "paused",
+          created_at: "2020-01-01T00:00:00.000Z",
+        }),
+      ],
+      contacts: [],
+      properties: [],
+    });
+
+    await expect(
+      fetchInboxDetail(supabase as never, CONVERSATION_ID),
+    ).rejects.toThrow("SMS_CONVERSATION_ORG_AMBIGUOUS");
+  });
 
   it("returns null when the conversation has no messages", async () => {
     const supabase = makeSupabaseStub({
@@ -256,7 +363,9 @@ describe("fetchInboxDetail", () => {
       properties: [makeProperty({ id: RECENT_PROPERTY_ID })],
     });
 
-    expect(await fetchInboxDetail(supabase as never, CONVERSATION_ID)).toBeNull();
+    expect(
+      await fetchInboxDetail(supabase as never, CONVERSATION_ID),
+    ).toBeNull();
   });
 
   it("still resolves bare conversation UUID links directly", async () => {
@@ -282,9 +391,97 @@ describe("fetchInboxDetail", () => {
     expect(detail?.contactId).toBe(CONTACT_ID);
     expect(detail?.homeownerContactId).toBeNull();
     expect(detail?.agentContactId).toBeNull();
+    expect(detail?.contactDoNotContact).toBe(false);
+    expect(detail?.contactSmsOptedOut).toBe(false);
+    expect(detail?.smsConsentState).toBe("no_consent");
+    expect(detail?.phoneSuppressed).toBe(false);
+    expect(detail?.smsSafetyReadFailed).toBe(false);
+    expect(detail?.isDncLocked).toBe(false);
   });
 
-  it("ignores queued and paused rows in the conversation", async () => {
+  it("surfaces an authoritative phone-suppression read failure", async () => {
+    vi.mocked(isSmsPhoneSuppressed).mockRejectedValueOnce(
+      new Error("suppression unavailable"),
+    );
+    const supabase = makeSupabaseStub({
+      messages: [
+        makeMessage({
+          id: "safety-read-failure",
+          contact_id: CONTACT_ID,
+          property_id: RECENT_PROPERTY_ID,
+          conversation_id: CONVERSATION_ID,
+        }),
+      ],
+      contacts: [makeContact({ id: CONTACT_ID })],
+      properties: [makeProperty({ id: RECENT_PROPERTY_ID })],
+    });
+
+    const detail = await fetchInboxDetail(supabase as never, CONVERSATION_ID);
+
+    expect(detail?.phoneSuppressed).toBeNull();
+    expect(detail?.smsSafetyReadFailed).toBe(true);
+  });
+
+  it("fails closed when the message contact metadata is missing", async () => {
+    const supabase = makeSupabaseStub({
+      messages: [
+        makeMessage({
+          id: "missing-contact-metadata",
+          contact_id: CONTACT_ID,
+          property_id: RECENT_PROPERTY_ID,
+          conversation_id: CONVERSATION_ID,
+        }),
+      ],
+      contacts: [],
+      properties: [makeProperty({ id: RECENT_PROPERTY_ID })],
+    });
+
+    const detail = await fetchInboxDetail(supabase as never, CONVERSATION_ID);
+
+    expect(detail).toMatchObject({
+      contactId: CONTACT_ID,
+      smsConsentState: null,
+      phoneSuppressed: null,
+      smsSafetyReadFailed: true,
+    });
+  });
+
+  it("returns existing contact restrictions and the permanent property lock", async () => {
+    const supabase = makeSupabaseStub({
+      messages: [
+        makeMessage({
+          id: "restricted-conversation",
+          contact_id: CONTACT_ID,
+          property_id: RECENT_PROPERTY_ID,
+          conversation_id: CONVERSATION_ID,
+        }),
+      ],
+      contacts: [
+        makeContact({
+          id: CONTACT_ID,
+          do_not_contact: true,
+          sms_opted_out: true,
+        }),
+      ],
+      properties: [
+        makeProperty({
+          id: RECENT_PROPERTY_ID,
+          is_dnc_locked: true,
+          homeowner_contact_id: CONTACT_ID,
+        }),
+      ],
+    });
+
+    const detail = await fetchInboxDetail(supabase as never, CONVERSATION_ID);
+
+    expect(detail).toMatchObject({
+      contactDoNotContact: true,
+      contactSmsOptedOut: true,
+      isDncLocked: true,
+    });
+  });
+
+  it("retains queued and paused Outbox rows in the conversation after reload", async () => {
     const supabase = makeSupabaseStub({
       messages: [
         makeMessage({
@@ -331,6 +528,8 @@ describe("fetchInboxDetail", () => {
     expect(detail?.threadId).toBe(CONVERSATION_ID);
     expect(detail?.initialMessages.map((message) => message.id)).toEqual([
       "live-thread",
+      "queued-draft",
+      "paused-draft",
     ]);
     expect(detail?.propertyAddress).toContain("100 Live Ave");
     expect(detail?.homeownerContactId).toBe(CONTACT_ID);

@@ -68,15 +68,30 @@ vi.mock("@/components/ui/select", () => {
         {children}
       </Ctx.Provider>
     ),
-    SelectTrigger: ({ children, ...props }: React.ComponentPropsWithoutRef<"div">) => (
+    SelectTrigger: ({
+      children,
+      ...props
+    }: React.ComponentPropsWithoutRef<"div">) => (
       <div {...props}>{children}</div>
     ),
     SelectValue: () => null,
-    SelectContent: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
-    SelectItem: ({ value, children }: { value: string; children: React.ReactNode }) => {
+    SelectContent: ({ children }: { children: React.ReactNode }) => (
+      <div>{children}</div>
+    ),
+    SelectItem: ({
+      value,
+      children,
+    }: {
+      value: string;
+      children: React.ReactNode;
+    }) => {
       const { onValueChange } = React.useContext(Ctx);
       return (
-        <button type="button" data-testid={`select-item-${value}`} onClick={() => onValueChange(value)}>
+        <button
+          type="button"
+          data-testid={`select-item-${value}`}
+          onClick={() => onValueChange(value)}
+        >
           {children}
         </button>
       );
@@ -114,10 +129,13 @@ function buildWeek(anchor: Date, tz: string): CalendarDayBounds[] {
 const DAYS = buildWeek(new Date("2026-08-19T12:00:00Z"), CHI);
 const WEEK = DAYS[0].date;
 
-function baseProps(overrides: Partial<React.ComponentProps<typeof CalendarView>> = {}) {
-  return {
+function baseProps(
+  overrides: Partial<React.ComponentProps<typeof CalendarView>> = {},
+): React.ComponentProps<typeof CalendarView> {
+  const defaults: React.ComponentProps<typeof CalendarView> = {
     view: "week" as const,
     week: WEEK,
+    month: null,
     days: DAYS,
     appointments: [],
     timezone: CHI,
@@ -125,8 +143,12 @@ function baseProps(overrides: Partial<React.ComponentProps<typeof CalendarView>>
     assignees: {},
     assigneeLabels: {},
     currentUserId: "user-1",
-    ...overrides,
+    nowMs: new Date("2026-08-19T12:00:00Z").getTime(),
+    todayKey: dateKeyInZone(new Date("2026-08-19T12:00:00Z"), CHI),
   };
+  return { ...defaults, ...overrides } as React.ComponentProps<
+    typeof CalendarView
+  >;
 }
 
 describe("<CalendarView />", () => {
@@ -147,11 +169,17 @@ describe("<CalendarView />", () => {
       "href",
       "/calendar?assignee=rep-1&view=agenda",
     );
+    expect(
+      screen.getByRole("navigation", { name: "Calendar view" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("tablist")).not.toBeInTheDocument();
   });
 
   it("renders week-nav prev/today/next links preserving view+assignee and shifting by 7 days", () => {
     nav.search = "view=agenda&assignee=rep-1";
-    render(<CalendarView {...baseProps({ view: "agenda", week: "2026-08-17" })} />);
+    render(
+      <CalendarView {...baseProps({ view: "agenda", week: "2026-08-17" })} />,
+    );
 
     expect(screen.getByTestId("calendar-week-prev")).toHaveAttribute(
       "href",
@@ -164,7 +192,9 @@ describe("<CalendarView />", () => {
     // "Today" targets today's own date key in the viewer's zone — just
     // assert it's present and well-formed (exact value depends on the
     // real clock, deliberately not frozen here).
-    expect(screen.getByTestId("calendar-week-today").getAttribute("href")).toMatch(
+    expect(
+      screen.getByTestId("calendar-week-today").getAttribute("href"),
+    ).toMatch(
       /^\/calendar\?view=agenda&assignee=rep-1&week=\d{4}-\d{2}-\d{2}$/,
     );
   });
@@ -176,7 +206,9 @@ describe("<CalendarView />", () => {
     expect(weekGrid.parentElement).toHaveClass("hidden", "md:block");
 
     expect(screen.getAllByTestId("calendar-agenda-wrapper")).toHaveLength(1);
-    expect(screen.getByTestId("calendar-agenda-wrapper")).toHaveClass("md:hidden");
+    expect(screen.getByTestId("calendar-agenda-wrapper")).toHaveClass(
+      "md:hidden",
+    );
   });
 
   it("does not mount WeekGrid and shows AgendaList unconditionally when view=agenda", () => {
@@ -188,8 +220,14 @@ describe("<CalendarView />", () => {
   });
 
   it("renders the assignee filter for both owner and member roles (Codex round 1 — member default is own items, not a lockout)", () => {
-    const { rerender } = render(<CalendarView {...baseProps({ viewerRole: "owner" })} />);
+    const { rerender } = render(
+      <CalendarView {...baseProps({ viewerRole: "owner" })} />,
+    );
     expect(screen.getByTestId("calendar-assignee-filter")).toBeInTheDocument();
+    expect(screen.getByTestId("calendar-assignee-filter")).toHaveAttribute(
+      "aria-label",
+      "Filter calendar by assignee",
+    );
 
     rerender(<CalendarView {...baseProps({ viewerRole: "member" })} />);
     expect(screen.getByTestId("calendar-assignee-filter")).toBeInTheDocument();
@@ -197,11 +235,17 @@ describe("<CalendarView />", () => {
 
   it("defaults the filter value to Everyone for an owner and Me for a member when ?assignee= is absent", () => {
     nav.search = "";
-    const { rerender } = render(<CalendarView {...baseProps({ viewerRole: "owner" })} />);
-    expect(screen.getByTestId("calendar-assignee-filter-value")).toHaveTextContent("all");
+    const { rerender } = render(
+      <CalendarView {...baseProps({ viewerRole: "owner" })} />,
+    );
+    expect(
+      screen.getByTestId("calendar-assignee-filter-value"),
+    ).toHaveTextContent("all");
 
     rerender(<CalendarView {...baseProps({ viewerRole: "member" })} />);
-    expect(screen.getByTestId("calendar-assignee-filter-value")).toHaveTextContent("me");
+    expect(
+      screen.getByTestId("calendar-assignee-filter-value"),
+    ).toHaveTextContent("me");
   });
 
   it("lets a member switch to a teammate or Everyone, writing an explicit ?assignee= param that round-trips (not relying on 'param absent' — that means 'me' for a member)", async () => {
@@ -218,15 +262,44 @@ describe("<CalendarView />", () => {
 
     const user = userEvent.setup();
     await user.click(screen.getByTestId("select-item-rep-2"));
-    expect(nav.replace).toHaveBeenCalledWith("/calendar?view=week&assignee=rep-2");
+    expect(nav.replace).toHaveBeenCalledWith(
+      "/calendar?view=week&assignee=rep-2",
+    );
 
     await user.click(screen.getByTestId("select-item-all"));
-    expect(nav.replace).toHaveBeenCalledWith("/calendar?view=week&assignee=all");
+    expect(nav.replace).toHaveBeenCalledWith(
+      "/calendar?view=week&assignee=all",
+    );
   });
 
   it("renders +New with the current user id", () => {
     render(<CalendarView {...baseProps({ currentUserId: "user-42" })} />);
-    expect(screen.getByTestId("stub-new-block-button")).toHaveTextContent("user-42");
+    expect(screen.getByTestId("stub-new-block-button")).toHaveTextContent(
+      "user-42",
+    );
+  });
+
+  it("keeps the toolbar targets at least 44px tall and always names the viewer timezone", () => {
+    render(<CalendarView {...baseProps()} />);
+
+    for (const testId of [
+      "calendar-view-week",
+      "calendar-view-month",
+      "calendar-view-agenda",
+      "calendar-week-prev",
+      "calendar-week-today",
+      "calendar-week-next",
+      "calendar-assignee-filter",
+    ]) {
+      expect(screen.getByTestId(testId)).toHaveClass("min-h-11");
+    }
+    expect(screen.getByTestId("calendar-week-today")).toHaveClass("min-w-11");
+    expect(screen.getByTestId("calendar-timezone-caption")).toHaveTextContent(
+      "All times shown in America/Chicago.",
+    );
+    expect(
+      screen.getByTestId("stub-new-block-button").parentElement,
+    ).toHaveClass("[&>button]:min-h-11");
   });
 
   it("navigates via router.replace when the assignee filter changes", async () => {
@@ -243,7 +316,9 @@ describe("<CalendarView />", () => {
     const user = userEvent.setup();
     await user.click(screen.getByTestId("select-item-rep-1"));
 
-    expect(nav.replace).toHaveBeenCalledWith("/calendar?view=week&assignee=rep-1");
+    expect(nav.replace).toHaveBeenCalledWith(
+      "/calendar?view=week&assignee=rep-1",
+    );
   });
 
   it("normalizes an unknown deep-linked assignee to the role default in the selector (Codex round 10)", () => {
@@ -257,7 +332,9 @@ describe("<CalendarView />", () => {
         })}
       />,
     );
-    expect(screen.getByTestId("calendar-assignee-filter-value").textContent).toBe("all");
+    expect(
+      screen.getByTestId("calendar-assignee-filter-value").textContent,
+    ).toBe("all");
     unmount();
 
     nav.search = "assignee=ghost-user-id";
@@ -270,7 +347,9 @@ describe("<CalendarView />", () => {
         })}
       />,
     );
-    expect(screen.getByTestId("calendar-assignee-filter-value").textContent).toBe("me");
+    expect(
+      screen.getByTestId("calendar-assignee-filter-value").textContent,
+    ).toBe("me");
   });
 
   it("canonicalizes a deep link to the viewer's own raw id as 'me' (Codex round 11)", () => {
@@ -279,12 +358,75 @@ describe("<CalendarView />", () => {
       <CalendarView
         {...baseProps({
           viewerRole: "owner",
-          assignees: { "owner-1": "jarrad@bmhgroupkc.com", "rep-1": "rep@bmh.com" },
+          assignees: {
+            "owner-1": "jarrad@bmhgroupkc.com",
+            "rep-1": "rep@bmh.com",
+          },
           currentUserId: "owner-1",
         })}
       />,
     );
-    expect(screen.getByTestId("calendar-assignee-filter-value").textContent).toBe("me");
+    expect(
+      screen.getByTestId("calendar-assignee-filter-value").textContent,
+    ).toBe("me");
+  });
+});
+
+describe("<CalendarView /> month view", () => {
+  beforeEach(() => {
+    nav.search = "";
+    nav.replace.mockClear();
   });
 
+  it("keeps Month visible on narrow screens so the active deep-link state is truthful", () => {
+    render(<CalendarView {...baseProps()} />);
+    expect(screen.getByTestId("calendar-view-month")).not.toHaveClass("hidden");
+  });
+
+  it("renders the Month tab and mounts MonthGrid when view=month", () => {
+    render(
+      <CalendarView {...baseProps({ view: "month", month: "2026-08" })} />,
+    );
+    expect(screen.getByTestId("calendar-view-month")).toHaveAttribute(
+      "aria-current",
+    );
+    expect(screen.getByTestId("calendar-month-grid")).toBeInTheDocument();
+    expect(screen.queryByTestId("calendar-week-grid")).not.toBeInTheDocument();
+    expect(screen.getByTestId("calendar-mobile-month-state")).toHaveTextContent(
+      "Month agenda for August 2026",
+    );
+    expect(screen.getByTestId("calendar-agenda-wrapper")).toHaveClass(
+      "md:hidden",
+    );
+  });
+
+  it("steps prev/next by whole months from the month key, not the grid start", () => {
+    render(
+      <CalendarView
+        {...baseProps({ view: "month", month: "2026-08", week: "2026-07-26" })}
+      />,
+    );
+    expect(screen.getByTestId("calendar-week-prev")).toHaveAttribute(
+      "href",
+      expect.stringContaining("week=2026-07-01"),
+    );
+    expect(screen.getByTestId("calendar-week-next")).toHaveAttribute(
+      "href",
+      expect.stringContaining("week=2026-09-01"),
+    );
+  });
+
+  it("keeps 7-day stepping for the week view", () => {
+    render(<CalendarView {...baseProps()} />);
+    expect(screen.getByTestId("calendar-week-prev")).toHaveAttribute(
+      "href",
+      expect.stringContaining(`week=${addDaysToDateKeyForTest(WEEK, -7)}`),
+    );
+  });
 });
+
+function addDaysToDateKeyForTest(dateKey: string, days: number): string {
+  const [y, m, d] = dateKey.split("-").map(Number);
+  const dt = new Date(Date.UTC(y, (m ?? 1) - 1, (d ?? 1) + days));
+  return `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, "0")}-${String(dt.getUTCDate()).padStart(2, "0")}`;
+}

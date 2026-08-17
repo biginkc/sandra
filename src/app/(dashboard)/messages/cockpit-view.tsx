@@ -2,7 +2,7 @@
 
 import { MessageSquarePlusIcon, PlusIcon } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { Page } from "@/components/page";
 import { PageHeader } from "@/components/page-header";
@@ -46,6 +46,12 @@ type Props = {
   hideDnc: boolean;
   /** Count of DNC threads under the current filter that the toggle is hiding. */
   hiddenDncCount: number;
+  /** First Outbox page failed to load. Never present this as an empty queue. */
+  queueLoadFailed?: boolean;
+  /** Queue summary failed; zeroes are fallback data, not confirmed counts. */
+  queueStatsFailed?: boolean;
+  /** Request-scoped clock so SSR and hydration render identical relative times. */
+  nowMs: number;
 };
 
 const THREAD_FILTERS = new Set<InboxFilter>([
@@ -57,6 +63,7 @@ const THREAD_FILTERS = new Set<InboxFilter>([
   "dispo",
   "needs_outcome",
 ]);
+const LIVE_CLOCK_INTERVAL_MS = 30_000;
 
 export function CockpitView({
   activeTab,
@@ -73,15 +80,44 @@ export function CockpitView({
   queueStats,
   hideDnc,
   hiddenDncCount,
+  queueLoadFailed = false,
+  queueStatsFailed = false,
+  nowMs,
 }: Props) {
   const router = useRouter();
   const searchParams = useSearchParams();
+  const liveNowMs = useLiveNow(nowMs);
 
   // One live stats source for the Outbox tab badge + the stats banner,
   // so the two never show different numbers. Seeds from the server
   // first-paint stats and keeps polling while visible so the Outbox
   // badge stays current even when the operator is parked on Inbox.
-  const liveQueueStats = useQueueStats(queueStats);
+  const [liveQueueStatsFailed, setLiveQueueStatsFailed] =
+    useState(queueStatsFailed);
+  const [lastServerQueueStatsFailed, setLastServerQueueStatsFailed] =
+    useState(queueStatsFailed);
+  const [lastQueueStatsSuccessAt, setLastQueueStatsSuccessAt] = useState<
+    string | null
+  >(queueStatsFailed ? null : "server-snapshot");
+  const [queueStatsRefreshSignal, setQueueStatsRefreshSignal] = useState(0);
+  if (lastServerQueueStatsFailed !== queueStatsFailed) {
+    setLastServerQueueStatsFailed(queueStatsFailed);
+    setLiveQueueStatsFailed(queueStatsFailed);
+    if (!queueStatsFailed) setLastQueueStatsSuccessAt("server-snapshot");
+  }
+  const handleQueueStatsRefreshSuccess = useCallback((refreshedAt: string) => {
+    setLiveQueueStatsFailed(false);
+    setLastQueueStatsSuccessAt(refreshedAt);
+  }, []);
+  const handleQueueStatsRefreshFailure = useCallback(
+    () => setLiveQueueStatsFailed(true),
+    [],
+  );
+  const liveQueueStats = useQueueStats(queueStats, {
+    refreshSignal: queueStatsRefreshSignal,
+    onRefreshSuccess: handleQueueStatsRefreshSuccess,
+    onRefreshFailure: handleQueueStatsRefreshFailure,
+  });
 
   const setTab = (next: string) => {
     const sp = new URLSearchParams(searchParams.toString());
@@ -92,6 +128,23 @@ export function CockpitView({
     }
     const qs = sp.toString();
     router.replace(qs ? `/messages?${qs}` : "/messages");
+  };
+  const handleTabKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    const tabs = Array.from(
+      event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="tab"]'),
+    );
+    const current = tabs.indexOf(document.activeElement as HTMLButtonElement);
+    if (current < 0) return;
+    let next = current;
+    if (event.key === "ArrowRight") next = (current + 1) % tabs.length;
+    else if (event.key === "ArrowLeft")
+      next = (current - 1 + tabs.length) % tabs.length;
+    else if (event.key === "Home") next = 0;
+    else if (event.key === "End") next = tabs.length - 1;
+    else return;
+    event.preventDefault();
+    tabs[next]?.focus();
+    tabs[next]?.click();
   };
 
   const showThreadList = THREAD_FILTERS.has(filter);
@@ -104,16 +157,70 @@ export function CockpitView({
   // visible during transitions, so isPending never flips in the tree
   // the user is looking at.
   const [pendingThreadId, setPendingThreadId] = useState<string | null>(null);
+  const serverSelectedThreadId =
+    selectedThreadId ?? threadDetail?.threadId ?? null;
+  const previousServerSelection = useRef(serverSelectedThreadId);
+  const [mobileShowsDetail, setMobileShowsDetail] = useState(
+    serverSelectedThreadId !== null,
+  );
+  const [focusReturnThreadId, setFocusReturnThreadId] = useState<string | null>(
+    null,
+  );
 
   const handleSelectThread = useCallback(
     (threadId: string) => {
       setPendingThreadId(threadId);
+      setMobileShowsDetail(true);
+      setFocusReturnThreadId(null);
       const sp = new URLSearchParams(searchParams.toString());
       sp.set("thread", threadId);
-      router.replace(`/messages?${sp.toString()}`);
+      router.replace(`/messages?${sp.toString()}`, { scroll: false });
     },
     [searchParams, router],
   );
+
+  useEffect(() => {
+    if (previousServerSelection.current === serverSelectedThreadId) return;
+    previousServerSelection.current = serverSelectedThreadId;
+    setMobileShowsDetail(serverSelectedThreadId !== null);
+  }, [serverSelectedThreadId]);
+
+  const handleBackToList = useCallback(() => {
+    const returningThreadId =
+      pendingThreadId ?? threadDetail?.threadId ?? selectedThreadId ?? null;
+    setPendingThreadId(null);
+    setMobileShowsDetail(false);
+    setFocusReturnThreadId(returningThreadId);
+    const sp = new URLSearchParams(searchParams.toString());
+    sp.delete("thread");
+    const qs = sp.toString();
+    router.replace(qs ? `/messages?${qs}` : "/messages", { scroll: false });
+    router.refresh();
+  }, [
+    pendingThreadId,
+    router,
+    searchParams,
+    selectedThreadId,
+    threadDetail?.threadId,
+  ]);
+
+  useEffect(() => {
+    if (mobileShowsDetail || !focusReturnThreadId) return;
+    const timeout = window.setTimeout(() => {
+      const previousRow = document.getElementById(
+        `inbox-thread-option-${focusReturnThreadId}`,
+      );
+      const firstVisibleRow = document.querySelector<HTMLElement>(
+        '[data-testid="inbox-thread-list"] button',
+      );
+      const emptyList = document.querySelector<HTMLElement>(
+        '[data-testid="inbox-empty"]',
+      );
+      (previousRow ?? firstVisibleRow ?? emptyList)?.focus();
+      setFocusReturnThreadId(null);
+    }, 0);
+    return () => window.clearTimeout(timeout);
+  }, [focusReturnThreadId, mobileShowsDetail]);
 
   // Clear the pending marker once the server data catches up — that's
   // when the skeleton can disappear and the real panel or empty state
@@ -141,7 +248,13 @@ export function CockpitView({
     const sp = new URLSearchParams(searchParams.toString());
     sp.set("thread", threadDetail.threadId);
     router.replace(`/messages?${sp.toString()}`);
-  }, [pendingThreadId, router, searchParams, selectedThreadId, threadDetail?.threadId]);
+  }, [
+    pendingThreadId,
+    router,
+    searchParams,
+    selectedThreadId,
+    threadDetail?.threadId,
+  ]);
 
   // Skeleton shows when the user has clicked a thread that the server
   // hasn't returned yet. Same-thread re-clicks: pendingContactId
@@ -150,7 +263,7 @@ export function CockpitView({
     pendingThreadId !== null && selectedThreadId !== pendingThreadId;
 
   return (
-    <Page>
+    <Page className="pb-[calc(6rem+env(safe-area-inset-bottom))] md:pb-8">
       <PageHeader
         breadcrumb={[{ label: "Workspace" }, { label: "Messages" }]}
         title="Messages"
@@ -160,7 +273,7 @@ export function CockpitView({
             type="button"
             data-testid="messages-new-message"
             onClick={() => router.push(`/leads?compose=1`)}
-            className="inline-flex items-center gap-2 rounded-full bg-primary px-5 py-2.5 text-[12px] font-bold text-primary-foreground transition-opacity hover:opacity-90"
+            className="inline-flex min-h-11 items-center gap-2 rounded-full bg-primary px-5 py-2.5 text-[12px] font-bold text-primary-foreground transition-opacity hover:opacity-90"
           >
             <PlusIcon className="h-4 w-4" />
             New Message
@@ -175,6 +288,8 @@ export function CockpitView({
       <div
         role="tablist"
         aria-label="Inbox / Outbox"
+        aria-orientation="horizontal"
+        onKeyDown={handleTabKeyDown}
         className="flex gap-6 border-b border-border"
       >
         <TabButton
@@ -187,6 +302,7 @@ export function CockpitView({
         <TabButton
           label="Outbox"
           stats={liveQueueStats}
+          statsUnavailable={liveQueueStatsFailed}
           active={activeTab === "outbox"}
           onClick={() => setTab("outbox")}
           testId="tab-outbox"
@@ -194,7 +310,12 @@ export function CockpitView({
       </div>
 
       {activeTab === "inbox" ? (
-        <div className="flex flex-col gap-4">
+        <div
+          id="messages-inbox-panel"
+          role="tabpanel"
+          aria-labelledby="messages-inbox-tab"
+          className="flex flex-col gap-4"
+        >
           <InboxFilters
             active={filter}
             filterCounts={filterCounts}
@@ -205,44 +326,80 @@ export function CockpitView({
 
           {showThreadList && (
             <div
-              className="grid h-[calc(100vh-260px)] min-h-[500px] grid-cols-[minmax(280px,360px)_1fr] gap-6"
+              className="grid min-h-[500px] grid-cols-1 gap-3 md:h-[calc(100vh-260px)] md:grid-cols-[minmax(280px,360px)_1fr] md:gap-6"
               data-testid="inbox-cockpit-grid"
             >
-              <InboxThreadList
-                initial={threads}
-                selectedThreadId={
-                  pendingThreadId ??
-                  threadDetail?.threadId ??
-                  selectedThreadId ??
-                  null
-                }
-                currentUserId={currentUserId}
-                onSelectThread={handleSelectThread}
-              />
-              <InboxDetail
-                data={threadDetail}
-                isLoading={isLoadingThread}
-                assigneeEmails={assigneeEmails}
-                currentUserId={currentUserId}
-              />
+              <div
+                className={`${mobileShowsDetail ? "hidden" : "block"} min-h-0 md:block`}
+                data-testid="inbox-list-view"
+              >
+                <InboxThreadList
+                  initial={threads}
+                  selectedThreadId={
+                    pendingThreadId ??
+                    threadDetail?.threadId ??
+                    selectedThreadId ??
+                    null
+                  }
+                  currentUserId={currentUserId}
+                  onSelectThread={handleSelectThread}
+                  emptyMessage={emptyInboxMessage(filter, hiddenDncCount)}
+                  nowMs={liveNowMs}
+                />
+              </div>
+              <div
+                className={`${mobileShowsDetail ? "block" : "hidden"} min-h-0 md:block`}
+                data-testid="inbox-detail-view"
+              >
+                <InboxDetail
+                  data={threadDetail}
+                  isLoading={isLoadingThread}
+                  assigneeEmails={assigneeEmails}
+                  currentUserId={currentUserId}
+                  onBackToList={handleBackToList}
+                  nowMs={liveNowMs}
+                />
+              </div>
             </div>
           )}
 
           {filter === "unknown" && (
-            <UnknownSenderList senders={unknownSenders} showRestore={false} />
+            <UnknownSenderList
+              senders={unknownSenders}
+              showRestore={false}
+              nowMs={liveNowMs}
+            />
           )}
 
           {filter === "dismissed" && (
-            <UnknownSenderList senders={unknownSenders} showRestore={true} />
+            <UnknownSenderList
+              senders={unknownSenders}
+              showRestore={true}
+              nowMs={liveNowMs}
+            />
           )}
         </div>
       ) : (
-        <div>
-          <QueueStatsBanner stats={liveQueueStats} />
+        <div
+          id="messages-outbox-panel"
+          role="tabpanel"
+          aria-labelledby="messages-outbox-tab"
+        >
+          <QueueStatsBanner
+            stats={liveQueueStats}
+            loadFailed={liveQueueStatsFailed}
+            lastSuccessfulAt={lastQueueStatsSuccessAt}
+            onRetry={() =>
+              setQueueStatsRefreshSignal((current) => current + 1)
+            }
+            nowMs={liveNowMs}
+          />
           <QueuePanel
             initial={queued}
             initialHasMore={queuedHasMore}
             totalQueued={liveQueueStats.queued}
+            initialLoadFailed={queueLoadFailed}
+            nowMs={liveNowMs}
           />
         </div>
       )}
@@ -256,7 +413,7 @@ export function CockpitView({
         aria-label="Compose new message"
         data-testid="messages-fab"
         onClick={() => router.push(`/leads?compose=1`)}
-        className="fixed bottom-6 right-6 w-14 h-14 bg-primary text-primary-foreground rounded-full flex items-center justify-center shadow-2xl hover:scale-105 transition-transform z-40"
+        className="fixed bottom-[calc(1.5rem+env(safe-area-inset-bottom))] right-6 z-40 flex h-14 w-14 items-center justify-center rounded-full bg-primary text-primary-foreground shadow-2xl transition-transform hover:scale-105"
       >
         <MessageSquarePlusIcon className="h-6 w-6" />
       </button>
@@ -264,10 +421,38 @@ export function CockpitView({
   );
 }
 
+function useLiveNow(seedNowMs: number): number {
+  const [clock, setClock] = useState({ seedNowMs, value: seedNowMs });
+  if (clock.seedNowMs !== seedNowMs) {
+    setClock({ seedNowMs, value: seedNowMs });
+  }
+
+  useEffect(() => {
+    const tick = () => {
+      setClock((current) => ({
+        ...current,
+        value: Math.max(current.value, Date.now()),
+      }));
+    };
+    const intervalId = window.setInterval(tick, LIVE_CLOCK_INTERVAL_MS);
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible") tick();
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      window.clearInterval(intervalId);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  }, []);
+
+  return clock.value;
+}
+
 function TabButton({
   label,
   count,
   stats,
+  statsUnavailable = false,
   active,
   onClick,
   testId,
@@ -277,6 +462,9 @@ function TabButton({
   count?: number;
   /** Queue figures: queued · sent out today (green) · failed today (red) (Outbox). */
   stats?: QueueStats;
+  /** The server failed to establish first-paint totals. Do not render its
+   * zero fallback as though those counts were confirmed. */
+  statsUnavailable?: boolean;
   active: boolean;
   onClick: () => void;
   testId: string;
@@ -285,10 +473,13 @@ function TabButton({
     <button
       type="button"
       role="tab"
+      id={`messages-${label.toLowerCase()}-tab`}
+      aria-controls={`messages-${label.toLowerCase()}-panel`}
       aria-selected={active}
+      tabIndex={active ? 0 : -1}
       data-testid={testId}
       onClick={onClick}
-      className={`pb-2 -mb-px flex items-center gap-2 text-[14px] font-bold border-b-2 transition-colors ${
+      className={`-mb-px flex min-h-11 items-center gap-2 border-b-2 pb-2 text-[14px] font-bold transition-colors ${
         active
           ? "border-primary text-primary"
           : "border-transparent text-[#78716c] hover:text-[#1c1917]"
@@ -306,7 +497,15 @@ function TabButton({
           {count}
         </span>
       )}
-      {stats && (
+      {statsUnavailable ? (
+        <span
+          className="text-destructive text-[11px] font-bold"
+          title="Queue totals unavailable; retrying automatically"
+          data-testid={`${testId}-stats-unavailable`}
+        >
+          Unavailable
+        </span>
+      ) : stats ? (
         <span
           className="flex items-center gap-1.5 text-[11px] font-bold"
           title={`${stats.queued} queued${stats.paused > 0 ? ` · ${stats.paused} paused` : ""} · ${stats.sentOutToday} sent out today · ${stats.failedToday} failed today`}
@@ -326,7 +525,20 @@ function TabButton({
           <span className="text-[#a8a29e]">·</span>
           <span className="text-red-600">{stats.failedToday}</span>
         </span>
-      )}
+      ) : null}
     </button>
   );
+}
+
+function emptyInboxMessage(
+  filter: InboxFilter,
+  hiddenDncCount: number,
+): string {
+  if (filter === "all" && hiddenDncCount === 0) {
+    return "No conversations yet. Inbound messages will appear here.";
+  }
+  if (hiddenDncCount > 0) {
+    return `No conversations under this filter. ${hiddenDncCount} restricted or test ${hiddenDncCount === 1 ? "thread is" : "threads are"} hidden.`;
+  }
+  return "No conversations under this filter. Try a different filter.";
 }

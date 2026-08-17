@@ -7,6 +7,31 @@ import type { Database } from "@/lib/supabase/types";
 export const BMH_ORG_ID = "00000000-0000-0000-0000-000000000bbb";
 export const TEST_ORG_B_ID = "00000000-0000-0000-0000-000000000ccc";
 
+/**
+ * Resolve the primary integration-test tenant by its stable identity.
+ *
+ * Never replace this with `organizations.limit(1)`: organizations are
+ * intentionally multi-tenant fixtures, PostgreSQL does not promise heap
+ * order, and most tenant tables default omitted org_id values to BMH_ORG_ID.
+ * An unordered lookup can therefore seed configuration in one tenant while
+ * the record under test is silently inserted into another.
+ */
+export async function getCanonicalTestOrgId(
+  client: SupabaseClient<Database>,
+): Promise<string> {
+  const { data, error } = await client
+    .from("organizations")
+    .select("id")
+    .eq("id", BMH_ORG_ID)
+    .single();
+  if (error || !data?.id) {
+    throw new Error(
+      `canonical test org lookup failed: ${error?.message ?? "BMH org missing"}`,
+    );
+  }
+  return data.id;
+}
+
 type Role = "owner" | "member";
 
 type MembershipWriter = {

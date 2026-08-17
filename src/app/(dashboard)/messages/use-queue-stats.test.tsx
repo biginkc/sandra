@@ -7,7 +7,6 @@ vi.mock("./actions", () => ({
   getQueueStats,
 }));
 
-// eslint-disable-next-line import/first
 import { useQueueStats } from "./use-queue-stats";
 
 type Stats = {
@@ -82,9 +81,10 @@ describe("useQueueStats (260504-tgq polling, lifted from QueueStatsBanner)", () 
 
   it("Keeps previous stats when a poll returns ok: false", async () => {
     getQueueStats.mockResolvedValue({ ok: false, error: "boom" });
+    const onRefreshFailure = vi.fn();
 
     const { result } = renderHook(() =>
-      useQueueStats(makeStats({ queued: 7 })),
+      useQueueStats(makeStats({ queued: 7 }), { onRefreshFailure }),
     );
 
     await act(async () => {
@@ -92,6 +92,26 @@ describe("useQueueStats (260504-tgq polling, lifted from QueueStatsBanner)", () 
     });
     expect(getQueueStats).toHaveBeenCalledTimes(1);
     expect(result.current.queued).toBe(7);
+    expect(onRefreshFailure).toHaveBeenCalledOnce();
+  });
+
+  it("reports a successful poll so a failed first-paint indicator can recover", async () => {
+    const onRefreshSuccess = vi.fn();
+    getQueueStats.mockResolvedValue({
+      ok: true,
+      data: makeStats({ queued: 12, sentOutToday: 4 }),
+    });
+
+    const { result } = renderHook(() =>
+      useQueueStats(makeStats(), { onRefreshSuccess }),
+    );
+
+    await act(async () => {
+      vi.advanceTimersByTime(30_000);
+    });
+
+    expect(onRefreshSuccess).toHaveBeenCalledOnce();
+    expect(result.current).toMatchObject({ queued: 12, sentOutToday: 4 });
   });
 
   it("Does NOT poll while document is hidden", async () => {

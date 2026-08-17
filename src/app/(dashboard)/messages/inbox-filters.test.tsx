@@ -65,7 +65,9 @@ vi.mock("sonner", () => ({
   toast: { success: vi.fn(), warning: vi.fn(), error: vi.fn() },
 }));
 
-function makeThread(overrides: Partial<Thread> & { contactId: string }): Thread {
+function makeThread(
+  overrides: Partial<Thread> & { contactId: string },
+): Thread {
   const propertyId = overrides.propertyId ?? `prop-${overrides.contactId}`;
   return {
     threadId: overrides.threadId ?? `conv-${overrides.contactId}`,
@@ -76,6 +78,7 @@ function makeThread(overrides: Partial<Thread> & { contactId: string }): Thread 
     propertyAddress: overrides.propertyAddress ?? "123 Main St",
     propertyStatus: overrides.propertyStatus ?? "prospect",
     outreachDispo: overrides.outreachDispo ?? null,
+    isDncLocked: overrides.isDncLocked ?? false,
     lastMessageAt: overrides.lastMessageAt ?? "2026-04-29T12:00:00Z",
     lastMessageBody: overrides.lastMessageBody ?? "hello",
     lastMessageDirection: overrides.lastMessageDirection ?? "inbound",
@@ -122,6 +125,7 @@ const baseProps = {
   },
   hideDnc: true,
   hiddenDncCount: 0,
+  nowMs: Date.parse("2026-08-17T12:00:00.000Z"),
 };
 
 describe("<CockpitView /> assignment chips", () => {
@@ -137,13 +141,7 @@ describe("<CockpitView /> assignment chips", () => {
       assigneeId: "user-1",
     });
 
-    render(
-      <CockpitView
-        {...baseProps}
-        filter="mine"
-        threads={[mine]}
-      />,
-    );
+    render(<CockpitView {...baseProps} filter="mine" threads={[mine]} />);
 
     expect(screen.getByTestId("filter-mine")).toHaveAttribute(
       "data-active",
@@ -154,8 +152,12 @@ describe("<CockpitView /> assignment chips", () => {
       "data-active",
     );
 
-    expect(screen.getByTestId(`inbox-thread-${mine.threadId}`)).toBeInTheDocument();
-    expect(screen.queryByTestId("inbox-thread-not-mine")).not.toBeInTheDocument();
+    expect(
+      screen.getByTestId(`inbox-thread-${mine.threadId}`),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByTestId("inbox-thread-not-mine"),
+    ).not.toBeInTheDocument();
     expect(
       screen.queryByTestId(`inbox-thread-conv-unassigned-1`),
     ).not.toBeInTheDocument();
@@ -169,23 +171,23 @@ describe("<CockpitView /> assignment chips", () => {
       assigneeId: null,
     });
 
-    render(
-      <CockpitView
-        {...baseProps}
-        filter="unassigned"
-        threads={[open]}
-      />,
-    );
+    render(<CockpitView {...baseProps} filter="unassigned" threads={[open]} />);
 
     expect(screen.getByTestId("filter-unassigned")).toHaveAttribute(
       "data-active",
       "true",
     );
     expect(screen.getByTestId("filter-all")).not.toHaveAttribute("data-active");
-    expect(screen.getByTestId("filter-mine")).not.toHaveAttribute("data-active");
+    expect(screen.getByTestId("filter-mine")).not.toHaveAttribute(
+      "data-active",
+    );
 
-    expect(screen.getByTestId(`inbox-thread-${open.threadId}`)).toBeInTheDocument();
-    expect(screen.queryByTestId(`inbox-thread-conv-mine-1`)).not.toBeInTheDocument();
+    expect(
+      screen.getByTestId(`inbox-thread-${open.threadId}`),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByTestId(`inbox-thread-conv-mine-1`),
+    ).not.toBeInTheDocument();
   });
 
   it("does not render Mine/Unassigned chips when there is no current user", () => {
@@ -216,12 +218,7 @@ describe("<CockpitView /> DNC toggle", () => {
 
   it("renders OFF state with 'Showing all' label when hideDnc=false", () => {
     render(
-      <CockpitView
-        {...baseProps}
-        filter="all"
-        threads={[]}
-        hideDnc={false}
-      />,
+      <CockpitView {...baseProps} filter="all" threads={[]} hideDnc={false} />,
     );
     const toggle = screen.getByTestId("dnc-toggle");
     expect(toggle).not.toHaveAttribute("data-active");
@@ -300,7 +297,9 @@ describe("<CockpitView /> chip order (feedback-f E2b)", () => {
     render(<CockpitView {...baseProps} filter="all" threads={[thread]} />);
 
     expect(
-      screen.queryByTestId("inbox-thread-legacy:done-1:prop-done-1-needs-outcome"),
+      screen.queryByTestId(
+        "inbox-thread-legacy:done-1:prop-done-1-needs-outcome",
+      ),
     ).not.toBeInTheDocument();
   });
 
@@ -327,7 +326,9 @@ describe("<CockpitView /> chip order (feedback-f E2b)", () => {
 
       render(<CockpitView {...baseProps} filter="all" threads={[thread]} />);
 
-      const status = screen.getByTestId(`inbox-thread-${thread.threadId}-sandra-status`);
+      const status = screen.getByTestId(
+        `inbox-thread-${thread.threadId}-sandra-status`,
+      );
       expect(status).not.toHaveTextContent("Sandra handled");
       expect(status.querySelector("img")).toHaveAttribute("src", "/icon.png");
       expect(status).toHaveAccessibleName(label);
@@ -352,7 +353,9 @@ describe("<CockpitView /> chip order (feedback-f E2b)", () => {
 
     render(<CockpitView {...baseProps} filter="all" threads={[thread]} />);
 
-    const status = screen.getByTestId("inbox-thread-conv-escalated-1-sandra-status");
+    const status = screen.getByTestId(
+      "inbox-thread-conv-escalated-1-sandra-status",
+    );
     expect(status).not.toHaveTextContent("Sandra escalated");
     expect(status.querySelector("img")).toHaveAttribute("src", "/icon.png");
     expect(status).toHaveAccessibleName("Sandra escalated");
@@ -382,14 +385,12 @@ describe("<CockpitView /> chip order (feedback-f E2b)", () => {
       "filter-unknown",
       "filter-dismissed",
     ]);
-    expect(screen.getByTestId("filter-escalated").querySelector("img")).toHaveAttribute(
-      "src",
-      "/icon.png",
-    );
-    expect(screen.getByTestId("filter-dispo").querySelector("img")).toHaveAttribute(
-      "src",
-      "/icon.png",
-    );
+    expect(
+      screen.getByTestId("filter-escalated").querySelector("img"),
+    ).toHaveAttribute("src", "/icon.png");
+    expect(
+      screen.getByTestId("filter-dispo").querySelector("img"),
+    ).toHaveAttribute("src", "/icon.png");
     expect(screen.getByTestId("filter-dispo")).toHaveTextContent("Dispo");
     expect(screen.queryByTestId("filter-handled")).not.toBeInTheDocument();
   });
@@ -518,6 +519,47 @@ describe("<CockpitView /> chip order (feedback-f E2b)", () => {
     ]) {
       expect(screen.queryByTestId(`${id}-count`)).not.toBeInTheDocument();
     }
+  });
+
+  it("keeps Unknown and Dismissed primary controls at least 44px tall", () => {
+    const sender = {
+      fromAddress: "+15550009999",
+      toAddress: "+18162804181",
+      latestBody: "Who is this?",
+      latestAt: "2026-08-17T11:00:00.000Z",
+      messageCount: 1,
+      isDismissed: false,
+    };
+    const view = render(
+      <CockpitView
+        {...baseProps}
+        filter="unknown"
+        threads={[]}
+        unknownSenders={[sender]}
+      />,
+    );
+
+    expect(screen.getByTestId("filter-unknown")).toHaveClass("min-h-11");
+    expect(screen.getByTestId("filter-dismissed")).toHaveClass("min-h-11");
+    expect(screen.getByTestId("unknown-view-thread-+15550009999")).toHaveClass(
+      "min-h-11",
+      "min-w-11",
+    );
+    expect(screen.getByTestId("unknown-actions-+15550009999")).toHaveClass(
+      "min-h-11",
+    );
+
+    view.rerender(
+      <CockpitView
+        {...baseProps}
+        filter="dismissed"
+        threads={[]}
+        unknownSenders={[{ ...sender, isDismissed: true }]}
+      />,
+    );
+    expect(screen.getByTestId("unknown-restore-+15550009999")).toHaveClass(
+      "min-h-11",
+    );
   });
 });
 

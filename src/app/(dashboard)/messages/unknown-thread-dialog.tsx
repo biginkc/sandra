@@ -1,6 +1,6 @@
 "use client";
 
-import { formatDistanceToNow } from "date-fns/formatDistanceToNow";
+import { formatDistance } from "date-fns/formatDistance";
 import { useEffect, useState } from "react";
 
 import {
@@ -10,6 +10,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { Button } from "@/components/ui/button";
 import { callAction } from "@/lib/errors/call-action";
 import type { Database } from "@/lib/supabase/types";
 
@@ -21,6 +22,7 @@ type Props = {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   fromAddress: string;
+  nowMs: number;
 };
 
 /**
@@ -28,31 +30,53 @@ type Props = {
  * to read context before triaging from the row's dropdown. No actions
  * inside — close to pick from the dropdown.
  */
-export function UnknownThreadDialog({ open, onOpenChange, fromAddress }: Props) {
+export function UnknownThreadDialog({
+  open,
+  onOpenChange,
+  fromAddress,
+  nowMs,
+}: Props) {
   const [messages, setMessages] = useState<Message[] | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [loadAttempt, setLoadAttempt] = useState(0);
+  const loading = open && messages === null;
 
   useEffect(() => {
-    if (!open) {
-      setMessages(null);
-      return;
-    }
+    if (!open) return;
     let cancelled = false;
-    setLoading(true);
     callAction(fetchUnknownSenderThread(fromAddress), {
       fallbackMessage: "Could not load thread",
     }).then((result) => {
       if (cancelled) return;
-      setMessages(result.ok ? result.data : []);
-      setLoading(false);
+      if (result.ok) {
+        setMessages(result.data);
+        return;
+      }
+      setMessages([]);
+      setLoadError("Could not load this conversation.");
     });
     return () => {
       cancelled = true;
     };
-  }, [open, fromAddress]);
+  }, [open, fromAddress, loadAttempt]);
+
+  const handleOpenChange = (nextOpen: boolean) => {
+    if (!nextOpen) {
+      setMessages(null);
+      setLoadError(null);
+      setLoadAttempt(0);
+    }
+    onOpenChange(nextOpen);
+  };
+
+  const retry = () => {
+    setMessages(null);
+    setLoadError(null);
+    setLoadAttempt((attempt) => attempt + 1);
+  };
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent
         className="sm:max-w-lg"
         data-testid="unknown-thread-dialog"
@@ -60,7 +84,7 @@ export function UnknownThreadDialog({ open, onOpenChange, fromAddress }: Props) 
         <DialogHeader>
           <DialogTitle>Conversation with {fromAddress}</DialogTitle>
           <DialogDescription>
-            Read-only view. Close and use the row's Triage dropdown to merge,
+            Read-only view. Close and use the row&apos;s Triage dropdown to merge,
             create, or dismiss.
           </DialogDescription>
         </DialogHeader>
@@ -71,15 +95,27 @@ export function UnknownThreadDialog({ open, onOpenChange, fromAddress }: Props) 
               Loading…
             </div>
           )}
-          {!loading && messages && messages.length === 0 && (
+          {!loading && loadError && (
+            <div
+              className="flex flex-col items-center gap-3 py-8 text-center"
+              role="alert"
+              data-testid="unknown-thread-load-error"
+            >
+              <p className="text-muted-foreground text-sm">{loadError}</p>
+              <Button className="min-h-11" onClick={retry}>
+                Retry
+              </Button>
+            </div>
+          )}
+          {!loading && !loadError && messages && messages.length === 0 && (
             <div className="text-muted-foreground py-8 text-center text-sm">
               No messages from this sender yet.
             </div>
           )}
-          {!loading && messages && messages.length > 0 && (
+          {!loading && !loadError && messages && messages.length > 0 && (
             <div className="flex flex-col gap-2">
               {messages.map((m) => (
-                <Bubble key={m.id} message={m} />
+                <Bubble key={m.id} message={m} nowMs={nowMs} />
               ))}
             </div>
           )}
@@ -89,7 +125,7 @@ export function UnknownThreadDialog({ open, onOpenChange, fromAddress }: Props) 
   );
 }
 
-function Bubble({ message }: { message: Message }) {
+function Bubble({ message, nowMs }: { message: Message; nowMs: number }) {
   const outbound = message.direction === "outbound";
   return (
     <div className={outbound ? "flex justify-end" : "flex justify-start"}>
@@ -106,7 +142,7 @@ function Bubble({ message }: { message: Message }) {
             outbound ? "text-primary-foreground/70" : "text-muted-foreground"
           }`}
         >
-          {formatDistanceToNow(new Date(message.created_at), {
+          {formatDistance(new Date(message.created_at), new Date(nowMs), {
             addSuffix: true,
           })}
         </div>

@@ -1,6 +1,12 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createTestClient } from "@tests/integration/client";
+import {
+  BMH_ORG_ID,
+  TEST_ORG_B_ID,
+  createOrgUser,
+  seedTwoOrgs,
+} from "@tests/integration/fixtures/multi-user";
 import { resetTenantTables } from "@tests/integration/reset";
 
 // Wire the action's internal createClient() to our test client so it hits
@@ -10,7 +16,6 @@ vi.mock("@/lib/supabase/server", () => ({
   createClient: async () => testClient,
 }));
 
-// eslint-disable-next-line import/first
 import {
   createLeadNote,
   markMessagesReadForProperty,
@@ -18,9 +23,30 @@ import {
   updateLeadAssignee,
 } from "@/app/(dashboard)/leads/actions";
 
+const createdAuthUsers: string[] = [];
+
+async function createActiveAssignee(
+  orgId: string,
+  prefix: string,
+): Promise<string> {
+  const created = await createOrgUser(testClient, {
+    orgId,
+    email: `${prefix}-${crypto.randomUUID()}@test.invalid`,
+    role: "member",
+  });
+  createdAuthUsers.push(created.userId);
+  return created.userId;
+}
+
 describe("VA polish seams — Feature 1 integration", () => {
   beforeEach(async () => {
     await resetTenantTables(testClient);
+  });
+
+  afterEach(async () => {
+    for (const userId of createdAuthUsers.splice(0)) {
+      await testClient.auth.admin.deleteUser(userId);
+    }
   });
 
   async function seedProperty(): Promise<{ id: string; orgId: string }> {
@@ -38,32 +64,10 @@ describe("VA polish seams — Feature 1 integration", () => {
   // ---------------------------------------------------------------------------
   describe("updateLeadAssignee", () => {
     it("assigns a user to a property", async () => {
-      const { id } = await seedProperty();
-      // Use a synthesized UUID; the FK to auth.users only enforces existence
-      // when a user row is present, and in test-reset state the property
-      // table accepts any uuid for the assigned_user_id column. The
-      // realistic flow uses auth.users.id values, but the test only needs
-      // to verify the column flips.
-      const fakeUserId = "00000000-0000-0000-0000-000000000aaa";
+      const { id, orgId } = await seedProperty();
+      const createdUserId = await createActiveAssignee(orgId, "assignee-test");
 
-      // Seed: insert an auth user with that id so the FK satisfies.
-      const { error: userErr } = await testClient.auth.admin.createUser({
-        email: "assignee-test@example.com",
-        password: "irrelevant-for-test",
-        email_confirm: true,
-        user_metadata: { id: fakeUserId },
-      });
-      if (userErr) throw userErr;
-      // createUser doesn't let us pick the id; read it back.
-      const { data: users } = await testClient.auth.admin.listUsers({
-        perPage: 200,
-      });
-      const createdUserId = users?.users.find(
-        (u) => u.email === "assignee-test@example.com",
-      )?.id;
-      expect(createdUserId).toBeTruthy();
-
-      const result = await updateLeadAssignee(id, createdUserId!);
+      const result = await updateLeadAssignee(id, createdUserId);
       expect(result.ok).toBe(true);
 
       const { data } = await testClient
@@ -72,19 +76,11 @@ describe("VA polish seams — Feature 1 integration", () => {
         .eq("id", id)
         .single();
       expect(data?.assigned_user_id).toBe(createdUserId);
-
-      // Cleanup the test user so repeat runs stay clean.
-      await testClient.auth.admin.deleteUser(createdUserId!);
     });
 
     it("clears assignment when passed null", async () => {
-      const { id } = await seedProperty();
-      const { data: userData } = await testClient.auth.admin.createUser({
-        email: "unassign-test@example.com",
-        password: "irrelevant",
-        email_confirm: true,
-      });
-      const userId = userData.user!.id;
+      const { id, orgId } = await seedProperty();
+      const userId = await createActiveAssignee(orgId, "unassign-test");
 
       await updateLeadAssignee(id, userId);
       const clearResult = await updateLeadAssignee(id, null);
@@ -96,8 +92,6 @@ describe("VA polish seams — Feature 1 integration", () => {
         .eq("id", id)
         .single();
       expect(data?.assigned_user_id).toBeNull();
-
-      await testClient.auth.admin.deleteUser(userId);
     });
 
     it("bumps updated_at on assignment change", async () => {
@@ -276,6 +270,57 @@ describe("VA polish seams — Feature 1 integration", () => {
       expect(rows).toHaveLength(2);
       expect(rows?.find((row) => row.conversation_id === convoA)?.read_at).not.toBeNull();
       expect(rows?.find((row) => row.conversation_id === convoB)?.read_at).toBeNull();
+    });
+
+    it("refuses a shared conversation UUID across organizations before changing any row", async () => {
+      await seedTwoOrgs(testClient);
+      const conversationId = crypto.randomUUID();
+      const recentRows = Array.from({ length: 101 }, (_, index) => ({
+        org_id: BMH_ORG_ID,
+        channel: "sms" as const,
+        direction: "inbound" as const,
+        status: "received",
+        conversation_id: conversationId,
+        contact_id: null,
+        property_id: null,
+        from_address: "+18165550101",
+        to_address: "+18165550102",
+        body: `recent ${index}`,
+        created_at: new Date(Date.UTC(2026, 7, 16, 12, index)).toISOString(),
+      }));
+      const { error: seedError } = await testClient.from("messages").insert([
+        ...recentRows,
+        {
+          org_id: TEST_ORG_B_ID,
+          channel: "sms",
+          direction: "inbound",
+          status: "paused",
+          conversation_id: conversationId,
+          contact_id: null,
+          property_id: null,
+          from_address: "+18165550103",
+          to_address: "+18165550104",
+          body: "old contactless collision",
+          created_at: "2020-01-01T00:00:00Z",
+        },
+      ]);
+      expect(seedError).toBeNull();
+
+      const result = await markMessagesReadForThread(conversationId);
+      expect(result).toMatchObject({
+        ok: false,
+        error: {
+          code: "MARK_READ_FAILED",
+          message: expect.stringContaining("SMS_CONVERSATION_ORG_AMBIGUOUS"),
+        },
+      });
+
+      const { data: unread } = await testClient
+        .from("messages")
+        .select("read_at")
+        .eq("conversation_id", conversationId);
+      expect(unread).toHaveLength(102);
+      expect(unread?.every((row) => row.read_at === null)).toBe(true);
     });
   });
 

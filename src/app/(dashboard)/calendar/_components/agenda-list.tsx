@@ -9,7 +9,10 @@ import type {
 } from "../types";
 
 import { AppointmentBlock } from "./appointment-block";
-import { dayIndexForAppointment, formatAgendaDayHeader } from "./calendar-shared";
+import {
+  dayIndexForAppointment,
+  formatAgendaDayHeader,
+} from "./calendar-shared";
 
 type Props = {
   days: CalendarDayBounds[];
@@ -22,6 +25,7 @@ type Props = {
    *  "whose appointment" label, never a selectable option list. */
   assignees: Record<string, string>;
   currentUserId: string;
+  nowMs: number;
 };
 
 const VISIBLE_ROW_CAP = 40;
@@ -45,10 +49,14 @@ export function AgendaList({
   viewerRole,
   assignees,
   currentUserId,
+  nowMs,
 }: Props) {
-  const [expanded, setExpanded] = useState(false);
-  // eslint-disable-next-line react-hooks/purity
-  const nowMs = Date.now();
+  const rangeKey = `${days[0]?.date ?? "empty"}:${days.at(-1)?.date ?? "empty"}`;
+  const [expansion, setExpansion] = useState({ rangeKey, expanded: false });
+  // A URL range change can reuse this client component instance. Treat an
+  // expansion recorded for the prior week/month as collapsed immediately,
+  // without an effect-time flash of the old 40+ rows.
+  const expanded = expansion.rangeKey === rangeKey && expansion.expanded;
 
   const sorted = [...appointments].sort(
     (a, b) => new Date(a.due_at).getTime() - new Date(b.due_at).getTime(),
@@ -60,7 +68,7 @@ export function AgendaList({
         className="text-muted-foreground px-1 py-4 text-sm"
         data-testid="calendar-agenda-empty"
       >
-        No appointments this week.
+        No appointments in this range.
       </p>
     );
   }
@@ -70,7 +78,8 @@ export function AgendaList({
 
   // Group the VISIBLE slice by day — grouping AFTER slicing keeps the cap
   // an exact total-row-count cap rather than a per-group one.
-  const groups: { day: CalendarDayBounds; rows: CalendarAppointmentRow[] }[] = [];
+  const groups: { day: CalendarDayBounds; rows: CalendarAppointmentRow[] }[] =
+    [];
   for (const appt of visible) {
     const idx = dayIndexForAppointment(appt, days);
     if (idx === -1) continue;
@@ -91,7 +100,7 @@ export function AgendaList({
             className="text-muted-foreground mb-2 text-[10px] font-bold tracking-widest uppercase"
             data-testid={`calendar-agenda-day-header-${day.date}`}
           >
-            {formatAgendaDayHeader(day, timezone)}
+            {formatAgendaDayHeader(day, timezone, new Date(nowMs))}
           </div>
           <ul className="divide-border divide-y">
             {rows.map((appt) => (
@@ -112,8 +121,8 @@ export function AgendaList({
       {hiddenCount > 0 ? (
         <button
           type="button"
-          className="text-muted-foreground hover:text-foreground mt-2 text-xs font-bold"
-          onClick={() => setExpanded(true)}
+          className="text-muted-foreground hover:text-foreground mt-2 inline-flex min-h-11 min-w-11 items-center justify-center px-3 text-xs font-bold"
+          onClick={() => setExpansion({ rangeKey, expanded: true })}
           data-testid="calendar-agenda-show-more"
         >
           Show {hiddenCount} more

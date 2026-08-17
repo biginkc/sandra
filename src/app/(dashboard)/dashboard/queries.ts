@@ -83,7 +83,27 @@ export type TaskRow = {
   address: string | null;
   city: string | null;
   state: string | null;
+  /** Permanent property-level DNC lock. Locked rows remain visible as
+   *  history, but the dashboard must not expose any lifecycle mutation. */
+  is_dnc_locked: boolean;
 };
+
+export type MyTasksResult =
+  | {
+      status: "success";
+      overdue: TaskRow[];
+      today: TaskRow[];
+      upcoming: TaskRow[];
+      /** The zone the buckets were computed in — the panel must format due
+       *  labels with this same zone or labels and buckets can disagree. */
+      timezone: string;
+    }
+  | {
+      status: "failure";
+      /** Keep the resolved zone even on failure so a retry can use the same
+       *  viewer context without pretending the task buckets are empty. */
+      timezone: string;
+    };
 
 export type DashboardSummary = {
   total_leads: number;
@@ -142,50 +162,32 @@ export async function fetchDashboardSendilloSmsHealth(): Promise<SendilloSmsHeal
  * no related_property_id (personal blocks, contact-only appointments),
  * so a property-less row is legitimate, not an error. property_id/
  * address/city/state come back null together in that case.
+ * The exact task contact is joined independently from a property's
+ * homeowner: contact-only appointments and tasks concerning another contact
+ * must honor that contact's own permanent DNC flag. If a task claims a
+ * property/contact link but its safety join is unexpectedly absent, the row
+ * remains visible but lifecycle controls fail closed.
  *
- * Returns empty buckets on error rather than null — the panel renders
- * the all-clear empty state, which is a reasonable failure mode.
+ * Returns an explicit failure result on error. A failed query is not an
+ * empty queue: the dashboard must render a retry state rather than claim
+ * the viewer is all caught up.
  */
-export async function fetchMyTasks(userId: string): Promise<{
-  overdue: TaskRow[];
-  today: TaskRow[];
-  upcoming: TaskRow[];
-  /** The zone the buckets were computed in — the panel must format due
-   *  labels with this same zone or labels and buckets can disagree. */
-  timezone: string;
-}> {
+export async function fetchMyTasks(
+  userId: string,
+  now: Date = new Date(),
+): Promise<MyTasksResult> {
   const supabase = await createClient();
   const prefs = await loadIntegrationPrefs(supabase, userId);
-  const { dayStart, dayEnd } = getDayBoundsInZone(new Date(), prefs.timezone);
+  const { dayStart, dayEnd } = getDayBoundsInZone(now, prefs.timezone);
 
-  let { data, error } = await supabase
+  const { data, error } = await supabase
     .from("tasks")
     .select(
-      "id, type, title, due_at, end_at, related_property_id, contact_id, properties(address, city, state, deleted_at)",
+      "id, type, title, due_at, end_at, related_property_id, contact_id, properties(address, city, state, deleted_at, is_dnc_locked), task_contact:contacts!tasks_contact_org_fkey(do_not_contact)",
     )
     .eq("assignee_id", userId)
     .eq("status", "open")
     .order("due_at", { ascending: true });
-
-  // Post-deploy pre-migration window: contact_id/end_at don't exist yet
-  // and Postgres answers 42703 (undefined column). Retry with the legacy
-  // column list rather than hiding every task behind the "all caught up"
-  // empty state; both map to null (no appointment rows can exist before
-  // the schema does).
-  if (error?.code === "42703") {
-    const legacy = await supabase
-      .from("tasks")
-      .select(
-        "id, type, title, due_at, related_property_id, properties(address, city, state, deleted_at)",
-      )
-      .eq("assignee_id", userId)
-      .eq("status", "open")
-      .order("due_at", { ascending: true });
-    error = legacy.error;
-    data =
-      legacy.data?.map((row) => ({ ...row, contact_id: null, end_at: null })) ??
-      null;
-  }
 
   if (error || !data) {
     if (error) {
@@ -194,7 +196,7 @@ export async function fetchMyTasks(userId: string): Promise<{
         code: error.code,
       });
     }
-    return { overdue: [], today: [], upcoming: [], timezone: prefs.timezone };
+    return { status: "failure", timezone: prefs.timezone };
   }
 
   const dayStartMs = dayStart.getTime();
@@ -214,10 +216,18 @@ export async function fetchMyTasks(userId: string): Promise<{
       city: string | null;
       state: string | null;
       deleted_at: string | null;
+      is_dnc_locked: boolean;
     } | null;
     const propertyLinked = Boolean(
       prop && prop.deleted_at === null && prop.address && prop.state,
     );
+    const taskContact = row.task_contact as unknown as {
+      do_not_contact: boolean;
+    } | null;
+    const propertySafetyJoinMissing =
+      row.related_property_id !== null && prop === null;
+    const contactSafetyJoinMissing =
+      row.contact_id !== null && taskContact === null;
 
     const taskRow: TaskRow = {
       id: row.id,
@@ -230,6 +240,16 @@ export async function fetchMyTasks(userId: string): Promise<{
       address: propertyLinked ? (prop!.address ?? null) : null,
       city: propertyLinked ? (prop!.city ?? null) : null,
       state: propertyLinked ? (prop!.state ?? null) : null,
+      // DNC is a safety property, not a presentation property. Preserve the
+      // property lock even when display fields are unusable, include the
+      // exact task contact's lock, and fail closed if an expected safety join
+      // is inexplicably absent. A truly personal task has neither expected
+      // relation and therefore remains unlocked.
+      is_dnc_locked:
+        prop?.is_dnc_locked === true ||
+        taskContact?.do_not_contact === true ||
+        propertySafetyJoinMissing ||
+        contactSafetyJoinMissing,
     };
 
     const dueMs = new Date(row.due_at).getTime();
@@ -242,5 +262,11 @@ export async function fetchMyTasks(userId: string): Promise<{
     }
   }
 
-  return { overdue, today, upcoming, timezone: prefs.timezone };
+  return {
+    status: "success",
+    overdue,
+    today,
+    upcoming,
+    timezone: prefs.timezone,
+  };
 }

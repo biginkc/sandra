@@ -1,6 +1,7 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createTestClient } from "@tests/integration/client";
+import { createTemporaryOrganizationTracker } from "@tests/integration/fixtures/temporary-organizations";
 import { resetTenantTables } from "@tests/integration/reset";
 
 import { MockSkipTraceProvider } from "./providers/mock";
@@ -12,6 +13,7 @@ import {
 import type { SkipTraceResult } from "./types";
 
 const supabase = createTestClient();
+const temporaryOrganizations = createTemporaryOrganizationTracker(supabase);
 
 async function getOrgId(): Promise<string> {
   const { data } = await supabase
@@ -84,6 +86,10 @@ describe("runSkipTraceEnrichment (integration, mock provider)", () => {
     vi.restoreAllMocks();
   });
 
+  afterEach(async () => {
+    await temporaryOrganizations.cleanup();
+  });
+
   it("keeps preparation recoverable until the final paid-call checkpoint", async () => {
     const { propertyId } = await seedProperty({
       address: "1 Prepared Recovery Ln",
@@ -102,8 +108,8 @@ describe("runSkipTraceEnrichment (integration, mock provider)", () => {
           .eq("id", jobId)
           .single();
         observedPhase =
-          ((job?.result_summary as { submit_phase?: string } | null)
-            ?.submit_phase ?? null);
+          (job?.result_summary as { submit_phase?: string } | null)
+            ?.submit_phase ?? null;
         throw new Error("stop before provider");
       },
     });
@@ -178,12 +184,7 @@ describe("runSkipTraceEnrichment (integration, mock provider)", () => {
   });
 
   it("fails closed for an org-A job cross-wired to a valid org-B property", async () => {
-    const { data: orgB, error: orgError } = await supabase
-      .from("organizations")
-      .insert({ name: `Runner Tenant B ${crypto.randomUUID()}` })
-      .select("id")
-      .single();
-    if (orgError || !orgB) throw orgError ?? new Error("org B missing");
+    const orgB = await temporaryOrganizations.create("Runner Tenant B");
     const { data: property, error: propertyError } = await supabase
       .from("properties")
       .insert({
@@ -213,7 +214,6 @@ describe("runSkipTraceEnrichment (integration, mock provider)", () => {
     expect(result).toEqual({ claimed: false });
     expect(lookup).not.toHaveBeenCalled();
     expect(submit).not.toHaveBeenCalled();
-    await supabase.from("organizations").delete().eq("id", orgB.id);
   });
 
   it("allows only one concurrent direct sync runner to reach the provider", async () => {
@@ -605,6 +605,82 @@ describe("runSkipTraceEnrichment (integration, mock provider)", () => {
     expect(contact!.phone_3).toBeNull();
   });
 
+  it("records multi-contact DNC ambiguity as terminal manual review without claiming the property is locked", async () => {
+    const orgId = await getOrgId();
+    const ambiguousPhone = "+18165550100"; // Mock DNC-prefix result.
+    const { error: contactsError } = await supabase.from("contacts").insert([
+      {
+        org_id: orgId,
+        first_name: "Ambiguous",
+        last_name: "One",
+        phone_1_type: "unknown",
+        phone_2: ambiguousPhone,
+        phone_2_type: "mobile",
+        phone_3_type: "unknown",
+      },
+      {
+        org_id: orgId,
+        first_name: "Ambiguous",
+        last_name: "Two",
+        phone_1_type: "unknown",
+        phone_2_type: "unknown",
+        phone_3: ambiguousPhone,
+        phone_3_type: "mobile",
+      },
+    ]);
+    expect(contactsError).toBeNull();
+    const { propertyId } = await seedProperty({
+      address: "DNC ambiguous contact identity",
+      withContact: false,
+    });
+    const jobId = await createPendingJob([propertyId]);
+
+    await runSkipTraceEnrichment(supabase, {
+      jobId,
+      orgId,
+      propertyIds: [propertyId],
+    });
+
+    const { data: item } = await supabase
+      .from("job_items")
+      .select("status, error_class, error_message, output_payload")
+      .eq("job_id", jobId)
+      .eq("property_id", propertyId)
+      .single();
+    expect(item).toMatchObject({
+      status: "error",
+      error_class: "provider_persist_failed",
+      error_message:
+        "Manual review required: provider phone candidates map to multiple contacts. The property was not linked or marked permanently DNC.",
+      output_payload: {
+        manual_review: true,
+        reason: "dnc_contact_ambiguous",
+      },
+    });
+    expect(
+      (item?.output_payload as { ambiguous_contact_ids?: unknown[] })
+        .ambiguous_contact_ids,
+    ).toHaveLength(2);
+    const { data: property } = await supabase
+      .from("properties")
+      .select("homeowner_contact_id, is_dnc_locked")
+      .eq("id", propertyId)
+      .single();
+    expect(property).toEqual({
+      homeowner_contact_id: null,
+      is_dnc_locked: false,
+    });
+    const { data: job } = await supabase
+      .from("jobs")
+      .select("result_summary")
+      .eq("id", jobId)
+      .single();
+    expect(
+      (job?.result_summary as { dnc_contact_ambiguous?: number } | null)
+        ?.dnc_contact_ambiguous,
+    ).toBe(1);
+  });
+
   it("a provider DNC phone ratchets do_not_contact=true on the contact, not just drops the number (Codex PR #310 finding 4)", async () => {
     const { propertyId, contactId } = await seedProperty({
       address: "600 Dnc Ratchet Ln",
@@ -630,19 +706,36 @@ describe("runSkipTraceEnrichment (integration, mock provider)", () => {
       raw: {},
     };
 
-    await persistSkipTraceResult(supabase, await getOrgId(), result);
+    const outcome = await persistSkipTraceResult(
+      supabase,
+      await getOrgId(),
+      result,
+    );
 
     const { data: contact } = await supabase
       .from("contacts")
       .select("phone_1, phone_2, phone_3, do_not_contact")
       .eq("id", contactId!)
       .single();
-    // The clean mobile is kept; the DNC-flagged number never lands in a
-    // slot; the contact-level flag is ratcheted regardless.
-    expect(contact!.phone_1).toBe("+18165550600");
+    // Permanent DNC wins over every otherwise-clean provider field. The
+    // ratchet is isolated, the contact/property lock propagates, and the
+    // caller receives a truthful skipped outcome.
+    expect(outcome).toMatchObject({
+      status: "dnc_skipped",
+      contactId,
+      phonesAdded: 0,
+      emailsAdded: 0,
+    });
+    expect(contact!.phone_1).toBeNull();
     expect(contact!.phone_2).toBeNull();
     expect(contact!.phone_3).toBeNull();
     expect(contact!.do_not_contact).toBe(true);
+    const { data: property } = await supabase
+      .from("properties")
+      .select("is_dnc_locked")
+      .eq("id", propertyId)
+      .single();
+    expect(property!.is_dnc_locked).toBe(true);
   });
 
   it("finds + ratchets an existing contact via a LOWER-ranked DNC phone, not just the top-ranked one (Codex round-4 finding)", async () => {
@@ -689,7 +782,7 @@ describe("runSkipTraceEnrichment (integration, mock provider)", () => {
       raw: {},
     };
 
-    await persistSkipTraceResult(supabase, orgId, result);
+    const outcome = await persistSkipTraceResult(supabase, orgId, result);
 
     // Reused the EXISTING contact — no duplicate created — and ratcheted it.
     const { count: contactCount } = await supabase
@@ -700,17 +793,105 @@ describe("runSkipTraceEnrichment (integration, mock provider)", () => {
 
     const { data: contact } = await supabase
       .from("contacts")
-      .select("id, do_not_contact")
+      .select("id, phone_1, phone_2, phone_3, do_not_contact")
       .eq("id", existingContact!.id)
       .single();
+    expect(outcome).toMatchObject({
+      status: "dnc_skipped",
+      contactId: existingContact!.id,
+      phonesAdded: 0,
+      emailsAdded: 0,
+    });
+    expect(contact!.phone_1).toBe("+18165550620");
+    expect(contact!.phone_2).toBeNull();
+    expect(contact!.phone_3).toBeNull();
     expect(contact!.do_not_contact).toBe(true);
 
+    const { data: property } = await supabase
+      .from("properties")
+      .select("homeowner_contact_id, is_dnc_locked")
+      .eq("id", propertyId)
+      .single();
+    expect(property!.homeowner_contact_id).toBe(existingContact!.id);
+    expect(property!.is_dnc_locked).toBe(true);
+  });
+
+  it("ratchets the DNC-number owner but does not guess when provider phones map to multiple contacts", async () => {
+    const orgId = await getOrgId();
+    const { data: contacts, error: contactsError } = await supabase
+      .from("contacts")
+      .insert([
+        {
+          org_id: orgId,
+          first_name: "Clean",
+          last_name: "Candidate",
+          phone_1: "+18165550631",
+          phone_1_type: "mobile",
+        },
+        {
+          org_id: orgId,
+          first_name: "DNC",
+          last_name: "Candidate",
+          phone_1: "+18165550632",
+          phone_1_type: "mobile",
+        },
+      ])
+      .select("id, phone_1");
+    if (contactsError || !contacts) {
+      throw contactsError ?? new Error("contacts seed failed");
+    }
+    const cleanId = contacts.find((contact) =>
+      contact.phone_1?.endsWith("631"),
+    )!.id;
+    const dncId = contacts.find((contact) =>
+      contact.phone_1?.endsWith("632"),
+    )!.id;
+    const { propertyId } = await seedProperty({
+      address: "630 Ambiguous Dnc Ln",
+      withContact: false,
+    });
+
+    const outcome = await persistSkipTraceResult(supabase, orgId, {
+      propertyId,
+      hit: true,
+      persons: [
+        {
+          firstName: "Split",
+          lastName: "Owner",
+          phones: [
+            { number: "+18165550631", type: "Mobile", dnc: false, rank: 1 },
+            { number: "+18165550632", type: "Mobile", dnc: true, rank: 2 },
+          ],
+          emails: [],
+          isOwner: true,
+        },
+      ],
+      creditsDeducted: 1,
+      raw: {},
+    });
+
+    expect(outcome).toEqual({
+      status: "dnc_contact_ambiguous",
+      ambiguousContactIds: [cleanId, dncId].sort(),
+      phonesAdded: 0,
+      emailsAdded: 0,
+    });
+    const { data: proof } = await supabase
+      .from("contacts")
+      .select("id, do_not_contact")
+      .in("id", [cleanId, dncId]);
+    expect(
+      proof?.find((contact) => contact.id === cleanId)?.do_not_contact,
+    ).toBe(false);
+    expect(proof?.find((contact) => contact.id === dncId)?.do_not_contact).toBe(
+      true,
+    );
     const { data: property } = await supabase
       .from("properties")
       .select("homeowner_contact_id")
       .eq("id", propertyId)
       .single();
-    expect(property!.homeowner_contact_id).toBe(existingContact!.id);
+    expect(property?.homeowner_contact_id).toBeNull();
   });
 
   it("never clears an already-suppressed contact when a later skip-trace hit carries no DNC phone (one-way ratchet)", async () => {
@@ -1195,7 +1376,7 @@ describe("runSkipTraceEnrichment (integration, mock provider)", () => {
     expect(new Set(props!.map((p) => p.homeowner_contact_id)).size).toBe(1);
   });
 
-  it("phone owned by another contact degrades gracefully: names land, phone skipped", async () => {
+  it("does not guess when a provider phone conflicts with the property's linked contact", async () => {
     // contacts_phone_1_key is global — a returned number that already
     // belongs to a different contact must not sink the whole update.
     const a = await seedProperty({ address: "81 Phoneclash Ave" });
@@ -1232,16 +1413,25 @@ describe("runSkipTraceEnrichment (integration, mock provider)", () => {
     );
     expect(first.phonesAdded).toBe(1);
 
-    // Property B already HAS a contact (import-created), so the
-    // phone-reuse pre-resolve is skipped and the update path hits the
-    // unique index. It must degrade (skip the phone), not throw.
-    const second = await persistSkipTraceResult(
-      supabase,
-      orgId,
-      withPhone(b.propertyId, "Beta"),
-    );
-    expect(second.status).toBe("matched");
-    expect(second.phonesAdded).toBe(0);
+    // Property B already has a different linked contact. The provider phone
+    // resolves to A's contact, so selecting either identity would be an
+    // arbitrary merge. Fail closed and leave B untouched.
+    await expect(
+      persistSkipTraceResult(supabase, orgId, withPhone(b.propertyId, "Beta")),
+    ).rejects.toThrow("contact resolution ambiguous");
+    const { data: propertyB } = await supabase
+      .from("properties")
+      .select("homeowner_contact_id")
+      .eq("id", b.propertyId)
+      .single();
+    expect(propertyB?.homeowner_contact_id).toBe(b.contactId);
+    const { data: contactB } = await supabase
+      .from("contacts")
+      .select("phone_1, first_name")
+      .eq("id", b.contactId!)
+      .single();
+    expect(contactB?.phone_1).toBeNull();
+    expect(contactB?.first_name).not.toBe("Beta");
   });
 
   it("cache hit on second run: no provider call, contact unchanged", async () => {
@@ -1644,12 +1834,7 @@ describe("runSkipTraceEnrichment (integration, mock provider)", () => {
 
     it("rejects a forged org-A result map that points at an org-B property", async () => {
       const orgAId = await getOrgId();
-      const { data: orgB, error: orgError } = await supabase
-        .from("organizations")
-        .insert({ name: `Finalize Tenant B ${crypto.randomUUID()}` })
-        .select("id")
-        .single();
-      if (orgError || !orgB) throw orgError ?? new Error("org B missing");
+      const orgB = await temporaryOrganizations.create("Finalize Tenant B");
 
       const { data: foreignProperty, error: propertyError } = await supabase
         .from("properties")
@@ -1769,12 +1954,9 @@ describe("runSkipTraceEnrichment (integration, mock provider)", () => {
 
     it("rejects a forged foreign property even when the provider returns no result", async () => {
       const orgAId = await getOrgId();
-      const { data: orgB, error: orgError } = await supabase
-        .from("organizations")
-        .insert({ name: `Missing Result Tenant B ${crypto.randomUUID()}` })
-        .select("id")
-        .single();
-      if (orgError || !orgB) throw orgError ?? new Error("org B missing");
+      const orgB = await temporaryOrganizations.create(
+        "Missing Result Tenant B",
+      );
 
       const { data: foreignProperty, error: propertyError } = await supabase
         .from("properties")

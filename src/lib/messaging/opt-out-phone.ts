@@ -54,6 +54,21 @@ export async function applyPhoneLevelOptOut(
     contactIds.add(input.contactId);
   }
   for (const contactId of contactIds) {
+    const { data: currentContact, error: contactReadError } = await supabase
+      .from("contacts")
+      .select("do_not_contact, sms_opted_out")
+      .eq("id", contactId)
+      .eq("org_id", input.orgId)
+      .maybeSingle();
+    if (contactReadError) {
+      throw new Error(
+        `applyPhoneLevelOptOut contact read: ${contactReadError.message}`,
+      );
+    }
+    // A stale/cross-tenant thread pointer must never create an audit event or
+    // mutate a contact outside the phone suppression's organization.
+    if (!currentContact) continue;
+
     try {
       await recordConsentEvent(supabase, {
         contactId,
@@ -77,15 +92,32 @@ export async function applyPhoneLevelOptOut(
         },
       });
     }
-    const { error: contactUpdateError } = await supabase
-      .from("contacts")
-      .update({
-        sms_opted_out: true,
-        sms_opted_out_at: input.occurredAt.toISOString(),
-      })
-      .eq("id", contactId);
-    if (contactUpdateError) {
-      throw new Error(`applyPhoneLevelOptOut contact update: ${contactUpdateError.message}`);
+    // A permanent DNC contact/property is immutable. Durable phone
+    // suppression plus the append-only consent event above already blocks
+    // future SMS, so do not rewrite historical contact fields. Repeated STOP
+    // for an SMS-opted-out contact is likewise idempotent.
+    if (!currentContact.do_not_contact && !currentContact.sms_opted_out) {
+      const { error: contactUpdateError } = await supabase
+        .from("contacts")
+        .update({
+          sms_opted_out: true,
+          sms_opted_out_at: input.occurredAt.toISOString(),
+        })
+        .eq("id", contactId)
+        .eq("org_id", input.orgId)
+        .eq("do_not_contact", false)
+        .eq("sms_opted_out", false);
+      if (contactUpdateError) {
+        // A property-level permanent DNC can lock this contact even when the
+        // contact's own flag is still false. Preserve that immutable history;
+        // the durable phone suppression and consent event already enforce
+        // STOP. Every non-lock database failure remains fatal.
+        if (!contactUpdateError.message.includes("DNC_LOCKED")) {
+          throw new Error(
+            `applyPhoneLevelOptOut contact update: ${contactUpdateError.message}`,
+          );
+        }
+      }
     }
     try {
       await pauseContactEnrollments(supabase, {

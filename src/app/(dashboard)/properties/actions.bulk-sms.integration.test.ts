@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createTestClient } from "@tests/integration/client";
+import { getCanonicalTestOrgId } from "@tests/integration/fixtures/multi-user";
 import {
   MOCK_SENDER_PRIMARY,
   MOCK_SENDER_SECONDARY,
@@ -49,13 +50,7 @@ import {
 } from "./actions";
 
 async function getOrgId(): Promise<string> {
-  const { data } = await testClient
-    .from("organizations")
-    .select("id")
-    .limit(1)
-    .maybeSingle();
-  if (!data?.id) throw new Error("no org");
-  return data.id;
+  return getCanonicalTestOrgId(testClient);
 }
 
 async function seedLead(opts: {

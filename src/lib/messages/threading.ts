@@ -97,14 +97,11 @@ export async function canonicalizeThreadId(
   const parsed = parseThreadId(threadId);
 
   if (parsed.kind === "conversation") {
-    const { data } = await supabase
-      .from("messages")
-      .select("conversation_id")
-      .eq("channel", "sms")
-      .eq("conversation_id", parsed.conversationId)
-      .limit(1)
-      .maybeSingle();
-    if (data) return parsed.conversationId;
+    const orgId = await resolveSmsConversationOrg(
+      supabase,
+      parsed.conversationId,
+    );
+    if (orgId) return parsed.conversationId;
     // Contact ids are UUID-shaped too; a pre-Phase-2 link that doesn't
     // match any conversation gets retried as a contact id.
     return latestConversationIdForContact(supabase, parsed.conversationId);
@@ -124,10 +121,38 @@ export async function canonicalizeThreadId(
         ? query.is("property_id", null)
         : query.eq("property_id", parsed.propertyId);
     const { data } = await query.maybeSingle();
-    return data?.conversation_id ?? null;
+    return guardCanonicalConversation(supabase, data?.conversation_id ?? null);
   }
 
   return latestConversationIdForContact(supabase, parsed.contactId);
+}
+
+/** Resolve the sole active-membership-visible organization for every SMS row
+ * carrying this conversation UUID. The database raises on a cross-org UUID
+ * collision; callers must not catch that error and guess a tenant. */
+export async function resolveSmsConversationOrg(
+  supabase: SupabaseClient<Database>,
+  conversationId: string,
+): Promise<string | null> {
+  const { data, error } = await supabase.rpc("resolve_sms_conversation_org", {
+    p_conversation_id: conversationId,
+  });
+  if (error) {
+    throw new Error(`resolveSmsConversationOrg: ${error.message}`);
+  }
+  if (data !== null && typeof data !== "string") {
+    throw new Error("resolveSmsConversationOrg: invalid database response");
+  }
+  return data;
+}
+
+async function guardCanonicalConversation(
+  supabase: SupabaseClient<Database>,
+  conversationId: string | null,
+): Promise<string | null> {
+  if (!conversationId) return null;
+  const orgId = await resolveSmsConversationOrg(supabase, conversationId);
+  return orgId ? conversationId : null;
 }
 
 /** A bare contact id is ambiguous when the contact has several threads —
@@ -145,7 +170,7 @@ async function latestConversationIdForContact(
     .order("created_at", { ascending: false })
     .limit(1)
     .maybeSingle();
-  return data?.conversation_id ?? null;
+  return guardCanonicalConversation(supabase, data?.conversation_id ?? null);
 }
 
 export async function ensureConversationIdForThread(

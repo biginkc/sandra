@@ -3,6 +3,10 @@ import { createHash } from "node:crypto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createTestClient } from "@tests/integration/client";
+import {
+  BMH_ORG_ID,
+  getCanonicalTestOrgId,
+} from "@tests/integration/fixtures/multi-user";
 import { resetTenantTables } from "@tests/integration/reset";
 
 // Point the route's `createSupabaseClient(...)` call at the test
@@ -68,18 +72,14 @@ async function clearConsumers(): Promise<void> {
 }
 
 async function seedRunningSkipTraceJob(queueId: string): Promise<string> {
-  const { data: org } = await testClient
-    .from("organizations")
-    .select("id")
-    .limit(1)
-    .single();
+  const orgId = await getCanonicalTestOrgId(testClient);
   const { data: job, error } = await testClient
     .from("jobs")
     .insert({
       type: "skip_trace",
       provider: "tracerfy",
       status: "running",
-      org_id: org!.id,
+      org_id: orgId,
       provider_run_id: queueId,
       total_items: 0,
       title: "Test skip-trace job",
@@ -273,16 +273,11 @@ describe("POST /api/webhooks/skip-trace/[secret] (per-consumer auth)", () => {
     });
     // Seed a completed job — finalize already happened (cron poll
     // beat the webhook, or this is a duplicate delivery).
-    const { data: org } = await testClient
-      .from("organizations")
-      .select("id")
-      .limit(1)
-      .single();
     await testClient.from("jobs").insert({
       type: "skip_trace",
       provider: "tracerfy",
       status: "completed",
-      org_id: org!.id,
+      org_id: BMH_ORG_ID,
       provider_run_id: "queue-already-done",
       total_items: 0,
       title: "Already-finalized job",

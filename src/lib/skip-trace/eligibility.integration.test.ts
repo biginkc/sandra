@@ -1,6 +1,7 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { createTestClient } from "@tests/integration/client";
+import { createTemporaryOrganizationTracker } from "@tests/integration/fixtures/temporary-organizations";
 import { resetTenantTables } from "@tests/integration/reset";
 
 import {
@@ -10,6 +11,7 @@ import {
 } from "./eligibility";
 
 const supabase = createTestClient();
+const temporaryOrganizations = createTemporaryOrganizationTracker(supabase);
 
 async function defaultOrgId(): Promise<string> {
   const { data, error } = await supabase
@@ -24,6 +26,10 @@ async function defaultOrgId(): Promise<string> {
 describe("resolveSkipTraceEligibility (integration)", () => {
   beforeEach(async () => {
     await resetTenantTables(supabase);
+  });
+
+  afterEach(async () => {
+    await temporaryOrganizations.cleanup();
   });
 
   it("preserves split-job and prior gate context in audience copy", () => {
@@ -49,14 +55,7 @@ describe("resolveSkipTraceEligibility (integration)", () => {
 
   it("scopes durable phone suppression by organization and SMS channel", async () => {
     const orgA = await defaultOrgId();
-    const { data: orgBRow, error: orgBError } = await supabase
-      .from("organizations")
-      .insert({ name: `Skip Trace Tenant B ${crypto.randomUUID()}` })
-      .select("id")
-      .single();
-    if (orgBError || !orgBRow) {
-      throw orgBError ?? new Error("second org insert failed");
-    }
+    const orgBRow = await temporaryOrganizations.create("Skip Trace Tenant B");
 
     const sharedPhone = "+18165550144";
     const orgAPhone = "+18165550143";
@@ -145,8 +144,6 @@ describe("resolveSkipTraceEligibility (integration)", () => {
     ]);
     expect(resultB.eligibleIds).toEqual([propertyB.id]);
     expect(resultB.exclusions).toEqual([]);
-
-    await supabase.from("organizations").delete().eq("id", orgBRow.id);
   });
 
   it("excludes current terminal disposition and skip-trace kill-switch states", async () => {

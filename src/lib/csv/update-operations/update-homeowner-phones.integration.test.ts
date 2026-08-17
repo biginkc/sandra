@@ -1,12 +1,14 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { matchPropertyByAddress } from "@/lib/csv/match-by-address";
 import { normalizeAddress } from "@/lib/csv/normalize";
 import { updateHomeownerPhonesOp } from "@/lib/csv/update-operations/update-homeowner-phones";
 import { createTestClient } from "@tests/integration/client";
+import { createTemporaryOrganizationTracker } from "@tests/integration/fixtures/temporary-organizations";
 import { resetTenantTables } from "@tests/integration/reset";
 
 const supabase = createTestClient();
+const temporaryOrganizations = createTemporaryOrganizationTracker(supabase);
 
 async function seedContact(): Promise<string> {
   const { data, error } = await supabase
@@ -66,6 +68,10 @@ describe("update-homeowner-phones sub-op (integration)", () => {
     await resetTenantTables(supabase);
   });
 
+  afterEach(async () => {
+    await temporaryOrganizations.cleanup();
+  });
+
   it("property with homeowner_contact_id set → phones written to that contact", async () => {
     const contactId = await seedContact();
     await seedPropertyWithHomeowner("100 Phone St", contactId);
@@ -102,6 +108,55 @@ describe("update-homeowner-phones sub-op (integration)", () => {
     );
     expect(result.kind).toBe("rejected");
     if (result.kind === "rejected") expect(result.reason).toBe("no-homeowner");
+  });
+
+  it("fails closed when a property is cross-wired to another organization's homeowner", async () => {
+    const foreignOrg = await temporaryOrganizations.create(
+      "Homeowner phones foreign tenant",
+    );
+    const { data: foreignContact, error: contactError } = await supabase
+      .from("contacts")
+      .insert({
+        org_id: foreignOrg.id,
+        first_name: "Foreign",
+        last_name: "Homeowner",
+      })
+      .select("id")
+      .single();
+    if (contactError || !foreignContact) {
+      throw contactError ?? new Error("foreign contact seed failed");
+    }
+    await seedPropertyWithHomeowner("225 Cross Tenant Homeowner St", null);
+    const match = await matchPropertyByAddress(supabase, {
+      address: "225 Cross Tenant Homeowner St",
+    });
+    if (match.kind !== "matched") throw new Error("expected matched");
+
+    const result = await updateHomeownerPhonesOp.apply(
+      { supabase, userId: null },
+      {
+        rowIndex: 0,
+        parsedRow: {
+          Address: "225 Cross Tenant Homeowner St",
+          "Phone 1": "8165550225",
+          "Phone 1 Type": "DO NOT CALL",
+        },
+        // Model a legacy pre-guard cross-wire without weakening the live FK.
+        property: {
+          ...match.property,
+          homeowner_contact_id: foreignContact.id,
+        },
+      },
+      { dryRun: false },
+    );
+
+    expect(result).toMatchObject({ kind: "rejected", reason: "no-homeowner" });
+    const { data: proof } = await supabase
+      .from("contacts")
+      .select("phone_1, do_not_contact")
+      .eq("id", foreignContact.id)
+      .single();
+    expect(proof).toEqual({ phone_1: null, do_not_contact: false });
   });
 
   it("phone without a line type → rejected with reason missing-line-type, nothing written", async () => {
@@ -152,7 +207,7 @@ describe("update-homeowner-phones sub-op (integration)", () => {
     expect(contact?.do_not_contact).toBe(true);
   });
 
-  it("DO NOT CALL on Phone 1 alongside a clean mobile in Phone 2 → phone_2 written AND do_not_contact ratcheted", async () => {
+  it("DO NOT CALL on Phone 1 alongside a clean mobile in Phone 2 → only do_not_contact ratchets", async () => {
     const contactId = await seedContact();
     await seedPropertyWithHomeowner("510 Dnc Mixed St", contactId);
     const result = await applyRow({
@@ -169,8 +224,12 @@ describe("update-homeowner-phones sub-op (integration)", () => {
       .eq("id", contactId)
       .single();
     expect(contact?.phone_1).toBeNull();
-    expect(contact?.phone_2).toBe("+18165550511");
+    expect(contact?.phone_2).toBeNull();
     expect(contact?.do_not_contact).toBe(true);
+    expect(result).toMatchObject({
+      kind: "updated",
+      after: { do_not_contact: true },
+    });
   });
 
   it("never clears an already-suppressed contact when a later row has no DNC marker (one-way ratchet)", async () => {
@@ -185,12 +244,13 @@ describe("update-homeowner-phones sub-op (integration)", () => {
       "Phone 1": "8165550520",
       "Phone 1 Type": "Mobile",
     });
-    expect(result.kind).toBe("updated");
+    expect(result).toMatchObject({ kind: "rejected", reason: "dnc-locked" });
     const { data: contact } = await supabase
       .from("contacts")
-      .select("do_not_contact")
+      .select("phone_1, do_not_contact")
       .eq("id", contactId)
       .single();
+    expect(contact?.phone_1).toBeNull();
     expect(contact?.do_not_contact).toBe(true);
   });
 

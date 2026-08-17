@@ -1,22 +1,28 @@
 "use client";
 
-import { formatDistanceToNow } from "date-fns/formatDistanceToNow";
-import { PauseIcon, PlayIcon, SendIcon, Trash2Icon, PencilIcon } from "lucide-react";
+import { formatDistance } from "date-fns/formatDistance";
+import {
+  AlertCircleIcon,
+  PauseIcon,
+  PencilIcon,
+  PlayIcon,
+  RotateCwIcon,
+  SendIcon,
+  Trash2Icon,
+} from "lucide-react";
 import { useRouter } from "next/navigation";
-import { useEffect, useRef, useState, useTransition } from "react";
+import {
+  useEffect,
+  useEffectEvent,
+  useRef,
+  useState,
+  useTransition,
+} from "react";
 import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
 import { callAction } from "@/lib/errors/call-action";
 import { createClient } from "@/lib/supabase/client";
 
@@ -57,13 +63,20 @@ export function QueuePanel({
   initial,
   initialHasMore = false,
   totalQueued,
+  initialLoadFailed = false,
+  nowMs,
 }: {
   initial: QueuedRow[];
   /** True when the server's first page was full — more rows exist beyond it. */
   initialHasMore?: boolean;
   /** Live total from queue stats, for the "X of Y loaded" readout. */
   totalQueued?: number;
+  /** The first page query failed. An empty array is fallback data, not empty truth. */
+  initialLoadFailed?: boolean;
+  nowMs?: number;
 }) {
+  const [fallbackNowMs] = useState(Date.now);
+  const renderNowMs = nowMs ?? fallbackNowMs;
   const router = useRouter();
   const [rows, setRows] = useState<QueuedRow[]>(initial);
   const [pending, startTransition] = useTransition();
@@ -77,25 +90,48 @@ export function QueuePanel({
   // visible during a slow fetch).
   const [hasMore, setHasMore] = useState(initialHasMore);
   const [loadingMore, setLoadingMore] = useState(false);
+  const [loadMoreFailed, setLoadMoreFailed] = useState(false);
+  const [serverSnapshot, setServerSnapshot] = useState({
+    initial,
+    initialHasMore,
+  });
   const loadingRef = useRef(false);
   const sentinelRef = useRef<HTMLDivElement | null>(null);
+
+  // A route refresh returns a new server snapshot. Adopt it instead of
+  // continuing to render the mount-time fallback array — especially after a
+  // failed first load, where ignoring refreshed props would falsely claim the
+  // Outbox is empty even though the retry found queued rows.
+  if (
+    serverSnapshot.initial !== initial ||
+    serverSnapshot.initialHasMore !== initialHasMore
+  ) {
+    setServerSnapshot({ initial, initialHasMore });
+    setRows(initial);
+    setHasMore(initialHasMore);
+    setLoadMoreFailed(false);
+  }
 
   const loadMore = async () => {
     if (loadingRef.current) return;
     // Empty list → null cursor re-seeds from page 1 (dedup makes this
     // idempotent). Happens when live stats re-arm the sentinel on a
     // queue that grew from zero.
-    const last = rowsRef.current[rowsRef.current.length - 1];
+    const last = rows[rows.length - 1];
     const cursor = last
       ? { scheduledFor: last.scheduledFor, id: last.id }
       : null;
     loadingRef.current = true;
     setLoadingMore(true);
+    setLoadMoreFailed(false);
     try {
       const result = await callAction(listQueuedPage(cursor), {
         fallbackMessage: "Couldn't load more of the queue",
       });
-      if (!result.ok) return;
+      if (!result.ok) {
+        setLoadMoreFailed(true);
+        return;
+      }
       setHasMore(result.data.hasMore);
       // Dedup by id: realtime inserts or a queue that drained between
       // pages can hand us rows we already render.
@@ -171,29 +207,23 @@ export function QueuePanel({
   const [autoOn, setAutoOn] = useState(false);
   const [cadence, setCadence] = useState<number>(DEFAULT_CADENCE_S);
   const intervalRef = useRef<number | null>(null);
-  // Always-current view of rows + the send closure, so the auto-send
-  // interval tick reads the LATEST state without needing to be restarted
-  // every time the queue changes. Restarting the interval on rows
-  // change causes back-to-back immediate ticks and breaks cadence.
-  const rowsRef = useRef<QueuedRow[]>(initial);
-  useEffect(() => {
-    rowsRef.current = rows;
-  }, [rows]);
-  const sendOneRef = useRef<(row: QueuedRow) => Promise<boolean>>(
-    async () => false,
-  );
-
+  const skipInitialCadencePersistRef = useRef(true);
   useEffect(() => {
     const raw = localStorage.getItem(CADENCE_STORAGE_KEY);
     if (raw) {
       const n = Number(raw);
       if (Number.isFinite(n) && n >= MIN_CADENCE_S && n <= MAX_CADENCE_S) {
+        // eslint-disable-next-line react-hooks/set-state-in-effect -- localStorage is the external cadence source; adopt it after hydration so server/client first paint remains identical.
         setCadence(n);
       }
     }
   }, []);
 
   useEffect(() => {
+    if (skipInitialCadencePersistRef.current) {
+      skipInitialCadencePersistRef.current = false;
+      return;
+    }
     localStorage.setItem(CADENCE_STORAGE_KEY, String(cadence));
   }, [cadence]);
 
@@ -242,12 +272,6 @@ export function QueuePanel({
     };
   }, []);
 
-  // Keep the ref in sync with the latest sendOne closure so the
-  // interval tick always calls the current version.
-  useEffect(() => {
-    sendOneRef.current = sendOne;
-  });
-
   const sendOne = async (row: QueuedRow) => {
     const result = await callAction(releaseMessage(row.id), {
       fallbackMessage: "Send failed",
@@ -285,6 +309,26 @@ export function QueuePanel({
     }
   };
 
+  // Read the latest rows without making the long-lived interval restart
+  // after every queue update. Restarting it resets the cadence and can
+  // produce back-to-back sends.
+  const autoSendTick = useEffectEvent(async () => {
+    const first = rows[0];
+    if (!first) {
+      setAutoOn(false);
+      toast.info("Queue empty — auto-send stopped");
+      return;
+    }
+    const ok = await sendOne(first);
+    if (!ok) {
+      setAutoOn(false);
+      toast.warning("Auto-send paused", {
+        description:
+          "Last send didn't complete cleanly — review before resuming.",
+      });
+    }
+  });
+
   const sendNext = () => {
     if (rows.length === 0) return;
     const next = rows[0];
@@ -296,8 +340,8 @@ export function QueuePanel({
 
   // Auto-send loop. The interval itself only depends on [autoOn, cadence]
   // so it doesn't restart every time a row gets consumed — that earlier
-  // mistake caused immediate back-to-back sends. Inside the tick we read
-  // from rowsRef + sendOneRef to get the always-current values.
+  // mistake caused immediate back-to-back sends. The Effect Event reads
+  // the latest queue without becoming an interval dependency.
   useEffect(() => {
     if (!autoOn) {
       if (intervalRef.current !== null) {
@@ -311,20 +355,7 @@ export function QueuePanel({
       if (busy) return;
       busy = true;
       try {
-        const first = rowsRef.current[0];
-        if (!first) {
-          setAutoOn(false);
-          toast.info("Queue empty — auto-send stopped");
-          return;
-        }
-        const ok = await sendOneRef.current(first);
-        if (!ok) {
-          setAutoOn(false);
-          toast.warning("Auto-send paused", {
-            description:
-              "Last send didn't complete cleanly — review before resuming.",
-          });
-        }
+        await autoSendTick();
       } finally {
         busy = false;
       }
@@ -372,14 +403,45 @@ export function QueuePanel({
     });
   };
 
+  if (initialLoadFailed && rows.length === 0) {
+    return (
+      <div
+        className="flex min-h-48 flex-col items-center justify-center gap-3 rounded-xl border border-red-200 bg-red-50 p-6 text-center"
+        role="alert"
+        data-testid="queue-load-failure"
+      >
+        <AlertCircleIcon className="h-5 w-5 text-red-700" />
+        <div>
+          <p className="text-sm font-bold text-red-950">
+            Couldn&apos;t load the Outbox
+          </p>
+          <p className="mt-1 text-xs text-red-800">
+            This is a load failure, not an empty queue. Queued messages may
+            still exist.
+          </p>
+        </div>
+        <Button
+          type="button"
+          variant="outline"
+          className="min-h-11 bg-white"
+          onClick={() => router.refresh()}
+        >
+          <RotateCwIcon className="h-4 w-4" />
+          Retry
+        </Button>
+      </div>
+    );
+  }
+
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex flex-wrap items-center gap-3 rounded-md border p-3">
-        <div className="flex items-center gap-2">
+      <div className="flex flex-col items-stretch gap-3 rounded-xl border bg-white p-3 sm:flex-row sm:flex-wrap sm:items-center">
+        <div className="grid grid-cols-2 gap-2 sm:flex sm:items-center">
           <Button
             onClick={sendNext}
             disabled={pending || rows.length === 0 || autoOn}
             size="sm"
+            className="min-h-11 sm:min-h-0"
           >
             <SendIcon className="size-3.5" />
             Send next
@@ -389,6 +451,7 @@ export function QueuePanel({
             onClick={() => setAutoOn((v) => !v)}
             disabled={rows.length === 0 && !autoOn}
             size="sm"
+            className="min-h-11 sm:min-h-0"
           >
             {autoOn ? (
               <>
@@ -402,7 +465,7 @@ export function QueuePanel({
           </Button>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <Label htmlFor="cadence" className="text-xs">
             Cadence
           </Label>
@@ -419,140 +482,147 @@ export function QueuePanel({
               }
             }}
             disabled={autoOn}
-            className="border-input w-20 rounded-md border px-2 py-1 text-sm disabled:opacity-50"
+            className="border-input min-h-11 w-20 rounded-md border px-2 py-1 text-sm disabled:opacity-50 sm:min-h-0"
           />
           <span className="text-muted-foreground text-xs">
             seconds between sends ({MIN_CADENCE_S}–{MAX_CADENCE_S})
           </span>
         </div>
 
-        <div className="text-muted-foreground ml-auto text-sm">
+        <div className="text-muted-foreground text-sm sm:ml-auto">
           {totalQueued !== undefined && totalQueued > rows.length
             ? `${rows.length} of ${totalQueued} loaded`
             : `${rows.length} queued`}
         </div>
       </div>
 
-      <div className="border-border rounded-md border">
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead className="w-[35%]">Property · Contact</TableHead>
-              <TableHead>Message</TableHead>
-              <TableHead className="w-[110px]">Queued</TableHead>
-              <TableHead className="w-[150px] text-right">Actions</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {rows.length === 0 ? (
-              <TableRow>
-                <TableCell
-                  colSpan={4}
-                  className="text-muted-foreground py-8 text-center"
-                >
-                  No queued messages. Draft one from any lead page using the
-                  Send SMS composer.
-                </TableCell>
-              </TableRow>
-            ) : (
-              rows.map((r) => (
-                <TableRow key={r.id}>
-                  <TableCell>
-                    <div className="font-medium">
+      <div className="flex flex-col gap-3" data-testid="outbox-card-list">
+        {rows.length === 0 ? (
+          <div
+            className="text-muted-foreground rounded-xl border border-dashed p-8 text-center text-sm"
+            data-testid="queue-empty"
+          >
+            Outbox is clear — nothing queued. Draft one from any lead page using
+            the Send SMS composer.
+          </div>
+        ) : (
+          rows.map((r) => (
+            <article
+              key={r.id}
+              className="rounded-xl border border-border bg-white p-4"
+              data-testid={`outbox-card-${r.id}`}
+            >
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="font-bold text-[#1c1917]">
                       {r.propertyAddress ?? "(no property)"}
-                    </div>
-                    <div className="text-muted-foreground text-xs">
-                      {r.contactName ?? "(no contact)"} ·{" "}
-                      <span className="font-mono">{r.toAddress}</span>
-                    </div>
-                  </TableCell>
-                  <TableCell>
-                    {editingId === r.id ? (
-                      <div className="flex flex-col gap-1">
-                        <textarea
-                          value={editBody}
-                          onChange={(e) => setEditBody(e.target.value)}
-                          className="border-input min-h-[60px] rounded-md border p-2 text-sm"
-                        />
-                        <div className="flex gap-2">
-                          <Button size="sm" onClick={saveEdit} disabled={pending}>
-                            Save
-                          </Button>
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            onClick={() => {
-                              setEditingId(null);
-                              setEditBody("");
-                            }}
-                            disabled={pending}
-                          >
-                            Cancel
-                          </Button>
-                        </div>
-                      </div>
-                    ) : (
-                      <div className="whitespace-pre-wrap break-words text-sm">
-                        {r.body}
-                      </div>
-                    )}
-                    <div className="text-muted-foreground mt-1 text-xs">
-                      from{" "}
-                      <span className="font-mono">
-                        {r.fromAddress ?? "(default)"}
-                      </span>
-                    </div>
-                  </TableCell>
-                  <TableCell className="text-muted-foreground text-sm">
-                    {formatDistanceToNow(new Date(r.createdAt), {
-                      addSuffix: true,
-                    })}
-                  </TableCell>
-                  <TableCell className="text-right">
-                    {editingId === r.id ? null : (
-                      <div className="inline-flex gap-1">
+                    </span>
+                    <Badge className="border border-blue-200 bg-blue-50 font-mono text-[10px] text-blue-700">
+                      QUEUED
+                    </Badge>
+                  </div>
+                  <div className="text-muted-foreground mt-1 text-xs">
+                    {r.contactName ?? "(no contact)"} ·{" "}
+                    <span className="font-mono">{r.toAddress}</span>
+                  </div>
+                  {editingId === r.id ? (
+                    <div className="mt-3 flex flex-col gap-2">
+                      <textarea
+                        value={editBody}
+                        onChange={(e) => setEditBody(e.target.value)}
+                        aria-label="Message body"
+                        className="border-input min-h-24 rounded-md border p-3 text-sm"
+                      />
+                      <div className="grid grid-cols-2 gap-2 sm:flex">
                         <Button
-                          size="icon-sm"
-                          variant="ghost"
-                          aria-label="Edit"
-                          onClick={() => {
-                            setEditingId(r.id);
-                            setEditBody(r.body);
-                          }}
-                          disabled={pending || autoOn}
+                          size="sm"
+                          className="min-h-11 sm:min-h-0"
+                          onClick={saveEdit}
+                          disabled={pending}
                         >
-                          <PencilIcon className="size-3.5" />
-                        </Button>
-                        <Button
-                          size="icon-sm"
-                          variant="ghost"
-                          aria-label="Delete"
-                          onClick={() => deleteOne(r.id)}
-                          disabled={pending || autoOn}
-                        >
-                          <Trash2Icon className="size-3.5" />
+                          Save
                         </Button>
                         <Button
                           size="sm"
                           variant="outline"
+                          className="min-h-11 sm:min-h-0"
                           onClick={() => {
-                            startTransition(async () => {
-                              await sendOne(r);
-                              router.refresh();
-                            });
+                            setEditingId(null);
+                            setEditBody("");
                           }}
-                          disabled={pending || autoOn}
+                          disabled={pending}
                         >
-                          Send
+                          Cancel
                         </Button>
                       </div>
+                    </div>
+                  ) : (
+                    <p className="mt-3 whitespace-pre-wrap break-words text-sm text-[#57534e]">
+                      “{r.body}”
+                    </p>
+                  )}
+                  <div className="text-muted-foreground mt-2 text-xs">
+                    From{" "}
+                    <span className="font-mono">
+                      {r.fromAddress ?? "(default)"}
+                    </span>
+                    {" · "}
+                    queued{" "}
+                    {formatDistance(
+                      new Date(r.createdAt),
+                      new Date(renderNowMs),
+                      { addSuffix: true },
                     )}
-                  </TableCell>
-                </TableRow>
-              ))
-            )}
-          </TableBody>
-        </Table>
+                  </div>
+                </div>
+                {editingId === r.id ? null : (
+                  <div className="grid grid-cols-3 gap-2 sm:flex sm:shrink-0">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="min-h-11 sm:min-h-0"
+                      aria-label="Edit"
+                      onClick={() => {
+                        setEditingId(r.id);
+                        setEditBody(r.body);
+                      }}
+                      disabled={pending || autoOn}
+                    >
+                      <PencilIcon className="size-3.5" />
+                      Edit
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="min-h-11 sm:min-h-0"
+                      aria-label="Delete"
+                      onClick={() => deleteOne(r.id)}
+                      disabled={pending || autoOn}
+                    >
+                      <Trash2Icon className="size-3.5" />
+                      Delete
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="min-h-11 sm:min-h-0"
+                      onClick={() => {
+                        startTransition(async () => {
+                          await sendOne(r);
+                          router.refresh();
+                        });
+                      }}
+                      disabled={pending || autoOn}
+                    >
+                      Send
+                    </Button>
+                  </div>
+                )}
+              </div>
+            </article>
+          ))
+        )}
       </div>
 
       {hasMore && (
@@ -561,7 +631,21 @@ export function QueuePanel({
           data-testid="queue-load-more-sentinel"
           className="text-muted-foreground py-3 text-center text-xs"
         >
-          {loadingMore ? "Loading more…" : "Scroll to load more"}
+          {loadingMore ? (
+            "Loading more…"
+          ) : loadMoreFailed ? (
+            <Button
+              type="button"
+              variant="outline"
+              className="min-h-11"
+              onClick={() => void loadMore()}
+            >
+              <RotateCwIcon className="h-4 w-4" />
+              Retry loading queue
+            </Button>
+          ) : (
+            "Scroll to load more"
+          )}
         </div>
       )}
 

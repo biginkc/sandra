@@ -5,12 +5,16 @@ import { PageHeader } from "@/components/page-header";
 import { getCallerMemberships } from "@/lib/auth/memberships";
 import { loadIntegrationPrefs } from "@/lib/integrations/prefs";
 import { createClient } from "@/lib/supabase/server";
-import { addDaysInZone, getDayBoundsInZone, wallTimeToUtc } from "@/lib/time/zoned";
-
-import { fetchAssigneeEmails, fetchCalendarAppointments, fetchOrgRoster } from "./queries";
+import {
+  fetchAssigneeEmails,
+  fetchCalendarAppointments,
+  fetchCalendarAppointmentsForWindows,
+  fetchOrgRoster,
+} from "./queries";
+import { resolveMonth, resolveWeek } from "./range";
 import { resolveAssigneeId } from "./scoping";
+import { todayDateKeyInZone } from "./_components/calendar-shared";
 import type {
-  CalendarDayBounds,
   CalendarSearchParams,
   CalendarViewMode,
   CalendarViewerRole,
@@ -22,105 +26,6 @@ import type {
 import { CalendarView } from "./_components/calendar-view";
 
 export const dynamic = "force-dynamic";
-
-const WEEK_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
-const WEEKDAY_INDEX: Record<string, number> = {
-  Sun: 0,
-  Mon: 1,
-  Tue: 2,
-  Wed: 3,
-  Thu: 4,
-  Fri: 5,
-  Sat: 6,
-};
-
-/**
- * Resolves the zone-local day-of-week (0=Sunday..6=Saturday) of a UTC
- * instant AS OBSERVED in `timeZone` — used to walk an anchor day back to
- * its week's Sunday. Formatting the same instant through the target zone
- * (rather than reading UTC fields) is what keeps this correct regardless
- * of what zone the server process itself runs in.
- */
-function weekdayIndexInZone(instant: Date, timeZone: string): number {
-  // Explicit `timeZone: timeZone` (not shorthand) — Turbopack's production
-  // minifier inlined this helper into resolveWeek, renamed the parameter,
-  // and left the shorthand key referencing a now-undefined `timeZone`
-  // global: /calendar crashed in production with "ReferenceError: timeZone
-  // is not defined" while dev, tests, and typecheck all passed.
-  const label = new Intl.DateTimeFormat("en-US", {
-    timeZone: timeZone,
-    weekday: "short",
-  }).format(instant);
-  return WEEKDAY_INDEX[label] ?? 0;
-}
-
-/**
- * YYYY-MM-DD label of `instant`'s zone-local calendar date. Built from
- * `formatToParts` (numeric y/m/d, then joined explicitly) rather than a
- * locale-string shortcut like `en-CA` — same defensive approach as
- * `zoned.ts`'s internal `getZonedParts`, which this mirrors: don't trust
- * a locale's formatted output to always come back in a fixed shape.
- */
-function zonedDateLabel(instant: Date, timeZone: string): string {
-  // Explicit key for the same minifier-inlining hazard as weekdayIndexInZone.
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone: timeZone,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).formatToParts(instant);
-  const map: Record<string, string> = {};
-  for (const part of parts) {
-    if (part.type !== "literal") map[part.type] = part.value;
-  }
-  return `${map.year}-${map.month}-${map.day}`;
-}
-
-/**
- * Resolves the anchor day (from `?week=`, defaulting to "today") to its
- * containing week's 7 zone-local day bounds, Sunday through Saturday (no
- * existing week-start convention found elsewhere in the app — Sunday per
- * the plan's fallback).
- *
- * The anchor string is converted through `wallTimeToUtc` at a fixed
- * midday wall-time rather than `new Date(anchor)` — parsing a bare
- * YYYY-MM-DD as UTC midnight and then asking "what zone-local day is
- * this" can land on the WRONG calendar day for zones behind UTC (e.g.
- * Pacific): midday avoids that edge entirely for every zone this app
- * supports, and reuses the same DST-safe wall-time boundary the rest of
- * the appointment feature is built on instead of ad hoc date math.
- */
-function resolveWeek(
-  anchor: string | undefined,
-  timeZone: string,
-): { weekStartDate: string; days: CalendarDayBounds[] } {
-  let anchorInstant: Date;
-  if (anchor && WEEK_DATE_RE.test(anchor)) {
-    const converted = wallTimeToUtc({ date: anchor, time: "12:00", timeZone });
-    anchorInstant = converted.ok ? converted.utc : new Date();
-  } else {
-    anchorInstant = new Date();
-  }
-
-  const { dayStart: anchorDayStart } = getDayBoundsInZone(anchorInstant, timeZone);
-  const weekday = weekdayIndexInZone(anchorDayStart, timeZone);
-  const weekStart =
-    weekday === 0 ? anchorDayStart : addDaysInZone(anchorDayStart, -weekday, timeZone);
-
-  const days: CalendarDayBounds[] = [];
-  let cursor = weekStart;
-  for (let i = 0; i < 7; i++) {
-    const next = addDaysInZone(cursor, 1, timeZone);
-    days.push({
-      date: zonedDateLabel(cursor, timeZone),
-      startUtc: cursor.toISOString(),
-      endUtc: next.toISOString(),
-    });
-    cursor = next;
-  }
-
-  return { weekStartDate: days[0].date, days };
-}
 
 /**
  * Rebuilds the current `/calendar` URL from the already-parsed
@@ -172,7 +77,12 @@ export default async function CalendarPage({
   searchParams?: Promise<CalendarSearchParams>;
 }) {
   const params = (await searchParams) ?? {};
-  const view: CalendarViewMode = params.view === "agenda" ? "agenda" : "week";
+  const view: CalendarViewMode =
+    params.view === "agenda"
+      ? "agenda"
+      : params.view === "month"
+        ? "month"
+        : "week";
 
   const supabase = await createClient();
   const {
@@ -240,20 +150,52 @@ export default async function CalendarPage({
   const labelsDegraded = rosterResult.labelsDegraded;
   const rosterIds = new Set(rosterResult.roster.map((entry) => entry.id));
 
-  const assigneeId = resolveAssigneeId(viewerRole, params.assignee, user.id, rosterIds);
+  const assigneeId = resolveAssigneeId(
+    viewerRole,
+    params.assignee,
+    user.id,
+    rosterIds,
+  );
+  const scopeDescription =
+    assigneeId === undefined
+      ? "All team appointments."
+      : assigneeId === user.id
+        ? "Your appointments."
+        : `Appointments assigned to ${assignees[assigneeId] ?? "the selected teammate"}.`;
 
   const prefs = await loadIntegrationPrefs(supabase, user.id);
   const timezone = prefs.timezone;
+  const requestNow = new Date();
+  const nowMs = requestNow.getTime();
+  const todayKey = todayDateKeyInZone(timezone, requestNow);
 
-  const { weekStartDate, days } = resolveWeek(params.week, timezone);
+  // Month view always resolves a fixed six-week grid. Its single-snapshot
+  // RPC enforces the existing cap independently for every week rather than
+  // stretching a week-sized limit over the whole 42-day range.
+  const monthRange =
+    view === "month" ? resolveMonth(params.week, timezone, requestNow) : null;
+  const { weekStartDate, days } =
+    monthRange ?? resolveWeek(params.week, timezone, requestNow);
+  const monthKey = monthRange?.monthKey ?? null;
   const weekStartUtc = days[0].startUtc;
-  const weekEndUtc = days[6].endUtc;
+  const weekEndUtc = days[days.length - 1].endUtc;
 
-  const appointmentsResult = await fetchCalendarAppointments(orgId, {
-    assigneeId,
-    weekStartUtc,
-    weekEndUtc,
-  });
+  // Month view supplies six adjacent weekly windows to one RPC statement:
+  // per-week caps stay intact without assembling six different snapshots.
+  const appointmentsResult =
+    view === "month"
+      ? await fetchCalendarAppointmentsForWindows(orgId, {
+          assigneeId,
+          windows: Array.from({ length: days.length / 7 }, (_, w) => ({
+            startUtc: days[w * 7].startUtc,
+            endUtc: days[w * 7 + 6].endUtc,
+          })),
+        })
+      : await fetchCalendarAppointments(orgId, {
+          assigneeId,
+          weekStartUtc,
+          weekEndUtc,
+        });
 
   // A query failure is NOT an empty week (Codex round 2) — render an
   // explicit retry state instead of silently showing "no appointments".
@@ -285,7 +227,8 @@ export default async function CalendarPage({
       : {};
   const assigneeLabels: Record<string, string> = { ...assignees };
   for (const id of inactiveAssigneeIds) {
-    assigneeLabels[id] = inactiveEmails[id] ?? `Former teammate (${id.slice(0, 8)})`;
+    assigneeLabels[id] =
+      inactiveEmails[id] ?? `Former teammate (${id.slice(0, 8)})`;
   }
 
   return (
@@ -293,11 +236,7 @@ export default async function CalendarPage({
       <PageHeader
         breadcrumb={[{ label: "Workspace" }, { label: "Calendar" }]}
         title="Calendar"
-        description={
-          viewerRole === "owner"
-            ? "Org-wide appointments — filter to a teammate below."
-            : "Your appointments."
-        }
+        description={scopeDescription}
       />
       {labelsDegraded && (
         <div className="text-muted-foreground text-xs">
@@ -307,6 +246,7 @@ export default async function CalendarPage({
       <CalendarView
         view={view}
         week={weekStartDate}
+        month={monthKey}
         days={days}
         appointments={appointments}
         timezone={timezone}
@@ -314,6 +254,8 @@ export default async function CalendarPage({
         assignees={assignees}
         assigneeLabels={assigneeLabels}
         currentUserId={user.id}
+        nowMs={nowMs}
+        todayKey={todayKey}
       />
     </Page>
   );

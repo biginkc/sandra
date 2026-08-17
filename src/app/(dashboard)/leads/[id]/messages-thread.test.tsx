@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { act, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import type { Database } from "@/lib/supabase/types";
@@ -118,6 +118,56 @@ describe("messageBelongsToThread", () => {
 });
 
 describe("<MessagesThread />", () => {
+  it("uses neutral empty copy that remains truthful when SMS is restricted", () => {
+    render(
+      <MessagesThread
+        initial={[]}
+        contactId="contact-1"
+        propertyId="property-1"
+      />,
+    );
+
+    expect(
+      screen.getByText("No messages in this conversation yet."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/send an sms/i)).not.toBeInTheDocument();
+  });
+
+  it("advances a serialized day label across operator midnight without navigation", async () => {
+    vi.useFakeTimers();
+    const beforeChicagoMidnight = new Date("2026-06-10T04:59:30.000Z");
+    vi.setSystemTime(beforeChicagoMidnight);
+    const view = render(
+      <MessagesThread
+        initial={[
+          makeMessage({
+            id: "midnight-message",
+            created_at: "2026-06-10T04:00:00.000Z",
+          }),
+        ]}
+        contactId="contact-1"
+        propertyId="property-1"
+        nowMs={beforeChicagoMidnight.getTime()}
+      />,
+    );
+
+    try {
+      expect(screen.getByTestId("messages-thread-day-sep")).toHaveTextContent(
+        "Today, June 9",
+      );
+      await act(async () => {
+        vi.advanceTimersByTime(60_000);
+        await Promise.resolve();
+      });
+      expect(screen.getByTestId("messages-thread-day-sep")).toHaveTextContent(
+        "Yesterday, June 9",
+      );
+    } finally {
+      view.unmount();
+      vi.useRealTimers();
+    }
+  });
+
   it("filters sibling-thread rows out of the initial render", () => {
     render(
       <MessagesThread
@@ -145,7 +195,7 @@ describe("<MessagesThread />", () => {
   });
 
   it.each([
-    ["queued", "Pending"],
+    ["queued", "Queued · in Outbox"],
     ["pending", "Pending"],
     ["sent", "Sent"],
     ["delivered", "Delivered"],
@@ -190,6 +240,43 @@ describe("<MessagesThread />", () => {
       expect(threadMessages[2]).toHaveTextContent(expectedLabel);
     },
   );
+
+  it("labels every queued or paused Outbox row even when it is not the latest outbound", () => {
+    render(
+      <MessagesThread
+        initial={[
+          makeMessage({
+            id: "older-queued",
+            direction: "outbound",
+            status: "queued",
+            body: "queued body",
+            created_at: "2026-06-09T12:00:00.000Z",
+          }),
+          makeMessage({
+            id: "older-paused",
+            direction: "outbound",
+            status: "paused",
+            body: "paused body",
+            created_at: "2026-06-09T12:01:00.000Z",
+          }),
+          makeMessage({
+            id: "newer-inbound",
+            direction: "inbound",
+            body: "newer reply",
+            created_at: "2026-06-09T12:02:00.000Z",
+          }),
+        ]}
+        contactId="contact-1"
+        propertyId="property-1"
+      />,
+    );
+
+    const labels = screen.getAllByTestId("messages-thread-delivery-status");
+    expect(labels.map((label) => label.textContent)).toEqual([
+      "Queued · in Outbox",
+      "Paused · in Outbox",
+    ]);
+  });
 
   it("renders red 'Not delivered' under any failed outbound message", () => {
     render(

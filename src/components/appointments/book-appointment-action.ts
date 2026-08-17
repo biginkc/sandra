@@ -3,6 +3,7 @@
 import { revalidatePath } from "next/cache";
 import { after } from "next/server";
 
+import { kickCalendarMutationSync } from "@/lib/appointments/inline-sync-kick";
 import {
   requireOrgMembership,
   requireOrgMembershipByResource,
@@ -87,6 +88,7 @@ type AppointmentRpcClient = {
       task_id: string;
       already_qualified: boolean;
       calendar_chain_id: string;
+      ledger_id: string;
       duplicate: boolean;
       /** Round 9: the PERSISTED linkage of the booked (or replayed-and-
        *  matched) task, straight from the RPC — never derived from the
@@ -179,7 +181,9 @@ async function resolveBookingOrgId(
  * this value ("Times in Central Time (America/Chicago)") and submits it
  * back unchanged; the booking RPC re-validates it server-side.
  */
-export async function getMemberTimezone(userId: string): Promise<Result<string>> {
+export async function getMemberTimezone(
+  userId: string,
+): Promise<Result<string>> {
   try {
     const supabase = (await createClient()) as unknown as AppointmentRpcClient;
     const { data, error } = await supabase.rpc("fn_get_member_timezone", {
@@ -271,14 +275,20 @@ export async function bookAppointment(
     });
   }
   if (!input.title.trim()) {
-    return err({ code: "TITLE_REQUIRED", message: "Give the appointment a title." });
+    return err({
+      code: "TITLE_REQUIRED",
+      message: "Give the appointment a title.",
+    });
   }
   if (
     !Number.isFinite(input.durationMinutes) ||
     input.durationMinutes < MIN_DURATION_MINUTES ||
     input.durationMinutes > MAX_DURATION_MINUTES
   ) {
-    return err({ code: "INVALID_DURATION", message: "Choose a valid duration." });
+    return err({
+      code: "INVALID_DURATION",
+      message: "Choose a valid duration.",
+    });
   }
 
   const converted = wallTimeToUtc({
@@ -288,7 +298,10 @@ export async function bookAppointment(
   });
   if (!converted.ok) {
     return err({
-      code: converted.reason === "nonexistent" ? "TIME_NONEXISTENT" : "TIME_INVALID",
+      code:
+        converted.reason === "nonexistent"
+          ? "TIME_NONEXISTENT"
+          : "TIME_INVALID",
       message:
         converted.reason === "nonexistent"
           ? "That time doesn't exist in this timezone because of a daylight-saving change — pick another."
@@ -308,11 +321,17 @@ export async function bookAppointment(
     }
 
     if (input.propertyId) {
-      const unlocked = await assertPropertyDncUnlocked(supabase, input.propertyId);
+      const unlocked = await assertPropertyDncUnlocked(
+        supabase,
+        input.propertyId,
+      );
       if (!unlocked.ok) return unlocked;
     }
     if (input.contactId) {
-      const unlocked = await assertContactDncUnlocked(supabase, input.contactId);
+      const unlocked = await assertContactDncUnlocked(
+        supabase,
+        input.contactId,
+      );
       if (!unlocked.ok) return unlocked;
     }
 
@@ -370,6 +389,18 @@ export async function bookAppointment(
     const linkedPropertyId = data.related_property_id ?? undefined;
     const linkedContactId = data.contact_id ?? undefined;
 
+    // Advance the exact create-ledger row before any other post-commit side
+    // effect. The targeted claim cannot consume retries from an unrelated
+    // appointment, and a failure here never changes the committed result.
+    try {
+      await kickCalendarMutationSync(createAdminClient(), data.ledger_id);
+    } catch (e) {
+      reportError(e, {
+        tags: { surface: "book_appointment_inline_sync_kick" },
+        extra: { taskId: result.taskId, ledgerId: data.ledger_id },
+      });
+    }
+
     // Single-owner rule for Google Calendar event creation: fn_book_appointment
     // already opened the task_calendar_mutations ledger row (phase='pending')
     // in the same transaction that created the task — that ledger row IS the
@@ -385,7 +416,10 @@ export async function bookAppointment(
       const subjectLabel = linkedPropertyId
         ? await loadPropertyAddress(supabase, linkedPropertyId)
         : input.title;
-      const deepLink = buildAppointmentDeepLink(linkedPropertyId, linkedContactId);
+      const deepLink = buildAppointmentDeepLink(
+        linkedPropertyId,
+        linkedContactId,
+      );
       after(async () => {
         await Promise.allSettled([
           dispatchTaskAssigned(supabase, {
@@ -482,7 +516,10 @@ async function loadPropertyAddress(
   return data?.address ?? "Appointment";
 }
 
-function buildAppointmentDeepLink(propertyId?: string, contactId?: string): string {
+function buildAppointmentDeepLink(
+  propertyId?: string,
+  contactId?: string,
+): string {
   const baseUrl =
     process.env.NEXT_PUBLIC_APP_URL ??
     process.env.APP_URL ??
@@ -567,7 +604,10 @@ export async function listBookingAssignees(
       .is("deletion_prepared_at", null)
       .or(`access_expires_at.is.null,access_expires_at.gt.${activeAt}`);
     if (orgMembershipsError) {
-      return err({ code: "TEAM_FETCH_FAILED", message: orgMembershipsError.message });
+      return err({
+        code: "TEAM_FETCH_FAILED",
+        message: orgMembershipsError.message,
+      });
     }
 
     const memberIds = new Set((orgMemberships ?? []).map((m) => m.user_id));

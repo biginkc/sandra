@@ -6,10 +6,12 @@ const mocks = vi.hoisted(() => ({
 
 let queuedData: unknown[] | null = [];
 let queuedError: { message: string; code?: string } | null = null;
+let queuedResponses: { data: unknown; error: unknown }[] = [];
 let eqCalls: Array<[string, unknown]> = [];
 let selectCalls: string[] = [];
 let orderCalls: Array<[string, unknown]> = [];
 let limitCalls: number[] = [];
+let inCalls: Array<[string, unknown]> = [];
 
 function makeBuilder(): Record<string, unknown> {
   const builder: Record<string, unknown> = {};
@@ -21,7 +23,10 @@ function makeBuilder(): Record<string, unknown> {
     eqCalls.push([col, val]);
     return builder;
   };
-  builder.in = () => builder;
+  builder.in = (col: string, val: unknown) => {
+    inCalls.push([col, val]);
+    return builder;
+  };
   builder.gte = () => builder;
   builder.lt = () => builder;
   builder.order = (col: string, opts: unknown) => {
@@ -30,6 +35,12 @@ function makeBuilder(): Record<string, unknown> {
   };
   builder.limit = (n: number) => {
     limitCalls.push(n);
+    // Per-call FIFO first (multi-window month fetches need distinct
+    // responses per query), falling back to the shared single-response
+    // queue every pre-existing test uses.
+    if (queuedResponses.length > 0) {
+      return Promise.resolve(queuedResponses.shift()!);
+    }
     return Promise.resolve({ data: queuedData, error: queuedError });
   };
   return builder;
@@ -73,9 +84,12 @@ function makeMembershipsBuilder(): Record<string, unknown> {
   return builder;
 }
 
+const rpcMock = vi.hoisted(() => vi.fn());
+
 vi.mock("@/lib/supabase/server", () => ({
   createClient: vi.fn(async () => ({
     from: vi.fn(() => makeBuilder()),
+    rpc: rpcMock,
   })),
 }));
 
@@ -92,6 +106,7 @@ vi.mock("@/lib/supabase/admin", () => ({
 import {
   fetchAssigneeEmails,
   fetchCalendarAppointments,
+  fetchCalendarAppointmentsForWindows,
   fetchOrgRoster,
 } from "./queries";
 
@@ -103,10 +118,33 @@ beforeEach(() => {
   mocks.listUsers.mockReset();
   queuedData = [];
   queuedError = null;
+  queuedResponses = [];
+  rpcMock.mockReset();
+  rpcMock.mockImplementation(async () => ({
+    data:
+      queuedData?.map((row) => {
+        const value = row as Record<string, unknown>;
+        const property = value.properties as Record<string, unknown> | null;
+        const contact = value.contacts as Record<string, unknown> | null;
+        return {
+          ...value,
+          property_address: property?.address ?? null,
+          property_city: property?.city ?? null,
+          property_state: property?.state ?? null,
+          property_deleted_at: property?.deleted_at ?? null,
+          property_is_dnc_locked: property?.is_dnc_locked ?? null,
+          contact_first_name: contact?.first_name ?? null,
+          contact_last_name: contact?.last_name ?? null,
+          contact_entity_name: contact?.entity_name ?? null,
+        };
+      }) ?? null,
+    error: queuedError,
+  }));
   eqCalls = [];
   selectCalls = [];
   orderCalls = [];
   limitCalls = [];
+  inCalls = [];
   membershipRows = [];
   membershipError = null;
   membershipEqCalls = [];
@@ -116,7 +154,9 @@ beforeEach(() => {
   membershipLimitCalls = [];
 });
 
-function appointmentRow(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+function appointmentRow(
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
   return {
     id: "t-1",
     title: "Walkthrough",
@@ -135,17 +175,30 @@ function appointmentRow(overrides: Record<string, unknown> = {}): Record<string,
 }
 
 describe("fetchCalendarAppointments", () => {
-  it("scopes to org + type='appointment' + open/completed status + the due_at window", async () => {
+  it("delegates a week to the single-snapshot RPC as exactly one window", async () => {
     queuedData = [];
     await fetchCalendarAppointments("org-1", {
       weekStartUtc: "2026-05-03T05:00:00.000Z",
       weekEndUtc: "2026-05-10T05:00:00.000Z",
     });
 
-    expect(eqCalls).toContainEqual(["org_id", "org-1"]);
-    expect(eqCalls).toContainEqual(["type", "appointment"]);
-    expect(selectCalls[0]).toContain("properties(");
-    expect(selectCalls[0]).toContain("contacts(");
+    expect(rpcMock).toHaveBeenCalledWith("fn_calendar_month_appointments", {
+      p_org: "org-1",
+      p_assignee: null,
+      p_week_starts: ["2026-05-03T05:00:00.000Z"],
+      p_week_ends: ["2026-05-10T05:00:00.000Z"],
+    });
+  });
+
+  it("does not run a separate direct-task query for week visibility", async () => {
+    queuedData = [];
+    await fetchCalendarAppointments("org-1", {
+      weekStartUtc: "2026-05-03T05:00:00.000Z",
+      weekEndUtc: "2026-05-10T05:00:00.000Z",
+    });
+
+    expect(rpcMock).toHaveBeenCalledTimes(1);
+    expect(eqCalls).toEqual([]);
   });
 
   it("adds an assignee_id filter only when assigneeId is supplied", async () => {
@@ -155,7 +208,10 @@ describe("fetchCalendarAppointments", () => {
       weekStartUtc: "2026-05-03T05:00:00.000Z",
       weekEndUtc: "2026-05-10T05:00:00.000Z",
     });
-    expect(eqCalls).toContainEqual(["assignee_id", "user-1"]);
+    expect(rpcMock).toHaveBeenCalledWith(
+      "fn_calendar_month_appointments",
+      expect.objectContaining({ p_assignee: "user-1" }),
+    );
   });
 
   it("maps a property-linked row and derives contact_name from entity_name first", async () => {
@@ -171,8 +227,18 @@ describe("fetchCalendarAppointments", () => {
         assignee_id: "user-1",
         related_property_id: "prop-1",
         contact_id: "contact-1",
-        properties: { address: "1 Main St", city: "KC", state: "MO", deleted_at: null },
-        contacts: { first_name: "Jane", last_name: "Doe", entity_name: "Acme LLC" },
+        properties: {
+          address: "1 Main St",
+          city: "KC",
+          state: "MO",
+          deleted_at: null,
+          is_dnc_locked: true,
+        },
+        contacts: {
+          first_name: "Jane",
+          last_name: "Doe",
+          entity_name: "Acme LLC",
+        },
       },
     ];
 
@@ -189,6 +255,7 @@ describe("fetchCalendarAppointments", () => {
       property_id: "prop-1",
       address: "1 Main St",
       contact_name: "Acme LLC",
+      is_dnc_locked: true,
     });
   });
 
@@ -311,11 +378,7 @@ describe("fetchCalendarAppointments", () => {
         weekEndUtc: "2026-05-10T05:00:00.000Z",
       });
 
-      expect(orderCalls).toEqual([
-        ["due_at", { ascending: true }],
-        ["id", { ascending: true }],
-      ]);
-      expect(limitCalls).toEqual([CAP + 1]);
+      expect(rpcMock).toHaveBeenCalledTimes(1);
     });
 
     it("returns every row up to and including the cap", async () => {
@@ -333,9 +396,10 @@ describe("fetchCalendarAppointments", () => {
     });
 
     it("fails closed (ok:false) when the (CAP+1)th row comes back, rather than silently truncating the week", async () => {
-      queuedData = Array.from({ length: CAP + 1 }, (_, i) =>
-        appointmentRow({ id: `t-${String(i).padStart(4, "0")}` }),
-      );
+      rpcMock.mockResolvedValueOnce({
+        data: null,
+        error: { message: "calendar month volume exceeds cap", code: "P0001" },
+      });
 
       const result = await fetchCalendarAppointments("org-1", {
         weekStartUtc: "2026-05-03T05:00:00.000Z",
@@ -345,7 +409,7 @@ describe("fetchCalendarAppointments", () => {
       expect(result).toEqual({ ok: false });
       // Exactly one query — the cap check happens on the single response,
       // not via a second round trip.
-      expect(limitCalls).toEqual([CAP + 1]);
+      expect(rpcMock).toHaveBeenCalledTimes(1);
     });
 
     it("is immune to a concurrent reschedule moving due_at across a would-be cursor (Codex round 6 — the anomaly this fix eliminates)", async () => {
@@ -356,7 +420,10 @@ describe("fetchCalendarAppointments", () => {
       // it comes back exactly once, appearing in exactly ONE round trip.
       queuedData = [
         appointmentRow({ id: "t-early", due_at: "2026-05-03T06:00:00.000Z" }),
-        appointmentRow({ id: "t-rescheduled", due_at: "2026-05-03T06:00:01.000Z" }),
+        appointmentRow({
+          id: "t-rescheduled",
+          due_at: "2026-05-03T06:00:01.000Z",
+        }),
         appointmentRow({ id: "t-late", due_at: "2026-05-09T23:00:00.000Z" }),
       ];
 
@@ -368,7 +435,7 @@ describe("fetchCalendarAppointments", () => {
       if (!result.ok) throw new Error("expected ok:true");
       const ids = result.rows.map((r) => r.id);
       expect(ids.filter((id) => id === "t-rescheduled")).toHaveLength(1);
-      expect(limitCalls).toHaveLength(1);
+      expect(rpcMock).toHaveBeenCalledTimes(1);
     });
   });
 });
@@ -400,7 +467,10 @@ describe("fetchAssigneeEmails", () => {
   // reproduces the installed auth-js's mis-parse of multi-digit Link-header
   // pages (page 9 reports nextPage=1). Page numbers must still advance from
   // the caller's own local counter, never from this field.
-  function fullFillerPage(pageNum: number, extra: Array<{ id: string; email: string }> = []) {
+  function fullFillerPage(
+    pageNum: number,
+    extra: Array<{ id: string; email: string }> = [],
+  ) {
     const filler = Array.from({ length: 200 }, (_, i) => ({
       id: `filler-p${pageNum}-${i}`,
       email: `filler-p${pageNum}-${i}@example.com`,
@@ -413,7 +483,10 @@ describe("fetchAssigneeEmails", () => {
       mocks.listUsers.mockResolvedValueOnce(fullFillerPage(page));
     }
     mocks.listUsers.mockResolvedValueOnce({
-      data: { users: [{ id: "user-final", email: "final@example.com" }], nextPage: 1 },
+      data: {
+        users: [{ id: "user-final", email: "final@example.com" }],
+        nextPage: 1,
+      },
       error: null,
     });
 
@@ -441,7 +514,10 @@ describe("fetchAssigneeEmails", () => {
     });
 
     const result = await fetchAssigneeEmails(["user-1", "user-2"]);
-    expect(result).toEqual({ "user-1": "a@example.com", "user-2": "b@example.com" });
+    expect(result).toEqual({
+      "user-1": "a@example.com",
+      "user-2": "b@example.com",
+    });
     expect(mocks.listUsers).toHaveBeenCalledTimes(1);
   });
 
@@ -499,7 +575,9 @@ describe("fetchOrgRoster", () => {
     expect(membershipEqCalls).toContainEqual(["org_id", "org-1"]);
     expect(membershipEqCalls).toContainEqual(["access_status", "active"]);
     expect(membershipIsCalls).toContainEqual(["deletion_prepared_at", null]);
-    expect(membershipOrCalls[0]).toMatch(/^access_expires_at\.is\.null,access_expires_at\.gt\./);
+    expect(membershipOrCalls[0]).toMatch(
+      /^access_expires_at\.is\.null,access_expires_at\.gt\./,
+    );
   });
 
   it("keeps the full roster available even when the current week's appointments are empty (decoupled from `fetchCalendarAppointments`)", async () => {
@@ -555,7 +633,10 @@ describe("fetchOrgRoster", () => {
     membershipRows = [{ user_id: "user-1" }, { user_id: "rep-2" }];
     mocks.listUsers
       .mockResolvedValueOnce({
-        data: { users: [{ id: "user-1", email: "owner@bmh.com" }], nextPage: 2 },
+        data: {
+          users: [{ id: "user-1", email: "owner@bmh.com" }],
+          nextPage: 2,
+        },
         error: null,
       })
       .mockResolvedValueOnce({ data: null, error: { message: "boom" } });
@@ -607,7 +688,9 @@ describe("fetchOrgRoster", () => {
     });
 
     it("returns every membership up to and including the cap", async () => {
-      membershipRows = Array.from({ length: CAP }, (_, i) => ({ user_id: userId(i) }));
+      membershipRows = Array.from({ length: CAP }, (_, i) => ({
+        user_id: userId(i),
+      }));
 
       const result = await fetchOrgRoster("org-1");
       if (!result.ok) throw new Error("expected ok:true");
@@ -615,7 +698,9 @@ describe("fetchOrgRoster", () => {
     });
 
     it("fails closed (ok:false) when the (CAP+1)th membership comes back, rather than silently truncating the roster", async () => {
-      membershipRows = Array.from({ length: CAP + 1 }, (_, i) => ({ user_id: userId(i) }));
+      membershipRows = Array.from({ length: CAP + 1 }, (_, i) => ({
+        user_id: userId(i),
+      }));
 
       const result = await fetchOrgRoster("org-1");
       expect(result).toEqual({ ok: false });
@@ -623,5 +708,110 @@ describe("fetchOrgRoster", () => {
       // A capped-out identity load never falls through to resolving labels.
       expect(mocks.listUsers).not.toHaveBeenCalled();
     });
+  });
+});
+
+describe("fetchCalendarAppointmentsForWindows (month view)", () => {
+  const WINDOWS = [
+    {
+      startUtc: "2026-08-02T05:00:00.000Z",
+      endUtc: "2026-08-09T05:00:00.000Z",
+    },
+    {
+      startUtc: "2026-08-09T05:00:00.000Z",
+      endUtc: "2026-08-16T05:00:00.000Z",
+    },
+  ];
+
+  function rpcRow(
+    overrides: Record<string, unknown> = {},
+  ): Record<string, unknown> {
+    return {
+      id: "t-1",
+      title: "Walkthrough",
+      description: null,
+      due_at: "2026-08-03T15:00:00.000Z",
+      end_at: "2026-08-03T15:30:00.000Z",
+      status: "open",
+      outcome: null,
+      assignee_id: "user-1",
+      related_property_id: null,
+      contact_id: null,
+      property_address: null,
+      property_city: null,
+      property_state: null,
+      property_deleted_at: null,
+      contact_first_name: null,
+      contact_last_name: null,
+      contact_entity_name: null,
+      ...overrides,
+    };
+  }
+
+  it("calls the single-snapshot RPC with the window arrays and maps rows through the week path's shaping rules", async () => {
+    rpcMock.mockResolvedValueOnce({
+      data: [
+        rpcRow({ id: "a1" }),
+        rpcRow({
+          id: "a2",
+          due_at: "2026-08-10T15:00:00.000Z",
+          related_property_id: "prop-1",
+          property_address: "123 Main St",
+          property_city: "Kansas City",
+          property_state: "MO",
+        }),
+        rpcRow({
+          id: "a3",
+          due_at: "2026-08-11T15:00:00.000Z",
+          related_property_id: "prop-2",
+          property_address: "9 Gone St",
+          property_state: "MO",
+          property_deleted_at: "2026-08-01T00:00:00.000Z",
+        }),
+      ],
+      error: null,
+    });
+    const result = await fetchCalendarAppointmentsForWindows("org-1", {
+      windows: WINDOWS,
+    });
+    expect(rpcMock).toHaveBeenCalledWith("fn_calendar_month_appointments", {
+      p_org: "org-1",
+      p_assignee: null,
+      p_week_starts: WINDOWS.map((w) => w.startUtc),
+      p_week_ends: WINDOWS.map((w) => w.endUtc),
+    });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.rows.map((r) => r.id)).toEqual(["a1", "a2", "a3"]);
+      // Live property -> linked; deleted property -> unlinked (same rule
+      // as the week path).
+      expect(result.rows[1].property_id).toBe("prop-1");
+      expect(result.rows[1].address).toBe("123 Main St");
+      expect(result.rows[2].property_id).toBeNull();
+      expect(result.rows[2].address).toBeNull();
+    }
+  });
+
+  it("passes the assignee filter through to the RPC", async () => {
+    rpcMock.mockResolvedValueOnce({ data: [], error: null });
+    await fetchCalendarAppointmentsForWindows("org-1", {
+      assigneeId: "user-9",
+      windows: WINDOWS,
+    });
+    expect(rpcMock).toHaveBeenCalledWith(
+      "fn_calendar_month_appointments",
+      expect.objectContaining({ p_assignee: "user-9" }),
+    );
+  });
+
+  it("fails closed when the RPC errors (volume-cap RAISE included)", async () => {
+    rpcMock.mockResolvedValueOnce({
+      data: null,
+      error: { message: "calendar month volume exceeds cap", code: "P0001" },
+    });
+    const result = await fetchCalendarAppointmentsForWindows("org-1", {
+      windows: WINDOWS,
+    });
+    expect(result.ok).toBe(false);
   });
 });
