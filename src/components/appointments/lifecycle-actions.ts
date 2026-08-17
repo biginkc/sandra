@@ -3,6 +3,7 @@
 import { revalidatePath } from "next/cache";
 import { after } from "next/server";
 
+import { kickCalendarMutationSync } from "@/lib/appointments/inline-sync-kick";
 import { errFromUnknown, err, type Result } from "@/lib/errors/result";
 import { assertAppointmentTaskPropertyDncUnlocked } from "@/lib/dnc/property-lock";
 import { reportError } from "@/lib/errors/report";
@@ -142,6 +143,21 @@ async function revalidateAppointmentPathsBestEffort(
   }
 }
 
+/** Best-effort post-commit processing of only this appointment's ledger row. */
+async function kickCalendarMutationSyncBestEffort(
+  surfaceTag: string,
+  taskId: string,
+): Promise<void> {
+  try {
+    await kickCalendarMutationSync(createAdminClient(), taskId);
+  } catch (e) {
+    reportError(e, {
+      tags: { surface: `${surfaceTag}_inline_sync_kick` },
+      extra: { taskId },
+    });
+  }
+}
+
 export async function completeAppointmentAction(
   taskId: string,
   outcome: AppointmentOutcome,
@@ -192,6 +208,8 @@ export async function cancelAppointmentAction(
 
     const result = await cancelAppointment(supabase, taskId);
     if (!result.ok) return result;
+
+    await kickCalendarMutationSyncBestEffort("cancel_appointment_action", taskId);
 
     // Codex round 11 (finding 3): best-effort post-commit revalidation —
     // `task` is already resolved (fetched pre-RPC), so only `revalidatePath`
@@ -270,6 +288,8 @@ export async function rescheduleAppointmentAction(
     });
     if (!result.ok) return result;
 
+    await kickCalendarMutationSyncBestEffort("reschedule_appointment_action", input.taskId);
+
     // Codex round 11 (finding 3): best-effort post-commit revalidation —
     // same posture as cancel above.
     await revalidateAppointmentPathsBestEffort(
@@ -303,6 +323,8 @@ export async function reassignAppointmentAction(
 
     const result = await reassignAppointment(supabase, taskId, newAssigneeId, idempotencyKey);
     if (!result.ok) return result;
+
+    await kickCalendarMutationSyncBestEffort("reassign_appointment_action", taskId);
 
     // Codex round 10 (finding 3): everything past this point is
     // best-effort — `reassignAppointment` above already committed the

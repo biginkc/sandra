@@ -3,6 +3,7 @@
 import { revalidatePath } from "next/cache";
 import { after } from "next/server";
 
+import { kickCalendarMutationSync } from "@/lib/appointments/inline-sync-kick";
 import {
   requireOrgMembership,
   requireOrgMembershipByResource,
@@ -369,6 +370,18 @@ export async function bookAppointment(
     // the one the persisted task is actually linked to.
     const linkedPropertyId = data.related_property_id ?? undefined;
     const linkedContactId = data.contact_id ?? undefined;
+
+    // Advance the exact create-ledger row before any other post-commit side
+    // effect. The targeted claim cannot consume retries from an unrelated
+    // appointment, and a failure here never changes the committed result.
+    try {
+      await kickCalendarMutationSync(createAdminClient(), result.taskId);
+    } catch (e) {
+      reportError(e, {
+        tags: { surface: "book_appointment_inline_sync_kick" },
+        extra: { taskId: result.taskId },
+      });
+    }
 
     // Single-owner rule for Google Calendar event creation: fn_book_appointment
     // already opened the task_calendar_mutations ledger row (phase='pending')

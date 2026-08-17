@@ -10,6 +10,7 @@ const {
   createClient,
   dispatchTaskAssigned,
   dispatchTaskAssignedSlack,
+  kickCalendarMutationSync,
   loadIntegrationPrefs,
   reassignAppointment,
   rescheduleAppointment,
@@ -26,6 +27,7 @@ const {
   createClient: vi.fn(),
   dispatchTaskAssigned: vi.fn(),
   dispatchTaskAssignedSlack: vi.fn(),
+  kickCalendarMutationSync: vi.fn().mockResolvedValue(undefined),
   loadIntegrationPrefs: vi.fn(async () => ({
     slackEnabled: true,
     calendarEnabled: true,
@@ -45,6 +47,7 @@ vi.mock("next/server", () => ({ after: afterMock }));
 vi.mock("@/lib/integrations/prefs", () => ({ loadIntegrationPrefs }));
 vi.mock("@/lib/integrations/slack/dispatch", () => ({ dispatchTaskAssignedSlack }));
 vi.mock("@/lib/notifications/dispatch", () => ({ dispatchTaskAssigned }));
+vi.mock("@/lib/appointments/inline-sync-kick", () => ({ kickCalendarMutationSync }));
 vi.mock("@/lib/appointments/lifecycle", () => ({
   cancelAppointment,
   completeAppointment,
@@ -486,9 +489,11 @@ describe("reassignAppointmentAction", () => {
       ok: true,
       data: { taskId: "task-1", oldAssigneeId: "user-1", newAssigneeId: "user-2", duplicate: false },
     });
-    createAdminClient.mockImplementationOnce(() => {
-      throw new Error("admin client unavailable");
-    });
+    createAdminClient
+      .mockImplementationOnce(() => ({ __admin: true }))
+      .mockImplementationOnce(() => {
+        throw new Error("admin client unavailable");
+      });
 
     const result = await reassignAppointmentAction("task-1", "user-2");
 
@@ -543,5 +548,61 @@ describe("reassignAppointmentAction", () => {
     // The notification path still runs — task was resolved fine, only
     // revalidatePath itself threw.
     expect(afterCallbacks).toHaveLength(1);
+  });
+});
+
+describe("targeted inline calendar sync", () => {
+  beforeEach(() => {
+    createClient.mockResolvedValue(
+      makeSupabaseMock({
+        userId: "user-1",
+        taskRow: { org_id: "org-1", title: "Call", due_at: "2026-09-01T15:00:00Z", related_property_id: null, contact_id: null },
+      }),
+    );
+  });
+
+  it("does not kick after completion because completion opens no ledger row", async () => {
+    completeAppointment.mockResolvedValue({
+      ok: true,
+      data: { taskId: "task-1", status: "completed", outcome: "held" },
+    });
+
+    await completeAppointmentAction("task-1", "held");
+
+    expect(kickCalendarMutationSync).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["cancel", async () => {
+      cancelAppointment.mockResolvedValue({
+        ok: true,
+        data: { taskId: "task-1", status: "cancelled", ledgerId: "ledger-1" },
+      });
+      await cancelAppointmentAction("task-1");
+    }],
+    ["reschedule", async () => {
+      rescheduleAppointment.mockResolvedValue({
+        ok: true,
+        data: { taskId: "successor-1", oldTaskId: "task-1", chainId: "chain-1", duplicate: false },
+      });
+      await rescheduleAppointmentAction({
+        taskId: "task-1",
+        date: "2026-09-02",
+        time: "15:00",
+        timeZone: "America/Chicago",
+        durationMinutes: 30,
+      });
+    }],
+    ["reassign", async () => {
+      reassignAppointment.mockResolvedValue({
+        ok: true,
+        data: { taskId: "task-1", oldAssigneeId: "user-1", newAssigneeId: "user-2", duplicate: false },
+      });
+      await reassignAppointmentAction("task-1", "user-2");
+    }],
+  ])("%s claims only its own source task", async (_label, run) => {
+    await run();
+
+    expect(kickCalendarMutationSync).toHaveBeenCalledWith({ __admin: true }, "task-1");
   });
 });
