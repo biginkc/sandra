@@ -1,16 +1,23 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const { listQueuedPage, releaseMessage } = vi.hoisted(() => ({
+const { listQueuedPage, releaseMessage, refresh } = vi.hoisted(() => ({
   listQueuedPage: vi.fn(),
   releaseMessage: vi.fn(),
+  refresh: vi.fn(),
 }));
 
 vi.mock("next/navigation", () => ({
   useRouter: () => ({
     push: vi.fn(),
     replace: vi.fn(),
-    refresh: vi.fn(),
+    refresh,
     back: vi.fn(),
     forward: vi.fn(),
     prefetch: vi.fn(),
@@ -80,6 +87,7 @@ const disconnect = vi.fn();
 beforeEach(() => {
   listQueuedPage.mockReset();
   releaseMessage.mockReset();
+  refresh.mockReset();
   intersect = null;
   observe.mockClear();
   disconnect.mockClear();
@@ -176,6 +184,59 @@ describe("<QueuePanel /> infinite scroll", () => {
     });
 
     expect(screen.getByTestId("queue-load-more-sentinel")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Retry loading queue" }),
+    ).toBeInTheDocument();
+  });
+
+  it("never presents a failed first page as an empty Outbox", () => {
+    render(
+      <QueuePanel initial={[]} initialHasMore={false} initialLoadFailed />,
+    );
+
+    expect(screen.getByTestId("queue-load-failure")).toHaveTextContent(
+      "This is a load failure, not an empty queue",
+    );
+    expect(screen.queryByTestId("queue-empty")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(refresh).toHaveBeenCalledTimes(1);
+  });
+
+  it("adopts the successful server snapshot after a failed-load retry", async () => {
+    const view = render(
+      <QueuePanel initial={[]} initialHasMore={false} initialLoadFailed />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    view.rerender(
+      <QueuePanel
+        initial={[makeRow(1)]}
+        initialHasMore={false}
+        initialLoadFailed={false}
+      />,
+    );
+
+    expect(await screen.findByText("1 Main St")).toBeInTheDocument();
+    expect(screen.queryByTestId("queue-load-failure")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("queue-empty")).not.toBeInTheDocument();
+  });
+
+  it("renders narrow-safe Outbox cards with labeled Edit, Delete, and Send controls", () => {
+    render(<QueuePanel initial={[makeRow(1)]} initialHasMore={false} />);
+
+    const card = screen.getByTestId("outbox-card-msg-0001");
+    expect(card).toHaveTextContent("QUEUED");
+    expect(screen.getByRole("button", { name: "Edit" })).toHaveClass(
+      "min-h-11",
+    );
+    expect(screen.getByRole("button", { name: "Delete" })).toHaveClass(
+      "min-h-11",
+    );
+    expect(screen.getByRole("button", { name: "Send" })).toHaveClass(
+      "min-h-11",
+    );
+    expect(screen.queryByRole("table")).not.toBeInTheDocument();
   });
 
   it("re-arms the sentinel and re-seeds from page 1 when live stats outrun an empty table", async () => {
@@ -308,7 +369,8 @@ describe("<QueuePanel /> infinite scroll", () => {
       data: {
         outcome: {
           status: "blocked_terminal_dispo",
-          reason: "Property is suppressed by terminal disposition: wrong_number.",
+          reason:
+            "Property is suppressed by terminal disposition: wrong_number.",
         },
       },
     });

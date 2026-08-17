@@ -2,7 +2,7 @@
 
 import { MessageSquarePlusIcon, PlusIcon } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { Page } from "@/components/page";
 import { PageHeader } from "@/components/page-header";
@@ -46,6 +46,10 @@ type Props = {
   hideDnc: boolean;
   /** Count of DNC threads under the current filter that the toggle is hiding. */
   hiddenDncCount: number;
+  /** First Outbox page failed to load. Never present this as an empty queue. */
+  queueLoadFailed?: boolean;
+  /** Queue summary failed; zeroes are fallback data, not confirmed counts. */
+  queueStatsFailed?: boolean;
 };
 
 const THREAD_FILTERS = new Set<InboxFilter>([
@@ -73,6 +77,8 @@ export function CockpitView({
   queueStats,
   hideDnc,
   hiddenDncCount,
+  queueLoadFailed = false,
+  queueStatsFailed = false,
 }: Props) {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -104,16 +110,70 @@ export function CockpitView({
   // visible during transitions, so isPending never flips in the tree
   // the user is looking at.
   const [pendingThreadId, setPendingThreadId] = useState<string | null>(null);
+  const serverSelectedThreadId =
+    selectedThreadId ?? threadDetail?.threadId ?? null;
+  const previousServerSelection = useRef(serverSelectedThreadId);
+  const [mobileShowsDetail, setMobileShowsDetail] = useState(
+    serverSelectedThreadId !== null,
+  );
+  const [focusReturnThreadId, setFocusReturnThreadId] = useState<string | null>(
+    null,
+  );
 
   const handleSelectThread = useCallback(
     (threadId: string) => {
       setPendingThreadId(threadId);
+      setMobileShowsDetail(true);
+      setFocusReturnThreadId(null);
       const sp = new URLSearchParams(searchParams.toString());
       sp.set("thread", threadId);
-      router.replace(`/messages?${sp.toString()}`);
+      router.replace(`/messages?${sp.toString()}`, { scroll: false });
     },
     [searchParams, router],
   );
+
+  useEffect(() => {
+    if (previousServerSelection.current === serverSelectedThreadId) return;
+    previousServerSelection.current = serverSelectedThreadId;
+    setMobileShowsDetail(serverSelectedThreadId !== null);
+  }, [serverSelectedThreadId]);
+
+  const handleBackToList = useCallback(() => {
+    const returningThreadId =
+      pendingThreadId ?? threadDetail?.threadId ?? selectedThreadId ?? null;
+    setPendingThreadId(null);
+    setMobileShowsDetail(false);
+    setFocusReturnThreadId(returningThreadId);
+    const sp = new URLSearchParams(searchParams.toString());
+    sp.delete("thread");
+    const qs = sp.toString();
+    router.replace(qs ? `/messages?${qs}` : "/messages", { scroll: false });
+    router.refresh();
+  }, [
+    pendingThreadId,
+    router,
+    searchParams,
+    selectedThreadId,
+    threadDetail?.threadId,
+  ]);
+
+  useEffect(() => {
+    if (mobileShowsDetail || !focusReturnThreadId) return;
+    const timeout = window.setTimeout(() => {
+      const previousRow = document.getElementById(
+        `inbox-thread-option-${focusReturnThreadId}`,
+      );
+      const firstVisibleRow = document.querySelector<HTMLElement>(
+        '[data-testid="inbox-thread-list"] button',
+      );
+      const emptyList = document.querySelector<HTMLElement>(
+        '[data-testid="inbox-empty"]',
+      );
+      (previousRow ?? firstVisibleRow ?? emptyList)?.focus();
+      setFocusReturnThreadId(null);
+    }, 0);
+    return () => window.clearTimeout(timeout);
+  }, [focusReturnThreadId, mobileShowsDetail]);
 
   // Clear the pending marker once the server data catches up — that's
   // when the skeleton can disappear and the real panel or empty state
@@ -141,7 +201,13 @@ export function CockpitView({
     const sp = new URLSearchParams(searchParams.toString());
     sp.set("thread", threadDetail.threadId);
     router.replace(`/messages?${sp.toString()}`);
-  }, [pendingThreadId, router, searchParams, selectedThreadId, threadDetail?.threadId]);
+  }, [
+    pendingThreadId,
+    router,
+    searchParams,
+    selectedThreadId,
+    threadDetail?.threadId,
+  ]);
 
   // Skeleton shows when the user has clicked a thread that the server
   // hasn't returned yet. Same-thread re-clicks: pendingContactId
@@ -160,7 +226,7 @@ export function CockpitView({
             type="button"
             data-testid="messages-new-message"
             onClick={() => router.push(`/leads?compose=1`)}
-            className="inline-flex items-center gap-2 rounded-full bg-primary px-5 py-2.5 text-[12px] font-bold text-primary-foreground transition-opacity hover:opacity-90"
+            className="inline-flex min-h-11 items-center gap-2 rounded-full bg-primary px-5 py-2.5 text-[12px] font-bold text-primary-foreground transition-opacity hover:opacity-90"
           >
             <PlusIcon className="h-4 w-4" />
             New Message
@@ -205,26 +271,38 @@ export function CockpitView({
 
           {showThreadList && (
             <div
-              className="grid h-[calc(100vh-260px)] min-h-[500px] grid-cols-[minmax(280px,360px)_1fr] gap-6"
+              className="grid min-h-[500px] grid-cols-1 gap-3 md:h-[calc(100vh-260px)] md:grid-cols-[minmax(280px,360px)_1fr] md:gap-6"
               data-testid="inbox-cockpit-grid"
             >
-              <InboxThreadList
-                initial={threads}
-                selectedThreadId={
-                  pendingThreadId ??
-                  threadDetail?.threadId ??
-                  selectedThreadId ??
-                  null
-                }
-                currentUserId={currentUserId}
-                onSelectThread={handleSelectThread}
-              />
-              <InboxDetail
-                data={threadDetail}
-                isLoading={isLoadingThread}
-                assigneeEmails={assigneeEmails}
-                currentUserId={currentUserId}
-              />
+              <div
+                className={`${mobileShowsDetail ? "hidden" : "block"} min-h-0 md:block`}
+                data-testid="inbox-list-view"
+              >
+                <InboxThreadList
+                  initial={threads}
+                  selectedThreadId={
+                    pendingThreadId ??
+                    threadDetail?.threadId ??
+                    selectedThreadId ??
+                    null
+                  }
+                  currentUserId={currentUserId}
+                  onSelectThread={handleSelectThread}
+                  emptyMessage={emptyInboxMessage(filter, hiddenDncCount)}
+                />
+              </div>
+              <div
+                className={`${mobileShowsDetail ? "block" : "hidden"} min-h-0 md:block`}
+                data-testid="inbox-detail-view"
+              >
+                <InboxDetail
+                  data={threadDetail}
+                  isLoading={isLoadingThread}
+                  assigneeEmails={assigneeEmails}
+                  currentUserId={currentUserId}
+                  onBackToList={handleBackToList}
+                />
+              </div>
             </div>
           )}
 
@@ -238,11 +316,16 @@ export function CockpitView({
         </div>
       ) : (
         <div>
-          <QueueStatsBanner stats={liveQueueStats} />
+          <QueueStatsBanner
+            stats={liveQueueStats}
+            loadFailed={queueStatsFailed}
+            onRetry={() => router.refresh()}
+          />
           <QueuePanel
             initial={queued}
             initialHasMore={queuedHasMore}
             totalQueued={liveQueueStats.queued}
+            initialLoadFailed={queueLoadFailed}
           />
         </div>
       )}
@@ -288,7 +371,7 @@ function TabButton({
       aria-selected={active}
       data-testid={testId}
       onClick={onClick}
-      className={`pb-2 -mb-px flex items-center gap-2 text-[14px] font-bold border-b-2 transition-colors ${
+      className={`-mb-px flex min-h-11 items-center gap-2 border-b-2 pb-2 text-[14px] font-bold transition-colors ${
         active
           ? "border-primary text-primary"
           : "border-transparent text-[#78716c] hover:text-[#1c1917]"
@@ -329,4 +412,17 @@ function TabButton({
       )}
     </button>
   );
+}
+
+function emptyInboxMessage(
+  filter: InboxFilter,
+  hiddenDncCount: number,
+): string {
+  if (filter === "all" && hiddenDncCount === 0) {
+    return "No conversations yet. Inbound messages will appear here.";
+  }
+  if (hiddenDncCount > 0) {
+    return `No conversations under this filter. ${hiddenDncCount} restricted or test ${hiddenDncCount === 1 ? "thread is" : "threads are"} hidden.`;
+  }
+  return "No conversations under this filter. Try a different filter.";
 }

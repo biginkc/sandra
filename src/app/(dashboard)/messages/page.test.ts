@@ -305,10 +305,9 @@ describe("MessagesPage filter-count boundary", () => {
         isDismissed: false,
       }),
     ]);
-    expect(mocks.listUnknownSenders).toHaveBeenCalledWith(
-      expect.anything(),
-      { includeDismissed: true },
-    );
+    expect(mocks.listUnknownSenders).toHaveBeenCalledWith(expect.anything(), {
+      includeDismissed: true,
+    });
   });
 
   it("uses one latest-row sender classification for Unknown and Dismissed", async () => {
@@ -334,5 +333,29 @@ describe("MessagesPage filter-count boundary", () => {
     expect(element.props.unknownSenders).toEqual([]);
     expect(element.props.filterCounts.unknown).toBe(0);
     expect(element.props.filterCounts.dismissed).toBe(1);
+  });
+
+  it("passes queue query failures through instead of presenting fallback rows as empty", async () => {
+    mocks.listThreads.mockResolvedValue([]);
+    mocks.listQueuedPage.mockResolvedValue({
+      ok: false,
+      error: { code: "QUEUE_LOAD_FAILED", message: "queue unavailable" },
+    });
+    mocks.getQueueStats.mockResolvedValue({
+      ok: false,
+      error: { code: "QUEUE_STATS_FAILED", message: "stats unavailable" },
+    });
+
+    const element = (await MessagesPage({
+      searchParams: Promise.resolve({ tab: "outbox" }),
+    })) as ReactElement<{
+      queued: unknown[];
+      queueLoadFailed: boolean;
+      queueStatsFailed: boolean;
+    }>;
+
+    expect(element.props.queued).toEqual([]);
+    expect(element.props.queueLoadFailed).toBe(true);
+    expect(element.props.queueStatsFailed).toBe(true);
   });
 });

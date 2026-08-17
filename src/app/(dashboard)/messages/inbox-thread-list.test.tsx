@@ -17,11 +17,7 @@ const supabaseMock = vi.hoisted(() => {
   }> = [];
   const channel = {
     on: vi.fn(
-      (
-        type: string,
-        filter: Record<string, unknown>,
-        callback: () => void,
-      ) => {
+      (type: string, filter: Record<string, unknown>, callback: () => void) => {
         subscriptions.push({ type, filter, callback });
         return channel;
       },
@@ -175,9 +171,9 @@ describe("<InboxThreadList /> realtime subscriptions", () => {
       />,
     );
 
-    expect(screen.getByTestId("inbox-thread-visible-phone-phone")).toHaveTextContent(
-      "+1 (555) 000-0002",
-    );
+    expect(
+      screen.getByTestId("inbox-thread-visible-phone-phone"),
+    ).toHaveTextContent("+1 (555) 000-0002");
   });
 
   it("refreshes on message_threads changes so Sandra delivery state does not stay stale", async () => {
@@ -212,6 +208,32 @@ describe("<InboxThreadList /> realtime subscriptions", () => {
 });
 
 describe("<InboxThreadList /> Sandra state", () => {
+  it("shows the real pipeline stage and an explicit escalation tag", () => {
+    render(
+      <InboxThreadList
+        initial={[
+          makeThread({
+            threadId: "thread-stage-escalated",
+            contactName: "Stage Lead",
+            propertyStatus: "offer_sent",
+            aiResponderStatus: "escalated",
+            aiResponderReason: "asked for a manager",
+          }),
+        ]}
+        selectedThreadId={null}
+        currentUserId={null}
+        onSelectThread={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByTestId("message-stage-chip")).toHaveTextContent(
+      "Offer Sent",
+    );
+    expect(
+      screen.getByTestId("inbox-thread-thread-stage-escalated-escalated-tag"),
+    ).toHaveTextContent("ESCALATED");
+  });
+
   it.each([
     ["wrong_number", "Wrong #"],
     ["bad_number", "Bad #"],
@@ -221,32 +243,37 @@ describe("<InboxThreadList /> Sandra state", () => {
     ["dnc", "DNC"],
     ["nurture", "Follow up"],
     ["callback_requested", "Callback"],
-  ])("shows compact disposition label %s beside the contact name", (dispo, label) => {
-    const { getByTestId, getByText } = render(
-      <InboxThreadList
-        initial={[
-          makeThread({
-            threadId: `thread-with-${dispo}`,
-            contactName: "David Moreno",
-            outreachDispo: dispo,
-            lastMessageBody: "Latest reply",
-          }),
-        ]}
-        selectedThreadId={null}
-        currentUserId={null}
-        onSelectThread={vi.fn()}
-      />,
-    );
+  ])(
+    "shows compact disposition label %s beside the contact name",
+    (dispo, label) => {
+      const { getByTestId, getByText } = render(
+        <InboxThreadList
+          initial={[
+            makeThread({
+              threadId: `thread-with-${dispo}`,
+              contactName: "David Moreno",
+              outreachDispo: dispo,
+              lastMessageBody: "Latest reply",
+            }),
+          ]}
+          selectedThreadId={null}
+          currentUserId={null}
+          onSelectThread={vi.fn()}
+        />,
+      );
 
-    const name = getByText("David Moreno");
-    const disposition = getByTestId(`inbox-thread-thread-with-${dispo}-disposition`);
+      const name = getByText("David Moreno");
+      const disposition = getByTestId(
+        `inbox-thread-thread-with-${dispo}-disposition`,
+      );
 
-    expect(disposition).toHaveTextContent(label);
-    expect(disposition).toHaveAttribute("title", label);
-    expect(disposition.parentElement).toBe(name.parentElement);
-    expect(disposition).toHaveClass("max-w-[7.5rem]");
-    expect(disposition).toHaveClass("truncate");
-  });
+      expect(disposition).toHaveTextContent(label);
+      expect(disposition).toHaveAttribute("title", label);
+      expect(disposition.parentElement).toBe(name.parentElement);
+      expect(disposition).toHaveClass("max-w-[7.5rem]");
+      expect(disposition).toHaveClass("truncate");
+    },
+  );
 
   it("does not render a disposition pill when the thread has no disposition", () => {
     render(
@@ -299,9 +326,9 @@ describe("<InboxThreadList /> Sandra state", () => {
     expect(status).toHaveAccessibleName("Sandra handled. SMS delivered");
     expect(status).not.toHaveClass("rounded-full");
     expect(status).not.toHaveClass("border");
-    expect(getByTestId("inbox-thread-thread-ai-inline-sandra-status-dot")).toHaveClass(
-      "bg-[#10b981]",
-    );
+    expect(
+      getByTestId("inbox-thread-thread-ai-inline-sandra-status-dot"),
+    ).toHaveClass("bg-[#10b981]");
   });
 
   it("keeps Sandra's escalation reason in the icon label only", () => {
@@ -323,7 +350,9 @@ describe("<InboxThreadList /> Sandra state", () => {
       />,
     );
 
-    const status = getByTestId("inbox-thread-thread-ai-escalated-sandra-status");
+    const status = getByTestId(
+      "inbox-thread-thread-ai-escalated-sandra-status",
+    );
     expect(status).not.toHaveTextContent("Sandra escalated");
     expect(status).not.toHaveTextContent("asked for price");
     expect(status).toHaveAccessibleName("Sandra escalated: asked for price");

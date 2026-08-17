@@ -1,5 +1,9 @@
 "use client";
 
+import { RotateCwIcon } from "lucide-react";
+
+import { Button } from "@/components/ui/button";
+
 import { type QueueStats } from "./actions";
 
 /**
@@ -10,9 +14,44 @@ import { type QueueStats } from "./actions";
  * useQueueStats, owned by CockpitView, so this banner and the Outbox
  * tab badge always show the same numbers.
  */
-export function QueueStatsBanner({ stats }: { stats: QueueStats }) {
+export function QueueStatsBanner({
+  stats,
+  loadFailed = false,
+  onRetry,
+}: {
+  stats: QueueStats;
+  loadFailed?: boolean;
+  onRetry?: () => void;
+}) {
+  if (loadFailed) {
+    return (
+      <div
+        className="mb-4 rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-950"
+        role="status"
+        data-testid="queue-stats-failure"
+      >
+        <p>
+          Queue totals could not be refreshed. The queue below may still contain
+          work; these fallback totals are not an empty-queue confirmation.
+        </p>
+        {onRetry ? (
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="mt-3 min-h-11 border-red-300 bg-white text-red-950 hover:bg-red-100"
+            onClick={onRetry}
+          >
+            <RotateCwIcon className="h-4 w-4" aria-hidden="true" />
+            Retry totals
+          </Button>
+        ) : null}
+      </div>
+    );
+  }
+
   return (
-    <div className="bg-card mb-4 rounded-xl border p-4 text-sm">
+    <div className="bg-card mb-4 flex flex-wrap gap-x-5 gap-y-1 rounded-xl border p-4 text-sm">
       <div className="font-medium">
         {stats.queued} queued
         {stats.paused > 0 ? ` · ${stats.paused} paused` : ""} ·{" "}

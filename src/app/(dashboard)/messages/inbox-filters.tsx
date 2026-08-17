@@ -190,7 +190,7 @@ function DncToggle({
       aria-checked={hideDnc}
       data-testid="dnc-toggle"
       data-active={hideDnc || undefined}
-      className="ml-auto inline-flex items-center gap-2 text-[12px] text-[#78716c] hover:text-[#1c1917]"
+      className="ml-auto inline-flex min-h-11 items-center gap-2 text-[12px] text-[#78716c] hover:text-[#1c1917] md:min-h-0"
     >
       <span
         className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${
@@ -243,7 +243,7 @@ function FilterChip({
       aria-pressed={active}
       data-testid={testId}
       data-active={active || undefined}
-      className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-full px-4 py-1.5 text-[12px] font-bold transition-colors ${
+      className={`inline-flex min-h-11 items-center gap-1.5 whitespace-nowrap rounded-full px-4 py-1.5 text-[12px] font-bold transition-colors md:min-h-0 ${
         active
           ? "bg-primary text-primary-foreground"
           : "border border-[#e5e1df] text-[#78716c] hover:bg-[#f5f5f4] hover:text-[#1c1917]"

@@ -88,21 +88,16 @@ export default async function MessagesPage({
   // Fetch everything in parallel. The thread list + unknown active count
   // are needed regardless of which filter is active (badge counts on the
   // tab + filter chips). Other queries are conditional on the filter.
-  const [
-    allThreads,
-    queuedResult,
-    threadDetail,
-    unknownAll,
-    queueStatsResult,
-  ] = await Promise.all([
-    listThreads(supabase, {}),
-    listQueuedPage(null),
-    canonicalThreadId
-      ? fetchInboxDetail(supabase, canonicalThreadId)
-      : Promise.resolve(null),
-    listUnknownSenders(supabase, { includeDismissed: true }),
-    getQueueStats(),
-  ]);
+  const [allThreads, queuedResult, threadDetail, unknownAll, queueStatsResult] =
+    await Promise.all([
+      listThreads(supabase, {}),
+      listQueuedPage(null),
+      canonicalThreadId
+        ? fetchInboxDetail(supabase, canonicalThreadId)
+        : Promise.resolve(null),
+      listUnknownSenders(supabase, { includeDismissed: true }),
+      getQueueStats(),
+    ]);
 
   const {
     threads: visibleThreads,
@@ -177,6 +172,8 @@ export default async function MessagesPage({
       queueStats={queueStats}
       hideDnc={hideDnc}
       hiddenDncCount={hiddenDncCount}
+      queueLoadFailed={!queuedResult.ok}
+      queueStatsFailed={!queueStatsResult.ok}
     />
   );
 }

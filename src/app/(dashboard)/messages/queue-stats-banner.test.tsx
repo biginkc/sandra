@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { QueueStatsBanner } from "./queue-stats-banner";
@@ -37,6 +37,21 @@ afterEach(() => {
 // Polling behavior (30s interval, visibility gating, cleanup) lives in
 // useQueueStats and is covered by use-queue-stats.test.ts.
 describe("<QueueStatsBanner /> (260504-tgq)", () => {
+  it("labels a stats failure instead of presenting fallback zeroes as truth", () => {
+    const onRetry = vi.fn();
+    render(
+      <QueueStatsBanner stats={makeStats()} loadFailed onRetry={onRetry} />,
+    );
+
+    expect(screen.getByTestId("queue-stats-failure")).toHaveTextContent(
+      "fallback totals are not an empty-queue confirmation",
+    );
+    expect(screen.queryByText(/0 queued/)).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Retry totals" }));
+    expect(onRetry).toHaveBeenCalledOnce();
+  });
+
   it("Renders queued / sent out today / failed today counts from stats", () => {
     render(
       <QueueStatsBanner

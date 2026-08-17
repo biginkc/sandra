@@ -1,5 +1,11 @@
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { CockpitView } from "./cockpit-view";
 import type { InboxFilterCounts } from "./inbox-filters";
@@ -9,16 +15,23 @@ import type { Database } from "@/lib/supabase/types";
 
 type MessageRow = Database["public"]["Tables"]["messages"]["Row"];
 
+const navigationMocks = vi.hoisted(() => ({
+  push: vi.fn(),
+  replace: vi.fn(),
+  refresh: vi.fn(),
+  search: "",
+}));
+
 vi.mock("next/navigation", () => ({
   useRouter: () => ({
-    push: vi.fn(),
-    replace: vi.fn(),
-    refresh: vi.fn(),
+    push: navigationMocks.push,
+    replace: navigationMocks.replace,
+    refresh: navigationMocks.refresh,
     back: vi.fn(),
     forward: vi.fn(),
     prefetch: vi.fn(),
   }),
-  useSearchParams: () => new URLSearchParams(),
+  useSearchParams: () => new URLSearchParams(navigationMocks.search),
   usePathname: () => "/messages",
 }));
 
@@ -160,6 +173,9 @@ function makeDetail(contactId: string, body: string): InboxDetailData {
     assigneeId: null,
     propertyStatus: "prospect",
     outreachDispo: null,
+    contactDoNotContact: false,
+    contactSmsOptedOut: false,
+    isDncLocked: false,
     initialMessages: [
       makeMessage({
         id: `m-${contactId}`,
@@ -205,6 +221,13 @@ const baseProps = {
 };
 
 describe("<CockpitView /> URL deep-linking", () => {
+  beforeEach(() => {
+    navigationMocks.push.mockClear();
+    navigationMocks.replace.mockClear();
+    navigationMocks.refresh.mockClear();
+    navigationMocks.search = "";
+  });
+
   it("activeTab='outbox' renders the Outbox tab as aria-selected (test 32)", () => {
     render(<CockpitView {...baseProps} activeTab="outbox" />);
 
@@ -266,8 +289,9 @@ describe("<CockpitView /> URL deep-linking", () => {
     );
 
     const grid = screen.getByTestId("inbox-cockpit-grid");
-    expect(grid.className).toMatch(/h-\[calc\(100vh-260px\)\]/);
-    expect(grid.className).toMatch(/min-h-\[500px\]/);
+    expect(grid.className).toMatch(/md:h-\[calc\(100vh-260px\)\]/);
+    expect(grid.className).toMatch(/grid-cols-1/);
+    expect(grid.className).toMatch(/md:grid-cols-/);
   });
 
   it("threadDetail prop pre-selects that thread + renders its body (test 33)", () => {
@@ -299,9 +323,9 @@ describe("<CockpitView /> URL deep-linking", () => {
       "data-selected",
       "true",
     );
-    expect(screen.getByTestId(threadBTestId(threadA.threadId))).not.toHaveAttribute(
-      "data-selected",
-    );
+    expect(
+      screen.getByTestId(threadBTestId(threadA.threadId)),
+    ).not.toHaveAttribute("data-selected");
   });
 
   it("clears the loading skeleton when the server returns no detail for the selected thread", async () => {
@@ -343,6 +367,139 @@ describe("<CockpitView /> URL deep-linking", () => {
       ).not.toBeInTheDocument();
     });
     expect(screen.getByTestId("inbox-detail-empty")).toBeVisible();
+  });
+
+  it("uses a real narrow list-or-detail flow without compressing both panes", () => {
+    navigationMocks.search = "filter=mine&hideDnc=0";
+    const thread = makeThread({ contactId: "mobile-thread" });
+
+    render(
+      <CockpitView
+        {...baseProps}
+        activeTab="inbox"
+        filter="mine"
+        threads={[thread]}
+      />,
+    );
+
+    expect(screen.getByTestId("inbox-list-view")).toHaveClass("block");
+    expect(screen.getByTestId("inbox-detail-view")).toHaveClass("hidden");
+
+    fireEvent.click(screen.getByTestId(threadBTestId(thread.threadId)));
+
+    expect(screen.getByTestId("inbox-list-view")).toHaveClass("hidden");
+    expect(screen.getByTestId("inbox-detail-view")).toHaveClass("block");
+    expect(navigationMocks.replace).toHaveBeenCalledWith(
+      `/messages?filter=mine&hideDnc=0&thread=${thread.threadId}`,
+      { scroll: false },
+    );
+  });
+
+  it("Back preserves URL context and returns focus to the selected row", async () => {
+    navigationMocks.search =
+      "tab=inbox&filter=unread&hideDnc=0&thread=conv-focus-thread";
+    const thread = makeThread({
+      contactId: "focus-thread",
+      threadId: "conv-focus-thread",
+    });
+
+    render(
+      <CockpitView
+        {...baseProps}
+        activeTab="inbox"
+        filter="unread"
+        threads={[thread]}
+        selectedThreadId={thread.threadId}
+        threadDetail={makeDetail("focus-thread", "open detail")}
+      />,
+    );
+
+    expect(screen.getByTestId(threadBTestId(thread.threadId))).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "All conversations" }));
+
+    expect(navigationMocks.replace).toHaveBeenCalledWith(
+      "/messages?tab=inbox&filter=unread&hideDnc=0",
+      { scroll: false },
+    );
+    expect(navigationMocks.refresh).toHaveBeenCalled();
+    await waitFor(() => {
+      expect(screen.getByTestId(threadBTestId(thread.threadId))).toHaveFocus();
+    });
+  });
+
+  it("lets a narrow stale thread URL return focus to the preserved conversation list", async () => {
+    navigationMocks.search =
+      "tab=inbox&filter=unread&hideDnc=0&thread=missing-thread";
+    const thread = makeThread({ contactId: "still-visible" });
+
+    render(
+      <CockpitView
+        {...baseProps}
+        activeTab="inbox"
+        filter="unread"
+        threads={[thread]}
+        selectedThreadId="missing-thread"
+        threadDetail={null}
+      />,
+    );
+
+    expect(screen.getByTestId("inbox-list-view")).toHaveClass("hidden");
+    expect(screen.getByTestId("inbox-detail-empty")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "All conversations" }));
+
+    expect(screen.getByTestId("inbox-list-view")).toHaveClass("block");
+    expect(navigationMocks.replace).toHaveBeenCalledWith(
+      "/messages?tab=inbox&filter=unread&hideDnc=0",
+      { scroll: false },
+    );
+    await waitFor(() => {
+      expect(screen.getByTestId(threadBTestId(thread.threadId))).toHaveFocus();
+    });
+  });
+
+  it("returns stale-thread focus to a filtered empty-list status", async () => {
+    navigationMocks.search = "filter=escalated&thread=missing-thread";
+
+    render(
+      <CockpitView
+        {...baseProps}
+        activeTab="inbox"
+        filter="escalated"
+        selectedThreadId="missing-thread"
+        threadDetail={null}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "All conversations" }));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("inbox-empty")).toHaveFocus();
+    });
+    expect(navigationMocks.replace).toHaveBeenCalledWith(
+      "/messages?filter=escalated",
+      { scroll: false },
+    );
+  });
+
+  it("labels a filtered empty view without claiming the Inbox is empty", () => {
+    render(
+      <CockpitView
+        {...baseProps}
+        activeTab="inbox"
+        filter="escalated"
+        hiddenDncCount={2}
+      />,
+    );
+
+    expect(screen.getByTestId("inbox-empty")).toHaveTextContent(
+      "No conversations under this filter. 2 restricted or test threads are hidden.",
+    );
+    expect(screen.getByTestId("inbox-empty")).not.toHaveTextContent(
+      "No conversations yet",
+    );
   });
 });
 

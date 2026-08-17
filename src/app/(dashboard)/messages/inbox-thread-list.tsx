@@ -11,6 +11,7 @@ import { formatPhoneE164 } from "@/lib/phone-format";
 import { createClient } from "@/lib/supabase/client";
 import type { Database } from "@/lib/supabase/types";
 
+import { MessageStageChip } from "./stage-chip";
 import { useThrottledRefresh } from "./use-throttled-refresh";
 
 type Message = Database["public"]["Tables"]["messages"]["Row"];
@@ -35,6 +36,8 @@ type Props = {
    *  router.refresh() in useTransition; that's how the detail panel
    *  knows when to render a skeleton. The list just emits clicks. */
   onSelectThread: (threadId: string) => void;
+  /** Truthful copy for an empty all-inbox vs an empty filtered view. */
+  emptyMessage?: string;
 };
 
 const THREAD_DISPO_LABELS: Record<string, string> = {
@@ -70,11 +73,12 @@ export function InboxThreadList({
   selectedThreadId,
   currentUserId,
   onSelectThread,
+  emptyMessage = "No conversations yet. Inbound messages will appear here.",
 }: Props) {
   const requestRefresh = useThrottledRefresh();
-  const [threadUpdates, setThreadUpdates] = useState<Record<string, ThreadUpdate>>(
-    {},
-  );
+  const [threadUpdates, setThreadUpdates] = useState<
+    Record<string, ThreadUpdate>
+  >({});
   const threads = applyThreadUpdates(initial, threadUpdates);
 
   useEffect(() => {
@@ -118,21 +122,21 @@ export function InboxThreadList({
     };
   }, [requestRefresh]);
 
-
   if (threads.length === 0) {
     return (
       <div
-        className="border-border/60 text-muted-foreground rounded-md border border-dashed p-6 text-center text-sm"
+        className="border-border/60 text-muted-foreground focus-visible:ring-ring rounded-md border border-dashed p-6 text-center text-sm outline-none focus-visible:ring-2"
         data-testid="inbox-empty"
+        tabIndex={-1}
       >
-        No conversations yet. Inbound messages will appear here.
+        {emptyMessage}
       </div>
     );
   }
 
   return (
     <div
-      className="bg-white border border-border rounded-xl overflow-hidden flex flex-col"
+      className="bg-white border border-border rounded-xl h-full overflow-hidden flex flex-col"
       data-testid="inbox-thread-list"
     >
       <div className="flex-1 overflow-y-auto divide-y divide-border">
@@ -143,8 +147,10 @@ export function InboxThreadList({
           return (
             <button
               key={t.threadId}
+              id={`inbox-thread-option-${t.threadId}`}
               type="button"
               onClick={() => onSelectThread(t.threadId)}
+              aria-pressed={selected}
               data-testid={`inbox-thread-${t.threadId}`}
               data-selected={selected || undefined}
               data-assignee-id={t.assigneeId ?? undefined}
@@ -222,8 +228,18 @@ export function InboxThreadList({
                   <EscalationBadge reason={t.escalationReason} />
                 </div>
               ) : null}
-              <div className="flex w-full items-center justify-between gap-2">
-                <span className="line-clamp-1 text-[13px] text-[#78716c]">
+              <div className="flex w-full min-w-0 items-center gap-1.5">
+                <MessageStageChip status={t.propertyStatus} compact />
+                {t.aiResponderStatus === "escalated" ||
+                t.needsHumanAttention ? (
+                  <span
+                    className="shrink-0 text-[9px] font-black tracking-[0.06em] text-[#b91c1c]"
+                    data-testid={`inbox-thread-${t.threadId}-escalated-tag`}
+                  >
+                    ESCALATED
+                  </span>
+                ) : null}
+                <span className="line-clamp-1 min-w-0 flex-1 text-[13px] text-[#78716c]">
                   {t.lastMessageDirection === "outbound" ? "You: " : ""}
                   {t.lastMessageBody}
                 </span>
@@ -280,7 +296,8 @@ function SandraThreadStatus({
   deliveryError: string | null;
 }) {
   const deliveryLabel = formatDeliveryLabel(deliveryStatus, deliveryError);
-  const statusLabel = status === "handled" ? "Sandra handled" : "Sandra escalated";
+  const statusLabel =
+    status === "handled" ? "Sandra handled" : "Sandra escalated";
   const reasonLabel = status === "escalated" && reason ? `: ${reason}` : "";
   const iconLabel = deliveryLabel
     ? `${statusLabel}${reasonLabel}. ${deliveryLabel}`
@@ -301,12 +318,7 @@ function SandraThreadStatus({
       title={iconLabel}
     >
       {/* eslint-disable-next-line @next/next/no-img-element */}
-      <img
-        src="/icon.png"
-        alt=""
-        aria-hidden="true"
-        className="h-3.5 w-3.5"
-      />
+      <img src="/icon.png" alt="" aria-hidden="true" className="h-3.5 w-3.5" />
       <span
         aria-hidden="true"
         className={`absolute -right-0.5 -bottom-0.5 h-1.5 w-1.5 rounded-full ${statusDotTone}`}
@@ -422,10 +434,7 @@ export function applyThreadUpdates(
   return next.sort((a, b) => b.lastMessageAt.localeCompare(a.lastMessageAt));
 }
 
-function initialsOfContact(
-  name: string | null,
-  phone: string | null,
-): string {
+function initialsOfContact(name: string | null, phone: string | null): string {
   if (name) {
     // "Donna Harper-Bradley" → DH; "Maria" → MA; punctuation/whitespace
     // collapses so "Mary-Jane Smith" stays MS.

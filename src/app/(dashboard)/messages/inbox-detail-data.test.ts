@@ -100,6 +100,7 @@ function makeProperty(
     is_residential: overrides.is_residential ?? null,
     is_seasonal: overrides.is_seasonal ?? null,
     is_vacant: overrides.is_vacant ?? null,
+    is_dnc_locked: overrides.is_dnc_locked ?? false,
     last_ai_escalation_at: overrides.last_ai_escalation_at ?? null,
     last_ai_escalation_reason: overrides.last_ai_escalation_reason ?? null,
     lat: overrides.lat ?? null,
@@ -133,7 +134,8 @@ type SeedData = {
 
 function makeSupabaseStub(seed: SeedData) {
   function makeBuilder(table: keyof SeedData) {
-    const filters: Array<{ kind: "eq" | "is"; key: string; value: unknown }> = [];
+    const filters: Array<{ kind: "eq" | "is"; key: string; value: unknown }> =
+      [];
     const negativeFilters: Array<{ key: string; value: unknown }> = [];
     let orderBy: { key: string; ascending: boolean } | null = null;
     let maxRows: number | null = null;
@@ -157,7 +159,9 @@ function makeSupabaseStub(seed: SeedData) {
       },
       not(key: string, operator: "in", value: string) {
         if (operator !== "in") {
-          throw new Error("inbox detail test mock only supports not(..., 'in', value)");
+          throw new Error(
+            "inbox detail test mock only supports not(..., 'in', value)",
+          );
         }
         const values = value
           .replace(/^\(|\)$/g, "")
@@ -182,11 +186,13 @@ function makeSupabaseStub(seed: SeedData) {
       },
       then<TResult1 = { data: unknown; error: null }, TResult2 = never>(
         onfulfilled?:
-          | ((value: { data: unknown; error: null }) => TResult1 | PromiseLike<TResult1>)
+          | ((value: {
+              data: unknown;
+              error: null;
+            }) => TResult1 | PromiseLike<TResult1>)
           | null,
         onrejected?:
-          | ((reason: unknown) => TResult2 | PromiseLike<TResult2>)
-          | null,
+          ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null,
       ) {
         return Promise.resolve(execute()).then(onfulfilled, onrejected);
       },
@@ -212,7 +218,9 @@ function makeSupabaseStub(seed: SeedData) {
         rows.sort((left, right) => {
           const leftValue = left[orderBy!.key as keyof typeof left];
           const rightValue = right[orderBy!.key as keyof typeof right];
-          const comparison = String(leftValue).localeCompare(String(rightValue));
+          const comparison = String(leftValue).localeCompare(
+            String(rightValue),
+          );
           return orderBy!.ascending ? comparison : -comparison;
         });
       }
@@ -222,7 +230,7 @@ function makeSupabaseStub(seed: SeedData) {
       }
 
       return {
-        data: wantSingle ? rows[0] ?? null : rows,
+        data: wantSingle ? (rows[0] ?? null) : rows,
         error: null,
       };
     }
@@ -256,7 +264,9 @@ describe("fetchInboxDetail", () => {
       properties: [makeProperty({ id: RECENT_PROPERTY_ID })],
     });
 
-    expect(await fetchInboxDetail(supabase as never, CONVERSATION_ID)).toBeNull();
+    expect(
+      await fetchInboxDetail(supabase as never, CONVERSATION_ID),
+    ).toBeNull();
   });
 
   it("still resolves bare conversation UUID links directly", async () => {
@@ -282,6 +292,44 @@ describe("fetchInboxDetail", () => {
     expect(detail?.contactId).toBe(CONTACT_ID);
     expect(detail?.homeownerContactId).toBeNull();
     expect(detail?.agentContactId).toBeNull();
+    expect(detail?.contactDoNotContact).toBe(false);
+    expect(detail?.contactSmsOptedOut).toBe(false);
+    expect(detail?.isDncLocked).toBe(false);
+  });
+
+  it("returns existing contact restrictions and the permanent property lock", async () => {
+    const supabase = makeSupabaseStub({
+      messages: [
+        makeMessage({
+          id: "restricted-conversation",
+          contact_id: CONTACT_ID,
+          property_id: RECENT_PROPERTY_ID,
+          conversation_id: CONVERSATION_ID,
+        }),
+      ],
+      contacts: [
+        makeContact({
+          id: CONTACT_ID,
+          do_not_contact: true,
+          sms_opted_out: true,
+        }),
+      ],
+      properties: [
+        makeProperty({
+          id: RECENT_PROPERTY_ID,
+          is_dnc_locked: true,
+          homeowner_contact_id: CONTACT_ID,
+        }),
+      ],
+    });
+
+    const detail = await fetchInboxDetail(supabase as never, CONVERSATION_ID);
+
+    expect(detail).toMatchObject({
+      contactDoNotContact: true,
+      contactSmsOptedOut: true,
+      isDncLocked: true,
+    });
   });
 
   it("ignores queued and paused rows in the conversation", async () => {
