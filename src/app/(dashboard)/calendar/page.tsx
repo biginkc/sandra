@@ -14,7 +14,6 @@ import {
 import { resolveMonth, resolveWeek } from "./range";
 import { resolveAssigneeId } from "./scoping";
 import type {
-  CalendarDayBounds,
   CalendarSearchParams,
   CalendarViewMode,
   CalendarViewerRole,
@@ -156,6 +155,12 @@ export default async function CalendarPage({
     user.id,
     rosterIds,
   );
+  const scopeDescription =
+    assigneeId === undefined
+      ? "All team appointments."
+      : assigneeId === user.id
+        ? "Your appointments."
+        : `Appointments assigned to ${assignees[assigneeId] ?? "the selected teammate"}.`;
 
   const prefs = await loadIntegrationPrefs(supabase, user.id);
   const timezone = prefs.timezone;
@@ -227,11 +232,7 @@ export default async function CalendarPage({
       <PageHeader
         breadcrumb={[{ label: "Workspace" }, { label: "Calendar" }]}
         title="Calendar"
-        description={
-          viewerRole === "owner"
-            ? "Org-wide appointments — filter to a teammate below."
-            : "Your appointments."
-        }
+        description={scopeDescription}
       />
       {labelsDegraded && (
         <div className="text-muted-foreground text-xs">

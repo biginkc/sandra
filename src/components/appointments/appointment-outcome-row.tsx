@@ -65,7 +65,7 @@ export function AppointmentOutcomeRow({ taskId, assigneeId }: Props) {
 
   return (
     <div
-      className="flex shrink-0 flex-wrap items-center gap-1.5"
+      className="flex w-full flex-wrap items-center gap-1.5 sm:w-auto sm:justify-end"
       data-testid={`appointment-outcome-${taskId}`}
     >
       {!confirmingCancel ? (
@@ -79,7 +79,7 @@ export function AppointmentOutcomeRow({ taskId, assigneeId }: Props) {
             disabled={pending}
             onClick={() => complete("held")}
             data-testid={`appointment-held-${taskId}`}
-            className="h-7 px-2 text-xs"
+            className="min-h-11 px-3 text-xs"
           >
             Held
           </Button>
@@ -89,27 +89,29 @@ export function AppointmentOutcomeRow({ taskId, assigneeId }: Props) {
             disabled={pending}
             onClick={() => complete("no_show")}
             data-testid={`appointment-no-show-${taskId}`}
-            className="h-7 px-2 text-xs"
+            className="min-h-11 px-3 text-xs"
           >
             No-show
           </Button>
-          <BookAppointmentPopover
-            mode="reschedule"
-            taskId={taskId}
-            assigneeId={assigneeId}
-            currentUserId={assigneeId}
-            triggerLabel="Reschedule"
-            triggerVariant="outline"
-            triggerSize="sm"
-            disabled={pending}
-          />
+          <div className="[&>button]:min-h-11">
+            <BookAppointmentPopover
+              mode="reschedule"
+              taskId={taskId}
+              assigneeId={assigneeId}
+              currentUserId={assigneeId}
+              triggerLabel="Reschedule"
+              triggerVariant="outline"
+              triggerSize="sm"
+              disabled={pending}
+            />
+          </div>
           <Button
             size="sm"
             variant="outline"
             disabled={pending}
             onClick={cancel}
             data-testid={`appointment-cancel-${taskId}`}
-            className="h-7 px-2 text-xs"
+            className="min-h-11 px-3 text-xs"
           >
             Cancel
           </Button>
@@ -125,7 +127,7 @@ export function AppointmentOutcomeRow({ taskId, assigneeId }: Props) {
             disabled={pending}
             onClick={cancel}
             data-testid={`appointment-cancel-confirm-${taskId}`}
-            className="h-7 px-2 text-xs"
+            className="min-h-11 px-3 text-xs"
           >
             {pending ? "Cancelling…" : "Yes, cancel"}
           </Button>
@@ -135,7 +137,7 @@ export function AppointmentOutcomeRow({ taskId, assigneeId }: Props) {
             disabled={pending}
             onClick={() => setConfirmingCancel(false)}
             data-testid={`appointment-cancel-dismiss-${taskId}`}
-            className="h-7 px-2 text-xs"
+            className="min-h-11 px-3 text-xs"
           >
             Never mind
           </Button>
@@ -180,7 +182,7 @@ export function AppointmentUpcomingActions({
   }
 
   return (
-    <div className="relative inline-flex shrink-0">
+    <div className="relative inline-flex self-start sm:self-auto">
       <DropdownMenu>
         <DropdownMenuTrigger
           render={
@@ -190,7 +192,7 @@ export function AppointmentUpcomingActions({
               disabled={pending}
               aria-label="Appointment actions"
               data-testid={`appointment-menu-${taskId}`}
-              className="h-7 w-7 p-0"
+              className="min-h-11 min-w-11 p-0"
             >
               <MoreHorizontalIcon className="size-3.5" />
             </Button>
@@ -201,6 +203,7 @@ export function AppointmentUpcomingActions({
             disabled={pending}
             onClick={() => rescheduleTriggerRef.current?.click()}
             data-testid={`appointment-menu-reschedule-${taskId}`}
+            className="min-h-11"
           >
             Reschedule
           </DropdownMenuItem>
@@ -209,6 +212,7 @@ export function AppointmentUpcomingActions({
             disabled={pending}
             onClick={cancel}
             data-testid={`appointment-menu-cancel-${taskId}`}
+            className="min-h-11"
           >
             Cancel
           </DropdownMenuItem>

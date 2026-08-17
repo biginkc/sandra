@@ -160,6 +160,69 @@ describe("CalendarPage — genuinely empty week", () => {
   });
 });
 
+describe("CalendarPage — resolved scope description", () => {
+  it("describes a member's explicit org-wide scope instead of claiming the results are only theirs", async () => {
+    createClient.mockResolvedValue({
+      auth: {
+        getUser: vi.fn().mockResolvedValue({
+          data: { user: { id: "user-1", email: "member@bmh.com" } },
+        }),
+      },
+    });
+    getCallerMemberships.mockResolvedValue([
+      { user_id: "user-1", org_id: "org-1", role: "member" },
+    ]);
+    fetchOrgRoster.mockResolvedValue({
+      ok: true,
+      labelsDegraded: false,
+      roster: [
+        { id: "user-1", label: "member@bmh.com" },
+        { id: "rep-2", label: "rep2@bmh.com" },
+      ],
+    });
+    fetchCalendarAppointments.mockResolvedValue({ ok: true, rows: [] });
+
+    const jsx = await CalendarPage({
+      searchParams: Promise.resolve({ assignee: "all" }),
+    });
+    render(jsx);
+
+    expect(screen.getByText("All team appointments.")).toBeInTheDocument();
+    expect(screen.queryByText("Your appointments.")).not.toBeInTheDocument();
+  });
+
+  it("names the teammate selected by a member", async () => {
+    createClient.mockResolvedValue({
+      auth: {
+        getUser: vi.fn().mockResolvedValue({
+          data: { user: { id: "user-1", email: "member@bmh.com" } },
+        }),
+      },
+    });
+    getCallerMemberships.mockResolvedValue([
+      { user_id: "user-1", org_id: "org-1", role: "member" },
+    ]);
+    fetchOrgRoster.mockResolvedValue({
+      ok: true,
+      labelsDegraded: false,
+      roster: [
+        { id: "user-1", label: "member@bmh.com" },
+        { id: "rep-2", label: "rep2@bmh.com" },
+      ],
+    });
+    fetchCalendarAppointments.mockResolvedValue({ ok: true, rows: [] });
+
+    const jsx = await CalendarPage({
+      searchParams: Promise.resolve({ assignee: "rep-2" }),
+    });
+    render(jsx);
+
+    expect(
+      screen.getByText("Appointments assigned to rep2@bmh.com."),
+    ).toBeInTheDocument();
+  });
+});
+
 describe("CalendarPage — fixed six-week month", () => {
   it("passes all six adjacent windows to the single-snapshot RPC and renders 42 days", async () => {
     mockUser();
@@ -395,11 +458,9 @@ describe("CalendarPage — deep-linked ?assignee= outside the active roster (Cod
   it("normalizes a member's deep link to a removed/suspended id to their own items before querying", async () => {
     createClient.mockResolvedValue({
       auth: {
-        getUser: vi
-          .fn()
-          .mockResolvedValue({
-            data: { user: { id: "user-1", email: "member@bmh.com" } },
-          }),
+        getUser: vi.fn().mockResolvedValue({
+          data: { user: { id: "user-1", email: "member@bmh.com" } },
+        }),
       },
     });
     getCallerMemberships.mockResolvedValue([

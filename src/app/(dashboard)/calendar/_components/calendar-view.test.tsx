@@ -275,6 +275,28 @@ describe("<CalendarView />", () => {
     );
   });
 
+  it("keeps the toolbar targets at least 44px tall and always names the viewer timezone", () => {
+    render(<CalendarView {...baseProps()} />);
+
+    for (const testId of [
+      "calendar-view-week",
+      "calendar-view-month",
+      "calendar-view-agenda",
+      "calendar-week-prev",
+      "calendar-week-today",
+      "calendar-week-next",
+      "calendar-assignee-filter",
+    ]) {
+      expect(screen.getByTestId(testId)).toHaveClass("min-h-11");
+    }
+    expect(screen.getByTestId("calendar-timezone-caption")).toHaveTextContent(
+      "All times shown in America/Chicago.",
+    );
+    expect(
+      screen.getByTestId("stub-new-block-button").parentElement,
+    ).toHaveClass("[&>button]:min-h-11");
+  });
+
   it("navigates via router.replace when the assignee filter changes", async () => {
     nav.search = "view=week";
     render(
@@ -351,11 +373,9 @@ describe("<CalendarView /> month view", () => {
     nav.replace.mockClear();
   });
 
-  it("hides the Month tab below md (desktop-only surface)", () => {
+  it("keeps Month visible on narrow screens so the active deep-link state is truthful", () => {
     render(<CalendarView {...baseProps()} />);
-    expect(screen.getByTestId("calendar-view-month").className).toContain(
-      "hidden md:inline-block",
-    );
+    expect(screen.getByTestId("calendar-view-month")).not.toHaveClass("hidden");
   });
 
   it("renders the Month tab and mounts MonthGrid when view=month", () => {
@@ -367,6 +387,12 @@ describe("<CalendarView /> month view", () => {
     );
     expect(screen.getByTestId("calendar-month-grid")).toBeInTheDocument();
     expect(screen.queryByTestId("calendar-week-grid")).not.toBeInTheDocument();
+    expect(screen.getByTestId("calendar-mobile-month-state")).toHaveTextContent(
+      "Month agenda for August 2026",
+    );
+    expect(screen.getByTestId("calendar-agenda-wrapper")).toHaveClass(
+      "md:hidden",
+    );
   });
 
   it("steps prev/next by whole months from the month key, not the grid start", () => {

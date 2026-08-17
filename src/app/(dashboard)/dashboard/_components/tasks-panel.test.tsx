@@ -55,14 +55,12 @@ function makeRow(overrides: Partial<TaskRow> & { id: string }): TaskRow {
 describe("<TasksPanel />", () => {
   it("renders a truthful Retry state on failure, never the all-caught-up copy", () => {
     render(
-      <TasksPanel
-        status="failure"
-        timezone={TZ}
-        currentUserId={VIEWER_ID}
-      />,
+      <TasksPanel status="failure" timezone={TZ} currentUserId={VIEWER_ID} />,
     );
 
-    expect(screen.getByText(/load failure, not an empty queue/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(/load failure, not an empty queue/i),
+    ).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Retry" })).toHaveAttribute(
       "href",
       "/dashboard",
@@ -115,6 +113,13 @@ describe("<TasksPanel />", () => {
     // count badge = 2
     const badge = screen.getByText("2", { selector: "span" });
     expect(badge).toBeInTheDocument();
+    expect(screen.getByTestId("tasks-timezone-caption")).toHaveTextContent(
+      "Appointment times shown in America/Chicago.",
+    );
+    expect(screen.getByTestId("task-row-t1").firstElementChild).toHaveClass(
+      "flex-col",
+      "sm:flex-row",
+    );
   });
 
   it("renders all three buckets with separate section headers", () => {
@@ -342,6 +347,50 @@ describe("<TasksPanel />", () => {
     expect(screen.getByText(/2:00.*2:30 PM/)).toBeInTheDocument();
   });
 
+  it("marks an overnight appointment as ending on the next local day", () => {
+    render(
+      <TasksPanel
+        status="success"
+        overdue={[]}
+        today={[]}
+        upcoming={[
+          makeRow({
+            id: "overnight",
+            type: "appointment",
+            due_at: "2026-05-06T04:30:00.000Z",
+            end_at: "2026-05-06T05:15:00.000Z",
+          }),
+        ]}
+        timezone={TZ}
+        currentUserId={VIEWER_ID}
+      />,
+    );
+
+    expect(screen.getByText(/11:30 PM–12:15 AM → Wed/)).toBeInTheDocument();
+  });
+
+  it("disambiguates the repeated fall-back hour in Overview exactly like Calendar", () => {
+    render(
+      <TasksPanel
+        status="success"
+        overdue={[]}
+        today={[]}
+        upcoming={[
+          makeRow({
+            id: "fall-back",
+            type: "appointment",
+            due_at: "2026-11-01T06:30:00.000Z",
+            end_at: "2026-11-01T07:30:00.000Z",
+          }),
+        ]}
+        timezone={TZ}
+        currentUserId={VIEWER_ID}
+      />,
+    );
+
+    expect(screen.getByText(/1:30 AM CDT–1:30 AM CST/)).toBeInTheDocument();
+  });
+
   describe("near-midnight due labeling (upcoming bucket)", () => {
     afterEach(() => {
       vi.useRealTimers();
@@ -372,7 +421,9 @@ describe("<TasksPanel />", () => {
       );
 
       expect(screen.getByText(/Follow-up · today/)).toBeInTheDocument();
-      expect(screen.queryByText(/Follow-up · tomorrow/)).not.toBeInTheDocument();
+      expect(
+        screen.queryByText(/Follow-up · tomorrow/),
+      ).not.toBeInTheDocument();
     });
   });
 });

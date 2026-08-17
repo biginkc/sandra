@@ -27,12 +27,14 @@ import { WeekGrid } from "./week-grid";
 const ALL = "all";
 const ME = "me";
 
-const TAB_BASE = "rounded-full px-3 py-1.5 text-xs font-bold";
+const TAB_BASE =
+  "inline-flex min-h-11 items-center rounded-full px-3 py-1.5 text-xs font-bold";
 const TAB_ACTIVE = "bg-card text-foreground border-border border";
 const TAB_INACTIVE = "text-muted-foreground hover:text-foreground";
 
 /**
- * Calendar page's top-level client component: view switcher (Week/Agenda),
+ * Calendar page's top-level client component: view switcher
+ * (Week/Month/Agenda),
  * week navigation, an assignee filter (both roles — Codex round 1; a
  * member's default is their own items, not a lockout), "+ New", and the
  * WeekGrid/AgendaList surfaces below. Everything view-affecting lives in
@@ -41,13 +43,11 @@ const TAB_INACTIVE = "text-muted-foreground hover:text-foreground";
  * plain `<Link>` per the plan.
  *
  * Desktop/mobile split is CSS-only (`md:` classes), no separate route or
- * fetch: WeekGrid mounts only when `view==="week"` (hidden below `md` by
- * its wrapper); AgendaList mounts exactly once, always — visible whenever
- * `view!=="week"` on any screen, and on top of that always visible below
- * `md` regardless of `view` (the plan's "day = mobile agenda"). Mounting
- * AgendaList exactly once (never twice) avoids duplicate DOM nodes /
- * duplicate `data-testid`s that a naive "render both, hide one with CSS"
- * approach would produce.
+ * fetch: WeekGrid and MonthGrid are hidden below `md`; AgendaList mounts
+ * exactly once and represents the active range on a phone. In particular,
+ * a narrow Month deep link keeps Month visibly active and labels the
+ * 42-day list as a month agenda. Mounting AgendaList exactly once avoids
+ * duplicate DOM nodes / duplicate `data-testid`s.
  */
 export function CalendarView({
   view,
@@ -113,11 +113,21 @@ export function CalendarView({
   const memberOptions = Object.entries(assignees)
     .filter(([id]) => id !== currentUserId)
     .sort(([, a], [, b]) => a.localeCompare(b));
+  const monthLabel = month
+    ? new Intl.DateTimeFormat("en-US", {
+        timeZone: timezone,
+        month: "long",
+        year: "numeric",
+      }).format(new Date(`${month}-15T12:00:00.000Z`))
+    : null;
 
   return (
     <div className="flex flex-col gap-4" data-testid="calendar-view">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <nav className="flex items-center gap-1" aria-label="Calendar view">
+        <nav
+          className="flex w-full items-center gap-1 sm:w-auto"
+          aria-label="Calendar view"
+        >
           <Link
             href={buildHref({ view: "week" })}
             data-testid="calendar-view-week"
@@ -129,18 +139,15 @@ export function CalendarView({
           >
             Week
           </Link>
-          {/* Month is a desktop-only surface (Codex month-view round 2):
-              below md the grid can't render and agenda takes over, so
-              offering the tab there would select a view the phone cannot
-              show. Deep links to ?view=month on mobile still render the
-              agenda over the month range with range-neutral copy. */}
+          {/* The phone renders the month range as a chronological agenda,
+              not as a squeezed 7-column grid. Keep Month visible and
+              active so a ?view=month deep link never hides its true state. */}
           <Link
             href={buildHref({ view: "month" })}
             data-testid="calendar-view-month"
             aria-current={view === "month" || undefined}
             className={cn(
               TAB_BASE,
-              "hidden md:inline-block",
               view === "month" ? TAB_ACTIVE : TAB_INACTIVE,
             )}
           >
@@ -159,7 +166,7 @@ export function CalendarView({
           </Link>
         </nav>
 
-        <div className="flex items-center gap-3 text-xs font-bold">
+        <div className="flex w-full items-center justify-between gap-3 text-xs font-bold sm:w-auto sm:justify-start">
           {/* Month view steps the anchor by whole months (from the month
               key, NOT the grid's first cell, which can precede the month);
               week/agenda step by 7 days as before. */}
@@ -171,14 +178,14 @@ export function CalendarView({
                   : addDaysToDateKey(week, -7),
             })}
             data-testid="calendar-week-prev"
-            className="text-muted-foreground hover:text-foreground"
+            className="text-muted-foreground hover:text-foreground inline-flex min-h-11 items-center"
           >
             ← Prev
           </Link>
           <Link
             href={buildHref({ week: todayKey })}
             data-testid="calendar-week-today"
-            className="text-muted-foreground hover:text-foreground"
+            className="text-muted-foreground hover:text-foreground inline-flex min-h-11 items-center"
           >
             Today
           </Link>
@@ -190,38 +197,60 @@ export function CalendarView({
                   : addDaysToDateKey(week, 7),
             })}
             data-testid="calendar-week-next"
-            className="text-muted-foreground hover:text-foreground"
+            className="text-muted-foreground hover:text-foreground inline-flex min-h-11 items-center"
           >
             Next →
           </Link>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex w-full items-center gap-2 sm:w-auto">
           {/* Both roles get the filter (Codex round 1) — "own items" is
               a default for members, not a lockout, and the booking flow
               already lets a member act on a teammate's behalf. */}
           <Select value={assigneeValue} onValueChange={onAssigneeChange}>
             <SelectTrigger
               size="sm"
-              className="w-40"
+              className="min-h-11 min-w-0 flex-1 sm:w-40 sm:flex-none"
               aria-label="Filter calendar by assignee"
               data-testid="calendar-assignee-filter"
             >
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value={ALL}>Everyone</SelectItem>
-              <SelectItem value={ME}>Me</SelectItem>
+              <SelectItem value={ALL} className="min-h-11">
+                Everyone
+              </SelectItem>
+              <SelectItem value={ME} className="min-h-11">
+                Me
+              </SelectItem>
               {memberOptions.map(([id, email]) => (
-                <SelectItem key={id} value={id}>
+                <SelectItem key={id} value={id} className="min-h-11">
                   {email}
                 </SelectItem>
               ))}
             </SelectContent>
           </Select>
-          <NewBlockButton currentUserId={currentUserId} />
+          <div className="[&>button]:min-h-11">
+            <NewBlockButton currentUserId={currentUserId} />
+          </div>
         </div>
       </div>
+
+      <div
+        className="text-muted-foreground text-xs"
+        data-testid="calendar-timezone-caption"
+      >
+        All times shown in {timezone}.
+      </div>
+
+      {view === "month" && monthLabel ? (
+        <div
+          className="border-border bg-muted/40 rounded-xl border px-3 py-2 text-sm font-semibold md:hidden"
+          data-testid="calendar-mobile-month-state"
+        >
+          Month agenda for {monthLabel}
+        </div>
+      ) : null}
 
       {view === "month" && month ? (
         <div className="hidden md:block">

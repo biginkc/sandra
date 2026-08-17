@@ -47,14 +47,14 @@ export function TaskActionsRow({ taskId }: Props) {
   }
 
   return (
-    <div className="flex shrink-0 items-center gap-1.5">
+    <div className="flex w-full flex-wrap items-center gap-1.5 sm:w-auto sm:justify-end">
       <Button
         size="sm"
         variant="outline"
         disabled={pending}
         onClick={complete}
         data-testid={`task-done-${taskId}`}
-        className="h-7 px-2 text-xs"
+        className="min-h-11 px-3 text-xs"
       >
         <CheckIcon className="mr-1 size-3.5" />
         Done
@@ -67,7 +67,7 @@ export function TaskActionsRow({ taskId }: Props) {
               variant="outline"
               disabled={pending}
               data-testid={`task-snooze-${taskId}`}
-              className="h-7 px-2 text-xs"
+              className="min-h-11 px-3 text-xs"
               aria-label="Snooze task"
             >
               <ClockIcon className="mr-1 size-3.5" />
@@ -82,7 +82,7 @@ export function TaskActionsRow({ taskId }: Props) {
               key={preset.label}
               onClick={() => snooze(preset.days)}
               disabled={pending}
-              className="hover:bg-muted flex w-full items-center rounded-md px-2 py-1.5 text-left text-xs font-medium transition-colors disabled:opacity-50"
+              className="hover:bg-muted flex min-h-11 w-full items-center rounded-md px-2 py-1.5 text-left text-xs font-medium transition-colors disabled:opacity-50"
               data-testid={`task-snooze-${preset.days}d-${taskId}`}
             >
               {preset.label}

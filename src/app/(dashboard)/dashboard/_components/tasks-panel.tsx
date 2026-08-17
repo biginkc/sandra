@@ -1,6 +1,7 @@
 import Link from "next/link";
 
 import { humanDueDate } from "@/lib/notifications/format";
+import { formatTimeRange } from "@/lib/time/format-time-range";
 import {
   AppointmentOutcomeRow,
   AppointmentUpcomingActions,
@@ -52,8 +53,8 @@ export function TasksPanel(props: Props) {
       >
         <h2 className="text-foreground text-base font-bold">My Tasks</h2>
         <p className="text-muted-foreground mt-3 text-sm">
-          Tasks couldn&apos;t load. This is a load failure, not an empty queue
-          — your tasks may still exist.
+          Tasks couldn&apos;t load. This is a load failure, not an empty queue —
+          your tasks may still exist.
         </p>
         <a
           href="/dashboard"
@@ -91,7 +92,15 @@ export function TasksPanel(props: Props) {
       data-testid="tasks-panel"
     >
       <div className="mb-4 flex items-center justify-between">
-        <h2 className="text-foreground text-base font-bold">My Tasks</h2>
+        <div>
+          <h2 className="text-foreground text-base font-bold">My Tasks</h2>
+          <p
+            className="text-muted-foreground mt-0.5 text-xs"
+            data-testid="tasks-timezone-caption"
+          >
+            Appointment times shown in {timezone}.
+          </p>
+        </div>
         <span className="text-muted-foreground rounded-full bg-stone-100 px-2.5 py-1 text-xs font-bold tabular-nums">
           {total}
         </span>
@@ -149,24 +158,6 @@ function taskPrimaryLabel(t: TaskRow): string {
   return t.title;
 }
 
-/** "2:00–2:30 PM" in the panel's timezone; just the start time when
- *  `end_at` is missing (shouldn't happen for a real appointment, but a
- *  malformed row degrades gracefully rather than throwing). */
-function formatTimeRange(
-  dueAt: string,
-  endAt: string | null,
-  timeZone: string,
-): string {
-  const fmt = new Intl.DateTimeFormat("en-US", {
-    timeZone,
-    hour: "numeric",
-    minute: "2-digit",
-  });
-  const start = fmt.format(new Date(dueAt));
-  if (!endAt) return start;
-  return `${start}–${fmt.format(new Date(endAt))}`;
-}
-
 /** Subtitle for an appointment row: the usual day label (today / overdue
  *  / relative date) plus the appointment's own time range, so a row in
  *  the (possibly multi-day) Upcoming bucket still reads as a specific
@@ -204,7 +195,9 @@ function Section({
     <div className="mb-4 last:mb-0">
       <div
         className={`mb-2 text-[10px] font-bold tracking-widest uppercase ${
-          variant === "overdue" ? "text-alert-critical" : "text-muted-foreground"
+          variant === "overdue"
+            ? "text-alert-critical"
+            : "text-muted-foreground"
         }`}
       >
         {label}
@@ -220,7 +213,7 @@ function Section({
                 {primary}
               </div>
               <div className="text-muted-foreground truncate text-xs font-medium">
-                {(TYPE_LABELS[t.type] ?? "Task")} ·{" "}
+                {TYPE_LABELS[t.type] ?? "Task"} ·{" "}
                 {isAppointment
                   ? appointmentSubtitle(t, variant, timezone)
                   : variant === "today"
@@ -254,17 +247,17 @@ function Section({
               className="py-2.5 first:pt-0 last:pb-0"
               data-testid={`task-row-${t.id}`}
             >
-              <div className="flex items-center justify-between gap-3">
+              <div className="flex flex-col items-stretch gap-3 sm:flex-row sm:items-center sm:justify-between">
                 {href ? (
                   <Link
                     href={href}
-                    className="min-w-0 flex-1 hover:underline"
+                    className="inline-flex min-h-11 min-w-0 flex-1 flex-col justify-center hover:underline"
                   >
                     {rowContent}
                   </Link>
                 ) : (
                   <div
-                    className="min-w-0 flex-1"
+                    className="flex min-h-11 min-w-0 flex-1 flex-col justify-center"
                     data-testid={`task-row-${t.id}-unlinked`}
                   >
                     {rowContent}
