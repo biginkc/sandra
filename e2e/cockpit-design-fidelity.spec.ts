@@ -196,6 +196,7 @@ test.describe("Messages cockpit — design fidelity", () => {
     const deferredDnc = page.getByTestId("dispo-dnc-deferred");
     await expect(deferredDnc).toContainText("Permanent DNC unavailable here");
     await expect(deferredDnc).toBeDisabled();
+    await expect(page.getByTestId("dispo-dnc")).toHaveCount(0);
     const moveToLead = page.getByTestId("message-move-to-lead");
     await expect(moveToLead).toContainText("Move to Lead");
     await expect(moveToLead).toBeDisabled();

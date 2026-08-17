@@ -123,7 +123,13 @@ test("reply from cockpit shows up on the lead detail page (test 29)", async ({
 
   // Switch to lead detail.
   await page.goto(`/leads/${propertyId}`);
-  await expect(page.getByText(reply)).toBeVisible();
+  const leadBubble = page
+    .getByTestId("messages-thread-msg")
+    .filter({ hasText: reply });
+  await expect(leadBubble).toBeVisible();
+  await expect(leadBubble.getByTestId("messages-thread-delivery-status")).toHaveText(
+    "Queued · in Outbox",
+  );
 });
 
 test("reply from lead detail shows up on the cockpit (test 30)", async ({
@@ -154,7 +160,13 @@ test("reply from lead detail shows up on the cockpit (test 30)", async ({
   }).toPass({ timeout: 10_000 });
 
   await page.goto(`/messages?thread=${encodeURIComponent(threadId)}`);
-  await expect(page.getByTestId("inbox-detail-panel")).toContainText(reply);
+  const cockpitBubble = page
+    .getByTestId("messages-thread-msg")
+    .filter({ hasText: reply });
+  await expect(cockpitBubble).toBeVisible();
+  await expect(
+    cockpitBubble.getByTestId("messages-thread-delivery-status"),
+  ).toHaveText("Queued · in Outbox");
 });
 
 test("Realtime cross-surface: both surfaces update from the other (test 31)", async ({
