@@ -506,6 +506,173 @@ export default async function LeadDetailPage({
         nowMs={requestNowMs}
       />
 
+      <div
+        className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4"
+        data-testid="lead-record-summary"
+      >
+        <Section title="Property">
+          {zillowHref ? (
+            <a
+              href={zillowHref}
+              target="_blank"
+              rel="noopener noreferrer"
+              data-testid="zillow-link-panel"
+              className="border-border flex items-center justify-between gap-2 border-b px-4 py-2 text-xs font-medium text-[#1c1917] transition-colors hover:bg-[#f5f5f4]"
+            >
+              <span>View on Zillow</span>
+              <ExternalLink
+                className="h-3.5 w-3.5 text-[#78716c]"
+                aria-hidden
+              />
+            </a>
+          ) : null}
+          <Row label="Beds" value={lead.beds} />
+          <Row label="Baths" value={lead.baths} />
+          <Row label="Square feet" value={lead.sqft} />
+          <Row label="Year built" value={lead.year_built} />
+          <Row
+            label="Listing price"
+            value={lead.listing_price}
+            format="currency"
+          />
+          <Row label="ARV" value={lead.arv} format="currency" />
+          <Row
+            label="Repair estimate"
+            value={lead.repair_estimate}
+            format="currency"
+          />
+          <Row
+            label="Mortgage balance"
+            value={lead.mortgage_balance}
+            format="currency"
+          />
+          <Row
+            label="Equity (est.)"
+            value={lead.equity_estimate}
+            format="currency"
+          />
+          <Row label="Source" value={lead.source} />
+        </Section>
+
+        <Section title="Address quality (USPS)">
+          <Row label="CASS status" value={lead.cass_status} />
+          <Row
+            label="Last verified"
+            value={formatDate(lead.cass_verified_at)}
+          />
+          <Row label="Vacant" value={formatBool(lead.is_vacant)} />
+          <Row label="Vacant since" value={formatDate(lead.vacant_since)} />
+          <Row label="Seasonal" value={formatBool(lead.is_seasonal)} />
+          <Row label="Residential" value={formatBool(lead.is_residential)} />
+          <Row label="Owner moved" value={formatDate(lead.owner_moved_at)} />
+          <Row
+            label="NCOA verified"
+            value={formatDate(lead.ncoa_verified_at)}
+          />
+        </Section>
+
+        <Section title="Homeowner">
+          {lead.homeowner ? (
+            <>
+              <Row
+                label="Name"
+                value={
+                  lead.homeowner.contact_type === "entity"
+                    ? lead.homeowner.entity_name
+                    : [lead.homeowner.first_name, lead.homeowner.last_name]
+                        .filter(Boolean)
+                        .join(" ")
+                }
+              />
+              <div className="flex items-center justify-between gap-3">
+                <Row label="Phone 1" value={lead.homeowner.phone_1} mono />
+                <SoftphoneLeadButton lead={detailSoftphoneLead} />
+              </div>
+              <Row label="Phone 2" value={lead.homeowner.phone_2} mono />
+              <Row label="Phone 3" value={lead.homeowner.phone_3} mono />
+              <Row label="Email" value={lead.homeowner.email} />
+              <Row
+                label="Mailing address"
+                value={(() => {
+                  const d = lead.homeowner.homeowner_details;
+                  if (!d) return null;
+                  // If mailing_address already contains commas it's a full
+                  // combined string (e.g. DealMachine "Primary Mailing Address").
+                  // Show it alone to avoid duplicating city/state/zip.
+                  if (d.mailing_address?.includes(","))
+                    return d.mailing_address;
+                  return (
+                    [
+                      d.mailing_address,
+                      d.mailing_city,
+                      d.mailing_state,
+                      d.mailing_zip,
+                    ]
+                      .filter(Boolean)
+                      .join(", ") || null
+                  );
+                })()}
+              />
+              <Row
+                label="SMS consent"
+                value={`${smsPresentation.consentLabel} — ${smsPresentation.consentDetail}`}
+                testId="lead-sms-consent-row"
+              />
+              <Row
+                label="SMS restriction"
+                value={
+                  smsPresentation.smsRestricted
+                    ? `SMS disabled — ${smsPresentation.consentLabel}`
+                    : "No SMS opt-out recorded"
+                }
+                testId="lead-sms-restriction-row"
+              />
+              {smsPresentation.readFailed ? (
+                <div className="p-3">
+                  <LeadLoadFailure
+                    title="SMS consent status is incomplete"
+                    detail="One or more consent sources failed to load. Retry before relying on this status."
+                    testId="lead-sms-consent-load-failure"
+                  />
+                </div>
+              ) : null}
+              <Row
+                label="Contact do-not-contact flag"
+                value={formatBool(lead.homeowner.do_not_contact)}
+              />
+            </>
+          ) : (
+            <EmptyRow text="No homeowner linked yet" />
+          )}
+        </Section>
+
+        <Section title="Listing agent">
+          {lead.agent ? (
+            <>
+              <Row
+                label="Name"
+                value={[lead.agent.first_name, lead.agent.last_name]
+                  .filter(Boolean)
+                  .join(" ")}
+              />
+              <Row label="Phone" value={lead.agent.phone_1} mono />
+              <Row label="Email" value={lead.agent.email} />
+              <Row
+                label="Brokerage"
+                value={lead.agent.agent_details?.brokerage}
+              />
+              <Row
+                label="License #"
+                value={lead.agent.agent_details?.license_number}
+                mono
+              />
+            </>
+          ) : (
+            <EmptyRow text="No agent linked. Trigger agent enrichment from this page (coming soon)." />
+          )}
+        </Section>
+      </div>
+
       <LeadIdentityActions
         workingState={
           <>
@@ -707,172 +874,11 @@ export default async function LeadDetailPage({
         </div>
       </section>
 
-      <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
-        <Section title="Property">
-          {zillowHref ? (
-            <a
-              href={zillowHref}
-              target="_blank"
-              rel="noopener noreferrer"
-              data-testid="zillow-link-panel"
-              className="border-border flex items-center justify-between gap-2 border-b px-4 py-2 text-xs font-medium text-[#1c1917] transition-colors hover:bg-[#f5f5f4]"
-            >
-              <span>View on Zillow</span>
-              <ExternalLink
-                className="h-3.5 w-3.5 text-[#78716c]"
-                aria-hidden
-              />
-            </a>
-          ) : null}
-          <Row label="Beds" value={lead.beds} />
-          <Row label="Baths" value={lead.baths} />
-          <Row label="Square feet" value={lead.sqft} />
-          <Row label="Year built" value={lead.year_built} />
-          <Row
-            label="Listing price"
-            value={lead.listing_price}
-            format="currency"
-          />
-          <Row label="ARV" value={lead.arv} format="currency" />
-          <Row
-            label="Repair estimate"
-            value={lead.repair_estimate}
-            format="currency"
-          />
-          <Row
-            label="Mortgage balance"
-            value={lead.mortgage_balance}
-            format="currency"
-          />
-          <Row
-            label="Equity (est.)"
-            value={lead.equity_estimate}
-            format="currency"
-          />
-          <Row label="Source" value={lead.source} />
+      {lead.notes ? (
+        <Section title="Imported notes (legacy)">
+          <div className="whitespace-pre-wrap p-3 text-sm">{lead.notes}</div>
         </Section>
-
-        <Section title="Address quality (USPS)">
-          <Row label="CASS status" value={lead.cass_status} />
-          <Row
-            label="Last verified"
-            value={formatDate(lead.cass_verified_at)}
-          />
-          <Row label="Vacant" value={formatBool(lead.is_vacant)} />
-          <Row label="Vacant since" value={formatDate(lead.vacant_since)} />
-          <Row label="Seasonal" value={formatBool(lead.is_seasonal)} />
-          <Row label="Residential" value={formatBool(lead.is_residential)} />
-          <Row label="Owner moved" value={formatDate(lead.owner_moved_at)} />
-          <Row
-            label="NCOA verified"
-            value={formatDate(lead.ncoa_verified_at)}
-          />
-        </Section>
-
-        <Section title="Homeowner">
-          {lead.homeowner ? (
-            <>
-              <Row
-                label="Name"
-                value={
-                  lead.homeowner.contact_type === "entity"
-                    ? lead.homeowner.entity_name
-                    : [lead.homeowner.first_name, lead.homeowner.last_name]
-                        .filter(Boolean)
-                        .join(" ")
-                }
-              />
-              <div className="flex items-center justify-between gap-3"><Row label="Phone 1" value={lead.homeowner.phone_1} mono /><SoftphoneLeadButton lead={detailSoftphoneLead} /></div>
-              <Row label="Phone 2" value={lead.homeowner.phone_2} mono />
-              <Row label="Phone 3" value={lead.homeowner.phone_3} mono />
-              <Row label="Email" value={lead.homeowner.email} />
-              <Row
-                label="Mailing address"
-                value={(() => {
-                  const d = lead.homeowner.homeowner_details;
-                  if (!d) return null;
-                  // If mailing_address already contains commas it's a full
-                  // combined string (e.g. DealMachine "Primary Mailing Address").
-                  // Show it alone to avoid duplicating city/state/zip.
-                  if (d.mailing_address?.includes(","))
-                    return d.mailing_address;
-                  return (
-                    [
-                      d.mailing_address,
-                      d.mailing_city,
-                      d.mailing_state,
-                      d.mailing_zip,
-                    ]
-                      .filter(Boolean)
-                      .join(", ") || null
-                  );
-                })()}
-              />
-              <Row
-                label="SMS consent"
-                value={`${smsPresentation.consentLabel} — ${smsPresentation.consentDetail}`}
-                testId="lead-sms-consent-row"
-              />
-              <Row
-                label="SMS restriction"
-                value={
-                  smsPresentation.smsRestricted
-                    ? `SMS disabled — ${smsPresentation.consentLabel}`
-                    : "No SMS opt-out recorded"
-                }
-                testId="lead-sms-restriction-row"
-              />
-              {smsPresentation.readFailed ? (
-                <div className="p-3">
-                  <LeadLoadFailure
-                    title="SMS consent status is incomplete"
-                    detail="One or more consent sources failed to load. Retry before relying on this status."
-                    testId="lead-sms-consent-load-failure"
-                  />
-                </div>
-              ) : null}
-              <Row
-                label="Contact do-not-contact flag"
-                value={formatBool(lead.homeowner.do_not_contact)}
-              />
-            </>
-          ) : (
-            <EmptyRow text="No homeowner linked yet" />
-          )}
-        </Section>
-
-        <Section title="Listing agent">
-          {lead.agent ? (
-            <>
-              <Row
-                label="Name"
-                value={[lead.agent.first_name, lead.agent.last_name]
-                  .filter(Boolean)
-                  .join(" ")}
-              />
-              <Row label="Phone" value={lead.agent.phone_1} mono />
-              <Row label="Email" value={lead.agent.email} />
-              <Row
-                label="Brokerage"
-                value={lead.agent.agent_details?.brokerage}
-              />
-              <Row
-                label="License #"
-                value={lead.agent.agent_details?.license_number}
-                mono
-              />
-            </>
-          ) : (
-            <EmptyRow text="No agent linked. Trigger agent enrichment from this page (coming soon)." />
-          )}
-        </Section>
-
-        {lead.notes ? (
-          <Section title="Imported notes (legacy)">
-            <div className="whitespace-pre-wrap p-3 text-sm">{lead.notes}</div>
-          </Section>
-        ) : null}
-      </div>
+      ) : null}
 
       <div>
         <div className="text-muted-foreground mb-2 text-xs font-semibold tracking-wide uppercase">
