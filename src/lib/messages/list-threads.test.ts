@@ -5,6 +5,7 @@ import type { Database } from "@/lib/supabase/types";
 
 import {
   countNeedsOutcomeThreads,
+  listThreadPage,
   listThreads,
   looksLikeTestTraffic,
 } from "./list-threads";
@@ -160,6 +161,149 @@ function makeStub(opts: {
 }
 
 describe("listThreads — chunking", () => {
+  it("loads one bounded server-filtered page with full-window counts", async () => {
+    const rpc = vi.fn(async () => ({
+      data: {
+        rows: [
+          {
+            thread_id: "11111111-1111-4111-8111-111111111111",
+            contact_id: "22222222-2222-4222-8222-222222222222",
+            contact_name: "Seller",
+            thread_customer_phone: "+18165550100",
+            thread_business_phone: "+18165550200",
+            property_id: "33333333-3333-4333-8333-333333333333",
+            property_address: "123 Main St, Kansas City, MO",
+            property_status: "prospect",
+            outreach_dispo: null,
+            is_dnc_locked: false,
+            assignee_id: "44444444-4444-4444-8444-444444444444",
+            last_message_body: "Hello",
+            last_message_direction: "inbound",
+            last_message_at: "2026-08-17T12:00:00.000Z",
+            unread_count: 1,
+            has_inbound: true,
+            needs_human_attention: false,
+            escalation_reason: null,
+            is_opted_out: false,
+            is_test_traffic: false,
+            needs_outcome: true,
+            ai_responder_status: null,
+            ai_responder_reason: null,
+            ai_responder_status_at: null,
+            ai_last_delivery_status: null,
+            ai_last_delivery_error: null,
+          },
+        ],
+        counts: {
+          all: 53_503,
+          mine: 220,
+          unassigned: 52_000,
+          unread: 45,
+          escalated: 3,
+          dispo: 900,
+          needs_outcome: 17,
+        },
+        total: 45,
+        hidden_count: 8,
+        limit: 200,
+        offset: 0,
+      },
+      error: null,
+    }));
+    const supabase = { rpc } as unknown as SupabaseClient<Database>;
+
+    const page = await listThreadPage(supabase, {
+      filter: "unread",
+      currentUserId: "44444444-4444-4444-8444-444444444444",
+      includeThreadId: null,
+      hideNoise: true,
+      page: 1,
+    });
+
+    expect(page.counts.all).toBe(53_503);
+    expect(page.total).toBe(45);
+    expect(page.hiddenCount).toBe(8);
+    expect(page.threads).toHaveLength(1);
+    expect(page.threads[0].needsOutcome).toBe(true);
+    expect(rpc).toHaveBeenCalledWith(
+      "sms_inbox_thread_page_snapshot",
+      expect.objectContaining({
+        p_filter: "unread",
+        p_limit: 200,
+        p_offset: 0,
+      }),
+    );
+  });
+
+  it("fails closed on a paged snapshot tenant collision", async () => {
+    const supabase = {
+      rpc: vi.fn(async () => ({
+        data: { __error: "cross_org_conversation_id_ambiguity", count: 1 },
+        error: null,
+      })),
+    } as unknown as SupabaseClient<Database>;
+
+    await expect(
+      listThreadPage(supabase, {
+        filter: "all",
+        currentUserId: null,
+        includeThreadId: null,
+        hideNoise: true,
+        page: 1,
+      }),
+    ).rejects.toThrow("cross_org_conversation_id_ambiguity");
+  });
+
+  it("clamps non-finite and oversized pages before the PostgreSQL integer offset", async () => {
+    const rpc = vi.fn(async (_name: string, args: { p_limit: number }) => ({
+      data: {
+        rows: [],
+        counts: {
+          all: 0,
+          mine: 0,
+          unassigned: 0,
+          unread: 0,
+          escalated: 0,
+          dispo: 0,
+          needs_outcome: 0,
+        },
+        total: 0,
+        hidden_count: 0,
+        limit: args.p_limit,
+        offset: 0,
+      },
+      error: null,
+    }));
+    const supabase = { rpc } as unknown as SupabaseClient<Database>;
+
+    await listThreadPage(supabase, {
+      filter: "all",
+      currentUserId: null,
+      includeThreadId: null,
+      hideNoise: true,
+      page: Number.POSITIVE_INFINITY,
+      pageSize: 500,
+    });
+    expect(rpc).toHaveBeenLastCalledWith(
+      "sms_inbox_thread_page_snapshot",
+      expect.objectContaining({ p_offset: 0 }),
+    );
+
+    await listThreadPage(supabase, {
+      filter: "all",
+      currentUserId: null,
+      includeThreadId: null,
+      hideNoise: true,
+      page: Number.MAX_SAFE_INTEGER,
+      pageSize: 500,
+    });
+    const maxSafeIntegerOffset = Math.floor(2_147_483_647 / 500) * 500;
+    expect(rpc).toHaveBeenLastCalledWith(
+      "sms_inbox_thread_page_snapshot",
+      expect.objectContaining({ p_offset: maxSafeIntegerOffset }),
+    );
+  });
+
   it("fails closed when the server reports the snapshot thread ceiling", async () => {
     const supabase = {
       rpc: vi.fn(async () => ({

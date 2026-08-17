@@ -10,7 +10,7 @@ import {
 } from "@tests/integration/fixtures/multi-user";
 import { resetTenantTables } from "@tests/integration/reset";
 
-import { listThreads } from "./list-threads";
+import { listThreadPage, listThreads } from "./list-threads";
 import { ensureConversationIdForThread } from "./threading";
 
 const supabase = createTestClient();
@@ -116,8 +116,8 @@ describe("listThreads (integration)", () => {
     await resetTenantTables(supabase);
   });
 
-  it("returns every thread and filter fact beyond PostgREST's 1,000-row cap", async () => {
-    const total = 1_005;
+  it("pages truthfully beyond the former 20,000-thread production ceiling", async () => {
+    const total = 20_005;
     const contacts = Array.from({ length: total }, (_, index) => ({
       id: crypto.randomUUID(),
       first_name: `Scale ${index}`,
@@ -147,28 +147,161 @@ describe("listThreads (integration)", () => {
       read_at: index % 2 === 0 ? null : new Date().toISOString(),
     }));
 
-    for (let start = 0; start < total; start += 250) {
+    for (let start = 0; start < total; start += 500) {
       const { error: contactError } = await supabase
         .from("contacts")
-        .insert(contacts.slice(start, start + 250));
+        .insert(contacts.slice(start, start + 500));
       if (contactError) throw contactError;
       const { error: propertyError } = await supabase
         .from("properties")
-        .insert(properties.slice(start, start + 250));
+        .insert(properties.slice(start, start + 500));
       if (propertyError) throw propertyError;
       const { error: messageError } = await supabase
         .from("messages")
-        .insert(messages.slice(start, start + 250));
+        .insert(messages.slice(start, start + 500));
       if (messageError) throw messageError;
     }
 
-    const threads = await listThreads(supabase, {});
-    expect(threads).toHaveLength(total);
-    expect(threads.filter((thread) => thread.unreadCount > 0)).toHaveLength(
-      Math.ceil(total / 2),
+    const page = await listThreadPage(supabase, {
+      filter: "all",
+      currentUserId: null,
+      includeThreadId: null,
+      hideNoise: false,
+      page: 1,
+    });
+    expect(page.counts.all).toBe(total);
+    expect(page.counts.unread).toBe(Math.ceil(total / 2));
+    expect(page.counts.needs_outcome).toBe(total);
+    expect(page.total).toBe(total);
+    expect(page.threads).toHaveLength(200);
+    expect(page.threads[0]?.lastMessageBody).toBe(`scale message ${total - 1}`);
+
+    const secondPage = await listThreadPage(supabase, {
+      filter: "all",
+      currentUserId: null,
+      includeThreadId: null,
+      hideNoise: false,
+      page: 2,
+    });
+    const selectedOnSecondPage = secondPage.threads[50]?.threadId;
+    expect(selectedOnSecondPage).toBeDefined();
+    const selectedSecondPage = await listThreadPage(supabase, {
+      filter: "all",
+      currentUserId: null,
+      includeThreadId: selectedOnSecondPage ?? null,
+      hideNoise: false,
+      page: 2,
+    });
+    expect(
+      selectedSecondPage.threads.some(
+        (thread) => thread.threadId === selectedOnSecondPage,
+      ),
+    ).toBe(true);
+  }, 180_000);
+
+  it("keeps full-window counts, active filters, assignment, and hidden DNC in parity", async () => {
+    const viewerId = await mintTestUser(
+      `thread-page-counts-${crypto.randomUUID()}@example.com`,
     );
-    expect(threads.filter((thread) => thread.needsOutcome)).toHaveLength(total);
-    expect(threads[0]?.lastMessageBody).toBe(`scale message ${total - 1}`);
+    const normal = await seedConversation({
+      contactName: "Normal",
+      phone: "+18165554101",
+      messages: [{ direction: "inbound", body: "normal unread" }],
+    });
+    const dispositioned = await seedConversation({
+      contactName: "Dispositioned",
+      phone: "+18165554102",
+      messages: [
+        { direction: "inbound", body: "has outcome", read: true },
+      ],
+    });
+    const escalated = await seedConversation({
+      contactName: "Escalated",
+      phone: "+18165554103",
+      messages: [{ direction: "inbound", body: "needs a human" }],
+    });
+    const restricted = await seedConversation({
+      contactName: "Restricted",
+      phone: "+18165554104",
+      messages: [{ direction: "inbound", body: "stop" }],
+    });
+
+    const { error: dispoError } = await supabase
+      .from("properties")
+      .update({ outreach_dispo: "nurture" })
+      .eq("id", dispositioned.propertyId);
+    if (dispoError) throw dispoError;
+    const { error: assignError } = await supabase
+      .from("properties")
+      .update({ assigned_user_id: viewerId })
+      .eq("id", escalated.propertyId);
+    if (assignError) throw assignError;
+    const { data: escalatedMessage, error: escalatedMessageError } =
+      await supabase
+        .from("messages")
+        .select("conversation_id")
+        .eq("property_id", escalated.propertyId)
+        .single();
+    if (escalatedMessageError || !escalatedMessage?.conversation_id) {
+      throw escalatedMessageError ?? new Error("missing escalated conversation");
+    }
+    const { error: escalationError } = await supabase
+      .from("message_threads")
+      .update({ ai_responder_status: "escalated" })
+      .eq("conversation_id", escalatedMessage.conversation_id);
+    if (escalationError) throw escalationError;
+    const { error: dncError } = await supabase
+      .from("contacts")
+      .update({ do_not_contact: true })
+      .eq("id", restricted.contactId);
+    if (dncError) throw dncError;
+
+    const all = await listThreadPage(supabase, {
+      filter: "all",
+      currentUserId: viewerId,
+      includeThreadId: null,
+      hideNoise: true,
+      page: 1,
+    });
+    expect(all.counts).toMatchObject({
+      all: 3,
+      mine: 1,
+      unassigned: 2,
+      unread: 2,
+      escalated: 1,
+      dispo: 1,
+      needs_outcome: 2,
+    });
+    expect(all.total).toBe(3);
+    expect(all.hiddenCount).toBe(1);
+    expect(all.threads.map((thread) => thread.contactId)).not.toContain(
+      restricted.contactId,
+    );
+
+    const dispositionPage = await listThreadPage(supabase, {
+      filter: "dispo",
+      currentUserId: viewerId,
+      includeThreadId: null,
+      hideNoise: true,
+      page: 1,
+    });
+    expect(dispositionPage.total).toBe(1);
+    expect(dispositionPage.threads[0]?.contactId).toBe(
+      dispositioned.contactId,
+    );
+
+    const withRestricted = await listThreadPage(supabase, {
+      filter: "all",
+      currentUserId: viewerId,
+      includeThreadId: null,
+      hideNoise: false,
+      page: 1,
+    });
+    expect(withRestricted.counts.all).toBe(4);
+    expect(withRestricted.hiddenCount).toBe(0);
+    expect(withRestricted.threads.map((thread) => thread.contactId)).toContain(
+      normal.contactId,
+    );
   });
 
   it("returns only active-member tenant threads and fails closed after suspension", async () => {
@@ -458,10 +591,10 @@ describe("listThreads (integration)", () => {
               property_id: propertyA,
               conversation_id: conversationId,
               from_address: "+18165554992",
-          to_address: "+18162804181",
-          body: "collision A",
-          created_at: new Date().toISOString(),
-        },
+              to_address: "+18162804181",
+              body: "collision A",
+              created_at: new Date().toISOString(),
+            },
             {
               org_id: TEST_ORG_B_ID,
               channel: "sms",

@@ -117,6 +117,36 @@ export type ListThreadsOpts = {
   needsOutcomeOnly?: boolean;
 };
 
+export type ThreadPageFilter =
+  | "all"
+  | "mine"
+  | "unassigned"
+  | "unread"
+  | "escalated"
+  | "dispo"
+  | "needs_outcome";
+
+export type ThreadPageCounts = Record<ThreadPageFilter, number>;
+
+export type ThreadPage = {
+  threads: Thread[];
+  counts: ThreadPageCounts;
+  total: number;
+  hiddenCount: number;
+  page: number;
+  pageSize: number;
+};
+
+export type ListThreadPageOpts = {
+  filter: ThreadPageFilter;
+  currentUserId: string | null;
+  includeThreadId: string | null;
+  hideNoise: boolean;
+  page: number;
+  pageSize?: number;
+  sinceDays?: number;
+};
+
 export type NeedsOutcomeCountOpts = {
   /** Window for "active" conversations. Defaults to 90 days. */
   sinceDays?: number;
@@ -385,6 +415,63 @@ export async function listThreads(
   return threads;
 }
 
+/**
+ * Production-scale inbox reader. PostgreSQL computes counts over the complete
+ * active window, applies the selected filter, and returns one bounded page.
+ * This prevents a bulk campaign from turning the Messages route into a
+ * tens-of-thousands-row JSON response while keeping every chip count truthful.
+ */
+export async function listThreadPage(
+  supabase: SupabaseClient<Database>,
+  opts: ListThreadPageOpts,
+): Promise<ThreadPage> {
+  const sinceDays = opts.sinceDays ?? 90;
+  const pageSize = Math.min(Math.max(opts.pageSize ?? 200, 1), 500);
+  // p_offset is a PostgreSQL integer. Clamp adversarial URL values before
+  // multiplying so a crafted ?inboxPage cannot turn a valid route into an
+  // RPC cast error.
+  const rawPage = Number.isFinite(opts.page) ? Math.trunc(opts.page) : 1;
+  const maxPageForIntegerOffset =
+    Math.floor(2_147_483_647 / pageSize) + 1;
+  const requestedPage = Math.min(
+    Math.max(rawPage, 1),
+    maxPageForIntegerOffset,
+  );
+  const cutoff = new Date(
+    Date.now() - sinceDays * 24 * 60 * 60 * 1000,
+  ).toISOString();
+
+  const { data, error } = await supabase.rpc("sms_inbox_thread_page_snapshot", {
+    p_cutoff: cutoff,
+    p_filter: opts.filter,
+    p_assignee_id: opts.currentUserId,
+    p_include_thread_id: opts.includeThreadId,
+    p_hide_noise: opts.hideNoise,
+    p_limit: pageSize,
+    p_offset: (requestedPage - 1) * pageSize,
+  });
+  if (error) {
+    throw new Error(`sms_inbox_thread_page_snapshot: ${error.message}`);
+  }
+  if (!isThreadPageDocument(data)) {
+    if (isSnapshotError(data)) {
+      throw new Error(
+        `sms_inbox_thread_page_snapshot: ${String(data.__error)}`,
+      );
+    }
+    throw new Error("sms_inbox_thread_page_snapshot: invalid response");
+  }
+
+  return {
+    threads: mapThreadSnapshot(data.rows, {}),
+    counts: data.counts,
+    total: data.total,
+    hiddenCount: data.hidden_count,
+    page: Math.floor(data.offset / data.limit) + 1,
+    pageSize: data.limit,
+  };
+}
+
 function parseAiResponderStatus(
   value: string | null,
 ): AiResponderThreadStatus | null {
@@ -580,6 +667,78 @@ async function fetchThreadSnapshot(
     throw new Error("sms_inbox_thread_snapshot: invalid response");
   }
   return data as unknown as ThreadSnapshotRow[];
+}
+
+type ThreadPageDocument = {
+  rows: ThreadSnapshotRow[];
+  counts: ThreadPageCounts;
+  total: number;
+  hidden_count: number;
+  limit: number;
+  offset: number;
+};
+
+function isSnapshotError(value: unknown): value is { __error: unknown } {
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    "__error" in value
+  );
+}
+
+function isThreadPageDocument(value: unknown): value is ThreadPageDocument {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  const document = value as Record<string, unknown>;
+  if (
+    !Array.isArray(document.rows) ||
+    document.counts === null ||
+    typeof document.counts !== "object" ||
+    Array.isArray(document.counts) ||
+    !Number.isInteger(document.total) ||
+    !Number.isInteger(document.hidden_count) ||
+    !Number.isInteger(document.limit) ||
+    !Number.isInteger(document.offset) ||
+    (document.limit as number) < 1 ||
+    (document.offset as number) < 0
+  ) {
+    return false;
+  }
+  const counts = document.counts as Record<string, unknown>;
+  return (
+    [
+      "all",
+      "mine",
+      "unassigned",
+      "unread",
+      "escalated",
+      "dispo",
+      "needs_outcome",
+    ].every((key) => Number.isInteger(counts[key])) &&
+    document.rows.every(isThreadSnapshotRow)
+  );
+}
+
+function isThreadSnapshotRow(value: unknown): value is ThreadSnapshotRow {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  const row = value as Record<string, unknown>;
+  return (
+    typeof row.thread_id === "string" &&
+    typeof row.contact_id === "string" &&
+    typeof row.last_message_body === "string" &&
+    (row.last_message_direction === "inbound" ||
+      row.last_message_direction === "outbound") &&
+    typeof row.last_message_at === "string" &&
+    Number.isInteger(row.unread_count) &&
+    typeof row.has_inbound === "boolean" &&
+    typeof row.is_dnc_locked === "boolean" &&
+    typeof row.needs_human_attention === "boolean" &&
+    typeof row.is_opted_out === "boolean"
+  );
 }
 
 function mapThreadSnapshot(

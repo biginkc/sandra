@@ -240,6 +240,32 @@ describe("<CockpitView /> URL deep-linking", () => {
     expect(inbox).toHaveAttribute("aria-selected", "false");
   });
 
+  it("navigates bounded Inbox pages while preserving the active filter", () => {
+    navigationMocks.search = "filter=unread&inboxPage=2";
+    render(
+      <CockpitView
+        {...baseProps}
+        activeTab="inbox"
+        filter="unread"
+        inboxPage={2}
+        inboxPageSize={200}
+        inboxTotal={45_000}
+      />,
+    );
+
+    expect(
+      screen.getByText("Page 2 of 225 · 45,000 conversations"),
+    ).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    expect(navigationMocks.replace).toHaveBeenCalledWith(
+      "/messages?filter=unread&inboxPage=3",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Previous" }));
+    expect(navigationMocks.replace).toHaveBeenCalledWith(
+      "/messages?filter=unread",
+    );
+  });
+
   it("activeTab='inbox' renders the Inbox tab as aria-selected (baseline for test 32)", () => {
     render(<CockpitView {...baseProps} activeTab="inbox" />);
 
@@ -379,11 +405,7 @@ describe("<CockpitView /> URL deep-linking", () => {
     };
     getQueueStatsMock.mockResolvedValue({ ok: true, data: queueStats });
     const view = render(
-      <CockpitView
-        {...baseProps}
-        activeTab="outbox"
-        queueStats={queueStats}
-      />,
+      <CockpitView {...baseProps} activeTab="outbox" queueStats={queueStats} />,
     );
     try {
       expect(screen.getByText(/Next release: in 2m/)).toBeVisible();
@@ -406,11 +428,7 @@ describe("<CockpitView /> URL deep-linking", () => {
       lastMessageAt: new Date(baseProps.nowMs - 10_000).toISOString(),
     });
     const view = render(
-      <CockpitView
-        {...baseProps}
-        activeTab="inbox"
-        threads={[thread]}
-      />,
+      <CockpitView {...baseProps} activeTab="inbox" threads={[thread]} />,
     );
     try {
       expect(screen.getByText("less than a minute ago")).toBeVisible();
@@ -430,9 +448,7 @@ describe("<CockpitView /> URL deep-linking", () => {
     getQueueStatsMock
       .mockResolvedValueOnce({ ok: false, error: "offline" })
       .mockResolvedValueOnce({ ok: true, data: baseProps.queueStats });
-    const view = render(
-      <CockpitView {...baseProps} activeTab="outbox" />,
-    );
+    const view = render(<CockpitView {...baseProps} activeTab="outbox" />);
     try {
       await act(async () => {
         vi.advanceTimersByTime(30_000);

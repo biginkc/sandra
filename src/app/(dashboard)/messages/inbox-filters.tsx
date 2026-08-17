@@ -48,6 +48,7 @@ export function InboxFilters({
     if (next === "all") sp.delete("filter");
     else sp.set("filter", next);
     sp.delete("thread"); // clear selection when switching filters
+    sp.delete("inboxPage");
     const qs = sp.toString();
     router.replace(qs ? `/messages?${qs}` : "/messages");
   };
@@ -62,6 +63,7 @@ export function InboxFilters({
       sp.delete("hideDnc");
     }
     sp.delete("thread");
+    sp.delete("inboxPage");
     const qs = sp.toString();
     router.replace(qs ? `/messages?${qs}` : "/messages");
   };
