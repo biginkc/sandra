@@ -100,14 +100,43 @@ export function buildEmailsOp(role: Role): SubOperationModule {
           .update({ email: lowered })
           .eq("id", contactId)
           .eq("org_id", property.org_id)
+          .eq("do_not_contact", false)
           .select("id");
         if (error) {
+          if (error.message.includes("DNC_LOCKED")) return dncLockedResult;
           return {
             kind: "rejected",
             rowIndex,
             address,
             reason: "db-error",
             detail: error.message,
+          };
+        }
+        if (updatedContacts?.length === 0) {
+          const { data: proof, error: proofError } = await ctx.supabase
+            .from("contacts")
+            .select("do_not_contact")
+            .eq("id", contactId)
+            .eq("org_id", property.org_id)
+            .maybeSingle();
+          if (proofError) {
+            return {
+              kind: "rejected",
+              rowIndex,
+              address,
+              reason: "db-error",
+              detail: `Email update proof failed: ${proofError.message}`,
+            };
+          }
+          if (proof?.do_not_contact) return dncLockedResult;
+          return {
+            kind: "rejected",
+            rowIndex,
+            address,
+            reason: "db-error",
+            detail: proof
+              ? "Email update affected zero rows while the contact remained mutable."
+              : "Email update was not confirmed because the contact no longer exists.",
           };
         }
         if (updatedContacts?.length !== 1) {
