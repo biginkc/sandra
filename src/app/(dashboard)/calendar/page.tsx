@@ -36,10 +36,34 @@ export const dynamic = "force-dynamic";
 function currentCalendarHref(params: CalendarSearchParams): string {
   const sp = new URLSearchParams();
   if (params.week) sp.set("week", params.week);
+  if (params.month) sp.set("month", params.month);
   if (params.assignee) sp.set("assignee", params.assignee);
   if (params.view) sp.set("view", params.view);
   const qs = sp.toString();
   return qs ? `/calendar?${qs}` : "/calendar";
+}
+
+function dateKeyAsUtcNoon(dateKey: string): Date {
+  return new Date(`${dateKey}T12:00:00.000Z`);
+}
+
+function monthYearLabel(dateKey: string): string {
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone: "UTC",
+    month: "long",
+    year: "numeric",
+  }).format(dateKeyAsUtcNoon(dateKey));
+}
+
+function weekRangeLabel(days: { date: string }[]): string {
+  const first = dateKeyAsUtcNoon(days[0].date);
+  const last = dateKeyAsUtcNoon(days[days.length - 1].date);
+  const monthDay = new Intl.DateTimeFormat("en-US", {
+    timeZone: "UTC",
+    month: "short",
+    day: "numeric",
+  });
+  return `Week of ${monthDay.format(first)} – ${monthDay.format(last)}`;
 }
 
 /**
@@ -172,11 +196,21 @@ export default async function CalendarPage({
   // Month view always resolves a fixed six-week grid. Its single-snapshot
   // RPC enforces the existing cap independently for every week rather than
   // stretching a week-sized limit over the whole 42-day range.
+  const monthAnchor = params.month ? `${params.month}-01` : params.week;
   const monthRange =
-    view === "month" ? resolveMonth(params.week, timezone, requestNow) : null;
+    view === "month" ? resolveMonth(monthAnchor, timezone, requestNow) : null;
   const { weekStartDate, days } =
     monthRange ?? resolveWeek(params.week, timezone, requestNow);
   const monthKey = monthRange?.monthKey ?? null;
+  const currentWeekStart = resolveWeek(
+    todayKey,
+    timezone,
+    requestNow,
+  ).weekStartDate;
+  const isCurrentPeriod =
+    view === "month"
+      ? monthKey === todayKey.slice(0, 7)
+      : weekStartDate === currentWeekStart;
   const weekStartUtc = days[0].startUtc;
   const weekEndUtc = days[days.length - 1].endUtc;
 
@@ -237,6 +271,23 @@ export default async function CalendarPage({
         breadcrumb={[{ label: "Workspace" }, { label: "Calendar" }]}
         title="Calendar"
         description={scopeDescription}
+        actions={
+          <div className="ml-auto text-right">
+            <div
+              className="text-[26px] leading-[1.1] font-black tracking-[-0.02em] whitespace-nowrap"
+              data-testid="calendar-range-label"
+            >
+              {view === "month" && monthKey
+                ? monthYearLabel(`${monthKey}-01`)
+                : monthYearLabel(days[0].date)}
+            </div>
+            {view !== "month" ? (
+              <div className="text-muted-foreground mt-0.5 text-xs font-bold whitespace-nowrap">
+                {weekRangeLabel(days)}
+              </div>
+            ) : null}
+          </div>
+        }
       />
       {labelsDegraded && (
         <div className="text-muted-foreground text-xs">
@@ -247,6 +298,7 @@ export default async function CalendarPage({
         view={view}
         week={weekStartDate}
         month={monthKey}
+        isCurrentPeriod={isCurrentPeriod}
         days={days}
         appointments={appointments}
         timezone={timezone}

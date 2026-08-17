@@ -34,9 +34,9 @@ const TAB_INACTIVE = "text-muted-foreground hover:text-foreground";
  * week navigation, an assignee filter (both roles — Codex round 1; a
  * member's default is their own items, not a lockout), "+ New", and the
  * WeekGrid/AgendaList surfaces below. Everything view-affecting lives in
- * the URL (`?view=&week=&assignee=`) so the page stays deep-linkable; every
- * control except the assignee `<Select>` (which needs an onChange) is a
- * plain `<Link>` per the plan.
+ * the URL (`?view=&week=&month=&assignee=`) so the page stays deep-linkable;
+ * View state stays in links; period controls are real buttons that push
+ * URL-backed anchors, and the assignee `<Select>` replaces its URL state.
  *
  * Desktop/mobile split is CSS-only (`md:` classes), no separate route or
  * fetch: WeekGrid and MonthGrid are hidden below `md`; AgendaList mounts
@@ -49,6 +49,7 @@ export function CalendarView({
   view,
   week,
   month,
+  isCurrentPeriod,
   days,
   appointments,
   timezone,
@@ -117,6 +118,15 @@ export function CalendarView({
         year: "numeric",
       }).format(new Date(`${month}-15T12:00:00.000Z`))
     : null;
+  const previousHref =
+    view === "month" && month
+      ? buildHref({ month: monthStartDateKey(month, -1).slice(0, 7) })
+      : buildHref({ week: addDaysToDateKey(week, -7) });
+  const nextHref =
+    view === "month" && month
+      ? buildHref({ month: monthStartDateKey(month, 1).slice(0, 7) })
+      : buildHref({ week: addDaysToDateKey(week, 7) });
+  const todayHref = buildHref({ week: null, month: null });
 
   return (
     <div className="flex flex-col gap-4" data-testid="calendar-view">
@@ -136,20 +146,6 @@ export function CalendarView({
           >
             Week
           </Link>
-          {/* The phone renders the month range as a chronological agenda,
-              not as a squeezed 7-column grid. Keep Month visible and
-              active so a ?view=month deep link never hides its true state. */}
-          <Link
-            href={buildHref({ view: "month" })}
-            data-testid="calendar-view-month"
-            aria-current={view === "month" || undefined}
-            className={cn(
-              TAB_BASE,
-              view === "month" ? TAB_ACTIVE : TAB_INACTIVE,
-            )}
-          >
-            Month
-          </Link>
           <Link
             href={buildHref({ view: "agenda" })}
             data-testid="calendar-view-agenda"
@@ -161,43 +157,74 @@ export function CalendarView({
           >
             Agenda
           </Link>
+          {/* The phone renders the month range as a chronological agenda,
+              not as a squeezed 7-column grid. Keep Month visible and
+              active so a ?view=month deep link never hides its true state. */}
+          <Link
+            href={buildHref({
+              view: "month",
+              month: searchParams.get("month") ?? todayKey.slice(0, 7),
+            })}
+            data-testid="calendar-view-month"
+            aria-current={view === "month" || undefined}
+            className={cn(
+              TAB_BASE,
+              view === "month" ? TAB_ACTIVE : TAB_INACTIVE,
+            )}
+          >
+            Month
+          </Link>
         </nav>
 
         <div className="flex w-full items-center justify-between gap-3 text-xs font-bold sm:w-auto sm:justify-start">
-          {/* Month view steps the anchor by whole months (from the month
-              key, NOT the grid's first cell, which can precede the month);
-              week/agenda step by 7 days as before. */}
-          <Link
-            href={buildHref({
-              week:
-                view === "month" && month
-                  ? monthStartDateKey(month, -1)
-                  : addDaysToDateKey(week, -7),
-            })}
+          {/* Legacy selector wrappers remain click-compatible while the
+              amendment adds the final selector names to real buttons. */}
+          <span
             data-testid="calendar-week-prev"
-            className="text-muted-foreground hover:text-foreground inline-flex min-h-11 items-center"
+            className="inline-flex min-h-11"
           >
-            ← Prev
-          </Link>
-          <Link
-            href={buildHref({ week: todayKey })}
+            <button
+              type="button"
+              data-testid="calendar-prev"
+              aria-label="Previous period"
+              onClick={() => router.push(previousHref)}
+              className="border-border bg-card text-muted-foreground hover:text-foreground inline-flex min-h-11 items-center rounded-full border px-3 whitespace-nowrap"
+            >
+              ← Prev
+            </button>
+          </span>
+          <span
             data-testid="calendar-week-today"
-            className="text-muted-foreground hover:text-foreground inline-flex min-h-11 min-w-11 items-center justify-center"
+            className="inline-flex min-h-11 min-w-11"
           >
-            Today
-          </Link>
-          <Link
-            href={buildHref({
-              week:
-                view === "month" && month
-                  ? monthStartDateKey(month, 1)
-                  : addDaysToDateKey(week, 7),
-            })}
+            <button
+              type="button"
+              data-testid="calendar-today"
+              onClick={() => router.push(todayHref)}
+              className={cn(
+                "inline-flex min-h-11 min-w-11 items-center justify-center rounded-full border px-3 whitespace-nowrap",
+                isCurrentPeriod
+                  ? "border-border bg-card text-foreground hover:bg-muted"
+                  : "border-foreground bg-foreground text-background",
+              )}
+            >
+              Today
+            </button>
+          </span>
+          <span
             data-testid="calendar-week-next"
-            className="text-muted-foreground hover:text-foreground inline-flex min-h-11 items-center"
+            className="inline-flex min-h-11"
           >
-            Next →
-          </Link>
+            <button
+              type="button"
+              data-testid="calendar-next"
+              aria-label="Next period"
+              onClick={() => router.push(nextHref)}
+              className="border-border bg-card text-muted-foreground hover:text-foreground inline-flex min-h-11 items-center rounded-full border px-3 whitespace-nowrap"
+            >
+              Next →
+            </button>
+          </span>
         </div>
 
         <div className="flex w-full items-center gap-2 sm:w-auto">
@@ -232,6 +259,15 @@ export function CalendarView({
           </div>
         </div>
       </div>
+
+      {appointments.length === 0 ? (
+        <div
+          className="text-muted-foreground -mt-2 text-xs font-semibold"
+          data-testid="calendar-empty-range-notice"
+        >
+          Nothing scheduled in this period.
+        </div>
+      ) : null}
 
       <div
         className="text-muted-foreground text-xs"

@@ -78,6 +78,9 @@ export type CalendarViewProps = {
    *  `view === "month"`, else null. Drives the month grid's
    *  outside-month muting and the month-step prev/next nav. */
   month: string | null;
+  /** True when the displayed view is anchored to the viewer's current
+   *  week/month. Drives the filled Today return affordance. */
+  isCurrentPeriod: boolean;
   /** Week view: exactly 7 entries. Month view: exactly 42 entries (the
    *  fixed six-row Sunday-to-Saturday grid). Always
    *  `days[0].date === week`, consecutive zone-local days in order. */
@@ -109,7 +112,7 @@ export type CalendarViewProps = {
   todayKey: string;
 };
 
-/** `?week=&assignee=&view=` — parsed by page.tsx from the awaited
+/** `?week=&month=&assignee=&view=` — parsed by page.tsx from the awaited
  *  `searchParams` promise (Next.js 15 async searchParams contract). */
 export type CalendarSearchParams = {
   /** YYYY-MM-DD, zone-local anchor of the desired range; any day within
@@ -117,6 +120,9 @@ export type CalendarSearchParams = {
    *  range containing it. Defaults to "today" in the viewer's zone when
    *  absent/unparseable. */
   week?: string;
+  /** YYYY-MM month anchor. Kept separate from `week` so switching views
+   *  restores each view family's last navigated period. */
+  month?: string;
   /** A specific assignee's user id, or the sentinel `"me"`/`"all"` — see
    *  `resolveAssigneeId` in page.tsx. Owner default (param absent):
    *  org-wide. Member default (param absent): `"me"`. Both roles can set

@@ -14,6 +14,7 @@ import {
   appointmentToneClass,
   appointmentVisualTone,
   dayIndexForAppointment,
+  formatDateKeyLong,
 } from "./calendar-shared";
 
 /** Compact start-time label for a month cell ("4:45 PM") — the full
@@ -77,20 +78,24 @@ export function MonthGrid({
   void viewerRole;
   return (
     <div data-testid="calendar-month-grid">
-      <div className="grid grid-cols-7">
+      <div className="grid grid-cols-7 gap-1.5">
         {WEEKDAY_HEADERS.map((label) => (
           <div
             key={label}
-            className="text-muted-foreground px-2 py-2 text-[10px] font-bold tracking-widest uppercase"
+            className="text-muted-foreground px-2 py-1 text-center text-[10px] font-bold tracking-widest uppercase"
           >
             {label}
           </div>
         ))}
       </div>
-      <div className="bg-border grid grid-cols-7 gap-px overflow-hidden rounded-xl border">
+      <div className="grid grid-cols-7 gap-1.5">
         {days.map((day, i) => {
           const inMonth = day.date.slice(0, 7) === month;
-          const isToday = day.date === todayKey;
+          // An offset month may include today's date in its leading/trailing
+          // padding. The amendment's fail-closed rule says an out-of-period
+          // view has no today marker, so only the displayed month's own date
+          // can invert.
+          const isToday = inMonth && day.date === todayKey;
           const dayAppointments = appointments
             .filter((a) => dayIndexForAppointment(a, days) === i)
             .sort(
@@ -105,8 +110,11 @@ export function MonthGrid({
             <div
               key={day.date}
               className={cn(
-                "min-h-28 p-1.5",
-                inMonth ? "bg-card" : "bg-muted/20 text-muted-foreground",
+                "border-border min-h-[86px] rounded-xl border p-1.5",
+                inMonth
+                  ? "bg-card"
+                  : "bg-muted/40 text-muted-foreground opacity-55",
+                isToday && "border-stone-300 bg-card",
               )}
               data-testid={`calendar-month-cell-${day.date}`}
               data-today={isToday || undefined}
@@ -114,6 +122,7 @@ export function MonthGrid({
             >
               <Link
                 href={dayHref(day.date)}
+                aria-label={`View week containing ${formatDateKeyLong(day.date)}`}
                 className={cn(
                   "inline-flex size-7 items-center justify-center rounded-full text-xs font-bold hover:underline",
                   isToday
@@ -177,6 +186,7 @@ export function MonthGrid({
                     <Link
                       key={appt.id}
                       href={href}
+                      aria-label={`${formatDateKeyLong(day.date)}, ${startTimeLabel(appt.due_at, timezone)}, ${appointmentLabel(appt)}${ownerLabel ? `, ${ownerLabel}` : ""}`}
                       className={cn(
                         "block rounded border px-1 hover:underline",
                         appointmentToneClass(tone),
@@ -203,6 +213,7 @@ export function MonthGrid({
                 {overflow > 0 ? (
                   <Link
                     href={dayHref(day.date)}
+                    aria-label={`View ${overflow} more appointments on ${formatDateKeyLong(day.date)}`}
                     className="text-muted-foreground text-[11px] font-bold hover:underline"
                     data-testid={`calendar-month-more-${day.date}`}
                   >

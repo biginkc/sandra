@@ -44,6 +44,7 @@ vi.mock("./_components/calendar-view", () => ({
     assigneeLabels: Record<string, string>;
     view: string;
     month: string | null;
+    isCurrentPeriod: boolean;
     days: unknown[];
     nowMs: number;
     todayKey: string;
@@ -55,6 +56,9 @@ vi.mock("./_components/calendar-view", () => ({
       </span>
       <span data-testid="calendar-view-mode">{props.view}</span>
       <span data-testid="calendar-month-key">{props.month ?? "none"}</span>
+      <span data-testid="calendar-current-period">
+        {String(props.isCurrentPeriod)}
+      </span>
       <span data-testid="calendar-day-count">{props.days.length}</span>
       <span data-testid="calendar-now-ms">{props.nowMs}</span>
       <span data-testid="calendar-today-key">{props.todayKey}</span>
@@ -145,6 +149,31 @@ describe("CalendarPage — appointments load failure", () => {
       "/calendar?week=2026-05-03&assignee=all&view=agenda",
     );
   });
+
+  it("preserves the independent month anchor on retry", async () => {
+    mockUser();
+    fetchCalendarAppointmentsForWindows.mockResolvedValue({ ok: false });
+    fetchOrgRoster.mockResolvedValue({
+      ok: true,
+      labelsDegraded: false,
+      roster: [{ id: "user-1", label: "owner@bmh.com" }],
+    });
+
+    render(
+      await CalendarPage({
+        searchParams: Promise.resolve({
+          view: "month",
+          week: "2026-08-16",
+          month: "2027-02",
+        }),
+      }),
+    );
+
+    expect(screen.getByRole("link", { name: /retry/i })).toHaveAttribute(
+      "href",
+      "/calendar?week=2026-08-16&month=2027-02&view=month",
+    );
+  });
 });
 
 describe("CalendarPage — genuinely empty week", () => {
@@ -191,6 +220,13 @@ describe("CalendarPage — genuinely empty week", () => {
     );
     expect(screen.getByTestId("calendar-today-key")).toHaveTextContent(
       "2026-08-16",
+    );
+    expect(screen.getByTestId("calendar-range-label")).toHaveTextContent(
+      "August 2026",
+    );
+    expect(screen.getByText("Week of Aug 16 – Aug 22")).toBeInTheDocument();
+    expect(screen.getByTestId("calendar-current-period")).toHaveTextContent(
+      "true",
     );
   });
 });
@@ -272,7 +308,11 @@ describe("CalendarPage — fixed six-week month", () => {
     });
 
     const jsx = await CalendarPage({
-      searchParams: Promise.resolve({ view: "month", week: "2026-02-10" }),
+      searchParams: Promise.resolve({
+        view: "month",
+        week: "2026-08-16",
+        month: "2026-02",
+      }),
     });
     render(jsx);
 
@@ -301,6 +341,9 @@ describe("CalendarPage — fixed six-week month", () => {
       "2026-02",
     );
     expect(screen.getByTestId("calendar-day-count")).toHaveTextContent("42");
+    expect(screen.getByTestId("calendar-range-label")).toHaveTextContent(
+      "February 2026",
+    );
   });
 
   it("renders Retry instead of an empty month when the month RPC fails", async () => {

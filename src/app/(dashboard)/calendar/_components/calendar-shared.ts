@@ -124,6 +124,19 @@ export function formatColumnHeader(
   }).format(new Date(day.startUtc));
 }
 
+/** Full date for accessible names built from an already-zone-local date key.
+ * UTC noon keeps the calendar label stable without reinterpreting it in the
+ * server or browser's own timezone. */
+export function formatDateKeyLong(dateKey: string): string {
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone: "UTC",
+    weekday: "long",
+    month: "long",
+    day: "numeric",
+    year: "numeric",
+  }).format(new Date(`${dateKey}T12:00:00.000Z`));
+}
+
 /** "Today" / "Tomorrow" / weekday-date agenda group header — delegates to
  *  the shared zoned-day helper `formatRelativeDay` per the plan's naming
  *  (humanDueDate/formatRelativeDay conventions). */
