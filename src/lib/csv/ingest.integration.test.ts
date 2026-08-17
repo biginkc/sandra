@@ -465,7 +465,7 @@ describe("runIngestion (integration)", () => {
     expect(contactCount).toBe(1);
   });
 
-  it("records invalid rows as job_items errors and marks job partial", async () => {
+  it("records invalid rows as job_items errors and marks the job partially completed", async () => {
     const { jobId, csvImportId } = await createImportJob("dealmachine", "Kansas City", 2);
 
     const mapping: Mapping = { address: "Address", state: "State" };
@@ -491,7 +491,7 @@ describe("runIngestion (integration)", () => {
       .select("status, succeeded_items, failed_items")
       .eq("id", jobId)
       .single();
-    expect(job?.status).toBe("partial");
+    expect(job?.status).toBe("partially_completed");
     expect(job?.succeeded_items).toBe(1);
     expect(job?.failed_items).toBe(1);
 

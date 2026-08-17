@@ -1,6 +1,8 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createTestClient } from "@tests/integration/client";
+import { getCanonicalTestOrgId } from "@tests/integration/fixtures/multi-user";
+import { createTemporaryOrganizationTracker } from "@tests/integration/fixtures/temporary-organizations";
 import { resetTenantTables } from "@tests/integration/reset";
 import {
   getMockMessageLog,
@@ -28,6 +30,7 @@ vi.mock("@/lib/messaging/quiet-hours", () => ({
 }));
 
 const supabase = createTestClient();
+const temporaryOrganizations = createTemporaryOrganizationTracker(supabase);
 
 // ----------- Anthropic stub -------------------------------------------------
 
@@ -67,12 +70,7 @@ function throwingAnthropic(err: Error): AnthropicLike {
 // ----------- fixtures -------------------------------------------------------
 
 async function getOrgId(): Promise<string> {
-  const { data } = await supabase
-    .from("organizations")
-    .select("id")
-    .limit(1)
-    .single();
-  return data!.id;
+  return getCanonicalTestOrgId(supabase);
 }
 
 async function seedConfig(overrides: Partial<{
@@ -160,6 +158,10 @@ describe("dispatchAiResponse (integration)", () => {
     await resetTenantTables(supabase);
     resetMockState();
     await seedSenderCatalog(supabase, await getOrgId(), [MOCK_SENDER_PRIMARY]);
+  });
+
+  afterEach(async () => {
+    await temporaryOrganizations.cleanup();
   });
 
   it("Claude opt_out suppresses the actual inbound sender when it is phone_2", async () => {
@@ -1399,17 +1401,8 @@ describe("dispatchAiResponse (integration)", () => {
       email_confirm: true,
     });
     const adminUserId = adminUser!.user!.id;
-    const { data: orgA } = await supabase
-      .from("organizations")
-      .select("id")
-      .limit(1)
-      .single();
-    const { data: orgB, error: orgBErr } = await supabase
-      .from("organizations")
-      .insert({ name: `dedupe-test-org-${Date.now()}` })
-      .select("id")
-      .single();
-    if (orgBErr || !orgB) throw new Error(`org seed failed: ${orgBErr?.message}`);
+    const orgAId = await getCanonicalTestOrgId(supabase);
+    const orgB = await temporaryOrganizations.create("dedupe-test-org");
 
     const row = (orgId: string) => ({
       org_id: orgId,
@@ -1421,10 +1414,10 @@ describe("dispatchAiResponse (integration)", () => {
       body: "test",
     });
 
-    const first = await supabase.from("notifications").insert(row(orgA!.id));
+    const first = await supabase.from("notifications").insert(row(orgAId));
     expect(first.error).toBeNull();
     // Same org, same kind, same day → conflict.
-    const dup = await supabase.from("notifications").insert(row(orgA!.id));
+    const dup = await supabase.from("notifications").insert(row(orgAId));
     expect(dup.error?.message ?? "").toMatch(/duplicate key/i);
     // Different org, same admin/kind/day → allowed.
     const crossOrg = await supabase.from("notifications").insert(row(orgB.id));
@@ -1435,7 +1428,6 @@ describe("dispatchAiResponse (integration)", () => {
       .from("notifications")
       .delete()
       .eq("event_type", "ai_responder_provider_failure");
-    await supabase.from("organizations").delete().eq("id", orgB.id);
     await supabase.auth.admin.deleteUser(adminUserId);
   });
 

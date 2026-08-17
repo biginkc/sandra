@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 
 import { createTestClient } from "@tests/integration/client";
+import { getCanonicalTestOrgId } from "@tests/integration/fixtures/multi-user";
 import { resetTenantTables } from "@tests/integration/reset";
 
 const supabase = createTestClient();
@@ -20,27 +21,23 @@ async function rpc(name: string, args: Record<string, unknown>) {
 }
 
 async function seedLineTypeJob(): Promise<{ jobId: string; orgId: string }> {
-  const { data: org } = await supabase
-    .from("organizations")
-    .select("id")
-    .limit(1)
-    .single();
+  const orgId = await getCanonicalTestOrgId(supabase);
   const { data: county } = await supabase
     .from("counties")
     .select("id, market")
     .limit(1)
     .single();
-  if (!org || !county) throw new Error("tenant seed is missing");
+  if (!county) throw new Error("tenant seed is missing");
 
   const { data: csvImport, error: importError } = await supabase
     .from("csv_imports")
     .insert({
-      org_id: org.id,
+      org_id: orgId,
       filename: "line-type-ledger.csv",
       source: "generic",
       market: county.market,
       county_id: county.id,
-      storage_path: `${org.id}/line-type-ledger.csv`,
+      storage_path: `${orgId}/line-type-ledger.csv`,
       dataset_sha256: "a".repeat(64),
       dataset_version: 2,
       dnc_rows: 0,
@@ -53,7 +50,7 @@ async function seedLineTypeJob(): Promise<{ jobId: string; orgId: string }> {
   const { data: job, error: jobError } = await supabase
     .from("jobs")
     .insert({
-      org_id: org.id,
+      org_id: orgId,
       type: "csv_import",
       status: "running",
       related_import_id: csvImport.id,
@@ -69,9 +66,9 @@ async function seedLineTypeJob(): Promise<{ jobId: string; orgId: string }> {
     .from("csv_import_job_provenance")
     .insert({
       job_id: job.id,
-      org_id: org.id,
+      org_id: orgId,
       csv_import_id: csvImport.id,
-      storage_path: `${org.id}/line-type-ledger.csv`,
+      storage_path: `${orgId}/line-type-ledger.csv`,
       source: "generic",
       market: county.market,
       county_id: county.id,
@@ -84,7 +81,7 @@ async function seedLineTypeJob(): Promise<{ jobId: string; orgId: string }> {
       expected_dnc_rows: 0,
     });
   if (provenanceError) throw provenanceError;
-  return { jobId: job.id, orgId: org.id };
+  return { jobId: job.id, orgId };
 }
 
 describe("CSV import line-type outcome ledger", () => {

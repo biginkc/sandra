@@ -11,6 +11,7 @@ import {
   resetMockState,
 } from "@/lib/messaging/providers/mock";
 import { createTestClient } from "@tests/integration/client";
+import { getCanonicalTestOrgId } from "@tests/integration/fixtures/multi-user";
 import {
   MOCK_SENDER_PRIMARY,
   MOCK_SENDER_SECONDARY,
@@ -83,15 +84,7 @@ async function seed(params: {
 }
 
 async function getOrgId(): Promise<string> {
-  const { data, error } = await supabase
-    .from("organizations")
-    .select("id")
-    .limit(1)
-    .single();
-  if (error || !data) {
-    throw new Error(`org lookup failed: ${error?.message ?? "no org"}`);
-  }
-  return data.id;
+  return getCanonicalTestOrgId(supabase);
 }
 
 describe("sendSmsToContact (integration)", () => {
@@ -878,70 +871,74 @@ describe("sendSmsToContact (integration)", () => {
   });
 
   it("release-time automated boundary: a campaign SMS queued BEFORE a booking cannot release AFTER it — zero provider calls, terminal suppressed row", async () => {
-    const { contactId, propertyId } = await seed({ withConsent: true });
-    const queue = await sendSmsToContact(supabase, {
-      origin: "automated",
-      contactId,
-      propertyId,
-      body: "queued before the property was booked",
-      queueOnly: true,
+    await withSafeSendWindow(async () => {
+      const { contactId, propertyId } = await seed({ withConsent: true });
+      const queue = await sendSmsToContact(supabase, {
+        origin: "automated",
+        contactId,
+        propertyId,
+        body: "queued before the property was booked",
+        queueOnly: true,
+      });
+      expect(queue.status).toBe("queued");
+      if (queue.status !== "queued") return;
+
+      // Booking commits between queue and release.
+      await supabase
+        .from("properties")
+        .update({ outreach_dispo: "booked_appointment" })
+        .eq("id", propertyId);
+
+      const callsBefore = getMockMessageLog().length;
+      const release = await releaseQueuedMessage(supabase, queue.messageId);
+
+      expect(release.status).toBe("blocked_automated_suppressed");
+      // The core assertion: the provider was never called.
+      expect(getMockMessageLog()).toHaveLength(callsBefore);
+
+      const { data: row } = await supabase
+        .from("messages")
+        .select("status, error_message")
+        .eq("id", queue.messageId)
+        .single();
+      expect(row?.status).toBe("failed");
+      expect(row?.error_message).toMatch(/human-owned disposition/i);
+
+      // Terminal — a retry-looping auto-send tick must not pick it back up.
+      const retryRelease = await releaseQueuedMessage(supabase, queue.messageId);
+      expect(retryRelease.status).toBe("db_error");
+      expect(getMockMessageLog()).toHaveLength(callsBefore);
     });
-    expect(queue.status).toBe("queued");
-    if (queue.status !== "queued") return;
-
-    // Booking commits between queue and release.
-    await supabase
-      .from("properties")
-      .update({ outreach_dispo: "booked_appointment" })
-      .eq("id", propertyId);
-
-    const callsBefore = getMockMessageLog().length;
-    const release = await releaseQueuedMessage(supabase, queue.messageId);
-
-    expect(release.status).toBe("blocked_automated_suppressed");
-    // The core assertion: the provider was never called.
-    expect(getMockMessageLog()).toHaveLength(callsBefore);
-
-    const { data: row } = await supabase
-      .from("messages")
-      .select("status, error_message")
-      .eq("id", queue.messageId)
-      .single();
-    expect(row?.status).toBe("failed");
-    expect(row?.error_message).toMatch(/human-owned disposition/i);
-
-    // Terminal — a retry-looping auto-send tick must not pick it back up.
-    const retryRelease = await releaseQueuedMessage(supabase, queue.messageId);
-    expect(retryRelease.status).toBe("db_error");
-    expect(getMockMessageLog()).toHaveLength(callsBefore);
   });
 
   it("release-time automated boundary: a manually-queued reply released after a booking still sends (manual provenance is consent-only)", async () => {
-    const { contactId, propertyId } = await seed({ withConsent: true });
-    const queue = await sendSmsToContact(supabase, {
-      origin: "manual",
-      contactId,
-      propertyId,
-      body: "see you at 2pm tomorrow!",
-      queueOnly: true,
+    await withSafeSendWindow(async () => {
+      const { contactId, propertyId } = await seed({ withConsent: true });
+      const queue = await sendSmsToContact(supabase, {
+        origin: "manual",
+        contactId,
+        propertyId,
+        body: "see you at 2pm tomorrow!",
+        queueOnly: true,
+      });
+      expect(queue.status).toBe("queued");
+      if (queue.status !== "queued") return;
+
+      await supabase
+        .from("properties")
+        .update({ outreach_dispo: "booked_appointment" })
+        .eq("id", propertyId);
+
+      const release = await releaseQueuedMessage(supabase, queue.messageId);
+      expect(release.status).toBe("sent");
+
+      const { data: row } = await supabase
+        .from("messages")
+        .select("status")
+        .eq("id", queue.messageId)
+        .single();
+      expect(row?.status).toBe("sent");
     });
-    expect(queue.status).toBe("queued");
-    if (queue.status !== "queued") return;
-
-    await supabase
-      .from("properties")
-      .update({ outreach_dispo: "booked_appointment" })
-      .eq("id", propertyId);
-
-    const release = await releaseQueuedMessage(supabase, queue.messageId);
-    expect(release.status).toBe("sent");
-
-    const { data: row } = await supabase
-      .from("messages")
-      .select("status")
-      .eq("id", queue.messageId)
-      .single();
-    expect(row?.status).toBe("sent");
   });
 
   it("release permanently fails when the queued phone is suppressed before release", async () => {

@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 
 import { createTestClient } from "@tests/integration/client";
+import { getCanonicalTestOrgId } from "@tests/integration/fixtures/multi-user";
 import { resetTenantTables } from "@tests/integration/reset";
 
 import { enrollLead } from "./enrollment";
@@ -10,13 +11,7 @@ import { seedStarterLibrary, STARTER_SEQUENCES } from "./starter-library";
 const supabase = createTestClient();
 
 async function getOrgId(): Promise<string> {
-  const { data } = await supabase
-    .from("organizations")
-    .select("id")
-    .limit(1)
-    .maybeSingle();
-  if (!data?.id) throw new Error("no org");
-  return data.id;
+  return getCanonicalTestOrgId(supabase);
 }
 
 describe("seedStarterLibrary (integration)", () => {

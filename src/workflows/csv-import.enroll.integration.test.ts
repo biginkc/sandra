@@ -1,20 +1,16 @@
 import { beforeEach, describe, expect, it } from "vitest";
 
 import { createTestClient } from "@tests/integration/client";
+import { getCanonicalTestOrgId } from "@tests/integration/fixtures/multi-user";
 import { resetTenantTables } from "@tests/integration/reset";
 
+import { enrollLead } from "@/lib/sequences/enrollment";
 import { enrollJobBatch } from "./csv-import";
 
 const supabase = createTestClient();
 
 async function getOrgId(): Promise<string> {
-  const { data } = await supabase
-    .from("organizations")
-    .select("id")
-    .limit(1)
-    .maybeSingle();
-  if (!data?.id) throw new Error("no organization seeded");
-  return data.id;
+  return getCanonicalTestOrgId(supabase);
 }
 
 async function seedJob(): Promise<string> {
@@ -161,13 +157,19 @@ describe("enrollJobBatch (integration)", () => {
 
     // One property with no phone → no_phone outcome
     const noPhone = await seedPropertyWithPhone(null);
-    // One property that will get a duplicate on the second job_item
+    // One new property that the batch enrolls successfully.
     const withPhone = await seedPropertyWithPhone("+18165550006");
+    // A distinct property already active in this sequence → duplicate_active.
+    const alreadyActive = await seedPropertyWithPhone("+18165550016");
+    const initialEnrollment = await enrollLead(supabase, {
+      sequenceId: seqId,
+      propertyId: alreadyActive,
+    });
+    expect(initialEnrollment.status).toBe("enrolled");
 
     await seedJobItem({ jobId, propertyId: noPhone, status: "success" });
     await seedJobItem({ jobId, propertyId: withPhone, status: "success" });
-    // Second item for same property → duplicate_active on second call
-    await seedJobItem({ jobId, propertyId: withPhone, status: "success" });
+    await seedJobItem({ jobId, propertyId: alreadyActive, status: "success" });
 
     const result = await enrollJobBatch(supabase, { jobId, sequenceId: seqId, orgId: await getOrgId() });
     expect(result.enrolled).toBe(1);

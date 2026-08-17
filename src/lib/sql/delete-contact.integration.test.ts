@@ -154,7 +154,7 @@ describe("delete_contact() (integration)", () => {
       p_reason: "blocked",
     });
 
-    expect(error?.message).toContain("caller is not authorized");
+    expect(error?.message).toContain("active access required");
     const { data: contactAfter } = await supabase
       .from("contacts")
       .select("id")

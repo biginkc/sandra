@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createTestClient } from "@tests/integration/client";
+import { getCanonicalTestOrgId } from "@tests/integration/fixtures/multi-user";
 import { resetTenantTables } from "@tests/integration/reset";
 
 const testClient = createTestClient();
@@ -12,6 +13,13 @@ vi.mock("@/lib/supabase/server", () => ({
 
 vi.mock("workflow/api", () => ({
   start,
+}));
+
+// Server Actions register workflow dispatch after the response. Integration
+// tests do not run inside a Next request scope, so keep the continuation
+// registered but inert; this suite verifies the durable retry child itself.
+vi.mock("next/server", () => ({
+  after: vi.fn(),
 }));
 
 process.env.ADMIN_EMAILS = "jarrad@bmhgroupkc.com";
@@ -32,12 +40,7 @@ vi.spyOn(testClient.auth, "getUser").mockImplementation(async () =>
 import { retryFailedCassItems, retryFailedSkipTraceItems } from "./actions";
 
 async function getOrgId(): Promise<string> {
-  const { data } = await testClient
-    .from("organizations")
-    .select("id")
-    .limit(1)
-    .single();
-  return data!.id;
+  return getCanonicalTestOrgId(testClient);
 }
 
 async function seedProperty(address: string): Promise<string> {

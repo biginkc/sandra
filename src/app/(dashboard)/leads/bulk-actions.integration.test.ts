@@ -90,16 +90,27 @@ async function seedCustomTag(
 
 const createdAuthUsers: string[] = [];
 async function createAuthUser(email: string): Promise<string> {
+  const uniqueEmail = email.replace("@", `-${crypto.randomUUID()}@`);
   const { data, error } = await testClient.auth.admin.createUser({
-    email,
+    email: uniqueEmail,
     password: `test-pw-${Math.random().toString(36).slice(2)}`,
     email_confirm: true,
   });
   if (error || !data.user) {
-    throw new Error(`createAuthUser failed: ${error?.message}`);
+    throw new Error(`createAuthUser(${uniqueEmail}) failed: ${error?.message}`);
   }
   createdAuthUsers.push(data.user.id);
   return data.user.id;
+}
+
+async function grantActiveMembership(userId: string): Promise<void> {
+  const { error } = await testClient.from("memberships").insert({
+    org_id: BMH_ORG_ID,
+    user_id: userId,
+    role: "member",
+    access_status: "active",
+  });
+  if (error) throw new Error(`membership seed failed: ${error.message}`);
 }
 
 describe("bulk actions (integration)", () => {
@@ -628,6 +639,7 @@ describe("bulk actions (integration)", () => {
       const assignee = await createAuthUser(
         `ba-assignee-${Date.now()}@test.invalid`,
       );
+      await grantActiveMembership(assignee);
       currentUserId = actor;
       currentEmail = "actor@test.invalid";
       const ids = [
@@ -660,6 +672,7 @@ describe("bulk actions (integration)", () => {
       const self = await createAuthUser(
         `ba-self-${Date.now()}@test.invalid`,
       );
+      await grantActiveMembership(self);
       currentUserId = self;
       currentEmail = "self@test.invalid";
       const id = await seedProspect("1 SelfAssign Ln");
@@ -700,6 +713,8 @@ describe("bulk actions (integration)", () => {
       const userC = await createAuthUser(
         `ba-rc-${Date.now()}@test.invalid`,
       );
+      await grantActiveMembership(userB);
+      await grantActiveMembership(userC);
       currentUserId = actor;
       currentEmail = "actor@test.invalid";
       const id = await seedProspect("1 Reassign Ln");

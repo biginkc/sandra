@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createTestClient } from "@tests/integration/client";
+import { getCanonicalTestOrgId } from "@tests/integration/fixtures/multi-user";
 import { resetTenantTables } from "@tests/integration/reset";
 import {
   getMockMessageLog,
@@ -19,13 +20,7 @@ const supabase = createTestClient();
 const SAFE_NOW = new Date("2026-04-23T18:00:00Z");
 
 async function getOrgId(): Promise<string> {
-  const { data } = await supabase
-    .from("organizations")
-    .select("id")
-    .limit(1)
-    .maybeSingle();
-  if (!data?.id) throw new Error("no org");
-  return data.id;
+  return getCanonicalTestOrgId(supabase);
 }
 
 type FakeQueryResult = {

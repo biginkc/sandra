@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 
 import { createTestClient } from "@tests/integration/client";
+import { getCanonicalTestOrgId } from "@tests/integration/fixtures/multi-user";
 import { resetTenantTables } from "@tests/integration/reset";
 
 import {
@@ -12,13 +13,7 @@ import {
 const supabase = createTestClient();
 
 async function getOrgId(): Promise<string> {
-  const { data } = await supabase
-    .from("organizations")
-    .select("id")
-    .limit(1)
-    .maybeSingle();
-  if (!data?.id) throw new Error("no organization seeded");
-  return data.id;
+  return getCanonicalTestOrgId(supabase);
 }
 
 async function seedSequence(opts: {

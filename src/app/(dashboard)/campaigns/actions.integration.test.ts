@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resetMockState } from "@/lib/messaging/providers/mock";
 import { EMPTY_AUDIENCE_VALIDATION_MESSAGE } from "@/lib/prospects/effective-audience";
 import { createTestClient } from "@tests/integration/client";
+import { getCanonicalTestOrgId } from "@tests/integration/fixtures/multi-user";
 import {
   MOCK_PROVIDER_CAMPAIGN_ID,
   MOCK_SENDER_PRIMARY,
@@ -60,13 +61,7 @@ function sortIds(ids?: Array<string | null | undefined>): string[] {
 }
 
 async function getOrgId(): Promise<string> {
-  const { data } = await testClient
-    .from("organizations")
-    .select("id")
-    .limit(1)
-    .single();
-  if (!data?.id) throw new Error("no org");
-  return data.id;
+  return getCanonicalTestOrgId(testClient);
 }
 
 async function createAuthUser(email: string): Promise<string> {

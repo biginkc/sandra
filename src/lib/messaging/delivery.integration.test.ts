@@ -12,6 +12,7 @@ import {
   setMockProviderCampaigns,
 } from "@/lib/messaging/providers/mock";
 import { createTestClient } from "@tests/integration/client";
+import { getCanonicalTestOrgId } from "@tests/integration/fixtures/multi-user";
 import {
   MOCK_PROVIDER_CAMPAIGN_ID,
   MOCK_SENDER_PRIMARY,
@@ -29,15 +30,7 @@ import { resetTenantTables } from "@tests/integration/reset";
 const supabase = createTestClient();
 
 async function getOrgId(): Promise<string> {
-  const { data, error } = await supabase
-    .from("organizations")
-    .select("id")
-    .limit(1)
-    .single();
-  if (error || !data) {
-    throw new Error(`org lookup failed: ${error?.message ?? "no org"}`);
-  }
-  return data.id;
+  return getCanonicalTestOrgId(supabase);
 }
 
 async function listSenderRows(orgId: string) {

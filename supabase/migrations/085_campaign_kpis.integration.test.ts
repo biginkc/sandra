@@ -531,6 +531,6 @@ describe("Migration 085 — campaign KPI scoreboard RPC", () => {
 
     expect(data).toBeNull();
     expect(error?.code).toBe("42501");
-    expect(error?.message).toContain("caller is not authorized");
+    expect(error?.message).toContain("active access required");
   });
 });
