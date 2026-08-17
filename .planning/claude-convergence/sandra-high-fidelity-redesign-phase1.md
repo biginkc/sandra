@@ -52,6 +52,8 @@ Implement the Claude-approved Overview, Messages, Calendar, and Lead Detail rede
 - `bc5f16e` — whitespace-only test cleanup; exact reviewed candidate before the final CSV corrections.
 - `f785cd2` — historical cross-tenant phone fixtures model the legacy boundary without weakening the newly applied foreign keys.
 - `c3c761a` — permanent-DNC email immutability and exact-row proof for clean phone writes, closing both material findings from the exact-head database review.
+- `44a4bfe` — atomic email-update DNC predicate plus zero-row reclassification, closing the remaining read/write race without weakening the DNC ratchet.
+- `269bb6e` — hidden appointment reschedule trigger removed from sequential tab order with focus restored to the visible overflow button on close.
 
 ## Verification evidence so far
 
@@ -66,9 +68,10 @@ Implement the Claude-approved Overview, Messages, Calendar, and Lead Detail rede
 - Corrective UI/workflow evidence through `7843e05`: 168 focused unit tests and 230 focused RTL tests pass independently in addition to the full hooks.
 - Second whole-change manual review at `5e819ff`: REJECTED by all three independent slices. Database/security reproduced the legacy contact-delete trigger failure and inactive-member Calendar access; route/quality review found direct-send replies, DNC lifecycle controls, member KPI exposure, unstable request time, ambiguous fall-back DST ranges, undersized targets, stale queue truth, and row-capped Messages/Lead history.
 - Second-round corrections through `1fddc85`: every commit hook passed typecheck, 2,224 unit tests, and 716 RTL tests. The combined dedicated-database run passed 128/128 tests, including all 97 legacy appointment scenarios, Calendar active-access/volume cases, DNC contact-delete regressions, and a 1,005-thread Messages snapshot. The inbox RPC also proves cross-tenant isolation and fails closed for suspended, expired, and deletion-prepared memberships.
-- Commit hooks through `c3c761a`: typecheck, 2,254 unit tests, and 751 RTL tests pass on every assembled correction commit. The production Next build succeeds, changed-file ESLint has zero errors, `git diff --check` is clean, and migration-safety unit/rehearsal gates pass.
+- Commit hooks through `269bb6e`: typecheck, 2,256 unit tests, and 752 RTL tests pass on every assembled correction commit. The production Next build succeeds, changed-file ESLint has zero errors, `git diff --check` is clean, and migration-safety unit/rehearsal gates pass.
 - The Sandra-only aggregate real-database run excluded every Jitter path and produced 1,017 passes with exactly two fixture failures: the newly applied composite foreign keys correctly refused the tests' attempted corrupt seed rows. The corrected historical-boundary fixtures then passed 12/12 on the same database.
-- Final CSV review corrections pass 4/4 unit tests and 9/9 homeowner/agent email integration tests; exact-head database re-review is in progress.
+- Final CSV review corrections pass 5/5 unit tests and 9/9 homeowner/agent email integration tests. At exact head `269bb6e`, the database reviewer reports `BLOCKING: 0` and `APPROVE_MERGE: true` for the last DNC race correction.
+- The appointment focus correction passes 13/13 focused RTL tests. At exact head `269bb6e`, the UI reviewer reports `BLOCKING: 0` and `APPROVE_MERGE: true` for the last invisible-focus/focus-restoration correction.
 - `origin/main` remains the candidate merge base and the branch is zero commits behind. PRs #368/#369/#370 remain open until this replacement has CI, preview, migration, deployment, and browser proof.
 
 ## Active execution lane
@@ -89,4 +92,4 @@ Implement the Claude-approved Overview, Messages, Calendar, and Lead Detail rede
 
 ## Current state
 
-Both prior whole-change candidates were correctly rejected. Their correction families are now committed through `c3c761a`; all static/unit/RTL/build gates are clean, the only aggregate integration failures were corrected test fixtures, and the two material findings from the latest database review are fixed with focused proof. Exact-head re-review and Claude Fable convergence are next, followed by publication, CI/preview, final migration rehearsal, merge/deploy, and real Chrome acceptance. No production migration, merge, deployment, provider send, or production browser mutation has occurred in this execution block yet.
+Both prior whole-change candidates were correctly rejected. Their correction families are now committed through `269bb6e`; all static/unit/RTL/build gates are clean, the only aggregate integration failures were corrected test fixtures, and the final database and UI correction reviewers report zero blockers at the exact code head. The exact-head Sandra-only aggregate database rerun and Claude Fable convergence are next, followed by publication, CI/preview, final migration rehearsal, merge/deploy, and real Chrome acceptance. No production migration, merge, deployment, provider send, or production browser mutation has occurred in this execution block yet.
