@@ -54,7 +54,7 @@
 -- needed for a predecessor row, only the visibility flip.
 --
 -- Multi-hop chains (reschedule -> reschedule -> cancel) are covered: the
--- predecessor UPDATE below is scoped by calendar_chain_id alone, not by
+-- predecessor UPDATE below is scoped by org_id + calendar_chain_id, not by
 -- "the row directly before p_task", so it catches every completed/
 -- rescheduled row in the chain in one statement regardless of how many
 -- reschedule hops preceded this cancel.
@@ -136,7 +136,8 @@ begin
 
   perform 1
   from public.task_calendar_mutations
-  where calendar_chain_id = v_task.calendar_chain_id
+  where org_id = v_task.org_id
+    and calendar_chain_id = v_task.calendar_chain_id
     and phase in ('pending', 'provider_done', 'needs_repair')
   for update;
   if found then
@@ -158,8 +159,8 @@ begin
   -- hop of this chain that a prior reschedule closed out (status=completed,
   -- outcome=rescheduled) is now dead history of a CANCELLED chain, not of a
   -- still-live one — flip it the same way so the calendar's
-  -- `status IN (open, completed)` filter drops it too. Scoped by
-  -- calendar_chain_id only (not "the immediately preceding row"), so a
+  -- `status IN (open, completed)` filter drops it too. Scoped by org and
+  -- calendar_chain_id (not "the immediately preceding row"), so a
   -- multi-hop chain (reschedule, reschedule, cancel) clears every
   -- predecessor in this one statement. completed_at/completed_by are left
   -- as-is (still accurate — that's genuinely when each hop stopped being
@@ -173,7 +174,8 @@ begin
       outcome = 'cancelled',
       calendar_generation = calendar_generation + 1,
       updated_at = now()
-  where calendar_chain_id = v_task.calendar_chain_id
+  where org_id = v_task.org_id
+    and calendar_chain_id = v_task.calendar_chain_id
     and status = 'completed'
     and outcome = 'rescheduled';
 
@@ -198,7 +200,7 @@ end;
 $$;
 
 comment on function public.fn_cancel_appointment(uuid) is
-  'Cancels an open appointment and opens a cancel/pending ledger row so the worker deletes the Google event (404 = idempotent success). This migration (20260816090000): also cancels every completed/rescheduled predecessor row sharing the chain, so a reschedule->cancel chain drops off the calendar entirely instead of leaving the pre-reschedule row stuck showing a stale "Rescheduled" chip forever — see this migration''s header for the full root-cause writeup. SECURITY DEFINER: see 20260814210000 migration header.';
+  'Cancels an open appointment and opens a cancel/pending ledger row so the worker deletes the Google event (404 = idempotent success). This migration (20260816090000): also cancels every completed/rescheduled predecessor row sharing the same organization and chain, so a reschedule->cancel chain drops off the calendar entirely instead of leaving the pre-reschedule row stuck showing a stale "Rescheduled" chip forever — see this migration''s header for the full root-cause writeup. SECURITY DEFINER: see 20260814210000 migration header.';
 
 -- ----------------------------------------------------------------------------
 -- 2. One-time backfill for existing prod data — chains that were already
@@ -228,46 +230,109 @@ comment on function public.fn_cancel_appointment(uuid) is
 -- ----------------------------------------------------------------------------
 select set_config('sandra.allow_appointment_time_move', 'on', true);
 
-with chain_terminal as (
-  select distinct on (calendar_chain_id)
-    calendar_chain_id,
-    status as terminal_status
-  from public.tasks
-  where type = 'appointment'
-  order by calendar_chain_id, created_at desc
-)
-update public.tasks t
-set status = 'cancelled',
-    outcome = 'cancelled',
-    calendar_generation = t.calendar_generation + 1,
-    updated_at = now()
-from chain_terminal ct
-where ct.calendar_chain_id = t.calendar_chain_id
-  and ct.terminal_status = 'cancelled'
-  and t.status = 'completed'
-  and t.outcome = 'rescheduled'
-  and not exists (
-    select 1
-    from public.properties p
-    where p.id = t.related_property_id
-      and p.org_id = t.org_id
-      and p.is_dnc_locked
-  )
-  and not exists (
-    select 1
-    from public.contacts c
-    where c.id = t.contact_id
-      and c.org_id = t.org_id
-      and (
-        c.do_not_contact
-        or exists (
-          select 1
-          from public.properties contact_property
-          where contact_property.homeowner_contact_id = c.id
-            and contact_property.org_id = c.org_id
-            and contact_property.is_dnc_locked
-        )
-      )
-  );
+do $$
+declare
+  candidate record;
+  contact_is_dnc boolean;
+  linked_property_is_locked boolean;
+  related_property_is_locked boolean;
+  dnc_error_message text;
+begin
+  for candidate in
+    with chain_terminal as (
+      select distinct on (org_id, calendar_chain_id)
+        org_id,
+        calendar_chain_id,
+        status as terminal_status
+      from public.tasks
+      where type = 'appointment'
+      order by org_id, calendar_chain_id, created_at desc, id desc
+    )
+    select
+      t.id,
+      t.org_id,
+      t.contact_id,
+      t.related_property_id
+    from public.tasks t
+    join chain_terminal ct
+      on ct.org_id = t.org_id
+     and ct.calendar_chain_id = t.calendar_chain_id
+    where ct.terminal_status = 'cancelled'
+      and t.status = 'completed'
+      and t.outcome = 'rescheduled'
+    order by t.org_id, t.contact_id nulls first,
+      t.related_property_id nulls first, t.id
+  loop
+    contact_is_dnc := false;
+    linked_property_is_locked := false;
+    related_property_is_locked := false;
+
+    -- Match the permanent-DNC trigger's canonical CONTACT -> PROPERTY lock
+    -- order before touching the task. A concurrent one-way DNC ratchet then
+    -- either completes first (and this row is skipped after recheck) or waits
+    -- until this historical cleanup finishes; it cannot make the migration
+    -- update a task first and then fail the whole transaction at the trigger.
+    if candidate.contact_id is not null then
+      select c.do_not_contact
+      into contact_is_dnc
+      from public.contacts c
+      where c.id = candidate.contact_id
+        and c.org_id = candidate.org_id
+      for no key update;
+
+      perform 1
+      from public.properties p
+      where p.homeowner_contact_id = candidate.contact_id
+        and p.org_id = candidate.org_id
+      order by p.id
+      for no key update;
+
+      select exists (
+        select 1
+        from public.properties p
+        where p.homeowner_contact_id = candidate.contact_id
+          and p.org_id = candidate.org_id
+          and p.is_dnc_locked
+      ) into linked_property_is_locked;
+    end if;
+
+    if candidate.related_property_id is not null then
+      select p.is_dnc_locked
+      into related_property_is_locked
+      from public.properties p
+      where p.id = candidate.related_property_id
+        and p.org_id = candidate.org_id
+      for no key update;
+    end if;
+
+    if coalesce(contact_is_dnc, false)
+      or coalesce(linked_property_is_locked, false)
+      or coalesce(related_property_is_locked, false)
+    then
+      continue;
+    end if;
+
+    begin
+      update public.tasks t
+      set status = 'cancelled',
+          outcome = 'cancelled',
+          calendar_generation = t.calendar_generation + 1,
+          updated_at = now()
+      where t.id = candidate.id
+        and t.org_id = candidate.org_id
+        and t.status = 'completed'
+        and t.outcome = 'rescheduled';
+    exception when sqlstate 'P0001' then
+      get stacked diagnostics dnc_error_message = message_text;
+      if dnc_error_message not like 'DNC_LOCKED:%' then
+        raise;
+      end if;
+      -- Defense in depth for a relationship change between candidate
+      -- discovery and the locked recheck. Never bypass the DNC trigger;
+      -- skip only its explicit immutable-history rejection.
+    end;
+  end loop;
+end
+$$;
 
 commit;

@@ -117,11 +117,7 @@ export function CalendarView({
   return (
     <div className="flex flex-col gap-4" data-testid="calendar-view">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <div
-          className="flex items-center gap-1"
-          role="tablist"
-          aria-label="Calendar view"
-        >
+        <nav className="flex items-center gap-1" aria-label="Calendar view">
           <Link
             href={buildHref({ view: "week" })}
             data-testid="calendar-view-week"
@@ -161,7 +157,7 @@ export function CalendarView({
           >
             Agenda
           </Link>
-        </div>
+        </nav>
 
         <div className="flex items-center gap-3 text-xs font-bold">
           {/* Month view steps the anchor by whole months (from the month
@@ -208,6 +204,7 @@ export function CalendarView({
             <SelectTrigger
               size="sm"
               className="w-40"
+              aria-label="Filter calendar by assignee"
               data-testid="calendar-assignee-filter"
             >
               <SelectValue />

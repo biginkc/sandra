@@ -11,6 +11,7 @@ import { loadTestEnv } from "@tests/integration/env";
 import { resetTenantTables } from "@tests/integration/reset";
 import {
   BMH_ORG_ID,
+  TEST_ORG_B_ID,
   clientForUser,
   createOrgUser,
   seedTwoOrgs,
@@ -149,9 +150,9 @@ function uniqueEmail(label: string): string {
   return `mig20260816090000-${label}-${Date.now()}-${Math.random().toString(36).slice(2)}@bmhgroupkc.com`;
 }
 
-async function createUserForOrg() {
+async function createUserForOrg(orgId = BMH_ORG_ID) {
   const user = await createOrgUser(serviceClient, {
-    orgId: BMH_ORG_ID,
+    orgId,
     email: uniqueEmail("member"),
     role: "member",
   });
@@ -164,6 +165,7 @@ async function createUserForOrg() {
 async function insertOpenAppointment(opts: {
   assigneeId: string;
   createdBy: string;
+  orgId?: string;
   chainId?: string;
   contactId?: string | null;
   propertyId?: string | null;
@@ -174,7 +176,7 @@ async function insertOpenAppointment(opts: {
   const { data, error } = await db
     .from("tasks")
     .insert({
-      org_id: BMH_ORG_ID,
+      org_id: opts.orgId ?? BMH_ORG_ID,
       type: "appointment",
       status: "open",
       title: "Chain-visibility test appointment",
@@ -462,6 +464,63 @@ describe("Migration 20260816090000 — cancel chain visibility", () => {
       expect(otherPredecessorAfter).toEqual(otherPredecessorBefore);
     });
 
+    it("never crosses organizations when two tenants choose the same chain id, including the historical backfill", async () => {
+      const orgAActor = await createUserForOrg(BMH_ORG_ID);
+      const orgBActor = await createUserForOrg(TEST_ORG_B_ID);
+      await setTimezonePref(orgAActor.userId);
+      await setTimezonePref(orgBActor.userId);
+      const sharedChainId = randomUUID();
+
+      const orgA = await insertOpenAppointment({
+        assigneeId: orgAActor.userId,
+        createdBy: orgAActor.userId,
+        orgId: BMH_ORG_ID,
+        chainId: sharedChainId,
+      });
+      const { successorId: orgASuccessorId } = await reschedule(
+        orgAActor.client,
+        orgA.taskId,
+      );
+      await finalizeChainLedger(sharedChainId);
+
+      const orgB = await insertOpenAppointment({
+        assigneeId: orgBActor.userId,
+        createdBy: orgBActor.userId,
+        orgId: TEST_ORG_B_ID,
+        chainId: sharedChainId,
+      });
+      const orgBCancel = await cancelAppointment(orgBActor.client, {
+        p_task: orgB.taskId,
+      });
+      expect(orgBCancel.error).toBeNull();
+
+      // Cancelling org B must not rewrite org A's rescheduled history.
+      expect(await readTask(orgA.taskId)).toMatchObject({
+        status: "completed",
+        outcome: "rescheduled",
+      });
+      expect(await readTask(orgASuccessorId)).toMatchObject({ status: "open" });
+
+      // Nor may the historical backfill use org B's cancelled terminal row
+      // as evidence that org A's same-id chain is terminal.
+      const conn = new Client({ connectionString: testDbUrl() });
+      await conn.connect();
+      try {
+        await conn.query("begin");
+        await conn.query(migrationBackfillSql());
+        await conn.query("commit");
+      } catch (error) {
+        await conn.query("rollback").catch(() => undefined);
+        throw error;
+      } finally {
+        await conn.end();
+      }
+      expect(await readTask(orgA.taskId)).toMatchObject({
+        status: "completed",
+        outcome: "rescheduled",
+      });
+    });
+
     it("rejects cancelling an already-cancelled appointment (not-open guard still holds after the chain-visibility change)", async () => {
       const actor = await createUserForOrg();
       const { taskId } = await insertOpenAppointment({
@@ -626,6 +685,85 @@ describe("Migration 20260816090000 — cancel chain visibility", () => {
       expect(await readTask(unlockedChain.taskId)).toMatchObject({
         status: "cancelled",
         outcome: "cancelled",
+      });
+    });
+
+    it("waits for a concurrent permanent-DNC ratchet, then skips its newly locked history without aborting", async () => {
+      const actor = await createUserForOrg();
+      await setTimezonePref(actor.userId);
+      const contactId = await insertContact("Concurrent ratchet");
+      const chain = await insertOpenAppointment({
+        assigneeId: actor.userId,
+        createdBy: actor.userId,
+        contactId,
+      });
+      const { successorId } = await reschedule(actor.client, chain.taskId);
+      await finalizeChainLedger(chain.chainId);
+      const cancelled = await cancelAppointment(actor.client, {
+        p_task: successorId,
+      });
+      expect(cancelled.error).toBeNull();
+
+      const setup = new Client({ connectionString: testDbUrl() });
+      await setup.connect();
+      try {
+        await setup.query("begin");
+        await setup.query(
+          "select set_config('sandra.allow_appointment_time_move', 'on', true)",
+        );
+        await setup.query(
+          `update public.tasks
+             set status = 'completed', outcome = 'rescheduled'
+           where id = $1`,
+          [chain.taskId],
+        );
+        await setup.query("commit");
+      } catch (error) {
+        await setup.query("rollback").catch(() => undefined);
+        throw error;
+      } finally {
+        await setup.end();
+      }
+
+      const ratchet = new Client({ connectionString: testDbUrl() });
+      const backfill = new Client({ connectionString: testDbUrl() });
+      await ratchet.connect();
+      await backfill.connect();
+      try {
+        await ratchet.query("begin");
+        await ratchet.query(
+          "update public.contacts set do_not_contact = true where id = $1",
+          [contactId],
+        );
+
+        await backfill.query("begin");
+        let backfillSettled = false;
+        const backfillRun = backfill
+          .query(migrationBackfillSql())
+          .finally(() => {
+            backfillSettled = true;
+          });
+
+        // The backfill must be waiting on the contact lock held by the
+        // uncommitted ratchet, not racing ahead with a stale unlocked read.
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        expect(backfillSettled).toBe(false);
+
+        await ratchet.query("commit");
+        await backfillRun;
+        await backfill.query("commit");
+      } catch (error) {
+        await ratchet.query("rollback").catch(() => undefined);
+        await backfill.query("rollback").catch(() => undefined);
+        throw error;
+      } finally {
+        await ratchet.end();
+        await backfill.end();
+      }
+
+      expect(await readTask(chain.taskId)).toMatchObject({
+        status: "completed",
+        outcome: "rescheduled",
       });
     });
   });
