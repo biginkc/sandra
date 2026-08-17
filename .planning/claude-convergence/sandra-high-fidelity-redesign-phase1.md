@@ -42,6 +42,9 @@ Implement the Claude-approved Overview, Messages, Calendar, and Lead Detail rede
 - `34a02b4` — non-mutating cancel-chain visibility, shared week/month single-snapshot reads, exact-ledger lifecycle receipts and claims, replay/concurrency proof, and dedicated-test-database reapply proof.
 - `085a538` — 44px narrow controls, truthful Calendar scope/timezone captions, visible mobile Month state, and one shared DST/overnight-safe time-range formatter.
 - `7843e05` — exact-task Lead retry receipts, immediate Messages permanent-lock convergence, property-level DNC filtering, queue-stat failure truth, and Overview Retry.
+- `f5f8b7f` — active-member Calendar RPC gate, DNC-safe contact deletion, and forward trigger repair without weakening property locks.
+- `202b45c` — request-stable Calendar/Overview time, DNC-locked appointment history, DST-labelled ranges, member-safe Overview health, and 44px responsive controls.
+- `1fddc85` — queue-only inline replies, canonical Messages safety reads, newest-first Lead history window, stale queue truth, accessible tabs, and a scalar inbox snapshot beyond PostgREST's row cap.
 
 ## Verification evidence so far
 
@@ -54,6 +57,8 @@ Implement the Claude-approved Overview, Messages, Calendar, and Lead Detail rede
 - First whole-change manual review at `f9af052`: REJECTED by all three independent slices. Database/security found destructive history rewriting and non-exact inline claims; route review found cross-task retry, stale DNC controls, incomplete DNC filtering, and false queue zeroes; quality review found undersized narrow controls, missing timezone truth, and DST/overnight formatting errors.
 - Corrective database evidence at `34a02b4`: initial rehearsal/apply and reapply rehearsal/apply passed on the dedicated test project; 18 focused migration/integration tests, including simultaneous claims, delayed old-ledger isolation, and book/reschedule/reassign replay receipts, pass. Migration safety is 59/59.
 - Corrective UI/workflow evidence through `7843e05`: 168 focused unit tests and 230 focused RTL tests pass independently in addition to the full hooks.
+- Second whole-change manual review at `5e819ff`: REJECTED by all three independent slices. Database/security reproduced the legacy contact-delete trigger failure and inactive-member Calendar access; route/quality review found direct-send replies, DNC lifecycle controls, member KPI exposure, unstable request time, ambiguous fall-back DST ranges, undersized targets, stale queue truth, and row-capped Messages/Lead history.
+- Second-round corrections through `1fddc85`: every commit hook passed typecheck, 2,224 unit tests, and 716 RTL tests. The combined dedicated-database run passed 128/128 tests, including all 97 legacy appointment scenarios, Calendar active-access/volume cases, DNC contact-delete regressions, and a 1,005-thread Messages snapshot. The inbox RPC also proves cross-tenant isolation and fails closed for suspended, expired, and deletion-prepared memberships.
 
 ## Active execution lane
 
@@ -73,4 +78,4 @@ Implement the Claude-approved Overview, Messages, Calendar, and Lead Detail rede
 
 ## Current state
 
-The first whole-change candidate was correctly rejected. Its three correction families are implemented at `7843e05` with full hooks and dedicated-database evidence clean. Exact-head whole-change re-review and Claude convergence are next. No merge, production migration, production deployment, provider send, or production browser mutation has occurred in this execution block yet.
+Both prior whole-change candidates were correctly rejected. Their correction families are now committed through `1fddc851a64dc995c4004eee71c2f93e2f6b7ef5`; full hooks and the combined dedicated-database suite are clean. Exact-head whole-change re-review and Claude convergence are next. No merge, production migration, production deployment, provider send, or production browser mutation has occurred in this execution block yet.
