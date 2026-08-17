@@ -23,10 +23,10 @@ Implement the Claude-approved Overview, Messages, Calendar, and Lead Detail rede
 
 ## Adversarial integration decisions
 
-1. PR #370 was patched before integration: its historical cancel-chain backfill skips true-DNC-locked property and contact history instead of bypassing the lock.
-2. PR #369 was rejected as unsafe: its five-row global claim burned attempts on unrelated work, its completion kick could only claim unrelated rows, and its four-second deadline could not reach Google. It was replaced by an exact-source-task claim, no completion kick, and a ten-second bounded worker.
+1. PR #370's historical cancel-chain rewrite was rejected after exact-head review because it destroyed the recorded `completed/rescheduled` fact and still left immutable DNC history visibly stale. The unpublished migration now preserves every audit row and Calendar hides a reschedule predecessor only when the same organization and chain has a cancelled appointment.
+2. PR #369 was rejected as unsafe: its five-row global claim burned attempts on unrelated work, its completion kick could only claim unrelated rows, and its four-second deadline could not reach Google. The first task-scoped replacement was also rejected because a delayed request could claim a newer mutation on the same task. Lifecycle RPCs now return the exact ledger id, inline sync claims only that id, completion never kicks, and the bounded worker gets ten seconds.
 3. PR #368 is reused only for its functional Calendar engine through `4a03e4c`; the presentation is replaced. Its old migration number is renamed after the current main ledger.
-4. Calendar Month is always 42 days / six Sunday-start weeks, uses one snapshot RPC, keeps per-week caps, and remains Agenda-only on narrow screens.
+4. Calendar Month is always 42 days / six Sunday-start weeks, uses one snapshot RPC, and keeps per-week caps. On narrow screens that same range becomes a labelled Month agenda with the Month tab visibly active; the seven-column grid remains desktop-only.
 
 ## Completed checkpoints
 
@@ -39,15 +39,21 @@ Implement the Claude-approved Overview, Messages, Calendar, and Lead Detail rede
 - `bed541d` — cancel-chain tenant isolation, deterministic lock order, and concurrent DNC-ratchet proof.
 - `dbe99be` — Lead Detail hierarchy, one ordered task/appointment timeline, truthful fail-closed SMS restrictions, and preserved DNC/read models.
 - `8fa318f` — narrow list-or-detail Messages cockpit, persistent filter URL state, truthful queue failures, stage/escalation labels, and keyboard focus recovery.
+- `34a02b4` — non-mutating cancel-chain visibility, shared week/month single-snapshot reads, exact-ledger lifecycle receipts and claims, replay/concurrency proof, and dedicated-test-database reapply proof.
+- `085a538` — 44px narrow controls, truthful Calendar scope/timezone captions, visible mobile Month state, and one shared DST/overnight-safe time-range formatter.
+- `7843e05` — exact-task Lead retry receipts, immediate Messages permanent-lock convergence, property-level DNC filtering, queue-stat failure truth, and Overview Retry.
 
 ## Verification evidence so far
 
-- Full commit hooks through `8fa318f`: typecheck, 2,214 unit tests, and 694 RTL tests pass. One unrelated Prospects menu timing failure reproduced once in the full suite, then its exact test and the complete hook passed on immediate rerun.
+- Full commit hooks through `7843e05`: typecheck, 2,216 unit tests, and 705 RTL tests pass. One unrelated Prospects menu timing failure reproduced once before the first whole-change review, then its exact test and all later complete hooks passed.
 - Calendar Month migration: transaction rehearsal rolled back cleanly, exact migration applied cleanly to the dedicated test database, 7/7 migration integration tests pass.
 - Cancel-chain and targeted inline-claim migrations were separately rehearsed/applied in the dedicated test database with their integration suites passing.
 - Overview/shell independent review: CLEAN.
 - Lead Detail adversarial review: three findings fixed (nearest appointment ordering, terminal/landline SMS gating, partial-read visibility), then CLEAN.
 - Messages adversarial review: queue refresh truthfulness and stale-thread mobile recovery/focus findings fixed across non-empty and empty filters, then CLEAN.
+- First whole-change manual review at `f9af052`: REJECTED by all three independent slices. Database/security found destructive history rewriting and non-exact inline claims; route review found cross-task retry, stale DNC controls, incomplete DNC filtering, and false queue zeroes; quality review found undersized narrow controls, missing timezone truth, and DST/overnight formatting errors.
+- Corrective database evidence at `34a02b4`: initial rehearsal/apply and reapply rehearsal/apply passed on the dedicated test project; 18 focused migration/integration tests, including simultaneous claims, delayed old-ledger isolation, and book/reschedule/reassign replay receipts, pass. Migration safety is 59/59.
+- Corrective UI/workflow evidence through `7843e05`: 168 focused unit tests and 230 focused RTL tests pass independently in addition to the full hooks.
 
 ## Active execution lane
 
@@ -67,4 +73,4 @@ Implement the Claude-approved Overview, Messages, Calendar, and Lead Detail rede
 
 ## Current state
 
-Phase 1 implementation is complete at `8fa318f` and route-lane re-reviews are clean. Whole-change manual review and Claude convergence are next. No merge, production migration, production deployment, provider send, or production browser mutation has occurred in this execution block yet.
+The first whole-change candidate was correctly rejected. Its three correction families are implemented at `7843e05` with full hooks and dedicated-database evidence clean. Exact-head whole-change re-review and Claude convergence are next. No merge, production migration, production deployment, provider send, or production browser mutation has occurred in this execution block yet.
