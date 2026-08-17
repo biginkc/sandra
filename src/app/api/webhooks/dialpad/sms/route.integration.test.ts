@@ -74,6 +74,20 @@ async function createAuthUser(email: string): Promise<string> {
   if (error || !data.user) {
     throw new Error(`createAuthUser failed: ${error?.message}`);
   }
+  const { error: membershipError } = await supabase
+    .from("memberships")
+    .insert({
+      user_id: data.user.id,
+      org_id: TEST_ORG_ID,
+      role: "member",
+      access_status: "active",
+    });
+  if (membershipError) {
+    await supabase.auth.admin.deleteUser(data.user.id);
+    throw new Error(
+      `createAuthUser membership failed: ${membershipError.message}`,
+    );
+  }
   createdAuthUsers.push(data.user.id);
   return data.user.id;
 }
@@ -187,6 +201,11 @@ describe("POST /api/webhooks/dialpad/sms (integration)", () => {
   afterEach(async () => {
     process.env.ADMIN_EMAILS = ORIGINAL_ADMIN_EMAILS;
     for (const id of createdAuthUsers) {
+      const { error: membershipError } = await supabase
+        .from("memberships")
+        .delete()
+        .eq("user_id", id);
+      if (membershipError) throw membershipError;
       await supabase.auth.admin.deleteUser(id);
     }
     createdAuthUsers.length = 0;
@@ -449,6 +468,40 @@ describe("POST /api/webhooks/dialpad/sms (integration)", () => {
       .eq("id", property!.id)
       .single();
     expect(propertyAfterStop?.outreach_dispo).toBe("dnc");
+
+    const { data: contactAfterStop } = await supabase
+      .from("contacts")
+      .select("do_not_contact, sms_opted_out")
+      .eq("id", contactId)
+      .single();
+    expect(contactAfterStop).toMatchObject({
+      do_not_contact: false,
+      // The permanent contact history remains immutable; the durable phone
+      // suppression and append-only audit below carry the SMS STOP state.
+      sms_opted_out: false,
+    });
+    const { data: suppression } = await supabase
+      .from("sms_phone_suppressions")
+      .select("phone_e164, first_contact_id")
+      .eq("org_id", TEST_ORG_ID)
+      .eq("channel", "sms")
+      .eq("phone_e164", phone)
+      .single();
+    expect(suppression).toMatchObject({
+      phone_e164: phone,
+      first_contact_id: contactId,
+    });
+    const { count: consentCount } = await supabase
+      .from("consent_events")
+      .select("id", { count: "exact", head: true })
+      .eq("contact_id", contactId)
+      .eq("event_type", "opt_out");
+    expect(consentCount).toBe(1);
+    const { count: inboundCount } = await supabase
+      .from("messages")
+      .select("id", { count: "exact", head: true })
+      .eq("external_id", "msg_stop_preserve_dnc_001");
+    expect(inboundCount).toBe(1);
   });
 
   it("fails soft when attribution lookup errors so STOP still opts out and inserts the inbound", async () => {
@@ -1184,7 +1237,7 @@ describe("POST /api/webhooks/dialpad/sms (integration)", () => {
     const assignee = await createAuthUser(
       `idempotent-assignee-${Date.now()}@test.invalid`,
     );
-    const { data: property } = await supabase
+    const { data: property, error: propertyError } = await supabase
       .from("properties")
       .insert({
         address: "3 Idempotent Ln",
@@ -1195,6 +1248,9 @@ describe("POST /api/webhooks/dialpad/sms (integration)", () => {
       })
       .select("id")
       .single();
+    if (propertyError || !property) {
+      throw propertyError ?? new Error("idempotent property insert failed");
+    }
     await supabase.from("messages").insert({
       channel: "sms",
       direction: "outbound",
@@ -1248,7 +1304,7 @@ describe("POST /api/webhooks/dialpad/sms (integration)", () => {
     const assignee = await createAuthUser(
       `idempotent-replay-${Date.now()}@test.invalid`,
     );
-    const { data: property } = await supabase
+    const { data: property, error: propertyError } = await supabase
       .from("properties")
       .insert({
         address: "4 Replay Ln",
@@ -1259,6 +1315,9 @@ describe("POST /api/webhooks/dialpad/sms (integration)", () => {
       })
       .select("id")
       .single();
+    if (propertyError || !property) {
+      throw propertyError ?? new Error("replay property insert failed");
+    }
     await supabase.from("messages").insert([
       {
         channel: "sms",
@@ -1491,7 +1550,7 @@ describe("POST /api/webhooks/dialpad/sms (integration)", () => {
     const assignee = await createAuthUser(
       `idempotent-notif-${Date.now()}@test.invalid`,
     );
-    const { data: property } = await supabase
+    const { data: property, error: propertyError } = await supabase
       .from("properties")
       .insert({
         address: "5 Replay Ln",
@@ -1502,6 +1561,11 @@ describe("POST /api/webhooks/dialpad/sms (integration)", () => {
       })
       .select("id")
       .single();
+    if (propertyError || !property) {
+      throw (
+        propertyError ?? new Error("notification replay property insert failed")
+      );
+    }
     await supabase.from("messages").insert([
       {
         channel: "sms",
@@ -1583,7 +1647,7 @@ describe("POST /api/webhooks/dialpad/sms (integration)", () => {
       `persisted-prop-b-${Date.now()}@test.invalid`,
     );
 
-    const { data: propertyA } = await supabase
+    const { data: propertyA, error: propertyAError } = await supabase
       .from("properties")
       .insert({
         address: "21 Persisted Replay Ln",
@@ -1594,7 +1658,10 @@ describe("POST /api/webhooks/dialpad/sms (integration)", () => {
       })
       .select("id")
       .single();
-    const { data: propertyB } = await supabase
+    if (propertyAError || !propertyA) {
+      throw propertyAError ?? new Error("persisted property A insert failed");
+    }
+    const { data: propertyB, error: propertyBError } = await supabase
       .from("properties")
       .insert({
         address: "22 Fresh Resolve Ln",
@@ -1605,6 +1672,9 @@ describe("POST /api/webhooks/dialpad/sms (integration)", () => {
       })
       .select("id")
       .single();
+    if (propertyBError || !propertyB) {
+      throw propertyBError ?? new Error("persisted property B insert failed");
+    }
 
     await supabase.from("messages").insert([
       {
@@ -1994,7 +2064,7 @@ describe("POST /api/webhooks/dialpad/sms (integration)", () => {
     const assignee = await createAuthUser(
       `webhook-notif-${Date.now()}@test.invalid`,
     );
-    const { data: property } = await supabase
+    const { data: property, error: propertyError } = await supabase
       .from("properties")
       .insert({
         address: "18 Notify Ln",
@@ -2005,6 +2075,9 @@ describe("POST /api/webhooks/dialpad/sms (integration)", () => {
       })
       .select("id")
       .single();
+    if (propertyError || !property) {
+      throw propertyError ?? new Error("notification property insert failed");
+    }
     await supabase.from("messages").insert({
       channel: "sms",
       direction: "outbound",

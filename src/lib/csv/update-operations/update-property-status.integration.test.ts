@@ -126,4 +126,76 @@ describe("update-property-status sub-op (integration)", () => {
     expect(result.kind).toBe("updated");
     expect(await readStatus(id)).toBe("new_lead");
   });
+
+  it("fails closed when the matched property is hard-deleted before save", async () => {
+    const id = await seedProperty("600 Deleted Status St", "new_lead");
+    const match = await matchPropertyByAddress(supabase, {
+      address: "600 Deleted Status St",
+    });
+    if (match.kind !== "matched") throw new Error("expected matched");
+    const { error: deleteError } = await supabase
+      .from("properties")
+      .delete()
+      .eq("id", id);
+    if (deleteError) throw deleteError;
+
+    const result = await updatePropertyStatusOp.apply(
+      { supabase, userId: null },
+      {
+        rowIndex: 0,
+        parsedRow: {
+          Address: "600 Deleted Status St",
+          Status: "contacted",
+        },
+        property: match.property,
+      },
+      { dryRun: false },
+    );
+
+    expect(result).toMatchObject({
+      kind: "rejected",
+      reason: "stale-property",
+    });
+  });
+
+  it("fails closed when the matched property is soft-deleted before save", async () => {
+    const id = await seedProperty("700 Soft Deleted Status St", "new_lead");
+    const match = await matchPropertyByAddress(supabase, {
+      address: "700 Soft Deleted Status St",
+    });
+    if (match.kind !== "matched") throw new Error("expected matched");
+    const deletedAt = new Date().toISOString();
+    const { error: deleteError } = await supabase
+      .from("properties")
+      .update({ deleted_at: deletedAt })
+      .eq("id", id);
+    if (deleteError) throw deleteError;
+
+    const result = await updatePropertyStatusOp.apply(
+      { supabase, userId: null },
+      {
+        rowIndex: 0,
+        parsedRow: {
+          Address: "700 Soft Deleted Status St",
+          Status: "contacted",
+        },
+        property: match.property,
+      },
+      { dryRun: false },
+    );
+
+    expect(result).toMatchObject({
+      kind: "rejected",
+      reason: "stale-property",
+    });
+    const { data: proof } = await supabase
+      .from("properties")
+      .select("status, deleted_at")
+      .eq("id", id)
+      .single();
+    expect(proof?.status).toBe("new_lead");
+    expect(new Date(proof!.deleted_at!).getTime()).toBe(
+      new Date(deletedAt).getTime(),
+    );
+  });
 });

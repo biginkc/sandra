@@ -1,4 +1,7 @@
-import { isDoNotCallLabel, lineTypeFromVendorLabel } from "@/lib/messaging/line-type";
+import {
+  isDoNotCallLabel,
+  lineTypeFromVendorLabel,
+} from "@/lib/messaging/line-type";
 import type { Database } from "@/lib/supabase/types";
 
 import { normalizePhone } from "../normalize";
@@ -20,13 +23,13 @@ type Role = "homeowner" | "agent";
 
 export function buildPhonesOp(role: Role): SubOperationModule {
   const idSuffix = role === "homeowner" ? "homeowner-phones" : "agent-phones";
-  const label = role === "homeowner"
-    ? "Update homeowner phone numbers"
-    : "Update agent phone numbers";
+  const label =
+    role === "homeowner"
+      ? "Update homeowner phone numbers"
+      : "Update agent phone numbers";
   const noContactReason = role === "homeowner" ? "no-homeowner" : "no-agent";
-  const contactKey = role === "homeowner"
-    ? "homeowner_contact_id"
-    : "agent_contact_id";
+  const contactKey =
+    role === "homeowner" ? "homeowner_contact_id" : "agent_contact_id";
 
   return {
     id: `update-${idSuffix}` as SubOperationModule["id"],
@@ -134,12 +137,133 @@ export function buildPhonesOp(role: Role): SubOperationModule {
         return { kind: "unchanged", rowIndex, address, reason: "blank" };
       }
 
-      if (!options.dryRun) {
+      const dncLockedResult = {
+        kind: "rejected" as const,
+        rowIndex,
+        address,
+        reason: "dnc-locked",
+        detail: "Permanent Do Not Contact records are read-only.",
+      };
+      if (property.is_dnc_locked && !dncFlagged) {
+        return dncLockedResult;
+      }
+
+      const { data: currentContact, error: contactReadError } =
+        await ctx.supabase
+          .from("contacts")
+          .select("do_not_contact")
+          .eq("id", contactId)
+          .eq("org_id", property.org_id)
+          .maybeSingle();
+      if (contactReadError) {
+        return {
+          kind: "rejected",
+          rowIndex,
+          address,
+          reason: "db-error",
+          detail: contactReadError.message,
+        };
+      }
+      if (!currentContact) {
+        return {
+          kind: "rejected",
+          rowIndex,
+          address,
+          reason: noContactReason,
+          detail: `Property has no ${role} contact attached.`,
+        };
+      }
+      if (currentContact.do_not_contact && !dncFlagged) {
+        return dncLockedResult;
+      }
+      if (currentContact.do_not_contact && dncFlagged) {
+        return { kind: "unchanged", rowIndex, address, reason: "no-change" };
+      }
+
+      // Permanent DNC must be a flag-only transition. A row that also
+      // contains clean phones cannot smuggle those mutable fields into the
+      // same write, and a repeated DNC row is an idempotent no-op.
+      const writeUpdate: Partial<ContactPhoneUpdate> = dncFlagged
+        ? { do_not_contact: true }
+        : update;
+
+      if (!options.dryRun && dncFlagged) {
+        const { data: ratcheted, error } = await ctx.supabase
+          .from("contacts")
+          .update(writeUpdate)
+          .eq("id", contactId)
+          .eq("org_id", property.org_id)
+          .eq("do_not_contact", false)
+          .select("id");
+        if (!error && ratcheted?.length === 1) {
+          // Positive proof: exactly the intended contact was ratcheted.
+        } else {
+          if (!error && ratcheted && ratcheted.length > 1) {
+            return {
+              kind: "rejected",
+              rowIndex,
+              address,
+              reason: "db-error",
+              detail: `DNC ratchet updated ${ratcheted.length} contacts; expected exactly one.`,
+            };
+          }
+          if (error && !error.message.includes("DNC_LOCKED")) {
+            return {
+              kind: "rejected",
+              rowIndex,
+              address,
+              reason: "db-error",
+              detail: error.message,
+            };
+          }
+
+          // Zero rows can be an idempotent race (another writer already
+          // ratcheted DNC), or a concurrent delete/stale contact. Re-read and
+          // accept only positive proof that this exact contact is now DNC.
+          const { data: proof, error: proofError } = await ctx.supabase
+            .from("contacts")
+            .select("do_not_contact")
+            .eq("id", contactId)
+            .eq("org_id", property.org_id)
+            .maybeSingle();
+          if (proofError) {
+            return {
+              kind: "rejected",
+              rowIndex,
+              address,
+              reason: "db-error",
+              detail: `DNC ratchet proof failed: ${proofError.message}`,
+            };
+          }
+          if (!proof) {
+            return {
+              kind: "rejected",
+              rowIndex,
+              address,
+              reason: "db-error",
+              detail:
+                "DNC ratchet was not confirmed because the contact no longer exists.",
+            };
+          }
+          if (!proof.do_not_contact) {
+            return {
+              kind: "rejected",
+              rowIndex,
+              address,
+              reason: "db-error",
+              detail:
+                "DNC ratchet updated zero rows and the contact remains callable.",
+            };
+          }
+        }
+      } else if (!options.dryRun) {
         const { error } = await ctx.supabase
           .from("contacts")
-          .update(update)
-          .eq("id", contactId);
+          .update(writeUpdate)
+          .eq("id", contactId)
+          .eq("org_id", property.org_id);
         if (error) {
+          if (error.message.includes("DNC_LOCKED")) return dncLockedResult;
           return {
             kind: "rejected",
             rowIndex,
@@ -154,7 +278,7 @@ export function buildPhonesOp(role: Role): SubOperationModule {
         rowIndex,
         address,
         before: { contact_id: contactId },
-        after: update,
+        after: writeUpdate,
       };
     },
   };

@@ -5,6 +5,7 @@ import { updatePropertyStatusOp } from "./update-property-status";
 
 const baseProperty: PropertyForMatch = {
   id: "property-1",
+  org_id: "org-1",
   homeowner_contact_id: null,
   agent_contact_id: null,
   status: "new_lead",
@@ -33,15 +34,22 @@ describe("CSV property-status DNC guard", () => {
   });
 
   it("reports a DNC race when the guarded update changes zero rows", async () => {
-    const result = Promise.resolve({ data: null, error: null });
     const query = {
       update: vi.fn(),
       eq: vi.fn(),
+      is: vi.fn(),
       select: vi.fn(),
-      maybeSingle: vi.fn().mockReturnValue(result),
+      maybeSingle: vi
+        .fn()
+        .mockResolvedValueOnce({ data: null, error: null })
+        .mockResolvedValueOnce({
+          data: { is_dnc_locked: true, deleted_at: null },
+          error: null,
+        }),
     };
     query.update.mockReturnValue(query);
     query.eq.mockReturnValue(query);
+    query.is.mockReturnValue(query);
     query.select.mockReturnValue(query);
 
     const row = await updatePropertyStatusOp.apply(

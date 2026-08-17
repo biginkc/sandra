@@ -845,20 +845,37 @@ export async function createDialerBatchFromFilters(args: {
   imported?: "today" | null;
   title?: string;
 }): Promise<Result<CreateDialerBatchResult>> {
-  const idsResult = await getAllMatchingProspectIds({
+  const selectionResult = await getAllMatchingProspectSelection({
     search: args.search ?? null,
     blockStack: args.blockStack,
     imported: args.imported ?? null,
   });
-  if (!idsResult.ok) return idsResult;
+  if (!selectionResult.ok) return selectionResult;
 
-  return createDialerBatchFromPropertyIds(idsResult.data, {
-    title: args.title,
-    sourceKind: "filters",
-    sourceMeta: {
-      search: args.search ?? null,
-      blockStack: args.blockStack,
-      imported: args.imported ?? null,
+  const result = await createDialerBatchFromPropertyIds(
+    selectionResult.data.eligibleIds,
+    {
+      title: args.title,
+      sourceKind: "filters",
+      sourceMeta: {
+        search: args.search ?? null,
+        blockStack: args.blockStack,
+        imported: args.imported ?? null,
+      },
+    },
+  );
+  if (!result.ok || selectionResult.data.dncLockedCount === 0) return result;
+
+  return ok({
+    ...result.data,
+    counts: {
+      ...result.data.counts,
+      blocked: {
+        ...result.data.counts.blocked,
+        dnc_locked:
+          (result.data.counts.blocked.dnc_locked ?? 0) +
+          selectionResult.data.dncLockedCount,
+      },
     },
   });
 }

@@ -1,12 +1,14 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { matchPropertyByAddress } from "@/lib/csv/match-by-address";
 import { normalizeAddress } from "@/lib/csv/normalize";
 import { updateAgentEmailsOp } from "@/lib/csv/update-operations/update-agent-emails";
 import { createTestClient } from "@tests/integration/client";
+import { createTemporaryOrganizationTracker } from "@tests/integration/fixtures/temporary-organizations";
 import { resetTenantTables } from "@tests/integration/reset";
 
 const supabase = createTestClient();
+const temporaryOrganizations = createTemporaryOrganizationTracker(supabase);
 
 async function seedContact(): Promise<string> {
   const { data, error } = await supabase
@@ -66,6 +68,10 @@ describe("update-agent-emails sub-op (integration)", () => {
     await resetTenantTables(supabase);
   });
 
+  afterEach(async () => {
+    await temporaryOrganizations.cleanup();
+  });
+
   it("email written to the agent contact (lowercased + trimmed)", async () => {
     const contactId = await seedContact();
     await seedPropertyWithAgent("100 AgentMail St", contactId);
@@ -94,5 +100,51 @@ describe("update-agent-emails sub-op (integration)", () => {
     );
     expect(result.kind).toBe("rejected");
     if (result.kind === "rejected") expect(result.reason).toBe("no-agent");
+  });
+
+  it("fails closed on a legacy cross-tenant agent link and leaves the foreign email unchanged", async () => {
+    const foreignOrg = await temporaryOrganizations.create(
+      "Agent email foreign tenant",
+    );
+    const { data: foreignContact, error: contactError } = await supabase
+      .from("contacts")
+      .insert({
+        org_id: foreignOrg.id,
+        first_name: "Foreign",
+        last_name: "Agent",
+        email: "foreign-agent@example.com",
+      })
+      .select("id")
+      .single();
+    if (contactError || !foreignContact) {
+      throw contactError ?? new Error("foreign contact seed failed");
+    }
+
+    await seedPropertyWithAgent("225 Cross Tenant Agent Mail St", null);
+    const match = await matchPropertyByAddress(supabase, {
+      address: "225 Cross Tenant Agent Mail St",
+    });
+    if (match.kind !== "matched") throw new Error("expected matched");
+
+    const result = await updateAgentEmailsOp.apply(
+      { supabase, userId: null },
+      {
+        rowIndex: 0,
+        parsedRow: {
+          Address: "225 Cross Tenant Agent Mail St",
+          Email: "stolen@example.com",
+        },
+        property: {
+          ...match.property,
+          agent_contact_id: foreignContact.id,
+        },
+      },
+      { dryRun: false },
+    );
+
+    expect(result).toMatchObject({ kind: "rejected", reason: "no-agent" });
+    expect(await readEmail(foreignContact.id)).toBe(
+      "foreign-agent@example.com",
+    );
   });
 });

@@ -49,10 +49,14 @@ export const updateMotivationLevelOp: SubOperationModule = {
       return { kind: "unchanged", rowIndex, address, reason: "no-change" };
     }
     if (!options.dryRun) {
-      const { error } = await ctx.supabase
+      const { data, error } = await ctx.supabase
         .from("properties")
         .update({ motivation_level: next })
-        .eq("id", property.id);
+        .eq("id", property.id)
+        .eq("org_id", property.org_id)
+        .is("deleted_at", null)
+        .select("id")
+        .maybeSingle();
       if (error) {
         return {
           kind: "rejected",
@@ -60,6 +64,16 @@ export const updateMotivationLevelOp: SubOperationModule = {
           address,
           reason: "db-error",
           detail: error.message,
+        };
+      }
+      if (!data) {
+        return {
+          kind: "rejected",
+          rowIndex,
+          address,
+          reason: "stale-property",
+          detail:
+            "The matched property was deleted or no longer belongs to this organization before the update saved.",
         };
       }
     }

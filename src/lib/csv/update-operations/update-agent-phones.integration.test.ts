@@ -1,12 +1,14 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { matchPropertyByAddress } from "@/lib/csv/match-by-address";
 import { normalizeAddress } from "@/lib/csv/normalize";
 import { updateAgentPhonesOp } from "@/lib/csv/update-operations/update-agent-phones";
 import { createTestClient } from "@tests/integration/client";
+import { createTemporaryOrganizationTracker } from "@tests/integration/fixtures/temporary-organizations";
 import { resetTenantTables } from "@tests/integration/reset";
 
 const supabase = createTestClient();
+const temporaryOrganizations = createTemporaryOrganizationTracker(supabase);
 
 async function seedContact(): Promise<string> {
   const { data, error } = await supabase
@@ -66,6 +68,10 @@ describe("update-agent-phones sub-op (integration)", () => {
     await resetTenantTables(supabase);
   });
 
+  afterEach(async () => {
+    await temporaryOrganizations.cleanup();
+  });
+
   it("property with agent_contact_id → phones written to the agent contact", async () => {
     const contactId = await seedContact();
     await seedPropertyWithAgent("100 Agent St", contactId);
@@ -95,5 +101,38 @@ describe("update-agent-phones sub-op (integration)", () => {
     );
     expect(result.kind).toBe("rejected");
     if (result.kind === "rejected") expect(result.reason).toBe("no-agent");
+  });
+
+  it("fails closed when a property is cross-wired to another organization's agent", async () => {
+    const foreignOrg = await temporaryOrganizations.create(
+      "Agent phones foreign tenant",
+    );
+    const { data: foreignContact, error: contactError } = await supabase
+      .from("contacts")
+      .insert({
+        org_id: foreignOrg.id,
+        first_name: "Foreign",
+        last_name: "Agent",
+      })
+      .select("id")
+      .single();
+    if (contactError || !foreignContact) {
+      throw contactError ?? new Error("foreign contact seed failed");
+    }
+    await seedPropertyWithAgent("225 Cross Tenant Agent St", foreignContact.id);
+
+    const result = await applyRow({
+      Address: "225 Cross Tenant Agent St",
+      "Phone 1": "8165551225",
+      "Phone 1 Type": "DO NOT CALL",
+    });
+
+    expect(result).toMatchObject({ kind: "rejected", reason: "no-agent" });
+    const { data: proof } = await supabase
+      .from("contacts")
+      .select("phone_1, do_not_contact")
+      .eq("id", foreignContact.id)
+      .single();
+    expect(proof).toEqual({ phone_1: null, do_not_contact: false });
   });
 });

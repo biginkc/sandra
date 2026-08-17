@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { matchPropertyByAddress } from "@/lib/csv/match-by-address";
 import { normalizeAddress } from "@/lib/csv/normalize";
 import { createTestClient } from "@tests/integration/client";
+import { BMH_ORG_ID } from "@tests/integration/fixtures/multi-user";
 import { resetTenantTables } from "@tests/integration/reset";
 
 const supabase = createTestClient();
@@ -34,7 +35,9 @@ describe("matchPropertyByAddress (integration)", () => {
       address: "123 Main St",
     });
     expect(result.kind).toBe("matched");
-    if (result.kind === "matched") expect(result.property.id).toBe(id);
+    if (result.kind === "matched") {
+      expect(result.property).toMatchObject({ id, org_id: BMH_ORG_ID });
+    }
   });
 
   it("returns unmatched when no property matches", async () => {
@@ -43,7 +46,8 @@ describe("matchPropertyByAddress (integration)", () => {
       address: "1 Nowhere Pl",
     });
     expect(result.kind).toBe("unmatched");
-    if (result.kind === "unmatched") expect(result.reason).toBe("no-address-match");
+    if (result.kind === "unmatched")
+      expect(result.reason).toBe("no-address-match");
   });
 
   it("returns matched and is case-insensitive (123 Main St == 123 MAIN ST)", async () => {
@@ -68,6 +72,7 @@ describe("matchPropertyByAddress (integration)", () => {
     await seedProperty("123 Main St");
     const result = await matchPropertyByAddress(supabase, { address: "  " });
     expect(result.kind).toBe("unmatched");
-    if (result.kind === "unmatched") expect(result.reason).toBe("blank-address");
+    if (result.kind === "unmatched")
+      expect(result.reason).toBe("blank-address");
   });
 });

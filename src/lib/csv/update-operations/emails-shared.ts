@@ -53,11 +53,44 @@ export function buildEmailsOp(role: Role): SubOperationModule {
           detail: `"${raw}" doesn't look like an email.`,
         };
       }
+
+      // A legacy property row may point at a contact from another tenant.
+      // Never trust the globally unique contact id by itself: both preview
+      // and execution must prove that the contact belongs to the property's
+      // organization before claiming this row can be updated.
+      const { data: currentContact, error: contactReadError } =
+        await ctx.supabase
+          .from("contacts")
+          .select("id")
+          .eq("id", contactId)
+          .eq("org_id", property.org_id)
+          .maybeSingle();
+      if (contactReadError) {
+        return {
+          kind: "rejected",
+          rowIndex,
+          address,
+          reason: "db-error",
+          detail: contactReadError.message,
+        };
+      }
+      if (!currentContact) {
+        return {
+          kind: "rejected",
+          rowIndex,
+          address,
+          reason: noContactReason,
+          detail: `Property has no ${role} contact attached in its organization.`,
+        };
+      }
+
       if (!options.dryRun) {
-        const { error } = await ctx.supabase
+        const { data: updatedContacts, error } = await ctx.supabase
           .from("contacts")
           .update({ email: lowered })
-          .eq("id", contactId);
+          .eq("id", contactId)
+          .eq("org_id", property.org_id)
+          .select("id");
         if (error) {
           return {
             kind: "rejected",
@@ -65,6 +98,15 @@ export function buildEmailsOp(role: Role): SubOperationModule {
             address,
             reason: "db-error",
             detail: error.message,
+          };
+        }
+        if (updatedContacts?.length !== 1) {
+          return {
+            kind: "rejected",
+            rowIndex,
+            address,
+            reason: "db-error",
+            detail: `Email update affected ${updatedContacts?.length ?? 0} contacts; expected exactly one.`,
           };
         }
       }

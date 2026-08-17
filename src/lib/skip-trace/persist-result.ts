@@ -10,8 +10,17 @@ import type { Database } from "@/lib/supabase/types";
 import type { SkipTraceResult } from "./types";
 
 export type PersistOutcome = {
-  status: "matched" | "no_match" | "property_not_found" | "dnc_skipped";
+  status:
+    | "matched"
+    | "no_match"
+    | "property_not_found"
+    | "dnc_skipped"
+    | "dnc_contact_ambiguous";
   contactId?: string;
+  /** Present when provider phones resolved to more than one contact. No
+   * property-contact link was guessed; contacts owning DNC-flagged numbers
+   * were ratcheted before the fail-closed outcome was returned. */
+  ambiguousContactIds?: string[];
   phonesAdded: number;
   emailsAdded: number;
   /** True when the provider returned an owner mailing address that
@@ -63,6 +72,43 @@ export async function persistSkipTraceResult(
 
   // Pick the best person — owner first, then highest-rank phone holder.
   const owner = result.persons.find((p) => p.isOwner) ?? result.persons[0];
+  const hasDncPhone = owner.phones.some((p) => !!p.number && p.dnc);
+
+  // Resolve every provider phone before selecting a contact. Stopping at the
+  // first match can silently attach a property to whichever contact happened
+  // to own the highest-ranked number while a lower-ranked (possibly DNC)
+  // number belongs to somebody else. Lookup failures are fatal because a miss
+  // and an unavailable lookup are not interchangeable for identity or DNC.
+  const phoneResolution = await resolveContactsByPhone(
+    supabase,
+    property.org_id,
+    owner,
+  );
+  const resolvedContactIds = new Set(phoneResolution.contactIds);
+  if (property.homeowner_contact_id) {
+    resolvedContactIds.add(property.homeowner_contact_id);
+  }
+  if (resolvedContactIds.size > 1) {
+    const ambiguousContactIds = [...resolvedContactIds].sort();
+    if (!hasDncPhone) {
+      throw new Error(
+        `contact resolution ambiguous: provider phones map to multiple contacts (${ambiguousContactIds.join(", ")})`,
+      );
+    }
+    // Do not attach the property to an arbitrary contact. Ratchet every
+    // contact that actually owns a DNC-flagged number; clean-number matches
+    // remain untouched because permanent DNC is irreversible and ambiguity is
+    // not evidence that an unrelated clean number is suppressed.
+    for (const dncContactId of phoneResolution.dncContactIds) {
+      await ratchetContactDnc(supabase, property.org_id, dncContactId);
+    }
+    return {
+      status: "dnc_contact_ambiguous",
+      ambiguousContactIds,
+      phonesAdded: 0,
+      emailsAdded: 0,
+    };
+  }
 
   // Resolve / create the contact. Two-phase lookup for the no-existing-
   // contact case: there's a global unique index on contacts.phone_1, so
@@ -71,18 +117,18 @@ export async function persistSkipTraceResult(
   // landlords with N rentals), we must REUSE that contact instead of
   // trying to insert a duplicate. Otherwise we hit
   // `contacts_phone_1_key` and lose the row.
-  let contactId = property.homeowner_contact_id;
+  let contactId: string | null =
+    property.homeowner_contact_id ?? phoneResolution.contactIds[0] ?? null;
   let createdContactId: string | null = null;
   if (!contactId) {
     contactId =
-      (await resolveContactByPhone(supabase, property.org_id, owner)) ??
       // contacts_person_name_key is a partial unique index on
       // (lower(last_name), lower(first_name)) WHERE phone_1 IS NULL AND
       // email IS NULL — a name-only contact (created when a previous
       // property's persist couldn't fill any phone) collides
       // deterministically with every later insert for the same owner
       // (624 rows failed this way on 2026-06-12). Reuse it instead.
-      (await resolveContactByName(supabase, property.org_id, owner));
+      await resolveContactByName(supabase, property.org_id, owner);
     if (!contactId) {
       const { data: newContact, error: contactErr } = await supabase
         .from("contacts")
@@ -99,8 +145,34 @@ export async function persistSkipTraceResult(
       } else if (isUniqueViolation(contactErr?.message)) {
         // Raced another writer between lookup and insert — re-resolve
         // and reuse whoever won.
+        const racedResolution = await resolveContactsByPhone(
+          supabase,
+          property.org_id,
+          owner,
+        );
+        if (racedResolution.contactIds.length > 1) {
+          const ambiguousContactIds = [...racedResolution.contactIds].sort();
+          if (hasDncPhone) {
+            for (const ambiguousContactId of racedResolution.dncContactIds) {
+              await ratchetContactDnc(
+                supabase,
+                property.org_id,
+                ambiguousContactId,
+              );
+            }
+            return {
+              status: "dnc_contact_ambiguous",
+              ambiguousContactIds,
+              phonesAdded: 0,
+              emailsAdded: 0,
+            };
+          }
+          throw new Error(
+            `contact resolution ambiguous after create race: provider phones map to multiple contacts (${ambiguousContactIds.join(", ")})`,
+          );
+        }
         contactId =
-          (await resolveContactByPhone(supabase, property.org_id, owner)) ??
+          racedResolution.contactIds[0] ??
           (await resolveContactByName(supabase, property.org_id, owner));
         if (!contactId) {
           throw new Error(
@@ -113,6 +185,13 @@ export async function persistSkipTraceResult(
         );
       }
     }
+  }
+
+  // A phone/name match found for an unlinked property still needs a guarded,
+  // positively confirmed link. Creating the contact is only one way to reach
+  // this point; do not skip the link merely because resolution reused an
+  // existing contact.
+  if (!property.homeowner_contact_id) {
     const { data: linked, error: linkError } = await supabase
       .from("properties")
       .update({ homeowner_contact_id: contactId })
@@ -156,6 +235,16 @@ export async function persistSkipTraceResult(
     throw new Error("contact lookup failed: linked contact not found");
   }
   if (currentContact.do_not_contact) {
+    return { status: "dnc_skipped", contactId, phonesAdded: 0, emailsAdded: 0 };
+  }
+
+  // A provider DNC signal permanently locks the contact and its linked
+  // properties. Ratchet that signal in its own statement: the database guard
+  // intentionally rejects a false->true transition that also changes phone,
+  // name, email, or organization fields. Once DNC is present, none of the
+  // otherwise-clean provider fields below may be persisted.
+  if (hasDncPhone) {
+    await ratchetContactDnc(supabase, property.org_id, contactId);
     return { status: "dnc_skipped", contactId, phonesAdded: 0, emailsAdded: 0 };
   }
 
@@ -206,15 +295,6 @@ export async function persistSkipTraceResult(
       if (aMobile !== bMobile) return aMobile ? -1 : 1;
       return a.rank - b.rank;
     });
-
-  // The provider's `dnc` flag is filtered out of candidatePhones above (the
-  // number itself is never packed into a slot), but the compliance signal
-  // was previously dropped along with it — the contact stayed callable via
-  // its other numbers. Ratchet do_not_contact=true when the chosen owner
-  // carries ANY DNC-flagged phone (Codex PR #310 finding 4). One-way: only
-  // ever set true below, never false — a run with no DNC phone must not
-  // un-suppress a contact a prior run/import/inbound STOP already protected.
-  const hasDncPhone = owner.phones.some((p) => !!p.number && p.dnc);
 
   // Slot packing is re-runnable with a ban list so a phone_1 unique
   // conflict can drop ONLY the conflicting number and keep salvageable
@@ -290,9 +370,6 @@ export async function persistSkipTraceResult(
     phone_3_type: slotTypes[2],
     email: emailToWrite,
   };
-  if (hasDncPhone) {
-    updates.do_not_contact = true;
-  }
   if (!currentContact.first_name && owner.firstName) {
     updates.first_name = owner.firstName;
   }
@@ -436,28 +513,91 @@ type OwnerPerson = {
  *  DNC-flagged numbers — compliance status must never block identity
  *  matching: a DNC-only skip-trace hit still needs to find + ratchet the
  *  existing contact it's protecting. */
-async function resolveContactByPhone(
+async function resolveContactsByPhone(
   supabase: SupabaseClient<Database>,
   orgId: string,
   owner: OwnerPerson,
-): Promise<string | null> {
-  const candidates = [...owner.phones]
-    .filter((p) => !!p.number)
-    .sort((a, b) => a.rank - b.rank)
-    .map((p) => normalizePhone(p.number));
-  for (const normalized of candidates) {
-    const { data: existing } = await supabase
+): Promise<{ contactIds: string[]; dncContactIds: string[] }> {
+  const candidates = new Map<string, boolean>();
+  for (const phone of [...owner.phones].sort((a, b) => a.rank - b.rank)) {
+    if (!phone.number) continue;
+    const normalized = normalizePhone(phone.number);
+    candidates.set(
+      normalized,
+      (candidates.get(normalized) ?? false) || phone.dnc,
+    );
+  }
+  const contactIds = new Set<string>();
+  const dncContactIds = new Set<string>();
+  for (const [normalized, isDnc] of candidates) {
+    const { data: existing, error } = await supabase
       .from("contacts")
       .select("id")
       .eq("org_id", orgId)
       .or(
         `phone_1.eq.${normalized},phone_2.eq.${normalized},phone_3.eq.${normalized}`,
-      )
-      .limit(1)
-      .maybeSingle();
-    if (existing) return existing.id;
+      );
+    if (error) {
+      throw new Error(
+        `contact phone lookup failed for ${normalized}: ${error.message}`,
+      );
+    }
+    for (const contact of existing ?? []) {
+      contactIds.add(contact.id);
+      if (isDnc) dncContactIds.add(contact.id);
+    }
   }
-  return null;
+  return {
+    contactIds: [...contactIds],
+    dncContactIds: [...dncContactIds],
+  };
+}
+
+/** A DNC transition is successful only when exactly one row is returned, or
+ * a follow-up read proves the contact was already DNC. A zero-row update can
+ * mean a concurrent delete or stale identity; neither may be reported as a
+ * successful compliance ratchet. */
+async function ratchetContactDnc(
+  supabase: SupabaseClient<Database>,
+  orgId: string,
+  contactId: string,
+): Promise<void> {
+  const { data: updated, error } = await supabase
+    .from("contacts")
+    .update({ do_not_contact: true })
+    .eq("id", contactId)
+    .eq("org_id", orgId)
+    .eq("do_not_contact", false)
+    .select("id");
+  if (!error && updated?.length === 1) return;
+  if (!error && updated && updated.length > 1) {
+    throw new Error(
+      `contact DNC ratchet failed: expected one row, updated ${updated.length}`,
+    );
+  }
+  if (error && !isDncLockedError(error.message)) {
+    throw new Error(`contact DNC ratchet failed: ${error.message}`);
+  }
+
+  const { data: current, error: readError } = await supabase
+    .from("contacts")
+    .select("do_not_contact")
+    .eq("id", contactId)
+    .eq("org_id", orgId)
+    .maybeSingle();
+  if (readError) {
+    throw new Error(`contact DNC ratchet proof failed: ${readError.message}`);
+  }
+  if (!current) {
+    throw new Error(
+      "contact DNC ratchet failed: contact disappeared before the write was confirmed",
+    );
+  }
+  if (!current.do_not_contact) {
+    throw new Error(
+      "contact DNC ratchet failed: zero rows updated and contact remains callable",
+    );
+  }
 }
 
 /** Find an existing NAME-ONLY person contact (no phone, no email) with
@@ -474,7 +614,7 @@ async function resolveContactByName(
   // ilike without wildcards = case-insensitive equality; escape the
   // pattern chars so a literal % or _ in a name can't widen the match.
   const escape = (v: string) => v.replace(/([%_\\])/g, "\\$1");
-  const { data: existing } = await supabase
+  const { data: existing, error } = await supabase
     .from("contacts")
     .select("id")
     .eq("org_id", orgId)
@@ -485,6 +625,9 @@ async function resolveContactByName(
     .is("email", null)
     .limit(1)
     .maybeSingle();
+  if (error) {
+    throw new Error(`contact name lookup failed: ${error.message}`);
+  }
   return existing?.id ?? null;
 }
 
