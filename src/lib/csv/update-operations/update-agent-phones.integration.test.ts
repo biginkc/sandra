@@ -119,13 +119,26 @@ describe("update-agent-phones sub-op (integration)", () => {
     if (contactError || !foreignContact) {
       throw contactError ?? new Error("foreign contact seed failed");
     }
-    await seedPropertyWithAgent("225 Cross Tenant Agent St", foreignContact.id);
-
-    const result = await applyRow({
-      Address: "225 Cross Tenant Agent St",
-      "Phone 1": "8165551225",
-      "Phone 1 Type": "DO NOT CALL",
+    await seedPropertyWithAgent("225 Cross Tenant Agent St", null);
+    const match = await matchPropertyByAddress(supabase, {
+      address: "225 Cross Tenant Agent St",
     });
+    if (match.kind !== "matched") throw new Error("expected matched");
+
+    const result = await updateAgentPhonesOp.apply(
+      { supabase, userId: null },
+      {
+        rowIndex: 0,
+        parsedRow: {
+          Address: "225 Cross Tenant Agent St",
+          "Phone 1": "8165551225",
+          "Phone 1 Type": "DO NOT CALL",
+        },
+        // Model a legacy pre-guard cross-wire without weakening the live FK.
+        property: { ...match.property, agent_contact_id: foreignContact.id },
+      },
+      { dryRun: false },
+    );
 
     expect(result).toMatchObject({ kind: "rejected", reason: "no-agent" });
     const { data: proof } = await supabase
