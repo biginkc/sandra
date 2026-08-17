@@ -1,6 +1,9 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
-import { listThreads } from "@/lib/messages/list-threads";
+import {
+  listThreadPage,
+  type ThreadPageFilter,
+} from "@/lib/messages/list-threads";
 import { listUnknownSenders } from "@/lib/messages/list-unknown-senders";
 import { canonicalizeThreadId } from "@/lib/messages/threading";
 import { redirect } from "next/navigation";
@@ -13,7 +16,6 @@ import {
   isThreadFilter,
   normalizeInboxFilterForUser,
   parseInboxFilter,
-  resolveVisibleThreadState,
 } from "./inbox-filter-resolve";
 import { fetchInboxDetail } from "./inbox-detail-data";
 
@@ -69,6 +71,7 @@ export default async function MessagesPage({
   // it off so we can keep clean URLs the rest of the time.
   const hideDnc = firstSearchParam(sp.hideDnc) !== "0";
   const selectedThreadId = firstSearchParam(sp.thread);
+  const requestedInboxPage = parsePositivePage(firstSearchParam(sp.inboxPage));
 
   const supabase = await createClient();
   const {
@@ -89,9 +92,18 @@ export default async function MessagesPage({
   // Fetch everything in parallel. The thread list + unknown active count
   // are needed regardless of which filter is active (badge counts on the
   // tab + filter chips). Other queries are conditional on the filter.
-  const [allThreads, queuedResult, threadDetail, unknownAll, queueStatsResult] =
+  const pageFilter: ThreadPageFilter = isThreadFilter(effectiveFilter)
+    ? (effectiveFilter as ThreadPageFilter)
+    : "all";
+  const [threadPage, queuedResult, threadDetail, unknownAll, queueStatsResult] =
     await Promise.all([
-      listThreads(supabase, {}),
+      listThreadPage(supabase, {
+        filter: pageFilter,
+        currentUserId,
+        includeThreadId: canonicalThreadId,
+        hideNoise: hideDnc,
+        page: requestedInboxPage,
+      }),
       listQueuedPage(null),
       canonicalThreadId
         ? fetchInboxDetail(supabase, canonicalThreadId)
@@ -100,15 +112,7 @@ export default async function MessagesPage({
       getQueueStats(),
     ]);
 
-  const {
-    threads: visibleThreads,
-    filterCounts: threadFilterCounts,
-    hiddenDncCount,
-  } = resolveVisibleThreadState(allThreads, effectiveFilter, {
-    currentUserId,
-    canonicalThreadId,
-    hideDnc,
-  });
+  const visibleThreads = threadPage.threads;
 
   // Banner still renders if first-paint stats fail — the client-side poll
   // will retry every 30s.
@@ -152,7 +156,7 @@ export default async function MessagesPage({
   const unknownSenders =
     effectiveFilter === "dismissed" ? dismissedUnknown : unknownActive;
   const filterCounts = {
-    ...threadFilterCounts,
+    ...threadPage.counts,
     unknown: unknownActive.length,
     dismissed: dismissedUnknown.length,
   };
@@ -172,7 +176,10 @@ export default async function MessagesPage({
       currentUserId={currentUserId}
       queueStats={queueStats}
       hideDnc={hideDnc}
-      hiddenDncCount={hiddenDncCount}
+      hiddenDncCount={threadPage.hiddenCount}
+      inboxPage={threadPage.page}
+      inboxPageSize={threadPage.pageSize}
+      inboxTotal={threadPage.total}
       queueLoadFailed={!queuedResult.ok}
       queueStatsFailed={!queueStatsResult.ok}
       nowMs={requestNowMs}
@@ -183,6 +190,14 @@ export default async function MessagesPage({
 function firstSearchParam(value: string | string[] | undefined): string | null {
   if (Array.isArray(value)) return value[0] ?? null;
   return value ?? null;
+}
+
+function parsePositivePage(value: string | null): number {
+  if (!value) return 1;
+  const parsed = Number.parseInt(value, 10);
+  return Number.isSafeInteger(parsed) && parsed > 0
+    ? Math.min(parsed, 10_000_000)
+    : 1;
 }
 
 function searchParamsToUrlParams(

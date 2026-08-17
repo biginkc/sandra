@@ -3793,6 +3793,18 @@ export type Database = {
         Args: { p_cutoff: string }
         Returns: Json
       }
+      sms_inbox_thread_page_snapshot: {
+        Args: {
+          p_assignee_id?: string | null
+          p_cutoff: string
+          p_filter?: string
+          p_hide_noise?: boolean
+          p_include_thread_id?: string | null
+          p_limit?: number
+          p_offset?: number
+        }
+        Returns: Json
+      }
       resolve_sms_conversation_org: {
         Args: { p_conversation_id: string }
         Returns: string

@@ -46,6 +46,10 @@ type Props = {
   hideDnc: boolean;
   /** Count of DNC threads under the current filter that the toggle is hiding. */
   hiddenDncCount: number;
+  /** Server-filtered Inbox page metadata. */
+  inboxPage?: number;
+  inboxPageSize?: number;
+  inboxTotal?: number;
   /** First Outbox page failed to load. Never present this as an empty queue. */
   queueLoadFailed?: boolean;
   /** Queue summary failed; zeroes are fallback data, not confirmed counts. */
@@ -80,6 +84,9 @@ export function CockpitView({
   queueStats,
   hideDnc,
   hiddenDncCount,
+  inboxPage = 1,
+  inboxPageSize = 200,
+  inboxTotal = threads.length,
   queueLoadFailed = false,
   queueStatsFailed = false,
   nowMs,
@@ -87,6 +94,7 @@ export function CockpitView({
   const router = useRouter();
   const searchParams = useSearchParams();
   const liveNowMs = useLiveNow(nowMs);
+  const inboxTotalPages = Math.max(Math.ceil(inboxTotal / inboxPageSize), 1);
 
   // One live stats source for the Outbox tab badge + the stats banner,
   // so the two never show different numbers. Seeds from the server
@@ -129,6 +137,17 @@ export function CockpitView({
     const qs = sp.toString();
     router.replace(qs ? `/messages?${qs}` : "/messages");
   };
+  const setInboxPage = useCallback(
+    (nextPage: number) => {
+      const sp = new URLSearchParams(searchParams.toString());
+      if (nextPage <= 1) sp.delete("inboxPage");
+      else sp.set("inboxPage", String(nextPage));
+      sp.delete("thread");
+      const qs = sp.toString();
+      router.replace(qs ? `/messages?${qs}` : "/messages");
+    },
+    [router, searchParams],
+  );
   const handleTabKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
     const tabs = Array.from(
       event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="tab"]'),
@@ -294,7 +313,7 @@ export function CockpitView({
       >
         <TabButton
           label="Inbox"
-          count={threads.length}
+          count={inboxTotal}
           active={activeTab === "inbox"}
           onClick={() => setTab("inbox")}
           testId="tab-inbox"
@@ -333,19 +352,51 @@ export function CockpitView({
                 className={`${mobileShowsDetail ? "hidden" : "block"} min-h-0 md:block`}
                 data-testid="inbox-list-view"
               >
-                <InboxThreadList
-                  initial={threads}
-                  selectedThreadId={
-                    pendingThreadId ??
-                    threadDetail?.threadId ??
-                    selectedThreadId ??
-                    null
-                  }
-                  currentUserId={currentUserId}
-                  onSelectThread={handleSelectThread}
-                  emptyMessage={emptyInboxMessage(filter, hiddenDncCount)}
-                  nowMs={liveNowMs}
-                />
+                <div className="flex h-full min-h-0 flex-col gap-2">
+                  <div className="min-h-0 flex-1">
+                    <InboxThreadList
+                      initial={threads}
+                      selectedThreadId={
+                        pendingThreadId ??
+                        threadDetail?.threadId ??
+                        selectedThreadId ??
+                        null
+                      }
+                      currentUserId={currentUserId}
+                      onSelectThread={handleSelectThread}
+                      emptyMessage={emptyInboxMessage(filter, hiddenDncCount)}
+                      nowMs={liveNowMs}
+                    />
+                  </div>
+                  {inboxTotalPages > 1 ? (
+                    <nav
+                      aria-label="Inbox pages"
+                      className="flex min-h-11 items-center justify-between gap-2 text-xs text-muted-foreground"
+                      data-testid="inbox-pagination"
+                    >
+                      <button
+                        type="button"
+                        className="min-h-11 rounded-md border px-3 font-semibold disabled:opacity-40"
+                        disabled={inboxPage <= 1}
+                        onClick={() => setInboxPage(inboxPage - 1)}
+                      >
+                        Previous
+                      </button>
+                      <span className="text-center" aria-live="polite">
+                        Page {inboxPage} of {inboxTotalPages} ·{" "}
+                        {inboxTotal.toLocaleString()} conversations
+                      </span>
+                      <button
+                        type="button"
+                        className="min-h-11 rounded-md border px-3 font-semibold disabled:opacity-40"
+                        disabled={inboxPage >= inboxTotalPages}
+                        onClick={() => setInboxPage(inboxPage + 1)}
+                      >
+                        Next
+                      </button>
+                    </nav>
+                  ) : null}
+                </div>
               </div>
               <div
                 className={`${mobileShowsDetail ? "block" : "hidden"} min-h-0 md:block`}
@@ -389,9 +440,7 @@ export function CockpitView({
             stats={liveQueueStats}
             loadFailed={liveQueueStatsFailed}
             lastSuccessfulAt={lastQueueStatsSuccessAt}
-            onRetry={() =>
-              setQueueStatsRefreshSignal((current) => current + 1)
-            }
+            onRetry={() => setQueueStatsRefreshSignal((current) => current + 1)}
             nowMs={liveNowMs}
           />
           <QueuePanel

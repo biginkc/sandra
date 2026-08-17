@@ -27,7 +27,53 @@ vi.mock("@/lib/supabase/admin", () => ({
 }));
 
 vi.mock("@/lib/messages/list-threads", () => ({
-  listThreads: mocks.listThreads,
+  listThreadPage: async (...args: unknown[]) => {
+    const rows = (await mocks.listThreads(...args)) as Thread[];
+    const opts = args[1] as {
+      filter: string;
+      currentUserId: string | null;
+      hideNoise: boolean;
+      page: number;
+    };
+    const visible = opts.hideNoise
+      ? rows.filter(
+          (row) => !row.isDncLocked && !row.isOptedOut && !row.isTestTraffic,
+        )
+      : rows;
+    const filtered = visible.filter((row) => {
+      if (opts.filter === "mine") return row.assigneeId === opts.currentUserId;
+      if (opts.filter === "unassigned") return row.assigneeId === null;
+      if (opts.filter === "unread") return row.unreadCount > 0;
+      if (opts.filter === "escalated")
+        return row.aiResponderStatus === "escalated";
+      if (opts.filter === "dispo") return row.outreachDispo !== null;
+      if (opts.filter === "needs_outcome") return row.needsOutcome;
+      return true;
+    });
+    return {
+      threads: filtered,
+      counts: {
+        all: visible.length,
+        mine: opts.currentUserId
+          ? visible.filter((row) => row.assigneeId === opts.currentUserId)
+              .length
+          : 0,
+        unassigned: opts.currentUserId
+          ? visible.filter((row) => row.assigneeId === null).length
+          : 0,
+        unread: visible.filter((row) => row.unreadCount > 0).length,
+        escalated: visible.filter(
+          (row) => row.aiResponderStatus === "escalated",
+        ).length,
+        dispo: visible.filter((row) => row.outreachDispo !== null).length,
+        needs_outcome: visible.filter((row) => row.needsOutcome).length,
+      },
+      total: filtered.length,
+      hiddenCount: rows.length - visible.length,
+      page: opts.page,
+      pageSize: 200,
+    };
+  },
 }));
 
 vi.mock("@/lib/messages/list-unknown-senders", () => ({
