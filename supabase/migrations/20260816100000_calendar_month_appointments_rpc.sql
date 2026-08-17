@@ -33,16 +33,29 @@
 -- month.
 --
 -- SECURITY INVOKER on purpose: RLS scopes rows exactly like the direct
--- week SELECT; callers gain no visibility they don't already have.
+-- week SELECT; callers gain no visibility they don't already have. RLS's
+-- legacy membership predicate is not a lifecycle authorization boundary,
+-- though, so authenticated calls also require an active, unexpired,
+-- not-deletion-prepared membership in the requested organization. The
+-- service_role and raw-postgres migration/test paths retain their existing
+-- access because the explicit gate applies only to current_user
+-- `authenticated`.
 
 begin;
 
 -- Round-4 rework note: the round-3 shape of this function shipped only to
 -- sandra-crm-test (hand-applied during development; the migration was
--- never merged) with this same 6-parameter signature, so CREATE OR
--- REPLACE upgrades it in place everywhere. The separate RAISE helper the
--- LANGUAGE SQL body needed is gone — plpgsql raises directly.
+-- never merged) with this same 6-parameter signature. It is dropped and
+-- recreated transactionally below because the final result-row shape adds
+-- property_is_dnc_locked. The separate RAISE helper the LANGUAGE SQL body
+-- needed is gone — plpgsql raises directly.
 drop function if exists public.fn_calendar_month_volume_exceeded();
+-- The development-only test deployment had the previous RETURNS TABLE
+-- shape. PostgreSQL cannot add an OUT column through CREATE OR REPLACE, so
+-- drop the same input signature before recreating it with DNC state.
+drop function if exists public.fn_calendar_month_appointments(
+  uuid, uuid, timestamptz[], timestamptz[], integer, integer
+);
 
 create or replace function public.fn_calendar_month_appointments(
   p_org uuid,
@@ -67,6 +80,7 @@ returns table (
   property_city text,
   property_state text,
   property_deleted_at timestamptz,
+  property_is_dnc_locked boolean,
   contact_first_name text,
   contact_last_name text,
   contact_entity_name text
@@ -83,6 +97,21 @@ declare
   v_count integer;
   i integer;
 begin
+  if current_user = 'authenticated'
+     and not exists (
+       select 1
+       from public.memberships m
+       where m.user_id = auth.uid()
+         and m.org_id = p_org
+         and m.access_status = 'active'
+         and m.deletion_prepared_at is null
+         and (m.access_expires_at is null or m.access_expires_at > now())
+     )
+  then
+    raise exception 'calendar month: caller has no active membership in org %', p_org
+      using errcode = '42501';
+  end if;
+
   if p_week_starts is null or p_week_ends is null then
     raise exception 'calendar month windows are required' using errcode = 'P0001';
   end if;
@@ -155,6 +184,9 @@ begin
     g.id, g.title, g.description, g.due_at, g.end_at, g.status, g.outcome,
     g.assignee_id, g.related_property_id, g.contact_id,
     p.address, p.city, p.state, p.deleted_at,
+    -- NULL means the appointment has no related property. Callers need only
+    -- hide lifecycle controls when this value is explicitly true.
+    p.is_dnc_locked,
     c.first_name, c.last_name, c.entity_name
   from guarded g
   left join public.properties p on p.id = g.related_property_id

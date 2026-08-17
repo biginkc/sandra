@@ -1,6 +1,6 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { Client } from "pg";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { createTestClient } from "@tests/integration/client";
 import { loadTestEnv } from "@tests/integration/env";
@@ -27,6 +27,7 @@ type MonthRpcRow = {
   due_at: string;
   assignee_id: string;
   property_address: string | null;
+  property_is_dnc_locked: boolean | null;
   contact_entity_name: string | null;
 };
 type MonthRpcClient = {
@@ -68,6 +69,7 @@ async function insertAppointment(
   orgId: string,
   assigneeId: string,
   dueAtIso: string,
+  relatedPropertyId?: string,
 ): Promise<string> {
   const { data, error } = await serviceClient
     .from("tasks")
@@ -82,6 +84,7 @@ async function insertAppointment(
         new Date(dueAtIso).getTime() + 30 * 60_000,
       ).toISOString(),
       calendar_chain_id: crypto.randomUUID(),
+      related_property_id: relatedPropertyId ?? null,
       status: "open",
     } as never)
     .select("id")
@@ -95,7 +98,7 @@ async function insertAppointment(
 let member: { userId: string; client: SupabaseClient<Database> };
 let orgBMember: { userId: string; client: SupabaseClient<Database> };
 
-beforeAll(async () => {
+beforeEach(async () => {
   await resetTenantTables(serviceClient);
   await seedTwoOrgs(serviceClient);
   const a = await createOrgUser(serviceClient, {
@@ -114,10 +117,16 @@ beforeAll(async () => {
   orgBMember = { userId: b.userId, client: clientForUser(b.jwt) };
 });
 
-afterAll(async () => {
+afterEach(async () => {
+  // Reset first so no task/member FKs retain auth identities from this case.
+  await resetTenantTables(serviceClient);
   for (const userId of createdUserIds) {
     await serviceClient.auth.admin.deleteUser(userId);
   }
+  createdUserIds.length = 0;
+});
+
+afterAll(async () => {
   await resetTenantTables(serviceClient);
 });
 
@@ -175,14 +184,111 @@ describe("Migration 20260816100000 — fn_calendar_month_appointments", () => {
     expect(filteredOut.data ?? []).toHaveLength(0);
   });
 
-  it("is SECURITY INVOKER: an org-B member reading org A's month gets zero rows via RLS, not an error", async () => {
+  it("rejects an authenticated member asking for an unrelated organization", async () => {
     const probe = await callMonthRpc(orgBMember.client, {
       p_org: BMH_ORG_ID,
       p_week_starts: STARTS,
       p_week_ends: ENDS,
     });
-    expect(probe.error).toBeNull();
-    expect(probe.data ?? []).toHaveLength(0);
+    expect(probe.error?.message).toMatch(/no active membership/i);
+    expect(probe.data).toBeNull();
+  });
+
+  it.each([
+    ["suspended", { access_status: "suspended" }],
+    ["expired", { access_expires_at: "2026-08-01T00:00:00Z" }],
+    ["deletion-prepared", { deletion_prepared_at: "2026-08-01T00:00:00Z" }],
+  ] as const)("rejects a %s membership", async (_label, membershipPatch) => {
+    const { error: patchError } = await serviceClient
+      .from("memberships")
+      .update(membershipPatch)
+      .eq("user_id", member.userId)
+      .eq("org_id", BMH_ORG_ID);
+    expect(patchError).toBeNull();
+
+    const probe = await callMonthRpc(member.client, {
+      p_org: BMH_ORG_ID,
+      p_week_starts: STARTS,
+      p_week_ends: ENDS,
+    });
+    expect(probe.error?.message).toMatch(/no active membership/i);
+    expect(probe.data).toBeNull();
+  });
+
+  it("preserves service-role access for server and migration-test reads", async () => {
+    const appointmentId = await insertAppointment(
+      BMH_ORG_ID,
+      member.userId,
+      "2026-08-03T15:00:00Z",
+    );
+    const result = await callMonthRpc(serviceClient, {
+      p_org: BMH_ORG_ID,
+      p_week_starts: STARTS,
+      p_week_ends: ENDS,
+    });
+    expect(result.error).toBeNull();
+    expect((result.data ?? []).map((row) => row.id)).toContain(appointmentId);
+  });
+
+  it("returns the related property's permanent-DNC state and leaves personal appointments null", async () => {
+    const { data: contact, error: contactError } = await serviceClient
+      .from("contacts")
+      .insert({
+        org_id: BMH_ORG_ID,
+        contact_type: "person",
+        first_name: "Calendar DNC projection",
+        phone_1: `+1816${String(Date.now()).slice(-7)}`,
+        phone_1_type: "mobile",
+      })
+      .select("id")
+      .single();
+    expect(contactError).toBeNull();
+    const { data: property, error: propertyError } = await serviceClient
+      .from("properties")
+      .insert({
+        org_id: BMH_ORG_ID,
+        address: `Calendar DNC ${crypto.randomUUID()}`,
+        state: "MO",
+        status: "new_lead",
+        homeowner_contact_id: contact!.id,
+      })
+      .select("id")
+      .single();
+    expect(propertyError).toBeNull();
+
+    const lockedAppointmentId = await insertAppointment(
+      BMH_ORG_ID,
+      member.userId,
+      "2026-08-03T15:00:00Z",
+      property!.id,
+    );
+    const personalAppointmentId = await insertAppointment(
+      BMH_ORG_ID,
+      member.userId,
+      "2026-08-04T15:00:00Z",
+    );
+    expect(
+      (
+        await serviceClient
+          .from("contacts")
+          .update({ do_not_contact: true })
+          .eq("id", contact!.id)
+      ).error,
+    ).toBeNull();
+
+    const result = await callMonthRpc(member.client, {
+      p_org: BMH_ORG_ID,
+      p_week_starts: STARTS,
+      p_week_ends: ENDS,
+    });
+    expect(result.error).toBeNull();
+    const rowsById = new Map((result.data ?? []).map((row) => [row.id, row]));
+    expect(rowsById.get(lockedAppointmentId)?.property_is_dnc_locked).toBe(
+      true,
+    );
+    expect(
+      rowsById.get(personalAppointmentId)?.property_is_dnc_locked,
+    ).toBeNull();
   });
 
   it("suppresses completed/rescheduled predecessors of a cancelled org+chain without rewriting DNC-locked audit history", async () => {
@@ -303,7 +409,7 @@ describe("Migration 20260816100000 — fn_calendar_month_appointments", () => {
   it("RAISEs (fail-closed) when a single window exceeds p_week_cap inside the snapshot", async () => {
     await insertAppointment(BMH_ORG_ID, member.userId, "2026-08-04T15:00:00Z");
     await insertAppointment(BMH_ORG_ID, member.userId, "2026-08-04T16:00:00Z");
-    // Window 1 now holds >= 3 rows (with t1 from the previous test).
+    await insertAppointment(BMH_ORG_ID, member.userId, "2026-08-04T17:00:00Z");
     const { error } = await callMonthRpc(member.client, {
       p_org: BMH_ORG_ID,
       p_week_starts: STARTS,
@@ -357,6 +463,8 @@ describe("Migration 20260816100000 — fn_calendar_month_appointments", () => {
   });
 
   it("RAISEs (fail-closed) when the month total exceeds p_total_cap", async () => {
+    await insertAppointment(BMH_ORG_ID, member.userId, "2026-08-04T15:00:00Z");
+    await insertAppointment(BMH_ORG_ID, member.userId, "2026-08-11T15:00:00Z");
     const { error } = await callMonthRpc(member.client, {
       p_org: BMH_ORG_ID,
       p_week_starts: STARTS,
