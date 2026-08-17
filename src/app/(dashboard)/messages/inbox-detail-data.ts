@@ -4,6 +4,11 @@ import {
   deriveSmsParties,
   findMatchingSavedContactPhone,
 } from "@/lib/messages/sms-parties";
+import {
+  computeConsentState,
+  type ConsentState,
+} from "@/lib/messaging/consent";
+import { isSmsPhoneSuppressed } from "@/lib/messaging/opt-out-phone";
 import type { Database } from "@/lib/supabase/types";
 
 export type InboxDetail = {
@@ -35,6 +40,12 @@ export type InboxDetail = {
    * restrictions, not proof that the property has the permanent DNC lock. */
   contactDoNotContact: boolean;
   contactSmsOptedOut: boolean;
+  /** Canonical consent-event state. Null means the authoritative read failed. */
+  smsConsentState: ConsentState | null;
+  /** Durable phone-level suppression. Null means the authoritative read failed. */
+  phoneSuppressed: boolean | null;
+  /** Convenience bit for a fail-closed operator surface. */
+  smsSafetyReadFailed: boolean;
   /** The only field that makes the entire property permanently read-only. */
   isDncLocked: boolean;
   initialMessages: Database["public"]["Tables"]["messages"]["Row"][];
@@ -79,7 +90,7 @@ export async function fetchInboxDetail(
     supabase
       .from("contacts")
       .select(
-        "first_name, last_name, entity_name, phone_1, phone_2, phone_3, do_not_contact, sms_opted_out",
+        "org_id, first_name, last_name, entity_name, phone_1, phone_2, phone_3, do_not_contact, sms_opted_out",
       )
       .eq("id", contactId)
       .maybeSingle(),
@@ -106,6 +117,25 @@ export async function fetchInboxDetail(
   const latestMessage = messages[messages.length - 1];
   const parties = deriveSmsParties(latestMessage);
   const replyToPhone = findMatchingSavedContactPhone(c, parties.customerPhone);
+  let smsConsentState: ConsentState | null = null;
+  let phoneSuppressed: boolean | null = null;
+  if (c) {
+    const consentResult = await supabase
+      .from("consent_events")
+      .select("event_type, occurred_at")
+      .eq("contact_id", contactId)
+      .eq("channel", "sms")
+      .order("occurred_at", { ascending: false })
+      .limit(20);
+    smsConsentState = consentResult.error
+      ? null
+      : computeConsentState(consentResult.data ?? []);
+    phoneSuppressed = parties.customerPhone
+      ? await isSmsPhoneSuppressed(supabase, parties.customerPhone, c.org_id)
+          .then((value) => value)
+          .catch(() => null)
+      : false;
+  }
 
   return {
     threadId: conversationId,
@@ -130,6 +160,9 @@ export async function fetchInboxDetail(
     outreachDispo: p?.outreach_dispo ?? null,
     contactDoNotContact: c?.do_not_contact ?? false,
     contactSmsOptedOut: c?.sms_opted_out ?? false,
+    smsConsentState,
+    phoneSuppressed,
+    smsSafetyReadFailed: smsConsentState === null || phoneSuppressed === null,
     isDncLocked: p?.is_dnc_locked ?? false,
     initialMessages: messages,
   };

@@ -160,6 +160,23 @@ function makeStub(opts: {
 }
 
 describe("listThreads — chunking", () => {
+  it("fails closed when the server reports the snapshot thread ceiling", async () => {
+    const supabase = {
+      rpc: vi.fn(async () => ({
+        data: {
+          __error: "thread_limit_exceeded",
+          limit: 20_000,
+          count: 20_001,
+        },
+        error: null,
+      })),
+    } as unknown as SupabaseClient<Database>;
+
+    await expect(listThreads(supabase, {})).rejects.toThrow(
+      "thread_limit_exceeded",
+    );
+  });
+
   it("splits oversized contact-id IN clauses into multiple Supabase calls", async () => {
     // 600 contacts > the 250 chunk threshold ⇒ should produce 3 chunked calls.
     const N = 600;

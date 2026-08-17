@@ -91,16 +91,25 @@ export function CockpitView({
     useState(queueStatsFailed);
   const [lastServerQueueStatsFailed, setLastServerQueueStatsFailed] =
     useState(queueStatsFailed);
+  const [lastQueueStatsSuccessAt, setLastQueueStatsSuccessAt] = useState<
+    string | null
+  >(queueStatsFailed ? null : "server-snapshot");
   if (lastServerQueueStatsFailed !== queueStatsFailed) {
     setLastServerQueueStatsFailed(queueStatsFailed);
     setLiveQueueStatsFailed(queueStatsFailed);
+    if (!queueStatsFailed) setLastQueueStatsSuccessAt("server-snapshot");
   }
-  const handleQueueStatsRefreshSuccess = useCallback(
-    () => setLiveQueueStatsFailed(false),
+  const handleQueueStatsRefreshSuccess = useCallback((refreshedAt: string) => {
+    setLiveQueueStatsFailed(false);
+    setLastQueueStatsSuccessAt(refreshedAt);
+  }, []);
+  const handleQueueStatsRefreshFailure = useCallback(
+    () => setLiveQueueStatsFailed(true),
     [],
   );
   const liveQueueStats = useQueueStats(queueStats, {
     onRefreshSuccess: handleQueueStatsRefreshSuccess,
+    onRefreshFailure: handleQueueStatsRefreshFailure,
   });
 
   const setTab = (next: string) => {
@@ -112,6 +121,23 @@ export function CockpitView({
     }
     const qs = sp.toString();
     router.replace(qs ? `/messages?${qs}` : "/messages");
+  };
+  const handleTabKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    const tabs = Array.from(
+      event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="tab"]'),
+    );
+    const current = tabs.indexOf(document.activeElement as HTMLButtonElement);
+    if (current < 0) return;
+    let next = current;
+    if (event.key === "ArrowRight") next = (current + 1) % tabs.length;
+    else if (event.key === "ArrowLeft")
+      next = (current - 1 + tabs.length) % tabs.length;
+    else if (event.key === "Home") next = 0;
+    else if (event.key === "End") next = tabs.length - 1;
+    else return;
+    event.preventDefault();
+    tabs[next]?.focus();
+    tabs[next]?.click();
   };
 
   const showThreadList = THREAD_FILTERS.has(filter);
@@ -255,6 +281,8 @@ export function CockpitView({
       <div
         role="tablist"
         aria-label="Inbox / Outbox"
+        aria-orientation="horizontal"
+        onKeyDown={handleTabKeyDown}
         className="flex gap-6 border-b border-border"
       >
         <TabButton
@@ -275,7 +303,12 @@ export function CockpitView({
       </div>
 
       {activeTab === "inbox" ? (
-        <div className="flex flex-col gap-4">
+        <div
+          id="messages-inbox-panel"
+          role="tabpanel"
+          aria-labelledby="messages-inbox-tab"
+          className="flex flex-col gap-4"
+        >
           <InboxFilters
             active={filter}
             filterCounts={filterCounts}
@@ -330,10 +363,15 @@ export function CockpitView({
           )}
         </div>
       ) : (
-        <div>
+        <div
+          id="messages-outbox-panel"
+          role="tabpanel"
+          aria-labelledby="messages-outbox-tab"
+        >
           <QueueStatsBanner
             stats={liveQueueStats}
             loadFailed={liveQueueStatsFailed}
+            lastSuccessfulAt={lastQueueStatsSuccessAt}
             onRetry={() => router.refresh()}
           />
           <QueuePanel
@@ -387,7 +425,10 @@ function TabButton({
     <button
       type="button"
       role="tab"
+      id={`messages-${label.toLowerCase()}-tab`}
+      aria-controls={`messages-${label.toLowerCase()}-panel`}
       aria-selected={active}
+      tabIndex={active ? 0 : -1}
       data-testid={testId}
       onClick={onClick}
       className={`-mb-px flex min-h-11 items-center gap-2 border-b-2 pb-2 text-[14px] font-bold transition-colors ${

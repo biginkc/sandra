@@ -26,6 +26,7 @@ import { formatPhoneE164 } from "@/lib/phone-format";
 import { cn } from "@/lib/utils";
 
 import { InlineReply } from "../leads/[id]/inline-reply";
+import { deriveLeadSmsPresentation } from "../leads/[id]/lead-detail-state";
 import { MessagesThread } from "../leads/[id]/messages-thread";
 
 import { AssignDropdown } from "./assign-dropdown";
@@ -83,7 +84,7 @@ function outcomeButtonClass(
   activeClass = "bg-[#f5f5f4] border-[#e5e1df] text-[#1c1917]",
 ) {
   return cn(
-    "min-h-11 px-3 py-1 text-[11px] font-medium rounded-md border transition-colors md:min-h-0 md:px-2",
+    "min-h-11 px-3 py-1 text-[11px] font-medium rounded-md border transition-colors",
     isActive
       ? activeClass
       : "border-[#e5e1df] text-[#78716c] hover:bg-[#f5f5f4]",
@@ -213,7 +214,7 @@ function DispoBar({
       <button
         onClick={moveToLead}
         disabled={pending || isLead}
-        className="rounded-md border border-[#111827] bg-[#111827] px-2 py-1 text-[11px] font-medium text-white transition-colors hover:bg-[#292524] disabled:cursor-not-allowed disabled:opacity-60"
+        className="min-h-11 rounded-md border border-[#111827] bg-[#111827] px-3 py-1 text-[11px] font-medium text-white transition-colors hover:bg-[#292524] disabled:cursor-not-allowed disabled:opacity-60"
         data-testid="message-move-to-lead"
         title={isLead ? "Already a lead" : undefined}
       >
@@ -236,7 +237,7 @@ function DispoBar({
             <button
               type="button"
               disabled={pending}
-              className="inline-flex items-center gap-1 rounded-md border border-[#e5e1df] px-2 py-1 text-[11px] font-medium text-[#78716c] transition-colors hover:bg-[#f5f5f4] hover:text-[#1c1917]"
+              className="inline-flex min-h-11 items-center gap-1 rounded-md border border-[#e5e1df] px-3 py-1 text-[11px] font-medium text-[#78716c] transition-colors hover:bg-[#f5f5f4] hover:text-[#1c1917]"
               data-testid="dispo-more"
             >
               More
@@ -246,12 +247,14 @@ function DispoBar({
         />
         <DropdownMenuContent align="start">
           <DropdownMenuItem
+            className="min-h-11"
             onClick={() => apply("bad_number")}
             data-testid="dispo-bad-number"
           >
             Bad / disconnected #
           </DropdownMenuItem>
           <DropdownMenuItem
+            className="min-h-11"
             onClick={() => apply("opted_out")}
             data-testid="dispo-opted-out"
           >
@@ -395,15 +398,28 @@ export function InboxDetail({
     data.outreachDispo === "bad_number";
   const isSmsOptedOut =
     data.contactSmsOptedOut ||
+    data.phoneSuppressed === true ||
+    data.smsConsentState === "opted_out" ||
     data.outreachDispo === "dnc" ||
     data.outreachDispo === "opted_out";
+  const smsPresentation = deriveLeadSmsPresentation({
+    hasContact: true,
+    hasUsablePhone: Boolean(data.replyToPhone),
+    consentState: data.smsConsentState,
+    contactSmsOptedOut: data.contactSmsOptedOut,
+    propertySmsOptedOut: data.outreachDispo === "opted_out",
+    phoneSuppressed: data.phoneSuppressed,
+    outreachDispo: data.outreachDispo,
+    phoneLineType: null,
+  });
   const isSmsRestricted =
-    data.contactDoNotContact || isSmsOptedOut || hasBadThreadNumber;
+    data.contactDoNotContact || smsPresentation.smsRestricted;
   const isPermanentlyLocked =
     data.isDncLocked || optimisticallyLockedThreadId === data.threadId;
   const canCall =
     Boolean(phoneHref) &&
     !isPermanentlyLocked &&
+    !data.smsSafetyReadFailed &&
     !data.contactDoNotContact &&
     !hasBadThreadNumber;
   const replyRefreshPending =
@@ -514,6 +530,7 @@ export function InboxDetail({
               disabled={openLeadPending}
               variant="outline"
               size="sm"
+              className="min-h-11"
               data-testid="inbox-detail-open-lead"
               aria-label={`Open ${recordLabel}`}
             >
@@ -528,6 +545,7 @@ export function InboxDetail({
                   type="button"
                   variant="outline"
                   size="icon-sm"
+                  className="min-h-11 min-w-11"
                   aria-label="Conversation actions"
                   data-testid="inbox-detail-more"
                 >
@@ -537,6 +555,7 @@ export function InboxDetail({
             />
             <DropdownMenuContent align="end" className="min-w-52">
               <DropdownMenuItem
+                className="min-h-11"
                 onClick={() => copy(conversationLink, "Conversation link")}
                 data-testid="copy-conversation-link"
               >
@@ -545,6 +564,7 @@ export function InboxDetail({
               </DropdownMenuItem>
               {recordLink ? (
                 <DropdownMenuItem
+                  className="min-h-11"
                   onClick={() =>
                     copy(recordLink, `${capitalize(recordLabel)} link`)
                   }
@@ -556,6 +576,7 @@ export function InboxDetail({
               ) : null}
               {data.threadCustomerPhone ? (
                 <DropdownMenuItem
+                  className="min-h-11"
                   onClick={() =>
                     copy(data.threadCustomerPhone!, "Phone number")
                   }
@@ -567,6 +588,7 @@ export function InboxDetail({
               ) : null}
               {canCall ? (
                 <DropdownMenuItem
+                  className="min-h-11"
                   render={
                     <a
                       href={phoneHref!}
@@ -598,6 +620,11 @@ export function InboxDetail({
             have been removed.
           </p>
         </div>
+      ) : data.smsSafetyReadFailed ? (
+        <RestrictionNotice>
+          Contact safety status could not be verified. Calling and replying are
+          hidden until consent and phone restrictions load successfully.
+        </RestrictionNotice>
       ) : data.contactDoNotContact ? (
         <RestrictionNotice>
           Contact suppressed — outreach is blocked for this contact. The
@@ -605,8 +632,9 @@ export function InboxDetail({
         </RestrictionNotice>
       ) : isSmsOptedOut ? (
         <RestrictionNotice>
-          SMS disabled — this contact opted out. This is not the permanent
-          organization-wide DNC lock; non-SMS work remains available.
+          SMS disabled — canonical consent or phone suppression blocks this
+          number. This is not the permanent organization-wide DNC lock; non-SMS
+          work remains available.
         </RestrictionNotice>
       ) : hasBadThreadNumber ? (
         <RestrictionNotice>
@@ -636,7 +664,7 @@ export function InboxDetail({
       {data.propertyId && !isPermanentlyLocked ? (
         <>
           {!data.contactDoNotContact ? (
-            <div className="border-t border-border bg-white flex items-center px-6 py-2">
+            <div className="border-t border-border bg-white flex items-center px-6 py-2 [&_button]:min-h-11">
               <DispoBar
                 key={`dispo-${data.propertyId}`}
                 propertyId={data.propertyId}
@@ -655,8 +683,10 @@ export function InboxDetail({
                 className="rounded-xl border border-dashed border-[#e5e1df] bg-[#fafaf9] p-3 text-center text-xs text-[#57534e]"
                 data-testid="inline-reply-restricted"
               >
-                SMS reply unavailable for this restricted thread. Review the
-                notice above before taking another safe action.
+                {data.homeownerContactId === data.contactId &&
+                !data.replyToPhone
+                  ? "This thread number is not saved on the homeowner contact — save or resolve it before replying."
+                  : "SMS reply unavailable for this restricted thread. Review the notice above before taking another safe action."}
               </div>
             ) : replyRefreshPending ? (
               <div
@@ -692,7 +722,7 @@ export function InboxDetail({
               <button
                 type="button"
                 onClick={() => setResolveOpen(true)}
-                className="rounded-md border border-[#111827] bg-[#111827] px-3 py-1.5 text-xs font-bold text-white transition-colors hover:bg-[#292524]"
+                className="min-h-11 rounded-md border border-[#111827] bg-[#111827] px-3 py-1.5 text-xs font-bold text-white transition-colors hover:bg-[#292524]"
                 data-testid="resolve-to-property-open"
               >
                 Resolve to property

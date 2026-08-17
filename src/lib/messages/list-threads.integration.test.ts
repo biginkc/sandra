@@ -1,6 +1,13 @@
 import { beforeEach, describe, expect, it } from "vitest";
 
 import { createTestClient } from "@tests/integration/client";
+import {
+  BMH_ORG_ID,
+  TEST_ORG_B_ID,
+  clientForUser,
+  createOrgUser,
+  seedTwoOrgs,
+} from "@tests/integration/fixtures/multi-user";
 import { resetTenantTables } from "@tests/integration/reset";
 
 import { listThreads } from "./list-threads";
@@ -13,18 +20,43 @@ const supabase = createTestClient();
  * Idempotent — returns the existing user's id if the email already exists.
  */
 async function mintTestUser(email: string): Promise<string> {
-  const { data: existing } = await supabase.auth.admin.listUsers({
-    perPage: 200,
-  });
-  const found = existing?.users.find((u) => u.email === email);
-  if (found) return found.id;
-  const { data, error } = await supabase.auth.admin.createUser({
-    email,
-    password: "irrelevant-for-test",
-    email_confirm: true,
-  });
-  if (error || !data.user) throw error ?? new Error("createUser returned no user");
-  return data.user.id;
+  let userId: string | null = null;
+  for (let page = 1; ; page += 1) {
+    const { data: existing, error } = await supabase.auth.admin.listUsers({
+      page,
+      perPage: 200,
+    });
+    if (error) throw error;
+    const found = existing?.users.find((u) => u.email === email);
+    if (found) {
+      userId = found.id;
+      break;
+    }
+    if ((existing?.users.length ?? 0) < 200) break;
+  }
+  if (!userId) {
+    const { data, error } = await supabase.auth.admin.createUser({
+      email,
+      password: "irrelevant-for-test",
+      email_confirm: true,
+    });
+    if (error || !data.user)
+      throw error ?? new Error("createUser returned no user");
+    userId = data.user.id;
+  }
+  const { error: membershipError } = await supabase.from("memberships").upsert(
+    {
+      user_id: userId,
+      org_id: BMH_ORG_ID,
+      role: "member",
+      access_status: "active",
+      deletion_prepared_at: null,
+      access_expires_at: null,
+    },
+    { onConflict: "user_id,org_id" },
+  );
+  if (membershipError) throw membershipError;
+  return userId;
 }
 
 async function seedConversation(opts: {
@@ -84,14 +116,199 @@ describe("listThreads (integration)", () => {
     await resetTenantTables(supabase);
   });
 
+  it("returns every thread and filter fact beyond PostgREST's 1,000-row cap", async () => {
+    const total = 1_005;
+    const contacts = Array.from({ length: total }, (_, index) => ({
+      id: crypto.randomUUID(),
+      first_name: `Scale ${index}`,
+      last_name: "Thread",
+      phone_1: `+1816${String(5_000_000 + index).padStart(7, "0")}`,
+      phone_1_type: "mobile",
+    }));
+    const properties = contacts.map((contact, index) => ({
+      id: crypto.randomUUID(),
+      address: `${index + 1} Scale Test Ln`,
+      state: "MO",
+      status: "prospect",
+      homeowner_contact_id: contact.id,
+    }));
+    const base = Date.now() - total * 1_000;
+    const messages = contacts.map((contact, index) => ({
+      channel: "sms" as const,
+      direction: "inbound" as const,
+      status: "received",
+      contact_id: contact.id,
+      property_id: properties[index]!.id,
+      conversation_id: crypto.randomUUID(),
+      from_address: contact.phone_1,
+      to_address: "+18162804181",
+      body: `scale message ${index}`,
+      created_at: new Date(base + index * 1_000).toISOString(),
+      read_at: index % 2 === 0 ? null : new Date().toISOString(),
+    }));
+
+    for (let start = 0; start < total; start += 250) {
+      const { error: contactError } = await supabase
+        .from("contacts")
+        .insert(contacts.slice(start, start + 250));
+      if (contactError) throw contactError;
+      const { error: propertyError } = await supabase
+        .from("properties")
+        .insert(properties.slice(start, start + 250));
+      if (propertyError) throw propertyError;
+      const { error: messageError } = await supabase
+        .from("messages")
+        .insert(messages.slice(start, start + 250));
+      if (messageError) throw messageError;
+    }
+
+    const threads = await listThreads(supabase, {});
+    expect(threads).toHaveLength(total);
+    expect(threads.filter((thread) => thread.unreadCount > 0)).toHaveLength(
+      Math.ceil(total / 2),
+    );
+    expect(threads.filter((thread) => thread.needsOutcome)).toHaveLength(total);
+    expect(threads[0]?.lastMessageBody).toBe(`scale message ${total - 1}`);
+  });
+
+  it("returns only active-member tenant threads and fails closed after suspension", async () => {
+    await seedTwoOrgs(supabase);
+    const userA = await createOrgUser(supabase, {
+      orgId: BMH_ORG_ID,
+      email: `thread-snapshot-a-${crypto.randomUUID()}@example.com`,
+      role: "member",
+    });
+    const userB = await createOrgUser(supabase, {
+      orgId: TEST_ORG_B_ID,
+      email: `thread-snapshot-b-${crypto.randomUUID()}@example.com`,
+      role: "member",
+    });
+    const contactA = crypto.randomUUID();
+    const contactB = crypto.randomUUID();
+    const propertyA = crypto.randomUUID();
+    const propertyB = crypto.randomUUID();
+    const { error: contactsError } = await supabase.from("contacts").insert([
+      {
+        id: contactA,
+        org_id: BMH_ORG_ID,
+        first_name: "Org A",
+        phone_1: "+18165554001",
+        phone_1_type: "mobile",
+      },
+      {
+        id: contactB,
+        org_id: TEST_ORG_B_ID,
+        first_name: "Org B",
+        phone_1: "+18165554002",
+        phone_1_type: "mobile",
+      },
+    ]);
+    if (contactsError) throw contactsError;
+    const { error: propertiesError } = await supabase
+      .from("properties")
+      .insert([
+        {
+          id: propertyA,
+          org_id: BMH_ORG_ID,
+          address: "1 Tenant A Ln",
+          state: "MO",
+          homeowner_contact_id: contactA,
+        },
+        {
+          id: propertyB,
+          org_id: TEST_ORG_B_ID,
+          address: "2 Tenant B Ln",
+          state: "MO",
+          homeowner_contact_id: contactB,
+        },
+      ]);
+    if (propertiesError) throw propertiesError;
+    const { error: messagesError } = await supabase.from("messages").insert([
+      {
+        org_id: BMH_ORG_ID,
+        channel: "sms",
+        direction: "inbound",
+        status: "received",
+        contact_id: contactA,
+        property_id: propertyA,
+        conversation_id: crypto.randomUUID(),
+        from_address: "+18165554001",
+        to_address: "+18162804181",
+        body: "tenant A only",
+      },
+      {
+        org_id: TEST_ORG_B_ID,
+        channel: "sms",
+        direction: "inbound",
+        status: "received",
+        contact_id: contactB,
+        property_id: propertyB,
+        conversation_id: crypto.randomUUID(),
+        from_address: "+18165554002",
+        to_address: "+18162804182",
+        body: "tenant B only",
+      },
+    ]);
+    if (messagesError) throw messagesError;
+
+    const threadsA = await listThreads(clientForUser(userA.jwt), {});
+    const threadsB = await listThreads(clientForUser(userB.jwt), {});
+    expect(threadsA.map((thread) => thread.contactId)).toEqual([contactA]);
+    expect(threadsB.map((thread) => thread.contactId)).toEqual([contactB]);
+
+    const { error: suspendError } = await supabase
+      .from("memberships")
+      .update({ access_status: "suspended" })
+      .eq("user_id", userA.userId)
+      .eq("org_id", BMH_ORG_ID);
+    if (suspendError) throw suspendError;
+    expect(await listThreads(clientForUser(userA.jwt), {})).toEqual([]);
+
+    const { error: expireError } = await supabase
+      .from("memberships")
+      .update({
+        access_status: "active",
+        access_expires_at: new Date(Date.now() - 60_000).toISOString(),
+        deletion_prepared_at: null,
+      })
+      .eq("user_id", userA.userId)
+      .eq("org_id", BMH_ORG_ID);
+    if (expireError) throw expireError;
+    expect(await listThreads(clientForUser(userA.jwt), {})).toEqual([]);
+
+    const { error: deletionPreparedError } = await supabase
+      .from("memberships")
+      .update({
+        access_status: "active",
+        access_expires_at: null,
+        deletion_prepared_at: new Date().toISOString(),
+      })
+      .eq("user_id", userA.userId)
+      .eq("org_id", BMH_ORG_ID);
+    if (deletionPreparedError) throw deletionPreparedError;
+    expect(await listThreads(clientForUser(userA.jwt), {})).toEqual([]);
+  });
+
   // Test case #1
   it("returns one row per contact/property thread with the most recent message", async () => {
     const { contactId } = await seedConversation({
       phone: "+18165550001",
       messages: [
-        { direction: "outbound", body: "first reach-out", createdAtOffsetMin: -120 },
-        { direction: "inbound", body: "interested, tell me more", createdAtOffsetMin: -60 },
-        { direction: "outbound", body: "great — 2pm work?", createdAtOffsetMin: -30 },
+        {
+          direction: "outbound",
+          body: "first reach-out",
+          createdAtOffsetMin: -120,
+        },
+        {
+          direction: "inbound",
+          body: "interested, tell me more",
+          createdAtOffsetMin: -60,
+        },
+        {
+          direction: "outbound",
+          body: "great — 2pm work?",
+          createdAtOffsetMin: -30,
+        },
       ],
     });
 
@@ -245,17 +462,23 @@ describe("listThreads (integration)", () => {
     const a = await seedConversation({
       contactName: "Alpha",
       phone: "+18165550010",
-      messages: [{ direction: "inbound", body: "older", createdAtOffsetMin: -180 }],
+      messages: [
+        { direction: "inbound", body: "older", createdAtOffsetMin: -180 },
+      ],
     });
     const b = await seedConversation({
       contactName: "Bravo",
       phone: "+18165550011",
-      messages: [{ direction: "inbound", body: "newer", createdAtOffsetMin: -10 }],
+      messages: [
+        { direction: "inbound", body: "newer", createdAtOffsetMin: -10 },
+      ],
     });
     const c = await seedConversation({
       contactName: "Charlie",
       phone: "+18165550012",
-      messages: [{ direction: "inbound", body: "middle", createdAtOffsetMin: -90 }],
+      messages: [
+        { direction: "inbound", body: "middle", createdAtOffsetMin: -90 },
+      ],
     });
 
     const threads = await listThreads(supabase, {});
@@ -274,9 +497,24 @@ describe("listThreads (integration)", () => {
     const { contactId } = await seedConversation({
       phone: "+18165550020",
       messages: [
-        { direction: "inbound", body: "1", createdAtOffsetMin: -60, read: true },
-        { direction: "inbound", body: "2", createdAtOffsetMin: -30, read: false },
-        { direction: "inbound", body: "3", createdAtOffsetMin: -10, read: false },
+        {
+          direction: "inbound",
+          body: "1",
+          createdAtOffsetMin: -60,
+          read: true,
+        },
+        {
+          direction: "inbound",
+          body: "2",
+          createdAtOffsetMin: -30,
+          read: false,
+        },
+        {
+          direction: "inbound",
+          body: "3",
+          createdAtOffsetMin: -10,
+          read: false,
+        },
         { direction: "outbound", body: "ack", createdAtOffsetMin: -5 },
       ],
     });
@@ -299,13 +537,11 @@ describe("listThreads (integration)", () => {
       })
       .select("id")
       .single();
-    await supabase
-      .from("properties")
-      .insert({
-        address: "999 Lonely Ln",
-        state: "MO",
-        homeowner_contact_id: contact!.id,
-      });
+    await supabase.from("properties").insert({
+      address: "999 Lonely Ln",
+      state: "MO",
+      homeowner_contact_id: contact!.id,
+    });
 
     const threads = await listThreads(supabase, {});
     expect(threads.find((t) => t.contactId === contact!.id)).toBeUndefined();
@@ -317,13 +553,19 @@ describe("listThreads (integration)", () => {
       contactName: "OldThread",
       phone: "+18165550040",
       messages: [
-        { direction: "inbound", body: "ancient", createdAtOffsetMin: -60 * 24 * 100 },
+        {
+          direction: "inbound",
+          body: "ancient",
+          createdAtOffsetMin: -60 * 24 * 100,
+        },
       ],
     });
     const recent = await seedConversation({
       contactName: "RecentThread",
       phone: "+18165550041",
-      messages: [{ direction: "inbound", body: "fresh", createdAtOffsetMin: -60 }],
+      messages: [
+        { direction: "inbound", body: "fresh", createdAtOffsetMin: -60 },
+      ],
     });
 
     const defaultThreads = await listThreads(supabase, {});
@@ -335,9 +577,7 @@ describe("listThreads (integration)", () => {
     ).toBeDefined();
 
     const allThreads = await listThreads(supabase, { sinceDays: 365 });
-    expect(
-      allThreads.find((t) => t.contactId === old.contactId),
-    ).toBeDefined();
+    expect(allThreads.find((t) => t.contactId === old.contactId)).toBeDefined();
   });
 
   // Test case #6
@@ -361,7 +601,9 @@ describe("listThreads (integration)", () => {
   it("returns assigneeId on each thread (null when unassigned)", async () => {
     const seeded = await seedConversation({
       phone: "+18165550200",
-      messages: [{ direction: "inbound", body: "needs claim", createdAtOffsetMin: -10 }],
+      messages: [
+        { direction: "inbound", body: "needs claim", createdAtOffsetMin: -10 },
+      ],
     });
 
     const threads = await listThreads(supabase, {});
@@ -380,15 +622,21 @@ describe("listThreads (integration)", () => {
 
     const a = await seedConversation({
       phone: "+18165550210",
-      messages: [{ direction: "inbound", body: "for user A", createdAtOffsetMin: -10 }],
+      messages: [
+        { direction: "inbound", body: "for user A", createdAtOffsetMin: -10 },
+      ],
     });
     const b = await seedConversation({
       phone: "+18165550211",
-      messages: [{ direction: "inbound", body: "for user B", createdAtOffsetMin: -20 }],
+      messages: [
+        { direction: "inbound", body: "for user B", createdAtOffsetMin: -20 },
+      ],
     });
     const u = await seedConversation({
       phone: "+18165550212",
-      messages: [{ direction: "inbound", body: "unassigned", createdAtOffsetMin: -30 }],
+      messages: [
+        { direction: "inbound", body: "unassigned", createdAtOffsetMin: -30 },
+      ],
     });
 
     await supabase
@@ -413,11 +661,15 @@ describe("listThreads (integration)", () => {
 
     const assigned = await seedConversation({
       phone: "+18165550220",
-      messages: [{ direction: "inbound", body: "claimed", createdAtOffsetMin: -10 }],
+      messages: [
+        { direction: "inbound", body: "claimed", createdAtOffsetMin: -10 },
+      ],
     });
     const unassigned = await seedConversation({
       phone: "+18165550221",
-      messages: [{ direction: "inbound", body: "claim queue", createdAtOffsetMin: -20 }],
+      messages: [
+        { direction: "inbound", body: "claim queue", createdAtOffsetMin: -20 },
+      ],
     });
 
     await supabase

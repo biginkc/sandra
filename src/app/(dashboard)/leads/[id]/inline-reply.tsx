@@ -26,7 +26,7 @@ type Props = {
 };
 
 /**
- * Inline reply box under the SMS thread. Sends via the existing
+ * Inline reply box under the SMS thread. Queues via the existing
  * `sendSmsFromLead` server action — same TCPA + quiet-hours guardrails
  * as the modal composer. Kept intentionally minimal: no from-number
  * picker here; it replies from the business number the seller most
@@ -67,22 +67,25 @@ export function InlineReply({
     if (!canSend) return;
     startTransition(async () => {
       const result = await callAction(
-        sendSmsFromLead(propertyId, body, fromNumber, false, effectiveToPhone),
-        { fallbackMessage: "SMS send failed" },
+        sendSmsFromLead(propertyId, body, fromNumber, true, effectiveToPhone),
+        { fallbackMessage: "SMS queue failed" },
       );
       if (!result.ok) return;
 
       const { outcome } = result.data;
       switch (outcome.status) {
         case "sent":
-          toast.success("Message sent", {
-            description: `Delivered to ${effectiveToPhone}.`,
+          // queueOnly=true makes this an invalid action contract. Keep the
+          // branch fail-closed in case a server regression returns it.
+          toast.error("Queue confirmation failed", {
+            description:
+              "The server reported an immediate send. Refresh before retrying.",
           });
-          setBody("");
-          router.refresh();
           break;
         case "queued":
-          toast.success("Queued");
+          toast.success("Added to Outbox", {
+            description: `Queued for ${effectiveToPhone}. Review delivery in Outbox.`,
+          });
           setBody("");
           router.refresh();
           break;
@@ -90,7 +93,9 @@ export function InlineReply({
           toast.error("Blocked: no consent", { description: outcome.reason });
           break;
         case "blocked_quiet_hours":
-          toast.warning("Blocked: quiet hours", { description: outcome.reason });
+          toast.warning("Blocked: quiet hours", {
+            description: outcome.reason,
+          });
           break;
         case "blocked_no_phone":
           toast.error("Blocked: no phone", { description: outcome.reason });
@@ -203,18 +208,18 @@ export function InlineReply({
             type="button"
             onClick={send}
             disabled={!canSend}
-            aria-label="Send reply"
+            aria-label="Queue reply in Outbox"
             data-testid="inline-reply-send"
-            className="inline-flex shrink-0 items-center gap-2 rounded-full bg-primary px-5 py-2 text-[12px] font-bold text-primary-foreground transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+            className="inline-flex min-h-11 shrink-0 items-center gap-2 rounded-full bg-primary px-5 py-2 text-[12px] font-bold text-primary-foreground transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
           >
-            {pending ? "Sending…" : "Send SMS"}
+            {pending ? "Queueing…" : "Queue SMS"}
             <SendIcon className="h-3.5 w-3.5" />
           </button>
         </div>
       </div>
       <p className="text-[10px] text-center text-[#a8a29e] px-2">
-        By sending, you confirm you have active consent to contact this lead
-        via SMS.
+        This adds the message to Outbox. Delivery happens only after the queue
+        re-checks consent, suppression, and release timing.
       </p>
     </div>
   );

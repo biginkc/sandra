@@ -1,8 +1,13 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import type { Database } from "@/lib/supabase/types";
+import { isSmsPhoneSuppressed } from "@/lib/messaging/opt-out-phone";
 
 import { fetchInboxDetail } from "./inbox-detail-data";
+
+vi.mock("@/lib/messaging/opt-out-phone", () => ({
+  isSmsPhoneSuppressed: vi.fn(async () => false),
+}));
 
 type MessageRow = Database["public"]["Tables"]["messages"]["Row"];
 type ContactRow = Database["public"]["Tables"]["contacts"]["Row"];
@@ -130,6 +135,12 @@ type SeedData = {
   messages: MessageRow[];
   contacts: ContactRow[];
   properties: PropertyRow[];
+  consent_events?: Array<{
+    contact_id: string;
+    channel: string;
+    event_type: string;
+    occurred_at: string;
+  }>;
 };
 
 function makeSupabaseStub(seed: SeedData) {
@@ -199,7 +210,7 @@ function makeSupabaseStub(seed: SeedData) {
     };
 
     function execute() {
-      let rows = [...seed[table]];
+      let rows = [...(seed[table] ?? [])];
       for (const filter of filters) {
         rows = rows.filter((row) => {
           const value = row[filter.key as keyof typeof row];
@@ -294,7 +305,57 @@ describe("fetchInboxDetail", () => {
     expect(detail?.agentContactId).toBeNull();
     expect(detail?.contactDoNotContact).toBe(false);
     expect(detail?.contactSmsOptedOut).toBe(false);
+    expect(detail?.smsConsentState).toBe("no_consent");
+    expect(detail?.phoneSuppressed).toBe(false);
+    expect(detail?.smsSafetyReadFailed).toBe(false);
     expect(detail?.isDncLocked).toBe(false);
+  });
+
+  it("surfaces an authoritative phone-suppression read failure", async () => {
+    vi.mocked(isSmsPhoneSuppressed).mockRejectedValueOnce(
+      new Error("suppression unavailable"),
+    );
+    const supabase = makeSupabaseStub({
+      messages: [
+        makeMessage({
+          id: "safety-read-failure",
+          contact_id: CONTACT_ID,
+          property_id: RECENT_PROPERTY_ID,
+          conversation_id: CONVERSATION_ID,
+        }),
+      ],
+      contacts: [makeContact({ id: CONTACT_ID })],
+      properties: [makeProperty({ id: RECENT_PROPERTY_ID })],
+    });
+
+    const detail = await fetchInboxDetail(supabase as never, CONVERSATION_ID);
+
+    expect(detail?.phoneSuppressed).toBeNull();
+    expect(detail?.smsSafetyReadFailed).toBe(true);
+  });
+
+  it("fails closed when the message contact metadata is missing", async () => {
+    const supabase = makeSupabaseStub({
+      messages: [
+        makeMessage({
+          id: "missing-contact-metadata",
+          contact_id: CONTACT_ID,
+          property_id: RECENT_PROPERTY_ID,
+          conversation_id: CONVERSATION_ID,
+        }),
+      ],
+      contacts: [],
+      properties: [makeProperty({ id: RECENT_PROPERTY_ID })],
+    });
+
+    const detail = await fetchInboxDetail(supabase as never, CONVERSATION_ID);
+
+    expect(detail).toMatchObject({
+      contactId: CONTACT_ID,
+      smsConsentState: null,
+      phoneSuppressed: null,
+      smsSafetyReadFailed: true,
+    });
   });
 
   it("returns existing contact restrictions and the permanent property lock", async () => {

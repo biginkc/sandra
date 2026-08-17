@@ -81,9 +81,10 @@ describe("useQueueStats (260504-tgq polling, lifted from QueueStatsBanner)", () 
 
   it("Keeps previous stats when a poll returns ok: false", async () => {
     getQueueStats.mockResolvedValue({ ok: false, error: "boom" });
+    const onRefreshFailure = vi.fn();
 
     const { result } = renderHook(() =>
-      useQueueStats(makeStats({ queued: 7 })),
+      useQueueStats(makeStats({ queued: 7 }), { onRefreshFailure }),
     );
 
     await act(async () => {
@@ -91,6 +92,7 @@ describe("useQueueStats (260504-tgq polling, lifted from QueueStatsBanner)", () 
     });
     expect(getQueueStats).toHaveBeenCalledTimes(1);
     expect(result.current.queued).toBe(7);
+    expect(onRefreshFailure).toHaveBeenCalledOnce();
   });
 
   it("reports a successful poll so a failed first-paint indicator can recover", async () => {

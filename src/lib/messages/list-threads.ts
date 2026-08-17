@@ -126,6 +126,33 @@ export type NeedsOutcomeCountOpts = {
   hideTestTraffic?: boolean;
 };
 
+type ThreadSnapshotRow = {
+  thread_id: string;
+  contact_id: string;
+  contact_name: string | null;
+  thread_customer_phone: string | null;
+  thread_business_phone: string | null;
+  property_id: string | null;
+  property_address: string | null;
+  property_status: string | null;
+  outreach_dispo: string | null;
+  is_dnc_locked: boolean;
+  assignee_id: string | null;
+  last_message_body: string;
+  last_message_direction: "inbound" | "outbound";
+  last_message_at: string;
+  unread_count: number;
+  has_inbound: boolean;
+  needs_human_attention: boolean;
+  escalation_reason: string | null;
+  is_opted_out: boolean;
+  ai_responder_status: string | null;
+  ai_responder_reason: string | null;
+  ai_responder_status_at: string | null;
+  ai_last_delivery_status: string | null;
+  ai_last_delivery_error: string | null;
+};
+
 /**
  * Build the inbox thread list — one row per conversation. Every
  * contact-bearing SMS row carries a conversation_id (backfilled and
@@ -147,6 +174,9 @@ export async function listThreads(
   const cutoff = new Date(
     Date.now() - sinceDays * 24 * 60 * 60 * 1000,
   ).toISOString();
+
+  const snapshot = await fetchThreadSnapshot(supabase, cutoff);
+  if (snapshot) return mapThreadSnapshot(snapshot, opts);
 
   const { data: msgs, error } = await supabase
     .from("messages")
@@ -370,6 +400,14 @@ export async function countNeedsOutcomeThreads(
     Date.now() - sinceDays * 24 * 60 * 60 * 1000,
   ).toISOString();
 
+  const snapshot = await fetchThreadSnapshot(supabase, cutoff);
+  if (snapshot) {
+    return mapThreadSnapshot(snapshot, {})
+      .filter((thread) => thread.needsOutcome)
+      .filter((thread) => !opts.hideTestTraffic || !thread.isTestTraffic)
+      .length;
+  }
+
   const { data: msgs, error } = await supabase
     .from("messages")
     .select("contact_id, property_id, conversation_id, direction, created_at")
@@ -512,6 +550,100 @@ export async function countNeedsOutcomeThreads(
   }
 
   return needsOutcome.length;
+}
+
+async function fetchThreadSnapshot(
+  supabase: SupabaseClient<Database>,
+  cutoff: string,
+): Promise<ThreadSnapshotRow[] | null> {
+  // Older unit stubs exercise the pre-migration fallback below. Real
+  // Supabase clients always expose rpc(), so production never returns to the
+  // PostgREST row-capped path once migration 20260816120000 is installed.
+  const rpc = (supabase as unknown as { rpc?: SupabaseClient<Database>["rpc"] })
+    .rpc;
+  if (typeof rpc !== "function") return null;
+  const { data, error } = await supabase.rpc("sms_inbox_thread_snapshot", {
+    p_cutoff: cutoff,
+  });
+  if (error) throw new Error(`sms_inbox_thread_snapshot: ${error.message}`);
+  if (
+    data &&
+    typeof data === "object" &&
+    !Array.isArray(data) &&
+    "__error" in data
+  ) {
+    throw new Error(
+      `sms_inbox_thread_snapshot: ${String(data.__error)}; narrow the inbox window`,
+    );
+  }
+  if (!Array.isArray(data)) {
+    throw new Error("sms_inbox_thread_snapshot: invalid response");
+  }
+  return data as unknown as ThreadSnapshotRow[];
+}
+
+function mapThreadSnapshot(
+  rows: ThreadSnapshotRow[],
+  opts: ListThreadsOpts,
+): Thread[] {
+  const threads: Thread[] = [];
+  for (const row of rows) {
+    const aiResponderStatus = parseAiResponderStatus(row.ai_responder_status);
+    if (opts.assigneeId && row.assignee_id !== opts.assigneeId) continue;
+    if (opts.unassignedOnly && row.assignee_id) continue;
+    if (
+      opts.unreadOnly &&
+      row.unread_count === 0 &&
+      row.thread_id !== opts.includeThreadId
+    )
+      continue;
+    if (opts.escalatedOnly && aiResponderStatus !== "escalated") continue;
+    if (opts.handledOnly && aiResponderStatus !== "handled") continue;
+    if (opts.dispoOnly && row.outreach_dispo == null) continue;
+
+    const needsOutcome = isNeedsOutcomeThread({
+      propertyId: row.property_id,
+      hasInbound: row.has_inbound,
+      propertyStatus: row.property_status,
+      outreachDispo: row.outreach_dispo,
+      isOptedOut: row.is_opted_out,
+    });
+    if (opts.needsOutcomeOnly && !needsOutcome) continue;
+
+    threads.push({
+      threadId: row.thread_id,
+      contactId: row.contact_id,
+      contactName: row.contact_name,
+      threadCustomerPhone: row.thread_customer_phone,
+      threadBusinessPhone: row.thread_business_phone,
+      contactPhone: row.thread_customer_phone,
+      propertyId: row.property_id,
+      propertyAddress: row.property_address,
+      propertyStatus: row.property_status,
+      outreachDispo: row.outreach_dispo,
+      isDncLocked: row.is_dnc_locked,
+      assigneeId: row.assignee_id,
+      lastMessageBody: row.last_message_body,
+      lastMessageDirection: row.last_message_direction,
+      lastMessageAt: row.last_message_at,
+      unreadCount: row.unread_count,
+      needsHumanAttention: row.needs_human_attention,
+      escalationReason: row.escalation_reason,
+      isOptedOut: row.is_opted_out,
+      isTestTraffic: looksLikeTestTraffic(
+        row.contact_name,
+        row.property_address,
+      ),
+      needsOutcome,
+      aiResponderStatus,
+      aiResponderReason: row.ai_responder_reason,
+      aiResponderStatusAt: row.ai_responder_status_at,
+      aiLastDeliveryStatus: row.ai_last_delivery_status,
+      aiLastDeliveryError: row.ai_last_delivery_error,
+    });
+  }
+  threads.sort((a, b) => b.lastMessageAt.localeCompare(a.lastMessageAt));
+  return threads;
 }
 
 /**

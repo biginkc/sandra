@@ -168,6 +168,9 @@ function makeDetail(contactId: string, body: string): InboxDetailData {
     outreachDispo: null,
     contactDoNotContact: false,
     contactSmsOptedOut: false,
+    smsConsentState: "can_send_marketing",
+    phoneSuppressed: false,
+    smsSafetyReadFailed: false,
     isDncLocked: false,
     initialMessages: [
       makeMessage({
@@ -246,6 +249,24 @@ describe("<CockpitView /> URL deep-linking", () => {
     expect(outbox).toHaveAttribute("aria-selected", "false");
   });
 
+  it("implements roving tab focus and arrow-key activation", () => {
+    render(<CockpitView {...baseProps} activeTab="inbox" />);
+    const inbox = screen.getByTestId("tab-inbox");
+    const outbox = screen.getByTestId("tab-outbox");
+    inbox.focus();
+
+    fireEvent.keyDown(inbox.closest('[role="tablist"]')!, {
+      key: "ArrowRight",
+    });
+
+    expect(outbox).toHaveFocus();
+    expect(navigationMocks.replace).toHaveBeenCalledWith(
+      "/messages?tab=outbox",
+    );
+    expect(inbox).toHaveAttribute("aria-controls", "messages-inbox-panel");
+    expect(outbox).toHaveAttribute("aria-controls", "messages-outbox-panel");
+  });
+
   it("Outbox tab shows real queue stats — queued plain, sent green, failed red", () => {
     render(
       <CockpitView
@@ -306,6 +327,39 @@ describe("<CockpitView /> URL deep-linking", () => {
       expect(screen.queryByTestId("tab-outbox-stats-unavailable")).toBeNull();
       expect(screen.getByTestId("tab-outbox-stats")).toHaveTextContent(
         /14\s*·\s*3\s*·\s*1/,
+      );
+    } finally {
+      view.unmount();
+      vi.useRealTimers();
+    }
+  });
+
+  it("marks retained server totals stale when the first client poll fails", async () => {
+    vi.useFakeTimers();
+    getQueueStatsMock.mockResolvedValue({ ok: false, error: "offline" });
+    const view = render(
+      <CockpitView
+        {...baseProps}
+        activeTab="outbox"
+        queueStats={{ ...baseProps.queueStats, queued: 9, sentOutToday: 2 }}
+      />,
+    );
+    try {
+      expect(screen.getByTestId("tab-outbox-stats")).toHaveTextContent(
+        /9\s*·\s*2/,
+      );
+
+      await act(async () => {
+        vi.advanceTimersByTime(30_000);
+        await Promise.resolve();
+      });
+
+      expect(screen.getByTestId("tab-outbox-stats-unavailable")).toBeVisible();
+      expect(screen.getByTestId("queue-stats-failure")).toHaveTextContent(
+        "last good totals",
+      );
+      expect(screen.getByTestId("queue-stats-failure")).toHaveTextContent(
+        "9 queued",
       );
     } finally {
       view.unmount();

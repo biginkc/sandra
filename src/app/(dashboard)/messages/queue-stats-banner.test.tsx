@@ -52,6 +52,24 @@ describe("<QueueStatsBanner /> (260504-tgq)", () => {
     expect(onRetry).toHaveBeenCalledOnce();
   });
 
+  it("keeps last-good totals visible but marks them stale after a later failure", () => {
+    render(
+      <QueueStatsBanner
+        stats={makeStats({ queued: 17, sentOutToday: 4 })}
+        loadFailed
+        lastSuccessfulAt="2026-05-04T17:59:30Z"
+      />,
+    );
+
+    expect(screen.getByTestId("queue-stats-failure")).toHaveTextContent(
+      "last good totals",
+    );
+    expect(screen.getByText(/17 queued/)).toBeInTheDocument();
+    expect(screen.getByTestId("queue-stats-last-success")).toHaveTextContent(
+      "May 4, 2026",
+    );
+  });
+
   it("Renders queued / sent out today / failed today counts from stats", () => {
     render(
       <QueueStatsBanner

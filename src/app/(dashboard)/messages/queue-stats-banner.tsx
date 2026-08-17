@@ -17,10 +17,12 @@ import { type QueueStats } from "./actions";
 export function QueueStatsBanner({
   stats,
   loadFailed = false,
+  lastSuccessfulAt = null,
   onRetry,
 }: {
   stats: QueueStats;
   loadFailed?: boolean;
+  lastSuccessfulAt?: string | null;
   onRetry?: () => void;
 }) {
   if (loadFailed) {
@@ -31,9 +33,20 @@ export function QueueStatsBanner({
         data-testid="queue-stats-failure"
       >
         <p>
-          Queue totals could not be refreshed. The queue below may still contain
-          work; these fallback totals are not an empty-queue confirmation.
+          {lastSuccessfulAt
+            ? "Queue totals could not be refreshed. The last good totals remain visible below and may be stale; they are not an empty-queue confirmation."
+            : "Queue totals could not be refreshed. The queue may still contain work; fallback totals are not an empty-queue confirmation."}
         </p>
+        <p className="mt-1 text-xs" data-testid="queue-stats-last-success">
+          Last successful refresh:{" "}
+          {formatLastSuccessfulRefresh(lastSuccessfulAt)}
+        </p>
+        {lastSuccessfulAt ? (
+          <div className="mt-3 rounded-lg border border-red-200 bg-white p-3 font-medium">
+            {stats.queued} queued · {stats.paused} paused · {stats.sentOutToday}{" "}
+            sent today · {stats.failedToday} failed today
+          </div>
+        ) : null}
         {onRetry ? (
           <Button
             type="button"
@@ -63,6 +76,18 @@ export function QueueStatsBanner({
       </div>
     </div>
   );
+}
+
+function formatLastSuccessfulRefresh(iso: string | null): string {
+  if (!iso) return "server snapshot (exact time unavailable)";
+  if (iso === "server-snapshot")
+    return "server snapshot (exact time unavailable)";
+  const time = Date.parse(iso);
+  if (!Number.isFinite(time)) return "unknown";
+  return new Intl.DateTimeFormat(undefined, {
+    dateStyle: "medium",
+    timeStyle: "medium",
+  }).format(new Date(time));
 }
 
 /**

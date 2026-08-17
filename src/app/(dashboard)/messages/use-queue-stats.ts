@@ -35,7 +35,12 @@ export function useQueueStats(
   {
     enabled = true,
     onRefreshSuccess,
-  }: { enabled?: boolean; onRefreshSuccess?: () => void } = {},
+    onRefreshFailure,
+  }: {
+    enabled?: boolean;
+    onRefreshSuccess?: (refreshedAt: string) => void;
+    onRefreshFailure?: () => void;
+  } = {},
 ): QueueStats {
   const [stats, setStats] = useState<QueueStats>(initialStats);
   const [lastInitialStats, setLastInitialStats] =
@@ -75,7 +80,9 @@ export function useQueueStats(
       if (result.ok) {
         appliedSeqRef.current = seq;
         setStats(result.data);
-        onRefreshSuccess?.();
+        onRefreshSuccess?.(new Date().toISOString());
+      } else {
+        onRefreshFailure?.();
       }
     }
 
@@ -109,6 +116,7 @@ export function useQueueStats(
     initialStats.queued,
     initialStats.sentOutToday,
     onRefreshSuccess,
+    onRefreshFailure,
   ]);
 
   return stats;

@@ -137,6 +137,7 @@ function AssignDropdownContent({
           <Button
             variant="outline"
             size="sm"
+            className="min-h-11"
             disabled={pending}
             aria-label="Change assignee"
             data-testid="assign-dropdown-trigger"
@@ -157,7 +158,7 @@ function AssignDropdownContent({
           <>
             <DropdownMenuItem
               onClick={() => change(currentUserId)}
-              className="flex items-center justify-between gap-4"
+              className="min-h-11 items-center justify-between gap-4"
               data-testid="assign-dropdown-me"
             >
               <span>Me</span>
@@ -175,7 +176,7 @@ function AssignDropdownContent({
               <DropdownMenuItem
                 key={m.id}
                 onClick={() => change(m.id)}
-                className="flex items-center justify-between gap-4"
+                className="min-h-11 items-center justify-between gap-4"
                 data-testid={`assign-dropdown-user-${m.id}`}
               >
                 <span>{m.email}</span>
@@ -187,7 +188,7 @@ function AssignDropdownContent({
             <DropdownMenuSeparator />
             <DropdownMenuItem
               onClick={() => change(null)}
-              className="flex items-center justify-between gap-4"
+              className="min-h-11 items-center justify-between gap-4"
               data-testid="assign-dropdown-unassign"
             >
               <span className="text-muted-foreground">Unassign</span>

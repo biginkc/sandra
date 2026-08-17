@@ -166,6 +166,13 @@ function makeData(
     outreachDispo: overrides.outreachDispo ?? null,
     contactDoNotContact: overrides.contactDoNotContact ?? false,
     contactSmsOptedOut: overrides.contactSmsOptedOut ?? false,
+    smsConsentState: Object.hasOwn(overrides, "smsConsentState")
+      ? overrides.smsConsentState!
+      : "can_send_marketing",
+    phoneSuppressed: Object.hasOwn(overrides, "phoneSuppressed")
+      ? overrides.phoneSuppressed!
+      : false,
+    smsSafetyReadFailed: overrides.smsSafetyReadFailed ?? false,
     isDncLocked: overrides.isDncLocked ?? false,
     initialMessages: overrides.initialMessages ?? [],
   };
@@ -215,7 +222,7 @@ describe("<InboxDetail />", () => {
     vi.mocked(sendSmsFromLead).mockReset();
     vi.mocked(sendSmsFromLead).mockResolvedValue({
       ok: true,
-      data: { outcome: { status: "sent" } },
+      data: { outcome: { status: "queued" } },
     } as Awaited<ReturnType<typeof sendSmsFromLead>>);
     Object.defineProperty(navigator, "clipboard", {
       configurable: true,
@@ -388,7 +395,7 @@ describe("<InboxDetail />", () => {
     expect(screen.getByLabelText("Reply to this lead")).toHaveValue("");
   });
 
-  it("sends inline replies to the same saved thread phone shown in Messages", async () => {
+  it("queues inline replies to the same saved thread phone shown in Messages", async () => {
     const user = userEvent.setup();
     const data = makeData({
       contactId: "contact-reply-phone",
@@ -415,10 +422,33 @@ describe("<InboxDetail />", () => {
         "prop-reply-phone",
         "Thanks",
         null,
-        false,
+        true,
         "+15550000002",
       );
     });
+    expect(screen.getByLabelText("Reply to this lead")).toHaveValue("");
+  });
+
+  it("does not claim success or clear the draft if queueOnly returns an impossible immediate send", async () => {
+    const user = userEvent.setup();
+    vi.mocked(sendSmsFromLead).mockResolvedValueOnce({
+      ok: true,
+      data: { outcome: { status: "sent" } },
+    } as Awaited<ReturnType<typeof sendSmsFromLead>>);
+    render(
+      <InboxDetail
+        data={makeData({ contactId: "contact-invalid-immediate-send" })}
+        assigneeEmails={{}}
+        currentUserId="user-1"
+      />,
+    );
+
+    const composer = screen.getByLabelText("Reply to this lead");
+    await user.type(composer, "keep this draft");
+    await user.click(screen.getByTestId("inline-reply-send"));
+
+    await waitFor(() => expect(sendSmsFromLead).toHaveBeenCalledOnce());
+    expect(composer).toHaveValue("keep this draft");
   });
 
   it("pauses Messages replies after a live same-thread insert until server detail refreshes", async () => {
@@ -917,6 +947,47 @@ describe("<InboxDetail />", () => {
 
     await user.click(screen.getByTestId("inbox-detail-more"));
     expect(await screen.findByTestId("inbox-detail-phone")).toBeInTheDocument();
+  });
+
+  it("uses canonical consent and phone suppression for SMS without inventing a voice DNC", async () => {
+    const user = userEvent.setup();
+    const data = makeData({
+      contactId: "contact-canonical-optout",
+      smsConsentState: "opted_out",
+      phoneSuppressed: true,
+    });
+
+    render(
+      <InboxDetail data={data} assigneeEmails={{}} currentUserId="user-1" />,
+    );
+
+    expect(screen.queryByTestId("inline-reply")).not.toBeInTheDocument();
+    expect(
+      screen.getByTestId("messages-contact-restriction"),
+    ).toHaveTextContent("canonical consent or phone suppression");
+    await user.click(screen.getByTestId("inbox-detail-more"));
+    expect(await screen.findByTestId("inbox-detail-phone")).toBeInTheDocument();
+  });
+
+  it("fails closed when authoritative SMS safety reads fail", async () => {
+    const user = userEvent.setup();
+    const data = makeData({
+      contactId: "contact-safety-read-failed",
+      smsConsentState: null,
+      phoneSuppressed: null,
+      smsSafetyReadFailed: true,
+    });
+
+    render(
+      <InboxDetail data={data} assigneeEmails={{}} currentUserId="user-1" />,
+    );
+
+    expect(screen.queryByTestId("inline-reply")).not.toBeInTheDocument();
+    expect(
+      screen.getByTestId("messages-contact-restriction"),
+    ).toHaveTextContent("could not be verified");
+    await user.click(screen.getByTestId("inbox-detail-more"));
+    expect(screen.queryByTestId("inbox-detail-phone")).not.toBeInTheDocument();
   });
 
   it("removes outreach outcomes and channel controls for a suppressed contact", async () => {

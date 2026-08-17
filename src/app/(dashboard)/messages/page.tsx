@@ -36,9 +36,8 @@ export const metadata = {
  * Cockpit page — two tabs:
  *
  *   1. Inbox  (default) — Slack/iPhone-style conversation list with a
- *      side-panel detail view. Click a thread, reply inline, sends
- *      immediately via the existing send-now path. Replaces the Dialpad
- *      app for live conversation work.
+ *      side-panel detail view. Inline replies enter Outbox and wait for the
+ *      existing queue release path to re-check safety before delivery.
  *
  *      Filters: All (default), Unread, Needs Outcome, Mine, Escalated,
  *      Dispo, Unassigned, Unknown, Dismissed.
