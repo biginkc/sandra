@@ -47,7 +47,16 @@ vi.mock("@/lib/supabase/server", () => ({
   })),
 }));
 
-import { fetchMyTasks } from "./queries";
+import { fetchMyTasks, type MyTasksResult } from "./queries";
+
+function expectTaskLoadSuccess(
+  result: MyTasksResult,
+): asserts result is Extract<MyTasksResult, { status: "success" }> {
+  expect(result.status).toBe("success");
+  if (result.status !== "success") {
+    throw new Error("Expected task load to succeed");
+  }
+}
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -111,6 +120,7 @@ describe("fetchMyTasks", () => {
     ];
 
     const result = await fetchMyTasks("user-1");
+    expectTaskLoadSuccess(result);
 
     expect(result.overdue.map((r) => r.id)).toEqual(["t-overdue"]);
     expect(result.today.map((r) => r.id)).toEqual(["t-today"]);
@@ -132,6 +142,7 @@ describe("fetchMyTasks", () => {
     ];
 
     const result = await fetchMyTasks("user-1");
+    expectTaskLoadSuccess(result);
     expect(result.today).toHaveLength(1);
     expect(result.today[0]).toMatchObject({
       property_id: null,
@@ -161,19 +172,18 @@ describe("fetchMyTasks", () => {
     ];
 
     const result = await fetchMyTasks("user-1");
+    expectTaskLoadSuccess(result);
     expect(result.today[0].property_id).toBeNull();
     expect(result.today[0].address).toBeNull();
   });
 
-  it("returns empty buckets on a query error", async () => {
+  it("returns an explicit failure on a query error instead of empty buckets", async () => {
     queuedData = null;
     queuedError = { message: "boom" };
 
     const result = await fetchMyTasks("user-1");
     expect(result).toEqual({
-      overdue: [],
-      today: [],
-      upcoming: [],
+      status: "failure",
       timezone: "America/Chicago",
     });
   });
@@ -187,6 +197,7 @@ describe("fetchMyTasks", () => {
     queuedData = [];
 
     const result = await fetchMyTasks("user-1");
+    expectTaskLoadSuccess(result);
 
     expect(mocks.loadIntegrationPrefs).toHaveBeenCalledWith(
       expect.anything(),
@@ -213,6 +224,7 @@ describe("fetchMyTasks", () => {
     queuedData = [];
 
     const result = await fetchMyTasks("user-1");
+    expectTaskLoadSuccess(result);
 
     expect(result.timezone).toBe("America/Chicago");
   });
@@ -244,6 +256,7 @@ describe("fetchMyTasks", () => {
     ];
 
     const result = await fetchMyTasks("user-1");
+    expectTaskLoadSuccess(result);
 
     expect(selectCalls).toHaveLength(2);
     expect(selectCalls[1]).not.toContain("contact_id");
@@ -258,7 +271,7 @@ describe("fetchMyTasks", () => {
     });
   });
 
-  it("does not retry and returns empty buckets when the first select fails with a non-42703 error", async () => {
+  it("does not retry and returns failure when the first select fails with a non-42703 error", async () => {
     queuedData = null;
     queuedError = { message: "connection reset", code: "57P01" };
 
@@ -266,9 +279,7 @@ describe("fetchMyTasks", () => {
 
     expect(selectCalls).toHaveLength(1);
     expect(result).toEqual({
-      overdue: [],
-      today: [],
-      upcoming: [],
+      status: "failure",
       timezone: "America/Chicago",
     });
   });

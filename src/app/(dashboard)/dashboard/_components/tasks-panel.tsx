@@ -6,18 +6,11 @@ import {
   AppointmentUpcomingActions,
 } from "@/components/appointments/appointment-outcome-row";
 
-import type { TaskRow } from "../queries";
+import type { MyTasksResult, TaskRow } from "../queries";
 
 import { TaskActionsRow } from "./task-actions-row";
 
-type Props = {
-  overdue: TaskRow[];
-  today: TaskRow[];
-  upcoming: TaskRow[];
-  /** Zone the buckets were computed in (fetchMyTasks.timezone) — due
-   *  labels must be formatted in the same zone or a row can sit under
-   *  Upcoming while its label reads "today". */
-  timezone: string;
+type Props = MyTasksResult & {
   /** The viewer these tasks belong to (fetchMyTasks always scopes to
    *  `assignee_id = viewer`) — appointment rows need this to drive the
    *  reschedule popover's timezone lookup. */
@@ -32,7 +25,7 @@ const TYPE_LABELS: Record<string, string> = {
 };
 
 /**
- * Right-rail dashboard panel surfacing the current viewer's open tasks
+ * Dashboard daily-work panel surfacing the current viewer's open tasks
  * split into Overdue / Today / Upcoming. Empty-state collapses to a
  * single "all caught up" line, matching the NeedsAttentionStrip "all
  * clear" visual rest state.
@@ -50,13 +43,29 @@ const TYPE_LABELS: Record<string, string> = {
  * row (held / no-show / reschedule / cancel); before that, a compact
  * "..." overflow with just Reschedule/Cancel.
  */
-export function TasksPanel({
-  overdue,
-  today,
-  upcoming,
-  timezone,
-  currentUserId,
-}: Props) {
+export function TasksPanel(props: Props) {
+  if (props.status === "failure") {
+    return (
+      <div
+        className="border-alert-critical/30 bg-card rounded-2xl border px-5 py-5"
+        data-testid="tasks-panel"
+      >
+        <h2 className="text-foreground text-base font-bold">My Tasks</h2>
+        <p className="text-muted-foreground mt-3 text-sm">
+          Tasks couldn&apos;t load. This is a load failure, not an empty queue
+          — your tasks may still exist.
+        </p>
+        <a
+          href="/dashboard"
+          className="border-border text-foreground mt-4 inline-flex min-h-11 items-center rounded-full border-2 px-5 text-sm font-bold hover:bg-stone-50"
+        >
+          Retry
+        </a>
+      </div>
+    );
+  }
+
+  const { overdue, today, upcoming, timezone, currentUserId } = props;
   const total = overdue.length + today.length + upcoming.length;
 
   if (total === 0) {

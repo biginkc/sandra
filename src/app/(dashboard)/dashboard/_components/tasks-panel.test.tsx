@@ -53,9 +53,27 @@ function makeRow(overrides: Partial<TaskRow> & { id: string }): TaskRow {
 }
 
 describe("<TasksPanel />", () => {
+  it("renders a truthful Retry state on failure, never the all-caught-up copy", () => {
+    render(
+      <TasksPanel
+        status="failure"
+        timezone={TZ}
+        currentUserId={VIEWER_ID}
+      />,
+    );
+
+    expect(screen.getByText(/load failure, not an empty queue/i)).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Retry" })).toHaveAttribute(
+      "href",
+      "/dashboard",
+    );
+    expect(screen.queryByText(/all caught up/i)).not.toBeInTheDocument();
+  });
+
   it("renders the all-clear empty state when all buckets are empty", () => {
     render(
       <TasksPanel
+        status="success"
         overdue={[]}
         today={[]}
         upcoming={[]}
@@ -75,6 +93,7 @@ describe("<TasksPanel />", () => {
     ];
     render(
       <TasksPanel
+        status="success"
         overdue={[]}
         today={today}
         upcoming={[]}
@@ -103,6 +122,7 @@ describe("<TasksPanel />", () => {
     const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
     render(
       <TasksPanel
+        status="success"
         overdue={[
           makeRow({ id: "t0", address: "000 Yesterday Rd", due_at: yesterday }),
         ]}
@@ -134,6 +154,7 @@ describe("<TasksPanel />", () => {
     const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
     render(
       <TasksPanel
+        status="success"
         overdue={[
           makeRow({ id: "t0", address: "000 Yesterday Rd", due_at: yesterday }),
         ]}
@@ -154,6 +175,7 @@ describe("<TasksPanel />", () => {
     const today = [makeRow({ id: "t1", property_id: "prop-abc" })];
     const { container } = render(
       <TasksPanel
+        status="success"
         overdue={[]}
         today={today}
         upcoming={[]}
@@ -186,6 +208,7 @@ describe("<TasksPanel />", () => {
     ];
     render(
       <TasksPanel
+        status="success"
         overdue={[]}
         today={today}
         upcoming={[]}
@@ -220,6 +243,7 @@ describe("<TasksPanel />", () => {
     ];
     const { container } = render(
       <TasksPanel
+        status="success"
         overdue={[]}
         today={today}
         upcoming={[]}
@@ -239,6 +263,7 @@ describe("<TasksPanel />", () => {
     const today = [makeRow({ id: "t1" })];
     render(
       <TasksPanel
+        status="success"
         overdue={[]}
         today={today}
         upcoming={[]}
@@ -266,6 +291,7 @@ describe("<TasksPanel />", () => {
     ];
     render(
       <TasksPanel
+        status="success"
         overdue={overdue}
         today={[]}
         upcoming={[]}
@@ -298,6 +324,7 @@ describe("<TasksPanel />", () => {
     ];
     render(
       <TasksPanel
+        status="success"
         overdue={[]}
         today={[]}
         upcoming={upcoming}
@@ -335,6 +362,7 @@ describe("<TasksPanel />", () => {
       ];
       render(
         <TasksPanel
+          status="success"
           overdue={[]}
           today={[]}
           upcoming={upcoming}

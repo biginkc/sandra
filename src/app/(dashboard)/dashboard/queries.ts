@@ -85,6 +85,23 @@ export type TaskRow = {
   state: string | null;
 };
 
+export type MyTasksResult =
+  | {
+      status: "success";
+      overdue: TaskRow[];
+      today: TaskRow[];
+      upcoming: TaskRow[];
+      /** The zone the buckets were computed in — the panel must format due
+       *  labels with this same zone or labels and buckets can disagree. */
+      timezone: string;
+    }
+  | {
+      status: "failure";
+      /** Keep the resolved zone even on failure so a retry can use the same
+       *  viewer context without pretending the task buckets are empty. */
+      timezone: string;
+    };
+
 export type DashboardSummary = {
   total_leads: number;
   new_this_week: number;
@@ -143,17 +160,11 @@ export async function fetchDashboardSendilloSmsHealth(): Promise<SendilloSmsHeal
  * so a property-less row is legitimate, not an error. property_id/
  * address/city/state come back null together in that case.
  *
- * Returns empty buckets on error rather than null — the panel renders
- * the all-clear empty state, which is a reasonable failure mode.
+ * Returns an explicit failure result on error. A failed query is not an
+ * empty queue: the dashboard must render a retry state rather than claim
+ * the viewer is all caught up.
  */
-export async function fetchMyTasks(userId: string): Promise<{
-  overdue: TaskRow[];
-  today: TaskRow[];
-  upcoming: TaskRow[];
-  /** The zone the buckets were computed in — the panel must format due
-   *  labels with this same zone or labels and buckets can disagree. */
-  timezone: string;
-}> {
+export async function fetchMyTasks(userId: string): Promise<MyTasksResult> {
   const supabase = await createClient();
   const prefs = await loadIntegrationPrefs(supabase, userId);
   const { dayStart, dayEnd } = getDayBoundsInZone(new Date(), prefs.timezone);
@@ -194,7 +205,7 @@ export async function fetchMyTasks(userId: string): Promise<{
         code: error.code,
       });
     }
-    return { overdue: [], today: [], upcoming: [], timezone: prefs.timezone };
+    return { status: "failure", timezone: prefs.timezone };
   }
 
   const dayStartMs = dayStart.getTime();
@@ -242,5 +253,11 @@ export async function fetchMyTasks(userId: string): Promise<{
     }
   }
 
-  return { overdue, today, upcoming, timezone: prefs.timezone };
+  return {
+    status: "success",
+    overdue,
+    today,
+    upcoming,
+    timezone: prefs.timezone,
+  };
 }

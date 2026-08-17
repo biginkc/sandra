@@ -102,11 +102,29 @@ export default async function DashboardPage() {
         description={today}
       />
 
-      <div className="grid grid-cols-1 gap-6 lg:grid-cols-[1fr_340px]">
-        {/* Main column */}
-        <div className="space-y-6">
-          <SkipTraceCredits balance={balance} isAdmin={isAdmin} />
+      <div className="space-y-6">
+        <section
+          aria-label="Today's work"
+          className="space-y-6"
+          data-testid="overview-daily-work"
+        >
           <NeedsAttentionStrip needs={summary.needs_attention} />
+
+          <div className="grid grid-cols-1 gap-6 lg:grid-cols-2 lg:items-start">
+            <TasksPanel {...myTasks} currentUserId={user.id} />
+            <ThreadsNeedingAttention
+              threads={summary.threads_needing_attention}
+              totalCount={escalatedTotal}
+              nowMs={nowMs}
+            />
+          </div>
+        </section>
+
+        <section
+          aria-label="Business and system health"
+          className="space-y-6"
+          data-testid="overview-business-health"
+        >
           <KpiRowOne
             totalLeads={summary.total_leads}
             newThisWeek={summary.new_this_week}
@@ -116,26 +134,11 @@ export default async function DashboardPage() {
             currentUserId={user.id}
           />
           <KpiRowTwo summary={summary} currentUserId={user.id} />
+          <SkipTraceCredits balance={balance} isAdmin={isAdmin} />
           <SendilloHealthCard result={sendilloSmsHealth} />
           <QuickActions isAdmin={isAdmin} />
-        </div>
-
-        {/* Right rail */}
-        <div className="space-y-6">
-          <TasksPanel
-            overdue={myTasks.overdue}
-            today={myTasks.today}
-            upcoming={myTasks.upcoming}
-            timezone={myTasks.timezone}
-            currentUserId={user.id}
-          />
-          <ThreadsNeedingAttention
-            threads={summary.threads_needing_attention}
-            totalCount={escalatedTotal}
-            nowMs={nowMs}
-          />
           <ActivityFeed events={summary.recent_activity} />
-        </div>
+        </section>
       </div>
     </Page>
   );
