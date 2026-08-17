@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, it } from "vitest";
+import { Client } from "pg";
 
 import { createTestClient } from "@tests/integration/client";
+import { loadTestEnv } from "@tests/integration/env";
 import {
   BMH_ORG_ID,
   TEST_ORG_B_ID,
@@ -14,6 +16,53 @@ import { listThreadPage, listThreads } from "./list-threads";
 import { ensureConversationIdForThread } from "./threading";
 
 const supabase = createTestClient();
+
+async function readScaleSnapshotUnderStatementTimeout(): Promise<{
+  durationMs: number;
+  snapshot: {
+    rows: unknown[];
+    counts: { all: number; unread: number; needs_outcome: number };
+    total: number;
+  };
+}> {
+  const env = loadTestEnv();
+  const connectionString =
+    process.env.TEST_SUPABASE_DB_URL ?? env.TEST_SUPABASE_DB_URL;
+  if (!connectionString) throw new Error("missing TEST_SUPABASE_DB_URL");
+
+  const client = new Client({ connectionString });
+  await client.connect();
+  try {
+    await client.query("begin");
+    await client.query("set local statement_timeout = '7000ms'");
+    const startedAt = performance.now();
+    const result = await client.query<{
+      snapshot: {
+        rows: unknown[];
+        counts: { all: number; unread: number; needs_outcome: number };
+        total: number;
+      };
+    }>(
+      `select public.sms_inbox_thread_page_snapshot(
+        $1::timestamptz,
+        'all'::text,
+        null::uuid,
+        null::uuid,
+        false,
+        200,
+        0
+      ) as snapshot`,
+      [new Date(Date.now() - 90 * 24 * 60 * 60 * 1_000).toISOString()],
+    );
+    return {
+      durationMs: performance.now() - startedAt,
+      snapshot: result.rows[0]!.snapshot,
+    };
+  } finally {
+    await client.query("rollback").catch(() => {});
+    await client.end();
+  }
+}
 
 /**
  * Mint a real auth.users row so properties.assigned_user_id FK passes.
@@ -142,9 +191,22 @@ describe("listThreads (integration)", () => {
       conversation_id: crypto.randomUUID(),
       from_address: contact.phone_1,
       to_address: "+18162804181",
-      body: `scale message ${index}`,
+      body: `scale message ${index} ${"x".repeat(256 + (index % 8) * 137)}`,
       created_at: new Date(base + index * 1_000).toISOString(),
       read_at: index % 2 === 0 ? null : new Date().toISOString(),
+    }));
+    const historyMessages = contacts.map((contact, index) => ({
+      channel: "sms" as const,
+      direction: "outbound" as const,
+      status: "sent",
+      contact_id: contact.id,
+      property_id: properties[index]!.id,
+      conversation_id: messages[index]!.conversation_id,
+      from_address: "+18162804181",
+      to_address: contact.phone_1,
+      body: `history ${index} ${String(index % 97).repeat(32 + (index % 5) * 11)}`,
+      created_at: new Date(base - 86_400_000 + index * 1_000).toISOString(),
+      read_at: null,
     }));
 
     for (let start = 0; start < total; start += 500) {
@@ -161,7 +223,24 @@ describe("listThreads (integration)", () => {
         .insert(messages.slice(start, start + 500));
       if (messageError) throw messageError;
     }
+    for (let start = 0; start < total; start += 500) {
+      const { error: historyError } = await supabase
+        .from("messages")
+        .insert(historyMessages.slice(start, start + 500));
+      if (historyError) throw historyError;
+    }
 
+    const timedSnapshot = await readScaleSnapshotUnderStatementTimeout();
+    expect(timedSnapshot.durationMs).toBeLessThan(7_000);
+    expect(timedSnapshot.snapshot.total).toBe(total);
+    expect(timedSnapshot.snapshot.rows).toHaveLength(200);
+    expect(timedSnapshot.snapshot.counts).toMatchObject({
+      all: total,
+      unread: Math.ceil(total / 2),
+      needs_outcome: total,
+    });
+
+    const firstPageStartedAt = performance.now();
     const page = await listThreadPage(supabase, {
       filter: "all",
       currentUserId: null,
@@ -169,12 +248,16 @@ describe("listThreads (integration)", () => {
       hideNoise: false,
       page: 1,
     });
+    const firstPageDurationMs = performance.now() - firstPageStartedAt;
     expect(page.counts.all).toBe(total);
     expect(page.counts.unread).toBe(Math.ceil(total / 2));
     expect(page.counts.needs_outcome).toBe(total);
     expect(page.total).toBe(total);
     expect(page.threads).toHaveLength(200);
-    expect(page.threads[0]?.lastMessageBody).toBe(`scale message ${total - 1}`);
+    expect(page.threads[0]?.lastMessageBody).toBe(
+      `scale message ${total - 1} ${"x".repeat(256 + ((total - 1) % 8) * 137)}`,
+    );
+    expect(firstPageDurationMs).toBeLessThan(7_000);
 
     const secondPage = await listThreadPage(supabase, {
       filter: "all",
@@ -384,6 +467,23 @@ describe("listThreads (integration)", () => {
     ]);
     if (messagesError) throw messagesError;
 
+    const pageA = await listThreadPage(clientForUser(userA.jwt), {
+      filter: "all",
+      currentUserId: userA.userId,
+      includeThreadId: null,
+      hideNoise: false,
+      page: 1,
+    });
+    const pageB = await listThreadPage(clientForUser(userB.jwt), {
+      filter: "all",
+      currentUserId: userB.userId,
+      includeThreadId: null,
+      hideNoise: false,
+      page: 1,
+    });
+    expect(pageA.threads.map((thread) => thread.contactId)).toEqual([contactA]);
+    expect(pageB.threads.map((thread) => thread.contactId)).toEqual([contactB]);
+
     const threadsA = await listThreads(clientForUser(userA.jwt), {});
     const threadsB = await listThreads(clientForUser(userB.jwt), {});
     expect(threadsA.map((thread) => thread.contactId)).toEqual([contactA]);
@@ -395,6 +495,17 @@ describe("listThreads (integration)", () => {
       .eq("user_id", userA.userId)
       .eq("org_id", BMH_ORG_ID);
     if (suspendError) throw suspendError;
+    expect(
+      (
+        await listThreadPage(clientForUser(userA.jwt), {
+          filter: "all",
+          currentUserId: userA.userId,
+          includeThreadId: null,
+          hideNoise: false,
+          page: 1,
+        })
+      ).threads,
+    ).toEqual([]);
     expect(await listThreads(clientForUser(userA.jwt), {})).toEqual([]);
 
     const { error: expireError } = await supabase

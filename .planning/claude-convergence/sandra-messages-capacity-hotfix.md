@@ -20,8 +20,8 @@ Restore the Phase 1 Messages cockpit in production at real Sandra volume without
 - [x] More than 20,000 active threads load successfully in the dedicated test database.
 - [x] Page-two selection remains stable; hostile page values cannot overflow the RPC argument.
 - [x] Manual review findings are fixed and reverified at the PR head.
-- [ ] Claude Fable returns `DONE` with high confidence for the exact PR head.
-- [ ] Required CI, preview, and guarded test migration are green at the exact PR head.
+- [x] Claude Fable completed a high-confidence adversarial review of PR #373 with no code blocker and authorized release-gate progression.
+- [x] PR #373 exact-head CI, preview, and guarded test migration were green.
 - [ ] Production migration and deployment are green.
 - [ ] Fresh real-Chrome desktop and mobile Messages acceptance passes without console/runtime errors.
 
@@ -38,6 +38,12 @@ Restore the Phase 1 Messages cockpit in production at real Sandra volume without
 - Changed-file lint and diff check passed.
 - Manual review: two P1 pagination findings accepted/fixed; anonymous Unassigned-count suggestion rejected as contrary to the existing signed-out UI/count contract.
 - No secret/config changes and no deferred-app file paths in the branch.
+- PR #373 merged as `88db5acc4fb1bff46d987388ab65cddd2c263c70`; migration `20260817100000` applied successfully to production.
+- First production acceptance failed: both default and `hideDnc=0` `/messages` returned the route failure UI. Vercel logged `sms_inbox_thread_page_snapshot: canceling statement due to statement timeout`.
+- Production app was immediately restored to recorded healthy deployment `dpl_6GrqcjtTjafe8uVNMwf7JXqHHFH3`; Chrome then showed the Messages cockpit with no route failure.
+- Forward-only correction `20260817110000` leaves the applied migration immutable, carries a narrow full-window workset, and hydrates bodies plus detailed AI delivery fields only after selecting the bounded page.
+- Corrected scale proof: 20,005 conversations / 40,010 varied-body messages; raw RPC succeeds inside an explicit 7-second PostgreSQL statement timeout, returns 200 rows with truthful counts, and the complete 19-case Messages integration suite passes.
+- Correction manual review: two P1 test-proof findings accepted and fixed; both independent reviewers returned `BLOCKING: 0` and `APPROVE_CORRECTIONS: true`.
 
 ## Transport preflight
 
@@ -49,4 +55,14 @@ Restore the Phase 1 Messages cockpit in production at real Sandra volume without
 
 ### Iteration 1
 
-- Pending exact-head Fable readiness review.
+- Fable verdict: `NEXT_STEP`, confidence high, no code/migration/test blocker. Proceed through exact-head release gates and use production timeout/browser behavior as a hard gate.
+- PR #373 merged only after exact-head Verify, preview, test migration, and manual review were green.
+- Production acceptance refuted readiness because the page RPC exceeded the live statement timeout. Rolled back immediately.
+
+### Iteration 2
+
+- Engineering blocker classification: production database statement timeout, not rendering or Vercel deployment failure.
+- Action: add forward migration `20260817110000` with narrow classification and page-only wide hydration.
+- Verification: transaction rollback rehearsal, apply, reapply, 37 focused unit/static tests, 59 migration-safety tests, 19 Messages integration tests, typecheck, scoped ESLint, and diff check pass.
+- Manual review found and closed two proof gaps: the superseding definition now owns complete contract assertions, and the production-shape test now uses multiple messages per conversation under a real database statement timeout.
+- Next: open a correction PR, rerun Fable on the exact head, pass exact-head CI/test migration/preview, deploy, then repeat desktop/mobile real-Chrome acceptance.
