@@ -72,7 +72,14 @@ Implement the Claude-approved Overview, Messages, Calendar, and Lead Detail rede
 - The Sandra-only aggregate real-database run excluded every Jitter path and produced 1,017 passes with exactly two fixture failures: the newly applied composite foreign keys correctly refused the tests' attempted corrupt seed rows. The corrected historical-boundary fixtures then passed 12/12 on the same database.
 - Final CSV review corrections pass 5/5 unit tests and 9/9 homeowner/agent email integration tests. At exact head `269bb6e`, the database reviewer reports `BLOCKING: 0` and `APPROVE_MERGE: true` for the last DNC race correction.
 - The appointment focus correction passes 13/13 focused RTL tests. At exact head `269bb6e`, the UI reviewer reports `BLOCKING: 0` and `APPROVE_MERGE: true` for the last invisible-focus/focus-restoration correction.
+- Final exact-head Sandra-only aggregate integration gate: 81 files passed, 1,021 tests passed, 1 intentionally skipped, zero failed in 1,859.95 seconds. The 82-file selection was preflighted to contain no Jitter path before Vitest started.
 - `origin/main` remains the candidate merge base and the branch is zero commits behind. PRs #368/#369/#370 remain open until this replacement has CI, preview, migration, deployment, and browser proof.
+
+## Claude transport preflight
+
+- Claude desktop inspection was performed under the orange-border handoff and showed the shared desktop occupied by the active Codex thread; overwriting or repurposing that surface was rejected.
+- Authenticated Claude Code CLI fallback is installed and reachable. The convergence review uses deterministic headless output with explicit `--model fable`; Opus is not used.
+- Real Chrome and the orange-border control protocol are available for the later preview and production acceptance gates.
 
 ## Active execution lane
 
@@ -92,4 +99,4 @@ Implement the Claude-approved Overview, Messages, Calendar, and Lead Detail rede
 
 ## Current state
 
-Both prior whole-change candidates were correctly rejected. Their correction families are now committed through `269bb6e`; all static/unit/RTL/build gates are clean, the only aggregate integration failures were corrected test fixtures, and the final database and UI correction reviewers report zero blockers at the exact code head. The exact-head Sandra-only aggregate database rerun and Claude Fable convergence are next, followed by publication, CI/preview, final migration rehearsal, merge/deploy, and real Chrome acceptance. No production migration, merge, deployment, provider send, or production browser mutation has occurred in this execution block yet.
+Both prior whole-change candidates were correctly rejected. Their correction families are committed through `269bb6e`; all static/unit/RTL/build and exact-head Sandra-only integration gates are clean, and the final database and UI correction reviewers report zero blockers at the exact code head. Claude Fable convergence is next, followed by publication, CI/preview, final migration rehearsal, merge/deploy, and real Chrome acceptance. No production migration, merge, deployment, provider send, or production browser mutation has occurred in this execution block yet.
