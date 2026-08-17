@@ -9,9 +9,10 @@ import {
 
 /** Minimal fake Supabase client exposing only `.rpc`, matching how every
  *  RPC-wrapping function in lifecycle.ts calls it. */
-function fakeSupabase(
-  response: { data: unknown; error: { message: string; code?: string } | null },
-) {
+function fakeSupabase(response: {
+  data: unknown;
+  error: { message: string; code?: string } | null;
+}) {
   const rpc = vi.fn().mockResolvedValue(response);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   return { rpc } as any;
@@ -72,7 +73,9 @@ describe("cancelAppointment", () => {
 
     const result = await cancelAppointment(supabase, "task-1");
 
-    expect(supabase.rpc).toHaveBeenCalledWith("fn_cancel_appointment", { p_task: "task-1" });
+    expect(supabase.rpc).toHaveBeenCalledWith("fn_cancel_appointment", {
+      p_task: "task-1",
+    });
     expect(result).toEqual({
       ok: true,
       data: { taskId: "task-1", status: "cancelled", ledgerId: "ledger-1" },
@@ -119,6 +122,7 @@ describe("rescheduleAppointment", () => {
         old_task_id: "task-1",
         calendar_chain_id: "chain-1",
         duplicate: false,
+        ledger_id: "ledger-reschedule-1",
       },
       error: null,
     });
@@ -134,7 +138,13 @@ describe("rescheduleAppointment", () => {
     });
     expect(result).toEqual({
       ok: true,
-      data: { taskId: "succ-1", oldTaskId: "task-1", chainId: "chain-1", duplicate: false },
+      data: {
+        taskId: "succ-1",
+        oldTaskId: "task-1",
+        chainId: "chain-1",
+        duplicate: false,
+        ledgerId: "ledger-reschedule-1",
+      },
     });
   });
 
@@ -145,11 +155,15 @@ describe("rescheduleAppointment", () => {
         old_task_id: "task-1",
         calendar_chain_id: "chain-1",
         duplicate: true,
+        ledger_id: "ledger-reschedule-1",
       },
       error: null,
     });
 
-    await rescheduleAppointment(supabase, { ...input, idempotencyKey: "idem-1" });
+    await rescheduleAppointment(supabase, {
+      ...input,
+      idempotencyKey: "idem-1",
+    });
 
     expect(supabase.rpc).toHaveBeenCalledWith(
       "fn_reschedule_appointment",
@@ -158,12 +172,16 @@ describe("rescheduleAppointment", () => {
   });
 
   it("maps an RPC error to a typed failure", async () => {
-    const supabase = fakeSupabase({ data: null, error: { message: "timezone mismatch" } });
+    const supabase = fakeSupabase({
+      data: null,
+      error: { message: "timezone mismatch" },
+    });
 
     const result = await rescheduleAppointment(supabase, input);
 
     expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.error.code).toBe("RESCHEDULE_APPOINTMENT_FAILED");
+    if (!result.ok)
+      expect(result.error.code).toBe("RESCHEDULE_APPOINTMENT_FAILED");
   });
 });
 
@@ -184,6 +202,7 @@ describe("reassignAppointment", () => {
         old_assignee_id: "user-a",
         new_assignee_id: "user-b",
         duplicate: false,
+        ledger_id: "ledger-reassign-1",
       },
       error: null,
     });
@@ -197,7 +216,13 @@ describe("reassignAppointment", () => {
     });
     expect(result).toEqual({
       ok: true,
-      data: { taskId: "task-1", oldAssigneeId: "user-a", newAssigneeId: "user-b", duplicate: false },
+      data: {
+        taskId: "task-1",
+        oldAssigneeId: "user-a",
+        newAssigneeId: "user-b",
+        duplicate: false,
+        ledgerId: "ledger-reassign-1",
+      },
     });
   });
 
@@ -210,6 +235,7 @@ describe("reassignAppointment", () => {
     const result = await reassignAppointment(supabase, "task-1", "user-b");
 
     expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.error.code).toBe("REASSIGN_APPOINTMENT_FAILED");
+    if (!result.ok)
+      expect(result.error.code).toBe("REASSIGN_APPOINTMENT_FAILED");
   });
 });

@@ -26,10 +26,10 @@ describe("kickCalendarMutationSync", () => {
       ledgerId: "ledger-a",
     });
 
-    await kickCalendarMutationSync({ rpc } as never, "task-a");
+    await kickCalendarMutationSync({ rpc } as never, "ledger-a");
 
-    expect(rpc).toHaveBeenCalledWith("fn_claim_calendar_mutation_for_task", {
-      p_source_task: "task-a",
+    expect(rpc).toHaveBeenCalledWith("fn_claim_calendar_mutation_for_ledger", {
+      p_ledger_id: "ledger-a",
     });
     expect(processClaimedCalendarMutation).toHaveBeenCalledTimes(1);
     expect(processClaimedCalendarMutation).toHaveBeenCalledWith(
@@ -45,7 +45,7 @@ describe("kickCalendarMutationSync", () => {
   it("does not process anything when this task has no due mutation", async () => {
     const rpc = vi.fn().mockResolvedValue({ data: [], error: null });
 
-    await kickCalendarMutationSync({ rpc } as never, "task-a");
+    await kickCalendarMutationSync({ rpc } as never, "ledger-a");
 
     expect(processClaimedCalendarMutation).not.toHaveBeenCalled();
     expect(reportError).not.toHaveBeenCalled();
@@ -58,13 +58,13 @@ describe("kickCalendarMutationSync", () => {
     });
 
     await expect(
-      kickCalendarMutationSync({ rpc } as never, "task-a"),
+      kickCalendarMutationSync({ rpc } as never, "ledger-a"),
     ).resolves.toBeUndefined();
     expect(reportError).toHaveBeenCalledWith(
       expect.any(Error),
       expect.objectContaining({
         tags: { surface: "inline_calendar_sync_kick" },
-        extra: { sourceTaskId: "task-a" },
+        extra: { ledgerId: "ledger-a" },
       }),
     );
   });
@@ -74,29 +74,29 @@ describe("kickCalendarMutationSync", () => {
     processClaimedCalendarMutation.mockRejectedValue(new Error("boom"));
 
     await expect(
-      kickCalendarMutationSync({ rpc } as never, "task-a"),
+      kickCalendarMutationSync({ rpc } as never, "ledger-a"),
     ).resolves.toBeUndefined();
 
     expect(reportError).toHaveBeenCalledWith(
       expect.any(Error),
       expect.objectContaining({
         tags: { surface: "inline_calendar_sync_kick_unhandled" },
-        extra: { ledgerId: "ledger-a", sourceTaskId: "task-a" },
+        extra: { ledgerId: "ledger-a" },
       }),
     );
   });
 
-  it("bounds a hung claim and includes the source task in telemetry", async () => {
+  it("bounds a hung claim and includes the exact ledger in telemetry", async () => {
     const rpc = vi.fn(() => new Promise(() => undefined));
 
     await expect(
-      kickCalendarMutationSync({ rpc } as never, "task-a", { timeoutMs: 25 }),
+      kickCalendarMutationSync({ rpc } as never, "ledger-a", { timeoutMs: 25 }),
     ).resolves.toBeUndefined();
 
     const [error, meta] = reportError.mock.calls[0];
     expect((error as Error).message).toMatch(/timed out after 25ms/);
     expect(meta).toEqual(
-      expect.objectContaining({ extra: { sourceTaskId: "task-a" } }),
+      expect.objectContaining({ extra: { ledgerId: "ledger-a" } }),
     );
   });
 });

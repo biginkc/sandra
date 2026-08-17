@@ -1,7 +1,9 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+import { Client } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { createTestClient } from "@tests/integration/client";
+import { loadTestEnv } from "@tests/integration/env";
 import { resetTenantTables } from "@tests/integration/reset";
 import {
   BMH_ORG_ID,
@@ -181,6 +183,121 @@ describe("Migration 20260816100000 — fn_calendar_month_appointments", () => {
     });
     expect(probe.error).toBeNull();
     expect(probe.data ?? []).toHaveLength(0);
+  });
+
+  it("suppresses completed/rescheduled predecessors of a cancelled org+chain without rewriting DNC-locked audit history", async () => {
+    const chainId = crypto.randomUUID();
+    const { data: contact, error: contactError } = await serviceClient
+      .from("contacts")
+      .insert({
+        org_id: BMH_ORG_ID,
+        contact_type: "person",
+        first_name: "Calendar audit",
+        phone_1: `+1816${String(Date.now()).slice(-7)}`,
+        phone_1_type: "mobile",
+      })
+      .select("id")
+      .single();
+    expect(contactError).toBeNull();
+
+    const predecessorId = crypto.randomUUID();
+    const cancelledId = crypto.randomUUID();
+    const completedAt = "2026-08-01T15:00:00Z";
+    const { error: historyError } = await serviceClient.from("tasks").insert([
+      {
+        id: predecessorId,
+        org_id: BMH_ORG_ID,
+        type: "appointment",
+        title: "Original slot",
+        assignee_id: member.userId,
+        created_by: member.userId,
+        due_at: "2026-08-05T15:00:00Z",
+        end_at: "2026-08-05T15:30:00Z",
+        calendar_chain_id: chainId,
+        contact_id: contact!.id,
+        status: "open",
+      },
+      {
+        id: cancelledId,
+        org_id: BMH_ORG_ID,
+        type: "appointment",
+        title: "Cancelled successor",
+        assignee_id: member.userId,
+        created_by: member.userId,
+        due_at: "2026-08-12T15:00:00Z",
+        end_at: "2026-08-12T15:30:00Z",
+        calendar_chain_id: chainId,
+        contact_id: contact!.id,
+        status: "open",
+      },
+    ] as never);
+    expect(historyError).toBeNull();
+
+    const dbUrl =
+      process.env.TEST_SUPABASE_DB_URL ?? loadTestEnv().TEST_SUPABASE_DB_URL;
+    if (!dbUrl) throw new Error("Missing TEST_SUPABASE_DB_URL");
+    const conn = new Client({ connectionString: dbUrl });
+    await conn.connect();
+    try {
+      await conn.query("begin");
+      await conn.query(
+        "select set_config('sandra.allow_appointment_time_move', 'on', true)",
+      );
+      await conn.query(
+        `update public.tasks
+         set status = 'completed', outcome = 'rescheduled',
+             completed_at = $2, completed_by = $3,
+             calendar_generation = 1
+         where id = $1`,
+        [predecessorId, completedAt, member.userId],
+      );
+      await conn.query(
+        `update public.tasks
+         set status = 'cancelled', outcome = 'cancelled',
+             calendar_generation = 1
+         where id = $1`,
+        [cancelledId],
+      );
+      await conn.query("commit");
+    } catch (error) {
+      await conn.query("rollback").catch(() => undefined);
+      throw error;
+    } finally {
+      await conn.end();
+    }
+    expect(
+      (
+        await serviceClient
+          .from("contacts")
+          .update({ do_not_contact: true })
+          .eq("id", contact!.id)
+      ).error,
+    ).toBeNull();
+
+    const result = await callMonthRpc(member.client, {
+      p_org: BMH_ORG_ID,
+      p_week_starts: STARTS,
+      p_week_ends: ENDS,
+    });
+    expect(result.error).toBeNull();
+    expect((result.data ?? []).map((row) => row.id)).not.toContain(
+      predecessorId,
+    );
+
+    const { data: auditRow, error: auditError } = await serviceClient
+      .from("tasks")
+      .select("status, outcome, completed_at, completed_by")
+      .eq("id", predecessorId)
+      .single();
+    expect(auditError).toBeNull();
+    expect(auditRow).toMatchObject({
+      status: "completed",
+      outcome: "rescheduled",
+      completed_by: member.userId,
+    });
+    expect(new Date(auditRow!.completed_at!).toISOString()).toBe(
+      new Date(completedAt).toISOString(),
+    );
   });
 
   it("RAISEs (fail-closed) when a single window exceeds p_week_cap inside the snapshot", async () => {

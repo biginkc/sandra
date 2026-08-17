@@ -48,10 +48,14 @@ vi.mock("@/lib/errors/report", () => ({ reportError: vi.fn() }));
 vi.mock("next/cache", () => ({ revalidatePath }));
 vi.mock("next/server", () => ({ after: afterMock }));
 vi.mock("@/lib/integrations/prefs", () => ({ loadIntegrationPrefs }));
-vi.mock("@/lib/integrations/slack/dispatch", () => ({ dispatchTaskAssignedSlack }));
+vi.mock("@/lib/integrations/slack/dispatch", () => ({
+  dispatchTaskAssignedSlack,
+}));
 vi.mock("@/lib/notifications/dispatch", () => ({ dispatchTaskAssigned }));
 vi.mock("@/lib/sequences/enrollment", () => ({ pausePropertyEnrollments }));
-vi.mock("@/lib/appointments/inline-sync-kick", () => ({ kickCalendarMutationSync }));
+vi.mock("@/lib/appointments/inline-sync-kick", () => ({
+  kickCalendarMutationSync,
+}));
 vi.mock("@/lib/auth/require-org-membership", () => ({
   requireOrgMembership,
   requireOrgMembershipByResource,
@@ -75,7 +79,9 @@ function makeSupabaseMock(opts: {
   overlapError?: { message: string } | null;
   propertyAddress?: string | null;
 }) {
-  const rpc = vi.fn().mockResolvedValue(opts.rpcResult ?? { data: null, error: null });
+  const rpc = vi
+    .fn()
+    .mockResolvedValue(opts.rpcResult ?? { data: null, error: null });
 
   // .from("memberships").select().eq("user_id", ...).eq("access_status", "active").is("deletion_prepared_at", null).or(activeAt filter)
   const membershipsBuilder = {
@@ -115,7 +121,9 @@ function makeSupabaseMock(opts: {
     }),
     maybeSingle: vi.fn().mockResolvedValue({
       data:
-        opts.propertyAddress !== undefined ? { address: opts.propertyAddress } : null,
+        opts.propertyAddress !== undefined
+          ? { address: opts.propertyAddress }
+          : null,
       error: null,
     }),
   };
@@ -197,7 +205,10 @@ describe("bookAppointment — permanent DNC", () => {
     });
 
     expect(result).toMatchObject({ ok: false, error: { code: "DNC_LOCKED" } });
-    expect(assertContactDncUnlocked).toHaveBeenCalledWith(supabase, "contact-1");
+    expect(assertContactDncUnlocked).toHaveBeenCalledWith(
+      supabase,
+      "contact-1",
+    );
     expect(supabase.rpc).not.toHaveBeenCalledWith(
       "fn_book_appointment",
       expect.anything(),
@@ -240,7 +251,11 @@ describe("checkAppointmentOverlap", () => {
     createClient.mockResolvedValue(makeSupabaseMock({ overlapRow: null }));
 
     await expect(
-      checkAppointmentOverlap("user-1", "2026-06-15T19:00:00.000Z", "2026-06-15T19:30:00.000Z"),
+      checkAppointmentOverlap(
+        "user-1",
+        "2026-06-15T19:00:00.000Z",
+        "2026-06-15T19:30:00.000Z",
+      ),
     ).resolves.toEqual({
       ok: true,
       data: { hasOverlap: false, conflictStartAt: null },
@@ -253,7 +268,11 @@ describe("checkAppointmentOverlap", () => {
     );
 
     await expect(
-      checkAppointmentOverlap("user-1", "2026-06-15T18:45:00.000Z", "2026-06-15T19:15:00.000Z"),
+      checkAppointmentOverlap(
+        "user-1",
+        "2026-06-15T18:45:00.000Z",
+        "2026-06-15T19:15:00.000Z",
+      ),
     ).resolves.toEqual({
       ok: true,
       data: { hasOverlap: true, conflictStartAt: "2026-06-15T19:00:00.000Z" },
@@ -274,7 +293,9 @@ describe("checkAppointmentOverlap", () => {
         "2026-06-15T19:30:00.000Z",
       );
 
-      const tasksBuilder = mock.from("tasks") as { neq: ReturnType<typeof import("vitest")["vi"]["fn"]> };
+      const tasksBuilder = mock.from("tasks") as {
+        neq: ReturnType<(typeof import("vitest"))["vi"]["fn"]>;
+      };
       expect(tasksBuilder.neq).not.toHaveBeenCalled();
     });
 
@@ -293,8 +314,13 @@ describe("checkAppointmentOverlap", () => {
         "task-being-rescheduled",
       );
 
-      const tasksBuilder = mock.from("tasks") as { neq: ReturnType<typeof import("vitest")["vi"]["fn"]> };
-      expect(tasksBuilder.neq).toHaveBeenCalledWith("id", "task-being-rescheduled");
+      const tasksBuilder = mock.from("tasks") as {
+        neq: ReturnType<(typeof import("vitest"))["vi"]["fn"]>;
+      };
+      expect(tasksBuilder.neq).toHaveBeenCalledWith(
+        "id",
+        "task-being-rescheduled",
+      );
     });
 
     it("still detects a genuine SECOND conflicting appointment when excludeTaskId is set — the self-match doesn't hide it", async () => {
@@ -317,8 +343,13 @@ describe("checkAppointmentOverlap", () => {
         ok: true,
         data: { hasOverlap: true, conflictStartAt: "2026-06-15T19:15:00.000Z" },
       });
-      const tasksBuilder = mock.from("tasks") as { neq: ReturnType<typeof import("vitest")["vi"]["fn"]> };
-      expect(tasksBuilder.neq).toHaveBeenCalledWith("id", "task-being-rescheduled");
+      const tasksBuilder = mock.from("tasks") as {
+        neq: ReturnType<(typeof import("vitest"))["vi"]["fn"]>;
+      };
+      expect(tasksBuilder.neq).toHaveBeenCalledWith(
+        "id",
+        "task-being-rescheduled",
+      );
     });
   });
 });
@@ -328,13 +359,19 @@ describe("bookAppointment — validation", () => {
     const result = await bookAppointment({ ...VALID_INPUT, assigneeId: "" });
     expect(result).toEqual({
       ok: false,
-      error: { code: "ASSIGNEE_REQUIRED", message: "Choose who this appointment is for." },
+      error: {
+        code: "ASSIGNEE_REQUIRED",
+        message: "Choose who this appointment is for.",
+      },
     });
     expect(createClient).not.toHaveBeenCalled();
   });
 
   it("rejects an out-of-range duration", async () => {
-    const result = await bookAppointment({ ...VALID_INPUT, durationMinutes: 5 });
+    const result = await bookAppointment({
+      ...VALID_INPUT,
+      durationMinutes: 5,
+    });
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.error.code).toBe("INVALID_DURATION");
   });
@@ -358,7 +395,11 @@ describe("bookAppointment — org resolution", () => {
     const supabase = makeSupabaseMock({
       userId: "user-1",
       rpcResult: {
-        data: { task_id: "task-1", already_qualified: false, calendar_chain_id: "chain-1" },
+        data: {
+          task_id: "task-1",
+          already_qualified: false,
+          calendar_chain_id: "chain-1",
+        },
         error: null,
       },
     });
@@ -366,7 +407,10 @@ describe("bookAppointment — org resolution", () => {
 
     const result = await bookAppointment(VALID_INPUT);
 
-    expect(requireOrgMembershipByResource).toHaveBeenCalledWith("properties", "prop-1");
+    expect(requireOrgMembershipByResource).toHaveBeenCalledWith(
+      "properties",
+      "prop-1",
+    );
     expect(result).toEqual({
       ok: true,
       data: { taskId: "task-1", alreadyQualified: false, chainId: "chain-1" },
@@ -378,7 +422,11 @@ describe("bookAppointment — org resolution", () => {
       makeSupabaseMock({
         userId: "user-1",
         rpcResult: {
-          data: { task_id: "task-2", already_qualified: false, calendar_chain_id: "chain-2" },
+          data: {
+            task_id: "task-2",
+            already_qualified: false,
+            calendar_chain_id: "chain-2",
+          },
           error: null,
         },
       }),
@@ -390,7 +438,10 @@ describe("bookAppointment — org resolution", () => {
       contactId: "contact-1",
     });
 
-    expect(requireOrgMembershipByResource).toHaveBeenCalledWith("contacts", "contact-1");
+    expect(requireOrgMembershipByResource).toHaveBeenCalledWith(
+      "contacts",
+      "contact-1",
+    );
   });
 
   it("falls back to the caller's single active membership for a personal block", async () => {
@@ -399,7 +450,11 @@ describe("bookAppointment — org resolution", () => {
         userId: "user-1",
         membershipsRows: [{ org_id: "org-9" }],
         rpcResult: {
-          data: { task_id: "task-3", already_qualified: false, calendar_chain_id: "chain-3" },
+          data: {
+            task_id: "task-3",
+            already_qualified: false,
+            calendar_chain_id: "chain-3",
+          },
           error: null,
         },
       }),
@@ -419,7 +474,11 @@ describe("bookAppointment — org resolution", () => {
       // the .eq/.is/.or filter chain excludes it at the DB.
       membershipsRows: [{ org_id: "org-9" }],
       rpcResult: {
-        data: { task_id: "task-9", already_qualified: false, calendar_chain_id: "chain-9" },
+        data: {
+          task_id: "task-9",
+          already_qualified: false,
+          calendar_chain_id: "chain-9",
+        },
         error: null,
       },
     });
@@ -432,10 +491,18 @@ describe("bookAppointment — org resolution", () => {
       is: ReturnType<typeof vi.fn>;
       or: ReturnType<typeof vi.fn>;
     };
-    expect(membershipsBuilder.eq).toHaveBeenCalledWith("access_status", "active");
-    expect(membershipsBuilder.is).toHaveBeenCalledWith("deletion_prepared_at", null);
+    expect(membershipsBuilder.eq).toHaveBeenCalledWith(
+      "access_status",
+      "active",
+    );
+    expect(membershipsBuilder.is).toHaveBeenCalledWith(
+      "deletion_prepared_at",
+      null,
+    );
     expect(membershipsBuilder.or).toHaveBeenCalledWith(
-      expect.stringMatching(/^access_expires_at\.is\.null,access_expires_at\.gt\.\d{4}-\d{2}-\d{2}T/),
+      expect.stringMatching(
+        /^access_expires_at\.is\.null,access_expires_at\.gt\.\d{4}-\d{2}-\d{2}T/,
+      ),
     );
     expect(requireOrgMembership).toHaveBeenCalledWith("org-9");
   });
@@ -448,7 +515,10 @@ describe("bookAppointment — org resolution", () => {
       }),
     );
 
-    const result = await bookAppointment({ ...VALID_INPUT, propertyId: undefined });
+    const result = await bookAppointment({
+      ...VALID_INPUT,
+      propertyId: undefined,
+    });
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.error.code).toBe("AMBIGUOUS_ORG");
   });
@@ -458,7 +528,10 @@ describe("bookAppointment — org resolution", () => {
       makeSupabaseMock({ userId: "user-1", membershipsRows: [] }),
     );
 
-    const result = await bookAppointment({ ...VALID_INPUT, propertyId: undefined });
+    const result = await bookAppointment({
+      ...VALID_INPUT,
+      propertyId: undefined,
+    });
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.error.code).toBe("AMBIGUOUS_ORG");
   });
@@ -469,13 +542,21 @@ describe("bookAppointment — RPC + side effects", () => {
     const supabase = makeSupabaseMock({
       userId: "user-1",
       rpcResult: {
-        data: { task_id: "task-1", already_qualified: true, calendar_chain_id: "chain-1" },
+        data: {
+          task_id: "task-1",
+          already_qualified: true,
+          calendar_chain_id: "chain-1",
+        },
         error: null,
       },
     });
     createClient.mockResolvedValue(supabase);
 
-    await bookAppointment({ ...VALID_INPUT, contactId: "contact-1", note: "  bring comps  " });
+    await bookAppointment({
+      ...VALID_INPUT,
+      contactId: "contact-1",
+      note: "  bring comps  ",
+    });
 
     expect(supabase.rpc).toHaveBeenCalledWith("fn_book_appointment", {
       p_org: "org-1",
@@ -495,7 +576,11 @@ describe("bookAppointment — RPC + side effects", () => {
     const supabase = makeSupabaseMock({
       userId: "user-1",
       rpcResult: {
-        data: { task_id: "task-1", already_qualified: true, calendar_chain_id: "chain-1" },
+        data: {
+          task_id: "task-1",
+          already_qualified: true,
+          calendar_chain_id: "chain-1",
+        },
         error: null,
       },
     });
@@ -586,7 +671,10 @@ describe("bookAppointment — RPC + side effects", () => {
     expect(afterMock).toHaveBeenCalledTimes(1);
     await afterCallbacks[0]?.();
 
-    expect(loadIntegrationPrefs).toHaveBeenCalledWith({ __admin: true }, "user-2");
+    expect(loadIntegrationPrefs).toHaveBeenCalledWith(
+      { __admin: true },
+      "user-2",
+    );
     expect(dispatchTaskAssigned).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({
@@ -598,7 +686,10 @@ describe("bookAppointment — RPC + side effects", () => {
       }),
     );
     expect(dispatchTaskAssignedSlack).toHaveBeenCalledWith(
-      expect.objectContaining({ assigneeId: "user-2", propertyAddress: "123 Main St" }),
+      expect.objectContaining({
+        assigneeId: "user-2",
+        propertyAddress: "123 Main St",
+      }),
     );
   });
 
@@ -649,10 +740,11 @@ describe("bookAppointment — RPC + side effects", () => {
 
     await bookAppointment(VALID_INPUT);
 
-    expect(pausePropertyEnrollments).toHaveBeenCalledWith(
-      expect.anything(),
-      { propertyId: "prop-1", reason: "appointment_booked", permanent: false },
-    );
+    expect(pausePropertyEnrollments).toHaveBeenCalledWith(expect.anything(), {
+      propertyId: "prop-1",
+      reason: "appointment_booked",
+      permanent: false,
+    });
   });
 
   // Round 9: the RPC-returned linkage is the only thing post-booking
@@ -681,10 +773,11 @@ describe("bookAppointment — RPC + side effects", () => {
 
     await bookAppointment({ ...VALID_INPUT, propertyId: "prop-REQUEST" });
 
-    expect(pausePropertyEnrollments).toHaveBeenCalledWith(
-      expect.anything(),
-      { propertyId: "prop-RETURNED", reason: "appointment_booked", permanent: false },
-    );
+    expect(pausePropertyEnrollments).toHaveBeenCalledWith(expect.anything(), {
+      propertyId: "prop-RETURNED",
+      reason: "appointment_booked",
+      permanent: false,
+    });
     expect(pausePropertyEnrollments).not.toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({ propertyId: "prop-REQUEST" }),
@@ -696,13 +789,21 @@ describe("bookAppointment — RPC + side effects", () => {
       makeSupabaseMock({
         userId: "user-1",
         rpcResult: {
-          data: { task_id: "task-1", already_qualified: false, calendar_chain_id: "chain-1" },
+          data: {
+            task_id: "task-1",
+            already_qualified: false,
+            calendar_chain_id: "chain-1",
+          },
           error: null,
         },
       }),
     );
 
-    await bookAppointment({ ...VALID_INPUT, propertyId: undefined, contactId: "contact-1" });
+    await bookAppointment({
+      ...VALID_INPUT,
+      propertyId: undefined,
+      contactId: "contact-1",
+    });
 
     expect(pausePropertyEnrollments).not.toHaveBeenCalled();
   });
@@ -736,7 +837,11 @@ describe("bookAppointment — RPC + side effects", () => {
       makeSupabaseMock({
         userId: "user-1",
         rpcResult: {
-          data: { task_id: "task-1", already_qualified: false, calendar_chain_id: "chain-1" },
+          data: {
+            task_id: "task-1",
+            already_qualified: false,
+            calendar_chain_id: "chain-1",
+          },
           error: null,
         },
       }),
@@ -804,7 +909,7 @@ describe("bookAppointment — RPC + side effects", () => {
     );
   });
 
-  it("kicks only the persisted booking task before revalidation", async () => {
+  it("kicks only the exact booking ledger before revalidation", async () => {
     const callOrder: string[] = [];
     kickCalendarMutationSync.mockImplementationOnce(async () => {
       callOrder.push("kick");
@@ -820,6 +925,7 @@ describe("bookAppointment — RPC + side effects", () => {
             task_id: "task-1",
             already_qualified: false,
             calendar_chain_id: "chain-1",
+            ledger_id: "ledger-create-1",
             related_property_id: "prop-1",
             contact_id: null,
           },
@@ -830,7 +936,10 @@ describe("bookAppointment — RPC + side effects", () => {
 
     await bookAppointment(VALID_INPUT);
 
-    expect(kickCalendarMutationSync).toHaveBeenCalledWith({ __admin: true }, "task-1");
+    expect(kickCalendarMutationSync).toHaveBeenCalledWith(
+      { __admin: true },
+      "ledger-create-1",
+    );
     expect(callOrder[0]).toBe("kick");
   });
 
@@ -840,7 +949,11 @@ describe("bookAppointment — RPC + side effects", () => {
       makeSupabaseMock({
         userId: "user-1",
         rpcResult: {
-          data: { task_id: "task-1", already_qualified: false, calendar_chain_id: "chain-1" },
+          data: {
+            task_id: "task-1",
+            already_qualified: false,
+            calendar_chain_id: "chain-1",
+          },
           error: null,
         },
       }),
@@ -929,11 +1042,22 @@ describe("listBookingAssignees", () => {
 
     const result = await listBookingAssignees({ propertyId: "prop-1" });
 
-    expect(result).toEqual({ ok: true, data: [{ id: "active-1", email: "active@example.test" }] });
-    expect(admin.__membershipsBuilder.eq).toHaveBeenCalledWith("access_status", "active");
-    expect(admin.__membershipsBuilder.is).toHaveBeenCalledWith("deletion_prepared_at", null);
+    expect(result).toEqual({
+      ok: true,
+      data: [{ id: "active-1", email: "active@example.test" }],
+    });
+    expect(admin.__membershipsBuilder.eq).toHaveBeenCalledWith(
+      "access_status",
+      "active",
+    );
+    expect(admin.__membershipsBuilder.is).toHaveBeenCalledWith(
+      "deletion_prepared_at",
+      null,
+    );
     expect(admin.__membershipsBuilder.or).toHaveBeenCalledWith(
-      expect.stringMatching(/^access_expires_at\.is\.null,access_expires_at\.gt\.\d{4}-\d{2}-\d{2}T/),
+      expect.stringMatching(
+        /^access_expires_at\.is\.null,access_expires_at\.gt\.\d{4}-\d{2}-\d{2}T/,
+      ),
     );
   });
 
@@ -950,13 +1074,22 @@ describe("listBookingAssignees", () => {
 
     await listBookingAssignees({ contactId: "contact-1" });
 
-    expect(requireOrgMembershipByResource).toHaveBeenCalledWith("contacts", "contact-1");
-    expect(admin.__membershipsBuilder.eq).toHaveBeenCalledWith("org_id", "org-1");
+    expect(requireOrgMembershipByResource).toHaveBeenCalledWith(
+      "contacts",
+      "contact-1",
+    );
+    expect(admin.__membershipsBuilder.eq).toHaveBeenCalledWith(
+      "org_id",
+      "org-1",
+    );
   });
 
   it("an unlinked personal-block context (no property, no contact) uses the caller's single active org", async () => {
     createClient.mockResolvedValue(
-      makeSupabaseMock({ userId: "user-1", membershipsRows: [{ org_id: "org-9" }] }),
+      makeSupabaseMock({
+        userId: "user-1",
+        membershipsRows: [{ org_id: "org-9" }],
+      }),
     );
     requireOrgMembership.mockResolvedValue({
       userId: "user-1",
@@ -970,7 +1103,10 @@ describe("listBookingAssignees", () => {
 
     expect(requireOrgMembershipByResource).not.toHaveBeenCalled();
     expect(requireOrgMembership).toHaveBeenCalledWith("org-9");
-    expect(admin.__membershipsBuilder.eq).toHaveBeenCalledWith("org_id", "org-9");
+    expect(admin.__membershipsBuilder.eq).toHaveBeenCalledWith(
+      "org_id",
+      "org-9",
+    );
   });
 
   it("errors on an ambiguous personal block, same as bookAppointment's org resolution", async () => {

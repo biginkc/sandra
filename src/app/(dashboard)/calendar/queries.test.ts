@@ -120,6 +120,25 @@ beforeEach(() => {
   queuedError = null;
   queuedResponses = [];
   rpcMock.mockReset();
+  rpcMock.mockImplementation(async () => ({
+    data:
+      queuedData?.map((row) => {
+        const value = row as Record<string, unknown>;
+        const property = value.properties as Record<string, unknown> | null;
+        const contact = value.contacts as Record<string, unknown> | null;
+        return {
+          ...value,
+          property_address: property?.address ?? null,
+          property_city: property?.city ?? null,
+          property_state: property?.state ?? null,
+          property_deleted_at: property?.deleted_at ?? null,
+          contact_first_name: contact?.first_name ?? null,
+          contact_last_name: contact?.last_name ?? null,
+          contact_entity_name: contact?.entity_name ?? null,
+        };
+      }) ?? null,
+    error: queuedError,
+  }));
   eqCalls = [];
   selectCalls = [];
   orderCalls = [];
@@ -155,40 +174,30 @@ function appointmentRow(
 }
 
 describe("fetchCalendarAppointments", () => {
-  it("scopes to org + type='appointment' + open/completed status + the due_at window", async () => {
+  it("delegates a week to the single-snapshot RPC as exactly one window", async () => {
     queuedData = [];
     await fetchCalendarAppointments("org-1", {
       weekStartUtc: "2026-05-03T05:00:00.000Z",
       weekEndUtc: "2026-05-10T05:00:00.000Z",
     });
 
-    expect(eqCalls).toContainEqual(["org_id", "org-1"]);
-    expect(eqCalls).toContainEqual(["type", "appointment"]);
-    expect(selectCalls[0]).toContain("properties(");
-    expect(selectCalls[0]).toContain("contacts(");
+    expect(rpcMock).toHaveBeenCalledWith("fn_calendar_month_appointments", {
+      p_org: "org-1",
+      p_assignee: null,
+      p_week_starts: ["2026-05-03T05:00:00.000Z"],
+      p_week_ends: ["2026-05-10T05:00:00.000Z"],
+    });
   });
 
-  // Migration 20260816090000 (cancel chain visibility fix): a reschedule ->
-  // cancel chain now flips its predecessor row(s) from
-  // status=completed/outcome=rescheduled to status=cancelled/
-  // outcome=cancelled, specifically SO THAT they fall outside this status
-  // filter and stop rendering as a stale "Rescheduled" card forever. This
-  // test doesn't (and can't, given this file's mock `.in()` doesn't
-  // actually filter `queuedData`) prove server-side exclusion — the real
-  // proof is the DB-level integration suite
-  // (20260816090000_cancel_chain_visibility.integration.test.ts, which
-  // asserts the predecessor's row status/outcome directly). What this test
-  // pins is that the query still asks for EXACTLY `["open", "completed"]`
-  // and nothing wider (e.g. "cancelled") — the one invariant a chain whose
-  // predecessor is now cancelled actually depends on to stop rendering.
-  it("filters to status IN (open, completed) — the same filter a chain-cancelled reschedule predecessor now falls outside of", async () => {
+  it("does not run a separate direct-task query for week visibility", async () => {
     queuedData = [];
     await fetchCalendarAppointments("org-1", {
       weekStartUtc: "2026-05-03T05:00:00.000Z",
       weekEndUtc: "2026-05-10T05:00:00.000Z",
     });
 
-    expect(inCalls).toContainEqual(["status", ["open", "completed"]]);
+    expect(rpcMock).toHaveBeenCalledTimes(1);
+    expect(eqCalls).toEqual([]);
   });
 
   it("adds an assignee_id filter only when assigneeId is supplied", async () => {
@@ -198,7 +207,10 @@ describe("fetchCalendarAppointments", () => {
       weekStartUtc: "2026-05-03T05:00:00.000Z",
       weekEndUtc: "2026-05-10T05:00:00.000Z",
     });
-    expect(eqCalls).toContainEqual(["assignee_id", "user-1"]);
+    expect(rpcMock).toHaveBeenCalledWith(
+      "fn_calendar_month_appointments",
+      expect.objectContaining({ p_assignee: "user-1" }),
+    );
   });
 
   it("maps a property-linked row and derives contact_name from entity_name first", async () => {
@@ -363,11 +375,7 @@ describe("fetchCalendarAppointments", () => {
         weekEndUtc: "2026-05-10T05:00:00.000Z",
       });
 
-      expect(orderCalls).toEqual([
-        ["due_at", { ascending: true }],
-        ["id", { ascending: true }],
-      ]);
-      expect(limitCalls).toEqual([CAP + 1]);
+      expect(rpcMock).toHaveBeenCalledTimes(1);
     });
 
     it("returns every row up to and including the cap", async () => {
@@ -385,9 +393,10 @@ describe("fetchCalendarAppointments", () => {
     });
 
     it("fails closed (ok:false) when the (CAP+1)th row comes back, rather than silently truncating the week", async () => {
-      queuedData = Array.from({ length: CAP + 1 }, (_, i) =>
-        appointmentRow({ id: `t-${String(i).padStart(4, "0")}` }),
-      );
+      rpcMock.mockResolvedValueOnce({
+        data: null,
+        error: { message: "calendar month volume exceeds cap", code: "P0001" },
+      });
 
       const result = await fetchCalendarAppointments("org-1", {
         weekStartUtc: "2026-05-03T05:00:00.000Z",
@@ -397,7 +406,7 @@ describe("fetchCalendarAppointments", () => {
       expect(result).toEqual({ ok: false });
       // Exactly one query — the cap check happens on the single response,
       // not via a second round trip.
-      expect(limitCalls).toEqual([CAP + 1]);
+      expect(rpcMock).toHaveBeenCalledTimes(1);
     });
 
     it("is immune to a concurrent reschedule moving due_at across a would-be cursor (Codex round 6 — the anomaly this fix eliminates)", async () => {
@@ -423,7 +432,7 @@ describe("fetchCalendarAppointments", () => {
       if (!result.ok) throw new Error("expected ok:true");
       const ids = result.rows.map((r) => r.id);
       expect(ids.filter((id) => id === "t-rescheduled")).toHaveLength(1);
-      expect(limitCalls).toHaveLength(1);
+      expect(rpcMock).toHaveBeenCalledTimes(1);
     });
   });
 });
@@ -701,11 +710,19 @@ describe("fetchOrgRoster", () => {
 
 describe("fetchCalendarAppointmentsForWindows (month view)", () => {
   const WINDOWS = [
-    { startUtc: "2026-08-02T05:00:00.000Z", endUtc: "2026-08-09T05:00:00.000Z" },
-    { startUtc: "2026-08-09T05:00:00.000Z", endUtc: "2026-08-16T05:00:00.000Z" },
+    {
+      startUtc: "2026-08-02T05:00:00.000Z",
+      endUtc: "2026-08-09T05:00:00.000Z",
+    },
+    {
+      startUtc: "2026-08-09T05:00:00.000Z",
+      endUtc: "2026-08-16T05:00:00.000Z",
+    },
   ];
 
-  function rpcRow(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  function rpcRow(
+    overrides: Record<string, unknown> = {},
+  ): Record<string, unknown> {
     return {
       id: "t-1",
       title: "Walkthrough",

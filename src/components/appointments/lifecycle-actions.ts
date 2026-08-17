@@ -73,19 +73,25 @@ async function loadPropertyAddress(
   return data?.address ?? "Appointment";
 }
 
-function buildAppointmentDeepLink(propertyId?: string | null, contactId?: string | null): string {
+function buildAppointmentDeepLink(
+  propertyId?: string | null,
+  contactId?: string | null,
+): string {
   const baseUrl =
     process.env.NEXT_PUBLIC_APP_URL ??
     process.env.APP_URL ??
     "https://sandra-sooty.vercel.app";
-  const normalizedBaseUrl = baseUrl.startsWith("http") ? baseUrl : `https://${baseUrl}`;
+  const normalizedBaseUrl = baseUrl.startsWith("http")
+    ? baseUrl
+    : `https://${baseUrl}`;
   if (propertyId) return `${normalizedBaseUrl}/leads/${propertyId}`;
   if (contactId) return `${normalizedBaseUrl}/messages?thread=${contactId}`;
   return `${normalizedBaseUrl}/dashboard`;
 }
 
 function revalidateAppointmentPaths(task: TaskLookupRow | null): void {
-  if (task?.related_property_id) revalidatePath(`/leads/${task.related_property_id}`);
+  if (task?.related_property_id)
+    revalidatePath(`/leads/${task.related_property_id}`);
   revalidatePath("/messages");
   revalidatePath("/dashboard");
   // Codex round 2: every lifecycle mutation (complete/cancel/reschedule/
@@ -132,7 +138,10 @@ async function revalidateAppointmentPathsBestEffort(
   const task =
     typeof taskOrLoader === "function"
       ? await taskOrLoader().catch((e) => {
-          reportError(e, { tags: { surface: `${surfaceTag}_task_lookup` }, extra: { taskId } });
+          reportError(e, {
+            tags: { surface: `${surfaceTag}_task_lookup` },
+            extra: { taskId },
+          });
           return null;
         })
       : taskOrLoader;
@@ -146,14 +155,14 @@ async function revalidateAppointmentPathsBestEffort(
 /** Best-effort post-commit processing of only this appointment's ledger row. */
 async function kickCalendarMutationSyncBestEffort(
   surfaceTag: string,
-  taskId: string,
+  ledgerId: string,
 ): Promise<void> {
   try {
-    await kickCalendarMutationSync(createAdminClient(), taskId);
+    await kickCalendarMutationSync(createAdminClient(), ledgerId);
   } catch (e) {
     reportError(e, {
       tags: { surface: `${surfaceTag}_inline_sync_kick` },
-      extra: { taskId },
+      extra: { ledgerId },
     });
   }
 }
@@ -167,8 +176,12 @@ export async function completeAppointmentAction(
     const {
       data: { user },
     } = await supabase.auth.getUser();
-    if (!user) return err({ code: "UNAUTHENTICATED", message: "Not signed in" });
-    const unlocked = await assertAppointmentTaskPropertyDncUnlocked(supabase, taskId);
+    if (!user)
+      return err({ code: "UNAUTHENTICATED", message: "Not signed in" });
+    const unlocked = await assertAppointmentTaskPropertyDncUnlocked(
+      supabase,
+      taskId,
+    );
     if (!unlocked.ok) return unlocked;
 
     const result = await completeAppointment(supabase, taskId, outcome);
@@ -184,7 +197,10 @@ export async function completeAppointmentAction(
     );
     return result;
   } catch (e) {
-    reportError(e, { tags: { surface: "complete_appointment_action" }, extra: { taskId } });
+    reportError(e, {
+      tags: { surface: "complete_appointment_action" },
+      extra: { taskId },
+    });
     return errFromUnknown(e, "COMPLETE_APPOINTMENT_FAILED");
   }
 }
@@ -197,19 +213,26 @@ export async function cancelAppointmentAction(
     const {
       data: { user },
     } = await supabase.auth.getUser();
-    if (!user) return err({ code: "UNAUTHENTICATED", message: "Not signed in" });
+    if (!user)
+      return err({ code: "UNAUTHENTICATED", message: "Not signed in" });
 
     // Read before the RPC closes the row — cancel doesn't change linkage,
     // but reading after would work identically; before is cheaper (one
     // fewer round trip when the RPC itself fails).
-    const unlocked = await assertAppointmentTaskPropertyDncUnlocked(supabase, taskId);
+    const unlocked = await assertAppointmentTaskPropertyDncUnlocked(
+      supabase,
+      taskId,
+    );
     if (!unlocked.ok) return unlocked;
     const task = await loadTaskForNotification(supabase, taskId);
 
     const result = await cancelAppointment(supabase, taskId);
     if (!result.ok) return result;
 
-    await kickCalendarMutationSyncBestEffort("cancel_appointment_action", taskId);
+    await kickCalendarMutationSyncBestEffort(
+      "cancel_appointment_action",
+      result.data.ledgerId,
+    );
 
     // Codex round 11 (finding 3): best-effort post-commit revalidation —
     // `task` is already resolved (fetched pre-RPC), so only `revalidatePath`
@@ -222,7 +245,10 @@ export async function cancelAppointmentAction(
     );
     return result;
   } catch (e) {
-    reportError(e, { tags: { surface: "cancel_appointment_action" }, extra: { taskId } });
+    reportError(e, {
+      tags: { surface: "cancel_appointment_action" },
+      extra: { taskId },
+    });
     return errFromUnknown(e, "CANCEL_APPOINTMENT_FAILED");
   }
 }
@@ -248,7 +274,10 @@ export async function rescheduleAppointmentAction(
   input: RescheduleAppointmentActionInput,
 ): Promise<Result<RescheduleAppointmentResult>> {
   if (!Number.isFinite(input.durationMinutes) || input.durationMinutes <= 0) {
-    return err({ code: "INVALID_DURATION", message: "Choose a valid duration." });
+    return err({
+      code: "INVALID_DURATION",
+      message: "Choose a valid duration.",
+    });
   }
 
   const converted = wallTimeToUtc({
@@ -258,7 +287,10 @@ export async function rescheduleAppointmentAction(
   });
   if (!converted.ok) {
     return err({
-      code: converted.reason === "nonexistent" ? "TIME_NONEXISTENT" : "TIME_INVALID",
+      code:
+        converted.reason === "nonexistent"
+          ? "TIME_NONEXISTENT"
+          : "TIME_INVALID",
       message:
         converted.reason === "nonexistent"
           ? "That time doesn't exist in this timezone because of a daylight-saving change — pick another."
@@ -266,16 +298,22 @@ export async function rescheduleAppointmentAction(
     });
   }
   const newStartUtc = converted.utc;
-  const newEndUtc = new Date(newStartUtc.getTime() + input.durationMinutes * 60_000);
+  const newEndUtc = new Date(
+    newStartUtc.getTime() + input.durationMinutes * 60_000,
+  );
 
   try {
     const supabase = await createClient();
     const {
       data: { user },
     } = await supabase.auth.getUser();
-    if (!user) return err({ code: "UNAUTHENTICATED", message: "Not signed in" });
+    if (!user)
+      return err({ code: "UNAUTHENTICATED", message: "Not signed in" });
 
-    const unlocked = await assertAppointmentTaskPropertyDncUnlocked(supabase, input.taskId);
+    const unlocked = await assertAppointmentTaskPropertyDncUnlocked(
+      supabase,
+      input.taskId,
+    );
     if (!unlocked.ok) return unlocked;
     const task = await loadTaskForNotification(supabase, input.taskId);
 
@@ -288,7 +326,10 @@ export async function rescheduleAppointmentAction(
     });
     if (!result.ok) return result;
 
-    await kickCalendarMutationSyncBestEffort("reschedule_appointment_action", input.taskId);
+    await kickCalendarMutationSyncBestEffort(
+      "reschedule_appointment_action",
+      result.data.ledgerId,
+    );
 
     // Codex round 11 (finding 3): best-effort post-commit revalidation —
     // same posture as cancel above.
@@ -317,14 +358,26 @@ export async function reassignAppointmentAction(
     const {
       data: { user },
     } = await supabase.auth.getUser();
-    if (!user) return err({ code: "UNAUTHENTICATED", message: "Not signed in" });
-    const unlocked = await assertAppointmentTaskPropertyDncUnlocked(supabase, taskId);
+    if (!user)
+      return err({ code: "UNAUTHENTICATED", message: "Not signed in" });
+    const unlocked = await assertAppointmentTaskPropertyDncUnlocked(
+      supabase,
+      taskId,
+    );
     if (!unlocked.ok) return unlocked;
 
-    const result = await reassignAppointment(supabase, taskId, newAssigneeId, idempotencyKey);
+    const result = await reassignAppointment(
+      supabase,
+      taskId,
+      newAssigneeId,
+      idempotencyKey,
+    );
     if (!result.ok) return result;
 
-    await kickCalendarMutationSyncBestEffort("reassign_appointment_action", taskId);
+    await kickCalendarMutationSyncBestEffort(
+      "reassign_appointment_action",
+      result.data.ledgerId,
+    );
 
     // Codex round 10 (finding 3): everything past this point is
     // best-effort — `reassignAppointment` above already committed the
@@ -383,7 +436,10 @@ export async function reassignAppointmentAction(
           const subjectLabel = task.related_property_id
             ? await loadPropertyAddress(supabase, task.related_property_id)
             : task.title;
-          const deepLink = buildAppointmentDeepLink(task.related_property_id, task.contact_id);
+          const deepLink = buildAppointmentDeepLink(
+            task.related_property_id,
+            task.contact_id,
+          );
           await Promise.allSettled([
             dispatchTaskAssigned(supabase, {
               taskId,
@@ -417,7 +473,10 @@ export async function reassignAppointmentAction(
 
     return result;
   } catch (e) {
-    reportError(e, { tags: { surface: "reassign_appointment_action" }, extra: { taskId } });
+    reportError(e, {
+      tags: { surface: "reassign_appointment_action" },
+      extra: { taskId },
+    });
     return errFromUnknown(e, "REASSIGN_APPOINTMENT_FAILED");
   }
 }

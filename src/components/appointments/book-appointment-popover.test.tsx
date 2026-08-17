@@ -1,4 +1,10 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import * as React from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -29,7 +35,9 @@ vi.mock("@/components/ui/popover", () => {
       open: boolean;
       onOpenChange: (open: boolean) => void;
       children: React.ReactNode;
-    }) => <Ctx.Provider value={{ open, onOpenChange }}>{children}</Ctx.Provider>,
+    }) => (
+      <Ctx.Provider value={{ open, onOpenChange }}>{children}</Ctx.Provider>
+    ),
     PopoverTrigger: ({
       render,
     }: {
@@ -84,7 +92,9 @@ vi.mock("@/components/ui/select", () => {
     SelectTrigger: ({
       children,
       ...props
-    }: React.ComponentPropsWithoutRef<"div">) => <div {...props}>{children}</div>,
+    }: React.ComponentPropsWithoutRef<"div">) => (
+      <div {...props}>{children}</div>
+    ),
     SelectValue: () => null,
     SelectContent: ({ children }: { children: React.ReactNode }) => (
       <div>{children}</div>
@@ -172,7 +182,9 @@ describe("<BookAppointmentPopover />", () => {
       <BookAppointmentPopover propertyId="prop-1" currentUserId="user-1" />,
     );
 
-    expect(screen.queryByTestId("book-appointment-calendar")).not.toBeInTheDocument();
+    expect(
+      screen.queryByTestId("book-appointment-calendar"),
+    ).not.toBeInTheDocument();
     await user.click(screen.getByTestId("book-appointment-trigger"));
 
     expect(screen.getByTestId("book-appointment-calendar")).toBeInTheDocument();
@@ -201,16 +213,16 @@ describe("<BookAppointmentPopover />", () => {
     );
     await openAndFillHappyPath();
 
-    expect(await screen.findByTestId("book-appointment-end-label")).toHaveTextContent(
-      "2:30 PM",
-    );
+    expect(
+      await screen.findByTestId("book-appointment-end-label"),
+    ).toHaveTextContent("2:30 PM");
 
     const user = userEvent.setup();
     await user.click(screen.getByTestId("select-item-60"));
 
-    expect(await screen.findByTestId("book-appointment-end-label")).toHaveTextContent(
-      "3:00 PM",
-    );
+    expect(
+      await screen.findByTestId("book-appointment-end-label"),
+    ).toHaveTextContent("3:00 PM");
   });
 
   it("shows an inline error for a wall time that doesn't exist across a DST gap and blocks submit", async () => {
@@ -229,9 +241,9 @@ describe("<BookAppointmentPopover />", () => {
     });
     await user.click(screen.getByTestId("select-item-02:30"));
 
-    expect(await screen.findByTestId("book-appointment-dst-error")).toHaveTextContent(
-      "daylight-saving change",
-    );
+    expect(
+      await screen.findByTestId("book-appointment-dst-error"),
+    ).toHaveTextContent("daylight-saving change");
     expect(screen.getByTestId("book-appointment-submit")).toBeDisabled();
     expect(bookAppointment).not.toHaveBeenCalled();
   });
@@ -277,14 +289,18 @@ describe("<BookAppointmentPopover />", () => {
         /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
       ),
     });
-    await waitFor(() => expect(onBooked).toHaveBeenCalledWith({
-      taskId: "task-1",
-      alreadyQualified: false,
-      chainId: "chain-1",
-      duplicate: false,
-    }));
     await waitFor(() =>
-      expect(screen.queryByTestId("book-appointment-calendar")).not.toBeInTheDocument(),
+      expect(onBooked).toHaveBeenCalledWith({
+        taskId: "task-1",
+        alreadyQualified: false,
+        chainId: "chain-1",
+        duplicate: false,
+      }),
+    );
+    await waitFor(() =>
+      expect(
+        screen.queryByTestId("book-appointment-calendar"),
+      ).not.toBeInTheDocument(),
     );
   });
 
@@ -298,12 +314,15 @@ describe("<BookAppointmentPopover />", () => {
         duplicate: false,
       },
     });
-    render(<BookAppointmentPopover propertyId="prop-1" currentUserId="user-1" />);
+    render(
+      <BookAppointmentPopover propertyId="prop-1" currentUserId="user-1" />,
+    );
 
     let user = await openAndFillHappyPath();
     await user.click(screen.getByTestId("book-appointment-submit"));
     await waitFor(() => expect(bookAppointment).toHaveBeenCalledTimes(1));
-    const firstKey = vi.mocked(bookAppointment).mock.calls[0]![0].idempotencyKey;
+    const firstKey =
+      vi.mocked(bookAppointment).mock.calls[0]![0].idempotencyKey;
     expect(firstKey).toEqual(expect.any(String));
 
     // Popover closed on success (asserted above); reopening for a second,
@@ -312,7 +331,8 @@ describe("<BookAppointmentPopover />", () => {
     user = await openAndFillHappyPath();
     await user.click(screen.getByTestId("book-appointment-submit"));
     await waitFor(() => expect(bookAppointment).toHaveBeenCalledTimes(2));
-    const secondKey = vi.mocked(bookAppointment).mock.calls[1]![0].idempotencyKey;
+    const secondKey =
+      vi.mocked(bookAppointment).mock.calls[1]![0].idempotencyKey;
 
     expect(secondKey).toEqual(expect.any(String));
     expect(secondKey).not.toBe(firstKey);
@@ -354,7 +374,9 @@ describe("<BookAppointmentPopover />", () => {
 
       expect(getMemberTimezone).toHaveBeenCalledWith("user-2");
       expect(screen.queryByTestId("assignee-select")).not.toBeInTheDocument();
-      expect(screen.queryByTestId("book-appointment-note")).not.toBeInTheDocument();
+      expect(
+        screen.queryByTestId("book-appointment-note"),
+      ).not.toBeInTheDocument();
       expect(screen.getByTestId("book-appointment-submit")).toHaveTextContent(
         "Reschedule",
       );
@@ -363,7 +385,13 @@ describe("<BookAppointmentPopover />", () => {
     it("submits via rescheduleAppointmentAction with the taskId and picked date/time (no assignee/title/note fields) and calls onRescheduled", async () => {
       vi.mocked(rescheduleAppointmentAction).mockResolvedValue({
         ok: true,
-        data: { taskId: "task-2", oldTaskId: "task-1", chainId: "chain-1", duplicate: false },
+        data: {
+          taskId: "task-2",
+          oldTaskId: "task-1",
+          chainId: "chain-1",
+          ledgerId: "ledger-1",
+          duplicate: false,
+        },
       });
       const onRescheduled = vi.fn();
       render(
@@ -377,7 +405,9 @@ describe("<BookAppointmentPopover />", () => {
       );
       await openAndFillHappyPath();
       await screen.findByTestId("book-appointment-end-label");
-      await userEvent.setup().click(screen.getByTestId("book-appointment-submit"));
+      await userEvent
+        .setup()
+        .click(screen.getByTestId("book-appointment-submit"));
 
       await waitFor(() =>
         expect(rescheduleAppointmentAction).toHaveBeenCalledTimes(1),
@@ -398,6 +428,7 @@ describe("<BookAppointmentPopover />", () => {
           taskId: "task-2",
           oldTaskId: "task-1",
           chainId: "chain-1",
+          ledgerId: "ledger-1",
           duplicate: false,
         }),
       );
@@ -415,12 +446,16 @@ describe("<BookAppointmentPopover />", () => {
         />,
       );
 
-      expect(screen.queryByTestId("book-appointment-calendar")).not.toBeInTheDocument();
+      expect(
+        screen.queryByTestId("book-appointment-calendar"),
+      ).not.toBeInTheDocument();
       act(() => {
         ref.current?.click();
       });
 
-      expect(await screen.findByTestId("book-appointment-calendar")).toBeInTheDocument();
+      expect(
+        await screen.findByTestId("book-appointment-calendar"),
+      ).toBeInTheDocument();
     });
   });
 });

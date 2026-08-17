@@ -59,6 +59,7 @@ type BookAppointmentRow = {
   duplicate: boolean;
   related_property_id: string | null;
   contact_id: string | null;
+  ledger_id: string;
 };
 
 type RescheduleArgs = {
@@ -73,6 +74,20 @@ type RescheduleRow = {
   old_task_id: string;
   calendar_chain_id: string;
   duplicate: boolean;
+  ledger_id: string;
+};
+
+type ReassignArgs = {
+  p_task: string;
+  p_new_assignee: string;
+  p_idempotency_key?: string | null;
+};
+type ReassignRow = {
+  task_id: string;
+  old_assignee_id: string;
+  new_assignee_id: string;
+  duplicate: boolean;
+  ledger_id: string;
 };
 
 type RpcResult<T> = {
@@ -89,6 +104,10 @@ type InlineKickTestRpcClient = {
     fn: "fn_reschedule_appointment",
     args: RescheduleArgs,
   ): Promise<RpcResult<RescheduleRow>>;
+  rpc(
+    fn: "fn_reassign_appointment",
+    args: ReassignArgs,
+  ): Promise<RpcResult<ReassignRow>>;
 };
 
 function asRpcClient(
@@ -109,6 +128,13 @@ function rescheduleAppointment(
   args: RescheduleArgs,
 ) {
   return asRpcClient(client).rpc("fn_reschedule_appointment", args);
+}
+
+function reassignAppointment(
+  client: SupabaseClient<Database>,
+  args: ReassignArgs,
+) {
+  return asRpcClient(client).rpc("fn_reassign_appointment", args);
 }
 
 type LedgerRow = {
@@ -255,7 +281,7 @@ describe("kickCalendarMutationSync — real DB: booking lock cleared inline inst
     // token is configured for `assignee` (fresh test user), so this
     // finalizes the create row as a no-op (`no_token`) without ever
     // calling Google — same as prod's org-with-no-token evidence.
-    await kickCalendarMutationSync(db, taskId);
+    await kickCalendarMutationSync(db, booked!.ledger_id);
 
     const ledgerAfter = await ledgerRowsForTask(taskId);
     expect(ledgerAfter.data).toHaveLength(1);
@@ -293,14 +319,147 @@ describe("kickCalendarMutationSync — real DB: booking lock cleared inline inst
     const result = await (
       member.client as unknown as {
         rpc(
-          fn: "fn_claim_calendar_mutation_for_task",
-          args: { p_source_task: string },
+          fn: "fn_claim_calendar_mutation_for_ledger",
+          args: { p_ledger_id: string },
         ): Promise<{ error: { message: string } | null }>;
       }
-    ).rpc("fn_claim_calendar_mutation_for_task", {
-      p_source_task: "00000000-0000-0000-0000-000000000001",
+    ).rpc("fn_claim_calendar_mutation_for_ledger", {
+      p_ledger_id: "00000000-0000-0000-0000-000000000001",
     });
 
     expect(result.error?.message).toMatch(/permission denied/i);
+  });
+
+  it("two concurrent exact-ledger kicks lease the row only once", async () => {
+    const actor = await createUserForOrg(BMH_ORG_ID);
+    const assignee = await createUserForOrg(BMH_ORG_ID);
+    const booked = await bookAppointment(actor.client, {
+      p_org: BMH_ORG_ID,
+      p_assignee: assignee.userId,
+      ...windowArgs(),
+      p_timezone: "America/Chicago",
+      p_title: "Concurrent exact claim",
+    });
+    expect(booked.error).toBeNull();
+
+    await Promise.all([
+      kickCalendarMutationSync(db, booked.data!.ledger_id),
+      kickCalendarMutationSync(db, booked.data!.ledger_id),
+    ]);
+
+    const rows = await ledgerRowsForTask(booked.data!.task_id);
+    expect(rows.data).toHaveLength(1);
+    expect(rows.data![0]).toMatchObject({
+      id: booked.data!.ledger_id,
+      phase: "finalized",
+      attempts: 1,
+    });
+  });
+
+  it("a delayed retry of an old ledger id cannot claim a newer mutation on the same task", async () => {
+    const actor = await createUserForOrg(BMH_ORG_ID);
+    const originalAssignee = await createUserForOrg(BMH_ORG_ID);
+    const { data: booked, error: bookError } = await bookAppointment(
+      actor.client,
+      {
+        p_org: BMH_ORG_ID,
+        p_assignee: originalAssignee.userId,
+        ...windowArgs(),
+        p_timezone: "America/Chicago",
+        p_title: "Exact ledger retry",
+      },
+    );
+    expect(bookError).toBeNull();
+    await kickCalendarMutationSync(db, booked!.ledger_id);
+
+    const first = await reassignAppointment(actor.client, {
+      p_task: booked!.task_id,
+      p_new_assignee: actor.userId,
+    });
+    expect(first.error).toBeNull();
+    await kickCalendarMutationSync(db, first.data!.ledger_id);
+
+    const second = await reassignAppointment(actor.client, {
+      p_task: booked!.task_id,
+      p_new_assignee: originalAssignee.userId,
+    });
+    expect(second.error).toBeNull();
+    expect(second.data!.ledger_id).not.toBe(first.data!.ledger_id);
+
+    // Simulate a delayed request resuming with the first action's receipt.
+    await kickCalendarMutationSync(db, first.data!.ledger_id);
+
+    const rows = await ledgerRowsForTask(booked!.task_id);
+    const newer = rows.data!.find((row) => row.id === second.data!.ledger_id);
+    expect(newer).toMatchObject({
+      operation: "reassign",
+      phase: "pending",
+      attempts: 0,
+    });
+  });
+
+  it("booking, reschedule, and reassign idempotency replays return their original exact ledger ids", async () => {
+    const actor = await createUserForOrg(BMH_ORG_ID);
+    const assignee = await createUserForOrg(BMH_ORG_ID);
+    const bookingKey = crypto.randomUUID();
+    const bookingArgs: BookAppointmentArgs = {
+      p_org: BMH_ORG_ID,
+      p_assignee: assignee.userId,
+      ...windowArgs(),
+      p_timezone: "America/Chicago",
+      p_title: "Replay receipts",
+      p_idempotency_key: bookingKey,
+    };
+    const firstBook = await bookAppointment(actor.client, bookingArgs);
+    const replayBook = await bookAppointment(actor.client, bookingArgs);
+    expect(firstBook.error).toBeNull();
+    expect(replayBook.data).toMatchObject({
+      task_id: firstBook.data!.task_id,
+      ledger_id: firstBook.data!.ledger_id,
+      duplicate: true,
+    });
+    await kickCalendarMutationSync(db, firstBook.data!.ledger_id);
+
+    const rescheduleKey = crypto.randomUUID();
+    const rescheduleArgs: RescheduleArgs = {
+      p_task: firstBook.data!.task_id,
+      p_new_start: new Date(Date.now() + 7_200_000).toISOString(),
+      p_new_end: new Date(Date.now() + 9_000_000).toISOString(),
+      p_timezone: "America/Chicago",
+      p_idempotency_key: rescheduleKey,
+    };
+    const firstReschedule = await rescheduleAppointment(
+      actor.client,
+      rescheduleArgs,
+    );
+    const replayReschedule = await rescheduleAppointment(
+      actor.client,
+      rescheduleArgs,
+    );
+    expect(firstReschedule.error).toBeNull();
+    expect(replayReschedule.data).toMatchObject({
+      task_id: firstReschedule.data!.task_id,
+      ledger_id: firstReschedule.data!.ledger_id,
+      duplicate: true,
+    });
+    await kickCalendarMutationSync(db, firstReschedule.data!.ledger_id);
+
+    const reassignKey = crypto.randomUUID();
+    const reassignArgs: ReassignArgs = {
+      p_task: firstReschedule.data!.task_id,
+      p_new_assignee: actor.userId,
+      p_idempotency_key: reassignKey,
+    };
+    const firstReassign = await reassignAppointment(actor.client, reassignArgs);
+    const replayReassign = await reassignAppointment(
+      actor.client,
+      reassignArgs,
+    );
+    expect(firstReassign.error).toBeNull();
+    expect(replayReassign.data).toMatchObject({
+      task_id: firstReassign.data!.task_id,
+      ledger_id: firstReassign.data!.ledger_id,
+      duplicate: true,
+    });
   });
 });

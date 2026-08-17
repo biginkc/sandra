@@ -1,5 +1,5 @@
--- fn_calendar_month_appointments — single-snapshot month read for the
--- Calendar page's month view (Codex month-view rounds 3+4).
+-- fn_calendar_month_appointments — single-snapshot window read for both the
+-- Calendar page's week view (one window) and month view (six windows).
 --
 -- Why an RPC: the month grid spans a fixed 6 weeks. One PostgREST SELECT over
 -- the whole range can't distinguish "a busy month" from "a busy week"
@@ -127,6 +127,22 @@ begin
       and t.type = 'appointment'
       and t.status in ('open', 'completed')
       and (p_assignee is null or t.assignee_id = p_assignee)
+      -- Preserve completed/rescheduled task rows as lifecycle audit history,
+      -- including permanently DNC-locked history, while suppressing stale
+      -- predecessor cards once this organization+chain has been cancelled.
+      -- The cancelled row itself is already excluded by the status predicate.
+      and not (
+        t.status = 'completed'
+        and t.outcome = 'rescheduled'
+        and exists (
+          select 1
+          from public.tasks cancelled
+          where cancelled.org_id = t.org_id
+            and cancelled.calendar_chain_id = t.calendar_chain_id
+            and cancelled.type = 'appointment'
+            and cancelled.status = 'cancelled'
+        )
+      )
   ),
   guarded as (
     select

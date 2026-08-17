@@ -9,8 +9,9 @@ import type { Database } from "@/lib/supabase/types";
 
 /**
  * Immediately advances the one durable calendar mutation created by a
- * successful appointment action. The claim is scoped to the persisted source
- * task, so this request can never consume an attempt from an unrelated chain.
+ * successful appointment action. The lifecycle/booking RPC returns this exact
+ * ledger id from the same transaction, so a delayed request can never consume
+ * an attempt from a newer mutation on the same task.
  *
  * The claim RPC retains the sweep worker's SKIP LOCKED lease and claim-token
  * fencing. A concurrent cron sweep or request therefore wins the row at most
@@ -23,8 +24,8 @@ import type { Database } from "@/lib/supabase/types";
  */
 type TargetedClaimRpcClient = {
   rpc(
-    fn: "fn_claim_calendar_mutation_for_task",
-    args: { p_source_task: string },
+    fn: "fn_claim_calendar_mutation_for_ledger",
+    args: { p_ledger_id: string },
   ): Promise<{
     data: ClaimedCalendarMutationRow[] | null;
     error: { message: string } | null;
@@ -39,36 +40,36 @@ const DEFAULT_INLINE_KICK_TIMEOUT_MS = 10_000;
 
 export async function kickCalendarMutationSync(
   supabase: SupabaseClient<Database>,
-  sourceTaskId: string,
+  ledgerId: string,
   opts: { timeoutMs?: number } = {},
 ): Promise<void> {
   const timeoutMs = opts.timeoutMs ?? DEFAULT_INLINE_KICK_TIMEOUT_MS;
   try {
     await withTimeout(
-      runInlineKick(supabase, sourceTaskId, Date.now() + timeoutMs),
+      runInlineKick(supabase, ledgerId, Date.now() + timeoutMs),
       timeoutMs,
     );
   } catch (error) {
     reportError(error, {
       tags: { surface: "inline_calendar_sync_kick" },
-      extra: { sourceTaskId },
+      extra: { ledgerId },
     });
   }
 }
 
 async function runInlineKick(
   supabase: SupabaseClient<Database>,
-  sourceTaskId: string,
+  ledgerId: string,
   deadlineAt: number,
 ): Promise<void> {
   const rpcClient = supabase as unknown as TargetedClaimRpcClient;
   const { data, error } = await rpcClient.rpc(
-    "fn_claim_calendar_mutation_for_task",
-    { p_source_task: sourceTaskId },
+    "fn_claim_calendar_mutation_for_ledger",
+    { p_ledger_id: ledgerId },
   );
   if (error) {
     throw new Error(
-      `fn_claim_calendar_mutation_for_task failed: ${error.message}`,
+      `fn_claim_calendar_mutation_for_ledger failed: ${error.message}`,
     );
   }
 
@@ -80,7 +81,7 @@ async function runInlineKick(
   } catch (error) {
     reportError(error, {
       tags: { surface: "inline_calendar_sync_kick_unhandled" },
-      extra: { ledgerId: claimed.ledger_id, sourceTaskId },
+      extra: { ledgerId: claimed.ledger_id },
     });
   }
 }

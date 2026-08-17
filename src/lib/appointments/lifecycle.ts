@@ -46,6 +46,7 @@ export type RescheduleAppointmentResult = {
   oldTaskId: string;
   chainId: string;
   duplicate: boolean;
+  ledgerId: string;
 };
 
 export type ReassignAppointmentResult = {
@@ -53,6 +54,7 @@ export type ReassignAppointmentResult = {
   oldAssigneeId: string;
   newAssigneeId: string;
   duplicate: boolean;
+  ledgerId: string;
 };
 
 type RpcResult<T> = PromiseLike<{
@@ -83,6 +85,7 @@ type LifecycleRpcClient = {
     old_task_id: string;
     calendar_chain_id: string;
     duplicate: boolean;
+    ledger_id: string;
   }>;
   rpc(
     fn: "fn_reassign_appointment",
@@ -96,6 +99,7 @@ type LifecycleRpcClient = {
     old_assignee_id: string;
     new_assignee_id: string;
     duplicate: boolean;
+    ledger_id: string;
   }>;
 };
 
@@ -143,14 +147,20 @@ export async function cancelAppointment(
       message: error?.message ?? "Could not cancel the appointment.",
     });
   }
-  return ok({ taskId: data.task_id, status: "cancelled", ledgerId: data.ledger_id });
+  return ok({
+    taskId: data.task_id,
+    status: "cancelled",
+    ledgerId: data.ledger_id,
+  });
 }
 
 export async function rescheduleAppointment(
   supabase: SupabaseClient<Database>,
   input: RescheduleAppointmentInput,
 ): Promise<Result<RescheduleAppointmentResult>> {
-  if (new Date(input.newEndUtc).getTime() <= new Date(input.newStartUtc).getTime()) {
+  if (
+    new Date(input.newEndUtc).getTime() <= new Date(input.newStartUtc).getTime()
+  ) {
     return err({
       code: "RESCHEDULE_APPOINTMENT_INVALID_WINDOW",
       message: "End must be after start.",
@@ -177,6 +187,7 @@ export async function rescheduleAppointment(
     oldTaskId: data.old_task_id,
     chainId: data.calendar_chain_id,
     duplicate: data.duplicate,
+    ledgerId: data.ledger_id,
   });
 }
 
@@ -211,5 +222,6 @@ export async function reassignAppointment(
     oldAssigneeId: data.old_assignee_id,
     newAssigneeId: data.new_assignee_id,
     duplicate: data.duplicate,
+    ledgerId: data.ledger_id,
   });
 }
