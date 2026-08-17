@@ -97,6 +97,7 @@ function DispoBar({
   initialDispo,
   propertyStatus,
   currentUserId,
+  onPermanentDnc,
 }: {
   propertyId: string;
   contactId: string;
@@ -104,6 +105,7 @@ function DispoBar({
   initialDispo: string | null;
   propertyStatus: string | null;
   currentUserId: string | null;
+  onPermanentDnc: () => void;
 }) {
   const router = useRouter();
   const [dispo, setDispo] = useState<string | null>(initialDispo);
@@ -116,6 +118,9 @@ function DispoBar({
       const result = await setOutreachDispo(propertyId, newDispo);
       if (result.ok) {
         setDispo(newDispo);
+        if (newDispo === "dnc") {
+          onPermanentDnc();
+        }
         if (newDispo === "wrong_number") {
           toast.info(
             "Marked wrong number — consider skip-tracing a new number.",
@@ -292,6 +297,8 @@ export function InboxDetail({
   const [resolveOpen, setResolveOpen] = useState(false);
   const [replyRefreshGate, setReplyRefreshGate] =
     useState<ReplyRefreshGate | null>(null);
+  const [optimisticallyLockedThreadId, setOptimisticallyLockedThreadId] =
+    useState<string | null>(null);
 
   const closeDetail = useCallback(() => {
     if (onBackToList) {
@@ -304,6 +311,12 @@ export function InboxDetail({
     router.replace(qs ? `/messages?${qs}` : "/messages", { scroll: false });
     router.refresh();
   }, [onBackToList, router, searchParams]);
+
+  const handlePermanentDnc = useCallback(() => {
+    if (!data) return;
+    setOptimisticallyLockedThreadId(data.threadId);
+    router.refresh();
+  }, [data, router]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -386,9 +399,11 @@ export function InboxDetail({
     data.outreachDispo === "opted_out";
   const isSmsRestricted =
     data.contactDoNotContact || isSmsOptedOut || hasBadThreadNumber;
+  const isPermanentlyLocked =
+    data.isDncLocked || optimisticallyLockedThreadId === data.threadId;
   const canCall =
     Boolean(phoneHref) &&
-    !data.isDncLocked &&
+    !isPermanentlyLocked &&
     !data.contactDoNotContact &&
     !hasBadThreadNumber;
   const replyRefreshPending =
@@ -430,7 +445,7 @@ export function InboxDetail({
                 </h2>
                 <MessageStageChip
                   status={data.propertyStatus}
-                  historical={data.isDncLocked}
+                  historical={isPermanentlyLocked}
                 />
               </div>
               <p className="text-[13px] text-[#78716c] flex items-center gap-2 min-w-0">
@@ -484,7 +499,7 @@ export function InboxDetail({
           </div>
         </div>
         <div className="flex shrink-0 flex-wrap items-center gap-2">
-          {data.propertyId && !data.isDncLocked ? (
+          {data.propertyId && !isPermanentlyLocked ? (
             <AssignDropdown
               propertyId={data.propertyId}
               initialAssigneeId={data.assigneeId}
@@ -568,7 +583,7 @@ export function InboxDetail({
           </DropdownMenu>
         </div>
       </header>
-      {data.isDncLocked ? (
+      {isPermanentlyLocked ? (
         <div
           className="border-b-2 border-[#1c1917] bg-[#f5f5f4] px-4 py-3 text-sm sm:px-6"
           role="status"
@@ -618,7 +633,7 @@ export function InboxDetail({
           onLiveMessage={handleLiveMessage}
         />
       </div>
-      {data.propertyId && !data.isDncLocked ? (
+      {data.propertyId && !isPermanentlyLocked ? (
         <>
           {!data.contactDoNotContact ? (
             <div className="border-t border-border bg-white flex items-center px-6 py-2">
@@ -630,6 +645,7 @@ export function InboxDetail({
                 initialDispo={data.outreachDispo}
                 propertyStatus={data.propertyStatus}
                 currentUserId={currentUserId}
+                onPermanentDnc={handlePermanentDnc}
               />
             </div>
           ) : null}
@@ -669,7 +685,7 @@ export function InboxDetail({
             )}
           </div>
         </>
-      ) : data.propertyId && data.isDncLocked ? null : (
+      ) : data.propertyId && isPermanentlyLocked ? null : (
         <div className="border-t border-border bg-white p-4">
           {data.contactId ? (
             <>

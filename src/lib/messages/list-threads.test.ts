@@ -26,36 +26,46 @@ function makeStub(opts: {
     created_at: string;
     read_at: string | null;
   }>;
-  contacts: Map<string, {
-    id: string;
-    first_name: string | null;
-    last_name: string | null;
-    entity_name: string | null;
-    phone_1: string | null;
-    phone_2?: string | null;
-    phone_3?: string | null;
-    do_not_contact?: boolean;
-    sms_opted_out?: boolean;
-  }>;
-  properties: Map<string, {
-    id: string;
-    address: string | null;
-    city: string | null;
-    state: string | null;
-    status?: string | null;
-    outreach_dispo?: string | null;
-    assigned_user_id: string | null;
-    needs_human_attention?: boolean;
-    last_ai_escalation_reason?: string | null;
-  }>;
-  messageThreads?: Map<string, {
-    conversation_id: string;
-    ai_responder_status?: string | null;
-    ai_responder_reason?: string | null;
-    ai_responder_status_at?: string | null;
-    ai_last_delivery_status?: string | null;
-    ai_last_delivery_error?: string | null;
-  }>;
+  contacts: Map<
+    string,
+    {
+      id: string;
+      first_name: string | null;
+      last_name: string | null;
+      entity_name: string | null;
+      phone_1: string | null;
+      phone_2?: string | null;
+      phone_3?: string | null;
+      do_not_contact?: boolean;
+      sms_opted_out?: boolean;
+    }
+  >;
+  properties: Map<
+    string,
+    {
+      id: string;
+      address: string | null;
+      city: string | null;
+      state: string | null;
+      status?: string | null;
+      outreach_dispo?: string | null;
+      is_dnc_locked?: boolean;
+      assigned_user_id: string | null;
+      needs_human_attention?: boolean;
+      last_ai_escalation_reason?: string | null;
+    }
+  >;
+  messageThreads?: Map<
+    string,
+    {
+      conversation_id: string;
+      ai_responder_status?: string | null;
+      ai_responder_reason?: string | null;
+      ai_responder_status_at?: string | null;
+      ai_last_delivery_status?: string | null;
+      ai_last_delivery_error?: string | null;
+    }
+  >;
   consentEvents?: Array<{
     contact_id: string;
     event_type: string;
@@ -106,7 +116,7 @@ function makeStub(opts: {
               ? opts.contacts
               : name === "properties"
                 ? opts.properties
-                : opts.messageThreads ?? new Map();
+                : (opts.messageThreads ?? new Map());
           const data = chunk
             .map((id) => source.get(id))
             .filter((row): row is NonNullable<typeof row> => Boolean(row));
@@ -164,7 +174,13 @@ describe("listThreads — chunking", () => {
     const contacts = new Map(
       messages.map((m) => [
         m.contact_id,
-        { id: m.contact_id, first_name: "C", last_name: String(0), entity_name: null, phone_1: null },
+        {
+          id: m.contact_id,
+          first_name: "C",
+          last_name: String(0),
+          entity_name: null,
+          phone_1: null,
+        },
       ]),
     );
     const properties = new Map(
@@ -177,6 +193,7 @@ describe("listThreads — chunking", () => {
           state: null,
           status: "prospect",
           outreach_dispo: null,
+          is_dnc_locked: false,
           assigned_user_id: null,
         },
       ]),
@@ -279,8 +296,7 @@ describe("listThreads — Sandra AI state", () => {
           city: null,
           state: null,
           status: "prospect",
-          outreach_dispo:
-            m.property_id === "p-dispo" ? "not_interested" : null,
+          outreach_dispo: m.property_id === "p-dispo" ? "not_interested" : null,
           assigned_user_id: null,
           needs_human_attention: m.property_id === "p-property-attention",
         },
@@ -386,16 +402,18 @@ describe("listThreads — Sandra AI state", () => {
       },
     ];
     const contacts = new Map(
-      Array.from(new Set(messages.map((m) => m.contact_id))).map((contactId) => [
-        contactId,
-        {
-          id: contactId,
-          first_name: null,
-          last_name: null,
-          entity_name: contactId,
-          phone_1: null,
-        },
-      ]),
+      Array.from(new Set(messages.map((m) => m.contact_id))).map(
+        (contactId) => [
+          contactId,
+          {
+            id: contactId,
+            first_name: null,
+            last_name: null,
+            entity_name: contactId,
+            phone_1: null,
+          },
+        ],
+      ),
     );
     const properties = new Map([
       [
@@ -407,6 +425,7 @@ describe("listThreads — Sandra AI state", () => {
           state: null,
           status: "prospect",
           outreach_dispo: null,
+          is_dnc_locked: false,
           assigned_user_id: null,
         },
       ],
@@ -482,7 +501,13 @@ describe("listThreads — isOptedOut (DNC) flag", () => {
     const contacts = new Map(
       contactIds.map((cid) => [
         cid,
-        { id: cid, first_name: null, last_name: null, entity_name: cid, phone_1: null },
+        {
+          id: cid,
+          first_name: null,
+          last_name: null,
+          entity_name: cid,
+          phone_1: null,
+        },
       ]),
     );
     const properties = new Map(
@@ -495,6 +520,7 @@ describe("listThreads — isOptedOut (DNC) flag", () => {
           state: null,
           status: "prospect",
           outreach_dispo: null,
+          is_dnc_locked: false,
           assigned_user_id: null,
         },
       ]),
@@ -534,6 +560,20 @@ describe("listThreads — isOptedOut (DNC) flag", () => {
 
     const threads = await listThreads(supabase, {});
     expect(threads[0]?.isOptedOut).toBe(false);
+  });
+
+  it("hydrates the property DNC lock even when the visible thread belongs to an agent contact", async () => {
+    const seed = buildBasicSeed(["agent-contact"]);
+    seed.properties.get("p-0")!.is_dnc_locked = true;
+
+    const { supabase } = makeStub({ ...seed, consentEvents: [] });
+    const threads = await listThreads(supabase, {});
+
+    expect(threads[0]).toMatchObject({
+      contactId: "agent-contact",
+      isOptedOut: false,
+      isDncLocked: true,
+    });
   });
 
   it("marks isOptedOut=false when latest event is opt_in (overrides prior opt_out)", async () => {
@@ -906,7 +946,13 @@ describe("listThreads — recency-only sort", () => {
     const contacts = new Map(
       messages.map((m) => [
         m.contact_id,
-        { id: m.contact_id, first_name: null, last_name: null, entity_name: m.contact_id, phone_1: null },
+        {
+          id: m.contact_id,
+          first_name: null,
+          last_name: null,
+          entity_name: m.contact_id,
+          phone_1: null,
+        },
       ]),
     );
     const properties = new Map(
@@ -1004,7 +1050,13 @@ describe("listThreads — escalatedOnly", () => {
     const contacts = new Map(
       messages.map((m) => [
         m.contact_id,
-        { id: m.contact_id, first_name: null, last_name: null, entity_name: m.contact_id, phone_1: null },
+        {
+          id: m.contact_id,
+          first_name: null,
+          last_name: null,
+          entity_name: m.contact_id,
+          phone_1: null,
+        },
       ]),
     );
     const properties = new Map([
@@ -1095,38 +1147,55 @@ describe("listThreads — escalatedOnly", () => {
       "c-esc",
       "c-property-attention",
     ]);
-    expect(threads.find((t) => t.contactId === "c-calm")?.escalationReason).toBeNull();
+    expect(
+      threads.find((t) => t.contactId === "c-calm")?.escalationReason,
+    ).toBeNull();
   });
 });
 
 describe("looksLikeTestTraffic", () => {
   it("flags Jitter canary contact names", () => {
-    expect(looksLikeTestTraffic("Canary CANARY-STOP-1778862210079", null)).toBe(true);
-    expect(looksLikeTestTraffic("Canary CANARY-AI-HAPPY-1777657500276", null)).toBe(true);
+    expect(looksLikeTestTraffic("Canary CANARY-STOP-1778862210079", null)).toBe(
+      true,
+    );
+    expect(
+      looksLikeTestTraffic("Canary CANARY-AI-HAPPY-1777657500276", null),
+    ).toBe(true);
   });
 
   it("flags synthetic jitter addresses even without a contact", () => {
     expect(
-      looksLikeTestTraffic(null, "Jitter Canary 26710917291-1 Golden Path Ln, Kansas City, MO"),
+      looksLikeTestTraffic(
+        null,
+        "Jitter Canary 26710917291-1 Golden Path Ln, Kansas City, MO",
+      ),
     ).toBe(true);
   });
 
   it("does not flag real homeowners", () => {
-    expect(looksLikeTestTraffic("Sheka Newsome", "8101 E 133rd ST, Grandview, MO")).toBe(false);
+    expect(
+      looksLikeTestTraffic("Sheka Newsome", "8101 E 133rd ST, Grandview, MO"),
+    ).toBe(false);
     expect(looksLikeTestTraffic(null, null)).toBe(false);
   });
 
   it("does not flag substring collisions with real names/streets", () => {
     // Codex P1: the matcher must follow the fixture contract (prefixes),
     // never generic substrings.
-    expect(looksLikeTestTraffic("Bob Canary", "123 Canary Ln, Kansas City, MO")).toBe(false);
-    expect(looksLikeTestTraffic("Jane Doe", "44 Jitterbug Dr, Liberty, MO")).toBe(false);
+    expect(
+      looksLikeTestTraffic("Bob Canary", "123 Canary Ln, Kansas City, MO"),
+    ).toBe(false);
+    expect(
+      looksLikeTestTraffic("Jane Doe", "44 Jitterbug Dr, Liberty, MO"),
+    ).toBe(false);
     expect(looksLikeTestTraffic("Canary Smith", null)).toBe(false);
     expect(looksLikeTestTraffic(null, "901 W Jittery Way")).toBe(false);
   });
 
   it("flags the JITTER-SANDRA-V1 writeback-proof address shape", () => {
-    expect(looksLikeTestTraffic(null, "JITTER-SANDRA-V1 writeback proof mpwl5neb")).toBe(true);
+    expect(
+      looksLikeTestTraffic(null, "JITTER-SANDRA-V1 writeback proof mpwl5neb"),
+    ).toBe(true);
   });
 });
 
@@ -1364,7 +1433,9 @@ describe("listThreads — Needs Outcome", () => {
     const threads = await listThreads(supabase, {});
 
     expect(
-      threads.filter((thread) => thread.needsOutcome).map((thread) => thread.propertyId),
+      threads
+        .filter((thread) => thread.needsOutcome)
+        .map((thread) => thread.propertyId),
     ).toEqual(["p-needs", "p-followup", "p-lead", "p-contacted", "p-mixed"]);
     expect(
       threads.find((thread) => thread.propertyId === "p-sms-opted-out")
@@ -1403,7 +1474,13 @@ describe("listThreads — Needs Outcome", () => {
     const contacts = new Map(
       messages.map((m) => [
         m.contact_id,
-        { id: m.contact_id, first_name: null, last_name: null, entity_name: m.contact_id, phone_1: null },
+        {
+          id: m.contact_id,
+          first_name: null,
+          last_name: null,
+          entity_name: m.contact_id,
+          phone_1: null,
+        },
       ]),
     );
     const properties = new Map([

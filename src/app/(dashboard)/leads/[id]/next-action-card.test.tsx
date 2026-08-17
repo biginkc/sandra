@@ -93,6 +93,32 @@ describe("<NextActionCard />", () => {
     ).toHaveTextContent("network unavailable");
     await user.click(screen.getByRole("button", { name: "Retry" }));
     expect(completeTaskAction).toHaveBeenCalledTimes(2);
+    expect(completeTaskAction).toHaveBeenNthCalledWith(1, "task-1");
+    expect(completeTaskAction).toHaveBeenNthCalledWith(2, "task-1");
     expect(refreshMock).toHaveBeenCalled();
+  });
+
+  it("never retargets a failed retry operation to newer task props", async () => {
+    const user = userEvent.setup();
+    completeTaskAction.mockResolvedValue({
+      ok: false,
+      error: { message: "network unavailable" },
+    });
+
+    const view = render(
+      <NextActionCard task={task} timezone="America/Chicago" />,
+    );
+    await user.click(screen.getByRole("button", { name: /Done/ }));
+    expect(await screen.findByRole("button", { name: "Retry" })).toBeVisible();
+
+    const newerTask = { ...task, id: "task-2", title: "Call agent" };
+    view.rerender(
+      <NextActionCard task={newerTask} timezone="America/Chicago" />,
+    );
+
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+    await user.click(screen.getByRole("button", { name: /Done/ }));
+    expect(completeTaskAction).toHaveBeenNthCalledWith(1, "task-1");
+    expect(completeTaskAction).toHaveBeenNthCalledWith(2, "task-2");
   });
 });

@@ -26,7 +26,14 @@ export type LeadNextTask = {
   type: string;
 };
 
-type TaskOperation = { kind: "complete" } | { kind: "snooze"; until: string };
+type TaskOperation =
+  | { kind: "complete"; taskId: string }
+  | { kind: "snooze"; taskId: string; until: string };
+
+type TaskFailure = {
+  message: string;
+  operation: TaskOperation;
+};
 
 const SNOOZE_PRESETS: ReadonlyArray<{ label: string; days: number }> = [
   { label: "1 day", days: 1 },
@@ -43,10 +50,7 @@ export function NextActionCard({
 }) {
   const router = useRouter();
   const [pending, startTransition] = useTransition();
-  const [failure, setFailure] = useState<string | null>(null);
-  const [retryOperation, setRetryOperation] = useState<TaskOperation | null>(
-    null,
-  );
+  const [failure, setFailure] = useState<TaskFailure | null>(null);
 
   const run = useCallback(
     (operation: TaskOperation) => {
@@ -54,25 +58,24 @@ export function NextActionCard({
       startTransition(async () => {
         const result =
           operation.kind === "complete"
-            ? await completeTaskAction(task!.id)
-            : await snoozeTaskAction(task!.id, operation.until);
+            ? await completeTaskAction(operation.taskId)
+            : await snoozeTaskAction(operation.taskId, operation.until);
         if (!result.ok) {
-          setFailure(result.error.message);
-          setRetryOperation(operation);
+          setFailure({ message: result.error.message, operation });
           return;
         }
-        setRetryOperation(null);
+        setFailure(null);
         router.refresh();
       });
     },
-    [router, task],
+    [router],
   );
 
-  const complete = () => run({ kind: "complete" });
+  const complete = () => run({ kind: "complete", taskId: task!.id });
   const snooze = (days: number) => {
     const until = new Date();
     until.setDate(until.getDate() + days);
-    run({ kind: "snooze", until: until.toISOString() });
+    run({ kind: "snooze", taskId: task!.id, until: until.toISOString() });
   };
 
   if (!task) {
@@ -173,18 +176,18 @@ export function NextActionCard({
           </div>
         )}
       </div>
-      {!isAppointment && failure ? (
+      {!isAppointment && failure?.operation.taskId === task.id ? (
         <div
           className="border-destructive/30 bg-destructive/5 text-destructive mt-3 flex flex-col gap-2 rounded-md border p-3 text-sm sm:flex-row sm:items-center sm:justify-between"
           role="alert"
           data-testid="lead-next-action-failure"
         >
-          <span>Task update failed: {failure}</span>
+          <span>Task update failed: {failure.message}</span>
           <Button
             type="button"
             variant="outline"
             size="sm"
-            onClick={() => retryOperation && run(retryOperation)}
+            onClick={() => run(failure.operation)}
           >
             <RotateCcwIcon className="size-3.5" />
             Retry

@@ -69,6 +69,7 @@ function makeThread(overrides: Partial<Thread> & { threadId: string }): Thread {
     ...overrides,
     propertyStatus: overrides.propertyStatus ?? null,
     outreachDispo: overrides.outreachDispo ?? null,
+    isDncLocked: overrides.isDncLocked ?? false,
     needsOutcome: overrides.needsOutcome ?? false,
     aiResponderStatus: overrides.aiResponderStatus ?? null,
     aiResponderReason: overrides.aiResponderReason ?? null,

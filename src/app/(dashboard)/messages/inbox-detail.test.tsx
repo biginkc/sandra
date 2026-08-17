@@ -609,6 +609,41 @@ describe("<InboxDetail />", () => {
     );
   });
 
+  it("immediately removes every mutable outreach control after permanent DNC succeeds", async () => {
+    const user = userEvent.setup();
+    const data = makeData({
+      contactId: "contact-permanent-dnc",
+      propertyId: "prop-permanent-dnc",
+      propertyStatus: "new_lead",
+      isDncLocked: false,
+      contactDoNotContact: false,
+      contactSmsOptedOut: false,
+      outreachDispo: null,
+    });
+
+    render(
+      <InboxDetail data={data} assigneeEmails={{}} currentUserId="user-1" />,
+    );
+
+    expect(screen.getByTestId("assign-dropdown-trigger")).toBeInTheDocument();
+    expect(screen.getByTestId("inline-reply")).toBeInTheDocument();
+    await user.click(screen.getByTestId("dispo-dnc"));
+
+    expect(setOutreachDispoMock).toHaveBeenCalledWith(
+      "prop-permanent-dnc",
+      "dnc",
+    );
+    expect(
+      await screen.findByTestId("messages-permanent-dnc-lock"),
+    ).toBeInTheDocument();
+    expect(screen.queryByTestId("assign-dropdown-trigger")).toBeNull();
+    expect(screen.queryByTestId("dispo-wrong-number")).toBeNull();
+    expect(screen.queryByTestId("message-move-to-lead")).toBeNull();
+    expect(screen.queryByTestId("inline-reply")).toBeNull();
+    expect(screen.queryByTestId("inline-reply-restricted")).toBeNull();
+    expect(refreshCalls).toHaveLength(1);
+  });
+
   it("Move to Lead promotes then opens the lead page", async () => {
     const user = userEvent.setup();
     const data = makeData({
@@ -861,7 +896,7 @@ describe("<InboxDetail />", () => {
     const data = makeData({
       contactId: "contact-sms-optout",
       contactSmsOptedOut: true,
-      outreachDispo: "dnc",
+      outreachDispo: "opted_out",
     });
 
     render(

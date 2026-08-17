@@ -87,7 +87,21 @@ export function CockpitView({
   // so the two never show different numbers. Seeds from the server
   // first-paint stats and keeps polling while visible so the Outbox
   // badge stays current even when the operator is parked on Inbox.
-  const liveQueueStats = useQueueStats(queueStats);
+  const [liveQueueStatsFailed, setLiveQueueStatsFailed] =
+    useState(queueStatsFailed);
+  const [lastServerQueueStatsFailed, setLastServerQueueStatsFailed] =
+    useState(queueStatsFailed);
+  if (lastServerQueueStatsFailed !== queueStatsFailed) {
+    setLastServerQueueStatsFailed(queueStatsFailed);
+    setLiveQueueStatsFailed(queueStatsFailed);
+  }
+  const handleQueueStatsRefreshSuccess = useCallback(
+    () => setLiveQueueStatsFailed(false),
+    [],
+  );
+  const liveQueueStats = useQueueStats(queueStats, {
+    onRefreshSuccess: handleQueueStatsRefreshSuccess,
+  });
 
   const setTab = (next: string) => {
     const sp = new URLSearchParams(searchParams.toString());
@@ -253,6 +267,7 @@ export function CockpitView({
         <TabButton
           label="Outbox"
           stats={liveQueueStats}
+          statsUnavailable={liveQueueStatsFailed}
           active={activeTab === "outbox"}
           onClick={() => setTab("outbox")}
           testId="tab-outbox"
@@ -318,7 +333,7 @@ export function CockpitView({
         <div>
           <QueueStatsBanner
             stats={liveQueueStats}
-            loadFailed={queueStatsFailed}
+            loadFailed={liveQueueStatsFailed}
             onRetry={() => router.refresh()}
           />
           <QueuePanel
@@ -351,6 +366,7 @@ function TabButton({
   label,
   count,
   stats,
+  statsUnavailable = false,
   active,
   onClick,
   testId,
@@ -360,6 +376,9 @@ function TabButton({
   count?: number;
   /** Queue figures: queued · sent out today (green) · failed today (red) (Outbox). */
   stats?: QueueStats;
+  /** The server failed to establish first-paint totals. Do not render its
+   * zero fallback as though those counts were confirmed. */
+  statsUnavailable?: boolean;
   active: boolean;
   onClick: () => void;
   testId: string;
@@ -389,7 +408,15 @@ function TabButton({
           {count}
         </span>
       )}
-      {stats && (
+      {statsUnavailable ? (
+        <span
+          className="text-destructive text-[11px] font-bold"
+          title="Queue totals unavailable; retrying automatically"
+          data-testid={`${testId}-stats-unavailable`}
+        >
+          Unavailable
+        </span>
+      ) : stats ? (
         <span
           className="flex items-center gap-1.5 text-[11px] font-bold"
           title={`${stats.queued} queued${stats.paused > 0 ? ` · ${stats.paused} paused` : ""} · ${stats.sentOutToday} sent out today · ${stats.failedToday} failed today`}
@@ -409,7 +436,7 @@ function TabButton({
           <span className="text-[#a8a29e]">·</span>
           <span className="text-red-600">{stats.failedToday}</span>
         </span>
-      )}
+      ) : null}
     </button>
   );
 }

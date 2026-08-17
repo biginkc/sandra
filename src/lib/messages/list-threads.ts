@@ -21,6 +21,9 @@ export type Thread = {
   propertyAddress: string | null;
   propertyStatus: string | null;
   outreachDispo: string | null;
+  /** Permanent property-level DNC lock. This is independent of which
+   * contact (homeowner or agent) owns the visible conversation. */
+  isDncLocked: boolean;
   /** auth.users.id of whoever is assigned to the property, or null. */
   assigneeId: string | null;
   lastMessageBody: string;
@@ -141,7 +144,9 @@ export async function listThreads(
   opts: ListThreadsOpts,
 ): Promise<Thread[]> {
   const sinceDays = opts.sinceDays ?? 90;
-  const cutoff = new Date(Date.now() - sinceDays * 24 * 60 * 60 * 1000).toISOString();
+  const cutoff = new Date(
+    Date.now() - sinceDays * 24 * 60 * 60 * 1000,
+  ).toISOString();
 
   const { data: msgs, error } = await supabase
     .from("messages")
@@ -158,7 +163,7 @@ export async function listThreads(
   if (!msgs || msgs.length === 0) return [];
 
   type Bucket = {
-    latest: typeof msgs[number];
+    latest: (typeof msgs)[number];
     propertyId: string | null;
     unreadCount: number;
     hasInbound: boolean;
@@ -220,7 +225,7 @@ export async function listThreads(
       supabase
         .from("properties")
         .select(
-          "id, address, city, state, status, outreach_dispo, assigned_user_id, needs_human_attention, last_ai_escalation_reason",
+          "id, address, city, state, status, outreach_dispo, is_dnc_locked, assigned_user_id, needs_human_attention, last_ai_escalation_reason",
         )
         .in("id", chunk),
     ),
@@ -315,6 +320,7 @@ export async function listThreads(
         : null,
       propertyStatus: p?.status ?? null,
       outreachDispo: p?.outreach_dispo ?? null,
+      isDncLocked: p?.is_dnc_locked ?? false,
       assigneeId: p?.assigned_user_id ?? null,
       lastMessageBody: bucket.latest.body,
       lastMessageDirection: bucket.latest.direction as "inbound" | "outbound",
@@ -328,7 +334,7 @@ export async function listThreads(
       isTestTraffic: looksLikeTestTraffic(
         c
           ? (c.entity_name ??
-            ([c.first_name, c.last_name].filter(Boolean).join(" ") || null))
+              ([c.first_name, c.last_name].filter(Boolean).join(" ") || null))
           : null,
         p ? [p.address, p.city, p.state].filter(Boolean).join(", ") : null,
       ),
@@ -360,7 +366,9 @@ export async function countNeedsOutcomeThreads(
   opts: NeedsOutcomeCountOpts = {},
 ): Promise<number> {
   const sinceDays = opts.sinceDays ?? 90;
-  const cutoff = new Date(Date.now() - sinceDays * 24 * 60 * 60 * 1000).toISOString();
+  const cutoff = new Date(
+    Date.now() - sinceDays * 24 * 60 * 60 * 1000,
+  ).toISOString();
 
   const { data: msgs, error } = await supabase
     .from("messages")
@@ -432,12 +440,16 @@ export async function countNeedsOutcomeThreads(
     fetchInChunks(contactIds, CHUNK, (chunk) =>
       supabase
         .from("contacts")
-        .select("id, first_name, last_name, entity_name, do_not_contact, sms_opted_out")
+        .select(
+          "id, first_name, last_name, entity_name, do_not_contact, sms_opted_out",
+        )
         .in("id", chunk),
     ),
   ]);
   const propertyById = new Map(propsRows.map((p) => [p.id, p]));
-  const contactById = new Map(contactsRows.map((contact) => [contact.id, contact]));
+  const contactById = new Map(
+    contactsRows.map((contact) => [contact.id, contact]),
+  );
 
   const consentRows = await fetchInChunks(contactIds, CHUNK, (chunk) =>
     supabase
@@ -465,8 +477,9 @@ export async function countNeedsOutcomeThreads(
     const isOptedOut =
       contact?.do_not_contact === true ||
       contact?.sms_opted_out === true ||
-      computeConsentState(consentEventsByContact.get(candidate.contactId) ?? []) ===
-        "opted_out";
+      computeConsentState(
+        consentEventsByContact.get(candidate.contactId) ?? [],
+      ) === "opted_out";
     return isNeedsOutcomeThread({
       propertyId: candidate.propertyId,
       hasInbound: candidate.hasInbound,
@@ -489,7 +502,9 @@ export async function countNeedsOutcomeThreads(
             null))
         : null;
       const propertyAddress = property
-        ? [property.address, property.city, property.state].filter(Boolean).join(", ")
+        ? [property.address, property.city, property.state]
+            .filter(Boolean)
+            .join(", ")
         : null;
 
       return !looksLikeTestTraffic(contactName, propertyAddress);
@@ -507,7 +522,9 @@ export async function countNeedsOutcomeThreads(
 async function fetchInChunks<T>(
   ids: string[],
   chunkSize: number,
-  query: (chunk: string[]) => PromiseLike<{ data: T[] | null; error: { message: string } | null }>,
+  query: (
+    chunk: string[],
+  ) => PromiseLike<{ data: T[] | null; error: { message: string } | null }>,
 ): Promise<T[]> {
   if (ids.length === 0) return [];
   const chunks: string[][] = [];

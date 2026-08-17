@@ -1,4 +1,5 @@
 import {
+  act,
   fireEvent,
   render,
   screen,
@@ -21,6 +22,7 @@ const navigationMocks = vi.hoisted(() => ({
   refresh: vi.fn(),
   search: "",
 }));
+const getQueueStatsMock = vi.hoisted(() => vi.fn());
 
 vi.mock("next/navigation", () => ({
   useRouter: () => ({
@@ -51,17 +53,7 @@ vi.mock("./actions", () => ({
   dismissUnknownSender: vi.fn(),
   restoreDismissedSender: vi.fn(),
   mergeUnknownSenderToProperty: vi.fn(),
-  getQueueStats: vi.fn(async () => ({
-    ok: true,
-    data: {
-      queued: 0,
-      paused: 0,
-      sentOutToday: 0,
-      failedToday: 0,
-      nextScheduledFor: null,
-      lastScheduledFor: null,
-    },
-  })),
+  getQueueStats: getQueueStatsMock,
 }));
 
 vi.mock("../leads/actions", () => ({
@@ -112,6 +104,7 @@ function makeThread(
     propertyAddress: overrides.propertyAddress ?? "123 Main St",
     propertyStatus: overrides.propertyStatus ?? "prospect",
     outreachDispo: overrides.outreachDispo ?? null,
+    isDncLocked: overrides.isDncLocked ?? false,
     lastMessageAt: overrides.lastMessageAt ?? "2026-04-29T12:00:00Z",
     lastMessageBody: overrides.lastMessageBody ?? "hello",
     lastMessageDirection: overrides.lastMessageDirection ?? "inbound",
@@ -226,6 +219,11 @@ describe("<CockpitView /> URL deep-linking", () => {
     navigationMocks.replace.mockClear();
     navigationMocks.refresh.mockClear();
     navigationMocks.search = "";
+    getQueueStatsMock.mockReset();
+    getQueueStatsMock.mockResolvedValue({
+      ok: true,
+      data: baseProps.queueStats,
+    });
   });
 
   it("activeTab='outbox' renders the Outbox tab as aria-selected (test 32)", () => {
@@ -271,6 +269,48 @@ describe("<CockpitView /> URL deep-linking", () => {
     expect(queued.className).not.toMatch(/emerald|red/);
     expect(sent).toHaveClass("text-emerald-600");
     expect(failed).toHaveClass("text-red-600");
+  });
+
+  it("shows unavailable instead of confirmed zero queue totals after first-paint failure", () => {
+    render(<CockpitView {...baseProps} activeTab="inbox" queueStatsFailed />);
+
+    expect(
+      screen.getByTestId("tab-outbox-stats-unavailable"),
+    ).toHaveTextContent("Unavailable");
+    expect(screen.queryByTestId("tab-outbox-stats")).toBeNull();
+  });
+
+  it("replaces the unavailable queue badge after the automatic poll succeeds", async () => {
+    vi.useFakeTimers();
+    getQueueStatsMock.mockResolvedValue({
+      ok: true,
+      data: {
+        ...baseProps.queueStats,
+        queued: 14,
+        sentOutToday: 3,
+        failedToday: 1,
+      },
+    });
+
+    const view = render(
+      <CockpitView {...baseProps} activeTab="inbox" queueStatsFailed />,
+    );
+    try {
+      expect(screen.getByTestId("tab-outbox-stats-unavailable")).toBeVisible();
+
+      await act(async () => {
+        vi.advanceTimersByTime(30_000);
+        await Promise.resolve();
+      });
+
+      expect(screen.queryByTestId("tab-outbox-stats-unavailable")).toBeNull();
+      expect(screen.getByTestId("tab-outbox-stats")).toHaveTextContent(
+        /14\s*·\s*3\s*·\s*1/,
+      );
+    } finally {
+      view.unmount();
+      vi.useRealTimers();
+    }
   });
 
   it("inbox grid is viewport-constrained so dispo + reply stay pinned (regression: page-scroll bug)", () => {

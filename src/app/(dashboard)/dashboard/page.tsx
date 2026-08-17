@@ -63,9 +63,16 @@ export default async function DashboardPage() {
         />
         <div className="border-border bg-card rounded-2xl border px-6 py-8 text-center">
           <p className="text-muted-foreground text-sm">
-            Could not load dashboard data. Try refreshing — if the problem
+            Could not load dashboard data. Retry this request — if the problem
             persists, check the server logs.
           </p>
+          <a
+            href="/dashboard"
+            className="bg-primary text-primary-foreground mt-4 inline-flex min-h-11 items-center justify-center rounded-md px-4 text-sm font-semibold"
+            data-testid="overview-summary-retry"
+          >
+            Retry
+          </a>
         </div>
       </Page>
     );

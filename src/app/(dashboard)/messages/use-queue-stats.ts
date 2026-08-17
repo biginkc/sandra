@@ -32,9 +32,14 @@ function sameStats(a: QueueStats, b: QueueStats): boolean {
  */
 export function useQueueStats(
   initialStats: QueueStats,
-  { enabled = true }: { enabled?: boolean } = {},
+  {
+    enabled = true,
+    onRefreshSuccess,
+  }: { enabled?: boolean; onRefreshSuccess?: () => void } = {},
 ): QueueStats {
   const [stats, setStats] = useState<QueueStats>(initialStats);
+  const [lastInitialStats, setLastInitialStats] =
+    useState<QueueStats>(initialStats);
 
   // Adopt fresh server-fetched stats whenever a new RSC render delivers
   // them. The page is force-dynamic, so every navigation (incl. tab
@@ -46,17 +51,8 @@ export function useQueueStats(
   // identity-tracking would loop), against the last seen prop — not
   // current stats — so a client-side re-render with the old prop never
   // clobbers fresher polled numbers.
-  const lastInitialRef = useRef(initialStats);
-  // Bumped every time fresh server props are adopted. A poll snapshots
-  // the generation when it STARTS; if props arrived while it was in
-  // flight, its data predates the server payload and is discarded —
-  // otherwise a slow 30s poll resolving after a router.refresh() (every
-  // queue action triggers one) would overwrite newer numbers with
-  // pre-action ones.
-  const generationRef = useRef(0);
-  if (!sameStats(lastInitialRef.current, initialStats)) {
-    lastInitialRef.current = initialStats;
-    generationRef.current += 1;
+  if (!sameStats(lastInitialStats, initialStats)) {
+    setLastInitialStats(initialStats);
     setStats(initialStats);
   }
 
@@ -72,14 +68,14 @@ export function useQueueStats(
     let cancelled = false;
 
     async function refresh() {
-      const generation = generationRef.current;
       const seq = ++requestSeqRef.current;
       const result = await getQueueStats();
-      if (cancelled || generation !== generationRef.current) return;
+      if (cancelled) return;
       if (seq <= appliedSeqRef.current) return;
       if (result.ok) {
         appliedSeqRef.current = seq;
         setStats(result.data);
+        onRefreshSuccess?.();
       }
     }
 
@@ -104,7 +100,16 @@ export function useQueueStats(
       clearInterval(intervalId);
       document.removeEventListener("visibilitychange", onVisibilityChange);
     };
-  }, [enabled]);
+  }, [
+    enabled,
+    initialStats.failedToday,
+    initialStats.lastScheduledFor,
+    initialStats.nextScheduledFor,
+    initialStats.paused,
+    initialStats.queued,
+    initialStats.sentOutToday,
+    onRefreshSuccess,
+  ]);
 
   return stats;
 }

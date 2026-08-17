@@ -23,6 +23,7 @@ function makeThread(overrides: Partial<Thread> & { threadId: string }): Thread {
     propertyAddress: overrides.propertyAddress ?? null,
     propertyStatus: overrides.propertyStatus ?? "prospect",
     outreachDispo: overrides.outreachDispo ?? null,
+    isDncLocked: overrides.isDncLocked ?? false,
     assigneeId: overrides.assigneeId ?? null,
     lastMessageBody: overrides.lastMessageBody ?? "body",
     lastMessageDirection: overrides.lastMessageDirection ?? "inbound",
@@ -224,9 +225,9 @@ describe("applyInboxThreadFilter", () => {
   it("applies each thread-list filter from the same in-memory thread set", () => {
     const ctx = { currentUserId: "user-1", canonicalThreadId: null };
 
-    expect(applyInboxThreadFilter(threads, "mine", ctx).map((t) => t.threadId)).toEqual([
-      "mine",
-    ]);
+    expect(
+      applyInboxThreadFilter(threads, "mine", ctx).map((t) => t.threadId),
+    ).toEqual(["mine"]);
     expect(
       applyInboxThreadFilter(threads, "unassigned", ctx).map((t) => t.threadId),
     ).toEqual([
@@ -238,9 +239,9 @@ describe("applyInboxThreadFilter", () => {
       "dispo",
       "needs",
     ]);
-    expect(applyInboxThreadFilter(threads, "unread", ctx).map((t) => t.threadId)).toEqual([
-      "unread",
-    ]);
+    expect(
+      applyInboxThreadFilter(threads, "unread", ctx).map((t) => t.threadId),
+    ).toEqual(["unread"]);
     expect(
       applyInboxThreadFilter(threads, "escalated", ctx).map((t) => t.threadId),
     ).toEqual(["escalated"]);
@@ -325,6 +326,26 @@ describe("resolveVisibleThreadState", () => {
     expect(state.hiddenDncCount).toBe(0);
   });
 
+  it("hides property-locked agent threads even when that contact has not opted out", () => {
+    const threads = [
+      makeThread({ threadId: "clean" }),
+      makeThread({
+        threadId: "agent-on-locked-property",
+        isDncLocked: true,
+        isOptedOut: false,
+      }),
+    ];
+
+    const state = resolveVisibleThreadState(threads, "all", {
+      currentUserId: "user-1",
+      canonicalThreadId: null,
+      hideDnc: true,
+    });
+
+    expect(state.threads.map((thread) => thread.threadId)).toEqual(["clean"]);
+    expect(state.hiddenDncCount).toBe(1);
+  });
+
   it("returns count badges for every thread-backed filter from the visible set", () => {
     const threads = [
       makeThread({
@@ -406,21 +427,21 @@ describe("resolveVisibleThreadState", () => {
   it.each(["unknown", "dismissed"] as const)(
     "does not report hidden DNC/test thread counts on non-thread %s buckets",
     (filter) => {
-    const threads = [
-      makeThread({ threadId: "real-thread" }),
-      makeThread({ threadId: "hidden-thread", isTestTraffic: true }),
-    ];
+      const threads = [
+        makeThread({ threadId: "real-thread" }),
+        makeThread({ threadId: "hidden-thread", isTestTraffic: true }),
+      ];
 
-    const state = resolveVisibleThreadState(threads, filter, {
-      currentUserId: "user-1",
-      canonicalThreadId: null,
-      hideDnc: true,
-    });
+      const state = resolveVisibleThreadState(threads, filter, {
+        currentUserId: "user-1",
+        canonicalThreadId: null,
+        hideDnc: true,
+      });
 
-    expect(state.threads.map((thread) => thread.threadId)).toEqual([
-      "real-thread",
-    ]);
-    expect(state.hiddenDncCount).toBe(0);
+      expect(state.threads.map((thread) => thread.threadId)).toEqual([
+        "real-thread",
+      ]);
+      expect(state.hiddenDncCount).toBe(0);
     },
   );
 });

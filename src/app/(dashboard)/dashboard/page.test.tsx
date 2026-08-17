@@ -1,4 +1,4 @@
-import { render } from "@testing-library/react";
+import { render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
@@ -29,7 +29,9 @@ vi.mock("./queries", () => ({
 }));
 
 vi.mock("@/components/page", () => ({
-  Page: ({ children }: { children: React.ReactNode }) => <main>{children}</main>,
+  Page: ({ children }: { children: React.ReactNode }) => (
+    <main>{children}</main>
+  ),
 }));
 vi.mock("@/components/page-header", () => ({
   PageHeader: () => <header data-testid="page-header" />,
@@ -133,5 +135,17 @@ describe("DashboardPage ordering", () => {
       "quick-actions",
       "activity",
     ]);
+  });
+
+  it("offers a functional same-route Retry when the summary request fails", async () => {
+    mocks.fetchDashboardSummary.mockResolvedValue(null);
+
+    render(await DashboardPage());
+
+    expect(screen.getByText(/Could not load dashboard data/)).toBeVisible();
+    expect(screen.getByRole("link", { name: "Retry" })).toHaveAttribute(
+      "href",
+      "/dashboard",
+    );
   });
 });
