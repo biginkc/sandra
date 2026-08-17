@@ -1,0 +1,41 @@
+import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+const { clearNeedsHumanAttention } = vi.hoisted(() => ({
+  clearNeedsHumanAttention: vi.fn(),
+}));
+
+vi.mock("./ai-actions", () => ({ clearNeedsHumanAttention }));
+
+import { AiAttentionBanner } from "./ai-attention-banner";
+
+describe("<AiAttentionBanner />", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it("uses Mark handled copy backed by the existing clear action", async () => {
+    const user = userEvent.setup();
+    clearNeedsHumanAttention.mockResolvedValue({ ok: true, data: undefined });
+    render(
+      <AiAttentionBanner propertyId="prop-1" initialVisible reason="low_confidence" />,
+    );
+    await user.click(screen.getByRole("button", { name: "Mark handled" }));
+    expect(clearNeedsHumanAttention).toHaveBeenCalledWith("prop-1");
+    expect(screen.queryByTestId("ai-attention-banner")).toBeNull();
+  });
+
+  it("shows a truthful failure and retries the same clear action", async () => {
+    const user = userEvent.setup();
+    clearNeedsHumanAttention
+      .mockResolvedValueOnce({ ok: false, error: { message: "save failed" } })
+      .mockResolvedValueOnce({ ok: true, data: undefined });
+    render(<AiAttentionBanner propertyId="prop-1" initialVisible reason={null} />);
+
+    await user.click(screen.getByRole("button", { name: "Mark handled" }));
+    expect(await screen.findByTestId("ai-attention-failure")).toHaveTextContent(
+      "save failed",
+    );
+    await user.click(screen.getByRole("button", { name: "Retry" }));
+    expect(clearNeedsHumanAttention).toHaveBeenCalledTimes(2);
+  });
+});
